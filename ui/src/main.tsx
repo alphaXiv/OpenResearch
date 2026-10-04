@@ -5,6 +5,8 @@ import { createRoot } from "react-dom/client";
 import { RouterProvider } from "@tanstack/react-router";
 import { router } from "./router";
 import { Toaster } from "./components/ui";
+import { WindowControls } from "./components/WindowControls";
+import { WINDOWS_TITLEBAR } from "./desktopTitlebar";
 import { getLocale } from "./paraglide/runtime.js";
 import { reportLocale } from "./api";
 import "./tailwind.css";
@@ -20,5 +22,6 @@ createRoot(document.getElementById("root")!).render(
       <RouterProvider router={router} />
     </QueryClientProvider>
     <Toaster />
+    {WINDOWS_TITLEBAR && <WindowControls />}
   </StrictMode>,
 );

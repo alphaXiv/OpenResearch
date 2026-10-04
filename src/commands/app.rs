@@ -580,6 +580,8 @@ mod imp {
     use tao::dpi::LogicalSize;
     use tao::event::{Event, StartCause, WindowEvent};
     use tao::event_loop::{ControlFlow, EventLoopBuilder};
+    #[cfg(target_os = "macos")]
+    use tao::window::Theme;
     use tao::window::{Window, WindowBuilder};
     use wry::{NewWindowResponse, PageLoadEvent, WebView, WebViewBuilder};
 
@@ -606,6 +608,10 @@ mod imp {
         Menu(MenuId),
         #[cfg(not(target_os = "macos"))]
         Focus,
+        #[cfg(windows)]
+        Close,
+        #[cfg(windows)]
+        SyncMaximized,
     }
 
     enum Quit {
@@ -634,6 +640,7 @@ mod imp {
                 no_agent: false,
                 model: None,
                 remote_host: false,
+                desktop_app: true,
             };
             // The window is useless without its server, so the app goes with it.
             match crate::commands::up::run(args).await {
@@ -700,11 +707,24 @@ mod imp {
             .with_min_inner_size(LogicalSize::new(720.0, 480.0))
             // Shown once the dashboard has loaded, so it rarely flashes blank.
             .with_visible(false);
+        // The dashboard runs under the titlebar, leaving only the traffic lights.
+        #[cfg(target_os = "macos")]
+        let window = {
+            use tao::platform::macos::WindowBuilderExtMacOS;
+            window
+                .with_titlebar_transparent(true)
+                .with_title_hidden(true)
+                .with_fullsize_content_view(true)
+        };
         #[cfg(windows)]
         let window = {
-            use tao::platform::windows::IconExtWindows;
-            // Resource 1 is the icon build.rs embeds in orx.exe.
-            window.with_window_icon(tao::window::Icon::from_resource(1, None).ok())
+            use tao::platform::windows::{IconExtWindows, WindowBuilderExtWindows};
+            // The dashboard draws the titlebar and its caption buttons itself.
+            window
+                .with_decorations(false)
+                .with_undecorated_shadow(true)
+                // Resource 1 is the icon build.rs embeds in orx.exe.
+                .with_window_icon(tao::window::Icon::from_resource(1, None).ok())
         };
         #[cfg(target_os = "linux")]
         let window = window.with_window_icon(linux_window_icon());
@@ -715,6 +735,16 @@ mod imp {
                 return;
             }
         };
+        // The dashboard's --base until the page reports what it shows under the titlebar.
+        #[cfg(target_os = "macos")]
+        set_titlebar_color(
+            &window,
+            None,
+            match window.theme() {
+                Theme::Dark => [0x0e, 0x0c, 0x0c],
+                _ => [0xff, 0xff, 0xff],
+            },
+        );
 
         let shown = Rc::new(Cell::new(false));
         let replaced = Rc::new(RefCell::new(HashMap::new()));
@@ -746,16 +776,60 @@ mod imp {
                 let window = window.clone();
                 let origin = origin.clone();
                 let shown = shown.clone();
+                #[cfg(windows)]
+                let proxy = event_loop.create_proxy();
                 move |event, url| {
-                    if matches!(event, PageLoadEvent::Finished)
-                        && super::is_dashboard_url(&url, &origin)
-                        && !shown.replace(true)
-                    {
+                    if !matches!(event, PageLoadEvent::Finished) {
+                        return;
+                    }
+                    #[cfg(windows)]
+                    let _ = proxy.send_event(UserEvent::SyncMaximized);
+                    if super::is_dashboard_url(&url, &origin) && !shown.replace(true) {
                         window.set_visible(true);
                         window.set_focus();
                     }
                 }
             });
+        #[cfg(not(target_os = "linux"))]
+        let builder = builder.with_ipc_handler({
+            let window = window.clone();
+            #[cfg(windows)]
+            let proxy = event_loop.create_proxy();
+            move |request| {
+                let message = request.body().as_str();
+                match message {
+                    "titlebar:drag" => {
+                        let _ = window.drag_window();
+                    }
+                    "titlebar:zoom" => window.set_maximized(!window.is_maximized()),
+                    #[cfg(windows)]
+                    "titlebar:minimize" => window.set_minimized(true),
+                    #[cfg(windows)]
+                    "titlebar:close" => {
+                        let _ = proxy.send_event(UserEvent::Close);
+                    }
+                    #[cfg(windows)]
+                    _ => {
+                        if let Some(direction) = message
+                            .strip_prefix("titlebar:resize:")
+                            .and_then(top_resize_direction)
+                        {
+                            let _ = window.drag_resize_window(direction);
+                        }
+                    }
+                    #[cfg(target_os = "macos")]
+                    _ => {
+                        if let Some((appearance, color)) = parse_titlebar_message(message) {
+                            set_titlebar_color(&window, appearance, color);
+                        }
+                    }
+                }
+            }
+        });
+        #[cfg(target_os = "macos")]
+        let builder = builder.with_initialization_script("window.__ORX_MAC_TITLEBAR__ = true;");
+        #[cfg(windows)]
+        let builder = builder.with_initialization_script("window.__ORX_WIN_TITLEBAR__ = true;");
         #[cfg(not(target_os = "linux"))]
         let webview = builder.build(&*window);
         // `build` supports only X11 on Linux.
@@ -779,6 +853,9 @@ mod imp {
         add_confirm_panel(&webview);
 
         let mut quit = Quit::No;
+        // What the loaded page was last told; a new page starts unmaximized.
+        #[cfg(windows)]
+        let mut page_maximized = false;
         event_loop.run(move |event, _, control_flow| match event {
             Event::NewEvents(StartCause::Init) => {
                 *control_flow = ControlFlow::Wait;
@@ -806,6 +883,23 @@ mod imp {
                 eprintln!("openresearch app: the dashboard has not finished loading; showing the window anyway");
                 window.set_visible(true);
                 window.set_focus();
+            }
+            #[cfg(windows)]
+            Event::UserEvent(UserEvent::Close) => {
+                begin_quit(&mut quit, &window, &webview, control_flow);
+            }
+            #[cfg(windows)]
+            Event::UserEvent(UserEvent::SyncMaximized) => {
+                page_maximized = window.is_maximized();
+                sync_maximized(&webview, page_maximized);
+            }
+            #[cfg(windows)]
+            Event::WindowEvent {
+                event: WindowEvent::Resized(_),
+                ..
+            } if window.is_maximized() != page_maximized => {
+                page_maximized = !page_maximized;
+                sync_maximized(&webview, page_maximized);
             }
             #[cfg(target_os = "macos")]
             Event::UserEvent(UserEvent::Menu(id)) if id == quit_item.id() => {
@@ -885,6 +979,51 @@ mod imp {
         let id = super::wide("alphaXiv.OpenResearch");
         // SAFETY: the string is NUL-terminated and outlives the call.
         unsafe { SetCurrentProcessExplicitAppUserModelID(id.as_ptr()) };
+    }
+
+    /// Reads desktopTitlebar.ts's `titlebar:<preference>:<rrggbb>` message. A "system"
+    /// preference leaves the appearance unforced so the page still sees OS changes.
+    #[cfg(target_os = "macos")]
+    fn parse_titlebar_message(message: &str) -> Option<(Option<Theme>, [u8; 3])> {
+        let (preference, hex) = message.strip_prefix("titlebar:")?.split_once(':')?;
+        let appearance = match preference {
+            "system" => None,
+            "light" => Some(Theme::Light),
+            "dark" => Some(Theme::Dark),
+            _ => return None,
+        };
+        if hex.len() != 6 {
+            return None;
+        }
+        let channel = |i: usize| u8::from_str_radix(hex.get(i..i + 2)?, 16).ok();
+        Some((appearance, [channel(0)?, channel(2)?, channel(4)?]))
+    }
+
+    #[cfg(target_os = "macos")]
+    fn set_titlebar_color(window: &Window, appearance: Option<Theme>, [r, g, b]: [u8; 3]) {
+        window.set_theme(appearance);
+        window.set_background_color(Some((r, g, b, 0xff)));
+    }
+
+    /// The top edge only: the shadow frame tao keeps around an undecorated window
+    /// resizes the others, but the webview covers the top.
+    #[cfg(windows)]
+    fn top_resize_direction(edge: &str) -> Option<tao::window::ResizeDirection> {
+        use tao::window::ResizeDirection;
+        match edge {
+            "n" => Some(ResizeDirection::North),
+            "ne" => Some(ResizeDirection::NorthEast),
+            "nw" => Some(ResizeDirection::NorthWest),
+            _ => None,
+        }
+    }
+
+    /// The page swaps its maximize and restore buttons on this.
+    #[cfg(windows)]
+    fn sync_maximized(webview: &WebView, maximized: bool) {
+        let script =
+            format!("document.documentElement.toggleAttribute('data-maximized', {maximized});");
+        let _ = webview.evaluate_script(&script);
     }
 
     #[cfg(target_os = "macos")]
@@ -1088,6 +1227,34 @@ mod imp {
         alert.addButtonWithTitle(&NSString::from_str("Cancel"));
         let confirmed = alert.runModal() == NSAlertFirstButtonReturn;
         handler.call((Bool::new(confirmed),));
+    }
+
+    #[cfg(all(test, target_os = "macos"))]
+    mod tests {
+        use super::parse_titlebar_message;
+        use tao::window::Theme;
+
+        #[test]
+        fn titlebar_messages_carry_a_preference_and_an_opaque_color() {
+            assert_eq!(
+                parse_titlebar_message("titlebar:system:0e0c0c"),
+                Some((None, [0x0e, 0x0c, 0x0c]))
+            );
+            assert_eq!(
+                parse_titlebar_message("titlebar:dark:FfFfFf"),
+                Some((Some(Theme::Dark), [0xff, 0xff, 0xff]))
+            );
+            for message in [
+                "titlebar:drag",
+                "titlebar:dark:fff",
+                "titlebar:sepia:ffffff",
+                "titlebar:dark:zzzzzz",
+                "titlebar:dark:ffffé",
+                "theme:dark:ffffff",
+            ] {
+                assert_eq!(parse_titlebar_message(message), None, "{message}");
+            }
+        }
     }
 }
 

@@ -1124,6 +1124,7 @@ fn gateway_router(session: Arc<RemoteSession>) -> Router {
         )
         .fallback(gateway_fallback)
         .layer(DefaultBodyLimit::max(64 * 1024 * 1024))
+        .layer(middleware::from_fn(super::up::track_active))
         .layer(middleware::from_fn(gateway_loopback_guard))
         .with_state(session)
 }
@@ -1672,7 +1673,7 @@ pub async fn run(host: &str, args: UpArgs) -> Result<()> {
     };
     eprintln!("orx up --remote: dashboard on {}", session.gateway_url);
     if !args.no_browser {
-        browser::open_browser(&session.gateway_url);
+        browser::open_dashboard(&session.gateway_url, crate::telemetry::UpLaunchMode::Remote);
     }
     eprintln!("orx up --remote: press Ctrl-C to stop.");
     let _ = tokio::signal::ctrl_c().await;

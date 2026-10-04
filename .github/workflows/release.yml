@@ -183,12 +183,25 @@ jobs:
       plan: ${{ needs.plan.outputs.val }}
     secrets: inherit
 
+  custom-sign-windows-cli:
+    needs:
+      - plan
+      - build-local-artifacts
+    if: ${{ needs.plan.outputs.publishing == 'true' || fromJson(needs.plan.outputs.val).ci.github.pr_run_mode == 'upload' || inputs.tag == 'dry-run' }}
+    permissions:
+      contents: read
+      id-token: write
+    uses: ./.github/workflows/sign-windows-cli.yml
+    with:
+      plan: ${{ needs.plan.outputs.val }}
+
   # Build and package all the platform-agnostic(ish) things
   build-global-artifacts:
     needs:
       - plan
       - build-local-artifacts
       - custom-sign-macos-cli
+      - custom-sign-windows-cli
     runs-on: "ubuntu-22.04"
     env:
       GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -236,6 +249,7 @@ jobs:
       - plan
       - build-local-artifacts
       - custom-sign-macos-cli
+      - custom-sign-windows-cli
     uses: ./.github/workflows/verify-build-channel.yml
     with:
       plan: ${{ needs.plan.outputs.val }}
@@ -246,6 +260,7 @@ jobs:
       - plan
       - build-local-artifacts
       - custom-sign-macos-cli
+      - custom-sign-windows-cli
     uses: ./.github/workflows/telemetry-contract.yml
     with:
       plan: ${{ needs.plan.outputs.val }}
@@ -256,6 +271,7 @@ jobs:
       - plan
       - build-local-artifacts
       - custom-sign-macos-cli
+      - custom-sign-windows-cli
     uses: ./.github/workflows/ci.yml
     with:
       plan: ${{ needs.plan.outputs.val }}
@@ -266,6 +282,7 @@ jobs:
       - plan
       - build-local-artifacts
       - custom-sign-macos-cli
+      - custom-sign-windows-cli
       - build-global-artifacts
       - custom-verify-build-channel
       - custom-telemetry-contract
@@ -275,7 +292,7 @@ jobs:
       issues: read
       pull-requests: read
     # Only run if we're "publishing", and only if plan, local and global didn't fail (skipped is fine)
-    if: ${{ always() && needs.plan.result == 'success' && needs.plan.outputs.publishing == 'true' && (needs.build-global-artifacts.result == 'skipped' || needs.build-global-artifacts.result == 'success') && (needs.custom-verify-build-channel.result == 'skipped' || needs.custom-verify-build-channel.result == 'success') && (needs.custom-telemetry-contract.result == 'skipped' || needs.custom-telemetry-contract.result == 'success') && (needs.custom-ci.result == 'skipped' || needs.custom-ci.result == 'success') && (needs.build-local-artifacts.result == 'skipped' || needs.build-local-artifacts.result == 'success') && (needs.custom-sign-macos-cli.result == 'skipped' || needs.custom-sign-macos-cli.result == 'success') }}
+    if: ${{ always() && needs.plan.result == 'success' && needs.plan.outputs.publishing == 'true' && (needs.build-global-artifacts.result == 'skipped' || needs.build-global-artifacts.result == 'success') && (needs.custom-verify-build-channel.result == 'skipped' || needs.custom-verify-build-channel.result == 'success') && (needs.custom-telemetry-contract.result == 'skipped' || needs.custom-telemetry-contract.result == 'success') && (needs.custom-ci.result == 'skipped' || needs.custom-ci.result == 'success') && (needs.build-local-artifacts.result == 'skipped' || needs.build-local-artifacts.result == 'success') && (needs.custom-sign-macos-cli.result == 'skipped' || needs.custom-sign-macos-cli.result == 'success') && (needs.custom-sign-windows-cli.result == 'skipped' || needs.custom-sign-windows-cli.result == 'success') }}
     env:
       GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
     runs-on: "ubuntu-22.04"
@@ -327,11 +344,9 @@ jobs:
         env:
           PRERELEASE_FLAG: "${{ fromJson(steps.host.outputs.manifest).announcement_is_prerelease && '--prerelease' || '' }}"
           ANNOUNCEMENT_TITLE: "${{ fromJson(steps.host.outputs.manifest).announcement_title }}"
-          ANNOUNCEMENT_BODY: "${{ fromJson(steps.host.outputs.manifest).announcement_github_body }}"
           RELEASE_COMMIT: "${{ github.sha }}"
         run: |
-          printf '%s\n' "$ANNOUNCEMENT_BODY" > "$RUNNER_TEMP/install-notes.txt"
-          python3 scripts/release_notes.py "${{ needs.plan.outputs.tag }}" "$RELEASE_COMMIT" "$RUNNER_TEMP/install-notes.txt" "$RUNNER_TEMP/notes.txt"
+          python3 scripts/release_notes.py "${{ needs.plan.outputs.tag }}" "$RELEASE_COMMIT" "$RUNNER_TEMP/notes.txt"
           gh release create "${{ needs.plan.outputs.tag }}" --target "$RELEASE_COMMIT" $PRERELEASE_FLAG --title "$ANNOUNCEMENT_TITLE" --notes-file "$RUNNER_TEMP/notes.txt" artifacts/*
 
   announce:

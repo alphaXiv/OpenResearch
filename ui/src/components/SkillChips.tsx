@@ -1,5 +1,5 @@
 import { useQuery } from "@tanstack/react-query";
-import { Copy, Cpu, Download, FoldVertical, Goal, History, ListChecks, SquarePen, WandSparkles, type LucideIcon } from "lucide-react";
+import { Copy, Cpu, Download, FoldVertical, Goal, History, ListChecks, MessagesSquare, SquarePen, WandSparkles, type LucideIcon } from "lucide-react";
 
 import { getSkillContentQuery } from "../queries/settings";
 import { m } from "../paraglide/messages.js";
@@ -67,6 +67,7 @@ const COMMAND_ICONS: Record<ComposerCommandName, LucideIcon> = {
   compact: FoldVertical,
   copy: Copy,
   export: Download,
+  side: MessagesSquare,
 };
 
 /** Skills never share a command's name (see `commandsForHarness`), so the name alone picks the icon. */

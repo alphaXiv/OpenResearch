@@ -187,7 +187,7 @@ pub enum ComputeCommand {
     /// Test execution readiness. Failure exits nonzero.
     Test(CheckArgs),
     /// Authenticate interactively, then test readiness.
-    Connect(CheckArgs),
+    Connect(ConnectArgs),
     /// Read or safely replace ~/.ssh/config.
     SshConfig {
         #[command(subcommand)]
@@ -253,6 +253,15 @@ pub struct ConfigureArgs {
     #[arg(long)]
     credentials_file: Option<String>,
 }
+#[derive(Debug, Args)]
+pub struct ConnectArgs {
+    #[command(flatten)]
+    check: CheckArgs,
+    /// Idle lifetime for a new SSH master, in seconds (default: 86400; 0 means indefinite).
+    #[arg(long)]
+    persist: Option<u64>,
+}
+
 #[derive(Debug, Args)]
 pub struct CheckArgs {
     backend: Backend,
@@ -400,16 +409,22 @@ impl ConfigureArgs {
 }
 
 async fn run_command(command: ComputeCommand, json_output: bool) -> Result<()> {
-    if let ComputeCommand::Test(ref args) | ComputeCommand::Connect(ref args) = command {
+    if let ComputeCommand::Test(ref args) = command {
         validate_check(args)?;
     }
     if let ComputeCommand::Connect(ref args) = command {
+        validate_check(&args.check)?;
+        if args.persist.is_some()
+            && (!cfg!(unix) || !matches!(args.check.backend, Backend::Ssh | Backend::Slurm))
+        {
+            return Err(anyhow!("--persist requires SSH or Slurm on Unix."));
+        }
         if json_output {
             return Err(anyhow!(
                 "connect is interactive; use test --json for machine-readable checks."
             ));
         }
-        connect(args).await?;
+        connect(&args.check, args.persist).await?;
     }
     let is_check = matches!(
         command,
@@ -429,7 +444,7 @@ async fn run_command(command: ComputeCommand, json_output: bool) -> Result<()> {
             let backend = args.backend.name();
             settings::configure(backend, (*args).body()?).await?
         }
-        ComputeCommand::Test(args) | ComputeCommand::Connect(args) => {
+        ComputeCommand::Test(args) | ComputeCommand::Connect(ConnectArgs { check: args, .. }) => {
             settings::check(
                 args.backend.name(),
                 args.host,
@@ -551,7 +566,7 @@ fn instructions_write(path: &std::path::Path, content: &str, expected: &str) -> 
     instructions_read(path)
 }
 
-async fn connect(args: &CheckArgs) -> Result<()> {
+async fn connect(args: &CheckArgs, persist: Option<u64>) -> Result<()> {
     use std::io::IsTerminal;
     if !std::io::stdin().is_terminal() {
         return Err(anyhow!("connect requires a terminal for login/MFA. Use configure with --credentials-file - for unattended credential setup."));
@@ -571,8 +586,8 @@ async fn connect(args: &CheckArgs) -> Result<()> {
             }
             .ok_or_else(|| anyhow!("Pass --host or configure a default host."))?;
             let target = crate::jobs::ssh::SshTarget::alias(&host);
-            let argv = crate::jobs::ssh::interactive_args(&target)?;
-            interactive_command("ssh", &argv).await?;
+            let connection = crate::jobs::ssh::interactive_args(&target, persist).await?;
+            interactive_command("ssh", &connection.args).await?;
         }
         Backend::Hf => {
             interactive_command("hf", &["auth".into(), "login".into()]).await?;

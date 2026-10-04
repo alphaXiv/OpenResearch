@@ -1,0 +1,15 @@
+[
+  {
+    "event": "step_update",
+    "step_update": {
+      "step_index": 1,
+      "usage": {
+        "input_tokens": 13016,
+        "output_tokens": 139,
+        "thinking_tokens": 138,
+        "cache_read_tokens": 0,
+        "total_tokens": 13155
+      }
+    }
+  }
+]

@@ -141,3 +141,11 @@ jobs:
             '$ARGS.named' > dist/macos-app.json
           cat dist/macos-app.json
           gh release upload "$TAG" dist/macos-app.json --clobber
+
+  refresh-downloads:
+    needs: [check, macos-app]
+    permissions:
+      contents: write
+    uses: ./.github/workflows/release-downloads.yml
+    with:
+      tag: ${{ needs.check.outputs.tag }}

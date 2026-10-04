@@ -7,9 +7,11 @@ import type { Pane, TaskWorkspace } from "./workspaceState";
 export function tabPane(tab: RightTab, runId?: string | null): Pane {
   if (typeof tab === "string") return { kind: "home", view: tab };
   if ("code" in tab) return { kind: "code", experimentId: tab.experimentId, branch: tab.branch, view: tab.view };
-  if ("kind" in tab) return tab.kind === "plan"
-    ? { kind: "plan", sessionId: tab.sessionId, promptId: tab.promptId }
-    : { kind: "subagent", sessionId: tab.sessionId, spawnPartId: tab.spawnPartId };
+  if ("kind" in tab) {
+    if (tab.kind === "plan") return { kind: "plan", sessionId: tab.sessionId, promptId: tab.promptId };
+    if (tab.kind === "side") return { kind: "side", sessionId: tab.sessionId };
+    return { kind: "subagent", sessionId: tab.sessionId, spawnPartId: tab.spawnPartId };
+  }
   if ("path" in tab) return { kind: "file", path: tab.path, source: tab.source, sessionId: tab.sessionId, ref: tab.ref, line: tab.line, branchLabel: tab.branchLabel };
   const selectedRun = runId === undefined ? tab.runId : runId;
   return { kind: "experiment", experimentId: tab.id, view: tab.view, ...(selectedRun ? { runId: selectedRun } : {}) };
@@ -23,6 +25,7 @@ export function paneTab(pane: Pane): RightTab {
     case "code": return { code: true, experimentId: pane.experimentId, branch: pane.branch, view: pane.view, toggled: new Set() };
     case "plan": return { kind: "plan", sessionId: pane.sessionId, promptId: pane.promptId, plan: "" };
     case "subagent": return { kind: "subagent", sessionId: pane.sessionId, spawnPartId: pane.spawnPartId };
+    case "side": return { kind: "side", sessionId: pane.sessionId };
   }
 }
 
@@ -32,7 +35,7 @@ export function rememberWorkspace(state: RightPaneSessionState, scroll: TaskWork
   if (state.terminalTabOpen) home.push("terminal");
   if (state.artifactsTabOpen) home.push("artifacts");
   if (state.experimentsTabOpen) home.push("experiments");
-  const content = [...state.expTabs, ...state.fileTabs, ...state.planTabs, ...state.subagentTabs, ...state.codeTabs];
+  const content = [...state.expTabs, ...state.fileTabs, ...state.planTabs, ...state.subagentTabs, ...state.sideTabs, ...state.codeTabs];
   const byKey = new Map(content.map((tab) => [rightTabKey(tab), tab]));
   const ordered = state.contentTabOrder.flatMap((key) => { const tab = byKey.get(key); return tab ? [tab] : []; });
   const activeKey = rightTabKey(state.rightTab);
@@ -73,6 +76,7 @@ export function restoreWorkspace(saved: TaskWorkspace | undefined, pane: Pane | 
     else if ("path" in tab) state.fileTabs.push(tab);
     else if ("kind" in tab) {
       if (tab.kind === "plan") state.planTabs.push(tab);
+      else if (tab.kind === "side") state.sideTabs.push(tab);
       else state.subagentTabs.push(tab);
     } else state.expTabs.push(tab);
     state.contentTabOrder.push(rightTabKey(tab));
@@ -170,6 +174,12 @@ export interface SubagentViewDef {
   label?: string;
 }
 
+/** A temporary side chat branched off the task's chat, live beside it. */
+export interface SideChatViewDef {
+  kind: "side";
+  sessionId: string;
+}
+
 /** One committed code-browser tab per experiment branch. Source, selected
  * view, and expansion state live here so they survive tab switches. */
 export interface CodeTabDef {
@@ -192,6 +202,7 @@ export type RightTab =
   | FileViewDef
   | PlanViewDef
   | SubagentViewDef
+  | SideChatViewDef
   | CodeTabDef;
 
 export type ContentTab = Exclude<RightTab, string>;
@@ -200,7 +211,8 @@ export function rightTabKey(tab: RightTab): string {
   if (typeof tab === "string") return `home:${tab}`;
   if ("code" in tab) return `code:${tab.branch}`;
   if ("kind" in tab) {
-    return tab.kind === "plan" ? `plan:${tab.promptId}` : `subagent:${tab.spawnPartId}`;
+    if (tab.kind === "plan") return `plan:${tab.promptId}`;
+    return tab.kind === "side" ? `side:${tab.sessionId}` : `subagent:${tab.spawnPartId}`;
   }
   if ("path" in tab) return `file:${fileTabKey(tab)}`;
   return `experiment:${tab.id}:${tab.view}`;
@@ -228,6 +240,7 @@ export interface RightPaneSessionState {
   fileTabs: FileViewDef[];
   planTabs: PlanViewDef[];
   subagentTabs: SubagentViewDef[];
+  sideTabs: SideChatViewDef[];
   codeTabs: CodeTabDef[];
   /** Stable strip order for content tabs; home tabs keep their fixed leading slots. */
   contentTabOrder: string[];
@@ -257,6 +270,7 @@ export function initialRightPaneSessionState(
     fileTabs: [],
     planTabs: [],
     subagentTabs: [],
+    sideTabs: [],
     codeTabs: [],
     contentTabOrder: [],
     previewTab: null,
@@ -321,7 +335,7 @@ export function applyPane(state: RightPaneSessionState, pane: Pane | undefined):
   if (!pane) return state;
   const tab = paneTab(pane);
   const key = rightTabKey(tab);
-  const existing = [...state.expTabs, ...state.fileTabs, ...state.codeTabs, ...state.planTabs, ...state.subagentTabs].find((item) => rightTabKey(item) === key);
+  const existing = [...state.expTabs, ...state.fileTabs, ...state.codeTabs, ...state.planTabs, ...state.subagentTabs, ...state.sideTabs].find((item) => rightTabKey(item) === key);
   const update = <T extends ContentTab>(tabs: T[], target: T): T[] => {
     const index = tabs.findIndex((item) => rightTabKey(item) === key);
     if (index < 0) return [...tabs, target];
@@ -339,6 +353,7 @@ export function applyPane(state: RightPaneSessionState, pane: Pane | undefined):
     else if ("id" in tab) next.expTabs = update(state.expTabs, { ...tab, runId: pane.kind === "experiment" ? pane.runId : undefined });
     else if ("code" in tab) next.codeTabs = update(state.codeTabs, { ...tab, toggled: existing && "code" in existing ? existing.toggled : tab.toggled });
     else if (tab.kind === "plan") next.planTabs = update(state.planTabs, tab);
+    else if (tab.kind === "side") next.sideTabs = update(state.sideTabs, tab);
     else next.subagentTabs = update(state.subagentTabs, tab);
     if (!state.contentTabOrder.includes(key)) next.contentTabOrder = [...state.contentTabOrder, key];
   }

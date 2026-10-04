@@ -158,6 +158,9 @@ enum Command {
     #[command(name = "plan-gate", hide = true)]
     PlanGate,
 
+    #[command(name = "invocation-gate", hide = true)]
+    InvocationGate,
+
     /// Internal: the plan-mode permission bridge. A stdio MCP server Claude
     /// Code spawns (`--mcp-config`) and consults (`--permission-prompt-tool`);
     /// relays each permission request to the running `orx up`, which surfaces
@@ -560,13 +563,68 @@ pub struct ExpRunArgs {
     /// Internal attribution forwarded through the local orx up API.
     #[arg(skip)]
     pub chat_session_id: Option<String>,
+    #[arg(long, hide = true)]
+    pub invocation_context: Option<String>,
+    /// The native agent CLI whose shell ran `orx exp run`, read once in that process.
+    #[arg(skip)]
+    pub agent_origin: Option<String>,
+    /// Handled by `orx up` for a caller: launch evidence comes only from the request.
+    #[arg(skip)]
+    pub forwarded: bool,
+    #[arg(skip)]
+    pub telemetry_suppressed: bool,
+}
+
+/// Markers the native agent CLIs export to their shells; nested agents are `unknown`.
+/// Antigravity exports none.
+pub(crate) fn agent_origin() -> Option<String> {
+    let found: Vec<_> = [
+        ("CLAUDECODE", "claude-code"),
+        ("CODEX_THREAD_ID", "codex"),
+        ("OPENCODE", "opencode"),
+        ("CURSOR_AGENT", "cursor"),
+    ]
+    .into_iter()
+    .filter(|(key, _)| std::env::var(key).is_ok_and(|value| !value.is_empty()))
+    .map(|(_, harness)| harness.to_string())
+    .collect();
+    match found.len() {
+        0 => None,
+        1 => found.into_iter().next(),
+        _ => Some("unknown".into()),
+    }
 }
 
 impl ExpRunArgs {
-    pub fn launching_chat_session(&self) -> Option<String> {
-        self.chat_session_id
+    pub(crate) fn invocation_identity(
+        &self,
+    ) -> crate::error::Result<Option<crate::store::InvocationIdentity>> {
+        let context = self
+            .invocation_context
             .clone()
-            .or_else(crate::local::chat::launching_chat_session)
+            .or_else(|| (!self.forwarded).then(|| std::env::var("ORX_INVOCATION_CONTEXT").ok())?);
+        let identity: Option<crate::store::InvocationIdentity> = match context {
+            Some(json) => Some(serde_json::from_str(&json)?),
+            // Codex exports only its thread id to shells; that thread's running turn invoked us.
+            None if !self.forwarded && self.launching_chat_session().is_some() => {
+                std::env::var("CODEX_THREAD_ID")
+                    .ok()
+                    .and_then(|thread| crate::local::harness::codex::running_turn_identity(&thread))
+            }
+            None => None,
+        };
+        if let Some(identity) = &identity {
+            identity.validate()?;
+        }
+        Ok(identity)
+    }
+
+    pub fn launching_chat_session(&self) -> Option<String> {
+        self.chat_session_id.clone().or_else(|| {
+            (!self.forwarded)
+                .then(crate::local::chat::launching_chat_session)
+                .flatten()
+        })
     }
 }
 
@@ -608,6 +666,9 @@ pub struct UpArgs {
     /// Internal persistent dashboard/agent-host mode.
     #[arg(long, hide = true)]
     pub remote_host: bool,
+    /// Serving the desktop app's window, which only restarts when asked.
+    #[arg(skip)]
+    pub desktop_app: bool,
 }
 
 #[derive(Args, Clone, Debug)]
@@ -922,6 +983,16 @@ async fn main() {
     // `plan-gate` is a per-tool-call hook body (fires on every Bash call during
     // plan mode): it must stay fast and touch neither stdout nor the network, so
     // skip the update check and telemetry and run it directly.
+    if matches!(command, Command::InvocationGate) {
+        if let Err(error) = commands::invocation_gate::run().await {
+            eprintln!("orx invocation-gate: {error}");
+            println!(
+                "{}",
+                serde_json::json!({"hookSpecificOutput":{"hookEventName":"PreToolUse","permissionDecision":"deny","permissionDecisionReason":"OpenResearch could not capture this tool invocation's model"}})
+            );
+        }
+        return;
+    }
     if matches!(command, Command::PlanGate) {
         // The hook fires on every Bash call during plan mode; it must NEVER
         // block the turn. Swallow any error to stderr and still exit 0 — a
@@ -984,6 +1055,10 @@ async fn main() {
     telemetry::set_flag(cli.no_telemetry);
     let session = telemetry::TelemetrySession::start(
         should_capture_command(&command).then(|| command_name(&command)),
+        match &command {
+            Command::Up(args) => Some(telemetry::UpLaunchMode::of(args)),
+            _ => None,
+        },
     );
 
     let result = dispatch(command).await;
@@ -1137,6 +1212,7 @@ fn command_name(command: &Command) -> &'static str {
         Command::Telemetry(_) => "telemetry",
         Command::Feedback(_) => "feedback",
         Command::PlanGate => "plan-gate",
+        Command::InvocationGate => "invocation-gate",
         Command::McpGate => "mcp-gate",
         Command::AntigravityGate => "antigravity-gate",
         Command::PublishBranch(_) => "publish-branch",
@@ -1192,6 +1268,7 @@ async fn dispatch(command: Command) -> error::Result<()> {
         Command::Feedback(args) => commands::feedback::run(args).await,
         // Handled before dispatch (fast path, no telemetry/update check).
         Command::PlanGate => commands::plan_gate::run().await,
+        Command::InvocationGate => commands::invocation_gate::run().await,
         Command::McpGate => commands::mcp_gate::run().await,
         Command::AntigravityGate => commands::mcp_gate::run_antigravity().await,
         Command::PublishBranch(_) => unreachable!("handled before dispatch"),
@@ -1212,6 +1289,7 @@ fn command_uses_lifecycle_lock(command: &Command) -> bool {
             | Command::Telemetry(_)
             | Command::Feedback(_)
             | Command::PlanGate
+            | Command::InvocationGate
             | Command::McpGate
             | Command::AntigravityGate
             | Command::PublishBranch(_)

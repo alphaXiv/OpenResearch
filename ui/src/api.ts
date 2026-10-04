@@ -113,6 +113,19 @@ export function runDisplayStatus(run: Pick<Run, "status" | "cancelRequested">): 
   return live && run.cancelRequested ? "cancelling" : run.status;
 }
 
+/** Why the supervisor can't currently observe a live run, if it can't. */
+export function runMonitoringError(run: Pick<Run, "status" | "backend">): string | null {
+  if (run.status !== "running" && run.status !== "starting") return null;
+  const error = run.backend?.monitoringError;
+  return typeof error === "string" && error ? error : null;
+}
+
+/** The newest live run's monitoring error: a forced relaunch can leave an older run live. */
+export function experimentMonitoringError(runs: Pick<Run, "status" | "backend" | "createdAt">[]): string | null {
+  const newestFirst = [...runs].sort((a, b) => b.createdAt - a.createdAt);
+  return newestFirst.map(runMonitoringError).find((error) => error !== null) ?? null;
+}
+
 const writeScopes = new WeakMap<Response, ReturnType<typeof workspaceScope>>();
 
 async function json<T>(res: Response): Promise<T> {
@@ -209,7 +222,12 @@ export interface UiState {
   onboardingCompleted: boolean;
   tourCompleted: boolean;
   preferredAgent: AgentSelection | null;
+  preferredAutonomy: Autonomy | null;
 }
+
+/** How much of the research the agent owns before checking in. */
+export type Autonomy = "copilot" | "agentic";
+export const DEFAULT_AUTONOMY: Autonomy = "agentic";
 
 export const getUiState = (signal?: AbortSignal) => get<UiState>("/api/settings/ui-state", signal);
 
@@ -225,6 +243,7 @@ export const updateUiState = (body: {
   workspace?: GlobalWorkspace;
   tourCompleted?: boolean;
   preferredAgent?: AgentSelection;
+  preferredAutonomy?: Autonomy;
 }) => post<UiState>("/api/settings/ui-state", body);
 
 export const completeOnboarding = (selection: OnboardingSelection, profile: Profile) =>
@@ -1661,7 +1680,10 @@ export interface Harness {
   version?: string;
   authenticated: boolean;
   authState: "ready" | "needsLogin" | "unknown" | "unsupported";
-  authMethod?: "oauth" | "apiKey" | "local";
+  authMethod?: "oauth" | "apiKey" | "thirdParty" | "local";
+  authProvider?: string;
+  loginEligible?: boolean;
+  authCheckFailed?: boolean;
   accountLoading?: boolean;
   account?: string;
   org?: string;
@@ -1893,12 +1915,16 @@ export interface ChatSession {
   planMode: boolean;
   /** What `/goal` asked the agent to keep working toward; null when unset. */
   goal?: string | null;
+  autonomy: Autonomy;
   reasoningLevel: string | null;
   /** Hidden from the default Recents list, but fully intact and resumable. */
   archived: boolean;
   /** Session whose agent spawned this one with `orx agent spawn`; null for
    * sessions the user started themselves. */
   parentSessionId?: string | null;
+  /** Chat this side chat branched from. Side chats share its worktree and
+   * stay out of history; closing the tab deletes one. */
+  sideParentSessionId?: string | null;
   createdAt: number;
   updatedAt: number;
   busy: boolean;
@@ -1949,7 +1975,7 @@ export interface TurnOptions {
 export const createChatSession = (
   projectId: string,
   harness: HarnessId,
-  opts: TurnOptions = {},
+  opts: TurnOptions & { autonomy?: Autonomy } = {},
 ) =>
   post<{ session: ChatSession }>("/api/chat/sessions", { projectId, harness, ...opts }).then(
     (r) => r.session,
@@ -1978,9 +2004,20 @@ export const setChatSessionPlanMode = (sessionId: string, planMode: boolean) =>
     (r) => r.session,
   );
 
+/** Branch a temporary side chat off a snapshot of `sessionId`'s transcript. */
+export const openSideChat = (sessionId: string) =>
+  post<{ session: ChatSession }>(`/api/chat/sessions/${sessionId}/side`, {}).then(
+    (r) => r.session,
+  );
+
 /** `null` clears the goal. */
 export const setChatSessionGoal = (sessionId: string, goal: string | null) =>
   patch<{ session: ChatSession }>(`/api/chat/sessions/${sessionId}`, { goal }).then(
+    (r) => r.session,
+  );
+
+export const setChatSessionAutonomy = (sessionId: string, autonomy: Autonomy) =>
+  patch<{ session: ChatSession }>(`/api/chat/sessions/${sessionId}`, { autonomy }).then(
     (r) => r.session,
   );
 

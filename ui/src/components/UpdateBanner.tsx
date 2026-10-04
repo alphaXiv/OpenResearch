@@ -106,7 +106,7 @@ export function UpdateBanner({ status }: { status: UpdateStatus | null }) {
 
   return (
     <div
-      className="update-banner flex items-center gap-2 shrink-0 py-1.5 px-3.5 text-sm text-text bg-surface border-b border-b-border"
+      className="update-banner flex items-center gap-2 shrink-0 py-1.5 px-3.5 mac-titlebar:ps-20 win-titlebar:pe-36 text-sm text-text bg-surface border-b border-b-border"
       role="status"
     >
       <RefreshCw size={13} className={`shrink-0 text-subtext${restarting ? " animate-spin" : ""}`} />

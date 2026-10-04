@@ -17,6 +17,8 @@ import {
   type HarnessId,
   type OptionChoice,
   type AgentSelection,
+  type Autonomy,
+  DEFAULT_AUTONOMY,
 } from "../api";
 import { renderNote } from "./agentNote";
 import { HarnessLogo } from "./HarnessLogo";
@@ -112,6 +114,8 @@ export function ModelPicker({
   reasoningChoices = [],
   defaultReasoningId,
   onSelectReasoning,
+  autonomy,
+  onSelectAutonomy,
   lockHarness = false,
   openRequest = 0,
   className,
@@ -125,6 +129,8 @@ export function ModelPicker({
   reasoningChoices?: OptionChoice[];
   defaultReasoningId?: string | null;
   onSelectReasoning?: (id: string) => void;
+  autonomy?: Autonomy;
+  onSelectAutonomy?: (autonomy: Autonomy) => void;
   /** When set (a session is open), only the current harness is offered — its
    * harness is fixed for its lifetime, so you can still switch models within it
    * but not switch to a different harness. */
@@ -140,7 +146,7 @@ export function ModelPicker({
   const submenuHeaderRef = useRef<HTMLButtonElement>(null);
   const { open, setOpen, ref: rootRef } = usePopover(triggerRef);
   const [filter, setFilter] = useState("");
-  const [page, setPage] = useState<"root" | "models" | "reasoning" | "speed" | "permissions">("root");
+  const [page, setPage] = useState<"root" | "models" | "reasoning" | "speed" | "permissions" | "autonomy">("root");
 
   const close = () => {
     setOpen(false);
@@ -244,6 +250,26 @@ export function ModelPicker({
 
   const choosePermission = (id: string) => {
     onSelectPermission?.(id);
+    close();
+  };
+
+  const autonomyChoices: (OptionChoice & { id: Autonomy })[] = [
+    {
+      id: "agentic",
+      label: m.model_picker_autonomy_agentic(),
+      description: m.model_picker_autonomy_agentic_description(),
+    },
+    {
+      id: "copilot",
+      label: m.model_picker_autonomy_copilot(),
+      description: m.model_picker_autonomy_copilot_description(),
+    },
+  ];
+  const autonomyLabel = autonomyChoices.find((choice) => choice.id === autonomy)?.label;
+
+  const chooseAutonomy = (id: string) => {
+    const choice = autonomyChoices.find((candidate) => candidate.id === id);
+    if (choice) onSelectAutonomy?.(choice.id);
     close();
   };
 
@@ -366,6 +392,7 @@ export function ModelPicker({
               {reasoningChoices.length > 0 && menuRow(reasoningAxisLabel, reasoningLabel, "reasoning")}
               {speedChoices.length > 0 && menuRow(m.model_picker_speed(), speedLabel, "speed")}
               {permissionChoices.length > 0 && menuRow(m.model_picker_mode(), permissionLabel, "permissions")}
+              {onSelectAutonomy && menuRow(m.model_picker_autonomy(), autonomyLabel, "autonomy")}
             </div>
           )}
           {page === "models" && (
@@ -471,6 +498,12 @@ export function ModelPicker({
             <>
               {submenuHeader(m.model_picker_mode())}
               {choiceList(permissionChoices, effectivePermissionId, defaultPermissionId, choosePermission)}
+            </>
+          )}
+          {page === "autonomy" && (
+            <>
+              {submenuHeader(m.model_picker_autonomy())}
+              {choiceList(autonomyChoices, autonomy, DEFAULT_AUTONOMY, chooseAutonomy)}
             </>
           )}
           {page === "speed" && (

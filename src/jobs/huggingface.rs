@@ -22,29 +22,31 @@ use serde_json::json;
 use crate::error::{anyhow, Result};
 
 const SOURCE_LAUNCHER: &str = r#"
-import json, sys
+import contextlib, json, sys
 from huggingface_hub import HfApi
 
 spec = json.load(sys.stdin)
 api = HfApi(endpoint=spec["endpoint"], token=spec["token"])
-volume = api.sync_job_volume(
-    spec["sourceDir"],
-    "/orx-source",
-    namespace=spec["namespace"],
-    remote_name="orx-" + spec["digest"],
-    read_only=True,
-)
-job = api.run_job(
-    image=spec["image"],
-    command=spec["command"],
-    env=spec["environment"],
-    secrets=spec["secrets"],
-    flavor=spec["flavor"],
-    timeout=spec["timeoutSeconds"],
-    labels=spec["labels"],
-    volumes=[volume],
-    namespace=spec["namespace"],
-)
+# sync_job_volume prints its sync plan to stdout, which must carry only the job JSON.
+with contextlib.redirect_stdout(sys.stderr):
+    volume = api.sync_job_volume(
+        spec["sourceDir"],
+        "/orx-source",
+        namespace=spec["namespace"],
+        remote_name="orx-" + spec["digest"],
+        read_only=True,
+    )
+    job = api.run_job(
+        image=spec["image"],
+        command=spec["command"],
+        env=spec["environment"],
+        secrets=spec["secrets"],
+        flavor=spec["flavor"],
+        timeout=spec["timeoutSeconds"],
+        labels=spec["labels"],
+        volumes=[volume],
+        namespace=spec["namespace"],
+    )
 print(json.dumps({"id": job.id}))
 "#;
 
@@ -57,6 +59,90 @@ fn managed_python() -> PathBuf {
     }
 }
 
+/// `huggingface_hub` gained `sync_job_volume` in 1.22, which requires Python 3.10.
+const MIN_PYTHON: (u32, u32) = (3, 10);
+const HUB_REQUIREMENT: &str = "huggingface_hub>=1.22.0";
+
+fn parse_python_version(text: &str) -> Option<(u32, u32)> {
+    let (major, minor) = text.trim().split_once('.')?;
+    Some((major.parse().ok()?, minor.parse().ok()?))
+}
+
+/// Versioned names catch a newer Python hidden behind an old `python3` (Xcode CLT ships 3.9).
+async fn base_python() -> Result<&'static str> {
+    let mut too_old = None;
+    for candidate in [
+        "python3",
+        "python",
+        "python3.14",
+        "python3.13",
+        "python3.12",
+        "python3.11",
+        "python3.10",
+    ] {
+        let Some(version) = tokio::process::Command::new(candidate)
+            .args([
+                "-c",
+                "import sys, venv; print('%d.%d' % sys.version_info[:2])",
+            ])
+            .stdin(Stdio::null())
+            .stderr(Stdio::null())
+            .output()
+            .await
+            .ok()
+            .filter(|output| output.status.success())
+            .and_then(|output| parse_python_version(&String::from_utf8_lossy(&output.stdout)))
+        else {
+            continue;
+        };
+        if version >= MIN_PYTHON {
+            return Ok(candidate);
+        }
+        too_old.get_or_insert((candidate, version));
+    }
+    let (min_major, min_minor) = MIN_PYTHON;
+    Err(match too_old {
+        Some((candidate, (major, minor))) => anyhow!(
+            "Hugging Face Jobs needs Python {min_major}.{min_minor} or newer to stage source, but \
+             `{candidate}` is Python {major}.{minor}. Install a newer Python and retry."
+        ),
+        None => anyhow!(
+            "Python {min_major}.{min_minor} or newer is required to stage source for Hugging Face Jobs."
+        ),
+    })
+}
+
+async fn client_env_ready(python: &Path) -> bool {
+    tokio::process::Command::new(python)
+        .args([
+            "-c",
+            "from huggingface_hub import HfApi; assert hasattr(HfApi, 'sync_job_volume')",
+        ])
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+        .await
+        .map(|status| status.success())
+        .unwrap_or(false)
+}
+
+/// Serializes installs across orx processes so one can't delete another's in-progress env.
+/// Best-effort, like the settings lock: a filesystem without locks shouldn't block launches.
+async fn lock_client_env(env_dir: &Path) -> Option<std::fs::File> {
+    let lock_path = env_dir.with_extension("lock");
+    std::fs::create_dir_all(lock_path.parent()?).ok()?;
+    let lock_file = std::fs::OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .write(true)
+        .open(&lock_path)
+        .ok()?;
+    tokio::task::spawn_blocking(move || lock_file.lock().map(|()| lock_file).ok())
+        .await
+        .ok()?
+}
+
 async fn ensure_client_env() -> Result<PathBuf> {
     static INSTALL_LOCK: OnceLock<tokio::sync::Mutex<()>> = OnceLock::new();
     let _install = INSTALL_LOCK
@@ -64,51 +150,31 @@ async fn ensure_client_env() -> Result<PathBuf> {
         .lock()
         .await;
     let python = managed_python();
-    if python.exists() {
-        let ready = tokio::process::Command::new(&python)
-            .args([
-                "-c",
-                "from huggingface_hub import HfApi; assert hasattr(HfApi, 'sync_job_volume')",
-            ])
-            .stdin(Stdio::null())
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .status()
-            .await
-            .map(|status| status.success())
-            .unwrap_or(false);
-        if ready {
-            return Ok(python);
-        }
-    }
-    let base = ["python3", "python"]
-        .into_iter()
-        .find(|candidate| {
-            std::process::Command::new(candidate)
-                .args(["-c", "import venv"])
-                .status()
-                .map(|status| status.success())
-                .unwrap_or(false)
-        })
-        .ok_or_else(|| anyhow!("Python 3 is required to stage source for Hugging Face Jobs."))?;
     let env_dir = python
         .parent()
         .and_then(Path::parent)
         .ok_or_else(|| anyhow!("Invalid managed Hugging Face environment path."))?;
-    if !python.exists() {
-        if let Some(parent) = env_dir.parent() {
-            std::fs::create_dir_all(parent)?;
-        }
-        let status = tokio::process::Command::new(base)
-            .args(["-m", "venv"])
-            .arg(env_dir)
-            .status()
-            .await?;
-        if !status.success() {
-            return Err(anyhow!(
-                "Could not create the Hugging Face client environment."
-            ));
-        }
+    let _env_lock = lock_client_env(env_dir).await;
+    if python.exists() && client_env_ready(&python).await {
+        return Ok(python);
+    }
+    let base = base_python().await?;
+    // An unusable env may be pinned to an interpreter too old to upgrade, so rebuild it.
+    if env_dir.exists() {
+        std::fs::remove_dir_all(env_dir)?;
+    }
+    if let Some(parent) = env_dir.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    let status = tokio::process::Command::new(base)
+        .args(["-m", "venv"])
+        .arg(env_dir)
+        .status()
+        .await?;
+    if !status.success() {
+        return Err(anyhow!(
+            "Could not create the Hugging Face client environment."
+        ));
     }
     eprintln!("orx: installing the Hugging Face source-transfer client (one time)…");
     let status = tokio::process::Command::new(&python)
@@ -118,13 +184,13 @@ async fn ensure_client_env() -> Result<PathBuf> {
             "install",
             "--quiet",
             "--disable-pip-version-check",
-            "huggingface_hub>=1.8.0",
+            HUB_REQUIREMENT,
         ])
         .status()
         .await?;
-    if !status.success() {
+    if !status.success() || !client_env_ready(&python).await {
         return Err(anyhow!(
-            "Could not install the Hugging Face source-transfer client."
+            "Could not install the Hugging Face source-transfer client ({HUB_REQUIREMENT})."
         ));
     }
     Ok(python)
@@ -510,5 +576,71 @@ mod settings_tests {
                 (status == 401).then_some(reqwest::StatusCode::UNAUTHORIZED)
             );
         }
+    }
+
+    #[test]
+    fn parses_python_versions() {
+        assert_eq!(parse_python_version("3.9\n"), Some((3, 9)));
+        assert_eq!(parse_python_version("3.14"), Some((3, 14)));
+        assert_eq!(parse_python_version("garbage"), None);
+    }
+
+    #[tokio::test]
+    async fn source_launcher_keeps_library_output_off_stdout() {
+        let Ok(python) = base_python().await else {
+            eprintln!(
+                "skipped: no Python {}.{}+ on PATH",
+                MIN_PYTHON.0, MIN_PYTHON.1
+            );
+            return;
+        };
+        let dir = std::env::temp_dir().join(format!("orx-hf-launcher-{}", uuid::Uuid::new_v4()));
+        let package = dir.join("huggingface_hub");
+        std::fs::create_dir_all(&package).unwrap();
+        std::fs::write(
+            package.join("__init__.py"),
+            r#"
+class HfApi:
+    def __init__(self, **kwargs):
+        pass
+    def sync_job_volume(self, *args, **kwargs):
+        print("Sync plan: local -> hf://buckets/x")
+        return "volume"
+    def run_job(self, **kwargs):
+        print("Job started")
+        return type("Job", (), {"id": "job-123"})()
+"#,
+        )
+        .unwrap();
+        let spec = json!({
+            "endpoint": "", "token": "", "namespace": "", "sourceDir": "", "digest": "",
+            "image": "", "command": [], "environment": {}, "secrets": {}, "flavor": "",
+            "timeoutSeconds": 0, "labels": {},
+        });
+        let mut child = std::process::Command::new(python)
+            .args(["-c", SOURCE_LAUNCHER])
+            .env("PYTHONPATH", &dir)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .unwrap();
+        use std::io::Write as _;
+        child
+            .stdin
+            .take()
+            .unwrap()
+            .write_all(spec.to_string().as_bytes())
+            .unwrap();
+        let output = child.wait_with_output().unwrap();
+        let _ = std::fs::remove_dir_all(&dir);
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let value: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+        assert_eq!(value["id"], "job-123");
+        assert!(String::from_utf8_lossy(&output.stderr).contains("Sync plan"));
     }
 }

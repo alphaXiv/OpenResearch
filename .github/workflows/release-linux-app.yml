@@ -140,3 +140,11 @@ jobs:
             '{version: $version, tag: $tag, assets: {x86_64: $x86_64, aarch64: $aarch64}}' > app-dist/linux-app.json
           cat app-dist/linux-app.json
           gh release upload "$TAG" app-dist/linux-app.json --repo "$GITHUB_REPOSITORY" --clobber
+
+  refresh-downloads:
+    needs: [check, publish]
+    permissions:
+      contents: write
+    uses: ./.github/workflows/release-downloads.yml
+    with:
+      tag: ${{ needs.check.outputs.tag }}

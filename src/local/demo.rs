@@ -2,7 +2,6 @@
 //! history, and three curated harness-native conversations.
 
 use std::path::{Path, PathBuf};
-use std::process::Command;
 
 use rust_embed::RustEmbed;
 use serde::{Deserialize, Serialize};
@@ -275,6 +274,16 @@ pub(crate) fn installed_origin(owner: &str, repo: &str) -> Option<PathBuf> {
     origin.exists().then_some(origin)
 }
 
+/// Analytics label for launching `experiment`, or `None` outside the demo project.
+pub(crate) fn run_label(experiment: &LocalExperiment) -> Option<&'static str> {
+    (experiment.project_id == PROJECT_ID).then_some(match experiment.id.as_str() {
+        EXPERIMENT_ID => "cpu_end_to_end",
+        LR_PROBE_EXPERIMENT_ID => "lr_probe",
+        VOCAB_PROBE_EXPERIMENT_ID => "vocab_probe",
+        _ => "other",
+    })
+}
+
 pub(crate) fn turn_context(project_id: &str) -> Option<&'static str> {
     (project_id == PROJECT_ID).then_some(TURN_CONTEXT)
 }
@@ -545,8 +554,10 @@ fn seed_at(
         context_usage_json: None,
         bootstrap_context: Some(BOOTSTRAP_CONTEXT.into()),
         goal: None,
+        autonomy: None,
         active_leaf_id: Some(ASSISTANT_MESSAGE_ID.into()),
         parent_session_id: None,
+        side_parent_session_id: None,
         created_at: ago(seeded_at, 240, 0),
         // Sessions list by updated_at DESC, the order validate_snapshot asserts.
         updated_at: ago(seeded_at, 9, 30),
@@ -590,8 +601,10 @@ fn seed_at(
         context_usage_json: None,
         bootstrap_context: Some(FIGURE_BOOTSTRAP_CONTEXT.into()),
         goal: None,
+        autonomy: None,
         active_leaf_id: Some(FIGURE_ASSISTANT_MESSAGE_ID.into()),
         parent_session_id: None,
+        side_parent_session_id: None,
         created_at: ago(seeded_at, 70, 0),
         updated_at: ago(seeded_at, 69, 40),
     };
@@ -637,8 +650,10 @@ fn seed_at(
         context_usage_json: None,
         bootstrap_context: Some(LITERATURE_BOOTSTRAP_CONTEXT.into()),
         goal: None,
+        autonomy: None,
         active_leaf_id: Some(LITERATURE_ASSISTANT_MESSAGE_ID.into()),
         parent_session_id: None,
+        side_parent_session_id: None,
         created_at: ago(seeded_at, 95, 0),
         updated_at: ago(seeded_at, 94, 40),
     };
@@ -1594,7 +1609,7 @@ fn commit(repo: &Path, message: &str) -> Result<()> {
 }
 
 fn git(dir: &Path, args: &[&str]) -> Result<String> {
-    let mut command = Command::new("git");
+    let mut command = super::git::git_command();
     // The prewarm's children yield to the catalog fill and to foreground work;
     // a click landing mid-build flips the rest back to normal priority.
     #[cfg(windows)]

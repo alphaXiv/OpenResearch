@@ -9,8 +9,8 @@ cargo-dist-version = "0.32.0"
 ci = "github"
 # Mark only publishing builds and verify every packaged binary before hosting.
 github-build-setup = "../build-setup.yml"
-# Sign and notarize the macOS archives before the global build checksums them.
-local-artifacts-jobs = ["./sign-macos-cli"]
+# Sign platform archives before the global build checksums them.
+local-artifacts-jobs = ["./sign-macos-cli", "./sign-windows-cli"]
 # release.yml is hand-edited (custom-sign-macos-cli needs build-local-artifacts),
 # so dist skips it; see macos/DISTRIBUTION.md before changing dist config.
 allow-dirty = ["ci"]

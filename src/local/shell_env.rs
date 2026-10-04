@@ -14,9 +14,9 @@
 //! to the process environment unchanged. The Linux AppImage also hands host
 //! programs the session's GTK settings ([`host_gui_env`]).
 //!
-//! Scope is orx's own resolution, the children it spawns, and the dashboard's
-//! PTY terminals. The other things orx shells out to — `git`, `kubectl`, and
-//! `ssh` — still inherit the process environment.
+//! Scope is orx's own resolution, the children it spawns (including `git`), and
+//! the dashboard's PTY terminals. `kubectl` and `ssh` still inherit the process
+//! environment.
 
 use std::collections::HashMap;
 use std::ffi::{OsStr, OsString};
@@ -88,7 +88,20 @@ fn search_in(paths: &OsStr, binary: &str) -> Option<PathBuf> {
                 .into_iter()
                 .map(move |name| dir.join(name))
         })
-        .find(|candidate| candidate.is_file())
+        .find(|candidate| is_executable(candidate))
+}
+
+/// Like execvp, pass over a non-executable file so a working binary later on PATH wins.
+#[cfg(unix)]
+fn is_executable(path: &std::path::Path) -> bool {
+    use std::os::unix::fs::PermissionsExt;
+    path.metadata()
+        .is_ok_and(|meta| meta.is_file() && meta.permissions().mode() & 0o111 != 0)
+}
+
+#[cfg(not(unix))]
+fn is_executable(path: &std::path::Path) -> bool {
+    path.is_file()
 }
 
 /// The filenames `binary` may have inside one PATH directory, in the order to
@@ -246,10 +259,20 @@ mod tests {
         std::fs::create_dir_all(&late).expect("late");
         std::fs::write(early.join(TOOL), "").expect("early tool");
         std::fs::write(late.join(TOOL), "").expect("late tool");
+        #[cfg(unix)]
+        for dir in [&early, &late] {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(dir.join(TOOL), std::fs::Permissions::from_mode(0o755))
+                .expect("chmod");
+        }
 
-        let paths =
-            std::env::join_paths([PathBuf::new(), PathBuf::from("bin"), early.clone(), late])
-                .expect("join");
+        let paths = std::env::join_paths([
+            PathBuf::new(),
+            PathBuf::from("bin"),
+            early.clone(),
+            late.clone(),
+        ])
+        .expect("join");
         assert_eq!(search_in(&paths, "tool"), Some(early.join(TOOL)));
         assert_eq!(search_in(&paths, "absent"), None);
 
@@ -257,6 +280,14 @@ mod tests {
         // tests from the package root, so `src/main.rs` is a real hit here.
         let relative = std::env::join_paths([PathBuf::from("src")]).expect("join");
         assert_eq!(search_in(&relative, "main.rs"), None);
+
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(early.join(TOOL), std::fs::Permissions::from_mode(0o644))
+                .expect("chmod");
+            assert_eq!(search_in(&paths, "tool"), Some(late.join(TOOL)));
+        }
 
         std::fs::remove_dir_all(&root).ok();
     }

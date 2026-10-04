@@ -4,6 +4,14 @@ Use this backend when the user asks to run on their own server, or when SSH is
 the configured compute default. Authentication uses SSH config, keys and the
 agent; `orx` never reads private keys.
 
+On Unix, `orx compute connect ssh --host lab` authenticates once for background
+commands. Its master stays available for 24 hours of idle time and sends
+keepalives every 30 seconds. Use `--persist <seconds>` to set a new master's idle
+lifetime (`0` keeps it indefinitely); an existing master retains its settings.
+Reconnect to recover an expired login.
+Monitoring outages are reported after 60 seconds without declaring the remote
+job stopped. Reconnecting resumes status and log polling.
+
 ```sh
 orx exp run <expId> --backend ssh --host lab
 orx exp run <expId> --backend ssh --host lab --container research

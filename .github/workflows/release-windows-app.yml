@@ -63,6 +63,10 @@ jobs:
     if: ${{ needs.check.outputs.ok == 'true' }}
     runs-on: windows-latest
     timeout-minutes: 30
+    environment: release-signing
+    permissions:
+      contents: write
+      id-token: write
     env:
       GH_TOKEN: ${{ github.token }}
       TAG: ${{ needs.check.outputs.tag }}
@@ -73,6 +77,13 @@ jobs:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           ref: ${{ github.event.workflow_run.head_sha || inputs.tag }}
+
+      - name: Take signing action from the workflow revision
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          ref: ${{ github.workflow_sha }}
+          path: signing-workflow
+          sparse-checkout: .github/actions/windows-signing
 
       # The runner's preinstalled stable toolchain, as release-macos-app.yml uses.
       - name: Build the launcher
@@ -94,12 +105,44 @@ jobs:
           $channel = & app-staging/orx.exe version --build-channel
           if ($channel -ne 'production') { throw "expected build channel 'production', got '$channel'" }
 
+      - uses: Azure/login@a641126d1b8aa4d1fa005f4f92df94a3a4c4c906 # v3
+        with:
+          client-id: ${{ vars.WINDOWS_SIGNING_CLIENT_ID }}
+          tenant-id: ${{ vars.WINDOWS_SIGNING_TENANT_ID }}
+          subscription-id: ${{ vars.WINDOWS_SIGNING_SUBSCRIPTION_ID }}
+
+      - name: Sign the app and bundled CLI
+        uses: ./signing-workflow/.github/actions/windows-signing
+        with:
+          files: |
+            ${{ github.workspace }}\app-staging\OpenResearch.exe
+            ${{ github.workspace }}\app-staging\orx.exe
+          endpoint: ${{ vars.WINDOWS_SIGNING_ENDPOINT }}
+          account: ${{ vars.WINDOWS_SIGNING_ACCOUNT }}
+          profile: ${{ vars.WINDOWS_SIGNING_PROFILE }}
+
       - name: Build the installer
         run: |
           & "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe" "/DAppVersion=$($env:TAG.TrimStart('v'))" "/DSourceDir=$PWD\app-staging" "/DOutputDir=$PWD\app-installer" windows\OpenResearch.iss
           if ($LASTEXITCODE) { exit $LASTEXITCODE }
 
+      - name: Sign the installer
+        uses: ./signing-workflow/.github/actions/windows-signing
+        with:
+          files: ${{ github.workspace }}\app-installer\OpenResearch-Setup.exe
+          endpoint: ${{ vars.WINDOWS_SIGNING_ENDPOINT }}
+          account: ${{ vars.WINDOWS_SIGNING_ACCOUNT }}
+          profile: ${{ vars.WINDOWS_SIGNING_PROFILE }}
+
       - name: Upload the installer to the release
         run: |
           gh release upload $env:TAG app-installer/OpenResearch-Setup.exe --repo $env:GITHUB_REPOSITORY --clobber
           if ($LASTEXITCODE) { exit $LASTEXITCODE }
+
+  refresh-downloads:
+    needs: [check, windows-app]
+    permissions:
+      contents: write
+    uses: ./.github/workflows/release-downloads.yml
+    with:
+      tag: ${{ needs.check.outputs.tag }}

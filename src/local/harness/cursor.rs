@@ -171,8 +171,9 @@ impl Harness for Cursor {
             .map_err(|error| TurnFailure::adapter(error, ctx.delivery_state()))
     }
 
-    async fn one_shot(&self, request: OneShot<'_>) -> Option<String> {
-        cursor_one_shot(&find_cursor()?, request).await
+    async fn one_shot(&self, request: OneShot<'_>) -> Result<String> {
+        let bin = find_cursor().ok_or_else(|| anyhow!("{} is not installed", self.name()))?;
+        cursor_one_shot(&bin, request).await
     }
 
     fn options(&self) -> HarnessOptions {
@@ -571,7 +572,7 @@ fn cursor_exit_detail(status: std::process::ExitStatus, log: &Path) -> String {
     })
 }
 
-async fn cursor_one_shot(bin: &Path, request: OneShot<'_>) -> Option<String> {
+async fn cursor_one_shot(bin: &Path, request: OneShot<'_>) -> Result<String> {
     let message = format!("{}\n\n{}", request.system, request.prompt);
     let mut cmd = Command::new(bin);
     cmd.args([
@@ -589,30 +590,35 @@ async fn cursor_one_shot(bin: &Path, request: OneShot<'_>) -> Option<String> {
     }
     cmd.stdin(Stdio::piped())
         .stdout(Stdio::piped())
-        .stderr(Stdio::null())
+        .stderr(Stdio::piped())
         .kill_on_drop(true)
         .current_dir(std::env::temp_dir());
     prepare_env(&mut cmd);
     let cursor_home =
         tokio::task::spawn_blocking(|| native_store::prepare_cursor(NativeStore::Isolated))
-            .await
-            .ok()?
-            .ok()?;
+            .await??;
     cmd.env("CURSOR_CONFIG_DIR", &cursor_home);
     cmd.env("CURSOR_DATA_DIR", &cursor_home);
     cmd.env("NO_COLOR", "1");
     let out = tokio::time::timeout(request.timeout, async {
-        let mut child = cmd.spawn().ok()?;
-        send_prompt(&mut child, &message).await.ok()?;
-        child.wait_with_output().await.ok()
+        let mut child = cmd.spawn()?;
+        send_prompt(&mut child, &message).await?;
+        Ok::<_, crate::error::Error>(child.wait_with_output().await?)
     })
     .await
-    .ok()??;
+    .map_err(|_| anyhow!("timed out after {}s", request.timeout.as_secs()))??;
     if !out.status.success() {
-        return None;
+        let detail = cursor_cli_error(&String::from_utf8_lossy(&out.stderr));
+        return Err(match detail {
+            Some(detail) => anyhow!("{}", super::one_line(&detail, 300)),
+            None => super::one_shot_exit_error(out.status, &[&out.stdout]),
+        });
     }
     let text = String::from_utf8_lossy(&out.stdout).trim().to_string();
-    (!text.is_empty()).then_some(text)
+    if text.is_empty() {
+        return Err(anyhow!("returned no reply"));
+    }
+    Ok(text)
 }
 
 async fn send_prompt(child: &mut tokio::process::Child, prompt: &str) -> Result<()> {
@@ -788,8 +794,33 @@ async fn run_turn(ctx: &mut TurnCtx) -> Result<()> {
     Ok(())
 }
 
+/// A success ran the init model even without output or usage; an error without usage did not.
+fn result_usage(result: &Value, is_error: bool) -> Option<crate::store::TokenUsage> {
+    result
+        .get("usage")
+        .map(cursor_native_usage)
+        .or_else(|| (!is_error).then(crate::store::TokenUsage::default))
+}
+
+fn cursor_native_usage(usage: &Value) -> crate::store::TokenUsage {
+    let field = |key| usage.get(key).and_then(Value::as_u64);
+    crate::store::TokenUsage {
+        input_tokens: field("inputTokens")
+            .and_then(|input| input.checked_add(field("cacheReadTokens")?))
+            .and_then(|input| input.checked_add(field("cacheWriteTokens")?)),
+        output_tokens: field("outputTokens"),
+        cache_read_tokens: field("cacheReadTokens"),
+        cache_write_tokens: field("cacheWriteTokens"),
+        reasoning_tokens: None,
+    }
+}
+
 #[derive(Default)]
 struct TurnState {
+    /// Cursor's `system/init` model label (`Auto` included), announced before the request.
+    init_model: Option<String>,
+    /// The request produced output, so `init_model` names an execution.
+    executed: bool,
     native_session_id: Option<String>,
     text_part_id: Option<String>,
     reasoning_part_id: Option<String>,
@@ -804,7 +835,25 @@ fn apply_event(ctx: &mut TurnCtx, state: &mut TurnState, event: &Value) -> bool 
     if let Some(sid) = event.get("session_id").and_then(Value::as_str) {
         state.native_session_id = Some(sid.to_string());
     }
-    match event.get("type").and_then(Value::as_str) {
+    let kind = event.get("type").and_then(Value::as_str);
+    // Output proves the init model ran even if no result (with usage) follows.
+    if !state.executed && matches!(kind, Some("assistant" | "thinking" | "tool_call")) {
+        state.executed = true;
+        ctx.record_native_usage(
+            &format!("cursor-result-{}", ctx.attempt_count_for_usage()),
+            state.init_model.as_deref(),
+            None,
+            crate::store::TokenUsage::default(),
+        );
+    }
+    match kind {
+        Some("system") if event.get("subtype").and_then(Value::as_str) == Some("init") => {
+            state.init_model = event
+                .get("model")
+                .and_then(Value::as_str)
+                .map(str::to_string);
+            false
+        }
         Some("thinking") => {
             if event.get("subtype").and_then(Value::as_str) == Some("delta") {
                 if let Some(text) = event.get("text").and_then(Value::as_str) {
@@ -857,6 +906,14 @@ fn apply_event(ctx: &mut TurnCtx, state: &mut TurnState, event: &Value) -> bool 
                 .and_then(Value::as_bool)
                 .unwrap_or(false)
                 || event.get("subtype").and_then(Value::as_str) == Some("error");
+            if let Some(usage) = result_usage(event, is_error) {
+                ctx.record_native_usage(
+                    &format!("cursor-result-{}", ctx.attempt_count_for_usage()),
+                    state.init_model.as_deref(),
+                    None,
+                    usage,
+                );
+            }
             if is_error {
                 state.turn_errored = true;
                 let detail = event
@@ -1113,6 +1170,18 @@ fn plan_card(parts: &[WirePart], assistant_id: &str, errored: bool) -> Option<Wi
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn native_usage_restores_inclusive_cached_input() {
+        let fixture: serde_json::Value =
+            serde_json::from_str(include_str!("fixtures/cursor-usage.json")).unwrap();
+        let usage = super::cursor_native_usage(&fixture[0]["usage"]);
+        usage.validate().unwrap();
+        assert_eq!(usage.input_tokens, Some(14304));
+        assert_eq!(usage.output_tokens, Some(34));
+        assert_eq!(usage.total(), Some(14338));
+        assert_eq!(usage.reasoning_tokens, None);
+    }
+
     use super::*;
     use crate::local::chat::TurnCtx;
 
@@ -1525,5 +1594,16 @@ ActionRequiredError: Named models unavailable Free plans can only use Auto. Swit
             .await
             .unwrap();
         assert!(matches!(reject, ResumeAction::Nothing));
+    }
+
+    #[test]
+    fn only_a_successful_or_measured_result_attests_the_init_model() {
+        let usage = serde_json::json!({"usage": {"inputTokens": 3, "outputTokens": 1}});
+        assert_eq!(
+            result_usage(&serde_json::json!({}), false),
+            Some(Default::default())
+        );
+        assert_eq!(result_usage(&serde_json::json!({}), true), None);
+        assert_eq!(result_usage(&usage, true).unwrap().output_tokens, Some(1));
     }
 }

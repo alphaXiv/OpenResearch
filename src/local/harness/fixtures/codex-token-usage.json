@@ -1,0 +1,40 @@
+[
+  {
+    "total": {
+      "totalTokens": 25162,
+      "inputTokens": 25156,
+      "cachedInputTokens": 12672,
+      "cacheWriteInputTokens": 0,
+      "outputTokens": 6,
+      "reasoningOutputTokens": 0
+    },
+    "last": {
+      "totalTokens": 25162,
+      "inputTokens": 25156,
+      "cachedInputTokens": 12672,
+      "cacheWriteInputTokens": 0,
+      "outputTokens": 6,
+      "reasoningOutputTokens": 0
+    },
+    "modelContextWindow": 258400
+  },
+  {
+    "total": {
+      "totalTokens": 54078,
+      "inputTokens": 54067,
+      "cachedInputTokens": 20608,
+      "cacheWriteInputTokens": 0,
+      "outputTokens": 11,
+      "reasoningOutputTokens": 0
+    },
+    "last": {
+      "totalTokens": 28916,
+      "inputTokens": 28911,
+      "cachedInputTokens": 7936,
+      "cacheWriteInputTokens": 0,
+      "outputTokens": 5,
+      "reasoningOutputTokens": 0
+    },
+    "modelContextWindow": 258400
+  }
+]

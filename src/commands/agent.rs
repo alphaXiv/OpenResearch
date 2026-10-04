@@ -182,8 +182,11 @@ async fn spawn(
         context_usage_json: None,
         bootstrap_context: None,
         goal: None,
+        // Copilot asks the user before acting; a helper has no user to ask.
+        autonomy: None,
         active_leaf_id: None,
         parent_session_id: Some(parent_id.clone()),
+        side_parent_session_id: None,
         created_at: now_ms(),
         updated_at: now_ms(),
     };
@@ -234,8 +237,10 @@ mod tests {
             context_usage_json: None,
             bootstrap_context: None,
             goal: None,
+            autonomy: None,
             active_leaf_id: None,
             parent_session_id: parent_session_id.map(str::to_string),
+            side_parent_session_id: None,
             created_at: 1,
             updated_at: 1,
         }

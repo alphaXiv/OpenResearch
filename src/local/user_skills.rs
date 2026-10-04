@@ -22,7 +22,7 @@ use std::time::{Duration, Instant};
 
 use sha2::{Digest, Sha256};
 
-use crate::error::{anyhow, Result};
+use crate::error::{anyhow, Context, Result};
 use crate::local::agent_skills::SkillSet;
 use crate::local::harness::registry;
 
@@ -523,14 +523,98 @@ fn parse_import_decisions(raw: &str, count: usize) -> Option<Vec<bool>> {
     (decisions.len() == count).then_some(decisions)
 }
 
+/// The last screening scan, and why it failed if it did.
+struct Scan {
+    at: Option<Instant>,
+    failure: Option<ScanFailure>,
+}
+
+/// A failed scan backs off per agent and model, and prints its cause only when it changes.
+struct ScanFailure {
+    agent: Option<super::starter::Agent>,
+    cause: String,
+    streak: usize,
+}
+
+const RESCAN_INTERVAL: Duration = Duration::from_secs(60);
+const RETRY_BACKOFF: [Duration; 4] = [
+    Duration::from_secs(60),
+    Duration::from_secs(5 * 60),
+    Duration::from_secs(30 * 60),
+    Duration::from_secs(2 * 60 * 60),
+];
+
+impl ScanFailure {
+    fn backoff(&self) -> Duration {
+        RETRY_BACKOFF[(self.streak - 1).min(RETRY_BACKOFF.len() - 1)]
+    }
+}
+
+impl Scan {
+    /// Picking another agent or model retries a failure straight away.
+    fn due(&self, agent: impl FnOnce() -> Option<super::starter::Agent>) -> bool {
+        let Some(at) = self.at else {
+            return true;
+        };
+        let wait = match &self.failure {
+            None => RESCAN_INTERVAL,
+            Some(failure) if failure.agent == agent() => failure.backoff(),
+            Some(_) => Duration::ZERO,
+        };
+        at.elapsed() >= wait
+    }
+
+    /// Record a scan's outcome, returning the warning to print when its cause is new.
+    fn finish(
+        &mut self,
+        agent: Option<super::starter::Agent>,
+        result: Result<()>,
+    ) -> Option<String> {
+        self.at = Some(Instant::now());
+        let Err(error) = result else {
+            self.failure = None;
+            return None;
+        };
+        let cause = super::harness::one_line(&format!("{error:#}"), 500);
+        let previous = self.failure.take().filter(|failure| failure.agent == agent);
+        let repeat = previous
+            .as_ref()
+            .is_some_and(|failure| failure.cause == cause);
+        let failure = self.failure.insert(ScanFailure {
+            agent,
+            cause,
+            streak: previous.map_or(1, |failure| failure.streak + 1),
+        });
+        (!repeat).then(|| {
+            format!(
+                "Skill import screening failed, so unclassified skills were not imported: {} (will retry after {} min)",
+                failure.cause,
+                failure.backoff().as_secs() / 60
+            )
+        })
+    }
+}
+
+/// The preferred agent as screening runs it, so a model the harness ignores doesn't reset backoff.
+/// With no preference, a fallback agent's failures back off under `None`.
+fn screening_agent() -> Option<super::starter::Agent> {
+    super::starter::preferred_agent().map(|agent| super::starter::Agent {
+        model: agent.effective_model().map(str::to_owned),
+        harness: agent.harness,
+    })
+}
+
 /// Import in the background; uploads are explicit choices and bypass screening.
 pub fn refresh_imports() -> bool {
-    // One scan at a time; failed model calls retry on a later catalog request.
-    static SCAN: tokio::sync::Mutex<Option<Instant>> = tokio::sync::Mutex::const_new(None);
+    // One scan at a time; failed model calls retry with backoff on a later catalog request.
+    static SCAN: tokio::sync::Mutex<Scan> = tokio::sync::Mutex::const_new(Scan {
+        at: None,
+        failure: None,
+    });
     let Ok(mut scan) = SCAN.try_lock() else {
         return true;
     };
-    if scan.is_some_and(|at| at.elapsed() < Duration::from_secs(60)) {
+    if !scan.due(screening_agent) {
         return false;
     }
     let root = root();
@@ -540,14 +624,22 @@ pub fn refresh_imports() -> bool {
         .filter(|skill| !root.join("excluded").join(&skill.name).exists())
         .filter(|skill| !decisions.contains_key(&import_key(skill)))
         .collect();
-    *scan = Some(Instant::now());
     if pending.is_empty() {
+        scan.finish(None, Ok(()));
         return false;
     }
+    let preferred = screening_agent();
     tokio::spawn(async move {
         let result = async {
-            let agent = super::starter::resolve_agent().await?;
-            let harness = super::harness::chat_harness(&agent.harness)?;
+            let agent = super::starter::resolve_agent()
+                .await
+                .ok_or_else(|| anyhow!("no coding agent is ready; sign in to one in Settings"))?;
+            let harness = super::harness::chat_harness(&agent.harness)
+                .ok_or_else(|| anyhow!("{} cannot run chat requests", agent.harness))?;
+            let label = match agent.effective_model() {
+                Some(model) => format!("{} ({model})", harness.name()),
+                None => harness.name().to_string(),
+            };
             for batch in pending.chunks(16) {
                 let metadata: Vec<_> = batch
                     .iter()
@@ -555,32 +647,38 @@ pub fn refresh_imports() -> bool {
                         serde_json::json!({"name": skill.name, "description": skill.description})
                     })
                     .collect();
-                let prompt = serde_json::to_string(&metadata).ok()?;
+                let prompt = serde_json::to_string(&metadata)?;
                 let raw = harness
                     .one_shot(super::harness::OneShot {
                         system: IMPORT_PROMPT,
                         prompt: &prompt,
                         quality: super::harness::OneShotQuality::Cheap,
-                        model: agent.model.as_deref(),
+                        model: agent.effective_model(),
                         timeout: Duration::from_secs(90),
                     })
-                    .await?;
-                let selected = parse_import_decisions(&raw, batch.len())?;
+                    .await
+                    .with_context(|| format!("{label} request failed"))?;
+                if raw.trim().is_empty() {
+                    return Err(anyhow!("{label} returned no reply"));
+                }
+                let selected = parse_import_decisions(&raw, batch.len()).ok_or_else(|| {
+                    let reply = super::harness::one_line(&raw, 200);
+                    anyhow!("{label} returned an unreadable classification: {reply}")
+                })?;
                 for (skill, selected) in batch.iter().zip(selected) {
                     decisions.insert(import_key(skill), selected);
                 }
-                fs::create_dir_all(&root).ok()?;
+                fs::create_dir_all(&root)?;
                 let temp = root.join("imports.json.tmp");
-                fs::write(&temp, serde_json::to_vec(&decisions).ok()?).ok()?;
-                fs::rename(temp, root.join("imports.json")).ok()?;
+                fs::write(&temp, serde_json::to_vec(&decisions)?)?;
+                fs::rename(temp, root.join("imports.json"))?;
             }
-            Some(())
+            Ok(())
         }
         .await;
-        if result.is_none() {
-            eprintln!("Skill import screening unavailable; unclassified skills were not imported.");
+        if let Some(warning) = scan.finish(preferred, result) {
+            eprintln!("{warning}");
         }
-        *scan = Some(Instant::now());
     });
     true
 }
@@ -1234,6 +1332,42 @@ mod tests {
         assert_eq!(parse_import_decisions("[true]", 2), None);
         assert_eq!(parse_import_decisions("[true,\"false\"]", 2), None);
         assert_eq!(parse_import_decisions("Import everything!", 2), None);
+    }
+
+    #[test]
+    fn a_failed_screening_warns_once_and_backs_off_per_agent() {
+        let codex = |model: &str| {
+            Some(crate::local::starter::Agent {
+                harness: "codex".into(),
+                model: Some(model.into()),
+            })
+        };
+        let backoff = |scan: &Scan| scan.failure.as_ref().map(ScanFailure::backoff);
+        let mut scan = Scan {
+            at: None,
+            failure: None,
+        };
+        assert!(scan.due(|| unreachable!()));
+        let unsupported = || Err(anyhow!("model not supported"));
+        let warning = scan.finish(codex("gpt-x"), unsupported()).unwrap();
+        assert!(warning.contains("model not supported"), "{warning}");
+        assert!(!scan.due(|| codex("gpt-x")));
+        assert!(scan.due(|| codex("gpt-y")));
+
+        assert_eq!(scan.finish(codex("gpt-x"), unsupported()), None);
+        assert_eq!(backoff(&scan), Some(RETRY_BACKOFF[1]));
+        // A cause that varies per request is reported but keeps backing off.
+        assert!(scan.finish(codex("gpt-x"), Err(anyhow!("req_2"))).is_some());
+        assert_eq!(backoff(&scan), Some(RETRY_BACKOFF[2]));
+        for _ in 0..5 {
+            scan.finish(codex("gpt-x"), unsupported());
+        }
+        assert_eq!(backoff(&scan), Some(RETRY_BACKOFF[3]));
+
+        assert!(scan.finish(codex("gpt-y"), unsupported()).is_some());
+        assert_eq!(backoff(&scan), Some(RETRY_BACKOFF[0]));
+        assert_eq!(scan.finish(codex("gpt-y"), Ok(())), None);
+        assert!(scan.failure.is_none());
     }
 
     fn temp_root() -> PathBuf {

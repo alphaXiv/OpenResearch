@@ -15,7 +15,7 @@ export function commandLabel(skill: SkillInfo): string {
 }
 
 /** Built-in commands the dashboard runs instead of sending, same on every harness. */
-export const COMPOSER_COMMANDS = ["plan", "goal", "new", "resume", "model", "compact", "copy", "export"] as const;
+export const COMPOSER_COMMANDS = ["plan", "goal", "new", "resume", "model", "compact", "copy", "export", "side"] as const;
 
 export type ComposerCommandName = (typeof COMPOSER_COMMANDS)[number];
 
@@ -28,6 +28,7 @@ const COMMAND_DESCRIPTIONS: Record<ComposerCommandName, () => string> = {
   compact: () => m.compact_command_description(),
   copy: () => m.copy_command_description(),
   export: () => m.export_command_description(),
+  side: () => m.side_command_description(),
 };
 
 function composerCommand(name: ComposerCommandName): SkillInfo {
@@ -177,10 +178,11 @@ export function commandsForHarness(
 }
 
 /** Commands that read the rest of the message: Plan as the prompt to plan,
- * Goal as the goal to keep. The rest run only as a whole message, so prose
- * mentioning `/export` or asking what `/clear` does still reaches the agent. */
+ * Goal as the goal to keep, Side as the side chat's first question. The rest
+ * run only as a whole message, so prose mentioning `/export` or asking what
+ * `/clear` does still reaches the agent. */
 export function takesArgument(name: ComposerCommandName): boolean {
-  return name === "plan" || name === "goal";
+  return name === "plan" || name === "goal" || name === "side";
 }
 
 /** The command a typed message runs instead of sending, minus its token. */
@@ -193,8 +195,8 @@ export function parseComposerCommand(
     if (name === "plan") {
       const token = new RegExp(`(^|\\s)\\/(?:${spellings})(?=\\s|$)`, "gi");
       if (token.test(text)) return { name, prompt: text.replace(token, "").trim() };
-    } else if (name === "goal") {
-      // Anchored: a goal is what follows the token, so `/goal` must lead.
+    } else if (name === "goal" || name === "side") {
+      // Anchored: the argument is what follows the token, so the token must lead.
       const token = new RegExp(`^\\/(?:${spellings})(?=\\s|$)`, "i");
       if (token.test(text.trim())) {
         return { name, prompt: text.trim().replace(token, "").trim() };

@@ -23,7 +23,7 @@ export function OfflineBanner() {
           text; keep this subtree free of anything focusable. */}
       {!connected && (
         <div
-          className="offline-banner flex items-center gap-2 shrink-0 py-1.5 px-3.5 text-sm text-text bg-accent-amber-subtle border-b border-b-accent-amber"
+          className="offline-banner flex items-center gap-2 shrink-0 py-1.5 px-3.5 mac-titlebar:ps-20 win-titlebar:pe-36 text-sm text-text bg-accent-amber-subtle border-b border-b-accent-amber"
           aria-hidden
         >
           <CircleAlert size={13} className="shrink-0 text-accent-amber" />

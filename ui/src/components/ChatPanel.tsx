@@ -41,6 +41,7 @@ import {
   Goal,
   Lightbulb,
   MessageSquareQuote,
+  MessagesSquare,
   MoreHorizontal,
   PanelLeft,
   Paperclip,
@@ -95,6 +96,7 @@ import {
   fmtDuration,
   sendChatMessage,
   setChatSessionArchived,
+  setChatSessionAutonomy,
   setChatSessionPermissionMode,
   importNativeChat,
   setChatSessionGoal,
@@ -104,6 +106,7 @@ import {
   type ChatMessage,
   type ChatPart,
   type ChatPrompt,
+  type Autonomy,
   type ChatSession,
   type Harness,
   type PromptAnswer,
@@ -210,6 +213,7 @@ const TOOL_TARGET_INSPECTION_LIMIT = 1_024;
 const TOOL_OUTPUT_SCAN_LIMIT = 20_000;
 const SELECTION_ACTION_GAP_PX = 8;
 const CHAT_ANNOTATION_HIGHLIGHT_NAME = "chat-annotations";
+const SIDE_CHAT_ANNOTATION_HIGHLIGHT_NAME = "side-chat-annotations";
 
 interface SelectionAction {
   text: string;
@@ -569,25 +573,25 @@ function useTranscriptSelection(
   return { action, add, dismiss };
 }
 
-function useAnnotationHighlights(annotations: ComposerAnnotation[]) {
+function useAnnotationHighlights(annotations: ComposerAnnotation[], name: string) {
   useLayoutEffect(() => {
     if (!("highlights" in CSS) || typeof Highlight === "undefined") return;
     const ranges = annotations.flatMap((annotation) =>
       annotation.range ? [annotation.range] : [],
     );
     if (ranges.length === 0) {
-      CSS.highlights.delete(CHAT_ANNOTATION_HIGHLIGHT_NAME);
+      CSS.highlights.delete(name);
       return;
     }
 
     const highlight = new Highlight(...ranges);
-    CSS.highlights.set(CHAT_ANNOTATION_HIGHLIGHT_NAME, highlight);
+    CSS.highlights.set(name, highlight);
     return () => {
-      if (CSS.highlights.get(CHAT_ANNOTATION_HIGHLIGHT_NAME) === highlight) {
-        CSS.highlights.delete(CHAT_ANNOTATION_HIGHLIGHT_NAME);
+      if (CSS.highlights.get(name) === highlight) {
+        CSS.highlights.delete(name);
       }
     };
-  }, [annotations]);
+  }, [annotations, name]);
 }
 
 function AnnotationPreview({ annotation }: { annotation: ComposerAnnotation }) {
@@ -3862,6 +3866,11 @@ type SessionFilter = "active" | "archived" | "all";
 const matchesFilter = (filter: SessionFilter, archived: boolean) =>
   filter === "all" ? true : filter === "archived" ? archived : !archived;
 
+/** Whether an event target sits inside the side-chat pane. */
+function inSideChat(target: EventTarget | null): boolean {
+  return target instanceof Element && target.closest("[data-side-chat]") !== null;
+}
+
 /** Menu label + rail section heading per filter — "Recents" for the default view. */
 const SESSION_FILTERS: { id: SessionFilter; label: () => string; railLabel: () => string }[] = [
   { id: "active", label: m.chat_panel_active, railLabel: m.chat_recents },
@@ -4192,6 +4201,10 @@ export function ChatPanel({
   onActiveSessionChange,
   preferredAgent,
   onPreferredAgentChange,
+  preferredAutonomy,
+  onPreferredAutonomyChange,
+  embedded = false,
+  onOpenSideChat,
   children,
 }: {
   projectId: string;
@@ -4252,11 +4265,19 @@ export function ChatPanel({
   /** Database-backed selection used to seed new chat sessions. */
   preferredAgent: ModelSelection | null;
   onPreferredAgentChange: (selection: ModelSelection) => Promise<void>;
+  preferredAutonomy: Autonomy;
+  onPreferredAutonomyChange: (autonomy: Autonomy) => void;
+  /** A second instance hosting a side chat in the right pane: no rail, and
+   * global shortcuts act on it only while focus is inside it. */
+  embedded?: boolean;
+  /** Branch a side chat off `parentSessionId`; a question, if given, is its first message. */
+  onOpenSideChat?: (parentSessionId: string, question: string) => void;
   /** Middle-pane content when a settings section is active. */
   children?: React.ReactNode;
 }) {
   const setChatSessionPermissionModeMutation = useMutation({ mutationFn: (args: Parameters<typeof setChatSessionPermissionMode>) => setChatSessionPermissionMode(...args) });
   const setChatSessionPlanModeMutation = useMutation({ mutationFn: (args: Parameters<typeof setChatSessionPlanMode>) => setChatSessionPlanMode(...args) });
+  const setChatSessionAutonomyMutation = useMutation({ mutationFn: (args: Parameters<typeof setChatSessionAutonomy>) => setChatSessionAutonomy(...args) });
   const setChatSessionGoalMutation = useMutation({ mutationFn: (args: Parameters<typeof setChatSessionGoal>) => setChatSessionGoal(...args) });
   const importNativeChatMutation = useMutation({ mutationFn: (args: Parameters<typeof importNativeChat>) => importNativeChat(...args) });
   const createChatSessionMutation = useMutation({ mutationFn: (args: Parameters<typeof createChatSession>) => createChatSession(...args) });
@@ -4311,9 +4332,9 @@ export function ChatPanel({
   // nudge anchors to the first scope that had it — seeding it in every scope
   // would read as the draft bleeding across chats.
   const composerPrefillOffer =
-    projectId === DEMO_PROJECT_ID &&
+    projectId === DEMO_PROJECT_ID && !embedded &&
       sessions.length > 0 &&
-      sessions.every((session) => DEMO_SEEDED_LEAF_IDS[session.id] === session.activeLeafId)
+      sessions.every((session) => session.sideParentSessionId || DEMO_SEEDED_LEAF_IDS[session.id] === session.activeLeafId)
       ? DEMO_RUN_EXPERIMENT_PROMPT
       : null;
   const prefillScopeRef = useRef<string | null>(null);
@@ -4394,7 +4415,7 @@ export function ChatPanel({
     composerRef.current?.focus();
   }, []);
   const transcriptSelection = useTranscriptSelection(threadInnerRef, addTranscriptSelection);
-  useAnnotationHighlights(annotations);
+  useAnnotationHighlights(annotations, embedded ? SIDE_CHAT_ANNOTATION_HIGHLIGHT_NAME : CHAT_ANNOTATION_HIGHLIGHT_NAME);
 
   useEffect(() => {
     setResumeOpen(false);
@@ -4673,6 +4694,32 @@ export function ChatPanel({
       });
   };
   const setReasoningLevel = (id: string) => selectModel({ reasoningLevel: id });
+  const setAutonomy = (autonomy: Autonomy) => {
+    if (!openSession) {
+      onPreferredAutonomyChange(autonomy);
+      return;
+    }
+    const sessionId = openSession.id;
+    const previous = openSession.autonomy;
+    const mutation = ++settingsMutationSeq.current;
+    const replace = (session: ChatSession) =>
+      setSessions((current) => current.map((row) => (row.id === session.id ? session : row)));
+    replace({ ...openSession, autonomy });
+    setSettingsError(null);
+    void queueSessionMutation(() => setChatSessionAutonomyMutation.mutateAsync([sessionId, autonomy]))
+      .then((session) => {
+        replace(session);
+        onPreferredAutonomyChange(session.autonomy);
+      })
+      .catch(() => {
+        setSessions((current) =>
+          current.map((row) =>
+            row.id === sessionId && row.autonomy === autonomy ? { ...row, autonomy: previous } : row,
+          ),
+        );
+        if (settingsMutationSeq.current === mutation) setSettingsError(m.chat_update_autonomy_failed());
+      });
+  };
   const sessionGoal = openSession?.goal?.trim() || "";
   const planActive = composerSelection?.harness === "claude-code"
     ? composerSelection.permissionMode === "plan"
@@ -4747,7 +4794,10 @@ export function ChatPanel({
         void togglePlanMode();
         return false;
       case "new":
-        startNewTask();
+        // In a side chat, a new chat is another side chat off the same parent.
+        if (embedded) {
+          if (openSession?.sideParentSessionId) onOpenSideChat?.(openSession.sideParentSessionId, "");
+        } else startNewTask();
         return false;
       case "resume":
         setResumeOpen(true);
@@ -4760,6 +4810,9 @@ export function ChatPanel({
         return false;
       case "goal":
         void setGoal(argument);
+        return false;
+      case "side":
+        openSide(argument);
         return false;
       case "copy": {
         const tail = messages.at(-1);
@@ -4782,6 +4835,12 @@ export function ChatPanel({
         return false;
       }
     }
+  }
+
+  function openSide(question: string) {
+    if (embedded) showAlert(m.side_chat_nested(), "info");
+    else if (!openSession || !onOpenSideChat) showAlert(m.side_chat_needs_a_chat(), "info");
+    else onOpenSideChat(openSession.id, question);
   }
 
   /** Adopt a chat from an agent's own CLI into this project, then open it. */
@@ -5213,7 +5272,7 @@ export function ChatPanel({
   const starterHarness = composerSelection?.harness ?? null;
   const starterModel = composerSelection?.model ?? null;
   const historyError = !historyQuery.data ? historyQuery.error : null;
-  const starterVisible = mainView === "chat" && !threadMounted && !historyLoading && !historyError;
+  const starterVisible = mainView === "chat" && !embedded && !threadMounted && !historyLoading && !historyError;
   const starterQuery = useQuery({
     ...getProjectStarterPromptsQuery(projectId, starterHarness ?? "claude-code", starterModel, getLocale()),
     enabled: starterVisible && starterHarness !== null,
@@ -5609,6 +5668,7 @@ export function ChatPanel({
       permissionMode: selection.permissionMode,
       planMode,
       reasoningLevel: selection.reasoningLevel,
+      autonomy: preferredAutonomy,
     }]);
     if (projectVisitRef.current === visit) {
       setSessions((cur) => [session, ...cur.filter((row) => row.id !== session.id)]);
@@ -5799,6 +5859,13 @@ export function ChatPanel({
     }
   }
 
+  const lastPointerInSide = useRef(false);
+  useEffect(() => {
+    const onDown = (e: PointerEvent) => { lastPointerInSide.current = inSideChat(e.target); };
+    document.addEventListener("pointerdown", onDown, true);
+    return () => document.removeEventListener("pointerdown", onDown, true);
+  }, []);
+
   // Escape stops the streaming turn and drops focus back into the composer,
   // mirroring the Claude Code desktop app. Harness-agnostic — `stop()` →
   // `interruptChat` interrupts whichever harness (Claude, Codex, OpenCode, …)
@@ -5816,13 +5883,16 @@ export function ChatPanel({
     if (!busy || mainView !== "chat") return;
     function onKey(e: KeyboardEvent) {
       if (e.key !== "Escape" || e.defaultPrevented) return;
+      // Clicking a transcript leaves focus on body; the click says which pane it was.
+      const side = e.target === document.body ? lastPointerInSide.current : inSideChat(e.target);
+      if (side !== embedded) return;
       e.preventDefault();
       stop();
       composerRef.current?.focus();
     }
     document.addEventListener("keydown", onKey);
     return () => document.removeEventListener("keydown", onKey);
-  }, [busy, activeId, mainView]);
+  }, [busy, activeId, mainView, embedded]);
 
   /** Drop every trace of a session — the local row, the open-thread selection,
    * and the cached transcript. Used on delete (ours or another dashboard's). */
@@ -5914,7 +5984,7 @@ export function ChatPanel({
     [activeId, projectId, queueSessionMutation, sessionsOptions],
   );
 
-  const visibleSessions = sessions.filter((s) => matchesFilter(sessionFilter, s.archived));
+  const visibleSessions = sessions.filter((s) => !s.sideParentSessionId && matchesFilter(sessionFilter, s.archived));
   const isApple = /Mac|iPhone|iPad/.test(navigator.platform);
   const newTaskShortcut = isApple ? "⌘ ⇧ ↵" : "Ctrl + Shift + ↵";
   const queueChord = isApple ? "⌘ Enter" : "Ctrl + Enter";
@@ -5933,13 +6003,15 @@ export function ChatPanel({
   );
 
   useEffect(() => {
+    if (embedded) return;
     const onKeyDown = (event: KeyboardEvent) => {
       if (
         event.repeat ||
         event.key !== "Enter" ||
         (!event.metaKey && !event.ctrlKey) ||
         event.altKey ||
-        !event.shiftKey
+        !event.shiftKey ||
+        inSideChat(event.target)
       )
         return;
       event.preventDefault();
@@ -5947,10 +6019,10 @@ export function ChatPanel({
     };
     document.addEventListener("keydown", onKeyDown);
     return () => document.removeEventListener("keydown", onKeyDown);
-  }, [startNewTask]);
+  }, [startNewTask, embedded]);
 
   const rail = (
-    <aside className="session-rail w-68 shrink-0 flex flex-col mt-5 me-3.5 mb-5 ms-0 bg-background min-h-0 [&_.rail-body]:flex-1 [&_.rail-body]:min-h-0 [&_.rail-body]:overflow-y-auto [&_.rail-body]:pt-0 [&_.rail-body]:pb-1 [&_.rail-body]:px-2 border border-border rounded-lg overflow-visible shadow-elevated">
+    <aside className="session-rail w-68 shrink-0 flex flex-col mt-5 mac-titlebar:mt-8 me-3.5 mb-5 ms-0 bg-background min-h-0 [&_.rail-body]:flex-1 [&_.rail-body]:min-h-0 [&_.rail-body]:overflow-y-auto [&_.rail-body]:pt-0 [&_.rail-body]:pb-1 [&_.rail-body]:px-2 border border-border rounded-lg overflow-visible shadow-elevated">
       {railHeader}
       <nav className="rail-nav flex flex-col gap-0.5 p-2 shrink-0">
         <button
@@ -6039,11 +6111,12 @@ export function ChatPanel({
   );
 
   const headerClass = `chat-header flex items-center gap-2 py-0 px-4 bg-background shrink-0 h-12 relative z-4 w-full max-w-readable my-0 mx-auto [&::after]:content-[''] [&::after]:absolute [&::after]:top-full [&::after]:start-0 [&::after]:end-0 [&::after]:h-6 [&::after]:bg-[linear-gradient(to_bottom,_var(--base),_transparent)] [&::after]:pointer-events-none`;
-  const railReopen = !railOpen && (
+  const railReopen = !railOpen && !embedded && (
     <IconButton
       title={m.chat_panel_show_sidebar()}
       aria-label={m.chat_panel_show_sidebar()}
       onClick={onShowRail}
+      className="mac-titlebar:ms-16"
     >
       <PanelLeft size={20} />
     </IconButton>
@@ -6064,10 +6137,10 @@ export function ChatPanel({
   return (
     <>
       {railOpen && rail}
-      <section className="chat-pane flex-1 min-w-0 flex flex-col bg-background min-h-0 mt-5">
+      <section data-side-chat={embedded || undefined} className={`chat-pane flex-1 min-w-0 flex flex-col bg-background min-h-0 ${embedded ? "" : "mt-5"}`}>
         {/* Header — session title on the left, end-pane view switchers on the
           right, fading into the chat below (sessions live in the rail). */}
-        <div className={railOpen ? "contents" : "grid shrink-0 grid-cols-[2rem_minmax(0,1fr)_2rem] items-center"}>
+        <div className={railOpen || embedded ? "contents" : "grid shrink-0 grid-cols-[2rem_minmax(0,1fr)_2rem] mac-titlebar:grid-cols-[6rem_minmax(0,1fr)_6rem] items-center"}>
           {railReopen}
           <div className={headerClass}>
           <PaperTitle variant="header"
@@ -6104,6 +6177,11 @@ export function ChatPanel({
           <div className="chat-loading flex-1 flex items-center justify-center gap-3 text-subtext text-xl p-5 [&_.spinner]:w-5.5 [&_.spinner]:h-5.5 [&_.spinner]:border-[3px]" aria-live="polite" aria-busy="true">
             <Spinner />
             <span>{m.chat_panel_loading_conversation()}</span>
+          </div>
+        ) : !threadMounted && activeSession?.sideParentSessionId ? (
+          <div className="chat-empty flex flex-1 flex-col items-center justify-center gap-3 p-8 text-center text-subtext">
+            <MessagesSquare size={22} />
+            <p className="m-0 text-balance">{m.side_chat_empty()}</p>
           </div>
         ) : !threadMounted ? (
           <div className="chat-empty flex-1 flex flex-col items-center justify-center text-text p-8 text-center [&_h2]:m-0 [&_h2]:text-5xl [&_h2]:font-medium [&_h2]:tracking-[-0.015em] [&_h2]:text-text">
@@ -6712,6 +6790,8 @@ export function ChatPanel({
                   reasoningChoices={activeHarness?.agentReady ? reasoning.choices : []}
                   defaultReasoningId={reasoning.defaultId}
                   onSelectReasoning={setReasoningLevel}
+                  autonomy={openSession?.autonomy ?? preferredAutonomy}
+                  onSelectAutonomy={setAutonomy}
                   lockHarness={!!openSession}
                   openRequest={modelPickerRequest}
                 />

@@ -98,13 +98,13 @@ dependencies = [
 
 [[package]]
 name = "async-trait"
-version = "0.1.89"
+version = "0.1.92"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "9035ad2d096bed7955a320ee7e2230574d28fd3c3a0f186cbea1ff3c7eed5dbb"
+checksum = "82f6aeea286b8eb4dd3431a1be1b59d290ace00f5bfd8e2a159bc2a05e2c1667"
 dependencies = [
  "proc-macro2",
  "quote",
- "syn 2.0.117",
+ "syn 3.0.6",
 ]
 
 [[package]]
@@ -2189,7 +2189,7 @@ checksum = "384b8ab6d37215f3c5301a95a4accb5d64aa607f1fcb26a11b5303878451b4fe"
 
 [[package]]
 name = "openresearch-cli"
-version = "0.2.13"
+version = "0.2.15"
 dependencies = [
  "aes",
  "anyhow",
@@ -2204,6 +2204,7 @@ dependencies = [
  "fd-lock",
  "futures",
  "gtk",
+ "httpdate",
  "hyper",
  "hyper-util",
  "libc",

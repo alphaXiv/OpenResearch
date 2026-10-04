@@ -27,7 +27,8 @@ body {
   background: var(--chat-annotation-highlight);
 }
 
-::highlight(chat-annotations) {
+::highlight(chat-annotations),
+::highlight(side-chat-annotations) {
   background: var(--chat-annotation-highlight);
 }
 

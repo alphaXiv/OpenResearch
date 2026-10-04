@@ -28,6 +28,7 @@ import {
   type Project,
 } from "../api";
 import { renderNote } from "./agentNote";
+import { claudeProviderLabel } from "./claudeProvider";
 import { HarnessLogo } from "./HarnessLogo";
 import { HarnessSetupDialog } from "./HarnessSetupDialog";
 
@@ -677,13 +678,15 @@ function agentBadge(h: Harness): { tone: StatusTone; label: string } {
   // A snapshot answer still being filled in — "checking" rather than a badge
   // the background pass may revoke.
   if (h.catalogPending) return { tone: "warning", label: m.onboarding_checking() };
-  if (h.agentReady) return { tone: "success", label: h.authMethod === "local" || !h.authenticated ? m.onboarding_ready() : m.onboarding_signed_in() };
+  if (h.authCheckFailed) return { tone: "warning", label: m.onboarding_unable_to_verify() };
+  if (h.agentReady) return { tone: "success", label: h.authMethod === "thirdParty" || claudeProviderLabel(h) ? m.settings_page_ready_to_use() : h.authMethod === "local" || !h.authenticated ? m.onboarding_ready() : m.onboarding_signed_in() };
   if (!h.installed) return { tone: "neutral", label: m.onboarding_not_detected() };
   if (h.installBroken) return { tone: "warning", label: m.onboarding_install_broken() };
   if (h.authMethod === "local") return { tone: "warning", label: m.onboarding_server_unavailable() };
   // A config fault reports `unsupported`, but no update repairs it; the note
   // carries the actual repair, so the badge must not promise an update.
   if (h.needsConfigRepair || h.authState === "unknown") return { tone: "warning", label: m.onboarding_unable_to_verify() };
+  if (h.id === "claude-code" && h.authState === "needsLogin" && !h.loginEligible) return { tone: "warning", label: m.onboarding_unable_to_verify() };
   if (h.authState === "unsupported") return { tone: "warning", label: m.onboarding_update_required() };
   if (h.installed) return { tone: "warning", label: m.onboarding_not_signed_in() };
   return { tone: "neutral", label: m.onboarding_not_detected() };
@@ -721,11 +724,12 @@ function AgentCard({
   // (an environment credential overriding the saved login, a database the CLI
   // will not open). Offering one sends the user through a command that
   // provably cannot help; the agentNote below carries the actual repair.
-  const canSetup = !remote && !h.needsConfigRepair && !h.catalogPending && (!h.installed || h.installBroken || h.authState === "unsupported" || (h.authMethod !== "local" && h.authMethod !== "apiKey" && (h.authState === "needsLogin" || h.authState === "unknown")));
+  const canLogin = h.id === "claude-code" ? Boolean(h.loginEligible) : h.authMethod !== "local" && h.authMethod !== "apiKey" && (h.authState === "needsLogin" || h.authState === "unknown");
+  const canSetup = !remote && !h.needsConfigRepair && !h.catalogPending && (!h.installed || h.installBroken || h.authState === "unsupported" || canLogin);
   const showSetupAction = !h.agentReady && canSetup;
   const showStatusDot = canSetup && (!h.installed || (!h.agentReady && h.authState === "needsLogin"));
   const badge = agentBadge(h);
-  const visibleBadge: { tone: StatusTone; label: string } = selected
+  const visibleBadge: { tone: StatusTone; label: string } = selected && !h.authCheckFailed
     ? { tone: "success", label: m.onboarding_selected() }
     : badge;
   const version = h.version?.replace(/\s*\(.*\)$/, "");
@@ -785,12 +789,13 @@ function AgentCard({
       {h.id !== "opencode" && (
         <div className="onb-card-detail flex items-center gap-1.5 text-sm">
           {h.accountLoading ? <><Spinner /> {m.onboarding_loading_account()}</> : <>
-            {h.account ?? (h.authMethod === "apiKey" ? m.onboarding_api_key() : null)}
+            {claudeProviderLabel(h) ?? h.account ?? (h.authMethod === "apiKey" ? m.onboarding_api_key() : null)}
             {h.plan ? ` · ${h.plan}` : ""}
           </>}
         </div>
       )}
       {meta && <div className={ONB_CARD_META_CLASS_NAME}>{meta}</div>}
+      {h.authCheckFailed && h.agentNote && <div className={ONB_CARD_META_CLASS_NAME}>{renderNote(h.agentNote)}</div>}
     </button>
   );
 }

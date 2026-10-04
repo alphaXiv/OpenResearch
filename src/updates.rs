@@ -917,6 +917,25 @@ pub fn status() -> UpdateStatus {
     }
 }
 
+/// Whether the binary [`relaunch`] would exec reports a newer version than this process.
+pub async fn newer_exe_on_disk() -> bool {
+    let Ok(exe) = crate::paths::spawnable_exe() else {
+        return false;
+    };
+    let Ok(out) = tokio::process::Command::new(exe)
+        .arg("--version")
+        .output()
+        .await
+    else {
+        return false;
+    };
+    String::from_utf8_lossy(&out.stdout)
+        .trim()
+        .strip_prefix("orx ")
+        .and_then(|v| Version::parse(v).ok())
+        .is_some_and(|on_disk| is_outdated(&current_version(), &on_disk))
+}
+
 fn instance_id() -> &'static str {
     static ID: OnceLock<String> = OnceLock::new();
     ID.get_or_init(|| uuid::Uuid::new_v4().to_string())
@@ -1278,6 +1297,25 @@ fn warning_for(
     ))
 }
 
+/// For an agent whose `orx up` predates restarting itself into updates: it keeps
+/// serving the old code, which the version this CLI reports no longer describes.
+fn stale_up_warning() -> Option<String> {
+    let up_version = std::env::var(crate::local::chat::UP_VERSION_ENV)
+        .ok()
+        .and_then(|version| Version::parse(&version).ok());
+    (matches!(crate::local::chat::trusted_up_port(), Ok(Some(_)))
+        && up_version.is_none_or(|version| is_outdated(&version, &current_version())))
+    .then(|| {
+        format!(
+            "{WARNING_LABEL} this session's `orx up` is older than orx {} and still runs its \
+             old code, so runs it launches and sandboxes it builds miss this version's fixes. \
+             Ask the user to restart `orx up` (or click Restart in the dashboard's update \
+             banner) once no chats are running.",
+            current_version()
+        )
+    })
+}
+
 /// The outdated-version warning, modeled on the gh CLI / update-notifier
 /// pattern: the message shown this run comes from the *cached* previous check,
 /// so it is instant and never adds latency to the command. A background refresh
@@ -1306,6 +1344,13 @@ impl UpdateWarning {
     /// after the command — is what guarantees the warning shows even when the
     /// command exits the process itself.
     pub fn start() -> UpdateWarning {
+        if let Some(message) = stale_up_warning() {
+            let _ = write!(
+                std::io::stderr(),
+                "{}",
+                render(&message, stderr_supports_ansi())
+            );
+        }
         if opted_out() {
             return UpdateWarning { refresh: None };
         }

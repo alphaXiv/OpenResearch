@@ -68,17 +68,65 @@ const AUTH_STATUS_TIMEOUT: Duration = Duration::from_secs(10);
 /// Not `claude update` — that runs the very binary that is failing.
 const CLAUDE_REINSTALL: &str = "Reinstall it from claude.com/download";
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-struct AuthProbe {
-    state: HarnessAuthState,
-    method: Option<&'static str>,
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct AuthProbe {
+    pub state: HarnessAuthState,
+    pub method: Option<&'static str>,
+    pub provider: Option<String>,
+    pub sequence: u64,
+    pub failed_check: bool,
+    reported_method_present: bool,
     /// The CLI answered with a saved login that an environment credential
     /// overrides — proven, not inferred from an `Unknown` a timeout also
     /// produces. No login or update command can repair it.
-    credential_conflict: bool,
+    pub credential_conflict: bool,
 }
 
-fn parse_auth_status(success: bool, stdout: &[u8]) -> AuthProbe {
+fn next_auth_sequence() -> u64 {
+    static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+    NEXT.fetch_add(1, std::sync::atomic::Ordering::SeqCst)
+}
+
+pub(crate) fn auth_barrier_sequence() -> u64 {
+    next_auth_sequence()
+}
+
+impl AuthProbe {
+    fn unknown(sequence: u64) -> Self {
+        Self {
+            state: HarnessAuthState::Unknown,
+            method: None,
+            provider: None,
+            sequence,
+            failed_check: true,
+            reported_method_present: false,
+            credential_conflict: false,
+        }
+    }
+}
+
+pub(crate) fn login_eligible(probe: &AuthProbe) -> bool {
+    login_eligible_state(
+        probe.state,
+        probe.method,
+        probe.provider.as_deref(),
+        probe.credential_conflict,
+    )
+}
+
+pub(crate) fn login_eligible_state(
+    state: HarnessAuthState,
+    method: Option<&str>,
+    provider: Option<&str>,
+    conflict: bool,
+) -> bool {
+    state == HarnessAuthState::NeedsLogin
+        && !conflict
+        && method != Some("thirdParty")
+        && (provider == Some("firstParty") || (provider.is_none() && method == Some("oauth")))
+}
+
+pub(crate) fn parse_auth_status(exit_code: Option<i32>, stdout: &[u8], sequence: u64) -> AuthProbe {
     let value = serde_json::from_slice::<Value>(stdout).ok();
     let logged_in = value
         .as_ref()
@@ -87,30 +135,41 @@ fn parse_auth_status(success: bool, stdout: &[u8]) -> AuthProbe {
     let reported_method = value
         .as_ref()
         .and_then(|value| value.get("authMethod"))
-        .and_then(Value::as_str)
-        .map(|method| method.to_ascii_lowercase());
-    let method = reported_method.as_deref().and_then(|method| {
-        if method.contains("api") || method.contains("token") {
-            Some("apiKey")
-        } else if method.contains("oauth") || method.contains("claude") {
-            Some("oauth")
-        } else {
-            None
-        }
+        .and_then(Value::as_str);
+    let method = reported_method.and_then(|method| match method.to_ascii_lowercase().as_str() {
+        "oauth" | "claude.ai" => Some("oauth"),
+        "api-key" | "api_key" | "apikey" => Some("apiKey"),
+        "third_party" | "third-party" => Some("thirdParty"),
+        _ => None,
     });
-    let state = match (success, logged_in) {
-        (true, Some(true)) => HarnessAuthState::Ready,
-        (_, Some(false)) => HarnessAuthState::NeedsLogin,
+    let state = match (exit_code, logged_in) {
+        (Some(0), Some(true)) => HarnessAuthState::Ready,
+        (Some(0 | 1), Some(false)) => HarnessAuthState::NeedsLogin,
         _ => HarnessAuthState::Unknown,
     };
     AuthProbe {
         state,
         method,
+        provider: value
+            .as_ref()
+            .and_then(|value| value.get("apiProvider"))
+            .and_then(Value::as_str)
+            .filter(|provider| {
+                !provider.is_empty()
+                    && provider.len() <= 64
+                    && provider
+                        .bytes()
+                        .all(|byte| byte.is_ascii_alphanumeric() || byte == b'_' || byte == b'-')
+            })
+            .map(str::to_string),
+        sequence,
+        failed_check: state == HarnessAuthState::Unknown,
+        reported_method_present: reported_method.is_some(),
         credential_conflict: false,
     }
 }
 
-async fn probe_auth(bin: &Path) -> AuthProbe {
+async fn probe_auth(bin: &Path, sequence: u64) -> AuthProbe {
     let mut cmd = Command::new(bin);
     cmd.args(["auth", "status", "--json"])
         .stdin(Stdio::null())
@@ -118,14 +177,10 @@ async fn probe_auth(bin: &Path) -> AuthProbe {
         .stderr(Stdio::null());
     prepare_env(&mut cmd);
     match super::detect::detect_spawn_output_timed(cmd, AUTH_STATUS_TIMEOUT).await {
-        Some(Ok(out)) => parse_auth_status(out.status.success(), &out.stdout),
+        Some(Ok(out)) => parse_auth_status(out.status.code(), &out.stdout, sequence),
         // A timeout or a spawn failure: no evidence of anything, least of all a
         // credential conflict.
-        _ => AuthProbe {
-            state: HarnessAuthState::Unknown,
-            method: None,
-            credential_conflict: false,
-        },
+        _ => AuthProbe::unknown(sequence),
     }
 }
 
@@ -134,161 +189,80 @@ async fn probe_auth(bin: &Path) -> AuthProbe {
 /// If status still reports OAuth in that environment, it has only verified
 /// leftover OAuth metadata, not the credential the worker will actually send.
 fn apply_env_credential_override(mut probe: AuthProbe) -> AuthProbe {
-    if has_api_credential() && probe.method != Some("apiKey") {
-        // Only a login the CLI reports as working proves the credential is
-        // overriding it. A signed-out or unanswered probe proves nothing and
-        // must not cost the user their sign-in button.
-        probe.credential_conflict = probe.state == HarnessAuthState::Ready;
+    if has_api_credential()
+        && probe.state == HarnessAuthState::Ready
+        && probe.method == Some("oauth")
+        && probe
+            .provider
+            .as_deref()
+            .is_none_or(|provider| provider == "firstParty")
+    {
+        probe.credential_conflict = true;
         probe.state = HarnessAuthState::Unknown;
-        probe.method = None;
-    } else if probe.state == HarnessAuthState::Ready && probe.method.is_none() {
-        probe.method = Some("oauth");
+        probe.failed_check = false;
     }
     probe
 }
 
-async fn effective_auth_probe(bin: &Path) -> AuthProbe {
-    apply_env_credential_override(probe_auth(bin).await)
+async fn effective_auth_probe(bin: &Path, sequence: u64) -> AuthProbe {
+    apply_env_credential_override(probe_auth(bin, sequence).await)
 }
 
-/// What the snapshot pass's auth read concludes from evidence alone — the
-/// `auth status` child only runs where a login could live in a credential
-/// store the filesystem cannot see (macOS Keychain, Windows).
-#[derive(Debug, PartialEq, Eq)]
-enum SnapshotAuth {
-    /// An environment credential overrides any saved login — the same
-    /// precedence `effective_auth_probe` encodes. Presence is knowable from
-    /// the environment; validity is not, so this reports `Unknown` and leaves
-    /// verification to the fill's live probe.
-    UnverifiedApiKey,
-    /// `.credentials.json` holds a `claudeAiOauth` login. It counts even past
-    /// its `expiresAt`: that is the access token's expiry, and the CLI
-    /// refreshes it from the same file.
-    SavedOauth,
-    /// The file is the whole credential store and holds no login.
-    SignedOut,
-    /// No file evidence either way — a login could be in the OS store, so the
-    /// CLI itself must answer.
-    ProbeCli,
-}
-
-fn snapshot_auth_choice(
-    has_api_credential: bool,
-    has_oauth_file: bool,
-    file_is_store: bool,
-) -> SnapshotAuth {
-    if has_api_credential {
-        SnapshotAuth::UnverifiedApiKey
-    } else if has_oauth_file {
-        SnapshotAuth::SavedOauth
-    } else if file_is_store {
-        SnapshotAuth::SignedOut
-    } else {
-        SnapshotAuth::ProbeCli
-    }
-}
-
-async fn snapshot_auth_probe(bin: &Path) -> AuthProbe {
-    let choice = snapshot_auth_choice(
-        has_api_credential(),
-        has_oauth_credentials(),
-        credential_store_is_file_only(),
-    );
-    match choice {
-        SnapshotAuth::UnverifiedApiKey => AuthProbe {
-            state: HarnessAuthState::Unknown,
-            method: Some("apiKey"),
-            credential_conflict: false,
-        },
-        SnapshotAuth::SavedOauth => AuthProbe {
-            state: HarnessAuthState::Ready,
-            method: Some("oauth"),
-            credential_conflict: false,
-        },
-        SnapshotAuth::SignedOut => AuthProbe {
-            state: HarnessAuthState::NeedsLogin,
-            method: None,
-            credential_conflict: false,
-        },
-        SnapshotAuth::ProbeCli => effective_auth_probe(bin).await,
-    }
-}
-
-/// `.credentials.json` holds a saved OAuth login. Absence is not proof of a
-/// sign-out on platforms with an OS credential store — only Linux treats the
-/// file itself as the store.
 fn has_oauth_credentials() -> bool {
     let path = native_store::claude_home(NativeStore::Legacy).join(".credentials.json");
     read_json(path).is_some_and(|creds| creds.get("claudeAiOauth").is_some())
 }
 
-/// On Windows a login can live in Credential Manager (`Claude
-/// Code-credentials*` targets, DPAPI-encrypted — rolled out per-account via
-/// `tengu_windows_credman`), which is invisible to the filesystem but not to
-/// `CredEnumerateW`. A false negative here would hide a real login, so the
-/// filter errs wide: anything Claude-branded counts as evidence and sends the
-/// caller down the live-probe path.
-#[cfg(windows)]
-fn credman_holds_claude_login() -> bool {
-    use windows_sys::Win32::Security::Credentials::{CredEnumerateW, CredFree, CREDENTIALW};
-    let filter: Vec<u16> = "Claude*".encode_utf16().chain(Some(0)).collect();
-    unsafe {
-        let mut count = 0u32;
-        let mut creds: *mut *mut CREDENTIALW = std::ptr::null_mut();
-        if CredEnumerateW(filter.as_ptr(), 0, &mut count, &mut creds) == 0 {
-            // ERROR_NOT_FOUND means the filter matched nothing — a real
-            // signed-out signal. Any other failure is inconclusive, so err
-            // toward "a login may exist" and let the live probe decide.
-            use windows_sys::Win32::Foundation::{GetLastError, ERROR_NOT_FOUND};
-            return GetLastError() != ERROR_NOT_FOUND;
-        }
-        CredFree(creds.cast());
-        count > 0
-    }
-}
-
-/// True where the filesystem-visible store is the *whole* credential store —
-/// so a missing `.credentials.json` proves signed-out without a child
-/// process. Linux qualifies outright; Windows qualifies only when Credential
-/// Manager holds nothing Claude-branded; macOS's Keychain stays opaque.
-fn credential_store_is_file_only() -> bool {
-    #[cfg(target_os = "linux")]
-    return true;
-    #[cfg(windows)]
-    return !credman_holds_claude_login();
-    #[allow(unreachable_code)]
-    false
-}
-
 fn gate_oauth_version(mut probe: AuthProbe, version: Option<&str>) -> AuthProbe {
-    if probe.state == HarnessAuthState::Ready && probe.method == Some("oauth") {
+    let direct_route = probe
+        .provider
+        .as_deref()
+        .is_none_or(|provider| provider == "firstParty");
+    if probe.state == HarnessAuthState::Ready
+        && direct_route
+        && (probe.method == Some("oauth")
+            || (!probe.reported_method_present && probe.method.is_none()))
+    {
         probe.state = match version.and_then(parse_version) {
             Some(version) if version >= MIN_CLAUDE_VERSION => HarnessAuthState::Ready,
             Some(_) => HarnessAuthState::Unsupported,
             None => HarnessAuthState::Unknown,
         };
+        probe.failed_check = probe.state == HarnessAuthState::Unknown;
     }
     probe
 }
 
 /// Polled on a timer by the auth monitor, so it must not re-probe every
 /// candidate: `find_claude` already returns the executable detection selected.
-pub(crate) async fn current_auth_state() -> HarnessAuthState {
+pub(crate) async fn current_auth_state() -> AuthProbe {
+    let sequence = next_auth_sequence();
     match find_claude() {
         Some(bin) => {
             let version = bin_version(&bin).await;
-            gate_oauth_version(effective_auth_probe(&bin).await, version.as_deref()).state
+            gate_oauth_version(
+                effective_auth_probe(&bin, sequence).await,
+                version.as_deref(),
+            )
         }
-        None => HarnessAuthState::Unknown,
+        None => AuthProbe::unknown(sequence),
     }
 }
 
-pub(crate) fn auth_recovery_note() -> &'static str {
-    if has_api_credential() {
+pub(crate) fn auth_recovery_note(method: Option<&str>, provider: Option<&str>) -> &'static str {
+    if external_provider(method, provider) {
+        "Check the configured Claude Code provider and run `claude auth status`, then re-check this harness."
+    } else if has_api_credential() {
         "Claude Code rejected the configured `ANTHROPIC_API_KEY` or `ANTHROPIC_AUTH_TOKEN`. Replace or unset it, then re-check this harness."
-    } else {
+    } else if method == Some("oauth") || provider == Some("firstParty") {
         "Sign in with `claude auth login`, then re-check this harness."
+    } else {
+        "Check Claude Code authentication with `claude auth status`, then re-check this harness."
     }
+}
+
+pub(crate) fn external_provider(method: Option<&str>, provider: Option<&str>) -> bool {
+    method == Some("thirdParty") || provider.is_some_and(|provider| provider != "firstParty")
 }
 
 /// One child answering both detection questions: `--effort ultracode`
@@ -309,7 +283,7 @@ pub(crate) fn auth_recovery_note() -> &'static str {
 ///
 /// Any failure reports unsupported: a missing choice is a smaller harm than a
 /// choice that silently runs at the default effort.
-async fn probe_auth_and_ultracode(bin: &Path) -> (AuthProbe, bool) {
+async fn probe_auth_and_ultracode(bin: &Path, sequence: u64) -> (AuthProbe, bool) {
     let mut cmd = Command::new(bin);
     cmd.args(["--effort", CLAUDE_ULTRACODE, "auth", "status", "--json"])
         .stdin(Stdio::null())
@@ -318,16 +292,7 @@ async fn probe_auth_and_ultracode(bin: &Path) -> (AuthProbe, bool) {
     prepare_env(&mut cmd);
     let out = match super::detect::detect_spawn_output_timed(cmd, AUTH_STATUS_TIMEOUT).await {
         Some(Ok(out)) => out,
-        _ => {
-            return (
-                AuthProbe {
-                    state: HarnessAuthState::Unknown,
-                    method: None,
-                    credential_conflict: false,
-                },
-                false,
-            )
-        }
+        _ => return (AuthProbe::unknown(sequence), false),
     };
     let warned = format!(
         "{}{}",
@@ -336,10 +301,10 @@ async fn probe_auth_and_ultracode(bin: &Path) -> (AuthProbe, bool) {
     )
     .contains("Unknown --effort value");
     let ultracode = out.status.success() && !warned;
-    let mut probe = parse_auth_status(out.status.success(), &out.stdout);
+    let mut probe = parse_auth_status(out.status.code(), &out.stdout, sequence);
     if warned && probe.state == HarnessAuthState::Unknown {
         // The parser rejected `--effort` and never reached `auth status`.
-        probe = probe_auth(bin).await;
+        probe = probe_auth(bin, sequence).await;
     }
     (apply_env_credential_override(probe), ultracode)
 }
@@ -411,6 +376,13 @@ async fn claude_models_response(bin: PathBuf) -> Option<Value> {
         .flatten()
 }
 
+pub(crate) async fn external_model_catalog(bin: PathBuf, ultracode: bool) -> Vec<ModelInfo> {
+    super::detect::timed_probe("claude-code", "models", claude_models_response(bin))
+        .await
+        .map(|response| parse_claude_model_list(&response, ultracode))
+        .unwrap_or_default()
+}
+
 /// The Full pass's probes on one binary. Auth and the ultracode parser check
 /// share a single child (`probe_auth_and_ultracode`). The `list_models`
 /// catalog child is only useful to a signed-in CLI, so it launches
@@ -419,29 +391,7 @@ async fn claude_models_response(bin: PathBuf) -> Option<Value> {
 /// other harnesses' probes need. When the live auth verdict surprises the
 /// evidence (e.g. a login in an OS credential store), the catalog child is
 /// launched late instead.
-async fn claude_spec_probes(bin: PathBuf) -> (AuthProbe, bool, Option<Value>) {
-    // No credential in any store a login could occupy means `auth status`
-    // could only answer `loggedIn: false` — skip the child entirely. This is
-    // the common first-install state, and the probe's several seconds of CPU
-    // (a ~200MB binary's startup) are better spent on harnesses that still
-    // have open questions. The ultracode verdict is likewise only consumed
-    // once the harness is ready, so it waits for the next fill.
-    if snapshot_auth_choice(
-        has_api_credential(),
-        has_oauth_credentials(),
-        credential_store_is_file_only(),
-    ) == SnapshotAuth::SignedOut
-    {
-        return (
-            AuthProbe {
-                state: HarnessAuthState::NeedsLogin,
-                method: None,
-                credential_conflict: false,
-            },
-            false,
-            None,
-        );
-    }
+async fn claude_spec_probes(bin: PathBuf, sequence: u64) -> (AuthProbe, bool, Option<Value>) {
     let login_evidence = has_oauth_credentials() || has_api_credential();
     let models = login_evidence.then(|| {
         super::detect::spawn_timed_probe(
@@ -453,22 +403,26 @@ async fn claude_spec_probes(bin: PathBuf) -> (AuthProbe, bool, Option<Value>) {
     let (auth, ultracode) = super::detect::timed_probe(
         "claude-code",
         "auth+ultracode",
-        probe_auth_and_ultracode(&bin),
+        probe_auth_and_ultracode(&bin, sequence),
     )
     .await;
-    let models = match (models, auth.state) {
-        (Some(task), HarnessAuthState::Ready) => task.await.ok().flatten(),
-        (Some(task), _) => {
+    // External provider model enumeration can stall; the CLI default remains usable.
+    let external = external_provider(auth.method, auth.provider.as_deref());
+    let models = match models {
+        Some(task) if auth.state == HarnessAuthState::Ready && !external => {
+            task.await.ok().flatten()
+        }
+        Some(task) => {
             task.abort();
             // Await teardown so the aborted probe's timing row lands in the
             // fill's sink before the pass can drain it.
             let _ = task.await;
             None
         }
-        (None, HarnessAuthState::Ready) => {
+        None if auth.state == HarnessAuthState::Ready && !external => {
             super::detect::timed_probe("claude-code", "models", claude_models_response(bin)).await
         }
-        (None, _) => None,
+        None => None,
     };
     (auth, ultracode, models)
 }
@@ -555,10 +509,9 @@ fn has_api_credential() -> bool {
 /// the throwaway request unrecorded.
 ///
 /// `--model haiku`/`sonnet` are CLI model aliases of the kind we already pass
-/// through from the catalog; a CLI too old to know them exits non-zero, which
-/// lands on `None`. Every other failure (spawn, timeout, garbage output)
-/// degrades the same silent way.
-async fn claude_one_shot(bin: &Path, request: OneShot<'_>) -> Option<String> {
+/// through from the catalog; a CLI too old to know them exits non-zero, and
+/// the error carries what it printed.
+async fn claude_one_shot(bin: &Path, request: OneShot<'_>) -> Result<String> {
     let model = match request.quality {
         OneShotQuality::Cheap => "haiku",
         OneShotQuality::Standard => "sonnet",
@@ -589,7 +542,7 @@ async fn claude_one_shot(bin: &Path, request: OneShot<'_>) -> Option<String> {
     ])
     .stdin(Stdio::null())
     .stdout(Stdio::piped())
-    .stderr(Stdio::null())
+    .stderr(Stdio::piped())
     .kill_on_drop(true)
     // Hermetic: run outside any repo so the child doesn't ingest the server
     // cwd's CLAUDE.md / settings into a request that carries its own context.
@@ -597,7 +550,7 @@ async fn claude_one_shot(bin: &Path, request: OneShot<'_>) -> Option<String> {
     prepare_env(&mut cmd);
     cmd.env(
         "CLAUDE_CONFIG_DIR",
-        native_store::prepare_claude(NativeStore::Isolated).ok()?,
+        native_store::prepare_claude(NativeStore::Isolated)?,
     );
     cmd.env(
         "CLAUDE_SECURESTORAGE_CONFIG_DIR",
@@ -609,12 +562,15 @@ async fn claude_one_shot(bin: &Path, request: OneShot<'_>) -> Option<String> {
     let fut = cmd.output();
     let out = tokio::time::timeout(request.timeout, fut)
         .await
-        .ok()?
-        .ok()?;
+        .map_err(|_| anyhow!("timed out after {}s", request.timeout.as_secs()))??;
     if !out.status.success() {
-        return None;
+        // `-p` prints request failures (bad model, signed out) on stdout; stderr is diagnostics.
+        return Err(super::one_shot_exit_error(
+            out.status,
+            &[&out.stdout, &out.stderr],
+        ));
     }
-    Some(String::from_utf8_lossy(&out.stdout).into_owned())
+    Ok(String::from_utf8_lossy(&out.stdout).into_owned())
 }
 
 /// `claude` on PATH, then the common install drop locations, in preference order.
@@ -668,11 +624,12 @@ impl ClaudeCode {
             )
             .await;
         } else {
+            let sequence = next_auth_sequence();
             let (selected, probes) = super::detect::select_and_speculate(
                 "claude-code",
                 claude_candidates(),
                 Some(MIN_CLAUDE_VERSION),
-                claude_spec_probes,
+                |bin| claude_spec_probes(bin, sequence),
             )
             .await;
             if let Some((bin, probe)) = selected {
@@ -683,30 +640,25 @@ impl ClaudeCode {
         let (spec_auth, ultracode, spec_models) = spec_probes
             .map(|(auth, ultracode, models)| (Some(auth), ultracode, models))
             .unwrap_or((None, false, None));
+        info.claude_ultracode = ultracode;
         // The CLI owns OAuth and Keychain refresh. Its live status decides
         // whether this harness can run; a broken binary would only fail it too.
         if info.installed && !info.install_broken {
             let bin = info.bin_path.as_deref().map(Path::new);
             let probe = match (bin, snapshot) {
                 (Some(_), false) => gate_oauth_version(
-                    spec_auth.unwrap_or(AuthProbe {
-                        state: HarnessAuthState::Unknown,
-                        method: None,
-                        credential_conflict: false,
-                    }),
+                    spec_auth.unwrap_or_else(|| AuthProbe::unknown(next_auth_sequence())),
                     info.version.as_deref(),
                 ),
-                // The snapshot has no probed version, so the OAuth minimum-
-                // version gate cannot run here — the Full pass re-checks it.
-                (Some(bin), true) => snapshot_auth_probe(bin).await,
-                (None, _) => AuthProbe {
-                    state: HarnessAuthState::Unknown,
-                    method: None,
-                    credential_conflict: false,
-                },
+                (Some(_), true) => AuthProbe::unknown(0),
+                (None, _) => AuthProbe::unknown(0),
             };
             info.auth_state = probe.state;
             info.auth_method = probe.method;
+            info.auth_provider = probe.provider.clone();
+            info.auth_observation = (!snapshot).then_some(probe.clone());
+            info.login_eligible = login_eligible(&probe);
+            info.auth_check_failed = probe.failed_check;
             info.needs_config_repair = probe.credential_conflict;
             if info.auth_state == HarnessAuthState::Ready {
                 info.authenticated = true;
@@ -738,7 +690,11 @@ impl ClaudeCode {
                 (!parsed.is_empty()).then_some(parsed)
             });
             if models.is_none() && !snapshot {
-                info.agent_note = Some("Could not load Claude Code models. Re-check this harness or update Claude Code; the CLI default model is still available.".to_string());
+                info.agent_note = Some(if external_provider(info.auth_method, info.auth_provider.as_deref()) {
+                    "Loading Claude Code models; the CLI default model is available now."
+                } else {
+                    "Could not load Claude Code models. Re-check this harness or update Claude Code; the CLI default model is still available."
+                }.to_string());
             }
             info = info.with_models(models.unwrap_or_default());
         } else if info.install_broken {
@@ -757,7 +713,7 @@ impl ClaudeCode {
                     "Claude Code could not verify the effective `ANTHROPIC_API_KEY` or `ANTHROPIC_AUTH_TOKEN`. Fix or unset it, then re-check this harness.".to_string(),
                 HarnessAuthState::Unknown =>
                     "Open a terminal and run `claude auth status`, then re-check this harness.".to_string(),
-                _ => auth_recovery_note().to_string(),
+                _ => auth_recovery_note(info.auth_method, info.auth_provider.as_deref()).to_string(),
             });
         } else {
             info.agent_note = Some(
@@ -829,8 +785,9 @@ impl Harness for ClaudeCode {
             .map_err(|error| TurnFailure::adapter(error, ctx.delivery_state()))
     }
 
-    async fn one_shot(&self, request: OneShot<'_>) -> Option<String> {
-        claude_one_shot(&find_claude()?, request).await
+    async fn one_shot(&self, request: OneShot<'_>) -> Result<String> {
+        let bin = find_claude().ok_or_else(|| anyhow!("{} is not installed", self.name()))?;
+        claude_one_shot(&bin, request).await
     }
 
     fn one_shot_honours_model(&self) -> bool {
@@ -1095,7 +1052,7 @@ pub(crate) fn uses_permission_bridge(mode: Option<PermissionMode>) -> bool {
     )
 }
 
-/// Path (relative to the worktree) of the plan-mode settings file we write and
+/// Path (relative to the worktree) of the native-hook settings file we write and
 /// pass via `--settings`. Lives under the same agent dir as the playbook, which
 /// is already git-excluded.
 const PLAN_SETTINGS_REL: &str = ".openresearch/agent/claude-plan-settings.json";
@@ -1104,19 +1061,10 @@ const PLAN_SETTINGS_REL: &str = ".openresearch/agent/claude-plan-settings.json";
 /// `orx mcp-gate` permission bridge. Same git-excluded agent dir.
 const MCP_CONFIG_REL: &str = ".openresearch/agent/claude-mcp.json";
 
-/// Write the plan-mode `--settings` file into `repo` and return its path. The
-/// file registers `PreToolUse` hooks running `orx plan-gate` (this same
-/// binary): on `Bash` it allows read-only inspection through plan mode's gate,
-/// and on `ExitPlanMode` it forces an `ask` — headless plan mode otherwise
-/// SELF-approves the call ("User has approved exiting plan mode", nobody
-/// asked; verified on claude 2.1.197) and starts editing. The `ask` routes
-/// plan approval to the permission bridge card. See `plan_gate`.
-///
-/// The hook command is this executable's absolute path, so it resolves without
-/// depending on `orx` being on Claude's `PATH`.
-pub(crate) fn write_plan_settings(repo: &std::path::Path) -> Result<PathBuf> {
+// Attribution updates input without granting permission; plan decisions stay separate.
+pub(crate) fn write_settings(repo: &std::path::Path, plan: bool) -> Result<PathBuf> {
     let orx = crate::paths::spawnable_exe()
-        .map_err(|e| anyhow!("cannot resolve orx binary path for plan-mode hook: {e}"))?;
+        .map_err(|e| anyhow!("cannot resolve orx binary path for native hooks: {e}"))?;
     let hook = serde_json::json!([{
         "type": "command",
         "command": format!(
@@ -1124,14 +1072,14 @@ pub(crate) fn write_plan_settings(repo: &std::path::Path) -> Result<PathBuf> {
             crate::jobs::ssh::sh_quote(&orx.to_string_lossy())
         ),
     }]);
-    let settings = serde_json::json!({
-        "hooks": {
-            "PreToolUse": [
-                { "matcher": "Bash", "hooks": hook },
-                { "matcher": "ExitPlanMode", "hooks": hook },
-            ],
-        }
-    });
+    let mut hooks = vec![
+        serde_json::json!({"matcher":"Bash","hooks":[{"type":"command","command":format!("{} invocation-gate", crate::jobs::ssh::sh_quote(&orx.to_string_lossy()))}]}),
+    ];
+    if plan {
+        hooks.push(serde_json::json!({"matcher":"Bash","hooks":hook}));
+        hooks.push(serde_json::json!({"matcher":"ExitPlanMode","hooks":hook}));
+    }
+    let settings = serde_json::json!({"hooks":{"PreToolUse":hooks}});
     let path = repo.join(PLAN_SETTINGS_REL);
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)
@@ -1554,6 +1502,10 @@ fn apply_event(ctx: &mut TurnCtx, state: &mut TurnState, event: &Value) -> bool 
             let inner = event.get("event").unwrap_or(&Value::Null);
             match inner.get("type").and_then(Value::as_str) {
                 Some("message_start") => {
+                    // An interrupt kills the child before `assistant`; the model is known here.
+                    if let Some(message) = inner.get("message") {
+                        record_message(ctx, message);
+                    }
                     // Sub-agent streams have their own message ids; namespace the
                     // stream mid per parent so a concurrent sub-agent's deltas
                     // don't collide with the main stream's.
@@ -1692,6 +1644,12 @@ fn apply_event(ctx: &mut TurnCtx, state: &mut TurnState, event: &Value) -> bool 
             _ => {}
         },
         Some("assistant") => {
+            if let Some(message) = event.get("message") {
+                ctx.record_native_invocations(message);
+            }
+            if let Some(message) = event.get("message") {
+                record_message(ctx, message);
+            }
             if event
                 .get("error")
                 .or_else(|| event.pointer("/message/error"))
@@ -1911,6 +1869,14 @@ fn apply_event(ctx: &mut TurnCtx, state: &mut TurnState, event: &Value) -> bool 
             }
         }
         Some("result") => {
+            if let Some(scope) = event.get("session_id").and_then(Value::as_str) {
+                let samples = claude_result_usage_samples(event);
+                ctx.record_native_aggregate(
+                    &format!("claude-{}:", ctx.attempt_count_for_usage()),
+                    scope,
+                    &samples,
+                );
+            }
             state.saw_result = true;
             // Resume mints a fresh session id per turn — track the latest.
             if let Some(sid) = event.get("session_id").and_then(Value::as_str) {
@@ -1968,6 +1934,70 @@ fn mark_stream_final(ctx: &mut TurnCtx, state: &TurnState) {
         let prefix = format!("{mid}-");
         ctx.mark_final_text(|part| part.id.starts_with(&prefix));
     }
+}
+
+/// One native message's model and usage snapshot, recorded even when only one is reported.
+fn record_message(ctx: &TurnCtx, message: &Value) {
+    let (Some(id), model, usage) = (
+        message.get("id").and_then(Value::as_str),
+        message.get("model").and_then(Value::as_str),
+        message.get("usage"),
+    ) else {
+        return;
+    };
+    if model.is_none() && usage.is_none() {
+        return;
+    }
+    let field = |key| {
+        usage
+            .and_then(|usage| usage.get(key))
+            .and_then(Value::as_u64)
+    };
+    ctx.record_native_usage(
+        &format!("claude-{}:{id}", ctx.attempt_count_for_usage()),
+        model,
+        None,
+        crate::store::TokenUsage {
+            input_tokens: field("input_tokens")
+                .and_then(|input| input.checked_add(field("cache_read_input_tokens")?))
+                .and_then(|input| input.checked_add(field("cache_creation_input_tokens")?)),
+            // Assistant output is a partial subtotal; terminal modelUsage includes reasoning.
+            output_tokens: field("output_tokens"),
+            cache_read_tokens: field("cache_read_input_tokens"),
+            cache_write_tokens: field("cache_creation_input_tokens"),
+            reasoning_tokens: None,
+        },
+    );
+}
+
+fn claude_result_usage_samples(
+    event: &Value,
+) -> Vec<(String, Option<String>, crate::store::TokenUsage)> {
+    event
+        .get("modelUsage")
+        .and_then(Value::as_object)
+        .into_iter()
+        .flat_map(|models| models.iter())
+        .map(|(model, usage)| {
+            let field = |name| usage.get(name).and_then(Value::as_u64);
+            (
+                model.clone(),
+                usage
+                    .get("provider")
+                    .and_then(Value::as_str)
+                    .map(str::to_string),
+                crate::store::TokenUsage {
+                    input_tokens: field("inputTokens")
+                        .and_then(|input| input.checked_add(field("cacheReadInputTokens")?))
+                        .and_then(|input| input.checked_add(field("cacheCreationInputTokens")?)),
+                    output_tokens: field("outputTokens"),
+                    cache_read_tokens: field("cacheReadInputTokens"),
+                    cache_write_tokens: field("cacheCreationInputTokens"),
+                    reasoning_tokens: field("thinkingTokens"),
+                },
+            )
+        })
+        .collect()
 }
 
 /// Sum the four token buckets of a Claude `usage` object into the context-window
@@ -2110,6 +2140,7 @@ async fn run_attempt(ctx: &mut TurnCtx, spec: SpawnSpec) -> Result<(TurnState, u
     let client = route.client();
     let auth_generation = client.auth_generation();
     let bridge_active = client.config().bridge_active;
+    ctx.begin_native_usage_attempt(&format!("claude-{}:", ctx.attempt_count_for_usage()))?;
     ctx.persist_delivery(DeliveryState::Unknown)?;
     if let Err(e) = client.send_user_message(&ctx.text).await {
         ctx.host.claude.kill_session(&ctx.session_id).await;
@@ -2380,7 +2411,7 @@ async fn run_turn(ctx: &mut TurnCtx) -> Result<()> {
 
         let detail = match auth {
             HarnessAuthState::NeedsLogin => {
-                "Claude Code sign-in required. Run `claude auth login`, then retry this message."
+                "Claude Code authentication needs attention. Check `claude auth status`, then retry this message."
             }
             HarnessAuthState::Unknown => {
                 "Claude Code authentication could not be verified. Run `claude auth status`, then re-check the harness."
@@ -2430,42 +2461,6 @@ async fn run_turn(ctx: &mut TurnCtx) -> Result<()> {
 mod tests {
     use super::super::options::REASONING_DEFAULT_ID;
     use super::*;
-
-    #[test]
-    fn snapshot_auth_choice_prefers_env_then_file_then_store() {
-        // The env credential overrides a saved login — the same precedence
-        // `effective_auth_probe` encodes — but its validity is unverified, so
-        // the choice is not a `Ready` answer.
-        assert_eq!(
-            snapshot_auth_choice(true, true, true),
-            SnapshotAuth::UnverifiedApiKey
-        );
-        assert_eq!(
-            snapshot_auth_choice(true, false, false),
-            SnapshotAuth::UnverifiedApiKey
-        );
-        // A saved OAuth login answers on every platform — an expired access
-        // token still refreshes from the same file.
-        assert_eq!(
-            snapshot_auth_choice(false, true, true),
-            SnapshotAuth::SavedOauth
-        );
-        assert_eq!(
-            snapshot_auth_choice(false, true, false),
-            SnapshotAuth::SavedOauth
-        );
-        // Where the file *is* the store (Linux), absent means signed out;
-        // elsewhere Keychain/the credential store could hold a login, so the
-        // CLI must answer.
-        assert_eq!(
-            snapshot_auth_choice(false, false, true),
-            SnapshotAuth::SignedOut
-        );
-        assert_eq!(
-            snapshot_auth_choice(false, false, false),
-            SnapshotAuth::ProbeCli
-        );
-    }
 
     #[test]
     fn local_mcp_config_contains_only_string_environment_values() {
@@ -2782,6 +2777,36 @@ mod tests {
         // this into an error that keeps the card actionable.
         let (text, _) = synthesize_resume("question", &answer(true, None, &[], None));
         assert!(text.trim().is_empty());
+    }
+
+    #[test]
+    fn native_model_usage_preserves_child_models_and_inclusive_totals() {
+        let events: Vec<Value> =
+            serde_json::from_str(include_str!("fixtures/claude-model-usage.json")).unwrap();
+        let samples = claude_result_usage_samples(&events[0]);
+        assert_eq!(samples.len(), 2);
+        let parent = samples
+            .iter()
+            .find(|(model, _, _)| model == "claude-opus-5-5")
+            .unwrap();
+        assert_eq!(parent.2.input_tokens, Some(290410));
+        assert_eq!(parent.2.output_tokens, Some(392));
+        assert_eq!(parent.2.reasoning_tokens, Some(198));
+        let child = samples
+            .iter()
+            .find(|(model, _, _)| model == "claude-haiku-4-5-20251001")
+            .unwrap();
+        assert_eq!(child.2.total(), Some(101006));
+        let resumed = claude_result_usage_samples(&events[1]);
+        assert_eq!(
+            resumed
+                .iter()
+                .find(|(model, _, _)| model == "claude-opus-5-5")
+                .unwrap()
+                .2
+                .output_tokens,
+            Some(484)
+        );
     }
 
     /// Fold a hand-written stream-json transcript through `apply_event` against a
@@ -3478,74 +3503,53 @@ mod tests {
 
     #[test]
     fn auth_status_requires_live_logged_in_result() {
-        assert_eq!(
-            parse_auth_status(true, br#"{"loggedIn":true,"authMethod":"claude.ai"}"#),
-            AuthProbe {
-                state: HarnessAuthState::Ready,
-                method: Some("oauth"),
-                credential_conflict: false,
-            }
+        let bedrock = parse_auth_status(
+            Some(0),
+            br#"{"loggedIn":true,"authMethod":"third_party","apiProvider":"bedrock"}"#,
+            1,
         );
+        assert_eq!(bedrock.state, HarnessAuthState::Ready);
+        assert_eq!(bedrock.method, Some("thirdParty"));
+        assert_eq!(bedrock.provider.as_deref(), Some("bedrock"));
         assert_eq!(
-            parse_auth_status(true, br#"{"loggedIn":true,"authMethod":"api-key"}"#),
-            AuthProbe {
-                state: HarnessAuthState::Ready,
-                method: Some("apiKey"),
-                credential_conflict: false,
-            }
-        );
-        // Claude intentionally exits 1 for this valid signed-out response.
-        assert_eq!(
-            parse_auth_status(false, br#"{"loggedIn":false,"authMethod":"none"}"#),
-            AuthProbe {
-                state: HarnessAuthState::NeedsLogin,
-                method: None,
-                credential_conflict: false,
-            }
-        );
-        assert_eq!(
-            parse_auth_status(true, b"not json"),
-            AuthProbe {
-                state: HarnessAuthState::Unknown,
-                method: None,
-                credential_conflict: false,
-            }
-        );
-        assert_eq!(
-            gate_oauth_version(
-                AuthProbe {
-                    state: HarnessAuthState::Ready,
-                    method: Some("oauth"),
-                    credential_conflict: false,
-                },
-                None,
-            )
-            .state,
-            HarnessAuthState::Unknown
-        );
-        assert_eq!(
-            gate_oauth_version(
-                AuthProbe {
-                    state: HarnessAuthState::Ready,
-                    method: Some("apiKey"),
-                    credential_conflict: false,
-                },
-                Some("2.0.0"),
-            )
-            .state,
+            gate_oauth_version(bedrock, Some("2.0.0")).state,
             HarnessAuthState::Ready
         );
-        // The version gate must carry a proven conflict through untouched.
-        assert!(
-            gate_oauth_version(
-                AuthProbe {
-                    state: HarnessAuthState::Unknown,
-                    method: None,
-                    credential_conflict: true,
-                },
-                Some("2.0.0"),
-            )
-            .credential_conflict
+
+        let key = parse_auth_status(
+            Some(0),
+            br#"{"loggedIn":true,"authMethod":"api-key","apiProvider":"bedrock"}"#,
+            2,
+        );
+        assert_eq!(key.method, Some("apiKey"));
+        assert_eq!(key.provider.as_deref(), Some("bedrock"));
+
+        let signed_out = parse_auth_status(
+            Some(1),
+            br#"{"loggedIn":false,"authMethod":"none","apiProvider":"firstParty"}"#,
+            3,
+        );
+        assert_eq!(signed_out.state, HarnessAuthState::NeedsLogin);
+        assert!(login_eligible(&signed_out));
+        assert_eq!(
+            parse_auth_status(Some(1), br#"{"loggedIn":true}"#, 4).state,
+            HarnessAuthState::Unknown
+        );
+        assert!(parse_auth_status(Some(0), b"not json", 5).failed_check);
+
+        let oauth = parse_auth_status(
+            Some(0),
+            br#"{"loggedIn":true,"authMethod":"claude.ai","apiProvider":"firstParty"}"#,
+            6,
+        );
+        assert_eq!(
+            gate_oauth_version(oauth, None).state,
+            HarnessAuthState::Unknown
+        );
+        let legacy = parse_auth_status(Some(0), br#"{"loggedIn":true}"#, 7);
+        assert_eq!(
+            gate_oauth_version(legacy, Some("2.0.0")).state,
+            HarnessAuthState::Unsupported
         );
     }
 

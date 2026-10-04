@@ -223,6 +223,12 @@ fn ssh_opts(target: &SshTarget, batch: bool) -> Vec<String> {
         format!("BatchMode={}", if batch { "yes" } else { "no" }),
         "-o".into(),
         "ConnectTimeout=10".into(),
+        "-o".into(),
+        "ServerAliveInterval=30".into(),
+        "-o".into(),
+        "ServerAliveCountMax=3".into(),
+        "-o".into(),
+        "TCPKeepAlive=yes".into(),
     ];
     opts.extend(multiplexing_opts(target));
     opts.extend(target.extra_opts.iter().cloned());
@@ -237,7 +243,7 @@ fn multiplexing_opts(target: &SshTarget) -> Vec<String> {
         "-o".into(),
         format!("ControlPath={}", control_path(target).display()),
         "-o".into(),
-        "ControlPersist=600".into(),
+        "ControlPersist=86400".into(),
     ]
 }
 
@@ -262,13 +268,7 @@ pub(crate) fn forward_args(
 ) -> Result<Vec<String>> {
     prepare_control_dir()?;
     let mut args = ssh_opts(target, true);
-    for option in [
-        "ExitOnForwardFailure=yes",
-        "ServerAliveInterval=30",
-        "ServerAliveCountMax=3",
-    ] {
-        args.extend(["-o".into(), option.into()]);
-    }
+    args.extend(["-o".into(), "ExitOnForwardFailure=yes".into()]);
     args.extend([
         // No PTY: the remote session bearer is delivered over stdin and must
         // never be echoed by terminal line discipline.
@@ -282,15 +282,58 @@ pub(crate) fn forward_args(
     Ok(args)
 }
 
+pub(crate) struct InteractiveConnection {
+    pub args: Vec<String>,
+    #[cfg(unix)]
+    _lock: std::fs::File,
+}
+
 /// Arguments for the short interactive login opened by Settings. `true` ends
 /// the visible session after authentication while ControlPersist keeps its
 /// master available to the batch-mode calls below — on Windows there is no
 /// master, so this only proves the host reachable and primes nothing.
-pub(crate) fn interactive_args(target: &SshTarget) -> Result<Vec<String>> {
+pub(crate) async fn interactive_args(
+    target: &SshTarget,
+    persist: Option<u64>,
+) -> Result<InteractiveConnection> {
     prepare_control_dir()?;
-    let mut args = ssh_opts(target, false);
+    #[cfg(unix)]
+    let lock = {
+        let file = std::fs::OpenOptions::new()
+            .create(true)
+            .truncate(false)
+            .write(true)
+            .open(control_path(target).with_extension("lock"))?;
+        loop {
+            match file.try_lock() {
+                Ok(()) => break,
+                Err(std::fs::TryLockError::WouldBlock) => {
+                    tokio::time::sleep(Duration::from_millis(50)).await;
+                }
+                Err(std::fs::TryLockError::Error(error)) => return Err(error.into()),
+            }
+        }
+        file
+    };
+    #[cfg(unix)]
+    if !master_is_running(target).await? {
+        match std::fs::remove_file(control_path(target)) {
+            Ok(()) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => return Err(error.into()),
+        }
+    }
+    let mut args = Vec::new();
+    if let Some(seconds) = persist {
+        args.extend(["-o".into(), format!("ControlPersist={seconds}")]);
+    }
+    args.extend(ssh_opts(target, false));
     args.extend(["--".into(), target.dest.clone(), "true".into()]);
-    Ok(args)
+    Ok(InteractiveConnection {
+        args,
+        #[cfg(unix)]
+        _lock: lock,
+    })
 }
 
 #[cfg(not(unix))]
@@ -579,7 +622,7 @@ async fn inspect_host_job(target: &SshTarget, dir: &str) -> Result<JobState> {
          elif [ -f \"$d/pid\" ]; then echo DEAD; else echo PENDING; fi",
     );
     let out = ssh_run(target, &format!("bash -c {}", sh_quote(&script)), None).await?;
-    Ok(parse_job_state(out.trim()))
+    parse_job_state(out.trim())
 }
 
 const HOST_PROCESS_HELPERS: &str = r#"
@@ -613,10 +656,13 @@ host_process_alive() {
 }
 "#;
 
-fn parse_job_state(out: &str) -> JobState {
+fn parse_job_state(out: &str) -> Result<JobState> {
     if let Some(code) = out.strip_prefix("EXIT ") {
-        let code: i32 = code.trim().parse().unwrap_or(-1);
-        return if code == 0 {
+        let code: i32 = code
+            .trim()
+            .parse()
+            .map_err(|_| anyhow!("unexpected inspect output: {out}"))?;
+        return Ok(if code == 0 {
             JobState {
                 stage: "COMPLETED".into(),
                 message: None,
@@ -626,9 +672,9 @@ fn parse_job_state(out: &str) -> JobState {
                 stage: "ERROR".into(),
                 message: Some(format!("exited with code {code}")),
             }
-        };
+        });
     }
-    match out {
+    Ok(match out {
         "RUNNING" | "PENDING" => JobState {
             stage: "RUNNING".into(),
             message: None,
@@ -637,11 +683,8 @@ fn parse_job_state(out: &str) -> JobState {
             stage: "ERROR".into(),
             message: Some("process died without an exit code (killed?)".into()),
         },
-        other => JobState {
-            stage: "RUNNING".into(),
-            message: Some(format!("unexpected inspect output: {other}")),
-        },
-    }
+        other => return Err(anyhow!("unexpected inspect output: {other}")),
+    })
 }
 
 /// One poll of the remote log past `skip` lines. Unlike the streaming backends
@@ -654,11 +697,14 @@ pub async fn stream_logs(
     sink: &mut (dyn FnMut(&str) + Send),
 ) -> Result<u64> {
     let cmd = format!(
-        "tail -n +{} \"$HOME/{}/log\" 2>/dev/null || true",
+        "printf '__ORX_LOG_START__\\n'; tail -n +{} \"$HOME/{}/log\" 2>/dev/null || true",
         skip + 1,
         dir
     );
     let out = ssh_run(target, &cmd, None).await?;
+    let out = out
+        .strip_prefix("__ORX_LOG_START__\n")
+        .ok_or_else(|| anyhow!("unexpected SSH log output: {out}"))?;
     let mut seen = skip;
     // A trailing newline yields a final empty element under split('\n'); use
     // lines() which ignores it, matching the "one line = one log line" contract.
@@ -736,6 +782,61 @@ pub async fn preflight(target: &SshTarget) -> SshPreflight {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn inspect_rejects_transport_output_and_invalid_exit_codes() {
+        for output in [
+            "",
+            "cannot assign requested address",
+            "EXIT nope",
+            "RUNNING\nproxy error",
+        ] {
+            assert!(parse_job_state(output).is_err(), "{output}");
+        }
+        for (output, stage) in [
+            ("RUNNING", "RUNNING"),
+            ("PENDING", "RUNNING"),
+            ("EXIT 0", "COMPLETED"),
+            ("EXIT 42", "ERROR"),
+            ("DEAD", "ERROR"),
+        ] {
+            assert_eq!(parse_job_state(output).unwrap().stage, stage);
+        }
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn interactive_login_removes_orphaned_sockets_and_broken_symlinks() {
+        use std::os::unix::{fs::symlink, net::UnixListener};
+        let target = SshTarget::alias(&format!("orx-test-{}", uuid::Uuid::new_v4()));
+        prepare_control_dir().unwrap();
+        let path = control_path(&target);
+        drop(UnixListener::bind(&path).unwrap());
+        interactive_args(&target, None).await.unwrap();
+        assert!(std::fs::symlink_metadata(&path).is_err());
+        symlink(path.with_extension("missing"), &path).unwrap();
+        let args = interactive_args(&target, Some(120)).await.unwrap();
+        assert!(std::fs::symlink_metadata(&path).is_err());
+        assert_eq!(args.args[..2], ["-o", "ControlPersist=120"]);
+        let socket = UnixListener::bind(&path).unwrap();
+        assert!(
+            tokio::time::timeout(Duration::from_millis(100), interactive_args(&target, None))
+                .await
+                .is_err()
+        );
+        assert!(path.exists());
+        drop(socket);
+        drop(args);
+        assert!(interactive_args(&target, None).await.is_ok());
+        let opts = ssh_opts(&target, true);
+        for option in [
+            "ServerAliveInterval=30",
+            "ServerAliveCountMax=3",
+            "TCPKeepAlive=yes",
+        ] {
+            assert!(opts.iter().any(|value| value == option));
+        }
+    }
 
     #[cfg(unix)]
     #[test]
@@ -893,7 +994,7 @@ mod tests {
         assert_eq!(target.dest, "mybox");
         assert!(target.extra_opts.is_empty());
         // No `-p`/`-o Strict…` beyond the shared multiplexing opts.
-        let shared = 4 + multiplexing_opts(&target).len(); // BatchMode, ConnectTimeout
+        let shared = 10 + multiplexing_opts(&target).len();
         assert_eq!(ssh_opts(&target, true).len(), shared);
     }
 
@@ -933,7 +1034,7 @@ mod tests {
         let opts = multiplexing_opts(&SshTarget::alias("cluster"));
         assert_eq!(opts[0..2], ["-o", "ControlMaster=auto"]);
         assert!(opts[3].starts_with("ControlPath="));
-        assert_eq!(opts[4..6], ["-o", "ControlPersist=600"]);
+        assert_eq!(opts[4..6], ["-o", "ControlPersist=86400"]);
     }
 
     /// Present and off, not absent: a user's own ssh_config would otherwise

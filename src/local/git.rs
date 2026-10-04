@@ -123,10 +123,18 @@ pub fn migrate_legacy_project_worktrees(
     Ok(())
 }
 
+/// Side chats resolve to the worktree of the chat they branched from.
 pub fn existing_session_worktree_path(
     project: &crate::local::model::LocalProject,
     session_id: &str,
 ) -> PathBuf {
+    let owner = crate::store::Store::open()
+        .and_then(|store| store.chat_worktree_owner(session_id))
+        .unwrap_or_else(|_| session_id.to_string());
+    owner_worktree_path(project, &owner)
+}
+
+fn owner_worktree_path(project: &crate::local::model::LocalProject, session_id: &str) -> PathBuf {
     let current = session_worktree_path(&project.id, session_id);
     if current.exists() || !project.has_github_repository() {
         return current;
@@ -149,11 +157,24 @@ fn long_paths() -> &'static [&'static str] {
     }
 }
 
+/// `git` resolved on, and run with, the user's shell PATH: a Finder-launched
+/// app's launchd PATH finds only `/usr/bin/git`, which needs the Xcode CLT.
+pub fn git_command() -> Command {
+    let mut command = match super::shell_env::find_on_path("git") {
+        Some(path) => Command::new(path),
+        None => Command::new("git"),
+    };
+    if let Some(paths) = super::shell_env::search_path() {
+        command.env("PATH", paths);
+    }
+    command
+}
+
 /// Run git with `args`, returning trimmed stdout; failures carry git's stderr.
 /// Headless: git must fail fast rather than prompt on /dev/tty (these calls
 /// run under a server, where a prompt would hang a worker forever).
 pub(super) fn git(dir: Option<&Path>, args: &[&str]) -> Result<String> {
-    let mut cmd = Command::new("git");
+    let mut cmd = git_command();
     if let Some(dir) = dir {
         cmd.current_dir(dir);
     }
@@ -282,7 +303,7 @@ fn git_context_bytes(
     index_file: &Path,
     args: &[&str],
 ) -> Result<Vec<u8>> {
-    let out = Command::new("git")
+    let out = git_command()
         .current_dir(work_tree)
         .env("GIT_TERMINAL_PROMPT", "0")
         .env("GIT_DIR", git_dir)
@@ -649,7 +670,7 @@ fn stage_initial_snapshot(path: &Path, included_paths: &[Vec<u8>]) -> Result<()>
         return Ok(());
     }
 
-    let mut child = Command::new("git")
+    let mut child = git_command()
         .current_dir(path)
         .env("GIT_TERMINAL_PROMPT", "0")
         .args(["add", "-f", "--pathspec-from-file=-", "--pathspec-file-nul"])
@@ -682,7 +703,7 @@ fn stage_initial_snapshot(path: &Path, included_paths: &[Vec<u8>]) -> Result<()>
 
 fn remove_excluded_paths_from_index(path: &Path, excluded_paths: &[Vec<u8>]) -> Result<()> {
     for paths in excluded_paths.chunks(128) {
-        let mut command = Command::new("git");
+        let mut command = git_command();
         command
             .current_dir(path)
             .env("GIT_TERMINAL_PROMPT", "0")
@@ -864,7 +885,7 @@ pub fn clone_public(url: &str, path: &Path, shallow: bool) -> Result<()> {
         .write(true)
         .create_new(true)
         .open(&empty_config)?;
-    let mut command = Command::new("git");
+    let mut command = git_command();
     command
         .current_dir(std::env::temp_dir())
         .env("GIT_TERMINAL_PROMPT", "0")
@@ -1263,16 +1284,17 @@ pub fn ensure_session_worktree(
     if !is_repository(repo_path) {
         return Err(anyhow!("{} is not a Git repository", repo_path.display()));
     }
-    let dir = existing_session_worktree_path(project, session_id);
+    let owner = crate::store::Store::open()?.chat_worktree_owner(session_id)?;
+    let dir = owner_worktree_path(project, &owner);
     let start_ref = super::demo::session_start_ref(
         repo_path,
         &project.github_owner,
         &project.github_repo,
-        session_id,
+        &owner,
     )
     .unwrap_or(&project.baseline_branch);
     git(Some(repo_path), &["rev-parse", "--verify", start_ref])?;
-    ensure_worktree_from(repo_path, dir, start_ref)
+    ensure_worktree_from(repo_path, dir, start_ref, true)
 }
 
 pub(crate) fn ensure_session_worktree_in(
@@ -1285,7 +1307,7 @@ pub(crate) fn ensure_session_worktree_in(
 ) -> Result<PathBuf> {
     let start_ref = super::demo::session_start_ref(repo, owner, repo_name, session_id)
         .unwrap_or(baseline_branch);
-    ensure_worktree_from(repo, dir.to_path_buf(), start_ref)
+    ensure_worktree_from(repo, dir.to_path_buf(), start_ref, true)
 }
 
 pub fn ensure_worktree_at(repo: &Path, dir: &Path, start_ref: &str) -> Result<PathBuf> {
@@ -1301,11 +1323,27 @@ pub fn ensure_worktree_at(repo: &Path, dir: &Path, start_ref: &str) -> Result<Pa
             ));
         }
     }
-    ensure_worktree_from(repo, dir.to_path_buf(), start_ref)
+    ensure_worktree_from(repo, dir.to_path_buf(), start_ref, false)
 }
 
-fn ensure_worktree_from(repo: &Path, dir: PathBuf, start_ref: &str) -> Result<PathBuf> {
-    if dir.join(".git").exists() {
+/// `restore_lost` recreates a vanished but still-registered worktree at its last
+/// checkout instead of `start_ref`, so an agent resumes its own work.
+fn ensure_worktree_from(
+    repo: &Path,
+    dir: PathBuf,
+    start_ref: &str,
+    restore_lost: bool,
+) -> Result<PathBuf> {
+    // In-process turns, terminals and slash commands race to create the same session's worktree.
+    static WORKTREE_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    let _guard = WORKTREE_LOCK
+        .lock()
+        .unwrap_or_else(|error| error.into_inner());
+    let has_git = dir
+        .join(".git")
+        .try_exists()
+        .map_err(|e| anyhow!("Could not inspect worktree {}: {}", dir.display(), e))?;
+    if has_git {
         if git(Some(&dir), &["rev-parse", "--is-inside-work-tree"]).is_ok() {
             return Ok(dir);
         }
@@ -1314,19 +1352,126 @@ fn ensure_worktree_from(repo: &Path, dir: PathBuf, start_ref: &str) -> Result<Pa
             dir.display()
         ));
     }
-    // A manually deleted worktree dir leaves a stale registration behind that
-    // would make `worktree add` at the same path fail.
-    let _ = git(Some(repo), &["worktree", "prune"]);
+    // Create the parent first so git and lost_worktree_head resolve symlinks to the registered path.
     if let Some(parent) = dir.parent() {
         std::fs::create_dir_all(parent)
             .map_err(|e| anyhow!("Could not create {}: {}", parent.display(), e))?;
     }
-    let target = dir.to_string_lossy().to_string();
+    // An empty dir left at the path would make git refuse to treat the worktree as missing.
+    let _ = std::fs::remove_dir(&dir);
+    // Read the lost checkout before the `worktree remove` below erases its registration.
+    let lost = if restore_lost {
+        lost_worktree_head(repo, &dir)
+    } else {
+        None
+    };
+    // An agent that recreates its vanished worktree leaves files there that block `worktree add`.
+    let stamp = crate::store::now_ms().to_string();
+    let stray = if restore_lost {
+        set_aside_stray_dir(&dir, &stamp)?
+    } else {
+        None
+    };
+    // Clears a stale registration (prune would also erase other vanished sessions' checkouts).
+    // `remove --force` deletes a live checkout, so it only runs once the dir is confirmed gone.
+    if matches!(dir.try_exists(), Ok(false)) {
+        let _ = git(
+            Some(repo),
+            &["worktree", "remove", "--force", &dir.to_string_lossy()],
+        );
+    }
+    let added = add_worktree(repo, &dir, lost.as_deref(), start_ref);
+    if let Some(stray) = stray {
+        settle_stray_dir(&dir, &stray, &stamp, added.is_ok());
+    }
+    added.map(|()| dir)
+}
+
+fn add_worktree(repo: &Path, dir: &Path, lost: Option<&str>, start_ref: &str) -> Result<()> {
+    let target = dir.to_string_lossy();
+    if let Some(head) = lost {
+        // A commit sha checks out detached; a branch name checks out the branch.
+        match git(Some(repo), &["worktree", "add", &target, head]) {
+            Ok(_) => {
+                eprintln!("orx: restored missing worktree {} at {head}", dir.display());
+                return Ok(());
+            }
+            Err(err) => eprintln!(
+                "orx: could not restore missing worktree {} at {head}: {err}",
+                dir.display()
+            ),
+        }
+    }
     git(
         Some(repo),
         &["worktree", "add", "--detach", &target, start_ref],
     )?;
-    Ok(dir)
+    Ok(())
+}
+
+fn set_aside_stray_dir(dir: &Path, stamp: &str) -> Result<Option<PathBuf>> {
+    if !dir.is_dir() {
+        return Ok(None);
+    }
+    let mut name = dir.as_os_str().to_owned();
+    name.push(format!(".stray-{stamp}"));
+    let stray = PathBuf::from(name);
+    std::fs::rename(dir, &stray)
+        .map_err(|e| anyhow!("Could not move {} aside: {}", dir.display(), e))?;
+    Ok(Some(stray))
+}
+
+/// Keeps set-aside files inside the restored worktree, or puts them back if the restore failed.
+fn settle_stray_dir(dir: &Path, stray: &Path, stamp: &str, restored: bool) {
+    let recovered = dir.join(".openresearch").join("recovered");
+    let kept = recovered.join(stamp);
+    let moved = if restored {
+        std::fs::create_dir_all(&recovered).and_then(|()| std::fs::rename(stray, &kept))
+    } else {
+        std::fs::rename(stray, dir)
+    };
+    if let Err(err) = moved {
+        eprintln!(
+            "orx: left files found in missing worktree {} at {}: {err}",
+            dir.display(),
+            stray.display()
+        );
+    } else if restored {
+        eprintln!(
+            "orx: kept files found in missing worktree {} at {}",
+            dir.display(),
+            kept.display()
+        );
+    }
+}
+
+/// What a still-registered worktree at `dir` had checked out: its branch, else its commit.
+fn lost_worktree_head(repo: &Path, dir: &Path) -> Option<String> {
+    let canonical_dir = dir
+        .parent()
+        .and_then(|parent| crate::paths::canonicalize(parent).ok())
+        .zip(dir.file_name())
+        .map(|(parent, name)| parent.join(name));
+    let list = git(Some(repo), &["worktree", "list", "--porcelain"]).ok()?;
+    list.split("\n\n").find_map(|entry| {
+        let mut path = None;
+        let mut sha = None;
+        let mut branch = None;
+        for line in entry.lines() {
+            if let Some(value) = line.strip_prefix("worktree ") {
+                path = Some(Path::new(value));
+            } else if let Some(value) = line.strip_prefix("HEAD ") {
+                sha = Some(value);
+            } else if let Some(value) = line.strip_prefix("branch refs/heads/") {
+                branch = Some(value);
+            }
+        }
+        let path = path?;
+        if path != dir && Some(path) != canonical_dir.as_deref() {
+            return None;
+        }
+        branch.or(sha).map(str::to_string)
+    })
 }
 
 /// Remove a session's worktree (on session/project delete). Uncommitted
@@ -1335,18 +1480,14 @@ fn ensure_worktree_from(repo: &Path, dir: PathBuf, start_ref: &str) -> Result<Pa
 pub fn remove_session_worktree(project: &crate::local::model::LocalProject, session_id: &str) {
     let repo_path = Path::new(&project.repo_path);
     let dir = existing_session_worktree_path(project, session_id);
-    if !dir.exists() {
-        return;
-    }
+    let _ = std::fs::remove_dir_all(&dir);
+    // Once the dir is gone, `worktree remove` drops only this registration (unlike prune).
     if is_repository(repo_path) {
         let _ = git(
             Some(repo_path),
             &["worktree", "remove", "--force", &dir.to_string_lossy()],
         );
-        let _ = git(Some(repo_path), &["worktree", "prune"]);
     }
-    // Hub gone (cache wiped) or `worktree remove` refused: take the dir anyway.
-    let _ = std::fs::remove_dir_all(&dir);
 }
 
 /// Seed a fresh (empty) GitHub repo from the tip of another repo — the
@@ -1553,14 +1694,11 @@ fn redact_remote_urls(text: &str) -> String {
 }
 
 fn authenticated_git_command(repo_path: &Path) -> Command {
-    let mut command = Command::new("git");
+    let mut command = git_command();
     command
         .current_dir(repo_path)
         .env("GH_HOST", "github.com")
         .env("GIT_TERMINAL_PROMPT", "0");
-    if let Some(paths) = super::shell_env::search_path() {
-        command.env("PATH", paths);
-    }
     if std::env::var_os("GIT_SSH_COMMAND").is_none() && std::env::var_os("GIT_SSH").is_none() {
         command.env(
             "GIT_SSH_COMMAND",
@@ -1833,7 +1971,7 @@ pub struct CommitInfo {
 /// Like `git` but raw stdout bytes, no trim, and extra tolerated exit codes
 /// (`git diff --no-index` exits 1 when the files differ).
 fn git_bytes(dir: &Path, args: &[&str], ok_codes: &[i32]) -> Result<Vec<u8>> {
-    let mut cmd = Command::new("git");
+    let mut cmd = git_command();
     cmd.current_dir(dir);
     cmd.env("GIT_TERMINAL_PROMPT", "0");
     let out = cmd
@@ -2196,7 +2334,7 @@ pub fn file_exists_at(repo: &Path, sha: &str, path: &str) -> Result<bool> {
 pub fn file_size_at(repo: &Path, sha: &str, path: &str) -> Result<Option<u64>> {
     use std::process::Stdio;
     let spec = format!("{sha}:{path}");
-    let kind = Command::new("git")
+    let kind = git_command()
         .current_dir(repo)
         .env("GIT_TERMINAL_PROMPT", "0")
         .args(["cat-file", "-t", &spec])
@@ -2207,7 +2345,7 @@ pub fn file_size_at(repo: &Path, sha: &str, path: &str) -> Result<Option<u64>> {
     if !kind.status.success() || kind.stdout != b"blob\n" {
         return Ok(None);
     }
-    let size = Command::new("git")
+    let size = git_command()
         .current_dir(repo)
         .env("GIT_TERMINAL_PROMPT", "0")
         .args(["cat-file", "-s", &spec])
@@ -2242,7 +2380,7 @@ pub fn file_bytes_at_capped(
     if !file_exists_at(repo, sha, path)? {
         return Ok(None);
     }
-    let mut child = Command::new("git")
+    let mut child = git_command()
         .current_dir(repo)
         .env("GIT_TERMINAL_PROMPT", "0")
         .args(["cat-file", "blob", &spec])
@@ -2624,5 +2762,170 @@ mod tests {
             &["--depth=1", "--single-branch"]
         );
         assert!(public_clone_history_args(false).is_empty());
+    }
+
+    #[test]
+    fn vanished_worktree_is_restored_on_its_branch() {
+        let hub = temp_repo();
+        let dir = hub.with_extension("session");
+        ensure_worktree_from(&hub, dir.clone(), "main", true).unwrap();
+        run(&dir, &["switch", "-q", "-c", "exp/square"]);
+        write(&dir, "result.txt", "42\n");
+        run(&dir, &["add", "-A"]);
+        run(&dir, &["commit", "-q", "-m", "result"]);
+        std::fs::remove_dir_all(&dir).unwrap();
+
+        ensure_worktree_from(&hub, dir.clone(), "main", true).unwrap();
+        assert_eq!(run(&dir, &["branch", "--show-current"]), "exp/square");
+        assert!(dir.join("result.txt").is_file());
+        let _ = std::fs::remove_dir_all(&dir);
+        let _ = std::fs::remove_dir_all(&hub);
+    }
+
+    #[test]
+    fn vanished_detached_worktree_is_restored_at_its_commit() {
+        let hub = temp_repo();
+        let dir = hub.with_extension("session");
+        ensure_worktree_from(&hub, dir.clone(), "main", true).unwrap();
+        write(&dir, "scratch.txt", "draft\n");
+        run(&dir, &["add", "-A"]);
+        run(&dir, &["commit", "-q", "-m", "detached work"]);
+        let head = run(&dir, &["rev-parse", "HEAD"]);
+        std::fs::remove_dir_all(&dir).unwrap();
+
+        ensure_worktree_from(&hub, dir.clone(), "main", true).unwrap();
+        assert_eq!(run(&dir, &["rev-parse", "HEAD"]), head);
+        assert_eq!(run(&dir, &["branch", "--show-current"]), "");
+        let _ = std::fs::remove_dir_all(&dir);
+        let _ = std::fs::remove_dir_all(&hub);
+    }
+
+    #[test]
+    fn seeded_worktree_ignores_a_vanished_checkout() {
+        let hub = temp_repo();
+        let dir = hub.with_extension("seeded");
+        let seed = run(&hub, &["rev-parse", "main"]);
+        ensure_worktree_at(&hub, &dir, &seed).unwrap();
+        run(&dir, &["switch", "-q", "-c", "exp/other"]);
+        std::fs::remove_dir_all(&dir).unwrap();
+
+        ensure_worktree_at(&hub, &dir, &seed).unwrap();
+        assert_eq!(run(&dir, &["rev-parse", "HEAD"]), seed);
+        assert_eq!(run(&dir, &["branch", "--show-current"]), "");
+        let _ = std::fs::remove_dir_all(&dir);
+        let _ = std::fs::remove_dir_all(&hub);
+    }
+
+    #[test]
+    fn restoring_one_vanished_worktree_keeps_another_restorable() {
+        let hub = temp_repo();
+        let first = hub.with_extension("first");
+        let second = hub.with_extension("second");
+        for (dir, branch) in [(&first, "exp/first"), (&second, "exp/second")] {
+            ensure_worktree_from(&hub, dir.clone(), "main", true).unwrap();
+            run(dir, &["switch", "-q", "-c", branch]);
+            std::fs::remove_dir_all(dir).unwrap();
+        }
+
+        ensure_worktree_from(&hub, first.clone(), "main", true).unwrap();
+        ensure_worktree_from(&hub, second.clone(), "main", true).unwrap();
+        assert_eq!(run(&second, &["branch", "--show-current"]), "exp/second");
+        for dir in [&first, &second, &hub] {
+            let _ = std::fs::remove_dir_all(dir);
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn vanished_worktree_under_a_symlink_is_restored_without_its_parent() {
+        let hub = temp_repo();
+        let real = hub.with_extension("real");
+        let link = hub.with_extension("link");
+        std::fs::create_dir_all(&real).unwrap();
+        std::os::unix::fs::symlink(&real, &link).unwrap();
+        let dir = link.join("project").join("session");
+        ensure_worktree_from(&hub, dir.clone(), "main", true).unwrap();
+        run(&dir, &["switch", "-q", "-c", "exp/linked"]);
+        std::fs::remove_dir_all(real.join("project")).unwrap();
+
+        ensure_worktree_from(&hub, dir.clone(), "main", true).unwrap();
+        assert_eq!(run(&dir, &["branch", "--show-current"]), "exp/linked");
+        for path in [&link, &real, &hub] {
+            let _ = std::fs::remove_dir_all(path);
+        }
+    }
+
+    #[test]
+    fn vanished_worktree_behind_an_empty_dir_is_restored() {
+        let hub = temp_repo();
+        let dir = hub.with_extension("session");
+        ensure_worktree_from(&hub, dir.clone(), "main", true).unwrap();
+        run(&dir, &["switch", "-q", "-c", "exp/empty"]);
+        std::fs::remove_dir_all(&dir).unwrap();
+        std::fs::create_dir(&dir).unwrap();
+
+        ensure_worktree_from(&hub, dir.clone(), "main", true).unwrap();
+        assert_eq!(run(&dir, &["branch", "--show-current"]), "exp/empty");
+        let _ = std::fs::remove_dir_all(&dir);
+        let _ = std::fs::remove_dir_all(&hub);
+    }
+
+    #[test]
+    fn vanished_worktree_recreated_with_files_is_restored_and_keeps_them() {
+        let hub = temp_repo();
+        let dir = hub.with_extension("session");
+        ensure_worktree_from(&hub, dir.clone(), "main", true).unwrap();
+        run(&dir, &["switch", "-q", "-c", "exp/stray"]);
+        std::fs::remove_dir_all(&dir).unwrap();
+        std::fs::create_dir(&dir).unwrap();
+        write(&dir, "figure.png", "plot\n");
+
+        ensure_worktree_from(&hub, dir.clone(), "main", true).unwrap();
+        assert_eq!(run(&dir, &["branch", "--show-current"]), "exp/stray");
+        let mut recovered = std::fs::read_dir(dir.join(".openresearch").join("recovered")).unwrap();
+        let kept = recovered.next().unwrap().unwrap().path();
+        assert!(recovered.next().is_none());
+        assert_eq!(
+            std::fs::read_to_string(kept.join("figure.png")).unwrap(),
+            "plot\n"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+        let _ = std::fs::remove_dir_all(&hub);
+    }
+
+    #[test]
+    fn failed_add_puts_stray_files_back() {
+        let hub = temp_repo();
+        let dir = hub.with_extension("session");
+        std::fs::create_dir(&dir).unwrap();
+        write(&dir, "figure.png", "plot\n");
+
+        assert!(ensure_worktree_from(&hub, dir.clone(), "no-such-ref", true).is_err());
+        assert_eq!(
+            std::fs::read_to_string(dir.join("figure.png")).unwrap(),
+            "plot\n"
+        );
+        let stray_prefix = format!("{}.stray-", dir.file_name().unwrap().to_string_lossy());
+        let siblings = std::fs::read_dir(dir.parent().unwrap()).unwrap();
+        assert!(!siblings
+            .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
+            .any(|name| name.starts_with(&stray_prefix)));
+        let _ = std::fs::remove_dir_all(&dir);
+        let _ = std::fs::remove_dir_all(&hub);
+    }
+
+    #[test]
+    fn seeded_worktree_never_moves_recreated_files() {
+        let hub = temp_repo();
+        let dir = hub.with_extension("seeded");
+        ensure_worktree_from(&hub, dir.clone(), "main", false).unwrap();
+        std::fs::remove_dir_all(&dir).unwrap();
+        std::fs::create_dir(&dir).unwrap();
+        write(&dir, "figure.png", "plot\n");
+
+        assert!(ensure_worktree_from(&hub, dir.clone(), "main", false).is_err());
+        assert!(dir.join("figure.png").is_file());
+        let _ = std::fs::remove_dir_all(&dir);
+        let _ = std::fs::remove_dir_all(&hub);
     }
 }

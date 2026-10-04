@@ -66,12 +66,15 @@ changes only with a new `OpenResearch-Setup.exe`.
 
 ### The SmartScreen warning
 
-Neither `orx.exe` nor the installer is code-signed yet, so Windows shows
-"Windows protected your PC" on first run. Choose **More info** → **Run anyway**.
+Official releases sign `orx.exe`, `OpenResearch.exe`, and `OpenResearch-Setup.exe`
+with alphaXiv Inc.'s Azure Artifact Signing certificate. The signature identifies
+the publisher and is timestamped so it remains valid after the short-lived
+signing certificate expires. Older releases and PR test artifacts are unsigned.
 
-Signing is planned, but it will not make this go away immediately: since 2024
-even an EV certificate has to earn SmartScreen reputation through download
-volume like any other, so early builds will keep showing the warning.
+Signing does not guarantee that "Windows protected your PC" disappears
+immediately: [SmartScreen reputation](https://learn.microsoft.com/en-us/windows/msix/package/sign-msix-package-guide)
+also depends on the app's download history. If a new release shows the warning,
+check that **More info** identifies **alphaXiv Inc.** before choosing **Run anyway**.
 
 ### Long paths
 
@@ -104,3 +107,29 @@ published `orx.exe` and attaches it, once the repository variable
 dispatched by a token (see `macos/DISTRIBUTION.md`); to attach the installer to
 an existing release, dispatch the workflow with its tag. CI on every pull
 request also uploads an `openresearch-windows-installer` artifact to test with.
+
+### Release signing
+
+Both `sign-windows-cli.yml` and `release-windows-app.yml` use the protected
+`release-signing` environment. GitHub OIDC authenticates an Azure service
+principal with the **Artifact Signing Certificate Profile Signer** role scoped
+to the Public Trust certificate profile. No private key or client secret is
+stored in GitHub. The federated credential subject must match the repository's
+canonical name: `repo:alphaXiv/OpenResearch:environment:release-signing`.
+
+Configure these environment variables before releasing:
+
+| Variable | Value |
+|---|---|
+| `WINDOWS_SIGNING_CLIENT_ID` | Signing service principal's application ID |
+| `WINDOWS_SIGNING_TENANT_ID` | Azure tenant containing that principal |
+| `WINDOWS_SIGNING_SUBSCRIPTION_ID` | Subscription containing the signing account |
+| `WINDOWS_SIGNING_ENDPOINT` | Signing account's regional endpoint |
+| `WINDOWS_SIGNING_ACCOUNT` | Artifact Signing account name |
+| `WINDOWS_SIGNING_PROFILE` | Public Trust certificate profile for alphaXiv Inc. |
+
+The CLI archive is signed before cargo-dist generates the global checksums and
+installers, so desktop self-updates retain a signed `orx.exe`. The app workflow
+signs its executable payload before packaging, then signs the installer. Each
+signing step requires a valid alphaXiv Inc. signature and timestamp before
+uploading anything; a signing failure blocks publication.

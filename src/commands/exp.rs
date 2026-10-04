@@ -172,7 +172,9 @@ pub(crate) fn default_hf_image(flavor: &str) -> String {
     }
 }
 
-/// Spawn `orx supervise <runId>` fully detached (own process group, no stdio),
+const SUPERVISOR_LOG_MAX_BYTES: u64 = 1024 * 1024;
+
+/// Spawn `orx supervise <runId>` fully detached (own process group, stderr to a log),
 /// so it outlives this command and any SSH session that launched it.
 pub(crate) fn spawn_detached_supervise(run_id: &str) -> Result<()> {
     let exe = crate::paths::spawnable_exe().map_err(|e| {
@@ -181,13 +183,24 @@ pub(crate) fn spawn_detached_supervise(run_id: &str) -> Result<()> {
             e
         )
     })?;
+    // Supervisor diagnostics (retries, transitions) exist only on stderr; keep them per run.
+    let path = crate::store::log_path(run_id).with_extension("supervisor.log");
+    if std::fs::metadata(&path).is_ok_and(|meta| meta.len() >= SUPERVISOR_LOG_MAX_BYTES) {
+        // Rename rather than truncate: a still-running supervisor keeps writing to its handle.
+        let _ = std::fs::rename(&path, path.with_extension("log.1"));
+    }
+    let stderr = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(path)
+        .map_or_else(|_| std::process::Stdio::null(), std::process::Stdio::from);
     // A long-lived `orx up` may be running a replaced binary; spawn the new file at its path.
     let mut cmd = std::process::Command::new(exe);
     cmd.arg("supervise")
         .arg(run_id)
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null());
+        .stderr(stderr);
     // The supervisor re-resolves its directories from its own environment, so
     // without this a run launched from the macOS app is tracked in a different
     // store than the app is reading.
@@ -202,8 +215,12 @@ pub(crate) fn spawn_detached_supervise(run_id: &str) -> Result<()> {
         use std::os::unix::process::CommandExt;
         cmd.process_group(0);
     }
-    cmd.spawn()
+    let mut child = cmd
+        .spawn()
         .map_err(|e| anyhow!("Could not spawn `orx supervise {}`: {}", run_id, e))?;
+    std::thread::spawn(move || {
+        let _ = child.wait();
+    });
     Ok(())
 }
 

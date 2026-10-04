@@ -1,23 +1,48 @@
 //! Cross-platform "open URL in browser".
 
-use std::process::{Command, Stdio};
+use std::process::{Child, Command, Stdio};
 
 /// Opens `url` in the user's default browser. Best-effort and non-fatal: errors
 /// (e.g. no browser, headless) are swallowed, since the caller is expected to
 /// have already printed the URL for manual opening. The child is detached so the
 /// CLI does not block on it.
 pub fn open_browser(url: &str) {
-    for mut cmd in openers(url) {
-        if cmd
-            .stdin(Stdio::null())
+    launch(url);
+}
+
+/// [`open_browser`] for `orx up`, reporting an opener that fails to spawn or
+/// exits non-zero (e.g. `xdg-open` without a display) to telemetry.
+/// Returns the watcher so a command about to exit can await it.
+pub fn open_dashboard(
+    url: &str,
+    mode: crate::telemetry::UpLaunchMode,
+) -> Option<tokio::task::JoinHandle<()>> {
+    let Some(mut child) = launch(url) else {
+        crate::telemetry::capture_browser_open_failed(mode);
+        return None;
+    };
+    // Openers that run the browser in the foreground never exit; stop watching then.
+    Some(tokio::spawn(async move {
+        for _ in 0..50 {
+            match child.try_wait() {
+                Ok(Some(status)) if !status.success() => {
+                    return crate::telemetry::capture_browser_open_failed(mode)
+                }
+                Ok(None) => tokio::time::sleep(std::time::Duration::from_millis(100)).await,
+                _ => return,
+            }
+        }
+    }))
+}
+
+fn launch(url: &str) -> Option<Child> {
+    openers(url).into_iter().find_map(|mut cmd| {
+        cmd.stdin(Stdio::null())
             .stdout(Stdio::null())
             .stderr(Stdio::null())
             .spawn()
-            .is_ok()
-        {
-            return;
-        }
-    }
+            .ok()
+    })
 }
 
 /// The open commands to try, in order. On WSL the URL goes to the Windows
