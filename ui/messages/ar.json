@@ -580,6 +580,7 @@
   "activity_searched_pubmed": "بحث في PubMed",
   "activity_searched_literature": "بحث في الأدبيات",
   "activity_for_query": "{activity} عن «{query}»",
+  "activity_for_queries": "{activity} لـ {count} استعلامات",
   "activity_read_target": "قرأ {target}",
   "activity_read_paper": "قرأ ورقة",
   "activity_updated_experiment_notes": "حدّث ملاحظات التجربة",

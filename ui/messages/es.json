@@ -581,6 +581,7 @@
   "activity_searched_pubmed": "Buscó en PubMed",
   "activity_searched_literature": "Buscó en la literatura",
   "activity_for_query": "{activity}: “{query}”",
+  "activity_for_queries": "{activity} para {count} consultas",
   "activity_read_target": "Leyó {target}",
   "activity_read_paper": "Leyó un paper",
   "activity_updated_experiment_notes": "Actualizó las notas del experimento",

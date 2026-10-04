@@ -581,6 +581,7 @@
   "activity_searched_pubmed": "PubMed खोजा",
   "activity_searched_literature": "साहित्य खोजा",
   "activity_for_query": "“{query}” के लिए {activity}",
+  "activity_for_queries": "{activity}: {count} क्वेरी",
   "activity_read_target": "{target} पढ़ा",
   "activity_read_paper": "एक पेपर पढ़ा",
   "activity_updated_experiment_notes": "प्रयोग के नोट्स अपडेट किए",

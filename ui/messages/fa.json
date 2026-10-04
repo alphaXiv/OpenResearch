@@ -575,6 +575,7 @@
   "activity_searched_pubmed": "PubMed جست‌وجو شد",
   "activity_searched_literature": "منابع علمی جست‌وجو شد",
   "activity_for_query": "{activity}: «{query}»",
+  "activity_for_queries": "{activity} برای {count} جستجو",
   "activity_read_target": "{target} خوانده شد",
   "activity_read_paper": "یک مقاله خوانده شد",
   "activity_updated_experiment_notes": "یادداشت‌های آزمایش به‌روز شد",

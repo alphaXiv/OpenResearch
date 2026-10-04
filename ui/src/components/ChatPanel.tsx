@@ -158,6 +158,7 @@ import {
   containsShellGlob,
   orxArgsMatch,
   orxArgv,
+  recordedDiscoveryQueries,
   shellWords,
   shellWrapperBody,
   unwrapShellBody,
@@ -209,7 +210,7 @@ import {
   shouldRecoverLegacyMath,
   tableMarkdown,
 } from "./annotationMarkdown";
-import { Button, IconButton, LoadingRow, MenuItem, showAlert, Spinner } from "./ui";
+import { Button, IconButton, LoadingRow, MenuItem, showAlert, Spinner, Tooltip } from "./ui";
 import { PaperTitle } from "./PaperTitle";
 
 const TOOL_LINE_CLASS_NAME = "tool-line flex-1 min-w-0 line-clamp-2 break-words text-base leading-6";
@@ -808,6 +809,7 @@ interface ToolActivity {
   fileRef?: string;
   labelTarget?: string;
   litCall?: NonNullable<ReturnType<typeof parseOrxLit>>;
+  queries?: string[];
   runIds?: string[];
   experimentIds?: string[];
   /** Chat sessions `orx agent spawn` created in this tool call. */
@@ -1511,6 +1513,9 @@ function computeToolActivity(part: ChatPart): ToolActivity {
         return argv !== null && argv[0] !== "discover" && argv[0] !== "paper";
       });
       if (litCall && !hasNonLiteratureOrx) {
+        const queries = litCall.kind === "discover" && !litCall.query
+          ? recordedDiscoveryQueries(commandArgv ? shellWrapperBody(commandArgv) ?? command : command, toolOutput ?? "", litCall.strategy)
+          : [];
         const discoveryLabel = litCall.kind === "discover"
           ? {
             keyword: m.activity_searched_alphaxiv_full_text(),
@@ -1523,9 +1528,13 @@ function computeToolActivity(part: ChatPart): ToolActivity {
         const label = litCall.kind === "discover"
           ? litCall.query
             ? m.activity_for_query({ activity: discoveryLabel ?? m.activity_searched_literature(), query: litCall.query })
-            : discoveryLabel ?? m.activity_searched_literature()
+            : queries.length === 1
+              ? m.activity_for_query({ activity: discoveryLabel ?? m.activity_searched_literature(), query: queries[0] })
+              : queries.length > 1
+                ? m.activity_for_queries({ activity: discoveryLabel ?? m.activity_searched_literature(), count: fmtNumber(queries.length) })
+                : discoveryLabel ?? m.activity_searched_literature()
           : litCall.id ? m.activity_read_target({ target: ltr(litCall.id) }) : m.activity_read_paper();
-        return { kind: litCall.kind === "paper" ? "read" : "search", label, litCall };
+        return { kind: litCall.kind === "paper" ? "read" : "search", label, litCall, queries };
       }
 
       if (commandInvokesOrx(command, "agent\\s+spawn")) {
@@ -2235,6 +2244,7 @@ function squashableToolPartKey(part: ChatPart, activity: ToolActivity): string |
     activity.runIds ?? null,
     activity.experimentIds ?? null,
     activity.spawnedSessionIds ?? null,
+    activity.queries ?? null,
   ]);
 }
 
@@ -6207,9 +6217,11 @@ export function ChatPanel({
           {sidebarGrouping === "projects" ? m.projects_home_projects() : m.chat_all_sessions()}
         </div>
         <div className="rail-section-actions flex items-center gap-0.5">
-          {onNewProject && <IconButton size="small" className="text-subtext" aria-label={m.projects_home_new_project()} onClick={onNewProject}>
-            <FolderPlus size={15} className="text-subtext" />
-          </IconButton>}
+          {onNewProject && <Tooltip interactive content={m.projects_home_new_project()} className="rounded-sm">
+            <IconButton size="small" className="text-subtext" aria-label={m.projects_home_new_project()} onClick={onNewProject}>
+              <FolderPlus size={15} className="text-subtext" />
+            </IconButton>
+          </Tooltip>}
           <SessionFilterMenu value={sessionFilter} onChange={setSessionFilter} grouping={sidebarGrouping} onGroupingChange={(grouping) => {
             setSidebarGrouping(grouping);
             try { localStorage.setItem("sidebar-grouping", grouping); } catch {}
@@ -6334,7 +6346,7 @@ export function ChatPanel({
         </div>
       </div>
       {sidebarScrollable && <>
-        <div aria-hidden="true" className="pointer-events-none absolute inset-x-0 top-0 z-5 h-3 bg-linear-to-b from-background to-transparent" />
+        {(sidebarVirtualizer.scrollOffset ?? 0) > 0 && <div aria-hidden="true" className="pointer-events-none absolute inset-x-0 top-0 z-5 h-3 bg-linear-to-b from-background to-transparent" />}
         <div aria-hidden="true" className="pointer-events-none absolute inset-x-0 bottom-0 z-5 h-3 bg-linear-to-t from-background to-transparent" />
       </>}
       </div>

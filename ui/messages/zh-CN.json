@@ -575,6 +575,7 @@
   "activity_searched_pubmed": "已搜索 PubMed",
   "activity_searched_literature": "已搜索文献",
   "activity_for_query": "{activity}：“{query}”",
+  "activity_for_queries": "{activity}，共 {count} 个查询",
   "activity_read_target": "已读取 {target}",
   "activity_read_paper": "已读取论文",
   "activity_updated_experiment_notes": "已更新实验笔记",
