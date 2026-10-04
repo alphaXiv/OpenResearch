@@ -214,9 +214,8 @@ export function recordedDiscoveryQueries(command: string, output: string, strate
     const search = new RegExp(`(?:^|[;\\n])\\s*orx\\s+discover\\s+${strategy}\\s+"?\\$${variable}"?(?=\\s|[;|]|$)`);
     if (!search.test(body) || !body.includes(`echo "=== $${variable}"`)) continue;
     const literals = shellWords(values, true);
-    if (literals.some((value) => !value)) continue;
     for (const query of literals) {
-      if (headings.has(query)) queries.push(query);
+      if (query && headings.has(query)) queries.push(query);
     }
   }
   return queries;

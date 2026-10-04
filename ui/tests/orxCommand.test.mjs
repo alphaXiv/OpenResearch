@@ -178,6 +178,7 @@ test("batch discovery queries are confirmed by recorded output", () => {
   assert.deepEqual(recordedDiscoveryQueries(command, '', 'embedding'), []);
   assert.deepEqual(recordedDiscoveryQueries(command, '=== AI agents', 'keyword'), []);
   assert.deepEqual(recordedDiscoveryQueries(command.replace('"AI agents" "world models"', '"$topics"'), '=== $topics', 'embedding'), []);
+  assert.deepEqual(recordedDiscoveryQueries(command.replace('"world models"', '"$topic"'), '=== AI agents\n=== expanded topic', 'embedding'), ['AI agents']);
 });
 
 test("paper parsing remains intact", () => {
