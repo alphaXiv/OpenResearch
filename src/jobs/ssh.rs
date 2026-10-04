@@ -345,21 +345,28 @@ pub(crate) async fn master_is_running(_target: &SshTarget) -> Result<bool> {
     Ok(false)
 }
 
-#[cfg(not(unix))]
-pub(crate) async fn master_is_responsive(_target: &SshTarget) -> bool {
-    false
-}
-
-#[cfg(not(unix))]
-pub(crate) async fn master_exit(_target: &SshTarget) -> Result<()> {
-    Ok(())
-}
-
 #[cfg(unix)]
 fn parse_mux_pid(s: &str) -> Option<i32> {
     let start = s.find("(pid=")? + 5;
     let end = s[start..].find(')')? + start;
     s[start..end].trim().parse().ok()
+}
+
+#[cfg(unix)]
+fn is_ssh_master_proc(pid: i32, control_path: &std::path::Path) -> bool {
+    #[cfg(target_os = "linux")]
+    {
+        let Ok(cmdline) = std::fs::read(format!("/proc/{pid}/cmdline")) else {
+            return false;
+        };
+        let path_bytes = control_path.as_os_str().as_encoded_bytes();
+        cmdline.windows(path_bytes.len()).any(|w| w == path_bytes)
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        let _ = (pid, control_path);
+        false
+    }
 }
 
 #[cfg(unix)]
@@ -381,16 +388,9 @@ pub(crate) async fn master_is_running(target: &SshTarget) -> Result<bool> {
 
     let status = match tokio::time::timeout(Duration::from_secs(2), cmd.status()).await {
         Ok(Ok(status)) => status,
-        _ => {
-            let _ = std::fs::remove_file(&path);
-            return Ok(false);
-        }
+        _ => return Ok(false),
     };
-    if !status.success() {
-        let _ = std::fs::remove_file(&path);
-        return Ok(false);
-    }
-    Ok(true)
+    Ok(status.success())
 }
 
 #[cfg(unix)]
@@ -403,7 +403,7 @@ pub(crate) async fn master_is_responsive(target: &SshTarget) -> bool {
     cmd.arg("-o")
         .arg("BatchMode=yes")
         .arg("-o")
-        .arg("ConnectTimeout=5")
+        .arg("ConnectTimeout=10")
         .arg("-o")
         .arg("ControlMaster=no")
         .arg("-S")
@@ -417,7 +417,7 @@ pub(crate) async fn master_is_responsive(target: &SshTarget) -> bool {
         .stderr(Stdio::null())
         .kill_on_drop(true);
 
-    let probe = tokio::time::timeout(Duration::from_secs(5), cmd.status()).await;
+    let probe = tokio::time::timeout(Duration::from_secs(10), cmd.status()).await;
     matches!(probe, Ok(Ok(s)) if s.success())
 }
 
@@ -472,7 +472,7 @@ pub(crate) async fn master_exit(target: &SshTarget) -> Result<()> {
             }
             tokio::time::sleep(Duration::from_millis(50)).await;
         }
-        if unsafe { libc::kill(pid, 0) } == 0 {
+        if unsafe { libc::kill(pid, 0) } == 0 && is_ssh_master_proc(pid, &path) {
             unsafe { libc::kill(pid, libc::SIGTERM) };
         }
     }
@@ -997,6 +997,15 @@ mod tests {
         drop(UnixListener::bind(&path).unwrap());
         assert!(!master_is_responsive(&target).await);
         let _ = std::fs::remove_file(path);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn ssh_master_proc_verification_rejects_unrelated_processes() {
+        let path = std::path::Path::new("/tmp/some-nonexistent-socket");
+        assert!(!is_ssh_master_proc(std::process::id() as i32, path));
+        assert!(!is_ssh_master_proc(0, path));
+        assert!(!is_ssh_master_proc(-1, path));
     }
 
     #[cfg(unix)]
