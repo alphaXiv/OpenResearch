@@ -144,9 +144,6 @@ pub async fn run() {
     // After the claim, so a launch that only brings the window forward isn't a
     // start. The durable outbox covers a quit before delivery.
     let _telemetry = crate::telemetry::TelemetrySession::start_app();
-    if let Err(error) = crate::telemetry::mark_desktop_app_used() {
-        eprintln!("openresearch app: could not record the launch: {error}");
-    }
     if let Err(error) = crate::local::storage::prepare().await {
         eprintln!("OpenResearch storage: {error}");
         crate::show_error_dialog(&error.to_string());

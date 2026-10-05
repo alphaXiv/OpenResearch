@@ -173,9 +173,6 @@ pub(crate) struct Settings {
     /// Language the dashboard last reported it is displaying (e.g. `zh-CN`).
     #[serde(default)]
     pub dashboard_locale: Option<String>,
-    /// The desktop app has launched with this config dir, so the CLI stops pointing users at it.
-    #[serde(default)]
-    pub desktop_app_used: bool,
     #[serde(default)]
     harness_snapshot: Option<harness::InitialSnapshot>,
 }
@@ -321,18 +318,6 @@ pub(crate) fn github_default_prompt_seen() -> bool {
 
 pub(crate) fn set_github_default_prompt_seen(seen: bool) -> std::io::Result<()> {
     mutate_settings(|settings| settings.github_default_prompt_seen = Some(seen))
-}
-
-pub(crate) fn desktop_app_used() -> bool {
-    load_settings().is_some_and(|settings| settings.desktop_app_used)
-}
-
-#[cfg(desktop_app)]
-pub(crate) fn mark_desktop_app_used() -> std::io::Result<()> {
-    if desktop_app_used() {
-        return Ok(());
-    }
-    mutate_settings(|settings| settings.desktop_app_used = true)
 }
 
 fn dashboard_locale() -> Option<String> {
