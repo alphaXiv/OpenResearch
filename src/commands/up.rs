@@ -233,7 +233,11 @@ pub async fn run(args: UpArgs) -> Result<()> {
         if let Some(warning) = crate::local::bash::missing_toolchain() {
             eprintln!("orx up: warning: {warning}");
         }
-        if !args.desktop_app && !persistent_host && std::io::stderr().is_terminal() {
+        if !args.desktop_app
+            && !persistent_host
+            && std::io::stderr().is_terminal()
+            && !crate::telemetry::desktop_app_used()
+        {
             eprintln!(
                 "orx up: the OpenResearch desktop app opens these same projects: {}",
                 crate::updates::desktop_app_download_url()
@@ -6243,6 +6247,7 @@ async fn local_runtime() -> Json<Value> {
         "kind": "local",
         "version": env!("CARGO_PKG_VERSION"),
         "sshSession": crate::remote::detect_ssh_session().is_some(),
+        "desktopAppUsed": crate::telemetry::desktop_app_used(),
     }))
 }
 

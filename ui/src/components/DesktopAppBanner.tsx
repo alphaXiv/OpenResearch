@@ -5,7 +5,7 @@ import { m } from "../paraglide/messages.js";
 import { IconButton } from "./ui";
 
 const DISMISSED_KEY = "desktop-app-banner-dismissed-at";
-const SNOOZE_MS = 14 * 24 * 60 * 60 * 1000;
+const SNOOZE_MS = 24 * 60 * 60 * 1000;
 const RELEASES = "https://github.com/alphaXiv/OpenResearch/releases/latest";
 
 // Null when the platform names no asset: the viewer picks one from the release page.

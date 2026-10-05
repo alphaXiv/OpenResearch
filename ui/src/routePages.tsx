@@ -81,7 +81,7 @@ export function ProjectsPage() {
 
   return (
     <div className="app flex flex-col h-full">
-      {runtime.kind === "local" && <><OfflineBanner /><UpdateBanner status={status} /><DesktopAppBanner hidden={runtime.sshSession || status?.restartRequired} /></>}
+      {runtime.kind === "local" && <><OfflineBanner /><UpdateBanner status={status} /><DesktopAppBanner hidden={runtime.sshSession || runtime.desktopAppUsed || status?.restartRequired} /></>}
       {error && (!projects || !state) ? <RouteFailure error={error} reset={retry} />
         : !projects || !state ? <RoutePending />
           : onboarding ? (
