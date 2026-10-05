@@ -9,6 +9,15 @@ commands. Its master stays available for 24 hours of idle time and sends
 keepalives every 30 seconds. Use `--persist <seconds>` to set a new master's idle
 lifetime (`0` keeps it indefinitely); an existing master retains its settings.
 Reconnect to recover an expired login.
+On Unix with OpenSSH 8.4 or newer, successful connections automatically install
+`Include openresearch_config` in `~/.ssh/config`. Agents and ordinary `ssh`,
+`scp`, and `rsync` commands reuse a live connection for the same user, host,
+port, and jump route. Existing user `ControlPath` settings take precedence.
+Symlinked configs require adding the reported Include manually.
+OpenResearch-launched agents select their instance's connection directory;
+external terminals use the default configuration unless they export
+`ORX_SSH_CONTROL_DIR` to the instance's directory. After upgrading from older
+socket naming, reconnect once; existing masters are not terminated.
 Monitoring outages are reported after 60 seconds without declaring the remote
 job stopped. Reconnecting resumes status and log polling.
 

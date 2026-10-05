@@ -5772,7 +5772,17 @@ async fn ssh_connect_socket(
     };
 
     match status {
-        Ok(status) if status.success() => {}
+        Ok(status) if status.success() => {
+            if let Some(warning) = crate::jobs::ssh::setup_connection_sharing(&target).await {
+                let _ = socket
+                    .send(Message::Binary(
+                        format!("\r\norx: warning: {warning}\r\n")
+                            .into_bytes()
+                            .into(),
+                    ))
+                    .await;
+            }
+        }
         Ok(status) => {
             send_ssh_connect_error(
                 &mut socket,

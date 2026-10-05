@@ -15,6 +15,8 @@
 //! A restarted `orx supervise` reattaches purely from that directory.
 
 mod container;
+#[cfg(unix)]
+mod sharing;
 pub use container::{
     resolve as resolve_container, validate_reference as validate_container_reference, ContainerRun,
 };
@@ -32,11 +34,16 @@ use crate::error::{anyhow, Result};
 /// Keep sockets out of config paths, which can exceed macOS's 104-byte limit.
 #[cfg(unix)]
 fn control_dir() -> PathBuf {
+    control_dir_for(&crate::config::config_dir())
+}
+
+#[cfg(unix)]
+fn control_dir_for(config_dir: &std::path::Path) -> PathBuf {
     use std::hash::{Hash as _, Hasher as _};
 
     let uid = unsafe { libc::geteuid() };
     let mut namespace = std::collections::hash_map::DefaultHasher::new();
-    crate::config::config_dir().hash(&mut namespace);
+    config_dir.hash(&mut namespace);
     PathBuf::from("/tmp").join(format!("orx-ssh-{uid}-{:08x}", namespace.finish() as u32))
 }
 
@@ -206,6 +213,9 @@ fn discarded_known_hosts() -> std::path::PathBuf {
 
 #[cfg(unix)]
 fn control_path(target: &SshTarget) -> PathBuf {
+    if target.extra_opts.is_empty() {
+        return control_dir().join("%C");
+    }
     // A 16-hex hash leaves room for ssh's temporary bind suffix. It folds in
     // the extra opts so different ports never share a control socket.
     use std::hash::{Hash, Hasher};
@@ -298,12 +308,14 @@ pub(crate) async fn interactive_args(
 ) -> Result<InteractiveConnection> {
     prepare_control_dir()?;
     #[cfg(unix)]
+    let path = resolved_control_path(target).await?;
+    #[cfg(unix)]
     let lock = {
         let file = std::fs::OpenOptions::new()
             .create(true)
             .truncate(false)
             .write(true)
-            .open(control_path(target).with_extension("lock"))?;
+            .open(path.with_extension("lock"))?;
         loop {
             match file.try_lock() {
                 Ok(()) => break,
@@ -317,7 +329,7 @@ pub(crate) async fn interactive_args(
     };
     #[cfg(unix)]
     if !master_is_running(target).await? {
-        match std::fs::remove_file(control_path(target)) {
+        match std::fs::remove_file(&path) {
             Ok(()) => {}
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
             Err(error) => return Err(error.into()),
@@ -345,12 +357,10 @@ pub(crate) async fn master_is_running(_target: &SshTarget) -> Result<bool> {
 pub(crate) async fn master_is_running(target: &SshTarget) -> Result<bool> {
     prepare_control_dir()?;
     let path = control_path(target);
-    if !path.try_exists()? {
-        return Ok(false);
-    }
     let status = Command::new("ssh")
         .args(["-O", "check", "-S"])
         .arg(path)
+        .args(&target.extra_opts)
         .arg("--")
         .arg(&target.dest)
         .stdin(Stdio::null())
@@ -361,6 +371,64 @@ pub(crate) async fn master_is_running(target: &SshTarget) -> Result<bool> {
         .await
         .map_err(|e| anyhow!("Could not check the SSH master: {e}"))?;
     Ok(status.success())
+}
+
+#[cfg(unix)]
+async fn resolved_control_path(target: &SshTarget) -> Result<PathBuf> {
+    if !target.extra_opts.is_empty() {
+        return Ok(control_path(target));
+    }
+    let output = Command::new("ssh")
+        .arg("-G")
+        .args(ssh_opts(target, true))
+        .arg("--")
+        .arg(&target.dest)
+        .stdin(Stdio::null())
+        .kill_on_drop(true)
+        .output()
+        .await?;
+    if !output.status.success() {
+        return Err(anyhow!(
+            "Could not resolve SSH connection for {}: {}",
+            target.dest,
+            String::from_utf8_lossy(&output.stderr).trim()
+        ));
+    }
+    let path = String::from_utf8_lossy(&output.stdout)
+        .lines()
+        .find_map(|line| line.strip_prefix("controlpath ").map(PathBuf::from))
+        .ok_or_else(|| anyhow!("OpenSSH did not resolve a ControlPath for {}", target.dest))?;
+    let valid_name = path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .is_some_and(|name| name.len() == 40 && name.bytes().all(|byte| byte.is_ascii_hexdigit()));
+    if path.parent() != Some(control_dir().as_path()) || !valid_name {
+        return Err(anyhow!(
+            "OpenSSH returned an unresolved or unexpected ControlPath for {}: {}",
+            target.dest,
+            path.display()
+        ));
+    }
+    Ok(path)
+}
+
+pub(crate) fn prepare_sharing_env(cmd: &mut tokio::process::Command) {
+    #[cfg(unix)]
+    cmd.env("ORX_SSH_CONTROL_DIR", control_dir());
+    #[cfg(not(unix))]
+    cmd.env_remove("ORX_SSH_CONTROL_DIR");
+}
+
+pub(crate) async fn setup_connection_sharing(target: &SshTarget) -> Option<String> {
+    #[cfg(unix)]
+    if target.extra_opts.is_empty() {
+        return sharing::setup(target).await.err().map(|error| {
+            format!("SSH login succeeded, but connection sharing is unavailable: {error}")
+        });
+    }
+    #[cfg(not(unix))]
+    let _ = target;
+    None
 }
 
 /// Run a command on `target` over ssh, feeding `stdin` if given, returning stdout.
@@ -752,6 +820,9 @@ pub async fn preflight(target: &SshTarget) -> SshPreflight {
     .await
     {
         Ok(out) => {
+            if let Some(warning) = setup_connection_sharing(target).await {
+                eprintln!("orx: warning: {warning}");
+            }
             let missing_tools = [("MISSING_BASH", "bash"), ("MISSING_TAR", "tar")]
                 .into_iter()
                 .filter(|(marker, _)| out.contains(marker))
@@ -810,7 +881,7 @@ mod tests {
         use std::os::unix::{fs::symlink, net::UnixListener};
         let target = SshTarget::alias(&format!("orx-test-{}", uuid::Uuid::new_v4()));
         prepare_control_dir().unwrap();
-        let path = control_path(&target);
+        let path = resolved_control_path(&target).await.unwrap();
         drop(UnixListener::bind(&path).unwrap());
         interactive_args(&target, None).await.unwrap();
         assert!(std::fs::symlink_metadata(&path).is_err());

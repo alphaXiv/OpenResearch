@@ -1021,6 +1021,9 @@ async fn connect_once(
         return ConnectionEnd::Cancelled;
     }
 
+    if let Some(warning) = crate::jobs::ssh::setup_connection_sharing(&session.target).await {
+        eprintln!("orx: warning: {warning}");
+    }
     let mut heartbeat = tokio::time::interval(Duration::from_secs(5));
     loop {
         tokio::select! {
