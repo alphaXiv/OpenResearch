@@ -389,7 +389,13 @@ pub(crate) async fn interactive_args(
         file
     };
     #[cfg(unix)]
-    if !check_master(target, &path, &options).await? {
+    if control_master(target, &path, &options, "check").await? {
+        if !master_accepts_sessions(target, &path, &options).await?
+            && !control_master(target, &path, &options, "stop").await?
+        {
+            return Err(anyhow!("Could not retire the existing SSH connection; retry Connect once the gateway responds."));
+        }
+    } else {
         match std::fs::remove_file(&path) {
             Ok(()) => {}
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
@@ -419,27 +425,36 @@ pub(crate) async fn master_is_running(target: &SshTarget) -> Result<bool> {
     prepare_control_dir()?;
     if target.extra_opts.is_empty() {
         let connection = prepared::prepare(target, false).await?;
-        return check_master(
+        return control_master(
             target,
             &connection
                 .path
                 .with_file_name(&connection.publication.socket_name),
             &ssh_opts_prepared(target, true, &connection),
+            "check",
         )
         .await;
     }
-    check_master(target, &control_path(target), &ssh_opts(target, true)).await
+    control_master(
+        target,
+        &control_path(target),
+        &ssh_opts(target, true),
+        "check",
+    )
+    .await
 }
 
 #[cfg(unix)]
-async fn check_master(
+async fn control_master(
     target: &SshTarget,
     path: &std::path::Path,
     options: &[String],
+    operation: &str,
 ) -> Result<bool> {
-    let status = Command::new("ssh")
+    let mut command = Command::new("ssh");
+    command
         .env("ORX_SSH_PROBE", "1")
-        .args(["-O", "check", "-S"])
+        .args(["-O", operation, "-S"])
         .arg(path)
         .args(options)
         .arg("--")
@@ -447,11 +462,46 @@ async fn check_master(
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::null())
-        .kill_on_drop(true)
-        .status()
+        .kill_on_drop(true);
+    let status = tokio::time::timeout(Duration::from_secs(10), command.status())
         .await
-        .map_err(|e| anyhow!("Could not check the SSH master: {e}"))?;
+        .map_err(|_| anyhow!("Timed out trying to {operation} the SSH master; retry Connect once the gateway responds."))?
+        .map_err(|e| anyhow!("Could not {operation} the SSH master: {e}"))?;
     Ok(status.success())
+}
+
+#[cfg(unix)]
+async fn master_accepts_sessions(
+    target: &SshTarget,
+    path: &std::path::Path,
+    options: &[String],
+) -> Result<bool> {
+    let mut command = Command::new("ssh");
+    command
+        .env("ORX_SSH_PROBE", "1")
+        // Refused mux sessions can fall back to a new transport; this probe must not.
+        .args([
+            "-oBatchMode=yes",
+            "-oControlMaster=no",
+            "-oControlPersist=no",
+            "-oProxyCommand=false",
+            "-oClearAllForwardings=yes",
+            "-oRemoteCommand=none",
+            "-T",
+            "-S",
+        ])
+        .arg(path)
+        .args(options)
+        .args(["--", &target.dest, "echo __ORX_SESSION_OK__"])
+        .stdin(Stdio::null())
+        .kill_on_drop(true);
+    let output = tokio::time::timeout(Duration::from_secs(10), command.output())
+        .await
+        .map_err(|_| anyhow!("Timed out probing the existing SSH connection; retry Connect once the gateway responds."))??;
+    Ok(output.status.success()
+        && String::from_utf8_lossy(&output.stdout)
+            .lines()
+            .any(|line| line == "__ORX_SESSION_OK__"))
 }
 
 #[cfg(unix)]
