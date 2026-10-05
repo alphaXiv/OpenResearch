@@ -174,7 +174,7 @@ fn install(ssh_dir: &Path, default_dir: &Path, publication: Option<Publication>)
         let from = if end == updated.len() {
             start
         } else {
-            start + 1
+            end - INCLUDE.len()
         };
         updated.drain(from..end);
     }
@@ -422,7 +422,7 @@ mod tests {
         let moved = std::fs::read(&user_config).unwrap();
         assert_eq!(
             moved,
-            [original.as_slice(), b"\n", later, FOOTER.as_bytes()].concat()
+            [original.as_slice(), b"\nHost *\n", later, FOOTER.as_bytes()].concat()
         );
         install(&ssh_dir, Path::new("/tmp/default"), None).unwrap();
         assert_eq!(std::fs::read(&user_config).unwrap(), moved);
@@ -436,6 +436,20 @@ mod tests {
             std::fs::read(&user_config).unwrap(),
             [b"# legacy\n", moved.as_slice()].concat()
         );
+        std::fs::write(
+            &user_config,
+            [b"Host office", FOOTER.as_bytes(), b"  Port 2222\n"].concat(),
+        )
+        .unwrap();
+        install(&ssh_dir, Path::new("/tmp/default"), None).unwrap();
+        let resolved = std::process::Command::new("ssh")
+            .args(["-G", "-F"])
+            .arg(&user_config)
+            .arg("another-host")
+            .output()
+            .unwrap();
+        assert!(resolved.status.success());
+        assert!(String::from_utf8_lossy(&resolved.stdout).contains("port 2222\n"));
         std::fs::remove_file(&user_config).unwrap();
         let real = temp.path().join("real");
         std::fs::write(&real, original).unwrap();
