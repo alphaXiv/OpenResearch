@@ -206,9 +206,10 @@ async fn resolve(dest: &str, config: Option<&std::path::Path>) -> Result<Prepare
     args.extend(["--".into(), dest.into()]);
     let first = query(args).await?;
     let host = host(&first)?.to_owned();
-    if !host
-        .bytes()
-        .all(|byte| byte.is_ascii_alphanumeric() || b".-_:".contains(&byte))
+    if host.is_empty()
+        || host.chars().any(|character| {
+            character.is_control() || character.is_whitespace() || "*?,!".contains(character)
+        })
     {
         return Err(anyhow!(
             "Cannot safely prepare SSH alias {host}; use a plain host alias"
@@ -314,15 +315,17 @@ mod tests {
     async fn configured_routes_have_distinct_identities_and_remain_pinned_after_edits() {
         let temp = crate::local::git::TemporaryDirectory::new("orx-route").unwrap();
         let config = temp.path().join("config with spaces");
-        let original = "Host direct equivalent command-a command-b jump-a jump-b\n HostName example.invalid\n User alice\n Port 2222\n IdentityFile \"/tmp/key with spaces\"\nHost command-a\n ProxyCommand printf a\nHost command-b\n ProxyCommand printf b\nHost jump-a\n ProxyJump gateway-a\nHost jump-b\n ProxyJump gateway-b\nHost gateway-a\n HostName first.invalid\nHost gateway-b\n HostName second.invalid\n";
+        let original = "Host direct equivalent gpu+cluster command-a command-b jump-a jump-b\n HostName example.invalid\n User alice\n Port 2222\n IdentityFile \"/tmp/key with spaces\"\nHost command-a\n ProxyCommand printf a\nHost command-b\n ProxyCommand printf b\nHost jump-a\n ProxyJump gateway-a\nHost jump-b\n ProxyJump gateway-b\nHost gateway-a\n HostName first.invalid\nHost gateway-b\n HostName second.invalid\n";
         std::fs::write(&config, original).unwrap();
         let direct = resolve("direct", Some(&config)).await.unwrap();
         let equivalent = resolve("equivalent", Some(&config)).await.unwrap();
+        let literal = resolve("gpu+cluster", Some(&config)).await.unwrap();
         let command_a = resolve("command-a", Some(&config)).await.unwrap();
         let command_b = resolve("command-b", Some(&config)).await.unwrap();
         let jump_a = resolve("jump-a", Some(&config)).await.unwrap();
         let jump_b = resolve("jump-b", Some(&config)).await.unwrap();
         assert_eq!(direct.path, equivalent.path);
+        assert_eq!(direct.path, literal.path);
         assert_ne!(command_a.path, command_b.path);
         assert_ne!(jump_a.path, jump_b.path);
         std::fs::write(
