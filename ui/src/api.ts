@@ -1054,7 +1054,8 @@ export interface RemoteSessionInfo {
 }
 
 export type RuntimeInfo =
-  | { kind: "local"; version: string }
+  // `sshSession`: this local server was started inside SSH, so the browser reaches it through a forward.
+  | { kind: "local"; version: string; sshSession: boolean }
   | { kind: "ssh"; version: string; dashboardProtocol: number; session: RemoteSessionInfo };
 
 export const getRuntime = (signal?: AbortSignal) => get<RuntimeInfo>("/_orx/runtime", signal);
