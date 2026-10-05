@@ -12,12 +12,17 @@ Reconnect to recover an expired login.
 On Unix with OpenSSH 8.4 or newer, successful connections automatically install
 `Include openresearch_config` in `~/.ssh/config`. Agents and ordinary `ssh`,
 `scp`, and `rsync` commands reuse a live connection for the same user, host,
-and port. Existing user `ControlPath` settings take precedence.
+and port of a connected alias. Configured `ProxyJump` and `ProxyCommand` routes
+remain separate. Existing user `ControlPath` settings, including `Match final`,
+take precedence; the managed Include appears after your settings.
 Symlinked configs require adding the reported Include manually.
 OpenResearch-launched agents select their instance's connection directory;
 external terminals use the default configuration unless they export
 `ORX_SSH_CONTROL_DIR` to the instance's directory. After upgrading from older
 socket naming, reconnect once; existing masters are not terminated.
+Changing a configured route requires reconnecting before ordinary commands can
+reuse it. For command-line proxy overrides, use a separate configured alias or
+`-S none`; native SSH does not expose those overrides to the sharing predicate.
 Monitoring outages are reported after 60 seconds without declaring the remote
 job stopped. Reconnecting resumes status and log polling.
 

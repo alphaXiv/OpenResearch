@@ -215,6 +215,7 @@ fn supervisor_recovers_monitoring_and_logs(ssh_backend: bool) {
     std::fs::write(
         &ssh,
         r#"#!/bin/sh
+if [ "$1" = -G ]; then exec /usr/bin/ssh -F /dev/null "$@"; fi
 printf '%s\n' "$*" >> "$HOME/calls"
 case "$*" in
   *sbatch*|*scancel*) exit 99;;
@@ -413,6 +414,7 @@ fn slurm_cancel_requires_acknowledgement_and_survives_restart_without_accounting
         (
             "ssh",
             r#"#!/bin/sh
+if [ "$1" = -G ]; then exec /usr/bin/ssh -F /dev/null "$@"; fi
 for cmd do :; done
 case "$cmd" in
   *scancel*|*exit_code*) exec /bin/sh -c "$cmd";;

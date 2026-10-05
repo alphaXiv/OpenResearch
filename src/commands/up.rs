@@ -5663,6 +5663,9 @@ fn start_pty_with_env(
     for (key, value) in env {
         command.env(key, value);
     }
+    if program == "ssh" {
+        command.env("ORX_SSH_PROBE", "1");
+    }
     let mut child = pair.slave.spawn_command(command)?;
     drop(pair.slave);
 

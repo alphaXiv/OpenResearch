@@ -624,10 +624,12 @@ async fn interactive_command(program: &str, args: &[String]) -> Result<()> {
     let path = crate::local::shell_env::find_on_path(program).ok_or_else(|| {
         anyhow!("{program} is not installed. Install it, then retry compute connect.")
     })?;
-    let status = tokio::process::Command::new(path)
-        .args(args)
-        .status()
-        .await?;
+    let mut command = tokio::process::Command::new(path);
+    command.args(args);
+    if program == "ssh" {
+        command.env("ORX_SSH_PROBE", "1");
+    }
+    let status = command.status().await?;
     if !status.success() {
         return Err(anyhow!("{program} exited with {status}."));
     }

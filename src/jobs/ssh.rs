@@ -16,6 +16,8 @@
 
 mod container;
 #[cfg(unix)]
+mod prepared;
+#[cfg(unix)]
 mod sharing;
 pub use container::{
     resolve as resolve_container, validate_reference as validate_container_reference, ContainerRun,
@@ -214,7 +216,9 @@ fn discarded_known_hosts() -> std::path::PathBuf {
 #[cfg(unix)]
 fn control_path(target: &SshTarget) -> PathBuf {
     if target.extra_opts.is_empty() {
-        return control_dir().join("%C");
+        return prepared::cached(target)
+            .map(|connection| control_dir().join(connection.publication.socket_name))
+            .unwrap_or_else(|| control_dir().join("%C"));
     }
     // A 16-hex hash leaves room for ssh's temporary bind suffix. It folds in
     // the extra opts so different ports never share a control socket.
@@ -242,6 +246,15 @@ fn ssh_opts(target: &SshTarget, batch: bool) -> Vec<String> {
     ];
     opts.extend(multiplexing_opts(target));
     opts.extend(target.extra_opts.iter().cloned());
+    #[cfg(unix)]
+    if target.extra_opts.is_empty() {
+        if let Some(connection) = prepared::cached(target) {
+            opts.extend([
+                "-F".into(),
+                connection.snapshot.to_string_lossy().into_owned(),
+            ]);
+        }
+    }
     opts
 }
 
@@ -308,7 +321,11 @@ pub(crate) async fn interactive_args(
 ) -> Result<InteractiveConnection> {
     prepare_control_dir()?;
     #[cfg(unix)]
-    let path = resolved_control_path(target).await?;
+    let path = if target.extra_opts.is_empty() {
+        prepared::prepare(target, true).await?.path
+    } else {
+        control_path(target)
+    };
     #[cfg(unix)]
     let lock = {
         let file = std::fs::OpenOptions::new()
@@ -356,11 +373,15 @@ pub(crate) async fn master_is_running(_target: &SshTarget) -> Result<bool> {
 #[cfg(unix)]
 pub(crate) async fn master_is_running(target: &SshTarget) -> Result<bool> {
     prepare_control_dir()?;
+    if target.extra_opts.is_empty() {
+        prepared::prepare(target, false).await?;
+    }
     let path = control_path(target);
     let status = Command::new("ssh")
+        .env("ORX_SSH_PROBE", "1")
         .args(["-O", "check", "-S"])
         .arg(path)
-        .args(&target.extra_opts)
+        .args(ssh_opts(target, true))
         .arg("--")
         .arg(&target.dest)
         .stdin(Stdio::null())
@@ -378,41 +399,11 @@ async fn resolved_control_path(target: &SshTarget) -> Result<PathBuf> {
     if !target.extra_opts.is_empty() {
         return Ok(control_path(target));
     }
-    let output = Command::new("ssh")
-        .arg("-G")
-        .args(ssh_opts(target, true))
-        .arg("--")
-        .arg(&target.dest)
-        .stdin(Stdio::null())
-        .kill_on_drop(true)
-        .output()
-        .await?;
-    if !output.status.success() {
-        return Err(anyhow!(
-            "Could not resolve SSH connection for {}: {}",
-            target.dest,
-            String::from_utf8_lossy(&output.stderr).trim()
-        ));
-    }
-    let path = String::from_utf8_lossy(&output.stdout)
-        .lines()
-        .find_map(|line| line.strip_prefix("controlpath ").map(PathBuf::from))
-        .ok_or_else(|| anyhow!("OpenSSH did not resolve a ControlPath for {}", target.dest))?;
-    let valid_name = path
-        .file_name()
-        .and_then(|name| name.to_str())
-        .is_some_and(|name| name.len() == 40 && name.bytes().all(|byte| byte.is_ascii_hexdigit()));
-    if path.parent() != Some(control_dir().as_path()) || !valid_name {
-        return Err(anyhow!(
-            "OpenSSH returned an unresolved or unexpected ControlPath for {}: {}",
-            target.dest,
-            path.display()
-        ));
-    }
-    Ok(path)
+    Ok(prepared::prepare(target, false).await?.path)
 }
 
 pub(crate) fn prepare_sharing_env(cmd: &mut tokio::process::Command) {
+    cmd.env_remove("ORX_SSH_PROBE");
     #[cfg(unix)]
     cmd.env("ORX_SSH_CONTROL_DIR", control_dir());
     #[cfg(not(unix))]
@@ -449,7 +440,12 @@ async fn ssh_run_bytes(
     stdin: Option<&[u8]>,
 ) -> Result<String> {
     prepare_control_dir()?;
+    #[cfg(unix)]
+    if target.extra_opts.is_empty() {
+        prepared::prepare(target, false).await?;
+    }
     let mut cmd = Command::new("ssh");
+    cmd.env("ORX_SSH_PROBE", "1");
     cmd.args(ssh_opts(target, true))
         .arg("--")
         .arg(&target.dest)
@@ -502,7 +498,12 @@ async fn ssh_run_file(
     source: &std::path::Path,
 ) -> Result<String> {
     prepare_control_dir()?;
+    #[cfg(unix)]
+    if target.extra_opts.is_empty() {
+        prepared::prepare(target, false).await?;
+    }
     let mut child = Command::new("ssh")
+        .env("ORX_SSH_PROBE", "1")
         .args(ssh_opts(target, true))
         .arg("--")
         .arg(&target.dest)
