@@ -165,10 +165,7 @@ fn install(ssh_dir: &Path, default_dir: &Path, publication: Option<Publication>)
             INCLUDE.trim()
         ));
     }
-    let mut updated = current
-        .strip_prefix(INCLUDE.as_bytes())
-        .unwrap_or(&current)
-        .to_vec();
+    let mut updated = current.clone();
     while let Some(start) = updated
         .windows(FOOTER.len())
         .position(|bytes| bytes == FOOTER.as_bytes())
@@ -180,6 +177,16 @@ fn install(ssh_dir: &Path, default_dir: &Path, publication: Option<Publication>)
             start + 1
         };
         updated.drain(from..end);
+    }
+    while let Some(start) = updated
+        .windows(INCLUDE.len())
+        .enumerate()
+        .find(|(start, bytes)| {
+            (*start == 0 || updated[*start - 1] == b'\n') && *bytes == INCLUDE.as_bytes()
+        })
+        .map(|(start, _)| start)
+    {
+        updated.drain(start..start + INCLUDE.len());
     }
     updated.extend_from_slice(FOOTER.as_bytes());
     if updated != current {
@@ -419,6 +426,16 @@ mod tests {
         );
         install(&ssh_dir, Path::new("/tmp/default"), None).unwrap();
         assert_eq!(std::fs::read(&user_config).unwrap(), moved);
+        std::fs::write(
+            &user_config,
+            [b"# legacy\n", INCLUDE.as_bytes(), moved.as_slice()].concat(),
+        )
+        .unwrap();
+        install(&ssh_dir, Path::new("/tmp/default"), None).unwrap();
+        assert_eq!(
+            std::fs::read(&user_config).unwrap(),
+            [b"# legacy\n", moved.as_slice()].concat()
+        );
         std::fs::remove_file(&user_config).unwrap();
         let real = temp.path().join("real");
         std::fs::write(&real, original).unwrap();
