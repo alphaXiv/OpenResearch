@@ -1,11 +1,10 @@
 import { Download, X } from "lucide-react";
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { m } from "../paraglide/messages.js";
 
 import { IconButton } from "./ui";
 
-const DISMISSED_KEY = "desktop-app-banner-dismissed-at";
-const SNOOZE_MS = 24 * 60 * 60 * 1000;
+const DISMISSED_KEY = "desktop-app-banner-dismissed-on";
 const RELEASES = "https://github.com/alphaXiv/OpenResearch/releases/latest";
 
 // Null when the platform names no asset: the viewer picks one from the release page.
@@ -18,22 +17,33 @@ function asset(): string | null {
   return null;
 }
 
-function snoozed(): boolean {
+// Dismissing lasts until the viewer's next calendar day.
+function today(): string {
+  return new Date().toDateString();
+}
+
+function dismissedToday(): boolean {
   try {
-    return Date.now() - Number(localStorage.getItem(DISMISSED_KEY)) < SNOOZE_MS;
+    return localStorage.getItem(DISMISSED_KEY) === today();
   } catch {
     return false;
   }
 }
 
 /** Points browser-dashboard users at the desktop app, which reads the same projects. */
-export function DesktopAppBanner({ hidden }: { hidden?: boolean }) {
-  const [dismissed, setDismissed] = useState(() => "__ORX_DESKTOP__" in window || snoozed());
-  if (dismissed || hidden) return null;
+export function DesktopAppBanner() {
+  const [dismissed, setDismissed] = useState(dismissedToday);
+  // Dashboards stay open for days: re-check when the tab comes back.
+  useEffect(() => {
+    const recheck = () => setDismissed(dismissedToday());
+    window.addEventListener("focus", recheck);
+    return () => window.removeEventListener("focus", recheck);
+  }, []);
+  if ("__ORX_DESKTOP__" in window || dismissed) return null;
 
   const dismiss = () => {
     try {
-      localStorage.setItem(DISMISSED_KEY, String(Date.now()));
+      localStorage.setItem(DISMISSED_KEY, today());
     } catch {
       // Storage is off: the banner returns on the next load.
     }

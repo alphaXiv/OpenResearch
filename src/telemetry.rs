@@ -327,6 +327,7 @@ pub(crate) fn desktop_app_used() -> bool {
     load_settings().is_some_and(|settings| settings.desktop_app_used)
 }
 
+#[cfg(desktop_app)]
 pub(crate) fn mark_desktop_app_used() -> std::io::Result<()> {
     if desktop_app_used() {
         return Ok(());

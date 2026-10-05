@@ -6246,7 +6246,6 @@ async fn local_runtime() -> Json<Value> {
     Json(json!({
         "kind": "local",
         "version": env!("CARGO_PKG_VERSION"),
-        "sshSession": crate::remote::detect_ssh_session().is_some(),
         "desktopAppUsed": crate::telemetry::desktop_app_used(),
     }))
 }
