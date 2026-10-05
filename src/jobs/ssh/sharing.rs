@@ -165,10 +165,24 @@ fn install(ssh_dir: &Path, default_dir: &Path, publication: Option<Publication>)
             INCLUDE.trim()
         ));
     }
-    let current = current.strip_prefix(INCLUDE.as_bytes()).unwrap_or(&current);
-    if !current.ends_with(FOOTER.as_bytes()) {
-        let mut updated = current.to_vec();
-        updated.extend_from_slice(FOOTER.as_bytes());
+    let mut updated = current
+        .strip_prefix(INCLUDE.as_bytes())
+        .unwrap_or(&current)
+        .to_vec();
+    while let Some(start) = updated
+        .windows(FOOTER.len())
+        .position(|bytes| bytes == FOOTER.as_bytes())
+    {
+        let end = start + FOOTER.len();
+        let from = if end == updated.len() {
+            start
+        } else {
+            start + 1
+        };
+        updated.drain(from..end);
+    }
+    updated.extend_from_slice(FOOTER.as_bytes());
+    if updated != current {
         crate::local::git::atomic_write_with_mode(&user_config, &updated, Some(0o600))?;
     }
     Ok(())
@@ -395,6 +409,16 @@ mod tests {
         assert_eq!(&once[..original.len()], original);
         install(&ssh_dir, Path::new("/tmp/default"), None).unwrap();
         assert_eq!(std::fs::read(&user_config).unwrap(), once);
+        let later = b"Match final\n  ControlPath none\n";
+        std::fs::write(&user_config, [once.as_slice(), later].concat()).unwrap();
+        install(&ssh_dir, Path::new("/tmp/default"), None).unwrap();
+        let moved = std::fs::read(&user_config).unwrap();
+        assert_eq!(
+            moved,
+            [original.as_slice(), b"\n", later, FOOTER.as_bytes()].concat()
+        );
+        install(&ssh_dir, Path::new("/tmp/default"), None).unwrap();
+        assert_eq!(std::fs::read(&user_config).unwrap(), moved);
         std::fs::remove_file(&user_config).unwrap();
         let real = temp.path().join("real");
         std::fs::write(&real, original).unwrap();

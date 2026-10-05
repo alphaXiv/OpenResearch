@@ -232,6 +232,39 @@ fn control_path(target: &SshTarget) -> PathBuf {
 /// Shared ssh options: setup may prompt, background work never does; on unix one shared
 /// socket lets a single login cover both.
 fn ssh_opts(target: &SshTarget, batch: bool) -> Vec<String> {
+    #[cfg(unix)]
+    if target.extra_opts.is_empty() {
+        if let Some(connection) = prepared::cached(target) {
+            return ssh_opts_prepared(target, batch, &connection);
+        }
+    }
+    ssh_options(target, batch, multiplexing_opts(target), None)
+}
+
+#[cfg(unix)]
+fn ssh_opts_prepared(
+    target: &SshTarget,
+    batch: bool,
+    connection: &prepared::Prepared,
+) -> Vec<String> {
+    ssh_options(
+        target,
+        batch,
+        multiplexing_opts_for(
+            &connection
+                .path
+                .with_file_name(&connection.publication.socket_name),
+        ),
+        Some(&connection.snapshot),
+    )
+}
+
+fn ssh_options(
+    target: &SshTarget,
+    batch: bool,
+    multiplexing: Vec<String>,
+    config: Option<&std::path::Path>,
+) -> Vec<String> {
     let mut opts = vec![
         "-o".into(),
         format!("BatchMode={}", if batch { "yes" } else { "no" }),
@@ -244,27 +277,26 @@ fn ssh_opts(target: &SshTarget, batch: bool) -> Vec<String> {
         "-o".into(),
         "TCPKeepAlive=yes".into(),
     ];
-    opts.extend(multiplexing_opts(target));
+    opts.extend(multiplexing);
     opts.extend(target.extra_opts.iter().cloned());
-    #[cfg(unix)]
-    if target.extra_opts.is_empty() {
-        if let Some(connection) = prepared::cached(target) {
-            opts.extend([
-                "-F".into(),
-                connection.snapshot.to_string_lossy().into_owned(),
-            ]);
-        }
+    if let Some(config) = config {
+        opts.extend(["-F".into(), config.to_string_lossy().into_owned()]);
     }
     opts
 }
 
 #[cfg(unix)]
 fn multiplexing_opts(target: &SshTarget) -> Vec<String> {
+    multiplexing_opts_for(&control_path(target))
+}
+
+#[cfg(unix)]
+fn multiplexing_opts_for(path: &std::path::Path) -> Vec<String> {
     vec![
         "-o".into(),
         "ControlMaster=auto".into(),
         "-o".into(),
-        format!("ControlPath={}", control_path(target).display()),
+        format!("ControlPath={}", path.display()),
         "-o".into(),
         "ControlPersist=86400".into(),
     ]
@@ -321,11 +353,23 @@ pub(crate) async fn interactive_args(
 ) -> Result<InteractiveConnection> {
     prepare_control_dir()?;
     #[cfg(unix)]
-    let path = if target.extra_opts.is_empty() {
-        prepared::prepare(target, true).await?.path
+    let connection = if target.extra_opts.is_empty() {
+        Some(prepared::prepare(target, true).await?)
     } else {
-        control_path(target)
+        None
     };
+    #[cfg(unix)]
+    let path = connection
+        .as_ref()
+        .map(|connection| connection.path.clone())
+        .unwrap_or_else(|| control_path(target));
+    #[cfg(unix)]
+    let options = connection
+        .as_ref()
+        .map(|connection| ssh_opts_prepared(target, false, connection))
+        .unwrap_or_else(|| ssh_opts(target, false));
+    #[cfg(not(unix))]
+    let options = ssh_opts(target, false);
     #[cfg(unix)]
     let lock = {
         let file = std::fs::OpenOptions::new()
@@ -345,7 +389,7 @@ pub(crate) async fn interactive_args(
         file
     };
     #[cfg(unix)]
-    if !master_is_running(target).await? {
+    if !check_master(target, &path, &options).await? {
         match std::fs::remove_file(&path) {
             Ok(()) => {}
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
@@ -356,7 +400,7 @@ pub(crate) async fn interactive_args(
     if let Some(seconds) = persist {
         args.extend(["-o".into(), format!("ControlPersist={seconds}")]);
     }
-    args.extend(ssh_opts(target, false));
+    args.extend(options);
     args.extend(["--".into(), target.dest.clone(), "true".into()]);
     Ok(InteractiveConnection {
         args,
@@ -374,14 +418,30 @@ pub(crate) async fn master_is_running(_target: &SshTarget) -> Result<bool> {
 pub(crate) async fn master_is_running(target: &SshTarget) -> Result<bool> {
     prepare_control_dir()?;
     if target.extra_opts.is_empty() {
-        prepared::prepare(target, false).await?;
+        let connection = prepared::prepare(target, false).await?;
+        return check_master(
+            target,
+            &connection
+                .path
+                .with_file_name(&connection.publication.socket_name),
+            &ssh_opts_prepared(target, true, &connection),
+        )
+        .await;
     }
-    let path = control_path(target);
+    check_master(target, &control_path(target), &ssh_opts(target, true)).await
+}
+
+#[cfg(unix)]
+async fn check_master(
+    target: &SshTarget,
+    path: &std::path::Path,
+    options: &[String],
+) -> Result<bool> {
     let status = Command::new("ssh")
         .env("ORX_SSH_PROBE", "1")
         .args(["-O", "check", "-S"])
         .arg(path)
-        .args(ssh_opts(target, true))
+        .args(options)
         .arg("--")
         .arg(&target.dest)
         .stdin(Stdio::null())

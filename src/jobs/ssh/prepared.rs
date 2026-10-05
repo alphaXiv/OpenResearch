@@ -320,6 +320,10 @@ mod tests {
         let direct = resolve("direct", Some(&config)).await.unwrap();
         let equivalent = resolve("equivalent", Some(&config)).await.unwrap();
         let literal = resolve("gpu+cluster", Some(&config)).await.unwrap();
+        for destination in ["[::1]", "root@[::1]"] {
+            let ipv6 = resolve(destination, Some(&config)).await.unwrap();
+            assert_eq!(ipv6.publication.host, "[::1]");
+        }
         let command_a = resolve("command-a", Some(&config)).await.unwrap();
         let command_b = resolve("command-b", Some(&config)).await.unwrap();
         let jump_a = resolve("jump-a", Some(&config)).await.unwrap();
@@ -352,6 +356,27 @@ mod tests {
             command_a.path,
             resolve("command-a", Some(&config)).await.unwrap().path
         );
+        let target = SshTarget::alias("command-a");
+        let key = (control_dir(), target.dest.clone());
+        let refreshed = resolve(&target.dest, Some(&config)).await.unwrap();
+        CONNECTIONS.write().unwrap().insert(key.clone(), refreshed);
+        let mut args = super::super::ssh_opts_prepared(&target, true, &command_a);
+        args.extend(["--".into(), target.dest.clone()]);
+        let pinned = Command::new("ssh")
+            .arg("-G")
+            .args(args)
+            .env("ORX_SSH_PROBE", "1")
+            .output()
+            .await
+            .unwrap();
+        CONNECTIONS.write().unwrap().remove(&key);
+        assert!(pinned.status.success());
+        let pinned = String::from_utf8(pinned.stdout).unwrap();
+        assert_eq!(
+            value(&pinned, "controlpath").unwrap(),
+            command_a.path.to_string_lossy()
+        );
+        assert!(value(&pinned, "proxycommand").unwrap().contains("printf a"));
         for (connection, dest, field, expected) in [
             (&command_a, "command-a", "proxycommand", "printf a"),
             (&jump_a, "gateway-a", "hostname", "first.invalid"),
