@@ -12,7 +12,7 @@ Reconnect to recover an expired login.
 On Unix with OpenSSH 8.4 or newer, successful connections automatically install
 `Include openresearch_config` in `~/.ssh/config`. Agents and ordinary `ssh`,
 `scp`, and `rsync` commands reuse a live connection for the same user, host,
-port, and jump route. Existing user `ControlPath` settings take precedence.
+and port. Existing user `ControlPath` settings take precedence.
 Symlinked configs require adding the reported Include manually.
 OpenResearch-launched agents select their instance's connection directory;
 external terminals use the default configuration unless they export
