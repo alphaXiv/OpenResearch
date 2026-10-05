@@ -65,7 +65,15 @@ pub(super) fn probe_args() -> Vec<String> {
     .collect()
 }
 
-pub(super) const ROUTE_FIELDS: &str = "host|hostname|user|port|controlpath|proxyjump|proxycommand";
+pub(super) const ROUTE_FIELDS: &str = "hostname|user|port|controlpath|proxyjump|proxycommand";
+
+fn host(query: &Query) -> Result<&str> {
+    query
+        .args
+        .last()
+        .and_then(|dest| dest.rsplit('@').next())
+        .ok_or_else(|| anyhow!("Missing SSH destination"))
+}
 
 pub(super) fn route_configuration(output: &str) -> String {
     // Match final can repeat unrelated list settings such as SendEnv.
@@ -130,10 +138,7 @@ fn snapshot_contents(
 ) -> Result<String> {
     let mut contents = String::new();
     for (query, proxy) in queries.iter().zip(proxies) {
-        contents.push_str(&format!(
-            "Host {}\n",
-            config_quote(value(&query.output, "host")?)
-        ));
+        contents.push_str(&format!("Host {}\n", config_quote(host(query)?)));
         for key in ["hostname", "user", "port"] {
             contents.push_str(&format!(
                 "  {key} {}\n",
@@ -200,7 +205,7 @@ async fn resolve(dest: &str, config: Option<&std::path::Path>) -> Result<Prepare
     let mut args = prefix.clone();
     args.extend(["--".into(), dest.into()]);
     let first = query(args).await?;
-    let host = value(&first.output, "host")?.to_owned();
+    let host = host(&first)?.to_owned();
     if !host
         .bytes()
         .all(|byte| byte.is_ascii_alphanumeric() || b".-_:".contains(&byte))
@@ -268,7 +273,7 @@ async fn resolve(dest: &str, config: Option<&std::path::Path>) -> Result<Prepare
             value(&query.output, "user")?.into(),
             "-p".into(),
             value(&query.output, "port")?.into(),
-            value(&query.output, "host")?.into(),
+            self::host(query)?.into(),
         ];
         let output = configuration(&args, true).await?;
         let debug = String::from_utf8_lossy(&output.stderr);
@@ -280,7 +285,7 @@ async fn resolve(dest: &str, config: Option<&std::path::Path>) -> Result<Prepare
             .ok_or_else(|| {
                 anyhow!(
                     "OpenSSH did not expose the ProxyJump transport for {}",
-                    value(&query.output, "host").unwrap_or("target")
+                    self::host(query).unwrap_or("target")
                 )
             })?;
         proxies[index] = Some(command.to_owned());
