@@ -30,7 +30,7 @@ El entorno de ejecución y espacio de trabajo local para agentes de investigaci�
 <a href="https://github.com/alphaXiv/OpenResearch/releases"><img src=".github/readme-assets/action-releases.svg" alt="Releases" width="78" height="24" /></a>
 </p>
 
-<p><sub>macOS 11+ · La versión beta para Windows requiere <a href="docs/windows.md">Git for Windows</a> · La app para Linux requiere glibc 2.35+</sub></p>
+<p><sub>macOS 11+ · La versión beta para Windows requiere <a href="docs/windows.md">Git for Windows</a> · La app para <a href="docs/linux.md">Linux</a> requiere glibc 2.35+</sub></p>
 
 <p><a href="https://trendshift.io/repositories/89363"><img src="https://trendshift.io/api/badge/repositories/89363" alt="GitHub Trending: #1 Repository of the Day" width="250" height="55" /></a>
 <a href="https://trendshift.io/repositories/89363?utm_source=trendshift-badge&amp;utm_medium=badge&amp;utm_campaign=badge-trendshift-89363" target="_blank" rel="noopener noreferrer"><img src="https://trendshift.io/api/badge/trendshift/repositories/89363/daily?language=Rust" alt="alphaXiv/OpenResearch | Trendshift" width="250" height="55" /></a></p>
@@ -88,8 +88,8 @@ Slurm,
 <img src=".github/readme-assets/huggingface.svg" alt="" width="18" height="18" align="texttop" /> Hugging Face Jobs y
 los recursos de cómputo administrados de OpenResearch.
 
-**Dale a tus agentes una memoria de cada experimento.** OpenResearch registra los logs, el código
-y los artefactos de cada experimento en una base de datos SQL local para que los agentes puedan
+**Dale a tus agentes una memoria de cada experimento.** OpenResearch registra cada experimento en una base de datos SQL local y conserva sus logs, código
+y artefactos en tu equipo para que los agentes puedan
 aprender de los resultados anteriores y decidir qué probar después. La aplicación de escritorio
 te permite ver fácilmente lo que han hecho tus agentes y examinar la evidencia de cada resultado.
 

@@ -30,7 +30,7 @@ The local-first harness & workspace for research agents.
 <a href="https://github.com/alphaXiv/OpenResearch/releases"><img src=".github/readme-assets/action-releases.svg" alt="Releases" width="78" height="24" /></a>
 </p>
 
-<p><sub>macOS 11+ · Windows beta requires <a href="docs/windows.md">Git for Windows</a> · Linux app needs glibc 2.35+</sub></p>
+<p><sub>macOS 11+ · Windows beta requires <a href="docs/windows.md">Git for Windows</a> · <a href="docs/linux.md">Linux</a> app needs glibc 2.35+</sub></p>
 
 <p><a href="https://trendshift.io/repositories/89363"><img src="https://trendshift.io/api/badge/repositories/89363" alt="GitHub Trending: #1 Repository of the Day" width="250" height="55" /></a>
 <a href="https://trendshift.io/repositories/89363?utm_source=trendshift-badge&amp;utm_medium=badge&amp;utm_campaign=badge-trendshift-89363" target="_blank" rel="noopener noreferrer"><img src="https://trendshift.io/api/badge/trendshift/repositories/89363/daily?language=Rust" alt="alphaXiv/OpenResearch | Trendshift" width="250" height="55" /></a></p>
@@ -88,8 +88,8 @@ Slurm,
 <img src=".github/readme-assets/huggingface.svg" alt="" width="18" height="18" align="texttop" /> Hugging Face Jobs, and
 managed OpenResearch compute.
 
-**Give agents a memory of every experiment.** OpenResearch tracks the logs, code,
-and artifacts of every experiment in a local SQL database so that agents can
+**Give agents a memory of every experiment.** OpenResearch records every experiment in a local SQL database and keeps its logs, code,
+and artifacts on your machine so that agents can
 learn from past results and decide what to try next. The desktop app makes it
 easy to see what your agents have done and inspect the evidence behind each result.
 

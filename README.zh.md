@@ -30,7 +30,7 @@
 <a href="https://github.com/alphaXiv/OpenResearch/releases"><img src=".github/readme-assets/action-releases.svg" alt="Releases" width="78" height="24" /></a>
 </p>
 
-<p><sub>macOS 11+ · Windows 测试版需要 <a href="docs/windows.md">Git for Windows</a> · Linux 应用需要 glibc 2.35+</sub></p>
+<p><sub>macOS 11+ · Windows 测试版需要 <a href="docs/windows.md">Git for Windows</a> · <a href="docs/linux.md">Linux</a> 应用需要 glibc 2.35+</sub></p>
 
 <p><a href="https://trendshift.io/repositories/89363"><img src="https://trendshift.io/api/badge/repositories/89363" alt="GitHub Trending: #1 Repository of the Day" width="250" height="55" /></a>
 <a href="https://trendshift.io/repositories/89363?utm_source=trendshift-badge&amp;utm_medium=badge&amp;utm_campaign=badge-trendshift-89363" target="_blank" rel="noopener noreferrer"><img src="https://trendshift.io/api/badge/trendshift/repositories/89363/daily?language=Rust" alt="alphaXiv/OpenResearch | Trendshift" width="250" height="55" /></a></p>
@@ -87,8 +87,8 @@ Slurm,
 <img src=".github/readme-assets/huggingface.svg" alt="" width="18" height="18" align="texttop" /> Hugging Face Jobs，以及
 OpenResearch 托管计算资源。
 
-**让智能体记住每一次实验。** OpenResearch 将每次实验的日志、代码
-和产物记录在本地 SQL 数据库中，让智能体能够从过去的结果中学习，
+**让智能体记住每一次实验。** OpenResearch 将每次实验记录在本地 SQL 数据库中，并将日志、代码
+和产物保存在你的机器上，让智能体能够从过去的结果中学习，
 并决定下一步尝试什么。桌面应用让你轻松查看智能体做了什么，
 并检查每个结果背后的证据。
 

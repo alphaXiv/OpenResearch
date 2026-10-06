@@ -30,7 +30,7 @@
 <a href="https://github.com/alphaXiv/OpenResearch/releases"><img src=".github/readme-assets/action-releases.svg" alt="Releases" width="78" height="24" /></a>
 </p>
 
-<p><sub>macOS 11+ · Windows 베타는 다음이 필요합니다: <a href="docs/windows.md">Git for Windows</a> · Linux 앱은 glibc 2.35+가 필요합니다</sub></p>
+<p><sub>macOS 11+ · Windows 베타는 다음이 필요합니다: <a href="docs/windows.md">Git for Windows</a> · <a href="docs/linux.md">Linux</a> 앱은 glibc 2.35+가 필요합니다</sub></p>
 
 <p><a href="https://trendshift.io/repositories/89363"><img src="https://trendshift.io/api/badge/repositories/89363" alt="GitHub Trending: #1 Repository of the Day" width="250" height="55" /></a>
 <a href="https://trendshift.io/repositories/89363?utm_source=trendshift-badge&amp;utm_medium=badge&amp;utm_campaign=badge-trendshift-89363" target="_blank" rel="noopener noreferrer"><img src="https://trendshift.io/api/badge/trendshift/repositories/89363/daily?language=Rust" alt="alphaXiv/OpenResearch | Trendshift" width="250" height="55" /></a></p>
@@ -87,8 +87,8 @@ Slurm,
 <img src=".github/readme-assets/huggingface.svg" alt="" width="18" height="18" align="texttop" /> Hugging Face Jobs 및
 OpenResearch의 관리형 컴퓨팅을 사용할 수 있습니다.
 
-**에이전트가 모든 실험을 기억하게 하세요.** OpenResearch는 각 실험의 로그, 코드,
-산출물을 로컬 SQL 데이터베이스에 기록합니다. 에이전트는 이전 결과에서 배우고
+**에이전트가 모든 실험을 기억하게 하세요.** OpenResearch는 각 실험을 로컬 SQL 데이터베이스에 기록하고 로그, 코드,
+산출물을 사용자 컴퓨터에 보관합니다. 에이전트는 이전 결과에서 배우고
 다음에 무엇을 시도할지 결정할 수 있습니다. 데스크톱 앱에서는 에이전트가 한 작업을
 쉽게 확인하고 각 결과의 근거를 살펴볼 수 있습니다.
 
