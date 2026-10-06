@@ -3,16 +3,25 @@
 # GitHub Release. Unlike the CLI's static musl binaries, the app is a glibc build
 # with the `desktop` feature, so it is built here from the release's commit.
 #
-# Triggers mirror release-macos-app.yml: the automatic workflow_run after a
-# successful dispatched "Release", or a manual dispatch naming the tag. Gated on
-# the repo variable LINUX_APP_ENABLED. See docs/linux.md.
+# Triggers: release.yml calls it once the release is published, or a manual
+# dispatch names the tag. Runs only in this fork's repository, whose
+# release builds stay on the development channel. See docs/linux.md.
 
 name: Attach Linux app to release
 
 on:
-  workflow_run:
-    workflows: ["Release"]
-    types: [completed]
+  # release.yml calls this after publishing (a post-announce job), since its
+  # GITHUB_TOKEN-dispatched runs would not fire a workflow_run.
+  workflow_call:
+    inputs:
+      plan:
+        description: dist's plan manifest (unused; the tag comes from Cargo.toml)
+        required: true
+        type: string
+      tag:
+        description: Release tag; empty means v<Cargo.toml version>
+        required: false
+        type: string
   workflow_dispatch:
     inputs:
       tag:
@@ -30,7 +39,7 @@ concurrency:
 
 jobs:
   check:
-    if: ${{ vars.LINUX_APP_ENABLED == 'true' && (github.event_name == 'workflow_dispatch' || (github.event.workflow_run.conclusion == 'success' && github.event.workflow_run.event == 'workflow_dispatch')) }}
+    if: ${{ github.repository == 'artur-shaikhutdinov/OpenResearch-Kimi-MiniMax-ZCode' }}
     runs-on: ubuntu-latest
     outputs:
       ok: ${{ steps.gate.outputs.ok }}
@@ -40,7 +49,7 @@ jobs:
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
-          ref: ${{ github.event.workflow_run.head_sha || inputs.tag }}
+          ref: ${{ inputs.tag }}
       - id: gate
         env:
           INPUT_TAG: ${{ inputs.tag }}
@@ -74,21 +83,26 @@ jobs:
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
-          ref: ${{ github.event.workflow_run.head_sha || inputs.tag }}
+          ref: ${{ inputs.tag }}
 
       - name: Install WebKitGTK and packaging tools
         run: |
           sudo apt-get update
           sudo apt-get install -y libwebkit2gtk-4.1-dev libgtk-3-dev librsvg2-dev file patchelf xvfb xdotool
 
-      # The runner's preinstalled stable toolchain, as release-macos-app.yml uses.
-      - name: Build the production orx
-        run: ORX_OFFICIAL_RELEASE_BUILD=1 cargo build --release --locked --features desktop
+      # The runner's preinstalled stable toolchain.
+      # A fork release build: development channel (no telemetry to alphaXiv),
+      # but the AppImage may update itself.
+      - name: Build the release orx
+        run: ORX_FORK_RELEASE_BUILD=1 cargo build --release --locked --features desktop
 
-      - name: Verify the production channel
+      - name: Verify the channel and version
         env:
           ORX_TELEMETRY_ENV: "off"
-        run: test "$(target/release/orx version --build-channel)" = production
+          TAG: ${{ needs.check.outputs.tag }}
+        run: |
+          test "$(target/release/orx version --build-channel)" = development
+          test "v$(target/release/orx --version | awk '{print $2}')" = "$TAG"
 
       - name: Package the AppImage
         run: scripts/build-linux-appimage.sh target/release/orx app-dist

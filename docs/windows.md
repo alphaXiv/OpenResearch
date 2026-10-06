@@ -25,6 +25,29 @@ The nanochat demo installs `uv`, and with it Python, on its first run.
 
 ## Install
 
+### The desktop app
+
+From [Releases](https://github.com/artur-shaikhutdinov/OpenResearch-Kimi-MiniMax-ZCode/releases), download
+`OpenResearch-Setup.exe` and run it. It installs for your account only, with no
+administrator prompt, into `%LOCALAPPDATA%\Programs\OpenResearch`, adds
+OpenResearch to the Start menu, and installs the Microsoft Edge WebView2 Runtime
+if Windows lacks it. The dashboard opens in its own window; closing the window
+quits OpenResearch, and starting it again while it runs brings the window back.
+Running the installer or uninstaller while OpenResearch is open asks you to
+close it first. It replaces alphaXiv's app if that is installed: both use the
+same data, port, and install folder, so only one can run at a time.
+
+The install holds two programs. `OpenResearch.exe` is what the Start menu runs:
+it starts `orx.exe app` in a hidden console, which `orx` and the git, shell, and
+agent processes it starts share, so none of them flashes a window. Agents find
+`orx` because its folder leads their `PATH`. `orx.exe` is the same binary as the
+CLI release, with Kimi Code, MiniMax Code and ZCode, and updates itself the
+same way (below).
+
+The app uses port 4792, or a free port if something else holds it.
+
+### The CLI
+
 From [Releases](https://github.com/artur-shaikhutdinov/OpenResearch-Kimi-MiniMax-ZCode/releases), download
 `openresearch-cli-x86_64-pc-windows-msvc.zip`, extract it, and double-click
 `orx.exe`. It starts the dashboard at `http://127.0.0.1:4791` and opens your
@@ -44,9 +67,10 @@ offers a Restart button once the new version is on disk.
 
 ### The SmartScreen warning
 
-This fork's `orx.exe` is not code-signed, so Windows shows "Windows protected
-your PC" on first run. Choose **More info** → **Run anyway**. (alphaXiv's own
-releases are signed with alphaXiv Inc.'s certificate; this fork cannot use it.)
+This fork's `OpenResearch-Setup.exe` and `orx.exe` are not code-signed, so
+Windows shows "Windows protected your PC" when you first run them. Choose
+**More info** → **Run anyway**. (alphaXiv's own releases are signed with
+alphaXiv Inc.'s certificate; this fork cannot use it.)
 
 ### Long paths
 
@@ -73,8 +97,12 @@ Set-ItemProperty -Path 'HKLM:\SYSTEM\CurrentControlSet\Control\FileSystem' -Name
 
 ## Releasing the app
 
-This fork publishes only the `orx` CLI for Windows. alphaXiv's desktop installer
-(`OpenResearch-Setup.exe`) and its signing need alphaXiv's signing account;
-`release-windows-app.yml` and `sign-windows-cli.yml` stay unused here, since
-`WINDOWS_APP_ENABLED` is not set and this fork's `release.yml` does not call the
-signing job.
+Once a release is published, `release.yml` calls `release-windows-app.yml`,
+which packages that release's own `orx.exe` with the launcher into
+`OpenResearch-Setup.exe` and attaches it. To attach the installer to an existing
+release, dispatch the workflow with its tag. CI on every pull request also
+uploads an `openresearch-windows-installer` artifact to test with.
+
+The installer is unsigned: alphaXiv's signing (`sign-windows-cli.yml` and its
+`release-signing` environment) needs alphaXiv's Azure account, so this fork does
+not run it.

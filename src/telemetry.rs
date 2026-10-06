@@ -40,6 +40,14 @@ pub(crate) fn build_channel() -> &'static str {
     BUILD_CHANNEL
 }
 
+/// Whether this binary is a published release that may replace itself: an
+/// official build, or this fork's own release build (still development channel).
+// Only the Linux AppImage's updater asks.
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+pub(crate) fn release_build() -> bool {
+    BUILD_CHANNEL == "production" || option_env!("ORX_FORK_RELEASE_BUILD").is_some()
+}
+
 /// First-party API origin. Overridable with `ORX_TELEMETRY_HOST` so tests can point
 /// at a throwaway local listener instead of production.
 fn telemetry_host() -> String {
@@ -1277,6 +1285,13 @@ mod tests {
     // these vars or config_dir() must isolate itself (e.g. its own temp
     // XDG_CONFIG_HOME) — it cannot rely on this lock.
     static ENV_LOCK: Mutex<()> = Mutex::new(());
+
+    #[test]
+    fn source_builds_are_not_releases() {
+        // Release builds set these only in GitHub Actions; a test build never does.
+        assert_eq!(build_channel(), "development");
+        assert!(!release_build());
+    }
 
     struct EnvGuard {
         _lock: MutexGuard<'static, ()>,

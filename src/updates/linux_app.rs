@@ -146,7 +146,7 @@ pub async fn update(
 /// Refuse the installs where replacing the file is wrong or impossible, each
 /// with the action that fixes it. Returns the directory the AppImage is in.
 fn ensure_replaceable(appimage: &Path) -> Result<&Path> {
-    if crate::telemetry::build_channel() != "production" {
+    if !crate::telemetry::release_build() {
         return Err(anyhow!(
             "This OpenResearch AppImage isn't an official build, so it won't update itself.\n\
              Download the released AppImage from {}/releases/latest.",

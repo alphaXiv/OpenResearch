@@ -5,16 +5,21 @@ import { m } from "../paraglide/messages.js";
 import { IconButton } from "./ui";
 
 const DISMISSED_KEY = "desktop-app-banner-dismissed-on";
-const RELEASES = "https://github.com/alphaXiv/OpenResearch/releases/latest";
+// This fork's own app (Windows and Linux), which carries its agents.
+const RELEASES = "https://github.com/artur-shaikhutdinov/OpenResearch-Kimi-MiniMax-ZCode/releases/latest";
 
 // Null when the platform names no asset: the viewer picks one from the release page.
 function asset(): string | null {
   const platform = navigator.platform;
-  if (/Mac/.test(platform)) return "OpenResearch.dmg";
   if (/Win/.test(platform)) return "OpenResearch-Setup.exe";
   if (/Linux x86_64/.test(platform)) return "OpenResearch-x86_64.AppImage";
   if (/Linux aarch64/.test(platform)) return "OpenResearch-aarch64.AppImage";
   return null;
+}
+
+// The fork has no macOS app, so there is nothing to point a Mac at.
+function hasApp(): boolean {
+  return !/Mac/.test(navigator.platform);
 }
 
 // Dismissing lasts until the viewer's next calendar day.
@@ -39,7 +44,7 @@ export function DesktopAppBanner() {
     window.addEventListener("focus", recheck);
     return () => window.removeEventListener("focus", recheck);
   }, []);
-  if ("__ORX_DESKTOP__" in window || dismissed) return null;
+  if ("__ORX_DESKTOP__" in window || dismissed || !hasApp()) return null;
 
   const dismiss = () => {
     try {

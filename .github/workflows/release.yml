@@ -308,3 +308,23 @@ jobs:
         with:
           persist-credentials: false
           submodules: recursive
+
+  # Post-announce jobs (dist-workspace.toml): this fork's desktop apps, attached
+  # to the release just published.
+  custom-release-windows-app:
+    needs:
+      - plan
+      - announce
+    uses: ./.github/workflows/release-windows-app.yml
+    with:
+      plan: ${{ needs.plan.outputs.val }}
+    secrets: inherit
+
+  custom-release-linux-app:
+    needs:
+      - plan
+      - announce
+    uses: ./.github/workflows/release-linux-app.yml
+    with:
+      plan: ${{ needs.plan.outputs.val }}
+    secrets: inherit

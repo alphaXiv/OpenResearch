@@ -1,3 +1,5 @@
+const FORK_REPOSITORY: &str = "artur-shaikhutdinov/OpenResearch-Kimi-MiniMax-ZCode";
+
 fn main() {
     println!("cargo:rerun-if-env-changed=ORX_OFFICIAL_RELEASE_BUILD");
     println!("cargo:rerun-if-env-changed=GITHUB_ACTIONS");
@@ -24,6 +26,24 @@ fn main() {
     };
 
     println!("cargo:rustc-env=ORX_BUILD_CHANNEL={channel}");
+
+    // This fork's own release builds (the desktop apps). They stay on the
+    // development channel, so nothing reaches alphaXiv, but may update themselves.
+    println!("cargo:rerun-if-env-changed=ORX_FORK_RELEASE_BUILD");
+    match std::env::var("ORX_FORK_RELEASE_BUILD") {
+        Ok(value)
+            if value == "1"
+                && std::env::var("GITHUB_ACTIONS").as_deref() == Ok("true")
+                && std::env::var("GITHUB_REPOSITORY").as_deref() == Ok(FORK_REPOSITORY) =>
+        {
+            println!("cargo:rustc-env=ORX_FORK_RELEASE_BUILD=1");
+        }
+        Ok(value) if value == "1" => {
+            panic!("ORX_FORK_RELEASE_BUILD=1 is only valid in {FORK_REPOSITORY} GitHub Actions")
+        }
+        Ok(value) => panic!("ORX_FORK_RELEASE_BUILD must be unset or exactly `1`, got `{value}`"),
+        Err(_) => {}
+    }
 
     // `desktop_app`: this build includes the windowed app (src/commands/app.rs).
     println!("cargo:rustc-check-cfg=cfg(desktop_app)");
