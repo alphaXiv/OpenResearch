@@ -26,7 +26,7 @@ use serde_json::Value;
 use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::process::Command;
 
-use super::detect::{HarnessAuthState, HarnessInfo};
+use super::detect::{HarnessAuthState, HarnessInfo, ModelInfo};
 use super::options::{HarnessOptions, OptionChoice, PermissionMode, PlanActivation};
 use super::{Harness, ResumeAction, TurnFailure, TurnOutcome, TurnResult, TURN_WATCHDOG};
 use crate::error::{anyhow, Result};
@@ -174,8 +174,13 @@ enum Access {
 
 /// What `zcode login` leaves for the runtime: `account-provider:<id>:identity`
 /// and the plan's API key, `account-provider:coding-plan:<id>:account:<identity>:api-key`.
-/// The runtime uses the plan only when the key is the identity's own.
-fn plan_access(store: &serde_json::Map<String, Value>, cipher_key: Option<&[u8; 32]>) -> Access {
+/// The runtime uses a plan only when the key is the identity's own. Returns
+/// the plans it can use, and whether some plan's key is another account's.
+fn signed_in_plans(
+    store: &serde_json::Map<String, Value>,
+    cipher_key: Option<&[u8; 32]>,
+) -> (Vec<String>, bool) {
+    let mut plans = Vec::new();
     let mut other_account = false;
     for (name, value) in store {
         let Some(provider) = name
@@ -196,23 +201,47 @@ fn plan_access(store: &serde_json::Map<String, Value>, cipher_key: Option<&[u8; 
             .zip(value.as_str())
             .and_then(|(cipher_key, value)| decrypt_credential(value, cipher_key));
         // Unreadable (a custom ZCODE_CREDENTIAL_SECRET): both keys are there.
-        let Some(identity) = identity else {
-            return Access::Ready;
-        };
-        let encoded = urlencoding::encode(&identity);
-        if accounts
-            .iter()
-            .any(|account| *account == encoded || *account == identity)
-        {
-            return Access::Ready;
+        let own = identity.is_none_or(|identity| {
+            let encoded = urlencoding::encode(&identity);
+            accounts
+                .iter()
+                .any(|account| *account == encoded || *account == identity)
+        });
+        if own {
+            plans.push(provider.to_string());
+        } else {
+            other_account = true;
         }
-        other_account = true;
     }
-    if other_account {
-        Access::OtherAccount
-    } else {
-        Access::None
+    (plans, other_account)
+}
+
+fn plan_access(store: &serde_json::Map<String, Value>, cipher_key: Option<&[u8; 32]>) -> Access {
+    match signed_in_plans(store, cipher_key) {
+        (plans, _) if !plans.is_empty() => Access::Ready,
+        (_, true) => Access::OtherAccount,
+        _ => Access::None,
     }
+}
+
+/// Enabled providers in provider_config.json that carry an API key.
+fn keyed_providers(config: &Value) -> Vec<&Value> {
+    config
+        .pointer("/config/providerConfigRules/providerRules")
+        .and_then(Value::as_array)
+        .map(|rules| {
+            rules
+                .iter()
+                .filter(|rule| {
+                    rule.get("enabled").and_then(Value::as_bool) != Some(false)
+                        && rule
+                            .pointer("/config/access/apiKey")
+                            .and_then(Value::as_str)
+                            .is_some_and(|key| !key.trim().is_empty())
+                })
+                .collect()
+        })
+        .unwrap_or_default()
 }
 
 fn access(home: &Path) -> Access {
@@ -228,26 +257,152 @@ fn access(home: &Path) -> Access {
         return plan;
     }
     let keyed_provider = super::detect::read_json(v2.join("provider_config.json"))
-        .and_then(|config| {
-            config
-                .pointer("/config/providerConfigRules/providerRules")
-                .and_then(Value::as_array)
-                .map(|rules| {
-                    rules.iter().any(|rule| {
-                        rule.get("enabled").and_then(Value::as_bool) != Some(false)
-                            && rule
-                                .pointer("/config/access/apiKey")
-                                .and_then(Value::as_str)
-                                .is_some_and(|key| !key.trim().is_empty())
-                    })
-                })
-        })
-        .unwrap_or(false);
+        .is_some_and(|config| !keyed_providers(&config).is_empty());
     if keyed_provider {
         Access::Ready
     } else {
         plan
     }
+}
+
+/// The runtime's built-in provider catalog: the app's file, handed to the
+/// bundled runtime, or the one an npm install ships next to its launcher.
+fn builtin_catalog(launch: &Launch) -> Option<PathBuf> {
+    if let Some((_, path)) = launch
+        .env
+        .iter()
+        .find(|(key, _)| *key == "ZCODE_BUILTIN_PROVIDER_CONFIG_FILE")
+    {
+        return Some(PathBuf::from(path));
+    }
+    let package = launch.program.parent()?.parent()?;
+    Some(
+        package
+            .join("vendor")
+            .join("provider")
+            .join("zcode-builtin.json"),
+    )
+    .filter(|path| path.is_file())
+}
+
+/// The models ZCode's runtime can use, from the same places it reads them: the
+/// built-in models of each plan `zcode login` signed in (from the app's
+/// built-in provider catalog), and the models of each enabled API-key provider
+/// (its own list, else its template's). Ids are `<provider>/<model>`, the form
+/// of ZCode's own model selection.
+fn catalog(home: &Path, builtin: Option<&Path>) -> Vec<ModelInfo> {
+    let v2 = home.join("v2");
+    let builtin = builtin.and_then(|path| super::detect::read_json(path.to_path_buf()));
+    let rules = |kind: &str| {
+        builtin
+            .as_ref()
+            .and_then(|config| config.pointer(&format!("/config/providerConfigRules/{kind}")))
+            .and_then(Value::as_array)
+            .cloned()
+            .unwrap_or_default()
+    };
+    let (providers, templates) = (rules("providerRules"), rules("templateRules"));
+    let models_of = |rule: &Value, key: &str| -> Vec<String> {
+        rule.pointer(&format!("/config/{key}"))
+            .and_then(Value::as_array)
+            .map(|ids| {
+                ids.iter()
+                    .filter_map(Value::as_str)
+                    .map(str::to_string)
+                    .collect()
+            })
+            .unwrap_or_default()
+    };
+    let mut entries: Vec<(String, String, String)> = Vec::new();
+    let plans = super::detect::read_json(v2.join("credentials.json"))
+        .and_then(|store| {
+            store
+                .as_object()
+                .map(|store| signed_in_plans(store, Some(&credential_cipher_key())).0)
+        })
+        .unwrap_or_default();
+    for plan in plans {
+        if let Some(rule) = providers
+            .iter()
+            .find(|rule| rule.get("providerId").and_then(Value::as_str) == Some(&plan))
+        {
+            let name = rule
+                .get("providerName")
+                .and_then(Value::as_str)
+                .unwrap_or(&plan)
+                .to_string();
+            for model in models_of(rule, "builtinModelIds") {
+                entries.push((plan.clone(), model, name.clone()));
+            }
+        }
+    }
+    if let Some(config) = super::detect::read_json(v2.join("provider_config.json")) {
+        for rule in keyed_providers(&config) {
+            let Some(provider) = rule.get("providerId").and_then(Value::as_str) else {
+                continue;
+            };
+            let name = rule
+                .get("providerName")
+                .and_then(Value::as_str)
+                .unwrap_or(provider)
+                .to_string();
+            let mut models = models_of(rule, "personalModelIds");
+            if models.is_empty() {
+                let template = rule
+                    .get("templateId")
+                    .and_then(Value::as_str)
+                    .unwrap_or(provider);
+                if let Some(template) = templates
+                    .iter()
+                    .find(|rule| rule.get("templateId").and_then(Value::as_str) == Some(template))
+                {
+                    models = models_of(template, "builtinModelIds");
+                }
+            }
+            for model in models {
+                entries.push((provider.to_string(), model, name.clone()));
+            }
+        }
+    }
+    let mut seen = std::collections::HashSet::new();
+    entries
+        .into_iter()
+        .filter(|(provider, model, _)| seen.insert(format!("{provider}/{model}")))
+        .map(|(provider, model, name)| {
+            ModelInfo::new(format!("{provider}/{model}")).with_label(Some(&model), Some(&name))
+        })
+        .collect()
+}
+
+/// Make `provider/model` ZCode's default model, which is the only model
+/// choice its print mode reads. The default is shared with the ZCode app.
+fn select_model(home: &Path, model: &str) -> Result<()> {
+    let Some((provider, model)) = model.split_once('/') else {
+        return Err(anyhow!("Unknown ZCode model {model}"));
+    };
+    let path = home.join("v2").join("provider_config.json");
+    let mut config = super::detect::read_json(path.clone()).unwrap_or_else(|| {
+        serde_json::json!({
+            "schemaVersion": 1,
+            "config": {
+                "providerConfigRules": {"providerRules": []},
+                "modelConfigRules": {"providerModelRules": [], "manualProviderModelRules": []},
+            },
+        })
+    });
+    let selection = serde_json::json!({"providerId": provider, "modelId": model});
+    let Some(settings) = config.get_mut("config").and_then(Value::as_object_mut) else {
+        return Err(anyhow!("{} has no config object", path.display()));
+    };
+    if settings.get("defaultModelSelection") == Some(&selection) {
+        return Ok(());
+    }
+    settings.insert("defaultModelSelection".into(), selection);
+    let tmp = path.with_extension("json.orx-tmp");
+    std::fs::create_dir_all(path.parent().unwrap())?;
+    std::fs::write(&tmp, serde_json::to_vec_pretty(&config)?)?;
+    std::fs::rename(&tmp, &path)?;
+    Ok(())
 }
 
 /// The key ZCode encrypts credentials.json with: SHA-256 of
@@ -380,6 +535,10 @@ impl ZCode {
         } else {
             info.agent_note = Some(INSTALL_HINT.into());
         }
+        if let (Some(home), Some(launch)) = (zcode_home(), find_launch()) {
+            let builtin = builtin_catalog(&launch);
+            info = info.with_models(catalog(&home, builtin.as_deref()));
+        }
         info.agent_ready = info.ready();
         Some(info)
     }
@@ -498,6 +657,11 @@ async fn run_turn(ctx: &mut TurnCtx) -> Result<()> {
     .map_err(|e| anyhow!("playbook task failed: {e}"))??;
 
     let resume = ctx.native_session_id.clone();
+    // A new session starts on ZCode's default model; a resumed one keeps its own.
+    if let (None, Some(model), Some(home)) = (&resume, ctx.model.as_deref(), zcode_home()) {
+        select_model(&home, model)
+            .map_err(|error| anyhow!("Could not select {model} in ZCode: {error}"))?;
+    }
     let plan = ctx.plan_mode || ctx.permission_mode == Some(PermissionMode::Plan);
     let prompt = turn_prompt(&ctx.text, resume.is_none(), plan);
 
@@ -978,6 +1142,84 @@ mod tests {
             plan_access(&serde_json::Map::new(), Some(&key)),
             Access::None
         );
+    }
+
+    #[test]
+    fn the_catalog_lists_signed_in_plans_and_keyed_providers() {
+        let dir = std::env::temp_dir().join(format!("orx-zcode-models-{}", uuid::Uuid::new_v4()));
+        let v2 = dir.join("v2");
+        std::fs::create_dir_all(&v2).unwrap();
+        let builtin = dir.join("zcode-builtin.json");
+        std::fs::write(
+            &builtin,
+            r#"{"config":{"providerConfigRules":{
+                "providerRules":[
+                    {"providerId":"account:zai-individual-coding-plan","providerName":"Z.AI Individual Coding Plan","config":{"builtinModelIds":["GLM-5.3","GLM-5.3-Flash"]}},
+                    {"providerId":"account:zai-start-plan","providerName":"Start Plan","config":{"builtinModelIds":["GLM-5.2"]}}],
+                "templateRules":[{"templateId":"zai-api","config":{"builtinModelIds":["GLM-5.3"]}}]}}}"#,
+        )
+        .unwrap();
+        assert!(catalog(&dir, Some(&builtin)).is_empty());
+        std::fs::write(
+            v2.join("credentials.json"),
+            r#"{"account-provider:account:zai-individual-coding-plan:identity":"enc:v1:a.b.c",
+                "account-provider:coding-plan:account:zai-individual-coding-plan:account:u1:api-key":"enc:v1:a.b.c"}"#,
+        )
+        .unwrap();
+        std::fs::write(
+            v2.join("provider_config.json"),
+            r#"{"config":{"providerConfigRules":{"providerRules":[
+                {"providerId":"zai-api","providerName":"Z.ai Coding Plan","enabled":true,"config":{"access":{"apiKey":"id.secret"}}},
+                {"providerId":"off","enabled":false,"config":{"access":{"apiKey":"k"},"personalModelIds":["x"]}}]}}}"#,
+        )
+        .unwrap();
+        let models: Vec<_> = catalog(&dir, Some(&builtin))
+            .into_iter()
+            .map(|model| {
+                (
+                    model.id,
+                    model.display_name.unwrap(),
+                    model.description.unwrap(),
+                )
+            })
+            .collect();
+        assert_eq!(
+            models,
+            vec![
+                (
+                    "account:zai-individual-coding-plan/GLM-5.3".to_string(),
+                    "GLM-5.3".to_string(),
+                    "Z.AI Individual Coding Plan".to_string()
+                ),
+                (
+                    "account:zai-individual-coding-plan/GLM-5.3-Flash".to_string(),
+                    "GLM-5.3-Flash".to_string(),
+                    "Z.AI Individual Coding Plan".to_string()
+                ),
+                (
+                    "zai-api/GLM-5.3".to_string(),
+                    "GLM-5.3".to_string(),
+                    "Z.ai Coding Plan".to_string()
+                ),
+            ]
+        );
+
+        select_model(&dir, "account:zai-individual-coding-plan/GLM-5.3-Flash").unwrap();
+        let config = super::super::detect::read_json(v2.join("provider_config.json")).unwrap();
+        assert_eq!(
+            config.pointer("/config/defaultModelSelection"),
+            Some(&serde_json::json!({
+                "providerId": "account:zai-individual-coding-plan",
+                "modelId": "GLM-5.3-Flash"
+            }))
+        );
+        // The rest of the file is kept.
+        assert_eq!(
+            config.pointer("/config/providerConfigRules/providerRules/0/providerId"),
+            Some(&serde_json::json!("zai-api"))
+        );
+        assert!(select_model(&dir, "no-provider").is_err());
+        let _ = std::fs::remove_dir_all(dir);
     }
 
     #[test]
