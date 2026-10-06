@@ -24,8 +24,6 @@ use crate::store::{log_path, now_ms, RunStatus, Store};
 const POLL_INTERVAL: Duration = Duration::from_secs(5);
 /// How long a silent log stream is held before re-checking job state.
 const LOG_IDLE: Duration = Duration::from_secs(30);
-/// The final pass's idle wait; it must end inside the 20s drain bound.
-const DRAIN_IDLE: Duration = Duration::from_secs(5);
 /// How long monitoring must keep failing before it is reported on the run.
 const MONITORING_GRACE: Duration = Duration::from_secs(60);
 
@@ -39,7 +37,7 @@ fn open_supervisor_lock(path: &std::path::Path) -> Result<fd_lock::RwLock<std::f
 }
 
 /// One streaming log pass, cut short (`None`) when the job ends so the final
-/// pass starts inside the drain bound.
+/// pass starts at once. That pass's only deadline is the watcher's drain bound.
 async fn log_pass<T>(
     done: &mut tokio::sync::watch::Receiver<bool>,
     draining: bool,
@@ -285,13 +283,13 @@ async fn tail_logs(
     loop {
         // Only a pass that began after the job ended is known to hold its last lines.
         let draining = *done.borrow();
-        let (skip, idle) = (seen, if draining { DRAIN_IDLE } else { LOG_IDLE });
+        let skip = seen;
         // Counted here so a pass that fails partway still dedups what it wrote.
         let mut sink = |line: &str| {
             seen += 1;
             log.line(line);
         };
-        let pass = hf::stream_logs(&token, &namespace, &job_id, skip, idle, &mut sink);
+        let pass = hf::stream_logs(&token, &namespace, &job_id, skip, LOG_IDLE, &mut sink);
         let Some(result) = log_pass(&mut done, draining, pass).await else {
             continue;
         };
@@ -451,7 +449,7 @@ async fn tail_logs_k8s(
             &namespace,
             &job_name,
             &mut resume,
-            if draining { DRAIN_IDLE } else { LOG_IDLE },
+            LOG_IDLE,
             &mut sink,
         );
         let Some(streamed) = log_pass(&mut done, draining, pass).await else {
@@ -584,12 +582,12 @@ async fn tail_logs_modal(
     let mut seen = 0u64;
     loop {
         let draining = *done.borrow();
-        let (skip, idle) = (seen, if draining { DRAIN_IDLE } else { LOG_IDLE });
+        let skip = seen;
         let mut sink = |line: &str| {
             seen += 1;
             log.line(line);
         };
-        let pass = modal::stream_logs(&sandbox_id, skip, idle, &mut sink);
+        let pass = modal::stream_logs(&sandbox_id, skip, LOG_IDLE, &mut sink);
         let Some(result) = log_pass(&mut done, draining, pass).await else {
             continue;
         };
