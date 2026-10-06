@@ -316,6 +316,7 @@ pub(crate) async fn start_server(
     binary.check_unchanged()?;
     let mut child = crate::local::harness::spawn_retrying_busy(|| cmd.spawn())?;
     let client = reqwest::Client::builder()
+        .no_proxy()
         .default_headers(headers)
         .build()?;
     let ready = async {
