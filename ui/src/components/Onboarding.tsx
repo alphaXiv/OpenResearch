@@ -160,6 +160,14 @@ export function Onboarding({
   };
   useEffect(() => load(false), []);
   const installGitMutation = useMutation({ mutationFn: installGit, onSuccess: () => load(true) });
+  const gitInstallPrompt = (
+    <GitInstallPrompt
+      pending={installGitMutation.isPending}
+      error={installGitMutation.error}
+      disabled={checking}
+      onInstall={() => installGitMutation.mutate()}
+    />
+  );
   useEffect(() => {
     if (harnesses === null) return;
     const ready = harnesses.filter((h) => h.agentReady && !h.catalogPending);
@@ -439,16 +447,7 @@ export function Onboarding({
                 {gitError ? (
                   <p className={GIT_RETRY_HINT_CLASS_NAME}>{m.onboarding_retry_connection()}</p>
                 ) : gitInstallable ? (
-                  <div className="mt-2 flex flex-col items-start gap-2.5">
-                    <p className={GIT_RETRY_HINT_CLASS_NAME}>{m.onboarding_install_git_for_windows()}</p>
-                    <Button variant="primary" onClick={() => installGitMutation.mutate()} disabled={installGitMutation.isPending || checking}>
-                      {installGitMutation.isPending && <Spinner />}
-                      {installGitMutation.isPending ? m.onboarding_installing_git() : m.onboarding_install_git()}
-                    </Button>
-                    {installGitMutation.isError && (
-                      <p className={ONB_CARD_META_CLASS_NAME}>{installGitMutation.error.message}</p>
-                    )}
-                  </div>
+                  gitInstallPrompt
                 ) : (
                   <p className={GIT_RETRY_HINT_CLASS_NAME}>
                     {m.onboarding_git_is_required_for_local_experiments_install_git()}
@@ -622,7 +621,9 @@ export function Onboarding({
             {automaticSetup && !gitReady && (
               <div className="mt-5" role="status">
                 <LocalGitCard gitVersion={gitVersion} error={gitError} />
-                <p className={GIT_RETRY_HINT_CLASS_NAME}>{gitError ? m.onboarding_retry_connection() : m.onboarding_git_is_required_for_local_experiments_install_git()}</p>
+                {gitInstallable && !gitError ? gitInstallPrompt : (
+                  <p className={GIT_RETRY_HINT_CLASS_NAME}>{gitError ? m.onboarding_retry_connection() : m.onboarding_git_is_required_for_local_experiments_install_git()}</p>
+                )}
                 <Button onClick={() => load(true, true)} disabled={checking}>{m.onboarding_re_check()}</Button>
               </div>
             )}
@@ -811,6 +812,29 @@ function AgentCard({
       {meta && <div className={ONB_CARD_META_CLASS_NAME}>{meta}</div>}
       {h.authCheckFailed && h.agentNote && <div className={ONB_CARD_META_CLASS_NAME}>{renderNote(h.agentNote)}</div>}
     </button>
+  );
+}
+
+function GitInstallPrompt({
+  pending,
+  error,
+  disabled,
+  onInstall,
+}: {
+  pending: boolean;
+  error: Error | null;
+  disabled: boolean;
+  onInstall: () => void;
+}) {
+  return (
+    <div className="flex flex-col items-start gap-2.5">
+      <p className={GIT_RETRY_HINT_CLASS_NAME}>{m.onboarding_install_git_for_windows()}</p>
+      <Button variant="primary" onClick={onInstall} disabled={pending || disabled}>
+        {pending && <Spinner />}
+        {pending ? m.onboarding_installing_git() : m.onboarding_install_git()}
+      </Button>
+      {error && <p role="alert" className="text-accent-red text-sm m-0">{error.message}</p>}
+    </div>
   );
 }
 

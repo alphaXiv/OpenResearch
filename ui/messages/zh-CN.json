@@ -892,7 +892,7 @@
   "onboarding_install_git_to_continue": "请安装 Git 后再继续",
   "onboarding_install_git": "安装 Git",
   "onboarding_installing_git": "正在安装 Git…",
-  "onboarding_install_git_for_windows": "OpenResearch 可以为你的账户安装 Git for Windows，无需管理员权限。本地实验需要 Git。",
+  "onboarding_install_git_for_windows": "本地实验需要 Git。OpenResearch 可以为你的账户安装 Git for Windows，无需管理员权限。",
   "onboarding_choose_area_to_continue": "请至少选择一个研究领域后再继续。",
   "onboarding_describe_area_to_continue": "请描述你的研究领域后再继续。",
   "onboarding_api_key": "API 密钥",

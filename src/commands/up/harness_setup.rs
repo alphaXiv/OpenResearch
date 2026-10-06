@@ -82,6 +82,15 @@ fn windows_powershell() -> String {
     "powershell.exe".into()
 }
 
+/// `$LASTEXITCODE` persists from an earlier native call, so reset it or a
+/// failing cmdlet exits with its code.
+#[cfg(any(windows, test))]
+fn windows_install_script(install: &str) -> String {
+    format!(
+        "$LASTEXITCODE = 0\n{install}\nif (-not $?) {{ if ($LASTEXITCODE) {{ exit $LASTEXITCODE }} else {{ exit 1 }} }}"
+    )
+}
+
 /// PowerShell's `-EncodedCommand` form: base64 of the script's UTF-16LE.
 #[cfg(any(windows, test))]
 fn encoded_command(script: &str) -> String {
@@ -289,11 +298,7 @@ async fn run(
                         // Encoded: the console title echoes the command line into
                         // the output, where the script's own phrases would be excerpted.
                         "-EncodedCommand".into(),
-                        // `$LASTEXITCODE` persists from an earlier native call,
-                        // so reset it or a failing cmdlet exits with its code.
-                        encoded_command(&format!(
-                            "$LASTEXITCODE = 0\n{install}\nif (-not $?) {{ if ($LASTEXITCODE) {{ exit $LASTEXITCODE }} else {{ exit 1 }} }}"
-                        )),
+                        encoded_command(&windows_install_script(install)),
                     ],
                 )
             }
@@ -790,9 +795,11 @@ mod tests {
 
     #[test]
     fn the_windows_install_command_line_carries_none_of_its_phrases() {
-        let script = windows_install_command("opencode").unwrap();
+        let script = windows_install_script(windows_install_command("opencode").unwrap());
         assert!(script.contains("Unsupported architecture"));
-        let encoded = encoded_command(script);
+        // Nothing the script prints on failure may quote its own text either.
+        assert!(!script.contains("Write-Error"));
+        let encoded = encoded_command(&script);
         assert_eq!(crate::telemetry::harness::excerpt_for_test(&encoded), None);
         assert_eq!(
             encoded_command("exit 1"),

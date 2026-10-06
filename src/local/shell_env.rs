@@ -97,8 +97,7 @@ fn registry_path() -> Vec<PathBuf> {
     use std::os::windows::ffi::OsStringExt;
     use windows_sys::Win32::Foundation::{ERROR_MORE_DATA, ERROR_SUCCESS};
     use windows_sys::Win32::System::Registry::{
-        RegGetValueW, HKEY, HKEY_CURRENT_USER, HKEY_LOCAL_MACHINE, RRF_RT_REG_EXPAND_SZ,
-        RRF_RT_REG_SZ,
+        RegGetValueW, HKEY, HKEY_CURRENT_USER, HKEY_LOCAL_MACHINE, RRF_RT_REG_SZ,
     };
 
     fn wide(text: &str) -> Vec<u16> {
@@ -116,7 +115,9 @@ fn registry_path() -> Vec<PathBuf> {
                     root,
                     key.as_ptr(),
                     value.as_ptr(),
-                    RRF_RT_REG_SZ | RRF_RT_REG_EXPAND_SZ,
+                    // Expanding (no RRF_NOEXPAND) returns REG_EXPAND_SZ as REG_SZ;
+                    // naming RRF_RT_REG_EXPAND_SZ here fails with ERROR_INVALID_PARAMETER.
+                    RRF_RT_REG_SZ,
                     std::ptr::null_mut(),
                     buffer.as_mut_ptr().cast(),
                     &mut bytes,

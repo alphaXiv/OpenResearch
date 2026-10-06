@@ -898,7 +898,7 @@
   "onboarding_install_git_to_continue": "Install Git to continue",
   "onboarding_install_git": "Install Git",
   "onboarding_installing_git": "Installing Git…",
-  "onboarding_install_git_for_windows": "OpenResearch can install Git for Windows for your account, with no administrator prompt. Git is required for local experiments.",
+  "onboarding_install_git_for_windows": "Git is required for local experiments. OpenResearch can install Git for Windows for your account, with no administrator prompt.",
   "onboarding_choose_area_to_continue": "Choose at least one research area to continue.",
   "onboarding_describe_area_to_continue": "Describe your research area to continue.",
   "onboarding_api_key": "API key",

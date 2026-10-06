@@ -54,9 +54,9 @@ Either way, `orx` is linked into `~/.local/bin`, with a hint to add it to your
 `PATH` if needed. If you already ran `install.sh`, remove `~/.cargo/bin/orx`
 first and open a new terminal.
 
-On Windows, use the beta download above. It needs
-[Git for Windows](docs/windows.md), which onboarding can install for you. It installs for your account, with no
-administrator prompt. The installer isn't signed yet, so Windows may say
+On Windows, use the beta download above. It installs for your account, with no
+administrator prompt, and onboarding can install [Git for Windows](docs/windows.md)
+if you need it. The installer isn't signed yet, so Windows may say
 "Windows protected your PC": choose **More info** → **Run anyway**.
 
 On Linux, the desktop app is an AppImage for

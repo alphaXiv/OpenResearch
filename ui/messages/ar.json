@@ -897,7 +897,7 @@
   "onboarding_install_git_to_continue": "ثبّت Git للمتابعة",
   "onboarding_install_git": "ثبّت Git",
   "onboarding_installing_git": "جارٍ تثبيت Git…",
-  "onboarding_install_git_for_windows": "يمكن لـ OpenResearch تثبيت Git for Windows لحسابك دون طلب صلاحيات المسؤول. Git مطلوب للتجارب المحلية.",
+  "onboarding_install_git_for_windows": "Git مطلوب للتجارب المحلية. يمكن لـ OpenResearch تثبيت Git for Windows لحسابك دون طلب صلاحيات المسؤول.",
   "onboarding_choose_area_to_continue": "اختر مجالًا بحثيًا واحدًا على الأقل للمتابعة.",
   "onboarding_describe_area_to_continue": "صِف مجالك البحثي للمتابعة.",
   "onboarding_api_key": "مفتاح API",

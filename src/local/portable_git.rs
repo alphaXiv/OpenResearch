@@ -10,14 +10,14 @@ use anyhow::{anyhow, Context};
 use std::path::{Path, PathBuf};
 
 #[cfg(windows)]
-fn root() -> Option<PathBuf> {
-    dirs::data_local_dir().map(|dir| dir.join("OpenResearch").join("PortableGit"))
+fn base() -> Option<PathBuf> {
+    dirs::data_local_dir().map(|dir| dir.join("OpenResearch"))
 }
 
 /// The installed copy's `cmd` directory, the one Git's own installer puts on PATH.
 #[cfg(windows)]
 pub fn cmd_dir() -> Option<PathBuf> {
-    let dir = root()?.join("cmd");
+    let dir = base()?.join("PortableGit").join("cmd");
     dir.join("git.exe").is_file().then_some(dir)
 }
 
@@ -34,11 +34,12 @@ pub async fn install() -> Result<()> {
     if cmd_dir().is_some() {
         return Ok(());
     }
-    let root = root().ok_or_else(|| anyhow!("Could not find %LOCALAPPDATA%."))?;
-    let parent = root.parent().expect("root has a parent");
-    tokio::fs::create_dir_all(parent)
+    let parent = base().ok_or_else(|| anyhow!("Could not find %LOCALAPPDATA%."))?;
+    let root = parent.join("PortableGit");
+    tokio::fs::create_dir_all(&parent)
         .await
         .with_context(|| format!("Could not create {}", parent.display()))?;
+    sweep_stale(&parent).await;
     let (url, sha256) = latest_asset().await?;
     let token = uuid::Uuid::new_v4().simple().to_string();
     let archive = parent.join(format!("PortableGit-{token}.7z.exe"));
@@ -56,10 +57,38 @@ pub async fn install() -> Result<()> {
         let _ = tokio::fs::remove_dir_all(&staging).await;
     }
     result?;
-    if super::git::version().is_none() {
+    if tokio::task::spawn_blocking(super::git::version)
+        .await?
+        .is_none()
+    {
+        // Removed, so the next attempt reinstalls rather than trusting this copy.
+        let _ = tokio::fs::remove_dir_all(&root).await;
         anyhow::bail!("Git was installed in {} but does not run.", root.display());
     }
     Ok(())
+}
+
+/// Downloads and staging folders an interrupted install left beside `PortableGit`.
+#[cfg(windows)]
+async fn sweep_stale(parent: &Path) {
+    let Ok(mut entries) = tokio::fs::read_dir(parent).await else {
+        return;
+    };
+    while let Ok(Some(entry)) = entries.next_entry().await {
+        if !entry
+            .file_name()
+            .to_string_lossy()
+            .starts_with("PortableGit-")
+        {
+            continue;
+        }
+        let path = entry.path();
+        let _ = if path.is_dir() {
+            tokio::fs::remove_dir_all(&path).await
+        } else {
+            tokio::fs::remove_file(&path).await
+        };
+    }
 }
 
 /// The release asset for this machine and its SHA-256, from GitHub's own digest.
@@ -72,6 +101,7 @@ async fn latest_asset() -> Result<(String, String)> {
     };
     let release: serde_json::Value = client()?
         .get("https://api.github.com/repos/git-for-windows/git/releases/latest")
+        .timeout(std::time::Duration::from_secs(60))
         .header("accept", "application/vnd.github+json")
         .header("x-github-api-version", "2022-11-28")
         .send()
@@ -134,11 +164,10 @@ async fn download(url: &str, sha256: &str, archive: &Path) -> Result<()> {
 /// setup, run the way Git's own installer runs it. The copy stays relocatable.
 #[cfg(windows)]
 async fn unpack(archive: &Path, staging: &Path) -> Result<()> {
-    let mut output = std::ffi::OsString::from("-o");
-    output.push(staging);
+    // Quoted by hand: 7-Zip's extractor reads `-o"<dir>"`, not an argument quoted whole.
     let status = tokio::process::Command::new(archive)
         .arg("-y")
-        .arg(output)
+        .raw_arg(format!("-o\"{}\"", staging.display()))
         .status()
         .await
         .context("Could not start the Git for Windows extractor")?;
@@ -170,9 +199,10 @@ async fn unpack(archive: &Path, staging: &Path) -> Result<()> {
 #[cfg(windows)]
 fn client() -> Result<reqwest::Client> {
     reqwest::Client::builder()
-        .user_agent(concat!("orx/", env!("CARGO_PKG_VERSION")))
+        .user_agent(super::github::UA)
         .connect_timeout(std::time::Duration::from_secs(20))
-        .timeout(std::time::Duration::from_secs(600))
+        // Per read, not total: a slow link must still finish the 60 MB download.
+        .read_timeout(std::time::Duration::from_secs(60))
         .build()
         .context("Could not create an HTTP client")
 }

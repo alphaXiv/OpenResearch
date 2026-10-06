@@ -22,7 +22,7 @@ try {
     # Unlike curl.exe, Invoke-WebRequest uses the system proxy and tolerates
     # revocation servers a filtered network cannot reach.
     try {
-        Invoke-WebRequest -UseBasicParsing -Uri $release -OutFile $archive -TimeoutSec 300
+        Invoke-WebRequest -UseBasicParsing -Uri $release -OutFile $archive -TimeoutSec 30
         Expand-Archive -Path $archive -DestinationPath $temp -Force
         $binary = Join-Path $temp 'opencode.exe'
     } catch {
@@ -31,9 +31,9 @@ try {
     # The same build is published to npm, which networks that block GitHub's downloads often allow.
     if (-not $binary) {
         try {
-            $package = Invoke-RestMethod -UseBasicParsing -Uri "https://registry.npmjs.org/opencode-windows-$asset/latest" -TimeoutSec 60
+            $package = Invoke-RestMethod -UseBasicParsing -Uri "https://registry.npmjs.org/opencode-windows-$asset/latest" -TimeoutSec 30
             $tarball = Join-Path $temp 'opencode.tgz'
-            Invoke-WebRequest -UseBasicParsing -Uri $package.dist.tarball -OutFile $tarball -TimeoutSec 300
+            Invoke-WebRequest -UseBasicParsing -Uri $package.dist.tarball -OutFile $tarball -TimeoutSec 30
             $expected = -join ([Convert]::FromBase64String(($package.dist.integrity -replace '^sha512-', '')) | ForEach-Object { $_.ToString('x2') })
             if ((Get-FileHash -LiteralPath $tarball -Algorithm SHA512).Hash -ne $expected) { throw 'npm package checksum mismatch.' }
             & (Join-Path $env:SystemRoot 'System32\tar.exe') -xzf $tarball -C $temp
@@ -48,7 +48,8 @@ try {
         # Keep curl's own exit code so distinct network faults stay apart; the
         # throws below surface as exit 1 with their message.
         if ($LASTEXITCODE -ne 0) {
-            Write-Error "OpenCode download failed (curl exit $LASTEXITCODE)." -ErrorAction Continue
+            # Straight to stderr: an error record raised here prints this whole script as its source.
+            [Console]::Error.WriteLine("OpenCode download failed (curl exit $LASTEXITCODE).")
             exit $LASTEXITCODE
         }
         Expand-Archive -Path $archive -DestinationPath $temp -Force
