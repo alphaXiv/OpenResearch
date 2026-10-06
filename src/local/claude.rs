@@ -448,10 +448,19 @@ async fn read_loop(client: Arc<ClaudeClient>, stdout: tokio::process::ChildStdou
             }
             ClaudeLine::Event(value) => {
                 // Route to the live turn; dropped if none is listening (a
-                // between-turns line, or an aborted turn's tail).
+                // between-turns line, or an aborted turn's tail) once its tool identities are recorded.
                 let turn = client.turn.lock().unwrap();
                 if let Some(tx) = turn.sender.as_ref() {
                     let _ = tx.send(TurnEvent::Line(value));
+                } else if value.get("type").and_then(Value::as_str) == Some("assistant") {
+                    drop(turn);
+                    if let Some(message) = value.get("message") {
+                        crate::local::chat::record_native_invocations(
+                            "claude-code",
+                            &client.session_id,
+                            message,
+                        );
+                    }
                 }
             }
             ClaudeLine::Junk => {}
