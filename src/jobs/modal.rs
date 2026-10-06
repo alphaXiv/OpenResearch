@@ -496,6 +496,7 @@ pub async fn stream_logs(
         .env(super::PYTHONUNBUFFERED, "1")
         .envs(modal_auth_env())
         .stdin(Stdio::null())
+        .kill_on_drop(true)
         .stdout(Stdio::piped())
         .stderr(Stdio::null()) // startup noise; state comes from inspect
         .spawn()
@@ -506,9 +507,20 @@ pub async fn stream_logs(
     let mut seen = 0u64;
     loop {
         match tokio::time::timeout(idle, lines.next_line()).await {
-            Err(_) => break,       // idle — let the caller re-check state
-            Ok(Err(_)) => break,   // read error
-            Ok(Ok(None)) => break, // launcher exited
+            Err(_) => break, // idle — let the caller re-check state
+            Ok(Err(e)) => {
+                return Err(anyhow!(
+                    "Could not read the Modal log launcher output: {}",
+                    e
+                ))
+            }
+            Ok(Ok(None)) => {
+                let status = child.wait().await?;
+                if !status.success() {
+                    return Err(anyhow!("the Modal log launcher exited with {}", status));
+                }
+                break;
+            }
             Ok(Ok(Some(line))) => {
                 seen += 1;
                 if seen > skip {

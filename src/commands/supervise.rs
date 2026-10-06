@@ -24,6 +24,8 @@ use crate::store::{log_path, now_ms, RunStatus, Store};
 const POLL_INTERVAL: Duration = Duration::from_secs(5);
 /// How long a silent log stream is held before re-checking job state.
 const LOG_IDLE: Duration = Duration::from_secs(30);
+/// The final pass's idle wait; it must end inside the 20s drain bound.
+const DRAIN_IDLE: Duration = Duration::from_secs(5);
 /// How long monitoring must keep failing before it is reported on the run.
 const MONITORING_GRACE: Duration = Duration::from_secs(60);
 
@@ -34,6 +36,22 @@ fn open_supervisor_lock(path: &std::path::Path) -> Result<fd_lock::RwLock<std::f
         .write(true)
         .open(path)?;
     Ok(fd_lock::RwLock::new(file))
+}
+
+/// One streaming log pass, cut short (`None`) when the job ends so the final
+/// pass starts inside the drain bound.
+async fn log_pass<T>(
+    done: &mut tokio::sync::watch::Receiver<bool>,
+    draining: bool,
+    pass: impl std::future::Future<Output = Result<T>>,
+) -> Option<Result<T>> {
+    if draining {
+        return Some(pass.await);
+    }
+    tokio::select! {
+        result = pass => Some(result),
+        Ok(()) = done.changed() => None,
+    }
 }
 
 /// The run's local log, rewritten from each supervisor's replay of the backend
@@ -251,7 +269,7 @@ async fn tail_logs(
     job_id: String,
     path: std::path::PathBuf,
     run_id: String,
-    done: tokio::sync::watch::Receiver<bool>,
+    mut done: tokio::sync::watch::Receiver<bool>,
 ) {
     let mut log = match RunLog::open(&path) {
         Ok(log) => log,
@@ -267,20 +285,21 @@ async fn tail_logs(
     loop {
         // Only a pass that began after the job ended is known to hold its last lines.
         let draining = *done.borrow();
-        let mut sink = |line: &str| log.line(line);
-        let drained =
-            match hf::stream_logs(&token, &namespace, &job_id, seen, LOG_IDLE, &mut sink).await {
-                Ok(s) => {
-                    seen = s;
-                    true
-                }
-                Err(err) => {
-                    eprintln!("supervise {run_id}: log stream error (will retry): {err}");
-                    false
-                }
-            };
+        let (skip, idle) = (seen, if draining { DRAIN_IDLE } else { LOG_IDLE });
+        // Counted here so a pass that fails partway still dedups what it wrote.
+        let mut sink = |line: &str| {
+            seen += 1;
+            log.line(line);
+        };
+        let pass = hf::stream_logs(&token, &namespace, &job_id, skip, idle, &mut sink);
+        let Some(result) = log_pass(&mut done, draining, pass).await else {
+            continue;
+        };
+        if let Err(err) = &result {
+            eprintln!("supervise {run_id}: log stream error (will retry): {err}");
+        }
         let _ = log.file.flush();
-        if draining && drained {
+        if draining && result.is_ok() {
             return;
         }
         tokio::time::sleep(Duration::from_secs(2)).await;
@@ -411,7 +430,7 @@ async fn tail_logs_k8s(
     job_name: String,
     path: std::path::PathBuf,
     run_id: String,
-    done: tokio::sync::watch::Receiver<bool>,
+    mut done: tokio::sync::watch::Receiver<bool>,
 ) {
     let mut log = match RunLog::open(&path) {
         Ok(log) => log,
@@ -427,15 +446,17 @@ async fn tail_logs_k8s(
     loop {
         let draining = *done.borrow();
         let mut sink = |line: &str| log.line(line);
-        let streamed = k8s::stream_logs(
+        let pass = k8s::stream_logs(
             context.as_deref(),
             &namespace,
             &job_name,
             &mut resume,
-            LOG_IDLE,
+            if draining { DRAIN_IDLE } else { LOG_IDLE },
             &mut sink,
-        )
-        .await;
+        );
+        let Some(streamed) = log_pass(&mut done, draining, pass).await else {
+            continue;
+        };
         if let Err(err) = &streamed {
             eprintln!("supervise {run_id}: log stream error (will retry): {err}");
         }
@@ -548,7 +569,7 @@ async fn tail_logs_modal(
     sandbox_id: String,
     path: std::path::PathBuf,
     run_id: String,
-    done: tokio::sync::watch::Receiver<bool>,
+    mut done: tokio::sync::watch::Receiver<bool>,
 ) {
     let mut log = match RunLog::open(&path) {
         Ok(log) => log,
@@ -563,19 +584,20 @@ async fn tail_logs_modal(
     let mut seen = 0u64;
     loop {
         let draining = *done.borrow();
-        let mut sink = |line: &str| log.line(line);
-        let drained = match modal::stream_logs(&sandbox_id, seen, LOG_IDLE, &mut sink).await {
-            Ok(s) => {
-                seen = s;
-                true
-            }
-            Err(err) => {
-                eprintln!("supervise {run_id}: log stream error (will retry): {err}");
-                false
-            }
+        let (skip, idle) = (seen, if draining { DRAIN_IDLE } else { LOG_IDLE });
+        let mut sink = |line: &str| {
+            seen += 1;
+            log.line(line);
         };
+        let pass = modal::stream_logs(&sandbox_id, skip, idle, &mut sink);
+        let Some(result) = log_pass(&mut done, draining, pass).await else {
+            continue;
+        };
+        if let Err(err) = &result {
+            eprintln!("supervise {run_id}: log stream error (will retry): {err}");
+        }
         let _ = log.file.flush();
-        if draining && drained {
+        if draining && result.is_ok() {
             return;
         }
         tokio::time::sleep(Duration::from_secs(2)).await;
@@ -1551,6 +1573,20 @@ mod tests {
             std::fs::read_to_string(&path).unwrap(),
             "a\n{\"big\": 1}\nlast\n"
         );
+    }
+
+    #[tokio::test]
+    async fn a_stalled_stream_pass_yields_to_the_final_drain() {
+        let (tx, mut rx) = tokio::sync::watch::channel(false);
+        let stalled = std::future::pending::<Result<()>>();
+        let flip = async {
+            tokio::time::sleep(Duration::from_millis(50)).await;
+            tx.send(true).unwrap();
+        };
+        let (interrupted, ()) = tokio::join!(log_pass(&mut rx, false, stalled), flip);
+        assert!(interrupted.is_none());
+        let drained = log_pass(&mut rx, true, async { Ok(7) }).await;
+        assert_eq!(drained.unwrap().unwrap(), 7);
     }
 
     #[test]
