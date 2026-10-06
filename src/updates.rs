@@ -47,18 +47,17 @@ const CHECK_TTL: Duration = Duration::from_secs(24 * 60 * 60);
 /// Sent on requests to GitHub — some CDNs reject the default (empty) UA.
 const UA: &str = concat!("openresearch-cli/", env!("CARGO_PKG_VERSION"));
 
-/// Where this platform's desktop app downloads from.
-// Unused while this fork ships no desktop app; kept for when it does.
-#[allow(dead_code)]
-pub fn desktop_app_download_url() -> String {
+/// Where this platform's desktop app downloads from; `None` on macOS, where this
+/// fork ships no app.
+pub fn desktop_app_download_url() -> Option<String> {
     let asset = match (std::env::consts::OS, std::env::consts::ARCH) {
-        ("macos", _) => "OpenResearch.dmg",
+        ("macos", _) => return None,
         ("windows", _) => "OpenResearch-Setup.exe",
         ("linux", "x86_64") => "OpenResearch-x86_64.AppImage",
         ("linux", "aarch64") => "OpenResearch-aarch64.AppImage",
-        _ => return format!("{REPO_URL}/releases/latest"),
+        _ => return Some(format!("{REPO_URL}/releases/latest")),
     };
-    format!("{REPO_URL}/releases/latest/download/{asset}")
+    Some(format!("{REPO_URL}/releases/latest/download/{asset}"))
 }
 
 pub fn current_version() -> Version {

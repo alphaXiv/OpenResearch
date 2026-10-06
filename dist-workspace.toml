@@ -15,6 +15,8 @@ ci = "github"
 allow-dirty = ["ci"]
 # Run source CI before publishing.
 global-artifacts-jobs = ["./ci"]
+# Attach this fork's desktop apps (Windows installer, Linux AppImages).
+post-announce-jobs = ["./release-windows-app", "./release-linux-app"]
 # The installers to generate for each app
 installers = ["shell", "powershell"]
 # Target platforms to build apps for (Rust target-triple syntax)

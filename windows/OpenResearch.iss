@@ -23,8 +23,8 @@
 AppId={{E9099BE3-5087-4A2A-9296-4DC836929049}
 AppName=OpenResearch
 AppVersion={#AppVersion}
-AppPublisher=alphaXiv
-AppPublisherURL=https://openresearch.sh
+AppPublisher=OpenResearch fork (artur-shaikhutdinov)
+AppPublisherURL=https://github.com/artur-shaikhutdinov/OpenResearch-Kimi-MiniMax-ZCode
 ; Per-user and writable, so orx.exe can update itself in place without admin.
 DefaultDirName={localappdata}\Programs\OpenResearch
 DisableDirPage=yes

@@ -20,7 +20,7 @@ The local-first harness & workspace for research agents.
 <p>Whether you’re looking for a copilot or an autoresearch tool, OpenResearch will accelerate your work. Launch research agents that can review literature, develop hypotheses, run experiments, and produce research artifacts.</p>
 
 <p>
-<a href="https://github.com/artur-shaikhutdinov/OpenResearch-Kimi-MiniMax-ZCode/releases/latest/download/openresearch-cli-x86_64-pc-windows-msvc.zip"><picture><source media="(prefers-color-scheme: dark)" srcset=".github/readme-assets/download-windows-dark.svg"><img src=".github/readme-assets/download-windows.svg" alt="Download OpenResearch for Windows (Beta)" width="220" height="44" /></picture></a>
+<a href="https://github.com/artur-shaikhutdinov/OpenResearch-Kimi-MiniMax-ZCode/releases/latest/download/OpenResearch-Setup.exe"><picture><source media="(prefers-color-scheme: dark)" srcset=".github/readme-assets/download-windows-dark.svg"><img src=".github/readme-assets/download-windows.svg" alt="Download OpenResearch for Windows (Beta)" width="220" height="44" /></picture></a>
 <a href="https://github.com/artur-shaikhutdinov/OpenResearch-Kimi-MiniMax-ZCode/releases/latest"><picture><source media="(prefers-color-scheme: dark)" srcset=".github/readme-assets/download-linux-dark.svg"><img src=".github/readme-assets/download-linux.svg" alt="Download OpenResearch for Linux" width="220" height="44" /></picture></a>
 </p>
 
@@ -40,45 +40,37 @@ The local-first harness & workspace for research agents.
 
 > **This is a fork** of [alphaXiv/OpenResearch](https://github.com/alphaXiv/OpenResearch)
 > that adds [Kimi Code, MiniMax Code and ZCode](docs/new-harnesses.md) as agents.
-> Its releases are Windows and Linux builds of the `orx` CLI, published from this
-> repository, and `orx update` follows them. They are development-channel builds:
-> no telemetry or feedback reaches alphaXiv, and there is no signed macOS app.
-> Install on Windows (after [Git for Windows](docs/windows.md)):
->
-> ```powershell
-> powershell -ExecutionPolicy Bypass -c "irm https://github.com/artur-shaikhutdinov/OpenResearch-Kimi-MiniMax-ZCode/releases/latest/download/openresearch-cli-installer.ps1 | iex"
-> ```
->
-> On Linux:
->
-> ```sh
-> curl --proto '=https' --tlsv1.2 -LsSf https://github.com/artur-shaikhutdinov/OpenResearch-Kimi-MiniMax-ZCode/releases/latest/download/openresearch-cli-installer.sh | sh
-> ```
->
-> The rest of this README describes upstream OpenResearch.
+> Its releases are a Windows and Linux desktop app and `orx` CLI, published from
+> this repository, and both update from it. They are development-channel
+> builds: no telemetry or feedback reaches alphaXiv, nothing is code-signed (so
+> Windows shows a SmartScreen warning: **More info** → **Run anyway**), and there
+> is no macOS app.
 
 ## Get started
 
-**We recommend using the OpenResearch desktop app.** Download it for your platform:
+**We recommend the desktop app.** Download it for your platform:
 
-- [macOS](https://github.com/alphaXiv/OpenResearch/releases/latest/download/OpenResearch.dmg)
-- [Windows (Beta)](https://github.com/alphaXiv/OpenResearch/releases/latest/download/OpenResearch-Setup.exe)
-- Linux: [x86_64](https://github.com/alphaXiv/OpenResearch/releases/latest/download/OpenResearch-x86_64.AppImage) · [ARM64](https://github.com/alphaXiv/OpenResearch/releases/latest/download/OpenResearch-aarch64.AppImage)
+- [Windows (Beta)](https://github.com/artur-shaikhutdinov/OpenResearch-Kimi-MiniMax-ZCode/releases/latest/download/OpenResearch-Setup.exe) — needs [Git for Windows](docs/windows.md)
+- Linux: [x86_64](https://github.com/artur-shaikhutdinov/OpenResearch-Kimi-MiniMax-ZCode/releases/latest/download/OpenResearch-x86_64.AppImage) · [ARM64](https://github.com/artur-shaikhutdinov/OpenResearch-Kimi-MiniMax-ZCode/releases/latest/download/OpenResearch-aarch64.AppImage) ([details](docs/linux.md))
 
 <details>
-<summary>Prefer the standalone CLI? Install on macOS or Linux</summary>
+<summary>Prefer the standalone CLI?</summary>
+
+On Windows (after [Git for Windows](docs/windows.md)):
+
+```powershell
+powershell -ExecutionPolicy Bypass -c "irm https://github.com/artur-shaikhutdinov/OpenResearch-Kimi-MiniMax-ZCode/releases/latest/download/openresearch-cli-installer.ps1 | iex"
+```
+
+On Linux:
 
 ```sh
-curl -LsSf https://openresearch.sh/install.sh | sh
+curl --proto '=https' --tlsv1.2 -LsSf https://github.com/artur-shaikhutdinov/OpenResearch-Kimi-MiniMax-ZCode/releases/latest/download/openresearch-cli-installer.sh | sh
 orx up
 ```
 
-`orx up` opens the local dashboard at `http://127.0.0.1:4791`.
-
-On a managed Mac, device-management policies may block the CLI installed by
-`install.sh` because it is not yet signed. Use the signed and notarized desktop
-app instead. You can also install `orx` for your terminal from the app's
-Settings → Updates → **Install the `orx` command**.
+`orx up` opens the local dashboard at `http://127.0.0.1:4791`. On macOS, build
+`orx` from source with `cargo install --path .`.
 
 </details>
 

@@ -3,16 +3,25 @@
 # the app runs exactly the published CLI build, and that orx.exe keeps itself
 # current through the CLI's self-update.
 #
-# Triggers mirror release-macos-app.yml: the automatic workflow_run after a
-# successful dispatched "Release", or a manual dispatch naming the tag. Gated on
-# the repo variable WINDOWS_APP_ENABLED. See docs/windows.md.
+# Triggers: release.yml calls it once the release is published, or a manual
+# dispatch names the tag. This fork's installer is unsigned (no
+# alphaXiv signing account) and runs only in this repository. See docs/windows.md.
 
 name: Attach Windows app to release
 
 on:
-  workflow_run:
-    workflows: ["Release"]
-    types: [completed]
+  # release.yml calls this after publishing (a post-announce job), since its
+  # GITHUB_TOKEN-dispatched runs would not fire a workflow_run.
+  workflow_call:
+    inputs:
+      plan:
+        description: dist's plan manifest (unused; the tag comes from Cargo.toml)
+        required: true
+        type: string
+      tag:
+        description: Release tag; empty means v<Cargo.toml version>
+        required: false
+        type: string
   workflow_dispatch:
     inputs:
       tag:
@@ -29,7 +38,7 @@ concurrency:
 
 jobs:
   check:
-    if: ${{ vars.WINDOWS_APP_ENABLED == 'true' && (github.event_name == 'workflow_dispatch' || (github.event.workflow_run.conclusion == 'success' && github.event.workflow_run.event == 'workflow_dispatch')) }}
+    if: ${{ github.repository == 'artur-shaikhutdinov/OpenResearch-Kimi-MiniMax-ZCode' }}
     runs-on: ubuntu-latest
     outputs:
       ok: ${{ steps.gate.outputs.ok }}
@@ -39,7 +48,7 @@ jobs:
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
-          ref: ${{ github.event.workflow_run.head_sha || inputs.tag }}
+          ref: ${{ inputs.tag }}
       - id: gate
         env:
           INPUT_TAG: ${{ inputs.tag }}
@@ -63,10 +72,8 @@ jobs:
     if: ${{ needs.check.outputs.ok == 'true' }}
     runs-on: windows-latest
     timeout-minutes: 30
-    environment: release-signing
     permissions:
       contents: write
-      id-token: write
     env:
       GH_TOKEN: ${{ github.token }}
       TAG: ${{ needs.check.outputs.tag }}
@@ -76,16 +83,9 @@ jobs:
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
-          ref: ${{ github.event.workflow_run.head_sha || inputs.tag }}
+          ref: ${{ inputs.tag }}
 
-      - name: Take signing action from the workflow revision
-        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
-        with:
-          ref: ${{ github.workflow_sha }}
-          path: signing-workflow
-          sparse-checkout: .github/actions/windows-signing
-
-      # The runner's preinstalled stable toolchain, as release-macos-app.yml uses.
+      # The runner's preinstalled stable toolchain.
       - name: Build the launcher
         run: cargo build --release --locked --manifest-path windows/launcher/Cargo.toml
 
@@ -98,41 +98,20 @@ jobs:
           Copy-Item (Get-ChildItem release-unpacked -Recurse -Filter orx.exe | Select-Object -First 1).FullName app-staging
           Copy-Item windows/launcher/target/release/OpenResearch.exe app-staging
 
-      - name: Verify the packaged production channel
+      # A development-channel build (no telemetry to alphaXiv) of this very tag.
+      - name: Verify the packaged orx
         env:
           ORX_TELEMETRY_ENV: "off"
         run: |
           $channel = & app-staging/orx.exe version --build-channel
-          if ($channel -ne 'production') { throw "expected build channel 'production', got '$channel'" }
-
-      - uses: Azure/login@a641126d1b8aa4d1fa005f4f92df94a3a4c4c906 # v3
-        with:
-          client-id: ${{ vars.WINDOWS_SIGNING_CLIENT_ID }}
-          tenant-id: ${{ vars.WINDOWS_SIGNING_TENANT_ID }}
-          subscription-id: ${{ vars.WINDOWS_SIGNING_SUBSCRIPTION_ID }}
-
-      - name: Sign the app and bundled CLI
-        uses: ./signing-workflow/.github/actions/windows-signing
-        with:
-          files: |
-            ${{ github.workspace }}\app-staging\OpenResearch.exe
-            ${{ github.workspace }}\app-staging\orx.exe
-          endpoint: ${{ vars.WINDOWS_SIGNING_ENDPOINT }}
-          account: ${{ vars.WINDOWS_SIGNING_ACCOUNT }}
-          profile: ${{ vars.WINDOWS_SIGNING_PROFILE }}
+          if ($channel -ne 'development') { throw "expected build channel 'development', got '$channel'" }
+          $version = (& app-staging/orx.exe --version) -replace '^\S+\s+', ''
+          if ("v$version" -ne $env:TAG) { throw "orx.exe is $version, expected $env:TAG" }
 
       - name: Build the installer
         run: |
           & "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe" "/DAppVersion=$($env:TAG.TrimStart('v'))" "/DSourceDir=$PWD\app-staging" "/DOutputDir=$PWD\app-installer" windows\OpenResearch.iss
           if ($LASTEXITCODE) { exit $LASTEXITCODE }
-
-      - name: Sign the installer
-        uses: ./signing-workflow/.github/actions/windows-signing
-        with:
-          files: ${{ github.workspace }}\app-installer\OpenResearch-Setup.exe
-          endpoint: ${{ vars.WINDOWS_SIGNING_ENDPOINT }}
-          account: ${{ vars.WINDOWS_SIGNING_ACCOUNT }}
-          profile: ${{ vars.WINDOWS_SIGNING_PROFILE }}
 
       - name: Upload the installer to the release
         run: |

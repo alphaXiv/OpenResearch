@@ -2,7 +2,7 @@
 
 ## The desktop app
 
-From [Releases](https://github.com/alphaXiv/OpenResearch/releases), download
+From [Releases](https://github.com/artur-shaikhutdinov/OpenResearch-Kimi-MiniMax-ZCode/releases), download
 `OpenResearch-x86_64.AppImage` (or `OpenResearch-aarch64.AppImage` on ARM), make
 it executable, and run it:
 
@@ -50,11 +50,13 @@ browser.
 
 ## Releasing the app
 
-`release-linux-app.yml` builds both AppImages from the release's commit, attaches
-them, and writes `linux-app.json`, once the repository variable
-`LINUX_APP_ENABLED` is `true`. Like the macOS app it follows a Release run
-dispatched by a token (see `macos/DISTRIBUTION.md`); to attach the AppImages to an
-existing release, dispatch the workflow with its tag. CI on every pull request
+Once a release is published, `release.yml` calls `release-linux-app.yml`, which
+builds both AppImages from the release's commit, attaches them, and writes
+`linux-app.json`. It builds with `ORX_FORK_RELEASE_BUILD=1`, which `build.rs`
+accepts only in this repository's GitHub Actions: the binary stays on the
+development channel, so no telemetry reaches alphaXiv, but the AppImage may
+update itself. To attach the AppImages to an existing release, dispatch the
+workflow with its tag. CI on every pull request
 also builds, smoke-tests, and uploads both AppImages
 (`openresearch-linux-<arch>-appimage`). The smoke test runs after WebKitGTK is
 removed from the runner, so it fails if the image falls back to a host copy.

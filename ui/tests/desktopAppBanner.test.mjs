@@ -6,7 +6,7 @@ import React from "react";
 import ts from "typescript";
 
 const require = createRequire(import.meta.url);
-const RELEASES = "https://github.com/alphaXiv/OpenResearch/releases/latest";
+const RELEASES = "https://github.com/artur-shaikhutdinov/OpenResearch-Kimi-MiniMax-ZCode/releases/latest";
 const KEY = "desktop-app-banner-dismissed-on";
 
 function storage(initial = {}) {
@@ -14,7 +14,7 @@ function storage(initial = {}) {
   return { getItem: (key) => values[key] ?? null, setItem: (key, value) => { values[key] = value; }, values };
 }
 
-function mount({ platform = "MacIntel", stored = {}, desktop = false } = {}) {
+function mount({ platform = "Win32", stored = {}, desktop = false } = {}) {
   const source = readFileSync(new URL("../src/components/DesktopAppBanner.tsx", import.meta.url), "utf8");
   const code = ts.transpileModule(source, {
     compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022, jsx: ts.JsxEmit.ReactJSX },
@@ -58,7 +58,6 @@ function find(node, type) {
 
 test("links the download for the viewer's platform", () => {
   const cases = [
-    ["MacIntel", `${RELEASES}/download/OpenResearch.dmg`],
     ["Win32", `${RELEASES}/download/OpenResearch-Setup.exe`],
     ["Linux x86_64", `${RELEASES}/download/OpenResearch-x86_64.AppImage`],
     ["Linux aarch64", `${RELEASES}/download/OpenResearch-aarch64.AppImage`],
@@ -85,6 +84,10 @@ test("dismissing hides the banner until the next calendar day", () => {
   assert.equal(mount({ stored: { [KEY]: new Date().toDateString() } }).render(), null);
   const yesterday = new Date(Date.now() - 24 * 60 * 60 * 1000).toDateString();
   assert.notEqual(mount({ stored: { [KEY]: yesterday } }).render(), null);
+});
+
+test("stays hidden on a Mac, where the fork has no app", () => {
+  assert.equal(mount({ platform: "MacIntel" }).render(), null);
 });
 
 test("never renders inside the desktop app", () => {
