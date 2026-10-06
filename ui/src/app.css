@@ -292,6 +292,20 @@
     transform: rotate(360deg);
   }
 }
+@keyframes onb-welcome-in {
+  from {
+    opacity: 0;
+    filter: blur(8px);
+    transform: translateY(0.3em);
+  }
+}
+@keyframes onb-warp-in {
+  from {
+    opacity: 0;
+    filter: blur(12px);
+    transform: scale(0.4);
+  }
+}
 @keyframes title-char-in {
   from {
     opacity: 0;
