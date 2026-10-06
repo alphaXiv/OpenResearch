@@ -369,14 +369,14 @@ export function Onboarding({
       >
         {step === 0 ? (
           <div className="onb-intro flex min-h-dvh flex-col items-center justify-center gap-6 text-center">
-            <Hyperspace className="pointer-events-none fixed inset-0 h-full w-full" />
-            <div className="onb-intro-brand relative text-6xl font-semibold leading-none tracking-[-0.035em] animate-[onb-warp-in_700ms_cubic-bezier(0.16,1,0.3,1)_1250ms_both] [@media((prefers-reduced-motion:_reduce))]:animate-none">
+            <Hyperspace className="pointer-events-none fixed inset-0 size-full" />
+            <div className="onb-intro-brand relative text-6xl font-semibold leading-none tracking-[-0.035em] animate-[onb-warp-in_700ms_cubic-bezier(0.16,1,0.3,1)_1250ms_both] motion-reduce:animate-none">
               <Wordmark />
             </div>
-            <h2 className="onb-title relative m-0 text-2xl font-medium text-muted tracking-[-0.02em] animate-[onb-welcome-in_700ms_ease-out_1700ms_both] [@media((prefers-reduced-motion:_reduce))]:animate-none">
+            <h2 className="onb-title relative m-0 text-2xl font-medium text-muted tracking-[-0.02em] animate-[onb-welcome-in_700ms_ease-out_1700ms_both] motion-reduce:animate-none">
               {m.onboarding_the_local_first_workspace_for_research_agents()}
             </h2>
-            <div className="relative mt-6 animate-[onb-welcome-in_600ms_ease-out_2300ms_both] [@media((prefers-reduced-motion:_reduce))]:animate-none">
+            <div className="relative mt-6 animate-[onb-welcome-in_600ms_ease-out_2300ms_both] motion-reduce:animate-none">
               <Button variant="primary" size="large"
                 onClick={continueFromWelcome}
                 disabled={checking && harnesses === null}

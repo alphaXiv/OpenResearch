@@ -29,12 +29,6 @@ export function Hyperspace({ className }: { className?: string }) {
     const ctx = canvas?.getContext("2d");
     if (!canvas || !ctx || matchMedia("(prefers-reduced-motion: reduce)").matches) return;
 
-    const styles = getComputedStyle(canvas);
-    const textColor = styles.getPropertyValue("--color-text").trim() || "#222";
-    // The brand red disappears against the dark canvas, so dark mode uses a lighter tint.
-    const primaryColor = document.documentElement.dataset.theme === "dark"
-      ? "#f07a90"
-      : styles.getPropertyValue("--color-primary").trim() || "#9a2036";
     const stars = Array.from({ length: STAR_COUNT }, () => spawn());
     let width = 0;
     let height = 0;
@@ -56,6 +50,10 @@ export function Hyperspace({ className }: { className?: string }) {
       const dt = Math.min(now - last, 50) / 1000;
       last = now;
       const speed = speedAt(now - start);
+      // Read per frame so an OS theme flip mid-intro recolours the stars.
+      const root = getComputedStyle(document.documentElement);
+      const textColor = root.getPropertyValue("--text");
+      const primaryColor = root.getPropertyValue("--primary");
       const cx = width / 2;
       const cy = height / 2;
       const focal = Math.max(width, height) * 0.5;
