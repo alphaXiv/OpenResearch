@@ -640,7 +640,12 @@ backend_adapter!(
         if let crate::client::SandboxTarget::New { gpu, .. } =
             crate::jobs::openresearch::parse_flavor(flavor, 0, None)?
         {
-            if let Ok(catalog) = crate::client::list_catalog(&creds).await {
+            if let Ok(Ok(catalog)) = tokio::time::timeout(
+                std::time::Duration::from_secs(10),
+                crate::client::list_catalog(&creds),
+            )
+            .await
+            {
                 let mut ids: Vec<_> = catalog.offers.into_iter().map(|o| o.gpu).collect();
                 ids.sort();
                 ids.dedup();
