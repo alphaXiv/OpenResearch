@@ -298,7 +298,7 @@ async fn run(
                         // Encoded: the console title echoes the command line into
                         // the output, where the script's own phrases would be excerpted.
                         "-EncodedCommand".into(),
-                        encoded_command(&windows_install_script(install)),
+                        encoded_command(&windows_install_script(&install)),
                     ],
                 )
             }
