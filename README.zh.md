@@ -2,7 +2,7 @@
 
 <h1><img src=".github/readme-assets/openresearch.svg" alt="" width="56" align="absmiddle" /> OpenResearch</h1>
 
-The local-first harness & workspace for research agents.
+以本地为核心的研究智能体执行框架和工作空间。
 
 <p><em>an <a href="https://alphaxiv.org"><img src=".github/readme-assets/alphaxiv.svg" alt="" width="18" height="18" align="absmiddle" /> alphaXiv</a> project</em></p>
 
@@ -17,11 +17,11 @@ The local-first harness & workspace for research agents.
 
 <hr />
 
-<p>Whether you’re looking for a copilot or an autoresearch tool, OpenResearch will accelerate your work. Launch research agents that can review literature, develop hypotheses, run experiments, and produce research artifacts.</p>
+<p>无论你需要的是助手还是自主研究工具，OpenResearch 都将加速你的工作。 启动研究智能体，让它们查阅文献、提出假设、运行实验并生成研究成果。</p>
 
 <p>
 <a href="https://github.com/alphaXiv/OpenResearch/releases/latest/download/OpenResearch.dmg"><picture><source media="(prefers-color-scheme: dark)" srcset=".github/readme-assets/download-macos-dark.svg"><img src=".github/readme-assets/download-macos.svg" alt="Download OpenResearch for macOS" width="220" height="44" /></picture></a>
-<a href="https://github.com/alphaXiv/OpenResearch/releases/latest/download/OpenResearch-Setup.exe"><picture><source media="(prefers-color-scheme: dark)" srcset=".github/readme-assets/download-windows-dark.svg"><img src=".github/readme-assets/download-windows.svg" alt="Download OpenResearch for Windows (Beta)" width="220" height="44" /></picture></a>
+<a href="https://github.com/alphaXiv/OpenResearch/releases/latest/download/OpenResearch-Setup.exe"><picture><source media="(prefers-color-scheme: dark)" srcset=".github/readme-assets/download-windows-dark.svg"><img src=".github/readme-assets/download-windows.svg" alt="Download OpenResearch for Windows（测试版）" width="220" height="44" /></picture></a>
 <a href="https://github.com/alphaXiv/OpenResearch/releases/latest/download/OpenResearch-x86_64.AppImage"><picture><source media="(prefers-color-scheme: dark)" srcset=".github/readme-assets/download-linux-dark.svg"><img src=".github/readme-assets/download-linux.svg" alt="Download OpenResearch for Linux" width="220" height="44" /></picture></a>
 </p>
 
@@ -30,77 +30,76 @@ The local-first harness & workspace for research agents.
 <a href="https://github.com/alphaXiv/OpenResearch/releases"><img src=".github/readme-assets/action-releases.svg" alt="Releases" width="78" height="24" /></a>
 </p>
 
-<p><sub>macOS 11+ · Windows beta requires <a href="docs/windows.md">Git for Windows</a> · <a href="docs/linux.md">Linux</a> app needs glibc 2.35+</sub></p>
+<p><sub>macOS 11+ · Windows 测试版需要 <a href="docs/windows.md">Git for Windows</a> · <a href="docs/linux.md">Linux</a> 应用需要 glibc 2.35+</sub></p>
 
 <p><a href="https://trendshift.io/repositories/89363"><img src="https://trendshift.io/api/badge/repositories/89363" alt="GitHub Trending: #1 Repository of the Day" width="250" height="55" /></a>
 <a href="https://trendshift.io/repositories/89363?utm_source=trendshift-badge&amp;utm_medium=badge&amp;utm_campaign=badge-trendshift-89363" target="_blank" rel="noopener noreferrer"><img src="https://trendshift.io/api/badge/trendshift/repositories/89363/daily?language=Rust" alt="alphaXiv/OpenResearch | Trendshift" width="250" height="55" /></a></p>
 
 </div>
 
-## Get started
+## 开始使用
 
-**We recommend using the OpenResearch desktop app.** Download it for your platform:
+**推荐使用 OpenResearch 桌面应用。** 下载适合你平台的版本：
 
 - [macOS](https://github.com/alphaXiv/OpenResearch/releases/latest/download/OpenResearch.dmg)
-- [Windows (Beta)](https://github.com/alphaXiv/OpenResearch/releases/latest/download/OpenResearch-Setup.exe)
+- [Windows（测试版）](https://github.com/alphaXiv/OpenResearch/releases/latest/download/OpenResearch-Setup.exe)
 - Linux: [x86_64](https://github.com/alphaXiv/OpenResearch/releases/latest/download/OpenResearch-x86_64.AppImage) · [ARM64](https://github.com/alphaXiv/OpenResearch/releases/latest/download/OpenResearch-aarch64.AppImage)
 
 <details>
-<summary>Prefer the standalone CLI? Install on macOS or Linux</summary>
+<summary>更喜欢独立 CLI？在 macOS 或 Linux 上安装</summary>
 
 ```sh
 curl -LsSf https://openresearch.sh/install.sh | sh
 orx up
 ```
 
-`orx up` opens the local dashboard at `http://127.0.0.1:4791`.
+`orx up` 会打开位于 `http://127.0.0.1:4791` 的本地仪表盘。
 
-On a managed Mac, device-management policies may block the CLI installed by
-`install.sh` because it is not yet signed. Use the signed and notarized desktop
-app instead. You can also install `orx` for your terminal from the app's
-Settings → Updates → **Install the `orx` command**.
+在受管理的 Mac 上，设备管理策略可能会阻止通过 `install.sh` 安装的 CLI，因为它尚未签名。
+请使用已签名并经过公证的桌面应用。你也可以在应用的
+Settings → Updates → **Install the `orx` command** 中为终端安装 `orx`。
 
 </details>
 
-Create an account at [openresearch.sh](https://openresearch.sh) to receive email
-updates and use managed OpenResearch compute.
+在 [openresearch.sh](https://openresearch.sh) 创建账户，即可接收邮件更新
+并使用 OpenResearch 托管计算资源。
 
-## How it works
+## 工作原理
 
-**Use your favorite coding agent.** OpenResearch works natively with <img src=".github/readme-assets/claude.svg" alt="" width="18" height="18" align="texttop" /> Claude Code,
+**使用你喜欢的编程智能体。** OpenResearch 原生兼容 <img src=".github/readme-assets/claude.svg" alt="" width="18" height="18" align="texttop" /> Claude Code,
 <img src=".github/readme-assets/codex.svg" alt="" width="18" height="18" align="texttop" /> Codex,
 <img src=".github/readme-assets/opencode.svg" alt="" width="18" height="18" align="texttop" /> OpenCode,
-<img src=".github/readme-assets/cursor.svg" alt="" width="18" height="18" align="texttop" /> Cursor, and
+<img src=".github/readme-assets/cursor.svg" alt="" width="18" height="18" align="texttop" /> Cursor，以及
 <img src=".github/readme-assets/antigravity.svg" alt="" width="18" height="18" align="texttop" /> Google Antigravity.
-You can also [use a local model](docs/local-models.md) with OpenCode through
+你也可以通过以下工具在 OpenCode 中[使用本地模型](docs/local-models.md)：
 <img src=".github/readme-assets/lmstudio.svg" alt="" width="18" height="18" align="texttop" /> LM Studio,
 <img src=".github/readme-assets/omlx.svg" alt="" width="18" height="18" align="texttop" /> oMLX,
-<img src=".github/readme-assets/ollama.svg" alt="" width="18" height="18" align="texttop" /> Ollama, or a custom endpoint.
+<img src=".github/readme-assets/ollama.svg" alt="" width="18" height="18" align="texttop" /> Ollama，或自定义端点。
 
-**Ground research hypotheses in the latest literature.** OpenResearch integrates with <img src=".github/readme-assets/alphaxiv.svg" alt="" width="18" height="18" align="absmiddle" /> alphaXiv, <img src=".github/readme-assets/biorxiv.svg" alt="" width="18" height="18" align="absmiddle" /> bioRxiv, and <img src=".github/readme-assets/pubmed.svg" alt="" width="18" height="18" align="absmiddle" /> PubMed so agents can find relevant papers, develop informed hypotheses, and connect their experiments to existing research.
+**以最新文献为依据提出研究假设。** OpenResearch 集成 <img src=".github/readme-assets/alphaxiv.svg" alt="" width="18" height="18" align="absmiddle" /> alphaXiv、<img src=".github/readme-assets/biorxiv.svg" alt="" width="18" height="18" align="absmiddle" /> bioRxiv 和 <img src=".github/readme-assets/pubmed.svg" alt="" width="18" height="18" align="absmiddle" /> PubMed，让智能体能够查找相关论文、提出有依据的假设，并将实验与现有研究联系起来。
 
-**Choose your compute.** Run experiments locally or use SSH,
+**选择你的计算资源。** 在本地运行实验，或使用 SSH、
 Slurm,
 <img src=".github/readme-assets/kubernetes.svg" alt="" width="18" height="18" align="texttop" /> Kubernetes,
 <img src=".github/readme-assets/modal.svg" alt="" width="18" height="18" align="texttop" /> Modal,
 <img src=".github/readme-assets/thinking-machines.svg" alt="" width="18" height="18" align="texttop" /> Tinker,
 <img src=".github/readme-assets/ray.svg" alt="" width="18" height="18" align="texttop" /> Ray,
-<img src=".github/readme-assets/huggingface.svg" alt="" width="18" height="18" align="texttop" /> Hugging Face Jobs, and
-managed OpenResearch compute.
+<img src=".github/readme-assets/huggingface.svg" alt="" width="18" height="18" align="texttop" /> Hugging Face Jobs，以及
+OpenResearch 托管计算资源。
 
-**Give agents a memory of every experiment.** OpenResearch records every experiment in a local SQL database and keeps its logs, code,
-and artifacts on your machine so that agents can
-learn from past results and decide what to try next. The desktop app makes it
-easy to see what your agents have done and inspect the evidence behind each result.
+**让智能体记住每一次实验。** OpenResearch 将每次实验记录在本地 SQL 数据库中，并将日志、代码
+和产物保存在你的机器上，让智能体能够从过去的结果中学习，
+并决定下一步尝试什么。桌面应用让你轻松查看智能体做了什么，
+并检查每个结果背后的证据。
 
-**Keep and own your research.** Run entirely locally. We don't collect your code or agent traces. Your projects,
-conversations, experiments, logs, and artifacts stay on your machine, under your
-control.
+**保留并拥有你的研究。** 完全在本地运行。我们不收集你的代码或智能体执行轨迹。
+你的项目、对话、实验、日志和产物都保存在你的机器上，
+由你掌控。
 
-## Usage analytics
+## 使用情况分析
 
-Official release builds send opt-out, coarse usage events tied to a random
-installation ID. They do not include code, prompts, file contents or paths,
-repository names, tokens, emails, or project and experiment identifiers.
+官方发布版本会发送与随机安装 ID 关联的粗粒度使用事件，你可以选择关闭。
+这些事件不包含代码、提示词、文件内容或路径、仓库名称、令牌、邮箱，
+以及项目或实验标识符。
 
-You can turn usage analytics off in the desktop app's Settings or with `orx telemetry off`.
+你可以在桌面应用的 Settings 中关闭使用情况分析，或运行 `orx telemetry off`。

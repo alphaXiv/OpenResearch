@@ -2572,6 +2572,8 @@ const LOCALE_CHOICES: { id: Locale; label: string }[] = [
   { id: "ar", label: "العربية" },
   { id: "es", label: "Español" },
   { id: "hi", label: "हिन्दी" },
+  { id: "ko", label: "한국어" },
+  { id: "ja", label: "日本語" },
 ];
 
 function AppearanceTab() {

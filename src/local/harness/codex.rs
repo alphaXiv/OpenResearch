@@ -1372,9 +1372,9 @@ fn config_supports_auto_review(response: &Value) -> bool {
     first_party_provider && first_party_url
 }
 
-async fn codex_auto_review_supported(client: &CodexClient, workspace: &Path) -> bool {
-    let Ok(Ok(response)) = client
-        .try_request(
+async fn codex_turn_config(client: &CodexClient, workspace: &Path) -> Result<Value> {
+    client
+        .request(
             "config/read",
             serde_json::json!({
                 "cwd": workspace.to_string_lossy(),
@@ -1382,20 +1382,43 @@ async fn codex_auto_review_supported(client: &CodexClient, workspace: &Path) -> 
             }),
         )
         .await
-    else {
-        return false;
-    };
-    config_supports_auto_review(&response) && super::detect::api_key("OPENAI_BASE_URL").is_none()
+        .map_err(|error| anyhow!("Could not read Codex sandbox configuration: {error}"))
 }
 
-/// The per-turn `sandboxPolicy` object. workspace-write carries the same
-/// grants the exec path passed via `-c`: the orx data dir, its lock directory,
-/// and the hub clone's `.git` as writable roots (see the helpers below), plus
-/// network (the agent's job is driving the orx API and git). Like the exec `-c`
-/// override, this is a full policy replacement for the turn — a user's own
-/// config.toml `sandbox_workspace_write.writable_roots` don't survive it (no
-/// append form exists on either transport).
-async fn sandbox_policy_json(mode: Option<PermissionMode>, workspace: &Path) -> Result<Value> {
+#[derive(Default, Deserialize)]
+#[serde(default)]
+struct CodexWorkspaceWrite {
+    writable_roots: Vec<String>,
+    exclude_tmpdir_env_var: bool,
+    exclude_slash_tmp: bool,
+}
+
+fn workspace_write_policy(config: &Value, managed_roots: Vec<String>) -> Result<Value> {
+    let config = config
+        .get("config")
+        .and_then(Value::as_object)
+        .ok_or_else(|| anyhow!("Codex config/read returned no configuration object"))?;
+    let mut settings = match config.get("sandbox_workspace_write") {
+        None | Some(Value::Null) => CodexWorkspaceWrite::default(),
+        Some(settings) => serde_json::from_value::<CodexWorkspaceWrite>(settings.clone())
+            .map_err(|error| anyhow!("Invalid Codex workspace-write configuration: {error}"))?,
+    };
+    // Codex resolves configuration-layer-relative paths before returning config/read.
+    settings.writable_roots.extend(managed_roots);
+    Ok(serde_json::json!({
+        "type": "workspaceWrite",
+        "writableRoots": settings.writable_roots,
+        "networkAccess": true,
+        "excludeTmpdirEnvVar": settings.exclude_tmpdir_env_var,
+        "excludeSlashTmp": settings.exclude_slash_tmp,
+    }))
+}
+
+async fn sandbox_policy_json(
+    mode: Option<PermissionMode>,
+    workspace: &Path,
+    config: &Value,
+) -> Result<Value> {
     Ok(match mode.unwrap_or(PermissionMode::Auto) {
         PermissionMode::Bypass => serde_json::json!({ "type": "dangerFullAccess" }),
         _ => {
@@ -1411,11 +1434,7 @@ async fn sandbox_policy_json(mode: Option<PermissionMode>, workspace: &Path) -> 
                     .await
                     .map(|p| p.to_string_lossy().into_owned()),
             );
-            serde_json::json!({
-                "type": "workspaceWrite",
-                "writableRoots": roots,
-                "networkAccess": true,
-            })
+            workspace_write_policy(config, roots)?
         }
     })
 }
@@ -2637,12 +2656,14 @@ async fn run_turn_app_server(ctx: &mut TurnCtx) -> Result<()> {
         .map(|session| session.store)
         .unwrap_or(NativeStore::Isolated);
     let mut client = ensure_codex_pre_accept(ctx, preferred_store).await?;
+    let config_client = client.clone();
+    let mut config = if ctx.permission_mode == Some(PermissionMode::Bypass) {
+        Value::Null
+    } else {
+        codex_turn_config(&client, &repo).await?
+    };
     let auto_review_supported =
-        if ctx.permission_mode.unwrap_or(PermissionMode::Auto) == PermissionMode::Auto {
-            codex_auto_review_supported(&client, &repo).await
-        } else {
-            false
-        };
+        config_supports_auto_review(&config) && super::detect::api_key("OPENAI_BASE_URL").is_none();
     let (sandbox_mode, approval_policy, approvals_reviewer) =
         codex_policies(ctx.permission_mode, auto_review_supported);
 
@@ -2711,6 +2732,11 @@ async fn run_turn_app_server(ctx: &mut TurnCtx) -> Result<()> {
         (None, _) => start_thread(ctx, &client, thread_setup).await?,
     };
 
+    if ctx.permission_mode != Some(PermissionMode::Bypass) && !Arc::ptr_eq(&client, &config_client)
+    {
+        config = codex_turn_config(&client, &repo).await?;
+    }
+
     // Route events to this turn before starting it — nothing is missed.
     let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
     let _route = client.register_turn(tx);
@@ -2719,10 +2745,10 @@ async fn run_turn_app_server(ctx: &mut TurnCtx) -> Result<()> {
         "threadId": thread_id,
         "input": [{ "type": "text", "text": ctx.text }],
         // Explicit per turn — the composer can change mode/model mid-session,
-        // and `sandboxPolicy` is the only carrier of writable roots.
+        // and configuration can add writable roots to an already running chat.
         "approvalPolicy": approval_policy,
         "approvalsReviewer": approvals_reviewer,
-        "sandboxPolicy": sandbox_policy_json(ctx.permission_mode, &repo).await?,
+        "sandboxPolicy": sandbox_policy_json(ctx.permission_mode, &repo, &config).await?,
     });
     if let Some(service_tier) = &ctx.service_tier {
         turn_params["serviceTier"] = Value::String(service_tier.clone());
@@ -3733,19 +3759,17 @@ fn codex_sandbox(mode: Option<PermissionMode>) -> Option<&'static str> {
     }
 }
 
-/// The `-c` value granting `roots` as sandbox writable roots, e.g.
-/// `sandbox_workspace_write.writable_roots=["/a", "/b"]`. `None` when there
-/// are no roots (omit the flag: `-c ...=[]` would still *replace* the user's
-/// configured roots with nothing).
-fn writable_roots_override(roots: &[PathBuf]) -> Option<String> {
-    if roots.is_empty() {
-        return None;
+fn codex_exec_command(bin: &Path, roots: &[PathBuf], native_id: Option<&str>) -> Command {
+    let mut cmd = Command::new(bin);
+    cmd.arg("exec");
+    for root in roots {
+        cmd.arg("--add-dir").arg(root);
     }
-    let list: Vec<String> = roots.iter().map(|p| native_store::toml_string(p)).collect();
-    Some(format!(
-        "sandbox_workspace_write.writable_roots=[{}]",
-        list.join(", ")
-    ))
+    // exec resume inherits parent options, but does not accept --add-dir itself.
+    if let Some(native_id) = native_id {
+        cmd.args(["resume", native_id]);
+    }
+    cmd
 }
 
 async fn run_turn_exec(ctx: &mut TurnCtx) -> Result<()> {
@@ -3771,15 +3795,31 @@ async fn run_turn_exec(ctx: &mut TurnCtx) -> Result<()> {
     let codex_home = tokio::task::spawn_blocking(move || native_store::prepare_codex(native_store))
         .await
         .map_err(|error| anyhow!("Codex config preparation failed: {error}"))??;
-    let mut cmd = Command::new(&bin);
-    match (&ctx.native_session_id, &native_session) {
-        (Some(native_id), Some(_)) => {
-            cmd.args(["exec", "resume", native_id]);
-        }
-        _ => {
-            cmd.arg("exec");
-        }
-    }
+    let policy = if ctx.plan_mode {
+        Some("read-only")
+    } else {
+        codex_sandbox(ctx.permission_mode)
+    };
+    let data_dir = (policy == Some("workspace-write"))
+        .then(ensure_orx_data_dir)
+        .flatten();
+    let roots: Vec<PathBuf> = if policy == Some("workspace-write") {
+        [
+            data_dir.clone(),
+            Some(ensure_orx_lifecycle_lock_dir()?),
+            shared_git_dir(&repo).await,
+        ]
+        .into_iter()
+        .flatten()
+        .collect()
+    } else {
+        Vec::new()
+    };
+    let native_id = ctx
+        .native_session_id
+        .as_deref()
+        .filter(|_| native_session.is_some());
+    let mut cmd = codex_exec_command(&bin, &roots, native_id);
     cmd.args(["--json", "--skip-git-repo-check"])
         .current_dir(&repo)
         .stdin(Stdio::null())
@@ -3797,11 +3837,7 @@ async fn run_turn_exec(ctx: &mut TurnCtx) -> Result<()> {
     //
     // Yields the data dir granted as a writable root (if any), so the child's
     // store can be pinned to it below, after `prepare_env`.
-    let data_dir_pin = match if ctx.plan_mode {
-        Some("read-only")
-    } else {
-        codex_sandbox(ctx.permission_mode)
-    } {
+    let data_dir_pin = match policy {
         Some(policy) => {
             cmd.args([
                 "-c",
@@ -3829,23 +3865,8 @@ async fn run_turn_exec(ctx: &mut TurnCtx) -> Result<()> {
             //     the workspace, and a worktree's real metadata (the hub
             //     clone's `.git`) sits outside it — so `git fetch`/`commit`
             //     fail outright; grant the common dir (see `shared_git_dir`).
-            // Note `-c` *replaces* any `writable_roots` from the user's
-            // config.toml for the turn (there is no append form; `exec
-            // --add-dir` is unverified on the resume path).
             if policy == "workspace-write" {
                 cmd.args(["-c", "sandbox_workspace_write.network_access=true"]);
-                let data_dir = ensure_orx_data_dir();
-                let roots: Vec<PathBuf> = [
-                    data_dir.clone(),
-                    Some(ensure_orx_lifecycle_lock_dir()?),
-                    shared_git_dir(&repo).await,
-                ]
-                .into_iter()
-                .flatten()
-                .collect();
-                if let Some(override_arg) = writable_roots_override(&roots) {
-                    cmd.args(["-c", &override_arg]);
-                }
                 data_dir
             } else {
                 None
@@ -5517,14 +5538,86 @@ requires_openai_auth = false
     }
 
     #[test]
-    fn writable_roots_override_joins_and_omits_empty() {
+    fn workspace_write_policy_preserves_native_roots_and_tmp_exclusions() {
+        let roots = vec![
+            "/configured directory".to_string(),
+            r"C:\tool chain\cache".to_string(),
+            r"\\server\share\toolchain".to_string(),
+        ];
+        let config = json!({"config": {"sandbox_workspace_write": {
+            "writable_roots": roots,
+            "exclude_tmpdir_env_var": true,
+            "exclude_slash_tmp": true,
+            "network_access": false,
+        }}});
+        let policy = workspace_write_policy(
+            &config,
+            vec!["/data".into(), "/locks".into(), "/project/.git".into()],
+        )
+        .unwrap();
         assert_eq!(
-            writable_roots_override(&[PathBuf::from("/data dir"), PathBuf::from("/hub/.git")]),
-            Some(r#"sandbox_workspace_write.writable_roots=["/data dir", "/hub/.git"]"#.into())
+            policy,
+            json!({
+                "type": "workspaceWrite",
+                "writableRoots": [
+                    "/configured directory", r"C:\tool chain\cache",
+                    r"\\server\share\toolchain", "/data", "/locks", "/project/.git",
+                ],
+                "networkAccess": true,
+                "excludeTmpdirEnvVar": true,
+                "excludeSlashTmp": true,
+            })
         );
-        // No roots → no flag at all; `=[]` would clobber the user's own
-        // config.toml roots for the turn.
-        assert_eq!(writable_roots_override(&[]), None);
+    }
+
+    #[test]
+    fn workspace_write_policy_uses_defaults_only_for_absent_settings() {
+        for config in [
+            json!({"config": {}}),
+            json!({"config": {"sandbox_workspace_write": null}}),
+            json!({"config": {"sandbox_workspace_write": {}}}),
+        ] {
+            let policy = workspace_write_policy(&config, vec!["/data".into()]).unwrap();
+            assert_eq!(policy["writableRoots"], json!(["/data"]));
+            assert_eq!(policy["excludeTmpdirEnvVar"], false);
+            assert_eq!(policy["excludeSlashTmp"], false);
+        }
+        for config in [
+            json!({}),
+            json!({"config": null}),
+            json!({"config": {"sandbox_workspace_write": {"writable_roots": [1]}}}),
+            json!({"config": {"sandbox_workspace_write": {"exclude_slash_tmp": "true"}}}),
+        ] {
+            assert!(workspace_write_policy(&config, vec!["/data".into()]).is_err());
+        }
+    }
+
+    #[test]
+    fn exec_additional_directories_precede_resume_and_preserve_path_arguments() {
+        let roots = [PathBuf::from("/data dir"), PathBuf::from(r"C:\hub\.git")];
+        for native_id in [None, Some("thread-id")] {
+            let cmd = codex_exec_command(Path::new("codex"), &roots, native_id);
+            let args: Vec<_> = cmd.as_std().get_args().collect();
+            let mut expected = vec![
+                std::ffi::OsStr::new("exec"),
+                std::ffi::OsStr::new("--add-dir"),
+                roots[0].as_os_str(),
+                std::ffi::OsStr::new("--add-dir"),
+                roots[1].as_os_str(),
+            ];
+            if native_id.is_some() {
+                expected.extend([
+                    std::ffi::OsStr::new("resume"),
+                    std::ffi::OsStr::new("thread-id"),
+                ]);
+            }
+            assert_eq!(args, expected);
+        }
+        let cmd = codex_exec_command(Path::new("codex"), &[], None);
+        assert_eq!(
+            cmd.as_std().get_args().collect::<Vec<_>>(),
+            [std::ffi::OsStr::new("exec")]
+        );
     }
 
     #[test]
