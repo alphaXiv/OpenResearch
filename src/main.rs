@@ -958,7 +958,7 @@ async fn main() {
     // AppImage's AppRun. See commands::app.
     #[cfg(all(desktop_app, not(target_os = "macos")))]
     if commands::app::launched_with_app_arg() {
-        telemetry::set_flag(false);
+        telemetry::set_flag(std::env::var_os(commands::app::APP_NO_TELEMETRY_ENV).is_some());
         commands::app::run().await;
         return;
     }
@@ -967,7 +967,7 @@ async fn main() {
     // Double-clicked from Explorer: open the desktop app instead of a console session.
     #[cfg(windows)]
     if cli.command.is_none() && owns_its_console() {
-        relaunch_as_app();
+        relaunch_as_app(cli.no_telemetry);
         return;
     }
     let Some(command) = cli.command else {
@@ -1091,14 +1091,17 @@ fn owns_its_console() -> bool {
 /// Restarts as `orx app` in a console no one sees, as OpenResearch.exe does, so
 /// the console Explorer opened closes when this process exits.
 #[cfg(windows)]
-fn relaunch_as_app() {
+fn relaunch_as_app(no_telemetry: bool) {
     use std::os::windows::process::CommandExt;
     use windows_sys::Win32::System::Threading::CREATE_NO_WINDOW;
     use windows_sys::Win32::UI::WindowsAndMessaging::AllowSetForegroundWindow;
 
     let started = std::env::current_exe().and_then(|exe| {
-        std::process::Command::new(exe)
-            .arg(commands::app::APP_ARG)
+        let mut app = std::process::Command::new(exe);
+        if no_telemetry {
+            app.env(commands::app::APP_NO_TELEMETRY_ENV, "1");
+        }
+        app.arg(commands::app::APP_ARG)
             // Inherited handles would tie the app to Explorer's console.
             .stdin(std::process::Stdio::null())
             .stdout(std::process::Stdio::null())
