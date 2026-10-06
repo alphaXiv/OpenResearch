@@ -873,6 +873,7 @@ pub async fn stream_logs(
     dir: &str,
     skip: u64,
     _idle: Duration,
+    drain: bool,
     sink: &mut (dyn FnMut(&str) + Send),
 ) -> Result<u64> {
     let cmd = format!(
@@ -885,9 +886,7 @@ pub async fn stream_logs(
         .strip_prefix("__ORX_LOG_START__\n")
         .ok_or_else(|| anyhow!("unexpected SSH log output: {out}"))?;
     let mut seen = skip;
-    // A trailing newline yields a final empty element under split('\n'); use
-    // lines() which ignores it, matching the "one line = one log line" contract.
-    for line in out.lines() {
+    for line in super::log_lines(out, drain) {
         seen += 1;
         sink(line);
     }

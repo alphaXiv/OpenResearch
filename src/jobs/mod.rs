@@ -247,6 +247,16 @@ pub fn is_terminal_stage(stage: &str) -> bool {
     matches!(stage, "COMPLETED" | "CANCELED" | "ERROR" | "DELETED")
 }
 
+/// A run log's lines. An unterminated last line may still be mid-flush, so it
+/// only counts once the writer has exited (`drain`).
+pub fn log_lines(text: &str, drain: bool) -> impl Iterator<Item = &str> {
+    text.split_inclusive('\n')
+        .filter_map(move |line| match line.strip_suffix('\n') {
+            Some(line) => Some(line.strip_suffix('\r').unwrap_or(line)),
+            None => drain.then_some(line),
+        })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -379,5 +389,16 @@ mod tests {
             got.get(PYTHONIOENCODING).map(String::as_str),
             Some("cp1252")
         );
+    }
+
+    #[test]
+    fn log_lines_hold_back_a_partial_last_line_until_drained() {
+        let text = "a\r\nb\n{\"partial\": ";
+        assert_eq!(log_lines(text, false).collect::<Vec<_>>(), ["a", "b"]);
+        assert_eq!(
+            log_lines(text, true).collect::<Vec<_>>(),
+            ["a", "b", "{\"partial\": "]
+        );
+        assert_eq!(log_lines("", true).count(), 0);
     }
 }
