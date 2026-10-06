@@ -1,0 +1,35 @@
+name: Update desktop release downloads
+
+on:
+  workflow_call:
+    inputs:
+      tag:
+        required: true
+        type: string
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Release tag with desktop-first notes to refresh
+        required: true
+        type: string
+
+permissions:
+  contents: write
+
+# Each refresh reads all uploaded assets; serialize read/edit across platforms.
+concurrency:
+  group: release-desktop-downloads
+  cancel-in-progress: false
+
+jobs:
+  refresh:
+    runs-on: ubuntu-latest
+    env:
+      GH_TOKEN: ${{ github.token }}
+      TAG: ${{ inputs.tag }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - name: Refresh desktop downloads
+        run: python3 scripts/release_notes.py --refresh-downloads "$TAG"

@@ -22,7 +22,7 @@ use std::time::{Duration, Instant};
 
 use sha2::{Digest, Sha256};
 
-use crate::error::{anyhow, Result};
+use crate::error::{anyhow, Context, Result};
 use crate::local::agent_skills::SkillSet;
 use crate::local::harness::registry;
 
@@ -252,6 +252,29 @@ pub(crate) fn is_valid_slug(name: &str) -> bool {
                     .chars()
                     .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit())
         })
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum SkillSelection {
+    Auto,
+    Personal,
+    Project,
+}
+
+pub(crate) fn parse_selection(token: &str) -> Option<(&str, SkillSelection)> {
+    let (name, source) = if let Some(name) = token.strip_suffix('^') {
+        (name, SkillSelection::Personal)
+    } else if let Some(name) = token.strip_suffix('~') {
+        (name, SkillSelection::Project)
+    } else {
+        match token.rsplit_once('@') {
+            Some((name, "personal" | "u")) => (name, SkillSelection::Personal),
+            Some((name, "project" | "p")) => (name, SkillSelection::Project),
+            Some(_) => return None,
+            None => (token, SkillSelection::Auto),
+        }
+    };
+    is_valid_slug(name).then_some((name, source))
 }
 
 /// Names owned by the built-ins: the `orx-` namespace, any bundled agent skill
@@ -500,14 +523,98 @@ fn parse_import_decisions(raw: &str, count: usize) -> Option<Vec<bool>> {
     (decisions.len() == count).then_some(decisions)
 }
 
+/// The last screening scan, and why it failed if it did.
+struct Scan {
+    at: Option<Instant>,
+    failure: Option<ScanFailure>,
+}
+
+/// A failed scan backs off per agent and model, and prints its cause only when it changes.
+struct ScanFailure {
+    agent: Option<super::starter::Agent>,
+    cause: String,
+    streak: usize,
+}
+
+const RESCAN_INTERVAL: Duration = Duration::from_secs(60);
+const RETRY_BACKOFF: [Duration; 4] = [
+    Duration::from_secs(60),
+    Duration::from_secs(5 * 60),
+    Duration::from_secs(30 * 60),
+    Duration::from_secs(2 * 60 * 60),
+];
+
+impl ScanFailure {
+    fn backoff(&self) -> Duration {
+        RETRY_BACKOFF[(self.streak - 1).min(RETRY_BACKOFF.len() - 1)]
+    }
+}
+
+impl Scan {
+    /// Picking another agent or model retries a failure straight away.
+    fn due(&self, agent: impl FnOnce() -> Option<super::starter::Agent>) -> bool {
+        let Some(at) = self.at else {
+            return true;
+        };
+        let wait = match &self.failure {
+            None => RESCAN_INTERVAL,
+            Some(failure) if failure.agent == agent() => failure.backoff(),
+            Some(_) => Duration::ZERO,
+        };
+        at.elapsed() >= wait
+    }
+
+    /// Record a scan's outcome, returning the warning to print when its cause is new.
+    fn finish(
+        &mut self,
+        agent: Option<super::starter::Agent>,
+        result: Result<()>,
+    ) -> Option<String> {
+        self.at = Some(Instant::now());
+        let Err(error) = result else {
+            self.failure = None;
+            return None;
+        };
+        let cause = super::harness::one_line(&format!("{error:#}"), 500);
+        let previous = self.failure.take().filter(|failure| failure.agent == agent);
+        let repeat = previous
+            .as_ref()
+            .is_some_and(|failure| failure.cause == cause);
+        let failure = self.failure.insert(ScanFailure {
+            agent,
+            cause,
+            streak: previous.map_or(1, |failure| failure.streak + 1),
+        });
+        (!repeat).then(|| {
+            format!(
+                "Skill import screening failed, so unclassified skills were not imported: {} (will retry after {} min)",
+                failure.cause,
+                failure.backoff().as_secs() / 60
+            )
+        })
+    }
+}
+
+/// The preferred agent as screening runs it, so a model the harness ignores doesn't reset backoff.
+/// With no preference, a fallback agent's failures back off under `None`.
+fn screening_agent() -> Option<super::starter::Agent> {
+    super::starter::preferred_agent().map(|agent| super::starter::Agent {
+        model: agent.effective_model().map(str::to_owned),
+        harness: agent.harness,
+    })
+}
+
 /// Import in the background; uploads are explicit choices and bypass screening.
 pub fn refresh_imports() -> bool {
-    // One scan at a time; failed model calls retry on a later catalog request.
-    static SCAN: tokio::sync::Mutex<Option<Instant>> = tokio::sync::Mutex::const_new(None);
+    // One scan at a time; failed model calls retry with backoff on a later catalog request.
+    static SCAN: tokio::sync::Mutex<Scan> = tokio::sync::Mutex::const_new(Scan {
+        at: None,
+        failure: None,
+    });
     let Ok(mut scan) = SCAN.try_lock() else {
         return true;
     };
-    if scan.is_some_and(|at| at.elapsed() < Duration::from_secs(60)) {
+    if !scan.due(screening_agent) {
         return false;
     }
     let root = root();
@@ -517,14 +624,22 @@ pub fn refresh_imports() -> bool {
         .filter(|skill| !root.join("excluded").join(&skill.name).exists())
         .filter(|skill| !decisions.contains_key(&import_key(skill)))
         .collect();
-    *scan = Some(Instant::now());
     if pending.is_empty() {
+        scan.finish(None, Ok(()));
         return false;
     }
+    let preferred = screening_agent();
     tokio::spawn(async move {
         let result = async {
-            let agent = super::starter::resolve_agent().await?;
-            let harness = super::harness::chat_harness(&agent.harness)?;
+            let agent = super::starter::resolve_agent()
+                .await
+                .ok_or_else(|| anyhow!("no coding agent is ready; sign in to one in Settings"))?;
+            let harness = super::harness::chat_harness(&agent.harness)
+                .ok_or_else(|| anyhow!("{} cannot run chat requests", agent.harness))?;
+            let label = match agent.effective_model() {
+                Some(model) => format!("{} ({model})", harness.name()),
+                None => harness.name().to_string(),
+            };
             for batch in pending.chunks(16) {
                 let metadata: Vec<_> = batch
                     .iter()
@@ -532,32 +647,38 @@ pub fn refresh_imports() -> bool {
                         serde_json::json!({"name": skill.name, "description": skill.description})
                     })
                     .collect();
-                let prompt = serde_json::to_string(&metadata).ok()?;
+                let prompt = serde_json::to_string(&metadata)?;
                 let raw = harness
                     .one_shot(super::harness::OneShot {
                         system: IMPORT_PROMPT,
                         prompt: &prompt,
                         quality: super::harness::OneShotQuality::Cheap,
-                        model: agent.model.as_deref(),
+                        model: agent.effective_model(),
                         timeout: Duration::from_secs(90),
                     })
-                    .await?;
-                let selected = parse_import_decisions(&raw, batch.len())?;
+                    .await
+                    .with_context(|| format!("{label} request failed"))?;
+                if raw.trim().is_empty() {
+                    return Err(anyhow!("{label} returned no reply"));
+                }
+                let selected = parse_import_decisions(&raw, batch.len()).ok_or_else(|| {
+                    let reply = super::harness::one_line(&raw, 200);
+                    anyhow!("{label} returned an unreadable classification: {reply}")
+                })?;
                 for (skill, selected) in batch.iter().zip(selected) {
                     decisions.insert(import_key(skill), selected);
                 }
-                fs::create_dir_all(&root).ok()?;
+                fs::create_dir_all(&root)?;
                 let temp = root.join("imports.json.tmp");
-                fs::write(&temp, serde_json::to_vec(&decisions).ok()?).ok()?;
-                fs::rename(temp, root.join("imports.json")).ok()?;
+                fs::write(&temp, serde_json::to_vec(&decisions)?)?;
+                fs::rename(temp, root.join("imports.json"))?;
             }
-            Some(())
+            Ok(())
         }
         .await;
-        if result.is_none() {
-            eprintln!("Skill import screening unavailable; unclassified skills were not imported.");
+        if let Some(warning) = scan.finish(preferred, result) {
+            eprintln!("{warning}");
         }
-        *scan = Some(Instant::now());
     });
     true
 }
@@ -660,6 +781,45 @@ pub fn list_for_harness(harness: Option<&str>) -> Vec<UserSkill> {
     list_in(&root(), &native_skills(harness))
 }
 
+pub fn list_project_skills(repo: &Path, harness: Option<&str>) -> Vec<UserSkill> {
+    let Some(dir) = harness
+        .and_then(super::harness::chat_harness)
+        .and_then(|agent| agent.session_skills_dir())
+    else {
+        return Vec::new();
+    };
+    let Ok(entries) = fs::read_dir(repo.join(dir)) else {
+        return Vec::new();
+    };
+    let mut skills: Vec<_> = entries
+        .flatten()
+        .filter(|entry| entry.path().is_dir())
+        .filter_map(|entry| read_project_at(&entry.path()).ok())
+        .filter(|skill| !is_reserved(&skill.name))
+        .collect();
+    skills.sort_by(|a, b| a.name.cmp(&b.name));
+    skills
+}
+
+fn read_project_at(dir: &Path) -> Result<UserSkill> {
+    let name = dir
+        .file_name()
+        .map(|name| name.to_string_lossy().into_owned())
+        .filter(|name| is_valid_slug(name))
+        .ok_or_else(|| anyhow!("invalid project skill name"))?;
+    let md_path = dir.join("SKILL.md");
+    let content = fs::read_to_string(&md_path)?;
+    let fm = parse_frontmatter(&content)?;
+    Ok(UserSkill {
+        name,
+        description: fm.description,
+        origin: None,
+        plugin: None,
+        bytes: content.len() as u64,
+        updated_at: mtime_ms(&md_path),
+    })
+}
+
 fn native_skills(harness: Option<&str>) -> Vec<Mirrored> {
     let Some(harness) = harness else {
         return Vec::new();
@@ -714,15 +874,37 @@ fn source_dirs(root: &Path, mirrored: &[Mirrored]) -> Vec<(String, PathBuf)> {
 }
 
 /// The Markdown body of a skill's `SKILL.md`, for the composer hover preview.
-pub fn content(name: &str, harness: Option<&str>) -> Option<String> {
-    content_in(&root(), &native_skills(harness), name)
+pub fn content(name: &str, harness: Option<&str>, project_repo: Option<&Path>) -> Option<String> {
+    let (name, selection) = parse_selection(name)?;
+    let project_file = harness
+        .and_then(super::harness::chat_harness)
+        .and_then(|agent| agent.session_skills_dir())
+        .and_then(|dir| project_repo.map(|repo| repo.join(dir).join(name).join("SKILL.md")));
+    content_selected_in(
+        &root(),
+        &native_skills(harness),
+        name,
+        selection,
+        project_file.as_deref(),
+    )
 }
 
-fn content_in(root: &Path, mirrored: &[Mirrored], name: &str) -> Option<String> {
-    let (_, dir) = source_dirs(root, mirrored)
-        .into_iter()
-        .find(|(n, ..)| n == name)?;
-    let content = fs::read_to_string(dir.join("SKILL.md")).ok()?;
+fn content_selected_in(
+    root: &Path,
+    mirrored: &[Mirrored],
+    name: &str,
+    selection: SkillSelection,
+    project_file: Option<&Path>,
+) -> Option<String> {
+    let file = if selection == SkillSelection::Project {
+        project_file?.to_path_buf()
+    } else {
+        let (_, dir) = source_dirs(root, mirrored)
+            .into_iter()
+            .find(|(n, ..)| n == name)?;
+        dir.join("SKILL.md")
+    };
+    let content = fs::read_to_string(file).ok()?;
     let content = content.strip_prefix('\u{feff}').unwrap_or(&content);
     let after_open = content
         .strip_prefix("---\n")
@@ -733,6 +915,11 @@ fn content_in(root: &Path, mirrored: &[Mirrored], name: &str) -> Option<String> 
             .trim_start_matches(['\r', '\n'])
             .to_string(),
     )
+}
+
+#[cfg(test)]
+fn content_in(root: &Path, mirrored: &[Mirrored], name: &str) -> Option<String> {
+    content_selected_in(root, mirrored, name, SkillSelection::Auto, None)
 }
 
 /// Remove uploads, or exclude discovered skills without touching their source.
@@ -785,19 +972,13 @@ pub fn write_into_session(worktree: &Path, skills_dir_rel: &str) -> Result<()> {
 
 fn write_into_session_in(root: &Path, worktree: &Path, skills_dir_rel: &str) -> Result<()> {
     let base = worktree.join(skills_dir_rel);
-    // No manifest at all — the agent can delete it — is the one case where a
-    // destination that already matches its source can be taken as ours, which is
-    // how that heals. While a manifest exists it is the whole truth about what
-    // we own, so a dir it doesn't name is the project's and stays unprunable.
-    let recorded = previously_managed(&base);
-    let adoptable = recorded.is_none();
-    let previous = recorded.unwrap_or_default();
+    let previous = previously_managed(&base).unwrap_or_default();
     let mut managed: Vec<String> = Vec::new();
     for (name, src) in source_dirs(root, &[]) {
         let src_tally = tally_all(&src);
         let dest = base.join(&name);
         let current = dest_matches_source(&src, src_tally, &dest);
-        if dest.exists() && !previous.contains(&name) && !(adoptable && current) {
+        if dest.exists() && !previous.contains(&name) {
             continue; // the project ships a skill by this name — it wins, untouched
         }
         if !current {
@@ -843,21 +1024,40 @@ fn previously_managed(base: &Path) -> Option<Vec<String>> {
 
 /// Whether `dest` already holds this skill, so the turn can skip a full re-copy.
 /// Timestamps are no witness — macOS's `fs::copy` carries the source's mtime
-/// across and Linux's doesn't — so the comparison is the source's [`Tally`] plus
-/// a byte-identical `SKILL.md`. That misses an edit to a supporting file that
-/// preserves its length; `SKILL.md` is the file worth reading in full because it
-/// is the one an edit almost always touches.
+/// across and Linux's doesn't. Compare contents so supporting-file edits refresh.
 fn dest_matches_source(src: &Path, src_tally: Tally, dest: &Path) -> bool {
     if !dest.is_dir() || tally_all(dest) != src_tally {
         return false;
     }
-    match (
-        fs::read(src.join("SKILL.md")),
-        fs::read(dest.join("SKILL.md")),
-    ) {
-        (Ok(from), Ok(to)) => from == to,
-        _ => false,
-    }
+    let (Ok(from), Ok(to)) = (fs::read_dir(src), fs::read_dir(dest)) else {
+        return false;
+    };
+    let entries = |dir: fs::ReadDir, source: bool| -> Option<Vec<fs::DirEntry>> {
+        let mut entries = dir.collect::<std::io::Result<Vec<_>>>().ok()?;
+        if source {
+            entries.retain(|entry| entry.file_type().is_ok_and(|kind| !kind.is_symlink()));
+        }
+        entries.sort_by_key(|entry| entry.file_name());
+        Some(entries)
+    };
+    let (Some(from), Some(to)) = (entries(from, true), entries(to, false)) else {
+        return false;
+    };
+    from.len() == to.len()
+        && from.iter().zip(to.iter()).all(|(a, b)| {
+            if a.file_name() != b.file_name() {
+                return false;
+            }
+            match (a.file_type(), b.file_type()) {
+                (Ok(x), Ok(y)) if x.is_dir() && y.is_dir() => {
+                    dest_matches_source(&a.path(), tally_all(&a.path()), &b.path())
+                }
+                (Ok(x), Ok(y)) if x.is_file() && y.is_file() => {
+                    matches!((fs::read(a.path()), fs::read(b.path())), (Ok(x), Ok(y)) if x == y)
+                }
+                _ => false,
+            }
+        })
 }
 
 /// The tally of a folder we're about to mirror, or `None` when it blows the same
@@ -868,22 +1068,146 @@ fn within_budget(dir: &Path) -> Option<Tally> {
 }
 
 /// Reference the selected skill without injecting its body.
-pub fn instructions(name: &str, harness: Option<&str>) -> Option<String> {
-    instructions_in(&root(), &native_skills(harness), name)
+pub fn instructions(
+    name: &str,
+    harness: Option<&str>,
+    worktree: Option<&Path>,
+    project_repo: Option<&Path>,
+) -> Option<String> {
+    let (skill_name, selection) = parse_selection(name)?;
+    let skills_dir = harness
+        .and_then(super::harness::chat_harness)
+        .and_then(|agent| agent.session_skills_dir());
+    let session_file = skills_dir.and_then(|dir| {
+        worktree.map(|worktree| worktree.join(dir).join(skill_name).join("SKILL.md"))
+    });
+    let project_file = skills_dir
+        .and_then(|dir| project_repo.map(|repo| repo.join(dir).join(skill_name).join("SKILL.md")));
+    instructions_selected_in(
+        &root(),
+        &native_skills(harness),
+        skill_name,
+        selection,
+        session_file.as_deref(),
+        project_file.as_deref(),
+    )
 }
 
-fn instructions_in(root: &Path, mirrored: &[Mirrored], name: &str) -> Option<String> {
+fn instructions_selected_in(
+    root: &Path,
+    mirrored: &[Mirrored],
+    name: &str,
+    selection: SkillSelection,
+    session_file: Option<&Path>,
+    project_file: Option<&Path>,
+) -> Option<String> {
+    if selection == SkillSelection::Project {
+        let file = match session_file {
+            Some(file) => {
+                let base = file.parent()?.parent()?;
+                let owned = previously_managed(base)
+                    .is_some_and(|names| names.iter().any(|managed| managed == name));
+                let worktree = base.parent()?.parent()?;
+                let tracked = file
+                    .strip_prefix(worktree)
+                    .ok()
+                    .and_then(|path| path.to_str())
+                    .is_some_and(|path| super::git::is_tracked(worktree, path));
+                let matches_project = project_file.is_some_and(|project| {
+                    fs::read(file)
+                        .ok()
+                        .zip(fs::read(project).ok())
+                        .is_some_and(|(session, source)| session == source)
+                });
+                let personal_dir = source_dirs(root, mirrored)
+                    .into_iter()
+                    .find(|(skill_name, _)| skill_name == name)
+                    .map(|(_, dir)| dir);
+                if owned
+                    || !file.exists()
+                    || (personal_dir.is_some() && !tracked && !matches_project)
+                {
+                    return Some(format!(
+                        "Project skill `{name}` is unavailable in this chat's worktree. Do not read or apply a different source."
+                    ));
+                }
+                file
+            }
+            None => project_file.filter(|path| path.exists())?,
+        };
+        return Some(format!(
+            "Use the project `{name}` skill at `{}`. Read that SKILL.md and follow it.",
+            file.display()
+        ));
+    }
     source_dirs(root, mirrored)
         .into_iter()
         .find(|(n, ..)| n == name)
-        .map(|(name, dir)| {
+        .and_then(|(name, dir)| {
+            if selection == SkillSelection::Personal {
+                return Some(format!(
+                    "Use the personal `{name}` skill at `{}`. Read that SKILL.md and follow it.",
+                    dir.join("SKILL.md").display()
+                ));
+            }
+            if let Some(project_file) = project_file.filter(|path| path.exists()) {
+                return Some(format!(
+                    "Source collision for `{name}`: a personal and a project skill at `{}` share this name. Stop and report the collision; do not read or apply either skill.",
+                    project_file.display()
+                ));
+            }
+            if dir == store_dir(root).join(&name) {
+                let source_file = dir.join("SKILL.md");
+                let selected = if let Some(session_file) = session_file {
+                    let target = session_file.parent()?;
+                    let base = target.parent()?;
+                    let owned = previously_managed(base)
+                        .is_some_and(|names| names.contains(&name));
+                    let current = dest_matches_source(&dir, tally_all(&dir), target);
+                    if target.exists() && !owned && !current {
+                        return Some(format!(
+                            "Source collision for `{name}`: an upload and a project skill at `{}` share this name. Stop and report the collision; do not read or apply either skill.",
+                            session_file.display()
+                        ));
+                    }
+                    if owned && current {
+                        session_file
+                    } else {
+                        source_file.as_path()
+                    }
+                } else {
+                    source_file.as_path()
+                };
+                return Some(format!(
+                    "Use the uploaded `{name}` skill at `{}`. Read that SKILL.md and follow it.",
+                    selected.display()
+                ));
+            }
             let native_name = mirrored
                 .iter()
                 .find(|skill| skill.dir == dir && skill.plugin)
                 .map(|skill| format!("{}:{name}", skill.origin))
                 .unwrap_or(name);
-            format!("Use the `{native_name}` skill.")
+            Some(format!("Use the `{native_name}` skill."))
         })
+}
+
+#[cfg(test)]
+fn instructions_in(
+    root: &Path,
+    mirrored: &[Mirrored],
+    name: &str,
+    session_file: Option<&Path>,
+    project_file: Option<&Path>,
+) -> Option<String> {
+    instructions_selected_in(
+        root,
+        mirrored,
+        name,
+        SkillSelection::Auto,
+        session_file,
+        project_file,
+    )
 }
 
 // --- fs helpers ---------------------------------------------------------------
@@ -1008,6 +1332,42 @@ mod tests {
         assert_eq!(parse_import_decisions("[true]", 2), None);
         assert_eq!(parse_import_decisions("[true,\"false\"]", 2), None);
         assert_eq!(parse_import_decisions("Import everything!", 2), None);
+    }
+
+    #[test]
+    fn a_failed_screening_warns_once_and_backs_off_per_agent() {
+        let codex = |model: &str| {
+            Some(crate::local::starter::Agent {
+                harness: "codex".into(),
+                model: Some(model.into()),
+            })
+        };
+        let backoff = |scan: &Scan| scan.failure.as_ref().map(ScanFailure::backoff);
+        let mut scan = Scan {
+            at: None,
+            failure: None,
+        };
+        assert!(scan.due(|| unreachable!()));
+        let unsupported = || Err(anyhow!("model not supported"));
+        let warning = scan.finish(codex("gpt-x"), unsupported()).unwrap();
+        assert!(warning.contains("model not supported"), "{warning}");
+        assert!(!scan.due(|| codex("gpt-x")));
+        assert!(scan.due(|| codex("gpt-y")));
+
+        assert_eq!(scan.finish(codex("gpt-x"), unsupported()), None);
+        assert_eq!(backoff(&scan), Some(RETRY_BACKOFF[1]));
+        // A cause that varies per request is reported but keeps backing off.
+        assert!(scan.finish(codex("gpt-x"), Err(anyhow!("req_2"))).is_some());
+        assert_eq!(backoff(&scan), Some(RETRY_BACKOFF[2]));
+        for _ in 0..5 {
+            scan.finish(codex("gpt-x"), unsupported());
+        }
+        assert_eq!(backoff(&scan), Some(RETRY_BACKOFF[3]));
+
+        assert!(scan.finish(codex("gpt-y"), unsupported()).is_some());
+        assert_eq!(backoff(&scan), Some(RETRY_BACKOFF[0]));
+        assert_eq!(scan.finish(codex("gpt-y"), Ok(())), None);
+        assert!(scan.failure.is_none());
     }
 
     fn temp_root() -> PathBuf {
@@ -1289,6 +1649,12 @@ mod tests {
         assert_eq!(list_in(&root, &mirrored).len(), 2);
         let dup = fs::read_to_string(wt.join(".claude/skills/dup/SKILL.md")).unwrap();
         assert!(dup.contains("UPLOADED"), "upload must shadow the mirror");
+        let session_file = wt.join(".claude/skills/dup/SKILL.md");
+        assert!(
+            instructions_in(&root, &mirrored, "dup", Some(&session_file), None)
+                .unwrap()
+                .contains(&session_file.display().to_string())
+        );
         assert!(
             !wt.join(".claude/skills/dup/extra.txt").exists(),
             "a shadowing upload must not keep the mirrored skill's files"
@@ -1329,7 +1695,7 @@ mod tests {
         assert!(!wt.join(".claude/skills/foreign/SKILL.md").exists());
         // Discovery remains independent of provisioning.
         assert_eq!(list_in(&root, &mirrored).len(), 2);
-        assert!(instructions_in(&root, &mirrored, "native").is_some());
+        assert!(instructions_in(&root, &mirrored, "native", None, None).is_some());
         let _ = fs::remove_dir_all(&root);
         let _ = fs::remove_dir_all(&agent_dir);
         let _ = fs::remove_dir_all(&wt);
@@ -1340,15 +1706,18 @@ mod tests {
         let root = temp_root();
         save_skill_md_in(&root, skill_md("greeter").as_bytes()).unwrap();
         assert_eq!(
-            instructions_in(&root, &[], "greeter").unwrap(),
-            "Use the `greeter` skill."
+            instructions_in(&root, &[], "greeter", None, None).unwrap(),
+            format!(
+                "Use the uploaded `greeter` skill at `{}`. Read that SKILL.md and follow it.",
+                store_dir(&root).join("greeter").join("SKILL.md").display()
+            )
         );
         assert_eq!(
             content_in(&root, &[], "greeter").unwrap(),
             "# greeter\nbody\n"
         );
         assert!(content_in(&root, &[], "../../etc/passwd").is_none());
-        assert!(instructions_in(&root, &[], "unknown").is_none());
+        assert!(instructions_in(&root, &[], "unknown", None, None).is_none());
         let _ = fs::remove_dir_all(&root);
     }
 
@@ -1466,7 +1835,26 @@ mod tests {
         fs::write(committed.join("SKILL.md"), "REPO COPY").unwrap();
         save_skill_md_in(&root, skill_md("code-review").as_bytes()).unwrap();
 
+        let pending = wt.join("new-session/.claude/skills/code-review/SKILL.md");
+        assert!(instructions_in(
+            &root,
+            &[],
+            "code-review",
+            Some(&pending),
+            Some(&committed.join("SKILL.md"))
+        )
+        .unwrap()
+        .contains("Source collision"));
         write_into_session_in(&root, &wt, rel).unwrap();
+        assert!(instructions_in(
+            &root,
+            &[],
+            "code-review",
+            Some(&committed.join("SKILL.md")),
+            None
+        )
+        .unwrap()
+        .contains("Source collision"));
         assert_eq!(
             fs::read_to_string(committed.join("SKILL.md")).unwrap(),
             "REPO COPY",
@@ -1480,7 +1868,7 @@ mod tests {
     }
 
     #[test]
-    fn a_matching_dir_is_adopted_only_when_the_manifest_is_gone() {
+    fn a_matching_project_skill_is_never_adopted() {
         let root = temp_root();
         let wt = temp_root();
         let rel = ".claude/skills";
@@ -1500,14 +1888,265 @@ mod tests {
             "a dir the manifest never claimed must not become prunable"
         );
 
-        // With no manifest at all we can't tell ours from theirs, so a dir that
-        // matches its source is taken as ours — that heals a deleted manifest.
+        // A missing manifest does not transfer ownership of a project skill.
         save_skill_md_in(&root, skill_md("shared").as_bytes()).unwrap();
         fs::remove_file(wt.join(rel).join(MANAGED_MANIFEST)).unwrap();
         write_into_session_in(&root, &wt, rel).unwrap();
-        assert!(previously_managed(&wt.join(rel))
+        assert!(!previously_managed(&wt.join(rel))
             .unwrap()
             .contains(&"shared".to_string()));
+        let _ = fs::remove_dir_all(&root);
+        let _ = fs::remove_dir_all(&wt);
+    }
+
+    #[test]
+    fn deleted_manifest_keeps_upload_usable_and_late_project_collision_is_reported() {
+        let root = temp_root();
+        let wt = temp_root();
+        save_skill_md_in(&root, skill_md("shared").as_bytes()).unwrap();
+        write_into_session_in(&root, &wt, ".claude/skills").unwrap();
+        let session_file = wt.join(".claude/skills/shared/SKILL.md");
+        fs::remove_file(wt.join(".claude/skills").join(MANAGED_MANIFEST)).unwrap();
+        write_into_session_in(&root, &wt, ".claude/skills").unwrap();
+        let upload = instructions_in(&root, &[], "shared", Some(&session_file), None).unwrap();
+        assert!(upload.contains(
+            &store_dir(&root)
+                .join("shared")
+                .join("SKILL.md")
+                .display()
+                .to_string()
+        ));
+
+        let project_file = wt.join("project/.claude/skills/shared/SKILL.md");
+        fs::create_dir_all(project_file.parent().unwrap()).unwrap();
+        fs::write(&project_file, "PROJECT COPY").unwrap();
+        assert!(instructions_in(
+            &root,
+            &[],
+            "shared",
+            Some(&session_file),
+            Some(&project_file)
+        )
+        .unwrap()
+        .contains("Source collision"));
+        let _ = fs::remove_dir_all(&root);
+        let _ = fs::remove_dir_all(&wt);
+    }
+
+    #[test]
+    fn duplicate_picker_entries_select_distinct_sources() {
+        let root = temp_root();
+        let repo = temp_root();
+        let upload_md = skill_md_desc("shared", "UPLOAD SOURCE").replace("body", "UPLOAD SOURCE");
+        save_skill_md_in(&root, upload_md.as_bytes()).unwrap();
+        let project_file = repo.join(".agents/skills/shared/SKILL.md");
+        fs::create_dir_all(project_file.parent().unwrap()).unwrap();
+        fs::write(
+            &project_file,
+            skill_md_desc("shared", "PROJECT SOURCE").replace("body", "PROJECT SOURCE"),
+        )
+        .unwrap();
+        let session_file = repo.join("session/.agents/skills/shared/SKILL.md");
+        fs::create_dir_all(session_file.parent().unwrap()).unwrap();
+        fs::write(&session_file, skill_md_desc("shared", "SESSION SOURCE")).unwrap();
+        let session_repo = repo.join("session");
+        crate::local::git::git(Some(&session_repo), &["init", "-q"]).unwrap();
+        crate::local::git::git(
+            Some(&session_repo),
+            &["add", ".agents/skills/shared/SKILL.md"],
+        )
+        .unwrap();
+
+        let project = list_project_skills(&repo, Some("codex"));
+        assert_eq!(project.len(), 1);
+        assert_eq!(project[0].name, "shared");
+        assert_eq!(project[0].description, "PROJECT SOURCE");
+        assert_eq!(
+            parse_selection("shared@personal").unwrap().1,
+            SkillSelection::Personal
+        );
+        assert_eq!(
+            parse_selection("shared@project").unwrap().1,
+            SkillSelection::Project
+        );
+        assert_eq!(
+            parse_selection("shared@u").unwrap().1,
+            SkillSelection::Personal
+        );
+        assert_eq!(
+            parse_selection("shared@p").unwrap().1,
+            SkillSelection::Project
+        );
+        assert_eq!(
+            parse_selection("shared^").unwrap().1,
+            SkillSelection::Personal
+        );
+        assert_eq!(
+            parse_selection("shared~").unwrap().1,
+            SkillSelection::Project
+        );
+        assert!(parse_selection("shared@other").is_none());
+
+        let personal = instructions_selected_in(
+            &root,
+            &[],
+            "shared",
+            SkillSelection::Personal,
+            None,
+            Some(&project_file),
+        )
+        .unwrap();
+        let project = instructions_selected_in(
+            &root,
+            &[],
+            "shared",
+            SkillSelection::Project,
+            Some(&session_file),
+            Some(&project_file),
+        )
+        .unwrap();
+        assert!(personal.contains(
+            &store_dir(&root)
+                .join("shared")
+                .join("SKILL.md")
+                .display()
+                .to_string()
+        ));
+        assert!(project.contains(&session_file.display().to_string()));
+        assert!(!project.contains(&project_file.display().to_string()));
+        fs::write(&project_file, &upload_md).unwrap();
+        fs::write(&session_file, &upload_md).unwrap();
+        assert!(instructions_selected_in(
+            &root,
+            &[],
+            "shared",
+            SkillSelection::Project,
+            Some(&session_file),
+            Some(&project_file)
+        )
+        .unwrap()
+        .contains(&session_file.display().to_string()));
+        fs::write(
+            &project_file,
+            skill_md_desc("shared", "PROJECT SOURCE").replace("body", "PROJECT SOURCE"),
+        )
+        .unwrap();
+        fs::write(&session_file, skill_md_desc("shared", "SESSION SOURCE")).unwrap();
+        let untracked_file = repo.join("untracked/.agents/skills/shared/SKILL.md");
+        fs::create_dir_all(untracked_file.parent().unwrap()).unwrap();
+        fs::copy(&project_file, &untracked_file).unwrap();
+        assert!(instructions_selected_in(
+            &root,
+            &[],
+            "shared",
+            SkillSelection::Project,
+            Some(&untracked_file),
+            Some(&project_file)
+        )
+        .unwrap()
+        .contains(&untracked_file.display().to_string()));
+        let manifest = session_file
+            .parent()
+            .unwrap()
+            .parent()
+            .unwrap()
+            .join(MANAGED_MANIFEST);
+        fs::write(&manifest, "shared\n").unwrap();
+        assert!(instructions_selected_in(
+            &root,
+            &[],
+            "shared",
+            SkillSelection::Project,
+            Some(&session_file),
+            Some(&project_file)
+        )
+        .unwrap()
+        .contains("unavailable"));
+        fs::remove_file(manifest).unwrap();
+        fs::write(&untracked_file, &upload_md).unwrap();
+        assert!(instructions_selected_in(
+            &root,
+            &[],
+            "shared",
+            SkillSelection::Project,
+            Some(&untracked_file),
+            Some(&project_file)
+        )
+        .unwrap()
+        .contains("unavailable"));
+        assert!(content_selected_in(
+            &root,
+            &[],
+            "shared",
+            SkillSelection::Personal,
+            Some(&project_file)
+        )
+        .unwrap()
+        .contains("UPLOAD SOURCE"));
+        assert!(content_selected_in(
+            &root,
+            &[],
+            "shared",
+            SkillSelection::Project,
+            Some(&project_file)
+        )
+        .unwrap()
+        .contains("PROJECT SOURCE"));
+        fs::remove_file(&session_file).unwrap();
+        assert!(instructions_selected_in(
+            &root,
+            &[],
+            "shared",
+            SkillSelection::Project,
+            Some(&session_file),
+            Some(&project_file)
+        )
+        .unwrap()
+        .contains("unavailable"));
+        let _ = fs::remove_dir_all(root);
+        let _ = fs::remove_dir_all(repo);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn project_picker_includes_symlinked_and_large_skills() {
+        let repo = temp_root();
+        let real = repo.join("real-skill");
+        fs::create_dir_all(&real).unwrap();
+        fs::write(real.join("SKILL.md"), skill_md_desc("linked", "linked")).unwrap();
+        fs::File::create(real.join("asset.bin"))
+            .unwrap()
+            .set_len(MAX_TOTAL_BYTES + 1)
+            .unwrap();
+        let dir = repo.join(".agents/skills");
+        fs::create_dir_all(&dir).unwrap();
+        std::os::unix::fs::symlink(&real, dir.join("linked")).unwrap();
+        let skills = list_project_skills(&repo, Some("codex"));
+        assert_eq!(skills.len(), 1);
+        assert_eq!(skills[0].name, "linked");
+        let _ = fs::remove_dir_all(repo);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn ignored_symlinks_do_not_make_a_session_copy_stale() {
+        let root = temp_root();
+        let wt = temp_root();
+        save_skill_md_in(&root, skill_md("linked").as_bytes()).unwrap();
+        let source = store_dir(&root).join("linked");
+        std::os::unix::fs::symlink("SKILL.md", source.join("alias.md")).unwrap();
+        write_into_session_in(&root, &wt, ".claude/skills").unwrap();
+        assert!(dest_matches_source(
+            &source,
+            tally_all(&source),
+            &wt.join(".claude/skills/linked")
+        ));
+        std::os::unix::fs::symlink("SKILL.md", wt.join(".claude/skills/linked/alias.md")).unwrap();
+        assert!(!dest_matches_source(
+            &source,
+            tally_all(&source),
+            &wt.join(".claude/skills/linked")
+        ));
         let _ = fs::remove_dir_all(&root);
         let _ = fs::remove_dir_all(&wt);
     }
@@ -1541,6 +2180,24 @@ mod tests {
         assert!(fs::read_to_string(&written)
             .unwrap()
             .contains("something else"));
+        let _ = fs::remove_dir_all(&root);
+        let _ = fs::remove_dir_all(&wt);
+    }
+
+    #[test]
+    fn a_same_size_supporting_file_edit_refreshes_the_session_copy() {
+        let root = temp_root();
+        let wt = temp_root();
+        save_skill_md_in(&root, skill_md("updated").as_bytes()).unwrap();
+        let source = store_dir(&root).join("updated/reference.txt");
+        fs::write(&source, "old").unwrap();
+        write_into_session_in(&root, &wt, ".agents/skills").unwrap();
+        fs::write(&source, "new").unwrap();
+        write_into_session_in(&root, &wt, ".agents/skills").unwrap();
+        assert_eq!(
+            fs::read_to_string(wt.join(".agents/skills/updated/reference.txt")).unwrap(),
+            "new"
+        );
         let _ = fs::remove_dir_all(&root);
         let _ = fs::remove_dir_all(&wt);
     }
@@ -1644,7 +2301,7 @@ mod tests {
         write_into_session_in(&root, &wt, ".agents/skills").unwrap();
         assert!(!wt.join(".agents/skills/flash").exists());
         assert_eq!(
-            instructions_in(&root, &mirrored, "flash").unwrap(),
+            instructions_in(&root, &mirrored, "flash", None, None).unwrap(),
             "Use the `runpod:flash` skill."
         );
         let _ = fs::remove_dir_all(&root);
@@ -1694,7 +2351,7 @@ mod tests {
             source_dirs(&root, &[]),
             vec![("alpha".to_string(), root.join("global/alpha"))]
         );
-        assert!(instructions_in(&root, &[], "alpha").is_some());
+        assert!(instructions_in(&root, &[], "alpha", None, None).is_some());
         assert!(delete_in(&root, "alpha").is_ok());
         let _ = fs::remove_dir_all(&root);
     }

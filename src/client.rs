@@ -428,6 +428,67 @@ pub async fn create_ssh_key(
 /// Sent on external requests — some CDNs reject the default (empty) UA.
 const ALPHAXIV_UA: &str = concat!("openresearch-cli/", env!("CARGO_PKG_VERSION"));
 
+/// Longest `Retry-After` worth waiting out in-process; a longer one fails fast with the wait.
+const MAX_RETRY_WAIT_SECS: u64 = 5;
+
+/// How long to wait before retrying a throttled request: the host's `Retry-After`,
+/// else a growing backoff, plus jitter so concurrent `orx` processes don't retry in lockstep.
+fn retry_delay(retry_after: Option<u64>, attempt: u64) -> std::time::Duration {
+    let secs = retry_after.unwrap_or(attempt);
+    let jitter_ms = u64::try_from(uuid::Uuid::new_v4().as_u128() % 500).unwrap_or(0);
+    std::time::Duration::from_millis(secs * 1000 + jitter_ms)
+}
+
+/// `Retry-After` as seconds from now: either delta-seconds or an HTTP-date (RFC 9110).
+fn retry_after_secs(value: &str) -> Option<u64> {
+    let value = value.trim();
+    value.parse().ok().or_else(|| {
+        let at = httpdate::parse_http_date(value).ok()?;
+        Some(
+            at.duration_since(std::time::SystemTime::now())
+                .map_or(0, |d| d.as_secs()),
+        )
+    })
+}
+
+/// Send a keyless literature GET, retrying 429s: parallel agent calls routinely
+/// burst past these hosts' per-IP limits. Other statuses are left to the caller.
+async fn public_get(
+    request: impl Fn() -> reqwest::RequestBuilder,
+    service: &str,
+    unreachable: impl Fn(reqwest::Error) -> crate::error::Error,
+) -> Result<reqwest::Response> {
+    const ATTEMPTS: u64 = 3;
+    let mut attempt = 1;
+    loop {
+        let res = request()
+            .header("user-agent", ALPHAXIV_UA)
+            .send()
+            .await
+            .map_err(&unreachable)?;
+        if res.status() != reqwest::StatusCode::TOO_MANY_REQUESTS {
+            return Ok(res);
+        }
+        let retry_after = res
+            .headers()
+            .get(reqwest::header::RETRY_AFTER)
+            .and_then(|v| v.to_str().ok())
+            .and_then(retry_after_secs);
+        drop(res);
+        if attempt == ATTEMPTS || retry_after.is_some_and(|secs| secs > MAX_RETRY_WAIT_SECS) {
+            let wait = match retry_after {
+                Some(secs) if secs > 0 => format!("retry in {secs}s"),
+                _ => "wait a minute before retrying".to_string(),
+            };
+            return Err(anyhow!(
+                "{service} is rate-limiting requests (429 Too Many Requests); {wait}"
+            ));
+        }
+        tokio::time::sleep(retry_delay(retry_after, attempt)).await;
+        attempt += 1;
+    }
+}
+
 /// One alphaXiv full-text or discovery search hit. Serialize is derived so the
 /// CLI can emit endpoint results verbatim.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -497,12 +558,12 @@ async fn discover_papers(
 ) -> Result<Vec<PaperHit>> {
     let base = crate::config::alphaxiv_api_url();
     let url = paper_discovery_url(&base, strategy, query, options)?;
-    let res = http()
-        .get(url)
-        .header("user-agent", ALPHAXIV_UA)
-        .send()
-        .await
-        .map_err(|e| transport_error(&base, e))?;
+    let res = public_get(
+        || http().get(url.clone()),
+        "alphaXiv",
+        |e| transport_error(&base, e),
+    )
+    .await?;
     let status = res.status();
     if !status.is_success() {
         let reason = status.canonical_reason().unwrap_or("");
@@ -558,12 +619,12 @@ pub async fn search_papers_fast(query: &str) -> Result<Vec<FastPaperHit>> {
         base,
         urlencoding::encode(query)
     );
-    let res = http()
-        .get(&url)
-        .header("user-agent", ALPHAXIV_UA)
-        .send()
-        .await
-        .map_err(|e| transport_error(&base, e))?;
+    let res = public_get(
+        || http().get(&url),
+        "alphaXiv",
+        |e| transport_error(&base, e),
+    )
+    .await?;
     let status = res.status();
     if !status.is_success() {
         let reason = status.canonical_reason().unwrap_or("");
@@ -590,17 +651,18 @@ pub struct ResolvedPaper {
 
 /// Resolve an arXiv id to title + linked GitHub repo. `/papers/v3/{id}` scrapes
 /// arXiv on a miss, so brand-new papers resolve too (their repo links may lag).
-/// The implementations lookup is best-effort — a failure there just means no repo.
+/// A missing or unparseable implementations answer just means no repo; a rate limit or
+/// unreachable host fails the resolve rather than silently starting a blank project.
 pub async fn resolve_paper(paper_id: &str) -> Result<ResolvedPaper> {
     let id = versionless_id(paper_id);
     let base = crate::config::alphaxiv_api_url();
     let url = format!("{}/papers/v3/{}", base, urlencoding::encode(id));
-    let res = http()
-        .get(&url)
-        .header("user-agent", ALPHAXIV_UA)
-        .send()
-        .await
-        .map_err(|e| transport_error(&base, e))?;
+    let res = public_get(
+        || http().get(&url),
+        "alphaXiv",
+        |e| transport_error(&base, e),
+    )
+    .await?;
     let status = res.status();
     if !status.is_success() {
         return Err(anyhow!(
@@ -651,17 +713,17 @@ pub async fn resolve_paper(paper_id: &str) -> Result<ResolvedPaper> {
         base,
         urlencoding::encode(&group_id)
     );
-    let impls = match http()
-        .get(&url)
-        .header("user-agent", ALPHAXIV_UA)
-        .send()
-        .await
-    {
-        Ok(res) if res.status().is_success() => match res.json::<Implementations>().await {
-            Ok(body) => body,
-            Err(_) => return Ok(resolved),
-        },
-        _ => return Ok(resolved),
+    let res = public_get(
+        || http().get(&url),
+        "alphaXiv",
+        |e| transport_error(&base, e),
+    )
+    .await?;
+    if !res.status().is_success() {
+        return Ok(resolved);
+    }
+    let Ok(impls) = res.json::<Implementations>().await else {
+        return Ok(resolved);
     };
 
     let is_github = |r: &&Resource| {
@@ -708,13 +770,12 @@ pub async fn fetch_paper_pdf(paper_id: &str) -> Result<Vec<u8>> {
         return Err(anyhow!("{} is not an arXiv id", paper_id));
     }
     let url = paper_pdf_url(paper_id);
-    let res = http()
-        .get(&url)
-        .header("user-agent", ALPHAXIV_UA)
-        .timeout(std::time::Duration::from_secs(30))
-        .send()
-        .await
-        .map_err(|e| anyhow!("Could not reach arXiv at {}: {}", url, e))?;
+    let res = public_get(
+        || http().get(&url).timeout(std::time::Duration::from_secs(30)),
+        "arXiv",
+        |e| anyhow!("Could not reach arXiv at {}: {}", url, e),
+    )
+    .await?;
     let status = res.status();
     if !status.is_success() {
         let reason = status.canonical_reason().unwrap_or("");
@@ -754,12 +815,12 @@ pub async fn fetch_paper_github(paper_id: &str) -> Result<Option<String>> {
         base,
         urlencoding::encode(versionless)
     );
-    let res = http()
-        .get(&url)
-        .header("user-agent", ALPHAXIV_UA)
-        .send()
-        .await
-        .map_err(|e| transport_error(&base, e))?;
+    let res = public_get(
+        || http().get(&url),
+        "alphaXiv",
+        |e| transport_error(&base, e),
+    )
+    .await?;
     let status = res.status();
     if !status.is_success() {
         let reason = status.canonical_reason().unwrap_or("");
@@ -789,12 +850,12 @@ pub async fn fetch_paper_github(paper_id: &str) -> Result<Option<String>> {
 pub async fn fetch_paper_markdown(kind: &str, paper_id: &str) -> Result<Option<String>> {
     let base = crate::config::alphaxiv_web_url();
     let url = format!("{}/{}/{}.md", base, kind, paper_id);
-    let res = http()
-        .get(&url)
-        .header("user-agent", ALPHAXIV_UA)
-        .send()
-        .await
-        .map_err(|e| transport_error(&base, e))?;
+    let res = public_get(
+        || http().get(&url),
+        "alphaXiv",
+        |e| transport_error(&base, e),
+    )
+    .await?;
     let status = res.status();
     if status.as_u16() == 404 {
         return Ok(None);
@@ -1072,12 +1133,12 @@ pub async fn discover_openalex(
 ) -> Result<Vec<LitHit>> {
     let base = crate::config::openalex_api_url();
     let url = openalex_discovery_url(&base, query, &crate::config::openalex_mailto(), options)?;
-    let res = http()
-        .get(url)
-        .header("user-agent", ALPHAXIV_UA)
-        .send()
-        .await
-        .map_err(|e| anyhow!("Could not reach OpenAlex at {}: {}", base, e))?;
+    let res = public_get(
+        || http().get(url.clone()),
+        "OpenAlex",
+        |e| anyhow!("Could not reach OpenAlex at {}: {}", base, e),
+    )
+    .await?;
     let status = res.status();
     if !status.is_success() {
         let reason = status.canonical_reason().unwrap_or("");
@@ -1125,12 +1186,12 @@ pub async fn fetch_openalex_work(id_or_doi: &str) -> Result<Option<OpenAlexWork>
         openalex_selector(id_or_doi),
         urlencoding::encode(&crate::config::openalex_mailto()),
     );
-    let res = http()
-        .get(&url)
-        .header("user-agent", ALPHAXIV_UA)
-        .send()
-        .await
-        .map_err(|e| anyhow!("Could not reach OpenAlex at {}: {}", base, e))?;
+    let res = public_get(
+        || http().get(&url),
+        "OpenAlex",
+        |e| anyhow!("Could not reach OpenAlex at {}: {}", base, e),
+    )
+    .await?;
     let status = res.status();
     if status.as_u16() == 404 {
         return Ok(None);
@@ -1175,12 +1236,12 @@ pub struct BiorxivDetail {
 pub async fn fetch_biorxiv(doi: &str) -> Result<Option<BiorxivDetail>> {
     let base = crate::config::biorxiv_api_url();
     let url = format!("{}/details/biorxiv/{}/na/json", base, doi.trim());
-    let res = http()
-        .get(&url)
-        .header("user-agent", ALPHAXIV_UA)
-        .send()
-        .await
-        .map_err(|e| anyhow!("Could not reach bioRxiv at {}: {}", base, e))?;
+    let res = public_get(
+        || http().get(&url),
+        "bioRxiv",
+        |e| anyhow!("Could not reach bioRxiv at {}: {}", base, e),
+    )
+    .await?;
     let status = res.status();
     if status.as_u16() == 404 {
         return Ok(None);
@@ -1292,51 +1353,24 @@ fn pubmed_fetch_url(base: &str, pmids: &[String], email: &str) -> Result<reqwest
     Ok(url)
 }
 
-/// How long to wait before retrying a throttled request: NCBI's `Retry-After`
-/// (seconds, capped) plus jitter so concurrent `orx` processes don't retry in lockstep.
-fn pubmed_retry_delay(retry_after: Option<&str>) -> std::time::Duration {
-    let secs = retry_after
-        .and_then(|v| v.trim().parse::<u64>().ok())
-        .unwrap_or(1)
-        .min(5);
-    let jitter_ms = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map_or(0, |d| u64::from(d.subsec_millis()) % 500);
-    std::time::Duration::from_millis(secs * 1000 + jitter_ms)
-}
-
 async fn pubmed_get(base: &str, url: reqwest::Url, action: &str) -> Result<reqwest::Response> {
-    // Keyless E-utilities allows 3 requests/s per IP, which parallel agent calls exceed.
-    const ATTEMPTS: usize = 3;
-    let mut attempt = 1;
-    loop {
-        let res = http()
-            .get(url.clone())
-            .header("user-agent", ALPHAXIV_UA)
-            .send()
-            .await
-            .map_err(|e| anyhow!("Could not reach PubMed at {}: {}", base, e))?;
-        let status = res.status();
-        if status == reqwest::StatusCode::TOO_MANY_REQUESTS && attempt < ATTEMPTS {
-            let retry_after = res
-                .headers()
-                .get(reqwest::header::RETRY_AFTER)
-                .and_then(|v| v.to_str().ok());
-            tokio::time::sleep(pubmed_retry_delay(retry_after)).await;
-            attempt += 1;
-            continue;
-        }
-        if !status.is_success() {
-            let reason = status.canonical_reason().unwrap_or("");
-            return Err(anyhow!(
-                "PubMed {} failed ({} {})",
-                action,
-                status.as_u16(),
-                reason
-            ));
-        }
-        return Ok(res);
+    let res = public_get(
+        || http().get(url.clone()),
+        "PubMed",
+        |e| anyhow!("Could not reach PubMed at {}: {}", base, e),
+    )
+    .await?;
+    let status = res.status();
+    if !status.is_success() {
+        let reason = status.canonical_reason().unwrap_or("");
+        return Err(anyhow!(
+            "PubMed {} failed ({} {})",
+            action,
+            status.as_u16(),
+            reason
+        ));
     }
+    Ok(res)
 }
 
 async fn fetch_pubmed_articles(pmids: &[String]) -> Result<Vec<PubmedArticle>> {
@@ -1597,8 +1631,9 @@ mod tests {
         SandboxTarget, BIORXIV_SOURCE_ID,
     };
     use super::{
-        parse_pubmed_articles, pubmed_discovery_url, pubmed_fetch_url, pubmed_retry_delay,
-        rerank_pubmed_articles, PubmedArticle, PubmedDiscoveryOptions,
+        parse_pubmed_articles, public_get, pubmed_discovery_url, pubmed_fetch_url,
+        rerank_pubmed_articles, retry_after_secs, retry_delay, PubmedArticle,
+        PubmedDiscoveryOptions,
     };
     use serde_json::json;
 
@@ -1720,12 +1755,21 @@ mod tests {
     }
 
     #[test]
-    fn pubmed_retry_delay_honors_retry_after_within_a_cap() {
-        let ms = |header| pubmed_retry_delay(header).as_millis();
-        assert!((2000..2500).contains(&ms(Some("2"))));
-        assert!((5000..5500).contains(&ms(Some("600"))));
-        assert!((1000..1500).contains(&ms(None)));
-        assert!((1000..1500).contains(&ms(Some("Wed, 21 Oct 2026 07:28:00 GMT"))));
+    fn retry_delay_prefers_retry_after_over_backoff() {
+        let ms = |retry_after, attempt| retry_delay(retry_after, attempt).as_millis();
+        assert!((2000..2500).contains(&ms(Some(2), 1)));
+        assert!((1000..1500).contains(&ms(None, 1)));
+        assert!((2000..2500).contains(&ms(None, 2)));
+    }
+
+    #[test]
+    fn retry_after_accepts_seconds_or_an_http_date() {
+        assert_eq!(retry_after_secs(" 30 "), Some(30));
+        assert_eq!(retry_after_secs("Wed, 21 Oct 2015 07:28:00 GMT"), Some(0));
+        let later = std::time::SystemTime::now() + std::time::Duration::from_secs(120);
+        let secs = retry_after_secs(&httpdate::fmt_http_date(later)).unwrap();
+        assert!((118..=120).contains(&secs));
+        assert_eq!(retry_after_secs("soon"), None);
     }
 
     #[test]
@@ -2297,6 +2341,67 @@ mod tests {
         assert_eq!(latest.version, "2");
         assert_eq!(latest.abstract_, "new");
         assert_eq!(latest.published, "10.1000/j.x");
+    }
+
+    const LIMITED: &str = "HTTP/1.1 429 Too Many Requests\r\nRetry-After: 0\r\nContent-Length: 0\r\nConnection: close\r\n\r\n";
+
+    async fn serve_statuses(
+        responses: &'static [&'static str],
+    ) -> (String, tokio::task::JoinHandle<()>) {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("http://{}/", listener.local_addr().unwrap());
+        let server = tokio::spawn(async move {
+            for response in responses {
+                let (mut stream, _) = listener.accept().await.unwrap();
+                let mut buf = [0u8; 4096];
+                let _ = stream.read(&mut buf).await.unwrap();
+                stream.write_all(response.as_bytes()).await.unwrap();
+            }
+        });
+        (url, server)
+    }
+
+    async fn loopback_public_get(url: &str) -> anyhow::Result<reqwest::Response> {
+        let client = reqwest::Client::builder().no_proxy().build().unwrap();
+        public_get(|| client.get(url), "Test", |e| anyhow::anyhow!("{e}")).await
+    }
+
+    #[tokio::test]
+    async fn public_get_retries_a_rate_limit_then_succeeds() {
+        let (url, server) = serve_statuses(&[
+            LIMITED,
+            "HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\nok",
+        ])
+        .await;
+        let res = loopback_public_get(&url).await.unwrap();
+        assert_eq!(res.status(), 200);
+        server.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn public_get_gives_up_after_persistent_rate_limits() {
+        let (url, server) = serve_statuses(&[LIMITED, LIMITED, LIMITED]).await;
+        let err = loopback_public_get(&url).await.unwrap_err().to_string();
+        assert_eq!(
+            err,
+            "Test is rate-limiting requests (429 Too Many Requests); wait a minute before retrying"
+        );
+        server.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn public_get_fails_fast_when_the_wait_is_long() {
+        let (url, server) = serve_statuses(&[
+            "HTTP/1.1 429 Too Many Requests\r\nRetry-After: 60\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+        ])
+        .await;
+        let err = loopback_public_get(&url).await.unwrap_err().to_string();
+        assert_eq!(
+            err,
+            "Test is rate-limiting requests (429 Too Many Requests); retry in 60s"
+        );
+        server.await.unwrap();
     }
 
     #[tokio::test]

@@ -1,7 +1,7 @@
 //! Local experiment creation — slug, branch, row. Used by
 //! `orx create-experiment` through the local execution plane.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::path::Path;
 
 use crate::error::{anyhow, Result};
@@ -36,7 +36,7 @@ fn unique_slug(store: &Store, project: &LocalProject, base: &str) -> Result<Stri
     }
 }
 
-/// The project's root experiment (parent NULL) — oldest first when several
+/// The project's active root experiment (parent NULL) — oldest first when several
 /// exist. `None` on a fresh project: the tree starts empty and the first
 /// no-parent create becomes the baseline. CLI creates without a parent attach
 /// here once a root exists (pass `--baseline` to add another root).
@@ -45,7 +45,7 @@ pub fn project_root(store: &Store, project_id: &str) -> Result<Option<LocalExper
     Ok(store
         .list_experiments_by_project(project_id)?
         .into_iter()
-        .find(|e| e.parent_experiment_id.is_none()))
+        .find(|e| e.parent_experiment_id.is_none() && !e.archived))
 }
 
 /// Warning for pre-orx/<slug>-baseline rows: roots created before baselines
@@ -62,6 +62,112 @@ pub fn legacy_root_warning(project: &LocalProject, experiment: &LocalExperiment)
                 experiment.id, project.baseline_branch, project.baseline_branch
             )
         })
+}
+
+#[derive(Clone, Copy)]
+pub enum ArchiveDirection {
+    Ancestors,
+    Descendants,
+    Only,
+    Region,
+    TaskRegion,
+}
+
+pub fn set_archived(
+    store: &mut Store,
+    id: &str,
+    direction: ArchiveDirection,
+    archived: bool,
+) -> Result<Vec<String>> {
+    let selected = store
+        .get_local_experiment(id)?
+        .ok_or_else(|| anyhow!("Experiment {id} not found."))?;
+    let experiments = store.list_experiments_by_project(&selected.project_id)?;
+    let ids = archive_ids(&experiments, &selected, direction);
+    store.set_experiments_archived(&ids, archived)
+}
+
+fn archive_ids(
+    experiments: &[LocalExperiment],
+    selected: &LocalExperiment,
+    direction: ArchiveDirection,
+) -> Vec<String> {
+    match direction {
+        ArchiveDirection::Only => vec![selected.id.clone()],
+        ArchiveDirection::Region | ArchiveDirection::TaskRegion => {
+            let in_scope = |experiment: &LocalExperiment| {
+                !matches!(direction, ArchiveDirection::TaskRegion)
+                    || selected.chat_session_id.is_some()
+                        && experiment.chat_session_id == selected.chat_session_id
+            };
+            if !selected.archived || !in_scope(selected) {
+                return Vec::new();
+            }
+            let by_id: HashMap<_, _> = experiments.iter().map(|e| (e.id.as_str(), e)).collect();
+            let mut root = selected;
+            while let Some(parent) = root
+                .parent_experiment_id
+                .as_deref()
+                .and_then(|id| by_id.get(id))
+            {
+                if !parent.archived || !in_scope(parent) {
+                    break;
+                }
+                root = parent;
+            }
+            let mut children: HashMap<&str, Vec<&LocalExperiment>> = HashMap::new();
+            for experiment in experiments {
+                if let Some(parent) = experiment.parent_experiment_id.as_deref() {
+                    children.entry(parent).or_default().push(experiment);
+                }
+            }
+            let mut ids = Vec::new();
+            let mut stack = vec![root];
+            while let Some(experiment) = stack.pop() {
+                ids.push(experiment.id.clone());
+                if let Some(next) = children.get(experiment.id.as_str()) {
+                    stack.extend(
+                        next.iter()
+                            .copied()
+                            .filter(|child| child.archived && in_scope(child)),
+                    );
+                }
+            }
+            ids
+        }
+        ArchiveDirection::Ancestors => {
+            let by_id: HashMap<_, _> = experiments.iter().map(|e| (e.id.as_str(), e)).collect();
+            let mut ids = Vec::new();
+            let mut parent = selected.parent_experiment_id.as_deref();
+            while let Some(id) = parent {
+                let Some(experiment) = by_id.get(id) else {
+                    break;
+                };
+                ids.push(experiment.id.clone());
+                parent = experiment.parent_experiment_id.as_deref();
+            }
+            ids
+        }
+        ArchiveDirection::Descendants => {
+            let mut children: HashMap<&str, Vec<&str>> = HashMap::new();
+            for experiment in experiments {
+                if let Some(parent) = experiment.parent_experiment_id.as_deref() {
+                    children.entry(parent).or_default().push(&experiment.id);
+                }
+            }
+            let mut ids = Vec::new();
+            let mut stack = vec![selected.id.as_str()];
+            while let Some(id) = stack.pop() {
+                if let Some(next) = children.get(id) {
+                    for child in next {
+                        ids.push((*child).to_string());
+                        stack.push(*child);
+                    }
+                }
+            }
+            ids
+        }
+    }
 }
 
 /// Create a local experiment. Every node gets its own `orx/<slug>` branch:
@@ -124,6 +230,7 @@ pub fn create_experiment(
         created_at: now,
         updated_at: now,
         chat_session_id: crate::local::chat::launching_chat_session(),
+        archived: false,
     };
     store.create_local_experiment(&experiment)?;
     Ok(experiment)
@@ -164,6 +271,7 @@ mod tests {
             created_at: 0,
             updated_at: 0,
             chat_session_id: None,
+            archived: false,
         }
     }
 
@@ -197,5 +305,101 @@ mod tests {
         assert_eq!(unique_slug(&store, &project, "project").unwrap(), "project");
         drop(store);
         let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn archive_directions_respect_selection_and_siblings() {
+        let mut root = experiment(None, "root");
+        root.id = "root".into();
+        let mut selected = experiment(Some("root"), "selected");
+        selected.id = "selected".into();
+        let mut child = experiment(Some("selected"), "child");
+        child.id = "child".into();
+        let mut sibling = experiment(Some("root"), "sibling");
+        sibling.id = "sibling".into();
+        let all = [root, selected.clone(), child, sibling];
+        assert_eq!(
+            archive_ids(&all, &selected, ArchiveDirection::Ancestors),
+            ["root"]
+        );
+        assert_eq!(
+            archive_ids(&all, &selected, ArchiveDirection::Only),
+            ["selected"]
+        );
+        assert_eq!(
+            archive_ids(&all, &selected, ArchiveDirection::Descendants),
+            ["child"]
+        );
+    }
+
+    #[test]
+    fn archive_region_stops_at_active_nodes() {
+        let mut root = experiment(None, "root");
+        root.id = "root".into();
+        root.archived = true;
+        let mut selected = experiment(Some("root"), "selected");
+        selected.id = "selected".into();
+        selected.archived = true;
+        let mut sibling = experiment(Some("root"), "sibling");
+        sibling.id = "sibling".into();
+        sibling.archived = true;
+        let mut active = experiment(Some("selected"), "active");
+        active.id = "active".into();
+        let mut separate = experiment(Some("active"), "separate");
+        separate.id = "separate".into();
+        separate.archived = true;
+        let ids = archive_ids(
+            &[root, selected.clone(), sibling, active, separate],
+            &selected,
+            ArchiveDirection::Region,
+        );
+        assert_eq!(ids.len(), 3);
+        assert!(ids.contains(&"root".to_string()));
+        assert!(ids.contains(&"selected".to_string()));
+        assert!(ids.contains(&"sibling".to_string()));
+    }
+
+    #[test]
+    fn task_region_does_not_restore_other_sessions() {
+        let mut foreign_root = experiment(None, "foreign-root");
+        foreign_root.archived = true;
+        foreign_root.chat_session_id = Some("other".into());
+        let mut selected = experiment(Some(&foreign_root.id), "selected");
+        selected.id = "selected".into();
+        selected.archived = true;
+        selected.chat_session_id = Some("mine".into());
+        let mut mine = experiment(Some(&selected.id), "mine");
+        mine.id = "mine".into();
+        mine.archived = true;
+        mine.chat_session_id = Some("mine".into());
+        let mut foreign_sibling = experiment(Some(&foreign_root.id), "foreign-sibling");
+        foreign_sibling.id = "foreign-sibling".into();
+        foreign_sibling.archived = true;
+        foreign_sibling.chat_session_id = Some("other".into());
+        let ids = archive_ids(
+            &[foreign_root, selected.clone(), mine, foreign_sibling],
+            &selected,
+            ArchiveDirection::TaskRegion,
+        );
+        assert_eq!(ids.len(), 2);
+        assert!(ids.contains(&"selected".to_string()));
+        assert!(ids.contains(&"mine".to_string()));
+    }
+
+    #[test]
+    fn default_parent_skips_archived_roots() {
+        let dir = std::env::temp_dir().join(format!("orx-archive-root-{}", uuid::Uuid::new_v4()));
+        let store = Store::open_at(dir.clone()).unwrap();
+        let mut archived = experiment(None, "old");
+        archived.archived = true;
+        store.create_local_experiment(&archived).unwrap();
+        assert!(project_root(&store, "p1").unwrap().is_none());
+        let mut active = experiment(None, "new");
+        active.id = "e2".into();
+        active.slug = "new".into();
+        store.create_local_experiment(&active).unwrap();
+        assert_eq!(project_root(&store, "p1").unwrap().unwrap().id, "e2");
+        drop(store);
+        let _ = std::fs::remove_dir_all(dir);
     }
 }

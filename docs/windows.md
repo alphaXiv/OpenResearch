@@ -44,12 +44,9 @@ offers a Restart button once the new version is on disk.
 
 ### The SmartScreen warning
 
-`orx.exe` is not code-signed yet, so Windows shows "Windows protected your PC"
-on first run. Choose **More info** → **Run anyway**.
-
-Signing is planned, but it will not make this go away immediately: since 2024
-even an EV certificate has to earn SmartScreen reputation through download
-volume like any other, so early builds will keep showing the warning.
+This fork's `orx.exe` is not code-signed, so Windows shows "Windows protected
+your PC" on first run. Choose **More info** → **Run anyway**. (alphaXiv's own
+releases are signed with alphaXiv Inc.'s certificate; this fork cannot use it.)
 
 ### Long paths
 
@@ -71,3 +68,13 @@ Set-ItemProperty -Path 'HKLM:\SYSTEM\CurrentControlSet\Control\FileSystem' -Name
 | SSH connection reuse | Windows' OpenSSH cannot multiplex, so each status or log poll opens its own connection, and the Settings page uses the most recent preflight result instead of reporting a missing multiplexed master as a disconnection. Use a key held by an agent, or one without a passphrase. |
 | The PATH guard | Not applied; it needs a POSIX shell startup file. |
 | Data directory | Still `%USERPROFILE%\.local\share\openresearch`, not `%APPDATA%`. |
+| Signing out or upgrading while the app runs | Windows ends the app at once, without stopping the agents it started or saving the last workspace state. |
+| Starting the app while it is quitting | The new launch finds the old one still running and exits, so start it again once it has closed. |
+
+## Releasing the app
+
+This fork publishes only the `orx` CLI for Windows. alphaXiv's desktop installer
+(`OpenResearch-Setup.exe`) and its signing need alphaXiv's signing account;
+`release-windows-app.yml` and `sign-windows-cli.yml` stay unused here, since
+`WINDOWS_APP_ENABLED` is not set and this fork's `release.yml` does not call the
+signing job.

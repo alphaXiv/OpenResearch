@@ -31,8 +31,11 @@ export function RemoteHostDialog({
   useDialogFocus(dialogRef, onClose);
 
   async function openRemote(host: string) {
-    const remoteWindow = window.open("/remote-launch", "_blank");
-    if (!remoteWindow) {
+    // The desktop app sends pop-ups to the system browser and returns no handle,
+    // so it opens the gateway once it exists instead of pre-opening a placeholder.
+    const inDesktopApp = "__ORX_DESKTOP__" in window;
+    const remoteWindow = inDesktopApp ? null : window.open("/remote-launch", "_blank");
+    if (!inDesktopApp && !remoteWindow) {
       showAlert(m.remote_popup_blocked(), "error");
       return;
     }
@@ -42,10 +45,11 @@ export function RemoteHostDialog({
         theme: getThemePreference(),
         locale: getLocale(),
       }]);
-      remoteWindow.location.replace(session.gatewayUrl);
+      if (remoteWindow) remoteWindow.location.replace(session.gatewayUrl);
+      else window.open(session.gatewayUrl, "_blank");
       onClose();
     } catch (error) {
-      remoteWindow.close();
+      remoteWindow?.close();
       showAlert(error instanceof Error ? error.message : String(error), "error");
     } finally {
       setOpeningHost(null);

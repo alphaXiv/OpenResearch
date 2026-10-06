@@ -113,7 +113,7 @@ import {
   type InstalledCli,
 } from "../api";
 import { onDataDirMove } from "../events";
-import { useRestartApp, useUpdateStatus } from "./UpdateBanner";
+import { releaseNotesUrl, useRestartApp, useUpdateStatus } from "./UpdateBanner";
 import { useThemePreference, type ThemePreference } from "../theme";
 import { m } from "../paraglide/messages.js";
 import { ltr } from "../i18n";
@@ -121,6 +121,7 @@ import { setLocale, useLocale } from "../locale";
 import { getLocale, isLocale, type Locale } from "../paraglide/runtime.js";
 import { TokenForm } from "./GitTokenForm";
 import { renderNote } from "./agentNote";
+import { claudeProviderLabel } from "./claudeProvider";
 import { BackendBadge, BackendLogo } from "./BackendLogos";
 import { ProgressBar } from "./ProgressBar";
 import { OptionPicker } from "./ModelPicker";
@@ -354,8 +355,9 @@ function CommandRunTerminal({ run, onComplete, onClose }: {
 
 function harnessStatus(h: Harness): { cls: string; variant: BadgeVariant; label: string } {
   if (h.catalogPending) return { cls: "warn", variant: "warning", label: m.onboarding_checking() };
+  if (h.authCheckFailed) return { cls: "warn", variant: "warning", label: m.settings_page_unable_to_verify() };
   if (h.agentReady && !h.authenticated && h.authMethod !== "local") return { cls: "warn", variant: "warning", label: m.onboarding_not_signed_in() };
-  if (h.agentReady) return { cls: "ok", variant: "success", label: h.authMethod === "local" ? m.onboarding_ready() : m.settings_page_signed_in() };
+  if (h.agentReady) return { cls: "ok", variant: "success", label: h.authMethod === "thirdParty" || claudeProviderLabel(h) ? m.settings_page_ready_to_use() : h.authMethod === "local" ? m.onboarding_ready() : m.settings_page_signed_in() };
   // Not installed — the same blocker whether or not there's saved auth: the
   // CLI has to be installed before anything can run. Amber "action needed".
   if (!h.installed) return { cls: "warn", variant: "warning", label: m.settings_page_not_installed() };
@@ -370,8 +372,11 @@ function harnessStatus(h: Harness): { cls: string; variant: BadgeVariant; label:
 
 function AuthLabel({ h }: { h: Harness }) {
   if (h.id === "opencode" && h.agentReady && !h.authenticated && !h.authMethod) return <>{m.settings_free_models_no_sign_in()}</>;
+  const provider = claudeProviderLabel(h);
+  if (provider) return <>{provider}</>;
   if (!h.authMethod) return <>—</>;
   if (h.authMethod === "local") return <>{m.projects_local()}</>;
+  if (h.authMethod === "thirdParty") return <>{m.settings_providers()}</>;
   return <>{h.authMethod === "oauth" ? m.settings_oauth_login() : m.onboarding_api_key()}</>;
 }
 
@@ -462,7 +467,7 @@ function HarnessesTab({ remote }: { remote: boolean }) {
           <div className="settings-card-head flex items-center gap-2.5 mb-3">
             <Badge variant={harnessStatus(h).variant}>{harnessStatus(h).label}</Badge>
             <div className="spacer flex-1" />
-            {!remote && !h.catalogPending && h.installed && !h.installBroken && !h.authenticated && !h.needsConfigRepair && h.authMethod !== "local" && h.authMethod !== "apiKey" && h.authState !== "unsupported" && (
+            {!remote && !h.catalogPending && h.installed && !h.installBroken && !h.authenticated && !h.needsConfigRepair && (h.id === "claude-code" ? h.loginEligible : h.authMethod !== "local" && h.authMethod !== "apiKey" && h.authState !== "unsupported") && (
               <Button size="small" onClick={() => setSetupHarness(h)} disabled={!setupCommands.data} aria-haspopup="dialog">
                 <SquareTerminal size={14} /> {m.harness_setup_login()}
               </Button>
@@ -504,7 +509,7 @@ function HarnessesTab({ remote }: { remote: boolean }) {
                 ? m.onboarding_checking()
                 : h.models.length > 0
                 ? m.settings_models_available({ count: fmtNumber(h.models.length), models: new Intl.ListFormat(getLocale()).format(h.models.slice(0, 4).map((model) => ltr(harnessModelLabel(model)))) })
-                : m.settings_none()}
+                : h.agentReady ? m.model_picker_default_model() : m.settings_none()}
             </span>
           </div>
           <RunnableNote
@@ -2567,6 +2572,8 @@ const LOCALE_CHOICES: { id: Locale; label: string }[] = [
   { id: "ar", label: "العربية" },
   { id: "es", label: "Español" },
   { id: "hi", label: "हिन्दी" },
+  { id: "ko", label: "한국어" },
+  { id: "ja", label: "日本語" },
 ];
 
 function AppearanceTab() {
@@ -2647,6 +2654,7 @@ function AppearanceTab() {
 const CHANNEL_LABELS: Record<InstallChannel, () => string> = {
   installer: m.updates_channel_installer,
   "app-bundle": m.updates_channel_app,
+  appimage: m.updates_channel_appimage,
   portable: m.updates_channel_portable,
   cargo: m.updates_channel_cargo,
   homebrew: m.updates_channel_homebrew,
@@ -2773,6 +2781,9 @@ function UpdatesTab() {
                   {status.updateAvailable
                     ? m.settings_install_release_now()
                     : m.settings_checks_automatically()}
+                  {status.updateAvailable && status.latestTag && (
+                    <> <a href={releaseNotesUrl(status.latestTag)} target="_blank" rel="noreferrer" className="underline">{m.settings_release_notes()}</a></>
+                  )}
                 </p>
               </div>
               <Button size="small"

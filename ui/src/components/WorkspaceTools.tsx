@@ -4,15 +4,16 @@ import { statusLabel } from "./StatusBadge";
 import { getComputeSettingsQuery } from "../queries/settings";
 import { TARGET_LABELS } from "../computeTargets";
 import { useEffect, useMemo, useRef } from "react";
-import { FlaskConical, FolderOpen, Package, GitBranch, Cpu, Terminal } from "lucide-react";
+import { FlaskConical, FolderOpen, Package, GitBranch, Cpu, MessagesSquare, MoreHorizontal, Terminal } from "lucide-react";
 import { useQuery } from "@tanstack/react-query";
 import { getSessionWorktreeQuery } from "../queries/files";
 import { countChanges, parseDiffFiles } from "./GitDiff";
 import { m } from "../paraglide/messages.js";
 import { BackendLogo } from "./BackendLogos";
 import { IconButton, MenuItem, StatusIndicator } from "./ui";
+import { usePopover } from "./ModelPicker";
 
-export function WorkspaceTools({ expanded, experiments, runs, onOpenExperiment, rightOffset, activeView, projectId, onCompute, sessionId, busy, onChanges, onFiles, onTerminal, onArtifacts, onExperiments }: {
+export function WorkspaceTools({ expanded, experiments, runs, onOpenExperiment, rightOffset, activeView, projectId, onCompute, sessionId, busy, onChanges, onFiles, onTerminal, onArtifacts, onExperiments, onSideChat }: {
   expanded: boolean;
   experiments: Experiment[];
   runs: Run[];
@@ -28,19 +29,22 @@ export function WorkspaceTools({ expanded, experiments, runs, onOpenExperiment, 
   onTerminal: () => void;
   onArtifacts: () => void;
   onExperiments: () => void;
+  /** Absent until there is a chat to branch from. */
+  onSideChat?: () => void;
 }) {
   const experimentRows = activeWorkspaceRuns(experiments, runs, sessionId);
+  const moreTrigger = useRef<HTMLButtonElement>(null);
+  const more = usePopover(moreTrigger);
   const compute = useQuery({ ...getComputeSettingsQuery(projectId), enabled: expanded });
   const defaultBackend = compute.data?.configuredDefaultBackend ?? compute.data?.defaultBackend;
   const computeLabel = defaultBackend ? TARGET_LABELS[defaultBackend]() : compute.isPending ? "…" : compute.isError ? m.model_picker_unavailable() : m.settings_not_set();
   const items = [
     { id: "files", label: m.app_files(), Icon: FolderOpen, onClick: onFiles },
-    { id: "terminal", label: m.workspace_terminal(), Icon: Terminal, onClick: onTerminal },
     { id: "artifacts", label: m.app_artifacts(), Icon: Package, onClick: onArtifacts },
     { id: "experiments", label: m.app_experiments(), Icon: FlaskConical, onClick: onExperiments },
   ];
   return (
-    <div className="workspace-tools absolute end-3.5 top-7 z-30" style={{ insetInlineEnd: rightOffset }}>
+    <div className={`workspace-tools absolute end-3.5 top-7 z-30 ${rightOffset === undefined ? "win-titlebar:top-10" : ""}`} style={{ insetInlineEnd: rightOffset }}>
       {!expanded ? (
         <nav aria-label={m.workspace_tools_heading()} className="flex items-center justify-end gap-3">
           {items.map(({ id, label, Icon, onClick }) => (
@@ -48,11 +52,28 @@ export function WorkspaceTools({ expanded, experiments, runs, onOpenExperiment, 
               <Icon size={15} />
             </IconButton>
           ))}
+          <div className="relative">
+            <IconButton ref={moreTrigger} active={activeView === "terminal" || more.open} className="text-text [&.active]:text-text" data-tip={more.open ? undefined : m.workspace_more_tools()} data-tip-align="end" aria-label={m.workspace_more_tools()} aria-expanded={more.open} aria-haspopup="menu" onClick={() => more.setOpen((open) => !open)}>
+              <MoreHorizontal size={15} />
+            </IconButton>
+            {more.open && (
+              <div ref={more.ref} role="menu" className="absolute end-0 top-[calc(100%_+_4px)] z-50 flex min-w-40 flex-col rounded-lg border border-border bg-background p-1.5 shadow-menu">
+                <MenuItem role="menuitem" onClick={() => { more.setOpen(false); onTerminal(); }}>
+                  <span className="flex items-center gap-2.5"><Terminal size={15} />{m.workspace_terminal()}</span>
+                </MenuItem>
+                {onSideChat && (
+                  <MenuItem role="menuitem" onClick={() => { more.setOpen(false); onSideChat(); }}>
+                    <span className="flex items-center gap-2.5"><MessagesSquare size={15} />{m.side_chat_open()}</span>
+                  </MenuItem>
+                )}
+              </div>
+            )}
+          </div>
         </nav>
       ) : (
         <nav aria-label={m.workspace_tools_heading()} className="workspace-tools-card flex w-60 flex-col gap-0.5 rounded-xl border border-border bg-background px-1.5 py-2 shadow-elevated">
           <h2 className="m-0 px-2 pt-1 pb-2 text-sm font-normal text-subtext">{m.workspace_tools_heading()}</h2>
-          {items.filter((item) => item.id !== "files" && item.id !== "terminal").map(({ id, label: itemLabel, Icon, onClick }) => (
+          {items.filter((item) => item.id !== "files").map(({ id, label: itemLabel, Icon, onClick }) => (
             <MenuItem key={id} className="min-h-7 py-1"
               data-onboarding={id === "artifacts" ? "nav-artifacts" : undefined}
               onClick={onClick}>
@@ -76,6 +97,11 @@ export function WorkspaceTools({ expanded, experiments, runs, onOpenExperiment, 
             <MenuItem className="min-h-7 py-1" onClick={onTerminal}>
               <span className="flex items-center gap-4"><Terminal size={15} />{m.workspace_terminal()}</span>
             </MenuItem>
+            {onSideChat && (
+              <MenuItem className="min-h-7 py-1" onClick={onSideChat}>
+                <span className="flex items-center gap-4"><MessagesSquare size={15} />{m.side_chat_open()}</span>
+              </MenuItem>
+            )}
             {sessionId && <ChatBranch key={sessionId} sessionId={sessionId} busy={busy} onChanges={onChanges} />}
             {experimentRows.length > 0 && (
               <div>

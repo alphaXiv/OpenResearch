@@ -248,7 +248,7 @@ pub(super) async fn connect(
         )
         .await;
         // Login rejection caches must not mask a successful new login.
-        if request.harness == "claude-code" {
+        if request.harness == "claude-code" && result.is_ok() {
             state.claude.clear_runtime_rejection();
         }
         *state.harnesses.lock().await = None;
@@ -354,10 +354,19 @@ async fn run(
                 )
             }
             Action::Login | Action::Update => {
-                let Some(bin) = crate::local::harness::detect_harness(&request.harness)
-                    .await
-                    .and_then(|h| h.bin_path)
+                let Some(harness) = crate::local::harness::detect_harness(&request.harness).await
                 else {
+                    attempt.record("failed", "detect", Some("not_installed"), None, None);
+                    return Err("Agent not found. Install it, then retry.".into());
+                };
+                if request.harness == "claude-code"
+                    && matches!(request.action, Action::Login)
+                    && (!harness.login_eligible || state.claude.auth_snapshot().runtime_rejected)
+                {
+                    attempt.record("interrupted", "detect", Some("not_eligible"), None, None);
+                    return Err("Claude Code account login is not applicable to the reported provider or auth state. Check its provider configuration and re-check the harness.".into());
+                }
+                let Some(bin) = harness.bin_path else {
                     attempt.record("failed", "detect", Some("not_installed"), None, None);
                     return Err("Agent not found. Install it, then retry.".into());
                 };
@@ -732,6 +741,11 @@ mod tests {
             authenticated: false,
             auth_state: crate::local::harness::HarnessAuthState::Unknown,
             auth_method: None,
+            auth_provider: None,
+            login_eligible: false,
+            auth_check_failed: false,
+            auth_observation: None,
+            claude_ultracode: false,
             account: None,
             org: None,
             plan: None,

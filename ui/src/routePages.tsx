@@ -1,4 +1,3 @@
-import { setScopedQueryData } from "./queries/client";
 import { isCancelledError, useQuery } from "@tanstack/react-query";
 import { listProjectsQuery, getUiStateQuery } from "./queries/projects";
 import { useRouteContext, Link, useNavigate, type ErrorComponentProps } from "@tanstack/react-router";
@@ -8,15 +7,13 @@ import { useRuntime } from "./RemoteRuntime";
 
 import { clearReadDemoSessions } from "./demoSessionState";
 import { globalResumeLocation, projectResumeLocation } from "./routeResume";
-import { getRememberedGlobalWorkspace, globalWorkspaceWriter } from "./workspacePersistence";
-import { initialPanelWidth } from "./panelLayout";
 import { m } from "./paraglide/messages.js";
 import { Onboarding } from "./components/Onboarding";
-import { ProjectsHome } from "./components/ProjectsHome";
 import { OfflineBanner } from "./components/OfflineBanner";
 import { WorkspaceConnection } from "./components/WorkspaceConnection";
 import { UpdateBanner, useUpdateStatus } from "./components/UpdateBanner";
-import { Button, showAlert, Spinner } from "./components/ui";
+import { DesktopAppBanner } from "./components/DesktopAppBanner";
+import { Button, Spinner } from "./components/ui";
 
 export function RoutePending() {
   return <div className="flex flex-1 h-full items-center justify-center"><Spinner /></div>;
@@ -73,23 +70,19 @@ export function ProjectsPage() {
   const stateQuery = useQuery(getUiStateQuery());
   const projects = projectsQuery.data;
   const state = stateQuery.data;
-  const onboarding = projects?.length === 0 && state?.onboardingCompleted === false;
+  const onboarding = projects?.length === 0;
   const error = projectsQuery.error ?? stateQuery.error;
   const retry = () => { void projectsQuery.refetch(); void stateQuery.refetch(); };
   const { status } = useUpdateStatus(runtime.kind === "local");
   useEffect(() => {
     document.title = "OpenResearch";
-    if (!state) return;
-    globalWorkspaceWriter.queue({
-      ...(getRememberedGlobalWorkspace() ?? state.workspace ?? { railOpen: true, panelWidth: initialPanelWidth(), experimentsView: "table" }),
-      lastLocation: "/projects",
-    });
-  }, [state]);
+  }, []);
   const openProject = (projectId: string) => void navigate({ to: "/projects/$projectId", params: { projectId } });
 
   return (
     <div className="app flex flex-col h-full">
       {runtime.kind === "local" && <><OfflineBanner /><UpdateBanner status={status} /></>}
+      <DesktopAppBanner />
       {error && (!projects || !state) ? <RouteFailure error={error} reset={retry} />
         : !projects || !state ? <RoutePending />
           : onboarding ? (
@@ -102,18 +95,7 @@ export function ProjectsPage() {
               }}
             />
           ) : (
-            <ProjectsHome
-              remote={runtime.kind === "ssh"}
-              projects={projects}
-              onOpen={openProject}
-              onCreated={(project, publicationError) => {
-                if (publicationError) {
-                  showAlert(publicationError, "error");
-                  void navigate({ to: "/projects/$projectId/settings/$tab", params: { projectId: project.id, tab: "git" } });
-                } else openProject(project.id);
-              }}
-              onDeleted={(id) => setScopedQueryData(projectsOptions.queryKey, (current) => current?.filter((project) => project.id !== id))}
-            />
+            <ResumeGlobal />
           )}
       {(runtime.kind === "ssh" || (projects && state && !onboarding)) && <WorkspaceConnection runtime={runtime} corner />}
     </div>

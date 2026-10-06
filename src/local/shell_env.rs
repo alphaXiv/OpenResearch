@@ -8,13 +8,15 @@
 //! machine uses whatever the user exported. Two OpenResearch installs then
 //! disagree about which database they are looking at.
 //!
-//! macOS app mode probes the shell once at startup ([`crate::commands::app`])
-//! and installs the answer here; every other entry point falls through to the
-//! process environment unchanged.
+//! App mode on macOS and Linux probes the shell once at startup
+//! ([`crate::commands::app`]) and installs the answer here (only PATH if it
+//! arrives after startup has moved on); every other entry point falls through
+//! to the process environment unchanged. The Linux AppImage also hands host
+//! programs the session's GTK settings ([`host_gui_env`]).
 //!
-//! Scope is orx's own resolution, the children it spawns, and the dashboard's
-//! PTY terminals. The other things orx shells out to — `git`, `kubectl`, and
-//! `ssh` — still inherit the process environment.
+//! Scope is orx's own resolution, the children it spawns (including `git`), and
+//! the dashboard's PTY terminals. `kubectl` and `ssh` still inherit the process
+//! environment.
 
 use std::collections::HashMap;
 use std::ffi::{OsStr, OsString};
@@ -86,7 +88,20 @@ fn search_in(paths: &OsStr, binary: &str) -> Option<PathBuf> {
                 .into_iter()
                 .map(move |name| dir.join(name))
         })
-        .find(|candidate| candidate.is_file())
+        .find(|candidate| is_executable(candidate))
+}
+
+/// Like execvp, pass over a non-executable file so a working binary later on PATH wins.
+#[cfg(unix)]
+fn is_executable(path: &std::path::Path) -> bool {
+    use std::os::unix::fs::PermissionsExt;
+    path.metadata()
+        .is_ok_and(|meta| meta.is_file() && meta.permissions().mode() & 0o111 != 0)
+}
+
+#[cfg(not(unix))]
+fn is_executable(path: &std::path::Path) -> bool {
+    path.is_file()
 }
 
 /// The filenames `binary` may have inside one PATH directory, in the order to
@@ -137,10 +152,51 @@ pub fn export_to(mut set: impl FnMut(&'static str, &OsString)) {
     }
 }
 
+/// What the Linux AppImage's AppRun and GTK hook point at the image (keep in step
+/// with linux/AppRun, which saves the session's values as `ORX_HOST_<name>`).
+const APPIMAGE_GTK_VARS: [&str; 12] = [
+    "GDK_BACKEND",
+    "GDK_PIXBUF_MODULE_FILE",
+    "GI_TYPELIB_PATH",
+    "GIO_EXTRA_MODULES",
+    "GIO_MODULE_DIR",
+    "GSETTINGS_SCHEMA_DIR",
+    "GTK_DATA_PREFIX",
+    "GTK_EXE_PREFIX",
+    "GTK_IM_MODULE_FILE",
+    "GTK_PATH",
+    "GTK_THEME",
+    "XDG_DATA_DIRS",
+];
+
+/// The session's own values (`None`: unset) of what AppRun set for the bundled GTK,
+/// for host programs, which fail on the image's schemas. Empty outside the AppImage.
+pub fn host_gui_env() -> Vec<(&'static str, Option<OsString>)> {
+    APPIMAGE_GTK_VARS
+        .iter()
+        .filter_map(|var| {
+            let saved = std::env::var_os(format!("ORX_HOST_{var}"))?;
+            let saved = saved.to_str()?;
+            // AppRun writes `=<value>` for a set variable and `-` for an unset one.
+            Some((*var, saved.strip_prefix('=').map(OsString::from)))
+        })
+        .collect()
+}
+
+/// [`host_gui_env`], applied to a command about to start a host program.
+pub fn restore_host_gui_env(command: &mut std::process::Command) {
+    for (var, value) in host_gui_env() {
+        match value {
+            Some(value) => command.env(var, value),
+            None => command.env_remove(var),
+        };
+    }
+}
+
 /// Install the probe's answer; the first call wins. Deliberately not
 /// `env::set_var` — app mode enters inside an already-running tokio runtime,
 /// where mutating the process environment races every live thread.
-#[cfg(target_os = "macos")]
+#[cfg(all(desktop_app, unix))]
 pub fn set(vars: HashMap<&'static str, OsString>) {
     let _ = OVERRIDE.set(vars);
 }
@@ -203,10 +259,20 @@ mod tests {
         std::fs::create_dir_all(&late).expect("late");
         std::fs::write(early.join(TOOL), "").expect("early tool");
         std::fs::write(late.join(TOOL), "").expect("late tool");
+        #[cfg(unix)]
+        for dir in [&early, &late] {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(dir.join(TOOL), std::fs::Permissions::from_mode(0o755))
+                .expect("chmod");
+        }
 
-        let paths =
-            std::env::join_paths([PathBuf::new(), PathBuf::from("bin"), early.clone(), late])
-                .expect("join");
+        let paths = std::env::join_paths([
+            PathBuf::new(),
+            PathBuf::from("bin"),
+            early.clone(),
+            late.clone(),
+        ])
+        .expect("join");
         assert_eq!(search_in(&paths, "tool"), Some(early.join(TOOL)));
         assert_eq!(search_in(&paths, "absent"), None);
 
@@ -214,6 +280,14 @@ mod tests {
         // tests from the package root, so `src/main.rs` is a real hit here.
         let relative = std::env::join_paths([PathBuf::from("src")]).expect("join");
         assert_eq!(search_in(&relative, "main.rs"), None);
+
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(early.join(TOOL), std::fs::Permissions::from_mode(0o644))
+                .expect("chmod");
+            assert_eq!(search_in(&paths, "tool"), Some(late.join(TOOL)));
+        }
 
         std::fs::remove_dir_all(&root).ok();
     }

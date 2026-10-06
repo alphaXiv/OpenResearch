@@ -298,3 +298,33 @@ test("a turn sent during a cold history load survives older server history", asy
   assert.deepEqual(result.messages.map((message) => message.id), ["history", local]);
   assert.equal(result.activeLeafId, local);
 });
+
+
+test("sidebar pages preserve indicators arriving during cold and subsequent page reads", async () => {
+  const listeners = new Set();
+  const requests = [];
+  const { load, client } = queryModules({ listSidebarChatSessions: () => {
+    const request = deferred(); requests.push(request); return request.promise;
+  } }, { onChatEvent: (listener) => { listeners.add(listener); return () => listeners.delete(listener); } });
+  const read = load("chat").readSidebarChatPage;
+  for (const cursor of [null, { updatedAt: 10, id: "older" }]) {
+    const pending = read("active", cursor, new AbortController().signal);
+    for (const listener of listeners) {
+      listener({ type: "busy", sessionId: "chat", busy: true });
+      listener({ type: "busy", sessionId: "chat", busy: false });
+      listener({ type: "usage", sessionId: "chat", usage: { tokens: 42 } });
+    }
+    requests.at(-1).resolve({ sessions: [{ id: "chat", busy: true }, { id: "other", busy: true }], next: cursor });
+    const page = await pending;
+    assert.equal(page.sessions[0].busy, false);
+    assert.deepEqual(page.sessions[0].contextUsage, { tokens: 42 });
+    assert.equal(page.sessions[1].busy, true);
+    assert.equal(page.next, cursor);
+    assert.equal(listeners.size, 0);
+  }
+  const pending = read("active", null, new AbortController().signal);
+  requests.at(-1).resolve(Promise.reject(new Error("offline")));
+  await assert.rejects(pending, /offline/);
+  assert.equal(listeners.size, 0);
+  client.clear();
+});

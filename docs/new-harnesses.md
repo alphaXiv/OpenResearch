@@ -35,6 +35,15 @@
     opens the printed URL itself.
   - With no usable provider a turn fails with "Select a model before
     continuing"; a provider without a plan or balance fails with `1113`.
+  - The runtime uses a plan only when its API key in `credentials.json` is
+    saved under the identity `zcode login` recorded. Signing in to the app
+    with another account replaces the key, and turns fail with "Select a
+    model"; orx then shows ZCode as not signed in and asks for `zcode login`.
+  - The composer lists the models of each signed-in plan (from the app's
+    built-in provider catalog) and of each enabled API-key provider. Print
+    mode has no `--model`, so a new chat writes the chosen model to
+    `defaultModelSelection` in `provider_config.json`, which the app shares;
+    a resumed session keeps its model.
 
 The rest of this file is the integration notes.
 

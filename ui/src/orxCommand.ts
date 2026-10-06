@@ -38,16 +38,18 @@ function detectPaperSource(id: string): LitSource {
 }
 
 /** Shell-style tokens up to the first operator, including Codex's quoted argv display. */
-export function shellWords(input: string): string[] {
+export function shellWords(input: string, hideShellExpansions = false): string[] {
   const words: string[] = [];
   let word = "";
   let hasWord = false;
+  let hasExpansion = false;
   let quote: '"' | "'" | null = null;
 
   const push = () => {
-    if (hasWord) words.push(word);
+    if (hasWord) words.push(hideShellExpansions && hasExpansion ? "" : word);
     word = "";
     hasWord = false;
+    hasExpansion = false;
   };
 
   for (let index = 0; index < input.length; index++) {
@@ -71,6 +73,9 @@ export function shellWords(input: string): string[] {
         hasWord = true;
       }
       continue;
+    }
+    if (quote !== "'" && (char === "`" || (char === "$" && /[A-Za-z_0-9{(?#@$!*-]/.test(input[index + 1] ?? "")))) {
+      hasExpansion = true;
     }
     if (quote) {
       if (char === quote) quote = null;
@@ -147,7 +152,7 @@ export function orxArgsMatch(command: string | readonly string[], args: string):
 
 /** Parse the first literature command from a shell segment. */
 export function parseOrxLit(command: string | readonly string[]): OrxLitCall | null {
-  const argv = orxArgv(command);
+  const argv = orxArgvFromTokens(typeof command === "string" ? shellWords(command, true) : command);
   if (!argv) return null;
   const kind = argv[0];
   if (kind !== "paper" && kind !== "discover") return null;
@@ -198,5 +203,20 @@ export function parseOrxLit(command: string | readonly string[]): OrxLitCall | n
   const discoverSource = strategy === "openalex" || strategy === "biorxiv" || strategy === "pubmed"
     ? strategy
     : "alphaxiv";
-  return { kind, source: discoverSource, strategy, query: positionals[1] };
+  return { kind, source: discoverSource, strategy, query: positionals[1] || undefined };
+}
+
+export function recordedDiscoveryQueries(command: string, output: string, strategy: string): string[] {
+  const headings = new Set(output.split(/\r?\n/).filter((line) => line.startsWith("=== ")).map((line) => line.slice(4)));
+  const queries: string[] = [];
+  for (const loop of command.matchAll(/\bfor\s+([A-Za-z_][A-Za-z0-9_]*)\s+in\s+([^;\n]+);\s*do\b([\s\S]*?)\bdone\b/g)) {
+    const [, variable, values, body] = loop;
+    const search = new RegExp(`(?:^|[;\\n])\\s*orx\\s+discover\\s+${strategy}\\s+"?\\$${variable}"?(?=\\s|[;|]|$)`);
+    if (!search.test(body) || !body.includes(`echo "=== $${variable}"`)) continue;
+    const literals = shellWords(values, true);
+    for (const query of literals) {
+      if (query && headings.has(query)) queries.push(query);
+    }
+  }
+  return queries;
 }

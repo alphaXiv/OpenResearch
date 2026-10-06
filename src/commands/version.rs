@@ -36,11 +36,11 @@ pub async fn run(args: crate::VersionArgs) -> Result<()> {
     let latest = updates::fetch_latest_for_channel(Duration::from_secs(10)).await?;
     if let Some(latest) = &latest {
         // Keep the update-check cache in sync with this explicit check.
-        updates::write_check_cache(&latest.to_string());
+        updates::write_check_cache(&latest.version.to_string(), &latest.tag);
     }
     let update_available = latest
         .as_ref()
-        .is_some_and(|latest| updates::is_outdated(&current, latest));
+        .is_some_and(|latest| updates::is_outdated(&current, &latest.version));
 
     if args.json {
         let status = updates::status();
@@ -48,7 +48,7 @@ pub async fn run(args: crate::VersionArgs) -> Result<()> {
             "{}",
             serde_json::json!({
                 "current": current.to_string(),
-                "latest": latest.as_ref().map(|v| v.to_string()),
+                "latest": latest.as_ref().map(|v| v.version.to_string()),
                 "updateAvailable": update_available,
                 // How this copy was installed, and whether it keeps itself
                 // current — so a harness can tell "will fix itself" from
@@ -63,10 +63,12 @@ pub async fn run(args: crate::VersionArgs) -> Result<()> {
     println!("orx {}", current);
     match latest.filter(|_| update_available) {
         Some(latest) => println!(
-            "A new release is available: {} → {}. Run `{} update` to upgrade.",
+            "A new release is available: {} → {}. Run `{} update` to upgrade. Release notes: {}/releases/tag/{}",
             current,
-            latest,
-            crate::invocation::orx()
+            latest.version,
+            crate::invocation::orx(),
+            updates::REPO_URL,
+            latest.tag,
         ),
         None => println!("orx is up to date."),
     }

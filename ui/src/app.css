@@ -300,21 +300,25 @@
   }
 }
 
-/* Reserve room for the three compact workspace buttons. */
-.workspace-body .chat-header {
-  padding-inline-end: 8.5rem;
+/* Reserve room for the four workspace buttons and their gaps. */
+.workspace-body > .chat-pane .chat-header {
+  padding-inline-end: 12rem;
 }
 
-.workspace-card-visible .chat-pane {
+.workspace-card-visible > .chat-pane {
   padding-inline-end: 16rem;
 }
 
-.workspace-card-visible .chat-header {
+.workspace-card-visible > .chat-pane .chat-header {
   padding-inline-end: 1rem;
 }
 
 .workspace-card-visible .workspace-tools {
   top: 1.25rem;
+}
+
+.win-titlebar .workspace-card-visible .workspace-tools {
+  top: 2.5rem;
 }
 
 .code-source-text,

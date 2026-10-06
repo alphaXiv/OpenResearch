@@ -82,6 +82,7 @@ pub struct LocalExperiment {
     /// Chat session that created this experiment. NULL for dashboard-created,
     /// legacy and out-of-session rows. Immutable once stamped.
     pub chat_session_id: Option<String>,
+    pub archived: bool,
 }
 
 impl LocalExperiment {
@@ -100,6 +101,7 @@ impl LocalExperiment {
             created_at: row.get(9)?,
             updated_at: row.get(10)?,
             chat_session_id: row.get(11)?,
+            archived: row.get(12)?,
         })
     }
 

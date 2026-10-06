@@ -1,4 +1,5 @@
 /target
+/windows/launcher/target
 # Built macOS .app bundle (scripts/build-macos-app.sh output).
 /dist
 *.log

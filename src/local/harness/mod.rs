@@ -39,7 +39,7 @@ use std::time::Duration;
 use async_trait::async_trait;
 use futures::StreamExt;
 
-use crate::error::Result;
+use crate::error::{anyhow, Error, Result};
 use crate::local::chat::{
     stored_to_wire, DeliveryState, PromptAnswer, ResumeCtx, SteerMessage, SteerReceiver, TurnCtx,
     WirePart, WirePrompt,
@@ -127,12 +127,20 @@ pub(crate) fn native_recovery_snapshot(session_id: &str, current_turn_id: &str) 
     let Ok(messages) = store.list_chat_messages(session_id) else {
         return String::new();
     };
+    transcript_snapshot(
+        messages
+            .iter()
+            .filter(|message| current_user_id.as_deref() != Some(message.id.as_str())),
+    )
+}
+
+/// The newest [`RECOVERY_SNAPSHOT_BYTES`] of a transcript, flattened to text.
+pub(crate) fn transcript_snapshot<'a>(
+    messages: impl IntoIterator<Item = &'a crate::store::StoredChatMessage>,
+) -> String {
     let mut entries = Vec::new();
     for message in messages {
-        if current_user_id.as_deref() == Some(message.id.as_str()) {
-            continue;
-        }
-        let wire = stored_to_wire(&message);
+        let wire = stored_to_wire(message);
         let mut lines = Vec::new();
         recovery_part_lines(&wire.parts, &mut lines);
         if !lines.is_empty() {
@@ -256,6 +264,8 @@ pub enum ResumeAction {
 
 /// One coding-agent integration. See the module docs for the capability model.
 #[async_trait]
+// async-trait marks its boxed futures `#[must_use]`; clippy 1.99 flags that generated code.
+#[allow(clippy::double_must_use)]
 pub trait Harness: Send + Sync {
     /// Canonical, stable id used on the wire and in the store
     /// (e.g. `"claude-code"`). Must be unique across the registry.
@@ -338,7 +348,7 @@ pub trait Harness: Send + Sync {
             model: model.filter(|model| self.id() == "opencode" && model.starts_with("orx-local-")),
             ..title::title_request(&prompt)
         };
-        let raw = self.one_shot(request).await?;
+        let raw = self.one_shot(request).await.ok()?;
         title::sanitize_title(&raw)
     }
 
@@ -346,9 +356,9 @@ pub trait Harness: Send + Sync {
     /// [`OneShotQuality`] and return the model's reply verbatim. The child
     /// cannot write or reach MCP servers (tools are disabled where the CLI
     /// allows), and nothing is recorded in the harness's own session store.
-    /// `None` = can't or failed.
-    async fn one_shot(&self, _request: OneShot<'_>) -> Option<String> {
-        None
+    /// The error says why it couldn't run or failed, in the CLI's own words where it gave any.
+    async fn one_shot(&self, _request: OneShot<'_>) -> Result<String> {
+        Err(anyhow!("{} cannot run one-shot requests", self.name()))
     }
 
     /// Whether `one_shot` runs on `OneShot::model`; callers caching by model
@@ -541,6 +551,25 @@ pub struct OneShot<'a> {
     pub timeout: Duration,
 }
 
+/// A failed one-shot child's message from the first of `outputs` it wrote to,
+/// on one line so a dumped model catalog stays readable in the log.
+pub(crate) fn one_shot_exit_error(status: std::process::ExitStatus, outputs: &[&[u8]]) -> Error {
+    outputs
+        .iter()
+        .map(|bytes| one_line(&String::from_utf8_lossy(bytes), 300))
+        .find(|text| !text.is_empty())
+        .map_or_else(|| anyhow!("{status}"), |text| anyhow!("{text}"))
+}
+
+/// `text` with its whitespace collapsed, capped at `max_chars`.
+pub(crate) fn one_line(text: &str, max_chars: usize) -> String {
+    let flat = text.split_whitespace().collect::<Vec<_>>().join(" ");
+    match flat.char_indices().nth(max_chars) {
+        Some((end, _)) => format!("{}…", &flat[..end]),
+        None => flat,
+    }
+}
+
 /// How much model to spend on a one-shot: `Cheap` is the smallest/fastest
 /// configuration (titles), `Standard` a mid-tier model at modest effort
 /// (anything that has to read and reason about a project). Each harness maps
@@ -641,6 +670,11 @@ pub async fn detect_harness(id: &str) -> Option<HarnessInfo> {
         .into_iter()
         .find(|h| h.id() == id && h.supports_chat())?;
     detect_one(harness.as_ref(), false).await
+}
+
+/// The snapshot pass of [`detect_harness`] (see [`Harness::detect_snapshot`]).
+pub async fn detect_harness_snapshot(id: &str) -> Option<HarnessInfo> {
+    detect_one(chat_harness(id)?.as_ref(), true).await
 }
 
 /// Detect every chat-capable harness, in registry order. This is what the
@@ -778,6 +812,16 @@ $ARGUMENTS
 mod tests {
     use super::options::{PlanActivation, REASONING_DEFAULT_ID};
     use super::*;
+
+    #[test]
+    fn one_line_flattens_and_caps_on_a_char_boundary() {
+        assert_eq!(
+            one_line("  Cannot use\n this   model. ", 300),
+            "Cannot use this model."
+        );
+        assert_eq!(one_line("ééééé", 3), "ééé…");
+        assert_eq!(one_line("abc", 3), "abc");
+    }
 
     fn options_for(id: &str) -> HarnessOptions {
         registry()

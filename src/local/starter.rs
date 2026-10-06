@@ -78,7 +78,7 @@ const ENTRYPOINT_PREFIXES: &[&str] = &[
 ];
 
 /// The chat harness that writes the prompts, and the model it runs on.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct Agent {
     pub harness: String,
     pub model: Option<String>,
@@ -87,7 +87,7 @@ pub struct Agent {
 impl Agent {
     /// The model as far as the harness's one-shot cares: dropped for a
     /// harness that ignores it.
-    fn effective_model(&self) -> Option<&str> {
+    pub(crate) fn effective_model(&self) -> Option<&str> {
         let honours =
             super::harness::chat_harness(&self.harness).is_some_and(|h| h.one_shot_honours_model());
         honours.then_some(self.model.as_deref()).flatten()
@@ -232,26 +232,30 @@ async fn generate_uncached(
             model: agent.effective_model(),
             timeout: GENERATION_TIMEOUT,
         })
-        .await?;
+        .await
+        .ok()?;
     parse_prompts(&raw)
+}
+
+/// The chat agent and model last picked in the composer, if it can still chat.
+pub(crate) fn preferred_agent() -> Option<Agent> {
+    crate::store::Store::open()
+        .and_then(|store| store.ui_state())
+        .ok()
+        .and_then(|state| state.preferred_agent)
+        .map(|agent| Agent {
+            harness: agent.harness,
+            model: agent.model,
+        })
+        .filter(|agent| super::harness::is_chat_harness(&agent.harness))
 }
 
 /// The user's preferred chat agent, else the first harness that is ready.
 pub(crate) async fn resolve_agent() -> Option<Agent> {
-    let preferred = tokio::task::spawn_blocking(|| {
-        crate::store::Store::open()
-            .and_then(|store| store.ui_state())
-            .ok()
-            .and_then(|state| state.preferred_agent)
-            .map(|agent| Agent {
-                harness: agent.harness,
-                model: agent.model,
-            })
-    })
-    .await
-    .ok()
-    .flatten()
-    .filter(|agent| super::harness::is_chat_harness(&agent.harness));
+    let preferred = tokio::task::spawn_blocking(preferred_agent)
+        .await
+        .ok()
+        .flatten();
     match preferred {
         Some(agent) => Some(agent),
         None => super::harness::detect_harnesses()

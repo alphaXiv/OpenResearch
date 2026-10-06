@@ -119,6 +119,122 @@ fn standalone_settings_defaults_and_instruction_conflicts() {
 
 #[cfg(unix)]
 #[test]
+fn interactive_ssh_retires_rejected_masters_without_unlinking_unknown_connections() {
+    use portable_pty::{native_pty_system, CommandBuilder, PtySize};
+    use std::io::Read;
+    use std::os::unix::fs::PermissionsExt;
+
+    let sandbox = Sandbox::new();
+    std::fs::write(
+        sandbox.0.join(".ssh/config"),
+        "Host lab\n  HostName localhost\n",
+    )
+    .unwrap();
+    let bin = sandbox.0.join("bin");
+    std::fs::create_dir(&bin).unwrap();
+    let ssh = bin.join("ssh");
+    std::fs::write(&ssh, r#"#!/bin/sh
+if [ "$1" = -G ]; then exec /usr/bin/ssh -F /dev/null "$@"; fi
+printf '%s\n' "$*" >> "$HOME/calls"
+case "$*" in
+  *'-O check -S '*)
+    socket=$4
+    printf '%s' "$socket" > "$HOME/socket-path"
+    : > "$socket"
+    if [ "$CASE" = check_timeout ]; then exec sleep 30; fi
+    exit 0;;
+  *'-O stop -S '*)
+    socket=$4
+    case "$CASE" in
+      stop_failure) exit 1;;
+      stop_timeout) exec sleep 30;;
+    esac
+    rm "$socket"
+    exit 0;;
+  *'echo __ORX_SESSION_OK__'*)
+    case "$*" in
+      *'-oBatchMode=yes -oControlMaster=no -oControlPersist=no -oProxyCommand=false -oClearAllForwardings=yes -oRemoteCommand=none -T -S '*) ;;
+      *) echo 'probe allows fallback or user configuration' >&2; exit 99;;
+    esac
+    case "$CASE" in
+      healthy) echo __ORX_SESSION_OK__;;
+      rejection) echo 'cannot assign requested address' >&2; exit 1;;
+      exit_zero|stop_failure|stop_timeout) echo 'cannot assign requested address';;
+      probe_timeout) exec sleep 30;;
+    esac
+    exit 0;;
+  *'-- lab true') echo LOGIN; exit 0;;
+  *'command -v bash'*) exit 0;;
+  *) exit 1;;
+esac
+"#).unwrap();
+    std::fs::set_permissions(&ssh, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+    for case in [
+        "healthy",
+        "rejection",
+        "exit_zero",
+        "stop_failure",
+        "probe_timeout",
+        "check_timeout",
+        "stop_timeout",
+    ] {
+        let _ = std::fs::remove_file(sandbox.0.join("calls"));
+        let command = sandbox.command();
+        let mut builder = CommandBuilder::new(command.get_program());
+        builder.args(command.get_args());
+        for (key, value) in command.get_envs() {
+            match value {
+                Some(value) => builder.env(key, value),
+                None => builder.env_remove(key),
+            }
+        }
+        builder.env("PATH", format!("{}:/usr/bin:/bin", bin.display()));
+        builder.env("CASE", case);
+        builder.args(["compute", "connect", "ssh", "--host", "lab"]);
+        let pair = native_pty_system().openpty(PtySize::default()).unwrap();
+        let mut child = pair.slave.spawn_command(builder).unwrap();
+        drop(pair.slave);
+        let mut reader = pair.master.try_clone_reader().unwrap();
+        let mut output = Vec::new();
+        // Linux PTYs report EIO instead of EOF when the slave closes.
+        if let Err(error) = reader.read_to_end(&mut output) {
+            assert_eq!(error.raw_os_error(), Some(libc::EIO));
+        }
+        let status = child.wait().unwrap();
+        let calls = std::fs::read_to_string(sandbox.0.join("calls")).unwrap();
+        let socket = PathBuf::from(std::fs::read_to_string(sandbox.0.join("socket-path")).unwrap());
+        let output = String::from_utf8_lossy(&output);
+        match case {
+            "healthy" => {
+                assert!(status.success(), "{output}");
+                assert!(!calls.contains("-O stop"));
+                assert!(socket.exists());
+                assert!(output.contains("LOGIN"));
+            }
+            "rejection" | "exit_zero" => {
+                assert!(status.success(), "{output}");
+                assert!(calls.find("-O stop").unwrap() < calls.find("-- lab true").unwrap());
+                assert!(!socket.exists());
+                assert!(output.contains("LOGIN"));
+            }
+            _ => {
+                assert!(!status.success(), "{case}: {output}");
+                assert!(socket.exists(), "{case} removed an unknown/live socket");
+                assert!(!output.contains("LOGIN"));
+                if case != "stop_failure" && case != "stop_timeout" {
+                    assert!(!calls.contains("-O stop"));
+                }
+            }
+        }
+        assert!(!calls.contains("-O exit"));
+        let _ = std::fs::remove_file(&socket);
+        let _ = std::fs::remove_file(socket.with_extension("lock"));
+    }
+}
+
+#[cfg(unix)]
+#[test]
 fn ssh_config_conflict_and_execution_target_checks() {
     use std::os::unix::fs::PermissionsExt;
     let sandbox = Sandbox::new();
@@ -186,13 +302,28 @@ fn ssh_config_conflict_and_execution_target_checks() {
 #[cfg(unix)]
 #[test]
 fn slurm_supervisor_survives_connection_and_accounting_loss() {
+    supervisor_recovers_monitoring_and_logs(false);
+}
+
+#[cfg(unix)]
+#[test]
+fn ssh_supervisor_survives_proxy_output_without_skipping_logs() {
+    supervisor_recovers_monitoring_and_logs(true);
+}
+
+#[cfg(unix)]
+fn supervisor_recovers_monitoring_and_logs(ssh_backend: bool) {
     use std::os::unix::fs::PermissionsExt;
     use std::time::{Duration, Instant};
     let sandbox = Sandbox::new();
     sandbox.json(&["projects", "--json"]);
     let db = rusqlite::Connection::open(sandbox.0.join("data/orx.db")).unwrap();
     db.execute("INSERT INTO local_experiments (id, project_id, slug, branch_name, run_command, created_at, updated_at) VALUES ('exp','project','exp','main','true',0,0)", []).unwrap();
-    let backend = json!({"kind":"slurm_job", "namespace":"lab", "jobId":"42", "timeoutSecs":86400});
+    let backend = if ssh_backend {
+        json!({"kind":"ssh_job", "namespace":"lab", "jobId":".orx/runs/run"})
+    } else {
+        json!({"kind":"slurm_job", "namespace":"lab", "jobId":"42", "timeoutSecs":86400})
+    };
     db.execute("INSERT INTO runs (id, experiment_id, project_id, status, backend_json, created_at, updated_at) VALUES ('run','exp','project','running',?1,0,0)", [backend.to_string()]).unwrap();
     let bin = sandbox.0.join("bin");
     std::fs::create_dir(&bin).unwrap();
@@ -200,6 +331,7 @@ fn slurm_supervisor_survives_connection_and_accounting_loss() {
     std::fs::write(
         &ssh,
         r#"#!/bin/sh
+if [ "$1" = -G ]; then exec /usr/bin/ssh -F /dev/null "$@"; fi
 printf '%s\n' "$*" >> "$HOME/calls"
 case "$*" in
   *sbatch*|*scancel*) exit 99;;
@@ -207,9 +339,14 @@ case "$*" in
     phase=$(cat "$HOME/phase")
     case "$phase" in
       outage) echo 'Permission denied (MFA expired)' >&2; exit 255;;
-      missing) echo GONE;;
-      running) echo 'SQ RUNNING';;
-      done) echo 'SA COMPLETED';;
+      missing) if [ "$SSH_BACKEND" = 1 ]; then echo 'cannot assign requested address'; else echo GONE; fi;;
+      running|log_failure) if [ "$SSH_BACKEND" = 1 ]; then echo RUNNING; else echo 'SQ RUNNING'; fi;;
+      done) if [ "$SSH_BACKEND" = 1 ]; then echo 'EXIT 0'; else echo 'SA COMPLETED'; fi;;
+    esac;;
+  *tail*)
+    case "$(cat "$HOME/phase")" in
+      missing|outage|log_failure) echo 'proxy dial error';;
+      *) printf '__ORX_LOG_START__\n'; case "$*" in *'tail -n +1 '*) printf 'first\nsecond\n';; esac;;
     esac;;
   *) exit 0;;
 esac
@@ -218,7 +355,7 @@ esac
     .unwrap();
     std::fs::set_permissions(&ssh, std::fs::Permissions::from_mode(0o755)).unwrap();
     let phase = sandbox.0.join("phase");
-    std::fs::write(&phase, "outage").unwrap();
+    std::fs::write(&phase, "missing").unwrap();
     struct ChildGuard(std::process::Child);
     impl Drop for ChildGuard {
         fn drop(&mut self) {
@@ -229,6 +366,7 @@ esac
     let mut child = ChildGuard(
         sandbox
             .command()
+            .env("SSH_BACKEND", if ssh_backend { "1" } else { "0" })
             .env("PATH", format!("{}:/usr/bin:/bin", bin.display()))
             .args(["supervise", "run"])
             .stdout(std::process::Stdio::null())
@@ -244,8 +382,8 @@ esac
             .unwrap();
         serde_json::from_str(&raw).unwrap()
     };
-    let wait = |condition: &dyn Fn() -> bool| {
-        let deadline = Instant::now() + Duration::from_secs(15);
+    let wait_for = |timeout: Duration, condition: &dyn Fn() -> bool| {
+        let deadline = Instant::now() + timeout;
         while !condition() {
             assert!(
                 Instant::now() < deadline,
@@ -254,24 +392,44 @@ esac
             std::thread::sleep(Duration::from_millis(100));
         }
     };
+    let wait = |condition: &dyn Fn() -> bool| wait_for(Duration::from_secs(15), condition);
+    // A missing scheduler record is reported only after about a minute, without failing the run.
+    wait(&|| {
+        std::fs::read_to_string(sandbox.0.join("calls")).is_ok_and(|c| c.contains("exit_code"))
+    });
+    std::thread::sleep(Duration::from_secs(10));
+    assert!(metadata()["monitoringError"].is_null());
+    wait_for(Duration::from_secs(75), &|| {
+        metadata()["monitoringError"].as_str().is_some_and(|s| {
+            s.contains(if ssh_backend {
+                "unexpected inspect output"
+            } else {
+                "scheduler record"
+            })
+        })
+    });
+    std::fs::write(&phase, "outage").unwrap();
     wait(&|| {
         metadata()["monitoringError"]
             .as_str()
             .is_some_and(|s| s.contains("Reconnect"))
     });
-    std::fs::write(&phase, "missing").unwrap();
-    wait(&|| {
-        metadata()["monitoringError"]
-            .as_str()
-            .is_some_and(|s| s.contains("scheduler record"))
-    });
-    // Exceeds the old one-minute GONE-to-failed threshold.
-    std::thread::sleep(Duration::from_secs(61));
     let status: String = db
         .query_row("SELECT status FROM runs WHERE id='run'", [], |r| r.get(0))
         .unwrap();
     assert_eq!(status, "running");
-    assert_eq!(metadata()["jobId"], "42");
+    assert_eq!(
+        metadata()["jobId"],
+        if ssh_backend { ".orx/runs/run" } else { "42" }
+    );
+    if ssh_backend {
+        std::fs::write(&phase, "log_failure").unwrap();
+        wait(&|| {
+            metadata()["monitoringError"]
+                .as_str()
+                .is_some_and(|s| s.contains("unexpected SSH log output"))
+        });
+    }
     std::fs::write(&phase, "running").unwrap();
     wait(&|| metadata()["monitoringError"].is_null());
     std::fs::write(&phase, "done").unwrap();
@@ -289,6 +447,10 @@ esac
     }
     let calls = std::fs::read_to_string(sandbox.0.join("calls")).unwrap();
     assert!(!calls.contains("sbatch") && !calls.contains("scancel"));
+    assert_eq!(
+        std::fs::read_to_string(sandbox.0.join("data/run-logs/run.log")).unwrap(),
+        "first\nsecond\n"
+    );
 }
 
 #[cfg(unix)]
@@ -368,6 +530,7 @@ fn slurm_cancel_requires_acknowledgement_and_survives_restart_without_accounting
         (
             "ssh",
             r#"#!/bin/sh
+if [ "$1" = -G ]; then exec /usr/bin/ssh -F /dev/null "$@"; fi
 for cmd do :; done
 case "$cmd" in
   *scancel*|*exit_code*) exec /bin/sh -c "$cmd";;

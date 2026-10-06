@@ -96,15 +96,15 @@ function resumeApi(lastLocation, sessions = [], projects = [{ id: "p" }], tasks 
   };
 }
 
-test("global resume preserves settings and archived task links, and terminates stale redirects at home", async () => {
+test("global resume preserves settings and archived task links, and falls back to an available project for stale redirects", async () => {
   for (const [location, sessions, expected] of [
     ["/projects/p/settings/storage", [], "/projects/p/settings/storage"],
     ["/projects/p/tasks/old", [{ id: "old", projectId: "p", archived: true }], "/projects/p/tasks/old"],
-    ["/projects/p/tasks/deleted", [], "/projects"],
-    ["/projects/deleted/tasks/new", [], "/projects"],
-    ["/projects/p", [], "/projects"],
-    ["//elsewhere.test", [], "/projects"],
-    [null, [], "/projects"],
+    ["/projects/p/tasks/deleted", [], "/projects/p/tasks/new"],
+    ["/projects/deleted/tasks/new", [], "/projects/p/tasks/new"],
+    ["/projects/p", [], "/projects/p/tasks/new"],
+    ["//elsewhere.test", [], "/projects/p/tasks/new"],
+    [null, [], "/projects/p/tasks/new"],
   ]) {
     const { globalResumeLocation } = loadModule("routeResume.ts", resumeApi(location, sessions));
     assert.equal(await globalResumeLocation(), expected);
@@ -128,7 +128,7 @@ test("resume uses the current database response and current queued preference; f
   const current = loadModule("routeResume.ts", api, { lastLocation: "/projects/p/skills" });
   assert.equal(await current.globalResumeLocation(), "/projects/p/skills");
   const otherDatabase = loadModule("routeResume.ts", resumeApi(saved, [], [{ id: "other" }]));
-  assert.equal(await otherDatabase.globalResumeLocation(), "/projects");
+  assert.equal(await otherDatabase.globalResumeLocation(), "/projects/other/tasks/new");
   const failed = loadModule("routeResume.ts", {
     ...api,
     getUiState: async () => { throw new Error("offline"); },
@@ -191,7 +191,7 @@ for (const projectId of [undefined, "p"]) {
         cleanup();
         const finish = setup();
         await new Promise(resolve => setImmediate(resolve));
-        assert.equal(navigated, projectId ? "/projects/p/tasks/new" : "/projects");
+        assert.equal(navigated, "/projects/p/tasks/new");
         finish();
       } else assert.equal(navigated, undefined);
       client.clear();

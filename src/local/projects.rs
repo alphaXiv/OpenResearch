@@ -55,8 +55,19 @@ pub(crate) fn expand_path(path: &str) -> Result<PathBuf> {
     if path.is_absolute() {
         Ok(path)
     } else {
-        Ok(std::env::current_dir()?.join(path))
+        Ok(relative_base()?.join(path))
     }
+}
+
+/// Where a relative path is anchored: the working directory, except in the Linux
+/// AppImage, whose working directory is its read-only mount (see linux/AppRun).
+pub fn relative_base() -> Result<PathBuf> {
+    let cwd = std::env::current_dir()?;
+    let in_image = crate::paths::in_appimage_mount(&cwd, std::env::var_os("APPDIR").as_deref());
+    Ok(match dirs::home_dir() {
+        Some(home) if in_image => home,
+        _ => cwd,
+    })
 }
 
 const PAPER_PDF_NAME: &str = "paper.pdf";

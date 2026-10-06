@@ -115,8 +115,10 @@ orx exp wait <expId> --interval 10 --timeout 3600
 
 After launching, use `orx exp wake <expId>` when you want to end the turn and
 resume after that run succeeds or fails. Wake-up is opt-in, fires only for
-`done` or `failed`, and waits behind queued user messages. Use either wait or
-wake for a run, not both.
+`done` or `failed`, and waits behind queued user messages. If orx cannot
+monitor a live Slurm run for over a minute, it tells you once per outage; the
+final wake-up comes once orx can see the run finish. Use either wait or wake
+for a run, not both.
 
 ## Sizing compute
 

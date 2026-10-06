@@ -27,6 +27,7 @@ mod file_serve;
 pub mod install_cli;
 pub mod install_skills;
 pub mod instance;
+pub mod invocation_gate;
 pub mod library;
 pub mod login;
 pub mod logout;

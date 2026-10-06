@@ -10,9 +10,19 @@ import {
   lastResponseText,
   transcriptFileName,
   transcriptMarkdown,
+  withoutDuplicateTurnError,
 } from "../src/chatRendering.ts";
 
 const message = (...parts) => ({ id: "assistant", role: "assistant", parts, createdAt: 0 });
+
+test("a recovery error replaces the identical terminal error without hiding other errors", () => {
+  const duplicate = { id: "err-0", type: "tool", tool: "error", state: { error: "Invalid model" } };
+  const other = { id: "err-1", type: "tool", tool: "error", state: { error: "Other failure" } };
+  const recovery = { id: "turn-recovery", type: "tool", tool: "error", state: { error: "Invalid model" } };
+  assert.deepEqual(withoutDuplicateTurnError([other, duplicate], recovery), [other]);
+  assert.deepEqual(withoutDuplicateTurnError([duplicate, other], recovery), [duplicate, other]);
+  assert.deepEqual(withoutDuplicateTurnError([duplicate], undefined), [duplicate]);
+});
 
 test("invisible transcript parts do not displace a visible tool tail", () => {
   const tool = { id: "tool", type: "tool", state: { status: "completed" } };

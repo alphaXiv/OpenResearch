@@ -470,6 +470,7 @@ async fn supervisor_restart(target: &SshTarget, reference: &str, port: u16) {
             created_at: 1,
             updated_at: 1,
             chat_session_id: None,
+            archived: false,
         })
         .unwrap();
     let (dir, container) = launch(target, Some(reference), "echo ONCE; sleep 8; echo AFTER").await;

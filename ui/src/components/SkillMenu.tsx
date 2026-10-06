@@ -46,6 +46,9 @@ export function SkillMenu({
           {s.source === "user" && (
             <span className="ms-auto shrink-0 ps-2 text-muted">{m.skill_menu_personal()}</span>
           )}
+          {s.source === "project" && (
+            <span className="ms-auto shrink-0 ps-2 text-muted">{m.header_project()}</span>
+          )}
         </button>
       ))}
     </div>

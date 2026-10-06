@@ -310,6 +310,11 @@ export function FileViewer({
   const draft = editState?.draft ?? normalizedFileContent(data?.content ?? "");
   const baseline = editState?.baseline ?? normalizedFileContent(data?.content ?? "");
   const dirty = editable && editState !== null && isDirtyFileBuffer(editState);
+  // A reopened file shows its cached copy (or clean buffer) until the refetch
+  // lands and reseeds it; jumping before then spends the request on stale lines.
+  const staleBuffer = editState !== null && !hasDraft
+    && typeof data?.version === "string" && editState.version !== data.version;
+  const settledLineScrollRequest = fileQuery.isFetching || staleBuffer ? undefined : lineScrollRequest;
 
   const save = async (expectedVersion?: string): Promise<boolean> => {
     const savingState = bufferSession.getSnapshot();
@@ -525,12 +530,16 @@ export function FileViewer({
       }
       else if (!conflict && current.conflict) updateEditState({ ...current, conflict: null });
     }
-    if ((!current || !isDirtyFileBuffer(current)) && next.source === "checkout" &&
+    // Reseeding only a lagging clean buffer lets this rerun on editState (a clean
+    // revert after a conflict) without looping.
+    const behind = !current || (!isDirtyFileBuffer(current)
+      && (current.version !== next.file.version || current.path !== next.file.path));
+    if (behind && next.source === "checkout" &&
       !next.file.notFound && !next.file.binary && !next.file.truncated && typeof next.file.version === "string") {
       updateEditState(createFileBuffer(next.file.path, next.file.content, next.file.version));
       setSaveError(null);
     }
-  }, [loaded, bufferSession, sessionId, saving, saveRevision]);
+  }, [loaded, bufferSession, sessionId, saving, saveRevision, editState]);
   const sourceKey = JSON.stringify(fileOptions.queryKey);
   const previousVersion = useRef({ sourceKey, nonce, artifactVersion, diskVersion });
   useEffect(() => {
@@ -841,7 +850,7 @@ export function FileViewer({
             readOnly={showingUnsafeDraft}
             path={path}
             highlightLine={line}
-            scrollRequest={lineScrollRequest}
+            scrollRequest={settledLineScrollRequest}
             onScrollRequestHandled={onLineScrollRequestHandled}
             scrollPosition={scrollPositionRef.current}
             onScrollPositionChange={(position) => {
@@ -912,7 +921,7 @@ export function FileViewer({
                 text={data.content}
                 path={path}
                 highlightLine={line}
-                scrollRequest={lineScrollRequest}
+                scrollRequest={settledLineScrollRequest}
                 onScrollRequestHandled={onLineScrollRequestHandled}
               />
             </div>

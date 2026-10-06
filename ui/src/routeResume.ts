@@ -16,12 +16,13 @@ function validSessionLocation(location: string, sessions: ChatSession[]): boolea
 export async function globalResumeLocation(client = queryClient): Promise<string> {
   const [state, projects] = await Promise.all([client.fetchQuery(getUiStateQuery()), client.fetchQuery(listProjectsQuery())]);
   const location = safeLocation((getRememberedGlobalWorkspace() ?? state.workspace)?.lastLocation);
-  if (!location) return "/projects";
+  const fallback = () => projects[0] ? projectResumeLocation(projects[0].id, client) : Promise.resolve("/projects");
+  if (!location) return fallback();
   const destination = parseDestination(location.split("?")[0]);
-  if (!destination?.projectId) return "/projects";
-  if (!projects.some((project) => project.id === destination.projectId)) return "/projects";
+  if (!destination?.projectId) return fallback();
+  if (!projects.some((project) => project.id === destination.projectId)) return fallback();
   if (destination.sessionId && !validSessionLocation(location, await client.fetchQuery(listChatSessionsQuery(destination.projectId))))
-    return "/projects";
+    return fallback();
   return location;
 }
 
@@ -31,7 +32,7 @@ export async function projectResumeLocation(projectId: string, client = queryCli
   const location = safeLocation(state?.lastLocation);
   if (location && parseDestination(location.split("?")[0])?.projectId === projectId
     && validSessionLocation(location, sessions)) return location;
-  const newest = sessions.find((session) => !session.archived);
+  const newest = sessions.find((session) => !session.archived && !session.sideParentSessionId);
   const defaults = isDemoProjectId(projectId) ? defaultTaskWorkspace(newest?.id, !(await client.fetchQuery(getUiStateQuery())).tourCompleted) : undefined;
   const task = getTaskWorkspace(state, newest?.id ?? "new");
   const rememberedPane = task ? task.active : defaults?.active;

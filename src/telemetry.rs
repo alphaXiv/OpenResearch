@@ -617,6 +617,7 @@ pub(crate) fn set_persisted_disabled(disabled: bool) -> std::io::Result<()> {
     if result.is_ok() && disabled {
         cancel_pending();
         remove_queued_product_events();
+        let _ = crate::store::Store::open().and_then(|store| store.purge_pending_telemetry());
     }
     result
 }
@@ -696,7 +697,7 @@ fn build_payload(
 /// (`YYYY-MM-DDTHH:MM:SS.mmmZ`). Pure civil-date math on the UTC timeline — no
 /// timezone or DST involved — so no date crate is needed (the codebase has
 /// none). Uses the standard days-from-civil algorithm.
-fn iso8601_utc(ms: i64) -> String {
+pub(crate) fn iso8601_utc(ms: i64) -> String {
     let ms = ms.max(0);
     let secs = ms / 1000;
     let millis = ms % 1000;
@@ -750,12 +751,14 @@ fn persist_payload(event_id: uuid::Uuid, payload: &serde_json::Value) -> Option<
     let dir = outbox_dir();
     std::fs::create_dir_all(&dir).ok()?;
     let path = dir.join(format!("{event_id}.json"));
-    let tmp = dir.join(format!(".{event_id}.tmp"));
-    std::fs::write(&tmp, serde_json::to_vec(payload).ok()?).ok()?;
-    if std::fs::rename(&tmp, &path).is_err() {
-        let _ = std::fs::remove_file(tmp);
-        return None;
-    }
+    crate::local::git::atomic_write_with_mode(
+        &path,
+        &serde_json::to_vec(payload).ok()?,
+        Some(0o600),
+    )
+    .ok()?;
+    #[cfg(unix)]
+    std::fs::File::open(&dir).ok()?.sync_all().ok()?;
     Some(path)
 }
 
@@ -812,10 +815,47 @@ fn remove_queued_product_events() {
     }
 }
 
+pub(crate) fn accounting_reports_enabled() -> bool {
+    is_enabled(flag())
+}
+
+pub(crate) fn pending_event_payload(
+    event: &str,
+    properties: serde_json::Value,
+) -> Option<(String, serde_json::Value)> {
+    if !is_enabled(flag()) {
+        return None;
+    }
+    let event_id = uuid::Uuid::new_v4();
+    let payload = build_payload_with_id(event, &install_id()?, event_id, properties);
+    Some((event_id.to_string(), payload))
+}
+
+fn transfer_pending_events() {
+    if !is_enabled(flag()) {
+        return;
+    }
+    let Ok(store) = crate::store::Store::open() else {
+        return;
+    };
+    let Ok(events) = store.pending_telemetry() else {
+        return;
+    };
+    for (id, payload) in events {
+        let Ok(event_id) = uuid::Uuid::parse_str(&id) else {
+            continue;
+        };
+        if persist_payload(event_id, &payload).is_some() {
+            let _ = store.acknowledge_pending_telemetry(&id);
+        }
+    }
+}
+
 pub(crate) fn retry_outbox() {
     if environment_disabled_reason().is_some() {
         return;
     }
+    transfer_pending_events();
     let Ok(entries) = std::fs::read_dir(outbox_dir()) else {
         return;
     };
@@ -984,6 +1024,38 @@ pub(crate) enum ProjectCreationMode {
     Paper,
 }
 
+/// How `orx up` presents the dashboard. The desktop app reports `app_started` instead.
+#[derive(Clone, Copy, Debug, PartialEq, serde::Serialize)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum UpLaunchMode {
+    Browser,
+    NoBrowser,
+    /// Plain `orx up` inside an SSH session, which prints forwarding steps instead.
+    Ssh,
+    Remote,
+    RemoteHost,
+}
+
+impl UpLaunchMode {
+    pub(crate) fn of(args: &crate::UpArgs) -> Self {
+        if args.remote_host {
+            Self::RemoteHost
+        } else if args.remote.is_some() {
+            Self::Remote
+        } else if args.no_browser {
+            Self::NoBrowser
+        } else if crate::remote::detect_ssh_session().is_some() {
+            Self::Ssh
+        } else {
+            Self::Browser
+        }
+    }
+}
+
+pub(crate) fn capture_browser_open_failed(mode: UpLaunchMode) {
+    capture("browser_open_failed", json!({ "mode": mode }));
+}
+
 pub(crate) fn capture_project_created(local: bool, mode: Option<ProjectCreationMode>) {
     let mut properties = json!({ "local": local });
     if let Some(mode) = mode {
@@ -1048,16 +1120,20 @@ impl TelemetrySession {
     /// The `--no-telemetry` flag is read from the process-global (set in `main`
     /// before this is called), matching every other event path. The handle is
     /// registered in the pending set and flushed by `finish`.
-    pub(crate) fn start(command: Option<&str>) -> TelemetrySession {
+    pub(crate) fn start(command: Option<&str>, mode: Option<UpLaunchMode>) -> TelemetrySession {
         retry_outbox();
         if let Some(command) = command {
             // Bare base name; `build_payload` prefixes it → wire event `cli_command`.
-            capture("command", json!({ "command": command }));
+            let mut properties = json!({ "command": command });
+            if let Some(mode) = mode {
+                properties["mode"] = json!(mode);
+            }
+            capture("command", properties);
         }
         TelemetrySession
     }
 
-    #[cfg(target_os = "macos")]
+    #[cfg(desktop_app)]
     pub(crate) fn start_app() -> TelemetrySession {
         retry_outbox();
         capture("app_started", json!({}));
@@ -1071,6 +1147,7 @@ impl TelemetrySession {
     /// site in `main` already threads it, so keeping the param avoids
     /// re-touching main).
     pub(crate) async fn finish(self, _success: bool) {
+        retry_outbox();
         flush_pending().await;
     }
 }
@@ -2059,9 +2136,34 @@ mod tests {
                 json!({ "kind": "run", "local": true, "computeTarget": "local" }),
             ),
         ];
+        let launch_modes = [
+            UpLaunchMode::Browser,
+            UpLaunchMode::NoBrowser,
+            UpLaunchMode::Ssh,
+            UpLaunchMode::Remote,
+            UpLaunchMode::RemoteHost,
+        ];
+        let launch_payloads = launch_modes.into_iter().flat_map(|mode| {
+            [
+                build_payload(
+                    "command",
+                    "cli-release-contract-test",
+                    json!({ "command": "up", "mode": mode }),
+                ),
+                build_payload(
+                    "browser_open_failed",
+                    "cli-release-contract-test",
+                    json!({ "mode": mode }),
+                ),
+            ]
+        });
         let mut localized = build_payload("app_started", "cli-release-contract-test", json!({}));
         localized["context"]["locale"] = json!("zh-CN");
-        for payload in payloads.into_iter().chain([localized]) {
+        for payload in payloads
+            .into_iter()
+            .chain(launch_payloads)
+            .chain([localized])
+        {
             assert_eq!(post_payload(&payload).await, DeliveryOutcome::Acknowledged);
         }
     }
@@ -2200,6 +2302,33 @@ mod tests {
         assert!(serde_json::from_value::<ProjectCreationMode>(json!("/private/path")).is_err());
     }
 
+    #[test]
+    fn up_launch_modes_follow_the_dashboard_code_paths() {
+        let _g = EnvGuard::new(&["SSH_CONNECTION", "SSH_TTY", "SSH_CLIENT"]);
+        let args = |argv: &[&str]| {
+            use clap::Parser;
+            match crate::Cli::parse_from(argv).command {
+                Some(crate::Command::Up(args)) => UpLaunchMode::of(&args),
+                _ => unreachable!(),
+            }
+        };
+        let cases = [
+            (&["orx", "up"][..], "browser"),
+            (&["orx", "up", "--no-browser"], "no_browser"),
+            (&["orx", "up", "--remote", "box"], "remote"),
+            (
+                &["orx", "up", "--no-browser", "--remote-host"],
+                "remote_host",
+            ),
+        ];
+        for (argv, mode) in cases {
+            assert_eq!(json!(args(argv)), json!(mode), "{argv:?}");
+        }
+        std::env::set_var("SSH_CONNECTION", "1.2.3.4 5 6.7.8.9 22");
+        assert_eq!(args(&["orx", "up"]), UpLaunchMode::Ssh);
+        assert_eq!(json!(UpLaunchMode::Ssh), json!("ssh"));
+    }
+
     #[tokio::test]
     async fn environment_disabled_consent_never_creates_an_install_id() {
         let _g = EnvGuard::new(OPT_VARS);
@@ -2230,12 +2359,13 @@ mod tests {
         }
         assert!(environment_disabled_reason().is_some());
 
-        let session = TelemetrySession::start(Some("up"));
+        let session = TelemetrySession::start(Some("up"), Some(UpLaunchMode::Browser));
         harness::capture_initial(&json!({"harnesses":[]}));
         harness::SetupAttempt::new("opencode", "install", "automatic");
         capture_onboarding_completed();
         capture_onboarding_research_profile(&ResearchProfile::default());
         capture_project_created(true, Some(ProjectCreationMode::Blank));
+        capture_browser_open_failed(UpLaunchMode::Browser);
         capture_demo_welcome_choice("explore_demo");
         capture_chat_session_started("codex");
         capture_chat_message_sent("codex");

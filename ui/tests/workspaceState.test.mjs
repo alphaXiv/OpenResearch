@@ -23,6 +23,7 @@ const panes = [
   { kind: "code", experimentId: "experiment", branch: "feature", view: "changes" },
   { kind: "plan", sessionId: "session", promptId: "prompt" },
   { kind: "subagent", sessionId: "session", spawnPartId: "part" },
+  { kind: "side", sessionId: "session" },
 ];
 
 test("every pane variant round-trips through a concrete task URL", () => {

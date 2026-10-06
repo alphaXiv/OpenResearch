@@ -1,6 +1,6 @@
 [package]
 name = "openresearch-cli"
-version = "0.3.3"
+version = "0.3.4"
 edition = "2021"
 description = "OpenResearch CLI (orx) — Rust port"
 repository = "https://github.com/artur-shaikhutdinov/OpenResearch-Kimi-MiniMax-ZCode"
@@ -9,6 +9,12 @@ license = "MIT"
 [[bin]]
 name = "orx"
 path = "src/main.rs"
+
+[features]
+# The Linux desktop app: a glibc build linking WebKitGTK (see linux/). Off by
+# default so the static musl CLI builds stay free of GTK. macOS and Windows
+# always build the app.
+desktop = ["dep:tao", "dep:wry", "dep:gtk", "dep:png"]
 
 [dependencies]
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "io-util", "io-std", "time", "fs", "process", "sync", "signal"] }
@@ -30,6 +36,7 @@ dirs = "5"
 # (same reasoning as rustls above — no system library dependency).
 rusqlite = { version = "0.32", features = ["bundled", "backup"] }
 urlencoding = "2"
+httpdate = "1"
 uuid = { version = "1", features = ["v4"] }
 semver = "1"
 fd-lock = "4"
@@ -56,6 +63,9 @@ aes = "0.8"
 cbc = "0.1"
 pbkdf2 = { version = "0.12", default-features = false, features = ["hmac"] }
 sha1 = "0.10"
+# ZCode keeps its sign-in in an AES-256-GCM-encrypted credentials.json; orx
+# reads the plan identity to tell whether ZCode's runtime can use the plan.
+aes-gcm = "0.10"
 # Overleaf live sync speaks the editor's socket.io channel. rustls for the same
 # musl reasons as reqwest above; already in the tree via axum. Native roots
 # trust a corporate CA on direct websocket connections.
@@ -74,20 +84,50 @@ libc = "0.2"
 [target.'cfg(windows)'.dependencies]
 # Win32 calls std lacks: run liveness, console ownership, the error dialog, PE
 # version-resource reads (GetFileVersionInfoW / VerQueryValueW — the spawn-free
-# `--version` fast path in harness detection). Already in the tree.
-windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_Security", "Win32_Security_Credentials", "Win32_Storage_FileSystem", "Win32_System_Diagnostics_ToolHelp", "Win32_System_JobObjects", "Win32_System_SystemServices", "Win32_System_Threading", "Win32_System_Console", "Win32_UI_WindowsAndMessaging"] }
+# `--version` fast path in harness detection), total RAM for the agent idle
+# policy, and the desktop app's single instance and taskbar identity. Already in
+# the tree.
+windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_Security", "Win32_Security_Credentials", "Win32_Storage_FileSystem", "Win32_System_Diagnostics_ToolHelp", "Win32_System_JobObjects", "Win32_System_SystemInformation", "Win32_System_SystemServices", "Win32_System_Threading", "Win32_System_Console", "Win32_UI_Shell", "Win32_UI_WindowsAndMessaging"] }
+
+[target.'cfg(any(target_os = "macos", windows))'.dependencies]
+# Desktop app mode (src/commands/app.rs): the dashboard in its own window. tao
+# owns the run loop on the main thread, wry hosts the dashboard in the system
+# webview (WKWebView, WebView2), and rfd shows the save panel.
+tao = "0.37"
+wry = "0.57"
+rfd = "0.17"
+
+[target.'cfg(target_os = "linux")'.dependencies]
+# The same, behind the `desktop` feature: WebKitGTK, png for the window icon,
+# and gtk (tao's version) for the save dialog. Not rfd: its GTK backend runs on a
+# thread of its own, which deadlocks against tao's hold on the main context.
+tao = { version = "0.37", optional = true }
+wry = { version = "0.57", optional = true }
+gtk = { version = "0.18", optional = true }
+png = { version = "0.18", optional = true }
 
 [target.'cfg(target_os = "macos")'.dependencies]
-# macOS `.app` mode (src/commands/app.rs): an NSApplication + delegate run loop
-# on the main thread so the downloadable app gets a Dock icon and click handling
-# while the dashboard server runs on background threads. macOS-only so the
-# static musl Linux builds are untouched.
+# muda builds the menu bar, and objc2-app-kit's NSAlert backs `window.confirm`.
 objc2 = "0.6"
-objc2-app-kit = { version = "0.3", default-features = false, features = ["std", "NSApplication", "NSResponder", "NSRunningApplication", "NSWorkspace"] }
-# Default-browser lookup for the Dock-click handler (NSWorkspace takes NSURLs).
-objc2-foundation = { version = "0.3", default-features = false, features = ["std", "NSArray", "NSEnumerator", "NSURL", "NSString"] }
+objc2-app-kit = { version = "0.3", default-features = false, features = ["std", "NSAlert", "NSApplication", "NSButton", "NSControl", "NSResponder", "NSView"] }
+objc2-foundation = { version = "0.3", default-features = false, features = ["std", "NSString"] }
+muda = "0.20"
+# `window.confirm` panel added to wry's WKUIDelegate (src/commands/app.rs).
+block2 = "0.6"
+
+[build-dependencies]
+# Embeds the Windows icon in orx.exe; a no-op for other targets.
+embed-resource = "3"
 
 # The profile that 'dist' will build with
 [profile.dist]
 inherits = "release"
 lto = "thin"
+
+# Full debuginfo bloats target/ by gigabytes; file:line backtraces are all we use.
+[profile.dev]
+debug = "line-tables-only"
+
+# Third-party crates need no line info; saves another ~0.2 GiB per build.
+[profile.dev.package."*"]
+debug = false

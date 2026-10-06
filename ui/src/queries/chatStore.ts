@@ -61,7 +61,7 @@ export function useChatState(projectId: string, activeId: string | null) {
   const enabled = Boolean(activeId) && !deletedSessionIds.has(activeId ?? "");
   const history = useQuery({ ...getChatMessagesQuery(activeId ?? ""), enabled, subscribed: enabled });
   const dataRevision = useSyncExternalStore(subscribeChat, getRevision);
-  const state = useMemo(() => readChatState(projectId, activeId), [projectId, activeId, dataRevision]);
+  const state = useMemo(() => readChatState(projectId, activeId), [projectId, activeId, dataRevision, history.data]);
   const generation = workspaceScope()[1];
   const dispatch = useCallback((action: Action) => {
     if (isCurrentScope(["workspace", generation])) dispatchChat(projectId, action);

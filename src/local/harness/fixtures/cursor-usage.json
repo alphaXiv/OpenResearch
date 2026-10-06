@@ -1,0 +1,12 @@
+[
+  {
+    "type": "result",
+    "subtype": "success",
+    "usage": {
+      "inputTokens": 10464,
+      "outputTokens": 34,
+      "cacheReadTokens": 3840,
+      "cacheWriteTokens": 0
+    }
+  }
+]

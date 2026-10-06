@@ -27,6 +27,7 @@
 //! COMPLETED/ERROR/CANCELED/DELETED) so `stage_to_run_status` and
 //! `is_terminal_stage` in `jobs/mod.rs` apply unchanged.
 
+use std::cmp::Ordering;
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::process::Stdio;
@@ -761,41 +762,114 @@ async fn leader_pod(context: Option<&str>, namespace: &str, job_name: &str) -> O
     names.first().map(|n| n.to_string())
 }
 
+/// RFC3339Nano with trailing zeros trimmed doesn't sort as text; pad the
+/// fraction to 9 digits. Assumes a fixed offset (nodes log in UTC).
+fn sort_key(ts: &str) -> Option<String> {
+    let secs = ts.get(..19)?;
+    if secs.as_bytes()[10] != b'T' {
+        return None;
+    }
+    let rest = &ts[19..];
+    let (frac, offset) = match rest.strip_prefix('.') {
+        Some(r) => r.split_at(r.find(|c: char| !c.is_ascii_digit())?),
+        None => ("", rest),
+    };
+    if offset.is_empty() || frac.len() > 9 {
+        return None;
+    }
+    Some(format!("{secs}.{frac:0<9}{offset}"))
+}
+
+/// Where the run log left off: the newest kubelet timestamp written and the
+/// lines that carried it, so a reconnect resumes there even after log rotation.
+#[derive(Default)]
+pub struct LogResume {
+    key: String,
+    tied: Vec<String>,
+}
+
+/// One reconnect's progress through the lines kubelet replays.
+#[derive(Default)]
+struct Pass {
+    replayed_ties: Vec<bool>,
+    caught_up: bool,
+}
+
+impl LogResume {
+    /// The text of a `--timestamps` line not yet written. Only the replay is
+    /// filtered: interleaved stdout/stderr can step timestamps back mid-stream,
+    /// so an older-stamped line racing a reconnect may be dropped.
+    fn admit<'a>(&mut self, pass: &mut Pass, raw: &'a str) -> Option<&'a str> {
+        let (ts, text) = raw.split_once(' ').unwrap_or((raw, ""));
+        // kubelet prefixes every line; keep anything else rather than drop it.
+        let Some(key) = sort_key(ts) else {
+            return Some(raw);
+        };
+        match key.cmp(&self.key) {
+            Ordering::Less if !pass.caught_up => return None,
+            Ordering::Less => {}
+            Ordering::Equal => {
+                // Match by text: rotation can drop part of the tied group.
+                if !pass.caught_up {
+                    pass.replayed_ties.resize(self.tied.len(), false);
+                    let written = (0..self.tied.len())
+                        .find(|&i| !pass.replayed_ties[i] && self.tied[i] == text);
+                    if let Some(i) = written {
+                        pass.replayed_ties[i] = true;
+                        return None;
+                    }
+                }
+                self.tied.push(text.to_string());
+            }
+            Ordering::Greater => {
+                self.key = key;
+                self.tied = vec![text.to_string()];
+            }
+        }
+        pass.caught_up = true;
+        Some(text)
+    }
+}
+
 /// One pass over `kubectl logs -f` on the job's leader pod, invoking `sink`
-/// per line past `skip`.
+/// per line past `resume`.
 ///
-/// Same replay/dedup contract as `hf::stream_logs`: kubectl replays the log
-/// from the start on each (re)connect, so the caller passes how many lines it
-/// has consumed and gets the new total back. Ends when kubectl exits (pod
-/// gone/finished) or after `idle` silence; the supervisor re-checks job state
-/// and reconnects if still live.
+/// Resumes by kubelet timestamp (`--since-time` plus a client-side filter),
+/// not line count: kubelet serves only the current log file, so after
+/// rotation a replay from the start is shorter than what was already written.
+/// Ends when kubectl exits (pod gone/finished) or after `idle` silence; the
+/// supervisor re-checks job state and reconnects if still live.
 ///
-/// Only the leader pod is captured: a stable single stream keeps the
-/// line-count dedup sound (interleaving N pods would reorder across
-/// reconnects), and the leader is where the driver's output lives. Other
-/// pods stay reachable via `kubectl logs`.
+/// Only the leader pod is captured: a stable single stream keeps the resume
+/// point sound, and the leader is where the driver's output lives. Other pods
+/// stay reachable via `kubectl logs`.
 pub async fn stream_logs(
     context: Option<&str>,
     namespace: &str,
     job_name: &str,
-    skip: u64,
+    resume: &mut LogResume,
     idle: Duration,
     sink: &mut (dyn FnMut(&str) + Send),
-) -> Result<u64> {
+) -> Result<()> {
     use tokio::io::{AsyncBufReadExt as _, BufReader};
 
     let target = match leader_pod(context, namespace, job_name).await {
         Some(pod) => format!("pod/{pod}"),
         // Not scheduled yet — let the supervisor's retry loop come back.
-        None => return Ok(skip),
+        None => return Ok(()),
     };
 
     let mut cmd = Command::new("kubectl");
     if let Some(ctx) = context {
         cmd.arg("--context").arg(ctx);
     }
+    cmd.args(["logs", "-f", &target, "-n", namespace, "--timestamps"]);
+    if resume.key.is_empty() {
+        cmd.arg("--tail=-1");
+    } else {
+        cmd.arg(format!("--since-time={}", resume.key));
+    }
     let mut child = cmd
-        .args(["logs", "-f", &target, "-n", namespace, "--tail=-1"])
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::null()) // "waiting to start" noise; state comes from inspect
@@ -804,22 +878,21 @@ pub async fn stream_logs(
 
     let stdout = child.stdout.take().expect("piped stdout");
     let mut lines = BufReader::new(stdout).lines();
-    let mut seen = 0u64;
+    let mut pass = Pass::default();
     loop {
         match tokio::time::timeout(idle, lines.next_line()).await {
             Err(_) => break,       // idle — let the caller re-check state
             Ok(Err(_)) => break,   // read error
             Ok(Ok(None)) => break, // kubectl exited
             Ok(Ok(Some(line))) => {
-                seen += 1;
-                if seen > skip {
-                    sink(&line);
+                if let Some(text) = resume.admit(&mut pass, &line) {
+                    sink(text);
                 }
             }
         }
     }
     let _ = child.kill().await;
-    Ok(seen.max(skip))
+    Ok(())
 }
 
 #[cfg(test)]
@@ -1003,5 +1076,94 @@ mod tests {
             .collect();
         assert_eq!(hits.len(), 1);
         assert_eq!(hits[0]["value"], "0");
+    }
+
+    fn reconnect<'a>(resume: &mut LogResume, raw: &[&'a str]) -> Vec<&'a str> {
+        let mut pass = Pass::default();
+        raw.iter()
+            .filter_map(|l| resume.admit(&mut pass, l))
+            .collect()
+    }
+
+    #[test]
+    fn sort_key_pads_trimmed_fractions() {
+        assert_eq!(
+            sort_key("2026-10-01T12:00:00.5Z").unwrap(),
+            "2026-10-01T12:00:00.500000000Z"
+        );
+        assert_eq!(
+            sort_key("2026-10-01T12:00:00+02:00").unwrap(),
+            "2026-10-01T12:00:00.000000000+02:00"
+        );
+        assert!(
+            sort_key("2026-10-01T12:00:00.5Z").unwrap()
+                > sort_key("2026-10-01T12:00:00.123456789Z").unwrap()
+        );
+        assert!(sort_key("loss=0.5").is_none());
+    }
+
+    #[test]
+    fn reconnect_skips_written_lines_including_timestamp_ties() {
+        let mut resume = LogResume::default();
+        let first = [
+            "2026-10-01T12:00:00.1Z step 1",
+            "2026-10-01T12:00:00.2Z step 2",
+            "2026-10-01T12:00:00.2Z step 2b",
+        ];
+        assert_eq!(
+            reconnect(&mut resume, &first),
+            ["step 1", "step 2", "step 2b"]
+        );
+
+        // `--since-time` is second-granular, so the replay repeats that second.
+        let replay = [
+            "2026-10-01T12:00:00.1Z step 1",
+            "2026-10-01T12:00:00.2Z step 2",
+            "2026-10-01T12:00:00.2Z step 2b",
+            "2026-10-01T12:00:00.2Z step 2c",
+            "2026-10-01T12:00:01Z step 3",
+            "2026-10-01T12:00:01Z ",
+        ];
+        assert_eq!(reconnect(&mut resume, &replay), ["step 2c", "step 3", ""]);
+    }
+
+    #[test]
+    fn replay_after_rotation_keeps_appending() {
+        let mut resume = LogResume::default();
+        let before = [
+            "2026-10-01T12:00:00Z old 1",
+            "2026-10-01T12:00:01Z old 2",
+            "2026-10-01T12:00:02Z old 3",
+        ];
+        assert_eq!(reconnect(&mut resume, &before).len(), 3);
+
+        // Rotated file: fewer lines than already written, all newer.
+        let rotated = ["2026-10-01T12:01:00Z new 1", "2026-10-01T12:01:01Z new 2"];
+        assert_eq!(reconnect(&mut resume, &rotated), ["new 1", "new 2"]);
+    }
+
+    #[test]
+    fn rotation_inside_a_timestamp_tie_keeps_new_tied_lines() {
+        let mut resume = LogResume::default();
+        let first = ["2026-10-01T12:00:00Z a", "2026-10-01T12:00:00Z b"];
+        assert_eq!(reconnect(&mut resume, &first), ["a", "b"]);
+
+        let rotated = ["2026-10-01T12:00:00Z b", "2026-10-01T12:00:00Z c"];
+        assert_eq!(reconnect(&mut resume, &rotated), ["c"]);
+    }
+
+    #[test]
+    fn live_lines_stepping_back_in_time_are_kept() {
+        let mut resume = LogResume::default();
+        let interleaved = [
+            "2026-10-01T12:00:00.2Z stdout",
+            "2026-10-01T12:00:00.3Z stdout",
+            "2026-10-01T12:00:00.25Z stderr",
+        ];
+        assert_eq!(
+            reconnect(&mut resume, &interleaved),
+            ["stdout", "stdout", "stderr"]
+        );
+        assert!(reconnect(&mut resume, &interleaved).is_empty());
     }
 }
