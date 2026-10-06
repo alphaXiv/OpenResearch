@@ -1011,18 +1011,29 @@ pub struct BackendLock {
 }
 
 impl BackendLock {
+    /// Waits out an install in progress, so a backend never starts under one.
     /// `None` leaves this backend unprotected, as every backend before this lock was.
     pub fn acquire() -> Option<Self> {
         let file = open_backend_lock()?;
-        file.try_lock_shared().ok()?;
+        file.lock_shared().ok()?;
         Some(Self { _file: file })
     }
 }
 
-/// Whether an `orx up` is using this install. A lock no backend could open counts as none.
-pub fn backend_running() -> bool {
-    open_backend_lock()
-        .is_some_and(|file| matches!(file.try_lock(), Err(std::fs::TryLockError::WouldBlock)))
+/// An updater's exclusive hold on the install, kept until it finishes replacing it.
+pub struct InstallClaim {
+    _file: Option<std::fs::File>,
+}
+
+/// `None` while an `orx up` is using this install. A lock nobody could open protects nobody.
+pub fn claim_install() -> Option<InstallClaim> {
+    let Some(file) = open_backend_lock() else {
+        return Some(InstallClaim { _file: None });
+    };
+    match file.try_lock() {
+        Err(std::fs::TryLockError::WouldBlock) => None,
+        _ => Some(InstallClaim { _file: Some(file) }),
+    }
 }
 
 fn instance_id() -> &'static str {
@@ -1538,7 +1549,7 @@ impl UpdateWarning {
 #[cfg(test)]
 mod tests {
     use super::{
-        app_bundle_root, attempt_backoff, attempt_due, backend_running, bold, detect_channel,
+        app_bundle_root, attempt_backoff, attempt_due, bold, claim_install, detect_channel,
         exe_matches_prefix, now_unix, package_manager_owns, parse_manifest, portable_dir,
         portable_outside_prefix, precedence, relaunch_args, render, restart_target, retired_path,
         warning_for, BackendLock, CheckCache, InstallChannel, ATTEMPT_BACKOFF_MAX,
@@ -1700,11 +1711,14 @@ mod tests {
     }
 
     #[test]
-    fn an_updater_sees_a_running_backend_only_while_its_lock_is_held() {
+    fn an_updater_defers_only_while_a_backend_holds_its_lock() {
         let lock = BackendLock::acquire().expect("backend lock beside the test binary");
-        assert!(backend_running());
+        assert!(claim_install().is_none());
         drop(lock);
-        assert!(!backend_running());
+        let claim = claim_install().expect("no backend running");
+        // The claim excludes backends until the install finishes.
+        assert!(claim_install().is_none());
+        drop(claim);
     }
 
     #[test]

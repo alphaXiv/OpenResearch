@@ -72,7 +72,16 @@ pub async fn run(args: UpArgs) -> Result<()> {
     )?;
     // Blocks only for a relaunched server, whose predecessor still holds the port.
     updates::await_replaced_parent();
-    let backend_lock = updates::BackendLock::acquire();
+    let backend_lock = tokio::task::spawn_blocking(updates::BackendLock::acquire)
+        .await
+        .ok()
+        .flatten();
+    // An install that finished while this process waited replaced the image it was started from.
+    if backend_lock.is_some() && updates::newer_exe_on_disk().await {
+        drop(backend_lock);
+        let err = updates::relaunch(port);
+        return Err(anyhow!("orx up: could not restart: {err}"));
+    }
     let listener = tokio::net::TcpListener::bind(("127.0.0.1", port))
         .await
         .map_err(|error| anyhow!("Could not bind 127.0.0.1:{}: {}", port, error))?;
@@ -4424,9 +4433,16 @@ fn spawn_restart_when_idle(state: AppState) {
     });
 }
 
+/// Serializes restart attempts; true once one committed, after which nothing reopens admission.
+static RESTART_COMMITTED: tokio::sync::Mutex<bool> = tokio::sync::Mutex::const_new(false);
+
 /// Stop admitting work and commit to a restart if nothing is in flight beyond
 /// `own_requests` (the caller's). Returns false, and admits again, otherwise.
 async fn begin_restart(state: &AppState, own_requests: usize) -> bool {
+    let mut committed = RESTART_COMMITTED.lock().await;
+    if *committed {
+        return true;
+    }
     DRAINING.store(true, Ordering::SeqCst);
     if ACTIVE.load(Ordering::SeqCst) <= own_requests
         && !state.data_dir_move_in_progress.load(Ordering::SeqCst)
@@ -4440,6 +4456,7 @@ async fn begin_restart(state: &AppState, own_requests: usize) -> bool {
         })
         && state.chat.stop_admitting_if_idle().await
     {
+        *committed = true;
         return true;
     }
     DRAINING.store(false, Ordering::SeqCst);

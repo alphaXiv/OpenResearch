@@ -686,7 +686,7 @@
   "desktop_app_banner_text": "OpenResearch はデスクトップアプリになりました。ターミナルを起動し続ける必要はなく、プロジェクトをそのままアプリで開けます。",
   "desktop_app_banner_download": "アプリをダウンロード",
   "desktop_app_banner_dismiss": "閉じる",
-  "update_banner_complete": "{version} に更新しました。使用するには再起動してください。",
+  "update_banner_complete": "OpenResearch {version} の準備ができました。切り替えるには再起動してください。",
   "update_banner_restart": "今すぐ再起動",
   "update_banner_restarting": "再起動中…",
   "update_banner_restart_failed": "再起動できませんでした: {error}",

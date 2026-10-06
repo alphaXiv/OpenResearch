@@ -680,7 +680,7 @@
   "desktop_app_banner_text": "OpenResearch 现已推出桌面应用。你的项目会在应用中原样打开，无需保持终端运行。",
   "desktop_app_banner_download": "下载应用",
   "desktop_app_banner_dismiss": "关闭",
-  "update_banner_complete": "已更新到 {version}。重新启动即可使用。",
+  "update_banner_complete": "OpenResearch {version} 已就绪。重新启动即可切换。",
   "update_banner_restart": "立即重新启动",
   "update_banner_restarting": "正在重新启动…",
   "update_banner_restart_failed": "无法重新启动：{error}",
