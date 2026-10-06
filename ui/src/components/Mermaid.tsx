@@ -8,7 +8,7 @@ import { m } from "../paraglide/messages.js";
 // plus the reason, so a diagram that will not draw is never a blank box.
 
 import { Check, Code, Copy, Workflow } from "lucide-react";
-import { useEffect, useLayoutEffect, useRef, useState } from "react";
+import { useEffect, useLayoutEffect, useRef, useState, type RefObject } from "react";
 import { highlight } from "../syntaxHighlight";
 import { renderMermaid, type MermaidRenderResult } from "../mermaid";
 import { IconButton } from "./ui";
@@ -19,20 +19,24 @@ const HIGHLIGHT_MAX_BYTES = 100_000;
 /** How long a revised diagram's source must hold still before it is re-drawn. */
 const STREAM_SETTLE_MS = 150;
 
-function CopyButton({ code }: { code: string }) {
+/**
+ * Copies the diagram source, falling back to selecting it when the clipboard
+ * write is refused. `fallbackRef` must point at the element holding that text:
+ * selecting document.body would hand the user the whole dashboard to copy.
+ */
+function CopyButton({ code, fallbackRef }: { code: string; fallbackRef?: RefObject<HTMLElement | null> }) {
   const [copied, setCopied] = useState(false);
-  // A write can be refused (no permission, an unfocused document, an insecure
-  // context). Selecting the text is the fallback, so the button still does the
-  // one thing it exists for rather than silently doing nothing.
   const copy = async () => {
     try {
       await navigator.clipboard.writeText(code);
       setCopied(true);
       setTimeout(() => setCopied(false), 1500);
     } catch {
-      const selection = window.getSelection();
+      const target = fallbackRef?.current;
+      if (!target) return;
       const range = document.createRange();
-      range.selectNodeContents(document.body);
+      range.selectNodeContents(target);
+      const selection = window.getSelection();
       selection?.removeAllRanges();
       selection?.addRange(range);
     }
@@ -57,6 +61,7 @@ export function MermaidDiagram({ code }: { code: string }) {
   // markup goes stale the moment <html data-theme> changes.
   const [theme, setTheme] = useState(() => document.documentElement.dataset.theme);
   const hostRef = useRef<HTMLDivElement>(null);
+  const sourceRef = useRef<HTMLPreElement>(null);
 
   useEffect(() => {
     const observer = new MutationObserver(() =>
@@ -126,7 +131,7 @@ export function MermaidDiagram({ code }: { code: string }) {
             {showDiagram ? <Code size={13} /> : <Workflow size={13} />}
           </IconButton>
         )}
-        <CopyButton code={code} />
+        <CopyButton code={code} fallbackRef={sourceRef} />
       </div>
 
       {result?.ok && showDiagram ? (
@@ -144,7 +149,7 @@ export function MermaidDiagram({ code }: { code: string }) {
           {/* A standalone .mmd file is rendered outside any markdown container,
               which is where the prose styles for <pre> live, so the code block
               carries the equivalent utilities itself. */}
-          <pre className="mermaid-diagram-source m-0 overflow-x-auto rounded-md border border-border-muted bg-surface py-2 px-3 text-sm text-text [&_code]:border-0 [&_code]:bg-transparent [&_code]:p-0 [&_code]:font-mono [&_code]:text-inherit">
+          <pre ref={sourceRef} className="mermaid-diagram-source m-0 overflow-x-auto rounded-md border border-border-muted bg-surface py-2 px-3 text-sm text-text [&_code]:border-0 [&_code]:bg-transparent [&_code]:p-0 [&_code]:font-mono [&_code]:text-inherit">
             <code>{highlight(code, "mermaid", HIGHLIGHT_MAX_BYTES)}</code>
           </pre>
           {reason && (

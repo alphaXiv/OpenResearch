@@ -890,9 +890,17 @@ export function FileViewer({
             />
           </MediaToolbarSlot.Provider>
         ) : isMermaid && !showSource ? (
-          <div ref={selectableContentRef} className="file-view-mermaid p-5">
-            <MermaidDiagram code={data.content} />
-          </div>
+          <>
+            <div ref={selectableContentRef} className="file-view-mermaid p-5">
+              {/* A clipped file would otherwise draw as a plausible-looking but
+                  partial diagram, which reads as complete. The notice is what
+                  the source branch already says. */}
+              <MermaidDiagram code={data.content} />
+            </div>
+            {data.truncated && (
+              <div className="file-view-note py-2.5 px-4 text-sm text-muted">{m.file_viewer_file_truncated_showing_the_first_512_kb()}</div>
+            )}
+          </>
         ) : isMarkdown && !showSource ? (
           <div ref={selectableContentRef} className="file-view-md max-w-readable pt-4.5 px-5 pb-8 [&_.md]:text-base [&_.md_h1]:text-2xl [&_.md_h1]:mt-4.5 [&_.md_h1]:mx-0 [&_.md_h1]:mb-2 [&_.md_h2]:text-xl [&_.md_h2]:mt-4 [&_.md_h2]:mx-0 [&_.md_h2]:mb-2 [&_.md_h3]:text-lg">
             {artifactsMode ? (
