@@ -42,6 +42,8 @@ const INSTALL_HINT: &str =
     "Install the ZCode desktop app from https://zcode.z.ai and sign in there, then re-check this harness.";
 const LOGIN_HINT: &str =
     "Sign in for command-line use with `zcode login` (Z.ai Individual or Team Coding Plan), or enable a provider with an API key in the ZCode app, then re-check this harness. Start Plan works only inside the ZCode app.";
+const OTHER_ACCOUNT_HINT: &str =
+    "ZCode's command-line sign-in belongs to a different Z.ai account than the plan key ZCode saved last, so its runtime finds no model. Sign in again with `zcode login` using the account that has the plan, then re-check this harness.";
 const VERSION_TIMEOUT: Duration = Duration::from_secs(20);
 
 pub struct ZCode;
@@ -159,49 +161,164 @@ fn zcode_home() -> Option<PathBuf> {
         .map(|base| base.join(".zcode"))
 }
 
-/// Whether ZCode's command-line runtime can reach a model: a plan key saved
-/// by `zcode login` (the desktop app's own sign-in alone leaves none), or an
-/// enabled provider with an API key.
-fn has_access(home: &Path) -> bool {
+/// Whether ZCode's command-line runtime can reach a model.
+#[derive(Debug, PartialEq)]
+enum Access {
+    /// A plan signed in with `zcode login`, or an enabled API-key provider.
+    Ready,
+    /// The plan's identity and its API key belong to different accounts
+    /// (a later sign-in in the app replaced the key), so no model is usable.
+    OtherAccount,
+    None,
+}
+
+/// What `zcode login` leaves for the runtime: `account-provider:<id>:identity`
+/// and the plan's API key, `account-provider:coding-plan:<id>:account:<identity>:api-key`.
+/// The runtime uses the plan only when the key is the identity's own.
+fn plan_access(store: &serde_json::Map<String, Value>, cipher_key: Option<&[u8; 32]>) -> Access {
+    let mut other_account = false;
+    for (name, value) in store {
+        let Some(provider) = name
+            .strip_prefix("account-provider:")
+            .and_then(|rest| rest.strip_suffix(":identity"))
+        else {
+            continue;
+        };
+        let prefix = format!("account-provider:coding-plan:{provider}:account:");
+        let accounts: Vec<&str> = store
+            .keys()
+            .filter_map(|key| key.strip_prefix(&prefix)?.strip_suffix(":api-key"))
+            .collect();
+        if accounts.is_empty() {
+            continue;
+        }
+        let identity = cipher_key
+            .zip(value.as_str())
+            .and_then(|(cipher_key, value)| decrypt_credential(value, cipher_key));
+        // Unreadable (a custom ZCODE_CREDENTIAL_SECRET): both keys are there.
+        let Some(identity) = identity else {
+            return Access::Ready;
+        };
+        let encoded = urlencoding::encode(&identity);
+        if accounts
+            .iter()
+            .any(|account| *account == encoded || *account == identity)
+        {
+            return Access::Ready;
+        }
+        other_account = true;
+    }
+    if other_account {
+        Access::OtherAccount
+    } else {
+        Access::None
+    }
+}
+
+fn access(home: &Path) -> Access {
     let v2 = home.join("v2");
-    // The runtime uses a plan only with both of the keys `zcode login` saves
-    // for it: `account-provider:<id>:identity` and the plan's API key,
-    // `account-provider:coding-plan:<id>:account:<identity>:api-key`.
-    let signed_in = super::detect::read_json(v2.join("credentials.json"))
+    let plan = super::detect::read_json(v2.join("credentials.json"))
         .and_then(|store| {
-            store.as_object().map(|store| {
-                store.keys().any(|key| {
-                    key.strip_prefix("account-provider:")
-                        .and_then(|rest| rest.strip_suffix(":identity"))
-                        .is_some_and(|provider| {
-                            let api_key =
-                                format!("account-provider:coding-plan:{provider}:account:");
-                            store
-                                .keys()
-                                .any(|key| key.starts_with(&api_key) && key.ends_with(":api-key"))
-                        })
+            store
+                .as_object()
+                .map(|store| plan_access(store, Some(&credential_cipher_key())))
+        })
+        .unwrap_or(Access::None);
+    if plan == Access::Ready {
+        return plan;
+    }
+    let keyed_provider = super::detect::read_json(v2.join("provider_config.json"))
+        .and_then(|config| {
+            config
+                .pointer("/config/providerConfigRules/providerRules")
+                .and_then(Value::as_array)
+                .map(|rules| {
+                    rules.iter().any(|rule| {
+                        rule.get("enabled").and_then(Value::as_bool) != Some(false)
+                            && rule
+                                .pointer("/config/access/apiKey")
+                                .and_then(Value::as_str)
+                                .is_some_and(|key| !key.trim().is_empty())
+                    })
                 })
-            })
         })
         .unwrap_or(false);
-    if signed_in {
-        return true;
+    if keyed_provider {
+        Access::Ready
+    } else {
+        plan
     }
-    let Some(config) = super::detect::read_json(v2.join("provider_config.json")) else {
-        return false;
+}
+
+/// The key ZCode encrypts credentials.json with: SHA-256 of
+/// `ZCODE_CREDENTIAL_SECRET`, else of a fallback built from the platform,
+/// home directory and user name, as Node reports them.
+fn credential_cipher_key() -> [u8; 32] {
+    use sha2::Digest;
+    let seed = crate::local::shell_env::var("ZCODE_CREDENTIAL_SECRET")
+        .map(|secret| secret.to_string_lossy().trim().to_string())
+        .filter(|secret| !secret.is_empty())
+        .unwrap_or_else(|| {
+            let platform = if cfg!(windows) {
+                "win32"
+            } else if cfg!(target_os = "macos") {
+                "darwin"
+            } else {
+                "linux"
+            };
+            let home = dirs::home_dir()
+                .map(|home| home.to_string_lossy().into_owned())
+                .unwrap_or_default();
+            format!(
+                "zcode-credential-fallback:{platform}:{home}:{}",
+                user_name()
+            )
+        });
+    sha2::Sha256::digest(seed.as_bytes()).into()
+}
+
+fn user_name() -> String {
+    let from_env = if cfg!(windows) {
+        std::env::var("USERNAME").ok()
+    } else {
+        std::env::var("USER")
+            .ok()
+            .or_else(|| std::env::var("LOGNAME").ok())
     };
-    config
-        .pointer("/config/providerConfigRules/providerRules")
-        .and_then(Value::as_array)
-        .is_some_and(|rules| {
-            rules.iter().any(|rule| {
-                rule.get("enabled").and_then(Value::as_bool) != Some(false)
-                    && rule
-                        .pointer("/config/access/apiKey")
-                        .and_then(Value::as_str)
-                        .is_some_and(|key| !key.trim().is_empty())
-            })
-        })
+    from_env
+        .filter(|name| !name.is_empty())
+        .unwrap_or_else(|| "unknown".into())
+}
+
+/// A credentials.json value: `enc:v1:<iv>.<tag>.<data>` (base64url,
+/// AES-256-GCM), or plain text.
+fn decrypt_credential(value: &str, cipher_key: &[u8; 32]) -> Option<String> {
+    use aes_gcm::aead::{Aead, KeyInit};
+    use base64::Engine;
+    let Some(sealed) = value.strip_prefix("enc:v1:") else {
+        return Some(value.to_string());
+    };
+    let decode = |part: &str| {
+        base64::engine::general_purpose::URL_SAFE_NO_PAD
+            .decode(part.trim_end_matches('='))
+            .ok()
+    };
+    let mut parts = sealed.split('.');
+    let (iv, tag, data) = (
+        decode(parts.next()?)?,
+        decode(parts.next()?)?,
+        decode(parts.next()?)?,
+    );
+    if parts.next().is_some() || iv.len() != 12 || tag.len() != 16 {
+        return None;
+    }
+    let cipher = aes_gcm::Aes256Gcm::new_from_slice(cipher_key).ok()?;
+    let mut sealed = data;
+    sealed.extend_from_slice(&tag);
+    let plain = cipher
+        .decrypt(aes_gcm::Nonce::from_slice(&iv), sealed.as_ref())
+        .ok()?;
+    String::from_utf8(plain).ok()
 }
 
 async fn version(launch: &Launch) -> Option<String> {
@@ -244,13 +361,20 @@ impl ZCode {
                 }
             }
             if !info.install_broken {
-                if zcode_home().is_some_and(|home| has_access(&home)) {
-                    info.authenticated = true;
-                    info.auth_state = HarnessAuthState::Ready;
-                    info.auth_method = Some("oauth");
-                } else {
-                    info.auth_state = HarnessAuthState::NeedsLogin;
-                    info.agent_note = Some(LOGIN_HINT.into());
+                match zcode_home().map_or(Access::None, |home| access(&home)) {
+                    Access::Ready => {
+                        info.authenticated = true;
+                        info.auth_state = HarnessAuthState::Ready;
+                        info.auth_method = Some("oauth");
+                    }
+                    Access::OtherAccount => {
+                        info.auth_state = HarnessAuthState::NeedsLogin;
+                        info.agent_note = Some(OTHER_ACCOUNT_HINT.into());
+                    }
+                    Access::None => {
+                        info.auth_state = HarnessAuthState::NeedsLogin;
+                        info.agent_note = Some(LOGIN_HINT.into());
+                    }
                 }
             }
         } else {
@@ -489,7 +613,8 @@ fn explain_failure(message: String, log_path: &Path) -> String {
     if message.contains(NO_MODEL) {
         return format!(
             "ZCode found no model it can use from the command line ({NO_MODEL}). \
-             {COMMAND_LINE_ACCESS} Log: {}",
+             {COMMAND_LINE_ACCESS} If you signed in to the app with another account since \
+             `zcode login`, run `zcode login` again. Log: {}",
             log_path.display()
         );
     }
@@ -807,33 +932,81 @@ mod tests {
         let _ = std::fs::remove_dir_all(dir);
     }
 
+    /// `enc:v1:` value written by ZCode's cipher (Node's AES-256-GCM, base64url)
+    /// for "1234567" under the key SHA-256("orx-test-seed").
+    const SEALED_IDENTITY: &str = "enc:v1:BwcHBwcHBwcHBwcH.d-LIcdY2dLLGlwsdtoEuJQ.aNUKjW6rJg";
+
+    fn test_key() -> [u8; 32] {
+        use sha2::Digest;
+        sha2::Sha256::digest(b"orx-test-seed").into()
+    }
+
+    #[test]
+    fn credentials_decrypt_like_zcode() {
+        assert_eq!(
+            decrypt_credential(SEALED_IDENTITY, &test_key()).as_deref(),
+            Some("1234567")
+        );
+        assert_eq!(
+            decrypt_credential("plain", &test_key()).as_deref(),
+            Some("plain")
+        );
+        assert_eq!(decrypt_credential(SEALED_IDENTITY, &[0; 32]), None);
+        assert_eq!(decrypt_credential("enc:v1:a.b.c", &test_key()), None);
+    }
+
+    #[test]
+    fn a_plan_key_from_another_account_is_not_access() {
+        let store = |account: &str| {
+            serde_json::json!({
+                "account-provider:account:zai-individual-coding-plan:identity": SEALED_IDENTITY,
+                format!("account-provider:coding-plan:account:zai-individual-coding-plan:account:{account}:api-key"): "enc:v1:x.y.z",
+            })
+            .as_object()
+            .unwrap()
+            .clone()
+        };
+        let key = test_key();
+        assert_eq!(plan_access(&store("1234567"), Some(&key)), Access::Ready);
+        assert_eq!(
+            plan_access(&store("7654321"), Some(&key)),
+            Access::OtherAccount
+        );
+        // Without a readable identity both keys being there is all orx can tell.
+        assert_eq!(plan_access(&store("7654321"), None), Access::Ready);
+        assert_eq!(
+            plan_access(&serde_json::Map::new(), Some(&key)),
+            Access::None
+        );
+    }
+
     #[test]
     fn access_comes_from_a_login_or_a_keyed_provider() {
         let dir = std::env::temp_dir().join(format!("orx-zcode-home-{}", uuid::Uuid::new_v4()));
         let v2 = dir.join("v2");
         std::fs::create_dir_all(&v2).unwrap();
-        assert!(!has_access(&dir));
+        assert!(!(access(&dir) == Access::Ready));
         // The desktop app's sign-in alone: OAuth tokens and plan keys, but no
         // identity the command-line runtime can pair them with.
         let app_only = r#"{"oauth:zai:access_token":"enc:v1:a.b.c","zcodejwttoken":"enc:v1:a.b.c",
             "account-provider:coding-plan:account:zai-team-coding-plan:account:u1:api-key":"enc:v1:a.b.c"}"#;
         std::fs::write(v2.join("credentials.json"), app_only).unwrap();
-        assert!(!has_access(&dir));
+        assert!(!(access(&dir) == Access::Ready));
         let disabled = r#"{"config":{"providerConfigRules":{"providerRules":[{"providerId":"zai-api","enabled":false,"config":{"access":{"type":"zhipu-coding-plan-api-key","apiKey":"id.secret"}}}]}}}"#;
         std::fs::write(v2.join("provider_config.json"), disabled).unwrap();
-        assert!(!has_access(&dir));
+        assert!(!(access(&dir) == Access::Ready));
         std::fs::write(
             v2.join("provider_config.json"),
             r#"{"config":{"providerConfigRules":{"providerRules":[{"providerId":"c","config":{"access":{"type":"api-key","apiKey":"sk"}}}]}}}"#,
         )
         .unwrap();
-        assert!(has_access(&dir));
+        assert!((access(&dir) == Access::Ready));
         std::fs::remove_file(v2.join("provider_config.json")).unwrap();
         // An identity whose plan has no API key does not reach a model either.
         let identity_only =
             r#"{"account-provider:account:zai-individual-coding-plan:identity":"enc:v1:a.b.c"}"#;
         std::fs::write(v2.join("credentials.json"), identity_only).unwrap();
-        assert!(!has_access(&dir));
+        assert!(!(access(&dir) == Access::Ready));
         // `zcode login` adds the identity for its plan.
         let cli = app_only.replace(
             "}",
@@ -841,7 +1014,7 @@ mod tests {
             "account-provider:coding-plan:account:zai-individual-coding-plan:account:u1:api-key":"enc:v1:a.b.c"}"#,
         );
         std::fs::write(v2.join("credentials.json"), cli).unwrap();
-        assert!(has_access(&dir));
+        assert!((access(&dir) == Access::Ready));
         let _ = std::fs::remove_dir_all(dir);
     }
 }
