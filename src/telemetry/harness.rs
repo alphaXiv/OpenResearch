@@ -336,6 +336,7 @@ const PHRASES: &[&str] = &[
     "running scripts is disabled on this system",
     "Unsupported platform",
     "Unsupported architecture",
+    "OpenCode has no Windows build",
     // The OpenCode Windows installer's sources, then .NET's network faults.
     "GitHub download failed",
     "npm download failed",

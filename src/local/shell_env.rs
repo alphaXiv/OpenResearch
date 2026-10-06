@@ -56,8 +56,8 @@ pub fn search_path() -> Option<OsString> {
     var("PATH")
 }
 
-/// Extended by the registry's current PATH, so a tool installed while orx runs
-/// is found without a restart, then by the Git orx installs, so the user's own wins.
+/// The PATH to search, extended by the registry's current PATH so a tool installed
+/// while orx runs is found without a restart, then by the Git orx installs.
 #[cfg(windows)]
 pub fn search_path() -> Option<OsString> {
     let base = var("PATH");

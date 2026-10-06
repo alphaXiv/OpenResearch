@@ -1363,7 +1363,9 @@ async fn install_git() -> ApiResult {
     // Spawned, so a page reload mid-install cannot orphan the extractor.
     tokio::spawn(local::portable_git::install())
         .await
-        .map_err(|error| ApiError::from(anyhow!("Git install task failed: {error}")))??;
+        .map_err(|error| ApiError::from(anyhow!("Git install task failed: {error}")))?
+        // `:#` keeps the cause (DNS, TLS, proxy) behind the outer context.
+        .map_err(|error| ApiError(StatusCode::INTERNAL_SERVER_ERROR, format!("{error:#}")))?;
     Ok(Json(json!({})))
 }
 

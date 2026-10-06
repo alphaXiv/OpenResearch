@@ -3,9 +3,9 @@
 //! no PATH change. [`super::shell_env::search_path`] appends its `cmd` directory,
 //! which is also how [`super::bash`] finds the bash it ships.
 
-use crate::error::Result;
 #[cfg(windows)]
-use crate::error::{anyhow, bail, Context};
+use crate::error::{anyhow, Context};
+use crate::error::{bail, Result};
 #[cfg(windows)]
 use std::path::{Path, PathBuf};
 
@@ -23,7 +23,7 @@ pub fn cmd_dir() -> Option<PathBuf> {
 
 #[cfg(not(windows))]
 pub async fn install() -> Result<()> {
-    crate::error::bail!("orx installs Git only on Windows.")
+    bail!("orx installs Git only on Windows.")
 }
 
 /// Download the latest PortableGit, check it against GitHub's digest, and unpack it.
@@ -220,8 +220,8 @@ async fn unpack(archive: &Path, staging: &Path) -> Result<()> {
             bail!("Git for Windows' post-install step failed ({status}).");
         }
     }
-    if !staging.join(r"cmd\git.exe").is_file() || !staging.join(r"bin\bash.exe").is_file() {
-        bail!("The Git for Windows download is missing git.exe or bash.exe.");
+    if !staging.join(r"bin\bash.exe").is_file() {
+        bail!("The Git for Windows download is missing bash.exe.");
     }
     Ok(())
 }
