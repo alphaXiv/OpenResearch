@@ -116,6 +116,7 @@ import { FileViewer, type FileScrollPosition } from "./components/FileViewer";
 import { confirmFileDiscard, FileBufferSession } from "./fileSync";
 import { RailHeader } from "./components/Header";
 import { UpdateBanner, useUpdateStatus } from "./components/UpdateBanner";
+import { DesktopAppBanner } from "./components/DesktopAppBanner";
 import { OfflineBanner } from "./components/OfflineBanner";
 import { NewProjectDialog } from "./components/ProjectsHome";
 import { ExperimentsTable } from "./components/ExperimentsTable";
@@ -1722,6 +1723,7 @@ export default function App({ runtime, projectId, pane }: { runtime: RuntimeInfo
     <div className="app flex flex-col h-full">
       {runtime.kind === "local" && <OfflineBanner />}
       {runtime.kind === "local" && <UpdateBanner status={updateStatus} />}
+      <DesktopAppBanner />
       {workspaceError && <div role="alert" className="flex items-center gap-2 px-4 mac-titlebar:ps-20 win-titlebar:pe-36 py-2 text-subtext"><span>{workspaceError}</span><Button onClick={retryWorkspace}>{m.app_retry()}</Button></div>}
       <div className={`app-body workspace-body relative flex flex-1 min-h-0 py-0 px-3.5 ${workspaceCardVisible ? "workspace-card-visible" : ""}`}>
         {projectId && (

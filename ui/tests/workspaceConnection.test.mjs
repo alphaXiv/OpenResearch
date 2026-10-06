@@ -97,6 +97,7 @@ for (const kind of ["local", "ssh"]) {
         "./components/OfflineBanner": { OfflineBanner: "OfflineBanner" },
         "./components/WorkspaceConnection": { WorkspaceConnection: "WorkspaceConnection" },
         "./components/UpdateBanner": { UpdateBanner: "UpdateBanner", useUpdateStatus: () => ({}) },
+        "./components/DesktopAppBanner": { DesktopAppBanner: "DesktopAppBanner" },
         "./components/ui": {},
       });
       const connection = nodes(ProjectsPage()).find((node) => node.type === "WorkspaceConnection");

@@ -12,6 +12,7 @@
 
 use std::collections::{HashMap, HashSet};
 use std::convert::Infallible;
+use std::io::IsTerminal as _;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
@@ -231,6 +232,12 @@ pub async fn run(args: UpArgs) -> Result<()> {
         eprintln!("orx up: dashboard on {url}");
         if let Some(warning) = crate::local::bash::missing_toolchain() {
             eprintln!("orx up: warning: {warning}");
+        }
+        if !args.desktop_app && !persistent_host && std::io::stderr().is_terminal() {
+            eprintln!(
+                "orx up: the OpenResearch desktop app opens these same projects: {}",
+                crate::updates::desktop_app_download_url()
+            );
         }
         if !args.no_browser {
             browser::open_dashboard(&url, crate::telemetry::UpLaunchMode::of(&args));
