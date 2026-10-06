@@ -18,7 +18,7 @@ fn uncaptured_invocation_allows_the_tool_call() {
         .stdin
         .take()
         .unwrap()
-        .write_all(br#"{"tool_name":"Bash","tool_input":{"command":"echo ok"}}"#)
+        .write_all(br#"{"tool_name":"Bash","tool_use_id":"toolu_never_captured","tool_input":{"command":"echo ok"}}"#)
         .unwrap();
     let output = child.wait_with_output().unwrap();
     assert!(output.status.success());

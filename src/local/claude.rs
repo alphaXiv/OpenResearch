@@ -454,12 +454,16 @@ async fn read_loop(client: Arc<ClaudeClient>, stdout: tokio::process::ChildStdou
                     let _ = tx.send(TurnEvent::Line(value));
                 } else if value.get("type").and_then(Value::as_str) == Some("assistant") {
                     drop(turn);
-                    if let Some(message) = value.get("message") {
-                        crate::local::chat::record_native_invocations(
-                            "claude-code",
-                            &client.session_id,
-                            message,
-                        );
+                    if let Some(message) = value.get("message").cloned() {
+                        let session_id = client.session_id.clone();
+                        // Off the reader so a busy store never stalls Claude's stdout.
+                        tokio::task::spawn_blocking(move || {
+                            crate::local::chat::record_native_invocations(
+                                "claude-code",
+                                &session_id,
+                                &message,
+                            )
+                        });
                     }
                 }
             }
