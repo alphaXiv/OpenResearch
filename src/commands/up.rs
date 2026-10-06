@@ -1365,7 +1365,10 @@ async fn install_git() -> ApiResult {
         .await
         .map_err(|error| ApiError::from(anyhow!("Git install task failed: {error}")))?
         // `:#` keeps the cause (DNS, TLS, proxy) behind the outer context.
-        .map_err(|error| ApiError(StatusCode::INTERNAL_SERVER_ERROR, format!("{error:#}")))?;
+        .map_err(|error| {
+            eprintln!("orx up: Git install failed: {error:#}");
+            ApiError(StatusCode::INTERNAL_SERVER_ERROR, format!("{error:#}"))
+        })?;
     Ok(Json(json!({})))
 }
 

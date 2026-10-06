@@ -126,10 +126,7 @@ fn registry_path() -> Vec<PathBuf> {
             match status {
                 ERROR_SUCCESS => {
                     buffer.truncate(bytes as usize / 2);
-                    while buffer.last() == Some(&0) {
-                        buffer.pop();
-                    }
-                    return Some(OsString::from_wide(&buffer));
+                    return Some(OsString::from_wide(until_nul(&buffer)));
                 }
                 ERROR_MORE_DATA => buffer.resize((bytes as usize).div_ceil(2) + 1, 0),
                 _ => return None,
@@ -149,6 +146,15 @@ fn registry_path() -> Vec<PathBuf> {
     .filter_map(|(root, key)| read(root, key))
     .flat_map(|path| std::env::split_paths(&path).collect::<Vec<_>>())
     .collect()
+}
+
+/// The string before its terminator. An expanded value's reported size can run
+/// past it, and a NUL left in PATH makes every spawn fail ("nul byte found").
+#[cfg(any(windows, test))]
+fn until_nul(wide: &[u16]) -> &[u16] {
+    wide.iter()
+        .position(|&unit| unit == 0)
+        .map_or(wide, |end| &wide[..end])
 }
 
 /// What separates PATH entries when composing one for a child.
@@ -327,6 +333,17 @@ pub fn parse_probe(stdout: &str, marker: &str) -> Option<HashMap<&'static str, O
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_registry_value_ends_at_its_first_nul() {
+        let wide: Vec<u16> = "C:\\bin\0stale\0\0".encode_utf16().collect();
+        assert_eq!(
+            until_nul(&wide),
+            "C:\\bin".encode_utf16().collect::<Vec<_>>()
+        );
+        let bare: Vec<u16> = "C:\\bin".encode_utf16().collect();
+        assert_eq!(until_nul(&bare), bare.as_slice());
+    }
 
     const M: &str = "__ORX_ENV_abc123__";
 
