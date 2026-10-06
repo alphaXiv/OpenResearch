@@ -47,6 +47,11 @@ export function Hyperspace({ className }: { className?: string }) {
     let last = start;
     let frame = 0;
     const draw = (now: number) => {
+      // Once settled, drift at ~30fps so an idle welcome screen stays cheap.
+      if (now - start > WARP_MS + SETTLE_MS && now - last < 33) {
+        frame = requestAnimationFrame(draw);
+        return;
+      }
       const dt = Math.min(now - last, 50) / 1000;
       last = now;
       const speed = speedAt(now - start);
