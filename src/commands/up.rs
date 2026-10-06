@@ -72,6 +72,7 @@ pub async fn run(args: UpArgs) -> Result<()> {
     )?;
     // Blocks only for a relaunched server, whose predecessor still holds the port.
     updates::await_replaced_parent();
+    let backend_lock = updates::BackendLock::acquire();
     let listener = tokio::net::TcpListener::bind(("127.0.0.1", port))
         .await
         .map_err(|error| anyhow!("Could not bind 127.0.0.1:{}: {}", port, error))?;
@@ -268,6 +269,17 @@ pub async fn run(args: UpArgs) -> Result<()> {
     }
     state.dashboard_lock.lock().unwrap().take();
     if restarting {
+        drop(backend_lock);
+        if !updates::newer_exe_on_disk().await {
+            eprintln!("orx up: installing the update before restarting");
+            if let Err(err) = updates::apply_now().await {
+                eprintln!("orx up: {err} Restarting on this version.");
+            }
+            // Deferred again (another backend) or failed: back off, or the relaunch restarts again.
+            if !updates::newer_exe_on_disk().await {
+                updates::record_attempt(false);
+            }
+        }
         eprintln!("orx up: restarting into the updated orx");
         let err = updates::relaunch(actual_port);
         return Err(anyhow!("orx up: could not restart: {err}"));
@@ -4400,29 +4412,38 @@ fn spawn_restart_when_idle(state: AppState) {
             // The cache can claim an install the exec target doesn't have; never restart in a loop.
             if !(status.auto_update
                 && status.restart_required
-                && updates::newer_exe_on_disk().await)
+                && (updates::deferred_update_due() || updates::newer_exe_on_disk().await))
             {
                 continue;
             }
-            DRAINING.store(true, Ordering::SeqCst);
-            if ACTIVE.load(Ordering::SeqCst) == 0
-                && !state.data_dir_move_in_progress.load(Ordering::SeqCst)
-                && state.remote_sessions.list().await.iter().all(|session| {
-                    matches!(
-                        session.status,
-                        RemoteSessionStatus::Disconnected
-                            | RemoteSessionStatus::NeedsInstall
-                            | RemoteSessionStatus::NeedsUpdate
-                    )
-                })
-                && state.chat.stop_admitting_if_idle().await
-            {
+            if begin_restart(&state, 0).await {
                 state.restart.notify_one();
                 return;
             }
-            DRAINING.store(false, Ordering::SeqCst);
         }
     });
+}
+
+/// Stop admitting work and commit to a restart if nothing is in flight beyond
+/// `own_requests` (the caller's). Returns false, and admits again, otherwise.
+async fn begin_restart(state: &AppState, own_requests: usize) -> bool {
+    DRAINING.store(true, Ordering::SeqCst);
+    if ACTIVE.load(Ordering::SeqCst) <= own_requests
+        && !state.data_dir_move_in_progress.load(Ordering::SeqCst)
+        && state.remote_sessions.list().await.iter().all(|session| {
+            matches!(
+                session.status,
+                RemoteSessionStatus::Disconnected
+                    | RemoteSessionStatus::NeedsInstall
+                    | RemoteSessionStatus::NeedsUpdate
+            )
+        })
+        && state.chat.stop_admitting_if_idle().await
+    {
+        return true;
+    }
+    DRAINING.store(false, Ordering::SeqCst);
+    false
 }
 
 /// Startup summary of detected coding agents. Never blocks. It goes through
@@ -5243,6 +5264,23 @@ async fn restart_after_update(State(state): State<AppState>) -> ApiResult {
             "no newer orx is installed to restart into".into(),
         ));
     };
+    // A dashboard poll landing alongside the click is not work worth refusing over.
+    let mut began = false;
+    for _ in 0..10 {
+        began = begin_restart(&state, 1).await;
+        if began {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    if !began {
+        return Err(ApiError(
+            StatusCode::CONFLICT,
+            "OpenResearch is busy: a chat turn, queued message, approval, open terminal, \
+             remote session, or request is still in progress. Try again once it finishes."
+                .into(),
+        ));
+    }
     let restart = state.restart.clone();
     tokio::spawn(async move {
         tokio::time::sleep(Duration::from_millis(250)).await;

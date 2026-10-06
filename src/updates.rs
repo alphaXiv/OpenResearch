@@ -668,6 +668,12 @@ struct CheckCache {
     installed_version: String,
     #[serde(default)]
     installed_tag: String,
+    /// A release the updater held back because a backend was using this
+    /// install; that backend installs it when it restarts.
+    #[serde(default)]
+    deferred_version: String,
+    #[serde(default)]
+    deferred_tag: String,
 }
 
 fn cache_path() -> PathBuf {
@@ -742,6 +748,19 @@ pub fn record_installed(version: &str, tag: &str) {
         cache.latest_tag = tag.to_string();
         cache.installed_version = version.to_string();
         cache.installed_tag = tag.to_string();
+        cache.deferred_version.clear();
+        cache.deferred_tag.clear();
+    });
+}
+
+/// Record a release held back for a running backend to install on restart.
+pub fn record_deferred(version: &str, tag: &str) {
+    mutate_cache(|cache| {
+        cache.checked_at = now_unix();
+        cache.latest = version.to_string();
+        cache.latest_tag = tag.to_string();
+        cache.deferred_version = version.to_string();
+        cache.deferred_tag = tag.to_string();
     });
 }
 
@@ -880,9 +899,9 @@ pub struct UpdateStatus {
     /// actually the reason.
     pub env_disabled: bool,
     pub update_available: bool,
-    /// The version already on disk when it is newer than the running one: only a
-    /// restart of *this* process is missing. Named separately from `latest`
-    /// because a release can land between the install and the restart.
+    /// The version a restart of *this* process moves to: already on disk, or held
+    /// back until this backend restarts. Named separately from `latest` because a
+    /// release can land between the install and the restart.
     pub installed_version: Option<String>,
     pub installed_tag: Option<String>,
     pub restart_required: bool,
@@ -895,27 +914,35 @@ pub struct UpdateStatus {
     pub instance: &'static str,
 }
 
+/// Installed on disk or held back for this restart: either way a restart is what moves to it.
+fn restart_target<'a>(cache: &'a CheckCache, current: &Version) -> Option<(Version, &'a str)> {
+    [
+        (&cache.installed_version, &cache.installed_tag),
+        (&cache.deferred_version, &cache.deferred_tag),
+    ]
+    .into_iter()
+    .filter_map(|(version, tag)| Some((Version::parse(version).ok()?, tag.as_str())))
+    .filter(|(version, _)| is_outdated(current, version))
+    .max_by(|a, b| a.0.cmp(&b.0))
+}
+
 pub fn status() -> UpdateStatus {
     let current = current_version();
     let cache = read_cache();
     let channel = current_channel().ok();
     let latest = cache.as_ref().and_then(|c| Version::parse(&c.latest).ok());
-    let installed = cache
-        .as_ref()
-        .and_then(|c| Version::parse(&c.installed_version).ok())
-        .filter(|installed| is_outdated(&current, installed));
+    let restart_target = cache.as_ref().and_then(|c| restart_target(c, &current));
     UpdateStatus {
         update_available: latest
             .as_ref()
             .is_some_and(|latest| is_outdated(&current, latest)),
-        restart_required: installed.is_some(),
+        restart_required: restart_target.is_some(),
         can_restart: true,
         instance: instance_id(),
-        installed_tag: installed
+        installed_tag: restart_target
             .as_ref()
-            .and(cache.as_ref())
-            .and_then(|c| (!c.installed_tag.is_empty()).then(|| c.installed_tag.clone())),
-        installed_version: installed.map(|v| v.to_string()),
+            .and_then(|(_, tag)| (!tag.is_empty()).then(|| tag.to_string())),
+        installed_version: restart_target.map(|(version, _)| version.to_string()),
         latest_tag: latest
             .as_ref()
             .and(cache.as_ref())
@@ -946,6 +973,56 @@ pub async fn newer_exe_on_disk() -> bool {
         .strip_prefix("orx ")
         .and_then(|v| Version::parse(v).ok())
         .is_some_and(|on_disk| is_outdated(&current_version(), &on_disk))
+}
+
+/// Whether a held-back update is waiting for this process's restart and no failed
+/// install of it is still backing off.
+pub fn deferred_update_due() -> bool {
+    let current = current_version();
+    read_cache().is_some_and(|cache| {
+        Version::parse(&cache.deferred_version).is_ok_and(|v| is_outdated(&current, &v))
+            && (cache.failures == 0 || attempt_due(Some(&cache)))
+    })
+}
+
+/// Beside what the updater replaces, so every config and data dir using this
+/// install agrees on it.
+fn backend_lock_path() -> Option<PathBuf> {
+    let target = match current_channel().ok()? {
+        InstallChannel::AppBundle(root) | InstallChannel::AppImage(root) => root.clone(),
+        _ => current_exe().ok()?,
+    };
+    Some(target.parent()?.join(".orx-backend.lock"))
+}
+
+fn open_backend_lock() -> Option<std::fs::File> {
+    std::fs::OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .write(true)
+        .open(backend_lock_path()?)
+        .ok()
+}
+
+/// Held shared for an `orx up`'s lifetime. Swapping the binary under it would hand
+/// its agents a different `orx` than the backend running them, so updaters defer.
+pub struct BackendLock {
+    _file: std::fs::File,
+}
+
+impl BackendLock {
+    /// `None` leaves this backend unprotected, as every backend before this lock was.
+    pub fn acquire() -> Option<Self> {
+        let file = open_backend_lock()?;
+        file.try_lock_shared().ok()?;
+        Some(Self { _file: file })
+    }
+}
+
+/// Whether an `orx up` is using this install. A lock no backend could open counts as none.
+pub fn backend_running() -> bool {
+    open_backend_lock()
+        .is_some_and(|file| matches!(file.try_lock(), Err(std::fs::TryLockError::WouldBlock)))
 }
 
 fn instance_id() -> &'static str {
@@ -1350,7 +1427,7 @@ impl UpdateWarning {
     /// refresh of the cached "latest" for next time. Printing here — rather than
     /// after the command — is what guarantees the warning shows even when the
     /// command exits the process itself.
-    pub fn start() -> UpdateWarning {
+    pub fn start(may_update: bool) -> UpdateWarning {
         if let Some(message) = stale_up_warning() {
             let _ = write!(
                 std::io::stderr(),
@@ -1394,7 +1471,7 @@ impl UpdateWarning {
             );
         }
 
-        if automatic && attempt_due(cache.as_ref()) {
+        if may_update && automatic && attempt_due(cache.as_ref()) {
             spawn_background_update();
         }
 
@@ -1461,10 +1538,11 @@ impl UpdateWarning {
 #[cfg(test)]
 mod tests {
     use super::{
-        app_bundle_root, attempt_backoff, attempt_due, bold, detect_channel, exe_matches_prefix,
-        now_unix, package_manager_owns, parse_manifest, portable_dir, portable_outside_prefix,
-        precedence, relaunch_args, render, retired_path, warning_for, CheckCache, InstallChannel,
-        ATTEMPT_BACKOFF_MAX, ATTEMPT_BACKOFF_MIN,
+        app_bundle_root, attempt_backoff, attempt_due, backend_running, bold, detect_channel,
+        exe_matches_prefix, now_unix, package_manager_owns, parse_manifest, portable_dir,
+        portable_outside_prefix, precedence, relaunch_args, render, restart_target, retired_path,
+        warning_for, BackendLock, CheckCache, InstallChannel, ATTEMPT_BACKOFF_MAX,
+        ATTEMPT_BACKOFF_MIN,
     };
     use semver::Version;
     use std::ffi::OsString;
@@ -1601,6 +1679,32 @@ mod tests {
         // shift.
         assert_eq!(attempt_backoff(20), ATTEMPT_BACKOFF_MAX);
         assert_eq!(attempt_backoff(u32::MAX), ATTEMPT_BACKOFF_MAX);
+    }
+
+    #[test]
+    fn a_deferred_update_is_a_restart_target() {
+        let v = |s: &str| Version::parse(s).unwrap();
+        let mut cache = CheckCache {
+            deferred_version: "0.2.17".into(),
+            deferred_tag: "v0.2.17".into(),
+            ..Default::default()
+        };
+        assert_eq!(
+            restart_target(&cache, &v("0.2.16")),
+            Some((v("0.2.17"), "v0.2.17"))
+        );
+        // The newer of installed and deferred wins; neither counts once running.
+        cache.installed_version = "0.2.18".into();
+        assert_eq!(restart_target(&cache, &v("0.2.16")).unwrap().0, v("0.2.18"));
+        assert_eq!(restart_target(&cache, &v("0.2.18")), None);
+    }
+
+    #[test]
+    fn an_updater_sees_a_running_backend_only_while_its_lock_is_held() {
+        let lock = BackendLock::acquire().expect("backend lock beside the test binary");
+        assert!(backend_running());
+        drop(lock);
+        assert!(!backend_running());
     }
 
     #[test]
