@@ -560,8 +560,24 @@ fn parse_custom_provider(raw: &str) -> Option<CustomProvider> {
 /// resolved — codex needs to find its `codex-code-mode-host` helper next to the
 /// real binary.
 fn codex_candidates() -> Vec<PathBuf> {
-    let drops = dirs::home_dir()
-        .map(|home| home.join(".local").join("bin"))
+    let drops = codex_install_dirs(dirs::home_dir().as_deref())
+        .into_iter()
+        .filter_map(|dir| crate::local::shell_env::find_in_dir(&dir, "codex"));
+    find_on_path("codex")
+        .into_iter()
+        .chain(drops)
+        .map(resolve_symlinks)
+        .collect()
+}
+
+/// Installer locations off PATH. ChatGPT.app bundles the Codex CLI without
+/// putting it on PATH, sometimes as the only install.
+fn codex_install_dirs(home: Option<&Path>) -> Vec<PathBuf> {
+    let chatgpt_apps = [
+        Some(PathBuf::from("/Applications")),
+        home.map(|home| home.join("Applications")),
+    ];
+    home.map(|home| home.join(".local").join("bin"))
         .into_iter()
         .chain(
             cfg!(windows)
@@ -569,11 +585,13 @@ fn codex_candidates() -> Vec<PathBuf> {
                 .flatten()
                 .map(|dir| dir.join("Programs/OpenAI/Codex/bin")),
         )
-        .filter_map(|dir| crate::local::shell_env::find_in_dir(&dir, "codex"));
-    find_on_path("codex")
-        .into_iter()
-        .chain(drops)
-        .map(resolve_symlinks)
+        .chain(
+            chatgpt_apps
+                .into_iter()
+                .flatten()
+                .filter(|_| cfg!(target_os = "macos"))
+                .map(|apps| apps.join("ChatGPT.app/Contents/Resources/codex-cli/bin")),
+        )
         .collect()
 }
 
@@ -4170,6 +4188,26 @@ mod tests {
     use super::super::options::REASONING_DEFAULT_ID;
     use super::*;
     use serde_json::json;
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn chatgpt_app_bundled_codex_is_an_install_candidate() {
+        let home = std::env::temp_dir().join(format!("orx-chatgpt-test-{}", uuid::Uuid::new_v4()));
+        let bin = home.join("Applications/ChatGPT.app/Contents/Resources/codex-cli/bin");
+        std::fs::create_dir_all(&bin).unwrap();
+        std::fs::write(bin.join("codex"), "").unwrap();
+
+        let dirs = codex_install_dirs(Some(&home));
+        assert!(dirs.contains(&PathBuf::from(
+            "/Applications/ChatGPT.app/Contents/Resources/codex-cli/bin"
+        )));
+        let found: Vec<_> = dirs
+            .iter()
+            .filter_map(|dir| crate::local::shell_env::find_in_dir(dir, "codex"))
+            .collect();
+        assert!(found.contains(&bin.join("codex")));
+        std::fs::remove_dir_all(&home).unwrap();
+    }
 
     #[test]
     fn plugin_skills_follow_enabled_installs_and_manifest_paths() {
