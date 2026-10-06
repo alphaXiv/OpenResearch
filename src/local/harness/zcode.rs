@@ -164,12 +164,23 @@ fn zcode_home() -> Option<PathBuf> {
 /// enabled provider with an API key.
 fn has_access(home: &Path) -> bool {
     let v2 = home.join("v2");
+    // The runtime uses a plan only with both of the keys `zcode login` saves
+    // for it: `account-provider:<id>:identity` and the plan's API key,
+    // `account-provider:coding-plan:<id>:account:<identity>:api-key`.
     let signed_in = super::detect::read_json(v2.join("credentials.json"))
         .and_then(|store| {
             store.as_object().map(|store| {
-                store
-                    .keys()
-                    .any(|key| key.starts_with("account-provider:") && key.ends_with(":identity"))
+                store.keys().any(|key| {
+                    key.strip_prefix("account-provider:")
+                        .and_then(|rest| rest.strip_suffix(":identity"))
+                        .is_some_and(|provider| {
+                            let api_key =
+                                format!("account-provider:coding-plan:{provider}:account:");
+                            store
+                                .keys()
+                                .any(|key| key.starts_with(&api_key) && key.ends_with(":api-key"))
+                        })
+                })
             })
         })
         .unwrap_or(false);
@@ -818,10 +829,16 @@ mod tests {
         .unwrap();
         assert!(has_access(&dir));
         std::fs::remove_file(v2.join("provider_config.json")).unwrap();
+        // An identity whose plan has no API key does not reach a model either.
+        let identity_only =
+            r#"{"account-provider:account:zai-individual-coding-plan:identity":"enc:v1:a.b.c"}"#;
+        std::fs::write(v2.join("credentials.json"), identity_only).unwrap();
+        assert!(!has_access(&dir));
         // `zcode login` adds the identity for its plan.
         let cli = app_only.replace(
             "}",
-            r#","account-provider:account:zai-individual-coding-plan:identity":"enc:v1:a.b.c"}"#,
+            r#","account-provider:account:zai-individual-coding-plan:identity":"enc:v1:a.b.c",
+            "account-provider:coding-plan:account:zai-individual-coding-plan:account:u1:api-key":"enc:v1:a.b.c"}"#,
         );
         std::fs::write(v2.join("credentials.json"), cli).unwrap();
         assert!(has_access(&dir));
