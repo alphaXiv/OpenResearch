@@ -442,7 +442,7 @@ export function Onboarding({
               </p>
             )}
             {(gitVersion === null || gitError) && (
-              <div className="onb-git-check mt-7" role="status" aria-live="polite">
+              <div className="onb-git-check mt-7 mb-5.5" role="status" aria-live="polite">
                 <LocalGitCard gitVersion={gitVersion} error={gitError} />
                 {gitError ? (
                   <p className={GIT_RETRY_HINT_CLASS_NAME}>{m.onboarding_retry_connection()}</p>
