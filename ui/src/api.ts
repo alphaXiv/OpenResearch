@@ -255,6 +255,8 @@ export const completeOnboarding = (selection: OnboardingSelection, profile: Prof
 
 export interface ProjectPathStatus {
   gitVersion: string | null;
+  /** Only without a path: Windows with no Git, which `installGit` can fix. */
+  gitInstallable?: boolean;
   resolvedPath: string | null;
   exists: boolean | null;
   directory: boolean | null;
@@ -269,6 +271,8 @@ export const getProjectPathStatus = (path = "", signal?: AbortSignal) => {
   const query = path ? `?path=${encodeURIComponent(path)}` : "";
   return get<ProjectPathStatus>(`/api/project-path/status${query}`, signal);
 };
+
+export const installGit = () => post<Record<string, never>>("/api/git/install");
 
 export const pickProjectFolder = () =>
   post<{ path: string | null }>("/api/project-path/pick").then((result) => result.path);

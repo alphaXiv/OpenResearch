@@ -36,6 +36,7 @@ pub mod opencode;
 pub mod openresearch;
 pub mod overleaf;
 pub mod overleaf_live;
+pub mod portable_git;
 pub mod projects;
 pub mod ray;
 pub mod resolve;

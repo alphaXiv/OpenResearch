@@ -31,7 +31,7 @@ fn usable_bash() -> Option<PathBuf> {
 pub fn missing_toolchain() -> Option<&'static str> {
     usable_bash().is_none().then_some(
         "Git for Windows not found — orx needs the bash it ships to run experiments. \
-         Install it from https://git-scm.com/download/win, then restart orx.",
+         Install it from the dashboard or from https://git-scm.com/download/win.",
     )
 }
 

@@ -9,9 +9,17 @@ experiment runs and the nanochat demo. The gaps are listed at the bottom.
 the `bash` and coreutils that orx uses to run experiments — the `bash.exe` in
 `System32` is the WSL launcher, which cannot see your files, and orx rejects it.
 Install it with the standard installer so `git.exe` lands on `PATH`; orx finds
-the shell by walking up from there.
+the shell by walking up from there. orx notices a Git installed while it runs,
+so **Re-check** in onboarding is enough; there is no need to restart.
 
-You also need a coding agent. Claude Code is the default:
+If you have no Git, onboarding offers **Install Git**. orx downloads the latest
+PortableGit from Git for Windows' GitHub releases, checks it against the SHA-256
+GitHub publishes, and unpacks it into `%LOCALAPPDATA%\OpenResearch\PortableGit`
+with no administrator prompt. orx, its agents, and its terminals use it; your
+own `PATH` is unchanged, and a Git you install later takes precedence.
+
+You also need a coding agent. Claude Code is the default. To install Git, Node,
+and Claude Code yourself:
 
 ```powershell
 winget install --id Git.Git -e

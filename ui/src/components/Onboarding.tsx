@@ -18,6 +18,7 @@ import {
   captureUiEvent,
   type HarnessSetupCommands,
   completeOnboarding,
+  installGit,
   reasoningFor,
   type AgentSelection,
   type Harness,
@@ -107,6 +108,7 @@ export function Onboarding({
   useEffect(() => () => installSocket.current?.close(), []);
   const harnesses = harnessQuery.data ?? null;
   const gitVersion = pathQuery.data?.gitVersion;
+  const gitInstallable = !remote && pathQuery.data?.gitInstallable === true;
   const [finishing, setFinishing] = useState(false);
   const [finishError, setFinishError] = useState<string | null>(null);
   const [finishErrorDetails, setFinishErrorDetails] = useState("");
@@ -157,6 +159,7 @@ export function Onboarding({
       .finally(() => fresh() && setChecking(false));
   };
   useEffect(() => load(false), []);
+  const installGitMutation = useMutation({ mutationFn: installGit, onSuccess: () => load(true) });
   useEffect(() => {
     if (harnesses === null) return;
     const ready = harnesses.filter((h) => h.agentReady && !h.catalogPending);
@@ -435,6 +438,17 @@ export function Onboarding({
                 <LocalGitCard gitVersion={gitVersion} error={gitError} />
                 {gitError ? (
                   <p className={GIT_RETRY_HINT_CLASS_NAME}>{m.onboarding_retry_connection()}</p>
+                ) : gitInstallable ? (
+                  <div className="mt-2 flex flex-col items-start gap-2.5">
+                    <p className={GIT_RETRY_HINT_CLASS_NAME}>{m.onboarding_install_git_for_windows()}</p>
+                    <Button variant="primary" onClick={() => installGitMutation.mutate()} disabled={installGitMutation.isPending || checking}>
+                      {installGitMutation.isPending && <Spinner />}
+                      {installGitMutation.isPending ? m.onboarding_installing_git() : m.onboarding_install_git()}
+                    </Button>
+                    {installGitMutation.isError && (
+                      <p className={ONB_CARD_META_CLASS_NAME}>{installGitMutation.error.message}</p>
+                    )}
+                  </div>
                 ) : (
                   <p className={GIT_RETRY_HINT_CLASS_NAME}>
                     {m.onboarding_git_is_required_for_local_experiments_install_git()}
