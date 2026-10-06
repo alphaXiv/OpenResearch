@@ -48,6 +48,8 @@ const CHECK_TTL: Duration = Duration::from_secs(24 * 60 * 60);
 const UA: &str = concat!("openresearch-cli/", env!("CARGO_PKG_VERSION"));
 
 /// Where this platform's desktop app downloads from.
+// Unused while this fork ships no desktop app; kept for when it does.
+#[allow(dead_code)]
 pub fn desktop_app_download_url() -> String {
     let asset = match (std::env::consts::OS, std::env::consts::ARCH) {
         ("macos", _) => "OpenResearch.dmg",
