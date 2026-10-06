@@ -140,7 +140,7 @@ pub struct ModelInfo {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub reasoning_levels: Option<Vec<super::options::OptionChoice>>,
     /// The catalog's own human name for the model (`Opus`, `GPT-5.6 Sol`,
-    /// `Big Pickle`). Absent for statically-listed fallback models, where the
+    /// `Big Pickle`). Absent when the CLI does not provide a display name; then
     /// UI derives a label from the id instead.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub display_name: Option<String>,
@@ -231,7 +231,17 @@ pub struct HarnessInfo {
     /// Live credential readiness. Account metadata never implies this state.
     pub auth_state: HarnessAuthState,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub auth_method: Option<&'static str>, // "oauth" | "apiKey" | "local"
+    pub auth_method: Option<&'static str>, // "oauth" | "apiKey" | "thirdParty" | "local"
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub auth_provider: Option<String>,
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub login_eligible: bool,
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub auth_check_failed: bool,
+    #[serde(skip)]
+    pub auth_observation: Option<super::claude::AuthProbe>,
+    #[serde(skip)]
+    pub claude_ultracode: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub account: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -275,6 +285,11 @@ impl HarnessInfo {
             authenticated: false,
             auth_state: HarnessAuthState::Unknown,
             auth_method: None,
+            auth_provider: None,
+            login_eligible: false,
+            auth_check_failed: false,
+            auth_observation: None,
+            claude_ultracode: false,
             account: None,
             org: None,
             plan: None,

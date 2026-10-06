@@ -115,11 +115,6 @@ Also enable **Require a pull request** + **Require review from Code Owners** on
 `main` (see `.github/CODEOWNERS`) so the signing scripts can't change unreviewed.
 Never commit the `.p12`.
 
-`package-macos-app.sh` signs with `macos/entitlements.plist`, which grants the
-Apple-events entitlement the Dock-click tab focus needs. Without it that path is
-denied in signed builds only — unsigned local bundles never exercise the check —
-and the first Dock click prompts once for Automation access.
-
 ## Build / sign locally
 
 ```bash
@@ -161,8 +156,9 @@ installer drop locations — the "works in my terminal, broken in the app" bug.
 (`$SHELL -ilc`, interactive because `.zshrc` is where these exports live) once at
 startup and installs the result via `local::shell_env`, which harness lookup,
 harness children, and directory resolution consult instead of the process
-environment. It is best-effort and capped at 5s; every outcome is logged. To see
-it, run the bundled binary from a terminal:
+environment. It is best-effort: startup waits up to 5s, and a later answer
+(within 60s) still supplies PATH but not the directories below. Every outcome is
+logged. To see it, run the bundled binary from a terminal:
 
 ```bash
 /Applications/OpenResearch.app/Contents/MacOS/OpenResearch
@@ -173,8 +169,9 @@ it, run the bundled binary from a terminal:
 The app and a `curl`-installed `orx` share one data dir and one config dir, so
 both must be safe to have at once:
 
-- **Ports** — the app binds an ephemeral loopback port rather than `orx up`'s
-  4791.
+- **Ports** — the app binds loopback port 4792 rather than `orx up`'s 4791,
+  falling back to an ephemeral port when 4792 is taken. Keeping it fixed keeps
+  the window's origin, and so its localStorage, stable across launches.
 - **Store** — SQLite in WAL with a 5s busy timeout; concurrent readers/writers
   are expected. Run supervisors hold a per-run exclusive lock, so a second
   server recovering the same active run exits instead of double-driving it.
@@ -190,7 +187,8 @@ both must be safe to have at once:
   `launched_as_app_bundle`.
 
 - **Directories** — `ORX_DATA_DIR`, `XDG_DATA_HOME`, and `XDG_CONFIG_HOME` are
-  imported by the same startup probe (`local::shell_env::IMPORTED`), so a rc
+  imported by the same startup probe when it answers within the startup wait
+  (`local::shell_env::IMPORTED`), so a rc
   file that redirects the store moves the app with it. Otherwise the app would
   read the default database while the CLI read the user's, and the lock above
   would guard a file neither shares.

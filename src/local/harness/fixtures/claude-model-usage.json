@@ -1,0 +1,41 @@
+[
+  {
+    "modelUsage": {
+      "claude-opus-5-5": {
+        "inputTokens": 4,
+        "outputTokens": 392,
+        "cacheReadInputTokens": 144926,
+        "cacheCreationInputTokens": 145480,
+        "thinkingTokens": 198,
+        "provider": "firstParty"
+      },
+      "claude-haiku-4-5-20251001": {
+        "inputTokens": 3,
+        "outputTokens": 4,
+        "cacheReadInputTokens": 0,
+        "cacheCreationInputTokens": 100999,
+        "thinkingTokens": 0,
+        "provider": "firstParty"
+      }
+    }
+  },
+  {
+    "modelUsage": {
+      "claude-opus-5-5": {
+        "inputTokens": 6,
+        "outputTokens": 484,
+        "thinkingTokens": 286,
+        "cacheReadInputTokens": 278541,
+        "cacheCreationInputTokens": 156400,
+        "provider": "firstParty"
+      },
+      "claude-haiku-4-5-20251001": {
+        "inputTokens": 3,
+        "outputTokens": 4,
+        "thinkingTokens": 0,
+        "cacheReadInputTokens": 0,
+        "cacheCreationInputTokens": 100999
+      }
+    }
+  }
+]

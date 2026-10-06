@@ -27,7 +27,7 @@ export function invalidateFamilies(families: readonly string[], scope = workspac
 
 const fileBodies = ["resolvedFile", "getProjectFile", "getArtifactFileText", "getArtifactFileMetadata"];
 export const artifactFamilies = ["getArtifacts", "getArtifactFileText", "getArtifactFileMetadata"];
-export const liveFamilies = ["listProjects", "listProjectActivity", "listExperiments", "listRuns", "listChatSessions", "getChatMessages", "getHarnesses", "getUpdateStatus", ...artifactFamilies, ...fileBodies, "getAbsoluteFile", "fileVersion", "getCodeTree", "getSessionWorktree", "getRunDiff", "getExperimentDiff"];
+export const liveFamilies = ["listProjects", "listProjectActivity", "listSidebarChatSessions", "listExperiments", "listRuns", "listChatSessions", "getChatMessages", "getHarnesses", "getUpdateStatus", ...artifactFamilies, ...fileBodies, "getAbsoluteFile", "fileVersion", "getCodeTree", "getSessionWorktree", "getRunDiff", "getExperimentDiff"];
 
 export function invalidateProjectFiles(projectId: string, scope = workspaceScope(), cancelReads = false) {
   const sessions = queryClient.getQueryData<ChatSession[]>([...scope, "listChatSessions", projectId]) ?? [];
@@ -94,6 +94,7 @@ export function invalidateWrite(url: string, scope: ReturnType<typeof workspaceS
     return;
   }
   if (path.startsWith("/api/chat/")) {
+    invalidate(["listSidebarChatSessions"], scope);
     if (path === "/api/chat/sessions") invalidate(["getProjectStarterPrompts", "listProjectActivity"], scope);
     return;
   }
@@ -101,7 +102,7 @@ export function invalidateWrite(url: string, scope: ReturnType<typeof workspaceS
   if (project) {
     const [, projectId, action] = project;
     if (action.startsWith("/file")) { invalidateProjectFiles(projectId, scope, true); return; }
-    invalidate(["listProjects", "listProjectActivity"], scope);
+    invalidate(["listProjects", "listProjectActivity", "listSidebarChatSessions"], scope);
     invalidate(["getProjectGitStatus", "getCodeTree", "getProjectStarterPrompts"], scope, (query) => query.queryKey[3] === projectId);
     return;
   }

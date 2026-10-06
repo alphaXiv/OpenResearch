@@ -4,7 +4,8 @@ export type Pane =
   | { kind: "file"; path: string; source?: "repo" | "artifacts" | "abs"; sessionId?: string; ref?: string; line?: number; branchLabel?: string }
   | { kind: "code"; experimentId: string; branch: string; view: "files" | "changes" }
   | { kind: "plan"; sessionId: string; promptId: string }
-  | { kind: "subagent"; sessionId: string; spawnPartId: string };
+  | { kind: "subagent"; sessionId: string; spawnPartId: string }
+  | { kind: "side"; sessionId: string };
 
 export interface TaskWorkspace {
   tabs: Pane[];
@@ -78,6 +79,9 @@ export function parsePane(value: unknown): Pane | undefined {
       break;
     case "subagent":
       if (only("kind", "sessionId", "spawnPartId") && nonempty(value.sessionId) && nonempty(value.spawnPartId)) return { kind: "subagent", sessionId: value.sessionId, spawnPartId: value.spawnPartId };
+      break;
+    case "side":
+      if (only("kind", "sessionId") && nonempty(value.sessionId)) return { kind: "side", sessionId: value.sessionId };
   }
 }
 

@@ -1,0 +1,84 @@
+name: Sign Windows CLI
+
+on:
+  workflow_call:
+    inputs:
+      plan:
+        required: true
+        type: string
+
+permissions:
+  contents: read
+  id-token: write
+
+jobs:
+  # Keep dry runs successful instead of skipping the caller's downstream jobs.
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - run: echo "Windows signing is required for published releases."
+
+  sign:
+    needs: check
+    if: ${{ !fromJson(inputs.plan).announcement_tag_is_implicit }}
+    runs-on: windows-latest
+    timeout-minutes: 20
+    environment: release-signing
+    defaults:
+      run:
+        shell: pwsh
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+        with:
+          name: artifacts-build-local-x86_64-pc-windows-msvc
+          path: artifacts
+
+      - name: Unpack the CLI
+        run: |
+          $archives = @(Get-ChildItem artifacts/*.zip)
+          $manifests = @(Get-ChildItem artifacts/*-dist-manifest.json)
+          if ($archives.Count -ne 1 -or $manifests.Count -ne 1) {
+            throw 'Expected one Windows archive and one manifest'
+          }
+          Expand-Archive -LiteralPath $archives[0].FullName -DestinationPath unpacked
+          $binaries = @(Get-ChildItem unpacked -Recurse -Filter orx.exe)
+          if ($binaries.Count -ne 1) { throw 'Expected one orx.exe' }
+          "WINDOWS_CLI=$($binaries[0].FullName)" >> $env:GITHUB_ENV
+
+      - uses: Azure/login@a641126d1b8aa4d1fa005f4f92df94a3a4c4c906 # v3
+        with:
+          client-id: ${{ vars.WINDOWS_SIGNING_CLIENT_ID }}
+          tenant-id: ${{ vars.WINDOWS_SIGNING_TENANT_ID }}
+          subscription-id: ${{ vars.WINDOWS_SIGNING_SUBSCRIPTION_ID }}
+
+      - uses: ./.github/actions/windows-signing
+        with:
+          files: ${{ env.WINDOWS_CLI }}
+          endpoint: ${{ vars.WINDOWS_SIGNING_ENDPOINT }}
+          account: ${{ vars.WINDOWS_SIGNING_ACCOUNT }}
+          profile: ${{ vars.WINDOWS_SIGNING_PROFILE }}
+
+      - name: Repack and update release checksums
+        run: |
+          $archive = Get-ChildItem artifacts/*.zip
+          $manifest = Get-ChildItem artifacts/*-dist-manifest.json
+          Remove-Item -LiteralPath $archive.FullName
+          Compress-Archive -Path unpacked/* -DestinationPath $archive.FullName
+          $sum = (Get-FileHash -Algorithm SHA256 -LiteralPath $archive.FullName).Hash.ToLowerInvariant()
+          [IO.File]::WriteAllText("$($archive.FullName).sha256", "$sum *$($archive.Name)`n`n")
+          $data = Get-Content -Raw -LiteralPath $manifest.FullName | ConvertFrom-Json -AsHashtable
+          if (-not $data.artifacts[$archive.Name].checksums.sha256) {
+            throw 'Windows archive has no sha256 in the manifest'
+          }
+          $data.artifacts[$archive.Name].checksums.sha256 = $sum
+          $data | ConvertTo-Json -Depth 100 | Set-Content -LiteralPath $manifest.FullName -Encoding utf8
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: artifacts-build-local-x86_64-pc-windows-msvc
+          path: artifacts/
+          overwrite: true

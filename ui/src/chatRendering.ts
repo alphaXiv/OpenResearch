@@ -39,6 +39,12 @@ export function isTurnStatusPart(part: ChatPart): boolean {
   return part.id === "turn-retry" || part.id === "turn-recovery";
 }
 
+export function withoutDuplicateTurnError(parts: ChatPart[], turnStatus: ChatPart | undefined): ChatPart[] {
+  const last = parts.at(-1);
+  return turnStatus?.id === "turn-recovery" && last?.type === "tool" && last.tool === "error"
+    && last.state?.error && last.state.error === turnStatus.state?.error ? parts.slice(0, -1) : parts;
+}
+
 /** The last visible part, when it is a non-errored tool. */
 export function partsTailToolId(parts: ChatPart[]): string | null {
   for (let index = parts.length - 1; index >= 0; index--) {

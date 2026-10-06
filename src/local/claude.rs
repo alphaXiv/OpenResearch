@@ -43,9 +43,9 @@ use tokio::process::{Child, ChildStdin, Command};
 use tokio::sync::{mpsc, oneshot, Mutex, Notify};
 
 use crate::error::{anyhow, Result};
+use crate::local::agent_lifecycle::{IdlePolicy, REAPER_INTERVAL};
 use crate::local::harness::claude::{
-    claude_permission_mode, find_claude, uses_permission_bridge, write_mcp_config,
-    write_plan_settings,
+    claude_permission_mode, find_claude, uses_permission_bridge, write_mcp_config, write_settings,
 };
 use crate::local::harness::{HarnessAuthState, PermissionMode};
 use crate::local::native_store::NativeStore;
@@ -55,21 +55,23 @@ use crate::local::native_store::NativeStore;
 const CONTROL_TIMEOUT: Duration = Duration::from_secs(10);
 const TERMINATION_TIMEOUT: Duration = Duration::from_secs(5);
 
-const IDLE_TIMEOUT: Duration = Duration::from_secs(15 * 60);
 const STALE_AFTER: Duration = Duration::from_secs(90 * 60);
-const REAPER_INTERVAL: Duration = Duration::from_secs(30);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum LifecycleStopReason {
     IdleExpired,
+    IdleLimit,
     Stale,
+    Exited,
 }
 
 impl LifecycleStopReason {
     fn as_str(self) -> &'static str {
         match self {
             Self::IdleExpired => "idle-expired",
+            Self::IdleLimit => "idle-limit",
             Self::Stale => "stale",
+            Self::Exited => "exited",
         }
     }
 }
@@ -87,14 +89,19 @@ impl TurnSlot {
         }
     }
 
-    fn stop_reason(&self, started_at: Instant, now: Instant) -> Option<LifecycleStopReason> {
+    fn stop_reason(
+        &self,
+        started_at: Instant,
+        now: Instant,
+        idle_timeout: Duration,
+    ) -> Option<LifecycleStopReason> {
         if self.sender.is_some() {
             return None;
         }
         if now.duration_since(started_at) >= STALE_AFTER {
             return Some(LifecycleStopReason::Stale);
         }
-        if now.duration_since(self.idle_since) >= IDLE_TIMEOUT {
+        if now.duration_since(self.idle_since) >= idle_timeout {
             return Some(LifecycleStopReason::IdleExpired);
         }
         None
@@ -296,10 +303,12 @@ impl ClaudeClient {
     pub(crate) async fn compact(
         self: &Arc<Self>,
         reaper_notify: Arc<Notify>,
+        spawning: tokio::sync::MutexGuard<'_, ()>,
         timeout: Duration,
     ) -> Result<()> {
         let (tx, mut rx) = mpsc::unbounded_channel();
         let _route = self.register_turn(tx, reaper_notify);
+        drop(spawning);
         self.send_user_message("/compact").await?;
         let settle = async {
             while let Some(event) = rx.recv().await {
@@ -381,8 +390,11 @@ impl ClaudeClient {
         }
     }
 
-    fn stop_reason(&self, now: Instant) -> Option<LifecycleStopReason> {
-        self.turn.lock().unwrap().stop_reason(self.started_at, now)
+    fn stop_reason(&self, now: Instant, idle_timeout: Duration) -> Option<LifecycleStopReason> {
+        self.turn
+            .lock()
+            .unwrap()
+            .stop_reason(self.started_at, now, idle_timeout)
     }
 
     fn age_and_idle(&self, now: Instant) -> (Duration, Option<Duration>) {
@@ -553,18 +565,11 @@ async fn spawn_client(spec: &SpawnSpec, auth_generation: u64) -> Result<Arc<Clau
     // today's no-bridge plan gating, never worse.
     let mut config = spec.config.clone();
     config.bridge_active = false;
-    if spec.config.permission_mode == Some(PermissionMode::Plan) {
-        match write_plan_settings(&spec.repo) {
-            Ok(path) => {
-                cmd.arg("--settings").arg(path);
-            }
-            Err(e) => {
-                eprintln!(
-                    "orx up: plan-mode settings not written, orx inspection will be gated: {e}"
-                );
-            }
-        }
-    }
+    let settings = write_settings(
+        &spec.repo,
+        spec.config.permission_mode == Some(PermissionMode::Plan),
+    )?;
+    cmd.arg("--settings").arg(settings);
     if uses_permission_bridge(spec.config.permission_mode) {
         // The gate token is minted HERE and ONLY here — once per child, riding
         // the mcp-gate bridge for the child's whole life. Re-minting mid-child
@@ -709,11 +714,16 @@ pub struct ClaudeHost {
     forgotten_sessions: Mutex<HashSet<String>>,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AuthSnapshot {
     pub state: HarnessAuthState,
     pub generation: u64,
     pub runtime_rejected: bool,
+    pub method: Option<&'static str>,
+    pub provider: Option<String>,
+    pub credential_conflict: bool,
+    pub auth_check_failed: bool,
+    sequence: u64,
     last_recovered_generation: Option<u64>,
 }
 
@@ -733,6 +743,11 @@ impl ClaudeHost {
                 state: HarnessAuthState::Unknown,
                 generation: 0,
                 runtime_rejected: false,
+                method: None,
+                provider: None,
+                credential_conflict: false,
+                auth_check_failed: false,
+                sequence: 0,
                 last_recovered_generation: None,
             }),
             auth_recovery_lock: Mutex::new(()),
@@ -763,12 +778,56 @@ impl ClaudeHost {
     }
 
     async fn reap_expired(&self) {
-        self.reap_expired_at(Instant::now()).await;
+        self.reap_expired_at(Instant::now(), IdlePolicy::current())
+            .await;
     }
 
-    async fn reap_expired_at(&self, now: Instant) {
-        let sessions = self.inner.lock().await.keys().cloned().collect::<Vec<_>>();
-        for session_id in sessions {
+    async fn reap_expired_at(&self, now: Instant, policy: IdlePolicy) {
+        let clients = self
+            .inner
+            .lock()
+            .await
+            .iter()
+            .map(|(session_id, client)| (session_id.clone(), client.clone()))
+            .collect::<Vec<_>>();
+        let mut doomed = Vec::new();
+        let mut idle = Vec::new();
+        for (session_id, client) in clients {
+            if client.terminated.load(Ordering::Acquire) {
+                continue;
+            }
+            let exited = !matches!(client.child.lock().await.try_wait(), Ok(None));
+            let turn = client.turn.lock().unwrap();
+            if turn.sender.is_some() {
+                continue;
+            }
+            let idle_since = turn.idle_since;
+            // An exited child may leave descendants in its group; release it, never keep it warm.
+            let reason = if exited {
+                Some(LifecycleStopReason::Exited)
+            } else {
+                turn.stop_reason(client.started_at, now, policy.idle_timeout)
+            };
+            drop(turn);
+            match reason {
+                Some(reason) => doomed.push((session_id, client, idle_since, reason)),
+                None => idle.push((session_id, client, idle_since)),
+            }
+        }
+        let idle_for = idle
+            .iter()
+            .map(|(_, _, idle_since)| now.duration_since(*idle_since))
+            .collect::<Vec<_>>();
+        for index in policy.over_limit(&idle_for) {
+            let (session_id, client, idle_since) = idle[index].clone();
+            doomed.push((
+                session_id,
+                client,
+                idle_since,
+                LifecycleStopReason::IdleLimit,
+            ));
+        }
+        for (session_id, client, idle_since, reason) in doomed {
             let session_lock = {
                 let mut locks = self.spawn_locks.lock().await;
                 locks
@@ -779,22 +838,27 @@ impl ClaudeHost {
             let _spawning = session_lock.lock().await;
             let expired = {
                 let mut clients = self.inner.lock().await;
-                let Some(client) = clients.get(&session_id) else {
+                // A turn may have run since the snapshot; only an untouched idle child goes.
+                let untouched = clients
+                    .get(&session_id)
+                    .is_some_and(|current| Arc::ptr_eq(current, &client))
+                    && {
+                        let turn = client.turn.lock().unwrap();
+                        turn.sender.is_none() && turn.idle_since == idle_since
+                    };
+                if !untouched {
                     continue;
-                };
-                let Some(reason) = client.stop_reason(now) else {
-                    continue;
-                };
-                clients.remove(&session_id).map(|client| (client, reason))
+                }
+                clients.remove(&session_id)
             };
-            if let Some((client, reason)) = expired {
+            if let Some(client) = expired {
                 stop_client_at(client, reason.as_str(), now).await;
             }
         }
     }
 
     pub fn auth_snapshot(&self) -> AuthSnapshot {
-        *self.auth.read().unwrap()
+        self.auth.read().unwrap().clone()
     }
 
     pub fn claim_auth_announcement(&self, generation: u64) -> bool {
@@ -813,24 +877,50 @@ impl ClaudeHost {
         false
     }
 
-    /// Adopt a read-only detection result if no runtime transition happened
-    /// since that probe began. Inconclusive probes never rotate credentials or
-    /// replace a previously conclusive state.
-    pub fn observe_auth_state(&self, state: HarnessAuthState, expected_generation: u64) -> bool {
+    /// Publish one live status result; worker generation is not probe order.
+    pub fn observe_auth_probe(&self, probe: &crate::local::harness::claude::AuthProbe) -> bool {
         let mut auth = self.auth.write().unwrap();
-        if auth.generation != expected_generation
-            || auth.runtime_rejected
-            || auth.state == state
-            || (state == HarnessAuthState::Unknown && auth.state != HarnessAuthState::Unknown)
-        {
+        if probe.sequence <= auth.sequence || auth.runtime_rejected {
             return false;
         }
-        auth.state = state;
-        if state != HarnessAuthState::Unknown {
-            auth.generation += 1;
-            auth.last_recovered_generation = None;
+        auth.sequence = probe.sequence;
+        let before = auth.clone();
+        if probe.failed_check {
+            auth.auth_check_failed = true;
+            if auth.state == HarnessAuthState::Unknown {
+                auth.method = probe.method;
+                auth.provider = probe.provider.clone();
+            }
+        } else {
+            let rotate = auth.state != probe.state
+                || (auth.state == HarnessAuthState::Ready
+                    && probe.state == HarnessAuthState::Ready
+                    && (auth.method != probe.method || auth.provider != probe.provider));
+            auth.state = probe.state;
+            auth.method = probe.method;
+            auth.provider = probe.provider.clone();
+            auth.credential_conflict = probe.credential_conflict;
+            auth.auth_check_failed = false;
+            if rotate {
+                auth.generation += 1;
+                auth.last_recovered_generation = None;
+            }
         }
-        true
+        auth.state != before.state
+            || auth.method != before.method
+            || auth.provider != before.provider
+            || auth.credential_conflict != before.credential_conflict
+            || auth.auth_check_failed != before.auth_check_failed
+            || auth.generation != before.generation
+    }
+
+    fn auth_barrier(auth: &mut AuthSnapshot) {
+        auth.sequence = crate::local::harness::claude::auth_barrier_sequence();
+    }
+
+    pub fn reserve_auth_check(&self) {
+        let mut auth = self.auth.write().unwrap();
+        Self::auth_barrier(&mut auth);
     }
 
     /// Explicit UI re-check after the user changed credentials. This clears a
@@ -843,6 +933,8 @@ impl ClaudeHost {
         }
         auth.runtime_rejected = false;
         auth.state = HarnessAuthState::Unknown;
+        Self::auth_barrier(&mut auth);
+        auth.auth_check_failed = false;
         auth.generation += 1;
         auth.last_recovered_generation = None;
         true
@@ -857,6 +949,8 @@ impl ClaudeHost {
             return false;
         }
         auth.state = HarnessAuthState::Unknown;
+        Self::auth_barrier(&mut auth);
+        auth.auth_check_failed = false;
         auth.generation += 1;
         auth.last_recovered_generation = None;
         true
@@ -883,14 +977,22 @@ impl ClaudeHost {
         if current.state == HarnessAuthState::NeedsLogin {
             return current.state;
         }
-        let state = crate::local::harness::claude::current_auth_state().await;
+        let probe = crate::local::harness::claude::current_auth_state().await;
         let mut auth = self.auth.write().unwrap();
-        if auth.generation != current.generation || auth.runtime_rejected {
+        if auth.generation != current.generation
+            || auth.runtime_rejected
+            || probe.sequence <= auth.sequence
+        {
             return auth.state;
         }
         auth.last_recovered_generation = Some(failed_generation);
+        Self::auth_barrier(&mut auth);
         auth.generation += 1;
-        auth.state = state;
+        auth.state = probe.state;
+        auth.method = probe.method;
+        auth.provider = probe.provider;
+        auth.credential_conflict = probe.credential_conflict;
+        auth.auth_check_failed = probe.failed_check;
         auth.runtime_rejected = false;
         auth.state
     }
@@ -912,6 +1014,8 @@ impl ClaudeHost {
         }
         auth.state = HarnessAuthState::NeedsLogin;
         auth.runtime_rejected = true;
+        Self::auth_barrier(&mut auth);
+        auth.auth_check_failed = false;
         auth.generation += 1;
         auth.last_recovered_generation = Some(failed_generation);
         auth.state
@@ -923,8 +1027,8 @@ impl ClaudeHost {
         if current.state != HarnessAuthState::Unknown || current.runtime_rejected {
             return current;
         }
-        let state = crate::local::harness::claude::current_auth_state().await;
-        self.observe_auth_state(state, current.generation);
+        let probe = crate::local::harness::claude::current_auth_state().await;
+        self.observe_auth_probe(&probe);
         self.auth_snapshot()
     }
 
@@ -961,7 +1065,11 @@ impl ClaudeHost {
         match auth.state {
             HarnessAuthState::NeedsLogin => {
                 return Err(anyhow!(
-                    "Claude Code sign-in required — run `claude auth login`, then try again"
+                    "{}",
+                    crate::local::harness::claude::auth_recovery_note(
+                        auth.method,
+                        auth.provider.as_deref(),
+                    )
                 ));
             }
             HarnessAuthState::Unsupported => {
@@ -981,7 +1089,9 @@ impl ClaudeHost {
             {
                 self.inner.lock().await.remove(&session);
                 stop_client(live, "exited").await;
-            } else if let Some(reason) = live.stop_reason(Instant::now()) {
+            } else if let Some(reason) =
+                live.stop_reason(Instant::now(), IdlePolicy::current().idle_timeout)
+            {
                 self.inner.lock().await.remove(&session);
                 stop_client(live, reason.as_str()).await;
             } else if live.auth_generation() != auth.generation {
@@ -1096,10 +1206,22 @@ impl ClaudeHost {
         session_id: &str,
         timeout: Duration,
     ) -> Result<bool> {
+        // Held until the compact turn registers, so the reaper cannot release the child first.
+        let session_lock = {
+            let mut locks = self.spawn_locks.lock().await;
+            locks
+                .entry(session_id.to_string())
+                .or_insert_with(|| Arc::new(Mutex::new(())))
+                .clone()
+        };
+        let spawning = session_lock.lock().await;
         let Some(client) = self.client_for(session_id).await else {
             return Ok(false);
         };
-        if let Err(error) = client.compact(self.reaper_notify.clone(), timeout).await {
+        if let Err(error) = client
+            .compact(self.reaper_notify.clone(), spawning, timeout)
+            .await
+        {
             // The child is still mid-`/compact`; its trailing `result` would
             // otherwise land in whatever turn registers next.
             self.kill_session(session_id).await;
@@ -1161,6 +1283,8 @@ impl ClaudeHost {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    const IDLE_TIMEOUT: Duration = IdlePolicy::DEFAULT.idle_timeout;
 
     #[cfg(unix)]
     async fn test_client(
@@ -1351,17 +1475,17 @@ mod tests {
         let recent_start = now - Duration::from_secs(20 * 60);
         let mut slot = TurnSlot::new(now - IDLE_TIMEOUT + Duration::from_secs(1));
 
-        assert_eq!(slot.stop_reason(recent_start, now), None);
+        assert_eq!(slot.stop_reason(recent_start, now, IDLE_TIMEOUT), None);
 
         slot.idle_since = now - IDLE_TIMEOUT;
         assert_eq!(
-            slot.stop_reason(recent_start, now),
+            slot.stop_reason(recent_start, now, IDLE_TIMEOUT),
             Some(LifecycleStopReason::IdleExpired)
         );
 
         slot.idle_since = now;
         assert_eq!(
-            slot.stop_reason(now - STALE_AFTER, now),
+            slot.stop_reason(now - STALE_AFTER, now, IDLE_TIMEOUT),
             Some(LifecycleStopReason::Stale)
         );
     }
@@ -1374,13 +1498,13 @@ mod tests {
         let (tx, _rx) = mpsc::unbounded_channel();
         slot.register(tx.clone());
 
-        assert_eq!(slot.stop_reason(started_at, now), None);
+        assert_eq!(slot.stop_reason(started_at, now, IDLE_TIMEOUT), None);
 
         let released_at = now + Duration::from_secs(5);
         assert!(slot.release(&tx, released_at));
         assert_eq!(slot.idle_since, released_at);
         assert_eq!(
-            slot.stop_reason(started_at, released_at),
+            slot.stop_reason(started_at, released_at, IDLE_TIMEOUT),
             Some(LifecycleStopReason::Stale)
         );
     }
@@ -1414,12 +1538,15 @@ mod tests {
         let (tx, _rx) = mpsc::unbounded_channel();
         let route = client.register_turn(tx, host.reaper_notify.clone());
 
-        host.reap_expired_at(now).await;
+        host.reap_expired_at(now, IdlePolicy::DEFAULT).await;
         assert!(host.inner.lock().await.contains_key("active-stale"));
 
         drop(route);
-        host.reap_expired_at(Instant::now() + Duration::from_secs(60))
-            .await;
+        host.reap_expired_at(
+            Instant::now() + Duration::from_secs(60),
+            IdlePolicy::DEFAULT,
+        )
+        .await;
         assert!(!host.inner.lock().await.contains_key("active-stale"));
         assert!(client.terminated.load(Ordering::Acquire));
     }
@@ -1440,7 +1567,7 @@ mod tests {
         install_test_client(&host, idle.clone()).await;
         install_test_client(&host, stale.clone()).await;
 
-        host.reap_expired_at(now).await;
+        host.reap_expired_at(now, IdlePolicy::DEFAULT).await;
 
         let clients = host.inner.lock().await;
         assert!(!clients.contains_key("idle"));
@@ -1448,6 +1575,53 @@ mod tests {
         drop(clients);
         assert!(idle.terminated.load(Ordering::Acquire));
         assert!(stale.terminated.load(Ordering::Acquire));
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn reaper_keeps_only_the_most_recent_idle_worker_on_low_memory() {
+        let now = Instant::now();
+        let host = ClaudeHost::new();
+        let recent = test_client("recent", now, now - Duration::from_secs(40), "sleep 600").await;
+        let older = test_client("older", now, now - Duration::from_secs(60), "sleep 600").await;
+        let active = test_client("active", now, now - Duration::from_secs(90), "sleep 600").await;
+        install_test_client(&host, recent.clone()).await;
+        install_test_client(&host, older.clone()).await;
+        install_test_client(&host, active.clone()).await;
+        let (tx, _rx) = mpsc::unbounded_channel();
+        let _route = active.register_turn(tx, host.reaper_notify.clone());
+
+        host.reap_expired_at(now, IdlePolicy::LOW_MEMORY).await;
+
+        let clients = host.inner.lock().await;
+        assert!(clients.contains_key("recent"));
+        assert!(clients.contains_key("active"));
+        assert!(!clients.contains_key("older"));
+        drop(clients);
+        assert!(older.terminated.load(Ordering::Acquire));
+        host.shutdown().await;
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn exited_worker_is_released_instead_of_kept_warm() {
+        let now = Instant::now();
+        let host = ClaudeHost::new();
+        let warm = test_client("warm", now, now - Duration::from_secs(60), "sleep 600").await;
+        let exited = test_client("exited", now, now - Duration::from_secs(40), "exit 0").await;
+        exited.child.lock().await.wait().await.unwrap();
+        install_test_client(&host, warm.clone()).await;
+        install_test_client(&host, exited.clone()).await;
+
+        host.reap_expired_at(now, IdlePolicy::LOW_MEMORY).await;
+
+        let clients = host.inner.lock().await;
+        assert!(clients.contains_key("warm"));
+        assert!(!clients.contains_key("exited"));
+        drop(clients);
+        assert!(!warm.terminated.load(Ordering::Acquire));
+        assert!(exited.terminated.load(Ordering::Acquire));
+        host.shutdown().await;
     }
 
     #[cfg(unix)]
@@ -1470,7 +1644,7 @@ mod tests {
             let host = host.clone();
             tokio::spawn(async move {
                 let _ = started_tx.send(());
-                host.reap_expired_at(now).await;
+                host.reap_expired_at(now, IdlePolicy::DEFAULT).await;
             })
         };
         started_rx.await.unwrap();
@@ -1606,16 +1780,84 @@ mod tests {
     }
 
     #[test]
-    fn auth_generation_changes_only_on_transitions() {
+    fn auth_observations_order_without_recycling_on_transient_failure() {
         let host = ClaudeHost::new();
         assert_eq!(host.auth_snapshot().generation, 0);
-        assert!(host.observe_auth_state(HarnessAuthState::NeedsLogin, 0));
+        let first = crate::local::harness::claude::parse_auth_status(
+            Some(1),
+            br#"{"loggedIn":false,"authMethod":"none","apiProvider":"firstParty"}"#,
+            crate::local::harness::claude::auth_barrier_sequence(),
+        );
+        assert!(host.observe_auth_probe(&first));
         assert_eq!(host.auth_snapshot().generation, 1);
-        assert!(!host.observe_auth_state(HarnessAuthState::NeedsLogin, 1));
+        assert!(!host.observe_auth_probe(&first));
         assert_eq!(host.auth_snapshot().generation, 1);
-        assert!(!host.observe_auth_state(HarnessAuthState::Unknown, 1));
-        assert_eq!(host.auth_snapshot().generation, 1);
-        assert!(host.observe_auth_state(HarnessAuthState::Ready, 1));
+        let ready = crate::local::harness::claude::parse_auth_status(
+            Some(0),
+            br#"{"loggedIn":true,"authMethod":"third_party","apiProvider":"bedrock"}"#,
+            crate::local::harness::claude::auth_barrier_sequence(),
+        );
+        assert!(host.observe_auth_probe(&ready));
         assert_eq!(host.auth_snapshot().generation, 2);
+        let unknown = crate::local::harness::claude::parse_auth_status(
+            Some(2),
+            b"not json",
+            crate::local::harness::claude::auth_barrier_sequence(),
+        );
+        assert!(host.observe_auth_probe(&unknown));
+        assert_eq!(host.auth_snapshot().state, HarnessAuthState::Ready);
+        assert!(host.auth_snapshot().auth_check_failed);
+        assert_eq!(host.auth_snapshot().generation, 2);
+        host.reserve_auth_check();
+        assert_eq!(host.auth_snapshot().generation, 2);
+        assert!(!host.observe_auth_probe(&unknown));
+    }
+
+    #[test]
+    fn newer_provider_wins_in_both_completion_orders() {
+        for newer_first in [false, true] {
+            let host = ClaudeHost::new();
+            let older = crate::local::harness::claude::parse_auth_status(
+                Some(0),
+                br#"{"loggedIn":true,"authMethod":"claude.ai","apiProvider":"firstParty"}"#,
+                crate::local::harness::claude::auth_barrier_sequence(),
+            );
+            let newer = crate::local::harness::claude::parse_auth_status(
+                Some(0),
+                br#"{"loggedIn":true,"authMethod":"third_party","apiProvider":"bedrock"}"#,
+                crate::local::harness::claude::auth_barrier_sequence(),
+            );
+            if newer_first {
+                assert!(host.observe_auth_probe(&newer));
+                assert!(!host.observe_auth_probe(&older));
+                assert_eq!(host.auth_snapshot().generation, 1);
+            } else {
+                assert!(host.observe_auth_probe(&older));
+                assert!(host.observe_auth_probe(&newer));
+                assert_eq!(host.auth_snapshot().generation, 2);
+            }
+            let snapshot = host.auth_snapshot();
+            assert_eq!(snapshot.method, Some("thirdParty"));
+            assert_eq!(snapshot.provider.as_deref(), Some("bedrock"));
+            assert!(!host.observe_auth_probe(&newer));
+        }
+    }
+
+    #[test]
+    fn ready_credential_route_change_recycles_workers() {
+        let host = ClaudeHost::new();
+        for status in [
+            br#"{"loggedIn":true,"authMethod":"claude.ai","apiProvider":"firstParty"}"#.as_slice(),
+            br#"{"loggedIn":true,"authMethod":"api-key","apiProvider":"firstParty"}"#.as_slice(),
+            br#"{"loggedIn":true,"authMethod":"api-key"}"#.as_slice(),
+        ] {
+            let probe = crate::local::harness::claude::parse_auth_status(
+                Some(0),
+                status,
+                crate::local::harness::claude::auth_barrier_sequence(),
+            );
+            assert!(host.observe_auth_probe(&probe));
+        }
+        assert_eq!(host.auth_snapshot().generation, 3);
     }
 }

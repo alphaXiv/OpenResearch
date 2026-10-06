@@ -22,7 +22,7 @@ test("a selected skill can be removed with its trailing composer spaces", () => 
   });
 });
 
-const ALL_COMMANDS = ["compact", "copy", "export", "goal", "model", "new", "plan", "resume"];
+const ALL_COMMANDS = ["compact", "copy", "export", "goal", "model", "new", "plan", "resume", "side"];
 
 test("every harness gets the same commands ahead of its skills", () => {
   const skills = [{ name: "review", description: "Review", source: "user" }];
@@ -98,6 +98,16 @@ test("Goal takes the rest of the message, but only when it leads", () => {
     name: "goal",
     prompt: "keep the /plan in sync",
   });
+});
+
+test("Side takes its first question from the rest of the message", () => {
+  assert.deepEqual(parseComposerCommand("/side why did loss spike?", "command"), {
+    name: "side",
+    prompt: "why did loss spike?",
+  });
+  assert.deepEqual(parseComposerCommand("/side", null), { name: "side", prompt: "" });
+  assert.equal(parseComposerCommand("ask in a /side chat", "command"), null);
+  assert.equal(parseComposerCommand("/sidebar", "command"), null);
 });
 
 test("only Plan composes with a prompt; the rest must be the whole message", () => {

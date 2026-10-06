@@ -40,6 +40,9 @@ export interface RestartState {
   restart: () => void;
 }
 
+export const releaseNotesUrl = (tag: string) =>
+  `https://github.com/alphaXiv/OpenResearch/releases/tag/${tag.split("/").map(encodeURIComponent).join("/")}`;
+
 /** Ask the server to relaunch, then reload once a different server process
  *  answers — the page itself is the old build until it reloads. The old server answers the POST and then drops every connection,
  *  so the polling errors in between are expected and swallowed. */
@@ -103,7 +106,7 @@ export function UpdateBanner({ status }: { status: UpdateStatus | null }) {
 
   return (
     <div
-      className="update-banner flex items-center gap-2 shrink-0 py-1.5 px-3.5 text-sm text-text bg-surface border-b border-b-border"
+      className="update-banner flex items-center gap-2 shrink-0 py-1.5 px-3.5 mac-titlebar:ps-20 win-titlebar:pe-36 text-sm text-text bg-surface border-b border-b-border"
       role="status"
     >
       <RefreshCw size={13} className={`shrink-0 text-subtext${restarting ? " animate-spin" : ""}`} />
@@ -112,6 +115,11 @@ export function UpdateBanner({ status }: { status: UpdateStatus | null }) {
           ? m.update_banner_restart_failed({ error })
           : m.update_banner_complete({ version: ltr(version) })}
       </span>
+      {status?.installedTag && (
+        <a href={releaseNotesUrl(status.installedTag)} target="_blank" rel="noreferrer" className="text-sm text-subtext underline shrink-0">
+          {m.settings_release_notes()}
+        </a>
+      )}
       {status?.canRestart && (
         <Button type="button" size="small" disabled={restarting} onClick={restart}>
           {restarting ? m.update_banner_restarting() : m.update_banner_restart()}

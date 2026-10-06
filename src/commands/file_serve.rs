@@ -233,7 +233,7 @@ pub async fn git_response(
 
     use std::process::Stdio;
     use tokio::io::AsyncReadExt as _;
-    let mut child = tokio::process::Command::new("git")
+    let mut child = tokio::process::Command::from(crate::local::git::git_command())
         .current_dir(repo)
         .env("GIT_TERMINAL_PROMPT", "0")
         .args(["cat-file", "blob", &spec])

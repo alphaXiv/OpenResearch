@@ -106,7 +106,7 @@ function savedTask(panes = [file, code]) {
 }
 
 test("all tab variants retain ordering, preview, history, expansion and view metadata", () => {
-  const panes = [file, code, { kind: "experiment", experimentId: "exp", view: "terminal", runId: "old" }, { kind: "plan", sessionId: "one", promptId: "plan" }, { kind: "subagent", sessionId: "one", spawnPartId: "spawn" }];
+  const panes = [file, code, { kind: "experiment", experimentId: "exp", view: "terminal", runId: "old" }, { kind: "plan", sessionId: "one", promptId: "plan" }, { kind: "subagent", sessionId: "one", spawnPartId: "spawn" }, { kind: "side", sessionId: "two" }];
   const saved = savedTask(panes);
   saved.previewKey = tabs.rightTabKey(tabs.paneTab(file));
   saved.expanded = { files: ["src"], [tabs.rightTabKey(tabs.paneTab(code))]: ["src/utils"] };
@@ -118,6 +118,7 @@ test("all tab variants retain ordering, preview, history, expansion and view met
   assert.equal(selected.fileTabs, restored.fileTabs);
   assert.equal(selected.expTabs, restored.expTabs);
   assert.equal(selected.subagentTabs, restored.subagentTabs);
+  assert.equal(selected.sideTabs, restored.sideTabs);
   assert.deepEqual([...selected.codeTabs[0].toggled], ["src/utils"]);
   const line = tabs.applyPane(restored, { ...file, line: 20 });
   assert.equal(line.fileTabs[0].branchLabel, "experiment-branch");

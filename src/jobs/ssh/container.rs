@@ -238,8 +238,9 @@ pub(super) async fn inspect(
     let mut lines = host.lines();
     let state = lines.next().unwrap_or_default();
     if state.starts_with("EXIT ") {
-        return Ok(super::parse_job_state(state));
+        return super::parse_job_state(state);
     }
+    super::parse_job_state(state)?;
     let age: i64 = lines.next().unwrap_or("0").parse()?;
     if let Some(reason) = unavailable(target, container).await? {
         if reason.ends_with(" is paused.") {
@@ -280,7 +281,7 @@ else echo DEAD; fi
                 let current = host_state(target, dir).await?;
                 let state = current.lines().next().unwrap_or_default();
                 if state == "RUNNING" || state.starts_with("EXIT ") {
-                    return Ok(super::parse_job_state(state));
+                    return super::parse_job_state(state);
                 }
             }
             cancel(target, container).await?;

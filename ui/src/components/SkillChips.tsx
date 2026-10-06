@@ -1,5 +1,5 @@
 import { useQuery } from "@tanstack/react-query";
-import { Copy, Cpu, Download, FoldVertical, Goal, History, ListChecks, SquarePen, WandSparkles, type LucideIcon } from "lucide-react";
+import { Copy, Cpu, Download, FoldVertical, Goal, History, ListChecks, MessagesSquare, SquarePen, WandSparkles, type LucideIcon } from "lucide-react";
 
 import { getSkillContentQuery } from "../queries/settings";
 import { m } from "../paraglide/messages.js";
@@ -16,7 +16,7 @@ import {
 } from "react";
 import { createPortal } from "react-dom";
 import { type SkillInfo } from "../api";
-import { commandDisplayName, isComposerCommand, splitCommandTokens, type ComposerCommandName } from "../composerCommands";
+import { canonicalSkillName, commandDisplayName, isComposerCommand, splitCommandTokens, type ComposerCommandName } from "../composerCommands";
 import { Md } from "./Md";
 import { Badge } from "./ui";
 
@@ -55,7 +55,7 @@ export function skillMarginSpaces(name: string, textarea: HTMLTextAreaElement | 
   // Match SkillLabel's 16px icon and 4px gap, plus 6px before adjacent text.
   const extraWidth = 16 + 4 + measurement.measureText(commandDisplayName(name)).width
     - measurement.measureText(`/${name}`).width;
-  return Math.max(2, Math.ceil((extraWidth + 6) / measurement.measureText(" ").width));
+  return Math.max(1, Math.ceil((extraWidth + 6) / measurement.measureText(" ").width));
 }
 
 const COMMAND_ICONS: Record<ComposerCommandName, LucideIcon> = {
@@ -67,6 +67,7 @@ const COMMAND_ICONS: Record<ComposerCommandName, LucideIcon> = {
   compact: FoldVertical,
   copy: Copy,
   export: Download,
+  side: MessagesSquare,
 };
 
 /** Skills never share a command's name (see `commandsForHarness`), so the name alone picks the icon. */
@@ -243,12 +244,14 @@ function ComposerSkillToken({
           clearClose();
         }}
       >
-        <span className="pointer-events-none absolute -inset-[7px] z-0 rounded-md bg-skill-blue-subtle opacity-0 transition-opacity group-hover/skill:opacity-100" />
         {/* Keep the native token's width; the label uses the spacing reserved on selection. */}
         <span className="invisible col-start-1 row-start-1" aria-hidden="true">{label}</span>
         <span className="relative z-1 col-start-1 row-start-1 w-0 whitespace-nowrap">
-          <span className="bg-background text-skill-blue">
-            <SkillLabel name={name} />
+          <span className="relative inline-block">
+            <span className="pointer-events-none absolute -inset-[7px] rounded-md bg-skill-blue-subtle opacity-0 transition-opacity group-hover/skill:opacity-100" />
+            <span className="relative text-skill-blue">
+              <SkillLabel name={name} />
+            </span>
           </span>
         </span>
       </span>
@@ -271,7 +274,7 @@ function ComposerSkillToken({
             onMouseDown={(event) => event.stopPropagation()}
           >
             <div className="sticky top-0 z-1 flex items-center gap-2 border-b border-border-variant bg-background px-4 py-3">
-              <span className="text-sm font-medium text-muted">/{name}</span>
+              <span className="text-sm font-medium text-muted">{commandDisplayName(name)}</span>
               <Badge className="h-5 border-border-variant bg-canvas px-1.5 tracking-[0.05em]">
                 {m.skill_chips_badge()}
               </Badge>
@@ -382,12 +385,10 @@ export function ComposerSkillChips({
         "",
         undefined,
         (label, name, end, key) => {
-          const trailing = text.slice(end);
-          const spaceCount = /^[ \t]+/.exec(trailing)?.[0].length ?? 0;
-          if (end === editingTokenEnd || (trailing && !trailing.startsWith("\n") && spaceCount < skillMarginSpaces(name, textareaRef.current))) {
+          if (end === editingTokenEnd) {
             return <span key={`${key}:${end}`} aria-hidden="true">{label}</span>;
           }
-          const skill = skills.find((candidate) => candidate.name === name);
+          const skill = skills.find((candidate) => candidate.name === canonicalSkillName(name));
           return skill && skill.source !== "command" ? (
             <ComposerSkillToken
               key={`${key}:${end}`}

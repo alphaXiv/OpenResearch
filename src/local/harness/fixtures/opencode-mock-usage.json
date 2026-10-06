@@ -1,0 +1,28 @@
+[
+  {
+    "type": "step_finish",
+    "tokens": {
+      "total": 120,
+      "input": 60,
+      "output": 15,
+      "reasoning": 5,
+      "cache": {
+        "write": 0,
+        "read": 40
+      }
+    }
+  },
+  {
+    "type": "step_finish",
+    "tokens": {
+      "total": 120,
+      "input": 60,
+      "output": 15,
+      "reasoning": 5,
+      "cache": {
+        "write": 0,
+        "read": 40
+      }
+    }
+  }
+]

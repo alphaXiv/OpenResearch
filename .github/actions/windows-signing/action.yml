@@ -1,0 +1,52 @@
+name: Sign Windows files
+description: Sign and verify timestamped alphaXiv binaries with Azure Artifact Signing.
+
+inputs:
+  files:
+    description: Absolute file paths separated by newlines or commas.
+    required: true
+  endpoint:
+    description: Regional Azure Artifact Signing endpoint.
+    required: true
+  account:
+    description: Artifact Signing account name.
+    required: true
+  profile:
+    description: Public Trust certificate profile name.
+    required: true
+
+runs:
+  using: composite
+  steps:
+    - uses: Azure/artifact-signing-action@c7ab2a863ab5f9a846ddb8265964877ef296ee82 # v2
+      with:
+        endpoint: ${{ inputs.endpoint }}
+        signing-account-name: ${{ inputs.account }}
+        certificate-profile-name: ${{ inputs.profile }}
+        files: ${{ inputs.files }}
+        file-digest: SHA256
+        timestamp-rfc3161: http://timestamp.acs.microsoft.com
+        timestamp-digest: SHA256
+        exclude-environment-credential: true
+        exclude-workload-identity-credential: true
+        exclude-managed-identity-credential: true
+        exclude-shared-token-cache-credential: true
+        exclude-visual-studio-credential: true
+        exclude-visual-studio-code-credential: true
+        exclude-azure-powershell-credential: true
+        exclude-azure-developer-cli-credential: true
+
+    - name: Verify publisher and timestamp
+      shell: pwsh
+      env:
+        SIGNED_FILES: ${{ inputs.files }}
+      run: |
+        foreach ($file in ($env:SIGNED_FILES -split '[,\r\n]+' | Where-Object { $_.Trim() })) {
+          $signature = Get-AuthenticodeSignature -LiteralPath $file.Trim()
+          if ($signature.Status -ne 'Valid' -or
+              $signature.SignerCertificate.GetNameInfo('SimpleName', $false) -ne 'alphaXiv Inc.' -or
+              -not $signature.TimeStamperCertificate) {
+            throw "Invalid alphaXiv signature or missing timestamp on $file : $($signature.Status)"
+          }
+          Write-Output "$file : valid timestamped alphaXiv Inc. signature"
+        }

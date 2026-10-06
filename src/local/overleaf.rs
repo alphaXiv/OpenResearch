@@ -24,7 +24,7 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Component, Path, PathBuf};
-use std::process::{Command, Output};
+use std::process::Output;
 
 use base64::Engine as _;
 
@@ -478,7 +478,7 @@ const CREDENTIAL_HELPER: &str = "!f() { host=; while IFS='=' read key value; do 
 /// argv, never the clone's config — and only the variable's *name* appears in
 /// the configuration git carries into `git-remote-https`.
 fn git(dir: Option<&Path>, auth: Option<Auth>, args: &[&str]) -> Result<Output> {
-    let mut command = Command::new("git");
+    let mut command = super::git::git_command();
     if let Some(dir) = dir {
         command.current_dir(dir);
     }
@@ -1668,7 +1668,7 @@ mod tests {
     #[test]
     fn hands_the_token_only_to_the_host_the_project_was_linked_with() {
         let filled = |asked_for: &str| {
-            let mut command = Command::new("git");
+            let mut command = std::process::Command::new("git");
             command
                 .env(HOST_ENV, "git.overleaf.com")
                 .env(TOKEN_ENV, "olp_secret")

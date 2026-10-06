@@ -3,15 +3,14 @@ import { ltr } from "../i18n";
 import { useLocale } from "../locale";
 // Chat markdown with evidence mentions, mirroring openresearch.sh's
 // MarkdownContent: `<file path="..." lines="20-40"/>` tags (and plain relative
-// links) render as chips that open the file as a right-pane tab, and
-// `<run id="..."/>` tags render as chips that open a run's logs — so the agent
-// can cite the code and the run behind a claim.
+// links, with any `:42` or `#L42` line) render as chips that open the file as a
+// right-pane tab, and `<run id="..."/>` tags render as chips that open a run's
+// logs — so the agent can cite the code and the run behind a claim.
 
 import { Check, Copy, FileCode, PanelRight, ScrollText, X, Download, Minus, Plus } from "lucide-react";
 import { createContext, memo, useContext, useEffect, useMemo, useRef, useState, type ImgHTMLAttributes, type ReactNode } from "react";
 import { createPortal } from "react-dom";
 import { Markdown as StreamingMarkdown } from "@clo/react-markdown";
-import { defaultUrlTransform } from "react-markdown";
 import rehypeKatex from "rehype-katex";
 import remarkGfm from "remark-gfm";
 import remarkMath from "remark-math";
@@ -25,7 +24,7 @@ import { normalizeMarkdownForRendering } from "../markdownNormalization";
 import { tabOpenGestureHandlers, type TabOpenIntent } from "../tabPreview";
 import { Button, IconButton, IconButtonLink } from "./ui";
 import { absoluteFileUrl, artifactUrl, projectFileUrl } from "../api";
-import { chatImageTarget, isWindowsDrivePath } from "../markdownTarget";
+import { chatImageTarget, firstCitedLine, rehypeSafeUrls, splitLineSuffix } from "../markdownTarget";
 
 const ImageResolverContext = createContext<((src: string, fallback?: boolean) => string | null) | undefined>(undefined);
 
@@ -159,12 +158,6 @@ interface MdastPosition {
   start: MdastPoint;
 }
 
-interface HastNode {
-  tagName?: string;
-  children?: HastNode[];
-  properties?: Record<string, unknown>;
-}
-
 /** Pull `name="value"` (or single-quoted) attributes off a tag's attribute run. */
 function parseTagAttrs(attrs: string): Record<string, string> {
   const out: Record<string, string> = {};
@@ -273,30 +266,14 @@ function remarkMentions() {
   return (tree: MdastNode) => replaceMentions(tree);
 }
 
-function rehypeSafeUrls() {
-  return (tree: HastNode) => {
-    const visit = (node: HastNode) => {
-      for (const key of ["href", "src"]) {
-        if (node.properties && Object.hasOwn(node.properties, key)) {
-          const value = String(node.properties[key] || "");
-          node.properties[key] = key === "src" && node.tagName === "img" && isWindowsDrivePath(value)
-            ? value : defaultUrlTransform(value);
-        }
-      }
-      node.children?.forEach(visit);
-    };
-    visit(tree);
-  };
-}
-
 function FileChip({
   path,
-  lines,
+  line,
   exp,
   onOpenFile,
 }: {
   path: string;
-  lines?: string;
+  line?: number;
   /** Experiment id this file was cited from, if any (`<file exp=…>`). */
   exp?: string;
   onOpenFile?: (
@@ -308,8 +285,6 @@ function FileChip({
   ) => void;
 }) {
   const name = path.split("/").pop() || path;
-  // `lines` may be a single line or a range ("20-40"); show the first.
-  const line = lines ? Number.parseInt(lines, 10) || undefined : undefined;
   const label = line != null ? `${name}:${line}` : name;
   return (
     <button
@@ -428,13 +403,15 @@ export const Md = memo(function Md({
   const chatImageSrc = useContext(ImageResolverContext);
   const imageSrc = resolveImageSrc ?? chatImageSrc;
   const components: Record<string, (props: any) => ReactNode> = useMemo(() => ({
-    "file-mention": (props) => (
-      <FileChip path={props.path} lines={props.lines} exp={props.exp} onOpenFile={onOpenFile} />
-    ),
+    "file-mention": (props) => {
+      const cited = splitLineSuffix(props.path);
+      const line = (props.lines && firstCitedLine(props.lines)) || cited.line;
+      return <FileChip path={cited.path} line={line} exp={props.exp} onOpenFile={onOpenFile} />;
+    },
     "run-mention": (props) => (
       <RunChip id={props.id} label={props.label} onOpenRun={onOpenRun} />
     ),
-    a: ({ node: _node, href, children, "data-figure-src": figureSrc, ...rest }) => {
+    a: ({ node: _node, href, children, "data-figure-src": figureSrc, "data-cited-href": citedHref, ...rest }) => {
       const figure = typeof figureSrc === "string" ? chatImageTarget(figureSrc) : null;
       if (figure && onOpenFile) {
         const localPath = figure.source === "artifact" ? `artifacts/${figure.path}` : figure.path;
@@ -446,15 +423,17 @@ export const Md = memo(function Md({
       }
       // Agents sometimes link files as plain markdown links; open those as
       // file tabs instead of navigating the dashboard away.
-      if (href && isFileHref(href) && onOpenFile) {
+      const target = typeof citedHref === "string" ? citedHref : href;
+      const cited = target ? splitLineSuffix(target) : null;
+      if (cited && isFileHref(cited.path) && onOpenFile) {
         let decoded: string;
         try {
-          decoded = decodeURI(href);
+          decoded = decodeURI(cited.path);
         } catch {
           return <span>{children}</span>;
         }
         const path = resolveFilePath ? resolveFilePath(decoded) : decoded;
-        return path ? <FileChip path={path} onOpenFile={onOpenFile} /> : <span>{children}</span>;
+        return path ? <FileChip path={path} line={cited.line} onOpenFile={onOpenFile} /> : <span>{children}</span>;
       }
       return (
         <a href={href} target="_blank" rel="noopener noreferrer" {...rest}>

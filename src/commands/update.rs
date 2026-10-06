@@ -99,12 +99,18 @@ async fn apply(args: crate::UpdateArgs) -> Result<Outcome> {
             .await
             .map(|_| Outcome::Done);
     }
+    #[cfg(target_os = "linux")]
+    if let UpdateTarget::AppImage(appimage) = &target {
+        return updates::linux_app::update(appimage, &current, args.dry_run, args.background)
+            .await
+            .map(|_| Outcome::Done);
+    }
 
     let latest = updates::fetch_latest(Duration::from_secs(10)).await?;
     // Record what the release actually is before acting on it, so a cache that
     // was wrong about being behind corrects itself on the next run instead of
     // warning off a stale answer until the check TTL lapses.
-    updates::write_check_cache(&latest.version.to_string());
+    updates::write_check_cache(&latest.version.to_string(), &latest.tag);
     if !updates::is_outdated(&current, &latest.version) {
         if !args.background {
             println!("orx {} is up to date.", current);
@@ -136,7 +142,7 @@ async fn apply(args: crate::UpdateArgs) -> Result<Outcome> {
 
     // Keep the update-check cache in sync so the warning doesn't fire on a stale
     // answer, and so a running `orx up` learns a restart would pick this up.
-    updates::record_installed(&latest.version.to_string());
+    updates::record_installed(&latest.version.to_string(), &latest.tag);
     // The shell installer rewrites the receipt itself; orx did the Windows swap,
     // so it fills in the version. The binary is already new: a warning, not a failure.
     #[cfg(windows)]
@@ -200,7 +206,7 @@ fn run_installer(target: &UpdateTarget, installer: &[u8], quiet: bool) -> Result
             .join("bin")
             .join("orx.exe"),
         UpdateTarget::Portable(dir) => dir.join("orx.exe"),
-        UpdateTarget::AppBundle(_) => {
+        UpdateTarget::AppBundle(_) | UpdateTarget::AppImage(_) => {
             return Err(anyhow!("This install is not managed by the installer."))
         }
     };

@@ -187,11 +187,109 @@ pub async fn run_antigravity() -> Result<()> {
     use tokio::io::AsyncReadExt;
     let mut input = String::new();
     tokio::io::stdin().read_to_string(&mut input).await?;
-    let decision = antigravity_decision(&input).await.unwrap_or_else(|error| {
+    if let Ok(payload) = serde_json::from_str::<Value>(&input) {
+        if payload.get("initialNumSteps").is_some() {
+            record_post_invocation(
+                &crate::store::Store::open()?,
+                &payload,
+                std::env::var("ORX_USAGE_EXECUTION_ID").ok().as_deref(),
+            )?;
+            println!("{{}}");
+            return Ok(());
+        }
+    }
+    let mut decision = antigravity_decision(&input).await.unwrap_or_else(|error| {
         json!({"decision": "deny", "reason": format!("OpenResearch approval bridge unavailable: {error}")})
     });
+    if decision["decision"] == "allow" {
+        if let Some(overwrite) = invocation_overwrite(&input) {
+            decision["overwrite"] = overwrite;
+        }
+    }
     println!("{decision}");
     Ok(())
+}
+
+/// A shell command runs with its invocation's native `modelName` exported, so `orx exp run` knows
+/// the model that launched it (native `overwrite` merges into the tool's arguments).
+fn invocation_overwrite(input: &str) -> Option<Value> {
+    if cfg!(windows) {
+        return None;
+    }
+    let payload: Value = serde_json::from_str(input).ok()?;
+    if payload.pointer("/toolCall/name")? != "run_command" {
+        return None;
+    }
+    let command = payload.pointer("/toolCall/args/CommandLine")?.as_str()?;
+    let identity = crate::store::InvocationIdentity {
+        harness: "antigravity".into(),
+        model: payload.get("modelName")?.as_str()?.to_string(),
+        provider: None,
+    };
+    let command =
+        crate::commands::invocation_gate::with_invocation_context(command, &identity).ok()?;
+    Some(json!({ "CommandLine": command }))
+}
+
+pub(crate) fn record_post_invocation(
+    store: &crate::store::Store,
+    payload: &Value,
+    execution: Option<&str>,
+) -> Result<()> {
+    let conversation = payload
+        .get("conversationId")
+        .and_then(Value::as_str)
+        .ok_or_else(|| anyhow!("Missing native conversation identity"))?;
+    let step = payload
+        .get("initialNumSteps")
+        .and_then(Value::as_i64)
+        .filter(|step| *step >= 0)
+        .ok_or_else(|| anyhow!("Missing native invocation step"))?;
+    let model = payload
+        .get("modelName")
+        .and_then(Value::as_str)
+        .ok_or_else(|| anyhow!("Missing native invocation model"))?;
+    let identity = crate::store::InvocationIdentity {
+        harness: "antigravity".into(),
+        model: model.to_string(),
+        provider: None,
+    };
+    let planner = invocation_key(payload, conversation, step);
+    let key = planner
+        .clone()
+        .unwrap_or_else(|| format!("antigravity:{conversation}:invocation:{step}"));
+    store.record_native_invocation(&key, &identity, Some(conversation))?;
+    // Sub-agents never reach the stream: this is their only per-call record. Only a planner row
+    // proves the model ran; without one the call may have failed before executing.
+    if let (Some(planner), Some(execution)) = (planner, execution) {
+        store.record_usage_sample(
+            execution,
+            &planner,
+            "antigravity",
+            Some(model),
+            None,
+            &Default::default(),
+        )?;
+    }
+    Ok(())
+}
+
+/// The invocation's own planner step from its native transcript (native steps can be inserted at
+/// or after `initialNumSteps`); none flushed yet means no step, never a guessed one.
+fn invocation_key(payload: &Value, conversation: &str, step: i64) -> Option<String> {
+    let planner = payload
+        .get("transcriptPath")
+        .and_then(Value::as_str)
+        .and_then(|path| std::fs::read_to_string(path).ok())
+        .and_then(|text| {
+            text.lines()
+                .filter_map(|line| serde_json::from_str::<Value>(line).ok())
+                .filter(|row| row["type"] == "PLANNER_RESPONSE")
+                .find_map(|row| row["step_index"].as_i64().filter(|index| *index >= step))
+        });
+    planner.map(|planner| {
+        crate::local::harness::antigravity::invocation_sample_id(conversation, planner)
+    })
 }
 
 async fn antigravity_decision(input: &str) -> Result<Value> {
@@ -288,5 +386,44 @@ mod antigravity_tests {
         let res = antigravity_decision("invalid-json").await.unwrap();
         assert_eq!(res["decision"], "allow");
         std::env::remove_var("ORX_AGY_GATE");
+    }
+
+    #[test]
+    fn shell_commands_carry_their_invocations_native_model() {
+        let payload = |tool: &str| {
+            json!({"modelName": "gemini-3.8-flash-high", "toolCall": {"name": tool, "args": {"CommandLine": "orx exp run e", "Cwd": "/w"}}})
+                .to_string()
+        };
+        let overwrite = invocation_overwrite(&payload("run_command"));
+        if cfg!(windows) {
+            assert_eq!(overwrite, None);
+            return;
+        }
+        let command = overwrite.unwrap()["CommandLine"]
+            .as_str()
+            .unwrap()
+            .to_string();
+        assert!(command.contains("gemini-3.8-flash-high") && command.ends_with("; orx exp run e"));
+        assert_eq!(invocation_overwrite(&payload("view_file")), None);
+    }
+
+    #[test]
+    fn hooks_key_their_own_planner_and_never_guess_a_step() {
+        let path =
+            std::env::temp_dir().join(format!("orx-agy-hook-{}.jsonl", uuid::Uuid::new_v4()));
+        let rows = [
+            (1, "PLANNER_RESPONSE"),
+            (3, "SYSTEM_MESSAGE"),
+            (4, "PLANNER_RESPONSE"),
+        ]
+        .map(|(step, kind)| json!({"step_index": step, "type": kind}).to_string());
+        std::fs::write(&path, rows.join("\n")).unwrap();
+        let payload = json!({"transcriptPath": path});
+        assert_eq!(
+            invocation_key(&payload, "c", 3).as_deref(),
+            Some("antigravity:c:step:4")
+        );
+        assert_eq!(invocation_key(&payload, "c", 5), None);
+        std::fs::remove_file(path).unwrap();
     }
 }

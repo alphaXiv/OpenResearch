@@ -93,7 +93,7 @@ pub fn agent_log_path() -> PathBuf {
 /// is denied AND disabled (it would deadlock serve mode — nothing can answer
 /// it), repeated on the default `build` agent because the tool filter is
 /// agent-scoped. The model default keeps local subagents on the same endpoint.
-fn opencode_config_json(model: Option<&str>, instructions: &str) -> String {
+fn opencode_config_json(model: Option<&str>, instructions: &str, plugin: Option<&str>) -> String {
     let mut cfg = json!({
         "$schema": "https://opencode.ai/config.json",
         "permission": {
@@ -117,6 +117,9 @@ fn opencode_config_json(model: Option<&str>, instructions: &str) -> String {
         },
         "instructions": [instructions],
     });
+    if let Some(plugin) = plugin {
+        cfg["plugin"] = json!([plugin]);
+    }
     if let Some(model) = model {
         cfg["model"] = json!(model);
     }
@@ -352,11 +355,23 @@ fn write_agent_files(
     project: &LocalProject,
     model: Option<&str>,
     session_id: &str,
+    protocol: Protocol,
 ) -> Result<(PathBuf, Option<PathBuf>)> {
     // Source of truth for the session-skills dir is the harness trait.
     use crate::local::harness::Harness;
     let skills_dir = crate::local::harness::opencode::OpenCode.session_skills_dir();
     let (repo, playbook) = ensure_playbook(project, session_id, skills_dir)?;
+    let plugin = if protocol == Protocol::V1 {
+        let path = repo.join(".openresearch/agent/invocation.mjs");
+        std::fs::write(&path, include_str!("opencode_invocation.mjs"))?;
+        Some(
+            reqwest::Url::from_file_path(&path)
+                .map_err(|_| anyhow!("Invalid invocation plugin path"))?
+                .to_string(),
+        )
+    } else {
+        None
+    };
     let config_override = if git::is_tracked(&repo, "opencode.json") {
         // Out-of-root config: absolute instructions path (no root to anchor it).
         let path = repo
@@ -365,14 +380,14 @@ fn write_agent_files(
             .join("opencode.json");
         std::fs::write(
             &path,
-            opencode_config_json(model, &playbook.to_string_lossy()),
+            opencode_config_json(model, &playbook.to_string_lossy(), plugin.as_deref()),
         )
         .map_err(|e| anyhow!("Could not write {}: {}", path.display(), e))?;
         Some(path)
     } else {
         std::fs::write(
             repo.join("opencode.json"),
-            opencode_config_json(model, PLAYBOOK_REL),
+            opencode_config_json(model, PLAYBOOK_REL, plugin.as_deref()),
         )
         .map_err(|e| anyhow!("Could not write opencode.json: {}", e))?;
         None
@@ -437,9 +452,12 @@ async fn spawn_agent(
     let (repo, config_override) = {
         let (project, model) = (project.clone(), model.map(str::to_string));
         let session = session_id.to_string();
-        tokio::task::spawn_blocking(move || write_agent_files(&project, model.as_deref(), &session))
-            .await
-            .map_err(|e| anyhow!("agent file task failed: {e}"))??
+        let protocol = binary.protocol;
+        tokio::task::spawn_blocking(move || {
+            write_agent_files(&project, model.as_deref(), &session, protocol)
+        })
+        .await
+        .map_err(|e| anyhow!("agent file task failed: {e}"))??
     };
     // Best-effort: the playbook is the real guide; the shim just lets
     // opencode's skill tool surface `orx skill` too.

@@ -91,7 +91,7 @@ def logs(sid):
     modal = _modal()
     sb = modal.Sandbox.from_id(sid)
     # StreamReader replays from the start on each (re)connect, which matches
-    # supervise's skip/dedup contract (same as HF's SSE and `kubectl logs -f`).
+    # supervise's skip/dedup contract (same as HF's SSE).
     for line in sb.stdout:
         if not line.endswith("\n"):
             line += "\n"
@@ -475,9 +475,9 @@ pub async fn cancel_job(sandbox_id: &str) -> Result<()> {
 
 /// One pass over the sandbox's log stream, invoking `sink` per line past `skip`.
 ///
-/// Same replay/dedup contract as `hf::stream_logs` and `k8s::stream_logs`: the
-/// launcher replays the whole stdout from the start on each connect, so the
-/// caller passes how many lines it has consumed and gets the new total back.
+/// Same replay/dedup contract as `hf::stream_logs`: the launcher replays the
+/// whole stdout from the start on each connect, so the caller passes how many
+/// lines it has consumed and gets the new total back.
 /// Ends when the launcher exits (sandbox finished) or after `idle` silence.
 pub async fn stream_logs(
     sandbox_id: &str,

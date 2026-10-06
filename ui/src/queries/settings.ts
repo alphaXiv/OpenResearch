@@ -151,9 +151,9 @@ export const getHarnessesQuery = () => queryOptions({
   refetchInterval: (query) => query.state.data?.some((h) => h.accountLoading || h.catalogPending) ? 1_000 : false,
 });
 
-export const getSkillsQuery = (harness?: string) => queryOptions({
-  queryKey: workspaceKey("getSkills", harness ?? null),
-  queryFn: ({ signal }) => api.getSkills(signal, harness),
+export const getSkillsQuery = (harness?: string, projectId?: string) => queryOptions({
+  queryKey: workspaceKey("getSkills", harness ?? null, projectId ?? null),
+  queryFn: ({ signal }) => api.getSkills(signal, harness, projectId),
   select: (data) => data.skills,
   refetchInterval: (query) => query.state.data?.importing ? 2_000 : 30_000,
   staleTime: 300_000,

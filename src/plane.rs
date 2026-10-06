@@ -158,4 +158,62 @@ mod tests {
             Some("reason: — (no message recorded — see `orx logs r1`)")
         );
     }
+
+    #[test]
+    fn exp_run_plane_tags_demo_launches_by_owning_project() {
+        use crate::local::model::{LocalExperiment, LocalProject};
+        let dir = std::env::temp_dir().join(format!("orx-plane-{}", uuid::Uuid::new_v4()));
+        let store = Store::open_at(dir.clone()).unwrap();
+        for project_id in [crate::local::demo::PROJECT_ID, "p1"] {
+            store
+                .create_local_project(&LocalProject {
+                    id: project_id.into(),
+                    name: project_id.into(),
+                    slug: project_id.into(),
+                    github_owner: "o".into(),
+                    github_repo: "r".into(),
+                    github_sync_enabled: false,
+                    baseline_branch: "main".into(),
+                    repo_path: "/tmp/repo".into(),
+                    run_command: None,
+                    paper_id: None,
+                    created_at: 0,
+                    updated_at: 0,
+                })
+                .unwrap();
+        }
+        for (id, project_id) in [
+            ("demo_nanochat_lr_probe_v1", crate::local::demo::PROJECT_ID),
+            ("agent_made", crate::local::demo::PROJECT_ID),
+            ("user_exp", "p1"),
+        ] {
+            store
+                .create_local_experiment(&LocalExperiment {
+                    id: id.into(),
+                    project_id: project_id.into(),
+                    parent_experiment_id: None,
+                    slug: id.into(),
+                    branch_name: format!("orx/{id}"),
+                    title: None,
+                    description: None,
+                    run_command: "echo hi".into(),
+                    agent_status: "idle".into(),
+                    created_at: 0,
+                    updated_at: 0,
+                    chat_session_id: None,
+                    archived: false,
+                })
+                .unwrap();
+        }
+        let label = |id: &str| {
+            resolve_experiment(Store::open_at(dir.clone()).unwrap(), id)
+                .unwrap()
+                .demo_run_label()
+        };
+        assert_eq!(label("demo_nanochat_lr_probe_v1"), Some("lr_probe"));
+        assert_eq!(label("agent_made"), Some("other"));
+        assert_eq!(label("user_exp"), None);
+        drop(store);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 }

@@ -20,7 +20,8 @@ By default, this chat resumes with the helper's closing reply. Use `--no-wake`
 only when no follow-up is needed. A spawned session cannot spawn another helper,
 and the CLI enforces the number of helpers a session may have in flight. If the
 command refuses a spawn for either reason, do the work here or wait for a helper
-to finish.
+to finish. It also refuses a `--harness` that OpenResearch cannot find installed;
+spawn on this session's harness instead, or tell the user.
 
 ## Choose tasks with a clean boundary
 

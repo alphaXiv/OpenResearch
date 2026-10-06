@@ -97,6 +97,9 @@ pub enum Pane {
         session_id: String,
         spawn_part_id: String,
     },
+    Side {
+        session_id: String,
+    },
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
@@ -181,6 +184,7 @@ impl Pane {
                 session_id,
                 spawn_part_id,
             } => nonempty(session_id) && nonempty(spawn_part_id),
+            Self::Side { session_id } => nonempty(session_id),
         }
     }
 }

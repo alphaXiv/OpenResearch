@@ -1,5 +1,6 @@
 //! Canonicalization minus Windows' `\\?\` prefix, which `CreateProcessW` rejects as a cwd.
 //! Every canonicalization goes through here so containment checks compare one spelling.
+//! Also the running binary's spawnable path, minus Linux's replaced-binary marker.
 
 #[cfg(windows)]
 use std::path::{Component, Prefix};
@@ -8,6 +9,34 @@ use std::path::{Path, PathBuf};
 /// `std::fs::canonicalize`, minus the Windows verbatim prefix.
 pub fn canonicalize<P: AsRef<Path>>(path: P) -> std::io::Result<PathBuf> {
     std::fs::canonicalize(path).map(plain)
+}
+
+/// `std::env::current_exe`, as a path to spawn. Linux reports a binary replaced
+/// under a live process as `<path> (deleted)`; its replacement, if any, is at `<path>`.
+pub fn spawnable_exe() -> std::io::Result<PathBuf> {
+    std::env::current_exe().map(undeleted)
+}
+
+fn undeleted(exe: PathBuf) -> PathBuf {
+    exe.to_str()
+        .and_then(|exe| exe.strip_suffix(" (deleted)"))
+        .map(PathBuf::from)
+        .unwrap_or(exe)
+}
+
+/// Whether the canonical `path` is inside the Linux AppImage mounted at `appdir`
+/// (its runtime's `APPDIR`, which every program the app starts inherits).
+pub fn in_appimage_mount(path: &Path, appdir: Option<&std::ffi::OsStr>) -> bool {
+    let Some(appdir) = appdir.map(Path::new) else {
+        return false;
+    };
+    // An empty or root APPDIR would claim every path on the machine.
+    if !appdir.is_absolute() || appdir.parent().is_none() {
+        return false;
+    }
+    // The runtime mounts under a temp dir that may be a symlink.
+    let appdir = canonicalize(appdir).unwrap_or_else(|_| appdir.to_path_buf());
+    path.starts_with(appdir)
 }
 
 #[cfg(not(windows))]
@@ -39,6 +68,20 @@ fn plain(path: PathBuf) -> PathBuf {
     let mut out = PathBuf::from(head);
     out.extend(components.filter(|part| !matches!(part, Component::RootDir)));
     out
+}
+
+#[cfg(test)]
+mod spawnable_exe_tests {
+    use super::*;
+
+    #[test]
+    fn the_deleted_marker_is_stripped() {
+        assert_eq!(
+            undeleted(PathBuf::from("/x/orx (deleted)")),
+            PathBuf::from("/x/orx")
+        );
+        assert_eq!(undeleted(PathBuf::from("/x/orx")), PathBuf::from("/x/orx"));
+    }
 }
 
 #[cfg(all(test, windows))]
