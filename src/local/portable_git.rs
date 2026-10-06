@@ -89,6 +89,8 @@ async fn rename_into_place(staging: &Path, root: &Path) -> Result<()> {
                 attempt += 1;
                 tokio::time::sleep(std::time::Duration::from_millis(500 * attempt)).await;
             }
+            // Another orx process finished first.
+            Err(_) if cmd_dir().is_some() => return Ok(()),
             Err(error) => {
                 return Err(error)
                     .with_context(|| format!("Could not move Git into {}", root.display()))
@@ -98,6 +100,7 @@ async fn rename_into_place(staging: &Path, root: &Path) -> Result<()> {
 }
 
 /// Downloads and staging folders an interrupted install left beside `PortableGit`.
+/// Recent ones are left alone: they may be another orx process's install in progress.
 #[cfg(windows)]
 async fn sweep_stale(parent: &Path) {
     let Ok(mut entries) = tokio::fs::read_dir(parent).await else {
@@ -109,6 +112,16 @@ async fn sweep_stale(parent: &Path) {
             .to_string_lossy()
             .starts_with("PortableGit-")
         {
+            continue;
+        }
+        let recent = entry
+            .metadata()
+            .await
+            .and_then(|meta| meta.modified())
+            .ok()
+            .and_then(|modified| modified.elapsed().ok())
+            .is_none_or(|age| age < std::time::Duration::from_secs(60 * 60));
+        if recent {
             continue;
         }
         let path = entry.path();
