@@ -1033,14 +1033,9 @@ pub fn relaunch(port: u16) -> std::io::Error {
 }
 
 /// The original arguments plus `--no-browser`: the tab that asked for the
-/// restart reloads itself, so a second tab would only be clutter. No arguments
-/// means a double-clicked exe, which `main` turned into `orx up`; the flag is
-/// `up`'s, so that conversion is made explicit here.
+/// restart reloads itself, so a second tab would only be clutter.
 fn relaunch_args(args: impl Iterator<Item = std::ffi::OsString>) -> Vec<std::ffi::OsString> {
     let mut args: Vec<std::ffi::OsString> = args.collect();
-    if args.is_empty() {
-        args.push("up".into());
-    }
     if !args.iter().any(|arg| arg == "--no-browser") {
         args.push("--no-browser".into());
     }
@@ -1784,8 +1779,6 @@ mod tests {
     #[test]
     fn relaunch_args_add_no_browser_once() {
         let args = |list: &[&str]| relaunch_args(list.iter().map(OsString::from));
-        // A double-clicked exe has no arguments; `main` ran it as `up`.
-        assert_eq!(args(&[]), ["up", "--no-browser"]);
         assert_eq!(
             args(&["up", "--port", "1"]),
             ["up", "--port", "1", "--no-browser"]

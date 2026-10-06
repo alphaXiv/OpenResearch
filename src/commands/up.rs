@@ -72,27 +72,9 @@ pub async fn run(args: UpArgs) -> Result<()> {
     )?;
     // Blocks only for a relaunched server, whose predecessor still holds the port.
     updates::await_replaced_parent();
-    let listener = match tokio::net::TcpListener::bind(("127.0.0.1", port)).await {
-        Ok(listener) => listener,
-        // A second double-click should reach the running dashboard, not fail on its port.
-        Err(error)
-            if error.kind() == std::io::ErrorKind::AddrInUse
-                && crate::owns_its_console()
-                && dashboard_is_serving(port).await =>
-        {
-            let url = format!("http://127.0.0.1:{port}");
-            eprintln!("orx up: already running — opening {url}");
-            if !args.no_browser {
-                if let Some(watch) =
-                    browser::open_dashboard(&url, crate::telemetry::UpLaunchMode::of(&args))
-                {
-                    let _ = watch.await;
-                }
-            }
-            return Ok(());
-        }
-        Err(error) => return Err(anyhow!("Could not bind 127.0.0.1:{}: {}", port, error)),
-    };
+    let listener = tokio::net::TcpListener::bind(("127.0.0.1", port))
+        .await
+        .map_err(|error| anyhow!("Could not bind 127.0.0.1:{}: {}", port, error))?;
     let actual_port = listener.local_addr()?.port();
     // Open early so the schema exists before any request or agent spawn.
     {
@@ -947,22 +929,6 @@ impl From<&StoredRun> for ApiRun {
 }
 
 // --- basic routes ---------------------------------------------------------
-
-/// Whether a dashboard this build can talk to, not some other server, holds `port`.
-async fn dashboard_is_serving(port: u16) -> bool {
-    let Ok(response) = reqwest::Client::new()
-        .get(format!("http://127.0.0.1:{port}/api/health"))
-        .timeout(std::time::Duration::from_secs(2))
-        .send()
-        .await
-    else {
-        return false;
-    };
-    response.json::<Value>().await.is_ok_and(|body| {
-        body.get("dashboardProtocol").and_then(Value::as_u64)
-            == Some(u64::from(crate::commands::up_remote::DASHBOARD_PROTOCOL))
-    })
-}
 
 async fn health(State(state): State<AppState>) -> Json<Value> {
     Json(json!({

@@ -963,10 +963,12 @@ async fn main() {
         return;
     }
 
-    let mut cli = Cli::parse();
-    // Double-clicked from Explorer: start the dashboard, as the macOS .app does.
+    let cli = Cli::parse();
+    // Double-clicked from Explorer: open the desktop app instead of a console session.
+    #[cfg(windows)]
     if cli.command.is_none() && owns_its_console() {
-        cli.command = Cli::parse_from(["orx", "up"]).command;
+        relaunch_as_app();
+        return;
     }
     let Some(command) = cli.command else {
         // Bare `orx`: print the command overview to stdout and exit 0.
@@ -1086,9 +1088,32 @@ fn owns_its_console() -> bool {
     count == 1
 }
 
-#[cfg(not(windows))]
-fn owns_its_console() -> bool {
-    false
+/// Restarts as `orx app` in a console no one sees, as OpenResearch.exe does, so
+/// the console Explorer opened closes when this process exits.
+#[cfg(windows)]
+fn relaunch_as_app() {
+    use std::os::windows::process::CommandExt;
+    use windows_sys::Win32::System::Threading::CREATE_NO_WINDOW;
+    use windows_sys::Win32::UI::WindowsAndMessaging::AllowSetForegroundWindow;
+
+    let started = std::env::current_exe().and_then(|exe| {
+        std::process::Command::new(exe)
+            .arg(commands::app::APP_ARG)
+            // Inherited handles would tie the app to Explorer's console.
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .creation_flags(CREATE_NO_WINDOW)
+            .spawn()
+    });
+    match started {
+        // Explorer let this process take the foreground; pass that to the app's window.
+        // SAFETY: a plain syscall on the child's process id.
+        Ok(child) => unsafe {
+            AllowSetForegroundWindow(child.id());
+        },
+        Err(error) => show_error_dialog(&format!("Could not start OpenResearch: {error}")),
+    }
 }
 
 /// A double-clicked exe's console closes with it, so repeat the error in a dialog.
@@ -1300,16 +1325,6 @@ fn command_uses_lifecycle_lock(command: &Command) -> bool {
 #[cfg(test)]
 mod cli_tests {
     use super::*;
-
-    /// A double-clicked orx.exe reaches `up` through this parse; an argv clap
-    /// rejected would panic there instead of opening the dashboard.
-    #[test]
-    fn a_double_click_parses_as_a_local_up() {
-        assert!(matches!(
-            Cli::parse_from(["orx", "up"]).command,
-            Some(Command::Up(args)) if args.remote.is_none()
-        ));
-    }
 
     #[test]
     fn library_add_commands_are_distinct_from_reading_skill_docs() {

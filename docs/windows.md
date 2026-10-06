@@ -48,9 +48,9 @@ The app uses port 4792, or a free port if something else holds it.
 
 From [Releases](https://github.com/alphaXiv/OpenResearch/releases), download
 `openresearch-cli-x86_64-pc-windows-msvc.zip`, extract it, and double-click
-`orx.exe`. It starts the dashboard at `http://127.0.0.1:4791` and opens your
-browser. Leave the console window open — closing it stops the server. If orx
-cannot start, a dialog says why.
+`orx.exe`. It opens the desktop app, as `OpenResearch.exe` does; that needs the
+WebView2 Runtime, which `OpenResearch-Setup.exe` installs if Windows lacks it. If
+orx cannot start, a dialog says why.
 
 To have `orx` on your `PATH` as a command instead, run the PowerShell installer,
 which installs to `%USERPROFILE%\.cargo\bin`:
