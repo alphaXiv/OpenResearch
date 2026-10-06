@@ -334,6 +334,7 @@ pub struct ProjectActivitySummary {
     pub running_experiments: usize,
     pub total_experiments: usize,
     pub last_message_at: Option<i64>,
+    pub last_activity_at: i64,
 }
 
 #[derive(Debug, Clone)]
@@ -2027,6 +2028,28 @@ impl Store {
         Ok(rows.collect::<std::result::Result<Vec<_>, _>>()?)
     }
 
+    pub fn list_sidebar_chat_sessions(
+        &self,
+        archived: Option<bool>,
+        before: Option<(i64, &str)>,
+    ) -> Result<Vec<StoredChatSession>> {
+        let mut stmt = self.conn.prepare(&format!(
+            "SELECT {CHAT_SESSION_COLS} FROM chat_sessions
+             WHERE side_parent_session_id IS NULL AND (?1 IS NULL OR archived = ?1)
+               AND (?2 IS NULL OR updated_at < ?2 OR (updated_at = ?2 AND id < ?3))
+             ORDER BY updated_at DESC, id DESC LIMIT 51"
+        ))?;
+        let rows = stmt.query_map(
+            params![
+                archived,
+                before.map(|cursor| cursor.0),
+                before.map(|cursor| cursor.1)
+            ],
+            row_to_chat_session,
+        )?;
+        Ok(rows.collect::<std::result::Result<Vec<_>, _>>()?)
+    }
+
     pub fn side_chat_ids(&self) -> Result<Vec<String>> {
         let mut stmt = self
             .conn
@@ -2098,17 +2121,30 @@ impl Store {
                  WHERE chat_messages.role IN ('user', 'assistant')
                  GROUP BY chat_sessions.project_id
              )
+             , latest_activity AS (
+                 SELECT project_id, MAX(updated_at) AS last_activity_at FROM (
+                     SELECT id AS project_id, updated_at FROM local_projects
+                     UNION ALL SELECT project_id, updated_at FROM chat_sessions
+                     UNION ALL SELECT project_id, updated_at FROM local_experiments
+                     UNION ALL SELECT project_id, updated_at FROM runs
+                     UNION ALL
+                     SELECT chat_sessions.project_id, chat_messages.created_at
+                     FROM chat_messages JOIN chat_sessions ON chat_sessions.id = chat_messages.session_id
+                 ) GROUP BY project_id
+             )
              SELECT local_projects.id,
                     COALESCE(agent_counts.total_agents, 0),
                     COALESCE(running_experiment_counts.running_experiments, 0),
                     COALESCE(experiment_counts.total_experiments, 0),
-                    latest_messages.last_message_at
+                    latest_messages.last_message_at,
+                    latest_activity.last_activity_at
              FROM local_projects
              LEFT JOIN agent_counts ON agent_counts.project_id = local_projects.id
              LEFT JOIN experiment_counts ON experiment_counts.project_id = local_projects.id
              LEFT JOIN running_experiment_counts
                ON running_experiment_counts.project_id = local_projects.id
-             LEFT JOIN latest_messages ON latest_messages.project_id = local_projects.id",
+             LEFT JOIN latest_messages ON latest_messages.project_id = local_projects.id
+             JOIN latest_activity ON latest_activity.project_id = local_projects.id",
         )?;
         let rows = stmt.query_map([], |row| {
             Ok(ProjectActivitySummary {
@@ -2117,6 +2153,7 @@ impl Store {
                 running_experiments: row.get::<_, i64>(2)? as usize,
                 total_experiments: row.get::<_, i64>(3)? as usize,
                 last_message_at: row.get(4)?,
+                last_activity_at: row.get(5)?,
             })
         })?;
         Ok(rows.collect::<std::result::Result<Vec<_>, _>>()?)
@@ -4569,6 +4606,45 @@ mod tests {
     }
 
     #[test]
+    fn sidebar_pages_across_projects_with_ties_and_archive_filter() {
+        let dir = std::env::temp_dir().join(format!("orx-store-sidebar-{}", uuid::Uuid::new_v4()));
+        let store = Store::open_at(dir.clone()).unwrap();
+        for n in 0..65 {
+            let mut session = chat_session_fixture(&format!("chat_{n:03}"));
+            session.project_id = format!("proj_{}", n % 3);
+            session.updated_at = 10;
+            session.archived = n >= 60;
+            store.create_chat_session(&session).unwrap();
+        }
+        let mut side = chat_session_fixture("side");
+        side.side_parent_session_id = Some("chat_000".into());
+        side.updated_at = 20;
+        store.create_chat_session(&side).unwrap();
+        let first = store.list_sidebar_chat_sessions(Some(false), None).unwrap();
+        assert_eq!(first.len(), 51);
+        assert_eq!(first[0].id, "chat_059");
+        let cursor = &first[49];
+        let second = store
+            .list_sidebar_chat_sessions(Some(false), Some((cursor.updated_at, &cursor.id)))
+            .unwrap();
+        assert_eq!(second.len(), 10);
+        assert_eq!(second[0].id, "chat_009");
+        assert_eq!(second.last().unwrap().id, "chat_000");
+        assert_eq!(
+            store
+                .list_sidebar_chat_sessions(Some(true), None)
+                .unwrap()
+                .len(),
+            5
+        );
+        assert_eq!(
+            store.list_sidebar_chat_sessions(None, None).unwrap()[0].id,
+            "chat_064"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
     fn only_one_claimant_advances_a_spawn() {
         let dir =
             std::env::temp_dir().join(format!("orx-store-spawnclaim-{}", uuid::Uuid::new_v4()));
@@ -5556,7 +5632,24 @@ mod tests {
         assert_eq!(summary.running_experiments, 2);
         assert_eq!(summary.total_experiments, 2);
         assert_eq!(summary.last_message_at, Some(20));
+        assert_eq!(summary.last_activity_at, 30);
         assert_eq!(store.list_chat_session_project_ids().unwrap().len(), 2);
+
+        for (table, timestamp) in [
+            ("local_projects", 40),
+            ("chat_sessions", 50),
+            ("local_experiments", 60),
+            ("runs", 70),
+        ] {
+            store
+                .conn
+                .execute(&format!("UPDATE {table} SET updated_at = ?1"), [timestamp])
+                .unwrap();
+            assert_eq!(
+                store.list_project_activity_summaries().unwrap()[0].last_activity_at,
+                timestamp
+            );
+        }
 
         let _ = std::fs::remove_dir_all(&dir);
     }

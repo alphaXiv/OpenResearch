@@ -16,12 +16,13 @@ function validSessionLocation(location: string, sessions: ChatSession[]): boolea
 export async function globalResumeLocation(client = queryClient): Promise<string> {
   const [state, projects] = await Promise.all([client.fetchQuery(getUiStateQuery()), client.fetchQuery(listProjectsQuery())]);
   const location = safeLocation((getRememberedGlobalWorkspace() ?? state.workspace)?.lastLocation);
-  if (!location) return "/projects";
+  const fallback = () => projects[0] ? projectResumeLocation(projects[0].id, client) : Promise.resolve("/projects");
+  if (!location) return fallback();
   const destination = parseDestination(location.split("?")[0]);
-  if (!destination?.projectId) return "/projects";
-  if (!projects.some((project) => project.id === destination.projectId)) return "/projects";
+  if (!destination?.projectId) return fallback();
+  if (!projects.some((project) => project.id === destination.projectId)) return fallback();
   if (destination.sessionId && !validSessionLocation(location, await client.fetchQuery(listChatSessionsQuery(destination.projectId))))
-    return "/projects";
+    return fallback();
   return location;
 }
 

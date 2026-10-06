@@ -1021,9 +1021,18 @@ async fn connect_once(
         return ConnectionEnd::Cancelled;
     }
 
+    let sharing = crate::jobs::ssh::setup_connection_sharing(&session.target);
+    tokio::pin!(sharing);
+    let mut sharing_pending = true;
     let mut heartbeat = tokio::time::interval(Duration::from_secs(5));
     loop {
         tokio::select! {
+            warning = &mut sharing, if sharing_pending => {
+                sharing_pending = false;
+                if let Some(warning) = warning {
+                    eprintln!("orx: warning: {warning}");
+                }
+            }
             status = child.wait() => {
                 return ConnectionEnd::Retryable(match status {
                     Ok(status) => format!("SSH connection ended ({status})."),
@@ -2245,6 +2254,7 @@ pub(crate) fn ssh_forward_command(
     remote_cmd: &str,
 ) -> Result<Command> {
     let mut cmd = Command::new("ssh");
+    cmd.env("ORX_SSH_PROBE", "1");
     cmd.args(crate::jobs::ssh::forward_args(target, forward, remote_cmd)?)
         .stdin(Stdio::null())
         .kill_on_drop(true);

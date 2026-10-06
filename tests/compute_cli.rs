@@ -119,6 +119,122 @@ fn standalone_settings_defaults_and_instruction_conflicts() {
 
 #[cfg(unix)]
 #[test]
+fn interactive_ssh_retires_rejected_masters_without_unlinking_unknown_connections() {
+    use portable_pty::{native_pty_system, CommandBuilder, PtySize};
+    use std::io::Read;
+    use std::os::unix::fs::PermissionsExt;
+
+    let sandbox = Sandbox::new();
+    std::fs::write(
+        sandbox.0.join(".ssh/config"),
+        "Host lab\n  HostName localhost\n",
+    )
+    .unwrap();
+    let bin = sandbox.0.join("bin");
+    std::fs::create_dir(&bin).unwrap();
+    let ssh = bin.join("ssh");
+    std::fs::write(&ssh, r#"#!/bin/sh
+if [ "$1" = -G ]; then exec /usr/bin/ssh -F /dev/null "$@"; fi
+printf '%s\n' "$*" >> "$HOME/calls"
+case "$*" in
+  *'-O check -S '*)
+    socket=$4
+    printf '%s' "$socket" > "$HOME/socket-path"
+    : > "$socket"
+    if [ "$CASE" = check_timeout ]; then exec sleep 30; fi
+    exit 0;;
+  *'-O stop -S '*)
+    socket=$4
+    case "$CASE" in
+      stop_failure) exit 1;;
+      stop_timeout) exec sleep 30;;
+    esac
+    rm "$socket"
+    exit 0;;
+  *'echo __ORX_SESSION_OK__'*)
+    case "$*" in
+      *'-oBatchMode=yes -oControlMaster=no -oControlPersist=no -oProxyCommand=false -oClearAllForwardings=yes -oRemoteCommand=none -T -S '*) ;;
+      *) echo 'probe allows fallback or user configuration' >&2; exit 99;;
+    esac
+    case "$CASE" in
+      healthy) echo __ORX_SESSION_OK__;;
+      rejection) echo 'cannot assign requested address' >&2; exit 1;;
+      exit_zero|stop_failure|stop_timeout) echo 'cannot assign requested address';;
+      probe_timeout) exec sleep 30;;
+    esac
+    exit 0;;
+  *'-- lab true') echo LOGIN; exit 0;;
+  *'command -v bash'*) exit 0;;
+  *) exit 1;;
+esac
+"#).unwrap();
+    std::fs::set_permissions(&ssh, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+    for case in [
+        "healthy",
+        "rejection",
+        "exit_zero",
+        "stop_failure",
+        "probe_timeout",
+        "check_timeout",
+        "stop_timeout",
+    ] {
+        let _ = std::fs::remove_file(sandbox.0.join("calls"));
+        let command = sandbox.command();
+        let mut builder = CommandBuilder::new(command.get_program());
+        builder.args(command.get_args());
+        for (key, value) in command.get_envs() {
+            match value {
+                Some(value) => builder.env(key, value),
+                None => builder.env_remove(key),
+            }
+        }
+        builder.env("PATH", format!("{}:/usr/bin:/bin", bin.display()));
+        builder.env("CASE", case);
+        builder.args(["compute", "connect", "ssh", "--host", "lab"]);
+        let pair = native_pty_system().openpty(PtySize::default()).unwrap();
+        let mut child = pair.slave.spawn_command(builder).unwrap();
+        drop(pair.slave);
+        let mut reader = pair.master.try_clone_reader().unwrap();
+        let mut output = Vec::new();
+        // Linux PTYs report EIO instead of EOF when the slave closes.
+        if let Err(error) = reader.read_to_end(&mut output) {
+            assert_eq!(error.raw_os_error(), Some(libc::EIO));
+        }
+        let status = child.wait().unwrap();
+        let calls = std::fs::read_to_string(sandbox.0.join("calls")).unwrap();
+        let socket = PathBuf::from(std::fs::read_to_string(sandbox.0.join("socket-path")).unwrap());
+        let output = String::from_utf8_lossy(&output);
+        match case {
+            "healthy" => {
+                assert!(status.success(), "{output}");
+                assert!(!calls.contains("-O stop"));
+                assert!(socket.exists());
+                assert!(output.contains("LOGIN"));
+            }
+            "rejection" | "exit_zero" => {
+                assert!(status.success(), "{output}");
+                assert!(calls.find("-O stop").unwrap() < calls.find("-- lab true").unwrap());
+                assert!(!socket.exists());
+                assert!(output.contains("LOGIN"));
+            }
+            _ => {
+                assert!(!status.success(), "{case}: {output}");
+                assert!(socket.exists(), "{case} removed an unknown/live socket");
+                assert!(!output.contains("LOGIN"));
+                if case != "stop_failure" && case != "stop_timeout" {
+                    assert!(!calls.contains("-O stop"));
+                }
+            }
+        }
+        assert!(!calls.contains("-O exit"));
+        let _ = std::fs::remove_file(&socket);
+        let _ = std::fs::remove_file(socket.with_extension("lock"));
+    }
+}
+
+#[cfg(unix)]
+#[test]
 fn ssh_config_conflict_and_execution_target_checks() {
     use std::os::unix::fs::PermissionsExt;
     let sandbox = Sandbox::new();
@@ -215,6 +331,7 @@ fn supervisor_recovers_monitoring_and_logs(ssh_backend: bool) {
     std::fs::write(
         &ssh,
         r#"#!/bin/sh
+if [ "$1" = -G ]; then exec /usr/bin/ssh -F /dev/null "$@"; fi
 printf '%s\n' "$*" >> "$HOME/calls"
 case "$*" in
   *sbatch*|*scancel*) exit 99;;
@@ -413,6 +530,7 @@ fn slurm_cancel_requires_acknowledgement_and_survives_restart_without_accounting
         (
             "ssh",
             r#"#!/bin/sh
+if [ "$1" = -G ]; then exec /usr/bin/ssh -F /dev/null "$@"; fi
 for cmd do :; done
 case "$cmd" in
   *scancel*|*exit_code*) exec /bin/sh -c "$cmd";;

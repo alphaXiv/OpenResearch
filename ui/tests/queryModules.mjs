@@ -3,7 +3,7 @@ import ts from "typescript";
 import * as query from "@tanstack/react-query";
 import * as react from "react";
 
-export function queryModules(api, { nativeClient = false } = {}) {
+export function queryModules(api, { nativeClient = false, onChatEvent = () => () => {} } = {}) {
   const modules = new Map();
   const deletedSessionIds = new Set();
   let client = new query.QueryClient({ defaultOptions: { queries: { staleTime: 30_000, gcTime: Infinity, retry: false } } });
@@ -18,6 +18,7 @@ export function queryModules(api, { nativeClient = false } = {}) {
       if (id === "@tanstack/react-query") return query;
       if (id === "react") return react;
       if (id === "../api") return api;
+      if (id === "../events") return { onChatEvent };
       if (id.startsWith("./")) return load(id.slice(2));
       throw new Error(`Unexpected query dependency: ${id}`);
     }, exports);

@@ -12,6 +12,7 @@
 
 use std::collections::{HashMap, HashSet};
 use std::convert::Infallible;
+use std::io::IsTerminal as _;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
@@ -231,6 +232,12 @@ pub async fn run(args: UpArgs) -> Result<()> {
         eprintln!("orx up: dashboard on {url}");
         if let Some(warning) = crate::local::bash::missing_toolchain() {
             eprintln!("orx up: warning: {warning}");
+        }
+        if !args.desktop_app && !persistent_host && std::io::stderr().is_terminal() {
+            eprintln!(
+                "orx up: the OpenResearch desktop app opens these same projects: {}",
+                crate::updates::desktop_app_download_url()
+            );
         }
         if !args.no_browser {
             browser::open_dashboard(&url, crate::telemetry::UpLaunchMode::of(&args));
@@ -1334,6 +1341,7 @@ async fn list_project_activity(State(state): State<AppState>) -> ApiResult {
                     "runningExperiments": summary.running_experiments,
                     "totalExperiments": summary.total_experiments,
                     "lastMessageAt": summary.last_message_at,
+                    "lastActivityAt": summary.last_activity_at,
                 })
             })
             .collect::<Vec<_>>();
@@ -3431,7 +3439,15 @@ async fn reveal_project_file(
     Json(req): Json<OpenProjectFileReq>,
 ) -> ApiResult {
     blocking_api(move || {
-        let full = confined_checkout_file(&id, &req, "reveal")?;
+        let full = if req.path == "." {
+            let store = Store::open()?;
+            let project = store
+                .get_local_project(&id)?
+                .ok_or_else(|| not_found("project"))?;
+            resolve_checkout_root(&store, &project, req.session_id.as_deref())?.0
+        } else {
+            confined_checkout_file(&id, &req, "reveal")?
+        };
         crate::editors::reveal_in_file_manager(&full)
             .map_err(|e| ApiError::from(anyhow!("could not reveal file: {e}")))?;
         Ok(Json(json!({ "ok": true })))
@@ -5654,6 +5670,9 @@ fn start_pty_with_env(
     for (key, value) in env {
         command.env(key, value);
     }
+    if program == "ssh" {
+        command.env("ORX_SSH_PROBE", "1");
+    }
     let mut child = pair.slave.spawn_command(command)?;
     drop(pair.slave);
 
@@ -5763,7 +5782,17 @@ async fn ssh_connect_socket(
     };
 
     match status {
-        Ok(status) if status.success() => {}
+        Ok(status) if status.success() => {
+            if let Some(warning) = crate::jobs::ssh::setup_connection_sharing(&target).await {
+                let _ = socket
+                    .send(Message::Binary(
+                        format!("\r\norx: warning: {warning}\r\n")
+                            .into_bytes()
+                            .into(),
+                    ))
+                    .await;
+            }
+        }
         Ok(status) => {
             send_ssh_connect_error(
                 &mut socket,
@@ -6926,6 +6955,9 @@ struct SessionsQuery {
     /// `all` is the composer's `/resume` picker, which spans every project.
     /// Spelled out so a dropped `projectId` cannot silently widen the scope.
     scope: Option<String>,
+    archived: Option<bool>,
+    before_updated_at: Option<i64>,
+    before_id: Option<String>,
 }
 
 async fn list_chat_sessions(
@@ -6933,6 +6965,26 @@ async fn list_chat_sessions(
     Query(q): Query<SessionsQuery>,
 ) -> ApiResult {
     let store = Store::open()?;
+    if q.scope.as_deref() == Some("sidebar") {
+        let before = match (q.before_updated_at, q.before_id.as_deref()) {
+            (Some(at), Some(id)) => Some((at, id)),
+            (None, None) => None,
+            _ => return Err(bad_request("both cursor fields are required")),
+        };
+        let mut sessions = store.list_sidebar_chat_sessions(q.archived, before)?;
+        let has_more = sessions.len() > 50;
+        sessions.truncate(50);
+        let next = sessions
+            .last()
+            .filter(|_| has_more)
+            .map(|session| json!({ "updatedAt": session.updated_at, "id": session.id }));
+        let busy = state.chat.busy_sessions().await;
+        let sessions: Vec<Value> = sessions
+            .iter()
+            .map(|session| local::chat::session_json(session, busy.contains(&session.id)))
+            .collect();
+        return Ok(Json(json!({ "sessions": sessions, "next": next })));
+    }
     let sessions = match (q.project_id.as_deref(), q.scope.as_deref()) {
         (Some(project_id), _) => store.list_chat_sessions_by_project(project_id)?,
         (None, Some("all")) => store.list_all_chat_sessions()?,

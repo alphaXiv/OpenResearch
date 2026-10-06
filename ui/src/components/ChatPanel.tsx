@@ -1,3 +1,6 @@
+import { ComposerProjectPicker } from "./ComposerProjectPicker";
+import { ProjectInfoCard } from "./ProjectInfoCard";
+import { fitSidebarRows, sidebarRowHeight, type SidebarRow } from "../sidebarLayout";
 import { useVirtualizer, defaultRangeExtractor, type Range as VirtualRange } from "@tanstack/react-virtual";
 import { markLiveUpdate } from "../queries/live";
 import { removeSession as removeCachedSession } from "../queries/invalidation";
@@ -6,17 +9,19 @@ import {
   setScopedQueryData,
   deletedSessionIds,
   queryClient,
+  workspaceKey,
 } from "../queries/client";
 import { LOCAL_PREFIX, SHELL_TOOL } from "../queries/chatState";
-import { useMutation, useQuery } from "@tanstack/react-query";
+import { useInfiniteQuery, useMutation, useQueries, useQuery } from "@tanstack/react-query";
+import { useNavigate } from "@tanstack/react-router";
 import { useChatState } from "../queries/chatStore";
 
 import {
   getHarnessesQuery,
   getSkillsQuery,
 } from "../queries/settings";
-import { listChatSessionsQuery, getChatMessagesQuery, listNativeChatsQuery } from "../queries/chat";
-import { getProjectStarterPromptsQuery } from "../queries/projects";
+import { listChatSessionsQuery, getChatMessagesQuery, listNativeChatsQuery, readSidebarChatPage } from "../queries/chat";
+import { getProjectStarterPromptsQuery, listProjectsQuery, listProjectActivityQuery } from "../queries/projects";
 import { m } from "../paraglide/messages.js";
 import { autoDir, ltr } from "../i18n";
 import { useLocale } from "../locale";
@@ -34,7 +39,7 @@ import {
   Copy,
   FileText,
   FlaskConical,
-  FolderOpen,
+  FolderPlus,
   Globe,
   Gauge,
   HelpCircle,
@@ -69,6 +74,7 @@ import {
 } from "react";
 import { BrandMark } from "./Wordmark";
 import {
+  type SidebarChatCursor,
   cancelQueuedMessage,
   chatAttachmentUrl,
   createChatSession,
@@ -152,6 +158,7 @@ import {
   containsShellGlob,
   orxArgsMatch,
   orxArgv,
+  recordedDiscoveryQueries,
   shellWords,
   shellWrapperBody,
   unwrapShellBody,
@@ -203,7 +210,7 @@ import {
   shouldRecoverLegacyMath,
   tableMarkdown,
 } from "./annotationMarkdown";
-import { Button, IconButton, LoadingRow, MenuItem, showAlert, Spinner } from "./ui";
+import { Button, IconButton, LoadingRow, MenuItem, showAlert, Spinner, Tooltip } from "./ui";
 import { PaperTitle } from "./PaperTitle";
 
 const TOOL_LINE_CLASS_NAME = "tool-line flex-1 min-w-0 line-clamp-2 break-words text-base leading-6";
@@ -802,6 +809,7 @@ interface ToolActivity {
   fileRef?: string;
   labelTarget?: string;
   litCall?: NonNullable<ReturnType<typeof parseOrxLit>>;
+  queries?: string[];
   runIds?: string[];
   experimentIds?: string[];
   /** Chat sessions `orx agent spawn` created in this tool call. */
@@ -1505,6 +1513,9 @@ function computeToolActivity(part: ChatPart): ToolActivity {
         return argv !== null && argv[0] !== "discover" && argv[0] !== "paper";
       });
       if (litCall && !hasNonLiteratureOrx) {
+        const queries = litCall.kind === "discover" && !litCall.query
+          ? recordedDiscoveryQueries(commandArgv ? shellWrapperBody(commandArgv) ?? command : command, toolOutput ?? "", litCall.strategy)
+          : [];
         const discoveryLabel = litCall.kind === "discover"
           ? {
             keyword: m.activity_searched_alphaxiv_full_text(),
@@ -1517,9 +1528,13 @@ function computeToolActivity(part: ChatPart): ToolActivity {
         const label = litCall.kind === "discover"
           ? litCall.query
             ? m.activity_for_query({ activity: discoveryLabel ?? m.activity_searched_literature(), query: litCall.query })
-            : discoveryLabel ?? m.activity_searched_literature()
+            : queries.length === 1
+              ? m.activity_for_query({ activity: discoveryLabel ?? m.activity_searched_literature(), query: queries[0] })
+              : queries.length > 1
+                ? m.activity_for_queries({ activity: discoveryLabel ?? m.activity_searched_literature(), count: fmtNumber(queries.length) })
+                : discoveryLabel ?? m.activity_searched_literature()
           : litCall.id ? m.activity_read_target({ target: ltr(litCall.id) }) : m.activity_read_paper();
-        return { kind: litCall.kind === "paper" ? "read" : "search", label, litCall };
+        return { kind: litCall.kind === "paper" ? "read" : "search", label, litCall, queries };
       }
 
       if (commandInvokesOrx(command, "agent\\s+spawn")) {
@@ -2229,6 +2244,7 @@ function squashableToolPartKey(part: ChatPart, activity: ToolActivity): string |
     activity.runIds ?? null,
     activity.experimentIds ?? null,
     activity.spawnedSessionIds ?? null,
+    activity.queries ?? null,
   ]);
 }
 
@@ -3873,8 +3889,8 @@ function inSideChat(target: EventTarget | null): boolean {
 
 /** Menu label + rail section heading per filter — "Recents" for the default view. */
 const SESSION_FILTERS: { id: SessionFilter; label: () => string; railLabel: () => string }[] = [
-  { id: "active", label: m.chat_panel_active, railLabel: m.chat_recents },
   { id: "archived", label: m.chat_panel_archived, railLabel: m.chat_panel_archived },
+  { id: "active", label: m.chat_panel_active, railLabel: m.chat_recents },
   { id: "all", label: m.chat_panel_all, railLabel: m.chat_all_sessions },
 ];
 
@@ -3882,26 +3898,40 @@ const SESSION_FILTERS: { id: SessionFilter; label: () => string; railLabel: () =
 function SessionFilterMenu({
   value,
   onChange,
+  grouping,
+  onGroupingChange,
 }: {
   value: SessionFilter;
   onChange: (next: SessionFilter) => void;
+  grouping: "projects" | "list";
+  onGroupingChange: (next: "projects" | "list") => void;
 }) {
   const { open, setOpen, ref } = usePopover();
   return (
     <div className="rail-filter relative inline-flex" ref={ref}>
       <IconButton size="small"
-        className="rail-filter-btn"
+        className="rail-filter-btn text-subtext"
         active={value !== "active"}
         title={m.chat_panel_filter_sessions()}
         aria-label={m.chat_panel_filter_sessions()}
         onClick={() => setOpen((v) => !v)}
       >
-        <SlidersHorizontal size={13} />
+        <SlidersHorizontal size={15} className="text-subtext" />
       </IconButton>
       {open && (
-        <div className="option-menu absolute bottom-[calc(100%_+_8px)] start-0 max-h-95 flex flex-col bg-background border border-border rounded-lg shadow-menu z-50 overflow-hidden min-w-47.5 p-1.5 [&.align-right]:start-auto [&.align-right]:end-0 [&.drop-down]:bottom-auto [&.drop-down]:top-[calc(100%_+_4px)] [&.session-menu]:start-auto [&.session-menu]:end-1.5 [&.session-menu]:top-[calc(100%_-_2px)] [&.session-menu]:min-w-35 drop-down align-right">
+        <div className="option-menu absolute bottom-[calc(100%_+_8px)] start-0 max-h-95 flex flex-col bg-background border border-border rounded-lg shadow-menu z-50 overflow-hidden min-w-40 p-1 [&.align-right]:start-auto [&.align-right]:end-0 [&.drop-down]:bottom-auto [&.drop-down]:top-[calc(100%_+_4px)] [&.session-menu]:start-auto [&.session-menu]:end-1.5 [&.session-menu]:top-[calc(100%_-_2px)] [&.session-menu]:min-w-35 drop-down align-right">
+          <div className="px-2 py-0.5 text-sm text-subtext">{m.sidebar_group_by()}</div>
+          {(["projects", "list"] as const).map((mode) => (
+            <MenuItem size="compact" className="text-sm" key={mode} onClick={() => { onGroupingChange(mode); setOpen(false); }}>
+              <span>{mode === "projects" ? m.projects_home_projects() : m.sidebar_one_list()}</span>
+              {grouping === mode && <Check size={13} />}
+            </MenuItem>
+          ))}
+          <div className="my-1 border-t border-border" />
+          <div className="px-2 py-0.5 text-sm text-subtext">{m.sidebar_filter()}</div>
           {SESSION_FILTERS.map((f) => (
             <MenuItem
+              size="compact" className="text-sm"
               key={f.id}
 
               onClick={() => {
@@ -4025,7 +4055,7 @@ function SessionRow({
       ref={ref}
       role="button"
       tabIndex={0}
-      className={`session-row relative flex items-center gap-2 w-full text-start py-[7px] px-2.5 rounded-md text-sm text-text cursor-pointer select-none [&:hover:not(.active)]:bg-surface [&.active]:bg-panel [&.active]:font-medium [&_.session-dot:empty]:hidden [&_.session-dot]:w-4 [&_.session-dot]:inline-flex [&_.session-dot]:items-center [&_.session-dot]:justify-center [&_.session-dot]:shrink-0 [&_.session-title]:flex-1 [&_.session-title]:min-w-0 [&_.session-title]:overflow-hidden [&_.session-title]:[mask-image:linear-gradient(to_right,black_calc(100%_-_16px),transparent)] [&_.session-title]:whitespace-nowrap [&_.session-menu-btn]:hidden [&_.session-menu-btn]:items-center [&_.session-menu-btn]:justify-center [&_.session-menu-btn]:w-4 [&_.session-menu-btn]:h-4 [&_.session-menu-btn]:-my-0.5 [&_.session-menu-btn]:mx-0 [&_.session-menu-btn]:rounded-sm [&_.session-menu-btn]:text-muted [&_.session-menu-btn]:shrink-0 [&_.session-menu-btn:hover]:text-text [&_.session-menu-btn:hover]:bg-panel [&:hover_.session-menu-btn]:inline-flex [&:focus-visible_.session-menu-btn]:inline-flex [&_.session-menu-btn:focus-visible]:inline-flex [&.menu-open_.session-menu-btn]:inline-flex [&:hover_.session-dot]:hidden [&:focus-visible_.session-dot]:hidden [&:has(.session-menu-btn:focus-visible)_.session-dot]:hidden [&.menu-open_.session-dot]:hidden [&_.busy-dot]:w-[7px] [&_.busy-dot]:h-[7px] [&_.busy-dot]:rounded-full [&_.busy-dot]:bg-primary [&_.busy-dot]:animate-[or-pulse_1.2s_infinite] [&_.busy-dot]:shrink-0 [&_.unread-dot]:w-[7px] [&_.unread-dot]:h-[7px] [&_.unread-dot]:rounded-full [&_.unread-dot]:bg-primary [&_.unread-dot]:shrink-0 [&_.busy-dot.waiting]:animate-none [&_.session-title-input]:flex-1 [&_.session-title-input]:min-w-0 [&_.session-title-input]:py-px [&_.session-title-input]:px-[5px] [&_.session-title-input]:-my-0.5 [&_.session-title-input]:mx-0 [&_.session-title-input]:[font:inherit] [&_.session-title-input]:text-text [&_.session-title-input]:bg-background [&_.session-title-input]:border [&_.session-title-input]:border-primary [&_.session-title-input]:rounded-sm [&_.session-title-input]:outline-none [&.editing]:bg-surface [&.editing]:cursor-default [&.editing_.session-menu-btn]:hidden [&.editing_.session-dot]:hidden ${active ? "active" : ""}  ${unread ? "unread" : ""}  ${open ? "menu-open" : ""}  ${
+      className={`session-row relative flex items-center gap-2 w-full text-start py-[7px] ps-2.5 pe-1.5 rounded-md text-sm text-text cursor-pointer select-none [&:hover:not(.active)]:bg-surface [&.active]:bg-panel [&.active]:font-medium [&_.session-dot:empty]:hidden [&_.session-dot]:w-4 [&_.session-dot]:inline-flex [&_.session-dot]:items-center [&_.session-dot]:justify-center [&_.session-dot]:shrink-0 [&_.session-title]:flex-1 [&_.session-title]:min-w-0 [&_.session-title]:overflow-hidden [&_.session-title]:[mask-image:linear-gradient(to_right,black_calc(100%_-_16px),transparent)] [&_.session-title]:whitespace-nowrap [&_.session-menu-btn]:hidden [&_.session-menu-btn]:items-center [&_.session-menu-btn]:justify-center [&_.session-menu-btn]:w-4 [&_.session-menu-btn]:h-4 [&_.session-menu-btn]:-my-0.5 [&_.session-menu-btn]:mx-0 [&_.session-menu-btn]:rounded-sm [&_.session-menu-btn]:text-muted [&_.session-menu-btn]:shrink-0 [&_.session-menu-btn:hover]:text-text [&_.session-menu-btn:hover]:bg-panel [&:hover_.session-menu-btn]:inline-flex [&:focus-visible_.session-menu-btn]:inline-flex [&_.session-menu-btn:focus-visible]:inline-flex [&.menu-open_.session-menu-btn]:inline-flex [&:hover_.session-dot]:hidden [&:focus-visible_.session-dot]:hidden [&:has(.session-menu-btn:focus-visible)_.session-dot]:hidden [&.menu-open_.session-dot]:hidden [&_.busy-dot]:w-[7px] [&_.busy-dot]:h-[7px] [&_.busy-dot]:rounded-full [&_.busy-dot]:bg-primary [&_.busy-dot]:animate-[or-pulse_1.2s_infinite] [&_.busy-dot]:shrink-0 [&_.unread-dot]:w-[7px] [&_.unread-dot]:h-[7px] [&_.unread-dot]:rounded-full [&_.unread-dot]:bg-primary [&_.unread-dot]:shrink-0 [&_.busy-dot.waiting]:animate-none [&_.session-title-input]:flex-1 [&_.session-title-input]:min-w-0 [&_.session-title-input]:py-px [&_.session-title-input]:px-[5px] [&_.session-title-input]:-my-0.5 [&_.session-title-input]:mx-0 [&_.session-title-input]:[font:inherit] [&_.session-title-input]:text-text [&_.session-title-input]:bg-background [&_.session-title-input]:border [&_.session-title-input]:border-primary [&_.session-title-input]:rounded-sm [&_.session-title-input]:outline-none [&.editing]:bg-surface [&.editing]:cursor-default [&.editing_.session-menu-btn]:hidden [&.editing_.session-dot]:hidden ${active ? "active" : ""}  ${unread ? "unread" : ""}  ${open ? "menu-open" : ""}  ${
         editing ? "editing" : ""
         }`}
       title={`${HARNESS_LABELS[session.harness]}${session.model ? ` · ${session.model}` : ""}${
@@ -4181,9 +4211,13 @@ export function deriveComposerSelection(
 export function ChatPanel({
   projectId,
   projectName,
+  contentLoading = false,
+  contentError = null,
+  onRetryContent,
   railHeader,
   railOpen,
   onShowRail,
+  onNewProject,
   mainView,
   onSelectMainView,
   onOpenFile,
@@ -4209,12 +4243,16 @@ export function ChatPanel({
 }: {
   projectId: string;
   projectName: string;
-  /** Back-to-projects + project name block rendered at the top of the rail. */
+  contentLoading?: boolean;
+  contentError?: string | null;
+  onRetryContent?: () => void;
+  /** Brand and project creation controls at the top of the rail. */
   railHeader?: React.ReactNode;
   /** Whether the agents rail is showing (collapsed via its own header icon). */
   railOpen: boolean;
   /** Reopen the rail (from the chat header's sidebar icon). */
   onShowRail: () => void;
+  onNewProject?: () => void;
   /** Settings sections replace chat; Artifacts remains a right-panel tool. */
   mainView: "chat" | "skills" | SettingsTab;
   onSelectMainView: (view: "chat" | "skills" | SettingsTab) => void;
@@ -4285,6 +4323,55 @@ export function ChatPanel({
   const renameChatSessionMutation = useMutation({ mutationFn: (args: Parameters<typeof renameChatSession>) => renameChatSession(...args) });
   const deleteChatSessionMutation = useMutation({ mutationFn: deleteChatSession });
 
+  const navigate = useNavigate();
+  const { data: sidebarProjects = [] } = useQuery({ ...listProjectsQuery(), enabled: !embedded });
+  const { data: projectActivity = [] } = useQuery({ ...listProjectActivityQuery(), enabled: !embedded });
+  const [sidebarGrouping, setSidebarGrouping] = useState<"projects" | "list">(() => {
+    try { return localStorage.getItem("sidebar-grouping") === "list" ? "list" : "projects"; }
+    catch { return "projects"; }
+  });
+  const [pinnedProjects, setPinnedProjects] = useState<string[]>(() => {
+    try {
+      const stored: unknown = JSON.parse(localStorage.getItem("sidebar-pinned-projects") ?? "[]");
+      return Array.isArray(stored) ? stored.filter((id): id is string => typeof id === "string") : [];
+    } catch { return []; }
+  });
+  const [sessionFilter, setSessionFilter] = useState<SessionFilter>("active");
+  const [sidebarExpanded, setSidebarExpanded] = useState(false);
+  const railBodyRef = useRef<HTMLDivElement>(null);
+  const [railHeight, setRailHeight] = useState(0);
+  const [focusedSidebarRow, setFocusedSidebarRow] = useState<string | null>(null);
+  const [chatLimits, setChatLimits] = useState<Record<string, number>>({});
+  useLayoutEffect(() => {
+    const body = railBodyRef.current;
+    if (!body || embedded) return;
+    const resize = () => setRailHeight(body.clientHeight);
+    const observer = new ResizeObserver(resize);
+    observer.observe(body);
+    resize();
+    return () => observer.disconnect();
+  }, [railOpen, embedded, mainView]);
+  const recentActivity = new Map(projectActivity.map((activity) => [activity.projectId, activity.lastActivityAt]));
+  const sortedProjects = [...sidebarProjects].sort((a, b) => Number(pinnedProjects.includes(b.id)) - Number(pinnedProjects.includes(a.id)) || Math.max(recentActivity.get(b.id) ?? 0, b.updatedAt) - Math.max(recentActivity.get(a.id) ?? 0, a.updatedAt));
+  const candidateLimit = sidebarGrouping === "list" || sidebarExpanded ? sortedProjects.length : Math.max(1, Math.ceil(railHeight / 36));
+  let shownProjects = sortedProjects.slice(0, candidateLimit);
+  const currentProject = sidebarProjects.find((project) => project.id === projectId);
+  if (currentProject && !shownProjects.some((project) => project.id === projectId)) {
+    shownProjects = [...shownProjects.slice(0, candidateLimit - 1), currentProject];
+  }
+  const projectSessionsQueries = useQueries({
+    queries: (sidebarGrouping === "projects" ? shownProjects : []).map((project) => ({
+      ...listChatSessionsQuery(project.id),
+      enabled: !embedded,
+    })),
+  });
+  const flatSessions = useInfiniteQuery({
+    queryKey: workspaceKey("listSidebarChatSessions", sessionFilter),
+    queryFn: ({ pageParam, signal }: { pageParam: SidebarChatCursor | null; signal: AbortSignal }) => readSidebarChatPage(sessionFilter, pageParam, signal),
+    initialPageParam: null,
+    getNextPageParam: (page): SidebarChatCursor | undefined => page.next ?? undefined,
+    enabled: !embedded && sidebarGrouping === "list",
+  });
   const sessionsOptions = useMemo(() => listChatSessionsQuery(projectId), [projectId]);
   const { data: sessions = EMPTY_SESSIONS } = useQuery(sessionsOptions);
   const setSessions = useCallback((value: React.SetStateAction<ChatSession[]>) => {
@@ -4306,7 +4393,6 @@ export function ChatPanel({
   const projectVisitRef = useRef({ projectId });
   if (projectVisitRef.current.projectId !== projectId) projectVisitRef.current = { projectId };
   const [unreadSessionIds, setUnreadSessionIds] = useState<ReadonlySet<string>>(new Set());
-  const [sessionFilter, setSessionFilter] = useState<SessionFilter>("active");
   const [draft, setDraft] = useState("");
   const [demoHintDismissed, setDemoHintDismissed] = useState(false);
   const [demoRunHintDismissed, setDemoRunHintDismissed] = useState(false);
@@ -4323,7 +4409,7 @@ export function ChatPanel({
   const [attachError, setAttachError] = useState<string | null>(null);
   // Unsent composer content belongs to the scope it was typed in — stash on
   // the way out, restore on return, so a draft can't bleed into another chat.
-  const stashKey = activeId ?? "new";
+  const stashKey = activeId ?? `${projectId}:new`;
   const composerStashRef = useRef(new Map<string, ComposerStash>());
   const composerLiveRef = useRef(EMPTY_COMPOSER_STASH);
   composerLiveRef.current = { draft, attachments, annotations };
@@ -4500,7 +4586,8 @@ export function ChatPanel({
         continue;
       }
       total += file.size;
-      const scope = activeId;
+      const scope = composerScopeRef.current;
+      const attachmentStashKey = stashKey;
       const reader = new FileReader();
       reader.onload = () => {
         const attachment = {
@@ -4511,12 +4598,12 @@ export function ChatPanel({
         };
         // The decode is async — if the composer moved on, the file belongs to
         // the scope it was pasted into, not whatever chat is now showing.
-        if (composerScopeRef.current.activeId === scope) {
+        if (composerScopeRef.current.projectId === scope.projectId && composerScopeRef.current.activeId === scope.activeId) {
           setAttachments((cur) => [...cur, attachment]);
           return;
         }
-        const stash = composerStashRef.current.get(scope ?? "new") ?? EMPTY_COMPOSER_STASH;
-        composerStashRef.current.set(scope ?? "new", {
+        const stash = composerStashRef.current.get(attachmentStashKey) ?? EMPTY_COMPOSER_STASH;
+        composerStashRef.current.set(attachmentStashKey, {
           ...stash,
           attachments: [...stash.attachments, attachment],
         });
@@ -5104,13 +5191,7 @@ export function ChatPanel({
       setPlanModeOverride(null);
     }
   }, [queued]);
-  // A session whose transcript hasn't been seeded yet: its key is absent from
-  // messagesBySession (vs. present-but-empty for a genuinely empty session).
-  // Switching to an existing session leaves this true for the getChatMessages
-  // fetch, so we show a spinner instead of flashing the empty state. A brand-new
-  // session created via the composer never lands here — its optimisticUser seed
-  // populates the key synchronously in the same handler.
-  const historyLoading = !!activeId && !(activeId in state.messagesBySession) && historyQuery.isPending;
+  const historyLoading = !!activeId && historyQuery.isPending;
   // A busy turn blocked on an unanswered HELD card (nativeId — a bridge or
   // inline mid-turn request) is waiting on the user, not the model. Drives
   // the status line and the rail dot (the composer button is keyed on
@@ -5272,7 +5353,7 @@ export function ChatPanel({
   const starterHarness = composerSelection?.harness ?? null;
   const starterModel = composerSelection?.model ?? null;
   const historyError = !historyQuery.data ? historyQuery.error : null;
-  const starterVisible = mainView === "chat" && !embedded && !threadMounted && !historyLoading && !historyError;
+  const starterVisible = mainView === "chat" && !embedded && !threadMounted && !contentLoading && !contentError && !historyLoading && !historyError;
   const starterQuery = useQuery({
     ...getProjectStarterPromptsQuery(projectId, starterHarness ?? "claude-code", starterModel, getLocale()),
     enabled: starterVisible && starterHarness !== null,
@@ -5919,16 +6000,22 @@ export function ChatPanel({
     seenTitles.current.delete(sessionId);
   }
 
+  function updateSidebarSession(session: ChatSession, changes: Partial<ChatSession>) {
+    const options = listChatSessionsQuery(session.projectId);
+    markLiveUpdate(queryClient, options.queryKey, session.id);
+    setScopedQueryData(options.queryKey, (current) =>
+      current?.map((row) => row.id === session.id ? { ...row, ...changes } : row),
+    );
+  }
+
   function setArchived(session: ChatSession, archived: boolean) {
     // Optimistic; the server also broadcasts the row over chat.session. On
     // failure restore the pre-request snapshot (not the request's negation,
     // which could undo a concurrent authoritative update).
     const prev = session.archived;
-    setSessions((cur) => cur.map((s) => (s.id === session.id ? { ...s, archived } : s)));
+    updateSidebarSession(session, { archived });
     void setChatSessionArchivedMutation.mutateAsync([session.id, archived]).catch(() => {
-      setSessions((cur) =>
-        cur.map((s) => (s.id === session.id ? { ...s, archived: prev } : s)),
-      );
+      updateSidebarSession(session, { archived: prev });
     });
   }
 
@@ -5937,9 +6024,9 @@ export function ChatPanel({
     // On failure restore the pre-request title (not the draft) so a concurrent
     // authoritative update isn't undone.
     const prev = session.title;
-    setSessions((cur) => cur.map((s) => (s.id === session.id ? { ...s, title } : s)));
+    updateSidebarSession(session, { title });
     void renameChatSessionMutation.mutateAsync([session.id, title]).catch(() => {
-      setSessions((cur) => cur.map((s) => (s.id === session.id ? { ...s, title: prev } : s)));
+      updateSidebarSession(session, { title: prev });
     });
   }
 
@@ -5984,14 +6071,24 @@ export function ChatPanel({
     [activeId, projectId, queueSessionMutation, sessionsOptions],
   );
 
-  const visibleSessions = sessions.filter((s) => !s.sideParentSessionId && matchesFilter(sessionFilter, s.archived));
   const isApple = /Mac|iPhone|iPad/.test(navigator.platform);
   const newTaskShortcut = isApple ? "⌘ ⇧ ↵" : "Ctrl + Shift + ↵";
   const queueChord = isApple ? "⌘ Enter" : "Ctrl + Enter";
-  const startNewTask = useCallback(() => {
+  const startProjectTask = useCallback(() => {
     setSessionFilter("active");
     onActiveSessionChange(null);
   }, [onActiveSessionChange]);
+  const startNewTask = useCallback(async () => {
+    try {
+      const activity = await queryClient.fetchQuery({ ...listProjectActivityQuery(), staleTime: 0 });
+      const latest = activity.reduce<(typeof activity)[number] | undefined>((current, item) =>
+        !current || item.lastActivityAt > current.lastActivityAt ? item : current, undefined);
+      setSessionFilter("active");
+      onActiveSessionChange(null, { projectId: latest?.projectId ?? projectId });
+    } catch (error) {
+      showAlert(error instanceof Error ? error.message : String(error), "error");
+    }
+  }, [projectId, onActiveSessionChange]);
 
   /** Follow a spawn card and reveal its session in the rail. */
   const openSpawnedSession = useCallback(
@@ -6021,8 +6118,69 @@ export function ChatPanel({
     return () => document.removeEventListener("keydown", onKeyDown);
   }, [startNewTask, embedded]);
 
+  const sidebarRows: SidebarRow[] = [];
+  if (sidebarGrouping === "projects") shownProjects.forEach((project, index) => {
+    const query = projectSessionsQueries[index];
+    const projectSessions = project.id === projectId ? sessions : query.data ?? EMPTY_SESSIONS;
+    const matching = projectSessions
+      .filter((session) => !session.sideParentSessionId && (matchesFilter(sessionFilter, session.archived) || session.id === activeId))
+      .sort((a, b) => b.updatedAt - a.updatedAt);
+    const chatLimit = chatLimits[project.id] ?? 6;
+    let visible = matching.slice(0, chatLimit);
+    const selected = matching.find((session) => session.id === activeId);
+    if (selected && !visible.some((session) => session.id === activeId)) visible = [...visible.slice(0, chatLimit - 1), selected];
+    if (sidebarGrouping === "projects") sidebarRows.push({ kind: "project", project });
+    visible.forEach((session) => sidebarRows.push({ kind: "chat", project, session }));
+    if (matching.length > chatLimit) sidebarRows.push({ kind: "more", project });
+    if (!visible.length && (sidebarGrouping === "projects" || query.isPending || query.error)) sidebarRows.push({ kind: "status", project, pending: query.isPending, error: Boolean(query.error), retry: () => { void query.refetch(); } });
+  });
+  if (sidebarGrouping === "list") {
+    const flat = flatSessions.data?.pages.flatMap((page) => page.sessions) ?? [];
+    const selected = sessions.find((session) => session.id === activeId);
+    if (selected && !flat.some((session) => session.id === selected.id)) flat.push(selected);
+    flat.filter((session) => !deletedSessionIds.has(session.id)).sort((a, b) => b.updatedAt - a.updatedAt).forEach((session) => {
+      const project = sidebarProjects.find((project) => project.id === session.projectId);
+      if (project) sidebarRows.push({ kind: "chat", project, session });
+    });
+    const project = currentProject ?? sidebarProjects[0];
+    if (project && (!sidebarRows.length || flatSessions.isFetchingNextPage || flatSessions.isError)) {
+      sidebarRows.push({ kind: "status", project, pending: flatSessions.isPending || flatSessions.isFetchingNextPage, error: flatSessions.isError,
+        retry: () => { void (flatSessions.isFetchNextPageError ? flatSessions.fetchNextPage() : flatSessions.refetch()); } });
+    }
+  }
+  const sidebarScrollable = sidebarGrouping === "list" || sidebarExpanded;
+  const initialRows = fitSidebarRows(sidebarRows, railHeight, activeId);
+  const hasHiddenProjects = initialRows.length < sidebarRows.length || shownProjects.length < sortedProjects.length;
+  const defaultRows = sidebarGrouping === "projects" && hasHiddenProjects
+    ? fitSidebarRows(sidebarRows, Math.max(0, railHeight - 38), activeId) : initialRows;
+  const showProjectMore = sidebarGrouping === "projects" && !sidebarExpanded && hasHiddenProjects;
+  const defaultRowsHeight = defaultRows.reduce((height, row) => height + sidebarRowHeight(row), 0);
+  const sidebarRowKey = (row: SidebarRow) => row.kind === "chat" ? row.session.id : `${row.kind}:${row.project.id}`;
+  const sidebarVirtualizer = useVirtualizer({
+    count: sidebarRows.length,
+    getScrollElement: () => railBodyRef.current,
+    getItemKey: (index) => sidebarRowKey(sidebarRows[index]),
+    estimateSize: (index) => sidebarRowHeight(sidebarRows[index]),
+    overscan: 5,
+    rangeExtractor: (range) => {
+      const indexes = defaultRangeExtractor(range);
+      const focused = sidebarRows.findIndex((row) => sidebarRowKey(row) === focusedSidebarRow);
+      return focused < 0 || indexes.includes(focused) ? indexes : [...indexes, focused].sort((a, b) => a - b);
+    },
+    enabled: sidebarScrollable && railOpen && !embedded,
+  });
+
+  const sidebarVirtualItems = sidebarVirtualizer.getVirtualItems();
+  const lastVisibleIndex = sidebarVirtualItems.at(-1)?.index ?? -1;
+  useEffect(() => {
+    if (sidebarGrouping === "list" && railOpen && !embedded && lastVisibleIndex >= sidebarRows.length - 6
+      && flatSessions.hasNextPage && !flatSessions.isFetching && !flatSessions.isError) {
+      void flatSessions.fetchNextPage();
+    }
+  }, [sidebarGrouping, railOpen, embedded, lastVisibleIndex, sidebarRows.length, flatSessions.hasNextPage, flatSessions.isFetching, flatSessions.isError, flatSessions.fetchNextPage]);
+
   const rail = (
-    <aside className="session-rail w-68 shrink-0 flex flex-col mt-5 mac-titlebar:mt-8 me-3.5 mb-5 ms-0 bg-background min-h-0 [&_.rail-body]:flex-1 [&_.rail-body]:min-h-0 [&_.rail-body]:overflow-y-auto [&_.rail-body]:pt-0 [&_.rail-body]:pb-1 [&_.rail-body]:px-2 border border-border rounded-lg overflow-visible shadow-elevated">
+    <aside className="session-rail w-75 shrink-0 flex flex-col mt-5 mac-titlebar:mt-8 me-3.5 mb-5 ms-0 bg-background min-h-0 [&_.rail-body]:flex-1 [&_.rail-body]:min-h-0 [&_.rail-body]:pt-0 [&_.rail-body]:pb-0 [&_.rail-body]:ps-2 [&_.rail-body]:pe-1 border border-border rounded-lg overflow-visible shadow-elevated">
       {railHeader}
       <nav className="rail-nav flex flex-col gap-0.5 p-2 shrink-0">
         <button
@@ -6056,55 +6214,141 @@ export function ChatPanel({
       </nav>
       <div className="rail-section-head flex items-center justify-between shrink-0 pt-3.5 pe-2.5 pb-0 ps-4.5">
         <div className="rail-section-label p-0 text-sm font-medium text-subtext">
-          {SESSION_FILTERS.find((f) => f.id === sessionFilter)?.railLabel() ?? m.chat_recents()}
+          {sidebarGrouping === "projects" ? m.projects_home_projects() : m.chat_all_sessions()}
         </div>
         <div className="rail-section-actions flex items-center gap-0.5">
-          <SessionFilterMenu value={sessionFilter} onChange={setSessionFilter} />
+          {onNewProject && <Tooltip interactive content={m.projects_home_new_project()} className="rounded-sm">
+            <IconButton size="small" className="text-subtext" aria-label={m.projects_home_new_project()} onClick={onNewProject}>
+              <FolderPlus size={15} className="text-subtext" />
+            </IconButton>
+          </Tooltip>}
+          <SessionFilterMenu value={sessionFilter} onChange={setSessionFilter} grouping={sidebarGrouping} onGroupingChange={(grouping) => {
+            setSidebarGrouping(grouping);
+            try { localStorage.setItem("sidebar-grouping", grouping); } catch {}
+            setSidebarExpanded(false);
+            setChatLimits({});
+            if (railBodyRef.current) railBodyRef.current.scrollTop = 0;
+          }} />
         </div>
       </div>
-      <div className="rail-body">
-        {visibleSessions.map((s) => (
-          <SessionRow
-            key={s.id}
-            session={s}
-            active={s.id === activeId && mainView === "chat"}
-            unread={unreadSessionIds.has(s.id)}
-            busy={state.busySessions.has(s.id)}
-            waiting={waitingSessions.has(s.id)}
-            revealTitle={titleReveals.get(s.id)}
-            onOpen={() => {
-              onActiveSessionChange(s.id);
-              if (projectId === DEMO_PROJECT_ID) {
-                markDemoSessionRead(s.id);
-                const experiment = DEMO_EXPERIMENT_LABELS[s.id];
-                if (experiment) {
-                  captureUiEvent({
-                    name: "demo_experiment_started",
-                    kind: "curated",
-                    experiment,
-                  });
-                  captureUiEvent({
-                    name: "first_action",
-                    surface: "demo",
-                    action: "open_experiment",
-                  });
+      <div className="relative flex-1 min-h-0">
+      <div ref={railBodyRef} tabIndex={-1} className={`rail-body h-full overflow-x-hidden ${sidebarScrollable ? "overflow-y-auto" : "overflow-y-hidden"}`}>
+        <div className="relative" style={{ height: (sidebarScrollable ? sidebarVirtualizer.getTotalSize() : defaultRowsHeight) + (showProjectMore ? 38 : 0) + (sidebarExpanded ? 46 : 0) }}>
+          {(sidebarScrollable
+            ? sidebarVirtualItems.map((item) => ({ row: sidebarRows[item.index], top: item.start, index: item.index }))
+            : defaultRows.map((row, index) => ({ row, top: 0, index }))
+          ).map(({ row, top, index }) => {
+            const project = row.project;
+            const s = row.kind === "chat" ? row.session : null;
+            return (
+              <div
+                key={sidebarRowKey(row)}
+                data-index={index}
+                onFocusCapture={() => setFocusedSidebarRow(sidebarRowKey(row))}
+                onBlurCapture={(event) => {
+                  if (!event.currentTarget.contains(event.relatedTarget)) setFocusedSidebarRow(null);
+                }}
+                className={sidebarScrollable ? "absolute top-0 start-0 w-full" : "relative"}
+                style={{ height: sidebarRowHeight(row), transform: sidebarScrollable ? `translateY(${top}px)` : undefined }}
+              >
+                {row.kind === "project" ? (
+                  <div className="group h-9 flex items-end gap-1 rounded-md px-2.5 text-text">
+                    <ProjectInfoCard
+                      project={project}
+                      chatCount={projectActivity.find((activity) => activity.projectId === project.id)?.totalAgents}
+                      pinned={pinnedProjects.includes(project.id)}
+                      onPin={() => {
+                        const next = pinnedProjects.includes(project.id) ? pinnedProjects.filter((id) => id !== project.id) : [...pinnedProjects, project.id];
+                        setPinnedProjects(next);
+                        try { localStorage.setItem("sidebar-pinned-projects", JSON.stringify(next)); } catch {}
+                      }}
+                      onRemoved={() => { if (project.id === projectId) void navigate({ to: "/projects" }); }}
+                      onNewChat={() => {
+                        if (project.id === projectId) startProjectTask();
+                        else void navigate({ to: "/projects/$projectId/tasks/new", params: { projectId: project.id } });
+                      }}
+                    />
+                  </div>
+                ) : s ? (
+                  <div className={sidebarGrouping === "projects" ? "ms-5.5" : undefined}>
+                    <SessionRow
+                      key={s.id}
+                      session={s}
+                      active={s.id === activeId && mainView === "chat"}
+                      unread={unreadSessionIds.has(s.id)}
+                      busy={project.id === projectId ? state.busySessions.has(s.id) : s.busy}
+                      waiting={waitingSessions.has(s.id)}
+                      revealTitle={titleReveals.get(s.id)}
+                      onOpen={() => {
+                        if (project.id === projectId) onActiveSessionChange(s.id);
+                        else void navigate({ to: "/projects/$projectId/tasks/$sessionId", params: { projectId: project.id, sessionId: s.id } });
+                        if (project.id === DEMO_PROJECT_ID) {
+                          markDemoSessionRead(s.id);
+                          const experiment = DEMO_EXPERIMENT_LABELS[s.id];
+                          if (experiment) {
+                            captureUiEvent({
+                              name: "demo_experiment_started",
+                              kind: "curated",
+                              experiment,
+                            });
+                            captureUiEvent({
+                              name: "first_action",
+                              surface: "demo",
+                              action: "open_experiment",
+                            });
+                          }
+                        }
+                      }}
+                      onRename={(title) => rename(s, title)}
+                      onSetArchived={(archived) => setArchived(s, archived)}
+                      onDelete={() => void removeSession(s)}
+                    />
+                  </div>
+                ) : row.kind === "more" ? (
+                  <Button variant="ghost" size="small" className="ms-5.5 font-normal text-subtext" onClick={() => {
+                    setSidebarExpanded(true);
+                    setChatLimits((current) => ({ ...current, [project.id]: (current[project.id] ?? 6) + 6 }));
+                  }}>
+                    {m.common_show_more()}
+                  </Button>
+                ) : row.kind === "status" && (
+                  <div className={`flex h-full items-center px-2.5 text-sm text-subtext ${sidebarGrouping === "projects" ? "ms-5.5" : ""}`}>
+                    {row.error ? <Button size="small" onClick={row.retry}>{m.app_retry()}</Button>
+                      : row.pending ? <Spinner />
+                        : sessionFilter === "archived" ? m.chat_no_archived_sessions() : m.chat_no_sessions_yet()}
+                  </div>
+                )}
+              </div>
+            );
+          })}
+          {showProjectMore && (
+            <div className="absolute start-0 flex h-9.5 w-full items-center pt-1" style={{ top: sidebarScrollable ? sidebarVirtualizer.getTotalSize() : defaultRowsHeight }}>
+              <Button variant="ghost" size="small" className="text-subtext" onClick={() => {
+                setSidebarExpanded(true);
+              }}>{m.common_show_more()}</Button>
+            </div>
+          )}
+          {sidebarExpanded && (
+            <div className="absolute start-0 w-full pt-1" style={{ top: sidebarVirtualizer.getTotalSize() + (showProjectMore ? 38 : 0) }}>
+              <Button variant="ghost" size="small" className="text-subtext" onClick={() => {
+                setSidebarExpanded(false);
+                setChatLimits({});
+                setFocusedSidebarRow(null);
+                if (railBodyRef.current) {
+                  railBodyRef.current.scrollTop = 0;
+                  railBodyRef.current.focus();
                 }
-              }
-            }}
-            onRename={(title) => rename(s, title)}
-            onSetArchived={(archived) => setArchived(s, archived)}
-            onDelete={() => void removeSession(s)}
-          />
-        ))}
-        {visibleSessions.length === 0 && (
-          <div className="rail-empty py-1.5 px-2.5 text-sm text-muted">
-            {sessionFilter === "archived"
-              ? m.chat_no_archived_sessions()
-              : sessions.length > 0
-                ? m.chat_no_active_sessions()
-                : m.chat_no_sessions_yet()}
-          </div>
-        )}
+              }}>
+                {m.common_show_less()}
+              </Button>
+            </div>
+          )}
+        </div>
+      </div>
+      {sidebarScrollable && <>
+        {(sidebarVirtualizer.scrollOffset ?? 0) > 0 && <div aria-hidden="true" className="pointer-events-none absolute inset-x-0 top-0 z-5 h-3 bg-linear-to-b from-background to-transparent" />}
+        <div aria-hidden="true" className="pointer-events-none absolute inset-x-0 bottom-0 z-5 h-3 bg-linear-to-t from-background to-transparent" />
+      </>}
       </div>
       <WorkspaceConnection runtime={runtime} />
     </aside>
@@ -6128,7 +6372,10 @@ export function ChatPanel({
         {railOpen && rail}
         <section className="chat-pane flex-1 min-w-0 flex flex-col bg-background min-h-0">
           {!railOpen && <div className="flex h-12 shrink-0 items-center">{railReopen}</div>}
-          <div className="settings-view-scroll flex-1 min-h-0 overflow-y-auto [scrollbar-gutter:stable_both-edges]">{children}</div>
+          <div className="settings-view-scroll flex-1 min-h-0 overflow-y-auto [scrollbar-gutter:stable_both-edges]">
+            {contentError ? <div role="alert" className="p-6 text-subtext">{contentError}<Button onClick={onRetryContent}>{m.app_retry()}</Button></div>
+              : contentLoading ? <LoadingRow className="p-6"><Spinner />{m.chat_panel_loading_conversation()}</LoadingRow> : children}
+          </div>
         </section>
       </>
     );
@@ -6143,19 +6390,22 @@ export function ChatPanel({
         <div className={railOpen || embedded ? "contents" : "grid shrink-0 grid-cols-[2rem_minmax(0,1fr)_2rem] mac-titlebar:grid-cols-[6rem_minmax(0,1fr)_6rem] items-center"}>
           {railReopen}
           <div className={headerClass}>
-          <PaperTitle variant="header"
-            title={activeSession ? activeSession.title?.trim() || m.chat_untitled() : m.chat_new_session()}
-          >
-            {activeSession ? (
-              <TitleReveal
-                key={activeTitleReveal ?? "static"}
-                title={activeSession.title?.trim() || m.chat_untitled()}
-                animate={activeTitleReveal !== undefined}
-              />
-            ) : (
-              m.chat_new_session()
-            )}
-          </PaperTitle>
+          <div className="flex min-w-0 flex-1 items-center gap-2">
+            {activeSession && <>
+              {activeSession.title?.trim() ? (
+                <PaperTitle variant="header" className="flex-initial" title={activeSession.title.trim()}>
+                  <TitleReveal
+                    key={activeTitleReveal ?? "static"}
+                    title={activeSession.title.trim()}
+                    animate={activeTitleReveal !== undefined}
+                  />
+                </PaperTitle>
+              ) : busy ? <Spinner /> : null}
+              <span className="min-w-0 truncate rounded-md border border-border bg-surface px-2.5 py-0.5 text-sm font-normal text-subtext" title={projectName}>
+                {projectName}
+              </span>
+            </>}
+          </div>
           {onOpenDemoWelcome && (
             <IconButton
               data-tip={m.chat_panel_about_this_demo()}
@@ -6168,15 +6418,32 @@ export function ChatPanel({
           </div>
         </div>
 
-        {historyError ? (
+        {contentError ? (
+          <div className="flex flex-1 flex-col items-center justify-center gap-3 p-5 text-subtext" role="alert">
+            <p>{contentError}</p><Button onClick={onRetryContent}>{m.app_retry()}</Button>
+          </div>
+        ) : historyError ? (
           <div className="flex flex-1 flex-col items-center justify-center gap-3 p-5 text-subtext" role="alert">
             <p>{historyError.message}</p>
             <Button onClick={() => void historyQuery.refetch()}>{m.app_retry()}</Button>
           </div>
-        ) : historyLoading ? (
-          <div className="chat-loading flex-1 flex items-center justify-center gap-3 text-subtext text-xl p-5 [&_.spinner]:w-5.5 [&_.spinner]:h-5.5 [&_.spinner]:border-[3px]" aria-live="polite" aria-busy="true">
-            <Spinner />
-            <span>{m.chat_panel_loading_conversation()}</span>
+        ) : contentLoading || historyLoading ? (
+          <div className="chat-loading flex-1 min-h-0 overflow-hidden [scrollbar-gutter:stable_both-edges]" role="status" aria-label={m.chat_panel_loading_conversation()} aria-busy="true">
+            <div aria-hidden="true" className="mx-auto flex h-full w-full max-w-readable flex-col gap-6 px-4 pb-8 pt-4 motion-safe:animate-pulse">
+              <div className="ms-auto h-14 w-3/5 shrink-0 rounded-lg bg-surface" />
+              <div className="flex shrink-0 flex-col gap-3">
+                {["w-5/6", "w-full", "w-11/12", "w-2/3", "w-full", "w-3/4", "w-1/2"].map((width, index) => (
+                  <div key={index} className={`h-3 rounded bg-surface ${width}`} />
+                ))}
+              </div>
+              <div className="ms-auto h-10 w-2/5 shrink-0 rounded-lg bg-surface" />
+              <div className="flex shrink-0 flex-col gap-3">
+                {["w-full", "w-11/12", "w-3/4", "w-5/6", "w-1/2", "w-full", "w-5/6", "w-11/12", "w-2/3", "w-3/4", "w-1/3"].map((width, index) => (
+                  <div key={index} className={`h-3 rounded bg-surface ${width}`} />
+                ))}
+              </div>
+              <div className="ms-auto h-16 w-1/2 shrink-0 rounded-lg bg-surface" />
+            </div>
           </div>
         ) : !threadMounted && activeSession?.sideParentSessionId ? (
           <div className="chat-empty flex flex-1 flex-col items-center justify-center gap-3 p-8 text-center text-subtext">
@@ -6189,10 +6456,6 @@ export function ChatPanel({
               <BrandMark />
             </div>
             <h2>{m.chat_panel_what_should_we_research()}</h2>
-            <div className="chat-empty-project inline-flex items-center gap-[7px] mt-3 py-1.5 px-3 border border-border rounded-full text-subtext bg-surface text-lg font-medium">
-              <FolderOpen size={19} />
-              <span>{projectName}</span>
-            </div>
             {starterLoading && (
               <>
                 <div className={STARTER_GRID_CLASS} aria-hidden="true">
@@ -6318,7 +6581,7 @@ export function ChatPanel({
 
         {/* Docked while a plan awaits a decision, so the approval controls never
           scroll away. Actions mirror the (now compact) inline card's wire. */}
-        <div className="composer px-3 pb-5 shrink-0 relative z-4 bg-background w-full max-w-readable my-0 mx-auto [&_textarea]:border-0 [&_textarea]:bg-none [&_textarea]:bg-transparent [&_textarea]:resize-none [&_textarea]:pt-2.5 [&_textarea]:px-3 [&_textarea]:pb-1 [&_textarea]:text-base [&_textarea]:field-sizing-content [&_textarea]:min-h-18 [&_textarea]:max-h-45">
+        <div inert={contentLoading || Boolean(contentError) || historyLoading} className="composer px-3 pb-5 shrink-0 relative z-4 bg-background w-full max-w-readable my-0 mx-auto [&_textarea]:border-0 [&_textarea]:bg-none [&_textarea]:bg-transparent [&_textarea]:resize-none [&_textarea]:pt-2.5 [&_textarea]:px-3 [&_textarea]:pb-1 [&_textarea]:text-base [&_textarea]:field-sizing-content [&_textarea]:min-h-18 [&_textarea]:max-h-45">
           {threadMounted && (
             <IconButton
               className={`absolute bottom-full left-1/2 z-5 mb-6 h-9 w-9 -translate-x-1/2 rounded-full border border-border bg-background shadow-control transition-opacity duration-150 ease-standard ${transcriptAtBottom ? "opacity-0" : "opacity-100"}`}
@@ -6480,6 +6743,18 @@ export function ChatPanel({
               ? `${m.chat_panel_demo_run_hint_before()} ${m.experiments_table_logs()} ${m.chat_panel_demo_run_hint_after()}`
               : ""}
           </span>
+          {!embedded && !activeId && onNewProject && (
+            <ComposerProjectPicker
+              projects={sidebarProjects}
+              activity={projectActivity}
+              projectId={projectId}
+              projectName={projectName}
+              onNewProject={onNewProject}
+              onSelect={(id) => {
+                if (id !== projectId) void navigate({ to: "/projects/$projectId/tasks/new", params: { projectId: id } });
+              }}
+            />
+          )}
           <div className={`composer-box relative flex flex-col border ${bashActive ? "border-accent-amber" : "border-border"} rounded-lg bg-background shadow-elevated`} data-onboarding="composer">
             {activeHarness && !activeHarness.agentReady && (
               <div className="composer-harness-warning py-2 px-3 text-subtext text-sm leading-normal border-b border-b-border-variant [&_strong]:text-accent-amber [&_strong]:font-medium [&_code]:font-mono [&_code]:text-text">

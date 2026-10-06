@@ -240,12 +240,12 @@ fn repositories(root: &Path, found: &mut BTreeSet<PathBuf>) -> Result<()> {
     Ok(())
 }
 
-fn config_may_need_repair(repo: &Path, mappings: &[(PathBuf, PathBuf)]) -> Result<bool> {
+fn config_may_need_repair(repo: &Path, mappings: &[(PathBuf, PathBuf)]) -> std::io::Result<bool> {
     let config = match std::fs::read_to_string(repo.join(".git/config")) {
         Ok(config) => config,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(false),
         Err(error) if error.kind() == std::io::ErrorKind::InvalidData => return Ok(true),
-        Err(error) => return Err(error.into()),
+        Err(error) => return Err(error),
     };
     // Let Git interpret includes and escapes rather than duplicating its config parser.
     if config.contains('\\') || config.to_ascii_lowercase().contains("[include") {
@@ -314,7 +314,27 @@ fn references(data: &Path, mappings: &[(PathBuf, PathBuf)]) -> Result<References
     // Registrations also find moved worktrees whose project/database was deleted.
     let mut discovered = Vec::new();
     for repo in &repos {
-        if repo.join(".git").is_dir() && config_may_need_repair(repo, mappings)? {
+        let needs_repair = if repo.join(".git").is_dir() {
+            match config_may_need_repair(repo, mappings) {
+                Ok(needed) => needed,
+                Err(error)
+                    if error.kind() == std::io::ErrorKind::PermissionDenied
+                        && !mappings
+                            .iter()
+                            .any(|(from, to)| repo.starts_with(from) || repo.starts_with(to)) =>
+                {
+                    eprintln!(
+                        "Skipping inaccessible repository {}: {error}",
+                        repo.display()
+                    );
+                    continue;
+                }
+                Err(error) => return Err(error.into()),
+            }
+        } else {
+            false
+        };
+        if needs_repair {
             for remote in git::git(Some(repo), &["remote"])
                 .unwrap_or_default()
                 .lines()
@@ -432,6 +452,37 @@ pub(crate) fn repair_paths(data: &Path, mappings: &[(PathBuf, PathBuf)]) -> Resu
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(unix)]
+    #[test]
+    fn inaccessible_external_projects_do_not_block_storage_checks() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let tmp = git::TemporaryDirectory::new("orx-inaccessible-storage").unwrap();
+        let root = normalize(tmp.path()).unwrap();
+        let data = root.join("data");
+        let repo = root.join("external");
+        init(&repo);
+        let store = Store::open_at(data.clone()).unwrap();
+        super::super::projects::create_project(
+            &store,
+            "inaccessible",
+            &repo.to_string_lossy(),
+            Default::default(),
+        )
+        .unwrap();
+        drop(store);
+        let config = repo.join(".git/config");
+        let permissions = std::fs::metadata(&config).unwrap().permissions();
+        std::fs::set_permissions(&config, std::fs::Permissions::from_mode(0o000)).unwrap();
+        let denied = std::fs::read_to_string(&config).unwrap_err();
+        let external = references(&data, &mappings(&root.join("cache"), &data));
+        let managed = references(&data, &[(repo, data.join("repos"))]);
+        std::fs::set_permissions(&config, permissions).unwrap();
+        assert_eq!(denied.kind(), std::io::ErrorKind::PermissionDenied);
+        assert!(external.unwrap().is_empty());
+        assert!(managed.is_err());
+    }
 
     fn init(repo: &Path) {
         std::fs::create_dir_all(repo).unwrap();

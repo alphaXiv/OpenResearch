@@ -8663,6 +8663,7 @@ pub fn prepare_env(cmd: &mut tokio::process::Command) {
             cmd.env(key, value);
         }
     }
+    crate::jobs::ssh::prepare_sharing_env(cmd);
 }
 
 /// Env var carrying the launching chat session's id into a harness child. The

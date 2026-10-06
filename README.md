@@ -1,14 +1,23 @@
 <div align="center">
 
-<h1><img src=".github/readme-assets/openresearch.svg" alt="" width="36" /> OpenResearch</h1>
+<h1><img src=".github/readme-assets/openresearch.svg" alt="" width="56" align="absmiddle" /> OpenResearch</h1>
 
-**The local-first workspace for research agents and autoresearch.**
+The local-first harness & workspace for research agents.
 
-<p>Turn <img src=".github/readme-assets/claude.svg" alt="" width="16" height="16" align="texttop" /> Claude Code,
-<img src=".github/readme-assets/codex.svg" alt="" width="16" height="16" align="texttop" /> Codex,
-<img src=".github/readme-assets/opencode.svg" alt="" width="16" height="16" align="texttop" /> OpenCode,
-<img src=".github/readme-assets/cursor.svg" alt="" width="16" height="16" align="texttop" /> Cursor, or Google Antigravity into research agents that can review
-literature, develop hypotheses, run experiments, and produce research artifacts.</p>
+<p><em>an <a href="https://alphaxiv.org"><img src=".github/readme-assets/alphaxiv.svg" alt="" width="18" height="18" align="absmiddle" /> alphaXiv</a> project</em></p>
+
+<p>
+<a href="https://github.com/alphaXiv/OpenResearch/releases/latest"><img src="https://img.shields.io/github/v/release/alphaXiv/OpenResearch?style=flat-square" alt="Latest release" /></a>
+<a href="https://github.com/alphaXiv/OpenResearch/blob/main/LICENSE"><img src="https://img.shields.io/github/license/alphaXiv/OpenResearch?style=flat-square" alt="License" /></a>
+</p>
+
+<p><a href="README.md">English</a> · <a href="README.es.md">Español</a> · <a href="README.ko.md">한국어</a> · <a href="README.zh.md">简体中文</a> · <a href="README.ja.md">日本語</a></p>
+
+<p><img src=".github/readme-assets/openresearch-screenshot.png" alt="OpenResearch desktop app showing a research agent conversation and experiment logs" width="680" /></p>
+
+<hr />
+
+<p>Whether you’re looking for a copilot or an autoresearch tool, OpenResearch will accelerate your work. Launch research agents that can review literature, develop hypotheses, run experiments, and produce research artifacts.</p>
 
 <p>
 <a href="https://github.com/alphaXiv/OpenResearch/releases/latest/download/OpenResearch.dmg"><picture><source media="(prefers-color-scheme: dark)" srcset=".github/readme-assets/download-macos-dark.svg"><img src=".github/readme-assets/download-macos.svg" alt="Download OpenResearch for macOS" width="220" height="44" /></picture></a>
@@ -21,7 +30,7 @@ literature, develop hypotheses, run experiments, and produce research artifacts.
 <a href="https://github.com/alphaXiv/OpenResearch/releases"><img src=".github/readme-assets/action-releases.svg" alt="Releases" width="78" height="24" /></a>
 </p>
 
-<p><sub>macOS 11+ · Windows beta requires <a href="docs/windows.md">Git for Windows</a> · Linux app needs glibc 2.35+</sub></p>
+<p><sub>macOS 11+ · Windows beta requires <a href="docs/windows.md">Git for Windows</a> · <a href="docs/linux.md">Linux</a> app needs glibc 2.35+</sub></p>
 
 <p><a href="https://trendshift.io/repositories/89363"><img src="https://trendshift.io/api/badge/repositories/89363" alt="GitHub Trending: #1 Repository of the Day" width="250" height="55" /></a>
 <a href="https://trendshift.io/repositories/89363?utm_source=trendshift-badge&amp;utm_medium=badge&amp;utm_campaign=badge-trendshift-89363" target="_blank" rel="noopener noreferrer"><img src="https://trendshift.io/api/badge/trendshift/repositories/89363/daily?language=Rust" alt="alphaXiv/OpenResearch | Trendshift" width="250" height="55" /></a></p>
@@ -30,7 +39,14 @@ literature, develop hypotheses, run experiments, and produce research artifacts.
 
 ## Get started
 
-Install the CLI on macOS or Linux, then launch OpenResearch:
+**We recommend using the OpenResearch desktop app.** Download it for your platform:
+
+- [macOS](https://github.com/alphaXiv/OpenResearch/releases/latest/download/OpenResearch.dmg)
+- [Windows (Beta)](https://github.com/alphaXiv/OpenResearch/releases/latest/download/OpenResearch-Setup.exe)
+- Linux: [x86_64](https://github.com/alphaXiv/OpenResearch/releases/latest/download/OpenResearch-x86_64.AppImage) · [ARM64](https://github.com/alphaXiv/OpenResearch/releases/latest/download/OpenResearch-aarch64.AppImage)
+
+<details>
+<summary>Prefer the standalone CLI? Install on macOS or Linux</summary>
 
 ```sh
 curl -LsSf https://openresearch.sh/install.sh | sh
@@ -39,101 +55,47 @@ orx up
 
 `orx up` opens the local dashboard at `http://127.0.0.1:4791`.
 
-On a managed Mac (for example, a work computer), use the macOS download above
-instead. Device-management policies may block the CLI that `install.sh`
-installs because it is not yet signed. The app is signed with a Developer ID
-and notarized by Apple. To use `orx` in your terminal, click **Install** under
-**Install the `orx` command** in the app's Settings → Updates, or run (adjusting
-the path if the app is not in `/Applications`):
+On a managed Mac, device-management policies may block the CLI installed by
+`install.sh` because it is not yet signed. Use the signed and notarized desktop
+app instead. You can also install `orx` for your terminal from the app's
+Settings → Updates → **Install the `orx` command**.
 
-```sh
-/Applications/OpenResearch.app/Contents/MacOS/orx install-cli
-```
-
-Either way, `orx` is linked into `~/.local/bin`, with a hint to add it to your
-`PATH` if needed. If you already ran `install.sh`, remove `~/.cargo/bin/orx`
-first and open a new terminal.
-
-On Windows, use the beta download above after installing
-[Git for Windows](docs/windows.md). It installs for your account, with no
-administrator prompt. The installer isn't signed yet, so Windows may say
-"Windows protected your PC": choose **More info** → **Run anyway**.
-
-On Linux, the desktop app is an AppImage for
-[x86_64](https://github.com/alphaXiv/OpenResearch/releases/latest/download/OpenResearch-x86_64.AppImage)
-or [ARM64](https://github.com/alphaXiv/OpenResearch/releases/latest/download/OpenResearch-aarch64.AppImage).
-Keep it somewhere you can write to, such as `~/Applications`, so it can update
-itself, then change to that directory, run `chmod +x OpenResearch-*.AppImage`, and open it. See
-[Linux](docs/linux.md) for requirements.
-
-[Connect a local model](docs/local-models.md) to use LM Studio, oMLX, Ollama,
-or a custom endpoint with OpenCode.
+</details>
 
 Create an account at [openresearch.sh](https://openresearch.sh) to receive email
 updates and use managed OpenResearch compute.
 
-## Built for research agents
+## How it works
 
-| | OpenResearch gives you |
-|---|---|
-| **Parallel exploration** | Give each research direction an independent agent session and isolated git worktree. |
-| **Reproducible experiments** | Track variants in a git-native experiment tree; every run receives an immutable archive of its recorded commit. |
-| **Evidence in context** | Keep logs, diffs, files, results, and artifacts tied to the work that produced them. |
-| **Your choice of agent** | Use Claude Code, Codex, OpenCode, Cursor, or Google Antigravity, with the harness and model selected per session. |
-| **Your choice of compute** | Run locally, on your own infrastructure, or with managed OpenResearch compute. |
-| **Local ownership** | Keep projects, conversations, experiments, runs, logs, code, and artifacts on your machine. |
+**Use your favorite coding agent.** OpenResearch works natively with <img src=".github/readme-assets/claude.svg" alt="" width="18" height="18" align="texttop" /> Claude Code,
+<img src=".github/readme-assets/codex.svg" alt="" width="18" height="18" align="texttop" /> Codex,
+<img src=".github/readme-assets/opencode.svg" alt="" width="18" height="18" align="texttop" /> OpenCode,
+<img src=".github/readme-assets/cursor.svg" alt="" width="18" height="18" align="texttop" /> Cursor, and
+<img src=".github/readme-assets/antigravity.svg" alt="" width="18" height="18" align="texttop" /> Google Antigravity.
+You can also [use a local model](docs/local-models.md) with OpenCode through
+<img src=".github/readme-assets/lmstudio.svg" alt="" width="18" height="18" align="texttop" /> LM Studio,
+<img src=".github/readme-assets/omlx.svg" alt="" width="18" height="18" align="texttop" /> oMLX,
+<img src=".github/readme-assets/ollama.svg" alt="" width="18" height="18" align="texttop" /> Ollama, or a custom endpoint.
 
-### Autoresearch
+**Ground research hypotheses in the latest literature.** OpenResearch integrates with <img src=".github/readme-assets/alphaxiv.svg" alt="" width="18" height="18" align="absmiddle" /> alphaXiv, <img src=".github/readme-assets/biorxiv.svg" alt="" width="18" height="18" align="absmiddle" /> bioRxiv, and <img src=".github/readme-assets/pubmed.svg" alt="" width="18" height="18" align="absmiddle" /> PubMed so agents can find relevant papers, develop informed hypotheses, and connect their experiments to existing research.
 
-OpenResearch can run the full loop autonomously: propose an idea, change the
-code, launch an experiment, inspect the evidence, and decide what to try next.
-Multiple agents can explore different directions in parallel while the
-experiment tree preserves their lineage.
+**Choose your compute.** Run experiments locally or use SSH,
+Slurm,
+<img src=".github/readme-assets/kubernetes.svg" alt="" width="18" height="18" align="texttop" /> Kubernetes,
+<img src=".github/readme-assets/modal.svg" alt="" width="18" height="18" align="texttop" /> Modal,
+<img src=".github/readme-assets/thinking-machines.svg" alt="" width="18" height="18" align="texttop" /> Tinker,
+<img src=".github/readme-assets/ray.svg" alt="" width="18" height="18" align="texttop" /> Ray,
+<img src=".github/readme-assets/huggingface.svg" alt="" width="18" height="18" align="texttop" /> Hugging Face Jobs, and
+managed OpenResearch compute.
 
-## Run anywhere
+**Give agents a memory of every experiment.** OpenResearch records every experiment in a local SQL database and keeps its logs, code,
+and artifacts on your machine so that agents can
+learn from past results and decide what to try next. The desktop app makes it
+easy to see what your agents have done and inspect the evidence behind each result.
 
-The same committed source snapshot can run locally, over SSH, or on Slurm,
-Kubernetes, Ray, Hugging Face Jobs, Modal, Tinker, and managed OpenResearch compute.
-Publishing the repository is not required.
-
-Run the workspace next to remote GPUs while using the browser on your laptop:
-
-```sh
-orx up --remote user@host
-```
-
-SSH config aliases and custom ports are supported. The remote service binds to
-loopback and has no application-level authentication, so other users on that
-host can reach it.
-
-## CLI and agent integration
-
-Install the OpenResearch skill into supported coding agents:
-
-```sh
-orx install-skills
-```
-
-Common commands:
-
-```sh
-orx projects
-orx project view <project-id>
-orx runs <project-id>
-orx logs <run-id>
-orx exp run <experiment-id>
-orx discover keyword <query>
-orx paper <arxiv-id-or-doi>
-```
-
-Run `orx --help` or `orx <command> --help` for the complete interface.
-
-## Local by default
-
-OpenResearch runs on `127.0.0.1` with a local SQLite store. Creating a project
-or launching a run does not publish your code. An
-[openresearch.sh](https://openresearch.sh) account is only used for
-service-owned capabilities such as organizations and managed compute.
+**Keep and own your research.** Run entirely locally. We don't collect your code or agent traces. Your projects,
+conversations, experiments, logs, and artifacts stay on your machine, under your
+control.
 
 ## Usage analytics
 
@@ -141,19 +103,4 @@ Official release builds send opt-out, coarse usage events tied to a random
 installation ID. They do not include code, prompts, file contents or paths,
 repository names, tokens, emails, or project and experiment identifiers.
 
-```sh
-orx telemetry off
-orx telemetry status
-orx <command> --no-telemetry
-```
-
-Source and development builds do not send analytics.
-
-Coding agents may also file product feedback with `orx feedback` when you hit
-a bug, wish for a feature, or get frustrated with OpenResearch. Each report is
-a short description of the workflow problem. Bug reports include as much detail
-as possible to reproduce a failure while omitting sensitive information. Like
-analytics, reports are sent only from official release builds.
-They are linked to your account when you are logged in and turned off by
-`orx telemetry off`. The `--no-telemetry` flag covers only the command it is
-passed to.
+You can turn usage analytics off in the desktop app's Settings or with `orx telemetry off`.

@@ -588,6 +588,9 @@ async fn connect(args: &CheckArgs, persist: Option<u64>) -> Result<()> {
             let target = crate::jobs::ssh::SshTarget::alias(&host);
             let connection = crate::jobs::ssh::interactive_args(&target, persist).await?;
             interactive_command("ssh", &connection.args).await?;
+            if let Some(warning) = crate::jobs::ssh::setup_connection_sharing(&target).await {
+                eprintln!("orx: warning: {warning}");
+            }
         }
         Backend::Hf => {
             interactive_command("hf", &["auth".into(), "login".into()]).await?;
@@ -621,10 +624,12 @@ async fn interactive_command(program: &str, args: &[String]) -> Result<()> {
     let path = crate::local::shell_env::find_on_path(program).ok_or_else(|| {
         anyhow!("{program} is not installed. Install it, then retry compute connect.")
     })?;
-    let status = tokio::process::Command::new(path)
-        .args(args)
-        .status()
-        .await?;
+    let mut command = tokio::process::Command::new(path);
+    command.args(args);
+    if program == "ssh" {
+        command.env("ORX_SSH_PROBE", "1");
+    }
+    let status = command.status().await?;
     if !status.success() {
         return Err(anyhow!("{program} exited with {status}."));
     }

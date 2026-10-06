@@ -15,6 +15,10 @@
 //! A restarted `orx supervise` reattaches purely from that directory.
 
 mod container;
+#[cfg(unix)]
+mod prepared;
+#[cfg(unix)]
+mod sharing;
 pub use container::{
     resolve as resolve_container, validate_reference as validate_container_reference, ContainerRun,
 };
@@ -32,11 +36,16 @@ use crate::error::{anyhow, Result};
 /// Keep sockets out of config paths, which can exceed macOS's 104-byte limit.
 #[cfg(unix)]
 fn control_dir() -> PathBuf {
+    control_dir_for(&crate::config::config_dir())
+}
+
+#[cfg(unix)]
+fn control_dir_for(config_dir: &std::path::Path) -> PathBuf {
     use std::hash::{Hash as _, Hasher as _};
 
     let uid = unsafe { libc::geteuid() };
     let mut namespace = std::collections::hash_map::DefaultHasher::new();
-    crate::config::config_dir().hash(&mut namespace);
+    config_dir.hash(&mut namespace);
     PathBuf::from("/tmp").join(format!("orx-ssh-{uid}-{:08x}", namespace.finish() as u32))
 }
 
@@ -206,6 +215,11 @@ fn discarded_known_hosts() -> std::path::PathBuf {
 
 #[cfg(unix)]
 fn control_path(target: &SshTarget) -> PathBuf {
+    if target.extra_opts.is_empty() {
+        return prepared::cached(target)
+            .map(|connection| control_dir().join(connection.publication.socket_name))
+            .unwrap_or_else(|| control_dir().join("%C"));
+    }
     // A 16-hex hash leaves room for ssh's temporary bind suffix. It folds in
     // the extra opts so different ports never share a control socket.
     use std::hash::{Hash, Hasher};
@@ -218,6 +232,39 @@ fn control_path(target: &SshTarget) -> PathBuf {
 /// Shared ssh options: setup may prompt, background work never does; on unix one shared
 /// socket lets a single login cover both.
 fn ssh_opts(target: &SshTarget, batch: bool) -> Vec<String> {
+    #[cfg(unix)]
+    if target.extra_opts.is_empty() {
+        if let Some(connection) = prepared::cached(target) {
+            return ssh_opts_prepared(target, batch, &connection);
+        }
+    }
+    ssh_options(target, batch, multiplexing_opts(target), None)
+}
+
+#[cfg(unix)]
+fn ssh_opts_prepared(
+    target: &SshTarget,
+    batch: bool,
+    connection: &prepared::Prepared,
+) -> Vec<String> {
+    ssh_options(
+        target,
+        batch,
+        multiplexing_opts_for(
+            &connection
+                .path
+                .with_file_name(&connection.publication.socket_name),
+        ),
+        Some(&connection.snapshot),
+    )
+}
+
+fn ssh_options(
+    target: &SshTarget,
+    batch: bool,
+    multiplexing: Vec<String>,
+    config: Option<&std::path::Path>,
+) -> Vec<String> {
     let mut opts = vec![
         "-o".into(),
         format!("BatchMode={}", if batch { "yes" } else { "no" }),
@@ -230,18 +277,26 @@ fn ssh_opts(target: &SshTarget, batch: bool) -> Vec<String> {
         "-o".into(),
         "TCPKeepAlive=yes".into(),
     ];
-    opts.extend(multiplexing_opts(target));
+    opts.extend(multiplexing);
     opts.extend(target.extra_opts.iter().cloned());
+    if let Some(config) = config {
+        opts.extend(["-F".into(), config.to_string_lossy().into_owned()]);
+    }
     opts
 }
 
 #[cfg(unix)]
 fn multiplexing_opts(target: &SshTarget) -> Vec<String> {
+    multiplexing_opts_for(&control_path(target))
+}
+
+#[cfg(unix)]
+fn multiplexing_opts_for(path: &std::path::Path) -> Vec<String> {
     vec![
         "-o".into(),
         "ControlMaster=auto".into(),
         "-o".into(),
-        format!("ControlPath={}", control_path(target).display()),
+        format!("ControlPath={}", path.display()),
         "-o".into(),
         "ControlPersist=86400".into(),
     ]
@@ -298,12 +353,30 @@ pub(crate) async fn interactive_args(
 ) -> Result<InteractiveConnection> {
     prepare_control_dir()?;
     #[cfg(unix)]
+    let connection = if target.extra_opts.is_empty() {
+        Some(prepared::prepare(target, true).await?)
+    } else {
+        None
+    };
+    #[cfg(unix)]
+    let path = connection
+        .as_ref()
+        .map(|connection| connection.path.clone())
+        .unwrap_or_else(|| control_path(target));
+    #[cfg(unix)]
+    let options = connection
+        .as_ref()
+        .map(|connection| ssh_opts_prepared(target, false, connection))
+        .unwrap_or_else(|| ssh_opts(target, false));
+    #[cfg(not(unix))]
+    let options = ssh_opts(target, false);
+    #[cfg(unix)]
     let lock = {
         let file = std::fs::OpenOptions::new()
             .create(true)
             .truncate(false)
             .write(true)
-            .open(control_path(target).with_extension("lock"))?;
+            .open(path.with_extension("lock"))?;
         loop {
             match file.try_lock() {
                 Ok(()) => break,
@@ -316,8 +389,14 @@ pub(crate) async fn interactive_args(
         file
     };
     #[cfg(unix)]
-    if !master_is_running(target).await? {
-        match std::fs::remove_file(control_path(target)) {
+    if control_master(target, &path, &options, "check").await? {
+        if !master_accepts_sessions(target, &path, &options).await?
+            && !control_master(target, &path, &options, "stop").await?
+        {
+            return Err(anyhow!("Could not retire the existing SSH connection; retry Connect once the gateway responds."));
+        }
+    } else {
+        match std::fs::remove_file(&path) {
             Ok(()) => {}
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
             Err(error) => return Err(error.into()),
@@ -327,7 +406,7 @@ pub(crate) async fn interactive_args(
     if let Some(seconds) = persist {
         args.extend(["-o".into(), format!("ControlPersist={seconds}")]);
     }
-    args.extend(ssh_opts(target, false));
+    args.extend(options);
     args.extend(["--".into(), target.dest.clone(), "true".into()]);
     Ok(InteractiveConnection {
         args,
@@ -344,23 +423,113 @@ pub(crate) async fn master_is_running(_target: &SshTarget) -> Result<bool> {
 #[cfg(unix)]
 pub(crate) async fn master_is_running(target: &SshTarget) -> Result<bool> {
     prepare_control_dir()?;
-    let path = control_path(target);
-    if !path.try_exists()? {
-        return Ok(false);
+    if target.extra_opts.is_empty() {
+        let connection = prepared::prepare(target, false).await?;
+        return control_master(
+            target,
+            &connection
+                .path
+                .with_file_name(&connection.publication.socket_name),
+            &ssh_opts_prepared(target, true, &connection),
+            "check",
+        )
+        .await;
     }
-    let status = Command::new("ssh")
-        .args(["-O", "check", "-S"])
+    control_master(
+        target,
+        &control_path(target),
+        &ssh_opts(target, true),
+        "check",
+    )
+    .await
+}
+
+#[cfg(unix)]
+async fn control_master(
+    target: &SshTarget,
+    path: &std::path::Path,
+    options: &[String],
+    operation: &str,
+) -> Result<bool> {
+    let mut command = Command::new("ssh");
+    command
+        .env("ORX_SSH_PROBE", "1")
+        .args(["-O", operation, "-S"])
         .arg(path)
+        .args(options)
         .arg("--")
         .arg(&target.dest)
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::null())
-        .kill_on_drop(true)
-        .status()
+        .kill_on_drop(true);
+    let status = tokio::time::timeout(Duration::from_secs(10), command.status())
         .await
-        .map_err(|e| anyhow!("Could not check the SSH master: {e}"))?;
+        .map_err(|_| anyhow!("Timed out trying to {operation} the SSH master; retry Connect once the gateway responds."))?
+        .map_err(|e| anyhow!("Could not {operation} the SSH master: {e}"))?;
     Ok(status.success())
+}
+
+#[cfg(unix)]
+async fn master_accepts_sessions(
+    target: &SshTarget,
+    path: &std::path::Path,
+    options: &[String],
+) -> Result<bool> {
+    let mut command = Command::new("ssh");
+    command
+        .env("ORX_SSH_PROBE", "1")
+        // Refused mux sessions can fall back to a new transport; this probe must not.
+        .args([
+            "-oBatchMode=yes",
+            "-oControlMaster=no",
+            "-oControlPersist=no",
+            "-oProxyCommand=false",
+            "-oClearAllForwardings=yes",
+            "-oRemoteCommand=none",
+            "-T",
+            "-S",
+        ])
+        .arg(path)
+        .args(options)
+        .args(["--", &target.dest, "echo __ORX_SESSION_OK__"])
+        .stdin(Stdio::null())
+        .kill_on_drop(true);
+    let output = tokio::time::timeout(Duration::from_secs(10), command.output())
+        .await
+        .map_err(|_| anyhow!("Timed out probing the existing SSH connection; retry Connect once the gateway responds."))??;
+    Ok(output.status.success()
+        && String::from_utf8_lossy(&output.stdout)
+            .lines()
+            .any(|line| line == "__ORX_SESSION_OK__"))
+}
+
+#[cfg(unix)]
+async fn resolved_control_path(target: &SshTarget) -> Result<PathBuf> {
+    if !target.extra_opts.is_empty() {
+        return Ok(control_path(target));
+    }
+    Ok(prepared::prepare(target, false).await?.path)
+}
+
+pub(crate) fn prepare_sharing_env(cmd: &mut tokio::process::Command) {
+    cmd.env_remove("ORX_SSH_PROBE");
+    #[cfg(unix)]
+    cmd.env("ORX_SSH_CONTROL_DIR", control_dir());
+    #[cfg(not(unix))]
+    cmd.env_remove("ORX_SSH_CONTROL_DIR");
+}
+
+pub(crate) async fn setup_connection_sharing(target: &SshTarget) -> Option<String> {
+    #[cfg(unix)]
+    if target.extra_opts.is_empty() {
+        return sharing::setup(target).await.err().map(|error| {
+            format!("SSH login succeeded, but connection sharing is unavailable: {error}")
+        });
+    }
+    #[cfg(not(unix))]
+    let _ = target;
+    None
 }
 
 /// Run a command on `target` over ssh, feeding `stdin` if given, returning stdout.
@@ -381,7 +550,12 @@ async fn ssh_run_bytes(
     stdin: Option<&[u8]>,
 ) -> Result<String> {
     prepare_control_dir()?;
+    #[cfg(unix)]
+    if target.extra_opts.is_empty() {
+        prepared::prepare(target, false).await?;
+    }
     let mut cmd = Command::new("ssh");
+    cmd.env("ORX_SSH_PROBE", "1");
     cmd.args(ssh_opts(target, true))
         .arg("--")
         .arg(&target.dest)
@@ -434,7 +608,12 @@ async fn ssh_run_file(
     source: &std::path::Path,
 ) -> Result<String> {
     prepare_control_dir()?;
+    #[cfg(unix)]
+    if target.extra_opts.is_empty() {
+        prepared::prepare(target, false).await?;
+    }
     let mut child = Command::new("ssh")
+        .env("ORX_SSH_PROBE", "1")
         .args(ssh_opts(target, true))
         .arg("--")
         .arg(&target.dest)
@@ -752,6 +931,9 @@ pub async fn preflight(target: &SshTarget) -> SshPreflight {
     .await
     {
         Ok(out) => {
+            if let Some(warning) = setup_connection_sharing(target).await {
+                eprintln!("orx: warning: {warning}");
+            }
             let missing_tools = [("MISSING_BASH", "bash"), ("MISSING_TAR", "tar")]
                 .into_iter()
                 .filter(|(marker, _)| out.contains(marker))
@@ -810,7 +992,7 @@ mod tests {
         use std::os::unix::{fs::symlink, net::UnixListener};
         let target = SshTarget::alias(&format!("orx-test-{}", uuid::Uuid::new_v4()));
         prepare_control_dir().unwrap();
-        let path = control_path(&target);
+        let path = resolved_control_path(&target).await.unwrap();
         drop(UnixListener::bind(&path).unwrap());
         interactive_args(&target, None).await.unwrap();
         assert!(std::fs::symlink_metadata(&path).is_err());

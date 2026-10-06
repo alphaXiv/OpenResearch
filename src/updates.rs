@@ -47,6 +47,18 @@ const CHECK_TTL: Duration = Duration::from_secs(24 * 60 * 60);
 /// Sent on requests to GitHub — some CDNs reject the default (empty) UA.
 const UA: &str = concat!("openresearch-cli/", env!("CARGO_PKG_VERSION"));
 
+/// Where this platform's desktop app downloads from.
+pub fn desktop_app_download_url() -> String {
+    let asset = match (std::env::consts::OS, std::env::consts::ARCH) {
+        ("macos", _) => "OpenResearch.dmg",
+        ("windows", _) => "OpenResearch-Setup.exe",
+        ("linux", "x86_64") => "OpenResearch-x86_64.AppImage",
+        ("linux", "aarch64") => "OpenResearch-aarch64.AppImage",
+        _ => return format!("{REPO_URL}/releases/latest"),
+    };
+    format!("{REPO_URL}/releases/latest/download/{asset}")
+}
+
 pub fn current_version() -> Version {
     // The crate version is always valid semver; a panic here is a build bug.
     Version::parse(env!("CARGO_PKG_VERSION")).expect("CARGO_PKG_VERSION is valid semver")
