@@ -8,9 +8,10 @@ experiment runs and the nanochat demo. The gaps are listed at the bottom.
 **Git for Windows is required**, and for more than git. It is the only source of
 the `bash` and coreutils that orx uses to run experiments — the `bash.exe` in
 `System32` is the WSL launcher, which cannot see your files, and orx rejects it.
-Install it with the standard installer so `git.exe` lands on `PATH`; orx finds
-the shell by walking up from there. orx notices a Git installed while it runs,
-so **Re-check** in onboarding is enough; there is no need to restart.
+Install it with the standard installer so `git.exe` lands on `PATH`, or let
+onboarding install it (below); orx finds the shell by walking up from `git.exe`.
+orx notices a Git installed while it runs, so **Re-check** in onboarding is
+enough; there is no need to restart.
 
 If you have no Git, onboarding offers **Install Git**. orx downloads the latest
 PortableGit from Git for Windows' GitHub releases, checks it against the SHA-256

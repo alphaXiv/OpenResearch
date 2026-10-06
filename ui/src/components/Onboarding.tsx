@@ -621,10 +621,14 @@ export function Onboarding({
             {automaticSetup && !gitReady && (
               <div className="mt-5" role="status">
                 <LocalGitCard gitVersion={gitVersion} error={gitError} />
-                {gitInstallable && !gitError ? gitInstallPrompt : (
-                  <p className={GIT_RETRY_HINT_CLASS_NAME}>{gitError ? m.onboarding_retry_connection() : m.onboarding_git_is_required_for_local_experiments_install_git()}</p>
+                {gitError ? (
+                  <p className={GIT_RETRY_HINT_CLASS_NAME}>{m.onboarding_retry_connection()}</p>
+                ) : gitInstallable ? (
+                  gitInstallPrompt
+                ) : (
+                  <p className={GIT_RETRY_HINT_CLASS_NAME}>{m.onboarding_git_is_required_for_local_experiments_install_git()}</p>
                 )}
-                <Button onClick={() => load(true, true)} disabled={checking}>{m.onboarding_re_check()}</Button>
+                <Button className="mt-2.5" onClick={() => load(true, true)} disabled={checking}>{m.onboarding_re_check()}</Button>
               </div>
             )}
             <div className="onb-actions flex items-center gap-2.5 mt-5.5">
@@ -833,7 +837,7 @@ function GitInstallPrompt({
         {pending && <Spinner />}
         {pending ? m.onboarding_installing_git() : m.onboarding_install_git()}
       </Button>
-      {error && <p role="alert" className="text-accent-red text-sm m-0">{error.message}</p>}
+      {error && <p className="text-accent-red text-sm m-0">{error.message}</p>}
     </div>
   );
 }

@@ -796,7 +796,7 @@ mod tests {
     #[test]
     fn the_windows_install_command_line_carries_none_of_its_phrases() {
         let script = windows_install_script(windows_install_command("opencode").unwrap());
-        assert!(script.contains("Unsupported architecture"));
+        assert!(script.contains("GitHub download failed"));
         // Nothing the script prints on failure may quote its own text either.
         assert!(!script.contains("Write-Error"));
         let encoded = encoded_command(&script);

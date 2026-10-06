@@ -1360,7 +1360,10 @@ struct ProjectPathStatusQ {
 }
 
 async fn install_git() -> ApiResult {
-    local::portable_git::install().await?;
+    // Spawned, so a page reload mid-install cannot orphan the extractor.
+    tokio::spawn(local::portable_git::install())
+        .await
+        .map_err(|error| ApiError::from(anyhow!("Git install task failed: {error}")))??;
     Ok(Json(json!({})))
 }
 

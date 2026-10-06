@@ -3,9 +3,9 @@
 //! no PATH change. [`super::shell_env::search_path`] appends its `cmd` directory,
 //! which is also how [`super::bash`] finds the bash it ships.
 
-use anyhow::Result;
+use crate::error::Result;
 #[cfg(windows)]
-use anyhow::{anyhow, Context};
+use crate::error::{anyhow, bail, Context};
 #[cfg(windows)]
 use std::path::{Path, PathBuf};
 
@@ -23,7 +23,7 @@ pub fn cmd_dir() -> Option<PathBuf> {
 
 #[cfg(not(windows))]
 pub async fn install() -> Result<()> {
-    anyhow::bail!("orx installs Git only on Windows.")
+    crate::error::bail!("orx installs Git only on Windows.")
 }
 
 /// Download the latest PortableGit, check it against GitHub's digest, and unpack it.
@@ -40,6 +40,12 @@ pub async fn install() -> Result<()> {
         .await
         .with_context(|| format!("Could not create {}", parent.display()))?;
     sweep_stale(&parent).await;
+    // A copy without `cmd\git.exe` is a damaged leftover the rename cannot replace.
+    if root.exists() {
+        tokio::fs::remove_dir_all(&root)
+            .await
+            .with_context(|| format!("Could not remove {}", root.display()))?;
+    }
     let (url, sha256) = latest_asset().await?;
     let token = uuid::Uuid::new_v4().simple().to_string();
     let archive = parent.join(format!("PortableGit-{token}.7z.exe"));
@@ -47,25 +53,48 @@ pub async fn install() -> Result<()> {
     let result = async {
         download(&url, &sha256, &archive).await?;
         unpack(&archive, &staging).await?;
-        tokio::fs::rename(&staging, &root)
-            .await
-            .with_context(|| format!("Could not move Git into {}", root.display()))
+        verify(&staging).await?;
+        rename_into_place(&staging, &root).await
     }
     .await;
     let _ = tokio::fs::remove_file(&archive).await;
     if result.is_err() {
         let _ = tokio::fs::remove_dir_all(&staging).await;
     }
-    result?;
-    if tokio::task::spawn_blocking(super::git::version)
-        .await?
-        .is_none()
-    {
-        // Removed, so the next attempt reinstalls rather than trusting this copy.
-        let _ = tokio::fs::remove_dir_all(&root).await;
-        anyhow::bail!("Git was installed in {} but does not run.", root.display());
+    result
+}
+
+/// Runs the unpacked `git.exe` itself: whatever `git` PATH finds first may not be this one.
+#[cfg(windows)]
+async fn verify(staging: &Path) -> Result<()> {
+    let output = tokio::process::Command::new(staging.join(r"cmd\git.exe"))
+        .arg("--version")
+        .output()
+        .await
+        .context("Could not run the downloaded Git")?;
+    if !output.status.success() {
+        bail!("The downloaded Git does not run ({}).", output.status);
     }
     Ok(())
+}
+
+/// Retried: antivirus and the search indexer briefly hold files that were just unpacked.
+#[cfg(windows)]
+async fn rename_into_place(staging: &Path, root: &Path) -> Result<()> {
+    let mut attempt = 0;
+    loop {
+        match tokio::fs::rename(staging, root).await {
+            Ok(()) => return Ok(()),
+            Err(_) if attempt < 4 => {
+                attempt += 1;
+                tokio::time::sleep(std::time::Duration::from_millis(500 * attempt)).await;
+            }
+            Err(error) => {
+                return Err(error)
+                    .with_context(|| format!("Could not move Git into {}", root.display()))
+            }
+        }
+    }
 }
 
 /// Downloads and staging folders an interrupted install left beside `PortableGit`.
@@ -91,14 +120,11 @@ async fn sweep_stale(parent: &Path) {
     }
 }
 
-/// The release asset for this machine and its SHA-256, from GitHub's own digest.
+/// The x64 release asset and its SHA-256, from GitHub's own digest. orx ships
+/// Windows for x64 only, which Arm machines run emulated.
 #[cfg(windows)]
 async fn latest_asset() -> Result<(String, String)> {
-    let suffix = if cfg!(target_arch = "aarch64") {
-        "-arm64.7z.exe"
-    } else {
-        "-64-bit.7z.exe"
-    };
+    let suffix = "-64-bit.7z.exe";
     let release: serde_json::Value = client()?
         .get("https://api.github.com/repos/git-for-windows/git/releases/latest")
         .timeout(std::time::Duration::from_secs(60))
@@ -155,25 +181,29 @@ async fn download(url: &str, sha256: &str, archive: &Path) -> Result<()> {
     }
     file.flush().await?;
     if format!("{:x}", hasher.finalize()) != sha256 {
-        anyhow::bail!("The Git for Windows download does not match GitHub's checksum.");
+        bail!("The Git for Windows download does not match GitHub's checksum.");
     }
     Ok(())
 }
 
 /// PortableGit is a 7-Zip self-extractor; `post-install.bat` finishes its `/etc`
-/// setup, run the way Git's own installer runs it. The copy stays relocatable.
+/// setup. The copy stays relocatable, so it is set up in staging and then moved.
 #[cfg(windows)]
 async fn unpack(archive: &Path, staging: &Path) -> Result<()> {
     // Quoted by hand: 7-Zip's extractor reads `-o"<dir>"`, not an argument quoted whole.
+    let mut output = std::ffi::OsString::from("-o\"");
+    output.push(staging);
+    output.push("\"");
     let status = tokio::process::Command::new(archive)
         .arg("-y")
-        .raw_arg(format!("-o\"{}\"", staging.display()))
+        .raw_arg(output)
         .status()
         .await
         .context("Could not start the Git for Windows extractor")?;
     if !status.success() {
-        anyhow::bail!("Extracting Git for Windows failed ({status}).");
+        bail!("Extracting Git for Windows failed ({status}).");
     }
+    // The extractor normally runs and deletes it; run it here only if it remains.
     if staging.join("post-install.bat").is_file() {
         let status = tokio::process::Command::new(staging.join("git-bash.exe"))
             .args([
@@ -187,11 +217,11 @@ async fn unpack(archive: &Path, staging: &Path) -> Result<()> {
             .await
             .context("Could not run Git for Windows' post-install step")?;
         if !status.success() {
-            anyhow::bail!("Git for Windows' post-install step failed ({status}).");
+            bail!("Git for Windows' post-install step failed ({status}).");
         }
     }
     if !staging.join(r"cmd\git.exe").is_file() || !staging.join(r"bin\bash.exe").is_file() {
-        anyhow::bail!("The Git for Windows download is missing git.exe or bash.exe.");
+        bail!("The Git for Windows download is missing git.exe or bash.exe.");
     }
     Ok(())
 }

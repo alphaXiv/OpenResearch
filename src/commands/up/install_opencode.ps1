@@ -8,7 +8,7 @@ $arch = [System.Runtime.InteropServices.RuntimeInformation]::OSArchitecture.ToSt
 $asset = switch ($arch) {
     'X64' { 'x64-baseline' }
     'Arm64' { 'arm64' }
-    default { throw "Unsupported architecture: $arch" }
+    default { throw "OpenCode has no Windows build for $arch processors." }
 }
 $temp = Join-Path ([System.IO.Path]::GetTempPath()) ([System.IO.Path]::GetRandomFileName())
 $destination = Join-Path $env:USERPROFILE '.opencode\bin'
