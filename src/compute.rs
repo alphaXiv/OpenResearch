@@ -143,7 +143,7 @@ fn archive(repo: &Path, revision: &str, format: &str, destination: &Path) -> Res
     Err(anyhow!(
         "git archive failed for {}: {}",
         revision,
-        String::from_utf8_lossy(&output.stderr).trim()
+        crate::local::git::failure_detail(&output)
     ))
 }
 

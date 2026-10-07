@@ -2151,11 +2151,9 @@ async fn decode_local_response<T: serde::de::DeserializeOwned>(
                     .map(str::to_string)
             })
             .unwrap_or_else(|| String::from_utf8_lossy(&body).trim().to_string());
-        let detail = if detail.is_empty() {
-            format!("HTTP {status}")
-        } else {
-            detail
-        };
+        if detail.is_empty() {
+            return Err(anyhow!("orx up could not {action}: HTTP {status}"));
+        }
         if status.is_client_error() {
             return Err(anyhow!("{detail}"));
         }
@@ -8092,17 +8090,27 @@ mod tests {
 
     #[tokio::test]
     async fn empty_local_error_reports_the_http_status() {
-        let response = axum::http::Response::builder()
-            .status(StatusCode::BAD_GATEWAY)
-            .body(String::new())
-            .unwrap();
-        let error = decode_local_response::<Value>(response.into(), "start the run")
-            .await
-            .unwrap_err();
-        assert_eq!(
-            error.to_string(),
-            "orx up could not start the run: HTTP 502 Bad Gateway"
-        );
+        for (status, body, expected) in [
+            (StatusCode::BAD_GATEWAY, "", "HTTP 502 Bad Gateway"),
+            (StatusCode::NOT_FOUND, "", "HTTP 404 Not Found"),
+            (
+                StatusCode::BAD_REQUEST,
+                r#"{"error":""}"#,
+                "HTTP 400 Bad Request",
+            ),
+        ] {
+            let response = axum::http::Response::builder()
+                .status(status)
+                .body(body.to_string())
+                .unwrap();
+            let error = decode_local_response::<Value>(response.into(), "start the run")
+                .await
+                .unwrap_err();
+            assert_eq!(
+                error.to_string(),
+                format!("orx up could not start the run: {expected}")
+            );
+        }
     }
 
     #[test]
