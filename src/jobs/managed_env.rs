@@ -23,11 +23,7 @@ impl ManagedEnv {
     }
 
     pub fn python(&self) -> PathBuf {
-        if cfg!(windows) {
-            self.dir().join("Scripts").join("python.exe")
-        } else {
-            self.dir().join("bin").join("python")
-        }
+        python_in(&self.dir())
     }
 
     async fn ready(&self, python: &Path) -> bool {
@@ -44,14 +40,17 @@ impl ManagedEnv {
 
     /// Returns the env's interpreter, (re)building the env when it is missing or stale.
     pub async fn ensure(&self) -> Result<PathBuf> {
+        self.ensure_in(self.dir()).await
+    }
+
+    async fn ensure_in(&self, env_dir: PathBuf) -> Result<PathBuf> {
         // One lock for every env: installs are rare, so serializing them is cheaper than keying.
         static INSTALL_LOCK: OnceLock<tokio::sync::Mutex<()>> = OnceLock::new();
         let _install = INSTALL_LOCK
             .get_or_init(|| tokio::sync::Mutex::new(()))
             .lock()
             .await;
-        let python = self.python();
-        let env_dir = self.dir();
+        let python = python_in(&env_dir);
         let _env_lock = lock_env(&env_dir).await;
         if python.exists() && self.ready(&python).await {
             return Ok(python);
@@ -100,6 +99,14 @@ impl ManagedEnv {
             ));
         }
         Ok(python)
+    }
+}
+
+fn python_in(env_dir: &Path) -> PathBuf {
+    if cfg!(windows) {
+        env_dir.join("Scripts").join("python.exe")
+    } else {
+        env_dir.join("bin").join("python")
     }
 }
 
@@ -175,5 +182,68 @@ mod tests {
         assert_eq!(parse_python_version("3.9\n"), Some((3, 9)));
         assert_eq!(parse_python_version("3.14"), Some((3, 14)));
         assert_eq!(parse_python_version("garbage"), None);
+    }
+
+    fn test_env(ready_check: &'static str, min_python: (u32, u32)) -> ManagedEnv {
+        ManagedEnv {
+            name: "test",
+            label: "Test",
+            min_python,
+            requirement: "pip",
+            ready_check,
+        }
+    }
+
+    /// A throwaway env whose interpreter is the host's Python, plus a marker that a rebuild would delete.
+    #[cfg(not(windows))]
+    async fn fake_env() -> Option<PathBuf> {
+        let host = base_python((3, 0), "Test").await.ok()?;
+        let host = std::process::Command::new(host)
+            .args(["-c", "import sys; print(sys.executable)"])
+            .output()
+            .ok()?;
+        let host = String::from_utf8(host.stdout).ok()?.trim().to_owned();
+        let dir = std::env::temp_dir().join(format!("orx-managed-env-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(dir.join("bin")).unwrap();
+        std::os::unix::fs::symlink(host, python_in(&dir)).unwrap();
+        std::fs::write(dir.join("marker"), "").unwrap();
+        Some(dir)
+    }
+
+    #[cfg(not(windows))]
+    #[tokio::test]
+    async fn ensure_reuses_a_ready_env() {
+        let Some(dir) = fake_env().await else {
+            eprintln!("skipped: no Python on PATH");
+            return;
+        };
+        let python = test_env("pass", (3, 0))
+            .ensure_in(dir.clone())
+            .await
+            .unwrap();
+        assert_eq!(python, python_in(&dir));
+        assert!(dir.join("marker").exists());
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[cfg(not(windows))]
+    #[tokio::test]
+    async fn ensure_keeps_a_stale_env_when_no_python_is_new_enough() {
+        let Some(dir) = fake_env().await else {
+            eprintln!("skipped: no Python on PATH");
+            return;
+        };
+        let error = test_env("raise SystemExit(1)", (99, 0))
+            .ensure_in(dir.clone())
+            .await
+            .unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("Test needs Python 99.0 or newer"),
+            "{error}"
+        );
+        assert!(dir.join("marker").exists());
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 }
