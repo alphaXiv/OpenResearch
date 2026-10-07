@@ -46,7 +46,11 @@ def submit():
     modal = _modal()
     spec = json.load(sys.stdin)
     app = modal.App.lookup(spec.get("app", "openresearch"), create_if_missing=True)
-    image = modal.Image.from_registry(spec["image"])
+    # Registry images rarely ship uv; append it to PATH so an image's own uv still wins.
+    image = modal.Image.from_registry(spec["image"]).dockerfile_commands(
+        "COPY --from=ghcr.io/astral-sh/uv:0.12.23 /uv /uvx /opt/orx-uv/",
+        "ENV PATH=$PATH:/opt/orx-uv",
+    )
     kwargs = {
         "app": app,
         "image": image,
@@ -656,5 +660,52 @@ mod credential_tests {
             let _ = std::fs::remove_dir_all(&dir);
             assert_eq!(status.success(), ready, "create({params})");
         }
+    }
+
+    #[tokio::test]
+    async fn submit_puts_uv_on_the_sandbox_path() {
+        let Ok(python) =
+            crate::jobs::managed_env::base_python(MODAL_ENV.min_python, MODAL_ENV.label).await
+        else {
+            eprintln!("skipped: no Python on PATH");
+            return;
+        };
+        let dir = std::env::temp_dir().join(format!("orx-modal-uv-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(dir.join("modal")).unwrap();
+        std::fs::write(
+            dir.join("modal").join("__init__.py"),
+            "import sys\n\
+             class App:\n    @staticmethod\n    def lookup(name, create_if_missing): return name\n\
+             class Image:\n    @staticmethod\n    def from_registry(tag): return Image()\n    \
+             def dockerfile_commands(self, *cmds):\n        sys.stderr.write('\\n'.join(cmds)); return self\n\
+             class Sandbox:\n    object_id = 'sb-1'\n    @classmethod\n    \
+             def create(cls, *args, **kwargs): return cls()\n",
+        )
+        .unwrap();
+        let mut child = std::process::Command::new(python)
+            .args(["-c", LAUNCHER, "submit"])
+            .env("PYTHONPATH", &dir)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .unwrap();
+        use std::io::Write as _;
+        child
+            .stdin
+            .take()
+            .unwrap()
+            .write_all(br#"{"image": "python:3.12", "script": "uv run --locked x"}"#)
+            .unwrap();
+        let out = child.wait_with_output().unwrap();
+        let _ = std::fs::remove_dir_all(&dir);
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        assert!(out.status.success(), "{stderr}");
+        assert!(
+            stderr.contains("COPY --from=ghcr.io/astral-sh/uv:"),
+            "{stderr}"
+        );
+        assert!(stderr.contains("/uv /uvx /opt/orx-uv/"), "{stderr}");
+        assert!(stderr.contains("ENV PATH=$PATH:/opt/orx-uv"), "{stderr}");
     }
 }
