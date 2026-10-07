@@ -139,12 +139,20 @@ pub fn run_job(spec: &LocalJobSpec) -> Result<PathBuf> {
 /// The unique script path distinguishes a run from an unrelated process reusing its PID.
 #[cfg(not(windows))]
 fn run_alive(dir: &Path, pid: &str) -> bool {
-    let Ok(output) = std::process::Command::new("ps")
+    run_alive_via("ps", dir, pid)
+}
+
+#[cfg(not(windows))]
+fn run_alive_via(ps: &str, dir: &Path, pid: &str) -> bool {
+    let Ok(output) = std::process::Command::new(ps)
         .args(["-ww", "-o", "stat=,command=", "-p", pid])
         .stderr(std::process::Stdio::null())
         .output()
     else {
-        return false;
+        // Agent sandboxes (Codex's seatbelt) refuse to exec setuid `ps`; fall back to a signal probe.
+        return pid
+            .parse::<libc::pid_t>()
+            .is_ok_and(|pid| pid > 0 && unsafe { libc::kill(pid, 0) } == 0);
     };
     let text = String::from_utf8_lossy(&output.stdout);
     let Some((stat, command)) = text.trim().split_once(char::is_whitespace) else {
@@ -475,6 +483,24 @@ mod tests {
             std::thread::sleep(std::time::Duration::from_millis(20));
         }
         panic!("local run {} was not reaped", pid.trim());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn run_alive_without_ps_probes_the_pid() {
+        let dir = std::env::temp_dir();
+        let unrunnable_ps = "/nonexistent/orx-test-ps";
+        let mut child = std::process::Command::new("sleep")
+            .arg("60")
+            .spawn()
+            .unwrap();
+        let pid = child.id().to_string();
+        let alive = run_alive_via(unrunnable_ps, &dir, &pid);
+        child.kill().unwrap();
+        child.wait().unwrap();
+        assert!(alive, "a live run must not read as dead when ps cannot run");
+        assert!(!run_alive_via(unrunnable_ps, &dir, &pid));
+        assert!(!run_alive_via(unrunnable_ps, &dir, ""));
     }
 
     #[test]

@@ -771,6 +771,8 @@ async fn tail_logs_ssh(
     let mut seen = 0u64;
     let mut last_error = None;
     loop {
+        // Read `done` first so the last pass starts after the run ended and captures its final lines.
+        let finished = *done.borrow();
         let mut sink = |line: &str| {
             let _ = writeln!(log_file, "{line}");
         };
@@ -792,7 +794,7 @@ async fn tail_logs_ssh(
             errors.send_replace(last_error.clone());
         }
         let _ = log_file.flush();
-        if *done.borrow() {
+        if finished {
             return;
         }
         tokio::time::sleep(Duration::from_secs(2)).await;
@@ -1125,6 +1127,8 @@ async fn tail_logs_local(
     };
     let mut seen = 0u64;
     loop {
+        // Read `done` first so the last pass starts after the run ended and captures its final lines.
+        let finished = *done.borrow();
         let mut sink = |line: &str| {
             let _ = writeln!(log_file, "{line}");
         };
@@ -1133,7 +1137,7 @@ async fn tail_logs_local(
             Err(err) => eprintln!("supervise {run_id}: log stream error (will retry): {err}"),
         }
         let _ = log_file.flush();
-        if *done.borrow() {
+        if finished {
             return;
         }
         tokio::time::sleep(Duration::from_secs(2)).await;
