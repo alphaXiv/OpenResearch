@@ -1617,10 +1617,10 @@ impl UpdateWarning {
 mod tests {
     use super::{
         app_bundle_root, attempt_backoff, attempt_due, bold, claim_install, detect_channel,
-        exe_matches_prefix, file_identity, now_unix, package_manager_owns, parse_manifest,
-        portable_dir, portable_outside_prefix, precedence, relaunch_args, render, restart_target,
-        retired_path, target_lock_path, warning_for, BackendLock, CheckCache, InstallChannel,
-        UpdateTarget, ATTEMPT_BACKOFF_MAX, ATTEMPT_BACKOFF_MIN,
+        exe_matches_prefix, now_unix, package_manager_owns, parse_manifest, portable_dir,
+        portable_outside_prefix, precedence, relaunch_args, render, restart_target, retired_path,
+        target_lock_path, warning_for, BackendLock, CheckCache, InstallChannel, UpdateTarget,
+        ATTEMPT_BACKOFF_MAX, ATTEMPT_BACKOFF_MIN,
     };
     use semver::Version;
     use std::ffi::OsString;
