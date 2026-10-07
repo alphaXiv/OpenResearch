@@ -283,7 +283,7 @@ export function FileViewer({
     },
     [isAbsolute, parentFolder, rawFileUrl],
   );
-  // Callers pass a fresh `onOpenFile` each render; a stable wrapper keeps Md's links and images mounted.
+  // Stable so Md's memo holds; callers pass a fresh `onOpenFile` each render.
   const onOpenFileRef = useRef(onOpenFile);
   onOpenFileRef.current = onOpenFile;
   const openMarkdownFile = useCallback(

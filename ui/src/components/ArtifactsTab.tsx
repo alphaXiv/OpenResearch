@@ -147,8 +147,7 @@ export function ArtifactMarkdown({
   markdown: string;
   entries: ArtifactEntry[];
 }) {
-  // A new `img` component type would remount every image, so artifact writes
-  // only refresh `src` through this ref instead of rebuilding the components.
+  // Artifact writes refresh `src` through this ref; a new `img` type would remount images.
   const entriesRef = useRef(entries);
   entriesRef.current = entries;
   const components = useMemo((): Components => {
