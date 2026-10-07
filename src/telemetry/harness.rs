@@ -336,6 +336,18 @@ const PHRASES: &[&str] = &[
     "running scripts is disabled on this system",
     "Unsupported platform",
     "Unsupported architecture",
+    "OpenCode has no Windows build",
+    // The OpenCode Windows installer's sources, then .NET's network faults.
+    "GitHub download failed",
+    "npm download failed",
+    "npm package checksum mismatch",
+    "The remote name could not be resolved",
+    "The operation has timed out",
+    "The underlying connection was closed",
+    "Could not create SSL/TLS secure channel",
+    "Could not establish trust relationship",
+    "Proxy Authentication Required",
+    "The revocation function was unable to check revocation",
     // Real failures the previous list discarded, leaving a NULL excerpt on
     // an exit that had a perfectly specific cause.
     "stdin is not a terminal",

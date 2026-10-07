@@ -53,6 +53,7 @@ mod harness_setup;
 use compute_settings::*;
 
 pub async fn run(args: UpArgs) -> Result<()> {
+    updates::note_startup_image();
     let port = args.port;
     let persistent_host = args.remote_host;
     let remote_auth = if persistent_host {
@@ -72,27 +73,19 @@ pub async fn run(args: UpArgs) -> Result<()> {
     )?;
     // Blocks only for a relaunched server, whose predecessor still holds the port.
     updates::await_replaced_parent();
-    let listener = match tokio::net::TcpListener::bind(("127.0.0.1", port)).await {
-        Ok(listener) => listener,
-        // A second double-click should reach the running dashboard, not fail on its port.
-        Err(error)
-            if error.kind() == std::io::ErrorKind::AddrInUse
-                && crate::owns_its_console()
-                && dashboard_is_serving(port).await =>
-        {
-            let url = format!("http://127.0.0.1:{port}");
-            eprintln!("orx up: already running — opening {url}");
-            if !args.no_browser {
-                if let Some(watch) =
-                    browser::open_dashboard(&url, crate::telemetry::UpLaunchMode::of(&args))
-                {
-                    let _ = watch.await;
-                }
-            }
-            return Ok(());
-        }
-        Err(error) => return Err(anyhow!("Could not bind 127.0.0.1:{}: {}", port, error)),
-    };
+    let backend_lock = tokio::task::spawn_blocking(updates::BackendLock::acquire)
+        .await
+        .ok()
+        .flatten();
+    // An install that finished while this process waited replaced the image it was started from.
+    if backend_lock.is_some() && updates::newer_exe_on_disk().await {
+        drop(backend_lock);
+        let err = updates::relaunch(port);
+        return Err(anyhow!("orx up: could not restart: {err}"));
+    }
+    let listener = tokio::net::TcpListener::bind(("127.0.0.1", port))
+        .await
+        .map_err(|error| anyhow!("Could not bind 127.0.0.1:{}: {}", port, error))?;
     let actual_port = listener.local_addr()?.port();
     // Open early so the schema exists before any request or agent spawn.
     {
@@ -286,7 +279,23 @@ pub async fn run(args: UpArgs) -> Result<()> {
     }
     state.dashboard_lock.lock().unwrap().take();
     if restarting {
-        eprintln!("orx up: restarting into the updated orx");
+        drop(backend_lock);
+        if !updates::newer_exe_on_disk().await {
+            eprintln!("orx up: installing the update before restarting");
+            let failures = updates::failure_count();
+            if let Err(err) = updates::apply_now().await {
+                eprintln!("orx up: {err} Restarting on this version.");
+            }
+            // Unless the updater counted it or still will, back off (deferred again, or it
+            // never started), or the relaunch restarts straight back into this.
+            if !updates::newer_exe_on_disk().await
+                && updates::failure_count() == failures
+                && !updates::updater_running()
+            {
+                updates::record_attempt(false);
+            }
+        }
+        eprintln!("orx up: restarting");
         let err = updates::relaunch(actual_port);
         return Err(anyhow!("orx up: could not restart: {err}"));
     }
@@ -497,6 +506,7 @@ fn router(state: AppState, remote_auth: Option<RemoteAuth>) -> Router {
         .route("/api/onboarding/complete", post(complete_onboarding))
         .route("/api/project-path/status", get(project_path_status))
         .route("/api/project-path/pick", post(pick_project_folder))
+        .route("/api/git/install", post(install_git))
         .route("/api/projects", get(list_projects).post(create_project))
         .route(
             "/api/projects/starter-prompts/prewarm",
@@ -837,6 +847,7 @@ fn remote_route_forbidden(path: &str) -> bool {
     matches!(
         path,
         "/api/project-path/pick"
+            | "/api/git/install"
             | "/api/update"
             | "/api/update/apply"
             | "/api/update/restart"
@@ -947,22 +958,6 @@ impl From<&StoredRun> for ApiRun {
 }
 
 // --- basic routes ---------------------------------------------------------
-
-/// Whether a dashboard this build can talk to, not some other server, holds `port`.
-async fn dashboard_is_serving(port: u16) -> bool {
-    let Ok(response) = reqwest::Client::new()
-        .get(format!("http://127.0.0.1:{port}/api/health"))
-        .timeout(std::time::Duration::from_secs(2))
-        .send()
-        .await
-    else {
-        return false;
-    };
-    response.json::<Value>().await.is_ok_and(|body| {
-        body.get("dashboardProtocol").and_then(Value::as_u64)
-            == Some(u64::from(crate::commands::up_remote::DASHBOARD_PROTOCOL))
-    })
-}
 
 async fn health(State(state): State<AppState>) -> Json<Value> {
     Json(json!({
@@ -1357,12 +1352,26 @@ struct ProjectPathStatusQ {
     path: Option<String>,
 }
 
+async fn install_git() -> ApiResult {
+    // Spawned, so a page reload mid-install cannot orphan the extractor.
+    tokio::spawn(local::portable_git::install())
+        .await
+        .map_err(|error| ApiError::from(anyhow!("Git install task failed: {error}")))?
+        // `:#` keeps the cause (DNS, TLS, proxy) behind the outer context.
+        .map_err(|error| {
+            eprintln!("orx up: Git install failed: {error:#}");
+            ApiError(StatusCode::INTERNAL_SERVER_ERROR, format!("{error:#}"))
+        })?;
+    Ok(Json(json!({})))
+}
+
 async fn project_path_status(Query(q): Query<ProjectPathStatusQ>) -> ApiResult {
     tokio::task::spawn_blocking(move || -> Result<Json<Value>> {
         let git_version = local::git::version();
         let Some(path) = q.path.filter(|path| !path.trim().is_empty()) else {
             return Ok(Json(json!({
                 "gitVersion": git_version,
+                "gitInstallable": cfg!(windows) && git_version.is_none(),
                 "resolvedPath": null,
                 "exists": null,
                 "directory": null,
@@ -4418,29 +4427,46 @@ fn spawn_restart_when_idle(state: AppState) {
             // The cache can claim an install the exec target doesn't have; never restart in a loop.
             if !(status.auto_update
                 && status.restart_required
-                && updates::newer_exe_on_disk().await)
+                && (updates::deferred_update_due() || updates::newer_exe_on_disk().await))
             {
                 continue;
             }
-            DRAINING.store(true, Ordering::SeqCst);
-            if ACTIVE.load(Ordering::SeqCst) == 0
-                && !state.data_dir_move_in_progress.load(Ordering::SeqCst)
-                && state.remote_sessions.list().await.iter().all(|session| {
-                    matches!(
-                        session.status,
-                        RemoteSessionStatus::Disconnected
-                            | RemoteSessionStatus::NeedsInstall
-                            | RemoteSessionStatus::NeedsUpdate
-                    )
-                })
-                && state.chat.stop_admitting_if_idle().await
-            {
+            if begin_restart(&state, 0).await {
                 state.restart.notify_one();
                 return;
             }
-            DRAINING.store(false, Ordering::SeqCst);
         }
     });
+}
+
+/// Serializes restart attempts; true once one committed, after which nothing reopens admission.
+static RESTART_COMMITTED: tokio::sync::Mutex<bool> = tokio::sync::Mutex::const_new(false);
+
+/// Stop admitting work and commit to a restart if nothing is in flight beyond
+/// `own_requests` (the caller's). Returns false, and admits again, otherwise.
+async fn begin_restart(state: &AppState, own_requests: usize) -> bool {
+    let mut committed = RESTART_COMMITTED.lock().await;
+    if *committed {
+        return true;
+    }
+    DRAINING.store(true, Ordering::SeqCst);
+    if ACTIVE.load(Ordering::SeqCst) <= own_requests
+        && !state.data_dir_move_in_progress.load(Ordering::SeqCst)
+        && state.remote_sessions.list().await.iter().all(|session| {
+            matches!(
+                session.status,
+                RemoteSessionStatus::Disconnected
+                    | RemoteSessionStatus::NeedsInstall
+                    | RemoteSessionStatus::NeedsUpdate
+            )
+        })
+        && state.chat.stop_admitting_if_idle().await
+    {
+        *committed = true;
+        return true;
+    }
+    DRAINING.store(false, Ordering::SeqCst);
+    false
 }
 
 /// Startup summary of detected coding agents. Never blocks. It goes through
@@ -5261,6 +5287,23 @@ async fn restart_after_update(State(state): State<AppState>) -> ApiResult {
             "no newer orx is installed to restart into".into(),
         ));
     };
+    // A dashboard poll landing alongside the click is not work worth refusing over.
+    let mut began = false;
+    for _ in 0..10 {
+        began = begin_restart(&state, 1).await;
+        if began {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    if !began {
+        return Err(ApiError(
+            StatusCode::CONFLICT,
+            "OpenResearch is busy: a chat turn, queued message, approval, open terminal, \
+             remote session, or request is still in progress. Try again once it finishes."
+                .into(),
+        ));
+    }
     let restart = state.restart.clone();
     tokio::spawn(async move {
         tokio::time::sleep(Duration::from_millis(250)).await;

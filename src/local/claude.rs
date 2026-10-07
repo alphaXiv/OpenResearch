@@ -448,10 +448,23 @@ async fn read_loop(client: Arc<ClaudeClient>, stdout: tokio::process::ChildStdou
             }
             ClaudeLine::Event(value) => {
                 // Route to the live turn; dropped if none is listening (a
-                // between-turns line, or an aborted turn's tail).
+                // between-turns line, or an aborted turn's tail) once its tool identities are recorded.
                 let turn = client.turn.lock().unwrap();
                 if let Some(tx) = turn.sender.as_ref() {
                     let _ = tx.send(TurnEvent::Line(value));
+                } else if value.get("type").and_then(Value::as_str) == Some("assistant") {
+                    drop(turn);
+                    if let Some(message) = value.get("message").cloned() {
+                        let session_id = client.session_id.clone();
+                        // Off the reader so a busy store never stalls Claude's stdout.
+                        tokio::task::spawn_blocking(move || {
+                            crate::local::chat::record_native_invocations(
+                                "claude-code",
+                                &session_id,
+                                &message,
+                            )
+                        });
+                    }
                 }
             }
             ClaudeLine::Junk => {}

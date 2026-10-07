@@ -30,8 +30,9 @@ export function useUpdateStatus(enabled = true): UpdateState {
   };
 }
 
-/** How long to wait for the relaunched server before giving up on the reload. */
-const RESTART_TIMEOUT_MS = 60_000;
+/** How long to wait for the relaunched server before giving up on the reload. It may
+ *  download and install a held-back update first, which the server bounds at 5 minutes. */
+const RESTART_TIMEOUT_MS = 360_000;
 const RESTART_POLL_MS = 500;
 
 export interface RestartState {
@@ -90,8 +91,8 @@ export function useRestartApp(status: UpdateStatus | null): RestartState {
   return { restarting, error, restart };
 }
 
-/** Shown once the updater has already installed a newer version: the app the
- *  user is looking at is the old one until it restarts.
+/** Shown once a newer version is installed, or held back until this server
+ *  restarts: the app the user is looking at is the old one until it restarts.
  *
  *  Deliberately not shown for a merely *available* update — that is the
  *  updater's job, and a banner for something already in hand is noise. */

@@ -7,7 +7,7 @@ use tokio::process::Command;
 
 use crate::error::{anyhow, Result};
 
-const UA: &str = concat!("orx/", env!("CARGO_PKG_VERSION"));
+pub(crate) const UA: &str = concat!("orx/", env!("CARGO_PKG_VERSION"));
 pub const SHALLOW_CLONE_THRESHOLD_KB: u64 = 250 * 1024;
 
 #[derive(Clone, Copy)]

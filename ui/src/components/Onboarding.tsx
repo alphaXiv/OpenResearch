@@ -18,6 +18,7 @@ import {
   captureUiEvent,
   type HarnessSetupCommands,
   completeOnboarding,
+  installGit,
   reasoningFor,
   type AgentSelection,
   type Harness,
@@ -32,6 +33,7 @@ import { claudeProviderLabel } from "./claudeProvider";
 import { HarnessLogo } from "./HarnessLogo";
 import { HarnessSetupDialog } from "./HarnessSetupDialog";
 
+import { Hyperspace } from "./Hyperspace";
 import { Button, LoadingRow, Spinner, StatusIndicator, type StatusTone } from "./ui";
 import { PaperTitle } from "./PaperTitle";
 
@@ -107,6 +109,7 @@ export function Onboarding({
   useEffect(() => () => installSocket.current?.close(), []);
   const harnesses = harnessQuery.data ?? null;
   const gitVersion = pathQuery.data?.gitVersion;
+  const gitInstallable = !remote && pathQuery.data?.gitInstallable === true;
   const [finishing, setFinishing] = useState(false);
   const [finishError, setFinishError] = useState<string | null>(null);
   const [finishErrorDetails, setFinishErrorDetails] = useState("");
@@ -157,6 +160,15 @@ export function Onboarding({
       .finally(() => fresh() && setChecking(false));
   };
   useEffect(() => load(false), []);
+  const installGitMutation = useMutation({ mutationFn: installGit, onSuccess: () => load(true) });
+  const gitInstallPrompt = (
+    <GitInstallPrompt
+      pending={installGitMutation.isPending}
+      error={installGitMutation.error}
+      disabled={checking}
+      onInstall={() => installGitMutation.mutate()}
+    />
+  );
   useEffect(() => {
     if (harnesses === null) return;
     const ready = harnesses.filter((h) => h.agentReady && !h.catalogPending);
@@ -356,54 +368,15 @@ export function Onboarding({
           }`}
       >
         {step === 0 ? (
-          <div className="onb-intro relative flex min-h-dvh flex-col justify-center gap-4 py-12 min-[1120px]:grid min-[1120px]:grid-cols-[minmax(0,_1.1fr)_minmax(28rem,_1fr)] min-[1120px]:grid-rows-[auto_auto] min-[1120px]:content-center min-[1120px]:gap-x-20 min-[1120px]:gap-y-10">
-            <div className="onb-intro-copy relative z-10 min-[1120px]:col-start-1 min-[1120px]:row-start-1 min-[1120px]:self-start">
-              <div className="onb-intro-brand mb-10 text-6xl font-semibold leading-none tracking-[-0.035em]">
-                <Wordmark />
-              </div>
-              <h2 className="onb-title mt-0 mx-0 text-4xl font-medium leading-[1.08] tracking-[-0.035em]">
-                {m.onboarding_a_workspace_for_your_research_agents()}
-              </h2>
+          <div className="onb-intro flex min-h-dvh flex-col items-center justify-center gap-6 text-center">
+            <Hyperspace className="pointer-events-none fixed inset-0 size-full" />
+            <div className="onb-intro-brand relative text-6xl font-semibold leading-none tracking-[-0.035em] animate-[onb-warp-in_700ms_cubic-bezier(0.16,1,0.3,1)_1250ms_both] motion-reduce:animate-none">
+              <Wordmark />
             </div>
-            <div className="onb-intro-features relative min-[1120px]:col-start-2 min-[1120px]:row-start-1 min-[1120px]:self-end">
-              <div
-                aria-hidden="true"
-                className="absolute -inset-14 rounded-full bg-primary-subtle opacity-70 blur-3xl"
-              />
-              <ul className="onb-intro-list relative flex flex-col gap-4 m-0 p-0 list-none">
-                <li className="rounded-2xl border border-border bg-background p-6 shadow-card">
-                  <span>
-                    <strong className="mb-1.5 block text-xl font-semibold tracking-[-0.015em]">
-                      {m.onboarding_consolidate_your_research()}
-                    </strong>
-                    <span className="block text-lg leading-[1.55] text-text">
-                      {m.onboarding_track_experiments_artifacts_compute_skills_and_code_all()}
-                    </span>
-                  </span>
-                </li>
-                <li className="rounded-2xl border border-border bg-background p-6 shadow-card">
-                  <span>
-                    <strong className="mb-1.5 block text-xl font-semibold tracking-[-0.015em]">
-                      {m.onboarding_ground_your_agents()}
-                    </strong>
-                    <span className="block text-lg leading-[1.55] text-text">
-                      {m.onboarding_sources_description()}
-                    </span>
-                  </span>
-                </li>
-                <li className="rounded-2xl border border-border bg-background p-6 shadow-card">
-                  <span>
-                    <strong className="mb-1.5 block text-xl font-semibold tracking-[-0.015em]">
-                      {m.onboarding_everything_stays_local()}
-                    </strong>
-                    <span className="block text-lg leading-[1.55] text-text">
-                      {m.onboarding_your_code_data_and_experiment_history_stay_on()}
-                    </span>
-                  </span>
-                </li>
-              </ul>
-            </div>
-            <div className="onb-intro-actions relative z-10 mt-8 flex justify-end min-[1120px]:col-start-2 min-[1120px]:row-start-2 min-[1120px]:mt-0 min-[1120px]:self-start">
+            <h2 className="onb-title relative m-0 text-2xl font-medium text-muted tracking-[-0.02em] animate-[onb-welcome-in_700ms_ease-out_1700ms_both] motion-reduce:animate-none">
+              {m.onboarding_the_local_first_workspace_for_research_agents()}
+            </h2>
+            <div className="relative mt-6 animate-[onb-welcome-in_600ms_ease-out_2300ms_both] motion-reduce:animate-none">
               <Button variant="primary" size="large"
                 onClick={continueFromWelcome}
                 disabled={checking && harnesses === null}
@@ -431,10 +404,12 @@ export function Onboarding({
               </p>
             )}
             {(gitVersion === null || gitError) && (
-              <div className="onb-git-check mt-7" role="status" aria-live="polite">
+              <div className="onb-git-check mt-7 mb-5.5" role="status" aria-live="polite">
                 <LocalGitCard gitVersion={gitVersion} error={gitError} />
                 {gitError ? (
                   <p className={GIT_RETRY_HINT_CLASS_NAME}>{m.onboarding_retry_connection()}</p>
+                ) : gitInstallable ? (
+                  gitInstallPrompt
                 ) : (
                   <p className={GIT_RETRY_HINT_CLASS_NAME}>
                     {m.onboarding_git_is_required_for_local_experiments_install_git()}
@@ -608,8 +583,14 @@ export function Onboarding({
             {automaticSetup && !gitReady && (
               <div className="mt-5" role="status">
                 <LocalGitCard gitVersion={gitVersion} error={gitError} />
-                <p className={GIT_RETRY_HINT_CLASS_NAME}>{gitError ? m.onboarding_retry_connection() : m.onboarding_git_is_required_for_local_experiments_install_git()}</p>
-                <Button onClick={() => load(true, true)} disabled={checking}>{m.onboarding_re_check()}</Button>
+                {gitError ? (
+                  <p className={GIT_RETRY_HINT_CLASS_NAME}>{m.onboarding_retry_connection()}</p>
+                ) : gitInstallable ? (
+                  gitInstallPrompt
+                ) : (
+                  <p className={GIT_RETRY_HINT_CLASS_NAME}>{m.onboarding_git_is_required_for_local_experiments_install_git()}</p>
+                )}
+                <Button className="mt-2.5" onClick={() => load(true, true)} disabled={checking}>{m.onboarding_re_check()}</Button>
               </div>
             )}
             <div className="onb-actions flex items-center gap-2.5 mt-5.5">
@@ -797,6 +778,29 @@ function AgentCard({
       {meta && <div className={ONB_CARD_META_CLASS_NAME}>{meta}</div>}
       {h.authCheckFailed && h.agentNote && <div className={ONB_CARD_META_CLASS_NAME}>{renderNote(h.agentNote)}</div>}
     </button>
+  );
+}
+
+function GitInstallPrompt({
+  pending,
+  error,
+  disabled,
+  onInstall,
+}: {
+  pending: boolean;
+  error: Error | null;
+  disabled: boolean;
+  onInstall: () => void;
+}) {
+  return (
+    <div className="flex flex-col items-start gap-2.5">
+      <p className={GIT_RETRY_HINT_CLASS_NAME}>{m.onboarding_install_git_for_windows()}</p>
+      <Button variant="primary" onClick={onInstall} disabled={pending || disabled}>
+        {pending && <Spinner />}
+        {pending ? m.onboarding_installing_git() : m.onboarding_install_git()}
+      </Button>
+      {error && <p className="text-accent-red text-sm m-0">{error.message}</p>}
+    </div>
   );
 }
 

@@ -8,10 +8,19 @@ experiment runs and the nanochat demo. The gaps are listed at the bottom.
 **Git for Windows is required**, and for more than git. It is the only source of
 the `bash` and coreutils that orx uses to run experiments — the `bash.exe` in
 `System32` is the WSL launcher, which cannot see your files, and orx rejects it.
-Install it with the standard installer so `git.exe` lands on `PATH`; orx finds
-the shell by walking up from there.
+Install it with the standard installer so `git.exe` lands on `PATH`, or let
+onboarding install it (below); orx finds the shell by walking up from `git.exe`.
+orx notices a Git installed while it runs, so **Re-check** in onboarding is
+enough; there is no need to restart.
 
-You also need a coding agent. Claude Code is the default:
+If you have no Git, onboarding offers **Install Git**. orx downloads the latest
+PortableGit from Git for Windows' GitHub releases, checks it against the SHA-256
+GitHub publishes, and unpacks it into `%LOCALAPPDATA%\OpenResearch\PortableGit`
+with no administrator prompt. orx, its agents, and its terminals use it; your
+own `PATH` is unchanged, and a Git you install later takes precedence.
+
+You also need a coding agent. Claude Code is the default. To install Git, Node,
+and Claude Code yourself:
 
 ```powershell
 winget install --id Git.Git -e
@@ -48,9 +57,9 @@ The app uses port 4792, or a free port if something else holds it.
 
 From [Releases](https://github.com/alphaXiv/OpenResearch/releases), download
 `openresearch-cli-x86_64-pc-windows-msvc.zip`, extract it, and double-click
-`orx.exe`. It starts the dashboard at `http://127.0.0.1:4791` and opens your
-browser. Leave the console window open — closing it stops the server. If orx
-cannot start, a dialog says why.
+`orx.exe`. It opens the desktop app, as `OpenResearch.exe` does; that needs the
+WebView2 Runtime, which `OpenResearch-Setup.exe` installs if Windows lacks it. If
+orx cannot start, a dialog says why.
 
 To have `orx` on your `PATH` as a command instead, run the PowerShell installer,
 which installs to `%USERPROFILE%\.cargo\bin`:
