@@ -80,14 +80,13 @@
 }
 
 .tool-running-shimmer::selection {
-  color: var(--base);
-  -webkit-text-fill-color: var(--base);
+  color: var(--selection-text);
+  -webkit-text-fill-color: var(--selection-text);
 }
 
-/* The chat thread selects on the annotation highlight (base.css), not on primary. */
-.chat-thread-inner .tool-running-shimmer::selection {
-  color: var(--text);
-  -webkit-text-fill-color: var(--text);
+.openresearch-diff ::selection {
+  color: currentColor;
+  background: var(--code-selection);
 }
 
 .tool-running-shimmer-icon {

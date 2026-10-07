@@ -20,18 +20,22 @@ body {
 }
 
 ::selection {
-  color: var(--base);
-  background: var(--primary);
-}
-
-.chat-thread-inner ::selection {
-  color: var(--text);
-  background: var(--chat-annotation-highlight);
+  color: var(--selection-text);
+  background: var(--selection-background);
 }
 
 ::highlight(chat-annotations),
 ::highlight(side-chat-annotations) {
   background: var(--chat-annotation-highlight);
+}
+
+/* currentColor preserves each token instead of inheriting the prose selection color. */
+pre::selection,
+pre ::selection,
+code::selection,
+code ::selection {
+  color: currentColor;
+  background: var(--code-selection);
 }
 
 /* The editor stacks a transparent textarea over the highlighted code, so an

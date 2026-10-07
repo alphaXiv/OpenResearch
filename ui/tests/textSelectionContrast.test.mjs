@@ -38,13 +38,6 @@ function hexToken(css, name) {
   return match[1];
 }
 
-/** The hex value a `var(--token)` declaration resolves to in one theme. */
-function resolve(css, value) {
-  const token = value.match(/^var\(--([a-z-]+)\)$/)?.[1];
-  assert.ok(token, `expected a theme token, got ${value}`);
-  return hexToken(css, token);
-}
-
 function luminance(hex) {
   const channels = hex
     .slice(1)
@@ -61,29 +54,25 @@ function contrast(first, second) {
 }
 
 const globalSelection = () => declarations(base, "::selection");
-const chatSelection = () => declarations(base, ".chat-thread-inner ::selection");
 
 test("text selection uses a global explicit foreground and background", () => {
-  assert.deepEqual(globalSelection(), { color: "var(--base)", background: "var(--primary)" });
+  assert.deepEqual(globalSelection(), { color: "var(--selection-text)", background: "var(--selection-background)" });
 });
 
 test("text selection meets contrast thresholds in both themes", () => {
   for (const { name, css } of themeTokens()) {
-    const ratio = contrast(hexToken(css, "base"), hexToken(css, "primary"));
+    const ratio = contrast(hexToken(css, "selection-text"), hexToken(css, "selection-background"));
+    const boundary = contrast(hexToken(css, "base"), hexToken(css, "selection-background"));
 
     assert.ok(ratio >= 4.5, `${name} selected text contrast ${ratio.toFixed(2)} is below 4.5`);
-    assert.ok(ratio >= 3, `${name} selection boundary contrast ${ratio.toFixed(2)} is below 3`);
+    assert.ok(boundary >= 3, `${name} selection boundary contrast ${boundary.toFixed(2)} is below 3`);
   }
 });
 
-test("chat selection keeps readable text on the annotation highlight in both themes", () => {
-  // A chat rule without its own colour inherits the global selection foreground.
-  const { color = globalSelection().color, background } = chatSelection();
-
-  for (const { name, css } of themeTokens()) {
-    const ratio = contrast(resolve(css, color), resolve(css, background));
-
-    assert.ok(ratio >= 4.5, `${name} chat selection contrast ${ratio.toFixed(2)} is below 4.5`);
+test("chat annotations stay separate from active selection", () => {
+  assert.ok(!base.includes(".chat-thread-inner ::selection"));
+  for (const { css } of themeTokens()) {
+    assert.notEqual(hexToken(css, "selection-background"), hexToken(css, "chat-annotation-highlight"));
   }
 });
 
@@ -98,8 +87,22 @@ test("shimmering labels select with the same foreground as the surrounding text"
   const foreground = (color) => ({ color, "-webkit-text-fill-color": color });
 
   assert.deepEqual(declarations(app, ".tool-running-shimmer::selection"), foreground(globalSelection().color));
-  assert.deepEqual(
-    declarations(app, ".chat-thread-inner .tool-running-shimmer::selection"),
-    foreground(chatSelection().color),
-  );
+});
+
+test("diff drag selection preserves syntax foregrounds on the shared code highlight", () => {
+  assert.deepEqual(declarations(app, ".openresearch-diff ::selection"), {
+    color: "currentColor",
+    background: "var(--code-selection)",
+  });
+  const diff = read("components/GitDiff.tsx");
+  assert.ok(diff.includes("--diff-selection-text-color:var(--text)"));
+  assert.ok(!diff.includes("--diff-selection-text-color:var(--primary)"));
+  assert.ok(theme.includes("--editor-selection: var(--code-selection)"));
+});
+
+test("code selection preserves each token's foreground rather than inheriting prose colors", () => {
+  assert.deepEqual(declarations(base, "code ::selection"), {
+    color: "currentColor",
+    background: "var(--code-selection)",
+  });
 });
