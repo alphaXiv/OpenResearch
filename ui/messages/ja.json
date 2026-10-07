@@ -933,7 +933,7 @@
   "settings_oauth_login": "OAuth（サブスクリプションでサインイン）",
   "settings_not_found_on_path": "PATH に見つかりません",
   "settings_providers": "プロバイダー",
-  "settings_models_available": "{count} 個のモデルが利用可能 — {models}",
+  "settings_models_available": "{count} 個のモデルが利用可能",
   "settings_none": "なし",
   "settings_kubectl_default": "現在の kubectl コンテキストを使用",
   "settings_kubectl_default_context": "現在のコンテキストを使用（{context}）",

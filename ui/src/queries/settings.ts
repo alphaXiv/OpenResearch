@@ -181,8 +181,15 @@ export const listUserSkillsQuery = () => queryOptions({
 });
 
 export async function refreshHarnesses(refresh = false, retryRejected = false) {
+  if (!refresh && !retryRejected) return queryClient.fetchQuery(getHarnessesQuery());
+  return fetchHarnesses(refresh, retryRejected);
+}
+
+/** The server's cached answer, skipping any in-flight poll that may predate a publish. */
+export const readHarnesses = () => fetchHarnesses(false, false);
+
+async function fetchHarnesses(refresh: boolean, retryRejected: boolean) {
   const options = getHarnessesQuery();
-  if (!refresh && !retryRejected) return queryClient.fetchQuery(options);
   await queryClient.cancelQueries(options);
   const data = await api.getHarnesses(refresh, retryRejected);
   if (isCurrentScope(options.queryKey)) queryClient.setQueryData(options.queryKey, data);
