@@ -385,12 +385,46 @@ async fn stage_source(
                 },
                 Err(error) => last_error = error.to_string(),
             }
+            // An exited script container or pod can never be staged; say why instead of timing out.
+            if let Some(exit) = exited(context, namespace, pod).await {
+                let logs = kubectl(context, &["logs", "-n", namespace, pod, "--tail=20"], None)
+                    .await
+                    .unwrap_or_else(|e| e.to_string());
+                return Err(anyhow!(
+                    "Kubernetes pod {namespace}/{pod} exited ({exit}) before orx could stage \
+                     the source. Last log lines:\n{}",
+                    logs.trim()
+                ));
+            }
         }
         tokio::time::sleep(Duration::from_secs(1)).await;
     }
     Err(anyhow!(
         "Kubernetes source staging timed out for Job {namespace}/{job_name}: {last_error}"
     ))
+}
+
+/// How the pod ended, once its script container (the default container
+/// `prepare_docs` annotates) or the whole pod (e.g. a failed init container) has.
+async fn exited(context: Option<&str>, namespace: &str, pod: &str) -> Option<String> {
+    let json = kubectl(
+        context,
+        &["get", "pod", "-n", namespace, pod, "-o", "json"],
+        None,
+    )
+    .await
+    .ok()?;
+    let pod: Value = serde_json::from_str(&json).ok()?;
+    let script = &pod["metadata"]["annotations"]["kubectl.kubernetes.io/default-container"];
+    let code = pod["status"]["containerStatuses"]
+        .as_array()
+        .and_then(|cs| cs.iter().find(|c| &c["name"] == script))
+        .and_then(|c| c["state"]["terminated"]["exitCode"].as_i64());
+    match (code, pod["status"]["phase"].as_str()) {
+        (Some(code), _) => Some(format!("code {code}")),
+        (None, Some(phase @ ("Failed" | "Succeeded"))) => Some(format!("pod {phase}")),
+        _ => None,
+    }
 }
 
 fn resource_handle(doc: &Value) -> String {
@@ -532,6 +566,19 @@ fn prepare_docs(
     for c in containers.iter_mut() {
         for field in ["command", "args"] {
             if let Some(items) = c[field].as_array() {
+                if let Some(bare) = items
+                    .iter()
+                    .filter_map(Value::as_str)
+                    .find(|s| matches!(s.trim(), "$ORX_SCRIPT" | "${ORX_SCRIPT}"))
+                {
+                    return Err(anyhow!(
+                        "Job '{}' passes `{}` as a bare argument: the shell only word-splits it and \
+                         never runs the script's `;`-separated commands. Use \
+                         command: [\"bash\", \"-c\", \"eval \\\"$ORX_SCRIPT\\\"\"]",
+                        job_name,
+                        bare.trim()
+                    ));
+                }
                 if items
                     .iter()
                     .any(|a| a.as_str().is_some_and(|s| s.contains("ORX_SCRIPT")))
@@ -578,7 +625,7 @@ fn prepare_docs(
     let Some(script_container) = script_container else {
         return Err(anyhow!(
             "no container in Job '{}' runs the experiment: reference the injected script, \
-             e.g. command: [\"bash\", \"-c\", \"$ORX_SCRIPT\"] — it extracts the source snapshot \
+             e.g. command: [\"bash\", \"-c\", \"eval \\\"$ORX_SCRIPT\\\"\"] — it extracts the source snapshot \
              and runs the experiment's fixed run command",
             job_name
         ));
@@ -918,7 +965,7 @@ mod tests {
                         "containers": [{
                             "name": "run",
                             "image": "python:3.12",
-                            "command": ["bash", "-c", "$ORX_SCRIPT"],
+                            "command": ["bash", "-c", "eval \"$ORX_SCRIPT\""],
                         }],
                     },
                 },
@@ -1021,6 +1068,15 @@ mod tests {
         let mut j = job("train");
         j["spec"]["template"]["spec"]["containers"][0]["command"] = json!(["python", "train.py"]);
         assert!(prepare(j).unwrap_err().to_string().contains("ORX_SCRIPT"));
+    }
+
+    #[test]
+    fn bare_script_reference_is_an_error() {
+        for bare in ["$ORX_SCRIPT", "${ORX_SCRIPT}"] {
+            let mut j = job("train");
+            j["spec"]["template"]["spec"]["containers"][0]["command"] = json!(["bash", "-c", bare]);
+            assert!(prepare(j).unwrap_err().to_string().contains("eval"));
+        }
     }
 
     #[test]
