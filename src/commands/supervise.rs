@@ -1645,18 +1645,22 @@ mod tests {
         let mut launcher = open_supervisor_lock(&lock_path).unwrap();
         let submitting = launcher.write().unwrap();
 
-        let supervisor = std::thread::spawn({
+        let (started, ready) = std::sync::mpsc::channel();
+        let (settled, result) = std::sync::mpsc::channel();
+        std::thread::spawn({
             let (dir, lock_path) = (dir.clone(), lock_path.clone());
             move || {
                 let store = Store::open_at(dir).unwrap();
-                settle_submission(&store, "run-1", &lock_path)
-                    .unwrap()
-                    .map(|(_, descriptor)| descriptor.job_id)
+                started.send(()).unwrap();
+                let settled_run = settle_submission(&store, "run-1", &lock_path).unwrap();
+                settled
+                    .send(settled_run.map(|(_, descriptor)| descriptor.job_id))
+                    .unwrap();
             }
         });
-        std::thread::sleep(Duration::from_millis(300));
+        ready.recv().unwrap();
         assert!(
-            !supervisor.is_finished(),
+            result.recv_timeout(Duration::from_millis(300)).is_err(),
             "must not give up while submission is in flight"
         );
         store
@@ -1664,7 +1668,7 @@ mod tests {
             .unwrap();
         drop(submitting);
 
-        assert_eq!(supervisor.join().unwrap(), Some(Some("7".into())));
+        assert_eq!(result.recv().unwrap(), Some(Some("7".into())));
         drop(store);
         let _ = std::fs::remove_dir_all(dir);
     }
