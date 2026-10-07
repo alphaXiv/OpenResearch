@@ -686,11 +686,13 @@ class Image:
     @staticmethod
     def from_registry(tag): return Image()
     def dockerfile_commands(self, *cmds):
-        sys.stderr.write("\n".join(cmds)); return self
+        sys.stderr.write("\n".join(cmds)); Image.with_uv = Image(); return Image.with_uv
 class Sandbox:
     object_id = "sb-1"
     @classmethod
-    def create(cls, *args, **kwargs): return cls()
+    def create(cls, *args, **kwargs):
+        assert kwargs["image"] is Image.with_uv, "sandbox did not get the uv image"
+        return cls()
 "#,
         )
         .unwrap();
