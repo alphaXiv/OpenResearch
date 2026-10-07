@@ -40,10 +40,11 @@ registration. Interactive login requires a terminal and does not support JSON.
 `configure <backend> --clear credentials` removes ORX-saved credentials; process
 environment and provider-owned credential stores can still take precedence.
 
-To change SSH aliases, read `ssh-config show --json` and retain its exact content
-in a private file. Write the modified config using `ssh-config set --file
-<new-file> --previous-file <original-file>`. A stale original is rejected; reread
-and reconcile instead of overwriting someone else's edit.
+To change SSH aliases, read `orx compute ssh-config show --json` and retain its
+exact content in a private file. Write the modified config using
+`orx compute ssh-config set --file <new-file> --previous-file <original-file>`.
+A stale original is rejected; reread and reconcile instead of overwriting
+someone else's edit.
 
 ## Maintain the custom recipe
 

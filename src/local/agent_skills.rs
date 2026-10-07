@@ -711,4 +711,35 @@ mod tests {
             }
         }
     }
+
+    #[test]
+    fn compute_skill_commands_parse() {
+        use clap::Parser;
+        let skill = find("compute", SkillSet::Full).expect("compute skill");
+        let docs = std::iter::once(skill.content).chain(skill.resources.iter().map(|r| r.content));
+        let mut checked = 0;
+        for doc in docs {
+            assert!(
+                !doc.replace("orx compute ssh-config", "")
+                    .contains("ssh-config"),
+                "ssh-config must be written as `orx compute ssh-config`"
+            );
+            let spans = doc.split('`').chain(doc.lines());
+            for span in spans.filter_map(|s| s.trim().strip_prefix("orx compute")) {
+                let command = span.split(" #").next().unwrap_or_default();
+                // Collapse `<multi word placeholder>` into one argument.
+                let mut args = vec!["orx".to_owned(), "compute".to_owned()];
+                for (i, part) in command.split(['<', '>']).enumerate() {
+                    if i % 2 == 1 {
+                        args.push("x".to_owned());
+                    } else {
+                        args.extend(part.split_whitespace().map(str::to_owned));
+                    }
+                }
+                assert!(crate::Cli::try_parse_from(&args).is_ok(), "{args:?}");
+                checked += 1;
+            }
+        }
+        assert!(checked > 20, "only {checked} compute commands checked");
+    }
 }
