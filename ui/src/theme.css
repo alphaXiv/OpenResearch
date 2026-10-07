@@ -125,7 +125,7 @@
   --chat-annotation-highlight: #b8d4ff;
   --selection-background: #e3e3e3;
   --selection-text: #161616;
-  --code-selection: #80808029;
+  --code-selection: var(--selection-background);
   --text: #1d1b1a;
   --subtext: #737373;
   --muted: #a1a1a1;
@@ -220,7 +220,7 @@
   --chat-annotation-highlight: #244e7a;
   --selection-background: #606060;
   --selection-text: #ffffff;
-  --code-selection: #b0b0b04d;
+  --code-selection: var(--selection-background);
   --text: #e6e1e0;
   --subtext: #a68e8b;
   --muted: #737373;

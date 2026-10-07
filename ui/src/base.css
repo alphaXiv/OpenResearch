@@ -38,8 +38,7 @@ code ::selection {
   background: var(--code-selection);
 }
 
-/* The editor stacks a transparent textarea over the highlighted code, so an
-   opaque selection would paint out the tokens underneath it. */
+/* Highlighted code is painted above the textarea's native selection. */
 .file-view-editarea::selection {
   color: transparent;
   background: var(--editor-selection);

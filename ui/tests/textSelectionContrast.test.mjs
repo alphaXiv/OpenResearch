@@ -98,6 +98,7 @@ test("diff drag selection preserves syntax foregrounds on the shared code highli
   assert.ok(diff.includes("--diff-selection-text-color:var(--text)"));
   assert.ok(!diff.includes("--diff-selection-text-color:var(--primary)"));
   assert.ok(theme.includes("--editor-selection: var(--code-selection)"));
+  assert.ok(theme.includes("--code-selection: var(--selection-background)"));
 });
 
 test("code selection preserves each token's foreground rather than inheriting prose colors", () => {

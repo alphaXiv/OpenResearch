@@ -1,4 +1,4 @@
-// Inline source editor: a transparent <textarea> layered over the same
+// Inline source editor: a transparent <textarea> beneath the same
 // refractor-highlighted lines CodeView renders read-only, so syntax colors stay
 // live while typing. It IS the view for editable files — there's no separate
 // mode, you just click and type. The textarea owns input, caret and selection;
@@ -120,7 +120,7 @@ export function CodeEditor({
   const layerClassName = `absolute inset-0 m-0 py-3.5 pe-4 ${CODE_TEXT_CLASS_NAME} ${CODE_WRAP_CLASS_NAME} [scrollbar-gutter:stable]`;
 
   return (
-    <div className={`file-view-editwrap relative h-full min-h-0 ${CODE_TEXT_CLASS_NAME}`}>
+    <div className={`file-view-editwrap relative isolate h-full min-h-0 ${CODE_TEXT_CLASS_NAME}`}>
       <div
         className="absolute start-0 top-0 bottom-0 border-e border-e-border-variant pointer-events-none"
         style={{ width: `${ruleCh}ch` }}
@@ -128,7 +128,7 @@ export function CodeEditor({
      />
       <div
         ref={overlayRef}
-        className={`file-view-code ${layerClassName} overflow-hidden pointer-events-none`}
+        className={`file-view-code ${layerClassName} z-10 overflow-hidden pointer-events-none`}
         aria-hidden="true"
       >
         {lines.map((line, i) => (
