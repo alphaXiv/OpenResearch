@@ -933,7 +933,7 @@
   "settings_oauth_login": "OAuth (구독 로그인)",
   "settings_not_found_on_path": "PATH에서 찾지 못함",
   "settings_providers": "제공업체",
-  "settings_models_available": "사용 가능한 모델 {count}개 — {models}",
+  "settings_models_available": "사용 가능한 모델 {count}개",
   "settings_none": "없음",
   "settings_kubectl_default": "현재 kubectl 컨텍스트 사용",
   "settings_kubectl_default_context": "현재 컨텍스트 사용 ({context})",
