@@ -15,7 +15,6 @@
   "settings_environment_tab": "تبويب البيئة",
   "settings_cpu_cores": "أنوية المعالج: {count}",
   "settings_gpu_count": "معالج رسومات × {count}",
-  "$schema": "https://inlang.com/schema/inlang-message-format",
   "app_close_panel": "إغلاق اللوحة",
   "app_current_task": "المهمة الحالية",
   "app_entire_project": "المشروع بالكامل",
@@ -1278,5 +1277,10 @@
   "sidebar_reveal_project": "إظهار في Finder",
   "sidebar_filter": "تصفية",
   "sidebar_group_by": "تجميع حسب",
-  "sidebar_one_list": "في قائمة واحدة"
+  "sidebar_one_list": "في قائمة واحدة",
+  "mermaid_show_source": "إظهار الشيفرة",
+  "mermaid_show_diagram": "إظهار المخطط",
+  "mermaid_could_not_render": "تعذّر عرض هذا المخطط: {error}",
+  "mermaid_not_a_diagram": "ليس مخططًا — يتم عرض الشيفرة بدلًا منه.",
+  "$schema": "https://inlang.com/schema/inlang-message-format"
 }

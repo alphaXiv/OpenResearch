@@ -15,7 +15,6 @@
   "settings_environment_tab": "Environment tab",
   "settings_cpu_cores": "CPU cores: {count}",
   "settings_gpu_count": "GPU × {count}",
-  "$schema": "https://inlang.com/schema/inlang-message-format",
   "app_close_panel": "Close panel",
   "app_current_task": "Current task",
   "app_entire_project": "Entire project",
@@ -1278,5 +1277,10 @@
   "sidebar_reveal_project": "Reveal in Finder",
   "sidebar_filter": "Filter",
   "sidebar_group_by": "Group by",
-  "sidebar_one_list": "In one list"
+  "sidebar_one_list": "In one list",
+  "mermaid_show_source": "Show source",
+  "mermaid_show_diagram": "Show diagram",
+  "mermaid_could_not_render": "This diagram could not be rendered: {error}",
+  "mermaid_not_a_diagram": "Not a diagram — showing the source instead.",
+  "$schema": "https://inlang.com/schema/inlang-message-format"
 }

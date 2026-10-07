@@ -30,6 +30,8 @@ import {
 } from "../api";
 import { CodeView } from "./CodeView";
 import { FileTypeIcon, isMarkdownFile } from "./FileTypeIcon";
+import { MermaidDiagram } from "./Mermaid";
+import { isMermaidFile } from "../mermaid";
 import { MediaPreview, mediaPreviewKind, type MediaPreviewKind } from "./MediaPreview";
 import { MediaToolbarSlot } from "./mediaToolbar";
 import { normalizeMarkdownForRendering } from "../markdownNormalization";
@@ -200,9 +202,12 @@ export function ArtifactMarkdown({
   );
 }
 
-type PreviewKind = "markdown" | MediaPreviewKind | "text" | "download";
+type PreviewKind = "markdown" | "mermaid" | MediaPreviewKind | "text" | "download";
 
 function previewKind(entry: ArtifactEntry): PreviewKind {
+  // A .mmd artifact is a diagram, not prose: without this it fell through to
+  // "text" and opened in the code view while the same file drew in a file tab.
+  if (entry.presentation === "text" && isMermaidFile(entry.name)) return "mermaid";
   if (entry.presentation === "text" && isMarkdownFile(entry.name)) return "markdown";
   return mediaPreviewKind(entry.presentation) ??
     (entry.presentation === "text" || entry.presentation === "unknown" ? "text" : "download");
@@ -210,7 +215,8 @@ function previewKind(entry: ArtifactEntry): PreviewKind {
 
 /** Fetched body for kinds that need text: markdown or raw text. */
 function useTextBody(projectId: string, entry: ArtifactEntry, kind: PreviewKind, version: string | null) {
-  const wantsText = kind === "markdown" || (kind === "text" && entry.size <= FILE_PREVIEW_BYTES);
+  const wantsText =
+    kind === "markdown" || kind === "mermaid" || (kind === "text" && entry.size <= FILE_PREVIEW_BYTES);
   const options = getArtifactFileTextQuery(projectId, entry.path);
   const query = useQuery({ ...options, enabled: wantsText, subscribed: wantsText });
   const previous = useRef({ projectId, path: entry.path, modifiedAt: entry.modifiedAt, size: entry.size, version });
@@ -251,6 +257,8 @@ function PreviewPane({
   const [showSource, setShowSource] = useState(false);
   const [mediaToolbarSlot, setMediaToolbarSlot] = useState<HTMLDivElement | null>(null);
   const isDoc = kind === "markdown";
+  // Same "rendered or source" control as markdown, so it is not missing for .mmd.
+  const rendersByDefault = isDoc || kind === "mermaid";
   const mdFolder = entry.path.split("/").slice(0, -1).join("/");
   const rawUrl = `${artifactUrl(projectId, entry.path)}&v=${encodeURIComponent(version ?? `${entry.modifiedAt}:${entry.size}`)}`;
 
@@ -285,6 +293,12 @@ function PreviewPane({
         <Spinner /> {m.artifacts_tab_loading()}
       </LoadingRow>
     );
+  } else if (kind === "mermaid" && !showSource) {
+    body = (
+      <div className="p-5">
+        <MermaidDiagram code={text} />
+      </div>
+    );
   } else if (isDoc && !showSource) {
     body = <ArtifactMarkdown projectId={projectId} folder={mdFolder} markdown={text} entries={artifactEntries} />;
   } else {
@@ -310,7 +324,7 @@ function PreviewPane({
         {(kind === "text" || kind === "download") && (
           <span className="fpreview-size text-xs text-muted whitespace-nowrap shrink-0">{fmtBytes(entry.size)}</span>
         )}
-        {isDoc && (
+        {rendersByDefault && (
           <IconButton
             size="small"
             active={showSource}

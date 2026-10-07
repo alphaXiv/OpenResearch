@@ -15,7 +15,6 @@
   "settings_environment_tab": "زبانهٔ محیط",
   "settings_cpu_cores": "{count} هستهٔ CPU",
   "settings_gpu_count": "{count} پردازندهٔ گرافیکی",
-  "$schema": "https://inlang.com/schema/inlang-message-format",
   "app_close_panel": "بستن پنل",
   "app_current_task": "وظیفهٔ فعلی",
   "app_entire_project": "کل پروژه",
@@ -1278,5 +1277,10 @@
   "sidebar_reveal_project": "نمایش در Finder",
   "sidebar_filter": "فیلتر",
   "sidebar_group_by": "گروه‌بندی بر اساس",
-  "sidebar_one_list": "در یک فهرست"
+  "sidebar_one_list": "در یک فهرست",
+  "mermaid_show_source": "نمایش کد مبدأ",
+  "mermaid_show_diagram": "نمایش نمودار",
+  "mermaid_could_not_render": "این نمودار رندر نشد: {error}",
+  "mermaid_not_a_diagram": "نمودار نیست — به‌جای آن کد مبدأ نمایش داده می‌شود.",
+  "$schema": "https://inlang.com/schema/inlang-message-format"
 }

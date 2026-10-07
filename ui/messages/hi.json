@@ -15,7 +15,6 @@
   "settings_environment_tab": "एनवायरनमेंट टैब",
   "settings_cpu_cores": "CPU कोर: {count}",
   "settings_gpu_count": "GPU × {count}",
-  "$schema": "https://inlang.com/schema/inlang-message-format",
   "app_close_panel": "पैनल बंद करें",
   "app_current_task": "मौजूदा टास्क",
   "app_entire_project": "पूरा प्रोजेक्ट",
@@ -1278,5 +1277,10 @@
   "sidebar_reveal_project": "Finder में दिखाएँ",
   "sidebar_filter": "फ़िल्टर",
   "sidebar_group_by": "समूह बनाएँ",
-  "sidebar_one_list": "एक सूची में"
+  "sidebar_one_list": "एक सूची में",
+  "mermaid_show_source": "स्रोत दिखाएँ",
+  "mermaid_show_diagram": "आरेख दिखाएँ",
+  "mermaid_could_not_render": "यह आरेख प्रदर्शित नहीं हो सका: {error}",
+  "mermaid_not_a_diagram": "यह आरेख नहीं है — इसके बजाय स्रोत दिखाया जा रहा है।",
+  "$schema": "https://inlang.com/schema/inlang-message-format"
 }

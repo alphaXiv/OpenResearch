@@ -15,7 +15,6 @@
   "settings_environment_tab": "환경 탭",
   "settings_cpu_cores": "CPU 코어: {count}",
   "settings_gpu_count": "GPU × {count}",
-  "$schema": "https://inlang.com/schema/inlang-message-format",
   "app_close_panel": "패널 닫기",
   "app_current_task": "현재 작업",
   "app_entire_project": "전체 프로젝트",
@@ -1278,5 +1277,10 @@
   "sidebar_reveal_project": "Finder에서 표시",
   "sidebar_filter": "필터",
   "sidebar_group_by": "그룹화 기준",
-  "sidebar_one_list": "단일 목록"
+  "sidebar_one_list": "단일 목록",
+  "mermaid_show_source": "소스 보기",
+  "mermaid_show_diagram": "다이어그램 보기",
+  "mermaid_could_not_render": "이 다이어그램을 렌더링할 수 없습니다: {error}",
+  "mermaid_not_a_diagram": "다이어그램이 아닙니다 — 대신 소스를 표시합니다.",
+  "$schema": "https://inlang.com/schema/inlang-message-format"
 }

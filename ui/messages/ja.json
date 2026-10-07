@@ -15,7 +15,6 @@
   "settings_environment_tab": "環境タブ",
   "settings_cpu_cores": "CPU コア: {count}",
   "settings_gpu_count": "GPU × {count}",
-  "$schema": "https://inlang.com/schema/inlang-message-format",
   "app_close_panel": "パネルを閉じる",
   "app_current_task": "現在のタスク",
   "app_entire_project": "プロジェクト全体",
@@ -1278,5 +1277,10 @@
   "sidebar_reveal_project": "Finder で表示",
   "sidebar_filter": "フィルター",
   "sidebar_group_by": "グループ分け",
-  "sidebar_one_list": "1 つの一覧"
+  "sidebar_one_list": "1 つの一覧",
+  "mermaid_show_source": "ソースを表示",
+  "mermaid_show_diagram": "図を表示",
+  "mermaid_could_not_render": "この図をレンダリングできませんでした: {error}",
+  "mermaid_not_a_diagram": "図ではありません — 代わりにソースを表示します。",
+  "$schema": "https://inlang.com/schema/inlang-message-format"
 }

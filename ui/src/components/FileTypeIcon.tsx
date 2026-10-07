@@ -1,4 +1,5 @@
 import type { ReactNode } from "react";
+import { isMermaidFile } from "../mermaid";
 
 const MD_RE = /\.(md|mdx|markdown)$/i;
 const LATEX_RE = /\.tex$/i;
@@ -29,19 +30,21 @@ export function isHtmlFile(name: string): boolean {
 export function FileTypeIcon({ name }: { name: string }) {
   const kind = isMarkdownFile(name)
     ? "markdown"
-    : isImageFile(name)
-      ? "image"
-      : SPREADSHEET_RE.test(name)
-        ? "spreadsheet"
-        : CODE_RE.test(name)
-          ? "code"
-          : ARCHIVE_RE.test(name)
-            ? "archive"
-            : PDF_RE.test(name)
-              ? "pdf"
-              : DOCUMENT_RE.test(name) || isLatexFile(name)
-                ? "document"
-                : "file";
+    : isMermaidFile(name)
+      ? "mermaid"
+      : isImageFile(name)
+        ? "image"
+        : SPREADSHEET_RE.test(name)
+          ? "spreadsheet"
+          : CODE_RE.test(name)
+            ? "code"
+            : ARCHIVE_RE.test(name)
+              ? "archive"
+              : PDF_RE.test(name)
+                ? "pdf"
+                : DOCUMENT_RE.test(name) || isLatexFile(name)
+                  ? "document"
+                  : "file";
 
   let glyph: ReactNode;
   if (kind === "markdown") {
@@ -49,6 +52,15 @@ export function FileTypeIcon({ name }: { name: string }) {
       <>
         <path d="M1 3h14v10H1z" fill="currentColor" opacity=".18" />
         <path d="M2.6 10.5v-5h1.2l1.6 2 1.6-2h1.2v5H6.8V7.6L5.4 9.3 4 7.6v2.9H2.6Zm8.5-5v2.4h1.3L10.5 10 8.6 7.9h1.3V5.5h1.2Z" fill="currentColor" />
+      </>
+    );
+  } else if (kind === "mermaid") {
+    glyph = (
+      <>
+        <rect x="1.5" y="2" width="13" height="12" rx="2" fill="currentColor" opacity=".18" />
+        <circle cx="5" cy="5.5" r="1.5" fill="currentColor" />
+        <circle cx="11" cy="10.5" r="1.5" fill="currentColor" />
+        <path d="M6.1 6.6 9.9 9.4" stroke="currentColor" strokeWidth="1.2" />
       </>
     );
   } else if (kind === "image") {
@@ -86,7 +98,7 @@ export function FileTypeIcon({ name }: { name: string }) {
   }
 
   return (
-    <svg className={`file-tree-icon w-[15px] h-[15px] shrink-0 text-muted overflow-visible [&.markdown]:text-accent-blue [&.image]:text-accent-purple [&.spreadsheet]:text-accent-green [&.code]:text-accent-orange [&.archive]:text-accent-amber [&.pdf]:text-accent-red [&.document]:text-subtext ${kind}`} viewBox="0 0 16 16" aria-hidden="true">
+    <svg className={`file-tree-icon w-[15px] h-[15px] shrink-0 text-muted overflow-visible [&.markdown]:text-accent-blue [&.mermaid]:text-accent-teal [&.image]:text-accent-purple [&.spreadsheet]:text-accent-green [&.code]:text-accent-orange [&.archive]:text-accent-amber [&.pdf]:text-accent-red [&.document]:text-subtext ${kind}`} viewBox="0 0 16 16" aria-hidden="true">
       {glyph}
     </svg>
   );

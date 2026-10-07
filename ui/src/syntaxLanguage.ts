@@ -1,6 +1,7 @@
 const LANGUAGE_ALIASES: Record<string, string> = {
   cjs: "javascript", console: "bash", cts: "typescript", fish: "bash",
   html: "markup", js: "javascript", jsx: "javascript", md: "markdown",
+  mmd: "mermaid",
   mjs: "javascript", mts: "typescript", py: "python", rb: "ruby",
   sh: "bash", shell: "bash", svg: "markup", terminal: "bash",
   ts: "typescript", tsx: "typescript", xml: "markup", yml: "yaml", zsh: "bash",

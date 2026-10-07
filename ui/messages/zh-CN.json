@@ -15,7 +15,6 @@
   "settings_environment_tab": "环境标签页",
   "settings_cpu_cores": "{count} 个 CPU 核心",
   "settings_gpu_count": "{count} 个 GPU",
-  "$schema": "https://inlang.com/schema/inlang-message-format",
   "app_close_panel": "关闭面板",
   "app_current_task": "当前任务",
   "app_entire_project": "整个项目",
@@ -1278,5 +1277,10 @@
   "sidebar_reveal_project": "在访达中显示",
   "sidebar_filter": "筛选",
   "sidebar_group_by": "分组方式",
-  "sidebar_one_list": "单一列表"
+  "sidebar_one_list": "单一列表",
+  "mermaid_show_source": "显示源代码",
+  "mermaid_show_diagram": "显示图表",
+  "mermaid_could_not_render": "无法渲染此图表：{error}",
+  "mermaid_not_a_diagram": "不是图表 — 已改为显示源代码。",
+  "$schema": "https://inlang.com/schema/inlang-message-format"
 }

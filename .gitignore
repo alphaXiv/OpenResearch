@@ -23,3 +23,7 @@ Claude.local.md
 
 # This repo uses pnpm; ignore an accidental npm lockfile
 ui/package-lock.json
+
+# Python bytecode from scripts/test_release_notes.py
+__pycache__/
+*.pyc
