@@ -8,6 +8,7 @@
 pub mod huggingface;
 pub mod kubernetes;
 pub mod localbox;
+mod managed_env;
 pub mod modal;
 pub mod openresearch;
 pub mod ray;

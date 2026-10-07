@@ -21,6 +21,7 @@ use std::time::Duration;
 use serde_json::{json, Value};
 use tokio::process::Command;
 
+use super::managed_env::ManagedEnv;
 use crate::error::{anyhow, Result};
 
 /// Bundled Python launcher. Subcommands (argv[1]):
@@ -116,21 +117,15 @@ else:
     sys.exit(2)
 "#;
 
-/// Directory of the orx-managed Modal environment (a venv with `modal` in it),
-/// under orx's config dir alongside `k8s.json`.
-fn managed_env_dir() -> PathBuf {
-    crate::config::config_dir().join("envs").join("modal")
-}
-
-/// The interpreter inside the managed env (may not exist until `ensure_env`).
-fn managed_python() -> PathBuf {
-    let dir = managed_env_dir();
-    if cfg!(windows) {
-        dir.join("Scripts").join("python.exe")
-    } else {
-        dir.join("bin").join("python")
-    }
-}
+/// `Sandbox.create(tags=...)` arrived in modal 1.4.3, which requires Python 3.10.
+const MODAL_ENV: ManagedEnv = ManagedEnv {
+    name: "modal",
+    label: "Modal",
+    min_python: (3, 10),
+    requirement: "modal>=1.4.3",
+    ready_check:
+        "import inspect, modal; assert 'tags' in inspect.signature(modal.Sandbox.create).parameters",
+};
 
 /// The Python interpreter the launcher runs with — resolved with NO side
 /// effects, so it's safe to call from the detached supervisor:
@@ -143,43 +138,11 @@ fn python_bin() -> String {
             return p;
         }
     }
-    let managed = managed_python();
+    let managed = MODAL_ENV.python();
     if managed.exists() {
         return managed.to_string_lossy().into_owned();
     }
     "python3".to_string()
-}
-
-/// Does `py -c "import modal"` succeed?
-async fn imports_modal(py: &str) -> bool {
-    Command::new(py)
-        .args(["-c", "import modal"])
-        .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .status()
-        .await
-        .map(|s| s.success())
-        .unwrap_or(false)
-}
-
-/// First interpreter on PATH that can build a venv (to bootstrap the managed env).
-async fn base_python() -> Option<String> {
-    for c in ["python3", "python"] {
-        let ok = Command::new(c)
-            .args(["-c", "import venv"])
-            .stdin(Stdio::null())
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .status()
-            .await
-            .map(|s| s.success())
-            .unwrap_or(false);
-        if ok {
-            return Some(c.to_string());
-        }
-    }
-    None
 }
 
 /// Ensure a usable Modal interpreter exists, provisioning the orx-managed venv
@@ -192,64 +155,12 @@ pub async fn ensure_env() -> Result<()> {
     if std::env::var("ORX_MODAL_PYTHON").is_ok_and(|p| !p.trim().is_empty()) {
         return Ok(()); // explicit override — trust it, don't provision
     }
-    let managed = managed_python();
-    let managed_str = managed.to_string_lossy().into_owned();
-    if managed.exists() && imports_modal(&managed_str).await {
-        return Ok(()); // already provisioned and healthy
-    }
-    let base = base_python().await.ok_or_else(|| {
+    MODAL_ENV.ensure().await.map_err(|e| {
         anyhow!(
-            "No Python 3 found to build the Modal environment. Install Python 3 (it ships with \
-             `venv`), or set ORX_MODAL_PYTHON to an interpreter that already has `modal`."
+            "{e} Or set ORX_MODAL_PYTHON to an interpreter with {}.",
+            MODAL_ENV.requirement
         )
     })?;
-    let dir = managed_env_dir();
-    if !managed.exists() {
-        eprintln!(
-            "orx: provisioning the Modal environment at {} (one-time, ~30–60s)…",
-            dir.display()
-        );
-        if let Some(parent) = dir.parent() {
-            let _ = std::fs::create_dir_all(parent);
-        }
-        let ok = Command::new(&base)
-            .arg("-m")
-            .arg("venv")
-            .arg(&dir)
-            .status()
-            .await
-            .map(|s| s.success())
-            .unwrap_or(false);
-        if !ok {
-            return Err(anyhow!(
-                "Could not create a virtualenv at {} with {}.",
-                dir.display(),
-                base
-            ));
-        }
-    }
-    eprintln!("orx: installing the `modal` SDK…");
-    let ok = Command::new(&managed_str)
-        .args([
-            "-m",
-            "pip",
-            "install",
-            "--quiet",
-            "--disable-pip-version-check",
-            "modal",
-        ])
-        .status()
-        .await
-        .map(|s| s.success())
-        .unwrap_or(false);
-    if !ok || !imports_modal(&managed_str).await {
-        return Err(anyhow!(
-            "Built the Modal environment but `import modal` still fails. Remove {} and relaunch, \
-             or set ORX_MODAL_PYTHON to a working interpreter.",
-            dir.display()
-        ));
-    }
-    eprintln!("orx: Modal environment ready.");
     Ok(())
 }
 
@@ -541,7 +452,7 @@ pub async fn preflight() -> Result<()> {
              ORX_MODAL_PYTHON to an interpreter that has it.",
             python_bin(),
             s.error.as_deref().unwrap_or("import modal failed"),
-            managed_env_dir().display()
+            MODAL_ENV.dir().display()
         ));
     }
     if !s.token_configured {
@@ -699,5 +610,35 @@ mod credential_tests {
         let ambiguous: toml::Table = "[one]\n[other]".parse().unwrap();
         assert!(token_profile(&ambiguous, None).is_err());
         assert!(token_profile(&toml::Table::new(), None).unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn managed_env_rejects_modal_without_sandbox_tags() {
+        let Ok(python) =
+            crate::jobs::managed_env::base_python(MODAL_ENV.min_python, MODAL_ENV.label).await
+        else {
+            eprintln!("skipped: no Python 3.10+ on PATH");
+            return;
+        };
+        for (params, ready) in [
+            ("*args, app=None", false),
+            ("*args, app=None, tags=None", true),
+        ] {
+            let dir = std::env::temp_dir().join(format!("orx-modal-env-{}", uuid::Uuid::new_v4()));
+            std::fs::create_dir_all(dir.join("modal")).unwrap();
+            std::fs::write(
+                dir.join("modal").join("__init__.py"),
+                format!("class Sandbox:\n    @classmethod\n    def create(cls, {params}):\n        pass\n"),
+            )
+            .unwrap();
+            let status = std::process::Command::new(python)
+                .args(["-c", MODAL_ENV.ready_check])
+                .env("PYTHONPATH", &dir)
+                .stderr(Stdio::null())
+                .status()
+                .unwrap();
+            let _ = std::fs::remove_dir_all(&dir);
+            assert_eq!(status.success(), ready, "create({params})");
+        }
     }
 }
