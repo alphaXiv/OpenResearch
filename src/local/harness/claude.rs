@@ -502,6 +502,18 @@ fn has_api_credential() -> bool {
         .any(|key| super::detect::api_key(key).is_some())
 }
 
+/// Turn Claude's private billing enum into a stable user-facing label. Unknown
+/// values are deliberately hidden: exposing a new server-side enum verbatim is
+/// both confusing and makes the dashboard depend on an undocumented contract.
+fn billing_label(value: Option<&str>) -> Option<String> {
+    match value {
+        Some("stripe_subscription" | "stripe_subscription_contracted") => {
+            Some("Subscription".to_string())
+        }
+        _ => None,
+    }
+}
+
 /// One headless request on a throwaway `claude -p` child, mirroring how
 /// Claude Code titles its own conversations with a cheap background model.
 /// Deliberately *not* the session's resident child — a request there would
@@ -669,11 +681,7 @@ impl ClaudeCode {
                     {
                         info.account = nonempty_str(&acct, "emailAddress");
                         info.org = nonempty_str(&acct, "organizationName");
-                        info.plan = match nonempty_str(&acct, "billingType").as_deref() {
-                            Some("stripe_subscription") => Some("Subscription".to_string()),
-                            Some(other) => Some(other.to_string()),
-                            None => None,
-                        };
+                        info.plan = billing_label(nonempty_str(&acct, "billingType").as_deref());
                     }
                 }
             }
@@ -2520,6 +2528,20 @@ mod tests {
         // No manifest at all is no plugins, not an error.
         assert!(installed_plugin_skills_dirs(&home.join("nope")).is_empty());
         let _ = std::fs::remove_dir_all(&home);
+    }
+
+    #[test]
+    fn billing_labels_hide_private_enums() {
+        assert_eq!(
+            billing_label(Some("stripe_subscription")),
+            Some("Subscription".to_string())
+        );
+        assert_eq!(
+            billing_label(Some("stripe_subscription_contracted")),
+            Some("Subscription".to_string())
+        );
+        assert_eq!(billing_label(Some("future_internal_value")), None);
+        assert_eq!(billing_label(None), None);
     }
 
     /// A `list_models` response in the live 2.1.212 shape (fields we don't
