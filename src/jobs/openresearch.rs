@@ -27,7 +27,7 @@ pub fn run_dir(run_id: &str) -> String {
 
 /// Parse `--flavor` into a `POST /sandboxes` target: `<gpu_id>[:count]`
 /// (e.g. `h100_sxm:2`) or a CPU flavor `cpu…[:vcpus]` (e.g. `cpu5c:8`).
-/// Ids are validated server-side against the live catalog (400 on unknown),
+/// Case-insensitive: the API's GPU ids are uppercase and its CPU flavors lowercase.
 /// See `orx compute` for the provider catalog.
 pub fn parse_flavor(flavor: &str, disk_gb: i64, provider: Option<String>) -> Result<SandboxTarget> {
     let flavor = flavor.trim();
@@ -49,14 +49,14 @@ pub fn parse_flavor(flavor: &str, disk_gb: i64, provider: Option<String>) -> Res
              like cpu5c[:vcpus] — see `orx compute`."
         ));
     }
-    if base.starts_with("cpu") {
+    if base.to_ascii_lowercase().starts_with("cpu") {
         Ok(SandboxTarget::NewCpu {
-            cpu_flavor: base.to_string(),
+            cpu_flavor: base.to_ascii_lowercase(),
             vcpu_count: count.unwrap_or(8),
         })
     } else {
         Ok(SandboxTarget::New {
-            gpu: base.to_string(),
+            gpu: base.to_ascii_uppercase(),
             gpu_count: count.unwrap_or(1),
             disk_gb,
             provider,
@@ -223,13 +223,23 @@ mod tests {
                 disk_gb,
                 provider,
             } => {
-                assert_eq!(gpu, "h100_sxm");
+                assert_eq!(gpu, "H100_SXM");
                 assert_eq!(gpu_count, 1);
                 assert_eq!(disk_gb, 100);
                 assert!(provider.is_none());
             }
             other => panic!("wrong target: {other:?}"),
         }
+    }
+
+    #[test]
+    fn parse_flavor_sends_uppercase_gpu_id() {
+        let body = crate::client::CreateSandboxBody {
+            organization_id: "org".into(),
+            target: parse_flavor("rtx_3090", 100, None).unwrap(),
+        };
+        let body = serde_json::to_value(&body).unwrap();
+        assert_eq!(body["target"]["gpu"], "RTX_3090");
     }
 
     #[test]
@@ -241,7 +251,7 @@ mod tests {
                 disk_gb,
                 provider,
             } => {
-                assert_eq!(gpu, "h100_sxm");
+                assert_eq!(gpu, "H100_SXM");
                 assert_eq!(gpu_count, 2);
                 assert_eq!(disk_gb, 250);
                 assert_eq!(provider.as_deref(), Some("runpod"));

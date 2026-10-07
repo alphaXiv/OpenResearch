@@ -681,7 +681,7 @@
   "desktop_app_banner_text": "OpenResearch is now a desktop app. Your projects open there as they are, with no terminal to keep running.",
   "desktop_app_banner_download": "Download the app",
   "desktop_app_banner_dismiss": "Dismiss",
-  "update_banner_complete": "Updated to {version}. Restart to use it.",
+  "update_banner_complete": "OpenResearch {version} is ready. Restart to switch to it.",
   "update_banner_restart": "Restart now",
   "update_banner_restarting": "Restarting…",
   "update_banner_restart_failed": "Could not restart: {error}",

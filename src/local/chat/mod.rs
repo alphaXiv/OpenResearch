@@ -3304,7 +3304,9 @@ impl ChatHost {
             opencode,
             codex,
             claude,
-            http: reqwest::Client::new(),
+            http: crate::net::loopback_client()
+                .build()
+                .expect("loopback http client"),
             events,
             turns: Mutex::new(HashMap::new()),
             durable_turns: std::sync::Mutex::new(HashMap::new()),

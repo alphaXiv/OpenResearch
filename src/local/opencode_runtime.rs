@@ -315,7 +315,7 @@ pub(crate) async fn start_server(
     cmd.process_group(0);
     binary.check_unchanged()?;
     let mut child = crate::local::harness::spawn_retrying_busy(|| cmd.spawn())?;
-    let client = reqwest::Client::builder()
+    let client = crate::net::loopback_client()
         .default_headers(headers)
         .build()?;
     let ready = async {
@@ -612,7 +612,7 @@ mod tests {
             let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
             let mut endpoint = AgentEndpoint {
                 base_url: format!("http://{}", listener.local_addr().unwrap()),
-                client: reqwest::Client::new(),
+                client: crate::net::loopback_client().build().unwrap(),
                 protocol,
                 legacy_v2_api: false,
             };
