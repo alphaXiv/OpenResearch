@@ -5642,6 +5642,7 @@ async fn send_ssh_connect_error(
                 .into(),
         ))
         .await;
+    close_socket(socket).await;
 }
 
 pub(crate) async fn ssh_connect(
@@ -5881,6 +5882,7 @@ async fn ssh_connect_socket(
         if let Some(test) = ssh_test {
             record_ssh_host_test(&test).await;
         }
+        close_socket(&mut socket).await;
     }
 }
 
@@ -6015,6 +6017,7 @@ async fn project_terminal(
             Ok(status) => {
                 let message = json!({ "type": "exit", "code": status.exit_code() });
                 let _ = socket.send(Message::Text(message.to_string().into())).await;
+                close_socket(&mut socket).await;
             }
             Err(error) => send_terminal_error(&mut socket, anyhow!(error)).await,
         }
@@ -6158,7 +6161,6 @@ async fn command_terminal(
             Ok(session) => session,
             Err(error) => {
                 send_terminal_error(&mut socket, error).await;
-                close_socket(&mut socket).await;
                 return;
             }
         };
@@ -6221,7 +6223,9 @@ async fn continue_in_shell(
     let (shell, args) = interactive_shell();
     match spawn_pty(shell, args, env, *size).await {
         Ok(session) => {
-            relay_pty(socket, session, None, size, None).await;
+            if relay_pty(socket, session, None, size, None).await.is_some() {
+                close_socket(socket).await;
+            }
         }
         Err(error) => send_terminal_error(socket, error).await,
     }
@@ -6245,6 +6249,7 @@ async fn send_terminal_error(socket: &mut WebSocket, error: anyhow::Error) {
                 .into(),
         ))
         .await;
+    close_socket(socket).await;
 }
 
 async fn remote_sessions(State(state): State<AppState>) -> Json<Value> {
