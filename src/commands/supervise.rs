@@ -27,7 +27,9 @@ const LOG_IDLE: Duration = Duration::from_secs(30);
 /// How long monitoring must keep failing before it is reported on the run.
 const MONITORING_GRACE: Duration = Duration::from_secs(60);
 
-fn open_supervisor_lock(path: &std::path::Path) -> Result<fd_lock::RwLock<std::fs::File>> {
+pub(crate) fn open_supervisor_lock(
+    path: &std::path::Path,
+) -> Result<fd_lock::RwLock<std::fs::File>> {
     let file = std::fs::OpenOptions::new()
         .create(true)
         .truncate(false)
@@ -81,6 +83,38 @@ impl RunLog {
     }
 }
 
+/// Held by `compute::submit` from reserving the run until submission returns.
+pub(crate) fn submission_lock_path(run_id: &str) -> std::path::PathBuf {
+    log_path(run_id).with_extension("submit.lock")
+}
+
+/// The live run and its descriptor, or `None` once terminal. A run without a
+/// handle first waits for a launcher still submitting, so a cancel landing
+/// mid-submission reaches the job instead of orphaning it.
+fn settle_submission(
+    store: &Store,
+    run_id: &str,
+    lock_path: &std::path::Path,
+) -> Result<Option<(crate::store::StoredRun, BackendDescriptor)>> {
+    let load = || -> Result<Option<(crate::store::StoredRun, BackendDescriptor)>> {
+        let stored = store
+            .get_run(run_id)?
+            .ok_or_else(|| anyhow!("Run {} not found in the local store.", run_id))?;
+        if status_of(&stored)?.is_terminal() {
+            return Ok(None);
+        }
+        let descriptor = BackendDescriptor::parse(&stored.backend_json)?;
+        Ok(Some((stored, descriptor)))
+    };
+    match load()? {
+        Some((_, descriptor)) if descriptor.job_id.is_none() => {
+            drop(open_supervisor_lock(lock_path)?.write()?);
+            load()
+        }
+        loaded => Ok(loaded),
+    }
+}
+
 pub async fn run(args: crate::SuperviseArgs) -> Result<()> {
     let run_id = args.run_id;
 
@@ -92,18 +126,16 @@ pub async fn run(args: crate::SuperviseArgs) -> Result<()> {
         Err(err) if err.kind() == std::io::ErrorKind::WouldBlock => return Ok(()),
         Err(err) => return Err(err.into()),
     };
-    let stored = store
-        .get_run(&run_id)?
-        .ok_or_else(|| anyhow!("Run {} not found in the local store.", run_id))?;
-    if status_of(&stored)?.is_terminal() {
+    let Some((stored, mut descriptor)) =
+        settle_submission(&store, &run_id, &submission_lock_path(&run_id))?
+    else {
         return Ok(());
-    }
+    };
     if store.get_local_experiment(&stored.experiment_id)?.is_none() {
         return Err(anyhow!(
             "Run {run_id} does not belong to a local orx experiment."
         ));
     }
-    let mut descriptor = BackendDescriptor::parse(&stored.backend_json)?;
     if descriptor.job_id.is_none() {
         if let Some(recovered) = crate::compute::recover_submission_handle(&run_id)? {
             store.set_backend_json(&run_id, &recovered.to_json())?;
@@ -1585,6 +1617,56 @@ mod tests {
         assert!(interrupted.is_none());
         let drained = log_pass(&mut rx, true, async { Ok(7) }).await;
         assert_eq!(drained.unwrap().unwrap(), 7);
+    }
+
+    #[test]
+    fn a_supervisor_waits_for_an_in_flight_submission_handle() {
+        let dir = std::env::temp_dir().join(format!("orx-submit-wait-{}", uuid::Uuid::new_v4()));
+        let store = Store::open_at(dir.clone()).unwrap();
+        let lock_path = dir.join("run.submit.lock");
+        store
+            .upsert_run(&StoredRun {
+                id: "run-1".into(),
+                experiment_id: "experiment-1".into(),
+                project_id: "project-1".into(),
+                status: "starting".into(),
+                backend_json: r#"{"kind":"slurm_job"}"#.into(),
+                command: String::new(),
+                created_at: 1,
+                updated_at: 1,
+                ended_at: None,
+                exit_code: None,
+                commit_sha: None,
+                result_markdown: None,
+                cancel_requested: true,
+                chat_session_id: None,
+            })
+            .unwrap();
+        let mut launcher = open_supervisor_lock(&lock_path).unwrap();
+        let submitting = launcher.write().unwrap();
+
+        let supervisor = std::thread::spawn({
+            let (dir, lock_path) = (dir.clone(), lock_path.clone());
+            move || {
+                let store = Store::open_at(dir).unwrap();
+                settle_submission(&store, "run-1", &lock_path)
+                    .unwrap()
+                    .map(|(_, descriptor)| descriptor.job_id)
+            }
+        });
+        std::thread::sleep(Duration::from_millis(300));
+        assert!(
+            !supervisor.is_finished(),
+            "must not give up while submission is in flight"
+        );
+        store
+            .set_backend_json("run-1", r#"{"kind":"slurm_job","jobId":"7"}"#)
+            .unwrap();
+        drop(submitting);
+
+        assert_eq!(supervisor.join().unwrap(), Some(Some("7".into())));
+        drop(store);
+        let _ = std::fs::remove_dir_all(dir);
     }
 
     #[test]

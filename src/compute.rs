@@ -849,6 +849,10 @@ pub async fn submit(args: &crate::ExpRunArgs) -> Result<StoredRun> {
             )
         })
         .flatten();
+    let mut submission = crate::commands::supervise::open_supervisor_lock(
+        &crate::commands::supervise::submission_lock_path(&run_id),
+    )?;
+    let _submitting = submission.write()?;
     reserve_run(
         &store,
         &pending,
