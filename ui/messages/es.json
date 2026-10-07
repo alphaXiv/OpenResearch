@@ -933,7 +933,7 @@
   "settings_oauth_login": "OAuth (inicio de sesión con suscripción)",
   "settings_not_found_on_path": "no se encontró en el PATH",
   "settings_providers": "Proveedores",
-  "settings_models_available": "Modelos disponibles ({count}): {models}",
+  "settings_models_available": "Modelos disponibles ({count})",
   "settings_none": "ninguno",
   "settings_kubectl_default": "Usar el contexto actual de kubectl",
   "settings_kubectl_default_context": "Usar el contexto actual ({context})",
