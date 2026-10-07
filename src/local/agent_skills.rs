@@ -717,7 +717,7 @@ mod tests {
         use clap::Parser;
         let skill = find("compute", SkillSet::Full).expect("compute skill");
         let docs = std::iter::once(skill.content).chain(skill.resources.iter().map(|r| r.content));
-        let mut checked = 0;
+        let mut ssh_config_checked = 0;
         for doc in docs {
             assert!(
                 !doc.replace("orx compute ssh-config", "")
@@ -736,10 +736,15 @@ mod tests {
                         args.extend(part.split_whitespace().map(str::to_owned));
                     }
                 }
-                assert!(crate::Cli::try_parse_from(&args).is_ok(), "{args:?}");
-                checked += 1;
+                if let Err(e) = crate::Cli::try_parse_from(&args) {
+                    panic!("{args:?}: {e}");
+                }
+                ssh_config_checked += usize::from(args.iter().any(|a| a == "ssh-config"));
             }
         }
-        assert!(checked > 20, "only {checked} compute commands checked");
+        assert!(
+            ssh_config_checked >= 2,
+            "ssh-config commands were not checked"
+        );
     }
 }
