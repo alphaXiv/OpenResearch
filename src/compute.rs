@@ -779,6 +779,7 @@ pub async fn submit(args: &crate::ExpRunArgs) -> Result<StoredRun> {
             "{}",
             preflight
                 .detail
+                .filter(|detail| !detail.trim().is_empty())
                 .unwrap_or_else(|| "Compute backend is not ready.".to_string())
         ));
     }

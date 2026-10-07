@@ -2148,7 +2148,7 @@ async fn decode_local_response<T: serde::de::DeserializeOwned>(
                 value
                     .get("error")
                     .and_then(Value::as_str)
-                    .map(str::to_string)
+                    .map(|error| error.trim().to_string())
             })
             .unwrap_or_else(|| String::from_utf8_lossy(&body).trim().to_string());
         if detail.is_empty() {

@@ -5,7 +5,7 @@
 
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
-use std::process::{Child, Command, Stdio};
+use std::process::{Child, Command, Output, Stdio};
 use std::time::{Duration, Instant};
 
 #[cfg(unix)]
@@ -198,7 +198,7 @@ pub(super) fn git(dir: Option<&Path>, args: &[&str]) -> Result<String> {
 }
 
 /// Git's stderr, or its exit status when it failed silently (e.g. `--verify -q`, a signal).
-pub(crate) fn failure_detail(output: &std::process::Output) -> String {
+pub(crate) fn failure_detail(output: &Output) -> String {
     let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
     if stderr.is_empty() {
         output.status.to_string()
