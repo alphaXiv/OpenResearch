@@ -151,23 +151,15 @@ pub(super) async fn run_turn(
                 &mut recorded,
             )
             .await?;
-            if delivered
-                && answered
-                && final_projection
-                    .pointer("/data/info/outcome")
-                    .and_then(Value::as_str)
-                    == Some("succeeded")
-            {
+            let outcome = final_projection
+                .pointer("/data/info/outcome")
+                .and_then(Value::as_str);
+            if delivered && answered && outcome == Some("succeeded") {
                 ctx.persist_delivery(DeliveryState::Accepted)?;
                 ctx.mark_final_text_tail();
                 return Ok(());
             }
-            if delivered
-                && final_projection
-                    .pointer("/data/info/outcome")
-                    .and_then(Value::as_str)
-                    == Some("failed")
-            {
+            if delivered && outcome == Some("failed") {
                 // Failures before a step (e.g. an unavailable model) leave no assistant message.
                 if let Ok(Some(message)) = execution_failure(&endpoint, &native_id).await {
                     ctx.mark_native_retry_exhausted();
@@ -315,6 +307,7 @@ async fn execution_failure(endpoint: &AgentEndpoint, native_id: &str) -> Result<
             "{}/api/experimental/session/{native_id}/log",
             endpoint.base_url
         ))
+        .timeout(Duration::from_secs(10))
         .send()
         .await?
         .error_for_status()?
@@ -330,7 +323,9 @@ fn last_execution_failure(log: &str) -> Option<String> {
         .filter_map(|line| line.strip_prefix("data:"))
         .filter_map(|data| serde_json::from_str::<Value>(data.trim()).ok())
         .find(|event| event["type"] == "session.execution.failed")
-        .map(|event| error_text(&event["data"]["error"]))
+        .map(|event| event["data"]["error"].clone())
+        .filter(|error| !error.is_null())
+        .map(|error| error_text(&error))
 }
 
 fn error_text(error: &Value) -> String {
