@@ -1013,7 +1013,7 @@ pub fn note_startup_image() {
     STARTUP_APPIMAGE.get_or_init(|| running_appimage().as_deref().and_then(file_identity));
 }
 
-#[cfg(any(test, all(desktop_app, target_os = "linux")))]
+#[cfg(any(all(test, unix), all(desktop_app, target_os = "linux")))]
 fn file_identity(path: &Path) -> Option<(u64, u64)> {
     use std::os::unix::fs::MetadataExt;
     std::fs::metadata(path)
@@ -1793,6 +1793,7 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn renaming_a_new_file_over_an_image_changes_its_identity() {
+        use super::file_identity;
         let dir = std::env::temp_dir().join(format!("orx-image-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(&dir).unwrap();
         let image = dir.join("OpenResearch.AppImage");
