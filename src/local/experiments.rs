@@ -304,6 +304,8 @@ mod tests {
         assert_eq!(effective_run_command(&e, Some(" ")), None);
         let train = Some("python train.py");
         assert_eq!(effective_run_command(&e, train), train);
+        e.run_command = "  ".into();
+        assert_eq!(effective_run_command(&e, train), train);
         e.run_command = "python eval.py".into();
         assert_eq!(effective_run_command(&e, train), Some("python eval.py"));
     }

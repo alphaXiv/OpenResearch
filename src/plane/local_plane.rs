@@ -156,7 +156,7 @@ impl LocalPlane {
         let project = store.get_local_project(&exp.project_id)?;
         let project_command = project.as_ref().and_then(|p| p.run_command.as_deref());
         match crate::local::experiments::effective_run_command(exp, project_command) {
-            Some(cmd) if cmd == exp.run_command => println!("  command:  {cmd}"),
+            Some(cmd) if !exp.run_command.trim().is_empty() => println!("  command:  {cmd}"),
             Some(cmd) => println!("  command:  {cmd} (project default)"),
             None => println!(
                 "  command:  — (not set — `orx project edit {} --run-command '<cmd>'`)",
