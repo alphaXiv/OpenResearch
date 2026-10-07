@@ -98,7 +98,7 @@ async fn apply(args: crate::UpdateArgs) -> Result<Outcome> {
     let target = updates::preflight(args.force)?;
 
     // Held until this function returns, so no backend starts mid-install.
-    let claim = (!args.dry_run).then(updates::claim_install);
+    let claim = (!args.dry_run).then(|| updates::claim_install(&target));
     if matches!(claim, Some(None)) {
         return defer(&current, args.background).await;
     }

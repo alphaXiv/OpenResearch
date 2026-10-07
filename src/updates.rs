@@ -992,15 +992,36 @@ fn backend_lock_path() -> Option<PathBuf> {
         InstallChannel::AppBundle(root) | InstallChannel::AppImage(root) => root.clone(),
         _ => current_exe().ok()?,
     };
-    Some(target.parent()?.join(".orx-backend.lock"))
+    Some(target.parent()?.join(BACKEND_LOCK))
 }
 
-fn open_backend_lock() -> Option<std::fs::File> {
+const BACKEND_LOCK: &str = ".orx-backend.lock";
+
+/// Where the backends of the copy `target` replaces hold their lock, which with
+/// `--force` need not be the copy running the updater.
+fn target_lock_path(target: &UpdateTarget) -> Option<PathBuf> {
+    let dir = match target {
+        UpdateTarget::Installer(receipt) => {
+            let prefix = PathBuf::from(&receipt.install_prefix);
+            let bin = prefix.join("bin");
+            if bin.is_dir() {
+                bin
+            } else {
+                prefix
+            }
+        }
+        UpdateTarget::AppBundle(file) | UpdateTarget::AppImage(file) => file.parent()?.into(),
+        UpdateTarget::Portable(dir) => dir.clone(),
+    };
+    Some(dir.join(BACKEND_LOCK))
+}
+
+fn open_lock(path: Option<PathBuf>) -> Option<std::fs::File> {
     std::fs::OpenOptions::new()
         .create(true)
         .truncate(false)
         .write(true)
-        .open(backend_lock_path()?)
+        .open(path?)
         .ok()
 }
 
@@ -1014,7 +1035,7 @@ impl BackendLock {
     /// Waits out an install in progress, so a backend never starts under one.
     /// `None` leaves this backend unprotected, as every backend before this lock was.
     pub fn acquire() -> Option<Self> {
-        let file = open_backend_lock()?;
+        let file = open_lock(backend_lock_path())?;
         file.lock_shared().ok()?;
         Some(Self { _file: file })
     }
@@ -1026,8 +1047,8 @@ pub struct InstallClaim {
 }
 
 /// `None` while an `orx up` is using this install. A lock nobody could open protects nobody.
-pub fn claim_install() -> Option<InstallClaim> {
-    let Some(file) = open_backend_lock() else {
+pub fn claim_install(target: &UpdateTarget) -> Option<InstallClaim> {
+    let Some(file) = open_lock(target_lock_path(target)) else {
         return Some(InstallClaim { _file: None });
     };
     match file.try_lock() {
@@ -1552,8 +1573,8 @@ mod tests {
         app_bundle_root, attempt_backoff, attempt_due, bold, claim_install, detect_channel,
         exe_matches_prefix, now_unix, package_manager_owns, parse_manifest, portable_dir,
         portable_outside_prefix, precedence, relaunch_args, render, restart_target, retired_path,
-        warning_for, BackendLock, CheckCache, InstallChannel, ATTEMPT_BACKOFF_MAX,
-        ATTEMPT_BACKOFF_MIN,
+        target_lock_path, warning_for, BackendLock, CheckCache, InstallChannel, UpdateTarget,
+        ATTEMPT_BACKOFF_MAX, ATTEMPT_BACKOFF_MIN,
     };
     use semver::Version;
     use std::ffi::OsString;
@@ -1712,13 +1733,35 @@ mod tests {
 
     #[test]
     fn an_updater_defers_only_while_a_backend_holds_its_lock() {
+        let exe = std::env::current_exe().unwrap();
+        let target = UpdateTarget::Portable(exe.parent().unwrap().to_path_buf());
         let lock = BackendLock::acquire().expect("backend lock beside the test binary");
-        assert!(claim_install().is_none());
+        assert!(claim_install(&target).is_none());
         drop(lock);
-        let claim = claim_install().expect("no backend running");
+        let claim = claim_install(&target).expect("no backend running");
         // The claim excludes backends until the install finishes.
-        assert!(claim_install().is_none());
+        assert!(claim_install(&target).is_none());
         drop(claim);
+    }
+
+    #[test]
+    fn an_installer_update_locks_beside_the_receipts_binary() {
+        let prefix = std::env::temp_dir().join(format!("orx-lock-{}", uuid::Uuid::new_v4()));
+        let target = UpdateTarget::Installer(super::Receipt {
+            install_prefix: prefix.to_string_lossy().into_owned(),
+            version: "0.2.15".into(),
+            modify_path: false,
+        });
+        assert_eq!(
+            target_lock_path(&target),
+            Some(prefix.join(".orx-backend.lock"))
+        );
+        std::fs::create_dir_all(prefix.join("bin")).unwrap();
+        assert_eq!(
+            target_lock_path(&target),
+            Some(prefix.join("bin").join(".orx-backend.lock"))
+        );
+        std::fs::remove_dir_all(&prefix).unwrap();
     }
 
     #[test]
