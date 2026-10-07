@@ -39,7 +39,7 @@ credentials in command arguments, custom instructions, or committed files.
 `orx compute connect tinker` prompt without echoing credentials.
 `orx compute connect openresearch` reuses login and SSH-key registration.
 Interactive login requires a terminal and does not support JSON.
-`orx compute configure modal --clear credentials` (likewise any backend) removes
+`orx compute configure modal --clear credentials` (likewise hf and tinker) removes
 ORX-saved credentials; process environment and provider-owned credential stores
 can still take precedence.
 
