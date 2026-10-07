@@ -53,6 +53,36 @@ fn value<'a>(output: &'a str, key: &str) -> Result<&'a str> {
         .ok_or_else(|| anyhow!("OpenSSH did not resolve {key}"))
 }
 
+fn unresolved_message(key: &str, ssh: Option<&std::path::Path>, version: Option<&str>) -> String {
+    format!(
+        "OpenSSH did not resolve {key} (ssh: {}, version: {}); a non-OpenSSH `ssh` wrapper earlier on PATH is the likely cause",
+        ssh.map_or("not found on PATH".into(), |path| path.display().to_string()),
+        version.unwrap_or("unknown")
+    )
+}
+
+async fn unresolved(key: &str) -> crate::error::Error {
+    let version = Command::new("ssh")
+        .arg("-V")
+        .stdin(std::process::Stdio::null())
+        .kill_on_drop(true)
+        .output();
+    let version = tokio::time::timeout(std::time::Duration::from_secs(10), version)
+        .await
+        .ok()
+        .and_then(Result::ok)
+        .map(|output| String::from_utf8_lossy(&output.stderr).trim().to_owned())
+        .filter(|version| !version.is_empty());
+    anyhow!(
+        "{}",
+        unresolved_message(
+            key,
+            crate::local::shell_env::find_on_path("ssh").as_deref(),
+            version.as_deref()
+        )
+    )
+}
+
 pub(super) fn probe_args() -> Vec<String> {
     [
         "-G",
@@ -215,7 +245,10 @@ async fn resolve(dest: &str, config: Option<&std::path::Path>) -> Result<Prepare
             "Cannot safely prepare SSH alias {host}; use a plain host alias"
         ));
     }
-    let native_id = value(&first.output, "controlpath")?
+    let Ok(native_id) = value(&first.output, "controlpath") else {
+        return Err(unresolved("controlpath").await);
+    };
+    let native_id = native_id
         .strip_prefix("/tmp/orx-ssh-probe-")
         .filter(|name| name.len() == 40 && name.bytes().all(|byte| byte.is_ascii_hexdigit()))
         .ok_or_else(|| anyhow!("OpenSSH did not expand the connection identifier for {host}"))?
@@ -310,6 +343,25 @@ async fn resolve(dest: &str, config: Option<&std::path::Path>) -> Result<Prepare
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn unresolved_key_names_the_ssh_binary_and_version() {
+        assert_eq!(
+            unresolved_message(
+                "controlpath",
+                Some(std::path::Path::new("/home/me/bin/ssh")),
+                Some("OpenSSH_9.6p1 Ubuntu-3ubuntu13")
+            ),
+            "OpenSSH did not resolve controlpath (ssh: /home/me/bin/ssh, version: OpenSSH_9.6p1 Ubuntu-3ubuntu13); a non-OpenSSH `ssh` wrapper earlier on PATH is the likely cause"
+        );
+        assert_eq!(
+            unresolved_message("controlpath", None, None),
+            "OpenSSH did not resolve controlpath (ssh: not found on PATH, version: unknown); a non-OpenSSH `ssh` wrapper earlier on PATH is the likely cause"
+        );
+        let probe = "hostname example.invalid\nuser alice\nport 22";
+        assert!(value(probe, "controlpath").is_err());
+        assert_eq!(value(probe, "user").unwrap(), "alice");
+    }
 
     #[tokio::test]
     async fn configured_routes_have_distinct_identities_and_remain_pinned_after_edits() {
