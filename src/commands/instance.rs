@@ -75,7 +75,7 @@ async fn create(creds: &crate::config::Credentials, args: InstanceCreateArgs) ->
     }
     let target = if let Some(gpu) = &args.gpu {
         SandboxTarget::New {
-            gpu: gpu.clone(),
+            gpu: gpu.to_ascii_uppercase(),
             gpu_count: args.count.unwrap_or(1),
             disk_gb: args.disk.unwrap_or(100),
             // Omitted = the server picks the cheapest matching offer across all

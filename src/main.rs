@@ -24,6 +24,7 @@ mod jobs;
 // Local mode (`orx up`): builds out across stages; not all of it is wired yet.
 #[allow(dead_code)]
 mod local;
+mod net;
 mod output;
 mod paths;
 mod plane;
@@ -1044,7 +1045,8 @@ async fn main() {
         command,
         Command::Version(_) | Command::Update(_) | Command::Delete(_) | Command::Feedback(_)
     ))
-    .then(updates::UpdateWarning::start);
+    // `orx up` updates from its own periodic pass, once it holds the backend lock that defers it.
+    .then(|| updates::UpdateWarning::start(!matches!(command, Command::Up(_))));
 
     // Anonymous usage analytics. Record the flag process-globally so command
     // modules can fire events without threading it through, then fire the

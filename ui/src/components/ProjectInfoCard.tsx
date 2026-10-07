@@ -1,6 +1,6 @@
 import { useEffect, useId, useRef, useState } from "react";
 import { createPortal } from "react-dom";
-import { FolderOpen, MessageCircle, MoreHorizontal, Pin, Plus, Settings, Trash2, X } from "lucide-react";
+import { Folder, FolderOpen, MessageCircle, MoreHorizontal, Pin, Plus, Settings, Trash2, X } from "lucide-react";
 import { deleteProject, revealFileInManager, updateProject, type Project } from "../api";
 import { m } from "../paraglide/messages.js";
 import { Button, IconButton, Input, MenuItem, Tooltip, showAlert } from "./ui";
@@ -11,9 +11,12 @@ function deleteExplanation(project: Project) {
   return `${m.projects_delete_from_app({ name: project.name })}\n\n${synced ? m.projects_home_local_and_github_kept() : m.projects_home_local_folder_kept()}`;
 }
 
-export function ProjectInfoCard({ project, chatCount, onRemoved, onNewChat, pinned, onPin }: {
+export function ProjectInfoCard({ project, chatCount, collapsed, busy, onToggleCollapsed, onRemoved, onNewChat, pinned, onPin }: {
   project: Project;
   chatCount: number | undefined;
+  collapsed: boolean;
+  busy: boolean;
+  onToggleCollapsed: () => void;
   onRemoved: () => void;
   onNewChat: () => void;
   pinned: boolean;
@@ -62,9 +65,11 @@ export function ProjectInfoCard({ project, chatCount, onRemoved, onNewChat, pinn
   }
 
   return <>
-    <div className="flex h-7 min-w-0 flex-1 items-center gap-[7px] py-1 text-start text-sm font-normal text-text">
-      <FolderOpen size={15} className="shrink-0" /><span className="truncate">{project.name}</span>
-    </div>
+    <button type="button" aria-expanded={!collapsed} onClick={onToggleCollapsed}
+      className="flex h-7 min-w-0 flex-1 cursor-pointer items-center gap-[7px] rounded-sm py-1 text-start text-sm font-normal text-text focus-visible:outline-2 focus-visible:outline-solid focus-visible:outline-text focus-visible:outline-offset-2">
+      {collapsed ? <Folder size={15} className="shrink-0" /> : <FolderOpen size={15} className="shrink-0" />}<span className="truncate">{project.name}</span>
+      {busy && <span aria-hidden className="size-[7px] shrink-0 rounded-full bg-primary animate-[or-pulse_1.2s_infinite]" />}
+    </button>
     <IconButton ref={triggerRef} size="small" className={`text-text group-hover:opacity-100 group-focus-within:opacity-100 ${menuOpen ? "bg-surface opacity-100" : "opacity-0"}`}
       aria-label={m.sidebar_project_details({ name: project.name })} aria-controls={menuId} aria-haspopup="menu" aria-expanded={menuOpen} onClick={() => {
           if (menuRef.current?.matches(":popover-open")) menuRef.current.hidePopover();

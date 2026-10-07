@@ -72,7 +72,7 @@ async fn terminal(target: &SshTarget, dir: &str, container: Option<&ContainerRun
 
 async fn logs(target: &SshTarget, dir: &str) -> String {
     let mut output = String::new();
-    ssh::stream_logs(target, dir, 0, Duration::ZERO, &mut |line| {
+    ssh::stream_logs(target, dir, 0, Duration::ZERO, true, &mut |line| {
         output.push_str(line);
         output.push('\n');
     })

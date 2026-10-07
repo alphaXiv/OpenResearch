@@ -60,6 +60,9 @@ async fn catalog(args: CatalogArgs, json: bool) -> Result<()> {
     }
     if filtered.is_empty() {
         println!("No matching compute offers.");
+        if gpu.is_some() {
+            println!("GPU ids look like RTX_3090 or H100_SXM; run `orx compute` to list them.");
+        }
         return Ok(());
     }
 

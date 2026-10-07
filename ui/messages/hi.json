@@ -681,7 +681,7 @@
   "desktop_app_banner_text": "OpenResearch अब एक डेस्कटॉप ऐप है। आपके प्रोजेक्ट वहां जैसे हैं वैसे ही खुलते हैं, टर्मिनल चालू रखने की ज़रूरत नहीं।",
   "desktop_app_banner_download": "ऐप डाउनलोड करें",
   "desktop_app_banner_dismiss": "खारिज करें",
-  "update_banner_complete": "{version} पर अपडेट हुआ। इस्तेमाल के लिए फिर से शुरू करें।",
+  "update_banner_complete": "OpenResearch {version} तैयार है। इस पर जाने के लिए फिर से शुरू करें।",
   "update_banner_restart": "अभी फिर से शुरू करें",
   "update_banner_restarting": "फिर से शुरू हो रहा है…",
   "update_banner_restart_failed": "फिर से शुरू नहीं हो सका: {error}",

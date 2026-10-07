@@ -232,7 +232,7 @@ fn transport_error(base: &str, err: reqwest::Error) -> crate::error::Error {
 
 fn http() -> &'static Client {
     static CLIENT: OnceLock<Client> = OnceLock::new();
-    CLIENT.get_or_init(Client::new)
+    CLIENT.get_or_init(|| crate::net::remote_client().build().expect("http client"))
 }
 
 /// Sends a request and returns the response after applying the shared error
@@ -2363,7 +2363,7 @@ mod tests {
     }
 
     async fn loopback_public_get(url: &str) -> anyhow::Result<reqwest::Response> {
-        let client = reqwest::Client::builder().no_proxy().build().unwrap();
+        let client = crate::net::loopback_client().build().unwrap();
         public_get(|| client.get(url), "Test", |e| anyhow::anyhow!("{e}")).await
     }
 
@@ -2406,8 +2406,7 @@ mod tests {
 
     #[tokio::test]
     async fn transport_error_includes_the_source_chain() {
-        let err = reqwest::Client::builder()
-            .no_proxy()
+        let err = crate::net::loopback_client()
             .build()
             .expect("build loopback client")
             .get("http://127.0.0.1:1/unreachable")

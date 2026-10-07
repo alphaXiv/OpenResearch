@@ -170,6 +170,16 @@ fn archive_ids(
     }
 }
 
+/// The command a launch would run: the experiment's own, else the project default.
+pub fn effective_run_command<'a>(
+    experiment: &'a LocalExperiment,
+    project_command: Option<&'a str>,
+) -> Option<&'a str> {
+    Some(experiment.run_command.as_str())
+        .filter(|c| !c.trim().is_empty())
+        .or_else(|| project_command.filter(|c| !c.trim().is_empty()))
+}
+
 /// Create a local experiment. Every node gets its own `orx/<slug>` branch:
 /// a child forks off its parent's tip, a baseline/root off
 /// the project's base branch. The base branch itself is never an experiment
@@ -285,6 +295,19 @@ mod tests {
         assert!(legacy_root_warning(&p, &experiment(None, "orx/baseline")).is_none());
         // Child, even on the base branch name (not a root): silent.
         assert!(legacy_root_warning(&p, &experiment(Some("root"), "main")).is_none());
+    }
+
+    #[test]
+    fn unset_experiment_command_follows_the_project_default() {
+        let mut e = experiment(None, "orx/baseline");
+        assert_eq!(effective_run_command(&e, None), None);
+        assert_eq!(effective_run_command(&e, Some(" ")), None);
+        let train = Some("python train.py");
+        assert_eq!(effective_run_command(&e, train), train);
+        e.run_command = "  ".into();
+        assert_eq!(effective_run_command(&e, train), train);
+        e.run_command = "python eval.py".into();
+        assert_eq!(effective_run_command(&e, train), Some("python eval.py"));
     }
 
     #[test]
