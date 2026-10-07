@@ -20,7 +20,7 @@
 
 use std::collections::HashMap;
 use std::ffi::{OsStr, OsString};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
 
 /// Deliberately short. These are the variables whose divergence makes the app
@@ -172,7 +172,17 @@ pub fn find_on_path(binary: &str) -> Option<PathBuf> {
 
 /// Like `find_on_path`, but on this process's PATH, which a bare `Command::new(binary)` searches.
 pub fn find_on_process_path(binary: &str) -> Option<PathBuf> {
-    search_in(&std::env::var_os("PATH")?, binary)
+    search_from(
+        &std::env::var_os("PATH")?,
+        &std::env::current_dir().ok()?,
+        binary,
+    )
+}
+
+/// `search_in`, but with relative entries resolved against `cwd` as a bare command name would be.
+fn search_from(paths: &OsStr, cwd: &Path, binary: &str) -> Option<PathBuf> {
+    let dirs = std::env::split_paths(paths).map(|dir| cwd.join(dir));
+    search_in(&std::env::join_paths(dirs).ok()?, binary)
 }
 
 /// Where `binary` lives inside `dir`, trying the PATHEXT spellings a bare name lacks on Windows.
@@ -338,6 +348,22 @@ pub fn parse_probe(stdout: &str, marker: &str) -> Option<HashMap<&'static str, O
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(unix)]
+    #[test]
+    fn process_path_search_resolves_relative_entries_against_cwd() {
+        use std::os::unix::fs::PermissionsExt;
+        let cwd = crate::local::git::TemporaryDirectory::new("orx-path").unwrap();
+        std::fs::create_dir(cwd.path().join("bin")).unwrap();
+        let wrapper = cwd.path().join("bin").join("orx-test-tool");
+        std::fs::write(&wrapper, "#!/bin/sh\n").unwrap();
+        std::fs::set_permissions(&wrapper, std::fs::Permissions::from_mode(0o755)).unwrap();
+        assert_eq!(
+            search_from(OsStr::new("bin:/usr/bin"), cwd.path(), "orx-test-tool"),
+            Some(wrapper)
+        );
+        assert_eq!(search_in(OsStr::new("bin:/usr/bin"), "orx-test-tool"), None);
+    }
 
     #[test]
     fn a_registry_value_ends_at_its_first_nul() {

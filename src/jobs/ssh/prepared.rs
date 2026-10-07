@@ -68,12 +68,21 @@ fn unresolved_message(key: &str, ssh: Option<&Path>, version: Option<&str>) -> S
 }
 
 async fn unresolved(key: &str) -> crate::error::Error {
-    let version = Command::new("ssh")
+    let version = ssh_version("ssh").await;
+    anyhow!(unresolved_message(
+        key,
+        crate::local::shell_env::find_on_process_path("ssh").as_deref(),
+        version.as_deref()
+    ))
+}
+
+async fn ssh_version(program: &str) -> Option<String> {
+    let version = Command::new(program)
         .arg("-V")
         .stdin(std::process::Stdio::null())
         .kill_on_drop(true)
         .output();
-    let version = tokio::time::timeout(std::time::Duration::from_secs(10), version)
+    tokio::time::timeout(std::time::Duration::from_secs(10), version)
         .await
         .ok()
         .and_then(Result::ok)
@@ -88,12 +97,7 @@ async fn unresolved(key: &str) -> crate::error::Error {
                         .find(|line| !line.is_empty())
                         .map(str::to_owned)
                 })
-        });
-    anyhow!(unresolved_message(
-        key,
-        crate::local::shell_env::find_on_process_path("ssh").as_deref(),
-        version.as_deref()
-    ))
+        })
 }
 
 pub(super) fn probe_args() -> Vec<String> {
@@ -356,6 +360,29 @@ async fn resolve(dest: &str, config: Option<&std::path::Path>) -> Result<Prepare
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn ssh_version_prefers_stderr_and_falls_back_to_stdout() {
+        use std::os::unix::fs::PermissionsExt;
+        let temp = crate::local::git::TemporaryDirectory::new("orx-ssh-version").unwrap();
+        let stub = |name: &str, body: &str| {
+            let path = temp.path().join(name);
+            std::fs::write(&path, format!("#!/bin/sh\n{body}\n")).unwrap();
+            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+            path.to_string_lossy().into_owned()
+        };
+        let both = stub("both", "echo usage; echo; echo 'OpenSSH_9.6p1' >&2");
+        let stdout_only = stub("stdout", "echo; echo 'ssh-wrapper 1.0'; exit 2");
+        let silent = stub("silent", "exit 1");
+        assert_eq!(ssh_version(&both).await.as_deref(), Some("OpenSSH_9.6p1"));
+        assert_eq!(
+            ssh_version(&stdout_only).await.as_deref(),
+            Some("ssh-wrapper 1.0")
+        );
+        assert_eq!(ssh_version(&silent).await, None);
+        assert_eq!(ssh_version("/nonexistent/orx-test-ssh").await, None);
+    }
 
     #[test]
     fn unresolved_key_names_the_ssh_binary_and_version() {
