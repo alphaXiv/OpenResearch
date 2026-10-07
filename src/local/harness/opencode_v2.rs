@@ -881,7 +881,7 @@ mod tests {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let endpoint = AgentEndpoint {
             base_url: format!("http://{}", listener.local_addr().unwrap()),
-            client: reqwest::Client::new(),
+            client: crate::net::loopback_client().build().unwrap(),
             protocol: crate::local::opencode::Protocol::V2,
             legacy_v2_api: false,
         };

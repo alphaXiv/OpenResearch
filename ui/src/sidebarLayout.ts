@@ -1,7 +1,7 @@
 import type { ChatSession, Project } from "./api";
 
 export type SidebarRow =
-  | { kind: "project"; project: Project }
+  | { kind: "project"; project: Project; collapsed: boolean; busy: boolean }
   | { kind: "chat"; project: Project; session: ChatSession }
   | { kind: "more"; project: Project }
   | { kind: "status"; project: Project; pending: boolean; error: boolean; retry: () => void };
@@ -19,7 +19,8 @@ export function fitSidebarRows(rows: SidebarRow[], height: number, activeId: str
       result.push(row);
       used += sidebarRowHeight(row);
     }
-    if (result.at(-1)?.kind === "project") result.pop();
+    const last = result.at(-1);
+    if (last?.kind === "project" && !last.collapsed) result.pop();
     return result;
   };
   const visible = fit(rows, height);

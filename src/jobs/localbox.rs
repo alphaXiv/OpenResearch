@@ -258,13 +258,18 @@ pub fn inspect_job(dir: &Path) -> JobState {
 
 /// One poll of the log past `skip` lines (the supervisor loops every ~2s).
 /// A missing log file just means the payload hasn't printed yet.
-pub fn stream_logs(dir: &Path, skip: u64, sink: &mut (dyn FnMut(&str) + Send)) -> Result<u64> {
+pub fn stream_logs(
+    dir: &Path,
+    skip: u64,
+    drain: bool,
+    sink: &mut (dyn FnMut(&str) + Send),
+) -> Result<u64> {
     let content = match std::fs::read_to_string(dir.join("log")) {
         Ok(c) => c,
         Err(_) => return Ok(skip),
     };
     let mut seen = skip;
-    for line in content.lines().skip(skip as usize) {
+    for line in super::log_lines(&content, drain).skip(skip as usize) {
         seen += 1;
         sink(line);
     }
@@ -503,11 +508,11 @@ mod tests {
         assert!(!run_sh.contains("s3cr3t-value"));
 
         let mut lines = Vec::new();
-        let seen = stream_logs(&dir, 0, &mut |l| lines.push(l.to_string())).unwrap();
+        let seen = stream_logs(&dir, 0, false, &mut |l| lines.push(l.to_string())).unwrap();
         assert_eq!(seen, 1);
         assert_eq!(lines, ["hello-42-fake-token"]);
         // Re-poll past the consumed lines: nothing new.
-        assert_eq!(stream_logs(&dir, seen, &mut |_| ()).unwrap(), seen);
+        assert_eq!(stream_logs(&dir, seen, false, &mut |_| ()).unwrap(), seen);
         #[cfg(windows)]
         {
             cancel_job(&dir).unwrap();

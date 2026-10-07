@@ -871,6 +871,7 @@ pub async fn stream_logs(
     }
     let mut child = cmd
         .stdin(Stdio::null())
+        .kill_on_drop(true)
         .stdout(Stdio::piped())
         .stderr(Stdio::null()) // "waiting to start" noise; state comes from inspect
         .spawn()
@@ -881,9 +882,15 @@ pub async fn stream_logs(
     let mut pass = Pass::default();
     loop {
         match tokio::time::timeout(idle, lines.next_line()).await {
-            Err(_) => break,       // idle — let the caller re-check state
-            Ok(Err(_)) => break,   // read error
-            Ok(Ok(None)) => break, // kubectl exited
+            Err(_) => break, // idle — let the caller re-check state
+            Ok(Err(e)) => return Err(anyhow!("Could not read kubectl logs output: {}", e)),
+            Ok(Ok(None)) => {
+                let status = child.wait().await?;
+                if !status.success() {
+                    return Err(anyhow!("kubectl logs exited with {}", status));
+                }
+                break;
+            }
             Ok(Ok(Some(line))) => {
                 if let Some(text) = resume.admit(&mut pass, &line) {
                     sink(text);

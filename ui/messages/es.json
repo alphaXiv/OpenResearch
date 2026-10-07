@@ -681,7 +681,7 @@
   "desktop_app_banner_text": "OpenResearch ya es una aplicación de escritorio. Tus proyectos se abren tal como están, sin una terminal que mantener abierta.",
   "desktop_app_banner_download": "Descargar la aplicación",
   "desktop_app_banner_dismiss": "Descartar",
-  "update_banner_complete": "Actualizado a la versión {version}. Reinicia para usarla.",
+  "update_banner_complete": "OpenResearch {version} está listo. Reinicia para cambiar a esta versión.",
   "update_banner_restart": "Reiniciar ahora",
   "update_banner_restarting": "Reiniciando…",
   "update_banner_restart_failed": "No se pudo reiniciar: {error}",

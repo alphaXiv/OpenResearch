@@ -130,7 +130,7 @@ pub async fn available_project_repo_name(repo: &str) -> Result<String> {
 
 pub async fn public_repo_size_kb(url: &str) -> Option<u64> {
     let (owner, repo) = super::git::github_repository(url)?;
-    let client = reqwest::Client::builder()
+    let client = crate::net::remote_client()
         .timeout(Duration::from_secs(10))
         .build()
         .ok()?;

@@ -681,7 +681,7 @@
   "desktop_app_banner_text": "OpenResearch가 이제 데스크톱 앱으로 제공됩니다. 터미널을 계속 실행하지 않아도 프로젝트를 그대로 앱에서 열 수 있습니다.",
   "desktop_app_banner_download": "앱 다운로드",
   "desktop_app_banner_dismiss": "닫기",
-  "update_banner_complete": "{version}(으)로 업데이트되었습니다. 사용하려면 다시 시작하세요.",
+  "update_banner_complete": "OpenResearch {version}이(가) 준비되었습니다. 전환하려면 다시 시작하세요.",
   "update_banner_restart": "지금 다시 시작",
   "update_banner_restarting": "다시 시작 중…",
   "update_banner_restart_failed": "다시 시작할 수 없습니다: {error}",

@@ -247,7 +247,7 @@ pub fn resolve_token_with_source() -> Result<(String, TokenSource)> {
 fn http() -> &'static Client {
     static CLIENT: OnceLock<Client> = OnceLock::new();
     CLIENT.get_or_init(|| {
-        Client::builder()
+        crate::net::remote_client()
             .connect_timeout(Duration::from_secs(15))
             .build()
             .expect("reqwest client")
@@ -499,8 +499,8 @@ pub async fn stream_logs(
     let mut buf: Vec<u8> = Vec::new();
     loop {
         let chunk = match tokio::time::timeout(idle_timeout, res.chunk()).await {
-            Err(_) => break,       // idle — likely end of buffered history
-            Ok(Err(_)) => break,   // stream error — caller reconnects if live
+            Err(_) => break, // idle — likely end of buffered history
+            Ok(Err(e)) => return Err(anyhow!("Hugging Face log stream failed: {}", e)),
             Ok(Ok(None)) => break, // server closed
             Ok(Ok(Some(c))) => c,
         };
