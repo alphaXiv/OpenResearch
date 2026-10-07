@@ -149,10 +149,14 @@ fn run_alive_via(ps: &str, dir: &Path, pid: &str) -> bool {
         .stderr(std::process::Stdio::null())
         .output()
     else {
-        // Agent sandboxes (Codex's seatbelt) refuse to exec setuid `ps`; fall back to a signal probe.
-        return pid
-            .parse::<libc::pid_t>()
-            .is_ok_and(|pid| pid > 0 && unsafe { libc::kill(pid, 0) } == 0);
+        // Agent sandboxes (Codex's seatbelt) refuse to exec setuid `ps`; fall back to a signal
+        // probe, which cannot rule out PID reuse. EPERM means the process exists in another sandbox.
+        return pid.parse::<libc::pid_t>().is_ok_and(|pid| {
+            // SAFETY: signal 0 only checks existence; pid > 0 excludes group and broadcast targets.
+            pid > 0
+                && (unsafe { libc::kill(pid, 0) } == 0
+                    || std::io::Error::last_os_error().raw_os_error() == Some(libc::EPERM))
+        });
     };
     let text = String::from_utf8_lossy(&output.stdout);
     let Some((stat, command)) = text.trim().split_once(char::is_whitespace) else {
@@ -501,6 +505,9 @@ mod tests {
         assert!(alive, "a live run must not read as dead when ps cannot run");
         assert!(!run_alive_via(unrunnable_ps, &dir, &pid));
         assert!(!run_alive_via(unrunnable_ps, &dir, ""));
+        assert!(!run_alive_via(unrunnable_ps, &dir, "0"));
+        // init/launchd is alive but unsignalable for normal users (EPERM).
+        assert!(run_alive_via(unrunnable_ps, &dir, "1"));
     }
 
     #[test]
