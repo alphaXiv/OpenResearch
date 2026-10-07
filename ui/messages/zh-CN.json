@@ -927,7 +927,7 @@
   "settings_oauth_login": "OAuth（订阅登录）",
   "settings_not_found_on_path": "在 PATH 中未找到",
   "settings_providers": "提供商",
-  "settings_models_available": "{count} 个模型可用 — {models}",
+  "settings_models_available": "{count} 个模型可用",
   "settings_none": "无",
   "settings_kubectl_default": "使用当前 kubectl 上下文",
   "settings_kubectl_default_context": "使用当前上下文（{context}）",
