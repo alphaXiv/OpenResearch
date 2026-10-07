@@ -281,12 +281,14 @@ pub async fn run(args: UpArgs) -> Result<()> {
         drop(backend_lock);
         if !updates::newer_exe_on_disk().await {
             eprintln!("orx up: installing the update before restarting");
-            match updates::apply_now().await {
-                // The updater already recorded the failure, which backs off the next try.
-                Err(err) => eprintln!("orx up: {err} Restarting on this version."),
-                // Deferred again by another backend: back off, or the relaunch restarts again.
-                Ok(()) if !updates::newer_exe_on_disk().await => updates::record_attempt(false),
-                Ok(()) => {}
+            let failures = updates::failure_count();
+            if let Err(err) = updates::apply_now().await {
+                eprintln!("orx up: {err} Restarting on this version.");
+            }
+            // Unless the updater counted it, back off (deferred again, or it never started),
+            // or the relaunch restarts straight back into this.
+            if !updates::newer_exe_on_disk().await && updates::failure_count() == failures {
+                updates::record_attempt(false);
             }
         }
         eprintln!("orx up: restarting");

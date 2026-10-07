@@ -753,6 +753,11 @@ pub fn record_installed(version: &str, tag: &str) {
     });
 }
 
+/// Consecutive failed update attempts recorded so far.
+pub fn failure_count() -> u32 {
+    read_cache().map_or(0, |cache| cache.failures)
+}
+
 /// Record a release held back for a running backend to install on restart.
 pub fn record_deferred(version: &str, tag: &str) {
     mutate_cache(|cache| {
