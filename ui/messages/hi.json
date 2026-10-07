@@ -933,7 +933,7 @@
   "settings_oauth_login": "OAuth (सब्सक्रिप्शन लॉगिन)",
   "settings_not_found_on_path": "PATH पर नहीं मिला",
   "settings_providers": "प्रोवाइडर",
-  "settings_models_available": "{count} मॉडल उपलब्ध — {models}",
+  "settings_models_available": "{count} मॉडल उपलब्ध",
   "settings_none": "कोई नहीं",
   "settings_kubectl_default": "मौजूदा kubectl कॉन्टेक्स्ट इस्तेमाल करें",
   "settings_kubectl_default_context": "मौजूदा कॉन्टेक्स्ट इस्तेमाल करें ({context})",
