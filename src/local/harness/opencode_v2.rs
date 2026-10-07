@@ -323,9 +323,7 @@ fn last_execution_failure(log: &str) -> Option<String> {
         .filter_map(|line| line.strip_prefix("data:"))
         .filter_map(|data| serde_json::from_str::<Value>(data.trim()).ok())
         .find(|event| event["type"] == "session.execution.failed")
-        .map(|event| event["data"]["error"].clone())
-        .filter(|error| !error.is_null())
-        .map(|error| error_text(&error))
+        .map(|event| error_text(&event["data"]["error"]))
 }
 
 fn error_text(error: &Value) -> String {
