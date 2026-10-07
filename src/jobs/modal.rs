@@ -609,6 +609,7 @@ pub async fn detect() -> ModalStatus {
 #[cfg(test)]
 mod credential_tests {
     use super::*;
+    use std::io::Write as _;
 
     #[test]
     fn selects_active_or_explicit_profile_and_rejects_ambiguity() {
@@ -667,19 +668,30 @@ mod credential_tests {
         let Ok(python) =
             crate::jobs::managed_env::base_python(MODAL_ENV.min_python, MODAL_ENV.label).await
         else {
-            eprintln!("skipped: no Python on PATH");
+            eprintln!(
+                "skipped: no Python {}.{}+ on PATH",
+                MODAL_ENV.min_python.0, MODAL_ENV.min_python.1
+            );
             return;
         };
         let dir = std::env::temp_dir().join(format!("orx-modal-uv-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(dir.join("modal")).unwrap();
         std::fs::write(
             dir.join("modal").join("__init__.py"),
-            "import sys\n\
-             class App:\n    @staticmethod\n    def lookup(name, create_if_missing): return name\n\
-             class Image:\n    @staticmethod\n    def from_registry(tag): return Image()\n    \
-             def dockerfile_commands(self, *cmds):\n        sys.stderr.write('\\n'.join(cmds)); return self\n\
-             class Sandbox:\n    object_id = 'sb-1'\n    @classmethod\n    \
-             def create(cls, *args, **kwargs): return cls()\n",
+            r#"import sys
+class App:
+    @staticmethod
+    def lookup(name, create_if_missing): return name
+class Image:
+    @staticmethod
+    def from_registry(tag): return Image()
+    def dockerfile_commands(self, *cmds):
+        sys.stderr.write("\n".join(cmds)); return self
+class Sandbox:
+    object_id = "sb-1"
+    @classmethod
+    def create(cls, *args, **kwargs): return cls()
+"#,
         )
         .unwrap();
         let mut child = std::process::Command::new(python)
@@ -690,22 +702,28 @@ mod credential_tests {
             .stderr(Stdio::piped())
             .spawn()
             .unwrap();
-        use std::io::Write as _;
         child
             .stdin
             .take()
             .unwrap()
-            .write_all(br#"{"image": "python:3.12", "script": "uv run --locked x"}"#)
+            .write_all(br#"{"image": "python:3.12", "script": "true"}"#)
             .unwrap();
         let out = child.wait_with_output().unwrap();
         let _ = std::fs::remove_dir_all(&dir);
         let stderr = String::from_utf8_lossy(&out.stderr);
         assert!(out.status.success(), "{stderr}");
         assert!(
-            stderr.contains("COPY --from=ghcr.io/astral-sh/uv:"),
+            stderr
+                .lines()
+                .any(|line| line.starts_with("COPY --from=ghcr.io/astral-sh/uv:")
+                    && line.ends_with(" /uv /uvx /opt/orx-uv/")),
             "{stderr}"
         );
-        assert!(stderr.contains("/uv /uvx /opt/orx-uv/"), "{stderr}");
-        assert!(stderr.contains("ENV PATH=$PATH:/opt/orx-uv"), "{stderr}");
+        assert!(
+            stderr
+                .lines()
+                .any(|line| line == "ENV PATH=$PATH:/opt/orx-uv"),
+            "{stderr}"
+        );
     }
 }
