@@ -986,12 +986,9 @@ async fn main() {
     // plan mode): it must stay fast and touch neither stdout nor the network, so
     // skip the update check and telemetry and run it directly.
     if matches!(command, Command::InvocationGate) {
+        // Fail open: a missing model only loses attribution, a deny blocks every Bash call.
         if let Err(error) = commands::invocation_gate::run().await {
             eprintln!("orx invocation-gate: {error}");
-            println!(
-                "{}",
-                serde_json::json!({"hookSpecificOutput":{"hookEventName":"PreToolUse","permissionDecision":"deny","permissionDecisionReason":"OpenResearch could not capture this tool invocation's model"}})
-            );
         }
         return;
     }

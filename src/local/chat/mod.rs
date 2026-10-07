@@ -7134,38 +7134,37 @@ fn rebase_prepared_attachment_paths(input: &str) -> String {
         .join("\n")
 }
 
-impl TurnCtx {
-    pub(crate) fn record_native_invocations(&self, message: &Value) {
-        if !self.durable {
-            return;
-        }
-        let Some(model) = message.get("model").and_then(Value::as_str) else {
-            return;
-        };
-        let identity = crate::store::InvocationIdentity {
-            harness: self.harness.clone(),
-            model: model.to_string(),
-            provider: message
-                .get("provider")
-                .and_then(Value::as_str)
-                .map(str::to_string),
-        };
-        if let Some(parts) = message.get("content").and_then(Value::as_array) {
-            for part in parts {
-                if part.get("type").and_then(Value::as_str) == Some("tool_use") {
-                    if let Some(call_id) = part.get("id").and_then(Value::as_str) {
-                        if let Err(error) = Store::open().and_then(|store| {
-                            store.record_native_invocation(
-                                call_id,
-                                &identity,
-                                Some(&self.session_id),
-                            )
-                        }) {
-                            eprintln!("orx up: could not capture native tool identity: {error}");
-                        }
+pub(crate) fn record_native_invocations(harness: &str, session_id: &str, message: &Value) {
+    let Some(model) = message.get("model").and_then(Value::as_str) else {
+        return;
+    };
+    let identity = crate::store::InvocationIdentity {
+        harness: harness.to_string(),
+        model: model.to_string(),
+        provider: message
+            .get("provider")
+            .and_then(Value::as_str)
+            .map(str::to_string),
+    };
+    if let Some(parts) = message.get("content").and_then(Value::as_array) {
+        for part in parts {
+            if part.get("type").and_then(Value::as_str) == Some("tool_use") {
+                if let Some(call_id) = part.get("id").and_then(Value::as_str) {
+                    if let Err(error) = Store::open().and_then(|store| {
+                        store.record_native_invocation(call_id, &identity, Some(session_id))
+                    }) {
+                        eprintln!("orx up: could not capture native tool identity: {error}");
                     }
                 }
             }
+        }
+    }
+}
+
+impl TurnCtx {
+    pub(crate) fn record_native_invocations(&self, message: &Value) {
+        if self.durable {
+            record_native_invocations(&self.harness, &self.session_id, message);
         }
     }
 
