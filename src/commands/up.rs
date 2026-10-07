@@ -285,9 +285,12 @@ pub async fn run(args: UpArgs) -> Result<()> {
             if let Err(err) = updates::apply_now().await {
                 eprintln!("orx up: {err} Restarting on this version.");
             }
-            // Unless the updater counted it, back off (deferred again, or it never started),
-            // or the relaunch restarts straight back into this.
-            if !updates::newer_exe_on_disk().await && updates::failure_count() == failures {
+            // Unless the updater counted it or still will, back off (deferred again, or it
+            // never started), or the relaunch restarts straight back into this.
+            if !updates::newer_exe_on_disk().await
+                && updates::failure_count() == failures
+                && !updates::updater_running()
+            {
                 updates::record_attempt(false);
             }
         }

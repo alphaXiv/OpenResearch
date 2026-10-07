@@ -75,10 +75,7 @@ async fn apply(args: crate::UpdateArgs) -> Result<Outcome> {
     // replace different things, so serializing them against each other would
     // only have one record a contended attempt and back off for an hour it
     // never spent. flock is advisory and released when the process exits.
-    let channel = updates::current_channel()
-        .map(updates::InstallChannel::as_str)
-        .unwrap_or("unknown");
-    let lock_path = crate::config::config_dir().join(format!("update-{channel}.lock"));
+    let lock_path = updates::updater_lock_path();
     if let Some(parent) = lock_path.parent() {
         std::fs::create_dir_all(parent)?;
     }

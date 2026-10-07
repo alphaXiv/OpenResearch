@@ -753,6 +753,20 @@ pub fn record_installed(version: &str, tag: &str) {
     });
 }
 
+/// Held by an `orx update` for its whole run.
+pub fn updater_lock_path() -> PathBuf {
+    let channel = current_channel()
+        .map(InstallChannel::as_str)
+        .unwrap_or("unknown");
+    crate::config::config_dir().join(format!("update-{channel}.lock"))
+}
+
+/// Whether an `orx update` is still running, e.g. one `apply_now` stopped waiting for.
+pub fn updater_running() -> bool {
+    std::fs::File::open(updater_lock_path())
+        .is_ok_and(|file| matches!(file.try_lock(), Err(std::fs::TryLockError::WouldBlock)))
+}
+
 /// Consecutive failed update attempts recorded so far.
 pub fn failure_count() -> u32 {
     read_cache().map_or(0, |cache| cache.failures)
@@ -980,14 +994,14 @@ pub async fn newer_exe_on_disk() -> bool {
         .is_some_and(|on_disk| is_outdated(&current_version(), &on_disk))
 }
 
-/// Whether a held-back update is waiting for this process's restart and no failed
-/// install of it is still backing off.
+/// Whether a held-back update is waiting for this process's restart, with no failed
+/// install of it backing off and no updater still installing it.
 pub fn deferred_update_due() -> bool {
     let current = current_version();
     read_cache().is_some_and(|cache| {
         Version::parse(&cache.deferred_version).is_ok_and(|v| is_outdated(&current, &v))
             && (cache.failures == 0 || attempt_due(Some(&cache)))
-    })
+    }) && !updater_running()
 }
 
 /// Beside what the updater replaces, so every config and data dir using this
