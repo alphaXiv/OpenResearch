@@ -44,6 +44,7 @@ impl ManagedEnv {
 
     /// Returns the env's interpreter, (re)building the env when it is missing or stale.
     pub async fn ensure(&self) -> Result<PathBuf> {
+        // One lock for every env: installs are rare, so serializing them is cheaper than keying.
         static INSTALL_LOCK: OnceLock<tokio::sync::Mutex<()>> = OnceLock::new();
         let _install = INSTALL_LOCK
             .get_or_init(|| tokio::sync::Mutex::new(()))

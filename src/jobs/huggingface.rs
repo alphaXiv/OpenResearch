@@ -447,7 +447,10 @@ mod settings_tests {
         let Ok(python) =
             crate::jobs::managed_env::base_python(CLIENT_ENV.min_python, CLIENT_ENV.label).await
         else {
-            eprintln!("skipped: no Python 3.10+ on PATH");
+            eprintln!(
+                "skipped: no Python {}.{}+ on PATH",
+                CLIENT_ENV.min_python.0, CLIENT_ENV.min_python.1
+            );
             return;
         };
         let dir = std::env::temp_dir().join(format!("orx-hf-launcher-{}", uuid::Uuid::new_v4()));

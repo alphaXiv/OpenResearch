@@ -157,7 +157,8 @@ pub async fn ensure_env() -> Result<()> {
     }
     MODAL_ENV.ensure().await.map_err(|e| {
         anyhow!(
-            "{e} Or set ORX_MODAL_PYTHON to an interpreter with {}.",
+            "{}. Or set ORX_MODAL_PYTHON to an interpreter with {}.",
+            e.to_string().trim_end_matches('.'),
             MODAL_ENV.requirement
         )
     })?;
@@ -613,11 +614,14 @@ mod credential_tests {
     }
 
     #[tokio::test]
-    async fn managed_env_rejects_modal_without_sandbox_tags() {
+    async fn ready_check_requires_sandbox_tags() {
         let Ok(python) =
             crate::jobs::managed_env::base_python(MODAL_ENV.min_python, MODAL_ENV.label).await
         else {
-            eprintln!("skipped: no Python 3.10+ on PATH");
+            eprintln!(
+                "skipped: no Python {}.{}+ on PATH",
+                MODAL_ENV.min_python.0, MODAL_ENV.min_python.1
+            );
             return;
         };
         for (params, ready) in [
