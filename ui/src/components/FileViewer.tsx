@@ -67,6 +67,8 @@ import { MediaToolbarSlot } from "./mediaToolbar";
 import { Md } from "./Md";
 import { Button, IconButton, IconButtonLink, Spinner, showAlert } from "./ui";
 
+const NO_ARTIFACT_ENTRIES: ArtifactEntry[] = [];
+
 export interface FileScrollPosition {
   top: number;
   left: number;
@@ -158,7 +160,7 @@ export function FileViewer({
   onLineScrollRequestHandled,
   onEdit,
   artifactVersion,
-  artifactEntries = [],
+  artifactEntries = NO_ARTIFACT_ENTRIES,
   bufferSession,
   remote = false,
   restored = false,
