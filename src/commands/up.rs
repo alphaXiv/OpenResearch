@@ -2166,8 +2166,7 @@ async fn decode_local_response<T: serde::de::DeserializeOwned>(
 }
 
 fn local_client() -> Result<reqwest::Client> {
-    reqwest::Client::builder()
-        .no_proxy()
+    crate::net::loopback_client()
         .connect_timeout(Duration::from_secs(3))
         .build()
         .map_err(|error| anyhow!("Could not create the orx up client: {error}"))
@@ -8212,7 +8211,13 @@ mod tests {
         let url = format!("http://{}/file", listener.local_addr().unwrap());
         tokio::spawn(async move { axum::serve(listener, app).await });
 
-        let response = reqwest::get(url).await.unwrap();
+        let response = crate::net::loopback_client()
+            .build()
+            .unwrap()
+            .get(url)
+            .send()
+            .await
+            .unwrap();
         assert_eq!(ACTIVE.load(Ordering::SeqCst), 1);
         release.notify_one();
         assert_eq!(response.text().await.unwrap(), "done");

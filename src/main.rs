@@ -24,6 +24,7 @@ mod jobs;
 // Local mode (`orx up`): builds out across stages; not all of it is wired yet.
 #[allow(dead_code)]
 mod local;
+mod net;
 mod output;
 mod paths;
 mod plane;

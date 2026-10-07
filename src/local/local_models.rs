@@ -85,8 +85,7 @@ pub async fn discover(req: &Probe) -> Result<Vec<String>> {
             "Use an http:// or https:// loopback address, such as http://127.0.0.1:1234/v1."
         ));
     }
-    let client = reqwest::Client::builder()
-        .no_proxy()
+    let client = crate::net::loopback_client()
         .redirect(reqwest::redirect::Policy::none())
         .timeout(Duration::from_secs(5))
         .build()?;

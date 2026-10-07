@@ -3304,8 +3304,7 @@ impl ChatHost {
             opencode,
             codex,
             claude,
-            http: reqwest::Client::builder()
-                .no_proxy()
+            http: crate::net::loopback_client()
                 .build()
                 .expect("loopback http client"),
             events,

@@ -247,7 +247,7 @@ pub fn resolve_token_with_source() -> Result<(String, TokenSource)> {
 fn http() -> &'static Client {
     static CLIENT: OnceLock<Client> = OnceLock::new();
     CLIENT.get_or_init(|| {
-        Client::builder()
+        crate::net::remote_client()
             .connect_timeout(Duration::from_secs(15))
             .build()
             .expect("reqwest client")
