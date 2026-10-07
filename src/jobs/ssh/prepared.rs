@@ -73,12 +73,12 @@ async fn unresolved(key: &str) -> crate::error::Error {
         .stdin(std::process::Stdio::null())
         .kill_on_drop(true)
         .output();
-    // OpenSSH prints its version to stderr; a wrapper may use stdout instead.
     let version = tokio::time::timeout(std::time::Duration::from_secs(10), version)
         .await
         .ok()
         .and_then(Result::ok)
         .and_then(|output| {
+            // OpenSSH prints its version to stderr; a wrapper may use stdout instead.
             [output.stderr, output.stdout]
                 .into_iter()
                 .find_map(|stream| {
@@ -89,14 +89,11 @@ async fn unresolved(key: &str) -> crate::error::Error {
                         .map(str::to_owned)
                 })
         });
-    anyhow!(
-        "{}",
-        unresolved_message(
-            key,
-            crate::local::shell_env::find_on_process_path("ssh").as_deref(),
-            version.as_deref()
-        )
-    )
+    anyhow!(unresolved_message(
+        key,
+        crate::local::shell_env::find_on_process_path("ssh").as_deref(),
+        version.as_deref()
+    ))
 }
 
 pub(super) fn probe_args() -> Vec<String> {
