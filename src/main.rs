@@ -986,12 +986,9 @@ async fn main() {
     // plan mode): it must stay fast and touch neither stdout nor the network, so
     // skip the update check and telemetry and run it directly.
     if matches!(command, Command::InvocationGate) {
+        // Fail open: a missing model only loses attribution, a deny blocks every Bash call.
         if let Err(error) = commands::invocation_gate::run().await {
             eprintln!("orx invocation-gate: {error}");
-            println!(
-                "{}",
-                serde_json::json!({"hookSpecificOutput":{"hookEventName":"PreToolUse","permissionDecision":"deny","permissionDecisionReason":"OpenResearch could not capture this tool invocation's model"}})
-            );
         }
         return;
     }
@@ -1047,7 +1044,8 @@ async fn main() {
         command,
         Command::Version(_) | Command::Update(_) | Command::Delete(_) | Command::Feedback(_)
     ))
-    .then(updates::UpdateWarning::start);
+    // `orx up` updates from its own periodic pass, once it holds the backend lock that defers it.
+    .then(|| updates::UpdateWarning::start(!matches!(command, Command::Up(_))));
 
     // Anonymous usage analytics. Record the flag process-globally so command
     // modules can fire events without threading it through, then fire the

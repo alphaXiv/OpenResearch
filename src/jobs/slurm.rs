@@ -598,6 +598,7 @@ mod tests {
             &run_dir(&run_a),
             0,
             std::time::Duration::from_secs(5),
+            true,
             &mut |l: &str| lines.push(l.to_string()),
         )
         .await

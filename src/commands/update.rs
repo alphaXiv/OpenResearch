@@ -48,8 +48,9 @@ pub async fn run(args: crate::UpdateArgs) -> Result<()> {
         _ if dry_run => {}
         // Someone else is mid-update; their outcome is the one that counts, and
         // recording either way here would skew the backoff they are building.
-        Ok(Outcome::Contended) => updates::record_contended(),
-        Ok(_) => updates::record_attempt(true),
+        // Nothing was installed or failed; this only damps the respawns.
+        Ok(Outcome::Contended | Outcome::Deferred) => updates::record_contended(),
+        Ok(Outcome::Done) => updates::record_attempt(true),
         Err(_) => updates::record_attempt(false),
     }
     match result {
@@ -65,6 +66,8 @@ enum Outcome {
     Done,
     /// Another updater holds the lock.
     Contended,
+    /// A running backend installs it on restart instead.
+    Deferred,
 }
 
 async fn apply(args: crate::UpdateArgs) -> Result<Outcome> {
@@ -72,10 +75,7 @@ async fn apply(args: crate::UpdateArgs) -> Result<Outcome> {
     // replace different things, so serializing them against each other would
     // only have one record a contended attempt and back off for an hour it
     // never spent. flock is advisory and released when the process exits.
-    let channel = updates::current_channel()
-        .map(updates::InstallChannel::as_str)
-        .unwrap_or("unknown");
-    let lock_path = crate::config::config_dir().join(format!("update-{channel}.lock"));
+    let lock_path = updates::updater_lock_path();
     if let Some(parent) = lock_path.parent() {
         std::fs::create_dir_all(parent)?;
     }
@@ -93,6 +93,12 @@ async fn apply(args: crate::UpdateArgs) -> Result<Outcome> {
 
     let current = updates::current_version();
     let target = updates::preflight(args.force)?;
+
+    // Held until this function returns, so no backend starts mid-install.
+    let claim = (!args.dry_run).then(|| updates::claim_install(&target));
+    if matches!(claim, Some(None)) {
+        return defer(&current, args.background).await;
+    }
 
     if let UpdateTarget::AppBundle(root) = &target {
         return updates::macos_app::update(root, &current, args.dry_run, args.background)
@@ -158,6 +164,29 @@ async fn apply(args: crate::UpdateArgs) -> Result<Outcome> {
         println!("✓ Updated orx {} → {}.", current, latest.version);
     }
     Ok(Outcome::Done)
+}
+
+/// Record the release for the running `orx up` to install when it restarts. Not
+/// even `--force` swaps the binary under it: its agents would run a different
+/// `orx` than the backend that set up their sandbox.
+async fn defer(current: &semver::Version, background: bool) -> Result<Outcome> {
+    let latest = updates::fetch_latest_for_channel(Duration::from_secs(10)).await?;
+    let Some(latest) = latest.filter(|latest| updates::is_outdated(current, &latest.version))
+    else {
+        if !background {
+            println!("orx {} is up to date.", current);
+        }
+        return Ok(Outcome::Done);
+    };
+    updates::record_deferred(&latest.version.to_string(), &latest.tag);
+    if !background {
+        println!(
+            "orx {} is ready. The running OpenResearch dashboard installs it when it restarts \
+             (automatically once idle, or with Restart in the dashboard).",
+            latest.version
+        );
+    }
+    Ok(Outcome::Deferred)
 }
 
 /// cargo-dist ships a shell installer and a PowerShell one.

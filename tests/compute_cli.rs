@@ -534,6 +534,7 @@ if [ "$1" = -G ]; then exec /usr/bin/ssh -F /dev/null "$@"; fi
 for cmd do :; done
 case "$cmd" in
   *scancel*|*exit_code*) exec /bin/sh -c "$cmd";;
+  *__ORX_LOG_START__*) echo __ORX_LOG_START__;;
   *) exit 0;;
 esac
 "#,
