@@ -977,6 +977,16 @@ pub fn status() -> UpdateStatus {
 
 /// Whether the binary [`relaunch`] would exec reports a newer version than this process.
 pub async fn newer_exe_on_disk() -> bool {
+    // This process runs from the AppImage's mount, but the updater renames a new
+    // `.AppImage` over the file, so ask whether that file was replaced instead.
+    #[cfg(all(desktop_app, target_os = "linux"))]
+    if let Some(appimage) = running_appimage() {
+        return STARTUP_APPIMAGE
+            .get()
+            .copied()
+            .flatten()
+            .is_some_and(|start| file_identity(&appimage) != Some(start));
+    }
     let Ok(exe) = crate::paths::spawnable_exe() else {
         return false;
     };
@@ -992,6 +1002,23 @@ pub async fn newer_exe_on_disk() -> bool {
         .strip_prefix("orx ")
         .and_then(|v| Version::parse(v).ok())
         .is_some_and(|on_disk| is_outdated(&current_version(), &on_disk))
+}
+
+#[cfg(all(desktop_app, target_os = "linux"))]
+static STARTUP_APPIMAGE: OnceLock<Option<(u64, u64)>> = OnceLock::new();
+
+/// Note which `.AppImage` file this process started from, before an update can replace it.
+pub fn note_startup_image() {
+    #[cfg(all(desktop_app, target_os = "linux"))]
+    STARTUP_APPIMAGE.get_or_init(|| running_appimage().as_deref().and_then(file_identity));
+}
+
+#[cfg(any(test, all(desktop_app, target_os = "linux")))]
+fn file_identity(path: &Path) -> Option<(u64, u64)> {
+    use std::os::unix::fs::MetadataExt;
+    std::fs::metadata(path)
+        .ok()
+        .map(|meta| (meta.dev(), meta.ino()))
 }
 
 /// Whether a held-back update is waiting for this process's restart, with no failed
@@ -1590,10 +1617,10 @@ impl UpdateWarning {
 mod tests {
     use super::{
         app_bundle_root, attempt_backoff, attempt_due, bold, claim_install, detect_channel,
-        exe_matches_prefix, now_unix, package_manager_owns, parse_manifest, portable_dir,
-        portable_outside_prefix, precedence, relaunch_args, render, restart_target, retired_path,
-        target_lock_path, warning_for, BackendLock, CheckCache, InstallChannel, UpdateTarget,
-        ATTEMPT_BACKOFF_MAX, ATTEMPT_BACKOFF_MIN,
+        exe_matches_prefix, file_identity, now_unix, package_manager_owns, parse_manifest,
+        portable_dir, portable_outside_prefix, precedence, relaunch_args, render, restart_target,
+        retired_path, target_lock_path, warning_for, BackendLock, CheckCache, InstallChannel,
+        UpdateTarget, ATTEMPT_BACKOFF_MAX, ATTEMPT_BACKOFF_MIN,
     };
     use semver::Version;
     use std::ffi::OsString;
@@ -1761,6 +1788,20 @@ mod tests {
         // The claim excludes backends until the install finishes.
         assert!(claim_install(&target).is_none());
         drop(claim);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn renaming_a_new_file_over_an_image_changes_its_identity() {
+        let dir = std::env::temp_dir().join(format!("orx-image-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let image = dir.join("OpenResearch.AppImage");
+        std::fs::write(&image, "old").unwrap();
+        let start = file_identity(&image);
+        std::fs::write(dir.join("new"), "new").unwrap();
+        std::fs::rename(dir.join("new"), &image).unwrap();
+        assert!(start.is_some() && file_identity(&image) != start);
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 
     #[test]

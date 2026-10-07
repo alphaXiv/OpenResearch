@@ -53,6 +53,7 @@ mod harness_setup;
 use compute_settings::*;
 
 pub async fn run(args: UpArgs) -> Result<()> {
+    updates::note_startup_image();
     let port = args.port;
     let persistent_host = args.remote_host;
     let remote_auth = if persistent_host {
