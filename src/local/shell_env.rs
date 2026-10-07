@@ -170,6 +170,11 @@ pub fn find_on_path(binary: &str) -> Option<PathBuf> {
     search_in(&search_path()?, binary)
 }
 
+/// Where `binary` resolves on the process PATH, which `ssh` and `kubectl` inherit.
+pub fn find_on_process_path(binary: &str) -> Option<PathBuf> {
+    search_in(&std::env::var_os("PATH")?, binary)
+}
+
 /// Where `binary` lives inside `dir`, trying the PATHEXT spellings a bare name lacks on Windows.
 pub fn find_in_dir(dir: &std::path::Path, binary: &str) -> Option<PathBuf> {
     candidate_names(binary)

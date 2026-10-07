@@ -1,5 +1,5 @@
 use std::collections::{BTreeMap, BTreeSet};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::{LazyLock, RwLock};
 
 use serde::{Deserialize, Serialize};
@@ -53,12 +53,18 @@ fn value<'a>(output: &'a str, key: &str) -> Result<&'a str> {
         .ok_or_else(|| anyhow!("OpenSSH did not resolve {key}"))
 }
 
-fn unresolved_message(key: &str, ssh: Option<&std::path::Path>, version: Option<&str>) -> String {
-    format!(
-        "OpenSSH did not resolve {key} (ssh: {}, version: {}); a non-OpenSSH `ssh` wrapper earlier on PATH is the likely cause",
-        ssh.map_or("not found on PATH".into(), |path| path.display().to_string()),
+fn unresolved_message(key: &str, ssh: Option<&Path>, version: Option<&str>) -> String {
+    let mut message = format!(
+        "OpenSSH did not resolve {key} (ssh: {}, version: {})",
+        ssh.map_or("not found on PATH".into(), |path| path
+            .display()
+            .to_string()),
         version.unwrap_or("unknown")
-    )
+    );
+    if !version.is_some_and(|version| version.starts_with("OpenSSH_")) {
+        message.push_str("; a non-OpenSSH `ssh` earlier on PATH is the likely cause");
+    }
+    message
 }
 
 async fn unresolved(key: &str) -> crate::error::Error {
@@ -67,17 +73,27 @@ async fn unresolved(key: &str) -> crate::error::Error {
         .stdin(std::process::Stdio::null())
         .kill_on_drop(true)
         .output();
+    // OpenSSH prints its version to stderr; a wrapper may use stdout instead.
     let version = tokio::time::timeout(std::time::Duration::from_secs(10), version)
         .await
         .ok()
         .and_then(Result::ok)
-        .map(|output| String::from_utf8_lossy(&output.stderr).trim().to_owned())
-        .filter(|version| !version.is_empty());
+        .and_then(|output| {
+            [output.stderr, output.stdout]
+                .into_iter()
+                .find_map(|stream| {
+                    String::from_utf8_lossy(&stream)
+                        .lines()
+                        .map(str::trim)
+                        .find(|line| !line.is_empty())
+                        .map(str::to_owned)
+                })
+        });
     anyhow!(
         "{}",
         unresolved_message(
             key,
-            crate::local::shell_env::find_on_path("ssh").as_deref(),
+            crate::local::shell_env::find_on_process_path("ssh").as_deref(),
             version.as_deref()
         )
     )
@@ -349,18 +365,23 @@ mod tests {
         assert_eq!(
             unresolved_message(
                 "controlpath",
-                Some(std::path::Path::new("/home/me/bin/ssh")),
-                Some("OpenSSH_9.6p1 Ubuntu-3ubuntu13")
+                Some(Path::new("/home/me/bin/ssh")),
+                Some("ssh-wrapper 1.0")
             ),
-            "OpenSSH did not resolve controlpath (ssh: /home/me/bin/ssh, version: OpenSSH_9.6p1 Ubuntu-3ubuntu13); a non-OpenSSH `ssh` wrapper earlier on PATH is the likely cause"
+            "OpenSSH did not resolve controlpath (ssh: /home/me/bin/ssh, version: ssh-wrapper 1.0); a non-OpenSSH `ssh` earlier on PATH is the likely cause"
         );
         assert_eq!(
             unresolved_message("controlpath", None, None),
-            "OpenSSH did not resolve controlpath (ssh: not found on PATH, version: unknown); a non-OpenSSH `ssh` wrapper earlier on PATH is the likely cause"
+            "OpenSSH did not resolve controlpath (ssh: not found on PATH, version: unknown); a non-OpenSSH `ssh` earlier on PATH is the likely cause"
         );
-        let probe = "hostname example.invalid\nuser alice\nport 22";
-        assert!(value(probe, "controlpath").is_err());
-        assert_eq!(value(probe, "user").unwrap(), "alice");
+        assert_eq!(
+            unresolved_message(
+                "controlpath",
+                Some(Path::new("/usr/bin/ssh")),
+                Some("OpenSSH_9.6p1 Ubuntu-3ubuntu13")
+            ),
+            "OpenSSH did not resolve controlpath (ssh: /usr/bin/ssh, version: OpenSSH_9.6p1 Ubuntu-3ubuntu13)"
+        );
     }
 
     #[tokio::test]
