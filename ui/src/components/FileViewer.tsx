@@ -283,6 +283,19 @@ export function FileViewer({
     },
     [isAbsolute, parentFolder, rawFileUrl],
   );
+  // Callers pass a fresh `onOpenFile` each render; a stable wrapper keeps Md's links and images mounted.
+  const onOpenFileRef = useRef(onOpenFile);
+  onOpenFileRef.current = onOpenFile;
+  const openMarkdownFile = useCallback(
+    (
+      path: string,
+      _line: number | undefined,
+      _exp: string | undefined,
+      _ref: string | undefined,
+      intent: TabOpenIntent,
+    ) => onOpenFileRef.current?.(path, sessionId, gitRef, intent),
+    [gitRef, sessionId],
+  );
   const mediaKind = mediaPreviewKind(data?.presentation);
   const viaArtifacts = loaded?.source === "artifact" && !isArtifacts;
   const viaCheckout = isArtifacts && loaded?.source === "checkout";
@@ -900,11 +913,7 @@ export function FileViewer({
                 text={data.content}
                 resolveFilePath={resolveMarkdownFilePath}
                 resolveImageSrc={resolveAssetSrc}
-                onOpenFile={
-                  onOpenFile &&
-                  ((p, _line, _exp, _ref, intent) =>
-                    onOpenFile(p, sessionId, gitRef, intent))
-                }
+                onOpenFile={onOpenFile && openMarkdownFile}
               />
             )}
           </div>
