@@ -184,6 +184,7 @@ mod tests {
         assert_eq!(parse_python_version("garbage"), None);
     }
 
+    #[cfg(not(windows))]
     fn test_env(ready_check: &'static str, min_python: (u32, u32)) -> ManagedEnv {
         ManagedEnv {
             name: "test",
