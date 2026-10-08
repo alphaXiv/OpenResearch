@@ -2209,7 +2209,7 @@ pub(crate) async fn submit_run_via_up(
         force: args.force,
         chat_session_id: args.launching_chat_session(),
         agent_origin: args.agent_origin.clone(),
-        caller_config_dir: Some(crate::config::config_dir()),
+        caller_config_dir: Some(absolute_config_dir()),
     };
     let response =
         authenticate_up_request(local_client()?.post(format!("http://127.0.0.1:{port}/api/runs")))
@@ -2263,6 +2263,12 @@ pub(crate) async fn cancel_run_via_up(port: u16, run_id: &str) -> Result<()> {
 
 /// Launching with orx up's settings after the caller checked its own would
 /// submit to a different cluster or namespace than the one the caller tested.
+/// A relative `XDG_CONFIG_HOME` names a different dir in each process's working directory.
+fn absolute_config_dir() -> std::path::PathBuf {
+    let dir = crate::config::config_dir();
+    std::path::absolute(&dir).unwrap_or(dir)
+}
+
 fn require_caller_config_dir(
     caller: Option<&std::path::Path>,
     own: &std::path::Path,
@@ -2292,11 +2298,8 @@ fn require_caller_config_dir(
 async fn create_run(State(state): State<AppState>, Json(req): Json<CreateRunReq>) -> ApiResult {
     reject_if_stopping(&state)?;
     reject_if_moving(&state)?;
-    require_caller_config_dir(
-        req.caller_config_dir.as_deref(),
-        &crate::config::config_dir(),
-    )
-    .map_err(bad_request)?;
+    require_caller_config_dir(req.caller_config_dir.as_deref(), &absolute_config_dir())
+        .map_err(bad_request)?;
     let store = Store::open()?;
     let experiment = store
         .get_local_experiment(&req.experiment_id)?
