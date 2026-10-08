@@ -55,7 +55,6 @@ import {
   Search,
   SlidersHorizontal,
   SquareTerminal,
-  Terminal,
   ToggleRight,
   TriangleAlert,
   Users,
@@ -4231,7 +4230,6 @@ export function ChatPanel({
   runtime,
   onOpenDemoWelcome,
   composerFocusNonce = 0,
-  demoRunningRunId = null,
   activeSessionId,
   onActiveSessionChange,
   preferredAgent,
@@ -4298,7 +4296,6 @@ export function ChatPanel({
   /** Increments when the demo welcome hands focus to the composer. */
   composerFocusNonce?: number;
   /** Demo run currently executing, for the monitor-it hint above the composer. */
-  demoRunningRunId?: string | null;
   activeSessionId: string | null;
   onActiveSessionChange: (sessionId: string | null, options?: { replace?: boolean; projectId?: string }) => void;
   /** Database-backed selection used to seed new chat sessions. */
@@ -4402,7 +4399,6 @@ export function ChatPanel({
   const [unreadSessionIds, setUnreadSessionIds] = useState<ReadonlySet<string>>(new Set());
   const [draft, setDraft] = useState("");
   const [demoHintDismissed, setDemoHintDismissed] = useState(false);
-  const [demoRunHintDismissed, setDemoRunHintDismissed] = useState(false);
   const [annotations, setAnnotations] = useState<ComposerAnnotation[]>([]);
   const annotationId = useRef(0);
   const composerScopeRef = useRef({ projectId, activeId, mainView });
@@ -5083,7 +5079,6 @@ export function ChatPanel({
         : new Set(),
     );
     setDemoHintDismissed(false);
-    setDemoRunHintDismissed(false);
     setTitleReveals(new Map());
     seenTitles.current = new Map();
     void syncSessionList();
@@ -6713,8 +6708,10 @@ export function ChatPanel({
               role="note"
               className={`composer-demo-hint ${COMPOSER_HINT_CLASS}`}
             >
-              <FlaskConical size={16} className="shrink-0 text-primary" />
-              <span className="flex-1" dir="auto">{m.chat_panel_demo_hint_body()}</span>
+              <span className="flex-1" dir="auto">
+                <FlaskConical size={16} className="inline-block align-text-bottom me-2 text-primary" />
+                {m.chat_panel_demo_hint_body()}
+              </span>
               <IconButton
                 size="small"
                 aria-label={m.chat_panel_dismiss_demo_hint()}
@@ -6728,38 +6725,6 @@ export function ChatPanel({
               </IconButton>
             </div>
           )}
-          {demoRunningRunId && !demoRunHintDismissed && onOpenRun && (
-            <div
-              role="note"
-              className={`composer-demo-run-hint ${COMPOSER_HINT_CLASS}`}
-            >
-              <FlaskConical size={16} className="shrink-0 text-primary" />
-              <span className="flex flex-1 flex-wrap items-center gap-x-1.5 gap-y-1" dir="auto">
-                <span>{m.chat_panel_demo_run_hint_before()}</span>
-                <Button size="small" onClick={() => onOpenRun(demoRunningRunId, "keepOpen")}>
-                  <Terminal size={14} />
-                  {m.experiments_table_logs()}
-                </Button>
-                <span>{m.chat_panel_demo_run_hint_after()}</span>
-              </span>
-              <IconButton
-                size="small"
-                aria-label={m.chat_panel_dismiss_demo_hint()}
-                title={m.chat_panel_dismiss_demo_hint()}
-                onClick={() => {
-                  setDemoRunHintDismissed(true);
-                  composerRef.current?.focus();
-                }}
-              >
-                <X size={14} />
-              </IconButton>
-            </div>
-          )}
-          <span className="sr-only" role="status" aria-live="polite">
-            {demoRunningRunId
-              ? `${m.chat_panel_demo_run_hint_before()} ${m.experiments_table_logs()} ${m.chat_panel_demo_run_hint_after()}`
-              : ""}
-          </span>
           {!embedded && !activeId && onNewProject && (
             <ComposerProjectPicker
               projects={sidebarProjects}

@@ -6,17 +6,19 @@ description: "Interactive HTML charts for chat and publication figures in matplo
 Prefer interactive HTML for suitable experiment metrics in chat, and static vector
 figures for papers. Skip a chart when the data or available templates do not fit,
 or when a text summary communicates the result better. Both should use real evidence, clear units, and honest uncertainty.
+Show newly created image figures inline in the chat handoff, including SVGs:
+`![Description](artifacts/figure.svg)`. Keep their clickable file links as well.
 
 ## Interactive charts in chat
 
 When a visualization helps explain experiment metrics in chat, use the bundled
 offline HTML chart. Start with one useful view. Add a dropdown only when the
 same data benefits from multiple distinct views; never add views just to fill
-the selector. A single view has no dropdown.
+the selector. A single view has no dropdown. Hide the legend when only one series is plotted.
 Use the house Helvetica/Arial typography and Okabe–Ito palette, with a clear
 hierarchy: an 18px medium-weight title, 14px setup metadata, 14px metric controls,
 ticks and legend, and a compact plot capped at 360px. Keep axes and horizontal
-grids quiet; put the metric name and units beside the y-axis in a restrained rotated label.
+grids quiet; put the metric name and units horizontally above the y-axis tick labels.
 Use 3px curves and small markers for sparse measurements. Controls should
 look secondary to the data, with readable foreground text. The dashboard hosts
 the metric dropdown using its shared OptionPicker component; the standalone
@@ -54,7 +56,9 @@ Embed the result inline using image syntax (HTML opens as a sandboxed figure):
 ![Learning-rate comparison](artifacts/loss.html)
 ```
 
-Link CSV/JSON evidence alongside the figure. Reuse a run's ready-made chart
+Choose complementary prose, tables, and visuals: each should help the reader
+understand something beyond what the other representations already show.
+Link CSV/JSON evidence alongside the figure for access to the underlying data. Reuse a run's ready-made chart
 rather than regenerating it. The paper-specific rules below apply to static
 publication output.
 

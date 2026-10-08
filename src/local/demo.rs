@@ -1040,7 +1040,7 @@ fn assistant_parts(harness: &str) -> Vec<WirePart> {
     ));
     parts.push(WirePart::text(
         "final",
-        "Pipeline completed successfully.\n\n- Base training: 5,000 steps, 81.92M tokens, 131.55 min\n- Final base validation BPB: **1.165758**\n- Base evaluation train/validation BPB: **1.152185 / 1.119301**\n- CORE accuracy: OpenBookQA **0.2500**, Winogrande **0.5625**, Wikidata/operators **0.0000**\n- SFT: 1,500 steps, 39.07 min\n- Final/minimum SFT validation BPB: **0.7389**\n- Final run status: **done**\n\nThe CLI loaded SFT checkpoint 1499 on MPS and answered **Paris**. I preserved the full stitched run log and `cpu-apple-silicon-pipeline-results.md` in the project artifact.",
+        "Pipeline completed successfully. Base training finished at **1.1658 BPB**; SFT finished at **0.7389 BPB**. Explore each phase’s validation curve and the CORE benchmark scores below.\n\n![Nanochat pipeline results](artifacts/nanochat-pipeline-results.html)\n\nBase training took **131.55 min** (5,000 steps, 81.92M tokens), followed by **39.07 min** of SFT (1,500 steps). The SFT checkpoint answered **Paris**. These are recorded results from the demo pipeline.\n\n[Full results](artifacts/cpu-apple-silicon-pipeline-results.md) · [Metric data](artifacts/evidence/training-metrics.csv)",
     ));
     parts
 }
@@ -1151,7 +1151,7 @@ fn figure_assistant_parts(harness: &str) -> Vec<WirePart> {
     parts.push(WirePart::text(
         "figure-final",
         format!(
-            "Completed the requested SVG-only figure set.\n\n- **Base training:** loss falls from about 10.40 to 3.75 over 5,000 steps; validation BPB improves from 3.1958 to 1.1658, with post-training evaluation at 1.1193.\n- **SFT:** loss finishes near 2.03; validation BPB briefly rises from 1.0174 to 1.0580 at step 200, then falls steadily to 0.7389.\n- **Throughput:** median 10,466 tok/s for base and 10,551 tok/s for SFT on Apple Silicon.\n- **CORE:** Winogrande leads at 0.5625 accuracy (0.1250 centered); OpenBookQA is 0.2500; Wikidata QA and Operators are 0.0000.\n\nFiles:\n\n- {}\n- {}\n- {}\n- {}",
+            "Completed the requested SVG-only figure set.\n\n- **Base training:** loss falls from about 10.40 to 3.75 over 5,000 steps; validation BPB improves from 3.1958 to 1.1658, with post-training evaluation at 1.1193.\n- **SFT:** loss finishes near 2.03; validation BPB briefly rises from 1.0174 to 1.0580 at step 200, then falls steadily to 0.7389.\n- **Throughput:** median 10,466 tok/s for base and 10,551 tok/s for SFT on Apple Silicon.\n- **CORE:** Winogrande leads at 0.5625 accuracy (0.1250 centered); OpenBookQA is 0.2500; Wikidata QA and Operators are 0.0000.\n\n![Base training loss and validation BPB](artifacts/nanochat-base-training-curves.svg)\n\n![SFT loss and validation BPB](artifacts/nanochat-sft-training-curves.svg)\n\n![Training throughput on Apple Silicon](artifacts/nanochat-training-throughput.svg)\n\n![CORE evaluation results](artifacts/nanochat-core-evaluation.svg)\n\nFiles:\n\n- {}\n- {}\n- {}\n- {}",
             artifact_link("nanochat-base-training-curves.svg"),
             artifact_link("nanochat-sft-training-curves.svg"),
             artifact_link("nanochat-training-throughput.svg"),
@@ -1362,8 +1362,7 @@ fn literature_assistant_parts(harness: &str) -> Vec<WirePart> {
     parts.push(WirePart::text(
         "literature-final",
         format!(
-            "The main bottleneck is insufficient pretraining. Model size sets the eventual ceiling; the SFT recipe likely worsens repetition but cannot manufacture knowledge the base model never learned.\n\nWhy:\n\n- The model saw only 81.9M tokens. Under nanochat’s own scaling convention, that is 3.53 tokens per scaling parameter, versus its default target of 12.\n- Base validation BPB was still improving at the endpoint: 1.1878 at step 4,000 → 1.1743 at 4,500 → 1.1658 at 5,000. The model had not converged.\n- [Chinchilla](https://arxiv.org/abs/2203.15556) establishes that substantially scaling training tokens is generally preferable to leaving a model undertrained. Its canonical ~20-token ratio is not directly comparable because nanochat counts parameters differently, but the direction is unambiguous.\n- [LIMA](https://arxiv.org/abs/2305.11206) supports the view that SFT mostly exposes capabilities acquired during pretraining. It also reports that validation perplexity can continue improving after generation quality peaks—matching your falling SFT loss but poor free-running behavior.\n- [TinyStories](https://arxiv.org/abs/2305.07759) shows that 73.5M parameters are sufficient for coherent generation on a constrained, high-quality distribution. Thus size alone does not explain the repetition. Conversely, broad MMLU/GSM8K performance at this size will remain limited.\n- [Textbooks Are All You Need](https://arxiv.org/abs/2306.11644) makes pretraining-data quality an important subsequent axis, but your run is too undertrained to diagnose quality cleanly yet.\n\nRun this next:\n\n- Train the identical d6 model from scratch with the same data and recipe, changing only the pretraining horizon to `--target-param-data-ratio=12`.\n- That gives 278,396,928 tokens or 16,992 steps—3.4× the current exposure.\n- Evaluate checkpoints at 5,000, ~11,000, and 16,992 steps using fixed prompts, base BPB, CORE, and a repetition metric.\n- Apply the identical 1,500-step SFT recipe only to the final checkpoint and compare ChatCORE, MMLU, GSM8K, and generation.\n\nDo not change SFT simultaneously; that would obscure whether additional pretraining solved the problem. If repetition remains after the longer-pretrained base improves, the following round should test SFT early stopping/lower learning rate using generation and ChatCORE—not validation loss—as the selection criterion.\n\nI saved the full diagnosis as the project artifact [{}]({}).",
-            "nanochat-bottleneck-diagnosis.md",
+            "The recorded run suggests **insufficient pretraining is the leading bottleneck**. Test that inference by increasing pretraining while keeping the model, data, and SFT recipe fixed.\n\nValidation BPB was still improving at the endpoint after **81.92M tokens**. The literature below informs the next test; it does not establish the cause of this run’s behavior.\n\n| Paper | Relevant finding | Implication here |\n| --- | --- | --- |\n| [Chinchilla](https://arxiv.org/abs/2203.15556) | Training tokens matter alongside model size. | Test more pretraining; its parameter-count convention differs from nanochat’s. |\n| [LIMA](https://arxiv.org/abs/2305.11206) | SFT can expose capabilities learned during pretraining. | Falling SFT loss alone does not establish better generation. |\n| [TinyStories](https://arxiv.org/abs/2305.07759) | Small models can generate coherently on constrained text. | Size alone does not establish the cause of repetition. |\n| [Textbooks Are All You Need](https://arxiv.org/abs/2306.11644) | Curated data can improve sample efficiency. | Data quality remains a follow-up hypothesis. |\n\n**Next experiment:** train the same d6 model from scratch to `--target-param-data-ratio=12` (**16,992 steps**, about **3.4×** the recorded token budget).\n\n- Keep architecture, data, optimizer, and the 1,500-step SFT recipe fixed.\n- Evaluate base BPB, CORE, fixed-prompt generations, and repetition at 5,000, ~11,000, and 16,992 steps.\n- Apply SFT to the final checkpoint, then compare generation and downstream evaluations.\n\n[Full diagnosis and sources]({})",
             report_path,
         ),
     ));
@@ -2111,7 +2110,7 @@ mod tests {
             .contains("My 73.5M-parameter nanochat model"));
         assert!(literature_messages[1]
             .parts_json
-            .contains("The main bottleneck is insufficient pretraining"));
+            .contains("insufficient pretraining is the leading bottleneck"));
         assert!(!literature_messages[1].parts_json.contains("/Users/"));
         assert!(!literature_messages[1]
             .parts_json
@@ -2148,7 +2147,7 @@ mod tests {
             std::fs::read_dir(data.join("files/nanochat"))
                 .unwrap()
                 .count(),
-            8
+            9
         );
         for name in FigureAssets::iter() {
             assert!(data.join("files/nanochat").join(name.as_ref()).is_file());

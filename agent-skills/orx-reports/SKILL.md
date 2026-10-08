@@ -46,4 +46,7 @@ Use relative links within reports, for example
 In the chat handoff, link every finished output using the session playbook's
 evidence-and-links contract, including the full nested path, for example
 `<file path="artifacts/transformer-sweep/figures/patch-size.svg" />`.
+When an output is an image, also show it inline in the chat handoff using
+`![Description](artifacts/<relative-path>)`, while keeping its file link. Put related image previews in consecutive
+paragraphs so they render as a carousel, with file links after the group.
 Load `orx-evidence` when the report makes claims derived from run results.

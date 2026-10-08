@@ -52,3 +52,17 @@ test("standalone HTML charts have a block figure container, including query URLs
   }
   assert.equal(render("Text ![chart](chart.html)").children[0].tagName, "p");
 });
+
+test("consecutive image previews form one carousel and keep file links outside it", () => {
+  const tree = render('![Base](base.svg)\n\n![SFT](sft.svg "SFT results")\n\n[Download base](base.svg)');
+  const carousel = tree.children[0];
+  assert.equal(carousel.tagName, "image-carousel");
+  const slides = carousel.children.filter((node) => node.type === "element");
+  assert.equal(slides.length, 2);
+  assert.equal(slides[1].children[1].tagName, "figcaption");
+  assert.equal(tree.children.at(-1).children[0].properties.href, "base.svg");
+  const separate = render('![Base](base.svg)\n\nExplanation.\n\n![SFT](sft.svg)');
+  assert.equal(separate.children.some((node) => node.tagName === "image-carousel"), false);
+  const charts = render('![A](a.html)\n\n![B](b.html)');
+  assert.equal(charts.children.some((node) => node.tagName === "image-carousel"), false);
+});

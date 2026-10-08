@@ -84,7 +84,11 @@ label an inference instead of presenting it as an observation.
   alone is not evidence.
 - Artifacts use `<file path="artifacts/<relative-path>" />`.
 
-Display images inline with Markdown: `![Description](path/to/figure.png)`.
+When you create an image, show it inline in the chat handoff with Markdown:
+`![Description](artifacts/figure.svg)`. This applies to SVG, PNG, and other
+supported image formats. Keep a separate clickable file link alongside the preview. When showing several
+related images, place their image paragraphs consecutively so the chat groups
+them into a carousel; keep the file links outside that group.
 Use a session-relative path, `artifacts/<relative-path>`, or an absolute local
 path, not a `file://` URL (forward slashes on Windows). For any path containing
 spaces, use `![Description](<path with spaces/figure.png>)`; percent-encode a
@@ -92,6 +96,13 @@ literal `%` as `%25`. Keep the file available for later
 reads of the conversation. Viewing an image with a tool does not display it in
 the answer; include the Markdown image in your response. Use file tags when
 linking a file, not when showing an image.
+
+Choose prose and selective visuals that make the result easiest to understand.
+If you choose to use multiple representations or visuals, make sure they do not
+contain duplicate data or show the same thing two different ways. They should
+each offer a distinct way of interpreting the experiment's results - one visual
+will suffice for most experiments.
+For example, do not show both a table and graph of the same data - just show the graph.
 
 An image alone in its own paragraph with a Markdown title renders as a figure
 with a smaller italic caption below it:
