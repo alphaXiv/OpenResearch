@@ -303,6 +303,23 @@ pub fn set_cross_harness_review(enabled: bool) -> Result<()> {
     Ok(())
 }
 
+/// Harness ids the user turned off for cross-harness review.
+pub fn cross_harness_excluded() -> Vec<String> {
+    crate::telemetry::cross_harness_excluded()
+}
+
+pub fn set_cross_harness_excluded(mut excluded: Vec<String>) -> Result<()> {
+    excluded.sort();
+    excluded.dedup();
+    crate::telemetry::set_cross_harness_excluded(excluded)?;
+    Ok(())
+}
+
+/// Whether cross-harness review may use this harness.
+pub fn cross_harness_allows(harness: &str) -> bool {
+    !cross_harness_excluded().iter().any(|id| id == harness)
+}
+
 /// Whether orx may install updates on its own (Settings → Updates). Lives in
 /// the telemetry-owned `settings.json` for the same single-writer reason as the
 /// data dir above. Read by `updates::auto_update_eligible`.

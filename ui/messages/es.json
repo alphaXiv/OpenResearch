@@ -1293,5 +1293,6 @@
   "settings_cross_harness_description": "Los agentes revisan ideas, resultados y borradores con ayudantes en harnesses de otros proveedores, como Codex o Antigravity, para que los hallazgos no dependan de una sola familia de modelos.",
   "settings_cross_harness_vendor_varies": "Depende del modelo",
   "settings_cross_harness_vendors_ready": "Proveedores listos: {vendors}",
-  "settings_cross_harness_needs_two": "Configura harnesses de al menos dos proveedores, por ejemplo Claude Code y Codex, para que las revisiones vengan de otra familia de modelos."
+  "settings_cross_harness_needs_two": "Configura harnesses de al menos dos proveedores, por ejemplo Claude Code y Codex, para que las revisiones vengan de otra familia de modelos.",
+  "settings_cross_harness_use": "Usar {harness} en la revisión entre harnesses"
 }

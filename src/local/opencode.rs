@@ -210,9 +210,27 @@ fn cross_harness_bullet(session_harness: Option<&str>) -> String {
         .map_or(String::new(), |harness| {
             format!(" This session runs on **{}**.", harness.name())
         });
+    let excluded = crate::config::cross_harness_excluded();
+    let allowed = if excluded.is_empty() {
+        String::new()
+    } else {
+        let names: Vec<_> = super::harness::registry()
+            .into_iter()
+            .filter(|harness| {
+                harness.supports_chat() && !excluded.iter().any(|id| id == harness.id())
+            })
+            .map(|harness| format!("`{}`", harness.id()))
+            .collect();
+        if names.is_empty() {
+            " The user turned every harness off for review, so do not spawn cross-harness helpers."
+                .to_string()
+        } else {
+            format!(" Spawn review helpers only on: {}.", names.join(", "))
+        }
+    };
     format!(
         "\n- Cross-harness review: **on** — the user wants research steps that one vendor's \
-         agent could bias checked by agents on other harnesses.{runs_on} Load \
+         agent could bias checked by agents on other harnesses.{runs_on}{allowed} Load \
          **`orx-agent-delegation`** and follow its cross-harness section"
     )
 }

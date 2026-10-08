@@ -1293,5 +1293,6 @@
   "settings_cross_harness_description": "Agents check ideas, results, and paper drafts with helpers on other vendors' harnesses, such as Codex or Antigravity, so findings do not rest on one model family.",
   "settings_cross_harness_vendor_varies": "Depends on the model",
   "settings_cross_harness_vendors_ready": "Ready vendors: {vendors}",
-  "settings_cross_harness_needs_two": "Set up harnesses from at least two vendors, for example Claude Code and Codex, so reviews come from a different model family."
+  "settings_cross_harness_needs_two": "Set up harnesses from at least two vendors, for example Claude Code and Codex, so reviews come from a different model family.",
+  "settings_cross_harness_use": "Use {harness} for cross-harness review"
 }

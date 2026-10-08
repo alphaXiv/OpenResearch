@@ -900,13 +900,15 @@ export const setAutoUpdate = (enabled: boolean) =>
 
 export interface CrossHarnessSettings {
   enabled: boolean;
+  /** Harnesses the user turned off for review. */
+  excluded: HarnessId[];
 }
 
 export const getCrossHarnessSettings = (signal?: AbortSignal) =>
   get<CrossHarnessSettings>("/api/settings/cross-harness", signal);
 
-export const setCrossHarnessSettings = (enabled: boolean) =>
-  post<CrossHarnessSettings>("/api/settings/cross-harness", { enabled });
+export const setCrossHarnessSettings = (update: { enabled?: boolean; excluded?: HarnessId[] }) =>
+  post<CrossHarnessSettings>("/api/settings/cross-harness", update);
 
 export const installCli = (force = false) =>
   post<InstalledCli>("/api/update/install-cli", { force });

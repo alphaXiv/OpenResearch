@@ -5259,7 +5259,10 @@ async fn update_status() -> ApiResult {
 }
 
 fn cross_harness_settings_json() -> Value {
-    json!({ "enabled": crate::config::cross_harness_review() })
+    json!({
+        "enabled": crate::config::cross_harness_review(),
+        "excluded": crate::config::cross_harness_excluded(),
+    })
 }
 
 async fn cross_harness_settings() -> ApiResult {
@@ -5268,15 +5271,29 @@ async fn cross_harness_settings() -> ApiResult {
 
 #[derive(Deserialize)]
 struct SetCrossHarnessReq {
-    enabled: bool,
+    enabled: Option<bool>,
+    /// Replaces the whole list of harnesses turned off for review.
+    excluded: Option<Vec<String>>,
 }
 
 /// Takes effect for each session at its next playbook rewrite.
 async fn set_cross_harness_settings(Json(req): Json<SetCrossHarnessReq>) -> ApiResult {
     tokio::task::spawn_blocking(move || {
-        crate::config::set_cross_harness_review(req.enabled).map_err(|e| {
-            ApiError::from(anyhow!("could not save the cross-harness setting: {e}"))
-        })?;
+        let save = |error: crate::error::Error| {
+            ApiError::from(anyhow!("could not save the cross-harness setting: {error}"))
+        };
+        if let Some(excluded) = req.excluded {
+            if let Some(unknown) = excluded
+                .iter()
+                .find(|id| crate::local::harness::chat_harness(id).is_none())
+            {
+                return Err(ApiError::from(anyhow!("Unknown harness {unknown}.")));
+            }
+            crate::config::set_cross_harness_excluded(excluded).map_err(save)?;
+        }
+        if let Some(enabled) = req.enabled {
+            crate::config::set_cross_harness_review(enabled).map_err(save)?;
+        }
         Ok(Json(cross_harness_settings_json()))
     })
     .await

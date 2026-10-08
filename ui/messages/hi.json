@@ -1293,5 +1293,6 @@
   "settings_cross_harness_description": "एजेंट विचारों, परिणामों और पेपर ड्राफ़्ट की जाँच दूसरे विक्रेताओं के हार्नेस, जैसे Codex या Antigravity, पर चल रहे सहायकों से करवाते हैं, ताकि निष्कर्ष किसी एक मॉडल परिवार पर निर्भर न रहें।",
   "settings_cross_harness_vendor_varies": "मॉडल पर निर्भर",
   "settings_cross_harness_vendors_ready": "तैयार विक्रेता: {vendors}",
-  "settings_cross_harness_needs_two": "कम से कम दो विक्रेताओं के harness सेट करें, जैसे Claude Code और Codex, ताकि समीक्षा किसी दूसरे मॉडल परिवार से हो।"
+  "settings_cross_harness_needs_two": "कम से कम दो विक्रेताओं के harness सेट करें, जैसे Claude Code और Codex, ताकि समीक्षा किसी दूसरे मॉडल परिवार से हो।",
+  "settings_cross_harness_use": "क्रॉस-हार्नेस समीक्षा के लिए {harness} का उपयोग करें"
 }

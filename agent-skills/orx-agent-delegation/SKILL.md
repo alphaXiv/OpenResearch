@@ -75,9 +75,11 @@ orx agent spawn --harness codex --title "Independent check: <claim>" --stdin
 
 Rules:
 
-- Prefer a harness whose vendor differs from this session's; OpenCode and Cursor
-  count by the model they run. If no other vendor is installed, say so once and
-  continue on this session's harness.
+- Use only harnesses the user left on for review: the `REVIEW` column of
+  `orx agent harnesses` and the playbook's list. Prefer one whose vendor differs
+  from this session's; OpenCode and Cursor count by the model they run. If no
+  allowed harness from another vendor is installed, say so once and continue
+  on this session's harness.
 - Give the helper the evidence and the question, not your conclusion. Forbid
   experiment launches unless the user approved them.
 - The wake-up names the helper's harness and model. Keep that attribution in

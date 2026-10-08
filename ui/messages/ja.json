@@ -1293,5 +1293,6 @@
   "settings_cross_harness_description": "エージェントは、Codex や Antigravity など他社のハーネス上のヘルパーにアイデア・結果・論文草稿を確認させ、結論が一つのモデル系統に依存しないようにします。",
   "settings_cross_harness_vendor_varies": "モデルによる",
   "settings_cross_harness_vendors_ready": "利用可能なベンダー: {vendors}",
-  "settings_cross_harness_needs_two": "レビューが別のモデルファミリーから行われるよう、Claude Code と Codex など、少なくとも 2 社のハーネスを設定してください。"
+  "settings_cross_harness_needs_two": "レビューが別のモデルファミリーから行われるよう、Claude Code と Codex など、少なくとも 2 社のハーネスを設定してください。",
+  "settings_cross_harness_use": "クロスハーネスレビューで {harness} を使う"
 }
