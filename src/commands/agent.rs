@@ -61,6 +61,8 @@ struct HarnessRow {
     /// `None` when the OpenResearch server could not be asked.
     installed: Option<bool>,
     current: bool,
+    /// The user allows this harness for cross-harness review.
+    review: bool,
 }
 
 async fn harnesses(store: &Store, json: bool) -> Result<()> {
@@ -86,6 +88,7 @@ async fn harnesses(store: &Store, json: bool) -> Result<()> {
             vendor: harness_vendor(harness.id()),
             installed,
             current: current.as_deref() == Some(harness.id()),
+            review: crate::config::cross_harness_allows(harness.id()),
         });
     }
     if json {
@@ -104,11 +107,15 @@ async fn harnesses(store: &Store, json: bool) -> Result<()> {
                     Some(false) => "no".to_string(),
                     None => "unknown".to_string(),
                 },
+                if row.review { "on" } else { "off" }.to_string(),
                 if row.current { "this session" } else { "" }.to_string(),
             ]
         })
         .collect();
-    crate::output::print_table(&["HARNESS", "NAME", "VENDOR", "INSTALLED", ""], &table);
+    crate::output::print_table(
+        &["HARNESS", "NAME", "VENDOR", "INSTALLED", "REVIEW", ""],
+        &table,
+    );
     if port.is_none() {
         println!(
             "Installation is unknown outside a running OpenResearch session; \

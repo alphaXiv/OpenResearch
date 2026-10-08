@@ -1293,5 +1293,6 @@
   "settings_cross_harness_description": "يتحقق الوكلاء من الأفكار والنتائج ومسودات الأوراق بمساعدين يعملون على أطر شركات أخرى مثل Codex أو Antigravity، كي لا تعتمد النتائج على عائلة نماذج واحدة.",
   "settings_cross_harness_vendor_varies": "يعتمد على النموذج",
   "settings_cross_harness_vendors_ready": "المزوّدون الجاهزون: {vendors}",
-  "settings_cross_harness_needs_two": "اضبط أدوات من مزوّدَين اثنين على الأقل، مثل Claude Code وCodex، حتى تأتي المراجعات من عائلة نماذج مختلفة."
+  "settings_cross_harness_needs_two": "اضبط أدوات من مزوّدَين اثنين على الأقل، مثل Claude Code وCodex، حتى تأتي المراجعات من عائلة نماذج مختلفة.",
+  "settings_cross_harness_use": "استخدام {harness} في المراجعة عبر الأدوات"
 }

@@ -171,6 +171,10 @@ pub(crate) struct Settings {
     /// Absent = off.
     #[serde(default)]
     pub cross_harness_review: Option<bool>,
+    /// Harness ids the user turned off for cross-harness review. Absent or
+    /// empty = every harness may be used.
+    #[serde(default)]
+    pub cross_harness_excluded: Vec<String>,
     /// Surfaces whose `first_action` event has already been sent, so a restart
     /// cannot re-report a later action as the user's first one.
     #[serde(default)]
@@ -323,6 +327,16 @@ pub(crate) fn cross_harness_review() -> bool {
 
 pub(crate) fn set_cross_harness_review(enabled: bool) -> std::io::Result<()> {
     mutate_settings(|settings| settings.cross_harness_review = Some(enabled))
+}
+
+pub(crate) fn cross_harness_excluded() -> Vec<String> {
+    load_settings()
+        .map(|settings| settings.cross_harness_excluded)
+        .unwrap_or_default()
+}
+
+pub(crate) fn set_cross_harness_excluded(excluded: Vec<String>) -> std::io::Result<()> {
+    mutate_settings(|settings| settings.cross_harness_excluded = excluded)
 }
 
 pub(crate) fn github_default_prompt_seen() -> bool {

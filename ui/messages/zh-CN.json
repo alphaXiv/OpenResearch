@@ -1293,5 +1293,6 @@
   "settings_cross_harness_description": "智能体会让其他厂商 Harness（如 Codex 或 Antigravity）上的助手复核想法、结果和论文草稿，避免结论依赖单一模型家族。",
   "settings_cross_harness_vendor_varies": "取决于模型",
   "settings_cross_harness_vendors_ready": "可用的供应商：{vendors}",
-  "settings_cross_harness_needs_two": "请至少设置两家供应商的 harness（例如 Claude Code 和 Codex），让评审来自不同的模型家族。"
+  "settings_cross_harness_needs_two": "请至少设置两家供应商的 harness（例如 Claude Code 和 Codex），让评审来自不同的模型家族。",
+  "settings_cross_harness_use": "在跨 harness 评审中使用 {harness}"
 }

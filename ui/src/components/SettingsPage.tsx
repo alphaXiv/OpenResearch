@@ -553,19 +553,20 @@ function CrossHarnessCard({ harnesses }: { harnesses: Harness[] | null }) {
   const mutation = useMutation({ mutationFn: setCrossHarnessSettings });
   const [error, setError] = useState<string | null>(null);
   const enabled = query.data?.enabled ?? false;
+  const excluded = query.data?.excluded ?? [];
   const readyVendors = [
     ...new Set(
       (harnesses ?? [])
-        .filter((harness) => harness.agentReady)
+        .filter((harness) => harness.agentReady && !excluded.includes(harness.id))
         .map((harness) => harnessVendor(harness.id))
         .filter((vendor): vendor is string => vendor !== null),
     ),
   ];
 
-  async function toggle() {
+  async function save(update: { enabled?: boolean; excluded?: HarnessId[] }) {
     setError(null);
     try {
-      const next = await mutation.mutateAsync(!enabled);
+      const next = await mutation.mutateAsync(update);
       setScopedQueryData(options.queryKey, () => next);
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err));
@@ -584,7 +585,7 @@ function CrossHarnessCard({ harnesses }: { harnesses: Harness[] | null }) {
           checked={enabled}
           aria-label={m.settings_cross_harness_title()}
           disabled={!query.data || mutation.isPending}
-          onClick={() => void toggle()}
+          onClick={() => void save({ enabled: !enabled })}
         />
       </div>
       {harnesses && (
@@ -599,6 +600,19 @@ function CrossHarnessCard({ harnesses }: { harnesses: Harness[] | null }) {
                   <span className="text-subtext">{harnessVendor(harness.id) ?? m.settings_cross_harness_vendor_varies()}</span>
                   <span className="flex-1" />
                   <Badge variant={status.variant}>{status.label}</Badge>
+                  <Switch
+                    type="button"
+                    checked={!excluded.includes(harness.id)}
+                    aria-label={m.settings_cross_harness_use({ harness: harness.name })}
+                    disabled={!query.data || !enabled || mutation.isPending}
+                    onClick={() =>
+                      void save({
+                        excluded: excluded.includes(harness.id)
+                          ? excluded.filter((id) => id !== harness.id)
+                          : [...excluded, harness.id],
+                      })
+                    }
+                  />
                 </li>
               );
             })}
