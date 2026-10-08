@@ -851,6 +851,15 @@ fn transfer_pending_events() {
     }
 }
 
+// Stat each path once: concurrent orx processes delete outbox files mid-sort, and a key
+// that changes between comparisons breaks total order, which makes `sort` panic.
+fn sort_oldest_first(
+    paths: &mut [PathBuf],
+    mtime: impl FnMut(&PathBuf) -> Option<std::time::SystemTime>,
+) {
+    paths.sort_by_cached_key(mtime);
+}
+
 pub(crate) fn retry_outbox() {
     if environment_disabled_reason().is_some() {
         return;
@@ -864,7 +873,7 @@ pub(crate) fn retry_outbox() {
         .map(|entry| entry.path())
         .filter(|path| path.extension().and_then(|extension| extension.to_str()) == Some("json"))
         .collect();
-    paths.sort_by_key(|path| {
+    sort_oldest_first(&mut paths, |path| {
         std::fs::metadata(path)
             .and_then(|meta| meta.modified())
             .ok()
@@ -2461,5 +2470,18 @@ mod tests {
         );
 
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn outbox_sort_stats_each_file_once() {
+        let mut paths: Vec<PathBuf> = (0..64)
+            .map(|i| PathBuf::from(format!("{i}.json")))
+            .collect();
+        let mut stats = 0;
+        sort_oldest_first(&mut paths, |_| {
+            stats += 1;
+            None
+        });
+        assert_eq!(stats, paths.len());
     }
 }
