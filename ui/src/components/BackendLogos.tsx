@@ -1,7 +1,7 @@
 // Brand marks for the compute backends. Most are inline SVGs; Tinker uses the
 // supplied Thinking Machines raster mark.
 
-import { CloudCog, Laptop, Server } from "lucide-react";
+import { Laptop, Server } from "lucide-react";
 import { backendDetail, backendKind, type Run } from "../api";
 import slurmLogo from "../assets/slurm-logo.svg";
 import thinkingMachinesLogo from "../assets/thinking-machines.png";
@@ -128,6 +128,17 @@ function OpenResearchLogo({ size = 16 }: { size?: number }) {
   );
 }
 
+// Google Colab — the two-tone "CO" mark, redrawn as circle arcs from the
+// official logo so it stays sharp at every size.
+function ColabLogo({ size = 16 }: { size?: number }) {
+  return (
+    <svg width={size} height={size} viewBox="8 270 1264 740" aria-hidden="true">
+      <path fill="#F9AB00" d="M640.4 901.6 A370 370 0 0 1 640.4 378.4 A370 370 0 0 1 1163.6 378.4 L1037.8 504.2 A192 192 0 0 0 766.2 504.2 A192 192 0 0 0 766.2 775.8Z M116.4 378.4 A370 370 0 0 1 604.3 347.2 L512.3 502.8 A192 192 0 0 0 242.2 504.2Z M604.3 932.8 A370 370 0 0 1 116.4 901.6 L242.2 775.8 A192 192 0 0 0 512.3 777.2Z" />
+      <path fill="#E8710A" d="M1163.6 378.4 A370 370 0 0 1 1163.6 901.6 A370 370 0 0 1 640.4 901.6 L766.2 775.8 A192 192 0 0 0 1037.8 775.8 A192 192 0 0 0 1037.8 504.2Z M116.4 901.6 A370 370 0 0 1 116.4 378.4 L242.2 504.2 A192 192 0 0 0 242.2 775.8Z" />
+    </svg>
+  );
+}
+
 function TinkerLogo({ size = 16 }: { size?: number }) {
   return (
     <img
@@ -177,7 +188,7 @@ export function BackendLogo({ kind, size = 16 }: { kind: string; size?: number }
     case "tinker_job":
       return <TinkerLogo size={size} />;
     case "colab_job":
-      return <CloudCog size={size} strokeWidth={1.5} />;
+      return <ColabLogo size={size} />;
     case "local_job":
       return <Laptop size={size} strokeWidth={1.5} />;
     default:
