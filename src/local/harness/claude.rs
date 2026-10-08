@@ -2382,8 +2382,8 @@ async fn run_attempt(ctx: &mut TurnCtx, spec: SpawnSpec) -> Result<(TurnState, u
                     // report as a fresh segment: init + messages + another
                     // result). Give that continuation a short window to show up
                     // before ending the turn; a quiet window means the report
-                    // was already delivered in this segment.
-                    if !state.saw_background_task {
+                    // was already delivered in this segment. A failed turn has nothing to resume.
+                    if !state.saw_background_task || state.turn_errored {
                         break;
                     }
                     match tokio::time::timeout(BACKGROUND_RESUME_GRACE, rx.recv()).await {
