@@ -309,8 +309,9 @@ fn compute_routing_bullet() -> String {
     }
     format!(
         "\n- Compute routing: **on** — you choose `--backend` and `--flavor` per run among the \
-         user's connected backends: {}. Load **`orx-compute`** and follow its \
-         \"Route runs across providers\" section",
+         user's connected backends: {}. Check `orx compute prices --json` for remaining credit \
+         and GPU prices, so no run starts on a provider whose credit would run out first. Load \
+         **`orx-compute`** and follow its \"Route runs across providers\" section",
         allowed.join(", ")
     )
 }

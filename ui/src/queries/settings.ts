@@ -63,6 +63,12 @@ export const getComputeRoutingSettingsQuery = () => queryOptions({
   staleTime: 300_000,
 });
 
+export const getComputePricesQuery = () => queryOptions({
+  queryKey: workspaceKey("getComputePrices"),
+  queryFn: ({ signal }) => api.getComputePrices(signal),
+  staleTime: 300_000,
+});
+
 export const getCrossHarnessSettingsQuery = () => queryOptions({
   queryKey: workspaceKey("getCrossHarnessSettings"),
   queryFn: ({ signal }) => api.getCrossHarnessSettings(signal),

@@ -14,6 +14,7 @@ pub mod localbox;
 mod managed_env;
 pub mod modal;
 pub mod openresearch;
+pub mod provider_prices;
 pub mod ray;
 pub mod slurm;
 pub mod ssh;

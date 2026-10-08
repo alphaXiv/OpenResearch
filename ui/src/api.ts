@@ -916,6 +916,50 @@ export interface ComputeRoutingSettings {
 export const getComputeRoutingSettings = (signal?: AbortSignal) =>
   get<ComputeRoutingSettings>("/api/settings/compute-routing", signal);
 
+export interface ProviderBalance {
+  amount: number;
+  /** `CU` (Colab compute units) or `USD`. */
+  unit: string;
+  usd: number | null;
+  burningPerHour: number | null;
+}
+
+export interface ProviderSpend {
+  meteredUsd: number | null;
+  billedUsd: number | null;
+  creditsUsd: number | null;
+}
+
+export interface ProviderOffer {
+  flavor: string;
+  gpu: string | null;
+  gpuCount: number;
+  vramGb: number | null;
+  usdPerHour: number | null;
+  unitsPerHour: number | null;
+  runwayHours: number | null;
+  available: boolean | null;
+  estimated: boolean;
+  host: string | null;
+}
+
+export interface ProviderPrices {
+  id: ComputeTargetId;
+  configured: boolean;
+  billing: "credits" | "usage" | "own" | "tokens";
+  balance: ProviderBalance | null;
+  spend: ProviderSpend | null;
+  offers: ProviderOffer[];
+  note: string | null;
+  error: string | null;
+}
+
+export const getComputePrices = (signal?: AbortSignal, fresh = false) =>
+  get<{ providers: ProviderPrices[] }>(
+    fresh ? "/api/settings/compute/prices?fresh=true" : "/api/settings/compute/prices",
+    signal,
+  );
+
 export const setComputeRoutingSettings = (update: { enabled?: boolean; excluded?: ComputeTargetId[] }) =>
   post<ComputeRoutingSettings>("/api/settings/compute-routing", update);
 
