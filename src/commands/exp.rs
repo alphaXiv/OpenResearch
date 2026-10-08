@@ -368,6 +368,7 @@ mod tests {
             |id| crate::plane::Run::from(&store.get_run(id).unwrap().unwrap()).failure_detail();
         assert_eq!(detail("run-1").as_deref(), Some("reason: first"));
         assert_eq!(detail("run-done"), None);
+        // The reason never leaks into a finished run's result.
         assert_eq!(
             store.get_run("run-done").unwrap().unwrap().result_markdown,
             None

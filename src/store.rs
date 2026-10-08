@@ -242,7 +242,7 @@ pub struct StoredRun {
     pub result_markdown: Option<String>,
     /// Cancel intent polled by the detached supervisor.
     pub cancel_requested: bool,
-    /// Who asked for the cancel; set together with the first cancel request.
+    /// Who asked for the cancel; written only by `Store::request_cancel`, never by `upsert_run`.
     pub cancel_reason: Option<String>,
     /// The `orx up` chat session that launched this run, when it was started by
     /// an agent harness child (which exports `ORX_CHAT_SESSION_ID`). `None` for
