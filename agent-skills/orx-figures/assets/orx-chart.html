@@ -68,7 +68,8 @@ metrics.hidden=data.metrics.length<2;
 metrics.onchange=()=>{metric=data.metrics.find(item=>item.key===metrics.value);domain=null;hover=null;tip.hidden=true;setLegend();draw()};
 setLegend();
 function points(run){return run.points.filter(p=>Number.isFinite(p[metric.key])&&Number.isFinite(p.step)&&(metric.xScale!=='log'||p.step>0)&&(metric.yScale!=='log'||p[metric.key]>0))}
-function bounds(){const all=series().flatMap(points);return [Math.min(...all.map(p=>p.step)),Math.max(...all.map(p=>p.step))]}
+function rangePoints(run){return [...points(run),...(run.fit||[])]}
+function bounds(){const all=series().flatMap(rangePoints);return [Math.min(...all.map(p=>p.step)),Math.max(...all.map(p=>p.step))]}
 let layout;
 function draw(){
  metrics.value=metric.key;
@@ -81,9 +82,9 @@ function draw(){
  if(metric.type==='dot'){drawDots(width,height,left,right,bottom);return}
  if(['heatmap','confusion'].includes(metric.type)){drawHeatmap(width,height,left,right,bottom);return}
  const [xmin,xmax]=domain?.x||bounds();
- const visible=series().flatMap((run,i)=>enabled.has(i)?points(run):[]);
+ const visible=series().flatMap((run,i)=>enabled.has(i)?rangePoints(run):[]);
  const values=visible.flatMap(p=>[p[metric.key],p.lower,p.upper]).filter(Number.isFinite);
- const [low,high]=domain?.y||[['bar','area'].includes(metric.type)?Math.min(0,...values):Math.min(...values),Math.max(...values)];
+ const [low,high]=domain?.y||[['bar','area'].includes(metric.type)?Math.min(0,...values):Math.min(...values),['bar','area'].includes(metric.type)?Math.max(0,...values):Math.max(...values)];
  const rough=Math.max((high-low)/5,.01),power=10**Math.floor(Math.log10(rough));
  const tickStep=[1,2,2.5,5,10].find(value=>value*power>=rough)*power;
  const ymin=domain?.y?low:Math.floor(low/tickStep)*tickStep,ymax=domain?.y?high:Math.max(ymin+tickStep,Math.ceil(high/tickStep)*tickStep);

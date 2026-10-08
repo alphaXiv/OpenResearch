@@ -21,6 +21,8 @@ class ChartTests(unittest.TestCase):
 
     def test_rejects_invalid_views_and_measurements(self):
         for metric, point in [
+            ({"key": "loss", "type": "bar", "yScale": "log"}, {"step": 1, "loss": 2}),
+            ({"key": "loss", "type": "area", "yScale": "log"}, {"step": 1, "loss": 2}),
             ({"key": "loss", "type": "unknown"}, {"step": 1, "loss": 2}),
             ({"key": "loss"}, {"step": 1, "loss": float("inf")}),
             ({"key": "loss", "type": "scaling"}, {"step": 0, "loss": 2}),

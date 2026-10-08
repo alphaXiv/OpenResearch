@@ -286,8 +286,9 @@ optional `color` and `dash`. Points use numeric `step` for x and the view's
 | Matrices | `heatmap` with one series per row; `columns` supplies column labels. Sequential viridis colors by default; `colorScale="diverging"` centers signed values on zero. Missing cells remain gray. `confusion` uses square cells; supply normalized values, `colorMin=0`, `colorMax=1`, and state normalization/support. |
 | Method diagrams | `diagram` uses `nodes` with `id`, `label`, integer `column`/`row`, optional `accent`/`description`; `edges` have `from`, `to`, optional `label`/`dashed`. Clicking a node highlights adjacent connections; Escape restores the diagram. |
 
-`scatter` is also available for measured relationships. Any numeric chart may
-set `xScale` or `yScale` to `log`. Numeric curves, scatter and Pareto plots use
+`scatter` is also available for measured relationships. Curves, scatter,
+scaling and Pareto plots may set `xScale` or `yScale` to `log`. Bars and areas
+require a linear y-axis because their baseline is zero. Numeric curves, scatter and Pareto plots use
 mouse drag selection zoom and show Reset only after zoom. Matrix cells,
 diagram nodes and dot intervals expose exact data on hover/focus. Download
 exports the current graph as SVG. Do not invent uncertainty or scaling data

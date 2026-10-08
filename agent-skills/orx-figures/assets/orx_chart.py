@@ -26,6 +26,8 @@ def validate_views(metrics, series):
             if any(edge["from"] not in ids or edge["to"] not in ids for edge in metric.get("edges", [])):
                 raise ValueError("Diagram edges must reference existing nodes")
             continue
+        if kind in {"bar", "area"} and metric.get("yScale") == "log":
+            raise ValueError("Bar and area charts require a linear y axis")
         runs = metric.get("series", series)
         if not runs:
             raise ValueError("A graph requires at least one series")

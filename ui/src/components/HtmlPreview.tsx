@@ -4,6 +4,7 @@ import { ltr } from "../i18n";
 import { isExternalMarkdownTarget } from "../markdownTarget";
 import { Spinner } from "./ui";
 import { OptionPicker } from "./ModelPicker";
+import { inlineHtmlHeight } from "../htmlPreviewSizing";
 
 /** Elements whose relative URLs name a project file, each with the response
  * types it may legitimately be. The gate is the security boundary: the parent
@@ -186,8 +187,9 @@ export function HtmlPreview({
     const resize = (event: MessageEvent) => {
       const data: unknown = event.data;
       if (event.source !== frame.current?.contentWindow || typeof data !== "object" || data === null) return;
-      if ("type" in data && data.type === "orx-html-size" && "height" in data && typeof data.height === "number" && Number.isFinite(data.height) && data.height > 0) {
-        setHeight(Math.ceil(data.height));
+      if ("type" in data && data.type === "orx-html-size" && "height" in data) {
+        const nextHeight = inlineHtmlHeight(data.height);
+        if (nextHeight !== null) setHeight(nextHeight);
       }
       if ("type" in data && data.type === "orx-chart-picker" && "choices" in data && Array.isArray(data.choices)
         && "value" in data && typeof data.value === "string"
@@ -211,6 +213,7 @@ export function HtmlPreview({
     let cancelled = false;
     const controller = new AbortController();
     setPage(null);
+    setHeight(360);
     setMetricPicker(null);
     completeSource(html, truncated, url, controller.signal)
       .then(async ({ text, partial }) => ({
