@@ -632,7 +632,6 @@ async fn run_ssh(
         status_of(&stored)?,
         target,
         dir,
-        descriptor.ssh_container.clone(),
         &run_id,
         &mut descriptor,
         None,
@@ -644,17 +643,16 @@ async fn run_ssh(
 /// The ssh two-half loop, shared by every backend whose job is a run dir on a
 /// box we ssh into (ssh itself, openresearch). Runs until the job is terminal
 /// and returns the final run status after logs are drained.
-#[allow(clippy::too_many_arguments)]
 async fn watch_ssh_job(
     store: &Store,
     initial_status: RunStatus,
     target: ssh::SshTarget,
     dir: String,
-    container: Option<ssh::ContainerRun>,
     run_id: &str,
     descriptor: &mut BackendDescriptor,
     sandbox: Option<(&Credentials, &str)>,
 ) -> Result<RunStatus> {
+    let container = descriptor.ssh_container.clone();
     let path = log_path(run_id);
     let (done_tx, done_rx) = tokio::sync::watch::channel(false);
     let (log_error_tx, log_error_rx) = tokio::sync::watch::channel(None);
@@ -672,6 +670,7 @@ async fn watch_ssh_job(
     let mut last_message = None;
     let mut failing_since = None;
     let mut last_error = None;
+    let mut missing_polls = 0;
 
     loop {
         if !cancel_sent && local_cancel_requested(store, run_id) {
@@ -735,6 +734,16 @@ async fn watch_ssh_job(
                 }
             },
         };
+        // A home directory can blink out (stale NFS); end the run only once it stays missing.
+        if job.message.as_deref() == Some(ssh::RUN_DIR_MISSING) {
+            missing_polls += 1;
+            if missing_polls < 3 {
+                tokio::time::sleep(POLL_INTERVAL).await;
+                continue;
+            }
+        } else {
+            missing_polls = 0;
+        }
         let stage = job.stage.as_str();
         let status = run_status_for_stage(store, run_id, cancel_sent, stage);
 
@@ -1042,7 +1051,6 @@ async fn run_openresearch(
         status_of(&stored)?,
         target,
         dir,
-        None,
         &run_id,
         &mut descriptor,
         Some((&lifecycle, &sandbox_id)),

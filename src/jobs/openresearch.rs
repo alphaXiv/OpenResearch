@@ -194,7 +194,8 @@ pub async fn launched(target: &super::ssh::SshTarget, run_id: &str) -> Result<bo
 
 /// Whether the API positively reports the box as deleted; an unreachable API is not proof.
 pub async fn box_deleted(creds: &Credentials, sandbox_id: &str) -> bool {
-    matches!(get_sandbox(creds, sandbox_id).await, Err(err) if is_not_found_error(&err.to_string()))
+    let lookup = tokio::time::timeout(Duration::from_secs(15), get_sandbox(creds, sandbox_id));
+    matches!(lookup.await, Ok(Err(err)) if is_not_found_error(&err.to_string()))
 }
 
 /// Delete the box, retrying transient failures. A 404 is success — the box is

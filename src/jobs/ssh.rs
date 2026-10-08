@@ -877,14 +877,14 @@ fn parse_job_state(out: &str) -> Result<JobState> {
         },
         "MISSING" => JobState {
             stage: "ERROR".into(),
-            message: Some(
-                "the remote run directory no longer exists (was the host rebuilt or cleaned up?)"
-                    .into(),
-            ),
+            message: Some(RUN_DIR_MISSING.into()),
         },
         other => return Err(anyhow!("unexpected inspect output: {other}")),
     })
 }
+
+pub const RUN_DIR_MISSING: &str = "the remote run directory no longer exists (was the host \
+     rebuilt or cleaned up, or does the ssh alias now reach a different host?)";
 
 /// One poll of the remote log past `skip` lines. Unlike the streaming backends
 /// this returns promptly (the supervisor loops every ~2s); `idle` is unused.
