@@ -58,6 +58,14 @@ mod v2;
 
 pub struct OpenCode;
 
+fn opencode_db_is_v2(db: &std::path::Path) -> bool {
+    use native_store::opencode_database::DatabaseState;
+    matches!(
+        native_store::opencode_database::inspect(db),
+        Ok(DatabaseState::V2Pending | DatabaseState::V2Ready)
+    )
+}
+
 impl OpenCode {
     /// `snapshot` skips every catalog probe — `models`/`debug config` children,
     /// the V2 server bring-up, local-server and dead-key checks — and answers
@@ -148,6 +156,12 @@ impl OpenCode {
             if !info.install_broken {
                 let db = native_store::opencode_db(NativeStore::Isolated);
                 let preflight = tokio::task::spawn_blocking(move || {
+                    // The snapshot never resolves the binary, so it cannot tell a
+                    // V2 install from V1. A database already on V2 belongs to a V2
+                    // install; leasing it as V1 would report a false repair.
+                    if snapshot && opencode_db_is_v2(&db) {
+                        return Ok(());
+                    }
                     native_store::opencode_database::DatabaseLease::acquire(&db, 1).map(drop)
                 })
                 .await
@@ -2109,6 +2123,35 @@ async fn handle_prompt_event(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn snapshot_treats_a_v2_database_as_a_v2_install() {
+        let dir = crate::local::git::TemporaryDirectory::new("orx-opencode-snapshot").unwrap();
+        let db = dir.path().join("opencode.db");
+        assert!(!opencode_db_is_v2(&db));
+        let connection = rusqlite::Connection::open(&db).unwrap();
+        connection
+            .execute_batch(
+                "CREATE TABLE session (id TEXT PRIMARY KEY, directory TEXT);
+                 CREATE TABLE message (id TEXT, session_id TEXT, data TEXT);
+                 CREATE TABLE part (id TEXT, message_id TEXT, session_id TEXT, data TEXT);",
+            )
+            .unwrap();
+        assert!(!opencode_db_is_v2(&db));
+        connection
+            .execute_batch(
+                "DROP TABLE session; DROP TABLE message; DROP TABLE part;
+                 CREATE TABLE session_v2 (id TEXT PRIMARY KEY, directory TEXT);
+                 CREATE TABLE session_message (id TEXT, session_id TEXT, data TEXT);
+                 CREATE TABLE kv (key TEXT PRIMARY KEY, value TEXT);
+                 CREATE TABLE migration (id TEXT PRIMARY KEY, time_completed INTEGER);
+                 INSERT INTO migration VALUES ('20260910120000_clear_v1_session_permission', 1);",
+            )
+            .unwrap();
+        assert!(opencode_db_is_v2(&db));
+        // The V1 lease is what the snapshot used to take, and it refuses this file.
+        assert!(native_store::opencode_database::DatabaseLease::acquire(&db, 1).is_err());
+    }
 
     #[tokio::test]
     async fn local_models_require_an_enabled_loopback_server_and_matching_model() {
