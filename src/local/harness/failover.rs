@@ -7,6 +7,7 @@
 
 use serde::{Deserialize, Serialize};
 
+use super::PermissionMode;
 use crate::error::{anyhow, Result};
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -60,6 +61,73 @@ impl HarnessFailover {
             .into_iter()
             .filter(|id| id != current && !tried.contains(id) && super::is_chat_harness(id))
             .collect()
+    }
+}
+
+/// The permission settings a chat carries onto another harness.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CarriedPermission {
+    /// Wire id on the new harness.
+    pub permission_id: Option<String>,
+    /// Plan on the independent axis (harnesses that enter Plan by command).
+    pub plan_mode: bool,
+}
+
+/// How much a permission mode lets the agent do without asking.
+fn reach(mode: PermissionMode) -> u8 {
+    match mode {
+        PermissionMode::Plan => 0,
+        PermissionMode::Ask => 1,
+        PermissionMode::AcceptEdits => 2,
+        PermissionMode::Auto => 3,
+        PermissionMode::Bypass => 4,
+    }
+}
+
+/// The settings on `to` that allow no more than `mode` and `plan` allowed on
+/// `from`: Plan stays Plan, and otherwise the widest choice `to` offers that
+/// does not go past the current one. `None` when `to` cannot run that narrowly,
+/// so failing over there would quietly widen what the agent may do.
+pub fn carry_permission(
+    from: &str,
+    mode: Option<PermissionMode>,
+    plan: bool,
+    to: &str,
+) -> Option<CarriedPermission> {
+    let current = mode.or_else(|| {
+        super::effective_permission_id(from, None)
+            .as_deref()
+            .and_then(PermissionMode::from_id)
+    });
+    let was_plan = plan || current == Some(PermissionMode::Plan);
+    // Under Claude's Plan the mode to return to is unknown; assume the narrow one.
+    let limit = current
+        .filter(|mode| *mode != PermissionMode::Plan)
+        .map_or(reach(PermissionMode::Ask), reach);
+    let best = super::chat_harness(to)?
+        .options()
+        .permission_modes
+        .into_iter()
+        .filter_map(|choice| Some((PermissionMode::from_id(&choice.id)?, choice.id)))
+        .filter(|(mode, _)| *mode != PermissionMode::Plan && reach(*mode) <= limit)
+        .max_by_key(|(mode, _)| reach(*mode))
+        .map(|(_, id)| id);
+    if !was_plan {
+        return Some(CarriedPermission {
+            permission_id: Some(best?),
+            plan_mode: false,
+        });
+    }
+    if super::supports_command_plan(to) {
+        Some(CarriedPermission {
+            permission_id: Some(best?),
+            plan_mode: true,
+        })
+    } else {
+        Some(CarriedPermission {
+            permission_id: Some(super::permission_id_for_mode(to, PermissionMode::Plan)?),
+            plan_mode: false,
+        })
     }
 }
 
@@ -129,6 +197,37 @@ mod tests {
             "codex_terminal",
             "permission denied"
         ));
+    }
+
+    #[test]
+    fn carried_permissions_never_widen() {
+        // Antigravity offers only ask or bypass, so auto narrows to ask.
+        let carried = carry_permission(
+            "claude-code",
+            Some(PermissionMode::Auto),
+            false,
+            "antigravity",
+        )
+        .unwrap();
+        assert_eq!(carried.permission_id.as_deref(), Some("default"));
+        assert!(!carried.plan_mode);
+        // Bypass stays bypass where it exists.
+        let carried =
+            carry_permission("codex", Some(PermissionMode::Bypass), false, "antigravity").unwrap();
+        assert_eq!(carried.permission_id.as_deref(), Some("bypass"));
+        // Claude's Plan becomes the command-plan flag on Codex.
+        let carried =
+            carry_permission("claude-code", Some(PermissionMode::Plan), false, "codex").unwrap();
+        assert!(carried.plan_mode);
+        let carried = carried
+            .permission_id
+            .and_then(|id| PermissionMode::from_id(&id));
+        assert!(carried.is_some_and(|mode| reach(mode) <= reach(PermissionMode::Ask)));
+        // Codex Plan becomes Claude's plan permission.
+        let carried =
+            carry_permission("codex", Some(PermissionMode::Auto), true, "claude-code").unwrap();
+        assert_eq!(carried.permission_id.as_deref(), Some("plan"));
+        assert!(!carried.plan_mode);
     }
 
     #[test]

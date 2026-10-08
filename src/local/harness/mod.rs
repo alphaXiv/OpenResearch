@@ -49,7 +49,7 @@ pub(crate) use detect::{
     ProbeTiming, ProbeTimingSink,
 };
 pub use detect::{HarnessAuthState, HarnessInfo, ModelInfo};
-pub use failover::{is_usage_limit_failure, HarnessFailover};
+pub use failover::{carry_permission, is_usage_limit_failure, CarriedPermission, HarnessFailover};
 pub use options::{HarnessOptions, PermissionMode};
 pub use plan_gate::command_is_readonly;
 pub use plan_gate::decide as plan_gate_decide;
