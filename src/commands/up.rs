@@ -2119,6 +2119,8 @@ struct CreateRunReq {
     force: bool,
     chat_session_id: Option<String>,
     agent_origin: Option<String>,
+    /// The forwarding CLI's config dir, where its compute settings and preflight live.
+    caller_config_dir: Option<std::path::PathBuf>,
 }
 
 #[derive(Deserialize)]
@@ -2207,6 +2209,7 @@ pub(crate) async fn submit_run_via_up(
         force: args.force,
         chat_session_id: args.launching_chat_session(),
         agent_origin: args.agent_origin.clone(),
+        caller_config_dir: Some(crate::config::config_dir()),
     };
     let response =
         authenticate_up_request(local_client()?.post(format!("http://127.0.0.1:{port}/api/runs")))
@@ -2258,9 +2261,38 @@ pub(crate) async fn cancel_run_via_up(port: u16, run_id: &str) -> Result<()> {
     Ok(())
 }
 
+/// Launching with orx up's settings after the caller checked its own would
+/// submit to a different cluster or namespace than the one the caller tested.
+fn require_caller_config_dir(
+    caller: Option<&std::path::Path>,
+    own: &std::path::Path,
+) -> Result<()> {
+    let Some(caller) = caller else {
+        return Ok(());
+    };
+    let same = caller == own
+        || matches!((caller.canonicalize(), own.canonicalize()), (Ok(a), Ok(b)) if a == b);
+    if same {
+        return Ok(());
+    }
+    Err(anyhow!(
+        "This command reads compute settings from {} (XDG_CONFIG_HOME), but orx up \
+         launches runs with the settings in {}. Launch without overriding \
+         XDG_CONFIG_HOME so the run uses the settings orx up checks, or restart \
+         orx up with the same XDG_CONFIG_HOME.",
+        caller.display(),
+        own.display()
+    ))
+}
+
 async fn create_run(State(state): State<AppState>, Json(req): Json<CreateRunReq>) -> ApiResult {
     reject_if_stopping(&state)?;
     reject_if_moving(&state)?;
+    require_caller_config_dir(
+        req.caller_config_dir.as_deref(),
+        &crate::config::config_dir(),
+    )
+    .map_err(bad_request)?;
     let store = Store::open()?;
     let experiment = store
         .get_local_experiment(&req.experiment_id)?
@@ -8719,9 +8751,11 @@ mod tests {
             force: true,
             chat_session_id: Some("session-1".into()),
             agent_origin: None,
+            caller_config_dir: Some("/tmp/orx-config/openresearch".into()),
         };
 
         let value = serde_json::to_value(&request).unwrap();
+        assert_eq!(value["callerConfigDir"], "/tmp/orx-config/openresearch");
         assert_eq!(value["experimentId"], "experiment-1");
         assert_eq!(value["chatSessionId"], "session-1");
         assert_eq!(value["force"], true);
@@ -8729,6 +8763,25 @@ mod tests {
             serde_json::from_value::<CreateRunReq>(value).unwrap(),
             request
         );
+    }
+
+    #[test]
+    fn create_run_rejects_a_caller_with_different_compute_settings() {
+        let root = std::env::temp_dir().join(format!("orx-caller-config-{}", uuid::Uuid::new_v4()));
+        let own = root.join("up/openresearch");
+        let caller = root.join("agent/openresearch");
+        std::fs::create_dir_all(&own).unwrap();
+        std::fs::create_dir_all(&caller).unwrap();
+
+        assert!(require_caller_config_dir(None, &own).is_ok());
+        assert!(require_caller_config_dir(Some(&own), &own).is_ok());
+        assert!(require_caller_config_dir(Some(&own.join("../openresearch")), &own).is_ok());
+        let error = require_caller_config_dir(Some(&caller), &own)
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains(&caller.display().to_string()));
+        assert!(error.contains(&own.display().to_string()));
+        std::fs::remove_dir_all(root).unwrap();
     }
 
     #[test]
