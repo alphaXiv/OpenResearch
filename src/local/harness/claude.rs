@@ -1406,6 +1406,10 @@ struct TurnState {
     /// — gates the post-result grace wait for the auto-resume segment, which
     /// can trail the result even when every task already finished.
     saw_background_task: bool,
+    /// A spawned helper's turn also waits on its background shell commands:
+    /// the CLI tells the model to reply and end its turn while one runs, and
+    /// that reply is only progress, not the helper's report.
+    spawned_helper: bool,
 }
 
 /// The spawning `Task` tool_use id for a sub-agent event (`parent_tool_use_id`),
@@ -1602,10 +1606,19 @@ fn apply_event(ctx: &mut TurnCtx, state: &mut TurnState, event: &Value) -> bool 
                     state.native_session_id = Some(sid.to_string());
                 }
             }
-            // Track background sub-agents so the `result` arm knows a turn
-            // isn't over while one still runs (see `pending_tasks`).
+            // Track background sub-agents (and a helper's shell commands) so the
+            // `result` arm knows a turn isn't over while one still runs.
             Some("task_started") => {
-                if event.get("task_type").and_then(Value::as_str) == Some("local_agent") {
+                let gates_turn = match event.get("task_type").and_then(Value::as_str) {
+                    Some("local_agent") => true,
+                    // A sub-agent's own command reports to that sub-agent.
+                    Some("local_bash") => {
+                        state.spawned_helper
+                            && event.get("owned_by_subagent").and_then(Value::as_bool) != Some(true)
+                    }
+                    _ => false,
+                };
+                if gates_turn {
                     if let Some(id) = event.get("task_id").and_then(Value::as_str) {
                         // No tool_use_id → no spawn-part association; the
                         // task still gates the turn's end.
@@ -2160,6 +2173,7 @@ async fn run_attempt(ctx: &mut TurnCtx, spec: SpawnSpec) -> Result<(TurnState, u
 
     let mut state = TurnState {
         bridge_active,
+        spawned_helper: ctx.spawned_helper,
         ..Default::default()
     };
     let mut saw_event = false;
@@ -2202,9 +2216,13 @@ async fn run_attempt(ctx: &mut TurnCtx, spec: SpawnSpec) -> Result<(TurnState, u
                 deadline = tokio::time::Instant::now() + super::TURN_WATCHDOG;
                 event
             }
-            // Card think-time is unbounded by design: re-arm, or an elapsed
-            // absolute deadline would spin this arm instead of waiting.
-            Waited::Event(Err(_)) if ctx.host.has_pending_permission(&ctx.session_id) => {
+            // Card think-time and a helper's silent background command are
+            // unbounded by design: re-arm, or an elapsed absolute deadline
+            // would spin this arm instead of waiting.
+            Waited::Event(Err(_))
+                if ctx.host.has_pending_permission(&ctx.session_id)
+                    || (state.spawned_helper && !state.pending_tasks.is_empty()) =>
+            {
                 deadline = tokio::time::Instant::now()
                     + if saw_event {
                         super::TURN_WATCHDOG
@@ -3481,6 +3499,45 @@ mod tests {
             apply_event(&mut ctx, &mut state, &result),
             "the post-continuation result ends the turn"
         );
+    }
+
+    /// Claude Code 2.1.284's stream for a background Bash: the model replies
+    /// with progress, the CLI emits a result, then resumes once the command ends.
+    const BACKGROUND_BASH_STREAM: &[&str] = &[
+        r#"{"type":"assistant","message":{"id":"m1","content":[{"type":"tool_use","id":"toolu_b","name":"Bash","input":{"command":"sleep 8; echo FINISHED-42","run_in_background":true}}]}}"#,
+        r#"{"type":"system","subtype":"task_started","task_id":"b1","tool_use_id":"toolu_b","task_type":"local_bash","is_backgrounded":true}"#,
+        r#"{"type":"user","message":{"content":[{"type":"tool_result","tool_use_id":"toolu_b","content":"Command running in background with ID: b1."}]}}"#,
+        r#"{"type":"assistant","message":{"id":"m2","content":[{"type":"text","text":"The command is running in the background."}]}}"#,
+        r#"{"type":"result","subtype":"success","is_error":false,"result":"The command is running in the background."}"#,
+        r#"{"type":"system","subtype":"task_notification","task_id":"b1","tool_use_id":"toolu_b","status":"completed"}"#,
+        r#"{"type":"system","subtype":"init","session_id":"s"}"#,
+        r#"{"type":"assistant","message":{"id":"m3","content":[{"type":"text","text":"FINISHED-42"}]}}"#,
+        r#"{"type":"result","subtype":"success","is_error":false,"result":"FINISHED-42"}"#,
+    ];
+
+    /// Index of the first event that ends the turn, if any.
+    fn background_bash_turn_end(spawned_helper: bool) -> Option<usize> {
+        let mut ctx = TurnCtx::test_stub();
+        let mut state = TurnState {
+            spawned_helper,
+            ..Default::default()
+        };
+        BACKGROUND_BASH_STREAM.iter().position(|line| {
+            apply_event(&mut ctx, &mut state, &serde_json::from_str(line).unwrap())
+        })
+    }
+
+    #[test]
+    fn spawned_helper_turn_outlasts_a_progress_reply_over_a_background_command() {
+        assert_eq!(
+            background_bash_turn_end(true),
+            Some(BACKGROUND_BASH_STREAM.len() - 1)
+        );
+    }
+
+    #[test]
+    fn chat_turn_still_ends_at_the_reply_over_a_background_command() {
+        assert_eq!(background_bash_turn_end(false), Some(4));
     }
 
     #[test]
