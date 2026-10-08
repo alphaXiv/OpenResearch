@@ -90,6 +90,7 @@ pub fn slugify(text: &str) -> String {
 pub const BACKENDS: &[&str] = &[
     "local",
     "tinker",
+    "colab",
     "hf",
     "modal",
     "k8s",
@@ -100,10 +101,11 @@ pub const BACKENDS: &[&str] = &[
 ];
 
 /// Backends whose launches take a `--flavor` (hf/modal/openresearch require
-/// one; slurm's is an optional GRES spec; ray's is optional resource hints).
+/// one; colab's defaults to a T4; slurm's is an optional GRES spec; ray's is
+/// optional resource hints).
 /// k8s (manifest), ssh (host), and local (this machine's hardware) have no
 /// flavor axis.
-pub const FLAVORED_BACKENDS: &[&str] = &["hf", "modal", "slurm", "ray", "openresearch"];
+pub const FLAVORED_BACKENDS: &[&str] = &["hf", "modal", "colab", "slurm", "ray", "openresearch"];
 
 /// The subset whose launches FAIL without a `--flavor` — the playbook warns
 /// about these when they're the default with no saved flavor.

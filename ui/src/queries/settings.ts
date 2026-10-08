@@ -51,6 +51,18 @@ export const getLocalMachineQuery = () => queryOptions({
   staleTime: 300_000,
 });
 
+export const getColabSettingsQuery = () => queryOptions({
+  queryKey: workspaceKey("getColabSettings"),
+  queryFn: ({ signal }) => api.getColabSettings(signal),
+  staleTime: 30_000,
+});
+
+export const getCrossHarnessSettingsQuery = () => queryOptions({
+  queryKey: workspaceKey("getCrossHarnessSettings"),
+  queryFn: ({ signal }) => api.getCrossHarnessSettings(signal),
+  staleTime: 300_000,
+});
+
 export const getOpenResearchSettingsQuery = () => queryOptions({
   queryKey: workspaceKey("getOpenResearchSettings"),
   queryFn: ({ signal }) => api.getOpenResearchSettings(signal),

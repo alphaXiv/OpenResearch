@@ -1,7 +1,7 @@
 // Brand marks for the compute backends. Most are inline SVGs; Tinker uses the
 // supplied Thinking Machines raster mark.
 
-import { Laptop, Server } from "lucide-react";
+import { CloudCog, Laptop, Server } from "lucide-react";
 import { backendDetail, backendKind, type Run } from "../api";
 import slurmLogo from "../assets/slurm-logo.svg";
 import thinkingMachinesLogo from "../assets/thinking-machines.png";
@@ -28,6 +28,8 @@ function backendName(kind: string): string {
       return m.compute_target_local();
     case "tinker_job":
       return "Tinker";
+    case "colab_job":
+      return "Colab";
     default:
       return kind || "—";
   }
@@ -174,6 +176,8 @@ export function BackendLogo({ kind, size = 16 }: { kind: string; size?: number }
       return <OpenResearchLogo size={size} />;
     case "tinker_job":
       return <TinkerLogo size={size} />;
+    case "colab_job":
+      return <CloudCog size={size} strokeWidth={1.5} />;
     case "local_job":
       return <Laptop size={size} strokeWidth={1.5} />;
     default:

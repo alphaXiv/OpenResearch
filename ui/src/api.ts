@@ -898,6 +898,16 @@ export const restartApp = () =>
 export const setAutoUpdate = (enabled: boolean) =>
   post<UpdateStatus>("/api/update/auto", { enabled });
 
+export interface CrossHarnessSettings {
+  enabled: boolean;
+}
+
+export const getCrossHarnessSettings = (signal?: AbortSignal) =>
+  get<CrossHarnessSettings>("/api/settings/cross-harness", signal);
+
+export const setCrossHarnessSettings = (enabled: boolean) =>
+  post<CrossHarnessSettings>("/api/settings/cross-harness", { enabled });
+
 export const installCli = (force = false) =>
   post<InstalledCli>("/api/update/install-cli", { force });
 
@@ -1182,6 +1192,7 @@ export const rayPreflight = (address?: string) =>
 export type ComputeTargetId =
   | "local"
   | "tinker"
+  | "colab"
   | "hf"
   | "modal"
   | "k8s"
@@ -1232,6 +1243,7 @@ export const setComputeDefault = (body: {
 export interface LocalGpu {
   name: string;
   memMib: number | null;
+  memFreeMib: number | null;
 }
 
 /** What `--backend local` runs on: this machine's detected hardware. */
@@ -1243,10 +1255,41 @@ export interface LocalMachine {
   chip: string | null;
   cpuCount: number;
   memBytes: number | null;
+  /** RAM a new run can use right now. */
+  memAvailableBytes: number | null;
+  swapTotalBytes: number | null;
+  swapFreeBytes: number | null;
+  diskFreeBytes: number | null;
+  loadAverage: number | null;
+  /** Local launches are refused below this much free RAM. */
+  launchFloorBytes: number | null;
   gpus: LocalGpu[];
 }
 
 export const getLocalMachine = (signal?: AbortSignal) => get<LocalMachine>("/api/settings/local", signal);
+
+export interface ColabAccelerator {
+  id: string;
+  kind: "cpu" | "gpu" | "tpu";
+  cliValue: string;
+  label: string;
+  memoryGb: number;
+  highMem: boolean;
+}
+
+/** Local probes of the Colab CLI; never starts its sign-in. */
+export interface ColabSettings {
+  supportedOs: boolean;
+  cliPath: string | null;
+  cliVersion: string | null;
+  signedIn: boolean;
+  ready: boolean;
+  error: string | null;
+  defaultFlavor: string;
+  accelerators: ColabAccelerator[];
+}
+
+export const getColabSettings = (signal?: AbortSignal) => get<ColabSettings>("/api/settings/colab", signal);
 
 export interface OpenResearchSettings {
   loggedIn: boolean;

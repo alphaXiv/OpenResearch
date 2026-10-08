@@ -141,7 +141,10 @@ pub async fn run(args: crate::SuperviseArgs) -> Result<()> {
     if descriptor.kind == "openresearch_job" {
         return run_openresearch(store, stored, descriptor, run_id).await;
     }
-    if matches!(descriptor.kind.as_str(), "local_job" | "tinker_job") {
+    if matches!(
+        descriptor.kind.as_str(),
+        "local_job" | "tinker_job" | "colab_job"
+    ) {
         return run_local(store, stored, descriptor, run_id).await;
     }
     let (namespace, job_id) = descriptor.hf_ref()?;
@@ -1094,11 +1097,18 @@ async fn run_local(
 
     let mut last_status = status_of(&stored)?;
     let mut cancel_sent = false;
+    // Only a run on this machine competes with it for memory; a controller's
+    // payload (Tinker, Colab) runs elsewhere.
+    let mut memory_guard = (descriptor.kind == "local_job").then(MemoryGuard::default);
 
     loop {
         let job = localbox::inspect_job(&dir);
         let stage = job.stage.as_str();
-        let status = run_status_for_stage(&store, &run_id, cancel_sent, stage);
+        let mut status = run_status_for_stage(&store, &run_id, cancel_sent, stage);
+        let guard_reason = memory_guard.as_ref().and_then(|guard| guard.reason.clone());
+        if guard_reason.is_some() && is_terminal_stage(stage) {
+            status = RunStatus::Failed;
+        }
 
         if is_terminal_stage(stage) {
             let _ = done_tx.send(true);
@@ -1110,16 +1120,26 @@ async fn run_local(
             }
             let applied = store.update_status(&run_id, status, Some(now_ms()), None)?;
             if applied && status == RunStatus::Failed {
-                if let Some(msg) = &job.message {
-                    if let Err(err) =
-                        store.set_result_markdown(&run_id, &format!("Job failed: {msg}"))
-                    {
+                let reason = guard_reason
+                    .or_else(|| job.message.as_ref().map(|msg| format!("Job failed: {msg}")));
+                if let Some(reason) = reason {
+                    if let Err(err) = store.set_result_markdown(&run_id, &reason) {
                         eprintln!("supervise {run_id}: could not record failure reason: {err}");
                     }
                 }
             }
             eprintln!("supervise {run_id}: finished ({status})");
             return Ok(());
+        }
+
+        if let Some(guard) = memory_guard.as_mut() {
+            if guard.reason.is_none() && guard.check().await {
+                eprintln!(
+                    "supervise {run_id}: {}",
+                    guard.reason.as_deref().unwrap_or_default()
+                );
+                cancel_local(&dir, &run_id, &mut cancel_sent);
+            }
         }
 
         if status != last_status && store.update_status(&run_id, status, None, None)? {
@@ -1134,6 +1154,41 @@ async fn run_local(
         }
 
         tokio::time::sleep(POLL_INTERVAL).await;
+    }
+}
+
+/// Stops a local run before it exhausts this machine's memory: two
+/// consecutive critical readings (one poll apart, so a brief spike passes)
+/// terminate the run and record why.
+#[derive(Default)]
+struct MemoryGuard {
+    critical_polls: u8,
+    reason: Option<String>,
+}
+
+impl MemoryGuard {
+    /// Take a reading; true when this reading tripped the guard.
+    async fn check(&mut self) -> bool {
+        let snapshot = tokio::task::spawn_blocking(localbox::memory_snapshot)
+            .await
+            .ok()
+            .flatten();
+        let Some(snapshot) = snapshot.filter(|memory| memory.is_critical()) else {
+            self.critical_polls = 0;
+            return false;
+        };
+        self.critical_polls += 1;
+        if self.critical_polls < 2 {
+            return false;
+        }
+        self.reason = Some(format!(
+            "Stopped by orx to keep this machine responsive: memory ran out during the run \
+             ({}). Lower the batch size, sequence length, or model size, stream the data \
+             instead of loading it all at once, or launch on remote compute such as \
+             `--backend colab`.",
+            snapshot.describe()
+        ));
+        true
     }
 }
 

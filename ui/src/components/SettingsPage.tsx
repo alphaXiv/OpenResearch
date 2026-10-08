@@ -19,6 +19,8 @@ import {
   getSshSettingsQuery,
   getSlurmSettingsQuery,
   getRaySettingsQuery,
+  getColabSettingsQuery,
+  getCrossHarnessSettingsQuery,
   getOpenResearchSettingsQuery,
   getLocalMachineQuery,
   getComputeSettingsQuery,
@@ -96,6 +98,7 @@ import {
   type TinkerSettings,
   type K8sSettings,
   type LocalMachine,
+  type ColabSettings,
   type ModalSettings,
   type RayPreflight,
   type RaySettings,
@@ -108,6 +111,7 @@ import {
   applyUpdate,
   installCli,
   setAutoUpdate as setAutoUpdateApi,
+  setCrossHarnessSettings,
   type InstallChannel,
   type InstalledCli,
 } from "../api";
@@ -524,7 +528,45 @@ function HarnessesTab({ remote }: { remote: boolean }) {
           {h.id === "opencode" && <LocalModelSetup installed={h.installed} />}
         </div>
       )}
+      <CrossHarnessCard />
     </>
+  );
+}
+
+function CrossHarnessCard() {
+  const options = getCrossHarnessSettingsQuery();
+  const query = useQuery(options);
+  const mutation = useMutation({ mutationFn: setCrossHarnessSettings });
+  const [error, setError] = useState<string | null>(null);
+  const enabled = query.data?.enabled ?? false;
+
+  async function toggle() {
+    setError(null);
+    try {
+      const next = await mutation.mutateAsync(!enabled);
+      setScopedQueryData(options.queryKey, () => next);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : String(err));
+    }
+  }
+
+  return (
+    <div className={cn(SETTINGS_CARD_CLASS_NAME, "mt-4")}>
+      <div className="flex items-center justify-between gap-6">
+        <div>
+          <div className="text-base font-medium">{m.settings_cross_harness_title()}</div>
+          <p className="mt-[3px] mb-0 text-sm leading-relaxed text-text">{m.settings_cross_harness_description()}</p>
+        </div>
+        <Switch
+          type="button"
+          checked={enabled}
+          aria-label={m.settings_cross_harness_title()}
+          disabled={!query.data || mutation.isPending}
+          onClick={() => void toggle()}
+        />
+      </div>
+      {error && <div className="error">{error}</div>}
+    </div>
   );
 }
 
@@ -1404,11 +1446,90 @@ function RayTestBadge({ test }: { test: "testing" | RayPreflight | null }) {
 
 function localMachineSummary(hw: LocalMachine) {
   const processor = hw.chip ?? `${hw.os}/${hw.arch}`;
-  const memory = hw.memBytes === null ? null : fmtBytes(hw.memBytes);
+  const memory = hw.memBytes === null
+    ? null
+    : hw.memAvailableBytes === null
+      ? fmtBytes(hw.memBytes)
+      : m.settings_memory_free({ free: fmtBytes(hw.memAvailableBytes), total: fmtBytes(hw.memBytes) });
   const gpu = hw.gpus.length === 0 ? null : m.settings_gpu_count({ count: hw.gpus.length });
   return [processor, hw.cpuCount > 0 ? m.settings_cpu_cores({ count: hw.cpuCount }) : null, memory, gpu]
     .filter(Boolean)
     .join(" · ");
+}
+
+// --- compute (colab) --------------------------------------------------------------
+
+function ColabSection() {
+  const options = getColabSettingsQuery();
+  const query = useQuery(options);
+  const s: ColabSettings | null = query.data ?? null;
+  const [refreshing, setRefreshing] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const loading = query.isPending || refreshing;
+
+  async function refresh() {
+    if (loading) return;
+    setRefreshing(true);
+    setError(null);
+    try {
+      await queryClient.fetchQuery({ ...getColabSettingsQuery(), staleTime: 0 });
+    } catch (err) {
+      setError(err instanceof Error ? err.message : String(err));
+    } finally {
+      setRefreshing(false);
+    }
+  }
+
+  const loadError = error ?? query.error?.message ?? null;
+  return (
+    <>
+      {!s && loading ? (
+        <LoadingRow>
+          <Spinner /> {m.settings_colab_checking()}
+        </LoadingRow>
+      ) : s && (
+        <>
+          <dl className="m-0 flex items-center justify-between gap-4 text-sm">
+            <dt className="font-medium text-subtext">{m.settings_page_status()}</dt>
+            <dd className="m-0 flex items-center gap-2">
+              <Badge variant={s.ready ? "success" : "warning"}>
+                {s.ready
+                  ? m.settings_page_ready_to_use()
+                  : !s.cliPath
+                    ? m.settings_colab_not_installed()
+                    : m.settings_colab_not_signed_in()}
+              </Badge>
+              <Button size="small" onClick={() => void refresh()} disabled={loading}>
+                <RefreshCw size={12} className={refreshing ? "animate-[spin_0.9s_linear_infinite]" : ""} /> {m.settings_page_refresh()}
+              </Button>
+            </dd>
+          </dl>
+          <div className={cn(KV_CLASS_NAME, "mt-4 [&_.v]:text-sm")}>
+            <span className="k">{m.settings_page_binary()}</span>
+            <span className="v">{s.cliPath ?? m.settings_not_found_on_path()}</span>
+            <span className="k">{m.settings_page_version()}</span>
+            <span className="v">{s.cliVersion ?? "—"}</span>
+          </div>
+          {s.error && <p className="mt-3 mb-0 text-sm text-subtext">{s.error}</p>}
+          <p className="mt-4 mb-2 text-sm font-medium text-subtext">{m.settings_colab_accelerators()}</p>
+          <ul className="m-0 flex list-none flex-col gap-1 p-0 text-sm">
+            {s.accelerators.map((accelerator) => (
+              <li key={accelerator.id} className="flex items-center justify-between gap-4">
+                <span>
+                  <code>{accelerator.id}</code> {accelerator.label}
+                </span>
+                <span className="text-subtext">
+                  {accelerator.memoryGb > 0 ? m.settings_colab_memory_gb({ gb: fmtNumber(accelerator.memoryGb) }) : "—"}
+                </span>
+              </li>
+            ))}
+          </ul>
+          <p className="mt-3 mb-0 text-sm text-subtext">{m.settings_colab_flavor_hint({ flavor: s.defaultFlavor })}</p>
+        </>
+      )}
+      {loadError && <div className="error mt-3">{loadError}</div>}
+    </>
+  );
 }
 
 // --- compute (openresearch) ---------------------------------------------------------
@@ -1532,6 +1653,7 @@ const TARGET_CARD_DESCRIPTIONS: Record<ComputeTargetId, () => string> = {
   local: m.compute_description_local,
   ssh: m.compute_description_ssh,
   tinker: m.compute_description_tinker,
+  colab: m.compute_description_colab,
   hf: m.compute_description_hf,
   modal: m.compute_description_modal,
   k8s: m.compute_description_k8s,
@@ -1544,6 +1666,7 @@ const TARGET_CARD_DESCRIPTIONS: Record<ComputeTargetId, () => string> = {
 const TARGET_KIND: Record<ComputeTargetId, string> = {
   local: "local_job",
   tinker: "tinker_job",
+  colab: "colab_job",
   hf: "hf_job",
   modal: "modal_job",
   k8s: "k8s_job",
@@ -1554,22 +1677,24 @@ const TARGET_KIND: Record<ComputeTargetId, string> = {
 };
 
 /** Backends whose launches take --flavor; mirrors the server's validation. */
-const FLAVORED_TARGETS: ComputeTargetId[] = ["hf", "modal", "slurm", "ray", "openresearch"];
+const FLAVORED_TARGETS: ComputeTargetId[] = ["hf", "modal", "colab", "slurm", "ray", "openresearch"];
 /** Of those, the ones where a launch *requires* a flavor. */
 const FLAVOR_REQUIRED: ComputeTargetId[] = ["hf", "modal", "openresearch"];
 
 const FLAVOR_SUGGESTIONS: Partial<Record<ComputeTargetId, string[]>> = {
   hf: ["cpu-basic", "t4-small", "a10g-small", "a10g-large", "a100-large", "h100", "h200"],
   modal: ["cpu", "t4", "l4", "a10g", "a100", "a100-80gb", "l40s", "h100", "h100:2"],
+  colab: ["t4", "l4", "a100", "h100", "g4", "a100:highmem", "cpu", "v5e1", "v6e1"],
   slurm: ["gpu", "h100:1", "h100:2", "a100:4"],
   ray: ["cpu", "cpu:2", "gpu", "gpu:1", "gpu:1,cpu:4", "gpu:1,mem:8GiB"],
   openresearch: ["h100_sxm", "h100_sxm:2", "cpu5c", "cpu5g", "cpu5m"],
 };
 
-const QUICK_SETUP_TARGETS: ComputeTargetId[] = ["tinker", "hf", "modal", "ray", "k8s"];
+const QUICK_SETUP_TARGETS: ComputeTargetId[] = ["tinker", "colab", "hf", "modal", "ray", "k8s"];
 
 const TARGET_USAGE: Partial<Record<ComputeTargetId, () => string>> = {
   tinker: m.compute_usage_tinker,
+  colab: m.compute_usage_colab,
   hf: m.compute_usage_hf,
   modal: m.compute_usage_modal,
   openresearch: m.compute_usage_openresearch,
@@ -1934,6 +2059,7 @@ function QuickSetupDialog({ target, remote, onClose }: { target: ComputeTargetSu
         </IconButton>
       </div>
       {target.id === "tinker" && <TinkerSection target={target} />}
+      {target.id === "colab" && <ColabSection />}
       {target.id === "hf" && <HfSection remote={remote} />}
       {target.id === "modal" && <ModalSection />}
       {target.id === "ray" && <RaySection />}

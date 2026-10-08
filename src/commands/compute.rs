@@ -153,6 +153,7 @@ pub enum Backend {
     Hf,
     Modal,
     Tinker,
+    Colab,
     K8s,
     Openresearch,
 }
@@ -166,6 +167,7 @@ impl Backend {
             Self::Hf => "hf",
             Self::Modal => "modal",
             Self::Tinker => "tinker",
+            Self::Colab => "colab",
             Self::K8s => "k8s",
             Self::Openresearch => "openresearch",
         }
@@ -617,6 +619,18 @@ async fn connect(args: &CheckArgs, persist: Option<u64>) -> Result<()> {
         Backend::Openresearch => {
             super::login::run(crate::LoginArgs { api_url: None }).await?;
             super::ssh_key::add(None).await?;
+        }
+        Backend::Colab => {
+            // Any authenticated command starts the CLI's browser sign-in once.
+            let cli = crate::jobs::colab::find_cli()
+                .ok_or_else(|| anyhow!("{}", crate::jobs::colab::INSTALL_HINT))?;
+            let status = tokio::process::Command::new(cli)
+                .arg("sessions")
+                .status()
+                .await?;
+            if !status.success() {
+                return Err(anyhow!("colab sessions exited with {status}."));
+            }
         }
         Backend::Local | Backend::Ray | Backend::K8s => {}
     }
