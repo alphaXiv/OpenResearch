@@ -43,3 +43,12 @@ test("numbered references open the matching inline image while paper citations s
   const ambiguous = render('[Table 1](https://example.com/paper)\n\n![Table 1](a.png)\n\n![Table 1](b.png)');
   assert.equal(ambiguous.children[0].children[0].properties["data-figure-src"], undefined);
 });
+
+test("standalone HTML charts have a block figure container, including query URLs", () => {
+  for (const url of ["chart.html", "chart.htm?version=2#plot"]) {
+    const figure = render(`![Interactive chart](${url})`).children[0];
+    assert.equal(figure.tagName, "figure");
+    assert.equal(figure.children[0].tagName, "img");
+  }
+  assert.equal(render("Text ![chart](chart.html)").children[0].tagName, "p");
+});

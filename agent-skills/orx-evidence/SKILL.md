@@ -45,3 +45,19 @@ run-derived claim, confirm that:
 Truncated output is not evidence of absence. Search or read the reported file until
 the relevant portion has been found. Format the resulting chat response using
 the evidence-and-links contract in the session playbook.
+
+## Summarize an experiment
+
+Briefly explain what changed, what ran, and what the evidence shows. When the
+measured results suit a supported `orx-figures` template and a graph makes the
+result easier to understand, prefer an interactive figure inline alongside
+that summary. Reuse an existing figure where possible and link its source data.
+
+This is a rule of thumb, not a required output. Skip the visualization when
+there is no suitable structured data, no appropriate template, or no useful
+visual comparison. Do not invent data, additional runs, or graph views to
+satisfy the preference; a concise text summary can be the complete result.
+
+Default to one graph. Offer a dropdown only when multiple views of the same
+data answer distinct, useful questions. Multiple series alone do not require
+a dropdown, and one useful view does not need a selector.

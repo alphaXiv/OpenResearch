@@ -73,7 +73,7 @@
   "chat_panel_data_sources": "Data sources",
   "chat_panel_delegated_a_task_to_a_new_agent": "Delegated a task to a new agent",
   "chat_panel_delete": "Delete",
-  "chat_panel_demo_hint_body": "This prompt runs a small 200-step training probe on your machine. Hit enter to get started.",
+  "chat_panel_demo_hint_body": "Train a tiny nanochat model for 20 steps per learning rate and compare the loss curves. First use prepares Python dependencies. Hit enter to get started.",
   "chat_panel_demo_run_hint_after": "to monitor it.",
   "chat_panel_demo_run_hint_before": "The experiment is now running. Tap",
   "chat_panel_deny": "Deny",

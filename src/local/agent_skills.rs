@@ -111,6 +111,14 @@ const FEEDBACK: &str = include_str!("../../agent-skills/orx-feedback/SKILL.md");
 const FIGURES: &str = include_str!("../../agent-skills/orx-figures/SKILL.md");
 const FIGURES_RESOURCES: &[AgentSkillResource] = &[
     AgentSkillResource {
+        path: "assets/orx-chart.html",
+        content: include_str!("../../agent-skills/orx-figures/assets/orx-chart.html"),
+    },
+    AgentSkillResource {
+        path: "assets/orx_chart.py",
+        content: include_str!("../../agent-skills/orx-figures/assets/orx_chart.py"),
+    },
+    AgentSkillResource {
         path: "references/curves.md",
         content: include_str!("../../agent-skills/orx-figures/references/curves.md"),
     },
@@ -209,7 +217,7 @@ const S_PAPER: AgentSkill = AgentSkill {
 };
 const S_FIGURES: AgentSkill = AgentSkill {
     name: "orx-figures",
-    description: "Publication-quality figures in matplotlib or TikZ: learning curves, scaling laws, benchmark and ablation comparisons, Pareto trade-offs, heatmaps and confusion matrices, method diagrams. Covers the shared style module, sizing, uncertainty, and vector export. Use whenever you plot, chart, or visualize results, add a figure to a paper or report, or one looks unpolished; then read one reference.",
+    description: "Interactive HTML charts for chat and publication figures in matplotlib or TikZ. Use when plotting experiment metrics, learning curves, comparisons, scaling, heatmaps or diagrams. Includes an offline chart template with hover, toggles, zoom and SVG export.",
     content: FIGURES,
     resources: FIGURES_RESOURCES,
 };

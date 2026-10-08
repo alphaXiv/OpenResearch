@@ -31,7 +31,7 @@ export const DEMO_SEEDED_LEAF_IDS: Record<string, string> = {
   [DEMO_LITERATURE_SESSION_ID]: "msg_demo_nanochat_literature_assistant_v1",
 };
 export const DEMO_RUN_EXPERIMENT_PROMPT =
-  "Run the Muon matrix LR 2× probe experiment. When it finishes, compare its step-100 and step-200 val_bpb against the baseline and tell me whether doubling the matrix learning rate helps early training.";
+  "Run the tiny nanochat learning-rate comparison experiment. Show its interactive HTML loss chart inline using image syntax and briefly compare the two learning rates using held-out validation loss.";
 
 export class FileChangedError extends Error {
   readonly currentVersion: string | null;

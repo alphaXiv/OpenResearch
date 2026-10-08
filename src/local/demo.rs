@@ -31,12 +31,11 @@ const OWNER: &str = "openresearch-demo";
 const REPO: &str = "nanochat";
 const BRANCH: &str = "orx/cpu-apple-silicon-end-to-end-baseline";
 const LR_PROBE_EXPERIMENT_ID: &str = "demo_nanochat_lr_probe_v1";
-const LR_PROBE_BRANCH: &str = "orx/matrix-lr-2x-probe";
+const LR_PROBE_BRANCH: &str = "orx/tiny-learning-rate-probe-interactive";
 const VOCAB_PROBE_EXPERIMENT_ID: &str = "demo_nanochat_vocab_probe_v1";
 const VOCAB_PROBE_BRANCH: &str = "orx/vocab-8192-probe";
-// Same environment and data setup as runs/runcpu.sh, then a 200-step base-training probe.
 // Git Bash: uv has no shell installer there, and venvs may use `Scripts/` not `bin/`.
-fn probe_setup() -> String {
+fn probe_uv() -> String {
     let install_uv = if cfg!(windows) {
         "powershell -NoProfile -ExecutionPolicy Bypass -Command \"irm https://astral.sh/uv/install.ps1 | iex\""
     } else {
@@ -45,13 +44,19 @@ fn probe_setup() -> String {
     format!(
         "export NANOCHAT_BASE_DIR=\"$PWD/.cache/nanochat\" UV_CACHE_DIR=\"$PWD/.cache/uv\" \
          && mkdir -p \"$NANOCHAT_BASE_DIR\" \"$UV_CACHE_DIR\" \
-         && {{ command -v uv >/dev/null || {{ {install_uv} && export PATH=\"$HOME/.local/bin:$PATH\"; }}; }} \
-         && ([ -d .venv ] || uv venv) \
-         && uv sync --extra cpu \
-         && {{ . .venv/bin/activate 2>/dev/null || . .venv/Scripts/activate; }} \
-         && python -m nanochat.dataset -n 8"
+         && {{ command -v uv >/dev/null || {{ {install_uv} && export PATH=\"$HOME/.local/bin:$PATH\"; }}; }}"
     )
 }
+
+fn probe_setup() -> String {
+    format!(
+        "{} && ([ -d .venv ] || uv venv) && uv sync --extra cpu \
+         && {{ . .venv/bin/activate 2>/dev/null || . .venv/Scripts/activate; }} \
+         && python -m nanochat.dataset -n 8",
+        probe_uv()
+    )
+}
+
 // --warmdown-ratio=0 keeps the LR schedule identical to the baseline's first 200 steps.
 const PROBE_TRAIN: &str = "python -m scripts.base_train --depth=6 --head-dim=64 --window-pattern=L --max-seq-len=512 --device-batch-size=32 --total-batch-size=16384 --eval-every=50 --eval-tokens=524288 --core-metric-every=-1 --sample-every=-1 --num-iterations=200 --warmdown-ratio=0";
 const PROBE_TOK_TRAIN: &str = "python -m scripts.tok_train --max-chars=2000000000";
@@ -93,9 +98,9 @@ You inspected the repository and prepared the CPU pipeline before launching it: 
 
 Recorded results: a 6-layer 73.5M-parameter model trained for 5,000 base steps over 81.92M tokens; final training validation BPB 1.165758; base-eval train/validation BPB 1.152185/1.119301; SFT completed 1,500 steps with final validation BPB 0.7389. The final CLI loaded the SFT checkpoint and answered that the capital of France is Paris. The results are saved in cpu-apple-silicon-pipeline-results.md.
 
-Two idle follow-up experiments already branch from that baseline, each with a complete run command and no code changes needed: demo_nanochat_lr_probe_v1 (Muon matrix LR 2× probe) and demo_nanochat_vocab_probe_v1 (8,192-token vocabulary probe). Both are short 200-step base-training probes on the local backend whose learning-rate schedule matches the baseline's first 200 steps, so their validation BPB compares directly with the baseline's 1.940739 at step 100 and 1.762539 at step 200.
+The default follow-up is demo_nanochat_lr_probe_v1 (Tiny nanochat learning-rate comparison). It runs the actual nanochat GPT architecture with approximately 0.8M parameters: 2 layers, width 128, vocabulary 1,024, and context 64. It trains two arms for 20 steps each with AdamW learning rates 0.001 and 0.002, identical starting weights and batches, and bundled nanochat README text split into training and held-out validation sections. It writes artifacts/tiny-nanochat-loss.html, tiny-nanochat-loss.csv, and tiny-nanochat-results.json in the run checkout. Compare these two fresh arms; their loss in nats/token is not comparable to the recorded 73.5M-model BPB. This demonstrates early optimization, not coherent generation or a reliable scientific conclusion. The vocabulary probe remains an optional longer experiment requiring data downloads.
 
-Operational note: when the user asks to run one of them, launch it immediately with `orx exp run <expId>`. Do not load skills, read compute references, or re-inspect the experiment tree first; follow the run's logs and report the comparison.
+Operational note: when the user asks to run one of them, launch it immediately with `orx exp run <expId>`. Do not load skills, read compute references, or re-inspect the experiment tree first; follow the run's logs and report the comparison. For the tiny probe, copy its ready-made HTML, CSV, and JSON into the project artifacts and embed the interactive HTML with image syntax: `![Tiny nanochat learning-rate comparison](artifacts/tiny-learning-rate-comparison/tiny-nanochat-loss.html)`. Keep the answer short; do not regenerate the figure or run extra experiments.
 
 Continue naturally from this completed state. Do not claim you are rerunning the historical training unless the user asks you to."#;
 
@@ -155,6 +160,10 @@ struct BaseAssets;
 #[derive(RustEmbed)]
 #[folder = "demo/nanochat/experiment/"]
 struct ExperimentAssets;
+
+#[derive(RustEmbed)]
+#[folder = "demo/nanochat/quick/"]
+struct QuickProbeAssets;
 
 #[derive(RustEmbed)]
 #[folder = "demo/nanochat/figures/"]
@@ -481,16 +490,16 @@ fn seed_at(
             id: LR_PROBE_EXPERIMENT_ID.into(),
             project_id: PROJECT_ID.into(),
             parent_experiment_id: Some(EXPERIMENT_ID.into()),
-            slug: "matrix-lr-2x-probe".into(),
+            slug: "tiny-learning-rate-probe".into(),
             branch_name: LR_PROBE_BRANCH.into(),
-            title: Some("Muon matrix LR 2× probe (200 steps)".into()),
+            title: Some("Tiny nanochat learning-rate comparison (20 steps)".into()),
             description: Some(
-                "A lightweight early-training probe: the baseline d6 recipe with --matrix-lr raised from 0.02 to 0.04, trained for 200 steps with validation every 50 and no learning-rate warmdown, so the learning-rate schedule matches the baseline's first 200 steps. Compare against the baseline curve, which reached val_bpb 1.940739 at step 100 and 1.762539 at step 200. Skips base_eval and SFT: a few minutes on Apple Silicon, longer on plain CPU."
+                "Train a real 0.8M-parameter nanochat model for 20 steps per arm on bundled text, comparing AdamW LR 0.001 with 0.002 from identical initialization and batches. Saves training/held-out validation loss, an interactive HTML loss chart, and raw metrics. No dataset download or full tokenizer training. Demonstrates early optimization, not coherent generation; results are separate from the recorded 73.5M baseline. First use prepares Python dependencies."
                     .into(),
             ),
             run_command: format!(
-                "{} && {PROBE_TOK_TRAIN} && {PROBE_TRAIN} --matrix-lr=0.04",
-                probe_setup()
+                "{} && uv run --script scripts/demo_probe.py",
+                probe_uv()
             ),
             agent_status: "idle".into(),
             created_at: ago(seeded_at, 8, 0),
@@ -1437,6 +1446,34 @@ fn ensure_follow_up_branches(repo: &Path) -> Result<()> {
         .is_err()
         {
             git(repo, &["branch", branch, BRANCH])?;
+            if branch == LR_PROBE_BRANCH {
+                let previous = git(repo, &["symbolic-ref", "--short", "HEAD"])?;
+                git(repo, &["checkout", branch])?;
+                write_assets::<QuickProbeAssets>(repo)?;
+                for (name, content) in [
+                    (
+                        "orx-chart.html",
+                        include_str!("../../agent-skills/orx-figures/assets/orx-chart.html"),
+                    ),
+                    (
+                        "orx_chart.py",
+                        include_str!("../../agent-skills/orx-figures/assets/orx_chart.py"),
+                    ),
+                ] {
+                    std::fs::write(repo.join("scripts").join(name), content)?;
+                }
+                git(
+                    repo,
+                    &[
+                        "add",
+                        "scripts/demo_probe.py",
+                        "scripts/orx-chart.html",
+                        "scripts/orx_chart.py",
+                    ],
+                )?;
+                commit(repo, "Add a tiny nanochat learning-rate comparison")?;
+                git(repo, &["checkout", &previous])?;
+            }
         }
     }
     Ok(())
@@ -1971,10 +2008,21 @@ mod tests {
                 Some(EXPERIMENT_ID)
             );
             assert_eq!(follow_up.agent_status, "idle");
-            assert_eq!(
-                git(&repo, &["rev-parse", &follow_up.branch_name]).unwrap(),
-                EXPERIMENT_SHA
-            );
+            let head = git(&repo, &["rev-parse", &follow_up.branch_name]).unwrap();
+            git(
+                &repo,
+                &["merge-base", "--is-ancestor", EXPERIMENT_SHA, &head],
+            )
+            .unwrap();
+            if follow_up.id == LR_PROBE_EXPERIMENT_ID {
+                assert!(
+                    git(&repo, &["show", &format!("{head}:scripts/demo_probe.py")])
+                        .unwrap()
+                        .contains("n_layer=2")
+                );
+            } else {
+                assert_eq!(head, EXPERIMENT_SHA);
+            }
             assert_eq!(
                 git(
                     &data.join("demo-repos").join("nanochat.git"),
@@ -1984,7 +2032,7 @@ mod tests {
                     ]
                 )
                 .unwrap(),
-                EXPERIMENT_SHA
+                head
             );
         }
         let runs = store.list_runs_by_project(PROJECT_ID).unwrap();

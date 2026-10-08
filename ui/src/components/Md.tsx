@@ -24,6 +24,7 @@ import { normalizeMarkdownForRendering } from "../markdownNormalization";
 import { tabOpenGestureHandlers, type TabOpenIntent } from "../tabPreview";
 import { Button, IconButton, IconButtonLink } from "./ui";
 import { absoluteFileUrl, artifactUrl, projectFileUrl } from "../api";
+import { InlineHtmlFigure } from "./InlineHtmlFigure";
 import { chatImageTarget, firstCitedLine, rehypeSafeUrls, splitLineSuffix } from "../markdownTarget";
 
 const ImageResolverContext = createContext<((src: string, fallback?: boolean) => string | null) | undefined>(undefined);
@@ -414,6 +415,11 @@ export const Md = memo(function Md({
     if (!src || typeof src !== "string") return null;
     const resolved = imageSrc ? imageSrc(src) : src;
     if (!resolved) return null;
+    if (imageSrc && chatImageTarget(src)?.path.match(/\.html?$/i)) {
+      return <InlineHtmlFigure key={resolved} source={src} url={resolved}
+        fallbackUrl={!resolveImageSrc ? chatImageSrc?.(src, true) : null}
+        name={alt || src} resolveSrc={imageSrc} />;
+    }
     return (
       <MarkdownImage
         {...rest}

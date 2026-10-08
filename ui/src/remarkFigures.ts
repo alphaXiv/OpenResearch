@@ -40,6 +40,10 @@ export function remarkFigures() {
         if (src) node.data = { ...node.data, hProperties: { ...node.data?.hProperties, "data-figure-src": src } };
         const image = node.type === "paragraph" && node.children?.length === 1
           ? node.children[0] : undefined;
+        if (image?.type === "image" && /\.html?(?:[?#]|$)/i.test(image.url ?? "") && !image.title?.trim()) {
+          node.type = "paperFigure";
+          node.data = { hName: "figure" };
+        }
         if (image?.type === "image" && image.title?.trim()) {
           const caption = captionParser.parse(image.title);
           const paragraph = caption.children.length === 1 && caption.children[0]?.type === "paragraph"
