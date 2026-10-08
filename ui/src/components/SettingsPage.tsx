@@ -97,11 +97,14 @@ import {
   type HarnessFailover,
   type HarnessSetupCommands,
   type HarnessId,
+  harnessModelLabel,
   type HfSettings,
   type TinkerSettings,
   type K8sSettings,
   type LocalMachine,
   type ColabSettings,
+  type ColabAccount,
+  getColabSettings,
   type ModalSettings,
   type RayPreflight,
   type RaySettings,
@@ -422,6 +425,7 @@ function HarnessesTab({ remote }: { remote: boolean }) {
     (a, b) => Number(b.agentReady) - Number(a.agentReady),
   );
   const h = orderedHarnesses.find((x) => x.id === active) ?? orderedHarnesses[0];
+  const recommended = h?.models.find((model) => model.id === h.recommendedModel);
 
   return (
     <>
@@ -510,6 +514,14 @@ function HarnessesTab({ remote }: { remote: boolean }) {
             <span className="v">
               {h.catalogPending
                 ? m.onboarding_checking()
+                : recommended && h.models.length > 1
+                ? (
+                  <Tooltip content={m.settings_models_recommended_hint()}>
+                    <span>{m.settings_models_recommended({ model: harnessModelLabel(recommended), count: fmtNumber(h.models.length - 1) })}</span>
+                  </Tooltip>
+                )
+                : recommended
+                ? harnessModelLabel(recommended)
                 : h.models.length > 0
                 ? m.settings_models_available({ count: fmtNumber(h.models.length) })
                 : h.agentReady ? m.model_picker_default_model() : m.settings_none()}
@@ -1614,6 +1626,21 @@ function localMachineSummary(hw: LocalMachine) {
 
 // --- compute (colab) --------------------------------------------------------------
 
+function colabTierLabel(tier: ColabAccount["tier"]): string | null {
+  switch (tier) {
+    case "free":
+      return m.settings_colab_tier_free();
+    case "pro":
+      return m.settings_colab_tier_pro();
+    case "pro_plus":
+      return m.settings_colab_tier_pro_plus();
+    default:
+      return null;
+  }
+}
+
+const fmtUnits = (value: number) => value.toLocaleString(undefined, { maximumFractionDigits: 2, minimumFractionDigits: 2 });
+
 function ColabSection() {
   const options = getColabSettingsQuery();
   const query = useQuery(options);
@@ -1627,7 +1654,8 @@ function ColabSection() {
     setRefreshing(true);
     setError(null);
     try {
-      await queryClient.fetchQuery({ ...getColabSettingsQuery(), staleTime: 0 });
+      const fresh = await getColabSettings(undefined, true);
+      queryClient.setQueryData(options.queryKey, fresh);
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err));
     } finally {
@@ -1636,6 +1664,10 @@ function ColabSection() {
   }
 
   const loadError = error ?? query.error?.message ?? null;
+  const account = s?.account ?? null;
+  const tier = colabTierLabel(account?.tier ?? null);
+  const rates = new Map((account?.rates ?? []).map((rate) => [rate.id, rate]));
+  const eligible = account?.eligible ? new Set(account.eligible) : null;
   return (
     <>
       {!s && loading ? (
@@ -1644,42 +1676,107 @@ function ColabSection() {
         </LoadingRow>
       ) : s && (
         <>
-          <dl className="m-0 flex items-center justify-between gap-4 text-sm">
-            <dt className="font-medium text-subtext">{m.settings_page_status()}</dt>
-            <dd className="m-0 flex items-center gap-2">
-              <Badge variant={s.ready ? "success" : "warning"}>
-                {s.ready
-                  ? m.settings_page_ready_to_use()
-                  : !s.cliPath
-                    ? m.settings_colab_not_installed()
-                    : m.settings_colab_not_signed_in()}
-              </Badge>
-              <Button size="small" onClick={() => void refresh()} disabled={loading}>
-                <RefreshCw size={12} className={refreshing ? "animate-[spin_0.9s_linear_infinite]" : ""} /> {m.settings_page_refresh()}
-              </Button>
-            </dd>
-          </dl>
+          <div className="flex flex-wrap items-center gap-2">
+            <Badge variant={s.ready ? "success" : "warning"}>
+              {s.ready
+                ? m.settings_page_ready_to_use()
+                : !s.cliPath
+                  ? m.settings_colab_not_installed()
+                  : m.settings_colab_not_signed_in()}
+            </Badge>
+            {tier && <Badge>{tier}</Badge>}
+            {account?.email && <span className="truncate text-sm text-subtext" title={m.settings_colab_google_account()}>{account.email}</span>}
+            <div className="flex-1" />
+            <Button size="small" onClick={() => void refresh()} disabled={loading}>
+              <RefreshCw size={12} className={refreshing ? "animate-[spin_0.9s_linear_infinite]" : ""} /> {m.settings_page_refresh()}
+            </Button>
+          </div>
+          {s.error && <p className="mt-3 mb-0 text-sm text-subtext">{s.error}</p>}
+          {account && (
+            <div className="mt-4 grid grid-cols-1 gap-3 sm:grid-cols-2">
+              <div className="rounded-lg border border-border bg-surface px-4 py-3">
+                <div className="text-sm text-subtext">{m.settings_colab_compute_units()}</div>
+                <div className="mt-1 text-2xl font-semibold tabular-nums text-text">
+                  {account.balance != null ? fmtUnits(account.balance) : "—"}
+                </div>
+              </div>
+              <div className="rounded-lg border border-border bg-surface px-4 py-3">
+                <div className="text-sm text-subtext">{m.settings_colab_using_now()}</div>
+                <div className="mt-1 text-2xl font-semibold tabular-nums text-text">
+                  {account.rateHourly != null && account.rateHourly > 0
+                    ? m.settings_colab_rate_value({ rate: fmtUnits(account.rateHourly) })
+                    : account.rateHourly != null ? m.settings_colab_idle() : "—"}
+                </div>
+                {account.activeRuntimes != null && account.activeRuntimes > 0 && (
+                  <div className="mt-0.5 text-sm text-subtext">{m.settings_colab_active_runtimes({ count: fmtNumber(account.activeRuntimes) })}</div>
+                )}
+              </div>
+            </div>
+          )}
+          {account?.error && <p className="mt-3 mb-0 text-sm text-subtext">{account.error}</p>}
+          <div className="mt-4 overflow-x-auto">
+            <table className="colab-accelerators w-full border-collapse text-sm">
+              <thead>
+                <tr className="text-start text-subtext [&_th]:border-b [&_th]:border-border [&_th]:pb-1.5 [&_th]:font-medium">
+                  <th className="text-start">{m.settings_colab_col_accelerator()}</th>
+                  <th className="text-end">{m.settings_colab_col_memory()}</th>
+                  <th className="text-end">{m.settings_colab_col_rate()}</th>
+                  {account?.balance != null && <th className="text-end">{m.settings_colab_col_hours()}</th>}
+                  {eligible && <th className="text-end">{m.settings_colab_col_plan()}</th>}
+                </tr>
+              </thead>
+              <tbody>
+                {s.accelerators.map((accelerator) => {
+                  const rate = rates.get(accelerator.id);
+                  const usable = eligible ? eligible.has(accelerator.id) : null;
+                  const hours = rate && account?.balance != null && rate.cuPerHour > 0 ? account.balance / rate.cuPerHour : null;
+                  return (
+                    <tr
+                      key={accelerator.id}
+                      className={cn("[&_td]:border-b [&_td]:border-border [&_td]:py-1.5", usable === false && "text-subtext")}
+                    >
+                      <td>
+                        <code className="me-2">{accelerator.id}</code>
+                        {accelerator.label}
+                      </td>
+                      <td className="text-end tabular-nums">
+                        {accelerator.memoryGb > 0 ? m.settings_colab_memory_gb({ gb: fmtNumber(accelerator.memoryGb) }) : "—"}
+                      </td>
+                      <td className="text-end tabular-nums">
+                        {rate ? (
+                          <span title={rate.measured ? m.settings_colab_measured() : undefined}>
+                            {rate.measured ? "" : "≈ "}
+                            {fmtUnits(rate.cuPerHour)}
+                            {rate.measured && <span className="ms-1 text-accent-green">●</span>}
+                          </span>
+                        ) : "—"}
+                      </td>
+                      {account?.balance != null && (
+                        <td className="text-end tabular-nums">
+                          {hours != null ? m.settings_colab_hours_value({ hours: hours.toLocaleString(undefined, { maximumFractionDigits: 1 }) }) : "—"}
+                        </td>
+                      )}
+                      {eligible && (
+                        <td className="text-end">
+                          <Badge size="small" variant={usable ? "success" : "default"}>
+                            {usable ? m.settings_colab_available() : m.settings_colab_unavailable()}
+                          </Badge>
+                        </td>
+                      )}
+                    </tr>
+                  );
+                })}
+              </tbody>
+            </table>
+          </div>
+          <p className="mt-3 mb-0 text-sm text-subtext">{m.settings_colab_rates_note()}</p>
+          <p className="mt-2 mb-0 text-sm text-subtext">{m.settings_colab_flavor_hint({ flavor: s.defaultFlavor })}</p>
           <div className={cn(KV_CLASS_NAME, "mt-4 [&_.v]:text-sm")}>
-            <span className="k">{m.settings_page_binary()}</span>
+            <span className="k">{m.settings_colab_cli()}</span>
             <span className="v">{s.cliPath ?? m.settings_not_found_on_path()}</span>
             <span className="k">{m.settings_page_version()}</span>
             <span className="v">{s.cliVersion ?? "—"}</span>
           </div>
-          {s.error && <p className="mt-3 mb-0 text-sm text-subtext">{s.error}</p>}
-          <p className="mt-4 mb-2 text-sm font-medium text-subtext">{m.settings_colab_accelerators()}</p>
-          <ul className="m-0 flex list-none flex-col gap-1 p-0 text-sm">
-            {s.accelerators.map((accelerator) => (
-              <li key={accelerator.id} className="flex items-center justify-between gap-4">
-                <span>
-                  <code>{accelerator.id}</code> {accelerator.label}
-                </span>
-                <span className="text-subtext">
-                  {accelerator.memoryGb > 0 ? m.settings_colab_memory_gb({ gb: fmtNumber(accelerator.memoryGb) }) : "—"}
-                </span>
-              </li>
-            ))}
-          </ul>
-          <p className="mt-3 mb-0 text-sm text-subtext">{m.settings_colab_flavor_hint({ flavor: s.defaultFlavor })}</p>
         </>
       )}
       {loadError && <div className="error mt-3">{loadError}</div>}

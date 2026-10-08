@@ -1298,9 +1298,32 @@ export interface ColabSettings {
   error: string | null;
   defaultFlavor: string;
   accelerators: ColabAccelerator[];
+  /** The signed-in Google account; `null` until the CLI has signed in. */
+  account: ColabAccount | null;
 }
 
-export const getColabSettings = (signal?: AbortSignal) => get<ColabSettings>("/api/settings/colab", signal);
+export interface ColabRate {
+  id: string;
+  cuPerHour: number;
+  /** Measured on this account; otherwise a third-party estimate. */
+  measured: boolean;
+}
+
+/** Best-effort: any field Colab did not answer is `null`, with `error` saying why. */
+export interface ColabAccount {
+  email: string | null;
+  tier: "free" | "pro" | "pro_plus" | null;
+  balance: number | null;
+  rateHourly: number | null;
+  activeRuntimes: number | null;
+  /** Accelerator ids the plan can assign; `null` when Colab did not say. */
+  eligible: string[] | null;
+  rates: ColabRate[];
+  error: string | null;
+}
+
+export const getColabSettings = (signal?: AbortSignal, fresh = false) =>
+  get<ColabSettings>(fresh ? "/api/settings/colab?fresh=true" : "/api/settings/colab", signal);
 
 export interface OpenResearchSettings {
   loggedIn: boolean;
@@ -1761,6 +1784,8 @@ export interface Harness {
    * arrives and a plain re-read swaps in the real list. */
   catalogPending?: boolean;
   models: HarnessModel[];
+  /** The strongest model in `models`; new chats use it unless one is picked. */
+  recommendedModel?: string;
   options: HarnessOptions;
 }
 
