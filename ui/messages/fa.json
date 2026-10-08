@@ -927,7 +927,7 @@
   "settings_oauth_login": "OAuth (ورود با اشتراک)",
   "settings_not_found_on_path": "در PATH پیدا نشد",
   "settings_providers": "ارائه‌دهندگان",
-  "settings_models_available": "{count} مدل در دسترس — {models}",
+  "settings_models_available": "{count} مدل در دسترس",
   "settings_none": "هیچ‌کدام",
   "settings_kubectl_default": "استفاده از کانتکست فعلی kubectl",
   "settings_kubectl_default_context": "استفاده از کانتکست فعلی ({context})",

@@ -139,12 +139,18 @@ pub fn run_job(spec: &LocalJobSpec) -> Result<PathBuf> {
 /// The unique script path distinguishes a run from an unrelated process reusing its PID.
 #[cfg(not(windows))]
 fn run_alive(dir: &Path, pid: &str) -> bool {
-    let Ok(output) = std::process::Command::new("ps")
+    run_alive_via("ps", dir, pid)
+}
+
+#[cfg(not(windows))]
+fn run_alive_via(ps: &str, dir: &Path, pid: &str) -> bool {
+    let Ok(output) = std::process::Command::new(ps)
         .args(["-ww", "-o", "stat=,command=", "-p", pid])
         .stderr(std::process::Stdio::null())
         .output()
     else {
-        return false;
+        // Agent sandboxes (Codex's seatbelt) refuse to exec setuid `ps`; this probe cannot rule out PID reuse.
+        return pid_alive(pid);
     };
     let text = String::from_utf8_lossy(&output.stdout);
     let Some((stat, command)) = text.trim().split_once(char::is_whitespace) else {
@@ -160,6 +166,18 @@ fn run_alive(dir: &Path, pid: &str) -> bool {
         // Runs launched before pid_script existed still use their original PID contract.
         Err(error) => error.kind() == std::io::ErrorKind::NotFound,
     }
+}
+
+/// EPERM still means the process exists, just not one we may signal.
+#[cfg(not(windows))]
+fn pid_alive(pid: &str) -> bool {
+    let Ok(pid) = pid.parse::<libc::pid_t>() else {
+        return false;
+    };
+    // SAFETY: signal 0 only checks existence; pid > 0 excludes group and broadcast targets.
+    pid > 0
+        && (unsafe { libc::kill(pid, 0) } == 0
+            || std::io::Error::last_os_error().raw_os_error() == Some(libc::EPERM))
 }
 
 #[cfg(windows)]
@@ -480,6 +498,27 @@ mod tests {
             std::thread::sleep(std::time::Duration::from_millis(20));
         }
         panic!("local run {} was not reaped", pid.trim());
+    }
+
+    #[cfg(not(windows))]
+    #[test]
+    fn run_alive_without_ps_probes_the_pid() {
+        let dir = std::env::temp_dir();
+        let unrunnable_ps = "/nonexistent/orx-test-ps";
+        let mut child = std::process::Command::new("sleep")
+            .arg("60")
+            .spawn()
+            .unwrap();
+        let pid = child.id().to_string();
+        let alive = run_alive_via(unrunnable_ps, &dir, &pid);
+        child.kill().unwrap();
+        child.wait().unwrap();
+        assert!(alive, "a live run must not read as dead when ps cannot run");
+        assert!(!run_alive_via(unrunnable_ps, &dir, &pid));
+        assert!(!run_alive_via(unrunnable_ps, &dir, ""));
+        assert!(!run_alive_via(unrunnable_ps, &dir, "0"));
+        // pid 1 always exists: 0 as root, EPERM otherwise.
+        assert!(run_alive_via(unrunnable_ps, &dir, "1"));
     }
 
     #[test]

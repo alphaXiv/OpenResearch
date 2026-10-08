@@ -932,7 +932,7 @@
   "settings_oauth_login": "OAuth (تسجيل دخول الاشتراك)",
   "settings_not_found_on_path": "غير موجود في PATH",
   "settings_providers": "المزوّدون",
-  "settings_models_available": "النماذج المتاحة: {count} — {models}",
+  "settings_models_available": "النماذج المتاحة: {count}",
   "settings_none": "لا شيء",
   "settings_kubectl_default": "استخدام سياق kubectl الحالي",
   "settings_kubectl_default_context": "استخدام السياق الحالي ({context})",

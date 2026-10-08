@@ -109,7 +109,6 @@ import {
   type SshExecutionPreflight,
   testSshExecution,
   applyUpdate,
-  harnessModelLabel,
   updateUiState,
   installCli,
   setAutoUpdate as setAutoUpdateApi,
@@ -122,7 +121,7 @@ import { useThemePreference, type ThemePreference } from "../theme";
 import { m } from "../paraglide/messages.js";
 import { ltr } from "../i18n";
 import { setLocale, useLocale } from "../locale";
-import { getLocale, isLocale, type Locale } from "../paraglide/runtime.js";
+import { isLocale, type Locale } from "../paraglide/runtime.js";
 import { TokenForm } from "./GitTokenForm";
 import { renderNote } from "./agentNote";
 import { claudeProviderLabel } from "./claudeProvider";
@@ -485,10 +484,12 @@ function HarnessesTab({ remote }: { remote: boolean }) {
             <span className="v">{h.binPath ?? m.settings_not_found_on_path()}</span>
             <span className="k">{m.settings_page_version()}</span>
             <span className="v">{h.version ?? "—"}</span>
-            <span className="k">{m.settings_page_auth()}</span>
-            <span className="v">
-              <AuthLabel h={h} />
-            </span>
+            {(h.authMethod === "apiKey" || h.authMethod === "thirdParty" || h.authMethod === "local" || claudeProviderLabel(h)) && (
+              <>
+                <span className="k">{m.settings_page_auth()}</span>
+                <span className="v"><AuthLabel h={h} /></span>
+              </>
+            )}
             {h.account && (
               <>
                 <span className="k">{h.id === "opencode" ? m.settings_providers() : m.settings_page_account()}</span>
@@ -501,18 +502,12 @@ function HarnessesTab({ remote }: { remote: boolean }) {
                 <span className="v">{h.org}</span>
               </>
             )}
-            {h.plan && (
-              <>
-                <span className="k">{m.settings_page_plan()}</span>
-                <span className="v">{h.plan}</span>
-              </>
-            )}
             <span className="k">{m.settings_page_agent_models()}</span>
             <span className="v">
               {h.catalogPending
                 ? m.onboarding_checking()
                 : h.models.length > 0
-                ? m.settings_models_available({ count: fmtNumber(h.models.length), models: new Intl.ListFormat(getLocale()).format(h.models.slice(0, 4).map((model) => ltr(harnessModelLabel(model)))) })
+                ? m.settings_models_available({ count: fmtNumber(h.models.length) })
                 : h.agentReady ? m.model_picker_default_model() : m.settings_none()}
             </span>
           </div>

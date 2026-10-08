@@ -151,16 +151,21 @@ pub(super) async fn run_turn(
                 &mut recorded,
             )
             .await?;
-            if delivered
-                && answered
-                && final_projection
-                    .pointer("/data/info/outcome")
-                    .and_then(Value::as_str)
-                    == Some("succeeded")
-            {
+            let outcome = final_projection
+                .pointer("/data/info/outcome")
+                .and_then(Value::as_str);
+            if delivered && answered && outcome == Some("succeeded") {
                 ctx.persist_delivery(DeliveryState::Accepted)?;
                 ctx.mark_final_text_tail();
                 return Ok(());
+            }
+            if delivered && outcome == Some("failed") {
+                // Failures before a step (e.g. an unavailable model) leave no assistant message.
+                if let Ok(Some(message)) = execution_failure(&endpoint, &native_id).await {
+                    ctx.mark_native_retry_exhausted();
+                    ctx.mark_terminal_failure("opencode_terminal", &message);
+                    return Err(anyhow!("OpenCode V2: {message}"));
+                }
             }
             if let Err(error) = admission {
                 return Err(error);
@@ -293,6 +298,32 @@ fn messages(projection: &Value) -> Result<&Vec<Value>> {
         .pointer("/data/messages")
         .and_then(Value::as_array)
         .ok_or_else(|| anyhow!("OpenCode V2 history response is invalid"))
+}
+
+async fn execution_failure(endpoint: &AgentEndpoint, native_id: &str) -> Result<Option<String>> {
+    let log = endpoint
+        .client
+        .get(format!(
+            "{}/api/experimental/session/{native_id}/log",
+            endpoint.base_url
+        ))
+        .timeout(Duration::from_secs(10))
+        .send()
+        .await?
+        .error_for_status()?
+        .text()
+        .await?;
+    Ok(last_execution_failure(&log))
+}
+
+/// The error of the last `session.execution.failed` event in a replayed SSE session log.
+fn last_execution_failure(log: &str) -> Option<String> {
+    log.lines()
+        .rev()
+        .filter_map(|line| line.strip_prefix("data:"))
+        .filter_map(|data| serde_json::from_str::<Value>(data.trim()).ok())
+        .find(|event| event["type"] == "session.execution.failed")
+        .map(|event| error_text(&event["data"]["error"]))
 }
 
 fn error_text(error: &Value) -> String {
@@ -943,6 +974,46 @@ mod tests {
                 .pointer("/state/metadata/sessionID")
                 .and_then(Value::as_str),
             Some("ses_child")
+        );
+    }
+
+    #[test]
+    fn execution_failure_comes_from_the_last_failed_log_event() {
+        let event = |seq: u64, kind: &str, data: Value| {
+            let event = json!({"id":format!("evt_{seq}"),"created":seq,"type":kind,
+                "durable":{"aggregateID":"ses_test","seq":seq,"version":1},"data":data});
+            format!("data: {event}\r\n\r\n")
+        };
+        let failed = |message: &str| json!({"sessionID":"ses_test","error":{"type":"provider.no-route","message":message}});
+        let log = [
+            event(
+                1,
+                "session.execution.started",
+                json!({"sessionID":"ses_test"}),
+            ),
+            event(
+                2,
+                "session.execution.failed",
+                failed("Model unavailable: a/old"),
+            ),
+            event(
+                3,
+                "session.execution.failed",
+                failed("Model unavailable: opencode-go/deepseek-v4.1-flash"),
+            ),
+            format!(
+                "data: {}\n\n",
+                json!({"type":"log.synced","aggregateID":"ses_test","seq":3})
+            ),
+        ]
+        .concat();
+        assert_eq!(
+            last_execution_failure(&log).as_deref(),
+            Some("Model unavailable: opencode-go/deepseek-v4.1-flash")
+        );
+        assert_eq!(
+            last_execution_failure(&event(1, "session.execution.succeeded", json!({}))),
+            None
         );
     }
 
