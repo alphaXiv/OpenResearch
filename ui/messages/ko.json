@@ -1095,6 +1095,7 @@
   "chat_attachment_too_large": "{name} 파일이 너무 큽니다. 첨부 파일당 크기는 30 MB 미만이어야 합니다.",
   "chat_attachment_alt": "첨부 파일",
   "chat_attachments_total_too_large": "첨부 파일의 총 크기가 40 MB를 초과합니다. 하나를 제거한 뒤 다시 시도하세요.",
+  "chat_model_no_image_input": "{model}은(는) 이미지를 볼 수 없습니다. 이미지를 제거하거나 이미지를 지원하는 모델로 전환하세요.",
   "chat_update_permissions_failed": "권한을 업데이트할 수 없습니다. 다시 시도하세요.",
   "chat_update_autonomy_failed": "자율성을 업데이트할 수 없습니다. 다시 시도하세요.",
   "chat_exit_plan_failed": "계획 모드를 종료할 수 없습니다. 다시 시도하세요.",

@@ -1095,6 +1095,7 @@
   "chat_attachment_too_large": "{name} es demasiado grande — cada adjunto debe ocupar menos de 30 MB.",
   "chat_attachment_alt": "Adjunto",
   "chat_attachments_total_too_large": "Los adjuntos superan el límite total de 40 MB — quita uno y vuelve a intentarlo.",
+  "chat_model_no_image_input": "{model} no puede ver imágenes. Quita la imagen o cambia a un modelo compatible con imágenes.",
   "chat_update_permissions_failed": "No se pudieron actualizar los permisos. Inténtalo de nuevo.",
   "chat_update_autonomy_failed": "No se pudo actualizar la autonomía. Inténtalo de nuevo.",
   "chat_exit_plan_failed": "No se pudo salir del modo Plan. Inténtalo de nuevo.",

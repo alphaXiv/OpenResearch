@@ -1095,6 +1095,7 @@
   "chat_attachment_too_large": "{name} बहुत बड़ी है — हर अटैचमेंट 30 MB से कम होनी चाहिए।",
   "chat_attachment_alt": "अटैचमेंट",
   "chat_attachments_total_too_large": "अटैचमेंट 40 MB की कुल सीमा से ज़्यादा हैं — एक हटाएं और फिर से कोशिश करें।",
+  "chat_model_no_image_input": "{model} इमेज नहीं देख सकता। इमेज हटाएं या इमेज सपोर्ट वाले मॉडल पर स्विच करें।",
   "chat_update_permissions_failed": "अनुमतियाँ अपडेट नहीं हो सकीं। फिर से कोशिश करें।",
   "chat_update_autonomy_failed": "स्वायत्तता अपडेट नहीं हो सकी। फिर से कोशिश करें।",
   "chat_exit_plan_failed": "प्लान मोड से बाहर नहीं निकला जा सका। फिर से कोशिश करें।",

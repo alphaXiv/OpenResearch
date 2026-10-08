@@ -88,6 +88,7 @@ import {
   DEMO_SEEDED_LEAF_IDS,
   forkChatTurn,
   fmtNumber,
+  harnessModelLabel,
   interruptChat,
   reasoningFor,
   recoverChatTurn,
@@ -4584,6 +4585,10 @@ export function ChatPanel({
     let total = attachments.reduce((n, a) => n + a.size, 0);
     for (const file of files) {
       if (!/^(image\/(png|jpeg|gif|webp)|application\/pdf)$/.test(file.type)) continue;
+      if (noImageInputError && file.type.startsWith("image/")) {
+        setAttachError(noImageInputError);
+        continue;
+      }
       if (file.size > MAX_BYTES) {
         setAttachError(m.chat_attachment_too_large({ name: ltr(file.name) }));
         continue;
@@ -4693,6 +4698,11 @@ export function ChatPanel({
   // OpenCode model with no `variants` hides the picker entirely, and Codex's
   // top tiers appear only on the models that accept them.
   const reasoning = reasoningFor(activeHarness, composerSelection?.model);
+  const selectedModel = activeHarness?.models.find((model) => model.id === composerSelection?.model);
+  // OpenCode reports a text-only model's image Read as both a success and an error.
+  const noImageInputError = selectedModel?.imageInput === false
+    ? m.chat_model_no_image_input({ model: ltr(harnessModelLabel(selectedModel)) })
+    : null;
 
   // Editing the pickers: every change updates the sticky global preference —
   // the config a "New session" composer opens with is whatever the user chose
@@ -5457,6 +5467,10 @@ export function ChatPanel({
       surface: telemetrySurface,
       action: "typed_prompt",
     });
+    if (noImageInputError && attachments.some((a) => a.mediaType.startsWith("image/"))) {
+      setAttachError(noImageInputError);
+      return;
+    }
     if (preparingSend.current) return;
     const planRequested = !!composerCommand;
     const toggledPlanMode = !planActive;
