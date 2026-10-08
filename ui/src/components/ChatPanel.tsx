@@ -4415,7 +4415,7 @@ export function ChatPanel({
   // Pasted/dropped/uploaded attachments waiting in the composer, as data URLs.
   const [attachments, setAttachments] = useState<ComposerAttachment[]>([]);
   const [attachError, setAttachError] = useState<string | null>(null);
-  const [imageRefused, setImageRefused] = useState(false);
+  const [imageRefusedFor, setImageRefusedFor] = useState<string | null>(null);
   // Unsent composer content belongs to the scope it was typed in — stash on
   // the way out, restore on return, so a draft can't bleed into another chat.
   const stashKey = activeId ?? `${projectId}:new`;
@@ -4583,12 +4583,12 @@ export function ChatPanel({
     const MAX_BYTES = 30 * 1024 * 1024;
     const TOTAL_BYTES = 40 * 1024 * 1024;
     setAttachError(null);
-    setImageRefused(false);
+    setImageRefusedFor(null);
     let total = attachments.reduce((n, a) => n + a.size, 0);
     for (const file of files) {
       if (!/^(image\/(png|jpeg|gif|webp)|application\/pdf)$/.test(file.type)) continue;
       if (noImageInputError && file.type.startsWith("image/")) {
-        setImageRefused(true);
+        setImageRefusedFor(selectedModel?.id ?? null);
         continue;
       }
       if (file.size > MAX_BYTES) {
@@ -4707,6 +4707,7 @@ export function ChatPanel({
     : null;
   const imageInputBlocked =
     !!noImageInputError && attachments.some((a) => a.mediaType.startsWith("image/"));
+  const imageRefused = !!selectedModel && imageRefusedFor === selectedModel.id;
   const imageInputError = imageInputBlocked || imageRefused ? noImageInputError : null;
 
   // Editing the pickers: every change updates the sticky global preference —
@@ -5599,6 +5600,7 @@ export function ChatPanel({
       setAttachments([]);
       setAnnotations([]);
       setAttachError(null);
+      setImageRefusedFor(null);
       // Always send the composer's settings, steer or not: a permission or
       // plan change persists itself before this message, so the server's
       // comparison against the *running* turn is the only thing that catches
@@ -5665,6 +5667,7 @@ export function ChatPanel({
       setAttachments((current) => current === pending ? [] : current);
       setAnnotations((current) => (current === pendingAnnotations ? [] : current));
       setAttachError(null);
+      setImageRefusedFor(null);
       preparingSend.current = true;
       try {
         if (!sid) {
