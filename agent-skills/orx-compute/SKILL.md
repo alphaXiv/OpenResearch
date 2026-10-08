@@ -1,6 +1,6 @@
 ---
 name: orx-compute
-description: "Launch and monitor experiment runs and route guidance for hf, modal, k8s/Kubernetes, ssh, slurm, ray, OpenResearch, Tinker, and local backends. Covers the fixed run contract, sizing, cancellation, and wait versus wake. Use before any launch or relaunch, when authoring a k8s manifest, choosing or switching compute, or handling an OOM, stall, or timeout; then read one backend reference."
+description: "Launch and monitor experiment runs and route guidance for hf, modal, colab, k8s, ssh, slurm, ray, OpenResearch, Tinker, and local backends. Covers the run contract, GPU and RAM sizing, cancellation, and wait versus wake. Use before any launch or relaunch, when authoring a k8s manifest, choosing or switching compute, or handling an OOM, stall, or timeout; then read one backend reference."
 ---
 
 Each run uses an immutable snapshot of the experiment branch's recorded commit.
@@ -75,6 +75,7 @@ this `SKILL.md`:
 |---|---|
 | Hugging Face Jobs (`hf`) | [references/hf.md](references/hf.md) |
 | Modal (`modal`) | [references/modal.md](references/modal.md) |
+| Google Colab (`colab`) | [references/colab.md](references/colab.md) |
 | Kubernetes (`k8s`) | [references/k8s.md](references/k8s.md) |
 | SSH (`ssh`) | [references/ssh.md](references/ssh.md) |
 | Slurm (`slurm`) | [references/slurm.md](references/slurm.md) |
@@ -124,7 +125,12 @@ for a run, not both.
 
 - Decide GPU versus CPU first. API-driven evaluation and data preparation often
   run more cheaply on CPU.
+- Estimate peak memory before choosing: accelerator memory for GPU runs, host
+  RAM for CPU runs. The Colab guide has the rules of thumb for model weights,
+  optimizer state, and activations.
 - Pick the smallest shape that fits the model and a minimal batch.
+- Before a run on this machine, read its free RAM with `orx compute show local
+  --json` and follow the checks in the local guide.
 - Escalate after a real OOM or hopelessly slow run instead of starting with the
   largest accelerator.
 - Raise the timeout only for genuinely long runs.

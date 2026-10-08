@@ -432,10 +432,42 @@ backend_adapter!(
     false,
     "local archive",
     false,
-    preflight | _args | ready(),
+    preflight | _args | {
+        // A local run shares this machine's RAM; refuse before it can starve it.
+        let snapshot = tokio::task::spawn_blocking(crate::jobs::localbox::memory_snapshot)
+            .await
+            .map_err(|error| anyhow!("memory probe task failed: {error}"))?;
+        match snapshot.and_then(|memory| memory.launch_refusal()) {
+            Some(reason) => Ok(not_ready(reason)),
+            None => ready(),
+        }
+    },
     submit | args,
     source,
     run_id | crate::local::localrun::submit_local_run_with_source(args, source, run_id).await
+);
+
+backend_adapter!(
+    ColabCompute,
+    "colab",
+    "Google Colab",
+    true,
+    true,
+    false,
+    "colab upload",
+    false,
+    preflight | args | {
+        if let Err(error) = crate::jobs::colab::parse_flavor(args.flavor.as_deref()) {
+            return Ok(not_ready(error.to_string()));
+        }
+        if let Err(error) = crate::jobs::colab::preflight().await {
+            return Ok(not_ready(error.to_string()));
+        }
+        ready()
+    },
+    submit | args,
+    source,
+    run_id | crate::local::localrun::submit_colab_run_with_source(args, source, run_id).await
 );
 
 backend_adapter!(
@@ -671,6 +703,7 @@ pub fn backend(id: &str) -> Result<Box<dyn ComputeBackend>> {
     match id {
         "local" => Ok(Box::new(LocalCompute)),
         "tinker" => Ok(Box::new(TinkerCompute)),
+        "colab" => Ok(Box::new(ColabCompute)),
         "hf" => Ok(Box::new(HuggingFaceCompute)),
         "modal" => Ok(Box::new(ModalCompute)),
         "k8s" => Ok(Box::new(KubernetesCompute)),
@@ -754,7 +787,7 @@ pub fn validate_run_args(args: &crate::ExpRunArgs) -> Result<()> {
                  modal (Modal serverless GPUs), k8s (your Kubernetes cluster), ssh (your own box), \
                  slurm (your Slurm cluster), ray (a Ray Jobs cluster), \
                  openresearch (an ephemeral OpenResearch box), tinker (local controller with remote model compute), \
-                 local (this machine).",
+                 colab (a Google Colab GPU runtime), local (this machine).",
                 backend
             ));
         }

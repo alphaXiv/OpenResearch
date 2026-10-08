@@ -821,6 +821,8 @@ pub(super) fn compute_settings_json(ssh: SshReadiness) -> Value {
     let hf = crate::jobs::huggingface::resolve_token_with_source().ok();
     let tinker = crate::jobs::tinker::resolve_api_key_with_source().ok();
     let modal_source = crate::jobs::modal::token_source();
+    let colab_cli = crate::jobs::colab::find_cli();
+    let colab_signed_in = crate::jobs::colab::token_path().is_some_and(|path| path.is_file());
     let k8s_settings = k8s::load_settings().ok().flatten();
     let ssh_hosts = list_ssh_hosts().len();
     let slurm_settings = crate::jobs::slurm::load_settings().ok().flatten();
@@ -868,6 +870,15 @@ pub(super) fn compute_settings_json(ssh: SshReadiness) -> Value {
                 Some(crate::jobs::tinker::ApiKeySource::Env) => "TINKER_API_KEY env var",
                 Some(crate::jobs::tinker::ApiKeySource::OpenresearchEnv) => "Key from Environment tab",
                 None => "No API key",
+            },
+        },
+        {
+            "id": "colab",
+            "configured": colab_cli.is_some() && colab_signed_in,
+            "summary": match (&colab_cli, colab_signed_in) {
+                (None, _) => "Colab CLI not installed",
+                (Some(_), false) => "Colab CLI installed, not signed in",
+                (Some(_), true) => "Colab CLI signed in",
             },
         },
         {
@@ -1015,6 +1026,12 @@ pub(super) async fn local_machine_settings() -> ApiResult {
     Ok(Json(json!(hw)))
 }
 
+/// The Colab row's expanded detail: CLI install, sign-in, and the
+/// accelerators a run can request. Local probes only; never starts a sign-in.
+pub(super) async fn colab_settings() -> ApiResult {
+    Ok(Json(json!(crate::jobs::colab::status().await)))
+}
+
 /// The OpenResearch row's expanded detail. Network calls are fine here (the
 /// row is open) but each is individually best-effort — an offline machine
 /// still renders "signed in, status unknown" instead of an error page.
@@ -1092,6 +1109,7 @@ pub(crate) async fn show(backend: &str) -> Result<Value> {
         "hf" => Ok(hf_settings().await),
         "modal" => modal_settings().await,
         "tinker" => tinker_settings().await,
+        "colab" => colab_settings().await,
         "k8s" => k8s_settings().await,
         "openresearch" => openresearch_settings().await,
         _ => return Err(anyhow!("Unknown compute backend: {backend}")),
@@ -1236,7 +1254,7 @@ pub(crate) async fn check(
                 && value["sshKeyStatus"] == "matched"
                 && value["error"].is_null()
         }
-        "modal" => value["ready"] == true,
+        "modal" | "colab" => value["ready"] == true,
         _ => false,
     };
     value["ready"] = json!(ready);

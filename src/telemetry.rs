@@ -166,6 +166,11 @@ pub(crate) struct Settings {
     /// place; only the silent apply stops.
     #[serde(default)]
     pub auto_update: Option<bool>,
+    /// Ask agents to put bias-prone research steps (idea generation, result
+    /// checks, paper review) through helpers on other vendors' harnesses.
+    /// Absent = off.
+    #[serde(default)]
+    pub cross_harness_review: Option<bool>,
     /// Surfaces whose `first_action` event has already been sent, so a restart
     /// cannot re-report a later action as the user's first one.
     #[serde(default)]
@@ -308,6 +313,16 @@ pub(crate) fn auto_update_enabled() -> bool {
 
 pub(crate) fn set_auto_update_enabled(enabled: bool) -> std::io::Result<()> {
     mutate_settings(|settings| settings.auto_update = Some(enabled))
+}
+
+pub(crate) fn cross_harness_review() -> bool {
+    load_settings()
+        .and_then(|settings| settings.cross_harness_review)
+        .unwrap_or(false)
+}
+
+pub(crate) fn set_cross_harness_review(enabled: bool) -> std::io::Result<()> {
+    mutate_settings(|settings| settings.cross_harness_review = Some(enabled))
 }
 
 pub(crate) fn github_default_prompt_seen() -> bool {

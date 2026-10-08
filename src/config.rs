@@ -292,6 +292,17 @@ pub fn set_github_for_new_projects(enabled: bool) -> Result<()> {
     Ok(())
 }
 
+/// Whether agents should run bias-prone research steps past helpers on other
+/// vendors' harnesses (Settings → Harnesses). Off unless the user turns it on.
+pub fn cross_harness_review() -> bool {
+    crate::telemetry::cross_harness_review()
+}
+
+pub fn set_cross_harness_review(enabled: bool) -> Result<()> {
+    crate::telemetry::set_cross_harness_review(enabled)?;
+    Ok(())
+}
+
 /// Whether orx may install updates on its own (Settings → Updates). Lives in
 /// the telemetry-owned `settings.json` for the same single-writer reason as the
 /// data dir above. Read by `updates::auto_update_eligible`.

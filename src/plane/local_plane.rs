@@ -294,13 +294,15 @@ impl LocalPlane {
                 Some("openresearch") => {
                     crate::local::openresearch::launch_local_openresearch(&args).await
                 }
-                Some("tinker" | "local") => crate::local::localrun::launch_local_run(&args).await,
+                Some("tinker" | "colab" | "local") => {
+                    crate::local::localrun::launch_local_run(&args).await
+                }
                 Some(other) => Err(anyhow!(
                     "Unknown --backend '{}'. Local experiments support: hf (Hugging Face Jobs), \
                      modal (Modal serverless GPUs), k8s (your Kubernetes cluster), ssh (your own box), \
                      slurm (your Slurm cluster), ray (a Ray Jobs cluster), \
                      openresearch (an ephemeral OpenResearch box), tinker (local controller with remote model compute), \
-                     local (this machine).",
+                     colab (a Google Colab GPU runtime), local (this machine).",
                     other
                 )),
                 None => Err(anyhow!(

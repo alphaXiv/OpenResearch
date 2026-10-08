@@ -60,6 +60,17 @@ impl Antigravity {
         if snapshot && info.installed {
             return Some(info);
         }
+        let confinement = info
+            .bin_path
+            .as_deref()
+            .map(Path::new)
+            .and_then(snap_confinement_problem);
+        if let Some(problem) = confinement {
+            // The model list would answer, yet every turn's file access fails.
+            info.agent_note = Some(problem);
+            info.agent_ready = false;
+            return Some(info);
+        }
         if info.installed && !info.install_broken {
             if let Some(bin) = info.bin_path.as_deref().map(Path::new) {
                 match super::detect::timed_probe("antigravity", "models", agy_model_list(bin)).await
@@ -216,6 +227,7 @@ impl Harness for Antigravity {
 
 /// `agy` on PATH, then common install locations under `~/.local/bin`,
 /// `~/.gemini/bin`, or `~/.gemini/antigravity-cli/bin`, in preference order.
+/// A standalone install beats the snap, which cannot reach hidden folders.
 fn agy_candidates() -> Vec<PathBuf> {
     let home_dirs = dirs::home_dir().into_iter().flat_map(|home| {
         let gemini = home.join(".gemini");
@@ -228,11 +240,54 @@ fn agy_candidates() -> Vec<PathBuf> {
     let drops = home_dirs
         .chain(dirs::data_local_dir().map(|dir| dir.join("agy").join("bin")))
         .filter_map(|dir| find_in_dir(&dir, "agy"));
-    find_on_path("agy")
+    let mut candidates: Vec<PathBuf> = find_on_path("agy")
         .into_iter()
         .chain(drops)
         .map(resolve_symlinks)
-        .collect()
+        .collect();
+    candidates.sort_by_key(|bin| is_snap_launch(bin));
+    candidates
+}
+
+/// A snap app: either its `/snap/bin` link, or that link already resolved to
+/// the `snap` launcher itself.
+fn is_snap_launch(bin: &Path) -> bool {
+    bin.starts_with("/snap/") || bin.file_name().is_some_and(|name| name == "snap")
+}
+
+/// Whether a strictly confined snap with the `home` interface can read `path`:
+/// only non-hidden folders under the user's home are visible to it.
+fn snap_can_reach(path: &Path, home: &Path) -> bool {
+    path.strip_prefix(home).is_ok_and(|rest| {
+        rest.components()
+            .next()
+            .is_none_or(|first| !first.as_os_str().to_string_lossy().starts_with('.'))
+    })
+}
+
+/// Why a snap-installed `agy` cannot work on OpenResearch's workspaces, if it
+/// cannot. Every turn runs inside a session worktree under the data dir, and
+/// the default `~/.local/share/openresearch` is hidden from strict snaps, so
+/// `agy` starts but every file read or edit fails with "permission denied".
+fn snap_confinement_problem(bin: &Path) -> Option<String> {
+    if !cfg!(target_os = "linux") || !is_snap_launch(bin) {
+        return None;
+    }
+    let home = dirs::home_dir()?;
+    let data_dir = crate::store::data_dir();
+    let data_dir = crate::paths::canonicalize(&data_dir).unwrap_or(data_dir);
+    let home = crate::paths::canonicalize(&home).unwrap_or(home);
+    if snap_can_reach(&data_dir, &home) {
+        return None;
+    }
+    Some(format!(
+        "Antigravity is installed as a snap, and snap confinement blocks it from reading \
+         OpenResearch workspaces in {}. Install the standalone CLI with `curl -fsSL \
+         https://antigravity.google/cli/install.sh | bash` (you can then run `sudo snap remove \
+         antigravity-cli`), or move the OpenResearch data folder to a non-hidden folder in your \
+         home directory in Settings → Storage, then re-check this harness.",
+        data_dir.display()
+    ))
 }
 
 /// The executable detection selected, else the first candidate — sync callers
@@ -314,6 +369,9 @@ async fn run_turn(ctx: &mut TurnCtx) -> Result<()> {
     let bin = find_agy().ok_or_else(|| {
         anyhow!("agy not found on PATH — install Antigravity CLI and sign in first")
     })?;
+    if let Some(problem) = snap_confinement_problem(&bin) {
+        return Err(anyhow!("{problem}"));
+    }
     let project = ctx.project.clone();
     let session_id = ctx.session_id.clone();
     let skills_dir = Antigravity.session_skills_dir();
@@ -1283,6 +1341,31 @@ mod tests {
             "denied_actions": [{"display_name": "RunCommand"}]
         }))
         .is_none());
+    }
+
+    #[test]
+    fn snaps_only_reach_visible_folders_in_home() {
+        let home = Path::new("/home/me");
+        assert!(snap_can_reach(Path::new("/home/me/research/orx"), home));
+        assert!(!snap_can_reach(
+            Path::new("/home/me/.local/share/openresearch"),
+            home
+        ));
+        assert!(!snap_can_reach(Path::new("/tmp/orx"), home));
+        assert!(!snap_can_reach(Path::new("/home/other/orx"), home));
+    }
+
+    #[test]
+    fn snap_launches_are_recognized_before_and_after_resolution() {
+        assert!(is_snap_launch(Path::new("/snap/bin/agy")));
+        assert!(is_snap_launch(Path::new("/usr/bin/snap")));
+        assert!(!is_snap_launch(Path::new("/home/me/.local/bin/agy")));
+        let mut candidates = [
+            PathBuf::from("/snap/bin/agy"),
+            PathBuf::from("/home/me/.local/bin/agy"),
+        ];
+        candidates.sort_by_key(|bin| is_snap_launch(bin));
+        assert_eq!(candidates[0], Path::new("/home/me/.local/bin/agy"));
     }
 
     #[test]

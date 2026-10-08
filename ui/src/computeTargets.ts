@@ -4,6 +4,7 @@ import { m } from "./paraglide/messages.js";
 export const TARGET_LABELS: Record<ComputeTargetId, () => string> = {
   local: m.compute_target_local,
   tinker: m.compute_target_tinker,
+  colab: m.compute_target_colab,
   hf: m.compute_target_hf,
   modal: m.compute_target_modal,
   k8s: m.compute_target_k8s,

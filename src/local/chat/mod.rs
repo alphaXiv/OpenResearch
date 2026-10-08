@@ -8372,6 +8372,15 @@ fn spawn_report_text(
         .as_deref()
         .map(|title| format!(" (\"{title}\")"))
         .unwrap_or_default();
+    // Say which agent did the work, so a cross-harness check can be attributed.
+    let ran_on = crate::local::harness::chat_harness(&child.harness).map_or_else(
+        || format!(" on {}", child.harness),
+        |harness| format!(" on {}", harness.name()),
+    ) + &child
+        .model
+        .as_deref()
+        .map(|model| format!(" ({model})"))
+        .unwrap_or_default();
     let brief = truncated(spawn.prompt.trim(), SPAWN_BRIEF_LIMIT);
     let stopped = "Its session holds however far it got. Re-delegate it if you still need the \
                    task done.";
@@ -8395,7 +8404,7 @@ fn spawn_report_text(
         }
     };
     Ok(format!(
-        "[orx] The agent you spawned for `{}`{named} {headline}.\n\nIt was asked to: {brief}\n\n\
+        "[orx] The agent you spawned for `{}`{named}{ran_on} {headline}.\n\nIt was asked to: {brief}\n\n\
          {closing}{}",
         spawn.session_id,
         spawn_workspace(store, &child),
@@ -10758,7 +10767,7 @@ with other project runs using `orx runs p1` and inspect the file located by `orx
         // which is also what a helper that never wrote anything looks like.
         assert_eq!(
             text,
-            "[orx] The agent you spawned for `child` (\"Lit sweep\") has finished.\n\n\
+            "[orx] The agent you spawned for `child` (\"Lit sweep\") on Codex has finished.\n\n\
              It was asked to: Sweep the literature\n\nIts closing reply:\n\nRank 8 wins."
         );
 
@@ -10780,7 +10789,7 @@ with other project runs using `orx runs p1` and inspect the file located by `orx
         assert!(
             spawn_report_text(&store, &spawn_fixture("untitled", "parent"), false)
                 .unwrap()
-                .starts_with("[orx] The agent you spawned for `untitled` has finished.")
+                .starts_with("[orx] The agent you spawned for `untitled` on Codex has finished.")
         );
 
         let _ = std::fs::remove_dir_all(&dir);

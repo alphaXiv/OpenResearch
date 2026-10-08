@@ -197,6 +197,31 @@ fn project_state_md(project: &LocalProject, state: &ProjectState) -> String {
 }
 
 fn playbook_md(project: &LocalProject, state: &ProjectState) -> String {
+    playbook_md_for_session(project, state, None)
+}
+
+/// The cross-harness bullet, present only while the user has it turned on.
+fn cross_harness_bullet(session_harness: Option<&str>) -> String {
+    if !crate::config::cross_harness_review() {
+        return String::new();
+    }
+    let runs_on = session_harness
+        .and_then(super::harness::chat_harness)
+        .map_or(String::new(), |harness| {
+            format!(" This session runs on **{}**.", harness.name())
+        });
+    format!(
+        "\n- Cross-harness review: **on** — the user wants research steps that one vendor's \
+         agent could bias checked by agents on other harnesses.{runs_on} Load \
+         **`orx-agent-delegation`** and follow its cross-harness section"
+    )
+}
+
+fn playbook_md_for_session(
+    project: &LocalProject,
+    state: &ProjectState,
+    session_harness: Option<&str>,
+) -> String {
     let id = &project.id;
     let name = &project.name;
     let publication_line = if project.github_enabled() {
@@ -237,7 +262,8 @@ fn playbook_md(project: &LocalProject, state: &ProjectState) -> String {
         .map_or(String::new(), |flavor| format!(" (`--flavor {flavor}`)"));
     let compute_bullet = format!(
         "- Compute: default target **{compute_backend}**{flavor_part} — \
-         {compute_default_source}; load **`orx-compute`** and read `orx compute instructions show` before configuring or launching"
+         {compute_default_source}; load **`orx-compute`** and read `orx compute instructions show` before configuring or launching{}",
+        cross_harness_bullet(session_harness)
     );
     let project_state = project_state_md(project, state);
     let skill_names = super::agent_skills::skills(super::agent_skills::SkillSet::Local)
@@ -326,8 +352,15 @@ pub fn ensure_playbook(
             .map_err(|e| anyhow!("Could not create {}: {}", parent.display(), e))?;
     }
     let project_state = ProjectState::load(&project.id)?;
-    std::fs::write(&playbook, playbook_md(project, &project_state))
-        .map_err(|e| anyhow!("Could not write {}: {}", playbook.display(), e))?;
+    let session_harness = crate::store::Store::open()
+        .ok()
+        .and_then(|store| store.get_chat_session(session_id).ok().flatten())
+        .map(|session| session.harness);
+    std::fs::write(
+        &playbook,
+        playbook_md_for_session(project, &project_state, session_harness.as_deref()),
+    )
+    .map_err(|e| anyhow!("Could not write {}: {}", playbook.display(), e))?;
     // Modular skills, written fresh beside the playbook (same freshness
     // semantics) so this session's agent discovers them natively.
     if let Some(dir) = session_skills_dir {

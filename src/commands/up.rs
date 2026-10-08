@@ -666,6 +666,10 @@ fn router(state: AppState, remote_auth: Option<RemoteAuth>) -> Router {
         .route("/api/update/apply", post(apply_update))
         .route("/api/update/restart", post(restart_after_update))
         .route("/api/update/auto", post(set_auto_update))
+        .route(
+            "/api/settings/cross-harness",
+            get(cross_harness_settings).post(set_cross_harness_settings),
+        )
         .route("/api/update/install-cli", post(install_cli))
         .route("/api/settings/ui-state", get(ui_state).post(set_ui_state))
         .route(
@@ -707,6 +711,7 @@ fn router(state: AppState, remote_auth: Option<RemoteAuth>) -> Router {
         .route("/api/settings/compute", get(compute_settings))
         .route("/api/settings/compute/default", post(set_compute_default))
         .route("/api/settings/local", get(local_machine_settings))
+        .route("/api/settings/colab", get(colab_settings))
         .route("/api/settings/openresearch", get(openresearch_settings))
         .route("/api/settings/openresearch/login", get(openresearch_login))
         .route("/api/settings/commands/run", get(run_settings_command))
@@ -5251,6 +5256,31 @@ async fn update_status() -> ApiResult {
     tokio::task::spawn_blocking(|| Ok(Json(json!(updates::status()))))
         .await
         .map_err(|e| ApiError::from(anyhow!("update status task failed: {e}")))?
+}
+
+fn cross_harness_settings_json() -> Value {
+    json!({ "enabled": crate::config::cross_harness_review() })
+}
+
+async fn cross_harness_settings() -> ApiResult {
+    Ok(Json(cross_harness_settings_json()))
+}
+
+#[derive(Deserialize)]
+struct SetCrossHarnessReq {
+    enabled: bool,
+}
+
+/// Takes effect for each session at its next playbook rewrite.
+async fn set_cross_harness_settings(Json(req): Json<SetCrossHarnessReq>) -> ApiResult {
+    tokio::task::spawn_blocking(move || {
+        crate::config::set_cross_harness_review(req.enabled).map_err(|e| {
+            ApiError::from(anyhow!("could not save the cross-harness setting: {e}"))
+        })?;
+        Ok(Json(cross_harness_settings_json()))
+    })
+    .await
+    .map_err(|e| ApiError::from(anyhow!("cross-harness task failed: {e}")))?
 }
 
 #[derive(Deserialize)]
