@@ -49,6 +49,10 @@ pub fn launched_as_app_bundle() -> bool {
 #[cfg(all(desktop_app, not(target_os = "macos")))]
 pub const APP_ARG: &str = "app";
 
+/// Carries `--no-telemetry` into `orx app`, whose argument list must stay exactly [`APP_ARG`].
+#[cfg(all(desktop_app, not(target_os = "macos")))]
+pub const APP_NO_TELEMETRY_ENV: &str = "ORX_APP_NO_TELEMETRY";
+
 #[cfg(all(desktop_app, not(target_os = "macos")))]
 pub fn launched_with_app_arg() -> bool {
     let mut args = std::env::args_os().skip(1);

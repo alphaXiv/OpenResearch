@@ -80,8 +80,13 @@
 }
 
 .tool-running-shimmer::selection {
-  color: var(--text);
-  -webkit-text-fill-color: var(--text);
+  color: var(--selection-text);
+  -webkit-text-fill-color: var(--selection-text);
+}
+
+.openresearch-diff ::selection {
+  color: var(--selection-text);
+  background: var(--code-selection);
 }
 
 .tool-running-shimmer-icon {
@@ -290,6 +295,20 @@
 @keyframes spin {
   to {
     transform: rotate(360deg);
+  }
+}
+@keyframes onb-welcome-in {
+  from {
+    opacity: 0;
+    filter: blur(8px);
+    transform: translateY(0.3em);
+  }
+}
+@keyframes onb-warp-in {
+  from {
+    opacity: 0;
+    filter: blur(12px);
+    transform: scale(0.4);
   }
 }
 @keyframes title-char-in {

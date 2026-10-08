@@ -208,8 +208,7 @@ impl RemoteSessionManager {
             ui_preferences: preferences,
             can_start_new_host: false,
         };
-        let client = reqwest::Client::builder()
-            .no_proxy()
+        let client = crate::net::loopback_client()
             .redirect(reqwest::redirect::Policy::none())
             .connect_timeout(Duration::from_secs(5))
             .http1_only()
@@ -2286,7 +2285,7 @@ mod tests {
     fn sample_session() -> RemoteSession {
         RemoteSession {
             target: parse_remote_target("example"),
-            client: reqwest::Client::new(),
+            client: crate::net::loopback_client().build().unwrap(),
             info: RwLock::new(RemoteSessionInfo {
                 id: "session".into(),
                 host: "example".into(),
