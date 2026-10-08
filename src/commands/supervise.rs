@@ -1518,6 +1518,7 @@ mod tests {
             commit_sha: None,
             result_markdown: None,
             cancel_requested: false,
+            cancel_reason: None,
             chat_session_id: None,
         };
         store.upsert_run(&run).unwrap();
@@ -1526,7 +1527,7 @@ mod tests {
             run_status_for_stage(&store, &run.id, false, "ERROR"),
             RunStatus::Failed
         );
-        store.set_cancel_requested(&run.id, true).unwrap();
+        assert!(store.request_cancel(&run.id, "test").unwrap());
         assert_eq!(
             run_status_for_stage(&store, &run.id, false, "ERROR"),
             RunStatus::Cancelled

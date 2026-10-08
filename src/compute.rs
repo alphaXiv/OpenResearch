@@ -831,6 +831,7 @@ pub async fn submit(args: &crate::ExpRunArgs) -> Result<StoredRun> {
         commit_sha: Some(source.0.revision.clone()),
         result_markdown: None,
         cancel_requested: false,
+        cancel_reason: None,
         chat_session_id: args.launching_chat_session(),
     };
     let chat_harness = match &pending.chat_session_id {

@@ -11,6 +11,7 @@ pub struct Run {
     pub duration_secs: i64,
     pub updated_display: String,
     pub result_markdown: Option<String>,
+    pub cancel_reason: Option<String>,
 }
 
 impl From<&StoredRun> for Run {
@@ -23,24 +24,25 @@ impl From<&StoredRun> for Run {
             duration_secs: crate::local::run_duration_secs(run),
             updated_display: crate::local::fmt_ago(run.updated_at),
             result_markdown: run.result_markdown.clone(),
+            cancel_reason: run.cancel_reason.clone(),
         }
     }
 }
 
 impl Run {
     pub fn failure_detail(&self) -> Option<String> {
-        let reason = self
-            .result_markdown
-            .as_deref()
-            .map(str::trim)
-            .filter(|reason| !reason.is_empty());
-        match (self.status.as_str(), reason) {
-            ("failed" | "cancelled", Some(reason)) => Some(format!("reason: {reason}")),
-            ("failed", None) => Some(format!(
+        if self.status == "cancelled" {
+            return self.cancel_reason.as_ref().map(|r| format!("reason: {r}"));
+        }
+        if self.status != "failed" {
+            return None;
+        }
+        match self.result_markdown.as_deref().map(str::trim) {
+            Some(reason) if !reason.is_empty() => Some(format!("reason: {reason}")),
+            _ => Some(format!(
                 "reason: — (no message recorded — see `orx logs {}`)",
                 self.id
             )),
-            _ => None,
         }
     }
 }
@@ -139,6 +141,7 @@ mod tests {
             commit_sha: Some("abcdef1234567890".to_string()),
             result_markdown: result_markdown.map(str::to_string),
             cancel_requested: false,
+            cancel_reason: None,
             chat_session_id: None,
         }
     }
@@ -164,17 +167,12 @@ mod tests {
 
     #[test]
     fn cancelled_run_reports_who_requested_the_cancel() {
-        let run = Run::from(&stored_run(
-            "cancelled",
-            Some("Cancel requested from the dashboard."),
-        ));
+        let mut run = Run::from(&stored_run("cancelled", None));
+        assert_eq!(run.failure_detail(), None);
+        run.cancel_reason = Some("Cancel requested with `orx exp cancel`.".into());
         assert_eq!(
             run.failure_detail().as_deref(),
-            Some("reason: Cancel requested from the dashboard.")
-        );
-        assert_eq!(
-            Run::from(&stored_run("cancelled", None)).failure_detail(),
-            None
+            Some("reason: Cancel requested with `orx exp cancel`.")
         );
     }
 

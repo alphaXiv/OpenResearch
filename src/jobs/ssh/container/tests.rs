@@ -491,6 +491,7 @@ async fn supervisor_restart(target: &SshTarget, reference: &str, port: u16) {
             commit_sha: None,
             result_markdown: None,
             cancel_requested: false,
+            cancel_reason: None,
             chat_session_id: None,
         })
         .unwrap();

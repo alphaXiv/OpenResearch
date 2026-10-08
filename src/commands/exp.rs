@@ -261,21 +261,19 @@ fn request_local_run_cancel_with(
     let mut cancel_lock = fd_lock::RwLock::new(lock_file);
     before_lock();
     let _cancel_guard = cancel_lock.write()?;
-    let prior = store
+    store
         .get_run(run_id)?
-        .ok_or_else(|| anyhow!("Run {run_id} not found in the local store."))?
-        .cancel_requested;
-    store.set_cancel_requested(run_id, true)?;
+        .ok_or_else(|| anyhow!("Run {run_id} not found in the local store."))?;
+    let requested = store.request_cancel(run_id, reason)?;
     if let Err(spawn_err) = spawn(run_id) {
-        if let Err(rollback_err) = store.set_cancel_requested(run_id, prior) {
-            return Err(anyhow!(
-                "Could not recover the supervisor: {spawn_err}; could not restore retryable cancel state: {rollback_err}"
-            ));
+        if requested {
+            if let Err(rollback_err) = store.withdraw_cancel(run_id) {
+                return Err(anyhow!(
+                    "Could not recover the supervisor: {spawn_err}; could not restore retryable cancel state: {rollback_err}"
+                ));
+            }
         }
         return Err(spawn_err);
-    }
-    if !prior {
-        store.set_cancel_reason(run_id, reason)?;
     }
     Ok(())
 }
@@ -300,6 +298,7 @@ mod tests {
             commit_sha: None,
             result_markdown: None,
             cancel_requested: false,
+            cancel_reason: None,
             chat_session_id: None,
         }
     }
@@ -322,37 +321,57 @@ mod tests {
             |_| Err(anyhow!("synthetic spawn failure")),
         );
         assert!(result.is_err());
-        assert!(!store.get_run(&run.id).unwrap().unwrap().cancel_requested);
+        let run = store.get_run(&run.id).unwrap().unwrap();
+        assert!(!run.cancel_requested);
+        assert_eq!(run.cancel_reason, None);
 
         drop(store);
         let _ = std::fs::remove_dir_all(dir);
     }
 
     #[test]
-    fn cancel_records_the_first_requester_without_clobbering_failures() {
+    fn cancel_reason_keeps_the_first_requester_and_shows_only_when_cancelled() {
+        use crate::store::RunStatus;
         let dir =
             std::env::temp_dir().join(format!("orx-cancel-reason-test-{}", uuid::Uuid::new_v4()));
         let store = Store::open_at(dir.clone()).unwrap();
         let lock_path = dir.join("cancel.lock");
-        let failed = StoredRun {
-            id: "run-failed".into(),
-            result_markdown: Some("Job failed: boom".into()),
+        let starting = StoredRun {
+            status: "starting".into(),
             ..run_fixture()
         };
-        store.upsert_run(&run_fixture()).unwrap();
-        store.upsert_run(&failed).unwrap();
+        let finishing = StoredRun {
+            id: "run-done".into(),
+            ..run_fixture()
+        };
+        store.upsert_run(&starting).unwrap();
+        store.upsert_run(&finishing).unwrap();
 
         for (run_id, reason) in [
             ("run-1", "first"),
             ("run-1", "second"),
-            ("run-failed", "first"),
+            ("run-done", "first"),
         ] {
             request_local_run_cancel_with(&store, run_id, reason, &lock_path, || {}, |_| Ok(()))
                 .unwrap();
         }
-        let reason = |id| store.get_run(id).unwrap().unwrap().result_markdown;
-        assert_eq!(reason("run-1").as_deref(), Some("first"));
-        assert_eq!(reason("run-failed").as_deref(), Some("Job failed: boom"));
+        // A backend's submit upsert lands after the cancel request.
+        store.upsert_run(&starting).unwrap();
+        store
+            .update_status("run-1", RunStatus::Cancelled, Some(2), None)
+            .unwrap();
+        store
+            .update_status("run-done", RunStatus::Done, Some(2), Some(0))
+            .unwrap();
+
+        let detail =
+            |id| crate::plane::Run::from(&store.get_run(id).unwrap().unwrap()).failure_detail();
+        assert_eq!(detail("run-1").as_deref(), Some("reason: first"));
+        assert_eq!(detail("run-done"), None);
+        assert_eq!(
+            store.get_run("run-done").unwrap().unwrap().result_markdown,
+            None
+        );
 
         drop(store);
         let _ = std::fs::remove_dir_all(dir);
@@ -421,7 +440,7 @@ mod tests {
         assert!(!completed_while_locked);
         let run = store.get_run("run-1").unwrap().unwrap();
         assert!(run.cancel_requested);
-        assert_eq!(run.result_markdown.as_deref(), Some("second"));
+        assert_eq!(run.cancel_reason.as_deref(), Some("second"));
         drop(store);
         let _ = std::fs::remove_dir_all(dir);
     }

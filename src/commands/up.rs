@@ -2360,7 +2360,7 @@ async fn list_instances() -> ApiResult {
     Ok(Json(json!({ "instances": instances })))
 }
 
-/// Sent by `orx exp cancel`; the dashboard posts no body.
+/// Sent by `orx exp cancel`; the dashboard and older CLIs post no body.
 #[derive(Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 struct CancelRunReq {
@@ -2381,7 +2381,7 @@ async fn cancel_run(
     }
     let reason = match req {
         Some(Json(req)) => crate::commands::exp::exp_cancel_reason(req.chat_session_id.as_deref()),
-        None => "Cancel requested from the dashboard.".into(),
+        None => "Cancel requested through orx up (dashboard or an older orx CLI).".into(),
     };
     let backend = backend_for_run(&run)?;
     backend.cancel(&run, &reason).await.map_err(bad_request)?;
@@ -8701,6 +8701,7 @@ mod tests {
             commit_sha: None,
             result_markdown: None,
             cancel_requested: true,
+            cancel_reason: None,
             chat_session_id: None,
         };
 
