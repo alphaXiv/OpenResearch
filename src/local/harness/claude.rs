@@ -1410,6 +1410,10 @@ struct TurnState {
     /// The last event was a `result` that kept the turn open: the CLI is idle,
     /// waiting on background tasks, not mid-segment.
     idle_after_result: bool,
+    /// A helper's foreground shell commands, task_id → tool_use_id: a timeout
+    /// or a queued message can move one to the background, reported only by
+    /// `task_updated`.
+    foreground_shells: HashMap<String, Option<String>>,
 }
 
 struct PendingTask {
@@ -1429,7 +1433,7 @@ fn quiet_helper_turn_is_over(ctx: &TurnCtx, state: &TurnState) -> bool {
     ctx.spawned_helper && state.idle_after_result && only_shells_pending(state)
 }
 
-fn end_quiet_helper_turn(ctx: &mut TurnCtx, state: &TurnState) {
+fn settle_pending_shells(ctx: &mut TurnCtx, state: &TurnState) {
     for tool_use_id in state
         .pending_tasks
         .values()
@@ -1443,6 +1447,10 @@ fn end_quiet_helper_turn(ctx: &mut TurnCtx, state: &TurnState) {
             part_state.output = Some("Still running in the background.".into());
         }
     }
+}
+
+fn end_quiet_helper_turn(ctx: &mut TurnCtx, state: &TurnState) {
+    settle_pending_shells(ctx, state);
     mark_stream_final(ctx, state);
 }
 
@@ -1528,7 +1536,13 @@ fn apply_subagent_blocks(
 /// the recv loop). Native-session-id application and flushing are the caller's
 /// job, keeping this store-free.
 fn apply_event(ctx: &mut TurnCtx, state: &mut TurnState, event: &Value) -> bool {
-    state.idle_after_result = false;
+    let segment_running = match event.get("type").and_then(Value::as_str) {
+        Some("system") => event.get("subtype").and_then(Value::as_str) == Some("init"),
+        kind => matches!(kind, Some("assistant" | "user" | "stream_event")),
+    };
+    if segment_running {
+        state.idle_after_result = false;
+    }
     match event.get("type").and_then(Value::as_str) {
         // Partial-message deltas (opt-in via --include-partial-messages): the
         // text/thinking streams token by token instead of landing as one block
@@ -1648,19 +1662,29 @@ fn apply_event(ctx: &mut TurnCtx, state: &mut TurnState, event: &Value) -> bool 
                 let tool_use_id = event.get("tool_use_id").and_then(Value::as_str);
                 let is_true = |key| event.get(key).and_then(Value::as_bool) == Some(true);
                 let shell = task_type == Some("local_bash");
-                let gates_turn = if shell {
-                    // A Monitor is a `local_bash` task too, but its output already
-                    // reaches the model; a sub-agent's command reports to that sub-agent.
-                    let spawned_by_bash = tool_use_id
+                // A Monitor is a `local_bash` task too, but its output already
+                // reaches the model; a sub-agent's command reports to that sub-agent.
+                let helper_shell = shell
+                    && ctx.spawned_helper
+                    && !is_true("owned_by_subagent")
+                    && tool_use_id
                         .and_then(|id| find_part_mut(&mut ctx.assistant.parts, id))
-                        .is_some_and(|part| part.tool.as_deref() == Some("Bash"));
-                    ctx.spawned_helper
-                        && spawned_by_bash
-                        && is_true("is_backgrounded")
-                        && !is_true("owned_by_subagent")
+                        .is_some_and(|part| {
+                            matches!(part.tool.as_deref(), Some("Bash" | "PowerShell"))
+                        });
+                let backgrounded = is_true("is_backgrounded");
+                let gates_turn = if shell {
+                    helper_shell && backgrounded
                 } else {
                     task_type == Some("local_agent")
                 };
+                if helper_shell && !backgrounded {
+                    if let Some(id) = event.get("task_id").and_then(Value::as_str) {
+                        state
+                            .foreground_shells
+                            .insert(id.to_string(), tool_use_id.map(str::to_string));
+                    }
+                }
                 if gates_turn {
                     if let Some(id) = event.get("task_id").and_then(Value::as_str) {
                         // No tool_use_id → no spawn-part association; the
@@ -1673,10 +1697,30 @@ fn apply_event(ctx: &mut TurnCtx, state: &mut TurnState, event: &Value) -> bool 
                     }
                 }
             }
+            Some("task_updated") => {
+                let backgrounded = event
+                    .pointer("/patch/is_backgrounded")
+                    .and_then(Value::as_bool)
+                    == Some(true);
+                if let Some(id) = event.get("task_id").and_then(Value::as_str) {
+                    if let Some(tool_use_id) = backgrounded
+                        .then(|| state.foreground_shells.remove(id))
+                        .flatten()
+                    {
+                        let task = PendingTask {
+                            tool_use_id,
+                            shell: true,
+                        };
+                        state.pending_tasks.insert(id.to_string(), task);
+                        state.saw_background_task = true;
+                    }
+                }
+            }
             // The task's real end: retire it and stamp the spawn part terminal
             // — the async-launch tool_result deliberately left it `running`.
             Some("task_notification") => {
                 if let Some(id) = event.get("task_id").and_then(Value::as_str) {
+                    state.foreground_shells.remove(id);
                     let task = state.pending_tasks.remove(id);
                     let shell = task.as_ref().is_some_and(|task| task.shell);
                     if let Some(part) = task
@@ -1989,6 +2033,7 @@ fn apply_event(ctx: &mut TurnCtx, state: &mut TurnState, event: &Value) -> bool 
                 state.idle_after_result = true;
                 return false;
             }
+            settle_pending_shells(ctx, state);
             if !is_error {
                 mark_stream_final(ctx, state);
             }
@@ -3630,6 +3675,14 @@ mod tests {
         assert_eq!(end, None, "the progress result alone must not end the turn");
         assert!(quiet_helper_turn_is_over(&ctx, &state));
         assert!(!state.turn_errored);
+        // Idle-time bookkeeping doesn't mean a segment resumed.
+        let idle: Value = serde_json::from_str(
+            r#"{"type":"system","subtype":"background_tasks_changed","tasks":[]}"#,
+        )
+        .unwrap();
+        let mut state = state;
+        assert!(!apply_event(&mut ctx, &mut state, &idle));
+        assert!(quiet_helper_turn_is_over(&ctx, &state));
         end_quiet_helper_turn(&mut ctx, &state);
         let bash = ctx.assistant.parts[0].state.as_ref().unwrap();
         assert_eq!(bash.status, "completed", "no endless running row");
@@ -3648,6 +3701,36 @@ mod tests {
         resumed.push(BACKGROUND_BASH_STREAM[PROGRESS_RESULT + 2]);
         let (_, ctx, state) = replay_background_bash(true, &resumed, str::to_string);
         assert!(!quiet_helper_turn_is_over(&ctx, &state));
+    }
+
+    #[test]
+    fn helper_waits_on_a_bash_command_moved_to_the_background_by_its_timeout() {
+        // Claude Code 2.1.284: a foreground Bash past its 120s timeout is
+        // backgrounded with only a `task_updated` patch, no second task_started.
+        let stream = [
+            r#"{"type":"assistant","message":{"id":"m1","content":[{"type":"tool_use","id":"toolu_f","name":"Bash","input":{"command":"python3 train.py"}}]}}"#,
+            r#"{"type":"system","subtype":"task_started","task_id":"f1","tool_use_id":"toolu_f","task_type":"local_bash","is_backgrounded":false}"#,
+            r#"{"type":"system","subtype":"task_updated","task_id":"f1","patch":{"is_backgrounded":true}}"#,
+            r#"{"type":"user","message":{"content":[{"type":"tool_result","tool_use_id":"toolu_f","content":"Command did not complete within its 120s timeout and was moved to the background (ID: f1)."}]}}"#,
+            r#"{"type":"assistant","message":{"id":"m2","content":[{"type":"text","text":"Training is running in the background."}]}}"#,
+            r#"{"type":"result","subtype":"success","is_error":false,"result":"Training is running in the background."}"#,
+            r#"{"type":"system","subtype":"task_updated","task_id":"f1","patch":{"status":"completed","end_time":1}}"#,
+            r#"{"type":"system","subtype":"task_notification","task_id":"f1","tool_use_id":"toolu_f","status":"completed"}"#,
+            r#"{"type":"system","subtype":"init","session_id":"s"}"#,
+            r#"{"type":"assistant","message":{"id":"m3","content":[{"type":"text","text":"Accuracy 0.91."}]}}"#,
+            r#"{"type":"result","subtype":"success","is_error":false,"result":"Accuracy 0.91."}"#,
+        ];
+        let (end, ctx, _) = replay_background_bash(true, &stream, str::to_string);
+        assert_eq!(end, Some(stream.len() - 1));
+        assert_eq!(
+            ctx.assistant.parts[0].state.as_ref().unwrap().status,
+            "completed"
+        );
+        assert!(ctx
+            .assistant
+            .parts
+            .iter()
+            .any(|part| part.text.as_deref() == Some("Accuracy 0.91.")));
     }
 
     #[test]

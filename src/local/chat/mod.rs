@@ -7024,7 +7024,7 @@ pub struct TurnCtx {
     orx_retry_count: u32,
     terminal_error: Option<(String, String)>,
     pub session_id: String,
-    /// The session was started by `orx agent spawn`.
+    /// Set on every turn of a session started by `orx agent spawn`, not just its first.
     pub spawned_helper: bool,
     pub harness: String,
     pub native_session_id: Option<String>,
