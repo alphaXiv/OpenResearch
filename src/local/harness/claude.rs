@@ -1407,6 +1407,9 @@ struct TurnState {
     /// — gates the post-result grace wait for the auto-resume segment, which
     /// can trail the result even when every task already finished.
     saw_background_task: bool,
+    /// The last event was a `result` that kept the turn open: the CLI is idle,
+    /// waiting on background tasks, not mid-segment.
+    idle_after_result: bool,
 }
 
 struct PendingTask {
@@ -1423,7 +1426,24 @@ fn only_shells_pending(state: &TurnState) -> bool {
 /// A helper turn that went quiet waiting on background shell commands ends
 /// with the reply it already gave, as if that segment's `result` had ended it.
 fn quiet_helper_turn_is_over(ctx: &TurnCtx, state: &TurnState) -> bool {
-    ctx.spawned_helper && state.saw_result && only_shells_pending(state)
+    ctx.spawned_helper && state.idle_after_result && only_shells_pending(state)
+}
+
+fn end_quiet_helper_turn(ctx: &mut TurnCtx, state: &TurnState) {
+    for tool_use_id in state
+        .pending_tasks
+        .values()
+        .filter_map(|task| task.tool_use_id.as_deref())
+    {
+        if let Some(part_state) = find_part_mut(&mut ctx.assistant.parts, tool_use_id)
+            .and_then(|part| part.state.as_mut())
+            .filter(|part_state| part_state.status == "running")
+        {
+            part_state.status = "completed".into();
+            part_state.output = Some("Still running in the background.".into());
+        }
+    }
+    mark_stream_final(ctx, state);
 }
 
 /// The spawning `Task` tool_use id for a sub-agent event (`parent_tool_use_id`),
@@ -1508,6 +1528,7 @@ fn apply_subagent_blocks(
 /// the recv loop). Native-session-id application and flushing are the caller's
 /// job, keeping this store-free.
 fn apply_event(ctx: &mut TurnCtx, state: &mut TurnState, event: &Value) -> bool {
+    state.idle_after_result = false;
     match event.get("type").and_then(Value::as_str) {
         // Partial-message deltas (opt-in via --include-partial-messages): the
         // text/thinking streams token by token instead of landing as one block
@@ -1623,22 +1644,28 @@ fn apply_event(ctx: &mut TurnCtx, state: &mut TurnState, event: &Value) -> bool 
             // Track background sub-agents (and a helper's background shell
             // commands) so the `result` arm knows a turn isn't over while one runs.
             Some("task_started") => {
-                let flag = |key| event.get(key).and_then(Value::as_bool) == Some(true);
-                let shell = event.get("task_type").and_then(Value::as_str) == Some("local_bash");
-                // A sub-agent's own command reports to that sub-agent.
+                let task_type = event.get("task_type").and_then(Value::as_str);
+                let tool_use_id = event.get("tool_use_id").and_then(Value::as_str);
+                let is_true = |key| event.get(key).and_then(Value::as_bool) == Some(true);
+                let shell = task_type == Some("local_bash");
                 let gates_turn = if shell {
-                    ctx.spawned_helper && flag("is_backgrounded") && !flag("owned_by_subagent")
+                    // A Monitor is a `local_bash` task too, but its output already
+                    // reaches the model; a sub-agent's command reports to that sub-agent.
+                    let spawned_by_bash = tool_use_id
+                        .and_then(|id| find_part_mut(&mut ctx.assistant.parts, id))
+                        .is_some_and(|part| part.tool.as_deref() == Some("Bash"));
+                    ctx.spawned_helper
+                        && spawned_by_bash
+                        && is_true("is_backgrounded")
+                        && !is_true("owned_by_subagent")
                 } else {
-                    event.get("task_type").and_then(Value::as_str) == Some("local_agent")
+                    task_type == Some("local_agent")
                 };
                 if gates_turn {
                     if let Some(id) = event.get("task_id").and_then(Value::as_str) {
                         // No tool_use_id → no spawn-part association; the
                         // task still gates the turn's end.
-                        let tool_use_id = event
-                            .get("tool_use_id")
-                            .and_then(Value::as_str)
-                            .map(str::to_string);
+                        let tool_use_id = tool_use_id.map(str::to_string);
                         state
                             .pending_tasks
                             .insert(id.to_string(), PendingTask { tool_use_id, shell });
@@ -1955,14 +1982,11 @@ fn apply_event(ctx: &mut TurnCtx, state: &mut TurnState, event: &Value) -> bool 
                 }
             }
             state.had_activity |= report_result_usage(ctx, event).is_some_and(|used| used > 0);
-            // A result while background sub-agents (or a helper's background
-            // commands) still run is only a segment boundary: the model ended
-            // ITS reply, but the CLI auto-resumes with their reports when they
-            // finish. Keep listening — the continuation's own result (no tasks
-            // pending) ends the turn. A failure over shells alone ends it now.
-            if !state.pending_tasks.is_empty()
-                && !(state.turn_errored && only_shells_pending(state))
-            {
+            // While background tasks run this is only a segment boundary: the CLI
+            // resumes with their reports. A failure over shells alone ends it now.
+            let failed_over_shells = state.turn_errored && only_shells_pending(state);
+            if !state.pending_tasks.is_empty() && !failed_over_shells {
+                state.idle_after_result = true;
                 return false;
             }
             if !is_error {
@@ -2252,7 +2276,7 @@ async fn run_attempt(ctx: &mut TurnCtx, spec: SpawnSpec) -> Result<(TurnState, u
                 continue;
             }
             Waited::Event(Err(_)) if quiet_helper_turn_is_over(ctx, &state) => {
-                mark_stream_final(ctx, &state);
+                end_quiet_helper_turn(ctx, &state);
                 break;
             }
             Waited::Event(Err(_)) => {
@@ -3565,13 +3589,10 @@ mod tests {
     fn spawned_helper_turn_outlasts_a_progress_reply_over_a_background_command() {
         let (end, ctx, _) = replay_background_bash(true, BACKGROUND_BASH_STREAM, str::to_string);
         assert_eq!(end, Some(BACKGROUND_BASH_STREAM.len() - 1));
-        let status = ctx.assistant.parts[0]
-            .state
-            .as_ref()
-            .unwrap()
-            .status
-            .clone();
-        assert_eq!(status, "completed");
+        assert_eq!(
+            ctx.assistant.parts[0].state.as_ref().unwrap().status,
+            "completed"
+        );
     }
 
     #[test]
@@ -3581,16 +3602,19 @@ mod tests {
     }
 
     #[test]
-    fn helper_only_waits_on_its_own_backgrounded_commands() {
-        let foreground =
-            |line: &str| line.replace(r#""is_backgrounded":true"#, r#""is_backgrounded":false"#);
-        let subagent = |line: &str| {
-            line.replace(
-                r#""is_backgrounded":true"#,
-                r#""is_backgrounded":true,"owned_by_subagent":true"#,
-            )
-        };
-        for edit in [&foreground as &dyn Fn(&str) -> String, &subagent] {
+    fn helper_only_waits_on_its_own_backgrounded_bash_commands() {
+        let edits: [fn(&str) -> String; 3] = [
+            |line| line.replace(r#""is_backgrounded":true"#, r#""is_backgrounded":false"#),
+            |line| {
+                line.replace(
+                    r#""is_backgrounded":true"#,
+                    r#""is_backgrounded":true,"owned_by_subagent":true"#,
+                )
+            },
+            // Claude Code registers a Monitor as a backgrounded local_bash task.
+            |line| line.replace(r#""name":"Bash""#, r#""name":"Monitor""#),
+        ];
+        for edit in edits {
             let (end, _, _) = replay_background_bash(true, BACKGROUND_BASH_STREAM, edit);
             assert_eq!(end, Some(PROGRESS_RESULT));
         }
@@ -3598,7 +3622,7 @@ mod tests {
 
     #[test]
     fn quiet_helper_turn_ends_with_its_reply_while_a_command_never_exits() {
-        let (end, ctx, state) = replay_background_bash(
+        let (end, mut ctx, state) = replay_background_bash(
             true,
             &BACKGROUND_BASH_STREAM[..=PROGRESS_RESULT],
             str::to_string,
@@ -3606,6 +3630,9 @@ mod tests {
         assert_eq!(end, None, "the progress result alone must not end the turn");
         assert!(quiet_helper_turn_is_over(&ctx, &state));
         assert!(!state.turn_errored);
+        end_quiet_helper_turn(&mut ctx, &state);
+        let bash = ctx.assistant.parts[0].state.as_ref().unwrap();
+        assert_eq!(bash.status, "completed", "no endless running row");
         assert!(ctx.assistant.parts.iter().any(|part| {
             part.text.as_deref() == Some("The command is running in the background.")
         }));
@@ -3614,6 +3641,12 @@ mod tests {
         let agent = |line: &str| line.replace("local_bash", "local_agent");
         let (_, ctx, state) =
             replay_background_bash(true, &BACKGROUND_BASH_STREAM[..=PROGRESS_RESULT], agent);
+        assert!(!quiet_helper_turn_is_over(&ctx, &state));
+
+        // Quiet mid-segment is a wedged child, not an idle one.
+        let mut resumed = BACKGROUND_BASH_STREAM[..=PROGRESS_RESULT].to_vec();
+        resumed.push(BACKGROUND_BASH_STREAM[PROGRESS_RESULT + 2]);
+        let (_, ctx, state) = replay_background_bash(true, &resumed, str::to_string);
         assert!(!quiet_helper_turn_is_over(&ctx, &state));
     }
 
@@ -3634,13 +3667,10 @@ mod tests {
     fn stopped_background_command_is_not_an_error() {
         let stopped = |line: &str| line.replace(r#""status":"completed""#, r#""status":"stopped""#);
         let (_, ctx, _) = replay_background_bash(true, BACKGROUND_BASH_STREAM, stopped);
-        let status = ctx.assistant.parts[0]
-            .state
-            .as_ref()
-            .unwrap()
-            .status
-            .clone();
-        assert_eq!(status, "completed");
+        assert_eq!(
+            ctx.assistant.parts[0].state.as_ref().unwrap().status,
+            "completed"
+        );
     }
 
     #[test]

@@ -50,6 +50,6 @@ Include the project, relevant experiment and branch, metric, constraints,
 allowed compute, expected output, and a concrete definition of done. Use
 `--stdin` for a multi-paragraph brief.
 
-A helper finishes once its background commands exit, or after a long quiet
-period, so do not ask it to leave servers or watchers running unless the task
-needs them.
+A Claude helper's closing reply waits for its background commands to exit (or
+about 30 quiet minutes), so do not ask it to leave servers or watchers running
+unless the task needs them.

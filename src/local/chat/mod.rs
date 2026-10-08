@@ -7024,7 +7024,7 @@ pub struct TurnCtx {
     orx_retry_count: u32,
     terminal_error: Option<(String, String)>,
     pub session_id: String,
-    /// The session was started by `orx agent spawn` (true for every turn in it).
+    /// The session was started by `orx agent spawn`.
     pub spawned_helper: bool,
     pub harness: String,
     pub native_session_id: Option<String>,
@@ -8319,20 +8319,25 @@ fn spawn_outcome(store: &Store, session: &StoredChatSession) -> Result<SpawnOutc
         {
             return Ok(SpawnOutcome::Interrupted);
         }
-        // A turn that resumed after background work also holds its earlier
-        // progress replies; the final answer is the report.
-        let is_final = |part: &&WirePart| part.phase == Some(MessagePhase::FinalAnswer);
-        let has_final = parts
-            .iter()
-            .any(|part| part.kind == "text" && is_final(&part));
-        let text = parts
-            .iter()
-            .filter(|part| part.kind == "text" && (!has_final || is_final(part)))
-            .filter_map(|part| part.text.as_deref())
-            .map(str::trim)
-            .filter(|text| !text.is_empty())
-            .collect::<Vec<_>>()
-            .join("\n\n");
+        let joined = |final_only: bool| {
+            parts
+                .iter()
+                .filter(|part| part.kind == "text")
+                .filter(|part| !final_only || part.phase == Some(MessagePhase::FinalAnswer))
+                .filter_map(|part| part.text.as_deref())
+                .map(str::trim)
+                .filter(|text| !text.is_empty())
+                .collect::<Vec<_>>()
+                .join("\n\n")
+        };
+        let mut text = joined(false);
+        // A turn that resumed after background work can bury its answer under progress.
+        if text.chars().count() > SPAWN_REPORT_LIMIT {
+            let answer = joined(true);
+            if !answer.is_empty() {
+                text = answer;
+            }
+        }
         if !text.is_empty() {
             return Ok(SpawnOutcome::Reply(truncated(&text, SPAWN_REPORT_LIMIT)));
         }
@@ -10642,22 +10647,31 @@ with other project runs using `orx runs p1` and inspect the file located by `orx
     }
 
     #[test]
-    fn a_resumed_helper_reports_its_final_answer_not_its_progress() {
+    fn a_long_helper_reply_keeps_its_final_answer() {
         let (store, dir) = temp_store("spawn-final");
         session(&store, "child");
-        let mut progress = WirePart::text("p", "x".repeat(SPAWN_REPORT_LIMIT));
-        progress.phase = Some(MessagePhase::Commentary);
-        let mut answer = WirePart::text("a", "the report");
-        answer.phase = Some(MessagePhase::FinalAnswer);
-        let mut message = assistant_message("a1", None, "");
-        message.parts_json = serde_json::to_string(&[progress, answer]).unwrap();
-        store.upsert_chat_message(&message).unwrap();
-
-        let child = store.get_chat_session("child").unwrap().unwrap();
-        let SpawnOutcome::Reply(reply) = spawn_outcome(&store, &child).unwrap() else {
-            panic!("expected a reply");
+        let reply_with_progress = |progress_text: String| {
+            let mut progress = WirePart::text("p", progress_text);
+            progress.phase = Some(MessagePhase::Commentary);
+            let mut answer = WirePart::text("a", "the report");
+            answer.phase = Some(MessagePhase::FinalAnswer);
+            let mut message = assistant_message("a1", None, "");
+            message.parts_json = serde_json::to_string(&[progress, answer]).unwrap();
+            store.upsert_chat_message(&message).unwrap();
+            let child = store.get_chat_session("child").unwrap().unwrap();
+            let SpawnOutcome::Reply(reply) = spawn_outcome(&store, &child).unwrap() else {
+                panic!("expected a reply");
+            };
+            reply
         };
-        assert_eq!(reply, "the report");
+        assert_eq!(
+            reply_with_progress("findings".into()),
+            "findings\n\nthe report"
+        );
+        assert_eq!(
+            reply_with_progress("x".repeat(SPAWN_REPORT_LIMIT)),
+            "the report"
+        );
 
         let _ = std::fs::remove_dir_all(&dir);
     }
