@@ -2281,8 +2281,8 @@ fn require_caller_config_dir(
     let base = own.parent().unwrap_or(own);
     Err(anyhow!(
         "This command uses the compute settings in {}, but orx up launches runs with \
-         the settings in {}. Re-run with XDG_CONFIG_HOME={} so both use the same \
-         settings, or restart orx up (or the OpenResearch app) from this environment.",
+         the settings in {}. Set XDG_CONFIG_HOME to {} and re-run, or restart orx up \
+         from this environment.",
         caller.display(),
         own.display(),
         base.display()
