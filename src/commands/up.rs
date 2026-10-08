@@ -5440,6 +5440,7 @@ struct SetUiStateReq {
     preferred_agent: Option<StoredAgentSelectionReq>,
     workspace: Option<GlobalWorkspaceState>,
     preferred_autonomy: Option<Autonomy>,
+    harness_failover: Option<local::harness::HarnessFailover>,
 }
 
 #[derive(Deserialize)]
@@ -5486,6 +5487,10 @@ async fn set_ui_state(Json(req): Json<SetUiStateReq>) -> ApiResult {
                 })
             })
             .transpose()?;
+        let failover = req
+            .harness_failover
+            .map(local::harness::HarnessFailover::validated)
+            .transpose()?;
         if let Some(completed) = req.tour_completed {
             store.set_tour_completed(completed)?;
         }
@@ -5494,6 +5499,9 @@ async fn set_ui_state(Json(req): Json<SetUiStateReq>) -> ApiResult {
         }
         if let Some(autonomy) = req.preferred_autonomy {
             store.set_preferred_autonomy(autonomy)?;
+        }
+        if let Some(failover) = failover {
+            store.set_harness_failover(&failover)?;
         }
         if let Some(workspace) = req.workspace {
             store.set_global_workspace_state(&workspace)?;
@@ -8280,6 +8288,7 @@ mod tests {
             preferred_agent: None,
             workspace: Some(invalid),
             preferred_autonomy: None,
+            harness_failover: None,
         }))
         .await;
         assert_eq!(result.err().unwrap().0, StatusCode::BAD_REQUEST);

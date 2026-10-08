@@ -1278,5 +1278,12 @@
   "sidebar_reveal_project": "Mostrar en Finder",
   "sidebar_filter": "Filtrar",
   "sidebar_group_by": "Agrupar por",
-  "sidebar_one_list": "En una lista"
+  "sidebar_one_list": "En una lista",
+  "settings_failover_title": "Cambiar de harness al llegar a un límite de uso",
+  "settings_failover_description": "Cuando el harness de un chat se queda sin uso o alcanza un límite de velocidad, el turno continúa en el siguiente harness disponible de esta lista, con el chat hasta ahora como contexto.",
+  "settings_failover_order": "Orden de respaldo",
+  "settings_failover_move_up": "Subir {name}",
+  "settings_failover_move_down": "Bajar {name}",
+  "settings_failover_include": "Usar {name} como respaldo",
+  "activity_switched_harness": "Se cambió de {from} a {to} tras alcanzar un límite de uso"
 }

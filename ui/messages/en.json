@@ -1278,5 +1278,12 @@
   "sidebar_reveal_project": "Reveal in Finder",
   "sidebar_filter": "Filter",
   "sidebar_group_by": "Group by",
-  "sidebar_one_list": "In one list"
+  "sidebar_one_list": "In one list",
+  "settings_failover_title": "Switch harness on usage limits",
+  "settings_failover_description": "When a chat's harness runs out of usage or hits a rate limit, the turn continues on the next ready harness in this order, with the chat so far as context.",
+  "settings_failover_order": "Fallback order",
+  "settings_failover_move_up": "Move {name} up",
+  "settings_failover_move_down": "Move {name} down",
+  "settings_failover_include": "Use {name} as a fallback",
+  "activity_switched_harness": "Switched from {from} to {to} after a usage limit"
 }

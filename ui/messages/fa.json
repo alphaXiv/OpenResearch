@@ -1278,5 +1278,12 @@
   "sidebar_reveal_project": "نمایش در Finder",
   "sidebar_filter": "فیلتر",
   "sidebar_group_by": "گروه‌بندی بر اساس",
-  "sidebar_one_list": "در یک فهرست"
+  "sidebar_one_list": "در یک فهرست",
+  "settings_failover_title": "تعویض harness هنگام رسیدن به سقف استفاده",
+  "settings_failover_description": "وقتی harness یک گفتگو سهمیهٔ استفاده‌اش تمام شود یا به سقف نرخ برسد، نوبت روی harness آمادهٔ بعدی به همین ترتیب ادامه می‌یابد و گفتگوی تاکنون به‌عنوان زمینه منتقل می‌شود.",
+  "settings_failover_order": "ترتیب جایگزین‌ها",
+  "settings_failover_move_up": "انتقال {name} به بالا",
+  "settings_failover_move_down": "انتقال {name} به پایین",
+  "settings_failover_include": "استفاده از {name} به‌عنوان جایگزین",
+  "activity_switched_harness": "پس از رسیدن به سقف استفاده، از {from} به {to} تغییر کرد"
 }

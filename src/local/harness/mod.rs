@@ -22,6 +22,7 @@ pub(crate) mod claude;
 pub(crate) mod codex;
 pub(crate) mod cursor;
 mod detect;
+mod failover;
 pub(crate) mod opencode;
 mod options;
 mod plan_gate;
@@ -48,6 +49,7 @@ pub(crate) use detect::{
     ProbeTiming, ProbeTimingSink,
 };
 pub use detect::{HarnessAuthState, HarnessInfo, ModelInfo};
+pub use failover::{is_usage_limit_failure, HarnessFailover};
 pub use options::{HarnessOptions, PermissionMode};
 pub use plan_gate::command_is_readonly;
 pub use plan_gate::decide as plan_gate_decide;

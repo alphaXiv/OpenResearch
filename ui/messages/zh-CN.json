@@ -1278,5 +1278,12 @@
   "sidebar_reveal_project": "在访达中显示",
   "sidebar_filter": "筛选",
   "sidebar_group_by": "分组方式",
-  "sidebar_one_list": "单一列表"
+  "sidebar_one_list": "单一列表",
+  "settings_failover_title": "达到用量上限时切换 harness",
+  "settings_failover_description": "当聊天所用的 harness 用量耗尽或触发速率限制时，会按此顺序在下一个可用的 harness 上继续本轮，并带上目前的聊天作为上下文。",
+  "settings_failover_order": "备用顺序",
+  "settings_failover_move_up": "上移 {name}",
+  "settings_failover_move_down": "下移 {name}",
+  "settings_failover_include": "将 {name} 用作备用",
+  "activity_switched_harness": "因达到用量上限，已从 {from} 切换到 {to}"
 }

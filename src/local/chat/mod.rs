@@ -5750,14 +5750,20 @@ impl ChatHost {
                     None,
                 )
             });
-            let result = match crate::local::harness::chat_harness(&ctx.harness) {
-                Some(harness) => harness.run_turn(&mut ctx).await,
-                None => Err(crate::local::harness::TurnFailure {
-                    kind: "unknown_harness",
-                    message: format!("unknown harness: {}", ctx.harness),
-                    delivery: DeliveryState::Rejected,
-                }),
-            };
+            // Captured before the harness runs: it may rewrite both.
+            let base_text = ctx.text.clone();
+            let resumed_native = ctx.native_session_id.is_some();
+            let mut result = run_harness_turn(&mut ctx).await;
+            let mut tried = vec![ctx.harness.clone()];
+            while let Some((next, reason)) = ctx
+                .host
+                .clone()
+                .failover_target(&ctx, &result, &mut tried)
+                .await
+            {
+                ctx.fail_over(&next, &reason, &base_text, resumed_native);
+                result = run_harness_turn(&mut ctx).await;
+            }
             drop(steer_route);
             if let Some(mut steering) = ctx.steering.take() {
                 steering.close();
@@ -5858,6 +5864,55 @@ impl ChatHost {
         }
         guard.defuse();
         Ok(TurnSubmission::Started(turn_id))
+    }
+
+    /// The harness to continue a turn on after it stopped on a usage limit,
+    /// with the failure that caused the switch. `None` when the failure is not
+    /// a limit, failover is off, the turn was interrupted, or no other
+    /// harness is ready. Harnesses checked here are added to `tried`.
+    async fn failover_target(
+        &self,
+        ctx: &TurnCtx,
+        result: &crate::local::harness::TurnResult,
+        tried: &mut Vec<String>,
+    ) -> Option<(String, String)> {
+        let (kind, message) = match (&ctx.terminal_error, result) {
+            (Some((kind, message)), _) => (kind.as_str(), message.as_str()),
+            (None, Err(failure)) => (failure.kind, failure.message.as_str()),
+            (None, Ok(_)) => return None,
+        };
+        if !crate::local::harness::is_usage_limit_failure(kind, message) {
+            return None;
+        }
+        let policy = Store::open().ok()?.ui_state().ok()?.harness_failover;
+        for id in policy.candidates(&ctx.harness, tried) {
+            if !self.owns_turn(&ctx.session_id, &ctx.turn_id).await {
+                return None;
+            }
+            tried.push(id.clone());
+            let ready = tokio::time::timeout(
+                FAILOVER_DETECT_TIMEOUT,
+                crate::local::harness::detect_harness(&id),
+            )
+            .await
+            .ok()
+            .flatten()
+            .is_some_and(|info| info.agent_ready);
+            if ready {
+                return Some((id, message.to_string()));
+            }
+        }
+        None
+    }
+
+    async fn owns_turn(&self, session_id: &str, turn_id: &str) -> bool {
+        if self.deleting_sessions.lock().unwrap().contains(session_id) {
+            return false;
+        }
+        matches!(
+            self.turns.lock().await.get(session_id),
+            Some(TurnState::Active(active)) if active.turn_id == turn_id
+        )
     }
 
     /// Turn cleanup: drop the handle, bump the session, broadcast idle.
@@ -7113,6 +7168,20 @@ fn turn_ctx_from_stored(
     }
 }
 
+/// How long a failover waits to learn whether the next harness is ready.
+const FAILOVER_DETECT_TIMEOUT: Duration = Duration::from_secs(30);
+
+async fn run_harness_turn(ctx: &mut TurnCtx) -> crate::local::harness::TurnResult {
+    match crate::local::harness::chat_harness(&ctx.harness) {
+        Some(harness) => harness.run_turn(ctx).await,
+        None => Err(crate::local::harness::TurnFailure {
+            kind: "unknown_harness",
+            message: format!("unknown harness: {}", ctx.harness),
+            delivery: DeliveryState::Rejected,
+        }),
+    }
+}
+
 fn rebase_prepared_attachment_paths(input: &str) -> String {
     let Ok(current_dir) = attachments_dir() else {
         return input.to_string();
@@ -7438,6 +7507,127 @@ impl TurnCtx {
             }));
         }
         self.upsert_part_raw(part);
+    }
+
+    /// Continue this turn on `to` after the current harness stopped on a usage
+    /// limit. The session moves to `to` with that harness's defaults, and the
+    /// turn's prompt is reseeded with the transcript so far, since `to` has
+    /// no native history of this chat.
+    fn fail_over(&mut self, to: &str, reason: &str, base_text: &str, resumed_native: bool) {
+        use crate::local::harness::{
+            chat_harness, permission_id_for_mode, permission_mode_for, supports_command_plan,
+            PermissionMode,
+        };
+        let from = std::mem::replace(&mut self.harness, to.to_string());
+        let name =
+            |id: &str| chat_harness(id).map_or_else(|| id.to_string(), |h| h.name().to_string());
+        let (from_name, to_name) = (name(&from), name(to));
+        let was_plan = self.plan_mode || self.permission_mode == Some(PermissionMode::Plan);
+        let command_plan = supports_command_plan(to);
+        let permission_id = if was_plan && !command_plan {
+            permission_id_for_mode(to, PermissionMode::Plan)
+        } else {
+            self.permission_mode
+                .filter(|mode| *mode != PermissionMode::Plan)
+                .and_then(|mode| permission_id_for_mode(to, mode))
+        };
+        self.permission_mode = permission_id
+            .as_deref()
+            .and_then(|id| permission_mode_for(to, id));
+        self.plan_mode = was_plan && command_plan;
+        self.plan_reset_pending = false;
+        self.native_session_id = None;
+        self.model = None;
+        self.reset_codex_model = false;
+        self.service_tier = None;
+        self.reasoning_level = None;
+        self.context_usage = None;
+        self.terminal_error = None;
+        self.delivery_state = DeliveryState::NotSent;
+        self.retry_owner = None;
+        self.retry_started_emitted = false;
+        self.retry_exhausted = false;
+        self.orx_retry_started = None;
+        self.orx_retry_count = 0;
+
+        let mut part = WirePart::tool(
+            format!("harness-failover-{}", self.assistant.parts.len()),
+            "harnessFailover",
+            "completed",
+            None,
+        );
+        if let Some(state) = part.state.as_mut() {
+            state.title = Some(format!(
+                "Switched from {from_name} to {to_name} after a usage limit"
+            ));
+            state.input = Some(json!({
+                "from": from,
+                "to": to,
+                "fromName": from_name,
+                "toName": to_name,
+                "reason": reason,
+            }));
+        }
+        self.clear_retry_status();
+        self.upsert_part_raw(part);
+        let _ = self.flush();
+
+        let store = Store::open().ok();
+        let bootstrap = resumed_native
+            .then(|| {
+                store
+                    .as_ref()?
+                    .get_chat_session(&self.session_id)
+                    .ok()??
+                    .bootstrap_context
+            })
+            .flatten()
+            .filter(|context| !context.trim().is_empty());
+        let snapshot =
+            crate::local::harness::native_recovery_snapshot(&self.session_id, &self.turn_id);
+        let prior = [bootstrap.as_deref(), Some(snapshot.as_str())]
+            .into_iter()
+            .flatten()
+            .filter(|text| !text.is_empty())
+            .collect::<Vec<_>>()
+            .join("\n\n");
+        self.text = if prior.is_empty() {
+            base_text.to_string()
+        } else {
+            format!(
+                "<orx-harness-failover>\nThis chat was running on {from_name}, which stopped on a usage limit; you are continuing it. Use this ORX transcript snapshot as prior context; do not repeat completed tool actions.\n{prior}\n</orx-harness-failover>\n\n{base_text}"
+            )
+        };
+
+        self.usage_execution_id = uuid::Uuid::new_v4().to_string();
+        if let Some(store) = store.as_ref() {
+            let _ = store.switch_chat_session_harness(
+                &self.session_id,
+                to,
+                permission_id.as_deref(),
+                self.plan_mode,
+            );
+            if let Ok(settings) = serde_json::to_string(&TurnOverrides {
+                model: None,
+                clear_model: false,
+                service_tier: None,
+                permission_mode: permission_id.clone(),
+                permission_revision: None,
+                plan_mode: command_plan.then_some(self.plan_mode),
+                plan_revision: None,
+                reasoning_level: None,
+            }) {
+                let _ = store.set_chat_turn_settings(&self.turn_id, &settings);
+            }
+            let _ = store.begin_usage_execution(&self.usage_execution_id, &self.turn_id, to);
+            if let Ok(Some(session)) = store.get_chat_session(&self.session_id) {
+                self.host.emit(
+                    "chat.session",
+                    json!({ "session": session_json(&session, true) }),
+                );
+            }
+        }
+        crate::telemetry::capture("chat_harness_failover", json!({ "from": from, "to": to }));
     }
 
     fn upsert_part_raw(&mut self, part: WirePart) {
