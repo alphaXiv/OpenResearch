@@ -1625,10 +1625,10 @@ impl Store {
         Ok(changed == 1)
     }
 
+    /// Keeps the reason: a live supervisor may already have acted on the request.
     pub fn withdraw_cancel(&self, run_id: &str) -> Result<()> {
         self.conn.execute(
-            "UPDATE runs SET cancel_requested = 0, cancel_reason = NULL, updated_at = ?2
-             WHERE id = ?1",
+            "UPDATE runs SET cancel_requested = 0, updated_at = ?2 WHERE id = ?1",
             params![run_id, now_ms()],
         )?;
         Ok(())

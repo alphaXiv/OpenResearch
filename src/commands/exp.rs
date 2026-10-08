@@ -321,9 +321,14 @@ mod tests {
             |_| Err(anyhow!("synthetic spawn failure")),
         );
         assert!(result.is_err());
-        let run = store.get_run(&run.id).unwrap().unwrap();
-        assert!(!run.cancel_requested);
-        assert_eq!(run.cancel_reason, None);
+        let stored = store.get_run(&run.id).unwrap().unwrap();
+        assert!(!stored.cancel_requested);
+        // A supervisor that already sent the cancel still ends the run with its requester.
+        store
+            .update_status(&run.id, crate::store::RunStatus::Cancelled, Some(1), None)
+            .unwrap();
+        let cancelled = crate::plane::Run::from(&store.get_run(&run.id).unwrap().unwrap());
+        assert_eq!(cancelled.failure_detail().as_deref(), Some("reason: test"));
 
         drop(store);
         let _ = std::fs::remove_dir_all(dir);
