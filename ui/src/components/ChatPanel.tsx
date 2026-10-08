@@ -4415,6 +4415,7 @@ export function ChatPanel({
   // Pasted/dropped/uploaded attachments waiting in the composer, as data URLs.
   const [attachments, setAttachments] = useState<ComposerAttachment[]>([]);
   const [attachError, setAttachError] = useState<string | null>(null);
+  const [imageRefused, setImageRefused] = useState(false);
   // Unsent composer content belongs to the scope it was typed in — stash on
   // the way out, restore on return, so a draft can't bleed into another chat.
   const stashKey = activeId ?? `${projectId}:new`;
@@ -4582,11 +4583,12 @@ export function ChatPanel({
     const MAX_BYTES = 30 * 1024 * 1024;
     const TOTAL_BYTES = 40 * 1024 * 1024;
     setAttachError(null);
+    setImageRefused(false);
     let total = attachments.reduce((n, a) => n + a.size, 0);
     for (const file of files) {
       if (!/^(image\/(png|jpeg|gif|webp)|application\/pdf)$/.test(file.type)) continue;
       if (noImageInputError && file.type.startsWith("image/")) {
-        setAttachError(noImageInputError);
+        setImageRefused(true);
         continue;
       }
       if (file.size > MAX_BYTES) {
@@ -4699,10 +4701,13 @@ export function ChatPanel({
   // top tiers appear only on the models that accept them.
   const reasoning = reasoningFor(activeHarness, composerSelection?.model);
   const selectedModel = activeHarness?.models.find((model) => model.id === composerSelection?.model);
-  // OpenCode reports a text-only model's image Read as both a success and an error.
+  // OpenCode reports a text-only model's image Read as both success and error, so refuse up front.
   const noImageInputError = selectedModel?.imageInput === false
     ? m.chat_model_no_image_input({ model: ltr(harnessModelLabel(selectedModel)) })
     : null;
+  const imageInputBlocked =
+    !!noImageInputError && attachments.some((a) => a.mediaType.startsWith("image/"));
+  const imageInputError = imageInputBlocked || imageRefused ? noImageInputError : null;
 
   // Editing the pickers: every change updates the sticky global preference —
   // the config a "New session" composer opens with is whatever the user chose
@@ -5462,15 +5467,12 @@ export function ChatPanel({
       runComposerCommand(composerCommand.name, composerCommand.prompt);
       return;
     }
+    if (imageInputBlocked) return;
     captureUiEvent({
       name: "first_action",
       surface: telemetrySurface,
       action: "typed_prompt",
     });
-    if (noImageInputError && attachments.some((a) => a.mediaType.startsWith("image/"))) {
-      setAttachError(noImageInputError);
-      return;
-    }
     if (preparingSend.current) return;
     const planRequested = !!composerCommand;
     const toggledPlanMode = !planActive;
@@ -6862,9 +6864,9 @@ export function ChatPanel({
                 })}
               </div>
             )}
-            {attachError && (
+            {(imageInputError ?? attachError) && (
               <div className="composer-attach-error pt-1.5 px-3 pb-0 text-sm text-accent-red" role="alert">
-                {attachError}
+                {imageInputError ?? attachError}
               </div>
             )}
             {settingsError && (
