@@ -227,25 +227,32 @@ pub(super) async fn connect(
             &mut follow_up,
         )
         .await;
-        // Login rejection caches must not mask a successful new login.
-        if request.harness == "claude-code" && result.is_ok() {
-            state.claude.clear_runtime_rejection();
-        }
-        *state.harnesses.lock().await = None;
         let message = match result {
-            Ok(()) => json!({ "type": "complete" }),
-            Err(error) => json!({ "type": "error", "error": error }),
+            Ok(harness) => {
+                // Login rejection caches must not mask a successful new login.
+                if request.harness == "claude-code" {
+                    state.claude.clear_runtime_rejection();
+                }
+                super::publish_harness(&state, &harness).await;
+                json!({ "type": "complete" })
+            }
+            Err(error) => {
+                *state.harnesses.lock().await = None;
+                json!({ "type": "error", "error": error })
+            }
         };
         if socket
             .send(Message::Text(message.to_string().into()))
             .await
             .is_err()
-            || !request.shell
         {
             return;
         }
-        if let Some(env) = follow_up {
-            super::continue_in_shell(&mut socket, &mut size, env).await;
+        match follow_up {
+            Some(env) if request.shell => {
+                super::continue_in_shell(&mut socket, &mut size, env).await
+            }
+            _ => super::close_socket(&mut socket).await,
         }
     })
 }
@@ -258,7 +265,7 @@ async fn run(
     size: &mut PtySize,
     // Set once a command actually ran: the env its follow-up shell must share.
     follow_up: &mut Option<Vec<(&'static str, std::ffi::OsString)>>,
-) -> Result<(), String> {
+) -> Result<crate::local::harness::HarnessInfo, String> {
     let mut run_command = true;
     // Held, not terminal: an install whose optional launch failed still counts,
     // but only against evidence this command changed something.
@@ -443,13 +450,15 @@ async fn run(
             }
         }
     }
-    let harness = crate::local::harness::detect_harness(&request.harness).await;
+    let mut harness = crate::local::harness::detect_harness(&request.harness).await;
     let verified = setup_verified(request, harness.as_ref());
     if let Some(failure) = command_failure {
         // Only a brand-new working install overrides the failure (codex
         // installs, then its optional launch fails); a binary that was already
         // there proves nothing about a command that exited nonzero.
-        if verified && fresh_install(request.action, installed_before, harness.as_ref()) {
+        if let Some(harness) = harness
+            .take_if(|h| verified && fresh_install(request.action, installed_before, Some(h)))
+        {
             // One terminal event, with the failed step still visible on it.
             attempt.record(
                 "succeeded",
@@ -458,7 +467,7 @@ async fn run(
                 Some(failure.exit_code),
                 Some(&failure.output),
             );
-            return Ok(());
+            return Ok(harness);
         }
         attempt.record(
             "failed",
@@ -469,9 +478,9 @@ async fn run(
         );
         return Err(failure.message);
     }
-    if verified {
+    if let Some(harness) = harness.take_if(|_| verified) {
         attempt.record("succeeded", "verify", None, None, None);
-        return Ok(());
+        return Ok(harness);
     }
     let (reason, detail) = verify_reason(harness.as_ref());
     attempt.record("failed", "verify", Some(reason), None, Some(detail));

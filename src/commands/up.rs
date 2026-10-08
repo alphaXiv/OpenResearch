@@ -2148,14 +2148,12 @@ async fn decode_local_response<T: serde::de::DeserializeOwned>(
                 value
                     .get("error")
                     .and_then(Value::as_str)
-                    .map(str::to_string)
+                    .map(|error| error.trim().to_string())
             })
             .unwrap_or_else(|| String::from_utf8_lossy(&body).trim().to_string());
-        let detail = if detail.is_empty() {
-            format!("HTTP {status}")
-        } else {
-            detail
-        };
+        if detail.is_empty() {
+            return Err(anyhow!("orx up could not {action}: HTTP {status}"));
+        }
         if status.is_client_error() {
             return Err(anyhow!("{detail}"));
         }
@@ -5642,6 +5640,7 @@ async fn send_ssh_connect_error(
                 .into(),
         ))
         .await;
+    close_socket(socket).await;
 }
 
 pub(crate) async fn ssh_connect(
@@ -5881,6 +5880,7 @@ async fn ssh_connect_socket(
         if let Some(test) = ssh_test {
             record_ssh_host_test(&test).await;
         }
+        close_socket(&mut socket).await;
     }
 }
 
@@ -6015,6 +6015,7 @@ async fn project_terminal(
             Ok(status) => {
                 let message = json!({ "type": "exit", "code": status.exit_code() });
                 let _ = socket.send(Message::Text(message.to_string().into())).await;
+                close_socket(&mut socket).await;
             }
             Err(error) => send_terminal_error(&mut socket, anyhow!(error)).await,
         }
@@ -6182,12 +6183,31 @@ async fn command_terminal(
             .send(Message::Text(message.to_string().into()))
             .await
             .is_err()
-            || !shell_after
         {
             return;
         }
-        continue_in_shell(&mut socket, &mut size, Vec::new()).await;
+        if shell_after {
+            continue_in_shell(&mut socket, &mut size, Vec::new()).await;
+        } else {
+            close_socket(&mut socket).await;
+        }
     })
+}
+
+/// WebKit drops the final frame of a socket closed without a close handshake,
+/// so send Close and wait for the client's before dropping it.
+async fn close_socket(socket: &mut WebSocket) {
+    if socket.send(Message::Close(None)).await.is_err() {
+        return;
+    }
+    let _ = tokio::time::timeout(Duration::from_secs(5), async {
+        while let Some(Ok(message)) = socket.recv().await {
+            if matches!(message, Message::Close(_)) {
+                break;
+            }
+        }
+    })
+    .await;
 }
 
 /// Hand the terminal to the user's interactive shell, with any env the command
@@ -6201,7 +6221,9 @@ async fn continue_in_shell(
     let (shell, args) = interactive_shell();
     match spawn_pty(shell, args, env, *size).await {
         Ok(session) => {
-            relay_pty(socket, session, None, size, None).await;
+            if relay_pty(socket, session, None, size, None).await.is_some() {
+                close_socket(socket).await;
+            }
         }
         Err(error) => send_terminal_error(socket, error).await,
     }
@@ -6225,6 +6247,7 @@ async fn send_terminal_error(socket: &mut WebSocket, error: anyhow::Error) {
                 .into(),
         ))
         .await;
+    close_socket(socket).await;
 }
 
 async fn remote_sessions(State(state): State<AppState>) -> Json<Value> {
@@ -6662,6 +6685,51 @@ async fn harnesses_payload(state: &AppState, q: &HarnessQuery) -> Value {
         return out;
     }
     seed_harnesses_locked(state, &mut cache).await
+}
+
+/// Commit one harness's full detection after setup changed it, so the
+/// dashboard need not wait on every sibling's probes to see the result.
+async fn publish_harness(state: &AppState, info: &local::harness::HarnessInfo) {
+    if info.id == "claude-code" {
+        if let Some(probe) = info.auth_observation.as_ref() {
+            state.claude.observe_auth_probe(probe);
+        }
+    }
+    let catalog = claude_catalog_request(std::slice::from_ref(info));
+    let mut cache = state.harnesses.lock().await;
+    // Bumping `at` voids a fill that probed before setup ran (and any cursor
+    // lookup keyed to it); a fresh seed's fill probes after, so it keeps its `at`.
+    let claim = cache.is_some();
+    if !claim {
+        seed_harnesses_locked(state, &mut cache).await;
+    }
+    let Some((at, payload)) = cache.as_mut() else {
+        return;
+    };
+    let Some(slot) = payload["harnesses"]
+        .as_array_mut()
+        .and_then(|all| all.iter_mut().find(|h| h["id"].as_str() == Some(info.id)))
+    else {
+        return;
+    };
+    *slot = json!(info);
+    if claim {
+        *at = std::time::Instant::now();
+    }
+    let cached_at = *at;
+    let lookup_voided = claim
+        && payload["harnesses"].as_array().is_some_and(|all| {
+            all.iter()
+                .any(|h| h["id"] == "cursor" && h["accountLoading"] == true)
+        });
+    if lookup_voided || info.id == "cursor" {
+        spawn_cursor_account_details(state, payload, cached_at);
+    }
+    drop(cache);
+    if let Some(catalog) = catalog {
+        enqueue_claude_catalog(state.clone(), cached_at, catalog);
+    }
+    state.chat.emit_event("harness.catalog", json!({}));
 }
 
 /// The spawn-free snapshot → provisional cache → background fill sequence,
@@ -8092,17 +8160,27 @@ mod tests {
 
     #[tokio::test]
     async fn empty_local_error_reports_the_http_status() {
-        let response = axum::http::Response::builder()
-            .status(StatusCode::BAD_GATEWAY)
-            .body(String::new())
-            .unwrap();
-        let error = decode_local_response::<Value>(response.into(), "start the run")
-            .await
-            .unwrap_err();
-        assert_eq!(
-            error.to_string(),
-            "orx up could not start the run: HTTP 502 Bad Gateway"
-        );
+        for (status, body, expected) in [
+            (StatusCode::BAD_GATEWAY, "", "HTTP 502 Bad Gateway"),
+            (StatusCode::NOT_FOUND, "", "HTTP 404 Not Found"),
+            (
+                StatusCode::BAD_REQUEST,
+                r#"{"error":""}"#,
+                "HTTP 400 Bad Request",
+            ),
+        ] {
+            let response = axum::http::Response::builder()
+                .status(status)
+                .body(body.to_string())
+                .unwrap();
+            let error = decode_local_response::<Value>(response.into(), "start the run")
+                .await
+                .unwrap_err();
+            assert_eq!(
+                error.to_string(),
+                format!("orx up could not start the run: {expected}")
+            );
+        }
     }
 
     #[test]
