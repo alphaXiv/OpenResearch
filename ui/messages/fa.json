@@ -1294,5 +1294,12 @@
   "settings_cross_harness_vendor_varies": "به مدل بستگی دارد",
   "settings_cross_harness_vendors_ready": "ارائه‌دهندگان آماده: {vendors}",
   "settings_cross_harness_needs_two": "دست‌کم دو هارنس از ارائه‌دهندگان مختلف، مثلاً Claude Code و Codex، راه‌اندازی کنید تا بازبینی از خانوادهٔ مدل دیگری انجام شود.",
-  "settings_cross_harness_use": "استفاده از {harness} برای بازبینی میان‌هارنسی"
+  "settings_cross_harness_use": "استفاده از {harness} برای بازبینی میان‌هارنسی",
+  "settings_failover_title": "تعویض harness هنگام رسیدن به سقف استفاده",
+  "settings_failover_description": "وقتی harness یک گفتگو سهمیهٔ استفاده‌اش تمام شود یا به سقف نرخ برسد، نوبت روی harness آمادهٔ بعدی به همین ترتیب ادامه می‌یابد و گفتگوی تاکنون به‌عنوان زمینه منتقل می‌شود.",
+  "settings_failover_order": "ترتیب جایگزین‌ها",
+  "settings_failover_move_up": "انتقال {name} به بالا",
+  "settings_failover_move_down": "انتقال {name} به پایین",
+  "settings_failover_include": "استفاده از {name} به‌عنوان جایگزین",
+  "activity_switched_harness": "پس از رسیدن به سقف استفاده، از {from} به {to} تغییر کرد"
 }

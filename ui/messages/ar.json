@@ -1294,5 +1294,12 @@
   "settings_cross_harness_vendor_varies": "يعتمد على النموذج",
   "settings_cross_harness_vendors_ready": "المزوّدون الجاهزون: {vendors}",
   "settings_cross_harness_needs_two": "اضبط أدوات من مزوّدَين اثنين على الأقل، مثل Claude Code وCodex، حتى تأتي المراجعات من عائلة نماذج مختلفة.",
-  "settings_cross_harness_use": "استخدام {harness} في المراجعة عبر الأدوات"
+  "settings_cross_harness_use": "استخدام {harness} في المراجعة عبر الأدوات",
+  "settings_failover_title": "تبديل الـ harness عند بلوغ حدود الاستخدام",
+  "settings_failover_description": "عندما ينفد استخدام الـ harness في محادثة أو يبلغ حد المعدل، يستمر الدور على الـ harness الجاهز التالي بهذا الترتيب، مع المحادثة حتى الآن كسياق.",
+  "settings_failover_order": "ترتيب البدائل",
+  "settings_failover_move_up": "نقل {name} لأعلى",
+  "settings_failover_move_down": "نقل {name} لأسفل",
+  "settings_failover_include": "استخدام {name} كبديل",
+  "activity_switched_harness": "تم التبديل من {from} إلى {to} بعد بلوغ حد الاستخدام"
 }

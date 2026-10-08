@@ -1294,5 +1294,12 @@
   "settings_cross_harness_vendor_varies": "मॉडल पर निर्भर",
   "settings_cross_harness_vendors_ready": "तैयार विक्रेता: {vendors}",
   "settings_cross_harness_needs_two": "कम से कम दो विक्रेताओं के harness सेट करें, जैसे Claude Code और Codex, ताकि समीक्षा किसी दूसरे मॉडल परिवार से हो।",
-  "settings_cross_harness_use": "क्रॉस-हार्नेस समीक्षा के लिए {harness} का उपयोग करें"
+  "settings_cross_harness_use": "क्रॉस-हार्नेस समीक्षा के लिए {harness} का उपयोग करें",
+  "settings_failover_title": "उपयोग सीमा पर harness बदलें",
+  "settings_failover_description": "जब किसी चैट का harness उपयोग सीमा या रेट लिमिट तक पहुँच जाए, तो टर्न इसी क्रम में अगले तैयार harness पर जारी रहता है, और अब तक की चैट संदर्भ के रूप में जाती है।",
+  "settings_failover_order": "फ़ॉलबैक क्रम",
+  "settings_failover_move_up": "{name} को ऊपर ले जाएँ",
+  "settings_failover_move_down": "{name} को नीचे ले जाएँ",
+  "settings_failover_include": "{name} को फ़ॉलबैक के रूप में उपयोग करें",
+  "activity_switched_harness": "उपयोग सीमा के बाद {from} से {to} पर बदला गया"
 }

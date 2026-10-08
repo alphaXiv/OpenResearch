@@ -1294,5 +1294,12 @@
   "settings_cross_harness_vendor_varies": "Depends on the model",
   "settings_cross_harness_vendors_ready": "Ready vendors: {vendors}",
   "settings_cross_harness_needs_two": "Set up harnesses from at least two vendors, for example Claude Code and Codex, so reviews come from a different model family.",
-  "settings_cross_harness_use": "Use {harness} for cross-harness review"
+  "settings_cross_harness_use": "Use {harness} for cross-harness review",
+  "settings_failover_title": "Switch harness on usage limits",
+  "settings_failover_description": "When a chat's harness runs out of usage or hits a rate limit, the turn continues on the next ready harness in this order, with the chat so far as context.",
+  "settings_failover_order": "Fallback order",
+  "settings_failover_move_up": "Move {name} up",
+  "settings_failover_move_down": "Move {name} down",
+  "settings_failover_include": "Use {name} as a fallback",
+  "activity_switched_harness": "Switched from {from} to {to} after a usage limit"
 }

@@ -1294,5 +1294,12 @@
   "settings_cross_harness_vendor_varies": "모델에 따라 다름",
   "settings_cross_harness_vendors_ready": "준비된 공급업체: {vendors}",
   "settings_cross_harness_needs_two": "검토가 다른 모델 계열에서 이루어지도록 Claude Code와 Codex처럼 최소 두 공급업체의 하네스를 설정하세요.",
-  "settings_cross_harness_use": "교차 하네스 검토에 {harness} 사용"
+  "settings_cross_harness_use": "교차 하네스 검토에 {harness} 사용",
+  "settings_failover_title": "사용 한도에 도달하면 harness 전환",
+  "settings_failover_description": "채팅의 harness가 사용량을 다 쓰거나 속도 제한에 걸리면, 지금까지의 채팅을 맥락으로 삼아 이 순서대로 다음 준비된 harness에서 턴을 이어갑니다.",
+  "settings_failover_order": "대체 순서",
+  "settings_failover_move_up": "{name} 위로 이동",
+  "settings_failover_move_down": "{name} 아래로 이동",
+  "settings_failover_include": "{name}을(를) 대체 harness로 사용",
+  "activity_switched_harness": "사용 한도에 도달해 {from}에서 {to}(으)로 전환했습니다"
 }
