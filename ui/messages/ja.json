@@ -251,7 +251,7 @@
   "onboarding_choose_a_coding_agent_to_continue": "続行するにはコーディングエージェントを選択してください。",
   "onboarding_choose_one_or_more": "1 つ以上選択してください。",
   "onboarding_continue": "続行",
-  "onboarding_detecting_claude_code_codex_open_code": "Claude Code、Codex、OpenCode、Cursor、Antigravity を検出中…",
+  "onboarding_detecting_claude_code_codex_open_code": "Claude Code、Codex、OpenCode、Cursor、Antigravity、Kimi Code、MiniMax Code、ZCode を検出中…",
   "onboarding_e_g_i_work_on_sample_efficient_rl": "例: 報酬モデルを使わない手法を中心に、LLM の事後学習に向けたサンプル効率のよい強化学習を研究しています。",
   "onboarding_get_started": "始める",
   "onboarding_git_is_required_for_local_experiments_install_git": "ローカルでの実験には Git が必要です。Git をインストールして再確認してください。",
