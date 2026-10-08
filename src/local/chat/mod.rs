@@ -7024,7 +7024,7 @@ pub struct TurnCtx {
     orx_retry_count: u32,
     terminal_error: Option<(String, String)>,
     pub session_id: String,
-    /// Started by `orx agent spawn`: no user follows up, so this turn is its whole task.
+    /// The session was started by `orx agent spawn` (true for every turn in it).
     pub spawned_helper: bool,
     pub harness: String,
     pub native_session_id: Option<String>,
@@ -8319,9 +8319,15 @@ fn spawn_outcome(store: &Store, session: &StoredChatSession) -> Result<SpawnOutc
         {
             return Ok(SpawnOutcome::Interrupted);
         }
+        // A turn that resumed after background work also holds its earlier
+        // progress replies; the final answer is the report.
+        let is_final = |part: &&WirePart| part.phase == Some(MessagePhase::FinalAnswer);
+        let has_final = parts
+            .iter()
+            .any(|part| part.kind == "text" && is_final(&part));
         let text = parts
             .iter()
-            .filter(|part| part.kind == "text")
+            .filter(|part| part.kind == "text" && (!has_final || is_final(part)))
             .filter_map(|part| part.text.as_deref())
             .map(str::trim)
             .filter(|text| !text.is_empty())
@@ -10631,6 +10637,27 @@ with other project runs using `orx runs p1` and inspect the file located by `orx
             panic!("an error part must not read as a silent turn");
         };
         assert!(error.contains("not supported"), "{error}");
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_resumed_helper_reports_its_final_answer_not_its_progress() {
+        let (store, dir) = temp_store("spawn-final");
+        session(&store, "child");
+        let mut progress = WirePart::text("p", "x".repeat(SPAWN_REPORT_LIMIT));
+        progress.phase = Some(MessagePhase::Commentary);
+        let mut answer = WirePart::text("a", "the report");
+        answer.phase = Some(MessagePhase::FinalAnswer);
+        let mut message = assistant_message("a1", None, "");
+        message.parts_json = serde_json::to_string(&[progress, answer]).unwrap();
+        store.upsert_chat_message(&message).unwrap();
+
+        let child = store.get_chat_session("child").unwrap().unwrap();
+        let SpawnOutcome::Reply(reply) = spawn_outcome(&store, &child).unwrap() else {
+            panic!("expected a reply");
+        };
+        assert_eq!(reply, "the report");
 
         let _ = std::fs::remove_dir_all(&dir);
     }
