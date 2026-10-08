@@ -9,7 +9,8 @@ whose SDK sends model operations remotely.
 
 ```sh
 orx exp status <expId>                 # branch, parent, run command, latest run + commit
-orx compute                            # browse GPU offers across all providers
+orx compute prices --json              # credit left and GPU prices on every connected provider
+orx compute                            # browse OpenResearch marketplace GPU offers
 orx compute --gpu H100_SXM --count 1   # filter GPU offers
 orx compute --cpu                      # browse CPU-only offers
 orx exp run <expId>                    # launch on the configured default
@@ -73,14 +74,24 @@ signal to switch.
 
 When the playbook says compute routing is on, pick the backend for each run
 yourself, but only among the backends it lists. Run `orx compute status --json`
-for which of them are connected and ready, and `orx compute` for current GPU
-offers and prices.
+for which of them are connected and ready, and `orx compute prices --json` for
+each provider's remaining credit and per-hour GPU prices.
 
 - Fit first: the run's peak GPU memory, GPU count, RAM, and expected duration
   (each backend's guide says how to size it). Then cost: the cheapest ready
-  option that fits, counting a Colab plan's remaining compute units from
-  `orx compute show colab --json`. Then availability: skip a provider that just
-  failed with a capacity error and use the next one.
+  option that fits, by `usdPerHour` times the expected hours. Then
+  availability: skip an offer with `available: false`, and a provider that
+  just failed with a capacity error, and use the next one.
+- Never start a run that its provider's credit cannot finish. On a `credits`
+  provider (Colab), an offer's `runwayHours` is how long the balance lasts at
+  that rate; when the expected duration plus a 25% margin exceeds it, and the
+  run does not checkpoint and resume, choose another provider or a cheaper
+  flavor. Subtract runs already in flight on that provider
+  (`balance.burningPerHour`). `usage` providers bill afterwards and do not run
+  out mid-run; `own` providers (local, ssh, slurm, k8s, ray) cost nothing per
+  hour but are limited by their hardware and quota.
+- `estimated: true` marks a published or third-party price, not the account's
+  own rate. Re-read with `--fresh` before a long or expensive launch.
 - Smoke-test and debug on the cheapest option (`local`, Colab `cpu`/`t4`)
   before spending on large GPUs.
 - Independent experiments may run at the same time on different providers to

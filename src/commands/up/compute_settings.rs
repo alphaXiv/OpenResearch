@@ -1017,6 +1017,18 @@ pub(super) async fn set_compute_default(Json(req): Json<SetComputeDefaultReq>) -
     Ok(Json(payload))
 }
 
+#[derive(Deserialize)]
+pub(super) struct ComputePricesQuery {
+    /// Skip the caches so Refresh shows current balances.
+    fresh: Option<bool>,
+}
+
+/// Every provider's GPU prices and remaining credit, cheapest offers first.
+pub(super) async fn compute_prices(Query(query): Query<ComputePricesQuery>) -> ApiResult {
+    let overview = crate::jobs::provider_prices::overview(query.fresh.unwrap_or(false)).await;
+    Ok(Json(json!(overview)))
+}
+
 /// The "This machine" row's expanded detail: detected hardware. Subprocess
 /// probes (hostname, sysctl, nvidia-smi) — blocking, so spawned.
 pub(super) async fn local_machine_settings() -> ApiResult {

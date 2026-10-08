@@ -714,6 +714,7 @@ fn router(state: AppState, remote_auth: Option<RemoteAuth>) -> Router {
         .route("/api/settings/ray/preflight", post(ray_preflight))
         .route("/api/settings/compute", get(compute_settings))
         .route("/api/settings/compute/default", post(set_compute_default))
+        .route("/api/settings/compute/prices", get(compute_prices))
         .route("/api/settings/local", get(local_machine_settings))
         .route("/api/settings/colab", get(colab_settings))
         .route(

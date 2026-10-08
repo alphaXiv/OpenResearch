@@ -22,6 +22,7 @@ import {
   getColabSettingsQuery,
   getCrossHarnessSettingsQuery,
   getComputeRoutingSettingsQuery,
+  getComputePricesQuery,
   getOpenResearchSettingsQuery,
   getLocalMachineQuery,
   getComputeSettingsQuery,
@@ -107,6 +108,7 @@ import {
   type ColabSettings,
   type ColabAccount,
   getColabSettings,
+  getComputePrices,
   stopColabRuntime,
   type ModalSettings,
   type RayPreflight,
@@ -710,6 +712,178 @@ function ComputeRoutingCard({ targets }: { targets: ComputeTargetSummary[] }) {
         </ul>
       )}
       {enabled && usable.length < 2 && <p className="mt-3 mb-0 text-sm text-subtext">{m.settings_compute_routing_needs_two()}</p>}
+      {error && <div className="error">{error}</div>}
+    </div>
+  );
+}
+
+const fmtUsd = (value: number) =>
+  value.toLocaleString(undefined, { style: "currency", currency: "USD", minimumFractionDigits: 2, maximumFractionDigits: 2 });
+
+/** How many of the cheapest GPU offers show before "Show all". */
+const PRICE_ROWS = 8;
+
+/** Remaining credit and GPU prices on every connected provider: the same
+ * numbers agents read with `orx compute prices` before choosing a backend. */
+function ProviderPricesCard() {
+  const options = getComputePricesQuery();
+  const query = useQuery(options);
+  const [refreshing, setRefreshing] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const [showAll, setShowAll] = useState(false);
+  const providers = (query.data?.providers ?? []).filter((provider) => provider.configured);
+  const paid = providers.filter((provider) => provider.billing === "credits" || provider.billing === "usage");
+  const own = providers.filter((provider) => provider.billing === "own");
+  const offers = paid
+    .flatMap((provider) =>
+      provider.offers
+        .filter((offer) => offer.gpu && offer.usdPerHour != null)
+        .map((offer) => ({ provider: provider.id, offer })),
+    )
+    .sort((a, b) => (a.offer.usdPerHour ?? 0) - (b.offer.usdPerHour ?? 0));
+  const shown = showAll ? offers : offers.slice(0, PRICE_ROWS);
+  const anyRunway = offers.some(({ offer }) => offer.runwayHours != null);
+
+  async function refresh() {
+    if (refreshing) return;
+    setRefreshing(true);
+    setError(null);
+    try {
+      queryClient.setQueryData(options.queryKey, await getComputePrices(undefined, true));
+    } catch (err) {
+      setError(err instanceof Error ? err.message : String(err));
+    } finally {
+      setRefreshing(false);
+    }
+  }
+
+  return (
+    <div className={cn(SETTINGS_CARD_CLASS_NAME, "provider-prices mb-8")}>
+      <div className="flex items-start justify-between gap-6">
+        <div>
+          <div className="text-base font-medium">{m.settings_prices_title()}</div>
+          <p className="mt-[3px] mb-0 text-sm leading-relaxed text-text">{m.settings_prices_description()}</p>
+        </div>
+        <Button size="small" onClick={() => void refresh()} disabled={query.isPending || refreshing}>
+          <RefreshCw size={12} className={refreshing ? "animate-[spin_0.9s_linear_infinite]" : ""} /> {m.settings_page_refresh()}
+        </Button>
+      </div>
+      {query.isPending ? (
+        <LoadingRow>
+          <Spinner /> {m.common_checking()}
+        </LoadingRow>
+      ) : (
+        <>
+          {paid.length > 0 && (
+            <div className="mt-4 grid grid-cols-1 gap-3 sm:grid-cols-2 lg:grid-cols-3">
+              {paid.map((provider) => (
+                <div key={provider.id} className="rounded-lg border border-border bg-surface px-4 py-3">
+                  <div className="flex items-center gap-2 text-sm text-subtext">
+                    <BackendLogo kind={TARGET_KIND[provider.id]} size={16} />
+                    {TARGET_LABELS[provider.id]()}
+                  </div>
+                  <div className="mt-1 text-xl font-semibold tabular-nums text-text">
+                    {provider.balance
+                      ? `${fmtUnits(provider.balance.amount)} ${provider.balance.unit}`
+                      : provider.spend?.meteredUsd != null
+                        ? m.settings_prices_used_month({ amount: fmtUsd(provider.spend.meteredUsd) })
+                        : provider.billing === "credits"
+                          ? m.settings_prices_balance_unknown()
+                          : m.settings_prices_pay_as_you_go()}
+                  </div>
+                  {provider.balance?.usd != null && (
+                    <div className="mt-0.5 text-sm text-subtext tabular-nums">≈ {fmtUsd(provider.balance.usd)}</div>
+                  )}
+                  {provider.spend && (
+                    <div className="mt-0.5 text-sm text-subtext tabular-nums">
+                      {provider.spend.billedUsd != null && m.settings_prices_billed({ amount: fmtUsd(provider.spend.billedUsd) })}
+                      {provider.spend.creditsUsd != null && provider.spend.creditsUsd > 0 && (
+                        <> · {m.settings_prices_credits_applied({ amount: fmtUsd(provider.spend.creditsUsd) })}</>
+                      )}
+                    </div>
+                  )}
+                  {provider.error ? (
+                    <div className="mt-1 text-sm text-subtext">{provider.error}</div>
+                  ) : provider.note && (
+                    <div className="mt-1 text-sm leading-snug text-subtext">{provider.note}</div>
+                  )}
+                </div>
+              ))}
+            </div>
+          )}
+          {offers.length > 0 ? (
+            <div className="mt-4 overflow-x-auto">
+              <table className="provider-offers w-full border-collapse text-sm">
+                <thead>
+                  <tr className="text-subtext [&_th]:border-b [&_th]:border-border [&_th]:pb-1.5 [&_th]:font-medium">
+                    <th className="text-start">{m.settings_prices_col_gpu()}</th>
+                    <th className="text-start">{m.settings_prices_col_provider()}</th>
+                    <th className="text-end">{m.settings_colab_col_memory()}</th>
+                    <th className="text-end">{m.settings_prices_col_price()}</th>
+                    {anyRunway && <th className="text-end">{m.settings_colab_col_hours()}</th>}
+                    <th className="text-end">{m.settings_prices_col_flavor()}</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {shown.map(({ provider, offer }) => (
+                    <tr
+                      key={`${provider}:${offer.flavor}`}
+                      className={cn("[&_td]:border-b [&_td]:border-border [&_td]:py-1.5", offer.available === false && "text-subtext")}
+                    >
+                      <td className="font-medium">
+                        {offer.gpu}
+                        {offer.gpuCount > 1 && <span className="ms-1 text-subtext">×{offer.gpuCount}</span>}
+                      </td>
+                      <td>
+                        <span className="inline-flex items-center gap-1.5">
+                          <BackendLogo kind={TARGET_KIND[provider]} size={14} />
+                          {TARGET_LABELS[provider]()}
+                          {offer.host && <span className="text-subtext">· {offer.host}</span>}
+                        </span>
+                      </td>
+                      <td className="text-end tabular-nums">
+                        {offer.vramGb != null ? m.settings_colab_memory_gb({ gb: fmtNumber(offer.vramGb) }) : "—"}
+                      </td>
+                      <td className="text-end tabular-nums" title={offer.estimated ? m.settings_prices_estimated_note() : undefined}>
+                        {offer.estimated ? "≈ " : ""}
+                        {m.settings_prices_per_hour({ price: fmtUsd(offer.usdPerHour ?? 0) })}
+                        {offer.unitsPerHour != null && (
+                          <span className="ms-1 text-subtext">({fmtUnits(offer.unitsPerHour)} CU)</span>
+                        )}
+                      </td>
+                      {anyRunway && (
+                        <td className="text-end tabular-nums">
+                          {offer.available === false
+                            ? m.settings_prices_not_on_plan()
+                            : offer.runwayHours != null
+                              ? m.settings_colab_hours_value({ hours: offer.runwayHours.toLocaleString(undefined, { maximumFractionDigits: 1 }) })
+                              : "—"}
+                        </td>
+                      )}
+                      <td className="text-end"><code>{offer.flavor}</code></td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+              <div className="mt-2 flex flex-wrap items-center gap-3">
+                <p className="m-0 flex-1 text-sm text-subtext">{m.settings_prices_estimated_note()}</p>
+                {offers.length > PRICE_ROWS && (
+                  <Button size="small" variant="ghost" onClick={() => setShowAll(!showAll)}>
+                    {showAll ? m.settings_prices_show_less() : m.settings_prices_show_all({ count: fmtNumber(offers.length) })}
+                  </Button>
+                )}
+              </div>
+            </div>
+          ) : (
+            <p className="mt-3 mb-0 text-sm text-subtext">{m.settings_prices_none()}</p>
+          )}
+          {own.length > 0 && (
+            <p className="mt-3 mb-0 text-sm text-subtext">
+              {m.settings_prices_own_hardware({ backends: own.map((provider) => TARGET_LABELS[provider.id]()).join(", ") })}
+            </p>
+          )}
+        </>
+      )}
       {error && <div className="error">{error}</div>}
     </div>
   );
@@ -2523,6 +2697,7 @@ function ComputeTab({
             onSaved={apply}
           />
           <ComputeRoutingCard targets={configuredTargets} />
+          <ProviderPricesCard />
           <section className="mb-8">
             <h2 className="mt-0 mx-0 mb-2 text-lg">{m.settings_page_ready_to_use()}</h2>
             <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-3">
