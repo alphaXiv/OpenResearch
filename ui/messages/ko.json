@@ -1290,5 +1290,8 @@
   "settings_colab_memory_gb": "{gb} GB",
   "settings_colab_flavor_hint": "flavor를 지정하지 않으면 {flavor}을(를) 사용합니다. 에이전트가 작업에 맞춰 GPU를 고르며, auto:<GB>는 그만큼의 메모리를 가진 가장 작은 GPU를 선택합니다.",
   "settings_cross_harness_title": "교차 하네스 검토",
-  "settings_cross_harness_description": "에이전트가 Codex나 Antigravity 같은 다른 회사 하네스의 도우미로 아이디어, 결과, 논문 초안을 검토해 결론이 한 모델 계열에 치우치지 않게 합니다."
+  "settings_cross_harness_description": "에이전트가 Codex나 Antigravity 같은 다른 회사 하네스의 도우미로 아이디어, 결과, 논문 초안을 검토해 결론이 한 모델 계열에 치우치지 않게 합니다.",
+  "settings_cross_harness_vendor_varies": "모델에 따라 다름",
+  "settings_cross_harness_vendors_ready": "준비된 공급업체: {vendors}",
+  "settings_cross_harness_needs_two": "검토가 다른 모델 계열에서 이루어지도록 Claude Code와 Codex처럼 최소 두 공급업체의 하네스를 설정하세요."
 }

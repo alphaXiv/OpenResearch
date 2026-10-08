@@ -1290,5 +1290,8 @@
   "settings_colab_memory_gb": "{gb} GB",
   "settings_colab_flavor_hint": "जब तक कोई और flavor न चुना जाए, रन {flavor} का उपयोग करते हैं। एजेंट काम के अनुसार GPU चुनता है, और auto:<GB> उतनी मेमोरी वाला सबसे छोटा GPU चुनता है।",
   "settings_cross_harness_title": "क्रॉस-हार्नेस समीक्षा",
-  "settings_cross_harness_description": "एजेंट विचारों, परिणामों और पेपर ड्राफ़्ट की जाँच दूसरे विक्रेताओं के हार्नेस, जैसे Codex या Antigravity, पर चल रहे सहायकों से करवाते हैं, ताकि निष्कर्ष किसी एक मॉडल परिवार पर निर्भर न रहें।"
+  "settings_cross_harness_description": "एजेंट विचारों, परिणामों और पेपर ड्राफ़्ट की जाँच दूसरे विक्रेताओं के हार्नेस, जैसे Codex या Antigravity, पर चल रहे सहायकों से करवाते हैं, ताकि निष्कर्ष किसी एक मॉडल परिवार पर निर्भर न रहें।",
+  "settings_cross_harness_vendor_varies": "मॉडल पर निर्भर",
+  "settings_cross_harness_vendors_ready": "तैयार विक्रेता: {vendors}",
+  "settings_cross_harness_needs_two": "कम से कम दो विक्रेताओं के harness सेट करें, जैसे Claude Code और Codex, ताकि समीक्षा किसी दूसरे मॉडल परिवार से हो।"
 }

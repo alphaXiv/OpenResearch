@@ -1290,5 +1290,8 @@
   "settings_colab_memory_gb": "{gb} GB",
   "settings_colab_flavor_hint": "اجراها از {flavor} استفاده می‌کنند مگر اینکه نوع دیگری انتخاب شود. عامل GPU را متناسب با کار انتخاب می‌کند و auto:<GB> کوچک‌ترین GPU با این مقدار حافظه را برمی‌گزیند.",
   "settings_cross_harness_title": "بازبینی میان چند harness",
-  "settings_cross_harness_description": "عامل‌ها ایده‌ها، نتایج و پیش‌نویس مقاله را با دستیارانی روی harnessهای شرکت‌های دیگر مانند Codex یا Antigravity بررسی می‌کنند تا یافته‌ها به یک خانواده مدل وابسته نباشد."
+  "settings_cross_harness_description": "عامل‌ها ایده‌ها، نتایج و پیش‌نویس مقاله را با دستیارانی روی harnessهای شرکت‌های دیگر مانند Codex یا Antigravity بررسی می‌کنند تا یافته‌ها به یک خانواده مدل وابسته نباشد.",
+  "settings_cross_harness_vendor_varies": "به مدل بستگی دارد",
+  "settings_cross_harness_vendors_ready": "ارائه‌دهندگان آماده: {vendors}",
+  "settings_cross_harness_needs_two": "دست‌کم دو هارنس از ارائه‌دهندگان مختلف، مثلاً Claude Code و Codex، راه‌اندازی کنید تا بازبینی از خانوادهٔ مدل دیگری انجام شود."
 }

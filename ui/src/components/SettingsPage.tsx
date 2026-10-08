@@ -528,17 +528,39 @@ function HarnessesTab({ remote }: { remote: boolean }) {
           {h.id === "opencode" && <LocalModelSetup installed={h.installed} />}
         </div>
       )}
-      <CrossHarnessCard />
+      <CrossHarnessCard harnesses={harnesses} />
     </>
   );
 }
 
-function CrossHarnessCard() {
+/** The model vendor behind a harness; `null` when it follows the chosen model. */
+function harnessVendor(id: HarnessId): string | null {
+  switch (id) {
+    case "claude-code":
+      return "Anthropic";
+    case "codex":
+      return "OpenAI";
+    case "antigravity":
+      return "Google";
+    default:
+      return null;
+  }
+}
+
+function CrossHarnessCard({ harnesses }: { harnesses: Harness[] | null }) {
   const options = getCrossHarnessSettingsQuery();
   const query = useQuery(options);
   const mutation = useMutation({ mutationFn: setCrossHarnessSettings });
   const [error, setError] = useState<string | null>(null);
   const enabled = query.data?.enabled ?? false;
+  const readyVendors = [
+    ...new Set(
+      (harnesses ?? [])
+        .filter((harness) => harness.agentReady)
+        .map((harness) => harnessVendor(harness.id))
+        .filter((vendor): vendor is string => vendor !== null),
+    ),
+  ];
 
   async function toggle() {
     setError(null);
@@ -565,6 +587,29 @@ function CrossHarnessCard() {
           onClick={() => void toggle()}
         />
       </div>
+      {harnesses && (
+        <>
+          <ul className="mt-3 mb-0 flex flex-col gap-2 p-0 list-none">
+            {harnesses.map((harness) => {
+              const status = harnessStatus(harness);
+              return (
+                <li key={harness.id} className="flex items-center gap-2.5 text-sm">
+                  <HarnessLogo harness={harness.id} />
+                  <span className="font-medium">{harness.name}</span>
+                  <span className="text-subtext">{harnessVendor(harness.id) ?? m.settings_cross_harness_vendor_varies()}</span>
+                  <span className="flex-1" />
+                  <Badge variant={status.variant}>{status.label}</Badge>
+                </li>
+              );
+            })}
+          </ul>
+          <p className="mt-3 mb-0 text-sm text-subtext">
+            {readyVendors.length >= 2
+              ? m.settings_cross_harness_vendors_ready({ vendors: readyVendors.join(", ") })
+              : m.settings_cross_harness_needs_two()}
+          </p>
+        </>
+      )}
       {error && <div className="error">{error}</div>}
     </div>
   );
