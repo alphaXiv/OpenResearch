@@ -133,16 +133,15 @@ fn has_command(harness: &str, action: Action) -> bool {
     }
 }
 
-/// The sign-in URL `zcode login --no-browser` prints after "Open this URL".
+/// The sign-in URL `zcode login --no-browser` prints after "Open this URL",
+/// once its end is in the output: the terminal delivers it in chunks, and a
+/// URL cut at a chunk boundary must not be opened.
 fn zcode_login_url(output: &str) -> Option<&str> {
     let (_, rest) = output.split_once("Open this URL")?;
     let start = rest.find("https://")?;
     let url = &rest[start..];
-    Some(
-        &url[..url
-            .find(|c: char| c.is_whitespace() || c == '\u{1b}')
-            .unwrap_or(url.len())],
-    )
+    let end = url.find(|c: char| c.is_whitespace() || c == '\u{1b}')?;
+    Some(&url[..end])
 }
 
 fn update_command(harness: &str) -> Option<(&'static str, Vec<String>)> {
@@ -976,6 +975,13 @@ mod tests {
         assert_eq!(zcode_login_url(&colored), Some(url));
         let tail = format!("Open this URL to sign in:\n{url}\u{1b}[0m\n");
         assert_eq!(zcode_login_url(&tail), Some(url));
+        // Output arrives in chunks: a URL with no end yet is not opened.
+        let mut chunks = format!("Open this URL to sign in:\r\n{}", &url[..40]);
+        assert_eq!(zcode_login_url(&chunks), None);
+        chunks.push_str(&url[40..]);
+        assert_eq!(zcode_login_url(&chunks), None);
+        chunks.push_str("\r\n");
+        assert_eq!(zcode_login_url(&chunks), Some(url));
         assert_eq!(zcode_login_url("Signing in...\r\n"), None);
         assert_eq!(zcode_login_url("see https://example.com first"), None);
         assert_eq!(

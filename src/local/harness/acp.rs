@@ -514,6 +514,10 @@ async fn drive(
             continue;
         }
         let (method, params) = setup.remove(0);
+        let config_id = params
+            .get("configId")
+            .and_then(Value::as_str)
+            .map(str::to_string);
         match call(ctx, conn, inbound, &mut state, method, params).await? {
             Ok(result) => {
                 if let Some(updated) = result.get("configOptions").filter(|o| o.is_array()) {
@@ -521,7 +525,9 @@ async fn drive(
                 }
             }
             Err(error) => {
-                if let Some(error) = setup_failure(agent, method, &error) {
+                if let Some(error) =
+                    setup_failure(agent, &settings, method, config_id.as_deref(), &error)
+                {
                     ctx.mark_delivery(DeliveryState::NotSent);
                     return Err(error);
                 }
@@ -580,12 +586,21 @@ async fn drive(
     Ok(())
 }
 
-/// A setup call whose failure must stop the turn. A refused mode switch would
-/// run the prompt in the session's current mode, which can allow more than the
-/// composer chose (a resumed session stays in its last turn's mode); a refused
-/// model or thinking level only logs.
-fn setup_failure(agent: &AcpAgent, method: &str, error: &RpcError) -> Option<crate::error::Error> {
-    (method == "session/set_mode").then(|| {
+/// A setup call whose failure must stop the turn: the session mode, or a
+/// config option the agent's settings choose (MiniMax's `permissionMode`).
+/// Either refused would run the prompt with the session's current permissions,
+/// which can allow more than the composer chose (a resumed session stays in its
+/// last turn's mode). A refused model or thinking level only logs.
+fn setup_failure(
+    agent: &AcpAgent,
+    settings: &AcpSettings,
+    method: &str,
+    config_id: Option<&str>,
+    error: &RpcError,
+) -> Option<crate::error::Error> {
+    let chosen_option = method == "session/set_config_option"
+        && config_id.is_some_and(|id| settings.config.iter().any(|(option, _)| *option == id));
+    (method == "session/set_mode" || chosen_option).then(|| {
         anyhow!(
             "{} could not switch to the chosen mode, so the message was not sent: {error}",
             agent.display
@@ -1250,19 +1265,35 @@ pub(crate) mod tests {
 
     #[test]
     fn only_a_failed_mode_switch_stops_the_turn() {
-        let agent = &super::super::kimi::AGENT;
         let error = RpcError {
             code: -32602,
             message: "Invalid params".into(),
         };
-        let stopped = setup_failure(agent, "session/set_mode", &error)
+        let kimi = &super::super::kimi::AGENT;
+        let settings = (kimi.settings)(Some(PermissionMode::Ask), false);
+        let stopped = setup_failure(kimi, &settings, "session/set_mode", None, &error)
             .expect("a refused mode switch stops the turn")
             .to_string();
         assert!(
             stopped.starts_with("Kimi Code could not switch to the chosen mode"),
             "{stopped}"
         );
-        assert!(setup_failure(agent, "session/set_config_option", &error).is_none());
+        // MiniMax sets its permissions with a config option: refused, it stops the turn.
+        let minimax = &super::super::minimax::AGENT;
+        let settings = (minimax.settings)(Some(PermissionMode::Ask), false);
+        let set_option = "session/set_config_option";
+        assert!(setup_failure(
+            minimax,
+            &settings,
+            set_option,
+            Some("permissionMode"),
+            &error
+        )
+        .is_some());
+        // A refused model or thinking level only logs.
+        for id in ["model", "thinking"] {
+            assert!(setup_failure(minimax, &settings, set_option, Some(id), &error).is_none());
+        }
     }
 
     /// Lets the agent's update and the response that follows it arrive

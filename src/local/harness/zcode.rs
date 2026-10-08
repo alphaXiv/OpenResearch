@@ -377,6 +377,19 @@ fn catalog(home: &Path, builtin: Option<&Path>) -> Vec<ModelInfo> {
         .collect()
 }
 
+/// Held by a new chat from writing ZCode's default model until its runtime has
+/// read it, so chats started together do not run on each other's model.
+static MODEL_SELECTION: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
+/// Whether `event` shows the runtime has settled on its model (or ended), so
+/// the shared default model may change again.
+fn model_settled(event: &Value) -> bool {
+    matches!(
+        event.get("type").and_then(Value::as_str),
+        Some("turn.completed" | "turn.failed")
+    ) || event.pointer("/payload/modelId").is_some()
+}
+
 /// Make `provider/model` ZCode's default model, which is the only model
 /// choice its print mode reads. The default is shared with the ZCode app.
 fn select_model(home: &Path, model: &str) -> Result<()> {
@@ -401,7 +414,7 @@ fn select_model(home: &Path, model: &str) -> Result<()> {
         return Ok(());
     }
     settings.insert("defaultModelSelection".into(), selection);
-    let tmp = path.with_extension("json.orx-tmp");
+    let tmp = path.with_extension(format!("json.orx-{}", uuid::Uuid::new_v4()));
     std::fs::create_dir_all(path.parent().unwrap())?;
     std::fs::write(&tmp, serde_json::to_vec_pretty(&config)?)?;
     std::fs::rename(&tmp, &path)?;
@@ -661,6 +674,10 @@ async fn run_turn(ctx: &mut TurnCtx) -> Result<()> {
 
     let resume = ctx.native_session_id.clone();
     // A new session starts on ZCode's default model; a resumed one keeps its own.
+    let mut selection = match resume {
+        None => Some(MODEL_SELECTION.lock().await),
+        Some(_) => None,
+    };
     if let (None, Some(model), Some(home)) = (&resume, ctx.model.as_deref(), zcode_home()) {
         select_model(&home, model)
             .map_err(|error| anyhow!("Could not select {model} in ZCode: {error}"))?;
@@ -716,6 +733,9 @@ async fn run_turn(ctx: &mut TurnCtx) -> Result<()> {
                     continue;
                 };
                 ctx.mark_delivery(DeliveryState::Accepted);
+                if selection.is_some() && model_settled(&event) {
+                    selection = None;
+                }
                 apply_event(ctx, &mut state, &event);
                 if let Some(sid) = state.session_id.as_deref() {
                     ctx.set_native_session_id(sid);
@@ -1230,7 +1250,39 @@ mod tests {
             Some(&serde_json::json!("zai-api"))
         );
         assert!(select_model(&dir, "no-provider").is_err());
+        // The write goes through a per-call temp file that does not stay behind.
+        let names: Vec<_> = std::fs::read_dir(&v2)
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
+            .filter(|name| name.starts_with("provider_config"))
+            .collect();
+        assert_eq!(names, vec!["provider_config.json"]);
         let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn the_model_settles_when_the_runtime_reports_it_or_the_turn_ends() {
+        let first_settled = |fixture: &str| {
+            fixture
+                .lines()
+                .filter_map(|line| serde_json::from_str::<Value>(line).ok())
+                .find(model_settled)
+                .and_then(|event| {
+                    event
+                        .get("type")
+                        .and_then(Value::as_str)
+                        .map(str::to_string)
+                })
+        };
+        // Title and turn start come before the runtime has read its model.
+        assert_eq!(
+            first_settled(include_str!("fixtures/zcode_stream_tool.jsonl")).as_deref(),
+            Some("session.updated")
+        );
+        assert_eq!(
+            first_settled(include_str!("fixtures/zcode_stream_no_model.jsonl")).as_deref(),
+            Some("turn.failed")
+        );
     }
 
     #[test]
