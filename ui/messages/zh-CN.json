@@ -1323,5 +1323,17 @@
   "settings_colab_rates_note": "≈ 表示第三方估算值：Colab 不公布各 GPU 的费率。某个 GPU 在你的账号上运行后，实测费率会替换估算值。剩余时长按全部余额都用于该 GPU 计算。",
   "settings_colab_cli": "Colab CLI",
   "settings_models_recommended": "{model} 及另外 {count} 个可用模型",
-  "settings_models_recommended_hint": "除非你另选模型，此 harness 上的新聊天和辅助代理都会使用其最强的模型。"
+  "settings_models_recommended_hint": "除非你另选模型，此 harness 上的新聊天和辅助代理都会使用其最强的模型。",
+  "settings_colab_runtimes": "运行中的运行时",
+  "settings_colab_runtime_run": "运行 {run} · {status}",
+  "settings_colab_runtime_orphaned": "其运行已结束，OpenResearch 很快会释放它",
+  "settings_colab_runtime_external": "不是由 OpenResearch 启动的",
+  "settings_colab_stop": "停止",
+  "settings_colab_stop_confirm": "停止此运行时？其上运行的一切（包括打开的笔记本或运行）都会丢失。",
+  "settings_colab_no_runtimes": "没有运行中的运行时，因此不会消耗计算单元。",
+  "settings_colab_auto_release": "每次运行在命令结束后会立即释放其运行时。OpenResearch 还会每 5 分钟释放已结束运行遗留的运行时。不是它启动的运行时只有在你点击停止时才会停止。",
+  "settings_compute_routing_title": "让代理选择提供商",
+  "settings_compute_routing_description": "代理不再总是使用默认项，而是根据适配度、价格和可用性，在已开启的提供商中为每次运行选择后端和 GPU。相互独立的实验可以同时在不同提供商上运行。",
+  "settings_compute_routing_use": "允许代理使用 {backend}",
+  "settings_compute_routing_needs_two": "请至少连接或开启两个后端，代理才能在其中选择。"
 }

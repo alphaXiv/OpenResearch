@@ -293,6 +293,28 @@ fn cross_harness_bullet(session_harness: Option<&str>) -> String {
     )
 }
 
+/// The compute-routing bullet, present only while the user has it turned on.
+fn compute_routing_bullet() -> String {
+    if !crate::config::compute_routing() {
+        return String::new();
+    }
+    let excluded = crate::config::compute_routing_excluded();
+    let allowed: Vec<_> = super::BACKENDS
+        .iter()
+        .filter(|id| !excluded.iter().any(|x| x == *id))
+        .map(|id| format!("`{id}`"))
+        .collect();
+    if allowed.is_empty() {
+        return String::new();
+    }
+    format!(
+        "\n- Compute routing: **on** — you choose `--backend` and `--flavor` per run among the \
+         user's connected backends: {}. Load **`orx-compute`** and follow its \
+         \"Route runs across providers\" section",
+        allowed.join(", ")
+    )
+}
+
 fn playbook_md_for_session(
     project: &LocalProject,
     state: &ProjectState,
@@ -338,7 +360,8 @@ fn playbook_md_for_session(
         .map_or(String::new(), |flavor| format!(" (`--flavor {flavor}`)"));
     let compute_bullet = format!(
         "- Compute: default target **{compute_backend}**{flavor_part} — \
-         {compute_default_source}; load **`orx-compute`** and read `orx compute instructions show` before configuring or launching{}",
+         {compute_default_source}; load **`orx-compute`** and read `orx compute instructions show` before configuring or launching{}{}",
+        compute_routing_bullet(),
         cross_harness_bullet(session_harness)
     );
     let project_state = project_state_md(project, state);

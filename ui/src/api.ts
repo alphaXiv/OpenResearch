@@ -907,6 +907,18 @@ export const restartApp = () =>
 export const setAutoUpdate = (enabled: boolean) =>
   post<UpdateStatus>("/api/update/auto", { enabled });
 
+export interface ComputeRoutingSettings {
+  enabled: boolean;
+  /** Backends the user kept out of per-run routing. */
+  excluded: ComputeTargetId[];
+}
+
+export const getComputeRoutingSettings = (signal?: AbortSignal) =>
+  get<ComputeRoutingSettings>("/api/settings/compute-routing", signal);
+
+export const setComputeRoutingSettings = (update: { enabled?: boolean; excluded?: ComputeTargetId[] }) =>
+  post<ComputeRoutingSettings>("/api/settings/compute-routing", update);
+
 export interface CrossHarnessSettings {
   enabled: boolean;
   /** Harnesses the user turned off for review. */
@@ -1300,6 +1312,20 @@ export interface ColabSettings {
   accelerators: ColabAccelerator[];
   /** The signed-in Google account; `null` until the CLI has signed in. */
   account: ColabAccount | null;
+  /** Runtimes assigned to the account right now; `null` when unknown. */
+  runtimes: ColabRuntime[] | null;
+}
+
+export interface ColabRuntime {
+  endpoint: string;
+  accelerator: string | null;
+  highMem: boolean;
+  name: string | null;
+  /** The OpenResearch run that owns it, when it is one of ours. */
+  runId: string | null;
+  runStatus: string | null;
+  /** Its run ended; the background sweep releases it. */
+  orphaned: boolean;
 }
 
 export interface ColabRate {
@@ -1324,6 +1350,9 @@ export interface ColabAccount {
 
 export const getColabSettings = (signal?: AbortSignal, fresh = false) =>
   get<ColabSettings>(fresh ? "/api/settings/colab?fresh=true" : "/api/settings/colab", signal);
+
+export const stopColabRuntime = (endpoint: string) =>
+  post<{ ok: true }>("/api/settings/colab/runtimes/stop", { endpoint });
 
 export interface OpenResearchSettings {
   loggedIn: boolean;

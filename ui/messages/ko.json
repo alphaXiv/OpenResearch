@@ -1323,5 +1323,17 @@
   "settings_colab_rates_note": "≈ 표시는 외부 추정치입니다. Colab은 GPU별 요율을 공개하지 않습니다. GPU가 내 계정에서 실행되면 측정된 요율이 추정치를 대체합니다. 남은 시간은 잔액 전부를 해당 GPU에 쓴다고 가정합니다.",
   "settings_colab_cli": "Colab CLI",
   "settings_models_recommended": "{model} 외 {count}개 모델 사용 가능",
-  "settings_models_recommended_hint": "이 하네스의 새 채팅과 도우미 에이전트는 다른 모델을 고르지 않으면 가장 강력한 모델을 사용합니다."
+  "settings_models_recommended_hint": "이 하네스의 새 채팅과 도우미 에이전트는 다른 모델을 고르지 않으면 가장 강력한 모델을 사용합니다.",
+  "settings_colab_runtimes": "실행 중인 런타임",
+  "settings_colab_runtime_run": "실행 {run} · {status}",
+  "settings_colab_runtime_orphaned": "실행이 끝났습니다. OpenResearch가 곧 해제합니다",
+  "settings_colab_runtime_external": "OpenResearch가 시작하지 않음",
+  "settings_colab_stop": "중지",
+  "settings_colab_stop_confirm": "이 런타임을 중지할까요? 열린 노트북이나 실행을 포함해 그 위에서 돌던 모든 작업이 사라집니다.",
+  "settings_colab_no_runtimes": "실행 중인 런타임이 없어 컴퓨팅 단위가 소비되지 않습니다.",
+  "settings_colab_auto_release": "각 실행은 명령이 끝나는 즉시 런타임을 해제합니다. OpenResearch는 5분마다 끝난 실행이 남긴 런타임도 해제합니다. OpenResearch가 시작하지 않은 런타임은 중지를 누를 때만 멈춥니다.",
+  "settings_compute_routing_title": "에이전트가 공급자 선택",
+  "settings_compute_routing_description": "항상 기본값을 쓰는 대신, 에이전트가 켜 둔 공급자 중에서 적합성·가격·가용성에 따라 실행마다 백엔드와 GPU를 고릅니다. 독립적인 실험은 서로 다른 공급자에서 동시에 실행될 수 있습니다.",
+  "settings_compute_routing_use": "에이전트가 {backend} 사용",
+  "settings_compute_routing_needs_two": "에이전트가 고를 수 있도록 백엔드를 두 개 이상 연결하거나 켜세요."
 }

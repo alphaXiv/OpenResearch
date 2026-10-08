@@ -1323,5 +1323,17 @@
   "settings_colab_rates_note": "≈ marks a third-party estimate: Colab does not publish per-GPU rates. Once a GPU runs on your account, its measured rate replaces the estimate. Hours left assume the whole balance goes to that GPU.",
   "settings_colab_cli": "Colab CLI",
   "settings_models_recommended": "{model} and {count} more models available",
-  "settings_models_recommended_hint": "New chats and helper agents on this harness use its strongest model unless you pick another."
+  "settings_models_recommended_hint": "New chats and helper agents on this harness use its strongest model unless you pick another.",
+  "settings_colab_runtimes": "Running runtimes",
+  "settings_colab_runtime_run": "Run {run} · {status}",
+  "settings_colab_runtime_orphaned": "Its run ended; OpenResearch releases it shortly",
+  "settings_colab_runtime_external": "Not started by OpenResearch",
+  "settings_colab_stop": "Stop",
+  "settings_colab_stop_confirm": "Stop this runtime? Anything running on it, including an open notebook or a run, is lost.",
+  "settings_colab_no_runtimes": "No runtime is running, so no compute units are being spent.",
+  "settings_colab_auto_release": "Each run releases its runtime as soon as its command exits. Every 5 minutes OpenResearch also releases any runtime an ended run left behind. Runtimes it did not start are only stopped when you click Stop.",
+  "settings_compute_routing_title": "Let the agent choose the provider",
+  "settings_compute_routing_description": "Instead of always using the default, the agent picks the backend and GPU for each run among the providers left on, by fit, price, and availability. Independent experiments can run on different providers at the same time.",
+  "settings_compute_routing_use": "Let the agent use {backend}",
+  "settings_compute_routing_needs_two": "Connect or turn on at least two backends for the agent to choose between."
 }

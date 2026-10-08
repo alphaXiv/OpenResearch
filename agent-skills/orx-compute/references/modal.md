@@ -1,8 +1,8 @@
 # Modal (`--backend modal`)
 
 Use this backend only when the user explicitly requests Modal or it is the
-configured default. Modal runs an ephemeral Sandbox in the user's account and
-bills that account per second.
+configured default (or the playbook's compute routing lists it). Modal runs an
+ephemeral Sandbox in the user's account and bills that account per second.
 
 Authentication uses `MODAL_TOKEN_ID` and `MODAL_TOKEN_SECRET`, or credentials
 created by `modal token new`. `orx` provisions its managed Modal environment on

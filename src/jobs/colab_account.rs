@@ -16,12 +16,12 @@ use tokio::sync::Mutex;
 
 use super::colab::{token_path, ACCELERATORS};
 
-const COLAB_DOMAIN: &str = "https://colab.research.google.com";
+pub(super) const COLAB_DOMAIN: &str = "https://colab.research.google.com";
 const COLAB_API: &str = "https://colaboratory.googleapis.com/v1beta";
 const USERINFO_URL: &str = "https://openidconnect.googleapis.com/v1/userinfo";
 const DEFAULT_TOKEN_URI: &str = "https://oauth2.googleapis.com/token";
-const XSSI_PREFIX: &str = ")]}'";
-const REQUEST_TIMEOUT: Duration = Duration::from_secs(10);
+pub(super) const XSSI_PREFIX: &str = ")]}'";
+pub(super) const REQUEST_TIMEOUT: Duration = Duration::from_secs(10);
 /// The settings page re-reads the account on every open; Colab's balance moves
 /// slowly enough that a minute-old answer is fine.
 const ACCOUNT_TTL: Duration = Duration::from_secs(60);
@@ -56,6 +56,11 @@ pub struct Rate {
     pub cu_per_hour: f64,
     /// Measured on this account rather than estimated.
     pub measured: bool,
+}
+
+/// Drop the cached account so the next read shows a released runtime.
+pub(super) async fn invalidate() {
+    *cache().lock().await = None;
 }
 
 fn cache() -> &'static Mutex<Option<(Instant, Account)>> {
@@ -159,7 +164,7 @@ fn tier_name(tier: &str) -> Option<String> {
 }
 
 /// Map a Colab accelerator name (`T4`, `NONE`, `V5E1`) to an orx flavor id.
-fn accelerator_id(name: &str) -> Option<String> {
+pub(super) fn accelerator_id(name: &str) -> Option<String> {
     let id = if name.eq_ignore_ascii_case("none") {
         "cpu".to_string()
     } else {
@@ -251,7 +256,11 @@ fn save_measured(rates: &BTreeMap<String, f64>) {
     }
 }
 
-async fn get_json(client: &reqwest::Client, token: &str, url: &str) -> Result<Value, String> {
+pub(super) async fn get_json(
+    client: &reqwest::Client,
+    token: &str,
+    url: &str,
+) -> Result<Value, String> {
     let response = client
         .get(url)
         .bearer_auth(token)
@@ -273,7 +282,7 @@ async fn get_json(client: &reqwest::Client, token: &str, url: &str) -> Result<Va
 }
 
 /// A fresh access token from the CLI's refresh token, kept in memory only.
-async fn access_token() -> Result<String, String> {
+pub(super) async fn access_token() -> Result<String, String> {
     let mut cached = access_token_cache().lock().await;
     if let Some((expires, token)) = cached.as_ref() {
         if Instant::now() < *expires {

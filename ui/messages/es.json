@@ -1323,5 +1323,17 @@
   "settings_colab_rates_note": "≈ indica una estimación de terceros: Colab no publica tarifas por GPU. Cuando una GPU se ejecuta en tu cuenta, su tarifa medida reemplaza la estimación. Las horas restantes suponen que todo el saldo se usa en esa GPU.",
   "settings_colab_cli": "CLI de Colab",
   "settings_models_recommended": "{model} y {count} modelos más disponibles",
-  "settings_models_recommended_hint": "Los chats nuevos y los agentes auxiliares de este harness usan su modelo más potente, salvo que elijas otro."
+  "settings_models_recommended_hint": "Los chats nuevos y los agentes auxiliares de este harness usan su modelo más potente, salvo que elijas otro.",
+  "settings_colab_runtimes": "Entornos en ejecución",
+  "settings_colab_runtime_run": "Ejecución {run} · {status}",
+  "settings_colab_runtime_orphaned": "Su ejecución terminó; OpenResearch lo liberará en breve",
+  "settings_colab_runtime_external": "No lo inició OpenResearch",
+  "settings_colab_stop": "Detener",
+  "settings_colab_stop_confirm": "¿Detener este entorno? Se perderá todo lo que se ejecute en él, incluido un cuaderno abierto o una ejecución.",
+  "settings_colab_no_runtimes": "No hay ningún entorno en ejecución, así que no se gastan unidades de cómputo.",
+  "settings_colab_auto_release": "Cada ejecución libera su entorno en cuanto termina su comando. Cada 5 minutos, OpenResearch también libera cualquier entorno que una ejecución terminada haya dejado activo. Los entornos que no inició solo se detienen al pulsar Detener.",
+  "settings_compute_routing_title": "Dejar que el agente elija el proveedor",
+  "settings_compute_routing_description": "En lugar de usar siempre el predeterminado, el agente elige el backend y la GPU de cada ejecución entre los proveedores activados, según ajuste, precio y disponibilidad. Los experimentos independientes pueden ejecutarse a la vez en proveedores distintos.",
+  "settings_compute_routing_use": "Permitir que el agente use {backend}",
+  "settings_compute_routing_needs_two": "Conecta o activa al menos dos backends para que el agente pueda elegir."
 }

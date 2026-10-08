@@ -1,8 +1,9 @@
 # This machine (`--backend local`)
 
 Use this backend only when the user asks to run on this machine or it is the
-configured default. It starts a detached process using this machine's own
-environment and shares its CPU, RAM, and GPU with other work.
+configured default (or the playbook's compute routing lists it). It starts a
+detached process using this machine's own environment and shares its CPU, RAM,
+and GPU with other work.
 
 ```sh
 orx exp run <expId> --backend local

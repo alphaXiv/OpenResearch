@@ -57,6 +57,12 @@ export const getColabSettingsQuery = () => queryOptions({
   staleTime: 30_000,
 });
 
+export const getComputeRoutingSettingsQuery = () => queryOptions({
+  queryKey: workspaceKey("getComputeRoutingSettings"),
+  queryFn: ({ signal }) => api.getComputeRoutingSettings(signal),
+  staleTime: 300_000,
+});
+
 export const getCrossHarnessSettingsQuery = () => queryOptions({
   queryKey: workspaceKey("getCrossHarnessSettings"),
   queryFn: ({ signal }) => api.getCrossHarnessSettings(signal),

@@ -1323,5 +1323,17 @@
   "settings_colab_rates_note": "≈ یعنی برآورد شخص ثالث: Colab نرخ هر GPU را منتشر نمی‌کند. وقتی یک GPU روی حساب شما اجرا شود، نرخ اندازه‌گیری‌شده جای برآورد را می‌گیرد. ساعت باقی‌مانده فرض می‌کند کل موجودی صرف همان GPU شود.",
   "settings_colab_cli": "Colab CLI",
   "settings_models_recommended": "{model} و {count} مدل دیگر در دسترس",
-  "settings_models_recommended_hint": "گفتگوهای جدید و عامل‌های کمکی روی این ابزار از قوی‌ترین مدل آن استفاده می‌کنند، مگر اینکه مدل دیگری انتخاب کنید."
+  "settings_models_recommended_hint": "گفتگوهای جدید و عامل‌های کمکی روی این ابزار از قوی‌ترین مدل آن استفاده می‌کنند، مگر اینکه مدل دیگری انتخاب کنید.",
+  "settings_colab_runtimes": "محیط‌های اجرایی فعال",
+  "settings_colab_runtime_run": "اجرای {run} · {status}",
+  "settings_colab_runtime_orphaned": "اجرای آن تمام شده؛ OpenResearch به‌زودی آزادش می‌کند",
+  "settings_colab_runtime_external": "توسط OpenResearch شروع نشده",
+  "settings_colab_stop": "توقف",
+  "settings_colab_stop_confirm": "این محیط اجرایی متوقف شود؟ هر چه روی آن اجرا می‌شود، از جمله دفترچه باز یا یک اجرا، از بین می‌رود.",
+  "settings_colab_no_runtimes": "هیچ محیط اجرایی فعال نیست، پس واحد محاسباتی مصرف نمی‌شود.",
+  "settings_colab_auto_release": "هر اجرا بلافاصله پس از پایان فرمانش محیط اجرایی را آزاد می‌کند. OpenResearch همچنین هر ۵ دقیقه هر محیطی را که یک اجرای تمام‌شده جا گذاشته آزاد می‌کند. محیط‌هایی که خودش شروع نکرده فقط با زدن توقف متوقف می‌شوند.",
+  "settings_compute_routing_title": "انتخاب ارائه‌دهنده با عامل",
+  "settings_compute_routing_description": "به‌جای استفاده همیشگی از پیش‌فرض، عامل برای هر اجرا بک‌اند و GPU را از میان ارائه‌دهندگان روشن، بر اساس تناسب، قیمت و دسترسی انتخاب می‌کند. آزمایش‌های مستقل می‌توانند هم‌زمان روی ارائه‌دهندگان مختلف اجرا شوند.",
+  "settings_compute_routing_use": "اجازه استفاده عامل از {backend}",
+  "settings_compute_routing_needs_two": "دست‌کم دو بک‌اند را وصل یا روشن کنید تا عامل بتواند بینشان انتخاب کند."
 }

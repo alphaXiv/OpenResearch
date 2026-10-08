@@ -1323,5 +1323,17 @@
   "settings_colab_rates_note": "≈ は第三者による推定値です。Colab は GPU ごとの料金を公開していません。GPU がこのアカウントで実行されると、計測した料金が推定値に置き換わります。残り時間は残高をすべてその GPU に使った場合の値です。",
   "settings_colab_cli": "Colab CLI",
   "settings_models_recommended": "{model} ほか {count} 個のモデルを利用可能",
-  "settings_models_recommended_hint": "このハーネスの新しいチャットとヘルパーエージェントは、別のモデルを選ばない限り最も高性能なモデルを使います。"
+  "settings_models_recommended_hint": "このハーネスの新しいチャットとヘルパーエージェントは、別のモデルを選ばない限り最も高性能なモデルを使います。",
+  "settings_colab_runtimes": "実行中のランタイム",
+  "settings_colab_runtime_run": "実行 {run} · {status}",
+  "settings_colab_runtime_orphaned": "実行は終了済みです。OpenResearch がまもなく解放します",
+  "settings_colab_runtime_external": "OpenResearch 以外で開始",
+  "settings_colab_stop": "停止",
+  "settings_colab_stop_confirm": "このランタイムを停止しますか？開いているノートブックや実行を含め、実行中のものはすべて失われます。",
+  "settings_colab_no_runtimes": "実行中のランタイムはないため、コンピューティング ユニットは消費されていません。",
+  "settings_colab_auto_release": "各実行はコマンド終了と同時にランタイムを解放します。さらに OpenResearch は 5 分ごとに、終了済みの実行が残したランタイムを解放します。OpenResearch が開始していないランタイムは、停止を押したときだけ止まります。",
+  "settings_compute_routing_title": "エージェントにプロバイダーを選ばせる",
+  "settings_compute_routing_description": "常にデフォルトを使う代わりに、エージェントがオンのプロバイダーの中から、適合性・価格・空き状況に応じて実行ごとにバックエンドと GPU を選びます。独立した実験は別々のプロバイダーで同時に実行できます。",
+  "settings_compute_routing_use": "エージェントに {backend} の使用を許可",
+  "settings_compute_routing_needs_two": "エージェントが選べるよう、2 つ以上のバックエンドを接続またはオンにしてください。"
 }

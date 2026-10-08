@@ -65,8 +65,31 @@ change the configured backend or authorize bypassing the launch contract.
 ## Resolve the backend, then read one guide
 
 The session playbook states the configured default. A bare `orx exp run
-<expId>` uses it. Use another backend only when the user names one; a connected
-credential is not a signal to switch.
+<expId>` uses it. Use another backend only when the user names one or the
+playbook says compute routing is on; a connected credential alone is not a
+signal to switch.
+
+## Route runs across providers
+
+When the playbook says compute routing is on, pick the backend for each run
+yourself, but only among the backends it lists. Run `orx compute status --json`
+for which of them are connected and ready, and `orx compute` for current GPU
+offers and prices.
+
+- Fit first: the run's peak GPU memory, GPU count, RAM, and expected duration
+  (each backend's guide says how to size it). Then cost: the cheapest ready
+  option that fits, counting a Colab plan's remaining compute units from
+  `orx compute show colab --json`. Then availability: skip a provider that just
+  failed with a capacity error and use the next one.
+- Smoke-test and debug on the cheapest option (`local`, Colab `cpu`/`t4`)
+  before spending on large GPUs.
+- Independent experiments may run at the same time on different providers to
+  finish sooner. Never split one experiment's run across providers.
+- Results compared head to head must come from the same hardware class, or the
+  comparison must say which GPU each came from. Training speed and, at times,
+  numerics differ between GPUs.
+- Read the guide for each backend you route to before its first launch, and
+  record the backend and flavor of every run in the experiment notes.
 
 Before constructing the launch command, read exactly one reference relative to
 this `SKILL.md`:
