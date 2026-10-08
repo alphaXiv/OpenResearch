@@ -1617,7 +1617,10 @@ fn git(dir: &Path, args: &[&str]) -> Result<String> {
         && !FOREGROUND_WANTED.load(std::sync::atomic::Ordering::Relaxed)
     {
         use std::os::windows::process::CommandExt;
-        command.creation_flags(windows_sys::Win32::System::Threading::IDLE_PRIORITY_CLASS);
+        command.creation_flags(
+            windows_sys::Win32::System::Threading::IDLE_PRIORITY_CLASS
+                | windows_sys::Win32::System::Threading::CREATE_NO_WINDOW,
+        );
     }
     for name in [
         "GIT_DIR",
