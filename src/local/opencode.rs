@@ -84,6 +84,64 @@ fn free_port() -> Result<u16> {
 }
 
 /// Where the spawned server's stdout/stderr land (startup diagnostics).
+/// OpenCode servers this user started outside OpenResearch (`opencode serve`
+/// without `OPENCODE_DB`). While one runs, `opencode auth login` hands the
+/// sign-in to it, so the credentials land in OpenCode's own database and never
+/// reach the isolated one OpenResearch uses. Linux only: elsewhere a process's
+/// environment is not readable, so this reports none.
+pub fn foreign_servers() -> Vec<(u32, String)> {
+    #[cfg(target_os = "linux")]
+    {
+        let Ok(entries) = std::fs::read_dir("/proc") else {
+            return Vec::new();
+        };
+        let me = std::process::id();
+        let mut found: Vec<(u32, String)> = entries
+            .flatten()
+            .filter_map(|entry| entry.file_name().to_str()?.parse::<u32>().ok())
+            .filter(|pid| *pid != me)
+            .filter_map(|pid| {
+                let raw = std::fs::read(format!("/proc/{pid}/cmdline")).ok()?;
+                let args: Vec<String> = raw
+                    .split(|b| *b == 0)
+                    .filter(|arg| !arg.is_empty())
+                    .map(|arg| String::from_utf8_lossy(arg).into_owned())
+                    .collect();
+                let program = Path::new(args.first()?).file_name()?.to_str()?;
+                if !program.starts_with("opencode") || !args.iter().any(|arg| arg == "serve") {
+                    return None;
+                }
+                let environ = std::fs::read(format!("/proc/{pid}/environ")).ok()?;
+                if environ
+                    .split(|b| *b == 0)
+                    .any(|var| var.starts_with(b"OPENCODE_DB="))
+                {
+                    return None;
+                }
+                Some((pid, args.join(" ")))
+            })
+            .collect();
+        found.sort();
+        found
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        Vec::new()
+    }
+}
+
+/// Why `opencode auth login` would miss OpenResearch's database right now.
+pub fn foreign_server_problem() -> Option<String> {
+    let servers = foreign_servers();
+    let (pid, command) = servers.first()?;
+    Some(format!(
+        "An OpenCode server you started is running (PID {pid}: `{command}`). While it runs, \
+         OpenCode signs in through it and saves the login to its own database, which \
+         OpenResearch does not use. Stop it (`kill {pid}`, or Ctrl+C in its terminal), sign in \
+         here, then start it again."
+    ))
+}
+
 pub fn agent_log_path() -> PathBuf {
     store::data_dir().join("agent-opencode.log")
 }
@@ -816,6 +874,36 @@ impl AgentHost {
 
 #[cfg(test)]
 mod tests {
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn foreign_servers_skip_servers_pointed_at_a_database() {
+        let dir = std::env::temp_dir().join(format!("orx-foreign-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let fake = dir.join("opencode");
+        std::fs::copy("/usr/bin/tail", &fake).unwrap();
+        let spawn = |db: Option<&str>| {
+            let mut cmd = std::process::Command::new(&fake);
+            cmd.args(["-f", "/dev/null", "serve"])
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null());
+            if let Some(db) = db {
+                cmd.env("OPENCODE_DB", db);
+            }
+            cmd.spawn().unwrap()
+        };
+        let mut user = spawn(None);
+        let mut ours = spawn(Some("/tmp/orx.db"));
+        std::thread::sleep(std::time::Duration::from_millis(200));
+        let pids: Vec<u32> = foreign_servers().into_iter().map(|(pid, _)| pid).collect();
+        let _ = user.kill();
+        let _ = ours.kill();
+        let _ = user.wait();
+        let _ = ours.wait();
+        let _ = std::fs::remove_dir_all(&dir);
+        assert!(pids.contains(&user.id()));
+        assert!(!pids.contains(&ours.id()));
+    }
+
     use super::*;
     use crate::local::agent_skills::{self, SkillSet};
 

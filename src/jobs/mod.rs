@@ -6,6 +6,7 @@
 //! is the serialized handle a later supervisor uses to reattach.
 
 pub mod colab;
+pub mod colab_account;
 pub mod huggingface;
 pub mod kubernetes;
 pub mod localbox;

@@ -12,8 +12,14 @@ run ends or is cancelled.
 
 ```sh
 orx compute test colab
-orx compute show colab --json      # CLI path, sign-in, and every accelerator with its memory
+orx compute show colab --json      # CLI path, sign-in, accelerators, and the account below
 ```
+
+`account` in that output describes the user's Colab plan: `tier`, `balance`
+(compute units left), `rateHourly` (units per hour their running runtimes burn
+now), `eligible` (accelerator ids the plan can assign right now), and `rates`
+(compute units per hour for each accelerator; `measured: false` marks a rough
+third-party estimate). Any field can be `null` when Colab did not answer.
 
 ```sh
 orx exp run <expId> --backend colab                     # T4 (the default)
@@ -46,6 +52,18 @@ flavor that fits with about 20% headroom, or `auto:<GB>` with that estimate:
 - LoRA or QLoRA: the frozen base weights at their precision plus a small
   fraction for adapters, optimizer state, and activations.
 - Classic models (ResNets, BERT-base, small transformers): T4 is usually enough.
+
+Then weigh cost, because every hour spends the user's compute units:
+
+- Only pass a flavor listed in `account.eligible` when that list is present;
+  Colab refuses the others for this plan.
+- Among the flavors that fit, take the one with the lowest rate. A bigger GPU
+  is worth it only when it fits a model the smaller one cannot, or when its
+  speedup clearly beats its higher rate for a long run.
+- Estimate the run's hours × the flavor's rate before launching. If that would
+  use most of `balance`, say so and offer a smaller configuration or a shorter
+  pilot run first. Never launch a run the balance cannot cover.
+- Debug and smoke-test on `cpu` or `t4` before spending A100 or H100 hours.
 
 Append `:highmem` when host RAM, not GPU memory, is the limit (large datasets
 held in memory, data loading workers). L4 and TPUs have only one machine shape.

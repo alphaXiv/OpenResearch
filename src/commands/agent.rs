@@ -189,6 +189,13 @@ async fn ensure_installed(harness: &str) -> Result<()> {
     }
 }
 
+async fn recommended_model(harness: &str) -> Option<String> {
+    let port = crate::local::chat::trusted_up_port().ok()??;
+    crate::commands::up::recommended_model_via_up(port, harness)
+        .await
+        .ok()?
+}
+
 fn install_refusal(harness: &str, install: &crate::commands::up::HarnessInstall) -> Option<String> {
     (!install.installed).then(|| {
         format!(
@@ -234,6 +241,13 @@ async fn spawn(
     if !inherits {
         ensure_installed(&harness).await?;
     }
+    // A helper on another harness runs that harness's strongest model unless
+    // the caller named one.
+    let model = match model {
+        Some(model) => Some(model),
+        None if !inherits => recommended_model(&harness).await,
+        None => None,
+    };
     let changes_model = model
         .as_deref()
         .is_some_and(|model| parent.model.as_deref() != Some(model));

@@ -1026,10 +1026,23 @@ pub(super) async fn local_machine_settings() -> ApiResult {
     Ok(Json(json!(hw)))
 }
 
-/// The Colab row's expanded detail: CLI install, sign-in, and the
-/// accelerators a run can request. Local probes only; never starts a sign-in.
-pub(super) async fn colab_settings() -> ApiResult {
-    Ok(Json(json!(crate::jobs::colab::status().await)))
+/// The Colab row's expanded detail: CLI install, sign-in, the accelerators a
+/// run can request, and the signed-in account's plan and compute units. Never
+/// starts a sign-in.
+pub(super) async fn colab_settings(Query(query): Query<ColabSettingsQuery>) -> ApiResult {
+    colab_settings_with(query.fresh.unwrap_or(false)).await
+}
+
+#[derive(serde::Deserialize)]
+pub(super) struct ColabSettingsQuery {
+    /// Skip the cached account so Refresh shows the current balance.
+    fresh: Option<bool>,
+}
+
+async fn colab_settings_with(fresh: bool) -> ApiResult {
+    let mut value = json!(crate::jobs::colab::status().await);
+    value["account"] = json!(crate::jobs::colab_account::account(fresh).await);
+    Ok(Json(value))
 }
 
 /// The OpenResearch row's expanded detail. Network calls are fine here (the
@@ -1109,7 +1122,7 @@ pub(crate) async fn show(backend: &str) -> Result<Value> {
         "hf" => Ok(hf_settings().await),
         "modal" => modal_settings().await,
         "tinker" => tinker_settings().await,
-        "colab" => colab_settings().await,
+        "colab" => colab_settings_with(true).await,
         "k8s" => k8s_settings().await,
         "openresearch" => openresearch_settings().await,
         _ => return Err(anyhow!("Unknown compute backend: {backend}")),

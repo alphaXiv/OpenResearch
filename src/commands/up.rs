@@ -2252,6 +2252,23 @@ pub(crate) async fn harness_install_via_up(port: u16, harness: &str) -> Result<H
     decode_local_response(response, "check the harness").await
 }
 
+/// The strongest model `orx up`'s cached catalog lists for `harness`.
+pub(crate) async fn recommended_model_via_up(port: u16, harness: &str) -> Result<Option<String>> {
+    let response = authenticate_up_request(
+        local_client()?.get(format!("http://127.0.0.1:{port}/api/harnesses")),
+    )
+    .timeout(Duration::from_secs(10))
+    .send()
+    .await
+    .map_err(|error| anyhow!("Could not reach the trusted orx up process: {error}"))?;
+    let payload: Value = decode_local_response(response, "read the harnesses").await?;
+    Ok(payload["harnesses"]
+        .as_array()
+        .and_then(|entries| entries.iter().find(|entry| entry["id"] == harness))
+        .and_then(|entry| entry["recommendedModel"].as_str())
+        .map(str::to_string))
+}
+
 pub(crate) async fn cancel_run_via_up(port: u16, run_id: &str) -> Result<()> {
     let response = authenticate_up_request(
         local_client()?.post(format!("http://127.0.0.1:{port}/api/runs/{run_id}/cancel")),
@@ -7219,6 +7236,22 @@ async fn create_chat_session(
             "this harness activates Plan through permissions",
         ));
     }
+    // Nobody picked a model: run the harness's strongest one rather than
+    // whatever its CLI defaults to.
+    let mut reasoning_level = nonempty(req.reasoning_level);
+    let model = match nonempty(req.model) {
+        Some(model) => Some(model),
+        None => match recommended_model(&state, &req.harness).await {
+            Some((model, levels)) => {
+                // An effort chosen for the CLI's default model may not exist on this one.
+                if let Some(levels) = levels {
+                    reasoning_level = reasoning_level.filter(|level| levels.contains(level));
+                }
+                Some(model)
+            }
+            None => None,
+        },
+    };
     let session = StoredChatSession {
         id: format!("chat_{}", uuid::Uuid::new_v4()),
         project_id: req.project_id,
@@ -7226,12 +7259,12 @@ async fn create_chat_session(
         native_session_id: None,
         title: None,
         title_source: None,
-        model: nonempty(req.model),
+        model,
         service_tier,
         permission_mode,
         plan_mode: req.plan_mode,
         plan_reset_pending: false,
-        reasoning_level: nonempty(req.reasoning_level),
+        reasoning_level,
         archived: false,
         context_usage_json: None,
         bootstrap_context: None,
@@ -7247,6 +7280,33 @@ async fn create_chat_session(
     Ok(Json(
         json!({ "session": local::chat::session_json(&session, false) }),
     ))
+}
+
+/// The cached catalog's strongest model for `harness`, if detection has one,
+/// with the reasoning ids that model accepts when the catalog lists them.
+async fn recommended_model(
+    state: &AppState,
+    harness: &str,
+) -> Option<(String, Option<Vec<String>>)> {
+    let cache = state.harnesses.lock().await;
+    let (_, payload) = cache.as_ref()?;
+    let entry = payload["harnesses"]
+        .as_array()?
+        .iter()
+        .find(|entry| entry["id"] == harness)?;
+    let model = entry["recommendedModel"].as_str()?;
+    let levels = entry["models"]
+        .as_array()?
+        .iter()
+        .find(|item| item["id"] == model)?["reasoningLevels"]
+        .as_array()
+        .map(|levels| {
+            levels
+                .iter()
+                .filter_map(|level| level["id"].as_str().map(str::to_string))
+                .collect()
+        });
+    Some((model.to_string(), levels))
 }
 
 /// Chats the user had in an agent's own CLI, for the composer's `/resume`

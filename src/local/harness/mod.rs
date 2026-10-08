@@ -652,6 +652,7 @@ async fn detect_one(harness: &dyn Harness, snapshot: bool) -> Option<HarnessInfo
             info.auth_state = HarnessAuthState::Ready;
         }
         info.options = harness.options();
+        info.recommended_model = detect::strongest_model(&info.models);
         // The trait is the ceiling: a `detect` narrows it for an installation
         // whose run path can't steer. A steering harness whose `detect` forgets
         // to set it reports false and silently queues every send.
