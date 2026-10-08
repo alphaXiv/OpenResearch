@@ -1323,5 +1323,17 @@
   "settings_colab_rates_note": "≈ किसी तीसरे पक्ष का अनुमान दिखाता है: Colab हर GPU की दर प्रकाशित नहीं करता। जब कोई GPU आपके खाते पर चलता है, तो उसकी मापी गई दर अनुमान की जगह ले लेती है। बचे घंटे मानते हैं कि पूरा बैलेंस उसी GPU पर खर्च होगा।",
   "settings_colab_cli": "Colab CLI",
   "settings_models_recommended": "{model} और {count} अन्य मॉडल उपलब्ध",
-  "settings_models_recommended_hint": "इस हार्नेस पर नई चैट और सहायक एजेंट इसका सबसे सक्षम मॉडल इस्तेमाल करते हैं, जब तक आप कोई और न चुनें।"
+  "settings_models_recommended_hint": "इस हार्नेस पर नई चैट और सहायक एजेंट इसका सबसे सक्षम मॉडल इस्तेमाल करते हैं, जब तक आप कोई और न चुनें।",
+  "settings_colab_runtimes": "चल रहे रनटाइम",
+  "settings_colab_runtime_run": "रन {run} · {status}",
+  "settings_colab_runtime_orphaned": "इसका रन खत्म हो गया; OpenResearch इसे जल्द छोड़ देगा",
+  "settings_colab_runtime_external": "OpenResearch ने शुरू नहीं किया",
+  "settings_colab_stop": "रोकें",
+  "settings_colab_stop_confirm": "यह रनटाइम रोकें? इस पर चल रहा सब कुछ, खुली नोटबुक या रन समेत, खो जाएगा।",
+  "settings_colab_no_runtimes": "कोई रनटाइम नहीं चल रहा, इसलिए कोई कंप्यूट यूनिट खर्च नहीं हो रही।",
+  "settings_colab_auto_release": "हर रन अपना कमांड खत्म होते ही रनटाइम छोड़ देता है। हर 5 मिनट में OpenResearch किसी खत्म हुए रन से छूटा रनटाइम भी छोड़ देता है। जो रनटाइम उसने शुरू नहीं किए, वे केवल रोकें दबाने पर रुकते हैं।",
+  "settings_compute_routing_title": "एजेंट को प्रदाता चुनने दें",
+  "settings_compute_routing_description": "हमेशा डिफ़ॉल्ट इस्तेमाल करने के बजाय, एजेंट हर रन के लिए चालू प्रदाताओं में से बैकएंड और GPU चुनता है — फ़िट, कीमत और उपलब्धता के आधार पर। स्वतंत्र प्रयोग एक साथ अलग-अलग प्रदाताओं पर चल सकते हैं।",
+  "settings_compute_routing_use": "एजेंट को {backend} इस्तेमाल करने दें",
+  "settings_compute_routing_needs_two": "एजेंट के चुनने के लिए कम से कम दो बैकएंड कनेक्ट करें या चालू करें।"
 }

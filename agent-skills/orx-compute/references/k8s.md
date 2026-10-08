@@ -1,8 +1,9 @@
 # Kubernetes (`--backend k8s`)
 
 Use this backend only when the user explicitly requests Kubernetes or it is the
-configured default. Authentication comes from the user's kubeconfig; the
-context and namespace come from their configured Kubernetes profile.
+configured default (or the playbook's compute routing lists it). Authentication
+comes from the user's kubeconfig; the context and namespace come from their
+configured Kubernetes profile.
 
 There are no flavors. The run shape is a Kubernetes manifest committed on the
 experiment branch, defaulting to `.orx/k8s.yaml` and overridable with

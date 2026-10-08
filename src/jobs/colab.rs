@@ -484,6 +484,51 @@ import base64 as _orx_b64
 import os as _orx_os
 import subprocess as _orx_sp
 import sys as _orx_sys
+import threading as _orx_threading
+import time as _orx_time
+
+# The GPU is billed while the runtime is up, busy or not. Sample it so an idle
+# GPU shows in the log, and report how much of the run actually used it.
+_ORX_IDLE_WARN_SECS = 15 * 60
+_orx_gpu = {"samples": 0, "busy": 0, "peak_mem_mb": 0, "total_mem_mb": 0}
+
+
+def _orx_watch_gpu(done):
+    idle_since = None
+    warned_at = None
+    while not done.wait(60):
+        try:
+            out = _orx_sp.run(
+                ["nvidia-smi", "--query-gpu=utilization.gpu,memory.used,memory.total", "--format=csv,noheader,nounits"],
+                capture_output=True, text=True, timeout=30,
+            ).stdout.strip().splitlines()
+            rows = [[float(x) for x in line.split(",")] for line in out if line.strip()]
+        except Exception:
+            return
+        if not rows:
+            return
+        util = max(row[0] for row in rows)
+        _orx_gpu["samples"] += 1
+        _orx_gpu["busy"] += 1 if util > 0 else 0
+        _orx_gpu["peak_mem_mb"] = max(_orx_gpu["peak_mem_mb"], max(row[1] for row in rows))
+        _orx_gpu["total_mem_mb"] = max(row[2] for row in rows)
+        now = _orx_time.monotonic()
+        if util > 0:
+            idle_since = warned_at = None
+            continue
+        idle_since = idle_since or now
+        if now - idle_since >= _ORX_IDLE_WARN_SECS and (warned_at is None or now - warned_at >= _ORX_IDLE_WARN_SECS):
+            warned_at = now
+            print("[orx] The GPU has been idle for %d minutes while this run keeps spending compute units. "
+                  "If the GPU work is over, cancel the run; run CPU-only steps with --flavor cpu."
+                  % ((now - idle_since) // 60), flush=True)
+
+
+def _orx_gpu_summary():
+    if not _orx_gpu["samples"]:
+        return
+    print("[orx] GPU busy in %d%% of samples; peak memory %d of %d MB."
+          % (100 * _orx_gpu["busy"] // _orx_gpu["samples"], _orx_gpu["peak_mem_mb"], _orx_gpu["total_mem_mb"]), flush=True)
 
 
 def _orx_main():
@@ -499,6 +544,7 @@ def _orx_main():
         return 97
     workdir = "/content/orx-run"
     _orx_os.makedirs(_orx_os.path.join(workdir, "repo"), exist_ok=True)
+    gpus = ""
     try:
         gpus = _orx_sp.run(
             ["nvidia-smi", "--query-gpu=name,memory.total", "--format=csv,noheader"],
@@ -515,10 +561,15 @@ def _orx_main():
         cwd=workdir, env=env, stdout=_orx_sp.PIPE, stderr=_orx_sp.STDOUT,
         text=True, bufsize=1, errors="replace",
     )
+    done = _orx_threading.Event()
+    if gpus:
+        _orx_threading.Thread(target=_orx_watch_gpu, args=(done,), daemon=True).start()
     for line in proc.stdout:
         _orx_sys.stdout.write(line)
         _orx_sys.stdout.flush()
     code = proc.wait()
+    done.set()
+    _orx_gpu_summary()
     if code == 124:
         print("[orx] The run hit its timeout of %d seconds." % ORX_TIMEOUT_SECS, flush=True)
     return code

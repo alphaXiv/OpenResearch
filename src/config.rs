@@ -315,6 +315,29 @@ pub fn set_cross_harness_excluded(mut excluded: Vec<String>) -> Result<()> {
     Ok(())
 }
 
+/// Whether agents may route each run to any connected backend the user left
+/// on (Settings → Compute), instead of always the default. Off by default.
+pub fn compute_routing() -> bool {
+    crate::telemetry::compute_routing()
+}
+
+pub fn set_compute_routing(enabled: bool) -> Result<()> {
+    crate::telemetry::set_compute_routing(enabled)?;
+    Ok(())
+}
+
+/// Backend ids the user kept out of per-run routing.
+pub fn compute_routing_excluded() -> Vec<String> {
+    crate::telemetry::compute_routing_excluded()
+}
+
+pub fn set_compute_routing_excluded(mut excluded: Vec<String>) -> Result<()> {
+    excluded.sort();
+    excluded.dedup();
+    crate::telemetry::set_compute_routing_excluded(excluded)?;
+    Ok(())
+}
+
 /// Whether cross-harness review may use this harness.
 pub fn cross_harness_allows(harness: &str) -> bool {
     !cross_harness_excluded().iter().any(|id| id == harness)

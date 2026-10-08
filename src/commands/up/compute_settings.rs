@@ -1041,8 +1041,28 @@ pub(super) struct ColabSettingsQuery {
 
 async fn colab_settings_with(fresh: bool) -> ApiResult {
     let mut value = json!(crate::jobs::colab::status().await);
-    value["account"] = json!(crate::jobs::colab_account::account(fresh).await);
+    let account = crate::jobs::colab_account::account(fresh).await;
+    let runtimes = if account.is_some() {
+        crate::jobs::colab_runtimes::runtimes().await.ok()
+    } else {
+        None
+    };
+    value["account"] = json!(account);
+    value["runtimes"] = json!(runtimes);
     Ok(Json(value))
+}
+
+#[derive(serde::Deserialize)]
+pub(super) struct StopColabRuntimeReq {
+    endpoint: String,
+}
+
+/// Release one Colab runtime so it stops spending compute units.
+pub(super) async fn stop_colab_runtime(Json(req): Json<StopColabRuntimeReq>) -> ApiResult {
+    crate::jobs::colab_runtimes::stop(&req.endpoint)
+        .await
+        .map_err(|error| ApiError::from(anyhow!("{error}")))?;
+    Ok(Json(json!({ "ok": true })))
 }
 
 /// The OpenResearch row's expanded detail. Network calls are fine here (the

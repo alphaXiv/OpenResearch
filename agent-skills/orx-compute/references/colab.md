@@ -1,9 +1,9 @@
 # Google Colab (`--backend colab`)
 
 Use this backend only when the user explicitly requests Colab or it is the
-configured default. Each run gets its own Colab runtime in the user's Google
-account, billed against their Colab plan or compute units, and released when the
-run ends or is cancelled.
+configured default (or the playbook's compute routing lists it). Each run gets
+its own Colab runtime in the user's Google account, billed against their Colab
+plan or compute units, and released when the run ends or is cancelled.
 
 `orx` drives the runtime through the official Colab CLI (`colab`, from
 `google-colab-cli`) on this machine. It needs Linux or macOS, the CLI installed
@@ -86,3 +86,10 @@ the GPU name and memory that Colab actually assigned.
   retry later.
 - A detached `orx supervise` process records status and logs; do not kill it.
   Cancelling the run releases the runtime.
+- The runtime is billed while it is assigned, busy or not. When the command
+  exits the runtime is released at once, and `orx up` also releases any runtime
+  an ended run left behind. Do not keep a run alive just to hold its GPU.
+- The log warns when the GPU has sat idle for 15 minutes; if the GPU work is
+  over, cancel the run. It ends with the share of samples the GPU was busy and
+  its peak memory: a low share or a peak far below the card's memory means the
+  next run should use a smaller flavor.

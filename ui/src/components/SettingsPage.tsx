@@ -21,6 +21,7 @@ import {
   getRaySettingsQuery,
   getColabSettingsQuery,
   getCrossHarnessSettingsQuery,
+  getComputeRoutingSettingsQuery,
   getOpenResearchSettingsQuery,
   getLocalMachineQuery,
   getComputeSettingsQuery,
@@ -49,6 +50,7 @@ import {
   Plus,
   RefreshCw,
   Settings,
+  Square,
   SquareTerminal,
   Sun,
   Trash2,
@@ -105,6 +107,7 @@ import {
   type ColabSettings,
   type ColabAccount,
   getColabSettings,
+  stopColabRuntime,
   type ModalSettings,
   type RayPreflight,
   type RaySettings,
@@ -119,6 +122,7 @@ import {
   installCli,
   setAutoUpdate as setAutoUpdateApi,
   setCrossHarnessSettings,
+  setComputeRoutingSettings,
   type InstallChannel,
   type InstalledCli,
 } from "../api";
@@ -641,6 +645,71 @@ function CrossHarnessCard({ harnesses }: { harnesses: Harness[] | null }) {
           </p>
         </>
       )}
+      {error && <div className="error">{error}</div>}
+    </div>
+  );
+}
+
+/** Lets agents pick the backend per run among the providers left on. */
+function ComputeRoutingCard({ targets }: { targets: ComputeTargetSummary[] }) {
+  const options = getComputeRoutingSettingsQuery();
+  const query = useQuery(options);
+  const mutation = useMutation({ mutationFn: setComputeRoutingSettings });
+  const [error, setError] = useState<string | null>(null);
+  const enabled = query.data?.enabled ?? false;
+  const excluded = query.data?.excluded ?? [];
+  const usable = targets.filter((target) => !excluded.includes(target.id));
+
+  async function save(update: { enabled?: boolean; excluded?: ComputeTargetId[] }) {
+    setError(null);
+    try {
+      const next = await mutation.mutateAsync(update);
+      setScopedQueryData(options.queryKey, () => next);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : String(err));
+    }
+  }
+
+  return (
+    <div className={cn(SETTINGS_CARD_CLASS_NAME, "mb-8")}>
+      <div className="flex items-center justify-between gap-6">
+        <div>
+          <div className="text-base font-medium">{m.settings_compute_routing_title()}</div>
+          <p className="mt-[3px] mb-0 text-sm leading-relaxed text-text">{m.settings_compute_routing_description()}</p>
+        </div>
+        <Switch
+          type="button"
+          checked={enabled}
+          aria-label={m.settings_compute_routing_title()}
+          disabled={!query.data || mutation.isPending}
+          onClick={() => void save({ enabled: !enabled })}
+        />
+      </div>
+      {targets.length > 0 && (
+        <ul className="mt-3 mb-0 flex flex-col gap-2 p-0 list-none">
+          {targets.map((target) => (
+            <li key={target.id} className="flex items-center gap-2.5 text-sm">
+              <BackendLogo kind={TARGET_KIND[target.id]} size={18} />
+              <span className="font-medium">{TARGET_LABELS[target.id]()}</span>
+              <span className="min-w-0 flex-1 truncate text-subtext">{target.summary}</span>
+              <Switch
+                type="button"
+                checked={!excluded.includes(target.id)}
+                aria-label={m.settings_compute_routing_use({ backend: TARGET_LABELS[target.id]() })}
+                disabled={!query.data || !enabled || mutation.isPending}
+                onClick={() =>
+                  void save({
+                    excluded: excluded.includes(target.id)
+                      ? excluded.filter((id) => id !== target.id)
+                      : [...excluded, target.id],
+                  })
+                }
+              />
+            </li>
+          ))}
+        </ul>
+      )}
+      {enabled && usable.length < 2 && <p className="mt-3 mb-0 text-sm text-subtext">{m.settings_compute_routing_needs_two()}</p>}
       {error && <div className="error">{error}</div>}
     </div>
   );
@@ -1663,6 +1732,21 @@ function ColabSection() {
     }
   }
 
+  const [stopping, setStopping] = useState<string | null>(null);
+  async function stopRuntime(endpoint: string) {
+    if (!window.confirm(m.settings_colab_stop_confirm())) return;
+    setStopping(endpoint);
+    setError(null);
+    try {
+      await stopColabRuntime(endpoint);
+      queryClient.setQueryData(options.queryKey, await getColabSettings(undefined, true));
+    } catch (err) {
+      setError(err instanceof Error ? err.message : String(err));
+    } finally {
+      setStopping(null);
+    }
+  }
+
   const loadError = error ?? query.error?.message ?? null;
   const account = s?.account ?? null;
   const tier = colabTierLabel(account?.tier ?? null);
@@ -1714,6 +1798,37 @@ function ColabSection() {
             </div>
           )}
           {account?.error && <p className="mt-3 mb-0 text-sm text-subtext">{account.error}</p>}
+          {s.runtimes && (
+            <div className="mt-4">
+              <p className="mt-0 mb-2 text-sm font-medium text-subtext">{m.settings_colab_runtimes()}</p>
+              {s.runtimes.length === 0 ? (
+                <p className="m-0 text-sm text-subtext">{m.settings_colab_no_runtimes()}</p>
+              ) : (
+                <ul className="m-0 flex list-none flex-col gap-1.5 p-0 text-sm">
+                  {s.runtimes.map((runtime) => (
+                    <li key={runtime.endpoint} className="flex items-center gap-3 rounded-md border border-border px-3 py-2">
+                      <code>{runtime.accelerator ?? "?"}{runtime.highMem ? ":highmem" : ""}</code>
+                      <span className="min-w-0 flex-1 truncate text-subtext">
+                        {runtime.orphaned
+                          ? m.settings_colab_runtime_orphaned()
+                          : runtime.runId
+                            ? m.settings_colab_runtime_run({ run: runtime.runId.slice(0, 8), status: runtime.runStatus ?? "?" })
+                            : runtime.name ?? m.settings_colab_runtime_external()}
+                      </span>
+                      <Button
+                        size="small"
+                        disabled={stopping === runtime.endpoint}
+                        onClick={() => void stopRuntime(runtime.endpoint)}
+                      >
+                        {stopping === runtime.endpoint ? <Spinner /> : <Square size={12} />} {m.settings_colab_stop()}
+                      </Button>
+                    </li>
+                  ))}
+                </ul>
+              )}
+              <p className="mt-2 mb-0 text-sm text-subtext">{m.settings_colab_auto_release()}</p>
+            </div>
+          )}
           <div className="mt-4 overflow-x-auto">
             <table className="colab-accelerators w-full border-collapse text-sm">
               <thead>
@@ -2407,6 +2522,7 @@ function ComputeTab({
             projectId={project?.id}
             onSaved={apply}
           />
+          <ComputeRoutingCard targets={configuredTargets} />
           <section className="mb-8">
             <h2 className="mt-0 mx-0 mb-2 text-lg">{m.settings_page_ready_to_use()}</h2>
             <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-3">

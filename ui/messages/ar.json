@@ -1323,5 +1323,17 @@
   "settings_colab_rates_note": "تشير ≈ إلى تقدير من جهة خارجية: لا ينشر Colab أسعار كل وحدة GPU. بعد تشغيل وحدة GPU على حسابك يحل معدلها المقيس محل التقدير. تفترض الساعات المتبقية إنفاق الرصيد كله على تلك الوحدة.",
   "settings_colab_cli": "واجهة Colab CLI",
   "settings_models_recommended": "{model} و{count} نماذج أخرى متاحة",
-  "settings_models_recommended_hint": "تستخدم المحادثات الجديدة والوكلاء المساعدون على هذه الأداة أقوى نموذج لديها ما لم تختر غيره."
+  "settings_models_recommended_hint": "تستخدم المحادثات الجديدة والوكلاء المساعدون على هذه الأداة أقوى نموذج لديها ما لم تختر غيره.",
+  "settings_colab_runtimes": "بيئات التشغيل العاملة",
+  "settings_colab_runtime_run": "التشغيل {run} · {status}",
+  "settings_colab_runtime_orphaned": "انتهى تشغيلها؛ سيحررها OpenResearch قريبًا",
+  "settings_colab_runtime_external": "لم يبدأه OpenResearch",
+  "settings_colab_stop": "إيقاف",
+  "settings_colab_stop_confirm": "هل تريد إيقاف بيئة التشغيل هذه؟ سيضيع كل ما يعمل عليها، بما في ذلك دفتر مفتوح أو تشغيل.",
+  "settings_colab_no_runtimes": "لا توجد بيئة تشغيل عاملة، لذا لا تُستهلك وحدات حوسبة.",
+  "settings_colab_auto_release": "يحرر كل تشغيل بيئته فور انتهاء أمره. وكل 5 دقائق يحرر OpenResearch أيضًا أي بيئة تركها تشغيل منتهٍ. أما البيئات التي لم يبدأها فلا تتوقف إلا عند الضغط على إيقاف.",
+  "settings_compute_routing_title": "دع الوكيل يختار المزوّد",
+  "settings_compute_routing_description": "بدلًا من استخدام الافتراضي دائمًا، يختار الوكيل الواجهة الخلفية ووحدة GPU لكل تشغيل من بين المزوّدين المفعّلين، حسب الملاءمة والسعر والتوفر. يمكن تشغيل التجارب المستقلة على مزوّدين مختلفين في الوقت نفسه.",
+  "settings_compute_routing_use": "السماح للوكيل باستخدام {backend}",
+  "settings_compute_routing_needs_two": "اربط أو فعّل واجهتين خلفيتين على الأقل ليختار الوكيل بينهما."
 }

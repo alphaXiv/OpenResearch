@@ -670,6 +670,10 @@ fn router(state: AppState, remote_auth: Option<RemoteAuth>) -> Router {
             "/api/settings/cross-harness",
             get(cross_harness_settings).post(set_cross_harness_settings),
         )
+        .route(
+            "/api/settings/compute-routing",
+            get(compute_routing_settings).post(set_compute_routing_settings),
+        )
         .route("/api/update/install-cli", post(install_cli))
         .route("/api/settings/ui-state", get(ui_state).post(set_ui_state))
         .route(
@@ -712,6 +716,10 @@ fn router(state: AppState, remote_auth: Option<RemoteAuth>) -> Router {
         .route("/api/settings/compute/default", post(set_compute_default))
         .route("/api/settings/local", get(local_machine_settings))
         .route("/api/settings/colab", get(colab_settings))
+        .route(
+            "/api/settings/colab/runtimes/stop",
+            post(stop_colab_runtime),
+        )
         .route("/api/settings/openresearch", get(openresearch_settings))
         .route("/api/settings/openresearch/login", get(openresearch_login))
         .route("/api/settings/commands/run", get(run_settings_command))
@@ -4370,6 +4378,13 @@ fn spawn_background_tasks(check_updates: bool) {
             crate::telemetry::retry_outbox();
         }
     });
+    // A Colab runtime outliving its run keeps spending the user's compute units.
+    tokio::spawn(async {
+        loop {
+            crate::jobs::colab_runtimes::reap_orphans().await;
+            tokio::time::sleep(crate::jobs::colab_runtimes::REAP_INTERVAL).await;
+        }
+    });
 }
 
 /// Requests and terminals in flight, which an automatic restart would cut off.
@@ -5315,6 +5330,52 @@ async fn set_cross_harness_settings(Json(req): Json<SetCrossHarnessReq>) -> ApiR
     })
     .await
     .map_err(|e| ApiError::from(anyhow!("cross-harness task failed: {e}")))?
+}
+
+fn compute_routing_settings_json() -> Value {
+    json!({
+        "enabled": crate::config::compute_routing(),
+        "excluded": crate::config::compute_routing_excluded(),
+    })
+}
+
+async fn compute_routing_settings() -> ApiResult {
+    Ok(Json(compute_routing_settings_json()))
+}
+
+#[derive(Deserialize)]
+struct SetComputeRoutingReq {
+    enabled: Option<bool>,
+    /// Replaces the whole list of backends kept out of routing.
+    excluded: Option<Vec<String>>,
+}
+
+/// Takes effect for each session at its next playbook rewrite.
+async fn set_compute_routing_settings(Json(req): Json<SetComputeRoutingReq>) -> ApiResult {
+    tokio::task::spawn_blocking(move || {
+        let save = |error: crate::error::Error| {
+            ApiError::from(anyhow!(
+                "could not save the compute routing setting: {error}"
+            ))
+        };
+        if let Some(excluded) = req.excluded {
+            if let Some(unknown) = excluded
+                .iter()
+                .find(|id| !crate::local::BACKENDS.contains(&id.as_str()))
+            {
+                return Err(ApiError::from(anyhow!(
+                    "Unknown compute backend {unknown}."
+                )));
+            }
+            crate::config::set_compute_routing_excluded(excluded).map_err(save)?;
+        }
+        if let Some(enabled) = req.enabled {
+            crate::config::set_compute_routing(enabled).map_err(save)?;
+        }
+        Ok(Json(compute_routing_settings_json()))
+    })
+    .await
+    .map_err(|e| ApiError::from(anyhow!("compute routing task failed: {e}")))?
 }
 
 #[derive(Deserialize)]

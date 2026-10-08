@@ -175,6 +175,13 @@ pub(crate) struct Settings {
     /// empty = every harness may be used.
     #[serde(default)]
     pub cross_harness_excluded: Vec<String>,
+    /// Let agents pick the backend per run among the user's connected
+    /// providers instead of always using the default. Absent = off.
+    #[serde(default)]
+    pub compute_routing: Option<bool>,
+    /// Backend ids the user kept out of per-run routing.
+    #[serde(default)]
+    pub compute_routing_excluded: Vec<String>,
     /// Surfaces whose `first_action` event has already been sent, so a restart
     /// cannot re-report a later action as the user's first one.
     #[serde(default)]
@@ -327,6 +334,26 @@ pub(crate) fn cross_harness_review() -> bool {
 
 pub(crate) fn set_cross_harness_review(enabled: bool) -> std::io::Result<()> {
     mutate_settings(|settings| settings.cross_harness_review = Some(enabled))
+}
+
+pub(crate) fn compute_routing() -> bool {
+    load_settings()
+        .and_then(|settings| settings.compute_routing)
+        .unwrap_or(false)
+}
+
+pub(crate) fn set_compute_routing(enabled: bool) -> std::io::Result<()> {
+    mutate_settings(|settings| settings.compute_routing = Some(enabled))
+}
+
+pub(crate) fn compute_routing_excluded() -> Vec<String> {
+    load_settings()
+        .map(|settings| settings.compute_routing_excluded)
+        .unwrap_or_default()
+}
+
+pub(crate) fn set_compute_routing_excluded(excluded: Vec<String>) -> std::io::Result<()> {
+    mutate_settings(|settings| settings.compute_routing_excluded = excluded)
 }
 
 pub(crate) fn cross_harness_excluded() -> Vec<String> {
