@@ -67,6 +67,8 @@ import { MediaToolbarSlot } from "./mediaToolbar";
 import { Md } from "./Md";
 import { Button, IconButton, IconButtonLink, Spinner, showAlert } from "./ui";
 
+const NO_ARTIFACT_ENTRIES: ArtifactEntry[] = [];
+
 export interface FileScrollPosition {
   top: number;
   left: number;
@@ -158,7 +160,7 @@ export function FileViewer({
   onLineScrollRequestHandled,
   onEdit,
   artifactVersion,
-  artifactEntries = [],
+  artifactEntries = NO_ARTIFACT_ENTRIES,
   bufferSession,
   remote = false,
   restored = false,
@@ -280,6 +282,19 @@ export function FileViewer({
       return markdownTargetUrl(rawFileUrl(target.path), target);
     },
     [isAbsolute, parentFolder, rawFileUrl],
+  );
+  // Stable so Md's memo holds; callers pass a fresh `onOpenFile` each render.
+  const onOpenFileRef = useRef(onOpenFile);
+  onOpenFileRef.current = onOpenFile;
+  const openMarkdownFile = useCallback(
+    (
+      path: string,
+      _line: number | undefined,
+      _exp: string | undefined,
+      _ref: string | undefined,
+      intent: TabOpenIntent,
+    ) => onOpenFileRef.current?.(path, sessionId, gitRef, intent),
+    [gitRef, sessionId],
   );
   const mediaKind = mediaPreviewKind(data?.presentation);
   const viaArtifacts = loaded?.source === "artifact" && !isArtifacts;
@@ -898,11 +913,7 @@ export function FileViewer({
                 text={data.content}
                 resolveFilePath={resolveMarkdownFilePath}
                 resolveImageSrc={resolveAssetSrc}
-                onOpenFile={
-                  onOpenFile &&
-                  ((p, _line, _exp, _ref, intent) =>
-                    onOpenFile(p, sessionId, gitRef, intent))
-                }
+                onOpenFile={onOpenFile && openMarkdownFile}
               />
             )}
           </div>

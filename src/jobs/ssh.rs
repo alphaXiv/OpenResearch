@@ -654,17 +654,9 @@ pub async fn stage_source(
 ) -> Result<String> {
     let dir = format!(".orx/runs/{run_id}");
     let cache = format!(".orx/source/{digest}.tar");
-    let present = ssh_run(
-        target,
-        &format!("test -f \"$HOME/{cache}\" && echo present || true"),
-        None,
-    )
-    .await?;
-    if present.trim() != "present" {
-        let upload = format!(
-            "umask 077; mkdir -p \"$HOME/.orx/source\"; \
-             tmp=\"$HOME/{cache}.tmp.$$\"; cat > \"$tmp\" && mv \"$tmp\" \"$HOME/{cache}\""
-        );
+    let size = tokio::fs::metadata(archive).await?.len();
+    let (check, upload) = source_cache_commands(&cache, size);
+    if ssh_run(target, &check, None).await?.trim() != "present" {
         ssh_run_file(target, &upload, archive).await?;
     }
     if let Some(container) = container {
@@ -686,6 +678,21 @@ pub async fn stage_source(
         .await?;
     }
     Ok(dir)
+}
+
+/// Remote (check, upload) scripts for a cached source tar. An interrupted upload
+/// still lets `cat` exit 0 on EOF, so both sides require the exact byte length;
+/// a short cached file reads as absent and is replaced by the next upload.
+fn source_cache_commands(cache: &str, size: u64) -> (String, String) {
+    let check = format!(
+        "f=\"$HOME/{cache}\"; test -f \"$f\" && test $(wc -c < \"$f\") -eq {size} && echo present || true"
+    );
+    let upload = format!(
+        "umask 077; mkdir -p \"$HOME/.orx/source\"; tmp=\"$HOME/{cache}.tmp.$$\"; \
+         cat > \"$tmp\" && test $(wc -c < \"$tmp\") -eq {size} && mv \"$tmp\" \"$HOME/{cache}\" \
+         || {{ rm -f \"$tmp\"; echo \"source archive upload incomplete\" >&2; exit 1; }}"
+    );
+    (check, upload)
 }
 
 /// Single-quote a value for safe embedding in the remote bash script.
@@ -873,6 +880,7 @@ pub async fn stream_logs(
     dir: &str,
     skip: u64,
     _idle: Duration,
+    drain: bool,
     sink: &mut (dyn FnMut(&str) + Send),
 ) -> Result<u64> {
     let cmd = format!(
@@ -885,9 +893,7 @@ pub async fn stream_logs(
         .strip_prefix("__ORX_LOG_START__\n")
         .ok_or_else(|| anyhow!("unexpected SSH log output: {out}"))?;
     let mut seen = skip;
-    // A trailing newline yields a final empty element under split('\n'); use
-    // lines() which ignores it, matching the "one line = one log line" contract.
-    for line in out.lines() {
+    for line in super::log_lines(out, drain) {
         seen += 1;
         sink(line);
     }
@@ -984,6 +990,38 @@ mod tests {
         ] {
             assert_eq!(parse_job_state(output).unwrap().stage, stage);
         }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn source_cache_rejects_and_replaces_truncated_archives() {
+        use std::io::Write;
+        let home = crate::local::git::TemporaryDirectory::new("orx-ssh-source-cache").unwrap();
+        let (check, upload) = source_cache_commands(".orx/source/d.tar", 6);
+        let sh = |script: &str, input: &[u8]| {
+            let mut child = std::process::Command::new("sh")
+                .args(["-c", script])
+                .env("HOME", home.path())
+                .stdin(Stdio::piped())
+                .stdout(Stdio::piped())
+                .spawn()
+                .unwrap();
+            child.stdin.take().unwrap().write_all(input).unwrap();
+            let out = child.wait_with_output().unwrap();
+            (out.status.success(), String::from_utf8(out.stdout).unwrap())
+        };
+        let cached = home.path().join(".orx/source/d.tar");
+        assert!(!sh(&upload, b"abc").0);
+        assert!(!cached.exists());
+        std::fs::write(&cached, b"abc").unwrap();
+        assert_eq!(sh(&check, b"").1, "");
+        assert!(sh(&upload, b"abcdef").0);
+        assert_eq!(sh(&check, b"").1.trim(), "present");
+        assert_eq!(std::fs::read(&cached).unwrap(), b"abcdef");
+        assert_eq!(
+            std::fs::read_dir(cached.parent().unwrap()).unwrap().count(),
+            1
+        );
     }
 
     #[cfg(unix)]

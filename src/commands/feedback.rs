@@ -24,6 +24,9 @@ struct Context {
     #[serde(skip_serializing_if = "Option::is_none")]
     chat_session_id: Option<String>,
     cli_version: &'static str,
+    /// The `orx up` that spawned this agent, which may differ from `cli_version`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    backend_version: Option<String>,
     os: &'static str,
     arch: &'static str,
     build_channel: &'static str,
@@ -45,6 +48,9 @@ pub async fn run(args: crate::FeedbackArgs) -> Result<()> {
             harness: crate::local::chat::launching_chat_harness(),
             chat_session_id: crate::local::chat::launching_chat_session(),
             cli_version: env!("CARGO_PKG_VERSION"),
+            backend_version: std::env::var(crate::local::chat::UP_VERSION_ENV)
+                .ok()
+                .filter(|version| !version.is_empty()),
             os: std::env::consts::OS,
             arch: std::env::consts::ARCH,
             build_channel: crate::telemetry::build_channel(),
@@ -70,6 +76,7 @@ mod tests {
                 harness: Some("codex".into()),
                 chat_session_id: None,
                 cli_version: "0.2.8",
+                backend_version: Some("0.2.6".into()),
                 os: "macos",
                 arch: "aarch64",
                 build_channel: "source",
@@ -85,6 +92,7 @@ mod tests {
                 "context": {
                     "harness": "codex",
                     "cliVersion": "0.2.8",
+                    "backendVersion": "0.2.6",
                     "os": "macos",
                     "arch": "aarch64",
                     "buildChannel": "source",

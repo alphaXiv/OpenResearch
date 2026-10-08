@@ -56,7 +56,7 @@ pub async fn run() -> Result<()> {
     let env = GateEnv::from_env()?;
     // The long-poll deliberately blocks for as long as the user thinks; only
     // connecting is bounded. (orx up itself times pending cards out.)
-    let http = reqwest::Client::builder()
+    let http = crate::net::loopback_client()
         .connect_timeout(std::time::Duration::from_secs(3))
         .build()
         .map_err(|e| anyhow!("http client: {e}"))?;
@@ -310,7 +310,7 @@ async fn antigravity_decision(input: &str) -> Result<Value> {
         return Ok(json!({"decision": "allow"}));
     }
     let (tool, input) = crate::local::harness::antigravity::normalize_tool(name, Some(args));
-    let http = reqwest::Client::builder()
+    let http = crate::net::loopback_client()
         .connect_timeout(std::time::Duration::from_secs(3))
         .build()?;
     let decision = relay(

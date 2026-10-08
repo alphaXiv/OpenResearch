@@ -69,8 +69,11 @@ OpenResearch のマネージドコンピュートを利用できます。
 **お気に入りのコーディングエージェントを使う。** OpenResearch は次のツールにネイティブ対応しています： <img src=".github/readme-assets/claude.svg" alt="" width="18" height="18" align="texttop" /> Claude Code,
 <img src=".github/readme-assets/codex.svg" alt="" width="18" height="18" align="texttop" /> Codex,
 <img src=".github/readme-assets/opencode.svg" alt="" width="18" height="18" align="texttop" /> OpenCode,
-<img src=".github/readme-assets/cursor.svg" alt="" width="18" height="18" align="texttop" /> Cursor、
-<img src=".github/readme-assets/antigravity.svg" alt="" width="18" height="18" align="texttop" /> Google Antigravity.
+<img src=".github/readme-assets/cursor.svg" alt="" width="18" height="18" align="texttop" /> Cursor,
+<img src=".github/readme-assets/antigravity.svg" alt="" width="18" height="18" align="texttop" /> Google Antigravity,
+<img src=".github/readme-assets/kimi.svg" alt="" width="18" height="18" align="texttop" /> Kimi Code,
+<img src=".github/readme-assets/minimax.svg" alt="" width="18" height="18" align="texttop" /> MiniMax Code、
+<img src=".github/readme-assets/zcode.svg" alt="" width="18" height="18" align="texttop" /> ZCode.
 OpenCode では、次のツールを通じて[ローカルモデルを使う](docs/local-models.md)こともできます：
 <img src=".github/readme-assets/lmstudio.svg" alt="" width="18" height="18" align="texttop" /> LM Studio,
 <img src=".github/readme-assets/omlx.svg" alt="" width="18" height="18" align="texttop" /> oMLX,

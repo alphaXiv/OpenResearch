@@ -19,8 +19,10 @@
   `/plan`. There is no Ask: MiniMax's own `default` mode ran commands outside
   the project without asking.
 - **ZCode**: uses the runtime bundled with the ZCode desktop app (or a `zcode`
-  CLI on PATH). Modes: Edit, YOLO, and `/plan`. Print mode cannot ask for
-  approval, so there is no Ask. The model is ZCode's default model.
+  CLI on PATH). Modes: Edit (the default), YOLO, and `/plan`. Print mode
+  cannot ask for approval, so there is no Ask. `/plan` runs in ZCode's
+  `build` mode, which then denies every tool with side effects (`Write`,
+  `Edit`, `Bash`, the Node REPL). The model is ZCode's default model.
   - Signing in to the app is not enough: outside the app the runtime needs its
     own sign-in, `zcode login` (Settings → Harnesses → ZCode → Sign in), which
     saves the Coding Plan key and a default model. It covers the Z.ai

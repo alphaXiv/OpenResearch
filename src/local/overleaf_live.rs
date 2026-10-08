@@ -1538,7 +1538,7 @@ async fn run_connection(config: &Config, shared: &Shared) -> Ended {
         "{origin}/socket.io/1/?projectId={}&t={now}",
         config.project.id
     );
-    let client = match reqwest::Client::builder()
+    let client = match crate::net::remote_client()
         .timeout(Duration::from_secs(20))
         .build()
     {

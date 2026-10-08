@@ -7,7 +7,7 @@ use tokio::process::Command;
 
 use crate::error::{anyhow, Result};
 
-const UA: &str = concat!("orx/", env!("CARGO_PKG_VERSION"));
+pub(crate) const UA: &str = concat!("orx/", env!("CARGO_PKG_VERSION"));
 pub const SHALLOW_CLONE_THRESHOLD_KB: u64 = 250 * 1024;
 
 #[derive(Clone, Copy)]
@@ -130,7 +130,7 @@ pub async fn available_project_repo_name(repo: &str) -> Result<String> {
 
 pub async fn public_repo_size_kb(url: &str) -> Option<u64> {
     let (owner, repo) = super::git::github_repository(url)?;
-    let client = reqwest::Client::builder()
+    let client = crate::net::remote_client()
         .timeout(Duration::from_secs(10))
         .build()
         .ok()?;

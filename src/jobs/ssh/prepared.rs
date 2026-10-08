@@ -1,5 +1,5 @@
 use std::collections::{BTreeMap, BTreeSet};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::{LazyLock, RwLock};
 
 use serde::{Deserialize, Serialize};
@@ -51,6 +51,53 @@ fn value<'a>(output: &'a str, key: &str) -> Result<&'a str> {
                 .and_then(|rest| rest.strip_prefix(' '))
         })
         .ok_or_else(|| anyhow!("OpenSSH did not resolve {key}"))
+}
+
+fn unresolved_message(key: &str, ssh: Option<&Path>, version: Option<&str>) -> String {
+    let mut message = format!(
+        "OpenSSH did not resolve {key} (ssh: {}, version: {})",
+        ssh.map_or("not found on PATH".into(), |path| path
+            .display()
+            .to_string()),
+        version.unwrap_or("unknown")
+    );
+    if !version.is_some_and(|version| version.starts_with("OpenSSH_")) {
+        message.push_str("; a non-OpenSSH `ssh` earlier on PATH is the likely cause");
+    }
+    message
+}
+
+async fn unresolved(key: &str) -> crate::error::Error {
+    let version = ssh_version("ssh").await;
+    anyhow!(unresolved_message(
+        key,
+        crate::local::shell_env::find_on_process_path("ssh").as_deref(),
+        version.as_deref()
+    ))
+}
+
+async fn ssh_version(program: &str) -> Option<String> {
+    let version = Command::new(program)
+        .arg("-V")
+        .stdin(std::process::Stdio::null())
+        .kill_on_drop(true)
+        .output();
+    tokio::time::timeout(std::time::Duration::from_secs(10), version)
+        .await
+        .ok()
+        .and_then(Result::ok)
+        .and_then(|output| {
+            // OpenSSH prints its version to stderr; a wrapper may use stdout instead.
+            [output.stderr, output.stdout]
+                .into_iter()
+                .find_map(|stream| {
+                    String::from_utf8_lossy(&stream)
+                        .lines()
+                        .map(str::trim)
+                        .find(|line| !line.is_empty())
+                        .map(str::to_owned)
+                })
+        })
 }
 
 pub(super) fn probe_args() -> Vec<String> {
@@ -215,7 +262,10 @@ async fn resolve(dest: &str, config: Option<&std::path::Path>) -> Result<Prepare
             "Cannot safely prepare SSH alias {host}; use a plain host alias"
         ));
     }
-    let native_id = value(&first.output, "controlpath")?
+    let Ok(native_id) = value(&first.output, "controlpath") else {
+        return Err(unresolved("controlpath").await);
+    };
+    let native_id = native_id
         .strip_prefix("/tmp/orx-ssh-probe-")
         .filter(|name| name.len() == 40 && name.bytes().all(|byte| byte.is_ascii_hexdigit()))
         .ok_or_else(|| anyhow!("OpenSSH did not expand the connection identifier for {host}"))?
@@ -310,6 +360,53 @@ async fn resolve(dest: &str, config: Option<&std::path::Path>) -> Result<Prepare
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn ssh_version_prefers_stderr_and_falls_back_to_stdout() {
+        use std::os::unix::fs::PermissionsExt;
+        let temp = crate::local::git::TemporaryDirectory::new("orx-ssh-version").unwrap();
+        let stub = |name: &str, body: &str| {
+            let path = temp.path().join(name);
+            std::fs::write(&path, format!("#!/bin/sh\n{body}\n")).unwrap();
+            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+            path.to_string_lossy().into_owned()
+        };
+        let both = stub("both", "echo usage; echo; echo 'OpenSSH_9.6p1' >&2");
+        let stdout_only = stub("stdout", "echo; echo 'ssh-wrapper 1.0'; exit 2");
+        let silent = stub("silent", "exit 1");
+        assert_eq!(ssh_version(&both).await.as_deref(), Some("OpenSSH_9.6p1"));
+        assert_eq!(
+            ssh_version(&stdout_only).await.as_deref(),
+            Some("ssh-wrapper 1.0")
+        );
+        assert_eq!(ssh_version(&silent).await, None);
+        assert_eq!(ssh_version("/nonexistent/orx-test-ssh").await, None);
+    }
+
+    #[test]
+    fn unresolved_key_names_the_ssh_binary_and_version() {
+        assert_eq!(
+            unresolved_message(
+                "controlpath",
+                Some(Path::new("/home/me/bin/ssh")),
+                Some("ssh-wrapper 1.0")
+            ),
+            "OpenSSH did not resolve controlpath (ssh: /home/me/bin/ssh, version: ssh-wrapper 1.0); a non-OpenSSH `ssh` earlier on PATH is the likely cause"
+        );
+        assert_eq!(
+            unresolved_message("controlpath", None, None),
+            "OpenSSH did not resolve controlpath (ssh: not found on PATH, version: unknown); a non-OpenSSH `ssh` earlier on PATH is the likely cause"
+        );
+        assert_eq!(
+            unresolved_message(
+                "controlpath",
+                Some(Path::new("/usr/bin/ssh")),
+                Some("OpenSSH_9.6p1 Ubuntu-3ubuntu13")
+            ),
+            "OpenSSH did not resolve controlpath (ssh: /usr/bin/ssh, version: OpenSSH_9.6p1 Ubuntu-3ubuntu13)"
+        );
+    }
 
     #[tokio::test]
     async fn configured_routes_have_distinct_identities_and_remain_pinned_after_edits() {

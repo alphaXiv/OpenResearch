@@ -143,7 +143,7 @@ fn archive(repo: &Path, revision: &str, format: &str, destination: &Path) -> Res
     Err(anyhow!(
         "git archive failed for {}: {}",
         revision,
-        String::from_utf8_lossy(&output.stderr).trim()
+        crate::local::git::failure_detail(&output)
     ))
 }
 
@@ -630,11 +630,33 @@ backend_adapter!(
     "SSH tar stream",
     false,
     preflight | args | {
-        if args.flavor.is_none() {
+        let Some(flavor) = args.flavor.as_deref() else {
             return Ok(not_ready("OpenResearch requires --flavor."));
-        }
-        if crate::config::load_credentials().await?.is_none() {
+        };
+        let Some(creds) = crate::config::load_credentials().await? else {
             return Ok(not_ready("OpenResearch requires `orx login`."));
+        };
+        // An unknown GPU id would only 400 after the run is recorded as failed.
+        if let crate::client::SandboxTarget::New { gpu, .. } =
+            crate::jobs::openresearch::parse_flavor(flavor, 0, None)?
+        {
+            if let Ok(Ok(catalog)) = tokio::time::timeout(
+                std::time::Duration::from_secs(10),
+                crate::client::list_catalog(&creds),
+            )
+            .await
+            {
+                let mut ids: Vec<_> = catalog.offers.into_iter().map(|o| o.gpu).collect();
+                ids.sort();
+                ids.dedup();
+                if !ids.is_empty() && !ids.contains(&gpu) {
+                    return Ok(not_ready(format!(
+                        "No OpenResearch offers for GPU '{gpu}'. Available now: {}. \
+                         See `orx compute`.",
+                        ids.join(", ")
+                    )));
+                }
+            }
         }
         ready()
     },
@@ -757,6 +779,7 @@ pub async fn submit(args: &crate::ExpRunArgs) -> Result<StoredRun> {
             "{}",
             preflight
                 .detail
+                .filter(|detail| !detail.trim().is_empty())
                 .unwrap_or_else(|| "Compute backend is not ready.".to_string())
         ));
     }
