@@ -4447,6 +4447,7 @@ export function ChatPanel({
     setDraft(restored.draft);
     setAttachments(restored.attachments);
     setAnnotations(restored.annotations);
+    setImageRefusedFor(null);
     return () => {
       const stashed = composerStashContent(composerLiveRef.current, composerPrefill);
       if (stashed) composerStashRef.current.set(stashKey, stashed);
@@ -4709,6 +4710,7 @@ export function ChatPanel({
     !!noImageInputError && attachments.some((a) => a.mediaType.startsWith("image/"));
   const imageRefused = !!selectedModel && imageRefusedFor === selectedModel.id;
   const imageInputError = imageInputBlocked || imageRefused ? noImageInputError : null;
+  useEffect(() => setImageRefusedFor(null), [selectedModel?.id]);
 
   // Editing the pickers: every change updates the sticky global preference —
   // the config a "New session" composer opens with is whatever the user chose
