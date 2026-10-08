@@ -1620,6 +1620,15 @@ impl Store {
         Ok(())
     }
 
+    /// Keeps any failure message the supervisor already recorded.
+    pub fn set_cancel_reason(&self, run_id: &str, reason: &str) -> Result<()> {
+        self.conn.execute(
+            "UPDATE runs SET result_markdown = ?2, updated_at = ?3 WHERE id = ?1 AND result_markdown IS NULL",
+            params![run_id, reason, now_ms()],
+        )?;
+        Ok(())
+    }
+
     pub fn set_result_markdown(&self, run_id: &str, markdown: &str) -> Result<()> {
         self.conn.execute(
             "UPDATE runs SET result_markdown = ?2, updated_at = ?3 WHERE id = ?1",

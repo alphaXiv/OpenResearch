@@ -224,15 +224,31 @@ pub(crate) fn spawn_detached_supervise(run_id: &str) -> Result<()> {
     Ok(())
 }
 
+/// Who asked `orx exp cancel` to stop a run, recorded on the run.
+pub(crate) fn exp_cancel_reason(chat_session_id: Option<&str>) -> String {
+    match chat_session_id {
+        Some(id) => format!("Cancel requested by agent session {id} with `orx exp cancel`."),
+        None => "Cancel requested with `orx exp cancel`.".into(),
+    }
+}
+
 /// Persist cancel intent and ensure an orphaned run gets a fresh supervisor.
-pub(crate) fn request_local_run_cancel(store: &Store, run_id: &str) -> Result<()> {
+pub(crate) fn request_local_run_cancel(store: &Store, run_id: &str, reason: &str) -> Result<()> {
     let lock_path = crate::store::log_path(run_id).with_extension("cancel.lock");
-    request_local_run_cancel_with(store, run_id, &lock_path, || {}, spawn_detached_supervise)
+    request_local_run_cancel_with(
+        store,
+        run_id,
+        reason,
+        &lock_path,
+        || {},
+        spawn_detached_supervise,
+    )
 }
 
 fn request_local_run_cancel_with(
     store: &Store,
     run_id: &str,
+    reason: &str,
     lock_path: &std::path::Path,
     before_lock: impl FnOnce(),
     spawn: impl FnOnce(&str) -> Result<()>,
@@ -257,6 +273,9 @@ fn request_local_run_cancel_with(
             ));
         }
         return Err(spawn_err);
+    }
+    if !prior {
+        store.set_cancel_reason(run_id, reason)?;
     }
     Ok(())
 }
@@ -297,12 +316,43 @@ mod tests {
         let result = request_local_run_cancel_with(
             &store,
             &run.id,
+            "test",
             &lock_path,
             || {},
             |_| Err(anyhow!("synthetic spawn failure")),
         );
         assert!(result.is_err());
         assert!(!store.get_run(&run.id).unwrap().unwrap().cancel_requested);
+
+        drop(store);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn cancel_records_the_first_requester_without_clobbering_failures() {
+        let dir =
+            std::env::temp_dir().join(format!("orx-cancel-reason-test-{}", uuid::Uuid::new_v4()));
+        let store = Store::open_at(dir.clone()).unwrap();
+        let lock_path = dir.join("cancel.lock");
+        let failed = StoredRun {
+            id: "run-failed".into(),
+            result_markdown: Some("Job failed: boom".into()),
+            ..run_fixture()
+        };
+        store.upsert_run(&run_fixture()).unwrap();
+        store.upsert_run(&failed).unwrap();
+
+        for (run_id, reason) in [
+            ("run-1", "first"),
+            ("run-1", "second"),
+            ("run-failed", "first"),
+        ] {
+            request_local_run_cancel_with(&store, run_id, reason, &lock_path, || {}, |_| Ok(()))
+                .unwrap();
+        }
+        let reason = |id| store.get_run(id).unwrap().unwrap().result_markdown;
+        assert_eq!(reason("run-1").as_deref(), Some("first"));
+        assert_eq!(reason("run-failed").as_deref(), Some("Job failed: boom"));
 
         drop(store);
         let _ = std::fs::remove_dir_all(dir);
@@ -331,6 +381,7 @@ mod tests {
             request_local_run_cancel_with(
                 &store,
                 "run-1",
+                "first",
                 &first_lock,
                 || {},
                 |_| {
@@ -350,6 +401,7 @@ mod tests {
             request_local_run_cancel_with(
                 &store,
                 "run-1",
+                "second",
                 &second_lock,
                 || attempted_tx.send(()).unwrap(),
                 |_| Ok(()),
@@ -367,7 +419,9 @@ mod tests {
 
         let store = Store::open_at(dir.clone()).unwrap();
         assert!(!completed_while_locked);
-        assert!(store.get_run("run-1").unwrap().unwrap().cancel_requested);
+        let run = store.get_run("run-1").unwrap().unwrap();
+        assert!(run.cancel_requested);
+        assert_eq!(run.result_markdown.as_deref(), Some("second"));
         drop(store);
         let _ = std::fs::remove_dir_all(dir);
     }

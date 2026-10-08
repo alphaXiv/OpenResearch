@@ -29,15 +29,18 @@ impl From<&StoredRun> for Run {
 
 impl Run {
     pub fn failure_detail(&self) -> Option<String> {
-        if self.status != "failed" {
-            return None;
-        }
-        match self.result_markdown.as_deref().map(str::trim) {
-            Some(reason) if !reason.is_empty() => Some(format!("reason: {reason}")),
-            _ => Some(format!(
+        let reason = self
+            .result_markdown
+            .as_deref()
+            .map(str::trim)
+            .filter(|reason| !reason.is_empty());
+        match (self.status.as_str(), reason) {
+            ("failed" | "cancelled", Some(reason)) => Some(format!("reason: {reason}")),
+            ("failed", None) => Some(format!(
                 "reason: — (no message recorded — see `orx logs {}`)",
                 self.id
             )),
+            _ => None,
         }
     }
 }
@@ -156,6 +159,22 @@ mod tests {
         assert_eq!(
             run.failure_detail().as_deref(),
             Some("reason: — (no message recorded — see `orx logs r1`)")
+        );
+    }
+
+    #[test]
+    fn cancelled_run_reports_who_requested_the_cancel() {
+        let run = Run::from(&stored_run(
+            "cancelled",
+            Some("Cancel requested from the dashboard."),
+        ));
+        assert_eq!(
+            run.failure_detail().as_deref(),
+            Some("reason: Cancel requested from the dashboard.")
+        );
+        assert_eq!(
+            Run::from(&stored_run("cancelled", None)).failure_detail(),
+            None
         );
     }
 

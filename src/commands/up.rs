@@ -1994,7 +1994,11 @@ async fn delete_project(State(state): State<AppState>, Path(id): Path<String>) -
     if !in_flight.is_empty() {
         let mut failures = Vec::new();
         for run in &in_flight {
-            if let Err(err) = crate::commands::exp::request_local_run_cancel(&store, &run.id) {
+            if let Err(err) = crate::commands::exp::request_local_run_cancel(
+                &store,
+                &run.id,
+                "Cancel requested because the project is being deleted.",
+            ) {
                 failures.push(format!("{}: {err}", run.id));
             }
         }
@@ -2249,7 +2253,11 @@ pub(crate) async fn harness_install_via_up(port: u16, harness: &str) -> Result<H
 
 pub(crate) async fn cancel_run_via_up(port: u16, run_id: &str) -> Result<()> {
     let response = authenticate_up_request(
-        local_client()?.post(format!("http://127.0.0.1:{port}/api/runs/{run_id}/cancel")),
+        local_client()?
+            .post(format!("http://127.0.0.1:{port}/api/runs/{run_id}/cancel"))
+            .json(&CancelRunReq {
+                chat_session_id: local::chat::launching_chat_session(),
+            }),
     )
     .send()
     .await
@@ -2352,7 +2360,18 @@ async fn list_instances() -> ApiResult {
     Ok(Json(json!({ "instances": instances })))
 }
 
-async fn cancel_run(State(state): State<AppState>, Path(id): Path<String>) -> ApiResult {
+/// Sent by `orx exp cancel`; the dashboard posts no body.
+#[derive(Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct CancelRunReq {
+    chat_session_id: Option<String>,
+}
+
+async fn cancel_run(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+    req: Option<Json<CancelRunReq>>,
+) -> ApiResult {
     reject_if_moving(&state)?;
     let store = Store::open()?;
     let run = local::local_run(&store, &id)?.ok_or_else(|| not_found("run"))?;
@@ -2360,8 +2379,12 @@ async fn cancel_run(State(state): State<AppState>, Path(id): Path<String>) -> Ap
     if is_terminal(&run.status) {
         return Ok(Json(json!({ "ok": true, "alreadyTerminal": true })));
     }
+    let reason = match req {
+        Some(Json(req)) => crate::commands::exp::exp_cancel_reason(req.chat_session_id.as_deref()),
+        None => "Cancel requested from the dashboard.".into(),
+    };
     let backend = backend_for_run(&run)?;
-    backend.cancel(&run).await.map_err(bad_request)?;
+    backend.cancel(&run, &reason).await.map_err(bad_request)?;
     Ok(Json(json!({ "ok": true })))
 }
 
