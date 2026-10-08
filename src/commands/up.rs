@@ -5903,7 +5903,8 @@ async fn relay_pty(
     session: PtySession,
     mut output: Option<&mut String>,
     size: &mut PtySize,
-    completed: Option<fn(&str) -> bool>,
+    // Sees the captured output after each chunk; `true` ends the relay as a success.
+    mut completed: Option<&mut (dyn FnMut(&str) -> bool + Send)>,
 ) -> Option<std::result::Result<portable_pty::ExitStatus, String>> {
     let PtySession {
         master,
@@ -5924,7 +5925,7 @@ async fn relay_pty(
                     if socket.send(Message::Binary(bytes.into())).await.is_err() {
                         return None;
                     }
-                    if let (Some(completed), Some(output)) = (completed, output.as_deref()) {
+                    if let (Some(completed), Some(output)) = (completed.as_deref_mut(), output.as_deref()) {
                         if completed(output) {
                             return Some(Ok(portable_pty::ExitStatus::with_exit_code(0)));
                         }

@@ -251,7 +251,7 @@
   "onboarding_choose_a_coding_agent_to_continue": "选择一个编程智能体以继续。",
   "onboarding_choose_one_or_more": "请选择一项或多项。",
   "onboarding_continue": "继续",
-  "onboarding_detecting_claude_code_codex_open_code": "正在检测 Claude Code、Codex、OpenCode、Cursor、Antigravity…",
+  "onboarding_detecting_claude_code_codex_open_code": "正在检测 Claude Code、Codex、OpenCode、Cursor、Antigravity、Kimi Code、MiniMax Code、ZCode…",
   "onboarding_e_g_i_work_on_sample_efficient_rl": "例如：我研究用于 LLM 后训练的样本高效强化学习，重点关注无需奖励模型的方法。",
   "onboarding_get_started": "开始使用",
   "onboarding_git_is_required_for_local_experiments_install_git": "本地实验需要 Git。请安装 Git，然后重新检查。",

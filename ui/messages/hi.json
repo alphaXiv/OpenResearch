@@ -251,7 +251,7 @@
   "onboarding_choose_a_coding_agent_to_continue": "जारी रखने के लिए एक कोडिंग एजेंट चुनें।",
   "onboarding_choose_one_or_more": "एक या अधिक चुनें।",
   "onboarding_continue": "जारी रखें",
-  "onboarding_detecting_claude_code_codex_open_code": "Claude Code, Codex, OpenCode, Cursor, Google Antigravity पहचाने जा रहे हैं…",
+  "onboarding_detecting_claude_code_codex_open_code": "Claude Code, Codex, OpenCode, Cursor, Google Antigravity, Kimi Code, MiniMax Code, ZCode पहचाने जा रहे हैं…",
   "onboarding_e_g_i_work_on_sample_efficient_rl": "जैसे: मैं LLM पोस्ट-ट्रेनिंग के लिए सैंपल-एफ़िशिएंट RL पर काम करता/करती हूँ, रिवॉर्ड-मॉडल-फ्री तरीकों पर ध्यान केंद्रित करते हुए।",
   "onboarding_get_started": "शुरू करें",
   "onboarding_git_is_required_for_local_experiments_install_git": "स्थानीय प्रयोगों के लिए Git ज़रूरी है। Git इंस्टॉल करें, फिर फिर से जाँचें।",

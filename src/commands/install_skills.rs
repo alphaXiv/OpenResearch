@@ -177,6 +177,8 @@ fn matches_agent(harness: &dyn Harness, name: &str) -> bool {
     match harness.id() {
         "claude-code" => name == "claude" || name == "claude-code",
         "antigravity" => name == "antigravity" || name == "agy",
+        "kimi-code" => name == "kimi-code" || name == "kimi",
+        "minimax-code" => name == "minimax-code" || name == "minimax" || name == "mcode",
         id => id == name,
     }
 }

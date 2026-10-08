@@ -63,6 +63,9 @@ aes = "0.8"
 cbc = "0.1"
 pbkdf2 = { version = "0.12", default-features = false, features = ["hmac"] }
 sha1 = "0.10"
+# ZCode keeps its sign-in in an AES-256-GCM-encrypted credentials.json; orx
+# reads the plan identity to tell whether ZCode's runtime can use the plan.
+aes-gcm = "0.10"
 # Overleaf live sync speaks the editor's socket.io channel. rustls for the same
 # musl reasons as reqwest above; already in the tree via axum. Native roots
 # trust a corporate CA on direct websocket connections.

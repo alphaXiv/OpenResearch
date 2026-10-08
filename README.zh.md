@@ -69,8 +69,11 @@ Settings → Updates → **Install the `orx` command** 中为终端安装 `orx`�
 **使用你喜欢的编程智能体。** OpenResearch 原生兼容 <img src=".github/readme-assets/claude.svg" alt="" width="18" height="18" align="texttop" /> Claude Code,
 <img src=".github/readme-assets/codex.svg" alt="" width="18" height="18" align="texttop" /> Codex,
 <img src=".github/readme-assets/opencode.svg" alt="" width="18" height="18" align="texttop" /> OpenCode,
-<img src=".github/readme-assets/cursor.svg" alt="" width="18" height="18" align="texttop" /> Cursor，以及
-<img src=".github/readme-assets/antigravity.svg" alt="" width="18" height="18" align="texttop" /> Google Antigravity.
+<img src=".github/readme-assets/cursor.svg" alt="" width="18" height="18" align="texttop" /> Cursor,
+<img src=".github/readme-assets/antigravity.svg" alt="" width="18" height="18" align="texttop" /> Google Antigravity,
+<img src=".github/readme-assets/kimi.svg" alt="" width="18" height="18" align="texttop" /> Kimi Code,
+<img src=".github/readme-assets/minimax.svg" alt="" width="18" height="18" align="texttop" /> MiniMax Code，以及
+<img src=".github/readme-assets/zcode.svg" alt="" width="18" height="18" align="texttop" /> ZCode.
 你也可以通过以下工具在 OpenCode 中[使用本地模型](docs/local-models.md)：
 <img src=".github/readme-assets/lmstudio.svg" alt="" width="18" height="18" align="texttop" /> LM Studio,
 <img src=".github/readme-assets/omlx.svg" alt="" width="18" height="18" align="texttop" /> oMLX,

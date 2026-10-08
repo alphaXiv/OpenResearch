@@ -251,7 +251,7 @@
   "onboarding_choose_a_coding_agent_to_continue": "Choose a coding agent to continue.",
   "onboarding_choose_one_or_more": "Choose one or more.",
   "onboarding_continue": "Continue",
-  "onboarding_detecting_claude_code_codex_open_code": "Detecting Claude Code, Codex, OpenCode, Cursor, Antigravity…",
+  "onboarding_detecting_claude_code_codex_open_code": "Detecting Claude Code, Codex, OpenCode, Cursor, Antigravity, Kimi Code, MiniMax Code, ZCode…",
   "onboarding_e_g_i_work_on_sample_efficient_rl": "e.g. I work on sample-efficient RL for LLM post-training, focused on reward-model-free methods.",
   "onboarding_get_started": "Get started",
   "onboarding_git_is_required_for_local_experiments_install_git": "Git is required for local experiments. Install Git, then re-check.",
