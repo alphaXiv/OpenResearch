@@ -729,6 +729,7 @@ async fn watch_ssh_job(
                     message: Some(format!("box {id} was deleted while the run was active")),
                 },
                 _ => {
+                    missing_polls = 0;
                     tokio::time::sleep(POLL_INTERVAL).await;
                     continue;
                 }
