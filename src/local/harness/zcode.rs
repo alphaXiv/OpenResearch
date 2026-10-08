@@ -8,8 +8,11 @@
 //!
 //! Print mode has no approval channel: in `build`/`edit` mode ZCode denies
 //! high-risk tools itself ("No permission client configured"). So the
-//! composer offers `edit` (edits allowed, risky commands denied) and `yolo`
-//! (everything allowed); Plan runs in `build` with a planning instruction.
+//! composer offers `edit` (edits allowed, risky commands denied; the default)
+//! and `yolo` (everything allowed). Plan runs in `build`, where every tool
+//! with side effects needs approval and so is denied: `Write`, `Edit`, every
+//! `Bash` command, and the Node REPL. The planning instruction only asks for
+//! a plan; the mode is what keeps the turn read-only.
 //!
 //! Detection: a `zcode` CLI (official `~/.zcode/runtime` install, npm, PATH),
 //! else the runtime bundled with the ZCode desktop app (`resources/glm/zcode.cjs`)
@@ -583,7 +586,7 @@ impl Harness for ZCode {
                 ),
                 OptionChoice::described("bypass", "YOLO", "Allow every tool"),
             ],
-            "bypass",
+            "accept-edits",
             PlanActivation::Command,
         )
     }
@@ -623,7 +626,7 @@ fn zcode_mode(mode: Option<PermissionMode>, plan: bool) -> &'static str {
     if plan || mode == Some(PermissionMode::Plan) {
         return "build";
     }
-    match mode.unwrap_or(PermissionMode::Bypass) {
+    match mode.unwrap_or(PermissionMode::AcceptEdits) {
         PermissionMode::Bypass => "yolo",
         PermissionMode::Ask => "build",
         PermissionMode::AcceptEdits | PermissionMode::Auto | PermissionMode::Plan => "edit",
@@ -1056,9 +1059,17 @@ mod tests {
 
     #[test]
     fn composer_modes_map_onto_zcode_modes() {
-        assert_eq!(zcode_mode(None, false), "yolo");
+        // A chat with no mode chosen gets Edit, never YOLO.
+        assert_eq!(zcode_mode(None, false), "edit");
+        assert_eq!(
+            ZCode.options().default_permission_mode,
+            Some("accept-edits")
+        );
         assert_eq!(zcode_mode(Some(PermissionMode::AcceptEdits), false), "edit");
+        assert_eq!(zcode_mode(Some(PermissionMode::Bypass), false), "yolo");
+        // Plan turns run in `build`, whatever mode the composer had.
         assert_eq!(zcode_mode(Some(PermissionMode::Bypass), true), "build");
+        assert_eq!(zcode_mode(Some(PermissionMode::Plan), false), "build");
     }
 
     #[test]

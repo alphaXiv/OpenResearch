@@ -350,16 +350,21 @@ async fn call(
 ) -> Result<RpcResult> {
     let mut rx = conn.send(method, params).await?;
     loop {
+        // Inbound first: the reader queues the agent's messages before it
+        // resolves the response that followed them, so the turn's last
+        // `session/update`s are handled before the response ends the call.
         tokio::select! {
-            response = &mut rx => {
-                return Ok(response.unwrap_or_else(|_| Err(RpcError { code: 0, message: "the agent exited".into() })));
-            }
+            biased;
             message = inbound.recv() => {
                 let Some(message) = message else {
-                    return Ok(Err(RpcError { code: 0, message: "the agent exited".into() }));
+                    // The agent exited; a response it sent before that still counts.
+                    return Ok(rx.try_recv().unwrap_or_else(|_| Err(RpcError { code: 0, message: "the agent exited".into() })));
                 };
                 handle_inbound(ctx, conn, state, message).await?;
                 ctx.maybe_flush();
+            }
+            response = &mut rx => {
+                return Ok(response.unwrap_or_else(|_| Err(RpcError { code: 0, message: "the agent exited".into() })));
             }
             _ = tokio::time::sleep(TURN_WATCHDOG) => {
                 if ctx.host.has_pending_permission(&ctx.session_id) {
@@ -515,7 +520,13 @@ async fn drive(
                     options = Some(updated.clone());
                 }
             }
-            Err(error) => eprintln!("{}: {method} failed: {error}", agent.harness_id),
+            Err(error) => {
+                if let Some(error) = setup_failure(agent, method, &error) {
+                    ctx.mark_delivery(DeliveryState::NotSent);
+                    return Err(error);
+                }
+                eprintln!("{}: {method} failed: {error}", agent.harness_id);
+            }
         }
     }
 
@@ -567,6 +578,19 @@ async fn drive(
     }
     let _ = ctx.flush();
     Ok(())
+}
+
+/// A setup call whose failure must stop the turn. A refused mode switch would
+/// run the prompt in the session's current mode, which can allow more than the
+/// composer chose (a resumed session stays in its last turn's mode); a refused
+/// model or thinking level only logs.
+fn setup_failure(agent: &AcpAgent, method: &str, error: &RpcError) -> Option<crate::error::Error> {
+    (method == "session/set_mode").then(|| {
+        anyhow!(
+            "{} could not switch to the chosen mode, so the message was not sent: {error}",
+            agent.display
+        )
+    })
 }
 
 /// The `session/set_mode` / `session/set_config_option` calls that move an
@@ -1222,6 +1246,82 @@ pub(crate) mod tests {
             detailed.starts_with("Kimi Code refused the request: token refresh failed (401). "),
             "{detailed}"
         );
+    }
+
+    #[test]
+    fn only_a_failed_mode_switch_stops_the_turn() {
+        let agent = &super::super::kimi::AGENT;
+        let error = RpcError {
+            code: -32602,
+            message: "Invalid params".into(),
+        };
+        let stopped = setup_failure(agent, "session/set_mode", &error)
+            .expect("a refused mode switch stops the turn")
+            .to_string();
+        assert!(
+            stopped.starts_with("Kimi Code could not switch to the chosen mode"),
+            "{stopped}"
+        );
+        assert!(setup_failure(agent, "session/set_config_option", &error).is_none());
+    }
+
+    /// Lets the agent's update and the response that follows it arrive
+    /// together, many times over: the update must never be dropped.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn updates_queued_before_a_response_are_kept() {
+        for _ in 0..32 {
+            let mut child = Command::new("cat")
+                .stdin(Stdio::piped())
+                .stdout(Stdio::piped())
+                .kill_on_drop(true)
+                .spawn()
+                .unwrap();
+            let conn = Connection {
+                stdin: Arc::new(tokio::sync::Mutex::new(child.stdin.take().unwrap())),
+                next_id: Arc::new(AtomicI64::new(1)),
+                pending: Arc::new(Mutex::new(HashMap::new())),
+            };
+            let (tx, mut inbound) = mpsc::unbounded_channel();
+            let pending = conn.pending.clone();
+            let stdout = child.stdout.take().unwrap();
+            // `cat` echoes the request back; answer it as the agent would.
+            let agent = tokio::spawn(async move {
+                let mut lines = BufReader::new(stdout).lines();
+                let request: Value =
+                    serde_json::from_str(&lines.next_line().await.unwrap().unwrap()).unwrap();
+                let update = json!({"jsonrpc": "2.0", "method": "session/update", "params": {"update":
+                    {"sessionUpdate": "agent_message_chunk", "content": {"type": "text", "text": "Done."}}}});
+                let response = json!({"jsonrpc": "2.0", "id": request["id"], "result": {"stopReason": "end_turn"}});
+                for line in [update, response] {
+                    if let Some(message) = route_line(&line.to_string(), &pending) {
+                        tx.send(message).unwrap();
+                    }
+                }
+            });
+            let mut ctx = TurnCtx::test_stub();
+            let mut state = TurnState::default();
+            let result = call(
+                &mut ctx,
+                &conn,
+                &mut inbound,
+                &mut state,
+                "session/prompt",
+                json!({}),
+            )
+            .await
+            .unwrap()
+            .unwrap();
+            agent.await.unwrap();
+            assert_eq!(result["stopReason"], "end_turn");
+            let texts: Vec<_> = ctx
+                .assistant
+                .parts
+                .iter()
+                .filter_map(|p| p.text.as_deref())
+                .collect();
+            assert_eq!(texts, vec!["Done."]);
+        }
     }
 
     #[test]
