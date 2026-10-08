@@ -635,6 +635,7 @@ async fn run_ssh(
         descriptor.ssh_container.clone(),
         &run_id,
         &mut descriptor,
+        None,
     )
     .await?;
     Ok(())
@@ -643,6 +644,7 @@ async fn run_ssh(
 /// The ssh two-half loop, shared by every backend whose job is a run dir on a
 /// box we ssh into (ssh itself, openresearch). Runs until the job is terminal
 /// and returns the final run status after logs are drained.
+#[allow(clippy::too_many_arguments)]
 async fn watch_ssh_job(
     store: &Store,
     initial_status: RunStatus,
@@ -651,6 +653,7 @@ async fn watch_ssh_job(
     container: Option<ssh::ContainerRun>,
     run_id: &str,
     descriptor: &mut BackendDescriptor,
+    sandbox: Option<(&Credentials, &str)>,
 ) -> Result<RunStatus> {
     let path = log_path(run_id);
     let (done_tx, done_rx) = tokio::sync::watch::channel(false);
@@ -721,10 +724,16 @@ async fn watch_ssh_job(
         }
         let job = match observed {
             Ok(job) => job,
-            Err(_) => {
-                tokio::time::sleep(POLL_INTERVAL).await;
-                continue;
-            }
+            Err(_) => match sandbox {
+                Some((creds, id)) if openresearch::box_deleted(creds, id).await => ssh::JobState {
+                    stage: "ERROR".into(),
+                    message: Some(format!("box {id} was deleted while the run was active")),
+                },
+                _ => {
+                    tokio::time::sleep(POLL_INTERVAL).await;
+                    continue;
+                }
+            },
         };
         let stage = job.stage.as_str();
         let status = run_status_for_stage(store, run_id, cancel_sent, stage);
@@ -1036,6 +1045,7 @@ async fn run_openresearch(
         None,
         &run_id,
         &mut descriptor,
+        Some((&lifecycle, &sandbox_id)),
     )
     .await;
     teardown_box(&store, &lifecycle, &sandbox_id, &run_id).await;

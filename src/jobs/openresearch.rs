@@ -192,6 +192,11 @@ pub async fn launched(target: &super::ssh::SshTarget, run_id: &str) -> Result<bo
     Ok(out.contains("STARTED"))
 }
 
+/// Whether the API positively reports the box as deleted; an unreachable API is not proof.
+pub async fn box_deleted(creds: &Credentials, sandbox_id: &str) -> bool {
+    matches!(get_sandbox(creds, sandbox_id).await, Err(err) if is_not_found_error(&err.to_string()))
+}
+
 /// Delete the box, retrying transient failures. A 404 is success — the box is
 /// already gone (dashboard delete, billing sweeper) — which makes teardown
 /// idempotent across supervisor restarts.
@@ -314,6 +319,34 @@ mod tests {
     #[test]
     fn provisioning_deadline_is_five_minutes() {
         assert_eq!(PROVISION_DEADLINE, Duration::from_secs(300));
+    }
+
+    #[tokio::test]
+    async fn only_a_404_reports_the_box_deleted() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let creds = Credentials {
+            api_url: format!("http://{}", listener.local_addr().unwrap()),
+            token: "token".into(),
+        };
+        let server = tokio::spawn(async move {
+            for status in ["404 Not Found", "503 Service Unavailable", "403 Forbidden"] {
+                let (mut stream, _) = listener.accept().await.unwrap();
+                let _ = stream.read(&mut [0u8; 4096]).await.unwrap();
+                let response =
+                    format!("HTTP/1.1 {status}\r\nContent-Length: 0\r\nConnection: close\r\n\r\n");
+                stream.write_all(response.as_bytes()).await.unwrap();
+            }
+        });
+        assert!(box_deleted(&creds, "sb").await);
+        assert!(!box_deleted(&creds, "sb").await);
+        assert!(!box_deleted(&creds, "sb").await);
+        server.await.unwrap();
+        let unreachable = Credentials {
+            api_url: "http://127.0.0.1:1".into(),
+            token: "token".into(),
+        };
+        assert!(!box_deleted(&unreachable, "sb").await);
     }
 
     #[test]
