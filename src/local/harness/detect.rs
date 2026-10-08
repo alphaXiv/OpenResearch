@@ -344,8 +344,20 @@ impl HarnessInfo {
 /// command fails with "No such file or directory" when codex is spawned via the
 /// symlink. Spawning the resolved path keeps helpers real siblings. Best-effort:
 /// a path that can't be resolved is returned unchanged.
+///
+/// Snap apps are the exception: `/snap/bin/<app>` links to `/usr/bin/snap`,
+/// which picks the app from the name it was invoked as. Resolved, `agy`
+/// becomes plain `snap` and only prints snap's own help.
 pub(super) fn resolve_symlinks(path: PathBuf) -> PathBuf {
-    crate::paths::canonicalize(&path).unwrap_or(path)
+    match crate::paths::canonicalize(&path) {
+        Ok(real) if is_snap_launcher(&real) => path,
+        Ok(real) => real,
+        Err(_) => path,
+    }
+}
+
+fn is_snap_launcher(path: &Path) -> bool {
+    path.file_name().is_some_and(|name| name == "snap")
 }
 
 /// The first candidate that runs, in discovery order, with its `--version`
@@ -892,6 +904,27 @@ mod tests {
             resolve_symlinks(link),
             crate::paths::canonicalize(&real).unwrap()
         );
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn resolve_symlinks_keeps_snap_app_links() {
+        let dir = std::env::temp_dir().join(format!("orx-detect-snap-{}", std::process::id()));
+        let usr_bin = dir.join("usr-bin");
+        let snap_bin = dir.join("snap-bin");
+        std::fs::create_dir_all(&usr_bin).unwrap();
+        std::fs::create_dir_all(&snap_bin).unwrap();
+        let snap = usr_bin.join("snap");
+        std::fs::write(&snap, "").unwrap();
+        // `/snap/bin/agy -> antigravity-cli -> /usr/bin/snap`
+        let app = snap_bin.join("antigravity-cli");
+        std::os::unix::fs::symlink(&snap, &app).unwrap();
+        let alias = snap_bin.join("agy");
+        std::os::unix::fs::symlink("antigravity-cli", &alias).unwrap();
+
+        assert_eq!(resolve_symlinks(alias.clone()), alias);
 
         std::fs::remove_dir_all(&dir).ok();
     }

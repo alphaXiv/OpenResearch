@@ -34,10 +34,12 @@ import {
 } from "../queries/settings";
 
 import { getOverleafSettingsQuery } from "../queries/files";
-import { listRunsQuery } from "../queries/projects";
+import { getUiStateQuery, listRunsQuery } from "../queries/projects";
 import {
+  ArrowDown,
   ArrowLeft,
   ArrowRight,
+  ArrowUp,
   ChevronDown,
   Cpu,
   ExternalLink,
@@ -92,6 +94,7 @@ import {
   type ProjectGitStatus,
   type TelemetrySettings,
   type Harness,
+  type HarnessFailover,
   type HarnessSetupCommands,
   type HarnessId,
   type HfSettings,
@@ -109,6 +112,7 @@ import {
   type SshExecutionPreflight,
   testSshExecution,
   applyUpdate,
+  updateUiState,
   installCli,
   setAutoUpdate as setAutoUpdateApi,
   setCrossHarnessSettings,
@@ -528,6 +532,7 @@ function HarnessesTab({ remote }: { remote: boolean }) {
           {h.id === "opencode" && <LocalModelSetup installed={h.installed} />}
         </div>
       )}
+      {harnesses && <HarnessFailoverCard harnesses={harnesses} />}
       <CrossHarnessCard harnesses={harnesses} />
     </>
   );
@@ -625,6 +630,97 @@ function CrossHarnessCard({ harnesses }: { harnesses: Harness[] | null }) {
         </>
       )}
       {error && <div className="error">{error}</div>}
+    </div>
+  );
+}
+
+/** The opt-in fallback list: which harnesses a chat moves to, and in what
+ * order, when its own harness runs out of usage. */
+function HarnessFailoverCard({ harnesses }: { harnesses: Harness[] }) {
+  const uiStateOptions = getUiStateQuery();
+  const { data: uiState } = useQuery(uiStateOptions);
+  const save = useMutation({
+    mutationFn: (harnessFailover: HarnessFailover) => updateUiState({ harnessFailover }),
+    onSuccess: (state) => setScopedQueryData(uiStateOptions.queryKey, state),
+    onError: (error) => showAlert(error instanceof Error ? error.message : String(error), "error"),
+  });
+  const stored = save.isPending ? save.variables : uiState?.harnessFailover;
+  if (!stored) return null;
+  // An empty order means "every harness": show them all switched on.
+  const order = stored.order.length > 0 ? stored.order : harnesses.map((harness) => harness.id);
+  const rows = [
+    ...order.flatMap((id) => harnesses.filter((harness) => harness.id === id)),
+    ...harnesses.filter((harness) => !order.includes(harness.id)),
+  ];
+  const update = (next: Partial<HarnessFailover>) => save.mutate({ enabled: stored.enabled, order, ...next });
+  const move = (index: number, by: number) => {
+    const next = [...order];
+    const [id] = next.splice(index, 1);
+    next.splice(index + by, 0, id);
+    update({ order: next });
+  };
+  return (
+    <div className={SETTINGS_CARD_CLASS_NAME}>
+      <div className={PROJECT_DEFAULT_ROW_CLASS_NAME}>
+        <div>
+          <div className="project-default-title text-base font-medium">{m.settings_failover_title()}</div>
+          <p>{m.settings_failover_description()}</p>
+        </div>
+        <Switch
+          type="button"
+          checked={stored.enabled}
+          aria-label={m.settings_failover_title()}
+          disabled={save.isPending}
+          onClick={() => update({ enabled: !stored.enabled })}
+        />
+      </div>
+      {stored.enabled && (
+        <div className="mt-3.5 pt-3.5 border-t border-t-border-variant">
+          <div className="text-sm text-subtext mb-2">{m.settings_failover_order()}</div>
+          <ol className="flex flex-col gap-1">
+            {rows.map((harness) => {
+              const index = order.indexOf(harness.id);
+              const included = index >= 0;
+              const status = harnessStatus(harness);
+              return (
+                <li key={harness.id} className="flex items-center gap-2.5 min-w-0">
+                  <span className="w-5 text-end text-sm text-muted tabular-nums">{included ? fmtNumber(index + 1) : ""}</span>
+                  <HarnessLogo harness={harness.id} />
+                  <span className={cn("flex-1 min-w-0 truncate text-base", !included && "text-subtext")}>{harness.name}</span>
+                  <span aria-hidden="true" className={`size-1.5 shrink-0 rounded-full bg-muted [&.ok]:bg-accent-green [&.warn]:bg-accent-amber ${status.cls}`} />
+                  <span className="sr-only">{status.label}</span>
+                  <IconButton
+                    size="small"
+                    title={m.settings_failover_move_up({ name: ltr(harness.name) })}
+                    aria-label={m.settings_failover_move_up({ name: ltr(harness.name) })}
+                    disabled={!included || index === 0 || save.isPending}
+                    onClick={() => move(index, -1)}
+                  >
+                    <ArrowUp size={14} />
+                  </IconButton>
+                  <IconButton
+                    size="small"
+                    title={m.settings_failover_move_down({ name: ltr(harness.name) })}
+                    aria-label={m.settings_failover_move_down({ name: ltr(harness.name) })}
+                    disabled={!included || index === order.length - 1 || save.isPending}
+                    onClick={() => move(index, 1)}
+                  >
+                    <ArrowDown size={14} />
+                  </IconButton>
+                  <Switch
+                    type="button"
+                    checked={included}
+                    aria-label={m.settings_failover_include({ name: ltr(harness.name) })}
+                    // Turning off the last one would read back as "all of them".
+                    disabled={save.isPending || (included && order.length === 1)}
+                    onClick={() => update({ order: included ? order.filter((id) => id !== harness.id) : [...order, harness.id] })}
+                  />
+                </li>
+              );
+            })}
+          </ol>
+        </div>
+      )}
     </div>
   );
 }

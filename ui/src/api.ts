@@ -224,6 +224,14 @@ export interface UiState {
   tourCompleted: boolean;
   preferredAgent: AgentSelection | null;
   preferredAutonomy: Autonomy | null;
+  harnessFailover: HarnessFailover;
+}
+
+/** Continue a turn on another harness when its own runs out of usage. An empty
+ * `order` tries every other chat harness in registry order. */
+export interface HarnessFailover {
+  enabled: boolean;
+  order: HarnessId[];
 }
 
 /** How much of the research the agent owns before checking in. */
@@ -245,6 +253,7 @@ export const updateUiState = (body: {
   tourCompleted?: boolean;
   preferredAgent?: AgentSelection;
   preferredAutonomy?: Autonomy;
+  harnessFailover?: HarnessFailover;
 }) => post<UiState>("/api/settings/ui-state", body);
 
 export const completeOnboarding = (selection: OnboardingSelection, profile: Profile) =>

@@ -1294,5 +1294,12 @@
   "settings_cross_harness_vendor_varies": "Depende del modelo",
   "settings_cross_harness_vendors_ready": "Proveedores listos: {vendors}",
   "settings_cross_harness_needs_two": "Configura harnesses de al menos dos proveedores, por ejemplo Claude Code y Codex, para que las revisiones vengan de otra familia de modelos.",
-  "settings_cross_harness_use": "Usar {harness} en la revisión entre harnesses"
+  "settings_cross_harness_use": "Usar {harness} en la revisión entre harnesses",
+  "settings_failover_title": "Cambiar de harness al llegar a un límite de uso",
+  "settings_failover_description": "Cuando el harness de un chat se queda sin uso o alcanza un límite de velocidad, el turno continúa en el siguiente harness disponible de esta lista, con el chat hasta ahora como contexto.",
+  "settings_failover_order": "Orden de respaldo",
+  "settings_failover_move_up": "Subir {name}",
+  "settings_failover_move_down": "Bajar {name}",
+  "settings_failover_include": "Usar {name} como respaldo",
+  "activity_switched_harness": "Se cambió de {from} a {to} tras alcanzar un límite de uso"
 }
