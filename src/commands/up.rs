@@ -2119,7 +2119,7 @@ struct CreateRunReq {
     force: bool,
     chat_session_id: Option<String>,
     agent_origin: Option<String>,
-    /// The forwarding CLI's config dir, where its compute settings and preflight live.
+    /// Absent from dashboard callers; checked against orx up's own config dir.
     caller_config_dir: Option<std::path::PathBuf>,
 }
 
@@ -2271,17 +2271,21 @@ fn require_caller_config_dir(
         return Ok(());
     };
     let same = caller == own
-        || matches!((caller.canonicalize(), own.canonicalize()), (Ok(a), Ok(b)) if a == b);
+        || crate::paths::canonicalize(caller)
+            .ok()
+            .zip(crate::paths::canonicalize(own).ok())
+            .is_some_and(|(a, b)| a == b);
     if same {
         return Ok(());
     }
+    let base = own.parent().unwrap_or(own);
     Err(anyhow!(
-        "This command reads compute settings from {} (XDG_CONFIG_HOME), but orx up \
-         launches runs with the settings in {}. Launch without overriding \
-         XDG_CONFIG_HOME so the run uses the settings orx up checks, or restart \
-         orx up with the same XDG_CONFIG_HOME.",
+        "This command uses the compute settings in {}, but orx up launches runs with \
+         the settings in {}. Re-run with XDG_CONFIG_HOME={} so both use the same \
+         settings, or restart orx up (or the OpenResearch app) from this environment.",
         caller.display(),
-        own.display()
+        own.display(),
+        base.display()
     ))
 }
 
@@ -8766,7 +8770,7 @@ mod tests {
     }
 
     #[test]
-    fn create_run_rejects_a_caller_with_different_compute_settings() {
+    fn require_caller_config_dir_rejects_a_different_dir() {
         let root = std::env::temp_dir().join(format!("orx-caller-config-{}", uuid::Uuid::new_v4()));
         let own = root.join("up/openresearch");
         let caller = root.join("agent/openresearch");
@@ -8775,6 +8779,8 @@ mod tests {
 
         assert!(require_caller_config_dir(None, &own).is_ok());
         assert!(require_caller_config_dir(Some(&own), &own).is_ok());
+        let fresh = root.join("fresh/openresearch");
+        assert!(require_caller_config_dir(Some(&fresh), &fresh).is_ok());
         assert!(require_caller_config_dir(Some(&own.join("../openresearch")), &own).is_ok());
         let error = require_caller_config_dir(Some(&caller), &own)
             .unwrap_err()
