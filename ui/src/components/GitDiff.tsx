@@ -23,7 +23,7 @@ const DIFF_CLASS_NAME = [
   "[&_.openresearch-diff-file]:[--diff-background-color:var(--base)]",
   "[&_.openresearch-diff-file]:[--diff-text-color:var(--text)]",
   "[&_.openresearch-diff-file]:[--diff-font-family:var(--mono)]",
-  "[&_.openresearch-diff-file]:[--diff-selection-text-color:var(--text)]",
+  "[&_.openresearch-diff-file]:[--diff-selection-text-color:var(--selection-text)]",
   "[&_.openresearch-diff-file]:[--diff-selection-background-color:var(--color-diff-selection)]",
   "[&_.openresearch-diff-file]:[--diff-gutter-selected-text-color:var(--diff-selection-text-color)]",
   "[&_.openresearch-diff-file]:[--diff-gutter-selected-background-color:var(--color-diff-gutter-selection)]",

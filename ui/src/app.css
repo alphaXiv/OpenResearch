@@ -85,7 +85,7 @@
 }
 
 .openresearch-diff ::selection {
-  color: currentColor;
+  color: var(--selection-text);
   background: var(--code-selection);
 }
 

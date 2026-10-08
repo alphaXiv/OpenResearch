@@ -76,9 +76,9 @@ test("chat annotations stay separate from active selection", () => {
   }
 });
 
-test("editor selection keeps the overlay textarea's text transparent", () => {
+test("editor selection uses the readable shared foreground over syntax highlighting", () => {
   assert.deepEqual(declarations(base, ".file-view-editarea::selection"), {
-    color: "transparent",
+    color: "var(--selection-text)",
     background: "var(--editor-selection)",
   });
 });
@@ -89,21 +89,25 @@ test("shimmering labels select with the same foreground as the surrounding text"
   assert.deepEqual(declarations(app, ".tool-running-shimmer::selection"), foreground(globalSelection().color));
 });
 
-test("diff drag selection preserves syntax foregrounds on the shared code highlight", () => {
+test("diff selections use the readable shared foreground and background", () => {
   assert.deepEqual(declarations(app, ".openresearch-diff ::selection"), {
-    color: "currentColor",
+    color: "var(--selection-text)",
     background: "var(--code-selection)",
   });
   const diff = read("components/GitDiff.tsx");
-  assert.ok(diff.includes("--diff-selection-text-color:var(--text)"));
+  assert.ok(diff.includes("--diff-selection-text-color:var(--selection-text)"));
   assert.ok(!diff.includes("--diff-selection-text-color:var(--primary)"));
   assert.ok(theme.includes("--editor-selection: var(--code-selection)"));
   assert.ok(theme.includes("--code-selection: var(--selection-background)"));
 });
 
-test("code selection preserves each token's foreground rather than inheriting prose colors", () => {
-  assert.deepEqual(declarations(base, "code ::selection"), {
-    color: "currentColor",
-    background: "var(--code-selection)",
-  });
+test("selected syntax uses the shared contrast pair even for low-contrast tokens", () => {
+  assert.ok(!base.includes("currentColor"));
+  assert.ok(!base.includes("code ::selection"));
+  for (const { name, css } of themeTokens()) {
+    const background = hexToken(css, "selection-background");
+    const selected = hexToken(css, "selection-text");
+    assert.ok(contrast(hexToken(css, "syntax-comment"), background) < 4.5);
+    assert.ok(contrast(selected, background) >= 4.5, `${name} selected syntax must remain readable`);
+  }
 });

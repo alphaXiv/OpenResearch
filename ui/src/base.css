@@ -29,18 +29,8 @@ body {
   background: var(--chat-annotation-highlight);
 }
 
-/* currentColor preserves each token instead of inheriting the prose selection color. */
-pre::selection,
-pre ::selection,
-code::selection,
-code ::selection {
-  color: currentColor;
-  background: var(--code-selection);
-}
-
-/* Highlighted code is painted above the textarea's native selection. */
 .file-view-editarea::selection {
-  color: transparent;
+  color: var(--selection-text);
   background: var(--editor-selection);
 }
 
