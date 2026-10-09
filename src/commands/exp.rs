@@ -19,7 +19,7 @@ use crate::store::Store;
 use crate::ExpCommand;
 
 pub async fn run(args: crate::ExpArgs) -> Result<()> {
-    let mut store = Store::open()?;
+    let store = Store::open()?;
     match args.command {
         ExpCommand::Archive {
             exp_id,
@@ -27,14 +27,14 @@ pub async fn run(args: crate::ExpArgs) -> Result<()> {
             only,
             descendants,
             ..
-        } => archive(&mut store, &exp_id, ancestors, only, descendants, true),
+        } => archive(&store, &exp_id, ancestors, only, descendants, true),
         ExpCommand::Unarchive {
             exp_id,
             ancestors,
             only,
             descendants,
             ..
-        } => archive(&mut store, &exp_id, ancestors, only, descendants, false),
+        } => archive(&store, &exp_id, ancestors, only, descendants, false),
         ExpCommand::Move { exp_id, parent, .. } => reparent(&store, &exp_id, parent.as_deref()),
         ExpCommand::Status { exp_id, scheduler } => {
             crate::local::chat::record_chat_target("experiments", &exp_id);
@@ -66,7 +66,7 @@ pub async fn run(args: crate::ExpArgs) -> Result<()> {
 }
 
 fn archive(
-    store: &mut Store,
+    store: &Store,
     id: &str,
     ancestors: bool,
     only: bool,
