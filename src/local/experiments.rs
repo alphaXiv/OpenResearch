@@ -170,6 +170,64 @@ fn archive_ids(
     }
 }
 
+/// Re-parent an experiment under `parent`, or make it a root when `None`.
+/// Returns the pre-move row.
+pub fn move_experiment(store: &Store, id: &str, parent: Option<&str>) -> Result<LocalExperiment> {
+    // Concurrent moves must not both pass the cycle check against the same tree.
+    let tx = store.begin_immediate()?;
+    let selected = store
+        .get_local_experiment(id)?
+        .ok_or_else(|| anyhow!("Experiment {id} not found."))?;
+    let project = store
+        .get_local_project(&selected.project_id)?
+        .ok_or_else(|| anyhow!("Project {} not found.", selected.project_id))?;
+    let experiments = store.list_experiments_by_project(&project.id)?;
+    check_move(&experiments, &project, &selected, parent)?;
+    store.set_experiment_parent(&selected.id, parent)?;
+    tx.commit()?;
+    Ok(selected)
+}
+
+fn check_move(
+    experiments: &[LocalExperiment],
+    project: &LocalProject,
+    selected: &LocalExperiment,
+    parent: Option<&str>,
+) -> Result<()> {
+    if selected.parent_experiment_id.as_deref() == parent {
+        return Err(match parent {
+            Some(parent) => anyhow!("Experiment {} is already under {parent}.", selected.id),
+            None => anyhow!("Experiment {} is already a root.", selected.id),
+        });
+    }
+    let Some(parent) = parent else {
+        return Ok(());
+    };
+    // A child on the base branch would lose the legacy-root warning and invert its diff.
+    if selected.branch_name == project.baseline_branch {
+        return Err(anyhow!(
+            "Experiment {} rides the project's base branch '{}', so it must stay a root.",
+            selected.id,
+            project.baseline_branch
+        ));
+    }
+    if !experiments.iter().any(|e| e.id == parent) {
+        return Err(anyhow!(
+            "Parent experiment {parent} not found in this experiment's project. \
+             Choose an experiment id from `orx project view {}`.",
+            project.id
+        ));
+    }
+    let descendants = archive_ids(experiments, selected, ArchiveDirection::Descendants);
+    if parent == selected.id || descendants.iter().any(|id| id == parent) {
+        return Err(anyhow!(
+            "Cannot move experiment {} under itself or one of its descendants.",
+            selected.id
+        ));
+    }
+    Ok(())
+}
+
 /// The command a launch would run: the experiment's own, else the project default.
 pub fn effective_run_command<'a>(
     experiment: &'a LocalExperiment,
@@ -407,6 +465,60 @@ mod tests {
         assert_eq!(ids.len(), 2);
         assert!(ids.contains(&"selected".to_string()));
         assert!(ids.contains(&"mine".to_string()));
+    }
+
+    #[test]
+    fn move_rejects_cycles_unknown_parents_no_ops_and_legacy_roots() {
+        let mut root = experiment(None, "root");
+        root.id = "root".into();
+        let mut selected = experiment(Some("root"), "selected");
+        selected.id = "selected".into();
+        let mut child = experiment(Some("selected"), "child");
+        child.id = "child".into();
+        let mut other = experiment(None, "other");
+        other.id = "other".into();
+        let all = [root, selected.clone(), child, other];
+        let p = project("main");
+        assert!(check_move(&all, &p, &selected, Some("other")).is_ok());
+        assert!(check_move(&all, &p, &selected, None).is_ok());
+        for parent in [
+            Some("root"),
+            Some("selected"),
+            Some("child"),
+            Some("missing"),
+        ] {
+            assert!(
+                check_move(&all, &p, &selected, parent).is_err(),
+                "{parent:?}"
+            );
+        }
+        assert!(check_move(&all, &p, &all[0], None).is_err());
+        let legacy = experiment(None, "main");
+        assert!(check_move(&all, &p, &legacy, Some("other")).is_err());
+    }
+
+    #[test]
+    fn move_updates_only_the_parent_link() {
+        let dir = std::env::temp_dir().join(format!("orx-move-{}", uuid::Uuid::new_v4()));
+        let store = Store::open_at(dir.clone()).unwrap();
+        store.create_local_project(&project("main")).unwrap();
+        let mut root = experiment(None, "orx/root");
+        root.id = "root".into();
+        let mut selected = experiment(Some("root"), "orx/selected");
+        selected.id = "selected".into();
+        selected.slug = "selected".into();
+        store.create_local_experiment(&root).unwrap();
+        store.create_local_experiment(&selected).unwrap();
+        let before = move_experiment(&store, "selected", None).unwrap();
+        assert_eq!(before.parent_experiment_id.as_deref(), Some("root"));
+        let after = store.get_local_experiment("selected").unwrap().unwrap();
+        assert_eq!(after.parent_experiment_id, None);
+        assert_eq!(after.branch_name, "orx/selected");
+        move_experiment(&store, "selected", Some("root")).unwrap();
+        let back = store.get_local_experiment("selected").unwrap().unwrap();
+        assert_eq!(back.parent_experiment_id.as_deref(), Some("root"));
+        drop(store);
+        let _ = std::fs::remove_dir_all(dir);
     }
 
     #[test]

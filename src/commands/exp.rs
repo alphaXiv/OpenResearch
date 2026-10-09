@@ -6,6 +6,7 @@
 //!   orx exp wake   <expId>            resume this agent when the run succeeds or fails
 //!   orx exp archive <expId> --ancestors|--only|--descendants   hide the chosen scope
 //!   orx exp unarchive <expId> --ancestors|--only|--descendants restore the same nodes
+//!   orx exp move <expId> --parent <expId>|--baseline          re-parent a subtree
 //!
 //! Unlike the project-scoped data commands, every verb here takes an
 //! *experiment* id from `orx project view <projectId>`.
@@ -34,6 +35,7 @@ pub async fn run(args: crate::ExpArgs) -> Result<()> {
             descendants,
             ..
         } => archive(&mut store, &exp_id, ancestors, only, descendants, false),
+        ExpCommand::Move { exp_id, parent, .. } => reparent(&store, &exp_id, parent.as_deref()),
         ExpCommand::Status { exp_id, scheduler } => {
             crate::local::chat::record_chat_target("experiments", &exp_id);
             resolve_experiment(store, &exp_id)?
@@ -86,6 +88,19 @@ fn archive(
         if archived { "Archived" } else { "Restored" },
         ids.len()
     );
+    Ok(())
+}
+
+fn reparent(store: &Store, id: &str, parent: Option<&str>) -> Result<()> {
+    let before = crate::local::experiments::move_experiment(store, id, parent)?;
+    println!(
+        "Moved {} ({}) from {} to {}.",
+        before.id,
+        before.display_name(),
+        before.parent_experiment_id.as_deref().unwrap_or("a root"),
+        parent.unwrap_or("a new root")
+    );
+    println!("  Git branch {} is unchanged.", before.branch_name);
     Ok(())
 }
 

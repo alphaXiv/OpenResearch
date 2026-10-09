@@ -436,6 +436,18 @@ pub enum ExpCommand {
         descendants: bool,
     },
 
+    /// Re-parent an experiment and its subtree. Only the tree changes; git branches stay put.
+    #[command(group(clap::ArgGroup::new("move_target").required(true)))]
+    Move {
+        exp_id: String,
+        /// New parent experiment in the same project.
+        #[arg(long, group = "move_target")]
+        parent: Option<String>,
+        /// Make the experiment a new root (baseline).
+        #[arg(long, group = "move_target")]
+        baseline: bool,
+    },
+
     /// Show the experiment's status, run command, and latest run.
     Status {
         exp_id: String,
