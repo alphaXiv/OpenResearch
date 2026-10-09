@@ -251,7 +251,8 @@ pub(crate) fn set_compute_default(
     })
 }
 
-/// The persisted researcher profile. Read by the profile settings endpoint.
+/// The persisted researcher profile. Read by the profile settings endpoint and
+/// blank-project starter prompts.
 pub(crate) fn load_profile() -> ResearchProfile {
     let s = load_settings().unwrap_or_default();
     ResearchProfile {
