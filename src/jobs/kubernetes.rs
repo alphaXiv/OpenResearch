@@ -386,10 +386,14 @@ async fn stage_source(
                 Err(error) => last_error = error.to_string(),
             }
             // An exited script container or pod can never be staged; say why instead of timing out.
-            if let Some(exit) = exited(context, namespace, pod).await {
-                let logs = kubectl(context, &["logs", "-n", namespace, pod, "--tail=20"], None)
-                    .await
-                    .unwrap_or_else(|e| e.to_string());
+            if let Some((exit, container)) = exited(context, namespace, pod).await {
+                let logs = kubectl(
+                    context,
+                    &["logs", "-n", namespace, pod, "-c", &container, "--tail=20"],
+                    None,
+                )
+                .await
+                .unwrap_or_else(|e| e.to_string());
                 return Err(anyhow!(
                     "Kubernetes pod {namespace}/{pod} exited ({exit}) before orx could stage \
                      the source. Last log lines:\n{}",
@@ -404,9 +408,10 @@ async fn stage_source(
     ))
 }
 
-/// How the pod ended, once its script container (the default container
-/// `prepare_docs` annotates) or the whole pod (e.g. a failed init container) has.
-async fn exited(context: Option<&str>, namespace: &str, pod: &str) -> Option<String> {
+/// How the pod ended and which container's logs explain it, once its script
+/// container (the default container `prepare_docs` annotates), an init
+/// container, or the whole pod has.
+async fn exited(context: Option<&str>, namespace: &str, pod: &str) -> Option<(String, String)> {
     let json = kubectl(
         context,
         &["get", "pod", "-n", namespace, pod, "-o", "json"],
@@ -415,14 +420,29 @@ async fn exited(context: Option<&str>, namespace: &str, pod: &str) -> Option<Str
     .await
     .ok()?;
     let pod: Value = serde_json::from_str(&json).ok()?;
-    let script = &pod["metadata"]["annotations"]["kubectl.kubernetes.io/default-container"];
-    let code = pod["status"]["containerStatuses"]
-        .as_array()
-        .and_then(|cs| cs.iter().find(|c| &c["name"] == script))
-        .and_then(|c| c["state"]["terminated"]["exitCode"].as_i64());
-    match (code, pod["status"]["phase"].as_str()) {
-        (Some(code), _) => Some(format!("code {code}")),
-        (None, Some(phase @ ("Failed" | "Succeeded"))) => Some(format!("pod {phase}")),
+    let script = pod["metadata"]["annotations"]["kubectl.kubernetes.io/default-container"]
+        .as_str()?
+        .to_string();
+    let status = &pod["status"];
+    let statuses = |key: &str| status[key].as_array().cloned().unwrap_or_default();
+    let code = |c: &Value| c["state"]["terminated"]["exitCode"].as_i64();
+    if let Some(code) = statuses("containerStatuses")
+        .iter()
+        .find(|c| c["name"] == script.as_str())
+        .and_then(code)
+    {
+        return Some((format!("code {code}"), script));
+    }
+    if let Some((name, code)) = statuses("initContainerStatuses").iter().find_map(|c| {
+        Some((
+            c["name"].as_str()?.to_string(),
+            code(c).filter(|&code| code != 0)?,
+        ))
+    }) {
+        return Some((format!("init container {name}, code {code}"), name));
+    }
+    match status["phase"].as_str() {
+        Some(phase @ ("Failed" | "Succeeded")) => Some((format!("pod {phase}"), script)),
         _ => None,
     }
 }
