@@ -146,7 +146,13 @@ pub async fn run(args: crate::SuperviseArgs) -> Result<()> {
     }
     // Failing while the cluster is unreachable would orphan a job it may have accepted.
     while descriptor.job_id.is_none() {
-        match crate::compute::reconcile_submission(&run_id, &descriptor).await {
+        let lookup = crate::compute::reconcile_submission(&run_id, &descriptor).await;
+        match lookup.and_then(|found| {
+            if let Some(found) = &found {
+                crate::compute::record_submission_handle(&run_id, found)?;
+            }
+            Ok(found)
+        }) {
             Ok(Some(found)) => descriptor = found,
             Ok(None) => break,
             Err(err) => {

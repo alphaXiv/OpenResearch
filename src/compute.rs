@@ -889,6 +889,8 @@ pub async fn submit(args: &crate::ExpRunArgs) -> Result<StoredRun> {
                         "warning: {error}\nFound the submitted job {} and kept tracking it.",
                         found.job_id.as_deref().unwrap_or_default()
                     );
+                    // Unsaved, the supervisor finds the job again and retries the save.
+                    let _ = record_submission_handle(&run_id, &found);
                     crate::commands::exp::spawn_detached_supervise(&run_id)?;
                     let mut run = store
                         .get_run(&run_id)?
@@ -1037,8 +1039,8 @@ pub fn record_submission_handle(run_id: &str, descriptor: &BackendDescriptor) ->
     Ok(())
 }
 
-/// Find a submission whose handle was never recorded by its run id and record
-/// it. Only Slurm can be looked up this way; other providers return `None`.
+/// Find a submission whose handle was never recorded by its run id. Only Slurm
+/// can be looked up this way; other providers return `None`.
 pub async fn reconcile_submission(
     run_id: &str,
     descriptor: &BackendDescriptor,
@@ -1057,7 +1059,6 @@ pub async fn reconcile_submission(
         job_id: Some(job_id),
         ..descriptor.clone()
     };
-    record_submission_handle(run_id, &found)?;
     Ok(Some(found))
 }
 
