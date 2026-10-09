@@ -6,7 +6,10 @@ import { unified } from "unified";
 
 import {
   chatImageTarget,
+  citedFilePath,
+  encodeMarkdownPath,
   firstCitedLine,
+  htmlFigureAssetTarget,
   isExternalMarkdownTarget,
   markdownTargetUrl,
   rehypeSafeUrls,
@@ -50,6 +53,32 @@ test("markdown paths decode percent-encoded reserved filename characters once", 
     hash: "",
     source: "checkout",
   });
+});
+
+test("re-resolved markdown paths are decoded only once", () => {
+  for (const name of ["chart#1.png", "chart%231.png", "a?b&c:d.png", "100%.png", "my figs/a b.png"]) {
+    assert.equal(resolveMarkdownTarget("", encodeMarkdownPath(name))?.path, name);
+  }
+  const docLink = (target) => resolveMarkdownTarget("docs", target)?.path ?? null;
+  assert.equal(citedFilePath("foo%2523bar.py", docLink), "docs/foo%23bar.py");
+  assert.equal(citedFilePath("foo%23bar.py", docLink), "docs/foo#bar.py");
+  assert.equal(citedFilePath("foo%2523bar.py"), "foo%23bar.py");
+  assert.equal(citedFilePath("%E0%A4%A"), null);
+  const figure = chatImageTarget("figures/chart%231.png");
+  assert.equal(docLink(encodeMarkdownPath(figure.path)), "docs/figures/chart#1.png");
+});
+
+test("inline html figure assets resolve relative to the figure once", () => {
+  const asset = (source, src) => chatImageTarget(htmlFigureAssetTarget(source, src));
+  assert.deepEqual(asset("my%20figs/plot.html", "chart%231.png#x"), {
+    path: "my figs/chart#1.png",
+    hash: "#x",
+    source: "checkout",
+  });
+  assert.equal(asset("figs/plot.html", "chart%25231.png").path, "figs/chart%231.png");
+  assert.equal(asset("figs/plot.html", "a%3Fb.png").path, "figs/a?b.png");
+  assert.equal(asset("/tmp/r/plot.html", "../a%231.png").path, "/tmp/a#1.png");
+  assert.equal(htmlFigureAssetTarget("%E0%A4%A/plot.html", "a.png"), null);
 });
 
 test("markdown paths cannot escape their root", () => {

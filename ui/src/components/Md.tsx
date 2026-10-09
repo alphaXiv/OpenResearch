@@ -27,7 +27,7 @@ import { absoluteFileUrl, artifactUrl, projectFileUrl } from "../api";
 import { InlineHtmlFigure } from "./InlineHtmlFigure";
 import { ImageCarousel, ImageCarouselContext } from "./ImageCarousel";
 import { imageWheelZoom } from "../imageZoom";
-import { chatImageTarget, firstCitedLine, rehypeSafeUrls, splitLineSuffix } from "../markdownTarget";
+import { chatImageTarget, citedFilePath, encodeMarkdownPath, firstCitedLine, rehypeSafeUrls, splitLineSuffix } from "../markdownTarget";
 
 const ImageResolverContext = createContext<((src: string, fallback?: boolean) => string | null) | undefined>(undefined);
 
@@ -463,7 +463,7 @@ export const Md = memo(function Md({
       const figure = typeof figureSrc === "string" ? chatImageTarget(figureSrc) : null;
       if (figure && onOpenFile) {
         const localPath = figure.source === "artifact" ? `artifacts/${figure.path}` : figure.path;
-        const path = resolveFilePath ? resolveFilePath(localPath) : localPath;
+        const path = resolveFilePath ? resolveFilePath(encodeMarkdownPath(localPath)) : localPath;
         if (path) return <button type="button" className="text-primary underline cursor-pointer text-start"
           {...tabOpenGestureHandlers<HTMLButtonElement>((intent) => onOpenFile(path, undefined, undefined, undefined, intent))}>
           {children}
@@ -474,13 +474,7 @@ export const Md = memo(function Md({
       const target = typeof citedHref === "string" ? citedHref : href;
       const cited = target ? splitLineSuffix(target) : null;
       if (cited && isFileHref(cited.path) && onOpenFile) {
-        let decoded: string;
-        try {
-          decoded = decodeURI(cited.path);
-        } catch {
-          return <span>{children}</span>;
-        }
-        const path = resolveFilePath ? resolveFilePath(decoded) : decoded;
+        const path = citedFilePath(cited.path, resolveFilePath);
         return path ? <FileChip path={path} line={cited.line} onOpenFile={onOpenFile} /> : <span>{children}</span>;
       }
       return (

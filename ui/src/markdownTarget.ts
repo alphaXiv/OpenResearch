@@ -50,6 +50,34 @@ export function resolveMarkdownTarget(
   };
 }
 
+/** Re-escapes a resolved path so resolving it again yields the same path. */
+export function encodeMarkdownPath(path: string): string {
+  return path.replace(/[%#?]/g, encodeURIComponent);
+}
+
+/** An asset `src` inside an inline HTML figure, joined to the figure's folder
+ * as a target for the figure's own image resolver. */
+export function htmlFigureAssetTarget(source: string, src: string): string | null {
+  let folder: string;
+  try {
+    folder = decodeURIComponent(source.replaceAll("\\", "/").split("/").slice(0, -1).join("/"));
+  } catch {
+    return null;
+  }
+  const target = resolveMarkdownTarget(folder, src, true);
+  return target ? encodeMarkdownPath(target.path) + target.hash : null;
+}
+
+/** A cited file link's path; `resolveFilePath` takes the still-encoded target. */
+export function citedFilePath(path: string, resolveFilePath?: (path: string) => string | null): string | null {
+  if (resolveFilePath) return resolveFilePath(path);
+  try {
+    return decodeURI(path);
+  } catch {
+    return null;
+  }
+}
+
 export function markdownTargetUrl(url: string, target: MarkdownTarget): string {
   return `${url}${target.query ? `&${target.query}` : ""}${target.hash}`;
 }
