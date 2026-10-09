@@ -716,6 +716,12 @@ fn selectable_model(model: &Value, connected: &HashSet<&str>) -> bool {
         })
 }
 
+/// Unknown for an empty `capabilities.input`, which is V2's placeholder for uncatalogued models.
+fn image_input(model: &Value) -> Option<bool> {
+    let input = model["capabilities"]["input"].as_array()?;
+    (!input.is_empty()).then(|| input.iter().any(|modality| modality == "image"))
+}
+
 pub(super) async fn detect(
     binary: crate::local::opencode::ResolvedBinary,
     mut info: HarnessInfo,
@@ -768,7 +774,8 @@ pub(super) async fn detect(
                     Some(
                         ModelInfo::new(format!("{provider}/{id}"))
                             .with_label(model["name"].as_str(), None)
-                            .with_reasoning(&variants),
+                            .with_reasoning(&variants)
+                            .with_image_input(image_input(model)),
                     )
                 })
                 .collect();
@@ -1080,5 +1087,14 @@ mod catalog_tests {
         assert!(selectable_model(&model, &anonymous));
         model["enabled"] = json!(false);
         assert!(!selectable_model(&model, &anonymous));
+    }
+
+    #[test]
+    fn image_input_reads_catalog_modalities() {
+        let with = |input: Value| image_input(&json!({"capabilities":{"input":input}}));
+        assert_eq!(with(json!(["text", "image"])), Some(true));
+        assert_eq!(with(json!(["text"])), Some(false));
+        assert_eq!(with(json!([])), None);
+        assert_eq!(image_input(&json!({})), None);
     }
 }

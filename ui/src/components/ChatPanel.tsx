@@ -88,6 +88,7 @@ import {
   DEMO_SEEDED_LEAF_IDS,
   forkChatTurn,
   fmtNumber,
+  harnessModelLabel,
   interruptChat,
   reasoningFor,
   recoverChatTurn,
@@ -4178,7 +4179,7 @@ function SessionRow({
 
 // The four starter prompts progress starting point → gap → baseline → experiment.
 const STARTER_ICONS = [BookOpen, Search, SquareTerminal, FlaskConical];
-// A blank project has nothing for a model to read, so its prompts are pre-written.
+// Shown for a blank project when prompts tailored to its researcher aren't available.
 const blankStarterPrompts = (): StarterPrompt[] => [
   { title: m.chat_panel_starter_blank_1_title(), prompt: m.chat_panel_starter_blank_1_prompt() },
   { title: m.chat_panel_starter_blank_2_title(), prompt: m.chat_panel_starter_blank_2_prompt() },
@@ -4419,6 +4420,7 @@ export function ChatPanel({
   // Pasted/dropped/uploaded attachments waiting in the composer, as data URLs.
   const [attachments, setAttachments] = useState<ComposerAttachment[]>([]);
   const [attachError, setAttachError] = useState<string | null>(null);
+  const [imageRefusedFor, setImageRefusedFor] = useState<string | null>(null);
   // Unsent composer content belongs to the scope it was typed in — stash on
   // the way out, restore on return, so a draft can't bleed into another chat.
   const stashKey = activeId ?? `${projectId}:new`;
@@ -4450,6 +4452,7 @@ export function ChatPanel({
     setDraft(restored.draft);
     setAttachments(restored.attachments);
     setAnnotations(restored.annotations);
+    setImageRefusedFor(null);
     return () => {
       const stashed = composerStashContent(composerLiveRef.current, composerPrefill);
       if (stashed) composerStashRef.current.set(stashKey, stashed);
@@ -4586,9 +4589,14 @@ export function ChatPanel({
     const MAX_BYTES = 30 * 1024 * 1024;
     const TOTAL_BYTES = 40 * 1024 * 1024;
     setAttachError(null);
+    setImageRefusedFor(null);
     let total = attachments.reduce((n, a) => n + a.size, 0);
     for (const file of files) {
       if (!/^(image\/(png|jpeg|gif|webp)|application\/pdf)$/.test(file.type)) continue;
+      if (noImageInputError && file.type.startsWith("image/")) {
+        setImageRefusedFor(selectedModel?.id ?? null);
+        continue;
+      }
       if (file.size > MAX_BYTES) {
         setAttachError(m.chat_attachment_too_large({ name: ltr(file.name) }));
         continue;
@@ -4698,6 +4706,16 @@ export function ChatPanel({
   // OpenCode model with no `variants` hides the picker entirely, and Codex's
   // top tiers appear only on the models that accept them.
   const reasoning = reasoningFor(activeHarness, composerSelection?.model);
+  const selectedModel = activeHarness?.models.find((model) => model.id === composerSelection?.model);
+  // OpenCode reports a text-only model's image Read as both success and error, so refuse up front.
+  const noImageInputError = selectedModel?.imageInput === false
+    ? m.chat_model_no_image_input({ model: ltr(harnessModelLabel(selectedModel)) })
+    : null;
+  const imageInputBlocked =
+    !!noImageInputError && attachments.some((a) => a.mediaType.startsWith("image/"));
+  const imageRefused = !!selectedModel && imageRefusedFor === selectedModel.id;
+  const imageInputError = imageInputBlocked || imageRefused ? noImageInputError : null;
+  useEffect(() => setImageRefusedFor(null), [selectedModel?.id]);
 
   // Editing the pickers: every change updates the sticky global preference —
   // the config a "New session" composer opens with is whatever the user chose
@@ -5444,11 +5462,11 @@ export function ChatPanel({
   }, [pinTranscriptToBottom]);
 
   /** `queue` (the ⌘/Ctrl+Enter chord) parks the message even on a harness that steers. */
-  async function send({ queue = false }: { queue?: boolean } = {}) {
+  async function send({ queue = false, starter }: { queue?: boolean; starter?: string } = {}) {
     // Slash tokens stay in the wire form: the server resolves every selected
     // skill and supplies this exact message as their shared request context.
-    const originalText = draft.trim();
-    const composerCommand = !pendingQuestion
+    const originalText = (starter ?? draft).trim();
+    const composerCommand = !pendingQuestion && starter === undefined
       ? parseComposerCommand(originalText, opts?.planActivation)
       : null;
     if (composerCommand && composerCommand.name !== "plan") {
@@ -5457,11 +5475,14 @@ export function ChatPanel({
       runComposerCommand(composerCommand.name, composerCommand.prompt);
       return;
     }
-    captureUiEvent({
-      name: "first_action",
-      surface: telemetrySurface,
-      action: "typed_prompt",
-    });
+    if (imageInputBlocked) return;
+    if (starter === undefined) {
+      captureUiEvent({
+        name: "first_action",
+        surface: telemetrySurface,
+        action: "typed_prompt",
+      });
+    }
     if (preparingSend.current) return;
     const planRequested = !!composerCommand;
     const toggledPlanMode = !planActive;
@@ -5588,6 +5609,7 @@ export function ChatPanel({
       setAttachments([]);
       setAnnotations([]);
       setAttachError(null);
+      setImageRefusedFor(null);
       // Always send the composer's settings, steer or not: a permission or
       // plan change persists itself before this message, so the server's
       // comparison against the *running* turn is the only thing that catches
@@ -5654,6 +5676,7 @@ export function ChatPanel({
       setAttachments((current) => current === pending ? [] : current);
       setAnnotations((current) => (current === pendingAnnotations ? [] : current));
       setAttachError(null);
+      setImageRefusedFor(null);
       preparingSend.current = true;
       try {
         if (!sid) {
@@ -6505,27 +6528,41 @@ export function ChatPanel({
                 {starterPrompts.map((item, index) => {
                   const Icon = STARTER_ICONS[index];
                   const tone = STARTER_TONES[index];
+                  const pickStarter = (edit: boolean) => {
+                    captureUiEvent({ name: "project_starter_clicked", slot: index + 1 });
+                    captureUiEvent({
+                      name: "first_action",
+                      surface: telemetrySurface,
+                      action: "starter_click",
+                    });
+                    // Don't auto-send past an unavailable agent or a non-empty composer.
+                    const composerEmpty = !draft.trim() && attachments.length === 0 && annotations.length === 0;
+                    if (edit || !activeHarness?.agentReady || !composerEmpty) applyStarterPrompt(item.prompt);
+                    else void send({ starter: item.prompt });
+                  };
                   return (
-                    <button
-                      key={index}
-                      type="button"
-                      className={`flex min-h-22 w-full min-w-0 cursor-pointer flex-col items-start justify-center gap-1.5 rounded-xl border bg-background px-5 py-4 text-start font-sans transition-colors duration-120 ease-standard hover:bg-surface ${tone.box}`}
-                      onClick={() => {
-                        captureUiEvent({ name: "project_starter_clicked", slot: index + 1 });
-                        captureUiEvent({
-                          name: "first_action",
-                          surface: telemetrySurface,
-                          action: "starter_click",
-                        });
-                        applyStarterPrompt(item.prompt);
-                      }}
-                    >
-                      <span className="flex items-center gap-2.5 text-base font-medium text-text">
-                        <Icon size={17} className={tone.icon} />
-                        {item.title}
-                      </span>
-                      <span className="w-full truncate text-sm text-subtext">{item.prompt}</span>
-                    </button>
+                    <div key={index} className="relative min-w-0">
+                      <button
+                        type="button"
+                        className={`flex h-full min-h-22 w-full min-w-0 cursor-pointer flex-col items-start justify-center gap-1.5 rounded-xl border bg-background py-4 ps-5 pe-11 text-start font-sans transition-colors duration-120 ease-standard hover:bg-surface ${tone.box}`}
+                        onClick={() => pickStarter(false)}
+                      >
+                        <span className="flex items-center gap-2.5 text-base font-medium text-text">
+                          <Icon size={17} className={tone.icon} />
+                          {item.title}
+                        </span>
+                        <span className="w-full truncate text-sm text-subtext">{item.prompt}</span>
+                      </button>
+                      <IconButton
+                        size="small"
+                        className="absolute end-2.5 top-2.5 [&:hover:not(:disabled)]:bg-surface-bright"
+                        aria-label={m.chat_panel_starter_edit({ title: item.title })}
+                        title={m.chat_panel_starter_edit({ title: item.title })}
+                        onClick={() => pickStarter(true)}
+                      >
+                        <Pencil size={13} />
+                      </IconButton>
+                    </div>
                   );
                 })}
               </div>
@@ -6853,9 +6890,9 @@ export function ChatPanel({
                 })}
               </div>
             )}
-            {attachError && (
+            {(imageInputError ?? attachError) && (
               <div className="composer-attach-error pt-1.5 px-3 pb-0 text-sm text-accent-red" role="alert">
-                {attachError}
+                {imageInputError ?? attachError}
               </div>
             )}
             {settingsError && (
