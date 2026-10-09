@@ -1,8 +1,9 @@
 //! Local Slurm launch — the scheduler-backed twin of `local/ssh.rs`: submit
 //! the experiment as a batch job on a Slurm cluster reached via its login
 //! node. `--host` names an `~/.ssh/config` alias (defaultable in the slurm
-//! settings); `--flavor` asks for GPUs as a GRES spec. The run row lives in
-//! the local store only; a detached `orx supervise` watches the job.
+//! settings); `--flavor` asks for GPUs as a GRES spec, `--cpus`/`--mem` for
+//! cores and host memory. The run row lives in the local store only; a
+//! detached `orx supervise` watches the job.
 
 use std::collections::HashMap;
 
@@ -57,7 +58,7 @@ pub async fn submit_local_slurm_with_source(
         if f.trim().to_ascii_lowercase().starts_with("cpu") {
             return Err(anyhow!(
                 "--flavor names GPUs on --backend slurm (e.g. h100:2). For a CPU-only \
-                 run just omit --flavor; CPUs come from the partition defaults."
+                 run omit --flavor and ask for cores with --cpus (e.g. --cpus 8)."
             ));
         }
     }
@@ -77,6 +78,20 @@ pub async fn submit_local_slurm_with_source(
     // `--timeout` beats the settings default; neither = the cluster's default.
     let time_limit_secs =
         slurm::resolve_time_limit(args.timeout.as_deref(), settings.time_limit.as_deref())?;
+
+    // Cores and host memory follow the same precedence as the time limit:
+    // the flag beats the stored default, and neither leaves the cluster's own
+    // partition defaults in place. Worth asking for explicitly on a GPU run —
+    // a partition that hands out one core and `DefMemPerCPU` with it will
+    // starve a dataloader feeding an H100.
+    let cpus_per_task = args.cpus.or(settings.cpus_per_task);
+    if cpus_per_task == Some(0) {
+        return Err(anyhow!("--cpus must be at least 1."));
+    }
+    let mem = match args.mem.as_deref().or(settings.mem.as_deref()) {
+        Some(m) => Some(slurm::parse_mem(m)?),
+        None => None,
+    };
 
     let store = Store::open()?;
     let exp = store
@@ -117,6 +132,8 @@ pub async fn submit_local_slurm_with_source(
         partition: settings.partition.clone(),
         account: settings.account.clone(),
         time_limit_secs,
+        cpus_per_task,
+        mem,
     })
     .await?;
 

@@ -558,6 +558,18 @@ pub struct ExpRunArgs {
     /// Not supported with `--backend ray` (Ray Jobs have no time limit).
     #[arg(long)]
     pub timeout: Option<String>,
+    /// Cores for the job (with `--backend slurm`): `#SBATCH --cpus-per-task=`.
+    /// Omitted falls back to the slurm settings, then the partition default —
+    /// which on many clusters is a single core, whatever the GPU request.
+    #[arg(long)]
+    pub cpus: Option<u32>,
+    /// Host memory for the job (with `--backend slurm`): `#SBATCH --mem=`, in
+    /// Slurm's own syntax (64G, 4000M, or a bare number for megabytes).
+    /// Omitted falls back to the slurm settings, then the partition default,
+    /// which is usually `DefMemPerCPU` × the core count — so raising `--cpus`
+    /// raises memory with it.
+    #[arg(long)]
+    pub mem: Option<String>,
     /// Launch even when another run is already in flight for this experiment.
     #[arg(long)]
     pub force: bool,

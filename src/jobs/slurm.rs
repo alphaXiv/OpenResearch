@@ -51,6 +51,13 @@ pub struct SlurmSettings {
     /// `#SBATCH --time=…` default, in orx's duration syntax ("4h", "30m").
     #[serde(default)]
     pub time_limit: Option<String>,
+    /// `#SBATCH --cpus-per-task=…` default; the `--cpus` default.
+    #[serde(default)]
+    pub cpus_per_task: Option<u32>,
+    /// `#SBATCH --mem=…` default in Slurm's own syntax ("64G"); the `--mem`
+    /// default.
+    #[serde(default)]
+    pub mem: Option<String>,
 }
 
 fn settings_path() -> std::path::PathBuf {
@@ -105,6 +112,36 @@ pub struct SlurmJobSpec {
     pub account: Option<String>,
     /// `#SBATCH --time=…` in seconds, from `--timeout` or settings.
     pub time_limit_secs: Option<u64>,
+    /// `#SBATCH --cpus-per-task=…`, from `--cpus` or settings. Unset leaves
+    /// the partition default, which on many clusters is a single core.
+    pub cpus_per_task: Option<u32>,
+    /// `#SBATCH --mem=…`, from `--mem` or settings, already validated by
+    /// `parse_mem`. Unset leaves the partition default, which is usually
+    /// `DefMemPerCPU × cpus-per-task` — i.e. memory tracks the CPU request.
+    pub mem: Option<String>,
+}
+
+/// Validate a Slurm memory request: a positive integer with an optional
+/// `K`/`M`/`G`/`T` suffix ("64G", "65536", "4000M"). Bare numbers are
+/// megabytes, as Slurm itself documents. Strict on purpose — the value is
+/// interpolated straight into a `#SBATCH` directive, so anything that is not
+/// this shape (a newline, a shell metacharacter, a second directive) is
+/// rejected here rather than reaching the cluster.
+pub fn parse_mem(mem: &str) -> Result<String> {
+    let m = mem.trim();
+    let (digits, suffix) = match m.char_indices().find(|(_, c)| !c.is_ascii_digit()) {
+        Some((i, _)) => m.split_at(i),
+        None => (m, ""),
+    };
+    let ok_suffix = matches!(suffix, "" | "K" | "M" | "G" | "T");
+    if digits.is_empty() || digits.trim_start_matches('0').is_empty() || !ok_suffix {
+        return Err(anyhow!(
+            "Unreadable memory request {:?}. Use a positive size in Slurm's own syntax: \
+             64G, 4000M, or a bare number for megabytes.",
+            mem
+        ));
+    }
+    Ok(format!("{digits}{suffix}"))
 }
 
 pub fn resolve_time_limit(explicit: Option<&str>, saved: Option<&str>) -> Result<Option<u64>> {
@@ -116,7 +153,8 @@ pub fn resolve_time_limit(explicit: Option<&str>, saved: Option<&str>) -> Result
 
 /// Map a `--flavor` string onto a `--gres` request. A flavor names GPUs —
 /// CPU-only runs just omit it (unlike HF/Modal there is no machine shape to
-/// pick; partition + cluster defaults decide CPUs/memory).
+/// pick). Cores and memory are asked for separately, with `--cpus`/`--mem`;
+/// omitting those leaves the partition defaults.
 ///   "gpu"      -> gpu:1
 ///   "gpu:…"    -> passed through verbatim (already a GRES spec)
 ///   "h100:2"   -> gpu:h100:2
@@ -172,6 +210,16 @@ fn render_sbatch(spec: &SlurmJobSpec) -> String {
     }
     if let Some(g) = spec.gres.as_deref() {
         directives.push(format!("#SBATCH --gres={g}"));
+    }
+    // Cores and host memory. Left out entirely when unset, so a cluster whose
+    // partition defaults are already right keeps behaving as before; asked for
+    // explicitly otherwise, because the common default is one core and
+    // `DefMemPerCPU` bytes with it — far too little to feed a GPU.
+    if let Some(c) = spec.cpus_per_task.filter(|c| *c > 0) {
+        directives.push(format!("#SBATCH --cpus-per-task={c}"));
+    }
+    if let Some(m) = spec.mem.as_deref().filter(|m| !m.trim().is_empty()) {
+        directives.push(format!("#SBATCH --mem={m}"));
     }
     // The script exits with the payload's code so Slurm's own COMPLETED/FAILED
     // verdict mirrors the payload — inspect leans on that when the exit_code
@@ -472,6 +520,8 @@ mod tests {
             partition: None,
             account: None,
             time_limit_secs: None,
+            cpus_per_task: None,
+            mem: None,
         }
     }
 
@@ -497,6 +547,10 @@ mod tests {
         assert!(!script.contains("--account"));
         assert!(!script.contains("--gres"));
         assert!(!script.contains("--time"));
+        // Unset cores/memory must emit nothing, so clusters whose partition
+        // defaults already suit the job are unaffected by this feature.
+        assert!(!script.contains("--cpus-per-task"));
+        assert!(!script.contains("--mem"));
         // Python is defaulted to unbuffered even with no author env, so Slurm's
         // --output redirect streams the job's prints live.
         assert!(script.contains("export PYTHONUNBUFFERED='1'\n"));
@@ -514,13 +568,46 @@ mod tests {
         s.partition = Some("gpu".into());
         s.account = Some("lab-a".into());
         s.time_limit_secs = Some(4 * 3600);
+        s.cpus_per_task = Some(8);
+        s.mem = Some("64G".into());
         s.env.insert("TOKEN".into(), "it's; rm -rf /".into());
         let script = render_sbatch(&s);
         assert!(script.contains("#SBATCH --gres=gpu:h100:2\n"));
         assert!(script.contains("#SBATCH --partition=gpu\n"));
         assert!(script.contains("#SBATCH --account=lab-a\n"));
         assert!(script.contains("#SBATCH --time=04:00:00\n"));
+        assert!(script.contains("#SBATCH --cpus-per-task=8\n"));
+        assert!(script.contains("#SBATCH --mem=64G\n"));
         assert!(script.contains("export TOKEN='it'\\''s; rm -rf /'\n"));
+    }
+
+    #[test]
+    fn zero_cpus_and_blank_mem_emit_nothing() {
+        let mut s = spec();
+        s.cpus_per_task = Some(0);
+        s.mem = Some("  ".into());
+        let script = render_sbatch(&s);
+        assert!(!script.contains("--cpus-per-task"));
+        assert!(!script.contains("--mem"));
+    }
+
+    #[test]
+    fn mem_parses_slurm_sizes_and_rejects_the_rest() {
+        assert_eq!(parse_mem("64G").unwrap(), "64G");
+        assert_eq!(parse_mem(" 4000M ").unwrap(), "4000M");
+        assert_eq!(parse_mem("65536").unwrap(), "65536");
+        for bad in [
+            "",
+            "0",
+            "G",
+            "64g",
+            "64GB",
+            "64 G",
+            "-1",
+            "64G\n#SBATCH --account=someone-else",
+        ] {
+            assert!(parse_mem(bad).is_err(), "{bad:?} should be rejected");
+        }
     }
 
     #[test]
@@ -560,6 +647,8 @@ mod tests {
             partition: None,
             account: None,
             time_limit_secs: Some(300),
+            cpus_per_task: None,
+            mem: None,
         };
         // 150 × 2s: a busy cluster can hold a job PENDING for a few minutes.
         let poll = |run_id: String, job_id: String, until: &'static [&'static str]| {

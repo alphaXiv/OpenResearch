@@ -725,6 +725,11 @@ pub fn validate_run_args(args: &crate::ExpRunArgs) -> Result<()> {
     if args.host.is_some() && !matches!(args.backend.as_deref(), Some("ssh") | Some("slurm")) {
         return Err(anyhow!("--host only applies with --backend ssh or slurm."));
     }
+    if (args.cpus.is_some() || args.mem.is_some()) && args.backend.as_deref() != Some("slurm") {
+        return Err(anyhow!(
+            "--cpus/--mem only apply with --backend slurm. Size other backends with --flavor."
+        ));
+    }
     if args.org.is_some() && args.backend.as_deref() != Some("openresearch") {
         return Err(anyhow!("--org only applies with --backend openresearch."));
     }
@@ -1124,6 +1129,8 @@ pub(crate) mod tests {
             manifest: None,
             image: None,
             timeout: None,
+            cpus: None,
+            mem: None,
             force: false,
             chat_session_id: None,
             invocation_context: None,
@@ -1222,6 +1229,30 @@ pub(crate) mod tests {
         args.image = None;
         args.timeout = Some("1h".into());
         assert!(validate_run_args(&args).is_err());
+    }
+
+    #[test]
+    fn slurm_resources_are_rejected_on_every_other_backend() {
+        let mut args = tinker_args();
+        for backend in crate::local::BACKENDS
+            .iter()
+            .filter(|backend| **backend != "slurm")
+        {
+            args.backend = Some(backend.to_string());
+            for (cpus, mem) in [(Some(8), None), (None, Some("64G"))] {
+                args.cpus = cpus;
+                args.mem = mem.map(str::to_string);
+                assert_eq!(
+                    validate_run_args(&args).unwrap_err().to_string(),
+                    "--cpus/--mem only apply with --backend slurm. Size other backends with --flavor.",
+                    "{backend}"
+                );
+            }
+        }
+        args.backend = Some("slurm".into());
+        args.cpus = Some(8);
+        args.mem = Some("64G".into());
+        assert!(validate_run_args(&args).is_ok());
     }
 
     #[test]
