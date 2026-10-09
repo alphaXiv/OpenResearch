@@ -92,7 +92,8 @@ each provider's remaining credit and per-hour GPU prices.
   hour but are limited by their hardware and quota.
 - `estimated: true` marks a published or third-party price, not the account's
   own rate. Re-read with `--fresh` before a long or expensive launch.
-- Smoke-test and debug on the cheapest option (`local`, Colab `cpu`/`t4`)
+- Smoke-test and debug on the cheapest option (`local`, Colab `cpu`/`t4`, a
+  Google Cloud `t4`)
   before spending on large GPUs.
 - Independent experiments may run at the same time on different providers to
   finish sooner. Never split one experiment's run across providers.
@@ -115,6 +116,7 @@ this `SKILL.md`:
 | Slurm (`slurm`) | [references/slurm.md](references/slurm.md) |
 | Ray Jobs (`ray`) | [references/ray.md](references/ray.md) |
 | OpenResearch (`openresearch`) | [references/openresearch.md](references/openresearch.md) |
+| Google Cloud (`gcp`) | [references/gcp.md](references/gcp.md) |
 | Tinker (`tinker`) | [references/tinker.md](references/tinker.md) |
 | This machine (`local`) | [references/local.md](references/local.md) |
 

@@ -8,6 +8,7 @@
 pub mod colab;
 pub mod colab_account;
 pub mod colab_runtimes;
+pub mod gcp;
 pub mod huggingface;
 pub mod kubernetes;
 pub mod localbox;
@@ -211,6 +212,32 @@ impl BackendDescriptor {
                 "Backend descriptor is missing the org/sandbox id — was the box provisioned?"
             )),
         }
+    }
+
+    /// The Compute Engine (project, zone, VM name) handle; the zone rides on
+    /// `context`.
+    pub fn gcp_ref(&self) -> Result<(&str, &str, &str)> {
+        if self.kind != "gcp_job" {
+            return Err(anyhow!("Unsupported backend kind: {}", self.kind));
+        }
+        match (
+            self.namespace.as_deref(),
+            self.context.as_deref(),
+            self.job_id.as_deref(),
+        ) {
+            (Some(project), Some(zone), Some(name)) => Ok((project, zone, name)),
+            _ => Err(anyhow!(
+                "Backend descriptor is missing the project/zone/VM — was the VM created?"
+            )),
+        }
+    }
+
+    /// The VM's SSH target once the supervisor has recorded its IP (gcp_job only).
+    pub fn gcp_ssh_target(&self) -> Option<ssh::SshTarget> {
+        if self.kind != "gcp_job" {
+            return None;
+        }
+        gcp::ssh_target(self.ssh_host.as_deref()?).ok()
     }
 
     /// The box's SSH endpoint as a ready-to-use target, once the supervisor

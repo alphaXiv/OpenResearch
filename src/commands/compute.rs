@@ -279,6 +279,7 @@ pub enum Backend {
     Colab,
     K8s,
     Openresearch,
+    Gcp,
 }
 impl Backend {
     fn name(self) -> &'static str {
@@ -293,6 +294,7 @@ impl Backend {
             Self::Colab => "colab",
             Self::K8s => "k8s",
             Self::Openresearch => "openresearch",
+            Self::Gcp => "gcp",
         }
     }
 }
@@ -389,6 +391,23 @@ pub struct ConfigureArgs {
     namespace: Option<String>,
     #[arg(long)]
     address: Option<String>,
+    /// Google Cloud project that owns and pays for the VMs (gcp).
+    #[arg(long)]
+    project: Option<String>,
+    /// Compute Engine zone for new VMs, e.g. us-central1-a (gcp).
+    #[arg(long)]
+    zone: Option<String>,
+    /// Use cheaper Spot VMs that Google can reclaim mid-run (gcp).
+    #[arg(long)]
+    spot: Option<bool>,
+    /// VM image family and its project (gcp; defaults to a Deep Learning VM image).
+    #[arg(long)]
+    image_family: Option<String>,
+    #[arg(long)]
+    image_project: Option<String>,
+    /// Boot disk size in GB (gcp).
+    #[arg(long)]
+    disk_gb: Option<u64>,
     /// Clear a saved field; repeat for multiple fields (e.g. --clear time-limit).
     #[arg(long)]
     clear: Vec<String>,
@@ -462,6 +481,14 @@ impl ConfigureArgs {
             "hf" => &["token"],
             "tinker" => &["key"],
             "modal" => &["tokenId", "tokenSecret"],
+            "gcp" => &[
+                "project",
+                "zone",
+                "spot",
+                "imageFamily",
+                "imageProject",
+                "diskGb",
+            ],
             _ => return Err(anyhow!("{backend} has no editable settings.")),
         };
         let mut body = Map::new();
@@ -475,10 +502,20 @@ impl ConfigureArgs {
             ("context", self.context),
             ("namespace", self.namespace),
             ("address", self.address),
+            ("project", self.project),
+            ("zone", self.zone),
+            ("imageFamily", self.image_family),
+            ("imageProject", self.image_project),
         ] {
             if let Some(value) = value {
                 body.insert(key.into(), json!(value));
             }
+        }
+        if let Some(spot) = self.spot {
+            body.insert("spot".into(), json!(spot));
+        }
+        if let Some(disk) = self.disk_gb {
+            body.insert("diskGb".into(), json!(disk));
         }
         if let Some(path) = self.credentials_file {
             let credentials: Map<String, Value> = serde_json::from_str(&read_input(&path)?)
@@ -511,11 +548,14 @@ impl ConfigureArgs {
             let key = match field.as_str() {
                 "time-limit" => "timeLimit",
                 "default-host" => "defaultHost",
+                "image-family" => "imageFamily",
+                "image-project" => "imageProject",
                 other => other,
             };
             if !allowed.contains(&key)
                 || matches!(key, "token" | "key" | "tokenId" | "tokenSecret")
                 || (backend == "ssh" && key == "host")
+                || matches!(key, "spot" | "diskGb")
             {
                 return Err(anyhow!("Cannot clear {field} for {backend}."));
             }
@@ -769,6 +809,11 @@ async fn connect(args: &CheckArgs, persist: Option<u64>) -> Result<()> {
                 .await?;
             if !status.success() {
                 return Err(anyhow!("colab sessions exited with {status}."));
+            }
+        }
+        Backend::Gcp => {
+            if crate::jobs::gcp::account().await.is_none() {
+                interactive_command("gcloud", &["auth".into(), "login".into()]).await?;
             }
         }
         Backend::Local | Backend::Ray | Backend::K8s => {}

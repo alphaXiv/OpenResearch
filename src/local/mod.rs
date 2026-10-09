@@ -19,6 +19,7 @@ pub mod datadir;
 pub mod demo;
 pub mod experiments;
 pub mod files;
+pub mod gcp;
 pub mod git;
 pub mod github;
 pub mod harness;
@@ -98,6 +99,7 @@ pub const BACKENDS: &[&str] = &[
     "slurm",
     "ray",
     "openresearch",
+    "gcp",
 ];
 
 /// Backends whose launches take a `--flavor` (hf/modal/openresearch require
@@ -105,7 +107,15 @@ pub const BACKENDS: &[&str] = &[
 /// optional resource hints).
 /// k8s (manifest), ssh (host), and local (this machine's hardware) have no
 /// flavor axis.
-pub const FLAVORED_BACKENDS: &[&str] = &["hf", "modal", "colab", "slurm", "ray", "openresearch"];
+pub const FLAVORED_BACKENDS: &[&str] = &[
+    "hf",
+    "modal",
+    "colab",
+    "slurm",
+    "ray",
+    "openresearch",
+    "gcp",
+];
 
 /// The subset whose launches FAIL without a `--flavor` — the playbook warns
 /// about these when they're the default with no saved flavor.
@@ -279,7 +289,7 @@ mod tests {
         for b in BACKENDS {
             assert!(validate_compute_default(b, None).is_ok(), "{b} valid");
         }
-        assert!(validate_compute_default("gcp", None).is_err());
+        assert!(validate_compute_default("aws", None).is_err());
         for b in FLAVORED_BACKENDS {
             assert!(
                 validate_compute_default(b, Some("x")).is_ok(),

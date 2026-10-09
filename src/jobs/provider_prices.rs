@@ -122,7 +122,7 @@ pub async fn overview(fresh: bool) -> Overview {
     }
     let (colab, hf, modal, openresearch) =
         tokio::join!(colab(fresh), hf(), modal(), openresearch());
-    let mut providers = vec![colab, hf, modal, openresearch];
+    let mut providers = vec![colab, hf, modal, openresearch, gcp()];
     providers.extend(own_hardware());
     providers.push(Provider {
         note: Some("Billed per token of training and sampling, not per GPU-hour.".into()),
@@ -433,6 +433,43 @@ fn modal_spend(billing: &Value) -> Option<Spend> {
         billed_usd: billed,
         credits_usd: credits,
     })
+}
+
+// --- Google Cloud ---------------------------------------------------------
+
+fn gcp() -> Provider {
+    let settings = crate::jobs::gcp::load_settings()
+        .ok()
+        .flatten()
+        .unwrap_or_default();
+    let configured = crate::jobs::gcp::find_cli().is_some()
+        && (settings.project.is_some() || crate::jobs::gcp::configured_project_on_disk().is_some());
+    let mut provider = empty("gcp", "usage", configured);
+    provider.note = Some(if settings.spot {
+        "Spot VMs: roughly 60–70% below these on-demand prices, but Google can reclaim one          mid-run. Billed to the project's billing account; gcloud cannot read free-trial          credits, so check Billing in the Google Cloud console."
+            .into()
+    } else {
+        "On-demand list prices in us-central1, GPU plus its smallest machine; other regions          differ. Billed to the project's billing account; gcloud cannot read free-trial          credits, so check Billing in the Google Cloud console."
+            .into()
+    });
+    let mut offers: Vec<Offer> = crate::jobs::gcp::GPUS
+        .iter()
+        .map(|gpu| Offer {
+            flavor: gpu.id.to_string(),
+            gpu: Some(gpu.id.to_ascii_uppercase()),
+            gpu_count: 1,
+            vram_gb: Some(gpu.vram_gb),
+            usd_per_hour: Some(gpu.usd_per_hour),
+            units_per_hour: None,
+            runway_hours: None,
+            available: None,
+            estimated: true,
+            host: None,
+        })
+        .collect();
+    sort_offers(&mut offers);
+    provider.offers = offers;
+    provider
 }
 
 // --- OpenResearch ---------------------------------------------------------
