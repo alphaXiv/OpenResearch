@@ -23,12 +23,29 @@ pub async fn launch_local_slurm(args: &crate::ExpRunArgs) -> Result<()> {
         backend.namespace.as_deref().unwrap_or(""),
         backend.job_id.as_deref().unwrap_or("")
     );
+    if let Some(resources) = requested_resources(&backend) {
+        println!("  {resources}");
+    }
     println!("  run  {}", run.id);
     println!(
         "{}",
         crate::invocation::follow_up(&run.experiment_id, &run.id)
     );
     Ok(())
+}
+
+/// The launch-summary line for a Slurm job that asked for cores or memory.
+pub fn requested_resources(backend: &BackendDescriptor) -> Option<String> {
+    if backend.cpus_per_task.is_none() && backend.mem.is_none() {
+        return None;
+    }
+    Some(format!(
+        "cpus {}  mem {}",
+        backend
+            .cpus_per_task
+            .map_or_else(|| "partition default".into(), |c| c.to_string()),
+        backend.mem.as_deref().unwrap_or("partition default")
+    ))
 }
 
 /// Submit the local experiment's run as a Slurm batch job and detach a
@@ -84,10 +101,7 @@ pub async fn submit_local_slurm_with_source(
     // partition defaults in place. Worth asking for explicitly on a GPU run —
     // a partition that hands out one core and `DefMemPerCPU` with it will
     // starve a dataloader feeding an H100.
-    let cpus_per_task = args.cpus.or(settings.cpus_per_task);
-    if cpus_per_task == Some(0) {
-        return Err(anyhow!("--cpus must be at least 1."));
-    }
+    let cpus_per_task = args.cpus.or(settings.cpus_per_task).filter(|c| *c > 0);
     let mem = match args.mem.as_deref().or(settings.mem.as_deref()) {
         Some(m) => Some(slurm::parse_mem(m)?),
         None => None,
@@ -133,7 +147,7 @@ pub async fn submit_local_slurm_with_source(
         account: settings.account.clone(),
         time_limit_secs,
         cpus_per_task,
-        mem,
+        mem: mem.clone(),
     })
     .await?;
 
@@ -154,6 +168,8 @@ pub async fn submit_local_slurm_with_source(
         ssh_port: None,
         ssh_user: None,
         timeout_secs: time_limit_secs,
+        cpus_per_task,
+        mem,
         source_digest: None,
         source_path: None,
         source_size: None,

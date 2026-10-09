@@ -730,6 +730,12 @@ pub fn validate_run_args(args: &crate::ExpRunArgs) -> Result<()> {
             "--cpus/--mem only apply with --backend slurm. Size other backends with --flavor."
         ));
     }
+    if args.cpus == Some(0) {
+        return Err(anyhow!("--cpus must be at least 1."));
+    }
+    if let Some(mem) = &args.mem {
+        crate::jobs::slurm::parse_mem(mem)?;
+    }
     if args.org.is_some() && args.backend.as_deref() != Some("openresearch") {
         return Err(anyhow!("--org only applies with --backend openresearch."));
     }
@@ -816,6 +822,8 @@ pub async fn submit(args: &crate::ExpRunArgs) -> Result<StoredRun> {
         ssh_port: None,
         ssh_user: None,
         timeout_secs: None,
+        cpus_per_task: None,
+        mem: None,
         source_digest: None,
         source_path: None,
         source_size: None,
@@ -1253,6 +1261,11 @@ pub(crate) mod tests {
         args.cpus = Some(8);
         args.mem = Some("64G".into());
         assert!(validate_run_args(&args).is_ok());
+        args.mem = Some("64GB".into());
+        assert!(validate_run_args(&args).is_err());
+        args.mem = None;
+        args.cpus = Some(0);
+        assert!(validate_run_args(&args).is_err());
     }
 
     #[test]

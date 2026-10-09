@@ -243,13 +243,19 @@ pub struct ConfigureArgs {
     account: Option<String>,
     #[arg(long)]
     time_limit: Option<String>,
+    /// Default `#SBATCH --cpus-per-task` for Slurm runs.
+    #[arg(long, value_parser = clap::value_parser!(u32).range(1..))]
+    cpus_per_task: Option<u32>,
+    /// Default `#SBATCH --mem` for Slurm runs (64G, 4000M, or megabytes).
+    #[arg(long)]
+    mem: Option<String>,
     #[arg(long)]
     context: Option<String>,
     #[arg(long)]
     namespace: Option<String>,
     #[arg(long)]
     address: Option<String>,
-    /// Clear a saved field; repeat for multiple fields (e.g. --clear time-limit).
+    /// Clear a saved field; repeat for multiple fields (e.g. --clear time-limit, --clear mem).
     #[arg(long)]
     clear: Vec<String>,
     /// JSON credentials: {"token":...}, {"key":...}, or {"tokenId":...,"tokenSecret":...}. Use - for stdin.
@@ -316,7 +322,14 @@ impl ConfigureArgs {
         let backend = self.backend.name();
         let allowed: &[&str] = match backend {
             "ssh" => &["host", "container", "defaultHost"],
-            "slurm" => &["host", "partition", "account", "timeLimit"],
+            "slurm" => &[
+                "host",
+                "partition",
+                "account",
+                "timeLimit",
+                "cpusPerTask",
+                "mem",
+            ],
             "k8s" => &["context", "namespace"],
             "ray" => &["address"],
             "hf" => &["token"],
@@ -332,6 +345,7 @@ impl ConfigureArgs {
             ("partition", self.partition),
             ("account", self.account),
             ("timeLimit", self.time_limit),
+            ("mem", self.mem),
             ("context", self.context),
             ("namespace", self.namespace),
             ("address", self.address),
@@ -339,6 +353,9 @@ impl ConfigureArgs {
             if let Some(value) = value {
                 body.insert(key.into(), json!(value));
             }
+        }
+        if let Some(cpus) = self.cpus_per_task {
+            body.insert("cpusPerTask".into(), json!(cpus));
         }
         if let Some(path) = self.credentials_file {
             let credentials: Map<String, Value> = serde_json::from_str(&read_input(&path)?)
@@ -370,6 +387,7 @@ impl ConfigureArgs {
         for field in self.clear {
             let key = match field.as_str() {
                 "time-limit" => "timeLimit",
+                "cpus-per-task" => "cpusPerTask",
                 "default-host" => "defaultHost",
                 other => other,
             };
@@ -386,6 +404,8 @@ impl ConfigureArgs {
                 key.into(),
                 if matches!(key, "container" | "defaultHost") {
                     Value::Null
+                } else if key == "cpusPerTask" {
+                    json!(0)
                 } else {
                     json!("")
                 },
@@ -724,6 +744,24 @@ mod tests {
             body(&["slurm", "--clear", "time-limit"]).unwrap(),
             json!({"timeLimit":""})
         );
+        assert_eq!(
+            body(&["slurm", "--cpus-per-task", "8", "--mem", "64G"]).unwrap(),
+            json!({"cpusPerTask":8, "mem":"64G"})
+        );
+        assert_eq!(
+            body(&["slurm", "--clear", "cpus-per-task", "--clear", "mem"]).unwrap(),
+            json!({"cpusPerTask":0, "mem":""})
+        );
+        assert!(body(&["ssh", "--host", "lab", "--mem", "64G"]).is_err());
+        assert!(crate::Cli::try_parse_from([
+            "orx",
+            "compute",
+            "configure",
+            "slurm",
+            "--cpus-per-task",
+            "0"
+        ])
+        .is_err());
         assert_eq!(
             body(&["ssh", "--host", "lab", "--clear", "container"]).unwrap(),
             json!({"host":"lab", "container":null})

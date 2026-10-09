@@ -90,7 +90,7 @@ the same canonical document.
 
 For Slurm, `--cpus` and `--mem` request `#SBATCH --cpus-per-task` and
 `#SBATCH --mem`; omitting either uses the configured Slurm default, then the
-cluster default. Read
+partition default. Read
 `references/slurm.md` before choosing values.
 
 ## Waiting on runs — `orx exp wait`

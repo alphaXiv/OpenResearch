@@ -89,6 +89,12 @@ pub struct BackendDescriptor {
     /// Requested execution limit for OpenResearch and Slurm jobs.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub timeout_secs: Option<u64>,
+    /// Requested `#SBATCH --cpus-per-task` (slurm_job only).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cpus_per_task: Option<u32>,
+    /// Requested `#SBATCH --mem` (slurm_job only).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mem: Option<String>,
     /// Immutable local source archive used for this run. These fields make a
     /// delayed or restarted supervisor independent of the working tree.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -280,6 +286,8 @@ mod tests {
             ssh_port: None,
             ssh_user: None,
             timeout_secs: Some(14_400),
+            cpus_per_task: None,
+            mem: None,
             source_digest: None,
             source_path: None,
             source_size: None,
@@ -301,11 +309,26 @@ mod tests {
         d.ssh_host = Some("203.0.113.7".to_string());
         d.ssh_port = Some(22022);
         d.ssh_user = Some("root".to_string());
+        d.cpus_per_task = Some(8);
+        d.mem = Some("64G".to_string());
         let json = d.to_json();
         assert!(json.contains("\"sshHost\":\"203.0.113.7\""), "{json}");
+        assert!(json.contains("\"cpusPerTask\":8"), "{json}");
 
         let back = BackendDescriptor::parse(&json).unwrap();
         assert_eq!(back.ssh_port, Some(22022));
+        assert_eq!(back.mem.as_deref(), Some("64G"));
+        assert_eq!(
+            crate::local::slurm::requested_resources(&back).as_deref(),
+            Some("cpus 8  mem 64G")
+        );
+        d.cpus_per_task = None;
+        assert_eq!(
+            crate::local::slurm::requested_resources(&d).as_deref(),
+            Some("cpus partition default  mem 64G")
+        );
+        d.mem = None;
+        assert_eq!(crate::local::slurm::requested_resources(&d), None);
         assert_eq!(back.openresearch_ref().unwrap(), ("org_1", "sb_1"));
     }
 
@@ -319,6 +342,7 @@ mod tests {
         assert_eq!(d.ssh_ref().unwrap(), ("mybox", ".orx/runs/r1"));
         assert_eq!(d.ssh_host, None);
         assert_eq!(d.timeout_secs, None);
+        assert_eq!(d.cpus_per_task, None);
         assert_eq!(d.ssh_container, None);
         let mut d = d;
         d.ssh_container = Some(ssh::ContainerRun {
