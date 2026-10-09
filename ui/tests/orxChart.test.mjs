@@ -107,3 +107,19 @@ test("a tight training-step zoom keeps its single integer tick exact", () => {
   const ticks=svg.children.filter(node=>node.attributes.y===String(layout.height-layout.bottom+23)).map(node=>Number(node.textContent));
   assert.deepEqual(ticks,[124]);
 });
+
+
+test("y-only zoom retains confidence bands crossing the selected range", () => {
+  const {layout}=render({type:"line"},[
+    {name:"Band",points:[{step:1,loss:10,lower:0,upper:20},{step:10,loss:10,lower:0,upper:20}]},
+    {name:"Other",points:[{step:20,loss:1},{step:30,loss:1}]},
+  ],"domain={y:[.5,1.5]};draw()");
+  assert.deepEqual([layout.xmin,layout.xmax],[1,30]);
+  const crossing=render({type:"line"},[{name:"Band",points:[{step:1,loss:0,lower:-1,upper:1},{step:10,loss:10,lower:9,upper:11}]}],"domain={y:[4,6]};draw()");
+  assert.ok(crossing.layout.xmin<4.6 && crossing.layout.xmax>6.4);
+});
+
+test("arrow inspection skips fitted-only slices without creating invalid cursors", () => {
+  const {svg}=render({type:"scaling"},[{name:"Fit",points:[{step:1,loss:2},{step:10,loss:2}],fit:[{step:1,loss:1},{step:10,loss:1}]}],"domain={x:[4,6]};draw();chart.onkeydown({key:'ArrowRight',preventDefault(){}})");
+  assert.ok(!svg.children.some(node=>node.attributes.id==='cursor'));
+});

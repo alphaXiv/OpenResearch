@@ -100,7 +100,10 @@ function slicePoints(run,axis,range){
  const result=sliceRows(samples,axis,range,connected);
  if(metric.type==='pareto')result.push(...sliceRows(frontier(samples),axis,range));
  const intervals=samples.filter(p=>Number.isFinite(p.lower)&&Number.isFinite(p.upper));
- if(intervals.length)result.push(...sliceRows(intervals,axis,range));
+ if(intervals.length){
+  if(axis==='step')result.push(...sliceRows(intervals,axis,range));
+  else result.push(...intervals.filter(p=>p.lower<=range[1]&&p.upper>=range[0]),...sliceRows(intervals,'lower',range),...sliceRows(intervals,'upper',range));
+ }
  return result.concat(sliceRows(run.fit||[],axis,range));
 }
 function tickLabel(value,spacing){const precision=Math.max(1,Math.floor(Math.log10(Math.abs(value)||1))-Math.floor(Math.log10(spacing))+2);return Number(value.toPrecision(Math.min(100,precision)))}
@@ -231,7 +234,7 @@ function selection(end){const dx=Math.abs(end.x-drag.x),dy=Math.abs(end.y-drag.y
 chart.onpointerdown=event=>{if(['heatmap','confusion','diagram','dot'].includes(metric.type))return;if(event.button!==0)return;const rect=chart.getBoundingClientRect(),px=event.clientX-rect.left,py=event.clientY-rect.top;if(px<layout.left||px>layout.width-layout.right||py<layout.top||py>layout.height-layout.bottom)return;event.preventDefault();drag=pointerPosition(event);hover=null;tip.hidden=true;chart.querySelector('#cursor')?.remove();chart.setPointerCapture(event.pointerId)};
 chart.onpointermove=event=>{if(['heatmap','confusion','diagram','dot'].includes(metric.type))return;if(drag){const end=pointerPosition(event),{mode}=selection(end);chart.querySelector('#selection')?.remove();chart.append(element('rect',{id:'selection',x:mode==='y'?layout.left:Math.min(drag.x,end.x),y:mode==='x'?layout.top:Math.min(drag.y,end.y),width:mode==='y'?layout.width-layout.left-layout.right:Math.abs(end.x-drag.x),height:mode==='x'?layout.height-layout.top-layout.bottom:Math.abs(end.y-drag.y),fill:'var(--fg)','fill-opacity':.12}));return}const steps=[...new Set(series().flatMap((run,i)=>enabled.has(i)?points(run).map(p=>p.step):[]))];inspect(steps.reduce((a,b)=>Math.abs(b-pointerStep(event))<Math.abs(a-pointerStep(event))?b:a))};
 chart.onpointerleave=()=>{if(drag)return;hover=null;tip.hidden=true;chart.querySelector('#cursor')?.remove()};
-chart.onkeydown=event=>{if(['heatmap','confusion','diagram','dot'].includes(metric.type))return;if(!['ArrowLeft','ArrowRight'].includes(event.key))return;event.preventDefault();const steps=[...new Set(series().flatMap(points).map(p=>p.step))].filter(s=>s>=layout.xmin&&s<=layout.xmax).sort((a,b)=>a-b);const index=hover===null?0:steps.indexOf(hover);inspect(steps[Math.max(0,Math.min(steps.length-1,index+(event.key==='ArrowRight'?1:-1)))])};
+chart.onkeydown=event=>{if(['heatmap','confusion','diagram','dot'].includes(metric.type))return;if(!['ArrowLeft','ArrowRight'].includes(event.key))return;event.preventDefault();const steps=[...new Set(series().flatMap(points).map(p=>p.step))].filter(s=>s>=layout.xmin&&s<=layout.xmax).sort((a,b)=>a-b);if(!steps.length)return;const index=hover===null?0:steps.indexOf(hover);inspect(steps[Math.max(0,Math.min(steps.length-1,index+(event.key==='ArrowRight'?1:-1)))])};
 chart.onpointerup=event=>{
  if(!drag)return;
  const end=pointerPosition(event),{mode,dx,dy}=selection(end);
