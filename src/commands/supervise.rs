@@ -1665,6 +1665,7 @@ mod tests {
                 commit_sha: None,
                 result_markdown: None,
                 cancel_requested: true,
+                cancel_reason: None,
                 chat_session_id: None,
             })
             .unwrap();
