@@ -1197,9 +1197,9 @@ fn literature_assistant_parts(harness: &str) -> Vec<WirePart> {
             "Load literature search workflow",
         ),
         (
-            "evidence-skill",
-            ".agents/skills/orx-evidence/SKILL.md",
-            "Load evidence workflow",
+            "results-skill",
+            ".agents/skills/orx-results/SKILL.md",
+            "Load results interpretation workflow",
         ),
         (
             "experiment-tree-skill",

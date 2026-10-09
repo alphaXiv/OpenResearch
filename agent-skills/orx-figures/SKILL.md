@@ -1,6 +1,6 @@
 ---
 name: orx-figures
-description: "Interactive HTML charts for chat and publication figures in matplotlib or TikZ. Use when plotting experiment metrics, learning curves, comparisons, scaling, heatmaps or diagrams. Includes an offline chart template with hover, toggles, zoom and SVG export."
+description: "Create or update interactive HTML charts for chat and static publication figures. Invoke before writing plotting code or when an existing figure needs correction; use `orx-results` for experiment interpretation and `orx-logs` for retrieving measurements."
 ---
 
 Prefer interactive HTML for suitable experiment metrics in chat, and static vector
@@ -14,19 +14,8 @@ Show newly created image figures inline in the chat handoff, including SVGs:
 When a visualization helps explain experiment metrics in chat, use the bundled
 offline HTML chart. Start with one useful view. Add a dropdown only when the
 same data benefits from multiple distinct views; never add views just to fill
-the selector. A single view has no dropdown. Hide the legend when only one series is plotted.
-Use the house Helvetica/Arial typography and Okabe–Ito palette, with a clear
-hierarchy: an 18px medium-weight title, 14px setup metadata, 14px metric controls,
-ticks and legend, and a compact plot capped at 360px. Keep axes and horizontal
-grids quiet; put the metric name and units horizontally above the y-axis tick labels.
-Use 3px curves and small markers for sparse measurements. Controls should
-look secondary to the data, with readable foreground text. The dashboard hosts
-the metric dropdown using its shared OptionPicker component; the standalone
-HTML keeps a native fallback. Tooltips should be compact and aligned, and mouse
-interaction must not leave a bright frame around the plot. Fill the available
-chat width and fit the document height without internal scrolling.
-It supports hover values, a metric dropdown, run toggles, drag selection zoom on either or both axes, keyboard inspection,
-and SVG export. Use real run data; preserve raw values and state the seed count.
+the selector. The template handles chart styling, controls, and interactions.
+Use real run data, preserve raw values, and state the seed count.
 Use static publication figures when the user requests a paper or export.
 
 Vendor both files beside the rendering script:
@@ -56,8 +45,6 @@ Embed the result inline using image syntax (HTML opens as a sandboxed figure):
 ![Learning-rate comparison](artifacts/loss.html)
 ```
 
-Choose complementary prose, tables, and visuals: each should help the reader
-understand something beyond what the other representations already show.
 Link CSV/JSON evidence alongside the figure for access to the underlying data. Reuse a run's ready-made chart
 rather than regenerating it. The paper-specific rules below apply to static
 publication output.
@@ -77,7 +64,7 @@ publication output.
    raster content: a photograph, a sample image grid, an attention map at
    pixel resolution.
 3. **Every number comes from a run.** Read metrics from the file located by
-   `orx logs` (see the `orx-evidence` module). Never plot a remembered,
+   `orx logs` (see the `orx-logs` module). Never plot a remembered,
    rounded, or plausible number, and never leave synthetic demo data in a
    script that ships.
 4. **The caption is the title.** No `ax.set_title` on a paper figure — a title

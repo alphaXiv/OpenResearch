@@ -1,6 +1,6 @@
 ---
 name: orx-reports
-description: "Write and organize durable outputs in the artifacts directory. Use before creating or organizing artifacts, including reports, summaries, comparisons, figures, and exported data, or when a line of work concludes."
+description: "Save and organize durable research outputs in the artifacts directory. Invoke when creating or reorganizing a report, exported dataset, or other deliverable; use `orx-results` for analysis and `orx-figures` when constructing charts."
 ---
 
 Write reports, figures, CSVs, PDFs, and other outputs directly into the artifacts
@@ -49,4 +49,4 @@ evidence-and-links contract, including the full nested path, for example
 When an output is an image, also show it inline in the chat handoff using
 `![Description](artifacts/<relative-path>)`, while keeping its file link. Put related image previews in consecutive
 paragraphs so they render as a carousel, with file links after the group.
-Load `orx-evidence` when the report makes claims derived from run results.
+Load `orx-results` when the report requires interpreting or comparing run results.

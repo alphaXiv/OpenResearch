@@ -76,10 +76,10 @@ metrics.onchange=()=>{metric=data.metrics.find(item=>item.key===metrics.value);d
 setLegend();
 function points(run){return run.points.filter(p=>Number.isFinite(p[metric.key])&&Number.isFinite(p.step)&&(metric.xScale!=='log'||p.step>0)&&(metric.yScale!=='log'||p[metric.key]>0))}
 function rangePoints(run){return [...points(run),...(run.fit||[])]}
-function slicePoints(run,axis,range){
- const rows=rangePoints(run),coordinate=p=>p[axis],inside=p=>coordinate(p)>=range[0]&&coordinate(p)<=range[1];
+function sliceRows(rows,axis,range,connected=true){
+ const coordinate=p=>p[axis],inside=p=>coordinate(p)>=range[0]&&coordinate(p)<=range[1];
  const result=rows.filter(inside);
- if(metric.type==='scatter'||metric.type==='bar')return result;
+ if(!connected)return result;
  const transform=(value,key)=>(key==='step'?metric.xScale:metric.yScale)==='log'?Math.log10(value):value;
  const restore=(value,key)=>(key==='step'?metric.xScale:metric.yScale)==='log'?10**value:value;
  for(let i=1;i<rows.length;i++){
@@ -93,6 +93,15 @@ function slicePoints(run,axis,range){
   }
  }
  return result;
+}
+function frontier(samples){return samples.filter(p=>!samples.some(q=>(metric.minimizeX===false?q.step>=p.step:q.step<=p.step)&&(metric.maximizeY===false?q[metric.key]<=p[metric.key]:q[metric.key]>=p[metric.key])&&(q.step!==p.step||q[metric.key]!==p[metric.key]))).sort((a,b)=>a.step-b.step)}
+function slicePoints(run,axis,range){
+ const samples=points(run),connected=!metric.type||['line','area'].includes(metric.type);
+ const result=sliceRows(samples,axis,range,connected);
+ if(metric.type==='pareto')result.push(...sliceRows(frontier(samples),axis,range));
+ const intervals=samples.filter(p=>Number.isFinite(p.lower)&&Number.isFinite(p.upper));
+ if(intervals.length)result.push(...sliceRows(intervals,axis,range));
+ return result.concat(sliceRows(run.fit||[],axis,range));
 }
 function bounds(){const all=series().flatMap(rangePoints);return [Math.min(...all.map(p=>p.step)),Math.max(...all.map(p=>p.step))]}
 let layout;
@@ -117,7 +126,7 @@ function draw(){
  const decimals=Math.max(0,-Math.floor(Math.log10(tickStep))+(tickStep/power===2.5?1:0));
  const xPad=domain?.x||metric.xScale==='log'?0:metric.type==='bar'?Math.max((xmax-xmin)*.2,.5):['line','area','scaling'].includes(metric.type||'line')?0:(xmax-xmin)*.025;
  const tx=v=>metric.xScale==='log'?Math.log10(v):v,ty=v=>metric.yScale==='log'?Math.log10(v):v;
- const yLow=metric.yScale==='log'?Math.max(low,Number.MIN_VALUE):ymin,yHigh=metric.yScale==='log'?high:ymax;
+ const yLow=metric.yScale==='log'?Math.max(low/(low===high?1.02:1),Number.MIN_VALUE):ymin,yHigh=metric.yScale==='log'?high*(low===high?1.02:1):ymax;
  const x=value=>left+(tx(value)-tx(xmin-xPad))/(tx(xmax+xPad)-tx(xmin-xPad)||1)*(width-left-right),y=value=>top+(ty(yHigh)-ty(value))/(ty(yHigh)-ty(yLow)||1)*(height-top-bottom);
  layout={width,height,left,right,top,bottom,xmin,xmax,ymin:yLow,ymax:yHigh,xPad,x,y};
  chart.replaceChildren();chart.setAttribute('viewBox',`0 0 ${width} ${height}`);
@@ -138,7 +147,7 @@ function draw(){
   if(run.fit?.length){chart.append(element('path',{d:run.fit.map((p,j)=>`${j?'L':'M'}${x(p.step)},${y(p[metric.key])}`).join(' '),fill:'none',stroke:color,'stroke-width':2,'stroke-dasharray':run.fitDash||'4 3','clip-path':'url(#plot-area)'}))}
   let front=null;
   if(metric.type==='pareto'){
-   front=samples.filter(p=>!samples.some(q=>(metric.minimizeX===false?q.step>=p.step:q.step<=p.step)&&(metric.maximizeY===false?q[metric.key]<=p[metric.key]:q[metric.key]>=p[metric.key])&&(q.step!==p.step||q[metric.key]!==p[metric.key]))).sort((a,b)=>a.step-b.step);
+   front=frontier(samples);
    chart.append(element('path',{d:front.map((p,j)=>`${j?'L':'M'}${x(p.step)},${y(p[metric.key])}`).join(' '),fill:'none',stroke:color,'stroke-width':3,'clip-path':'url(#plot-area)'}));
   }
   if(!metric.type||metric.type==='line'||metric.type==='area'){
@@ -205,12 +214,12 @@ function drawHeatmap(width,height,left,right,bottom){
  chart.append(element('text',{transform:`translate(${width-8} ${top+availableHeight/2}) rotate(-90)`,'text-anchor':'middle',fill:'var(--fg)','font-size':12},`${metric.label}${metric.unit?` (${metric.unit})`:''}`),element('text',{x:14,y:top-32,'text-anchor':'start',fill:'var(--fg)','font-size':14,'font-weight':500},metric.yLabel||'Learning rate'),element('text',{x:left+steps.length*cellWidth,y:height-3,'text-anchor':'end',fill:'var(--fg)','font-size':14,'font-weight':500},metric.xLabel||'Training step'));
 }
 function inspect(step){
- const {x,y,top,height,bottom,width,xmin,xmax}=layout;
+ const {x,y,top,height,bottom,width,xmin,xmax,ymin,ymax}=layout;
  if(step<xmin||step>xmax)return;
  hover=step;chart.querySelector('#cursor')?.remove();
  const cursor=element('g',{id:'cursor'});cursor.append(element('line',{x1:x(step),x2:x(step),y1:top,y2:height-bottom,stroke:'var(--muted)','stroke-dasharray':'3 4',opacity:.6}));
  tip.replaceChildren();const label=document.createElement('strong');label.textContent=`${metric.xLabel||data.xLabel||'Training step'}: ${step}`;tip.append(label);
- series().forEach((run,i)=>{if(!enabled.has(i))return;const p=points(run).find(p=>p.step===step);if(!p)return;cursor.append(element('circle',{cx:x(step),cy:y(p[metric.key]),r:5,fill:'var(--bg)',stroke:run.color||colors[i%colors.length],'stroke-width':2}));const row=document.createElement('div');row.className='value';const name=document.createElement('span'),value=document.createElement('span');name.textContent=run.name;name.style.color=run.color||colors[i%colors.length];value.textContent=p[metric.key].toFixed(4);row.append(name,value);tip.append(row)});
+ series().forEach((run,i)=>{if(!enabled.has(i))return;const p=points(run).find(p=>p.step===step);if(!p)return;if(p[metric.key]>=ymin&&p[metric.key]<=ymax)cursor.append(element('circle',{cx:x(step),cy:y(p[metric.key]),r:5,fill:'var(--bg)',stroke:run.color||colors[i%colors.length],'stroke-width':2}));const row=document.createElement('div');row.className='value';const name=document.createElement('span'),value=document.createElement('span');name.textContent=run.name;name.style.color=run.color||colors[i%colors.length];value.textContent=p[metric.key].toFixed(4);row.append(name,value);tip.append(row)});
  chart.append(cursor);tip.hidden=false;tip.style.left=`${Math.max(0,Math.min(width-tip.offsetWidth,x(step)+12))}px`;
 }
 function pointerStep(event){const {left,width,right,xmin,xmax,xPad}=layout;const px=event.clientX-chart.getBoundingClientRect().left;return Math.max(xmin,Math.min(xmax,metric.xScale==='log'?10**(Math.log10(xmin)+(px-left)/(width-left-right)*(Math.log10(xmax)-Math.log10(xmin))):xmin-xPad+(px-left)/(width-left-right)*(xmax-xmin+2*xPad)))}

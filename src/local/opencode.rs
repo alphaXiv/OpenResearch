@@ -954,7 +954,8 @@ mod tests {
     #[test]
     fn playbook_owns_clickable_references() {
         let md = sample_playbook();
-        let evidence = agent_skills::find("orx-evidence", SkillSet::Local).unwrap();
+        let results = agent_skills::find("orx-results", SkillSet::Local).unwrap();
+        let logs = agent_skills::find("orx-logs", SkillSet::Local).unwrap();
         assert!(md.contains("## Evidence and links in chat"));
         assert!(md.contains("<file path=\"relative/path.py\" />"));
         assert!(md.contains("exp=\"<experimentId>\""));
@@ -962,11 +963,11 @@ mod tests {
         assert!(md.contains("<file path=\"artifacts/<relative-path>\" />"));
         assert!(md.contains("Scholarly claims use the source links"));
         assert!(md.contains("Use `$...$` for inline math"));
-        assert!(evidence.content.contains("Validate before reporting"));
-        assert!(evidence
+        assert!(results.content.contains("Validate before reporting"));
+        assert!(logs
             .content
             .contains("Truncated output is not evidence of absence"));
-        assert!(!evidence.content.contains("<file path="));
+        assert!(!results.content.contains("<file path="));
     }
 
     #[test]
