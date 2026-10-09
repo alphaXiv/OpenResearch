@@ -4173,7 +4173,7 @@ function SessionRow({
 
 // The four starter prompts progress starting point → gap → baseline → experiment.
 const STARTER_ICONS = [BookOpen, Search, SquareTerminal, FlaskConical];
-// A blank project has nothing for a model to read, so its prompts are pre-written.
+// Shown for a blank project when prompts tailored to its researcher aren't available.
 const blankStarterPrompts = (): StarterPrompt[] => [
   { title: m.chat_panel_starter_blank_1_title(), prompt: m.chat_panel_starter_blank_1_prompt() },
   { title: m.chat_panel_starter_blank_2_title(), prompt: m.chat_panel_starter_blank_2_prompt() },
@@ -5439,11 +5439,11 @@ export function ChatPanel({
   }, [pinTranscriptToBottom]);
 
   /** `queue` (the ⌘/Ctrl+Enter chord) parks the message even on a harness that steers. */
-  async function send({ queue = false }: { queue?: boolean } = {}) {
+  async function send({ queue = false, starter }: { queue?: boolean; starter?: string } = {}) {
     // Slash tokens stay in the wire form: the server resolves every selected
     // skill and supplies this exact message as their shared request context.
-    const originalText = draft.trim();
-    const composerCommand = !pendingQuestion
+    const originalText = (starter ?? draft).trim();
+    const composerCommand = !pendingQuestion && starter === undefined
       ? parseComposerCommand(originalText, opts?.planActivation)
       : null;
     if (composerCommand && composerCommand.name !== "plan") {
@@ -5452,11 +5452,13 @@ export function ChatPanel({
       runComposerCommand(composerCommand.name, composerCommand.prompt);
       return;
     }
-    captureUiEvent({
-      name: "first_action",
-      surface: telemetrySurface,
-      action: "typed_prompt",
-    });
+    if (starter === undefined) {
+      captureUiEvent({
+        name: "first_action",
+        surface: telemetrySurface,
+        action: "typed_prompt",
+      });
+    }
     if (preparingSend.current) return;
     const planRequested = !!composerCommand;
     const toggledPlanMode = !planActive;
@@ -6500,27 +6502,41 @@ export function ChatPanel({
                 {starterPrompts.map((item, index) => {
                   const Icon = STARTER_ICONS[index];
                   const tone = STARTER_TONES[index];
+                  const pickStarter = (edit: boolean) => {
+                    captureUiEvent({ name: "project_starter_clicked", slot: index + 1 });
+                    captureUiEvent({
+                      name: "first_action",
+                      surface: telemetrySurface,
+                      action: "starter_click",
+                    });
+                    // Don't auto-send past an unavailable agent or a non-empty composer.
+                    const composerEmpty = !draft.trim() && attachments.length === 0 && annotations.length === 0;
+                    if (edit || !activeHarness?.agentReady || !composerEmpty) applyStarterPrompt(item.prompt);
+                    else void send({ starter: item.prompt });
+                  };
                   return (
-                    <button
-                      key={index}
-                      type="button"
-                      className={`flex min-h-22 w-full min-w-0 cursor-pointer flex-col items-start justify-center gap-1.5 rounded-xl border bg-background px-5 py-4 text-start font-sans transition-colors duration-120 ease-standard hover:bg-surface ${tone.box}`}
-                      onClick={() => {
-                        captureUiEvent({ name: "project_starter_clicked", slot: index + 1 });
-                        captureUiEvent({
-                          name: "first_action",
-                          surface: telemetrySurface,
-                          action: "starter_click",
-                        });
-                        applyStarterPrompt(item.prompt);
-                      }}
-                    >
-                      <span className="flex items-center gap-2.5 text-base font-medium text-text">
-                        <Icon size={17} className={tone.icon} />
-                        {item.title}
-                      </span>
-                      <span className="w-full truncate text-sm text-subtext">{item.prompt}</span>
-                    </button>
+                    <div key={index} className="relative min-w-0">
+                      <button
+                        type="button"
+                        className={`flex h-full min-h-22 w-full min-w-0 cursor-pointer flex-col items-start justify-center gap-1.5 rounded-xl border bg-background py-4 ps-5 pe-11 text-start font-sans transition-colors duration-120 ease-standard hover:bg-surface ${tone.box}`}
+                        onClick={() => pickStarter(false)}
+                      >
+                        <span className="flex items-center gap-2.5 text-base font-medium text-text">
+                          <Icon size={17} className={tone.icon} />
+                          {item.title}
+                        </span>
+                        <span className="w-full truncate text-sm text-subtext">{item.prompt}</span>
+                      </button>
+                      <IconButton
+                        size="small"
+                        className="absolute end-2.5 top-2.5 [&:hover:not(:disabled)]:bg-surface-bright"
+                        aria-label={m.chat_panel_starter_edit({ title: item.title })}
+                        title={m.chat_panel_starter_edit({ title: item.title })}
+                        onClick={() => pickStarter(true)}
+                      >
+                        <Pencil size={13} />
+                      </IconButton>
+                    </div>
                   );
                 })}
               </div>

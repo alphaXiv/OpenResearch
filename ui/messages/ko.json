@@ -128,6 +128,7 @@
   "chat_panel_starter_blank_3_prompt": "GPU 한 대로 몇 분 안에 작은 모델을 처음부터 끝까지 학습하는 최소한의 학습 스크립트를 설정, 의존성, 실행 명령과 함께 만들어 주세요.",
   "chat_panel_starter_blank_4_title": "첫 실험 실행",
   "chat_panel_starter_blank_4_prompt": "계획에서 비용이 적고 명확한 가설 하나를 골라 베이스라인의 변형으로 구현하고, 둘을 비교할 첫 실행을 시작해 주세요.",
+  "chat_panel_starter_edit": "보내기 전에 “{title}” 편집",
   "chat_panel_starter_generating": "시작 지점을 제안하기 위해 프로젝트를 읽는 중…",
   "chat_panel_starter_prompts": "시작 프롬프트",
   "chat_panel_stop": "중지",

@@ -128,6 +128,7 @@
   "chat_panel_starter_blank_3_prompt": "أنشئ أصغر سكربت تدريب ممكن مع إعدادات واعتماديات وأمر تشغيل يدرّب نموذجًا صغيرًا من البداية إلى النهاية في دقائق على وحدة GPU واحدة.",
   "chat_panel_starter_blank_4_title": "تشغيل التجربة الأولى",
   "chat_panel_starter_blank_4_prompt": "اختر فرضية واحدة منخفضة التكلفة ومحددة جيدًا من خطتنا، ونفّذها كنسخة معدّلة من خط الأساس، وابدأ أول تشغيل لمقارنة الاثنين.",
+  "chat_panel_starter_edit": "تعديل «{title}» قبل الإرسال",
   "chat_panel_starter_generating": "جارٍ قراءة المشروع لاقتراح نقطة البدء…",
   "chat_panel_starter_prompts": "اقتراحات للبدء",
   "chat_panel_stop": "إيقاف",

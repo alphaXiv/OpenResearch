@@ -128,6 +128,7 @@
   "chat_panel_starter_blank_3_prompt": "Prepara un script de entrenamiento mínimo con configuración, dependencias y un comando de ejecución que entrene un modelo pequeño de principio a fin en unos minutos con una GPU.",
   "chat_panel_starter_blank_4_title": "Ejecutar un primer experimento",
   "chat_panel_starter_blank_4_prompt": "Elige una hipótesis de nuestro plan que sea económica de probar y esté bien definida, impleméntala como una variante del modelo de referencia e inicia una primera ejecución para comparar ambas versiones.",
+  "chat_panel_starter_edit": "Editar “{title}” antes de enviar",
   "chat_panel_starter_generating": "Leyendo el proyecto para sugerir por dónde empezar…",
   "chat_panel_starter_prompts": "Prompts para empezar",
   "chat_panel_stop": "Detener",
