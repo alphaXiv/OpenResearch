@@ -2073,11 +2073,11 @@ async fn set_experiment_archive(
             ))
         }
     };
-    let mut store = Store::open()?;
+    let store = Store::open()?;
     if store.get_local_experiment(&id)?.is_none() {
         return Err(not_found("experiment"));
     }
-    let ids = local::experiments::set_archived(&mut store, &id, direction, request.archived)?;
+    let ids = local::experiments::set_archived(&store, &id, direction, request.archived)?;
     Ok(Json(json!({ "ids": ids })))
 }
 

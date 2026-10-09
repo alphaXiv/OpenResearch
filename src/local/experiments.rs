@@ -74,17 +74,21 @@ pub enum ArchiveDirection {
 }
 
 pub fn set_archived(
-    store: &mut Store,
+    store: &Store,
     id: &str,
     direction: ArchiveDirection,
     archived: bool,
 ) -> Result<Vec<String>> {
+    // A concurrent move must not re-parent rows between computing the scope and writing it.
+    let tx = store.begin_immediate()?;
     let selected = store
         .get_local_experiment(id)?
         .ok_or_else(|| anyhow!("Experiment {id} not found."))?;
     let experiments = store.list_experiments_by_project(&selected.project_id)?;
     let ids = archive_ids(&experiments, &selected, direction);
-    store.set_experiments_archived(&ids, archived)
+    let changed = store.set_experiments_archived(&ids, archived)?;
+    tx.commit()?;
+    Ok(changed)
 }
 
 fn archive_ids(
@@ -517,6 +521,37 @@ mod tests {
         move_experiment(&store, "selected", Some("root")).unwrap();
         let back = store.get_local_experiment("selected").unwrap().unwrap();
         assert_eq!(back.parent_experiment_id.as_deref(), Some("root"));
+        drop(store);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn set_archived_commits_descendants_and_returns_changed_ids() {
+        let dir = std::env::temp_dir().join(format!("orx-archive-tx-{}", uuid::Uuid::new_v4()));
+        let store = Store::open_at(dir.clone()).unwrap();
+        let mut root = experiment(None, "orx/root");
+        root.id = "root".into();
+        let mut child = experiment(Some("root"), "orx/child");
+        child.id = "child".into();
+        child.slug = "child".into();
+        store.create_local_experiment(&root).unwrap();
+        store.create_local_experiment(&child).unwrap();
+        let ids = set_archived(&store, "root", ArchiveDirection::Descendants, true).unwrap();
+        assert_eq!(ids, ["child"]);
+        assert!(
+            store
+                .get_local_experiment("child")
+                .unwrap()
+                .unwrap()
+                .archived
+        );
+        assert!(
+            !store
+                .get_local_experiment("root")
+                .unwrap()
+                .unwrap()
+                .archived
+        );
         drop(store);
         let _ = std::fs::remove_dir_all(dir);
     }

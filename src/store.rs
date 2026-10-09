@@ -1965,15 +1965,11 @@ impl Store {
         Ok(())
     }
 
-    pub fn set_experiments_archived(
-        &mut self,
-        ids: &[String],
-        archived: bool,
-    ) -> Result<Vec<String>> {
-        let tx = self.conn.transaction()?;
+    /// Not atomic on its own; call inside `begin_immediate` with the read that chose `ids`.
+    pub fn set_experiments_archived(&self, ids: &[String], archived: bool) -> Result<Vec<String>> {
         let mut changed = Vec::new();
         for id in ids {
-            let rows = tx.execute(
+            let rows = self.conn.execute(
                 "UPDATE local_experiments SET archived = ?2, updated_at = MAX(updated_at + 1, ?3) WHERE id = ?1 AND archived != ?2",
                 params![id, archived, now_ms()],
             )?;
@@ -1981,7 +1977,6 @@ impl Store {
                 changed.push(id.clone());
             }
         }
-        tx.commit()?;
         Ok(changed)
     }
 
