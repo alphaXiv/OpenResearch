@@ -190,11 +190,7 @@ impl LocalPlane {
                                 .unwrap_or_else(|| "unknown (older run or cluster default)".into())
                         );
                         if backend.job_id.is_some() {
-                            println!(
-                                "  requested {}",
-                                crate::local::slurm::requested_resources(&backend)
-                                    .unwrap_or_else(|| "cpus/mem: partition default".into())
-                            );
+                            println!("  {}", crate::local::slurm::status_resources(&backend));
                         }
                         if let Some(error) = backend.monitoring_error.as_deref() {
                             println!("  {error}");

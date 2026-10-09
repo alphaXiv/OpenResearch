@@ -322,6 +322,10 @@ mod tests {
             crate::local::slurm::requested_resources(&back).as_deref(),
             Some("cpus 8  mem 64G")
         );
+        assert_eq!(
+            crate::local::slurm::status_resources(&back),
+            "requested cpus 8  mem 64G"
+        );
         d.cpus_per_task = None;
         assert_eq!(
             crate::local::slurm::requested_resources(&d).as_deref(),
@@ -343,6 +347,14 @@ mod tests {
         assert_eq!(d.ssh_host, None);
         assert_eq!(d.timeout_secs, None);
         assert_eq!(d.cpus_per_task, None);
+        // A Slurm run from before cpus/mem were recorded may still have requested them.
+        let slurm =
+            BackendDescriptor::parse(r#"{"kind":"slurm_job","namespace":"login","jobId":"123"}"#)
+                .unwrap();
+        assert_eq!(
+            crate::local::slurm::status_resources(&slurm),
+            "requested cpus/mem: unknown (older run or partition default)"
+        );
         assert_eq!(d.ssh_container, None);
         let mut d = d;
         d.ssh_container = Some(ssh::ContainerRun {

@@ -48,6 +48,15 @@ pub fn requested_resources(backend: &BackendDescriptor) -> Option<String> {
     ))
 }
 
+/// The `exp status` line. Runs launched before cpus/mem were recorded may have
+/// requested them, so an empty descriptor is unknown rather than the default.
+pub fn status_resources(backend: &BackendDescriptor) -> String {
+    match requested_resources(backend) {
+        Some(resources) => format!("requested {resources}"),
+        None => "requested cpus/mem: unknown (older run or partition default)".into(),
+    }
+}
+
 /// Submit the local experiment's run as a Slurm batch job and detach a
 /// supervisor. Requires `--backend slurm`; the login node comes from
 /// `--host <alias>` or the slurm settings default.
