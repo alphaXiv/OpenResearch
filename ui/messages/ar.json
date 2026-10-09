@@ -1097,6 +1097,7 @@
   "chat_attachment_too_large": "{name} كبير جدًا — يجب أن يكون كل مرفق أقل من 30 ميغابايت.",
   "chat_attachment_alt": "مرفق",
   "chat_attachments_total_too_large": "تتجاوز المرفقات الحد الإجمالي 40 ميغابايت — أزِل واحدًا وحاول مجددًا.",
+  "chat_model_no_image_input": "لا يستطيع {model} قراءة الصور. أزِل الصورة أو بدّل إلى نموذج يدعم الصور.",
   "chat_update_permissions_failed": "تعذّر تحديث الأذونات. حاول مجددًا.",
   "chat_update_autonomy_failed": "تعذّر تحديث الاستقلالية. حاول مجددًا.",
   "chat_exit_plan_failed": "تعذّر الخروج من وضع التخطيط. حاول مجددًا.",

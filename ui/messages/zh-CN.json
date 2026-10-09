@@ -1092,6 +1092,7 @@
   "chat_attachment_too_large": "{name} 太大 — 每个附件必须小于 30 MB。",
   "chat_attachment_alt": "附件",
   "chat_attachments_total_too_large": "附件总大小超过 40 MB 限制 — 请移除一个附件后重试。",
+  "chat_model_no_image_input": "{model} 无法查看图片。请移除图片，或切换到支持图片的模型。",
   "chat_update_permissions_failed": "无法更新权限。请重试。",
   "chat_update_autonomy_failed": "无法更新自主程度。请重试。",
   "chat_exit_plan_failed": "无法退出计划模式。请重试。",

@@ -1098,6 +1098,7 @@
   "chat_attachment_too_large": "{name} が大きすぎます。各添付ファイルは 30 MB 未満である必要があります。",
   "chat_attachment_alt": "添付ファイル",
   "chat_attachments_total_too_large": "添付ファイルの合計が上限の 40 MB を超えています。1 つ削除して再試行してください。",
+  "chat_model_no_image_input": "{model} は画像を読み取れません。画像を削除するか、画像に対応したモデルに切り替えてください。",
   "chat_update_permissions_failed": "権限を更新できませんでした。再試行してください。",
   "chat_update_autonomy_failed": "自律性を更新できませんでした。再試行してください。",
   "chat_exit_plan_failed": "計画モードを終了できませんでした。再試行してください。",
