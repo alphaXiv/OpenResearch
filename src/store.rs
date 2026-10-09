@@ -1942,14 +1942,15 @@ impl Store {
     /// Full-row update by id (title / description / run_command / agent_status).
     ///
     /// `chat_session_id` is deliberately omitted: session ownership is stamped
-    /// once at creation and is immutable thereafter.
+    /// once at creation and is immutable thereafter. The parent changes only
+    /// through `set_experiment_parent`, so a stale row cannot undo a move.
     pub fn update_local_experiment(&self, e: &LocalExperiment) -> Result<()> {
         self.conn.execute(
-            "UPDATE local_experiments SET parent_experiment_id = ?2, slug = ?3, branch_name = ?4,
-                    title = ?5, description = ?6, run_command = ?7, agent_status = ?8, updated_at = ?9
+            "UPDATE local_experiments SET slug = ?2, branch_name = ?3,
+                    title = ?4, description = ?5, run_command = ?6, agent_status = ?7, updated_at = ?8
              WHERE id = ?1",
             params![
-                e.id, e.parent_experiment_id, e.slug, e.branch_name,
+                e.id, e.slug, e.branch_name,
                 e.title, e.description, e.run_command, e.agent_status, now_ms(),
             ],
         )?;
@@ -5721,6 +5722,7 @@ mod tests {
         // A later full-row update must not rewrite the owning session.
         let mut updated = experiment_fixture("exp_owned", None);
         updated.title = Some("renamed".into());
+        updated.parent_experiment_id = Some("stale-parent".into());
         store.update_local_experiment(&updated).unwrap();
 
         let stored = store.get_local_experiment("exp_owned").unwrap().unwrap();
@@ -5730,6 +5732,7 @@ mod tests {
             Some("chat_x".to_string()),
             "the creating session is never overwritten by a later update"
         );
+        assert_eq!(stored.parent_experiment_id, None, "only a move re-parents");
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

@@ -173,6 +173,8 @@ fn archive_ids(
 /// Re-parent an experiment under `parent`, or make it a root when `None`.
 /// Returns the pre-move row.
 pub fn move_experiment(store: &Store, id: &str, parent: Option<&str>) -> Result<LocalExperiment> {
+    // Concurrent moves must not both pass the cycle check against the same tree.
+    let tx = store.begin_immediate()?;
     let selected = store
         .get_local_experiment(id)?
         .ok_or_else(|| anyhow!("Experiment {id} not found."))?;
@@ -182,6 +184,7 @@ pub fn move_experiment(store: &Store, id: &str, parent: Option<&str>) -> Result<
     let experiments = store.list_experiments_by_project(&project.id)?;
     check_move(&experiments, &project, &selected, parent)?;
     store.set_experiment_parent(&selected.id, parent)?;
+    tx.commit()?;
     Ok(selected)
 }
 
