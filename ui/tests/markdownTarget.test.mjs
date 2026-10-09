@@ -32,10 +32,32 @@ test("repository markdown resolves images relative to the document", () => {
   });
 });
 
+test("markdown paths decode percent-encoded reserved filename characters once", () => {
+  assert.deepEqual(resolveMarkdownTarget("docs", "figures/chart%231.png"), {
+    path: "docs/figures/chart#1.png",
+    query: "",
+    hash: "",
+  });
+  assert.equal(resolveMarkdownTarget("", "a%3Fb%26c%3Ad.png")?.path, "a?b&c:d.png");
+  assert.deepEqual(resolveMarkdownTarget("docs", "chart%231.png?raw=1#plot"), {
+    path: "docs/chart#1.png",
+    query: "raw=1",
+    hash: "#plot",
+  });
+  assert.equal(resolveMarkdownTarget("docs", "chart%25231.png")?.path, "docs/chart%231.png");
+  assert.deepEqual(chatImageTarget("figures/chart%231.png"), {
+    path: "figures/chart#1.png",
+    hash: "",
+    source: "checkout",
+  });
+});
+
 test("markdown paths cannot escape their root", () => {
   assert.equal(resolveMarkdownTarget("docs", "../../secret.png"), null);
   assert.equal(resolveMarkdownTarget("", "../secret.png"), null);
   assert.equal(resolveMarkdownTarget("", "%E0%A4%A"), null);
+  assert.equal(resolveMarkdownTarget("", "..%2Fsecret.png"), null);
+  assert.equal(resolveMarkdownTarget("", "a%00.png"), null);
 });
 
 test("absolute markdown files preserve filesystem-rooted image paths", () => {

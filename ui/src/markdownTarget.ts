@@ -24,7 +24,7 @@ export function resolveMarkdownTarget(
 
   let pathname: string;
   try {
-    pathname = decodeURI(encodedPath);
+    pathname = decodeURIComponent(encodedPath);
   } catch {
     return null;
   }
