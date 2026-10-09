@@ -2652,7 +2652,8 @@ struct StarterPromptsQuery {
 /// Four starter prompts for the empty chat, written by a model that has read
 /// the project (paper, README, code). Slow on a cache miss — one headless
 /// model call — so the UI shows a placeholder while it waits. A blank project
-/// is flagged instead so the UI shows its pre-written prompts.
+/// with no profile to tailor to, or whose tailored prompts fail, is flagged so
+/// the UI shows its pre-written prompts.
 async fn project_starter_prompts(
     Path(id): Path<String>,
     Query(q): Query<StarterPromptsQuery>,

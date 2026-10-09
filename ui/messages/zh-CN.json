@@ -128,6 +128,7 @@
   "chat_panel_starter_blank_3_prompt": "搭建一个最小的训练脚本，包含配置、依赖和运行命令，能在单张 GPU 上几分钟内端到端训练一个小模型。",
   "chat_panel_starter_blank_4_title": "运行第一个实验",
   "chat_panel_starter_blank_4_prompt": "从我们的计划中选一个成本低、定义明确的假设，把它实现为基线的一个变体，并启动第一次运行来比较两者。",
+  "chat_panel_starter_edit": "发送前编辑“{title}”",
   "chat_panel_starter_generating": "正在阅读项目以建议从哪里开始…",
   "chat_panel_starter_prompts": "入门提示",
   "chat_panel_stop": "停止",
