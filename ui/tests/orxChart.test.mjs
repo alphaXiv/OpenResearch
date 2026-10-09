@@ -90,3 +90,13 @@ test("small fractional x ticks retain distinct values on linear and log axes", (
     assert.ok(ticks.every(tick=>tick>0));
   }
 });
+
+
+test("narrow ranges at large x-values keep fractional ticks distinct", () => {
+  for (const xScale of ["linear", "log"]) {
+    const {svg,layout} = render({type:"line",xScale,xLabel:"Scale"}, [{name:"Arm",points:[{step:100000.1,loss:1},{step:100000.9,loss:2}]}]);
+    const ticks=svg.children.filter(node=>node.attributes.y===String(layout.height-layout.bottom+23)).map(node=>Number(node.textContent));
+    assert.equal(new Set(ticks).size,5);
+    assert.ok(ticks.every((tick,i)=>Math.abs(tick-(100000.1+i*.2))<.01));
+  }
+});
