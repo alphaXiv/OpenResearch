@@ -22,6 +22,14 @@ import {
 } from "../queries/settings";
 import { listChatSessionsQuery, getChatMessagesQuery, listNativeChatsQuery, readSidebarChatPage } from "../queries/chat";
 import { getProjectStarterPromptsQuery, listProjectsQuery, listProjectActivityQuery } from "../queries/projects";
+import { getCodeTreeQuery } from "../queries/files";
+import {
+  fileMentionContext,
+  insertFileMention,
+  matchFileMentions,
+  mentionCandidates,
+  type FileMentionMatch,
+} from "../fileMentions";
 import { m } from "../paraglide/messages.js";
 import { autoDir, ltr } from "../i18n";
 import { useLocale } from "../locale";
@@ -171,6 +179,7 @@ import { ChatImageScope, Md } from "./Md";
 import { PlanStrip } from "./PlanStrip";
 import { SETTINGS_NAV, type SettingsTab } from "./SettingsPage";
 import { SkillMenu } from "./SkillMenu";
+import { FileMentionMenu } from "./FileMentionMenu";
 import { ComposerSkillChips, MessageWithChips, skillMarginSpaces } from "./SkillChips";
 import { WorkspaceConnection } from "./WorkspaceConnection";
 import {
@@ -4523,6 +4532,7 @@ export function ChatPanel({
   // matches, wherever in the message it was typed.
 
   const [skillIdx, setSkillIdx] = useState(0);
+  const [mentionIdx, setMentionIdx] = useState(0);
   const [skillMenuDismissed, setSkillMenuDismissed] = useState(false);
   const [modelPickerRequest, setModelPickerRequest] = useState(0);
   const [composerCursor, setComposerCursor] = useState(0);
@@ -4547,6 +4557,17 @@ export function ChatPanel({
     const tokenName = skill.name.replace(/@u$/, "^").replace(/@p$/, "~");
     const marginSpaces = skill.source === "command" ? 1 : skillMarginSpaces(tokenName, composerRef.current);
     const next = insertSlashCommand(draft, slashContext, tokenName, marginSpaces);
+    setDraft(next.text);
+    window.requestAnimationFrame(() => {
+      composerRef.current?.focus();
+      composerRef.current?.setSelectionRange(next.cursor, next.cursor);
+      setComposerCursor(next.cursor);
+    });
+  }
+
+  function pickFileMention(match: FileMentionMatch) {
+    if (!mentionContext) return;
+    const next = insertFileMention(draft, mentionContext, match);
     setDraft(next.text);
     window.requestAnimationFrame(() => {
       composerRef.current?.focus();
@@ -4694,6 +4715,22 @@ export function ChatPanel({
   const skillMenuOpen = skillMatches.length > 0;
   const activeSkillIdx = Math.min(skillIdx, Math.max(0, skillMatches.length - 1));
   useEffect(() => setSkillIdx(0), [slashToken]);
+  // `@path` mentions list the checkout the agent works in; the text is sent as typed.
+  const mentionContext = bashMode ? null : fileMentionContext(draft, composerCursor);
+  const mentionQuery = mentionContext?.end === composerCursor ? mentionContext.query : null;
+  const mentionTree = useQuery({
+    ...getCodeTreeQuery(projectId, activeId ? { sessionId: activeId } : {}),
+    enabled: mentionQuery !== null,
+  });
+  const mentionEntries = mentionTree.data?.entries;
+  const mentionPool = useMemo(() => mentionCandidates(mentionEntries ?? []), [mentionEntries]);
+  const mentionMatches = useMemo(
+    () => (mentionQuery !== null && !skillMenuDismissed ? matchFileMentions(mentionPool, mentionQuery) : []),
+    [mentionPool, mentionQuery, skillMenuDismissed],
+  );
+  const mentionMenuOpen = mentionMatches.length > 0;
+  const activeMentionIdx = Math.min(mentionIdx, Math.max(0, mentionMatches.length - 1));
+  useEffect(() => setMentionIdx(0), [mentionQuery]);
   // Reconcile the selected model's settings, including stale saved preferences,
   // without replacing custom model IDs that are absent from the catalog.
   const composerSelection = deriveComposerSelection(rawSelection, activeHarness);
@@ -5984,7 +6021,7 @@ export function ChatPanel({
   // must own the key ahead of this document-level bubble listener, by one of
   // two means already in use — a new overlay has to pick one or it will
   // interrupt the turn on Escape:
-  //   - the slash menu preventDefaults in the composer's onKeyDown (bubble),
+  //   - the slash and @file menus preventDefault in the composer's onKeyDown (bubble),
   //     so the `defaultPrevented` guard below defers to it;
   //   - the composer pickers (usePopover) stopPropagation in the capture phase,
   //     so their Escape never reaches this listener at all.
@@ -6814,6 +6851,14 @@ export function ChatPanel({
                 onHover={setSkillIdx}
               />
             )}
+            {mentionMenuOpen && (
+              <FileMentionMenu
+                matches={mentionMatches}
+                activeIndex={activeMentionIdx}
+                onPick={pickFileMention}
+                onHover={setMentionIdx}
+              />
+            )}
             {resumeOpen && (
               <ResumeDialog
                 activeSessionId={activeId}
@@ -6961,6 +7006,30 @@ export function ChatPanel({
                     if (e.key === "Tab" || e.key === "Enter") {
                       e.preventDefault();
                       pickSkill(skillMatches[activeSkillIdx]);
+                      return;
+                    }
+                    if (e.key === "Escape") {
+                      e.preventDefault();
+                      setSkillMenuDismissed(true);
+                      return;
+                    }
+                  }
+                  if (mentionMenuOpen && !e.nativeEvent.isComposing) {
+                    if (e.key === "ArrowDown" || e.key === "ArrowUp") {
+                      e.preventDefault();
+                      const delta = e.key === "ArrowDown" ? 1 : -1;
+                      setMentionIdx(
+                        (activeMentionIdx + delta + mentionMatches.length) % mentionMatches.length,
+                      );
+                      return;
+                    }
+                    // A bare trailing `@` still sends on Enter; `@` is common in prose.
+                    if (
+                      e.key === "Tab"
+                      || (e.key === "Enter" && mentionQuery !== "" && !e.shiftKey && !e.metaKey && !e.ctrlKey)
+                    ) {
+                      e.preventDefault();
+                      pickFileMention(mentionMatches[activeMentionIdx]);
                       return;
                     }
                     if (e.key === "Escape") {
