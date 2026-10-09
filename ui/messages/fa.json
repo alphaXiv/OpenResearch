@@ -134,6 +134,7 @@
   "chat_panel_stop": "توقف",
   "chat_panel_submit": "ارسال",
   "chat_panel_new_chat": "گفتگوی جدید",
+  "chat_panel_temporary_api_error": "خطای موقت API",
   "chat_panel_tool_failed": "ابزار ناموفق بود",
   "chat_panel_used_tools": "ابزارها استفاده شد",
   "chat_panel_view_full_plan": "مشاهدهٔ طرح کامل",

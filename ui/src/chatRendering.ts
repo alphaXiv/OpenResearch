@@ -41,7 +41,7 @@ export function isTurnStatusPart(part: ChatPart): boolean {
 
 export function withoutDuplicateTurnError(parts: ChatPart[], turnStatus: ChatPart | undefined): ChatPart[] {
   const last = parts.at(-1);
-  return turnStatus?.id === "turn-recovery" && last?.type === "tool" && last.tool === "error"
+  return turnStatus?.id === "turn-recovery" && last?.type === "tool" && (last.tool === "error" || last.tool === "api_error")
     && last.state?.error && last.state.error === turnStatus.state?.error ? parts.slice(0, -1) : parts;
 }
 

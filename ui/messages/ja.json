@@ -134,6 +134,7 @@
   "chat_panel_stop": "停止",
   "chat_panel_submit": "送信",
   "chat_panel_new_chat": "新しいチャット",
+  "chat_panel_temporary_api_error": "一時的な API エラー",
   "chat_panel_tool_failed": "ツールが失敗しました",
   "chat_panel_used_tools": "ツールを使用しました",
   "chat_panel_view_full_plan": "計画全体を表示",

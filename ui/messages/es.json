@@ -134,6 +134,7 @@
   "chat_panel_stop": "Detener",
   "chat_panel_submit": "Enviar",
   "chat_panel_new_chat": "Nuevo chat",
+  "chat_panel_temporary_api_error": "Error temporal de la API",
   "chat_panel_tool_failed": "Error en la herramienta",
   "chat_panel_used_tools": "Usó herramientas",
   "chat_panel_view_full_plan": "Ver plan completo",

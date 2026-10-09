@@ -134,6 +134,7 @@
   "chat_panel_stop": "Stop",
   "chat_panel_submit": "Submit",
   "chat_panel_new_chat": "New Chat",
+  "chat_panel_temporary_api_error": "Temporary API error",
   "chat_panel_tool_failed": "Tool failed",
   "chat_panel_used_tools": "Used tools",
   "chat_panel_view_full_plan": "View full plan",

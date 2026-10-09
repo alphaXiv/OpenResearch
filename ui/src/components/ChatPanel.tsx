@@ -1796,6 +1796,8 @@ function computeToolActivity(part: ChatPart): ToolActivity {
       return { kind: "agent", label: description ?? m.activity_ran_subagent() };
     case "subagent":
       return { kind: "agent", label: subagentLine(normalizedInput) };
+    case "api_error":
+      return { kind: "command", label: m.chat_panel_temporary_api_error() };
     case "error":
       return { kind: "command", label: m.chat_panel_tool_failed() };
     case "importedchat":
@@ -2281,9 +2283,11 @@ function TurnStatusRow({
   recovering,
   onRecover,
   usageLimited = false,
+  temporaryApiError = false,
 }: {
   part: ChatPart;
   usageLimited?: boolean;
+  temporaryApiError?: boolean;
   busy: boolean;
   recovering: boolean;
   onRecover?: (turnId: string, action: "retry" | "continue") => void;
@@ -2315,7 +2319,8 @@ function TurnStatusRow({
   const turnId = input?.turnId;
   const label = isModelAccessLimitPart(part)
     ? m.chat_model_unavailable()
-    : usageLimited ? m.chat_session_limit_reached() : m.chat_turn_incomplete();
+    : usageLimited ? m.chat_session_limit_reached()
+    : temporaryApiError ? m.chat_panel_temporary_api_error() : m.chat_turn_incomplete();
   const Icon = usageLimited ? Gauge : TriangleAlert;
   const errorMessage = cleanToolError(part.state?.error || m.chat_turn_incomplete());
   return (
@@ -2957,7 +2962,7 @@ function ForkControls({
   );
 }
 
-const Message = memo(function Message({
+export const Message = memo(function Message({
   message,
   activePermissionId,
   pendingTailToolId,
@@ -3134,10 +3139,10 @@ const Message = memo(function Message({
   }
   const usageLimit = message.parts.find((part) => part.type === "tool" && isUsageLimitPart(part));
   const turnStatus = message.parts.find(isTurnStatusPart) ?? usageLimit;
-  const regularParts = withoutDuplicateTurnError(
-    message.parts.filter((part) => part !== turnStatus && !(usageLimit && isUsageLimitPart(part))),
-    turnStatus,
-  );
+  const turnParts = message.parts.filter((part) => part !== turnStatus && !(usageLimit && isUsageLimitPart(part)));
+  const regularParts = withoutDuplicateTurnError(turnParts, turnStatus);
+  // The recovery row absorbs a duplicate transient API error, so it carries that label.
+  const temporaryApiError = regularParts.length < turnParts.length && turnParts.at(-1)?.tool === "api_error";
   const copyText = predictTextTail && !message.completedAt ? "" : responseText(message);
   return (
     <div className="msg-assistant group/turn text-base leading-[1.62] text-text min-w-0">
@@ -3159,6 +3164,7 @@ const Message = memo(function Message({
         <TurnStatusRow
           part={turnStatus}
           usageLimited={Boolean(usageLimit)}
+          temporaryApiError={temporaryApiError}
           busy={busy}
           recovering={recoveringTurnId === turnStatus.state?.input?.turnId}
           onRecover={onRecover}
@@ -3272,10 +3278,10 @@ function ShellExchangeCard({ part }: { part: ChatPart }) {
 /** Shared assistant-parts renderer, reused for a message body and (recursively)
  * for a sub-agent's nested transcript. Coalesces consecutive tool parts into one
  * collapsed group (Claude-desktop style); text / prompt parts break a run and
- * render inline, while reasoning parts are never rendered. A sub-agent spawn
- * part (tool `subagent`) also breaks the run and renders as its own nested
- * block. */
-function renderParts(
+ * render inline, while reasoning parts are never rendered. Sub-agent spawns and
+ * classified API errors also break the run so their status cannot disappear
+ * behind a collapsed count. */
+export function renderParts(
   parts: ChatPart[],
   opts: {
     activePermissionId?: string | null;
@@ -3337,6 +3343,11 @@ function renderParts(
     // resolved permission card. Without this, each invisible part splits
     // consecutive tools into single-row groups.
     if (!partIsVisible(part, activePermissionId)) continue;
+    if (part.type === "tool" && part.tool === "api_error") {
+      flushTools();
+      rendered.push(<ToolGroup key={`tg-${part.id}`} parts={[part]} onOpenFile={onOpenFile} />);
+      continue;
+    }
     // A sub-agent spawn part streams its own transcript in `children` — render
     // it as a standalone nested block, not folded into a tool run. Codex tags
     // its rows `subagent`; Claude's `Task`/`Agent` and OpenCode's `task` are

@@ -134,6 +134,7 @@
   "chat_panel_stop": "रोकें",
   "chat_panel_submit": "सबमिट करें",
   "chat_panel_new_chat": "नई चैट",
+  "chat_panel_temporary_api_error": "अस्थायी API त्रुटि",
   "chat_panel_tool_failed": "टूल विफल",
   "chat_panel_used_tools": "टूल इस्तेमाल किए",
   "chat_panel_view_full_plan": "पूरा प्लान देखें",

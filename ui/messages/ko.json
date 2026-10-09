@@ -134,6 +134,7 @@
   "chat_panel_stop": "중지",
   "chat_panel_submit": "제출",
   "chat_panel_new_chat": "새 채팅",
+  "chat_panel_temporary_api_error": "일시적인 API 오류",
   "chat_panel_tool_failed": "도구 실패",
   "chat_panel_used_tools": "도구 사용 완료",
   "chat_panel_view_full_plan": "전체 계획 보기",

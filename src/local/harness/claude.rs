@@ -1529,6 +1529,49 @@ fn apply_subagent_blocks(
     }
 }
 
+/// Claude Code can emit a transport failure twice: first as an assistant text
+/// block, then as the terminal `result`. Keep this deliberately narrow so API
+/// validation/auth/execution failures retain the generic error path.
+fn is_transient_api_error(event: &Value, detail: &str) -> bool {
+    let api_failure = event.get("terminal_reason").and_then(Value::as_str) == Some("api_error")
+        || detail.trim_start().starts_with("API Error:");
+    if !api_failure {
+        return false;
+    }
+    let detail = detail.to_ascii_lowercase();
+    [
+        "connection to the api was lost",
+        "enotfound",
+        "eai_again",
+        "econnreset",
+        "etimedout",
+        "socket hang up",
+    ]
+    .iter()
+    .any(|marker| detail.contains(marker))
+}
+
+fn push_transient_api_error(ctx: &mut TurnCtx, detail: &str) {
+    let detail = detail.trim();
+    ctx.assistant.parts.retain(|part| {
+        part.kind != "text"
+            || part
+                .text
+                .as_deref()
+                .is_none_or(|text| text.trim() != detail)
+    });
+    let mut part = WirePart::tool(
+        format!("api-error-{}", ctx.assistant.parts.len()),
+        "api_error",
+        "error",
+        Some(detail.to_string()),
+    );
+    if let Some(state) = part.state.as_mut() {
+        state.title = Some("Temporary API error".into());
+    }
+    ctx.assistant.parts.push(part);
+}
+
 /// Fold one stream-json output object into the turn's transcript + `TurnState`.
 /// Pure w.r.t. the store — touches only `ctx.assistant.parts` (via the TurnCtx
 /// helpers) and `state` — so it is fixture-tested against `TurnCtx::test_stub()`.
@@ -2022,7 +2065,11 @@ fn apply_event(ctx: &mut TurnCtx, state: &mut TurnState, event: &Value) -> bool 
                         .and_then(Value::as_str)
                         .unwrap_or(subtype)
                         .to_string();
-                    ctx.push_error(format!("claude: {detail}"));
+                    if is_transient_api_error(event, &detail) {
+                        push_transient_api_error(ctx, &detail);
+                    } else {
+                        ctx.push_error(format!("claude: {detail}"));
+                    }
                 }
             }
             state.had_activity |= report_result_usage(ctx, event).is_some_and(|used| used > 0);
@@ -3047,6 +3094,45 @@ mod tests {
             err.state.as_ref().unwrap().error.as_deref(),
             Some("claude: boom")
         );
+    }
+
+    #[test]
+    fn transient_api_result_replaces_duplicate_text_with_retryable_status() {
+        let detail = "API Error: Connection to the API was lost (ENOTFOUND). This is usually temporary — try again.";
+        let assistant = serde_json::json!({
+            "type": "assistant",
+            "message": {
+                "id": "msg_api",
+                "content": [{"type": "text", "text": detail}],
+                "usage": {"input_tokens": 0, "output_tokens": 0}
+            }
+        });
+        let result = serde_json::json!({
+            "type": "result",
+            "subtype": "error_during_execution",
+            "is_error": true,
+            "terminal_reason": "api_error",
+            "session_id": "sess-retry",
+            "result": detail
+        });
+        let mut ctx = TurnCtx::test_stub();
+        let mut state = TurnState::default();
+
+        assert!(!apply_event(&mut ctx, &mut state, &assistant));
+        assert!(apply_event(&mut ctx, &mut state, &result));
+
+        assert!(state.saw_result);
+        assert!(state.turn_errored);
+        assert!(!state.auth_failed);
+        assert_eq!(state.native_session_id.as_deref(), Some("sess-retry"));
+        assert_eq!(ctx.assistant.parts.len(), 1, "duplicate API error output");
+        let api_error = &ctx.assistant.parts[0];
+        assert_eq!(api_error.kind, "tool");
+        assert_eq!(api_error.tool.as_deref(), Some("api_error"));
+        let api_state = api_error.state.as_ref().expect("API error state");
+        assert_eq!(api_state.status, "error");
+        assert_eq!(api_state.title.as_deref(), Some("Temporary API error"));
+        assert_eq!(api_state.error.as_deref(), Some(detail));
     }
 
     #[test]
