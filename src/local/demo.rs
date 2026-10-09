@@ -544,6 +544,7 @@ fn seed_at(
         commit_sha: Some(commit_sha.clone()),
         result_markdown: Some(RESULT_MARKDOWN.into()),
         cancel_requested: false,
+        cancel_reason: None,
         chat_session_id: None,
     };
     let session = StoredChatSession {
