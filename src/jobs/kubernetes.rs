@@ -409,8 +409,7 @@ async fn stage_source(
 }
 
 /// How the pod ended and which container's logs explain it, once its script
-/// container (the default container `prepare_docs` annotates), an init
-/// container, or the whole pod has.
+/// container (the default container `prepare_docs` annotates) or the whole pod has.
 async fn exited(context: Option<&str>, namespace: &str, pod: &str) -> Option<(String, String)> {
     let json = kubectl(
         context,
@@ -419,7 +418,10 @@ async fn exited(context: Option<&str>, namespace: &str, pod: &str) -> Option<(St
     )
     .await
     .ok()?;
-    let pod: Value = serde_json::from_str(&json).ok()?;
+    pod_exit(&serde_json::from_str(&json).ok()?)
+}
+
+fn pod_exit(pod: &Value) -> Option<(String, String)> {
     let script = pod["metadata"]["annotations"]["kubectl.kubernetes.io/default-container"]
         .as_str()?
         .to_string();
@@ -433,6 +435,10 @@ async fn exited(context: Option<&str>, namespace: &str, pod: &str) -> Option<(St
     {
         return Some((format!("code {code}"), script));
     }
+    // Only a finished pod: a restartable init sidecar may exit nonzero and restart.
+    let phase = status["phase"]
+        .as_str()
+        .filter(|p| matches!(*p, "Failed" | "Succeeded"))?;
     if let Some((name, code)) = statuses("initContainerStatuses").iter().find_map(|c| {
         Some((
             c["name"].as_str()?.to_string(),
@@ -441,10 +447,11 @@ async fn exited(context: Option<&str>, namespace: &str, pod: &str) -> Option<(St
     }) {
         return Some((format!("init container {name}, code {code}"), name));
     }
-    match status["phase"].as_str() {
-        Some(phase @ ("Failed" | "Succeeded")) => Some((format!("pod {phase}"), script)),
-        _ => None,
-    }
+    let message = status["message"].as_str().unwrap_or_default();
+    Some((
+        format!("pod {phase} {message}").trim_end().to_string(),
+        script,
+    ))
 }
 
 fn resource_handle(doc: &Value) -> String {
@@ -1097,6 +1104,43 @@ mod tests {
             j["spec"]["template"]["spec"]["containers"][0]["command"] = json!(["bash", "-c", bare]);
             assert!(prepare(j).unwrap_err().to_string().contains("eval"));
         }
+    }
+
+    #[test]
+    fn pod_exit_reports_the_container_that_explains_it() {
+        let pod = |phase: &str, init: Value, script: Value| {
+            json!({
+                "metadata": { "annotations": { "kubectl.kubernetes.io/default-container": "run" } },
+                "status": {
+                    "phase": phase,
+                    "initContainerStatuses": [init],
+                    "containerStatuses": [{ "name": "run", "state": script }],
+                },
+            })
+        };
+        let failed_init = json!({ "name": "setup", "state": { "terminated": { "exitCode": 7 } } });
+        let waiting = json!({ "waiting": {} });
+        assert_eq!(
+            pod_exit(&pod(
+                "Running",
+                json!({}),
+                json!({ "terminated": { "exitCode": 3 } })
+            )),
+            Some(("code 3".into(), "run".into()))
+        );
+        // A restartable init sidecar's nonzero exit doesn't end a running pod.
+        assert_eq!(
+            pod_exit(&pod("Running", failed_init.clone(), waiting.clone())),
+            None
+        );
+        assert_eq!(
+            pod_exit(&pod("Failed", failed_init, waiting.clone())),
+            Some(("init container setup, code 7".into(), "setup".into()))
+        );
+        assert_eq!(
+            pod_exit(&pod("Failed", json!({}), waiting)),
+            Some(("pod Failed".into(), "run".into()))
+        );
     }
 
     #[test]
