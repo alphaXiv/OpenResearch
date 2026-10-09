@@ -215,6 +215,12 @@ pub(crate) fn spawn_detached_supervise(run_id: &str) -> Result<()> {
         use std::os::unix::process::CommandExt;
         cmd.process_group(0);
     }
+    // A console-less parent would otherwise give the supervisor a visible console window.
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        cmd.creation_flags(windows_sys::Win32::System::Threading::CREATE_NO_WINDOW);
+    }
     let mut child = cmd
         .spawn()
         .map_err(|e| anyhow!("Could not spawn `orx supervise {}`: {}", run_id, e))?;
