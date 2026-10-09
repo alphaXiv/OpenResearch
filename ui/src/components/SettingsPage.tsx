@@ -113,6 +113,7 @@ import {
   saveGcpSettings,
   stopGcpInstance,
   type GcpSettings,
+  type GcpSettingsUpdate,
   getComputePrices,
   stopColabRuntime,
   type ModalSettings,
@@ -789,14 +790,16 @@ function ProviderPricesCard() {
                   </div>
                   <div className="mt-1 text-xl font-semibold tabular-nums text-text">
                     {provider.balance
-                      ? `${fmtUnits(provider.balance.amount)} ${provider.balance.unit}`
+                      ? provider.balance.unit === "USD"
+                        ? m.settings_prices_available({ amount: fmtUsd(provider.balance.amount) })
+                        : `${fmtUnits(provider.balance.amount)} ${provider.balance.unit}`
                       : provider.spend?.meteredUsd != null
                         ? m.settings_prices_used_month({ amount: fmtUsd(provider.spend.meteredUsd) })
                         : provider.billing === "credits"
                           ? m.settings_prices_balance_unknown()
                           : m.settings_prices_pay_as_you_go()}
                   </div>
-                  {provider.balance?.usd != null && (
+                  {provider.balance?.usd != null && provider.balance.unit !== "USD" && (
                     <div className="mt-0.5 text-sm text-subtext tabular-nums">≈ {fmtUsd(provider.balance.usd)}</div>
                   )}
                   {provider.spend && (
@@ -902,6 +905,8 @@ function GcpSection() {
   const data: GcpSettings | null = query.data ?? null;
   const [project, setProject] = useState("");
   const [zone, setZone] = useState("");
+  const [credit, setCredit] = useState("");
+  const [exportTable, setExportTable] = useState("");
   const [saving, setSaving] = useState(false);
   const [refreshing, setRefreshing] = useState(false);
   const [deleting, setDeleting] = useState<string | null>(null);
@@ -911,6 +916,8 @@ function GcpSection() {
     if (!data) return;
     setProject(data.settings.project ?? "");
     setZone(data.settings.zone ?? "");
+    setExportTable(data.settings.billingExportTable ?? "");
+    setCredit("");
   }, [data]);
 
   async function refresh() {
@@ -925,7 +932,7 @@ function GcpSection() {
     }
   }
 
-  async function save(update: { project?: string; zone?: string; spot?: boolean }) {
+  async function save(update: GcpSettingsUpdate) {
     setSaving(true);
     setError(null);
     try {
@@ -980,6 +987,87 @@ function GcpSection() {
         </Button>
       </div>
       {preflight.error && <p className={COMPUTE_DIAGNOSTIC_CLASS_NAME}>{preflight.error}</p>}
+      {data.ready && (
+        <div className="mt-4 rounded-lg border border-border bg-surface px-4 py-3">
+          <div className="text-sm text-subtext">{m.settings_gcp_available()}</div>
+          <div className={cn("mt-1 text-2xl font-semibold tabular-nums", data.balance && data.balance.availableUsd <= 0 ? "text-accent-red" : "text-text")}>
+            {data.balance ? `≈ ${fmtUsd(data.balance.availableUsd)}` : "—"}
+          </div>
+          {data.balance ? (
+            <div className="mt-0.5 text-sm text-subtext">
+              {m.settings_gcp_balance_detail({
+                credit: fmtUsd(data.balance.creditUsd),
+                date: new Date(data.balance.asOf).toLocaleDateString(),
+                spent: fmtUsd(data.balance.spentUsd),
+              })}{" "}
+              {data.balance.source === "export" ? m.settings_gcp_source_export() : m.settings_gcp_source_estimate()}
+            </div>
+          ) : (
+            <div className="mt-0.5 text-sm text-subtext">{m.settings_gcp_no_credit()}</div>
+          )}
+          {data.balance?.error && <div className="mt-1 text-sm text-subtext">{data.balance.error}</div>}
+          {data.billing && (
+            <div className="mt-1 text-sm text-subtext">
+              {data.billing.enabled
+                ? m.settings_gcp_billing_account({ name: data.billing.name ?? data.billing.id })
+                : m.settings_gcp_billing_disabled()}
+            </div>
+          )}
+          <form
+            className="mt-3 flex flex-wrap items-end gap-2"
+            onSubmit={(event) => {
+              event.preventDefault();
+              const amount = Number(credit);
+              if (credit.trim() && Number.isFinite(amount) && amount >= 0) void save({ creditUsd: amount });
+            }}
+          >
+            <label className="flex min-w-48 flex-1 flex-col gap-1 text-sm">
+              {m.settings_gcp_credit_label()}
+              <Input
+                type="number"
+                min="0"
+                step="0.01"
+                inputMode="decimal"
+                value={credit}
+                onChange={(event) => setCredit(event.target.value)}
+                placeholder={data.settings.creditUsd != null ? String(data.settings.creditUsd) : "300.00"}
+              />
+            </label>
+            <Button type="submit" disabled={saving || !credit.trim()}>
+              {m.common_save()}
+            </Button>
+            {data.settings.creditUsd != null && (
+              <Button type="button" variant="ghost" disabled={saving} onClick={() => void save({ clearCredit: true })}>
+                {m.settings_gcp_clear_credit()}
+              </Button>
+            )}
+          </form>
+          <p className="mt-1.5 mb-0 text-sm text-subtext">{m.settings_gcp_credit_hint()}</p>
+          <form
+            className="mt-3 flex flex-wrap items-end gap-2"
+            onSubmit={(event) => {
+              event.preventDefault();
+              void save({ billingExportTable: exportTable });
+            }}
+          >
+            <label className="flex min-w-48 flex-1 flex-col gap-1 text-sm">
+              {m.settings_gcp_export_label()}
+              <Input
+                type="text"
+                value={exportTable}
+                onChange={(event) => setExportTable(event.target.value)}
+                placeholder="my-project.billing.gcp_billing_export_v1_XXXX"
+                autoComplete="off"
+                spellCheck={false}
+              />
+            </label>
+            <Button type="submit" disabled={saving || exportTable === (data.settings.billingExportTable ?? "")}>
+              {m.common_save()}
+            </Button>
+          </form>
+          <p className="mt-1.5 mb-0 text-sm text-subtext">{m.settings_gcp_export_hint()}</p>
+        </div>
+      )}
       {!preflight.cliPath && (
         <p className="mt-3 mb-0 text-sm text-subtext">
           {m.settings_gcp_install_hint()} <code>gcloud auth login</code>

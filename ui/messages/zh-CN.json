@@ -1372,5 +1372,18 @@
   "settings_gcp_auto_delete": "运行结束时 orx 会删除虚拟机。即使 orx 未运行，Compute Engine 也会在运行时限过后一小时将其删除。",
   "settings_gcp_prices_note": "us-central1 中一块 GPU 加最小机型的按需标价。其他区域和 Spot 虚拟机价格不同。",
   "compute_description_gcp": "每次运行都会在你的 Google Cloud 项目中创建一台 Compute Engine GPU 虚拟机",
-  "compute_usage_gcp": "每次运行使用独立的虚拟机，费用计入你的 Google Cloud 项目；运行结束后 orx 会删除它。"
+  "compute_usage_gcp": "每次运行使用独立的虚拟机，费用计入你的 Google Cloud 项目；运行结束后 orx 会删除它。",
+  "settings_prices_available": "可用 {amount}",
+  "settings_gcp_available": "可用金额",
+  "settings_gcp_balance_detail": "{date} 输入的额度 {credit}，减去此后已花费的 {spent}。",
+  "settings_gcp_source_export": "花费来自 BigQuery 账单导出。",
+  "settings_gcp_source_estimate": "花费按 orx 的 Google Cloud 运行以标价估算。",
+  "settings_gcp_no_credit": "Google 不允许 gcloud 读取额度。请在下方输入以跟踪剩余金额。",
+  "settings_gcp_billing_account": "结算账号：{name}",
+  "settings_gcp_billing_disabled": "此项目未启用结算，虚拟机无法启动。",
+  "settings_gcp_credit_label": "剩余额度（美元）",
+  "settings_gcp_clear_credit": "停止跟踪",
+  "settings_gcp_credit_hint": "从 Google Cloud 控制台的“结算”→“赠送金额”（或免费试用横幅）复制。orx 从保存时起扣减花费。",
+  "settings_gcp_export_label": "BigQuery 账单导出表（可选）",
+  "settings_gcp_export_hint": "启用账单导出到 BigQuery 后，orx 会读取项目的准确花费，而不是估算。"
 }

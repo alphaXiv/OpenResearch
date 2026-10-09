@@ -1110,9 +1110,13 @@ pub(super) async fn gcp_settings() -> ApiResult {
         .map_err(|e| ApiError::from(anyhow!("{e}")))?
         .unwrap_or_default();
     let preflight = gcp::preflight(&settings).await;
-    let instances = match (&preflight.project, preflight.compute_ready) {
-        (Some(project), true) => gcp::list_orx_instances(project).await.ok(),
-        _ => None,
+    let (instances, billing, balance) = match (&preflight.project, preflight.compute_ready) {
+        (Some(project), true) => tokio::join!(
+            async { gcp::list_orx_instances(project).await.ok() },
+            crate::jobs::gcp_billing::billing_account(project),
+            crate::jobs::gcp_billing::balance(&settings, project),
+        ),
+        _ => (None, None, None),
     };
     let gpus: Vec<Value> = gcp::GPUS
         .iter()
@@ -1130,6 +1134,8 @@ pub(super) async fn gcp_settings() -> ApiResult {
         "preflight": preflight,
         "ready": preflight.compute_ready,
         "instances": instances,
+        "billing": billing,
+        "balance": balance,
         "gpus": gpus,
     })))
 }
@@ -1144,6 +1150,11 @@ pub(super) struct SetGcpSettingsReq {
     image_family: Option<String>,
     image_project: Option<String>,
     disk_gb: Option<u64>,
+    /// Remaining credit in USD from the console; counting restarts now.
+    credit_usd: Option<f64>,
+    clear_credit: Option<bool>,
+    /// `""` clears it.
+    billing_export_table: Option<String>,
 }
 
 pub(super) async fn set_gcp_settings(Json(req): Json<SetGcpSettingsReq>) -> ApiResult {
@@ -1191,6 +1202,28 @@ pub(super) async fn set_gcp_settings(Json(req): Json<SetGcpSettingsReq>) -> ApiR
             return Err(bad_request("The boot disk must be 10–10000 GB."));
         }
         settings.disk_gb = Some(disk);
+    }
+    if let Some(credit) = req.credit_usd {
+        if !credit.is_finite() || credit < 0.0 {
+            return Err(bad_request("The credit must be a positive amount in USD."));
+        }
+        settings.credit_usd = Some(credit);
+        settings.credit_as_of = Some(crate::store::now_ms());
+    }
+    if req.clear_credit == Some(true) {
+        settings.credit_usd = None;
+        settings.credit_as_of = None;
+    }
+    if let Some(table) = req.billing_export_table {
+        let table = norm(table);
+        if let Some(table) = &table {
+            if !crate::jobs::gcp_billing::valid_export_table(table) {
+                return Err(bad_request(
+                    "The billing export table must look like project.dataset.table.",
+                ));
+            }
+        }
+        settings.billing_export_table = table;
     }
     gcp::save_settings(&settings).map_err(|e| ApiError::from(anyhow!("{e}")))?;
     gcp_settings().await

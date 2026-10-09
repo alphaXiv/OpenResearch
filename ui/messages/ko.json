@@ -1372,5 +1372,18 @@
   "settings_gcp_auto_delete": "orx는 실행이 끝나면 VM을 삭제합니다. orx가 실행 중이 아니어도 Compute Engine이 실행 시간 제한 1시간 후에 삭제합니다.",
   "settings_gcp_prices_note": "us-central1 기준 GPU 1개와 가장 작은 머신의 온디맨드 정가입니다. 다른 리전과 Spot VM은 다릅니다.",
   "compute_description_gcp": "실행마다 Google Cloud 프로젝트에 Compute Engine GPU VM을 만듭니다",
-  "compute_usage_gcp": "실행마다 전용 VM이 Google Cloud 프로젝트에 청구되며, 실행이 끝나면 orx가 삭제합니다."
+  "compute_usage_gcp": "실행마다 전용 VM이 Google Cloud 프로젝트에 청구되며, 실행이 끝나면 orx가 삭제합니다.",
+  "settings_prices_available": "{amount} 사용 가능",
+  "settings_gcp_available": "사용 가능 금액",
+  "settings_gcp_balance_detail": "{date}에 입력한 크레딧 {credit}에서 이후 사용한 {spent}를 뺀 금액입니다.",
+  "settings_gcp_source_export": "사용액은 BigQuery 결제 내보내기에서 가져왔습니다.",
+  "settings_gcp_source_estimate": "사용액은 orx의 Google Cloud 실행을 정가로 계산한 추정치입니다.",
+  "settings_gcp_no_credit": "Google은 gcloud에서 크레딧을 읽을 수 없게 합니다. 남은 금액을 추적하려면 아래에 입력하세요.",
+  "settings_gcp_billing_account": "결제 계정: {name}",
+  "settings_gcp_billing_disabled": "이 프로젝트는 결제가 꺼져 있어 VM을 시작할 수 없습니다.",
+  "settings_gcp_credit_label": "남은 크레딧 (USD)",
+  "settings_gcp_clear_credit": "추적 중지",
+  "settings_gcp_credit_hint": "Google Cloud 콘솔의 결제 → 크레딧(또는 무료 체험 배너)에서 복사하세요. 저장한 시점부터 사용액을 뺍니다.",
+  "settings_gcp_export_label": "BigQuery 결제 내보내기 테이블 (선택)",
+  "settings_gcp_export_hint": "BigQuery로 결제 내보내기를 켜면 추정 대신 프로젝트의 정확한 사용액을 읽습니다."
 }

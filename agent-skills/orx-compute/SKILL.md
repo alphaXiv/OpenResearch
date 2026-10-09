@@ -82,14 +82,15 @@ each provider's remaining credit and per-hour GPU prices.
   option that fits, by `usdPerHour` times the expected hours. Then
   availability: skip an offer with `available: false`, and a provider that
   just failed with a capacity error, and use the next one.
-- Never start a run that its provider's credit cannot finish. On a `credits`
-  provider (Colab), an offer's `runwayHours` is how long the balance lasts at
-  that rate; when the expected duration plus a 25% margin exceeds it, and the
-  run does not checkpoint and resume, choose another provider or a cheaper
-  flavor. Subtract runs already in flight on that provider
-  (`balance.burningPerHour`). `usage` providers bill afterwards and do not run
-  out mid-run; `own` providers (local, ssh, slurm, k8s, ray) cost nothing per
-  hour but are limited by their hardware and quota.
+- Never start a run that its provider's credit cannot finish. An offer's
+  `runwayHours` is how long the provider's remaining balance lasts at that
+  rate: Colab compute units, or the Google Cloud credit the user entered. When
+  the expected duration plus a 25% margin exceeds it, and the run does not
+  checkpoint and resume, choose another provider or a cheaper flavor. Subtract
+  runs already in flight on that provider (Colab's `balance.burningPerHour`).
+  Other `usage` providers bill afterwards and do not run out mid-run; `own`
+  providers (local, ssh, slurm, k8s, ray) cost nothing per hour but are
+  limited by their hardware and quota.
 - `estimated: true` marks a published or third-party price, not the account's
   own rate. Re-read with `--fresh` before a long or expensive launch.
 - Smoke-test and debug on the cheapest option (`local`, Colab `cpu`/`t4`, a

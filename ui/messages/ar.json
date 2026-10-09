@@ -1372,5 +1372,18 @@
   "settings_gcp_auto_delete": "يحذف orx كل جهاز عند انتهاء تشغيله. ويحذفه Compute Engine أيضًا بعد ساعة من الحد الزمني للتشغيل حتى لو لم يكن orx يعمل.",
   "settings_gcp_prices_note": "أسعار القائمة عند الطلب في us-central1 لوحدة GPU واحدة وأصغر جهاز لها. تختلف المناطق الأخرى وأجهزة Spot.",
   "compute_description_gcp": "ينشئ جهاز Compute Engine افتراضيًا مزودًا بـ GPU في مشروع Google Cloud لكل تشغيل",
-  "compute_usage_gcp": "يحصل كل تشغيل على جهازه الخاص المفوتر على مشروع Google Cloud، ويحذفه orx عند انتهاء التشغيل."
+  "compute_usage_gcp": "يحصل كل تشغيل على جهازه الخاص المفوتر على مشروع Google Cloud، ويحذفه orx عند انتهاء التشغيل.",
+  "settings_prices_available": "{amount} متاحة",
+  "settings_gcp_available": "المتاح للإنفاق",
+  "settings_gcp_balance_detail": "رصيد {credit} أُدخل في {date}، مطروحًا منه {spent} أُنفقت منذ ذلك الحين.",
+  "settings_gcp_source_export": "الإنفاق من تصدير الفوترة إلى BigQuery.",
+  "settings_gcp_source_estimate": "الإنفاق مقدّر من تشغيلات orx على Google Cloud بسعر القائمة.",
+  "settings_gcp_no_credit": "لا تسمح Google لـ gcloud بقراءة الرصيد. أدخله أدناه لتتبّع المتبقي.",
+  "settings_gcp_billing_account": "حساب الفوترة: {name}",
+  "settings_gcp_billing_disabled": "الفوترة معطّلة في هذا المشروع، لذا لا يمكن تشغيل الأجهزة.",
+  "settings_gcp_credit_label": "الرصيد المتبقي (USD)",
+  "settings_gcp_clear_credit": "إيقاف التتبّع",
+  "settings_gcp_credit_hint": "انسخه من الفوترة ← الأرصدة (أو شريط الفترة التجريبية) في وحدة تحكم Google Cloud. يطرح orx الإنفاق من لحظة الحفظ.",
+  "settings_gcp_export_label": "جدول تصدير الفوترة في BigQuery (اختياري)",
+  "settings_gcp_export_hint": "عند تفعيل تصدير الفوترة إلى BigQuery، يقرأ orx الإنفاق الدقيق للمشروع بدل تقديره."
 }

@@ -1412,6 +1412,9 @@ export interface GcpSettings {
     imageFamily: string | null;
     imageProject: string | null;
     diskGb: number | null;
+    creditUsd: number | null;
+    creditAsOf: number | null;
+    billingExportTable: string | null;
   };
   preflight: {
     cliPath: string | null;
@@ -1424,12 +1427,31 @@ export interface GcpSettings {
   ready: boolean;
   /** VMs orx created that still exist; `null` when they could not be listed. */
   instances: GcpInstance[] | null;
+  billing: { id: string; name: string | null; open: boolean | null; enabled: boolean } | null;
+  /** What is left to spend; `null` until the user enters the credit. */
+  balance: {
+    availableUsd: number;
+    creditUsd: number;
+    asOf: number;
+    spentUsd: number;
+    source: "export" | "estimate";
+    error: string | null;
+  } | null;
   gpus: { id: string; label: string; vramGb: number; usdPerHour: number }[];
 }
 
 export const getGcpSettings = (signal?: AbortSignal) => get<GcpSettings>("/api/settings/gcp", signal);
 
-export const saveGcpSettings = (update: { project?: string; zone?: string; spot?: boolean }) =>
+export type GcpSettingsUpdate = {
+  project?: string;
+  zone?: string;
+  spot?: boolean;
+  creditUsd?: number;
+  clearCredit?: boolean;
+  billingExportTable?: string;
+};
+
+export const saveGcpSettings = (update: GcpSettingsUpdate) =>
   post<GcpSettings>("/api/settings/gcp", update);
 
 export const stopGcpInstance = (zone: string, name: string) =>

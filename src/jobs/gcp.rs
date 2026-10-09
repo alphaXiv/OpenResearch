@@ -59,6 +59,16 @@ pub struct GcpSettings {
     pub image_project: Option<String>,
     #[serde(default)]
     pub disk_gb: Option<u64>,
+    /// Credit the user had left, in USD, copied from Billing → Credits in the
+    /// Google Cloud console (gcloud cannot read it).
+    #[serde(default)]
+    pub credit_usd: Option<f64>,
+    /// When `credit_usd` was entered (Unix ms); spend is counted from here.
+    #[serde(default)]
+    pub credit_as_of: Option<i64>,
+    /// BigQuery billing export table (`project.dataset.table`) for exact spend.
+    #[serde(default)]
+    pub billing_export_table: Option<String>,
 }
 
 fn settings_path() -> PathBuf {
@@ -102,7 +112,7 @@ pub fn find_cli() -> Option<PathBuf> {
 }
 
 /// Run gcloud non-interactively and return its stdout.
-async fn gcloud(args: &[String]) -> Result<String> {
+pub(super) async fn gcloud(args: &[String]) -> Result<String> {
     let cli = find_cli().ok_or_else(|| anyhow!("{INSTALL_HINT}"))?;
     let mut command = Command::new(cli);
     command
