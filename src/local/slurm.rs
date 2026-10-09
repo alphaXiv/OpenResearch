@@ -4,8 +4,6 @@
 //! settings); `--flavor` asks for GPUs as a GRES spec. The run row lives in
 //! the local store only; a detached `orx supervise` watches the job.
 
-use std::collections::HashMap;
-
 use crate::commands::exp::spawn_detached_supervise;
 use crate::compute::SourceSnapshot;
 use crate::error::{anyhow, Result};
@@ -95,7 +93,13 @@ pub async fn submit_local_slurm_with_source(
 
     // The job env: everything the user synced (API keys), plus the tokens the
     // run step expects. Exported in the setup script and job.sbatch.
-    let mut env: HashMap<String, String> = crate::config::list_synced_env().into_iter().collect();
+    let (mut env, tracking) = crate::config::run_env(
+        &run_id,
+        &project.id,
+        args.tracking == Some(crate::TrackingBackend::Tensorboard),
+        true,
+        crate::config::TensorboardDefault::RemoteRunDirectory,
+    )?;
     if let Ok(hf_token) = huggingface::resolve_token() {
         env.entry("HF_TOKEN".to_string()).or_insert(hf_token);
     }
@@ -140,6 +144,7 @@ pub async fn submit_local_slurm_with_source(
         source_digest: None,
         source_path: None,
         source_size: None,
+        tracking,
     };
     source.apply_to_descriptor(&mut descriptor);
     if let Err(error) = crate::compute::record_submission_handle(&run_id, &descriptor) {

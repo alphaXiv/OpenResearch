@@ -12,6 +12,9 @@ test("Tinker is always visible in compute and environment settings", async () =>
   ]);
   assert.match(targets, /tinker: m\.compute_target_tinker/);
   assert.match(settings, /target\.id === "tinker"/);
-  assert.match(settings, /"TINKER_API_KEY", "HF_TOKEN", "WANDB_API_KEY"/);
+  assert.match(
+    settings,
+    /"TINKER_API_KEY",\s+"HF_TOKEN",\s+"WANDB_API_KEY",\s+TRACKIO_SERVER_URL_KEY,\s+TRACKIO_PROJECT_KEY,\s+"TRACKIO_WRITE_TOKEN",\s+TENSORBOARD_LOGDIR_KEY,/,
+  );
   assert.match(logos, /case "tinker_job":\s+return <TinkerLogo/);
 });

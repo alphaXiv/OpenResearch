@@ -572,6 +572,25 @@ mod tests {
     }
 
     #[test]
+    fn tracking_guidance_compute_skill_names_the_trackio_contract() {
+        for body in [COMPUTE] {
+            for required in [
+                "TRACKIO_SERVER_URL",
+                "TRACKIO_PROJECT",
+                "TRACKIO_RUN",
+                "TRACKIO_WRITE_TOKEN",
+                "TENSORBOARD_LOGDIR",
+                "report_to=[\"tensorboard\"]",
+                "orx tensorboard <runId>",
+                "loopback",
+                "before submission",
+            ] {
+                assert!(body.contains(required), "missing {required}");
+            }
+        }
+    }
+
+    #[test]
     fn ensure_session_skills_writes_local_set_idempotently() {
         let tmp = std::env::temp_dir().join(format!(
             "orx-agent-skills-test-{}-{}",

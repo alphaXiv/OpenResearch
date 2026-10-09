@@ -17,6 +17,7 @@ const mocks = {
   "./ExperimentOverview": { ExperimentOverview: () => null },
   "./LogTerminal": { LogTerminal: ({ runId }) => `LOG:${runId}` },
   "./StatusBadge": { StatusBadge: () => null },
+  "./TrackingLinks": { TrackingLinks: () => null },
   "./ui": { Button: ({ children }) => React.createElement("button", null, children) },
   "lucide-react": { ChevronDown: () => null, CircleStop: () => null },
 };

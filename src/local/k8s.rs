@@ -116,7 +116,13 @@ pub async fn submit_local_k8s_with_source(
     // The pod's env: everything the user synced (API keys), plus the tokens
     // the run script and common tooling expect. Travels via a k8s Secret,
     // never on a command line.
-    let mut env: HashMap<String, String> = crate::config::list_synced_env().into_iter().collect();
+    let (mut env, tracking) = crate::config::run_env(
+        &run_id,
+        &project.id,
+        args.tracking == Some(crate::TrackingBackend::Tensorboard),
+        true,
+        crate::config::TensorboardDefault::ExplicitOnly,
+    )?;
     if let Ok(hf_token) = hf::resolve_token() {
         env.entry("HF_TOKEN".to_string()).or_insert(hf_token);
     }
@@ -169,6 +175,7 @@ pub async fn submit_local_k8s_with_source(
         source_digest: None,
         source_path: None,
         source_size: None,
+        tracking,
     };
     source.apply_to_descriptor(&mut descriptor);
     if let Err(error) = crate::compute::record_submission_handle(&run_id, &descriptor) {

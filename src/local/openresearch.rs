@@ -151,6 +151,19 @@ pub async fn submit_local_openresearch_with_source(
         .or_else(|| project.run_command.clone().filter(|c| !c.trim().is_empty()))
         .ok_or_else(|| anyhow!("{}", crate::invocation::no_run_command(&project.id)))?;
 
+    // Decide tracking before provisioning. OpenResearch sandboxes are deleted
+    // after the run, so recording a TensorBoard path inside one would leave a
+    // viewer command that can never work.
+    let (_, tracking) = crate::config::run_env(
+        &run_id,
+        &project.id,
+        args.tracking == Some(crate::TrackingBackend::Tensorboard),
+        true,
+        crate::config::TensorboardDefault::Unavailable(
+            "OpenResearch sandboxes are ephemeral and their event files are deleted at teardown",
+        ),
+    )?;
+
     let sandbox = create_sandbox(
         &creds,
         &CreateSandboxBody {
@@ -182,6 +195,7 @@ pub async fn submit_local_openresearch_with_source(
         source_digest: None,
         source_path: None,
         source_size: None,
+        tracking,
     };
     source.apply_to_descriptor(&mut descriptor);
     if let Err(error) = crate::compute::record_submission_handle(&run_id, &descriptor) {

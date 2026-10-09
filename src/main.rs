@@ -85,6 +85,12 @@ enum Command {
     /// Show a run's compact log summary (path, size, and preview) by default.
     Logs(LogsArgs),
 
+    /// Show the configured Trackio connection and its dashboard link.
+    Trackio(TrackioArgs),
+
+    /// Show how to open TensorBoard for a recorded run.
+    Tensorboard(TensorboardArgs),
+
     /// Add an experiment node to a local `orx up` project.
     #[command(name = "create-experiment")]
     CreateExperiment(CreateExperimentArgs),
@@ -250,6 +256,25 @@ pub struct RunsArgs {
 #[derive(Args, Debug)]
 pub struct LogsArgs {
     pub run_id: String,
+}
+
+#[derive(Args, Debug)]
+pub struct TrackioArgs {
+    /// Read the Trackio destination recorded on this run. Omit to inspect the
+    /// machine's current Trackio settings.
+    pub run_id: Option<String>,
+}
+
+#[derive(Args, Debug)]
+pub struct TensorboardArgs {
+    /// Run whose recorded TensorBoard log directory and launch command to show.
+    pub run_id: String,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, ValueEnum, serde::Deserialize, serde::Serialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum TrackingBackend {
+    Tensorboard,
 }
 
 #[derive(Args, Debug)]
@@ -510,6 +535,11 @@ pub struct ExpRunArgs {
     /// the configured default compute target, if set.
     #[arg(long)]
     pub backend: Option<String>,
+    /// Opt this run into an additional local-file tracking backend. Trackio
+    /// remains controlled by its configured connection; TensorBoard injects a
+    /// per-run TENSORBOARD_LOGDIR without adding packages or credentials.
+    #[arg(long, value_enum)]
+    pub tracking: Option<TrackingBackend>,
     /// Hardware flavor. With `--backend hf`: t4-small, a10g-small, a100-large,
     /// h200, … With `--backend modal`: a Modal GPU (t4, l4, a10g, a100,
     /// a100-80gb, l40s, h100, h200, or e.g. h100:2) or cpu/cpu-large. With
@@ -1218,6 +1248,8 @@ fn command_name(command: &Command) -> &'static str {
         Command::Agent(_) => "agent",
         Command::Runs(_) => "runs",
         Command::Logs(_) => "logs",
+        Command::Trackio(_) => "trackio",
+        Command::Tensorboard(_) => "tensorboard",
         Command::CreateExperiment(_) => "create-experiment",
         Command::Compute(_) => "compute",
         Command::Instance(_) => "instance",
@@ -1267,6 +1299,8 @@ async fn dispatch(command: Command) -> error::Result<()> {
         Command::Agent(args) => commands::agent::run(args).await,
         Command::Runs(args) => commands::runs::run(args).await,
         Command::Logs(args) => commands::logs::run(args).await,
+        Command::Trackio(args) => commands::trackio::run(args).await,
+        Command::Tensorboard(args) => commands::tensorboard::run(args).await,
         Command::CreateExperiment(args) => commands::create_experiment::run(args).await,
         Command::Compute(args) => commands::compute::run(args).await,
         Command::Instance(args) => commands::instance::run(args).await,

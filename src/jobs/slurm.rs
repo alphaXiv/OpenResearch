@@ -488,6 +488,69 @@ mod tests {
     }
 
     #[test]
+    fn trackio_remote_run_env_never_renders_a_loopback_export_in_job_sbatch() {
+        let root =
+            std::env::temp_dir().join(format!("orx-trackio-sbatch-test-{}", uuid::Uuid::new_v4()));
+        let env_path = root.join(".openresearch/env");
+        std::fs::create_dir_all(env_path.parent().unwrap()).unwrap();
+        std::fs::write(
+            &env_path,
+            "export TRACKIO_SERVER_URL='http://127.0.0.1:4791'\n\
+             export TRACKIO_PROJECT='demo'\n\
+             export TRACKIO_WRITE_TOKEN='secret'\n",
+        )
+        .unwrap();
+
+        // Control: the file's connection does reach the decision, so a clean
+        // render below is the loopback rule at work, not an ignored fixture.
+        let (local_env, _) =
+            crate::config::run_env_from_file(&env_path, "run-1", "project-1", false, false)
+                .expect("local environment should resolve");
+        assert_eq!(
+            local_env
+                .get(crate::config::TRACKIO_SERVER_URL)
+                .map(String::as_str),
+            Some("http://127.0.0.1:4791")
+        );
+
+        let (env, tracking) =
+            crate::config::run_env_from_file(&env_path, "run-1", "project-1", false, true)
+                .expect("remote environment should resolve");
+        assert_eq!(tracking, Vec::new());
+        let mut job = spec();
+        job.env = env;
+        let rendered = render_sbatch(&job);
+
+        assert!(!rendered.contains("TRACKIO_SERVER_URL"));
+        assert!(!rendered.contains("127.0.0.1"));
+        assert!(!rendered.contains("localhost"));
+        assert!(!rendered.contains("secret"));
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn trackio_umbrella_tensorboard_logdir_is_rendered_into_job_sbatch() {
+        let root = std::env::temp_dir().join(format!(
+            "orx-tensorboard-sbatch-test-{}",
+            uuid::Uuid::new_v4()
+        ));
+        std::fs::create_dir_all(&root).unwrap();
+        let env_path = root.join("env");
+        std::fs::write(&env_path, "").unwrap();
+        let (env, tracking) =
+            crate::config::run_env_from_file(&env_path, "run-1", "project-1", true, true)
+                .expect("TensorBoard environment should resolve");
+        let mut job = spec();
+        job.env = env;
+        let rendered = render_sbatch(&job);
+        assert!(
+            rendered.contains("export TENSORBOARD_LOGDIR='../../../tensorboard/project-1/run-1'")
+        );
+        assert_eq!(tracking.len(), 1);
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
     fn sbatch_minimal_has_only_fixed_directives() {
         let script = render_sbatch(&spec());
         assert!(script.starts_with("#!/usr/bin/env bash\n"));

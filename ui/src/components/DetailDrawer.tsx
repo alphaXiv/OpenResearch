@@ -14,6 +14,7 @@ import type { CodeView } from "./CodeTab";
 import { LogTerminal } from "./LogTerminal";
 import { StatusBadge } from "./StatusBadge";
 import type { TabOpenIntent } from "../tabPreview";
+import { TrackingLinks } from "./TrackingLinks";
 import { Button, MenuItem } from "./ui";
 
 export type ExperimentView = "overview" | "terminal";
@@ -144,6 +145,7 @@ function TerminalView({
             {cancelling ? m.common_cancelling() : m.common_stop()}
           </Button>
         )}
+        {selectedRun && <TrackingLinks run={selectedRun} />}
         {expRuns.length > 0 && selectedRun && (
           <div className="run-history relative shrink-0" ref={historyRef}>
             <Button

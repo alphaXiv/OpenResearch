@@ -981,8 +981,7 @@ async fn run_openresearch(
         let script = crate::compute::staged_script(&stored.command);
         let script =
             openresearch::wrap_with_timeout(&script, descriptor.timeout_secs.unwrap_or(4 * 3600));
-        let mut env: std::collections::HashMap<String, String> =
-            crate::config::list_synced_env().into_iter().collect();
+        let mut env = crate::config::run_env_for_tracking(&descriptor.tracking, true);
         if let Ok(hf_token) = hf::resolve_token() {
             env.entry("HF_TOKEN".to_string()).or_insert(hf_token);
         }

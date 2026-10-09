@@ -814,6 +814,7 @@ pub async fn submit(args: &crate::ExpRunArgs) -> Result<StoredRun> {
         source_digest: None,
         source_path: None,
         source_size: None,
+        tracking: Vec::new(),
     };
     source.0.apply_to_descriptor(&mut descriptor);
     let now = crate::store::now_ms();
@@ -1116,6 +1117,7 @@ pub(crate) mod tests {
             disk: None,
             provider: None,
             backend: Some("tinker".into()),
+            tracking: None,
             flavor: None,
             org: None,
             host: None,

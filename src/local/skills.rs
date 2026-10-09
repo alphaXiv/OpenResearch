@@ -23,7 +23,7 @@ Before running anything:
 1. Confirm the compute. The user should name where runs execute — a configured `~/.ssh/config` host alias (`orx exp run --backend ssh --host <alias>`), another `orx` backend (`hf` or `modal` with a flavor, `k8s` with a committed manifest), or the local machine. If unspecified, use the configured default compute target when one is set (omit `--backend` to launch there); otherwise ask before launching anything.
 2. Read the paper. If the args name no paper, infer it from the current repository — read the README, docs, and code, and if the repo clearly corresponds to an identifiable paper, reproduce that one; only ask the user if none can be identified. If it's on alphaXiv, `orx paper <id>` gives a structured report (`--full` for raw text); use the `orx-lit-review` retrieval workflow to find it. Otherwise ask the user for a PDF or link.
 3. Plan to the user's compute window. When the caller supplies an absolute deadline and available accelerator capacity, treat both as authoritative: keep the available GPUs occupied with scientifically useful parallel variants, seeds, ablations, controls, or profiling runs; refill freed capacity after each completion; and stop early when the target claims are adequately evaluated. Interpret capacity by total GPUs across in-flight runs, not by raw run count. Do not invent or maintain a GPU-hour ledger unless the user explicitly asks for one. For vague small-budget language such as "for a little bit," prefer published-checkpoint evaluation and targeted checks. Larger windows may support broader sweeps, added seeds, fine-tuning, or retraining, but they make training eligible, not mandatory.
-4. Optional tracking: if the user wants metrics logged, prefer Weights & Biases — check `wandb login` / `WANDB_API_KEY` and log each run to a project named after the paper. Don't require it.
+4. {tracking}
 
 Workflow:
 1. Enumerate the paper's main empirical claims (headline table/figure results first). Unless the user specifies, focus on the main illustrative claim of the paper.
@@ -130,6 +130,62 @@ pub const CATALOG: &[Skill] = &[
     },
 ];
 
+/// The TensorBoard alternative offered alongside a configured Trackio server.
+const TENSORBOARD_INSTEAD: &str = "For network-free tracking instead, launch with \
+     `--tracking tensorboard`, set `report_to=[\"tensorboard\"]` and \
+     `logging_dir=os.environ[\"TENSORBOARD_LOGDIR\"]`, then use `orx tensorboard <runId>` \
+     for the recorded viewer command.";
+
+/// What a template's `{tracking}` step says, given the Trackio connection.
+///
+/// With a server configured, Trackio is the concrete instruction and the agent
+/// is told the project by name. Without one, the guidance is unchanged from
+/// before Trackio existed: suggest W&B, require nothing.
+///
+/// `TRACKIO_PROJECT` and `TRACKIO_RUN` are the convention Trackio's Rust, Go and
+/// JS clients read from the environment; its Python client does not, which is
+/// why the instruction is to pass them explicitly to `trackio.init()`.
+fn tracking_guidance_for(config: Option<&crate::local::trackio::Config>) -> String {
+    let Some(config) = config else {
+        return "Optional tracking: if the user wants metrics logged, prefer Weights & Biases \
+                — check `wandb login` / `WANDB_API_KEY` and log each run to a project named \
+                after the paper. Don't require it. For network-free tracking on remote compute, \
+                launch with `--tracking tensorboard`, set the trainer's \
+                `report_to=[\"tensorboard\"]` and \
+                `logging_dir=os.environ[\"TENSORBOARD_LOGDIR\"]`, then use \
+                `orx tensorboard <runId>` for the recorded viewer command."
+            .to_string();
+    };
+    // Without a project, launches skip Trackio and no `TRACKIO_` variable
+    // reaches the run, so Trackio logging code would find no server there.
+    let Some(project) = config
+        .project
+        .as_deref()
+        .filter(|project| !project.trim().is_empty())
+    else {
+        return format!(
+            "Optional tracking: a self-hosted Trackio server is configured at {server}, but \
+             `TRACKIO_PROJECT` is not set, so orx launches runs without Trackio. If the user \
+             wants metrics logged there, ask them to set `TRACKIO_PROJECT` first. \
+             {TENSORBOARD_INSTEAD}",
+            server = config.server_url,
+        );
+    };
+    format!(
+        "Tracking: a self-hosted Trackio server is configured at {server} and every run gets \
+         `TRACKIO_SERVER_URL` and `TRACKIO_WRITE_TOKEN` in its environment. Log metrics with \
+         `trackio.init(project=…, name=os.environ.get(\"TRACKIO_RUN\"))` — Trackio's Python \
+         client reads the server URL and token from the environment itself, but reads neither \
+         `TRACKIO_PROJECT` nor `TRACKIO_RUN`, so pass both explicitly. The project is \
+         `{project}`, in `TRACKIO_PROJECT`; pass `project=os.environ[\"TRACKIO_PROJECT\"]`. \
+         The dashboard is {dashboard}. Loopback and wildcard-bind addresses only work for local \
+         runs; remote runs require a remotely reachable URL, and orx omits local-only Trackio \
+         settings. Never print or echo `TRACKIO_WRITE_TOKEN`. {TENSORBOARD_INSTEAD}",
+        server = config.server_url,
+        dashboard = config.dashboard_url(),
+    )
+}
+
 /// Expand one selected workflow. The complete request is appended once by the
 /// chat layer, even when several workflows are selected.
 pub fn instructions(name: &str, has_request: bool, github_enabled: bool) -> Option<String> {
@@ -164,7 +220,10 @@ pub fn instructions(name: &str, has_request: bool, github_enabled: bool) -> Opti
             _ => skill.template,
         }
     };
-    Some(template.replace("{request}", request))
+    Some(template.replace("{request}", request).replace(
+        "{tracking}",
+        &tracking_guidance_for(crate::local::trackio::config().as_ref()),
+    ))
 }
 
 #[cfg(test)]
@@ -220,7 +279,11 @@ mod tests {
         assert!(out.contains("preserve private visibility"));
         assert!(out.contains("marimo edit <notebook.py>"));
         assert!(out.contains("Never change repository visibility without explicit authorization"));
-        assert!(!out.contains("trackio"));
+        // The ICML challenge's logbook flow must not leak into this skill. Not
+        // `!contains("trackio")` — the tracking step legitimately names Trackio
+        // on a machine that has a server configured, which would make this
+        // assertion depend on the developer's own settings.
+        assert!(!out.contains("trackio logbook"));
         let bare = expand("reproduce-paper", false).unwrap();
         assert!(bare.contains("infer the paper from the current repository"));
         assert!(bare.contains("only ask the user if no paper can be identified"));
@@ -270,5 +333,54 @@ mod tests {
                 }
             }
         }
+    }
+
+    #[test]
+    fn tracking_guidance_without_trackio_is_the_optional_wandb_step() {
+        let out = super::tracking_guidance_for(None);
+        assert!(out.starts_with("Optional tracking:"));
+        assert!(out.contains("WANDB_API_KEY"));
+        assert!(out.contains("TENSORBOARD_LOGDIR"));
+        assert!(!out.contains("TRACKIO"));
+    }
+
+    #[test]
+    fn tracking_guidance_with_trackio_names_the_project_and_guards_the_token() {
+        let config = crate::local::trackio::Config {
+            server_url: "http://127.0.0.1:7860".to_string(),
+            project: Some("icl-repro".to_string()),
+            has_token: true,
+        };
+        let out = super::tracking_guidance_for(Some(&config));
+        assert!(out.contains("http://127.0.0.1:7860"));
+        assert!(out.contains("The project is `icl-repro`"));
+        assert!(out.contains("http://127.0.0.1:7860/?project=icl-repro"));
+        // The agent is told the two variables its Python client will not read.
+        assert!(out.contains("os.environ[\"TRACKIO_PROJECT\"]"));
+        assert!(out.contains("os.environ.get(\"TRACKIO_RUN\")"));
+        assert!(out.contains("Never print or echo `TRACKIO_WRITE_TOKEN`"));
+        assert!(out.contains("Loopback and wildcard-bind addresses only work for local runs"));
+        assert!(out.contains("remote runs require a remotely reachable URL"));
+        assert!(out.contains("TENSORBOARD_LOGDIR"));
+        // Whether a token exists is guidance-irrelevant; its value must never
+        // reach the prompt, and there is no way for it to.
+        assert!(!out.contains("wandb"));
+    }
+
+    #[test]
+    fn tracking_guidance_never_subscripts_an_unset_project_variable() {
+        let config = crate::local::trackio::Config {
+            server_url: "http://127.0.0.1:7860/".to_string(),
+            project: None,
+            has_token: false,
+        };
+        let out = super::tracking_guidance_for(Some(&config));
+        // With no project configured, launches skip Trackio and the run gets
+        // no `TRACKIO_` variable, so the agent must not be told to log there.
+        assert!(!out.contains("os.environ[\"TRACKIO_PROJECT\"]"));
+        assert!(!out.contains("every run gets"));
+        assert!(out.contains("orx launches runs without Trackio"));
+        assert!(out.contains("TENSORBOARD_LOGDIR"));
+        crate::local::assert_agent_guidance_is_ui_agnostic("tracking", &out);
     }
 }

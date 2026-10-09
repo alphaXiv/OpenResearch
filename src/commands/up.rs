@@ -638,6 +638,8 @@ fn router(state: AppState, remote_auth: Option<RemoteAuth>) -> Router {
             "/api/settings/env/{key}",
             axum::routing::delete(delete_env_var),
         )
+        .route("/api/settings/trackio", get(trackio_settings))
+        .route("/api/settings/trackio/preflight", post(trackio_preflight))
         .route(
             "/api/settings/data-dir",
             get(data_dir_settings).post(set_data_dir),
@@ -2108,6 +2110,7 @@ struct CreateRunReq {
     telemetry_suppressed: bool,
     experiment_id: String,
     backend: Option<String>,
+    tracking: Option<crate::TrackingBackend>,
     flavor: Option<String>,
     host: Option<String>,
     container: Option<String>,
@@ -2125,6 +2128,63 @@ struct CreateRunReq {
     agent_origin: Option<String>,
     /// Absent from dashboard callers; checked against orx up's own config dir.
     caller_config_dir: Option<std::path::PathBuf>,
+}
+
+impl CreateRunReq {
+    fn from_run_args(args: &crate::ExpRunArgs) -> Result<Self> {
+        Ok(Self {
+            telemetry_suppressed: args.telemetry_suppressed
+                || !crate::telemetry::accounting_reports_enabled(),
+            invocation_context: args
+                .invocation_identity()?
+                .map(|identity| serde_json::to_string(&identity))
+                .transpose()?,
+            experiment_id: args.exp_id.clone(),
+            backend: args.backend.clone(),
+            tracking: args.tracking,
+            flavor: args.flavor.clone(),
+            host: args.host.clone(),
+            container: args.container.clone(),
+            no_container: args.no_container,
+            manifest: args.manifest.clone(),
+            image: args.image.clone(),
+            timeout: args.timeout.clone(),
+            org: args.org.clone(),
+            provider: args.provider.clone(),
+            disk: args.disk,
+            force: args.force,
+            chat_session_id: args.launching_chat_session(),
+            agent_origin: args.agent_origin.clone(),
+            caller_config_dir: Some(absolute_config_dir()),
+        })
+    }
+
+    fn into_run_args(self) -> crate::ExpRunArgs {
+        let mut backend = self.backend;
+        let mut flavor = self.flavor;
+        local::apply_compute_default(&mut backend, &mut flavor);
+        crate::ExpRunArgs {
+            invocation_context: self.invocation_context,
+            telemetry_suppressed: self.telemetry_suppressed,
+            exp_id: self.experiment_id,
+            disk: self.disk,
+            provider: self.provider,
+            backend: Some(backend.unwrap_or_else(|| "local".to_string())),
+            tracking: self.tracking,
+            flavor,
+            org: self.org,
+            host: self.host,
+            container: self.container,
+            no_container: self.no_container,
+            manifest: self.manifest,
+            image: self.image,
+            timeout: self.timeout,
+            force: self.force,
+            chat_session_id: self.chat_session_id,
+            agent_origin: self.agent_origin,
+            forwarded: true,
+        }
+    }
 }
 
 #[derive(Deserialize)]
@@ -2191,30 +2251,7 @@ pub(crate) async fn submit_run_via_up(
     port: u16,
     args: &crate::ExpRunArgs,
 ) -> Result<RunLaunchSummary> {
-    let request = CreateRunReq {
-        telemetry_suppressed: args.telemetry_suppressed
-            || !crate::telemetry::accounting_reports_enabled(),
-        invocation_context: args
-            .invocation_identity()?
-            .map(|identity| serde_json::to_string(&identity))
-            .transpose()?,
-        experiment_id: args.exp_id.clone(),
-        backend: args.backend.clone(),
-        flavor: args.flavor.clone(),
-        host: args.host.clone(),
-        container: args.container.clone(),
-        no_container: args.no_container,
-        manifest: args.manifest.clone(),
-        image: args.image.clone(),
-        timeout: args.timeout.clone(),
-        org: args.org.clone(),
-        provider: args.provider.clone(),
-        disk: args.disk,
-        force: args.force,
-        chat_session_id: args.launching_chat_session(),
-        agent_origin: args.agent_origin.clone(),
-        caller_config_dir: Some(absolute_config_dir()),
-    };
+    let request = CreateRunReq::from_run_args(args)?;
     let response =
         authenticate_up_request(local_client()?.post(format!("http://127.0.0.1:{port}/api/runs")))
             .json(&request)
@@ -2316,30 +2353,8 @@ async fn create_run(State(state): State<AppState>, Json(req): Json<CreateRunReq>
         .project_lifecycle
         .admit(&experiment.project_id)
         .ok_or_else(|| bad_request("project deletion is in progress"))?;
-    let mut backend = req.backend;
-    let mut flavor = req.flavor;
-    // Dashboard callers may omit these; forwarded CLI requests arrive resolved.
-    local::apply_compute_default(&mut backend, &mut flavor);
-    let args = crate::ExpRunArgs {
-        invocation_context: req.invocation_context,
-        telemetry_suppressed: req.telemetry_suppressed,
-        exp_id: req.experiment_id,
-        disk: req.disk,
-        provider: req.provider,
-        backend: Some(backend.unwrap_or_else(|| "local".to_string())),
-        flavor,
-        org: req.org,
-        host: req.host,
-        container: req.container,
-        no_container: req.no_container,
-        manifest: req.manifest,
-        image: req.image,
-        timeout: req.timeout,
-        force: req.force,
-        chat_session_id: req.chat_session_id,
-        agent_origin: req.agent_origin,
-        forwarded: true,
-    };
+    // Dashboard callers may omit compute options; forwarded CLI requests arrive resolved.
+    let args = req.into_run_args();
     crate::compute::validate_run_args(&args).map_err(bad_request)?;
     let run = crate::compute::submit(&args).await.map_err(bad_request)?;
     Ok(Json(json!({ "run": ApiRun::from(&run) })))
@@ -4653,18 +4668,48 @@ fn spawn_claude_auth_monitor(
 
 // --- env var settings -------------------------------------------------------
 
-/// Everything in `~/.openresearch/env`, values masked. `inProcessEnv` flags
-/// keys that are also set in orx up's own environment (which wins at runtime).
+/// Whether a variable's value has to stay masked.
+///
+/// Everything is a secret unless it is explicitly known not to be. Trackio's
+/// server/project and TensorBoard's filesystem path carry no credential. The
+/// Trackio write token is deliberately not on this list.
+fn env_value_is_secret(key: &str) -> bool {
+    !matches!(
+        key,
+        crate::config::TRACKIO_SERVER_URL
+            | crate::config::TRACKIO_PROJECT
+            | crate::config::TENSORBOARD_LOGDIR
+    )
+}
+
+/// One variable's row. `value` is the plain value, present only for keys that
+/// carry no credential; a secret is only ever seen through `maskedValue`.
+fn env_var_json(key: &str, value: &str, in_process_env: bool) -> Value {
+    let secret = env_value_is_secret(key);
+    // Saving through this API splits an embedded write token out, but the env
+    // file is a plain file a user can also edit by hand — and this key is shown
+    // in the clear, so a token left inside its URL would be on screen.
+    let shown = if key == crate::config::TRACKIO_SERVER_URL {
+        crate::config::split_trackio_write_token(value).0
+    } else {
+        value.to_string()
+    };
+    json!({
+        "key": key,
+        "maskedValue": if secret { mask_token(&shown) } else { shown.clone() },
+        "value": if secret { Value::Null } else { json!(shown) },
+        "secret": secret,
+        "inProcessEnv": in_process_env,
+    })
+}
+
+/// Everything in `~/.openresearch/env`, secret values masked. `inProcessEnv`
+/// flags keys that are also set in orx up's own environment (which wins at
+/// runtime).
 fn env_settings_json() -> Value {
-    let vars: Vec<Value> = crate::config::list_synced_env()
+    let vars: Vec<Value> = crate::config::synced_env_for_display()
         .iter()
-        .map(|(key, value)| {
-            json!({
-                "key": key,
-                "maskedValue": mask_token(value),
-                "inProcessEnv": std::env::var_os(key).is_some(),
-            })
-        })
+        .map(|(key, value)| env_var_json(key, value, std::env::var_os(key).is_some()))
         .collect();
     json!({ "vars": vars })
 }
@@ -4704,11 +4749,83 @@ async fn set_env_var(Json(req): Json<SetEnvVarReq>) -> ApiResult {
         return Err(bad_request("value is required"));
     }
     tokio::task::spawn_blocking(move || {
+        // `trackio show` prints one write-access URL with the token in its query
+        // string, so that is what gets pasted here. Store the two separately:
+        // the URL is shown in the clear and ends up in every dashboard link, and
+        // the token must not travel with it. A different server without a
+        // token of its own drops the previous server's token.
+        if key == crate::config::TRACKIO_SERVER_URL {
+            crate::config::save_trackio_server_url(&value)?;
+            return Ok(Json(env_settings_json()));
+        }
         crate::config::write_synced_env_var(&key, &value)?;
         Ok(Json(env_settings_json()))
     })
     .await
     .map_err(|e| ApiError::from(anyhow!("env task failed: {e}")))?
+}
+
+// --- trackio ------------------------------------------------------------------
+
+/// The configured Trackio connection for the Environment tab. Reports whether a
+/// write token exists, never its value.
+fn trackio_settings_json(
+    config: Option<&crate::local::trackio::Config>,
+    probe: Option<&crate::local::trackio::Probe>,
+) -> Value {
+    let verdict = crate::local::trackio::verdict(config, probe, false);
+    match config {
+        Some(config) => json!({
+            "configured": verdict.configured,
+            "reachable": probe.is_some_and(|probe| probe.reachable),
+            "usable": verdict.usable,
+            "reason": verdict.reason,
+            "serverUrl": config.server_url,
+            "project": config.project,
+            "hasToken": config.has_token,
+            "dashboardUrl": verdict.usable.then(|| config.dashboard_url()),
+        }),
+        None => json!({
+            "configured": false,
+            "reachable": false,
+            "usable": false,
+            "reason": verdict.reason,
+            "serverUrl": null,
+            "project": null,
+            "hasToken": false,
+            "dashboardUrl": null,
+        }),
+    }
+}
+
+async fn trackio_settings() -> ApiResult {
+    let Some(config) = crate::local::trackio::config() else {
+        return Ok(Json(trackio_settings_json(None, None)));
+    };
+    let token = crate::config::trackio_write_token();
+    let probe = crate::local::trackio::probe(&config.server_url, token.as_deref()).await;
+    Ok(Json(trackio_settings_json(Some(&config), Some(&probe))))
+}
+
+/// Probe the configured server. Read-only on the Trackio side, and the write
+/// token appears in neither the response nor the error text.
+async fn trackio_preflight() -> ApiResult {
+    let Some(config) = crate::local::trackio::config() else {
+        return Ok(Json(json!({
+            "reachable": false,
+            "version": null,
+            "writeAccess": null,
+            "error": "Trackio is not configured — set TRACKIO_SERVER_URL.",
+        })));
+    };
+    let token = crate::config::trackio_write_token();
+    let probe = crate::local::trackio::probe(&config.server_url, token.as_deref()).await;
+    Ok(Json(json!({
+        "reachable": probe.reachable,
+        "version": probe.version,
+        "writeAccess": probe.write_access,
+        "error": probe.error,
+    })))
 }
 
 async fn delete_env_var(Path(key): Path<String>) -> ApiResult {
@@ -8764,37 +8881,45 @@ mod tests {
     }
 
     #[test]
-    fn create_run_request_round_trips_agent_attribution_and_force() {
-        let request = CreateRunReq {
+    fn create_run_request_preserves_forwarded_tracking_and_attribution() {
+        let args = crate::ExpRunArgs {
             invocation_context: None,
             telemetry_suppressed: true,
-            experiment_id: "experiment-1".into(),
+            forwarded: false,
+            exp_id: "experiment-1".into(),
+            disk: None,
+            provider: None,
             backend: Some("local".into()),
+            tracking: Some(crate::TrackingBackend::Tensorboard),
             flavor: None,
+            org: None,
             host: None,
             container: None,
             no_container: false,
             manifest: None,
             image: None,
             timeout: None,
-            org: None,
-            provider: None,
-            disk: None,
             force: true,
             chat_session_id: Some("session-1".into()),
             agent_origin: None,
-            caller_config_dir: Some("/tmp/orx-config/openresearch".into()),
         };
+        let request = CreateRunReq::from_run_args(&args).unwrap();
 
         let value = serde_json::to_value(&request).unwrap();
-        assert_eq!(value["callerConfigDir"], "/tmp/orx-config/openresearch");
+        assert_eq!(value["callerConfigDir"], json!(absolute_config_dir()));
         assert_eq!(value["experimentId"], "experiment-1");
+        assert_eq!(value["tracking"], "tensorboard");
         assert_eq!(value["chatSessionId"], "session-1");
         assert_eq!(value["force"], true);
+        let forwarded = serde_json::from_value::<CreateRunReq>(value)
+            .unwrap()
+            .into_run_args();
         assert_eq!(
-            serde_json::from_value::<CreateRunReq>(value).unwrap(),
-            request
+            forwarded.tracking,
+            Some(crate::TrackingBackend::Tensorboard)
         );
+        assert_eq!(forwarded.chat_session_id.as_deref(), Some("session-1"));
+        assert!(forwarded.force);
     }
 
     #[test]
@@ -9037,6 +9162,141 @@ mod tests {
         assert_eq!(abs_path("~").map(|(_, p)| p), Ok(home));
         // `~otheruser` isn't expanded, so it stays relative and is rejected.
         assert!(abs_path("~otheruser/x").is_err());
+    }
+
+    #[test]
+    fn env_var_json_masks_a_secret_and_withholds_its_value() {
+        let row = env_var_json("TRACKIO_WRITE_TOKEN", "supersecrettoken", false);
+        assert_eq!(
+            row,
+            json!({
+                "key": "TRACKIO_WRITE_TOKEN",
+                "maskedValue": "sup…oken",
+                "value": Value::Null,
+                "secret": true,
+                "inProcessEnv": false,
+            })
+        );
+    }
+
+    #[test]
+    fn env_var_json_shows_the_trackio_address_and_project_in_the_clear() {
+        assert_eq!(
+            env_var_json("TRACKIO_SERVER_URL", "http://127.0.0.1:7860", true),
+            json!({
+                "key": "TRACKIO_SERVER_URL",
+                "maskedValue": "http://127.0.0.1:7860",
+                "value": "http://127.0.0.1:7860",
+                "secret": false,
+                "inProcessEnv": true,
+            })
+        );
+        assert_eq!(
+            env_var_json("TRACKIO_PROJECT", "icl-repro", false),
+            json!({
+                "key": "TRACKIO_PROJECT",
+                "maskedValue": "icl-repro",
+                "value": "icl-repro",
+                "secret": false,
+                "inProcessEnv": false,
+            })
+        );
+    }
+
+    #[test]
+    fn env_var_json_strips_a_hand_edited_token_out_of_the_trackio_address() {
+        // Saving through the API splits the token out, but the env file is a
+        // plain file. This key is shown in the clear, so a token that got in by
+        // another route must not be rendered with it.
+        let row = env_var_json(
+            "TRACKIO_SERVER_URL",
+            "http://127.0.0.1:7860/?write_token=s3cret",
+            false,
+        );
+        assert_eq!(row["value"], json!("http://127.0.0.1:7860/"));
+        assert_eq!(row["maskedValue"], json!("http://127.0.0.1:7860/"));
+        assert!(!row.to_string().contains("s3cret"));
+    }
+
+    #[test]
+    fn trackio_settings_reject_a_reachable_non_trackio_endpoint() {
+        let config = crate::local::trackio::Config {
+            server_url: "http://127.0.0.1:7860".to_string(),
+            project: Some("demo".to_string()),
+            has_token: true,
+        };
+        let probe = crate::local::trackio::Probe {
+            reachable: true,
+            version: None,
+            write_access: None,
+            error: Some("not a Trackio server".to_string()),
+        };
+        assert_eq!(
+            trackio_settings_json(Some(&config), Some(&probe)),
+            json!({
+                "configured": false,
+                "reachable": true,
+                "usable": false,
+                "reason": "not a Trackio server",
+                "serverUrl": "http://127.0.0.1:7860",
+                "project": "demo",
+                "hasToken": true,
+                "dashboardUrl": null,
+            })
+        );
+    }
+
+    #[test]
+    fn trackio_settings_reject_an_unreachable_endpoint_with_its_reason() {
+        let config = crate::local::trackio::Config {
+            server_url: "http://127.0.0.1:7860".to_string(),
+            project: Some("demo".to_string()),
+            has_token: true,
+        };
+        let probe = crate::local::trackio::Probe {
+            reachable: false,
+            version: None,
+            write_access: None,
+            error: Some("connection refused".to_string()),
+        };
+        let value = trackio_settings_json(Some(&config), Some(&probe));
+        assert_eq!(value["configured"], json!(false));
+        assert_eq!(value["reachable"], json!(false));
+        assert_eq!(value["usable"], json!(false));
+        assert_eq!(value["reason"], json!("connection refused"));
+    }
+
+    #[test]
+    fn trackio_settings_distinguish_reachable_from_run_usable() {
+        let config = crate::local::trackio::Config {
+            server_url: "https://trackio.example".to_string(),
+            project: None,
+            has_token: true,
+        };
+        let probe = crate::local::trackio::Probe {
+            reachable: true,
+            version: Some("0.35.0".to_string()),
+            write_access: Some(true),
+            error: None,
+        };
+        let value = trackio_settings_json(Some(&config), Some(&probe));
+        assert_eq!(value["configured"], json!(true));
+        assert_eq!(value["reachable"], json!(true));
+        assert_eq!(value["usable"], json!(false));
+        assert!(value["reason"]
+            .as_str()
+            .unwrap()
+            .contains("TRACKIO_PROJECT"));
+    }
+
+    #[test]
+    fn env_var_json_defaults_an_unknown_key_to_secret() {
+        // The allowlist is the only way out of masking: a new variable the user
+        // adds is assumed to be a credential.
+        let row = env_var_json("MY_CUSTOM_THING", "plaintextvalue", false);
+        assert_eq!(row["secret"], json!(true));
+        assert_eq!(row["value"], Value::Null);
+        assert_eq!(row["maskedValue"], json!("pla…alue"));
     }
 
     fn no_key(path: Option<&str>) -> SshReadiness {

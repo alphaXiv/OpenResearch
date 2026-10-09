@@ -68,6 +68,28 @@ The session playbook states the configured default. A bare `orx exp run
 <expId>` uses it. Use another backend only when the user names one; a connected
 credential is not a signal to switch.
 
+## Experiment tracking
+
+Run `orx trackio` before writing tracking code. When it reports the connection
+as usable, ORX injects `TRACKIO_SERVER_URL`, `TRACKIO_PROJECT`, `TRACKIO_RUN`
+and, when configured, `TRACKIO_WRITE_TOKEN`. Trackio's Python client reads the
+server and token itself but not the project or run name, so initialise it with
+`trackio.init(project=os.environ["TRACKIO_PROJECT"],
+name=os.environ["TRACKIO_RUN"])`. Never print the token.
+
+A loopback or wildcard-bind Trackio URL works only for a local run. For a remote backend ORX
+removes every `TRACKIO_` value and says so before submission; do not probe the
+missing variable or copy the local-only URL into generated training code. This
+section is the inspectable list of the Trackio variables ORX may inject.
+
+For file-only tracking on remote compute, launch with `--tracking tensorboard`.
+ORX injects `TENSORBOARD_LOGDIR`; configure supported trainers with
+`report_to=["tensorboard"]` and `logging_dir=os.environ["TENSORBOARD_LOGDIR"]`
+instead of hand-writing a metrics logger. TensorBoard needs no server or token
+and does not change the environment's dependencies. After launch,
+`orx tensorboard <runId>` prints the recorded log root and the copyable SSH
+tunnel / `tensorboard --logdir` commands.
+
 Before constructing the launch command, read exactly one reference relative to
 this `SKILL.md`:
 

@@ -22,6 +22,26 @@ use serde::{Deserialize, Serialize};
 
 use crate::error::{anyhow, Result};
 
+/// Experiment-tracking destination actually selected for one run.
+///
+/// This is persisted inside [`BackendDescriptor`], so diagnostics and links
+/// remain tied to the launch even after the user's current settings change.
+/// Secret values are deliberately not representable here.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum TrackingDescriptor {
+    Trackio {
+        server_url: String,
+        project: Option<String>,
+        run: String,
+    },
+    Tensorboard {
+        log_dir: String,
+        root_log_dir: String,
+        run: String,
+    },
+}
+
 /// CPython env var that forces stdout/stderr unbuffered. Every backend streams a
 /// job's output by tailing a pipe or a redirected `log` file, so a block-buffered
 /// job would make its logs appear frozen until the buffer fills. We default it on
@@ -97,6 +117,10 @@ pub struct BackendDescriptor {
     pub source_path: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub source_size: Option<u64>,
+    /// Tracking destinations selected at launch. Empty for runs created before
+    /// tracking provenance was recorded.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub tracking: Vec<TrackingDescriptor>,
 }
 
 impl BackendDescriptor {
@@ -283,6 +307,7 @@ mod tests {
             source_digest: None,
             source_path: None,
             source_size: None,
+            tracking: Vec::new(),
         }
     }
 
@@ -333,6 +358,39 @@ mod tests {
             BackendDescriptor::parse(&json).unwrap().ssh_container,
             d.ssh_container
         );
+        assert!(d.tracking.is_empty());
+    }
+
+    #[test]
+    fn trackio_launch_provenance_round_trips_without_a_write_token() {
+        let mut first = openresearch_descriptor();
+        first.tracking = vec![TrackingDescriptor::Trackio {
+            server_url: "https://trackio.example".to_string(),
+            project: Some("paper-a".to_string()),
+            run: "run-1".to_string(),
+        }];
+        let json = first.to_json();
+        assert!(json.contains("\"server_url\":\"https://trackio.example\""));
+        assert!(
+            !json.contains("token"),
+            "secret-shaped field leaked: {json}"
+        );
+        let parsed = BackendDescriptor::parse(&json).unwrap();
+        assert_eq!(parsed.tracking, first.tracking);
+
+        let mut second = openresearch_descriptor();
+        second.tracking = vec![TrackingDescriptor::Trackio {
+            server_url: "https://other-trackio.example".to_string(),
+            project: Some("paper-b".to_string()),
+            run: "run-2".to_string(),
+        }];
+        assert_ne!(first.tracking, second.tracking);
+        assert!(BackendDescriptor::parse(
+            r#"{"kind":"slurm_job","namespace":"cluster","jobId":"1"}"#,
+        )
+        .unwrap()
+        .tracking
+        .is_empty());
     }
 
     #[test]

@@ -83,6 +83,27 @@ pub async fn submit_local_hf_with_source(
     // Tokens travel as job secrets only — the command line stays tokenless.
     let mut secrets = HashMap::new();
     secrets.insert("HF_TOKEN".to_string(), token.clone());
+    // Secrets are this backend's only environment channel. Copy only the
+    // tracking contract out of the complete resolved run env; unrelated synced
+    // variables retain the backend's previous behaviour.
+    let (tracking_env, tracking) = crate::config::run_env(
+        &run_id,
+        &project.id,
+        args.tracking == Some(crate::TrackingBackend::Tensorboard),
+        true,
+        crate::config::TensorboardDefault::HF_JOBS,
+    )?;
+    for key in [
+        crate::config::TRACKIO_SERVER_URL,
+        crate::config::TRACKIO_PROJECT,
+        crate::config::TRACKIO_RUN,
+        crate::config::TRACKIO_WRITE_TOKEN,
+        crate::config::TENSORBOARD_LOGDIR,
+    ] {
+        if let Some(value) = tracking_env.get(key) {
+            secrets.insert(key.to_string(), value.clone());
+        }
+    }
     let mut labels = HashMap::new();
     labels.insert("or_run".to_string(), run_id.clone());
     labels.insert("or_experiment".to_string(), exp.id.clone());
@@ -125,6 +146,7 @@ pub async fn submit_local_hf_with_source(
         source_digest: None,
         source_path: None,
         source_size: None,
+        tracking,
     };
     source.apply_to_descriptor(&mut descriptor);
     if let Err(error) = crate::compute::record_submission_handle(&run_id, &descriptor) {

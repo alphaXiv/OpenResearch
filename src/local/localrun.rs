@@ -83,7 +83,13 @@ async fn submit_controller_run(
 
     // The run's env: everything the user synced (API keys), plus the tokens
     // the run script expects. Passed to the launcher process.
-    let mut env: HashMap<String, String> = crate::config::list_synced_env().into_iter().collect();
+    let (mut env, tracking) = crate::config::run_env(
+        &run_id,
+        &project.id,
+        args.tracking == Some(crate::TrackingBackend::Tensorboard),
+        false,
+        crate::config::TensorboardDefault::LocalData,
+    )?;
     if let Ok(hf_token) = crate::jobs::huggingface::resolve_token() {
         env.entry("HF_TOKEN".to_string()).or_insert(hf_token);
     }
@@ -137,6 +143,7 @@ async fn submit_controller_run(
         source_digest: None,
         source_path: None,
         source_size: None,
+        tracking,
     };
     source.apply_to_descriptor(&mut descriptor);
     if let Err(error) = crate::compute::record_submission_handle(&run_id, &descriptor) {

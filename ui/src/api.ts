@@ -108,6 +108,32 @@ export interface Run {
   cancelRequested: boolean;
 }
 
+export type TrackingDescriptor =
+  | {
+      kind: "trackio";
+      server_url: string;
+      project: string | null;
+      run: string;
+    }
+  | {
+      kind: "tensorboard";
+      log_dir: string;
+      root_log_dir: string;
+      run: string;
+    };
+
+/** Public tracking destinations persisted on this run. Runs created before
+ *  provenance support return an empty list rather than current settings. */
+export function runTracking(run: Pick<Run, "backend">): TrackingDescriptor[] {
+  const tracking = run.backend?.tracking;
+  if (!Array.isArray(tracking)) return [];
+  return tracking.filter((record): record is TrackingDescriptor => {
+    if (!record || typeof record !== "object") return false;
+    const value = record as Record<string, unknown>;
+    return value.kind === "trackio" || value.kind === "tensorboard";
+  });
+}
+
 export function runDisplayStatus(run: Pick<Run, "status" | "cancelRequested">): RunDisplayStatus {
   const live = run.status === "running" || run.status === "starting";
   return live && run.cancelRequested ? "cancelling" : run.status;
@@ -945,6 +971,9 @@ export const saveModalToken = (tokenId: string, tokenSecret: string) =>
 export interface EnvVar {
   key: string;
   maskedValue: string;
+  /** Plain value, non-null only for keys that carry no credential. */
+  value: string | null;
+  secret: boolean;
   inProcessEnv: boolean;
 }
 
@@ -958,6 +987,33 @@ export const deleteEnvVar = (key: string) =>
   writeResponse(`/api/settings/env/${encodeURIComponent(key)}`, { method: "DELETE" })
     .then((r) => json<{ vars: EnvVar[] }>(r))
     .then((r) => r.vars);
+
+// --- settings: trackio ---------------------------------------------------------
+
+/** The configured self-hosted Trackio connection. Never carries the token. */
+export interface TrackioSettings {
+  configured: boolean;
+  reachable: boolean;
+  usable: boolean;
+  reason: string | null;
+  serverUrl: string | null;
+  project: string | null;
+  hasToken: boolean;
+  /** Project-scoped: Trackio's dashboard has no per-run query parameter. */
+  dashboardUrl: string | null;
+}
+
+export interface TrackioPreflight {
+  reachable: boolean;
+  version: string | null;
+  /** Whether the configured write token may write. `null` = could not ask. */
+  writeAccess: boolean | null;
+  error: string | null;
+}
+
+export const getTrackioSettings = () => get<TrackioSettings>("/api/settings/trackio");
+
+export const trackioPreflight = () => post<TrackioPreflight>("/api/settings/trackio/preflight", {});
 
 /** Where `source` says the resolved data dir came from. `env` means the
  * `$ORX_DATA_DIR` override forces it — the UI shows the field read-only. */

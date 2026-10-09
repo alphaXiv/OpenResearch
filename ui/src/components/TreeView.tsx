@@ -33,6 +33,7 @@ import { usePopover } from "./ModelPicker";
 import { MenuItem } from "./ui";
 import { statusLabel, StatusBadge } from "./StatusBadge";
 import { tabOpenGestureHandlers, type TabOpenIntent } from "../tabPreview";
+import { TrackingLinks } from "./TrackingLinks";
 
 const EMPTY_STATE_CLASS_NAME = [
   "empty-state absolute inset-0 flex flex-col items-center",
@@ -314,6 +315,7 @@ const ExpNode = memo(function ExpNode({ data }: NodeProps<ExpFlowNode>) {
         >
           <GitHubMark size={13} />
         </a>}
+        {latestRun && <TrackingLinks className="node-action node-action-ext" run={latestRun} />}
         <ArchiveMenu id={exp.id} name={exp.slug} actions={actions} onArchive={onArchive} compact />
       </div>
       <Handle type="source" position={Position.Bottom} />
