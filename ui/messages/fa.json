@@ -1372,5 +1372,18 @@
   "settings_gcp_auto_delete": "orx هر ماشین را پس از پایان اجرایش حذف می‌کند. Compute Engine نیز یک ساعت پس از سقف زمانی اجرا آن را حذف می‌کند، حتی اگر orx در حال اجرا نباشد.",
   "settings_gcp_prices_note": "قیمت‌های فهرست درخواستی در us-central1 برای یک GPU و کوچک‌ترین ماشین آن. نواحی دیگر و ماشین‌های Spot متفاوت‌اند.",
   "compute_description_gcp": "برای هر اجرا یک ماشین مجازی GPU در Compute Engine در پروژهٔ Google Cloud شما می‌سازد",
-  "compute_usage_gcp": "هر اجرا ماشین خودش را دارد که هزینه‌اش به پروژهٔ Google Cloud شما می‌رود؛ orx پس از پایان اجرا آن را حذف می‌کند."
+  "compute_usage_gcp": "هر اجرا ماشین خودش را دارد که هزینه‌اش به پروژهٔ Google Cloud شما می‌رود؛ orx پس از پایان اجرا آن را حذف می‌کند.",
+  "settings_prices_available": "{amount} در دسترس",
+  "settings_gcp_available": "قابل خرج",
+  "settings_gcp_balance_detail": "اعتبار {credit} واردشده در {date}، منهای {spent} خرج‌شده از آن زمان.",
+  "settings_gcp_source_export": "هزینه از خروجی صورت‌حساب BigQuery.",
+  "settings_gcp_source_estimate": "هزینه از اجراهای orx در Google Cloud با قیمت فهرست تخمین زده شده.",
+  "settings_gcp_no_credit": "Google اجازه نمی‌دهد gcloud اعتبار را بخواند. برای پیگیری مانده آن را در زیر وارد کنید.",
+  "settings_gcp_billing_account": "حساب صورت‌حساب: {name}",
+  "settings_gcp_billing_disabled": "صورت‌حساب این پروژه خاموش است، پس ماشین‌ها راه‌اندازی نمی‌شوند.",
+  "settings_gcp_credit_label": "اعتبار باقی‌مانده (USD)",
+  "settings_gcp_clear_credit": "توقف پیگیری",
+  "settings_gcp_credit_hint": "آن را از Billing ← Credits (یا بنر دورهٔ آزمایشی) در کنسول Google Cloud کپی کنید. orx از لحظهٔ ذخیره هزینه را کم می‌کند.",
+  "settings_gcp_export_label": "جدول خروجی صورت‌حساب BigQuery (اختیاری)",
+  "settings_gcp_export_hint": "با روشن بودن خروجی صورت‌حساب به BigQuery، orx هزینهٔ دقیق پروژه را به‌جای تخمین می‌خواند."
 }

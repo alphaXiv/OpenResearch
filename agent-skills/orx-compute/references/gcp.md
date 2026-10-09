@@ -24,6 +24,10 @@ orx exp run <expId> --backend gcp --flavor n2-standard-16   # CPU only
 - The project, zone, Spot VMs, image, and disk size come from the user's saved
   settings (`orx compute show gcp`). Change them only when the user asks:
   `orx compute configure gcp --project <id> --zone <zone>`.
+- `orx compute prices --json` shows the Google Cloud balance when the user
+  has entered their remaining credit: `balance.amount` is what is left in USD
+  and each offer's `runwayHours` is how long it lasts. Treat it as an
+  estimate; never launch a run that would outlast it.
 - Spot VMs cost far less but Google can reclaim them mid-run. When the user
   has Spot on, a run must save checkpoints and resume from the latest one.
 - The VM runs a Deep Learning VM image with CUDA, Python, and the NVIDIA

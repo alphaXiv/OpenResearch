@@ -122,7 +122,9 @@ async fn prices(args: PricesArgs, json: bool) -> Result<()> {
         let credit = match (&provider.balance, &provider.spend) {
             (Some(balance), _) => {
                 let mut text = format!("{:.1} {}", balance.amount, balance.unit);
-                if let Some(usd) = balance.usd {
+                if balance.unit == "USD" {
+                    text = format!("≈{} available", money(balance.amount));
+                } else if let Some(usd) = balance.usd {
                     text.push_str(&format!(" (≈{})", money(usd)));
                 }
                 if let Some(burn) = balance.burning_per_hour.filter(|burn| *burn > 0.0) {
@@ -408,6 +410,13 @@ pub struct ConfigureArgs {
     /// Boot disk size in GB (gcp).
     #[arg(long)]
     disk_gb: Option<u64>,
+    /// Credit left on the billing account in USD, from Billing → Credits in the
+    /// Google Cloud console; orx subtracts spend from now on (gcp).
+    #[arg(long)]
+    credit_usd: Option<f64>,
+    /// BigQuery billing export table (project.dataset.table) for exact spend (gcp).
+    #[arg(long)]
+    billing_export_table: Option<String>,
     /// Clear a saved field; repeat for multiple fields (e.g. --clear time-limit).
     #[arg(long)]
     clear: Vec<String>,
@@ -506,6 +515,7 @@ impl ConfigureArgs {
             ("zone", self.zone),
             ("imageFamily", self.image_family),
             ("imageProject", self.image_project),
+            ("billingExportTable", self.billing_export_table),
         ] {
             if let Some(value) = value {
                 body.insert(key.into(), json!(value));
@@ -516,6 +526,9 @@ impl ConfigureArgs {
         }
         if let Some(disk) = self.disk_gb {
             body.insert("diskGb".into(), json!(disk));
+        }
+        if let Some(credit) = self.credit_usd {
+            body.insert("creditUsd".into(), json!(credit));
         }
         if let Some(path) = self.credentials_file {
             let credentials: Map<String, Value> = serde_json::from_str(&read_input(&path)?)
@@ -550,12 +563,14 @@ impl ConfigureArgs {
                 "default-host" => "defaultHost",
                 "image-family" => "imageFamily",
                 "image-project" => "imageProject",
+                "billing-export-table" => "billingExportTable",
+                "credit" | "credit-usd" => "clearCredit",
                 other => other,
             };
             if !allowed.contains(&key)
                 || matches!(key, "token" | "key" | "tokenId" | "tokenSecret")
                 || (backend == "ssh" && key == "host")
-                || matches!(key, "spot" | "diskGb")
+                || matches!(key, "spot" | "diskGb" | "creditUsd")
             {
                 return Err(anyhow!("Cannot clear {field} for {backend}."));
             }
@@ -566,6 +581,8 @@ impl ConfigureArgs {
                 key.into(),
                 if matches!(key, "container" | "defaultHost") {
                     Value::Null
+                } else if key == "clearCredit" {
+                    json!(true)
                 } else {
                     json!("")
                 },

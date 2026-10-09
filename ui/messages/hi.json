@@ -1372,5 +1372,18 @@
   "settings_gcp_auto_delete": "रन खत्म होने पर orx VM हटा देता है। orx न चल रहा हो तब भी Compute Engine रन की समय-सीमा के एक घंटे बाद इसे हटा देता है।",
   "settings_gcp_prices_note": "us-central1 में एक GPU और उसकी सबसे छोटी मशीन की ऑन-डिमांड सूची कीमतें। अन्य क्षेत्रों और Spot VM में कीमतें अलग होती हैं।",
   "compute_description_gcp": "हर रन के लिए आपके Google Cloud प्रोजेक्ट में Compute Engine GPU VM बनाता है",
-  "compute_usage_gcp": "हर रन को अपना VM मिलता है, जिसका बिल आपके Google Cloud प्रोजेक्ट में जाता है; रन खत्म होने पर orx उसे हटा देता है।"
+  "compute_usage_gcp": "हर रन को अपना VM मिलता है, जिसका बिल आपके Google Cloud प्रोजेक्ट में जाता है; रन खत्म होने पर orx उसे हटा देता है।",
+  "settings_prices_available": "{amount} उपलब्ध",
+  "settings_gcp_available": "खर्च के लिए उपलब्ध",
+  "settings_gcp_balance_detail": "{date} को दर्ज {credit} क्रेडिट, उसके बाद खर्च हुए {spent} घटाकर।",
+  "settings_gcp_source_export": "खर्च BigQuery बिलिंग एक्सपोर्ट से।",
+  "settings_gcp_source_estimate": "खर्च orx के Google Cloud रन से सूची कीमत पर अनुमानित।",
+  "settings_gcp_no_credit": "Google, gcloud को क्रेडिट पढ़ने नहीं देता। बचा हुआ ट्रैक करने के लिए नीचे दर्ज करें।",
+  "settings_gcp_billing_account": "बिलिंग खाता: {name}",
+  "settings_gcp_billing_disabled": "इस प्रोजेक्ट में बिलिंग बंद है, इसलिए VM शुरू नहीं हो सकते।",
+  "settings_gcp_credit_label": "बचा क्रेडिट (USD)",
+  "settings_gcp_clear_credit": "ट्रैक करना बंद करें",
+  "settings_gcp_credit_hint": "Google Cloud कंसोल में Billing → Credits (या फ़्री-ट्रायल बैनर) से कॉपी करें। सहेजने के समय से orx खर्च घटाता है।",
+  "settings_gcp_export_label": "BigQuery बिलिंग एक्सपोर्ट टेबल (वैकल्पिक)",
+  "settings_gcp_export_hint": "BigQuery में बिलिंग एक्सपोर्ट चालू होने पर orx अनुमान की जगह प्रोजेक्ट का सटीक खर्च पढ़ता है।"
 }

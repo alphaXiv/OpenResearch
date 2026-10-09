@@ -120,9 +120,9 @@ pub async fn overview(fresh: bool) -> Overview {
             }
         }
     }
-    let (colab, hf, modal, openresearch) =
-        tokio::join!(colab(fresh), hf(), modal(), openresearch());
-    let mut providers = vec![colab, hf, modal, openresearch, gcp()];
+    let (colab, hf, modal, openresearch, gcp) =
+        tokio::join!(colab(fresh), hf(), modal(), openresearch(), gcp());
+    let mut providers = vec![colab, hf, modal, openresearch, gcp];
     providers.extend(own_hardware());
     providers.push(Provider {
         note: Some("Billed per token of training and sampling, not per GPU-hour.".into()),
@@ -437,34 +437,65 @@ fn modal_spend(billing: &Value) -> Option<Spend> {
 
 // --- Google Cloud ---------------------------------------------------------
 
-fn gcp() -> Provider {
-    let settings = crate::jobs::gcp::load_settings()
-        .ok()
-        .flatten()
-        .unwrap_or_default();
-    let configured = crate::jobs::gcp::find_cli().is_some()
-        && (settings.project.is_some() || crate::jobs::gcp::configured_project_on_disk().is_some());
+async fn gcp() -> Provider {
+    use crate::jobs::{gcp, gcp_billing};
+    let settings = gcp::load_settings().ok().flatten().unwrap_or_default();
+    let configured = gcp::find_cli().is_some()
+        && (settings.project.is_some() || gcp::configured_project_on_disk().is_some());
     let mut provider = empty("gcp", "usage", configured);
-    provider.note = Some(if settings.spot {
-        "Spot VMs: roughly 60–70% below these on-demand prices, but Google can reclaim one          mid-run. Billed to the project's billing account; gcloud cannot read free-trial          credits, so check Billing in the Google Cloud console."
-            .into()
+    let prices = if settings.spot {
+        "Spot VM prices, roughly a third of on-demand; Google can reclaim a Spot VM mid-run."
     } else {
-        "On-demand list prices in us-central1, GPU plus its smallest machine; other regions          differ. Billed to the project's billing account; gcloud cannot read free-trial          credits, so check Billing in the Google Cloud console."
-            .into()
+        "On-demand list prices in us-central1, GPU plus its smallest machine; other regions \
+         differ."
+    };
+    let mut balance = None;
+    if configured && settings.credit_usd.is_some() {
+        if let (Some(project), _) = gcp::resolve_location(&settings).await {
+            balance = gcp_billing::balance(&settings, &project).await;
+        }
+    }
+    provider.note = Some(match &balance {
+        Some(balance) => format!(
+            "{prices} Available = credit entered from the console minus {} spend since then.",
+            if balance.source == "export" {
+                "billing-export"
+            } else {
+                "estimated orx-run"
+            }
+        ),
+        None => format!(
+            "{prices} gcloud cannot read the billing account's credit; enter it in the Google \
+             Cloud settings (`orx compute configure gcp --credit-usd <amount>`) to see what is \
+             left."
+        ),
     });
-    let mut offers: Vec<Offer> = crate::jobs::gcp::GPUS
+    provider.error = balance.as_ref().and_then(|balance| balance.error.clone());
+    let available = balance
+        .as_ref()
+        .map(|balance| balance.available_usd.max(0.0));
+    provider.balance = balance.as_ref().map(|balance| Balance {
+        amount: balance.available_usd,
+        unit: "USD",
+        usd: Some(balance.available_usd),
+        burning_per_hour: None,
+    });
+    let mut offers: Vec<Offer> = gcp::GPUS
         .iter()
-        .map(|gpu| Offer {
-            flavor: gpu.id.to_string(),
-            gpu: Some(gpu.id.to_ascii_uppercase()),
-            gpu_count: 1,
-            vram_gb: Some(gpu.vram_gb),
-            usd_per_hour: Some(gpu.usd_per_hour),
-            units_per_hour: None,
-            runway_hours: None,
-            available: None,
-            estimated: true,
-            host: None,
+        .map(|gpu| {
+            let price = gcp_billing::flavor_usd_per_hour(gpu.id, settings.spot);
+            Offer {
+                flavor: gpu.id.to_string(),
+                gpu: Some(gpu.id.to_ascii_uppercase()),
+                gpu_count: 1,
+                vram_gb: Some(gpu.vram_gb),
+                usd_per_hour: Some(price),
+                units_per_hour: None,
+                runway_hours: available.filter(|_| price > 0.0).map(|left| left / price),
+                available: None,
+                estimated: true,
+                host: None,
+            }
         })
         .collect();
     sort_offers(&mut offers);

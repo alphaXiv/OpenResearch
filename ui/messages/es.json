@@ -1372,5 +1372,18 @@
   "settings_gcp_auto_delete": "orx elimina cada VM cuando termina su ejecución. Compute Engine también la elimina una hora después del límite de tiempo de la ejecución, aunque orx no esté en marcha.",
   "settings_gcp_prices_note": "Precios de lista bajo demanda en us-central1 para una GPU y su máquina más pequeña. Otras regiones y las VM Spot varían.",
   "compute_description_gcp": "Crea una VM con GPU de Compute Engine en tu proyecto de Google Cloud para cada ejecución",
-  "compute_usage_gcp": "Cada ejecución obtiene su propia VM, facturada a tu proyecto de Google Cloud; orx la elimina cuando termina la ejecución."
+  "compute_usage_gcp": "Cada ejecución obtiene su propia VM, facturada a tu proyecto de Google Cloud; orx la elimina cuando termina la ejecución.",
+  "settings_prices_available": "{amount} disponibles",
+  "settings_gcp_available": "Disponible para gastar",
+  "settings_gcp_balance_detail": "Crédito de {credit} introducido el {date}, menos {spent} gastados desde entonces.",
+  "settings_gcp_source_export": "Gasto según la exportación de facturación a BigQuery.",
+  "settings_gcp_source_estimate": "Gasto estimado a partir de las ejecuciones de orx en Google Cloud a precio de lista.",
+  "settings_gcp_no_credit": "Google no permite que gcloud lea el crédito. Introdúcelo abajo para seguir lo que queda.",
+  "settings_gcp_billing_account": "Cuenta de facturación: {name}",
+  "settings_gcp_billing_disabled": "La facturación está desactivada en este proyecto, así que las VM no pueden iniciarse.",
+  "settings_gcp_credit_label": "Crédito restante (USD)",
+  "settings_gcp_clear_credit": "Dejar de seguir",
+  "settings_gcp_credit_hint": "Cópialo de Facturación → Créditos (o del aviso de la prueba gratuita) en la consola de Google Cloud. orx resta el gasto desde que lo guardas.",
+  "settings_gcp_export_label": "Tabla de exportación de facturación de BigQuery (opcional)",
+  "settings_gcp_export_hint": "Con la exportación de facturación a BigQuery activada, orx lee el gasto exacto del proyecto en lugar de estimarlo."
 }
