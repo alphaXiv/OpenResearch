@@ -1065,7 +1065,7 @@ impl Store {
              VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)
              ON CONFLICT(id) DO UPDATE SET
                backend_json = excluded.backend_json,
-               commit_sha = excluded.commit_sha",
+               commit_sha = COALESCE(runs.commit_sha, excluded.commit_sha)",
             // chat_session_id is deliberately absent from the DO UPDATE SET:
             // run ownership is immutable, so a later status upsert never
             // rewrites (or clears) the session that launched the run.
@@ -5552,6 +5552,41 @@ mod tests {
             Some("chat_A".to_string()),
             "the launching session is never overwritten by a later upsert"
         );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn run_commit_sha_is_stable_across_upserts() {
+        let dir = std::env::temp_dir().join(format!("orx-store-runsha-{}", uuid::Uuid::new_v4()));
+        let store = Store::open_at(dir.clone()).unwrap();
+
+        let mut reserved = run_fixture("run_1", "starting", None);
+        reserved.commit_sha = Some("reserved".into());
+        store.upsert_run(&reserved).unwrap();
+
+        let mut different = run_fixture("run_1", "running", None);
+        different.commit_sha = Some("different".into());
+        different.backend_json = "{\"job_id\":\"late-handle\"}".into();
+        store.upsert_run(&different).unwrap();
+        let run = store.get_run("run_1").unwrap().unwrap();
+        assert_eq!(run.commit_sha.as_deref(), Some("reserved"));
+        assert_eq!(run.backend_json, different.backend_json);
+
+        let mut absent = run_fixture("run_1", "running", None);
+        absent.backend_json = different.backend_json.clone();
+        store.upsert_run(&absent).unwrap();
+        let run = store.get_run("run_1").unwrap().unwrap();
+        assert_eq!(run.commit_sha.as_deref(), Some("reserved"));
+
+        store
+            .upsert_run(&run_fixture("run_2", "starting", None))
+            .unwrap();
+        let mut backfill = run_fixture("run_2", "running", None);
+        backfill.commit_sha = Some("backfilled".into());
+        store.upsert_run(&backfill).unwrap();
+        let run = store.get_run("run_2").unwrap().unwrap();
+        assert_eq!(run.commit_sha.as_deref(), Some("backfilled"));
+
         let _ = std::fs::remove_dir_all(&dir);
     }
 
