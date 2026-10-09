@@ -1065,10 +1065,12 @@ impl Store {
              VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)
              ON CONFLICT(id) DO UPDATE SET
                backend_json = excluded.backend_json,
-               commit_sha = excluded.commit_sha",
+               commit_sha = COALESCE(runs.commit_sha, excluded.commit_sha)",
             // chat_session_id is deliberately absent from the DO UPDATE SET:
             // run ownership is immutable, so a later status upsert never
             // rewrites (or clears) the session that launched the run.
+            // The source revision is likewise fixed once present. Older runs
+            // without a revision can still receive it later.
             params![
                 run.id,
                 run.experiment_id,
@@ -5552,6 +5554,38 @@ mod tests {
             Some("chat_A".to_string()),
             "the launching session is never overwritten by a later upsert"
         );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn run_source_revision_is_immutable_across_upserts() {
+        let dir = std::env::temp_dir().join(format!("orx-store-runsha-{}", uuid::Uuid::new_v4()));
+        let store = Store::open_at(dir.clone()).unwrap();
+
+        let mut run = run_fixture("run_sha", "starting", None);
+        run.commit_sha = Some("launch-revision".into());
+        store.upsert_run(&run).unwrap();
+
+        run.commit_sha = Some("different-revision".into());
+        run.backend_json = "{\"job_id\":\"submitted\"}".into();
+        store.upsert_run(&run).unwrap();
+        run.commit_sha = None;
+        store.upsert_run(&run).unwrap();
+
+        let stored = store.get_run(&run.id).unwrap().unwrap();
+        assert_eq!(stored.commit_sha.as_deref(), Some("launch-revision"));
+        assert_eq!(stored.backend_json, run.backend_json);
+
+        let mut legacy = run_fixture("run_without_sha", "starting", None);
+        store.upsert_run(&legacy).unwrap();
+        legacy.commit_sha = Some("late-revision".into());
+        store.upsert_run(&legacy).unwrap();
+        assert_eq!(
+            store.get_run(&legacy.id).unwrap().unwrap().commit_sha.as_deref(),
+            Some("late-revision")
+        );
+
+        drop(store);
         let _ = std::fs::remove_dir_all(&dir);
     }
 
