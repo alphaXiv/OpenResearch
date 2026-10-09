@@ -40,6 +40,10 @@ export function remarkFigures() {
         if (src) node.data = { ...node.data, hProperties: { ...node.data?.hProperties, "data-figure-src": src } };
         const image = node.type === "paragraph" && node.children?.length === 1
           ? node.children[0] : undefined;
+        if (image?.type === "image" && /\.html?(?:[?#]|$)/i.test(image.url ?? "") && !image.title?.trim()) {
+          node.type = "paperFigure";
+          node.data = { hName: "figure" };
+        }
         if (image?.type === "image" && image.title?.trim()) {
           const caption = captionParser.parse(image.title);
           const paragraph = caption.children.length === 1 && caption.children[0]?.type === "paragraph"
@@ -54,6 +58,22 @@ export function remarkFigures() {
           image.title = null;
         }
         visit(node);
+      }
+      const children = parent.children ?? [];
+      const isImage = (node: FigureNode) => {
+        const image = node.children?.[0];
+        return (node.type === "paperFigure" || node.type === "paragraph" && node.children?.length === 1)
+          && image?.type === "image" && !/\.html?(?:[?#]|$)/i.test(image.url ?? "");
+      };
+      for (let start = 0; start < children.length; start++) {
+        if (!isImage(children[start])) continue;
+        let end = start + 1;
+        while (end < children.length && isImage(children[end])) end++;
+        if (end - start > 1) children.splice(start, end - start, {
+          type: "imageCarousel",
+          data: { hName: "image-carousel" },
+          children: children.slice(start, end),
+        });
       }
     }
     visit(tree);

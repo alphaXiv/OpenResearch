@@ -167,6 +167,11 @@ pub fn git_command() -> Command {
     if let Some(paths) = super::shell_env::search_path() {
         command.env("PATH", paths);
     }
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        command.creation_flags(windows_sys::Win32::System::Threading::CREATE_NO_WINDOW);
+    }
     command
 }
 
@@ -1882,6 +1887,11 @@ pub fn spawn_branch_publication(
     }
     #[cfg(unix)]
     command.process_group(0);
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        command.creation_flags(windows_sys::Win32::System::Threading::CREATE_NO_WINDOW);
+    }
     let mut child = command
         .spawn()
         .map_err(|error| anyhow!("Could not start GitHub publication worker: {error}"))?;

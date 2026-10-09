@@ -125,12 +125,13 @@ test("all tab variants retain ordering, preview, history, expansion and view met
   assert.equal(line.fileTabs[0].line, 20);
 });
 
-test("demo defaults preserve the welcome, figures, and literature workspaces", () => {
+test("demo defaults open the welcome pane and keep figures and literature closed", () => {
   assert.equal(tabs.defaultTaskWorkspace("ordinary", true), undefined);
   assert.equal(tabs.defaultTaskWorkspace(demo.DEMO_MAIN_SESSION_ID, false), undefined);
   assert.deepEqual(tabs.defaultTaskWorkspace(demo.DEMO_MAIN_SESSION_ID, true).active, { kind: "home", view: "experiments" });
-  assert.equal(tabs.defaultTaskWorkspace(demo.DEMO_FIGURE_SESSION_ID, false).tabs.length, 4);
-  assert.equal(tabs.defaultTaskWorkspace(demo.DEMO_LITERATURE_SESSION_ID, false).tabs[0].path, "nanochat-bottleneck-diagnosis.md");
+  assert.equal(tabs.defaultTaskWorkspace(demo.DEMO_FIGURE_SESSION_ID, false), undefined);
+  assert.equal(tabs.initialRightPaneSessionState(demo.DEMO_FIGURE_SESSION_ID, true).panelOpen, false);
+  assert.equal(tabs.defaultTaskWorkspace(demo.DEMO_LITERATURE_SESSION_ID, false), undefined);
 });
 
 test("delayed hydration cannot save defaults or apply a previous project response", async () => {
@@ -265,6 +266,7 @@ test("a run baseline resolving after project unmount cannot navigate", async () 
     runsVisitRef: { current: 0 }, runsBaselineReadyRef: { current: false },
     baselineRunsRef: { current: new Map() }, pendingFirstRunningRunsRef: { current: new Map() },
     observedRunsRef: { current: new Map() }, liveRunIdsRef: { current: new Set() },
+    streamingRunsRef: { current: new Set() }, autoOpenRunsRef: { current: new Map() },
     listRuns: () => response.promise, listExperiments: async () => [], getArtifacts: async () => [], openProject: async () => {},
     setExperiments() {}, setRuns() {}, setArtifacts() {}, setRunDataReady() {}, setExperimentDataReady() {},
     openExperimentsTab: () => { navigations++; },
@@ -332,4 +334,46 @@ test("code destinations cannot silently substitute another experiment branch", (
   assert.equal(resolve({ experimentId: "exp", branch: "wrong" }, [experiment]), null);
   assert.equal(resolve({ experimentId: "exp", branch: "expected" }, [experiment]), experiment);
   assert.equal(resolve({ experimentId: "missing", branch: "expected" }, [experiment]), null);
+});
+
+test("a newly running experiment opens its logs only on the first output", () => {
+  const source = ts.createSourceFile("App.tsx", readFileSync(new URL("../src/App.tsx", import.meta.url), "utf8"), ts.ScriptTarget.Latest, true, ts.ScriptKind.TSX);
+  let handlers;
+  function visit(node) {
+    if (ts.isCallExpression(node) && node.expression.getText(source) === "useOrxEvents") handlers = node.arguments[0];
+    ts.forEachChild(node, visit);
+  }
+  visit(source);
+  const opened = [];
+  const context = {
+    projectIdRef: { current: "p" }, observedRunsProjectRef: { current: "p" },
+    observedRunsRef: { current: new Map() }, liveRunIdsRef: { current: new Set() },
+    streamingRunsRef: { current: new Set() }, autoOpenRunsRef: { current: new Map() },
+    baselineRunsRef: { current: new Map() }, runsBaselineReadyRef: { current: true },
+    pendingFirstRunningRunsRef: { current: new Map() }, isDemoProjectId: () => false,
+    openStreamingRun: (run) => opened.push(run),
+  };
+  const callbacks = {};
+  for (const name of ["onRun", "onRunLog"]) {
+    const property = handlers.properties.find((node) => node.name.getText(source) === name);
+    const code = ts.transpileModule(`const callback = ${property.initializer.getText(source)};`, { compilerOptions: { target: ts.ScriptTarget.ES2022 } }).outputText;
+    callbacks[name] = new Function(...Object.keys(context), `${code}; return callback;`)(...Object.values(context));
+  }
+  const run = { id: "new", projectId: "p", experimentId: "exp", status: "running", updatedAt: 1 };
+  callbacks.onRun(run);
+  assert.deepEqual(opened, []);
+  callbacks.onRunLog({ runId: "new", dataBase64: "" });
+  assert.deepEqual(opened, []);
+  callbacks.onRunLog({ runId: "new", dataBase64: "bG9n" });
+  callbacks.onRunLog({ runId: "new", dataBase64: "bW9yZQ==" });
+  assert.deepEqual(opened, [run]);
+  callbacks.onRunLog({ runId: "historical", dataBase64: "bG9n" });
+  assert.deepEqual(opened, [run]);
+  const earlyLogRun = { ...run, id: "early-log" };
+  callbacks.onRunLog({ runId: earlyLogRun.id, dataBase64: "bG9n" });
+  callbacks.onRun(earlyLogRun);
+  assert.deepEqual(opened, [run, earlyLogRun]);
+  callbacks.onRun({ ...run, id: "other-project", projectId: "other" });
+  callbacks.onRunLog({ runId: "other-project", dataBase64: "bG9n" });
+  assert.deepEqual(opened, [run, earlyLogRun]);
 });

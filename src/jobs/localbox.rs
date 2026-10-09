@@ -316,8 +316,10 @@ pub fn cancel_job(dir: &Path) -> Result<()> {
 #[cfg(windows)]
 fn terminate_tree(pid: &str) -> Result<()> {
     // `/T` fails if any descendant already exited, so success is read from the leader's liveness.
+    use std::os::windows::process::CommandExt;
     let _ = std::process::Command::new("taskkill")
         .args(["/PID", pid, "/T", "/F"])
+        .creation_flags(windows_sys::Win32::System::Threading::CREATE_NO_WINDOW)
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null())
         .status();

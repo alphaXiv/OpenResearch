@@ -363,6 +363,8 @@ export default function App({ runtime, projectId, pane }: { runtime: RuntimeInfo
   const observedRunsProjectRef = useRef<string | null>(null);
   const runsBaselineReadyRef = useRef(false);
   const baselineRunsRef = useRef(new Map<string, Run>());
+  const streamingRunsRef = useRef(new Set<string>());
+  const autoOpenRunsRef = useRef(new Map<string, Run>());
   const pendingFirstRunningRunsRef = useRef(new Map<string, Run>());
   const runsVisitRef = useRef(0);
   const experimentsRef = useRef(experiments);
@@ -725,7 +727,6 @@ export default function App({ runtime, projectId, pane }: { runtime: RuntimeInfo
   }, [location.href, uiState, workspaceReady, railOpen, panelWidth, view]);
   const onboarded = uiState?.onboardingCompleted ?? false;
   const [demoWelcomeOpen, setDemoWelcomeOpen] = useState(false);
-  const [demoRunningRunId, setDemoRunningRunId] = useState<string | null>(null);
   const [composerFocusNonce, setComposerFocusNonce] = useState(0);
   const openDemoWelcome = useCallback(() => setDemoWelcomeOpen(true), []);
   const closeDemoWelcome = useCallback(async (choice: "explore_demo" | "create_project" | "dismiss") => {
@@ -853,6 +854,30 @@ export default function App({ runtime, projectId, pane }: { runtime: RuntimeInfo
     return () => window.removeEventListener("resize", onResize);
   }, []);
 
+  // Open an experiment view as a right-panel tab (creating it if needed) and
+  // focus it.
+  const openExperimentTab = useCallback((
+    id: string,
+    view: ExperimentView = "overview",
+    intent: TabOpenIntent = "preview",
+    runId?: string,
+  ) => {
+    reportFirstAction("open_experiment");
+    const tab = { id, view };
+    setExpTabs((prev) => (prev.some((t) => sameExpTab(t, tab)) ? prev : [...prev, tab]));
+    if (view === "terminal" && isDemoProjectId(projectIdRef.current)) {
+      setPanelWidth((width) => Math.max(width, sideChatPanelWidth()));
+    }
+    openRightTab(tab, intent, runId);
+  }, [openRightTab]);
+
+  const openStreamingRun = useCallback((run: Run) => {
+    const navigation = navigationRef.current;
+    if (!navigation.isTask || (navigation.pane &&
+      !(navigation.pane.kind === "home" && navigation.pane.view === "experiments"))) return;
+    openExperimentTab(run.experimentId, "terminal", "preview", run.id);
+  }, [openExperimentTab]);
+
   const loadRunsBaseline = useCallback((baselineProjectId: string) => {
     runsBaselineReadyRef.current = false;
     baselineRunsRef.current.clear();
@@ -866,7 +891,7 @@ export default function App({ runtime, projectId, pane }: { runtime: RuntimeInfo
           runsVisitRef.current !== runsVisit
         ) return;
         baselineRunsRef.current = new Map(loadedRuns.map((run) => [run.id, run]));
-        const shouldAutoOpen = [...pendingFirstRunningRunsRef.current.values()].some(
+        const autoOpenRuns = [...pendingFirstRunningRunsRef.current.values()].filter(
           (liveRun) => {
             const baselineRun = baselineRunsRef.current.get(liveRun.id);
             return (
@@ -884,14 +909,10 @@ export default function App({ runtime, projectId, pane }: { runtime: RuntimeInfo
         }
         runsBaselineReadyRef.current = true;
         setRunDataReady(true);
-        if (isDemoProjectId(baselineProjectId)) {
-          setDemoRunningRunId((current) =>
-            loadedRuns.some((run) => run.id === current && run.status === "running")
-              ? current
-              : loadedRuns.find((run) => run.status === "running")?.id ?? null,
-          );
+        for (const run of autoOpenRuns) {
+          if (streamingRunsRef.current.has(run.id)) openStreamingRun(run);
+          else autoOpenRunsRef.current.set(run.id, run);
         }
-        if (shouldAutoOpen) openExperimentsTab(true);
       })
       .catch(() => {
         if (runsVisitRef.current === runsVisit) {
@@ -899,7 +920,7 @@ export default function App({ runtime, projectId, pane }: { runtime: RuntimeInfo
           setRunDataReady(true);
         }
       });
-  }, [openExperimentsTab]);
+  }, [openStreamingRun]);
 
   // Per-project data. Harness agents spawn lazily on the first chat message.
   useEffect(() => {
@@ -907,6 +928,8 @@ export default function App({ runtime, projectId, pane }: { runtime: RuntimeInfo
     observedRunsProjectRef.current = projectId;
     observedRunsRef.current.clear();
     liveRunIdsRef.current.clear();
+    streamingRunsRef.current.clear();
+    autoOpenRunsRef.current.clear();
     openProject(projectId).catch(() => {});
     loadRunsBaseline(projectId);
     return () => { runsVisitRef.current++; };
@@ -930,12 +953,22 @@ export default function App({ runtime, projectId, pane }: { runtime: RuntimeInfo
 
   // Live store updates.
   useOrxEvents({
+    onRunLog: (event) => {
+      if (!event.dataBase64 || streamingRunsRef.current.has(event.runId)) return;
+      streamingRunsRef.current.add(event.runId);
+      const run = autoOpenRunsRef.current.get(event.runId);
+      if (!run) return;
+      autoOpenRunsRef.current.delete(event.runId);
+      openStreamingRun(run);
+    },
     onReconnect: () => {
       const id = projectIdRef.current;
       if (!id) return;
       observedRunsProjectRef.current = id;
       observedRunsRef.current.clear();
       liveRunIdsRef.current.clear();
+      streamingRunsRef.current.clear();
+      autoOpenRunsRef.current.clear();
       loadRunsBaseline(id);
     },
     onRun: (run) => {
@@ -948,43 +981,22 @@ export default function App({ runtime, projectId, pane }: { runtime: RuntimeInfo
       if (previous && previous.updatedAt > run.updatedAt) return;
       observedRunsRef.current.set(run.id, run);
       liveRunIdsRef.current.add(run.id);
-      if (isDemoProjectId(run.projectId)) {
-        setDemoRunningRunId((current) => {
-          if (run.status === "running") return current ?? run.id;
-          return current === run.id ? null : current;
-        });
-      }
       if (run.status !== "running" || previous?.status === "running") return;
       const baselineRun = baselineRunsRef.current.get(run.id);
       const newSinceBaseline =
         runsBaselineReadyRef.current &&
         (!baselineRun ||
           (baselineRun.status !== "running" && baselineRun.updatedAt <= run.updatedAt));
-      if ((previouslyLive && previous) || newSinceBaseline) openExperimentsTab(true);
-      else if (!runsBaselineReadyRef.current) pendingFirstRunningRunsRef.current.set(run.id, run);
+      if ((previouslyLive && previous) || newSinceBaseline) {
+        if (streamingRunsRef.current.has(run.id)) openStreamingRun(run);
+        else autoOpenRunsRef.current.set(run.id, run);
+      } else if (!runsBaselineReadyRef.current) pendingFirstRunningRunsRef.current.set(run.id, run);
     },
   });
 
   // Stable identity: in TreeView's layout-memo deps, so an inline arrow would
   // recompute the graph on every render.
   const showProjectScope = useCallback(() => setScope("project"), []);
-
-  // Open an experiment view as a right-panel tab (creating it if needed) and
-  // focus it.
-  const openExperimentTab = useCallback((
-    id: string,
-    view: ExperimentView = "overview",
-    intent: TabOpenIntent = "preview",
-    runId?: string,
-  ) => {
-    reportFirstAction("open_experiment");
-    const tab = { id, view };
-    setExpTabs((prev) => (prev.some((t) => sameExpTab(t, tab)) ? prev : [...prev, tab]));
-    if (view === "terminal" && isDemoProjectId(projectIdRef.current)) {
-      setPanelWidth((width) => Math.max(width, sideChatPanelWidth()));
-    }
-    openRightTab(tab, intent, runId);
-  }, [openRightTab]);
 
   // A `<run>` evidence chip in chat opens that run's logs — the only evidence
   // channel for a metric. Run ids are globally unique, so resolve the run to its
@@ -1748,7 +1760,6 @@ export default function App({ runtime, projectId, pane }: { runtime: RuntimeInfo
             onOpenSubagent={openSubagentTab}
             onOpenSideChat={(parentSessionId, question) => void startSideChat(parentSessionId, question)}
             composerFocusNonce={composerFocusNonce}
-            demoRunningRunId={isDemoProjectId(activeProject.id) && activeSessionId === DEMO_MAIN_SESSION_ID ? demoRunningRunId : null}
             runtime={runtime}
             onOpenDemoWelcome={
               activeProject && isDemoProjectId(activeProject.id) ? openDemoWelcome : undefined
