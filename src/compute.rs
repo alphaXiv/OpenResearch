@@ -699,6 +699,33 @@ backend_adapter!(
             .await
 );
 
+backend_adapter!(
+    GcpCompute,
+    "gcp",
+    "Google Cloud",
+    true,
+    true,
+    false,
+    "SSH tar stream",
+    false,
+    preflight | args | {
+        if let Some(flavor) = args.flavor.as_deref() {
+            crate::jobs::gcp::parse_flavor(flavor)?;
+        }
+        let settings = crate::jobs::gcp::load_settings()?.unwrap_or_default();
+        let check = crate::jobs::gcp::preflight(&settings).await;
+        if !check.compute_ready {
+            return Ok(not_ready(check.error.unwrap_or_else(|| {
+                "Google Cloud is not ready. Run `orx compute test gcp`.".to_string()
+            })));
+        }
+        ready()
+    },
+    submit | args,
+    source,
+    run_id | crate::local::gcp::submit_local_gcp_with_source(args, source, run_id).await
+);
+
 pub fn backend(id: &str) -> Result<Box<dyn ComputeBackend>> {
     match id {
         "local" => Ok(Box::new(LocalCompute)),
@@ -711,6 +738,7 @@ pub fn backend(id: &str) -> Result<Box<dyn ComputeBackend>> {
         "slurm" => Ok(Box::new(SlurmCompute)),
         "ray" => Ok(Box::new(RayCompute)),
         "openresearch" => Ok(Box::new(OpenResearchCompute)),
+        "gcp" => Ok(Box::new(GcpCompute)),
         _ => Err(anyhow!("Unknown compute backend '{id}'.")),
     }
 }
@@ -787,7 +815,7 @@ pub fn validate_run_args(args: &crate::ExpRunArgs) -> Result<()> {
                  modal (Modal serverless GPUs), k8s (your Kubernetes cluster), ssh (your own box), \
                  slurm (your Slurm cluster), ray (a Ray Jobs cluster), \
                  openresearch (an ephemeral OpenResearch box), tinker (local controller with remote model compute), \
-                 colab (a Google Colab GPU runtime), local (this machine).",
+                 colab (a Google Colab GPU runtime), gcp (a Google Cloud GPU VM), local (this machine).",
                 backend
             ));
         }

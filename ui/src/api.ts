@@ -1266,7 +1266,8 @@ export type ComputeTargetId =
   | "ssh"
   | "slurm"
   | "ray"
-  | "openresearch";
+  | "openresearch"
+  | "gcp";
 
 /** Cheap fs/env probe only — "worth trying", not "healthy". Deep health lives
  * in each backend's own settings endpoint, fetched when its setup surface opens. */
@@ -1391,6 +1392,48 @@ export interface ColabAccount {
   rates: ColabRate[];
   error: string | null;
 }
+
+export interface GcpInstance {
+  name: string;
+  zone: string;
+  status: string;
+  machineType: string;
+  externalIp: string | null;
+  runId: string | null;
+  gpu: string | null;
+  gpuCount: number;
+}
+
+export interface GcpSettings {
+  settings: {
+    project: string | null;
+    zone: string | null;
+    spot: boolean;
+    imageFamily: string | null;
+    imageProject: string | null;
+    diskGb: number | null;
+  };
+  preflight: {
+    cliPath: string | null;
+    account: string | null;
+    project: string | null;
+    zone: string;
+    computeReady: boolean;
+    error: string | null;
+  };
+  ready: boolean;
+  /** VMs orx created that still exist; `null` when they could not be listed. */
+  instances: GcpInstance[] | null;
+  gpus: { id: string; label: string; vramGb: number; usdPerHour: number }[];
+}
+
+export const getGcpSettings = (signal?: AbortSignal) => get<GcpSettings>("/api/settings/gcp", signal);
+
+export const saveGcpSettings = (update: { project?: string; zone?: string; spot?: boolean }) =>
+  post<GcpSettings>("/api/settings/gcp", update);
+
+export const stopGcpInstance = (zone: string, name: string) =>
+  post<{ ok: true }>("/api/settings/gcp/instances/stop", { zone, name });
 
 export const getColabSettings = (signal?: AbortSignal, fresh = false) =>
   get<ColabSettings>(fresh ? "/api/settings/colab?fresh=true" : "/api/settings/colab", signal);

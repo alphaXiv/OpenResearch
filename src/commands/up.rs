@@ -721,6 +721,11 @@ fn router(state: AppState, remote_auth: Option<RemoteAuth>) -> Router {
             "/api/settings/colab/runtimes/stop",
             post(stop_colab_runtime),
         )
+        .route(
+            "/api/settings/gcp",
+            get(gcp_settings).post(set_gcp_settings),
+        )
+        .route("/api/settings/gcp/instances/stop", post(stop_gcp_instance))
         .route("/api/settings/openresearch", get(openresearch_settings))
         .route("/api/settings/openresearch/login", get(openresearch_login))
         .route("/api/settings/commands/run", get(run_settings_command))
@@ -4379,10 +4384,11 @@ fn spawn_background_tasks(check_updates: bool) {
             crate::telemetry::retry_outbox();
         }
     });
-    // A Colab runtime outliving its run keeps spending the user's compute units.
+    // A Colab runtime or Google Cloud VM outliving its run keeps billing.
     tokio::spawn(async {
         loop {
             crate::jobs::colab_runtimes::reap_orphans().await;
+            crate::jobs::gcp::reap_orphans().await;
             tokio::time::sleep(crate::jobs::colab_runtimes::REAP_INTERVAL).await;
         }
     });

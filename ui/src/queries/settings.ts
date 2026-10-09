@@ -57,6 +57,12 @@ export const getColabSettingsQuery = () => queryOptions({
   staleTime: 30_000,
 });
 
+export const getGcpSettingsQuery = () => queryOptions({
+  queryKey: workspaceKey("getGcpSettings"),
+  queryFn: ({ signal }) => api.getGcpSettings(signal),
+  staleTime: 30_000,
+});
+
 export const getComputeRoutingSettingsQuery = () => queryOptions({
   queryKey: workspaceKey("getComputeRoutingSettings"),
   queryFn: ({ signal }) => api.getComputeRoutingSettings(signal),

@@ -294,6 +294,7 @@ impl LocalPlane {
                 Some("openresearch") => {
                     crate::local::openresearch::launch_local_openresearch(&args).await
                 }
+                Some("gcp") => crate::local::gcp::launch_local_gcp(&args).await,
                 Some("tinker" | "colab" | "local") => {
                     crate::local::localrun::launch_local_run(&args).await
                 }
@@ -302,7 +303,7 @@ impl LocalPlane {
                      modal (Modal serverless GPUs), k8s (your Kubernetes cluster), ssh (your own box), \
                      slurm (your Slurm cluster), ray (a Ray Jobs cluster), \
                      openresearch (an ephemeral OpenResearch box), tinker (local controller with remote model compute), \
-                     colab (a Google Colab GPU runtime), local (this machine).",
+                     colab (a Google Colab GPU runtime), gcp (a Google Cloud GPU VM), local (this machine).",
                     other
                 )),
                 None => Err(anyhow!(

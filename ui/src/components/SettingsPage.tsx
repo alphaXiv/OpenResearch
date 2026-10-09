@@ -20,6 +20,7 @@ import {
   getSlurmSettingsQuery,
   getRaySettingsQuery,
   getColabSettingsQuery,
+  getGcpSettingsQuery,
   getCrossHarnessSettingsQuery,
   getComputeRoutingSettingsQuery,
   getComputePricesQuery,
@@ -108,6 +109,10 @@ import {
   type ColabSettings,
   type ColabAccount,
   getColabSettings,
+  getGcpSettings,
+  saveGcpSettings,
+  stopGcpInstance,
+  type GcpSettings,
   getComputePrices,
   stopColabRuntime,
   type ModalSettings,
@@ -886,6 +891,202 @@ function ProviderPricesCard() {
       )}
       {error && <div className="error">{error}</div>}
     </div>
+  );
+}
+
+/** Google Cloud: gcloud sign-in, project and zone, Spot VMs, the GPUs a run
+ * can ask for, and the VMs orx created that still exist. */
+function GcpSection() {
+  const options = getGcpSettingsQuery();
+  const query = useQuery(options);
+  const data: GcpSettings | null = query.data ?? null;
+  const [project, setProject] = useState("");
+  const [zone, setZone] = useState("");
+  const [saving, setSaving] = useState(false);
+  const [refreshing, setRefreshing] = useState(false);
+  const [deleting, setDeleting] = useState<string | null>(null);
+  const [error, setError] = useState<string | null>(null);
+
+  useEffect(() => {
+    if (!data) return;
+    setProject(data.settings.project ?? "");
+    setZone(data.settings.zone ?? "");
+  }, [data]);
+
+  async function refresh() {
+    setRefreshing(true);
+    setError(null);
+    try {
+      queryClient.setQueryData(options.queryKey, await getGcpSettings());
+    } catch (err) {
+      setError(err instanceof Error ? err.message : String(err));
+    } finally {
+      setRefreshing(false);
+    }
+  }
+
+  async function save(update: { project?: string; zone?: string; spot?: boolean }) {
+    setSaving(true);
+    setError(null);
+    try {
+      queryClient.setQueryData(options.queryKey, await saveGcpSettings(update));
+    } catch (err) {
+      setError(err instanceof Error ? err.message : String(err));
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  async function deleteInstance(zone: string, name: string) {
+    if (!window.confirm(m.settings_gcp_delete_confirm({ name }))) return;
+    setDeleting(name);
+    setError(null);
+    try {
+      await stopGcpInstance(zone, name);
+      queryClient.setQueryData(options.queryKey, await getGcpSettings());
+    } catch (err) {
+      setError(err instanceof Error ? err.message : String(err));
+    } finally {
+      setDeleting(null);
+    }
+  }
+
+  if (query.isPending) {
+    return (
+      <LoadingRow>
+        <Spinner /> {m.common_checking()}
+      </LoadingRow>
+    );
+  }
+  if (!data) return <div className="error">{query.error?.message ?? error}</div>;
+  const { preflight } = data;
+  const unchanged = project === (data.settings.project ?? "") && zone === (data.settings.zone ?? "");
+  return (
+    <>
+      <div className="flex flex-wrap items-center gap-2">
+        <Badge variant={data.ready ? "success" : "warning"}>
+          {data.ready
+            ? m.settings_page_ready_to_use()
+            : !preflight.cliPath
+              ? m.settings_gcp_not_installed()
+              : !preflight.account
+                ? m.settings_gcp_not_signed_in()
+                : m.settings_gcp_not_ready()}
+        </Badge>
+        {preflight.account && <span className="truncate text-sm text-subtext">{preflight.account}</span>}
+        <div className="flex-1" />
+        <Button size="small" onClick={() => void refresh()} disabled={refreshing}>
+          <RefreshCw size={12} className={refreshing ? "animate-[spin_0.9s_linear_infinite]" : ""} /> {m.settings_page_refresh()}
+        </Button>
+      </div>
+      {preflight.error && <p className={COMPUTE_DIAGNOSTIC_CLASS_NAME}>{preflight.error}</p>}
+      {!preflight.cliPath && (
+        <p className="mt-3 mb-0 text-sm text-subtext">
+          {m.settings_gcp_install_hint()} <code>gcloud auth login</code>
+        </p>
+      )}
+      <form
+        className={FORM_CLASS_NAME}
+        onSubmit={(event) => {
+          event.preventDefault();
+          void save({ project, zone });
+        }}
+      >
+        <label>
+          {m.settings_gcp_project()}
+          <Input
+            type="text"
+            value={project}
+            onChange={(event) => setProject(event.target.value)}
+            placeholder={preflight.project ?? "my-project-id"}
+            autoComplete="off"
+            spellCheck={false}
+          />
+        </label>
+        <label>
+          {m.settings_gcp_zone()}
+          <Input
+            type="text"
+            value={zone}
+            onChange={(event) => setZone(event.target.value)}
+            placeholder={preflight.zone}
+            autoComplete="off"
+            spellCheck={false}
+          />
+        </label>
+        <p className="m-0 text-sm text-subtext">{m.settings_gcp_location_hint()}</p>
+        <div className="actions">
+          <Button variant="primary" type="submit" disabled={saving || unchanged}>
+            {saving ? m.common_saving() : m.common_save()}
+          </Button>
+        </div>
+      </form>
+      <div className="mt-4 flex items-center justify-between gap-6">
+        <div>
+          <div className="text-sm font-medium">{m.settings_gcp_spot()}</div>
+          <p className="mt-0.5 mb-0 text-sm text-subtext">{m.settings_gcp_spot_hint()}</p>
+        </div>
+        <Switch
+          type="button"
+          checked={data.settings.spot}
+          aria-label={m.settings_gcp_spot()}
+          disabled={saving}
+          onClick={() => void save({ spot: !data.settings.spot })}
+        />
+      </div>
+      {data.instances && (
+        <div className="mt-4">
+          <p className="mt-0 mb-2 text-sm font-medium text-subtext">{m.settings_gcp_instances()}</p>
+          {data.instances.length === 0 ? (
+            <p className="m-0 text-sm text-subtext">{m.settings_gcp_no_instances()}</p>
+          ) : (
+            <ul className="m-0 flex list-none flex-col gap-1.5 p-0 text-sm">
+              {data.instances.map((instance) => (
+                <li key={instance.name} className="flex items-center gap-3 rounded-md border border-border px-3 py-2">
+                  <code>{instance.machineType}</code>
+                  <span className="min-w-0 flex-1 truncate text-subtext">
+                    {instance.zone} · {instance.status}
+                    {instance.runId && <> · {m.settings_gcp_instance_run({ run: instance.runId.slice(0, 8) })}</>}
+                  </span>
+                  <Button
+                    size="small"
+                    disabled={deleting === instance.name}
+                    onClick={() => void deleteInstance(instance.zone, instance.name)}
+                  >
+                    {deleting === instance.name ? <Spinner /> : <Square size={12} />} {m.settings_gcp_delete()}
+                  </Button>
+                </li>
+              ))}
+            </ul>
+          )}
+          <p className="mt-2 mb-0 text-sm text-subtext">{m.settings_gcp_auto_delete()}</p>
+        </div>
+      )}
+      <div className="mt-4 overflow-x-auto">
+        <table className="gcp-gpus w-full border-collapse text-sm">
+          <thead>
+            <tr className="text-subtext [&_th]:border-b [&_th]:border-border [&_th]:pb-1.5 [&_th]:font-medium">
+              <th className="text-start">{m.settings_prices_col_flavor()}</th>
+              <th className="text-start">{m.settings_prices_col_gpu()}</th>
+              <th className="text-end">{m.settings_colab_col_memory()}</th>
+              <th className="text-end">{m.settings_prices_col_price()}</th>
+            </tr>
+          </thead>
+          <tbody>
+            {[...data.gpus].sort((a, b) => a.usdPerHour - b.usdPerHour).map((gpu) => (
+              <tr key={gpu.id} className="[&_td]:border-b [&_td]:border-border [&_td]:py-1.5">
+                <td><code>{gpu.id}</code></td>
+                <td>{gpu.label}</td>
+                <td className="text-end tabular-nums">{m.settings_colab_memory_gb({ gb: fmtNumber(gpu.vramGb) })}</td>
+                <td className="text-end tabular-nums">≈ {m.settings_prices_per_hour({ price: fmtUsd(gpu.usdPerHour) })}</td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+        <p className="mt-2 mb-0 text-sm text-subtext">{m.settings_gcp_prices_note()}</p>
+      </div>
+      {error && <div className="error mt-2.5">{error}</div>}
+    </>
   );
 }
 
@@ -2201,6 +2402,7 @@ const TARGET_CARD_DESCRIPTIONS: Record<ComputeTargetId, () => string> = {
   slurm: m.compute_description_slurm,
   ray: m.compute_description_ray,
   openresearch: m.compute_description_openresearch,
+  gcp: m.compute_description_gcp,
 };
 
 /** Kind strings from the runs table — reuses the instances-table logos. */
@@ -2215,10 +2417,11 @@ const TARGET_KIND: Record<ComputeTargetId, string> = {
   slurm: "slurm_job",
   ray: "ray_job",
   openresearch: "openresearch_job",
+  gcp: "gcp_job",
 };
 
 /** Backends whose launches take --flavor; mirrors the server's validation. */
-const FLAVORED_TARGETS: ComputeTargetId[] = ["hf", "modal", "colab", "slurm", "ray", "openresearch"];
+const FLAVORED_TARGETS: ComputeTargetId[] = ["hf", "modal", "colab", "slurm", "ray", "openresearch", "gcp"];
 /** Of those, the ones where a launch *requires* a flavor. */
 const FLAVOR_REQUIRED: ComputeTargetId[] = ["hf", "modal", "openresearch"];
 
@@ -2229,9 +2432,10 @@ const FLAVOR_SUGGESTIONS: Partial<Record<ComputeTargetId, string[]>> = {
   slurm: ["gpu", "h100:1", "h100:2", "a100:4"],
   ray: ["cpu", "cpu:2", "gpu", "gpu:1", "gpu:1,cpu:4", "gpu:1,mem:8GiB"],
   openresearch: ["h100_sxm", "h100_sxm:2", "cpu5c", "cpu5g", "cpu5m"],
+  gcp: ["t4", "l4", "v100", "a100", "a100-80gb", "h100", "a100:2", "cpu"],
 };
 
-const QUICK_SETUP_TARGETS: ComputeTargetId[] = ["tinker", "colab", "hf", "modal", "ray", "k8s"];
+const QUICK_SETUP_TARGETS: ComputeTargetId[] = ["tinker", "colab", "gcp", "hf", "modal", "ray", "k8s"];
 
 const TARGET_USAGE: Partial<Record<ComputeTargetId, () => string>> = {
   tinker: m.compute_usage_tinker,
@@ -2239,6 +2443,7 @@ const TARGET_USAGE: Partial<Record<ComputeTargetId, () => string>> = {
   hf: m.compute_usage_hf,
   modal: m.compute_usage_modal,
   openresearch: m.compute_usage_openresearch,
+  gcp: m.compute_usage_gcp,
 };
 
 const CUSTOM_FLAVOR_ID = "__custom__";
@@ -2601,6 +2806,7 @@ function QuickSetupDialog({ target, remote, onClose }: { target: ComputeTargetSu
       </div>
       {target.id === "tinker" && <TinkerSection target={target} />}
       {target.id === "colab" && <ColabSection />}
+      {target.id === "gcp" && <GcpSection />}
       {target.id === "hf" && <HfSection remote={remote} />}
       {target.id === "modal" && <ModalSection />}
       {target.id === "ray" && <RaySection />}
