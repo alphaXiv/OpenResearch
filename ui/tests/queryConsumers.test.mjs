@@ -162,7 +162,7 @@ test("first send waits for cold history so an accepted reply replaces its optimi
     queryClient: client, getChatMessagesQuery: load("chat").getChatMessagesQuery,
     dispatch: (action) => load("chatStore").dispatchChat("p", action),
     text: "new turn", draft: "new turn", pending: [], pendingAnnotations: [],
-    setDraft: () => {}, setAttachments: () => {}, setAnnotations: () => {}, setAttachError: () => {},
+    setDraft: () => {}, setAttachments: () => {}, setAnnotations: () => {}, setAttachError: () => {}, setImageRefusedFor: () => {},
   });
   assert.equal(client.getQueryData(options.queryKey), undefined);
   snapshot = { messages: [{ id: "history", role: "user", parts: [], createdAt: 1 }], queued: [], activeLeafId: "history" };
@@ -193,7 +193,7 @@ test("history preparation clears the composer up front but never sends early", a
     queryClient: client, getChatMessagesQuery: load("chat").getChatMessagesQuery,
     inSourceScope: () => true, draft: "unsent", pending: [], pendingAnnotations: [],
     setDraft: () => cleared.add("draft"), setAttachments: () => cleared.add("attachments"),
-    setAnnotations: () => cleared.add("annotations"), setAttachError: () => cleared.add("attachError"),
+    setAnnotations: () => cleared.add("annotations"), setAttachError: () => cleared.add("attachError"), setImageRefusedFor: () => cleared.add("imageRefused"),
     dispatch: () => assert.fail("must not send before history"),
   });
   const rejected = assert.rejects(sending);
@@ -201,7 +201,7 @@ test("history preparation clears the composer up front but never sends early", a
   await rejected;
   // The composer clears before the first await so a scope change mid-send can
   // never stash sent text; the caller's catch restores it via restoreComposer().
-  assert.deepEqual([...cleared].sort(), ["annotations", "attachError", "attachments", "draft"]);
+  assert.deepEqual([...cleared].sort(), ["annotations", "attachError", "attachments", "draft", "imageRefused"]);
   assert.equal(preparingSend.current, false);
 });
 
@@ -227,7 +227,7 @@ test("send joins a cold repair despite its intermediate cached history", async (
     preparingSend: { current: false }, inSourceScope: () => false,
     queryClient: client, getChatMessagesQuery: load("chat").getChatMessagesQuery,
     dispatch: () => { dispatched = true; }, text: "new", draft: "new", pending: [], pendingAnnotations: [],
-    setDraft: () => {}, setAttachments: () => {}, setAnnotations: () => {}, setAttachError: () => {},
+    setDraft: () => {}, setAttachments: () => {}, setAnnotations: () => {}, setAttachError: () => {}, setImageRefusedFor: () => {},
   });
   for (let i = 0; i < 20; i++) await Promise.resolve();
   assert.equal(dispatched, false);
@@ -247,7 +247,7 @@ test("the pre-await draft clear keeps an edit queued since render", async () => 
     getChatMessagesQuery: () => ({ queryKey: [] }),
     draft: "rendered", text: "rendered", pending: [], pendingAnnotations: [],
     setDraft: (update) => { updater = update; },
-    setAttachments: () => {}, setAnnotations: () => {}, setAttachError: () => {}, dispatch: () => {},
+    setAttachments: () => {}, setAnnotations: () => {}, setAttachError: () => {}, setImageRefusedFor: () => {}, dispatch: () => {},
   });
   await sending;
   assert.equal(updater("rendered"), "");

@@ -41,7 +41,7 @@ pub struct AgentSkill {
     pub resources: &'static [AgentSkillResource],
 }
 
-pub const RETIRED_SKILL_NAMES: &[&str] = &["orx-lit", "orx-compute-k8s"];
+pub const RETIRED_SKILL_NAMES: &[&str] = &["orx-lit", "orx-compute-k8s", "orx-evidence"];
 
 /// Which module set to serve. Both sets use the same canonical module bodies.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -103,13 +103,22 @@ const AGENT_DELEGATION: &str = include_str!("../../agent-skills/orx-agent-delega
 const LIT: &str = include_str!("../../agent-skills/orx-lit-review/SKILL.md");
 const CREATE: &str = include_str!("../../agent-skills/orx-create/SKILL.md");
 const REPORTS: &str = include_str!("../../agent-skills/orx-reports/SKILL.md");
-const EVIDENCE: &str = include_str!("../../agent-skills/orx-evidence/SKILL.md");
+const LOGS: &str = include_str!("../../agent-skills/orx-logs/SKILL.md");
+const RESULTS: &str = include_str!("../../agent-skills/orx-results/SKILL.md");
 const CUSTOMIZE: &str = include_str!("../../agent-skills/orx-customize/SKILL.md");
 const PAPER: &str = include_str!("../../agent-skills/orx-paper/SKILL.md");
 const INSTANCES: &str = include_str!("../../agent-skills/orx-instances/SKILL.md");
 const FEEDBACK: &str = include_str!("../../agent-skills/orx-feedback/SKILL.md");
 const FIGURES: &str = include_str!("../../agent-skills/orx-figures/SKILL.md");
 const FIGURES_RESOURCES: &[AgentSkillResource] = &[
+    AgentSkillResource {
+        path: "assets/orx-chart.html",
+        content: include_str!("../../agent-skills/orx-figures/assets/orx-chart.html"),
+    },
+    AgentSkillResource {
+        path: "assets/orx_chart.py",
+        content: include_str!("../../agent-skills/orx-figures/assets/orx_chart.py"),
+    },
     AgentSkillResource {
         path: "references/curves.md",
         content: include_str!("../../agent-skills/orx-figures/references/curves.md"),
@@ -191,7 +200,7 @@ const S_CREATE: AgentSkill = AgentSkill {
 };
 const S_REPORTS: AgentSkill = AgentSkill {
     name: "orx-reports",
-    description: "Write and organize durable outputs in the artifacts directory. Use before creating or organizing artifacts, including reports, summaries, comparisons, figures, and exported data, or when a line of work concludes.",
+    description: "Save and organize durable research outputs in the artifacts directory. Invoke when creating or reorganizing a report, exported dataset, or other deliverable; use `orx-results` for analysis and `orx-figures` when constructing charts.",
     content: REPORTS,
     resources: &[],
 };
@@ -209,14 +218,20 @@ const S_PAPER: AgentSkill = AgentSkill {
 };
 const S_FIGURES: AgentSkill = AgentSkill {
     name: "orx-figures",
-    description: "Publication-quality figures in matplotlib or TikZ: learning curves, scaling laws, benchmark and ablation comparisons, Pareto trade-offs, heatmaps and confusion matrices, method diagrams. Covers the shared style module, sizing, uncertainty, and vector export. Use whenever you plot, chart, or visualize results, add a figure to a paper or report, or one looks unpolished; then read one reference.",
+    description: "Create or update interactive HTML charts for chat and static publication figures. Invoke before writing plotting code or when an existing figure needs correction; use `orx-results` for experiment interpretation and `orx-logs` for retrieving measurements.",
     content: FIGURES,
     resources: FIGURES_RESOURCES,
 };
-const S_EVIDENCE: AgentSkill = AgentSkill {
-    name: "orx-evidence",
-    description: "Prepare and inspect experiment run evidence: design stdout metrics and summaries, locate persisted logs with `orx logs`, and validate run-derived claims. Use before launching a run whose output must be judged, after a run finishes, or before analyzing or reporting run results.",
-    content: EVIDENCE,
+const S_LOGS: AgentSkill = AgentSkill {
+    name: "orx-logs",
+    description: "Locate and read persisted experiment output with `orx logs`. Invoke when inspecting run progress, debugging a run failure, or retrieving recorded configuration and measurements; use `orx-results` to interpret the findings.",
+    content: LOGS,
+    resources: &[],
+};
+const S_RESULTS: AgentSkill = AgentSkill {
+    name: "orx-results",
+    description: "Interpret and summarize measured experiment results. Invoke before reporting measured results, including summarizing a completed run, comparing runs, evaluating an outcome, or recommending a next experiment from run evidence; retrieve missing output with `orx-logs`.",
+    content: RESULTS,
     resources: &[],
 };
 const S_INSTANCES: AgentSkill = AgentSkill {
@@ -243,7 +258,8 @@ pub fn skills(set: SkillSet) -> Vec<&'static AgentSkill> {
             &S_AGENT_DELEGATION,
             &S_COMPUTE,
             &S_INSTANCES,
-            &S_EVIDENCE,
+            &S_LOGS,
+            &S_RESULTS,
             &S_REPORTS,
             &S_FIGURES,
             &S_PAPER,
@@ -258,7 +274,8 @@ pub fn skills(set: SkillSet) -> Vec<&'static AgentSkill> {
             &S_AGENT_DELEGATION,
             &S_COMPUTE,
             &S_INSTANCES,
-            &S_EVIDENCE,
+            &S_LOGS,
+            &S_RESULTS,
             &S_REPORTS,
             &S_FIGURES,
             &S_PAPER,
@@ -503,7 +520,8 @@ mod tests {
             "agent-delegation",
             "compute",
             "instances",
-            "evidence",
+            "logs",
+            "results",
             "reports",
             "customize",
         ] {
@@ -525,12 +543,14 @@ mod tests {
     }
 
     #[test]
-    fn evidence_and_reports_have_distinct_ownership() {
-        assert!(EVIDENCE.contains("Validate before reporting"));
-        assert!(EVIDENCE.contains("Truncated output is not evidence of absence"));
-        assert!(!EVIDENCE.contains("<file path="));
+    fn logs_results_and_reports_have_distinct_ownership() {
+        assert!(LOGS.contains("Truncated output is not evidence of absence"));
+        assert!(!LOGS.contains("Summarize an experiment"));
+        assert!(RESULTS.contains("Validate before reporting"));
+        assert!(!RESULTS.contains("<file path="));
         assert!(REPORTS.contains("evidence-and-links contract"));
-        assert!(REPORTS.contains("Load `orx-evidence`"));
+        assert!(REPORTS.contains("Load `orx-results`"));
+        assert!(find("evidence", SkillSet::Local).is_none());
     }
 
     #[test]

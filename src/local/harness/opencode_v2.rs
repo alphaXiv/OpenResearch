@@ -151,16 +151,21 @@ pub(super) async fn run_turn(
                 &mut recorded,
             )
             .await?;
-            if delivered
-                && answered
-                && final_projection
-                    .pointer("/data/info/outcome")
-                    .and_then(Value::as_str)
-                    == Some("succeeded")
-            {
+            let outcome = final_projection
+                .pointer("/data/info/outcome")
+                .and_then(Value::as_str);
+            if delivered && answered && outcome == Some("succeeded") {
                 ctx.persist_delivery(DeliveryState::Accepted)?;
                 ctx.mark_final_text_tail();
                 return Ok(());
+            }
+            if delivered && outcome == Some("failed") {
+                // Failures before a step (e.g. an unavailable model) leave no assistant message.
+                if let Ok(Some(message)) = execution_failure(&endpoint, &native_id).await {
+                    ctx.mark_native_retry_exhausted();
+                    ctx.mark_terminal_failure("opencode_terminal", &message);
+                    return Err(anyhow!("OpenCode V2: {message}"));
+                }
             }
             if let Err(error) = admission {
                 return Err(error);
@@ -293,6 +298,32 @@ fn messages(projection: &Value) -> Result<&Vec<Value>> {
         .pointer("/data/messages")
         .and_then(Value::as_array)
         .ok_or_else(|| anyhow!("OpenCode V2 history response is invalid"))
+}
+
+async fn execution_failure(endpoint: &AgentEndpoint, native_id: &str) -> Result<Option<String>> {
+    let log = endpoint
+        .client
+        .get(format!(
+            "{}/api/experimental/session/{native_id}/log",
+            endpoint.base_url
+        ))
+        .timeout(Duration::from_secs(10))
+        .send()
+        .await?
+        .error_for_status()?
+        .text()
+        .await?;
+    Ok(last_execution_failure(&log))
+}
+
+/// The error of the last `session.execution.failed` event in a replayed SSE session log.
+fn last_execution_failure(log: &str) -> Option<String> {
+    log.lines()
+        .rev()
+        .filter_map(|line| line.strip_prefix("data:"))
+        .filter_map(|data| serde_json::from_str::<Value>(data.trim()).ok())
+        .find(|event| event["type"] == "session.execution.failed")
+        .map(|event| error_text(&event["data"]["error"]))
 }
 
 fn error_text(error: &Value) -> String {
@@ -685,6 +716,12 @@ fn selectable_model(model: &Value, connected: &HashSet<&str>) -> bool {
         })
 }
 
+/// Unknown for an empty `capabilities.input`, which is V2's placeholder for uncatalogued models.
+fn image_input(model: &Value) -> Option<bool> {
+    let input = model["capabilities"]["input"].as_array()?;
+    (!input.is_empty()).then(|| input.iter().any(|modality| modality == "image"))
+}
+
 pub(super) async fn detect(
     binary: crate::local::opencode::ResolvedBinary,
     mut info: HarnessInfo,
@@ -737,7 +774,8 @@ pub(super) async fn detect(
                     Some(
                         ModelInfo::new(format!("{provider}/{id}"))
                             .with_label(model["name"].as_str(), None)
-                            .with_reasoning(&variants),
+                            .with_reasoning(&variants)
+                            .with_image_input(image_input(model)),
                     )
                 })
                 .collect();
@@ -947,6 +985,46 @@ mod tests {
     }
 
     #[test]
+    fn execution_failure_comes_from_the_last_failed_log_event() {
+        let event = |seq: u64, kind: &str, data: Value| {
+            let event = json!({"id":format!("evt_{seq}"),"created":seq,"type":kind,
+                "durable":{"aggregateID":"ses_test","seq":seq,"version":1},"data":data});
+            format!("data: {event}\r\n\r\n")
+        };
+        let failed = |message: &str| json!({"sessionID":"ses_test","error":{"type":"provider.no-route","message":message}});
+        let log = [
+            event(
+                1,
+                "session.execution.started",
+                json!({"sessionID":"ses_test"}),
+            ),
+            event(
+                2,
+                "session.execution.failed",
+                failed("Model unavailable: a/old"),
+            ),
+            event(
+                3,
+                "session.execution.failed",
+                failed("Model unavailable: opencode-go/deepseek-v4.1-flash"),
+            ),
+            format!(
+                "data: {}\n\n",
+                json!({"type":"log.synced","aggregateID":"ses_test","seq":3})
+            ),
+        ]
+        .concat();
+        assert_eq!(
+            last_execution_failure(&log).as_deref(),
+            Some("Model unavailable: opencode-go/deepseek-v4.1-flash")
+        );
+        assert_eq!(
+            last_execution_failure(&event(1, "session.execution.succeeded", json!({}))),
+            None
+        );
+    }
+
+    #[test]
     fn one_idle_snapshot_cannot_finish_a_just_admitted_prompt() {
         let mut idle = false;
         assert!(!observed_idle(&mut idle, false, false));
@@ -1009,5 +1087,14 @@ mod catalog_tests {
         assert!(selectable_model(&model, &anonymous));
         model["enabled"] = json!(false);
         assert!(!selectable_model(&model, &anonymous));
+    }
+
+    #[test]
+    fn image_input_reads_catalog_modalities() {
+        let with = |input: Value| image_input(&json!({"capabilities":{"input":input}}));
+        assert_eq!(with(json!(["text", "image"])), Some(true));
+        assert_eq!(with(json!(["text"])), Some(false));
+        assert_eq!(with(json!([])), None);
+        assert_eq!(image_input(&json!({})), None);
     }
 }

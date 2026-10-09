@@ -1994,7 +1994,11 @@ async fn delete_project(State(state): State<AppState>, Path(id): Path<String>) -
     if !in_flight.is_empty() {
         let mut failures = Vec::new();
         for run in &in_flight {
-            if let Err(err) = crate::commands::exp::request_local_run_cancel(&store, &run.id) {
+            if let Err(err) = crate::commands::exp::request_local_run_cancel(
+                &store,
+                &run.id,
+                "Cancel requested because the project is being deleted.",
+            ) {
                 failures.push(format!("{}: {err}", run.id));
             }
         }
@@ -2119,6 +2123,8 @@ struct CreateRunReq {
     force: bool,
     chat_session_id: Option<String>,
     agent_origin: Option<String>,
+    /// Absent from dashboard callers; checked against orx up's own config dir.
+    caller_config_dir: Option<std::path::PathBuf>,
 }
 
 #[derive(Deserialize)]
@@ -2148,14 +2154,12 @@ async fn decode_local_response<T: serde::de::DeserializeOwned>(
                 value
                     .get("error")
                     .and_then(Value::as_str)
-                    .map(str::to_string)
+                    .map(|error| error.trim().to_string())
             })
             .unwrap_or_else(|| String::from_utf8_lossy(&body).trim().to_string());
-        let detail = if detail.is_empty() {
-            format!("HTTP {status}")
-        } else {
-            detail
-        };
+        if detail.is_empty() {
+            return Err(anyhow!("orx up could not {action}: HTTP {status}"));
+        }
         if status.is_client_error() {
             return Err(anyhow!("{detail}"));
         }
@@ -2209,6 +2213,7 @@ pub(crate) async fn submit_run_via_up(
         force: args.force,
         chat_session_id: args.launching_chat_session(),
         agent_origin: args.agent_origin.clone(),
+        caller_config_dir: Some(absolute_config_dir()),
     };
     let response =
         authenticate_up_request(local_client()?.post(format!("http://127.0.0.1:{port}/api/runs")))
@@ -2251,7 +2256,11 @@ pub(crate) async fn harness_install_via_up(port: u16, harness: &str) -> Result<H
 
 pub(crate) async fn cancel_run_via_up(port: u16, run_id: &str) -> Result<()> {
     let response = authenticate_up_request(
-        local_client()?.post(format!("http://127.0.0.1:{port}/api/runs/{run_id}/cancel")),
+        local_client()?
+            .post(format!("http://127.0.0.1:{port}/api/runs/{run_id}/cancel"))
+            .json(&CancelRunReq {
+                chat_session_id: local::chat::launching_chat_session(),
+            }),
     )
     .send()
     .await
@@ -2260,9 +2269,45 @@ pub(crate) async fn cancel_run_via_up(port: u16, run_id: &str) -> Result<()> {
     Ok(())
 }
 
+/// Launching with orx up's settings after the caller checked its own would
+/// submit to a different cluster or namespace than the one the caller tested.
+/// A relative `XDG_CONFIG_HOME` names a different dir in each process's working directory.
+fn absolute_config_dir() -> std::path::PathBuf {
+    let dir = crate::config::config_dir();
+    std::path::absolute(&dir).unwrap_or(dir)
+}
+
+fn require_caller_config_dir(
+    caller: Option<&std::path::Path>,
+    own: &std::path::Path,
+) -> Result<()> {
+    let Some(caller) = caller else {
+        return Ok(());
+    };
+    let same = caller == own
+        || crate::paths::canonicalize(caller)
+            .ok()
+            .zip(crate::paths::canonicalize(own).ok())
+            .is_some_and(|(a, b)| a == b);
+    if same {
+        return Ok(());
+    }
+    let base = own.parent().unwrap_or(own);
+    Err(anyhow!(
+        "This command uses the compute settings in {}, but orx up launches runs with \
+         the settings in {}. Set XDG_CONFIG_HOME to {} and re-run, or restart orx up \
+         from this environment.",
+        caller.display(),
+        own.display(),
+        base.display()
+    ))
+}
+
 async fn create_run(State(state): State<AppState>, Json(req): Json<CreateRunReq>) -> ApiResult {
     reject_if_stopping(&state)?;
     reject_if_moving(&state)?;
+    require_caller_config_dir(req.caller_config_dir.as_deref(), &absolute_config_dir())
+        .map_err(bad_request)?;
     let store = Store::open()?;
     let experiment = store
         .get_local_experiment(&req.experiment_id)?
@@ -2354,7 +2399,18 @@ async fn list_instances() -> ApiResult {
     Ok(Json(json!({ "instances": instances })))
 }
 
-async fn cancel_run(State(state): State<AppState>, Path(id): Path<String>) -> ApiResult {
+/// Sent by `orx exp cancel`; the dashboard and older CLIs post no body.
+#[derive(Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct CancelRunReq {
+    chat_session_id: Option<String>,
+}
+
+async fn cancel_run(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+    req: Option<Json<CancelRunReq>>,
+) -> ApiResult {
     reject_if_moving(&state)?;
     let store = Store::open()?;
     let run = local::local_run(&store, &id)?.ok_or_else(|| not_found("run"))?;
@@ -2362,8 +2418,12 @@ async fn cancel_run(State(state): State<AppState>, Path(id): Path<String>) -> Ap
     if is_terminal(&run.status) {
         return Ok(Json(json!({ "ok": true, "alreadyTerminal": true })));
     }
+    let reason = match req {
+        Some(Json(req)) => crate::commands::exp::exp_cancel_reason(req.chat_session_id.as_deref()),
+        None => "Cancel requested through orx up (dashboard or an older orx CLI).".into(),
+    };
     let backend = backend_for_run(&run)?;
-    backend.cancel(&run).await.map_err(bad_request)?;
+    backend.cancel(&run, &reason).await.map_err(bad_request)?;
     Ok(Json(json!({ "ok": true })))
 }
 
@@ -2592,7 +2652,8 @@ struct StarterPromptsQuery {
 /// Four starter prompts for the empty chat, written by a model that has read
 /// the project (paper, README, code). Slow on a cache miss — one headless
 /// model call — so the UI shows a placeholder while it waits. A blank project
-/// is flagged instead so the UI shows its pre-written prompts.
+/// with no profile to tailor to, or whose tailored prompts fail, is flagged so
+/// the UI shows its pre-written prompts.
 async fn project_starter_prompts(
     Path(id): Path<String>,
     Query(q): Query<StarterPromptsQuery>,
@@ -8162,17 +8223,27 @@ mod tests {
 
     #[tokio::test]
     async fn empty_local_error_reports_the_http_status() {
-        let response = axum::http::Response::builder()
-            .status(StatusCode::BAD_GATEWAY)
-            .body(String::new())
-            .unwrap();
-        let error = decode_local_response::<Value>(response.into(), "start the run")
-            .await
-            .unwrap_err();
-        assert_eq!(
-            error.to_string(),
-            "orx up could not start the run: HTTP 502 Bad Gateway"
-        );
+        for (status, body, expected) in [
+            (StatusCode::BAD_GATEWAY, "", "HTTP 502 Bad Gateway"),
+            (StatusCode::NOT_FOUND, "", "HTTP 404 Not Found"),
+            (
+                StatusCode::BAD_REQUEST,
+                r#"{"error":""}"#,
+                "HTTP 400 Bad Request",
+            ),
+        ] {
+            let response = axum::http::Response::builder()
+                .status(status)
+                .body(body.to_string())
+                .unwrap();
+            let error = decode_local_response::<Value>(response.into(), "start the run")
+                .await
+                .unwrap_err();
+            assert_eq!(
+                error.to_string(),
+                format!("orx up could not start the run: {expected}")
+            );
+        }
     }
 
     #[test]
@@ -8670,6 +8741,7 @@ mod tests {
             commit_sha: None,
             result_markdown: None,
             cancel_requested: true,
+            cancel_reason: None,
             chat_session_id: None,
         };
 
@@ -8711,9 +8783,11 @@ mod tests {
             force: true,
             chat_session_id: Some("session-1".into()),
             agent_origin: None,
+            caller_config_dir: Some("/tmp/orx-config/openresearch".into()),
         };
 
         let value = serde_json::to_value(&request).unwrap();
+        assert_eq!(value["callerConfigDir"], "/tmp/orx-config/openresearch");
         assert_eq!(value["experimentId"], "experiment-1");
         assert_eq!(value["chatSessionId"], "session-1");
         assert_eq!(value["force"], true);
@@ -8721,6 +8795,27 @@ mod tests {
             serde_json::from_value::<CreateRunReq>(value).unwrap(),
             request
         );
+    }
+
+    #[test]
+    fn require_caller_config_dir_rejects_a_different_dir() {
+        let root = std::env::temp_dir().join(format!("orx-caller-config-{}", uuid::Uuid::new_v4()));
+        let own = root.join("up/openresearch");
+        let caller = root.join("agent/openresearch");
+        std::fs::create_dir_all(&own).unwrap();
+        std::fs::create_dir_all(&caller).unwrap();
+
+        assert!(require_caller_config_dir(None, &own).is_ok());
+        assert!(require_caller_config_dir(Some(&own), &own).is_ok());
+        let fresh = root.join("fresh/openresearch");
+        assert!(require_caller_config_dir(Some(&fresh), &fresh).is_ok());
+        assert!(require_caller_config_dir(Some(&own.join("../openresearch")), &own).is_ok());
+        let error = require_caller_config_dir(Some(&caller), &own)
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains(&caller.display().to_string()));
+        assert!(error.contains(&own.display().to_string()));
+        std::fs::remove_dir_all(root).unwrap();
     }
 
     #[test]
