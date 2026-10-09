@@ -1,7 +1,7 @@
 import type { ExperimentView } from "./components/DetailDrawer";
 import type { CodeView } from "./components/CodeTab";
 import type { WorktreeView } from "./components/WorktreeTab";
-import { DEMO_MAIN_SESSION_ID, DEMO_FIGURE_SESSION_ID, DEMO_LITERATURE_SESSION_ID } from "./api";
+import { DEMO_MAIN_SESSION_ID } from "./api";
 import type { Pane, TaskWorkspace } from "./workspaceState";
 
 export function tabPane(tab: RightTab, runId?: string | null): Pane {
@@ -291,35 +291,6 @@ export function initialRightPaneSessionState(
       rightTab: experimentsTab,
       tabHistory: [experimentsTab],
       experimentsTabOpen: true,
-      panelOpen: true,
-    };
-  }
-  if (sessionId === DEMO_FIGURE_SESSION_ID) {
-    const fileTabs: FileViewDef[] = [
-      { path: "nanochat-base-training-curves.svg", source: "artifacts" },
-      { path: "nanochat-sft-training-curves.svg", source: "artifacts" },
-      { path: "nanochat-training-throughput.svg", source: "artifacts" },
-      { path: "nanochat-core-evaluation.svg", source: "artifacts" },
-    ];
-    return {
-      ...initial,
-      rightTab: fileTabs[0],
-      tabHistory: [...fileTabs.slice(1), fileTabs[0]],
-      fileTabs,
-      contentTabOrder: fileTabs.map(rightTabKey),
-      panelOpen: true,
-    };
-  }
-  if (sessionId === DEMO_LITERATURE_SESSION_ID) {
-    const fileTabs: FileViewDef[] = [
-      { path: "nanochat-bottleneck-diagnosis.md", source: "artifacts" },
-    ];
-    return {
-      ...initial,
-      rightTab: fileTabs[0],
-      tabHistory: [fileTabs[0]],
-      fileTabs,
-      contentTabOrder: fileTabs.map(rightTabKey),
       panelOpen: true,
     };
   }

@@ -848,7 +848,10 @@ fn updater_command() -> Result<tokio::process::Command> {
     #[cfg(unix)]
     cmd.process_group(0);
     #[cfg(windows)]
-    cmd.creation_flags(windows_sys::Win32::System::Threading::CREATE_NEW_PROCESS_GROUP);
+    cmd.creation_flags(
+        windows_sys::Win32::System::Threading::CREATE_NEW_PROCESS_GROUP
+            | windows_sys::Win32::System::Threading::CREATE_NO_WINDOW,
+    );
     Ok(cmd)
 }
 

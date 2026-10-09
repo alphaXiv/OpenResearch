@@ -2,8 +2,8 @@
 //! actually contains — paper, README, code, manifests — handed to a headless
 //! harness child that writes four prompts about *this* project. Results are
 //! cached per brief fingerprint so reopening the empty state doesn't pay for
-//! another model call. A blank project has nothing to brief, so it gets the
-//! UI's pre-written prompts and no model call at all.
+//! another model call. A blank project is briefed from the researcher's
+//! onboarding profile instead, and falls back to the UI's pre-written prompts.
 
 use std::collections::HashMap;
 use std::path::Path;
@@ -27,6 +27,7 @@ const README_CHARS: usize = 4000;
 const PAPER_CHARS: usize = 6000;
 const ENTRYPOINT_CHARS: usize = 2500;
 const MANIFEST_CHARS: usize = 1200;
+const BACKGROUND_CHARS: usize = 2000;
 const PAPER_FETCH_TIMEOUT: Duration = Duration::from_secs(12);
 /// A cold CLI start plus one reasoning-model round trip over a long brief.
 const GENERATION_TIMEOUT: Duration = Duration::from_secs(90);
@@ -47,9 +48,11 @@ pub struct StarterPrompt {
 /// What the empty chat has to offer.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Starter {
-    /// Nothing to read yet: the UI shows its pre-written prompts.
+    /// Nothing to read and no profile to tailor to, or the harness couldn't
+    /// answer: the UI shows its pre-written prompts.
     Blank,
-    /// Written about this project; `None` when the harness can't answer.
+    /// Written for this project (or, when blank, its researcher); `None` when
+    /// the harness can't answer.
     Generated(Option<Vec<StarterPrompt>>),
 }
 
@@ -96,27 +99,44 @@ impl Agent {
 
 /// Four prompts about this project, from the cache or a fresh model call.
 /// `Generated(None)` when the harness can't answer (not installed, timed out,
-/// replied with something that isn't four prompts).
+/// replied with something that isn't four prompts). A blank project is briefed
+/// from the researcher's profile and falls back to `Blank` instead.
 pub async fn prompts(project: &LocalProject, agent: &Agent, locale: &str) -> Starter {
     let brief = tokio::task::spawn_blocking({
         let project = project.clone();
         move || {
             let files = list_files(Path::new(&project.repo_path));
-            (!is_blank(project.paper_id.as_deref(), &files)).then(|| brief(&project, &files))
+            if is_blank(project.paper_id.as_deref(), &files) {
+                blank_brief(&project.name, &crate::telemetry::load_profile())
+                    .map(|brief| (brief, Kind::Blank))
+            } else {
+                Some((brief(&project, &files), Kind::Project))
+            }
         }
     })
     .await;
     match brief {
-        Ok(Some(brief)) => {
-            Starter::Generated(generate(brief, project.paper_id.as_deref(), agent, locale).await)
+        Ok(Some((brief, kind))) => {
+            let prompts = generate(brief, kind, project.paper_id.as_deref(), agent, locale).await;
+            match (kind, prompts) {
+                (Kind::Blank, None) => Starter::Blank,
+                (_, prompts) => Starter::Generated(prompts),
+            }
         }
         Ok(None) => Starter::Blank,
         Err(_) => Starter::Generated(None),
     }
 }
 
+/// Which instructions the model gets: read this project, or start from nothing.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Kind {
+    Project,
+    Blank,
+}
+
 /// A project with no paper and no files: there is nothing for a model to
-/// read, so prompts about "this project" would only be generic.
+/// read, so its prompts can only be about the researcher.
 fn is_blank(paper_id: Option<&str>, files: &[String]) -> bool {
     paper_id.is_none() && files.is_empty()
 }
@@ -158,7 +178,7 @@ pub fn prewarm(name: String, paper_id: Option<String>, path: Option<String>, loc
         })
         .await
         .ok()??;
-        generate(brief, paper_id.as_deref(), &agent, &locale).await
+        generate(brief, Kind::Project, paper_id.as_deref(), &agent, &locale).await
     });
 }
 
@@ -167,6 +187,7 @@ pub fn prewarm(name: String, paper_id: Option<String>, path: Option<String>, loc
 /// paper id, so it is fetched only on a miss and never decides staleness.
 async fn generate(
     brief: String,
+    kind: Kind,
     paper_id: Option<&str>,
     agent: &Agent,
     locale: &str,
@@ -188,7 +209,7 @@ async fn generate(
         }
         _ => {}
     }
-    let prompts = generate_uncached(brief, paper_id, agent, locale).await;
+    let prompts = generate_uncached(brief, kind, paper_id, agent, locale).await;
     let mut cache = lock_map(cache());
     if cache.len() >= MAX_CACHED {
         cache.clear();
@@ -207,6 +228,7 @@ async fn generate(
 
 async fn generate_uncached(
     mut brief: String,
+    kind: Kind,
     paper_id: Option<&str>,
     agent: &Agent,
     locale: &str,
@@ -217,7 +239,10 @@ async fn generate_uncached(
             push(&mut brief, "Paper overview", &head(&text, PAPER_CHARS));
         }
     }
-    let prompt = generation_prompt(&brief, locale);
+    let prompt = match kind {
+        Kind::Project => generation_prompt(&brief, locale),
+        Kind::Blank => blank_generation_prompt(&brief, locale),
+    };
     static SLOTS: OnceLock<tokio::sync::Semaphore> = OnceLock::new();
     let _slot = SLOTS
         .get_or_init(|| tokio::sync::Semaphore::new(MAX_CONCURRENT))
@@ -327,26 +352,59 @@ fn fingerprint(brief: &str, locale: &str) -> String {
 const SYSTEM_PROMPT: &str = "You help a researcher start work in an AI research \
 workspace where a coding agent runs experiments for them. You reply with JSON only.";
 
-fn generation_prompt(brief: &str, locale: &str) -> String {
+/// Rules both prompt kinds share; the JSON shape is what `parse_prompts` reads.
+fn output_rules(locale: &str) -> String {
     format!(
-        "Below is a brief of a research project a user just opened. Write the four \
-         messages the user should send to their research agent, in order, to move \
-         from this exact starting point to running a first experiment.\n\n\
-         Rules:\n\
-         - Every prompt must be about THIS project: name its actual method, files, \
-         datasets, models, hyperparameters, claims, or gaps from the brief. Generic \
-         advice that would fit any project is wrong.\n\
-         - The four prompts progress: (1) understand the specific starting point, \
-         (2) find the open question or weakness worth testing, (3) get a runnable \
-         baseline with a concrete run command, (4) launch a first experiment with \
-         one concrete, cheap-to-test hypothesis.\n\
+        "- Each prompt opens a new chat on its own: never refer to another prompt \
+         or to earlier steps (no \"that baseline\", \"the question above\").\n\
          - Write each prompt as the user speaking to the agent, 1-3 sentences, \
          plain text, no markdown.\n\
          - Each title is at most five words.\n\
          - Write titles and prompts in the language with IETF tag \"{locale}\".\n\
          - Reply with a JSON array of exactly four objects with keys \"title\" and \
-         \"prompt\", and nothing else.\n\n\
-         Project brief:\n{brief}"
+         \"prompt\", and nothing else.\n"
+    )
+}
+
+fn generation_prompt(brief: &str, locale: &str) -> String {
+    format!(
+        "Below is a brief of a research project a user just opened. Write four \
+         alternative first messages the user could send to their research agent, \
+         each a different way to move from this exact starting point toward running \
+         a first experiment.\n\n\
+         Rules:\n\
+         - Every prompt must be about THIS project: name its actual method, files, \
+         datasets, models, hyperparameters, claims, or gaps from the brief. Generic \
+         advice that would fit any project is wrong.\n\
+         - The four prompts cover: (1) understand the specific starting point, \
+         (2) find the open question or weakness worth testing, (3) get a runnable \
+         baseline with a concrete run command, (4) launch a first experiment with \
+         one concrete, cheap-to-test hypothesis.\n\
+         {rules}\n\
+         Project brief:\n{brief}",
+        rules = output_rules(locale)
+    )
+}
+
+fn blank_generation_prompt(brief: &str, locale: &str) -> String {
+    format!(
+        "A researcher just created an empty research project: no code, no data, no \
+         paper yet. Below is what they told us about themselves. Write four \
+         alternative first messages they could send to their research agent, each \
+         a different way to go from nothing toward running a first experiment in \
+         their field.\n\n\
+         Rules:\n\
+         - Tailor every prompt to this researcher: name concrete methods, datasets, \
+         models, or open problems from their field, background, and papers. Generic \
+         advice that would fit any researcher is wrong.\n\
+         - The project is empty; never refer to existing files, code, or plans.\n\
+         - The four prompts cover: (1) pin down a concrete, testable question, \
+         (2) survey the closest related work and baselines, (3) set up a small \
+         baseline that runs in minutes on one GPU, (4) launch a first cheap \
+         experiment that builds its own small baseline to compare against.\n\
+         {rules}\n\
+         About the researcher:\n{brief}",
+        rules = output_rules(locale)
     )
 }
 
@@ -459,6 +517,42 @@ fn brief_parts(
         push(&mut out, &label, &listing);
     }
     out
+}
+
+/// A blank project's brief: its name and the researcher's onboarding profile,
+/// or `None` when the profile says nothing to tailor to.
+fn blank_brief(name: &str, profile: &crate::telemetry::ResearchProfile) -> Option<String> {
+    let areas: Vec<&str> = profile
+        .research_areas
+        .iter()
+        .map(String::as_str)
+        .filter(|area| *area != "Other")
+        .chain(profile.other_area.as_deref())
+        .collect();
+    if areas.is_empty() && profile.background.is_none() && profile.papers.is_empty() {
+        return None;
+    }
+    let mut out = String::new();
+    push(&mut out, "Project name", name);
+    if !areas.is_empty() {
+        push(&mut out, "Research areas", &areas.join(", "));
+    }
+    if let Some(background) = &profile.background {
+        push(&mut out, "Background", &head(background, BACKGROUND_CHARS));
+    }
+    if !profile.papers.is_empty() {
+        let papers = profile
+            .papers
+            .iter()
+            .map(|paper| match &paper.title {
+                Some(title) => format!("{title} (arXiv {})", paper.paper_id),
+                None => format!("arXiv {}", paper.paper_id),
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        push(&mut out, "Their papers", &papers);
+    }
+    Some(out)
 }
 
 fn push(out: &mut String, label: &str, body: &str) {
@@ -651,6 +745,31 @@ mod tests {
         assert!(is_blank(None, &[]));
         assert!(!is_blank(None, &["train.py".to_string()]));
         assert!(!is_blank(Some("2401.12345"), &[]));
+    }
+
+    #[test]
+    fn blank_brief_reads_the_profile() {
+        use crate::telemetry::{ProfilePaper, ResearchProfile};
+        assert_eq!(blank_brief("idea", &ResearchProfile::default()), None);
+        let only_other = ResearchProfile {
+            research_areas: vec!["Other".into()],
+            ..ResearchProfile::default()
+        };
+        assert_eq!(blank_brief("idea", &only_other), None);
+        let profile = ResearchProfile {
+            research_areas: vec!["AI/ML".into(), "Other".into()],
+            other_area: Some("Protein design".into()),
+            background: Some("PhD student".into()),
+            papers: vec![ProfilePaper {
+                paper_id: "2401.12345".into(),
+                title: Some("Fold it".into()),
+            }],
+        };
+        assert_eq!(
+            blank_brief("idea", &profile).unwrap(),
+            "## Project name\nidea\n\n## Research areas\nAI/ML, Protein design\n\n\
+             ## Background\nPhD student\n\n## Their papers\nFold it (arXiv 2401.12345)\n\n"
+        );
     }
 
     #[test]

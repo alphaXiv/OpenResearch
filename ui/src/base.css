@@ -20,11 +20,8 @@ body {
 }
 
 ::selection {
-  background: var(--highlight);
-}
-
-.chat-thread-inner ::selection {
-  background: var(--chat-annotation-highlight);
+  color: var(--selection-text);
+  background: var(--selection-background);
 }
 
 ::highlight(chat-annotations),
@@ -32,9 +29,8 @@ body {
   background: var(--chat-annotation-highlight);
 }
 
-/* The editor stacks a transparent textarea over the highlighted code, so an
-   opaque selection would paint out the tokens underneath it. */
 .file-view-editarea::selection {
+  color: var(--selection-text);
   background: var(--editor-selection);
 }
 

@@ -5,7 +5,7 @@
 
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
-use std::process::{Child, Command, Stdio};
+use std::process::{Child, Command, Output, Stdio};
 use std::time::{Duration, Instant};
 
 #[cfg(unix)]
@@ -167,6 +167,11 @@ pub fn git_command() -> Command {
     if let Some(paths) = super::shell_env::search_path() {
         command.env("PATH", paths);
     }
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        command.creation_flags(windows_sys::Win32::System::Threading::CREATE_NO_WINDOW);
+    }
     command
 }
 
@@ -191,10 +196,20 @@ pub(super) fn git(dir: Option<&Path>, args: &[&str]) -> Result<String> {
         return Err(anyhow!(
             "git {} failed: {}",
             args.join(" "),
-            String::from_utf8_lossy(&out.stderr).trim()
+            failure_detail(&out)
         ));
     }
     Ok(String::from_utf8_lossy(&out.stdout).trim().to_string())
+}
+
+/// Git's stderr, or its exit status when it failed silently (e.g. `--verify -q`, a signal).
+pub(crate) fn failure_detail(output: &Output) -> String {
+    let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+    if stderr.is_empty() {
+        output.status.to_string()
+    } else {
+        stderr
+    }
 }
 
 pub fn version() -> Option<String> {
@@ -1872,6 +1887,11 @@ pub fn spawn_branch_publication(
     }
     #[cfg(unix)]
     command.process_group(0);
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        command.creation_flags(windows_sys::Win32::System::Threading::CREATE_NO_WINDOW);
+    }
     let mut child = command
         .spawn()
         .map_err(|error| anyhow!("Could not start GitHub publication worker: {error}"))?;
@@ -2470,6 +2490,24 @@ mod tests {
         assert!(text.contains("/checkpoint.bin\n"));
         assert_eq!(text.matches(MANAGED_IGNORE_START).count(), 1);
         assert_eq!(text.matches(MANAGED_IGNORE_END).count(), 1);
+    }
+
+    #[test]
+    fn silent_git_failure_reports_its_exit_status() {
+        let dir = std::env::temp_dir().join(format!("orx-git-silent-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        run(&dir, &["init", "-q"]);
+        let error = git(
+            Some(&dir),
+            &["rev-parse", "--verify", "-q", "refs/heads/missing"],
+        )
+        .unwrap_err()
+        .to_string();
+        let _ = std::fs::remove_dir_all(&dir);
+        assert!(
+            error.ends_with("failed: exit status: 1") || error.ends_with("failed: exit code: 1"),
+            "{error}"
+        );
     }
 
     #[test]

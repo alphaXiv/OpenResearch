@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import type { Harness, HarnessSetupCommands } from "../api";
 import { m } from "../paraglide/messages.js";
-import { refreshHarnesses } from "../queries/settings";
+import { readHarnesses, refreshHarnesses } from "../queries/settings";
 import { HarnessLogo } from "./HarnessLogo";
 import { CommandTerminal } from "./SshConnectTerminal";
 import { initialPhase, recheckedAction, setupAction, terminalMounted, type SetupAction, type SetupPhase } from "./harnessSetupState";
@@ -38,12 +38,14 @@ export function HarnessSetupDialog({ harness, commands, onReady, onClose }: {
     };
   }, []);
 
-  const verify = async () => {
+  // `full` re-probes every agent. After `complete` the server has published this
+  // one, so a plain read suffices unless an older sweep or auth check overtook it.
+  const verify = async (full = true): Promise<void> => {
     setPhase("checking");
     // Drop the previous attempt's message; this re-check replaces it.
     setError(null);
     try {
-      const harnesses = await refreshHarnesses(true, true);
+      const harnesses = full ? await refreshHarnesses(true, true) : await readHarnesses();
       if (cancelled.current) return;
       const current = harnesses.find((item) => item.id === harness.id);
       setNeedsRepair(current?.needsConfigRepair ?? false);
@@ -55,6 +57,8 @@ export function HarnessSetupDialog({ harness, commands, onReady, onClose }: {
         setAction("login");
         setStarted(true);
         setPhase("running");
+      } else if (!full) {
+        return verify(true);
       } else {
         // A cleared repair frees Retry; re-point it, and drop the old action's
         // approval so nothing runs until Retry.
@@ -124,7 +128,7 @@ export function HarnessSetupDialog({ harness, commands, onReady, onClose }: {
         awaitingApproval={phase === "preview"}
         onComplete={(value) => {
           if (typeof value !== "object" || value === null || !("type" in value) || value.type !== "complete") return false;
-          void verify();
+          void verify(false);
           return true;
         }}
         onError={(message) => {

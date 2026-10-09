@@ -1,16 +1,53 @@
 ---
 name: orx-figures
-description: "Publication-quality figures in matplotlib or TikZ: learning curves, scaling laws, benchmark and ablation comparisons, Pareto trade-offs, heatmaps and confusion matrices, method diagrams. Covers the shared style module, sizing, uncertainty, and vector export. Use whenever you plot, chart, or visualize results, add a figure to a paper or report, or one looks unpolished; then read one reference."
+description: "Create or update interactive HTML charts for chat and static publication figures. Invoke before writing plotting code or when an existing figure needs correction; use `orx-results` for experiment interpretation and `orx-logs` for retrieving measurements."
 ---
 
-A figure in a paper is an argument, not a screenshot of an array. It makes one
-claim, and a reader who skips the prose should still get that claim right.
-Default matplotlib output does not clear that bar: it is sized for a screen,
-titled where a caption belongs, colored from a cycle that collapses in
-greyscale, and rasterized where the document wants vector.
+Prefer interactive HTML for suitable experiment metrics in chat, and static vector
+figures for papers. Skip a chart when the data or available templates do not fit,
+or when a text summary communicates the result better. Both should use real evidence, clear units, and honest uncertainty.
+Show newly created image figures inline in the chat handoff, including SVGs:
+`![Description](artifacts/figure.svg)`. Keep their clickable file links as well.
 
-Everything below is what separates a figure that survives review from one that
-gets remade the week before the deadline.
+## Interactive charts in chat
+
+When a visualization helps explain experiment metrics in chat, use the bundled
+offline HTML chart. Start with one useful view. Add a dropdown only when the
+same data benefits from multiple distinct views; never add views just to fill
+the selector. The template handles chart styling, controls, and interactions.
+Use real run data, preserve raw values, and state the seed count.
+Use static publication figures when the user requests a paper or export.
+
+Vendor both files beside the rendering script:
+
+```sh
+orx skill figures/assets/orx-chart.html > artifacts/orx-chart.html
+orx skill figures/assets/orx_chart.py > artifacts/orx_chart.py
+```
+
+```python
+from orx_chart import render_chart
+render_chart("artifacts/loss.html", title="Learning-rate comparison",
+    subtitle="20 steps · single seed",
+    metrics=[dict(key="loss", label="Validation loss", unit="nats/token")],
+    series=[dict(name="LR 0.001", points=baseline_rows),
+            dict(name="LR 0.002", points=comparison_rows)])
+```
+
+Each point is a dict with numeric `step` and metric values. A missing or null
+metric is skipped. Pass at least one finite point per metric; use matching steps
+for run comparisons. Import from the directory where you vendored the helper.
+Keep HTML self-contained: no CDN scripts, external fonts, or network dependency.
+
+Embed the result inline using image syntax (HTML opens as a sandboxed figure):
+
+```markdown
+![Learning-rate comparison](artifacts/loss.html)
+```
+
+Link CSV/JSON evidence alongside the figure for access to the underlying data. Reuse a run's ready-made chart
+rather than regenerating it. The paper-specific rules below apply to static
+publication output.
 
 ## Non-negotiables
 
@@ -27,7 +64,7 @@ gets remade the week before the deadline.
    raster content: a photograph, a sample image grid, an attention map at
    pixel resolution.
 3. **Every number comes from a run.** Read metrics from the file located by
-   `orx logs` (see the `orx-evidence` module). Never plot a remembered,
+   `orx logs` (see the `orx-logs` module). Never plot a remembered,
    rounded, or plausible number, and never leave synthetic demo data in a
    script that ships.
 4. **The caption is the title.** No `ax.set_title` on a paper figure — a title
@@ -219,3 +256,32 @@ grid, a map — still obeys the non-negotiables above and the style module.
 - Uncertainty shown, with n stated.
 - No unexplained series, no legend entry for something that was cut.
 - The script reruns from scratch and reproduces the same file.
+
+### Interactive graph templates
+
+One graph is visible at a time. The shared dropdown chooses the view; do not
+build composite dashboards or append tables to this component.
+
+Use `orx_chart.render_chart` with `title`, `subtitle`, `metrics`, and `series`.
+Each view has a unique `key`, `label`, `type`, `unit`, optional `xLabel` and
+`yLabel`, and optionally its own `series`. A series has `name`, `points`,
+optional `color` and `dash`. Points use numeric `step` for x and the view's
+`key` for y. Use real measurements and state seed count in the subtitle.
+
+| ORX family | Interactive template and data |
+| --- | --- |
+| Learning curves | `line`; measured `lower`/`upper` bounds add a confidence band. `area` fills to zero for signed differences. |
+| Scaling laws | `scaling`; positive x/y coordinates, logarithmic axes by default. Supply separately computed fitted samples as `series.fit`; `fitDash` distinguishes extrapolation. State equation, fit range and uncertainty in the subtitle. The renderer does not estimate a law. |
+| Comparisons / ablations | `bar` groups methods at shared numeric category positions with point `label` for ticks, zero baseline. `dot` shows horizontal deltas with optional measured `lower`/`upper` whiskers and category `label`. |
+| Pareto trade-offs | `pareto`; numeric x/y points, defaults minimize x/maximize y; set `minimizeX`/`maximizeY` for other directions. All measured points remain visible; only non-dominated points are connected per series. Name directions and state the frontier is a guide. |
+| Matrices | `heatmap` with one series per row; `columns` supplies column labels. Sequential viridis colors by default; `colorScale="diverging"` centers signed values on zero. Missing cells remain gray. `confusion` uses square cells; supply normalized values, `colorMin=0`, `colorMax=1`, and state normalization/support. |
+| Method diagrams | `diagram` uses `nodes` with `id`, `label`, integer `column`/`row`, optional `accent`/`description`; `edges` have `from`, `to`, optional `label`/`dashed`. Clicking a node highlights adjacent connections; Escape restores the diagram. |
+
+`scatter` is also available for measured relationships. Curves, scatter,
+scaling and Pareto plots may set `xScale` or `yScale` to `log`. Bars and areas
+require a linear y-axis because their baseline is zero. Numeric curves, scatter and Pareto plots use
+mouse drag selection zoom and show Reset only after zoom. Matrix cells,
+diagram nodes and dot intervals expose exact data on hover/focus. Download
+exports the current graph as SVG. Do not invent uncertainty or scaling data
+just to demonstrate a template; a single-seed demo can show single-seed curves,
+comparisons, measured trade-offs, a matrix, and its actual method diagram.
