@@ -159,7 +159,7 @@ citation is worse than no citation.
 ## Results come from runs, not from memory
 
 Every number in a results table must come from an actual run — read it from
-the file located by `orx logs` (see the `orx-evidence` skill). Never write a
+the file located by `orx logs` (see the `orx-logs` skill). Never write a
 placeholder metric that reads as real. If a number is not measured yet, say so
 in the text.
 

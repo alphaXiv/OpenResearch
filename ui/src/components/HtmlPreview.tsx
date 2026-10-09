@@ -1,8 +1,10 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { m } from "../paraglide/messages.js";
 import { ltr } from "../i18n";
 import { isExternalMarkdownTarget } from "../markdownTarget";
 import { Spinner } from "./ui";
+import { OptionPicker } from "./ModelPicker";
+import { inlineHtmlHeight } from "../htmlPreviewSizing";
 
 /** Elements whose relative URLs name a project file, each with the response
  * types it may legitimately be. The gate is the security boundary: the parent
@@ -162,6 +164,7 @@ export function HtmlPreview({
   url,
   name,
   resolveSrc,
+  fitContent = false,
 }: {
   html: string;
   truncated: boolean;
@@ -170,16 +173,69 @@ export function HtmlPreview({
   /** Names the frame for a screen reader rotoring between open tabs. */
   name: string;
   resolveSrc: (src: string) => string | null;
+  fitContent?: boolean;
 }) {
   const [page, setPage] = useState<{ source: string; partial: boolean } | null>(null);
+  const frame = useRef<HTMLIFrameElement>(null);
+  const [height, setHeight] = useState(360);
+  const [metricPicker, setMetricPicker] = useState<{
+    choices: { id: string; label: string }[]; value: string; left: number; top: number; width: number;
+  } | null>(null);
+
+  useEffect(() => {
+    if (!fitContent) return;
+    const resize = (event: MessageEvent) => {
+      const data: unknown = event.data;
+      if (event.source !== frame.current?.contentWindow || typeof data !== "object" || data === null) return;
+      if ("type" in data && data.type === "orx-html-size" && "height" in data) {
+        const nextHeight = inlineHtmlHeight(data.height);
+        if (nextHeight !== null) setHeight(nextHeight);
+      }
+      if ("type" in data && data.type === "orx-chart-picker" && "choices" in data && Array.isArray(data.choices)
+        && "value" in data && typeof data.value === "string"
+        && "left" in data && typeof data.left === "number" && Number.isFinite(data.left)
+        && "top" in data && typeof data.top === "number" && Number.isFinite(data.top)
+        && "width" in data && typeof data.width === "number" && Number.isFinite(data.width) && data.width > 0) {
+        const choices: { id: string; label: string }[] = [];
+        for (const choice of data.choices) {
+          if (typeof choice !== "object" || choice === null || !("id" in choice) || typeof choice.id !== "string"
+            || !("label" in choice) || typeof choice.label !== "string") return;
+          choices.push({ id: choice.id, label: choice.label });
+        }
+        setMetricPicker({ choices, value: data.value, left: data.left, top: data.top, width: data.width });
+      }
+    };
+    window.addEventListener("message", resize);
+    return () => window.removeEventListener("message", resize);
+  }, [fitContent]);
 
   useEffect(() => {
     let cancelled = false;
     const controller = new AbortController();
     setPage(null);
+    setHeight(360);
+    setMetricPicker(null);
     completeSource(html, truncated, url, controller.signal)
       .then(async ({ text, partial }) => ({
-        source: await assembleDocument(text, resolveSrc, controller.signal),
+        source: await assembleDocument(text, resolveSrc, controller.signal) + (fitContent ? `<script>
+          new ResizeObserver(() => parent.postMessage({type: "orx-html-size", height: document.body.scrollHeight}, "*")).observe(document.body);
+          const metricSelect = document.querySelector('#metrics');
+          if (document.querySelector('#data') && document.querySelector('#chart') && metricSelect instanceof HTMLSelectElement && metricSelect.options.length > 1) {
+            metricSelect.style.visibility = 'hidden';
+            const publishPicker = () => {
+              const rect = metricSelect.getBoundingClientRect();
+              parent.postMessage({type: 'orx-chart-picker', choices: [...metricSelect.options].map(option => ({id: option.value, label: option.text})), value: metricSelect.value, left: rect.left, top: rect.top, width: rect.width}, '*');
+            };
+            new ResizeObserver(publishPicker).observe(document.body);
+            metricSelect.addEventListener('change', publishPicker);
+            window.addEventListener('message', event => {
+              if (event.source !== parent || event.data?.type !== 'orx-chart-metric' || typeof event.data.value !== 'string') return;
+              if (![...metricSelect.options].some(option => option.value === event.data.value)) return;
+              metricSelect.value = event.data.value;
+              metricSelect.dispatchEvent(new Event('change'));
+            });
+          }
+        </script>` : ""),
         partial,
       }))
       .then((next) => {
@@ -189,7 +245,7 @@ export function HtmlPreview({
       cancelled = true;
       controller.abort();
     };
-  }, [html, truncated, url, resolveSrc]);
+  }, [html, truncated, url, resolveSrc, fitContent]);
 
   if (page === null) {
     return (
@@ -200,16 +256,22 @@ export function HtmlPreview({
   }
 
   return (
-    <div className="flex h-full min-h-0 flex-col">
+    <div className={fitContent ? "relative flex flex-col" : "flex h-full min-h-0 flex-col"}>
       {page.partial && (
         <div className="file-view-note shrink-0 border-b border-b-border-variant py-2 px-4 text-sm text-muted">
           {m.file_viewer_html_partial()}
         </div>
       )}
+      {metricPicker && metricPicker.choices.length > 1 && <div className="absolute z-10" style={{ left: metricPicker.left, top: metricPicker.top, width: metricPicker.width }}>
+        <OptionPicker choices={metricPicker.choices} value={metricPicker.value} variant="field" floating dropDown
+          onSelect={(value) => frame.current?.contentWindow?.postMessage({ type: "orx-chart-metric", value }, "*")} />
+      </div>}
       <iframe
+        ref={frame}
+        style={fitContent ? { height } : undefined}
         // White-backed: an unstyled document assumes the browser default, and
         // the pane's dark ground would leave its black text unreadable.
-        className="block min-h-0 flex-1 w-full border-0 bg-white"
+        className={`block min-h-0 w-full border-0 bg-white ${fitContent ? "shrink-0" : "flex-1"}`}
         title={m.file_viewer_html_preview({ name: ltr(name) })}
         // Never allow-same-origin: it would hand a repo's or an agent's HTML
         // this page's origin and the unauthenticated loopback API. Popups so a
