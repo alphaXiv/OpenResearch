@@ -385,11 +385,72 @@ async fn stage_source(
                 },
                 Err(error) => last_error = error.to_string(),
             }
+            // An exited script container or pod can never be staged; say why instead of timing out.
+            if let Some((exit, container)) = exited(context, namespace, pod).await {
+                let logs = kubectl(
+                    context,
+                    &["logs", "-n", namespace, pod, "-c", &container, "--tail=20"],
+                    None,
+                )
+                .await
+                .unwrap_or_else(|e| e.to_string());
+                return Err(anyhow!(
+                    "Kubernetes pod {namespace}/{pod} exited ({exit}) before orx could stage \
+                     the source. Last log lines:\n{}",
+                    logs.trim()
+                ));
+            }
         }
         tokio::time::sleep(Duration::from_secs(1)).await;
     }
     Err(anyhow!(
         "Kubernetes source staging timed out for Job {namespace}/{job_name}: {last_error}"
+    ))
+}
+
+/// How the pod ended and which container's logs explain it, once its script
+/// container (the default container `prepare_docs` annotates) or the whole pod has.
+async fn exited(context: Option<&str>, namespace: &str, pod: &str) -> Option<(String, String)> {
+    let json = kubectl(
+        context,
+        &["get", "pod", "-n", namespace, pod, "-o", "json"],
+        None,
+    )
+    .await
+    .ok()?;
+    pod_exit(&serde_json::from_str(&json).ok()?)
+}
+
+fn pod_exit(pod: &Value) -> Option<(String, String)> {
+    let script = pod["metadata"]["annotations"]["kubectl.kubernetes.io/default-container"]
+        .as_str()?
+        .to_string();
+    let status = &pod["status"];
+    let statuses = |key: &str| status[key].as_array().cloned().unwrap_or_default();
+    let code = |c: &Value| c["state"]["terminated"]["exitCode"].as_i64();
+    if let Some(code) = statuses("containerStatuses")
+        .iter()
+        .find(|c| c["name"] == script.as_str())
+        .and_then(code)
+    {
+        return Some((format!("code {code}"), script));
+    }
+    // Only a finished pod: a restartable init sidecar may exit nonzero and restart.
+    let phase = status["phase"]
+        .as_str()
+        .filter(|p| matches!(*p, "Failed" | "Succeeded"))?;
+    if let Some((name, code)) = statuses("initContainerStatuses").iter().find_map(|c| {
+        Some((
+            c["name"].as_str()?.to_string(),
+            code(c).filter(|&code| code != 0)?,
+        ))
+    }) {
+        return Some((format!("init container {name}, code {code}"), name));
+    }
+    let message = status["message"].as_str().unwrap_or_default();
+    Some((
+        format!("pod {phase} {message}").trim_end().to_string(),
+        script,
     ))
 }
 
@@ -532,6 +593,19 @@ fn prepare_docs(
     for c in containers.iter_mut() {
         for field in ["command", "args"] {
             if let Some(items) = c[field].as_array() {
+                if let Some(bare) = items
+                    .iter()
+                    .filter_map(Value::as_str)
+                    .find(|s| matches!(s.trim(), "$ORX_SCRIPT" | "${ORX_SCRIPT}"))
+                {
+                    return Err(anyhow!(
+                        "Job '{}' passes `{}` as a bare argument: the shell only word-splits it and \
+                         never runs the script's `;`-separated commands. Use \
+                         command: [\"bash\", \"-c\", \"eval \\\"$ORX_SCRIPT\\\"\"]",
+                        job_name,
+                        bare.trim()
+                    ));
+                }
                 if items
                     .iter()
                     .any(|a| a.as_str().is_some_and(|s| s.contains("ORX_SCRIPT")))
@@ -578,7 +652,7 @@ fn prepare_docs(
     let Some(script_container) = script_container else {
         return Err(anyhow!(
             "no container in Job '{}' runs the experiment: reference the injected script, \
-             e.g. command: [\"bash\", \"-c\", \"$ORX_SCRIPT\"] — it extracts the source snapshot \
+             e.g. command: [\"bash\", \"-c\", \"eval \\\"$ORX_SCRIPT\\\"\"] — it extracts the source snapshot \
              and runs the experiment's fixed run command",
             job_name
         ));
@@ -918,7 +992,7 @@ mod tests {
                         "containers": [{
                             "name": "run",
                             "image": "python:3.12",
-                            "command": ["bash", "-c", "$ORX_SCRIPT"],
+                            "command": ["bash", "-c", "eval \"$ORX_SCRIPT\""],
                         }],
                     },
                 },
@@ -1021,6 +1095,52 @@ mod tests {
         let mut j = job("train");
         j["spec"]["template"]["spec"]["containers"][0]["command"] = json!(["python", "train.py"]);
         assert!(prepare(j).unwrap_err().to_string().contains("ORX_SCRIPT"));
+    }
+
+    #[test]
+    fn bare_script_reference_is_an_error() {
+        for bare in ["$ORX_SCRIPT", "${ORX_SCRIPT}"] {
+            let mut j = job("train");
+            j["spec"]["template"]["spec"]["containers"][0]["command"] = json!(["bash", "-c", bare]);
+            assert!(prepare(j).unwrap_err().to_string().contains("eval"));
+        }
+    }
+
+    #[test]
+    fn pod_exit_reports_the_container_that_explains_it() {
+        let pod = |phase: &str, init: Value, script: Value| {
+            json!({
+                "metadata": { "annotations": { "kubectl.kubernetes.io/default-container": "run" } },
+                "status": {
+                    "phase": phase,
+                    "initContainerStatuses": [init],
+                    "containerStatuses": [{ "name": "run", "state": script }],
+                },
+            })
+        };
+        let failed_init = json!({ "name": "setup", "state": { "terminated": { "exitCode": 7 } } });
+        let waiting = json!({ "waiting": {} });
+        assert_eq!(
+            pod_exit(&pod(
+                "Running",
+                json!({}),
+                json!({ "terminated": { "exitCode": 3 } })
+            )),
+            Some(("code 3".into(), "run".into()))
+        );
+        // A restartable init sidecar's nonzero exit doesn't end a running pod.
+        assert_eq!(
+            pod_exit(&pod("Running", failed_init.clone(), waiting.clone())),
+            None
+        );
+        assert_eq!(
+            pod_exit(&pod("Failed", failed_init, waiting.clone())),
+            Some(("init container setup, code 7".into(), "setup".into()))
+        );
+        assert_eq!(
+            pod_exit(&pod("Failed", json!({}), waiting)),
+            Some(("pod Failed".into(), "run".into()))
+        );
     }
 
     #[test]
