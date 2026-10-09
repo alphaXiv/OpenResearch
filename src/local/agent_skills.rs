@@ -230,7 +230,7 @@ const S_LOGS: AgentSkill = AgentSkill {
 };
 const S_RESULTS: AgentSkill = AgentSkill {
     name: "orx-results",
-    description: "Interpret and summarize measured experiment results. Invoke when comparing runs, evaluating an outcome, explaining what changed, or recommending a next experiment from run evidence; retrieve missing output with `orx-logs`.",
+    description: "Interpret and summarize measured experiment results. Invoke before reporting measured results, including summarizing a completed run, comparing runs, evaluating an outcome, or recommending a next experiment from run evidence; retrieve missing output with `orx-logs`.",
     content: RESULTS,
     resources: &[],
 };

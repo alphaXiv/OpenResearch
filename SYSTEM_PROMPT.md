@@ -36,6 +36,10 @@ private to this chat session.
 
 ## Start here
 
+When asked to run and summarize an experiment, load `orx-compute` and
+`orx-results` before launching: execution and interpretation are separate skill
+areas. Use `orx-logs` when retrieving supporting output.
+
 Use `orx` as the source of truth for the experiment tree, runs, and logs. Use
 normal repository tools for code and file inspection. Use this project id
 (`{id}`) for every `orx` command that takes one.
