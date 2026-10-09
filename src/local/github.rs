@@ -94,8 +94,34 @@ fn repository_endpoint(owner: &str, repo: &str) -> String {
     )
 }
 
-pub async fn create_project_repo(repo: &str) -> Result<(String, String)> {
-    let owner = viewer_login().await?;
+fn repository_owner(organization: Option<&str>) -> Result<Option<String>> {
+    let Some(organization) = organization
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    else {
+        return Ok(None);
+    };
+    let valid = organization.len() <= 39
+        && !organization.starts_with('-')
+        && !organization.ends_with('-')
+        && !organization.contains("--")
+        && organization
+            .chars()
+            .all(|character| character.is_ascii_alphanumeric() || character == '-');
+    if !valid {
+        return Err(anyhow!("Invalid GitHub organization login: {organization}"));
+    }
+    Ok(Some(organization.to_string()))
+}
+
+pub async fn create_project_repo(
+    repo: &str,
+    organization: Option<&str>,
+) -> Result<(String, String)> {
+    let owner = match repository_owner(organization)? {
+        Some(owner) => owner,
+        None => viewer_login().await?,
+    };
     for suffix in 1..=100 {
         let candidate = repository_candidate(repo, suffix);
         let name_with_owner = format!("{owner}/{candidate}");
@@ -107,7 +133,7 @@ pub async fn create_project_repo(repo: &str) -> Result<(String, String)> {
         {
             Ok(_) => return Ok((owner, candidate)),
             Err(error) if repository_name_exists(&error.to_string()) => continue,
-            Err(error) => return Err(error),
+            Err(error) => return Err(repository_creation_error(error, organization)),
         }
     }
     Err(anyhow!(
@@ -209,6 +235,30 @@ fn repository_name_exists(error: &str) -> bool {
         .contains("name already exists on this account")
 }
 
+fn repository_creation_error(
+    error: crate::error::Error,
+    organization: Option<&str>,
+) -> crate::error::Error {
+    let detail = error.to_string();
+    let lower = detail.to_ascii_lowercase();
+    if lower.contains("timed out") || lower.contains("could not run github cli") {
+        return anyhow!("Could not reach GitHub while creating the repository: {detail}");
+    }
+    if let Some(organization) = organization {
+        if lower.contains("saml") || lower.contains("sso") {
+            return anyhow!(
+                "GitHub denied repository creation in '{organization}': {detail}. Authorize GitHub CLI for the organization's SAML SSO, then retry."
+            );
+        }
+        if lower.contains("403") || lower.contains("permission") || lower.contains("not found") {
+            return anyhow!(
+                "GitHub denied repository creation in '{organization}': {detail}. Check the organization name and your repository-creation permission."
+            );
+        }
+    }
+    error
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -228,6 +278,12 @@ mod tests {
             repository_endpoint("owner/name", "repo name"),
             "repos/owner%2Fname/repo%20name"
         );
+        assert_eq!(repository_owner(None).unwrap(), None);
+        assert_eq!(
+            repository_owner(Some("alphaXiv")).unwrap().as_deref(),
+            Some("alphaXiv")
+        );
+        assert!(repository_owner(Some("not/an/org")).is_err());
     }
 
     #[test]
@@ -251,5 +307,18 @@ mod tests {
         assert!(repository_name_exists(
             "GraphQL: Name already exists on this account"
         ));
+    }
+
+    #[test]
+    fn organization_failures_name_permissions_and_sso() {
+        let error = repository_creation_error(
+            anyhow!("gh repo failed: Resource protected by organization SAML enforcement"),
+            Some("research-org"),
+        )
+        .to_string();
+        // The settings page shows messages with this prefix verbatim.
+        assert!(error.starts_with("GitHub denied repository creation in 'research-org'"));
+        assert!(error.contains("SAML SSO"));
+        assert!(!error.contains("Could not reach"));
     }
 }

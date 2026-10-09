@@ -1465,8 +1465,10 @@ export const getProjectGitStatus = (projectId: string, signal?: AbortSignal) =>
 export const initializeProjectGit = (projectId: string) =>
   post<ProjectGitStatus>(`/api/projects/${projectId}/git/init`);
 
-export const enableProjectGithub = (projectId: string) =>
-  post<{ project: Project; git: ProjectGitStatus }>(`/api/projects/${projectId}/github`);
+export const enableProjectGithub = (projectId: string, organization?: string) =>
+  post<{ project: Project; git: ProjectGitStatus }>(`/api/projects/${projectId}/github`, {
+    ...(organization ? { organization } : {}),
+  });
 
 export const disableProjectGithub = (projectId: string) =>
   post<{ project: Project; git: ProjectGitStatus }>(`/api/projects/${projectId}/github/disable`);
