@@ -1283,5 +1283,12 @@
   "sidebar_reveal_project": "إظهار في Finder",
   "sidebar_filter": "تصفية",
   "sidebar_group_by": "تجميع حسب",
-  "sidebar_one_list": "في قائمة واحدة"
+  "sidebar_one_list": "في قائمة واحدة",
+  "settings_failover_title": "تبديل الـ harness عند بلوغ حدود الاستخدام",
+  "settings_failover_description": "عندما ينفد استخدام الـ harness في محادثة أو يبلغ حد المعدل، يستمر الدور على الـ harness الجاهز التالي بهذا الترتيب، مع المحادثة حتى الآن كسياق.",
+  "settings_failover_order": "ترتيب البدائل",
+  "settings_failover_move_up": "نقل {name} لأعلى",
+  "settings_failover_move_down": "نقل {name} لأسفل",
+  "settings_failover_include": "استخدام {name} كبديل",
+  "activity_switched_harness": "تم التبديل من {from} إلى {to} بعد بلوغ حد الاستخدام"
 }

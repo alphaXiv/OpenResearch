@@ -1283,5 +1283,12 @@
   "sidebar_reveal_project": "Finder में दिखाएँ",
   "sidebar_filter": "फ़िल्टर",
   "sidebar_group_by": "समूह बनाएँ",
-  "sidebar_one_list": "एक सूची में"
+  "sidebar_one_list": "एक सूची में",
+  "settings_failover_title": "उपयोग सीमा पर harness बदलें",
+  "settings_failover_description": "जब किसी चैट का harness उपयोग सीमा या रेट लिमिट तक पहुँच जाए, तो टर्न इसी क्रम में अगले तैयार harness पर जारी रहता है, और अब तक की चैट संदर्भ के रूप में जाती है।",
+  "settings_failover_order": "फ़ॉलबैक क्रम",
+  "settings_failover_move_up": "{name} को ऊपर ले जाएँ",
+  "settings_failover_move_down": "{name} को नीचे ले जाएँ",
+  "settings_failover_include": "{name} को फ़ॉलबैक के रूप में उपयोग करें",
+  "activity_switched_harness": "उपयोग सीमा के बाद {from} से {to} पर बदला गया"
 }

@@ -708,6 +708,7 @@ impl Store {
             "ALTER TABLE ui_state ADD COLUMN preferred_service_tier TEXT",
             "ALTER TABLE ui_state ADD COLUMN workspace_state_json TEXT",
             "ALTER TABLE ui_state ADD COLUMN preferred_autonomy TEXT",
+            "ALTER TABLE ui_state ADD COLUMN harness_failover_json TEXT",
             "ALTER TABLE chat_spawns ADD COLUMN wake_parent INTEGER NOT NULL DEFAULT 1",
             "ALTER TABLE chat_spawns ADD COLUMN attempts INTEGER NOT NULL DEFAULT 0",
             "ALTER TABLE chat_spawns ADD COLUMN finished_at INTEGER",
@@ -945,7 +946,7 @@ impl Store {
             "SELECT onboarding_completed, tour_completed, preferred_harness,
                     preferred_model, preferred_service_tier,
                     preferred_permission_mode, preferred_reasoning_level, workspace_state_json,
-                    preferred_autonomy
+                    preferred_autonomy, harness_failover_json
              FROM ui_state WHERE id = 1",
             [],
             |row| {
@@ -972,6 +973,9 @@ impl Store {
                         .get::<_, Option<String>>(8)?
                         .as_deref()
                         .and_then(Autonomy::from_id),
+                    harness_failover: crate::local::harness::HarnessFailover::from_stored(
+                        row.get::<_, Option<String>>(9)?.as_deref(),
+                    ),
                 })
             },
         )?)
@@ -1027,6 +1031,17 @@ impl Store {
         self.conn.execute(
             "UPDATE ui_state SET preferred_autonomy = ?1 WHERE id = 1",
             params![autonomy.id()],
+        )?;
+        Ok(())
+    }
+
+    pub fn set_harness_failover(
+        &self,
+        failover: &crate::local::harness::HarnessFailover,
+    ) -> Result<()> {
+        self.conn.execute(
+            "UPDATE ui_state SET harness_failover_json = ?1 WHERE id = 1",
+            params![serde_json::to_string(failover)?],
         )?;
         Ok(())
     }
@@ -2849,6 +2864,28 @@ impl Store {
         Ok(())
     }
 
+    /// Move a session onto another harness. Everything the old harness owned
+    /// (its native session, model, tier, effort, context meter) is cleared so
+    /// the new one starts from its own defaults.
+    pub fn switch_chat_session_harness(
+        &self,
+        id: &str,
+        harness: &str,
+        permission_mode: Option<&str>,
+        plan_mode: bool,
+    ) -> Result<()> {
+        self.conn.execute(
+            "UPDATE chat_sessions
+             SET harness = ?2, native_session_id = NULL, model = NULL,
+                 service_tier = NULL, reasoning_level = NULL,
+                 permission_mode = ?3, plan_mode = ?4, plan_reset_pending = 0,
+                 context_usage_json = NULL, updated_at = ?5
+             WHERE id = ?1",
+            params![id, harness, permission_mode, plan_mode, now_ms()],
+        )?;
+        Ok(())
+    }
+
     pub fn set_chat_session_recovery_settings(
         &self,
         id: &str,
@@ -3239,6 +3276,7 @@ pub struct StoredUiState {
     pub preferred_agent: Option<StoredAgentSelection>,
     pub workspace: Option<GlobalWorkspaceState>,
     pub preferred_autonomy: Option<Autonomy>,
+    pub harness_failover: crate::local::harness::HarnessFailover,
 }
 
 /// Normalized transcript entry; `parts_json` is the wire-format parts array
@@ -3648,6 +3686,7 @@ mod tests {
                 preferred_agent: None,
                 workspace: None,
                 preferred_autonomy: None,
+                harness_failover: Default::default(),
             }
         );
 
@@ -3662,6 +3701,11 @@ mod tests {
         store.set_tour_completed(true).unwrap();
         store.set_preferred_agent(&selection).unwrap();
         store.set_preferred_autonomy(Autonomy::Copilot).unwrap();
+        let failover = crate::local::harness::HarnessFailover {
+            enabled: true,
+            order: vec!["codex".into(), "opencode".into()],
+        };
+        store.set_harness_failover(&failover).unwrap();
 
         assert_eq!(
             store.ui_state().unwrap(),
@@ -3671,6 +3715,7 @@ mod tests {
                 preferred_agent: Some(selection),
                 workspace: None,
                 preferred_autonomy: Some(Autonomy::Copilot),
+                harness_failover: failover,
             }
         );
         let _ = std::fs::remove_dir_all(&dir);
