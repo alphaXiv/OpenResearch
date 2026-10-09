@@ -19,6 +19,7 @@ class Element {
   replaceChildren(...nodes) { this.children = nodes; }
   setAttribute(key, value) { this.attributes[key] = String(value); }
   querySelector() { return null; }
+  getBoundingClientRect() { return {left: 0, top: 0}; }
 }
 function render(metric, series, interaction = "") {
   const nodes = new Map(["data", "chart", "tooltip", "title", "subtitle", "metrics", "legend", "reset", "export"].map(id => [id, new Element()]));
@@ -67,5 +68,25 @@ test("hover rings stay complete at endpoints but skip values outside a selected 
     const circles = cursor.children.filter(node => node.attributes.r === "5");
     assert.equal(circles.length, step === 1 ? 0 : 1);
     assert.ok(circles.every(node => !node.attributes["clip-path"]));
+  }
+});
+
+
+test("refining either zoom axis preserves the other selection", () => {
+  for (const axis of ["x", "y"]) {
+    const interaction = `domain={x:[2,8],y:[1.2,1.8]};draw();drag={x:layout.x(3),y:layout.y(1.6)};chart.onpointerup({clientX:layout.x(${axis === "x" ? 6 : 3}),clientY:layout.y(${axis === "y" ? 1.4 : 1.6})})`;
+    const {layout} = render({type: "line"}, [{name: "Arm",points:[{step:1,loss:1},{step:10,loss:2}]}], interaction);
+    if (axis === "x") assert.deepEqual([layout.ymin,layout.ymax],[1.2,1.8]);
+    else assert.deepEqual([layout.xmin,layout.xmax],[2,8]);
+  }
+});
+
+test("small fractional x ticks retain distinct values on linear and log axes", () => {
+  for (const xScale of ["linear", "log"]) {
+    const {svg,layout} = render({type:"scaling",xScale,xLabel:"Scale"}, [{name:"Arm",points:[{step:.001,loss:1},{step:.01,loss:2}]}]);
+    const ticks = svg.children.filter(node=>node.attributes.y===String(layout.height-layout.bottom+23)).map(node=>Number(node.textContent));
+    assert.equal(ticks.length,5);
+    assert.equal(new Set(ticks).size,5);
+    assert.ok(ticks.every(tick=>tick>0));
   }
 });
