@@ -1653,7 +1653,7 @@ mod tests {
     }
 
     #[test]
-    fn a_supervisor_waits_for_an_in_flight_submission_handle() {
+    fn a_supervisor_rereads_the_run_after_waiting_for_submission() {
         let dir = std::env::temp_dir().join(format!("orx-submit-wait-{}", uuid::Uuid::new_v4()));
         let store = Store::open_at(dir.clone()).unwrap();
         store

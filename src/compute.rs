@@ -887,12 +887,14 @@ pub async fn submit(args: &crate::ExpRunArgs) -> Result<StoredRun> {
                 if let Ok(Some(found)) = reconcile_submission(&run_id, descriptor).await {
                     eprintln!(
                         "warning: {error}\nFound the submitted job {} and kept tracking it.",
-                        found.job_id.unwrap_or_default()
+                        found.job_id.as_deref().unwrap_or_default()
                     );
                     crate::commands::exp::spawn_detached_supervise(&run_id)?;
-                    return store
+                    let mut run = store
                         .get_run(&run_id)?
-                        .ok_or_else(|| anyhow!("Run {run_id} not found in the local store."));
+                        .ok_or_else(|| anyhow!("Run {run_id} not found in the local store."))?;
+                    run.backend_json = found.to_json();
+                    return Ok(run);
                 }
             }
             if !handle_was_persisted
@@ -1055,10 +1057,7 @@ pub async fn reconcile_submission(
         job_id: Some(job_id),
         ..descriptor.clone()
     };
-    // Supervision proceeds from the in-memory handle and persists it on its next update.
-    if let Err(error) = record_submission_handle(run_id, &found) {
-        eprintln!("warning: could not record the recovered job for run {run_id}: {error}");
-    }
+    record_submission_handle(run_id, &found)?;
     Ok(Some(found))
 }
 
