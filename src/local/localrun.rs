@@ -159,6 +159,7 @@ async fn submit_controller_run(
         cancel_requested: store
             .get_run(&run_id)?
             .is_some_and(|run| run.cancel_requested),
+        cancel_reason: None,
         chat_session_id: args.launching_chat_session(),
     };
     store.upsert_run(&run)?;

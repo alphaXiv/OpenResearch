@@ -88,6 +88,7 @@ import {
   DEMO_SEEDED_LEAF_IDS,
   forkChatTurn,
   fmtNumber,
+  harnessModelLabel,
   interruptChat,
   reasoningFor,
   recoverChatTurn,
@@ -4414,6 +4415,7 @@ export function ChatPanel({
   // Pasted/dropped/uploaded attachments waiting in the composer, as data URLs.
   const [attachments, setAttachments] = useState<ComposerAttachment[]>([]);
   const [attachError, setAttachError] = useState<string | null>(null);
+  const [imageRefusedFor, setImageRefusedFor] = useState<string | null>(null);
   // Unsent composer content belongs to the scope it was typed in — stash on
   // the way out, restore on return, so a draft can't bleed into another chat.
   const stashKey = activeId ?? `${projectId}:new`;
@@ -4445,6 +4447,7 @@ export function ChatPanel({
     setDraft(restored.draft);
     setAttachments(restored.attachments);
     setAnnotations(restored.annotations);
+    setImageRefusedFor(null);
     return () => {
       const stashed = composerStashContent(composerLiveRef.current, composerPrefill);
       if (stashed) composerStashRef.current.set(stashKey, stashed);
@@ -4581,9 +4584,14 @@ export function ChatPanel({
     const MAX_BYTES = 30 * 1024 * 1024;
     const TOTAL_BYTES = 40 * 1024 * 1024;
     setAttachError(null);
+    setImageRefusedFor(null);
     let total = attachments.reduce((n, a) => n + a.size, 0);
     for (const file of files) {
       if (!/^(image\/(png|jpeg|gif|webp)|application\/pdf)$/.test(file.type)) continue;
+      if (noImageInputError && file.type.startsWith("image/")) {
+        setImageRefusedFor(selectedModel?.id ?? null);
+        continue;
+      }
       if (file.size > MAX_BYTES) {
         setAttachError(m.chat_attachment_too_large({ name: ltr(file.name) }));
         continue;
@@ -4693,6 +4701,16 @@ export function ChatPanel({
   // OpenCode model with no `variants` hides the picker entirely, and Codex's
   // top tiers appear only on the models that accept them.
   const reasoning = reasoningFor(activeHarness, composerSelection?.model);
+  const selectedModel = activeHarness?.models.find((model) => model.id === composerSelection?.model);
+  // OpenCode reports a text-only model's image Read as both success and error, so refuse up front.
+  const noImageInputError = selectedModel?.imageInput === false
+    ? m.chat_model_no_image_input({ model: ltr(harnessModelLabel(selectedModel)) })
+    : null;
+  const imageInputBlocked =
+    !!noImageInputError && attachments.some((a) => a.mediaType.startsWith("image/"));
+  const imageRefused = !!selectedModel && imageRefusedFor === selectedModel.id;
+  const imageInputError = imageInputBlocked || imageRefused ? noImageInputError : null;
+  useEffect(() => setImageRefusedFor(null), [selectedModel?.id]);
 
   // Editing the pickers: every change updates the sticky global preference —
   // the config a "New session" composer opens with is whatever the user chose
@@ -5452,6 +5470,7 @@ export function ChatPanel({
       runComposerCommand(composerCommand.name, composerCommand.prompt);
       return;
     }
+    if (imageInputBlocked) return;
     if (starter === undefined) {
       captureUiEvent({
         name: "first_action",
@@ -5585,6 +5604,7 @@ export function ChatPanel({
       setAttachments([]);
       setAnnotations([]);
       setAttachError(null);
+      setImageRefusedFor(null);
       // Always send the composer's settings, steer or not: a permission or
       // plan change persists itself before this message, so the server's
       // comparison against the *running* turn is the only thing that catches
@@ -5651,6 +5671,7 @@ export function ChatPanel({
       setAttachments((current) => current === pending ? [] : current);
       setAnnotations((current) => (current === pendingAnnotations ? [] : current));
       setAttachError(null);
+      setImageRefusedFor(null);
       preparingSend.current = true;
       try {
         if (!sid) {
@@ -6864,9 +6885,9 @@ export function ChatPanel({
                 })}
               </div>
             )}
-            {attachError && (
+            {(imageInputError ?? attachError) && (
               <div className="composer-attach-error pt-1.5 px-3 pb-0 text-sm text-accent-red" role="alert">
-                {attachError}
+                {imageInputError ?? attachError}
               </div>
             )}
             {settingsError && (

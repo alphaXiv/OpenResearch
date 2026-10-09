@@ -1090,6 +1090,7 @@
   "chat_attachment_too_large": "{name} بیش از حد بزرگ است — هر پیوست باید کمتر از ۳۰ مگابایت باشد.",
   "chat_attachment_alt": "پیوست",
   "chat_attachments_total_too_large": "حجم پیوست‌ها از سقف ۴۰ مگابایت بیشتر است — یکی را حذف و دوباره تلاش کنید.",
+  "chat_model_no_image_input": "{model} نمی‌تواند تصویر ببیند. تصویر را حذف کنید یا به مدلی با پشتیبانی از تصویر تغییر دهید.",
   "chat_update_permissions_failed": "به‌روزرسانی مجوزها انجام نشد. دوباره تلاش کنید.",
   "chat_update_autonomy_failed": "به‌روزرسانی خودمختاری انجام نشد. دوباره تلاش کنید.",
   "chat_exit_plan_failed": "خروج از حالت طرح ممکن نشد. دوباره تلاش کنید.",

@@ -800,15 +800,21 @@ pub async fn inspect_job(
 }
 
 async fn inspect_host_job(target: &SshTarget, dir: &str) -> Result<JobState> {
-    let script = format!(
-        "{HOST_PROCESS_HELPERS}\n\
-         d=\"$HOME/{dir}\"; \
-         if [ -f \"$d/exit_code\" ]; then echo \"EXIT $(cat \"$d/exit_code\")\"; \
-         elif [ -f \"$d/pid\" ] && host_process_alive \"$(cat \"$d/pid\")\"; then echo RUNNING; \
-         elif [ -f \"$d/pid\" ]; then echo DEAD; else echo PENDING; fi",
-    );
+    let script = host_job_script(dir);
     let out = ssh_run(target, &format!("bash -c {}", sh_quote(&script)), None).await?;
     parse_job_state(out.trim())
+}
+
+/// The run dir exists before any supervisor polls it, so a missing one means the job is gone.
+fn host_job_script(dir: &str) -> String {
+    format!(
+        "{HOST_PROCESS_HELPERS}\n\
+         d=\"$HOME/{dir}\"; \
+         if [ ! -d \"$d\" ]; then echo MISSING; \
+         elif [ -f \"$d/exit_code\" ]; then echo \"EXIT $(cat \"$d/exit_code\")\"; \
+         elif [ -f \"$d/pid\" ] && host_process_alive \"$(cat \"$d/pid\")\"; then echo RUNNING; \
+         elif [ -f \"$d/pid\" ]; then echo DEAD; else echo PENDING; fi",
+    )
 }
 
 const HOST_PROCESS_HELPERS: &str = r#"
@@ -869,9 +875,16 @@ fn parse_job_state(out: &str) -> Result<JobState> {
             stage: "ERROR".into(),
             message: Some("process died without an exit code (killed?)".into()),
         },
+        "MISSING" => JobState {
+            stage: "ERROR".into(),
+            message: Some(RUN_DIR_MISSING.into()),
+        },
         other => return Err(anyhow!("unexpected inspect output: {other}")),
     })
 }
+
+pub const RUN_DIR_MISSING: &str = "the remote run directory no longer exists (was the host \
+     rebuilt or cleaned up, or does the ssh alias now reach a different host?)";
 
 /// One poll of the remote log past `skip` lines. Unlike the streaming backends
 /// this returns promptly (the supervisor loops every ~2s); `idle` is unused.
@@ -987,9 +1000,30 @@ mod tests {
             ("EXIT 0", "COMPLETED"),
             ("EXIT 42", "ERROR"),
             ("DEAD", "ERROR"),
+            ("MISSING", "ERROR"),
         ] {
             assert_eq!(parse_job_state(output).unwrap().stage, stage);
         }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn host_inspect_reports_a_vanished_run_dir_as_missing() {
+        let home = crate::local::git::TemporaryDirectory::new("orx-ssh-inspect").unwrap();
+        let inspect = || {
+            let out = std::process::Command::new("bash")
+                .args(["-c", &host_job_script(".orx/runs/r1")])
+                .env("HOME", home.path())
+                .output()
+                .unwrap();
+            String::from_utf8(out.stdout).unwrap().trim().to_string()
+        };
+        assert_eq!(inspect(), "MISSING");
+        let dir = home.path().join(".orx/runs/r1");
+        std::fs::create_dir_all(&dir).unwrap();
+        assert_eq!(inspect(), "PENDING");
+        std::fs::write(dir.join("exit_code"), "0\n").unwrap();
+        assert_eq!(inspect(), "EXIT 0");
     }
 
     #[cfg(unix)]

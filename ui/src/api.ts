@@ -1543,6 +1543,8 @@ export interface HarnessModel {
   defaultReasoningLevel?: string;
   /** Additional processing tiers this model advertises (Codex Fast mode). */
   serviceTiers?: OptionChoice[];
+  /** Whether the model accepts images; absent when the catalog doesn't say. */
+  imageInput?: boolean;
 }
 
 /** Display label for a harness model: the catalog's own name when it has one,

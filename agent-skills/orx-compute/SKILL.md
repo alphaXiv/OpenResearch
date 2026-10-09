@@ -106,6 +106,8 @@ orx exp wait <expId> --interval 10 --timeout 3600
 - When nothing is in flight, project wait returns `drained: no runs in flight`.
 - The default interval is 5 seconds and timeout is 1800 seconds. Timeout exits
   non-zero and means nothing changed yet, not that the run failed.
+- Cancel only a run that is broken or no longer wanted; after a wait timeout,
+  wait again instead of cancelling.
 - Failed runs include a `reason:` line. Provider-capacity failures are often
   retryable; failures after startup require reading the file located by `orx logs <runId>`.
 - A failed run is not a new node. Repair and relaunch the same experiment as

@@ -329,9 +329,9 @@ pub trait ComputeBackend: Send + Sync {
         })
     }
 
-    async fn cancel(&self, handle: &StoredRun) -> Result<()> {
+    async fn cancel(&self, handle: &StoredRun, reason: &str) -> Result<()> {
         // Agent-session callers route through orx up before reaching this trusted path.
-        crate::commands::exp::request_local_run_cancel(&Store::open()?, &handle.id)
+        crate::commands::exp::request_local_run_cancel(&Store::open()?, &handle.id, reason)
     }
 
     async fn cleanup(&self, handle: &StoredRun) -> Result<()> {
@@ -831,6 +831,7 @@ pub async fn submit(args: &crate::ExpRunArgs) -> Result<StoredRun> {
         commit_sha: Some(source.0.revision.clone()),
         result_markdown: None,
         cancel_requested: false,
+        cancel_reason: None,
         chat_session_id: args.launching_chat_session(),
     };
     let chat_harness = match &pending.chat_session_id {
@@ -970,11 +971,12 @@ fn reserve_run(
             .find(|run| !crate::local::is_terminal(&run.status))
         {
             return Err(anyhow!(
-                "Run {} is already in flight for this experiment ({}). Cancel it with \
-                 `orx exp cancel {}` or pass --force to launch anyway.",
+                "Run {} is already in flight for this experiment ({}). Wait for it with \
+                 `orx exp wait {exp}`; cancel it with `orx exp cancel {exp}` only if it \
+                 should stop, or pass --force to launch anyway.",
                 run.id,
                 run.status,
-                pending.experiment_id
+                exp = pending.experiment_id
             ));
         }
     }
