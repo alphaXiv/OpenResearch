@@ -36,6 +36,24 @@ fn open_supervisor_lock(path: &std::path::Path) -> Result<fd_lock::RwLock<std::f
     Ok(fd_lock::RwLock::new(file))
 }
 
+fn supervisor_lock_path(run_id: &str) -> std::path::PathBuf {
+    log_path(run_id).with_extension("supervisor.lock")
+}
+
+/// Whether a live `orx supervise` holds `run_id`'s lock.
+pub(crate) fn supervisor_running(run_id: &str) -> bool {
+    lock_held(&supervisor_lock_path(run_id))
+}
+
+fn lock_held(path: &std::path::Path) -> bool {
+    let Ok(mut lock) = open_supervisor_lock(path) else {
+        return false;
+    };
+    // Bound so the guard drops before `lock`.
+    let held = matches!(lock.try_write(), Err(e) if e.kind() == std::io::ErrorKind::WouldBlock);
+    held
+}
+
 /// One streaming log pass, cut short (`None`) when the job ends so the final
 /// pass starts at once. That pass's only deadline is the watcher's drain bound.
 async fn log_pass<T>(
@@ -85,8 +103,7 @@ pub async fn run(args: crate::SuperviseArgs) -> Result<()> {
     let run_id = args.run_id;
 
     let store = Store::open()?;
-    let lock_path = log_path(&run_id).with_extension("supervisor.lock");
-    let mut supervisor_lock = open_supervisor_lock(&lock_path)?;
+    let mut supervisor_lock = open_supervisor_lock(&supervisor_lock_path(&run_id))?;
     let _supervisor_guard = match supervisor_lock.try_write() {
         Ok(guard) => guard,
         Err(err) if err.kind() == std::io::ErrorKind::WouldBlock => return Ok(()),
@@ -1625,6 +1642,24 @@ mod tests {
         drop(first_guard);
         drop(first);
         drop(second);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn a_run_lock_is_held_only_while_its_supervisor_lives() {
+        let dir =
+            std::env::temp_dir().join(format!("orx-supervisor-held-test-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("run.lock");
+        assert!(!lock_held(&path));
+
+        let mut supervisor = open_supervisor_lock(&path).unwrap();
+        let guard = supervisor.try_write().unwrap();
+        assert!(lock_held(&path));
+
+        drop(guard);
+        assert!(!lock_held(&path));
+        drop(supervisor);
         let _ = std::fs::remove_dir_all(dir);
     }
 }

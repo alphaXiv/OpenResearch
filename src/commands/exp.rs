@@ -189,10 +189,52 @@ pub(crate) fn spawn_detached_supervise(run_id: &str) -> Result<()> {
         // Rename rather than truncate: a still-running supervisor keeps writing to its handle.
         let _ = std::fs::rename(&path, path.with_extension("log.1"));
     }
+    let mut child = match supervise_command(&exe, run_id, &path).spawn() {
+        // `/proc/self/exe` can name a path this process cannot exec (OR-334); the `orx` on PATH still runs.
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            match crate::local::shell_env::find_on_path("orx").filter(|orx| *orx != exe) {
+                Some(orx) => {
+                    let tried = format!("`{}`{}: {error}", exe.display(), current_exe_note(&exe));
+                    let child = supervise_command(&orx, run_id, &path)
+                        .spawn()
+                        .map_err(|e| {
+                            anyhow!(
+                                "{} First tried {tried}.",
+                                supervise_spawn_error(&orx, run_id, e)
+                            )
+                        })?;
+                    let warning = format!(
+                        "warning: could not run {tried}; started the supervisor with `{}`.",
+                        orx.display()
+                    );
+                    eprintln!("{warning}");
+                    // A forwarded launch prints this on `orx up`'s stderr; keep it beside the run too.
+                    if let Ok(mut log) = std::fs::OpenOptions::new().append(true).open(&path) {
+                        use std::io::Write as _;
+                        let _ = log.write_all(format!("{warning}\n").as_bytes());
+                    }
+                    child
+                }
+                None => return Err(supervise_spawn_error(&exe, run_id, error)),
+            }
+        }
+        result => result.map_err(|e| supervise_spawn_error(&exe, run_id, e))?,
+    };
+    std::thread::spawn(move || {
+        let _ = child.wait();
+    });
+    Ok(())
+}
+
+fn supervise_command(
+    exe: &std::path::Path,
+    run_id: &str,
+    log_path: &std::path::Path,
+) -> std::process::Command {
     let stderr = std::fs::OpenOptions::new()
         .create(true)
         .append(true)
-        .open(path)
+        .open(log_path)
         .map_or_else(|_| std::process::Stdio::null(), std::process::Stdio::from);
     // A long-lived `orx up` may be running a replaced binary; spawn the new file at its path.
     let mut cmd = std::process::Command::new(exe);
@@ -221,13 +263,41 @@ pub(crate) fn spawn_detached_supervise(run_id: &str) -> Result<()> {
         use std::os::windows::process::CommandExt;
         cmd.creation_flags(windows_sys::Win32::System::Threading::CREATE_NO_WINDOW);
     }
-    let mut child = cmd
-        .spawn()
-        .map_err(|e| anyhow!("Could not spawn `orx supervise {}`: {}", run_id, e))?;
-    std::thread::spawn(move || {
-        let _ = child.wait();
-    });
-    Ok(())
+    cmd
+}
+
+/// Names the binary that failed and how to attach a supervisor by hand, since
+/// the run stays `starting` without one.
+fn supervise_spawn_error(
+    exe: &std::path::Path,
+    run_id: &str,
+    error: std::io::Error,
+) -> crate::error::Error {
+    let missing = if exe.exists() {
+        ""
+    } else {
+        " (no file at that path)"
+    };
+    let current = if crate::paths::spawnable_exe().is_ok_and(|own| own == exe) {
+        current_exe_note(exe)
+    } else {
+        String::new()
+    };
+    anyhow!(
+        "Could not spawn `{} supervise {run_id}`{missing}{current}: {error}. A running `orx up` retries \
+         within about 6 minutes; otherwise start `{} supervise {run_id}` in the background.",
+        exe.display(),
+        crate::invocation::orx(),
+    )
+}
+
+/// The kernel's own name for this binary when it differs from the spawned path, e.g. `… (deleted)`.
+fn current_exe_note(exe: &std::path::Path) -> String {
+    std::env::current_exe()
+        .ok()
+        .filter(|raw| raw != exe)
+        .map(|raw| format!(" (current_exe: {})", raw.display()))
+        .unwrap_or_default()
 }
 
 /// Who asked `orx exp cancel` to stop a run, recorded on the run.
@@ -288,6 +358,18 @@ fn request_local_run_cancel_with(
 mod tests {
     use super::*;
     use crate::store::StoredRun;
+
+    #[test]
+    fn supervise_spawn_error_names_the_binary_and_the_manual_attach() {
+        let message = supervise_spawn_error(
+            std::path::Path::new("/nonexistent/orx"),
+            "run-1",
+            std::io::Error::from(std::io::ErrorKind::NotFound),
+        )
+        .to_string();
+        assert!(message.contains("`/nonexistent/orx supervise run-1` (no file at that path)"));
+        assert!(message.ends_with(" supervise run-1` in the background."));
+    }
 
     fn run_fixture() -> StoredRun {
         StoredRun {
