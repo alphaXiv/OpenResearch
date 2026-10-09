@@ -137,8 +137,8 @@ function draw(){
  const categories=metric.type==='bar'?[...new Map(series().flatMap(points).map(p=>[p.step,p])).values()]:null;
  const integerSteps=!categories&&metric.xScale!=='log'&&(metric.xLabel||data.xLabel||'Training step')==='Training step'?trainingStepTicks(xmin,xmax):null;
  const xTicks=categories?categories.map(p=>p.step):integerSteps||Array.from({length:5},(_,i)=>metric.xScale==='log'?10**(tx(xmin)+(tx(xmax)-tx(xmin))*i/4):xmin+(xmax-xmin)*i/4);
- const xSpacing=Math.min(...xTicks.slice(1).map((value,i)=>Math.abs(value-xTicks[i])))||1;
- for(const [i,value] of xTicks.entries())chart.append(element('text',{x:x(value),y:height-bottom+23,'text-anchor':x(value)<=left+1?'start':x(value)>=width-right-1?'end':'middle',fill:'var(--fg)','font-size':'var(--tick-size)'},categories?categories[i].label:tickLabel(value,xSpacing)));
+ const xSpacing=xTicks.length>1?Math.min(...xTicks.slice(1).map((value,i)=>Math.abs(value-xTicks[i])))||1:1;
+ for(const [i,value] of xTicks.entries())chart.append(element('text',{x:x(value),y:height-bottom+23,'text-anchor':x(value)<=left+1?'start':x(value)>=width-right-1?'end':'middle',fill:'var(--fg)','font-size':'var(--tick-size)'},categories?categories[i].label:Number.isInteger(value)?value:tickLabel(value,xSpacing)));
  chart.append(element('text',{x:14,y:top-32,'text-anchor':'start',fill:'var(--fg)','font-size':'var(--label-size)','font-weight':500},`${metric.yLabel||metric.label}${metric.unit?` (${metric.unit})`:""}${metric.yScale==='log'?' · log scale':''}`),
   element('text',{x:width-right,y:height-3,'text-anchor':'end',fill:'var(--fg)','font-size':'var(--label-size)','font-weight':500},`${metric.xLabel||data.xLabel||'Training step'}${metric.xScale==='log'?' · log scale':''}`));
  const defs=element('defs'),clip=element('clipPath',{id:'plot-area'});clip.append(element('rect',{x:left,y:top,width:width-left-right,height:height-top-bottom}));defs.append(clip);chart.append(defs);

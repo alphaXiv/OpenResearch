@@ -100,3 +100,10 @@ test("narrow ranges at large x-values keep fractional ticks distinct", () => {
     assert.ok(ticks.every((tick,i)=>Math.abs(tick-(100000.1+i*.2))<.01));
   }
 });
+
+
+test("a tight training-step zoom keeps its single integer tick exact", () => {
+  const {svg,layout}=render({type:"line"},[{name:"Arm",points:[{step:123,loss:1},{step:125,loss:2}]}],"domain={x:[123.2,124.8]};draw()");
+  const ticks=svg.children.filter(node=>node.attributes.y===String(layout.height-layout.bottom+23)).map(node=>Number(node.textContent));
+  assert.deepEqual(ticks,[124]);
+});
