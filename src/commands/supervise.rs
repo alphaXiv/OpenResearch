@@ -144,9 +144,15 @@ pub async fn run(args: crate::SuperviseArgs) -> Result<()> {
             descriptor = recovered;
         }
     }
-    if descriptor.job_id.is_none() {
-        if let Some(found) = crate::compute::reconcile_submission(&run_id, &descriptor).await {
-            descriptor = found;
+    // Failing while the cluster is unreachable would orphan a job it may have accepted.
+    while descriptor.job_id.is_none() {
+        match crate::compute::reconcile_submission(&run_id, &descriptor).await {
+            Ok(Some(found)) => descriptor = found,
+            Ok(None) => break,
+            Err(err) => {
+                eprintln!("supervise {run_id}: job lookup failed (will retry): {err}");
+                tokio::time::sleep(POLL_INTERVAL).await;
+            }
         }
     }
     if descriptor.job_id.is_none() {

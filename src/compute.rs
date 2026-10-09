@@ -884,7 +884,7 @@ pub async fn submit(args: &crate::ExpRunArgs) -> Result<StoredRun> {
                 .and_then(|run| BackendDescriptor::parse(&run.backend_json).ok());
             let handle_was_persisted = descriptor.as_ref().is_some_and(|d| d.job_id.is_some());
             if let (false, Some(descriptor)) = (handle_was_persisted, &descriptor) {
-                if let Some(found) = reconcile_submission(&run_id, descriptor).await {
+                if let Ok(Some(found)) = reconcile_submission(&run_id, descriptor).await {
                     eprintln!(
                         "warning: {error}\nFound the submitted job {} and kept tracking it.",
                         found.job_id.unwrap_or_default()
@@ -1040,24 +1040,26 @@ pub fn record_submission_handle(run_id: &str, descriptor: &BackendDescriptor) ->
 pub async fn reconcile_submission(
     run_id: &str,
     descriptor: &BackendDescriptor,
-) -> Option<BackendDescriptor> {
-    let host = descriptor
+) -> Result<Option<BackendDescriptor>> {
+    let Some(host) = descriptor
         .namespace
         .as_deref()
-        .filter(|_| descriptor.kind == "slurm_job")?;
-    let job_id = match crate::jobs::slurm::find_job(host, run_id).await {
-        Ok(job_id) => job_id?,
-        Err(error) => {
-            eprintln!("Could not look up run {run_id} on {host}: {error}");
-            return None;
-        }
+        .filter(|_| descriptor.kind == "slurm_job")
+    else {
+        return Ok(None);
+    };
+    let Some(job_id) = crate::jobs::slurm::find_job(host, run_id).await? else {
+        return Ok(None);
     };
     let found = BackendDescriptor {
         job_id: Some(job_id),
         ..descriptor.clone()
     };
-    record_submission_handle(run_id, &found).ok()?;
-    Some(found)
+    // Supervision proceeds from the in-memory handle and persists it on its next update.
+    if let Err(error) = record_submission_handle(run_id, &found) {
+        eprintln!("warning: could not record the recovered job for run {run_id}: {error}");
+    }
+    Ok(Some(found))
 }
 
 pub fn recover_submission_handle(run_id: &str) -> Result<Option<BackendDescriptor>> {
