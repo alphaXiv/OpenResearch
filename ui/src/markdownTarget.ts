@@ -52,7 +52,7 @@ export function resolveMarkdownTarget(
 
 /** Re-escapes a resolved path so resolving it again yields the same path. */
 export function encodeMarkdownPath(path: string): string {
-  return path.replace(/[%#?]/g, encodeURIComponent);
+  return path.replace(/[%#?:]/g, encodeURIComponent);
 }
 
 /** An asset `src` inside an inline HTML figure, joined to the figure's folder

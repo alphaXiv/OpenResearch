@@ -77,6 +77,7 @@ test("inline html figure assets resolve relative to the figure once", () => {
   });
   assert.equal(asset("figs/plot.html", "chart%25231.png").path, "figs/chart%231.png");
   assert.equal(asset("figs/plot.html", "a%3Fb.png").path, "figs/a?b.png");
+  assert.equal(asset("plot.html", "a%3Ab.png").path, "a:b.png");
   assert.equal(asset("/tmp/r/plot.html", "../a%231.png").path, "/tmp/a#1.png");
   assert.equal(htmlFigureAssetTarget("%E0%A4%A/plot.html", "a.png"), null);
 });
