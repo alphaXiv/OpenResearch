@@ -353,3 +353,24 @@
 .openresearch-diff .diff-code {
   @apply whitespace-pre-wrap break-normal break-words;
 }
+
+@layer components {
+.term-provenance {
+  display: flex;
+  align-items: center;
+  gap: 6px 14px;
+  min-height: 32px;
+  padding: 6px 10px;
+  overflow-x: auto;
+  border-bottom: 1px solid var(--border);
+  background: var(--surface);
+  color: var(--subtext);
+  font-size: 11px;
+  white-space: nowrap;
+  flex-shrink: 0;
+}
+.term-provenance code {
+  color: var(--text);
+  font-size: inherit;
+}
+}

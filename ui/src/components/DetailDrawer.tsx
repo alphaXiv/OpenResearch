@@ -15,6 +15,7 @@ import { LogTerminal } from "./LogTerminal";
 import { StatusBadge } from "./StatusBadge";
 import type { TabOpenIntent } from "../tabPreview";
 import { Button, MenuItem } from "./ui";
+import { historyBackendLabel, historyJobId } from "./experimentHistoryModel";
 
 export type ExperimentView = "overview" | "terminal";
 
@@ -179,6 +180,23 @@ function TerminalView({
           </div>
         )}
       </div>
+
+      {selectedRun && (
+        <div className="term-provenance" aria-label={m.detail_drawer_run_provenance()}>
+          <span>
+            {m.detail_drawer_provenance_run()} <code>{selectedRun.id}</code>
+          </span>
+          <span>
+            {m.detail_drawer_provenance_commit()} <code>{selectedRun.commitSha || m.history_commit_unavailable()}</code>
+          </span>
+          <span>
+            {m.detail_drawer_provenance_backend()} <code>{historyBackendLabel(selectedRun)}</code>
+          </span>
+          <span>
+            {m.detail_drawer_provenance_scheduler()} <code>{historyJobId(selectedRun)}</code>
+          </span>
+        </div>
+      )}
 
       <div className="term-fill flex-1 min-h-0 bg-terminal pt-1 pe-0 pb-1 ps-1.5">
         {selectedRun ? (

@@ -18,6 +18,7 @@ const mocks = {
   "./LogTerminal": { LogTerminal: ({ runId }) => `LOG:${runId}` },
   "./StatusBadge": { StatusBadge: () => null },
   "./ui": { Button: ({ children }) => React.createElement("button", null, children) },
+  "./experimentHistoryModel": { historyBackendLabel: () => "local", historyJobId: () => "—" },
   "lucide-react": { ChevronDown: () => null, CircleStop: () => null },
 };
 const exports = {};

@@ -95,6 +95,7 @@
   --shadow-plan-menu: 0 6px 20px rgb(0 0 0 / 12%);
   --shadow-logo: 0 0 0 1px rgb(0 0 0 / 8%);
   --shadow-tree: 0 1px 2px rgb(0 0 0 / 4%);
+  --shadow-row-selected: inset 2px 0 0 var(--primary);
   --shadow-tree-hover: 0 2px 8px rgb(0 0 0 / 8%);
   --shadow-tree-live: 0 2px 12px rgb(32 154 132 / 20%);
   --shadow-file-line: inset 2px 0 0 var(--accent-blue);

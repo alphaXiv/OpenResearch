@@ -145,6 +145,7 @@ pub enum Scope {
 pub enum ExperimentsView {
     Tree,
     Table,
+    History,
 }
 
 impl Pane {
