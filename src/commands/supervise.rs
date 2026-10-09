@@ -94,7 +94,7 @@ pub(crate) fn submission_lock_path(run_id: &str) -> std::path::PathBuf {
 fn settle_submission(
     store: &Store,
     run_id: &str,
-    lock_path: &std::path::Path,
+    wait_for_launcher: impl FnOnce() -> Result<()>,
 ) -> Result<Option<(crate::store::StoredRun, BackendDescriptor)>> {
     let load = || -> Result<Option<(crate::store::StoredRun, BackendDescriptor)>> {
         let stored = store
@@ -108,7 +108,7 @@ fn settle_submission(
     };
     match load()? {
         Some((_, descriptor)) if descriptor.job_id.is_none() => {
-            drop(open_supervisor_lock(lock_path)?.write()?);
+            wait_for_launcher()?;
             load()
         }
         loaded => Ok(loaded),
@@ -126,8 +126,10 @@ pub async fn run(args: crate::SuperviseArgs) -> Result<()> {
         Err(err) if err.kind() == std::io::ErrorKind::WouldBlock => return Ok(()),
         Err(err) => return Err(err.into()),
     };
-    let Some((stored, mut descriptor)) =
-        settle_submission(&store, &run_id, &submission_lock_path(&run_id))?
+    let Some((stored, mut descriptor)) = settle_submission(&store, &run_id, || {
+        drop(open_supervisor_lock(&submission_lock_path(&run_id))?.write()?);
+        Ok(())
+    })?
     else {
         return Ok(());
     };
@@ -140,6 +142,11 @@ pub async fn run(args: crate::SuperviseArgs) -> Result<()> {
         if let Some(recovered) = crate::compute::recover_submission_handle(&run_id)? {
             store.set_backend_json(&run_id, &recovered.to_json())?;
             descriptor = recovered;
+        }
+    }
+    if descriptor.job_id.is_none() {
+        if let Some(found) = crate::compute::reconcile_submission(&run_id, &descriptor).await {
+            descriptor = found;
         }
     }
     if descriptor.job_id.is_none() {
@@ -1623,7 +1630,6 @@ mod tests {
     fn a_supervisor_waits_for_an_in_flight_submission_handle() {
         let dir = std::env::temp_dir().join(format!("orx-submit-wait-{}", uuid::Uuid::new_v4()));
         let store = Store::open_at(dir.clone()).unwrap();
-        let lock_path = dir.join("run.submit.lock");
         store
             .upsert_run(&StoredRun {
                 id: "run-1".into(),
@@ -1642,33 +1648,12 @@ mod tests {
                 chat_session_id: None,
             })
             .unwrap();
-        let mut launcher = open_supervisor_lock(&lock_path).unwrap();
-        let submitting = launcher.write().unwrap();
-
-        let (started, ready) = std::sync::mpsc::channel();
-        let (settled, result) = std::sync::mpsc::channel();
-        std::thread::spawn({
-            let (dir, lock_path) = (dir.clone(), lock_path.clone());
-            move || {
-                let store = Store::open_at(dir).unwrap();
-                started.send(()).unwrap();
-                let settled_run = settle_submission(&store, "run-1", &lock_path).unwrap();
-                settled
-                    .send(settled_run.map(|(_, descriptor)| descriptor.job_id))
-                    .unwrap();
-            }
-        });
-        ready.recv().unwrap();
-        assert!(
-            result.recv_timeout(Duration::from_millis(300)).is_err(),
-            "must not give up while submission is in flight"
-        );
-        store
-            .set_backend_json("run-1", r#"{"kind":"slurm_job","jobId":"7"}"#)
-            .unwrap();
-        drop(submitting);
-
-        assert_eq!(result.recv().unwrap(), Some(Some("7".into())));
+        // The launcher records the handle only while the supervisor waits for it.
+        let settled = settle_submission(&store, "run-1", || {
+            store.set_backend_json("run-1", r#"{"kind":"slurm_job","jobId":"7"}"#)
+        })
+        .unwrap();
+        assert_eq!(settled.map(|(_, d)| d.job_id), Some(Some("7".into())));
         drop(store);
         let _ = std::fs::remove_dir_all(dir);
     }

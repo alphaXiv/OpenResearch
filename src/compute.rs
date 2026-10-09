@@ -860,7 +860,6 @@ pub async fn submit(args: &crate::ExpRunArgs) -> Result<StoredRun> {
         identity.as_ref(),
         report.as_ref(),
     )?;
-    let pending_backend_json = descriptor.to_json();
     match backend.submit(args, source, run_id.clone()).await {
         Ok(run) => {
             if project.github_enabled() {
@@ -878,10 +877,22 @@ pub async fn submit(args: &crate::ExpRunArgs) -> Result<StoredRun> {
             Ok(run)
         }
         Err(error) => {
-            let current = store.get_run(&run_id)?;
-            let handle_was_persisted = current
-                .as_ref()
-                .is_some_and(|run| run.backend_json != pending_backend_json);
+            let descriptor = store
+                .get_run(&run_id)?
+                .and_then(|run| BackendDescriptor::parse(&run.backend_json).ok());
+            let handle_was_persisted = descriptor.as_ref().is_some_and(|d| d.job_id.is_some());
+            if let (false, Some(descriptor)) = (handle_was_persisted, &descriptor) {
+                if let Some(found) = reconcile_submission(&run_id, descriptor).await {
+                    eprintln!(
+                        "warning: {error}\nFound the submitted job {} and kept tracking it.",
+                        found.job_id.unwrap_or_default()
+                    );
+                    crate::commands::exp::spawn_detached_supervise(&run_id)?;
+                    return store
+                        .get_run(&run_id)?
+                        .ok_or_else(|| anyhow!("Run {run_id} not found in the local store."));
+                }
+            }
             if !handle_was_persisted
                 && store.update_status(
                     &run_id,
@@ -1019,6 +1030,31 @@ pub fn record_submission_handle(run_id: &str, descriptor: &BackendDescriptor) ->
         eprintln!("warning: could not write redundant submission recovery record: {error}");
     }
     Ok(())
+}
+
+/// Find a submission whose handle was never recorded by its run id and record
+/// it. Only Slurm can be looked up this way; other providers return `None`.
+pub async fn reconcile_submission(
+    run_id: &str,
+    descriptor: &BackendDescriptor,
+) -> Option<BackendDescriptor> {
+    let host = descriptor
+        .namespace
+        .as_deref()
+        .filter(|_| descriptor.kind == "slurm_job")?;
+    let job_id = match crate::jobs::slurm::find_job(host, run_id).await {
+        Ok(job_id) => job_id?,
+        Err(error) => {
+            eprintln!("Could not look up run {run_id} on {host}: {error}");
+            return None;
+        }
+    };
+    let found = BackendDescriptor {
+        job_id: Some(job_id),
+        ..descriptor.clone()
+    };
+    record_submission_handle(run_id, &found).ok()?;
+    Some(found)
 }
 
 pub fn recover_submission_handle(run_id: &str) -> Result<Option<BackendDescriptor>> {

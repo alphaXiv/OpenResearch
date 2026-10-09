@@ -153,10 +153,8 @@ fn slurm_time(secs: u64) -> String {
 /// `echo $? > exit_code` line — same contract as the ssh backend's run.sh.
 fn render_sbatch(spec: &SlurmJobSpec) -> String {
     let mut directives = vec![
-        format!(
-            "#SBATCH --job-name=orx-{}",
-            &spec.run_id[..spec.run_id.len().min(8)]
-        ),
+        // The full run id lets a handle lost mid-submission be found again (`find_job`).
+        format!("#SBATCH --job-name=orx-{}", spec.run_id),
         "#SBATCH --output=log".to_string(),
         "#SBATCH --error=log".to_string(),
         "#SBATCH --open-mode=append".to_string(),
@@ -251,6 +249,20 @@ pub async fn run_job(spec: &SlurmJobSpec) -> Result<String> {
     .await
     .map_err(|e| anyhow!("sbatch failed: {e}"))?;
     parse_job_id(&out)
+}
+
+/// The queued or running job submitted for `run_id`, found by its job name.
+pub async fn find_job(host: &str, run_id: &str) -> Result<Option<String>> {
+    let out = ssh_run(
+        &SshTarget::alias(host),
+        &format!(
+            "squeue -h -u \"$(id -un)\" --name={} -o %i",
+            sh_quote(&format!("orx-{run_id}"))
+        ),
+        None,
+    )
+    .await?;
+    Ok(out.split_whitespace().next().map(str::to_string))
 }
 
 /// Job state in the shared stage vocabulary (see `jobs::stage_to_run_status`).
@@ -491,7 +503,7 @@ mod tests {
     fn sbatch_minimal_has_only_fixed_directives() {
         let script = render_sbatch(&spec());
         assert!(script.starts_with("#!/usr/bin/env bash\n"));
-        assert!(script.contains("#SBATCH --job-name=orx-01234567\n"));
+        assert!(script.contains("#SBATCH --job-name=orx-0123456789abcdef\n"));
         assert!(script.contains("#SBATCH --output=log\n"));
         assert!(!script.contains("--partition"));
         assert!(!script.contains("--account"));
@@ -609,6 +621,7 @@ mod tests {
         // Cancel path: scancel'd job leaves the queue without an exit code.
         let job_b = run_job(&mk(&run_b, "sleep 300")).await.unwrap();
         poll(run_b.clone(), job_b.clone(), &["RUNNING", "SCHEDULING"]).await;
+        assert_eq!(find_job(&host, &run_b).await.unwrap(), Some(job_b.clone()));
         cancel_job(&host, &job_b).await.unwrap();
         let after = poll(run_b, job_b, &["CANCELED", "GONE", "ERROR"]).await;
         // Best-effort teardown before asserting — don't litter the cluster.
