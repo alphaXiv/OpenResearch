@@ -165,6 +165,10 @@
   margin-inline: auto;
 }
 
+.msg-assistant .md figure:has(.inline-html-figure) {
+  width: 100%;
+}
+
 /* Inline flex otherwise inherits paragraph leading and outgrows code chips. */
 .md .file-chip {
   line-height: 1.3;

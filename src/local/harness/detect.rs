@@ -158,6 +158,9 @@ pub struct ModelInfo {
     /// Additional processing tiers this model advertises (Codex Fast mode).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub service_tiers: Option<Vec<super::options::OptionChoice>>,
+    /// Whether the model accepts image input, when the catalog says (OpenCode).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub image_input: Option<bool>,
 }
 
 impl ModelInfo {
@@ -171,6 +174,7 @@ impl ModelInfo {
             description: None,
             default_reasoning_level: None,
             service_tiers: None,
+            image_input: None,
         }
     }
 
@@ -204,6 +208,11 @@ impl ModelInfo {
         } else {
             super::options::reasoning_choices(ids)
         });
+        self
+    }
+
+    pub(super) fn with_image_input(mut self, image_input: Option<bool>) -> Self {
+        self.image_input = image_input;
         self
     }
 

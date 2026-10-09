@@ -31,7 +31,7 @@ export const DEMO_SEEDED_LEAF_IDS: Record<string, string> = {
   [DEMO_LITERATURE_SESSION_ID]: "msg_demo_nanochat_literature_assistant_v1",
 };
 export const DEMO_RUN_EXPERIMENT_PROMPT =
-  "Run the Muon matrix LR 2× probe experiment. When it finishes, compare its step-100 and step-200 val_bpb against the baseline and tell me whether doubling the matrix learning rate helps early training.";
+  "Run the proposed learning-rate probe experiment. Summarize its results using the recorded validation metric and comparison described by the experiment. If it produces an interactive HTML loss chart, show it inline using image syntax.";
 
 export class FileChangedError extends Error {
   readonly currentVersion: string | null;
@@ -1551,6 +1551,8 @@ export interface HarnessModel {
   defaultReasoningLevel?: string;
   /** Additional processing tiers this model advertises (Codex Fast mode). */
   serviceTiers?: OptionChoice[];
+  /** Whether the model accepts images; absent when the catalog doesn't say. */
+  imageInput?: boolean;
 }
 
 /** Display label for a harness model: the catalog's own name when it has one,

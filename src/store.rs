@@ -242,6 +242,8 @@ pub struct StoredRun {
     pub result_markdown: Option<String>,
     /// Cancel intent polled by the detached supervisor.
     pub cancel_requested: bool,
+    /// Who asked for the cancel; written only by `Store::request_cancel`, never by `upsert_run`.
+    pub cancel_reason: Option<String>,
     /// The `orx up` chat session that launched this run, when it was started by
     /// an agent harness child (which exports `ORX_CHAT_SESSION_ID`). `None` for
     /// CLI-launched runs. This records attribution; wake-ups are
@@ -710,6 +712,7 @@ impl Store {
             "ALTER TABLE chat_spawns ADD COLUMN attempts INTEGER NOT NULL DEFAULT 0",
             "ALTER TABLE chat_spawns ADD COLUMN finished_at INTEGER",
             "ALTER TABLE chat_messages ADD COLUMN completed_at INTEGER",
+            "ALTER TABLE runs ADD COLUMN cancel_reason TEXT",
         ] {
             let _ = conn.execute(ddl, []);
         }
@@ -1285,7 +1288,7 @@ impl Store {
             "SELECT r.id, r.experiment_id, r.project_id, r.status, r.backend_json, r.command,
                     r.created_at, r.updated_at, r.ended_at, r.exit_code,
                     r.commit_sha, r.result_markdown, r.cancel_requested, r.chat_session_id,
-                    w.chat_session_id, w.state, w.monitoring_alerted
+                    r.cancel_reason, w.chat_session_id, w.state, w.monitoring_alerted
              FROM chat_run_wakeups w
              JOIN runs r ON r.id = w.run_id
              WHERE {filter}"
@@ -1293,9 +1296,9 @@ impl Store {
         let rows = stmt.query_map([], |row| {
             Ok(RunWakeup {
                 run: row_to_run(row)?,
-                chat_session_id: row.get(14)?,
-                state: row.get(15)?,
-                monitoring_alerted: row.get(16)?,
+                chat_session_id: row.get(15)?,
+                state: row.get(16)?,
+                monitoring_alerted: row.get(17)?,
             })
         })?;
         Ok(rows.collect::<std::result::Result<Vec<_>, _>>()?)
@@ -1612,10 +1615,21 @@ impl Store {
         Ok(())
     }
 
-    pub fn set_cancel_requested(&self, run_id: &str, requested: bool) -> Result<()> {
+    /// First requester wins; true when this call set the cancel intent.
+    pub fn request_cancel(&self, run_id: &str, reason: &str) -> Result<bool> {
+        let changed = self.conn.execute(
+            "UPDATE runs SET cancel_requested = 1, cancel_reason = ?2, updated_at = ?3
+             WHERE id = ?1 AND cancel_requested = 0 AND status IN ('starting', 'running')",
+            params![run_id, reason, now_ms()],
+        )?;
+        Ok(changed == 1)
+    }
+
+    /// Keeps the reason: a live supervisor may already have acted on the request.
+    pub fn withdraw_cancel(&self, run_id: &str) -> Result<()> {
         self.conn.execute(
-            "UPDATE runs SET cancel_requested = ?2, updated_at = ?3 WHERE id = ?1",
-            params![run_id, requested, now_ms()],
+            "UPDATE runs SET cancel_requested = 0, updated_at = ?2 WHERE id = ?1",
+            params![run_id, now_ms()],
         )?;
         Ok(())
     }
@@ -3397,7 +3411,7 @@ fn row_to_chat_session(
 const SELECT_RUN: &str = "SELECT id, experiment_id, project_id, status, backend_json, command,
                                  created_at, updated_at, ended_at, exit_code,
                                  commit_sha, result_markdown, cancel_requested,
-                                 chat_session_id FROM runs";
+                                 chat_session_id, cancel_reason FROM runs";
 
 const PROJECT_COLS: &str = "id, name, slug, github_owner, github_repo, github_sync_enabled, \
                             baseline_branch, repo_path, run_command, paper_id, created_at, updated_at";
@@ -3422,6 +3436,7 @@ fn row_to_run(row: &rusqlite::Row<'_>) -> std::result::Result<StoredRun, rusqlit
         result_markdown: row.get(11)?,
         cancel_requested: row.get(12)?,
         chat_session_id: row.get(13)?,
+        cancel_reason: row.get(14)?,
     })
 }
 
@@ -4880,6 +4895,7 @@ mod tests {
             commit_sha: None,
             result_markdown: None,
             cancel_requested: false,
+            cancel_reason: None,
             chat_session_id: chat_session_id.map(str::to_string),
         }
     }

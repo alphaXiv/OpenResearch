@@ -92,7 +92,7 @@ one; if none, use the skill's default preamble.
 Method:
 1. Ground the paper in what actually ran. Read the tree with `orx project view
    <projectId>`, then use `orx logs` to locate each file and read every number
-   you intend to report from it (the `orx-evidence` skill covers this). Never
+   you intend to report from it (the `orx-logs` skill covers this). Never
    write a metric you have not read
    out of a run; if something is not measured yet, say so in the text.
 2. Load `orx-lit-review`, retrieve real related work with `orx discover`, and

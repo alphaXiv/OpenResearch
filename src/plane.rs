@@ -11,6 +11,7 @@ pub struct Run {
     pub duration_secs: i64,
     pub updated_display: String,
     pub result_markdown: Option<String>,
+    pub cancel_reason: Option<String>,
 }
 
 impl From<&StoredRun> for Run {
@@ -23,12 +24,16 @@ impl From<&StoredRun> for Run {
             duration_secs: crate::local::run_duration_secs(run),
             updated_display: crate::local::fmt_ago(run.updated_at),
             result_markdown: run.result_markdown.clone(),
+            cancel_reason: run.cancel_reason.clone(),
         }
     }
 }
 
 impl Run {
     pub fn failure_detail(&self) -> Option<String> {
+        if self.status == "cancelled" {
+            return self.cancel_reason.as_ref().map(|r| format!("reason: {r}"));
+        }
         if self.status != "failed" {
             return None;
         }
@@ -136,6 +141,7 @@ mod tests {
             commit_sha: Some("abcdef1234567890".to_string()),
             result_markdown: result_markdown.map(str::to_string),
             cancel_requested: false,
+            cancel_reason: None,
             chat_session_id: None,
         }
     }
@@ -156,6 +162,17 @@ mod tests {
         assert_eq!(
             run.failure_detail().as_deref(),
             Some("reason: — (no message recorded — see `orx logs r1`)")
+        );
+    }
+
+    #[test]
+    fn cancelled_run_reports_who_requested_the_cancel() {
+        let mut run = Run::from(&stored_run("cancelled", None));
+        assert_eq!(run.failure_detail(), None);
+        run.cancel_reason = Some("Cancel requested with `orx exp cancel`.".into());
+        assert_eq!(
+            run.failure_detail().as_deref(),
+            Some("reason: Cancel requested with `orx exp cancel`.")
         );
     }
 
