@@ -1956,6 +1956,14 @@ impl Store {
         Ok(())
     }
 
+    pub fn set_experiment_parent(&self, id: &str, parent: Option<&str>) -> Result<()> {
+        self.conn.execute(
+            "UPDATE local_experiments SET parent_experiment_id = ?2, updated_at = MAX(updated_at + 1, ?3) WHERE id = ?1",
+            params![id, parent, now_ms()],
+        )?;
+        Ok(())
+    }
+
     pub fn set_experiments_archived(
         &mut self,
         ids: &[String],
