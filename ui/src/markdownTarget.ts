@@ -108,6 +108,11 @@ export function chatImageTarget(src: string): (Pick<MarkdownTarget, "path" | "ha
   if (!resolved) return null;
   // Local-image queries must not override the selected file or session.
   const target = { path: resolved.path, hash: resolved.hash };
+  // An encoded drive path (`C%3A/…`) decodes to `C:/…`, so classify the decoded
+  // path too — the re-resolve round trip keeps the absolute source.
+  if (isWindowsDrivePath(target.path)) {
+    return { ...target, path: target.path.replaceAll("\\", "/"), source: "absolute" };
+  }
   if (target.path.startsWith("/") || target.path.startsWith("~/") || windows) {
     return { ...target, source: "absolute" };
   }

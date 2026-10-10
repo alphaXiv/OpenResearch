@@ -82,6 +82,15 @@ test("inline html figure assets resolve relative to the figure once", () => {
   assert.equal(htmlFigureAssetTarget("%E0%A4%A/plot.html", "a.png"), null);
 });
 
+test("inline html figure assets on Windows figures stay absolute", () => {
+  const asset = (source, src) => chatImageTarget(htmlFigureAssetTarget(source, src));
+  for (const source of ["C:/figs/plot.html", String.raw`C:\figs\plot.html`, "C%3A/figs/plot.html"]) {
+    assert.deepEqual(asset(source, "chart.png"), {
+      path: "C:/figs/chart.png", hash: "", source: "absolute",
+    }, source);
+  }
+});
+
 test("markdown paths cannot escape their root", () => {
   assert.equal(resolveMarkdownTarget("docs", "../../secret.png"), null);
   assert.equal(resolveMarkdownTarget("", "../secret.png"), null);
@@ -122,6 +131,11 @@ test("chat images resolve local paths without crossing the session root", () => 
   assert.deepEqual(chatImageTarget("C:/papers/figure.png"), {
     path: "C:/papers/figure.png", hash: "", source: "absolute",
   });
+  for (const src of ["C%3A/papers/figure.png", "C%3A%5Cpapers%5Cfigure.png"]) {
+    assert.deepEqual(chatImageTarget(src), {
+      path: "C:/papers/figure.png", hash: "", source: "absolute",
+    }, src);
+  }
   assert.deepEqual(chatImageTarget("artifacts/paper/figure.png"), {
     path: "paper/figure.png", hash: "", source: "artifact",
   });
