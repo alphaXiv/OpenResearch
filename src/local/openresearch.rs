@@ -179,6 +179,8 @@ pub async fn submit_local_openresearch_with_source(
         ssh_port: None,
         ssh_user: None,
         timeout_secs: Some(timeout_secs),
+        cpus_per_task: None,
+        mem: None,
         source_digest: None,
         source_path: None,
         source_size: None,

@@ -78,7 +78,7 @@ export function PlanStrip({
   };
 
   return (
-    <div className="plan-strip relative w-full mt-0 mx-0 mb-2.5 py-[11px] px-[13px] flex flex-col items-stretch gap-2.5 border border-border border-s-[3px] border-s-accent-blue rounded-md bg-surface shadow-plan">
+    <div className="plan-strip relative w-full mt-0 mx-0 mb-2.5 py-[11px] px-[13px] flex flex-col items-stretch gap-2.5 border border-border border-s-[3px] border-s-accent-blue rounded-md bg-accent-blue-subtle shadow-plan">
       <div className="plan-strip-info flex items-baseline gap-2 min-w-0">
         <ScrollText size={14} className="plan-strip-icon text-accent-blue shrink-0 self-center" />
         <span dir="auto" className="plan-strip-title text-sm font-semibold whitespace-nowrap">
@@ -155,7 +155,7 @@ export function PlanStrip({
                 <ChevronDown size={13} />
               </Button>
               {menuOpen && (
-                <div className="plan-strip-menu absolute end-0 bottom-[calc(100%_+_4px)] flex min-w-47.5 flex-col rounded-md border border-border bg-surface p-1 shadow-plan-menu z-6">
+                <div className="plan-strip-menu absolute end-0 bottom-[calc(100%_+_4px)] flex min-w-47.5 flex-col rounded-md border border-border bg-background p-1 shadow-plan-menu z-6">
                   <MenuItem
                     onClick={() => {
                       setMenuOpen(false);

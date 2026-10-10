@@ -1065,6 +1065,8 @@ function SlurmSection() {
   const [partition, setPartition] = useState("");
   const [account, setAccount] = useState("");
   const [timeLimit, setTimeLimit] = useState("");
+  const [cpusPerTask, setCpusPerTask] = useState("");
+  const [mem, setMem] = useState("");
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [test, setTest] = useState<SlurmPreflight | null>(null);
@@ -1086,6 +1088,8 @@ function SlurmSection() {
     setPartition(s.partition ?? "");
     setAccount(s.account ?? "");
     setTimeLimit(s.timeLimit ?? "");
+    setCpusPerTask(s.cpusPerTask === null ? "" : String(s.cpusPerTask));
+    setMem(s.mem ?? "");
   };
 
   const previousSettings = useRef<SlurmSettings | null>(null);
@@ -1097,20 +1101,26 @@ function SlurmSection() {
       && partition.trim() === (previous.partition ?? "")
       && account.trim() === (previous.account ?? "")
       && timeLimit.trim() === (previous.timeLimit ?? "")
+      && cpusPerTask.trim() === (previous.cpusPerTask === null ? "" : String(previous.cpusPerTask))
+      && mem.trim() === (previous.mem ?? "")
     ))) {
       setHost(settings.host ?? "");
       setPartition(settings.partition ?? "");
       setAccount(settings.account ?? "");
       setTimeLimit(settings.timeLimit ?? "");
+      setCpusPerTask(settings.cpusPerTask === null ? "" : String(settings.cpusPerTask));
+      setMem(settings.mem ?? "");
     }
-  }, [settings, host, partition, account, timeLimit]);
+  }, [settings, host, partition, account, timeLimit, cpusPerTask, mem]);
 
   const unchanged =
     settings !== null &&
     host === (settings.host ?? "") &&
     partition.trim() === (settings.partition ?? "") &&
     account.trim() === (settings.account ?? "") &&
-    timeLimit.trim() === (settings.timeLimit ?? "");
+    timeLimit.trim() === (settings.timeLimit ?? "") &&
+    cpusPerTask.trim() === (settings.cpusPerTask === null ? "" : String(settings.cpusPerTask)) &&
+    mem.trim() === (settings.mem ?? "");
 
   async function submit(e: React.FormEvent) {
     e.preventDefault();
@@ -1124,6 +1134,9 @@ function SlurmSection() {
           partition: partition.trim(),
           account: account.trim(),
           timeLimit: timeLimit.trim(),
+          // Blank means "clear it"; the API reads 0 as back-to-partition-default.
+          cpusPerTask: Number(cpusPerTask.trim()) || 0,
+          mem: mem.trim(),
         }),
       );
     } catch (err) {
@@ -1239,6 +1252,30 @@ function SlurmSection() {
                   spellCheck={false}
                 />
               </label>
+              <div className="row2 mt-3">
+                <label>
+                  {m.settings_slurm_cpus_per_job()}
+                  <Input
+                    type="number"
+                    min={1}
+                    value={cpusPerTask}
+                    onChange={(e) => setCpusPerTask(e.target.value)}
+                    placeholder={m.settings_slurm_cpus_placeholder()}
+                    autoComplete="off"
+                  />
+                </label>
+                <label>
+                  {m.settings_slurm_memory()}
+                  <Input
+                    type="text"
+                    value={mem}
+                    onChange={(e) => setMem(e.target.value)}
+                    placeholder={m.settings_slurm_memory_placeholder()}
+                    autoComplete="off"
+                    spellCheck={false}
+                  />
+                </label>
+              </div>
             </div>
             {error && <div className="error">{error}</div>}
             <div className="actions">
@@ -3560,7 +3597,7 @@ function InstancesTable({ instances, emptyLabel }: { instances: Run[]; emptyLabe
   }
   return (
     <div className="instances-table-wrap overflow-x-auto">
-      <table className="runs-table w-full border-collapse bg-background text-base [&_th]:text-start [&_th]:text-text [&_th]:text-sm [&_th]:font-medium [&_th]:py-2 [&_th]:px-3 [&_th]:border-b [&_th]:border-b-border [&_th]:sticky [&_th]:top-0 [&_th]:bg-background [&_th]:z-1 [&_td]:py-2 [&_td]:px-3 [&_td]:border-b [&_td]:border-b-divider-faint [&_td]:whitespace-nowrap [&_tr:last-child_td]:border-b-0 [&_tr.clickable]:cursor-pointer [&_tr.clickable:hover_td]:bg-canvas">
+      <table className="runs-table w-full border-collapse bg-background text-base [&_th]:text-start [&_th]:text-text [&_th]:text-sm [&_th]:font-medium [&_th]:py-2 [&_th]:px-3 [&_th]:border-b [&_th]:border-b-border [&_th]:sticky [&_th]:top-0 [&_th]:bg-background [&_th]:z-1 [&_td]:py-2 [&_td]:px-3 [&_td]:border-b [&_td]:border-b-divider-faint [&_td]:whitespace-nowrap [&_tr:last-child_td]:border-b-0 [&_tr.clickable]:cursor-pointer [&_tr.clickable:hover_td]:bg-surface">
         <thead>
           <tr>
             <th>{m.settings_page_backend()}</th>
@@ -3627,7 +3664,7 @@ function ComputeActivity({ projectId, onViewHistory }: { projectId?: string; onV
   const past = instances?.filter((i) => !isLive(i.status)).sort(byRecent);
 
   return (
-    <section className="compute-activity [&_.count-badge]:inline-flex [&_.count-badge]:items-center [&_.count-badge]:justify-center [&_.count-badge]:min-w-4.5 [&_.count-badge]:h-4.5 [&_.count-badge]:py-0 [&_.count-badge]:px-[5px] [&_.count-badge]:rounded-md [&_.count-badge]:bg-canvas [&_.count-badge]:border [&_.count-badge]:border-border [&_.count-badge]:text-xs [&_.count-badge]:font-medium [&_.count-badge]:text-text mt-5.5 mx-0 mb-8">
+    <section className="compute-activity [&_.count-badge]:inline-flex [&_.count-badge]:items-center [&_.count-badge]:justify-center [&_.count-badge]:min-w-4.5 [&_.count-badge]:h-4.5 [&_.count-badge]:py-0 [&_.count-badge]:px-[5px] [&_.count-badge]:rounded-md [&_.count-badge]:bg-surface [&_.count-badge]:border [&_.count-badge]:border-border [&_.count-badge]:text-xs [&_.count-badge]:font-medium [&_.count-badge]:text-text mt-5.5 mx-0 mb-8">
       <div className="compute-activity-head flex items-start justify-between gap-5 mb-3.5 [&_h2]:flex [&_h2]:items-center [&_h2]:gap-2 [&_h2]:m-0 [&_h2]:text-lg [@media((max-width:_640px))]:items-stretch [@media((max-width:_640px))]:flex-col">
         <div>
           <h2>

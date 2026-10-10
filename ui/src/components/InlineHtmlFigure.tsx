@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useState } from "react";
 import { m } from "../paraglide/messages.js";
-import { isExternalMarkdownTarget, resolveMarkdownTarget } from "../markdownTarget";
+import { htmlFigureAssetTarget, isExternalMarkdownTarget } from "../markdownTarget";
 import { HtmlPreview } from "./HtmlPreview";
 
 export function InlineHtmlFigure({ source, url, fallbackUrl, name, resolveSrc }: {
@@ -36,9 +36,8 @@ export function InlineHtmlFigure({ source, url, fallbackUrl, name, resolveSrc }:
   }, [url, fallbackUrl]);
   const resolveAsset = useCallback((src: string) => {
     if (isExternalMarkdownTarget(src)) return src;
-    const folder = source.replaceAll("\\", "/").split("/").slice(0, -1).join("/");
-    const target = resolveMarkdownTarget(folder, src, true);
-    return target ? resolveSrc(target.path + target.hash, document?.fallback) : null;
+    const target = htmlFigureAssetTarget(source, src);
+    return target ? resolveSrc(target, document?.fallback) : null;
   }, [source, resolveSrc, document?.fallback]);
   return <div className="inline-html-figure my-2 w-full min-w-0">
     {document ? <HtmlPreview html={document.html} truncated={false} url={document.url} name={name} resolveSrc={resolveAsset} fitContent />
