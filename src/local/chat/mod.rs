@@ -1660,11 +1660,19 @@ impl ChatHost {
     ) -> Result<Option<String>> {
         let harness = crate::local::harness::chat_harness(&session.harness)
             .ok_or_else(|| anyhow!("unknown harness `{}`", session.harness))?;
+        let project = Store::open()?
+            .get_local_project(&session.project_id)?
+            .ok_or_else(|| anyhow!("project is gone"))?;
         let ctx = crate::local::harness::CompactCtx {
             host: self.clone(),
             session_id: session_id.to_string(),
             native_session_id: session.native_session_id.clone(),
             model: session.model.clone(),
+            project,
+            permission_mode: session.permission_mode.as_deref().and_then(|mode| {
+                crate::local::harness::permission_mode_for(&session.harness, mode)
+            }),
+            service_tier: session.service_tier.clone(),
         };
         match harness.compact(&ctx).await? {
             crate::local::harness::CompactOutcome::Native => Ok(None),
