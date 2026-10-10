@@ -8734,23 +8734,40 @@ const PATH_GUARD: &str =
 /// harness spawned still reach its later tool calls: a running process can't
 /// gain env vars, but every zsh and non-interactive bash invocation sources
 /// one of these hook files, so each tool call re-reads `~/.openresearch/env`
-/// itself. Unset-only, like [`prepare_env`]: a value the session really
-/// carries still wins over a synced one, and the line must be the exact
-/// `export KEY='v'` shape `config::write_synced_env_vars` writes.
+/// itself. Only complete `export KEY='v'` lines — the exact shape
+/// `config::write_synced_env_vars` writes — are honored, so a saved value
+/// with a newline can't wedge every later shell on a syntax error. The
+/// stored `'\''` and `\\` escapes are decoded the same way
+/// `config::list_synced_env` decodes them (quotes first, then backslashes),
+/// and unset-only, like [`prepare_env`], means a value the session really
+/// carries still wins over a synced one. Everything here is a shell builtin:
+/// a tool shell whose PATH can't find `env` or `grep` still applies the
+/// real-env-wins rule correctly.
 const SYNCED_ENV_HOOK: &str = r#"if [ -r "$HOME/.openresearch/env" ]; then
   while IFS= read -r _ORX_ENV_LINE; do
     case "$_ORX_ENV_LINE" in
-      export\ *\'*)
-        _ORX_ENV_KEY="${_ORX_ENV_LINE#export }"
-        _ORX_ENV_KEY="${_ORX_ENV_KEY%%=*}"
+      export\ *\'*\')
+        _ORX_ENV_REST="${_ORX_ENV_LINE#export }"
+        _ORX_ENV_KEY="${_ORX_ENV_REST%%=*}"
         case "$_ORX_ENV_KEY" in
           ''|[0-9]*|*[!A-Za-z0-9_]*) ;;
-          *) env | grep -q "^$_ORX_ENV_KEY=" || eval "$_ORX_ENV_LINE" ;;
+          *)
+            _ORX_ENV_QUOTED="${_ORX_ENV_REST#$_ORX_ENV_KEY=}"
+            case "$_ORX_ENV_QUOTED" in
+              \'*\')
+                _ORX_ENV_VAL="${_ORX_ENV_QUOTED#\'}"
+                _ORX_ENV_VAL="${_ORX_ENV_VAL%\'}"
+                _ORX_ENV_VAL="${_ORX_ENV_VAL//\'\\\'\'/\'}"
+                _ORX_ENV_VAL="${_ORX_ENV_VAL//\\\\/\\}"
+                eval "[ -n \"\${$_ORX_ENV_KEY+x}\" ]" || export "$_ORX_ENV_KEY=$_ORX_ENV_VAL"
+                ;;
+            esac
+            ;;
         esac
         ;;
     esac
   done < "$HOME/.openresearch/env"
-  unset _ORX_ENV_LINE _ORX_ENV_KEY
+  unset _ORX_ENV_LINE _ORX_ENV_REST _ORX_ENV_KEY _ORX_ENV_QUOTED _ORX_ENV_VAL
 fi
 "#;
 
@@ -8994,13 +9011,13 @@ mod session_env_tests {
 
     static ENV_LOCK: Mutex<()> = Mutex::new(());
 
-    struct EnvGuard {
+    pub(crate) struct EnvGuard {
         _lock: MutexGuard<'static, ()>,
         saved: Vec<(&'static str, Option<String>)>,
     }
 
     impl EnvGuard {
-        fn new(vars: &[&'static str]) -> Self {
+        pub(crate) fn new(vars: &[&'static str]) -> Self {
             let lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
             let saved = vars
                 .iter()
@@ -9138,22 +9155,31 @@ mod cap_tests {
     #[test]
     fn shell_hooks_pick_up_late_saved_env_without_shadowing_real_env() {
         let root = std::env::temp_dir().join(format!("orx-env-hook-{}", uuid::Uuid::new_v4()));
-        let env_dir = root.join(".openresearch");
-        std::fs::create_dir_all(&env_dir).unwrap();
-        crate::local::git::atomic_write_with_mode(
-            &env_dir.join("env"),
-            b"export LATE_SAVED='v1'\nexport WITH_QUOTE='it'\\''s'\nexport ALREADY_SET='file'\n",
-            None,
-        )
+        std::fs::create_dir_all(&root).unwrap();
+        let _guard = super::session_env_tests::EnvGuard::new(&["HOME"]);
+        std::env::set_var("HOME", &root);
+        crate::config::write_synced_env_vars(&[
+            ("LATE_SAVED", "v1"),
+            ("WITH_QUOTE", "it's"),
+            ("WITH_SLASH", r"C:\data"),
+            ("WITH_DOLLAR", "$(echo pwned)"),
+            ("MULTILINE", "first\nsecond"),
+            ("ALREADY_SET", "file"),
+        ])
         .unwrap();
         let shim = root.join("bash_env");
         std::fs::write(&shim, bash_env_hook(None)).unwrap();
+        // An empty PATH proves the whole hook is builtins: `env`/`grep` can't
+        // be found, yet the inherited value must still win — and the multiline
+        // record must not print a syntax error to stderr.
+        let no_tools = root.join("no-tools");
+        std::fs::create_dir_all(&no_tools).unwrap();
 
-        let output = std::process::Command::new("bash")
+        let output = std::process::Command::new("/bin/bash")
             .arg("-c")
-            .arg("printf '%s|%s|%s' \"$LATE_SAVED\" \"$WITH_QUOTE\" \"$ALREADY_SET\"")
+            .arg("printf '%s|%s|%s|%s|%s' \"$LATE_SAVED\" \"$WITH_QUOTE\" \"$WITH_SLASH\" \"$ALREADY_SET\" \"$WITH_DOLLAR\"")
             .env("BASH_ENV", &shim)
-            .env("HOME", &root)
+            .env("PATH", &no_tools)
             .env("ALREADY_SET", "real")
             .env_remove(CHAT_TARGET_FILE_ENV)
             .env_remove(CHAT_TARGET_POINTER_ENV)
@@ -9166,7 +9192,15 @@ mod cap_tests {
             "{}",
             String::from_utf8_lossy(&output.stderr)
         );
-        assert_eq!(String::from_utf8_lossy(&output.stdout), "v1|it's|real");
+        assert!(
+            output.stderr.is_empty(),
+            "hook printed an error: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert_eq!(
+            String::from_utf8_lossy(&output.stdout),
+            "v1|it's|C:\\data|real|$(echo pwned)"
+        );
     }
 
     #[cfg(unix)]
