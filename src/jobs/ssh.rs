@@ -1022,10 +1022,11 @@ fn host_cancel_script(dir: &str) -> String {
          case \"$p\" in ''|*[!0-9]*) exit 0;; esac; \
          d=\"$HOME/{dir}\"; dr=$(cd \"$d\" 2>/dev/null && pwd -P) || dr=\"$d\"; \
          declare -A tt=() kk=() 2>/dev/null; \
-         for ((i=0; i<200; i++)); do \
+         end=$((SECONDS + 20)); \
+         while [ \"$SECONDS\" -lt \"$end\" ]; do \
              for g in $p $(host_run_groups \"$dr\" \"$d\" \"$p\"); do \
                  if [ -z \"${{tt[$g]}}\" ]; then \
-                     tt[$g]=$i; \
+                     tt[$g]=$SECONDS; \
                      kill -TERM -- -\"$g\" 2>/dev/null || kill -TERM \"$g\" 2>/dev/null || true; \
                  fi; \
              done; \
@@ -1033,7 +1034,7 @@ fn host_cancel_script(dir: &str) -> String {
              for g in \"${{!tt[@]}}\"; do \
                  host_group_alive \"$g\" || continue; \
                  alive=1; \
-                 if [ -z \"${{kk[$g]}}\" ] && [ $((i - ${{tt[$g]}})) -ge 50 ]; then \
+                 if [ -z \"${{kk[$g]}}\" ] && [ $((SECONDS - ${{tt[$g]}})) -ge 5 ]; then \
                      kk[$g]=1; \
                      kill -KILL -- -\"$g\" 2>/dev/null || true; \
                  fi; \
