@@ -13,6 +13,30 @@ pub(crate) use telemetry::{InvocationIdentity, TokenUsage};
 
 use std::path::{Path, PathBuf};
 
+#[cfg(test)]
+thread_local! {
+    static TEST_DATA_DIR: std::cell::RefCell<Option<PathBuf>> = const {
+        std::cell::RefCell::new(None)
+    };
+}
+
+#[cfg(test)]
+pub(crate) struct TestDataDirGuard(Option<PathBuf>);
+
+#[cfg(test)]
+impl TestDataDirGuard {
+    pub(crate) fn new(dir: PathBuf) -> Self {
+        Self(TEST_DATA_DIR.with(|root| root.replace(Some(dir))))
+    }
+}
+
+#[cfg(test)]
+impl Drop for TestDataDirGuard {
+    fn drop(&mut self) {
+        TEST_DATA_DIR.with(|root| root.replace(self.0.take()));
+    }
+}
+
 use rusqlite::{params, Connection, OptionalExtension};
 use serde::Serialize;
 
@@ -22,6 +46,10 @@ use crate::local::model::{LocalExperiment, LocalProject};
 use crate::workspace_state::{GlobalWorkspaceState, WorkspaceState};
 
 pub fn data_dir() -> PathBuf {
+    #[cfg(test)]
+    if let Some(dir) = TEST_DATA_DIR.with(|root| root.borrow().clone()) {
+        return dir;
+    }
     // Resolution order (most to least authoritative):
     //   1. $ORX_DATA_DIR — explicit imperative override (launch.json, tests,
     //      the Codex sandbox pin). Stays on top so a forced path always wins.
@@ -426,6 +454,10 @@ impl Store {
     /// Open (creating dirs/schema as needed). WAL so the supervise writers and
     /// the serve readers never block each other.
     pub fn open() -> Result<Self> {
+        #[cfg(test)]
+        if let Some(dir) = TEST_DATA_DIR.with(|root| root.borrow().clone()) {
+            return Self::open_at(dir);
+        }
         Self::open_at_with_move_lock(data_dir(), data_dir_move_lock_path())
     }
 
@@ -1283,6 +1315,20 @@ impl Store {
         )
     }
 
+    /// Explicit experiment continuations still owed to this session, including
+    /// claimed terminal deliveries. Cancellation and deletion release the work.
+    pub fn session_has_run_wakeups(&self, session_id: &str) -> Result<bool> {
+        Ok(self.conn.query_row(
+            "SELECT EXISTS (
+                SELECT 1 FROM chat_run_wakeups w JOIN runs r ON r.id = w.run_id
+                WHERE w.chat_session_id = ?1 AND w.state IN ('pending', 'claimed')
+                  AND r.status != 'cancelled'
+            )",
+            params![session_id],
+            |row| row.get(0),
+        )?)
+    }
+
     fn list_run_wakeups(&self, filter: &'static str) -> Result<Vec<RunWakeup>> {
         let mut stmt = self.conn.prepare(&format!(
             "SELECT r.id, r.experiment_id, r.project_id, r.status, r.backend_json, r.command,
@@ -1456,6 +1502,89 @@ impl Store {
             params![session_id, from.as_str(), to.as_str(), token, now_ms()],
         )?;
         Ok((claimed == 1).then_some(token))
+    }
+
+    /// Completion is allowed only while the caller exclusively holds the
+    /// helper, and all explicitly subscribed experiment work has ended.
+    pub fn claim_completed_chat_spawn(
+        &self,
+        session_id: &str,
+        lease_token: &str,
+    ) -> Result<Option<String>> {
+        let token = uuid::Uuid::new_v4().to_string();
+        let now = now_ms();
+        let changed = self.conn.execute(
+            "UPDATE chat_spawns SET state = 'waking', claim_token = ?3, claimed_at = ?4
+             WHERE session_id = ?1 AND state = 'running'
+               AND EXISTS (
+                 SELECT 1 FROM chat_turn_leases
+                 WHERE chat_session_id = ?1 AND claim_token = ?2 AND heartbeat_at >= ?5
+               )
+               AND NOT EXISTS (
+                 SELECT 1 FROM chat_run_wakeups w JOIN runs r ON r.id = w.run_id
+                 WHERE w.chat_session_id = ?1 AND w.state IN ('pending', 'claimed')
+                   AND r.status != 'cancelled'
+               )",
+            params![
+                session_id,
+                lease_token,
+                token,
+                now,
+                now - CHAT_TURN_LEASE_TTL_MS
+            ],
+        )?;
+        Ok((changed == 1).then_some(token))
+    }
+
+    /// Validate completion authority and either renew it or atomically settle
+    /// the row while the helper lease remains owned and unexpired.
+    pub fn update_chat_spawn_completion(
+        &self,
+        session_id: &str,
+        token: &str,
+        lease_token: &str,
+        next: Option<ChatSpawnState>,
+    ) -> Result<bool> {
+        let now = now_ms();
+        let tx = rusqlite::Transaction::new_unchecked(
+            &self.conn,
+            rusqlite::TransactionBehavior::Immediate,
+        )?;
+        let changed = tx.execute(
+            "UPDATE chat_spawns
+             SET state = COALESCE(?7, state),
+                 claim_token = CASE WHEN ?7 IS NULL THEN claim_token ELSE NULL END,
+                 claimed_at = CASE WHEN ?7 IS NULL THEN ?4 ELSE NULL END
+             WHERE session_id = ?1 AND state = 'waking' AND claim_token = ?2
+               AND claimed_at >= ?5
+               AND EXISTS (
+                 SELECT 1 FROM chat_turn_leases WHERE chat_session_id = ?1
+                   AND claim_token = ?3 AND heartbeat_at >= ?6
+               )
+               AND NOT EXISTS (
+                 SELECT 1 FROM chat_run_wakeups w JOIN runs r ON r.id = w.run_id
+                 WHERE w.chat_session_id = ?1 AND w.state IN ('pending', 'claimed')
+                   AND r.status != 'cancelled'
+               )",
+            params![
+                session_id,
+                token,
+                lease_token,
+                now,
+                now - CHAT_SPAWN_CLAIM_TTL_MS,
+                now - CHAT_TURN_LEASE_TTL_MS,
+                next.map(ChatSpawnState::as_str)
+            ],
+        )?;
+        if changed == 1 {
+            tx.execute(
+                "UPDATE chat_turn_leases SET heartbeat_at = ?3
+                 WHERE chat_session_id = ?1 AND claim_token = ?2",
+                params![session_id, lease_token, now],
+            )?;
+        }
+        tx.commit()?;
+        Ok(changed == 1)
     }
 
     /// Finish (or hand back) a claimed step. `false` means the claim expired
@@ -2579,6 +2708,11 @@ impl Store {
                 turn.created_at,
                 turn.updated_at,
             ],
+        )?;
+        tx.execute(
+            "UPDATE chat_spawns SET finished_at = NULL
+             WHERE session_id = ?1 AND state = 'running'",
+            params![turn.session_id],
         )?;
         tx.commit()?;
         Ok(ChatTurnAdmission::Inserted)
@@ -4509,6 +4643,209 @@ mod tests {
             wake_parent: true,
             attempts: 0,
             finished_at: None,
+        }
+    }
+
+    #[test]
+    fn resumed_turn_admission_resets_only_new_helper_work() {
+        let dir = std::env::temp_dir().join(format!("orx-resume-{}", uuid::Uuid::new_v4()));
+        let store = Store::open_at(dir.clone()).unwrap();
+        store
+            .create_chat_session(&chat_session_fixture("chat_1"))
+            .unwrap();
+        store
+            .create_chat_spawn(&chat_spawn_fixture("chat_1", "parent"))
+            .unwrap();
+        let token = store
+            .claim_chat_spawn("chat_1", ChatSpawnState::Pending, ChatSpawnState::Starting)
+            .unwrap()
+            .unwrap();
+        store
+            .settle_chat_spawn("chat_1", &token, ChatSpawnState::Running)
+            .unwrap();
+        store.mark_chat_spawn_finished("chat_1").unwrap();
+        let turn = chat_turn_fixture("resumed", "client-resumed");
+
+        assert_eq!(
+            store.admit_chat_turn(None, &turn).unwrap(),
+            ChatTurnAdmission::Inserted
+        );
+        assert!(store
+            .get_chat_spawn("chat_1")
+            .unwrap()
+            .unwrap()
+            .finished_at
+            .is_none());
+        store.mark_chat_spawn_finished("chat_1").unwrap();
+        let finished_at = store.get_chat_spawn("chat_1").unwrap().unwrap().finished_at;
+        assert!(matches!(
+            store.admit_chat_turn(None, &turn).unwrap(),
+            ChatTurnAdmission::Existing(_)
+        ));
+        let mut conflict = turn.clone();
+        conflict.request_hash = "conflicting".into();
+        assert_eq!(
+            store.admit_chat_turn(None, &conflict).unwrap(),
+            ChatTurnAdmission::Conflict
+        );
+        assert_eq!(
+            store.get_chat_spawn("chat_1").unwrap().unwrap().finished_at,
+            finished_at
+        );
+        drop(store);
+        let store = Store::open_at(dir.clone()).unwrap();
+        let next = chat_turn_fixture("interrupted", "client-interrupted");
+        store.admit_chat_turn(None, &next).unwrap();
+        drop(store);
+        let store = Store::open_at(dir.clone()).unwrap();
+        assert!(store
+            .get_chat_spawn("chat_1")
+            .unwrap()
+            .unwrap()
+            .finished_at
+            .is_none());
+        drop(store);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn helper_completion_requires_its_live_lease_through_settlement() {
+        let dir = std::env::temp_dir().join(format!("orx-completion-{}", uuid::Uuid::new_v4()));
+        let store = Store::open_at(dir.clone()).unwrap();
+        store
+            .create_chat_session(&chat_session_fixture("child"))
+            .unwrap();
+        store
+            .create_chat_spawn(&chat_spawn_fixture("child", "parent"))
+            .unwrap();
+        let start = store
+            .claim_chat_spawn("child", ChatSpawnState::Pending, ChatSpawnState::Starting)
+            .unwrap()
+            .unwrap();
+        store
+            .settle_chat_spawn("child", &start, ChatSpawnState::Running)
+            .unwrap();
+        assert!(store
+            .claim_completed_chat_spawn("child", "mine")
+            .unwrap()
+            .is_none());
+        assert!(store.claim_chat_turn("child", "mine").unwrap());
+        assert!(store
+            .claim_completed_chat_spawn("child", "foreign")
+            .unwrap()
+            .is_none());
+        let completion = store
+            .claim_completed_chat_spawn("child", "mine")
+            .unwrap()
+            .unwrap();
+        let other = Store::open_at(dir.clone()).unwrap();
+        assert!(!other.claim_chat_turn("child", "other").unwrap());
+        store
+            .conn
+            .execute(
+                "UPDATE chat_turn_leases SET heartbeat_at = ?1 WHERE chat_session_id = 'child'",
+                params![now_ms() - CHAT_TURN_LEASE_TTL_MS - 1],
+            )
+            .unwrap();
+        assert!(!store
+            .update_chat_spawn_completion("child", &completion, "mine", Some(ChatSpawnState::Done))
+            .unwrap());
+        assert!(other.claim_chat_turn("child", "other").unwrap());
+        assert!(!store
+            .update_chat_spawn_completion("child", &completion, "mine", Some(ChatSpawnState::Done))
+            .unwrap());
+        store
+            .settle_chat_spawn("child", &completion, ChatSpawnState::Running)
+            .unwrap();
+        let completion = store
+            .claim_completed_chat_spawn("child", "other")
+            .unwrap()
+            .unwrap();
+        assert!(store
+            .update_chat_spawn_completion("child", &completion, "other", Some(ChatSpawnState::Done))
+            .unwrap());
+        other.release_chat_turn("child", "other").unwrap();
+        assert!(store.claim_chat_turn("child", "after-settlement").unwrap());
+        drop(other);
+        drop(store);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn helper_work_includes_claimed_terminal_wakeups_but_not_cancelled_or_deleted_runs() {
+        for status in ["running", "done", "failed", "cancelled", "deleted"] {
+            let dir =
+                std::env::temp_dir().join(format!("orx-outstanding-{}", uuid::Uuid::new_v4()));
+            let store = Store::open_at(dir.clone()).unwrap();
+            store
+                .create_chat_session(&chat_session_fixture("child"))
+                .unwrap();
+            store
+                .create_chat_spawn(&chat_spawn_fixture("child", "parent"))
+                .unwrap();
+            let start = store
+                .claim_chat_spawn("child", ChatSpawnState::Pending, ChatSpawnState::Starting)
+                .unwrap()
+                .unwrap();
+            store
+                .settle_chat_spawn("child", &start, ChatSpawnState::Running)
+                .unwrap();
+            store
+                .upsert_run(&run_fixture(
+                    "run",
+                    if status == "deleted" {
+                        "running"
+                    } else {
+                        status
+                    },
+                    Some("child"),
+                ))
+                .unwrap();
+            store.register_run_wakeup("run", "child").unwrap();
+            if status == "deleted" {
+                store
+                    .conn
+                    .execute("DELETE FROM runs WHERE id = 'run'", [])
+                    .unwrap();
+            }
+            let outstanding = !matches!(status, "cancelled" | "deleted");
+            assert_eq!(store.session_has_run_wakeups("child").unwrap(), outstanding);
+            assert!(!store.session_has_run_wakeups("parent").unwrap());
+            let wake = store.claim_run_wakeup("run", "child").unwrap().unwrap();
+            assert_eq!(store.session_has_run_wakeups("child").unwrap(), outstanding);
+            assert!(store.claim_chat_turn("child", "helper").unwrap());
+            let claim = store.claim_completed_chat_spawn("child", "helper").unwrap();
+            assert_eq!(claim.is_none(), outstanding);
+            if outstanding {
+                store
+                    .mark_run_wakeup_delivered("run", "child", &wake)
+                    .unwrap();
+                let claim = store
+                    .claim_completed_chat_spawn("child", "helper")
+                    .unwrap()
+                    .unwrap();
+                assert!(store
+                    .update_chat_spawn_completion(
+                        "child",
+                        &claim,
+                        "helper",
+                        Some(ChatSpawnState::Done)
+                    )
+                    .unwrap());
+            } else {
+                store.prune_run_wakeups().unwrap();
+                assert!(store.list_ready_run_wakeups().unwrap().is_empty());
+                assert!(store
+                    .update_chat_spawn_completion(
+                        "child",
+                        &claim.unwrap(),
+                        "helper",
+                        Some(ChatSpawnState::Done)
+                    )
+                    .unwrap());
+            }
+            drop(store);
+            std::fs::remove_dir_all(dir).unwrap();
         }
     }
 
