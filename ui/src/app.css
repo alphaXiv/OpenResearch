@@ -208,7 +208,8 @@
   text-decoration-color: currentColor;
 }
 
-.md .file-link code {
+.md .file-link code,
+.md a code {
   font: inherit;
   color: inherit;
   background: transparent;
