@@ -942,7 +942,16 @@ pub async fn cancel_job(
         container::cancel(target, container).await?;
     }
 
-    let script = format!(
+    let script = host_cancel_script(dir);
+    ssh_run(target, &format!("bash -c {}", sh_quote(&script)), None).await?;
+    Ok(())
+}
+
+/// The remote half of `cancel_job`: TERM the recorded process group, wait five
+/// seconds, then KILL whoever ignored it. Kept separate so tests can run it
+/// against a real local group.
+fn host_cancel_script(dir: &str) -> String {
+    format!(
         "{HOST_PROCESS_HELPERS}\n\
          p=$(cat \"$HOME/{dir}/pid\" 2>/dev/null); \
          [ -n \"$p\" ] || exit 0; \
@@ -952,9 +961,7 @@ pub async fn cancel_job(
          kill -KILL -- -\"$p\" 2>/dev/null || true; \
          for ((i=0; i<10; i++)); do host_group_alive \"$p\" || exit 0; sleep 0.1; done; \
          echo 'Experiment process group is still alive' >&2; exit 1",
-    );
-    ssh_run(target, &format!("bash -c {}", sh_quote(&script)), None).await?;
-    Ok(())
+    )
 }
 
 /// Per-host readiness for the Settings UI: can we reach it and execute snapshots?
@@ -1265,6 +1272,71 @@ mod tests {
         assert!(zombie);
         assert!(with_member);
         assert!(without_member);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn host_cancel_escalates_to_kill_when_the_leader_is_gone() {
+        let home = crate::local::git::TemporaryDirectory::new("orx-ssh-cancel").unwrap();
+        let dir = home.path().join(".orx/runs/r1");
+        std::fs::create_dir_all(&dir).unwrap();
+        // OR-354: the group leader exits, leaving a member that ignores TERM.
+        // setsid makes the spawned script's own pid the group id.
+        let spawn = home.path().join("spawn.sh");
+        std::fs::write(
+            &spawn,
+            format!(
+                "bash -c 'trap \"\" TERM; echo $$ > \"{}\"; exec sleep 60' &\n",
+                dir.join("worker_pid").display()
+            ),
+        )
+        .unwrap();
+        let leader = std::process::Command::new("setsid")
+            .arg("bash")
+            .arg(&spawn)
+            .env("HOME", home.path())
+            .spawn()
+            .unwrap();
+        std::fs::write(dir.join("pid"), format!("{}\n", leader.id())).unwrap();
+        // An unrelated process in another group must survive the sweep.
+        let mut bystander = std::process::Command::new("setsid")
+            .arg("sleep")
+            .arg("60")
+            .spawn()
+            .unwrap();
+        let mut worker_pid = 0i32;
+        for _ in 0..100 {
+            if let Ok(text) = std::fs::read_to_string(dir.join("worker_pid")) {
+                if let Ok(pid) = text.trim().parse() {
+                    worker_pid = pid;
+                    break;
+                }
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        assert!(worker_pid > 0);
+        let start = std::time::Instant::now();
+        let status = std::process::Command::new("bash")
+            .args(["-c", &host_cancel_script(".orx/runs/r1")])
+            .env("HOME", home.path())
+            .status()
+            .unwrap();
+        assert!(status.success());
+        let alive = |pid: i32| {
+            std::process::Command::new("ps")
+                .args(["-o", "stat=", "-p", &pid.to_string()])
+                .output()
+                .map(|out| {
+                    let state = String::from_utf8_lossy(&out.stdout);
+                    !state.trim().is_empty() && !state.trim().starts_with('Z')
+                })
+                .unwrap_or(false)
+        };
+        // TERM was ignored, so the sweep waited the full five seconds before KILL.
+        assert!(start.elapsed() >= Duration::from_secs(4));
+        assert!(!alive(worker_pid));
+        assert!(alive(bystander.id() as i32));
+        let _ = bystander.kill();
     }
 
     #[test]
