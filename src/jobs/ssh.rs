@@ -902,6 +902,40 @@ host_run_groups() {
         echo "$g"
     done 2>/dev/null | sort -u
 }
+
+# Scan, signal, and wait until the attributable set stays empty for three
+# consecutive ticks or $1 seconds elapse since the script started. Every newly
+# found group gets its own TERM and five-second KILL deadline; a group once
+# recorded is never dropped, even if it later loses its attribution.
+host_sweep() {
+    local end="$1" g alive
+    clean=0
+    while [ "$SECONDS" -lt "$end" ]; do
+        for g in $p $(host_run_groups "$d" "$p"); do
+            if [ -z "${tt[$g]}" ]; then
+                tt[$g]=$SECONDS
+                kill -TERM -- -"$g" 2>/dev/null || kill -TERM "$g" 2>/dev/null || true
+            fi
+        done
+        alive=
+        for g in "${!tt[@]}"; do
+            host_group_alive "$g" || continue
+            alive=1
+            if [ -z "${kk[$g]}" ] && [ $((SECONDS - ${tt[$g]})) -ge 5 ]; then
+                kk[$g]=1
+                kill -KILL -- -"$g" 2>/dev/null || true
+            fi
+        done
+        if [ -z "$alive" ]; then
+            clean=$((clean + 1))
+            [ "$clean" -ge 3 ] && return 0
+        else
+            clean=0
+        fi
+        sleep 0.1
+    done
+    return 1
+}
 "#;
 
 fn parse_job_state(out: &str) -> Result<JobState> {
@@ -1002,14 +1036,15 @@ pub async fn cancel_job(
     Ok(())
 }
 
-/// The remote half of `cancel_job`: every ~0.1s it re-derives the attributable
-/// group set, TERMs each group the first time it appears, and KILLs it once
-/// that group's own five seconds of grace have elapsed — so a worker spawned
-/// mid-cancel (e.g. from a TERM handler) still gets its cleanup window, a
-/// group once found can never slip out of the tracked set, and success is
-/// declared only after several consecutive clean scans so a just-spawned
-/// straggler is not missed. Kept separate so tests can run it against real
-/// local processes.
+/// The remote half of `cancel_job`: `host_sweep` re-derives the attributable
+/// group set every ~0.1s, TERMs each group the first time it appears, and
+/// KILLs it once that group's own five seconds of grace have elapsed — so a
+/// worker spawned mid-cancel (e.g. from a TERM handler) still gets its
+/// cleanup window and a group once found can never slip out of the tracked
+/// set. A second sweep window keeps scanning if the first twenty seconds were
+/// not enough; only when nothing attributable has been seen for three
+/// consecutive ticks is success declared. Kept separate so tests can run it
+/// against real local processes.
 fn host_cancel_script(dir: &str) -> String {
     format!(
         "{HOST_PROCESS_HELPERS}\n\
@@ -1018,40 +1053,12 @@ fn host_cancel_script(dir: &str) -> String {
          case \"$p\" in ''|*[!0-9]*) exit 0;; esac; \
          d=$(cd \"$HOME/{dir}\" 2>/dev/null && pwd -P) || d=\"$HOME/{dir}\"; \
          declare -A tt=() kk=() 2>/dev/null; \
-         end=$((SECONDS + 20)); clean=0; \
-         while [ \"$SECONDS\" -lt \"$end\" ]; do \
-             for g in $p $(host_run_groups \"$d\" \"$p\"); do \
-                 if [ -z \"${{tt[$g]}}\" ]; then \
-                     tt[$g]=$SECONDS; \
-                     kill -TERM -- -\"$g\" 2>/dev/null || kill -TERM \"$g\" 2>/dev/null || true; \
-                 fi; \
-             done; \
-             alive=; \
-             for g in \"${{!tt[@]}}\"; do \
-                 host_group_alive \"$g\" || continue; \
-                 alive=1; \
-                 if [ -z \"${{kk[$g]}}\" ] && [ $((SECONDS - ${{tt[$g]}})) -ge 5 ]; then \
-                     kk[$g]=1; \
-                     kill -KILL -- -\"$g\" 2>/dev/null || true; \
-                 fi; \
-             done; \
-             if [ -z \"$alive\" ]; then \
-                 clean=$((clean + 1)); \
-                 [ \"$clean\" -ge 3 ] && exit 0; \
-             else \
-                 clean=0; \
-             fi; \
-             sleep 0.1; \
-         done; \
-         for g in \"${{!tt[@]}}\"; do \
-             host_group_alive \"$g\" || continue; \
-             w=$(( ${{tt[$g]}} + 5 - SECONDS )); \
-             [ \"$w\" -gt 0 ] && sleep \"$w\"; \
-             kill -KILL -- -\"$g\" 2>/dev/null || true; \
-         done; \
+         host_sweep $((SECONDS + 20)) && exit 0; \
+         host_sweep $((SECONDS + 40)) && exit 0; \
+         for g in \"${{!tt[@]}}\"; do host_group_alive \"$g\" && kill -KILL -- -\"$g\" 2>/dev/null; done; \
          sleep 1; \
          for g in \"${{!tt[@]}}\"; do \
-             host_group_alive \"$g\" && {{ echo 'Experiment processes are still alive' >&2; exit 1; }}; \
+             if host_group_alive \"$g\"; then echo 'Experiment processes are still alive' >&2; exit 1; fi; \
          done; \
          exit 0",
     )
