@@ -121,7 +121,7 @@ pub async fn submit_local_hf_with_source(
         ssh_host: None,
         ssh_port: None,
         ssh_user: None,
-        timeout_secs: None,
+        timeout_secs: Some(timeout_seconds),
         cpus_per_task: None,
         mem: None,
         source_digest: None,
