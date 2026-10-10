@@ -91,16 +91,12 @@ pub async fn submit_local_slurm_with_source(
     }
 
     let settings = slurm::load_settings()?.unwrap_or_default();
-    let host = args
-        .host
-        .clone()
-        .or_else(|| settings.host.clone())
-        .ok_or_else(|| {
-            anyhow!(
-                "--backend slurm needs a login node: pass --host <alias> (an ~/.ssh/config \
-                 alias) or use a configured default Slurm host."
-            )
-        })?;
+    if args.host.is_none() && settings.host.is_none() {
+        return Err(anyhow!(
+            "--backend slurm needs a login node: pass --host <alias> (an ~/.ssh/config \
+             alias) or use a configured default Slurm host."
+        ));
+    }
 
     // `--timeout` beats the settings default; neither = the cluster's default.
     let time_limit_secs =
@@ -163,7 +159,9 @@ pub async fn submit_local_slurm_with_source(
         monitoring_error: None,
         cancellation_accepted: false,
         kind: "slurm_job".to_string(),
-        namespace: Some(host.clone()),
+        // The supervisor watches the cluster the job actually went to:
+        // `target.dest`, not a default re-read that may have moved on.
+        namespace: Some(target.dest.clone()),
         job_id: Some(job_id.clone()),
         flavor: args.flavor.clone(),
         image: None,
@@ -183,7 +181,7 @@ pub async fn submit_local_slurm_with_source(
     };
     source.apply_to_descriptor(&mut descriptor);
     if let Err(error) = crate::compute::record_submission_handle(&run_id, &descriptor) {
-        let _ = slurm::cancel_job(&host, &job_id).await;
+        let _ = slurm::cancel_job(&target.dest, &job_id).await;
         return Err(error);
     }
     let run = StoredRun {
