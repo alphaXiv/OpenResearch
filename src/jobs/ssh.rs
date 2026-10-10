@@ -861,18 +861,19 @@ host_group_alive() {
     ps -e -o pgid= -o stat= 2>/dev/null | awk -v p="$p" '$1 == p && $2 !~ /^[ZX]/ { alive=1 } END { exit !alive }'
 }
 
-# Foreign process groups attributable to the run whose leader is $3, where the
-# run directory is $1 (symlink-resolved) or its verbatim spelling $2. A process
-# is attributable when it descends from $3 at any depth — a payload child
-# spawned with start_new_session/setsid leaves the run's group but stays a
-# descendant — or when it is anchored to the run dir (cwd inside it, or an argv
-# path referencing it), which is what orphans keep once reparented. A group is
-# emitted only when it holds an attributable member AND its own group leader
-# is attributable or already gone: an unrelated process merely reading run
-# files (a `tail -f` on the log in a foreign shell's group) never pulls its
-# whole group into the sweep.
+# Foreign process groups attributable to the run whose leader is $2, where
+# $1 is the symlink-resolved run directory. A process is attributable when it
+# descends from $2 at any depth — a payload child spawned with
+# start_new_session/setsid leaves the run's group but stays a descendant — or
+# when it executes inside the run dir (its /proc cwd is at or under $1, which
+# is what orphaned workers keep once reparented). A path reference in argv is
+# deliberately NOT attribution: merely reading run files must never enroll a
+# process. A group is emitted only when it holds an attributable member AND
+# its own group leader is attributable or already gone, so an unrelated
+# reader (a `tail -f` on the log in a foreign shell's group) never pulls its
+# group into the sweep.
 host_run_groups() {
-    local d="$1" dv="$2" root="$3" file cwd stat fields cmd pid g cur
+    local d="$1" root="$2" file cwd stat fields pid g cur
     [ -d /proc ] || return 0
     local -A parent group anchored descend
     for file in /proc/[0-9]*/stat; do
@@ -884,14 +885,7 @@ host_run_groups() {
         parent[$pid]=${fields[1]}
         group[$pid]=${fields[2]}
         cwd=$(readlink "/proc/$pid/cwd" 2>/dev/null) || cwd=
-        case "$cwd" in
-            "$d"|"$d"/*|"$dv"|"$dv"/*) anchored[$pid]=1;;
-            *)
-                cmd=$(tr '\0' ' ' < "/proc/$pid/cmdline" 2>/dev/null) || cmd=
-                case "$cmd" in
-                    *"$d/"*|*"$dv/"*|*"$d "*|*"$dv "*|*"$d"|*"$dv") anchored[$pid]=1;;
-                esac;;
-        esac
+        case "$cwd" in "$d"|"$d"/*) anchored[$pid]=1;; esac
     done 2>/dev/null
     for pid in "${!parent[@]}"; do
         cur=${parent[$pid]}
@@ -987,8 +981,8 @@ pub async fn stream_logs(
 /// session and group, which a group-scoped signal can never reach. They are
 /// attributed two ways: still-descendant of the recorded pid (at any depth,
 /// which survives the coordinator's exit until the orphan is reparented), and
-/// anchored to the run directory (cwd or argv under `~/.orx/runs/<id>`, which
-/// is what orphans keep once reparented). A foreign group is only signaled
+/// executing inside the run directory (`/proc` cwd under `~/.orx/runs/<id>`,
+/// which is what orphaned workers keep once reparented). A foreign group is only signaled
 /// when its leader is attributable or already gone, so an unrelated process
 /// that merely references run files (a `tail -f` on the log in someone's
 /// shell) never pulls its group into the sweep. Each group gets the same
@@ -1009,22 +1003,24 @@ pub async fn cancel_job(
 }
 
 /// The remote half of `cancel_job`: every ~0.1s it re-derives the attributable
-/// group set, TERMs each group the first time it appears, and KILLs it only
-/// after its own five-second grace expires — so a worker spawned mid-cancel
-/// (e.g. from a TERM handler) still gets its cleanup window, and a group once
-/// found can never slip out of the tracked set. Kept separate so tests can run
-/// it against real local processes.
+/// group set, TERMs each group the first time it appears, and KILLs it once
+/// that group's own five seconds of grace have elapsed — so a worker spawned
+/// mid-cancel (e.g. from a TERM handler) still gets its cleanup window, a
+/// group once found can never slip out of the tracked set, and success is
+/// declared only after several consecutive clean scans so a just-spawned
+/// straggler is not missed. Kept separate so tests can run it against real
+/// local processes.
 fn host_cancel_script(dir: &str) -> String {
     format!(
         "{HOST_PROCESS_HELPERS}\n\
          p=$(cat \"$HOME/{dir}/pid\" 2>/dev/null); \
          [ -n \"$p\" ] || exit 0; \
          case \"$p\" in ''|*[!0-9]*) exit 0;; esac; \
-         d=\"$HOME/{dir}\"; dr=$(cd \"$d\" 2>/dev/null && pwd -P) || dr=\"$d\"; \
+         d=$(cd \"$HOME/{dir}\" 2>/dev/null && pwd -P) || d=\"$HOME/{dir}\"; \
          declare -A tt=() kk=() 2>/dev/null; \
-         end=$((SECONDS + 20)); \
+         end=$((SECONDS + 20)); clean=0; \
          while [ \"$SECONDS\" -lt \"$end\" ]; do \
-             for g in $p $(host_run_groups \"$dr\" \"$d\" \"$p\"); do \
+             for g in $p $(host_run_groups \"$d\" \"$p\"); do \
                  if [ -z \"${{tt[$g]}}\" ]; then \
                      tt[$g]=$SECONDS; \
                      kill -TERM -- -\"$g\" 2>/dev/null || kill -TERM \"$g\" 2>/dev/null || true; \
@@ -1039,7 +1035,12 @@ fn host_cancel_script(dir: &str) -> String {
                      kill -KILL -- -\"$g\" 2>/dev/null || true; \
                  fi; \
              done; \
-             [ -z \"$alive\" ] && exit 0; \
+             if [ -z \"$alive\" ]; then \
+                 clean=$((clean + 1)); \
+                 [ \"$clean\" -ge 3 ] && exit 0; \
+             else \
+                 clean=0; \
+             fi; \
              sleep 0.1; \
          done; \
          echo 'Experiment processes are still alive' >&2; exit 1",
@@ -1541,8 +1542,8 @@ mod tests {
                     .arg("-c")
                     .arg(format!(
                         "{HOST_PROCESS_HELPERS}\n\
-                         d=\"$HOME/.orx/runs/r1\"; dr=$(cd \"$d\" && pwd -P); \
-                         host_run_groups \"$dr\" \"$d\" {leader}"
+                         d=$(cd \"$HOME/.orx/runs/r1\" && pwd -P); \
+                         host_run_groups \"$d\" {leader}"
                     ))
                     .env("HOME", home.path())
                     .output()
