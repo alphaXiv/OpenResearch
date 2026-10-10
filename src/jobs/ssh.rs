@@ -1043,7 +1043,17 @@ fn host_cancel_script(dir: &str) -> String {
              fi; \
              sleep 0.1; \
          done; \
-         echo 'Experiment processes are still alive' >&2; exit 1",
+         for g in \"${{!tt[@]}}\"; do \
+             host_group_alive \"$g\" || continue; \
+             w=$(( ${{tt[$g]}} + 5 - SECONDS )); \
+             [ \"$w\" -gt 0 ] && sleep \"$w\"; \
+             kill -KILL -- -\"$g\" 2>/dev/null || true; \
+         done; \
+         sleep 1; \
+         for g in \"${{!tt[@]}}\"; do \
+             host_group_alive \"$g\" && {{ echo 'Experiment processes are still alive' >&2; exit 1; }}; \
+         done; \
+         exit 0",
     )
 }
 
