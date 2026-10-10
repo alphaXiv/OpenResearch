@@ -24,7 +24,7 @@ export function resolveMarkdownTarget(
 
   let pathname: string;
   try {
-    pathname = decodeURI(encodedPath);
+    pathname = decodeURIComponent(encodedPath);
   } catch {
     return null;
   }
@@ -48,6 +48,34 @@ export function resolveMarkdownTarget(
     query,
     hash,
   };
+}
+
+/** Re-escapes a resolved path so resolving it again yields the same path. */
+export function encodeMarkdownPath(path: string): string {
+  return path.replace(/[%#?:]/g, encodeURIComponent);
+}
+
+/** An asset `src` inside an inline HTML figure, joined to the figure's folder
+ * as a target for the figure's own image resolver. */
+export function htmlFigureAssetTarget(source: string, src: string): string | null {
+  let folder: string;
+  try {
+    folder = decodeURIComponent(source.replaceAll("\\", "/").split("/").slice(0, -1).join("/"));
+  } catch {
+    return null;
+  }
+  const target = resolveMarkdownTarget(folder, src, true);
+  return target ? encodeMarkdownPath(target.path) + target.hash : null;
+}
+
+/** A cited file link's path; `resolveFilePath` takes the still-encoded target. */
+export function citedFilePath(path: string, resolveFilePath?: (path: string) => string | null): string | null {
+  if (resolveFilePath) return resolveFilePath(path);
+  try {
+    return decodeURI(path);
+  } catch {
+    return null;
+  }
 }
 
 export function markdownTargetUrl(url: string, target: MarkdownTarget): string {
@@ -80,6 +108,11 @@ export function chatImageTarget(src: string): (Pick<MarkdownTarget, "path" | "ha
   if (!resolved) return null;
   // Local-image queries must not override the selected file or session.
   const target = { path: resolved.path, hash: resolved.hash };
+  // An encoded drive path (`C%3A/…`) decodes to `C:/…`, so classify the decoded
+  // path too — the re-resolve round trip keeps the absolute source.
+  if (isWindowsDrivePath(target.path)) {
+    return { ...target, path: target.path.replaceAll("\\", "/"), source: "absolute" };
+  }
   if (target.path.startsWith("/") || target.path.startsWith("~/") || windows) {
     return { ...target, source: "absolute" };
   }

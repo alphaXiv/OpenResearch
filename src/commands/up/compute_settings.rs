@@ -589,6 +589,8 @@ pub(super) fn slurm_settings_json() -> Value {
         "partition": settings.partition,
         "account": settings.account,
         "timeLimit": settings.time_limit,
+        "cpusPerTask": settings.cpus_per_task,
+        "mem": settings.mem,
         "hosts": list_ssh_hosts(),
     })
 }
@@ -607,6 +609,9 @@ pub(super) struct SetSlurmSettingsReq {
     partition: Option<String>,
     account: Option<String>,
     time_limit: Option<String>,
+    /// Cores per job. `Some(0)` clears it (partition default).
+    cpus_per_task: Option<u32>,
+    mem: Option<String>,
 }
 
 pub(super) async fn set_slurm_settings(Json(req): Json<SetSlurmSettingsReq>) -> ApiResult {
@@ -631,6 +636,17 @@ pub(super) async fn set_slurm_settings(Json(req): Json<SetSlurmSettingsReq>) -> 
                 crate::jobs::huggingface::parse_timeout(t).map_err(bad_request)?;
             }
             settings.time_limit = t;
+        }
+        if let Some(c) = req.cpus_per_task {
+            settings.cpus_per_task = Some(c).filter(|c| *c > 0);
+        }
+        if let Some(m) = req.mem {
+            // Reject a default that would fail every later launch.
+            let m = norm(m);
+            settings.mem = match m {
+                Some(m) => Some(slurm::parse_mem(&m).map_err(bad_request)?),
+                None => None,
+            };
         }
         slurm::save_settings(&settings)?;
         Ok(Json(slurm_settings_json()))

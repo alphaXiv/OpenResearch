@@ -178,6 +178,10 @@ pub async fn run(args: UpArgs) -> Result<()> {
         state.data_dir_move_in_progress.clone(),
         state.data_dir_gate.clone(),
     ));
+    tokio::spawn(adopt_orphaned_runs(
+        state.data_dir_move_in_progress.clone(),
+        state.data_dir_gate.clone(),
+    ));
     spawn_claude_auth_monitor(
         state.chat.clone(),
         claude.clone(),
@@ -2013,7 +2017,11 @@ async fn delete_project(State(state): State<AppState>, Path(id): Path<String>) -
     if !in_flight.is_empty() {
         let mut failures = Vec::new();
         for run in &in_flight {
-            if let Err(err) = crate::commands::exp::request_local_run_cancel(&store, &run.id) {
+            if let Err(err) = crate::commands::exp::request_local_run_cancel(
+                &store,
+                &run.id,
+                "Cancel requested because the project is being deleted.",
+            ) {
                 failures.push(format!("{}: {err}", run.id));
             }
         }
@@ -2123,6 +2131,8 @@ struct CreateRunReq {
     telemetry_suppressed: bool,
     experiment_id: String,
     backend: Option<String>,
+    cpus: Option<u32>,
+    mem: Option<String>,
     flavor: Option<String>,
     host: Option<String>,
     container: Option<String>,
@@ -2138,6 +2148,67 @@ struct CreateRunReq {
     force: bool,
     chat_session_id: Option<String>,
     agent_origin: Option<String>,
+    /// Absent from dashboard callers; checked against orx up's own config dir.
+    caller_config_dir: Option<std::path::PathBuf>,
+}
+
+impl CreateRunReq {
+    fn from_run_args(args: &crate::ExpRunArgs) -> Result<Self> {
+        Ok(Self {
+            telemetry_suppressed: args.telemetry_suppressed
+                || !crate::telemetry::accounting_reports_enabled(),
+            invocation_context: args
+                .invocation_identity()?
+                .map(|identity| serde_json::to_string(&identity))
+                .transpose()?,
+            experiment_id: args.exp_id.clone(),
+            backend: args.backend.clone(),
+            cpus: args.cpus,
+            mem: args.mem.clone(),
+            flavor: args.flavor.clone(),
+            host: args.host.clone(),
+            container: args.container.clone(),
+            no_container: args.no_container,
+            manifest: args.manifest.clone(),
+            image: args.image.clone(),
+            timeout: args.timeout.clone(),
+            org: args.org.clone(),
+            provider: args.provider.clone(),
+            disk: args.disk,
+            force: args.force,
+            chat_session_id: args.launching_chat_session(),
+            agent_origin: args.agent_origin.clone(),
+            caller_config_dir: Some(absolute_config_dir()),
+        })
+    }
+
+    fn into_run_args(self) -> crate::ExpRunArgs {
+        let mut backend = self.backend;
+        let mut flavor = self.flavor;
+        local::apply_compute_default(&mut backend, &mut flavor);
+        crate::ExpRunArgs {
+            invocation_context: self.invocation_context,
+            telemetry_suppressed: self.telemetry_suppressed,
+            exp_id: self.experiment_id,
+            disk: self.disk,
+            provider: self.provider,
+            backend: Some(backend.unwrap_or_else(|| "local".to_string())),
+            flavor,
+            org: self.org,
+            host: self.host,
+            container: self.container,
+            no_container: self.no_container,
+            manifest: self.manifest,
+            image: self.image,
+            timeout: self.timeout,
+            cpus: self.cpus,
+            mem: self.mem,
+            force: self.force,
+            chat_session_id: self.chat_session_id,
+            agent_origin: self.agent_origin,
+            forwarded: true,
+        }
+    }
 }
 
 #[derive(Deserialize)]
@@ -2149,6 +2220,7 @@ pub(crate) struct RunLaunchSummary {
     pub run_id: String,
     pub experiment_id: String,
     pub job_id: Option<String>,
+    pub slurm_resources: Option<String>,
 }
 
 async fn decode_local_response<T: serde::de::DeserializeOwned>(
@@ -2204,29 +2276,7 @@ pub(crate) async fn submit_run_via_up(
     port: u16,
     args: &crate::ExpRunArgs,
 ) -> Result<RunLaunchSummary> {
-    let request = CreateRunReq {
-        telemetry_suppressed: args.telemetry_suppressed
-            || !crate::telemetry::accounting_reports_enabled(),
-        invocation_context: args
-            .invocation_identity()?
-            .map(|identity| serde_json::to_string(&identity))
-            .transpose()?,
-        experiment_id: args.exp_id.clone(),
-        backend: args.backend.clone(),
-        flavor: args.flavor.clone(),
-        host: args.host.clone(),
-        container: args.container.clone(),
-        no_container: args.no_container,
-        manifest: args.manifest.clone(),
-        image: args.image.clone(),
-        timeout: args.timeout.clone(),
-        org: args.org.clone(),
-        provider: args.provider.clone(),
-        disk: args.disk,
-        force: args.force,
-        chat_session_id: args.launching_chat_session(),
-        agent_origin: args.agent_origin.clone(),
-    };
+    let request = CreateRunReq::from_run_args(args)?;
     let response =
         authenticate_up_request(local_client()?.post(format!("http://127.0.0.1:{port}/api/runs")))
             .json(&request)
@@ -2241,10 +2291,16 @@ pub(crate) async fn submit_run_via_up(
         .and_then(|backend| backend.get("jobId"))
         .and_then(Value::as_str)
         .map(str::to_string);
+    let slurm_resources = response
+        .run
+        .backend
+        .and_then(|backend| serde_json::from_value(backend).ok())
+        .and_then(|backend| local::slurm::requested_resources(&backend));
     Ok(RunLaunchSummary {
         run_id: response.run.id,
         experiment_id: args.exp_id.clone(),
         job_id,
+        slurm_resources,
     })
 }
 
@@ -2285,7 +2341,11 @@ pub(crate) async fn recommended_model_via_up(port: u16, harness: &str) -> Result
 
 pub(crate) async fn cancel_run_via_up(port: u16, run_id: &str) -> Result<()> {
     let response = authenticate_up_request(
-        local_client()?.post(format!("http://127.0.0.1:{port}/api/runs/{run_id}/cancel")),
+        local_client()?
+            .post(format!("http://127.0.0.1:{port}/api/runs/{run_id}/cancel"))
+            .json(&CancelRunReq {
+                chat_session_id: local::chat::launching_chat_session(),
+            }),
     )
     .send()
     .await
@@ -2294,9 +2354,45 @@ pub(crate) async fn cancel_run_via_up(port: u16, run_id: &str) -> Result<()> {
     Ok(())
 }
 
+/// Launching with orx up's settings after the caller checked its own would
+/// submit to a different cluster or namespace than the one the caller tested.
+/// A relative `XDG_CONFIG_HOME` names a different dir in each process's working directory.
+fn absolute_config_dir() -> std::path::PathBuf {
+    let dir = crate::config::config_dir();
+    std::path::absolute(&dir).unwrap_or(dir)
+}
+
+fn require_caller_config_dir(
+    caller: Option<&std::path::Path>,
+    own: &std::path::Path,
+) -> Result<()> {
+    let Some(caller) = caller else {
+        return Ok(());
+    };
+    let same = caller == own
+        || crate::paths::canonicalize(caller)
+            .ok()
+            .zip(crate::paths::canonicalize(own).ok())
+            .is_some_and(|(a, b)| a == b);
+    if same {
+        return Ok(());
+    }
+    let base = own.parent().unwrap_or(own);
+    Err(anyhow!(
+        "This command uses the compute settings in {}, but orx up launches runs with \
+         the settings in {}. Set XDG_CONFIG_HOME to {} and re-run, or restart orx up \
+         from this environment.",
+        caller.display(),
+        own.display(),
+        base.display()
+    ))
+}
+
 async fn create_run(State(state): State<AppState>, Json(req): Json<CreateRunReq>) -> ApiResult {
     reject_if_stopping(&state)?;
     reject_if_moving(&state)?;
+    require_caller_config_dir(req.caller_config_dir.as_deref(), &absolute_config_dir())
+        .map_err(bad_request)?;
     let store = Store::open()?;
     let experiment = store
         .get_local_experiment(&req.experiment_id)?
@@ -2305,30 +2401,8 @@ async fn create_run(State(state): State<AppState>, Json(req): Json<CreateRunReq>
         .project_lifecycle
         .admit(&experiment.project_id)
         .ok_or_else(|| bad_request("project deletion is in progress"))?;
-    let mut backend = req.backend;
-    let mut flavor = req.flavor;
-    // Dashboard callers may omit these; forwarded CLI requests arrive resolved.
-    local::apply_compute_default(&mut backend, &mut flavor);
-    let args = crate::ExpRunArgs {
-        invocation_context: req.invocation_context,
-        telemetry_suppressed: req.telemetry_suppressed,
-        exp_id: req.experiment_id,
-        disk: req.disk,
-        provider: req.provider,
-        backend: Some(backend.unwrap_or_else(|| "local".to_string())),
-        flavor,
-        org: req.org,
-        host: req.host,
-        container: req.container,
-        no_container: req.no_container,
-        manifest: req.manifest,
-        image: req.image,
-        timeout: req.timeout,
-        force: req.force,
-        chat_session_id: req.chat_session_id,
-        agent_origin: req.agent_origin,
-        forwarded: true,
-    };
+    // Dashboard callers may omit compute options; forwarded CLI requests arrive resolved.
+    let args = req.into_run_args();
     crate::compute::validate_run_args(&args).map_err(bad_request)?;
     let run = crate::compute::submit(&args).await.map_err(bad_request)?;
     Ok(Json(json!({ "run": ApiRun::from(&run) })))
@@ -2388,7 +2462,18 @@ async fn list_instances() -> ApiResult {
     Ok(Json(json!({ "instances": instances })))
 }
 
-async fn cancel_run(State(state): State<AppState>, Path(id): Path<String>) -> ApiResult {
+/// Sent by `orx exp cancel`; the dashboard and older CLIs post no body.
+#[derive(Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct CancelRunReq {
+    chat_session_id: Option<String>,
+}
+
+async fn cancel_run(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+    req: Option<Json<CancelRunReq>>,
+) -> ApiResult {
     reject_if_moving(&state)?;
     let store = Store::open()?;
     let run = local::local_run(&store, &id)?.ok_or_else(|| not_found("run"))?;
@@ -2396,8 +2481,12 @@ async fn cancel_run(State(state): State<AppState>, Path(id): Path<String>) -> Ap
     if is_terminal(&run.status) {
         return Ok(Json(json!({ "ok": true, "alreadyTerminal": true })));
     }
+    let reason = match req {
+        Some(Json(req)) => crate::commands::exp::exp_cancel_reason(req.chat_session_id.as_deref()),
+        None => "Cancel requested through orx up (dashboard or an older orx CLI).".into(),
+    };
     let backend = backend_for_run(&run)?;
-    backend.cancel(&run).await.map_err(bad_request)?;
+    backend.cancel(&run, &reason).await.map_err(bad_request)?;
     Ok(Json(json!({ "ok": true })))
 }
 
@@ -2626,7 +2715,8 @@ struct StarterPromptsQuery {
 /// Four starter prompts for the empty chat, written by a model that has read
 /// the project (paper, README, code). Slow on a cache miss — one headless
 /// model call — so the UI shows a placeholder while it waits. A blank project
-/// is flagged instead so the UI shows its pre-written prompts.
+/// with no profile to tailor to, or whose tailored prompts fail, is flagged so
+/// the UI shows its pre-written prompts.
 async fn project_starter_prompts(
     Path(id): Path<String>,
     Query(q): Query<StarterPromptsQuery>,
@@ -4462,6 +4552,62 @@ impl axum::body::HttpBody for ActiveBody {
     fn size_hint(&self) -> hyper::body::SizeHint {
         self.body.size_hint()
     }
+}
+
+const ORPHANED_RUN_SCAN_INTERVAL: Duration = Duration::from_secs(60);
+/// SSH container launches record their handle before the job starts; leave them this long to finish.
+const ORPHANED_RUN_SETTLE_MS: i64 = 5 * 60 * 1000;
+
+/// Give a supervisor to every submitted local run that has none, so a launch
+/// whose supervisor spawn failed (OR-334) is tracked instead of stuck `starting`.
+async fn adopt_orphaned_runs(moving: Arc<AtomicBool>, gate: Arc<tokio::sync::Mutex<()>>) {
+    // Runs whose spawn failure is already logged, so a stuck run logs once.
+    let mut reported = HashSet::new();
+    loop {
+        tokio::time::sleep(ORPHANED_RUN_SCAN_INTERVAL).await;
+        if moving.load(Ordering::SeqCst) {
+            continue;
+        }
+        let _gate = gate.lock().await;
+        if moving.load(Ordering::SeqCst) {
+            continue;
+        }
+        match tokio::task::spawn_blocking(adopt_orphaned_runs_once).await {
+            Ok(Ok(failures)) => {
+                for (run_id, err) in failures {
+                    if reported.insert(run_id.clone()) {
+                        eprintln!("orx up: could not recover supervisor for run {run_id}: {err}");
+                    }
+                }
+            }
+            Ok(Err(err)) => {
+                eprintln!("orx up: could not check runs for missing supervisors: {err}")
+            }
+            Err(_) => {}
+        }
+    }
+}
+
+/// Spawns the missing supervisors and returns the runs whose spawn failed.
+fn adopt_orphaned_runs_once() -> Result<Vec<(String, crate::error::Error)>> {
+    let store = Store::open()?;
+    let mut failures = Vec::new();
+    for run in store.list_active_runs()? {
+        // Without a job handle the launch may still be submitting, and a supervisor would fail it.
+        let submitted = crate::jobs::BackendDescriptor::parse(&run.backend_json)
+            .is_ok_and(|descriptor| descriptor.job_id.is_some());
+        if !submitted
+            || now_ms() - run.updated_at < ORPHANED_RUN_SETTLE_MS
+            || store.get_local_experiment(&run.experiment_id)?.is_none()
+            || crate::commands::supervise::supervisor_running(&run.id)
+        {
+            continue;
+        }
+        if let Err(err) = crate::commands::exp::spawn_detached_supervise(&run.id) {
+            failures.push((run.id, err));
+        }
+    }
+    Ok(failures)
 }
 
 /// Relaunch into an update installed underneath this server once that interrupts nothing,
@@ -8862,6 +9008,7 @@ mod tests {
             commit_sha: None,
             result_markdown: None,
             cancel_requested: true,
+            cancel_reason: None,
             chat_session_id: None,
         };
 
@@ -8884,35 +9031,66 @@ mod tests {
     }
 
     #[test]
-    fn create_run_request_round_trips_agent_attribution_and_force() {
-        let request = CreateRunReq {
+    fn create_run_request_preserves_forwarded_slurm_resources_and_attribution() {
+        let args = crate::ExpRunArgs {
             invocation_context: None,
             telemetry_suppressed: true,
-            experiment_id: "experiment-1".into(),
-            backend: Some("local".into()),
+            forwarded: false,
+            exp_id: "experiment-1".into(),
+            disk: None,
+            provider: None,
+            backend: Some("slurm".into()),
             flavor: None,
+            org: None,
             host: None,
             container: None,
             no_container: false,
             manifest: None,
             image: None,
             timeout: None,
-            org: None,
-            provider: None,
-            disk: None,
+            cpus: Some(8),
+            mem: Some("64G".into()),
             force: true,
             chat_session_id: Some("session-1".into()),
             agent_origin: None,
         };
+        let request = CreateRunReq::from_run_args(&args).unwrap();
 
         let value = serde_json::to_value(&request).unwrap();
+        assert_eq!(value["callerConfigDir"], json!(absolute_config_dir()));
         assert_eq!(value["experimentId"], "experiment-1");
+        assert_eq!(value["cpus"], 8);
+        assert_eq!(value["mem"], "64G");
         assert_eq!(value["chatSessionId"], "session-1");
         assert_eq!(value["force"], true);
-        assert_eq!(
-            serde_json::from_value::<CreateRunReq>(value).unwrap(),
-            request
-        );
+        let forwarded = serde_json::from_value::<CreateRunReq>(value)
+            .unwrap()
+            .into_run_args();
+        assert_eq!(forwarded.cpus, Some(8));
+        assert_eq!(forwarded.mem.as_deref(), Some("64G"));
+        assert_eq!(forwarded.chat_session_id.as_deref(), Some("session-1"));
+        assert!(forwarded.force);
+    }
+
+    #[test]
+    fn require_caller_config_dir_rejects_a_different_dir() {
+        let root = std::env::temp_dir().join(format!("orx-caller-config-{}", uuid::Uuid::new_v4()));
+        let own = root.join("up/openresearch");
+        let caller = root.join("agent/openresearch");
+        std::fs::create_dir_all(&own).unwrap();
+        std::fs::create_dir_all(&caller).unwrap();
+
+        assert!(require_caller_config_dir(None, &own).is_ok());
+        assert!(require_caller_config_dir(Some(&own), &own).is_ok());
+        let fresh = root.join("fresh/openresearch");
+        assert!(require_caller_config_dir(Some(&fresh), &fresh).is_ok());
+        assert!(require_caller_config_dir(Some(&own.join("../openresearch")), &own).is_ok());
+        let error = require_caller_config_dir(Some(&caller), &own)
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains(&caller.display().to_string()));
+        assert!(error.contains(&own.display().to_string()));
+        std::fs::remove_dir_all(root).unwrap();
     }
 
     #[test]

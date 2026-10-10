@@ -29,6 +29,9 @@
   --color-accent-amber-subtle: var(--accent-amber-subtle);
   --color-accent-red-subtle: var(--accent-red-subtle);
   --color-accent-blue-subtle: var(--accent-blue-subtle);
+  --color-accent-blue-border: var(--accent-blue-border);
+  --color-accent-blue-strong: var(--accent-blue-strong);
+  --color-accent-purple-subtle: var(--accent-purple-subtle);
   --color-dots-strong: var(--dots-strong);
   --color-syntax-comment: var(--syntax-comment);
   --color-syntax-text: var(--syntax-text);
@@ -61,9 +64,9 @@
   --color-danger-hover: color-mix(in oklab, var(--accent-red) 8%, transparent);
   --color-danger-active: color-mix(in oklab, var(--accent-red) 14%, transparent);
   --color-plan-caret: color-mix(in oklab, var(--base) 35%, var(--text));
-  --color-image-backdrop: rgb(29 27 26 / 85%);
-  --color-modal-backdrop: rgb(29 27 26 / 42%);
-  --color-modal-backdrop-light: rgb(29 27 26 / 40%);
+  --color-image-backdrop: rgb(23 23 23 / 85%);
+  --color-modal-backdrop: rgb(23 23 23 / 42%);
+  --color-modal-backdrop-light: rgb(23 23 23 / 40%);
   --color-diff-selection: var(--code-selection);
   --color-diff-gutter-selection: var(--code-selection);
   --color-diff-insert-gutter: color-mix(in oklab, var(--base) 84%, var(--accent-green));
@@ -117,16 +120,16 @@
 :root {
   /* Theme is resolved by theme.ts; do not add prefers-color-scheme overrides. */
   --base: #ffffff;
-  --canvas: #faf8f4;
-  --panel: #f3f0ea;
-  --surface: #faf7f2;
-  --surface-bright: #fdfbfb;
-  --highlight: #fdf3f1;
+  --canvas: #fafafa;
+  --panel: #ededed;
+  --surface: #f5f5f5;
+  --surface-bright: #ffffff;
+  --highlight: #e5e5e5;
   --chat-annotation-highlight: #b8d4ff;
   --selection-background: #e3e3e3;
   --selection-text: #161616;
   --code-selection: var(--selection-background);
-  --text: #1d1b1a;
+  --text: #171717;
   --subtext: #737373;
   --muted: #a1a1a1;
   --primary: #9a2036;
@@ -143,46 +146,49 @@
   --accent-purple: #9c5cff;
 
   --accent-green-subtle: #e7f4e5;
-  --accent-amber-subtle: #fff3e1;
+  --accent-amber-subtle: #fff8cc;
   --accent-teal-subtle: #e1f3f0;
   --accent-red-subtle: #fbe9ea;
-  --accent-blue-subtle: #e5f0ff;
+  --accent-blue-subtle: #eff6ff;
+  --accent-blue-border: #bfdbfe;
+  --accent-blue-strong: #2858a4;
+  --link-underline: color-mix(in srgb, var(--accent-blue-strong) 60%, transparent);
   --skill-blue: #184f91;
   --skill-blue-subtle: #d9e9fb;
   --skill-blue-slash: #7fa6d2;
-  --accent-purple-subtle: #f1e8ff;
+  --accent-purple-subtle: #f5f0ff;
 
-  --dots-muted: #e3ded5;
-  --dots-strong: #bdb6a8;
+  --dots-muted: #e3e3e3;
+  --dots-strong: #bdbdbd;
 
   --mono: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", monospace;
   --sans: -apple-system, BlinkMacSystemFont, "Segoe UI", Inter, Roboto, sans-serif;
   --modal-top: min(30vh, 260px);
   /* Keep synchronized with LogTerminal's xterm theme. */
   --term-bg: #1a1a1a;
-  --term-foreground: #e6e1e0;
+  --term-foreground: #e5e5e5;
   --term-selection: #2c3441;
   /* Terminals that follow the app theme (settings sign-in) instead of staying dark. */
-  --term-app-bg: #fdfbfb;
-  --term-app-foreground: #1d1b1a;
-  --term-app-selection: #e9e2d8;
+  --term-app-bg: #ffffff;
+  --term-app-foreground: #171717;
+  --term-app-selection: #dcebff;
   /* Light-theme ANSI palette; the dark theme keeps xterm's defaults. */
-  --term-app-ansi-black: #1d1b1a;
+  --term-app-ansi-black: #171717;
   --term-app-ansi-red: #c0392b;
   --term-app-ansi-green: #3d8b37;
   --term-app-ansi-yellow: #b26a00;
   --term-app-ansi-blue: #2a6fcb;
   --term-app-ansi-magenta: #8e44ad;
   --term-app-ansi-cyan: #1a8a7a;
-  --term-app-ansi-white: #8f8a85;
-  --term-app-ansi-bright-black: #6b6663;
+  --term-app-ansi-white: #737373;
+  --term-app-ansi-bright-black: #737373;
   --term-app-ansi-bright-red: #d94654;
   --term-app-ansi-bright-green: #5eb64c;
   --term-app-ansi-bright-yellow: #da9100;
   --term-app-ansi-bright-blue: #3a8dff;
   --term-app-ansi-bright-magenta: #9c5cff;
   --term-app-ansi-bright-cyan: #209a84;
-  --term-app-ansi-bright-white: #1d1b1a;
+  --term-app-ansi-bright-white: #171717;
   --tool-shimmer: color-mix(in srgb, var(--text) 58%, var(--subtext));
   --editor-selection: var(--code-selection);
   /* Shared reading width for chat, markdown, and plan surfaces. */
@@ -211,18 +217,18 @@
 }
 
 :root[data-theme="dark"] {
-  --base: #0e0c0c;
-  --canvas: #141110;
-  --panel: #221f1e;
-  --surface: #1d1b1a;
-  --surface-bright: #130f0f;
-  --highlight: #393433;
+  --base: #101010;
+  --canvas: #141414;
+  --panel: #262626;
+  --surface: #1c1c1c;
+  --surface-bright: #181818;
+  --highlight: #333333;
   --chat-annotation-highlight: #244e7a;
   --selection-background: #606060;
   --selection-text: #ffffff;
   --code-selection: var(--selection-background);
-  --text: #e6e1e0;
-  --subtext: #a68e8b;
+  --text: #e5e5e5;
+  --subtext: #a3a3a3;
   --muted: #737373;
   --primary: #ffb3ad;
   --primary-subtle: #33191b;
@@ -232,21 +238,23 @@
   --accent-amber: #e67e22;
 
   --accent-green-subtle: #1c2b18;
-  --accent-amber-subtle: #33260f;
+  --accent-amber-subtle: #302a0d;
   --accent-teal-subtle: #12332d;
   --accent-red-subtle: #331418;
-  --accent-blue-subtle: #10233a;
+  --accent-blue-subtle: #132239;
+  --accent-blue-border: #28466b;
+  --accent-blue-strong: #79adf0;
   --skill-blue: #79adf0;
   --skill-blue-subtle: #183452;
   --skill-blue-slash: #527ca8;
-  --accent-purple-subtle: #251933;
+  --accent-purple-subtle: #261c38;
 
-  --dots-muted: #2a2523;
+  --dots-muted: #262626;
   --dots-strong: #555555;
 
-  --term-app-bg: #141110;
-  --term-app-foreground: #e6e1e0;
-  --term-app-selection: #2c3441;
+  --term-app-bg: #141414;
+  --term-app-foreground: #e5e5e5;
+  --term-app-selection: #23364d;
 
   --syntax-comment: #7f848e;
   --syntax-text: #abb2bf;

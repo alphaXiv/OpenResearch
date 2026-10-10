@@ -2,7 +2,7 @@ import type { ButtonHTMLAttributes, HTMLAttributes } from "react";
 import { cn } from "./cn";
 
 const BASE = [
-  "relative h-5.5 w-9.5 flex-none rounded-full border border-border bg-surface",
+  "relative h-5.5 w-9.5 flex-none rounded-full border border-border bg-panel",
   "transition-[background,border-color] duration-120 ease-standard",
   "[&_span]:absolute [&_span]:start-[3px] [&_span]:top-[3px] [&_span]:h-3.5 [&_span]:w-3.5",
   "[&_span]:rounded-full [&_span]:bg-muted [&_span]:transition-[translate,background] [&_span]:duration-120 [&_span]:ease-standard",

@@ -198,6 +198,8 @@ async fn submit_controller_run(
         ssh_port: None,
         ssh_user: None,
         timeout_secs: colab_launch.as_ref().map(|(_, _, secs)| *secs),
+        cpus_per_task: None,
+        mem: None,
         source_digest: None,
         source_path: None,
         source_size: None,
@@ -223,6 +225,7 @@ async fn submit_controller_run(
         cancel_requested: store
             .get_run(&run_id)?
             .is_some_and(|run| run.cancel_requested),
+        cancel_reason: None,
         chat_session_id: args.launching_chat_session(),
     };
     store.upsert_run(&run)?;

@@ -7,7 +7,7 @@ import { useLocale } from "../locale";
 // right-pane tab, and `<run id="..."/>` tags render as chips that open a run's
 // logs — so the agent can cite the code and the run behind a claim.
 
-import { Check, Copy, FileCode, PanelRight, ScrollText, X, Download, Minus, Plus } from "lucide-react";
+import { Check, Copy, FileCode, ScrollText, X, Download, Minus, Plus } from "lucide-react";
 import { createContext, memo, useContext, useEffect, useMemo, useRef, useState, type ImgHTMLAttributes, type ReactNode } from "react";
 import { createPortal } from "react-dom";
 import { Markdown as StreamingMarkdown } from "@clo/react-markdown";
@@ -24,7 +24,10 @@ import { normalizeMarkdownForRendering } from "../markdownNormalization";
 import { tabOpenGestureHandlers, type TabOpenIntent } from "../tabPreview";
 import { Button, IconButton, IconButtonLink } from "./ui";
 import { absoluteFileUrl, artifactUrl, projectFileUrl } from "../api";
-import { chatImageTarget, firstCitedLine, rehypeSafeUrls, splitLineSuffix } from "../markdownTarget";
+import { InlineHtmlFigure } from "./InlineHtmlFigure";
+import { ImageCarousel, ImageCarouselContext } from "./ImageCarousel";
+import { imageWheelZoom } from "../imageZoom";
+import { chatImageTarget, citedFilePath, encodeMarkdownPath, firstCitedLine, rehypeSafeUrls, splitLineSuffix } from "../markdownTarget";
 
 const ImageResolverContext = createContext<((src: string, fallback?: boolean) => string | null) | undefined>(undefined);
 
@@ -48,7 +51,10 @@ export function ChatImageScope({ projectId, sessionId, children }: {
 function ImageModal({ src, alt, name, onClose }: { src: string; alt: string; name?: string; onClose: () => void }) {
   const ref = useRef<HTMLDialogElement>(null);
   const viewport = useRef<HTMLDivElement>(null);
-  const [zoom, setZoom] = useState(1);
+  const [localZoom, setLocalZoom] = useState(1);
+  const carousel = useContext(ImageCarouselContext);
+  const zoom = carousel?.zoom ?? localZoom;
+  const setZoom = carousel?.setZoom ?? setLocalZoom;
   const [bounds, setBounds] = useState({ width: 0, height: 0 });
   const [size, setSize] = useState({ width: 0, height: 0 });
   useEffect(() => {
@@ -59,8 +65,19 @@ function ImageModal({ src, alt, name, onClose }: { src: string; alt: string; nam
     const observer = new ResizeObserver(([entry]) => {
       setBounds({ width: entry.contentRect.width, height: entry.contentRect.height });
     });
-    if (area) observer.observe(area);
-    return () => { observer.disconnect(); dialog?.close(); };
+    const onWheel = (event: WheelEvent) => {
+      event.preventDefault();
+      setZoom((value) => imageWheelZoom(value, event.deltaY, event.deltaMode, area?.clientHeight ?? 0));
+    };
+    if (area) {
+      observer.observe(area);
+      area.addEventListener("wheel", onWheel, { passive: false });
+    }
+    return () => {
+      area?.removeEventListener("wheel", onWheel);
+      observer.disconnect();
+      dialog?.close();
+    };
   }, []);
   const fit = size.width && bounds.width
     ? Math.min(1, bounds.width * 0.9 / size.width, bounds.height * 0.9 / size.height)
@@ -101,17 +118,19 @@ function ImageModal({ src, alt, name, onClose }: { src: string; alt: string; nam
 function MarkdownImage({ src, fallbackSrc, downloadName, alt = "", ...props }: ImgHTMLAttributes<HTMLImageElement> & { fallbackSrc?: string | null; downloadName?: string }) {
   const [failed, setFailed] = useState(false);
   const [expanded, setExpanded] = useState(false);
+  const carousel = useContext(ImageCarouselContext);
+  const changeExpanded = carousel?.setExpanded ?? setExpanded;
   const displayedSrc = failed && fallbackSrc ? fallbackSrc : src;
   return <>
     <img {...props} src={displayedSrc} alt={alt} role="button" tabIndex={0} aria-haspopup="dialog"
-      onClick={(event) => { event.preventDefault(); event.stopPropagation(); setExpanded(true); }}
+      onClick={(event) => { event.preventDefault(); event.stopPropagation(); changeExpanded(true); }}
       onKeyDown={(event) => {
         if (event.key === "Enter" || event.key === " ") {
-          event.preventDefault(); event.stopPropagation(); setExpanded(true);
+          event.preventDefault(); event.stopPropagation(); changeExpanded(true);
         }
       }}
       onError={!failed && fallbackSrc && fallbackSrc !== src ? () => setFailed(true) : undefined} />
-    {expanded && displayedSrc && <ImageModal src={displayedSrc} alt={alt} name={downloadName} onClose={() => setExpanded(false)} />}
+    {(carousel?.expanded ?? expanded) && displayedSrc && <ImageModal src={displayedSrc} alt={alt} name={downloadName} onClose={() => changeExpanded(false)} />}
   </>;
 }
 
@@ -297,7 +316,6 @@ function FileChip({
     >
       <FileCode size={12} />
       <span className="file-chip-label">{label}</span>
-      <PanelRight className="file-chip-open" size={12} aria-hidden="true" />
     </button>
   );
 }
@@ -323,7 +341,6 @@ function RunChip({
     >
       <ScrollText size={12} />
       <span className="file-chip-label">{label || m.tree_view_logs()}</span>
-      <PanelRight className="file-chip-open" size={12} aria-hidden="true" />
     </button>
   );
 }
@@ -414,6 +431,11 @@ export const Md = memo(function Md({
     if (!src || typeof src !== "string") return null;
     const resolved = imageSrc ? imageSrc(src) : src;
     if (!resolved) return null;
+    if (imageSrc && chatImageTarget(src)?.path.match(/\.html?$/i)) {
+      return <InlineHtmlFigure key={resolved} source={src} url={resolved}
+        fallbackUrl={!resolveImageSrc ? chatImageSrc?.(src, true) : null}
+        name={alt || src} resolveSrc={imageSrc} />;
+    }
     return (
       <MarkdownImage
         {...rest}
@@ -428,6 +450,7 @@ export const Md = memo(function Md({
     );
   }, [resolveImageSrc, chatImageSrc, imageSrc]);
   const components: Record<string, (props: any) => ReactNode> = useMemo(() => ({
+    "image-carousel": ({ children }) => <ImageCarousel>{children}</ImageCarousel>,
     "file-mention": (props) => {
       const cited = splitLineSuffix(props.path);
       const line = (props.lines && firstCitedLine(props.lines)) || cited.line;
@@ -440,8 +463,8 @@ export const Md = memo(function Md({
       const figure = typeof figureSrc === "string" ? chatImageTarget(figureSrc) : null;
       if (figure && onOpenFile) {
         const localPath = figure.source === "artifact" ? `artifacts/${figure.path}` : figure.path;
-        const path = resolveFilePath ? resolveFilePath(localPath) : localPath;
-        if (path) return <button type="button" className="text-primary underline cursor-pointer text-start"
+        const path = resolveFilePath ? resolveFilePath(encodeMarkdownPath(localPath)) : localPath;
+        if (path) return <button type="button" className="file-link cursor-pointer text-start"
           {...tabOpenGestureHandlers<HTMLButtonElement>((intent) => onOpenFile(path, undefined, undefined, undefined, intent))}>
           {children}
         </button>;
@@ -451,13 +474,7 @@ export const Md = memo(function Md({
       const target = typeof citedHref === "string" ? citedHref : href;
       const cited = target ? splitLineSuffix(target) : null;
       if (cited && isFileHref(cited.path) && onOpenFile) {
-        let decoded: string;
-        try {
-          decoded = decodeURI(cited.path);
-        } catch {
-          return <span>{children}</span>;
-        }
-        const path = resolveFilePath ? resolveFilePath(decoded) : decoded;
+        const path = citedFilePath(cited.path, resolveFilePath);
         return path ? <FileChip path={path} line={cited.line} onOpenFile={onOpenFile} /> : <span>{children}</span>;
       }
       return (
@@ -472,7 +489,7 @@ export const Md = memo(function Md({
   }), [onOpenFile, onOpenRun, resolveFilePath, img]);
 
   return (
-    <div dir="auto" data-streaming={predict || undefined} className="md min-w-0 wrap-anywhere text-text leading-[1.62] [&_>_*:first-child]:mt-0 [&_>_*:last-child]:mb-0 [&_p]:my-2.5 [&_p]:mx-0 [&_strong]:text-text [&_strong]:font-semibold [&_pre]:bg-surface [&_pre]:border [&_pre]:border-border-muted [&_pre]:rounded-md [&_pre]:py-2 [&_pre]:px-3 [&_pre]:overflow-x-auto [&_pre]:text-sm [&_pre]:text-text [&_code]:font-mono [&_code]:text-sm [&_code]:font-medium [&_code]:text-primary [&_code]:bg-panel [&_code]:border [&_code]:border-border-variant [&_code]:rounded-xs [&_code]:py-px [&_code]:px-[5px] [&_.katex]:text-prose-emphasis [&_.katex-display]:my-3 [&_.katex-display]:mx-0 [&_.katex-display]:overflow-x-auto [&_.katex-display]:overflow-y-hidden [&_.katex-display]:py-0.5 [&_.katex-display]:px-0 [&_.file-chip]:inline-flex [&_.file-chip]:items-center [&_.file-chip]:gap-1 [&_.file-chip]:max-w-full [&_.file-chip]:my-0 [&_.file-chip]:mx-px [&_.file-chip]:py-0 [&_.file-chip]:px-1.5 [&_.file-chip]:align-baseline [&_.file-chip]:font-mono [&_.file-chip]:text-sm [&_.file-chip]:font-medium [&_.file-chip]:text-text [&_.file-chip]:bg-panel [&_.file-chip]:border [&_.file-chip]:border-border-variant [&_.file-chip]:rounded-xs [&_.file-chip]:cursor-pointer [&_.file-chip:hover:not(:disabled)]:bg-surface [&_.file-chip:hover:not(:disabled)]:text-primary [&_.file-chip_svg]:flex-none [&_.file-chip_svg]:opacity-60 [&_.file-chip-label]:max-w-65 [&_.file-chip-label]:overflow-hidden [&_.file-chip-label]:text-ellipsis [&_.file-chip-label]:whitespace-nowrap [&_.run-chip_svg]:opacity-100 [&_.run-chip_svg]:text-primary [&_pre_code]:bg-none [&_pre_code]:bg-transparent [&_pre_code]:border-0 [&_pre_code]:text-inherit [&_pre_code]:p-0 [&_pre_code]:font-normal [&_h1]:text-text [&_h1]:text-prose-emphasis [&_h1]:font-semibold [&_h1]:mt-3 [&_h1]:mx-0 [&_h1]:mb-1.5 [&_h2]:text-text [&_h2]:text-prose-emphasis [&_h2]:font-semibold [&_h2]:mt-3 [&_h2]:mx-0 [&_h2]:mb-1.5 [&_h3]:text-text [&_h3]:text-prose-emphasis [&_h3]:font-semibold [&_h3]:mt-3 [&_h3]:mx-0 [&_h3]:mb-1.5 [&_h4]:text-text [&_h4]:text-prose-emphasis [&_h4]:font-semibold [&_h4]:mt-3 [&_h4]:mx-0 [&_h4]:mb-1.5 [&_ul]:my-1.5 [&_ul]:mx-0 [&_ul]:ps-5.5 [&_ol]:my-1.5 [&_ol]:mx-0 [&_ol]:ps-5.5 [&_li::marker]:text-primary [&_a]:text-primary [&_table]:border-collapse [&_table]:block [&_table]:w-max [&_table]:max-w-full [&_table]:text-sm [&_table]:my-2.5 [&_table]:mx-0 [&_table]:border [&_table]:border-border [&_table]:rounded-md [&_table]:overflow-x-auto [&_th]:border-b [&_th]:border-b-border-variant [&_th]:py-2 [&_th]:px-3.5 [&_th]:text-start [&_th]:text-text [&_th]:break-normal [&_th]:break-words [&_td]:border-b [&_td]:border-b-border-variant [&_td]:py-2 [&_td]:px-3.5 [&_td]:text-start [&_td]:text-text [&_td]:break-normal [&_td]:break-words [&_tr:last-child_td]:border-b-0 [&_thead_th]:bg-surface [&_thead_th]:font-medium [&_thead_th]:text-text [&_thead_th]:border-b [&_thead_th]:border-b-border [&_tbody_tr:hover_td]:bg-surface-bright [&_blockquote]:my-1.5 [&_blockquote]:mx-0 [&_blockquote]:pt-0.5 [&_blockquote]:pe-0 [&_blockquote]:pb-0.5 [&_blockquote]:ps-2.5 [&_blockquote]:border-s-[3px] [&_blockquote]:border-s-border [&_blockquote]:text-subtext [:is(&,_.openresearch-diff,_.file-view)_.token.comment]:italic [:is(&,_.openresearch-diff,_.file-view)_.token.prolog]:italic [:is(&,_.openresearch-diff,_.file-view)_.token.cdata]:italic [:is(&,_.openresearch-diff,_.file-view)_.token.operator]:text-syntax-cyan [:is(&,_.openresearch-diff,_.file-view)_.token.entity]:text-syntax-cyan [:is(&,_.openresearch-diff,_.file-view)_.token.url]:text-syntax-cyan [:is(&,_.openresearch-diff,_.file-view)_.token.comment]:text-syntax-comment [:is(&,_.openresearch-diff,_.file-view)_.token.prolog]:text-syntax-comment [:is(&,_.openresearch-diff,_.file-view)_.token.cdata]:text-syntax-comment [:is(&,_.openresearch-diff,_.file-view)_.token.punctuation]:text-syntax-text [:is(&,_.openresearch-diff,_.file-view)_.token.property]:text-syntax-red [:is(&,_.openresearch-diff,_.file-view)_.token.tag]:text-syntax-red [:is(&,_.openresearch-diff,_.file-view)_.token.deleted]:text-syntax-red [:is(&,_.openresearch-diff,_.file-view)_.token.constant]:text-syntax-orange [:is(&,_.openresearch-diff,_.file-view)_.token.symbol]:text-syntax-orange [:is(&,_.openresearch-diff,_.file-view)_.token.boolean]:text-syntax-orange [:is(&,_.openresearch-diff,_.file-view)_.token.number]:text-syntax-orange [:is(&,_.openresearch-diff,_.file-view)_.token.selector]:text-syntax-green [:is(&,_.openresearch-diff,_.file-view)_.token.attr-name]:text-syntax-green [:is(&,_.openresearch-diff,_.file-view)_.token.char]:text-syntax-green [:is(&,_.openresearch-diff,_.file-view)_.token.inserted]:text-syntax-green [:is(&,_.openresearch-diff,_.file-view)_.token.string]:text-syntax-green [:is(&,_.openresearch-diff,_.file-view)_.token.builtin]:text-syntax-yellow [:is(&,_.openresearch-diff,_.file-view)_.token.atrule]:text-syntax-orange [:is(&,_.openresearch-diff,_.file-view)_.token.attr-value]:text-syntax-orange [:is(&,_.openresearch-diff,_.file-view)_.token.keyword]:text-syntax-purple [:is(&,_.openresearch-diff,_.file-view)_.token.function]:text-syntax-blue [:is(&,_.openresearch-diff,_.file-view)_.token.decorator]:text-syntax-blue [:is(&,_.openresearch-diff,_.file-view)_.token.def]:text-syntax-blue [:is(&,_.openresearch-diff,_.file-view)_.token.class-name]:text-syntax-yellow [:is(&,_.openresearch-diff,_.file-view)_.token.namespace]:text-syntax-yellow [:is(&,_.openresearch-diff,_.file-view)_.token.regex]:text-syntax-green [:is(&,_.openresearch-diff,_.file-view)_.token.important]:text-syntax-red [:is(&,_.openresearch-diff,_.file-view)_.token.variable]:text-syntax-red [:is(&,_.openresearch-diff,_.file-view)_.token.parameter]:text-syntax-text">
+    <div dir="auto" data-streaming={predict || undefined} className="md min-w-0 wrap-anywhere text-text leading-[1.62] [&_>_*:first-child]:mt-0 [&_>_*:last-child]:mb-0 [&_p]:my-2.5 [&_p]:mx-0 [&_strong]:text-text [&_strong]:font-semibold [&_pre]:bg-surface [&_pre]:border [&_pre]:border-border-muted [&_pre]:rounded-md [&_pre]:py-2 [&_pre]:px-3 [&_pre]:overflow-x-auto [&_pre]:text-sm [&_pre]:text-text [&_code]:font-mono [&_code]:text-sm [&_code]:font-normal [&_code]:text-primary [&_code]:bg-surface [&_code]:border [&_code]:border-border-variant [&_code]:rounded-xs [&_code]:py-px [&_code]:px-[5px] [&_.katex]:text-prose-emphasis [&_.katex-display]:my-3 [&_.katex-display]:mx-0 [&_.katex-display]:overflow-x-auto [&_.katex-display]:overflow-y-hidden [&_.katex-display]:py-0.5 [&_.katex-display]:px-0 [&_.file-chip]:inline-flex [&_.file-chip]:items-center [&_.file-chip]:gap-1 [&_.file-chip]:max-w-full [&_.file-chip]:my-0 [&_.file-chip]:mx-px [&_.file-chip]:py-0 [&_.file-chip]:px-1.5 [&_.file-chip]:align-baseline [&_.file-chip]:font-mono [&_.file-chip]:text-sm [&_.file-chip]:font-medium [&_.file-chip]:text-text [&_.file-chip]:bg-panel [&_.file-chip]:border [&_.file-chip]:border-border-variant [&_.file-chip]:rounded-xs [&_.file-chip]:cursor-pointer [&_.file-chip:hover:not(:disabled)]:bg-surface [&_.file-chip:hover:not(:disabled)]:text-primary [&_.file-chip_svg]:flex-none [&_.file-chip_svg]:opacity-60 [&_.file-chip-label]:min-w-0 [&_.file-chip-label]:overflow-hidden [&_.file-chip-label]:text-ellipsis [&_.file-chip-label]:whitespace-nowrap [&_.run-chip_svg]:opacity-100 [&_.run-chip_svg]:text-primary [&_pre_code]:bg-none [&_pre_code]:bg-transparent [&_pre_code]:border-0 [&_pre_code]:text-inherit [&_pre_code]:p-0 [&_pre_code]:font-normal [&_h1]:text-text [&_h1]:text-prose-emphasis [&_h1]:font-semibold [&_h1]:mt-3 [&_h1]:mx-0 [&_h1]:mb-1.5 [&_h2]:text-text [&_h2]:text-prose-emphasis [&_h2]:font-semibold [&_h2]:mt-3 [&_h2]:mx-0 [&_h2]:mb-1.5 [&_h3]:text-text [&_h3]:text-prose-emphasis [&_h3]:font-semibold [&_h3]:mt-3 [&_h3]:mx-0 [&_h3]:mb-1.5 [&_h4]:text-text [&_h4]:text-prose-emphasis [&_h4]:font-semibold [&_h4]:mt-3 [&_h4]:mx-0 [&_h4]:mb-1.5 [&_ul]:my-1.5 [&_ul]:mx-0 [&_ul]:ps-5.5 [&_ol]:my-1.5 [&_ol]:mx-0 [&_ol]:ps-5.5 [&_li::marker]:text-text [&_a]:text-primary [&_table]:border-collapse [&_table]:block [&_table]:w-max [&_table]:max-w-full [&_table]:text-sm [&_table]:my-2.5 [&_table]:mx-0 [&_table]:border [&_table]:border-border [&_table]:rounded-md [&_table]:overflow-x-auto [&_th]:border-b [&_th]:border-b-border-variant [&_th]:py-2 [&_th]:px-3.5 [&_th]:text-start [&_th]:text-text [&_th]:break-normal [&_th]:break-words [&_td]:border-b [&_td]:border-b-border-variant [&_td]:py-2 [&_td]:px-3.5 [&_td]:text-start [&_td]:text-text [&_td]:break-normal [&_td]:break-words [&_tr:last-child_td]:border-b-0 [&_thead_th]:bg-surface [&_thead_th]:font-medium [&_thead_th]:text-text [&_thead_th]:border-b [&_thead_th]:border-b-border [&_tbody_tr:hover_td]:bg-surface [&_blockquote]:my-1.5 [&_blockquote]:mx-0 [&_blockquote]:pt-0.5 [&_blockquote]:pe-0 [&_blockquote]:pb-0.5 [&_blockquote]:ps-2.5 [&_blockquote]:border-s-[3px] [&_blockquote]:border-s-border [&_blockquote]:text-subtext [:is(&,_.openresearch-diff,_.file-view)_.token.comment]:italic [:is(&,_.openresearch-diff,_.file-view)_.token.prolog]:italic [:is(&,_.openresearch-diff,_.file-view)_.token.cdata]:italic [:is(&,_.openresearch-diff,_.file-view)_.token.operator]:text-syntax-cyan [:is(&,_.openresearch-diff,_.file-view)_.token.entity]:text-syntax-cyan [:is(&,_.openresearch-diff,_.file-view)_.token.url]:text-syntax-cyan [:is(&,_.openresearch-diff,_.file-view)_.token.comment]:text-syntax-comment [:is(&,_.openresearch-diff,_.file-view)_.token.prolog]:text-syntax-comment [:is(&,_.openresearch-diff,_.file-view)_.token.cdata]:text-syntax-comment [:is(&,_.openresearch-diff,_.file-view)_.token.punctuation]:text-syntax-text [:is(&,_.openresearch-diff,_.file-view)_.token.property]:text-syntax-red [:is(&,_.openresearch-diff,_.file-view)_.token.tag]:text-syntax-red [:is(&,_.openresearch-diff,_.file-view)_.token.deleted]:text-syntax-red [:is(&,_.openresearch-diff,_.file-view)_.token.constant]:text-syntax-orange [:is(&,_.openresearch-diff,_.file-view)_.token.symbol]:text-syntax-orange [:is(&,_.openresearch-diff,_.file-view)_.token.boolean]:text-syntax-orange [:is(&,_.openresearch-diff,_.file-view)_.token.number]:text-syntax-orange [:is(&,_.openresearch-diff,_.file-view)_.token.selector]:text-syntax-green [:is(&,_.openresearch-diff,_.file-view)_.token.attr-name]:text-syntax-green [:is(&,_.openresearch-diff,_.file-view)_.token.char]:text-syntax-green [:is(&,_.openresearch-diff,_.file-view)_.token.inserted]:text-syntax-green [:is(&,_.openresearch-diff,_.file-view)_.token.string]:text-syntax-green [:is(&,_.openresearch-diff,_.file-view)_.token.builtin]:text-syntax-yellow [:is(&,_.openresearch-diff,_.file-view)_.token.atrule]:text-syntax-orange [:is(&,_.openresearch-diff,_.file-view)_.token.attr-value]:text-syntax-orange [:is(&,_.openresearch-diff,_.file-view)_.token.keyword]:text-syntax-purple [:is(&,_.openresearch-diff,_.file-view)_.token.function]:text-syntax-blue [:is(&,_.openresearch-diff,_.file-view)_.token.decorator]:text-syntax-blue [:is(&,_.openresearch-diff,_.file-view)_.token.def]:text-syntax-blue [:is(&,_.openresearch-diff,_.file-view)_.token.class-name]:text-syntax-yellow [:is(&,_.openresearch-diff,_.file-view)_.token.namespace]:text-syntax-yellow [:is(&,_.openresearch-diff,_.file-view)_.token.regex]:text-syntax-green [:is(&,_.openresearch-diff,_.file-view)_.token.important]:text-syntax-red [:is(&,_.openresearch-diff,_.file-view)_.token.variable]:text-syntax-red [:is(&,_.openresearch-diff,_.file-view)_.token.parameter]:text-syntax-text">
       <StreamingMarkdown
         content={normalizeMarkdownForRendering(text, { predictMath: predict })}
         processor={markdownProcessor}

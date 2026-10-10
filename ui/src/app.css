@@ -165,10 +165,56 @@
   margin-inline: auto;
 }
 
+.msg-assistant .md figure:has(.inline-html-figure) {
+  width: 100%;
+}
+
 /* Inline flex otherwise inherits paragraph leading and outgrows code chips. */
 .md .file-chip {
   line-height: 1.3;
   padding-block: 0.5px;
+}
+
+.md .file-chip:not(.run-chip),
+.md .file-link,
+.md a {
+  font: inherit;
+  color: var(--accent-blue-strong);
+  background: transparent;
+  border: 0;
+  padding-inline: 0;
+  opacity: 1;
+}
+
+.md .file-chip:not(.run-chip) svg {
+  opacity: 1;
+}
+
+.md .file-chip:not(.run-chip) .file-chip-label,
+.md .file-link,
+.md a {
+  text-decoration-line: underline;
+  text-decoration-color: var(--link-underline);
+  text-decoration-thickness: 1px;
+  text-underline-offset: 2px;
+}
+
+.md .file-chip:not(.run-chip):hover:not(:disabled) .file-chip-label,
+.md .file-chip:not(.run-chip):focus-visible .file-chip-label,
+.md .file-link:hover:not(:disabled),
+.md .file-link:focus-visible,
+.md a:hover,
+.md a:focus-visible {
+  text-decoration-color: currentColor;
+}
+
+.md .file-link code,
+.md a code {
+  font: inherit;
+  color: inherit;
+  background: transparent;
+  border: 0;
+  padding: 0;
 }
 
 /* Unlayered so `.run-chip svg` on the `.md` wrapper cannot tint the trailing
