@@ -546,12 +546,45 @@ export const openFileInEditor = (
 export const revealFileInManager = (
   projectId: string,
   path: string,
-  opts: { sessionId?: string } = {},
+  opts: { sessionId?: string; source?: "repo" | "artifacts" | "abs"; ref?: string } = {},
 ) =>
   post<{ ok: boolean }>(`/api/projects/${projectId}/file/reveal`, {
     path,
-    sessionId: opts.sessionId,
+    ...opts,
   });
+
+export interface FileLocationRequest extends CheckoutRef {
+  path: string;
+  source: "repo" | "artifacts" | "abs";
+}
+export interface FileLocation {
+  absolutePath: string | null;
+  isDir: boolean;
+}
+export const getFileLocation = (projectId: string, request: FileLocationRequest, signal?: AbortSignal) =>
+  get<FileLocation>(`/api/projects/${projectId}/file/location?${checkoutQuery(request, new URLSearchParams({ path: request.path, source: request.source }))}`, signal);
+
+export interface ArtifactSearch {
+  entries: ArtifactEntry[];
+  nextCursor: string | null;
+  incomplete: boolean;
+}
+export interface ArtifactSearchJob {
+  id: string;
+  status: "running" | "paused" | "complete" | "cancelled" | "failed";
+  stage: number;
+  result: ArtifactSearch | null;
+  error: string | null;
+}
+export const artifactSearchClient = (projectId: string) => {
+  const url = `/api/projects/${projectId}/files/search`;
+  return {
+    start: (q: string, after?: string) => fetch(url, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ q, after }) }).then(json<ArtifactSearchJob>),
+    status: (id: string) => get<ArtifactSearchJob>(`${url}/${id}`),
+    resume: (id: string) => fetch(`${url}/${id}/continue`, { method: "POST" }).then(json<ArtifactSearchJob>),
+    cancel: (id: string) => fetch(`${url}/${id}`, { method: "DELETE" }).then(json<{ ok: boolean }>),
+  };
+};
 
 export interface LatexEngine {
   /** The engine that will run, or null when the machine has none. */

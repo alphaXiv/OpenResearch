@@ -4,6 +4,7 @@ import {
 } from "./queries/client";
 import { useMutation, useQuery } from "@tanstack/react-query";
 import type { Viewport } from "@xyflow/react";
+import { FileActionsContext, FileActionScope, type FileActionScopeValue } from "./components/FileLinkActions";
 
 import {
   type SetStateAction,
@@ -1167,6 +1168,16 @@ export default function App({ runtime, projectId, pane }: { runtime: RuntimeInfo
 
   // Following a chip or link out of a preview keeps the source open before the
   // destination uses its own preview/keep-open intent.
+  const fileActions = useMemo(() => ({
+    projectId: projectId ?? "",
+    remote: runtime.kind === "ssh",
+    resolve: (path: string, scope: FileActionScopeValue | null, exp?: string) => {
+      const input = scope?.source === "artifacts" ? `artifacts/${path}` : path;
+      const tab = resolveFileTab(input, scope ? scope.sessionId : activeSessionId ?? undefined, scope?.ref, undefined, exp);
+      return tab ? { path: tab.path, source: tab.source ?? "repo", sessionId: tab.sessionId, ref: tab.ref } : null;
+    },
+  }), [projectId, runtime.kind, resolveFileTab, activeSessionId]);
+
   const openFromRightTab = useCallback(
     (host: RightTab, open: () => void) => {
       promoteRightTab(host);
@@ -1730,6 +1741,7 @@ export default function App({ runtime, projectId, pane }: { runtime: RuntimeInfo
   );
 
   return (
+    <FileActionsContext value={fileActions}>
     <div className="app flex flex-col h-full">
       {runtime.kind === "local" && <OfflineBanner />}
       {runtime.kind === "local" && <UpdateBanner status={updateStatus} />}
@@ -1890,6 +1902,7 @@ export default function App({ runtime, projectId, pane }: { runtime: RuntimeInfo
                     key={activeProject.id}
                     project={activeProject}
                     artifacts={artifacts}
+                    remote={runtime.kind === "ssh"}
                     onOpenFile={openArtifactFileTab}
                     canRenameFile={(path) => !fileBuffersRef.current.get(
                       fileScrollKey(activeProject.id, activeSessionId, { path, source: "artifacts" }),
@@ -2139,7 +2152,7 @@ export default function App({ runtime, projectId, pane }: { runtime: RuntimeInfo
               <TabBody>
                 {/* The plan markdown is already client-side — render directly,
                   file links resolve against the plan's session worktree. */}
-                <div className="pane-content flex-1 min-h-0 relative plan-tab-content overflow-y-auto bg-background py-4.5 px-6 [&_.md]:max-w-readable">
+                <FileActionScope value={{ sessionId: planTab.sessionId }}><div className="pane-content flex-1 min-h-0 relative plan-tab-content overflow-y-auto bg-background py-4.5 px-6 [&_.md]:max-w-readable">
                   <Md
                     text={planContent?.key === `${planTab.sessionId}:${planTab.promptId}` ? planContent.text ?? m.model_picker_unavailable() : planTabs.find((tab) => tab.promptId === planTab.promptId)?.plan || m.artifacts_tab_loading()}
                     onOpenFile={(path, line, exp, ref, intent) =>
@@ -2156,7 +2169,7 @@ export default function App({ runtime, projectId, pane }: { runtime: RuntimeInfo
                       )
                     }
                   />
-                </div>
+                </div></FileActionScope>
               </TabBody>
             ) : sideTab && projectId ? (
               <TabBody>
@@ -2328,5 +2341,6 @@ export default function App({ runtime, projectId, pane }: { runtime: RuntimeInfo
         />
       )}
     </div>
+    </FileActionsContext>
   );
 }

@@ -49,6 +49,12 @@ export const getArtifactsQuery = (projectId: string) => queryOptions({
   staleTime: 30_000,
 });
 
+export const getFileLocationQuery = (projectId: string, request: api.FileLocationRequest) => queryOptions({
+  queryKey: workspaceKey("getFileLocation", projectId, request),
+  queryFn: ({ signal }) => api.getFileLocation(projectId, request, signal),
+  staleTime: 0,
+});
+
 export const getArtifactFileTextQuery = (projectId: string, path: string) => queryOptions({
   queryKey: workspaceKey("getArtifactFileText", projectId, path),
   queryFn: ({ signal }) => api.getArtifactFileText(projectId, path, signal),
