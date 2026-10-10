@@ -27,7 +27,7 @@ use std::collections::HashMap;
 
 use serde::{Deserialize, Serialize};
 
-use super::ssh::{sh_quote, ssh_run, SshTarget};
+use super::ssh::{refresh_route, sh_quote, ssh_run, SshTarget};
 use crate::error::{anyhow, Result};
 
 // --- settings ---------------------------------------------------------------
@@ -444,6 +444,15 @@ pub struct SlurmPreflight {
 }
 
 pub async fn preflight(host: &str) -> SlurmPreflight {
+    if let Err(error) = refresh_route(&SshTarget::alias(host)).await {
+        return SlurmPreflight {
+            reachable: false,
+            slurm_found: false,
+            tools_found: false,
+            partitions: Vec::new(),
+            error: Some(error.to_string()),
+        };
+    }
     let cmd = "if command -v sbatch >/dev/null 2>&1 && command -v squeue >/dev/null 2>&1 \
                && command -v scancel >/dev/null 2>&1; then echo SLURM_OK; fi; \
                if command -v bash >/dev/null 2>&1 && command -v tar >/dev/null 2>&1; \

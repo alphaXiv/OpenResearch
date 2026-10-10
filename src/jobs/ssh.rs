@@ -940,20 +940,30 @@ pub struct SshPreflight {
     pub error: Option<String>,
 }
 
-pub async fn preflight(target: &SshTarget) -> SshPreflight {
-    // An explicit launch or host test resolves the alias against the current
-    // ~/.ssh/config: a long-lived `orx up` would otherwise keep dialing a route
-    // prepared before the config changed. Polls keep the pinned connection.
-    #[cfg(unix)]
+/// Re-resolve an alias against the current `~/.ssh/config` before an explicit
+/// launch or host test: a long-lived `orx up` would otherwise keep dialing a
+/// route prepared before the config changed. Polls keep the pinned connection.
+#[cfg(unix)]
+pub(crate) async fn refresh_route(target: &SshTarget) -> Result<()> {
     if target.extra_opts.is_empty() {
-        if let Err(error) = prepared::prepare(target, true, None).await {
-            return SshPreflight {
-                reachable: false,
-                tools_found: false,
-                missing_tools: Vec::new(),
-                error: Some(error.to_string()),
-            };
-        }
+        prepared::prepare(target, true, None).await?;
+    }
+    Ok(())
+}
+
+#[cfg(not(unix))]
+pub(crate) async fn refresh_route(_target: &SshTarget) -> Result<()> {
+    Ok(())
+}
+
+pub async fn preflight(target: &SshTarget) -> SshPreflight {
+    if let Err(error) = refresh_route(target).await {
+        return SshPreflight {
+            reachable: false,
+            tools_found: false,
+            missing_tools: Vec::new(),
+            error: Some(error.to_string()),
+        };
     }
     match ssh_run(
         target,
