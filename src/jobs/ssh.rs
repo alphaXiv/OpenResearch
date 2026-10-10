@@ -1055,9 +1055,10 @@ fn host_cancel_script(dir: &str) -> String {
          declare -A tt=() kk=() 2>/dev/null; \
          host_sweep $((SECONDS + 20)) && exit 0; \
          host_sweep $((SECONDS + 40)) && exit 0; \
+         host_sweep $((SECONDS + 15)) && exit 0; \
          for g in \"${{!tt[@]}}\"; do host_group_alive \"$g\" && kill -KILL -- -\"$g\" 2>/dev/null; done; \
          sleep 1; \
-         for g in \"${{!tt[@]}}\"; do \
+         for g in \"${{!tt[@]}}\" $(host_run_groups \"$d\" \"$p\"); do \
              if host_group_alive \"$g\"; then echo 'Experiment processes are still alive' >&2; exit 1; fi; \
          done; \
          exit 0",
