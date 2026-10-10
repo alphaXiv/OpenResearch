@@ -210,7 +210,9 @@ pub(super) async fn setup(target: &SshTarget) -> Result<()> {
     let home = dirs::home_dir().ok_or_else(|| anyhow!("could not locate your home directory"))?;
     let ssh_dir = home.join(".ssh");
     let default_dir = control_dir_for(&home.join(".config/openresearch"));
-    let publication = super::prepared::prepare(target, false).await?.publication;
+    let publication = super::prepared::prepare(target, false, None)
+        .await?
+        .publication;
     tokio::task::spawn_blocking(move || install(&ssh_dir, &default_dir, Some(publication)))
         .await??;
 

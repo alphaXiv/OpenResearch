@@ -354,7 +354,7 @@ pub(crate) async fn interactive_args(
     prepare_control_dir()?;
     #[cfg(unix)]
     let connection = if target.extra_opts.is_empty() {
-        Some(prepared::prepare(target, true).await?)
+        Some(prepared::prepare(target, true, None).await?)
     } else {
         None
     };
@@ -424,7 +424,7 @@ pub(crate) async fn master_is_running(_target: &SshTarget) -> Result<bool> {
 pub(crate) async fn master_is_running(target: &SshTarget) -> Result<bool> {
     prepare_control_dir()?;
     if target.extra_opts.is_empty() {
-        let connection = prepared::prepare(target, false).await?;
+        let connection = prepared::prepare(target, false, None).await?;
         return control_master(
             target,
             &connection
@@ -509,7 +509,7 @@ async fn resolved_control_path(target: &SshTarget) -> Result<PathBuf> {
     if !target.extra_opts.is_empty() {
         return Ok(control_path(target));
     }
-    Ok(prepared::prepare(target, false).await?.path)
+    Ok(prepared::prepare(target, false, None).await?.path)
 }
 
 pub(crate) fn prepare_sharing_env(cmd: &mut tokio::process::Command) {
@@ -552,7 +552,7 @@ async fn ssh_run_bytes(
     prepare_control_dir()?;
     #[cfg(unix)]
     if target.extra_opts.is_empty() {
-        prepared::prepare(target, false).await?;
+        prepared::prepare(target, false, None).await?;
     }
     let mut cmd = Command::new("ssh");
     cmd.env("ORX_SSH_PROBE", "1");
@@ -610,7 +610,7 @@ async fn ssh_run_file(
     prepare_control_dir()?;
     #[cfg(unix)]
     if target.extra_opts.is_empty() {
-        prepared::prepare(target, false).await?;
+        prepared::prepare(target, false, None).await?;
     }
     let mut child = Command::new("ssh")
         .env("ORX_SSH_PROBE", "1")
@@ -941,6 +941,20 @@ pub struct SshPreflight {
 }
 
 pub async fn preflight(target: &SshTarget) -> SshPreflight {
+    // An explicit launch or host test resolves the alias against the current
+    // ~/.ssh/config: a long-lived `orx up` would otherwise keep dialing a route
+    // prepared before the config changed. Polls keep the pinned connection.
+    #[cfg(unix)]
+    if target.extra_opts.is_empty() {
+        if let Err(error) = prepared::prepare(target, true, None).await {
+            return SshPreflight {
+                reachable: false,
+                tools_found: false,
+                missing_tools: Vec::new(),
+                error: Some(error.to_string()),
+            };
+        }
+    }
     match ssh_run(
         target,
         "command -v bash >/dev/null 2>&1 || echo MISSING_BASH; \

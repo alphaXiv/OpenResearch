@@ -224,7 +224,11 @@ fn jump_args(jump: &str) -> Result<Vec<String>> {
     Ok(args)
 }
 
-pub(super) async fn prepare(target: &SshTarget, refresh: bool) -> Result<Prepared> {
+pub(super) async fn prepare(
+    target: &SshTarget,
+    refresh: bool,
+    config: Option<&std::path::Path>,
+) -> Result<Prepared> {
     if !refresh {
         if let Some(connection) = cached(target) {
             return Ok(connection);
@@ -236,7 +240,7 @@ pub(super) async fn prepare(target: &SshTarget, refresh: bool) -> Result<Prepare
             return Ok(connection);
         }
     }
-    let connection = resolve(&target.dest, None).await?;
+    let connection = resolve(&target.dest, config).await?;
     CONNECTIONS
         .write()
         .unwrap_or_else(std::sync::PoisonError::into_inner)
@@ -500,5 +504,40 @@ mod tests {
                     .contains("identityfile /tmp/key with spaces\n"));
             }
         }
+    }
+
+    #[tokio::test]
+    async fn prepare_serves_the_cached_route_until_a_refresh() {
+        let temp = crate::local::git::TemporaryDirectory::new("orx-prepare").unwrap();
+        let config = temp.path().join("config");
+        std::fs::write(
+            &config,
+            "Host gate-prepare\n HostName first.invalid\n Port 2222\n",
+        )
+        .unwrap();
+        let target = SshTarget::alias("gate-prepare");
+        let key = (control_dir(), target.dest.clone());
+        let first = prepare(&target, false, Some(&config)).await.unwrap();
+        std::fs::write(
+            &config,
+            "Host gate-prepare\n HostName first.invalid\n Port 2223\n",
+        )
+        .unwrap();
+        // Non-refresh callers keep the earlier route, pinning polls and
+        // forwards to the connection their run started with.
+        let pinned = prepare(&target, false, Some(&config)).await.unwrap();
+        assert_eq!(pinned.snapshot, first.snapshot);
+        // A refresh re-resolves the edited config and updates the cache so
+        // subsequent callers, such as a launch preflight, see current settings.
+        let current = prepare(&target, true, Some(&config)).await.unwrap();
+        assert_ne!(current.snapshot, first.snapshot);
+        assert_eq!(
+            prepare(&target, false, Some(&config))
+                .await
+                .unwrap()
+                .snapshot,
+            current.snapshot
+        );
+        CONNECTIONS.write().unwrap().remove(&key);
     }
 }
