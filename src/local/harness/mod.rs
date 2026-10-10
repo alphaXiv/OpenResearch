@@ -22,6 +22,7 @@ pub(crate) mod claude;
 pub(crate) mod codex;
 pub(crate) mod cursor;
 mod detect;
+mod failover;
 pub(crate) mod opencode;
 mod options;
 mod plan_gate;
@@ -48,6 +49,7 @@ pub(crate) use detect::{
     ProbeTiming, ProbeTimingSink,
 };
 pub use detect::{HarnessAuthState, HarnessInfo, ModelInfo};
+pub use failover::{carry_permission, is_usage_limit_failure, CarriedPermission, HarnessFailover};
 pub use options::{HarnessOptions, PermissionMode};
 pub use plan_gate::command_is_readonly;
 pub use plan_gate::decide as plan_gate_decide;
@@ -650,6 +652,7 @@ async fn detect_one(harness: &dyn Harness, snapshot: bool) -> Option<HarnessInfo
             info.auth_state = HarnessAuthState::Ready;
         }
         info.options = harness.options();
+        info.recommended_model = detect::strongest_model(&info.models);
         // The trait is the ceiling: a `detect` narrows it for an installation
         // whose run path can't steer. A steering harness whose `detect` forgets
         // to set it reports false and silently queues every send.

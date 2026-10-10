@@ -15,6 +15,9 @@ use std::path::{Path, PathBuf};
 use crate::error::{anyhow, Result};
 use crate::jobs::ssh::{sh_quote, JobState};
 
+pub use memory::{disk_free_bytes, memory_snapshot};
+
+mod memory;
 #[cfg(windows)]
 mod python;
 #[cfg(windows)]
@@ -41,6 +44,14 @@ pub struct LocalJobSpec {
     pub secret_env: HashMap<String, String>,
 }
 
+/// When memory runs out, Linux's OOM killer picks this run (and everything it
+/// starts) before the desktop, the dashboard, or the agent. Raising one's own
+/// score needs no privileges.
+#[cfg(target_os = "linux")]
+const OOM_PREFERENCE: &str = "echo 1000 > /proc/self/oom_score_adj 2>/dev/null || true\n";
+#[cfg(all(not(windows), not(target_os = "linux")))]
+const OOM_PREFERENCE: &str = "";
+
 /// Submit the job: write run.sh, launch it detached in its own process group
 /// (pid == pgid, so cancel can TERM the whole tree), record the pid. Returns
 /// the run dir — the reattach handle stored on the descriptor.
@@ -52,11 +63,12 @@ pub fn run_job(spec: &LocalJobSpec) -> Result<PathBuf> {
     #[cfg(not(windows))]
     // Keep the launcher identifiable until background children exit, including after a payload cd.
     let prelude = format!(
-        "trap 'exit 143' TERM\ntrap {} EXIT\n",
+        "trap 'exit 143' TERM\ntrap {} EXIT\n{}",
         sh_quote(&format!(
             "code=$?; wait; echo \"$code\" > {}; exit \"$code\"",
             sh_quote(&crate::local::bash::bash_path(&dir.join("exit_code")))
-        ))
+        )),
+        OOM_PREFERENCE,
     );
     #[cfg(windows)]
     let prelude = python::prelude(&dir)
@@ -371,6 +383,16 @@ pub struct LocalHardware {
     pub chip: Option<String>,
     pub cpu_count: usize,
     pub mem_bytes: Option<u64>,
+    /// RAM a new run can use right now, plus swap; see [`MemorySnapshot`].
+    pub mem_available_bytes: Option<u64>,
+    pub swap_total_bytes: Option<u64>,
+    pub swap_free_bytes: Option<u64>,
+    /// Free space where local runs extract their source and write outputs.
+    pub disk_free_bytes: Option<u64>,
+    /// 1-minute load average (Unix only).
+    pub load_average: Option<f64>,
+    /// The least free RAM a local run may start with; launches below it are refused.
+    pub launch_floor_bytes: Option<u64>,
     pub gpus: Vec<Gpu>,
 }
 
@@ -379,6 +401,7 @@ pub struct LocalHardware {
 pub struct Gpu {
     pub name: String,
     pub mem_mib: Option<u64>,
+    pub mem_free_mib: Option<u64>,
 }
 
 /// Best-effort hardware probe. Every field degrades independently — a missing
@@ -408,7 +431,15 @@ pub fn hardware_info() -> LocalHardware {
                     .map(|kb| kb * 1024)
             })
     };
+    let memory = memory_snapshot();
+    let runs_dir = crate::store::data_dir();
     LocalHardware {
+        mem_available_bytes: memory.map(|m| m.available_bytes),
+        swap_total_bytes: memory.map(|m| m.swap_total_bytes),
+        swap_free_bytes: memory.map(|m| m.swap_free_bytes),
+        disk_free_bytes: disk_free_bytes(&runs_dir),
+        load_average: load_average(),
+        launch_floor_bytes: memory.map(|m| m.launch_floor_bytes()),
         hostname: cmd("hostname", &[]).unwrap_or_else(|| "unknown".to_string()),
         os: std::env::consts::OS,
         arch: std::env::consts::ARCH,
@@ -418,11 +449,11 @@ pub fn hardware_info() -> LocalHardware {
             None
         },
         cpu_count: std::thread::available_parallelism().map_or(0, |n| n.get()),
-        mem_bytes,
+        mem_bytes: mem_bytes.or(memory.map(|m| m.total_bytes)),
         gpus: cmd(
             "nvidia-smi",
             &[
-                "--query-gpu=name,memory.total",
+                "--query-gpu=name,memory.total,memory.free",
                 "--format=csv,noheader,nounits",
             ],
         )
@@ -431,22 +462,46 @@ pub fn hardware_info() -> LocalHardware {
     }
 }
 
-/// Parse `nvidia-smi --query-gpu=name,memory.total --format=csv,noheader,nounits`:
-/// one `name, mem_mib` line per GPU. Names may contain no commas in this
-/// format (nvidia-smi separates fields with ", "), but tolerate odd lines by
-/// keeping the name and dropping the memory rather than dropping the GPU.
+#[cfg(unix)]
+fn load_average() -> Option<f64> {
+    let mut loads = [0f64; 3];
+    // SAFETY: getloadavg writes at most `nelem` doubles into the buffer.
+    (unsafe { libc::getloadavg(loads.as_mut_ptr(), 1) } == 1).then_some(loads[0])
+}
+
+#[cfg(not(unix))]
+fn load_average() -> Option<f64> {
+    None
+}
+
+/// Parse `nvidia-smi --query-gpu=name,memory.total,memory.free --format=csv,noheader,nounits`:
+/// one `name, total_mib, free_mib` line per GPU (a two-field line has no free
+/// column). Names may contain no commas in this format (nvidia-smi separates
+/// fields with ", "), but tolerate odd lines by keeping the name and dropping
+/// the memory rather than dropping the GPU.
 fn parse_nvidia_smi_csv(out: &str) -> Vec<Gpu> {
     out.lines()
         .filter(|l| !l.trim().is_empty())
-        .map(|line| match line.rsplit_once(',') {
-            Some((name, mem)) => Gpu {
-                name: name.trim().to_string(),
-                mem_mib: mem.trim().parse().ok(),
-            },
-            None => Gpu {
-                name: line.trim().to_string(),
-                mem_mib: None,
-            },
+        .map(|line| {
+            let fields: Vec<&str> = line.split(',').map(str::trim).collect();
+            let number = |field: Option<&&str>| field.and_then(|f| f.parse().ok());
+            match fields.as_slice() {
+                [name, total, free] => Gpu {
+                    name: name.to_string(),
+                    mem_mib: number(Some(total)),
+                    mem_free_mib: number(Some(free)),
+                },
+                [name, total] => Gpu {
+                    name: name.to_string(),
+                    mem_mib: number(Some(total)),
+                    mem_free_mib: None,
+                },
+                _ => Gpu {
+                    name: line.trim().to_string(),
+                    mem_mib: None,
+                    mem_free_mib: None,
+                },
+            }
         })
         .collect()
 }
@@ -462,6 +517,8 @@ mod tests {
         assert_eq!(parsed.len(), 2);
         assert_eq!(parsed[0].name, "NVIDIA A100-SXM4-80GB");
         assert_eq!(parsed[0].mem_mib, Some(81920));
+        let with_free = parse_nvidia_smi_csv("NVIDIA L4, 23034, 20000\n");
+        assert_eq!(with_free[0].mem_free_mib, Some(20000));
     }
 
     #[test]

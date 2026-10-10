@@ -29,6 +29,7 @@ use crate::error::{anyhow, Result};
 ///   status <id>     -> prints {"stage": "...", "message": "..."?}
 ///   logs   <id>     streams the sandbox's merged stdout/stderr, line per line
 ///   cancel <id>     terminate the sandbox
+///   billing         -> prints the workspace's rates and this month's spend
 ///
 /// Exit 3 = the `modal` package isn't importable (surfaced as a friendly hint).
 const LAUNCHER: &str = r#"
@@ -107,6 +108,27 @@ def cancel(sid):
     modal = _modal()
     modal.Sandbox.from_id(sid).terminate()
 
+def billing():
+    modal = _modal()
+    out = {}
+    try:
+        manager = modal.Workspace.from_context().billing
+    except Exception as e:
+        print(json.dumps({"error": "This modal version has no billing API (%s)." % type(e).__name__}))
+        return
+    try:
+        out["rates"] = {str(k): str(v) for k, v in manager.rates().items()}
+    except Exception as e:
+        out["ratesError"] = str(e)[:300]
+    try:
+        summary = manager.summary()
+        out["meteredCost"] = str(summary.metered_cost)
+        out["billedCost"] = str(summary.billed_cost)
+        out["adjustments"] = {str(k): str(v) for k, v in summary.adjustments.items()}
+    except Exception as e:
+        out["summaryError"] = str(e)[:300]
+    print(json.dumps(out))
+
 cmd = sys.argv[1] if len(sys.argv) > 1 else ""
 if cmd == "submit":
     submit()
@@ -116,6 +138,8 @@ elif cmd == "logs":
     logs(sys.argv[2])
 elif cmd == "cancel":
     cancel(sys.argv[2])
+elif cmd == "billing":
+    billing()
 else:
     sys.stderr.write("unknown launcher subcommand: %r" % cmd)
     sys.exit(2)
@@ -259,6 +283,14 @@ async fn launcher_capture(args: &[&str], stdin: Option<&str>) -> Result<Vec<u8>>
         ));
     }
     Ok(out.stdout)
+}
+
+/// The workspace's billing rates and this month's spend, as the launcher's
+/// `billing` subcommand reports them. Never provisions the managed env: a
+/// machine without the `modal` package gets an error instead.
+pub async fn billing() -> Result<Value> {
+    let out = launcher_capture(&["billing"], None).await?;
+    serde_json::from_slice(&out).map_err(|e| anyhow!("Modal billing output was not JSON: {e}"))
 }
 
 /// Resources resolved from a flavor name.

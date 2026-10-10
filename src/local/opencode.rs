@@ -84,6 +84,64 @@ fn free_port() -> Result<u16> {
 }
 
 /// Where the spawned server's stdout/stderr land (startup diagnostics).
+/// OpenCode servers this user started outside OpenResearch (`opencode serve`
+/// without `OPENCODE_DB`). While one runs, `opencode auth login` hands the
+/// sign-in to it, so the credentials land in OpenCode's own database and never
+/// reach the isolated one OpenResearch uses. Linux only: elsewhere a process's
+/// environment is not readable, so this reports none.
+pub fn foreign_servers() -> Vec<(u32, String)> {
+    #[cfg(target_os = "linux")]
+    {
+        let Ok(entries) = std::fs::read_dir("/proc") else {
+            return Vec::new();
+        };
+        let me = std::process::id();
+        let mut found: Vec<(u32, String)> = entries
+            .flatten()
+            .filter_map(|entry| entry.file_name().to_str()?.parse::<u32>().ok())
+            .filter(|pid| *pid != me)
+            .filter_map(|pid| {
+                let raw = std::fs::read(format!("/proc/{pid}/cmdline")).ok()?;
+                let args: Vec<String> = raw
+                    .split(|b| *b == 0)
+                    .filter(|arg| !arg.is_empty())
+                    .map(|arg| String::from_utf8_lossy(arg).into_owned())
+                    .collect();
+                let program = Path::new(args.first()?).file_name()?.to_str()?;
+                if !program.starts_with("opencode") || !args.iter().any(|arg| arg == "serve") {
+                    return None;
+                }
+                let environ = std::fs::read(format!("/proc/{pid}/environ")).ok()?;
+                if environ
+                    .split(|b| *b == 0)
+                    .any(|var| var.starts_with(b"OPENCODE_DB="))
+                {
+                    return None;
+                }
+                Some((pid, args.join(" ")))
+            })
+            .collect();
+        found.sort();
+        found
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        Vec::new()
+    }
+}
+
+/// Why `opencode auth login` would miss OpenResearch's database right now.
+pub fn foreign_server_problem() -> Option<String> {
+    let servers = foreign_servers();
+    let (pid, command) = servers.first()?;
+    Some(format!(
+        "An OpenCode server you started is running (PID {pid}: `{command}`). While it runs, \
+         OpenCode signs in through it and saves the login to its own database, which \
+         OpenResearch does not use. Stop it (`kill {pid}`, or Ctrl+C in its terminal), sign in \
+         here, then start it again."
+    ))
+}
+
 pub fn agent_log_path() -> PathBuf {
     store::data_dir().join("agent-opencode.log")
 }
@@ -197,6 +255,72 @@ fn project_state_md(project: &LocalProject, state: &ProjectState) -> String {
 }
 
 fn playbook_md(project: &LocalProject, state: &ProjectState) -> String {
+    playbook_md_for_session(project, state, None)
+}
+
+/// The cross-harness bullet, present only while the user has it turned on.
+fn cross_harness_bullet(session_harness: Option<&str>) -> String {
+    if !crate::config::cross_harness_review() {
+        return String::new();
+    }
+    let runs_on = session_harness
+        .and_then(super::harness::chat_harness)
+        .map_or(String::new(), |harness| {
+            format!(" This session runs on **{}**.", harness.name())
+        });
+    let excluded = crate::config::cross_harness_excluded();
+    let allowed = if excluded.is_empty() {
+        String::new()
+    } else {
+        let names: Vec<_> = super::harness::registry()
+            .into_iter()
+            .filter(|harness| {
+                harness.supports_chat() && !excluded.iter().any(|id| id == harness.id())
+            })
+            .map(|harness| format!("`{}`", harness.id()))
+            .collect();
+        if names.is_empty() {
+            " The user turned every harness off for review, so do not spawn cross-harness helpers."
+                .to_string()
+        } else {
+            format!(" Spawn review helpers only on: {}.", names.join(", "))
+        }
+    };
+    format!(
+        "\n- Cross-harness review: **on** — the user wants research steps that one vendor's \
+         agent could bias checked by agents on other harnesses.{runs_on}{allowed} Load \
+         **`orx-agent-delegation`** and follow its cross-harness section"
+    )
+}
+
+/// The compute-routing bullet, present only while the user has it turned on.
+fn compute_routing_bullet() -> String {
+    if !crate::config::compute_routing() {
+        return String::new();
+    }
+    let excluded = crate::config::compute_routing_excluded();
+    let allowed: Vec<_> = super::BACKENDS
+        .iter()
+        .filter(|id| !excluded.iter().any(|x| x == *id))
+        .map(|id| format!("`{id}`"))
+        .collect();
+    if allowed.is_empty() {
+        return String::new();
+    }
+    format!(
+        "\n- Compute routing: **on** — you choose `--backend` and `--flavor` per run among the \
+         user's connected backends: {}. Check `orx compute prices --json` for remaining credit \
+         and GPU prices, so no run starts on a provider whose credit would run out first. Load \
+         **`orx-compute`** and follow its \"Route runs across providers\" section",
+        allowed.join(", ")
+    )
+}
+
+fn playbook_md_for_session(
+    project: &LocalProject,
+    state: &ProjectState,
+    session_harness: Option<&str>,
+) -> String {
     let id = &project.id;
     let name = &project.name;
     let publication_line = if project.github_enabled() {
@@ -237,7 +361,9 @@ fn playbook_md(project: &LocalProject, state: &ProjectState) -> String {
         .map_or(String::new(), |flavor| format!(" (`--flavor {flavor}`)"));
     let compute_bullet = format!(
         "- Compute: default target **{compute_backend}**{flavor_part} — \
-         {compute_default_source}; load **`orx-compute`** and read `orx compute instructions show` before configuring or launching"
+         {compute_default_source}; load **`orx-compute`** and read `orx compute instructions show` before configuring or launching{}{}",
+        compute_routing_bullet(),
+        cross_harness_bullet(session_harness)
     );
     let project_state = project_state_md(project, state);
     let skill_names = super::agent_skills::skills(super::agent_skills::SkillSet::Local)
@@ -326,8 +452,15 @@ pub fn ensure_playbook(
             .map_err(|e| anyhow!("Could not create {}: {}", parent.display(), e))?;
     }
     let project_state = ProjectState::load(&project.id)?;
-    std::fs::write(&playbook, playbook_md(project, &project_state))
-        .map_err(|e| anyhow!("Could not write {}: {}", playbook.display(), e))?;
+    let session_harness = crate::store::Store::open()
+        .ok()
+        .and_then(|store| store.get_chat_session(session_id).ok().flatten())
+        .map(|session| session.harness);
+    std::fs::write(
+        &playbook,
+        playbook_md_for_session(project, &project_state, session_harness.as_deref()),
+    )
+    .map_err(|e| anyhow!("Could not write {}: {}", playbook.display(), e))?;
     // Modular skills, written fresh beside the playbook (same freshness
     // semantics) so this session's agent discovers them natively.
     if let Some(dir) = session_skills_dir {
@@ -765,6 +898,36 @@ impl AgentHost {
 
 #[cfg(test)]
 mod tests {
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn foreign_servers_skip_servers_pointed_at_a_database() {
+        let dir = std::env::temp_dir().join(format!("orx-foreign-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let fake = dir.join("opencode");
+        std::fs::copy("/usr/bin/tail", &fake).unwrap();
+        let spawn = |db: Option<&str>| {
+            let mut cmd = std::process::Command::new(&fake);
+            cmd.args(["-f", "/dev/null", "serve"])
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null());
+            if let Some(db) = db {
+                cmd.env("OPENCODE_DB", db);
+            }
+            cmd.spawn().unwrap()
+        };
+        let mut user = spawn(None);
+        let mut ours = spawn(Some("/tmp/orx.db"));
+        std::thread::sleep(std::time::Duration::from_millis(200));
+        let pids: Vec<u32> = foreign_servers().into_iter().map(|(pid, _)| pid).collect();
+        let _ = user.kill();
+        let _ = ours.kill();
+        let _ = user.wait();
+        let _ = ours.wait();
+        let _ = std::fs::remove_dir_all(&dir);
+        assert!(pids.contains(&user.id()));
+        assert!(!pids.contains(&ours.id()));
+    }
+
     use super::*;
     use crate::local::agent_skills::{self, SkillSet};
 

@@ -16,10 +16,10 @@ use crate::store::{now_ms, Store, StoredRun};
 pub async fn launch_local_run(args: &crate::ExpRunArgs) -> Result<()> {
     let run = crate::compute::submit(args).await?;
     let backend = BackendDescriptor::parse(&run.backend_json)?;
-    let label = if backend.kind == "tinker_job" {
-        "Tinker"
-    } else {
-        "Local"
+    let label = match backend.kind.as_str() {
+        "tinker_job" => "Tinker",
+        "colab_job" => "Colab",
+        _ => "Local",
     };
     println!("\u{2713} {label} run started.");
     println!("  dir  {}", backend.job_id.as_deref().unwrap_or(""));
@@ -47,6 +47,14 @@ pub async fn submit_tinker_run_with_source(
     submit_controller_run(args, source, run_id, "tinker_job").await
 }
 
+pub async fn submit_colab_run_with_source(
+    args: &crate::ExpRunArgs,
+    source: SourceSnapshot,
+    run_id: String,
+) -> Result<StoredRun> {
+    submit_controller_run(args, source, run_id, "colab_job").await
+}
+
 async fn submit_controller_run(
     args: &crate::ExpRunArgs,
     source: SourceSnapshot,
@@ -54,7 +62,8 @@ async fn submit_controller_run(
     kind: &str,
 ) -> Result<StoredRun> {
     let backend = kind.trim_end_matches("_job");
-    if args.flavor.is_some() {
+    let colab = kind == "colab_job";
+    if args.flavor.is_some() && !colab {
         return Err(anyhow!("--backend {backend} does not take --flavor."));
     }
     if args.image.is_some() {
@@ -78,8 +87,17 @@ async fn submit_controller_run(
         .or_else(|| project.run_command.clone().filter(|c| !c.trim().is_empty()))
         .ok_or_else(|| anyhow!("{}", crate::invocation::no_run_command(&project.id)))?;
 
-    let script =
-        crate::compute::snapshot_script(&crate::local::bash::bash_path(&source.path), &run_command);
+    let colab_launch = if colab {
+        let flavor = crate::jobs::colab::parse_flavor(args.flavor.as_deref())?;
+        let cli = crate::jobs::colab::preflight().await?;
+        let timeout_secs = match args.timeout.as_deref() {
+            Some(timeout) => crate::jobs::huggingface::parse_timeout(timeout)?,
+            None => crate::jobs::colab::DEFAULT_TIMEOUT_SECS,
+        };
+        Some((flavor, cli, timeout_secs))
+    } else {
+        None
+    };
 
     // The run's env: everything the user synced (API keys), plus the tokens
     // the run script expects. Passed to the launcher process.
@@ -110,6 +128,50 @@ async fn submit_controller_run(
         secret_env.insert(crate::jobs::tinker::API_KEY_ENV.to_string(), key);
     }
 
+    let script = match &colab_launch {
+        Some((flavor, cli, timeout_secs)) => {
+            let dir = localbox::run_dir(&run_id);
+            std::fs::create_dir_all(&dir)
+                .map_err(|e| anyhow!("Could not create {}: {}", dir.display(), e))?;
+            let mut env_keys: Vec<String> = crate::config::list_synced_env()
+                .into_iter()
+                .map(|(key, _)| key)
+                .chain(secret_env.keys().cloned())
+                .collect();
+            if env.contains_key("HF_TOKEN") {
+                env_keys.push("HF_TOKEN".to_string());
+            }
+            env_keys.push("ORX_RUN_ID".to_string());
+            env.insert("ORX_RUN_ID".to_string(), run_id.clone());
+            env_keys.sort();
+            env_keys.dedup();
+            let controller =
+                crate::jobs::colab::controller_script(&crate::jobs::colab::ControllerSpec {
+                    cli,
+                    session: &crate::jobs::colab::session_name(&run_id),
+                    flavor,
+                    archive: &source.path,
+                    timeout_secs: *timeout_secs,
+                    env_keys,
+                });
+            std::fs::write(dir.join(crate::jobs::colab::CONTROLLER_FILE), controller)
+                .map_err(|e| anyhow!("Could not write the Colab controller: {e}"))?;
+            std::fs::write(
+                dir.join(crate::jobs::colab::DRIVER_FILE),
+                crate::jobs::colab::driver_source(&run_command),
+            )
+            .map_err(|e| anyhow!("Could not write the Colab driver: {e}"))?;
+            format!(
+                "bash {}",
+                crate::jobs::ssh::sh_quote(crate::jobs::colab::CONTROLLER_FILE)
+            )
+        }
+        None => crate::compute::snapshot_script(
+            &crate::local::bash::bash_path(&source.path),
+            &run_command,
+        ),
+    };
+
     let dir = localbox::run_job(&localbox::LocalJobSpec {
         run_id: run_id.clone(),
         script,
@@ -122,9 +184,11 @@ async fn submit_controller_run(
         monitoring_error: None,
         cancellation_accepted: false,
         kind: kind.to_string(),
-        namespace: None,
+        namespace: colab_launch
+            .as_ref()
+            .map(|_| crate::jobs::colab::session_name(&run_id)),
         job_id: Some(dir.to_string_lossy().into_owned()),
-        flavor: None,
+        flavor: colab_launch.as_ref().map(|(flavor, _, _)| flavor.id()),
         image: None,
         url: None,
         context: None,
@@ -133,7 +197,7 @@ async fn submit_controller_run(
         ssh_host: None,
         ssh_port: None,
         ssh_user: None,
-        timeout_secs: None,
+        timeout_secs: colab_launch.as_ref().map(|(_, _, secs)| *secs),
         cpus_per_task: None,
         mem: None,
         source_digest: None,
