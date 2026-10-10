@@ -182,6 +182,7 @@ fn snapshot_contents(
     queries: &[Query],
     proxies: &[Option<String>],
     config: &std::path::Path,
+    system_include: bool,
 ) -> Result<String> {
     let mut contents = String::new();
     for (query, proxy) in queries.iter().zip(proxies) {
@@ -201,8 +202,16 @@ fn snapshot_contents(
             contents.push_str("  ProxyCommand none\n");
         }
     }
+    // The system config is re-included so `-F <snapshot>` keeps its settings,
+    // but only when it was readable during resolution: inside a UID-mapped
+    // user namespace its files look nobody-owned and OpenSSH rejects them.
+    let system = if system_include {
+        " /etc/ssh/ssh_config"
+    } else {
+        ""
+    };
     contents.push_str(&format!(
-        "Host *\nInclude {} /etc/ssh/ssh_config\n",
+        "Host *\nInclude {}{system}\n",
         config_quote(&config.to_string_lossy())
     ));
     Ok(contents)
@@ -246,12 +255,35 @@ pub(super) async fn prepare(target: &SshTarget, refresh: bool) -> Result<Prepare
 
 async fn resolve(dest: &str, config: Option<&std::path::Path>) -> Result<Prepared> {
     super::prepare_control_dir()?;
-    let prefix: Vec<String> = config
+    let mut prefix: Vec<String> = config
         .map(|path| vec!["-F".into(), path.to_string_lossy().into_owned()])
         .unwrap_or_default();
     let mut args = prefix.clone();
     args.extend(["--".into(), dest.into()]);
-    let first = query(args).await?;
+    // When the default chain fails OpenSSH's owner check — a user namespace
+    // (bwrap, managed agent sandboxes) shows root-owned /etc/ssh files as
+    // nobody — retry against the user config alone, skipping the system
+    // include chain; the same workaround as `ssh -F ~/.ssh/config`.
+    let (first, skip_system_include) = match query(args).await {
+        Ok(first) => (first, false),
+        Err(error)
+            if prefix.is_empty() && error.to_string().contains("Bad owner or permissions") =>
+        {
+            let home =
+                dirs::home_dir().ok_or_else(|| anyhow!("Could not locate your home directory"))?;
+            prefix = vec![
+                "-F".into(),
+                home.join(".ssh/config").to_string_lossy().into_owned(),
+            ];
+            let mut retry = prefix.clone();
+            retry.extend(["--".into(), dest.into()]);
+            match query(retry).await {
+                Ok(first) => (first, true),
+                Err(_) => return Err(error),
+            }
+        }
+        Err(error) => return Err(error),
+    };
     let host = host(&first)?.to_owned();
     if host.is_empty()
         || host.chars().any(|character| {
@@ -311,7 +343,7 @@ async fn resolve(dest: &str, config: Option<&std::path::Path>) -> Result<Prepare
                 .map(str::to_owned)
         })
         .collect();
-    let contents = snapshot_contents(&queries, &proxies, &config)?;
+    let contents = snapshot_contents(&queries, &proxies, &config, !skip_system_include)?;
     crate::local::git::atomic_write_with_mode(&snapshot, contents.as_bytes(), Some(0o600))?;
     for (index, query) in queries.iter().enumerate() {
         if value(&query.output, "proxyjump").unwrap_or("none") == "none" {
@@ -341,7 +373,7 @@ async fn resolve(dest: &str, config: Option<&std::path::Path>) -> Result<Prepare
             })?;
         proxies[index] = Some(command.to_owned());
     }
-    let contents = snapshot_contents(&queries, &proxies, &config)?;
+    let contents = snapshot_contents(&queries, &proxies, &config, !skip_system_include)?;
     crate::local::git::atomic_write_with_mode(&snapshot, contents.as_bytes(), Some(0o600))?;
     let path = control_dir().join(if routed { &socket_name } else { &native_id });
     let connection = Prepared {
@@ -382,6 +414,25 @@ mod tests {
         );
         assert_eq!(ssh_version(&silent).await, None);
         assert_eq!(ssh_version("/nonexistent/orx-test-ssh").await, None);
+    }
+
+    #[test]
+    fn snapshot_drops_system_include_when_it_failed_the_owner_check() {
+        let query = Query {
+            args: vec!["--".into(), "lab".into()],
+            output:
+                "hostname lab.invalid\nuser alice\nport 22\nproxyjump none\nproxycommand none\n"
+                    .into(),
+        };
+        let proxies = vec![None];
+        let config = Path::new("/home/me/.ssh/config");
+        let with_system =
+            snapshot_contents(std::slice::from_ref(&query), &proxies, config, true).unwrap();
+        assert!(with_system.contains("Include \"/home/me/.ssh/config\" /etc/ssh/ssh_config"));
+        let without_system =
+            snapshot_contents(std::slice::from_ref(&query), &proxies, config, false).unwrap();
+        assert!(without_system.ends_with("Include \"/home/me/.ssh/config\"\n"));
+        assert!(!without_system.contains("/etc/ssh/ssh_config"));
     }
 
     #[test]
