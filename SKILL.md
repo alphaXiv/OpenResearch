@@ -97,6 +97,7 @@ group below has a module (`orx skill <name>`) with the full flags and rules.
 | `orx instance create <orgId> (--gpu <id> … \| --cpu <flavor> …)` | Spin up a standalone instance in an org; see `orx-instances`. |
 | `orx exp status/run/cancel/wait/wake <localExpId>` | Inspect, run, cancel, wait on, or register a wake-up for a local experiment node. |
 | `orx exp desc <expId> [--set "<text>" \| --stdin]` | Read or overwrite the experiment's description. |
+| `orx exp rename <expId> "<title>" [--clear]` | Rename an experiment manually, or clear its title to revert to slug. |
 | `orx agent spawn "<task>" [--title "<t>"] [--stdin] [--no-wake]` | Delegate an independent task to a helper session; see `orx-agent-delegation`. |
 
 To **read or edit** a node's code—including diffing what a run changed—use plain

@@ -455,6 +455,19 @@ pub enum ExpCommand {
         stdin: bool,
     },
 
+    /// Rename an experiment manually (sets its title / display name).
+    Rename {
+        exp_id: String,
+        /// New title / name for the experiment.
+        title: Option<String>,
+        /// New title / name for the experiment (flag alternative).
+        #[arg(long, visible_alias = "title", conflicts_with = "title")]
+        name: Option<String>,
+        /// Clear the custom title and revert to the experiment's slug.
+        #[arg(long, conflicts_with = "title", conflicts_with = "name")]
+        clear: bool,
+    },
+
     /// Launch a locally initialized experiment through an orx-supervised backend.
     Run(Box<ExpRunArgs>),
 
