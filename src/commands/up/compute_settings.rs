@@ -667,7 +667,7 @@ pub(super) async fn slurm_preflight(Json(req): Json<SlurmPreflightReq>) -> ApiRe
     if host.is_empty() {
         return Err(bad_request("host is required"));
     }
-    let p = slurm::preflight(&host).await;
+    let p = slurm::preflight(&crate::jobs::ssh::SshTarget::alias(&host)).await;
     Ok(Json(slurm_preflight_value(&p)))
 }
 

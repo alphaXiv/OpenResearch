@@ -6010,7 +6010,8 @@ async fn ssh_connect_socket(
             ("ssh", result, Some(test))
         }
         SshConnectBackend::Slurm => {
-            let result = crate::jobs::slurm::preflight(&host).await;
+            let result =
+                crate::jobs::slurm::preflight(&crate::jobs::ssh::SshTarget::alias(&host)).await;
             ("slurm", slurm_preflight_value(&result), None)
         }
     };

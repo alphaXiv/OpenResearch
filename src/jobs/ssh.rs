@@ -119,7 +119,13 @@ pub fn resolve_options(
 pub async fn resolve_launch(args: &crate::ExpRunArgs) -> Result<ResolvedLaunch> {
     let settings = crate::config::ssh_settings()?;
     let (host, options) = resolve_options(args, &settings)?;
-    let target = SshTarget::alias(&host);
+    // Resolve the route before the probe and carry it on the target: preflight,
+    // staging, and submission all run against this exact route, so a concurrent
+    // refresh (another launch or a Settings test) cannot move the launch to a
+    // different host mid-flight.
+    let target = resolved_alias(&host)
+        .await
+        .unwrap_or_else(|_| SshTarget::alias(&host));
     let host_check = preflight(&target).await;
     if !host_check.reachable || !host_check.tools_found {
         return Err(anyhow!(
@@ -146,6 +152,11 @@ pub struct SshTarget {
     pub dest: String,
     /// Extra ssh args before `--` (e.g. `["-p", "2222", "-o", …]`).
     pub extra_opts: Vec<String>,
+    /// Route resolved when the target was pinned for a launch. Pinned targets
+    /// consult this instead of the shared per-alias cache, so a concurrent
+    /// refresh cannot retarget an in-flight submission.
+    #[cfg(unix)]
+    route: Option<prepared::Prepared>,
 }
 
 /// How to treat the remote's SSH host key for a `host_port` target.
@@ -172,7 +183,23 @@ impl SshTarget {
         Self {
             dest: host.to_string(),
             extra_opts: Vec::new(),
+            #[cfg(unix)]
+            route: None,
         }
+    }
+
+    /// This target pinned to `route`: operations consult it instead of the
+    /// shared cache, keeping one submission on one connection.
+    #[cfg(unix)]
+    fn pin_route(mut self, route: prepared::Prepared) -> Self {
+        self.route = Some(route);
+        self
+    }
+
+    /// The route this target is pinned to, if any.
+    #[cfg(unix)]
+    fn route(&self) -> Option<&prepared::Prepared> {
+        self.route.as_ref()
     }
 
     /// `dest` (an alias or `user@host`) on an explicit `port`, with an explicit
@@ -198,8 +225,29 @@ impl SshTarget {
                 ]);
             }
         }
-        Self { dest, extra_opts }
+        Self {
+            dest,
+            extra_opts,
+            #[cfg(unix)]
+            route: None,
+        }
     }
+}
+
+/// Resolve `host` against the current `~/.ssh/config` and return an alias
+/// target pinned to the resulting route: every ssh call made with the target
+/// stays on it regardless of later cache refreshes. A resolution error comes
+/// back as `Err` so callers can surface it before touching the host.
+#[cfg(unix)]
+pub(crate) async fn resolved_alias(host: &str) -> Result<SshTarget> {
+    let target = SshTarget::alias(host);
+    let route = prepared::prepare(&target, true, None).await?;
+    Ok(target.pin_route(route))
+}
+
+#[cfg(not(unix))]
+pub(crate) async fn resolved_alias(host: &str) -> Result<SshTarget> {
+    Ok(SshTarget::alias(host))
 }
 
 #[cfg(unix)]
@@ -354,7 +402,7 @@ pub(crate) async fn interactive_args(
     prepare_control_dir()?;
     #[cfg(unix)]
     let connection = if target.extra_opts.is_empty() {
-        Some(prepared::prepare(target, true).await?)
+        Some(prepared::prepare(target, true, None).await?)
     } else {
         None
     };
@@ -424,7 +472,7 @@ pub(crate) async fn master_is_running(_target: &SshTarget) -> Result<bool> {
 pub(crate) async fn master_is_running(target: &SshTarget) -> Result<bool> {
     prepare_control_dir()?;
     if target.extra_opts.is_empty() {
-        let connection = prepared::prepare(target, false).await?;
+        let connection = prepared::prepare(target, false, None).await?;
         return control_master(
             target,
             &connection
@@ -509,7 +557,7 @@ async fn resolved_control_path(target: &SshTarget) -> Result<PathBuf> {
     if !target.extra_opts.is_empty() {
         return Ok(control_path(target));
     }
-    Ok(prepared::prepare(target, false).await?.path)
+    Ok(prepared::prepare(target, false, None).await?.path)
 }
 
 pub(crate) fn prepare_sharing_env(cmd: &mut tokio::process::Command) {
@@ -552,7 +600,7 @@ async fn ssh_run_bytes(
     prepare_control_dir()?;
     #[cfg(unix)]
     if target.extra_opts.is_empty() {
-        prepared::prepare(target, false).await?;
+        prepared::prepare(target, false, None).await?;
     }
     let mut cmd = Command::new("ssh");
     cmd.env("ORX_SSH_PROBE", "1");
@@ -610,7 +658,7 @@ async fn ssh_run_file(
     prepare_control_dir()?;
     #[cfg(unix)]
     if target.extra_opts.is_empty() {
-        prepared::prepare(target, false).await?;
+        prepared::prepare(target, false, None).await?;
     }
     let mut child = Command::new("ssh")
         .env("ORX_SSH_PROBE", "1")
@@ -972,7 +1020,37 @@ pub struct SshPreflight {
     pub error: Option<String>,
 }
 
+/// Re-resolve an alias against the current `~/.ssh/config` before an explicit
+/// launch or host test: a long-lived `orx up` would otherwise keep dialing a
+/// route prepared before the config changed. Polls keep the pinned connection.
+#[cfg(unix)]
+pub(crate) async fn refresh_route(
+    target: &SshTarget,
+    config: Option<&std::path::Path>,
+) -> Result<()> {
+    if target.extra_opts.is_empty() {
+        prepared::prepare(target, true, config).await?;
+    }
+    Ok(())
+}
+
+#[cfg(not(unix))]
+pub(crate) async fn refresh_route(
+    _target: &SshTarget,
+    _config: Option<&std::path::Path>,
+) -> Result<()> {
+    Ok(())
+}
+
 pub async fn preflight(target: &SshTarget) -> SshPreflight {
+    if let Err(error) = refresh_route(target, None).await {
+        return SshPreflight {
+            reachable: false,
+            tools_found: false,
+            missing_tools: Vec::new(),
+            error: Some(error.to_string()),
+        };
+    }
     match ssh_run(
         target,
         "command -v bash >/dev/null 2>&1 || echo MISSING_BASH; \
@@ -1435,6 +1513,7 @@ mod tests {
         let mk = |port: &str| SshTarget {
             dest: "root@h".to_string(),
             extra_opts: vec!["-p".into(), port.into()],
+            route: None,
         };
         assert_ne!(control_path(&mk("22022")), control_path(&mk("22023")));
         assert_eq!(control_path(&mk("22022")), control_path(&mk("22022")));

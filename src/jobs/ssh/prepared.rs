@@ -9,13 +9,13 @@ use tokio::process::Command;
 use super::{control_dir, sh_quote, sharing::config_quote, SshTarget};
 use crate::error::{anyhow, Result};
 
-#[derive(Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub(super) struct Query {
     pub args: Vec<String>,
     pub output: String,
 }
 
-#[derive(Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub(super) struct Publication {
     pub host: String,
     pub native_id: String,
@@ -23,7 +23,7 @@ pub(super) struct Publication {
     pub queries: Vec<Query>,
 }
 
-#[derive(Clone)]
+#[derive(Debug, Clone)]
 pub(super) struct Prepared {
     pub publication: Publication,
     pub snapshot: PathBuf,
@@ -36,6 +36,9 @@ static CONNECTIONS: LazyLock<RwLock<BTreeMap<Key, Prepared>>> =
 static PREPARATION: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
 pub(super) fn cached(target: &SshTarget) -> Option<Prepared> {
+    if let Some(route) = target.route() {
+        return Some(route.clone());
+    }
     CONNECTIONS
         .read()
         .unwrap_or_else(std::sync::PoisonError::into_inner)
@@ -233,7 +236,16 @@ fn jump_args(jump: &str) -> Result<Vec<String>> {
     Ok(args)
 }
 
-pub(super) async fn prepare(target: &SshTarget, refresh: bool) -> Result<Prepared> {
+pub(super) async fn prepare(
+    target: &SshTarget,
+    refresh: bool,
+    config: Option<&std::path::Path>,
+) -> Result<Prepared> {
+    // A pinned target is bound to the route its launch resolved; even a
+    // refresh must serve the pin, not the shared cache.
+    if let Some(route) = target.route() {
+        return Ok(route.clone());
+    }
     if !refresh {
         if let Some(connection) = cached(target) {
             return Ok(connection);
@@ -245,7 +257,7 @@ pub(super) async fn prepare(target: &SshTarget, refresh: bool) -> Result<Prepare
             return Ok(connection);
         }
     }
-    let connection = resolve(&target.dest, None).await?;
+    let connection = resolve(&target.dest, config).await?;
     CONNECTIONS
         .write()
         .unwrap_or_else(std::sync::PoisonError::into_inner)
@@ -710,5 +722,60 @@ mod tests {
                     .contains("identityfile /tmp/key with spaces\n"));
             }
         }
+    }
+
+    #[tokio::test]
+    async fn refresh_route_reresolves_while_pins_and_polls_keep_their_route() {
+        let temp = crate::local::git::TemporaryDirectory::new("orx-prepare").unwrap();
+        let config = temp.path().join("config");
+        std::fs::write(
+            &config,
+            "Host gate-prepare\n HostName first.invalid\n Port 2222\n",
+        )
+        .unwrap();
+        let target = SshTarget::alias("gate-prepare");
+        let key = (control_dir(), target.dest.clone());
+        let first = prepare(&target, false, Some(&config)).await.unwrap();
+        std::fs::write(
+            &config,
+            "Host gate-prepare\n HostName first.invalid\n Port 2223\n",
+        )
+        .unwrap();
+        // Non-refresh callers keep the earlier route, pinning polls and
+        // forwards to the connection their run started with.
+        let pinned = prepare(&target, false, Some(&config)).await.unwrap();
+        assert_eq!(pinned.snapshot, first.snapshot);
+        // refresh_route — the call both launch and host-test preflights make —
+        // re-resolves the edited config and updates the shared cache, so the
+        // next non-refresh caller sees current settings.
+        super::super::refresh_route(&target, Some(&config))
+            .await
+            .unwrap();
+        let current = prepare(&target, false, Some(&config)).await.unwrap();
+        assert_ne!(current.snapshot, first.snapshot);
+        // A target pinned to the earlier route — the one a launch captured —
+        // stays on it through later refreshes.
+        let launch = target.pin_route(first.clone());
+        assert_eq!(cached(&launch).unwrap().snapshot, first.snapshot);
+        std::fs::write(
+            &config,
+            "Host gate-prepare\n HostName first.invalid\n Port 2224\n",
+        )
+        .unwrap();
+        assert_eq!(
+            prepare(&launch, false, Some(&config))
+                .await
+                .unwrap()
+                .snapshot,
+            first.snapshot
+        );
+        assert_eq!(
+            prepare(&launch, true, Some(&config))
+                .await
+                .unwrap()
+                .snapshot,
+            first.snapshot
+        );
+        CONNECTIONS.write().unwrap().remove(&key);
     }
 }

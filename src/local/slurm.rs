@@ -68,6 +68,7 @@ pub async fn submit_local_slurm_with_source(
     args: &crate::ExpRunArgs,
     source: SourceSnapshot,
     run_id: String,
+    target: &crate::jobs::ssh::SshTarget,
 ) -> Result<StoredRun> {
     if args.image.is_some() {
         return Err(anyhow!(
@@ -90,16 +91,12 @@ pub async fn submit_local_slurm_with_source(
     }
 
     let settings = slurm::load_settings()?.unwrap_or_default();
-    let host = args
-        .host
-        .clone()
-        .or_else(|| settings.host.clone())
-        .ok_or_else(|| {
-            anyhow!(
-                "--backend slurm needs a login node: pass --host <alias> (an ~/.ssh/config \
-                 alias) or use a configured default Slurm host."
-            )
-        })?;
+    if args.host.is_none() && settings.host.is_none() {
+        return Err(anyhow!(
+            "--backend slurm needs a login node: pass --host <alias> (an ~/.ssh/config \
+             alias) or use a configured default Slurm host."
+        ));
+    }
 
     // `--timeout` beats the settings default; neither = the cluster's default.
     let time_limit_secs =
@@ -137,27 +134,24 @@ pub async fn submit_local_slurm_with_source(
     if let Ok(hf_token) = huggingface::resolve_token() {
         env.entry("HF_TOKEN".to_string()).or_insert(hf_token);
     }
-    crate::jobs::ssh::stage_source(
-        &crate::jobs::ssh::SshTarget::alias(&host),
-        &run_id,
-        &source.path,
-        &source.digest,
-        None,
+    // Stage and submit on the route preflight checked: the target was resolved
+    // and pinned before the probe, so a concurrent refresh cannot retarget them.
+    crate::jobs::ssh::stage_source(target, &run_id, &source.path, &source.digest, None).await?;
+    let job_id = slurm::run_job(
+        &slurm::SlurmJobSpec {
+            run_id: run_id.clone(),
+            setup_script: "test -d repo".to_string(),
+            command: run_command.clone(),
+            env,
+            gres: args.flavor.as_deref().and_then(slurm::resolve_gres),
+            partition: settings.partition.clone(),
+            account: settings.account.clone(),
+            time_limit_secs,
+            cpus_per_task,
+            mem: mem.clone(),
+        },
+        target,
     )
-    .await?;
-    let job_id = slurm::run_job(&slurm::SlurmJobSpec {
-        host: host.clone(),
-        run_id: run_id.clone(),
-        setup_script: "test -d repo".to_string(),
-        command: run_command.clone(),
-        env,
-        gres: args.flavor.as_deref().and_then(slurm::resolve_gres),
-        partition: settings.partition.clone(),
-        account: settings.account.clone(),
-        time_limit_secs,
-        cpus_per_task,
-        mem: mem.clone(),
-    })
     .await?;
 
     let mut descriptor = BackendDescriptor {
@@ -165,7 +159,9 @@ pub async fn submit_local_slurm_with_source(
         monitoring_error: None,
         cancellation_accepted: false,
         kind: "slurm_job".to_string(),
-        namespace: Some(host.clone()),
+        // The supervisor watches the cluster the job actually went to:
+        // `target.dest`, not a default re-read that may have moved on.
+        namespace: Some(target.dest.clone()),
         job_id: Some(job_id.clone()),
         flavor: args.flavor.clone(),
         image: None,
@@ -185,7 +181,7 @@ pub async fn submit_local_slurm_with_source(
     };
     source.apply_to_descriptor(&mut descriptor);
     if let Err(error) = crate::compute::record_submission_handle(&run_id, &descriptor) {
-        let _ = slurm::cancel_job(&host, &job_id).await;
+        let _ = slurm::cancel_job(&target.dest, &job_id).await;
         return Err(error);
     }
     let run = StoredRun {

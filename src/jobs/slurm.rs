@@ -27,7 +27,7 @@ use std::collections::HashMap;
 
 use serde::{Deserialize, Serialize};
 
-use super::ssh::{sh_quote, ssh_run, SshTarget};
+use super::ssh::{refresh_route, sh_quote, ssh_run, SshTarget};
 use crate::error::{anyhow, Result};
 
 // --- settings ---------------------------------------------------------------
@@ -94,8 +94,6 @@ pub fn save_settings(settings: &SlurmSettings) -> Result<()> {
 // --- job spec & script generation --------------------------------------------
 
 pub struct SlurmJobSpec {
-    /// ssh config host alias of the cluster's login node.
-    pub host: String,
     /// Names the remote run dir `~/.orx/runs/<run_id>`.
     pub run_id: String,
     /// Runs on the login node in the run dir at submit time, with `env`
@@ -266,7 +264,7 @@ pub fn run_dir(run_id: &str) -> String {
 /// Submit the job: create the run dir, clone on the login node, write
 /// job.sbatch, `sbatch --parsable`. Returns the Slurm job id — the reattach
 /// handle (together with the host).
-pub async fn run_job(spec: &SlurmJobSpec) -> Result<String> {
+pub async fn run_job(spec: &SlurmJobSpec, target: &SshTarget) -> Result<String> {
     let dir = run_dir(&spec.run_id);
 
     // Login-node setup (clone). Env + script travel via stdin so tokens never
@@ -277,7 +275,7 @@ pub async fn run_job(spec: &SlurmJobSpec) -> Result<String> {
         script = spec.setup_script,
     );
     ssh_run(
-        &SshTarget::alias(&spec.host),
+        target,
         &format!("mkdir -p \"$HOME/{dir}\" && chmod 700 \"$HOME/{dir}\" && bash -s"),
         Some(&setup),
     )
@@ -286,13 +284,13 @@ pub async fn run_job(spec: &SlurmJobSpec) -> Result<String> {
 
     // Write the batch script (owner-only: it embeds tokens) and submit.
     ssh_run(
-        &SshTarget::alias(&spec.host),
+        target,
         &format!("umask 077 && cat > \"$HOME/{dir}/job.sbatch\""),
         Some(&render_sbatch(spec)),
     )
     .await?;
     let out = ssh_run(
-        &SshTarget::alias(&spec.host),
+        target,
         &format!("cd \"$HOME/{dir}\" && sbatch --parsable job.sbatch"),
         None,
     )
@@ -443,13 +441,22 @@ pub struct SlurmPreflight {
     pub error: Option<String>,
 }
 
-pub async fn preflight(host: &str) -> SlurmPreflight {
+pub async fn preflight(target: &SshTarget) -> SlurmPreflight {
+    if let Err(error) = refresh_route(target, None).await {
+        return SlurmPreflight {
+            reachable: false,
+            slurm_found: false,
+            tools_found: false,
+            partitions: Vec::new(),
+            error: Some(error.to_string()),
+        };
+    }
     let cmd = "if command -v sbatch >/dev/null 2>&1 && command -v squeue >/dev/null 2>&1 \
                && command -v scancel >/dev/null 2>&1; then echo SLURM_OK; fi; \
                if command -v bash >/dev/null 2>&1 && command -v tar >/dev/null 2>&1; \
                then echo TOOLS_OK; fi; \
                sinfo -h -o %P 2>/dev/null || true";
-    match ssh_run(&SshTarget::alias(host), cmd, None).await {
+    match ssh_run(target, cmd, None).await {
         Ok(out) => {
             let mut slurm_found = false;
             let mut tools_found = false;
@@ -511,7 +518,6 @@ mod tests {
 
     fn spec() -> SlurmJobSpec {
         SlurmJobSpec {
-            host: "cluster".into(),
             run_id: "0123456789abcdef".into(),
             setup_script: "git clone x repo".into(),
             command: "python train.py".into(),
@@ -638,7 +644,6 @@ mod tests {
             panic!("set ORX_SLURM_TEST_HOST to an ~/.ssh/config alias of a slurm login node");
         };
         let mk = |run_id: &str, command: &str| SlurmJobSpec {
-            host: host.clone(),
             run_id: run_id.into(),
             setup_script: "mkdir -p repo".into(),
             command: command.into(),
@@ -676,9 +681,12 @@ mod tests {
         );
 
         // Happy path: runs, completes, logs arrive.
-        let job_a = run_job(&mk(&run_a, "echo hello-from-slurm; echo \"env=$ORX_E2E\""))
-            .await
-            .unwrap();
+        let job_a = run_job(
+            &mk(&run_a, "echo hello-from-slurm; echo \"env=$ORX_E2E\""),
+            &SshTarget::alias(&host),
+        )
+        .await
+        .unwrap();
         let done = poll(run_a.clone(), job_a, &["COMPLETED", "ERROR"]).await;
         assert_eq!(done.stage, "COMPLETED", "message: {:?}", done.message);
         let mut lines = Vec::new();
@@ -696,7 +704,9 @@ mod tests {
         assert!(lines.iter().any(|l| l == "env=1"), "{lines:?}");
 
         // Cancel path: scancel'd job leaves the queue without an exit code.
-        let job_b = run_job(&mk(&run_b, "sleep 300")).await.unwrap();
+        let job_b = run_job(&mk(&run_b, "sleep 300"), &SshTarget::alias(&host))
+            .await
+            .unwrap();
         poll(run_b.clone(), job_b.clone(), &["RUNNING", "SCHEDULING"]).await;
         cancel_job(&host, &job_b).await.unwrap();
         let after = poll(run_b, job_b, &["CANCELED", "GONE", "ERROR"]).await;
