@@ -137,27 +137,25 @@ pub async fn submit_local_slurm_with_source(
     if let Ok(hf_token) = huggingface::resolve_token() {
         env.entry("HF_TOKEN".to_string()).or_insert(hf_token);
     }
-    crate::jobs::ssh::stage_source(
-        &crate::jobs::ssh::SshTarget::alias(&host),
-        &run_id,
-        &source.path,
-        &source.digest,
-        None,
+    // One submission stays on one route: pin staging and submit to the route
+    // resolved at preflight so a concurrent refresh cannot split them.
+    let target = crate::jobs::ssh::pinned_alias(&host);
+    crate::jobs::ssh::stage_source(&target, &run_id, &source.path, &source.digest, None).await?;
+    let job_id = slurm::run_job(
+        &slurm::SlurmJobSpec {
+            run_id: run_id.clone(),
+            setup_script: "test -d repo".to_string(),
+            command: run_command.clone(),
+            env,
+            gres: args.flavor.as_deref().and_then(slurm::resolve_gres),
+            partition: settings.partition.clone(),
+            account: settings.account.clone(),
+            time_limit_secs,
+            cpus_per_task,
+            mem: mem.clone(),
+        },
+        &target,
     )
-    .await?;
-    let job_id = slurm::run_job(&slurm::SlurmJobSpec {
-        host: host.clone(),
-        run_id: run_id.clone(),
-        setup_script: "test -d repo".to_string(),
-        command: run_command.clone(),
-        env,
-        gres: args.flavor.as_deref().and_then(slurm::resolve_gres),
-        partition: settings.partition.clone(),
-        account: settings.account.clone(),
-        time_limit_secs,
-        cpus_per_task,
-        mem: mem.clone(),
-    })
     .await?;
 
     let mut descriptor = BackendDescriptor {
