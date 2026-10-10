@@ -2480,9 +2480,11 @@ mod tests {
             let (mut stream, _) = listener.accept().await.unwrap();
             let mut buf = [0u8; 4096];
             let _ = stream.read(&mut buf).await.unwrap();
-            let length = declare_length
-                .then(|| format!("Content-Length: {}\r\n", body.len()))
-                .unwrap_or_default();
+            let length = if declare_length {
+                format!("Content-Length: {}\r\n", body.len())
+            } else {
+                String::new()
+            };
             stream
                 .write_all(
                     format!(
