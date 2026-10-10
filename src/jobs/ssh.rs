@@ -1291,7 +1291,7 @@ mod tests {
             ),
         )
         .unwrap();
-        let leader = std::process::Command::new("setsid")
+        let mut leader = std::process::Command::new("setsid")
             .arg("bash")
             .arg(&spawn)
             .env("HOME", home.path())
@@ -1337,6 +1337,8 @@ mod tests {
         assert!(!alive(worker_pid));
         assert!(alive(bystander.id() as i32));
         let _ = bystander.kill();
+        let _ = leader.wait();
+        let _ = bystander.wait();
     }
 
     #[test]
