@@ -860,6 +860,67 @@ host_group_alive() {
     fi
     ps -e -o pgid= -o stat= 2>/dev/null | awk -v p="$p" '$1 == p && $2 !~ /^[ZX]/ { alive=1 } END { exit !alive }'
 }
+
+host_any_group_alive() {
+    local g
+    for g in "$@"; do
+        host_group_alive "$g" && return 0
+    done
+    return 1
+}
+
+# Groups, other than $1's own, holding current descendants of $1. A payload
+# child spawned with start_new_session/setsid leaves the run's group but stays
+# a descendant — snapshotting this before TERM catches it while its ancestry
+# is still intact.
+host_descendant_groups() {
+    local root="$1" file stat fields pid cur
+    [ -d /proc ] || return 0
+    local -A parent group
+    for file in /proc/[0-9]*/stat; do
+        pid=${file#/proc/}; pid=${pid%/stat}
+        IFS= read -r stat < "$file" 2>/dev/null || continue
+        stat=${stat##*) }
+        read -ra fields <<< "$stat"
+        parent[$pid]=${fields[1]}
+        group[$pid]=${fields[2]}
+    done
+    for pid in "${!parent[@]}"; do
+        cur=${parent[$pid]}
+        while [ "$cur" -gt 1 ] 2>/dev/null && [ "$cur" != "$pid" ]; do
+            if [ "$cur" = "$root" ]; then
+                [ "${group[$pid]}" != "$root" ] && echo "${group[$pid]}"
+                break
+            fi
+            cur=${parent[$cur]:-0}
+        done
+    done 2>/dev/null | sort -u
+}
+
+# Groups, other than $2's, holding processes anchored to the run directory
+# $1: working directory inside it or a command line referencing it. This is
+# the fallback attribution once detached children are orphaned (reparented,
+# ancestry lost) — they still run from the run's repo or against its files.
+host_path_groups() {
+    local d="$1" own="$2" dir file cwd stat fields cmd
+    [ -d /proc ] || return 0
+    for file in /proc/[0-9]*/cwd; do
+        dir=${file%/cwd}
+        cwd=$(readlink "$file" 2>/dev/null) || cwd=
+        case "$cwd" in
+            "$d"|"$d"/*) ;;
+            *)
+                cmd=$(tr '\0' ' ' < "$dir/cmdline" 2>/dev/null) || continue
+                case "$cmd" in *"$d"*) ;; *) continue;; esac;;
+        esac
+        IFS= read -r stat < "$dir/stat" 2>/dev/null || continue
+        stat=${stat##*) }
+        read -ra fields <<< "$stat"
+        if [ "${fields[0]}" = Z ] || [ "${fields[0]}" = X ]; then continue; fi
+        [ "${fields[2]}" = "$own" ] && continue
+        echo "${fields[2]}"
+    done 2>/dev/null | sort -u
+}
 "#;
 
 fn parse_job_state(out: &str) -> Result<JobState> {
@@ -933,6 +994,15 @@ pub async fn stream_logs(
 /// after five seconds, matching the documented contract and the container
 /// path. run.sh's own escalation dies with its leader, so this sweep is the
 /// only one that still fires once the group leader is gone.
+///
+/// The sweep also covers children that left the run's process group —
+/// e.g. workers a payload spawns with `start_new_session=True`, each its own
+/// session and group, which a group-scoped signal can never reach. They are
+/// attributed two ways: still-descendant of the recorded pid (snapshotted
+/// before TERM, while the ancestry survives the coordinator's exit), and
+/// anchored to the run directory (cwd or argv under `~/.orx/runs/<id>`, which
+/// is what orphans keep once reparented). Each foreign group gets the same
+/// TERM-then-KILL contract; anything else on the host is untouched.
 pub async fn cancel_job(
     target: &SshTarget,
     dir: &str,
@@ -947,20 +1017,27 @@ pub async fn cancel_job(
     Ok(())
 }
 
-/// The remote half of `cancel_job`: TERM the recorded process group, wait five
-/// seconds, then KILL whoever ignored it. Kept separate so tests can run it
-/// against a real local group.
+/// The remote half of `cancel_job`: TERM the recorded process group plus every
+/// foreign group attributable to the run, wait five seconds, then KILL whoever
+/// ignored it. Kept separate so tests can run it against real local processes.
 fn host_cancel_script(dir: &str) -> String {
     format!(
         "{HOST_PROCESS_HELPERS}\n\
          p=$(cat \"$HOME/{dir}/pid\" 2>/dev/null); \
          [ -n \"$p\" ] || exit 0; \
          case \"$p\" in ''|*[!0-9]*) exit 0;; esac; \
-         kill -TERM -- -\"$p\" 2>/dev/null || kill -TERM \"$p\" 2>/dev/null || true; \
-         for ((i=0; i<50; i++)); do host_group_alive \"$p\" || exit 0; sleep 0.1; done; \
-         kill -KILL -- -\"$p\" 2>/dev/null || true; \
-         for ((i=0; i<10; i++)); do host_group_alive \"$p\" || exit 0; sleep 0.1; done; \
-         echo 'Experiment process group is still alive' >&2; exit 1",
+         d=\"$HOME/{dir}\"; \
+         groups=\"$p $(host_descendant_groups \"$p\") $(host_path_groups \"$d\" \"$p\")\"; \
+         for g in $groups; do \
+             kill -TERM -- -\"$g\" 2>/dev/null || kill -TERM \"$g\" 2>/dev/null || true; \
+         done; \
+         for ((i=0; i<50; i++)); do host_any_group_alive $groups || exit 0; sleep 0.1; done; \
+         groups=\"$p $(host_descendant_groups \"$p\") $(host_path_groups \"$d\" \"$p\")\"; \
+         for g in $groups; do \
+             host_group_alive \"$g\" && kill -KILL -- -\"$g\" 2>/dev/null; \
+         done; \
+         for ((i=0; i<10; i++)); do host_any_group_alive $groups || exit 0; sleep 0.1; done; \
+         echo 'Experiment processes are still alive' >&2; exit 1",
     )
 }
 
@@ -1354,6 +1431,113 @@ mod tests {
         assert!(start.elapsed() >= Duration::from_secs(4));
         assert!(!group_alive(leader));
         // host_group_alive skips zombies, unlike kill(pid, 0) on our own child.
+        assert!(group_alive(bystander));
+        unsafe {
+            libc::kill(bystander, libc::SIGKILL);
+            libc::waitpid(bystander, std::ptr::null_mut(), 0);
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn host_cancel_kills_detached_session_children() {
+        let home = crate::local::git::TemporaryDirectory::new("orx-ssh-cancel").unwrap();
+        let dir = home.path().join(".orx/runs/r1");
+        std::fs::create_dir_all(dir.join("repo")).unwrap();
+        let mut ready = [0; 2];
+        assert_eq!(unsafe { libc::pipe(ready.as_mut_ptr()) }, 0);
+        // OR-469: a worker spawned with start_new_session gets its own session
+        // and process group, so the group-scoped kill cannot reach it. The
+        // leader exits first (the coordinator is already torn down), orphaning
+        // the worker and erasing its ancestry — path attribution must find it.
+        let leader = unsafe { libc::fork() };
+        assert!(leader >= 0);
+        if leader == 0 {
+            unsafe {
+                libc::close(ready[0]);
+                libc::setsid();
+                if libc::fork() == 0 {
+                    libc::setsid();
+                    // Run from the run's repo like a real payload child.
+                    let repo = std::ffi::CString::new(dir.join("repo").to_str().unwrap()).unwrap();
+                    libc::chdir(repo.as_ptr());
+                    libc::signal(libc::SIGTERM, libc::SIG_IGN);
+                    // Tell the test the worker is detached, anchored, and
+                    // ignoring TERM before the leader exits.
+                    libc::write(ready[1], b"r".as_ptr().cast(), 1);
+                    libc::sleep(60);
+                }
+                libc::_exit(0);
+            }
+        }
+        unsafe { libc::close(ready[1]) };
+        std::fs::write(dir.join("pid"), format!("{leader}\n")).unwrap();
+        // An unrelated session leader outside the run dir must survive.
+        let bystander = unsafe { libc::fork() };
+        assert!(bystander >= 0);
+        if bystander == 0 {
+            unsafe {
+                libc::close(ready[0]);
+                libc::setsid();
+                libc::sleep(60);
+                libc::_exit(0)
+            };
+        }
+        let mut pfd = libc::pollfd {
+            fd: ready[0],
+            events: libc::POLLIN,
+            revents: 0,
+        };
+        assert_eq!(unsafe { libc::poll(&mut pfd, 1, 10_000) }, 1);
+        let mut byte = 0u8;
+        assert_eq!(
+            unsafe { libc::read(ready[0], &mut byte as *mut u8 as *mut libc::c_void, 1) },
+            1
+        );
+        unsafe { libc::close(ready[0]) };
+        let mut leader_dead = false;
+        for _ in 0..500 {
+            if unsafe { libc::waitpid(leader, std::ptr::null_mut(), libc::WNOHANG) } == leader {
+                leader_dead = true;
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        assert!(leader_dead);
+        let anchored = || {
+            String::from_utf8(
+                std::process::Command::new("bash")
+                    .arg("-c")
+                    .arg(format!(
+                        "{HOST_PROCESS_HELPERS}\nhost_path_groups \"$HOME/.orx/runs/r1\" {leader}"
+                    ))
+                    .env("HOME", home.path())
+                    .output()
+                    .unwrap()
+                    .stdout,
+            )
+            .unwrap()
+        };
+        // The orphaned worker is anchored to the run dir; the bystander is not.
+        assert_eq!(anchored().trim().lines().count(), 1);
+        let start = std::time::Instant::now();
+        let status = std::process::Command::new("bash")
+            .args(["-c", &host_cancel_script(".orx/runs/r1")])
+            .env("HOME", home.path())
+            .status()
+            .unwrap();
+        assert!(status.success());
+        // TERM was ignored, so the sweep waited the full five seconds before KILL.
+        assert!(start.elapsed() >= Duration::from_secs(4));
+        assert_eq!(anchored().trim(), "");
+        let group_alive = |pgid: i32| {
+            std::process::Command::new("bash")
+                .arg("-c")
+                .arg(format!("{HOST_PROCESS_HELPERS}\nhost_group_alive {pgid}"))
+                .status()
+                .unwrap()
+                .success()
+        };
         assert!(group_alive(bystander));
         unsafe {
             libc::kill(bystander, libc::SIGKILL);
