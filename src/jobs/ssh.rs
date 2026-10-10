@@ -1280,31 +1280,61 @@ mod tests {
         let home = crate::local::git::TemporaryDirectory::new("orx-ssh-cancel").unwrap();
         let dir = home.path().join(".orx/runs/r1");
         std::fs::create_dir_all(&dir).unwrap();
+        let mut ready = [0; 2];
+        assert_eq!(unsafe { libc::pipe(ready.as_mut_ptr()) }, 0);
         // OR-354: the group leader exits, leaving a member that ignores TERM.
         let leader = unsafe { libc::fork() };
         assert!(leader >= 0);
         if leader == 0 {
-            unsafe { libc::setsid() };
-            if unsafe { libc::fork() } == 0 {
-                unsafe {
+            unsafe {
+                libc::close(ready[0]);
+                libc::setsid();
+                if libc::fork() == 0 {
                     libc::signal(libc::SIGTERM, libc::SIG_IGN);
+                    // Tell the test TERM is ignored before sleeping.
+                    libc::write(ready[1], b"r".as_ptr().cast(), 1);
                     libc::sleep(60);
-                    libc::_exit(0)
-                };
+                }
+                libc::_exit(0);
             }
-            unsafe { libc::_exit(0) };
         }
+        unsafe { libc::close(ready[1]) };
         std::fs::write(dir.join("pid"), format!("{leader}\n")).unwrap();
         // An unrelated process in another group must survive the sweep.
         let bystander = unsafe { libc::fork() };
         assert!(bystander >= 0);
         if bystander == 0 {
             unsafe {
+                libc::close(ready[0]);
                 libc::setsid();
                 libc::sleep(60);
                 libc::_exit(0)
             };
         }
+        // Wait for the member to confirm it ignores TERM and for the leader to
+        // exit before cancelling: a group liveness check can pass on the leader
+        // itself or on the member before it installs its handler.
+        let mut pfd = libc::pollfd {
+            fd: ready[0],
+            events: libc::POLLIN,
+            revents: 0,
+        };
+        assert_eq!(unsafe { libc::poll(&mut pfd, 1, 10_000) }, 1);
+        let mut byte = 0u8;
+        assert_eq!(
+            unsafe { libc::read(ready[0], &mut byte as *mut u8 as *mut libc::c_void, 1) },
+            1
+        );
+        unsafe { libc::close(ready[0]) };
+        let mut leader_dead = false;
+        for _ in 0..500 {
+            if unsafe { libc::waitpid(leader, std::ptr::null_mut(), libc::WNOHANG) } == leader {
+                leader_dead = true;
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        assert!(leader_dead);
         let group_alive = |pgid: i32| {
             std::process::Command::new("bash")
                 .arg("-c")
@@ -1313,15 +1343,6 @@ mod tests {
                 .unwrap()
                 .success()
         };
-        let mut member_seen = false;
-        for _ in 0..100 {
-            if group_alive(leader) {
-                member_seen = true;
-                break;
-            }
-            std::thread::sleep(Duration::from_millis(10));
-        }
-        assert!(member_seen);
         let start = std::time::Instant::now();
         let status = std::process::Command::new("bash")
             .args(["-c", &host_cancel_script(".orx/runs/r1")])
@@ -1332,11 +1353,11 @@ mod tests {
         // TERM was ignored, so the sweep waited the full five seconds before KILL.
         assert!(start.elapsed() >= Duration::from_secs(4));
         assert!(!group_alive(leader));
+        // host_group_alive skips zombies, unlike kill(pid, 0) on our own child.
+        assert!(group_alive(bystander));
         unsafe {
-            assert_eq!(libc::kill(bystander, 0), 0);
             libc::kill(bystander, libc::SIGKILL);
             libc::waitpid(bystander, std::ptr::null_mut(), 0);
-            libc::waitpid(leader, std::ptr::null_mut(), 0);
         }
     }
 
