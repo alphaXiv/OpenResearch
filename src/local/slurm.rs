@@ -145,6 +145,12 @@ pub async fn submit_local_slurm_with_source(
         None,
     )
     .await?;
+    // Record the host before sbatch so a handle lost mid-submission can be found by run id.
+    if let Some(pending) = store.get_run(&run_id)? {
+        let mut pending = BackendDescriptor::parse(&pending.backend_json)?;
+        pending.namespace = Some(host.clone());
+        store.set_backend_json(&run_id, &pending.to_json())?;
+    }
     let job_id = slurm::run_job(&slurm::SlurmJobSpec {
         host: host.clone(),
         run_id: run_id.clone(),
