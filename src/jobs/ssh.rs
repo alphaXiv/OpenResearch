@@ -1281,40 +1281,47 @@ mod tests {
         let dir = home.path().join(".orx/runs/r1");
         std::fs::create_dir_all(&dir).unwrap();
         // OR-354: the group leader exits, leaving a member that ignores TERM.
-        // setsid makes the spawned script's own pid the group id.
-        let spawn = home.path().join("spawn.sh");
-        std::fs::write(
-            &spawn,
-            format!(
-                "bash -c 'trap \"\" TERM; echo $$ > \"{}\"; exec sleep 60' &\n",
-                dir.join("worker_pid").display()
-            ),
-        )
-        .unwrap();
-        let mut leader = std::process::Command::new("setsid")
-            .arg("bash")
-            .arg(&spawn)
-            .env("HOME", home.path())
-            .spawn()
-            .unwrap();
-        std::fs::write(dir.join("pid"), format!("{}\n", leader.id())).unwrap();
+        let leader = unsafe { libc::fork() };
+        assert!(leader >= 0);
+        if leader == 0 {
+            unsafe { libc::setsid() };
+            if unsafe { libc::fork() } == 0 {
+                unsafe {
+                    libc::signal(libc::SIGTERM, libc::SIG_IGN);
+                    libc::sleep(60);
+                    libc::_exit(0)
+                };
+            }
+            unsafe { libc::_exit(0) };
+        }
+        std::fs::write(dir.join("pid"), format!("{leader}\n")).unwrap();
         // An unrelated process in another group must survive the sweep.
-        let mut bystander = std::process::Command::new("setsid")
-            .arg("sleep")
-            .arg("60")
-            .spawn()
-            .unwrap();
-        let mut worker_pid = 0i32;
+        let bystander = unsafe { libc::fork() };
+        assert!(bystander >= 0);
+        if bystander == 0 {
+            unsafe {
+                libc::setsid();
+                libc::sleep(60);
+                libc::_exit(0)
+            };
+        }
+        let group_alive = |pgid: i32| {
+            std::process::Command::new("bash")
+                .arg("-c")
+                .arg(format!("{HOST_PROCESS_HELPERS}\nhost_group_alive {pgid}"))
+                .status()
+                .unwrap()
+                .success()
+        };
+        let mut member_seen = false;
         for _ in 0..100 {
-            if let Ok(text) = std::fs::read_to_string(dir.join("worker_pid")) {
-                if let Ok(pid) = text.trim().parse() {
-                    worker_pid = pid;
-                    break;
-                }
+            if group_alive(leader) {
+                member_seen = true;
+                break;
             }
             std::thread::sleep(Duration::from_millis(10));
         }
-        assert!(worker_pid > 0);
+        assert!(member_seen);
         let start = std::time::Instant::now();
         let status = std::process::Command::new("bash")
             .args(["-c", &host_cancel_script(".orx/runs/r1")])
@@ -1322,23 +1329,15 @@ mod tests {
             .status()
             .unwrap();
         assert!(status.success());
-        let alive = |pid: i32| {
-            std::process::Command::new("ps")
-                .args(["-o", "stat=", "-p", &pid.to_string()])
-                .output()
-                .map(|out| {
-                    let state = String::from_utf8_lossy(&out.stdout);
-                    !state.trim().is_empty() && !state.trim().starts_with('Z')
-                })
-                .unwrap_or(false)
-        };
         // TERM was ignored, so the sweep waited the full five seconds before KILL.
         assert!(start.elapsed() >= Duration::from_secs(4));
-        assert!(!alive(worker_pid));
-        assert!(alive(bystander.id() as i32));
-        let _ = bystander.kill();
-        let _ = leader.wait();
-        let _ = bystander.wait();
+        assert!(!group_alive(leader));
+        unsafe {
+            assert_eq!(libc::kill(bystander, 0), 0);
+            libc::kill(bystander, libc::SIGKILL);
+            libc::waitpid(bystander, std::ptr::null_mut(), 0);
+            libc::waitpid(leader, std::ptr::null_mut(), 0);
+        }
     }
 
     #[test]
