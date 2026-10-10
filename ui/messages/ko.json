@@ -255,7 +255,7 @@
   "onboarding_choose_a_coding_agent_to_continue": "계속하려면 코딩 에이전트를 선택하세요.",
   "onboarding_choose_one_or_more": "하나 이상 선택하세요.",
   "onboarding_continue": "계속",
-  "onboarding_detecting_claude_code_codex_open_code": "Claude Code, Codex, OpenCode, Cursor, Antigravity 감지 중…",
+  "onboarding_detecting_claude_code_codex_open_code": "Claude Code, Codex, OpenCode, Cursor, Antigravity, Kimi Code, MiniMax Code, ZCode 감지 중…",
   "onboarding_e_g_i_work_on_sample_efficient_rl": "예: 보상 모델을 사용하지 않는 방법을 중심으로 LLM 사후 학습을 위한 샘플 효율적인 강화학습을 연구합니다.",
   "onboarding_get_started": "시작하기",
   "onboarding_git_is_required_for_local_experiments_install_git": "로컬 실험에는 Git이 필요합니다. Git을 설치한 뒤 다시 확인하세요.",

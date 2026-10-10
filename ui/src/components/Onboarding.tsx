@@ -32,6 +32,7 @@ import { renderNote } from "./agentNote";
 import { claudeProviderLabel } from "./claudeProvider";
 import { HarnessLogo } from "./HarnessLogo";
 import { HarnessSetupDialog } from "./HarnessSetupDialog";
+import { setupAction } from "./harnessSetupState";
 
 import { Hyperspace } from "./Hyperspace";
 import { Button, LoadingRow, Spinner, StatusIndicator, type StatusTone } from "./ui";
@@ -735,7 +736,7 @@ function AgentCard({
         </span>
       </span>
       {showSetupAction ? (
-        <Button size="small" onClick={onSetup} disabled={!commands} aria-haspopup="dialog" title={m.harness_setup_opens_terminal()}>
+        <Button size="small" onClick={onSetup} disabled={!commands?.[setupAction(h)]} aria-haspopup="dialog" title={m.harness_setup_opens_terminal()}>
           <Terminal size={14} />
           {!h.installed || h.installBroken ? m.harness_setup_install() : h.authState === "unsupported" ? m.harness_setup_update() : m.harness_setup_login()}
         </Button>
