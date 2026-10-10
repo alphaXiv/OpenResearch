@@ -1229,9 +1229,9 @@ async fn run_gcp(
         status_of(&stored)?,
         target,
         openresearch::run_dir(&run_id),
-        None,
         &run_id,
         &mut descriptor,
+        None,
     )
     .await;
     teardown_gcp(&store, &project, &zone, &name, &run_id).await;
