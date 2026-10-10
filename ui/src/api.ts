@@ -31,7 +31,7 @@ export const DEMO_SEEDED_LEAF_IDS: Record<string, string> = {
   [DEMO_LITERATURE_SESSION_ID]: "msg_demo_nanochat_literature_assistant_v1",
 };
 export const DEMO_RUN_EXPERIMENT_PROMPT =
-  "Run the Muon matrix LR 2× probe experiment. When it finishes, compare its step-100 and step-200 val_bpb against the baseline and tell me whether doubling the matrix learning rate helps early training.";
+  "Run the proposed learning-rate probe experiment. Summarize its results using the recorded validation metric and comparison described by the experiment. If it produces an interactive HTML loss chart, show it inline using image syntax.";
 
 export class FileChangedError extends Error {
   readonly currentVersion: string | null;
@@ -388,10 +388,6 @@ export const getProjectStarterPrompts = (
     `/api/projects/${projectId}/starter-prompts?${new URLSearchParams({ harness, ...(model ? { model } : {}), locale })}`,
     signal,
   );
-
-/** Record a visit so the backend can persist project-level UI recency. */
-export const openProject = (projectId: string) =>
-  post<{ project: Project }>(`/api/projects/${projectId}/open`).then((r) => r.project);
 
 export const deleteProject = (projectId: string) =>
   writeResponse(`/api/projects/${projectId}`, { method: "DELETE" }).then(async (r) => {
@@ -1204,6 +1200,10 @@ export interface SlurmSettings {
   partition: string | null;
   account: string | null;
   timeLimit: string | null;
+  /** `--cpus-per-task` default; null = the partition decides (often one core). */
+  cpusPerTask: number | null;
+  /** `--mem` default in Slurm syntax ("64G"); null = the partition decides. */
+  mem: string | null;
   /** Login-node candidates, from ~/.ssh/config (same source as SSH). */
   hosts: SshHost[];
 }
@@ -1216,6 +1216,9 @@ export const saveSlurmSettings = (body: {
   partition?: string;
   account?: string;
   timeLimit?: string;
+  /** 0 clears it back to the partition default. */
+  cpusPerTask?: number;
+  mem?: string;
 }) => post<SlurmSettings>("/api/settings/slurm", body);
 
 export interface SlurmPreflight {
@@ -1758,6 +1761,8 @@ export interface HarnessModel {
   defaultReasoningLevel?: string;
   /** Additional processing tiers this model advertises (Codex Fast mode). */
   serviceTiers?: OptionChoice[];
+  /** Whether the model accepts images; absent when the catalog doesn't say. */
+  imageInput?: boolean;
 }
 
 /** Display label for a harness model: the catalog's own name when it has one,

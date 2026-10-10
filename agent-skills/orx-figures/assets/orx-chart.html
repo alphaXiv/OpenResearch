@@ -1,0 +1,252 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Experiment metrics</title>
+<style>
+:root{color-scheme:light;--bg:#fff;--fg:#1d1b1a;--muted:#6b7078;--line:#e7e9ec;--blue:#0072B2;--orange:#E69F00;--tick-size:14px;--label-size:14px}
+*{box-sizing:border-box}
+html{overflow:hidden}
+body{margin:0;background:var(--bg);color:var(--fg);font:400 14px "Helvetica Neue",Helvetica,Arial,sans-serif;-webkit-font-smoothing:antialiased}
+main{padding:4px 4px 0}
+header{margin:0 14px 10px 14px}
+h1{font-size:18px;line-height:1.4;font-weight:500;margin:0 0 4px}
+#subtitle{font-size:14px;line-height:1.4;color:var(--fg)}
+button{font:inherit;color:var(--fg);background:none;border:0;padding:5px 0;cursor:pointer}
+button:hover{color:var(--fg)}
+button:focus-visible{outline:2px solid var(--blue);outline-offset:4px;border-radius:2px}
+svg text{font-weight:400}
+svg text[font-weight="500"]{font-weight:500}
+svg:focus{outline:none}
+svg:focus-visible{outline:1px dashed #b6bec7;outline-offset:-1px}
+.toolbar{display:flex;flex-wrap:wrap;align-items:center;gap:16px;margin:0 14px 12px 14px}
+select{height:36px;min-width:170px;font:inherit;color:var(--fg);background:var(--bg);border:1px solid var(--line);border-radius:5px;padding:6px 28px 6px 10px;max-width:100%;margin-right:auto}
+.toolbar:has(select[hidden]){justify-content:flex-end}
+select:focus-visible{outline:2px solid var(--blue);outline-offset:2px}
+#reset,#export{font-size:13px}
+#export{display:flex;align-items:center;justify-content:center;width:28px;height:28px;padding:0}
+button[hidden]{display:none}
+button:disabled{opacity:.45;cursor:default}
+.legend{position:absolute;top:0;left:14px;right:14px;display:flex;flex-wrap:wrap;justify-content:flex-start;gap:2px 20px}
+.legend button{color:var(--fg);font-size:14px;display:flex;align-items:center;gap:7px;white-space:nowrap}
+.legend button[aria-pressed=false]{opacity:.4;text-decoration:line-through}
+.swatch{width:20px;height:3px;flex-shrink:0}
+
+.legend[hidden]{display:none}
+.plot{position:relative}
+#chart{display:block;width:100%;height:clamp(260px,40vw,320px);touch-action:none;cursor:crosshair;user-select:none}
+.tooltip{position:absolute;pointer-events:none;top:44px;background:var(--bg);border:1px solid var(--line);border-radius:6px;box-shadow:0 4px 16px #0000000d;padding:10px 12px;min-width:170px;font-size:14px;line-height:1.8;font-variant-numeric:tabular-nums}
+.tooltip[hidden]{display:none}
+.tooltip strong{font-weight:400;color:var(--muted)}
+.value{display:flex;gap:12px}
+@media(max-width:440px){.toolbar{gap:12px}.legend{gap:12px}}
+</style>
+</head>
+<body><main>
+<header><h1 id="title"></h1><div id="subtitle"></div></header>
+<div class="toolbar"><select id="metrics" aria-label="Metric"></select><button id="reset" hidden>Reset zoom</button><button id="export" aria-label="Download SVG" title="Download SVG"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 3v12m-5-5 5 5 5-5M5 16v4h14v-4"/></svg></button></div>
+<div class="plot"><div class="legend" id="legend" aria-label="Runs"></div><svg id="chart" role="img" tabindex="0"></svg><div class="tooltip" id="tooltip" hidden></div></div>
+
+</main>
+<script id="data" type="application/json">__ORX_CHART_DATA__</script>
+<script>
+function trainingStepTicks(min,max){
+ const rough=Math.max((max-min)/6,1),power=10**Math.floor(Math.log10(rough));
+ const spacing=Math.max(1,Math.ceil([1,2,2.5,5,10].find(n=>n*power>=rough)*power));
+ const first=Math.ceil(min/spacing),last=Math.floor(max/spacing);
+ return Array.from({length:Math.max(0,last-first+1)},(_,i)=>Math.round((first+i)*spacing));
+}
+const data=JSON.parse(document.querySelector('#data').textContent);
+for(const item of data.metrics)if(item.type==='scaling'){item.xScale??='log';item.yScale??='log'}
+const chart=document.querySelector('#chart'),tip=document.querySelector('#tooltip');
+const colors=['#0072B2','#E69F00','#009E73','#CC79A7','#D55E00','#56B4E9','#332288'];
+let metric=data.metrics[0],enabled=new Set(),domain=null,hover=null,drag=null;
+function series(){return metric.series||data.series||[]}
+let legends=[];
+function setLegend(){enabled=new Set(series().map((_,i)=>i));document.querySelector('#legend').replaceChildren();legends=series().map((run,i)=>{const node=button(run.name,document.querySelector('#legend'),()=>{if(enabled.has(i)){if(enabled.size===1)return;enabled.delete(i)}else enabled.add(i);draw()});const swatch=document.createElement('span');swatch.className='swatch';swatch.style.background=run.color||colors[i%colors.length];if(run.dash&&run.dash!=='none'){swatch.style.background='none';swatch.style.borderTop=`3px dashed ${run.color||colors[i%colors.length]}`}node.prepend(swatch);return node})}
+document.querySelector('#title').textContent=data.title;
+document.querySelector('#subtitle').textContent=data.subtitle||'';
+const ns='http://www.w3.org/2000/svg';
+function element(tag,attrs={},text){const node=document.createElementNS(ns,tag);for(const [key,value]of Object.entries(attrs))node.setAttribute(key,value);if(text!==undefined)node.textContent=text;return node}
+function button(text,parent,action){const node=document.createElement('button');node.textContent=text;node.onclick=action;parent.append(node);return node}
+const metrics=document.querySelector('#metrics');
+for(const item of data.metrics){const option=document.createElement('option');option.value=item.key;option.textContent=item.label;metrics.append(option)}
+metrics.hidden=data.metrics.length<2;
+metrics.onchange=()=>{metric=data.metrics.find(item=>item.key===metrics.value);domain=null;hover=null;tip.hidden=true;setLegend();draw()};
+setLegend();
+function points(run){return run.points.filter(p=>Number.isFinite(p[metric.key])&&Number.isFinite(p.step)&&(metric.xScale!=='log'||p.step>0)&&(metric.yScale!=='log'||p[metric.key]>0))}
+function rangePoints(run){return [...points(run),...(run.fit||[])]}
+function sliceRows(rows,axis,range,connected=true){
+ const coordinate=p=>p[axis],inside=p=>coordinate(p)>=range[0]&&coordinate(p)<=range[1];
+ const result=rows.filter(inside);
+ if(!connected)return result;
+ const transform=(value,key)=>(key==='step'?metric.xScale:metric.yScale)==='log'?Math.log10(value):value;
+ const restore=(value,key)=>(key==='step'?metric.xScale:metric.yScale)==='log'?10**value:value;
+ for(let i=1;i<rows.length;i++){
+  const a=rows[i-1],b=rows[i];
+  for(const edge of range){
+   if(!((coordinate(a)<edge&&coordinate(b)>edge)||(coordinate(b)<edge&&coordinate(a)>edge)))continue;
+   const fraction=(transform(edge,axis)-transform(coordinate(a),axis))/(transform(coordinate(b),axis)-transform(coordinate(a),axis));
+   const point={};
+   for(const key of ['step',metric.key,'lower','upper'])if(Number.isFinite(a[key])&&Number.isFinite(b[key]))point[key]=restore(transform(a[key],key)+(transform(b[key],key)-transform(a[key],key))*fraction,key);
+   point[axis]=edge;result.push(point);
+  }
+ }
+ return result;
+}
+function frontier(samples){return samples.filter(p=>!samples.some(q=>(metric.minimizeX===false?q.step>=p.step:q.step<=p.step)&&(metric.maximizeY===false?q[metric.key]<=p[metric.key]:q[metric.key]>=p[metric.key])&&(q.step!==p.step||q[metric.key]!==p[metric.key]))).sort((a,b)=>a.step-b.step)}
+function slicePoints(run,axis,range){
+ const samples=points(run),connected=!metric.type||['line','area'].includes(metric.type);
+ const result=sliceRows(samples,axis,range,connected);
+ if(metric.type==='pareto')result.push(...sliceRows(frontier(samples),axis,range));
+ const intervals=samples.filter(p=>Number.isFinite(p.lower)&&Number.isFinite(p.upper));
+ if(intervals.length){
+  if(axis==='step')result.push(...sliceRows(intervals,axis,range));
+  else result.push(...intervals.filter(p=>p.lower<=range[1]&&p.upper>=range[0]),...sliceRows(intervals,'lower',range),...sliceRows(intervals,'upper',range));
+ }
+ return result.concat(sliceRows(run.fit||[],axis,range));
+}
+function tickLabel(value,spacing){const precision=Math.max(1,Math.floor(Math.log10(Math.abs(value)||1))-Math.floor(Math.log10(spacing))+2);return Number(value.toPrecision(Math.min(100,precision)))}
+function bounds(){const all=series().flatMap(rangePoints);return [Math.min(...all.map(p=>p.step)),Math.max(...all.map(p=>p.step))]}
+let layout;
+function draw(){
+ metrics.value=metric.key;
+ document.querySelector('#legend').hidden=series().length<=1||['heatmap','confusion','diagram','dot'].includes(metric.type);
+ legends.forEach((node,i)=>node.setAttribute('aria-pressed',String(enabled.has(i))));
+ chart.setAttribute('aria-label',`${data.title}: ${metric.label}. Use arrow keys to inspect steps.`);
+ document.querySelector("#reset").hidden=domain===null;
+ const width=chart.clientWidth,height=chart.clientHeight,left=52,right=14,top=document.querySelector("#legend").offsetHeight+64,bottom=52;
+ if(metric.type==='diagram'){drawDiagram(width,height,left,right,bottom);return}
+ if(metric.type==='dot'){drawDots(width,height,left,right,bottom);return}
+ if(['heatmap','confusion'].includes(metric.type)){drawHeatmap(width,height,left,right,bottom);return}
+ const selected=series().flatMap((run,i)=>!enabled.has(i)?[]:domain?.x&&!domain?.y?slicePoints(run,'step',domain.x):domain?.y&&!domain?.x?slicePoints(run,metric.key,domain.y):rangePoints(run));
+ const visible=selected.length?selected:series().flatMap((run,i)=>enabled.has(i)?rangePoints(run):[]);
+ const [xmin,xmax]=domain?.x||(domain?.y&&visible.length?[Math.min(...visible.map(p=>p.step)),Math.max(...visible.map(p=>p.step))]:bounds());
+ const values=visible.flatMap(p=>[p[metric.key],p.lower,p.upper]).filter(Number.isFinite);
+ const [low,high]=domain?.y||[['bar','area'].includes(metric.type)?Math.min(0,...values):Math.min(...values),['bar','area'].includes(metric.type)?Math.max(0,...values):Math.max(...values)];
+ const rough=((high-low)||Math.abs(high)*.02||1)/5,power=10**Math.floor(Math.log10(rough));
+ const tickStep=[1,2,2.5,5,10].find(value=>value*power>=rough)*power;
+ const ymin=domain?.y?low:Math.floor(low/tickStep)*tickStep,ymax=domain?.y?high:Math.max(ymin+tickStep,Math.ceil(high/tickStep)*tickStep);
+ const decimals=Math.max(0,-Math.floor(Math.log10(tickStep))+(tickStep/power===2.5?1:0));
+ const xPad=domain?.x||metric.xScale==='log'?0:metric.type==='bar'?Math.max((xmax-xmin)*.2,.5):['line','area','scaling'].includes(metric.type||'line')?0:(xmax-xmin)*.025;
+ const tx=v=>metric.xScale==='log'?Math.log10(v):v,ty=v=>metric.yScale==='log'?Math.log10(v):v;
+ const yLow=metric.yScale==='log'?Math.max(low/(low===high?1.02:1),Number.MIN_VALUE):ymin,yHigh=metric.yScale==='log'?high*(low===high?1.02:1):ymax;
+ const x=value=>left+(tx(value)-tx(xmin-xPad))/(tx(xmax+xPad)-tx(xmin-xPad)||1)*(width-left-right),y=value=>top+(ty(yHigh)-ty(value))/(ty(yHigh)-ty(yLow)||1)*(height-top-bottom);
+ layout={width,height,left,right,top,bottom,xmin,xmax,ymin:yLow,ymax:yHigh,xPad,x,y};
+ chart.replaceChildren();chart.setAttribute('viewBox',`0 0 ${width} ${height}`);
+ chart.append(element('rect',{width,height,fill:'var(--bg)'}));
+ const yTicks=metric.yScale==='log'?Array.from({length:5},(_,i)=>10**(ty(yLow)+(ty(yHigh)-ty(yLow))*i/4)):Array.from({length:Math.floor(ymax/tickStep)-Math.ceil(ymin/tickStep)+1},(_,i)=>(Math.ceil(ymin/tickStep)+i)*tickStep);
+ for(const value of yTicks){const cy=y(value);chart.append(element('line',{x1:left,x2:width-right,y1:cy,y2:cy,stroke:'var(--line)','stroke-width':.7}),element('text',{x:left-10,y:cy+5,'text-anchor':'end',fill:'var(--fg)','font-size':'var(--tick-size)'},metric.yScale==='log'?Number(value.toPrecision(3)):value.toFixed(decimals)))}
+ const categories=metric.type==='bar'?[...new Map(series().flatMap(points).map(p=>[p.step,p])).values()]:null;
+ const integerSteps=!categories&&metric.xScale!=='log'&&(metric.xLabel||data.xLabel||'Training step')==='Training step'?trainingStepTicks(xmin,xmax):null;
+ const xTicks=categories?categories.map(p=>p.step):integerSteps||Array.from({length:5},(_,i)=>metric.xScale==='log'?10**(tx(xmin)+(tx(xmax)-tx(xmin))*i/4):xmin+(xmax-xmin)*i/4);
+ const xSpacing=xTicks.length>1?Math.min(...xTicks.slice(1).map((value,i)=>Math.abs(value-xTicks[i])))||1:1;
+ for(const [i,value] of xTicks.entries())chart.append(element('text',{x:x(value),y:height-bottom+23,'text-anchor':x(value)<=left+1?'start':x(value)>=width-right-1?'end':'middle',fill:'var(--fg)','font-size':'var(--tick-size)'},categories?categories[i].label:Number.isInteger(value)?value:tickLabel(value,xSpacing)));
+ chart.append(element('text',{x:14,y:top-32,'text-anchor':'start',fill:'var(--fg)','font-size':'var(--label-size)','font-weight':500},`${metric.yLabel||metric.label}${metric.unit?` (${metric.unit})`:""}${metric.yScale==='log'?' · log scale':''}`),
+  element('text',{x:width-right,y:height-3,'text-anchor':'end',fill:'var(--fg)','font-size':'var(--label-size)','font-weight':500},`${metric.xLabel||data.xLabel||'Training step'}${metric.xScale==='log'?' · log scale':''}`));
+ const defs=element('defs'),clip=element('clipPath',{id:'plot-area'});clip.append(element('rect',{x:left,y:top,width:width-left-right,height:height-top-bottom}));defs.append(clip);chart.append(defs);
+ series().forEach((run,i)=>{
+  if(!enabled.has(i))return;
+  const samples=points(run),color=run.color||colors[i%colors.length];
+  const interval=samples.filter(p=>Number.isFinite(p.lower)&&Number.isFinite(p.upper));
+  if(interval.length){const band=interval.map((p,j)=>`${j?'L':'M'}${x(p.step)},${y(p.upper)}`).join(' ')+interval.toReversed().map(p=>` L${x(p.step)},${y(p.lower)}`).join(' ')+' Z';chart.append(element('path',{d:band,fill:color,'fill-opacity':.15,'clip-path':'url(#plot-area)'}))}
+  if(run.fit?.length){chart.append(element('path',{d:run.fit.map((p,j)=>`${j?'L':'M'}${x(p.step)},${y(p[metric.key])}`).join(' '),fill:'none',stroke:color,'stroke-width':2,'stroke-dasharray':run.fitDash||'4 3','clip-path':'url(#plot-area)'}))}
+  let front=null;
+  if(metric.type==='pareto'){
+   front=frontier(samples);
+   chart.append(element('path',{d:front.map((p,j)=>`${j?'L':'M'}${x(p.step)},${y(p[metric.key])}`).join(' '),fill:'none',stroke:color,'stroke-width':3,'clip-path':'url(#plot-area)'}));
+  }
+  if(!metric.type||metric.type==='line'||metric.type==='area'){
+   if(metric.type==='area'&&samples.length){const fillPath=`M${x(samples[0].step)},${y(0)} `+samples.map(p=>`L${x(p.step)},${y(p[metric.key])}`).join(' ')+` L${x(samples.at(-1).step)},${y(0)} Z`;chart.append(element('path',{d:fillPath,fill:color,'fill-opacity':.18,'clip-path':'url(#plot-area)'}))}
+   const path=samples.map((p,j)=>`${j?'L':'M'}${x(p.step)},${y(p[metric.key])}`).join(' ');
+   chart.append(element('path',{d:path,fill:'none',stroke:color,'stroke-width':3,'stroke-linejoin':'round','stroke-linecap':'round','stroke-dasharray':run.dash||(!run.color&&i%2?'6 4':'none'),'clip-path':'url(#plot-area)'}));
+  }
+  if(metric.type==='bar'){
+   const peers=series().filter((_,j)=>enabled.has(j)),slot=(width-left-right)/Math.max(categories.length,1)*.7,barWidth=Math.min(64,slot/peers.length),offset=(peers.indexOf(run)-(peers.length-1)/2)*barWidth;
+   for(const p of samples)chart.append(element('rect',{x:x(p.step)+offset-barWidth/2,y:Math.min(y(0),y(p[metric.key])),width:barWidth,height:Math.abs(y(0)-y(p[metric.key])),fill:color,rx:2,'clip-path':'url(#plot-area)'}));
+  }else if(['scatter','scaling','pareto'].includes(metric.type)||samples.length<=10){
+   for(const p of samples){if(p.step<xmin||p.step>xmax||p[metric.key]<yLow||p[metric.key]>yHigh)continue;chart.append(element('circle',{cx:x(p.step),cy:y(p[metric.key]),r:['scatter','scaling','pareto'].includes(metric.type)?4.5:3.5,fill:p.inFit===false?'var(--bg)':color,stroke:color,opacity:front&&!front.includes(p)?.35:1}));}
+  }
+ });
+ if(hover!==null)inspect(hover);
+}
+function drawDots(width,height,left,right,bottom){
+ const rows=series().flatMap((run,i)=>points(run).map(p=>({run,p,color:run.color||colors[i%colors.length]})));
+ left=Math.max(left,Math.min(width*.35,Math.max(...rows.map(({run,p})=>(p.label||run.name).length))*7+28));
+ const values=rows.flatMap(({p})=>[p[metric.key],p.lower,p.upper]).filter(Number.isFinite),low=Math.min(0,...values),high=Math.max(0,...values),pad=(high-low||1)*.12;
+ const top=20,base=height-bottom,x=v=>left+(v-low+pad)/(high-low+2*pad)*(width-left-right),rowHeight=(base-top)/rows.length;
+ layout={width,height,left,right,top,bottom};chart.replaceChildren();chart.setAttribute('viewBox',`0 0 ${width} ${height}`);chart.append(element('rect',{width,height,fill:'var(--bg)'}));
+ for(let i=0;i<5;i++){const value=low+(high-low)*i/4,cx=x(value);chart.append(element('line',{x1:cx,x2:cx,y1:top,y2:base,stroke:'var(--line)'}),element('text',{x:cx,y:base+22,'text-anchor':'middle',fill:'var(--fg)','font-size':14},Number(value.toPrecision(3))))}
+ chart.append(element('line',{x1:x(0),x2:x(0),y1:top,y2:base,stroke:'var(--muted)'}));
+ rows.forEach(({run,p,color},i)=>{const cy=top+(i+.5)*rowHeight;chart.append(element('text',{x:left-10,y:cy+4,'text-anchor':'end',fill:'var(--fg)','font-size':12},p.label||run.name));if(Number.isFinite(p.lower)&&Number.isFinite(p.upper))chart.append(element('line',{x1:x(p.lower),x2:x(p.upper),y1:cy,y2:cy,stroke:color,'stroke-width':3}));const dot=element('circle',{cx:x(p[metric.key]),cy,r:5,fill:color,tabindex:0});dot.append(element('title',{},`${p.label||run.name}: ${p[metric.key]}${Number.isFinite(p.lower)?` [${p.lower}, ${p.upper}]`:''}`));chart.append(dot)});
+ chart.append(element('text',{x:width-right,y:height-3,'text-anchor':'end',fill:'var(--fg)','font-size':14,'font-weight':500},`${metric.xLabel||metric.label}${metric.unit?` (${metric.unit})`:''}`));
+}
+function drawDiagram(width,height,left,right,bottom){
+ const nodes=metric.nodes,edges=metric.edges||[],columns=Math.max(...nodes.map(n=>n.column))+1,rows=Math.max(...nodes.map(n=>n.row))+1;
+ const top=24,nodeWidth=Math.min(150,(width-left-right)/columns*.7),nodeHeight=Math.min(56,(height-top-bottom)/rows*.65);
+ const position=node=>({x:left+(node.column+.5)*(width-left-right)/columns,y:top+(node.row+.5)*(height-top-bottom)/rows});
+ layout={width,height,left,right,top,bottom};chart.replaceChildren();chart.setAttribute('viewBox',`0 0 ${width} ${height}`);chart.append(element('rect',{width,height,fill:'var(--bg)'}));
+ const defs=element('defs'),marker=element('marker',{id:'arrow',viewBox:'0 0 10 10',refX:9,refY:5,markerWidth:6,markerHeight:6,orient:'auto-start-reverse'});marker.append(element('path',{d:'M0 0 L10 5 L0 10 Z',fill:'var(--muted)'}));defs.append(marker);chart.append(defs);
+ const marks=[];
+ for(const edge of edges){
+  const from=position(nodes.find(n=>n.id===edge.from)),to=position(nodes.find(n=>n.id===edge.to)),sameRow=from.y===to.y,sameColumn=from.x===to.x;
+  const sx=from.x+(sameColumn?0:Math.sign(to.x-from.x)*nodeWidth/2),sy=from.y+(sameColumn?Math.sign(to.y-from.y)*nodeHeight/2:0);
+  const ex=to.x-(sameRow?Math.sign(to.x-from.x)*nodeWidth/2:0),ey=to.y-(sameRow?0:Math.sign(to.y-from.y)*nodeHeight/2);
+  const path=sameRow||sameColumn?`M${sx} ${sy} L${ex} ${ey}`:`M${sx} ${sy} L${ex} ${sy} L${ex} ${ey}`;
+  const group=element('g');group.append(element('path',{d:path,fill:'none',stroke:'var(--muted)','stroke-width':1.8,'stroke-linejoin':'round','stroke-dasharray':edge.dashed?'5 4':'none','marker-end':'url(#arrow)'}));
+  if(edge.label)group.append(element('text',{x:sameColumn?sx-8:(sx+ex)/2,y:sameColumn?(sy+ey)/2+4:sy-9,'text-anchor':sameColumn?'end':'middle',fill:'var(--fg)','font-size':12},edge.label));
+  chart.append(group);marks.push({group,ids:[edge.from,edge.to]});
+ }
+ for(const node of nodes){const pos=position(node),group=element('g',{tabindex:0,role:'button','aria-label':node.label});group.append(element('rect',{x:pos.x-nodeWidth/2,y:pos.y-nodeHeight/2,width:nodeWidth,height:nodeHeight,rx:5,fill:node.accent?'#edf6fb':'var(--bg)',stroke:node.accent?'var(--blue)':'var(--line)','stroke-width':1.5}),element('title',{},node.description||node.label));
+  const label=element('text',{'text-anchor':'middle',fill:'var(--fg)','font-size':13});group.append(label);chart.append(group);
+  const lines=[],words=node.label.split(/\s+/);let line='';
+  for(const word of words){label.textContent=line?`${line} ${word}`:word;if(line&&label.getComputedTextLength()>nodeWidth-20){lines.push(line);line=word}else line=label.textContent}if(line)lines.push(line);
+  label.replaceChildren();lines.forEach((text,i)=>label.append(element('tspan',{x:pos.x,y:pos.y-(lines.length-1)*8+i*16+4},text)));
+  const select=()=>{const related=new Set([node.id,...edges.filter(e=>e.from===node.id||e.to===node.id).flatMap(e=>[e.from,e.to])]);for(const mark of marks)mark.group.setAttribute('opacity',mark.ids.every(id=>related.has(id))?'1':'.25')};group.onclick=select;group.onkeydown=event=>{if(['Enter',' '].includes(event.key)){event.preventDefault();select()}if(event.key==='Escape')for(const mark of marks)mark.group.setAttribute('opacity','1')};group.style.cursor='pointer';chart.append(group);marks.push({group,ids:[node.id]})}
+}
+function drawHeatmap(width,height,left,right,bottom){
+ const runs=series(),steps=[...new Set(runs.flatMap(run=>run.points).map(p=>p.step))].sort((a,b)=>a-b);
+ const values=runs.flatMap(points).map(p=>p[metric.key]),signed=metric.colorScale==='diverging',extent=Math.max(...values.map(Math.abs));
+ const low=metric.colorMin??(signed?-extent:Math.min(...values)),high=metric.colorMax??(signed?extent:Math.max(...values));
+ const top=64,plotRight=width-96,availableWidth=plotRight-left,availableHeight=height-top-bottom;
+ const side=Math.min(availableWidth/steps.length,availableHeight/runs.length),cellWidth=metric.type==='confusion'?side:availableWidth/steps.length,cellHeight=metric.type==='confusion'?side:availableHeight/runs.length;
+ const palette=signed?['#2166ac','#67a9cf','#f7f7f7','#ef8a62','#b2182b']:['#440154','#3b528b','#21918c','#5ec962','#fde725'];
+ function color(value){if(!Number.isFinite(value))return '#e7e9ec';const scaled=Math.max(0,Math.min(1,(value-low)/(high-low||1)))*(palette.length-1),index=Math.min(palette.length-2,Math.floor(scaled)),t=scaled-index;const rgb=hex=>[1,3,5].map(i=>parseInt(hex.slice(i,i+2),16)),a=rgb(palette[index]),b=rgb(palette[index+1]);return `rgb(${a.map((v,i)=>Math.round(v+(b[i]-v)*t)).join(',')})`}
+ layout={width,height,left,right,top,bottom};chart.replaceChildren();chart.setAttribute('viewBox',`0 0 ${width} ${height}`);chart.append(element('rect',{width,height,fill:'var(--bg)'}));
+ runs.forEach((run,row)=>{chart.append(element('text',{x:left-8,y:top+(row+.5)*cellHeight+5,'text-anchor':'end',fill:'var(--fg)','font-size':12},run.name));steps.forEach((step,col)=>{const p=run.points.find(p=>p.step===step),value=p?.[metric.key],fill=color(value),cx=left+col*cellWidth,cy=top+row*cellHeight;const cell=element('rect',{x:cx+1,y:cy+1,width:cellWidth-2,height:cellHeight-2,fill,tabindex:0});cell.append(element('title',{},`${run.name} · ${metric.columns?.[col]||step}: ${Number.isFinite(value)?value.toFixed(4):'Missing'}`));chart.append(cell);if(runs.length<=12&&steps.length<=12){const rgb=fill.match(/\d+/g)?.map(Number),light=rgb?(.2126*rgb[0]+.7152*rgb[1]+.0722*rgb[2])>135:true;chart.append(element('text',{x:cx+cellWidth/2,y:cy+cellHeight/2+5,'text-anchor':'middle',fill:light?'#1d1b1a':'#fff','font-size':13,'pointer-events':'none'},Number.isFinite(value)?value.toFixed(metric.digits??3):'—'))}})});
+ steps.forEach((step,col)=>chart.append(element('text',{x:left+(col+.5)*cellWidth,y:top+runs.length*cellHeight+22,'text-anchor':'middle',fill:'var(--fg)','font-size':12},metric.columns?.[col]||step)));
+ for(let i=0;i<80;i++){const value=low+(high-low)*(1-i/79);chart.append(element('rect',{x:plotRight+14,y:top+i*availableHeight/80,width:12,height:availableHeight/80+1,fill:color(value)}))}
+ for(const [value,cy]of [[high,top+5],[low,top+availableHeight]])chart.append(element('text',{x:plotRight+31,y:cy,fill:'var(--fg)','font-size':12},Number(value.toPrecision(3))));
+ chart.append(element('text',{transform:`translate(${width-8} ${top+availableHeight/2}) rotate(-90)`,'text-anchor':'middle',fill:'var(--fg)','font-size':12},`${metric.label}${metric.unit?` (${metric.unit})`:''}`),element('text',{x:14,y:top-32,'text-anchor':'start',fill:'var(--fg)','font-size':14,'font-weight':500},metric.yLabel||'Learning rate'),element('text',{x:left+steps.length*cellWidth,y:height-3,'text-anchor':'end',fill:'var(--fg)','font-size':14,'font-weight':500},metric.xLabel||'Training step'));
+}
+function inspect(step){
+ const {x,y,top,height,bottom,width,xmin,xmax,ymin,ymax}=layout;
+ if(step<xmin||step>xmax)return;
+ hover=step;chart.querySelector('#cursor')?.remove();
+ const cursor=element('g',{id:'cursor'});cursor.append(element('line',{x1:x(step),x2:x(step),y1:top,y2:height-bottom,stroke:'var(--muted)','stroke-dasharray':'3 4',opacity:.6}));
+ tip.replaceChildren();const label=document.createElement('strong');label.textContent=`${metric.xLabel||data.xLabel||'Training step'}: ${step}`;tip.append(label);
+ series().forEach((run,i)=>{if(!enabled.has(i))return;const p=points(run).find(p=>p.step===step);if(!p)return;if(p[metric.key]>=ymin&&p[metric.key]<=ymax)cursor.append(element('circle',{cx:x(step),cy:y(p[metric.key]),r:5,fill:'var(--bg)',stroke:run.color||colors[i%colors.length],'stroke-width':2}));const row=document.createElement('div');row.className='value';const name=document.createElement('span'),value=document.createElement('span');name.textContent=run.name;name.style.color=run.color||colors[i%colors.length];value.textContent=p[metric.key].toFixed(4);row.append(name,value);tip.append(row)});
+ chart.append(cursor);tip.hidden=false;tip.style.left=`${Math.max(0,Math.min(width-tip.offsetWidth,x(step)+12))}px`;
+}
+function pointerStep(event){const {left,width,right,xmin,xmax,xPad}=layout;const px=event.clientX-chart.getBoundingClientRect().left;return Math.max(xmin,Math.min(xmax,metric.xScale==='log'?10**(Math.log10(xmin)+(px-left)/(width-left-right)*(Math.log10(xmax)-Math.log10(xmin))):xmin-xPad+(px-left)/(width-left-right)*(xmax-xmin+2*xPad)))}
+function pointerPosition(event){const rect=chart.getBoundingClientRect();return {x:Math.max(layout.left,Math.min(layout.width-layout.right,event.clientX-rect.left)),y:Math.max(layout.top,Math.min(layout.height-layout.bottom,event.clientY-rect.top))}}
+function selection(end){const dx=Math.abs(end.x-drag.x),dy=Math.abs(end.y-drag.y);return {mode:dx>dy*3?'x':dy>dx*3?'y':'both',dx,dy}}
+chart.onpointerdown=event=>{if(['heatmap','confusion','diagram','dot'].includes(metric.type))return;if(event.button!==0)return;const rect=chart.getBoundingClientRect(),px=event.clientX-rect.left,py=event.clientY-rect.top;if(px<layout.left||px>layout.width-layout.right||py<layout.top||py>layout.height-layout.bottom)return;event.preventDefault();drag=pointerPosition(event);hover=null;tip.hidden=true;chart.querySelector('#cursor')?.remove();chart.setPointerCapture(event.pointerId)};
+chart.onpointermove=event=>{if(['heatmap','confusion','diagram','dot'].includes(metric.type))return;if(drag){const end=pointerPosition(event),{mode}=selection(end);chart.querySelector('#selection')?.remove();chart.append(element('rect',{id:'selection',x:mode==='y'?layout.left:Math.min(drag.x,end.x),y:mode==='x'?layout.top:Math.min(drag.y,end.y),width:mode==='y'?layout.width-layout.left-layout.right:Math.abs(end.x-drag.x),height:mode==='x'?layout.height-layout.top-layout.bottom:Math.abs(end.y-drag.y),fill:'var(--fg)','fill-opacity':.12}));return}const steps=[...new Set(series().flatMap((run,i)=>enabled.has(i)?points(run).map(p=>p.step):[]))];inspect(steps.reduce((a,b)=>Math.abs(b-pointerStep(event))<Math.abs(a-pointerStep(event))?b:a))};
+chart.onpointerleave=()=>{if(drag)return;hover=null;tip.hidden=true;chart.querySelector('#cursor')?.remove()};
+chart.onkeydown=event=>{if(['heatmap','confusion','diagram','dot'].includes(metric.type))return;if(!['ArrowLeft','ArrowRight'].includes(event.key))return;event.preventDefault();const steps=[...new Set(series().flatMap(points).map(p=>p.step))].filter(s=>s>=layout.xmin&&s<=layout.xmax).sort((a,b)=>a-b);if(!steps.length)return;const index=hover===null?0:steps.indexOf(hover);inspect(steps[Math.max(0,Math.min(steps.length-1,index+(event.key==='ArrowRight'?1:-1)))])};
+chart.onpointerup=event=>{
+ if(!drag)return;
+ const end=pointerPosition(event),{mode,dx,dy}=selection(end);
+ const xValue=px=>Math.max(layout.xmin,Math.min(layout.xmax,metric.xScale==='log'?10**(Math.log10(layout.xmin)+(px-layout.left)/(layout.width-layout.left-layout.right)*(Math.log10(layout.xmax)-Math.log10(layout.xmin))):layout.xmin-layout.xPad+(px-layout.left)/(layout.width-layout.left-layout.right)*(layout.xmax-layout.xmin+2*layout.xPad)));
+ const yValue=py=>metric.yScale==='log'?10**(Math.log10(layout.ymax)-(py-layout.top)/(layout.height-layout.top-layout.bottom)*(Math.log10(layout.ymax)-Math.log10(layout.ymin))):layout.ymax-(py-layout.top)/(layout.height-layout.top-layout.bottom)*(layout.ymax-layout.ymin);
+ if((mode==='x'&&dx>=6)||(mode==='y'&&dy>=6)||(mode==='both'&&dx>=6&&dy>=6)){
+  domain={x:mode==='y'?domain?.x:[xValue(Math.min(drag.x,end.x)),xValue(Math.max(drag.x,end.x))],y:mode==='x'?domain?.y:[yValue(Math.max(drag.y,end.y)),yValue(Math.min(drag.y,end.y))]};
+ }
+ drag=null;hover=null;tip.hidden=true;draw();
+};
+chart.onpointercancel=()=>{drag=null;draw()};
+document.querySelector('#reset').onclick=()=>{domain=null;hover=null;tip.hidden=true;draw()};
+document.querySelector('#export').onclick=()=>{const svg=chart.cloneNode(true);svg.querySelector('#cursor')?.remove();svg.querySelector('#selection')?.remove();svg.setAttribute('xmlns',ns);svg.setAttribute('width',layout.width);svg.setAttribute('height',layout.height);svg.setAttribute('font-family','Helvetica Neue, Helvetica, Arial, sans-serif');let lx=layout.left,ly=16;series().forEach((run,i)=>{if(['heatmap','confusion','diagram','dot'].includes(metric.type)||!enabled.has(i))return;const itemWidth=run.name.length*8+48;if(lx+itemWidth>layout.width-layout.right){lx=layout.left;ly+=24}svg.append(element('line',{x1:lx,x2:lx+20,y1:ly,y2:ly,stroke:run.color||colors[i%colors.length],'stroke-width':3,'stroke-dasharray':run.dash||'none'}),element('text',{x:lx+26,y:ly+5,fill:'var(--fg)','font-size':'var(--tick-size)'},run.name));lx+=itemWidth});const style=getComputedStyle(document.documentElement);const fonts={'--tick-size':getComputedStyle(document.body).fontSize,'--label-size':getComputedStyle(chart.querySelector('text')).fontSize};for(const node of svg.querySelectorAll('*'))for(const attr of ['fill','stroke','font-size']){const value=node.getAttribute(attr);if(value?.startsWith('var('))node.setAttribute(attr,fonts[value.slice(4,-1)]||style.getPropertyValue(value.slice(4,-1)).trim())}const url=URL.createObjectURL(new Blob([new XMLSerializer().serializeToString(svg)],{type:'image/svg+xml'}));const link=document.createElement('a');link.href=url;link.download=`${metric.key}.svg`;link.click();setTimeout(()=>URL.revokeObjectURL(url),1000)};
+new ResizeObserver(draw).observe(chart);
+</script></body></html>

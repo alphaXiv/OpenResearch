@@ -50,6 +50,10 @@ Include the project, relevant experiment and branch, metric, constraints,
 allowed compute, expected output, and a concrete definition of done. Use
 `--stdin` for a multi-paragraph brief.
 
+A Claude helper's closing reply waits for its background commands to exit (or
+about 30 quiet minutes), so do not ask it to leave servers or watchers running
+unless the task needs them.
+
 ## Cross-harness review
 
 When the session playbook says cross-harness review is on, the user wants the

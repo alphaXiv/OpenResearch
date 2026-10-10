@@ -126,6 +126,11 @@ always requires `references/k8s.md` before creating or editing the manifest.
 If the installed reference cannot be read, `orx skill compute/<backend>` prints
 the same canonical document.
 
+For Slurm, `--cpus` and `--mem` request `#SBATCH --cpus-per-task` and
+`#SBATCH --mem`; omitting either uses the configured Slurm default, then the
+partition default. Read
+`references/slurm.md` before choosing values.
+
 ## Waiting on runs — `orx exp wait`
 
 Block until a run changes state when you want to act as soon as it finishes:
@@ -144,6 +149,8 @@ orx exp wait <expId> --interval 10 --timeout 3600
 - When nothing is in flight, project wait returns `drained: no runs in flight`.
 - The default interval is 5 seconds and timeout is 1800 seconds. Timeout exits
   non-zero and means nothing changed yet, not that the run failed.
+- Cancel only a run that is broken or no longer wanted; after a wait timeout,
+  wait again instead of cancelling.
 - Failed runs include a `reason:` line. Provider-capacity failures are often
   retryable; failures after startup require reading the file located by `orx logs <runId>`.
 - A failed run is not a new node. Repair and relaunch the same experiment as

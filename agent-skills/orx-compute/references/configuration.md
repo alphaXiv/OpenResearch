@@ -14,6 +14,8 @@ orx compute test ssh --host lab                     # tests saved container too
 orx compute test ssh --host lab --no-container      # explicitly tests host
 orx compute connect ssh --host lab                 # interactive login/MFA
 orx compute configure slurm --host cluster --partition gpu --account lab --time-limit 24h
+orx compute configure slurm --cpus-per-task 8 --mem 64G   # defaults; exp run --cpus/--mem override
+orx compute configure slurm --clear cpus-per-task --clear mem
 orx compute configure slurm --clear time-limit     # cluster chooses
 orx compute connect slurm --host cluster
 orx compute configure k8s --context research --namespace experiments

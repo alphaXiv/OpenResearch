@@ -31,12 +31,11 @@ const OWNER: &str = "openresearch-demo";
 const REPO: &str = "nanochat";
 const BRANCH: &str = "orx/cpu-apple-silicon-end-to-end-baseline";
 const LR_PROBE_EXPERIMENT_ID: &str = "demo_nanochat_lr_probe_v1";
-const LR_PROBE_BRANCH: &str = "orx/matrix-lr-2x-probe";
+const LR_PROBE_BRANCH: &str = "orx/tiny-learning-rate-probe-interactive";
 const VOCAB_PROBE_EXPERIMENT_ID: &str = "demo_nanochat_vocab_probe_v1";
 const VOCAB_PROBE_BRANCH: &str = "orx/vocab-8192-probe";
-// Same environment and data setup as runs/runcpu.sh, then a 200-step base-training probe.
 // Git Bash: uv has no shell installer there, and venvs may use `Scripts/` not `bin/`.
-fn probe_setup() -> String {
+fn probe_uv() -> String {
     let install_uv = if cfg!(windows) {
         "powershell -NoProfile -ExecutionPolicy Bypass -Command \"irm https://astral.sh/uv/install.ps1 | iex\""
     } else {
@@ -45,13 +44,19 @@ fn probe_setup() -> String {
     format!(
         "export NANOCHAT_BASE_DIR=\"$PWD/.cache/nanochat\" UV_CACHE_DIR=\"$PWD/.cache/uv\" \
          && mkdir -p \"$NANOCHAT_BASE_DIR\" \"$UV_CACHE_DIR\" \
-         && {{ command -v uv >/dev/null || {{ {install_uv} && export PATH=\"$HOME/.local/bin:$PATH\"; }}; }} \
-         && ([ -d .venv ] || uv venv) \
-         && uv sync --extra cpu \
-         && {{ . .venv/bin/activate 2>/dev/null || . .venv/Scripts/activate; }} \
-         && python -m nanochat.dataset -n 8"
+         && {{ command -v uv >/dev/null || {{ {install_uv} && export PATH=\"$HOME/.local/bin:$PATH\"; }}; }}"
     )
 }
+
+fn probe_setup() -> String {
+    format!(
+        "{} && ([ -d .venv ] || uv venv) && uv sync --extra cpu \
+         && {{ . .venv/bin/activate 2>/dev/null || . .venv/Scripts/activate; }} \
+         && python -m nanochat.dataset -n 8",
+        probe_uv()
+    )
+}
+
 // --warmdown-ratio=0 keeps the LR schedule identical to the baseline's first 200 steps.
 const PROBE_TRAIN: &str = "python -m scripts.base_train --depth=6 --head-dim=64 --window-pattern=L --max-seq-len=512 --device-batch-size=32 --total-batch-size=16384 --eval-every=50 --eval-tokens=524288 --core-metric-every=-1 --sample-every=-1 --num-iterations=200 --warmdown-ratio=0";
 const PROBE_TOK_TRAIN: &str = "python -m scripts.tok_train --max-chars=2000000000";
@@ -93,9 +98,9 @@ You inspected the repository and prepared the CPU pipeline before launching it: 
 
 Recorded results: a 6-layer 73.5M-parameter model trained for 5,000 base steps over 81.92M tokens; final training validation BPB 1.165758; base-eval train/validation BPB 1.152185/1.119301; SFT completed 1,500 steps with final validation BPB 0.7389. The final CLI loaded the SFT checkpoint and answered that the capital of France is Paris. The results are saved in cpu-apple-silicon-pipeline-results.md.
 
-Two idle follow-up experiments already branch from that baseline, each with a complete run command and no code changes needed: demo_nanochat_lr_probe_v1 (Muon matrix LR 2× probe) and demo_nanochat_vocab_probe_v1 (8,192-token vocabulary probe). Both are short 200-step base-training probes on the local backend whose learning-rate schedule matches the baseline's first 200 steps, so their validation BPB compares directly with the baseline's 1.940739 at step 100 and 1.762539 at step 200.
+The default follow-up is demo_nanochat_lr_probe_v1 (Tiny nanochat learning-rate comparison). It runs the actual nanochat GPT architecture with approximately 0.8M parameters: 2 layers, width 128, vocabulary 1,024, and context 64. It trains two arms for 20 steps each with AdamW learning rates 0.001 and 0.002, identical starting weights and batches, and bundled nanochat README text split into training and held-out validation sections. It writes artifacts/tiny-nanochat-loss.html, tiny-nanochat-loss.csv, and tiny-nanochat-results.json in the run checkout. Compare these two fresh arms; their loss in nats/token is not comparable to the recorded 73.5M-model BPB. This demonstrates early optimization, not coherent generation or a reliable scientific conclusion. The vocabulary probe remains an optional longer experiment requiring data downloads.
 
-Operational note: when the user asks to run one of them, launch it immediately with `orx exp run <expId>`. Do not load skills, read compute references, or re-inspect the experiment tree first; follow the run's logs and report the comparison.
+Operational note: when the user asks to run one of them, launch it with `orx exp run <expId>`. Use the applicable skills for running, monitoring, and interpreting the experiment, as in any other project. For the tiny probe, copy its ready-made HTML, CSV, and JSON into the project artifacts and embed the interactive HTML with image syntax: `![Tiny nanochat learning-rate comparison](artifacts/tiny-learning-rate-comparison/tiny-nanochat-loss.html)`. Keep the answer short; do not regenerate the figure or run extra experiments.
 
 Continue naturally from this completed state. Do not claim you are rerunning the historical training unless the user asks you to."#;
 
@@ -155,6 +160,10 @@ struct BaseAssets;
 #[derive(RustEmbed)]
 #[folder = "demo/nanochat/experiment/"]
 struct ExperimentAssets;
+
+#[derive(RustEmbed)]
+#[folder = "demo/nanochat/quick/"]
+struct QuickProbeAssets;
 
 #[derive(RustEmbed)]
 #[folder = "demo/nanochat/figures/"]
@@ -481,16 +490,16 @@ fn seed_at(
             id: LR_PROBE_EXPERIMENT_ID.into(),
             project_id: PROJECT_ID.into(),
             parent_experiment_id: Some(EXPERIMENT_ID.into()),
-            slug: "matrix-lr-2x-probe".into(),
+            slug: "tiny-learning-rate-probe".into(),
             branch_name: LR_PROBE_BRANCH.into(),
-            title: Some("Muon matrix LR 2× probe (200 steps)".into()),
+            title: Some("Tiny nanochat learning-rate comparison (20 steps)".into()),
             description: Some(
-                "A lightweight early-training probe: the baseline d6 recipe with --matrix-lr raised from 0.02 to 0.04, trained for 200 steps with validation every 50 and no learning-rate warmdown, so the learning-rate schedule matches the baseline's first 200 steps. Compare against the baseline curve, which reached val_bpb 1.940739 at step 100 and 1.762539 at step 200. Skips base_eval and SFT: a few minutes on Apple Silicon, longer on plain CPU."
+                "Train a real 0.8M-parameter nanochat model for 20 steps per arm on bundled text, comparing AdamW LR 0.001 with 0.002 from identical initialization and batches. Saves training/held-out validation loss, an interactive HTML loss chart, and raw metrics. No dataset download or full tokenizer training. Demonstrates early optimization, not coherent generation; results are separate from the recorded 73.5M baseline. First use prepares Python dependencies."
                     .into(),
             ),
             run_command: format!(
-                "{} && {PROBE_TOK_TRAIN} && {PROBE_TRAIN} --matrix-lr=0.04",
-                probe_setup()
+                "{} && uv run --script scripts/demo_probe.py",
+                probe_uv()
             ),
             agent_status: "idle".into(),
             created_at: ago(seeded_at, 8, 0),
@@ -535,6 +544,7 @@ fn seed_at(
         commit_sha: Some(commit_sha.clone()),
         result_markdown: Some(RESULT_MARKDOWN.into()),
         cancel_requested: false,
+        cancel_reason: None,
         chat_session_id: None,
     };
     let session = StoredChatSession {
@@ -1031,7 +1041,7 @@ fn assistant_parts(harness: &str) -> Vec<WirePart> {
     ));
     parts.push(WirePart::text(
         "final",
-        "Pipeline completed successfully.\n\n- Base training: 5,000 steps, 81.92M tokens, 131.55 min\n- Final base validation BPB: **1.165758**\n- Base evaluation train/validation BPB: **1.152185 / 1.119301**\n- CORE accuracy: OpenBookQA **0.2500**, Winogrande **0.5625**, Wikidata/operators **0.0000**\n- SFT: 1,500 steps, 39.07 min\n- Final/minimum SFT validation BPB: **0.7389**\n- Final run status: **done**\n\nThe CLI loaded SFT checkpoint 1499 on MPS and answered **Paris**. I preserved the full stitched run log and `cpu-apple-silicon-pipeline-results.md` in the project artifact.",
+        "Pipeline completed successfully. Base training finished at **1.1658 BPB**; SFT finished at **0.7389 BPB**. Explore each phase’s validation curve and the CORE benchmark scores below.\n\n![Nanochat pipeline results](artifacts/nanochat-pipeline-results.html)\n\nBase training took **131.55 min** (5,000 steps, 81.92M tokens), followed by **39.07 min** of SFT (1,500 steps). The SFT checkpoint answered **Paris**. These are recorded results from the demo pipeline.\n\n[Full results](artifacts/cpu-apple-silicon-pipeline-results.md) · [Metric data](artifacts/evidence/training-metrics.csv)",
     ));
     parts
 }
@@ -1142,7 +1152,7 @@ fn figure_assistant_parts(harness: &str) -> Vec<WirePart> {
     parts.push(WirePart::text(
         "figure-final",
         format!(
-            "Completed the requested SVG-only figure set.\n\n- **Base training:** loss falls from about 10.40 to 3.75 over 5,000 steps; validation BPB improves from 3.1958 to 1.1658, with post-training evaluation at 1.1193.\n- **SFT:** loss finishes near 2.03; validation BPB briefly rises from 1.0174 to 1.0580 at step 200, then falls steadily to 0.7389.\n- **Throughput:** median 10,466 tok/s for base and 10,551 tok/s for SFT on Apple Silicon.\n- **CORE:** Winogrande leads at 0.5625 accuracy (0.1250 centered); OpenBookQA is 0.2500; Wikidata QA and Operators are 0.0000.\n\nFiles:\n\n- {}\n- {}\n- {}\n- {}",
+            "Completed the requested SVG-only figure set.\n\n- **Base training:** loss falls from about 10.40 to 3.75 over 5,000 steps; validation BPB improves from 3.1958 to 1.1658, with post-training evaluation at 1.1193.\n- **SFT:** loss finishes near 2.03; validation BPB briefly rises from 1.0174 to 1.0580 at step 200, then falls steadily to 0.7389.\n- **Throughput:** median 10,466 tok/s for base and 10,551 tok/s for SFT on Apple Silicon.\n- **CORE:** Winogrande leads at 0.5625 accuracy (0.1250 centered); OpenBookQA is 0.2500; Wikidata QA and Operators are 0.0000.\n\n![Base training loss and validation BPB](artifacts/nanochat-base-training-curves.svg)\n\n![SFT loss and validation BPB](artifacts/nanochat-sft-training-curves.svg)\n\n![Training throughput on Apple Silicon](artifacts/nanochat-training-throughput.svg)\n\n![CORE evaluation results](artifacts/nanochat-core-evaluation.svg)\n\nFiles:\n\n- {}\n- {}\n- {}\n- {}",
             artifact_link("nanochat-base-training-curves.svg"),
             artifact_link("nanochat-sft-training-curves.svg"),
             artifact_link("nanochat-training-throughput.svg"),
@@ -1187,9 +1197,9 @@ fn literature_assistant_parts(harness: &str) -> Vec<WirePart> {
             "Load literature search workflow",
         ),
         (
-            "evidence-skill",
-            ".agents/skills/orx-evidence/SKILL.md",
-            "Load evidence workflow",
+            "results-skill",
+            ".agents/skills/orx-results/SKILL.md",
+            "Load results interpretation workflow",
         ),
         (
             "experiment-tree-skill",
@@ -1353,8 +1363,7 @@ fn literature_assistant_parts(harness: &str) -> Vec<WirePart> {
     parts.push(WirePart::text(
         "literature-final",
         format!(
-            "The main bottleneck is insufficient pretraining. Model size sets the eventual ceiling; the SFT recipe likely worsens repetition but cannot manufacture knowledge the base model never learned.\n\nWhy:\n\n- The model saw only 81.9M tokens. Under nanochat’s own scaling convention, that is 3.53 tokens per scaling parameter, versus its default target of 12.\n- Base validation BPB was still improving at the endpoint: 1.1878 at step 4,000 → 1.1743 at 4,500 → 1.1658 at 5,000. The model had not converged.\n- [Chinchilla](https://arxiv.org/abs/2203.15556) establishes that substantially scaling training tokens is generally preferable to leaving a model undertrained. Its canonical ~20-token ratio is not directly comparable because nanochat counts parameters differently, but the direction is unambiguous.\n- [LIMA](https://arxiv.org/abs/2305.11206) supports the view that SFT mostly exposes capabilities acquired during pretraining. It also reports that validation perplexity can continue improving after generation quality peaks—matching your falling SFT loss but poor free-running behavior.\n- [TinyStories](https://arxiv.org/abs/2305.07759) shows that 73.5M parameters are sufficient for coherent generation on a constrained, high-quality distribution. Thus size alone does not explain the repetition. Conversely, broad MMLU/GSM8K performance at this size will remain limited.\n- [Textbooks Are All You Need](https://arxiv.org/abs/2306.11644) makes pretraining-data quality an important subsequent axis, but your run is too undertrained to diagnose quality cleanly yet.\n\nRun this next:\n\n- Train the identical d6 model from scratch with the same data and recipe, changing only the pretraining horizon to `--target-param-data-ratio=12`.\n- That gives 278,396,928 tokens or 16,992 steps—3.4× the current exposure.\n- Evaluate checkpoints at 5,000, ~11,000, and 16,992 steps using fixed prompts, base BPB, CORE, and a repetition metric.\n- Apply the identical 1,500-step SFT recipe only to the final checkpoint and compare ChatCORE, MMLU, GSM8K, and generation.\n\nDo not change SFT simultaneously; that would obscure whether additional pretraining solved the problem. If repetition remains after the longer-pretrained base improves, the following round should test SFT early stopping/lower learning rate using generation and ChatCORE—not validation loss—as the selection criterion.\n\nI saved the full diagnosis as the project artifact [{}]({}).",
-            "nanochat-bottleneck-diagnosis.md",
+            "The recorded run suggests **insufficient pretraining is the leading bottleneck**. Test that inference by increasing pretraining while keeping the model, data, and SFT recipe fixed.\n\nValidation BPB was still improving at the endpoint after **81.92M tokens**. The literature below informs the next test; it does not establish the cause of this run’s behavior.\n\n| Paper | Relevant finding | Implication here |\n| --- | --- | --- |\n| [Chinchilla](https://arxiv.org/abs/2203.15556) | Training tokens matter alongside model size. | Test more pretraining; its parameter-count convention differs from nanochat’s. |\n| [LIMA](https://arxiv.org/abs/2305.11206) | SFT can expose capabilities learned during pretraining. | Falling SFT loss alone does not establish better generation. |\n| [TinyStories](https://arxiv.org/abs/2305.07759) | Small models can generate coherently on constrained text. | Size alone does not establish the cause of repetition. |\n| [Textbooks Are All You Need](https://arxiv.org/abs/2306.11644) | Curated data can improve sample efficiency. | Data quality remains a follow-up hypothesis. |\n\n**Next experiment:** train the same d6 model from scratch to `--target-param-data-ratio=12` (**16,992 steps**, about **3.4×** the recorded token budget).\n\n- Keep architecture, data, optimizer, and the 1,500-step SFT recipe fixed.\n- Evaluate base BPB, CORE, fixed-prompt generations, and repetition at 5,000, ~11,000, and 16,992 steps.\n- Apply SFT to the final checkpoint, then compare generation and downstream evaluations.\n\n[Full diagnosis and sources]({})",
             report_path,
         ),
     ));
@@ -1437,6 +1446,34 @@ fn ensure_follow_up_branches(repo: &Path) -> Result<()> {
         .is_err()
         {
             git(repo, &["branch", branch, BRANCH])?;
+            if branch == LR_PROBE_BRANCH {
+                let previous = git(repo, &["symbolic-ref", "--short", "HEAD"])?;
+                git(repo, &["checkout", branch])?;
+                write_assets::<QuickProbeAssets>(repo)?;
+                for (name, content) in [
+                    (
+                        "orx-chart.html",
+                        include_str!("../../agent-skills/orx-figures/assets/orx-chart.html"),
+                    ),
+                    (
+                        "orx_chart.py",
+                        include_str!("../../agent-skills/orx-figures/assets/orx_chart.py"),
+                    ),
+                ] {
+                    std::fs::write(repo.join("scripts").join(name), content)?;
+                }
+                git(
+                    repo,
+                    &[
+                        "add",
+                        "scripts/demo_probe.py",
+                        "scripts/orx-chart.html",
+                        "scripts/orx_chart.py",
+                    ],
+                )?;
+                commit(repo, "Add a tiny nanochat learning-rate comparison")?;
+                git(repo, &["checkout", &previous])?;
+            }
         }
     }
     Ok(())
@@ -1617,7 +1654,10 @@ fn git(dir: &Path, args: &[&str]) -> Result<String> {
         && !FOREGROUND_WANTED.load(std::sync::atomic::Ordering::Relaxed)
     {
         use std::os::windows::process::CommandExt;
-        command.creation_flags(windows_sys::Win32::System::Threading::IDLE_PRIORITY_CLASS);
+        command.creation_flags(
+            windows_sys::Win32::System::Threading::IDLE_PRIORITY_CLASS
+                | windows_sys::Win32::System::Threading::CREATE_NO_WINDOW,
+        );
     }
     for name in [
         "GIT_DIR",
@@ -1971,10 +2011,21 @@ mod tests {
                 Some(EXPERIMENT_ID)
             );
             assert_eq!(follow_up.agent_status, "idle");
-            assert_eq!(
-                git(&repo, &["rev-parse", &follow_up.branch_name]).unwrap(),
-                EXPERIMENT_SHA
-            );
+            let head = git(&repo, &["rev-parse", &follow_up.branch_name]).unwrap();
+            git(
+                &repo,
+                &["merge-base", "--is-ancestor", EXPERIMENT_SHA, &head],
+            )
+            .unwrap();
+            if follow_up.id == LR_PROBE_EXPERIMENT_ID {
+                assert!(
+                    git(&repo, &["show", &format!("{head}:scripts/demo_probe.py")])
+                        .unwrap()
+                        .contains("n_layer=2")
+                );
+            } else {
+                assert_eq!(head, EXPERIMENT_SHA);
+            }
             assert_eq!(
                 git(
                     &data.join("demo-repos").join("nanochat.git"),
@@ -1984,7 +2035,7 @@ mod tests {
                     ]
                 )
                 .unwrap(),
-                EXPERIMENT_SHA
+                head
             );
         }
         let runs = store.list_runs_by_project(PROJECT_ID).unwrap();
@@ -2063,7 +2114,7 @@ mod tests {
             .contains("My 73.5M-parameter nanochat model"));
         assert!(literature_messages[1]
             .parts_json
-            .contains("The main bottleneck is insufficient pretraining"));
+            .contains("insufficient pretraining is the leading bottleneck"));
         assert!(!literature_messages[1].parts_json.contains("/Users/"));
         assert!(!literature_messages[1]
             .parts_json
@@ -2100,7 +2151,7 @@ mod tests {
             std::fs::read_dir(data.join("files/nanochat"))
                 .unwrap()
                 .count(),
-            8
+            9
         );
         for name in FigureAssets::iter() {
             assert!(data.join("files/nanochat").join(name.as_ref()).is_file());

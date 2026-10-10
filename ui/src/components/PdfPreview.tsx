@@ -273,7 +273,7 @@ export default function PdfPreview({
       {toolbarSlot &&
         createPortal(<div className="flex min-w-0 shrink items-center gap-1">{controls}</div>, toolbarSlot)}
       {/* PDFViewer requires an absolutely positioned scroll container. */}
-      <div ref={paneRef} className="relative min-h-0 flex-1 bg-surface">
+      <div ref={paneRef} className="relative min-h-0 flex-1 bg-panel">
         {/* Focusable, so a click in the pages keeps Cmd/Ctrl+F here and the keys scroll. */}
         <div
           ref={containerRef}

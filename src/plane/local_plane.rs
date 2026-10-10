@@ -189,6 +189,9 @@ impl LocalPlane {
                                 .map(|s| format!("{s}s"))
                                 .unwrap_or_else(|| "unknown (older run or cluster default)".into())
                         );
+                        if backend.job_id.is_some() {
+                            println!("  {}", crate::local::slurm::status_resources(&backend));
+                        }
                         if let Some(error) = backend.monitoring_error.as_deref() {
                             println!("  {error}");
                         }
@@ -277,6 +280,9 @@ impl LocalPlane {
                     let label = if backend == "local" { "dir" } else { "job" };
                     println!("  {label}  {job_id}");
                 }
+                if let Some(resources) = summary.slurm_resources {
+                    println!("  {resources}");
+                }
                 println!("  run  {}", summary.run_id);
                 println!(
                     "{}",
@@ -354,7 +360,13 @@ impl LocalPlane {
         for r in &in_flight {
             match trusted_port {
                 Some(port) => crate::commands::up::cancel_run_via_up(port, &r.id).await?,
-                None => crate::commands::exp::request_local_run_cancel(store, &r.id)?,
+                None => crate::commands::exp::request_local_run_cancel(
+                    store,
+                    &r.id,
+                    &crate::commands::exp::exp_cancel_reason(
+                        crate::local::chat::launching_chat_session().as_deref(),
+                    ),
+                )?,
             }
             println!("\u{2713} Cancel requested for run {}.", r.id);
         }

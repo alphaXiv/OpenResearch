@@ -131,8 +131,9 @@ intended flow — do **not** edit a frozen node or rewrite the run command:
    #   …edit only the files that idea touches…
    git commit -am "cosine LR + warmup"
    ```
-   **Leave the run command alone.** Before launching, load `orx-evidence` and
-   make sure the committed code emits enough run evidence to judge the node.
+   **Leave the run command alone.** Before launching, ensure the committed code
+   prints its effective configuration, final metrics, and a compact summary to
+   stdout. Long runs should also print periodic searchable metrics.
 5. **Launch the round's ready children**: `orx exp run <childId> --backend <b>`
    (or omit `--backend` when a default target is set — see `orx-compute`). Remote
    backends can run siblings in parallel; `--backend local` shares this machine's
@@ -174,7 +175,7 @@ intended flow — do **not** edit a frozen node or rewrite the run command:
 7. **Analyze each finish as it lands, then iterate.** Do the per-completion read
    *inside the loop above*, not deferred to the end — when a run finishes,
    **actually read its results** from the file reported by `orx logs <runId>`
-   (see `orx-evidence`). To see exactly what a finished node changed, diff its
+   (see `orx-logs`), then use `orx-results` to interpret the outcome. To see exactly what a finished node changed, diff its
    branch against its parent's
    branch (see `orx-git`). Don't infer from status alone. Each
    completion is a decision point with four moves:

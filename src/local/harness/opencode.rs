@@ -1091,7 +1091,11 @@ fn parse_verbose_models_filtered(out: &str, public_only: bool) -> Vec<super::Mod
             }
             None => super::ModelInfo::new(header),
         };
-        models.push(model.with_label(name, None));
+        let image_input = parsed
+            .as_ref()
+            .and_then(|v| v.pointer("/capabilities/input/image"))
+            .and_then(Value::as_bool);
+        models.push(model.with_label(name, None).with_image_input(image_input));
     }
     models
 }
@@ -2220,7 +2224,7 @@ mod tests {
   "providerID": "opencode",
   "capabilities": {
     "reasoning": true,
-    "input": { "text": true }
+    "input": { "text": true, "image": false }
   },
   "variants": {
     "low": { "effort": "low" },
@@ -2234,6 +2238,7 @@ opencode/gemini-3-flash
 {
   "id": "gemini-3-flash",
   "providerID": "opencode",
+  "capabilities": { "input": { "text": true, "image": true } },
   "variants": {
     "minimal": { "effort": "minimal" },
     "low": { "effort": "low" },
@@ -2347,6 +2352,10 @@ opencode/unknown
         assert_eq!(
             ids(&models[1]),
             Some(vec!["default", "minimal", "low", "medium", "high"])
+        );
+        assert_eq!(
+            models.iter().map(|m| m.image_input).collect::<Vec<_>>(),
+            [Some(false), Some(true), None]
         );
     }
 

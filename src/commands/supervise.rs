@@ -37,6 +37,24 @@ fn open_supervisor_lock(path: &std::path::Path) -> Result<fd_lock::RwLock<std::f
     Ok(fd_lock::RwLock::new(file))
 }
 
+fn supervisor_lock_path(run_id: &str) -> std::path::PathBuf {
+    log_path(run_id).with_extension("supervisor.lock")
+}
+
+/// Whether a live `orx supervise` holds `run_id`'s lock.
+pub(crate) fn supervisor_running(run_id: &str) -> bool {
+    lock_held(&supervisor_lock_path(run_id))
+}
+
+fn lock_held(path: &std::path::Path) -> bool {
+    let Ok(mut lock) = open_supervisor_lock(path) else {
+        return false;
+    };
+    // Bound so the guard drops before `lock`.
+    let held = matches!(lock.try_write(), Err(e) if e.kind() == std::io::ErrorKind::WouldBlock);
+    held
+}
+
 /// One streaming log pass, cut short (`None`) when the job ends so the final
 /// pass starts at once. That pass's only deadline is the watcher's drain bound.
 async fn log_pass<T>(
@@ -86,8 +104,7 @@ pub async fn run(args: crate::SuperviseArgs) -> Result<()> {
     let run_id = args.run_id;
 
     let store = Store::open()?;
-    let lock_path = log_path(&run_id).with_extension("supervisor.lock");
-    let mut supervisor_lock = open_supervisor_lock(&lock_path)?;
+    let mut supervisor_lock = open_supervisor_lock(&supervisor_lock_path(&run_id))?;
     let _supervisor_guard = match supervisor_lock.try_write() {
         Ok(guard) => guard,
         Err(err) if err.kind() == std::io::ErrorKind::WouldBlock => return Ok(()),
@@ -639,9 +656,9 @@ async fn run_ssh(
         status_of(&stored)?,
         target,
         dir,
-        descriptor.ssh_container.clone(),
         &run_id,
         &mut descriptor,
+        None,
     )
     .await?;
     Ok(())
@@ -655,10 +672,11 @@ async fn watch_ssh_job(
     initial_status: RunStatus,
     target: ssh::SshTarget,
     dir: String,
-    container: Option<ssh::ContainerRun>,
     run_id: &str,
     descriptor: &mut BackendDescriptor,
+    sandbox: Option<(&Credentials, &str)>,
 ) -> Result<RunStatus> {
+    let container = descriptor.ssh_container.clone();
     let path = log_path(run_id);
     let (done_tx, done_rx) = tokio::sync::watch::channel(false);
     let (log_error_tx, log_error_rx) = tokio::sync::watch::channel(None);
@@ -676,6 +694,7 @@ async fn watch_ssh_job(
     let mut last_message = None;
     let mut failing_since = None;
     let mut last_error = None;
+    let mut missing_polls = 0;
 
     loop {
         if !cancel_sent && local_cancel_requested(store, run_id) {
@@ -728,11 +747,28 @@ async fn watch_ssh_job(
         }
         let job = match observed {
             Ok(job) => job,
-            Err(_) => {
+            Err(_) => match sandbox {
+                Some((creds, id)) if openresearch::box_deleted(creds, id).await => ssh::JobState {
+                    stage: "ERROR".into(),
+                    message: Some(format!("box {id} was deleted while the run was active")),
+                },
+                _ => {
+                    missing_polls = 0;
+                    tokio::time::sleep(POLL_INTERVAL).await;
+                    continue;
+                }
+            },
+        };
+        // A home directory can blink out (stale NFS); end the run only once it stays missing.
+        if job.message.as_deref() == Some(ssh::RUN_DIR_MISSING) {
+            missing_polls += 1;
+            if missing_polls < 3 {
                 tokio::time::sleep(POLL_INTERVAL).await;
                 continue;
             }
-        };
+        } else {
+            missing_polls = 0;
+        }
         let stage = job.stage.as_str();
         let status = run_status_for_stage(store, run_id, cancel_sent, stage);
 
@@ -1040,9 +1076,9 @@ async fn run_openresearch(
         status_of(&stored)?,
         target,
         dir,
-        None,
         &run_id,
         &mut descriptor,
+        Some((&lifecycle, &sandbox_id)),
     )
     .await;
     teardown_box(&store, &lifecycle, &sandbox_id, &run_id).await;
@@ -1193,9 +1229,9 @@ async fn run_gcp(
         status_of(&stored)?,
         target,
         openresearch::run_dir(&run_id),
-        None,
         &run_id,
         &mut descriptor,
+        None,
     )
     .await;
     teardown_gcp(&store, &project, &zone, &name, &run_id).await;
@@ -1753,6 +1789,7 @@ mod tests {
             commit_sha: None,
             result_markdown: None,
             cancel_requested: false,
+            cancel_reason: None,
             chat_session_id: None,
         };
         store.upsert_run(&run).unwrap();
@@ -1761,7 +1798,7 @@ mod tests {
             run_status_for_stage(&store, &run.id, false, "ERROR"),
             RunStatus::Failed
         );
-        store.set_cancel_requested(&run.id, true).unwrap();
+        assert!(store.request_cancel(&run.id, "test").unwrap());
         assert_eq!(
             run_status_for_stage(&store, &run.id, false, "ERROR"),
             RunStatus::Cancelled
@@ -1840,6 +1877,24 @@ mod tests {
         drop(first_guard);
         drop(first);
         drop(second);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn a_run_lock_is_held_only_while_its_supervisor_lives() {
+        let dir =
+            std::env::temp_dir().join(format!("orx-supervisor-held-test-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("run.lock");
+        assert!(!lock_held(&path));
+
+        let mut supervisor = open_supervisor_lock(&path).unwrap();
+        let guard = supervisor.try_write().unwrap();
+        assert!(lock_held(&path));
+
+        drop(guard);
+        assert!(!lock_held(&path));
+        drop(supervisor);
         let _ = std::fs::remove_dir_all(dir);
     }
 }

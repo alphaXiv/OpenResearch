@@ -189,10 +189,52 @@ pub(crate) fn spawn_detached_supervise(run_id: &str) -> Result<()> {
         // Rename rather than truncate: a still-running supervisor keeps writing to its handle.
         let _ = std::fs::rename(&path, path.with_extension("log.1"));
     }
+    let mut child = match supervise_command(&exe, run_id, &path).spawn() {
+        // `/proc/self/exe` can name a path this process cannot exec (OR-334); the `orx` on PATH still runs.
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            match crate::local::shell_env::find_on_path("orx").filter(|orx| *orx != exe) {
+                Some(orx) => {
+                    let tried = format!("`{}`{}: {error}", exe.display(), current_exe_note(&exe));
+                    let child = supervise_command(&orx, run_id, &path)
+                        .spawn()
+                        .map_err(|e| {
+                            anyhow!(
+                                "{} First tried {tried}.",
+                                supervise_spawn_error(&orx, run_id, e)
+                            )
+                        })?;
+                    let warning = format!(
+                        "warning: could not run {tried}; started the supervisor with `{}`.",
+                        orx.display()
+                    );
+                    eprintln!("{warning}");
+                    // A forwarded launch prints this on `orx up`'s stderr; keep it beside the run too.
+                    if let Ok(mut log) = std::fs::OpenOptions::new().append(true).open(&path) {
+                        use std::io::Write as _;
+                        let _ = log.write_all(format!("{warning}\n").as_bytes());
+                    }
+                    child
+                }
+                None => return Err(supervise_spawn_error(&exe, run_id, error)),
+            }
+        }
+        result => result.map_err(|e| supervise_spawn_error(&exe, run_id, e))?,
+    };
+    std::thread::spawn(move || {
+        let _ = child.wait();
+    });
+    Ok(())
+}
+
+fn supervise_command(
+    exe: &std::path::Path,
+    run_id: &str,
+    log_path: &std::path::Path,
+) -> std::process::Command {
     let stderr = std::fs::OpenOptions::new()
         .create(true)
         .append(true)
-        .open(path)
+        .open(log_path)
         .map_or_else(|_| std::process::Stdio::null(), std::process::Stdio::from);
     // A long-lived `orx up` may be running a replaced binary; spawn the new file at its path.
     let mut cmd = std::process::Command::new(exe);
@@ -215,24 +257,74 @@ pub(crate) fn spawn_detached_supervise(run_id: &str) -> Result<()> {
         use std::os::unix::process::CommandExt;
         cmd.process_group(0);
     }
-    let mut child = cmd
-        .spawn()
-        .map_err(|e| anyhow!("Could not spawn `orx supervise {}`: {}", run_id, e))?;
-    std::thread::spawn(move || {
-        let _ = child.wait();
-    });
-    Ok(())
+    // A console-less parent would otherwise give the supervisor a visible console window.
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        cmd.creation_flags(windows_sys::Win32::System::Threading::CREATE_NO_WINDOW);
+    }
+    cmd
+}
+
+/// Names the binary that failed and how to attach a supervisor by hand, since
+/// the run stays `starting` without one.
+fn supervise_spawn_error(
+    exe: &std::path::Path,
+    run_id: &str,
+    error: std::io::Error,
+) -> crate::error::Error {
+    let missing = if exe.exists() {
+        ""
+    } else {
+        " (no file at that path)"
+    };
+    let current = if crate::paths::spawnable_exe().is_ok_and(|own| own == exe) {
+        current_exe_note(exe)
+    } else {
+        String::new()
+    };
+    anyhow!(
+        "Could not spawn `{} supervise {run_id}`{missing}{current}: {error}. A running `orx up` retries \
+         within about 6 minutes; otherwise start `{} supervise {run_id}` in the background.",
+        exe.display(),
+        crate::invocation::orx(),
+    )
+}
+
+/// The kernel's own name for this binary when it differs from the spawned path, e.g. `… (deleted)`.
+fn current_exe_note(exe: &std::path::Path) -> String {
+    std::env::current_exe()
+        .ok()
+        .filter(|raw| raw != exe)
+        .map(|raw| format!(" (current_exe: {})", raw.display()))
+        .unwrap_or_default()
+}
+
+/// Who asked `orx exp cancel` to stop a run, recorded on the run.
+pub(crate) fn exp_cancel_reason(chat_session_id: Option<&str>) -> String {
+    match chat_session_id {
+        Some(id) => format!("Cancel requested by agent session {id} with `orx exp cancel`."),
+        None => "Cancel requested with `orx exp cancel`.".into(),
+    }
 }
 
 /// Persist cancel intent and ensure an orphaned run gets a fresh supervisor.
-pub(crate) fn request_local_run_cancel(store: &Store, run_id: &str) -> Result<()> {
+pub(crate) fn request_local_run_cancel(store: &Store, run_id: &str, reason: &str) -> Result<()> {
     let lock_path = crate::store::log_path(run_id).with_extension("cancel.lock");
-    request_local_run_cancel_with(store, run_id, &lock_path, || {}, spawn_detached_supervise)
+    request_local_run_cancel_with(
+        store,
+        run_id,
+        reason,
+        &lock_path,
+        || {},
+        spawn_detached_supervise,
+    )
 }
 
 fn request_local_run_cancel_with(
     store: &Store,
     run_id: &str,
+    reason: &str,
     lock_path: &std::path::Path,
     before_lock: impl FnOnce(),
     spawn: impl FnOnce(&str) -> Result<()>,
@@ -245,16 +337,17 @@ fn request_local_run_cancel_with(
     let mut cancel_lock = fd_lock::RwLock::new(lock_file);
     before_lock();
     let _cancel_guard = cancel_lock.write()?;
-    let prior = store
+    store
         .get_run(run_id)?
-        .ok_or_else(|| anyhow!("Run {run_id} not found in the local store."))?
-        .cancel_requested;
-    store.set_cancel_requested(run_id, true)?;
+        .ok_or_else(|| anyhow!("Run {run_id} not found in the local store."))?;
+    let requested = store.request_cancel(run_id, reason)?;
     if let Err(spawn_err) = spawn(run_id) {
-        if let Err(rollback_err) = store.set_cancel_requested(run_id, prior) {
-            return Err(anyhow!(
-                "Could not recover the supervisor: {spawn_err}; could not restore retryable cancel state: {rollback_err}"
-            ));
+        if requested {
+            if let Err(rollback_err) = store.withdraw_cancel(run_id) {
+                return Err(anyhow!(
+                    "Could not recover the supervisor: {spawn_err}; could not restore retryable cancel state: {rollback_err}"
+                ));
+            }
         }
         return Err(spawn_err);
     }
@@ -265,6 +358,18 @@ fn request_local_run_cancel_with(
 mod tests {
     use super::*;
     use crate::store::StoredRun;
+
+    #[test]
+    fn supervise_spawn_error_names_the_binary_and_the_manual_attach() {
+        let message = supervise_spawn_error(
+            std::path::Path::new("/nonexistent/orx"),
+            "run-1",
+            std::io::Error::from(std::io::ErrorKind::NotFound),
+        )
+        .to_string();
+        assert!(message.contains("`/nonexistent/orx supervise run-1` (no file at that path)"));
+        assert!(message.ends_with(" supervise run-1` in the background."));
+    }
 
     fn run_fixture() -> StoredRun {
         StoredRun {
@@ -281,6 +386,7 @@ mod tests {
             commit_sha: None,
             result_markdown: None,
             cancel_requested: false,
+            cancel_reason: None,
             chat_session_id: None,
         }
     }
@@ -297,12 +403,69 @@ mod tests {
         let result = request_local_run_cancel_with(
             &store,
             &run.id,
+            "test",
             &lock_path,
             || {},
             |_| Err(anyhow!("synthetic spawn failure")),
         );
         assert!(result.is_err());
-        assert!(!store.get_run(&run.id).unwrap().unwrap().cancel_requested);
+        let stored = store.get_run(&run.id).unwrap().unwrap();
+        assert!(!stored.cancel_requested);
+        // A supervisor that already sent the cancel still ends the run with its requester.
+        store
+            .update_status(&run.id, crate::store::RunStatus::Cancelled, Some(1), None)
+            .unwrap();
+        let cancelled = crate::plane::Run::from(&store.get_run(&run.id).unwrap().unwrap());
+        assert_eq!(cancelled.failure_detail().as_deref(), Some("reason: test"));
+
+        drop(store);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn cancel_reason_keeps_the_first_requester_and_shows_only_when_cancelled() {
+        use crate::store::RunStatus;
+        let dir =
+            std::env::temp_dir().join(format!("orx-cancel-reason-test-{}", uuid::Uuid::new_v4()));
+        let store = Store::open_at(dir.clone()).unwrap();
+        let lock_path = dir.join("cancel.lock");
+        let starting = StoredRun {
+            status: "starting".into(),
+            ..run_fixture()
+        };
+        let finishing = StoredRun {
+            id: "run-done".into(),
+            ..run_fixture()
+        };
+        store.upsert_run(&starting).unwrap();
+        store.upsert_run(&finishing).unwrap();
+
+        for (run_id, reason) in [
+            ("run-1", "first"),
+            ("run-1", "second"),
+            ("run-done", "first"),
+        ] {
+            request_local_run_cancel_with(&store, run_id, reason, &lock_path, || {}, |_| Ok(()))
+                .unwrap();
+        }
+        // A backend's submit upsert lands after the cancel request.
+        store.upsert_run(&starting).unwrap();
+        store
+            .update_status("run-1", RunStatus::Cancelled, Some(2), None)
+            .unwrap();
+        store
+            .update_status("run-done", RunStatus::Done, Some(2), Some(0))
+            .unwrap();
+
+        let detail =
+            |id| crate::plane::Run::from(&store.get_run(id).unwrap().unwrap()).failure_detail();
+        assert_eq!(detail("run-1").as_deref(), Some("reason: first"));
+        assert_eq!(detail("run-done"), None);
+        // The reason never leaks into a finished run's result.
+        assert_eq!(
+            store.get_run("run-done").unwrap().unwrap().result_markdown,
+            None
+        );
 
         drop(store);
         let _ = std::fs::remove_dir_all(dir);
@@ -331,6 +494,7 @@ mod tests {
             request_local_run_cancel_with(
                 &store,
                 "run-1",
+                "first",
                 &first_lock,
                 || {},
                 |_| {
@@ -350,6 +514,7 @@ mod tests {
             request_local_run_cancel_with(
                 &store,
                 "run-1",
+                "second",
                 &second_lock,
                 || attempted_tx.send(()).unwrap(),
                 |_| Ok(()),
@@ -367,7 +532,9 @@ mod tests {
 
         let store = Store::open_at(dir.clone()).unwrap();
         assert!(!completed_while_locked);
-        assert!(store.get_run("run-1").unwrap().unwrap().cancel_requested);
+        let run = store.get_run("run-1").unwrap().unwrap();
+        assert!(run.cancel_requested);
+        assert_eq!(run.cancel_reason.as_deref(), Some("second"));
         drop(store);
         let _ = std::fs::remove_dir_all(dir);
     }
