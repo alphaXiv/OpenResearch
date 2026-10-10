@@ -1287,5 +1287,10 @@
   "sidebar_reveal_project": "Finder में दिखाएँ",
   "sidebar_filter": "फ़िल्टर",
   "sidebar_group_by": "समूह बनाएँ",
-  "sidebar_one_list": "एक सूची में"
+  "sidebar_one_list": "एक सूची में",
+  "app_routes": "मार्ग",
+  "routes_archived_ancestor": "संग्रहीत पूर्वज",
+  "routes_other_task": "दूसरे कार्य से",
+  "routes_missing_parent": "मूल प्रयोग उपलब्ध नहीं",
+  "routes_invalid_lineage": "अमान्य प्रयोग संबंध"
 }

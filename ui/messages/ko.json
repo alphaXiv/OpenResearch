@@ -1287,5 +1287,10 @@
   "sidebar_reveal_project": "Finder에서 표시",
   "sidebar_filter": "필터",
   "sidebar_group_by": "그룹화 기준",
-  "sidebar_one_list": "단일 목록"
+  "sidebar_one_list": "단일 목록",
+  "app_routes": "경로",
+  "routes_archived_ancestor": "보관된 상위 실험",
+  "routes_other_task": "다른 작업에서 생성됨",
+  "routes_missing_parent": "상위 실험을 찾을 수 없음",
+  "routes_invalid_lineage": "잘못된 실험 관계"
 }

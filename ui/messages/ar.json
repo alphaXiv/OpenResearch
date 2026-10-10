@@ -1287,5 +1287,10 @@
   "sidebar_reveal_project": "إظهار في Finder",
   "sidebar_filter": "تصفية",
   "sidebar_group_by": "تجميع حسب",
-  "sidebar_one_list": "في قائمة واحدة"
+  "sidebar_one_list": "في قائمة واحدة",
+  "app_routes": "المسارات",
+  "routes_archived_ancestor": "تجربة سابقة مؤرشفة",
+  "routes_other_task": "من مهمة أخرى",
+  "routes_missing_parent": "التجربة الأصلية غير متاحة",
+  "routes_invalid_lineage": "علاقة تجارب غير صالحة"
 }

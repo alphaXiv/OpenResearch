@@ -1287,5 +1287,10 @@
   "sidebar_reveal_project": "在访达中显示",
   "sidebar_filter": "筛选",
   "sidebar_group_by": "分组方式",
-  "sidebar_one_list": "单一列表"
+  "sidebar_one_list": "单一列表",
+  "app_routes": "路线",
+  "routes_archived_ancestor": "已归档的祖先",
+  "routes_other_task": "来自其他任务",
+  "routes_missing_parent": "父实验不可用",
+  "routes_invalid_lineage": "实验关系异常"
 }

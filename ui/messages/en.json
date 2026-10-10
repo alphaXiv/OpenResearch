@@ -1287,5 +1287,10 @@
   "sidebar_reveal_project": "Reveal in Finder",
   "sidebar_filter": "Filter",
   "sidebar_group_by": "Group by",
-  "sidebar_one_list": "In one list"
+  "sidebar_one_list": "In one list",
+  "app_routes": "Routes",
+  "routes_archived_ancestor": "Archived ancestor",
+  "routes_other_task": "From another task",
+  "routes_missing_parent": "Parent unavailable",
+  "routes_invalid_lineage": "Invalid lineage"
 }
