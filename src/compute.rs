@@ -572,34 +572,68 @@ impl ComputeBackend for SshCompute {
     }
 }
 
-backend_adapter!(
-    SlurmCompute,
-    "slurm",
-    "Slurm",
-    true,
-    false,
-    false,
-    "SSH tar stream",
-    false,
-    preflight | args | {
+#[derive(Default)]
+pub struct SlurmCompute {
+    target: tokio::sync::OnceCell<crate::jobs::ssh::SshTarget>,
+}
+
+#[async_trait]
+impl ComputeBackend for SlurmCompute {
+    fn capabilities(&self) -> Capabilities {
+        Capabilities {
+            id: "slurm",
+            label: "Slurm",
+            remote: true,
+            flavors: true,
+            requires_flavor: false,
+            source_transport: "SSH tar stream",
+        }
+    }
+
+    async fn preflight(&self, args: &crate::ExpRunArgs) -> Result<Preflight> {
         let settings = crate::jobs::slurm::load_settings()?.unwrap_or_default();
         let host = args
             .host
             .as_deref()
             .or(settings.host.as_deref())
             .ok_or_else(|| anyhow!("Slurm requires --host or a configured host."))?;
-        let check = crate::jobs::slurm::preflight(host).await;
+        // Resolve and pin the route before the probe and keep the target: the
+        // submission stages and calls sbatch on the exact connection checked
+        // here, never a route another check resolved in between.
+        let target = self
+            .target
+            .get_or_try_init(|| crate::jobs::ssh::resolved_alias(host))
+            .await?;
+        let check = crate::jobs::slurm::preflight(target).await;
         if !check.reachable || !check.slurm_found || !check.tools_found {
             return Ok(not_ready(check.error.as_deref().unwrap_or(
                 "The Slurm host needs bash, tar, sbatch, squeue, and scancel.",
             )));
         }
         ready()
-    },
-    submit | args,
-    source,
-    run_id | crate::local::slurm::submit_local_slurm_with_source(args, source, run_id).await
-);
+    }
+
+    async fn stage_source(
+        &self,
+        project: &LocalProject,
+        experiment: &LocalExperiment,
+    ) -> Result<StagedSource> {
+        stage_snapshot(project, experiment, false).await
+    }
+
+    async fn submit(
+        &self,
+        args: &crate::ExpRunArgs,
+        source: StagedSource,
+        run_id: String,
+    ) -> Result<StoredRun> {
+        let target = self
+            .target
+            .get()
+            .ok_or_else(|| anyhow!("Slurm launch was not prepared."))?;
+        crate::local::slurm::submit_local_slurm_with_source(args, source.0, run_id, target).await
+    }
+}
 
 backend_adapter!(
     RayCompute,
@@ -675,7 +709,7 @@ pub fn backend(id: &str) -> Result<Box<dyn ComputeBackend>> {
         "modal" => Ok(Box::new(ModalCompute)),
         "k8s" => Ok(Box::new(KubernetesCompute)),
         "ssh" => Ok(Box::new(SshCompute::default())),
-        "slurm" => Ok(Box::new(SlurmCompute)),
+        "slurm" => Ok(Box::new(SlurmCompute::default())),
         "ray" => Ok(Box::new(RayCompute)),
         "openresearch" => Ok(Box::new(OpenResearchCompute)),
         _ => Err(anyhow!("Unknown compute backend '{id}'.")),

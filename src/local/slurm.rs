@@ -68,6 +68,7 @@ pub async fn submit_local_slurm_with_source(
     args: &crate::ExpRunArgs,
     source: SourceSnapshot,
     run_id: String,
+    target: &crate::jobs::ssh::SshTarget,
 ) -> Result<StoredRun> {
     if args.image.is_some() {
         return Err(anyhow!(
@@ -137,10 +138,9 @@ pub async fn submit_local_slurm_with_source(
     if let Ok(hf_token) = huggingface::resolve_token() {
         env.entry("HF_TOKEN".to_string()).or_insert(hf_token);
     }
-    // One submission stays on the route preflight just checked: pin staging
-    // and submit to it so a concurrent refresh cannot split or retarget them.
-    let target = crate::jobs::ssh::pinned_alias(&host);
-    crate::jobs::ssh::stage_source(&target, &run_id, &source.path, &source.digest, None).await?;
+    // Stage and submit on the route preflight checked: the target was resolved
+    // and pinned before the probe, so a concurrent refresh cannot retarget them.
+    crate::jobs::ssh::stage_source(target, &run_id, &source.path, &source.digest, None).await?;
     let job_id = slurm::run_job(
         &slurm::SlurmJobSpec {
             run_id: run_id.clone(),
@@ -154,7 +154,7 @@ pub async fn submit_local_slurm_with_source(
             cpus_per_task,
             mem: mem.clone(),
         },
-        &target,
+        target,
     )
     .await?;
 

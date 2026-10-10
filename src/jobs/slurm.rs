@@ -441,8 +441,8 @@ pub struct SlurmPreflight {
     pub error: Option<String>,
 }
 
-pub async fn preflight(host: &str) -> SlurmPreflight {
-    if let Err(error) = refresh_route(&SshTarget::alias(host), None).await {
+pub async fn preflight(target: &SshTarget) -> SlurmPreflight {
+    if let Err(error) = refresh_route(target, None).await {
         return SlurmPreflight {
             reachable: false,
             slurm_found: false,
@@ -456,7 +456,7 @@ pub async fn preflight(host: &str) -> SlurmPreflight {
                if command -v bash >/dev/null 2>&1 && command -v tar >/dev/null 2>&1; \
                then echo TOOLS_OK; fi; \
                sinfo -h -o %P 2>/dev/null || true";
-    match ssh_run(&SshTarget::alias(host), cmd, None).await {
+    match ssh_run(target, cmd, None).await {
         Ok(out) => {
             let mut slurm_found = false;
             let mut tools_found = false;
