@@ -1287,5 +1287,10 @@
   "sidebar_reveal_project": "Mostrar en Finder",
   "sidebar_filter": "Filtrar",
   "sidebar_group_by": "Agrupar por",
-  "sidebar_one_list": "En una lista"
+  "sidebar_one_list": "En una lista",
+  "app_routes": "Rutas",
+  "routes_archived_ancestor": "Antecesor archivado",
+  "routes_other_task": "De otra tarea",
+  "routes_missing_parent": "Experimento padre no disponible",
+  "routes_invalid_lineage": "Linaje no válido"
 }

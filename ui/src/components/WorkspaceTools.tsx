@@ -4,7 +4,7 @@ import { statusLabel } from "./StatusBadge";
 import { getComputeSettingsQuery } from "../queries/settings";
 import { TARGET_LABELS } from "../computeTargets";
 import { useEffect, useMemo, useRef } from "react";
-import { FlaskConical, FolderOpen, Package, GitBranch, Cpu, MessagesSquare, MoreHorizontal, Terminal } from "lucide-react";
+import { FlaskConical, FolderOpen, Package, GitBranch, GitFork, Cpu, MessagesSquare, MoreHorizontal, Terminal } from "lucide-react";
 import { useQuery } from "@tanstack/react-query";
 import { getSessionWorktreeQuery } from "../queries/files";
 import { countChanges, parseDiffFiles } from "./GitDiff";
@@ -13,13 +13,13 @@ import { BackendLogo } from "./BackendLogos";
 import { IconButton, MenuItem, StatusIndicator } from "./ui";
 import { usePopover } from "./ModelPicker";
 
-export function WorkspaceTools({ expanded, experiments, runs, onOpenExperiment, rightOffset, activeView, projectId, onCompute, sessionId, busy, onChanges, onFiles, onTerminal, onArtifacts, onExperiments, onSideChat }: {
+export function WorkspaceTools({ expanded, experiments, runs, onOpenExperiment, rightOffset, activeView, projectId, onCompute, sessionId, busy, onChanges, onFiles, onTerminal, onArtifacts, onExperiments, onRoutes, onSideChat }: {
   expanded: boolean;
   experiments: Experiment[];
   runs: Run[];
   onOpenExperiment: (id: string, runId: string) => void;
   rightOffset?: number;
-  activeView: "files" | "artifacts" | "experiments" | "terminal" | null;
+  activeView: "files" | "artifacts" | "experiments" | "routes" | "terminal" | null;
   projectId: string;
   onCompute: () => void;
   sessionId: string | null;
@@ -29,6 +29,7 @@ export function WorkspaceTools({ expanded, experiments, runs, onOpenExperiment, 
   onTerminal: () => void;
   onArtifacts: () => void;
   onExperiments: () => void;
+  onRoutes: () => void;
   /** Absent until there is a chat to branch from. */
   onSideChat?: () => void;
 }) {
@@ -42,6 +43,7 @@ export function WorkspaceTools({ expanded, experiments, runs, onOpenExperiment, 
     { id: "files", label: m.app_files(), Icon: FolderOpen, onClick: onFiles },
     { id: "artifacts", label: m.app_artifacts(), Icon: Package, onClick: onArtifacts },
     { id: "experiments", label: m.app_experiments(), Icon: FlaskConical, onClick: onExperiments },
+    { id: "routes", label: m.app_routes(), Icon: GitFork, onClick: onRoutes },
   ];
   return (
     <div className={`workspace-tools absolute end-3.5 top-7 z-30 ${rightOffset === undefined ? "win-titlebar:top-10" : ""}`} style={{ insetInlineEnd: rightOffset }}>

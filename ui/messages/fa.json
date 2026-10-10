@@ -1287,5 +1287,10 @@
   "sidebar_reveal_project": "نمایش در Finder",
   "sidebar_filter": "فیلتر",
   "sidebar_group_by": "گروه‌بندی بر اساس",
-  "sidebar_one_list": "در یک فهرست"
+  "sidebar_one_list": "در یک فهرست",
+  "app_routes": "مسیرها",
+  "routes_archived_ancestor": "آزمایش پیشین بایگانی‌شده",
+  "routes_other_task": "از وظیفه‌ای دیگر",
+  "routes_missing_parent": "آزمایش والد در دسترس نیست",
+  "routes_invalid_lineage": "رابطهٔ آزمایش نامعتبر"
 }

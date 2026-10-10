@@ -125,6 +125,7 @@ import { Md } from "./components/Md";
 import { SettingsView, type SettingsTab } from "./components/SettingsPage";
 import { DemoWelcomeModal } from "./components/Tour";
 import { TreeView } from "./components/TreeView";
+import { ExperimentRoutes } from "./components/ExperimentRoutes";
 import { onChatEvent, useOrxEvents } from "./events";
 import { closeTab, openTab, type TabOpenIntent } from "./tabPreview";
 import { Button, IconButton, MenuItem, showAlert, Spinner } from "./components/ui";
@@ -373,6 +374,9 @@ export default function App({ runtime, projectId, pane }: { runtime: RuntimeInfo
   const artifacts = artifactsQuery.data ?? null;
 
   const [view, setView] = useState<ExperimentsView>("table");
+  // Routes uses the same home pane; its browser-only mode leaves the existing
+  // server workspace schema and the saved table/canvas preference intact.
+  const [routesView, setRoutesView] = useState(false);
   const [showArchivedExperiments, setShowArchivedExperiments] = useState(false);
   // Experiments pane scope: "agent" narrows to the open chat session's work.
   // Falls back to "project" whenever there is no usable experiment attribution.
@@ -1793,7 +1797,7 @@ export default function App({ runtime, projectId, pane }: { runtime: RuntimeInfo
             runs={runs}
             onOpenExperiment={(id, runId) => openExperimentTab(id, "overview", "preview", runId)}
             rightOffset={panelOpen ? panelWidth + 28 : undefined}
-            activeView={panelOpen && (rightTab === "files" || rightTab === "artifacts" || rightTab === "experiments" || rightTab === "terminal") ? rightTab : null}
+            activeView={panelOpen && (rightTab === "files" || rightTab === "artifacts" || rightTab === "experiments" || rightTab === "terminal") ? rightTab === "experiments" && routesView ? "routes" : rightTab : null}
             projectId={activeProject.id}
             onCompute={() => selectMainView("compute")}
             sessionId={activeSessionId}
@@ -1802,7 +1806,8 @@ export default function App({ runtime, projectId, pane }: { runtime: RuntimeInfo
             onFiles={() => { setFilesView("files"); openWorktreeTab(); }}
             onTerminal={openTerminalTab}
             onArtifacts={openArtifactsTab}
-            onExperiments={() => openExperimentsTab()}
+            onExperiments={() => { setRoutesView(false); openExperimentsTab(); }}
+            onRoutes={() => { setRoutesView(true); openExperimentsTab(); }}
             onSideChat={activeSessionId ? () => void startSideChat(activeSessionId, "") : undefined}
           />
         )}
@@ -1966,24 +1971,39 @@ export default function App({ runtime, projectId, pane }: { runtime: RuntimeInfo
                       aria-label={m.app_experiment_view()}
                     >
                       <button
-                        className={view === "table" ? "active" : ""}
-                        aria-pressed={view === "table"}
-                        onClick={() => setView("table")}
+                        className={!routesView && view === "table" ? "active" : ""}
+                        aria-pressed={!routesView && view === "table"}
+                        onClick={() => { setRoutesView(false); setView("table"); }}
                       >
                         {m.app_table()}
                       </button>
                       <button
-                        className={view === "tree" ? "active" : ""}
-                        aria-pressed={view === "tree"}
-                        onClick={() => setView("tree")}
+                        className={!routesView && view === "tree" ? "active" : ""}
+                        aria-pressed={!routesView && view === "tree"}
+                        onClick={() => { setRoutesView(false); setView("tree"); }}
                       >
                         {m.app_tree()}
+                      </button>
+                      <button className={routesView ? "active" : ""} aria-pressed={routesView} onClick={() => setRoutesView(true)}>
+                        {m.app_routes()}
                       </button>
                     </div>
                   </div>
                 </div>
                 <div className="pane-content flex-1 min-h-0 relative bg-background">
-                  {view === "tree" ? (
+                  {routesView ? (
+                    <ExperimentRoutes
+                      key={`${projectId}:${effectiveScope === "agent" ? activeSessionId : "project"}`}
+                      storageKey={`orx:routes:${projectId}:${effectiveScope === "agent" ? activeSessionId : "project"}`}
+                      experiments={experiments}
+                      runs={runs}
+                      sessionId={effectiveScope === "agent" ? activeSessionId : null}
+                      showArchived={showArchivedExperiments}
+                      emptyHint={!showArchivedExperiments && scopedExperiments.length > 0 && visibleScopedExperiments.length === 0
+                        ? m.tree_all_experiments_archived() : effectiveScope === "agent" && experiments.length > 0 ? m.app_no_task_experiments() : undefined}
+                      onOpen={(id, intent, runId) => openExperimentTab(id, "overview", intent, runId)}
+                    />
+                  ) : view === "tree" ? (
                     activeProject && (
                       <TreeView
                         experiments={experiments}

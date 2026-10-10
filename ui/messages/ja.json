@@ -1287,5 +1287,10 @@
   "sidebar_reveal_project": "Finder で表示",
   "sidebar_filter": "フィルター",
   "sidebar_group_by": "グループ分け",
-  "sidebar_one_list": "1 つの一覧"
+  "sidebar_one_list": "1 つの一覧",
+  "app_routes": "ルート",
+  "routes_archived_ancestor": "アーカイブ済みの祖先",
+  "routes_other_task": "別のタスクから",
+  "routes_missing_parent": "親実験が見つかりません",
+  "routes_invalid_lineage": "無効な実験関係"
 }
