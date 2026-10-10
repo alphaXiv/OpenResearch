@@ -250,6 +250,25 @@ pub(crate) async fn resolved_alias(host: &str) -> Result<SshTarget> {
     Ok(SshTarget::alias(host))
 }
 
+/// A bare alias target pinned to the route currently in the shared cache —
+/// the one the last preflight resolved and checked — left unpinned when
+/// nothing is cached. Callers that already probed the host pin with this so a
+/// concurrent refresh cannot move the submission to a different, unchecked
+/// host mid-flight.
+#[cfg(unix)]
+pub(crate) fn pinned_alias(host: &str) -> SshTarget {
+    let target = SshTarget::alias(host);
+    match prepared::cached(&target) {
+        Some(route) => target.pin_route(route),
+        None => target,
+    }
+}
+
+#[cfg(not(unix))]
+pub(crate) fn pinned_alias(host: &str) -> SshTarget {
+    SshTarget::alias(host)
+}
+
 #[cfg(unix)]
 fn discarded_known_hosts() -> PathBuf {
     PathBuf::from("/dev/null")
