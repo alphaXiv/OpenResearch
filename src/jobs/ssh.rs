@@ -855,70 +855,57 @@ host_group_alive() {
             stat=${stat##*) }
             read -ra fields <<< "$stat"
             if [ "${fields[2]}" = "$p" ] && [ "${fields[0]}" != Z ] && [ "${fields[0]}" != X ]; then return 0; fi
-        done
+        done 2>/dev/null
         return 1
     fi
     ps -e -o pgid= -o stat= 2>/dev/null | awk -v p="$p" '$1 == p && $2 !~ /^[ZX]/ { alive=1 } END { exit !alive }'
 }
 
-host_any_group_alive() {
-    local g
-    for g in "$@"; do
-        host_group_alive "$g" && return 0
-    done
-    return 1
-}
-
-# Groups, other than $1's own, holding current descendants of $1. A payload
-# child spawned with start_new_session/setsid leaves the run's group but stays
-# a descendant — snapshotting this before TERM catches it while its ancestry
-# is still intact.
-host_descendant_groups() {
-    local root="$1" file stat fields pid cur
+# Foreign process groups attributable to the run whose leader is $3, where the
+# run directory is $1 (symlink-resolved) or its verbatim spelling $2. A process
+# is attributable when it descends from $3 at any depth — a payload child
+# spawned with start_new_session/setsid leaves the run's group but stays a
+# descendant — or when it is anchored to the run dir (cwd inside it, or an argv
+# path referencing it), which is what orphans keep once reparented. A group is
+# emitted only when it holds an attributable member AND its own group leader
+# is attributable or already gone: an unrelated process merely reading run
+# files (a `tail -f` on the log in a foreign shell's group) never pulls its
+# whole group into the sweep.
+host_run_groups() {
+    local d="$1" dv="$2" root="$3" file cwd stat fields cmd pid g cur
     [ -d /proc ] || return 0
-    local -A parent group
+    local -A parent group anchored descend
     for file in /proc/[0-9]*/stat; do
         pid=${file#/proc/}; pid=${pid%/stat}
         IFS= read -r stat < "$file" 2>/dev/null || continue
         stat=${stat##*) }
         read -ra fields <<< "$stat"
+        if [ "${fields[0]}" = Z ] || [ "${fields[0]}" = X ]; then continue; fi
         parent[$pid]=${fields[1]}
         group[$pid]=${fields[2]}
-    done
+        cwd=$(readlink "/proc/$pid/cwd" 2>/dev/null) || cwd=
+        case "$cwd" in
+            "$d"|"$d"/*|"$dv"|"$dv"/*) anchored[$pid]=1;;
+            *)
+                cmd=$(tr '\0' ' ' < "/proc/$pid/cmdline" 2>/dev/null) || cmd=
+                case "$cmd" in
+                    *"$d/"*|*"$dv/"*|*"$d "*|*"$dv "*|*"$d"|*"$dv") anchored[$pid]=1;;
+                esac;;
+        esac
+    done 2>/dev/null
     for pid in "${!parent[@]}"; do
         cur=${parent[$pid]}
         while [ "$cur" -gt 1 ] 2>/dev/null && [ "$cur" != "$pid" ]; do
-            if [ "$cur" = "$root" ]; then
-                [ "${group[$pid]}" != "$root" ] && echo "${group[$pid]}"
-                break
-            fi
+            if [ "$cur" = "$root" ]; then descend[$pid]=1; break; fi
             cur=${parent[$cur]:-0}
         done
-    done 2>/dev/null | sort -u
-}
-
-# Groups, other than $2's, holding processes anchored to the run directory
-# $1: working directory inside it or a command line referencing it. This is
-# the fallback attribution once detached children are orphaned (reparented,
-# ancestry lost) — they still run from the run's repo or against its files.
-host_path_groups() {
-    local d="$1" own="$2" dir file cwd stat fields cmd
-    [ -d /proc ] || return 0
-    for file in /proc/[0-9]*/cwd; do
-        dir=${file%/cwd}
-        cwd=$(readlink "$file" 2>/dev/null) || cwd=
-        case "$cwd" in
-            "$d"|"$d"/*) ;;
-            *)
-                cmd=$(tr '\0' ' ' < "$dir/cmdline" 2>/dev/null) || continue
-                case "$cmd" in *"$d"*) ;; *) continue;; esac;;
-        esac
-        IFS= read -r stat < "$dir/stat" 2>/dev/null || continue
-        stat=${stat##*) }
-        read -ra fields <<< "$stat"
-        if [ "${fields[0]}" = Z ] || [ "${fields[0]}" = X ]; then continue; fi
-        [ "${fields[2]}" = "$own" ] && continue
-        echo "${fields[2]}"
+    done
+    for pid in "${!parent[@]}"; do
+        g=${group[$pid]}
+        [ "$g" = "$root" ] && continue
+        if [ -z "${anchored[$pid]}" ] && [ -z "${descend[$pid]}" ]; then continue; fi
+        if [ -n "${parent[$g]}" ] && [ -z "${anchored[$g]}" ] && [ -z "${descend[$g]}" ]; then continue; fi
+        echo "$g"
     done 2>/dev/null | sort -u
 }
 "#;
@@ -998,11 +985,15 @@ pub async fn stream_logs(
 /// The sweep also covers children that left the run's process group —
 /// e.g. workers a payload spawns with `start_new_session=True`, each its own
 /// session and group, which a group-scoped signal can never reach. They are
-/// attributed two ways: still-descendant of the recorded pid (snapshotted
-/// before TERM, while the ancestry survives the coordinator's exit), and
+/// attributed two ways: still-descendant of the recorded pid (at any depth,
+/// which survives the coordinator's exit until the orphan is reparented), and
 /// anchored to the run directory (cwd or argv under `~/.orx/runs/<id>`, which
-/// is what orphans keep once reparented). Each foreign group gets the same
-/// TERM-then-KILL contract; anything else on the host is untouched.
+/// is what orphans keep once reparented). A foreign group is only signaled
+/// when its leader is attributable or already gone, so an unrelated process
+/// that merely references run files (a `tail -f` on the log in someone's
+/// shell) never pulls its group into the sweep. Each group gets the same
+/// TERM-then-KILL contract on its own five-second clock, and the sweep
+/// rescans until nothing attributable remains; anything else is untouched.
 pub async fn cancel_job(
     target: &SshTarget,
     dir: &str,
@@ -1017,26 +1008,39 @@ pub async fn cancel_job(
     Ok(())
 }
 
-/// The remote half of `cancel_job`: TERM the recorded process group plus every
-/// foreign group attributable to the run, wait five seconds, then KILL whoever
-/// ignored it. Kept separate so tests can run it against real local processes.
+/// The remote half of `cancel_job`: every ~0.1s it re-derives the attributable
+/// group set, TERMs each group the first time it appears, and KILLs it only
+/// after its own five-second grace expires — so a worker spawned mid-cancel
+/// (e.g. from a TERM handler) still gets its cleanup window, and a group once
+/// found can never slip out of the tracked set. Kept separate so tests can run
+/// it against real local processes.
 fn host_cancel_script(dir: &str) -> String {
     format!(
         "{HOST_PROCESS_HELPERS}\n\
          p=$(cat \"$HOME/{dir}/pid\" 2>/dev/null); \
          [ -n \"$p\" ] || exit 0; \
          case \"$p\" in ''|*[!0-9]*) exit 0;; esac; \
-         d=\"$HOME/{dir}\"; \
-         groups=\"$p $(host_descendant_groups \"$p\") $(host_path_groups \"$d\" \"$p\")\"; \
-         for g in $groups; do \
-             kill -TERM -- -\"$g\" 2>/dev/null || kill -TERM \"$g\" 2>/dev/null || true; \
+         d=\"$HOME/{dir}\"; dr=$(cd \"$d\" 2>/dev/null && pwd -P) || dr=\"$d\"; \
+         declare -A tt=() kk=() 2>/dev/null; \
+         for ((i=0; i<200; i++)); do \
+             for g in $p $(host_run_groups \"$dr\" \"$d\" \"$p\"); do \
+                 if [ -z \"${{tt[$g]}}\" ]; then \
+                     tt[$g]=$i; \
+                     kill -TERM -- -\"$g\" 2>/dev/null || kill -TERM \"$g\" 2>/dev/null || true; \
+                 fi; \
+             done; \
+             alive=; \
+             for g in \"${{!tt[@]}}\"; do \
+                 host_group_alive \"$g\" || continue; \
+                 alive=1; \
+                 if [ -z \"${{kk[$g]}}\" ] && [ $((i - ${{tt[$g]}})) -ge 50 ]; then \
+                     kk[$g]=1; \
+                     kill -KILL -- -\"$g\" 2>/dev/null || true; \
+                 fi; \
+             done; \
+             [ -z \"$alive\" ] && exit 0; \
+             sleep 0.1; \
          done; \
-         for ((i=0; i<50; i++)); do host_any_group_alive $groups || exit 0; sleep 0.1; done; \
-         groups=\"$p $(host_descendant_groups \"$p\") $(host_path_groups \"$d\" \"$p\")\"; \
-         for g in $groups; do \
-             host_group_alive \"$g\" && kill -KILL -- -\"$g\" 2>/dev/null; \
-         done; \
-         for ((i=0; i<10; i++)); do host_any_group_alive $groups || exit 0; sleep 0.1; done; \
          echo 'Experiment processes are still alive' >&2; exit 1",
     )
 }
@@ -1438,7 +1442,8 @@ mod tests {
         }
     }
 
-    #[cfg(unix)]
+    // The sweep helpers read /proc, so this only runs on Linux.
+    #[cfg(target_os = "linux")]
     #[test]
     fn host_cancel_kills_detached_session_children() {
         let home = crate::local::git::TemporaryDirectory::new("orx-ssh-cancel").unwrap();
@@ -1472,17 +1477,42 @@ mod tests {
         }
         unsafe { libc::close(ready[1]) };
         std::fs::write(dir.join("pid"), format!("{leader}\n")).unwrap();
-        // An unrelated session leader outside the run dir must survive.
+        // An unrelated session leader outside the run dir must survive — and
+        // so must an anchored member of ITS group: a process merely reading
+        // run files (like `tail -f` on the log) does not make its foreign
+        // group attributable. The member reports its pid over a second pipe.
+        let mut ready2 = [0; 2];
+        assert_eq!(unsafe { libc::pipe(ready2.as_mut_ptr()) }, 0);
         let bystander = unsafe { libc::fork() };
         assert!(bystander >= 0);
         if bystander == 0 {
             unsafe {
                 libc::close(ready[0]);
                 libc::setsid();
+                if libc::fork() == 0 {
+                    let repo = std::ffi::CString::new(dir.join("repo").to_str().unwrap()).unwrap();
+                    libc::chdir(repo.as_ptr());
+                    let pid = libc::getpid();
+                    libc::write(ready2[1], (&pid as *const i32).cast(), 4);
+                    libc::sleep(60);
+                }
                 libc::sleep(60);
                 libc::_exit(0)
             };
         }
+        unsafe { libc::close(ready2[1]) };
+        let mut reader_pid = 0i32;
+        assert_eq!(
+            unsafe {
+                libc::read(
+                    ready2[0],
+                    &mut reader_pid as *mut i32 as *mut libc::c_void,
+                    4,
+                )
+            },
+            4
+        );
+        unsafe { libc::close(ready2[0]) };
         let mut pfd = libc::pollfd {
             fd: ready[0],
             events: libc::POLLIN,
@@ -1509,7 +1539,9 @@ mod tests {
                 std::process::Command::new("bash")
                     .arg("-c")
                     .arg(format!(
-                        "{HOST_PROCESS_HELPERS}\nhost_path_groups \"$HOME/.orx/runs/r1\" {leader}"
+                        "{HOST_PROCESS_HELPERS}\n\
+                         d=\"$HOME/.orx/runs/r1\"; dr=$(cd \"$d\" && pwd -P); \
+                         host_run_groups \"$dr\" \"$d\" {leader}"
                     ))
                     .env("HOME", home.path())
                     .output()
@@ -1518,7 +1550,8 @@ mod tests {
             )
             .unwrap()
         };
-        // The orphaned worker is anchored to the run dir; the bystander is not.
+        // Only the orphaned worker's group is attributable: the bystander's
+        // group is excluded even though its member sits inside the run dir.
         assert_eq!(anchored().trim().lines().count(), 1);
         let start = std::time::Instant::now();
         let status = std::process::Command::new("bash")
@@ -1539,7 +1572,10 @@ mod tests {
                 .success()
         };
         assert!(group_alive(bystander));
+        // The anchored non-leader in the foreign group was never signaled.
+        assert_eq!(unsafe { libc::kill(reader_pid, 0) }, 0);
         unsafe {
+            libc::kill(reader_pid, libc::SIGKILL);
             libc::kill(bystander, libc::SIGKILL);
             libc::waitpid(bystander, std::ptr::null_mut(), 0);
         }
