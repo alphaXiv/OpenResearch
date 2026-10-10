@@ -2685,11 +2685,11 @@ function PromptCard({
     // harness-agnostic permission-mode wire ids).
     const docked = !!onOpenPlan;
     return (
-      <div className={`prompt-card my-2 mx-0 py-3 px-3.5 border border-border border-s-[3px] border-s-border rounded-sm bg-surface flex flex-col gap-[9px] [&.plan]:border-s-accent-blue [&.permission]:border-s-accent-amber [&.question]:border-s-accent-purple [&.readonly]:opacity-60 plan ${done ? "readonly" : ""}`}>
+      <div className={`prompt-card my-2 mx-0 py-3 px-3.5 border border-border border-s-[3px] border-s-border rounded-sm bg-accent-blue-subtle flex flex-col gap-[9px] [&.plan]:border-s-accent-blue [&.permission]:border-s-accent-amber [&.question]:border-s-accent-purple [&.readonly]:opacity-60 plan ${done ? "readonly" : ""}`}>
         <div className="prompt-head text-base font-semibold text-text">
           {p.synthesized ? m.chat_plan_ready() : m.chat_proposed_plan()}
         </div>
-        <div className={`prompt-plan text-base leading-[1.6] text-text max-h-85 overflow-y-auto [&.clamped]:max-h-[9.5em] [&.clamped]:overflow-hidden [&.clamped]:relative [&.clamped::after]:content-[''] [&.clamped::after]:absolute [&.clamped::after]:inset-x-0 [&.clamped::after]:bottom-0 [&.clamped::after]:top-auto [&.clamped::after]:h-8.5 [&.clamped::after]:bg-[linear-gradient(to_bottom,_transparent,_var(--surface))] [&.clamped::after]:pointer-events-none ${docked ? "clamped" : ""}`}>
+        <div className={`prompt-plan text-base leading-[1.6] text-text max-h-85 overflow-y-auto [&.clamped]:max-h-[9.5em] [&.clamped]:overflow-hidden [&.clamped]:relative [&.clamped::after]:content-[''] [&.clamped::after]:absolute [&.clamped::after]:inset-x-0 [&.clamped::after]:bottom-0 [&.clamped::after]:top-auto [&.clamped::after]:h-8.5 [&.clamped::after]:bg-[linear-gradient(to_bottom,_transparent,_var(--accent-blue-subtle))] [&.clamped::after]:pointer-events-none ${docked ? "clamped" : ""}`}>
           <Md text={p.plan ?? ""} onOpenFile={onOpenFile} />
         </div>
         {docked && (
@@ -2789,7 +2789,7 @@ function PromptCard({
         : [label],
     );
   return (
-    <div className={`prompt-card my-2 mx-0 py-3 px-3.5 border border-border border-s-[3px] border-s-border rounded-sm bg-surface flex flex-col gap-[9px] [&.plan]:border-s-accent-blue [&.permission]:border-s-accent-amber [&.question]:border-s-accent-purple [&.readonly]:opacity-60 question ${done ? "readonly" : ""}`}>
+    <div className={`prompt-card my-2 mx-0 py-3 px-3.5 border border-border border-s-[3px] border-s-border rounded-sm bg-accent-purple-subtle flex flex-col gap-[9px] [&.plan]:border-s-accent-blue [&.permission]:border-s-accent-amber [&.question]:border-s-accent-purple [&.readonly]:opacity-60 question ${done ? "readonly" : ""}`}>
       {p.header && <div className={PROMPT_HEAD_CLASS_NAME}>{p.header}</div>}
       {p.question && <div className="prompt-q text-base font-semibold leading-normal text-text">{p.question}</div>}
       <div className="prompt-options flex flex-col gap-1.5">
@@ -3053,7 +3053,7 @@ const Message = memo(function Message({
       };
       return (
         <div className="msg-user-group ms-auto self-end flex w-full max-w-[88%] flex-col items-end gap-1.5">
-          <div className="msg-user-edit w-full bg-surface rounded-[16px] py-2.5 px-[15px] flex flex-col gap-2">
+          <div className="msg-user-edit w-full bg-panel rounded-[16px] py-2.5 px-[15px] flex flex-col gap-2">
             <textarea
               dir="auto"
               className="w-full bg-transparent text-base text-text resize-none outline-none field-sizing-content min-h-16"
@@ -3093,7 +3093,7 @@ const Message = memo(function Message({
         {annotations.length > 0 && (
           <AnnotationsPopover annotations={annotations} variant="sent" />
         )}
-        <div dir="auto" className="msg-user max-w-full bg-surface rounded-[16px] py-2.5 px-[15px] text-base whitespace-pre-wrap wrap-anywhere [&_.skill-chip]:align-baseline">
+        <div dir="auto" className="msg-user max-w-full bg-panel rounded-[16px] py-2.5 px-[15px] text-base whitespace-pre-wrap wrap-anywhere [&_.skill-chip]:align-baseline">
           <MessageWithChips text={text} isCommand={isCommand} />
           {images.length > 0 && (
             <div className="msg-images flex flex-wrap gap-1.5 mt-2 [&_img]:max-w-55 [&_img]:max-h-40 [&_img]:border [&_img]:border-border-variant [&_img]:rounded-xs [&_img]:block">
@@ -3245,7 +3245,7 @@ function ShellExchangeCard({ part }: { part: ChatPart }) {
       : null;
   return (
     <div className="msg-shell ms-auto self-end flex w-full max-w-[88%] flex-col items-stretch gap-1.5">
-      <div dir="ltr" className="max-w-full bg-surface rounded-[16px] py-2.5 px-[15px] text-base">
+      <div dir="ltr" className="max-w-full bg-panel rounded-[16px] py-2.5 px-[15px] text-base">
         <div className="flex items-start gap-2 font-mono text-sm text-text whitespace-pre-wrap wrap-anywhere">
           <span className="sr-only">{m.chat_panel_bash()} </span>
           <SquareTerminal
@@ -3387,7 +3387,7 @@ function renderParts(
           dir="auto"
           role="note"
           aria-label={m.chat_panel_you_mid_task()}
-          className="msg-steer my-2 ms-auto w-fit max-w-[88%] bg-surface rounded-[16px] py-2.5 px-[15px] text-base whitespace-pre-wrap wrap-anywhere"
+          className="msg-steer my-2 ms-auto w-fit max-w-[88%] bg-panel rounded-[16px] py-2.5 px-[15px] text-base whitespace-pre-wrap wrap-anywhere"
         >
           {part.text}
         </div>,
@@ -6502,19 +6502,19 @@ export function ChatPanel({
         ) : contentLoading || historyLoading ? (
           <div className="chat-loading flex-1 min-h-0 overflow-hidden [scrollbar-gutter:stable_both-edges]" role="status" aria-label={m.chat_panel_loading_conversation()} aria-busy="true">
             <div aria-hidden="true" className="mx-auto flex h-full w-full max-w-readable flex-col gap-6 px-4 pb-8 pt-4 motion-safe:animate-pulse">
-              <div className="ms-auto h-14 w-3/5 shrink-0 rounded-lg bg-surface" />
+              <div className="ms-auto h-14 w-3/5 shrink-0 rounded-lg bg-panel" />
               <div className="flex shrink-0 flex-col gap-3">
                 {["w-5/6", "w-full", "w-11/12", "w-2/3", "w-full", "w-3/4", "w-1/2"].map((width, index) => (
-                  <div key={index} className={`h-3 rounded bg-surface ${width}`} />
+                  <div key={index} className={`h-3 rounded bg-panel ${width}`} />
                 ))}
               </div>
-              <div className="ms-auto h-10 w-2/5 shrink-0 rounded-lg bg-surface" />
+              <div className="ms-auto h-10 w-2/5 shrink-0 rounded-lg bg-panel" />
               <div className="flex shrink-0 flex-col gap-3">
                 {["w-full", "w-11/12", "w-3/4", "w-5/6", "w-1/2", "w-full", "w-5/6", "w-11/12", "w-2/3", "w-3/4", "w-1/3"].map((width, index) => (
-                  <div key={index} className={`h-3 rounded bg-surface ${width}`} />
+                  <div key={index} className={`h-3 rounded bg-panel ${width}`} />
                 ))}
               </div>
-              <div className="ms-auto h-16 w-1/2 shrink-0 rounded-lg bg-surface" />
+              <div className="ms-auto h-16 w-1/2 shrink-0 rounded-lg bg-panel" />
             </div>
           </div>
         ) : !threadMounted && activeSession?.sideParentSessionId ? (
@@ -6538,9 +6538,9 @@ export function ChatPanel({
                     >
                       <span className={`flex w-full items-center gap-2.5 ${STARTER_TONES[index].icon}`}>
                         <Icon size={17} />
-                        <span className="h-3.5 w-2/5 rounded bg-surface-bright" />
+                        <span className="h-3.5 w-2/5 rounded bg-panel" />
                       </span>
-                      <span className="h-3 w-4/5 rounded bg-surface" />
+                      <span className="h-3 w-4/5 rounded bg-panel" />
                     </div>
                   ))}
                 </div>

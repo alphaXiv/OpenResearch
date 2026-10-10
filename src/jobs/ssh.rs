@@ -846,6 +846,20 @@ host_process_alive() {
         fi
     fi
 }
+
+host_group_alive() {
+    local p="$1" file stat fields
+    if [ -d /proc ]; then
+        for file in /proc/[0-9]*/stat; do
+            IFS= read -r stat < "$file" 2>/dev/null || continue
+            stat=${stat##*) }
+            read -ra fields <<< "$stat"
+            if [ "${fields[2]}" = "$p" ] && [ "${fields[0]}" != Z ] && [ "${fields[0]}" != X ]; then return 0; fi
+        done
+        return 1
+    fi
+    ps -e -o pgid= -o stat= 2>/dev/null | awk -v p="$p" '$1 == p && $2 !~ /^[ZX]/ { alive=1 } END { exit !alive }'
+}
 "#;
 
 fn parse_job_state(out: &str) -> Result<JobState> {
@@ -914,7 +928,11 @@ pub async fn stream_logs(
 }
 
 /// Cancel = TERM the process group if we have one (setsid case), else the pid
-/// (nohup fallback). The negative-pid form targets the whole group.
+/// (nohup fallback). The negative-pid form targets the whole group. When TERM
+/// leaves members behind — a payload may block or ignore it — escalate to KILL
+/// after five seconds, matching the documented contract and the container
+/// path. run.sh's own escalation dies with its leader, so this sweep is the
+/// only one that still fires once the group leader is gone.
 pub async fn cancel_job(
     target: &SshTarget,
     dir: &str,
@@ -924,12 +942,26 @@ pub async fn cancel_job(
         container::cancel(target, container).await?;
     }
 
-    let cmd = format!(
-        "p=$(cat \"$HOME/{dir}/pid\" 2>/dev/null); \
-         [ -n \"$p\" ] && {{ kill -TERM -\"$p\" 2>/dev/null || kill -TERM \"$p\" 2>/dev/null; }}; true",
-    );
-    ssh_run(target, &cmd, None).await?;
+    let script = host_cancel_script(dir);
+    ssh_run(target, &format!("bash -c {}", sh_quote(&script)), None).await?;
     Ok(())
+}
+
+/// The remote half of `cancel_job`: TERM the recorded process group, wait five
+/// seconds, then KILL whoever ignored it. Kept separate so tests can run it
+/// against a real local group.
+fn host_cancel_script(dir: &str) -> String {
+    format!(
+        "{HOST_PROCESS_HELPERS}\n\
+         p=$(cat \"$HOME/{dir}/pid\" 2>/dev/null); \
+         [ -n \"$p\" ] || exit 0; \
+         case \"$p\" in ''|*[!0-9]*) exit 0;; esac; \
+         kill -TERM -- -\"$p\" 2>/dev/null || kill -TERM \"$p\" 2>/dev/null || true; \
+         for ((i=0; i<50; i++)); do host_group_alive \"$p\" || exit 0; sleep 0.1; done; \
+         kill -KILL -- -\"$p\" 2>/dev/null || true; \
+         for ((i=0; i<10; i++)); do host_group_alive \"$p\" || exit 0; sleep 0.1; done; \
+         echo 'Experiment process group is still alive' >&2; exit 1",
+    )
 }
 
 /// Per-host readiness for the Settings UI: can we reach it and execute snapshots?
@@ -1240,6 +1272,93 @@ mod tests {
         assert!(zombie);
         assert!(with_member);
         assert!(without_member);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn host_cancel_escalates_to_kill_when_the_leader_is_gone() {
+        let home = crate::local::git::TemporaryDirectory::new("orx-ssh-cancel").unwrap();
+        let dir = home.path().join(".orx/runs/r1");
+        std::fs::create_dir_all(&dir).unwrap();
+        let mut ready = [0; 2];
+        assert_eq!(unsafe { libc::pipe(ready.as_mut_ptr()) }, 0);
+        // OR-354: the group leader exits, leaving a member that ignores TERM.
+        let leader = unsafe { libc::fork() };
+        assert!(leader >= 0);
+        if leader == 0 {
+            unsafe {
+                libc::close(ready[0]);
+                libc::setsid();
+                if libc::fork() == 0 {
+                    libc::signal(libc::SIGTERM, libc::SIG_IGN);
+                    // Tell the test TERM is ignored before sleeping.
+                    libc::write(ready[1], b"r".as_ptr().cast(), 1);
+                    libc::sleep(60);
+                }
+                libc::_exit(0);
+            }
+        }
+        unsafe { libc::close(ready[1]) };
+        std::fs::write(dir.join("pid"), format!("{leader}\n")).unwrap();
+        // An unrelated process in another group must survive the sweep.
+        let bystander = unsafe { libc::fork() };
+        assert!(bystander >= 0);
+        if bystander == 0 {
+            unsafe {
+                libc::close(ready[0]);
+                libc::setsid();
+                libc::sleep(60);
+                libc::_exit(0)
+            };
+        }
+        // Wait for the member to confirm it ignores TERM and for the leader to
+        // exit before cancelling: a group liveness check can pass on the leader
+        // itself or on the member before it installs its handler.
+        let mut pfd = libc::pollfd {
+            fd: ready[0],
+            events: libc::POLLIN,
+            revents: 0,
+        };
+        assert_eq!(unsafe { libc::poll(&mut pfd, 1, 10_000) }, 1);
+        let mut byte = 0u8;
+        assert_eq!(
+            unsafe { libc::read(ready[0], &mut byte as *mut u8 as *mut libc::c_void, 1) },
+            1
+        );
+        unsafe { libc::close(ready[0]) };
+        let mut leader_dead = false;
+        for _ in 0..500 {
+            if unsafe { libc::waitpid(leader, std::ptr::null_mut(), libc::WNOHANG) } == leader {
+                leader_dead = true;
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        assert!(leader_dead);
+        let group_alive = |pgid: i32| {
+            std::process::Command::new("bash")
+                .arg("-c")
+                .arg(format!("{HOST_PROCESS_HELPERS}\nhost_group_alive {pgid}"))
+                .status()
+                .unwrap()
+                .success()
+        };
+        let start = std::time::Instant::now();
+        let status = std::process::Command::new("bash")
+            .args(["-c", &host_cancel_script(".orx/runs/r1")])
+            .env("HOME", home.path())
+            .status()
+            .unwrap();
+        assert!(status.success());
+        // TERM was ignored, so the sweep waited the full five seconds before KILL.
+        assert!(start.elapsed() >= Duration::from_secs(4));
+        assert!(!group_alive(leader));
+        // host_group_alive skips zombies, unlike kill(pid, 0) on our own child.
+        assert!(group_alive(bystander));
+        unsafe {
+            libc::kill(bystander, libc::SIGKILL);
+            libc::waitpid(bystander, std::ptr::null_mut(), 0);
+        }
     }
 
     #[test]

@@ -44,7 +44,7 @@ const ONB_GATE_HINT_CLASS_NAME = [
 
 const ONB_CARD_META_CLASS_NAME = [
   "onb-card-meta text-sm text-subtext [&_code]:font-mono",
-  "[&_code]:text-xs [&_code]:bg-panel",
+  "[&_code]:text-xs [&_code]:bg-surface",
   "[&_code]:border [&_code]:border-border-variant [&_code]:rounded-xs",
   "[&_code]:py-px [&_code]:px-[5px] [&_code]:whitespace-nowrap",
 ].join(" ");
@@ -344,7 +344,7 @@ export function Onboarding({
 
   return (
     <div
-      className={`home flex-1 min-h-0 overflow-y-auto [scrollbar-gutter:stable_both-edges] bg-canvas onboarding ${
+      className={`home flex-1 min-h-0 overflow-y-auto [scrollbar-gutter:stable_both-edges] bg-background onboarding ${
         step === 0
           ? "[&_.home-inner]:max-w-300 [&_.home-inner]:pt-0 [&_.home-inner]:pb-0"
           : "[&_.home-inner]:max-w-140 [&_.home-inner]:pt-24"
