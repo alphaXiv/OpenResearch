@@ -813,16 +813,26 @@ pub async fn fetch_paper_pdf(paper_id: &str) -> Result<Vec<u8>> {
     {
         return Err(anyhow!("{} is too large to download", url));
     }
-    // A bare "error decoding response body" says nothing about which download
-    // died; name the URL so the failure is actionable.
-    let body = res
-        .bytes()
-        .await
-        .map_err(|e| anyhow!("arXiv PDF download from {} was interrupted: {}", url, e))?;
-    if body.len() as u64 > MAX_PAPER_PDF_BYTES {
-        return Err(anyhow!("{} is too large to download", url));
+    capped_body(res, MAX_PAPER_PDF_BYTES, &url).await
+}
+
+/// Reads the body while enforcing `max` live: a response that never declares
+/// its length can't grow past the cap unchecked. A bare "error decoding
+/// response body" says nothing about which download died; the error names the
+/// URL so the failure is actionable.
+async fn capped_body(res: reqwest::Response, max: u64, url: &str) -> Result<Vec<u8>> {
+    use futures::StreamExt;
+    let mut body = Vec::new();
+    let mut stream = res.bytes_stream();
+    while let Some(chunk) = stream.next().await {
+        let chunk =
+            chunk.map_err(|e| anyhow!("arXiv PDF download from {} was interrupted: {}", url, e))?;
+        body.extend_from_slice(&chunk);
+        if body.len() as u64 > max {
+            return Err(anyhow!("{} is too large to download", url));
+        }
     }
-    Ok(body.to_vec())
+    Ok(body)
 }
 
 /// Look up a paper's linked GitHub repository (the most-starred repo associated
@@ -2453,5 +2463,109 @@ mod tests {
             rendered.contains(&deepest_cause),
             "deepest cause {deepest_cause:?} missing: {rendered}"
         );
+    }
+
+    /// Trickles `body` out in `parts` writes at `pace`; `Content-Length` is
+    /// declared only when asked, so tests can cover undeclared lengths too.
+    async fn serve_paced_body(
+        body: &'static [u8],
+        parts: usize,
+        pace: std::time::Duration,
+        declare_length: bool,
+    ) -> (String, tokio::task::JoinHandle<()>) {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("http://{}/", listener.local_addr().unwrap());
+        let server = tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.unwrap();
+            let mut buf = [0u8; 4096];
+            let _ = stream.read(&mut buf).await.unwrap();
+            let length = declare_length
+                .then(|| format!("Content-Length: {}\r\n", body.len()))
+                .unwrap_or_default();
+            stream
+                .write_all(
+                    format!(
+                        "HTTP/1.1 200 OK\r\nContent-Type: application/pdf\r\n{length}Connection: close\r\n\r\n"
+                    )
+                    .as_bytes(),
+                )
+                .await
+                .unwrap();
+            for part in body.chunks((body.len() / parts).max(1)) {
+                tokio::time::sleep(pace).await;
+                stream.write_all(part).await.unwrap();
+            }
+        });
+        (url, server)
+    }
+
+    /// Sends the response head then holds the body open forever.
+    async fn serve_stalled_body() -> (String, tokio::task::JoinHandle<()>) {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("http://{}/", listener.local_addr().unwrap());
+        let server = tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.unwrap();
+            let mut buf = [0u8; 4096];
+            let _ = stream.read(&mut buf).await.unwrap();
+            stream
+                .write_all(
+                    b"HTTP/1.1 200 OK\r\nContent-Type: application/pdf\r\nContent-Length: 10\r\n\r\n",
+                )
+                .await
+                .unwrap();
+            std::future::pending::<()>().await;
+        });
+        (url, server)
+    }
+
+    /// The PDF client's contract, shrunk to test scale: a read may take no
+    /// longer than 500ms, however long the whole download runs.
+    fn short_read_client() -> reqwest::Client {
+        crate::net::loopback_client()
+            .read_timeout(std::time::Duration::from_millis(500))
+            .build()
+            .unwrap()
+    }
+
+    #[tokio::test]
+    async fn paper_pdf_download_finishes_a_slow_but_progressing_body() {
+        static BODY: &[u8] = &[b'%'; 8];
+        // The whole body takes ~1.2s — past a 500ms whole-request deadline —
+        // but every part lands inside the per-read timeout (OR-468).
+        let (url, server) =
+            serve_paced_body(BODY, 4, std::time::Duration::from_millis(300), true).await;
+        let res = short_read_client().get(&url).send().await.unwrap();
+        let body = super::capped_body(res, 64, &url).await.unwrap();
+        assert_eq!(body, BODY);
+        server.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn paper_pdf_download_times_out_a_stalled_read() {
+        let (url, server) = serve_stalled_body().await;
+        let res = short_read_client().get(&url).send().await.unwrap();
+        let err = super::capped_body(res, 64, &url)
+            .await
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("was interrupted"), "{err}");
+        assert!(err.contains(&url), "{err}");
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn paper_pdf_download_stops_past_the_size_cap() {
+        static BODY: &[u8] = &[b'x'; 100];
+        // No declared length: the cap has to bite mid-stream.
+        let (url, server) = serve_paced_body(BODY, 1, std::time::Duration::ZERO, false).await;
+        let res = short_read_client().get(&url).send().await.unwrap();
+        let err = super::capped_body(res, 10, &url)
+            .await
+            .unwrap_err()
+            .to_string();
+        assert_eq!(err, format!("{url} is too large to download"));
+        server.await.unwrap();
     }
 }
