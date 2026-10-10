@@ -88,6 +88,11 @@ always requires `references/k8s.md` before creating or editing the manifest.
 If the installed reference cannot be read, `orx skill compute/<backend>` prints
 the same canonical document.
 
+For Slurm, `--cpus` and `--mem` request `#SBATCH --cpus-per-task` and
+`#SBATCH --mem`; omitting either uses the configured Slurm default, then the
+partition default. Read
+`references/slurm.md` before choosing values.
+
 ## Waiting on runs — `orx exp wait`
 
 Block until a run changes state when you want to act as soon as it finishes:

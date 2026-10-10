@@ -1065,6 +1065,8 @@ function SlurmSection() {
   const [partition, setPartition] = useState("");
   const [account, setAccount] = useState("");
   const [timeLimit, setTimeLimit] = useState("");
+  const [cpusPerTask, setCpusPerTask] = useState("");
+  const [mem, setMem] = useState("");
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [test, setTest] = useState<SlurmPreflight | null>(null);
@@ -1086,6 +1088,8 @@ function SlurmSection() {
     setPartition(s.partition ?? "");
     setAccount(s.account ?? "");
     setTimeLimit(s.timeLimit ?? "");
+    setCpusPerTask(s.cpusPerTask === null ? "" : String(s.cpusPerTask));
+    setMem(s.mem ?? "");
   };
 
   const previousSettings = useRef<SlurmSettings | null>(null);
@@ -1097,20 +1101,26 @@ function SlurmSection() {
       && partition.trim() === (previous.partition ?? "")
       && account.trim() === (previous.account ?? "")
       && timeLimit.trim() === (previous.timeLimit ?? "")
+      && cpusPerTask.trim() === (previous.cpusPerTask === null ? "" : String(previous.cpusPerTask))
+      && mem.trim() === (previous.mem ?? "")
     ))) {
       setHost(settings.host ?? "");
       setPartition(settings.partition ?? "");
       setAccount(settings.account ?? "");
       setTimeLimit(settings.timeLimit ?? "");
+      setCpusPerTask(settings.cpusPerTask === null ? "" : String(settings.cpusPerTask));
+      setMem(settings.mem ?? "");
     }
-  }, [settings, host, partition, account, timeLimit]);
+  }, [settings, host, partition, account, timeLimit, cpusPerTask, mem]);
 
   const unchanged =
     settings !== null &&
     host === (settings.host ?? "") &&
     partition.trim() === (settings.partition ?? "") &&
     account.trim() === (settings.account ?? "") &&
-    timeLimit.trim() === (settings.timeLimit ?? "");
+    timeLimit.trim() === (settings.timeLimit ?? "") &&
+    cpusPerTask.trim() === (settings.cpusPerTask === null ? "" : String(settings.cpusPerTask)) &&
+    mem.trim() === (settings.mem ?? "");
 
   async function submit(e: React.FormEvent) {
     e.preventDefault();
@@ -1124,6 +1134,9 @@ function SlurmSection() {
           partition: partition.trim(),
           account: account.trim(),
           timeLimit: timeLimit.trim(),
+          // Blank means "clear it"; the API reads 0 as back-to-partition-default.
+          cpusPerTask: Number(cpusPerTask.trim()) || 0,
+          mem: mem.trim(),
         }),
       );
     } catch (err) {
@@ -1239,6 +1252,30 @@ function SlurmSection() {
                   spellCheck={false}
                 />
               </label>
+              <div className="row2 mt-3">
+                <label>
+                  {m.settings_slurm_cpus_per_job()}
+                  <Input
+                    type="number"
+                    min={1}
+                    value={cpusPerTask}
+                    onChange={(e) => setCpusPerTask(e.target.value)}
+                    placeholder={m.settings_slurm_cpus_placeholder()}
+                    autoComplete="off"
+                  />
+                </label>
+                <label>
+                  {m.settings_slurm_memory()}
+                  <Input
+                    type="text"
+                    value={mem}
+                    onChange={(e) => setMem(e.target.value)}
+                    placeholder={m.settings_slurm_memory_placeholder()}
+                    autoComplete="off"
+                    spellCheck={false}
+                  />
+                </label>
+              </div>
             </div>
             {error && <div className="error">{error}</div>}
             <div className="actions">

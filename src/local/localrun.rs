@@ -134,6 +134,8 @@ async fn submit_controller_run(
         ssh_port: None,
         ssh_user: None,
         timeout_secs: None,
+        cpus_per_task: None,
+        mem: None,
         source_digest: None,
         source_path: None,
         source_size: None,

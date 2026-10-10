@@ -189,6 +189,9 @@ impl LocalPlane {
                                 .map(|s| format!("{s}s"))
                                 .unwrap_or_else(|| "unknown (older run or cluster default)".into())
                         );
+                        if backend.job_id.is_some() {
+                            println!("  {}", crate::local::slurm::status_resources(&backend));
+                        }
                         if let Some(error) = backend.monitoring_error.as_deref() {
                             println!("  {error}");
                         }
@@ -276,6 +279,9 @@ impl LocalPlane {
                 if let Some(job_id) = summary.job_id {
                     let label = if backend == "local" { "dir" } else { "job" };
                     println!("  {label}  {job_id}");
+                }
+                if let Some(resources) = summary.slurm_resources {
+                    println!("  {resources}");
                 }
                 println!("  run  {}", summary.run_id);
                 println!(
