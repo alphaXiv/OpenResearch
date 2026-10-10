@@ -52,6 +52,9 @@ jobs:
       - name: Release notes composition
         run: python3 scripts/test_release_notes.py
 
+      - name: Literature retrieval evaluation
+        run: python3 scripts/test_scholarcatalyst_eval.py
+
       - uses: pnpm/action-setup@v4
         with:
           version: 10
