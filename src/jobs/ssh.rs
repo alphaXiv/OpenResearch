@@ -119,7 +119,14 @@ pub fn resolve_options(
 pub async fn resolve_launch(args: &crate::ExpRunArgs) -> Result<ResolvedLaunch> {
     let settings = crate::config::ssh_settings()?;
     let (host, options) = resolve_options(args, &settings)?;
-    let host_check = preflight(&SshTarget::alias(&host)).await;
+    // Resolve the route before the probe and carry it on the target: preflight,
+    // staging, and submission all run against this exact route, so a concurrent
+    // refresh (another launch or a Settings test) cannot move the launch to a
+    // different host mid-flight.
+    let target = resolved_alias(&host)
+        .await
+        .unwrap_or_else(|_| SshTarget::alias(&host));
+    let host_check = preflight(&target).await;
     if !host_check.reachable || !host_check.tools_found {
         return Err(anyhow!(
             "{}",
@@ -128,13 +135,6 @@ pub async fn resolve_launch(args: &crate::ExpRunArgs) -> Result<ResolvedLaunch> 
                 .unwrap_or_else(|| "SSH host needs bash and tar.".into())
         ));
     }
-    // Keep this submission on the route preflight just resolved: a later
-    // refresh (another launch or a Settings test) rewrites the shared cache
-    // and must not move the staging/submit calls below to a different host.
-    #[cfg(unix)]
-    let target = pinned_alias(&host);
-    #[cfg(not(unix))]
-    let target = SshTarget::alias(&host);
     let container = match options.container {
         Some(reference) => Some(container::resolve(&target, &reference).await?),
         None => None,
@@ -234,22 +234,20 @@ impl SshTarget {
     }
 }
 
-/// A bare alias target pinned to the route currently in the shared cache
-/// (fresh right after a preflight refresh); left unpinned when nothing is
-/// cached. Launches use this so a concurrent refresh — another launch or a
-/// Settings test — cannot move the submission to a different host mid-flight.
+/// Resolve `host` against the current `~/.ssh/config` and return an alias
+/// target pinned to the resulting route: every ssh call made with the target
+/// stays on it regardless of later cache refreshes. A resolution error comes
+/// back as `Err` so callers can surface it before touching the host.
 #[cfg(unix)]
-pub(crate) fn pinned_alias(host: &str) -> SshTarget {
+pub(crate) async fn resolved_alias(host: &str) -> Result<SshTarget> {
     let target = SshTarget::alias(host);
-    match prepared::cached(&target) {
-        Some(route) => target.pin_route(route),
-        None => target,
-    }
+    let route = prepared::prepare(&target, true, None).await?;
+    Ok(target.pin_route(route))
 }
 
 #[cfg(not(unix))]
-pub(crate) fn pinned_alias(host: &str) -> SshTarget {
-    SshTarget::alias(host)
+pub(crate) async fn resolved_alias(host: &str) -> Result<SshTarget> {
+    Ok(SshTarget::alias(host))
 }
 
 #[cfg(unix)]
