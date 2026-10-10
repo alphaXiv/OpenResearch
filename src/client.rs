@@ -758,6 +758,19 @@ fn paper_pdf_url(paper_id: &str) -> String {
     format!("https://export.arxiv.org/pdf/{path}")
 }
 
+/// PDFs run to tens of MB, so the deadline is per read, not for the whole
+/// download: a slow link must still finish the paper (OR-468).
+fn paper_pdf_http() -> &'static Client {
+    static CLIENT: OnceLock<Client> = OnceLock::new();
+    CLIENT.get_or_init(|| {
+        crate::net::remote_client()
+            .connect_timeout(std::time::Duration::from_secs(20))
+            .read_timeout(std::time::Duration::from_secs(30))
+            .build()
+            .expect("http client")
+    })
+}
+
 /// Download a paper's PDF, for paper projects that start blank because the
 /// paper has no linked public code repository.
 pub async fn fetch_paper_pdf(paper_id: &str) -> Result<Vec<u8>> {
@@ -771,7 +784,7 @@ pub async fn fetch_paper_pdf(paper_id: &str) -> Result<Vec<u8>> {
     }
     let url = paper_pdf_url(paper_id);
     let res = public_get(
-        || http().get(&url).timeout(std::time::Duration::from_secs(30)),
+        || paper_pdf_http().get(&url),
         "arXiv",
         |e| anyhow!("Could not reach arXiv at {}: {}", url, e),
     )
@@ -800,7 +813,16 @@ pub async fn fetch_paper_pdf(paper_id: &str) -> Result<Vec<u8>> {
     {
         return Err(anyhow!("{} is too large to download", url));
     }
-    Ok(res.bytes().await?.to_vec())
+    // A bare "error decoding response body" says nothing about which download
+    // died; name the URL so the failure is actionable.
+    let body = res
+        .bytes()
+        .await
+        .map_err(|e| anyhow!("arXiv PDF download from {} was interrupted: {}", url, e))?;
+    if body.len() as u64 > MAX_PAPER_PDF_BYTES {
+        return Err(anyhow!("{} is too large to download", url));
+    }
+    Ok(body.to_vec())
 }
 
 /// Look up a paper's linked GitHub repository (the most-starred repo associated
