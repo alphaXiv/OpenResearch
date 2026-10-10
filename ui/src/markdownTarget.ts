@@ -72,7 +72,7 @@ export function htmlFigureAssetTarget(source: string, src: string): string | nul
 export function citedFilePath(path: string, resolveFilePath?: (path: string) => string | null): string | null {
   if (resolveFilePath) return resolveFilePath(path);
   try {
-    return decodeURI(path);
+    return decodeURIComponent(path);
   } catch {
     return null;
   }
