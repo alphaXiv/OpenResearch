@@ -119,8 +119,7 @@ pub fn resolve_options(
 pub async fn resolve_launch(args: &crate::ExpRunArgs) -> Result<ResolvedLaunch> {
     let settings = crate::config::ssh_settings()?;
     let (host, options) = resolve_options(args, &settings)?;
-    let target = SshTarget::alias(&host);
-    let host_check = preflight(&target).await;
+    let host_check = preflight(&SshTarget::alias(&host)).await;
     if !host_check.reachable || !host_check.tools_found {
         return Err(anyhow!(
             "{}",
@@ -129,6 +128,13 @@ pub async fn resolve_launch(args: &crate::ExpRunArgs) -> Result<ResolvedLaunch> 
                 .unwrap_or_else(|| "SSH host needs bash and tar.".into())
         ));
     }
+    // Keep this submission on the route preflight just resolved: a later
+    // refresh (another launch or a Settings test) rewrites the shared cache
+    // and must not move the staging/submit calls below to a different host.
+    #[cfg(unix)]
+    let target = pinned_alias(&host);
+    #[cfg(not(unix))]
+    let target = SshTarget::alias(&host);
     let container = match options.container {
         Some(reference) => Some(container::resolve(&target, &reference).await?),
         None => None,
@@ -146,6 +152,11 @@ pub struct SshTarget {
     pub dest: String,
     /// Extra ssh args before `--` (e.g. `["-p", "2222", "-o", …]`).
     pub extra_opts: Vec<String>,
+    /// Route resolved when the target was pinned for a launch. Pinned targets
+    /// consult this instead of the shared per-alias cache, so a concurrent
+    /// refresh cannot retarget an in-flight submission.
+    #[cfg(unix)]
+    route: Option<prepared::Prepared>,
 }
 
 /// How to treat the remote's SSH host key for a `host_port` target.
@@ -172,7 +183,23 @@ impl SshTarget {
         Self {
             dest: host.to_string(),
             extra_opts: Vec::new(),
+            #[cfg(unix)]
+            route: None,
         }
+    }
+
+    /// This target pinned to `route`: operations consult it instead of the
+    /// shared cache, keeping one submission on one connection.
+    #[cfg(unix)]
+    fn pin_route(mut self, route: prepared::Prepared) -> Self {
+        self.route = Some(route);
+        self
+    }
+
+    /// The route this target is pinned to, if any.
+    #[cfg(unix)]
+    fn route(&self) -> Option<&prepared::Prepared> {
+        self.route.as_ref()
     }
 
     /// `dest` (an alias or `user@host`) on an explicit `port`, with an explicit
@@ -198,8 +225,31 @@ impl SshTarget {
                 ]);
             }
         }
-        Self { dest, extra_opts }
+        Self {
+            dest,
+            extra_opts,
+            #[cfg(unix)]
+            route: None,
+        }
     }
+}
+
+/// A bare alias target pinned to the route currently in the shared cache
+/// (fresh right after a preflight refresh); left unpinned when nothing is
+/// cached. Launches use this so a concurrent refresh — another launch or a
+/// Settings test — cannot move the submission to a different host mid-flight.
+#[cfg(unix)]
+pub(crate) fn pinned_alias(host: &str) -> SshTarget {
+    let target = SshTarget::alias(host);
+    match prepared::cached(&target) {
+        Some(route) => target.pin_route(route),
+        None => target,
+    }
+}
+
+#[cfg(not(unix))]
+pub(crate) fn pinned_alias(host: &str) -> SshTarget {
+    SshTarget::alias(host)
 }
 
 #[cfg(unix)]
@@ -944,20 +994,26 @@ pub struct SshPreflight {
 /// launch or host test: a long-lived `orx up` would otherwise keep dialing a
 /// route prepared before the config changed. Polls keep the pinned connection.
 #[cfg(unix)]
-pub(crate) async fn refresh_route(target: &SshTarget) -> Result<()> {
+pub(crate) async fn refresh_route(
+    target: &SshTarget,
+    config: Option<&std::path::Path>,
+) -> Result<()> {
     if target.extra_opts.is_empty() {
-        prepared::prepare(target, true, None).await?;
+        prepared::prepare(target, true, config).await?;
     }
     Ok(())
 }
 
 #[cfg(not(unix))]
-pub(crate) async fn refresh_route(_target: &SshTarget) -> Result<()> {
+pub(crate) async fn refresh_route(
+    _target: &SshTarget,
+    _config: Option<&std::path::Path>,
+) -> Result<()> {
     Ok(())
 }
 
 pub async fn preflight(target: &SshTarget) -> SshPreflight {
-    if let Err(error) = refresh_route(target).await {
+    if let Err(error) = refresh_route(target, None).await {
         return SshPreflight {
             reachable: false,
             tools_found: false,
@@ -1340,6 +1396,7 @@ mod tests {
         let mk = |port: &str| SshTarget {
             dest: "root@h".to_string(),
             extra_opts: vec!["-p".into(), port.into()],
+            route: None,
         };
         assert_ne!(control_path(&mk("22022")), control_path(&mk("22023")));
         assert_eq!(control_path(&mk("22022")), control_path(&mk("22022")));

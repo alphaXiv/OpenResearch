@@ -27,7 +27,7 @@ use std::collections::HashMap;
 
 use serde::{Deserialize, Serialize};
 
-use super::ssh::{refresh_route, sh_quote, ssh_run, SshTarget};
+use super::ssh::{pinned_alias, refresh_route, sh_quote, ssh_run, SshTarget};
 use crate::error::{anyhow, Result};
 
 // --- settings ---------------------------------------------------------------
@@ -268,6 +268,9 @@ pub fn run_dir(run_id: &str) -> String {
 /// handle (together with the host).
 pub async fn run_job(spec: &SlurmJobSpec) -> Result<String> {
     let dir = run_dir(&spec.run_id);
+    // One submission stays on one route: pin to the route resolved at
+    // preflight so a concurrent refresh cannot move the run mid-submit.
+    let target = pinned_alias(&spec.host);
 
     // Login-node setup (clone). Env + script travel via stdin so tokens never
     // land on an argv or in a file.
@@ -277,7 +280,7 @@ pub async fn run_job(spec: &SlurmJobSpec) -> Result<String> {
         script = spec.setup_script,
     );
     ssh_run(
-        &SshTarget::alias(&spec.host),
+        &target,
         &format!("mkdir -p \"$HOME/{dir}\" && chmod 700 \"$HOME/{dir}\" && bash -s"),
         Some(&setup),
     )
@@ -286,13 +289,13 @@ pub async fn run_job(spec: &SlurmJobSpec) -> Result<String> {
 
     // Write the batch script (owner-only: it embeds tokens) and submit.
     ssh_run(
-        &SshTarget::alias(&spec.host),
+        &target,
         &format!("umask 077 && cat > \"$HOME/{dir}/job.sbatch\""),
         Some(&render_sbatch(spec)),
     )
     .await?;
     let out = ssh_run(
-        &SshTarget::alias(&spec.host),
+        &target,
         &format!("cd \"$HOME/{dir}\" && sbatch --parsable job.sbatch"),
         None,
     )
@@ -444,7 +447,7 @@ pub struct SlurmPreflight {
 }
 
 pub async fn preflight(host: &str) -> SlurmPreflight {
-    if let Err(error) = refresh_route(&SshTarget::alias(host)).await {
+    if let Err(error) = refresh_route(&SshTarget::alias(host), None).await {
         return SlurmPreflight {
             reachable: false,
             slurm_found: false,

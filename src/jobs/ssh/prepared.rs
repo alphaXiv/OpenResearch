@@ -9,13 +9,13 @@ use tokio::process::Command;
 use super::{control_dir, sh_quote, sharing::config_quote, SshTarget};
 use crate::error::{anyhow, Result};
 
-#[derive(Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub(super) struct Query {
     pub args: Vec<String>,
     pub output: String,
 }
 
-#[derive(Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub(super) struct Publication {
     pub host: String,
     pub native_id: String,
@@ -23,7 +23,7 @@ pub(super) struct Publication {
     pub queries: Vec<Query>,
 }
 
-#[derive(Clone)]
+#[derive(Debug, Clone)]
 pub(super) struct Prepared {
     pub publication: Publication,
     pub snapshot: PathBuf,
@@ -36,6 +36,9 @@ static CONNECTIONS: LazyLock<RwLock<BTreeMap<Key, Prepared>>> =
 static PREPARATION: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
 pub(super) fn cached(target: &SshTarget) -> Option<Prepared> {
+    if let Some(route) = target.route() {
+        return Some(route.clone());
+    }
     CONNECTIONS
         .read()
         .unwrap_or_else(std::sync::PoisonError::into_inner)
@@ -229,6 +232,11 @@ pub(super) async fn prepare(
     refresh: bool,
     config: Option<&std::path::Path>,
 ) -> Result<Prepared> {
+    // A pinned target is bound to the route its launch resolved; even a
+    // refresh must serve the pin, not the shared cache.
+    if let Some(route) = target.route() {
+        return Ok(route.clone());
+    }
     if !refresh {
         if let Some(connection) = cached(target) {
             return Ok(connection);
@@ -507,7 +515,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn prepare_serves_the_cached_route_until_a_refresh() {
+    async fn refresh_route_reresolves_while_pins_and_polls_keep_their_route() {
         let temp = crate::local::git::TemporaryDirectory::new("orx-prepare").unwrap();
         let config = temp.path().join("config");
         std::fs::write(
@@ -527,16 +535,36 @@ mod tests {
         // forwards to the connection their run started with.
         let pinned = prepare(&target, false, Some(&config)).await.unwrap();
         assert_eq!(pinned.snapshot, first.snapshot);
-        // A refresh re-resolves the edited config and updates the cache so
-        // subsequent callers, such as a launch preflight, see current settings.
-        let current = prepare(&target, true, Some(&config)).await.unwrap();
+        // refresh_route — the call both launch and host-test preflights make —
+        // re-resolves the edited config and updates the shared cache, so the
+        // next non-refresh caller sees current settings.
+        super::super::refresh_route(&target, Some(&config))
+            .await
+            .unwrap();
+        let current = prepare(&target, false, Some(&config)).await.unwrap();
         assert_ne!(current.snapshot, first.snapshot);
+        // A target pinned to the earlier route — the one a launch captured —
+        // stays on it through later refreshes.
+        let launch = target.pin_route(first.clone());
+        assert_eq!(cached(&launch).unwrap().snapshot, first.snapshot);
+        std::fs::write(
+            &config,
+            "Host gate-prepare\n HostName first.invalid\n Port 2224\n",
+        )
+        .unwrap();
         assert_eq!(
-            prepare(&target, false, Some(&config))
+            prepare(&launch, false, Some(&config))
                 .await
                 .unwrap()
                 .snapshot,
-            current.snapshot
+            first.snapshot
+        );
+        assert_eq!(
+            prepare(&launch, true, Some(&config))
+                .await
+                .unwrap()
+                .snapshot,
+            first.snapshot
         );
         CONNECTIONS.write().unwrap().remove(&key);
     }
