@@ -846,6 +846,20 @@ host_process_alive() {
         fi
     fi
 }
+
+host_group_alive() {
+    local p="$1" file stat fields
+    if [ -d /proc ]; then
+        for file in /proc/[0-9]*/stat; do
+            IFS= read -r stat < "$file" 2>/dev/null || continue
+            stat=${stat##*) }
+            read -ra fields <<< "$stat"
+            if [ "${fields[2]}" = "$p" ] && [ "${fields[0]}" != Z ] && [ "${fields[0]}" != X ]; then return 0; fi
+        done
+        return 1
+    fi
+    ps -e -o pgid= -o stat= 2>/dev/null | awk -v p="$p" '$1 == p && $2 !~ /^[ZX]/ { alive=1 } END { exit !alive }'
+}
 "#;
 
 fn parse_job_state(out: &str) -> Result<JobState> {
@@ -914,7 +928,11 @@ pub async fn stream_logs(
 }
 
 /// Cancel = TERM the process group if we have one (setsid case), else the pid
-/// (nohup fallback). The negative-pid form targets the whole group.
+/// (nohup fallback). The negative-pid form targets the whole group. When TERM
+/// leaves members behind — a payload may block or ignore it — escalate to KILL
+/// after five seconds, matching the documented contract and the container
+/// path. run.sh's own escalation dies with its leader, so this sweep is the
+/// only one that still fires once the group leader is gone.
 pub async fn cancel_job(
     target: &SshTarget,
     dir: &str,
@@ -924,11 +942,18 @@ pub async fn cancel_job(
         container::cancel(target, container).await?;
     }
 
-    let cmd = format!(
-        "p=$(cat \"$HOME/{dir}/pid\" 2>/dev/null); \
-         [ -n \"$p\" ] && {{ kill -TERM -\"$p\" 2>/dev/null || kill -TERM \"$p\" 2>/dev/null; }}; true",
+    let script = format!(
+        "{HOST_PROCESS_HELPERS}\n\
+         p=$(cat \"$HOME/{dir}/pid\" 2>/dev/null); \
+         [ -n \"$p\" ] || exit 0; \
+         case \"$p\" in ''|*[!0-9]*) exit 0;; esac; \
+         kill -TERM -- -\"$p\" 2>/dev/null || kill -TERM \"$p\" 2>/dev/null || true; \
+         for ((i=0; i<50; i++)); do host_group_alive \"$p\" || exit 0; sleep 0.1; done; \
+         kill -KILL -- -\"$p\" 2>/dev/null || true; \
+         for ((i=0; i<10; i++)); do host_group_alive \"$p\" || exit 0; sleep 0.1; done; \
+         echo 'Experiment process group is still alive' >&2; exit 1",
     );
-    ssh_run(target, &cmd, None).await?;
+    ssh_run(target, &format!("bash -c {}", sh_quote(&script)), None).await?;
     Ok(())
 }
 
