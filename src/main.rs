@@ -395,6 +395,12 @@ pub enum AgentCommand {
         #[arg(long)]
         no_wake: bool,
     },
+    /// List the agent harnesses a helper can run on here, with each one's
+    /// model vendor, so independent checks can use a different vendor.
+    Harnesses {
+        #[arg(long)]
+        json: bool,
+    },
 }
 
 #[derive(Args, Debug)]
@@ -503,8 +509,9 @@ pub struct ExpRunArgs {
     /// `ray` (a job on your Ray cluster, via the Ray Jobs API), `openresearch`
     /// (an ephemeral OpenResearch GPU/CPU box billed to your org; needs
     /// `orx login`), `tinker` (a local controller using remote Tinker model
-    /// compute), or `local` (a detached process on this machine). k8s,
-    /// ssh, slurm, ray, openresearch, tinker, and local are local
+    /// compute), `colab` (a Google Colab GPU/TPU runtime through the `colab`
+    /// CLI), or `local` (a detached process on this machine). k8s,
+    /// ssh, slurm, ray, openresearch, tinker, colab, and local are local
     /// experiments only. orx submits the job and a detached supervisor
     /// records status and logs locally. Omitted on a local experiment: launches on
     /// the configured default compute target, if set.
@@ -518,8 +525,10 @@ pub struct ExpRunArgs {
     /// entrypoint resources (`cpu:2`, `gpu:1`, `gpu:1,mem:8GiB`; omit to reserve
     /// nothing). With `--backend openresearch`: a GPU id from `orx compute`
     /// (h100_sxm, or h100_sxm:2 for two) or a CPU flavor (cpu5c/cpu5g/cpu5m, or
-    /// cpu5c:32 for the vCPU tier). Not used by k8s (see --manifest) or ssh
-    /// (see --host).
+    /// cpu5c:32 for the vCPU tier). With `--backend colab`: t4 (default), l4,
+    /// a100, h100, g4, v5e1, v6e1, or cpu; append `:highmem` for a high-RAM
+    /// machine, or pass `auto:<GB>` for the smallest GPU with that much VRAM.
+    /// Not used by k8s (see --manifest) or ssh (see --host).
     #[arg(long)]
     pub flavor: Option<String>,
     /// The org to bill the box to (with `--backend openresearch`). Omit when
@@ -548,7 +557,7 @@ pub struct ExpRunArgs {
     /// `--backend k8s`, set the image in the manifest instead.
     #[arg(long)]
     pub image: Option<String>,
-    /// Job timeout (with `--backend hf/modal/k8s/slurm/openresearch`): 90s,
+    /// Job timeout (with `--backend hf/modal/colab/k8s/slurm/openresearch`): 90s,
     /// 30m, 4h, 1d. Default 4h (HF's own default is only 30 minutes). With
     /// `--backend k8s` it becomes activeDeadlineSeconds unless the manifest
     /// sets its own. With `--backend slurm` it becomes `#SBATCH --time=` and

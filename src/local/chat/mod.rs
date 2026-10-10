@@ -5750,14 +5750,22 @@ impl ChatHost {
                     None,
                 )
             });
-            let result = match crate::local::harness::chat_harness(&ctx.harness) {
-                Some(harness) => harness.run_turn(&mut ctx).await,
-                None => Err(crate::local::harness::TurnFailure {
-                    kind: "unknown_harness",
-                    message: format!("unknown harness: {}", ctx.harness),
-                    delivery: DeliveryState::Rejected,
-                }),
-            };
+            // Captured before the harness runs: it may rewrite both.
+            let base_text = ctx.text.clone();
+            let resumed_native = ctx.native_session_id.is_some();
+            let mut result = run_harness_turn(&mut ctx).await;
+            let mut tried = vec![ctx.harness.clone()];
+            let mut steer_route = steer_route;
+            while let Some((next, reason, permission)) = ctx
+                .host
+                .clone()
+                .failover_target(&ctx, &result, &mut tried)
+                .await
+            {
+                ctx.fail_over(&next, &reason, permission, &base_text, resumed_native);
+                steer_route = ctx.host.clone().refresh_steering(&mut ctx, steer_route);
+                result = run_harness_turn(&mut ctx).await;
+            }
             drop(steer_route);
             if let Some(mut steering) = ctx.steering.take() {
                 steering.close();
@@ -5858,6 +5866,160 @@ impl ChatHost {
         }
         guard.defuse();
         Ok(TurnSubmission::Started(turn_id))
+    }
+
+    /// The harness to continue a turn on after it stopped on a usage limit,
+    /// with the failure that caused the switch. `None` when the failure is not
+    /// a limit, failover is off, the turn was interrupted, or no other
+    /// harness is ready. Harnesses checked here are added to `tried`.
+    async fn failover_target(
+        &self,
+        ctx: &TurnCtx,
+        result: &crate::local::harness::TurnResult,
+        tried: &mut Vec<String>,
+    ) -> Option<(String, String, crate::local::harness::CarriedPermission)> {
+        let (kind, message) = match (&ctx.terminal_error, result) {
+            (Some((kind, message)), _) => (kind.as_str(), message.as_str()),
+            (None, Err(failure)) => (failure.kind, failure.message.as_str()),
+            (None, Ok(_)) => return None,
+        };
+        if !crate::local::harness::is_usage_limit_failure(kind, message) {
+            return None;
+        }
+        let policy = Store::open().ok()?.ui_state().ok()?.harness_failover;
+        for id in policy.candidates(&ctx.harness, tried) {
+            if !self.owns_turn(&ctx.session_id, &ctx.turn_id).await {
+                return None;
+            }
+            tried.push(id.clone());
+            // A harness that cannot run as narrowly as this chat is not a fallback.
+            let Some(permission) = crate::local::harness::carry_permission(
+                &ctx.harness,
+                ctx.permission_mode,
+                ctx.plan_mode,
+                &id,
+            ) else {
+                continue;
+            };
+            let ready = tokio::time::timeout(
+                FAILOVER_DETECT_TIMEOUT,
+                crate::local::harness::detect_harness(&id),
+            )
+            .await
+            .ok()
+            .flatten()
+            .is_some_and(|info| info.agent_ready);
+            if ready {
+                return Some((id, message.to_string(), permission));
+            }
+        }
+        None
+    }
+
+    /// Point the session's steering at the harness a turn failed over to:
+    /// open a channel if the new harness steers and the old one did not, close
+    /// it (parking what was sent) if the reverse, and match sends against the
+    /// settings the turn now runs under.
+    fn refresh_steering(
+        self: Arc<Self>,
+        ctx: &mut TurnCtx,
+        route: Option<SteerRoute>,
+    ) -> Option<SteerRoute> {
+        let steers = crate::local::harness::supports_steering(&ctx.harness);
+        match route {
+            Some(route) if steers => {
+                if let Some(sink) = self.steering.lock().unwrap().get_mut(&ctx.session_id) {
+                    if sink.tx.same_channel(&route.tx) {
+                        sink.settings = TurnSettings::of(ctx);
+                    }
+                }
+                Some(route)
+            }
+            Some(route) => {
+                drop(route);
+                if let Some(mut steering) = ctx.steering.take() {
+                    steering.close();
+                    while let Ok(message) = steering.try_recv() {
+                        if let Err(error) = self.park_steer(&ctx.session_id, message) {
+                            ctx.push_error(format!("Could not preserve steering message: {error}"));
+                        }
+                    }
+                }
+                None
+            }
+            None if steers => {
+                let (tx, rx) = mpsc::unbounded_channel();
+                ctx.steering = Some(rx);
+                Some(self.register_steering(&ctx.session_id, tx, TurnSettings::of(ctx)))
+            }
+            None => None,
+        }
+    }
+
+    /// Carry queued messages onto the harness the session failed over to:
+    /// their model, tier and effort belonged to the old harness, and their
+    /// permission is narrowed the same way the turn's was.
+    fn carry_queue_over(
+        &self,
+        session_id: &str,
+        from: &str,
+        to: &str,
+        fallback: &crate::local::harness::CarriedPermission,
+    ) {
+        let _mutation = self.queue_persistence.lock().unwrap();
+        let Ok(store) = Store::open() else {
+            return;
+        };
+        let mut changed = false;
+        if let Some(queue) = self.queued.lock().unwrap().get_mut(session_id) {
+            for item in queue.iter_mut() {
+                let overrides = &item.overrides;
+                let permission = overrides
+                    .permission_mode
+                    .as_deref()
+                    .and_then(|id| crate::local::harness::permission_mode_for(from, id));
+                let carried = (permission.is_some() || overrides.plan_mode.is_some())
+                    .then(|| {
+                        crate::local::harness::carry_permission(
+                            from,
+                            permission,
+                            overrides.plan_mode.unwrap_or(false),
+                            to,
+                        )
+                    })
+                    .flatten()
+                    .unwrap_or_else(|| fallback.clone());
+                item.overrides = TurnOverrides {
+                    model: None,
+                    clear_model: false,
+                    service_tier: None,
+                    permission_mode: carried.permission_id,
+                    permission_revision: None,
+                    plan_mode: crate::local::harness::supports_command_plan(to)
+                        .then_some(carried.plan_mode),
+                    plan_revision: None,
+                    reasoning_level: None,
+                };
+                if let Ok(payload) = serde_json::to_string(&*item) {
+                    let _ = store.update_queued_chat_message(&item.id, &payload);
+                }
+                changed = true;
+            }
+        }
+        drop(_mutation);
+        if changed {
+            self.emit_queued(session_id);
+        }
+    }
+
+    async fn owns_turn(&self, session_id: &str, turn_id: &str) -> bool {
+        if self.deleting_sessions.lock().unwrap().contains(session_id) {
+            return false;
+        }
+        matches!(
+            self.turns.lock().await.get(session_id),
+            Some(TurnState::Active(active)) if active.turn_id == turn_id
+        )
     }
 
     /// Turn cleanup: drop the handle, bump the session, broadcast idle.
@@ -7116,6 +7278,20 @@ fn turn_ctx_from_stored(
     }
 }
 
+/// How long a failover waits to learn whether the next harness is ready.
+const FAILOVER_DETECT_TIMEOUT: Duration = Duration::from_secs(30);
+
+async fn run_harness_turn(ctx: &mut TurnCtx) -> crate::local::harness::TurnResult {
+    match crate::local::harness::chat_harness(&ctx.harness) {
+        Some(harness) => harness.run_turn(ctx).await,
+        None => Err(crate::local::harness::TurnFailure {
+            kind: "unknown_harness",
+            message: format!("unknown harness: {}", ctx.harness),
+            delivery: DeliveryState::Rejected,
+        }),
+    }
+}
+
 fn rebase_prepared_attachment_paths(input: &str) -> String {
     let Ok(current_dir) = attachments_dir() else {
         return input.to_string();
@@ -7441,6 +7617,156 @@ impl TurnCtx {
             }));
         }
         self.upsert_part_raw(part);
+    }
+
+    /// Continue this turn on `to` after the current harness stopped on a usage
+    /// limit. The session moves to `to` with that harness's defaults, and the
+    /// turn's prompt is reseeded with the transcript so far, since `to` has
+    /// no native history of this chat.
+    fn fail_over(
+        &mut self,
+        to: &str,
+        reason: &str,
+        permission: crate::local::harness::CarriedPermission,
+        base_text: &str,
+        resumed_native: bool,
+    ) {
+        use crate::local::harness::{chat_harness, permission_mode_for, supports_command_plan};
+        let from = std::mem::replace(&mut self.harness, to.to_string());
+        let name =
+            |id: &str| chat_harness(id).map_or_else(|| id.to_string(), |h| h.name().to_string());
+        let (from_name, to_name) = (name(&from), name(to));
+        let command_plan = supports_command_plan(to);
+        let permission_id = permission.permission_id.clone();
+        self.permission_mode = permission_id
+            .as_deref()
+            .and_then(|id| permission_mode_for(to, id));
+        self.plan_mode = permission.plan_mode;
+        self.plan_reset_pending = false;
+        self.native_session_id = None;
+        self.model = None;
+        self.reset_codex_model = false;
+        self.service_tier = None;
+        self.reasoning_level = None;
+        self.context_usage = None;
+        self.terminal_error = None;
+        self.delivery_state = DeliveryState::NotSent;
+        self.retry_owner = None;
+        self.retry_started_emitted = false;
+        self.retry_exhausted = false;
+        self.orx_retry_started = None;
+        self.orx_retry_count = 0;
+
+        // Harnesses number their parts from scratch (`text-1`, …); move the
+        // earlier attempt's parts out of the way so the next one cannot
+        // overwrite them.
+        self.apply_target_events();
+        let attempt = self
+            .assistant
+            .parts
+            .iter()
+            .filter(|part| part.tool.as_deref() == Some("harnessFailover"))
+            .count();
+        let prefix = format!("attempt{attempt}-");
+        let mut renamed = HashMap::new();
+        for part in &mut self.assistant.parts {
+            if part.id.starts_with("attempt")
+                || part.id.starts_with("harness-failover-")
+                || part.id == "turn-retry"
+            {
+                continue;
+            }
+            let id = format!("{prefix}{}", part.id);
+            renamed.insert(std::mem::replace(&mut part.id, id.clone()), id);
+        }
+        for ids in self.target_event_bindings.values_mut() {
+            for id in ids.iter_mut() {
+                if let Some(new) = renamed.get(id) {
+                    *id = new.clone();
+                }
+            }
+        }
+
+        let mut part = WirePart::tool(
+            format!("harness-failover-{attempt}"),
+            "harnessFailover",
+            "completed",
+            None,
+        );
+        if let Some(state) = part.state.as_mut() {
+            state.title = Some(format!(
+                "Switched from {from_name} to {to_name} after a usage limit"
+            ));
+            state.input = Some(json!({
+                "from": from,
+                "to": to,
+                "fromName": from_name,
+                "toName": to_name,
+                "reason": reason,
+            }));
+        }
+        self.clear_retry_status();
+        self.upsert_part_raw(part);
+        let _ = self.flush();
+
+        let store = Store::open().ok();
+        let bootstrap = resumed_native
+            .then(|| {
+                store
+                    .as_ref()?
+                    .get_chat_session(&self.session_id)
+                    .ok()??
+                    .bootstrap_context
+            })
+            .flatten()
+            .filter(|context| !context.trim().is_empty());
+        let snapshot =
+            crate::local::harness::native_recovery_snapshot(&self.session_id, &self.turn_id);
+        let prior = [bootstrap.as_deref(), Some(snapshot.as_str())]
+            .into_iter()
+            .flatten()
+            .filter(|text| !text.is_empty())
+            .collect::<Vec<_>>()
+            .join("\n\n");
+        self.text = if prior.is_empty() {
+            base_text.to_string()
+        } else {
+            format!(
+                "<orx-harness-failover>\nThis chat was running on {from_name}, which stopped on a usage limit; you are continuing it. Use this ORX transcript snapshot as prior context; do not repeat completed tool actions.\n{prior}\n</orx-harness-failover>\n\n{base_text}"
+            )
+        };
+
+        self.usage_execution_id = uuid::Uuid::new_v4().to_string();
+        if let Some(store) = store.as_ref() {
+            let _ = store.switch_chat_session_harness(
+                &self.session_id,
+                to,
+                permission_id.as_deref(),
+                self.plan_mode,
+            );
+            if let Ok(settings) = serde_json::to_string(&TurnOverrides {
+                model: None,
+                clear_model: false,
+                service_tier: None,
+                permission_mode: permission_id.clone(),
+                permission_revision: None,
+                plan_mode: command_plan.then_some(self.plan_mode),
+                plan_revision: None,
+                reasoning_level: None,
+            }) {
+                let _ = store.set_chat_turn_settings(&self.turn_id, &settings);
+            }
+            let _ = store.begin_usage_execution(&self.usage_execution_id, &self.turn_id, to);
+            self.host
+                .carry_queue_over(&self.session_id, &from, to, &permission);
+            if let Ok(Some(session)) = store.get_chat_session(&self.session_id) {
+                self.host.emit(
+                    "chat.session",
+                    json!({ "session": session_json(&session, true) }),
+                );
+            }
+        }
+        crate::telemetry::capture("chat_harness_failover", json!({ "from": from, "to": to }));
     }
 
     fn upsert_part_raw(&mut self, part: WirePart) {
@@ -8387,6 +8713,15 @@ fn spawn_report_text(
         .as_deref()
         .map(|title| format!(" (\"{title}\")"))
         .unwrap_or_default();
+    // Say which agent did the work, so a cross-harness check can be attributed.
+    let ran_on = crate::local::harness::chat_harness(&child.harness).map_or_else(
+        || format!(" on {}", child.harness),
+        |harness| format!(" on {}", harness.name()),
+    ) + &child
+        .model
+        .as_deref()
+        .map(|model| format!(" ({model})"))
+        .unwrap_or_default();
     let brief = truncated(spawn.prompt.trim(), SPAWN_BRIEF_LIMIT);
     let stopped = "Its session holds however far it got. Re-delegate it if you still need the \
                    task done.";
@@ -8410,7 +8745,7 @@ fn spawn_report_text(
         }
     };
     Ok(format!(
-        "[orx] The agent you spawned for `{}`{named} {headline}.\n\nIt was asked to: {brief}\n\n\
+        "[orx] The agent you spawned for `{}`{named}{ran_on} {headline}.\n\nIt was asked to: {brief}\n\n\
          {closing}{}",
         spawn.session_id,
         spawn_workspace(store, &child),
@@ -10804,7 +11139,7 @@ with other project runs using `orx runs p1` and inspect the file located by `orx
         // which is also what a helper that never wrote anything looks like.
         assert_eq!(
             text,
-            "[orx] The agent you spawned for `child` (\"Lit sweep\") has finished.\n\n\
+            "[orx] The agent you spawned for `child` (\"Lit sweep\") on Codex has finished.\n\n\
              It was asked to: Sweep the literature\n\nIts closing reply:\n\nRank 8 wins."
         );
 
@@ -10826,7 +11161,7 @@ with other project runs using `orx runs p1` and inspect the file located by `orx
         assert!(
             spawn_report_text(&store, &spawn_fixture("untitled", "parent"), false)
                 .unwrap()
-                .starts_with("[orx] The agent you spawned for `untitled` has finished.")
+                .starts_with("[orx] The agent you spawned for `untitled` on Codex has finished.")
         );
 
         let _ = std::fs::remove_dir_all(&dir);

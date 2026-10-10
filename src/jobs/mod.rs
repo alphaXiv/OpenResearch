@@ -1,16 +1,22 @@
 //! Job backends — external compute that orx launches and supervises itself.
 //!
 //! Orx submits natively (HF Jobs, Modal, Kubernetes, SSH, Slurm, an OpenResearch
-//! box, Tinker through a local controller, or this machine) and a detached
+//! box, Tinker or Google Colab through a local controller, or this machine) and a detached
 //! `orx supervise` watches the job beside it. The run's `backend_json` descriptor
 //! is the serialized handle a later supervisor uses to reattach.
 
+pub mod colab;
+pub mod colab_account;
+pub mod colab_runtimes;
+pub mod gcp;
+pub mod gcp_billing;
 pub mod huggingface;
 pub mod kubernetes;
 pub mod localbox;
 mod managed_env;
 pub mod modal;
 pub mod openresearch;
+pub mod provider_prices;
 pub mod ray;
 pub mod slurm;
 pub mod ssh;
@@ -166,7 +172,7 @@ impl BackendDescriptor {
 
     /// The local run dir (the reattach handle) for a local controller.
     pub fn local_ref(&self) -> Result<&str> {
-        if !matches!(self.kind.as_str(), "local_job" | "tinker_job") {
+        if !matches!(self.kind.as_str(), "local_job" | "tinker_job" | "colab_job") {
             return Err(anyhow!("Unsupported backend kind: {}", self.kind));
         }
         self.job_id.as_deref().ok_or_else(|| {
@@ -213,6 +219,32 @@ impl BackendDescriptor {
                 "Backend descriptor is missing the org/sandbox id — was the box provisioned?"
             )),
         }
+    }
+
+    /// The Compute Engine (project, zone, VM name) handle; the zone rides on
+    /// `context`.
+    pub fn gcp_ref(&self) -> Result<(&str, &str, &str)> {
+        if self.kind != "gcp_job" {
+            return Err(anyhow!("Unsupported backend kind: {}", self.kind));
+        }
+        match (
+            self.namespace.as_deref(),
+            self.context.as_deref(),
+            self.job_id.as_deref(),
+        ) {
+            (Some(project), Some(zone), Some(name)) => Ok((project, zone, name)),
+            _ => Err(anyhow!(
+                "Backend descriptor is missing the project/zone/VM — was the VM created?"
+            )),
+        }
+    }
+
+    /// The VM's SSH target once the supervisor has recorded its IP (gcp_job only).
+    pub fn gcp_ssh_target(&self) -> Option<ssh::SshTarget> {
+        if self.kind != "gcp_job" {
+            return None;
+        }
+        gcp::ssh_target(self.ssh_host.as_deref()?).ok()
     }
 
     /// The box's SSH endpoint as a ready-to-use target, once the supervisor

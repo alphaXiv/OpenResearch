@@ -28,9 +28,26 @@ function backendName(kind: string): string {
       return m.compute_target_local();
     case "tinker_job":
       return "Tinker";
+    case "colab_job":
+      return "Colab";
+    case "gcp_job":
+      return "Google Cloud";
     default:
       return kind || "—";
   }
+}
+
+// Google Cloud — the four-color cloud mark. Carries its own colors, so it
+// renders the same in light and dark.
+function GoogleCloudLogo({ size = 16 }: { size?: number }) {
+  return (
+    <svg width={size} height={size} viewBox="0 0 24 24" aria-hidden="true">
+      <path fill="#EA4335" d="M15.22 7.06h.84l2.4-2.4.12-1.02A10.79 10.79 0 0 0 1.03 8.9a1.3 1.3 0 0 1 .84-.05l4.8-.79s.24-.4.37-.38a5.99 5.99 0 0 1 8.18-.62z" />
+      <path fill="#4285F4" d="M21.88 8.9a10.81 10.81 0 0 0-3.26-5.25l-3.37 3.37a5.99 5.99 0 0 1 2.2 4.75v.6a3 3 0 1 1 0 6h-6l-.6.61v3.6l.6.6h6a7.8 7.8 0 0 0 4.43-14.28z" />
+      <path fill="#34A853" d="M5.43 22.96h6v-4.8h-6a2.98 2.98 0 0 1-1.24-.27l-.84.26-2.42 2.4-.21.84a7.76 7.76 0 0 0 4.71 1.57z" />
+      <path fill="#FBBC05" d="M5.43 7.39A7.8 7.8 0 0 0 .72 21.38l3.48-3.48a3 3 0 1 1 3.97-3.97l3.48-3.48a7.8 7.8 0 0 0-6.22-3.06z" />
+    </svg>
+  );
 }
 
 // Hugging Face — official full-color smiley (huggingface.co/brand, via
@@ -126,6 +143,17 @@ function OpenResearchLogo({ size = 16 }: { size?: number }) {
   );
 }
 
+// Google Colab — the two-tone "CO" mark, redrawn as circle arcs from the
+// official logo so it stays sharp at every size.
+function ColabLogo({ size = 16 }: { size?: number }) {
+  return (
+    <svg width={size} height={size} viewBox="8 270 1264 740" aria-hidden="true">
+      <path fill="#F9AB00" d="M640.4 901.6 A370 370 0 0 1 640.4 378.4 A370 370 0 0 1 1163.6 378.4 L1037.8 504.2 A192 192 0 0 0 766.2 504.2 A192 192 0 0 0 766.2 775.8Z M116.4 378.4 A370 370 0 0 1 604.3 347.2 L512.3 502.8 A192 192 0 0 0 242.2 504.2Z M604.3 932.8 A370 370 0 0 1 116.4 901.6 L242.2 775.8 A192 192 0 0 0 512.3 777.2Z" />
+      <path fill="#E8710A" d="M1163.6 378.4 A370 370 0 0 1 1163.6 901.6 A370 370 0 0 1 640.4 901.6 L766.2 775.8 A192 192 0 0 0 1037.8 775.8 A192 192 0 0 0 1037.8 504.2Z M116.4 901.6 A370 370 0 0 1 116.4 378.4 L242.2 504.2 A192 192 0 0 0 242.2 775.8Z" />
+    </svg>
+  );
+}
+
 function TinkerLogo({ size = 16 }: { size?: number }) {
   return (
     <img
@@ -174,6 +202,10 @@ export function BackendLogo({ kind, size = 16 }: { kind: string; size?: number }
       return <OpenResearchLogo size={size} />;
     case "tinker_job":
       return <TinkerLogo size={size} />;
+    case "colab_job":
+      return <ColabLogo size={size} />;
+    case "gcp_job":
+      return <GoogleCloudLogo size={size} />;
     case "local_job":
       return <Laptop size={size} strokeWidth={1.5} />;
     default:

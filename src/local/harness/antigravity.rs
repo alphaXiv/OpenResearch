@@ -60,6 +60,17 @@ impl Antigravity {
         if snapshot && info.installed {
             return Some(info);
         }
+        let confinement = info
+            .bin_path
+            .as_deref()
+            .map(Path::new)
+            .and_then(snap_confinement_problem);
+        if let Some(problem) = confinement {
+            // The model list would answer, yet every turn's file access fails.
+            info.agent_note = Some(problem);
+            info.agent_ready = false;
+            return Some(info);
+        }
         if info.installed && !info.install_broken {
             if let Some(bin) = info.bin_path.as_deref().map(Path::new) {
                 match super::detect::timed_probe("antigravity", "models", agy_model_list(bin)).await
@@ -68,6 +79,7 @@ impl Antigravity {
                         info.authenticated = true;
                         info.auth_state = HarnessAuthState::Ready;
                         info.auth_method = Some("oauth");
+                        info.account = agy_account().await;
                         info = info.with_models(models);
                     }
                     Err(error) => {
@@ -216,6 +228,7 @@ impl Harness for Antigravity {
 
 /// `agy` on PATH, then common install locations under `~/.local/bin`,
 /// `~/.gemini/bin`, or `~/.gemini/antigravity-cli/bin`, in preference order.
+/// A standalone install beats the snap, which cannot reach hidden folders.
 fn agy_candidates() -> Vec<PathBuf> {
     let home_dirs = dirs::home_dir().into_iter().flat_map(|home| {
         let gemini = home.join(".gemini");
@@ -228,11 +241,54 @@ fn agy_candidates() -> Vec<PathBuf> {
     let drops = home_dirs
         .chain(dirs::data_local_dir().map(|dir| dir.join("agy").join("bin")))
         .filter_map(|dir| find_in_dir(&dir, "agy"));
-    find_on_path("agy")
+    let mut candidates: Vec<PathBuf> = find_on_path("agy")
         .into_iter()
         .chain(drops)
         .map(resolve_symlinks)
-        .collect()
+        .collect();
+    candidates.sort_by_key(|bin| is_snap_launch(bin));
+    candidates
+}
+
+/// A snap app: either its `/snap/bin` link, or that link already resolved to
+/// the `snap` launcher itself.
+fn is_snap_launch(bin: &Path) -> bool {
+    bin.starts_with("/snap/") || bin.file_name().is_some_and(|name| name == "snap")
+}
+
+/// Whether a strictly confined snap with the `home` interface can read `path`:
+/// only non-hidden folders under the user's home are visible to it.
+fn snap_can_reach(path: &Path, home: &Path) -> bool {
+    path.strip_prefix(home).is_ok_and(|rest| {
+        rest.components()
+            .next()
+            .is_none_or(|first| !first.as_os_str().to_string_lossy().starts_with('.'))
+    })
+}
+
+/// Why a snap-installed `agy` cannot work on OpenResearch's workspaces, if it
+/// cannot. Every turn runs inside a session worktree under the data dir, and
+/// the default `~/.local/share/openresearch` is hidden from strict snaps, so
+/// `agy` starts but every file read or edit fails with "permission denied".
+fn snap_confinement_problem(bin: &Path) -> Option<String> {
+    if !cfg!(target_os = "linux") || !is_snap_launch(bin) {
+        return None;
+    }
+    let home = dirs::home_dir()?;
+    let data_dir = crate::store::data_dir();
+    let data_dir = crate::paths::canonicalize(&data_dir).unwrap_or(data_dir);
+    let home = crate::paths::canonicalize(&home).unwrap_or(home);
+    if snap_can_reach(&data_dir, &home) {
+        return None;
+    }
+    Some(format!(
+        "Antigravity is installed as a snap, and snap confinement blocks it from reading \
+         OpenResearch workspaces in {}. Install the standalone CLI with `curl -fsSL \
+         https://antigravity.google/cli/install.sh | bash` (you can then run `sudo snap remove \
+         antigravity-cli`), or move the OpenResearch data folder to a non-hidden folder in your \
+         home directory in Settings → Storage, then re-check this harness.",
+        data_dir.display()
+    ))
 }
 
 /// The executable detection selected, else the first candidate — sync callers
@@ -244,6 +300,116 @@ pub(crate) fn find_agy() -> Option<PathBuf> {
 /// The first candidate that actually runs, with its version probe.
 pub(super) async fn find_agy_working() -> Option<(PathBuf, super::detect::BinProbe)> {
     super::detect::select_working("antigravity", agy_candidates(), None).await
+}
+
+/// Files where `agy` (and the Gemini tooling it shares `~/.gemini` with) keeps
+/// the signed-in Google account, most specific first.
+fn agy_account_files() -> Vec<PathBuf> {
+    let Some(gemini) = dirs::home_dir().map(|home| home.join(".gemini")) else {
+        return Vec::new();
+    };
+    let cli = gemini.join("antigravity-cli");
+    vec![
+        cli.join("antigravity-oauth-token"),
+        cli.join("antigravity-oauth-token.json"),
+        cli.join("google_accounts.json"),
+        gemini.join("google_accounts.json"),
+        gemini.join("oauth_creds.json"),
+    ]
+}
+
+/// The Google account `agy` signed in with. Read from its local files first;
+/// failing that, its stored access token is asked who it belongs to.
+async fn agy_account() -> Option<String> {
+    let mut access_token = None;
+    for path in agy_account_files() {
+        let Ok(text) = std::fs::read_to_string(&path) else {
+            continue;
+        };
+        let text = text.trim();
+        let value = serde_json::from_str::<Value>(text)
+            .ok()
+            .or_else(|| super::detect::jwt_payload(text));
+        let Some(value) = value else { continue };
+        if let Some(email) = find_email(&value) {
+            return Some(email);
+        }
+        if access_token.is_none() {
+            access_token = find_string(&value, &["access_token", "accessToken"]);
+        }
+    }
+    let token = access_token?;
+    let client = crate::net::remote_client()
+        .timeout(Duration::from_secs(5))
+        .build()
+        .ok()?;
+    let response = client
+        .get("https://openidconnect.googleapis.com/v1/userinfo")
+        .bearer_auth(token)
+        .send()
+        .await
+        .ok()?;
+    if !response.status().is_success() {
+        return None;
+    }
+    let body: Value = response.json().await.ok()?;
+    body["email"].as_str().map(str::to_string)
+}
+
+/// An email address anywhere in a credential file: an `email`/`active`/
+/// `account` field, or the `email` claim of an embedded ID token.
+fn find_email(value: &Value) -> Option<String> {
+    match value {
+        Value::Object(map) => {
+            for key in ["email", "active", "account", "user", "userEmail"] {
+                if let Some(email) = map
+                    .get(key)
+                    .and_then(Value::as_str)
+                    .filter(|v| looks_like_email(v))
+                {
+                    return Some(email.to_string());
+                }
+            }
+            for key in ["id_token", "idToken"] {
+                if let Some(email) = map
+                    .get(key)
+                    .and_then(Value::as_str)
+                    .and_then(super::detect::jwt_payload)
+                    .and_then(|claims| claims["email"].as_str().map(str::to_string))
+                {
+                    return Some(email);
+                }
+            }
+            map.values().find_map(find_email)
+        }
+        Value::Array(items) => items.iter().find_map(find_email),
+        _ => None,
+    }
+}
+
+fn find_string(value: &Value, keys: &[&str]) -> Option<String> {
+    match value {
+        Value::Object(map) => keys
+            .iter()
+            .find_map(|key| {
+                map.get(*key)
+                    .and_then(Value::as_str)
+                    .filter(|v| !v.is_empty())
+            })
+            .map(str::to_string)
+            .or_else(|| map.values().find_map(|v| find_string(v, keys))),
+        Value::Array(items) => items.iter().find_map(|v| find_string(v, keys)),
+        _ => None,
+    }
+}
+
+fn looks_like_email(text: &str) -> bool {
+    let text = text.trim();
+    text.len() < 255
+        && !text.contains(char::is_whitespace)
+        && text
+            .split_once('@')
+            .is_some_and(|(user, domain)| !user.is_empty() && domain.contains('.'))
 }
 
 async fn agy_model_list(bin: &Path) -> Result<Vec<ModelInfo>> {
@@ -314,6 +480,9 @@ async fn run_turn(ctx: &mut TurnCtx) -> Result<()> {
     let bin = find_agy().ok_or_else(|| {
         anyhow!("agy not found on PATH — install Antigravity CLI and sign in first")
     })?;
+    if let Some(problem) = snap_confinement_problem(&bin) {
+        return Err(anyhow!("{problem}"));
+    }
     let project = ctx.project.clone();
     let session_id = ctx.session_id.clone();
     let skills_dir = Antigravity.session_skills_dir();
@@ -892,6 +1061,22 @@ fn plan_card(parts: &[WirePart], assistant_id: &str) -> Option<WirePart> {
 
 #[cfg(test)]
 mod tests {
+
+    #[test]
+    fn agy_account_email_is_found_in_fields_and_id_tokens() {
+        use base64::Engine as _;
+        let gemini = serde_json::json!({"active": "ada@example.com", "old": []});
+        assert_eq!(find_email(&gemini).as_deref(), Some("ada@example.com"));
+        let claims = base64::engine::general_purpose::URL_SAFE_NO_PAD
+            .encode(br#"{"email":"grace@example.com"}"#);
+        let token = serde_json::json!({"token": {"id_token": format!("h.{claims}.s"), "access_token": "x"}});
+        assert_eq!(find_email(&token).as_deref(), Some("grace@example.com"));
+        assert!(
+            find_email(&serde_json::json!({"active": null, "account": "not an email"})).is_none()
+        );
+        assert_eq!(find_string(&token, &["access_token"]).as_deref(), Some("x"));
+    }
+
     #[test]
     fn native_step_usage_includes_reasoning_without_double_counting() {
         let fixture: serde_json::Value =
@@ -1283,6 +1468,31 @@ mod tests {
             "denied_actions": [{"display_name": "RunCommand"}]
         }))
         .is_none());
+    }
+
+    #[test]
+    fn snaps_only_reach_visible_folders_in_home() {
+        let home = Path::new("/home/me");
+        assert!(snap_can_reach(Path::new("/home/me/research/orx"), home));
+        assert!(!snap_can_reach(
+            Path::new("/home/me/.local/share/openresearch"),
+            home
+        ));
+        assert!(!snap_can_reach(Path::new("/tmp/orx"), home));
+        assert!(!snap_can_reach(Path::new("/home/other/orx"), home));
+    }
+
+    #[test]
+    fn snap_launches_are_recognized_before_and_after_resolution() {
+        assert!(is_snap_launch(Path::new("/snap/bin/agy")));
+        assert!(is_snap_launch(Path::new("/usr/bin/snap")));
+        assert!(!is_snap_launch(Path::new("/home/me/.local/bin/agy")));
+        let mut candidates = [
+            PathBuf::from("/snap/bin/agy"),
+            PathBuf::from("/home/me/.local/bin/agy"),
+        ];
+        candidates.sort_by_key(|bin| is_snap_launch(bin));
+        assert_eq!(candidates[0], Path::new("/home/me/.local/bin/agy"));
     }
 
     #[test]
