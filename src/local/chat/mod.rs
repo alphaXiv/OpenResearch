@@ -8730,6 +8730,47 @@ const PATH_GUARD: &str =
      export PATH=\"$ORX_BIN_DIR${PATH:+:$PATH}\"\n\
      fi\n";
 
+/// Vars saved in the dashboard's Environment tab *after* this session's
+/// harness spawned still reach its later tool calls: a running process can't
+/// gain env vars, but every zsh and non-interactive bash invocation sources
+/// one of these hook files, so each tool call re-reads `~/.openresearch/env`
+/// itself. Only complete `export KEY='v'` lines — the exact shape
+/// `config::write_synced_env_vars` writes — are honored, so a saved value
+/// with a newline can't wedge every later shell on a syntax error. The
+/// stored `'\''` and `\\` escapes are decoded the same way
+/// `config::list_synced_env` decodes them (quotes first, then backslashes),
+/// and unset-only, like [`prepare_env`], means a value the session really
+/// carries still wins over a synced one. Everything here is a shell builtin:
+/// a tool shell whose PATH can't find `env` or `grep` still applies the
+/// real-env-wins rule correctly.
+const SYNCED_ENV_HOOK: &str = r#"if [ -r "$HOME/.openresearch/env" ]; then
+  while IFS= read -r _ORX_ENV_LINE; do
+    case "$_ORX_ENV_LINE" in
+      export\ *\'*\')
+        _ORX_ENV_REST="${_ORX_ENV_LINE#export }"
+        _ORX_ENV_KEY="${_ORX_ENV_REST%%=*}"
+        case "$_ORX_ENV_KEY" in
+          ''|[0-9]*|*[!A-Za-z0-9_]*) ;;
+          *)
+            _ORX_ENV_QUOTED="${_ORX_ENV_REST#$_ORX_ENV_KEY=}"
+            case "$_ORX_ENV_QUOTED" in
+              \'*\')
+                _ORX_ENV_VAL="${_ORX_ENV_QUOTED#\'}"
+                _ORX_ENV_VAL="${_ORX_ENV_VAL%\'}"
+                _ORX_ENV_VAL="${_ORX_ENV_VAL//\'\\\'\'/\'}"
+                _ORX_ENV_VAL="${_ORX_ENV_VAL//\\\\/\\}"
+                eval "[ -n \"\${$_ORX_ENV_KEY+x}\" ]" || export "$_ORX_ENV_KEY=$_ORX_ENV_VAL"
+                ;;
+            esac
+            ;;
+        esac
+        ;;
+    esac
+  done < "$HOME/.openresearch/env"
+  unset _ORX_ENV_LINE _ORX_ENV_REST _ORX_ENV_KEY _ORX_ENV_QUOTED _ORX_ENV_VAL
+fi
+"#;
+
 /// Directory holding the running `orx`; None if relative (PATH would resolve it against the
 /// agent's cwd) or if it contains the PATH separator.
 fn orx_bin_dir() -> Option<PathBuf> {
@@ -8762,8 +8803,10 @@ fn zsh_startup_wrapper(name: &str) -> String {
 }
 
 fn zshenv_hook(original_zdotdir: &std::path::Path) -> String {
-    format!(
-        "_ORX_CHAT_SHIM_ZDOTDIR=$ZDOTDIR\n\
+    // SYNCED_ENV_HOOK first so the user's own .zshenv still overrides it.
+    SYNCED_ENV_HOOK.to_string()
+        + &format!(
+            "_ORX_CHAT_SHIM_ZDOTDIR=$ZDOTDIR\n\
          _ORX_CHAT_USER_ZDOTDIR={}\n\
          ZDOTDIR=$_ORX_CHAT_USER_ZDOTDIR\n\
          [[ -r \"$ZDOTDIR/.zshenv\" ]] && source \"$ZDOTDIR/.zshenv\"\n\
@@ -8776,8 +8819,9 @@ fn zshenv_hook(original_zdotdir: &std::path::Path) -> String {
          elif [[ -z \"${{ORX_CHAT_TARGET_FILE-}}\" ]]; then\n\
            unset ORX_CHAT_TARGET_FILE\n\
          fi\n",
-        shell_single_quote(original_zdotdir)
-    ) + PATH_GUARD
+            shell_single_quote(original_zdotdir)
+        )
+        + PATH_GUARD
 }
 
 fn bash_env_hook(original: Option<String>) -> String {
@@ -8791,8 +8835,10 @@ fn bash_env_hook(original: Option<String>) -> String {
             )
         })
         .unwrap_or_default();
-    format!(
-        "{source}\
+    // SYNCED_ENV_HOOK first so the user's own BASH_ENV still overrides it.
+    SYNCED_ENV_HOOK.to_string()
+        + &format!(
+            "{source}\
          export ORX_CHAT_TOOL_SCOPE=\"bash-$$\"\n\
          export ORX_CHAT_TOOL_COMMAND=\"${{BASH_EXECUTION_STRING-}}\"\n\
          if [[ -z \"${{ORX_CHAT_TARGET_FILE-}}\" && -r \"${{ORX_CHAT_TARGET_POINTER-}}\" ]]; then\n\
@@ -8800,7 +8846,8 @@ fn bash_env_hook(original: Option<String>) -> String {
          elif [[ -z \"${{ORX_CHAT_TARGET_FILE-}}\" ]]; then\n\
            unset ORX_CHAT_TARGET_FILE\n\
          fi\n"
-    ) + PATH_GUARD
+        )
+        + PATH_GUARD
 }
 
 fn child_env_value(key: &str) -> Option<std::ffi::OsString> {
@@ -8964,13 +9011,13 @@ mod session_env_tests {
 
     static ENV_LOCK: Mutex<()> = Mutex::new(());
 
-    struct EnvGuard {
+    pub(crate) struct EnvGuard {
         _lock: MutexGuard<'static, ()>,
         saved: Vec<(&'static str, Option<String>)>,
     }
 
     impl EnvGuard {
-        fn new(vars: &[&'static str]) -> Self {
+        pub(crate) fn new(vars: &[&'static str]) -> Self {
             let lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
             let saved = vars
                 .iter()
@@ -9099,6 +9146,61 @@ mod cap_tests {
         assert!(zshenv_hook(std::path::Path::new("/tmp")).contains("${ORX_CHAT_TARGET_FILE-}"));
         assert!(bash_env_hook(None).contains("${BASH_EXECUTION_STRING-}"));
         assert!(zshenv_hook(std::path::Path::new("/tmp")).contains("${ZSH_EXECUTION_STRING-}"));
+    }
+
+    /// Vars saved after the session spawned land in `~/.openresearch/env`, so
+    /// the hooks re-export them into each tool call — but only ones the child
+    /// doesn't already carry, matching `prepare_env`'s real-env-wins rule.
+    #[cfg(unix)]
+    #[test]
+    fn shell_hooks_pick_up_late_saved_env_without_shadowing_real_env() {
+        let root = std::env::temp_dir().join(format!("orx-env-hook-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&root).unwrap();
+        let _guard = super::session_env_tests::EnvGuard::new(&["HOME"]);
+        std::env::set_var("HOME", &root);
+        crate::config::write_synced_env_vars(&[
+            ("LATE_SAVED", "v1"),
+            ("WITH_QUOTE", "it's"),
+            ("WITH_SLASH", r"C:\data"),
+            ("WITH_DOLLAR", "$(echo pwned)"),
+            ("MULTILINE", "first\nsecond"),
+            ("ALREADY_SET", "file"),
+        ])
+        .unwrap();
+        let shim = root.join("bash_env");
+        std::fs::write(&shim, bash_env_hook(None)).unwrap();
+        // An empty PATH proves the whole hook is builtins: `env`/`grep` can't
+        // be found, yet the inherited value must still win — and the multiline
+        // record must not print a syntax error to stderr.
+        let no_tools = root.join("no-tools");
+        std::fs::create_dir_all(&no_tools).unwrap();
+
+        let output = std::process::Command::new("/bin/bash")
+            .arg("-c")
+            .arg("printf '%s|%s|%s|%s|%s' \"$LATE_SAVED\" \"$WITH_QUOTE\" \"$WITH_SLASH\" \"$ALREADY_SET\" \"$WITH_DOLLAR\"")
+            .env("BASH_ENV", &shim)
+            .env("PATH", &no_tools)
+            .env("ALREADY_SET", "real")
+            .env_remove(CHAT_TARGET_FILE_ENV)
+            .env_remove(CHAT_TARGET_POINTER_ENV)
+            .output()
+            .unwrap();
+
+        let _ = std::fs::remove_dir_all(root);
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert!(
+            output.stderr.is_empty(),
+            "hook printed an error: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert_eq!(
+            String::from_utf8_lossy(&output.stdout),
+            "v1|it's|C:\\data|real|$(echo pwned)"
+        );
     }
 
     #[cfg(unix)]
