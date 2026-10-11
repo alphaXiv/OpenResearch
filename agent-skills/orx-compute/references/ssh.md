@@ -1,7 +1,8 @@
 # SSH (`--backend ssh`)
 
-Use this backend when the user asks to run on their own server, or when SSH is
-the configured compute default. Authentication uses SSH config, keys and the
+Use this backend when the user asks to run on their own server, when SSH is
+the configured compute default, or when the playbook's compute routing lists
+it. Authentication uses SSH config, keys and the
 agent; `orx` never reads private keys.
 
 On Unix, `orx compute connect ssh --host lab` authenticates once for background

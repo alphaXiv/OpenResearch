@@ -69,6 +69,14 @@ const COMPUTE_RESOURCES: &[AgentSkillResource] = &[
         content: include_str!("../../agent-skills/orx-compute/references/modal.md"),
     },
     AgentSkillResource {
+        path: "references/colab.md",
+        content: include_str!("../../agent-skills/orx-compute/references/colab.md"),
+    },
+    AgentSkillResource {
+        path: "references/gcp.md",
+        content: include_str!("../../agent-skills/orx-compute/references/gcp.md"),
+    },
+    AgentSkillResource {
         path: "references/k8s.md",
         content: include_str!("../../agent-skills/orx-compute/references/k8s.md"),
     },
@@ -159,7 +167,7 @@ const FIGURES_RESOURCES: &[AgentSkillResource] = &[
 // works blind). Keep each ≤400 chars — Codex's ambient budget is ~8k across
 // the whole set.
 
-const D_COMPUTE: &str = "Launch and monitor experiment runs and route guidance for hf, modal, k8s/Kubernetes, ssh, slurm, ray, OpenResearch, Tinker, and local backends. Covers the fixed run contract, sizing, cancellation, and wait versus wake. Use before any launch or relaunch, when authoring a k8s manifest, choosing or switching compute, or handling an OOM, stall, or timeout; then read one backend reference.";
+const D_COMPUTE: &str = "Launch and monitor experiment runs and route guidance for hf, modal, colab, k8s, ssh, slurm, ray, OpenResearch, Tinker, and local backends. Covers the run contract, GPU and RAM sizing, cancellation, and wait versus wake. Use before any launch or relaunch, when authoring a k8s manifest, choosing or switching compute, or handling an OOM, stall, or timeout; then read one backend reference.";
 const D_EXPERIMENT_TREE: &str = "Plan and drive the experiment tree: first-launch setup, fixed run contract, frozen nodes, stacked-bush tree shape, branch/launch/wait/promote, repair limits, notes, and turn summaries. Use before creating or changing experiments, launching a first run, deciding what to try next, handling a completed run, or reporting experiment progress.";
 
 const S_COMPUTE: AgentSkill = AgentSkill {
@@ -182,7 +190,7 @@ const S_GIT: AgentSkill = AgentSkill {
 };
 const S_AGENT_DELEGATION: AgentSkill = AgentSkill {
     name: "orx-agent-delegation",
-    description: "Delegate independent work to helper agent sessions with `orx agent spawn`: task selection, self-contained briefs, branch ownership, compute authorization, wakeups, and nesting or concurrency constraints. Use before spawning a helper or interpreting its result; do not delegate the literature retrieval loop.",
+    description: "Delegate independent work to helper agent sessions with `orx agent spawn`: task selection, briefs, branch ownership, compute authorization, wakeups, concurrency, and cross-harness review on other vendors' agents. Use before spawning a helper, interpreting its result, or when cross-harness review is on; do not delegate the literature retrieval loop.",
     content: AGENT_DELEGATION,
     resources: &[],
 };

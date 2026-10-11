@@ -51,6 +51,36 @@ export const getLocalMachineQuery = () => queryOptions({
   staleTime: 300_000,
 });
 
+export const getColabSettingsQuery = () => queryOptions({
+  queryKey: workspaceKey("getColabSettings"),
+  queryFn: ({ signal }) => api.getColabSettings(signal),
+  staleTime: 30_000,
+});
+
+export const getGcpSettingsQuery = () => queryOptions({
+  queryKey: workspaceKey("getGcpSettings"),
+  queryFn: ({ signal }) => api.getGcpSettings(signal),
+  staleTime: 30_000,
+});
+
+export const getComputeRoutingSettingsQuery = () => queryOptions({
+  queryKey: workspaceKey("getComputeRoutingSettings"),
+  queryFn: ({ signal }) => api.getComputeRoutingSettings(signal),
+  staleTime: 300_000,
+});
+
+export const getComputePricesQuery = () => queryOptions({
+  queryKey: workspaceKey("getComputePrices"),
+  queryFn: ({ signal }) => api.getComputePrices(signal),
+  staleTime: 300_000,
+});
+
+export const getCrossHarnessSettingsQuery = () => queryOptions({
+  queryKey: workspaceKey("getCrossHarnessSettings"),
+  queryFn: ({ signal }) => api.getCrossHarnessSettings(signal),
+  staleTime: 300_000,
+});
+
 export const getOpenResearchSettingsQuery = () => queryOptions({
   queryKey: workspaceKey("getOpenResearchSettings"),
   queryFn: ({ signal }) => api.getOpenResearchSettings(signal),

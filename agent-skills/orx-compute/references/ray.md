@@ -1,8 +1,8 @@
 # Ray Jobs (`--backend ray`)
 
 Use this backend only when the user explicitly requests a Ray cluster or it is
-the configured default. It submits through the Ray Jobs/Dashboard API and uses
-the cluster's runtime environment.
+the configured default (or the playbook's compute routing lists it). It submits
+through the Ray Jobs/Dashboard API and uses the cluster's runtime environment.
 
 ```sh
 orx exp run <expId> --backend ray

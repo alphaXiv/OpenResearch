@@ -224,6 +224,14 @@ export interface UiState {
   tourCompleted: boolean;
   preferredAgent: AgentSelection | null;
   preferredAutonomy: Autonomy | null;
+  harnessFailover: HarnessFailover;
+}
+
+/** Continue a turn on another harness when its own runs out of usage. An empty
+ * `order` tries every other chat harness in registry order. */
+export interface HarnessFailover {
+  enabled: boolean;
+  order: HarnessId[];
 }
 
 /** How much of the research the agent owns before checking in. */
@@ -245,6 +253,7 @@ export const updateUiState = (body: {
   tourCompleted?: boolean;
   preferredAgent?: AgentSelection;
   preferredAutonomy?: Autonomy;
+  harnessFailover?: HarnessFailover;
 }) => post<UiState>("/api/settings/ui-state", body);
 
 export const completeOnboarding = (selection: OnboardingSelection, profile: Profile) =>
@@ -894,6 +903,74 @@ export const restartApp = () =>
 export const setAutoUpdate = (enabled: boolean) =>
   post<UpdateStatus>("/api/update/auto", { enabled });
 
+export interface ComputeRoutingSettings {
+  enabled: boolean;
+  /** Backends the user kept out of per-run routing. */
+  excluded: ComputeTargetId[];
+}
+
+export const getComputeRoutingSettings = (signal?: AbortSignal) =>
+  get<ComputeRoutingSettings>("/api/settings/compute-routing", signal);
+
+export interface ProviderBalance {
+  amount: number;
+  /** `CU` (Colab compute units) or `USD`. */
+  unit: string;
+  usd: number | null;
+  burningPerHour: number | null;
+}
+
+export interface ProviderSpend {
+  meteredUsd: number | null;
+  billedUsd: number | null;
+  creditsUsd: number | null;
+}
+
+export interface ProviderOffer {
+  flavor: string;
+  gpu: string | null;
+  gpuCount: number;
+  vramGb: number | null;
+  usdPerHour: number | null;
+  unitsPerHour: number | null;
+  runwayHours: number | null;
+  available: boolean | null;
+  estimated: boolean;
+  host: string | null;
+}
+
+export interface ProviderPrices {
+  id: ComputeTargetId;
+  configured: boolean;
+  billing: "credits" | "usage" | "own" | "tokens";
+  balance: ProviderBalance | null;
+  spend: ProviderSpend | null;
+  offers: ProviderOffer[];
+  note: string | null;
+  error: string | null;
+}
+
+export const getComputePrices = (signal?: AbortSignal, fresh = false) =>
+  get<{ providers: ProviderPrices[] }>(
+    fresh ? "/api/settings/compute/prices?fresh=true" : "/api/settings/compute/prices",
+    signal,
+  );
+
+export const setComputeRoutingSettings = (update: { enabled?: boolean; excluded?: ComputeTargetId[] }) =>
+  post<ComputeRoutingSettings>("/api/settings/compute-routing", update);
+
+export interface CrossHarnessSettings {
+  enabled: boolean;
+  /** Harnesses the user turned off for review. */
+  excluded: HarnessId[];
+}
+
+export const getCrossHarnessSettings = (signal?: AbortSignal) =>
+  get<CrossHarnessSettings>("/api/settings/cross-harness", signal);
+
+export const setCrossHarnessSettings = (update: { enabled?: boolean; excluded?: HarnessId[] }) =>
+  post<CrossHarnessSettings>("/api/settings/cross-harness", update);
+
 export const installCli = (force = false) =>
   post<InstalledCli>("/api/update/install-cli", { force });
 
@@ -1185,13 +1262,15 @@ export const rayPreflight = (address?: string) =>
 export type ComputeTargetId =
   | "local"
   | "tinker"
+  | "colab"
   | "hf"
   | "modal"
   | "k8s"
   | "ssh"
   | "slurm"
   | "ray"
-  | "openresearch";
+  | "openresearch"
+  | "gcp";
 
 /** Cheap fs/env probe only — "worth trying", not "healthy". Deep health lives
  * in each backend's own settings endpoint, fetched when its setup surface opens. */
@@ -1235,6 +1314,7 @@ export const setComputeDefault = (body: {
 export interface LocalGpu {
   name: string;
   memMib: number | null;
+  memFreeMib: number | null;
 }
 
 /** What `--backend local` runs on: this machine's detected hardware. */
@@ -1246,10 +1326,145 @@ export interface LocalMachine {
   chip: string | null;
   cpuCount: number;
   memBytes: number | null;
+  /** RAM a new run can use right now. */
+  memAvailableBytes: number | null;
+  swapTotalBytes: number | null;
+  swapFreeBytes: number | null;
+  diskFreeBytes: number | null;
+  loadAverage: number | null;
+  /** Local launches are refused below this much free RAM. */
+  launchFloorBytes: number | null;
   gpus: LocalGpu[];
 }
 
 export const getLocalMachine = (signal?: AbortSignal) => get<LocalMachine>("/api/settings/local", signal);
+
+export interface ColabAccelerator {
+  id: string;
+  kind: "cpu" | "gpu" | "tpu";
+  cliValue: string;
+  label: string;
+  memoryGb: number;
+  highMem: boolean;
+}
+
+/** Local probes of the Colab CLI; never starts its sign-in. */
+export interface ColabSettings {
+  supportedOs: boolean;
+  cliPath: string | null;
+  cliVersion: string | null;
+  signedIn: boolean;
+  ready: boolean;
+  error: string | null;
+  defaultFlavor: string;
+  accelerators: ColabAccelerator[];
+  /** The signed-in Google account; `null` until the CLI has signed in. */
+  account: ColabAccount | null;
+  /** Runtimes assigned to the account right now; `null` when unknown. */
+  runtimes: ColabRuntime[] | null;
+}
+
+export interface ColabRuntime {
+  endpoint: string;
+  accelerator: string | null;
+  highMem: boolean;
+  name: string | null;
+  /** The OpenResearch run that owns it, when it is one of ours. */
+  runId: string | null;
+  runStatus: string | null;
+  /** Its run ended; the background sweep releases it. */
+  orphaned: boolean;
+}
+
+export interface ColabRate {
+  id: string;
+  cuPerHour: number;
+  /** Measured on this account; otherwise a third-party estimate. */
+  measured: boolean;
+}
+
+/** Best-effort: any field Colab did not answer is `null`, with `error` saying why. */
+export interface ColabAccount {
+  email: string | null;
+  tier: "free" | "pro" | "pro_plus" | null;
+  balance: number | null;
+  rateHourly: number | null;
+  activeRuntimes: number | null;
+  /** Accelerator ids the plan can assign; `null` when Colab did not say. */
+  eligible: string[] | null;
+  rates: ColabRate[];
+  error: string | null;
+}
+
+export interface GcpInstance {
+  name: string;
+  zone: string;
+  status: string;
+  machineType: string;
+  externalIp: string | null;
+  runId: string | null;
+  gpu: string | null;
+  gpuCount: number;
+}
+
+export interface GcpSettings {
+  settings: {
+    project: string | null;
+    zone: string | null;
+    spot: boolean;
+    imageFamily: string | null;
+    imageProject: string | null;
+    diskGb: number | null;
+    creditUsd: number | null;
+    creditAsOf: number | null;
+    billingExportTable: string | null;
+  };
+  preflight: {
+    cliPath: string | null;
+    account: string | null;
+    project: string | null;
+    zone: string;
+    computeReady: boolean;
+    error: string | null;
+  };
+  ready: boolean;
+  /** VMs orx created that still exist; `null` when they could not be listed. */
+  instances: GcpInstance[] | null;
+  billing: { id: string; name: string | null; open: boolean | null; enabled: boolean } | null;
+  /** What is left to spend; `null` until the user enters the credit. */
+  balance: {
+    availableUsd: number;
+    creditUsd: number;
+    asOf: number;
+    spentUsd: number;
+    source: "export" | "estimate";
+    error: string | null;
+  } | null;
+  gpus: { id: string; label: string; vramGb: number; usdPerHour: number }[];
+}
+
+export const getGcpSettings = (signal?: AbortSignal) => get<GcpSettings>("/api/settings/gcp", signal);
+
+export type GcpSettingsUpdate = {
+  project?: string;
+  zone?: string;
+  spot?: boolean;
+  creditUsd?: number;
+  clearCredit?: boolean;
+  billingExportTable?: string;
+};
+
+export const saveGcpSettings = (update: GcpSettingsUpdate) =>
+  post<GcpSettings>("/api/settings/gcp", update);
+
+export const stopGcpInstance = (zone: string, name: string) =>
+  post<{ ok: true }>("/api/settings/gcp/instances/stop", { zone, name });
+
+export const getColabSettings = (signal?: AbortSignal, fresh = false) =>
+  get<ColabSettings>(fresh ? "/api/settings/colab?fresh=true" : "/api/settings/colab", signal);
+
+export const stopColabRuntime = (endpoint: string) =>
+  post<{ ok: true }>("/api/settings/colab/runtimes/stop", { endpoint });
 
 export interface OpenResearchSettings {
   loggedIn: boolean;
@@ -1712,6 +1927,8 @@ export interface Harness {
    * arrives and a plain re-read swaps in the real list. */
   catalogPending?: boolean;
   models: HarnessModel[];
+  /** The strongest model in `models`; new chats use it unless one is picked. */
+  recommendedModel?: string;
   options: HarnessOptions;
 }
 

@@ -1,6 +1,6 @@
 ---
 name: orx-agent-delegation
-description: "Delegate independent work to helper agent sessions with `orx agent spawn`: task selection, self-contained briefs, branch ownership, compute authorization, wakeups, and nesting or concurrency constraints. Use before spawning a helper or interpreting its result; do not delegate the literature retrieval loop."
+description: "Delegate independent work to helper agent sessions with `orx agent spawn`: task selection, briefs, branch ownership, compute authorization, wakeups, concurrency, and cross-harness review on other vendors' agents. Use before spawning a helper, interpreting its result, or when cross-harness review is on; do not delegate the literature retrieval loop."
 ---
 
 # Delegate work to another agent
@@ -53,3 +53,41 @@ allowed compute, expected output, and a concrete definition of done. Use
 A Claude helper's closing reply waits for its background commands to exit (or
 about 30 quiet minutes), so do not ask it to leave servers or watchers running
 unless the task needs them.
+
+## Cross-harness review
+
+When the session playbook says cross-harness review is on, the user wants the
+research not to rest on one vendor's agent. Each agent family has its own
+habits in what it proposes, how generously it reads results, and how it
+writes, so route the steps where those habits can bias conclusions through a
+helper on a different vendor's harness:
+
+```sh
+orx agent harnesses                     # installed harnesses and their model vendors
+orx agent spawn --harness codex --title "Independent check: <claim>" --stdin
+```
+
+- **Ideas**: before committing to the next round of experiments, ask one helper
+  on another vendor to propose its own candidates from the same evidence, then
+  pick from the union and say where each idea came from.
+- **Results**: before a claim enters a report or paper, have a helper on another
+  vendor re-derive it from `orx logs` and the run outputs without seeing your
+  interpretation. Record agreement, or keep the claim provisional and state the
+  disagreement.
+- **Writing**: have a helper on another vendor review a paper or report draft
+  for overclaiming, missing baselines, and statistical errors.
+
+Rules:
+
+- Use only harnesses the user left on for review: the `REVIEW` column of
+  `orx agent harnesses` and the playbook's list. Prefer one whose vendor differs
+  from this session's; OpenCode and Cursor count by the model they run. If no
+  allowed harness from another vendor is installed, say so once and continue
+  on this session's harness.
+- Give the helper the evidence and the question, not your conclusion. Forbid
+  experiment launches unless the user approved them.
+- The wake-up names the helper's harness and model. Keep that attribution in
+  experiment notes, reports, and the paper's methods or acknowledgements, for
+  example "Result independently re-derived by a Codex (OpenAI) agent."
+- Do not split the experiment loop itself across harnesses, and never delegate
+  the literature retrieval loop.

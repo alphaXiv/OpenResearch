@@ -1798,6 +1798,11 @@ function computeToolActivity(part: ChatPart): ToolActivity {
       return { kind: "agent", label: subagentLine(normalizedInput) };
     case "error":
       return { kind: "command", label: m.chat_panel_tool_failed() };
+    case "harnessfailover": {
+      const from = inputString(normalizedInput, "fromName", "from");
+      const to = inputString(normalizedInput, "toName", "to");
+      return { kind: "agent", label: from && to ? m.activity_switched_harness({ from: ltr(from), to: ltr(to) }) : part.state?.title ?? tool };
+    }
     case "importedchat":
       return { kind: "project", label: m.activity_imported_chat() };
     case "contextcompaction":

@@ -19,6 +19,11 @@ import {
   getSshSettingsQuery,
   getSlurmSettingsQuery,
   getRaySettingsQuery,
+  getColabSettingsQuery,
+  getGcpSettingsQuery,
+  getCrossHarnessSettingsQuery,
+  getComputeRoutingSettingsQuery,
+  getComputePricesQuery,
   getOpenResearchSettingsQuery,
   getLocalMachineQuery,
   getComputeSettingsQuery,
@@ -32,10 +37,12 @@ import {
 } from "../queries/settings";
 
 import { getOverleafSettingsQuery } from "../queries/files";
-import { listRunsQuery } from "../queries/projects";
+import { getUiStateQuery, listRunsQuery } from "../queries/projects";
 import {
+  ArrowDown,
   ArrowLeft,
   ArrowRight,
+  ArrowUp,
   ChevronDown,
   Cpu,
   ExternalLink,
@@ -45,6 +52,7 @@ import {
   Plus,
   RefreshCw,
   Settings,
+  Square,
   SquareTerminal,
   Sun,
   Trash2,
@@ -90,12 +98,24 @@ import {
   type ProjectGitStatus,
   type TelemetrySettings,
   type Harness,
+  type HarnessFailover,
   type HarnessSetupCommands,
   type HarnessId,
+  harnessModelLabel,
   type HfSettings,
   type TinkerSettings,
   type K8sSettings,
   type LocalMachine,
+  type ColabSettings,
+  type ColabAccount,
+  getColabSettings,
+  getGcpSettings,
+  saveGcpSettings,
+  stopGcpInstance,
+  type GcpSettings,
+  type GcpSettingsUpdate,
+  getComputePrices,
+  stopColabRuntime,
   type ModalSettings,
   type RayPreflight,
   type RaySettings,
@@ -106,8 +126,11 @@ import {
   type SshExecutionPreflight,
   testSshExecution,
   applyUpdate,
+  updateUiState,
   installCli,
   setAutoUpdate as setAutoUpdateApi,
+  setCrossHarnessSettings,
+  setComputeRoutingSettings,
   type InstallChannel,
   type InstalledCli,
 } from "../api";
@@ -414,6 +437,7 @@ function HarnessesTab({ remote }: { remote: boolean }) {
     (a, b) => Number(b.agentReady) - Number(a.agentReady),
   );
   const h = orderedHarnesses.find((x) => x.id === active) ?? orderedHarnesses[0];
+  const recommended = h?.models.find((model) => model.id === h.recommendedModel);
 
   return (
     <>
@@ -502,6 +526,14 @@ function HarnessesTab({ remote }: { remote: boolean }) {
             <span className="v">
               {h.catalogPending
                 ? m.onboarding_checking()
+                : recommended && h.models.length > 1
+                ? (
+                  <Tooltip content={m.settings_models_recommended_hint()}>
+                    <span>{m.settings_models_recommended({ model: harnessModelLabel(recommended), count: fmtNumber(h.models.length - 1) })}</span>
+                  </Tooltip>
+                )
+                : recommended
+                ? harnessModelLabel(recommended)
                 : h.models.length > 0
                 ? m.settings_models_available({ count: fmtNumber(h.models.length) })
                 : h.agentReady ? m.model_picker_default_model() : m.settings_none()}
@@ -524,7 +556,716 @@ function HarnessesTab({ remote }: { remote: boolean }) {
           {h.id === "opencode" && <LocalModelSetup installed={h.installed} />}
         </div>
       )}
+      {harnesses && <HarnessFailoverCard harnesses={harnesses} />}
+      <CrossHarnessCard harnesses={harnesses} />
     </>
+  );
+}
+
+/** The model vendor behind a harness; `null` when it follows the chosen model. */
+function harnessVendor(id: HarnessId): string | null {
+  switch (id) {
+    case "claude-code":
+      return "Anthropic";
+    case "codex":
+      return "OpenAI";
+    case "antigravity":
+      return "Google";
+    default:
+      return null;
+  }
+}
+
+function CrossHarnessCard({ harnesses }: { harnesses: Harness[] | null }) {
+  const options = getCrossHarnessSettingsQuery();
+  const query = useQuery(options);
+  const mutation = useMutation({ mutationFn: setCrossHarnessSettings });
+  const [error, setError] = useState<string | null>(null);
+  const enabled = query.data?.enabled ?? false;
+  const excluded = query.data?.excluded ?? [];
+  const readyVendors = [
+    ...new Set(
+      (harnesses ?? [])
+        .filter((harness) => harness.agentReady && !excluded.includes(harness.id))
+        .map((harness) => harnessVendor(harness.id))
+        .filter((vendor): vendor is string => vendor !== null),
+    ),
+  ];
+
+  async function save(update: { enabled?: boolean; excluded?: HarnessId[] }) {
+    setError(null);
+    try {
+      const next = await mutation.mutateAsync(update);
+      setScopedQueryData(options.queryKey, () => next);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : String(err));
+    }
+  }
+
+  return (
+    <div className={cn(SETTINGS_CARD_CLASS_NAME, "mt-4")}>
+      <div className="flex items-center justify-between gap-6">
+        <div>
+          <div className="text-base font-medium">{m.settings_cross_harness_title()}</div>
+          <p className="mt-[3px] mb-0 text-sm leading-relaxed text-text">{m.settings_cross_harness_description()}</p>
+        </div>
+        <Switch
+          type="button"
+          checked={enabled}
+          aria-label={m.settings_cross_harness_title()}
+          disabled={!query.data || mutation.isPending}
+          onClick={() => void save({ enabled: !enabled })}
+        />
+      </div>
+      {harnesses && (
+        <>
+          <ul className="mt-3 mb-0 flex flex-col gap-2 p-0 list-none">
+            {harnesses.map((harness) => {
+              const status = harnessStatus(harness);
+              return (
+                <li key={harness.id} className="flex items-center gap-2.5 text-sm">
+                  <HarnessLogo harness={harness.id} />
+                  <span className="font-medium">{harness.name}</span>
+                  <span className="text-subtext">{harnessVendor(harness.id) ?? m.settings_cross_harness_vendor_varies()}</span>
+                  <span className="flex-1" />
+                  <Badge variant={status.variant}>{status.label}</Badge>
+                  <Switch
+                    type="button"
+                    checked={!excluded.includes(harness.id)}
+                    aria-label={m.settings_cross_harness_use({ harness: harness.name })}
+                    disabled={!query.data || !enabled || mutation.isPending}
+                    onClick={() =>
+                      void save({
+                        excluded: excluded.includes(harness.id)
+                          ? excluded.filter((id) => id !== harness.id)
+                          : [...excluded, harness.id],
+                      })
+                    }
+                  />
+                </li>
+              );
+            })}
+          </ul>
+          <p className="mt-3 mb-0 text-sm text-subtext">
+            {readyVendors.length >= 2
+              ? m.settings_cross_harness_vendors_ready({ vendors: readyVendors.join(", ") })
+              : m.settings_cross_harness_needs_two()}
+          </p>
+        </>
+      )}
+      {error && <div className="error">{error}</div>}
+    </div>
+  );
+}
+
+/** Lets agents pick the backend per run among the providers left on. */
+function ComputeRoutingCard({ targets }: { targets: ComputeTargetSummary[] }) {
+  const options = getComputeRoutingSettingsQuery();
+  const query = useQuery(options);
+  const mutation = useMutation({ mutationFn: setComputeRoutingSettings });
+  const [error, setError] = useState<string | null>(null);
+  const enabled = query.data?.enabled ?? false;
+  const excluded = query.data?.excluded ?? [];
+  const usable = targets.filter((target) => !excluded.includes(target.id));
+
+  async function save(update: { enabled?: boolean; excluded?: ComputeTargetId[] }) {
+    setError(null);
+    try {
+      const next = await mutation.mutateAsync(update);
+      setScopedQueryData(options.queryKey, () => next);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : String(err));
+    }
+  }
+
+  return (
+    <div className={cn(SETTINGS_CARD_CLASS_NAME, "mb-8")}>
+      <div className="flex items-center justify-between gap-6">
+        <div>
+          <div className="text-base font-medium">{m.settings_compute_routing_title()}</div>
+          <p className="mt-[3px] mb-0 text-sm leading-relaxed text-text">{m.settings_compute_routing_description()}</p>
+        </div>
+        <Switch
+          type="button"
+          checked={enabled}
+          aria-label={m.settings_compute_routing_title()}
+          disabled={!query.data || mutation.isPending}
+          onClick={() => void save({ enabled: !enabled })}
+        />
+      </div>
+      {targets.length > 0 && (
+        <ul className="mt-3 mb-0 flex flex-col gap-2 p-0 list-none">
+          {targets.map((target) => (
+            <li key={target.id} className="flex items-center gap-2.5 text-sm">
+              <BackendLogo kind={TARGET_KIND[target.id]} size={18} />
+              <span className="font-medium">{TARGET_LABELS[target.id]()}</span>
+              <span className="min-w-0 flex-1 truncate text-subtext">{target.summary}</span>
+              <Switch
+                type="button"
+                checked={!excluded.includes(target.id)}
+                aria-label={m.settings_compute_routing_use({ backend: TARGET_LABELS[target.id]() })}
+                disabled={!query.data || !enabled || mutation.isPending}
+                onClick={() =>
+                  void save({
+                    excluded: excluded.includes(target.id)
+                      ? excluded.filter((id) => id !== target.id)
+                      : [...excluded, target.id],
+                  })
+                }
+              />
+            </li>
+          ))}
+        </ul>
+      )}
+      {enabled && usable.length < 2 && <p className="mt-3 mb-0 text-sm text-subtext">{m.settings_compute_routing_needs_two()}</p>}
+      {error && <div className="error">{error}</div>}
+    </div>
+  );
+}
+
+const fmtUsd = (value: number) =>
+  value.toLocaleString(undefined, { style: "currency", currency: "USD", minimumFractionDigits: 2, maximumFractionDigits: 2 });
+
+/** How many of the cheapest GPU offers show before "Show all". */
+const PRICE_ROWS = 8;
+
+/** Remaining credit and GPU prices on every connected provider: the same
+ * numbers agents read with `orx compute prices` before choosing a backend. */
+function ProviderPricesCard() {
+  const options = getComputePricesQuery();
+  const query = useQuery(options);
+  const [refreshing, setRefreshing] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const [showAll, setShowAll] = useState(false);
+  const providers = (query.data?.providers ?? []).filter((provider) => provider.configured);
+  const paid = providers.filter((provider) => provider.billing === "credits" || provider.billing === "usage");
+  const own = providers.filter((provider) => provider.billing === "own");
+  const offers = paid
+    .flatMap((provider) =>
+      provider.offers
+        .filter((offer) => offer.gpu && offer.usdPerHour != null)
+        .map((offer) => ({ provider: provider.id, offer })),
+    )
+    .sort((a, b) => (a.offer.usdPerHour ?? 0) - (b.offer.usdPerHour ?? 0));
+  const shown = showAll ? offers : offers.slice(0, PRICE_ROWS);
+  const anyRunway = offers.some(({ offer }) => offer.runwayHours != null);
+
+  async function refresh() {
+    if (refreshing) return;
+    setRefreshing(true);
+    setError(null);
+    try {
+      queryClient.setQueryData(options.queryKey, await getComputePrices(undefined, true));
+    } catch (err) {
+      setError(err instanceof Error ? err.message : String(err));
+    } finally {
+      setRefreshing(false);
+    }
+  }
+
+  return (
+    <div className={cn(SETTINGS_CARD_CLASS_NAME, "provider-prices mb-8")}>
+      <div className="flex items-start justify-between gap-6">
+        <div>
+          <div className="text-base font-medium">{m.settings_prices_title()}</div>
+          <p className="mt-[3px] mb-0 text-sm leading-relaxed text-text">{m.settings_prices_description()}</p>
+        </div>
+        <Button size="small" onClick={() => void refresh()} disabled={query.isPending || refreshing}>
+          <RefreshCw size={12} className={refreshing ? "animate-[spin_0.9s_linear_infinite]" : ""} /> {m.settings_page_refresh()}
+        </Button>
+      </div>
+      {query.isPending ? (
+        <LoadingRow>
+          <Spinner /> {m.common_checking()}
+        </LoadingRow>
+      ) : (
+        <>
+          {paid.length > 0 && (
+            <div className="mt-4 grid grid-cols-1 gap-3 sm:grid-cols-2 lg:grid-cols-3">
+              {paid.map((provider) => (
+                <div key={provider.id} className="rounded-lg border border-border bg-surface px-4 py-3">
+                  <div className="flex items-center gap-2 text-sm text-subtext">
+                    <BackendLogo kind={TARGET_KIND[provider.id]} size={16} />
+                    {TARGET_LABELS[provider.id]()}
+                  </div>
+                  <div className="mt-1 text-xl font-semibold tabular-nums text-text">
+                    {provider.balance
+                      ? provider.balance.unit === "USD"
+                        ? m.settings_prices_available({ amount: fmtUsd(provider.balance.amount) })
+                        : `${fmtUnits(provider.balance.amount)} ${provider.balance.unit}`
+                      : provider.spend?.meteredUsd != null
+                        ? m.settings_prices_used_month({ amount: fmtUsd(provider.spend.meteredUsd) })
+                        : provider.billing === "credits"
+                          ? m.settings_prices_balance_unknown()
+                          : m.settings_prices_pay_as_you_go()}
+                  </div>
+                  {provider.balance?.usd != null && provider.balance.unit !== "USD" && (
+                    <div className="mt-0.5 text-sm text-subtext tabular-nums">≈ {fmtUsd(provider.balance.usd)}</div>
+                  )}
+                  {provider.spend && (
+                    <div className="mt-0.5 text-sm text-subtext tabular-nums">
+                      {provider.spend.billedUsd != null && m.settings_prices_billed({ amount: fmtUsd(provider.spend.billedUsd) })}
+                      {provider.spend.creditsUsd != null && provider.spend.creditsUsd > 0 && (
+                        <> · {m.settings_prices_credits_applied({ amount: fmtUsd(provider.spend.creditsUsd) })}</>
+                      )}
+                    </div>
+                  )}
+                  {provider.error ? (
+                    <div className="mt-1 text-sm text-subtext">{provider.error}</div>
+                  ) : provider.note && (
+                    <div className="mt-1 text-sm leading-snug text-subtext">{provider.note}</div>
+                  )}
+                </div>
+              ))}
+            </div>
+          )}
+          {offers.length > 0 ? (
+            <div className="mt-4 overflow-x-auto">
+              <table className="provider-offers w-full border-collapse text-sm">
+                <thead>
+                  <tr className="text-subtext [&_th]:border-b [&_th]:border-border [&_th]:pb-1.5 [&_th]:font-medium">
+                    <th className="text-start">{m.settings_prices_col_gpu()}</th>
+                    <th className="text-start">{m.settings_prices_col_provider()}</th>
+                    <th className="text-end">{m.settings_colab_col_memory()}</th>
+                    <th className="text-end">{m.settings_prices_col_price()}</th>
+                    {anyRunway && <th className="text-end">{m.settings_colab_col_hours()}</th>}
+                    <th className="text-end">{m.settings_prices_col_flavor()}</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {shown.map(({ provider, offer }) => (
+                    <tr
+                      key={`${provider}:${offer.flavor}`}
+                      className={cn("[&_td]:border-b [&_td]:border-border [&_td]:py-1.5", offer.available === false && "text-subtext")}
+                    >
+                      <td className="font-medium">
+                        {offer.gpu}
+                        {offer.gpuCount > 1 && <span className="ms-1 text-subtext">×{offer.gpuCount}</span>}
+                      </td>
+                      <td>
+                        <span className="inline-flex items-center gap-1.5">
+                          <BackendLogo kind={TARGET_KIND[provider]} size={14} />
+                          {TARGET_LABELS[provider]()}
+                          {offer.host && <span className="text-subtext">· {offer.host}</span>}
+                        </span>
+                      </td>
+                      <td className="text-end tabular-nums">
+                        {offer.vramGb != null ? m.settings_colab_memory_gb({ gb: fmtNumber(offer.vramGb) }) : "—"}
+                      </td>
+                      <td className="text-end tabular-nums" title={offer.estimated ? m.settings_prices_estimated_note() : undefined}>
+                        {offer.estimated ? "≈ " : ""}
+                        {m.settings_prices_per_hour({ price: fmtUsd(offer.usdPerHour ?? 0) })}
+                        {offer.unitsPerHour != null && (
+                          <span className="ms-1 text-subtext">({fmtUnits(offer.unitsPerHour)} CU)</span>
+                        )}
+                      </td>
+                      {anyRunway && (
+                        <td className="text-end tabular-nums">
+                          {offer.available === false
+                            ? m.settings_prices_not_on_plan()
+                            : offer.runwayHours != null
+                              ? m.settings_colab_hours_value({ hours: offer.runwayHours.toLocaleString(undefined, { maximumFractionDigits: 1 }) })
+                              : "—"}
+                        </td>
+                      )}
+                      <td className="text-end"><code>{offer.flavor}</code></td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+              <div className="mt-2 flex flex-wrap items-center gap-3">
+                <p className="m-0 flex-1 text-sm text-subtext">{m.settings_prices_estimated_note()}</p>
+                {offers.length > PRICE_ROWS && (
+                  <Button size="small" variant="ghost" onClick={() => setShowAll(!showAll)}>
+                    {showAll ? m.settings_prices_show_less() : m.settings_prices_show_all({ count: fmtNumber(offers.length) })}
+                  </Button>
+                )}
+              </div>
+            </div>
+          ) : (
+            <p className="mt-3 mb-0 text-sm text-subtext">{m.settings_prices_none()}</p>
+          )}
+          {own.length > 0 && (
+            <p className="mt-3 mb-0 text-sm text-subtext">
+              {m.settings_prices_own_hardware({ backends: own.map((provider) => TARGET_LABELS[provider.id]()).join(", ") })}
+            </p>
+          )}
+        </>
+      )}
+      {error && <div className="error">{error}</div>}
+    </div>
+  );
+}
+
+/** Google Cloud: gcloud sign-in, project and zone, Spot VMs, the GPUs a run
+ * can ask for, and the VMs orx created that still exist. */
+function GcpSection() {
+  const options = getGcpSettingsQuery();
+  const query = useQuery(options);
+  const data: GcpSettings | null = query.data ?? null;
+  const [project, setProject] = useState("");
+  const [zone, setZone] = useState("");
+  const [credit, setCredit] = useState("");
+  const [exportTable, setExportTable] = useState("");
+  const [saving, setSaving] = useState(false);
+  const [refreshing, setRefreshing] = useState(false);
+  const [deleting, setDeleting] = useState<string | null>(null);
+  const [error, setError] = useState<string | null>(null);
+
+  useEffect(() => {
+    if (!data) return;
+    setProject(data.settings.project ?? "");
+    setZone(data.settings.zone ?? "");
+    setExportTable(data.settings.billingExportTable ?? "");
+    setCredit("");
+  }, [data]);
+
+  async function refresh() {
+    setRefreshing(true);
+    setError(null);
+    try {
+      queryClient.setQueryData(options.queryKey, await getGcpSettings());
+    } catch (err) {
+      setError(err instanceof Error ? err.message : String(err));
+    } finally {
+      setRefreshing(false);
+    }
+  }
+
+  async function save(update: GcpSettingsUpdate) {
+    setSaving(true);
+    setError(null);
+    try {
+      queryClient.setQueryData(options.queryKey, await saveGcpSettings(update));
+    } catch (err) {
+      setError(err instanceof Error ? err.message : String(err));
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  async function deleteInstance(zone: string, name: string) {
+    if (!window.confirm(m.settings_gcp_delete_confirm({ name }))) return;
+    setDeleting(name);
+    setError(null);
+    try {
+      await stopGcpInstance(zone, name);
+      queryClient.setQueryData(options.queryKey, await getGcpSettings());
+    } catch (err) {
+      setError(err instanceof Error ? err.message : String(err));
+    } finally {
+      setDeleting(null);
+    }
+  }
+
+  if (query.isPending) {
+    return (
+      <LoadingRow>
+        <Spinner /> {m.common_checking()}
+      </LoadingRow>
+    );
+  }
+  if (!data) return <div className="error">{query.error?.message ?? error}</div>;
+  const { preflight } = data;
+  const unchanged = project === (data.settings.project ?? "") && zone === (data.settings.zone ?? "");
+  return (
+    <>
+      <div className="flex flex-wrap items-center gap-2">
+        <Badge variant={data.ready ? "success" : "warning"}>
+          {data.ready
+            ? m.settings_page_ready_to_use()
+            : !preflight.cliPath
+              ? m.settings_gcp_not_installed()
+              : !preflight.account
+                ? m.settings_gcp_not_signed_in()
+                : m.settings_gcp_not_ready()}
+        </Badge>
+        {preflight.account && <span className="truncate text-sm text-subtext">{preflight.account}</span>}
+        <div className="flex-1" />
+        <Button size="small" onClick={() => void refresh()} disabled={refreshing}>
+          <RefreshCw size={12} className={refreshing ? "animate-[spin_0.9s_linear_infinite]" : ""} /> {m.settings_page_refresh()}
+        </Button>
+      </div>
+      {preflight.error && <p className={COMPUTE_DIAGNOSTIC_CLASS_NAME}>{preflight.error}</p>}
+      {data.ready && (
+        <div className="mt-4 rounded-lg border border-border bg-surface px-4 py-3">
+          <div className="text-sm text-subtext">{m.settings_gcp_available()}</div>
+          <div className={cn("mt-1 text-2xl font-semibold tabular-nums", data.balance && data.balance.availableUsd <= 0 ? "text-accent-red" : "text-text")}>
+            {data.balance ? `≈ ${fmtUsd(data.balance.availableUsd)}` : "—"}
+          </div>
+          {data.balance ? (
+            <div className="mt-0.5 text-sm text-subtext">
+              {m.settings_gcp_balance_detail({
+                credit: fmtUsd(data.balance.creditUsd),
+                date: new Date(data.balance.asOf).toLocaleDateString(),
+                spent: fmtUsd(data.balance.spentUsd),
+              })}{" "}
+              {data.balance.source === "export" ? m.settings_gcp_source_export() : m.settings_gcp_source_estimate()}
+            </div>
+          ) : (
+            <div className="mt-0.5 text-sm text-subtext">{m.settings_gcp_no_credit()}</div>
+          )}
+          {data.balance?.error && <div className="mt-1 text-sm text-subtext">{data.balance.error}</div>}
+          {data.billing && (
+            <div className="mt-1 text-sm text-subtext">
+              {data.billing.enabled
+                ? m.settings_gcp_billing_account({ name: data.billing.name ?? data.billing.id })
+                : m.settings_gcp_billing_disabled()}
+            </div>
+          )}
+          <form
+            className="mt-3 flex flex-wrap items-end gap-2"
+            onSubmit={(event) => {
+              event.preventDefault();
+              const amount = Number(credit);
+              if (credit.trim() && Number.isFinite(amount) && amount >= 0) void save({ creditUsd: amount });
+            }}
+          >
+            <label className="flex min-w-48 flex-1 flex-col gap-1 text-sm">
+              {m.settings_gcp_credit_label()}
+              <Input
+                type="number"
+                min="0"
+                step="0.01"
+                inputMode="decimal"
+                value={credit}
+                onChange={(event) => setCredit(event.target.value)}
+                placeholder={data.settings.creditUsd != null ? String(data.settings.creditUsd) : "300.00"}
+              />
+            </label>
+            <Button type="submit" disabled={saving || !credit.trim()}>
+              {m.common_save()}
+            </Button>
+            {data.settings.creditUsd != null && (
+              <Button type="button" variant="ghost" disabled={saving} onClick={() => void save({ clearCredit: true })}>
+                {m.settings_gcp_clear_credit()}
+              </Button>
+            )}
+          </form>
+          <p className="mt-1.5 mb-0 text-sm text-subtext">{m.settings_gcp_credit_hint()}</p>
+          <form
+            className="mt-3 flex flex-wrap items-end gap-2"
+            onSubmit={(event) => {
+              event.preventDefault();
+              void save({ billingExportTable: exportTable });
+            }}
+          >
+            <label className="flex min-w-48 flex-1 flex-col gap-1 text-sm">
+              {m.settings_gcp_export_label()}
+              <Input
+                type="text"
+                value={exportTable}
+                onChange={(event) => setExportTable(event.target.value)}
+                placeholder="my-project.billing.gcp_billing_export_v1_XXXX"
+                autoComplete="off"
+                spellCheck={false}
+              />
+            </label>
+            <Button type="submit" disabled={saving || exportTable === (data.settings.billingExportTable ?? "")}>
+              {m.common_save()}
+            </Button>
+          </form>
+          <p className="mt-1.5 mb-0 text-sm text-subtext">{m.settings_gcp_export_hint()}</p>
+        </div>
+      )}
+      {!preflight.cliPath && (
+        <p className="mt-3 mb-0 text-sm text-subtext">
+          {m.settings_gcp_install_hint()} <code>gcloud auth login</code>
+        </p>
+      )}
+      <form
+        className={FORM_CLASS_NAME}
+        onSubmit={(event) => {
+          event.preventDefault();
+          void save({ project, zone });
+        }}
+      >
+        <label>
+          {m.settings_gcp_project()}
+          <Input
+            type="text"
+            value={project}
+            onChange={(event) => setProject(event.target.value)}
+            placeholder={preflight.project ?? "my-project-id"}
+            autoComplete="off"
+            spellCheck={false}
+          />
+        </label>
+        <label>
+          {m.settings_gcp_zone()}
+          <Input
+            type="text"
+            value={zone}
+            onChange={(event) => setZone(event.target.value)}
+            placeholder={preflight.zone}
+            autoComplete="off"
+            spellCheck={false}
+          />
+        </label>
+        <p className="m-0 text-sm text-subtext">{m.settings_gcp_location_hint()}</p>
+        <div className="actions">
+          <Button variant="primary" type="submit" disabled={saving || unchanged}>
+            {saving ? m.common_saving() : m.common_save()}
+          </Button>
+        </div>
+      </form>
+      <div className="mt-4 flex items-center justify-between gap-6">
+        <div>
+          <div className="text-sm font-medium">{m.settings_gcp_spot()}</div>
+          <p className="mt-0.5 mb-0 text-sm text-subtext">{m.settings_gcp_spot_hint()}</p>
+        </div>
+        <Switch
+          type="button"
+          checked={data.settings.spot}
+          aria-label={m.settings_gcp_spot()}
+          disabled={saving}
+          onClick={() => void save({ spot: !data.settings.spot })}
+        />
+      </div>
+      {data.instances && (
+        <div className="mt-4">
+          <p className="mt-0 mb-2 text-sm font-medium text-subtext">{m.settings_gcp_instances()}</p>
+          {data.instances.length === 0 ? (
+            <p className="m-0 text-sm text-subtext">{m.settings_gcp_no_instances()}</p>
+          ) : (
+            <ul className="m-0 flex list-none flex-col gap-1.5 p-0 text-sm">
+              {data.instances.map((instance) => (
+                <li key={instance.name} className="flex items-center gap-3 rounded-md border border-border px-3 py-2">
+                  <code>{instance.machineType}</code>
+                  <span className="min-w-0 flex-1 truncate text-subtext">
+                    {instance.zone} · {instance.status}
+                    {instance.runId && <> · {m.settings_gcp_instance_run({ run: instance.runId.slice(0, 8) })}</>}
+                  </span>
+                  <Button
+                    size="small"
+                    disabled={deleting === instance.name}
+                    onClick={() => void deleteInstance(instance.zone, instance.name)}
+                  >
+                    {deleting === instance.name ? <Spinner /> : <Square size={12} />} {m.settings_gcp_delete()}
+                  </Button>
+                </li>
+              ))}
+            </ul>
+          )}
+          <p className="mt-2 mb-0 text-sm text-subtext">{m.settings_gcp_auto_delete()}</p>
+        </div>
+      )}
+      <div className="mt-4 overflow-x-auto">
+        <table className="gcp-gpus w-full border-collapse text-sm">
+          <thead>
+            <tr className="text-subtext [&_th]:border-b [&_th]:border-border [&_th]:pb-1.5 [&_th]:font-medium">
+              <th className="text-start">{m.settings_prices_col_flavor()}</th>
+              <th className="text-start">{m.settings_prices_col_gpu()}</th>
+              <th className="text-end">{m.settings_colab_col_memory()}</th>
+              <th className="text-end">{m.settings_prices_col_price()}</th>
+            </tr>
+          </thead>
+          <tbody>
+            {[...data.gpus].sort((a, b) => a.usdPerHour - b.usdPerHour).map((gpu) => (
+              <tr key={gpu.id} className="[&_td]:border-b [&_td]:border-border [&_td]:py-1.5">
+                <td><code>{gpu.id}</code></td>
+                <td>{gpu.label}</td>
+                <td className="text-end tabular-nums">{m.settings_colab_memory_gb({ gb: fmtNumber(gpu.vramGb) })}</td>
+                <td className="text-end tabular-nums">≈ {m.settings_prices_per_hour({ price: fmtUsd(gpu.usdPerHour) })}</td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+        <p className="mt-2 mb-0 text-sm text-subtext">{m.settings_gcp_prices_note()}</p>
+      </div>
+      {error && <div className="error mt-2.5">{error}</div>}
+    </>
+  );
+}
+
+/** The opt-in fallback list: which harnesses a chat moves to, and in what
+ * order, when its own harness runs out of usage. */
+function HarnessFailoverCard({ harnesses }: { harnesses: Harness[] }) {
+  const uiStateOptions = getUiStateQuery();
+  const { data: uiState } = useQuery(uiStateOptions);
+  const save = useMutation({
+    mutationFn: (harnessFailover: HarnessFailover) => updateUiState({ harnessFailover }),
+    onSuccess: (state) => setScopedQueryData(uiStateOptions.queryKey, state),
+    onError: (error) => showAlert(error instanceof Error ? error.message : String(error), "error"),
+  });
+  const stored = save.isPending ? save.variables : uiState?.harnessFailover;
+  if (!stored) return null;
+  // An empty order means "every harness": show them all switched on.
+  const order = stored.order.length > 0 ? stored.order : harnesses.map((harness) => harness.id);
+  const rows = [
+    ...order.flatMap((id) => harnesses.filter((harness) => harness.id === id)),
+    ...harnesses.filter((harness) => !order.includes(harness.id)),
+  ];
+  const update = (next: Partial<HarnessFailover>) => save.mutate({ enabled: stored.enabled, order, ...next });
+  const move = (index: number, by: number) => {
+    const next = [...order];
+    const [id] = next.splice(index, 1);
+    next.splice(index + by, 0, id);
+    update({ order: next });
+  };
+  return (
+    <div className={SETTINGS_CARD_CLASS_NAME}>
+      <div className={PROJECT_DEFAULT_ROW_CLASS_NAME}>
+        <div>
+          <div className="project-default-title text-base font-medium">{m.settings_failover_title()}</div>
+          <p>{m.settings_failover_description()}</p>
+        </div>
+        <Switch
+          type="button"
+          checked={stored.enabled}
+          aria-label={m.settings_failover_title()}
+          disabled={save.isPending}
+          onClick={() => update({ enabled: !stored.enabled })}
+        />
+      </div>
+      {stored.enabled && (
+        <div className="mt-3.5 pt-3.5 border-t border-t-border-variant">
+          <div className="text-sm text-subtext mb-2">{m.settings_failover_order()}</div>
+          <ol className="flex flex-col gap-1">
+            {rows.map((harness) => {
+              const index = order.indexOf(harness.id);
+              const included = index >= 0;
+              const status = harnessStatus(harness);
+              return (
+                <li key={harness.id} className="flex items-center gap-2.5 min-w-0">
+                  <span className="w-5 text-end text-sm text-muted tabular-nums">{included ? fmtNumber(index + 1) : ""}</span>
+                  <HarnessLogo harness={harness.id} />
+                  <span className={cn("flex-1 min-w-0 truncate text-base", !included && "text-subtext")}>{harness.name}</span>
+                  <span aria-hidden="true" className={`size-1.5 shrink-0 rounded-full bg-muted [&.ok]:bg-accent-green [&.warn]:bg-accent-amber ${status.cls}`} />
+                  <span className="sr-only">{status.label}</span>
+                  <IconButton
+                    size="small"
+                    title={m.settings_failover_move_up({ name: ltr(harness.name) })}
+                    aria-label={m.settings_failover_move_up({ name: ltr(harness.name) })}
+                    disabled={!included || index === 0 || save.isPending}
+                    onClick={() => move(index, -1)}
+                  >
+                    <ArrowUp size={14} />
+                  </IconButton>
+                  <IconButton
+                    size="small"
+                    title={m.settings_failover_move_down({ name: ltr(harness.name) })}
+                    aria-label={m.settings_failover_move_down({ name: ltr(harness.name) })}
+                    disabled={!included || index === order.length - 1 || save.isPending}
+                    onClick={() => move(index, 1)}
+                  >
+                    <ArrowDown size={14} />
+                  </IconButton>
+                  <Switch
+                    type="button"
+                    checked={included}
+                    aria-label={m.settings_failover_include({ name: ltr(harness.name) })}
+                    // Turning off the last one would read back as "all of them".
+                    disabled={save.isPending || (included && order.length === 1)}
+                    onClick={() => update({ order: included ? order.filter((id) => id !== harness.id) : [...order, harness.id] })}
+                  />
+                </li>
+              );
+            })}
+          </ol>
+        </div>
+      )}
+    </div>
   );
 }
 
@@ -1441,11 +2182,221 @@ function RayTestBadge({ test }: { test: "testing" | RayPreflight | null }) {
 
 function localMachineSummary(hw: LocalMachine) {
   const processor = hw.chip ?? `${hw.os}/${hw.arch}`;
-  const memory = hw.memBytes === null ? null : fmtBytes(hw.memBytes);
+  const memory = hw.memBytes === null
+    ? null
+    : hw.memAvailableBytes === null
+      ? fmtBytes(hw.memBytes)
+      : m.settings_memory_free({ free: fmtBytes(hw.memAvailableBytes), total: fmtBytes(hw.memBytes) });
   const gpu = hw.gpus.length === 0 ? null : m.settings_gpu_count({ count: hw.gpus.length });
   return [processor, hw.cpuCount > 0 ? m.settings_cpu_cores({ count: hw.cpuCount }) : null, memory, gpu]
     .filter(Boolean)
     .join(" · ");
+}
+
+// --- compute (colab) --------------------------------------------------------------
+
+function colabTierLabel(tier: ColabAccount["tier"]): string | null {
+  switch (tier) {
+    case "free":
+      return m.settings_colab_tier_free();
+    case "pro":
+      return m.settings_colab_tier_pro();
+    case "pro_plus":
+      return m.settings_colab_tier_pro_plus();
+    default:
+      return null;
+  }
+}
+
+const fmtUnits = (value: number) => value.toLocaleString(undefined, { maximumFractionDigits: 2, minimumFractionDigits: 2 });
+
+function ColabSection() {
+  const options = getColabSettingsQuery();
+  const query = useQuery(options);
+  const s: ColabSettings | null = query.data ?? null;
+  const [refreshing, setRefreshing] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const loading = query.isPending || refreshing;
+
+  async function refresh() {
+    if (loading) return;
+    setRefreshing(true);
+    setError(null);
+    try {
+      const fresh = await getColabSettings(undefined, true);
+      queryClient.setQueryData(options.queryKey, fresh);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : String(err));
+    } finally {
+      setRefreshing(false);
+    }
+  }
+
+  const [stopping, setStopping] = useState<string | null>(null);
+  async function stopRuntime(endpoint: string) {
+    if (!window.confirm(m.settings_colab_stop_confirm())) return;
+    setStopping(endpoint);
+    setError(null);
+    try {
+      await stopColabRuntime(endpoint);
+      queryClient.setQueryData(options.queryKey, await getColabSettings(undefined, true));
+    } catch (err) {
+      setError(err instanceof Error ? err.message : String(err));
+    } finally {
+      setStopping(null);
+    }
+  }
+
+  const loadError = error ?? query.error?.message ?? null;
+  const account = s?.account ?? null;
+  const tier = colabTierLabel(account?.tier ?? null);
+  const rates = new Map((account?.rates ?? []).map((rate) => [rate.id, rate]));
+  const eligible = account?.eligible ? new Set(account.eligible) : null;
+  return (
+    <>
+      {!s && loading ? (
+        <LoadingRow>
+          <Spinner /> {m.settings_colab_checking()}
+        </LoadingRow>
+      ) : s && (
+        <>
+          <div className="flex flex-wrap items-center gap-2">
+            <Badge variant={s.ready ? "success" : "warning"}>
+              {s.ready
+                ? m.settings_page_ready_to_use()
+                : !s.cliPath
+                  ? m.settings_colab_not_installed()
+                  : m.settings_colab_not_signed_in()}
+            </Badge>
+            {tier && <Badge>{tier}</Badge>}
+            {account?.email && <span className="truncate text-sm text-subtext" title={m.settings_colab_google_account()}>{account.email}</span>}
+            <div className="flex-1" />
+            <Button size="small" onClick={() => void refresh()} disabled={loading}>
+              <RefreshCw size={12} className={refreshing ? "animate-[spin_0.9s_linear_infinite]" : ""} /> {m.settings_page_refresh()}
+            </Button>
+          </div>
+          {s.error && <p className="mt-3 mb-0 text-sm text-subtext">{s.error}</p>}
+          {account && (
+            <div className="mt-4 grid grid-cols-1 gap-3 sm:grid-cols-2">
+              <div className="rounded-lg border border-border bg-surface px-4 py-3">
+                <div className="text-sm text-subtext">{m.settings_colab_compute_units()}</div>
+                <div className="mt-1 text-2xl font-semibold tabular-nums text-text">
+                  {account.balance != null ? fmtUnits(account.balance) : "—"}
+                </div>
+              </div>
+              <div className="rounded-lg border border-border bg-surface px-4 py-3">
+                <div className="text-sm text-subtext">{m.settings_colab_using_now()}</div>
+                <div className="mt-1 text-2xl font-semibold tabular-nums text-text">
+                  {account.rateHourly != null && account.rateHourly > 0
+                    ? m.settings_colab_rate_value({ rate: fmtUnits(account.rateHourly) })
+                    : account.rateHourly != null ? m.settings_colab_idle() : "—"}
+                </div>
+                {account.activeRuntimes != null && account.activeRuntimes > 0 && (
+                  <div className="mt-0.5 text-sm text-subtext">{m.settings_colab_active_runtimes({ count: fmtNumber(account.activeRuntimes) })}</div>
+                )}
+              </div>
+            </div>
+          )}
+          {account?.error && <p className="mt-3 mb-0 text-sm text-subtext">{account.error}</p>}
+          {s.runtimes && (
+            <div className="mt-4">
+              <p className="mt-0 mb-2 text-sm font-medium text-subtext">{m.settings_colab_runtimes()}</p>
+              {s.runtimes.length === 0 ? (
+                <p className="m-0 text-sm text-subtext">{m.settings_colab_no_runtimes()}</p>
+              ) : (
+                <ul className="m-0 flex list-none flex-col gap-1.5 p-0 text-sm">
+                  {s.runtimes.map((runtime) => (
+                    <li key={runtime.endpoint} className="flex items-center gap-3 rounded-md border border-border px-3 py-2">
+                      <code>{runtime.accelerator ?? "?"}{runtime.highMem ? ":highmem" : ""}</code>
+                      <span className="min-w-0 flex-1 truncate text-subtext">
+                        {runtime.orphaned
+                          ? m.settings_colab_runtime_orphaned()
+                          : runtime.runId
+                            ? m.settings_colab_runtime_run({ run: runtime.runId.slice(0, 8), status: runtime.runStatus ?? "?" })
+                            : runtime.name ?? m.settings_colab_runtime_external()}
+                      </span>
+                      <Button
+                        size="small"
+                        disabled={stopping === runtime.endpoint}
+                        onClick={() => void stopRuntime(runtime.endpoint)}
+                      >
+                        {stopping === runtime.endpoint ? <Spinner /> : <Square size={12} />} {m.settings_colab_stop()}
+                      </Button>
+                    </li>
+                  ))}
+                </ul>
+              )}
+              <p className="mt-2 mb-0 text-sm text-subtext">{m.settings_colab_auto_release()}</p>
+            </div>
+          )}
+          <div className="mt-4 overflow-x-auto">
+            <table className="colab-accelerators w-full border-collapse text-sm">
+              <thead>
+                <tr className="text-start text-subtext [&_th]:border-b [&_th]:border-border [&_th]:pb-1.5 [&_th]:font-medium">
+                  <th className="text-start">{m.settings_colab_col_accelerator()}</th>
+                  <th className="text-end">{m.settings_colab_col_memory()}</th>
+                  <th className="text-end">{m.settings_colab_col_rate()}</th>
+                  {account?.balance != null && <th className="text-end">{m.settings_colab_col_hours()}</th>}
+                  {eligible && <th className="text-end">{m.settings_colab_col_plan()}</th>}
+                </tr>
+              </thead>
+              <tbody>
+                {s.accelerators.map((accelerator) => {
+                  const rate = rates.get(accelerator.id);
+                  const usable = eligible ? eligible.has(accelerator.id) : null;
+                  const hours = rate && account?.balance != null && rate.cuPerHour > 0 ? account.balance / rate.cuPerHour : null;
+                  return (
+                    <tr
+                      key={accelerator.id}
+                      className={cn("[&_td]:border-b [&_td]:border-border [&_td]:py-1.5", usable === false && "text-subtext")}
+                    >
+                      <td>
+                        <code className="me-2">{accelerator.id}</code>
+                        {accelerator.label}
+                      </td>
+                      <td className="text-end tabular-nums">
+                        {accelerator.memoryGb > 0 ? m.settings_colab_memory_gb({ gb: fmtNumber(accelerator.memoryGb) }) : "—"}
+                      </td>
+                      <td className="text-end tabular-nums">
+                        {rate ? (
+                          <span title={rate.measured ? m.settings_colab_measured() : undefined}>
+                            {rate.measured ? "" : "≈ "}
+                            {fmtUnits(rate.cuPerHour)}
+                            {rate.measured && <span className="ms-1 text-accent-green">●</span>}
+                          </span>
+                        ) : "—"}
+                      </td>
+                      {account?.balance != null && (
+                        <td className="text-end tabular-nums">
+                          {hours != null ? m.settings_colab_hours_value({ hours: hours.toLocaleString(undefined, { maximumFractionDigits: 1 }) }) : "—"}
+                        </td>
+                      )}
+                      {eligible && (
+                        <td className="text-end">
+                          <Badge size="small" variant={usable ? "success" : "default"}>
+                            {usable ? m.settings_colab_available() : m.settings_colab_unavailable()}
+                          </Badge>
+                        </td>
+                      )}
+                    </tr>
+                  );
+                })}
+              </tbody>
+            </table>
+          </div>
+          <p className="mt-3 mb-0 text-sm text-subtext">{m.settings_colab_rates_note()}</p>
+          <p className="mt-2 mb-0 text-sm text-subtext">{m.settings_colab_flavor_hint({ flavor: s.defaultFlavor })}</p>
+          <div className={cn(KV_CLASS_NAME, "mt-4 [&_.v]:text-sm")}>
+            <span className="k">{m.settings_colab_cli()}</span>
+            <span className="v">{s.cliPath ?? m.settings_not_found_on_path()}</span>
+            <span className="k">{m.settings_page_version()}</span>
+            <span className="v">{s.cliVersion ?? "—"}</span>
+          </div>
+        </>
+      )}
+      {loadError && <div className="error mt-3">{loadError}</div>}
+    </>
+  );
 }
 
 // --- compute (openresearch) ---------------------------------------------------------
@@ -1569,18 +2520,21 @@ const TARGET_CARD_DESCRIPTIONS: Record<ComputeTargetId, () => string> = {
   local: m.compute_description_local,
   ssh: m.compute_description_ssh,
   tinker: m.compute_description_tinker,
+  colab: m.compute_description_colab,
   hf: m.compute_description_hf,
   modal: m.compute_description_modal,
   k8s: m.compute_description_k8s,
   slurm: m.compute_description_slurm,
   ray: m.compute_description_ray,
   openresearch: m.compute_description_openresearch,
+  gcp: m.compute_description_gcp,
 };
 
 /** Kind strings from the runs table — reuses the instances-table logos. */
 const TARGET_KIND: Record<ComputeTargetId, string> = {
   local: "local_job",
   tinker: "tinker_job",
+  colab: "colab_job",
   hf: "hf_job",
   modal: "modal_job",
   k8s: "k8s_job",
@@ -1588,28 +2542,33 @@ const TARGET_KIND: Record<ComputeTargetId, string> = {
   slurm: "slurm_job",
   ray: "ray_job",
   openresearch: "openresearch_job",
+  gcp: "gcp_job",
 };
 
 /** Backends whose launches take --flavor; mirrors the server's validation. */
-const FLAVORED_TARGETS: ComputeTargetId[] = ["hf", "modal", "slurm", "ray", "openresearch"];
+const FLAVORED_TARGETS: ComputeTargetId[] = ["hf", "modal", "colab", "slurm", "ray", "openresearch", "gcp"];
 /** Of those, the ones where a launch *requires* a flavor. */
 const FLAVOR_REQUIRED: ComputeTargetId[] = ["hf", "modal", "openresearch"];
 
 const FLAVOR_SUGGESTIONS: Partial<Record<ComputeTargetId, string[]>> = {
   hf: ["cpu-basic", "t4-small", "a10g-small", "a10g-large", "a100-large", "h100", "h200"],
   modal: ["cpu", "t4", "l4", "a10g", "a100", "a100-80gb", "l40s", "h100", "h100:2"],
+  colab: ["t4", "l4", "a100", "h100", "g4", "a100:highmem", "cpu", "v5e1", "v6e1"],
   slurm: ["gpu", "h100:1", "h100:2", "a100:4"],
   ray: ["cpu", "cpu:2", "gpu", "gpu:1", "gpu:1,cpu:4", "gpu:1,mem:8GiB"],
   openresearch: ["h100_sxm", "h100_sxm:2", "cpu5c", "cpu5g", "cpu5m"],
+  gcp: ["t4", "l4", "v100", "a100", "a100-80gb", "h100", "a100:2", "cpu"],
 };
 
-const QUICK_SETUP_TARGETS: ComputeTargetId[] = ["tinker", "hf", "modal", "ray", "k8s"];
+const QUICK_SETUP_TARGETS: ComputeTargetId[] = ["tinker", "colab", "gcp", "hf", "modal", "ray", "k8s"];
 
 const TARGET_USAGE: Partial<Record<ComputeTargetId, () => string>> = {
   tinker: m.compute_usage_tinker,
+  colab: m.compute_usage_colab,
   hf: m.compute_usage_hf,
   modal: m.compute_usage_modal,
   openresearch: m.compute_usage_openresearch,
+  gcp: m.compute_usage_gcp,
 };
 
 const CUSTOM_FLAVOR_ID = "__custom__";
@@ -1971,6 +2930,8 @@ function QuickSetupDialog({ target, remote, onClose }: { target: ComputeTargetSu
         </IconButton>
       </div>
       {target.id === "tinker" && <TinkerSection target={target} />}
+      {target.id === "colab" && <ColabSection />}
+      {target.id === "gcp" && <GcpSection />}
       {target.id === "hf" && <HfSection remote={remote} />}
       {target.id === "modal" && <ModalSection />}
       {target.id === "ray" && <RaySection />}
@@ -2066,6 +3027,8 @@ function ComputeTab({
             projectId={project?.id}
             onSaved={apply}
           />
+          <ComputeRoutingCard targets={configuredTargets} />
+          <ProviderPricesCard />
           <section className="mb-8">
             <h2 className="mt-0 mx-0 mb-2 text-lg">{m.settings_page_ready_to_use()}</h2>
             <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-3">

@@ -40,6 +40,8 @@ credentials in command arguments, custom instructions, or committed files.
 `orx compute connect hf` uses `hf auth login`; `orx compute connect modal` and
 `orx compute connect tinker` prompt without echoing credentials.
 `orx compute connect openresearch` reuses login and SSH-key registration.
+`orx compute connect colab` runs the Colab CLI's one-time browser sign-in; the
+CLI keeps its own token, so Colab has no credentials to configure here.
 Interactive login requires a terminal and does not support JSON.
 `orx compute configure modal --clear credentials` (likewise hf and tinker) removes
 ORX-saved credentials; process environment and provider-owned credential stores

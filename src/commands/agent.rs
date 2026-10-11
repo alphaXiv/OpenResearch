@@ -1,6 +1,7 @@
 //! The `agent` command group: delegate work to a second agent session.
 //!
 //!   orx agent spawn "<task>"   start a helper agent on its own top-level session
+//!   orx agent harnesses        list the harnesses a helper can run on
 //!
 //! Only meaningful inside a local `orx up` agent session. `ORX_LOCAL_SESSION`
 //! marks the process as one; `ORX_CHAT_SESSION_ID` names the session doing the
@@ -36,7 +37,92 @@ pub async fn run(args: crate::AgentArgs) -> Result<()> {
             model,
             no_wake,
         } => spawn(&store, task, stdin, title, harness, model, !no_wake).await,
+        AgentCommand::Harnesses { json } => harnesses(&store, json).await,
     }
+}
+
+/// Whose models a harness runs by default. Cross-harness review is about
+/// vendor diversity, and OpenCode and Cursor front many vendors' models.
+pub(crate) fn harness_vendor(harness: &str) -> &'static str {
+    match harness {
+        "claude-code" => "Anthropic",
+        "codex" => "OpenAI",
+        "antigravity" => "Google",
+        _ => "depends on the model",
+    }
+}
+
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+struct HarnessRow {
+    id: &'static str,
+    name: &'static str,
+    vendor: &'static str,
+    /// `None` when the OpenResearch server could not be asked.
+    installed: Option<bool>,
+    current: bool,
+    /// The user allows this harness for cross-harness review.
+    review: bool,
+}
+
+async fn harnesses(store: &Store, json: bool) -> Result<()> {
+    let current = crate::local::chat::launching_chat_session()
+        .and_then(|id| store.get_chat_session(&id).ok().flatten())
+        .map(|session| session.harness);
+    let port = crate::local::chat::trusted_up_port().ok().flatten();
+    let mut rows = Vec::new();
+    for harness in crate::local::harness::registry()
+        .into_iter()
+        .filter(|harness| harness.supports_chat())
+    {
+        let installed = match port {
+            Some(port) => crate::commands::up::harness_install_via_up(port, harness.id())
+                .await
+                .ok()
+                .map(|install| install.installed),
+            None => None,
+        };
+        rows.push(HarnessRow {
+            id: harness.id(),
+            name: harness.name(),
+            vendor: harness_vendor(harness.id()),
+            installed,
+            current: current.as_deref() == Some(harness.id()),
+            review: crate::config::cross_harness_allows(harness.id()),
+        });
+    }
+    if json {
+        println!("{}", serde_json::to_string(&rows)?);
+        return Ok(());
+    }
+    let table: Vec<Vec<String>> = rows
+        .iter()
+        .map(|row| {
+            vec![
+                row.id.to_string(),
+                row.name.to_string(),
+                row.vendor.to_string(),
+                match row.installed {
+                    Some(true) => "yes".to_string(),
+                    Some(false) => "no".to_string(),
+                    None => "unknown".to_string(),
+                },
+                if row.review { "on" } else { "off" }.to_string(),
+                if row.current { "this session" } else { "" }.to_string(),
+            ]
+        })
+        .collect();
+    crate::output::print_table(
+        &["HARNESS", "NAME", "VENDOR", "INSTALLED", "REVIEW", ""],
+        &table,
+    );
+    if port.is_none() {
+        println!(
+            "Installation is unknown outside a running OpenResearch session; \
+             `orx agent spawn --harness <id>` refuses a harness that is missing."
+        );
+    }
+    Ok(())
 }
 
 /// Read the task from the positional argument or, with `--stdin`, from the
@@ -103,6 +189,13 @@ async fn ensure_installed(harness: &str) -> Result<()> {
     }
 }
 
+async fn recommended_model(harness: &str) -> Option<String> {
+    let port = crate::local::chat::trusted_up_port().ok()??;
+    crate::commands::up::recommended_model_via_up(port, harness)
+        .await
+        .ok()?
+}
+
 fn install_refusal(harness: &str, install: &crate::commands::up::HarnessInstall) -> Option<String> {
     (!install.installed).then(|| {
         format!(
@@ -148,6 +241,13 @@ async fn spawn(
     if !inherits {
         ensure_installed(&harness).await?;
     }
+    // A helper on another harness runs that harness's strongest model unless
+    // the caller named one.
+    let model = match model {
+        Some(model) => Some(model),
+        None if !inherits => recommended_model(&harness).await,
+        None => None,
+    };
     let changes_model = model
         .as_deref()
         .is_some_and(|model| parent.model.as_deref() != Some(model));

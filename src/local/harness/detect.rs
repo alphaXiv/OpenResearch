@@ -278,6 +278,10 @@ pub struct HarnessInfo {
     #[serde(skip_serializing_if = "std::ops::Not::not")]
     pub catalog_pending: bool,
     pub models: Vec<ModelInfo>,
+    /// The most capable model in `models` (see [`strongest_model`]): what a new
+    /// session runs when nobody picks a model.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub recommended_model: Option<String>,
     /// Composer toggle vocabulary (permission modes, reasoning levels).
     pub options: super::HarnessOptions,
 }
@@ -308,6 +312,7 @@ impl HarnessInfo {
             supports_steering: false,
             catalog_pending: false,
             models: Vec::new(),
+            recommended_model: None,
             options: super::HarnessOptions::none(),
         }
     }
@@ -353,8 +358,20 @@ impl HarnessInfo {
 /// command fails with "No such file or directory" when codex is spawned via the
 /// symlink. Spawning the resolved path keeps helpers real siblings. Best-effort:
 /// a path that can't be resolved is returned unchanged.
+///
+/// Snap apps are the exception: `/snap/bin/<app>` links to `/usr/bin/snap`,
+/// which picks the app from the name it was invoked as. Resolved, `agy`
+/// becomes plain `snap` and only prints snap's own help.
 pub(super) fn resolve_symlinks(path: PathBuf) -> PathBuf {
-    crate::paths::canonicalize(&path).unwrap_or(path)
+    match crate::paths::canonicalize(&path) {
+        Ok(real) if is_snap_launcher(&real) => path,
+        Ok(real) => real,
+        Err(_) => path,
+    }
+}
+
+fn is_snap_launcher(path: &Path) -> bool {
+    path.file_name().is_some_and(|name| name == "snap")
 }
 
 /// The first candidate that runs, in discovery order, with its `--version`
@@ -841,6 +858,82 @@ pub(super) fn nonempty_str(v: &Value, key: &str) -> Option<String> {
         .map(str::to_string)
 }
 
+/// The most capable model in a catalog, judged from what the catalog says
+/// about itself: an explicit "most capable" blurb first, then the model's tier
+/// (Fable and Opus over Sonnet, Pro over Flash, full models over mini/lite),
+/// then the newest version, then the highest effort suffix. A model the
+/// catalog says needs extra paid credits only wins when nothing else is
+/// available, and aliases that only mean "let the CLI decide" are never picked.
+pub(crate) fn strongest_model(models: &[ModelInfo]) -> Option<String> {
+    models
+        .iter()
+        .filter(|model| !matches!(model.id.as_str(), "default" | "auto" | ""))
+        .max_by(|a, b| {
+            model_strength(a)
+                .partial_cmp(&model_strength(b))
+                .unwrap_or(std::cmp::Ordering::Equal)
+        })
+        .map(|model| model.id.clone())
+}
+
+fn model_strength(model: &ModelInfo) -> (bool, u8, u8, f64, u8) {
+    let blurb = model
+        .description
+        .as_deref()
+        .unwrap_or_default()
+        .to_ascii_lowercase();
+    let included = !(blurb.contains("requires")
+        && (blurb.contains("credit") || blurb.contains("extra usage")));
+    let flagship = [
+        "most capable",
+        "most intelligent",
+        "most powerful",
+        "flagship",
+        "frontier",
+    ]
+    .iter()
+    .any(|phrase| blurb.contains(phrase));
+    let name = format!(
+        "{} {}",
+        model.id,
+        model.display_name.as_deref().unwrap_or_default()
+    )
+    .to_ascii_lowercase();
+    let words: Vec<&str> = name
+        .split(|c: char| !c.is_ascii_alphanumeric() && c != '.')
+        .filter(|word| !word.is_empty())
+        .collect();
+    let has = |list: &[&str]| words.iter().any(|word| list.contains(word));
+    let tier = if has(&["fable"]) {
+        5
+    } else if has(&["opus", "ultra", "pro", "max"]) {
+        4
+    } else if has(&["nano", "lite", "tiny", "small", "haiku"]) {
+        1
+    } else if has(&["mini", "flash", "fast", "spark"]) {
+        2
+    } else {
+        3
+    };
+    let version = words
+        .iter()
+        .filter_map(|word| word.trim_matches('.').parse::<f64>().ok())
+        .filter(|v| *v < 100.0)
+        .fold(0.0, f64::max);
+    let effort = if has(&["xhigh", "max"]) {
+        4
+    } else if has(&["high"]) {
+        3
+    } else if has(&["medium"]) {
+        2
+    } else if has(&["low", "minimal"]) {
+        0
+    } else {
+        1
+    };
+    (included, u8::from(flagship), tier, version, effort)
+}
+
 /// Decode a JWT's payload without verifying — we only surface the account
 /// email and plan the user is already signed in as, locally.
 pub(super) fn jwt_payload(token: &str) -> Option<Value> {
@@ -901,6 +994,27 @@ mod tests {
             resolve_symlinks(link),
             crate::paths::canonicalize(&real).unwrap()
         );
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn resolve_symlinks_keeps_snap_app_links() {
+        let dir = std::env::temp_dir().join(format!("orx-detect-snap-{}", std::process::id()));
+        let usr_bin = dir.join("usr-bin");
+        let snap_bin = dir.join("snap-bin");
+        std::fs::create_dir_all(&usr_bin).unwrap();
+        std::fs::create_dir_all(&snap_bin).unwrap();
+        let snap = usr_bin.join("snap");
+        std::fs::write(&snap, "").unwrap();
+        // `/snap/bin/agy -> antigravity-cli -> /usr/bin/snap`
+        let app = snap_bin.join("antigravity-cli");
+        std::os::unix::fs::symlink(&snap, &app).unwrap();
+        let alias = snap_bin.join("agy");
+        std::os::unix::fs::symlink("antigravity-cli", &alias).unwrap();
+
+        assert_eq!(resolve_symlinks(alias.clone()), alias);
 
         std::fs::remove_dir_all(&dir).ok();
     }
@@ -1150,5 +1264,64 @@ mod tests {
         assert!(info.ready(), "an inconclusive probe must not lock chat out");
         assert!(!info.install_broken);
         assert!(info.version.is_none());
+    }
+
+    fn ids(models: &[(&str, Option<&str>)]) -> Vec<ModelInfo> {
+        models
+            .iter()
+            .map(|(id, blurb)| ModelInfo::new(*id).with_label(None, *blurb))
+            .collect()
+    }
+
+    #[test]
+    fn strongest_model_prefers_the_catalogs_own_flagship() {
+        let claude = ids(&[
+            ("default", None),
+            ("sonnet", Some("Sonnet 5 · Best for everyday tasks")),
+            ("claude-fable-5[1m]", Some("Fable 5 · Most capable")),
+            ("haiku", Some("Haiku 5 · Fastest")),
+        ]);
+        assert_eq!(
+            strongest_model(&claude).as_deref(),
+            Some("claude-fable-5[1m]")
+        );
+        let metered = ids(&[
+            ("sonnet", Some("Efficient for routine tasks")),
+            (
+                "fable",
+                Some("Most capable for your hardest tasks · Requires usage credits"),
+            ),
+            ("opus", Some("Best for everyday, complex tasks")),
+        ]);
+        assert_eq!(strongest_model(&metered).as_deref(), Some("opus"));
+    }
+
+    #[test]
+    fn strongest_model_ranks_tier_then_version_then_effort() {
+        let codex = ids(&[
+            ("gpt-5.4-mini", None),
+            ("gpt-5.6-sol", None),
+            ("gpt-5.5", None),
+        ]);
+        assert_eq!(strongest_model(&codex).as_deref(), Some("gpt-5.6-sol"));
+        let agy = ids(&[
+            ("gemini-3.8-flash-high", None),
+            ("gemini-3.1-pro-low", None),
+            ("gemini-3.1-pro-high", None),
+        ]);
+        assert_eq!(
+            strongest_model(&agy).as_deref(),
+            Some("gemini-3.1-pro-high")
+        );
+        let opencode = ids(&[
+            ("opencode/big-pickle", None),
+            ("github-copilot/claude-sonnet-4.5", None),
+            ("github-copilot/claude-opus-4.5", None),
+        ]);
+        assert_eq!(
+            strongest_model(&opencode).as_deref(),
+            Some("github-copilot/claude-opus-4.5")
+        );
+        assert_eq!(strongest_model(&ids(&[("auto", None)])), None);
     }
 }

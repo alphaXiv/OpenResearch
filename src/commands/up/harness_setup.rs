@@ -380,6 +380,14 @@ async fn run(
         } else {
             None
         };
+        if let Some(problem) = lease
+            .as_ref()
+            .and_then(|_| crate::local::opencode::foreign_server_problem())
+        {
+            // The command line stays local; only the fixed reason is reported.
+            attempt.record("interrupted", "detect", Some("not_ready"), None, None);
+            return Err(problem);
+        }
         // The lease ends with `run`; the follow-up shell only inherits the path.
         let env: Vec<_> = lease
             .as_ref()
@@ -704,6 +712,7 @@ mod tests {
             supports_steering: false,
             catalog_pending: false,
             models: Vec::new(),
+            recommended_model: None,
             options: crate::local::harness::HarnessOptions::none(),
         }
     }
