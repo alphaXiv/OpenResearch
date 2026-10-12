@@ -76,7 +76,7 @@ enum Command {
     /// Operate on one local project.
     Project(ProjectArgs),
 
-    /// Delegate a task to a second agent session.
+    /// Create independent project chats.
     Agent(AgentArgs),
 
     /// List a project's runs.
@@ -374,10 +374,12 @@ pub struct AgentArgs {
 
 #[derive(Subcommand, Debug)]
 pub enum AgentCommand {
-    /// Hand a task to a helper agent running in its own top-level session.
+    /// Create an independent chat using your saved New Chat settings.
+    #[command(
+        after_help = "New chats use your saved New Chat settings. --harness, --model, and --no-wake are no longer supported; created chats never wake the creator."
+    )]
     Spawn {
-        /// What the helper agent should do. Write it as a self-contained brief:
-        /// the helper starts with an empty transcript and cannot see this chat.
+        /// Opening message for the new chat; it starts with an empty transcript.
         task: Option<String>,
         /// Read the task from stdin instead, for long multi-paragraph briefs.
         #[arg(long)]
@@ -385,15 +387,9 @@ pub enum AgentCommand {
         /// Name the session in the sidebar. Defaults to an auto-generated title.
         #[arg(long)]
         title: Option<String>,
-        /// Harness for the helper (defaults to this session's).
+        /// Project ID (defaults to the current OpenResearch chat's project).
         #[arg(long)]
-        harness: Option<String>,
-        /// Model for the helper (defaults to this session's).
-        #[arg(long)]
-        model: Option<String>,
-        /// Do not resume this chat when the helper finishes.
-        #[arg(long)]
-        no_wake: bool,
+        project: Option<String>,
     },
 }
 
@@ -945,6 +941,19 @@ pub struct PaperArgs {
     pub full: bool,
 }
 
+fn explain_removed_spawn_flags(mut error: clap::Error) -> clap::Error {
+    use clap::error::{ContextKind, ContextValue, ErrorKind};
+    if error.kind() == ErrorKind::UnknownArgument
+        && error.to_string().contains(" agent spawn")
+        && matches!(error.get(ContextKind::InvalidArg), Some(ContextValue::String(flag)) if ["--harness", "--model", "--no-wake"].contains(&flag.split('=').next().unwrap_or(flag)))
+    {
+        error.insert(ContextKind::Suggested, ContextValue::StyledStrs(vec![
+            "New chats use your saved New Chat settings and never wake the creator. Configure the agent and model in OpenResearch.".into()
+        ]));
+    }
+    error
+}
+
 // The default multi-thread runtime is load-bearing for desktop app mode: it
 // blocks the main thread in the window's run loop while the dashboard server runs
 // on worker threads. A `current_thread` flavor would deadlock. See commands::app.
@@ -976,7 +985,7 @@ async fn main() {
         return;
     }
 
-    let cli = Cli::parse();
+    let cli = Cli::try_parse().unwrap_or_else(|error| explain_removed_spawn_flags(error).exit());
     // Double-clicked from Explorer: open the desktop app instead of a console session.
     #[cfg(windows)]
     if cli.command.is_none() && owns_its_console() {
@@ -1424,6 +1433,21 @@ mod cli_tests {
             };
             assert_eq!(actual, expected);
         }
+    }
+
+    #[test]
+    fn agent_spawn_rejects_removed_settings_flags() {
+        for program in ["orx", "orx.exe"] {
+            for flag in ["--harness", "--model", "--model=legacy", "--no-wake"] {
+                let error = Cli::try_parse_from([program, "agent", "spawn", "task", flag])
+                    .expect_err("removed flag");
+                assert_eq!(error.kind(), clap::error::ErrorKind::UnknownArgument);
+                assert!(explain_removed_spawn_flags(error)
+                    .to_string()
+                    .contains("saved New Chat settings"));
+            }
+        }
+        assert!(Cli::try_parse_from(["orx", "agent", "spawn", "task", "--project", "p1"]).is_ok());
     }
 
     #[test]

@@ -85,6 +85,7 @@ import {
   cancelQueuedMessage,
   chatAttachmentUrl,
   createChatSession,
+  getChatSession,
   deleteChatSession,
   DEMO_FIGURE_SESSION_ID,
   DEMO_LITERATURE_SESSION_ID,
@@ -4068,9 +4069,7 @@ function SessionRow({
       className={`session-row relative flex items-center gap-2 w-full text-start py-[7px] ps-2.5 pe-1.5 rounded-md text-sm text-text cursor-pointer select-none [&:hover:not(.active)]:bg-surface [&.active]:bg-panel [&.active]:font-medium [&_.session-dot:empty]:hidden [&_.session-dot]:w-4 [&_.session-dot]:inline-flex [&_.session-dot]:items-center [&_.session-dot]:justify-center [&_.session-dot]:shrink-0 [&_.session-title]:flex-1 [&_.session-title]:min-w-0 [&_.session-title]:overflow-hidden [&_.session-title]:[mask-image:linear-gradient(to_right,black_calc(100%_-_16px),transparent)] [&_.session-title]:whitespace-nowrap [&_.session-menu-btn]:hidden [&_.session-menu-btn]:items-center [&_.session-menu-btn]:justify-center [&_.session-menu-btn]:w-4 [&_.session-menu-btn]:h-4 [&_.session-menu-btn]:-my-0.5 [&_.session-menu-btn]:mx-0 [&_.session-menu-btn]:rounded-sm [&_.session-menu-btn]:text-muted [&_.session-menu-btn]:shrink-0 [&_.session-menu-btn:hover]:text-text [&_.session-menu-btn:hover]:bg-panel [&:hover_.session-menu-btn]:inline-flex [&:focus-visible_.session-menu-btn]:inline-flex [&_.session-menu-btn:focus-visible]:inline-flex [&.menu-open_.session-menu-btn]:inline-flex [&:hover_.session-dot]:hidden [&:focus-visible_.session-dot]:hidden [&:has(.session-menu-btn:focus-visible)_.session-dot]:hidden [&.menu-open_.session-dot]:hidden [&_.busy-dot]:w-[7px] [&_.busy-dot]:h-[7px] [&_.busy-dot]:rounded-full [&_.busy-dot]:bg-primary [&_.busy-dot]:animate-[or-pulse_1.2s_infinite] [&_.busy-dot]:shrink-0 [&_.unread-dot]:w-[7px] [&_.unread-dot]:h-[7px] [&_.unread-dot]:rounded-full [&_.unread-dot]:bg-primary [&_.unread-dot]:shrink-0 [&_.busy-dot.waiting]:animate-none [&_.session-title-input]:flex-1 [&_.session-title-input]:min-w-0 [&_.session-title-input]:py-px [&_.session-title-input]:px-[5px] [&_.session-title-input]:-my-0.5 [&_.session-title-input]:mx-0 [&_.session-title-input]:[font:inherit] [&_.session-title-input]:text-text [&_.session-title-input]:bg-background [&_.session-title-input]:border [&_.session-title-input]:border-primary [&_.session-title-input]:rounded-sm [&_.session-title-input]:outline-none [&.editing]:bg-surface [&.editing]:cursor-default [&.editing_.session-menu-btn]:hidden [&.editing_.session-dot]:hidden ${active ? "active" : ""}  ${unread ? "unread" : ""}  ${open ? "menu-open" : ""}  ${
         editing ? "editing" : ""
         }`}
-      title={`${HARNESS_LABELS[session.harness]}${session.model ? ` · ${session.model}` : ""}${
-        session.parentSessionId ? m.chat_spawned_by_agent() : ""
-        }`}
+      title={`${HARNESS_LABELS[session.harness]}${session.model ? ` · ${session.model}` : ""}`}
       onClick={() => {
         // While editing, a body click is a no-op; blur/Enter/Esc drive it.
         if (editing) return;
@@ -4093,9 +4092,6 @@ function SessionRow({
         }
       }}
     >
-      {session.parentSessionId && !editing && (
-        <Users className="text-muted shrink-0" size={12} aria-hidden />
-      )}
       {editing ? (
         <input
           ref={inputRef}
@@ -6152,11 +6148,19 @@ export function ChatPanel({
     }
   }, [projectId, onActiveSessionChange]);
 
-  /** Follow a spawn card and reveal its session in the rail. */
   const openSpawnedSession = useCallback(
-    (sessionId: string) => {
-      setSessionFilter("all");
-      onActiveSessionChange(sessionId);
+    async (sessionId: string) => {
+      const visit = projectVisitRef.current;
+      const scope = composerScopeRef.current;
+      try {
+        const session = await getChatSession(sessionId);
+        if (projectVisitRef.current !== visit || composerScopeRef.current !== scope) return;
+        setSessionFilter("all");
+        onActiveSessionChange(sessionId, { projectId: session.projectId });
+      } catch (error) {
+        if (projectVisitRef.current !== visit || composerScopeRef.current !== scope) return;
+        showAlert(error instanceof Error ? error.message : String(error), "error");
+      }
     },
     [onActiveSessionChange],
   );

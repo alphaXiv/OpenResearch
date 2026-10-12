@@ -18,6 +18,17 @@ use crate::store::Store;
 use crate::ExpCommand;
 
 pub async fn run(args: crate::ExpArgs) -> Result<()> {
+    // `exp wait` opens its store itself: a transiently locked orx.db is
+    // retried inside the wait timeout rather than dying at startup.
+    if let ExpCommand::Wait {
+        exp_id,
+        project,
+        timeout,
+        interval,
+    } = args.command
+    {
+        return wait(exp_id, project, timeout, interval).await;
+    }
     let mut store = Store::open()?;
     match args.command {
         ExpCommand::Archive {
@@ -54,12 +65,7 @@ pub async fn run(args: crate::ExpArgs) -> Result<()> {
         }
         ExpCommand::Cancel { exp_id } => resolve_experiment(store, &exp_id)?.cancel().await,
         ExpCommand::Wake { exp_id } => wake(&store, &exp_id),
-        ExpCommand::Wait {
-            exp_id,
-            project,
-            timeout,
-            interval,
-        } => wait(store, exp_id, project, timeout, interval).await,
+        ExpCommand::Wait { .. } => unreachable!("handled above"),
     }
 }
 
@@ -132,7 +138,6 @@ fn wake(store: &Store, exp_id: &str) -> Result<()> {
 /// seconds (default 1800) with a non-zero exit so callers can branch on it. The
 /// Polling reads only the local run store.
 async fn wait(
-    store: Store,
     exp_id: Option<String>,
     project: Option<String>,
     timeout: Option<u64>,
@@ -148,14 +153,32 @@ async fn wait(
              `orx exp wait --project <projectId>` (any run in a project)."
         )),
         (Some(exp_id), None) => {
-            resolve_experiment(store, &exp_id)?
-                .wait_experiment(interval, deadline)
-                .await
+            let plane = crate::plane::local_plane::retry_on_db_lock(
+                || {
+                    let store = Store::open_with_busy_timeout(
+                        crate::plane::local_plane::busy_timeout_left(deadline),
+                    )?;
+                    resolve_experiment(store, &exp_id)
+                },
+                interval,
+                deadline,
+            )
+            .await?;
+            plane.wait_experiment(interval, deadline).await
         }
         (None, Some(project_id)) => {
-            resolve_project(store, &project_id)?
-                .wait_project(interval, deadline)
-                .await
+            let plane = crate::plane::local_plane::retry_on_db_lock(
+                || {
+                    let store = Store::open_with_busy_timeout(
+                        crate::plane::local_plane::busy_timeout_left(deadline),
+                    )?;
+                    resolve_project(store, &project_id)
+                },
+                interval,
+                deadline,
+            )
+            .await?;
+            plane.wait_project(interval, deadline).await
         }
     }
 }
