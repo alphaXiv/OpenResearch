@@ -1286,5 +1286,10 @@
   "sidebar_reveal_project": "Pokaż w Finderze",
   "sidebar_filter": "Filtruj",
   "sidebar_group_by": "Grupuj według",
-  "sidebar_one_list": "Na jednej liście"
+  "sidebar_one_list": "Na jednej liście",
+  "app_routes": "Ścieżki",
+  "routes_archived_ancestor": "Zarchiwizowany eksperyment nadrzędny",
+  "routes_other_task": "Z innego zadania",
+  "routes_missing_parent": "Eksperyment nadrzędny niedostępny",
+  "routes_invalid_lineage": "Nieprawidłowe powiązania"
 }
