@@ -1286,5 +1286,20 @@
   "sidebar_reveal_project": "Reveal in Finder",
   "sidebar_filter": "Filter",
   "sidebar_group_by": "Group by",
-  "sidebar_one_list": "In one list"
+  "sidebar_one_list": "In one list",
+  "acp_add": "Connect a coding agent",
+  "acp_edit": "Edit coding agent",
+  "acp_preset": "Coding agent",
+  "acp_custom": "Other (custom setup)",
+  "acp_name": "Name",
+  "acp_executable": "Executable",
+  "acp_arguments": "Arguments",
+  "acp_argument": "Argument {number}",
+  "acp_add_argument": "Add argument",
+  "acp_test": "Test connection",
+  "acp_setup_help": "Install and sign in on the machine running OpenResearch first. Your existing account and settings will be used.",
+  "acp_setup_docs": "Setup instructions",
+  "acp_edit_help": "Changes apply to new chats. Existing chats keep their launch configuration.",
+  "acp_advanced": "Advanced setup",
+  "acp_adapter_help": "{name} needs a connection add-on. Follow the setup instructions, then re-check."
 }

@@ -7,6 +7,7 @@
 //! Experiment and run identifiers resolve only when their records belong to a
 //! project registered in the local store.
 
+pub mod acp;
 pub mod agent_lifecycle;
 pub mod agent_skills;
 pub mod autonomy;

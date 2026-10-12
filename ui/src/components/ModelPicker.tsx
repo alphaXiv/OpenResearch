@@ -50,6 +50,10 @@ export const HARNESS_LABELS: Record<HarnessId, string> = {
   antigravity: "Google Antigravity",
 };
 
+export function harnessLabel(id: HarnessId, name?: string | null): string {
+  return name || HARNESS_LABELS[id] || (id.startsWith("acp:") ? "ACP" : id);
+}
+
 /** First harness that can actually run — the fallback when nothing is picked.
  * Seeds mode/reasoning from that harness's advertised defaults. */
 export function defaultSelection(harnesses: Harness[]): ModelSelection | null {
@@ -119,6 +123,7 @@ export function ModelPicker({
   lockHarness = false,
   openRequest = 0,
   className,
+  sessionHarness,
 }: {
   value: ModelSelection | null;
   onSelect: (value: ModelSelection) => void;
@@ -138,8 +143,10 @@ export function ModelPicker({
   /** Bumped to open the picker from elsewhere (the composer's `/model`). */
   openRequest?: number;
   className?: string;
+  sessionHarness?: Harness;
 }) {
-  const { data: harnesses = EMPTY_HARNESSES } = useQuery(getHarnessesQuery());
+  const { data: catalog = EMPTY_HARNESSES } = useQuery(getHarnessesQuery());
+  const harnesses = useMemo(() => sessionHarness ? [sessionHarness, ...catalog.filter((harness) => harness.id !== sessionHarness.id)] : catalog, [catalog, sessionHarness]);
   const queryClient = useQueryClient();
   const [addingLocalModel, setAddingLocalModel] = useState(false);
   const triggerRef = useRef<HTMLButtonElement>(null);
@@ -425,7 +432,7 @@ export function ModelPicker({
                       </div>
                     ) : (
                       <>
-                        {!filter.trim() && (
+                        {!filter.trim() && !harness.id.startsWith("acp:") && (
                           <MenuItem onClick={() => pick(harness, null)}>
                             <span>{m.model_picker_default_model()}</span>
                             {value?.harness === harness.id && value?.model === null && (
@@ -450,7 +457,7 @@ export function ModelPicker({
                           </MenuItem>
                         ))}
                         {/* An explicit ID is passed to the CLI without claiming availability. */}
-                        {filter.trim().length > 0 &&
+                        {filter.trim().length > 0 && !harness.id.startsWith("acp:") &&
                           !harness.models.some((m) => m.id === filter.trim()) && (
                             <MenuItem
                               onClick={() => pick(harness, filter.trim())}

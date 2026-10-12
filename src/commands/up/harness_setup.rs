@@ -564,6 +564,11 @@ fn automatic_install_needed(payload: &Value) -> Option<bool> {
     if opencode["installed"] == true && opencode["installBroken"] == false {
         return Some(false);
     }
+    if entries.iter().any(|h| {
+        h["id"].as_str().is_some_and(|id| id.starts_with("acp:")) && h["installed"] == true
+    }) {
+        return None;
+    }
     crate::telemetry::harness::IDS
         .iter()
         .all(|id| {
@@ -645,10 +650,23 @@ mod tests {
     }
 
     #[test]
+    fn automatic_setup_does_not_replace_an_installed_acp_agent() {
+        let mut entries: Vec<_> = crate::telemetry::harness::IDS
+            .iter()
+            .map(|id| json!({"id": id, "installed": false, "installBroken": false}))
+            .collect();
+        entries.push(json!({"id": "acp:565e351e-62c7-488f-a58a-914d30cc5776", "installed": true}));
+        assert_eq!(
+            automatic_install_needed(&json!({"harnesses": entries})),
+            None
+        );
+    }
+
+    #[test]
     fn setup_verification_distinguishes_install_login_and_automatic_readiness() {
         let mut h = crate::local::harness::HarnessInfo {
-            id: "opencode",
-            name: "OpenCode",
+            id: "opencode".into(),
+            name: "OpenCode".into(),
             ..blank_harness()
         };
         h.installed = true;
@@ -681,8 +699,8 @@ mod tests {
     /// A blank `HarnessInfo`; `HarnessInfo::new` is private to the harness module.
     fn blank_harness() -> crate::local::harness::HarnessInfo {
         crate::local::harness::HarnessInfo {
-            id: "claude-code",
-            name: "Claude Code",
+            id: "claude-code".into(),
+            name: "Claude Code".into(),
             installed: false,
             install_broken: false,
             bin_path: None,
@@ -700,6 +718,8 @@ mod tests {
             plan: None,
             agent_ready: false,
             agent_note: None,
+            setup_url: None,
+            needs_connection_adapter: false,
             needs_config_repair: false,
             supports_steering: false,
             catalog_pending: false,

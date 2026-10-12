@@ -11,7 +11,7 @@ import { getProjectPathStatusQuery, searchPapersQuery, resolvePaperQuery } from 
 
 import { m } from "../paraglide/messages.js";
 import { ltr } from "../i18n";
-import { AlertCircle, ArrowLeft, ArrowRight, RefreshCw, Terminal, X } from "lucide-react";
+import { AlertCircle, ArrowLeft, ArrowRight, Plus, RefreshCw, Terminal, X } from "lucide-react";
 import { Wordmark } from "./Wordmark";
 import { useEffect, useRef, useState } from "react";
 import {
@@ -31,6 +31,7 @@ import {
 import { renderNote } from "./agentNote";
 import { claudeProviderLabel } from "./claudeProvider";
 import { HarnessLogo } from "./HarnessLogo";
+import { AcpHarnessDialog } from "./AcpHarnessDialog";
 import { HarnessSetupDialog } from "./HarnessSetupDialog";
 
 import { Hyperspace } from "./Hyperspace";
@@ -101,6 +102,8 @@ export function Onboarding({
   const pathQuery = useQuery(getProjectPathStatusQuery());
   const setupCommands = useQuery(getHarnessSetupCommandsQuery());
   const [setupHarness, setSetupHarness] = useState<Harness | null>(null);
+  const [acpDialogOpen, setAcpDialogOpen] = useState(false);
+  const addedAcpHarness = useRef<HarnessId | null>(null);
   const [automaticSetup, setAutomaticSetup] = useState(false);
   const installSocket = useRef<WebSocket | null>(null);
   const installOutput = useRef("");
@@ -172,6 +175,12 @@ export function Onboarding({
   useEffect(() => {
     if (harnesses === null) return;
     const ready = harnesses.filter((h) => h.agentReady && !h.catalogPending);
+    const added = ready.find((h) => h.id === addedAcpHarness.current);
+    if (added) {
+      addedAcpHarness.current = null;
+      setPreferredHarness(added.id);
+      return;
+    }
     setPreferredHarness((current) => {
       if (current && ready.some((h) => h.id === current)) return current;
       const saved = preferredAgent && ready.find((h) => h.id === preferredAgent.harness);
@@ -350,6 +359,13 @@ export function Onboarding({
           : "[&_.home-inner]:max-w-140 [&_.home-inner]:pt-24"
         }`}
     >
+      {acpDialogOpen && <AcpHarnessDialog
+        onClose={() => setAcpDialogOpen(false)}
+        onSaved={(definition) => {
+          addedAcpHarness.current = definition.id;
+          load(true, true);
+        }}
+      />}
       {!remote && setupHarness && setupCommands.data && (
         <HarnessSetupDialog
           harness={setupHarness}
@@ -419,13 +435,13 @@ export function Onboarding({
             )}
             <div className="onb-cards flex flex-col gap-3.5">
               {harnesses !== null ? (
-                harnesses.map((h) => (
+                harnesses.filter((h) => !h.id.startsWith("acp:") || h.installed).map((h) => (
                   <AgentCard
                     key={h.id}
                     h={h}
                     remote={remote}
                     selected={preferredHarness === h.id}
-                    onSelect={() => setPreferredHarness(h.id)}
+                    onSelect={() => { addedAcpHarness.current = null; setPreferredHarness(h.id); }}
                     commands={setupCommands.data?.[h.id]}
                     onSetup={() => setSetupHarness(h)}
                   />
@@ -438,6 +454,7 @@ export function Onboarding({
                   <Spinner /> {m.onboarding_detecting_claude_code_codex_open_code()}
                 </LoadingRow>
               )}
+              <Button variant="ghost" className="self-start" onClick={() => setAcpDialogOpen(true)} aria-haspopup="dialog"><Plus size={14} />{m.acp_add()}</Button>
             </div>
             {setupCommands.isError && <p className={ONB_CARD_META_CLASS_NAME}>
               {m.harness_setup_load_failed()} <Button variant="ghost" onClick={() => void setupCommands.refetch()}>{m.app_retry()}</Button>
@@ -659,6 +676,7 @@ function agentBadge(h: Harness): { tone: StatusTone; label: string } {
   // A snapshot answer still being filled in — "checking" rather than a badge
   // the background pass may revoke.
   if (h.catalogPending) return { tone: "warning", label: m.onboarding_checking() };
+  if (h.id.startsWith("acp:") && h.agentReady) return { tone: "success", label: m.settings_page_connected() };
   if (h.authCheckFailed) return { tone: "warning", label: m.onboarding_unable_to_verify() };
   if (h.agentReady) return { tone: "success", label: h.authMethod === "thirdParty" || claudeProviderLabel(h) ? m.settings_page_ready_to_use() : h.authMethod === "local" || !h.authenticated ? m.onboarding_ready() : m.onboarding_signed_in() };
   if (!h.installed) return { tone: "neutral", label: m.onboarding_not_detected() };
@@ -706,7 +724,7 @@ function AgentCard({
   // will not open). Offering one sends the user through a command that
   // provably cannot help; the agentNote below carries the actual repair.
   const canLogin = h.id === "claude-code" ? Boolean(h.loginEligible) : h.authMethod !== "local" && h.authMethod !== "apiKey" && (h.authState === "needsLogin" || h.authState === "unknown");
-  const canSetup = !remote && !h.needsConfigRepair && !h.catalogPending && (!h.installed || h.installBroken || h.authState === "unsupported" || canLogin);
+  const canSetup = !h.id.startsWith("acp:") && !remote && !h.needsConfigRepair && !h.catalogPending && (!h.installed || h.installBroken || h.authState === "unsupported" || canLogin);
   const showSetupAction = !h.agentReady && canSetup;
   const showStatusDot = canSetup && (!h.installed || (!h.agentReady && h.authState === "needsLogin"));
   const badge = agentBadge(h);
@@ -731,7 +749,7 @@ function AgentCard({
               <StatusIndicator tone={badge.tone} className="font-normal">{badge.label}</StatusIndicator>
             )}
           </span>
-          {showSetupAction && !showStatusDot && <StatusIndicator tone={visibleBadge.tone}>{visibleBadge.label}</StatusIndicator>}
+          {(showSetupAction && !showStatusDot || h.setupUrl && !h.agentReady && !h.catalogPending) && <StatusIndicator tone={visibleBadge.tone}>{visibleBadge.label}</StatusIndicator>}
         </span>
       </span>
       {showSetupAction ? (
@@ -739,6 +757,8 @@ function AgentCard({
           <Terminal size={14} />
           {!h.installed || h.installBroken ? m.harness_setup_install() : h.authState === "unsupported" ? m.harness_setup_update() : m.harness_setup_login()}
         </Button>
+      ) : h.setupUrl && !h.agentReady && !h.catalogPending ? (
+        <a href={h.setupUrl} target="_blank" rel="noreferrer" className="text-sm text-primary underline">{m.acp_setup_docs()}</a>
       ) : (
         <StatusIndicator tone={visibleBadge.tone}>{visibleBadge.label}</StatusIndicator>
       )}
@@ -756,6 +776,7 @@ function AgentCard({
         {!showSetupAction && h.agentNote && (
           <div className={`${ONB_CARD_META_CLASS_NAME} [&_code]:whitespace-pre-wrap break-words`}>{renderNote(h.agentNote)}</div>
         )}
+        {!h.installed && h.needsConnectionAdapter && <p className={ONB_CARD_META_CLASS_NAME}>{m.acp_adapter_help({ name: h.name })}</p>}
       </div>
     );
   }
@@ -767,7 +788,7 @@ function AgentCard({
       onClick={onSelect}
     >
       {head}
-      {h.id !== "opencode" && (
+      {h.id !== "opencode" && !h.id.startsWith("acp:") && (
         <div className="onb-card-detail flex items-center gap-1.5 text-sm">
           {h.accountLoading ? <><Spinner /> {m.onboarding_loading_account()}</> : <>
             {claudeProviderLabel(h) ?? h.account ?? (h.authMethod === "apiKey" ? m.onboarding_api_key() : null)}

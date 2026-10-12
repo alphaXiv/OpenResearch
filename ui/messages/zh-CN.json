@@ -1286,5 +1286,20 @@
   "sidebar_reveal_project": "在访达中显示",
   "sidebar_filter": "筛选",
   "sidebar_group_by": "分组方式",
-  "sidebar_one_list": "单一列表"
+  "sidebar_one_list": "单一列表",
+  "acp_add": "连接编程智能体",
+  "acp_edit": "编辑编程智能体",
+  "acp_preset": "编程智能体",
+  "acp_custom": "其他（自定义设置）",
+  "acp_name": "名称",
+  "acp_executable": "可执行文件",
+  "acp_arguments": "参数",
+  "acp_argument": "参数 {number}",
+  "acp_add_argument": "添加参数",
+  "acp_test": "测试连接",
+  "acp_setup_help": "请先在运行 OpenResearch 的电脑上安装智能体并登录。将使用你现有的账户和设置。",
+  "acp_setup_docs": "设置说明",
+  "acp_edit_help": "更改适用于新聊天。现有聊天保留其启动配置。",
+  "acp_advanced": "高级设置",
+  "acp_adapter_help": "{name} 需要连接插件。请按照设置说明操作，然后重新检查。"
 }

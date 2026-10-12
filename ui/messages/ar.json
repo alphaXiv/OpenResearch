@@ -1286,5 +1286,20 @@
   "sidebar_reveal_project": "إظهار في Finder",
   "sidebar_filter": "تصفية",
   "sidebar_group_by": "تجميع حسب",
-  "sidebar_one_list": "في قائمة واحدة"
+  "sidebar_one_list": "في قائمة واحدة",
+  "acp_add": "ربط وكيل برمجة",
+  "acp_edit": "تعديل وكيل البرمجة",
+  "acp_preset": "وكيل البرمجة",
+  "acp_custom": "آخر (إعداد مخصص)",
+  "acp_name": "الاسم",
+  "acp_executable": "الملف التنفيذي",
+  "acp_arguments": "الوسائط",
+  "acp_argument": "الوسيط {number}",
+  "acp_add_argument": "إضافة وسيط",
+  "acp_test": "اختبار الاتصال",
+  "acp_setup_help": "ثبّت الوكيل وسجّل الدخول أولاً على الجهاز الذي يشغّل OpenResearch. سيُستخدم حسابك وإعداداتك الحالية.",
+  "acp_setup_docs": "إرشادات الإعداد",
+  "acp_edit_help": "تسري التغييرات على المحادثات الجديدة. تحتفظ المحادثات الحالية بإعدادات التشغيل الخاصة بها.",
+  "acp_advanced": "إعداد متقدم",
+  "acp_adapter_help": "يحتاج {name} إلى إضافة اتصال. اتبع إرشادات الإعداد ثم أعد التحقق."
 }

@@ -1286,5 +1286,20 @@
   "sidebar_reveal_project": "Finder で表示",
   "sidebar_filter": "フィルター",
   "sidebar_group_by": "グループ分け",
-  "sidebar_one_list": "1 つの一覧"
+  "sidebar_one_list": "1 つの一覧",
+  "acp_add": "コーディングエージェントを接続",
+  "acp_edit": "コーディングエージェントを編集",
+  "acp_preset": "コーディングエージェント",
+  "acp_custom": "その他（カスタム設定）",
+  "acp_name": "名前",
+  "acp_executable": "実行ファイル",
+  "acp_arguments": "引数",
+  "acp_argument": "引数 {number}",
+  "acp_add_argument": "引数を追加",
+  "acp_test": "接続をテスト",
+  "acp_setup_help": "まず OpenResearch を実行するマシンでインストールしてログインしてください。既存のアカウントと設定が使用されます。",
+  "acp_setup_docs": "設定手順",
+  "acp_edit_help": "変更は新しいチャットに適用されます。既存のチャットは起動設定を保持します。",
+  "acp_advanced": "詳細設定",
+  "acp_adapter_help": "{name} には接続用アドオンが必要です。設定手順に従ってから再確認してください。"
 }

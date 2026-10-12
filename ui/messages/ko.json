@@ -1286,5 +1286,20 @@
   "sidebar_reveal_project": "Finder에서 표시",
   "sidebar_filter": "필터",
   "sidebar_group_by": "그룹화 기준",
-  "sidebar_one_list": "단일 목록"
+  "sidebar_one_list": "단일 목록",
+  "acp_add": "코딩 에이전트 연결",
+  "acp_edit": "코딩 에이전트 편집",
+  "acp_preset": "코딩 에이전트",
+  "acp_custom": "기타(사용자 지정 설정)",
+  "acp_name": "이름",
+  "acp_executable": "실행 파일",
+  "acp_arguments": "인수",
+  "acp_argument": "인수 {number}",
+  "acp_add_argument": "인수 추가",
+  "acp_test": "연결 테스트",
+  "acp_setup_help": "먼저 OpenResearch를 실행하는 컴퓨터에 설치하고 로그인하세요. 기존 계정과 설정이 사용됩니다.",
+  "acp_setup_docs": "설정 안내",
+  "acp_edit_help": "변경 사항은 새 채팅에 적용됩니다. 기존 채팅은 실행 설정을 유지합니다.",
+  "acp_advanced": "고급 설정",
+  "acp_adapter_help": "{name}에는 연결 추가 기능이 필요합니다. 설정 안내를 따른 후 다시 확인하세요."
 }

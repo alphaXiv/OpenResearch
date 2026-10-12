@@ -1286,5 +1286,20 @@
   "sidebar_reveal_project": "Pokaż w Finderze",
   "sidebar_filter": "Filtruj",
   "sidebar_group_by": "Grupuj według",
-  "sidebar_one_list": "Na jednej liście"
+  "sidebar_one_list": "Na jednej liście",
+  "acp_add": "Połącz agenta programistycznego",
+  "acp_edit": "Edytuj agenta programistycznego",
+  "acp_preset": "Agent programistyczny",
+  "acp_custom": "Inny (konfiguracja własna)",
+  "acp_name": "Nazwa",
+  "acp_executable": "Plik wykonywalny",
+  "acp_arguments": "Argumenty",
+  "acp_argument": "Argument {number}",
+  "acp_add_argument": "Dodaj argument",
+  "acp_test": "Testuj połączenie",
+  "acp_setup_help": "Najpierw zainstaluj i zaloguj się na komputerze, na którym działa OpenResearch. Zostaną użyte istniejące konto i ustawienia.",
+  "acp_setup_docs": "Instrukcje konfiguracji",
+  "acp_edit_help": "Zmiany dotyczą nowych czatów. Istniejące czaty zachowują konfigurację uruchamiania.",
+  "acp_advanced": "Ustawienia zaawansowane",
+  "acp_adapter_help": "{name} wymaga dodatku do połączenia. Postępuj zgodnie z instrukcjami konfiguracji, a następnie sprawdź ponownie."
 }

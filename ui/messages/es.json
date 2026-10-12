@@ -1286,5 +1286,20 @@
   "sidebar_reveal_project": "Mostrar en Finder",
   "sidebar_filter": "Filtrar",
   "sidebar_group_by": "Agrupar por",
-  "sidebar_one_list": "En una lista"
+  "sidebar_one_list": "En una lista",
+  "acp_add": "Conectar un agente de programación",
+  "acp_edit": "Editar agente de programación",
+  "acp_preset": "Agente de programación",
+  "acp_custom": "Otro (configuración personalizada)",
+  "acp_name": "Nombre",
+  "acp_executable": "Ejecutable",
+  "acp_arguments": "Argumentos",
+  "acp_argument": "Argumento {number}",
+  "acp_add_argument": "Añadir argumento",
+  "acp_test": "Probar conexión",
+  "acp_setup_help": "Primero instala el agente e inicia sesión en la máquina que ejecuta OpenResearch. Se usarán tu cuenta y configuración existentes.",
+  "acp_setup_docs": "Instrucciones de configuración",
+  "acp_edit_help": "Los cambios se aplican a los chats nuevos. Los chats existentes conservan su configuración de inicio.",
+  "acp_advanced": "Configuración avanzada",
+  "acp_adapter_help": "{name} necesita un complemento de conexión. Sigue las instrucciones de configuración y vuelve a comprobar."
 }
