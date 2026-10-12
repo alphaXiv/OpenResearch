@@ -221,3 +221,19 @@ cat notes.md | orx exp desc <expId> --stdin   # overwrite from stdin (long markd
   append, read first, edit, and write back.
 - `<expId>` comes from `orx create-experiment` output or `orx project view
   <projectId>` (the experiment id, not a run or project id).
+
+## Renaming an experiment — `orx exp rename`
+
+Set or clear an experiment node's human-readable title (its display name in the
+UI and tree):
+
+```sh
+orx exp rename <expId> "Higher LR with Cosine Warmup"   # set a custom title
+orx exp rename <expId> --name "Ablation: No Dropout"   # set title via flag
+orx exp rename <expId> --clear                         # remove title, revert to slug
+```
+
+- Setting a title updates how the experiment appears across tree views
+  and CLI lists, while preserving the underlying branch name (`orx/<slug>`) and slug.
+- `--clear` removes the custom title, returning the display name to its original slug.
+
