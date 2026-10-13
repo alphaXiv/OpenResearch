@@ -102,6 +102,7 @@ import {
   type Run,
   type SlurmPreflight,
   type SlurmSettings,
+  type SshHost,
   type SshPreflight,
   type SshExecutionPreflight,
   testSshExecution,
@@ -827,10 +828,24 @@ function HostTestCell({ test, connecting, masterRunning, containerFailed = false
   );
 }
 
+const SSH_MAIN_CONFIG = "~/.ssh/config";
+
+/** Hosts by the config file that defines them, ~/.ssh/config first, then
+ * included files in the order ssh reads them. */
+function groupSshHostsBySource(hosts: SshHost[]) {
+  const groups = new Map<string, SshHost[]>([[SSH_MAIN_CONFIG, []]]);
+  for (const host of hosts) {
+    const source = host.source ?? SSH_MAIN_CONFIG;
+    groups.set(source, [...(groups.get(source) ?? []), host]);
+  }
+  return [...groups].filter(([, members]) => members.length > 0);
+}
+
 function SshSection() {
   const hostsOptions = getSshSettingsQuery();
   const hostsQuery = useQuery(hostsOptions);
   const hosts = hostsQuery.data?.hosts ?? (hostsQuery.isError ? [] : null);
+  const hostGroups = groupSshHostsBySource(hosts ?? []);
   const [configOpen, setConfigOpen] = useState(false);
   const [tests, setTests] = useState<Record<string, SshExecutionPreflight>>({});
   const [drafts, setDrafts] = useState<Record<string, string | null>>({});
@@ -885,7 +900,14 @@ function SshSection() {
         <p className="settings-empty mt-1 mx-0 mb-0 text-base text-subtext">{m.settings_page_no_hosts_found_in_ssh_config()}</p>
       ) : (
         <div className="border-y border-border-variant divide-y divide-border-variant">
-          {hosts.map((h) => {
+          {hostGroups.flatMap(([source, members]) => [
+            // Headings only once Include spreads hosts across several files.
+            ...(hostGroups.length > 1 ? [
+              <div key={`source:${source}`} className="ssh-host-source pt-4 pb-1.5 truncate text-xs font-medium text-subtext" title={source}>
+                {ltr(source)}
+              </div>,
+            ] : []),
+            ...members.map((h) => {
             // Session-local result wins; the persisted one covers restarts.
             const reference = drafts[h.host] === undefined ? h.container ?? null : drafts[h.host];
             const executionTest = tests[h.host];
@@ -1026,7 +1048,8 @@ function SshSection() {
                 )}
               </div>
             );
-          })}
+          }),
+          ])}
         </div>
       )}
       {configOpen && (

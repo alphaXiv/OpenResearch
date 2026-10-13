@@ -992,6 +992,8 @@ export const moveDataDir = (path: string) =>
 export interface SshHost {
   container?: string | null;
   host: string;
+  /** The SSH config file whose Host block first names it, e.g. `~/.ssh/conf.d/lab.conf`. */
+  source?: string;
   hostname?: string;
   user?: string;
   port?: string;
