@@ -319,10 +319,13 @@ impl SshHostReader<'_> {
             return;
         };
         self.stack.push(key);
+        // Each file starts in the block that included it, and ssh restores
+        // that block when the file ends.
+        let enclosing = self.current.clone();
         let enclosing_source =
             std::mem::replace(&mut self.source, ssh_config_label(self.home, path));
         for line in raw.lines() {
-            let line = line.split('#').next().unwrap_or("").trim();
+            let line = strip_ssh_comment(line).trim();
             if line.is_empty() {
                 continue;
             }
@@ -347,15 +350,11 @@ impl SshHostReader<'_> {
                     continue;
                 }
                 "include" => {
-                    // Included lines extend the enclosing block; ssh restores
-                    // that block once the include ends.
-                    let enclosing = self.current.clone();
                     for pattern in ssh_config_args(value) {
                         for file in expand_ssh_include(self.home, &pattern) {
                             self.read_file(&file);
                         }
                     }
-                    self.current = enclosing;
                     continue;
                 }
                 _ => {}
@@ -375,6 +374,7 @@ impl SshHostReader<'_> {
                 }
             }
         }
+        self.current = enclosing;
         self.source = enclosing_source;
         self.stack.pop();
     }
@@ -409,6 +409,22 @@ fn ssh_config_label(home: &std::path::Path, path: &std::path::Path) -> String {
             .join("/"),
         Err(_) => path.display().to_string(),
     }
+}
+
+/// The line before its comment: a `#` outside quotes that starts a word, as
+/// ssh splits arguments (so `"lab#1.conf"` and `alice#1` keep their `#`).
+fn strip_ssh_comment(line: &str) -> &str {
+    let mut quoted = false;
+    let mut word_start = true;
+    for (i, c) in line.char_indices() {
+        match c {
+            '"' => quoted = !quoted,
+            '#' if !quoted && word_start => return &line[..i],
+            _ => {}
+        }
+        word_start = c.is_whitespace();
+    }
+    line
 }
 
 /// Whitespace-separated arguments, double quotes grouping.
@@ -568,7 +584,7 @@ pub(super) struct SaveSshSettingsReq {
 
 pub(super) async fn save_ssh_settings(Json(req): Json<SaveSshSettingsReq>) -> ApiResult {
     let host = req.host.trim().to_string();
-    require_configured_ssh_host(&host)?;
+    require_configured_ssh_host(&host).await?;
     let options = crate::config::SshHostSettings {
         container: req.container,
     };
@@ -588,7 +604,7 @@ pub(super) struct SaveSshDefaultReq {
 pub(super) async fn save_ssh_default(Json(req): Json<SaveSshDefaultReq>) -> ApiResult {
     let host = req.host.map(|host| host.trim().to_string());
     if let Some(host) = &host {
-        require_configured_ssh_host(host)?;
+        require_configured_ssh_host(host).await?;
     }
     blocking_api(move || {
         crate::config::set_ssh_default(host)?;
@@ -705,7 +721,7 @@ pub(super) async fn ssh_preflight(Json(req): Json<SshPreflightReq>) -> ApiResult
     if host.is_empty() {
         return Err(bad_request("host is required"));
     }
-    require_configured_ssh_host(&host)?;
+    require_configured_ssh_host(&host).await?;
     if let Some(reference) = &req.container {
         crate::jobs::ssh::validate_container_reference(reference).map_err(bad_request)?;
     }
@@ -728,8 +744,13 @@ pub(super) async fn ssh_preflight(Json(req): Json<SshPreflightReq>) -> ApiResult
     Ok(Json(result))
 }
 
-pub(super) fn require_configured_ssh_host(host: &str) -> Result<(), ApiError> {
-    if list_ssh_hosts()
+pub(super) async fn require_configured_ssh_host(host: &str) -> Result<(), ApiError> {
+    // Following Include reads files and lists directories; keep that off the
+    // async workers, as `ssh_settings` does.
+    let hosts = tokio::task::spawn_blocking(list_ssh_hosts)
+        .await
+        .map_err(|e| ApiError::from(anyhow!("ssh task failed: {e}")))?;
+    if hosts
         .iter()
         .any(|candidate| candidate.get("host").and_then(Value::as_str) == Some(host))
     {
@@ -1360,6 +1381,7 @@ pub(crate) async fn configure(backend: &str, body: Value) -> Result<Value> {
             // Validate both changes before persisting either.
             if let Some(host) = body.get("defaultHost").and_then(Value::as_str) {
                 require_configured_ssh_host(host)
+                    .await
                     .map_err(|ApiError(_, message)| anyhow!(message))?;
             }
             if body.get("container").is_some() {
@@ -1560,6 +1582,56 @@ mod tests {
         assert_eq!(hosts[0]["hostname"], "outer.invalid");
         assert_eq!(hosts[0]["user"], "carol");
         assert_eq!(hosts[1]["user"], "dave");
+    }
+
+    #[test]
+    fn ssh_each_included_file_starts_in_the_enclosing_block() {
+        let home = fake_home(&[
+            (
+                ".ssh/config",
+                "Host outer
+  Include a.conf b.conf
+",
+            ),
+            (
+                ".ssh/a.conf",
+                "Host a
+  User alice
+",
+            ),
+            (
+                ".ssh/b.conf",
+                "Port 2222
+Host b
+",
+            ),
+        ]);
+        let hosts = ssh_hosts_in(home.path());
+        assert_eq!(names(&hosts), ["outer", "a", "b"]);
+        assert_eq!(hosts[0]["port"], "2222");
+        assert!(hosts[1].get("port").is_none());
+    }
+
+    #[test]
+    fn ssh_comments_start_only_at_an_unquoted_word() {
+        let home = fake_home(&[
+            (
+                ".ssh/config",
+                "Include \"conf.d/lab#1.conf\" # the first lab
+# Host commented-out
+",
+            ),
+            (
+                ".ssh/conf.d/lab#1.conf",
+                "Host lab-one # note
+  User alice#1
+",
+            ),
+        ]);
+        let hosts = ssh_hosts_in(home.path());
+        assert_eq!(names(&hosts), ["lab-one"]);
+        assert_eq!(hosts[0]["user"], "alice#1");
+        assert_eq!(hosts[0]["source"], "~/.ssh/conf.d/lab#1.conf");
     }
 
     #[test]
