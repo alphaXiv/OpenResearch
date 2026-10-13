@@ -1,10 +1,10 @@
 # Keep the real WinForms owner, replacing only the dialog that requires user input.
 function New-Object {
     param([string]$TypeName)
-    if ($TypeName -ne 'System.Windows.Forms.FolderBrowserDialog') {
+    if ($TypeName -ne 'OpenResearch.FolderPicker') {
         return Microsoft.PowerShell.Utility\New-Object -TypeName $TypeName
     }
-    $picker = [PSCustomObject]@{ Description = ''; SelectedPath = $env:ORX_PICKER_TEST_PATH }
+    $picker = [PSCustomObject]@{ SelectedPath = $env:ORX_PICKER_TEST_PATH }
     $picker | Add-Member ScriptMethod ShowDialog {
         param($owner)
         if ($null -eq $owner -or !$owner.Visible -or !$owner.TopMost -or !$owner.IsHandleCreated) {
