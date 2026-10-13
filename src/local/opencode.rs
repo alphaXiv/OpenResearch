@@ -280,10 +280,10 @@ fn cross_harness_bullet(session_harness: Option<&str>) -> String {
             .map(|harness| format!("`{}`", harness.id()))
             .collect();
         if names.is_empty() {
-            " The user turned every harness off for review, so do not spawn cross-harness helpers."
+            " The user turned every harness off for review, so do not create cross-harness review chats."
                 .to_string()
         } else {
-            format!(" Spawn review helpers only on: {}.", names.join(", "))
+            format!(" Create review chats only on: {}.", names.join(", "))
         }
     };
     format!(

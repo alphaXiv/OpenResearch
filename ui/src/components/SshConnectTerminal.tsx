@@ -114,16 +114,18 @@ type CommandStatus = "running" | "done" | "failed" | "closed";
  * `gh auth login` via the settings allowlist), so the user never copies it into
  * a terminal of their own. Framed like an app window; after the command exits
  * the same terminal continues as the user's shell for follow-ups. */
-export function SettingsCommandTerminal({ path, label, onComplete, onError, onClose }: {
+export function SettingsCommandTerminal({ path, label, className = "mt-4 overflow-hidden rounded-lg border border-border", heightClass = "h-80", onComplete, onError, onClose }: {
   path: string;
   label: string;
+  className?: string;
+  heightClass?: string;
   onComplete: () => void;
   onError: (error: string) => void;
   onClose: () => void;
 }) {
   const [status, setStatus] = useState<CommandStatus>("running");
   return (
-    <div className="mt-4 overflow-hidden rounded-lg border border-border">
+    <div className={className}>
       <div className="flex h-9 items-center gap-3 border-b border-b-border-variant bg-surface ps-3 pe-1.5">
         <code dir="ltr" className="min-w-0 flex-1 truncate font-mono text-xs text-subtext">
           {label}
@@ -152,7 +154,7 @@ export function SettingsCommandTerminal({ path, label, onComplete, onError, onCl
       <CommandTerminal
         path={path}
         label={label}
-        heightClass="h-80"
+        heightClass={heightClass}
         frame="bare"
         palette="app"
         shellAfter
@@ -309,7 +311,7 @@ export function CommandTerminal({ path, label, command, heightClass = "h-40", fr
   }, [active, error, awaitingApproval]);
 
   return (
-    <div className={frame === "card" ? "mt-3" : undefined}>
+    <div className={frame === "card" ? "mt-3" : "contents"}>
       <div
         className={`${heightClass} ${frame === "card" ? TERMINAL_CLASS_NAME : `overflow-hidden p-3 ${palette === "app" ? "bg-terminal-app" : "bg-terminal"}`}`}
         role="group"

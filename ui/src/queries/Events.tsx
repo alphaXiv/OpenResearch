@@ -2,6 +2,7 @@ import type { InfiniteData } from "@tanstack/react-query";
 import type { ChatSession, SidebarChatPage } from "../api";
 import { markLiveUpdate } from "./live";
 import {
+  refreshHarness,
   refreshHarnesses,
   getHarnessesQuery,
   getUpdateStatusQuery,
@@ -114,7 +115,11 @@ export function QueryEvents() {
         });
       }
     });
-    const offAuth = onHarnessAuth(() => { if (isCurrentScope(scope)) void refreshHarnesses(true).catch(() => {}); });
+    const offAuth = onHarnessAuth(({ harness }) => {
+      if (!isCurrentScope(scope)) return;
+      // Re-probe only the harness whose sign-in changed; a full sweep waits on the slowest CLI.
+      void (harness === "*" ? refreshHarnesses(true) : refreshHarness(harness)).catch(() => {});
+    });
     // The catalog fill already ran server-side; a plain read serves the
     // updated cache — forcing a refresh here would spawn a second sweep. The
     // query's 5-minute staleTime would swallow a bare fetchQuery, so bypass it.

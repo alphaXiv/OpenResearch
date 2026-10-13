@@ -76,7 +76,7 @@ enum Command {
     /// Operate on one local project.
     Project(ProjectArgs),
 
-    /// Delegate a task to a second agent session.
+    /// Create independent project chats.
     Agent(AgentArgs),
 
     /// List a project's runs.
@@ -374,10 +374,12 @@ pub struct AgentArgs {
 
 #[derive(Subcommand, Debug)]
 pub enum AgentCommand {
-    /// Hand a task to a helper agent running in its own top-level session.
+    /// Create an independent chat using your saved New Chat settings.
+    #[command(
+        after_help = "New chats use your saved New Chat settings unless --harness names another agent (for cross-harness review). --no-wake is no longer supported; created chats never wake the creator."
+    )]
     Spawn {
-        /// What the helper agent should do. Write it as a self-contained brief:
-        /// the helper starts with an empty transcript and cannot see this chat.
+        /// Opening message for the new chat; it starts with an empty transcript.
         task: Option<String>,
         /// Read the task from stdin instead, for long multi-paragraph briefs.
         #[arg(long)]
@@ -385,17 +387,18 @@ pub enum AgentCommand {
         /// Name the session in the sidebar. Defaults to an auto-generated title.
         #[arg(long)]
         title: Option<String>,
-        /// Harness for the helper (defaults to this session's).
+        /// Project ID (defaults to the current OpenResearch chat's project).
+        #[arg(long)]
+        project: Option<String>,
+        /// Run the chat on this harness instead of the New Chat agent
+        /// (`orx agent harnesses` lists them), with its default settings.
         #[arg(long)]
         harness: Option<String>,
-        /// Model for the helper (defaults to this session's).
-        #[arg(long)]
+        /// Model for `--harness`; defaults to that harness's strongest model.
+        #[arg(long, requires = "harness")]
         model: Option<String>,
-        /// Do not resume this chat when the helper finishes.
-        #[arg(long)]
-        no_wake: bool,
     },
-    /// List the agent harnesses a helper can run on here, with each one's
+    /// List the agent harnesses a chat can run on here, with each one's
     /// model vendor, so independent checks can use a different vendor.
     Harnesses {
         #[arg(long)]
@@ -440,6 +443,18 @@ pub enum ExpCommand {
         /// Restore descendants, excluding the selected experiment.
         #[arg(long, group = "unarchive_scope")]
         descendants: bool,
+    },
+
+    /// Re-parent an experiment and its subtree. Only the tree changes; git branches stay put.
+    #[command(group(clap::ArgGroup::new("move_target").required(true)))]
+    Move {
+        exp_id: String,
+        /// New parent experiment in the same project.
+        #[arg(long, group = "move_target")]
+        parent: Option<String>,
+        /// Make the experiment a new root (baseline).
+        #[arg(long, group = "move_target")]
+        baseline: bool,
     },
 
     /// Show the experiment's status, run command, and latest run.
@@ -954,6 +969,19 @@ pub struct PaperArgs {
     pub full: bool,
 }
 
+fn explain_removed_spawn_flags(mut error: clap::Error) -> clap::Error {
+    use clap::error::{ContextKind, ContextValue, ErrorKind};
+    if error.kind() == ErrorKind::UnknownArgument
+        && error.to_string().contains(" agent spawn")
+        && matches!(error.get(ContextKind::InvalidArg), Some(ContextValue::String(flag)) if flag.split('=').next() == Some("--no-wake"))
+    {
+        error.insert(ContextKind::Suggested, ContextValue::StyledStrs(vec![
+            "New chats use your saved New Chat settings (or `--harness`) and never wake the creator.".into()
+        ]));
+    }
+    error
+}
+
 // The default multi-thread runtime is load-bearing for desktop app mode: it
 // blocks the main thread in the window's run loop while the dashboard server runs
 // on worker threads. A `current_thread` flavor would deadlock. See commands::app.
@@ -985,7 +1013,7 @@ async fn main() {
         return;
     }
 
-    let cli = Cli::parse();
+    let cli = Cli::try_parse().unwrap_or_else(|error| explain_removed_spawn_flags(error).exit());
     // Double-clicked from Explorer: open the desktop app instead of a console session.
     #[cfg(windows)]
     if cli.command.is_none() && owns_its_console() {
@@ -1433,6 +1461,30 @@ mod cli_tests {
             };
             assert_eq!(actual, expected);
         }
+    }
+
+    #[test]
+    fn agent_spawn_rejects_removed_settings_flags() {
+        for program in ["orx", "orx.exe"] {
+            for flag in ["--no-wake", "--no-wake=true"] {
+                let error = Cli::try_parse_from([program, "agent", "spawn", "task", flag])
+                    .expect_err("removed flag");
+                assert_eq!(error.kind(), clap::error::ErrorKind::UnknownArgument);
+                assert!(explain_removed_spawn_flags(error)
+                    .to_string()
+                    .contains("saved New Chat settings"));
+            }
+        }
+        assert!(Cli::try_parse_from(["orx", "agent", "spawn", "task", "--project", "p1"]).is_ok());
+        assert!(
+            Cli::try_parse_from(["orx", "agent", "spawn", "task", "--harness", "codex"]).is_ok()
+        );
+        let model_alone = Cli::try_parse_from(["orx", "agent", "spawn", "task", "--model", "m"])
+            .expect_err("--model needs --harness");
+        assert_eq!(
+            model_alone.kind(),
+            clap::error::ErrorKind::MissingRequiredArgument
+        );
     }
 
     #[test]
