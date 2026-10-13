@@ -72,7 +72,7 @@ OpenResearch のマネージドコンピュートを利用できます。
 <img src=".github/readme-assets/cursor.svg" alt="" width="18" height="18" align="texttop" /> Cursor,
 <img src=".github/readme-assets/antigravity.svg" alt="" width="18" height="18" align="texttop" /> Google Antigravity,
 <img src=".github/readme-assets/kimi.svg" alt="" width="18" height="18" align="texttop" /> Kimi Code,
-<img src=".github/readme-assets/minimax.svg" alt="" width="18" height="18" align="texttop" /> MiniMax Code、
+<img src=".github/readme-assets/minimax.png" alt="" width="18" height="18" align="texttop" /> MiniMax Code、
 <img src=".github/readme-assets/zcode.svg" alt="" width="18" height="18" align="texttop" /> ZCode.
 OpenCode では、次のツールを通じて[ローカルモデルを使う](docs/local-models.md)こともできます：
 <img src=".github/readme-assets/lmstudio.svg" alt="" width="18" height="18" align="texttop" /> LM Studio,

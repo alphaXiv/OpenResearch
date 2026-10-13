@@ -73,7 +73,7 @@ updates and use managed OpenResearch compute.
 <img src=".github/readme-assets/cursor.svg" alt="" width="18" height="18" align="texttop" /> Cursor,
 <img src=".github/readme-assets/antigravity.svg" alt="" width="18" height="18" align="texttop" /> Google Antigravity,
 <img src=".github/readme-assets/kimi.svg" alt="" width="18" height="18" align="texttop" /> Kimi Code,
-<img src=".github/readme-assets/minimax.svg" alt="" width="18" height="18" align="texttop" /> MiniMax Code, and
+<img src=".github/readme-assets/minimax.png" alt="" width="18" height="18" align="texttop" /> MiniMax Code, and
 <img src=".github/readme-assets/zcode.svg" alt="" width="18" height="18" align="texttop" /> ZCode.
 You can also [use a local model](docs/local-models.md) with OpenCode through
 <img src=".github/readme-assets/lmstudio.svg" alt="" width="18" height="18" align="texttop" /> LM Studio,

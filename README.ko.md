@@ -72,7 +72,7 @@ OpenResearch의 관리형 컴퓨팅을 사용할 수 있습니다.
 <img src=".github/readme-assets/cursor.svg" alt="" width="18" height="18" align="texttop" /> Cursor,
 <img src=".github/readme-assets/antigravity.svg" alt="" width="18" height="18" align="texttop" /> Google Antigravity,
 <img src=".github/readme-assets/kimi.svg" alt="" width="18" height="18" align="texttop" /> Kimi Code,
-<img src=".github/readme-assets/minimax.svg" alt="" width="18" height="18" align="texttop" /> MiniMax Code 및
+<img src=".github/readme-assets/minimax.png" alt="" width="18" height="18" align="texttop" /> MiniMax Code 및
 <img src=".github/readme-assets/zcode.svg" alt="" width="18" height="18" align="texttop" /> ZCode.
 OpenCode에서 다음 도구를 통해 [로컬 모델을 사용할 수도 있습니다](docs/local-models.md):
 <img src=".github/readme-assets/lmstudio.svg" alt="" width="18" height="18" align="texttop" /> LM Studio,

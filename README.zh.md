@@ -72,7 +72,7 @@ Settings → Updates → **Install the `orx` command** 中为终端安装 `orx`�
 <img src=".github/readme-assets/cursor.svg" alt="" width="18" height="18" align="texttop" /> Cursor,
 <img src=".github/readme-assets/antigravity.svg" alt="" width="18" height="18" align="texttop" /> Google Antigravity,
 <img src=".github/readme-assets/kimi.svg" alt="" width="18" height="18" align="texttop" /> Kimi Code,
-<img src=".github/readme-assets/minimax.svg" alt="" width="18" height="18" align="texttop" /> MiniMax Code，以及
+<img src=".github/readme-assets/minimax.png" alt="" width="18" height="18" align="texttop" /> MiniMax Code，以及
 <img src=".github/readme-assets/zcode.svg" alt="" width="18" height="18" align="texttop" /> ZCode.
 你也可以通过以下工具在 OpenCode 中[使用本地模型](docs/local-models.md)：
 <img src=".github/readme-assets/lmstudio.svg" alt="" width="18" height="18" align="texttop" /> LM Studio,
