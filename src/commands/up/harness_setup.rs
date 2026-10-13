@@ -95,6 +95,20 @@ fn windows_install_script(install: &str) -> String {
     )
 }
 
+/// ZCode's desktop runtime runs through `ZCode.exe`, a GUI program: started
+/// in the terminal directly it gets no console and its output is lost. A pipe
+/// gives it a real stdout, and makes PowerShell wait for it.
+#[cfg(any(windows, test))]
+fn windows_zcode_login_script(program: &str, args: &[String]) -> String {
+    let quote = |arg: &str| format!("'{}'", arg.replace('\'', "''"));
+    let args: Vec<String> = args.iter().map(|arg| quote(arg)).collect();
+    format!(
+        "$LASTEXITCODE = 0\n& {} {} 2>&1 | ForEach-Object {{ \"$_\" }}\nexit $LASTEXITCODE",
+        quote(program),
+        args.join(" ")
+    )
+}
+
 /// PowerShell's `-EncodedCommand` form: base64 of the script's UTF-16LE.
 #[cfg(any(windows, test))]
 fn encoded_command(script: &str) -> String {
@@ -365,15 +379,28 @@ async fn run(
                 };
                 let (_, args) = login_command("zcode").unwrap();
                 zcode_env = launch.env.clone();
-                (
-                    launch.program.to_string_lossy().into_owned(),
-                    launch
-                        .prefix
-                        .iter()
-                        .map(|arg| arg.to_string_lossy().into_owned())
-                        .chain(args)
-                        .collect(),
-                )
+                let program = launch.program.to_string_lossy().into_owned();
+                let args: Vec<String> = launch
+                    .prefix
+                    .iter()
+                    .map(|arg| arg.to_string_lossy().into_owned())
+                    .chain(args)
+                    .collect();
+                #[cfg(windows)]
+                let (program, args) = if launch.bundled {
+                    let script = windows_zcode_login_script(&program, &args);
+                    (
+                        windows_powershell(),
+                        vec![
+                            "-NoProfile".into(),
+                            "-EncodedCommand".into(),
+                            encoded_command(&script),
+                        ],
+                    )
+                } else {
+                    (program, args)
+                };
+                (program, args)
             }
             Action::Login | Action::Update => {
                 let Some(harness) = crate::local::harness::detect_harness(&request.harness).await
@@ -891,6 +918,26 @@ mod tests {
                 &base64::engine::general_purpose::STANDARD,
                 b"e\0x\0i\0t\0 \x001\0"
             )
+        );
+    }
+
+    #[test]
+    fn the_windows_zcode_login_pipes_the_desktop_runtime() {
+        let script = windows_zcode_login_script(
+            r"C:\Users\O'Brien\AppData\Local\Programs\ZCode\ZCode.exe",
+            &[
+                r"C:\Users\O'Brien\AppData\Local\Programs\ZCode\resources\glm\zcode.cjs".into(),
+                "login".into(),
+                "--no-browser".into(),
+            ],
+        );
+        assert_eq!(
+            script,
+            "$LASTEXITCODE = 0\n\
+             & 'C:\\Users\\O''Brien\\AppData\\Local\\Programs\\ZCode\\ZCode.exe' \
+             'C:\\Users\\O''Brien\\AppData\\Local\\Programs\\ZCode\\resources\\glm\\zcode.cjs' \
+             'login' '--no-browser' 2>&1 | ForEach-Object { \"$_\" }\n\
+             exit $LASTEXITCODE"
         );
     }
 

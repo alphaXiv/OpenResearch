@@ -175,10 +175,13 @@ enum Access {
     None,
 }
 
-/// What `zcode login` leaves for the runtime: `account-provider:<id>:identity`
-/// and the plan's API key, `account-provider:coding-plan:<id>:account:<identity>:api-key`.
-/// The runtime uses a plan only when the key is the identity's own. Returns
-/// the plans it can use, and whether some plan's key is another account's.
+/// What a sign-in leaves for the runtime: the plan's identity,
+/// `account-provider:<id>:identity`, plus its credential. Since ZCode 3.15
+/// `account-provider:<id>:auth-source` names which one: `manual` is the
+/// identity's own API key, `account-provider:coding-plan:<id>:account:<identity>:api-key`,
+/// anything else the account's OAuth token, `oauth:<zai|bigmodel>:access_token`.
+/// Earlier versions wrote no source and used the API key. Returns the plans
+/// the runtime can use, and whether some plan's key is another account's.
 fn signed_in_plans(
     store: &serde_json::Map<String, Value>,
     cipher_key: Option<&[u8; 32]>,
@@ -192,6 +195,33 @@ fn signed_in_plans(
         else {
             continue;
         };
+        let source = store
+            .get(&format!("account-provider:{provider}:auth-source"))
+            .and_then(Value::as_str)
+            // Unreadable counts as unknown, as before 3.15.
+            .and_then(|source| match cipher_key {
+                Some(cipher_key) => decrypt_credential(source, cipher_key),
+                None => (!source.starts_with("enc:")).then(|| source.to_string()),
+            });
+        let manual = source.as_deref().map(str::trim) == Some("manual");
+        // The account family, as the built-in catalog's `accountType` gives it
+        // for every `account:zai-*` and `account:bigmodel-*` plan.
+        let family = if provider.contains("bigmodel") {
+            "bigmodel"
+        } else {
+            "zai"
+        };
+        let token = store
+            .get(&format!("oauth:{family}:access_token"))
+            .and_then(Value::as_str)
+            .is_some_and(|token| !token.trim().is_empty());
+        if token && !manual {
+            plans.push(provider.to_string());
+            continue;
+        }
+        if source.is_some() && !manual {
+            continue;
+        }
         let prefix = format!("account-provider:coding-plan:{provider}:account:");
         let accounts: Vec<&str> = store
             .keys()
@@ -1176,6 +1206,56 @@ mod tests {
     }
 
     #[test]
+    fn the_auth_source_picks_the_oauth_token_or_the_api_key() {
+        let identity = "account-provider:account:zai-individual-coding-plan:identity";
+        let source = "account-provider:account:zai-individual-coding-plan:auth-source";
+        let api_key =
+            "account-provider:coding-plan:account:zai-individual-coding-plan:account:1234567:api-key";
+        let store = |entries: &[(&str, &str)]| {
+            entries
+                .iter()
+                .map(|(key, value)| (key.to_string(), Value::from(*value)))
+                .collect::<serde_json::Map<_, _>>()
+        };
+        let key = test_key();
+        // ZCode 3.15's browser sign-in: identity and OAuth token, no plan key.
+        let oauth = [
+            (identity, SEALED_IDENTITY),
+            (source, "oauth"),
+            ("oauth:zai:access_token", "enc:v1:a.b.c"),
+        ];
+        assert_eq!(plan_access(&store(&oauth), Some(&key)), Access::Ready);
+        assert_eq!(plan_access(&store(&oauth), None), Access::Ready);
+        // Without a source (before 3.15) the token is enough too.
+        assert_eq!(
+            plan_access(&store(&[oauth[0], oauth[2]]), Some(&key)),
+            Access::Ready
+        );
+        // The token's family is the plan's.
+        let bigmodel = [
+            (
+                "account-provider:account:bigmodel-individual-coding-plan:identity",
+                SEALED_IDENTITY,
+            ),
+            ("oauth:zai:access_token", "enc:v1:a.b.c"),
+        ];
+        assert_eq!(plan_access(&store(&bigmodel), Some(&key)), Access::None);
+        // An OAuth source with no token, or a key source with no key.
+        assert_eq!(
+            plan_access(&store(&[oauth[0], oauth[1], (api_key, "k")]), Some(&key)),
+            Access::None
+        );
+        let manual = [
+            (identity, SEALED_IDENTITY),
+            (source, "manual"),
+            ("oauth:zai:access_token", "enc:v1:a.b.c"),
+        ];
+        assert_eq!(plan_access(&store(&manual), Some(&key)), Access::None);
+        let with_key = [manual[0], manual[1], manual[2], (api_key, "k")];
+        assert_eq!(plan_access(&store(&with_key), Some(&key)), Access::Ready);
+    }
+
+    #[test]
     fn the_catalog_lists_signed_in_plans_and_keyed_providers() {
         let dir = std::env::temp_dir().join(format!("orx-zcode-models-{}", uuid::Uuid::new_v4()));
         let v2 = dir.join("v2");
@@ -1312,6 +1392,12 @@ mod tests {
             r#"{"account-provider:account:zai-individual-coding-plan:identity":"enc:v1:a.b.c"}"#;
         std::fs::write(v2.join("credentials.json"), identity_only).unwrap();
         assert!(!(access(&dir) == Access::Ready));
+        // ZCode 3.15's sign-in pairs the identity with the OAuth token instead.
+        let oauth = r#"{"account-provider:account:zai-individual-coding-plan:identity":"enc:v1:a.b.c",
+            "account-provider:account:zai-individual-coding-plan:auth-source":"oauth",
+            "oauth:zai:access_token":"enc:v1:a.b.c"}"#;
+        std::fs::write(v2.join("credentials.json"), oauth).unwrap();
+        assert!((access(&dir) == Access::Ready));
         // `zcode login` adds the identity for its plan.
         let cli = app_only.replace(
             "}",
