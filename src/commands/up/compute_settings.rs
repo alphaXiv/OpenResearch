@@ -291,6 +291,7 @@ fn ssh_hosts_in(home: &std::path::Path) -> Vec<Value> {
         hosts: Vec::new(),
         current: Vec::new(),
         stack: Vec::new(),
+        source: String::new(),
     };
     reader.read_file(&home.join(".ssh").join("config"));
     reader.hosts
@@ -303,6 +304,8 @@ struct SshHostReader<'a> {
     current: Vec<usize>,
     // Files being read, outermost first, to stop Include cycles.
     stack: Vec<std::path::PathBuf>,
+    // The file being read, as the dashboard labels it.
+    source: String,
 }
 
 impl SshHostReader<'_> {
@@ -316,6 +319,8 @@ impl SshHostReader<'_> {
             return;
         };
         self.stack.push(key);
+        let enclosing_source =
+            std::mem::replace(&mut self.source, ssh_config_label(self.home, path));
         for line in raw.lines() {
             let line = line.split('#').next().unwrap_or("").trim();
             if line.is_empty() {
@@ -370,10 +375,12 @@ impl SshHostReader<'_> {
                 }
             }
         }
+        self.source = enclosing_source;
         self.stack.pop();
     }
 
-    /// Repeated Host blocks for one alias merge into a single entry.
+    /// Repeated Host blocks for one alias merge into a single entry, which
+    /// keeps the file that first defined it as its `source`.
     fn host_index(&mut self, name: &str) -> usize {
         if let Some(i) = self
             .hosts
@@ -382,8 +389,25 @@ impl SshHostReader<'_> {
         {
             return i;
         }
-        self.hosts.push(json!({ "host": name }));
+        self.hosts
+            .push(json!({ "host": name, "source": self.source }));
         self.hosts.len() - 1
+    }
+}
+
+/// `~/`-relative with `/` separators wherever the file sits under home, so
+/// the label reads the same on every platform.
+fn ssh_config_label(home: &std::path::Path, path: &std::path::Path) -> String {
+    match path.strip_prefix(home) {
+        Ok(relative) => std::iter::once("~".into())
+            .chain(
+                relative
+                    .components()
+                    .map(|c| c.as_os_str().to_string_lossy().into_owned()),
+            )
+            .collect::<Vec<String>>()
+            .join("/"),
+        Err(_) => path.display().to_string(),
     }
 }
 
@@ -1502,6 +1526,21 @@ mod tests {
             ["relative", "glob-a", "glob-b", "absolute", "tilde", "direct"]
         );
         assert_eq!(hosts[0]["user"], "bob");
+        let sources: Vec<&str> = hosts
+            .iter()
+            .map(|h| h["source"].as_str().unwrap())
+            .collect();
+        assert_eq!(
+            sources,
+            [
+                "~/.ssh/extra.conf",
+                "~/.ssh/config.d/a.conf",
+                "~/.ssh/config.d/b.conf",
+                "~/absolute.conf",
+                "~/tilde.conf",
+                "~/.ssh/config",
+            ]
+        );
     }
 
     #[test]
@@ -1526,11 +1565,16 @@ mod tests {
     #[test]
     fn ssh_include_cycles_terminate_and_merge_repeated_hosts() {
         let home = fake_home(&[
-            (".ssh/config", "Include a.conf\nHost top\n"),
+            (".ssh/config", "Include a.conf\nHost top a\n  User erin\n"),
             (".ssh/a.conf", "Host a\nInclude b.conf\n"),
             (".ssh/b.conf", "Host b\nInclude a.conf config\n"),
         ]);
-        assert_eq!(names(&ssh_hosts_in(home.path())), ["a", "b", "top"]);
+        let hosts = ssh_hosts_in(home.path());
+        assert_eq!(names(&hosts), ["a", "b", "top"]);
+        assert_eq!(hosts[2]["source"], "~/.ssh/config");
+        // A later block for `a` fills its gaps but doesn't move it.
+        assert_eq!(hosts[0]["source"], "~/.ssh/a.conf");
+        assert_eq!(hosts[0]["user"], "erin");
     }
 
     #[test]
