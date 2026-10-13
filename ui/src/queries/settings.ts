@@ -185,13 +185,16 @@ export async function refreshHarnesses(refresh = false, retryRejected = false) {
   return fetchHarnesses(refresh, retryRejected);
 }
 
+/** Re-check one harness without waiting on the others' probes. */
+export const refreshHarness = (harness: api.HarnessId) => fetchHarnesses(true, false, harness);
+
 /** The server's cached answer, skipping any in-flight poll that may predate a publish. */
 export const readHarnesses = () => fetchHarnesses(false, false);
 
-async function fetchHarnesses(refresh: boolean, retryRejected: boolean) {
+async function fetchHarnesses(refresh: boolean, retryRejected: boolean, harness?: api.HarnessId) {
   const options = getHarnessesQuery();
   await queryClient.cancelQueries(options);
-  const data = await api.getHarnesses(refresh, retryRejected);
+  const data = await api.getHarnesses(refresh, retryRejected, undefined, harness);
   if (isCurrentScope(options.queryKey)) queryClient.setQueryData(options.queryKey, data);
   return data;
 }

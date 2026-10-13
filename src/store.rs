@@ -12,6 +12,7 @@ mod telemetry;
 pub(crate) use telemetry::{InvocationIdentity, TokenUsage};
 
 use std::path::{Path, PathBuf};
+use std::time::Duration;
 
 use rusqlite::{params, Connection, OptionalExtension};
 use serde::Serialize;
@@ -354,56 +355,91 @@ pub enum RunWakeupRegistration {
     AlreadyDelivered,
 }
 
-/// A helper session an agent created with `orx agent spawn`, and the task it
-/// was spawned to do. The CLI only writes the row; the resident `orx up`
-/// watcher is what starts the child's first turn and reports back.
-#[derive(Debug, Clone)]
-pub struct ChatSpawn {
-    pub session_id: String,
-    pub parent_session_id: String,
-    pub prompt: String,
-    /// Whether the parent gets a wake-up once the helper finishes.
-    pub wake_parent: bool,
-    /// Failed attempts to start the helper's first turn.
-    pub attempts: i64,
-    /// Set by `finish_turn` when the helper's turn ends. Absent on a row whose
-    /// turn is still running — or whose `orx up` died mid-turn, which is how a
-    /// crash is told from a completion.
-    pub finished_at: Option<i64>,
-}
-
-/// Lifecycle of a [`ChatSpawn`]: `Pending → Starting → Running → Waking →
-/// Done`. The two `-ing` states are claims — one watcher owns the transition
-/// and holds a token, so a crash mid-step is reclaimable rather than lost.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum ChatSpawnState {
-    /// Row written; the child's first turn has not been delivered yet.
-    Pending,
-    /// Claimed for delivery of the brief to the helper.
-    Starting,
-    /// The helper is working on its task.
-    Running,
-    /// Claimed for delivery of the wake-up to the parent.
-    Waking,
-    /// Terminal: the parent has been told, or never asked to be.
-    Done,
-}
-
-impl ChatSpawnState {
-    pub fn as_str(self) -> &'static str {
-        match self {
-            Self::Pending => "pending",
-            Self::Starting => "starting",
-            Self::Running => "running",
-            Self::Waking => "waking",
-            Self::Done => "done",
-        }
-    }
-}
-
 const RUN_WAKEUP_CLAIM_TTL_MS: i64 = 60 * 1000;
 pub(crate) const CHAT_TURN_LEASE_TTL_MS: i64 = 60 * 1000;
-const CHAT_SPAWN_CLAIM_TTL_MS: i64 = 60 * 1000;
+
+fn migrate_chat_spawns(conn: &Connection) -> Result<()> {
+    let tx = rusqlite::Transaction::new_unchecked(conn, rusqlite::TransactionBehavior::Immediate)?;
+    let exists: bool = tx.query_row(
+        "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'chat_spawns')",
+        [],
+        |row| row.get(0),
+    )?;
+    if !exists {
+        return Ok(());
+    }
+    let pending = {
+        let mut statement = tx.prepare(
+            "SELECT sp.session_id, sp.prompt, sp.requested_at FROM chat_spawns sp
+             JOIN chat_sessions s ON s.id = sp.session_id
+             WHERE sp.state IN ('pending', 'starting')
+               AND NOT EXISTS (SELECT 1 FROM chat_turns t WHERE t.session_id = sp.session_id)
+             ORDER BY sp.requested_at, sp.session_id",
+        )?;
+        let rows = statement.query_map([], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, i64>(2)?,
+            ))
+        })?;
+        rows.collect::<std::result::Result<Vec<_>, _>>()?
+    };
+    for (session_id, prompt, requested_at) in pending {
+        let leased: bool = tx.query_row(
+            "SELECT EXISTS(SELECT 1 FROM chat_turn_leases WHERE chat_session_id = ?1 AND heartbeat_at > ?2)",
+            params![session_id, now_ms() - CHAT_TURN_LEASE_TTL_MS], |row| row.get(0),
+        )?;
+        if leased {
+            return Err(anyhow!(
+                "Stop the older OpenResearch process before migrating its pending agent chats."
+            ));
+        }
+        let parts = {
+            let mut statement = tx.prepare("SELECT role, parts_json FROM chat_messages WHERE session_id = ?1 ORDER BY created_at, rowid")?;
+            let rows = statement.query_map(params![session_id], |row| {
+                Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+            })?;
+            rows.collect::<std::result::Result<Vec<_>, _>>()?
+        };
+        let brief_recorded = match parts.as_slice() {
+            [] => false,
+            [(role, parts)] if role == "user" => {
+                let parts: Vec<crate::local::chat::WirePart> = serde_json::from_str(parts)?;
+                let text = parts
+                    .iter()
+                    .filter(|part| part.kind == "text")
+                    .filter_map(|part| part.text.as_deref())
+                    .collect::<Vec<_>>()
+                    .join("\n\n");
+                if text.trim() != prompt.trim() {
+                    continue;
+                }
+                true
+            }
+            _ => continue,
+        };
+        let message = crate::local::chat::legacy_opening_message(
+            &session_id,
+            prompt,
+            requested_at,
+            brief_recorded,
+        )?;
+        tx.execute(
+            "INSERT OR IGNORE INTO chat_queued_messages (id, session_id, client_turn_id, request_hash, payload_json, created_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+            params![message.id, message.session_id, message.client_turn_id, message.request_hash, message.payload_json, message.created_at],
+        )?;
+    }
+    tx.execute_batch("DROP TABLE chat_spawns")?;
+    tx.commit()?;
+    Ok(())
+}
+
+/// Default SQLite busy_timeout for every store connection (5s). Long enough
+/// to ride out ordinary writer bursts, short enough that a dead writer doesn't
+/// stall a command for long.
+pub(crate) const BUSY_TIMEOUT: Duration = Duration::from_millis(5000);
 
 pub struct Store {
     conn: Connection,
@@ -426,7 +462,13 @@ impl Store {
     /// Open (creating dirs/schema as needed). WAL so the supervise writers and
     /// the serve readers never block each other.
     pub fn open() -> Result<Self> {
-        Self::open_at_with_move_lock(data_dir(), data_dir_move_lock_path())
+        Self::open_at_with_move_lock(data_dir(), data_dir_move_lock_path(), BUSY_TIMEOUT)
+    }
+
+    /// Open like `open`, but cap SQLite's lock wait — `orx exp wait` shrinks
+    /// this to its deadline so one blocked open can't overshoot it.
+    pub fn open_with_busy_timeout(busy_timeout: Duration) -> Result<Self> {
+        Self::open_at_with_move_lock(data_dir(), data_dir_move_lock_path(), busy_timeout)
     }
 
     /// Open a store rooted at an explicit directory, bypassing `data_dir()`
@@ -435,15 +477,27 @@ impl Store {
     /// (tests in different modules share env under the parallel runner).
     pub fn open_at(dir: PathBuf) -> Result<Self> {
         let move_lock_path = dir.join(".orx-data-dir-move.lock");
-        Self::open_at_with_move_lock(dir, move_lock_path)
+        Self::open_at_with_move_lock(dir, move_lock_path, BUSY_TIMEOUT)
     }
 
-    fn open_at_with_move_lock(dir: PathBuf, data_dir_move_lock_path: PathBuf) -> Result<Self> {
+    /// Shrink this connection's lock wait (e.g. to a wait loop's remaining
+    /// deadline). The next call can pass the default back to restore it.
+    pub(crate) fn set_busy_timeout(&self, timeout: Duration) -> Result<()> {
+        self.conn
+            .pragma_update(None, "busy_timeout", timeout.as_millis() as u64)?;
+        Ok(())
+    }
+
+    fn open_at_with_move_lock(
+        dir: PathBuf,
+        data_dir_move_lock_path: PathBuf,
+        busy_timeout: Duration,
+    ) -> Result<Self> {
         std::fs::create_dir_all(dir.join("run-logs"))
             .map_err(|e| anyhow!("Could not create {}: {}", dir.display(), e))?;
         let conn = Connection::open(dir.join("orx.db"))?;
         conn.pragma_update(None, "journal_mode", "WAL")?;
-        conn.pragma_update(None, "busy_timeout", 5000)?;
+        conn.pragma_update(None, "busy_timeout", busy_timeout.as_millis() as u64)?;
         conn.execute_batch(
             "CREATE TABLE IF NOT EXISTS runs (
                 id           TEXT PRIMARY KEY,
@@ -612,20 +666,6 @@ impl Store {
             );
             CREATE INDEX IF NOT EXISTS idx_chat_run_wakeups_requested
                 ON chat_run_wakeups(requested_at);
-            CREATE TABLE IF NOT EXISTS chat_spawns (
-                session_id        TEXT PRIMARY KEY,
-                parent_session_id TEXT NOT NULL,
-                prompt            TEXT NOT NULL,
-                wake_parent       INTEGER NOT NULL DEFAULT 1,
-                state             TEXT NOT NULL DEFAULT 'pending',
-                requested_at      INTEGER NOT NULL,
-                claim_token       TEXT,
-                claimed_at        INTEGER,
-                attempts          INTEGER NOT NULL DEFAULT 0,
-                finished_at       INTEGER
-            );
-            CREATE INDEX IF NOT EXISTS idx_chat_spawns_state
-                ON chat_spawns(state, requested_at);
             CREATE TABLE IF NOT EXISTS chat_turn_leases (
                 chat_session_id TEXT PRIMARY KEY,
                 claim_token     TEXT NOT NULL,
@@ -708,9 +748,6 @@ impl Store {
             "ALTER TABLE ui_state ADD COLUMN preferred_service_tier TEXT",
             "ALTER TABLE ui_state ADD COLUMN workspace_state_json TEXT",
             "ALTER TABLE ui_state ADD COLUMN preferred_autonomy TEXT",
-            "ALTER TABLE chat_spawns ADD COLUMN wake_parent INTEGER NOT NULL DEFAULT 1",
-            "ALTER TABLE chat_spawns ADD COLUMN attempts INTEGER NOT NULL DEFAULT 0",
-            "ALTER TABLE chat_spawns ADD COLUMN finished_at INTEGER",
             "ALTER TABLE chat_messages ADD COLUMN completed_at INTEGER",
             "ALTER TABLE runs ADD COLUMN cancel_reason TEXT",
         ] {
@@ -727,6 +764,7 @@ impl Store {
              WHERE reachable = 1 AND tools_found = 0 AND missing_tools = ''",
             [],
         )?;
+        migrate_chat_spawns(&conn)?;
         // Chat messages became a tree (forked turns). Legacy rows are one linear
         // chain each; after this a NULL parent_id genuinely means "branch root".
         // All-or-nothing, because a half-applied backfill that still bumped the
@@ -1379,147 +1417,10 @@ impl Store {
         Ok(delivered == 1)
     }
 
-    pub fn create_chat_spawn(&self, spawn: &ChatSpawn) -> Result<()> {
-        self.conn.execute(
-            "INSERT INTO chat_spawns
-                 (session_id, parent_session_id, prompt, wake_parent, state, requested_at)
-             VALUES (?1, ?2, ?3, ?4, 'pending', ?5)",
-            params![
-                spawn.session_id,
-                spawn.parent_session_id,
-                spawn.prompt,
-                spawn.wake_parent,
-                now_ms(),
-            ],
-        )?;
-        Ok(())
-    }
-
-    /// Return abandoned claims to their prior state and drop rows whose child
-    /// session is gone. A missing *parent* is not pruned here: the child keeps
-    /// working, and the wake step retires the row on its own.
-    pub fn prune_chat_spawns(&self) -> Result<()> {
-        self.clear_stale_data_dir_move_lease()?;
-        let stale = now_ms() - CHAT_SPAWN_CLAIM_TTL_MS;
-        self.conn.execute(
-            "UPDATE chat_spawns
-             SET state = CASE state WHEN 'starting' THEN 'pending' ELSE 'running' END,
-                 attempts = attempts + CASE state WHEN 'starting' THEN 1 ELSE 0 END,
-                 claim_token = NULL, claimed_at = NULL
-             WHERE state IN ('starting', 'waking') AND claimed_at < ?1
-               AND NOT EXISTS (SELECT 1 FROM data_dir_move_lease WHERE id = 1)",
-            params![stale],
-        )?;
-        self.conn.execute(
-            "DELETE FROM chat_spawns
-             WHERE NOT EXISTS (SELECT 1 FROM data_dir_move_lease WHERE id = 1)
-               AND NOT EXISTS (
-                   SELECT 1 FROM chat_sessions WHERE chat_sessions.id = chat_spawns.session_id
-               )",
-            [],
-        )?;
-        Ok(())
-    }
-
-    /// Spawns sitting in one state, oldest request first.
-    pub fn list_chat_spawns(&self, state: ChatSpawnState) -> Result<Vec<ChatSpawn>> {
-        let mut stmt = self.conn.prepare(
-            "SELECT session_id, parent_session_id, prompt, wake_parent, attempts, finished_at
-             FROM chat_spawns WHERE state = ?1 ORDER BY requested_at, session_id",
-        )?;
-        let rows = stmt.query_map(params![state.as_str()], row_to_chat_spawn)?;
-        Ok(rows.collect::<std::result::Result<Vec<_>, _>>()?)
-    }
-
-    pub fn get_chat_spawn(&self, session_id: &str) -> Result<Option<ChatSpawn>> {
-        let mut stmt = self.conn.prepare(
-            "SELECT session_id, parent_session_id, prompt, wake_parent, attempts, finished_at
-             FROM chat_spawns WHERE session_id = ?1",
-        )?;
-        let mut rows = stmt.query_map(params![session_id], row_to_chat_spawn)?;
-        Ok(rows.next().transpose()?)
-    }
-
-    /// Take ownership of a spawn's next step, moving it into the claimed state
-    /// and returning the token that proves the claim. `None` means another
-    /// watcher got there first.
-    pub fn claim_chat_spawn(
-        &self,
-        session_id: &str,
-        from: ChatSpawnState,
-        to: ChatSpawnState,
-    ) -> Result<Option<String>> {
-        let token = uuid::Uuid::new_v4().to_string();
-        let claimed = self.conn.execute(
-            "UPDATE chat_spawns SET state = ?3, claim_token = ?4, claimed_at = ?5
-             WHERE session_id = ?1 AND state = ?2",
-            params![session_id, from.as_str(), to.as_str(), token, now_ms()],
-        )?;
-        Ok((claimed == 1).then_some(token))
-    }
-
-    /// Finish (or hand back) a claimed step. `false` means the claim expired
-    /// and someone else reclaimed the row, so the caller's work is NOT recorded
-    /// and must not be treated as done.
-    pub fn settle_chat_spawn(
-        &self,
-        session_id: &str,
-        token: &str,
-        to: ChatSpawnState,
-    ) -> Result<bool> {
-        let settled = self.conn.execute(
-            "UPDATE chat_spawns SET state = ?3, claim_token = NULL, claimed_at = NULL
-             WHERE session_id = ?1 AND claim_token = ?2",
-            params![session_id, token, to.as_str()],
-        )?;
-        Ok(settled == 1)
-    }
-
-    /// Whether any `orx up` currently holds a turn lease on this session.
-    ///
-    /// The durable counterpart to `ChatHost::is_busy`, which reads a map this
-    /// process owns: a helper started by a different `orx up` — or by one that
-    /// has since restarted — is busy without this process knowing it.
     pub fn chat_turn_leased(&self, chat_session_id: &str) -> Result<bool> {
-        let leased = self.conn.query_row(
-            "SELECT 1 FROM chat_turn_leases WHERE chat_session_id = ?1 AND heartbeat_at >= ?2",
-            params![chat_session_id, now_ms() - CHAT_TURN_LEASE_TTL_MS],
-            |_| Ok(()),
-        );
-        Ok(matches!(leased, Ok(())))
-    }
-
-    /// Record that a spawned helper's turn ended. An unstamped row whose lease
-    /// has lapsed is how the watcher recognizes an `orx up` that died mid-turn,
-    /// so the parent hears "interrupted" rather than a false completion.
-    pub fn mark_chat_spawn_finished(&self, chat_session_id: &str) -> Result<()> {
-        self.conn.execute(
-            "UPDATE chat_spawns SET finished_at = ?2
-             WHERE session_id = ?1 AND finished_at IS NULL",
-            params![chat_session_id, now_ms()],
-        )?;
-        Ok(())
-    }
-
-    pub fn record_chat_spawn_attempt(&self, chat_session_id: &str) -> Result<i64> {
-        self.conn.execute(
-            "UPDATE chat_spawns SET attempts = attempts + 1 WHERE session_id = ?1",
-            params![chat_session_id],
-        )?;
         Ok(self.conn.query_row(
-            "SELECT attempts FROM chat_spawns WHERE session_id = ?1",
-            params![chat_session_id],
-            |row| row.get(0),
-        )?)
-    }
-
-    /// Helpers this parent has in flight, for the fan-out cap.
-    pub fn count_live_chat_spawns(&self, parent_session_id: &str) -> Result<i64> {
-        Ok(self.conn.query_row(
-            "SELECT count(*) FROM chat_spawns
-             WHERE parent_session_id = ?1 AND state != 'done'",
-            params![parent_session_id],
-            |row| row.get(0),
+            "SELECT EXISTS(SELECT 1 FROM chat_turn_leases WHERE chat_session_id = ?1 AND heartbeat_at >= ?2)",
+            params![chat_session_id, now_ms() - CHAT_TURN_LEASE_TTL_MS], |row| row.get(0),
         )?)
     }
 
@@ -1846,11 +1747,6 @@ impl Store {
             params![id],
         )?;
         tx.execute(
-            "DELETE FROM chat_spawns WHERE session_id IN
-               (SELECT id FROM chat_sessions WHERE project_id = ?1)",
-            params![id],
-        )?;
-        tx.execute(
             "DELETE FROM chat_messages WHERE session_id IN
                (SELECT id FROM chat_sessions WHERE project_id = ?1)",
             params![id],
@@ -1942,16 +1838,25 @@ impl Store {
     /// Full-row update by id (title / description / run_command / agent_status).
     ///
     /// `chat_session_id` is deliberately omitted: session ownership is stamped
-    /// once at creation and is immutable thereafter.
+    /// once at creation and is immutable thereafter. The parent changes only
+    /// through `set_experiment_parent`, so a stale row cannot undo a move.
     pub fn update_local_experiment(&self, e: &LocalExperiment) -> Result<()> {
         self.conn.execute(
-            "UPDATE local_experiments SET parent_experiment_id = ?2, slug = ?3, branch_name = ?4,
-                    title = ?5, description = ?6, run_command = ?7, agent_status = ?8, updated_at = ?9
+            "UPDATE local_experiments SET slug = ?2, branch_name = ?3,
+                    title = ?4, description = ?5, run_command = ?6, agent_status = ?7, updated_at = ?8
              WHERE id = ?1",
             params![
-                e.id, e.parent_experiment_id, e.slug, e.branch_name,
+                e.id, e.slug, e.branch_name,
                 e.title, e.description, e.run_command, e.agent_status, now_ms(),
             ],
+        )?;
+        Ok(())
+    }
+
+    pub fn set_experiment_parent(&self, id: &str, parent: Option<&str>) -> Result<()> {
+        self.conn.execute(
+            "UPDATE local_experiments SET parent_experiment_id = ?2, updated_at = MAX(updated_at + 1, ?3) WHERE id = ?1",
+            params![id, parent, now_ms()],
         )?;
         Ok(())
     }
@@ -1982,9 +1887,9 @@ impl Store {
         self.conn.execute(
             "INSERT INTO chat_sessions (id, project_id, harness, native_session_id, title, title_source, model,
                                         service_tier, permission_mode, plan_mode, plan_reset_pending, reasoning_level, archived, bootstrap_context,
-                                        active_leaf_id, parent_session_id, created_at, updated_at, autonomy,
+                                        active_leaf_id, created_at, updated_at, autonomy,
                                         side_parent_session_id)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20)",
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19)",
             params![
                 s.id,
                 s.project_id,
@@ -2001,7 +1906,6 @@ impl Store {
                 s.archived,
                 s.bootstrap_context,
                 s.active_leaf_id,
-                s.parent_session_id,
                 s.created_at,
                 s.updated_at,
                 s.autonomy,
@@ -2184,7 +2088,6 @@ impl Store {
             "DELETE FROM chat_messages WHERE session_id = ?1",
             params![id],
         )?;
-        tx.execute("DELETE FROM chat_spawns WHERE session_id = ?1", params![id])?;
         tx.execute("DELETE FROM chat_sessions WHERE id = ?1", params![id])?;
         tx.commit()?;
         Ok(())
@@ -3213,7 +3116,6 @@ pub struct StoredChatSession {
     pub active_leaf_id: Option<String>,
     /// Session that spawned this one with `orx agent spawn`. `None` for
     /// sessions the user started from the dashboard.
-    pub parent_session_id: Option<String>,
     /// Chat this side chat branched from. Side chats share that chat's
     /// worktree, stay out of history, and are deleted with it.
     pub side_parent_session_id: Option<String>,
@@ -3365,19 +3267,8 @@ fn row_to_chat_turn(
 
 const CHAT_SESSION_COLS: &str = "id, project_id, harness, native_session_id, title, model, service_tier, \
      permission_mode, plan_mode, plan_reset_pending, reasoning_level, archived, context_usage_json, \
-     created_at, updated_at, title_source, bootstrap_context, active_leaf_id, parent_session_id, \
+     created_at, updated_at, title_source, bootstrap_context, active_leaf_id, \
      goal, autonomy, side_parent_session_id";
-
-fn row_to_chat_spawn(row: &rusqlite::Row<'_>) -> std::result::Result<ChatSpawn, rusqlite::Error> {
-    Ok(ChatSpawn {
-        session_id: row.get(0)?,
-        parent_session_id: row.get(1)?,
-        prompt: row.get(2)?,
-        wake_parent: row.get(3)?,
-        attempts: row.get(4)?,
-        finished_at: row.get(5)?,
-    })
-}
 
 fn row_to_chat_session(
     row: &rusqlite::Row<'_>,
@@ -3401,10 +3292,9 @@ fn row_to_chat_session(
         title_source: row.get(15)?,
         bootstrap_context: row.get(16)?,
         active_leaf_id: row.get(17)?,
-        parent_session_id: row.get(18)?,
-        goal: row.get(19)?,
-        autonomy: row.get(20)?,
-        side_parent_session_id: row.get(21)?,
+        goal: row.get(18)?,
+        autonomy: row.get(19)?,
+        side_parent_session_id: row.get(20)?,
     })
 }
 
@@ -4494,21 +4384,9 @@ mod tests {
             goal: None,
             autonomy: None,
             active_leaf_id: None,
-            parent_session_id: None,
             side_parent_session_id: None,
             created_at: 1,
             updated_at: 1,
-        }
-    }
-
-    fn chat_spawn_fixture(session_id: &str, parent: &str) -> ChatSpawn {
-        ChatSpawn {
-            session_id: session_id.into(),
-            parent_session_id: parent.into(),
-            prompt: "Sweep the literature for LoRA rank ablations".into(),
-            wake_parent: true,
-            attempts: 0,
-            finished_at: None,
         }
     }
 
@@ -4525,37 +4403,6 @@ mod tests {
             .set_chat_session_autonomy("chat_a", Autonomy::Agentic)
             .unwrap();
         assert_eq!(autonomy(&store).as_deref(), Some("agentic"));
-        let _ = std::fs::remove_dir_all(&dir);
-    }
-
-    #[test]
-    fn spawned_sessions_record_their_parent() {
-        let dir = std::env::temp_dir().join(format!("orx-store-spawnrow-{}", uuid::Uuid::new_v4()));
-        let store = Store::open_at(dir.clone()).unwrap();
-
-        store
-            .create_chat_session(&chat_session_fixture("chat_parent"))
-            .unwrap();
-        let mut child = chat_session_fixture("chat_child");
-        child.parent_session_id = Some("chat_parent".into());
-        store.create_chat_session(&child).unwrap();
-
-        assert!(store
-            .get_chat_session("chat_parent")
-            .unwrap()
-            .unwrap()
-            .parent_session_id
-            .is_none());
-        assert_eq!(
-            store
-                .get_chat_session("chat_child")
-                .unwrap()
-                .unwrap()
-                .parent_session_id
-                .as_deref(),
-            Some("chat_parent")
-        );
-
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -4660,99 +4507,64 @@ mod tests {
     }
 
     #[test]
-    fn only_one_claimant_advances_a_spawn() {
+    fn legacy_spawns_migrate_only_unadmitted_opening_messages() {
         let dir =
-            std::env::temp_dir().join(format!("orx-store-spawnclaim-{}", uuid::Uuid::new_v4()));
+            std::env::temp_dir().join(format!("orx-spawn-migration-{}", uuid::Uuid::new_v4()));
         let store = Store::open_at(dir.clone()).unwrap();
-        store
-            .create_chat_session(&chat_session_fixture("chat_child"))
-            .unwrap();
-        store
-            .create_chat_spawn(&chat_spawn_fixture("chat_child", "chat_parent"))
-            .unwrap();
-
-        let pending = store.list_chat_spawns(ChatSpawnState::Pending).unwrap();
-        assert_eq!(pending.len(), 1);
-        assert_eq!(pending[0].parent_session_id, "chat_parent");
-        assert!(pending[0].wake_parent);
-
-        let token = store
-            .claim_chat_spawn(
-                "chat_child",
-                ChatSpawnState::Pending,
-                ChatSpawnState::Starting,
-            )
-            .unwrap()
-            .expect("first claim wins");
-        assert!(store
-            .claim_chat_spawn(
-                "chat_child",
-                ChatSpawnState::Pending,
-                ChatSpawnState::Starting
-            )
-            .unwrap()
-            .is_none());
-        // A settle under the wrong token must not move the row.
-        assert!(!store
-            .settle_chat_spawn("chat_child", "not-the-token", ChatSpawnState::Running)
-            .unwrap());
-        assert!(store
-            .settle_chat_spawn("chat_child", &token, ChatSpawnState::Running)
-            .unwrap());
-        assert_eq!(
-            store
-                .list_chat_spawns(ChatSpawnState::Running)
-                .unwrap()
-                .len(),
-            1
-        );
-
-        let _ = std::fs::remove_dir_all(&dir);
-    }
-
-    #[test]
-    fn pruning_reclaims_stale_spawns_and_drops_deleted_sessions() {
-        let dir =
-            std::env::temp_dir().join(format!("orx-store-spawnprune-{}", uuid::Uuid::new_v4()));
-        let store = Store::open_at(dir.clone()).unwrap();
-        for id in ["chat_stuck", "chat_gone"] {
+        store.conn.execute_batch("CREATE TABLE chat_spawns (session_id TEXT PRIMARY KEY, prompt TEXT NOT NULL, requested_at INTEGER NOT NULL, state TEXT NOT NULL)").unwrap();
+        for (id, state) in [
+            ("pending", "pending"),
+            ("brief", "starting"),
+            ("admitted", "starting"),
+            ("running", "running"),
+            ("waking", "waking"),
+            ("done", "done"),
+        ] {
             store
                 .create_chat_session(&chat_session_fixture(id))
                 .unwrap();
             store
-                .create_chat_spawn(&chat_spawn_fixture(id, "chat_parent"))
+                .conn
+                .execute(
+                    "INSERT INTO chat_spawns VALUES (?1, 'Opening task', 1, ?2)",
+                    params![id, state],
+                )
                 .unwrap();
         }
-
-        // A watcher that claimed the start and then died.
-        store
-            .claim_chat_spawn(
-                "chat_stuck",
-                ChatSpawnState::Pending,
-                ChatSpawnState::Starting,
-            )
-            .unwrap()
-            .unwrap();
-        store
+        let parts =
+            serde_json::to_string(&[crate::local::chat::WirePart::text("part", "Opening task")])
+                .unwrap();
+        store.conn.execute("INSERT INTO chat_messages (id, session_id, role, parts_json, created_at) VALUES ('brief-user', 'brief', 'user', ?1, 1)", params![parts]).unwrap();
+        store.conn.execute("INSERT INTO chat_turns (id, session_id, assistant_message_id, client_turn_id, request_hash, prepared_input, settings_json, state, delivery_state, created_at, updated_at) VALUES ('turn', 'admitted', 'assistant', 'ct', 'hash', 'task', '{}', 'interrupted', 'accepted', 1, 1)", []).unwrap();
+        drop(store);
+        let store = Store::open_at(dir.clone()).unwrap();
+        let queued = store.list_queued_chat_messages().unwrap();
+        assert_eq!(queued.len(), 2);
+        let brief = queued.iter().find(|m| m.session_id == "brief").unwrap();
+        assert_eq!(brief.client_turn_id, "legacy_spawn_brief");
+        let payload: serde_json::Value = serde_json::from_str(&brief.payload_json).unwrap();
+        assert_eq!(payload["transcriptText"], "");
+        assert_eq!(store.list_chat_messages("brief").unwrap().len(), 1);
+        assert_eq!(store.list_all_chat_sessions().unwrap().len(), 6);
+        let exists: bool = store
             .conn
-            .execute(
-                "UPDATE chat_spawns SET claimed_at = ?1 WHERE session_id = 'chat_stuck'",
-                params![now_ms() - CHAT_SPAWN_CLAIM_TTL_MS - 1],
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE name = 'chat_spawns')",
+                [],
+                |r| r.get(0),
             )
             .unwrap();
-        // A session removed WITHOUT its spawn row (the `delete_local_project`
-        // path) is what prune's orphan sweep is actually for.
-        store
-            .conn
-            .execute("DELETE FROM chat_sessions WHERE id = 'chat_gone'", [])
-            .unwrap();
-
-        store.prune_chat_spawns().unwrap();
-        let pending = store.list_chat_spawns(ChatSpawnState::Pending).unwrap();
-        assert_eq!(pending.len(), 1);
-        assert_eq!(pending[0].session_id, "chat_stuck");
-
-        let _ = std::fs::remove_dir_all(&dir);
+        assert!(!exists);
+        drop(store);
+        assert_eq!(
+            Store::open_at(dir.clone())
+                .unwrap()
+                .list_queued_chat_messages()
+                .unwrap()
+                .len(),
+            2
+        );
+        std::fs::remove_dir_all(dir).unwrap();
     }
 
     #[test]
@@ -5713,6 +5525,7 @@ mod tests {
         // A later full-row update must not rewrite the owning session.
         let mut updated = experiment_fixture("exp_owned", None);
         updated.title = Some("renamed".into());
+        updated.parent_experiment_id = Some("stale-parent".into());
         store.update_local_experiment(&updated).unwrap();
 
         let stored = store.get_local_experiment("exp_owned").unwrap().unwrap();
@@ -5722,6 +5535,7 @@ mod tests {
             Some("chat_x".to_string()),
             "the creating session is never overwritten by a later update"
         );
+        assert_eq!(stored.parent_experiment_id, None, "only a move re-parents");
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

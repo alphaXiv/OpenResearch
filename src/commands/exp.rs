@@ -6,6 +6,7 @@
 //!   orx exp wake   <expId>            resume this agent when the run succeeds or fails
 //!   orx exp archive <expId> --ancestors|--only|--descendants   hide the chosen scope
 //!   orx exp unarchive <expId> --ancestors|--only|--descendants restore the same nodes
+//!   orx exp move <expId> --parent <expId>|--baseline          re-parent a subtree
 //!
 //! Unlike the project-scoped data commands, every verb here takes an
 //! *experiment* id from `orx project view <projectId>`.
@@ -18,6 +19,17 @@ use crate::store::Store;
 use crate::ExpCommand;
 
 pub async fn run(args: crate::ExpArgs) -> Result<()> {
+    // `exp wait` opens its store itself: a transiently locked orx.db is
+    // retried inside the wait timeout rather than dying at startup.
+    if let ExpCommand::Wait {
+        exp_id,
+        project,
+        timeout,
+        interval,
+    } = args.command
+    {
+        return wait(exp_id, project, timeout, interval).await;
+    }
     let mut store = Store::open()?;
     match args.command {
         ExpCommand::Archive {
@@ -34,6 +46,7 @@ pub async fn run(args: crate::ExpArgs) -> Result<()> {
             descendants,
             ..
         } => archive(&mut store, &exp_id, ancestors, only, descendants, false),
+        ExpCommand::Move { exp_id, parent, .. } => reparent(&store, &exp_id, parent.as_deref()),
         ExpCommand::Status { exp_id, scheduler } => {
             crate::local::chat::record_chat_target("experiments", &exp_id);
             resolve_experiment(store, &exp_id)?
@@ -54,12 +67,7 @@ pub async fn run(args: crate::ExpArgs) -> Result<()> {
         }
         ExpCommand::Cancel { exp_id } => resolve_experiment(store, &exp_id)?.cancel().await,
         ExpCommand::Wake { exp_id } => wake(&store, &exp_id),
-        ExpCommand::Wait {
-            exp_id,
-            project,
-            timeout,
-            interval,
-        } => wait(store, exp_id, project, timeout, interval).await,
+        ExpCommand::Wait { .. } => unreachable!("handled above"),
     }
 }
 
@@ -86,6 +94,19 @@ fn archive(
         if archived { "Archived" } else { "Restored" },
         ids.len()
     );
+    Ok(())
+}
+
+fn reparent(store: &Store, id: &str, parent: Option<&str>) -> Result<()> {
+    let before = crate::local::experiments::move_experiment(store, id, parent)?;
+    println!(
+        "Moved {} ({}) from {} to {}.",
+        before.id,
+        before.display_name(),
+        before.parent_experiment_id.as_deref().unwrap_or("a root"),
+        parent.unwrap_or("a new root")
+    );
+    println!("  Git branch {} is unchanged.", before.branch_name);
     Ok(())
 }
 
@@ -132,7 +153,6 @@ fn wake(store: &Store, exp_id: &str) -> Result<()> {
 /// seconds (default 1800) with a non-zero exit so callers can branch on it. The
 /// Polling reads only the local run store.
 async fn wait(
-    store: Store,
     exp_id: Option<String>,
     project: Option<String>,
     timeout: Option<u64>,
@@ -148,14 +168,32 @@ async fn wait(
              `orx exp wait --project <projectId>` (any run in a project)."
         )),
         (Some(exp_id), None) => {
-            resolve_experiment(store, &exp_id)?
-                .wait_experiment(interval, deadline)
-                .await
+            let plane = crate::plane::local_plane::retry_on_db_lock(
+                || {
+                    let store = Store::open_with_busy_timeout(
+                        crate::plane::local_plane::busy_timeout_left(deadline),
+                    )?;
+                    resolve_experiment(store, &exp_id)
+                },
+                interval,
+                deadline,
+            )
+            .await?;
+            plane.wait_experiment(interval, deadline).await
         }
         (None, Some(project_id)) => {
-            resolve_project(store, &project_id)?
-                .wait_project(interval, deadline)
-                .await
+            let plane = crate::plane::local_plane::retry_on_db_lock(
+                || {
+                    let store = Store::open_with_busy_timeout(
+                        crate::plane::local_plane::busy_timeout_left(deadline),
+                    )?;
+                    resolve_project(store, &project_id)
+                },
+                interval,
+                deadline,
+            )
+            .await?;
+            plane.wait_project(interval, deadline).await
         }
     }
 }
