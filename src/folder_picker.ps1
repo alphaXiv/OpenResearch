@@ -52,9 +52,10 @@ namespace OpenResearch {
     }
 
     public sealed class FolderPicker : IDisposable {
-        private const uint FOS_PICKFOLDERS = 0x20;
-        private const uint FOS_FORCEFILESYSTEM = 0x40;
-        private const uint FOS_PATHMUSTEXIST = 0x800;
+        public const uint FOS_PICKFOLDERS = 0x20;
+        public const uint FOS_FORCEFILESYSTEM = 0x40;
+        public const uint FOS_PATHMUSTEXIST = 0x800;
+        public const uint FolderPickerOptions = FOS_PICKFOLDERS | FOS_FORCEFILESYSTEM | FOS_PATHMUSTEXIST;
         private const uint SIGDN_FILESYSPATH = 0x80058000;
 
         private IFileDialog _dialog;
@@ -66,26 +67,52 @@ namespace OpenResearch {
 
         public FolderPicker() {
             _dialog = (IFileDialog)new FileOpenDialogRCW();
+            SetOptions(FolderPickerOptions);
+        }
+
+        public uint GetOptions() {
+            uint options;
+            int hr = _dialog.GetOptions(out options);
+            if (hr != 0) {
+                throw Marshal.GetExceptionForHR(hr) ?? new COMException("GetOptions failed", hr);
+            }
+            return options;
+        }
+
+        public void SetOptions(uint options) {
+            int hr = _dialog.SetOptions(options);
+            if (hr != 0) {
+                throw Marshal.GetExceptionForHR(hr) ?? new COMException("SetOptions failed", hr);
+            }
         }
 
         public DialogResult ShowDialog(IWin32Window owner) {
-            _dialog.SetOptions(FOS_PICKFOLDERS | FOS_FORCEFILESYSTEM | FOS_PATHMUSTEXIST);
-            _dialog.SetTitle("Choose a project folder");
+            SetOptions(FolderPickerOptions);
+
+            int hr = _dialog.SetTitle("Choose a project folder");
+            if (hr != 0) {
+                throw Marshal.GetExceptionForHR(hr) ?? new COMException("SetTitle failed", hr);
+            }
 
             IntPtr hwnd = owner != null ? owner.Handle : IntPtr.Zero;
-            int hr = _dialog.Show(hwnd);
+            hr = _dialog.Show(hwnd);
 
             if (hr == 0) {
                 IShellItem item;
-                if (_dialog.GetResult(out item) == 0 && item != null) {
-                    try {
-                        string path;
-                        if (item.GetDisplayName(SIGDN_FILESYSPATH, out path) == 0) {
-                            _selectedPath = path;
-                        }
-                    } finally {
-                        Marshal.ReleaseComObject(item);
+                hr = _dialog.GetResult(out item);
+                if (hr != 0 || item == null) {
+                    throw Marshal.GetExceptionForHR(hr) ?? new COMException("GetResult failed", hr);
+                }
+
+                try {
+                    string path;
+                    hr = item.GetDisplayName(SIGDN_FILESYSPATH, out path);
+                    if (hr != 0 || string.IsNullOrEmpty(path)) {
+                        throw Marshal.GetExceptionForHR(hr) ?? new COMException("GetDisplayName failed", hr);
                     }
+                    _selectedPath = path;
+                } finally {
+                    Marshal.ReleaseComObject(item);
                 }
                 return DialogResult.OK;
             }
