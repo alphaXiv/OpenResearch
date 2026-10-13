@@ -609,6 +609,8 @@ mod imp {
         ServerReady,
         LoadTimedOut,
         #[cfg(target_os = "macos")]
+        SyncZoom,
+        #[cfg(target_os = "macos")]
         Menu(MenuId),
         #[cfg(not(target_os = "macos"))]
         Focus,
@@ -696,7 +698,20 @@ mod imp {
                 true,
                 Some(Accelerator::new(Modifiers::META, Code::KeyR)),
             );
-            match build_menu(&quit, &reload) {
+            let zoom_items = [
+                ("zoom-in", "Zoom In", Code::Equal),
+                ("zoom-out", "Zoom Out", Code::Minus),
+                ("zoom-reset", "Actual Size", Code::Digit0),
+            ]
+            .map(|(id, title, key)| {
+                MenuItem::with_id(
+                    id,
+                    title,
+                    true,
+                    Some(Accelerator::new(Modifiers::META, key)),
+                )
+            });
+            match build_menu(&quit, &reload, &zoom_items) {
                 Ok(menu) => (menu, quit, reload),
                 Err(err) => {
                     crate::show_error_dialog(&format!("Could not build the menu bar: {err}"));
@@ -780,11 +795,15 @@ mod imp {
                 let window = window.clone();
                 let origin = origin.clone();
                 let shown = shown.clone();
-                #[cfg(windows)]
+                #[cfg(any(target_os = "macos", windows))]
                 let proxy = event_loop.create_proxy();
                 move |event, url| {
                     if !matches!(event, PageLoadEvent::Finished) {
                         return;
+                    }
+                    #[cfg(target_os = "macos")]
+                    if super::is_dashboard_url(&url, &origin) {
+                        let _ = proxy.send_event(UserEvent::SyncZoom);
                     }
                     #[cfg(windows)]
                     let _ = proxy.send_event(UserEvent::SyncMaximized);
@@ -856,6 +875,8 @@ mod imp {
         #[cfg(target_os = "macos")]
         add_confirm_panel(&webview);
 
+        #[cfg(target_os = "macos")]
+        let mut zoom_percent = 100;
         let mut quit = Quit::No;
         // What the loaded page was last told; a new page starts unmaximized.
         #[cfg(windows)]
@@ -912,6 +933,23 @@ mod imp {
             #[cfg(target_os = "macos")]
             Event::UserEvent(UserEvent::Menu(id)) if id == reload_item.id() => {
                 let _ = webview.reload();
+            }
+            #[cfg(target_os = "macos")]
+            Event::UserEvent(UserEvent::Menu(id)) if matches!(quit, Quit::No) => {
+                let next = match id.as_ref() {
+                    "zoom-in" => (zoom_percent + 10).min(200),
+                    "zoom-out" => (zoom_percent - 10).max(50),
+                    "zoom-reset" => 100,
+                    _ => return,
+                };
+                match sync_page_zoom(&webview, next) {
+                    Ok(()) => zoom_percent = next,
+                    Err(error) => eprintln!("openresearch app: could not apply page zoom: {error}"),
+                }
+            }
+            #[cfg(target_os = "macos")]
+            Event::UserEvent(UserEvent::SyncZoom) if matches!(quit, Quit::No) => {
+                let _ = sync_page_zoom(&webview, zoom_percent);
             }
             // Even before the page loads: a launch that brings nothing up looks
             // like a broken app. While quitting it must stay hidden.
@@ -1031,7 +1069,21 @@ mod imp {
     }
 
     #[cfg(target_os = "macos")]
-    fn build_menu(quit: &MenuItem, reload: &MenuItem) -> muda::Result<Menu> {
+    fn sync_page_zoom(webview: &WebView, percent: i32) -> wry::Result<()> {
+        let factor = f64::from(percent) / 100.0;
+        webview.zoom(factor)?;
+        // The native traffic lights and drag strip keep their unscaled size.
+        webview.evaluate_script(&format!(
+            "document.documentElement.style.setProperty('--desktop-page-zoom', '{factor}');"
+        ))
+    }
+
+    #[cfg(target_os = "macos")]
+    fn build_menu(
+        quit: &MenuItem,
+        reload: &MenuItem,
+        zoom_items: &[MenuItem; 3],
+    ) -> muda::Result<Menu> {
         let about = AboutMetadata {
             name: Some("OpenResearch".into()),
             version: Some(env!("CARGO_PKG_VERSION").into()),
@@ -1071,6 +1123,10 @@ mod imp {
                 true,
                 &[
                     reload,
+                    &PredefinedMenuItem::separator(),
+                    &zoom_items[0],
+                    &zoom_items[1],
+                    &zoom_items[2],
                     &PredefinedMenuItem::separator(),
                     &PredefinedMenuItem::fullscreen(None),
                 ],

@@ -82,6 +82,11 @@
   --text-menu: 0.8125rem;
   --text-menu--line-height: 1.25rem;
 
+  /* Native traffic lights keep their size when the WKWebView is zoomed out. */
+  --spacing-titlebar: calc(2rem / min(1, var(--desktop-page-zoom, 1)));
+  --spacing-titlebar-inset: calc(4rem / min(1, var(--desktop-page-zoom, 1)));
+  --spacing-titlebar-controls: calc(5rem / min(1, var(--desktop-page-zoom, 1)));
+
   --shadow-elevated: 0 6px 24px color-mix(in oklab, var(--text) 5%, transparent), 0 1px 4px color-mix(in oklab, var(--text) 4%, transparent);
   --shadow-panel-max: 0 12px 40px color-mix(in oklab, var(--text) 22%, transparent);
   --shadow-segment: 0 1px 3px color-mix(in oklab, var(--text) 25%, transparent);
@@ -115,6 +120,10 @@
   --radius-lg: 10px;
   --radius-xl: 12px;
   --radius-full: 999px;
+}
+
+@utility grid-cols-titlebar-chat {
+  grid-template-columns: calc(6rem / min(1, var(--desktop-page-zoom, 1))) minmax(0, 1fr) calc(6rem / min(1, var(--desktop-page-zoom, 1)));
 }
 
 :root {

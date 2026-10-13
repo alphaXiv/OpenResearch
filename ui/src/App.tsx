@@ -1748,7 +1748,7 @@ export default function App({ runtime, projectId, pane }: { runtime: RuntimeInfo
       {runtime.kind === "local" && <OfflineBanner />}
       {runtime.kind === "local" && <UpdateBanner status={updateStatus} />}
       <DesktopAppBanner />
-      {workspaceError && <div role="alert" className="flex items-center gap-2 px-4 mac-titlebar:ps-20 win-titlebar:pe-36 py-2 text-subtext"><span>{workspaceError}</span><Button onClick={retryWorkspace}>{m.app_retry()}</Button></div>}
+      {workspaceError && <div role="alert" className="flex items-center gap-2 px-4 mac-titlebar:ps-titlebar-controls win-titlebar:pe-36 py-2 text-subtext"><span>{workspaceError}</span><Button onClick={retryWorkspace}>{m.app_retry()}</Button></div>}
       <div className={`app-body workspace-body relative flex flex-1 min-h-0 py-0 px-3.5 ${workspaceCardVisible ? "workspace-card-visible" : ""}`}>
         {projectId && (
           <ChatPanel
@@ -1821,7 +1821,7 @@ export default function App({ runtime, projectId, pane }: { runtime: RuntimeInfo
         )}
         {mainView === "chat" && panelOpen && (
           <aside
-            className={`right-pane relative shrink-0 min-w-0 flex flex-col mt-5 win-titlebar:mt-10 me-0 mb-5 ms-3.5 bg-background [&.max]:fixed [&.max]:inset-2.5 mac-titlebar:[&.max]:top-8 win-titlebar:[&.max]:top-10 [&.max]:m-0 [&.max]:z-60 [&.max]:shadow-panel-max border border-border rounded-lg overflow-hidden shadow-elevated ${panelMax ? "max" : ""}`}
+            className={`right-pane relative shrink-0 min-w-0 flex flex-col mt-5 win-titlebar:mt-10 me-0 mb-5 ms-3.5 bg-background [&.max]:fixed [&.max]:inset-2.5 mac-titlebar:[&.max]:top-titlebar win-titlebar:[&.max]:top-10 [&.max]:m-0 [&.max]:z-60 [&.max]:shadow-panel-max border border-border rounded-lg overflow-hidden shadow-elevated ${panelMax ? "max" : ""}`}
             style={panelMax ? undefined : { width: panelWidth }}
             data-onboarding="experiments"
           >

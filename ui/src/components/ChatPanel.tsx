@@ -6261,7 +6261,7 @@ export function ChatPanel({
   }, [sidebarGrouping, railOpen, embedded, lastVisibleIndex, sidebarRows.length, flatSessions.hasNextPage, flatSessions.isFetching, flatSessions.isError, flatSessions.fetchNextPage]);
 
   const rail = (
-    <aside className="session-rail w-75 shrink-0 flex flex-col mt-5 mac-titlebar:mt-8 me-3.5 mb-5 ms-0 bg-background min-h-0 [&_.rail-body]:flex-1 [&_.rail-body]:min-h-0 [&_.rail-body]:pt-0 [&_.rail-body]:pb-0 [&_.rail-body]:ps-2 [&_.rail-body]:pe-1 border border-border rounded-lg overflow-visible shadow-elevated">
+    <aside className="session-rail w-75 shrink-0 flex flex-col mt-5 mac-titlebar:mt-titlebar me-3.5 mb-5 ms-0 bg-background min-h-0 [&_.rail-body]:flex-1 [&_.rail-body]:min-h-0 [&_.rail-body]:pt-0 [&_.rail-body]:pb-0 [&_.rail-body]:ps-2 [&_.rail-body]:pe-1 border border-border rounded-lg overflow-visible shadow-elevated">
       {railHeader}
       <nav className="rail-nav flex flex-col gap-0.5 p-2 shrink-0">
         <button
@@ -6448,7 +6448,7 @@ export function ChatPanel({
       title={m.chat_panel_show_sidebar()}
       aria-label={m.chat_panel_show_sidebar()}
       onClick={onShowRail}
-      className="mac-titlebar:ms-16"
+      className="mac-titlebar:ms-titlebar-inset"
     >
       <PanelLeft size={20} />
     </IconButton>
@@ -6475,7 +6475,7 @@ export function ChatPanel({
       <section data-side-chat={embedded || undefined} className={`chat-pane flex-1 min-w-0 flex flex-col bg-background min-h-0 ${embedded ? "" : "mt-5"}`}>
         {/* Header — session title on the left, end-pane view switchers on the
           right, fading into the chat below (sessions live in the rail). */}
-        <div className={railOpen || embedded ? "contents" : "grid shrink-0 grid-cols-[2rem_minmax(0,1fr)_2rem] mac-titlebar:grid-cols-[6rem_minmax(0,1fr)_6rem] items-center"}>
+        <div className={railOpen || embedded ? "contents" : "grid shrink-0 grid-cols-[2rem_minmax(0,1fr)_2rem] mac-titlebar:grid-cols-titlebar-chat items-center"}>
           {railReopen}
           <div className={headerClass}>
           <div className="flex min-w-0 flex-1 items-center gap-2">
@@ -6935,7 +6935,7 @@ export function ChatPanel({
                 ref={composerRef}
                 aria-describedby={demoHintVisible ? demoHintId : undefined}
                 // Native prose stays visible; the aligned mirror paints only skill tokens.
-                className="relative z-1 bg-transparent"
+                className="relative z-1 min-w-0 overflow-x-hidden bg-transparent"
                 value={draft}
                 placeholder={
                   // A pending question card owns typed text (see send()); say so.
