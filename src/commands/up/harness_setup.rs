@@ -282,6 +282,7 @@ async fn run(
             Query(super::HarnessQuery {
                 refresh: Some(1),
                 retry: None,
+                harness: None,
             }),
         )
         .await;

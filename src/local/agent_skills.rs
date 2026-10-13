@@ -190,7 +190,7 @@ const S_GIT: AgentSkill = AgentSkill {
 };
 const S_AGENT_DELEGATION: AgentSkill = AgentSkill {
     name: "orx-agent-delegation",
-    description: "Delegate independent work to helper agent sessions with `orx agent spawn`: task selection, briefs, branch ownership, compute authorization, wakeups, concurrency, and cross-harness review on other vendors' agents. Use before spawning a helper, interpreting its result, or when cross-harness review is on; do not delegate the literature retrieval loop.",
+    description: "Create independent project chats with `orx agent spawn`: standalone opening messages, project selection, worktrees, compute authorization, and cross-harness review chats on other vendors' agents. Use before creating another chat or when cross-harness review is on.",
     content: AGENT_DELEGATION,
     resources: &[],
 };

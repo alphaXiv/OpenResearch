@@ -621,6 +621,7 @@ async fn ssh_run_file(
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
+        .kill_on_drop(true)
         .spawn()
         .map_err(|e| anyhow!("Could not run ssh: {e}"))?;
     let mut file = tokio::fs::File::open(source).await?;
@@ -642,6 +643,38 @@ async fn ssh_run_file(
     Ok(String::from_utf8_lossy(&out.stdout).into_owned())
 }
 
+/// Source uploads are restarted a few times on failure: a dropped SSH
+/// connection mid-stream surfaces as a client-side write error (on Windows,
+/// broken pipe os error 232 writing to ssh's stdin) and the remote script's
+/// byte-length check makes any partial upload safe to re-run.
+const SOURCE_UPLOAD_ATTEMPTS: usize = 3;
+const SOURCE_UPLOAD_RETRY_DELAY: Duration = Duration::from_secs(2);
+
+/// Runs an upload `attempt` until it succeeds or the attempt budget is spent.
+/// Only call with attempts that are safe to re-run (see
+/// `source_cache_commands`). A final failure names the transport stage and
+/// target so a bare transport error reports what was being uploaded.
+async fn upload_source<F, Fut>(dest: &str, delay: Duration, mut attempt: F) -> Result<()>
+where
+    F: FnMut() -> Fut,
+    Fut: std::future::Future<Output = Result<()>>,
+{
+    let mut last_err = None;
+    for n in 1..=SOURCE_UPLOAD_ATTEMPTS {
+        match attempt().await {
+            Ok(()) => return Ok(()),
+            Err(e) => last_err = Some(e),
+        }
+        if n < SOURCE_UPLOAD_ATTEMPTS {
+            tokio::time::sleep(delay).await;
+        }
+    }
+    Err(anyhow!(
+        "uploading source archive to {dest} failed after {SOURCE_UPLOAD_ATTEMPTS} attempts: {:#}",
+        last_err.unwrap_or_else(|| anyhow!("no upload attempt ran"))
+    ))
+}
+
 /// Upload a content-addressed tar once, then materialize it into this run's
 /// private `repo/` directory. Both the cache write and extraction are safe to
 /// repeat after a client or supervisor restart.
@@ -657,7 +690,11 @@ pub async fn stage_source(
     let size = tokio::fs::metadata(archive).await?.len();
     let (check, upload) = source_cache_commands(&cache, size);
     if ssh_run(target, &check, None).await?.trim() != "present" {
-        ssh_run_file(target, &upload, archive).await?;
+        let cmd = upload.as_str();
+        upload_source(&target.dest, SOURCE_UPLOAD_RETRY_DELAY, || async move {
+            ssh_run_file(target, cmd, archive).await.map(|_| ())
+        })
+        .await?;
     }
     if let Some(container) = container {
         container.require_running(target).await?;
@@ -1088,6 +1125,58 @@ mod tests {
             std::fs::read_dir(cached.parent().unwrap()).unwrap().count(),
             1
         );
+    }
+
+    #[tokio::test]
+    async fn upload_source_retries_a_dropped_attempt_then_succeeds() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        let calls = AtomicUsize::new(0);
+        upload_source("host", Duration::ZERO, || {
+            let n = calls.fetch_add(1, Ordering::SeqCst);
+            async move {
+                if n == 0 {
+                    Err(anyhow!("The pipe is being closed. (os error 232)"))
+                } else {
+                    Ok(())
+                }
+            }
+        })
+        .await
+        .unwrap();
+        assert_eq!(calls.load(Ordering::SeqCst), 2);
+    }
+
+    #[tokio::test]
+    async fn upload_source_stops_after_the_attempt_budget_and_names_the_stage() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        let calls = AtomicUsize::new(0);
+        let err = upload_source("box.example.com", Duration::ZERO, || {
+            calls.fetch_add(1, Ordering::SeqCst);
+            async { Err::<(), _>(anyhow!("The pipe is being closed. (os error 232)")) }
+        })
+        .await
+        .unwrap_err();
+        assert_eq!(calls.load(Ordering::SeqCst), SOURCE_UPLOAD_ATTEMPTS);
+        let msg = err.to_string();
+        assert!(
+            msg.contains("uploading source archive to box.example.com"),
+            "{msg}"
+        );
+        assert!(msg.contains(&SOURCE_UPLOAD_ATTEMPTS.to_string()), "{msg}");
+        assert!(msg.contains("os error 232"), "{msg}");
+    }
+
+    #[tokio::test]
+    async fn upload_source_runs_a_single_attempt_on_success() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        let calls = AtomicUsize::new(0);
+        upload_source("host", Duration::ZERO, || {
+            calls.fetch_add(1, Ordering::SeqCst);
+            async { Ok(()) }
+        })
+        .await
+        .unwrap();
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
     }
 
     #[cfg(unix)]
