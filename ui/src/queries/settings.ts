@@ -204,3 +204,12 @@ export const getLocalModelsQuery = () => queryOptions({
   queryFn: ({ signal }) => api.getLocalModels(signal),
   staleTime: 30_000,
 });
+
+export const reportLocaleQuery = (locale: string) => queryOptions({
+  queryKey: workspaceKey("reportLocale", locale),
+  queryFn: ({ signal }) => api.reportLocale(locale, signal),
+  staleTime: 0,
+  retry: 3,
+  retryDelay: 1_000,
+  refetchOnWindowFocus: false,
+});

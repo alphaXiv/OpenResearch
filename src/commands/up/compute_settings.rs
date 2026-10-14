@@ -272,53 +272,307 @@ pub(super) async fn set_k8s_settings(Json(req): Json<SetK8sSettingsReq>) -> ApiR
     Ok(Json(k8s_settings_json().await))
 }
 
-/// Concrete Host entries from `~/.ssh/config` (wildcard patterns skipped) —
-/// read-only groundwork for an SSH compute backend. No keys are read.
+/// Concrete Host entries from `~/.ssh/config` and the files it `Include`s
+/// (wildcard patterns skipped) — read-only groundwork for an SSH compute
+/// backend. No keys are read.
 pub(super) fn list_ssh_hosts() -> Vec<Value> {
-    let Some(path) = dirs::home_dir().map(|h| h.join(".ssh").join("config")) else {
+    let Some(home) = dirs::home_dir() else {
         return Vec::new();
     };
-    let Ok(raw) = std::fs::read_to_string(path) else {
-        return Vec::new();
+    ssh_hosts_in(&home)
+}
+
+/// OpenSSH's `READCONF_MAX_DEPTH`.
+const SSH_INCLUDE_MAX_DEPTH: usize = 16;
+
+fn ssh_hosts_in(home: &std::path::Path) -> Vec<Value> {
+    let mut reader = SshHostReader {
+        home,
+        hosts: Vec::new(),
+        current: Vec::new(),
+        stack: Vec::new(),
     };
-    let mut hosts: Vec<Value> = Vec::new();
+    reader.read_file(&home.join(".ssh").join("config"));
+    reader.hosts
+}
+
+struct SshHostReader<'a> {
+    home: &'a std::path::Path,
+    hosts: Vec<Value>,
     // Indices into `hosts` for the Host block currently being filled.
-    let mut current: Vec<usize> = Vec::new();
-    for line in raw.lines() {
-        let line = line.split('#').next().unwrap_or("").trim();
-        if line.is_empty() {
-            continue;
+    current: Vec<usize>,
+    // Files being read, outermost first, to stop Include cycles.
+    stack: Vec<std::path::PathBuf>,
+}
+
+impl SshHostReader<'_> {
+    /// Unreadable or missing files are skipped, like ssh does for Include.
+    fn read_file(&mut self, path: &std::path::Path) {
+        let key = std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
+        if self.stack.len() > SSH_INCLUDE_MAX_DEPTH || self.stack.contains(&key) {
+            return;
         }
-        let (key, value) = match line.split_once([' ', '\t', '=']) {
-            Some((k, v)) => (k.trim().to_ascii_lowercase(), v.trim().trim_matches('"')),
-            None => continue,
+        let Ok(raw) = std::fs::read_to_string(path) else {
+            return;
         };
-        if key == "host" {
-            current = value
-                .split_whitespace()
-                .filter(|name| !name.contains(['*', '?', '!']))
-                .map(|name| {
-                    hosts.push(json!({ "host": name }));
-                    hosts.len() - 1
-                })
-                .collect();
-            continue;
+        self.stack.push(key);
+        // Each file starts in the block that included it, and ssh restores
+        // that block when the file ends.
+        let enclosing = self.current.clone();
+        for line in raw.lines() {
+            let line = line.trim();
+            if line.is_empty() {
+                continue;
+            }
+            let (key, value) = match line.split_once([' ', '\t', '=']) {
+                Some((k, v)) => (
+                    k.trim().to_ascii_lowercase(),
+                    v.trim().trim_start_matches('=').trim(),
+                ),
+                None => continue,
+            };
+            let args = ssh_config_args(value);
+            if args.is_empty() {
+                continue;
+            }
+            match key.as_str() {
+                "host" => {
+                    let current = args
+                        .into_iter()
+                        .filter(|name| !name.contains(['*', '?', '!']))
+                        .map(|name| self.host_index(&name))
+                        .collect();
+                    self.current = current;
+                    continue;
+                }
+                // Match criteria aren't evaluated; its options belong to no listed host.
+                "match" => {
+                    self.current.clear();
+                    continue;
+                }
+                "include" => {
+                    for pattern in args {
+                        for file in expand_ssh_include(self.home, &pattern) {
+                            self.read_file(&file);
+                        }
+                    }
+                    continue;
+                }
+                _ => {}
+            }
+            let field = match key.as_str() {
+                "hostname" => "hostname",
+                "user" => "user",
+                "port" => "port",
+                "identityfile" => "identityFile",
+                _ => continue,
+            };
+            let value = args.join(" ");
+            for &i in &self.current {
+                // First value wins, like ssh itself.
+                if self.hosts[i].get(field).is_none() {
+                    self.hosts[i][field] = json!(value);
+                }
+            }
         }
-        let field = match key.as_str() {
-            "hostname" => "hostname",
-            "user" => "user",
-            "port" => "port",
-            "identityfile" => "identityFile",
-            _ => continue,
-        };
-        for &i in &current {
-            // First value wins, like ssh itself.
-            if hosts[i].get(field).is_none() {
-                hosts[i][field] = json!(value);
+        self.current = enclosing;
+        self.stack.pop();
+    }
+
+    /// Repeated Host blocks for one alias merge into a single entry.
+    fn host_index(&mut self, name: &str) -> usize {
+        if let Some(i) = self
+            .hosts
+            .iter()
+            .position(|h| h.get("host").and_then(Value::as_str) == Some(name))
+        {
+            return i;
+        }
+        self.hosts.push(json!({ "host": name }));
+        self.hosts.len() - 1
+    }
+}
+
+/// OpenSSH's argument quoting, escapes and word-start comments.
+fn ssh_config_args(value: &str) -> Vec<String> {
+    let mut args = Vec::new();
+    let mut arg = String::new();
+    let mut quote = None;
+    let mut started = false;
+    let mut chars = value.chars().peekable();
+    while let Some(c) = chars.next() {
+        match c {
+            ' ' | '\t' if quote.is_none() => {
+                if started {
+                    args.push(std::mem::take(&mut arg));
+                    started = false;
+                }
+            }
+            '#' if !started => break,
+            '\\' if chars.peek().is_some_and(|&next| {
+                matches!(next, '\\' | '\'' | '"') || (quote.is_none() && next == ' ')
+            }) =>
+            {
+                arg.push(chars.next().unwrap());
+                started = true;
+            }
+            '\'' | '"' if quote.is_none() => {
+                quote = Some(c);
+                started = true;
+            }
+            c if quote == Some(c) => quote = None,
+            c => {
+                arg.push(c);
+                started = true;
             }
         }
     }
-    hosts
+    if quote.is_some() {
+        return Vec::new();
+    }
+    if started {
+        args.push(arg);
+    }
+    args
+}
+
+/// Relative Include paths are under `~/.ssh`, even in nested files.
+fn expand_ssh_include(home: &std::path::Path, pattern: &str) -> Vec<std::path::PathBuf> {
+    use std::path::Path;
+    let pattern = if let Some(rest) = pattern.strip_prefix('~') {
+        let (user, rest) = rest.split_once(['/', '\\']).unwrap_or((rest, ""));
+        let home = if user.is_empty() {
+            home.to_path_buf()
+        } else if let Some(home) = ssh_user_home(user) {
+            home
+        } else {
+            return Vec::new();
+        };
+        let home = glob::Pattern::escape(&home.to_string_lossy());
+        if rest.is_empty() {
+            home
+        } else {
+            format!("{home}/{rest}")
+        }
+    } else if Path::new(pattern).is_absolute() || pattern.starts_with(['/', '\\']) {
+        pattern.to_string()
+    } else {
+        format!(
+            "{}/{pattern}",
+            glob::Pattern::escape(&home.join(".ssh").to_string_lossy())
+        )
+    };
+    let pattern = ssh_include_glob(&pattern);
+    let Ok(matcher) = glob::Pattern::new(&pattern) else {
+        return Vec::new();
+    };
+    let options = glob::MatchOptions {
+        case_sensitive: !cfg!(windows),
+        require_literal_separator: true,
+        require_literal_leading_dot: true,
+    };
+    // glob's directory filter drops even explicit dot patterns and panics on
+    // non-UTF-8 names. Apply the literal-dot rule to safe full-path matches.
+    let scan_options = glob::MatchOptions {
+        require_literal_leading_dot: false,
+        ..options
+    };
+    glob::glob_with(&pattern, scan_options)
+        .map(|paths| {
+            paths
+                .flatten()
+                .filter(|path| matcher.matches_path_with(path, options))
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+fn ssh_include_glob(pattern: &str) -> String {
+    let mut result = String::new();
+    let mut in_class = false;
+    let mut chars = pattern.chars().peekable();
+    while let Some(c) = chars.next() {
+        if c == '\\' && !cfg!(windows) && !in_class {
+            let Some(literal) = chars.next() else {
+                result.push(c);
+                break;
+            };
+            result.push_str(&glob::Pattern::escape(&literal.to_string()));
+            continue;
+        }
+        result.push(c);
+        match c {
+            '[' => in_class = true,
+            ']' => in_class = false,
+            // OpenSSH glob has no recursive ** operator.
+            '*' if !in_class => {
+                while chars.peek() == Some(&'*') {
+                    chars.next();
+                }
+            }
+            _ => {}
+        }
+    }
+    result
+}
+
+#[cfg(unix)]
+fn ssh_user_home(user: &str) -> Option<std::path::PathBuf> {
+    use std::ffi::{CStr, CString, OsStr};
+    use std::os::unix::ffi::OsStrExt;
+
+    let user = CString::new(user).ok()?;
+    let mut buffer = vec![0u8; 16384];
+    loop {
+        let mut entry = std::mem::MaybeUninit::<libc::passwd>::uninit();
+        let mut result = std::ptr::null_mut();
+        // SAFETY: the input and writable buffers remain valid throughout the call.
+        let error = unsafe {
+            libc::getpwnam_r(
+                user.as_ptr(),
+                entry.as_mut_ptr(),
+                buffer.as_mut_ptr().cast(),
+                buffer.len(),
+                &mut result,
+            )
+        };
+        if error == libc::ERANGE && buffer.len() < 1024 * 1024 {
+            buffer.resize(buffer.len() * 2, 0);
+            continue;
+        }
+        if error != 0 || result.is_null() {
+            return None;
+        }
+        // SAFETY: success initializes the entry and its string lives in buffer.
+        let directory = unsafe { CStr::from_ptr(entry.assume_init().pw_dir) };
+        return Some(OsStr::from_bytes(directory.to_bytes()).into());
+    }
+}
+
+#[cfg(windows)]
+fn ssh_user_home(user: &str) -> Option<std::path::PathBuf> {
+    use std::os::windows::process::CommandExt;
+
+    // OpenSSH resolves the account SID's ProfileImagePath, not a guessed folder.
+    let script = r#"
+$ErrorActionPreference = 'Stop'
+[Console]::OutputEncoding = [Text.UTF8Encoding]::new($false)
+$sid = [Security.Principal.NTAccount]::new($env:ORX_SSH_CONFIG_USER).Translate([Security.Principal.SecurityIdentifier]).Value
+$path = [Microsoft.Win32.Registry]::GetValue('HKEY_LOCAL_MACHINE\SOFTWARE\Microsoft\Windows NT\CurrentVersion\ProfileList\' + $sid, 'ProfileImagePath', $null)
+if (!$path) { $path = $env:SystemRoot }
+[Environment]::ExpandEnvironmentVariables($path)
+"#;
+    let output = std::process::Command::new("powershell.exe")
+        .args(["-NoProfile", "-NonInteractive", "-Command", script])
+        .env("ORX_SSH_CONFIG_USER", user)
+        .creation_flags(windows_sys::Win32::System::Threading::CREATE_NO_WINDOW)
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let path = std::str::from_utf8(&output.stdout).ok()?.trim();
+    (!path.is_empty()).then(|| path.into())
 }
 
 pub(super) async fn ssh_settings() -> ApiResult {
@@ -372,7 +626,7 @@ pub(super) struct SaveSshSettingsReq {
 
 pub(super) async fn save_ssh_settings(Json(req): Json<SaveSshSettingsReq>) -> ApiResult {
     let host = req.host.trim().to_string();
-    require_configured_ssh_host(&host)?;
+    require_configured_ssh_host(&host).await?;
     let options = crate::config::SshHostSettings {
         container: req.container,
     };
@@ -392,7 +646,7 @@ pub(super) struct SaveSshDefaultReq {
 pub(super) async fn save_ssh_default(Json(req): Json<SaveSshDefaultReq>) -> ApiResult {
     let host = req.host.map(|host| host.trim().to_string());
     if let Some(host) = &host {
-        require_configured_ssh_host(host)?;
+        require_configured_ssh_host(host).await?;
     }
     blocking_api(move || {
         crate::config::set_ssh_default(host)?;
@@ -509,7 +763,7 @@ pub(super) async fn ssh_preflight(Json(req): Json<SshPreflightReq>) -> ApiResult
     if host.is_empty() {
         return Err(bad_request("host is required"));
     }
-    require_configured_ssh_host(&host)?;
+    require_configured_ssh_host(&host).await?;
     if let Some(reference) = &req.container {
         crate::jobs::ssh::validate_container_reference(reference).map_err(bad_request)?;
     }
@@ -532,8 +786,11 @@ pub(super) async fn ssh_preflight(Json(req): Json<SshPreflightReq>) -> ApiResult
     Ok(Json(result))
 }
 
-pub(super) fn require_configured_ssh_host(host: &str) -> Result<(), ApiError> {
-    if list_ssh_hosts()
+pub(super) async fn require_configured_ssh_host(host: &str) -> Result<(), ApiError> {
+    let hosts = tokio::task::spawn_blocking(list_ssh_hosts)
+        .await
+        .map_err(|e| ApiError::from(anyhow!("ssh task failed: {e}")))?;
+    if hosts
         .iter()
         .any(|candidate| candidate.get("host").and_then(Value::as_str) == Some(host))
     {
@@ -1164,6 +1421,7 @@ pub(crate) async fn configure(backend: &str, body: Value) -> Result<Value> {
             // Validate both changes before persisting either.
             if let Some(host) = body.get("defaultHost").and_then(Value::as_str) {
                 require_configured_ssh_host(host)
+                    .await
                     .map_err(|ApiError(_, message)| anyhow!(message))?;
             }
             if body.get("container").is_some() {
@@ -1270,4 +1528,295 @@ pub(crate) async fn write_ssh_config(content: String, previous_content: String) 
         }))
         .await,
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn fake_home(files: &[(&str, &str)]) -> crate::local::git::TemporaryDirectory {
+        let home = crate::local::git::TemporaryDirectory::new("orx-ssh-include").unwrap();
+        for (path, contents) in files {
+            let path = path
+                .split('/')
+                .fold(home.path().to_path_buf(), |p, part| p.join(part));
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(path, contents).unwrap();
+        }
+        home
+    }
+
+    fn names(hosts: &[Value]) -> Vec<&str> {
+        hosts.iter().map(|h| h["host"].as_str().unwrap()).collect()
+    }
+
+    #[test]
+    fn ssh_hosts_lists_direct_hosts_without_patterns_or_match() {
+        let home = fake_home(&[(
+            ".ssh/config",
+            "Host lab gpu-*\n  HostName lab.invalid\n  User alice\nHost *\n  User nobody\nMatch host lab\n  Port 2222\n",
+        )]);
+        let hosts = ssh_hosts_in(home.path());
+        assert_eq!(names(&hosts), ["lab"]);
+        assert_eq!(hosts[0]["hostname"], "lab.invalid");
+        assert_eq!(hosts[0]["user"], "alice");
+        assert!(hosts[0].get("port").is_none());
+    }
+
+    #[test]
+    fn ssh_hosts_follow_relative_glob_absolute_and_tilde_includes() {
+        let home = fake_home(&[
+            ("absolute.conf", "Host absolute\n"),
+            ("tilde.conf", "Host tilde\n"),
+            (".ssh/extra.conf", "Host relative\n  User bob\n"),
+            (".ssh/config.d/b.conf", "Host glob-b\n"),
+            (".ssh/config.d/a.conf", "Host glob-a\n"),
+            (".ssh/config.d/.hidden", "Host hidden\n"),
+        ]);
+        let absolute = home.path().join("absolute.conf");
+        std::fs::write(
+            home.path().join(".ssh").join("config"),
+            format!(
+                "Include extra.conf config.d/*\nInclude \"{}\"\nInclude ~/tilde.conf\nHost direct\n",
+                absolute.display()
+            ),
+        )
+        .unwrap();
+        let hosts = ssh_hosts_in(home.path());
+        assert_eq!(
+            names(&hosts),
+            ["relative", "glob-a", "glob-b", "absolute", "tilde", "direct"]
+        );
+        assert_eq!(hosts[0]["user"], "bob");
+    }
+
+    #[test]
+    fn ssh_include_inside_host_block_resumes_enclosing_block() {
+        let home = fake_home(&[
+            (
+                ".ssh/config",
+                "Host outer\n  Include inner.conf\n  User carol\n",
+            ),
+            (
+                ".ssh/inner.conf",
+                "HostName outer.invalid\nHost inner\n  User dave\n",
+            ),
+        ]);
+        let hosts = ssh_hosts_in(home.path());
+        assert_eq!(names(&hosts), ["outer", "inner"]);
+        assert_eq!(hosts[0]["hostname"], "outer.invalid");
+        assert_eq!(hosts[0]["user"], "carol");
+        assert_eq!(hosts[1]["user"], "dave");
+    }
+
+    #[test]
+    fn ssh_each_included_file_starts_in_the_enclosing_block() {
+        let home = fake_home(&[
+            (
+                ".ssh/config",
+                "Host outer
+  Include a.conf b.conf
+",
+            ),
+            (
+                ".ssh/a.conf",
+                "Host a
+  User alice
+",
+            ),
+            (
+                ".ssh/b.conf",
+                "Port 2222
+Host b
+",
+            ),
+        ]);
+        let hosts = ssh_hosts_in(home.path());
+        assert_eq!(names(&hosts), ["outer", "a", "b"]);
+        assert_eq!(hosts[0]["port"], "2222");
+        assert!(hosts[1].get("port").is_none());
+    }
+
+    #[test]
+    fn ssh_comments_start_only_at_an_unquoted_word() {
+        let home = fake_home(&[
+            (
+                ".ssh/config",
+                "Include \"conf.d/lab#1.conf\" # the first lab
+# Host commented-out
+",
+            ),
+            (
+                ".ssh/conf.d/lab#1.conf",
+                "Host lab-one # note
+  User alice#1
+",
+            ),
+        ]);
+        let hosts = ssh_hosts_in(home.path());
+        assert_eq!(names(&hosts), ["lab-one"]);
+        assert_eq!(hosts[0]["user"], "alice#1");
+    }
+
+    #[test]
+    fn ssh_include_cycles_terminate_and_merge_repeated_hosts() {
+        let home = fake_home(&[
+            (".ssh/config", "Include a.conf\nHost top a\n  User erin\n"),
+            (".ssh/a.conf", "Host a\nInclude b.conf\n"),
+            (".ssh/b.conf", "Host b\nInclude a.conf config\n"),
+        ]);
+        let hosts = ssh_hosts_in(home.path());
+        assert_eq!(names(&hosts), ["a", "b", "top"]);
+        assert_eq!(hosts[0]["user"], "erin");
+    }
+
+    #[test]
+    fn ssh_include_missing_files_are_skipped() {
+        let home = fake_home(&[(
+            ".ssh/config",
+            "Host before\nInclude missing.conf nowhere.d/* ~/absent/*.conf\nHost after\n",
+        )]);
+        assert_eq!(names(&ssh_hosts_in(home.path())), ["before", "after"]);
+    }
+
+    #[test]
+    fn ssh_includes_support_single_quotes_and_escaped_spaces() {
+        let home = fake_home(&[
+            (
+                ".ssh/config",
+                r#"Include 'conf.d/lab #1.conf' conf.d/lab\ space.conf conf.d/lab\'s.conf # ignored
+"#,
+            ),
+            (".ssh/conf.d/lab #1.conf", "Host quoted\n"),
+            (".ssh/conf.d/lab space.conf", "Host escaped\n"),
+            (".ssh/conf.d/lab's.conf", "Host apostrophe\n"),
+        ]);
+        assert_eq!(
+            names(&ssh_hosts_in(home.path())),
+            ["quoted", "escaped", "apostrophe"]
+        );
+    }
+
+    #[test]
+    fn ssh_includes_expand_named_user_homes() {
+        #[cfg(windows)]
+        let user = std::env::var("USERNAME").unwrap();
+        #[cfg(unix)]
+        let user = String::from_utf8(
+            std::process::Command::new("id")
+                .arg("-un")
+                .output()
+                .unwrap()
+                .stdout,
+        )
+        .unwrap()
+        .trim()
+        .to_string();
+        let actual_home = ssh_user_home(&user).unwrap();
+        assert!(actual_home.is_dir());
+        let fake_home = fake_home(&[(".ssh/config", "")]);
+        assert_eq!(
+            expand_ssh_include(fake_home.path(), &format!("~{user}")),
+            [actual_home]
+        );
+        assert!(expand_ssh_include(
+            fake_home.path(),
+            &format!("~orx-missing-{}/config", uuid::Uuid::new_v4()),
+        )
+        .is_empty());
+    }
+
+    #[test]
+    fn ssh_args_preserve_windows_separators_and_quoted_hashes() {
+        assert_eq!(
+            ssh_config_args(r#"C:\Users\alice\lab.conf 'lab #1.conf' lab\ #2.conf "#),
+            [r"C:\Users\alice\lab.conf", "lab #1.conf", "lab #2.conf"]
+        );
+        assert_eq!(
+            ssh_config_args(r#""lab\"quote" 'lab\'quote'"#),
+            ["lab\"quote", "lab'quote"]
+        );
+        assert!(ssh_config_args("'unclosed path").is_empty());
+    }
+
+    #[test]
+    fn ssh_include_globs_match_explicit_dotfiles_only() {
+        let home = fake_home(&[
+            (".ssh/config", "Include conf.d/.lab*.conf conf.d/*.conf\n"),
+            (".ssh/conf.d/.lab1.conf", "Host hidden\n"),
+            (".ssh/conf.d/.private.conf", "Host private\n"),
+            (".ssh/conf.d/lab.conf", "Host public\n"),
+        ]);
+        assert_eq!(names(&ssh_hosts_in(home.path())), ["hidden", "public"]);
+    }
+
+    #[test]
+    fn ssh_include_double_stars_are_nonrecursive() {
+        let home = fake_home(&[
+            (".ssh/config", "Include conf.d/**.conf conf.d/**/lab.conf\n"),
+            (".ssh/conf.d/a.conf", "Host immediate\n"),
+            (".ssh/conf.d/one/lab.conf", "Host one\n"),
+            (".ssh/conf.d/one/two/lab.conf", "Host two\n"),
+        ]);
+        assert_eq!(names(&ssh_hosts_in(home.path())), ["immediate", "one"]);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn ssh_include_globs_preserve_escaped_literal_characters() {
+        let home = fake_home(&[
+            (
+                ".ssh/config",
+                r"Include conf.d/foo\#bar.conf conf.d/\*.conf",
+            ),
+            (".ssh/conf.d/foo#bar.conf", "Host hash\n"),
+            (".ssh/conf.d/*.conf", "Host literal\n"),
+            (".ssh/conf.d/other.conf", "Host other\n"),
+        ]);
+        assert_eq!(names(&ssh_hosts_in(home.path())), ["hash", "literal"]);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn ssh_include_globs_skip_non_utf8_filenames_without_panicking() {
+        use std::os::unix::ffi::OsStringExt;
+        let home = fake_home(&[
+            (".ssh/config", "Host direct\nInclude conf.d/*.conf\n"),
+            (".ssh/conf.d/lab.conf", "Host included\n"),
+        ]);
+        let name = std::ffi::OsString::from_vec(b"bad\xff.conf".to_vec());
+        std::fs::write(home.path().join(".ssh/conf.d").join(name), "Host bad\n").unwrap();
+        assert_eq!(names(&ssh_hosts_in(home.path())), ["direct", "included"]);
+    }
+
+    #[test]
+    fn ssh_include_globs_match_components_and_character_classes() {
+        let home = fake_home(&[
+            (".ssh/config", "Include = config.?/[ab].conf\n"),
+            (".ssh/config.d/a.conf", "Host a\n"),
+            (".ssh/config.d/b.conf", "Host b\n"),
+            (".ssh/config.d/c.conf", "Host excluded\n"),
+            (".ssh/config.d/nested/a.conf", "Host nested\n"),
+        ]);
+        assert_eq!(names(&ssh_hosts_in(home.path())), ["a", "b"]);
+    }
+
+    #[test]
+    fn ssh_nested_includes_resolve_under_ssh_and_stop_at_depth_limit() {
+        let home = fake_home(&[
+            (".ssh/config", "Include conf.d/start.conf\n"),
+            (".ssh/conf.d/start.conf", "Include 0.conf\n"),
+        ]);
+        for i in 0..=SSH_INCLUDE_MAX_DEPTH {
+            std::fs::write(
+                home.path().join(".ssh").join(format!("{i}.conf")),
+                format!("Host depth-{i}\nInclude {}.conf\n", i + 1),
+            )
+            .unwrap();
+        }
+        let hosts = ssh_hosts_in(home.path());
+        assert_eq!(hosts.len(), SSH_INCLUDE_MAX_DEPTH - 1);
+        assert_eq!(hosts[0]["host"], "depth-0");
+        assert_eq!(hosts.last().unwrap()["host"], "depth-14");
+    }
 }
