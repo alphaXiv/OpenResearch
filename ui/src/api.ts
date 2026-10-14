@@ -798,6 +798,8 @@ export interface ChangedFile {
  * untracked files rendered as new-file diffs. */
 export interface SessionWorktree {
   exists: boolean;
+  /** Absolute path of the session's worktree on disk. */
+  path?: string;
   /** Checked-out branch, or null when detached at the baseline tip. */
   branch?: string | null;
   baselineBranch?: string;
@@ -808,6 +810,22 @@ export interface SessionWorktree {
 
 export const getSessionWorktree = (sessionId: string, signal?: AbortSignal) =>
   get<SessionWorktree>(`/api/chat/sessions/${sessionId}/worktree`, signal);
+
+/** Overlay the session worktree's changes into the project folder. */
+export const syncSessionWorktree = (sessionId: string) =>
+  post<{ ok: boolean; copied: number; deleted: number }>(
+    `/api/chat/sessions/${sessionId}/worktree/sync`,
+  );
+
+export type SessionStoragePaths = Record<"records" | "transcript" | "attachments" | "artifacts", string>;
+
+export const getSessionStorage = (sessionId: string, signal?: AbortSignal) =>
+  get<SessionStoragePaths>(`/api/chat/sessions/${sessionId}/storage`, signal);
+
+export const revealSessionStorage = (
+  sessionId: string,
+  location: keyof SessionStoragePaths,
+) => post<{ ok: boolean }>(`/api/chat/sessions/${sessionId}/storage/reveal`, { location });
 
 /** A GitHub `tree` URL for a branch. Branch names contain `/` (`orx/<slug>`),
  * so encode each path segment — never the whole string, which would escape the

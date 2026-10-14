@@ -86,7 +86,7 @@ export function QueryEvents() {
       }, 100);
     };
     const offActivity = onProjectActivityEvent(refreshActivity);
-    const offMove = onDataDirMove((event) => { if (event.type === "done") invalidateFamilies(["getDataDir"], scope); });
+    const offMove = onDataDirMove((event) => { if (event.type === "done") invalidateFamilies(["getDataDir", "getSessionStorage"], scope, undefined, true); });
     const offChat = onChatEvent((event) => {
       if (!isCurrentScope(scope)) return;
       if (event.type === "session" || event.type === "sessionDeleted") refreshSidebar();
@@ -99,6 +99,7 @@ export function QueryEvents() {
             : { type: "activeLeaf", sessionId: event.sessionId, leafId: event.activeLeafId }, true);
       }
       if (event.type === "session" && !deletedSessionIds.has(event.session.id)) {
+        invalidateFamilies(["getSessionStorage"], scope, (query) => query.queryKey[3] === event.session.id, true);
         queryClient.setQueryData(listChatSessionsQuery(event.session.projectId).queryKey, (rows) => {
           if (!rows) return undefined;
           const old = rows.find((row) => row.id === event.session.id);

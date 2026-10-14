@@ -12,6 +12,28 @@ function setup(t, api) {
   return modules;
 }
 
+test("storage refreshes after data-directory writes without fetching collapsed panels", async (t) => {
+  let calls = 0;
+  const { client, load } = setup(t, { getSessionStorage: async () => ({ transcript: `native-${++calls}` }) });
+  const options = load("files").getSessionStorageQuery("s");
+  const observer = new QueryObserver(client, { ...options, enabled: false });
+  const off = observer.subscribe(() => {});
+  t.after(off);
+  assert.equal(calls, 0);
+  observer.setOptions({ ...options, enabled: true });
+  await settle();
+  assert.equal(observer.getCurrentResult().data.transcript, "native-1");
+  load("invalidation").invalidateWrite("/api/settings/data-dir/move", load("client").workspaceScope());
+  await settle();
+  assert.equal(observer.getCurrentResult().data.transcript, "native-2");
+  observer.setOptions({ ...options, enabled: false });
+  load("invalidation").invalidateFamilies(["getSessionStorage"]);
+  await settle();
+  assert.equal(calls, 2);
+  assert.equal(client.getQueryState(options.queryKey).isInvalidated, true);
+  off();
+});
+
 test("components and imperative readers deduplicate and reuse fresh data", async (t) => {
   let calls = 0;
   const pending = deferred();

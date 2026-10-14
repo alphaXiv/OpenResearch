@@ -13,6 +13,7 @@ export function CodeBrowserHeader({
   branchTitle,
   githubHref,
   githubTitle,
+  actions,
   refreshing,
   onRefresh,
 }: {
@@ -23,6 +24,8 @@ export function CodeBrowserHeader({
   branchTitle?: string;
   githubHref?: string;
   githubTitle?: string;
+  /** Extra icon buttons ahead of the refresh button (sync, reveal). */
+  actions?: React.ReactNode;
   refreshing: boolean;
   onRefresh: () => void;
 }) {
@@ -66,6 +69,7 @@ export function CodeBrowserHeader({
         </IconButtonLink>
       )}
       <span className="flex-1" />
+      {actions}
       <IconButton title={m.code_browser_header_refresh()} aria-label={m.code_browser_header_refresh()} onClick={onRefresh}>
         {refreshing ? <Spinner /> : <RotateCw size={13} />}
       </IconButton>

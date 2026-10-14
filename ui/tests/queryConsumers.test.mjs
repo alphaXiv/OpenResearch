@@ -19,6 +19,50 @@ function declaration(file, name) {
   return found.initializer.getText(file);
 }
 
+test("worktree header refresh includes the session storage paths", () => {
+  const calls = [];
+  const refresh = evaluate(`return ${declaration(source("WorktreeTab.tsx"), "load")}`, {
+    useCallback: (fn) => fn,
+    sessionId: "s", projectId: "p",
+    queryClient: { invalidateQueries: (options) => calls.push(options.queryKey) },
+    getSessionWorktreeQuery: (id) => ({ queryKey: ["getSessionWorktree", id] }),
+    getSessionStorageQuery: (id) => ({ queryKey: ["getSessionStorage", id] }),
+    workspaceKey: (...args) => args,
+    isImmutableQuery: () => false,
+  });
+  refresh();
+  assert.deepEqual(calls, [["getSessionWorktree", "s"], ["getSessionStorage", "s"], ["getCodeTree", "p"]]);
+});
+
+test("session metadata and completed storage moves refresh storage locations", (t) => {
+  const file = ts.createSourceFile("Events.tsx", readFileSync(new URL("../src/queries/Events.tsx", import.meta.url), "utf8"), ts.ScriptTarget.Latest, true, ts.ScriptKind.TSX);
+  const component = file.statements.find((node) => ts.isFunctionDeclaration(node) && node.name.text === "QueryEvents");
+  const calls = [], handlers = {}, cleanups = [];
+  t.after(() => cleanups.forEach((cleanup) => cleanup()));
+  evaluate(component.body.getText(file), {
+    workspaceScope: () => ["workspace", 1], isCurrentScope: () => true,
+    useOrxEventStream: (events) => { handlers.reconnect = events.onReconnect; },
+    useEffect: (effect) => cleanups.push(effect()),
+    onProjectActivityEvent: () => () => {},
+    onDataDirMove: (fn) => { handlers.move = fn; return () => {}; },
+    onChatEvent: (fn) => { handlers.chat = fn; return () => {}; },
+    onHarnessAuth: () => () => {}, onHarnessCatalog: () => () => {}, onUpdateStatus: () => () => {},
+    invalidateFamilies: (families, scope, predicate) => calls.push({ families, scope, predicate }),
+    deletedSessionIds: new Set(), markLiveUpdate: () => {},
+    listChatSessionsQuery: () => ({ queryKey: [] }),
+    queryClient: { setQueryData: () => {} },
+  });
+  handlers.chat({ type: "session", session: { id: "s", projectId: "p" } });
+  const [session] = calls;
+  assert.deepEqual(session.families, ["getSessionStorage"]);
+  assert.equal(session.predicate({ queryKey: ["workspace", 1, "getSessionStorage", "s"] }), true);
+  assert.equal(session.predicate({ queryKey: ["workspace", 1, "getSessionStorage", "other"] }), false);
+  handlers.move({ type: "progress" });
+  assert.equal(calls.length, 1);
+  handlers.move({ type: "done" });
+  assert.deepEqual(calls[1].families, ["getDataDir", "getSessionStorage"]);
+});
+
 function sendPreparation() {
   const file = source("ChatPanel.tsx");
   let send;

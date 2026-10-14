@@ -1,4 +1,4 @@
-import { FolderOpen } from "lucide-react";
+import { FolderOpen, FolderSync } from "lucide-react";
 import { WorkspaceEmptyState } from "./WorkspaceEmptyState";
 import { isImmutableQuery } from "../queries/invalidation";
 import { useQuery } from "@tanstack/react-query";
@@ -8,7 +8,7 @@ import {
   queryClient,
 } from "../queries/client";
 
-import { getCodeTreeQuery, getSessionWorktreeQuery } from "../queries/files";
+import { getCodeTreeQuery, getSessionStorageQuery, getSessionWorktreeQuery } from "../queries/files";
 import { m } from "../paraglide/messages.js";
 import { ltr } from "../i18n";
 // The pinned Files home for the active chat session's private worktree — what
@@ -29,9 +29,14 @@ import { ltr } from "../i18n";
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
+  fmtNumber,
   githubBranchUrl,
   manageProjectFile,
+  revealFileInManager,
+  revealSessionStorage,
+  syncSessionWorktree,
   type Project,
+  type SessionStoragePaths,
 } from "../api";
 
 import { CodeBrowserHeader, type CodeBrowserView } from "./CodeBrowserHeader";
@@ -45,7 +50,7 @@ import {
   fileContextMenuTarget,
   type FileContextMenuTarget,
 } from "./FileTreeActions";
-import { showAlert } from "./ui";
+import { IconButton, showAlert, Spinner } from "./ui";
 
 export type WorktreeView = CodeBrowserView;
 
@@ -58,9 +63,13 @@ export function WorktreeTab({
   onToggledChange,
   onOpenFile,
   canRenameFile,
+  remote,
 }: {
   sessionId?: string;
   project: Project;
+  /** True when `orx up` serves this dashboard over SSH — OS file actions
+   * (reveal in file manager) act on the remote box, so they're local-only. */
+  remote?: boolean;
   /** Which segmented view is showing (lives on the tab def, so it survives the
    * unmount/remount when another end-pane tab fronts this one). */
   view: WorktreeView;
@@ -90,7 +99,10 @@ export function WorktreeTab({
   const [contextMenu, setContextMenu] = useState<FileContextMenuTarget | null>(null);
   const [renamingPath, setRenamingPath] = useState<string | null>(null);
   const load = useCallback(() => {
-    if (sessionId) void queryClient.invalidateQueries(getSessionWorktreeQuery(sessionId));
+    if (sessionId) {
+      void queryClient.invalidateQueries(getSessionWorktreeQuery(sessionId));
+      void queryClient.invalidateQueries(getSessionStorageQuery(sessionId));
+    }
     void queryClient.invalidateQueries({ queryKey: workspaceKey("getCodeTree", projectId), predicate: (query) => !isImmutableQuery(query) });
   }, [sessionId, projectId]);
   const wasBusy = useRef(busy);
@@ -139,6 +151,52 @@ export function WorktreeTab({
     const root = tree?.path ?? project.repoPath;
     copyFilePath(root, path);
   };
+  const [syncing, setSyncing] = useState(false);
+  const [showStorage, setShowStorage] = useState(false);
+  const storage = useQuery({
+    ...getSessionStorageQuery(sessionId ?? ""),
+    enabled: Boolean(sessionId) && showStorage,
+    refetchInterval: busy ? 5_000 : false,
+  });
+  /** Overlay this worktree's changes into the project folder — the explicit
+   * "land my work in the folder I picked" action. */
+  const sync = async () => {
+    if (!sessionId) return;
+    setSyncing(true);
+    try {
+      const result = await syncSessionWorktree(sessionId);
+      const changes = result.copied + result.deleted;
+      showAlert(
+        changes === 0
+          ? m.worktree_sync_none()
+          : changes === 1
+            ? m.worktree_sync_one()
+            : m.worktree_sync_many({ count: fmtNumber(changes) }),
+        changes === 0 ? "info" : "success",
+      );
+      load();
+    } catch (error) {
+      showAlert(error instanceof Error ? error.message : String(error), "error");
+    } finally {
+      setSyncing(false);
+    }
+  };
+  const revealWorktree = async () => {
+    if (!sessionId) return;
+    try {
+      await revealFileInManager(projectId, ".", { sessionId });
+    } catch (error) {
+      showAlert(error instanceof Error ? error.message : String(error), "error");
+    }
+  };
+  const revealStorage = async (location: keyof SessionStoragePaths) => {
+    if (!sessionId) return;
+    try {
+      await revealSessionStorage(sessionId, location);
+    } catch (error) {
+      showAlert(error instanceof Error ? error.message : String(error), "error");
+    }
+  };
 
   return (
     <div className="code-tab flex flex-col h-full min-h-0 wt-tab">
@@ -154,9 +212,65 @@ export function WorktreeTab({
             : undefined
         }
         githubTitle={githubBranch ? m.a11y_open_branch_github({ branch: ltr(githubBranch) }) : undefined}
+        actions={liveWorktree && sessionId ? (
+          <>
+            <IconButton
+              size="small"
+              data-tip={remote ? m.file_viewer_os_action_local_only() : m.file_viewer_reveal_in_file_manager()}
+              aria-label={m.file_viewer_reveal_in_file_manager()}
+              disabled={remote}
+              onClick={() => void revealWorktree()}
+            >
+              <FolderOpen size={13} />
+            </IconButton>
+            <IconButton
+              size="small"
+              data-tip={m.worktree_sync_to_folder()}
+              aria-label={m.worktree_sync_to_folder()}
+              disabled={syncing}
+              onClick={() => void sync()}
+            >
+              {syncing ? <Spinner /> : <FolderSync size={13} />}
+            </IconButton>
+          </>
+        ) : undefined}
         refreshing={loading}
         onRefresh={load}
       />
+      {liveWorktree && sessionId && <CodeTabNote>{m.worktree_sync_note()}</CodeTabNote>}
+      {sessionId && (
+        <details
+          className="shrink-0 border-b border-border-variant px-3 py-2 text-sm"
+          onToggle={(event) => setShowStorage(event.currentTarget.open)}
+        >
+          <summary className="cursor-pointer text-subtext">{m.worktree_storage_locations()}</summary>
+          <p className="my-2 text-muted">{m.worktree_storage_note()}</p>
+          {storage.error && <p className="text-muted">{m.common_failed_to_load({ error: ltr(storage.error.message) })}</p>}
+          {!storage.data && !storage.error && <Spinner />}
+          {storage.data && ([
+            ["records", m.worktree_storage_records()],
+            ["transcript", m.worktree_storage_transcript()],
+            ["attachments", m.worktree_storage_attachments()],
+            ["artifacts", m.worktree_storage_artifacts()],
+          ] as const).map(([location, label]) => (
+            <div key={location} className="flex items-center gap-2 py-1">
+              <div className="min-w-0 flex-1">
+                <div>{label}</div>
+                <code dir="ltr" className="block wrap-anywhere text-xs text-muted">{storage.data[location]}</code>
+              </div>
+              <IconButton
+                size="small"
+                aria-label={`${m.file_viewer_reveal_in_file_manager()}: ${label}`}
+                data-tip={remote ? m.file_viewer_os_action_local_only() : m.file_viewer_reveal_in_file_manager()}
+                disabled={remote}
+                onClick={() => void revealStorage(location)}
+              >
+                <FolderOpen size={13} />
+              </IconButton>
+            </div>
+          ))}
+        </details>
+      )}
       {error && (wt || tree) && <CodeTabNote>{m.worktree_tab_refresh_failed()} {ltr(error)}</CodeTabNote>}
       {!tree || (sessionId && !wt) ? (
         <CodeTabBody>

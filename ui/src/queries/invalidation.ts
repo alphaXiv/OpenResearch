@@ -27,7 +27,7 @@ export function invalidateFamilies(families: readonly string[], scope = workspac
 
 const fileBodies = ["resolvedFile", "getProjectFile", "getArtifactFileText", "getArtifactFileMetadata"];
 export const artifactFamilies = ["getArtifacts", "getArtifactFileText", "getArtifactFileMetadata"];
-export const liveFamilies = ["listProjects", "listProjectActivity", "listSidebarChatSessions", "listExperiments", "listRuns", "listChatSessions", "getChatMessages", "getHarnesses", "getUpdateStatus", ...artifactFamilies, ...fileBodies, "getAbsoluteFile", "fileVersion", "getCodeTree", "getSessionWorktree", "getRunDiff", "getExperimentDiff"];
+export const liveFamilies = ["listProjects", "listProjectActivity", "listSidebarChatSessions", "listExperiments", "listRuns", "listChatSessions", "getChatMessages", "getHarnesses", "getUpdateStatus", ...artifactFamilies, ...fileBodies, "getAbsoluteFile", "fileVersion", "getCodeTree", "getSessionWorktree", "getSessionStorage", "getRunDiff", "getExperimentDiff"];
 
 export function invalidateProjectFiles(projectId: string, scope = workspaceScope(), cancelReads = false) {
   const sessions = queryClient.getQueryData<ChatSession[]>([...scope, "listChatSessions", projectId]) ?? [];
@@ -48,7 +48,7 @@ export function removeSession(sessionId: string) {
   deletedSessionIds.add(sessionId);
   markLiveUpdate(queryClient, [...scope, "listChatSessions"], sessionId);
   queryClient.setQueriesData<ChatSession[]>({ queryKey: [...scope, "listChatSessions"] }, (rows) => rows?.filter((row) => row.id !== sessionId));
-  for (const family of ["getChatMessages", "getSessionWorktree"]) void cancelAndRemove({ queryKey: [...scope, family, sessionId] });
+  for (const family of ["getChatMessages", "getSessionWorktree", "getSessionStorage"]) void cancelAndRemove({ queryKey: [...scope, family, sessionId] });
 }
 
 export function removeProject(projectId: string) {
@@ -66,7 +66,7 @@ const settingsFamilies: Record<string, readonly string[]> = {
   slurm: ["getSlurmSettings", "getComputeSettings"],
   ray: ["getRaySettings", "getComputeSettings"],
   env: ["getEnvVars", "getHfSettings", "getTinkerSettings", "getModalSettings", "getSlurmSettings", "getRaySettings", "getK8sSettings", "getOpenResearchSettings", "getComputeSettings", "getHarnesses"],
-  "data-dir": ["getDataDir"],
+  "data-dir": ["getDataDir", "getSessionStorage"],
   ssh: ["getSshSettings", "getSshConfig", "getSshMasterStatus", "getComputeSettings"],
   compute: ["getComputeSettings"],
   git: ["githubAccount", "repoAccess", "getProjectGitStatus"],

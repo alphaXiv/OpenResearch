@@ -3,6 +3,7 @@
 //! `<data>/repos/<owner>/<repo>`, the same convention SKILL.md
 //! documents for manual diffing.
 
+use sha2::{Digest, Sha256};
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Output, Stdio};
@@ -2205,16 +2206,20 @@ pub fn changed_files(repo: &Path, base: &str) -> Result<Vec<ChangedFile>> {
         let first = code.chars().next().unwrap_or(' ');
         match first {
             'R' | 'C' => {
-                // Rename/copy: <old> then <new>. A copy leaves the original in
-                // place, so surface only the new path (as a rename) — the old
-                // file is unchanged and needs no row.
+                // Rename/copy: <old> then <new>. A rename surfaces the pair so
+                // callers can drop the vacated path; a copy leaves the
+                // original in place, so it is a plain add of the new path.
                 let old = fields.get(i + 1).cloned();
                 let new = fields.get(i + 2).cloned();
                 if let Some(path) = new {
                     files.push(ChangedFile {
                         path,
-                        status: ChangedStatus::Renamed,
-                        old_path: old,
+                        status: if first == 'R' {
+                            ChangedStatus::Renamed
+                        } else {
+                            ChangedStatus::Added
+                        },
+                        old_path: if first == 'R' { old } else { None },
                     });
                 }
                 i += 3;
@@ -2258,6 +2263,943 @@ pub fn changed_files(repo: &Path, base: &str) -> Result<Vec<ChangedFile>> {
     // cases (e.g. index-only states) forever.
     files.dedup_by(|a, b| a.path == b.path);
     Ok(files)
+}
+
+/// Outcome of [`sync_worktree_changes`]: files written or removed in the
+/// target checkout, plus the paths that blocked the sync because the target
+/// holds content that is neither the base's, the desired result's, nor this
+/// source's last synced state.
+#[derive(Debug, Default, PartialEq, Eq)]
+pub struct SyncOutcome {
+    pub copied: usize,
+    pub deleted: usize,
+    pub conflicts: Vec<String>,
+}
+
+/// Overlay a checkout's changes since `base` onto another checkout of the same
+/// repository — the "copy work back to the project folder" step behind the
+/// dashboard's sync button. A file overlay, not a merge: the target keeps its
+/// branch and the files arrive uncommitted, so the user reviews them like
+/// their own edits.
+///
+/// A path blocks the whole sync when the target's content there is neither the
+/// base's, the desired result's, nor what this source last synced — untracked
+/// and ignored files are protected the same way — and the conflicting paths
+/// come back in `conflicts` with nothing written. A manifest (`orx-sync.json`
+/// under the target's git dir) records the synced fingerprint per path so
+/// repeat syncs can tell their own writes from user edits, and a lock file
+/// serializes concurrent syncs of the same target. Writes never pass through
+/// symlinks: link sources are recreated as links, a symlink standing in a
+/// destination's way is a conflict, and an ancestor symlink aborts the sync.
+pub fn sync_worktree_changes(source: &Path, base: &str, target: &Path) -> Result<SyncOutcome> {
+    let source = &abs_path(source);
+    let target = &abs_path(target);
+
+    enum Act {
+        /// Land the source's current entry (file bytes or a symlink).
+        Copy(String),
+        /// Drop the path: deletions and the vacated half of a rename.
+        Remove(String),
+        /// Restore the base state for a path this source synced before but no
+        /// longer changes.
+        Revert(String),
+    }
+    impl Act {
+        fn rel(&self) -> &str {
+            match self {
+                Self::Copy(r) | Self::Remove(r) | Self::Revert(r) => r,
+            }
+        }
+    }
+
+    let submodules: std::collections::HashSet<String> =
+        split_nul(&git_bytes(source, &["ls-files", "--stage", "-z"], &[])?)
+            .into_iter()
+            .filter_map(|record| {
+                let (entry, path) = record.split_once('\t')?;
+                entry.starts_with("160000 ").then(|| path.to_string())
+            })
+            .collect();
+    let mut acts = Vec::new();
+    for change in &changed_files(source, base)? {
+        // Submodule pins are not file contents this overlay can copy.
+        if submodules.contains(&change.path)
+            || (change.status == ChangedStatus::Deleted
+                && base_entry(source, base, &change.path)?.is_some_and(|e| e.mode == "160000"))
+        {
+            continue;
+        }
+        match change.status {
+            ChangedStatus::Deleted => acts.push(Act::Remove(change.path.clone())),
+            _ => {
+                acts.push(Act::Copy(change.path.clone()));
+                if let Some(old) = &change.old_path {
+                    acts.push(Act::Remove(old.clone()));
+                }
+            }
+        }
+    }
+
+    let git_dir = git_dir(target)?;
+    let lock_path = git_dir.join("orx-sync.lock");
+    let lock_file = std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .open(&lock_path)
+        .map_err(|e| anyhow!("could not lock {}: {}", lock_path.display(), e))?;
+    let mut sync_lock = fd_lock::RwLock::new(lock_file);
+    let _sync_guard = sync_lock.try_write().map_err(|e| {
+        if e.kind() == std::io::ErrorKind::WouldBlock {
+            anyhow!("another sync is already writing to this project folder")
+        } else {
+            anyhow!("could not lock {}: {}", lock_path.display(), e)
+        }
+    })?;
+    let manifest_path = git_dir.join("orx-sync.json");
+    let mut manifest = SyncManifest::read(&manifest_path);
+    // Keyed by the worktree's directory name (its owning session), which a
+    // data-directory move keeps; older manifests used the absolute path.
+    let source_key = source
+        .file_name()
+        .map(|name| name.to_string_lossy().into_owned())
+        .ok_or_else(|| anyhow!("invalid source checkout {}", source.display()))?;
+    if !manifest.sources.contains_key(&source_key) {
+        let legacy = manifest
+            .sources
+            .keys()
+            .find(|key| Path::new(key).file_name() == source.file_name() && *key != &source_key)
+            .cloned();
+        if let Some(legacy) = legacy {
+            if let Some(paths) = manifest.sources.remove(&legacy) {
+                manifest.sources.insert(source_key.clone(), paths);
+            }
+            if let Some(dirs) = manifest.created_dirs.remove(&legacy) {
+                manifest.created_dirs.insert(source_key.clone(), dirs);
+            }
+        }
+    }
+    // Gitdir records retain literal paths, even with spaces or newlines on older Git.
+    let mut active_sources = std::collections::HashSet::new();
+    for entry in std::fs::read_dir(common_git_dir(target)?.join("worktrees"))? {
+        let gitfile = std::fs::read_to_string(entry?.path().join("gitdir"))?;
+        if let Some(name) = Path::new(gitfile.trim_end())
+            .parent()
+            .and_then(Path::file_name)
+        {
+            active_sources.insert(name.to_string_lossy().into_owned());
+        }
+    }
+    manifest.sources.retain(|key, _| {
+        Path::new(key)
+            .file_name()
+            .is_some_and(|name| active_sources.contains(name.to_string_lossy().as_ref()))
+    });
+    manifest
+        .created_dirs
+        .retain(|key, _| manifest.sources.contains_key(key));
+    let mut entries = manifest
+        .sources
+        .get(&source_key)
+        .cloned()
+        .unwrap_or_default();
+    let mut created_dirs = manifest
+        .created_dirs
+        .get(&source_key)
+        .cloned()
+        .unwrap_or_default();
+    let other_synced_paths: std::collections::HashSet<String> = manifest
+        .sources
+        .iter()
+        .filter(|(key, _)| *key != &source_key)
+        .flat_map(|(_, paths)| {
+            paths
+                .iter()
+                .filter(|(_, fp)| !fp.is_empty())
+                .map(|(path, _)| path.clone())
+        })
+        .collect();
+
+    let mut reverted_trees = Vec::new();
+    for rel in entries.keys() {
+        if acts.iter().any(|a| a.rel() == rel.as_str())
+            || reverted_trees
+                .iter()
+                .any(|prefix: &String| rel.starts_with(prefix))
+        {
+            continue;
+        }
+        if base_entry(target, base, rel)?.is_some_and(|entry| entry.mode.starts_with("04")) {
+            reverted_trees.push(format!("{rel}/"));
+        }
+        acts.push(Act::Revert(rel.clone()));
+    }
+    let mut dir_restores = std::collections::HashSet::new();
+    for act in &acts {
+        if matches!(act, Act::Revert(_))
+            && base_entry(target, base, act.rel())?.is_some_and(|e| e.mode.starts_with("04"))
+        {
+            dir_restores.insert(act.rel().to_string());
+        }
+    }
+    // Directory restores first, so later child removals and copies apply on
+    // top of them; then deepest removals, copies last: a file replacing a
+    // directory needs the old contents gone before it can be written.
+    acts.sort_by_key(|a| {
+        (
+            matches!(a, Act::Copy(_)),
+            !dir_restores.contains(a.rel()),
+            std::cmp::Reverse(a.rel().matches('/').count()),
+            a.rel().to_string(),
+        )
+    });
+    let mut removals = std::collections::HashSet::new();
+    for act in &acts {
+        if matches!(act, Act::Remove(_))
+            || (matches!(act, Act::Revert(_)) && base_entry(target, base, act.rel())?.is_none())
+        {
+            removals.insert(act.rel());
+        }
+    }
+    let mut complete_replacements = std::collections::HashSet::new();
+    for act in &acts {
+        let rel = act.rel();
+        let desired = match act {
+            Act::Copy(_) => fingerprint(&checkout_path(source, rel)?),
+            Act::Revert(_) => base_entry(target, base, rel)?
+                .map(|entry| entry.fingerprint())
+                .unwrap_or_default(),
+            Act::Remove(_) => continue,
+        };
+        if !desired.is_empty()
+            && desired != "dir"
+            && fingerprint(&safe_target_path(target, rel)?) == desired
+        {
+            complete_replacements.insert(rel.to_string());
+        }
+    }
+
+    // The conflict scan, shared by the upfront check and the re-check before
+    // each write: the target's current entry is safe to replace when it
+    // already is the desired result, is this source's last synced state, or,
+    // without sync history, is still the base state.
+    let safe = |entries: &std::collections::BTreeMap<String, String>,
+                rel: &str,
+                dest: &Path,
+                desired: &str,
+                removed: &std::collections::HashSet<String>,
+                created_dirs: &std::collections::BTreeSet<String>|
+     -> Result<bool> {
+        // Every ancestor the write passes through must be a directory,
+        // missing, or itself removed by this sync — a stray file there blocks
+        // path creation.
+        let mut ancestor = String::new();
+        for part in rel.split('/') {
+            if !ancestor.is_empty() {
+                let pcur = fingerprint(&safe_target_path(target, &ancestor)?);
+                if !(pcur.is_empty()
+                    || pcur == "dir"
+                    || removals.contains(ancestor.as_str())
+                    || dir_restores.contains(&ancestor))
+                {
+                    return Ok(false);
+                }
+            }
+            if !ancestor.is_empty() {
+                ancestor.push('/');
+            }
+            ancestor.push_str(part);
+        }
+        let current = fingerprint(dest);
+        let prefix = format!("{rel}/");
+        for path in other_synced_paths
+            .iter()
+            .filter(|path| path.as_str() == rel || path.starts_with(&prefix))
+        {
+            let baseline = base_entry(target, base, path)?
+                .map(|entry| entry.fingerprint())
+                .unwrap_or_default();
+            let expected = if desired == "dir" {
+                baseline.as_str()
+            } else if path == rel {
+                desired
+            } else {
+                ""
+            };
+            let existing = fingerprint(&safe_target_path(target, path)?);
+            if existing != expected && existing != baseline {
+                return Ok(false);
+            }
+        }
+        // A directory coming back from the base is checked per entry the
+        // restore writes, not by the equality rules below.
+        if desired == "dir" && !current.is_empty() {
+            return revert_tree_ok(entries, target, base, rel, &current);
+        }
+        // A submodule pin has no content to land: keep the checkout there.
+        if desired == "gitlink" {
+            return Ok(current == "dir" || current.is_empty());
+        }
+        if current.is_empty() {
+            return Ok(desired.is_empty()
+                || removed.contains(rel)
+                || dir_restores
+                    .iter()
+                    .any(|dir| rel.starts_with(&format!("{dir}/")))
+                || match entries.get(rel) {
+                    Some(previous) => previous.is_empty(),
+                    None => {
+                        !other_synced_paths.contains(rel)
+                            && base_entry(target, base, rel)?.is_none()
+                    }
+                });
+        }
+        // A directory may only be replaced when everything it still holds is
+        // itself being removed by this sync — fingerprint equality can never
+        // stand in for that check ("dir" matches any directory, including the
+        // base's).
+        if current == "dir" {
+            if !created_dirs.contains(rel)
+                && !base_entry(target, base, rel)?.is_some_and(|e| e.mode.starts_with("04"))
+            {
+                return Ok(false);
+            }
+            for f in files_inside(dest, target)? {
+                if removals.contains(f.as_str()) {
+                    continue;
+                }
+                if fingerprint(&target.join(&f)) == "dir"
+                    && removed
+                        .iter()
+                        .any(|path| path.starts_with(&format!("{f}/")))
+                    && (f == rel
+                        || created_dirs.contains(&f)
+                        || base_entry(target, base, &f)?.is_some_and(|e| e.mode.starts_with("04")))
+                {
+                    continue;
+                }
+                return Ok(false);
+            }
+            return Ok(true);
+        }
+        Ok(current == desired
+            || entries.get(rel).is_some_and(|fp| fp == &current)
+            || (!entries.contains_key(rel)
+                && current
+                    == base_entry(target, base, rel)?
+                        .map(|e| e.fingerprint())
+                        .unwrap_or_default()))
+    };
+
+    let mut plan = Vec::with_capacity(acts.len());
+    let mut conflicts = Vec::new();
+    let mut removed = std::collections::HashSet::new();
+    for act in &acts {
+        let rel = act.rel().to_string();
+        if matches!(act, Act::Remove(_) | Act::Revert(_))
+            && complete_replacements
+                .iter()
+                .any(|parent| rel.starts_with(&format!("{parent}/")))
+        {
+            continue;
+        }
+        if matches!(act, Act::Remove(_))
+            && fingerprint(&checkout_path(source, &rel)?) == "dir"
+            && fingerprint(&safe_target_path(target, &rel)?) == "dir"
+        {
+            continue;
+        }
+        let desired = match act {
+            Act::Copy(_) => fingerprint(&checkout_path(source, &rel)?),
+            Act::Remove(_) => String::new(),
+            Act::Revert(_) => base_entry(target, base, &rel)?
+                .map(|e| e.fingerprint())
+                .unwrap_or_default(),
+        };
+        let dest = safe_target_path(target, &rel)?;
+        if safe(&entries, &rel, &dest, &desired, &removed, &created_dirs)? {
+            plan.push((act, rel, dest, desired));
+        } else {
+            conflicts.push(rel);
+        }
+    }
+    if !conflicts.is_empty() {
+        conflicts.sort();
+        return Ok(SyncOutcome {
+            conflicts,
+            ..SyncOutcome::default()
+        });
+    }
+
+    let mut outcome = SyncOutcome::default();
+    for (act, rel, dest, desired) in plan {
+        // File copies re-check again after preparing their temporary file.
+        if !safe(&entries, &rel, &dest, &desired, &removed, &created_dirs)? {
+            return Err(anyhow!(
+                "the project folder changed {rel} during the sync — rerun it"
+            ));
+        }
+        match act {
+            Act::Copy(rel) => {
+                if desired.is_empty() {
+                    return Err(anyhow!(
+                        "source entry {rel} vanished during sync — rerun it"
+                    ));
+                }
+                let src = checkout_path(source, rel)?;
+                let meta = std::fs::symlink_metadata(&src).map_err(|e| {
+                    anyhow!("source entry {} vanished during sync: {e}", src.display())
+                })?;
+                if meta.file_type().is_symlink() {
+                    if fingerprint(&dest) != desired {
+                        remove_entry(&dest)?;
+                        if let Some(parent) = dest.parent() {
+                            create_sync_parents(parent, target, &mut created_dirs)?;
+                        }
+                        crate::local::native_store::copy_symlink(&src, &dest)
+                            .map_err(|e| anyhow!("could not link {}: {}", dest.display(), e))?;
+                        outcome.copied += 1;
+                    }
+                } else if meta.is_file() {
+                    if fingerprint(&dest) != desired {
+                        if let Some(parent) = dest.parent() {
+                            create_sync_parents(parent, target, &mut created_dirs)?;
+                        }
+                        let previous = fingerprint(&dest);
+                        let parents = dest
+                            .parent()
+                            .into_iter()
+                            .flat_map(Path::ancestors)
+                            .take_while(|parent| parent.starts_with(target))
+                            .map(|parent| {
+                                same_file::Handle::from_path(parent)
+                                    .map(|handle| (parent.to_path_buf(), handle))
+                            })
+                            .collect::<std::io::Result<Vec<_>>>()?;
+                        // Copy beside the destination and rename over it, so a
+                        // hard link to the old file is never written through.
+                        let tmp = dest.with_file_name(format!(
+                            ".orx-sync-{}.tmp",
+                            uuid::Uuid::new_v4().simple()
+                        ));
+                        let copied = (|| -> Result<bool> {
+                            std::fs::copy(&src, &tmp)?;
+                            #[cfg(test)]
+                            BEFORE_SYNC_REPLACE.with(|hook| {
+                                if let Some(hook) = hook.borrow_mut().take() {
+                                    hook();
+                                }
+                            });
+                            if parents.iter().any(|(path, before)| {
+                                same_file::Handle::from_path(path)
+                                    .map(|after| &after != before)
+                                    .unwrap_or(true)
+                            }) || safe_target_path(target, rel).is_err()
+                                || fingerprint(&dest) != previous
+                                || !safe(&entries, rel, &dest, &desired, &removed, &created_dirs)?
+                            {
+                                return Ok(false);
+                            }
+                            if std::fs::symlink_metadata(&dest).is_ok_and(|m| m.is_dir()) {
+                                std::fs::remove_dir_all(&dest)?;
+                            }
+                            std::fs::rename(&tmp, &dest)?;
+                            Ok(true)
+                        })();
+                        let _ = std::fs::remove_file(&tmp);
+                        if !copied.map_err(|e| {
+                            anyhow!(
+                                "could not copy {} to {}: {e}",
+                                src.display(),
+                                dest.display()
+                            )
+                        })? {
+                            outcome.conflicts.push(rel.clone());
+                            continue;
+                        }
+                        outcome.copied += 1;
+                    }
+                } else {
+                    return Err(anyhow!(
+                        "source entry {rel} changed type during sync — rerun it"
+                    ));
+                }
+                // Record the bytes that actually landed — the source may have
+                // changed between the plan and the write.
+                entries.insert(rel.clone(), fingerprint(&dest));
+            }
+            Act::Remove(rel) => {
+                if remove_entry(&dest)? {
+                    outcome.deleted += 1;
+                    removed.insert(rel.clone());
+                    entries.insert(rel.clone(), String::new());
+                }
+            }
+            Act::Revert(rel) => match base_entry(target, base, rel)? {
+                None => {
+                    if !remove_entry(&dest)? {
+                        // Keep prior ownership when the user already deleted it.
+                        continue;
+                    }
+                    outcome.deleted += 1;
+                    removed.insert(rel.clone());
+                }
+                // A submodule pin has no content to land.
+                Some(entry) if entry.mode == "160000" => {}
+                Some(entry) if entry.mode.starts_with("04") => {
+                    let children = tree_entries(target, base, rel)?;
+                    if fingerprint(&dest) != "dir" {
+                        remove_entry(&dest)?;
+                    } else {
+                        // Inside a kept directory, drop only the leftovers this
+                        // source synced and the base lacks — unrelated files
+                        // stay put.
+                        let keep: std::collections::HashSet<&str> =
+                            children.iter().map(String::as_str).collect();
+                        for f in files_inside(&dest, target)? {
+                            if f.starts_with(&format!("{rel}/")) && !keep.contains(f.as_str()) {
+                                let fdest = safe_target_path(target, &f)?;
+                                if entries.get(&f).is_some_and(|fp| fp == &fingerprint(&fdest)) {
+                                    remove_entry(&fdest)?;
+                                }
+                            }
+                        }
+                    }
+                    git_bytes(
+                        target,
+                        &[
+                            "--literal-pathspecs",
+                            "restore",
+                            "--overlay",
+                            "--worktree",
+                            "--source",
+                            base,
+                            "--",
+                            rel,
+                        ],
+                        &[],
+                    )?;
+                    outcome.copied += children.len();
+                }
+                Some(_) => {
+                    // `git restore --worktree` lands the base's file or link
+                    // with its own mode and content filters, never the index.
+                    remove_entry(&dest)?;
+                    git_bytes(
+                        target,
+                        &[
+                            "--literal-pathspecs",
+                            "restore",
+                            "--worktree",
+                            "--source",
+                            base,
+                            "--",
+                            rel,
+                        ],
+                        &[],
+                    )?;
+                    outcome.copied += 1;
+                }
+            },
+        }
+        if matches!(act, Act::Revert(_)) {
+            // Back at the base state: nothing this source owns anymore.
+            let prefix = format!("{rel}/");
+            entries.retain(|k, _| k.as_str() != rel && !k.starts_with(prefix.as_str()));
+        }
+        if fingerprint(&dest) != "dir" {
+            // A directory this sync created is gone: a later one there is not ours.
+            let prefix = format!("{rel}/");
+            created_dirs.retain(|k| k.as_str() != rel && !k.starts_with(prefix.as_str()));
+        }
+        // Persist after every applied act so an interrupted sync still knows
+        // what it already wrote.
+        manifest.sources.insert(source_key.clone(), entries.clone());
+        manifest
+            .created_dirs
+            .insert(source_key.clone(), created_dirs.clone());
+        manifest.write(&manifest_path)?;
+    }
+    Ok(outcome)
+}
+
+#[cfg(test)]
+thread_local! {
+    static BEFORE_SYNC_REPLACE: std::cell::RefCell<Option<Box<dyn FnOnce()>>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+/// Canonicalized for stable manifest keys, keeping the path when it does not
+/// resolve (a checkout deleted mid-request).
+fn abs_path(path: &Path) -> PathBuf {
+    path.canonicalize().unwrap_or_else(|_| path.to_path_buf())
+}
+
+/// The repository's real git dir — `.git` for a plain checkout, the shared
+/// git dir for a worktree — where the sync lock and manifest live.
+fn git_dir(repo: &Path) -> Result<PathBuf> {
+    let raw = git(Some(repo), &["rev-parse", "--git-dir"])?;
+    let dir = PathBuf::from(raw.trim());
+    Ok(if dir.is_absolute() {
+        dir
+    } else {
+        repo.join(dir)
+    })
+}
+
+/// Content fingerprint of a checkout entry: "" when absent, `dir` for a
+/// directory, `lnk:<target>` for a symlink, `fil:<sha256>:<exec>` for a file.
+/// The executable bits ride along so permission-only changes still sync.
+fn fingerprint(path: &Path) -> String {
+    let meta = match std::fs::symlink_metadata(path) {
+        Ok(m) => m,
+        Err(_) => return String::new(),
+    };
+    if meta.file_type().is_symlink() {
+        let link = std::fs::read_link(path)
+            .map(|l| l.to_string_lossy().into_owned())
+            .unwrap_or_default();
+        return format!("lnk:{link}");
+    }
+    if meta.is_file() {
+        let digest = std::fs::read(path)
+            .map(|b| format!("{:x}", Sha256::digest(&b)))
+            .unwrap_or_default();
+        return format!("fil:{digest}:{:o}", exec_bits(&meta));
+    }
+    "dir".to_string()
+}
+
+fn exec_bits(meta: &std::fs::Metadata) -> u32 {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        meta.permissions().mode() & 0o111
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = meta;
+        0
+    }
+}
+
+/// A file's entry in the base commit, read without a checkout so ignored or
+/// otherwise unlisted target files can still be compared against the base.
+struct BaseEntry {
+    /// The `ls-tree` mode string — `100644`, `100755`, `120000` (symlink),
+    /// `040000` (tree), `160000` (gitlink).
+    mode: String,
+    /// Blob bytes — the link target's text for a `120000` symlink.
+    bytes: Vec<u8>,
+}
+
+impl BaseEntry {
+    fn fingerprint(&self) -> String {
+        match self.mode.as_str() {
+            "120000" => format!("lnk:{}", self.text()),
+            m if m.starts_with("04") => "dir".to_string(),
+            "160000" => "gitlink".to_string(),
+            // The checkout's own fingerprint only sees exec bits on unix, so
+            // the base's must match on the same platform.
+            m => format!(
+                "fil:{:x}:{:o}",
+                Sha256::digest(&self.bytes),
+                if m == "100755" && cfg!(unix) {
+                    0o111
+                } else {
+                    0
+                }
+            ),
+        }
+    }
+
+    fn text(&self) -> String {
+        String::from_utf8_lossy(&self.bytes).into_owned()
+    }
+}
+
+fn base_entry(repo: &Path, base: &str, rel: &str) -> Result<Option<BaseEntry>> {
+    let out = git_bytes(
+        repo,
+        &["--literal-pathspecs", "ls-tree", "-z", base, "--", rel],
+        &[],
+    )?;
+    let record = out.split(|b| *b == 0).next().unwrap_or(&[]);
+    if record.is_empty() {
+        return Ok(None);
+    }
+    let info = record
+        .split(|b| *b == b'\t')
+        .next()
+        .map(String::from_utf8_lossy)
+        .unwrap_or_default();
+    let mut fields = info.split(' ');
+    let mode = fields.next().unwrap_or_default().to_string();
+    let sha = fields.nth(1).unwrap_or_default().to_string();
+    if mode.starts_with("04") || mode == "160000" {
+        return Ok(Some(BaseEntry {
+            mode,
+            bytes: Vec::new(),
+        }));
+    }
+    // Smudge the blob the way a checkout would (eol, attributes, filters) so
+    // the fingerprint matches the on-disk bytes: raw `cat-file` bytes compare
+    // false against a CRLF-converted checkout. Symlink blobs are the literal
+    // link target and must not be converted.
+    let bytes = if mode == "120000" {
+        git_bytes(repo, &["cat-file", "blob", &sha], &[])?
+    } else {
+        git_bytes(
+            repo,
+            &["cat-file", "--filters", &format!("{base}:{rel}")],
+            &[],
+        )?
+    };
+    Ok(Some(BaseEntry { mode, bytes }))
+}
+
+/// `rel` under `root`, additionally refusing to write through a symlinked
+/// ancestor — a link under the target could redirect the write outside it.
+fn safe_target_path(root: &Path, rel: &str) -> Result<PathBuf> {
+    let path = checkout_path(root, rel)?;
+    let mut ancestor = path.parent();
+    while let Some(dir) = ancestor {
+        if dir == root {
+            break;
+        }
+        if std::fs::symlink_metadata(dir)
+            .map(|m| m.file_type().is_symlink())
+            .unwrap_or(false)
+        {
+            return Err(anyhow!("cannot sync {rel}: its parent is a symlink"));
+        }
+        ancestor = dir.parent();
+    }
+    Ok(path)
+}
+
+/// Entries a directory replacement would remove, including empty directories
+/// and nested `.git` directories as protected leaves.
+fn files_inside(dir: &Path, root: &Path) -> Result<Vec<String>> {
+    let mut out = Vec::new();
+    let mut stack = vec![dir.to_path_buf()];
+    while let Some(dir) = stack.pop() {
+        let mut read = std::fs::read_dir(&dir)?.peekable();
+        if read.peek().is_none() {
+            out.push(
+                dir.strip_prefix(root)?
+                    .components()
+                    .map(|c| c.as_os_str().to_string_lossy())
+                    .collect::<Vec<_>>()
+                    .join("/"),
+            );
+        }
+        for entry in read {
+            let entry = entry?;
+            let path = entry.path();
+            match entry.file_type()? {
+                t if t.is_dir() && !t.is_symlink() && entry.file_name() != ".git" => {
+                    stack.push(path)
+                }
+                _ => {
+                    if let Ok(rel) = path.strip_prefix(root) {
+                        out.push(
+                            rel.components()
+                                .map(|c| c.as_os_str().to_string_lossy())
+                                .collect::<Vec<_>>()
+                                .join("/"),
+                        );
+                    }
+                }
+            }
+        }
+    }
+    Ok(out)
+}
+
+fn create_sync_parents(
+    parent: &Path,
+    root: &Path,
+    created: &mut std::collections::BTreeSet<String>,
+) -> Result<()> {
+    let mut missing = Vec::new();
+    let mut path = parent;
+    while path != root {
+        match std::fs::symlink_metadata(path) {
+            Ok(meta) if meta.is_dir() && !meta.file_type().is_symlink() => break,
+            Ok(_) => return Err(anyhow!("cannot create directory {}", path.display())),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                missing.push(
+                    path.strip_prefix(root)?
+                        .components()
+                        .map(|c| c.as_os_str().to_string_lossy())
+                        .collect::<Vec<_>>()
+                        .join("/"),
+                );
+            }
+            Err(e) => return Err(e.into()),
+        }
+        path = path
+            .parent()
+            .ok_or_else(|| anyhow!("path outside project folder"))?;
+    }
+    std::fs::create_dir_all(parent)?;
+    created.extend(missing);
+    Ok(())
+}
+
+/// Remove an entry that is no longer wanted, whichever kind it is — a file, a
+/// symlink (the link itself, never its target), or a directory. Reports
+/// whether anything was removed.
+fn remove_entry(path: &Path) -> Result<bool> {
+    let meta = match std::fs::symlink_metadata(path) {
+        Ok(m) => m,
+        Err(_) => return Ok(false),
+    };
+    #[cfg(windows)]
+    let dir_link = {
+        use std::os::windows::fs::FileTypeExt;
+        meta.file_type().is_symlink_dir()
+    };
+    #[cfg(not(windows))]
+    let dir_link = false;
+    if dir_link {
+        // Windows removes a directory link with remove_dir, never remove_file.
+        std::fs::remove_dir(path)
+    } else if meta.is_dir() && !meta.file_type().is_symlink() {
+        std::fs::remove_dir_all(path)
+    } else {
+        std::fs::remove_file(path)
+    }
+    .map_err(|e| anyhow!("could not remove {}: {}", path.display(), e))?;
+    Ok(true)
+}
+
+/// Every repo-relative file path inside the base's tree at `rel` — what
+/// `git restore` will write when a reverted directory comes back.
+fn tree_entries(repo: &Path, base: &str, rel: &str) -> Result<Vec<String>> {
+    let out = git_bytes(
+        repo,
+        &[
+            "--literal-pathspecs",
+            "ls-tree",
+            "-r",
+            "-z",
+            "--name-only",
+            base,
+            "--",
+            rel,
+        ],
+        &[],
+    )?;
+    Ok(split_nul(&out))
+}
+
+/// Safety for restoring a base directory at `rel`: the path itself may only
+/// be absent, a directory, or this source's own synced entry, and every path
+/// the restore writes — plus every ancestor it passes — must likewise be free
+/// of unrecorded edits. Files already inside the directory that the base
+/// doesn't know are left alone.
+fn revert_tree_ok(
+    entries: &std::collections::BTreeMap<String, String>,
+    target: &Path,
+    base: &str,
+    rel: &str,
+    current: &str,
+) -> Result<bool> {
+    if !(current.is_empty() || current == "dir" || entries.get(rel) == Some(&current.into())) {
+        return Ok(false);
+    }
+    let rel_depth = rel.matches('/').count() + 1;
+    for child in tree_entries(target, base, rel)? {
+        let parts: Vec<&str> = child.split('/').collect();
+        for i in rel_depth..parts.len().saturating_sub(1) {
+            let prefix = parts[..=i].join("/");
+            let pcur = fingerprint(&safe_target_path(target, &prefix)?);
+            if !(pcur.is_empty() || pcur == "dir" || entries.get(&prefix) == Some(&pcur)) {
+                return Ok(false);
+            }
+        }
+        let cdest = safe_target_path(target, &child)?;
+        let ccur = fingerprint(&cdest);
+        if ccur == "dir" {
+            if base_entry(target, base, &child)?.is_some_and(|e| e.mode == "160000") {
+                continue;
+            }
+            return Ok(false);
+        }
+        if current == "dir"
+            && entries.get(rel).is_some_and(|fp| fp != "dir")
+            && ccur
+                != base_entry(target, base, &child)?
+                    .map(|e| e.fingerprint())
+                    .unwrap_or_default()
+        {
+            return Ok(false);
+        }
+        if ccur.is_empty() || entries.get(&child).is_some_and(|fp| fp == &ccur) {
+            continue;
+        }
+        if ccur
+            != base_entry(target, base, &child)?
+                .map(|e| e.fingerprint())
+                .unwrap_or_default()
+        {
+            return Ok(false);
+        }
+    }
+    Ok(true)
+}
+
+/// Last-synced fingerprints per source checkout, persisted as
+/// `.git/orx-sync.json` so later syncs can tell their own writes apart from
+/// user edits — and know which paths to revert when the source lets go.
+#[derive(Default, serde::Serialize, serde::Deserialize)]
+struct SyncManifest {
+    #[serde(default)]
+    sources: std::collections::BTreeMap<String, std::collections::BTreeMap<String, String>>,
+    #[serde(default)]
+    created_dirs: std::collections::BTreeMap<String, std::collections::BTreeSet<String>>,
+}
+
+impl SyncManifest {
+    fn read(path: &Path) -> Self {
+        std::fs::read(path)
+            .ok()
+            .and_then(|b| serde_json::from_slice(&b).ok())
+            .unwrap_or_default()
+    }
+
+    /// Atomic replace through a temp file so an interrupted save can't leave
+    /// a torn manifest behind. Windows won't rename over an existing file, so
+    /// the target is dropped first there — the manifest is small.
+    fn write(&self, path: &Path) -> Result<()> {
+        let tmp = path.with_file_name("orx-sync.json.tmp");
+        std::fs::write(&tmp, serde_json::to_vec(self)?)
+            .map_err(|e| anyhow!("could not write {}: {}", tmp.display(), e))?;
+        if std::fs::rename(&tmp, path).is_err() {
+            let _ = std::fs::remove_file(path);
+            std::fs::rename(&tmp, path)
+                .map_err(|e| anyhow!("could not write {}: {}", path.display(), e))?;
+        }
+        Ok(())
+    }
+}
+
+/// `rel` under `root`, refusing absolute paths and any component that escapes
+/// or steps into `.git` — the same bar the dashboard file endpoints apply.
+fn checkout_path(root: &Path, rel: &str) -> Result<PathBuf> {
+    let rel_path = Path::new(rel);
+    let safe = !rel_path.is_absolute()
+        && rel_path.components().all(|c| {
+            matches!(c, std::path::Component::Normal(name) if !name.eq_ignore_ascii_case(".git"))
+        });
+    if safe {
+        Ok(root.join(rel_path))
+    } else {
+        Err(anyhow!("path must stay inside the repository: {rel}"))
+    }
 }
 
 /// The checked-out branch name, or `None` when detached (`rev-parse
@@ -2608,6 +3550,8 @@ mod tests {
         run(&dir, &["config", "user.name", "orx-test"]);
         run(&dir, &["config", "user.email", "orx-test@example.com"]);
         run(&dir, &["config", "commit.gpgsign", "false"]);
+        // Bytes must round-trip identically on Windows checkouts too.
+        run(&dir, &["config", "core.autocrlf", "false"]);
         write(&dir, "seed.txt", "seed\n");
         run(&dir, &["add", "-A"]);
         run(&dir, &["commit", "-q", "-m", "seed"]);
@@ -2722,6 +3666,1073 @@ mod tests {
             .expect("delete row");
         assert_eq!(deleted.status, ChangedStatus::Deleted);
         let _ = std::fs::remove_dir_all(&repo);
+    }
+
+    #[test]
+    fn sync_preserves_editor_saves_while_preparing_a_copy() {
+        let hub = temp_repo();
+        let base = run(&hub, &["rev-parse", "HEAD"]);
+        let wt = hub.with_extension("wt");
+        run(
+            &hub,
+            &["worktree", "add", "-q", "--detach", &wt.to_string_lossy()],
+        );
+        write(&wt, "seed.txt", "agent contents\n");
+        let destination = hub.join("seed.txt");
+        BEFORE_SYNC_REPLACE.with(|hook| {
+            *hook.borrow_mut() = Some(Box::new(move || {
+                std::fs::write(destination, "user's later save\n").unwrap();
+            }));
+        });
+        let outcome = sync_worktree_changes(&wt, &base, &hub).unwrap();
+        assert_eq!(outcome.conflicts, ["seed.txt"]);
+        assert_eq!(outcome.copied, 0);
+        assert_eq!(
+            std::fs::read_to_string(hub.join("seed.txt")).unwrap(),
+            "user's later save\n"
+        );
+        assert!(!std::fs::read_dir(&hub).unwrap().any(|entry| {
+            entry
+                .unwrap()
+                .file_name()
+                .to_string_lossy()
+                .starts_with(".orx-sync-")
+        }));
+        assert_eq!(
+            sync_worktree_changes(&wt, &base, &hub).unwrap().conflicts,
+            ["seed.txt"]
+        );
+        run(
+            &hub,
+            &["worktree", "remove", "--force", &wt.to_string_lossy()],
+        );
+        let _ = std::fs::remove_dir_all(hub);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn sync_preserves_replaced_parents_while_preparing_a_copy() {
+        let hub = temp_repo();
+        let base = run(&hub, &["rev-parse", "HEAD"]);
+        let wt = hub.with_extension("wt");
+        run(
+            &hub,
+            &["worktree", "add", "-q", "--detach", &wt.to_string_lossy()],
+        );
+        write(&wt, "dir/agent.txt", "agent contents\n");
+        let target = hub.clone();
+        BEFORE_SYNC_REPLACE.with(|hook| {
+            *hook.borrow_mut() = Some(Box::new(move || {
+                std::fs::rename(target.join("dir"), target.join("saved-dir")).unwrap();
+                std::fs::create_dir(target.join("dir")).unwrap();
+            }));
+        });
+        let outcome = sync_worktree_changes(&wt, &base, &hub).unwrap();
+        assert_eq!(outcome.conflicts, ["dir/agent.txt"]);
+        assert_eq!(outcome.copied, 0);
+        assert!(std::fs::read_dir(hub.join("dir")).unwrap().next().is_none());
+        run(
+            &hub,
+            &["worktree", "remove", "--force", &wt.to_string_lossy()],
+        );
+        let _ = std::fs::remove_dir_all(hub);
+    }
+
+    #[test]
+    fn sync_worktree_changes_overlays_files_and_flags_conflicts() {
+        let hub = temp_repo();
+        write(&hub, "old.txt", "rename me\n");
+        write(&hub, "gone.txt", "delete me\n");
+        run(&hub, &["add", "-A"]);
+        run(&hub, &["commit", "-q", "-m", "seed2"]);
+        let base = run(&hub, &["rev-parse", "HEAD"]);
+        let wt = hub.with_file_name(format!("{}-wt", hub.file_name().unwrap().to_string_lossy()));
+        run(
+            &hub,
+            &["worktree", "add", "-q", "--detach", &wt.to_string_lossy()],
+        );
+        // The worktree's mix: a committed new file, an uncommitted edit, an
+        // untracked file, a rename and a delete.
+        write(&wt, "committed.txt", "c\n");
+        run(&wt, &["add", "-A"]);
+        run(&wt, &["commit", "-q", "-m", "agent work"]);
+        write(&wt, "seed.txt", "seed edited\n");
+        write(&wt, "untracked.txt", "u\n");
+        run(&wt, &["mv", "old.txt", "new.txt"]);
+        run(&wt, &["rm", "-q", "gone.txt"]);
+
+        let outcome = sync_worktree_changes(&wt, &base, &hub).unwrap();
+        assert!(outcome.conflicts.is_empty());
+        assert_eq!(outcome.copied, 4);
+        assert_eq!(outcome.deleted, 2);
+        assert_eq!(
+            std::fs::read_to_string(hub.join("committed.txt")).unwrap(),
+            "c\n"
+        );
+        assert_eq!(
+            std::fs::read_to_string(hub.join("seed.txt")).unwrap(),
+            "seed edited\n"
+        );
+        assert_eq!(
+            std::fs::read_to_string(hub.join("untracked.txt")).unwrap(),
+            "u\n"
+        );
+        assert_eq!(
+            std::fs::read_to_string(hub.join("new.txt")).unwrap(),
+            "rename me\n"
+        );
+        assert!(!hub.join("gone.txt").exists() && !hub.join("old.txt").exists());
+
+        // A second sync with no new work copies nothing and conflicts on
+        // nothing — the hub already holds the synced state.
+        let again = sync_worktree_changes(&wt, &base, &hub).unwrap();
+        assert_eq!(again, SyncOutcome::default());
+
+        // A synced deletion still belongs to this source until it is restored.
+        run(
+            &wt,
+            &[
+                "restore",
+                "--staged",
+                "--worktree",
+                "--source",
+                &base,
+                "--",
+                "gone.txt",
+            ],
+        );
+        let restored = sync_worktree_changes(&wt, &base, &hub).unwrap();
+        assert!(restored.conflicts.is_empty());
+        assert_eq!(restored.copied, 1);
+        assert_eq!(
+            std::fs::read_to_string(hub.join("gone.txt")).unwrap(),
+            "delete me\n"
+        );
+        assert_eq!(
+            sync_worktree_changes(&wt, &base, &hub).unwrap(),
+            SyncOutcome::default()
+        );
+        run(&wt, &["rm", "-q", "gone.txt"]);
+        assert_eq!(sync_worktree_changes(&wt, &base, &hub).unwrap().deleted, 1);
+        write(&hub, "gone.txt", "user replacement\n");
+        run(
+            &wt,
+            &[
+                "restore",
+                "--staged",
+                "--worktree",
+                "--source",
+                &base,
+                "--",
+                "gone.txt",
+            ],
+        );
+        let blocked = sync_worktree_changes(&wt, &base, &hub).unwrap();
+        assert_eq!(blocked.conflicts, vec!["gone.txt".to_string()]);
+        assert_eq!(
+            std::fs::read_to_string(hub.join("gone.txt")).unwrap(),
+            "user replacement\n"
+        );
+        std::fs::remove_file(hub.join("gone.txt")).unwrap();
+        assert!(sync_worktree_changes(&wt, &base, &hub)
+            .unwrap()
+            .conflicts
+            .is_empty());
+
+        // A third sync after more worktree edits copies the file again: the
+        // manifest marks the hub's copy as this source's own, not a user edit.
+        write(&wt, "seed.txt", "seed edited twice\n");
+        let third = sync_worktree_changes(&wt, &base, &hub).unwrap();
+        assert_eq!(third.copied, 1);
+        assert_eq!(third.deleted, 0);
+        assert!(third.conflicts.is_empty());
+        assert_eq!(
+            std::fs::read_to_string(hub.join("seed.txt")).unwrap(),
+            "seed edited twice\n"
+        );
+
+        // Reverting the worktree's copy of a synced file deletes it in the hub
+        // rather than leaving the stale copy behind.
+        std::fs::remove_file(wt.join("untracked.txt")).unwrap();
+        let reverted = sync_worktree_changes(&wt, &base, &hub).unwrap();
+        assert_eq!(reverted.deleted, 1);
+        assert!(reverted.conflicts.is_empty());
+        assert!(!hub.join("untracked.txt").exists());
+
+        std::fs::create_dir_all(hub.join("results")).unwrap();
+        write(&wt, "results/output.pdf", "agent output\n");
+        assert!(sync_worktree_changes(&wt, &base, &hub)
+            .unwrap()
+            .conflicts
+            .is_empty());
+        std::fs::remove_file(wt.join("results/output.pdf")).unwrap();
+        assert!(sync_worktree_changes(&wt, &base, &hub)
+            .unwrap()
+            .conflicts
+            .is_empty());
+        assert!(hub.join("results").is_dir());
+        std::fs::remove_file(hub.join("seed.txt")).unwrap();
+        assert_eq!(
+            sync_worktree_changes(&wt, &base, &hub).unwrap().conflicts,
+            vec!["seed.txt".to_string()]
+        );
+        assert!(!hub.join("seed.txt").exists());
+        write(&hub, "seed.txt", "seed edited twice\n");
+
+        // A hub-side edit to a path the worktree also changed blocks the sync
+        // without touching the hub's copy.
+        write(&hub, "committed.txt", "hub edit\n");
+        write(&wt, "committed.txt", "wt edit\n");
+        let blocked = sync_worktree_changes(&wt, &base, &hub).unwrap();
+        assert_eq!(blocked.conflicts, vec!["committed.txt".to_string()]);
+        assert_eq!(blocked.copied + blocked.deleted, 0);
+        assert_eq!(
+            std::fs::read_to_string(hub.join("committed.txt")).unwrap(),
+            "hub edit\n"
+        );
+        // The conflict is recorded: the hub-side edit survives the next syncs
+        // until the user resolves it, while other paths keep syncing.
+        let _ = std::fs::remove_file(hub.join("committed.txt"));
+
+        run(
+            &hub,
+            &["worktree", "remove", "--force", &wt.to_string_lossy()],
+        );
+        let _ = std::fs::remove_dir_all(&hub);
+    }
+
+    #[test]
+    fn sync_restores_literal_names_without_overwriting_pattern_matches() {
+        let hub = temp_repo();
+        write(&hub, "fig[1].txt", "base\n");
+        write(&hub, "fig1.txt", "other\n");
+        write(&hub, "dir[1]/data.txt", "base directory\n");
+        write(&hub, "dir1/data.txt", "other directory\n");
+        run(&hub, &["add", "-A"]);
+        run(&hub, &["commit", "-q", "-m", "seed literal names"]);
+        let base = run(&hub, &["rev-parse", "HEAD"]);
+        let wt = hub.with_file_name(format!("{}-wt", hub.file_name().unwrap().to_string_lossy()));
+        run(
+            &hub,
+            &["worktree", "add", "-q", "--detach", &wt.to_string_lossy()],
+        );
+        write(&wt, "fig[1].txt", "agent edit\n");
+        std::fs::remove_dir_all(wt.join("dir[1]")).unwrap();
+        write(&wt, "dir[1]", "agent replacement\n");
+        run(&wt, &["add", "-A"]);
+        let copied = sync_worktree_changes(&wt, &base, &hub).unwrap();
+        assert!(copied.conflicts.is_empty());
+        write(&hub, "fig1.txt", "user edit\n");
+        write(&hub, "dir1/data.txt", "user directory edit\n");
+        run(&wt, &["reset", "-q", "--hard", &base]);
+        let restored = sync_worktree_changes(&wt, &base, &hub).unwrap();
+        assert!(restored.conflicts.is_empty());
+        assert_eq!(
+            std::fs::read_to_string(hub.join("fig[1].txt")).unwrap(),
+            "base\n"
+        );
+        assert_eq!(
+            std::fs::read_to_string(hub.join("fig1.txt")).unwrap(),
+            "user edit\n"
+        );
+        assert_eq!(
+            std::fs::read_to_string(hub.join("dir[1]/data.txt")).unwrap(),
+            "base directory\n"
+        );
+        assert_eq!(
+            std::fs::read_to_string(hub.join("dir1/data.txt")).unwrap(),
+            "user directory edit\n"
+        );
+        run(
+            &hub,
+            &["worktree", "remove", "--force", &wt.to_string_lossy()],
+        );
+        let _ = std::fs::remove_dir_all(&hub);
+    }
+
+    #[test]
+    fn sync_replaces_nested_baseline_directories_but_preserves_user_empty_dirs() {
+        let hub = temp_repo();
+        write(&hub, "dir/nested/a.txt", "baseline\n");
+        run(&hub, &["add", "-A"]);
+        run(&hub, &["commit", "-q", "-m", "seed"]);
+        let base = run(&hub, &["rev-parse", "HEAD"]);
+        let wt = hub.with_extension("wt");
+        run(
+            &hub,
+            &["worktree", "add", "-q", "--detach", &wt.to_string_lossy()],
+        );
+        run(&wt, &["rm", "-r", "-q", "dir"]);
+        write(&wt, "dir", "replacement\n");
+        run(&wt, &["add", "-A"]);
+        std::fs::create_dir(hub.join("dir/nested/user-empty")).unwrap();
+        assert_eq!(
+            sync_worktree_changes(&wt, &base, &hub).unwrap().conflicts,
+            vec!["dir"]
+        );
+        assert!(hub.join("dir/nested/a.txt").is_file());
+        std::fs::remove_dir(hub.join("dir/nested/user-empty")).unwrap();
+        assert!(sync_worktree_changes(&wt, &base, &hub)
+            .unwrap()
+            .conflicts
+            .is_empty());
+        assert_eq!(
+            std::fs::read_to_string(hub.join("dir")).unwrap(),
+            "replacement\n"
+        );
+        assert_eq!(
+            sync_worktree_changes(&wt, &base, &hub).unwrap(),
+            SyncOutcome::default()
+        );
+
+        run(&wt, &["reset", "-q", "--hard", &base]);
+        std::fs::remove_file(hub.join("dir")).unwrap();
+        std::fs::create_dir(hub.join("dir")).unwrap();
+        for _ in 0..2 {
+            assert_eq!(
+                sync_worktree_changes(&wt, &base, &hub).unwrap().conflicts,
+                vec!["dir"]
+            );
+            assert_eq!(std::fs::read_dir(hub.join("dir")).unwrap().count(), 0);
+        }
+        run(
+            &hub,
+            &[
+                "restore",
+                "--worktree",
+                "--source",
+                &base,
+                "--",
+                "dir/nested/a.txt",
+            ],
+        );
+        write(&hub, "dir/user.txt", "staged version\n");
+        run(&hub, &["add", "dir/user.txt"]);
+        write(&hub, "dir/user.txt", "user unstaged version\n");
+        assert!(sync_worktree_changes(&wt, &base, &hub)
+            .unwrap()
+            .conflicts
+            .is_empty());
+        assert_eq!(
+            std::fs::read_to_string(hub.join("dir/user.txt")).unwrap(),
+            "user unstaged version\n"
+        );
+        run(&hub, &["reset", "-q", "--", "dir/user.txt"]);
+        std::fs::remove_file(hub.join("dir/user.txt")).unwrap();
+        run(&wt, &["rm", "-r", "-q", "dir"]);
+        write(&wt, "dir", "replacement again\n");
+        run(&wt, &["add", "-A"]);
+        std::fs::remove_dir_all(hub.join("dir/nested")).unwrap();
+        std::fs::create_dir(hub.join("dir/nested")).unwrap();
+        assert_eq!(
+            sync_worktree_changes(&wt, &base, &hub).unwrap().conflicts,
+            vec!["dir"]
+        );
+        assert!(hub.join("dir/nested").is_dir());
+        run(
+            &hub,
+            &["worktree", "remove", "--force", &wt.to_string_lossy()],
+        );
+        let _ = std::fs::remove_dir_all(&hub);
+    }
+
+    #[test]
+    fn sync_lock_does_not_expire_while_held() {
+        let hub = temp_repo();
+        let base = run(&hub, &["rev-parse", "HEAD"]);
+        let wt = hub.with_extension("wt");
+        run(
+            &hub,
+            &["worktree", "add", "-q", "--detach", &wt.to_string_lossy()],
+        );
+        let path = git_dir(&hub).unwrap().join("orx-sync.lock");
+        let file = std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(true)
+            .truncate(false)
+            .open(path)
+            .unwrap();
+        let mut lock = fd_lock::RwLock::new(file);
+        let holder = lock.try_write().unwrap();
+        holder
+            .set_times(
+                std::fs::FileTimes::new()
+                    .set_modified(std::time::SystemTime::now() - Duration::from_secs(600)),
+            )
+            .unwrap();
+        assert!(sync_worktree_changes(&wt, &base, &hub)
+            .unwrap_err()
+            .to_string()
+            .contains("another sync"));
+        drop(holder);
+        drop(lock);
+        assert_eq!(
+            sync_worktree_changes(&wt, &base, &hub).unwrap(),
+            SyncOutcome::default()
+        );
+        run(
+            &hub,
+            &["worktree", "remove", "--force", &wt.to_string_lossy()],
+        );
+        let _ = std::fs::remove_dir_all(&hub);
+    }
+
+    #[test]
+    fn sync_preserves_user_restorations_to_baseline() {
+        for deleted in [false, true] {
+            let hub = temp_repo();
+            let baseline = std::fs::read(hub.join("seed.txt")).unwrap();
+            let base = run(&hub, &["rev-parse", "HEAD"]);
+            let wt = hub.with_extension("wt");
+            run(
+                &hub,
+                &["worktree", "add", "-q", "--detach", &wt.to_string_lossy()],
+            );
+            if deleted {
+                std::fs::remove_file(wt.join("seed.txt")).unwrap();
+            } else {
+                write(&wt, "seed.txt", "agent contents\n");
+            }
+            assert_eq!(
+                sync_worktree_changes(&wt, &base, &hub).unwrap(),
+                SyncOutcome {
+                    copied: usize::from(!deleted),
+                    deleted: usize::from(deleted),
+                    ..Default::default()
+                }
+            );
+            run(&hub, &["restore", "--worktree", "--", "seed.txt"]);
+            for _ in 0..2 {
+                assert_eq!(
+                    sync_worktree_changes(&wt, &base, &hub).unwrap(),
+                    SyncOutcome {
+                        conflicts: vec!["seed.txt".into()],
+                        ..Default::default()
+                    }
+                );
+                assert_eq!(std::fs::read(hub.join("seed.txt")).unwrap(), baseline);
+            }
+            write(&wt, "seed.txt", "later agent contents\n");
+            assert_eq!(
+                sync_worktree_changes(&wt, &base, &hub).unwrap().conflicts,
+                ["seed.txt"]
+            );
+            assert_eq!(std::fs::read(hub.join("seed.txt")).unwrap(), baseline);
+            write(&hub, "seed.txt", "later agent contents\n");
+            assert_eq!(
+                sync_worktree_changes(&wt, &base, &hub).unwrap(),
+                SyncOutcome::default()
+            );
+            run(
+                &hub,
+                &["worktree", "remove", "--force", &wt.to_string_lossy()],
+            );
+            let _ = std::fs::remove_dir_all(&hub);
+        }
+    }
+
+    #[test]
+    fn sync_preserves_independent_user_deletion_after_source_restores() {
+        let hub = temp_repo();
+        write(&hub, "code.txt", "baseline\n");
+        run(&hub, &["add", "-A"]);
+        run(&hub, &["commit", "-q", "-m", "baseline"]);
+        let base = run(&hub, &["rev-parse", "HEAD"]);
+        let wt = hub.with_extension("wt");
+        run(
+            &hub,
+            &["worktree", "add", "-q", "--detach", &wt.to_string_lossy()],
+        );
+        std::fs::remove_file(hub.join("code.txt")).unwrap();
+        std::fs::remove_file(wt.join("code.txt")).unwrap();
+        assert_eq!(
+            sync_worktree_changes(&wt, &base, &hub).unwrap(),
+            SyncOutcome::default()
+        );
+        run(&wt, &["reset", "--hard", &base]);
+        assert_eq!(
+            sync_worktree_changes(&wt, &base, &hub).unwrap(),
+            SyncOutcome::default()
+        );
+        assert!(!hub.join("code.txt").exists());
+        write(&wt, "new-code.txt", "session output\n");
+        assert_eq!(sync_worktree_changes(&wt, &base, &hub).unwrap().copied, 1);
+        std::fs::remove_file(hub.join("new-code.txt")).unwrap();
+        std::fs::remove_file(wt.join("new-code.txt")).unwrap();
+        assert_eq!(
+            sync_worktree_changes(&wt, &base, &hub).unwrap(),
+            SyncOutcome::default()
+        );
+        write(&wt, "new-code.txt", "session output\n");
+        assert_eq!(
+            sync_worktree_changes(&wt, &base, &hub).unwrap(),
+            SyncOutcome {
+                conflicts: vec!["new-code.txt".into()],
+                ..Default::default()
+            }
+        );
+        assert!(!hub.join("new-code.txt").exists());
+        run(
+            &hub,
+            &["worktree", "remove", "--force", &wt.to_string_lossy()],
+        );
+        let _ = std::fs::remove_dir_all(&hub);
+    }
+
+    #[test]
+    fn sync_allows_later_edits_to_committed_session_output() {
+        let hub = temp_repo();
+        let base = run(&hub, &["rev-parse", "HEAD"]);
+        let a = hub.with_extension("a");
+        let b = hub.with_extension("b");
+        run(
+            &hub,
+            &["worktree", "add", "-q", "--detach", &a.to_string_lossy()],
+        );
+        write(&a, "code.txt", "first session\n");
+        assert!(sync_worktree_changes(&a, &base, &hub)
+            .unwrap()
+            .conflicts
+            .is_empty());
+        run(&hub, &["add", "-A"]);
+        run(&hub, &["commit", "-q", "-m", "accept first session"]);
+        let accepted = run(&hub, &["rev-parse", "HEAD"]);
+        run(
+            &hub,
+            &["worktree", "add", "-q", "--detach", &b.to_string_lossy()],
+        );
+        write(&b, "code.txt", "later session\n");
+        assert!(sync_worktree_changes(&b, &accepted, &hub)
+            .unwrap()
+            .conflicts
+            .is_empty());
+        assert_eq!(
+            std::fs::read_to_string(hub.join("code.txt")).unwrap(),
+            "later session\n"
+        );
+        assert_eq!(
+            sync_worktree_changes(&b, &accepted, &hub).unwrap(),
+            SyncOutcome::default()
+        );
+        for wt in [&a, &b] {
+            run(
+                &hub,
+                &["worktree", "remove", "--force", &wt.to_string_lossy()],
+            );
+        }
+        let _ = std::fs::remove_dir_all(&hub);
+    }
+
+    #[test]
+    fn sync_preserves_other_sessions_shared_output() {
+        let hub = temp_repo();
+        let base = run(&hub, &["rev-parse", "HEAD"]);
+        let a = hub.with_extension("a");
+        let b = hub.with_extension(if cfg!(unix) { "b\nowner" } else { "b owner" });
+        for wt in [&a, &b] {
+            run(
+                &hub,
+                &["worktree", "add", "-q", "--detach", &wt.to_string_lossy()],
+            );
+            write(wt, "paper.pdf", "shared output\n");
+            assert!(sync_worktree_changes(wt, &base, &hub)
+                .unwrap()
+                .conflicts
+                .is_empty());
+        }
+        write(&a, "paper.pdf", "new output\n");
+        assert_eq!(
+            sync_worktree_changes(&a, &base, &hub).unwrap().conflicts,
+            vec!["paper.pdf"]
+        );
+        std::fs::remove_file(a.join("paper.pdf")).unwrap();
+        assert_eq!(
+            sync_worktree_changes(&a, &base, &hub).unwrap().conflicts,
+            vec!["paper.pdf"]
+        );
+        assert_eq!(
+            std::fs::read_to_string(hub.join("paper.pdf")).unwrap(),
+            "shared output\n"
+        );
+        run(
+            &hub,
+            &["worktree", "remove", "--force", &b.to_string_lossy()],
+        );
+        write(&a, "paper.pdf", "new output after other owner deleted\n");
+        assert!(sync_worktree_changes(&a, &base, &hub)
+            .unwrap()
+            .conflicts
+            .is_empty());
+        assert_eq!(
+            std::fs::read_to_string(hub.join("paper.pdf")).unwrap(),
+            "new output after other owner deleted\n"
+        );
+        assert!(
+            !SyncManifest::read(&git_dir(&hub).unwrap().join("orx-sync.json"))
+                .sources
+                .contains_key(b.file_name().unwrap().to_str().unwrap())
+        );
+        run(
+            &hub,
+            &["worktree", "remove", "--force", &a.to_string_lossy()],
+        );
+        let _ = std::fs::remove_dir_all(&hub);
+    }
+
+    #[test]
+    fn sync_preserves_other_sessions_shared_directory_conversion() {
+        let hub = temp_repo();
+        write(&hub, "dir/a.txt", "baseline\n");
+        run(&hub, &["add", "-A"]);
+        run(&hub, &["commit", "-q", "-m", "seed"]);
+        let base = run(&hub, &["rev-parse", "HEAD"]);
+        let a = hub.with_extension("a");
+        let b = hub.with_extension("b");
+        for wt in [&a, &b] {
+            run(
+                &hub,
+                &["worktree", "add", "-q", "--detach", &wt.to_string_lossy()],
+            );
+            run(wt, &["rm", "-r", "-q", "dir"]);
+            write(wt, "dir", "shared file\n");
+            run(wt, &["add", "-A"]);
+            assert!(sync_worktree_changes(wt, &base, &hub)
+                .unwrap()
+                .conflicts
+                .is_empty());
+        }
+        run(&a, &["reset", "-q", "--hard", &base]);
+        assert_eq!(
+            sync_worktree_changes(&a, &base, &hub).unwrap().conflicts,
+            vec!["dir"]
+        );
+        assert_eq!(
+            std::fs::read_to_string(hub.join("dir")).unwrap(),
+            "shared file\n"
+        );
+        for wt in [&a, &b] {
+            run(
+                &hub,
+                &["worktree", "remove", "--force", &wt.to_string_lossy()],
+            );
+        }
+        let _ = std::fs::remove_dir_all(&hub);
+    }
+
+    #[test]
+    fn sync_preserves_user_parent_after_removing_owned_child() {
+        let hub = temp_repo();
+        let base = run(&hub, &["rev-parse", "HEAD"]);
+        let wt = hub.with_extension("wt");
+        run(
+            &hub,
+            &["worktree", "add", "-q", "--detach", &wt.to_string_lossy()],
+        );
+        std::fs::create_dir(hub.join("results")).unwrap();
+        write(&wt, "results/output.txt", "agent\n");
+        run(&wt, &["add", "-A"]);
+        assert!(sync_worktree_changes(&wt, &base, &hub)
+            .unwrap()
+            .conflicts
+            .is_empty());
+        run(&wt, &["rm", "-r", "-f", "-q", "results"]);
+        write(&wt, "results", "as file\n");
+        run(&wt, &["add", "-A"]);
+        assert_eq!(
+            sync_worktree_changes(&wt, &base, &hub).unwrap().conflicts,
+            vec!["results"]
+        );
+        assert!(hub.join("results").is_dir());
+        assert_eq!(
+            std::fs::read_to_string(hub.join("results/output.txt")).unwrap(),
+            "agent\n"
+        );
+        run(
+            &hub,
+            &["worktree", "remove", "--force", &wt.to_string_lossy()],
+        );
+        let _ = std::fs::remove_dir_all(&hub);
+    }
+
+    #[test]
+    fn sync_skips_submodule_changes_without_blocking_other_files() {
+        let module = temp_repo();
+        write(&module, "seed.txt", "module\n");
+        run(&module, &["add", "-A"]);
+        run(&module, &["commit", "-q", "-m", "module"]);
+        let hub = temp_repo();
+        run(
+            &hub,
+            &[
+                "-c",
+                "protocol.file.allow=always",
+                "submodule",
+                "add",
+                "-q",
+                &module.to_string_lossy(),
+                "module",
+            ],
+        );
+        run(&hub, &["commit", "-q", "-am", "seed"]);
+        let base = run(&hub, &["rev-parse", "HEAD"]);
+        let module_before = std::fs::read(hub.join("module/seed.txt")).unwrap();
+        let wt = hub.with_file_name(format!("{}-wt", hub.file_name().unwrap().to_string_lossy()));
+        run(
+            &hub,
+            &["worktree", "add", "-q", "--detach", &wt.to_string_lossy()],
+        );
+        run(
+            &wt,
+            &[
+                "-c",
+                "protocol.file.allow=always",
+                "submodule",
+                "update",
+                "--init",
+                "-q",
+            ],
+        );
+        write(&wt, "module/seed.txt", "agent module edit\n");
+        write(&wt, "code.txt", "agent\n");
+        assert!(changed_files(&wt, &base)
+            .unwrap()
+            .iter()
+            .any(|change| change.path == "module"));
+        assert!(sync_worktree_changes(&wt, &base, &hub)
+            .unwrap()
+            .conflicts
+            .is_empty());
+        assert_eq!(
+            std::fs::read_to_string(hub.join("code.txt")).unwrap(),
+            "agent\n"
+        );
+        assert_eq!(
+            std::fs::read(hub.join("module/seed.txt")).unwrap(),
+            module_before
+        );
+
+        run(
+            &wt,
+            &[
+                "-c",
+                "protocol.file.allow=always",
+                "submodule",
+                "add",
+                "-q",
+                &module.to_string_lossy(),
+                "new-module",
+            ],
+        );
+        assert!(sync_worktree_changes(&wt, &base, &hub)
+            .unwrap()
+            .conflicts
+            .is_empty());
+        assert!(!hub.join("new-module").exists());
+        run(&wt, &["rm", "-f", "-q", "module"]);
+        assert!(sync_worktree_changes(&wt, &base, &hub)
+            .unwrap()
+            .conflicts
+            .is_empty());
+        assert_eq!(
+            std::fs::read(hub.join("module/seed.txt")).unwrap(),
+            module_before
+        );
+        run(
+            &hub,
+            &["worktree", "remove", "--force", &wt.to_string_lossy()],
+        );
+        let _ = std::fs::remove_dir_all(&hub);
+        let _ = std::fs::remove_dir_all(&module);
+    }
+
+    #[test]
+    fn sync_preserves_links_owned_dirs_restores_and_moved_history() {
+        let hub = temp_repo();
+        write(&hub, "dir/a", "a\n");
+        write(&hub, "dir/b", "b\n");
+        write(&hub, "linked.txt", "base\n");
+        run(&hub, &["add", "-A"]);
+        run(&hub, &["commit", "-q", "-m", "seed"]);
+        let base = run(&hub, &["rev-parse", "HEAD"]);
+        let wt = hub.with_file_name(format!("{}-wt", hub.file_name().unwrap().to_string_lossy()));
+        run(
+            &hub,
+            &["worktree", "add", "-q", "--detach", &wt.to_string_lossy()],
+        );
+        let synced = |wt: &Path| sync_worktree_changes(wt, &base, &hub).unwrap();
+
+        // Writes replace the file, never writing through a hard link to it.
+        std::fs::hard_link(hub.join("linked.txt"), hub.join("backup.txt")).unwrap();
+        write(&wt, "linked.txt", "agent\n");
+        assert!(synced(&wt).conflicts.is_empty());
+        assert_eq!(
+            std::fs::read_to_string(hub.join("backup.txt")).unwrap(),
+            "base\n"
+        );
+
+        // A sync-created directory, once replaced, is no longer sync-owned.
+        write(&wt, "p/a.txt", "a\n");
+        run(&wt, &["add", "-A"]);
+        assert!(synced(&wt).conflicts.is_empty());
+        run(&wt, &["rm", "-r", "-f", "-q", "p"]);
+        write(&wt, "p", "file\n");
+        run(&wt, &["add", "-A"]);
+        std::fs::remove_dir_all(hub.join("p")).unwrap();
+        std::fs::create_dir(hub.join("p")).unwrap();
+        assert_eq!(synced(&wt).conflicts, vec!["p".to_string()]);
+        assert!(hub.join("p").is_dir());
+        write(&hub, "p/a.txt", "a\n");
+        assert!(synced(&wt).conflicts.is_empty());
+        std::fs::remove_file(hub.join("p")).unwrap();
+        std::fs::create_dir(hub.join("p")).unwrap();
+        assert_eq!(synced(&wt).conflicts, vec!["p".to_string()]);
+        assert!(hub.join("p").is_dir());
+        std::fs::remove_dir(hub.join("p")).unwrap();
+        write(&hub, "p", "file\n");
+
+        // Restoring a converted directory applies child edits and deletions.
+        run(&wt, &["rm", "-r", "-f", "-q", "dir"]);
+        write(&wt, "dir", "as file\n");
+        run(&wt, &["add", "-A"]);
+        assert!(synced(&wt).conflicts.is_empty());
+        run(&wt, &["checkout", "-q", &base, "--", "dir"]);
+        write(&wt, "dir/a", "edited\n");
+        assert!(synced(&wt).conflicts.is_empty());
+        assert_eq!(
+            std::fs::read_to_string(hub.join("dir/a")).unwrap(),
+            "edited\n"
+        );
+        assert_eq!(std::fs::read_to_string(hub.join("dir/b")).unwrap(), "b\n");
+        run(&wt, &["rm", "-r", "-f", "-q", "dir"]);
+        write(&wt, "dir", "as file\n");
+        run(&wt, &["add", "-A"]);
+        assert!(synced(&wt).conflicts.is_empty());
+        run(&wt, &["checkout", "-q", &base, "--", "dir"]);
+        run(&wt, &["rm", "-f", "-q", "dir/a"]);
+        assert!(synced(&wt).conflicts.is_empty());
+        assert!(!hub.join("dir/a").exists());
+        assert_eq!(std::fs::read_to_string(hub.join("dir/b")).unwrap(), "b\n");
+
+        // History follows the worktree when its storage directory moves.
+        let manifest_path = git_dir(&hub).unwrap().join("orx-sync.json");
+        let mut legacy = SyncManifest::read(&manifest_path);
+        let key = wt.file_name().unwrap().to_string_lossy().into_owned();
+        let paths = legacy.sources.remove(&key).unwrap();
+        legacy
+            .sources
+            .insert(wt.to_string_lossy().into_owned(), paths);
+        if let Some(dirs) = legacy.created_dirs.remove(&key) {
+            legacy
+                .created_dirs
+                .insert(wt.to_string_lossy().into_owned(), dirs);
+        }
+        legacy.write(&manifest_path).unwrap();
+        let moved = hub.with_file_name(format!(
+            "{}-moved",
+            hub.file_name().unwrap().to_string_lossy()
+        ));
+        std::fs::create_dir_all(&moved).unwrap();
+        let moved_wt = moved.join(wt.file_name().unwrap());
+        run(
+            &hub,
+            &[
+                "worktree",
+                "move",
+                &wt.to_string_lossy(),
+                &moved_wt.to_string_lossy(),
+            ],
+        );
+        write(&moved_wt, "linked.txt", "agent again\n");
+        assert!(synced(&moved_wt).conflicts.is_empty());
+        assert_eq!(
+            std::fs::read_to_string(hub.join("linked.txt")).unwrap(),
+            "agent again\n"
+        );
+        assert!(SyncManifest::read(&manifest_path)
+            .sources
+            .contains_key(&key));
+        assert!(!SyncManifest::read(&manifest_path)
+            .sources
+            .contains_key(&wt.to_string_lossy().into_owned()));
+
+        run(
+            &hub,
+            &["worktree", "remove", "--force", &moved_wt.to_string_lossy()],
+        );
+        let _ = std::fs::remove_dir_all(&moved);
+        let _ = std::fs::remove_dir_all(&hub);
+    }
+
+    #[test]
+    fn sync_worktree_changes_handles_converted_files_and_directories() {
+        let hub = temp_repo();
+        write(&hub, ".gitattributes", "crlf.txt text eol=crlf\n");
+        write(&hub, "dir/a.txt", "in dir\n");
+        write(&hub, "crlf.txt", "a\r\n"); // stored as LF, checked out as CRLF
+        write(&hub, "nested", "baseline file\n");
+        run(&hub, &["add", "-A"]);
+        run(&hub, &["commit", "-q", "-m", "seed"]);
+        let base = run(&hub, &["rev-parse", "HEAD"]);
+        let wt = hub.with_file_name(format!("{}-wt", hub.file_name().unwrap().to_string_lossy()));
+        run(
+            &hub,
+            &["worktree", "add", "-q", "--detach", &wt.to_string_lossy()],
+        );
+
+        // A worktree edit to a checkout-converted file still syncs: the hub's
+        // copy compares equal to the base's smudged bytes, not a conflict.
+        write(&wt, "crlf.txt", "b\r\n");
+        let outcome = sync_worktree_changes(&wt, &base, &hub).unwrap();
+        assert_eq!(outcome.copied, 1);
+        assert!(outcome.conflicts.is_empty());
+        assert_eq!(
+            std::fs::read_to_string(hub.join("crlf.txt")).unwrap(),
+            "b\r\n"
+        );
+
+        // The worktree replacing a directory with a file conflicts while the
+        // hub's directory still holds an unrelated file.
+        run(&wt, &["rm", "-r", "-q", "dir"]);
+        write(&wt, "dir", "as file\n");
+        run(&wt, &["add", "dir"]);
+        write(&hub, "dir/extra.txt", "unrelated\n");
+        let blocked = sync_worktree_changes(&wt, &base, &hub).unwrap();
+        assert_eq!(blocked.conflicts, vec!["dir".to_string()]);
+        assert!(hub.join("dir/a.txt").is_file());
+        assert!(hub.join("dir/extra.txt").is_file());
+
+        std::fs::remove_file(hub.join("dir/extra.txt")).unwrap();
+        std::fs::create_dir_all(hub.join("dir/empty-user-directory")).unwrap();
+        let blocked = sync_worktree_changes(&wt, &base, &hub).unwrap();
+        assert_eq!(blocked.conflicts, vec!["dir".to_string()]);
+        assert!(hub.join("dir/empty-user-directory").is_dir());
+        std::fs::remove_dir(hub.join("dir/empty-user-directory")).unwrap();
+        write(&hub, "dir/.git/config", "unrelated nested repository\n");
+        let blocked = sync_worktree_changes(&wt, &base, &hub).unwrap();
+        assert_eq!(blocked.conflicts, vec!["dir".to_string()]);
+        assert_eq!(
+            std::fs::read_to_string(hub.join("dir/.git/config")).unwrap(),
+            "unrelated nested repository\n"
+        );
+        std::fs::remove_file(hub.join("dir/.git/config")).unwrap();
+        assert_eq!(
+            sync_worktree_changes(&wt, &base, &hub).unwrap().conflicts,
+            vec!["dir".to_string()]
+        );
+        std::fs::remove_dir(hub.join("dir/.git")).unwrap();
+
+        // Once only removable content remains, the file lands.
+        let outcome = sync_worktree_changes(&wt, &base, &hub).unwrap();
+        assert!(outcome.conflicts.is_empty());
+        assert!(hub.join("dir").is_file());
+        assert_eq!(
+            std::fs::read_to_string(hub.join("dir")).unwrap(),
+            "as file\n"
+        );
+
+        // The worktree reverting to the base restores the directory — it does
+        // not leave an empty file behind.
+        run(&wt, &["reset", "-q", "--hard", &base]);
+        std::fs::remove_file(hub.join("dir")).unwrap();
+        write(&hub, "dir/a.txt/notes.txt", "unrelated user notes\n");
+        let blocked = sync_worktree_changes(&wt, &base, &hub).unwrap();
+        assert_eq!(blocked.conflicts, vec!["dir".to_string()]);
+        assert_eq!(
+            std::fs::read_to_string(hub.join("dir/a.txt/notes.txt")).unwrap(),
+            "unrelated user notes\n"
+        );
+        std::fs::remove_file(hub.join("dir/a.txt/notes.txt")).unwrap();
+        assert_eq!(
+            sync_worktree_changes(&wt, &base, &hub).unwrap().conflicts,
+            vec!["dir".to_string()]
+        );
+        std::fs::remove_dir(hub.join("dir/a.txt")).unwrap();
+        assert_eq!(
+            sync_worktree_changes(&wt, &base, &hub).unwrap().conflicts,
+            vec!["dir".to_string()]
+        );
+        std::fs::remove_dir(hub.join("dir")).unwrap();
+        write(&hub, "dir", "as file\n");
+        let outcome = sync_worktree_changes(&wt, &base, &hub).unwrap();
+        assert!(outcome.conflicts.is_empty());
+        assert!(hub.join("dir").is_dir());
+        assert_eq!(
+            std::fs::read_to_string(hub.join("dir/a.txt")).unwrap(),
+            "in dir\n"
+        );
+        assert_eq!(
+            std::fs::read_to_string(hub.join("crlf.txt")).unwrap(),
+            "a\r\n"
+        );
+
+        run(&wt, &["rm", "-q", "crlf.txt"]);
+        write(&wt, "crlf.txt/output.txt", "agent result\n");
+        run(&wt, &["add", "-A"]);
+        assert!(sync_worktree_changes(&wt, &base, &hub)
+            .unwrap()
+            .conflicts
+            .is_empty());
+        assert_eq!(
+            sync_worktree_changes(&wt, &base, &hub).unwrap(),
+            SyncOutcome::default()
+        );
+        run(&wt, &["reset", "-q", "--hard", &base]);
+        write(&hub, "crlf.txt/output.txt", "user edit\n");
+        assert!(!sync_worktree_changes(&wt, &base, &hub)
+            .unwrap()
+            .conflicts
+            .is_empty());
+        assert_eq!(
+            std::fs::read_to_string(hub.join("crlf.txt/output.txt")).unwrap(),
+            "user edit\n"
+        );
+        write(&hub, "crlf.txt/output.txt", "agent result\n");
+        assert!(sync_worktree_changes(&wt, &base, &hub)
+            .unwrap()
+            .conflicts
+            .is_empty());
+        assert_eq!(
+            std::fs::read_to_string(hub.join("crlf.txt")).unwrap(),
+            "a\r\n"
+        );
+        assert_eq!(
+            sync_worktree_changes(&wt, &base, &hub).unwrap(),
+            SyncOutcome::default()
+        );
+        run(&wt, &["rm", "-q", "nested"]);
+        write(&wt, "nested/sub/result.txt", "session output\n");
+        run(&wt, &["add", "-A"]);
+        assert!(sync_worktree_changes(&wt, &base, &hub)
+            .unwrap()
+            .conflicts
+            .is_empty());
+        assert_eq!(
+            sync_worktree_changes(&wt, &base, &hub).unwrap(),
+            SyncOutcome::default()
+        );
+        run(&wt, &["reset", "-q", "--hard", &base]);
+        std::fs::create_dir_all(hub.join("nested/sub/user-empty")).unwrap();
+        assert!(!sync_worktree_changes(&wt, &base, &hub)
+            .unwrap()
+            .conflicts
+            .is_empty());
+        assert!(hub.join("nested/sub/user-empty").is_dir());
+        std::fs::remove_dir(hub.join("nested/sub/user-empty")).unwrap();
+        assert!(sync_worktree_changes(&wt, &base, &hub)
+            .unwrap()
+            .conflicts
+            .is_empty());
+        assert_eq!(
+            std::fs::read_to_string(hub.join("nested")).unwrap(),
+            "baseline file\n"
+        );
+
+        run(
+            &hub,
+            &["worktree", "remove", "--force", &wt.to_string_lossy()],
+        );
+        let _ = std::fs::remove_dir_all(&hub);
     }
 
     #[test]

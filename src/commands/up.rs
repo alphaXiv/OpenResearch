@@ -435,6 +435,7 @@ struct ProjectLifecycleState {
 struct ProjectAdmissionLease {
     inner: Arc<std::sync::Mutex<ProjectLifecycleState>>,
     project_id: String,
+    _shared: crate::store::LifecycleLock,
 }
 
 impl Drop for ProjectAdmissionLease {
@@ -452,6 +453,7 @@ impl Drop for ProjectAdmissionLease {
 struct ProjectDeletionLease {
     inner: Arc<std::sync::Mutex<ProjectLifecycleState>>,
     project_id: String,
+    _shared: crate::store::LifecycleLock,
 }
 
 impl Drop for ProjectDeletionLease {
@@ -466,10 +468,12 @@ impl ProjectLifecycle {
         if state.deleting.contains(project_id) {
             return None;
         }
+        let shared = crate::store::acquire_operation_lock("project", project_id, false).ok()?;
         *state.admissions.entry(project_id.to_string()).or_default() += 1;
         Some(ProjectAdmissionLease {
             inner: self.inner.clone(),
             project_id: project_id.to_string(),
+            _shared: shared,
         })
     }
 
@@ -491,10 +495,12 @@ impl ProjectLifecycle {
         {
             return None;
         }
+        let shared = crate::store::acquire_operation_lock("project", project_id, true).ok()?;
         state.deleting.insert(project_id.to_string());
         Some(ProjectDeletionLease {
             inner: self.inner.clone(),
             project_id: project_id.to_string(),
+            _shared: shared,
         })
     }
 
@@ -765,6 +771,15 @@ fn router(state: AppState, remote_auth: Option<RemoteAuth>) -> Router {
         )
         .route("/api/chat/sessions/{id}/messages", get(chat_messages))
         .route("/api/chat/sessions/{id}/worktree", get(session_worktree))
+        .route("/api/chat/sessions/{id}/storage", get(session_storage))
+        .route(
+            "/api/chat/sessions/{id}/storage/reveal",
+            post(reveal_session_storage),
+        )
+        .route(
+            "/api/chat/sessions/{id}/worktree/sync",
+            post(sync_session_worktree),
+        )
         .route("/api/chat/sessions/{id}/message", post(send_chat_message))
         .route("/api/chat/sessions/{id}/shell", post(run_shell_command))
         .route(
@@ -2023,9 +2038,9 @@ async fn delete_project(State(state): State<AppState>, Path(id): Path<String>) -
     // Abort any in-flight chat turns before their rows disappear, and clean up
     // each session's serve child + worktree (the rows cascade with the project).
     let sessions = store.list_chat_sessions_by_project(&id)?;
-    let mut _session_deletions = Vec::with_capacity(sessions.len());
+    let mut session_deletions = Vec::with_capacity(sessions.len());
     for session in &sessions {
-        _session_deletions.push(
+        session_deletions.push(
             state
                 .chat
                 .begin_session_delete(&session.id)
@@ -2040,10 +2055,14 @@ async fn delete_project(State(state): State<AppState>, Path(id): Path<String>) -
         state.chat.claude.forget_session(&session.id).await;
     }
     store.delete_local_project(&id)?;
-    for session in &sessions {
-        local::chat::cleanup_session_transcript_artifacts(&session.id);
-        local::chat::cleanup_session_worktree(&project, &session.id);
-    }
+    tokio::task::spawn_blocking(move || {
+        let _deleting_project = _deleting_project;
+        let _session_deletions = session_deletions;
+        for session in &sessions {
+            local::chat::cleanup_session_transcript_artifacts(&session.id);
+            local::git::remove_session_worktree(&project, &session.id);
+        }
+    });
     Ok(Json(json!({ "ok": true })))
 }
 
@@ -2786,11 +2805,225 @@ async fn session_worktree(Path(id): Path<String>) -> ApiResult {
         let payload = local::git::working_tree_diff_against(&root, Some(&base))?;
         Ok(Json(json!({
             "exists": true,
+            "path": root,
             "branch": branch,
             "baselineBranch": baseline,
             "baseSha": base,
             "files": files,
             "diff": diff_json(payload),
+        })))
+    })
+    .await
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+enum SessionStorageLocation {
+    Records,
+    Transcript,
+    Attachments,
+    Artifacts,
+}
+
+fn session_storage_path(
+    project: &local::model::LocalProject,
+    session: &StoredChatSession,
+    location: SessionStorageLocation,
+) -> Result<std::path::PathBuf> {
+    Ok(match location {
+        SessionStorageLocation::Records => crate::store::data_dir(),
+        SessionStorageLocation::Transcript => {
+            let native = match (
+                session.harness.as_str(),
+                session.native_session_id.as_deref(),
+            ) {
+                ("claude-code", Some(id)) => local::native_store::claude_session(id)?,
+                ("codex", Some(id)) => local::native_store::codex_session(id)?,
+                ("opencode", Some(id)) => local::native_store::opencode_session(id)?,
+                ("cursor", Some(id)) => local::native_store::cursor_session(id)?,
+                _ => None,
+            };
+            native
+                .map(|location| location.path)
+                .unwrap_or_else(|| crate::store::data_dir().join("orx.db"))
+        }
+        SessionStorageLocation::Attachments => crate::store::data_dir().join("chat-attachments"),
+        SessionStorageLocation::Artifacts => local::files::files_dir(project),
+    })
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RevealSessionStorageReq {
+    location: SessionStorageLocation,
+}
+
+async fn session_storage(State(state): State<AppState>, Path(id): Path<String>) -> ApiResult {
+    reject_if_moving(&state)?;
+    blocking_api(move || {
+        let data_dir_lock = crate::store::open_data_dir_move_lock()?;
+        let _data_dir_read = data_dir_lock.try_read().map_err(|error| {
+            if error.kind() == std::io::ErrorKind::WouldBlock {
+                bad_request("another dashboard is moving the data directory")
+            } else {
+                ApiError::from(anyhow!("could not lock data directory: {error}"))
+            }
+        })?;
+        let _session_storage = state
+            .chat
+            .begin_worktree_sync(&id)
+            .ok_or_else(|| bad_request("session deletion or another operation is in progress"))?;
+        let store = Store::open()?;
+        let session = store
+            .get_chat_session(&id)?
+            .ok_or_else(|| not_found("chat session"))?;
+        let owner = store.chat_worktree_owner(&id)?;
+        let _owner_storage = if owner != id {
+            Some(state.chat.begin_worktree_sync(&owner).ok_or_else(|| {
+                bad_request("worktree owner deletion or another operation is in progress")
+            })?)
+        } else {
+            None
+        };
+        let _admission = state
+            .project_lifecycle
+            .admit(&session.project_id)
+            .ok_or_else(|| bad_request("project deletion is in progress"))?;
+        reject_if_moving(&state)?;
+        let project = store
+            .get_local_project(&session.project_id)?
+            .ok_or_else(|| not_found("project"))?;
+        Ok(Json(json!({
+            "records": session_storage_path(&project, &session, SessionStorageLocation::Records)?,
+            "transcript": session_storage_path(&project, &session, SessionStorageLocation::Transcript)?,
+            "attachments": session_storage_path(&project, &session, SessionStorageLocation::Attachments)?,
+            "artifacts": session_storage_path(&project, &session, SessionStorageLocation::Artifacts)?,
+        })))
+    })
+    .await
+}
+
+async fn reveal_session_storage(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+    Json(req): Json<RevealSessionStorageReq>,
+) -> ApiResult {
+    reject_if_moving(&state)?;
+    blocking_api(move || {
+        let data_dir_lock = crate::store::open_data_dir_move_lock()?;
+        let _data_dir_read = data_dir_lock.try_read().map_err(|error| {
+            if error.kind() == std::io::ErrorKind::WouldBlock {
+                bad_request("another dashboard is moving the data directory")
+            } else {
+                ApiError::from(anyhow!("could not lock data directory: {error}"))
+            }
+        })?;
+        let _session_storage = state
+            .chat
+            .begin_worktree_sync(&id)
+            .ok_or_else(|| bad_request("session deletion or another operation is in progress"))?;
+        let store = Store::open()?;
+        let session = store
+            .get_chat_session(&id)?
+            .ok_or_else(|| not_found("chat session"))?;
+        let owner = store.chat_worktree_owner(&id)?;
+        let _owner_storage = if owner != id {
+            Some(state.chat.begin_worktree_sync(&owner).ok_or_else(|| {
+                bad_request("worktree owner deletion or another operation is in progress")
+            })?)
+        } else {
+            None
+        };
+        let _admission = state
+            .project_lifecycle
+            .admit(&session.project_id)
+            .ok_or_else(|| bad_request("project deletion is in progress"))?;
+        reject_if_moving(&state)?;
+        let project = store
+            .get_local_project(&session.project_id)?
+            .ok_or_else(|| not_found("project"))?;
+        let create_folder = matches!(
+            req.location,
+            SessionStorageLocation::Attachments | SessionStorageLocation::Artifacts
+        );
+        let path = session_storage_path(&project, &session, req.location)?;
+        if create_folder {
+            std::fs::create_dir_all(&path).map_err(crate::error::Error::from)?;
+        }
+        crate::editors::reveal_in_file_manager(&path)
+            .map_err(|e| ApiError::from(anyhow!("could not reveal folder: {e}")))?;
+        Ok(Json(json!({ "ok": true })))
+    })
+    .await
+}
+
+/// Copy the session worktree's changes since the baseline fork into the
+/// project folder — the explicit sync that lands agent work where the user
+/// picked it. A file overlay, not a merge: the folder's branch is untouched
+/// and files arrive uncommitted for review. Paths the folder itself changed
+/// since the fork come back as conflicts instead of being overwritten.
+async fn sync_session_worktree(State(state): State<AppState>, Path(id): Path<String>) -> ApiResult {
+    reject_if_moving(&state)?;
+    blocking_api(move || {
+        let data_dir_lock = crate::store::open_data_dir_move_lock()?;
+        let _data_dir_read = data_dir_lock.try_read().map_err(|error| {
+            if error.kind() == std::io::ErrorKind::WouldBlock {
+                bad_request("another dashboard is moving the data directory")
+            } else {
+                ApiError::from(anyhow!("could not lock data directory: {error}"))
+            }
+        })?;
+        let _session_sync = state
+            .chat
+            .begin_worktree_sync(&id)
+            .ok_or_else(|| bad_request("session deletion or sync is in progress"))?;
+        let store = Store::open()?;
+        let session = store
+            .get_chat_session(&id)?
+            .ok_or_else(|| not_found("chat session"))?;
+        let owner = store.chat_worktree_owner(&id)?;
+        let _owner_sync = if owner != id {
+            Some(
+                state
+                    .chat
+                    .begin_worktree_sync(&owner)
+                    .ok_or_else(|| bad_request("worktree owner deletion or sync is in progress"))?,
+            )
+        } else {
+            None
+        };
+        let _admission = state
+            .project_lifecycle
+            .admit(&session.project_id)
+            .ok_or_else(|| bad_request("project deletion is in progress"))?;
+        reject_if_moving(&state)?;
+        let project = store
+            .get_local_project(&session.project_id)?
+            .ok_or_else(|| not_found("project"))?;
+        let dir = local::git::existing_session_worktree_path(&project, &session.id);
+        let worktree = crate::paths::canonicalize(&dir).map_err(|e| {
+            bad_request(format!(
+                "this session's worktree is no longer available: {e}"
+            ))
+        })?;
+        let hub = crate::paths::canonicalize(std::path::Path::new(&project.repo_path))
+            .map_err(|e| ApiError::from(anyhow!("repo clone unavailable: {e}")))?;
+        let base = local::git::merge_base(&worktree, &project.baseline_branch, "HEAD")?
+            .unwrap_or_else(|| "HEAD".to_string());
+        let outcome = local::git::sync_worktree_changes(&worktree, &base, &hub)?;
+        if !outcome.conflicts.is_empty() {
+            return Err(ApiError(
+                StatusCode::CONFLICT,
+                format!(
+                    "the project folder also changed {} — back up and move conflicting paths aside, or compare and reconcile both versions before retrying",
+                    outcome.conflicts.join(", ")
+                ),
+            ));
+        }
+        Ok(Json(json!({
+            "ok": true,
+            "copied": outcome.copied,
+            "deleted": outcome.deleted,
         })))
     })
     .await
@@ -3537,12 +3770,50 @@ async fn open_project_file(
 
 /// Reveal a checkout file in the OS file manager; unlike open, directories are allowed.
 async fn reveal_project_file(
+    State(state): State<AppState>,
     Path(id): Path<String>,
     Json(req): Json<OpenProjectFileReq>,
 ) -> ApiResult {
+    reject_if_moving(&state)?;
     blocking_api(move || {
+        let data_dir_lock = crate::store::open_data_dir_move_lock()?;
+        let _data_dir_read = data_dir_lock.try_read().map_err(|error| {
+            if error.kind() == std::io::ErrorKind::WouldBlock {
+                bad_request("another dashboard is moving the data directory")
+            } else {
+                ApiError::from(anyhow!("could not lock data directory: {error}"))
+            }
+        })?;
+        let _session_reveal = req
+            .session_id
+            .as_deref()
+            .map(|session| {
+                state.chat.begin_worktree_sync(session).ok_or_else(|| {
+                    bad_request("session deletion or another operation is in progress")
+                })
+            })
+            .transpose()?;
+        let store = Store::open()?;
+        let owner = req
+            .session_id
+            .as_deref()
+            .map(|session| store.chat_worktree_owner(session))
+            .transpose()?;
+        let _owner_reveal = owner
+            .as_deref()
+            .filter(|owner| Some(*owner) != req.session_id.as_deref())
+            .map(|owner| {
+                state.chat.begin_worktree_sync(owner).ok_or_else(|| {
+                    bad_request("worktree owner deletion or another operation is in progress")
+                })
+            })
+            .transpose()?;
+        let _admission = state
+            .project_lifecycle
+            .admit(&id)
+            .ok_or_else(|| bad_request("project deletion is in progress"))?;
+        reject_if_moving(&state)?;
         let full = if req.path == "." {
-            let store = Store::open()?;
             let project = store
                 .get_local_project(&id)?
                 .ok_or_else(|| not_found("project"))?;
@@ -8441,6 +8712,302 @@ pub(crate) async fn spa(uri: Uri) -> Response {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn project_operations_remain_counted_until_writes_finish() {
+        let lifecycle = ProjectLifecycle::default();
+        let sync = lifecycle.admit("project").unwrap();
+        let reveal = lifecycle.admit("project").unwrap();
+        assert_eq!(lifecycle.operation_count(), 2);
+        assert!(lifecycle.begin_delete("project").is_none());
+        drop(sync);
+        assert_eq!(lifecycle.operation_count(), 1);
+        drop(reveal);
+        assert_eq!(lifecycle.operation_count(), 0);
+        assert!(lifecycle.begin_delete("project").is_some());
+    }
+
+    #[test]
+    fn storage_reveal_accepts_only_known_locations() {
+        for location in ["records", "transcript", "attachments", "artifacts"] {
+            assert!(serde_json::from_value::<RevealSessionStorageReq>(
+                json!({ "location": location })
+            )
+            .is_ok());
+        }
+        for request in [
+            json!({ "location": "../secrets" }),
+            json!({ "location": "artifacts", "path": "/etc" }),
+            json!({ "path": "/etc" }),
+        ] {
+            assert!(serde_json::from_value::<RevealSessionStorageReq>(request).is_err());
+        }
+    }
+
+    #[tokio::test]
+    async fn storage_routes_refuse_concurrent_session_deletion() {
+        if std::env::var_os("ORX_STORAGE_LIFETIME_TEST_CHILD").is_none() {
+            let dir =
+                std::env::temp_dir().join(format!("orx-storage-lifetime-{}", uuid::Uuid::new_v4()));
+            let run = |mode| {
+                std::process::Command::new(std::env::current_exe().unwrap())
+                    .args([
+                        "--exact",
+                        "commands::up::tests::storage_routes_refuse_concurrent_session_deletion",
+                        "--nocapture",
+                    ])
+                    .env("ORX_STORAGE_LIFETIME_TEST_CHILD", mode)
+                    .env("ORX_DATA_DIR", &dir)
+                    .env("XDG_CONFIG_HOME", dir.join("config"))
+                    .status()
+                    .unwrap()
+            };
+            let mut mover = crate::store::open_lifecycle_lock_at(
+                &dir.join("config/openresearch/orx.data-dir-move.lock"),
+            )
+            .unwrap();
+            let moving = mover.try_write().unwrap();
+            assert!(run("moving").success());
+            drop(moving);
+            assert!(run("normal").success());
+            for (holding, checking) in [
+                ("hold-sync", "sync-held"),
+                ("hold-delete", "deleting"),
+                ("hold-project", "project-held"),
+                ("hold-project-delete", "project-deleting"),
+                ("hold-owner-delete", "owner-deleting"),
+            ] {
+                let mut holder = std::process::Command::new(std::env::current_exe().unwrap())
+                    .args([
+                        "--exact",
+                        "commands::up::tests::storage_routes_refuse_concurrent_session_deletion",
+                        "--nocapture",
+                    ])
+                    .env("ORX_STORAGE_LIFETIME_TEST_CHILD", holding)
+                    .env("ORX_DATA_DIR", &dir)
+                    .env("XDG_CONFIG_HOME", dir.join("config"))
+                    .stdin(std::process::Stdio::piped())
+                    .stdout(std::process::Stdio::piped())
+                    .spawn()
+                    .unwrap();
+                let mut output = std::io::BufReader::new(holder.stdout.take().unwrap());
+                loop {
+                    let mut line = String::new();
+                    assert!(std::io::BufRead::read_line(&mut output, &mut line).unwrap() > 0);
+                    if line.trim() == "ORX_LOCK_READY" {
+                        break;
+                    }
+                }
+                let checked = run(checking);
+                drop(holder.stdin.take());
+                assert!(holder.wait().unwrap().success());
+                assert!(checked.success());
+            }
+            drop(mover);
+            let _ = std::fs::remove_dir_all(dir);
+            return;
+        }
+        let agent = Arc::new(AgentHost::new(None));
+        let claude = Arc::new(local::claude::ClaudeHost::new());
+        let state = AppState {
+            agent: agent.clone(),
+            chat: Arc::new(ChatHost::new(
+                agent,
+                Arc::new(local::codex::CodexHost::new()),
+                claude.clone(),
+            )),
+            claude,
+            harnesses: Default::default(),
+            project_lifecycle: Default::default(),
+            project_creation_lock: Default::default(),
+            publication_locks: Default::default(),
+            harness_fill_in_flight: Default::default(),
+            claude_catalog_queue: Default::default(),
+            data_dir_move_in_progress: Default::default(),
+            data_dir_gate: Default::default(),
+            remote_sessions: crate::commands::up_remote::RemoteSessionManager::new(),
+            remote_instance_id: None,
+            stopping: Default::default(),
+            dashboard_lock: Default::default(),
+            restart: Default::default(),
+        };
+        let mode = std::env::var("ORX_STORAGE_LIFETIME_TEST_CHILD").unwrap();
+        if mode.starts_with("hold-") {
+            let _sync =
+                (mode == "hold-sync").then(|| state.chat.begin_worktree_sync("session").unwrap());
+            let _delete = (mode == "hold-delete")
+                .then(|| state.chat.begin_session_delete("session").unwrap());
+            let _owner_delete = (mode == "hold-owner-delete")
+                .then(|| state.chat.begin_session_delete("owner").unwrap());
+            let _project =
+                (mode == "hold-project").then(|| state.project_lifecycle.admit("project").unwrap());
+            let _project_delete = (mode == "hold-project-delete")
+                .then(|| state.project_lifecycle.begin_delete("project").unwrap());
+            println!("ORX_LOCK_READY");
+            std::io::Write::flush(&mut std::io::stdout()).unwrap();
+            std::io::Read::read_to_end(&mut std::io::stdin(), &mut Vec::new()).unwrap();
+            return;
+        }
+        if mode == "sync-held" {
+            assert!(state.chat.begin_session_delete("session").is_none());
+            assert!(state.chat.begin_session_delete("unrelated").is_some());
+            return;
+        }
+        if mode == "project-held" {
+            assert!(state.project_lifecycle.begin_delete("project").is_none());
+            assert!(state.project_lifecycle.begin_delete("unrelated").is_some());
+            return;
+        }
+        if mode == "project-deleting" {
+            assert!(state.project_lifecycle.admit("project").is_none());
+            let error = reveal_project_file(
+                State(state),
+                Path("project".into()),
+                Json(OpenProjectFileReq {
+                    path: ".".into(),
+                    session_id: None,
+                }),
+            )
+            .await
+            .unwrap_err();
+            assert_eq!(error.0, StatusCode::BAD_REQUEST);
+            assert!(error.1.contains("project deletion"));
+            return;
+        }
+        if mode == "moving" || mode == "deleting" {
+            let lookup = session_storage(State(state.clone()), Path("session".into())).await;
+            let reveal = reveal_session_storage(
+                State(state.clone()),
+                Path("session".into()),
+                Json(RevealSessionStorageReq {
+                    location: SessionStorageLocation::Artifacts,
+                }),
+            )
+            .await;
+            let sync = sync_session_worktree(State(state.clone()), Path("session".into())).await;
+            let worktree = reveal_project_file(
+                State(state),
+                Path("project".into()),
+                Json(OpenProjectFileReq {
+                    path: ".".into(),
+                    session_id: Some("session".into()),
+                }),
+            )
+            .await;
+            for result in [lookup, reveal, sync, worktree] {
+                let error = result.unwrap_err();
+                assert_eq!(error.0, StatusCode::BAD_REQUEST);
+                assert!(error.1.contains(if mode == "moving" {
+                    "another dashboard"
+                } else {
+                    "session deletion"
+                }));
+            }
+            return;
+        }
+        let _deleting = state.chat.begin_session_delete("session").unwrap();
+        let lookup = session_storage(State(state.clone()), Path("session".into())).await;
+        let reveal = reveal_session_storage(
+            State(state.clone()),
+            Path("session".into()),
+            Json(RevealSessionStorageReq {
+                location: SessionStorageLocation::Artifacts,
+            }),
+        )
+        .await;
+        let worktree = reveal_project_file(
+            State(state.clone()),
+            Path("project".into()),
+            Json(OpenProjectFileReq {
+                path: ".".into(),
+                session_id: Some("session".into()),
+            }),
+        )
+        .await;
+        for result in [lookup, reveal, worktree] {
+            let error = result.unwrap_err();
+            assert_eq!(error.0, StatusCode::BAD_REQUEST);
+            assert!(error.1.contains("session deletion"));
+        }
+        drop(_deleting);
+
+        let store = Store::open().unwrap();
+        if mode == "normal" {
+            let data_dir_lock = crate::store::open_data_dir_move_lock().unwrap();
+            let reading = data_dir_lock.try_read().unwrap();
+            assert!(store.acquire_data_dir_move_lock().is_err());
+            drop(reading);
+            drop(store.acquire_data_dir_move_lock().unwrap());
+        } else {
+            assert!(store.acquire_data_dir_move_lock().is_err());
+        }
+        let mut session = StoredChatSession {
+            id: "owner".into(),
+            project_id: "project".into(),
+            harness: "codex".into(),
+            native_session_id: None,
+            title: None,
+            title_source: None,
+            model: None,
+            service_tier: None,
+            permission_mode: None,
+            plan_mode: false,
+            plan_reset_pending: false,
+            reasoning_level: None,
+            archived: false,
+            context_usage_json: None,
+            bootstrap_context: None,
+            goal: None,
+            autonomy: None,
+            active_leaf_id: None,
+            side_parent_session_id: None,
+            created_at: 1,
+            updated_at: 1,
+        };
+        store.create_chat_session(&session).unwrap();
+        session.id = "side".into();
+        session.side_parent_session_id = Some("owner".into());
+        store.create_chat_session(&session).unwrap();
+
+        let deleting =
+            (mode != "owner-deleting").then(|| state.chat.begin_session_delete("owner").unwrap());
+        let lookup = session_storage(State(state.clone()), Path("side".into())).await;
+        let reveal = reveal_session_storage(
+            State(state.clone()),
+            Path("side".into()),
+            Json(RevealSessionStorageReq {
+                location: SessionStorageLocation::Artifacts,
+            }),
+        )
+        .await;
+        let worktree = reveal_project_file(
+            State(state.clone()),
+            Path("project".into()),
+            Json(OpenProjectFileReq {
+                path: ".".into(),
+                session_id: Some("side".into()),
+            }),
+        )
+        .await;
+        for result in [lookup, reveal, worktree] {
+            let error = result.unwrap_err();
+            assert_eq!(error.0, StatusCode::BAD_REQUEST);
+            assert!(error.1.contains("owner deletion"));
+        }
+        drop(deleting);
+        if mode == "owner-deleting" {
+            return;
+        }
+
+        let storage = state.chat.begin_worktree_sync("side").unwrap();
+        assert!(state.chat.delete_session("owner").await.is_err());
+        assert!(store.get_chat_session("owner").unwrap().is_some());
+        assert!(store.get_chat_session("side").unwrap().is_some());
+        drop(storage);
+        state.chat.delete_session("owner").await.unwrap();
+        assert!(store.get_chat_session("owner").unwrap().is_none());
+        assert!(store.get_chat_session("side").unwrap().is_none());
+    }
 
     #[test]
     fn new_chat_uses_saved_preferences_and_normalizes_model_settings() {

@@ -43,6 +43,12 @@ export const getSessionWorktreeQuery = (sessionId: string) => queryOptions({
   staleTime: 30_000,
 });
 
+export const getSessionStorageQuery = (sessionId: string) => queryOptions({
+  queryKey: workspaceKey("getSessionStorage", sessionId),
+  queryFn: ({ signal }) => api.getSessionStorage(sessionId, signal),
+  staleTime: 30_000,
+});
+
 export const getArtifactsQuery = (projectId: string) => queryOptions({
   queryKey: workspaceKey("getArtifacts", projectId),
   queryFn: ({ signal }) => api.getArtifacts(projectId, signal),

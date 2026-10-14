@@ -648,11 +648,14 @@ export function ArtifactsTab({
 
   if (artifacts.entries.length === 0) {
     return (
-      <WorkspaceEmptyState
-        icon={Package}
-        title={m.artifacts_tab_no_artifacts_yet()}
-        description={m.artifacts_tab_this_is_the_project_s_durable_output_space()}
-      />
+      <div className="flex h-full min-h-0 flex-col">
+        <WorkspaceEmptyState
+          icon={Package}
+          title={m.artifacts_tab_no_artifacts_yet()}
+          description={m.artifacts_tab_this_is_the_project_s_durable_output_space()}
+        />
+        <code dir="ltr" className="shrink-0 wrap-anywhere px-6 pb-6 text-center text-xs text-muted">{project.artifactsDir}</code>
+      </div>
     );
   }
 

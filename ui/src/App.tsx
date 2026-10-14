@@ -2066,6 +2066,7 @@ export default function App({ runtime, projectId, pane }: { runtime: RuntimeInfo
                         sessionId: activeSessionId ?? undefined,
                       }),
                     )?.needsProtection}
+                    remote={runtime.kind === "ssh"}
                     onOpenFile={(path, sessionId, ref, intent) =>
                       openFileTab(
                         path,

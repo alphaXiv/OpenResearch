@@ -91,12 +91,16 @@ fn data_dir_move_lock_path() -> PathBuf {
     crate::config::config_dir().join("orx.data-dir-move.lock")
 }
 
-pub(crate) struct DataDirMoveLock {
+pub(crate) fn open_data_dir_move_lock() -> Result<fd_lock::RwLock<std::fs::File>> {
+    open_lifecycle_lock_at(&data_dir_move_lock_path())
+}
+
+pub(crate) struct LifecycleLock {
     release: Option<std::sync::mpsc::Sender<()>>,
     thread: Option<std::thread::JoinHandle<()>>,
 }
 
-impl Drop for DataDirMoveLock {
+impl Drop for LifecycleLock {
     fn drop(&mut self) {
         self.release.take();
         if let Some(thread) = self.thread.take() {
@@ -105,25 +109,53 @@ impl Drop for DataDirMoveLock {
     }
 }
 
-fn acquire_data_dir_move_lock(path: PathBuf) -> Result<DataDirMoveLock> {
+pub(crate) fn acquire_operation_lock(
+    kind: &str,
+    id: &str,
+    exclusive: bool,
+) -> Result<LifecycleLock> {
+    use sha2::{Digest, Sha256};
+    let key = format!("{:x}", Sha256::digest(id.as_bytes()));
+    let path = crate::config::config_dir().join(format!("locks/{kind}-{key}.lock"));
+    acquire_lifecycle_lock(path, exclusive, true)
+}
+
+fn acquire_lifecycle_lock(
+    path: PathBuf,
+    exclusive: bool,
+    protect_data_dir: bool,
+) -> Result<LifecycleLock> {
     let (ready_tx, ready_rx) = std::sync::mpsc::sync_channel(1);
     let (release_tx, release_rx) = std::sync::mpsc::channel();
     let thread = std::thread::spawn(move || {
         let result = (|| -> Result<()> {
+            let data_dir_lock = protect_data_dir.then(open_data_dir_move_lock).transpose()?;
+            let _data_dir_read = data_dir_lock
+                .as_ref()
+                .map(|lock| lock.try_read())
+                .transpose()?;
             let mut lock = open_lifecycle_lock_at(&path)?;
-            let _guard = lock.try_write()?;
-            ready_tx
-                .send(Ok(()))
-                .map_err(|_| anyhow!("data-directory move lock receiver closed"))?;
-            let _ = release_rx.recv();
-            Ok(())
+            let hold = || {
+                ready_tx
+                    .send(Ok(()))
+                    .map_err(|_| anyhow!("lifecycle lock receiver closed"))?;
+                let _ = release_rx.recv();
+                Ok(())
+            };
+            if exclusive {
+                let _guard = lock.try_write()?;
+                hold()
+            } else {
+                let _guard = lock.try_read()?;
+                hold()
+            }
         })();
         if let Err(error) = result {
             let _ = ready_tx.send(Err(error.to_string()));
         }
     });
     match ready_rx.recv() {
-        Ok(Ok(())) => Ok(DataDirMoveLock {
+        Ok(Ok(())) => Ok(LifecycleLock {
             release: Some(release_tx),
             thread: Some(thread),
         }),
@@ -133,7 +165,7 @@ fn acquire_data_dir_move_lock(path: PathBuf) -> Result<DataDirMoveLock> {
         }
         Err(_) => {
             let _ = thread.join();
-            Err(anyhow!("data-directory move lock thread exited"))
+            Err(anyhow!("lifecycle lock thread exited"))
         }
     }
 }
@@ -1478,8 +1510,8 @@ impl Store {
         Ok(claimed == 1)
     }
 
-    pub(crate) fn acquire_data_dir_move_lock(&self) -> Result<DataDirMoveLock> {
-        acquire_data_dir_move_lock(self.data_dir_move_lock_path.clone())
+    pub(crate) fn acquire_data_dir_move_lock(&self) -> Result<LifecycleLock> {
+        acquire_lifecycle_lock(self.data_dir_move_lock_path.clone(), true, false)
     }
 
     fn clear_stale_data_dir_move_lease(&self) -> Result<()> {
