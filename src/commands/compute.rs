@@ -285,7 +285,7 @@ pub enum Backend {
     Kaggle,
 }
 impl Backend {
-    fn name(self) -> &'static str {
+    pub(crate) fn name(self) -> &'static str {
         match self {
             Self::Local => "local",
             Self::Ssh => "ssh",
@@ -322,6 +322,8 @@ pub enum ComputeCommand {
     Configure(Box<ConfigureArgs>),
     /// Test execution readiness. Failure exits nonzero.
     Test(CheckArgs),
+    /// Diagnose compute without launching a job; includes actionable checks.
+    Doctor(CheckArgs),
     /// Authenticate interactively, then test readiness.
     Connect(ConnectArgs),
     /// Read or safely replace ~/.ssh/config.
@@ -639,7 +641,7 @@ impl ConfigureArgs {
 }
 
 async fn run_command(command: ComputeCommand, json_output: bool) -> Result<()> {
-    if let ComputeCommand::Test(ref args) = command {
+    if let ComputeCommand::Test(ref args) | ComputeCommand::Doctor(ref args) = command {
         validate_check(args)?;
     }
     if let ComputeCommand::Connect(ref args) = command {
@@ -658,12 +660,22 @@ async fn run_command(command: ComputeCommand, json_output: bool) -> Result<()> {
     }
     let is_check = matches!(
         command,
-        ComputeCommand::Test(_) | ComputeCommand::Connect(_)
+        ComputeCommand::Test(_) | ComputeCommand::Doctor(_) | ComputeCommand::Connect(_)
     );
     let value = match command {
         ComputeCommand::Catalog(a) => return catalog(a, json_output).await,
         ComputeCommand::Prices(a) => return prices(a, json_output).await,
         ComputeCommand::Status => settings::status().await?,
+        ComputeCommand::Doctor(args) => serde_json::to_value(
+            super::compute_doctor::diagnose(
+                args.backend.name(),
+                args.host,
+                args.container,
+                args.no_container,
+                args.address,
+            )
+            .await,
+        )?,
         ComputeCommand::Show { backend } => settings::show(backend.name()).await?,
         ComputeCommand::Default { command } => match command {
             DefaultCommand::Set { backend, flavor } => {

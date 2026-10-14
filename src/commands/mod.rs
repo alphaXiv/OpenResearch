@@ -18,6 +18,7 @@
 pub mod agent;
 pub mod app;
 pub mod compute;
+pub(crate) mod compute_doctor;
 pub mod create_experiment;
 pub mod delete;
 pub mod discover;
@@ -39,6 +40,7 @@ pub mod plan_gate;
 pub mod project;
 pub mod projects;
 pub mod remote_host;
+pub(crate) mod run_metrics;
 pub mod runs;
 pub mod serve;
 pub mod skill;

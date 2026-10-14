@@ -162,7 +162,7 @@ async function json<T>(res: Response): Promise<T> {
   return data;
 }
 
-const get = <T>(url: string, signal?: AbortSignal) => fetch(url, { signal }).then((r) => json<T>(r));
+export const get = <T>(url: string, signal?: AbortSignal) => fetch(url, { signal }).then((r) => json<T>(r));
 async function writeResponse(url: string, init: RequestInit): Promise<Response> {
   const scope = workspaceScope();
   const response = await fetch(url, init);
@@ -171,7 +171,7 @@ async function writeResponse(url: string, init: RequestInit): Promise<Response> 
   if (response.ok) invalidateWrite(url, scope);
   return response;
 }
-const post = <T>(url: string, body?: unknown, keepalive = false) =>
+export const post = <T>(url: string, body?: unknown, keepalive = false) =>
   writeResponse(url, {
     method: "POST",
     keepalive,

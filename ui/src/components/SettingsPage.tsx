@@ -146,6 +146,7 @@ import { onDataDirMove } from "../events";
 import { releaseNotesUrl, useRestartApp, useUpdateStatus } from "./UpdateBanner";
 import { useThemePreference, type ThemePreference } from "../theme";
 import { m } from "../paraglide/messages.js";
+import { ComputeDoctor } from "../features/research/ComputeDoctor";
 import { ltr } from "../i18n";
 import { setLocale, useLocale } from "../locale";
 import { isLocale, type Locale } from "../paraglide/runtime.js";
@@ -3270,6 +3271,7 @@ function ComputeTab({
         {m.settings_page_connect_compute_backends_and_choose_where_new_runs()}
       </p>
       <ComputeActivity projectId={project?.id} onViewHistory={onViewHistory} />
+      <ComputeDoctor />
       {loadError ? (
         <div className="error">{loadError}</div>
       ) : !settings ? (

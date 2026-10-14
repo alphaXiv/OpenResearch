@@ -8,6 +8,7 @@
 //! Data dir: `$ORX_DATA_DIR`, else `$XDG_DATA_HOME/openresearch`, else
 //! `~/.local/share/openresearch`.
 
+pub(crate) mod run_metrics;
 mod telemetry;
 pub(crate) use telemetry::{InvocationIdentity, TokenUsage};
 

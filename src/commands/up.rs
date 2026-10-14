@@ -50,6 +50,7 @@ use crate::{browser, UpArgs};
 
 pub(crate) mod compute_settings;
 mod harness_setup;
+mod research_tools;
 use compute_settings::*;
 
 pub async fn run(args: UpArgs) -> Result<()> {
@@ -544,6 +545,18 @@ fn router(state: AppState, remote_auth: Option<RemoteAuth>) -> Router {
         .route("/api/github/repo-access", get(github_repo_access))
         .route("/api/projects/{id}/experiments", get(list_experiments))
         .route("/api/projects/{id}/runs", get(list_project_runs))
+        .route(
+            "/api/projects/{id}/metrics",
+            get(research_tools::project_metrics),
+        )
+        .route(
+            "/api/runs/{id}/metrics",
+            post(research_tools::import_metrics),
+        )
+        .route(
+            "/api/settings/compute/doctor/{backend}",
+            post(research_tools::compute_doctor),
+        )
         .route("/api/papers/search", get(search_papers_api))
         .route("/api/papers/resolve", get(resolve_paper_api))
         .route("/api/compute/backends", get(compute_backends))

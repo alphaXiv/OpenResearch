@@ -414,6 +414,8 @@ pub struct ExpArgs {
 
 #[derive(Subcommand, Debug)]
 pub enum ExpCommand {
+    /// Import or inspect structured measurements for an explicit run.
+    Metrics(commands::run_metrics::MetricsArgs),
     /// Hide ancestors, the selected experiment, or descendants.
     /// A later no-parent create starts a new baseline if all roots are archived.
     #[command(group(clap::ArgGroup::new("archive_scope").required(true)))]

@@ -1,4 +1,5 @@
 import { WorkspaceEmptyState } from "./WorkspaceEmptyState";
+import { RunComparison } from "../features/research/RunComparison";
 import { m } from "../paraglide/messages.js";
 import { ltr } from "../i18n";
 import { FlaskConical, CircleStop, FolderTree, GitBranch, Terminal } from "lucide-react";
@@ -75,6 +76,7 @@ export function ExperimentsTable({
 
   return (
     <div className="experiments-table-wrap absolute inset-0 overflow-auto bg-background @container">
+      <RunComparison key={experiments[0]?.projectId} runs={runs} experiments={experiments} />
       {cancelError && (
         <div className="experiments-table-error py-2 px-3 text-accent-red text-sm border-b border-b-border" role="alert">
           {m.experiments_table_stop_failed()} {cancelError}

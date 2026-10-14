@@ -194,7 +194,7 @@ const S_GIT: AgentSkill = AgentSkill {
 };
 const S_AGENT_DELEGATION: AgentSkill = AgentSkill {
     name: "orx-agent-delegation",
-    description: "Create independent project chats with `orx agent spawn`: standalone opening messages, project selection, worktrees, compute authorization, and cross-harness review chats on other vendors' agents. Use before creating another chat or when cross-harness review is on.",
+    description: "Create independent project chats with `orx agent spawn`: standalone opening messages, project selection, worktrees, compute authorization, and cross-harness review chats on other vendors' agents. Use before creating another chat or when cross-harness review is on; keep ordinary literature retrieval local; deep-research has its own contract.",
     content: AGENT_DELEGATION,
     resources: &[],
 };
@@ -277,6 +277,7 @@ pub fn skills(set: SkillSet) -> Vec<&'static AgentSkill> {
             &S_PAPER,
             &S_CUSTOMIZE,
             &S_LIT,
+            &super::deep_research::SKILL,
             &S_FEEDBACK,
         ],
         SkillSet::Full => vec![
@@ -293,6 +294,7 @@ pub fn skills(set: SkillSet) -> Vec<&'static AgentSkill> {
             &S_PAPER,
             &S_CUSTOMIZE,
             &S_LIT,
+            &super::deep_research::SKILL,
             &S_FEEDBACK,
         ],
     }

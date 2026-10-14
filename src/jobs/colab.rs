@@ -302,12 +302,16 @@ async fn cli_version(path: &Path) -> Option<String> {
         std::time::Duration::from_secs(15),
         tokio::process::Command::new(path)
             .arg("version")
+            .kill_on_drop(true)
             .stdin(std::process::Stdio::null())
             .output(),
     )
     .await
     .ok()?
     .ok()?;
+    if !output.status.success() {
+        return None;
+    }
     let text = String::from_utf8_lossy(&output.stdout);
     text.lines()
         .map(str::trim)

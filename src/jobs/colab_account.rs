@@ -63,6 +63,33 @@ pub(super) async fn invalidate() {
     *cache().lock().await = None;
 }
 
+/// Explicit diagnostics after reconnecting must not reuse the previous login.
+pub(crate) async fn refresh_sign_in() {
+    let mut account = cache().lock().await;
+    *access_token_cache().lock().await = None;
+    *account = None;
+}
+
+/// A strict read-only authentication probe, without local run/session lookups.
+pub(crate) async fn probe_connection() -> Result<usize, String> {
+    refresh_sign_in().await;
+    let token = access_token().await?;
+    let client = crate::net::remote_client()
+        .timeout(REQUEST_TIMEOUT)
+        .build()
+        .map_err(|e| e.to_string())?;
+    let body = get_json(
+        &client,
+        &token,
+        &format!("{COLAB_DOMAIN}/tun/m/assignments?authuser=0"),
+    )
+    .await?;
+    body["assignments"]
+        .as_array()
+        .map(Vec::len)
+        .ok_or_else(|| "Colab returned an unexpected assignments response.".into())
+}
+
 fn cache() -> &'static Mutex<Option<(Instant, Account)>> {
     static CACHE: OnceLock<Mutex<Option<(Instant, Account)>>> = OnceLock::new();
     CACHE.get_or_init(|| Mutex::new(None))

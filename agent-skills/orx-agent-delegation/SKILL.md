@@ -1,6 +1,6 @@
 ---
 name: orx-agent-delegation
-description: "Create independent project chats with `orx agent spawn`: standalone opening messages, project selection, worktrees, compute authorization, and cross-harness review chats on other vendors' agents. Use before creating another chat or when cross-harness review is on."
+description: "Create independent project chats with `orx agent spawn`: standalone opening messages, project selection, worktrees, compute authorization, and cross-harness review chats on other vendors' agents. Use before creating another chat or when cross-harness review is on; keep ordinary literature retrieval local; deep-research has its own contract."
 ---
 
 # Create an independent chat
@@ -35,6 +35,10 @@ compute, expected output, and definition of done in the opening message. Use
 are authorized. Changes stay in the new chat's worktree and never merge here
 automatically. Do not assign a branch already checked out by another session
 or edit a frozen experiment node.
+
+For ordinary `orx-lit-review`, keep the retrieval loop with the main agent.
+For the `orx-deep-research` report workflow, independent subtopics may be
+delegated under its bounded research and synthesis contract.
 
 ## Cross-harness review
 
@@ -73,4 +77,5 @@ Rules:
 - Keep the attribution the spawn command printed (harness and model) in
   experiment notes, reports, and the paper's methods or acknowledgements, for
   example "Result independently re-derived by a Codex (OpenAI) agent."
-- Do not split the experiment loop itself across harnesses.
+- Do not split the experiment loop itself across harnesses, and keep ordinary literature
+  retrieval local except for the `orx-deep-research` workflow.
