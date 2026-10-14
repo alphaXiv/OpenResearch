@@ -852,6 +852,135 @@ pub async fn accounts(force: bool) -> Vec<AccountStatus> {
     statuses
 }
 
+/// A kernel that is queued or running on one of the saved accounts, whether
+/// orx started it or not.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LiveKernel {
+    pub account: String,
+    /// `owner/slug`.
+    pub kernel: String,
+    pub title: String,
+    /// `queued` or `running`.
+    pub status: String,
+    pub last_run_time: Option<String>,
+    pub url: String,
+}
+
+/// Kernels a session can still be live on are among the most recently run.
+const LIVE_SCAN_DEPTH: &str = "5";
+const LIVE_TTL: Duration = Duration::from_secs(30);
+
+type LiveCache = Mutex<Option<(Instant, Vec<LiveKernel>)>>;
+
+fn live_cache() -> &'static LiveCache {
+    static CACHE: OnceLock<LiveCache> = OnceLock::new();
+    CACHE.get_or_init(|| Mutex::new(None))
+}
+
+/// `[{"ref": "user/slug", "title": ..., "lastRunTime": ...}]`, possibly after
+/// a "Next Page Token" line.
+fn parse_kernel_list(text: &str) -> Vec<(String, String, Option<String>)> {
+    let Some(start) = text.find('[') else {
+        return Vec::new();
+    };
+    let rows: Vec<Value> = serde_json::from_str(text[start..].trim()).unwrap_or_default();
+    rows.iter()
+        .filter_map(|row| {
+            let kernel = row["ref"].as_str()?.trim_start_matches('/').to_string();
+            kernel.contains('/').then(|| {
+                let title = row["title"].as_str().unwrap_or(&kernel).to_string();
+                let last = row["lastRunTime"].as_str().map(str::to_string);
+                (kernel, title, last)
+            })
+        })
+        .collect()
+}
+
+/// `user/slug has status "KernelWorkerStatus.RUNNING"` -> `running`.
+fn parse_kernel_state(text: &str) -> Option<String> {
+    let rest = &text[text.find("has status \"")? + "has status \"".len()..];
+    let status = &rest[..rest.find('"')?];
+    Some(status.rsplit('.').next()?.to_ascii_lowercase())
+}
+
+/// Queued and running kernels across every saved account.
+pub async fn live_kernels(force: bool) -> Vec<LiveKernel> {
+    let Some(cli) = find_cli() else {
+        return Vec::new();
+    };
+    let mut cached = live_cache().lock().await;
+    if !force {
+        if let Some((at, kernels)) = cached.as_ref() {
+            if at.elapsed() < LIVE_TTL {
+                return kernels.clone();
+            }
+        }
+    }
+    let file = load_accounts();
+    let scans = file.accounts.iter().map(|account| {
+        let cli = cli.clone();
+        let username = account.username.clone();
+        async move {
+            let home = account_home(&username);
+            let listed = run_cli(
+                &cli,
+                &home,
+                &[
+                    "kernels",
+                    "list",
+                    "--mine",
+                    "--sort-by",
+                    "dateRun",
+                    "--page-size",
+                    LIVE_SCAN_DEPTH,
+                    "--format",
+                    "json",
+                ],
+            )
+            .await
+            .map(|text| parse_kernel_list(&text))
+            .unwrap_or_default();
+            let checks = listed.into_iter().map(|(kernel, title, last_run_time)| {
+                let cli = cli.clone();
+                let home = home.clone();
+                let account = username.clone();
+                async move {
+                    let text = run_cli(&cli, &home, &["kernels", "status", &kernel])
+                        .await
+                        .ok()?;
+                    let status = parse_kernel_state(&text)?;
+                    let status = match status.as_str() {
+                        "running" => "running",
+                        "queued" | "new_script" => "queued",
+                        _ => return None,
+                    };
+                    Some(LiveKernel {
+                        account,
+                        url: format!("https://www.kaggle.com/code/{kernel}"),
+                        kernel,
+                        title,
+                        status: status.to_string(),
+                        last_run_time,
+                    })
+                }
+            });
+            futures::future::join_all(checks)
+                .await
+                .into_iter()
+                .flatten()
+                .collect::<Vec<_>>()
+        }
+    });
+    let kernels: Vec<LiveKernel> = futures::future::join_all(scans)
+        .await
+        .into_iter()
+        .flatten()
+        .collect();
+    *cached = Some((Instant::now(), kernels.clone()));
+    kernels
+}
+
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Status {
@@ -995,7 +1124,11 @@ pub fn write_run_files(dir: &Path, spec: &RunSpec<'_>) -> Result<()> {
     )?;
     std::fs::write(
         kernel_dir.join(DRIVER_FILE),
-        driver_source(spec.run_command, spec.timeout_secs),
+        driver_source(
+            spec.run_command,
+            spec.timeout_secs,
+            spec.flavor.accelerator.kind,
+        ),
     )?;
     std::fs::write(dir.join(CONTROLLER_FILE), controller_script(spec))?;
     Ok(())
@@ -1113,11 +1246,13 @@ while :; do
 done
 
 code=""
+offline=0
 if [ "$state" = running ]; then
   "$kaggle" kernels logs "$kernel" --follow </dev/null 2>/dev/null | while IFS= read -r line || [ -n "$line" ]; do
     case "$line" in
       *{sentinel}*) code="${{line##*{sentinel}}}"; code="${{code%%[!0-9]*}}" ;;
-      *) printf '%s\n' "$line" ;;
+      *) case "$line" in *"{offline_marker}"*) offline=1 ;; esac
+         printf '%s\n' "$line" ;;
     esac
   done
 fi
@@ -1149,10 +1284,19 @@ if [ -z "$code" ]; then
   if [ -n "$code" ]; then
     echo "[orx] The full kernel log is in {output_dir}/{slug}.log"
   fi
+  if cat {output_dir}/*.log 2>/dev/null | grep -q "{offline_marker}"; then
+    offline=1
+  fi
 fi
 if [ -z "$code" ]; then
   echo "[orx] The Kaggle kernel ended ($state) without reporting the run's exit status. See $url"
   exit 1
+fi
+# The run's status line in orx shows this instead of a bare exit code.
+if [ "$code" = {no_gpu} ]; then
+  echo "Kaggle gave the kernel no GPU. {verify}" > {reason_file}
+elif [ "$code" != 0 ] && [ "$offline" = 1 ]; then
+  echo "Exited with code $code; the kernel had no internet access. {verify}" > {reason_file}
 fi
 exit "$code"
 "#,
@@ -1169,6 +1313,10 @@ exit "$code"
         output_dir = OUTPUT_DIR,
         sentinel = EXIT_SENTINEL,
         skipped = skipped_note(&spec.skipped_env),
+        offline_marker = OFFLINE_MARKER,
+        no_gpu = NO_GPU_EXIT_CODE,
+        verify = VERIFY_HINT,
+        reason_file = crate::jobs::localbox::FAILURE_REASON_FILE,
     )
 }
 
@@ -1187,10 +1335,21 @@ fn skipped_note(keys: &[String]) -> String {
     )
 }
 
+/// Exit status the driver reports when Kaggle started the kernel without the
+/// GPU it asked for.
+pub const NO_GPU_EXIT_CODE: i32 = 98;
+
+/// What the driver prints when the kernel cannot reach the internet.
+const OFFLINE_MARKER: &str = "This kernel has no internet access";
+
+/// Kaggle silently drops GPU and internet for accounts without a verified
+/// phone number; the kernel still runs, on CPU and offline.
+const VERIFY_HINT: &str = "Kaggle grants GPUs and internet access only to phone-verified accounts: verify this account at https://www.kaggle.com/settings and run again.";
+
 /// The kernel's script: finds the mounted snapshot, runs the fixed command,
 /// and prints the exit sentinel. The kernel itself always succeeds so its
 /// output is kept; the run's status rides on the sentinel.
-pub fn driver_source(run_command: &str, timeout_secs: u64) -> String {
+pub fn driver_source(run_command: &str, timeout_secs: u64, accelerator_kind: &str) -> String {
     use base64::Engine as _;
     let script = crate::compute::staged_script(run_command);
     let script_b64 = base64::engine::general_purpose::STANDARD.encode(script);
@@ -1199,6 +1358,17 @@ pub fn driver_source(run_command: &str, timeout_secs: u64) -> String {
         .replace("__ORX_SENTINEL__", EXIT_SENTINEL)
         .replace("__ORX_ARCHIVE__", ARCHIVE_FILE)
         .replace("__ORX_TIMEOUT_SECS__", &timeout_secs.to_string())
+        .replace(
+            "__ORX_WANT_GPU__",
+            if accelerator_kind == "gpu" {
+                "True"
+            } else {
+                "False"
+            },
+        )
+        .replace("__ORX_NO_GPU_EXIT__", &NO_GPU_EXIT_CODE.to_string())
+        .replace("__ORX_VERIFY_HINT__", VERIFY_HINT)
+        .replace("__ORX_OFFLINE_MARKER__", OFFLINE_MARKER)
 }
 
 const DRIVER_TEMPLATE: &str = r#"# Generated by orx: runs one experiment snapshot on Kaggle.
@@ -1208,6 +1378,9 @@ import subprocess as _orx_sp
 import sys as _orx_sys
 
 ORX_TIMEOUT_SECS = __ORX_TIMEOUT_SECS__
+ORX_WANT_GPU = __ORX_WANT_GPU__
+ORX_NO_GPU_EXIT = __ORX_NO_GPU_EXIT__
+ORX_VERIFY_HINT = "__ORX_VERIFY_HINT__"
 
 
 def _orx_find_archive():
@@ -1217,20 +1390,42 @@ def _orx_find_archive():
     return None
 
 
+def _orx_gpus():
+    try:
+        return _orx_sp.run(
+            ["nvidia-smi", "--query-gpu=name,memory.total", "--format=csv,noheader"],
+            capture_output=True, text=True, timeout=30,
+        ).stdout.strip().splitlines()
+    except Exception:
+        return []
+
+
+def _orx_online():
+    import socket
+    for host in ("pypi.org", "files.pythonhosted.org", "github.com"):
+        try:
+            socket.create_connection((host, 443), timeout=10).close()
+            return True
+        except Exception:
+            continue
+    return False
+
+
 def _orx_main():
     archive = _orx_find_archive()
     if archive is None:
         print("[orx] The source snapshot dataset is not mounted in this kernel.", flush=True)
         return 97
-    try:
-        gpus = _orx_sp.run(
-            ["nvidia-smi", "--query-gpu=name,memory.total", "--format=csv,noheader"],
-            capture_output=True, text=True, timeout=30,
-        ).stdout.strip()
-        for gpu in gpus.splitlines():
-            print("[orx] GPU: " + gpu, flush=True)
-    except Exception:
-        pass
+    online = _orx_online()
+    gpus = _orx_gpus()
+    for gpu in gpus:
+        print("[orx] GPU: " + gpu, flush=True)
+    if ORX_WANT_GPU and not gpus:
+        print("[orx] Kaggle started this kernel without a GPU%s. %s" % (
+            "" if online else " and without internet access", ORX_VERIFY_HINT), flush=True)
+        return ORX_NO_GPU_EXIT
+    if not online:
+        print("[orx] __ORX_OFFLINE_MARKER__, so package downloads will fail. " + ORX_VERIFY_HINT, flush=True)
     workdir = "/tmp/orx-run"
     _orx_os.makedirs(_orx_os.path.join(workdir, "repo"), exist_ok=True)
     _orx_sp.run(["tar", "-xf", archive, "-C", _orx_os.path.join(workdir, "repo")], check=True)
@@ -1265,6 +1460,40 @@ print("\n__ORX_SENTINEL__%d" % _orx_code, flush=True)
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn live_kernel_listing_and_status_parse() {
+        let listed = parse_kernel_list(
+            "Next Page Token = abc\n[{\"ref\": \"alice/orx-run-1\", \"title\": \"orx-run-1\", \"author\": \"alice\", \"lastRunTime\": \"2026-10-14T09:00:00\"}, {\"ref\": \"\", \"title\": \"x\"}]",
+        );
+        assert_eq!(listed.len(), 1);
+        assert_eq!(listed[0].0, "alice/orx-run-1");
+        assert_eq!(listed[0].2.as_deref(), Some("2026-10-14T09:00:00"));
+        assert_eq!(
+            parse_kernel_state("alice/orx-run-1 has status \"KernelWorkerStatus.RUNNING\"")
+                .as_deref(),
+            Some("running")
+        );
+        assert_eq!(parse_kernel_state("Not found"), None);
+        assert!(parse_kernel_list("Not found").is_empty());
+    }
+
+    #[test]
+    fn driver_stops_when_kaggle_withholds_the_gpu() {
+        let gpu = driver_source("python train.py", 60, "gpu");
+        assert!(gpu.contains("ORX_WANT_GPU = True"), "{gpu}");
+        assert!(gpu.contains("ORX_NO_GPU_EXIT = 98"), "{gpu}");
+        assert!(gpu.contains("phone-verified"), "{gpu}");
+        for placeholder in [
+            "__ORX_WANT_GPU__",
+            "__ORX_VERIFY_HINT__",
+            "__ORX_OFFLINE_MARKER__",
+        ] {
+            assert!(!gpu.contains(placeholder), "{gpu}");
+        }
+        let cpu = driver_source("python train.py", 60, "cpu");
+        assert!(cpu.contains("ORX_WANT_GPU = False"), "{cpu}");
+    }
 
     #[test]
     fn flavors_parse_with_default_and_accounts() {
@@ -1407,7 +1636,7 @@ mod tests {
     #[test]
     fn driver_embeds_the_staged_command_and_reports_its_exit() {
         use base64::Engine as _;
-        let driver = driver_source("python train.py --lr 3e-4", 7200);
+        let driver = driver_source("python train.py --lr 3e-4", 7200, "gpu");
         let encoded = base64::engine::general_purpose::STANDARD
             .encode(crate::compute::staged_script("python train.py --lr 3e-4"));
         assert!(driver.contains(&encoded));

@@ -22,6 +22,7 @@ import {
   getColabSettingsQuery,
   getGcpSettingsQuery,
   getKaggleSettingsQuery,
+  getKaggleLiveKernelsQuery,
   getCrossHarnessSettingsQuery,
   getComputeRoutingSettingsQuery,
   getComputePricesQuery,
@@ -119,6 +120,7 @@ import {
   stopColabRuntime,
   type KaggleAccount,
   type KaggleSettings,
+  type KaggleLiveKernel,
   getKaggleSettings,
   addKaggleAccount,
   importKaggleAccount,
@@ -4813,9 +4815,18 @@ function runtimeLabel(inst: Run): string {
   return "—";
 }
 
-/** One section's table: backend (logo + flavor), status, started, runtime. */
-function InstancesTable({ instances, emptyLabel }: { instances: Run[]; emptyLabel: string }) {
-  if (instances.length === 0) {
+/** Kaggle reports naive UTC timestamps. */
+function kaggleTime(value: string | null): number | null {
+  if (!value) return null;
+  const ms = Date.parse(/[zZ]|[+-]\d\d:?\d\d$/.test(value) ? value : `${value}Z`);
+  return Number.isNaN(ms) ? null : ms;
+}
+
+/** One section's table: backend (logo + flavor), status, started, runtime.
+ *  `kernels` adds Kaggle kernels that are live on the user's accounts but are
+ *  not one of `instances` (started elsewhere, or no longer followed by orx). */
+function InstancesTable({ instances, kernels = [], emptyLabel }: { instances: Run[]; kernels?: KaggleLiveKernel[]; emptyLabel: string }) {
+  if (instances.length === 0 && kernels.length === 0) {
     return <p className="instances-empty m-0 rounded-lg border border-border bg-background py-3.5 px-4 text-base text-subtext">{emptyLabel}</p>;
   }
   return (
@@ -4860,6 +4871,38 @@ function InstancesTable({ instances, emptyLabel }: { instances: Run[]; emptyLabe
               </tr>
             );
           })}
+          {kernels.map((kernel) => {
+            const started = kaggleTime(kernel.lastRunTime);
+            return (
+              <tr key={kernel.kernel} className="kaggle-kernel-row">
+                <td>
+                  <span className="backend-cell inline-flex items-center gap-0.5">
+                    <span className="backend-badge inline-flex items-center gap-[7px] [&_svg]:flex-none [&_svg]:block [&_.backend-name]:font-medium [&_.backend-detail]:text-muted">
+                      <BackendLogo kind="kaggle" />
+                      <span className="backend-name">Kaggle</span>
+                      <span className="backend-detail text-sm" title={kernel.kernel}>
+                        {m.settings_kaggle_live_kernel_detail({ account: kernel.account, title: kernel.title })}
+                      </span>
+                    </span>
+                    <IconButtonLink size="small"
+                      href={kernel.url}
+                      target="_blank"
+                      rel="noreferrer"
+                      title={m.settings_page_open_job_page()}
+                      aria-label={m.settings_page_open_job_page()}
+                    >
+                      <ExternalLink size={12} />
+                    </IconButtonLink>
+                  </span>
+                </td>
+                <td>
+                  <StatusBadge status={kernel.status === "running" ? "running" : "starting"} />
+                </td>
+                <td>{started ? timeAgo(started) : "—"}</td>
+                <td>{started ? fmtDuration(Date.now() - started) : "—"}</td>
+              </tr>
+            );
+          })}
         </tbody>
       </table>
     </div>
@@ -4870,7 +4913,8 @@ function ComputeActivity({ projectId, onViewHistory }: { projectId?: string; onV
   const query = useQuery({ ...listRunsQuery(projectId ?? ""), enabled: Boolean(projectId), subscribed: Boolean(projectId) });
   const instances = projectId ? query.data ?? (query.error ? [] : null) : [];
   const error = query.error?.message;
-  const refreshing = query.isFetching;
+  const kaggleQuery = useQuery(getKaggleLiveKernelsQuery());
+  const refreshing = query.isFetching || kaggleQuery.isFetching;
 
   // Re-render every 30s so live rows' Runtime keeps counting (client-side
   // only — the minute-level display doesn't warrant a refetch).
@@ -4880,11 +4924,17 @@ function ComputeActivity({ projectId, onViewHistory }: { projectId?: string; onV
     return () => clearInterval(t);
   }, []);
 
-  const load = () => { if (projectId) void query.refetch(); };
+  const load = () => {
+    if (projectId) void query.refetch();
+    void kaggleQuery.refetch();
+  };
 
   const byRecent = (a: Run, b: Run) => b.createdAt - a.createdAt;
   const running = instances?.filter((i) => isLive(i.status)).sort(byRecent);
   const past = instances?.filter((i) => !isLive(i.status)).sort(byRecent);
+  const followed = new Set(running?.map((i) => i.backend?.url).filter((url): url is string => typeof url === "string"));
+  const kernels = (kaggleQuery.data ?? []).filter((kernel) => !followed.has(kernel.url));
+  const liveCount = (running?.length ?? 0) + kernels.length;
 
   return (
     <section className="compute-activity [&_.count-badge]:inline-flex [&_.count-badge]:items-center [&_.count-badge]:justify-center [&_.count-badge]:min-w-4.5 [&_.count-badge]:h-4.5 [&_.count-badge]:py-0 [&_.count-badge]:px-[5px] [&_.count-badge]:rounded-md [&_.count-badge]:bg-surface [&_.count-badge]:border [&_.count-badge]:border-border [&_.count-badge]:text-xs [&_.count-badge]:font-medium [&_.count-badge]:text-text mt-5.5 mx-0 mb-8">
@@ -4892,7 +4942,7 @@ function ComputeActivity({ projectId, onViewHistory }: { projectId?: string; onV
         <div>
           <h2>
             {m.settings_page_running_instances()}
-            {running && running.length > 0 && <span className="count-badge">{running.length}</span>}
+            {liveCount > 0 && <span className="count-badge">{liveCount}</span>}
           </h2>
         </div>
         <div className="compute-activity-actions flex gap-2 flex-none [@media((max-width:_640px))]:justify-start">
@@ -4909,7 +4959,7 @@ function ComputeActivity({ projectId, onViewHistory }: { projectId?: string; onV
         <LoadingRow>
           <Spinner /> {m.settings_page_loading()}
         </LoadingRow>
-      ) : <InstancesTable instances={running} emptyLabel={projectId ? m.instances_nothing_running() : m.instances_select_project_runs()} />}
+      ) : <InstancesTable instances={running} kernels={kernels} emptyLabel={projectId ? m.instances_nothing_running() : m.instances_select_project_runs()} />}
     </section>
   );
 }

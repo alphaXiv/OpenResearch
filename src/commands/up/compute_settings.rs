@@ -1412,6 +1412,13 @@ async fn kaggle_settings_with(fresh: bool) -> ApiResult {
     Ok(Json(value))
 }
 
+/// Kernels queued or running on any saved Kaggle account, including ones orx
+/// no longer follows and ones started outside orx.
+pub(super) async fn kaggle_live_kernels(Query(query): Query<KaggleSettingsQuery>) -> ApiResult {
+    let kernels = crate::jobs::kaggle::live_kernels(query.fresh.unwrap_or(false)).await;
+    Ok(Json(json!({ "kernels": kernels })))
+}
+
 /// Validate pasted credentials with the Kaggle CLI and save them as an account.
 pub(super) async fn add_kaggle_account(
     Json(req): Json<crate::jobs::kaggle::NewAccount>,

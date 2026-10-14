@@ -1452,5 +1452,6 @@
   "research_select_run": "実行を選択",
   "research_replace": "既存の指標を置換",
   "research_importing": "インポート中…",
-  "research_file_too_large": "指標が 64 KiB の上限を超えています。"
+  "research_file_too_large": "指標が 64 KiB の上限を超えています。",
+  "settings_kaggle_live_kernel_detail": "{account} · {title}"
 }

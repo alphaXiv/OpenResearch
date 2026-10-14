@@ -1452,5 +1452,6 @@
   "research_select_run": "실행 선택",
   "research_replace": "기존 지표 교체",
   "research_importing": "가져오는 중…",
-  "research_file_too_large": "지표가 64 KiB 제한을 초과합니다."
+  "research_file_too_large": "지표가 64 KiB 제한을 초과합니다.",
+  "settings_kaggle_live_kernel_detail": "{account} · {title}"
 }

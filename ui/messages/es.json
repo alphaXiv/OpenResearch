@@ -1452,5 +1452,6 @@
   "research_select_run": "Elegir ejecución",
   "research_replace": "Reemplazar métricas existentes",
   "research_importing": "Importando…",
-  "research_file_too_large": "Las métricas superan el límite de 64 KiB."
+  "research_file_too_large": "Las métricas superan el límite de 64 KiB.",
+  "settings_kaggle_live_kernel_detail": "{account} · {title}"
 }

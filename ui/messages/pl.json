@@ -1452,5 +1452,6 @@
   "research_select_run": "Wybierz przebieg",
   "research_replace": "Zastąp istniejące metryki",
   "research_importing": "Importowanie…",
-  "research_file_too_large": "Metryki przekraczają limit 64 KiB."
+  "research_file_too_large": "Metryki przekraczają limit 64 KiB.",
+  "settings_kaggle_live_kernel_detail": "{account} · {title}"
 }

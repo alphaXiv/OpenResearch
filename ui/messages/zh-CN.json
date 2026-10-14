@@ -1452,5 +1452,6 @@
   "research_select_run": "选择运行",
   "research_replace": "替换已有指标",
   "research_importing": "正在导入…",
-  "research_file_too_large": "指标超过 64 KiB 限制。"
+  "research_file_too_large": "指标超过 64 KiB 限制。",
+  "settings_kaggle_live_kernel_detail": "{account} · {title}"
 }

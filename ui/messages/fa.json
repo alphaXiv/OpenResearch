@@ -1452,5 +1452,6 @@
   "research_select_run": "انتخاب اجرا",
   "research_replace": "جایگزینی سنجه‌های موجود",
   "research_importing": "در حال ورود…",
-  "research_file_too_large": "سنجه‌ها از سقف 64 KiB بیشتر هستند."
+  "research_file_too_large": "سنجه‌ها از سقف 64 KiB بیشتر هستند.",
+  "settings_kaggle_live_kernel_detail": "{account} · {title}"
 }

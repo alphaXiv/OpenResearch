@@ -63,6 +63,13 @@ export const getKaggleSettingsQuery = () => queryOptions({
   staleTime: 30_000,
 });
 
+export const getKaggleLiveKernelsQuery = () => queryOptions({
+  queryKey: workspaceKey("getKaggleLiveKernels"),
+  queryFn: ({ signal }) => api.getKaggleLiveKernels(signal),
+  staleTime: 30_000,
+  refetchInterval: 60_000,
+});
+
 export const getGcpSettingsQuery = () => queryOptions({
   queryKey: workspaceKey("getGcpSettings"),
   queryFn: ({ signal }) => api.getGcpSettings(signal),

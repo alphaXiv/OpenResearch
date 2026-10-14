@@ -142,10 +142,7 @@ pub fn instructions(name: &str, has_request: bool, github_enabled: bool) -> Opti
     let skill = CATALOG
         .iter()
         .find(|skill| skill.name.eq_ignore_ascii_case(name))?;
-    if matches!(
-        skill.name,
-        "lit-review" | "deep-research"
-    ) {
+    if matches!(skill.name, "lit-review" | "deep-research") {
         let after_open = skill
             .template
             .strip_prefix("---\n")

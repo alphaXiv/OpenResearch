@@ -1518,6 +1518,19 @@ export interface NewKaggleAccount {
   kaggleJson?: string;
 }
 
+export interface KaggleLiveKernel {
+  account: string;
+  kernel: string;
+  title: string;
+  status: "queued" | "running";
+  lastRunTime: string | null;
+  url: string;
+}
+
+export const getKaggleLiveKernels = (signal?: AbortSignal, fresh = false) =>
+  get<{ kernels: KaggleLiveKernel[] }>(fresh ? "/api/settings/kaggle/kernels?fresh=true" : "/api/settings/kaggle/kernels", signal)
+    .then((r) => r.kernels);
+
 export const getKaggleSettings = (signal?: AbortSignal, fresh = false) =>
   get<KaggleSettings>(fresh ? "/api/settings/kaggle?fresh=true" : "/api/settings/kaggle", signal);
 

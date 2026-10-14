@@ -1452,5 +1452,6 @@
   "research_select_run": "रन चुनें",
   "research_replace": "मौजूदा मेट्रिक्स बदलें",
   "research_importing": "आयात हो रहा है…",
-  "research_file_too_large": "मेट्रिक्स 64 KiB की सीमा से अधिक हैं।"
+  "research_file_too_large": "मेट्रिक्स 64 KiB की सीमा से अधिक हैं।",
+  "settings_kaggle_live_kernel_detail": "{account} · {title}"
 }

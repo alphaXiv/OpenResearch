@@ -1452,5 +1452,6 @@
   "research_select_run": "اختر تشغيلاً",
   "research_replace": "استبدال المقاييس الحالية",
   "research_importing": "جارٍ الاستيراد…",
-  "research_file_too_large": "تتجاوز المقاييس الحد البالغ 64 KiB."
+  "research_file_too_large": "تتجاوز المقاييس الحد البالغ 64 KiB.",
+  "settings_kaggle_live_kernel_detail": "{account} · {title}"
 }

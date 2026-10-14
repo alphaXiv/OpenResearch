@@ -220,6 +220,10 @@ fn pid_alive(pid: &str) -> bool {
     }
 }
 
+/// A one-line explanation a controller may leave next to exit_code; shown in
+/// place of the bare "exited with code N".
+pub const FAILURE_REASON_FILE: &str = "failure_reason";
+
 /// The terminal state recorded in exit_code, if any. An empty file is run.sh
 /// mid-write (`>` truncates before the code lands) — not terminal yet.
 fn exit_code_state(dir: &Path) -> Option<JobState> {
@@ -235,9 +239,18 @@ fn exit_code_state(dir: &Path) -> Option<JobState> {
             message: None,
         }
     } else {
+        let reason = std::fs::read_to_string(dir.join(FAILURE_REASON_FILE))
+            .ok()
+            .and_then(|text| {
+                text.lines()
+                    .map(str::trim)
+                    .find(|l| !l.is_empty())
+                    .map(str::to_string)
+            })
+            .map(|line| line.chars().take(400).collect::<String>());
         JobState {
             stage: "ERROR".into(),
-            message: Some(format!("exited with code {code}")),
+            message: Some(reason.unwrap_or_else(|| format!("exited with code {code}"))),
         }
     })
 }

@@ -745,6 +745,7 @@ fn router(state: AppState, remote_auth: Option<RemoteAuth>) -> Router {
         .route("/api/settings/gcp/instances/stop", post(stop_gcp_instance))
         .route("/api/settings/kaggle", get(kaggle_settings))
         .route("/api/settings/kaggle/accounts", post(add_kaggle_account))
+        .route("/api/settings/kaggle/kernels", get(kaggle_live_kernels))
         .route(
             "/api/settings/kaggle/accounts/import",
             post(import_kaggle_account),
