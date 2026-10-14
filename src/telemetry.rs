@@ -1867,6 +1867,7 @@ mod tests {
         for (bare, wire) in [
             ("command", "cli_command"),
             ("app_started", "cli_app_started"),
+            ("dashboard_locale", "cli_dashboard_locale"),
             ("onboarding_completed", "cli_onboarding_completed"),
             (
                 "onboarding_research_profile_submitted",
@@ -2167,13 +2168,12 @@ mod tests {
                 ),
             ]
         });
-        let mut localized = build_payload("app_started", "cli-release-contract-test", json!({}));
-        localized["context"]["locale"] = json!("zh-CN");
-        for payload in payloads
-            .into_iter()
-            .chain(launch_payloads)
-            .chain([localized])
-        {
+        let localized = ["app_started", "dashboard_locale"].map(|event| {
+            let mut payload = build_payload(event, "cli-release-contract-test", json!({}));
+            payload["context"]["locale"] = json!("zh-CN");
+            payload
+        });
+        for payload in payloads.into_iter().chain(launch_payloads).chain(localized) {
             assert_eq!(post_payload(&payload).await, DeliveryOutcome::Acknowledged);
         }
     }

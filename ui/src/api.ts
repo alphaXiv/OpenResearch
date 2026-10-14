@@ -1517,10 +1517,13 @@ export const captureUiEvent = (event: UiEvent): void => {
   void post<{ ok: boolean }>("/api/telemetry/event", event).catch(() => {});
 };
 
-/** Tells orx which language the dashboard displays, for usage analytics. Fire-and-forget. */
-export const reportLocale = (locale: string): void => {
-  void post<{ locale: string }>("/api/telemetry/locale", { locale }).catch(() => {});
-};
+export const reportLocale = (locale: string, signal?: AbortSignal) =>
+  writeResponse("/api/telemetry/locale", {
+    method: "POST",
+    signal,
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ locale }),
+  }).then((r) => json<{ locale: string }>(r));
 
 export type HarnessId = "claude-code" | "codex" | "opencode" | "cursor" | "antigravity";
 
@@ -2173,23 +2176,6 @@ export const respondChat = (sessionId: string, answer: PromptAnswer) =>
   post<{ ok: boolean }>(`/api/chat/sessions/${sessionId}/respond`, answer);
 
 // --- helpers shared across views --------------------------------------------
-
-export function statusColor(status: string): string {
-  switch (status) {
-    case "done":
-      return "var(--green)";
-    case "running":
-      return "var(--teal)";
-    case "starting":
-      return "var(--amber)";
-    case "failed":
-      return "var(--red)";
-    case "cancelled":
-      return "var(--muted)";
-    default:
-      return "var(--muted)";
-  }
-}
 
 export function timeAgo(ms: number): string {
   const s = Math.max(0, Math.floor((Date.now() - ms) / 1000));
