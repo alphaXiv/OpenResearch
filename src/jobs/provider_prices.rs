@@ -23,20 +23,6 @@ const MODAL_TIMEOUT: Duration = Duration::from_secs(30);
 /// Colab sells compute units at $9.99 per 100 (pay as you go).
 const COLAB_USD_PER_UNIT: f64 = 0.0999;
 
-/// Modal's published per-hour GPU prices (modal.com/pricing), used when the
-/// workspace's own rates cannot be read. `(flavor, vram_gb, usd_per_hour)`.
-const MODAL_LIST_PRICES: &[(&str, f64, f64)] = &[
-    ("T4", 16.0, 0.59),
-    ("L4", 24.0, 0.80),
-    ("A10G", 24.0, 1.10),
-    ("L40S", 48.0, 1.95),
-    ("A100-40GB", 40.0, 2.10),
-    ("A100-80GB", 80.0, 2.50),
-    ("H100", 80.0, 3.95),
-    ("H200", 141.0, 4.54),
-    ("B200", 180.0, 6.25),
-];
-
 #[derive(Debug, Clone, serde::Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Overview {
@@ -108,6 +94,11 @@ pub struct Offer {
 fn cache() -> &'static Mutex<Option<(Instant, Overview)>> {
     static CACHE: OnceLock<Mutex<Option<(Instant, Overview)>>> = OnceLock::new();
     CACHE.get_or_init(|| Mutex::new(None))
+}
+
+/// Forget the cached overview, after a setting that changes a balance.
+pub async fn invalidate() {
+    *cache().lock().await = None;
 }
 
 /// Every backend's prices and balance. `fresh` skips the caches.
@@ -401,24 +392,66 @@ fn parse_hf_hardware(body: &Value) -> Vec<Offer> {
 // --- Modal ----------------------------------------------------------------
 
 async fn modal() -> Provider {
-    let configured = crate::jobs::modal::token_source().is_some();
+    use crate::jobs::modal;
+    let configured = modal::token_source().is_some();
+    let settings = modal::load_settings().ok().flatten().unwrap_or_default();
     let mut provider = empty("modal", "usage", configured);
-    provider.note =
-        Some("Billed per second; plan credits cover usage first, then the payment method.".into());
     let mut offers = modal_list_offers();
+    let mut billing = Err("Connect Modal to read its spend.".to_string());
     if configured {
-        match tokio::time::timeout(MODAL_TIMEOUT, crate::jobs::modal::billing()).await {
-            Ok(Ok(billing)) => {
+        let since = settings
+            .credit_usd
+            .map(|_| settings.credit_as_of.unwrap_or(0));
+        billing = match tokio::time::timeout(MODAL_TIMEOUT, modal::billing(since)).await {
+            Ok(Ok(billing)) => Ok(billing),
+            Ok(Err(error)) => Err(error.to_string()),
+            Err(_) => Err("Modal did not answer in time.".into()),
+        };
+        match &billing {
+            Ok(billing) => {
                 apply_modal_rates(&mut offers, &billing["rates"]);
-                provider.spend = modal_spend(&billing);
+                provider.spend = modal_spend(billing);
                 provider.error = billing["error"]
                     .as_str()
                     .or(billing["ratesError"].as_str())
                     .map(str::to_string);
             }
-            Ok(Err(error)) => provider.error = Some(error.to_string()),
-            Err(_) => provider.error = Some("Modal did not answer in time.".into()),
+            Err(error) => provider.error = Some(error.clone()),
         }
+    }
+    let balance = modal::balance(&settings, billing.as_ref().map_err(String::clone));
+    provider.note = Some(match &balance {
+        Some(balance) => format!(
+            "Billed per second. Available = credit entered from the Modal dashboard minus {} \
+             spend since then.",
+            if balance.source == "report" {
+                "Modal's reported"
+            } else {
+                "estimated orx-run"
+            }
+        ),
+        None => "Billed per second; plan credits cover usage first, then the payment method. \
+                 Modal does not report the credit left; enter it in the Modal settings \
+                 (`orx compute configure modal --credit-usd <amount>`) to see what is left."
+            .into(),
+    });
+    if provider.error.is_none() {
+        provider.error = balance.as_ref().and_then(|balance| balance.error.clone());
+    }
+    if let Some(balance) = &balance {
+        let left = balance.available_usd.max(0.0);
+        for offer in &mut offers {
+            offer.runway_hours = offer
+                .usd_per_hour
+                .filter(|price| *price > 0.0)
+                .map(|price| left / price);
+        }
+        provider.balance = Some(Balance {
+            amount: balance.available_usd,
+            unit: "USD",
+            usd: Some(balance.available_usd),
+            burning_per_hour: None,
+        });
     }
     sort_offers(&mut offers);
     provider.offers = offers;
@@ -426,7 +459,7 @@ async fn modal() -> Provider {
 }
 
 fn modal_list_offers() -> Vec<Offer> {
-    MODAL_LIST_PRICES
+    crate::jobs::modal::LIST_PRICES
         .iter()
         .map(|(flavor, vram, price)| Offer {
             flavor: (*flavor).to_string(),

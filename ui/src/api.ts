@@ -1007,11 +1007,23 @@ export interface ModalSettings {
   maskedTokenId: string | null;
   maskedTokenSecret: string | null;
   processEnv: boolean;
+  settings: { creditUsd: number | null; creditAsOf: number | null };
+  /** What is left of the entered credit; absent until the user enters one. */
+  balance?: {
+    availableUsd: number;
+    creditUsd: number;
+    asOf: number;
+    spentUsd: number;
+    source: "report" | "estimate";
+    error: string | null;
+  } | null;
 }
 
 export const getModalSettings = (signal?: AbortSignal) => get<ModalSettings>("/api/settings/modal", signal);
 export const saveModalToken = (tokenId: string, tokenSecret: string) =>
   post<ModalSettings>("/api/settings/modal", { tokenId, tokenSecret });
+export const saveModalCredit = (update: { creditUsd?: number; clearCredit?: boolean }) =>
+  post<ModalSettings>("/api/settings/modal", update);
 
 // --- settings: env vars / git / harnesses ------------------------------------
 

@@ -79,6 +79,7 @@ import {
   saveHfToken,
   saveTinkerKey,
   saveModalToken,
+  saveModalCredit,
   saveK8sSettings,
   saveRaySettings,
   saveSlurmSettings,
@@ -1453,9 +1454,24 @@ function ModalSection() {
   const error = actionError ?? sQuery.error?.message ?? null;
   const [tokenId, setTokenId] = useState("");
   const [tokenSecret, setTokenSecret] = useState("");
+  const [credit, setCredit] = useState("");
   const [refreshing, setRefreshing] = useState(false);
   const loading = sQuery.isPending || refreshing;
   const [saving, setSaving] = useState(false);
+
+  async function saveCredit(update: Parameters<typeof saveModalCredit>[0]) {
+    setSaving(true);
+    setError(null);
+    try {
+      setS(await saveModalCredit(update));
+      setCredit("");
+      void queryClient.invalidateQueries({ queryKey: getComputePricesQuery().queryKey });
+    } catch (err) {
+      setError(err instanceof Error ? err.message : String(err));
+    } finally {
+      setSaving(false);
+    }
+  }
 
   async function refresh() {
     if (loading || saving) return;
@@ -1503,6 +1519,57 @@ function ModalSection() {
         </dl>
       )}
       {s?.processEnv && <p className="mt-2 mb-0 text-sm text-subtext">{m.settings_modal_env_override()}</p>}
+      {s?.tokenConfigured && (
+        <div className="mt-4 rounded-lg border border-border bg-surface px-4 py-3">
+          <div className="text-sm text-subtext">{m.settings_gcp_available()}</div>
+          <div className={cn("mt-1 text-2xl font-semibold tabular-nums", s.balance && s.balance.availableUsd <= 0 ? "text-accent-red" : "text-text")}>
+            {s.balance ? `≈ ${fmtUsd(s.balance.availableUsd)}` : "—"}
+          </div>
+          {s.balance ? (
+            <div className="mt-0.5 text-sm text-subtext">
+              {m.settings_gcp_balance_detail({
+                credit: fmtUsd(s.balance.creditUsd),
+                date: new Date(s.balance.asOf).toLocaleDateString(),
+                spent: fmtUsd(s.balance.spentUsd),
+              })}{" "}
+              {s.balance.source === "report" ? m.settings_modal_source_report() : m.settings_modal_source_estimate()}
+            </div>
+          ) : (
+            <div className="mt-0.5 text-sm text-subtext">{m.settings_modal_no_credit()}</div>
+          )}
+          {s.balance?.error && <div className="mt-1 text-sm text-subtext">{s.balance.error}</div>}
+          <form
+            className="mt-3 flex flex-wrap items-end gap-2"
+            onSubmit={(event) => {
+              event.preventDefault();
+              const amount = Number(credit);
+              if (credit.trim() && Number.isFinite(amount) && amount >= 0) void saveCredit({ creditUsd: amount });
+            }}
+          >
+            <label className="flex min-w-48 flex-1 flex-col gap-1 text-sm">
+              {m.settings_gcp_credit_label()}
+              <Input
+                type="number"
+                min="0"
+                step="0.01"
+                inputMode="decimal"
+                value={credit}
+                onChange={(event) => setCredit(event.target.value)}
+                placeholder={s.settings.creditUsd != null ? String(s.settings.creditUsd) : "30.00"}
+              />
+            </label>
+            <Button type="submit" disabled={saving || loading || !credit.trim()}>
+              {m.common_save()}
+            </Button>
+            {s.settings.creditUsd != null && (
+              <Button type="button" variant="ghost" disabled={saving || loading} onClick={() => void saveCredit({ clearCredit: true })}>
+                {m.settings_gcp_clear_credit()}
+              </Button>
+            )}
+          </form>
+          <p className="mt-1.5 mb-0 text-sm text-subtext">{m.settings_modal_credit_hint()}</p>
+        </div>
+      )}
       <form className="mt-5 flex flex-col gap-4" onSubmit={submit}>
         <label className="flex flex-col gap-2 text-sm font-medium text-subtext">
           {s?.tokenConfigured ? m.settings_modal_replace_id() : m.settings_modal_token_id()}

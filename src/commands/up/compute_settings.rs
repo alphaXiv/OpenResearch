@@ -175,23 +175,86 @@ pub(super) fn modal_settings_json() -> crate::error::Result<Value> {
         "maskedTokenId": token.as_ref().map(|token| mask_token(&token.id)),
         "maskedTokenSecret": token.as_ref().map(|token| mask_token(&token.secret)),
         "processEnv": std::env::var_os("MODAL_TOKEN_ID").is_some() || std::env::var_os("MODAL_TOKEN_SECRET").is_some(),
+        "settings": modal::load_settings()?.unwrap_or_default(),
     }))
 }
 
+/// The settings plus, once a credit is entered, what is left of it — which
+/// asks Modal for the spend since, so it costs a launcher round trip.
 pub(super) async fn modal_settings() -> ApiResult {
-    Ok(Json(modal_settings_json().map_err(bad_request)?))
+    let mut value = modal_settings_json().map_err(bad_request)?;
+    let settings = modal::load_settings().ok().flatten().unwrap_or_default();
+    if let Some(as_of) = settings
+        .credit_usd
+        .map(|_| settings.credit_as_of.unwrap_or(0))
+    {
+        let billing = if value["tokenConfigured"] == true {
+            match tokio::time::timeout(
+                std::time::Duration::from_secs(30),
+                modal::billing(Some(as_of)),
+            )
+            .await
+            {
+                Ok(Ok(billing)) => Ok(billing),
+                Ok(Err(error)) => Err(error.to_string()),
+                Err(_) => Err("Modal did not answer in time.".to_string()),
+            }
+        } else {
+            Err("Connect Modal to read its spend.".to_string())
+        };
+        value["balance"] = json!(modal::balance(
+            &settings,
+            billing.as_ref().map_err(String::clone)
+        ));
+    }
+    Ok(Json(value))
 }
 
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub(super) struct SetModalTokenReq {
-    token_id: String,
-    token_secret: String,
+pub(super) struct SetModalSettingsReq {
+    token_id: Option<String>,
+    token_secret: Option<String>,
+    /// Credit left in USD from the Modal dashboard; counting restarts now.
+    credit_usd: Option<f64>,
+    clear_credit: Option<bool>,
 }
 
-pub(super) async fn set_modal_token(Json(req): Json<SetModalTokenReq>) -> ApiResult {
-    let id = req.token_id.trim().to_string();
-    let secret = req.token_secret.trim().to_string();
+/// Saves a token and/or the credit left; a request may carry either.
+pub(super) async fn set_modal_settings(Json(req): Json<SetModalSettingsReq>) -> ApiResult {
+    if let Some(credit) = req.credit_usd {
+        if !credit.is_finite() || credit < 0.0 {
+            return Err(bad_request("The credit must be a positive amount in USD."));
+        }
+    }
+    if req.token_id.is_some() || req.token_secret.is_some() {
+        set_modal_token(
+            req.token_id.unwrap_or_default(),
+            req.token_secret.unwrap_or_default(),
+        )
+        .await?;
+    }
+    if req.credit_usd.is_some() || req.clear_credit == Some(true) {
+        let mut settings = modal::load_settings()
+            .map_err(|e| ApiError::from(anyhow!("{e}")))?
+            .unwrap_or_default();
+        if let Some(credit) = req.credit_usd {
+            settings.credit_usd = Some(credit);
+            settings.credit_as_of = Some(crate::store::now_ms());
+        }
+        if req.clear_credit == Some(true) {
+            settings.credit_usd = None;
+            settings.credit_as_of = None;
+        }
+        modal::save_settings(&settings).map_err(|e| ApiError::from(anyhow!("{e}")))?;
+        crate::jobs::provider_prices::invalidate().await;
+    }
+    modal_settings().await
+}
+
+async fn set_modal_token(id: String, secret: String) -> std::result::Result<(), ApiError> {
+    let id = id.trim().to_string();
+    let secret = secret.trim().to_string();
     if id.is_empty() || secret.is_empty() {
         return Err(bad_request(
             "Both the Modal token ID and secret are required.",
@@ -204,8 +267,6 @@ pub(super) async fn set_modal_token(Json(req): Json<SetModalTokenReq>) -> ApiRes
     }
     // Modal loads and validates its profile file even when credentials come from env.
     modal::resolve_token().map_err(bad_request)?;
-    let masked_id = mask_token(&id);
-    let masked_secret = mask_token(&secret);
     tokio::task::spawn_blocking(move || {
         crate::config::write_synced_env_vars(&[
             ("MODAL_TOKEN_ID", &id),
@@ -214,10 +275,7 @@ pub(super) async fn set_modal_token(Json(req): Json<SetModalTokenReq>) -> ApiRes
     })
     .await
     .map_err(|e| anyhow!("env write task failed: {e}"))??;
-    Ok(Json(json!({
-        "tokenConfigured": true, "tokenSource": "syncedEnv", "processEnv": false,
-        "maskedTokenId": masked_id, "maskedTokenSecret": masked_secret,
-    })))
+    Ok(())
 }
 
 // --- kubernetes settings ------------------------------------------------------
@@ -1607,6 +1665,7 @@ pub(super) async fn set_gcp_settings(Json(req): Json<SetGcpSettingsReq>) -> ApiR
         settings.billing_export_table = table;
     }
     gcp::save_settings(&settings).map_err(|e| ApiError::from(anyhow!("{e}")))?;
+    crate::jobs::provider_prices::invalidate().await;
     gcp_settings().await
 }
 
@@ -1797,7 +1856,7 @@ pub(crate) async fn configure(backend: &str, body: Value) -> Result<Value> {
         "ray" => set_ray_settings(Json(serde_json::from_value(body)?)).await,
         "k8s" => set_k8s_settings(Json(serde_json::from_value(body)?)).await,
         "hf" => set_hf_token(Json(serde_json::from_value(body)?)).await,
-        "modal" => set_modal_token(Json(serde_json::from_value(body)?)).await,
+        "modal" => set_modal_settings(Json(serde_json::from_value(body)?)).await,
         "tinker" => set_tinker_key(Json(serde_json::from_value(body)?)).await,
         "gcp" => set_gcp_settings(Json(serde_json::from_value(body)?)).await,
         "kaggle" => configure_kaggle(body).await,

@@ -420,8 +420,9 @@ pub struct ConfigureArgs {
     /// Boot disk size in GB (gcp).
     #[arg(long)]
     disk_gb: Option<u64>,
-    /// Credit left on the billing account in USD, from Billing → Credits in the
-    /// Google Cloud console; orx subtracts spend from now on (gcp).
+    /// Credit left in USD, from Billing → Credits in the Google Cloud console
+    /// (gcp) or Usage & Billing in the Modal dashboard (modal); orx subtracts
+    /// spend from now on.
     #[arg(long)]
     credit_usd: Option<f64>,
     /// BigQuery billing export table (project.dataset.table) for exact spend (gcp).
@@ -510,7 +511,7 @@ impl ConfigureArgs {
             "ray" => &["address"],
             "hf" => &["token"],
             "tinker" => &["key"],
-            "modal" => &["tokenId", "tokenSecret"],
+            "modal" => &["tokenId", "tokenSecret", "creditUsd", "clearCredit"],
             "kaggle" => &["account", "removeAccount", "token", "key", "username"],
             "gcp" => &[
                 "project",
@@ -519,6 +520,9 @@ impl ConfigureArgs {
                 "imageFamily",
                 "imageProject",
                 "diskGb",
+                "creditUsd",
+                "clearCredit",
+                "billingExportTable",
             ],
             _ => return Err(anyhow!("{backend} has no editable settings.")),
         };

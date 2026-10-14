@@ -494,6 +494,33 @@ fn credential_files_are_masked_and_can_be_cleared() {
 }
 
 #[test]
+fn modal_credit_is_entered_by_hand_and_can_be_cleared() {
+    let sandbox = Sandbox::new();
+    let value = sandbox.json(&[
+        "compute",
+        "configure",
+        "modal",
+        "--credit-usd",
+        "30",
+        "--json",
+    ]);
+    assert_eq!(value["settings"]["creditUsd"], 30.0);
+    assert!(value["settings"]["creditAsOf"].is_i64());
+    assert_eq!(value["balance"]["availableUsd"], 30.0);
+    assert_eq!(value["balance"]["source"], "estimate");
+    let value = sandbox.json(&[
+        "compute",
+        "configure",
+        "modal",
+        "--clear",
+        "credit",
+        "--json",
+    ]);
+    assert!(value["settings"]["creditUsd"].is_null());
+    assert!(value.get("balance").is_none());
+}
+
+#[test]
 fn slurm_status_preserves_submission_failure_without_job_handle() {
     let sandbox = Sandbox::new();
     sandbox.json(&["projects", "--json"]);

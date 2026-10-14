@@ -648,7 +648,7 @@ fn router(state: AppState, remote_auth: Option<RemoteAuth>) -> Router {
         )
         .route(
             "/api/settings/modal",
-            get(modal_settings).post(set_modal_token),
+            get(modal_settings).post(set_modal_settings),
         )
         .route("/api/settings/env", get(env_settings).post(set_env_var))
         .route(
