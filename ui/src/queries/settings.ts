@@ -57,6 +57,12 @@ export const getColabSettingsQuery = () => queryOptions({
   staleTime: 30_000,
 });
 
+export const getKaggleSettingsQuery = () => queryOptions({
+  queryKey: workspaceKey("getKaggleSettings"),
+  queryFn: ({ signal }) => api.getKaggleSettings(signal),
+  staleTime: 30_000,
+});
+
 export const getGcpSettingsQuery = () => queryOptions({
   queryKey: workspaceKey("getGcpSettings"),
   queryFn: ({ signal }) => api.getGcpSettings(signal),

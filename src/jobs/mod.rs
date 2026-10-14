@@ -1,7 +1,7 @@
 //! Job backends — external compute that orx launches and supervises itself.
 //!
 //! Orx submits natively (HF Jobs, Modal, Kubernetes, SSH, Slurm, an OpenResearch
-//! box, Tinker or Google Colab through a local controller, or this machine) and a detached
+//! box, Tinker, Google Colab or Kaggle through a local controller, or this machine) and a detached
 //! `orx supervise` watches the job beside it. The run's `backend_json` descriptor
 //! is the serialized handle a later supervisor uses to reattach.
 
@@ -11,6 +11,7 @@ pub mod colab_runtimes;
 pub mod gcp;
 pub mod gcp_billing;
 pub mod huggingface;
+pub mod kaggle;
 pub mod kubernetes;
 pub mod localbox;
 mod managed_env;
@@ -172,7 +173,10 @@ impl BackendDescriptor {
 
     /// The local run dir (the reattach handle) for a local controller.
     pub fn local_ref(&self) -> Result<&str> {
-        if !matches!(self.kind.as_str(), "local_job" | "tinker_job" | "colab_job") {
+        if !matches!(
+            self.kind.as_str(),
+            "local_job" | "tinker_job" | "colab_job" | "kaggle_job"
+        ) {
             return Err(anyhow!("Unsupported backend kind: {}", self.kind));
         }
         self.job_id.as_deref().ok_or_else(|| {

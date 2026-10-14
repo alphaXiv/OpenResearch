@@ -32,6 +32,8 @@ function backendName(kind: string): string {
       return "Colab";
     case "gcp_job":
       return "Google Cloud";
+    case "kaggle_job":
+      return "Kaggle";
     default:
       return kind || "—";
   }
@@ -154,6 +156,16 @@ function ColabLogo({ size = 16 }: { size?: number }) {
   );
 }
 
+// Kaggle — the "k" letterform in Kaggle blue, redrawn as plain shapes. Carries
+// its own color, so it renders the same in light and dark.
+function KaggleLogo({ size = 16 }: { size?: number }) {
+  return (
+    <svg width={size} height={size} viewBox="0 0 24 24" aria-hidden="true">
+      <path fill="#20BEFF" d="M5.5 1.5h3.4v21H5.5zM9.3 13.3l7-8.3h4.3l-7.4 8.6zM11.6 12.1l9.2 10.4h-4.4L9.7 14.9z" />
+    </svg>
+  );
+}
+
 function TinkerLogo({ size = 16 }: { size?: number }) {
   return (
     <img
@@ -206,6 +218,8 @@ export function BackendLogo({ kind, size = 16 }: { kind: string; size?: number }
       return <ColabLogo size={size} />;
     case "gcp_job":
       return <GoogleCloudLogo size={size} />;
+    case "kaggle_job":
+      return <KaggleLogo size={size} />;
     case "local_job":
       return <Laptop size={size} strokeWidth={1.5} />;
     default:

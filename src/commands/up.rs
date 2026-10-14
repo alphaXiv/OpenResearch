@@ -730,6 +730,20 @@ fn router(state: AppState, remote_auth: Option<RemoteAuth>) -> Router {
             get(gcp_settings).post(set_gcp_settings),
         )
         .route("/api/settings/gcp/instances/stop", post(stop_gcp_instance))
+        .route("/api/settings/kaggle", get(kaggle_settings))
+        .route("/api/settings/kaggle/accounts", post(add_kaggle_account))
+        .route(
+            "/api/settings/kaggle/accounts/import",
+            post(import_kaggle_account),
+        )
+        .route(
+            "/api/settings/kaggle/accounts/active",
+            post(set_kaggle_active_account),
+        )
+        .route(
+            "/api/settings/kaggle/accounts/remove",
+            post(remove_kaggle_account),
+        )
         .route("/api/settings/openresearch", get(openresearch_settings))
         .route("/api/settings/openresearch/login", get(openresearch_login))
         .route("/api/settings/commands/run", get(run_settings_command))

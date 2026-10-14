@@ -19,6 +19,7 @@ pub async fn launch_local_run(args: &crate::ExpRunArgs) -> Result<()> {
     let label = match backend.kind.as_str() {
         "tinker_job" => "Tinker",
         "colab_job" => "Colab",
+        "kaggle_job" => "Kaggle",
         _ => "Local",
     };
     println!("\u{2713} {label} run started.");
@@ -55,6 +56,14 @@ pub async fn submit_colab_run_with_source(
     submit_controller_run(args, source, run_id, "colab_job").await
 }
 
+pub async fn submit_kaggle_run_with_source(
+    args: &crate::ExpRunArgs,
+    source: SourceSnapshot,
+    run_id: String,
+) -> Result<StoredRun> {
+    submit_controller_run(args, source, run_id, "kaggle_job").await
+}
+
 async fn submit_controller_run(
     args: &crate::ExpRunArgs,
     source: SourceSnapshot,
@@ -63,7 +72,8 @@ async fn submit_controller_run(
 ) -> Result<StoredRun> {
     let backend = kind.trim_end_matches("_job");
     let colab = kind == "colab_job";
-    if args.flavor.is_some() && !colab {
+    let kaggle = kind == "kaggle_job";
+    if args.flavor.is_some() && !colab && !kaggle {
         return Err(anyhow!("--backend {backend} does not take --flavor."));
     }
     if args.image.is_some() {
@@ -98,6 +108,26 @@ async fn submit_controller_run(
     } else {
         None
     };
+    let kaggle_launch = if kaggle {
+        let flavor = crate::jobs::kaggle::parse_flavor(args.flavor.as_deref())?;
+        let cli = crate::jobs::kaggle::preflight().await?;
+        let timeout_secs = match args.timeout.as_deref() {
+            Some(timeout) => crate::jobs::huggingface::parse_timeout(timeout)?,
+            None => crate::jobs::kaggle::DEFAULT_TIMEOUT_SECS.min(flavor.timeout_cap()),
+        };
+        if timeout_secs > flavor.timeout_cap() {
+            return Err(anyhow!(
+                "Kaggle stops a {} session after {} hours; pass a shorter --timeout.",
+                flavor.accelerator.kind.to_uppercase(),
+                flavor.timeout_cap() / 3600
+            ));
+        }
+        let username =
+            crate::jobs::kaggle::resolve_account(&flavor.account, flavor.accelerator.kind).await?;
+        Some((flavor, cli, timeout_secs, username))
+    } else {
+        None
+    };
 
     // The run's env: everything the user synced (API keys), plus the tokens
     // the run script expects. Passed to the launcher process.
@@ -128,8 +158,46 @@ async fn submit_controller_run(
         secret_env.insert(crate::jobs::tinker::API_KEY_ENV.to_string(), key);
     }
 
-    let script = match &colab_launch {
-        Some((flavor, cli, timeout_secs)) => {
+    let kaggle_script = match &kaggle_launch {
+        Some((flavor, cli, timeout_secs, username)) => {
+            let dir = localbox::run_dir(&run_id);
+            std::fs::create_dir_all(&dir)
+                .map_err(|e| anyhow!("Could not create {}: {}", dir.display(), e))?;
+            let mut skipped_env: Vec<String> = crate::config::list_synced_env()
+                .into_iter()
+                .map(|(key, _)| key)
+                .chain(secret_env.keys().cloned())
+                .collect();
+            if env.contains_key("HF_TOKEN") {
+                skipped_env.push("HF_TOKEN".to_string());
+            }
+            skipped_env.sort();
+            skipped_env.dedup();
+            crate::jobs::kaggle::write_run_files(
+                &dir,
+                &crate::jobs::kaggle::RunSpec {
+                    cli,
+                    username,
+                    run_id: &run_id,
+                    flavor,
+                    archive: &source.path,
+                    run_command: &run_command,
+                    timeout_secs: *timeout_secs,
+                    skipped_env,
+                },
+            )
+            .map_err(|e| anyhow!("Could not prepare the Kaggle run: {e}"))?;
+            Some(format!(
+                "bash {}",
+                crate::jobs::ssh::sh_quote(crate::jobs::kaggle::CONTROLLER_FILE)
+            ))
+        }
+        None => None,
+    };
+
+    let script = match (kaggle_script, &colab_launch) {
+        (Some(script), _) => script,
+        (None, Some((flavor, cli, timeout_secs))) => {
             let dir = localbox::run_dir(&run_id);
             std::fs::create_dir_all(&dir)
                 .map_err(|e| anyhow!("Could not create {}: {}", dir.display(), e))?;
@@ -166,7 +234,7 @@ async fn submit_controller_run(
                 crate::jobs::ssh::sh_quote(crate::jobs::colab::CONTROLLER_FILE)
             )
         }
-        None => crate::compute::snapshot_script(
+        (None, None) => crate::compute::snapshot_script(
             &crate::local::bash::bash_path(&source.path),
             &run_command,
         ),
@@ -186,18 +254,34 @@ async fn submit_controller_run(
         kind: kind.to_string(),
         namespace: colab_launch
             .as_ref()
-            .map(|_| crate::jobs::colab::session_name(&run_id)),
+            .map(|_| crate::jobs::colab::session_name(&run_id))
+            .or_else(|| {
+                kaggle_launch.as_ref().map(|(_, _, _, username)| {
+                    format!("{username}/{}", crate::jobs::kaggle::run_slug(&run_id))
+                })
+            }),
         job_id: Some(dir.to_string_lossy().into_owned()),
-        flavor: colab_launch.as_ref().map(|(flavor, _, _)| flavor.id()),
+        flavor: colab_launch
+            .as_ref()
+            .map(|(flavor, _, _)| flavor.id())
+            .or_else(|| kaggle_launch.as_ref().map(|(flavor, _, _, _)| flavor.id())),
         image: None,
-        url: None,
+        url: kaggle_launch.as_ref().map(|(_, _, _, username)| {
+            format!(
+                "https://www.kaggle.com/code/{username}/{}",
+                crate::jobs::kaggle::run_slug(&run_id)
+            )
+        }),
         context: None,
         manifest: None,
         resources: None,
         ssh_host: None,
         ssh_port: None,
         ssh_user: None,
-        timeout_secs: colab_launch.as_ref().map(|(_, _, secs)| *secs),
+        timeout_secs: colab_launch
+            .as_ref()
+            .map(|(_, _, secs)| *secs)
+            .or_else(|| kaggle_launch.as_ref().map(|(_, _, secs, _)| *secs)),
         cpus_per_task: None,
         mem: None,
         source_digest: None,

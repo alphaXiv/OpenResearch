@@ -839,6 +839,8 @@ pub(super) fn compute_settings_json(ssh: SshReadiness) -> Value {
     let modal_source = crate::jobs::modal::token_source();
     let colab_cli = crate::jobs::colab::find_cli();
     let colab_signed_in = crate::jobs::colab::token_path().is_some_and(|path| path.is_file());
+    let kaggle_cli = crate::jobs::kaggle::find_cli().is_some();
+    let kaggle_accounts = crate::jobs::kaggle::load_accounts();
     let k8s_settings = k8s::load_settings().ok().flatten();
     let ssh_hosts = list_ssh_hosts().len();
     let slurm_settings = crate::jobs::slurm::load_settings().ok().flatten();
@@ -908,6 +910,17 @@ pub(super) fn compute_settings_json(ssh: SshReadiness) -> Value {
                 (None, _) => "Colab CLI not installed",
                 (Some(_), false) => "Colab CLI installed, not signed in",
                 (Some(_), true) => "Colab CLI signed in",
+            },
+        },
+        {
+            "id": "kaggle",
+            "configured": kaggle_cli && !kaggle_accounts.accounts.is_empty(),
+            "summary": match (kaggle_cli, kaggle_accounts.accounts.len(), &kaggle_accounts.active) {
+                (false, _, _) => "Kaggle CLI not installed".to_string(),
+                (true, 0, _) => "Kaggle CLI installed, no account".to_string(),
+                (true, 1, Some(active)) => format!("Account {active}"),
+                (true, n, Some(active)) => format!("{n} accounts, default {active}"),
+                (true, n, None) => format!("{n} accounts"),
             },
         },
         {
@@ -1113,6 +1126,94 @@ pub(super) async fn stop_colab_runtime(Json(req): Json<StopColabRuntimeReq>) -> 
         .await
         .map_err(|error| ApiError::from(anyhow!("{error}")))?;
     Ok(Json(json!({ "ok": true })))
+}
+
+// --- Kaggle ---------------------------------------------------------------------
+
+#[derive(serde::Deserialize)]
+pub(super) struct KaggleSettingsQuery {
+    /// Re-read every account's quota instead of the cached one.
+    fresh: Option<bool>,
+}
+
+/// The Kaggle row's expanded detail: CLI install (with install commands when
+/// missing), saved accounts, and each account's weekly quota. Credentials are
+/// never part of the payload.
+pub(super) async fn kaggle_settings(Query(query): Query<KaggleSettingsQuery>) -> ApiResult {
+    kaggle_settings_with(query.fresh.unwrap_or(false)).await
+}
+
+async fn kaggle_settings_with(fresh: bool) -> ApiResult {
+    let status = crate::jobs::kaggle::status().await;
+    let accounts = if status.cli_path.is_some() {
+        crate::jobs::kaggle::accounts(fresh).await
+    } else {
+        Vec::new()
+    };
+    let mut value = json!(status);
+    value["accounts"] = json!(accounts);
+    Ok(Json(value))
+}
+
+/// Validate pasted credentials with the Kaggle CLI and save them as an account.
+pub(super) async fn add_kaggle_account(
+    Json(req): Json<crate::jobs::kaggle::NewAccount>,
+) -> ApiResult {
+    crate::jobs::kaggle::add_account(req)
+        .await
+        .map_err(bad_request)?;
+    kaggle_settings_with(false).await
+}
+
+/// Save the sign-in the Kaggle CLI already has in ~/.kaggle as an account.
+pub(super) async fn import_kaggle_account() -> ApiResult {
+    crate::jobs::kaggle::import_cli_account()
+        .await
+        .map_err(bad_request)?;
+    kaggle_settings_with(false).await
+}
+
+#[derive(serde::Deserialize)]
+pub(super) struct KaggleAccountReq {
+    username: String,
+}
+
+pub(super) async fn set_kaggle_active_account(Json(req): Json<KaggleAccountReq>) -> ApiResult {
+    crate::jobs::kaggle::set_active(&req.username)
+        .await
+        .map_err(bad_request)?;
+    kaggle_settings_with(false).await
+}
+
+pub(super) async fn remove_kaggle_account(Json(req): Json<KaggleAccountReq>) -> ApiResult {
+    crate::jobs::kaggle::remove_account(&req.username)
+        .await
+        .map_err(bad_request)?;
+    kaggle_settings_with(false).await
+}
+
+/// `orx compute configure kaggle`: add an account from `token`/`username`/`key`,
+/// make `account` the default, or delete `removeAccount`.
+async fn configure_kaggle(body: Value) -> ApiResult {
+    if let Some(name) = body.get("removeAccount").and_then(Value::as_str) {
+        return remove_kaggle_account(Json(KaggleAccountReq {
+            username: name.to_string(),
+        }))
+        .await;
+    }
+    let new: crate::jobs::kaggle::NewAccount =
+        serde_json::from_value(body.clone()).map_err(|e| bad_request(anyhow!("{e}")))?;
+    if new.token.is_some() || new.key.is_some() || new.kaggle_json.is_some() {
+        crate::jobs::kaggle::add_account(new)
+            .await
+            .map_err(bad_request)?;
+    }
+    if let Some(name) = body.get("account").and_then(Value::as_str) {
+        crate::jobs::kaggle::set_active(name)
+            .await
+            .map_err(bad_request)?;
+    }
+    kaggle_settings_with(true).await
 }
 
 // --- Google Cloud ---------------------------------------------------------------
@@ -1354,6 +1455,7 @@ pub(crate) async fn show(backend: &str) -> Result<Value> {
         "k8s" => k8s_settings().await,
         "openresearch" => openresearch_settings().await,
         "gcp" => gcp_settings().await,
+        "kaggle" => kaggle_settings_with(true).await,
         _ => return Err(anyhow!("Unknown compute backend: {backend}")),
     })?;
     if backend == "ssh" {
@@ -1433,6 +1535,7 @@ pub(crate) async fn configure(backend: &str, body: Value) -> Result<Value> {
         "modal" => set_modal_token(Json(serde_json::from_value(body)?)).await,
         "tinker" => set_tinker_key(Json(serde_json::from_value(body)?)).await,
         "gcp" => set_gcp_settings(Json(serde_json::from_value(body)?)).await,
+        "kaggle" => configure_kaggle(body).await,
         _ => {
             return Err(anyhow!(
                 "{backend} has no saved configuration; use compute connect or default set."
@@ -1498,6 +1601,13 @@ pub(crate) async fn check(
                 && value["error"].is_null()
         }
         "modal" | "colab" | "gcp" => value["ready"] == true,
+        // Ready once some account answered with its credentials.
+        "kaggle" => {
+            value["ready"] == true
+                && value["accounts"]
+                    .as_array()
+                    .is_some_and(|accounts| accounts.iter().any(|a| a["error"].is_null()))
+        }
         _ => false,
     };
     value["ready"] = json!(ready);

@@ -42,6 +42,13 @@ credentials in command arguments, custom instructions, or committed files.
 `orx compute connect openresearch` reuses login and SSH-key registration.
 `orx compute connect colab` runs the Colab CLI's one-time browser sign-in; the
 CLI keeps its own token, so Colab has no credentials to configure here.
+`orx compute connect kaggle` adds a Kaggle account: it prompts for an API token
+without echoing it, and runs the Kaggle CLI's browser sign-in when the prompt
+is left empty. Each account keeps its own credentials folder. Accounts can also come from
+`orx compute configure kaggle --credentials-file -` with `{"token":"…"}`
+(the username is read from Kaggle) or `{"username":"…","key":"…"}` (a legacy
+kaggle.json). `orx compute configure kaggle --account <name>` makes a saved
+account the default, and `--remove-account <name>` deletes one.
 Interactive login requires a terminal and does not support JSON.
 `orx compute configure modal --clear credentials` (likewise hf and tinker) removes
 ORX-saved credentials; process environment and provider-owned credential stores

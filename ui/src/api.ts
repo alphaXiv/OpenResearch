@@ -1270,7 +1270,8 @@ export type ComputeTargetId =
   | "slurm"
   | "ray"
   | "openresearch"
-  | "gcp";
+  | "gcp"
+  | "kaggle";
 
 /** Cheap fs/env probe only — "worth trying", not "healthy". Deep health lives
  * in each backend's own settings endpoint, fetched when its setup surface opens. */
@@ -1465,6 +1466,72 @@ export const getColabSettings = (signal?: AbortSignal, fresh = false) =>
 
 export const stopColabRuntime = (endpoint: string) =>
   post<{ ok: true }>("/api/settings/colab/runtimes/stop", { endpoint });
+
+export interface KaggleAccelerator {
+  id: string;
+  kind: "cpu" | "gpu" | "tpu";
+  machineShape: string;
+  label: string;
+  count: number;
+  memoryGb: number;
+}
+
+export interface KaggleQuotaLine {
+  usedHours: number;
+  remainingHours: number;
+  totalHours: number;
+}
+
+/** One saved Kaggle account; credentials never leave the server. */
+export interface KaggleAccount {
+  username: string;
+  method: "token" | "key" | "oauth";
+  /** Used when a launch names no account. */
+  active: boolean;
+  /** `null` when Kaggle did not say (or the CLI is too old for `kaggle quota`). */
+  quota: { gpu: KaggleQuotaLine | null; tpu: KaggleQuotaLine | null; refreshAt: string | null } | null;
+  error: string | null;
+}
+
+/** Local probes of the Kaggle CLI plus every saved account's weekly quota. */
+export interface KaggleSettings {
+  supportedOs: boolean;
+  cliPath: string | null;
+  cliVersion: string | null;
+  cliOutdated: boolean;
+  installCommands: string[];
+  active: string | null;
+  accountCount: number;
+  /** `~/.kaggle` holds a sign-in that can be imported as an account. */
+  importable: boolean;
+  ready: boolean;
+  error: string | null;
+  defaultFlavor: string;
+  accelerators: KaggleAccelerator[];
+  accounts: KaggleAccount[];
+}
+
+export interface NewKaggleAccount {
+  username?: string;
+  token?: string;
+  key?: string;
+  kaggleJson?: string;
+}
+
+export const getKaggleSettings = (signal?: AbortSignal, fresh = false) =>
+  get<KaggleSettings>(fresh ? "/api/settings/kaggle?fresh=true" : "/api/settings/kaggle", signal);
+
+export const addKaggleAccount = (account: NewKaggleAccount) =>
+  post<KaggleSettings>("/api/settings/kaggle/accounts", account);
+
+export const importKaggleAccount = () =>
+  post<KaggleSettings>("/api/settings/kaggle/accounts/import", {});
+
+export const setKaggleActiveAccount = (username: string) =>
+  post<KaggleSettings>("/api/settings/kaggle/accounts/active", { username });
+
+export const removeKaggleAccount = (username: string) =>
+  post<KaggleSettings>("/api/settings/kaggle/accounts/remove", { username });
 
 export interface OpenResearchSettings {
   loggedIn: boolean;

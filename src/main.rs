@@ -525,9 +525,10 @@ pub struct ExpRunArgs {
     /// (an ephemeral OpenResearch GPU/CPU box billed to your org; needs
     /// `orx login`), `tinker` (a local controller using remote Tinker model
     /// compute), `colab` (a Google Colab GPU/TPU runtime through the `colab`
-    /// CLI), or `local` (a detached process on this machine). k8s,
-    /// ssh, slurm, ray, openresearch, tinker, colab, and local are local
-    /// experiments only. orx submits the job and a detached supervisor
+    /// CLI), `kaggle` (a private Kaggle kernel through the `kaggle` CLI, on one
+    /// of your saved Kaggle accounts), or `local` (a detached process on this
+    /// machine). k8s, ssh, slurm, ray, openresearch, tinker, colab, kaggle, and
+    /// local are local experiments only. orx submits the job and a detached supervisor
     /// records status and logs locally. Omitted on a local experiment: launches on
     /// the configured default compute target, if set.
     #[arg(long)]
@@ -543,6 +544,9 @@ pub struct ExpRunArgs {
     /// cpu5c:32 for the vCPU tier). With `--backend colab`: t4 (default), l4,
     /// a100, h100, g4, v5e1, v6e1, or cpu; append `:highmem` for a high-RAM
     /// machine, or pass `auto:<GB>` for the smallest GPU with that much VRAM.
+    /// With `--backend kaggle`: t4 (default, two T4s), p100, tpu, or cpu;
+    /// append `@<account>` to pick a saved Kaggle account, or `@auto` for the
+    /// one with the most weekly quota left.
     /// Not used by k8s (see --manifest) or ssh (see --host).
     #[arg(long)]
     pub flavor: Option<String>,
@@ -572,7 +576,7 @@ pub struct ExpRunArgs {
     /// `--backend k8s`, set the image in the manifest instead.
     #[arg(long)]
     pub image: Option<String>,
-    /// Job timeout (with `--backend hf/modal/colab/k8s/slurm/openresearch`): 90s,
+    /// Job timeout (with `--backend hf/modal/colab/kaggle/k8s/slurm/openresearch`): 90s,
     /// 30m, 4h, 1d. Default 4h (HF's own default is only 30 minutes). With
     /// `--backend k8s` it becomes activeDeadlineSeconds unless the manifest
     /// sets its own. With `--backend slurm` it becomes `#SBATCH --time=` and

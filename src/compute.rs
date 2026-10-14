@@ -471,6 +471,37 @@ backend_adapter!(
 );
 
 backend_adapter!(
+    KaggleCompute,
+    "kaggle",
+    "Kaggle",
+    true,
+    true,
+    false,
+    "private Kaggle dataset",
+    false,
+    preflight | args | {
+        let flavor = match crate::jobs::kaggle::parse_flavor(args.flavor.as_deref()) {
+            Ok(flavor) => flavor,
+            Err(error) => return Ok(not_ready(error.to_string())),
+        };
+        if let Err(error) = crate::jobs::kaggle::preflight().await {
+            return Ok(not_ready(error.to_string()));
+        }
+        if let crate::jobs::kaggle::AccountChoice::Named(_) = flavor.account {
+            if let Err(error) =
+                crate::jobs::kaggle::resolve_account(&flavor.account, flavor.accelerator.kind).await
+            {
+                return Ok(not_ready(error.to_string()));
+            }
+        }
+        ready()
+    },
+    submit | args,
+    source,
+    run_id | crate::local::localrun::submit_kaggle_run_with_source(args, source, run_id).await
+);
+
+backend_adapter!(
     TinkerCompute,
     "tinker",
     "Tinker",
@@ -739,6 +770,7 @@ pub fn backend(id: &str) -> Result<Box<dyn ComputeBackend>> {
         "ray" => Ok(Box::new(RayCompute)),
         "openresearch" => Ok(Box::new(OpenResearchCompute)),
         "gcp" => Ok(Box::new(GcpCompute)),
+        "kaggle" => Ok(Box::new(KaggleCompute)),
         _ => Err(anyhow!("Unknown compute backend '{id}'.")),
     }
 }
@@ -826,7 +858,7 @@ pub fn validate_run_args(args: &crate::ExpRunArgs) -> Result<()> {
                  modal (Modal serverless GPUs), k8s (your Kubernetes cluster), ssh (your own box), \
                  slurm (your Slurm cluster), ray (a Ray Jobs cluster), \
                  openresearch (an ephemeral OpenResearch box), tinker (local controller with remote model compute), \
-                 colab (a Google Colab GPU runtime), gcp (a Google Cloud GPU VM), local (this machine).",
+                 colab (a Google Colab GPU runtime), gcp (a Google Cloud GPU VM), kaggle (a Kaggle kernel), local (this machine).",
                 backend
             ));
         }

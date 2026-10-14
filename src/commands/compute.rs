@@ -282,6 +282,7 @@ pub enum Backend {
     K8s,
     Openresearch,
     Gcp,
+    Kaggle,
 }
 impl Backend {
     fn name(self) -> &'static str {
@@ -297,6 +298,7 @@ impl Backend {
             Self::K8s => "k8s",
             Self::Openresearch => "openresearch",
             Self::Gcp => "gcp",
+            Self::Kaggle => "kaggle",
         }
     }
 }
@@ -423,10 +425,14 @@ pub struct ConfigureArgs {
     /// BigQuery billing export table (project.dataset.table) for exact spend (gcp).
     #[arg(long)]
     billing_export_table: Option<String>,
+    /// Delete a saved Kaggle account by username (kaggle).
+    #[arg(long)]
+    remove_account: Option<String>,
     /// Clear a saved field; repeat for multiple fields (e.g. --clear time-limit, --clear mem).
     #[arg(long)]
     clear: Vec<String>,
-    /// JSON credentials: {"token":...}, {"key":...}, or {"tokenId":...,"tokenSecret":...}. Use - for stdin.
+    /// JSON credentials: {"token":...}, {"key":...}, or {"tokenId":...,"tokenSecret":...};
+    /// kaggle also takes {"username":...,"key":...}. Use - for stdin.
     #[arg(long)]
     credentials_file: Option<String>,
 }
@@ -503,6 +509,7 @@ impl ConfigureArgs {
             "hf" => &["token"],
             "tinker" => &["key"],
             "modal" => &["tokenId", "tokenSecret"],
+            "kaggle" => &["account", "removeAccount", "token", "key", "username"],
             "gcp" => &[
                 "project",
                 "zone",
@@ -530,6 +537,7 @@ impl ConfigureArgs {
             ("imageFamily", self.image_family),
             ("imageProject", self.image_project),
             ("billingExportTable", self.billing_export_table),
+            ("removeAccount", self.remove_account),
         ] {
             if let Some(value) = value {
                 body.insert(key.into(), json!(value));
@@ -555,7 +563,9 @@ impl ConfigureArgs {
                     )
                 })?;
             for (key, value) in credentials {
-                if !["token", "key", "tokenId", "tokenSecret"].contains(&key.as_str())
+                let kaggle_username = backend == "kaggle" && key == "username";
+                if !(["token", "key", "tokenId", "tokenSecret"].contains(&key.as_str())
+                    || kaggle_username)
                     || !value.is_string()
                 {
                     return Err(anyhow!("Unsupported credential field or value."));
@@ -847,6 +857,30 @@ async fn connect(args: &CheckArgs, persist: Option<u64>) -> Result<()> {
             if !status.success() {
                 return Err(anyhow!("colab sessions exited with {status}."));
             }
+        }
+        Backend::Kaggle => {
+            if crate::jobs::kaggle::find_cli().is_none() {
+                return Err(anyhow!("{}", crate::jobs::kaggle::INSTALL_HINT));
+            }
+            eprintln!(
+                "Create an API token at https://www.kaggle.com/settings/api (Generate New Token)."
+            );
+            let token =
+                secret_prompt("Kaggle API token (leave empty to sign in with the browser)").await?;
+            let account = if token.is_empty() {
+                crate::jobs::kaggle::login_interactive().await?
+            } else {
+                crate::jobs::kaggle::add_account(crate::jobs::kaggle::NewAccount {
+                    token: Some(token),
+                    ..Default::default()
+                })
+                .await?
+            };
+            eprintln!(
+                "Saved Kaggle account {}{}.",
+                account.username,
+                if account.active { " (default)" } else { "" }
+            );
         }
         Backend::Gcp => {
             if crate::jobs::gcp::account().await.is_none() {

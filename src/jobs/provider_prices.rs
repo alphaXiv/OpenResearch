@@ -120,9 +120,15 @@ pub async fn overview(fresh: bool) -> Overview {
             }
         }
     }
-    let (colab, hf, modal, openresearch, gcp) =
-        tokio::join!(colab(fresh), hf(), modal(), openresearch(), gcp());
-    let mut providers = vec![colab, hf, modal, openresearch, gcp];
+    let (colab, kaggle, hf, modal, openresearch, gcp) = tokio::join!(
+        colab(fresh),
+        kaggle(fresh),
+        hf(),
+        modal(),
+        openresearch(),
+        gcp()
+    );
+    let mut providers = vec![colab, kaggle, hf, modal, openresearch, gcp];
     providers.extend(own_hardware());
     providers.push(Provider {
         note: Some("Billed per token of training and sampling, not per GPU-hour.".into()),
@@ -183,6 +189,86 @@ async fn colab(fresh: bool) -> Provider {
     });
     provider.offers = colab_offers(&account);
     provider
+}
+
+// --- Kaggle ---------------------------------------------------------------
+
+/// Free: a weekly GPU/TPU quota per account, so the balance is the hours left
+/// across every saved account and the price is zero.
+async fn kaggle(fresh: bool) -> Provider {
+    let configured = crate::jobs::kaggle::configured();
+    let mut provider = empty("kaggle", "credits", configured);
+    if !configured {
+        return provider;
+    }
+    let accounts = crate::jobs::kaggle::accounts(fresh).await;
+    let failed = accounts.iter().filter(|a| a.error.is_some()).count();
+    if failed == accounts.len() {
+        provider.error = accounts.iter().find_map(|a| a.error.clone());
+        return provider;
+    }
+    provider.offers = kaggle_offers(&accounts);
+    let gpu_left = provider
+        .offers
+        .iter()
+        .find(|offer| offer.flavor == "t4")
+        .and_then(|offer| offer.runway_hours);
+    if let Some(hours) = gpu_left {
+        provider.balance = Some(Balance {
+            amount: hours,
+            unit: "GPU h",
+            usd: None,
+            burning_per_hour: None,
+        });
+    }
+    provider.note = Some(match (accounts.len(), failed) {
+        (1, _) => "Free weekly GPU and TPU quota; no charge per hour.".to_string(),
+        (n, 0) => format!("Free weekly quota summed over {n} accounts; use @auto to pick the one with the most left."),
+        (n, f) => format!("Free weekly quota summed over {} of {n} accounts ({f} could not be checked).", n - f),
+    });
+    provider
+}
+
+fn kaggle_offers(accounts: &[crate::jobs::kaggle::AccountStatus]) -> Vec<Offer> {
+    let left = |kind: &str| -> Option<f64> {
+        let lines: Vec<f64> = accounts
+            .iter()
+            .filter(|a| a.error.is_none())
+            .filter_map(|a| a.quota.as_ref())
+            .filter_map(|q| {
+                if kind == "tpu" {
+                    q.tpu.as_ref()
+                } else {
+                    q.gpu.as_ref()
+                }
+            })
+            .map(|line| line.remaining_hours)
+            .collect();
+        (!lines.is_empty()).then(|| lines.iter().sum())
+    };
+    crate::jobs::kaggle::ACCELERATORS
+        .iter()
+        .filter(|a| a.kind == "gpu")
+        .map(|a| {
+            let runway = left(a.kind);
+            Offer {
+                flavor: a.id.to_string(),
+                gpu: Some(
+                    a.machine_shape
+                        .trim_start_matches("NvidiaTesla")
+                        .to_string(),
+                ),
+                gpu_count: a.count,
+                vram_gb: Some(a.memory_gb as f64),
+                usd_per_hour: Some(0.0),
+                units_per_hour: None,
+                runway_hours: runway,
+                available: runway.map(|hours| hours > 0.0),
+                estimated: false,
+                host: None,
+            }
+        })
+        .collect()
 }
 
 fn colab_offers(account: &crate::jobs::colab_account::Account) -> Vec<Offer> {
@@ -729,5 +815,39 @@ mod tests {
         assert_eq!(offers[1].runway_hours, Some(20.0));
         assert_eq!(offers[1].available, Some(false));
         assert!(offers[1].estimated);
+    }
+
+    #[test]
+    fn kaggle_offers_are_free_and_sum_quota_across_accounts() {
+        use crate::jobs::kaggle::{AccountStatus, Quota, QuotaLine};
+        let account = |name: &str, left: f64, error: Option<&str>| AccountStatus {
+            username: name.into(),
+            method: "token".into(),
+            active: false,
+            quota: Some(Quota {
+                gpu: Some(QuotaLine {
+                    used_hours: 30.0 - left,
+                    remaining_hours: left,
+                    total_hours: 30.0,
+                }),
+                tpu: None,
+                refresh_at: None,
+            }),
+            error: error.map(str::to_string),
+        };
+        let offers = kaggle_offers(&[
+            account("a", 10.0, None),
+            account("b", 12.5, None),
+            account("c", 30.0, Some("bad token")),
+        ]);
+        let t4 = offers.iter().find(|o| o.flavor == "t4").unwrap();
+        assert_eq!(t4.usd_per_hour, Some(0.0));
+        assert_eq!(t4.gpu.as_deref(), Some("T4"));
+        assert_eq!(t4.gpu_count, 2);
+        assert_eq!(t4.runway_hours, Some(22.5));
+        assert_eq!(t4.available, Some(true));
+        assert!(offers
+            .iter()
+            .all(|o| o.flavor != "cpu" && o.flavor != "tpu"));
     }
 }

@@ -164,7 +164,7 @@ pub async fn run(args: crate::SuperviseArgs) -> Result<()> {
     }
     if matches!(
         descriptor.kind.as_str(),
-        "local_job" | "tinker_job" | "colab_job"
+        "local_job" | "tinker_job" | "colab_job" | "kaggle_job"
     ) {
         return run_local(store, stored, descriptor, run_id).await;
     }
@@ -1314,7 +1314,7 @@ async fn run_local(
     let mut last_status = status_of(&stored)?;
     let mut cancel_sent = false;
     // Only a run on this machine competes with it for memory; a controller's
-    // payload (Tinker, Colab) runs elsewhere.
+    // payload (Tinker, Colab, Kaggle) runs elsewhere.
     let mut memory_guard = (descriptor.kind == "local_job").then(MemoryGuard::default);
 
     loop {
