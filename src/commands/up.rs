@@ -5426,6 +5426,7 @@ async fn set_dashboard_locale(Json(SetLocaleReq { locale }): Json<SetLocaleReq>)
     tokio::task::spawn_blocking(move || {
         crate::telemetry::set_dashboard_locale(&locale)
             .map_err(|e| ApiError::from(anyhow!("could not save the dashboard locale: {e}")))?;
+        crate::telemetry::capture("dashboard_locale", json!({}));
         Ok(Json(json!({ "locale": locale })))
     })
     .await
@@ -6553,7 +6554,7 @@ async fn create_remote_session(
     if host.is_empty() {
         return Err(bad_request("host is required"));
     }
-    require_configured_ssh_host(&host)?;
+    require_configured_ssh_host(&host).await?;
     let (created, session) = state
         .remote_sessions
         .create(host, req.ui_preferences, None)
