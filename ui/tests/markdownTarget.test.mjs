@@ -68,6 +68,19 @@ test("re-resolved markdown paths are decoded only once", () => {
   assert.equal(docLink(encodeMarkdownPath(figure.path)), "docs/figures/chart#1.png");
 });
 
+test("chat file links decode reserved filename characters without a resolver", () => {
+  for (const [target, filename] of [
+    ["chart%231.png", "chart#1.png"],
+    ["chart%3F1.png", "chart?1.png"],
+    ["chart%26draft.png", "chart&draft.png"],
+    ["chart%3A42.py", "chart:42.py"],
+    ["chart%25231.png", "chart%231.png"],
+  ]) {
+    assert.equal(citedFilePath(target), filename);
+  }
+  assert.equal(citedFilePath("bad%escape.png"), null);
+});
+
 test("inline html figure assets resolve relative to the figure once", () => {
   const asset = (source, src) => chatImageTarget(htmlFigureAssetTarget(source, src));
   assert.deepEqual(asset("my%20figs/plot.html", "chart%231.png#x"), {
