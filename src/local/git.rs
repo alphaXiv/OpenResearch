@@ -832,7 +832,8 @@ fn initialize(path: &Path, state: RepositoryState) -> Result<()> {
             let git_dir = root.join(".git");
             std::fs::create_dir(&git_dir)?;
             created_git_dir = Some(git_dir);
-            git(Some(&root), &["init", "-b", "main"])?;
+            git(Some(&root), &["init"])?;
+            git(Some(&root), &["symbolic-ref", "HEAD", "refs/heads/main"])?;
         }
         if snapshot.write_git_exclude {
             let exclude_path = repository_exclude_path(&root)?;
@@ -2508,6 +2509,20 @@ mod tests {
             error.ends_with("failed: exit status: 1") || error.ends_with("failed: exit code: 1"),
             "{error}"
         );
+    }
+
+    #[test]
+    fn initialize_new_repository_commits_on_main() {
+        let dir = std::env::temp_dir().join(format!("orx-git-initialize-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        write(&dir, "seed.txt", "seed\n");
+
+        initialize_repository(&dir).unwrap();
+
+        assert_eq!(repository_state(&dir), RepositoryState::Ready);
+        assert_eq!(require_current_branch(&dir).unwrap(), "main");
+        assert_eq!(git(Some(&dir), &["show", "HEAD:seed.txt"]).unwrap(), "seed");
+        let _ = std::fs::remove_dir_all(dir);
     }
 
     #[test]

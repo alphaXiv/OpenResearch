@@ -86,6 +86,7 @@ export function NewProjectForm({
   const [path, setPath] = useState("");
   const [pathTouched, setPathTouched] = useState(false);
   const [pickingFolder, setPickingFolder] = useState(false);
+  const [folderPickerFailed, setFolderPickerFailed] = useState(false);
   const [pending, setPending] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [advancedOpen, setAdvancedOpen] = useState(false);
@@ -221,6 +222,7 @@ export function NewProjectForm({
       }
     } catch (err) {
       if (request === folderPickSeq.current) {
+        setFolderPickerFailed(true);
         setError(err instanceof Error ? err.message : String(err));
       }
     } finally {
@@ -483,7 +485,7 @@ export function NewProjectForm({
                 </span>
               )}
             </label>
-          ) : mode === "folder" && !remote ? (
+          ) : mode === "folder" && !remote && !folderPickerFailed ? (
             <button
               data-initial-focus
               type="button"

@@ -55,6 +55,10 @@ fn windows_picker_command(script: &str) -> Command {
 
 #[cfg(not(any(target_os = "macos", target_os = "windows")))]
 pub fn pick_folder() -> Result<Option<PathBuf>> {
+    require_display(
+        std::env::var_os("DISPLAY").as_deref(),
+        std::env::var_os("WAYLAND_DISPLAY").as_deref(),
+    )?;
     for (program, args) in [
         (
             "zenity",
@@ -101,6 +105,41 @@ pub fn pick_folder() -> Result<Option<PathBuf>> {
     Err(anyhow!(
         "No native folder picker is available. Install zenity or kdialog, then try again."
     ))
+}
+
+#[cfg(not(any(target_os = "macos", target_os = "windows")))]
+fn require_display(
+    display: Option<&std::ffi::OsStr>,
+    wayland_display: Option<&std::ffi::OsStr>,
+) -> Result<()> {
+    if [display, wayland_display]
+        .into_iter()
+        .flatten()
+        .any(|value| !value.is_empty())
+    {
+        return Ok(());
+    }
+    Err(anyhow!(
+        "No graphical display is available for the folder picker. Enter the project folder path manually."
+    ))
+}
+
+#[cfg(all(test, not(any(target_os = "macos", target_os = "windows"))))]
+mod tests {
+    use super::*;
+    use std::ffi::OsStr;
+
+    #[test]
+    fn headless_picker_requires_a_display() {
+        for (display, wayland_display) in [(None, None), (Some(OsStr::new("")), None)] {
+            let error = require_display(display, wayland_display).unwrap_err();
+            assert!(error
+                .to_string()
+                .contains("Enter the project folder path manually"));
+        }
+        assert!(require_display(Some(OsStr::new(":0")), None).is_ok());
+        assert!(require_display(None, Some(OsStr::new("wayland-0"))).is_ok());
+    }
 }
 
 #[cfg(all(test, target_os = "windows"))]
