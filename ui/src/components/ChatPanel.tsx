@@ -4204,15 +4204,15 @@ const blankStarterPrompts = (): StarterPrompt[] => [
   { title: m.chat_panel_starter_blank_3_title(), prompt: m.chat_panel_starter_blank_3_prompt() },
   { title: m.chat_panel_starter_blank_4_title(), prompt: m.chat_panel_starter_blank_4_prompt() },
 ];
-// One outline colour per step so the four boxes read as distinct choices.
+// Color accents distinguish the research starting points on hover.
 const STARTER_TONES = [
-  { box: "border-accent-blue/45", icon: "text-accent-blue" },
-  { box: "border-accent-green/45", icon: "text-accent-green" },
-  { box: "border-accent-amber/45", icon: "text-accent-amber" },
-  { box: "border-primary/45", icon: "text-primary" },
+  { box: "hover:border-accent-blue/45", icon: "text-accent-blue" },
+  { box: "hover:border-accent-green/45", icon: "text-accent-green" },
+  { box: "hover:border-accent-amber/45", icon: "text-accent-amber" },
+  { box: "hover:border-primary/45", icon: "text-primary" },
 ];
 const STARTER_GRID_CLASS =
-  "mt-7 grid w-full max-w-readable grid-cols-1 gap-3 sm:grid-cols-2";
+  "mt-7 grid w-full max-w-readable grid-cols-1 gap-3 @min-[36rem]:grid-cols-2";
 
 /** Reconcile the settings attached to a selected model without treating the
  * catalog as an allowlist. The picker deliberately accepts free-form ids, so
@@ -6279,11 +6279,11 @@ export function ChatPanel({
   }, [sidebarGrouping, railOpen, embedded, lastVisibleIndex, sidebarRows.length, flatSessions.hasNextPage, flatSessions.isFetching, flatSessions.isError, flatSessions.fetchNextPage]);
 
   const rail = (
-    <aside className="session-rail w-75 shrink-0 flex flex-col mt-5 mac-titlebar:mt-8 me-3.5 mb-5 ms-0 bg-background min-h-0 [&_.rail-body]:flex-1 [&_.rail-body]:min-h-0 [&_.rail-body]:pt-0 [&_.rail-body]:pb-0 [&_.rail-body]:ps-2 [&_.rail-body]:pe-1 border border-border rounded-lg overflow-visible shadow-elevated">
+    <aside className="session-rail w-68 shrink-0 flex flex-col mt-5 mac-titlebar:mt-8 me-3.5 mb-5 ms-0 bg-background min-h-0 [&_.rail-body]:flex-1 [&_.rail-body]:min-h-0 [&_.rail-body]:pt-0 [&_.rail-body]:pb-0 [&_.rail-body]:ps-2 [&_.rail-body]:pe-1 border border-border rounded-lg overflow-visible shadow-elevated">
       {railHeader}
-      <nav className="rail-nav flex flex-col gap-0.5 p-2 shrink-0">
+      <nav className="rail-nav flex flex-col gap-1 p-3 shrink-0 border-b border-border-variant">
         <button
-          className="rail-nav-item flex items-center gap-2.5 py-[7px] px-2.5 text-base text-text rounded-md text-start hover:bg-surface [&[data-tip]::after]:top-auto [&[data-tip]::after]:bottom-[calc(100%_+_6px)]"
+          className="rail-nav-item flex items-center gap-2.5 py-2.5 px-3 mb-1 text-sm font-medium text-primary bg-primary-subtle rounded-lg text-start hover:bg-primary-subtle/70 [&[data-tip]::after]:top-auto [&[data-tip]::after]:bottom-[calc(100%_+_6px)]"
           data-onboarding="new-session"
           data-tip={newTaskShortcut}
           aria-keyshortcuts="Meta+Shift+Enter Control+Shift+Enter"
@@ -6293,7 +6293,8 @@ export function ChatPanel({
           {m.chat_panel_new_chat()}
         </button>
         <button
-          className={`rail-nav-item flex items-center gap-2.5 py-[7px] px-2.5 text-base text-text rounded-md text-start [&:hover:not(.active)]:bg-surface [&.active]:bg-panel [&.active]:font-medium ${mainView === "skills" ? "active" : ""}`}
+          className={`rail-nav-item flex items-center gap-2.5 py-2 px-3 text-sm text-subtext rounded-md text-start [&:hover:not(.active)]:bg-surface [&:hover]:text-text [&.active]:bg-surface [&.active]:text-text [&.active]:font-medium ${mainView === "skills" ? "active" : ""}`}
+          aria-current={mainView === "skills" ? "page" : undefined}
           onClick={() => onSelectMainView("skills")}
         >
           <Blocks size={15} />
@@ -6302,7 +6303,8 @@ export function ChatPanel({
         {SETTINGS_NAV.map((item) => (
           <button
             key={item.id}
-            className={`rail-nav-item flex items-center gap-2.5 py-[7px] px-2.5 text-base text-text rounded-md text-start [&:hover:not(.active)]:bg-surface [&.active]:bg-panel [&.active]:font-medium ${mainView !== "chat" && mainView !== "skills" && item.activeTabs.includes(mainView) ? "active" : ""}`}
+            className={`rail-nav-item flex items-center gap-2.5 py-2 px-3 text-sm text-subtext rounded-md text-start [&:hover:not(.active)]:bg-surface [&:hover]:text-text [&.active]:bg-surface [&.active]:text-text [&.active]:font-medium ${mainView !== "chat" && mainView !== "skills" && item.activeTabs.includes(mainView) ? "active" : ""}`}
+            aria-current={mainView !== "chat" && mainView !== "skills" && item.activeTabs.includes(mainView) ? "page" : undefined}
             data-onboarding={item.id === "compute" ? "nav-compute" : undefined}
             onClick={() => onSelectMainView(item.id)}
           >
@@ -6557,18 +6559,19 @@ export function ChatPanel({
             <p className="m-0 text-balance">{m.side_chat_empty()}</p>
           </div>
         ) : !threadMounted ? (
-          <div className="chat-empty flex-1 flex flex-col items-center justify-center text-text p-8 text-center [&_h2]:m-0 [&_h2]:text-5xl [&_h2]:font-medium [&_h2]:tracking-[-0.015em] [&_h2]:text-text">
-            <div className="chat-empty-mark w-10.5 h-10.5 mb-5.5 [&_svg]:block [&_svg]:w-full [&_svg]:h-full">
+          <div className="chat-empty @container flex-1 min-h-0 overflow-y-auto flex flex-col items-center text-text px-6 py-10 text-center [@media(max-height:800px)]:py-4">
+            <div className="chat-empty-mark [@media(max-height:800px)]:hidden mt-auto flex size-16 shrink-0 items-center justify-center mb-5 rounded-2xl border border-border-variant bg-background shadow-control-subtle text-primary [&_svg]:block [&_svg]:size-9">
               <BrandMark />
             </div>
-            <h2>{m.chat_panel_what_should_we_research()}</h2>
+            <h2 className="m-0 text-3xl font-medium tracking-tight text-balance text-text @min-[36rem]:text-4xl">{m.chat_panel_what_should_we_research()}</h2>
+            <p className="mt-3 mb-0 max-w-105 text-sm leading-relaxed text-subtext">{starterLoading || starterPrompts?.length ? m.chat_panel_start_hint() : m.onboarding_the_local_first_workspace_for_research_agents()}</p>
             {starterLoading && (
               <>
                 <div className={STARTER_GRID_CLASS} aria-hidden="true">
                   {STARTER_ICONS.map((Icon, index) => (
                     <div
                       key={index}
-                      className={`flex min-h-22 animate-pulse flex-col items-start justify-center gap-2.5 rounded-xl border bg-background px-5 py-4 ${STARTER_TONES[index].box}`}
+                      className="flex min-h-32 motion-safe:animate-pulse flex-col items-start justify-center gap-2.5 rounded-xl border border-border-variant bg-background px-5 py-4"
                     >
                       <span className={`flex w-full items-center gap-2.5 ${STARTER_TONES[index].icon}`}>
                         <Icon size={17} />
@@ -6605,14 +6608,14 @@ export function ChatPanel({
                     <div key={index} className="relative min-w-0">
                       <button
                         type="button"
-                        className={`flex h-full min-h-22 w-full min-w-0 cursor-pointer flex-col items-start justify-center gap-1.5 rounded-xl border bg-background py-4 ps-5 pe-11 text-start font-sans transition-colors duration-120 ease-standard hover:bg-surface ${tone.box}`}
+                        className={`group flex h-full min-h-32 w-full min-w-0 cursor-pointer flex-col items-start gap-3 rounded-xl border border-border-variant bg-background py-4 ps-4 pe-10 text-start font-sans shadow-hairline transition-[background,border-color,box-shadow] duration-150 hover:bg-surface hover:shadow-control-subtle ${tone.box}`}
                         onClick={() => pickStarter(false)}
                       >
-                        <span className="flex items-center gap-2.5 text-base font-medium text-text">
-                          <Icon size={17} className={tone.icon} />
+                        <span className="flex items-center gap-2.5 text-sm font-semibold text-text">
+                          <Icon size={18} className={`shrink-0 ${tone.icon}`} />
                           {item.title}
                         </span>
-                        <span className="w-full truncate text-sm text-subtext">{item.prompt}</span>
+                        <span className="line-clamp-3 w-full text-sm leading-relaxed text-subtext">{item.prompt}</span>
                       </button>
                       <IconButton
                         size="small"
@@ -6628,6 +6631,7 @@ export function ChatPanel({
                 })}
               </div>
             )}
+            <div className="mb-auto" />
           </div>
         ) : (
           <div

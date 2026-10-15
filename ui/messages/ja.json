@@ -1523,5 +1523,14 @@
   "research_replace": "既存の指標を置換",
   "research_importing": "インポート中…",
   "research_file_too_large": "指標が 64 KiB の上限を超えています。",
-  "settings_kaggle_live_kernel_detail": "{account} · {title}"
+  "settings_kaggle_live_kernel_detail": "{account} · {title}",
+  "experiments_search": "実験を検索…",
+  "experiments_clear_search": "検索をクリア",
+  "experiments_result_count": "{count} 件の実験が見つかりました",
+  "experiments_no_matches": "条件に一致する実験はありません。",
+  "experiments_reset_filters": "フィルターをリセット",
+  "chat_panel_start_hint": "質問やアイデアから始めるか、以下の候補を選んでください。",
+  "experiments_sort": "実験の並べ替え",
+  "experiments_sort_recent": "最近のアクティビティ",
+  "experiments_sort_name": "名前"
 }

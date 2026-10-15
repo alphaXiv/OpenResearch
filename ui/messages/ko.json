@@ -1523,5 +1523,14 @@
   "research_replace": "기존 지표 교체",
   "research_importing": "가져오는 중…",
   "research_file_too_large": "지표가 64 KiB 제한을 초과합니다.",
-  "settings_kaggle_live_kernel_detail": "{account} · {title}"
+  "settings_kaggle_live_kernel_detail": "{account} · {title}",
+  "experiments_search": "실험 검색…",
+  "experiments_clear_search": "검색 지우기",
+  "experiments_result_count": "실험 {count}개 검색됨",
+  "experiments_no_matches": "필터와 일치하는 실험이 없습니다.",
+  "experiments_reset_filters": "필터 초기화",
+  "chat_panel_start_hint": "질문이나 아이디어로 시작하거나 아래에서 시작점을 선택하세요.",
+  "experiments_sort": "실험 정렬",
+  "experiments_sort_recent": "최근 활동",
+  "experiments_sort_name": "이름"
 }

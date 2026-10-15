@@ -1523,5 +1523,14 @@
   "research_replace": "Reemplazar métricas existentes",
   "research_importing": "Importando…",
   "research_file_too_large": "Las métricas superan el límite de 64 KiB.",
-  "settings_kaggle_live_kernel_detail": "{account} · {title}"
+  "settings_kaggle_live_kernel_detail": "{account} · {title}",
+  "experiments_search": "Buscar experimentos…",
+  "experiments_clear_search": "Borrar búsqueda",
+  "experiments_result_count": "{count} experimentos encontrados",
+  "experiments_no_matches": "Ningún experimento coincide con estos filtros.",
+  "experiments_reset_filters": "Restablecer filtros",
+  "chat_panel_start_hint": "Empieza con una pregunta, explora una idea o elige un punto de partida.",
+  "experiments_sort": "Ordenar experimentos",
+  "experiments_sort_recent": "Actividad reciente",
+  "experiments_sort_name": "Nombre"
 }

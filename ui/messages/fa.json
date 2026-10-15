@@ -1523,5 +1523,14 @@
   "research_replace": "جایگزینی سنجه‌های موجود",
   "research_importing": "در حال ورود…",
   "research_file_too_large": "سنجه‌ها از سقف 64 KiB بیشتر هستند.",
-  "settings_kaggle_live_kernel_detail": "{account} · {title}"
+  "settings_kaggle_live_kernel_detail": "{account} · {title}",
+  "experiments_search": "جستجوی آزمایش‌ها…",
+  "experiments_clear_search": "پاک کردن جستجو",
+  "experiments_result_count": "{count} آزمایش پیدا شد",
+  "experiments_no_matches": "هیچ آزمایشی با این فیلترها مطابقت ندارد.",
+  "experiments_reset_filters": "بازنشانی فیلترها",
+  "chat_panel_start_hint": "با یک سؤال یا ایده شروع کنید، یا یکی از گزینه‌های زیر را انتخاب کنید.",
+  "experiments_sort": "مرتب‌سازی آزمایش‌ها",
+  "experiments_sort_recent": "فعالیت اخیر",
+  "experiments_sort_name": "نام"
 }

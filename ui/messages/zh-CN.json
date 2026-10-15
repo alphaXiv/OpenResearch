@@ -1523,5 +1523,14 @@
   "research_replace": "替换已有指标",
   "research_importing": "正在导入…",
   "research_file_too_large": "指标超过 64 KiB 限制。",
-  "settings_kaggle_live_kernel_detail": "{account} · {title}"
+  "settings_kaggle_live_kernel_detail": "{account} · {title}",
+  "experiments_search": "搜索实验…",
+  "experiments_clear_search": "清除搜索",
+  "experiments_result_count": "找到 {count} 个实验",
+  "experiments_no_matches": "没有符合这些筛选条件的实验。",
+  "experiments_reset_filters": "重置筛选",
+  "chat_panel_start_hint": "从一个问题或想法开始，或选择下方的起点。",
+  "experiments_sort": "实验排序",
+  "experiments_sort_recent": "最近活动",
+  "experiments_sort_name": "名称"
 }
