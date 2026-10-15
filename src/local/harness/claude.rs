@@ -1919,7 +1919,28 @@ fn apply_event(ctx: &mut TurnCtx, state: &mut TurnState, event: &Value) -> bool 
                         .and_then(Value::as_str)
                         .unwrap_or(subtype)
                         .to_string();
-                    ctx.push_error(format!("claude: {detail}"));
+                    if is_transient_api_error(event, &detail) {
+                        let detail = detail.trim();
+                        ctx.assistant.parts.retain(|part| {
+                            part.kind != "text"
+                                || part
+                                    .text
+                                    .as_deref()
+                                    .is_none_or(|text| text.trim() != detail)
+                        });
+                        let mut part = WirePart::tool(
+                            format!("api-error-{}", ctx.assistant.parts.len()),
+                            "api_error",
+                            "error",
+                            Some(detail.to_string()),
+                        );
+                        if let Some(state) = part.state.as_mut() {
+                            state.title = Some("Temporary API error".into());
+                        }
+                        ctx.assistant.parts.push(part);
+                    } else {
+                        ctx.push_error(format!("claude: {detail}"));
+                    }
                 }
             }
             state.had_activity |= report_result_usage(ctx, event).is_some_and(|used| used > 0);
@@ -1934,6 +1955,24 @@ fn apply_event(ctx: &mut TurnCtx, state: &mut TurnState, event: &Value) -> bool 
         _ => {}
     }
     false
+}
+
+fn is_transient_api_error(event: &Value, detail: &str) -> bool {
+    let api_failure = event.get("terminal_reason").and_then(Value::as_str) == Some("api_error")
+        || detail.trim_start().starts_with("API Error:");
+    let detail = detail.to_ascii_lowercase();
+    api_failure
+        && [
+            "connection to the api was lost",
+            "connection dropped",
+            "enotfound",
+            "eai_again",
+            "econnreset",
+            "etimedout",
+            "socket hang up",
+        ]
+        .iter()
+        .any(|marker| detail.contains(marker))
 }
 
 fn mark_stream_final(ctx: &mut TurnCtx, state: &TurnState) {
@@ -2935,6 +2974,67 @@ mod tests {
             err.state.as_ref().unwrap().error.as_deref(),
             Some("claude: boom")
         );
+    }
+
+    #[test]
+    fn transient_api_result_replaces_duplicate_text_with_retryable_status() {
+        for detail in [
+            "API Error: Connection to the API was lost (ENOTFOUND). This is usually temporary — try again.",
+            "API Error: Connection dropped (ECONNRESET)",
+            "API Error: Connection dropped",
+            "API Error: EAI_AGAIN",
+            "API Error: ETIMEDOUT",
+            "API Error: socket hang up",
+        ] {
+            let assistant = serde_json::json!({
+                "type": "assistant",
+                "message": {
+                    "id": "msg_api",
+                    "content": [{"type": "text", "text": "Earlier useful output"}, {"type": "text", "text": detail}]
+                }
+            });
+            let result = serde_json::json!({
+                "type": "result",
+                "subtype": "error_during_execution",
+                "is_error": true,
+                "terminal_reason": "api_error",
+                "session_id": "sess-retry",
+                "result": detail
+            });
+            let mut ctx = TurnCtx::test_stub();
+            let mut state = TurnState::default();
+            assert!(!apply_event(&mut ctx, &mut state, &assistant));
+            assert!(apply_event(&mut ctx, &mut state, &result));
+            assert!(state.saw_result && state.turn_errored && !state.auth_failed);
+            assert_eq!(state.native_session_id.as_deref(), Some("sess-retry"));
+            assert_eq!(ctx.assistant.parts.len(), 2);
+            assert_eq!(ctx.assistant.parts[0].text.as_deref(), Some("Earlier useful output"));
+            let part = &ctx.assistant.parts[1];
+            assert_eq!(part.tool.as_deref(), Some("api_error"));
+            assert_eq!(part.state.as_ref().unwrap().error.as_deref(), Some(detail));
+        }
+    }
+
+    #[test]
+    fn transient_api_classification_keeps_other_failures_generic() {
+        for detail in [
+            "API Error: Invalid API key",
+            "API Error: Invalid model",
+            "Bash failed: ENOTFOUND",
+        ] {
+            let event = serde_json::json!({"type": "result", "is_error": true, "result": detail});
+            let mut ctx = TurnCtx::test_stub();
+            assert!(apply_event(&mut ctx, &mut TurnState::default(), &event));
+            assert_eq!(ctx.assistant.parts[0].tool.as_deref(), Some("error"));
+        }
+        assert!(is_transient_api_error(
+            &serde_json::json!({"terminal_reason": "api_error"}),
+            "ECONNRESET"
+        ));
+        assert!(!is_transient_api_error(
+            &serde_json::json!({"terminal_reason": "api_error"}),
+            "Not logged in"
+        ));
     }
 
     #[test]

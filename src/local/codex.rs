@@ -177,6 +177,11 @@ pub struct CodexClient {
     /// to the wrapper alone, so teardown must signal the whole group.
     #[cfg(unix)]
     process_group_id: u32,
+    /// Windows has no process groups: the npm `codex.cmd` chain's native
+    /// descendants are confined to this Job Object so `terminate()` can kill
+    /// the tree (OR-409). `None` if job enrollment failed at spawn.
+    #[cfg(windows)]
+    job: Option<std::os::windows::io::OwnedHandle>,
     /// Once set, the group id may be reused — never signal it again.
     terminated: AtomicBool,
     stdin: Mutex<ChildStdin>,
@@ -345,6 +350,22 @@ impl CodexClient {
             // SAFETY: spawn assigns the child its own process group before this id is captured.
             unsafe {
                 libc::kill(-process_group_id, libc::SIGKILL);
+            }
+        }
+        #[cfg(windows)]
+        match self.job.as_ref() {
+            // Kills the wrapper and every descendant it spawned, at once,
+            // then waits them out: the replacement's thread/resume must not
+            // race a still-exiting writer lock holder.
+            Some(job) => {
+                windows_job::terminate(job);
+                windows_job::drain(job).await;
+            }
+            // Job enrollment failed at spawn — best-effort tree kill.
+            None => {
+                if let Some(pid) = child.id() {
+                    windows_job::kill_tree(pid);
+                }
             }
         }
         let _ = child.start_kill();
@@ -692,6 +713,11 @@ async fn spawn_client(
     // tears the child's group down deliberately (terminate()).
     #[cfg(unix)]
     cmd.process_group(0);
+    // Windows has no process groups: spawn suspended so the npm wrapper's
+    // native descendants can be confined to a Job Object before any of them
+    // start (OR-409 — mirrors `jobs::localbox::windows`).
+    #[cfg(windows)]
+    cmd.creation_flags(windows_job::SPAWN_FLAGS);
 
     let mut child = cmd
         .spawn()
@@ -700,6 +726,14 @@ async fn spawn_client(
     let process_group_id = child
         .id()
         .ok_or_else(|| anyhow!("codex app-server: spawned child has no process id"))?;
+    #[cfg(windows)]
+    let job = {
+        let pid = child
+            .id()
+            .ok_or_else(|| anyhow!("codex app-server: spawned child has no process id"))?;
+        windows_job::enroll(&mut child, pid)
+            .map_err(|e| anyhow!("Could not spawn {} app-server: {}", bin.display(), e))?
+    };
     let stdout = child
         .stdout
         .take()
@@ -713,6 +747,8 @@ async fn spawn_client(
         child: Mutex::new(child),
         #[cfg(unix)]
         process_group_id,
+        #[cfg(windows)]
+        job,
         terminated: AtomicBool::new(false),
         stdin: Mutex::new(stdin),
         next_id: AtomicI64::new(1),
@@ -1013,9 +1049,217 @@ impl CodexHost {
     }
 }
 
+/// Windows process-tree teardown (OR-409). npm's `codex` is a `cmd.exe` shim
+/// spawning `node.exe`/`codex.exe`; a wrapper-only kill orphans the native
+/// app-server, which keeps the thread's writer lock and breaks the
+/// replacement's `thread/resume`. The Job Object (`KILL_ON_JOB_CLOSE`)
+/// confines the whole tree: `TerminateJobObject` kills every descendant, and
+/// orx's own death can't orphan them either. Mirrors
+/// `crate::jobs::localbox::windows`.
+#[cfg(windows)]
+mod windows_job {
+    use std::io;
+    use std::os::windows::io::{AsRawHandle, FromRawHandle, OwnedHandle};
+    use std::time::Duration;
+
+    use windows_sys::Win32::Foundation::{HANDLE, INVALID_HANDLE_VALUE};
+    use windows_sys::Win32::System::Diagnostics::ToolHelp::{
+        CreateToolhelp32Snapshot, Thread32First, Thread32Next, TH32CS_SNAPTHREAD, THREADENTRY32,
+    };
+    use windows_sys::Win32::System::JobObjects::{
+        AssignProcessToJobObject, CreateJobObjectW, JobObjectBasicAccountingInformation,
+        JobObjectExtendedLimitInformation, QueryInformationJobObject, SetInformationJobObject,
+        TerminateJobObject, JOBOBJECT_BASIC_ACCOUNTING_INFORMATION,
+        JOBOBJECT_EXTENDED_LIMIT_INFORMATION, JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE,
+    };
+    use windows_sys::Win32::System::Threading::{
+        OpenThread, ResumeThread, CREATE_NO_WINDOW, CREATE_SUSPENDED, THREAD_SUSPEND_RESUME,
+    };
+
+    use crate::error::{anyhow, Result};
+
+    use super::Child;
+
+    /// Suspended until the child is inside the job — a runnable npm wrapper
+    /// could spawn its native descendants before enrollment; no console
+    /// window, matching the localbox spawns.
+    pub(super) const SPAWN_FLAGS: u32 = CREATE_SUSPENDED | CREATE_NO_WINDOW;
+
+    fn own(handle: HANDLE) -> io::Result<OwnedHandle> {
+        if handle.is_null() || handle == INVALID_HANDLE_VALUE {
+            return Err(io::Error::last_os_error());
+        }
+        // SAFETY: callers pass newly opened handles, transferred exactly once.
+        Ok(unsafe { OwnedHandle::from_raw_handle(handle) })
+    }
+
+    /// Confine a suspended `child`'s process tree to a fresh Job Object, then
+    /// resume it. Job-setup failure degrades to `Ok(None)` — `terminate()`
+    /// falls back to `kill_tree`; a resume failure is fatal (`Err`) because a
+    /// suspended child can never answer a request.
+    pub(super) fn enroll(child: &mut Child, pid: u32) -> Result<Option<OwnedHandle>> {
+        let assigned = (|| -> Result<OwnedHandle> {
+            // Anonymous job: the handle lives only on the client.
+            let job = own(unsafe { CreateJobObjectW(std::ptr::null(), std::ptr::null()) })?;
+            let mut limits = JOBOBJECT_EXTENDED_LIMIT_INFORMATION::default();
+            limits.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
+            // SAFETY: limits is live and correctly sized for the class requested.
+            if unsafe {
+                SetInformationJobObject(
+                    job.as_raw_handle(),
+                    JobObjectExtendedLimitInformation,
+                    std::ptr::from_ref(&limits).cast(),
+                    std::mem::size_of_val(&limits) as u32,
+                )
+            } == 0
+            {
+                return Err(io::Error::last_os_error().into());
+            }
+            let handle = child
+                .raw_handle()
+                .ok_or_else(|| anyhow!("codex app-server: spawned child has no handle"))?;
+            // SAFETY: both handles are live; the suspended child cannot have
+            // spawned descendants outside the job yet.
+            if unsafe { AssignProcessToJobObject(job.as_raw_handle(), handle) } == 0 {
+                return Err(io::Error::last_os_error().into());
+            }
+            Ok(job)
+        })();
+        if let Err(error) = resume(pid) {
+            // A suspended child would hang every request — kill it.
+            let _ = child.start_kill();
+            return Err(error.context("codex app-server: could not resume spawned child"));
+        }
+        match assigned {
+            Ok(job) => Ok(Some(job)),
+            Err(error) => {
+                eprintln!("orx up: codex app-server job setup failed: {error}");
+                Ok(None)
+            }
+        }
+    }
+
+    /// Resume the suspended spawn's threads (the toolhelp enumeration from
+    /// `jobs::localbox::windows::resume`).
+    fn resume(pid: u32) -> Result<()> {
+        // SAFETY: the snapshot owns no process resources and is closed by OwnedHandle.
+        let snapshot = own(unsafe { CreateToolhelp32Snapshot(TH32CS_SNAPTHREAD, 0) })?;
+        let mut entry = THREADENTRY32 {
+            dwSize: std::mem::size_of::<THREADENTRY32>() as u32,
+            ..Default::default()
+        };
+        // SAFETY: entry has the required size and remains writable throughout enumeration.
+        let mut found = unsafe { Thread32First(snapshot.as_raw_handle(), &mut entry) };
+        let mut resumed = false;
+        while found != 0 {
+            if entry.th32OwnerProcessID == pid {
+                // SAFETY: this is the primary thread of our still-suspended child.
+                let thread =
+                    own(unsafe { OpenThread(THREAD_SUSPEND_RESUME, 0, entry.th32ThreadID) })?;
+                // SAFETY: the thread handle has suspend/resume access.
+                let previous = unsafe { ResumeThread(thread.as_raw_handle()) };
+                if previous == u32::MAX {
+                    return Err(io::Error::last_os_error().into());
+                }
+                resumed |= previous == 1;
+            }
+            // SAFETY: same initialized entry and live snapshot as above.
+            found = unsafe { Thread32Next(snapshot.as_raw_handle(), &mut entry) };
+        }
+        if resumed {
+            Ok(())
+        } else {
+            Err(anyhow!("codex app-server: no suspended thread to resume"))
+        }
+    }
+
+    /// Kill every process the job confines — npm wrapper and all descendants.
+    pub(super) fn terminate(job: &OwnedHandle) {
+        // SAFETY: our job handle; terminating an already-empty job is a no-op.
+        if unsafe { TerminateJobObject(job.as_raw_handle(), 1) } == 0 {
+            eprintln!(
+                "orx up: codex app-server job terminate failed: {}",
+                io::Error::last_os_error()
+            );
+        }
+    }
+
+    /// Wait until the job's tree is empty — the wrapper's exit does not mean
+    /// its descendants finished exiting, and the native app-server must be
+    /// fully gone (writer lock released) before a replacement resumes.
+    pub(super) async fn drain(job: &OwnedHandle) {
+        for _ in 0..250 {
+            if active_processes(job) == 0 {
+                return;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        eprintln!("orx up: timed out draining codex app-server's process tree");
+    }
+
+    /// Fallback for an unenrolled child: `taskkill /T` the tree. `/T` fails if
+    /// any descendant already exited, so the result is not checked — the
+    /// caller still reaps the wrapper.
+    pub(super) fn kill_tree(pid: u32) {
+        use std::os::windows::process::CommandExt;
+        let _ = std::process::Command::new("taskkill")
+            .args(["/PID", &pid.to_string(), "/T", "/F"])
+            .creation_flags(CREATE_NO_WINDOW)
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status();
+    }
+
+    /// Processes still confined by the job — `drain` waits for this to reach
+    /// zero, and the tests assert teardown empties it.
+    pub(super) fn active_processes(job: &OwnedHandle) -> u32 {
+        let mut info = JOBOBJECT_BASIC_ACCOUNTING_INFORMATION::default();
+        // SAFETY: info is writable and its size matches the class requested.
+        if unsafe {
+            QueryInformationJobObject(
+                job.as_raw_handle(),
+                JobObjectBasicAccountingInformation,
+                std::ptr::from_mut(&mut info).cast(),
+                std::mem::size_of_val(&info) as u32,
+                std::ptr::null_mut(),
+            )
+        } == 0
+        {
+            return u32::MAX;
+        }
+        info.ActiveProcesses
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(windows)]
+    use std::os::windows::io::OwnedHandle;
+
+    #[cfg(windows)]
+    fn windows_test_client(mut child: Child, job: Option<OwnedHandle>) -> Arc<CodexClient> {
+        let stdin = child.stdin.take().unwrap();
+        Arc::new(CodexClient {
+            child: Mutex::new(child),
+            job,
+            terminated: AtomicBool::new(false),
+            stdin: Mutex::new(stdin),
+            next_id: AtomicI64::new(1),
+            pending: std::sync::Mutex::new(HashMap::new()),
+            turn: std::sync::Mutex::new(None),
+            unanswered: std::sync::Mutex::new(HashMap::new()),
+            active_turn: std::sync::Mutex::new(None),
+            resumed_thread: std::sync::Mutex::new(None),
+            thread_model: std::sync::Mutex::new(None),
+            last_collab_mode: std::sync::Mutex::new(None),
+            native_store: NativeStore::Isolated,
+            session_id: String::new(),
+            turn_models: std::sync::Mutex::new(HashMap::new()),
+            last_active: std::sync::Mutex::new(Instant::now()),
+        })
+    }
 
     #[cfg(unix)]
     fn idle_test_client(last_active: Instant) -> Arc<CodexClient> {
@@ -1199,6 +1443,50 @@ mod tests {
             eof.is_ok(),
             "native child {} survived terminate",
             native_pid.trim()
+        );
+    }
+
+    /// The npm `codex.cmd` shape (OR-409): a `cmd.exe` wrapper whose native
+    /// child (`timeout.exe`) survives a wrapper-only kill while holding the
+    /// thread's writer lock. The Job Object must empty the whole tree.
+    #[cfg(windows)]
+    #[tokio::test]
+    async fn terminate_kills_the_native_child_behind_a_wrapper() {
+        let mut command = Command::new("cmd");
+        command
+            .args(["/c", "timeout /t 600 > nul"])
+            .stdin(Stdio::piped())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .creation_flags(windows_job::SPAWN_FLAGS);
+        let mut child = command.spawn().unwrap();
+        let pid = child.id().unwrap();
+        let job = windows_job::enroll(&mut child, pid)
+            .unwrap()
+            .expect("job enrollment should succeed");
+        let client = windows_test_client(child, Some(job));
+
+        // Terminating before the wrapper spawns its native child would prove
+        // nothing — wait for the tree to hold both.
+        let job = client.job.as_ref().unwrap();
+        let mut populated = false;
+        for _ in 0..250 {
+            if windows_job::active_processes(job) >= 2 {
+                populated = true;
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        assert!(populated, "the wrapper never spawned its native child");
+
+        client.terminate().await;
+        // A second call must not signal the (possibly reused) job again.
+        client.terminate().await;
+        assert!(client.terminated.load(Ordering::Acquire));
+        assert_eq!(
+            windows_job::active_processes(job),
+            0,
+            "the wrapper's native child survived terminate"
         );
     }
 

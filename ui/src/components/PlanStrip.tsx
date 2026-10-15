@@ -104,6 +104,10 @@ export function PlanStrip({
             value={note}
             onChange={(e) => setNote(e.target.value)}
             onKeyDown={(e) => {
+              if (e.nativeEvent.isComposing || e.nativeEvent.keyCode === 229) {
+                e.stopPropagation();
+                return;
+              }
               if (e.key === "Escape") {
                 e.preventDefault();
                 setNote("");

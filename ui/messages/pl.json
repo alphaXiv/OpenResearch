@@ -134,6 +134,7 @@
   "chat_panel_stop": "Zatrzymaj",
   "chat_panel_submit": "Zatwierdź",
   "chat_panel_new_chat": "Nowy czat",
+  "chat_panel_temporary_api_error": "Połączenie przerwane — wyślij wiadomość ponownie.",
   "chat_panel_tool_failed": "Narzędzie zakończyło działanie błędem",
   "chat_panel_used_tools": "Użyte narzędzia",
   "chat_panel_view_full_plan": "Pokaż cały plan",

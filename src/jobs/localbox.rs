@@ -574,6 +574,60 @@ mod tests {
         #[cfg(unix)]
         assert_reaped(&failed);
 
+        #[cfg(windows)]
+        for (index, program) in [
+            "cmd".to_string(),
+            "cmd.exe".to_string(),
+            "CMD".to_string(),
+            "CMD.EXE".to_string(),
+            "cMd.ExE".to_string(),
+            "\"$COMSPEC\"".to_string(),
+            "\"${COMSPEC}\"".to_string(),
+            sh_quote(&std::env::var("COMSPEC").unwrap().replace('\\', "/")),
+            "\n\tcmd".to_string(),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            for code in [0, 7] {
+                let command = crate::local::bash::local_run_command(&format!(
+                    "{program} /c run_validation.cmd"
+                ))
+                .into_owned();
+                let batch = run_job(&LocalJobSpec {
+                    run_id: format!("batch-{index}-{code}"),
+                    script: format!(
+                        "unset MSYS2_ARG_CONV_EXCL\nmkdir repo; cd repo\n\
+                         printf '%s\\r\\n' '@echo off' 'echo batch-output' 'echo batch-result>result.txt' 'exit /b {code}' > run_validation.cmd\n\
+                         {command}\n\
+                         code=$?\n[ -z \"${{MSYS2_ARG_CONV_EXCL+x}}\" ] || exit 99\nexit \"$code\""
+                    ),
+                    env: HashMap::new(),
+                    secret_env: HashMap::new(),
+                })
+                .unwrap();
+                let state = wait_terminal(&batch);
+                assert_eq!(
+                    state.stage,
+                    if code == 0 { "COMPLETED" } else { "ERROR" },
+                    "{program}: {:?}",
+                    state.message
+                );
+                assert_eq!(
+                    state.message,
+                    (code != 0).then(|| format!("exited with code {code}"))
+                );
+                let log = std::fs::read_to_string(batch.join("log")).unwrap();
+                assert_eq!(log.trim(), "batch-output", "{program}");
+                assert_eq!(
+                    std::fs::read_to_string(batch.join("repo/result.txt"))
+                        .unwrap()
+                        .trim(),
+                    "batch-result"
+                );
+            }
+        }
+
         let cancelled = run_job(&LocalJobSpec {
             run_id: "cancelled".into(),
             script: "sleep 60".into(),

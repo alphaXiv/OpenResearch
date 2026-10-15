@@ -198,6 +198,11 @@ fn render_sbatch(spec: &SlurmJobSpec) -> String {
         "#SBATCH --output=log".to_string(),
         "#SBATCH --error=log".to_string(),
         "#SBATCH --open-mode=append".to_string(),
+        // One task, stated rather than left to Slurm's default of one: some
+        // clusters' job-submit plugins refuse a job that names no task count
+        // ("You must specify a number of tasks"). Cores come from
+        // --cpus-per-task, so this changes nothing where the default applied.
+        "#SBATCH --ntasks=1".to_string(),
     ];
     if let Some(secs) = spec.time_limit_secs {
         directives.push(format!("#SBATCH --time={}", slurm_time(secs)));
@@ -543,6 +548,8 @@ mod tests {
         assert!(script.starts_with("#!/usr/bin/env bash\n"));
         assert!(script.contains("#SBATCH --job-name=orx-01234567\n"));
         assert!(script.contains("#SBATCH --output=log\n"));
+        // Always explicit: clusters may reject a job with no task count.
+        assert!(script.contains("#SBATCH --ntasks=1\n"));
         assert!(!script.contains("--partition"));
         assert!(!script.contains("--account"));
         assert!(!script.contains("--gres"));
