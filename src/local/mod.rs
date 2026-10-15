@@ -16,9 +16,12 @@ pub mod chat;
 pub mod claude;
 pub mod codex;
 pub mod datadir;
+pub mod decision;
+pub(crate) mod deep_research;
 pub mod demo;
 pub mod experiments;
 pub mod files;
+pub mod gcp;
 pub mod git;
 pub mod github;
 pub mod harness;
@@ -90,6 +93,7 @@ pub fn slugify(text: &str) -> String {
 pub const BACKENDS: &[&str] = &[
     "local",
     "tinker",
+    "colab",
     "hf",
     "modal",
     "k8s",
@@ -97,13 +101,25 @@ pub const BACKENDS: &[&str] = &[
     "slurm",
     "ray",
     "openresearch",
+    "gcp",
+    "kaggle",
 ];
 
 /// Backends whose launches take a `--flavor` (hf/modal/openresearch require
-/// one; slurm's is an optional GRES spec; ray's is optional resource hints).
+/// one; colab's and kaggle's default to a T4; slurm's is an optional GRES spec; ray's is
+/// optional resource hints).
 /// k8s (manifest), ssh (host), and local (this machine's hardware) have no
 /// flavor axis.
-pub const FLAVORED_BACKENDS: &[&str] = &["hf", "modal", "slurm", "ray", "openresearch"];
+pub const FLAVORED_BACKENDS: &[&str] = &[
+    "hf",
+    "modal",
+    "colab",
+    "slurm",
+    "ray",
+    "openresearch",
+    "gcp",
+    "kaggle",
+];
 
 /// The subset whose launches FAIL without a `--flavor` — the playbook warns
 /// about these when they're the default with no saved flavor.
@@ -277,7 +293,7 @@ mod tests {
         for b in BACKENDS {
             assert!(validate_compute_default(b, None).is_ok(), "{b} valid");
         }
-        assert!(validate_compute_default("gcp", None).is_err());
+        assert!(validate_compute_default("aws", None).is_err());
         for b in FLAVORED_BACKENDS {
             assert!(
                 validate_compute_default(b, Some("x")).is_ok(),

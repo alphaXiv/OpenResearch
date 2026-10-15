@@ -61,6 +61,11 @@ select:focus {
   border-color: var(--text);
 }
 
+:where(button, a, [tabindex]):focus-visible {
+  outline: 2px solid var(--primary);
+  outline-offset: 3px;
+}
+
 input::placeholder,
 textarea::placeholder {
   color: var(--muted);

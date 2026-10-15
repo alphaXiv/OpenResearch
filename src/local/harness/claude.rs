@@ -2127,6 +2127,8 @@ fn spawn_config(ctx: &TurnCtx, native_store: NativeStore) -> SpawnConfig {
         effort: claude_effort(ctx.reasoning_level.as_deref()).map(str::to_string),
         model: ctx.model.clone(),
         native_store,
+        account: super::accounts::extra_account(ctx.account.as_deref(), native_store)
+            .map(str::to_string),
         // The turn WANTS the bridge iff it's plan mode under a bound `orx up`
         // port; whether the bridge was actually achieved is recorded on the
         // spawned child's config (a failed write leaves it false and the next

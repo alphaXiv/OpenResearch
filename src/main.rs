@@ -376,7 +376,7 @@ pub struct AgentArgs {
 pub enum AgentCommand {
     /// Create an independent chat using your saved New Chat settings.
     #[command(
-        after_help = "New chats use your saved New Chat settings. --harness, --model, and --no-wake are no longer supported; created chats never wake the creator."
+        after_help = "New chats use your saved New Chat settings unless --harness names another agent (for cross-harness review). --no-wake is no longer supported; created chats never wake the creator."
     )]
     Spawn {
         /// Opening message for the new chat; it starts with an empty transcript.
@@ -390,6 +390,43 @@ pub enum AgentCommand {
         /// Project ID (defaults to the current OpenResearch chat's project).
         #[arg(long)]
         project: Option<String>,
+        /// Run the chat on this harness instead of the New Chat agent
+        /// (`orx agent harnesses` lists them), with its default settings.
+        #[arg(long)]
+        harness: Option<String>,
+        /// Model for `--harness`; defaults to that harness's strongest model.
+        #[arg(long, requires = "harness")]
+        model: Option<String>,
+    },
+    /// List the agent harnesses a chat can run on here, with each one's
+    /// model vendor, so independent checks can use a different vendor.
+    Harnesses {
+        #[arg(long)]
+        json: bool,
+    },
+    /// Show each harness account's quota left per model pool, so delegated
+    /// work goes to a harness and model that will not hit a limit.
+    Quota {
+        /// Only this harness (claude-code, codex, antigravity).
+        #[arg(long)]
+        harness: Option<String>,
+        /// Ask the providers for current usage first (slower).
+        #[arg(long)]
+        refresh: bool,
+        #[arg(long)]
+        json: bool,
+    },
+    /// Ask the decision model (Settings → Harnesses) where new work should
+    /// run: harness, model, account, and compute. Without it, or when it is
+    /// unavailable, the answer comes from quota alone.
+    Route {
+        /// What the work is, in a sentence or a full brief.
+        task: Option<String>,
+        /// Read the task from stdin instead.
+        #[arg(long)]
+        stdin: bool,
+        #[arg(long)]
+        json: bool,
     },
 }
 
@@ -401,6 +438,8 @@ pub struct ExpArgs {
 
 #[derive(Subcommand, Debug)]
 pub enum ExpCommand {
+    /// Import or inspect structured measurements for an explicit run.
+    Metrics(commands::run_metrics::MetricsArgs),
     /// Hide ancestors, the selected experiment, or descendants.
     /// A later no-parent create starts a new baseline if all roots are archived.
     #[command(group(clap::ArgGroup::new("archive_scope").required(true)))]
@@ -511,9 +550,11 @@ pub struct ExpRunArgs {
     /// `ray` (a job on your Ray cluster, via the Ray Jobs API), `openresearch`
     /// (an ephemeral OpenResearch GPU/CPU box billed to your org; needs
     /// `orx login`), `tinker` (a local controller using remote Tinker model
-    /// compute), or `local` (a detached process on this machine). k8s,
-    /// ssh, slurm, ray, openresearch, tinker, and local are local
-    /// experiments only. orx submits the job and a detached supervisor
+    /// compute), `colab` (a Google Colab GPU/TPU runtime through the `colab`
+    /// CLI), `kaggle` (a private Kaggle kernel through the `kaggle` CLI, on one
+    /// of your saved Kaggle accounts), or `local` (a detached process on this
+    /// machine). k8s, ssh, slurm, ray, openresearch, tinker, colab, kaggle, and
+    /// local are local experiments only. orx submits the job and a detached supervisor
     /// records status and logs locally. Omitted on a local experiment: launches on
     /// the configured default compute target, if set.
     #[arg(long)]
@@ -526,8 +567,15 @@ pub struct ExpRunArgs {
     /// entrypoint resources (`cpu:2`, `gpu:1`, `gpu:1,mem:8GiB`; omit to reserve
     /// nothing). With `--backend openresearch`: a GPU id from `orx compute`
     /// (h100_sxm, or h100_sxm:2 for two) or a CPU flavor (cpu5c/cpu5g/cpu5m, or
-    /// cpu5c:32 for the vCPU tier). Not used by k8s (see --manifest) or ssh
-    /// (see --host).
+    /// cpu5c:32 for the vCPU tier). With `--backend colab`: t4 (default), l4,
+    /// a100, h100, g4, v5e1, v6e1, or cpu; append `:highmem` for a high-RAM
+    /// machine, or pass `auto:<GB>` for the smallest GPU with that much VRAM;
+    /// then `@<account>` to pick a saved Google account, or `@auto` for an
+    /// unpaused one whose plan can assign it.
+    /// With `--backend kaggle`: t4 (default, two T4s), p100, tpu, or cpu;
+    /// append `@<account>` to pick a saved Kaggle account, or `@auto` for the
+    /// one with the most weekly quota left.
+    /// Not used by k8s (see --manifest) or ssh (see --host).
     #[arg(long)]
     pub flavor: Option<String>,
     /// The org to bill the box to (with `--backend openresearch`). Omit when
@@ -556,7 +604,7 @@ pub struct ExpRunArgs {
     /// `--backend k8s`, set the image in the manifest instead.
     #[arg(long)]
     pub image: Option<String>,
-    /// Job timeout (with `--backend hf/modal/k8s/slurm/openresearch`): 90s,
+    /// Job timeout (with `--backend hf/modal/colab/kaggle/k8s/slurm/openresearch`): 90s,
     /// 30m, 4h, 1d. Default 4h (HF's own default is only 30 minutes). With
     /// `--backend k8s` it becomes activeDeadlineSeconds unless the manifest
     /// sets its own. With `--backend slurm` it becomes `#SBATCH --time=` and
@@ -957,10 +1005,10 @@ fn explain_removed_spawn_flags(mut error: clap::Error) -> clap::Error {
     use clap::error::{ContextKind, ContextValue, ErrorKind};
     if error.kind() == ErrorKind::UnknownArgument
         && error.to_string().contains(" agent spawn")
-        && matches!(error.get(ContextKind::InvalidArg), Some(ContextValue::String(flag)) if ["--harness", "--model", "--no-wake"].contains(&flag.split('=').next().unwrap_or(flag)))
+        && matches!(error.get(ContextKind::InvalidArg), Some(ContextValue::String(flag)) if flag.split('=').next() == Some("--no-wake"))
     {
         error.insert(ContextKind::Suggested, ContextValue::StyledStrs(vec![
-            "New chats use your saved New Chat settings and never wake the creator. Configure the agent and model in OpenResearch.".into()
+            "New chats use your saved New Chat settings (or `--harness`) and never wake the creator.".into()
         ]));
     }
     error
@@ -1450,7 +1498,7 @@ mod cli_tests {
     #[test]
     fn agent_spawn_rejects_removed_settings_flags() {
         for program in ["orx", "orx.exe"] {
-            for flag in ["--harness", "--model", "--model=legacy", "--no-wake"] {
+            for flag in ["--no-wake", "--no-wake=true"] {
                 let error = Cli::try_parse_from([program, "agent", "spawn", "task", flag])
                     .expect_err("removed flag");
                 assert_eq!(error.kind(), clap::error::ErrorKind::UnknownArgument);
@@ -1460,6 +1508,15 @@ mod cli_tests {
             }
         }
         assert!(Cli::try_parse_from(["orx", "agent", "spawn", "task", "--project", "p1"]).is_ok());
+        assert!(
+            Cli::try_parse_from(["orx", "agent", "spawn", "task", "--harness", "codex"]).is_ok()
+        );
+        let model_alone = Cli::try_parse_from(["orx", "agent", "spawn", "task", "--model", "m"])
+            .expect_err("--model needs --harness");
+        assert_eq!(
+            model_alone.kind(),
+            clap::error::ErrorKind::MissingRequiredArgument
+        );
     }
 
     #[test]

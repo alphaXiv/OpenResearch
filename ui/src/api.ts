@@ -162,7 +162,7 @@ async function json<T>(res: Response): Promise<T> {
   return data;
 }
 
-const get = <T>(url: string, signal?: AbortSignal) => fetch(url, { signal }).then((r) => json<T>(r));
+export const get = <T>(url: string, signal?: AbortSignal) => fetch(url, { signal }).then((r) => json<T>(r));
 async function writeResponse(url: string, init: RequestInit): Promise<Response> {
   const scope = workspaceScope();
   const response = await fetch(url, init);
@@ -171,7 +171,7 @@ async function writeResponse(url: string, init: RequestInit): Promise<Response> 
   if (response.ok) invalidateWrite(url, scope);
   return response;
 }
-const post = <T>(url: string, body?: unknown, keepalive = false) =>
+export const post = <T>(url: string, body?: unknown, keepalive = false) =>
   writeResponse(url, {
     method: "POST",
     keepalive,
@@ -224,6 +224,14 @@ export interface UiState {
   tourCompleted: boolean;
   preferredAgent: AgentSelection | null;
   preferredAutonomy: Autonomy | null;
+  harnessFailover: HarnessFailover;
+}
+
+/** Continue a turn on another harness when its own runs out of usage. An empty
+ * `order` tries every other chat harness in registry order. */
+export interface HarnessFailover {
+  enabled: boolean;
+  order: HarnessId[];
 }
 
 /** How much of the research the agent owns before checking in. */
@@ -245,6 +253,7 @@ export const updateUiState = (body: {
   tourCompleted?: boolean;
   preferredAgent?: AgentSelection;
   preferredAutonomy?: Autonomy;
+  harnessFailover?: HarnessFailover;
 }) => post<UiState>("/api/settings/ui-state", body);
 
 export const completeOnboarding = (selection: OnboardingSelection, profile: Profile) =>
@@ -844,6 +853,19 @@ export interface TinkerSettings {
 export const getTinkerSettings = (signal?: AbortSignal) => get<TinkerSettings>("/api/settings/tinker", signal);
 export const saveTinkerKey = (key: string) => post<TinkerSettings>("/api/settings/tinker", { key });
 
+export interface DecisionModelSettings {
+  enabled: boolean;
+  model: string;
+  defaultModel: string;
+  keySource: "env" | "settings" | null;
+  maskedKey: string | null;
+  /** `null` right after a save, which skips the network check. */
+  validationStatus: "missing" | "valid" | "invalid" | "modelUnavailable" | null;
+}
+export const getDecisionModelSettings = (signal?: AbortSignal) => get<DecisionModelSettings>("/api/settings/decision-model", signal);
+export const saveDecisionModelSettings = (patch: { enabled?: boolean; model?: string; apiKey?: string }) =>
+  post<DecisionModelSettings>("/api/settings/decision-model", patch);
+
 // --- updates ------------------------------------------------------------------
 
 /** How orx was installed. `installer`, `app-bundle`, `appimage` and `portable` update themselves. */
@@ -894,6 +916,74 @@ export const restartApp = () =>
 export const setAutoUpdate = (enabled: boolean) =>
   post<UpdateStatus>("/api/update/auto", { enabled });
 
+export interface ComputeRoutingSettings {
+  enabled: boolean;
+  /** Backends the user kept out of per-run routing. */
+  excluded: ComputeTargetId[];
+}
+
+export const getComputeRoutingSettings = (signal?: AbortSignal) =>
+  get<ComputeRoutingSettings>("/api/settings/compute-routing", signal);
+
+export interface ProviderBalance {
+  amount: number;
+  /** `CU` (Colab compute units) or `USD`. */
+  unit: string;
+  usd: number | null;
+  burningPerHour: number | null;
+}
+
+export interface ProviderSpend {
+  meteredUsd: number | null;
+  billedUsd: number | null;
+  creditsUsd: number | null;
+}
+
+export interface ProviderOffer {
+  flavor: string;
+  gpu: string | null;
+  gpuCount: number;
+  vramGb: number | null;
+  usdPerHour: number | null;
+  unitsPerHour: number | null;
+  runwayHours: number | null;
+  available: boolean | null;
+  estimated: boolean;
+  host: string | null;
+}
+
+export interface ProviderPrices {
+  id: ComputeTargetId;
+  configured: boolean;
+  billing: "credits" | "usage" | "own" | "tokens";
+  balance: ProviderBalance | null;
+  spend: ProviderSpend | null;
+  offers: ProviderOffer[];
+  note: string | null;
+  error: string | null;
+}
+
+export const getComputePrices = (signal?: AbortSignal, fresh = false) =>
+  get<{ providers: ProviderPrices[] }>(
+    fresh ? "/api/settings/compute/prices?fresh=true" : "/api/settings/compute/prices",
+    signal,
+  );
+
+export const setComputeRoutingSettings = (update: { enabled?: boolean; excluded?: ComputeTargetId[] }) =>
+  post<ComputeRoutingSettings>("/api/settings/compute-routing", update);
+
+export interface CrossHarnessSettings {
+  enabled: boolean;
+  /** Harnesses the user turned off for review. */
+  excluded: HarnessId[];
+}
+
+export const getCrossHarnessSettings = (signal?: AbortSignal) =>
+  get<CrossHarnessSettings>("/api/settings/cross-harness", signal);
+
+export const setCrossHarnessSettings = (update: { enabled?: boolean; excluded?: HarnessId[] }) =>
+  post<CrossHarnessSettings>("/api/settings/cross-harness", update);
+
 export const installCli = (force = false) =>
   post<InstalledCli>("/api/update/install-cli", { force });
 
@@ -930,11 +1020,23 @@ export interface ModalSettings {
   maskedTokenId: string | null;
   maskedTokenSecret: string | null;
   processEnv: boolean;
+  settings: { creditUsd: number | null; creditAsOf: number | null };
+  /** What is left of the entered credit; absent until the user enters one. */
+  balance?: {
+    availableUsd: number;
+    creditUsd: number;
+    asOf: number;
+    spentUsd: number;
+    source: "report" | "estimate";
+    error: string | null;
+  } | null;
 }
 
 export const getModalSettings = (signal?: AbortSignal) => get<ModalSettings>("/api/settings/modal", signal);
 export const saveModalToken = (tokenId: string, tokenSecret: string) =>
   post<ModalSettings>("/api/settings/modal", { tokenId, tokenSecret });
+export const saveModalCredit = (update: { creditUsd?: number; clearCredit?: boolean }) =>
+  post<ModalSettings>("/api/settings/modal", update);
 
 // --- settings: env vars / git / harnesses ------------------------------------
 
@@ -1185,13 +1287,16 @@ export const rayPreflight = (address?: string) =>
 export type ComputeTargetId =
   | "local"
   | "tinker"
+  | "colab"
   | "hf"
   | "modal"
   | "k8s"
   | "ssh"
   | "slurm"
   | "ray"
-  | "openresearch";
+  | "openresearch"
+  | "gcp"
+  | "kaggle";
 
 /** Cheap fs/env probe only — "worth trying", not "healthy". Deep health lives
  * in each backend's own settings endpoint, fetched when its setup surface opens. */
@@ -1235,6 +1340,7 @@ export const setComputeDefault = (body: {
 export interface LocalGpu {
   name: string;
   memMib: number | null;
+  memFreeMib: number | null;
 }
 
 /** What `--backend local` runs on: this machine's detected hardware. */
@@ -1246,10 +1352,21 @@ export interface LocalMachine {
   chip: string | null;
   cpuCount: number;
   memBytes: number | null;
+  /** RAM a new run can use right now. */
+  memAvailableBytes: number | null;
+  swapTotalBytes: number | null;
+  swapFreeBytes: number | null;
+  diskFreeBytes: number | null;
+  loadAverage: number | null;
+  /** Local launches are refused below this much free RAM. */
+  launchFloorBytes: number | null;
   gpus: LocalGpu[];
 }
 
 export const getLocalMachine = (signal?: AbortSignal) => get<LocalMachine>("/api/settings/local", signal);
+
+// Fork-owned compute settings (Colab, GCP, Kaggle).
+export * from "./features/fork/computeApi";
 
 export interface OpenResearchSettings {
   loggedIn: boolean;
@@ -1715,6 +1832,8 @@ export interface Harness {
    * arrives and a plain re-read swaps in the real list. */
   catalogPending?: boolean;
   models: HarnessModel[];
+  /** The strongest model in `models`; new chats use it unless one is picked. */
+  recommendedModel?: string;
   options: HarnessOptions;
 }
 
@@ -1730,6 +1849,86 @@ export interface HarnessSetupCommands {
 
 export const getHarnessSetupCommands = (signal?: AbortSignal) =>
   get<Record<HarnessId, HarnessSetupCommands>>("/api/harnesses/setup/commands", signal);
+
+export type HarnessQuotaState = "ok" | "low" | "blocked" | "unknown";
+
+/** A limit the user set for one quota pool: `limit` turns or tokens every `windowHours`. */
+export interface HarnessPoolLimit {
+  pool: string;
+  limit: number;
+  unit: "turns" | "tokens";
+  windowHours: number;
+}
+
+/** One usage window the provider reported. */
+export interface HarnessQuotaWindow {
+  window: string;
+  usedPercent: number;
+  resetsAt?: number;
+  readAt: number;
+}
+
+export interface HarnessPoolStatus {
+  pool: string;
+  label: string;
+  limit?: HarnessPoolLimit;
+  used?: number;
+  trackedTurns: number;
+  trackedTokens: number;
+  windows: HarnessQuotaWindow[];
+  blockedUntil?: number;
+  blockedReason?: string;
+  /** Share of quota left, 0–1, from the tightest source. */
+  remaining?: number;
+  state: HarnessQuotaState;
+}
+
+export interface HarnessAccount {
+  harness: HarnessId;
+  id: string;
+  label?: string;
+  email?: string;
+  isDefault: boolean;
+  signedIn: boolean;
+  paused: boolean;
+  limits: HarnessPoolLimit[];
+  pools: HarnessPoolStatus[];
+  /** The shell command that signs this account in (extra accounts only). */
+  loginCommand?: string;
+  /** Why the provider's quota could not be read on the last refresh. */
+  readError?: string;
+}
+
+export interface HarnessAccounts {
+  id: HarnessId;
+  pools: { id: string; label: string }[];
+  /** What orx can read about this harness's quota by itself. */
+  quotaSource: string;
+  accounts: HarnessAccount[];
+}
+
+export interface HarnessAccountPatch {
+  label?: string;
+  paused?: boolean;
+  limits?: HarnessPoolLimit[];
+  clearBlock?: boolean;
+}
+
+export const getHarnessAccounts = (signal?: AbortSignal, refresh = false) =>
+  get<{ harnesses: HarnessAccounts[] }>(`/api/harnesses/accounts${refresh ? "?refresh=1" : ""}`, signal).then((r) => r.harnesses);
+
+export const addHarnessAccount = (harness: HarnessId, id: string, label?: string) =>
+  post<{ harnesses: HarnessAccounts[] }>("/api/harnesses/accounts", { harness, id, label }).then((r) => r.harnesses);
+
+export const updateHarnessAccount = (harness: HarnessId, id: string, patch: HarnessAccountPatch) =>
+  post<{ harnesses: HarnessAccounts[] }>("/api/harnesses/accounts/update", { harness, id, ...patch }).then((r) => r.harnesses);
+
+export const removeHarnessAccount = (harness: HarnessId, id: string) =>
+  post<{ harnesses: HarnessAccounts[] }>("/api/harnesses/accounts/remove", { harness, id }).then((r) => r.harnesses);
+
+/** The terminal route that signs an extra account in. */
+export const harnessAccountLoginPath = (harness: HarnessId, id: string) =>
+  `/api/harnesses/accounts/login?${new URLSearchParams({ harness, id })}`;
 
 export const getHarnesses = (refresh = false, retryRejected = false, signal?: AbortSignal, harness?: HarnessId) => {
   const params = new URLSearchParams();

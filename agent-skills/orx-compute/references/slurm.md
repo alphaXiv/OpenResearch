@@ -1,8 +1,9 @@
 # Slurm (`--backend slurm`)
 
 Use this backend only when the user explicitly requests their Slurm cluster or
-it is the configured default. `orx` reaches the login node over SSH, stages the
-committed snapshot, and submits the fixed command with `sbatch`.
+it is the configured default (or the playbook's compute routing lists it). `orx`
+reaches the login node over SSH, stages the committed snapshot, and submits the
+fixed command with `sbatch`.
 
 ```sh
 orx exp run <expId> --backend slurm --host login-node --flavor h100:2 --timeout 4h

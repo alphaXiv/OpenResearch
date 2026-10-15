@@ -381,6 +381,14 @@ async fn run(
         } else {
             None
         };
+        if let Some(problem) = lease
+            .as_ref()
+            .and_then(|_| crate::local::opencode::foreign_server_problem())
+        {
+            // The command line stays local; only the fixed reason is reported.
+            attempt.record("interrupted", "detect", Some("not_ready"), None, None);
+            return Err(problem);
+        }
         // The lease ends with `run`; the follow-up shell only inherits the path.
         let env: Vec<_> = lease
             .as_ref()
@@ -601,7 +609,7 @@ fn setup_verified(
 }
 
 // The interactive CLI stays open after login; verify auth after its chat prompt appears.
-fn antigravity_prompt_ready(output: &str) -> bool {
+pub(super) fn antigravity_prompt_ready(output: &str) -> bool {
     output.contains("Antigravity CLI") && output.contains("for shortcuts")
 }
 
@@ -705,6 +713,7 @@ mod tests {
             supports_steering: false,
             catalog_pending: false,
             models: Vec::new(),
+            recommended_model: None,
             options: crate::local::harness::HarnessOptions::none(),
         }
     }

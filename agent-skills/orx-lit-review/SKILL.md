@@ -6,7 +6,9 @@ description: "Explain and compare scientific or technical concepts using origina
 # Literature retrieval
 
 Use this skill for scientific explanations and comparisons, even without a named
-paper. Never delegate retrieval to a sub-agent.
+paper. Keep ordinary retrieval with this agent. When following the
+`orx-deep-research` report workflow, its coordinator may delegate independent
+subtopics; each assigned researcher owns the retrieval loop for its scope.
 
 Use enabled literature connectors appropriate to the topic. General web search
 is a fallback only when relevant connectors provide no useful evidence. Do not

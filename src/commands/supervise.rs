@@ -27,6 +27,14 @@ const LOG_IDLE: Duration = Duration::from_secs(30);
 /// How long monitoring must keep failing before it is reported on the run.
 const MONITORING_GRACE: Duration = Duration::from_secs(60);
 
+// Backends and guards added by the tuandang304 fork; see docs/fork-maintenance.md.
+mod colab_resume;
+mod gcp_run;
+mod memory_guard;
+use colab_resume::resume_colab;
+use gcp_run::run_gcp;
+use memory_guard::MemoryGuard;
+
 fn open_supervisor_lock(path: &std::path::Path) -> Result<fd_lock::RwLock<std::fs::File>> {
     let file = std::fs::OpenOptions::new()
         .create(true)
@@ -158,7 +166,13 @@ pub async fn run(args: crate::SuperviseArgs) -> Result<()> {
     if descriptor.kind == "openresearch_job" {
         return run_openresearch(store, stored, descriptor, run_id).await;
     }
-    if matches!(descriptor.kind.as_str(), "local_job" | "tinker_job") {
+    if descriptor.kind == "gcp_job" {
+        return run_gcp(store, stored, descriptor, run_id).await;
+    }
+    if matches!(
+        descriptor.kind.as_str(),
+        "local_job" | "tinker_job" | "colab_job" | "kaggle_job"
+    ) {
         return run_local(store, stored, descriptor, run_id).await;
     }
     let (namespace, job_id) = descriptor.hf_ref()?;
@@ -1130,11 +1144,27 @@ async fn run_local(
 
     let mut last_status = status_of(&stored)?;
     let mut cancel_sent = false;
+    // Only a run on this machine competes with it for memory; a controller's
+    // payload (Tinker, Colab, Kaggle) runs elsewhere.
+    let mut memory_guard = (descriptor.kind == "local_job").then(MemoryGuard::default);
 
     loop {
         let job = localbox::inspect_job(&dir);
         let stage = job.stage.as_str();
-        let status = run_status_for_stage(&store, &run_id, cancel_sent, stage);
+        let mut status = run_status_for_stage(&store, &run_id, cancel_sent, stage);
+        let guard_reason = memory_guard.as_ref().and_then(|guard| guard.reason.clone());
+        if guard_reason.is_some() && is_terminal_stage(stage) {
+            status = RunStatus::Failed;
+        }
+
+        if is_terminal_stage(stage)
+            && descriptor.kind == "colab_job"
+            && !cancel_sent
+            && resume_colab(&dir, &run_id)
+        {
+            tokio::time::sleep(POLL_INTERVAL).await;
+            continue;
+        }
 
         if is_terminal_stage(stage) {
             let _ = done_tx.send(true);
@@ -1146,16 +1176,26 @@ async fn run_local(
             }
             let applied = store.update_status(&run_id, status, Some(now_ms()), None)?;
             if applied && status == RunStatus::Failed {
-                if let Some(msg) = &job.message {
-                    if let Err(err) =
-                        store.set_result_markdown(&run_id, &format!("Job failed: {msg}"))
-                    {
+                let reason = guard_reason
+                    .or_else(|| job.message.as_ref().map(|msg| format!("Job failed: {msg}")));
+                if let Some(reason) = reason {
+                    if let Err(err) = store.set_result_markdown(&run_id, &reason) {
                         eprintln!("supervise {run_id}: could not record failure reason: {err}");
                     }
                 }
             }
             eprintln!("supervise {run_id}: finished ({status})");
             return Ok(());
+        }
+
+        if let Some(guard) = memory_guard.as_mut() {
+            if guard.reason.is_none() && guard.check().await {
+                eprintln!(
+                    "supervise {run_id}: {}",
+                    guard.reason.as_deref().unwrap_or_default()
+                );
+                cancel_local(&dir, &run_id, &mut cancel_sent);
+            }
         }
 
         if status != last_status && store.update_status(&run_id, status, None, None)? {

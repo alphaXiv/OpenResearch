@@ -1,9 +1,9 @@
 # OpenResearch (`--backend openresearch`)
 
 Use this backend only when the user explicitly requests an OpenResearch box or
-it is the configured default. It provisions an ephemeral machine billed to the
-user's organization and deletes it when the run ends. It requires `orx login`
-and a registered SSH key.
+it is the configured default (or the playbook's compute routing lists it). It
+provisions an ephemeral machine billed to the user's organization and deletes it
+when the run ends. It requires `orx login` and a registered SSH key.
 
 ```sh
 orx exp run <expId> --backend openresearch --flavor h100_sxm:2 --timeout 4h

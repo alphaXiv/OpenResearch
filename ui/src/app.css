@@ -370,6 +370,20 @@
   padding-inline-end: 12rem;
 }
 
+/* Tool names fit when the chat has the full desktop workspace. A split pane
+   retains the compact controls and their accessible labels/tooltips. */
+@media (min-width: 1280px) {
+  .workspace-tools-labeled .workspace-tool-button {
+    @apply w-28 justify-start px-2;
+  }
+  .workspace-tools-labeled .workspace-tool-label {
+    @apply block;
+  }
+  .workspace-tools-labeled > .chat-pane .chat-header {
+    padding-inline-end: 25rem;
+  }
+}
+
 .workspace-card-visible > .chat-pane {
   padding-inline-end: 16rem;
 }

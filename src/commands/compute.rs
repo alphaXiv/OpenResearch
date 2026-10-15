@@ -9,6 +9,11 @@ use crate::client::{list_catalog, list_cpu_catalog, Disk};
 use crate::error::{require_credentials, Result};
 use crate::output::print_table;
 
+// `orx compute prices`, added by the tuandang304 fork; see docs/fork-maintenance.md.
+mod prices;
+use prices::prices;
+pub use prices::PricesArgs;
+
 pub async fn run(args: crate::ComputeArgs) -> Result<()> {
     if let Some(command) = args.command {
         if args.catalog.cpu
@@ -153,11 +158,14 @@ pub enum Backend {
     Hf,
     Modal,
     Tinker,
+    Colab,
     K8s,
     Openresearch,
+    Gcp,
+    Kaggle,
 }
 impl Backend {
-    fn name(self) -> &'static str {
+    pub(crate) fn name(self) -> &'static str {
         match self {
             Self::Local => "local",
             Self::Ssh => "ssh",
@@ -166,8 +174,11 @@ impl Backend {
             Self::Hf => "hf",
             Self::Modal => "modal",
             Self::Tinker => "tinker",
+            Self::Colab => "colab",
             Self::K8s => "k8s",
             Self::Openresearch => "openresearch",
+            Self::Gcp => "gcp",
+            Self::Kaggle => "kaggle",
         }
     }
 }
@@ -176,6 +187,8 @@ impl Backend {
 pub enum ComputeCommand {
     /// Browse cloud offers (also the behavior without a subcommand).
     Catalog(CatalogArgs),
+    /// Remaining credit and GPU prices on every provider, cheapest first.
+    Prices(PricesArgs),
     /// List backends and the machine-wide default.
     Status,
     /// Inspect backend configuration and hardware or credential sources.
@@ -189,6 +202,8 @@ pub enum ComputeCommand {
     Configure(Box<ConfigureArgs>),
     /// Test execution readiness. Failure exits nonzero.
     Test(CheckArgs),
+    /// Diagnose compute without launching a job; includes actionable checks.
+    Doctor(CheckArgs),
     /// Authenticate interactively, then test readiness.
     Connect(ConnectArgs),
     /// Read or safely replace ~/.ssh/config.
@@ -255,10 +270,48 @@ pub struct ConfigureArgs {
     namespace: Option<String>,
     #[arg(long)]
     address: Option<String>,
+    /// Google Cloud project that owns and pays for the VMs (gcp).
+    #[arg(long)]
+    project: Option<String>,
+    /// Compute Engine zone for new VMs, e.g. us-central1-a (gcp).
+    #[arg(long)]
+    zone: Option<String>,
+    /// Use cheaper Spot VMs that Google can reclaim mid-run (gcp).
+    #[arg(long)]
+    spot: Option<bool>,
+    /// VM image family and its project (gcp; defaults to a Deep Learning VM image).
+    #[arg(long)]
+    image_family: Option<String>,
+    #[arg(long)]
+    image_project: Option<String>,
+    /// Boot disk size in GB (gcp).
+    #[arg(long)]
+    disk_gb: Option<u64>,
+    /// Credit left in USD, from Billing → Credits in the Google Cloud console
+    /// (gcp) or Usage & Billing in the Modal dashboard (modal); orx subtracts
+    /// spend from now on.
+    #[arg(long)]
+    credit_usd: Option<f64>,
+    /// BigQuery billing export table (project.dataset.table) for exact spend (gcp).
+    #[arg(long)]
+    billing_export_table: Option<String>,
+    /// Delete a saved account: a Kaggle username (kaggle) or a Google email (colab).
+    #[arg(long)]
+    remove_account: Option<String>,
+    /// Pause a saved Google account so runs never pick it automatically (colab).
+    #[arg(long)]
+    pause_account: Option<String>,
+    /// Resume a paused Google account (colab).
+    #[arg(long)]
+    resume_account: Option<String>,
+    /// Save the Colab CLI's own sign-in from ~/.config/colab-cli as an account (colab).
+    #[arg(long)]
+    import: bool,
     /// Clear a saved field; repeat for multiple fields (e.g. --clear time-limit, --clear mem).
     #[arg(long)]
     clear: Vec<String>,
-    /// JSON credentials: {"token":...}, {"key":...}, or {"tokenId":...,"tokenSecret":...}. Use - for stdin.
+    /// JSON credentials: {"token":...}, {"key":...}, or {"tokenId":...,"tokenSecret":...};
+    /// kaggle also takes {"username":...,"key":...}. Use - for stdin.
     #[arg(long)]
     credentials_file: Option<String>,
 }
@@ -334,7 +387,26 @@ impl ConfigureArgs {
             "ray" => &["address"],
             "hf" => &["token"],
             "tinker" => &["key"],
-            "modal" => &["tokenId", "tokenSecret"],
+            "modal" => &["tokenId", "tokenSecret", "creditUsd", "clearCredit"],
+            "kaggle" => &["account", "removeAccount", "token", "key", "username"],
+            "colab" => &[
+                "account",
+                "removeAccount",
+                "pauseAccount",
+                "resumeAccount",
+                "import",
+            ],
+            "gcp" => &[
+                "project",
+                "zone",
+                "spot",
+                "imageFamily",
+                "imageProject",
+                "diskGb",
+                "creditUsd",
+                "clearCredit",
+                "billingExportTable",
+            ],
             _ => return Err(anyhow!("{backend} has no editable settings.")),
         };
         let mut body = Map::new();
@@ -349,10 +421,30 @@ impl ConfigureArgs {
             ("context", self.context),
             ("namespace", self.namespace),
             ("address", self.address),
+            ("project", self.project),
+            ("zone", self.zone),
+            ("imageFamily", self.image_family),
+            ("imageProject", self.image_project),
+            ("billingExportTable", self.billing_export_table),
+            ("removeAccount", self.remove_account),
+            ("pauseAccount", self.pause_account),
+            ("resumeAccount", self.resume_account),
         ] {
             if let Some(value) = value {
                 body.insert(key.into(), json!(value));
             }
+        }
+        if self.import {
+            body.insert("import".into(), json!(true));
+        }
+        if let Some(spot) = self.spot {
+            body.insert("spot".into(), json!(spot));
+        }
+        if let Some(disk) = self.disk_gb {
+            body.insert("diskGb".into(), json!(disk));
+        }
+        if let Some(credit) = self.credit_usd {
+            body.insert("creditUsd".into(), json!(credit));
         }
         if let Some(cpus) = self.cpus_per_task {
             body.insert("cpusPerTask".into(), json!(cpus));
@@ -365,7 +457,9 @@ impl ConfigureArgs {
                     )
                 })?;
             for (key, value) in credentials {
-                if !["token", "key", "tokenId", "tokenSecret"].contains(&key.as_str())
+                let kaggle_username = backend == "kaggle" && key == "username";
+                if !(["token", "key", "tokenId", "tokenSecret"].contains(&key.as_str())
+                    || kaggle_username)
                     || !value.is_string()
                 {
                     return Err(anyhow!("Unsupported credential field or value."));
@@ -389,11 +483,16 @@ impl ConfigureArgs {
                 "time-limit" => "timeLimit",
                 "cpus-per-task" => "cpusPerTask",
                 "default-host" => "defaultHost",
+                "image-family" => "imageFamily",
+                "image-project" => "imageProject",
+                "billing-export-table" => "billingExportTable",
+                "credit" | "credit-usd" => "clearCredit",
                 other => other,
             };
             if !allowed.contains(&key)
                 || matches!(key, "token" | "key" | "tokenId" | "tokenSecret")
                 || (backend == "ssh" && key == "host")
+                || matches!(key, "spot" | "diskGb" | "creditUsd")
             {
                 return Err(anyhow!("Cannot clear {field} for {backend}."));
             }
@@ -404,6 +503,8 @@ impl ConfigureArgs {
                 key.into(),
                 if matches!(key, "container" | "defaultHost") {
                     Value::Null
+                } else if key == "clearCredit" {
+                    json!(true)
                 } else if key == "cpusPerTask" {
                     json!(0)
                 } else {
@@ -432,7 +533,7 @@ impl ConfigureArgs {
 }
 
 async fn run_command(command: ComputeCommand, json_output: bool) -> Result<()> {
-    if let ComputeCommand::Test(ref args) = command {
+    if let ComputeCommand::Test(ref args) | ComputeCommand::Doctor(ref args) = command {
         validate_check(args)?;
     }
     if let ComputeCommand::Connect(ref args) = command {
@@ -451,11 +552,22 @@ async fn run_command(command: ComputeCommand, json_output: bool) -> Result<()> {
     }
     let is_check = matches!(
         command,
-        ComputeCommand::Test(_) | ComputeCommand::Connect(_)
+        ComputeCommand::Test(_) | ComputeCommand::Doctor(_) | ComputeCommand::Connect(_)
     );
     let value = match command {
         ComputeCommand::Catalog(a) => return catalog(a, json_output).await,
+        ComputeCommand::Prices(a) => return prices(a, json_output).await,
         ComputeCommand::Status => settings::status().await?,
+        ComputeCommand::Doctor(args) => serde_json::to_value(
+            super::compute_doctor::diagnose(
+                args.backend.name(),
+                args.host,
+                args.container,
+                args.no_container,
+                args.address,
+            )
+            .await,
+        )?,
         ComputeCommand::Show { backend } => settings::show(backend.name()).await?,
         ComputeCommand::Default { command } => match command {
             DefaultCommand::Set { backend, flavor } => {
@@ -637,6 +749,45 @@ async fn connect(args: &CheckArgs, persist: Option<u64>) -> Result<()> {
         Backend::Openresearch => {
             super::login::run(crate::LoginArgs { api_url: None }).await?;
             super::ssh_key::add(None).await?;
+        }
+        Backend::Colab => {
+            // Each run adds one Google account; run it again to add another.
+            let account = crate::jobs::colab_accounts::login_interactive().await?;
+            eprintln!(
+                "Saved Colab account {}{}{}.",
+                account.id,
+                if account.active { " (default)" } else { "" },
+                if account.paused { " (paused)" } else { "" }
+            );
+        }
+        Backend::Kaggle => {
+            if crate::jobs::kaggle::find_cli().is_none() {
+                return Err(anyhow!("{}", crate::jobs::kaggle::INSTALL_HINT));
+            }
+            eprintln!(
+                "Create an API token at https://www.kaggle.com/settings/api (Generate New Token)."
+            );
+            let token =
+                secret_prompt("Kaggle API token (leave empty to sign in with the browser)").await?;
+            let account = if token.is_empty() {
+                crate::jobs::kaggle::login_interactive().await?
+            } else {
+                crate::jobs::kaggle::add_account(crate::jobs::kaggle::NewAccount {
+                    token: Some(token),
+                    ..Default::default()
+                })
+                .await?
+            };
+            eprintln!(
+                "Saved Kaggle account {}{}.",
+                account.username,
+                if account.active { " (default)" } else { "" }
+            );
+        }
+        Backend::Gcp => {
+            if crate::jobs::gcp::account().await.is_none() {
+                interactive_command("gcloud", &["auth".into(), "login".into()]).await?;
+            }
         }
         Backend::Local | Backend::Ray | Backend::K8s => {}
     }

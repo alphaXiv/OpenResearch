@@ -15,6 +15,9 @@ use std::path::{Path, PathBuf};
 use crate::error::{anyhow, Result};
 use crate::jobs::ssh::{sh_quote, JobState};
 
+pub use memory::{disk_free_bytes, memory_snapshot};
+
+mod memory;
 #[cfg(windows)]
 mod python;
 #[cfg(windows)]
@@ -41,6 +44,28 @@ pub struct LocalJobSpec {
     pub secret_env: HashMap<String, String>,
 }
 
+/// When memory runs out, Linux's OOM killer picks this run (and everything it
+/// starts) before the desktop, the dashboard, or the agent. Raising one's own
+/// score needs no privileges.
+#[cfg(target_os = "linux")]
+const OOM_PREFERENCE: &str = "echo 1000 > /proc/self/oom_score_adj 2>/dev/null || true\n";
+#[cfg(all(not(windows), not(target_os = "linux")))]
+const OOM_PREFERENCE: &str = "";
+
+/// Records the payload's exit code, and keeps the launcher identifiable until
+/// background children exit, including after a payload cd.
+#[cfg(not(windows))]
+fn unix_prelude(dir: &Path) -> String {
+    format!(
+        "trap 'exit 143' TERM\ntrap {} EXIT\n{}",
+        sh_quote(&format!(
+            "code=$?; wait; echo \"$code\" > {}; exit \"$code\"",
+            sh_quote(&crate::local::bash::bash_path(&dir.join("exit_code")))
+        )),
+        OOM_PREFERENCE,
+    )
+}
+
 /// Submit the job: write run.sh, launch it detached in its own process group
 /// (pid == pgid, so cancel can TERM the whole tree), record the pid. Returns
 /// the run dir — the reattach handle stored on the descriptor.
@@ -50,14 +75,7 @@ pub fn run_job(spec: &LocalJobSpec) -> Result<PathBuf> {
         .map_err(|e| anyhow!("Could not create {}: {}", dir.display(), e))?;
     let env = super::default_python_env(&spec.env);
     #[cfg(not(windows))]
-    // Keep the launcher identifiable until background children exit, including after a payload cd.
-    let prelude = format!(
-        "trap 'exit 143' TERM\ntrap {} EXIT\n",
-        sh_quote(&format!(
-            "code=$?; wait; echo \"$code\" > {}; exit \"$code\"",
-            sh_quote(&crate::local::bash::bash_path(&dir.join("exit_code")))
-        ))
-    );
+    let prelude = unix_prelude(&dir);
     #[cfg(windows)]
     let prelude = python::prelude(&dir)
         .map_err(|e| anyhow!("Could not set up Python for {}: {}", dir.display(), e))?;
@@ -81,6 +99,52 @@ pub fn run_job(spec: &LocalJobSpec) -> Result<PathBuf> {
         let _ = std::fs::set_permissions(&run_sh_path, std::fs::Permissions::from_mode(0o600));
     }
 
+    spawn(&dir, &run_sh_path, &env, &spec.secret_env)?;
+    Ok(dir)
+}
+
+/// Start a dead job's script again in the same run dir, appending to its log:
+/// clears the recorded exit and records the new pid. Unix only.
+#[cfg(not(windows))]
+pub fn resume_job(dir: &Path, script: &str) -> Result<()> {
+    let prelude = unix_prelude(dir);
+    let resume_sh = format!(
+        "#!/usr/bin/env bash\ncd {dir} || exit 97\n(\n{prelude}{script}\n) >> log 2>&1\n",
+        dir = sh_quote(&crate::local::bash::bash_path(dir)),
+    );
+    let path = dir.join("resume.sh");
+    std::fs::write(&path, resume_sh)
+        .map_err(|e| anyhow!("Could not write {}: {}", path.display(), e))?;
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let _ = std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600));
+    }
+    for stale in ["exit_code", FAILURE_REASON_FILE] {
+        match std::fs::remove_file(dir.join(stale)) {
+            Ok(()) => {}
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+            Err(e) => return Err(anyhow!("Could not clear the run's {stale}: {e}")),
+        }
+    }
+    let mut env: HashMap<String, String> = HashMap::new();
+    if let Some(path) = crate::local::shell_env::search_path() {
+        env.insert("PATH".to_string(), path.to_string_lossy().into_owned());
+    }
+    spawn(
+        dir,
+        &path,
+        &super::default_python_env(&env),
+        &HashMap::new(),
+    )
+}
+
+/// Launch `script_path` detached in its own process group and record its pid.
+fn spawn(
+    dir: &Path,
+    script_path: &Path,
+    env: &HashMap<String, String>,
+    secret_env: &HashMap<String, String>,
+) -> Result<()> {
     let mut cmd = std::process::Command::new(crate::local::bash::program());
     if let Some(path) =
         crate::local::bash::path_with_toolchain(crate::local::shell_env::search_path())
@@ -89,7 +153,7 @@ pub fn run_job(spec: &LocalJobSpec) -> Result<PathBuf> {
     }
     #[cfg(not(windows))]
     {
-        let script_path = crate::paths::canonicalize(&run_sh_path)?;
+        let script_path = crate::paths::canonicalize(script_path)?;
         std::fs::write(
             dir.join("pid_script"),
             script_path.to_string_lossy().as_bytes(),
@@ -98,9 +162,9 @@ pub fn run_job(spec: &LocalJobSpec) -> Result<PathBuf> {
     }
     #[cfg(windows)]
     cmd.arg("run.sh");
-    cmd.envs(&env)
-        .envs(&spec.secret_env)
-        .current_dir(&dir)
+    cmd.envs(env)
+        .envs(secret_env)
+        .current_dir(dir)
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null());
@@ -110,14 +174,14 @@ pub fn run_job(spec: &LocalJobSpec) -> Result<PathBuf> {
         cmd.process_group(0);
     }
     #[cfg(windows)]
-    windows::spawn(&mut cmd, &dir).map_err(|e| anyhow!("Could not launch the local run: {}", e))?;
+    windows::spawn(&mut cmd, dir).map_err(|e| anyhow!("Could not launch the local run: {}", e))?;
     #[cfg(not(windows))]
     {
         let mut child = cmd
             .spawn()
             .map_err(|e| anyhow!("Could not launch the local run: {}", e))?;
         let pid = child.id();
-        let completed_dir = dir.clone();
+        let completed_dir = dir.to_path_buf();
         std::thread::spawn(move || {
             if let Ok(status) = child.wait() {
                 if exit_code_state(&completed_dir).is_none() {
@@ -133,7 +197,7 @@ pub fn run_job(spec: &LocalJobSpec) -> Result<PathBuf> {
         std::fs::write(dir.join("pid"), format!("{pid}\n"))
             .map_err(|e| anyhow!("Could not record the run's pid: {}", e))?;
     }
-    Ok(dir)
+    Ok(())
 }
 
 /// The unique script path distinguishes a run from an unrelated process reusing its PID.
@@ -208,6 +272,10 @@ fn pid_alive(pid: &str) -> bool {
     }
 }
 
+/// A one-line explanation a controller may leave next to exit_code; shown in
+/// place of the bare "exited with code N".
+pub const FAILURE_REASON_FILE: &str = "failure_reason";
+
 /// The terminal state recorded in exit_code, if any. An empty file is run.sh
 /// mid-write (`>` truncates before the code lands) — not terminal yet.
 fn exit_code_state(dir: &Path) -> Option<JobState> {
@@ -223,9 +291,18 @@ fn exit_code_state(dir: &Path) -> Option<JobState> {
             message: None,
         }
     } else {
+        let reason = std::fs::read_to_string(dir.join(FAILURE_REASON_FILE))
+            .ok()
+            .and_then(|text| {
+                text.lines()
+                    .map(str::trim)
+                    .find(|l| !l.is_empty())
+                    .map(str::to_string)
+            })
+            .map(|line| line.chars().take(400).collect::<String>());
         JobState {
             stage: "ERROR".into(),
-            message: Some(format!("exited with code {code}")),
+            message: Some(reason.unwrap_or_else(|| format!("exited with code {code}"))),
         }
     })
 }
@@ -294,10 +371,15 @@ pub fn stream_logs(
     Ok(seen)
 }
 
+/// Left in the run dir before a cancel TERMs the job, so a controller can tell
+/// a cancel from this machine shutting down.
+pub const CANCEL_REQUESTED_FILE: &str = "cancel_requested";
+
 /// TERM the process group (pid == pgid), else the pid alone; on Windows, the process tree.
 pub fn cancel_job(dir: &Path) -> Result<()> {
     let pid = std::fs::read_to_string(dir.join("pid"))
         .map_err(|e| anyhow!("Could not read the run's pid: {}", e))?;
+    let _ = std::fs::write(dir.join(CANCEL_REQUESTED_FILE), "");
     let pid = pid.trim().to_string();
     #[cfg(windows)]
     {
@@ -371,6 +453,16 @@ pub struct LocalHardware {
     pub chip: Option<String>,
     pub cpu_count: usize,
     pub mem_bytes: Option<u64>,
+    /// RAM a new run can use right now, plus swap; see [`MemorySnapshot`].
+    pub mem_available_bytes: Option<u64>,
+    pub swap_total_bytes: Option<u64>,
+    pub swap_free_bytes: Option<u64>,
+    /// Free space where local runs extract their source and write outputs.
+    pub disk_free_bytes: Option<u64>,
+    /// 1-minute load average (Unix only).
+    pub load_average: Option<f64>,
+    /// The least free RAM a local run may start with; launches below it are refused.
+    pub launch_floor_bytes: Option<u64>,
     pub gpus: Vec<Gpu>,
 }
 
@@ -379,6 +471,7 @@ pub struct LocalHardware {
 pub struct Gpu {
     pub name: String,
     pub mem_mib: Option<u64>,
+    pub mem_free_mib: Option<u64>,
 }
 
 /// Best-effort hardware probe. Every field degrades independently — a missing
@@ -408,7 +501,15 @@ pub fn hardware_info() -> LocalHardware {
                     .map(|kb| kb * 1024)
             })
     };
+    let memory = memory_snapshot();
+    let runs_dir = crate::store::data_dir();
     LocalHardware {
+        mem_available_bytes: memory.map(|m| m.available_bytes),
+        swap_total_bytes: memory.map(|m| m.swap_total_bytes),
+        swap_free_bytes: memory.map(|m| m.swap_free_bytes),
+        disk_free_bytes: disk_free_bytes(&runs_dir),
+        load_average: load_average(),
+        launch_floor_bytes: memory.map(|m| m.launch_floor_bytes()),
         hostname: cmd("hostname", &[]).unwrap_or_else(|| "unknown".to_string()),
         os: std::env::consts::OS,
         arch: std::env::consts::ARCH,
@@ -418,11 +519,11 @@ pub fn hardware_info() -> LocalHardware {
             None
         },
         cpu_count: std::thread::available_parallelism().map_or(0, |n| n.get()),
-        mem_bytes,
+        mem_bytes: mem_bytes.or(memory.map(|m| m.total_bytes)),
         gpus: cmd(
             "nvidia-smi",
             &[
-                "--query-gpu=name,memory.total",
+                "--query-gpu=name,memory.total,memory.free",
                 "--format=csv,noheader,nounits",
             ],
         )
@@ -431,22 +532,46 @@ pub fn hardware_info() -> LocalHardware {
     }
 }
 
-/// Parse `nvidia-smi --query-gpu=name,memory.total --format=csv,noheader,nounits`:
-/// one `name, mem_mib` line per GPU. Names may contain no commas in this
-/// format (nvidia-smi separates fields with ", "), but tolerate odd lines by
-/// keeping the name and dropping the memory rather than dropping the GPU.
+#[cfg(unix)]
+fn load_average() -> Option<f64> {
+    let mut loads = [0f64; 3];
+    // SAFETY: getloadavg writes at most `nelem` doubles into the buffer.
+    (unsafe { libc::getloadavg(loads.as_mut_ptr(), 1) } == 1).then_some(loads[0])
+}
+
+#[cfg(not(unix))]
+fn load_average() -> Option<f64> {
+    None
+}
+
+/// Parse `nvidia-smi --query-gpu=name,memory.total,memory.free --format=csv,noheader,nounits`:
+/// one `name, total_mib, free_mib` line per GPU (a two-field line has no free
+/// column). Names may contain no commas in this format (nvidia-smi separates
+/// fields with ", "), but tolerate odd lines by keeping the name and dropping
+/// the memory rather than dropping the GPU.
 fn parse_nvidia_smi_csv(out: &str) -> Vec<Gpu> {
     out.lines()
         .filter(|l| !l.trim().is_empty())
-        .map(|line| match line.rsplit_once(',') {
-            Some((name, mem)) => Gpu {
-                name: name.trim().to_string(),
-                mem_mib: mem.trim().parse().ok(),
-            },
-            None => Gpu {
-                name: line.trim().to_string(),
-                mem_mib: None,
-            },
+        .map(|line| {
+            let fields: Vec<&str> = line.split(',').map(str::trim).collect();
+            let number = |field: Option<&&str>| field.and_then(|f| f.parse().ok());
+            match fields.as_slice() {
+                [name, total, free] => Gpu {
+                    name: name.to_string(),
+                    mem_mib: number(Some(total)),
+                    mem_free_mib: number(Some(free)),
+                },
+                [name, total] => Gpu {
+                    name: name.to_string(),
+                    mem_mib: number(Some(total)),
+                    mem_free_mib: None,
+                },
+                _ => Gpu {
+                    name: line.trim().to_string(),
+                    mem_mib: None,
+                    mem_free_mib: None,
+                },
+            }
         })
         .collect()
 }
@@ -462,6 +587,8 @@ mod tests {
         assert_eq!(parsed.len(), 2);
         assert_eq!(parsed[0].name, "NVIDIA A100-SXM4-80GB");
         assert_eq!(parsed[0].mem_mib, Some(81920));
+        let with_free = parse_nvidia_smi_csv("NVIDIA L4, 23034, 20000\n");
+        assert_eq!(with_free[0].mem_free_mib, Some(20000));
     }
 
     #[test]
@@ -521,6 +648,27 @@ mod tests {
         assert!(!run_alive_via(unrunnable_ps, &dir, "0"));
         // pid 1 always exists: 0 as root, EPERM otherwise.
         assert!(run_alive_via(unrunnable_ps, &dir, "1"));
+    }
+
+    #[cfg(not(windows))]
+    #[test]
+    fn a_resumed_job_appends_to_its_log_and_records_its_new_exit() {
+        let dir = std::env::temp_dir().join(format!("orx-resume-test-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("log"), "first\n").unwrap();
+        std::fs::write(dir.join("exit_code"), "143\n").unwrap();
+        std::fs::write(dir.join(FAILURE_REASON_FILE), "stale\n").unwrap();
+        assert_eq!(inspect_job(&dir).stage, "ERROR");
+
+        resume_job(&dir, "echo second").unwrap();
+        let state = wait_terminal(&dir);
+        assert_eq!(state.stage, "COMPLETED", "{:?}", state.message);
+        assert_eq!(
+            std::fs::read_to_string(dir.join("log")).unwrap(),
+            "first\nsecond\n"
+        );
+        assert!(!dir.join(FAILURE_REASON_FILE).exists());
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
