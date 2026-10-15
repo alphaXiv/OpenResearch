@@ -423,10 +423,21 @@ pub fn launch_env(harness: &str, id: &str) -> Result<Vec<(&'static str, OsString
         )],
         "antigravity" => {
             let home = native_store::prepare_agy_account(&home.join("home"))?;
-            vec![
+            let mut env = vec![
                 ("HOME", home.clone().into_os_string()),
                 ("USERPROFILE", home.into_os_string()),
-            ]
+            ];
+            // On Linux `agy` keeps its sign-in in the Secret Service keyring,
+            // which every account would share whatever HOME says. Without a
+            // session bus it falls back to `.gemini/antigravity-cli/
+            // antigravity-oauth-token` inside the account's own home.
+            if cfg!(all(unix, not(target_os = "macos"))) {
+                env.push((
+                    "DBUS_SESSION_BUS_ADDRESS",
+                    OsString::from("unix:path=/nonexistent/orx-account-bus"),
+                ));
+            }
+            env
         }
         _ => Vec::new(),
     })
@@ -465,6 +476,10 @@ pub fn login_command_line(harness: &str, id: &str) -> Option<String> {
             quote(&home)
         ),
         "codex" => format!("CODEX_HOME={} codex login", quote(&home)),
+        "antigravity" if cfg!(all(unix, not(target_os = "macos"))) => format!(
+            "HOME={} DBUS_SESSION_BUS_ADDRESS=unix:path=/nonexistent/orx-account-bus agy",
+            quote(&home.join("home"))
+        ),
         "antigravity" => format!("HOME={} agy", quote(&home.join("home"))),
         _ => return None,
     })
@@ -1212,25 +1227,81 @@ async fn read_agy(account: &str) -> std::result::Result<Vec<QuotaSnapshot>, Stri
         .timeout(PROVIDER_TIMEOUT)
         .build()
         .map_err(|error| error.to_string())?;
-    let response = client
-        .post("https://cloudcode-pa.googleapis.com/v1internal:fetchAvailableModels")
-        .bearer_auth(token)
-        .json(&json!({}))
-        .send()
-        .await
-        .map_err(|error| format!("Antigravity did not answer: {error}"))?;
-    if !response.status().is_success() {
-        return Err(format!(
-            "Antigravity answered {} (its sign-in token may have expired; run a chat on this account to refresh it).",
-            response.status()
-        ));
-    }
-    let body: Value = response.json().await.map_err(|error| error.to_string())?;
+    // The model list is per Cloud Code project, which `loadCodeAssist` names;
+    // without it the API answers 403.
+    let assist = agy_call(
+        &client,
+        &token,
+        "loadCodeAssist",
+        &json!({ "metadata": {
+            "ideType": "ANTIGRAVITY",
+            "platform": "PLATFORM_UNSPECIFIED",
+            "pluginType": "GEMINI",
+        }}),
+    )
+    .await?;
+    let project = agy_project(&assist)
+        .ok_or("Antigravity did not name a Cloud Code project for this account.")?;
+    let body = agy_call(
+        &client,
+        &token,
+        "fetchAvailableModels",
+        &json!({ "project": project }),
+    )
+    .await?;
     let snapshots = parse_agy_models(&body, account);
     if snapshots.is_empty() {
         return Err("Antigravity reported no quota for its models.".into());
     }
     Ok(snapshots)
+}
+
+/// One `v1internal` Cloud Code call, as the Antigravity IDE makes it.
+async fn agy_call(
+    client: &reqwest::Client,
+    token: &str,
+    method: &str,
+    body: &Value,
+) -> std::result::Result<Value, String> {
+    let response = client
+        .post(format!(
+            "https://cloudcode-pa.googleapis.com/v1internal:{method}"
+        ))
+        .bearer_auth(token)
+        .header(reqwest::header::USER_AGENT, "antigravity")
+        .json(body)
+        .send()
+        .await
+        .map_err(|error| format!("Antigravity did not answer: {error}"))?;
+    let status = response.status();
+    if !status.is_success() {
+        let text = response.text().await.unwrap_or_default();
+        let detail = serde_json::from_str::<Value>(&text)
+            .ok()
+            .and_then(|value| value["error"]["message"].as_str().map(str::to_string))
+            .map(|message| format!(": {}", message.chars().take(200).collect::<String>()))
+            .unwrap_or_default();
+        let hint = if status == reqwest::StatusCode::UNAUTHORIZED {
+            " Its sign-in token may have expired; run a chat on this account to refresh it."
+        } else {
+            ""
+        };
+        return Err(format!(
+            "Antigravity {method} answered {status}{detail}.{hint}"
+        ));
+    }
+    response.json().await.map_err(|error| error.to_string())
+}
+
+/// `cloudaicompanionProject` is a bare id in current answers and `{ id }` in
+/// older ones.
+fn agy_project(assist: &Value) -> Option<String> {
+    let project = &assist["cloudaicompanionProject"];
+    project
+        .as_str()
+        .or_else(|| project["id"].as_str())
+        .filter(|id| !id.is_empty())
+        .map(str::to_string)
 }
 
 /// Each model's `quotaInfo.remainingFraction`, folded to the tightest one
@@ -1249,8 +1320,23 @@ fn parse_agy_models(body: &Value, account: &str) -> Vec<QuotaSnapshot> {
     };
     let mut tightest: Vec<(&'static str, f64, Option<i64>)> = Vec::new();
     for (id, model) in entries {
+        // Tab completion and internal chat models are not agent models.
+        if id.starts_with("tab_") || id.starts_with("chat_") {
+            continue;
+        }
         let quota = &model["quotaInfo"];
-        let Some(left) = quota["remainingFraction"].as_f64() else {
+        let left = quota["remainingFraction"].as_f64().or_else(|| {
+            quota["remainingFraction"]
+                .as_str()
+                .and_then(|text| text.parse().ok())
+        });
+        // The API leaves zero fields out, so a model with a reset time and no
+        // fraction has none left.
+        let left = left.or_else(|| {
+            (quota["isExhausted"].as_bool() == Some(true) || quota["resetTime"].is_string())
+                .then_some(0.0)
+        });
+        let Some(left) = left else {
             continue;
         };
         let pool = pool_for("antigravity", Some(&id));
@@ -1436,6 +1522,29 @@ mod tests {
         assert!((gemini.used_percent - 40.0).abs() < 1e-9);
         let partner = parsed.iter().find(|s| s.pool == "partner").unwrap();
         assert_eq!(partner.used_percent, 100.0);
+
+        let agy = json!({"models": {
+            "gemini-3.1-pro-high": {"quotaInfo": {"remainingFraction": "0.25"}},
+            "claude-sonnet-5-5-high": {"quotaInfo": {"resetTime": "2026-10-19T04:02:14Z"}},
+            "gpt-oss-120b-medium": {"quotaInfo": {"resetTime": "2026-10-19T04:02:14Z"}},
+            "tab_flash_lite_preview": {"quotaInfo": {"remainingFraction": 1}}
+        }});
+        let parsed = parse_agy_models(&agy, DEFAULT);
+        let gemini = parsed.iter().find(|s| s.pool == "gemini").unwrap();
+        assert!((gemini.used_percent - 75.0).abs() < 1e-9);
+        let partner = parsed.iter().find(|s| s.pool == "partner").unwrap();
+        assert_eq!(partner.used_percent, 100.0);
+        assert_eq!(partner.resets_at_ms, parse_time_ms("2026-10-19T04:02:14Z"));
+
+        assert_eq!(
+            agy_project(&json!({"cloudaicompanionProject": "proj-1"})).as_deref(),
+            Some("proj-1")
+        );
+        assert_eq!(
+            agy_project(&json!({"cloudaicompanionProject": {"id": "proj-2"}})).as_deref(),
+            Some("proj-2")
+        );
+        assert_eq!(agy_project(&json!({})), None);
     }
 
     #[test]
