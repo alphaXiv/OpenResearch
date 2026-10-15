@@ -185,6 +185,11 @@ pub struct HarnessOptions {
     pub plan_activation: Option<PlanActivation>,
     pub reasoning_levels: Vec<OptionChoice>,
     pub default_reasoning_level: Option<String>,
+    /// How the harness reaches its models (see `ModelInfo::provider_group`),
+    /// offered as the composer's provider switch even before a group has
+    /// models.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub provider_groups: Vec<OptionChoice>,
 }
 
 impl HarnessOptions {
@@ -196,7 +201,13 @@ impl HarnessOptions {
             plan_activation: None,
             reasoning_levels: Vec::new(),
             default_reasoning_level: None,
+            provider_groups: Vec::new(),
         }
+    }
+
+    pub fn with_provider_groups(mut self, groups: Vec<OptionChoice>) -> Self {
+        self.provider_groups = groups;
+        self
     }
 
     pub fn with_permission_choices(

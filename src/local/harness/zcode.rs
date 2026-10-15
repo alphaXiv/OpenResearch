@@ -1,41 +1,42 @@
 //! ZCode harness (Z.ai's coding agent).
 //!
-//! Chat: one `zcode -p <prompt> --output-format stream-json` child per turn,
-//! continued with `--resume <sessionId>`. The stream is one JSON event per
-//! line: `model.streaming` (text, reasoning and tool-call deltas),
-//! `tool.updated` (tool results), `permission.resolved`, and a closing
-//! `turn.completed` or `turn.failed`.
+//! Chat: one `zcode app-server --stdio` child per turn, speaking the ZCode
+//! Protocol (JSON-RPC-shaped NDJSON without the `jsonrpc` field). The turn
+//! creates or resumes the native session, moves it onto the composer's mode
+//! and model, subscribes, and sends one message. The session's events
+//! (`model.streaming`, `tool.updated`, `permission.resolved`, …) arrive as
+//! `session/event` notifications until `turn.completed` or `turn.failed`.
 //!
-//! Print mode has no approval channel: in `build`/`edit` mode ZCode denies
-//! high-risk tools itself ("No permission client configured"). So the
-//! composer offers `edit` (edits allowed, risky commands denied; the default)
-//! and `yolo` (everything allowed). Plan runs in `build`, where every tool
-//! with side effects needs approval and so is denied: `Write`, `Edit`, every
-//! `Bash` command, and the Node REPL. The planning instruction only asks for
-//! a plan; the mode is what keeps the turn read-only.
+//! The composer's modes are ZCode's own: Ask is `build`, Edit is `edit`, Auto
+//! is `guarded` (ask when there is risk), Full access is `yolo`, and Plan is
+//! ZCode's read-only `plan`. ZCode's approvals, AskUserQuestion and plan
+//! approval (ExitPlanMode) come back as requests that orx shows as cards while
+//! the turn waits ([`crate::local::chat::ChatHost::request_permission`]).
 //!
 //! Detection: a `zcode` CLI (official `~/.zcode/runtime` install, npm, PATH),
 //! else the runtime bundled with the ZCode desktop app (`resources/glm/zcode.cjs`)
 //! run through the app's own Electron binary as Node (`ELECTRON_RUN_AS_NODE=1`).
 //! The desktop login in `~/.zcode/v2` is shared with both.
 
+use std::collections::HashMap;
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use async_trait::async_trait;
-use serde_json::Value;
-use tokio::io::{AsyncBufReadExt, BufReader};
+use serde_json::{json, Value};
 use tokio::process::Command;
 
+use super::acp::{Connection, Inbound, RpcError, RpcResult};
 use super::detect::{HarnessAuthState, HarnessInfo, ModelInfo};
 use super::options::{HarnessOptions, OptionChoice, PermissionMode, PlanActivation};
 use super::{Harness, ResumeAction, TurnFailure, TurnOutcome, TurnResult, TURN_WATCHDOG};
 use crate::error::{anyhow, Result};
 use crate::local::chat::{
-    find_part_mut, harness_log, prepare_env, set_chat_session_env, DeliveryState, PromptAnswer,
-    ResumeCtx, TurnCtx, WirePart, WirePrompt, WireToolState,
+    find_part_mut, harness_log, prepare_env, set_chat_session_env, DeliveryState,
+    PermissionDecision, PromptAnswer, ResumeCtx, TurnCtx, WirePart, WirePrompt, WireToolState,
 };
 use crate::local::opencode::ensure_playbook;
 use crate::local::shell_env::{find_in_dir, find_on_path};
@@ -44,7 +45,7 @@ const KEY: &str = "zcode";
 const INSTALL_HINT: &str =
     "Install the ZCode desktop app from https://zcode.z.ai and sign in there, then re-check this harness.";
 const LOGIN_HINT: &str =
-    "Sign in for command-line use with `zcode login` (Z.ai Individual or Team Coding Plan), or enable a provider with an API key in the ZCode app, then re-check this harness. Start Plan works only inside the ZCode app.";
+    "Sign in for command-line use with `zcode login` (Z.ai Individual or Team Coding Plan), or use an API key: add a provider with an API key in the ZCode app (Settings → Providers). Then re-check this harness. Start Plan works only inside the ZCode app.";
 const OTHER_ACCOUNT_HINT: &str =
     "ZCode's command-line sign-in belongs to a different Z.ai account than the plan key ZCode saved last, so its runtime finds no model. Sign in again with `zcode login` using the account that has the plan, then re-check this harness.";
 const VERSION_TIMEOUT: Duration = Duration::from_secs(20);
@@ -277,9 +278,10 @@ fn keyed_providers(config: &Value) -> Vec<&Value> {
         .unwrap_or_default()
 }
 
-fn access(home: &Path) -> Access {
-    let v2 = home.join("v2");
-    let plan = super::detect::read_json(v2.join("credentials.json"))
+/// How ZCode's runtime can reach a model: through a signed-in plan, or only
+/// through providers with an API key.
+fn access(home: &Path) -> (Access, bool) {
+    let plan = super::detect::read_json(home.join("v2").join("credentials.json"))
         .and_then(|store| {
             store
                 .as_object()
@@ -287,15 +289,29 @@ fn access(home: &Path) -> Access {
         })
         .unwrap_or(Access::None);
     if plan == Access::Ready {
-        return plan;
+        return (plan, false);
     }
-    let keyed_provider = super::detect::read_json(v2.join("provider_config.json"))
-        .is_some_and(|config| !keyed_providers(&config).is_empty());
-    if keyed_provider {
-        Access::Ready
+    let keyed = provider_config(home).is_some_and(|config| !keyed_providers(&config).is_empty());
+    if keyed {
+        (Access::Ready, true)
     } else {
-        plan
+        (plan, false)
     }
+}
+
+/// The built-in template `id`.
+fn template<'a>(builtin: Option<&'a Value>, id: &str) -> Option<&'a Value> {
+    builtin?
+        .pointer("/config/providerConfigRules/templateRules")?
+        .as_array()?
+        .iter()
+        .find(|rule| rule.get("templateId").and_then(Value::as_str) == Some(id))
+}
+
+/// The ZCode app's provider configuration: the providers set up in the app,
+/// with their API keys (ZCode keeps them there; orx stores none).
+fn provider_config(home: &Path) -> Option<Value> {
+    super::detect::read_json(home.join("v2").join("provider_config.json"))
 }
 
 /// The runtime's built-in provider catalog: the app's file, handed to the
@@ -318,23 +334,31 @@ fn builtin_catalog(launch: &Launch) -> Option<PathBuf> {
     .filter(|path| path.is_file())
 }
 
+/// The composer's provider switch for ZCode: a plan's sign-in, or providers
+/// with an API key.
+fn provider_group(api_key: bool) -> OptionChoice {
+    if api_key {
+        OptionChoice::new("api-key", "API key")
+    } else {
+        OptionChoice::new("coding-plan", "Coding Plan")
+    }
+}
+
 /// The models ZCode's runtime can use, from the same places it reads them: the
 /// built-in models of each plan `zcode login` signed in (from the app's
 /// built-in provider catalog), and the models of each enabled API-key provider
-/// (its own list, else its template's). Ids are `<provider>/<model>`, the form
-/// of ZCode's own model selection.
-fn catalog(home: &Path, builtin: Option<&Path>) -> Vec<ModelInfo> {
-    let v2 = home.join("v2");
-    let builtin = builtin.and_then(|path| super::detect::read_json(path.to_path_buf()));
-    let rules = |kind: &str| {
+/// (its own list, else the models its template enables). Ids are
+/// `<provider>/<model>`, the form of ZCode's own model selection.
+fn catalog(home: &Path, builtin: Option<&Value>) -> Vec<ModelInfo> {
+    let rules = |pointer: &str| {
         builtin
-            .as_ref()
-            .and_then(|config| config.pointer(&format!("/config/providerConfigRules/{kind}")))
+            .and_then(|config| config.pointer(pointer))
             .and_then(Value::as_array)
             .cloned()
             .unwrap_or_default()
     };
-    let (providers, templates) = (rules("providerRules"), rules("templateRules"));
+    let providers = rules("/config/providerConfigRules/providerRules");
+    let template_models = rules("/config/modelConfigRules/templateModelRules");
     let models_of = |rule: &Value, key: &str| -> Vec<String> {
         rule.pointer(&format!("/config/{key}"))
             .and_then(Value::as_array)
@@ -346,8 +370,9 @@ fn catalog(home: &Path, builtin: Option<&Path>) -> Vec<ModelInfo> {
             })
             .unwrap_or_default()
     };
-    let mut entries: Vec<(String, String, String)> = Vec::new();
-    let plans = super::detect::read_json(v2.join("credentials.json"))
+    // (provider, model, provider name, reached with an API key)
+    let mut entries: Vec<(String, String, String, bool)> = Vec::new();
+    let plans = super::detect::read_json(home.join("v2").join("credentials.json"))
         .and_then(|store| {
             store
                 .as_object()
@@ -365,11 +390,11 @@ fn catalog(home: &Path, builtin: Option<&Path>) -> Vec<ModelInfo> {
                 .unwrap_or(&plan)
                 .to_string();
             for model in models_of(rule, "builtinModelIds") {
-                entries.push((plan.clone(), model, name.clone()));
+                entries.push((plan.clone(), model, name.clone(), false));
             }
         }
     }
-    if let Some(config) = super::detect::read_json(v2.join("provider_config.json")) {
+    if let Some(config) = provider_config(home) {
         for rule in keyed_providers(&config) {
             let Some(provider) = rule.get("providerId").and_then(Value::as_str) else {
                 continue;
@@ -381,74 +406,45 @@ fn catalog(home: &Path, builtin: Option<&Path>) -> Vec<ModelInfo> {
                 .to_string();
             let mut models = models_of(rule, "personalModelIds");
             if models.is_empty() {
-                let template = rule
+                let template_id = rule
                     .get("templateId")
                     .and_then(Value::as_str)
                     .unwrap_or(provider);
-                if let Some(template) = templates
+                // The models the template enables, as the runtime lists them;
+                // a catalog without model rules offers all of its models.
+                let enabled: Vec<String> = template_models
                     .iter()
-                    .find(|rule| rule.get("templateId").and_then(Value::as_str) == Some(template))
-                {
-                    models = models_of(template, "builtinModelIds");
-                }
+                    .filter(|rule| {
+                        rule.get("templateId").and_then(Value::as_str) == Some(template_id)
+                            && rule.pointer("/config/enabled").and_then(Value::as_bool)
+                                == Some(true)
+                    })
+                    .filter_map(|rule| rule.get("modelId").and_then(Value::as_str))
+                    .map(str::to_string)
+                    .collect();
+                models = if enabled.is_empty() {
+                    template(builtin, template_id)
+                        .map(|template| models_of(template, "builtinModelIds"))
+                        .unwrap_or_default()
+                } else {
+                    enabled
+                };
             }
             for model in models {
-                entries.push((provider.to_string(), model, name.clone()));
+                entries.push((provider.to_string(), model, name.clone(), true));
             }
         }
     }
     let mut seen = std::collections::HashSet::new();
     entries
         .into_iter()
-        .filter(|(provider, model, _)| seen.insert(format!("{provider}/{model}")))
-        .map(|(provider, model, name)| {
-            ModelInfo::new(format!("{provider}/{model}")).with_label(Some(&model), Some(&name))
+        .filter(|(provider, model, _, _)| seen.insert(format!("{provider}/{model}")))
+        .map(|(provider, model, name, api_key)| {
+            ModelInfo::new(format!("{provider}/{model}"))
+                .with_label(Some(&model), Some(&name))
+                .with_provider_group(provider_group(api_key))
         })
         .collect()
-}
-
-/// Held by a new chat from writing ZCode's default model until its runtime has
-/// read it, so chats started together do not run on each other's model.
-static MODEL_SELECTION: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
-
-/// Whether `event` shows the runtime has settled on its model (or ended), so
-/// the shared default model may change again.
-fn model_settled(event: &Value) -> bool {
-    matches!(
-        event.get("type").and_then(Value::as_str),
-        Some("turn.completed" | "turn.failed")
-    ) || event.pointer("/payload/modelId").is_some()
-}
-
-/// Make `provider/model` ZCode's default model, which is the only model
-/// choice its print mode reads. The default is shared with the ZCode app.
-fn select_model(home: &Path, model: &str) -> Result<()> {
-    let Some((provider, model)) = model.split_once('/') else {
-        return Err(anyhow!("Unknown ZCode model {model}"));
-    };
-    let path = home.join("v2").join("provider_config.json");
-    let mut config = super::detect::read_json(path.clone()).unwrap_or_else(|| {
-        serde_json::json!({
-            "schemaVersion": 1,
-            "config": {
-                "providerConfigRules": {"providerRules": []},
-                "modelConfigRules": {"providerModelRules": [], "manualProviderModelRules": []},
-            },
-        })
-    });
-    let selection = serde_json::json!({"providerId": provider, "modelId": model});
-    let Some(settings) = config.get_mut("config").and_then(Value::as_object_mut) else {
-        return Err(anyhow!("{} has no config object", path.display()));
-    };
-    if settings.get("defaultModelSelection") == Some(&selection) {
-        return Ok(());
-    }
-    settings.insert("defaultModelSelection".into(), selection);
-    let tmp = path.with_extension(format!("json.orx-{}", uuid::Uuid::new_v4()));
-    std::fs::create_dir_all(path.parent().unwrap())?;
-    std::fs::write(&tmp, serde_json::to_vec_pretty(&config)?)?;
-    std::fs::rename(&tmp, &path)?;
-    Ok(())
 }
 
 /// The key ZCode encrypts credentials.json with: SHA-256 of
@@ -545,11 +541,16 @@ async fn version(launch: &Launch) -> Option<String> {
 impl ZCode {
     async fn detect_at(&self, snapshot: bool) -> Option<HarnessInfo> {
         let mut info = HarnessInfo::new(self.id(), self.name());
-        if let Some(launch) = find_launch() {
+        let launch = find_launch();
+        let builtin = launch
+            .as_ref()
+            .and_then(builtin_catalog)
+            .and_then(super::detect::read_json);
+        if let Some(launch) = launch.as_ref() {
             info.installed = true;
             info.bin_path = Some(launch.program.to_string_lossy().into_owned());
             if !snapshot {
-                match version(&launch).await {
+                match version(launch).await {
                     Some(version) => info.version = Some(version),
                     None if launch.bundled => {
                         info.install_broken = true;
@@ -562,11 +563,13 @@ impl ZCode {
                 }
             }
             if !info.install_broken {
-                match zcode_home().map_or(Access::None, |home| access(&home)) {
+                let (access, api_key) =
+                    zcode_home().map_or((Access::None, false), |home| access(&home));
+                match access {
                     Access::Ready => {
                         info.authenticated = true;
                         info.auth_state = HarnessAuthState::Ready;
-                        info.auth_method = Some("oauth");
+                        info.auth_method = Some(if api_key { "apiKey" } else { "oauth" });
                     }
                     Access::OtherAccount => {
                         info.auth_state = HarnessAuthState::NeedsLogin;
@@ -581,9 +584,8 @@ impl ZCode {
         } else {
             info.agent_note = Some(INSTALL_HINT.into());
         }
-        if let (Some(home), Some(launch)) = (zcode_home(), find_launch()) {
-            let builtin = builtin_catalog(&launch);
-            info = info.with_models(catalog(&home, builtin.as_deref()));
+        if let (Some(home), Some(_)) = (zcode_home(), launch.as_ref()) {
+            info = info.with_models(catalog(&home, builtin.as_ref()));
         }
         info.agent_ready = info.ready();
         Some(info)
@@ -620,18 +622,22 @@ impl Harness for ZCode {
     }
 
     fn options(&self) -> HarnessOptions {
-        HarnessOptions::none().with_permission_choices(
-            vec![
-                OptionChoice::described(
-                    "accept-edits",
-                    "Edit",
-                    "Allow file edits; ZCode denies high-risk commands",
-                ),
-                OptionChoice::described("bypass", "YOLO", "Allow every tool"),
-            ],
-            "accept-edits",
-            PlanActivation::Command,
-        )
+        HarnessOptions::none()
+            .with_permission_choices(
+                vec![
+                    OptionChoice::described("ask", "Ask", "Ask before changes and commands"),
+                    OptionChoice::described(
+                        "accept-edits",
+                        "Edit",
+                        "Allow file edits; ask before commands",
+                    ),
+                    OptionChoice::described("auto", "Auto", "Ask only when there is risk"),
+                    OptionChoice::described("bypass", "Full access", "Allow every tool"),
+                ],
+                "auto",
+                PlanActivation::Command,
+            )
+            .with_provider_groups(vec![provider_group(false), provider_group(true)])
     }
 
     async fn resume_from_prompt(
@@ -640,7 +646,7 @@ impl Harness for ZCode {
         prompt: &WirePrompt,
         answer: &PromptAnswer,
     ) -> Result<ResumeAction> {
-        super::acp::resume_from_prompt(ctx, prompt, answer).await
+        resume_from_prompt(ctx, prompt, answer).await
     }
 
     fn config_home(&self) -> Option<PathBuf> {
@@ -665,31 +671,489 @@ impl Harness for ZCode {
     }
 }
 
+/// ZCode's mode for the composer's permission mode. Plan is ZCode's own
+/// read-only mode, left through its plan approval (ExitPlanMode).
 fn zcode_mode(mode: Option<PermissionMode>, plan: bool) -> &'static str {
     if plan || mode == Some(PermissionMode::Plan) {
-        return "build";
+        return "plan";
     }
-    match mode.unwrap_or(PermissionMode::AcceptEdits) {
-        PermissionMode::Bypass => "yolo",
+    match mode.unwrap_or(PermissionMode::Auto) {
         PermissionMode::Ask => "build",
-        PermissionMode::AcceptEdits | PermissionMode::Auto | PermissionMode::Plan => "edit",
+        PermissionMode::AcceptEdits => "edit",
+        PermissionMode::Auto | PermissionMode::Plan => "guarded",
+        PermissionMode::Bypass => "yolo",
     }
 }
 
-const PLAN_NOTE: &str = "Plan mode: investigate read-only and reply with a concrete plan. Do not modify files or run commands that change state.";
+/// ZCode before 3.15 has no `guarded` mode (its `auto` is a stub that denies
+/// every tool). `edit` is the nearest: edits run, anything else asks.
+const GUARDED_FALLBACK: &str = "edit";
 
-fn turn_prompt(text: &str, first: bool, plan: bool) -> String {
-    let mut prompt = String::new();
+fn turn_prompt(text: &str, first: bool) -> String {
     if first {
-        prompt.push_str(&super::acp::playbook_pointer());
-        prompt.push_str("\n\n");
+        format!("{}\n\n{text}", super::acp::playbook_pointer())
+    } else {
+        text.to_string()
     }
-    if plan {
-        prompt.push_str(PLAN_NOTE);
-        prompt.push_str("\n\n");
+}
+
+/// What ZCode's runtime asks the client while it waits for preferences;
+/// the defaults of ZCode's own desktop app, except that questions always
+/// reach the user.
+fn runtime_preferences() -> Value {
+    json!({
+        "nativeSearchEnhancementsEnabled": false,
+        "memoryEnabled": false,
+        "askUserQuestionAutoResolutionEnabled": false,
+    })
+}
+
+/// Something ZCode asks the user mid-turn, as orx shows it.
+#[derive(Debug, Clone, PartialEq)]
+enum Ask {
+    /// A tool approval, answered with one of ZCode's own options.
+    Permission {
+        tool: String,
+        input: Value,
+        options: Vec<Value>,
+    },
+    /// AskUserQuestion, answered with the chosen option labels.
+    Question { input: Value, question: String },
+    /// ExitPlanMode: approve the plan, revise it, or stay in plan mode.
+    Plan { plan: String },
+}
+
+impl Ask {
+    /// The request ZCode sent, if orx can show it.
+    fn of(method: &str, params: &Value) -> Option<Self> {
+        let input = params.get("input").cloned().unwrap_or_else(|| json!({}));
+        let tool = params.get("toolName").and_then(Value::as_str);
+        match method {
+            "interaction/requestPermission" => Some(Ask::Permission {
+                tool: tool.unwrap_or("Tool").to_string(),
+                input,
+                options: params
+                    .get("options")
+                    .and_then(Value::as_array)
+                    .cloned()
+                    .unwrap_or_default(),
+            }),
+            "interaction/requestUserInput"
+                if params
+                    .pointer("/schema/interaction")
+                    .and_then(Value::as_str)
+                    == Some("plan_approval") =>
+            {
+                Some(Ask::Plan {
+                    plan: input
+                        .get("plan")
+                        .and_then(Value::as_str)
+                        .unwrap_or_default()
+                        .to_string(),
+                })
+            }
+            "interaction/requestUserInput" if tool == Some("AskUserQuestion") => {
+                let question = input
+                    .pointer("/questions/0/question")
+                    .and_then(Value::as_str)?
+                    .to_string();
+                Some(Ask::Question { input, question })
+            }
+            _ => None,
+        }
     }
-    prompt.push_str(text);
-    prompt
+
+    /// The tool name and input of orx's card (`ChatHost::request_permission`
+    /// turns ExitPlanMode into a plan card and AskUserQuestion into a
+    /// question card).
+    fn card(&self) -> (&str, Value) {
+        match self {
+            Ask::Permission { tool, input, .. } => (tool, input.clone()),
+            Ask::Question { input, .. } => ("AskUserQuestion", input.clone()),
+            Ask::Plan { plan } => ("ExitPlanMode", json!({ "plan": plan })),
+        }
+    }
+
+    /// ZCode's answer for the user's decision. A plan card's Allow carries
+    /// `{"feedback": …}` when the user asked for a revision, and a question
+    /// card's carries `{"answers": {question: answer}}` (see
+    /// `resume_from_prompt`).
+    fn reply(&self, decision: &PermissionDecision) -> Value {
+        match (self, decision) {
+            (Ask::Permission { options, .. }, PermissionDecision::Allow { .. }) => {
+                let allows = |option: &&Value| {
+                    option.pointer("/response/decision").and_then(Value::as_str) == Some("allow")
+                };
+                options
+                    .iter()
+                    .filter(allows)
+                    .find(|option| option.get("kind").and_then(Value::as_str) == Some("allow_once"))
+                    .or_else(|| options.iter().find(allows))
+                    .and_then(|option| option.get("response").cloned())
+                    .unwrap_or_else(|| json!({ "decision": "allow" }))
+            }
+            (Ask::Permission { .. }, PermissionDecision::Deny { message }) => {
+                json!({ "decision": "deny", "reason": message })
+            }
+            (Ask::Question { .. }, PermissionDecision::Allow { updated_input }) => {
+                match updated_input
+                    .as_ref()
+                    .and_then(|input| input.get("answers"))
+                {
+                    Some(answers) => {
+                        json!({ "action": "accept", "content": { "answers": answers } })
+                    }
+                    None => json!({ "action": "decline" }),
+                }
+            }
+            (Ask::Plan { .. }, PermissionDecision::Allow { updated_input }) => {
+                let answer = updated_input
+                    .as_ref()
+                    .and_then(|input| input.get("feedback"))
+                    .and_then(Value::as_str)
+                    .unwrap_or(PLAN_APPROVE);
+                json!({ "action": "accept", "content": { "answer": answer } })
+            }
+            (Ask::Question { .. } | Ask::Plan { .. }, PermissionDecision::Deny { .. }) => {
+                json!({ "action": "decline" })
+            }
+        }
+    }
+}
+
+/// The answer that approves a plan; any other answer is feedback on it.
+const PLAN_APPROVE: &str = "approve";
+
+/// ZCode re-announces a request it is still waiting on (a new protocol id,
+/// the same `requestId`). One card answers all of them.
+#[derive(Default)]
+struct Asks {
+    waiting: HashMap<String, Vec<Value>>,
+    answered: HashMap<String, Value>,
+}
+
+#[derive(Default)]
+struct TurnState {
+    session_id: Option<String>,
+    text_part: Option<(String, String)>,
+    reasoning_part: Option<(String, String)>,
+    completed: bool,
+    failure: Option<String>,
+    /// ZCode asked for plan approval this turn, so its plan has a card.
+    plan_asked: bool,
+}
+
+/// One turn's connection to `zcode app-server --stdio`.
+struct Turn<'a> {
+    conn: &'a Connection,
+    inbound: &'a mut tokio::sync::mpsc::UnboundedReceiver<Inbound>,
+    state: TurnState,
+    asks: Arc<Mutex<Asks>>,
+    gate_token: String,
+    /// The mode a plan approval hands the session to.
+    after_plan: &'static str,
+}
+
+impl Turn<'_> {
+    /// Send a request and wait for its answer, handling ZCode's own messages
+    /// meanwhile.
+    async fn call(&mut self, ctx: &mut TurnCtx, method: &str, params: Value) -> Result<RpcResult> {
+        let mut rx = self.conn.send(method, params).await?;
+        loop {
+            tokio::select! {
+                biased;
+                message = self.inbound.recv() => {
+                    let Some(message) = message else {
+                        return Ok(rx.try_recv().unwrap_or_else(|_| Err(exited())));
+                    };
+                    self.handle(ctx, message).await?;
+                    ctx.maybe_flush();
+                }
+                response = &mut rx => return Ok(response.unwrap_or_else(|_| Err(exited()))),
+                _ = tokio::time::sleep(TURN_WATCHDOG) => {
+                    if !ctx.host.has_pending_permission(&ctx.session_id) {
+                        return Err(silent());
+                    }
+                }
+            }
+        }
+    }
+
+    /// Handle ZCode's messages until the turn completes or fails.
+    async fn finish(&mut self, ctx: &mut TurnCtx) -> Result<()> {
+        while !self.state.completed && self.state.failure.is_none() {
+            match tokio::time::timeout(TURN_WATCHDOG, self.inbound.recv()).await {
+                Ok(Some(message)) => {
+                    self.handle(ctx, message).await?;
+                    ctx.maybe_flush();
+                }
+                Ok(None) => return Err(anyhow!("ZCode exited before the turn finished")),
+                Err(_) if ctx.host.has_pending_permission(&ctx.session_id) => {}
+                Err(_) => return Err(silent()),
+            }
+        }
+        Ok(())
+    }
+
+    async fn handle(&mut self, ctx: &mut TurnCtx, message: Inbound) -> Result<()> {
+        match message {
+            Inbound::Notification { method, params } if method == "session/event" => {
+                ctx.mark_delivery(DeliveryState::Accepted);
+                apply_event(ctx, &mut self.state, &params);
+                if let Some(sid) = self.state.session_id.as_deref() {
+                    ctx.set_native_session_id(sid);
+                }
+            }
+            Inbound::Notification { .. } => {}
+            // Only a host that owns the account answers this; orx runs the
+            // runtime signed in by itself, so a request here has no answer.
+            Inbound::Request { id, method, .. }
+                if method == "interaction/requestProviderRuntimeHeaders" =>
+            {
+                self.conn
+                    .respond(
+                        id,
+                        json!({
+                            "headersApplied": false,
+                            "errorMessage": HOST_CREDENTIALS,
+                        }),
+                    )
+                    .await?;
+            }
+            Inbound::Request { id, method, .. }
+                if method == "session/requestRuntimePreferences" =>
+            {
+                self.conn.respond(id, runtime_preferences()).await?;
+            }
+            Inbound::Request { id, method, params } => match Ask::of(&method, &params) {
+                Some(ask) => self.ask(ctx, id, &params, ask).await?,
+                None => {
+                    // An unknown interaction answered "no" lets ZCode go on.
+                    self.conn
+                        .respond_error(
+                            id,
+                            -32601,
+                            &format!("{method} is not supported by OpenResearch"),
+                        )
+                        .await?
+                }
+            },
+        }
+        Ok(())
+    }
+
+    /// Show the user a card for `ask`; its answer arrives on a background task
+    /// while the turn keeps streaming.
+    async fn ask(&mut self, ctx: &TurnCtx, id: Value, params: &Value, ask: Ask) -> Result<()> {
+        let request = params
+            .get("requestId")
+            .and_then(Value::as_str)
+            .map(str::to_string)
+            .unwrap_or_else(|| id.to_string());
+        let answered = {
+            let mut asks = self.asks.lock().unwrap();
+            match asks.answered.get(&request).cloned() {
+                Some(reply) => Some((id, reply)),
+                None => {
+                    let waiting = asks.waiting.entry(request.clone()).or_default();
+                    waiting.push(id);
+                    if waiting.len() > 1 {
+                        return Ok(());
+                    }
+                    None
+                }
+            }
+        };
+        if let Some((id, reply)) = answered {
+            return self.conn.respond(id, reply).await;
+        }
+        if matches!(ask, Ask::Plan { .. }) {
+            self.state.plan_asked = true;
+        }
+        let host = ctx.host.clone();
+        let session_id = ctx.session_id.clone();
+        let native_id = params
+            .get("sessionId")
+            .and_then(Value::as_str)
+            .map(str::to_string);
+        let token = self.gate_token.clone();
+        let conn = self.conn.clone();
+        let asks = self.asks.clone();
+        let after_plan = self.after_plan;
+        tokio::spawn(async move {
+            let (tool, input) = ask.card();
+            let decision = host
+                .request_permission(&session_id, &token, tool, input)
+                .await
+                .unwrap_or_else(|error| PermissionDecision::Deny {
+                    message: error.to_string(),
+                });
+            let reply = ask.reply(&decision);
+            let ids = {
+                let mut asks = asks.lock().unwrap();
+                asks.answered.insert(request.clone(), reply.clone());
+                asks.waiting.remove(&request).unwrap_or_default()
+            };
+            for id in ids {
+                let _ = conn.respond(id, reply.clone()).await;
+            }
+            // An approved plan leaves ZCode in `build`; continue in the
+            // composer's own mode instead.
+            let approved = matches!(ask, Ask::Plan { .. })
+                && reply.pointer("/content/answer").and_then(Value::as_str) == Some(PLAN_APPROVE);
+            if let (true, Some(native_id)) = (approved, native_id) {
+                let _ = conn
+                    .send(
+                        "session/setMode",
+                        json!({"sessionId": native_id, "mode": after_plan}),
+                    )
+                    .await;
+            }
+        });
+        Ok(())
+    }
+
+    /// Set the session's mode, falling back from `guarded` on a ZCode that
+    /// lacks it.
+    async fn set_mode(&mut self, ctx: &mut TurnCtx, session: &str, mode: &str) -> Result<()> {
+        let mut result = self
+            .call(
+                ctx,
+                "session/setMode",
+                json!({"sessionId": session, "mode": mode}),
+            )
+            .await?;
+        if result.is_err() && mode == "guarded" {
+            result = self
+                .call(
+                    ctx,
+                    "session/setMode",
+                    json!({"sessionId": session, "mode": GUARDED_FALLBACK}),
+                )
+                .await?;
+        }
+        result.map(|_| ()).map_err(|error| {
+            anyhow!(
+                "ZCode could not switch to the chosen mode, so the message was not sent: {error}"
+            )
+        })
+    }
+}
+
+fn exited() -> RpcError {
+    RpcError {
+        code: 0,
+        message: "ZCode exited".into(),
+    }
+}
+
+fn silent() -> crate::error::Error {
+    anyhow!(
+        "ZCode went silent for {} minutes and was interrupted.",
+        TURN_WATCHDOG.as_secs() / 60
+    )
+}
+
+/// The `session/setModel` selection that moves a session onto the composer's
+/// model (`provider/model`) at `reasoning`, else the model's default level;
+/// `None` when the session already runs it. `settings` is the session
+/// snapshot's.
+fn model_selection(settings: &Value, wanted: &str, reasoning: Option<&str>) -> Option<Value> {
+    let (provider, model) = wanted.split_once('/')?;
+    let offered = settings
+        .pointer("/model/available")
+        .and_then(Value::as_array)
+        .and_then(|all| {
+            all.iter().find(|entry| {
+                entry.pointer("/ref/providerId").and_then(Value::as_str) == Some(provider)
+                    && entry.pointer("/ref/modelId").and_then(Value::as_str) == Some(model)
+            })
+        });
+    let levels: Vec<&str> = offered
+        .and_then(|entry| entry.pointer("/reasoning/levels"))
+        .and_then(Value::as_array)
+        .map(|levels| {
+            levels
+                .iter()
+                .filter_map(|level| level.get("value").and_then(Value::as_str))
+                .collect()
+        })
+        .unwrap_or_default();
+    let level = reasoning
+        .filter(|level| levels.contains(level))
+        .or_else(|| {
+            offered
+                .and_then(|entry| entry.pointer("/reasoning/defaultLevel"))
+                .and_then(Value::as_str)
+        });
+    let mut selection = json!({"providerId": provider, "modelId": model});
+    if let Some(level) = level {
+        selection["options"] = json!({ "reasoningLevel": level });
+    }
+    let current = settings.pointer("/model/current");
+    let same = current.and_then(|c| c.get("providerId")) == selection.get("providerId")
+        && current.and_then(|c| c.get("modelId")) == selection.get("modelId")
+        && (level.is_none()
+            || current
+                .and_then(|c| c.pointer("/options/reasoningLevel"))
+                .and_then(Value::as_str)
+                == level);
+    (!same).then_some(selection)
+}
+
+/// Runs the desktop app's runtime through orx's loader, which starts its
+/// app-server signed in the way `zcode -p` is (see `zcode_app_server.cjs`).
+const APP_SERVER_LOADER: &str = include_str!("zcode_app_server.cjs");
+
+/// What the loader prints when this ZCode build cannot be signed in that way.
+const STANDALONE_UNAVAILABLE: &str = "orx: ZCode standalone sign-in unavailable";
+
+/// orx's answer when ZCode asks its host for account credentials, which the
+/// turn then fails with: the runtime is not signed in by itself.
+const HOST_CREDENTIALS: &str = "ZCode asked OpenResearch for its Coding Plan credentials";
+
+/// Why a Coding Plan model cannot run with this ZCode build, when that is the
+/// cause (from the turn's message and the loader's word in the log).
+fn sign_in_failure(message: &str, log: &str) -> Option<String> {
+    let unavailable = log.contains(STANDALONE_UNAVAILABLE);
+    if !unavailable && !message.contains(HOST_CREDENTIALS) {
+        return None;
+    }
+    let status = log
+        .lines()
+        .find_map(|line| line.strip_prefix("orx: ZCode app-server sign-in: "))
+        .unwrap_or("not reported");
+    Some(format!(
+        "OpenResearch could not use ZCode's Coding Plan sign-in with this ZCode version \
+         (sign-in loader: {status}). Choose a model of a provider with an API key, or update \
+         OpenResearch."
+    ))
+}
+
+/// The app-server launch: the desktop runtime goes through the loader; a
+/// standalone CLI (the npm build signs in by itself) runs as it is.
+fn app_server_launch(launch: Launch) -> Result<Launch> {
+    let [runtime] = launch.prefix.as_slice() else {
+        return Ok(launch);
+    };
+    if !launch.bundled {
+        return Ok(launch);
+    }
+    let loader = crate::store::data_dir().join("zcode-app-server.cjs");
+    if std::fs::read_to_string(&loader).ok().as_deref() != Some(APP_SERVER_LOADER) {
+        std::fs::create_dir_all(crate::store::data_dir())?;
+        let tmp = loader.with_extension(format!("cjs.{}", uuid::Uuid::new_v4()));
+        std::fs::write(&tmp, APP_SERVER_LOADER)?;
+        std::fs::rename(&tmp, &loader)?;
+    }
+    let mut env = launch.env.clone();
+    env.push(("ORX_ZCODE_RUNTIME", runtime.clone()));
+    Ok(Launch {
+        program: launch.program,
+        prefix: vec![loader.into_os_string()],
+        env,
+        bundled: true,
+    })
 }
 
 async fn run_turn(ctx: &mut TurnCtx) -> Result<()> {
@@ -702,32 +1166,12 @@ async fn run_turn(ctx: &mut TurnCtx) -> Result<()> {
     .await
     .map_err(|e| anyhow!("playbook task failed: {e}"))??;
 
-    let resume = ctx.native_session_id.clone();
-    // A new session starts on ZCode's default model; a resumed one keeps its own.
-    let mut selection = match resume {
-        None => Some(MODEL_SELECTION.lock().await),
-        Some(_) => None,
-    };
-    if let (None, Some(model), Some(home)) = (&resume, ctx.model.as_deref(), zcode_home()) {
-        select_model(&home, model)
-            .map_err(|error| anyhow!("Could not select {model} in ZCode: {error}"))?;
-    }
-    let plan = ctx.plan_mode || ctx.permission_mode == Some(PermissionMode::Plan);
-    let prompt = turn_prompt(&ctx.text, resume.is_none(), plan);
-
     let log_name = format!("zcode-{}", uuid::Uuid::new_v4());
+    let launch = app_server_launch(launch)?;
     let mut cmd = launch.command();
-    cmd.arg("-p")
-        .arg(&prompt)
-        .args(["--output-format", "stream-json", "--no-color", "--mode"])
-        .arg(zcode_mode(ctx.permission_mode, ctx.plan_mode))
-        .arg("--cwd")
-        .arg(&repo);
-    if let Some(native_id) = &resume {
-        cmd.args(["--resume", native_id]);
-    }
-    cmd.current_dir(&repo)
-        .stdin(Stdio::null())
+    cmd.args(["app-server", "--stdio"])
+        .current_dir(&repo)
+        .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::from(harness_log(&log_name)?))
         .kill_on_drop(true);
@@ -752,68 +1196,222 @@ async fn run_turn(ctx: &mut TurnCtx) -> Result<()> {
         }
     };
     let _processes = super::antigravity::TurnProcesses(child.id());
+    let stdin = child.stdin.take().ok_or_else(|| anyhow!("no stdin"))?;
     let stdout = child.stdout.take().ok_or_else(|| anyhow!("no stdout"))?;
-    let mut lines = BufReader::new(stdout).lines();
-    let mut state = TurnState::default();
-
-    loop {
-        match tokio::time::timeout(TURN_WATCHDOG, lines.next_line()).await {
-            Ok(Ok(Some(line))) => {
-                let Ok(event) = serde_json::from_str::<Value>(&line) else {
-                    continue;
-                };
-                ctx.mark_delivery(DeliveryState::Accepted);
-                if selection.is_some() && model_settled(&event) {
-                    selection = None;
-                }
-                apply_event(ctx, &mut state, &event);
-                if let Some(sid) = state.session_id.as_deref() {
-                    ctx.set_native_session_id(sid);
-                }
-                ctx.maybe_flush();
+    let (conn, mut inbound, reader) = super::acp::connect(stdin, stdout, false);
+    let log_path = crate::store::data_dir().join(format!("agent-{log_name}.log"));
+    let outcome = drive(ctx, &conn, &mut inbound, &repo).await;
+    reader.abort();
+    // Closing stdin ends the app-server.
+    drop(conn);
+    let _ = tokio::time::timeout(Duration::from_secs(5), child.wait()).await;
+    match outcome {
+        Ok(failure) => {
+            if let Some(message) = failure {
+                ctx.mark_terminal_failure("zcode_turn_failed", explain_failure(message, &log_path));
+            } else {
+                let _ = std::fs::remove_file(&log_path);
             }
-            Ok(Ok(None)) => break,
-            Ok(Err(error)) => return Err(anyhow!("zcode stdout: {error}")),
-            Err(_) => {
-                return Err(anyhow!(
-                    "ZCode went silent for {} minutes and was interrupted.",
-                    TURN_WATCHDOG.as_secs() / 60
-                ))
+            let _ = ctx.flush();
+            Ok(())
+        }
+        Err(error) => {
+            let log = std::fs::read_to_string(&log_path).unwrap_or_default();
+            if let Some(why) = sign_in_failure(&error.to_string(), &log) {
+                return Err(anyhow!("{error}\n\n{why} (log: {})", log_path.display()));
             }
+            Err(anyhow!("{error} (log: {})", log_path.display()))
         }
     }
-    let status = tokio::time::timeout(Duration::from_secs(30), child.wait())
-        .await
-        .map_err(|_| anyhow!("ZCode did not exit after its response"))??;
-    let log_path = crate::store::data_dir().join(format!("agent-{log_name}.log"));
-    if let Some(message) = state.failure.take() {
-        ctx.mark_terminal_failure("zcode_turn_failed", explain_failure(message, &log_path));
-    } else if !state.completed {
-        let detail = std::fs::read_to_string(&log_path)
-            .ok()
-            .and_then(|log| {
-                log.lines()
-                    .rev()
-                    .find(|l| !l.trim().is_empty())
-                    .map(str::to_string)
-            })
-            .unwrap_or_default();
-        return Err(anyhow!(
-            "ZCode ended without a result ({status}). {detail} (log: {})",
-            log_path.display()
-        ));
-    } else {
-        let _ = std::fs::remove_file(&log_path);
+}
+
+/// Open (or resume) the session, bring it to the composer's mode and model,
+/// and run one message. Returns ZCode's own failure message, if the turn
+/// failed.
+async fn drive(
+    ctx: &mut TurnCtx,
+    conn: &Connection,
+    inbound: &mut tokio::sync::mpsc::UnboundedReceiver<Inbound>,
+    repo: &Path,
+) -> Result<Option<String>> {
+    let plan = ctx.plan_mode || ctx.permission_mode == Some(PermissionMode::Plan);
+    let mode = zcode_mode(ctx.permission_mode, plan);
+    let bypass = mode == "yolo";
+    let mut turn = Turn {
+        conn,
+        inbound,
+        state: TurnState::default(),
+        asks: Arc::default(),
+        gate_token: ctx.host.mint_gate_token(&ctx.session_id, plan, bypass),
+        after_plan: zcode_mode(
+            ctx.permission_mode.filter(|m| *m != PermissionMode::Plan),
+            false,
+        ),
+    };
+    let path = repo.to_string_lossy().into_owned();
+    let workspace = json!({"workspacePath": path, "workspaceKey": path});
+
+    let mut opened = None;
+    if let Some(native) = ctx.native_session_id.clone() {
+        // A session ZCode no longer has starts over; orx keeps the transcript.
+        if let Ok(snapshot) = turn
+            .call(
+                ctx,
+                "session/resume",
+                json!({"sessionId": native, "workspace": workspace}),
+            )
+            .await?
+        {
+            turn.set_mode(ctx, &native, mode).await?;
+            opened = Some((native, snapshot));
+        }
     }
-    if plan {
+    let resumed = opened.is_some();
+    let (session, snapshot) = match opened {
+        Some(opened) => opened,
+        None => {
+            let create = |mode: &str| json!({"workspace": workspace, "mode": mode});
+            let mut created = turn.call(ctx, "session/create", create(mode)).await?;
+            if created.is_err() && mode == "guarded" {
+                created = turn
+                    .call(ctx, "session/create", create(GUARDED_FALLBACK))
+                    .await?;
+            }
+            let snapshot =
+                created.map_err(|error| anyhow!("ZCode could not start a session: {error}"))?;
+            let session = snapshot
+                .pointer("/session/sessionId")
+                .and_then(Value::as_str)
+                .ok_or_else(|| anyhow!("ZCode started a session without an id"))?
+                .to_string();
+            (session, snapshot)
+        }
+    };
+    ctx.set_native_session_id(&session);
+
+    if let Some(model) = ctx.model.clone() {
+        let settings = snapshot.get("settings").cloned().unwrap_or(Value::Null);
+        if let Some(selection) = model_selection(&settings, &model, ctx.reasoning_level.as_deref())
+        {
+            turn.call(
+                ctx,
+                "session/setModel",
+                json!({"sessionId": session, "model": selection, "persistAsWorkspaceLastUsed": false}),
+            )
+            .await?
+            .map_err(|error| anyhow!("ZCode could not switch to {model}, so the message was not sent: {error}"))?;
+        }
+    }
+    turn.call(
+        ctx,
+        "session/subscribe",
+        json!({"sessionId": session, "deliveryKind": "desktop-continuous"}),
+    )
+    .await?
+    .map_err(|error| anyhow!("ZCode did not stream the session: {error}"))?;
+    turn.call(
+        ctx,
+        "session/send",
+        json!({"sessionId": session, "content": turn_prompt(&ctx.text, !resumed)}),
+    )
+    .await?
+    .map_err(|error| {
+        ctx.mark_delivery(DeliveryState::NotSent);
+        anyhow!("ZCode did not accept the message: {error}")
+    })?;
+    ctx.mark_delivery(DeliveryState::Accepted);
+    turn.finish(ctx).await?;
+
+    // ZCode's plan mode ends a turn without asking for approval when the
+    // model writes its plan as text; that plan still needs a card.
+    if plan && !turn.state.plan_asked {
         if let Some(card) =
             super::acp::synthesized_plan_card(&ctx.assistant.parts, &ctx.assistant.id)
         {
             ctx.upsert_part(card);
         }
     }
-    let _ = ctx.flush();
-    Ok(())
+    Ok(turn.state.failure.take())
+}
+
+/// Answer a card ZCode is waiting on inside the running turn: a tool
+/// approval, a plan approval (ExitPlanMode) or a question (AskUserQuestion).
+/// End-turn plan cards (a plan written as text) continue with a new message.
+async fn resume_from_prompt(
+    ctx: &ResumeCtx,
+    prompt: &WirePrompt,
+    answer: &PromptAnswer,
+) -> Result<ResumeAction> {
+    let Some(native_id) = &prompt.native_id else {
+        return super::acp::resume_from_prompt(ctx, prompt, answer).await;
+    };
+    if !ctx.is_busy().await {
+        ctx.host
+            .resolve_zombie_prompt(&ctx.session_id, &answer.prompt_id);
+        return Err(anyhow!("this approval is no longer pending"));
+    }
+    let note = answer
+        .note
+        .as_deref()
+        .map(str::trim)
+        .filter(|n| !n.is_empty());
+    let (decision, plan_mode) = match (prompt.kind.as_str(), answer.approve) {
+        ("permission", true) => (
+            PermissionDecision::Allow {
+                updated_input: prompt.tool_input.clone(),
+            },
+            None,
+        ),
+        ("permission", false) => (
+            PermissionDecision::Deny {
+                message: match note {
+                    Some(note) => format!(
+                        "The user denied this action: {note}. Do not retry it; adjust course."
+                    ),
+                    None => "The user denied this action. Do not retry it; adjust course.".into(),
+                },
+            },
+            None,
+        ),
+        // ZCode leaves plan mode itself and implements in the same turn.
+        ("plan", true) => (
+            PermissionDecision::Allow {
+                updated_input: None,
+            },
+            Some(false),
+        ),
+        // A note asks ZCode to revise the plan; none rejects it.
+        ("plan", false) => match note {
+            Some(note) => (
+                PermissionDecision::Allow {
+                    updated_input: Some(json!({ "feedback": note })),
+                },
+                None,
+            ),
+            None => (
+                PermissionDecision::Deny {
+                    message: "The user rejected this plan.".into(),
+                },
+                None,
+            ),
+        },
+        ("question", _) => {
+            let text = answer.contextualized_answer(answer.plain_answer_text());
+            if text.trim().is_empty() {
+                return Err(anyhow!("select an option (or add a note) to answer"));
+            }
+            let question = prompt.question.clone().unwrap_or_default();
+            (
+                PermissionDecision::Allow {
+                    updated_input: Some(json!({ "answers": { question: text } })),
+                },
+                None,
+            )
+        }
+        _ => return Err(anyhow!("unsupported prompt kind for a ZCode card")),
+    };
+    ctx.host.settle_permission(native_id, decision)?;
+    Ok(ResumeAction::Handled { plan_mode })
 }
 
 /// ZCode's own wording for a turn that found no model says nothing about why.
@@ -827,11 +1425,27 @@ const COMMAND_LINE_ACCESS: &str = "Outside its app ZCode reaches models through 
      ZCode app.";
 
 fn explain_failure(message: String, log_path: &Path) -> String {
+    let log = std::fs::read_to_string(log_path).unwrap_or_default();
+    if let Some(why) = sign_in_failure(&message, &log) {
+        return format!("{message}\n\n{why} Log: {}", log_path.display());
+    }
     if message.contains(NO_MODEL) {
         return format!(
             "ZCode found no model it can use from the command line ({NO_MODEL}). \
              {COMMAND_LINE_ACCESS} If you signed in to the app with another account since \
              `zcode login`, run `zcode login` again. Log: {}",
+            log_path.display()
+        );
+    }
+    // The runtime's own Coding Plan sign-in: Z.ai refused the token `zcode
+    // login` saved (it lapsed, or another sign-in replaced it), or it is gone.
+    if message.contains("project_token_login_failed")
+        || message.contains("project_token_login_required")
+    {
+        return format!(
+            "{message}\n\nZ.ai did not accept ZCode's command-line sign-in (`zcode login`): it may \
+             have expired. Sign in again under Settings → Agents → ZCode → Sign in again, then \
+             continue. Log: {}",
             log_path.display()
         );
     }
@@ -841,15 +1455,6 @@ fn explain_failure(message: String, log_path: &Path) -> String {
         return format!("{message}\n\nZ.ai has no plan quota or balance for this request. {COMMAND_LINE_ACCESS}");
     }
     message
-}
-
-#[derive(Default)]
-struct TurnState {
-    session_id: Option<String>,
-    text_part: Option<(String, String)>,
-    reasoning_part: Option<(String, String)>,
-    completed: bool,
-    failure: Option<String>,
 }
 
 fn apply_event(ctx: &mut TurnCtx, state: &mut TurnState, event: &Value) {
@@ -874,7 +1479,7 @@ fn apply_event(ctx: &mut TurnCtx, state: &mut TurnState, event: &Value) {
                         .and_then(|part| part.state.as_mut())
                     {
                         part_state.status = "error".into();
-                        part_state.error = Some(format!("ZCode denied this tool: {reason}"));
+                        part_state.error = Some(format!("Denied: {reason}"));
                     }
                 }
             }
@@ -884,7 +1489,7 @@ fn apply_event(ctx: &mut TurnCtx, state: &mut TurnState, event: &Value) {
             if let Some(title) = payload
                 .get("title")
                 .and_then(Value::as_str)
-                .and_then(|title| super::acp::agent_title(title, &[&pointer, PLAN_NOTE]))
+                .and_then(|title| super::acp::agent_title(title, &[&pointer]))
             {
                 ctx.set_title(title);
             }
@@ -1109,17 +1714,409 @@ mod tests {
 
     #[test]
     fn composer_modes_map_onto_zcode_modes() {
-        // A chat with no mode chosen gets Edit, never YOLO.
-        assert_eq!(zcode_mode(None, false), "edit");
-        assert_eq!(
-            ZCode.options().default_permission_mode,
-            Some("accept-edits")
-        );
+        // A chat with no mode chosen gets ZCode's risk-based mode, never YOLO.
+        assert_eq!(zcode_mode(None, false), "guarded");
+        assert_eq!(ZCode.options().default_permission_mode, Some("auto"));
+        assert_eq!(zcode_mode(Some(PermissionMode::Ask), false), "build");
         assert_eq!(zcode_mode(Some(PermissionMode::AcceptEdits), false), "edit");
+        assert_eq!(zcode_mode(Some(PermissionMode::Auto), false), "guarded");
         assert_eq!(zcode_mode(Some(PermissionMode::Bypass), false), "yolo");
-        // Plan turns run in `build`, whatever mode the composer had.
-        assert_eq!(zcode_mode(Some(PermissionMode::Bypass), true), "build");
-        assert_eq!(zcode_mode(Some(PermissionMode::Plan), false), "build");
+        // Plan is ZCode's own plan mode, whatever mode the composer had.
+        assert_eq!(zcode_mode(Some(PermissionMode::Bypass), true), "plan");
+        assert_eq!(zcode_mode(Some(PermissionMode::Plan), false), "plan");
+    }
+
+    /// A recorded `zcode app-server --stdio` exchange: what orx sent (`>>`)
+    /// and what ZCode sent (`<<`).
+    fn exchange(fixture: &str) -> Vec<(bool, Value)> {
+        fixture
+            .lines()
+            .map(|line| {
+                let (sent, body) = match line.split_at(3) {
+                    (">> ", body) => (true, body),
+                    ("<< ", body) => (false, body),
+                    _ => panic!("fixture line without direction: {line}"),
+                };
+                (
+                    sent,
+                    serde_json::from_str(body).expect("fixture line is JSON"),
+                )
+            })
+            .collect()
+    }
+
+    /// ZCode's first request of `method`, and the answer recorded for it.
+    fn request_and_answer(fixture: &str, method: &str) -> (Value, Value) {
+        let messages = exchange(fixture);
+        let request = messages
+            .iter()
+            .find(|(sent, m)| !sent && m.get("method").and_then(Value::as_str) == Some(method))
+            .map(|(_, m)| m.clone())
+            .expect("fixture has the request");
+        let answer = messages
+            .iter()
+            .find(|(sent, m)| {
+                *sent && m.get("id") == request.get("id") && m.get("result").is_some()
+            })
+            .map(|(_, m)| m["result"].clone())
+            .expect("fixture has the answer");
+        (request["params"].clone(), answer)
+    }
+
+    #[test]
+    fn folds_an_app_server_turn() {
+        let fixture = include_str!("fixtures/zcode_app_server_permission.jsonl");
+        let mut ctx = TurnCtx::test_stub();
+        let mut state = TurnState::default();
+        for (sent, message) in exchange(fixture) {
+            if !sent && message.get("method").and_then(Value::as_str) == Some("session/event") {
+                apply_event(&mut ctx, &mut state, &message["params"]);
+            }
+        }
+        assert!(state.completed);
+        assert!(state.failure.is_none());
+        assert!(state
+            .session_id
+            .as_deref()
+            .is_some_and(|id| id.starts_with("sess_")));
+        let tool = ctx
+            .assistant
+            .parts
+            .iter()
+            .find(|part| part.kind == "tool")
+            .expect("tool part");
+        assert_eq!(tool.tool.as_deref(), Some("Bash"));
+        assert_eq!(tool.state.as_ref().unwrap().status, "completed");
+        let texts: Vec<_> = ctx
+            .assistant
+            .parts
+            .iter()
+            .filter(|part| part.kind == "text")
+            .filter_map(|part| part.text.as_deref())
+            .collect();
+        assert_eq!(texts.len(), 2);
+        assert!(texts[1].starts_with("Done."));
+    }
+
+    #[test]
+    fn a_tool_approval_answers_with_zcodes_own_options() {
+        let (params, recorded) = request_and_answer(
+            include_str!("fixtures/zcode_app_server_permission.jsonl"),
+            "interaction/requestPermission",
+        );
+        let ask = Ask::of("interaction/requestPermission", &params).unwrap();
+        let (tool, input) = ask.card();
+        assert_eq!(tool, "Bash");
+        assert!(input["command"]
+            .as_str()
+            .unwrap()
+            .starts_with("rm -rf build"));
+        let allow = ask.reply(&PermissionDecision::Allow {
+            updated_input: Some(input),
+        });
+        assert_eq!(allow, recorded);
+        assert_eq!(allow["decision"], "allow");
+        let deny = ask.reply(&PermissionDecision::Deny {
+            message: "The user denied this action.".into(),
+        });
+        assert_eq!(
+            deny,
+            json!({"decision": "deny", "reason": "The user denied this action."})
+        );
+    }
+
+    #[test]
+    fn a_plan_approval_becomes_a_plan_card() {
+        let (params, recorded) = request_and_answer(
+            include_str!("fixtures/zcode_app_server_plan.jsonl"),
+            "interaction/requestUserInput",
+        );
+        let ask = Ask::of("interaction/requestUserInput", &params).unwrap();
+        assert_eq!(
+            ask,
+            Ask::Plan {
+                plan: "1. Create hello.txt\n2. Run git status".into()
+            }
+        );
+        assert_eq!(ask.card().0, "ExitPlanMode");
+        let approve = ask.reply(&PermissionDecision::Allow {
+            updated_input: None,
+        });
+        assert_eq!(approve, recorded);
+        // A note is feedback on the plan; a plain rejection declines it.
+        assert_eq!(
+            ask.reply(&PermissionDecision::Allow {
+                updated_input: Some(json!({"feedback": "Use Rust"})),
+            }),
+            json!({"action": "accept", "content": {"answer": "Use Rust"}})
+        );
+        assert_eq!(
+            ask.reply(&PermissionDecision::Deny {
+                message: "the turn was interrupted".into(),
+            }),
+            json!({"action": "decline"})
+        );
+    }
+
+    #[test]
+    fn a_question_is_answered_by_its_text() {
+        let (params, recorded) = request_and_answer(
+            include_str!("fixtures/zcode_app_server_question.jsonl"),
+            "interaction/requestUserInput",
+        );
+        let ask = Ask::of("interaction/requestUserInput", &params).unwrap();
+        let (tool, input) = ask.card();
+        assert_eq!(tool, "AskUserQuestion");
+        let card = crate::local::harness::question_prompt(tool, Some(&input)).unwrap();
+        assert_eq!(card.question.as_deref(), Some("Which language?"));
+        assert_eq!(card.options.len(), 2);
+        let answer = ask.reply(&PermissionDecision::Allow {
+            updated_input: Some(json!({"answers": {"Which language?": "Rust"}})),
+        });
+        assert_eq!(answer, recorded);
+        // The tool reports the answer back to the model.
+        let result = exchange(include_str!("fixtures/zcode_app_server_question.jsonl"))
+            .into_iter()
+            .find_map(|(_, m)| {
+                (m.pointer("/params/payload/kind").and_then(Value::as_str) == Some("result"))
+                    .then(|| m["params"]["payload"]["result"]["content"].clone())
+            })
+            .unwrap();
+        assert!(result
+            .as_str()
+            .unwrap()
+            .contains("\"Which language?\"=\"Rust\""));
+        // Other interactions are not shown.
+        assert_eq!(
+            Ask::of(
+                "interaction/requestUserInput",
+                &json!({"toolName": "Other"})
+            ),
+            None
+        );
+    }
+
+    #[test]
+    fn the_session_switches_to_the_composers_model() {
+        let fixture = include_str!("fixtures/zcode_app_server_permission.jsonl");
+        let snapshot = exchange(fixture)
+            .into_iter()
+            .find_map(|(sent, m)| (!sent && m.pointer("/result/settings").is_some()).then_some(m))
+            .unwrap();
+        let settings = &snapshot["result"]["settings"];
+        // Already on the model at its default level: nothing to switch.
+        assert_eq!(model_selection(settings, "custom/mock-model", None), None);
+        assert_eq!(
+            model_selection(settings, "custom/mock-model", Some("disabled")),
+            Some(json!({
+                "providerId": "custom",
+                "modelId": "mock-model",
+                "options": {"reasoningLevel": "disabled"}
+            }))
+        );
+        // A level the model lacks keeps its default.
+        assert_eq!(
+            model_selection(settings, "custom/mock-model", Some("max")),
+            None
+        );
+        // A model the session does not list is still asked for, so ZCode
+        // says why it cannot use it.
+        assert_eq!(
+            model_selection(settings, "account:zai-individual-coding-plan/GLM-5.3", None),
+            Some(json!({"providerId": "account:zai-individual-coding-plan", "modelId": "GLM-5.3"}))
+        );
+        assert_eq!(model_selection(settings, "no-provider", None), None);
+    }
+
+    /// The loader makes both of the npm repack's edits on the app's runtime
+    /// (standalone registry, and its credentials for each session), leaves a
+    /// build that already chooses its sign-in alone, and refuses a build it
+    /// does not know. It then runs the patched runtime as the main module.
+    #[test]
+    fn the_loader_signs_the_app_server_in_like_the_cli() {
+        let Some(node) = crate::local::shell_env::find_on_path("node") else {
+            eprintln!("node not found; skipping the loader test");
+            return;
+        };
+        let dir = std::env::temp_dir().join(format!("orx-zcode-loader-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let loader = dir.join("loader.cjs");
+        std::fs::write(&loader, APP_SERVER_LOADER).unwrap();
+        let script = r#"
+const { standalone } = require(process.argv[1]);
+const names = 'r(x$C,"startProcessProviderRegistryRuntime");r(gDe,"createCliProviderRefreshReporter");';
+const ready = 'u.info("Worker Provider Registry \\u5DF2\\u5C31\\u7EEA");';
+const call = 'let z=e.env??process.env;U=await FUe({signal:s,create:r(()=>x$C(z),"create"),disposeLate:r(e=>e.dispose(),"disposeLate")}),' + ready;
+const factory = 'let Fe=U,bt=1;new JEt({createZCodeApp:r((ut={})=>INn({...q0c($0c(ut,n),Fe.runtime.registryService,Fe.configuredDefaultModelSelection),env:{}}),"createZCodeApp")});';
+const app = standalone(names + call + factory);
+const npm = standalone(names + 'create:r(()=>x$C(z,require("cli-config.cjs").appServerRegistryOptions(z,gDe)),"create"),' + ready + factory);
+const noFactory = standalone(names + call);
+const overridden = standalone(names + call + factory.replace('env:{}', 'providerRuntimeHeadersPort:h'));
+const unknown = standalone(names + 'create:r(()=>other(z),"create"),' + ready + factory);
+console.log(JSON.stringify({ app, npm: npm.status, noFactory: noFactory.status, overridden: overridden.status, unknown: unknown.status }));
+"#;
+        let output = std::process::Command::new(&node)
+            .arg("-e")
+            .arg(script)
+            .arg(&loader)
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let result: Value = serde_json::from_slice(&output.stdout).unwrap();
+        assert_eq!(result["app"]["status"], "patched");
+        let patched = result["app"]["source"].as_str().unwrap();
+        assert!(
+            patched.contains(r#"create:r(()=>x$C(z,{standalone:gDe(process.stderr)}),"create")"#)
+        );
+        assert!(patched.contains(
+            "Fe.configuredDefaultModelSelection),...Fe.providerRuntimeHeadersPort?{providerRuntimeHeadersPort:Fe.providerRuntimeHeadersPort}:{},env:{}"
+        ));
+        assert_eq!(result["npm"], "native");
+        assert_eq!(result["noFactory"], "unavailable");
+        assert_eq!(result["overridden"], "unavailable");
+        assert_eq!(result["unknown"], "unavailable");
+
+        // Run as the loader: the runtime is the main module, with its own argv.
+        let runtime = dir.join("zcode.cjs");
+        std::fs::write(
+            &runtime,
+            "#!/usr/bin/env node\nconsole.log(JSON.stringify({main: require.main === module, file: __filename, args: process.argv.slice(2)}));\n",
+        )
+        .unwrap();
+        let output = std::process::Command::new(&node)
+            .arg(&loader)
+            .args(["app-server", "--stdio"])
+            .env("ORX_ZCODE_RUNTIME", &runtime)
+            .output()
+            .unwrap();
+        let _ = std::fs::remove_dir_all(&dir);
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let ran: Value = serde_json::from_slice(&output.stdout).unwrap();
+        assert_eq!(ran["main"], true);
+        assert_eq!(ran["file"], runtime.to_str().unwrap());
+        assert_eq!(ran["args"], json!(["app-server", "--stdio"]));
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(
+            stderr.contains("orx: ZCode app-server sign-in: unavailable"),
+            "{stderr}"
+        );
+        assert!(stderr.contains(STANDALONE_UNAVAILABLE), "{stderr}");
+    }
+
+    /// A turn that asked orx for account credentials, or ran on a build the
+    /// loader could not sign in, says so with the loader's status.
+    #[test]
+    fn a_host_credentials_request_explains_the_sign_in() {
+        let why = sign_in_failure(
+            HOST_CREDENTIALS,
+            "orx: ZCode app-server sign-in: patched\nother\n",
+        )
+        .unwrap();
+        assert!(why.contains("sign-in loader: patched"), "{why}");
+        let why = sign_in_failure(
+            "model_request_failed",
+            &format!("orx: ZCode app-server sign-in: unavailable\n{STANDALONE_UNAVAILABLE}\n"),
+        )
+        .unwrap();
+        assert!(why.contains("sign-in loader: unavailable"), "{why}");
+        assert!(sign_in_failure(
+            "project_token_login_failed",
+            "orx: ZCode app-server sign-in: patched"
+        )
+        .is_none());
+    }
+
+    /// A refused `zcode login` token says how to sign in again.
+    #[test]
+    fn a_refused_sign_in_asks_to_sign_in_again() {
+        let explained = explain_failure(
+            "project_token_login_failed".into(),
+            Path::new("/tmp/zcode.log"),
+        );
+        assert!(explained.contains("Sign in again"), "{explained}");
+        assert!(explained.contains("/tmp/zcode.log"), "{explained}");
+    }
+
+    /// The built-in catalog's Z.ai API template, as ZCode 3.15.3 ships it.
+    fn zai_api_catalog() -> Value {
+        json!({"config": {
+            "providerConfigRules": {
+                "providerRules": [
+                    {"providerId": "account:zai-individual-coding-plan", "providerName": "Z.AI Individual Coding Plan",
+                     "config": {"builtinModelIds": ["GLM-5.3"]}}],
+                "templateRules": [
+                    {"templateId": "zai-standard-api", "templateNameMap": {"en-US": "Z.ai API"},
+                     "config": {"access": {"type": "api-key"}, "builtinModelIds": ["GLM-5.3", "GLM-5.3-Flash", "GLM-5"]}}]},
+            "modelConfigRules": {"templateModelRules": [
+                {"modelId": "GLM-5.3", "templateId": "zai-standard-api", "config": {"enabled": true}},
+                {"modelId": "GLM-5.3-Flash", "templateId": "zai-standard-api", "config": {"enabled": true}},
+                {"modelId": "GLM-5", "templateId": "zai-standard-api", "config": {"enabled": false}}]}}})
+    }
+
+    #[test]
+    fn the_catalog_groups_models_by_how_zcode_reaches_them() {
+        let dir = std::env::temp_dir().join(format!("orx-zcode-groups-{}", uuid::Uuid::new_v4()));
+        let v2 = dir.join("v2");
+        std::fs::create_dir_all(&v2).unwrap();
+        let identity = "account-provider:account:zai-individual-coding-plan:identity";
+        std::fs::write(
+            v2.join("credentials.json"),
+            json!({identity: "enc:v1:a.b.c", "oauth:zai:access_token": "enc:v1:a.b.c"}).to_string(),
+        )
+        .unwrap();
+        std::fs::write(
+            v2.join("provider_config.json"),
+            json!({"config": {"providerConfigRules": {"providerRules": [
+                {"providerId": "zai-standard-api", "templateId": "zai-standard-api", "providerName": "Z.ai API",
+                 "config": {"group": "standard-personal", "access": {"type": "api-key", "apiKey": "sk"}}}]}}})
+            .to_string(),
+        )
+        .unwrap();
+        let builtin = zai_api_catalog();
+        let models: Vec<_> = catalog(&dir, Some(&builtin))
+            .into_iter()
+            .map(|model| (model.id, model.provider_group.unwrap().id))
+            .collect();
+        assert_eq!(
+            models,
+            [
+                ("account:zai-individual-coding-plan/GLM-5.3", "coding-plan"),
+                // Only the models the template enables, as the runtime lists them.
+                ("zai-standard-api/GLM-5.3", "api-key"),
+                ("zai-standard-api/GLM-5.3-Flash", "api-key"),
+            ]
+            .map(|(id, group)| (id.to_string(), group.to_string()))
+        );
+        // A provider the app has without a key, or switched off, offers nothing.
+        for rule in [
+            json!({"providerId": "zai-standard-api", "templateId": "zai-standard-api",
+                   "config": {"group": "standard-personal", "access": {"type": "api-key", "apiKey": null}}}),
+            json!({"providerId": "zai-standard-api", "templateId": "zai-standard-api", "enabled": false,
+                   "config": {"group": "standard-personal", "access": {"type": "api-key", "apiKey": "sk"}}}),
+        ] {
+            let config = json!({"config": {"providerConfigRules": {"providerRules": [rule]}}});
+            assert!(keyed_providers(&config).is_empty());
+        }
+        // The plan's sign-in makes ZCode ready, not the key.
+        assert_eq!(access(&dir), (Access::Ready, false));
+        std::fs::remove_file(v2.join("credentials.json")).unwrap();
+        assert_eq!(access(&dir), (Access::Ready, true));
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn questions_always_reach_the_user() {
+        let preferences = runtime_preferences();
+        assert_eq!(preferences["askUserQuestionAutoResolutionEnabled"], false);
+        assert_eq!(preferences["memoryEnabled"], false);
     }
 
     #[test]
@@ -1270,6 +2267,7 @@ mod tests {
                 "templateRules":[{"templateId":"zai-api","config":{"builtinModelIds":["GLM-5.3"]}}]}}}"#,
         )
         .unwrap();
+        let builtin = super::super::detect::read_json(builtin).unwrap();
         assert!(catalog(&dir, Some(&builtin)).is_empty());
         std::fs::write(
             v2.join("credentials.json"),
@@ -1315,54 +2313,7 @@ mod tests {
             ]
         );
 
-        select_model(&dir, "account:zai-individual-coding-plan/GLM-5.3-Flash").unwrap();
-        let config = super::super::detect::read_json(v2.join("provider_config.json")).unwrap();
-        assert_eq!(
-            config.pointer("/config/defaultModelSelection"),
-            Some(&serde_json::json!({
-                "providerId": "account:zai-individual-coding-plan",
-                "modelId": "GLM-5.3-Flash"
-            }))
-        );
-        // The rest of the file is kept.
-        assert_eq!(
-            config.pointer("/config/providerConfigRules/providerRules/0/providerId"),
-            Some(&serde_json::json!("zai-api"))
-        );
-        assert!(select_model(&dir, "no-provider").is_err());
-        // The write goes through a per-call temp file that does not stay behind.
-        let names: Vec<_> = std::fs::read_dir(&v2)
-            .unwrap()
-            .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
-            .filter(|name| name.starts_with("provider_config"))
-            .collect();
-        assert_eq!(names, vec!["provider_config.json"]);
         let _ = std::fs::remove_dir_all(dir);
-    }
-
-    #[test]
-    fn the_model_settles_when_the_runtime_reports_it_or_the_turn_ends() {
-        let first_settled = |fixture: &str| {
-            fixture
-                .lines()
-                .filter_map(|line| serde_json::from_str::<Value>(line).ok())
-                .find(model_settled)
-                .and_then(|event| {
-                    event
-                        .get("type")
-                        .and_then(Value::as_str)
-                        .map(str::to_string)
-                })
-        };
-        // Title and turn start come before the runtime has read its model.
-        assert_eq!(
-            first_settled(include_str!("fixtures/zcode_stream_tool.jsonl")).as_deref(),
-            Some("session.updated")
-        );
-        assert_eq!(
-            first_settled(include_str!("fixtures/zcode_stream_no_model.jsonl")).as_deref(),
-            Some("turn.failed")
-        );
     }
 
     #[test]
@@ -1370,34 +2321,34 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("orx-zcode-home-{}", uuid::Uuid::new_v4()));
         let v2 = dir.join("v2");
         std::fs::create_dir_all(&v2).unwrap();
-        assert!(!(access(&dir) == Access::Ready));
+        assert!(!(access(&dir).0 == Access::Ready));
         // The desktop app's sign-in alone: OAuth tokens and plan keys, but no
         // identity the command-line runtime can pair them with.
         let app_only = r#"{"oauth:zai:access_token":"enc:v1:a.b.c","zcodejwttoken":"enc:v1:a.b.c",
             "account-provider:coding-plan:account:zai-team-coding-plan:account:u1:api-key":"enc:v1:a.b.c"}"#;
         std::fs::write(v2.join("credentials.json"), app_only).unwrap();
-        assert!(!(access(&dir) == Access::Ready));
+        assert!(!(access(&dir).0 == Access::Ready));
         let disabled = r#"{"config":{"providerConfigRules":{"providerRules":[{"providerId":"zai-api","enabled":false,"config":{"access":{"type":"zhipu-coding-plan-api-key","apiKey":"id.secret"}}}]}}}"#;
         std::fs::write(v2.join("provider_config.json"), disabled).unwrap();
-        assert!(!(access(&dir) == Access::Ready));
+        assert!(!(access(&dir).0 == Access::Ready));
         std::fs::write(
             v2.join("provider_config.json"),
             r#"{"config":{"providerConfigRules":{"providerRules":[{"providerId":"c","config":{"access":{"type":"api-key","apiKey":"sk"}}}]}}}"#,
         )
         .unwrap();
-        assert!((access(&dir) == Access::Ready));
+        assert!((access(&dir).0 == Access::Ready));
         std::fs::remove_file(v2.join("provider_config.json")).unwrap();
         // An identity whose plan has no API key does not reach a model either.
         let identity_only =
             r#"{"account-provider:account:zai-individual-coding-plan:identity":"enc:v1:a.b.c"}"#;
         std::fs::write(v2.join("credentials.json"), identity_only).unwrap();
-        assert!(!(access(&dir) == Access::Ready));
+        assert!(!(access(&dir).0 == Access::Ready));
         // ZCode 3.15's sign-in pairs the identity with the OAuth token instead.
         let oauth = r#"{"account-provider:account:zai-individual-coding-plan:identity":"enc:v1:a.b.c",
             "account-provider:account:zai-individual-coding-plan:auth-source":"oauth",
             "oauth:zai:access_token":"enc:v1:a.b.c"}"#;
         std::fs::write(v2.join("credentials.json"), oauth).unwrap();
-        assert!((access(&dir) == Access::Ready));
+        assert!((access(&dir).0 == Access::Ready));
         // `zcode login` adds the identity for its plan.
         let cli = app_only.replace(
             "}",
@@ -1405,7 +2356,7 @@ mod tests {
             "account-provider:coding-plan:account:zai-individual-coding-plan:account:u1:api-key":"enc:v1:a.b.c"}"#,
         );
         std::fs::write(v2.join("credentials.json"), cli).unwrap();
-        assert!((access(&dir) == Access::Ready));
+        assert!((access(&dir).0 == Access::Ready));
         let _ = std::fs::remove_dir_all(dir);
     }
 }

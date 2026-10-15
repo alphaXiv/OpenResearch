@@ -161,6 +161,11 @@ pub struct ModelInfo {
     /// Whether the model accepts image input, when the catalog says (OpenCode).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub image_input: Option<bool>,
+    /// How the harness reaches this model, when it reaches models more than
+    /// one way (ZCode: a Coding Plan sign-in, or a provider with an API key).
+    /// The composer offers it as a provider switch over the model list.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub provider_group: Option<super::options::OptionChoice>,
 }
 
 impl ModelInfo {
@@ -175,6 +180,7 @@ impl ModelInfo {
             default_reasoning_level: None,
             service_tiers: None,
             image_input: None,
+            provider_group: None,
         }
     }
 
@@ -186,6 +192,12 @@ impl ModelInfo {
         // A default outside the advertised tiers would be unselectable — leave
         // it unset then, and the composer preselects the first tier.
         self.default_reasoning_level = ids.contains(&default).then(|| default.to_string());
+        self
+    }
+
+    /// Attach how the harness reaches this model (see [`Self::provider_group`]).
+    pub(super) fn with_provider_group(mut self, group: super::options::OptionChoice) -> Self {
+        self.provider_group = Some(group);
         self
     }
 

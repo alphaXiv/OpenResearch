@@ -115,11 +115,11 @@ impl std::fmt::Display for RpcError {
     }
 }
 
-type RpcResult = std::result::Result<Value, RpcError>;
+pub(crate) type RpcResult = std::result::Result<Value, RpcError>;
 
 /// A message the agent sent that is not a response to one of ours.
 #[derive(Debug)]
-enum Inbound {
+pub(crate) enum Inbound {
     Notification {
         method: String,
         params: Value,
@@ -132,14 +132,62 @@ enum Inbound {
 }
 
 #[derive(Clone)]
-struct Connection {
+pub(crate) struct Connection {
     stdin: Arc<tokio::sync::Mutex<ChildStdin>>,
     next_id: Arc<AtomicI64>,
     pending: Arc<Mutex<HashMap<i64, oneshot::Sender<RpcResult>>>>,
+    /// Whether messages carry `"jsonrpc": "2.0"`. ZCode's protocol has the
+    /// same shape without it, and rejects the field.
+    jsonrpc: bool,
+}
+
+/// Connect to an agent over its stdio: the connection, the agent's own
+/// messages, and the reader task (abort it when the turn ends). Requests still
+/// pending when the agent exits fail, so a turn never waits on a dead agent.
+pub(crate) fn connect(
+    stdin: ChildStdin,
+    stdout: tokio::process::ChildStdout,
+    jsonrpc: bool,
+) -> (
+    Connection,
+    mpsc::UnboundedReceiver<Inbound>,
+    tokio::task::JoinHandle<()>,
+) {
+    let conn = Connection {
+        stdin: Arc::new(tokio::sync::Mutex::new(stdin)),
+        next_id: Arc::new(AtomicI64::new(1)),
+        pending: Arc::new(Mutex::new(HashMap::new())),
+        jsonrpc,
+    };
+    let (inbound_tx, inbound) = mpsc::unbounded_channel();
+    let reader_pending = conn.pending.clone();
+    let reader = tokio::spawn(async move {
+        let mut lines = BufReader::new(stdout).lines();
+        while let Ok(Some(line)) = lines.next_line().await {
+            if let Some(message) = route_line(&line, &reader_pending) {
+                if inbound_tx.send(message).is_err() {
+                    break;
+                }
+            }
+        }
+        // EOF: fail every request still waiting so the turn does not hang.
+        for (_, tx) in reader_pending.lock().unwrap().drain() {
+            let _ = tx.send(Err(RpcError {
+                code: 0,
+                message: "the agent exited".into(),
+            }));
+        }
+    });
+    (conn, inbound, reader)
 }
 
 impl Connection {
-    async fn write(&self, message: Value) -> Result<()> {
+    async fn write(&self, mut message: Value) -> Result<()> {
+        if self.jsonrpc {
+            if let Some(object) = message.as_object_mut() {
+                object.insert("jsonrpc".into(), json!("2.0"));
+            }
+        }
         let mut line = message.to_string();
         line.push('\n');
         let mut stdin = self.stdin.lock().await;
@@ -149,22 +197,25 @@ impl Connection {
     }
 
     /// Send a request; the returned receiver resolves with its response.
-    async fn send(&self, method: &str, params: Value) -> Result<oneshot::Receiver<RpcResult>> {
+    pub(crate) async fn send(
+        &self,
+        method: &str,
+        params: Value,
+    ) -> Result<oneshot::Receiver<RpcResult>> {
         let id = self.next_id.fetch_add(1, Ordering::Relaxed);
         let (tx, rx) = oneshot::channel();
         self.pending.lock().unwrap().insert(id, tx);
-        self.write(json!({"jsonrpc": "2.0", "id": id, "method": method, "params": params}))
+        self.write(json!({"id": id, "method": method, "params": params}))
             .await?;
         Ok(rx)
     }
 
-    async fn respond(&self, id: Value, result: Value) -> Result<()> {
-        self.write(json!({"jsonrpc": "2.0", "id": id, "result": result}))
-            .await
+    pub(crate) async fn respond(&self, id: Value, result: Value) -> Result<()> {
+        self.write(json!({"id": id, "result": result})).await
     }
 
-    async fn respond_error(&self, id: Value, code: i64, message: &str) -> Result<()> {
-        self.write(json!({"jsonrpc": "2.0", "id": id, "error": {"code": code, "message": message}}))
+    pub(crate) async fn respond_error(&self, id: Value, code: i64, message: &str) -> Result<()> {
+        self.write(json!({"id": id, "error": {"code": code, "message": message}}))
             .await
     }
 }
@@ -300,30 +351,7 @@ pub(crate) async fn run_turn(ctx: &mut TurnCtx, agent: &AcpAgent, launch: AcpLau
     let _processes = super::antigravity::TurnProcesses(child.id());
     let stdin = child.stdin.take().ok_or_else(|| anyhow!("no stdin"))?;
     let stdout = child.stdout.take().ok_or_else(|| anyhow!("no stdout"))?;
-    let conn = Connection {
-        stdin: Arc::new(tokio::sync::Mutex::new(stdin)),
-        next_id: Arc::new(AtomicI64::new(1)),
-        pending: Arc::new(Mutex::new(HashMap::new())),
-    };
-    let (inbound_tx, mut inbound) = mpsc::unbounded_channel();
-    let reader_pending = conn.pending.clone();
-    let reader = tokio::spawn(async move {
-        let mut lines = BufReader::new(stdout).lines();
-        while let Ok(Some(line)) = lines.next_line().await {
-            if let Some(message) = route_line(&line, &reader_pending) {
-                if inbound_tx.send(message).is_err() {
-                    break;
-                }
-            }
-        }
-        // EOF: fail every request still waiting so the turn does not hang.
-        for (_, tx) in reader_pending.lock().unwrap().drain() {
-            let _ = tx.send(Err(RpcError {
-                code: 0,
-                message: "the agent exited".into(),
-            }));
-        }
-    });
+    let (conn, mut inbound, reader) = connect(stdin, stdout, true);
     let log_path = crate::store::data_dir().join(format!("agent-{log_name}.log"));
     let outcome = drive(ctx, agent, &conn, &mut inbound, &repo).await;
     reader.abort();
@@ -1312,6 +1340,7 @@ pub(crate) mod tests {
                 stdin: Arc::new(tokio::sync::Mutex::new(child.stdin.take().unwrap())),
                 next_id: Arc::new(AtomicI64::new(1)),
                 pending: Arc::new(Mutex::new(HashMap::new())),
+                jsonrpc: true,
             };
             let (tx, mut inbound) = mpsc::unbounded_channel();
             let pending = conn.pending.clone();

@@ -144,6 +144,7 @@ import {
   Tooltip,
   type BadgeVariant,
 } from "./ui";
+import { providerGroups } from "../providerGroups";
 
 const SETTINGS_CARD_CLASS_NAME = [
   "settings-card [&_>_.error]:text-accent-red [&_>_.error]:text-base",
@@ -471,6 +472,13 @@ function HarnessesTab({ remote }: { remote: boolean }) {
                 <SquareTerminal size={14} /> {m.harness_setup_login()}
               </Button>
             )}
+            {/* ZCode's command-line sign-in can lapse while its file stays: Z.ai
+                then refuses it, and only a new `zcode login` helps. */}
+            {!remote && h.id === "zcode" && h.installed && !h.installBroken && h.authenticated && h.authMethod === "oauth" && (
+              <Button size="small" onClick={() => setSetupHarness(h)} disabled={!setupCommands.data} aria-haspopup="dialog">
+                <SquareTerminal size={14} /> {m.harness_setup_login_again()}
+              </Button>
+            )}
             <Button size="small" onClick={() => load(true, true)} disabled={refreshing}>
               <RefreshCw size={12} className={refreshing ? "animate-[spin_0.9s_linear_infinite]" : ""} /> {m.settings_page_refresh()}
             </Button>
@@ -496,6 +504,25 @@ function HarnessesTab({ remote }: { remote: boolean }) {
               <>
                 <span className="k">{m.settings_page_org()}</span>
                 <span className="v">{h.org}</span>
+              </>
+            )}
+            {(h.options.providerGroups?.length ?? 0) > 1 && (
+              <>
+                <span className="k">{m.settings_providers()}</span>
+                <span className="v">
+                  {providerGroups(h.models, h.options.providerGroups)
+                    .map((group) => {
+                      const label = group.id === "api-key" ? m.onboarding_api_key() : group.label;
+                      const count = h.models.filter((entry) => entry.providerGroup?.id === group.id).length;
+                      const state = group.available
+                        ? m.settings_models_available({ count: fmtNumber(count) })
+                        : group.id === "api-key"
+                          ? m.settings_provider_key_missing({ harness: h.name })
+                          : m.onboarding_not_signed_in();
+                      return `${label}: ${state}`;
+                    })
+                    .join(" · ")}
+                </span>
               </>
             )}
             <span className="k">{m.settings_page_agent_models()}</span>
