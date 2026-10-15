@@ -689,6 +689,19 @@ fn zcode_mode(mode: Option<PermissionMode>, plan: bool) -> &'static str {
 /// every tool). `edit` is the nearest: edits run, anything else asks.
 const GUARDED_FALLBACK: &str = "edit";
 
+/// The message for ZCode. A chat whose ZCode session could not be resumed
+/// starts a new one; it gets orx's transcript as prior context, as the other
+/// agents do, so the conversation so far is not lost.
+fn turn_text(ctx: &TurnCtx, recovering: bool) -> String {
+    match recovering
+        .then(|| super::native_recovery_context(ctx, "ZCode"))
+        .flatten()
+    {
+        Some(recovery) => format!("{recovery}\n\n{}", ctx.text),
+        None => ctx.text.clone(),
+    }
+}
+
 fn turn_prompt(text: &str, first: bool) -> String {
     if first {
         format!("{}\n\n{text}", super::acp::playbook_pointer())
@@ -989,6 +1002,14 @@ impl Turn<'_> {
                     message: error.to_string(),
                 });
             let reply = ask.reply(&decision);
+            // An approved plan is implemented in the same turn: leave Plan's
+            // policy before ZCode goes on, so its edits get the composer
+            // mode's cards rather than Plan's refusal.
+            let approved = matches!(ask, Ask::Plan { .. })
+                && reply.pointer("/content/answer").and_then(Value::as_str) == Some(PLAN_APPROVE);
+            if approved {
+                host.end_gate_plan(&session_id, &token);
+            }
             let ids = {
                 let mut asks = asks.lock().unwrap();
                 asks.answered.insert(request.clone(), reply.clone());
@@ -999,8 +1020,6 @@ impl Turn<'_> {
             }
             // An approved plan leaves ZCode in `build`; continue in the
             // composer's own mode instead.
-            let approved = matches!(ask, Ask::Plan { .. })
-                && reply.pointer("/content/answer").and_then(Value::as_str) == Some(PLAN_APPROVE);
             if let (true, Some(native_id)) = (approved, native_id) {
                 let _ = conn
                     .send(
@@ -1266,6 +1285,7 @@ async fn drive(
             opened = Some((native, snapshot));
         }
     }
+    let had_native_session = ctx.native_session_id.is_some();
     let resumed = opened.is_some();
     let (session, snapshot) = match opened {
         Some(opened) => opened,
@@ -1312,7 +1332,7 @@ async fn drive(
     turn.call(
         ctx,
         "session/send",
-        json!({"sessionId": session, "content": turn_prompt(&ctx.text, !resumed)}),
+        json!({"sessionId": session, "content": turn_prompt(&turn_text(ctx, had_native_session && !resumed), !resumed)}),
     )
     .await?
     .map_err(|error| {

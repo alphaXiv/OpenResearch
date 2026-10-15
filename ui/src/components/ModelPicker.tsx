@@ -272,6 +272,8 @@ export function ModelPicker({
   };
 
   const choosePermission = (id: string) => {
+    // A normal mode picked while Plan is on leaves Plan.
+    if (planMode) onTogglePlan?.();
     onSelectPermission?.(id);
     close();
   };

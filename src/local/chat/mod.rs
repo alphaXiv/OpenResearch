@@ -3413,6 +3413,17 @@ impl ChatHost {
         token
     }
 
+    /// The user approved this child's plan and its turn goes on to implement
+    /// it: drop the Plan policy from its token (which stays valid), so the
+    /// rest of the turn's tool calls are decided in the composer's mode.
+    pub fn end_gate_plan(&self, session_id: &str, token: &str) {
+        if let Some(gate) = self.gate_tokens.lock().unwrap().get_mut(session_id) {
+            if gate.value == token {
+                gate.plan_mode = false;
+            }
+        }
+    }
+
     /// Whether this session's running turn surfaced a bridge card — and clear
     /// the flag. Consulted by the synthesized-plan-card fallback at turn end.
     pub fn take_bridge_prompted(&self, session_id: &str) -> bool {
@@ -9737,6 +9748,20 @@ mod bridge_tests {
         assert_eq!(gate.value, token);
         assert!(gate.plan_mode);
         assert!(!gate.bypass);
+    }
+
+    #[test]
+    fn an_approved_plan_ends_the_gate_plan_policy() {
+        let host = test_host();
+        let token = host.mint_gate_token("session", true, false);
+        // A stale token changes nothing.
+        host.end_gate_plan("session", "other");
+        assert!(host.gate_tokens.lock().unwrap()["session"].plan_mode);
+        host.end_gate_plan("session", &token);
+        let gates = host.gate_tokens.lock().unwrap();
+        let gate = &gates["session"];
+        assert_eq!(gate.value, token, "the token stays valid");
+        assert!(!gate.plan_mode);
     }
 
     #[test]
