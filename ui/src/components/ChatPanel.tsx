@@ -223,7 +223,7 @@ import {
   shouldRecoverLegacyMath,
   tableMarkdown,
 } from "./annotationMarkdown";
-import { Button, IconButton, LoadingRow, MenuItem, showAlert, Spinner, Tooltip } from "./ui";
+import { Button, DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuTrigger, IconButton, LoadingRow, MenuItem, showAlert, Spinner, Tooltip } from "./ui";
 import { PaperTitle } from "./PaperTitle";
 
 const TOOL_LINE_CLASS_NAME = "tool-line flex-1 min-w-0 line-clamp-2 break-words text-base leading-6";
@@ -4021,8 +4021,9 @@ function TitleReveal({ title, animate }: { title: string; animate: boolean }) {
 /** One Recents row. Hover swaps the timestamp for a three-dot menu with
  * Rename, Archive/Unarchive, and Delete (Claude-desktop style). Rename turns
  * the title into an inline input. */
-function SessionRow({
+export function SessionRow({
   session,
+  menuBoundaryRef,
   active,
   unread,
   busy,
@@ -4034,6 +4035,7 @@ function SessionRow({
   onDelete,
 }: {
   session: ChatSession;
+  menuBoundaryRef: React.RefObject<HTMLElement | null>;
   active: boolean;
   unread: boolean;
   busy: boolean;
@@ -4048,7 +4050,8 @@ function SessionRow({
   onSetArchived: (archived: boolean) => void;
   onDelete: () => void;
 }) {
-  const { open, setOpen, ref } = usePopover();
+  const rowRef = useRef<HTMLDivElement>(null);
+  const [open, setOpen] = useState(false);
   const title = session.title?.trim() || "Untitled";
   const [editing, setEditing] = useState(false);
   // Seeded by startEditing() before the input mounts; "" is just a placeholder.
@@ -4077,7 +4080,7 @@ function SessionRow({
   // Not a <button>: the kebab is a real button and can't nest inside one.
   return (
     <div
-      ref={ref}
+      ref={rowRef}
       role="button"
       tabIndex={0}
       className={`session-row relative flex items-center gap-2 w-full text-start py-[7px] ps-2.5 pe-1.5 rounded-md text-sm text-text cursor-pointer select-none [&:hover:not(.active)]:bg-surface [&.active]:bg-panel [&.active]:font-medium [&_.session-dot:empty]:hidden [&_.session-dot]:w-4 [&_.session-dot]:inline-flex [&_.session-dot]:items-center [&_.session-dot]:justify-center [&_.session-dot]:shrink-0 [&_.session-title]:flex-1 [&_.session-title]:min-w-0 [&_.session-title]:overflow-hidden [&_.session-title]:[mask-image:linear-gradient(to_right,black_calc(100%_-_16px),transparent)] [&_.session-title]:whitespace-nowrap [&_.session-menu-btn]:hidden [&_.session-menu-btn]:items-center [&_.session-menu-btn]:justify-center [&_.session-menu-btn]:w-4 [&_.session-menu-btn]:h-4 [&_.session-menu-btn]:-my-0.5 [&_.session-menu-btn]:mx-0 [&_.session-menu-btn]:rounded-sm [&_.session-menu-btn]:text-muted [&_.session-menu-btn]:shrink-0 [&_.session-menu-btn:hover]:text-text [&_.session-menu-btn:hover]:bg-panel [&:hover_.session-menu-btn]:inline-flex [&:focus-visible_.session-menu-btn]:inline-flex [&_.session-menu-btn:focus-visible]:inline-flex [&.menu-open_.session-menu-btn]:inline-flex [&:hover_.session-dot]:hidden [&:focus-visible_.session-dot]:hidden [&:has(.session-menu-btn:focus-visible)_.session-dot]:hidden [&.menu-open_.session-dot]:hidden [&_.busy-dot]:w-[7px] [&_.busy-dot]:h-[7px] [&_.busy-dot]:rounded-full [&_.busy-dot]:bg-primary [&_.busy-dot]:animate-[or-pulse_1.2s_infinite] [&_.busy-dot]:shrink-0 [&_.unread-dot]:w-[7px] [&_.unread-dot]:h-[7px] [&_.unread-dot]:rounded-full [&_.unread-dot]:bg-primary [&_.unread-dot]:shrink-0 [&_.busy-dot.waiting]:animate-none [&_.session-title-input]:flex-1 [&_.session-title-input]:min-w-0 [&_.session-title-input]:py-px [&_.session-title-input]:px-[5px] [&_.session-title-input]:-my-0.5 [&_.session-title-input]:mx-0 [&_.session-title-input]:[font:inherit] [&_.session-title-input]:text-text [&_.session-title-input]:bg-background [&_.session-title-input]:border [&_.session-title-input]:border-primary [&_.session-title-input]:rounded-sm [&_.session-title-input]:outline-none [&.editing]:bg-surface [&.editing]:cursor-default [&.editing_.session-menu-btn]:hidden [&.editing_.session-dot]:hidden ${active ? "active" : ""}  ${unread ? "unread" : ""}  ${open ? "menu-open" : ""}  ${
@@ -4142,48 +4145,29 @@ function SessionRow({
           unread && <span className="unread-dot" />
         )}
       </span>
-      <button
-        className="session-menu-btn"
-        title={m.chat_panel_session_options()}
-        aria-label={m.chat_panel_session_options()}
-        onClick={(e) => {
-          e.stopPropagation();
-          setOpen((v) => !v);
-        }}
-      >
-        <MoreHorizontal size={14} />
-      </button>
-      {open && (
-        <div className="option-menu absolute bottom-[calc(100%_+_8px)] start-0 max-h-95 flex flex-col bg-background border border-border rounded-lg shadow-menu z-50 overflow-hidden min-w-47.5 p-1.5 [&.align-right]:start-auto [&.align-right]:end-0 [&.drop-down]:bottom-auto [&.drop-down]:top-[calc(100%_+_4px)] [&.session-menu]:start-auto [&.session-menu]:end-1.5 [&.session-menu]:top-[calc(100%_-_2px)] [&.session-menu]:min-w-35 drop-down session-menu">
-          <MenuItem
-            onClick={(e) => {
-              e.stopPropagation();
-              setOpen(false);
-              startEditing();
-            }}
+      <DropdownMenu open={open} onOpenChange={setOpen}>
+        <DropdownMenuTrigger asChild>
+          <button
+            className="session-menu-btn"
+            title={m.chat_panel_session_options()}
+            aria-label={m.chat_panel_session_options()}
+            onClick={(e) => e.stopPropagation()}
           >
+            <MoreHorizontal size={14} />
+          </button>
+        </DropdownMenuTrigger>
+        <DropdownMenuContent className="session-menu" ownerRef={rowRef} collisionBoundary={menuBoundaryRef.current ?? undefined} restoreFocus={!editing}>
+          <DropdownMenuItem onSelect={startEditing}>
             <span>{m.chat_panel_rename()}</span>
-          </MenuItem>
-          <MenuItem
-            onClick={(e) => {
-              e.stopPropagation();
-              setOpen(false);
-              onSetArchived(!session.archived);
-            }}
-          >
+          </DropdownMenuItem>
+          <DropdownMenuItem onSelect={() => onSetArchived(!session.archived)}>
             <span>{session.archived ? m.chat_unarchive() : m.chat_archive()}</span>
-          </MenuItem>
-          <MenuItem danger
-            onClick={(e) => {
-              e.stopPropagation();
-              setOpen(false);
-              onDelete();
-            }}
-          >
+          </DropdownMenuItem>
+          <DropdownMenuItem danger onSelect={onDelete}>
             <span>{m.chat_panel_delete()}</span>
-          </MenuItem>
-        </div>
-      )}
+          </DropdownMenuItem>
+        </DropdownMenuContent>
+      </DropdownMenu>
     </div>
   );
 }
@@ -6374,6 +6358,7 @@ export function ChatPanel({
                   <div className={sidebarGrouping === "projects" ? "ms-5.5" : undefined}>
                     <SessionRow
                       key={s.id}
+                      menuBoundaryRef={railBodyRef}
                       session={s}
                       active={s.id === activeId && mainView === "chat"}
                       unread={unreadSessionIds.has(s.id)}

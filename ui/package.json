@@ -11,11 +11,13 @@
     "lint:i18n": "node scripts/check-i18n.mjs",
     "lint:styles": "node scripts/check-styles.mjs",
     "test": "node --test --experimental-strip-types tests/*.test.mjs",
+    "test:components": "vitest run",
     "preview": "vite preview"
   },
   "dependencies": {
     "@clo/react-markdown": "jsr:1.1.1",
     "@inlang/paraglide-js": "^2.25.0",
+    "@radix-ui/react-dropdown-menu": "2.1.16",
     "@tanstack/react-query": "^5.102.8",
     "@tanstack/react-router": "^1.170.32",
     "@tanstack/react-virtual": "^3.14.11",
@@ -45,11 +47,15 @@
     "@tanstack/react-query-devtools": "^5.102.0",
     "@tanstack/router-cli": "^1.167.33",
     "@tanstack/router-plugin": "^1.168.35",
+    "@testing-library/react": "16.3.0",
+    "@testing-library/user-event": "14.6.1",
     "@types/react": "^19.1.0",
     "@types/react-dom": "^19.1.0",
     "@vitejs/plugin-react": "^4.5.0",
+    "jsdom": "26.1.0",
     "tailwindcss": "4.3.3",
     "typescript": "^5.8.3",
-    "vite": "^6.3.5"
+    "vite": "^6.3.5",
+    "vitest": "3.2.6"
   }
 }

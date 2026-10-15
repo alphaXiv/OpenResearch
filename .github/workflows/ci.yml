@@ -71,6 +71,10 @@ jobs:
       - name: UI unit tests
         run: node --test --experimental-strip-types ui/tests/*.test.mjs
 
+      - name: UI component behavior tests
+        working-directory: ui
+        run: pnpm test:components
+
       - name: Committed UI bundle matches source
         working-directory: ui
         run: |

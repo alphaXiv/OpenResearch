@@ -5,6 +5,7 @@ export { IconButton, IconButtonLink } from "./IconButton";
 export { Input } from "./Input";
 export type { InputProps } from "./Input";
 export { MenuItem } from "./MenuItem";
+export { DropdownMenu, DropdownMenuTrigger, DropdownMenuContent, DropdownMenuItem } from "./DropdownMenu";
 export { LoadingRow, Spinner } from "./Spinner";
 export { StatusIndicator } from "./StatusIndicator";
 export type { StatusTone } from "./StatusIndicator";
