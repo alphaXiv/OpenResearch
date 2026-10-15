@@ -441,6 +441,7 @@ pub fn codex_account_sqlite_override() -> String {
 
 /// Paths under `~/.gemini` that hold who `agy` is signed in as. An account's
 /// home keeps its own copies; everything else is linked to the user's.
+#[cfg(unix)]
 const AGY_ACCOUNT_OWNED: &[&str] = &[
     "antigravity-cli",
     "oauth_creds.json",
