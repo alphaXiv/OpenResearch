@@ -134,6 +134,7 @@
   "chat_panel_stop": "Остановить",
   "chat_panel_submit": "Отправить",
   "chat_panel_new_chat": "Новый чат",
+  "chat_panel_temporary_api_error": "Соединение прервалось — отправьте сообщение ещё раз.",
   "chat_panel_tool_failed": "Ошибка инструмента",
   "chat_panel_used_tools": "Использование инструментов",
   "chat_panel_view_full_plan": "Открыть весь план",

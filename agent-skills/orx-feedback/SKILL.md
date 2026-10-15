@@ -49,8 +49,11 @@ characters and `--quote` under 1000.
 
 ## Protect the user's research
 
-Leave out secrets, credentials, tokens, personal data, private paths, and
-unpublished or proprietary research details. Sanitize sensitive parts of
+Leave out secrets, credentials, tokens, personal data, private paths, private
+research identifiers, and unpublished or proprietary research details. Never
+include the user's code, prompts, conversation transcripts, agent traces, logs,
+or artifacts. An optional `--quote` may contain only sanitized words about
+OpenResearch itself. Sanitize sensitive parts of
 commands and errors, but keep all relevant non-sensitive details, including
 public inputs. Rephrase `--quote` only as needed to remove sensitive details.
 
