@@ -1331,7 +1331,10 @@ fn parse_agy_models(body: &Value, account: &str) -> Vec<QuotaSnapshot> {
         let Some(left) = left else {
             continue;
         };
-        let pool = pool_for("antigravity", Some(&id));
+        // Some answers key models by an internal id and name them only in
+        // `displayName`.
+        let name = format!("{id} {}", model["displayName"].as_str().unwrap_or_default());
+        let pool = pool_for("antigravity", Some(&name));
         let resets = quota["resetTime"].as_str().and_then(parse_time_ms);
         match tightest.iter_mut().find(|(existing, ..)| *existing == pool) {
             Some(entry) if left < entry.1 => *entry = (pool, left, resets),
@@ -1517,7 +1520,7 @@ mod tests {
 
         let agy = json!({"models": {
             "gemini-3.1-pro-high": {"quotaInfo": {"remainingFraction": "0.25"}},
-            "claude-sonnet-4-6": {"quotaInfo": {"isExhausted": true}}
+            "MODEL_PLACEHOLDER_M35": {"displayName": "Claude Sonnet 4.6 (Thinking)", "quotaInfo": {"isExhausted": true}}
         }});
         let parsed = parse_agy_models(&agy, DEFAULT);
         let gemini = parsed.iter().find(|s| s.pool == "gemini").unwrap();
