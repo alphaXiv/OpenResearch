@@ -17,6 +17,7 @@
 //! in `registry()`; the dispatch, the ID list, the detection sweep, and the
 //! skill installer all pick it up with no further edits.
 
+pub(crate) mod accounts;
 pub(crate) mod antigravity;
 pub(crate) mod claude;
 pub(crate) mod codex;

@@ -305,9 +305,14 @@ pub(super) async fn find_agy_working() -> Option<(PathBuf, super::detect::BinPro
 /// Files where `agy` (and the Gemini tooling it shares `~/.gemini` with) keeps
 /// the signed-in Google account, most specific first.
 fn agy_account_files() -> Vec<PathBuf> {
-    let Some(gemini) = dirs::home_dir().map(|home| home.join(".gemini")) else {
-        return Vec::new();
-    };
+    dirs::home_dir()
+        .map(|home| agy_account_files_in(&home))
+        .unwrap_or_default()
+}
+
+/// [`agy_account_files`] for an account whose `agy` runs with `home` as `$HOME`.
+pub(crate) fn agy_account_files_in(home: &Path) -> Vec<PathBuf> {
+    let gemini = home.join(".gemini");
     let cli = gemini.join("antigravity-cli");
     vec![
         cli.join("antigravity-oauth-token"),
@@ -358,7 +363,7 @@ async fn agy_account() -> Option<String> {
 
 /// An email address anywhere in a credential file: an `email`/`active`/
 /// `account` field, or the `email` claim of an embedded ID token.
-fn find_email(value: &Value) -> Option<String> {
+pub(crate) fn find_email(value: &Value) -> Option<String> {
     match value {
         Value::Object(map) => {
             for key in ["email", "active", "account", "user", "userEmail"] {
@@ -387,7 +392,7 @@ fn find_email(value: &Value) -> Option<String> {
     }
 }
 
-fn find_string(value: &Value, keys: &[&str]) -> Option<String> {
+pub(crate) fn find_string(value: &Value, keys: &[&str]) -> Option<String> {
     match value {
         Value::Object(map) => keys
             .iter()
@@ -537,6 +542,20 @@ async fn run_turn(ctx: &mut TurnCtx) -> Result<()> {
         .kill_on_drop(true);
 
     prepare_env(&mut cmd);
+    if let Some(account) = ctx
+        .account
+        .clone()
+        .filter(|account| account != super::accounts::DEFAULT)
+    {
+        let env = tokio::task::spawn_blocking(move || {
+            super::accounts::launch_env("antigravity", &account)
+        })
+        .await
+        .map_err(|e| anyhow!("account preparation failed: {e}"))??;
+        for (key, value) in env {
+            cmd.env(key, value);
+        }
+    }
     cmd.env("NO_COLOR", "1");
     set_chat_session_env(&mut cmd, &ctx.session_id, "antigravity", Some(up_port));
     cmd.env("ORX_SESSION_ID", &ctx.session_id);

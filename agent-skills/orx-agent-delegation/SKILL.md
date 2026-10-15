@@ -1,6 +1,6 @@
 ---
 name: orx-agent-delegation
-description: "Create independent project chats with `orx agent spawn`: standalone opening messages, project selection, worktrees, compute authorization, and cross-harness review chats on other vendors' agents. Use before creating another chat or when cross-harness review is on; keep ordinary literature retrieval local; deep-research has its own contract."
+description: "Create independent project chats with `orx agent spawn`: standalone opening messages, project selection, worktrees, compute authorization, quota-aware harness and model choice (`orx agent quota`), and cross-harness review chats on other vendors' agents. Use before creating another chat or when cross-harness review is on; keep ordinary literature retrieval local; deep-research has its own contract."
 ---
 
 # Create an independent chat
@@ -39,6 +39,29 @@ or edit a frozen experiment node.
 For ordinary `orx-lit-review`, keep the retrieval loop with the main agent.
 For the `orx-deep-research` report workflow, independent subtopics may be
 delegated under its bounded research and synthesis contract.
+
+## Quota-aware delegation
+
+Claude Code, Codex, and Antigravity can each run on several accounts, and each
+account has its own quota. Antigravity meters its Gemini models and its
+Claude/GPT models separately. Before you start a chat on another harness or
+pick a model for delegated work, check what is left:
+
+```sh
+orx agent quota            # quota left per account and model pool
+orx agent quota --refresh  # ask the providers first (slower)
+orx agent quota --json
+```
+
+- Send work to a harness and model whose pool has room (`ok`). Avoid `low`
+  pools for long tasks and never target a `blocked` one; its row says when it
+  comes back.
+- On Antigravity, when the Claude & GPT pool is low or blocked, prefer a
+  Gemini model (`--model gemini-…`), and the reverse.
+- You do not pick the account: every turn runs on the account with the most
+  room for its model and moves to another account if it hits a limit.
+- When every account of every allowed harness is low, say so and keep large
+  delegations for after the reset time the command shows.
 
 ## Cross-harness review
 
