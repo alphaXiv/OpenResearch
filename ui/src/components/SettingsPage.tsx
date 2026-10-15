@@ -29,6 +29,7 @@ import {
   getLocalMachineQuery,
   getComputeSettingsQuery,
   getTinkerSettingsQuery,
+  getDecisionModelSettingsQuery,
   getHfSettingsQuery,
   getEnvVarsQuery,
   getTelemetryQuery,
@@ -115,6 +116,8 @@ import {
   harnessModelLabel,
   type HfSettings,
   type TinkerSettings,
+  type DecisionModelSettings,
+  saveDecisionModelSettings,
   type K8sSettings,
   type LocalMachine,
   getGcpSettings,
@@ -568,6 +571,7 @@ function HarnessesTab({ remote }: { remote: boolean }) {
       )}
       {h && ACCOUNT_HARNESSES.includes(h.id) && <HarnessAccountsCard harness={h} remote={remote} />}
       {harnesses && <HarnessFailoverCard harnesses={harnesses} />}
+      <DecisionModelCard />
       <CrossHarnessCard harnesses={harnesses} />
     </>
   );
@@ -1447,6 +1451,127 @@ function GcpSection() {
 
 /** The opt-in fallback list: which harnesses a chat moves to, and in what
  * order, when its own harness runs out of usage. */
+/** An OpenAI model that picks the account, fallback harness, and compute
+ * for work, so the harnesses' own quota lasts longer. */
+function DecisionModelCard() {
+  const options = getDecisionModelSettingsQuery();
+  const query = useQuery(options);
+  const settings = query.data ?? null;
+  const [apiKey, setApiKey] = useState("");
+  const [model, setModel] = useState<string | null>(null);
+  const [saving, setSaving] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  async function save(patch: { enabled?: boolean; model?: string; apiKey?: string }) {
+    setSaving(true);
+    setError(null);
+    try {
+      queryClient.setQueryData(options.queryKey, await saveDecisionModelSettings(patch));
+      return true;
+    } catch (err) {
+      setError(err instanceof Error ? err.message : String(err));
+      return false;
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  async function submit(e: React.FormEvent) {
+    e.preventDefault();
+    if (saving) return;
+    const patch: { model?: string; apiKey?: string } = {};
+    if (apiKey.trim()) patch.apiKey = apiKey.trim();
+    if (model != null && model.trim() !== settings?.model) patch.model = model.trim();
+    if (!patch.apiKey && patch.model == null) return;
+    if (await save(patch)) {
+      setApiKey("");
+      setModel(null);
+    }
+  }
+
+  if (!settings) {
+    return query.isPending ? (
+      <LoadingRow>
+        <Spinner /> {m.common_checking()}
+      </LoadingRow>
+    ) : null;
+  }
+  const status = settings.validationStatus;
+  return (
+    <div className={SETTINGS_CARD_CLASS_NAME}>
+      <div className={PROJECT_DEFAULT_ROW_CLASS_NAME}>
+        <div>
+          <div className="project-default-title text-base font-medium">{m.settings_decision_title()}</div>
+          <p>{m.settings_decision_description()}</p>
+        </div>
+        <Switch
+          type="button"
+          checked={settings.enabled}
+          aria-label={m.settings_decision_title()}
+          disabled={saving}
+          onClick={() => void save({ enabled: !settings.enabled })}
+        />
+      </div>
+      <dl className="mt-3 mb-0 flex items-center justify-between gap-4 text-sm">
+        <dt className="font-medium text-subtext">{m.settings_page_status()}</dt>
+        <dd className="m-0">
+          <DecisionStatusBadge settings={settings} />
+        </dd>
+      </dl>
+      {settings.enabled && !settings.keySource && <p className="mt-2 mb-0 text-sm text-subtext">{m.settings_decision_needs_key()}</p>}
+      {status === "modelUnavailable" && <p className="mt-2 mb-0 text-sm text-subtext">{m.settings_decision_model_unavailable({ model: settings.model })}</p>}
+      {settings.keySource === "env" && <p className="mt-2 mb-0 text-sm text-subtext">{m.settings_decision_env_override()}</p>}
+      <form className="mt-4 flex flex-col gap-4" onSubmit={submit}>
+        <label className="flex flex-col gap-2 text-sm font-medium text-subtext">
+          {settings.maskedKey ? m.settings_replace_key() : m.settings_decision_api_key()}
+          <Input
+            type="password"
+            value={apiKey}
+            placeholder={settings.maskedKey ?? "sk-…"}
+            onChange={(e) => setApiKey(e.target.value)}
+            autoComplete="new-password"
+          />
+        </label>
+        <label className="flex flex-col gap-2 text-sm font-medium text-subtext">
+          {m.settings_decision_model()}
+          <Input
+            value={model ?? settings.model}
+            placeholder={settings.defaultModel}
+            onChange={(e) => setModel(e.target.value)}
+            spellCheck={false}
+          />
+          <span className="font-normal">{m.settings_decision_model_hint({ model: settings.defaultModel })}</span>
+        </label>
+        {error && <p className="m-0 text-sm text-accent-red">{error}</p>}
+        <div className="flex justify-end gap-2">
+          {settings.maskedKey && settings.keySource === "settings" && (
+            <Button
+              type="button"
+              disabled={saving}
+              onClick={() => {
+                if (window.confirm(m.settings_decision_remove_key_confirm())) void save({ apiKey: "" });
+              }}
+            >
+              {m.settings_decision_remove_key()}
+            </Button>
+          )}
+          <Button variant="primary" type="submit" disabled={saving || (!apiKey.trim() && (model == null || model.trim() === settings.model))}>
+            {saving ? m.settings_validating() : m.common_save()}
+          </Button>
+        </div>
+      </form>
+    </div>
+  );
+}
+
+function DecisionStatusBadge({ settings }: { settings: DecisionModelSettings }) {
+  if (!settings.keySource) return <Badge variant="warning">{m.settings_page_not_configured()}</Badge>;
+  if (settings.validationStatus === "invalid") return <Badge variant="error">{m.settings_decision_invalid_key()}</Badge>;
+  if (settings.validationStatus === "modelUnavailable") return <Badge variant="warning">{m.settings_decision_model_blocked()}</Badge>;
+  if (!settings.enabled) return <Badge>{m.settings_decision_off()}</Badge>;
+  return <Badge variant="success">{m.settings_page_ready()}</Badge>;
+}
+
 function HarnessFailoverCard({ harnesses }: { harnesses: Harness[] }) {
   const uiStateOptions = getUiStateQuery();
   const { data: uiState } = useQuery(uiStateOptions);

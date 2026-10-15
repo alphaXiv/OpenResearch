@@ -181,3 +181,69 @@ async fn run_login(
         None => Err("Terminal disconnected".into()),
     }
 }
+
+// --- decision model ------------------------------------------------------------
+
+/// Settings → Harnesses → Decision model: on or off, the OpenAI model, and
+/// whether its key works. The key itself never leaves the machine's
+/// settings file; only its masked form is shown.
+async fn decision_payload(check: bool) -> ApiResult {
+    use crate::local::decision;
+    let settings = decision::settings();
+    let status = if check {
+        Some(
+            decision::current_key_status(&settings)
+                .await
+                .map_err(bad_request)?,
+        )
+    } else {
+        None
+    };
+    Ok(Json(json!({
+        "enabled": settings.enabled,
+        "model": settings.model,
+        "defaultModel": decision::DEFAULT_MODEL,
+        "keySource": settings.key_source(),
+        "maskedKey": settings.masked_key(),
+        "validationStatus": status,
+    })))
+}
+
+pub(super) async fn decision_settings() -> ApiResult {
+    decision_payload(true).await
+}
+
+pub(super) async fn set_decision_settings(
+    Json(patch): Json<crate::local::decision::SettingsPatch>,
+) -> ApiResult {
+    use crate::local::decision;
+    if let Some(key) = patch
+        .api_key
+        .as_deref()
+        .map(str::trim)
+        .filter(|key| !key.is_empty())
+    {
+        let model = patch
+            .model
+            .as_deref()
+            .map(str::trim)
+            .filter(|model| !model.is_empty())
+            .map_or_else(|| decision::settings().model, str::to_string);
+        match decision::check_key(key, &model)
+            .await
+            .map_err(bad_request)?
+        {
+            decision::KeyStatus::Invalid => {
+                return Err(bad_request("OpenAI rejected this API key."));
+            }
+            decision::KeyStatus::ModelUnavailable => {
+                return Err(bad_request(format!(
+                    "This API key cannot use {model}. Pick another model or check the key's project permissions."
+                )));
+            }
+            _ => {}
+        }
+    }
+    decision::save(patch).map_err(bad_request)?;
+    decision_payload(false).await
+}

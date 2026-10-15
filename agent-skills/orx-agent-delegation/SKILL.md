@@ -1,6 +1,6 @@
 ---
 name: orx-agent-delegation
-description: "Create independent project chats with `orx agent spawn`: standalone opening messages, project selection, worktrees, compute authorization, quota-aware harness and model choice (`orx agent quota`), and cross-harness review chats on other vendors' agents. Use before creating another chat or when cross-harness review is on; keep ordinary literature retrieval local; deep-research has its own contract."
+description: "Create independent project chats with `orx agent spawn`: opening messages, project selection, worktrees, compute authorization, quota-aware harness, model and compute choice (`orx agent quota`, `orx agent route`), and cross-harness review chats. Use before creating another chat or when cross-harness review is on; keep ordinary literature retrieval local; deep-research has its own contract."
 ---
 
 # Create an independent chat
@@ -62,6 +62,21 @@ orx agent quota --json
   room for its model and moves to another account if it hits a limit.
 - When every account of every allowed harness is low, say so and keep large
   delegations for after the reset time the command shows.
+
+When the user turned on the decision model, ask it
+where new work should run before you pick a harness, model, or compute target:
+
+```sh
+orx agent route "<one-paragraph description of the work>"
+orx agent route --stdin --json < brief.md
+```
+
+It answers with a harness, model, account, and compute target (and a GPU type
+when one fits), each one of the options that are ready and have room, and a
+one-line reason. Use its harness and model for `orx agent spawn --harness …
+--model …` and its compute for the run, unless the user asked for something
+else. When the decision model is off or unavailable the command still answers
+from quota alone and says so.
 
 ## Cross-harness review
 

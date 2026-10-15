@@ -1145,6 +1145,12 @@ pub(super) fn openresearch_summary(logged_in: bool, ssh: &SshReadiness) -> Strin
     }
 }
 
+/// The compute targets and default, as the Compute settings show them, for
+/// routing work with the decision model.
+pub(crate) async fn routing_targets() -> Value {
+    compute_settings_json(openresearch_ssh_readiness().await)
+}
+
 pub(super) fn compute_settings_json(ssh: SshReadiness) -> Value {
     let default = crate::config::compute_default();
     let (default_backend, default_flavor) = match &default {
