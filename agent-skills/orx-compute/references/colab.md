@@ -94,17 +94,31 @@ the GPU name and memory that Colab actually assigned.
   environment variables (for example `HF_TOKEN`). Values are never written to disk.
 - The whole snapshot is uploaded in one request, so keep datasets and
   checkpoints out of Git and download them inside the run.
-- Everything on the runtime is deleted when it is released. Print metrics to
-  stdout, and push checkpoints or large outputs to durable storage (for example
-  the Hugging Face Hub) inside the run command.
+- Write result files to `$ORX_OUTPUT_DIR`: when the run ends they are
+  downloaded into the run's `colab-output` folder (up to 2 GB). Everything else
+  on the runtime is deleted when it is released. Print metrics to stdout, and
+  push checkpoints or larger outputs to durable storage (for example the
+  Hugging Face Hub) inside the run command.
 - Availability depends on the user's Colab plan. If Colab cannot assign the
   accelerator, the run fails at once with that reason; pick another flavor or
   retry later.
 - A detached `orx supervise` process records status and logs; do not kill it.
   Cancelling the run releases the runtime.
+- The run goes on on Colab when this machine sleeps, loses its network, or
+  shuts down. Once `orx up` is running again, it picks the run up: the log
+  catches up from where it stopped, and the outputs and status arrive when it
+  ends. A run cancelled while this machine was off is released then.
+- Colab's own limits still apply whatever this machine does: a runtime lives at
+  most 12 hours (24 on Colab Pro+), so keep `--timeout` under that and save
+  checkpoints during long training so a cut-off run can continue from the last
+  one. If the run ends while this machine is off, the runtime sits idle until
+  Colab's idle timeout reclaims it (spending compute units meanwhile), and its
+  `$ORX_OUTPUT_DIR` is lost if this machine is not back before then. Push
+  anything that must survive to the Hugging Face Hub from the run itself.
 - The runtime is billed while it is assigned, busy or not. When the command
-  exits the runtime is released at once, and `orx up` also releases any runtime
-  an ended run left behind. Do not keep a run alive just to hold its GPU.
+  exits and this machine has collected the outputs, the runtime is released at
+  once, and `orx up` also releases any runtime an ended run left behind. Do not
+  keep a run alive just to hold its GPU.
 - The log warns when the GPU has sat idle for 15 minutes; if the GPU work is
   over, cancel the run. It ends with the share of samples the GPU was busy and
   its peak memory: a low share or a peak far below the card's memory means the
