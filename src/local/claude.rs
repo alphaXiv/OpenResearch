@@ -135,6 +135,8 @@ pub struct SpawnConfig {
     pub effort: Option<String>,
     pub model: Option<String>,
     pub native_store: NativeStore,
+    /// The extra account the child runs on; `None` for the default sign-in.
+    pub account: Option<String>,
     /// Whether the mcp-gate permission bridge was actually wired at spawn (plan
     /// mode + a bound `orx up` port + a successful config write). A plan turn
     /// that wanted the bridge but got `false` respawns next turn to try again.
@@ -614,16 +616,24 @@ async fn spawn_client(spec: &SpawnSpec, auth_generation: u64) -> Result<Arc<Clau
     }
     crate::local::chat::prepare_env(&mut cmd);
     let native_store = spec.config.native_store;
-    let config_home = tokio::task::spawn_blocking(move || {
-        crate::local::native_store::prepare_claude(native_store)
+    let account = spec.config.account.clone();
+    let account_env = tokio::task::spawn_blocking(move || match account {
+        Some(id) => crate::local::harness::accounts::launch_env("claude-code", &id),
+        None => crate::local::native_store::prepare_claude(native_store).map(|home| {
+            vec![
+                ("CLAUDE_CONFIG_DIR", home.into_os_string()),
+                (
+                    "CLAUDE_SECURESTORAGE_CONFIG_DIR",
+                    crate::local::native_store::claude_secure_storage_config_dir(),
+                ),
+            ]
+        }),
     })
     .await
     .map_err(|error| anyhow!("Claude config preparation failed: {error}"))??;
-    cmd.env("CLAUDE_CONFIG_DIR", config_home);
-    cmd.env(
-        "CLAUDE_SECURESTORAGE_CONFIG_DIR",
-        crate::local::native_store::claude_secure_storage_config_dir(),
-    );
+    for (key, value) in account_env {
+        cmd.env(key, value);
+    }
     // Stamp the launching session so `orx exp run` (a fresh subprocess the
     // agent shells out) tags its run and can explicitly subscribe this chat.
     // After prepare_env so it wins.
@@ -695,6 +705,7 @@ pub fn child_action(current: &SpawnConfig, wanted: &SpawnConfig) -> ChildAction 
         || current.effort != wanted.effort
         || current.bridge_active != wanted.bridge_active
         || current.native_store != wanted.native_store
+        || current.account != wanted.account
     {
         return ChildAction::Respawn;
     }
@@ -1357,6 +1368,7 @@ mod tests {
             effort: effort.map(str::to_string),
             model: model.map(str::to_string),
             native_store: NativeStore::Isolated,
+            account: None,
             bridge_active: bridge,
         }
     }

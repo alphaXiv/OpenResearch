@@ -404,6 +404,18 @@ pub enum AgentCommand {
         #[arg(long)]
         json: bool,
     },
+    /// Show each harness account's quota left per model pool, so delegated
+    /// work goes to a harness and model that will not hit a limit.
+    Quota {
+        /// Only this harness (claude-code, codex, antigravity).
+        #[arg(long)]
+        harness: Option<String>,
+        /// Ask the providers for current usage first (slower).
+        #[arg(long)]
+        refresh: bool,
+        #[arg(long)]
+        json: bool,
+    },
 }
 
 #[derive(Args, Debug)]

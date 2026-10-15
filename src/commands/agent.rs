@@ -4,6 +4,7 @@
 //!   orx agent spawn "<message>" --harness <id> [--model <model>]
 //!                                 create it on another agent, for cross-harness review
 //!   orx agent harnesses           list the agents a chat can run on, with their vendors
+//!   orx agent quota               quota left per harness account and model pool
 
 use std::io::Read;
 
@@ -56,7 +57,180 @@ pub async fn run(args: crate::AgentArgs) -> Result<()> {
             spawn(port, &project, &prompt, title.as_deref(), agent).await
         }
         AgentCommand::Harnesses { json } => harnesses(json).await,
+        AgentCommand::Quota {
+            harness,
+            refresh,
+            json,
+        } => quota(harness.as_deref(), refresh, json).await,
     }
+}
+
+/// `orx agent quota`: what each account has left per quota pool, and the
+/// account a new turn on that pool would use.
+async fn quota(harness: Option<&str>, refresh: bool, json: bool) -> Result<()> {
+    use crate::local::harness::accounts;
+    if let Some(harness) = harness {
+        if !accounts::supports_accounts(harness) {
+            return Err(anyhow!(
+                "`{harness}` has no accounts to report. Use one of {}.",
+                accounts::ACCOUNT_HARNESSES.join(", ")
+            ));
+        }
+    }
+    let mut read_errors = Vec::new();
+    if refresh {
+        for account in accounts::statuses(harness)? {
+            if account.signed_in && !account.paused {
+                if let Err(error) = accounts::refresh(&account.harness, &account.id).await {
+                    read_errors.push(format!("{}/{}: {error}", account.harness, account.id));
+                }
+            }
+        }
+    }
+    let statuses = accounts::statuses(harness)?;
+    let mut rows = Vec::new();
+    for account in &statuses {
+        for pool in &account.pools {
+            rows.push(serde_json::json!({
+                "harness": account.harness,
+                "account": account.id,
+                "email": account.email,
+                "signedIn": account.signed_in,
+                "paused": account.paused,
+                "pool": pool.pool,
+                "poolLabel": pool.label,
+                "state": pool.state,
+                "remaining": pool.remaining,
+                "blockedUntil": pool.blocked_until,
+                "windows": pool.windows,
+                "trackedTurns24h": pool.tracked_turns,
+                "trackedTokens24h": pool.tracked_tokens,
+            }));
+        }
+    }
+    let mut next = Vec::new();
+    for harness in accounts::ACCOUNT_HARNESSES
+        .iter()
+        .filter(|id| harness.is_none_or(|only| only == **id))
+    {
+        for pool in accounts::pools(harness) {
+            let model = match pool.id {
+                "partner" => Some("claude"),
+                _ => None,
+            };
+            let pick = accounts::choose(harness, model, None);
+            let usable = statuses.iter().any(|account| {
+                account.harness == *harness
+                    && !account.paused
+                    && account.signed_in
+                    && account.pools.iter().any(|status| {
+                        status.pool == pool.id && status.state != accounts::QuotaState::Blocked
+                    })
+            });
+            next.push(serde_json::json!({
+                "harness": harness,
+                "pool": pool.id,
+                "poolLabel": pool.label,
+                "account": pick.clone().or_else(|| usable.then(|| accounts::DEFAULT.to_string())),
+                "available": usable,
+            }));
+        }
+    }
+    if json {
+        println!(
+            "{}",
+            serde_json::to_string(&serde_json::json!({
+                "accounts": rows,
+                "next": next,
+                "readErrors": read_errors,
+            }))?
+        );
+        return Ok(());
+    }
+    let now = crate::store::now_ms();
+    let when = |ms: i64| {
+        let minutes = ((ms - now).max(0) + 59_999) / 60_000;
+        if minutes >= 120 {
+            format!("in {}h", minutes / 60)
+        } else {
+            format!("in {minutes}m")
+        }
+    };
+    let table: Vec<Vec<String>> = statuses
+        .iter()
+        .flat_map(|account| {
+            account.pools.iter().map(move |pool| {
+                let left = pool
+                    .remaining
+                    .map(|left| format!("{:.0}%", left * 100.0))
+                    .unwrap_or_else(|| "unknown".into());
+                let mut note = Vec::new();
+                if let Some(until) = pool.blocked_until {
+                    note.push(format!("limited, back {}", when(until)));
+                }
+                for window in &pool.windows {
+                    let reset = window
+                        .resets_at
+                        .map(|at| format!(", resets {}", when(at)))
+                        .unwrap_or_default();
+                    note.push(format!(
+                        "{} {:.0}% used{reset}",
+                        window.window, window.used_percent
+                    ));
+                }
+                if let (Some(limit), Some(used)) = (&pool.limit, pool.used) {
+                    note.push(format!(
+                        "{used:.0}/{:.0} {} per {}h",
+                        limit.limit,
+                        match limit.unit {
+                            accounts::LimitUnit::Turns => "turns",
+                            accounts::LimitUnit::Tokens => "tokens",
+                        },
+                        limit.window_hours
+                    ));
+                }
+                if !account.signed_in {
+                    note.push("not signed in".into());
+                } else if account.paused {
+                    note.push("paused".into());
+                }
+                vec![
+                    account.harness.clone(),
+                    account.id.clone(),
+                    account.email.clone().unwrap_or_default(),
+                    pool.label.to_string(),
+                    left,
+                    format!("{:?}", pool.state).to_lowercase(),
+                    note.join("; "),
+                ]
+            })
+        })
+        .collect();
+    crate::output::print_table(
+        &[
+            "HARNESS",
+            "ACCOUNT",
+            "SIGNED IN AS",
+            "POOL",
+            "LEFT",
+            "STATE",
+            "DETAIL",
+        ],
+        &table,
+    );
+    println!();
+    for entry in &next {
+        let harness = entry["harness"].as_str().unwrap_or_default();
+        let pool = entry["poolLabel"].as_str().unwrap_or_default();
+        match entry["account"].as_str() {
+            Some(account) => println!("{harness} · {pool}: next turn uses `{account}`"),
+            None => println!("{harness} · {pool}: every account is at its limit"),
+        }
+    }
+    for error in &read_errors {
+        println!("Could not read quota for {error}");
+    }
+    Ok(())
 }
 
 /// Whose models a harness runs by default. Cross-harness review is about

@@ -2586,7 +2586,11 @@ async fn ensure_codex_pre_accept(
     native_store: NativeStore,
 ) -> Result<Arc<CodexClient>> {
     loop {
-        let ensure = ctx.host.codex.ensure(&ctx.session_id, native_store);
+        let account = super::accounts::extra_account(ctx.account.as_deref(), native_store);
+        let ensure = ctx
+            .host
+            .codex
+            .ensure(&ctx.session_id, native_store, account);
         let result = match ctx.orx_retry_remaining() {
             Some(remaining) => tokio::time::timeout(remaining, ensure)
                 .await
@@ -3792,9 +3796,19 @@ async fn run_turn_exec(ctx: &mut TurnCtx) -> Result<()> {
         .as_ref()
         .map(|session| session.store)
         .unwrap_or(NativeStore::Isolated);
-    let codex_home = tokio::task::spawn_blocking(move || native_store::prepare_codex(native_store))
-        .await
-        .map_err(|error| anyhow!("Codex config preparation failed: {error}"))??;
+    let account =
+        super::accounts::extra_account(ctx.account.as_deref(), native_store).map(str::to_string);
+    let account_id = account.clone();
+    let codex_home = tokio::task::spawn_blocking(move || match account_id {
+        Some(id) => super::accounts::launch_env("codex", &id)?
+            .into_iter()
+            .find(|(key, _)| *key == "CODEX_HOME")
+            .map(|(_, home)| PathBuf::from(home))
+            .ok_or_else(|| anyhow!("Codex account `{id}` has no home")),
+        None => native_store::prepare_codex(native_store),
+    })
+    .await
+    .map_err(|error| anyhow!("Codex config preparation failed: {error}"))??;
     let policy = if ctx.plan_mode {
         Some("read-only")
     } else {
@@ -3887,7 +3901,11 @@ async fn run_turn_exec(ctx: &mut TurnCtx) -> Result<()> {
     if let Some(model) = &ctx.model {
         cmd.args(["-m", model]);
     }
-    if let Some(override_arg) = native_store::codex_sqlite_override(native_store, &codex_home) {
+    if account.is_some() {
+        cmd.args(["-c", &native_store::codex_account_sqlite_override()]);
+    } else if let Some(override_arg) =
+        native_store::codex_sqlite_override(native_store, &codex_home)
+    {
         cmd.args(["-c", &override_arg]);
     }
     let mut turn_text = legacy_exec_text(&ctx.text, ctx.plan_mode);

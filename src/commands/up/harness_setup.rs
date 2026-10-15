@@ -609,7 +609,7 @@ fn setup_verified(
 }
 
 // The interactive CLI stays open after login; verify auth after its chat prompt appears.
-fn antigravity_prompt_ready(output: &str) -> bool {
+pub(super) fn antigravity_prompt_ready(output: &str) -> bool {
     output.contains("Antigravity CLI") && output.contains("for shortcuts")
 }
 

@@ -49,6 +49,7 @@ use crate::workspace_state::{GlobalWorkspaceState, WorkspaceState};
 use crate::{browser, UpArgs};
 
 pub(crate) mod compute_settings;
+mod harness_accounts;
 mod harness_setup;
 mod research_tools;
 use compute_settings::*;
@@ -777,6 +778,22 @@ fn router(state: AppState, remote_auth: Option<RemoteAuth>) -> Router {
         )
         .route("/api/harnesses/setup", get(harness_setup::connect))
         .route(
+            "/api/harnesses/accounts",
+            get(harness_accounts::list).post(harness_accounts::add),
+        )
+        .route(
+            "/api/harnesses/accounts/update",
+            post(harness_accounts::update),
+        )
+        .route(
+            "/api/harnesses/accounts/remove",
+            post(harness_accounts::remove),
+        )
+        .route(
+            "/api/harnesses/accounts/login",
+            get(harness_accounts::login),
+        )
+        .route(
             "/api/local-models",
             get(list_local_models).post(connect_local_model),
         )
@@ -912,6 +929,7 @@ fn remote_route_forbidden(path: &str) -> bool {
             | "/api/settings/openresearch/login"
             | "/api/settings/commands/run"
             | "/api/harnesses/setup"
+            | "/api/harnesses/accounts/login"
     ) || path.starts_with("/api/remote/")
         || (path.starts_with("/api/projects/")
             && (path.ends_with("/file/open") || path.ends_with("/file/reveal")))

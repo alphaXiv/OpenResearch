@@ -11,6 +11,7 @@ import { useMutation, useQuery, useQueries } from "@tanstack/react-query";
 
 import {
   getHarnessesQuery,
+  getHarnessAccountsQuery,
   getHarnessSetupCommandsQuery,
   refreshHarnesses,
   getK8sSettingsQuery,
@@ -102,6 +103,15 @@ import {
   type TelemetrySettings,
   type Harness,
   type HarnessFailover,
+  type HarnessAccount,
+  type HarnessAccounts,
+  type HarnessPoolLimit,
+  type HarnessPoolStatus,
+  getHarnessAccounts,
+  addHarnessAccount,
+  updateHarnessAccount,
+  removeHarnessAccount,
+  harnessAccountLoginPath,
   type HarnessSetupCommands,
   type HarnessId,
   harnessModelLabel,
@@ -568,9 +578,266 @@ function HarnessesTab({ remote }: { remote: boolean }) {
           {h.id === "opencode" && <LocalModelSetup installed={h.installed} />}
         </div>
       )}
+      {h && ACCOUNT_HARNESSES.includes(h.id) && <HarnessAccountsCard harness={h} remote={remote} />}
       {harnesses && <HarnessFailoverCard harnesses={harnesses} />}
       <CrossHarnessCard harnesses={harnesses} />
     </>
+  );
+}
+
+const ACCOUNT_HARNESSES: HarnessId[] = ["claude-code", "codex", "antigravity"];
+
+function fmtClock(ms: number): string {
+  const date = new Date(ms);
+  return ms - Date.now() < 20 * 3600_000 ? date.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" }) : date.toLocaleString();
+}
+
+/** One line per pool: share left, the provider's windows, a set limit, a block. */
+function poolSummary(pool: HarnessPoolStatus): string {
+  const parts: string[] = [
+    pool.blockedUntil
+      ? m.settings_accounts_blocked_until({ time: fmtClock(pool.blockedUntil) })
+      : pool.remaining != null
+        ? m.settings_accounts_left({ percent: fmtNumber(Math.round(pool.remaining * 100)) })
+        : m.settings_accounts_quota_unknown(),
+  ];
+  for (const window of pool.windows) {
+    const used = m.settings_accounts_window({ window: window.window, percent: fmtNumber(Math.round(window.usedPercent)) });
+    parts.push(window.resetsAt ? `${used}, ${m.settings_accounts_resets({ time: fmtClock(window.resetsAt) })}` : used);
+  }
+  if (pool.limit && pool.used != null) {
+    parts.push(m.settings_accounts_used_of({
+      used: fmtNumber(Math.round(pool.used)),
+      limit: fmtNumber(pool.limit.limit),
+      unit: pool.limit.unit === "turns" ? m.settings_accounts_unit_turns() : m.settings_accounts_unit_tokens(),
+      hours: fmtNumber(pool.limit.windowHours),
+    }));
+  }
+  parts.push(m.settings_accounts_tracked({ turns: fmtNumber(pool.trackedTurns) }));
+  return parts.join(" · ");
+}
+
+const QUOTA_DOT: Record<HarnessPoolStatus["state"], string> = {
+  ok: "bg-accent-green",
+  low: "bg-accent-amber",
+  blocked: "bg-accent-red",
+  unknown: "bg-muted",
+};
+
+/** Several accounts for one harness: each one's quota per pool, sign-in,
+ * pausing, limits set by hand, and adding or removing accounts. */
+function HarnessAccountsCard({ harness, remote }: { harness: Harness; remote: boolean }) {
+  const options = getHarnessAccountsQuery();
+  const query = useQuery(options);
+  const group: HarnessAccounts | undefined = query.data?.find((entry) => entry.id === harness.id);
+  const [busy, setBusy] = useState<string | null>(null);
+  const [editing, setEditing] = useState<string | null>(null);
+  const [newId, setNewId] = useState("");
+  const [newLabel, setNewLabel] = useState("");
+  const loginRun = useCommandRun();
+
+  async function run(label: string, action: () => Promise<HarnessAccounts[]>) {
+    setBusy(label);
+    try {
+      queryClient.setQueryData(options.queryKey, await action());
+      return true;
+    } catch (err) {
+      showAlert(err instanceof Error ? err.message : String(err), "error");
+      return false;
+    } finally {
+      setBusy(null);
+    }
+  }
+
+  const signIn = (account: HarnessAccount) =>
+    loginRun.start(account.loginCommand ?? account.id, harnessAccountLoginPath(harness.id, account.id), account.id);
+
+  async function add() {
+    const id = newId.trim().toLowerCase();
+    if (!id) return;
+    if (await run("add", () => addHarnessAccount(harness.id, id, newLabel.trim() || undefined))) {
+      setNewId("");
+      setNewLabel("");
+      const added = queryClient.getQueryData(options.queryKey)?.find((entry) => entry.id === harness.id)?.accounts.find((account) => account.id === id);
+      if (added && !remote) signIn(added);
+    }
+  }
+
+  if (!group) {
+    return query.isPending ? (
+      <LoadingRow>
+        <Spinner /> {m.common_checking()}
+      </LoadingRow>
+    ) : null;
+  }
+  return (
+    <div className={SETTINGS_CARD_CLASS_NAME}>
+      <div className="flex items-start gap-3">
+        <div className="min-w-0 flex-1">
+          <div className="text-base font-medium">{m.settings_accounts_title()}</div>
+          <p className="mt-1 mb-0 text-sm text-subtext">{m.settings_accounts_description()}</p>
+        </div>
+        <Button size="small" disabled={busy != null} onClick={() => void run("refresh", () => getHarnessAccounts(undefined, true))}>
+          <RefreshCw size={12} className={busy === "refresh" ? "animate-[spin_0.9s_linear_infinite]" : ""} /> {m.settings_accounts_refresh()}
+        </Button>
+      </div>
+      <p className="mt-2 mb-0 text-sm text-subtext">{group.quotaSource}</p>
+      <ul className="mt-3 mb-0 flex list-none flex-col gap-1.5 p-0 text-sm">
+        {group.accounts.map((account) => {
+          const name = account.isDefault ? m.settings_accounts_default() : account.label ? `${account.id} · ${account.label}` : account.id;
+          return (
+            <li key={account.id} className="rounded-md border border-border px-3 py-2">
+              <div className="flex flex-wrap items-center gap-x-3 gap-y-1">
+                <span className="font-medium text-text">{name}</span>
+                {account.email && <span className="min-w-0 truncate text-subtext">{account.email}</span>}
+                {!account.signedIn && <Badge size="small" variant="warning">{m.settings_accounts_not_signed_in()}</Badge>}
+                {account.paused && <Badge size="small">{m.settings_accounts_paused()}</Badge>}
+                <span className="flex-1" />
+                {!account.isDefault && !remote && (
+                  <Button size="small" variant="ghost" disabled={busy != null} onClick={() => signIn(account)}>
+                    <SquareTerminal size={13} /> {m.settings_accounts_sign_in()}
+                  </Button>
+                )}
+                {account.pools.some((pool) => pool.blockedUntil) && (
+                  <Button size="small" variant="ghost" disabled={busy != null} onClick={() => void run(`clear:${account.id}`, () => updateHarnessAccount(harness.id, account.id, { clearBlock: true }))}>
+                    {m.settings_accounts_clear_block()}
+                  </Button>
+                )}
+                <Button size="small" variant="ghost" disabled={busy != null} onClick={() => setEditing(editing === account.id ? null : account.id)}>
+                  {m.settings_accounts_limits()}
+                </Button>
+                <Switch
+                  type="button"
+                  checked={!account.paused}
+                  aria-label={m.settings_accounts_use({ name: ltr(name) })}
+                  disabled={busy != null}
+                  onClick={() => void run(`pause:${account.id}`, () => updateHarnessAccount(harness.id, account.id, { paused: !account.paused }))}
+                />
+                {!account.isDefault && (
+                  <IconButton
+                    title={m.settings_accounts_remove()}
+                    aria-label={m.settings_accounts_remove()}
+                    disabled={busy != null}
+                    onClick={() => {
+                      if (!window.confirm(m.settings_accounts_remove_confirm({ name: account.id }))) return;
+                      void run(`remove:${account.id}`, () => removeHarnessAccount(harness.id, account.id));
+                    }}
+                  >
+                    {busy === `remove:${account.id}` ? <Spinner /> : <Trash2 size={13} />}
+                  </IconButton>
+                )}
+              </div>
+              <ul className="mt-1.5 mb-0 flex list-none flex-col gap-1 p-0">
+                {account.pools.map((pool) => (
+                  <li key={pool.pool} className="flex items-baseline gap-2 text-subtext">
+                    <span aria-hidden="true" className={cn("size-1.5 shrink-0 translate-y-[-1px] rounded-full", QUOTA_DOT[pool.state])} />
+                    <span className="shrink-0 text-text">{pool.label}</span>
+                    <span className="min-w-0">{poolSummary(pool)}</span>
+                  </li>
+                ))}
+              </ul>
+              {account.readError && (
+                <p className="mt-1.5 mb-0 text-sm text-subtext">{m.settings_accounts_read_error({ error: account.readError })}</p>
+              )}
+              {editing === account.id && (
+                <AccountLimitsForm
+                  pools={group.pools}
+                  limits={account.limits}
+                  busy={busy != null}
+                  onSave={async (limits) => {
+                    if (await run(`limits:${account.id}`, () => updateHarnessAccount(harness.id, account.id, { limits }))) setEditing(null);
+                  }}
+                />
+              )}
+              {loginRun.run?.owner === account.id && (
+                <CommandRunTerminal run={loginRun.run} onComplete={() => void query.refetch()} onClose={loginRun.clear} />
+              )}
+            </li>
+          );
+        })}
+      </ul>
+      <form
+        className={cn(FORM_CLASS_NAME, "mt-3")}
+        onSubmit={(event) => {
+          event.preventDefault();
+          void add();
+        }}
+      >
+        <div className="flex flex-wrap items-end gap-2">
+          <label className="min-w-40 flex-1">
+            {m.settings_accounts_name()}
+            <Input value={newId} onChange={(event) => setNewId(event.target.value)} placeholder={m.settings_accounts_name_placeholder()} autoComplete="off" spellCheck={false} />
+          </label>
+          <label className="min-w-40 flex-1">
+            {m.settings_accounts_note()}
+            <Input value={newLabel} onChange={(event) => setNewLabel(event.target.value)} autoComplete="off" />
+          </label>
+          <Button variant="primary" type="submit" disabled={busy != null || !newId.trim()}>
+            {busy === "add" ? <Spinner /> : <Plus size={13} />} {m.settings_accounts_add()}
+          </Button>
+        </div>
+      </form>
+    </div>
+  );
+}
+
+function AccountLimitsForm({ pools, limits, busy, onSave }: {
+  pools: { id: string; label: string }[];
+  limits: HarnessPoolLimit[];
+  busy: boolean;
+  onSave: (limits: HarnessPoolLimit[]) => void;
+}) {
+  const [draft, setDraft] = useState<Record<string, { limit: string; unit: HarnessPoolLimit["unit"]; hours: string }>>(() =>
+    Object.fromEntries(pools.map((pool) => {
+      const limit = limits.find((entry) => entry.pool === pool.id);
+      return [pool.id, { limit: limit ? String(limit.limit) : "", unit: limit?.unit ?? "turns", hours: String(limit?.windowHours ?? 5) }];
+    })),
+  );
+  const set = (pool: string, patch: Partial<(typeof draft)[string]>) => setDraft((current) => ({ ...current, [pool]: { ...current[pool], ...patch } }));
+  return (
+    <form
+      className={cn(FORM_CLASS_NAME, "mt-2.5 border-t border-t-border-variant pt-2.5")}
+      onSubmit={(event) => {
+        event.preventDefault();
+        onSave(pools.flatMap((pool) => {
+          const entry = draft[pool.id];
+          const limit = Number(entry.limit);
+          const hours = Number(entry.hours);
+          return entry.limit.trim() && limit > 0 && hours > 0 ? [{ pool: pool.id, limit, unit: entry.unit, windowHours: hours }] : [];
+        }));
+      }}
+    >
+      <p className="m-0 text-sm text-subtext">{m.settings_accounts_limit_hint()}</p>
+      {pools.map((pool) => (
+        <div key={pool.id} className="flex flex-wrap items-end gap-2">
+          <span className="w-40 shrink-0 pb-2 text-sm text-text">{pool.label}</span>
+          <label className="w-28">
+            {m.settings_accounts_limit_amount()}
+            <Input type="number" min={0} value={draft[pool.id].limit} onChange={(event) => set(pool.id, { limit: event.target.value })} />
+          </label>
+          <OptionPicker
+            variant="field"
+            dropDown
+            title={m.settings_accounts_limit_unit()}
+            choices={[
+              { id: "turns", label: m.settings_accounts_unit_turns() },
+              { id: "tokens", label: m.settings_accounts_unit_tokens() },
+            ]}
+            value={draft[pool.id].unit}
+            onSelect={(id) => set(pool.id, { unit: id === "tokens" ? "tokens" : "turns" })}
+          />
+          <label className="w-24">
+            {m.settings_accounts_limit_window()}
+            <Input type="number" min={1} value={draft[pool.id].hours} onChange={(event) => set(pool.id, { hours: event.target.value })} />
+          </label>
+        </div>
+      ))}
+      <div className="actions">
+        <Button variant="primary" type="submit" disabled={busy}>
+          {m.settings_accounts_save_limits()}
+        </Button>
+      </div>
+    </form>
   );
 }
 

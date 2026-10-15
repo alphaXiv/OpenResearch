@@ -184,6 +184,12 @@ export const getHarnessSetupCommandsQuery = () => queryOptions({
   staleTime: Infinity,
 });
 
+export const getHarnessAccountsQuery = () => queryOptions({
+  queryKey: workspaceKey("getHarnessAccounts"),
+  queryFn: ({ signal }) => api.getHarnessAccounts(signal),
+  staleTime: 30_000,
+});
+
 export const getHarnessesQuery = () => queryOptions({
   queryKey: workspaceKey("getHarnesses"),
   queryFn: ({ signal }) => api.getHarnesses(false, false, signal),

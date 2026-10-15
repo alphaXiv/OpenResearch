@@ -2040,6 +2040,86 @@ export interface HarnessSetupCommands {
 export const getHarnessSetupCommands = (signal?: AbortSignal) =>
   get<Record<HarnessId, HarnessSetupCommands>>("/api/harnesses/setup/commands", signal);
 
+export type HarnessQuotaState = "ok" | "low" | "blocked" | "unknown";
+
+/** A limit the user set for one quota pool: `limit` turns or tokens every `windowHours`. */
+export interface HarnessPoolLimit {
+  pool: string;
+  limit: number;
+  unit: "turns" | "tokens";
+  windowHours: number;
+}
+
+/** One usage window the provider reported. */
+export interface HarnessQuotaWindow {
+  window: string;
+  usedPercent: number;
+  resetsAt?: number;
+  readAt: number;
+}
+
+export interface HarnessPoolStatus {
+  pool: string;
+  label: string;
+  limit?: HarnessPoolLimit;
+  used?: number;
+  trackedTurns: number;
+  trackedTokens: number;
+  windows: HarnessQuotaWindow[];
+  blockedUntil?: number;
+  blockedReason?: string;
+  /** Share of quota left, 0–1, from the tightest source. */
+  remaining?: number;
+  state: HarnessQuotaState;
+}
+
+export interface HarnessAccount {
+  harness: HarnessId;
+  id: string;
+  label?: string;
+  email?: string;
+  isDefault: boolean;
+  signedIn: boolean;
+  paused: boolean;
+  limits: HarnessPoolLimit[];
+  pools: HarnessPoolStatus[];
+  /** The shell command that signs this account in (extra accounts only). */
+  loginCommand?: string;
+  /** Why the provider's quota could not be read on the last refresh. */
+  readError?: string;
+}
+
+export interface HarnessAccounts {
+  id: HarnessId;
+  pools: { id: string; label: string }[];
+  /** What orx can read about this harness's quota by itself. */
+  quotaSource: string;
+  accounts: HarnessAccount[];
+}
+
+export interface HarnessAccountPatch {
+  label?: string;
+  paused?: boolean;
+  limits?: HarnessPoolLimit[];
+  clearBlock?: boolean;
+}
+
+export const getHarnessAccounts = (signal?: AbortSignal, refresh = false) =>
+  get<{ harnesses: HarnessAccounts[] }>(`/api/harnesses/accounts${refresh ? "?refresh=1" : ""}`, signal).then((r) => r.harnesses);
+
+export const addHarnessAccount = (harness: HarnessId, id: string, label?: string) =>
+  post<{ harnesses: HarnessAccounts[] }>("/api/harnesses/accounts", { harness, id, label }).then((r) => r.harnesses);
+
+export const updateHarnessAccount = (harness: HarnessId, id: string, patch: HarnessAccountPatch) =>
+  post<{ harnesses: HarnessAccounts[] }>("/api/harnesses/accounts/update", { harness, id, ...patch }).then((r) => r.harnesses);
+
+export const removeHarnessAccount = (harness: HarnessId, id: string) =>
+  post<{ harnesses: HarnessAccounts[] }>("/api/harnesses/accounts/remove", { harness, id }).then((r) => r.harnesses);
+
+/** The terminal route that signs an extra account in. */
+export const harnessAccountLoginPath = (harness: HarnessId, id: string) =>
+  `/api/harnesses/accounts/login?${new URLSearchParams({ harness, id })}`;
+
 export const getHarnesses = (refresh = false, retryRejected = false, signal?: AbortSignal, harness?: HarnessId) => {
   const params = new URLSearchParams();
   if (refresh) params.set("refresh", "1");
