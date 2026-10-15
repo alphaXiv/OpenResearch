@@ -15,6 +15,12 @@ export const getTinkerSettingsQuery = () => queryOptions({
   staleTime: 300_000,
 });
 
+export const getDecisionModelSettingsQuery = () => queryOptions({
+  queryKey: workspaceKey("getDecisionModelSettings"),
+  queryFn: ({ signal }) => api.getDecisionModelSettings(signal),
+  staleTime: 300_000,
+});
+
 export const getK8sSettingsQuery = () => queryOptions({
   queryKey: workspaceKey("getK8sSettings"),
   queryFn: ({ signal }) => api.getK8sSettings(signal),

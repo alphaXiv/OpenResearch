@@ -834,6 +834,30 @@ pub fn choose(harness: &str, model: Option<&str>, sticky: Option<&str>) -> Optio
     pick(&candidates, sticky, &[])
 }
 
+/// The accounts the decision model may choose between for the next turn,
+/// with their quota for `model`'s pool. `None` when there is nothing to
+/// decide: the sticky account still has room, or fewer than two accounts do.
+pub fn open_choice(
+    harness: &str,
+    model: Option<&str>,
+    sticky: Option<&str>,
+) -> Option<Vec<(String, PoolStatus)>> {
+    if !supports_accounts(harness) {
+        return None;
+    }
+    let candidates = candidates(harness, pool_for(harness, model));
+    let with_room = candidates
+        .iter()
+        .filter(|(_, status)| status.score().is_some())
+        .count();
+    let sticky_has_room = sticky.is_some_and(|sticky| {
+        candidates
+            .iter()
+            .any(|(id, status)| id == sticky && status.score().is_some_and(|score| score >= LOW))
+    });
+    (with_room >= 2 && !sticky_has_room).then_some(candidates)
+}
+
 /// Another account with room for `model` after `tried` ran out.
 pub fn next_account(harness: &str, model: Option<&str>, tried: &[String]) -> Option<String> {
     if !supports_accounts(harness) {
