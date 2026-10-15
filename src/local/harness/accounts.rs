@@ -423,10 +423,21 @@ pub fn launch_env(harness: &str, id: &str) -> Result<Vec<(&'static str, OsString
         )],
         "antigravity" => {
             let home = native_store::prepare_agy_account(&home.join("home"))?;
-            vec![
+            let mut env = vec![
                 ("HOME", home.clone().into_os_string()),
                 ("USERPROFILE", home.into_os_string()),
-            ]
+            ];
+            // On Linux `agy` keeps its sign-in in the Secret Service keyring,
+            // which every account would share whatever HOME says. Without a
+            // session bus it falls back to `.gemini/antigravity-cli/
+            // antigravity-oauth-token` inside the account's own home.
+            if cfg!(all(unix, not(target_os = "macos"))) {
+                env.push((
+                    "DBUS_SESSION_BUS_ADDRESS",
+                    OsString::from("unix:path=/nonexistent/orx-account-bus"),
+                ));
+            }
+            env
         }
         _ => Vec::new(),
     })
@@ -465,6 +476,10 @@ pub fn login_command_line(harness: &str, id: &str) -> Option<String> {
             quote(&home)
         ),
         "codex" => format!("CODEX_HOME={} codex login", quote(&home)),
+        "antigravity" if cfg!(all(unix, not(target_os = "macos"))) => format!(
+            "HOME={} DBUS_SESSION_BUS_ADDRESS=unix:path=/nonexistent/orx-account-bus agy",
+            quote(&home.join("home"))
+        ),
         "antigravity" => format!("HOME={} agy", quote(&home.join("home"))),
         _ => return None,
     })
