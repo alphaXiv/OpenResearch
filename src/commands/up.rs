@@ -49,6 +49,7 @@ use crate::workspace_state::{GlobalWorkspaceState, WorkspaceState};
 use crate::{browser, UpArgs};
 
 pub(crate) mod compute_settings;
+mod fork_compute;
 mod harness_accounts;
 mod harness_setup;
 mod research_tools;
@@ -732,33 +733,8 @@ fn router(state: AppState, remote_auth: Option<RemoteAuth>) -> Router {
         .route("/api/settings/ray/preflight", post(ray_preflight))
         .route("/api/settings/compute", get(compute_settings))
         .route("/api/settings/compute/default", post(set_compute_default))
-        .route("/api/settings/compute/prices", get(compute_prices))
         .route("/api/settings/local", get(local_machine_settings))
-        .route("/api/settings/colab", get(colab_settings))
-        .route(
-            "/api/settings/colab/runtimes/stop",
-            post(stop_colab_runtime),
-        )
-        .route(
-            "/api/settings/gcp",
-            get(gcp_settings).post(set_gcp_settings),
-        )
-        .route("/api/settings/gcp/instances/stop", post(stop_gcp_instance))
-        .route("/api/settings/kaggle", get(kaggle_settings))
-        .route("/api/settings/kaggle/accounts", post(add_kaggle_account))
-        .route("/api/settings/kaggle/kernels", get(kaggle_live_kernels))
-        .route(
-            "/api/settings/kaggle/accounts/import",
-            post(import_kaggle_account),
-        )
-        .route(
-            "/api/settings/kaggle/accounts/active",
-            post(set_kaggle_active_account),
-        )
-        .route(
-            "/api/settings/kaggle/accounts/remove",
-            post(remove_kaggle_account),
-        )
+        .merge(fork_compute::routes())
         .route("/api/settings/openresearch", get(openresearch_settings))
         .route("/api/settings/openresearch/login", get(openresearch_login))
         .route("/api/settings/commands/run", get(run_settings_command))
