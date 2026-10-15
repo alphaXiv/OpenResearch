@@ -49,6 +49,8 @@ use crate::workspace_state::{GlobalWorkspaceState, WorkspaceState};
 use crate::{browser, UpArgs};
 
 pub(crate) mod compute_settings;
+mod fork_compute;
+mod fork_settings;
 mod harness_accounts;
 mod harness_setup;
 mod research_tools;
@@ -546,18 +548,6 @@ fn router(state: AppState, remote_auth: Option<RemoteAuth>) -> Router {
         .route("/api/github/repo-access", get(github_repo_access))
         .route("/api/projects/{id}/experiments", get(list_experiments))
         .route("/api/projects/{id}/runs", get(list_project_runs))
-        .route(
-            "/api/projects/{id}/metrics",
-            get(research_tools::project_metrics),
-        )
-        .route(
-            "/api/runs/{id}/metrics",
-            post(research_tools::import_metrics),
-        )
-        .route(
-            "/api/settings/compute/doctor/{backend}",
-            post(research_tools::compute_doctor),
-        )
         .route("/api/papers/search", get(search_papers_api))
         .route("/api/papers/resolve", get(resolve_paper_api))
         .route("/api/compute/backends", get(compute_backends))
@@ -684,14 +674,6 @@ fn router(state: AppState, remote_auth: Option<RemoteAuth>) -> Router {
         .route("/api/update/apply", post(apply_update))
         .route("/api/update/restart", post(restart_after_update))
         .route("/api/update/auto", post(set_auto_update))
-        .route(
-            "/api/settings/cross-harness",
-            get(cross_harness_settings).post(set_cross_harness_settings),
-        )
-        .route(
-            "/api/settings/compute-routing",
-            get(compute_routing_settings).post(set_compute_routing_settings),
-        )
         .route("/api/update/install-cli", post(install_cli))
         .route("/api/settings/ui-state", get(ui_state).post(set_ui_state))
         .route(
@@ -732,33 +714,8 @@ fn router(state: AppState, remote_auth: Option<RemoteAuth>) -> Router {
         .route("/api/settings/ray/preflight", post(ray_preflight))
         .route("/api/settings/compute", get(compute_settings))
         .route("/api/settings/compute/default", post(set_compute_default))
-        .route("/api/settings/compute/prices", get(compute_prices))
         .route("/api/settings/local", get(local_machine_settings))
-        .route("/api/settings/colab", get(colab_settings))
-        .route(
-            "/api/settings/colab/runtimes/stop",
-            post(stop_colab_runtime),
-        )
-        .route(
-            "/api/settings/gcp",
-            get(gcp_settings).post(set_gcp_settings),
-        )
-        .route("/api/settings/gcp/instances/stop", post(stop_gcp_instance))
-        .route("/api/settings/kaggle", get(kaggle_settings))
-        .route("/api/settings/kaggle/accounts", post(add_kaggle_account))
-        .route("/api/settings/kaggle/kernels", get(kaggle_live_kernels))
-        .route(
-            "/api/settings/kaggle/accounts/import",
-            post(import_kaggle_account),
-        )
-        .route(
-            "/api/settings/kaggle/accounts/active",
-            post(set_kaggle_active_account),
-        )
-        .route(
-            "/api/settings/kaggle/accounts/remove",
-            post(remove_kaggle_account),
-        )
+        .merge(fork_settings::routes())
         .route("/api/settings/openresearch", get(openresearch_settings))
         .route("/api/settings/openresearch/login", get(openresearch_login))
         .route("/api/settings/commands/run", get(run_settings_command))
@@ -777,26 +734,6 @@ fn router(state: AppState, remote_auth: Option<RemoteAuth>) -> Router {
             get(harness_setup::commands),
         )
         .route("/api/harnesses/setup", get(harness_setup::connect))
-        .route(
-            "/api/harnesses/accounts",
-            get(harness_accounts::list).post(harness_accounts::add),
-        )
-        .route(
-            "/api/harnesses/accounts/update",
-            post(harness_accounts::update),
-        )
-        .route(
-            "/api/harnesses/accounts/remove",
-            post(harness_accounts::remove),
-        )
-        .route(
-            "/api/harnesses/accounts/login",
-            get(harness_accounts::login),
-        )
-        .route(
-            "/api/settings/decision-model",
-            get(harness_accounts::decision_settings).post(harness_accounts::set_decision_settings),
-        )
         .route(
             "/api/local-models",
             get(list_local_models).post(connect_local_model),
@@ -5475,94 +5412,6 @@ async fn update_status() -> ApiResult {
     tokio::task::spawn_blocking(|| Ok(Json(json!(updates::status()))))
         .await
         .map_err(|e| ApiError::from(anyhow!("update status task failed: {e}")))?
-}
-
-fn cross_harness_settings_json() -> Value {
-    json!({
-        "enabled": crate::config::cross_harness_review(),
-        "excluded": crate::config::cross_harness_excluded(),
-    })
-}
-
-async fn cross_harness_settings() -> ApiResult {
-    Ok(Json(cross_harness_settings_json()))
-}
-
-#[derive(Deserialize)]
-struct SetCrossHarnessReq {
-    enabled: Option<bool>,
-    /// Replaces the whole list of harnesses turned off for review.
-    excluded: Option<Vec<String>>,
-}
-
-/// Takes effect for each session at its next playbook rewrite.
-async fn set_cross_harness_settings(Json(req): Json<SetCrossHarnessReq>) -> ApiResult {
-    tokio::task::spawn_blocking(move || {
-        let save = |error: crate::error::Error| {
-            ApiError::from(anyhow!("could not save the cross-harness setting: {error}"))
-        };
-        if let Some(excluded) = req.excluded {
-            if let Some(unknown) = excluded
-                .iter()
-                .find(|id| crate::local::harness::chat_harness(id).is_none())
-            {
-                return Err(ApiError::from(anyhow!("Unknown harness {unknown}.")));
-            }
-            crate::config::set_cross_harness_excluded(excluded).map_err(save)?;
-        }
-        if let Some(enabled) = req.enabled {
-            crate::config::set_cross_harness_review(enabled).map_err(save)?;
-        }
-        Ok(Json(cross_harness_settings_json()))
-    })
-    .await
-    .map_err(|e| ApiError::from(anyhow!("cross-harness task failed: {e}")))?
-}
-
-fn compute_routing_settings_json() -> Value {
-    json!({
-        "enabled": crate::config::compute_routing(),
-        "excluded": crate::config::compute_routing_excluded(),
-    })
-}
-
-async fn compute_routing_settings() -> ApiResult {
-    Ok(Json(compute_routing_settings_json()))
-}
-
-#[derive(Deserialize)]
-struct SetComputeRoutingReq {
-    enabled: Option<bool>,
-    /// Replaces the whole list of backends kept out of routing.
-    excluded: Option<Vec<String>>,
-}
-
-/// Takes effect for each session at its next playbook rewrite.
-async fn set_compute_routing_settings(Json(req): Json<SetComputeRoutingReq>) -> ApiResult {
-    tokio::task::spawn_blocking(move || {
-        let save = |error: crate::error::Error| {
-            ApiError::from(anyhow!(
-                "could not save the compute routing setting: {error}"
-            ))
-        };
-        if let Some(excluded) = req.excluded {
-            if let Some(unknown) = excluded
-                .iter()
-                .find(|id| !crate::local::BACKENDS.contains(&id.as_str()))
-            {
-                return Err(ApiError::from(anyhow!(
-                    "Unknown compute backend {unknown}."
-                )));
-            }
-            crate::config::set_compute_routing_excluded(excluded).map_err(save)?;
-        }
-        if let Some(enabled) = req.enabled {
-            crate::config::set_compute_routing(enabled).map_err(save)?;
-        }
-        Ok(Json(compute_routing_settings_json()))
-    })
-    .await
-    .map_err(|e| ApiError::from(anyhow!("compute routing task failed: {e}")))?
 }
 
 #[derive(Deserialize)]

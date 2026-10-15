@@ -16,6 +16,37 @@ are required. UI strings follow the existing catalogs; compiled assets follow
 the existing release workflow. Keep future changes within these boundaries
 instead of reformatting shared files or duplicating backend implementations.
 
+## Where the fork touches upstream files
+
+Fork code lives in its own files. Upstream files only carry a small hook that
+mounts it, so a sync should only conflict at these lines. List the current
+touch points with:
+
+```sh
+git fetch upstream main
+git diff --numstat upstream/main -- . ':!ui/dist' ':!ui/messages' \
+  | while read a d f; do git cat-file -e "upstream/main:$f" 2>/dev/null && echo "$((a+d)) $f"; done | sort -rn
+```
+
+| Fork code | Hook in the upstream file |
+| --- | --- |
+| `src/commands/up/fork_settings.rs` (all fork API routes: research tools, harness accounts, decision model, cross-harness, compute routing) and `fork_compute.rs` (prices, Colab, GCP, Kaggle handlers) | `mod` lines and one `.merge(fork_settings::routes())` in `up.rs`; one `use super::fork_compute::{...}` in `compute_settings.rs` for `orx compute show/configure` |
+| `src/commands/compute/prices.rs` (`orx compute prices`) | `mod prices;` and the `Prices` subcommand variant in `compute.rs` |
+| `src/commands/supervise/gcp_run.rs`, `memory_guard.rs` | `mod` lines, the `gcp_job` dispatch and the memory guard calls in `run_local` in `supervise.rs` |
+| `src/jobs/modal/credit.rs` (Modal credit and list prices) | `mod credit; pub use credit::*;` and the `billing` launcher subcommand in `modal.rs` |
+| `ui/src/features/fork/ComputeSections.tsx` (Colab, Kaggle cards), `SettingsCards.tsx` (harness accounts, failover, decision model, cross-harness, compute routing, provider prices, GCP) | two imports and the card mounts in `SettingsPage.tsx`; the shared class names and helpers they use are exported from `SettingsPage.tsx` |
+| `ui/src/features/fork/computeApi.ts` (Colab, GCP, Kaggle types and calls) | `export * from "./features/fork/computeApi";` in `api.ts` |
+| `src/jobs/{colab,colab_account,colab_runtimes,gcp,gcp_billing,kaggle,provider_prices}.rs`, `src/local/gcp.rs` | `mod` lines and backend dispatch in `jobs/mod.rs`, `compute.rs`, `localrun.rs` |
+| `src/local/harness/{accounts,failover}.rs`, `src/store/harness_accounts.rs`, `src/commands/up/harness_accounts.rs` | Turn routing in `local/chat/mod.rs`, account homes in `native_store.rs`, harness CLI in `commands/agent.rs` |
+
+Still inline: the harness, routing and decision model types in `api.ts`, the
+chat-time account routing in `local/chat/mod.rs`, and `recommended_model` in
+`up.rs`. These are woven into upstream logic rather than standalone blocks.
+
+UI strings must stay in `ui/messages/*.json` because `check-i18n` reads only
+those catalogs. Add new keys next to related fork keys rather than at the end of
+the file, and resolve catalog conflicts by keeping both sides.
+
 ## Updating from upstream
 
 1. Keep feature changes in separate, reviewable commits and start with a clean
