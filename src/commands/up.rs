@@ -794,6 +794,10 @@ fn router(state: AppState, remote_auth: Option<RemoteAuth>) -> Router {
             get(harness_accounts::login),
         )
         .route(
+            "/api/settings/decision-model",
+            get(harness_accounts::decision_settings).post(harness_accounts::set_decision_settings),
+        )
+        .route(
             "/api/local-models",
             get(list_local_models).post(connect_local_model),
         )
