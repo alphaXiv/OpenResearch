@@ -17,13 +17,31 @@ export interface ColabSettings {
   cliPath: string | null;
   cliVersion: string | null;
   signedIn: boolean;
+  accountCount: number;
+  /** The default account's email. */
+  active: string | null;
+  pausedCount: number;
+  /** The CLI has its own sign-in in ~/.config/colab-cli that can be imported. */
+  importable: boolean;
   ready: boolean;
   error: string | null;
   defaultFlavor: string;
   accelerators: ColabAccelerator[];
-  /** The signed-in Google account; `null` until the CLI has signed in. */
+  /** The default Google account; `null` until one is saved. */
   account: ColabAccount | null;
-  /** Runtimes assigned to the account right now; `null` when unknown. */
+  /** Runtimes assigned to the default account right now; `null` when unknown. */
+  runtimes: ColabRuntime[] | null;
+  /** Every saved Google account; tokens never leave the server. */
+  accounts: ColabSavedAccount[];
+}
+
+export interface ColabSavedAccount {
+  /** The Google account's email. */
+  id: string;
+  active: boolean;
+  /** Never picked by `@auto` or for runs without an account. */
+  paused: boolean;
+  account: ColabAccount | null;
   runtimes: ColabRuntime[] | null;
 }
 
@@ -126,8 +144,30 @@ export const stopGcpInstance = (zone: string, name: string) =>
 export const getColabSettings = (signal?: AbortSignal, fresh = false) =>
   get<ColabSettings>(fresh ? "/api/settings/colab?fresh=true" : "/api/settings/colab", signal);
 
-export const stopColabRuntime = (endpoint: string) =>
-  post<{ ok: true }>("/api/settings/colab/runtimes/stop", { endpoint });
+export const stopColabRuntime = (endpoint: string, account?: string) =>
+  post<{ ok: true }>("/api/settings/colab/runtimes/stop", { endpoint, account });
+
+/** Starts the Colab CLI's sign-in for a new account; `url` is Google's page. */
+export const startColabLogin = () =>
+  post<{ id: string; url: string }>("/api/settings/colab/accounts/login", {});
+
+export const finishColabLogin = (id: string, code: string) =>
+  post<ColabSettings>("/api/settings/colab/accounts/login/finish", { id, code });
+
+export const cancelColabLogin = (id: string) =>
+  post<{ ok: true }>("/api/settings/colab/accounts/login/cancel", { id });
+
+export const importColabAccount = () =>
+  post<ColabSettings>("/api/settings/colab/accounts/import", {});
+
+export const setColabActiveAccount = (account: string) =>
+  post<ColabSettings>("/api/settings/colab/accounts/active", { account });
+
+export const pauseColabAccount = (account: string, paused: boolean) =>
+  post<ColabSettings>("/api/settings/colab/accounts/pause", { account, paused });
+
+export const removeColabAccount = (account: string) =>
+  post<ColabSettings>("/api/settings/colab/accounts/remove", { account });
 
 export interface KaggleAccelerator {
   id: string;

@@ -28,8 +28,10 @@ const LOG_IDLE: Duration = Duration::from_secs(30);
 const MONITORING_GRACE: Duration = Duration::from_secs(60);
 
 // Backends and guards added by the tuandang304 fork; see docs/fork-maintenance.md.
+mod colab_resume;
 mod gcp_run;
 mod memory_guard;
+use colab_resume::resume_colab;
 use gcp_run::run_gcp;
 use memory_guard::MemoryGuard;
 
@@ -1153,6 +1155,15 @@ async fn run_local(
         let guard_reason = memory_guard.as_ref().and_then(|guard| guard.reason.clone());
         if guard_reason.is_some() && is_terminal_stage(stage) {
             status = RunStatus::Failed;
+        }
+
+        if is_terminal_stage(stage)
+            && descriptor.kind == "colab_job"
+            && !cancel_sent
+            && resume_colab(&dir, &run_id)
+        {
+            tokio::time::sleep(POLL_INTERVAL).await;
+            continue;
         }
 
         if is_terminal_stage(stage) {

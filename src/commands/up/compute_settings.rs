@@ -1,7 +1,8 @@
 //! Shared compute settings operations for the dashboard and standalone CLI.
 
 use super::fork_compute::{
-    colab_settings_with, configure_kaggle, gcp_settings, kaggle_settings_with, set_gcp_settings,
+    colab_settings_with, configure_colab, configure_kaggle, gcp_settings, kaggle_settings_with,
+    set_gcp_settings,
 };
 use super::*;
 
@@ -1162,7 +1163,9 @@ pub(super) fn compute_settings_json(ssh: SshReadiness) -> Value {
     let tinker = crate::jobs::tinker::resolve_api_key_with_source().ok();
     let modal_source = crate::jobs::modal::token_source();
     let colab_cli = crate::jobs::colab::find_cli();
-    let colab_signed_in = crate::jobs::colab::token_path().is_some_and(|path| path.is_file());
+    let colab_configured = crate::jobs::colab_accounts::configured();
+    let colab_accounts = crate::jobs::colab_accounts::load_accounts();
+    let colab_paused = colab_accounts.accounts.iter().filter(|a| a.paused).count();
     let kaggle_cli = crate::jobs::kaggle::find_cli().is_some();
     let kaggle_accounts = crate::jobs::kaggle::load_accounts();
     let k8s_settings = k8s::load_settings().ok().flatten();
@@ -1229,11 +1232,17 @@ pub(super) fn compute_settings_json(ssh: SshReadiness) -> Value {
         },
         {
             "id": "colab",
-            "configured": colab_cli.is_some() && colab_signed_in,
-            "summary": match (&colab_cli, colab_signed_in) {
-                (None, _) => "Colab CLI not installed",
-                (Some(_), false) => "Colab CLI installed, not signed in",
-                (Some(_), true) => "Colab CLI signed in",
+            // Paused accounts are not offered to routing.
+            "configured": colab_configured && (colab_accounts.accounts.is_empty() || colab_paused < colab_accounts.accounts.len()),
+            "summary": match (&colab_cli, colab_configured, colab_accounts.accounts.len(), &colab_accounts.active) {
+                (None, _, _, _) => "Colab CLI not installed".to_string(),
+                (Some(_), false, _, _) => "Colab CLI installed, no Google account".to_string(),
+                (Some(_), true, 0, _) => "Colab CLI signed in".to_string(),
+                (Some(_), true, n, _) if colab_paused == n => format!("{n} accounts, all paused"),
+                (Some(_), true, 1, Some(active)) => format!("Account {active}"),
+                (Some(_), true, n, Some(active)) if colab_paused > 0 => format!("{n} accounts ({colab_paused} paused), default {active}"),
+                (Some(_), true, n, Some(active)) => format!("{n} accounts, default {active}"),
+                (Some(_), true, n, None) => format!("{n} accounts"),
             },
         },
         {
@@ -1564,6 +1573,7 @@ pub(crate) async fn configure(backend: &str, body: Value) -> Result<Value> {
         "tinker" => set_tinker_key(Json(serde_json::from_value(body)?)).await,
         "gcp" => set_gcp_settings(Json(serde_json::from_value(body)?)).await,
         "kaggle" => configure_kaggle(body).await,
+        "colab" => configure_colab(body).await,
         _ => {
             return Err(anyhow!(
                 "{backend} has no saved configuration; use compute connect or default set."
@@ -1628,7 +1638,18 @@ pub(crate) async fn check(
                 && value["sshKeyStatus"] == "matched"
                 && value["error"].is_null()
         }
-        "modal" | "colab" | "gcp" => value["ready"] == true,
+        "modal" | "gcp" => value["ready"] == true,
+        // Ready once some unpaused account answered with its sign-in.
+        "colab" => {
+            value["ready"] == true
+                && value["accounts"].as_array().is_some_and(|accounts| {
+                    accounts.iter().any(|a| {
+                        a["paused"] == false
+                            && a["account"].is_object()
+                            && a["account"]["error"].is_null()
+                    })
+                })
+        }
         // Ready once some account answered with its credentials.
         "kaggle" => {
             value["ready"] == true

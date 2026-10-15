@@ -124,33 +124,41 @@ async fn colab_checks(checks: &mut Vec<Check>) {
         },
         colab::INSTALL_HINT,
     ));
+    crate::jobs::colab_accounts::ensure_imported().await;
+    let accounts = crate::jobs::colab_accounts::load_accounts();
     checks.push(Check::new(
         "credentials",
-        status.signed_in,
-        if status.signed_in {
-            "A Colab credential file exists; live authentication is checked next."
-        } else {
-            "No Colab credential file was found."
+        !accounts.accounts.is_empty(),
+        match accounts.accounts.len() {
+            0 => "No Google account is saved for Colab.".to_string(),
+            1 => "1 Google account is saved; live authentication is checked next.".to_string(),
+            n => format!("{n} Google accounts are saved; live authentication is checked next."),
         },
         colab::SIGN_IN_HINT,
     ));
-    if !status.signed_in {
-        return;
-    }
     // A doctor request must not reuse a token from before the user signed in again.
-    match crate::jobs::colab_account::probe_connection().await {
-        Ok(runtime_count) => checks.push(Check::new(
-            "connection",
-            true,
-            format!(
-                "Google accepted the sign-in; {} assigned runtime(s). No runtime was started.",
-                runtime_count
-            ),
-            "",
-        )),
-        Err(error) => {
-            let action = colab_recovery(&error);
-            checks.push(Check::new("connection", false, error, action));
+    for account in &accounts.accounts {
+        let home = crate::jobs::colab_accounts::account_home(&account.id);
+        let paused = if account.paused { " (paused)" } else { "" };
+        match crate::jobs::colab_account::probe_connection(&home).await {
+            Ok(runtime_count) => checks.push(Check::new(
+                "connection",
+                true,
+                format!(
+                    "{}{paused}: Google accepted the sign-in; {} assigned runtime(s). No runtime was started.",
+                    account.id, runtime_count
+                ),
+                "",
+            )),
+            Err(error) => {
+                let action = colab_recovery(&error);
+                checks.push(Check::new(
+                    "connection",
+                    false,
+                    format!("{}{paused}: {error}", account.id),
+                    action,
+                ));
+            }
         }
     }
 }
@@ -161,7 +169,7 @@ fn colab_recovery(error: &str) -> &'static str {
         || error.contains("sign-in has no token")
         || error.contains("sign-in could not be read")
     {
-        "Run `orx compute connect colab` in a terminal, finish Google sign-in, then check again."
+        "Sign in to that account again (Settings → Compute → Colab, or `orx compute connect colab` in a terminal), then check again."
     } else if error.contains("403") {
         "Google denied access. Check the selected Google account and its Colab permissions; reconnect with `orx compute connect colab`."
     } else {

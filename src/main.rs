@@ -569,7 +569,9 @@ pub struct ExpRunArgs {
     /// (h100_sxm, or h100_sxm:2 for two) or a CPU flavor (cpu5c/cpu5g/cpu5m, or
     /// cpu5c:32 for the vCPU tier). With `--backend colab`: t4 (default), l4,
     /// a100, h100, g4, v5e1, v6e1, or cpu; append `:highmem` for a high-RAM
-    /// machine, or pass `auto:<GB>` for the smallest GPU with that much VRAM.
+    /// machine, or pass `auto:<GB>` for the smallest GPU with that much VRAM;
+    /// then `@<account>` to pick a saved Google account, or `@auto` for an
+    /// unpaused one whose plan can assign it.
     /// With `--backend kaggle`: t4 (default, two T4s), p100, tpu, or cpu;
     /// append `@<account>` to pick a saved Kaggle account, or `@auto` for the
     /// one with the most weekly quota left.

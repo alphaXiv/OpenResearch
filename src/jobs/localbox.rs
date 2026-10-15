@@ -52,6 +52,20 @@ const OOM_PREFERENCE: &str = "echo 1000 > /proc/self/oom_score_adj 2>/dev/null |
 #[cfg(all(not(windows), not(target_os = "linux")))]
 const OOM_PREFERENCE: &str = "";
 
+/// Records the payload's exit code, and keeps the launcher identifiable until
+/// background children exit, including after a payload cd.
+#[cfg(not(windows))]
+fn unix_prelude(dir: &Path) -> String {
+    format!(
+        "trap 'exit 143' TERM\ntrap {} EXIT\n{}",
+        sh_quote(&format!(
+            "code=$?; wait; echo \"$code\" > {}; exit \"$code\"",
+            sh_quote(&crate::local::bash::bash_path(&dir.join("exit_code")))
+        )),
+        OOM_PREFERENCE,
+    )
+}
+
 /// Submit the job: write run.sh, launch it detached in its own process group
 /// (pid == pgid, so cancel can TERM the whole tree), record the pid. Returns
 /// the run dir — the reattach handle stored on the descriptor.
@@ -61,15 +75,7 @@ pub fn run_job(spec: &LocalJobSpec) -> Result<PathBuf> {
         .map_err(|e| anyhow!("Could not create {}: {}", dir.display(), e))?;
     let env = super::default_python_env(&spec.env);
     #[cfg(not(windows))]
-    // Keep the launcher identifiable until background children exit, including after a payload cd.
-    let prelude = format!(
-        "trap 'exit 143' TERM\ntrap {} EXIT\n{}",
-        sh_quote(&format!(
-            "code=$?; wait; echo \"$code\" > {}; exit \"$code\"",
-            sh_quote(&crate::local::bash::bash_path(&dir.join("exit_code")))
-        )),
-        OOM_PREFERENCE,
-    );
+    let prelude = unix_prelude(&dir);
     #[cfg(windows)]
     let prelude = python::prelude(&dir)
         .map_err(|e| anyhow!("Could not set up Python for {}: {}", dir.display(), e))?;
@@ -93,6 +99,52 @@ pub fn run_job(spec: &LocalJobSpec) -> Result<PathBuf> {
         let _ = std::fs::set_permissions(&run_sh_path, std::fs::Permissions::from_mode(0o600));
     }
 
+    spawn(&dir, &run_sh_path, &env, &spec.secret_env)?;
+    Ok(dir)
+}
+
+/// Start a dead job's script again in the same run dir, appending to its log:
+/// clears the recorded exit and records the new pid. Unix only.
+#[cfg(not(windows))]
+pub fn resume_job(dir: &Path, script: &str) -> Result<()> {
+    let prelude = unix_prelude(dir);
+    let resume_sh = format!(
+        "#!/usr/bin/env bash\ncd {dir} || exit 97\n(\n{prelude}{script}\n) >> log 2>&1\n",
+        dir = sh_quote(&crate::local::bash::bash_path(dir)),
+    );
+    let path = dir.join("resume.sh");
+    std::fs::write(&path, resume_sh)
+        .map_err(|e| anyhow!("Could not write {}: {}", path.display(), e))?;
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let _ = std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600));
+    }
+    for stale in ["exit_code", FAILURE_REASON_FILE] {
+        match std::fs::remove_file(dir.join(stale)) {
+            Ok(()) => {}
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+            Err(e) => return Err(anyhow!("Could not clear the run's {stale}: {e}")),
+        }
+    }
+    let mut env: HashMap<String, String> = HashMap::new();
+    if let Some(path) = crate::local::shell_env::search_path() {
+        env.insert("PATH".to_string(), path.to_string_lossy().into_owned());
+    }
+    spawn(
+        dir,
+        &path,
+        &super::default_python_env(&env),
+        &HashMap::new(),
+    )
+}
+
+/// Launch `script_path` detached in its own process group and record its pid.
+fn spawn(
+    dir: &Path,
+    script_path: &Path,
+    env: &HashMap<String, String>,
+    secret_env: &HashMap<String, String>,
+) -> Result<()> {
     let mut cmd = std::process::Command::new(crate::local::bash::program());
     if let Some(path) =
         crate::local::bash::path_with_toolchain(crate::local::shell_env::search_path())
@@ -101,7 +153,7 @@ pub fn run_job(spec: &LocalJobSpec) -> Result<PathBuf> {
     }
     #[cfg(not(windows))]
     {
-        let script_path = crate::paths::canonicalize(&run_sh_path)?;
+        let script_path = crate::paths::canonicalize(script_path)?;
         std::fs::write(
             dir.join("pid_script"),
             script_path.to_string_lossy().as_bytes(),
@@ -110,9 +162,9 @@ pub fn run_job(spec: &LocalJobSpec) -> Result<PathBuf> {
     }
     #[cfg(windows)]
     cmd.arg("run.sh");
-    cmd.envs(&env)
-        .envs(&spec.secret_env)
-        .current_dir(&dir)
+    cmd.envs(env)
+        .envs(secret_env)
+        .current_dir(dir)
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null());
@@ -122,14 +174,14 @@ pub fn run_job(spec: &LocalJobSpec) -> Result<PathBuf> {
         cmd.process_group(0);
     }
     #[cfg(windows)]
-    windows::spawn(&mut cmd, &dir).map_err(|e| anyhow!("Could not launch the local run: {}", e))?;
+    windows::spawn(&mut cmd, dir).map_err(|e| anyhow!("Could not launch the local run: {}", e))?;
     #[cfg(not(windows))]
     {
         let mut child = cmd
             .spawn()
             .map_err(|e| anyhow!("Could not launch the local run: {}", e))?;
         let pid = child.id();
-        let completed_dir = dir.clone();
+        let completed_dir = dir.to_path_buf();
         std::thread::spawn(move || {
             if let Ok(status) = child.wait() {
                 if exit_code_state(&completed_dir).is_none() {
@@ -145,7 +197,7 @@ pub fn run_job(spec: &LocalJobSpec) -> Result<PathBuf> {
         std::fs::write(dir.join("pid"), format!("{pid}\n"))
             .map_err(|e| anyhow!("Could not record the run's pid: {}", e))?;
     }
-    Ok(dir)
+    Ok(())
 }
 
 /// The unique script path distinguishes a run from an unrelated process reusing its PID.
@@ -319,10 +371,15 @@ pub fn stream_logs(
     Ok(seen)
 }
 
+/// Left in the run dir before a cancel TERMs the job, so a controller can tell
+/// a cancel from this machine shutting down.
+pub const CANCEL_REQUESTED_FILE: &str = "cancel_requested";
+
 /// TERM the process group (pid == pgid), else the pid alone; on Windows, the process tree.
 pub fn cancel_job(dir: &Path) -> Result<()> {
     let pid = std::fs::read_to_string(dir.join("pid"))
         .map_err(|e| anyhow!("Could not read the run's pid: {}", e))?;
+    let _ = std::fs::write(dir.join(CANCEL_REQUESTED_FILE), "");
     let pid = pid.trim().to_string();
     #[cfg(windows)]
     {
@@ -591,6 +648,27 @@ mod tests {
         assert!(!run_alive_via(unrunnable_ps, &dir, "0"));
         // pid 1 always exists: 0 as root, EPERM otherwise.
         assert!(run_alive_via(unrunnable_ps, &dir, "1"));
+    }
+
+    #[cfg(not(windows))]
+    #[test]
+    fn a_resumed_job_appends_to_its_log_and_records_its_new_exit() {
+        let dir = std::env::temp_dir().join(format!("orx-resume-test-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("log"), "first\n").unwrap();
+        std::fs::write(dir.join("exit_code"), "143\n").unwrap();
+        std::fs::write(dir.join(FAILURE_REASON_FILE), "stale\n").unwrap();
+        assert_eq!(inspect_job(&dir).stage, "ERROR");
+
+        resume_job(&dir, "echo second").unwrap();
+        let state = wait_terminal(&dir);
+        assert_eq!(state.stage, "COMPLETED", "{:?}", state.message);
+        assert_eq!(
+            std::fs::read_to_string(dir.join("log")).unwrap(),
+            "first\nsecond\n"
+        );
+        assert!(!dir.join(FAILURE_REASON_FILE).exists());
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

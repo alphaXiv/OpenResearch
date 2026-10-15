@@ -14,6 +14,34 @@ pub(super) fn routes() -> Router<AppState> {
             post(stop_colab_runtime),
         )
         .route(
+            "/api/settings/colab/accounts/login",
+            post(start_colab_login),
+        )
+        .route(
+            "/api/settings/colab/accounts/login/finish",
+            post(finish_colab_login),
+        )
+        .route(
+            "/api/settings/colab/accounts/login/cancel",
+            post(cancel_colab_login),
+        )
+        .route(
+            "/api/settings/colab/accounts/import",
+            post(import_colab_account),
+        )
+        .route(
+            "/api/settings/colab/accounts/active",
+            post(set_colab_active_account),
+        )
+        .route(
+            "/api/settings/colab/accounts/pause",
+            post(pause_colab_account),
+        )
+        .route(
+            "/api/settings/colab/accounts/remove",
+            post(remove_colab_account),
+        )
+        .route(
             "/api/settings/gcp",
             get(gcp_settings).post(set_gcp_settings),
         )
@@ -47,43 +75,158 @@ pub(super) async fn compute_prices(Query(query): Query<ComputePricesQuery>) -> A
     Ok(Json(json!(overview)))
 }
 
-/// The Colab row's expanded detail: CLI install, sign-in, the accelerators a
-/// run can request, and the signed-in account's plan and compute units. Never
-/// starts a sign-in.
+/// The Colab row's expanded detail: CLI install, the saved Google accounts
+/// with each one's plan, compute units and runtimes, and the accelerators a
+/// run can request. `account`/`runtimes` repeat the default account's. Never
+/// starts a sign-in, and never includes a token.
 pub(super) async fn colab_settings(Query(query): Query<ColabSettingsQuery>) -> ApiResult {
     colab_settings_with(query.fresh.unwrap_or(false)).await
 }
 
 #[derive(serde::Deserialize)]
 pub(super) struct ColabSettingsQuery {
-    /// Skip the cached account so Refresh shows the current balance.
+    /// Skip the cached accounts so Refresh shows the current balances.
     fresh: Option<bool>,
 }
 
 pub(super) async fn colab_settings_with(fresh: bool) -> ApiResult {
+    let accounts = crate::jobs::colab_accounts::accounts(fresh).await;
     let mut value = json!(crate::jobs::colab::status().await);
-    let account = crate::jobs::colab_account::account(fresh).await;
-    let runtimes = if account.is_some() {
-        crate::jobs::colab_runtimes::runtimes().await.ok()
-    } else {
-        None
-    };
-    value["account"] = json!(account);
-    value["runtimes"] = json!(runtimes);
+    let active = accounts.iter().find(|a| a.active);
+    value["account"] = json!(active.and_then(|a| a.account.clone()));
+    value["runtimes"] = json!(active.and_then(|a| a.runtimes.clone()));
+    value["accounts"] = json!(accounts);
     Ok(Json(value))
 }
 
 #[derive(serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub(super) struct StopColabRuntimeReq {
     endpoint: String,
+    /// The account the runtime belongs to; the default account when omitted.
+    account: Option<String>,
+}
+
+fn colab_home(account: Option<&str>) -> Result<std::path::PathBuf, ApiError> {
+    let file = crate::jobs::colab_accounts::load_accounts();
+    let id = match account {
+        Some(name) => file
+            .accounts
+            .iter()
+            .find(|a| a.id.eq_ignore_ascii_case(name))
+            .map(|a| a.id.clone()),
+        None => file.active.clone(),
+    }
+    .ok_or_else(|| bad_request(anyhow!("No saved Colab account {}.", account.unwrap_or(""))))?;
+    Ok(crate::jobs::colab_accounts::account_home(&id))
 }
 
 /// Release one Colab runtime so it stops spending compute units.
 pub(super) async fn stop_colab_runtime(Json(req): Json<StopColabRuntimeReq>) -> ApiResult {
-    crate::jobs::colab_runtimes::stop(&req.endpoint)
+    let home = colab_home(req.account.as_deref())?;
+    crate::jobs::colab_runtimes::stop(&home, &req.endpoint)
         .await
         .map_err(|error| ApiError::from(anyhow!("{error}")))?;
     Ok(Json(json!({ "ok": true })))
+}
+
+/// Start adding a Google account: the CLI's sign-in link, for the user to
+/// open, sign in with the account to add, and copy Google's code from.
+pub(super) async fn start_colab_login() -> ApiResult {
+    let login = crate::jobs::colab_accounts::login_start()
+        .await
+        .map_err(bad_request)?;
+    Ok(Json(json!(login)))
+}
+
+#[derive(serde::Deserialize)]
+pub(super) struct FinishColabLoginReq {
+    id: String,
+    code: String,
+}
+
+pub(super) async fn finish_colab_login(Json(req): Json<FinishColabLoginReq>) -> ApiResult {
+    crate::jobs::colab_accounts::login_finish(&req.id, &req.code)
+        .await
+        .map_err(bad_request)?;
+    colab_settings_with(false).await
+}
+
+#[derive(serde::Deserialize)]
+pub(super) struct CancelColabLoginReq {
+    id: String,
+}
+
+pub(super) async fn cancel_colab_login(Json(req): Json<CancelColabLoginReq>) -> ApiResult {
+    crate::jobs::colab_accounts::login_cancel(&req.id).await;
+    Ok(Json(json!({ "ok": true })))
+}
+
+/// Save the sign-in the Colab CLI already has in ~/.config/colab-cli.
+pub(super) async fn import_colab_account() -> ApiResult {
+    crate::jobs::colab_accounts::import_cli_account()
+        .await
+        .map_err(bad_request)?;
+    colab_settings_with(false).await
+}
+
+#[derive(serde::Deserialize)]
+pub(super) struct ColabAccountReq {
+    account: String,
+    /// For the pause route: pause (`true`) or resume (`false`).
+    #[serde(default)]
+    paused: bool,
+}
+
+pub(super) async fn set_colab_active_account(Json(req): Json<ColabAccountReq>) -> ApiResult {
+    crate::jobs::colab_accounts::set_active(&req.account)
+        .await
+        .map_err(bad_request)?;
+    colab_settings_with(false).await
+}
+
+pub(super) async fn pause_colab_account(Json(req): Json<ColabAccountReq>) -> ApiResult {
+    crate::jobs::colab_accounts::set_paused(&req.account, req.paused)
+        .await
+        .map_err(bad_request)?;
+    crate::jobs::provider_prices::invalidate().await;
+    colab_settings_with(false).await
+}
+
+pub(super) async fn remove_colab_account(Json(req): Json<ColabAccountReq>) -> ApiResult {
+    crate::jobs::colab_accounts::remove_account(&req.account)
+        .await
+        .map_err(bad_request)?;
+    crate::jobs::provider_prices::invalidate().await;
+    colab_settings_with(false).await
+}
+
+/// `orx compute configure colab`: make `account` the default, pause or resume
+/// `pauseAccount`/`resumeAccount`, delete `removeAccount`, or `import` the
+/// CLI's own sign-in.
+pub(super) async fn configure_colab(body: Value) -> ApiResult {
+    use crate::jobs::colab_accounts as accounts;
+    if body.get("import").and_then(Value::as_bool) == Some(true) {
+        accounts::import_cli_account().await.map_err(bad_request)?;
+    }
+    if let Some(name) = body.get("removeAccount").and_then(Value::as_str) {
+        accounts::remove_account(name).await.map_err(bad_request)?;
+    }
+    if let Some(name) = body.get("pauseAccount").and_then(Value::as_str) {
+        accounts::set_paused(name, true)
+            .await
+            .map_err(bad_request)?;
+    }
+    if let Some(name) = body.get("resumeAccount").and_then(Value::as_str) {
+        accounts::set_paused(name, false)
+            .await
+            .map_err(bad_request)?;
+    }
+    if let Some(name) = body.get("account").and_then(Value::as_str) {
+        accounts::set_active(name).await.map_err(bad_request)?;
+    }
+    crate::jobs::provider_prices::invalidate().await;
+    colab_settings_with(true).await
 }
 
 // --- Kaggle ---------------------------------------------------------------------

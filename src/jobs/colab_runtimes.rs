@@ -1,4 +1,4 @@
-//! Colab runtimes assigned to the signed-in account, and releasing them.
+//! Colab runtimes assigned to each saved account, and releasing them.
 //!
 //! A run's controller releases its runtime on every exit it can trap. A
 //! controller killed outright (SIGKILL, a crash, the machine shutting down)
@@ -8,14 +8,16 @@
 //! notebook open in the browser) are only listed, never stopped automatically.
 
 use std::collections::HashMap;
+use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use serde_json::Value;
 
-use super::colab::{session_name, token_path};
+use super::colab::session_name;
 use super::colab_account::{
     accelerator_id, access_token, get_json, COLAB_DOMAIN, REQUEST_TIMEOUT, XSSI_PREFIX,
 };
+use super::colab_accounts::{account_home, cli_home, token_file};
 
 /// How often `orx up` looks for runtimes left behind by ended runs.
 pub const REAP_INTERVAL: Duration = Duration::from_secs(5 * 60);
@@ -37,12 +39,13 @@ pub struct Runtime {
     pub orphaned: bool,
 }
 
-/// Every runtime assigned to the account, labelled with its owner when known.
-pub async fn runtimes() -> Result<Vec<Runtime>, String> {
-    if !token_path().is_some_and(|path| path.is_file()) {
+/// Every runtime assigned to the account signed in at `home`, labelled with
+/// its owner when known.
+pub async fn runtimes(home: &Path) -> Result<Vec<Runtime>, String> {
+    if !token_file(home).is_file() {
         return Ok(Vec::new());
     }
-    let token = access_token().await?;
+    let token = access_token(home).await?;
     let client = client()?;
     let body = get_json(
         &client,
@@ -50,13 +53,14 @@ pub async fn runtimes() -> Result<Vec<Runtime>, String> {
         &format!("{COLAB_DOMAIN}/tun/m/assignments?authuser=0"),
     )
     .await?;
-    let names = cli_session_names();
+    let names = cli_session_names(home);
     let runs = colab_runs();
     Ok(parse_assignments(&body, &names, &runs))
 }
 
-/// Release one runtime. Colab hands out a one-time token for the unassign.
-pub async fn stop(endpoint: &str) -> Result<(), String> {
+/// Release one runtime of the account at `home`. Colab hands out a one-time
+/// token for the unassign.
+pub async fn stop(home: &Path, endpoint: &str) -> Result<(), String> {
     if endpoint.is_empty()
         || !endpoint
             .chars()
@@ -64,7 +68,7 @@ pub async fn stop(endpoint: &str) -> Result<(), String> {
     {
         return Err("Invalid Colab runtime.".into());
     }
-    let token = access_token().await?;
+    let token = access_token(home).await?;
     let client = client()?;
     let url = format!("{COLAB_DOMAIN}/tun/m/unassign/{endpoint}?authuser=0");
     let ticket = get_json(&client, &token, &url).await?;
@@ -86,31 +90,39 @@ pub async fn stop(endpoint: &str) -> Result<(), String> {
             response.status()
         ));
     }
-    super::colab_account::invalidate().await;
+    super::colab_account::invalidate(home).await;
     Ok(())
 }
 
-/// Release runtimes OpenResearch started for runs that have ended. Returns the
+/// Release runtimes OpenResearch started for runs that have ended, on every
+/// saved account (paused ones too: a paused account still bills). Returns the
 /// released endpoints.
 pub async fn reap_orphans() -> Vec<String> {
-    let Ok(runtimes) = runtimes().await else {
-        return Vec::new();
-    };
     let mut released = Vec::new();
-    for runtime in runtimes.into_iter().filter(|r| r.orphaned) {
-        match stop(&runtime.endpoint).await {
-            Ok(()) => {
-                eprintln!(
-                    "orx: released Colab runtime {} left behind by run {}",
-                    runtime.name.as_deref().unwrap_or(&runtime.endpoint),
-                    runtime.run_id.as_deref().unwrap_or("?")
-                );
-                released.push(runtime.endpoint);
+    let homes: Vec<PathBuf> = super::colab_accounts::load_accounts()
+        .accounts
+        .iter()
+        .map(|account| account_home(&account.id))
+        .collect();
+    for home in homes {
+        let Ok(runtimes) = runtimes(&home).await else {
+            continue;
+        };
+        for runtime in runtimes.into_iter().filter(|r| r.orphaned) {
+            match stop(&home, &runtime.endpoint).await {
+                Ok(()) => {
+                    eprintln!(
+                        "orx: released Colab runtime {} left behind by run {}",
+                        runtime.name.as_deref().unwrap_or(&runtime.endpoint),
+                        runtime.run_id.as_deref().unwrap_or("?")
+                    );
+                    released.push(runtime.endpoint);
+                }
+                Err(error) => eprintln!(
+                    "orx: could not release Colab runtime {}: {error}",
+                    runtime.endpoint
+                ),
             }
-            Err(error) => eprintln!(
-                "orx: could not release Colab runtime {}: {error}",
-                runtime.endpoint
-            ),
         }
     }
     released
@@ -123,26 +135,28 @@ fn client() -> Result<reqwest::Client, String> {
         .map_err(|e| e.to_string())
 }
 
-/// Endpoint → name, from the Colab CLI's own session list.
-fn cli_session_names() -> HashMap<String, String> {
-    let Some(path) = dirs::home_dir().map(|home| home.join(".config/colab-cli/sessions.json"))
-    else {
-        return HashMap::new();
-    };
-    let Some(value) = std::fs::read(path)
-        .ok()
-        .and_then(|bytes| serde_json::from_slice::<Value>(&bytes).ok())
-    else {
-        return HashMap::new();
-    };
-    value
-        .as_object()
-        .into_iter()
-        .flatten()
-        .filter_map(|(name, session)| {
-            Some((session["endpoint"].as_str()?.to_string(), name.clone()))
-        })
-        .collect()
+/// Endpoint → name, from the Colab CLI's session list in the account's home,
+/// plus the CLI's own home, where runs from before accounts kept theirs.
+fn cli_session_names(home: &Path) -> HashMap<String, String> {
+    let mut names = HashMap::new();
+    for home in cli_home().iter().map(PathBuf::as_path).chain([home]) {
+        let Some(value) = std::fs::read(home.join(".config/colab-cli/sessions.json"))
+            .ok()
+            .and_then(|bytes| serde_json::from_slice::<Value>(&bytes).ok())
+        else {
+            continue;
+        };
+        names.extend(
+            value
+                .as_object()
+                .into_iter()
+                .flatten()
+                .filter_map(|(name, session)| {
+                    Some((session["endpoint"].as_str()?.to_string(), name.clone()))
+                }),
+        );
+    }
+    names
 }
 
 /// Session name → (run id, status) for this store's Colab runs.

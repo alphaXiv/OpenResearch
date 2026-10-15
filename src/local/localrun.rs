@@ -104,7 +104,9 @@ async fn submit_controller_run(
             Some(timeout) => crate::jobs::huggingface::parse_timeout(timeout)?,
             None => crate::jobs::colab::DEFAULT_TIMEOUT_SECS,
         };
-        Some((flavor, cli, timeout_secs))
+        // Recorded with the account it ran on, so the run says which one paid.
+        let account = crate::jobs::colab_accounts::resolve_account(&flavor).await?;
+        Some((flavor.on_account(&account), cli, timeout_secs, account))
     } else {
         None
     };
@@ -197,7 +199,7 @@ async fn submit_controller_run(
 
     let script = match (kaggle_script, &colab_launch) {
         (Some(script), _) => script,
-        (None, Some((flavor, cli, timeout_secs))) => {
+        (None, Some((flavor, cli, timeout_secs, account))) => {
             let dir = localbox::run_dir(&run_id);
             std::fs::create_dir_all(&dir)
                 .map_err(|e| anyhow!("Could not create {}: {}", dir.display(), e))?;
@@ -216,6 +218,7 @@ async fn submit_controller_run(
             let controller =
                 crate::jobs::colab::controller_script(&crate::jobs::colab::ControllerSpec {
                     cli,
+                    home: &crate::jobs::colab_accounts::account_home(account),
                     session: &crate::jobs::colab::session_name(&run_id),
                     flavor,
                     archive: &source.path,
@@ -263,7 +266,7 @@ async fn submit_controller_run(
         job_id: Some(dir.to_string_lossy().into_owned()),
         flavor: colab_launch
             .as_ref()
-            .map(|(flavor, _, _)| flavor.id())
+            .map(|(flavor, _, _, _)| flavor.id())
             .or_else(|| kaggle_launch.as_ref().map(|(flavor, _, _, _)| flavor.id())),
         image: None,
         url: kaggle_launch.as_ref().map(|(_, _, _, username)| {
@@ -280,7 +283,7 @@ async fn submit_controller_run(
         ssh_user: None,
         timeout_secs: colab_launch
             .as_ref()
-            .map(|(_, _, secs)| *secs)
+            .map(|(_, _, secs, _)| *secs)
             .or_else(|| kaggle_launch.as_ref().map(|(_, _, secs, _)| *secs)),
         cpus_per_task: None,
         mem: None,

@@ -295,9 +295,18 @@ pub struct ConfigureArgs {
     /// BigQuery billing export table (project.dataset.table) for exact spend (gcp).
     #[arg(long)]
     billing_export_table: Option<String>,
-    /// Delete a saved Kaggle account by username (kaggle).
+    /// Delete a saved account: a Kaggle username (kaggle) or a Google email (colab).
     #[arg(long)]
     remove_account: Option<String>,
+    /// Pause a saved Google account so runs never pick it automatically (colab).
+    #[arg(long)]
+    pause_account: Option<String>,
+    /// Resume a paused Google account (colab).
+    #[arg(long)]
+    resume_account: Option<String>,
+    /// Save the Colab CLI's own sign-in from ~/.config/colab-cli as an account (colab).
+    #[arg(long)]
+    import: bool,
     /// Clear a saved field; repeat for multiple fields (e.g. --clear time-limit, --clear mem).
     #[arg(long)]
     clear: Vec<String>,
@@ -380,6 +389,13 @@ impl ConfigureArgs {
             "tinker" => &["key"],
             "modal" => &["tokenId", "tokenSecret", "creditUsd", "clearCredit"],
             "kaggle" => &["account", "removeAccount", "token", "key", "username"],
+            "colab" => &[
+                "account",
+                "removeAccount",
+                "pauseAccount",
+                "resumeAccount",
+                "import",
+            ],
             "gcp" => &[
                 "project",
                 "zone",
@@ -411,10 +427,15 @@ impl ConfigureArgs {
             ("imageProject", self.image_project),
             ("billingExportTable", self.billing_export_table),
             ("removeAccount", self.remove_account),
+            ("pauseAccount", self.pause_account),
+            ("resumeAccount", self.resume_account),
         ] {
             if let Some(value) = value {
                 body.insert(key.into(), json!(value));
             }
+        }
+        if self.import {
+            body.insert("import".into(), json!(true));
         }
         if let Some(spot) = self.spot {
             body.insert("spot".into(), json!(spot));
@@ -730,16 +751,14 @@ async fn connect(args: &CheckArgs, persist: Option<u64>) -> Result<()> {
             super::ssh_key::add(None).await?;
         }
         Backend::Colab => {
-            // Any authenticated command starts the CLI's browser sign-in once.
-            let cli = crate::jobs::colab::find_cli()
-                .ok_or_else(|| anyhow!("{}", crate::jobs::colab::INSTALL_HINT))?;
-            let status = tokio::process::Command::new(cli)
-                .arg("sessions")
-                .status()
-                .await?;
-            if !status.success() {
-                return Err(anyhow!("colab sessions exited with {status}."));
-            }
+            // Each run adds one Google account; run it again to add another.
+            let account = crate::jobs::colab_accounts::login_interactive().await?;
+            eprintln!(
+                "Saved Colab account {}{}{}.",
+                account.id,
+                if account.active { " (default)" } else { "" },
+                if account.paused { " (paused)" } else { "" }
+            );
         }
         Backend::Kaggle => {
             if crate::jobs::kaggle::find_cli().is_none() {
