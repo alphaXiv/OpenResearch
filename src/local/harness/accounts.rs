@@ -1320,21 +1320,26 @@ fn parse_agy_models(body: &Value, account: &str) -> Vec<QuotaSnapshot> {
     };
     let mut tightest: Vec<(&'static str, f64, Option<i64>)> = Vec::new();
     for (id, model) in entries {
+        // Tab completion and internal chat models are not agent models.
+        if id.starts_with("tab_") || id.starts_with("chat_") {
+            continue;
+        }
         let quota = &model["quotaInfo"];
         let left = quota["remainingFraction"].as_f64().or_else(|| {
             quota["remainingFraction"]
                 .as_str()
                 .and_then(|text| text.parse().ok())
         });
-        // An exhausted model may leave the fraction out.
-        let left = left.or_else(|| quota["isExhausted"].as_bool()?.then_some(0.0));
+        // The API leaves zero fields out, so a model with a reset time and no
+        // fraction has none left.
+        let left = left.or_else(|| {
+            (quota["isExhausted"].as_bool() == Some(true) || quota["resetTime"].is_string())
+                .then_some(0.0)
+        });
         let Some(left) = left else {
             continue;
         };
-        // Some answers key models by an internal id and name them only in
-        // `displayName`.
-        let name = format!("{id} {}", model["displayName"].as_str().unwrap_or_default());
-        let pool = pool_for("antigravity", Some(&name));
+        let pool = pool_for("antigravity", Some(&id));
         let resets = quota["resetTime"].as_str().and_then(parse_time_ms);
         match tightest.iter_mut().find(|(existing, ..)| *existing == pool) {
             Some(entry) if left < entry.1 => *entry = (pool, left, resets),
@@ -1520,13 +1525,16 @@ mod tests {
 
         let agy = json!({"models": {
             "gemini-3.1-pro-high": {"quotaInfo": {"remainingFraction": "0.25"}},
-            "MODEL_PLACEHOLDER_M35": {"displayName": "Claude Sonnet 4.6 (Thinking)", "quotaInfo": {"isExhausted": true}}
+            "claude-sonnet-5-5-high": {"quotaInfo": {"resetTime": "2026-10-19T04:02:14Z"}},
+            "gpt-oss-120b-medium": {"quotaInfo": {"resetTime": "2026-10-19T04:02:14Z"}},
+            "tab_flash_lite_preview": {"quotaInfo": {"remainingFraction": 1}}
         }});
         let parsed = parse_agy_models(&agy, DEFAULT);
         let gemini = parsed.iter().find(|s| s.pool == "gemini").unwrap();
         assert!((gemini.used_percent - 75.0).abs() < 1e-9);
         let partner = parsed.iter().find(|s| s.pool == "partner").unwrap();
         assert_eq!(partner.used_percent, 100.0);
+        assert_eq!(partner.resets_at_ms, parse_time_ms("2026-10-19T04:02:14Z"));
 
         assert_eq!(
             agy_project(&json!({"cloudaicompanionProject": "proj-1"})).as_deref(),
