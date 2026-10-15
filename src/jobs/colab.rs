@@ -13,9 +13,13 @@
 //!
 //! Secrets never touch disk or argv: the controller reads them from its own
 //! environment and pipes them, base64-encoded, into the kernel over stdin.
+//!
+//! Each run uses one of several saved Google accounts (`colab_accounts`): the
+//! controller points the CLI's `HOME` at that account's folder.
 
 use std::path::{Path, PathBuf};
 
+use super::colab_accounts::{valid_account_id, AccountChoice};
 use crate::error::{anyhow, Result};
 
 /// One assignable Colab accelerator, as `colab new` accepts it.
@@ -108,19 +112,33 @@ pub const DEFAULT_FLAVOR: &str = "t4";
 
 const HIGH_MEM_SUFFIXES: &[&str] = &["highmem", "high-mem", "hm"];
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Flavor {
     pub accelerator: Accelerator,
     pub high_mem: bool,
+    pub account: AccountChoice,
 }
 
 impl Flavor {
-    /// The canonical spelling, e.g. `a100:highmem`.
+    /// The canonical spelling, e.g. `a100:highmem@alice@gmail.com`.
     pub fn id(&self) -> String {
-        if self.high_mem {
+        let shape = if self.high_mem {
             format!("{}:highmem", self.accelerator.id)
         } else {
             self.accelerator.id.to_string()
+        };
+        match &self.account {
+            AccountChoice::Active => shape,
+            AccountChoice::Auto => format!("{shape}@auto"),
+            AccountChoice::Named(name) => format!("{shape}@{name}"),
+        }
+    }
+
+    /// The same machine on one named account.
+    pub fn on_account(&self, id: &str) -> Self {
+        Self {
+            account: AccountChoice::Named(id.to_string()),
+            ..self.clone()
         }
     }
 
@@ -156,16 +174,34 @@ impl Flavor {
 ///
 /// - `t4`, `l4`, `a100`, `h100`, `g4`, `v5e1`, `v6e1`, or `cpu`;
 /// - `<id>:highmem` for a high-RAM machine shape (not L4 or TPUs);
-/// - `auto:<GB>` for the smallest GPU with at least that much VRAM.
+/// - `auto:<GB>` for the smallest GPU with at least that much VRAM;
+/// - any of these with `@<account>` (an email, or the part before `@` when it
+///   is unique) to run on one saved Google account, or `@auto` for the
+///   unpaused account best placed to run it. Without `@`, the default account.
 ///
 /// Omitted means [`DEFAULT_FLAVOR`]. The `colab` CLI maps unknown GPU names to
 /// an A100 silently, so anything else is rejected here.
 pub fn parse_flavor(flavor: Option<&str>) -> Result<Flavor> {
-    let raw = flavor
+    let full = flavor
         .map(str::trim)
         .filter(|f| !f.is_empty())
         .unwrap_or(DEFAULT_FLAVOR)
         .to_ascii_lowercase();
+    let (machine, account) = match full.split_once('@') {
+        Some((machine, account)) => (machine.trim(), Some(account.trim())),
+        None => (full.as_str(), None),
+    };
+    let account = match account {
+        None => AccountChoice::Active,
+        Some("auto") => AccountChoice::Auto,
+        Some(name) if valid_account_id(name) => AccountChoice::Named(name.to_string()),
+        Some(_) => return Err(anyhow!("Unknown Colab flavor '{full}'. {}", flavor_help())),
+    };
+    let raw = if machine.is_empty() {
+        DEFAULT_FLAVOR.to_string()
+    } else {
+        machine.to_string()
+    };
     let (name, modifier) = match raw.split_once(':') {
         Some((name, modifier)) => (name.trim(), Some(modifier.trim())),
         None => (raw.as_str(), None),
@@ -187,6 +223,7 @@ pub fn parse_flavor(flavor: Option<&str>) -> Result<Flavor> {
         return Ok(Flavor {
             accelerator,
             high_mem: false,
+            account,
         });
     }
     let accelerator = *ACCELERATORS
@@ -207,13 +244,14 @@ pub fn parse_flavor(flavor: Option<&str>) -> Result<Flavor> {
     Ok(Flavor {
         accelerator,
         high_mem,
+        account,
     })
 }
 
 fn flavor_help() -> String {
     let ids: Vec<_> = ACCELERATORS.iter().map(|a| a.id).collect();
     format!(
-        "Use one of {}, optionally with `:highmem`, or `auto:<GB of VRAM>`.",
+        "Use one of {}, optionally with `:highmem`, or `auto:<GB of VRAM>`; add `@<account>` or `@auto` to pick the Google account.",
         ids.join(", ")
     )
 }
@@ -235,11 +273,6 @@ fn largest_gpu() -> Accelerator {
         .expect("at least one Colab GPU")
 }
 
-/// Where google-colab-cli keeps its OAuth token after `colab` signs in.
-pub fn token_path() -> Option<PathBuf> {
-    dirs::home_dir().map(|home| home.join(".config/colab-cli/token.json"))
-}
-
 /// The `colab` executable: PATH first, then uv/pipx's `~/.local/bin`.
 pub fn find_cli() -> Option<PathBuf> {
     crate::local::shell_env::find_on_path("colab").or_else(|| {
@@ -251,8 +284,7 @@ pub fn find_cli() -> Option<PathBuf> {
 
 pub const INSTALL_HINT: &str =
     "Install the Colab CLI with `uv tool install google-colab-cli` (or `pip install google-colab-cli`).";
-pub const SIGN_IN_HINT: &str =
-    "Sign in once by running `colab sessions` in a terminal (or `orx compute connect colab`).";
+pub const SIGN_IN_HINT: &str = super::colab_accounts::ADD_ACCOUNT_HINT;
 
 #[derive(Debug, Clone, serde::Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -260,7 +292,13 @@ pub struct Status {
     pub supported_os: bool,
     pub cli_path: Option<String>,
     pub cli_version: Option<String>,
+    /// At least one Google account is saved (or about to be imported).
     pub signed_in: bool,
+    pub account_count: usize,
+    pub active: Option<String>,
+    pub paused_count: usize,
+    /// The CLI has its own sign-in in `~/.config/colab-cli` that can be imported.
+    pub importable: bool,
     pub ready: bool,
     pub error: Option<String>,
     pub default_flavor: &'static str,
@@ -275,7 +313,9 @@ pub async fn status() -> Status {
         Some(path) => cli_version(path).await,
         None => None,
     };
-    let signed_in = token_path().is_some_and(|path| path.is_file());
+    let accounts = super::colab_accounts::load_accounts();
+    let importable = super::colab_accounts::cli_token().is_some();
+    let signed_in = super::colab_accounts::configured() || !accounts.accounts.is_empty();
     let error = if !supported_os {
         Some("The Colab CLI supports Linux and macOS only.".to_string())
     } else if cli.is_none() {
@@ -290,6 +330,10 @@ pub async fn status() -> Status {
         cli_path: cli.map(|p| p.to_string_lossy().into_owned()),
         cli_version,
         signed_in,
+        account_count: accounts.accounts.len(),
+        active: accounts.active.clone(),
+        paused_count: accounts.accounts.iter().filter(|a| a.paused).count(),
+        importable,
         ready: error.is_none(),
         error,
         default_flavor: DEFAULT_FLAVOR,
@@ -348,6 +392,8 @@ const EXIT_SENTINEL: &str = "__ORX_EXIT_CODE__=";
 
 pub struct ControllerSpec<'a> {
     pub cli: &'a Path,
+    /// The account folder the CLI uses as its home.
+    pub home: &'a Path,
     pub session: &'a str,
     pub flavor: &'a Flavor,
     pub archive: &'a Path,
@@ -399,12 +445,18 @@ pub fn controller_script(spec: &ControllerSpec<'_>) -> String {
     // `colab exec --timeout` bounds the whole cell; the driver enforces the
     // run's own limit first, so give the CLI a little slack.
     let exec_timeout = spec.timeout_secs + 600;
+    let account_env = super::colab_accounts::account_env(spec.home)
+        .into_iter()
+        .map(|(key, value)| format!("export {key}={}", sh_quote(&value)))
+        .collect::<Vec<_>>()
+        .join("\n");
     format!(
         r#"#!/usr/bin/env bash
 # Generated by orx: runs one experiment on a Google Colab runtime.
 set -u
 shopt -s lastpipe
 colab={cli}
+{account_env}
 session={session}
 released=0
 release() {{
@@ -458,6 +510,7 @@ fi
 exit "$code"
 "#,
         cli = sh_quote(&spec.cli.to_string_lossy()),
+        account_env = account_env,
         session = sh_quote(spec.session),
         label = spec.flavor.label().replace(['"', '$', '`', '\\'], ""),
         new_args = new_args,
@@ -617,6 +670,7 @@ mod tests {
         assert!(parse_flavor(Some("l4:highmem")).is_err());
         assert!(parse_flavor(Some("auto")).is_err());
         assert!(parse_flavor(Some("auto:-3")).is_err());
+        assert!(parse_flavor(Some("t4@a b")).is_err());
     }
 
     #[test]
@@ -639,6 +693,7 @@ mod tests {
         let flavor = parse_flavor(Some("l4")).unwrap();
         controller_script(&ControllerSpec {
             cli: Path::new("/home/me/.local/bin/colab"),
+            home: Path::new("/data/colab/accounts/alice@gmail.com"),
             session: "orx-abc",
             flavor: &flavor,
             archive: Path::new("/data/source-snapshots/0123456789abcdef0123.tar"),
@@ -656,6 +711,14 @@ mod tests {
         assert!(new < upload && upload < exec, "{script}");
         assert!(script.contains("'--gpu' 'L4'"), "{script}");
         assert!(script.contains("trap release EXIT"), "{script}");
+        assert!(
+            script.contains("export HOME='/data/colab/accounts/alice@gmail.com'"),
+            "{script}"
+        );
+        assert!(
+            script.find("export HOME").unwrap() < script.find("trap release EXIT").unwrap(),
+            "{script}"
+        );
         assert!(script.contains("--timeout 4200"), "{script}");
         assert!(
             script.contains("'orx-source-0123456789abcdef.tar'"),

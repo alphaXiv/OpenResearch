@@ -740,6 +740,34 @@ fn router(state: AppState, remote_auth: Option<RemoteAuth>) -> Router {
             post(stop_colab_runtime),
         )
         .route(
+            "/api/settings/colab/accounts/login",
+            post(start_colab_login),
+        )
+        .route(
+            "/api/settings/colab/accounts/login/finish",
+            post(finish_colab_login),
+        )
+        .route(
+            "/api/settings/colab/accounts/login/cancel",
+            post(cancel_colab_login),
+        )
+        .route(
+            "/api/settings/colab/accounts/import",
+            post(import_colab_account),
+        )
+        .route(
+            "/api/settings/colab/accounts/active",
+            post(set_colab_active_account),
+        )
+        .route(
+            "/api/settings/colab/accounts/pause",
+            post(pause_colab_account),
+        )
+        .route(
+            "/api/settings/colab/accounts/remove",
+            post(remove_colab_account),
+        )
+        .route(
             "/api/settings/gcp",
             get(gcp_settings).post(set_gcp_settings),
         )

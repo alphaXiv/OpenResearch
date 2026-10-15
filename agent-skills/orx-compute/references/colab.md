@@ -7,26 +7,42 @@ plan or compute units, and released when the run ends or is cancelled.
 
 `orx` drives the runtime through the official Colab CLI (`colab`, from
 `google-colab-cli`) on this machine. It needs Linux or macOS, the CLI installed
-(`uv tool install google-colab-cli`), and a one-time browser sign-in
-(`orx compute connect colab`). Check readiness first:
+(`uv tool install google-colab-cli`), and at least one Google account signed in
+(`orx compute connect colab`, once per account).
+Check readiness first:
 
 ```sh
 orx compute test colab
-orx compute show colab --json      # CLI path, sign-in, accelerators, and the account below
+orx compute show colab --json      # CLI path, saved accounts, accelerators
 ```
 
-`account` in that output describes the user's Colab plan: `tier`, `balance`
-(compute units left), `rateHourly` (units per hour their running runtimes burn
-now), `eligible` (accelerator ids the plan can assign right now), and `rates`
-(compute units per hour for each accelerator; `measured: false` marks a rough
-third-party estimate). Any field can be `null` when Colab did not answer.
+`accounts` in that output lists every saved Google account: `id` (its email),
+`active` (the default), `paused`, `runtimes` it has assigned now, and `account`,
+its Colab plan: `tier`, `balance` (compute units left), `rateHourly` (units per
+hour its running runtimes burn now), `activeRuntimes`, `eligible` (accelerator
+ids the plan can assign right now), and `rates` (compute units per hour for
+each accelerator; `measured: false` marks a rough third-party estimate). Any
+field can be `null` when Colab did not answer. Top-level `account` repeats the
+default account's.
 
 ```sh
-orx exp run <expId> --backend colab                     # T4 (the default)
+orx exp run <expId> --backend colab                     # T4 (the default) on the default account
 orx exp run <expId> --backend colab --flavor l4
 orx exp run <expId> --backend colab --flavor auto:30    # smallest GPU with >= 30 GB VRAM
 orx exp run <expId> --backend colab --flavor a100:highmem --timeout 8h
+orx exp run <expId> --backend colab --flavor a100@auto  # any unpaused account that can assign an A100
+orx exp run <expId> --backend colab --flavor t4@alice   # account alice@… (email, or the part before @)
 ```
+
+## Choose the account
+
+With several accounts, add `@auto` unless the user named one: it skips paused
+accounts, accounts whose sign-in fails, and accounts whose plan cannot assign
+the accelerator, then prefers the one with the fewest runtimes up and the most
+compute units left. Without `@`, the default account is used (or `@auto` when
+the default is paused). Never use a paused account unless the user names it.
+Independent runs can go to different accounts at the same time. The run
+records the account it used in its flavor (`t4@alice@gmail.com`).
 
 ## Choose the accelerator for the task
 
@@ -55,13 +71,13 @@ flavor that fits with about 20% headroom, or `auto:<GB>` with that estimate:
 
 Then weigh cost, because every hour spends the user's compute units:
 
-- Only pass a flavor listed in `account.eligible` when that list is present;
-  Colab refuses the others for this plan.
+- Only pass a flavor listed in some unpaused account's `eligible` when those
+  lists are present; Colab refuses the others for that plan.
 - Among the flavors that fit, take the one with the lowest rate. A bigger GPU
   is worth it only when it fits a model the smaller one cannot, or when its
   speedup clearly beats its higher rate for a long run.
 - Estimate the run's hours × the flavor's rate before launching. If that would
-  use most of `balance`, say so and offer a smaller configuration or a shorter
+  use most of the chosen account's `balance`, say so and offer a smaller configuration or a shorter
   pilot run first. Never launch a run the balance cannot cover.
 - Debug and smoke-test on `cpu` or `t4` before spending A100 or H100 hours.
 

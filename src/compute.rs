@@ -457,11 +457,17 @@ backend_adapter!(
     "colab upload",
     false,
     preflight | args | {
-        if let Err(error) = crate::jobs::colab::parse_flavor(args.flavor.as_deref()) {
-            return Ok(not_ready(error.to_string()));
-        }
+        let flavor = match crate::jobs::colab::parse_flavor(args.flavor.as_deref()) {
+            Ok(flavor) => flavor,
+            Err(error) => return Ok(not_ready(error.to_string())),
+        };
         if let Err(error) = crate::jobs::colab::preflight().await {
             return Ok(not_ready(error.to_string()));
+        }
+        if let crate::jobs::colab_accounts::AccountChoice::Named(_) = flavor.account {
+            if let Err(error) = crate::jobs::colab_accounts::resolve_account(&flavor).await {
+                return Ok(not_ready(error.to_string()));
+            }
         }
         ready()
     },

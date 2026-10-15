@@ -1,20 +1,22 @@
-//! The signed-in Colab account: plan, compute-unit balance, which accelerators
+//! One signed-in Colab account: plan, compute-unit balance, which accelerators
 //! the plan can assign, and what each one costs per hour.
 //!
-//! Reuses the OAuth token google-colab-cli stores after its sign-in. The token
-//! is refreshed in memory only; the CLI's token file is never written. Every
-//! call is best-effort, so a missing scope or an offline machine leaves the
-//! affected fields empty instead of failing the whole probe.
+//! Every function takes the account's home folder (see `colab_accounts`) and
+//! reuses the OAuth token google-colab-cli stored there after its sign-in.
+//! The token is refreshed in memory only; the CLI's token file is never
+//! written. Every call is best-effort, so a missing scope or an offline
+//! machine leaves the affected fields empty instead of failing the whole probe.
 
-use std::collections::BTreeMap;
-use std::path::PathBuf;
+use std::collections::{BTreeMap, HashMap};
+use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
 use std::time::{Duration, Instant};
 
 use serde_json::Value;
 use tokio::sync::Mutex;
 
-use super::colab::{token_path, ACCELERATORS};
+use super::colab::ACCELERATORS;
+use super::colab_accounts::token_file;
 
 pub(super) const COLAB_DOMAIN: &str = "https://colab.research.google.com";
 const COLAB_API: &str = "https://colaboratory.googleapis.com/v1beta";
@@ -59,21 +61,27 @@ pub struct Rate {
 }
 
 /// Drop the cached account so the next read shows a released runtime.
-pub(super) async fn invalidate() {
-    *cache().lock().await = None;
+pub(super) async fn invalidate(home: &Path) {
+    cache().lock().await.remove(home);
+}
+
+/// Drop every cached account and token, e.g. after accounts changed.
+pub(super) async fn invalidate_all() {
+    cache().lock().await.clear();
+    access_token_cache().lock().await.clear();
 }
 
 /// Explicit diagnostics after reconnecting must not reuse the previous login.
-pub(crate) async fn refresh_sign_in() {
+pub(crate) async fn refresh_sign_in(home: &Path) {
     let mut account = cache().lock().await;
-    *access_token_cache().lock().await = None;
-    *account = None;
+    access_token_cache().lock().await.remove(home);
+    account.remove(home);
 }
 
 /// A strict read-only authentication probe, without local run/session lookups.
-pub(crate) async fn probe_connection() -> Result<usize, String> {
-    refresh_sign_in().await;
-    let token = access_token().await?;
+pub(crate) async fn probe_connection(home: &Path) -> Result<usize, String> {
+    refresh_sign_in(home).await;
+    let token = access_token(home).await?;
     let client = crate::net::remote_client()
         .timeout(REQUEST_TIMEOUT)
         .build()
@@ -90,40 +98,60 @@ pub(crate) async fn probe_connection() -> Result<usize, String> {
         .ok_or_else(|| "Colab returned an unexpected assignments response.".into())
 }
 
-fn cache() -> &'static Mutex<Option<(Instant, Account)>> {
-    static CACHE: OnceLock<Mutex<Option<(Instant, Account)>>> = OnceLock::new();
-    CACHE.get_or_init(|| Mutex::new(None))
+/// The Google account the sign-in in `home` belongs to.
+pub(super) async fn email(home: &Path) -> Result<String, String> {
+    let token = access_token(home).await?;
+    let client = crate::net::remote_client()
+        .timeout(REQUEST_TIMEOUT)
+        .build()
+        .map_err(|e| e.to_string())?;
+    let userinfo = get_json(&client, &token, USERINFO_URL).await?;
+    userinfo["email"]
+        .as_str()
+        .filter(|email| !email.is_empty())
+        .map(str::to_ascii_lowercase)
+        .ok_or_else(|| "Google did not say which account signed in.".into())
 }
 
-fn access_token_cache() -> &'static Mutex<Option<(Instant, String)>> {
-    static TOKEN: OnceLock<Mutex<Option<(Instant, String)>>> = OnceLock::new();
-    TOKEN.get_or_init(|| Mutex::new(None))
+type AccountCache = Mutex<HashMap<PathBuf, (Instant, Account)>>;
+type TokenCache = Mutex<HashMap<PathBuf, (Instant, String)>>;
+
+fn cache() -> &'static AccountCache {
+    static CACHE: OnceLock<AccountCache> = OnceLock::new();
+    CACHE.get_or_init(|| Mutex::new(HashMap::new()))
 }
 
-/// The account, or `None` when the Colab CLI has not signed in.
-pub async fn account(force: bool) -> Option<Account> {
-    if !token_path().is_some_and(|path| path.is_file()) {
+fn access_token_cache() -> &'static TokenCache {
+    static TOKEN: OnceLock<TokenCache> = OnceLock::new();
+    TOKEN.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+/// The account signed in at `home`, or `None` when it has no sign-in.
+pub async fn account(home: &Path, force: bool) -> Option<Account> {
+    if !token_file(home).is_file() {
         return None;
     }
-    let mut cached = cache().lock().await;
     if !force {
-        if let Some((at, account)) = cached.as_ref() {
+        if let Some((at, account)) = cache().lock().await.get(home) {
             if at.elapsed() < ACCOUNT_TTL {
                 return Some(account.clone());
             }
         }
     }
-    let account = fetch().await;
-    *cached = Some((Instant::now(), account.clone()));
+    let account = fetch(home).await;
+    cache()
+        .lock()
+        .await
+        .insert(home.to_path_buf(), (Instant::now(), account.clone()));
     Some(account)
 }
 
-async fn fetch() -> Account {
+async fn fetch(home: &Path) -> Account {
     let mut account = Account {
         rates: rates(&load_measured()),
         ..Account::default()
     };
-    let token = match access_token().await {
+    let token = match access_token(home).await {
         Ok(token) => token,
         Err(error) => {
             account.error = Some(error);
@@ -309,14 +337,13 @@ pub(super) async fn get_json(
 }
 
 /// A fresh access token from the CLI's refresh token, kept in memory only.
-pub(super) async fn access_token() -> Result<String, String> {
-    let mut cached = access_token_cache().lock().await;
-    if let Some((expires, token)) = cached.as_ref() {
+pub(super) async fn access_token(home: &Path) -> Result<String, String> {
+    if let Some((expires, token)) = access_token_cache().lock().await.get(home) {
         if Instant::now() < *expires {
             return Ok(token.clone());
         }
     }
-    let path = token_path().ok_or("No home directory.")?;
+    let path = token_file(home);
     let stored: Value = std::fs::read(&path)
         .ok()
         .and_then(|bytes| serde_json::from_slice(&bytes).ok())
@@ -361,10 +388,13 @@ pub(super) async fn access_token() -> Result<String, String> {
         .as_u64()
         .unwrap_or(3600)
         .saturating_sub(120);
-    *cached = Some((
-        Instant::now() + Duration::from_secs(lifetime),
-        token.clone(),
-    ));
+    access_token_cache().lock().await.insert(
+        home.to_path_buf(),
+        (
+            Instant::now() + Duration::from_secs(lifetime),
+            token.clone(),
+        ),
+    );
     Ok(token)
 }
 

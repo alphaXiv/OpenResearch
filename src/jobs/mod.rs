@@ -7,6 +7,7 @@
 
 pub mod colab;
 pub mod colab_account;
+pub mod colab_accounts;
 pub mod colab_runtimes;
 pub mod gcp;
 pub mod gcp_billing;

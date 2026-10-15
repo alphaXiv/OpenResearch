@@ -40,8 +40,14 @@ credentials in command arguments, custom instructions, or committed files.
 `orx compute connect hf` uses `hf auth login`; `orx compute connect modal` and
 `orx compute connect tinker` prompt without echoing credentials.
 `orx compute connect openresearch` reuses login and SSH-key registration.
-`orx compute connect colab` runs the Colab CLI's one-time browser sign-in; the
-CLI keeps its own token, so Colab has no credentials to configure here.
+`orx compute connect colab` adds a Google account for Colab through the Colab
+CLI's browser sign-in (open the link, choose the account, paste back Google's
+code); run it once per account. Each account keeps its own sign-in folder, and
+the CLI's own sign-in is imported as the first account (`orx compute configure
+colab --import` imports it again). `orx compute configure colab --account
+<email>` makes an account the default, `--pause-account`/`--resume-account`
+take one out of or back into automatic choice, and `--remove-account` deletes
+one.
 `orx compute connect kaggle` adds a Kaggle account: it prompts for an API token
 without echoing it, and runs the Kaggle CLI's browser sign-in when the prompt
 is left empty. Each account keeps its own credentials folder. Accounts can also come from

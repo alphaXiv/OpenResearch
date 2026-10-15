@@ -159,26 +159,52 @@ fn sort_offers(offers: &mut [Offer]) {
 // --- Colab ----------------------------------------------------------------
 
 async fn colab(fresh: bool) -> Provider {
-    let configured = crate::jobs::colab::find_cli().is_some()
-        && crate::jobs::colab::token_path().is_some_and(|path| path.is_file());
+    let configured = crate::jobs::colab_accounts::configured();
     let mut provider = empty("colab", "credits", configured);
-    provider.note = Some(
-        "Compute units are prepaid; a run stops when they run out. Dollar values assume \
-         pay-as-you-go units ($9.99 per 100)."
-            .into(),
-    );
-    let Some(account) = crate::jobs::colab_account::account(fresh).await else {
-        provider.error = Some("Sign in to the Colab CLI to read the balance.".into());
+    if !configured {
+        provider.error = Some("Add a Google account for Colab to read the balance.".into());
         return provider;
-    };
-    provider.error = account.error.clone();
-    provider.balance = account.balance.map(|amount| Balance {
-        amount,
-        unit: "CU",
-        usd: Some(amount * COLAB_USD_PER_UNIT),
-        burning_per_hour: account.rate_hourly,
+    }
+    // Paused accounts are not offered to runs, so their units are not counted.
+    let statuses = crate::jobs::colab_accounts::accounts(fresh).await;
+    let usable: Vec<&crate::jobs::colab_account::Account> = statuses
+        .iter()
+        .filter(|status| !status.paused)
+        .filter_map(|status| status.account.as_ref())
+        .collect();
+    let paused = statuses.iter().filter(|status| status.paused).count();
+    let base = "Compute units are prepaid; a run stops when they run out. Dollar values assume \
+                pay-as-you-go units ($9.99 per 100).";
+    provider.note = Some(match (usable.len(), paused) {
+        (0 | 1, 0) => base.to_string(),
+        (n, 0) => {
+            format!("{base} Units summed over {n} accounts; use @auto to pick one that can run it.")
+        }
+        (n, p) => format!("{base} Units summed over {n} accounts ({p} paused, not counted)."),
     });
-    provider.offers = colab_offers(&account);
+    if usable.is_empty() {
+        provider.error = Some(if paused > 0 {
+            "Every Colab account is paused.".into()
+        } else {
+            "Sign in to a Colab account to read the balance.".into()
+        });
+        return provider;
+    }
+    if usable.iter().all(|account| account.error.is_some()) {
+        provider.error = usable.iter().find_map(|account| account.error.clone());
+    }
+    let balances: Vec<f64> = usable.iter().filter_map(|a| a.balance).collect();
+    if !balances.is_empty() {
+        let amount: f64 = balances.iter().sum();
+        let burning: Vec<f64> = usable.iter().filter_map(|a| a.rate_hourly).collect();
+        provider.balance = Some(Balance {
+            amount,
+            unit: "CU",
+            usd: Some(amount * COLAB_USD_PER_UNIT),
+            burning_per_hour: (!burning.is_empty()).then(|| burning.iter().sum()),
+        });
+    }
+    provider.offers = colab_offers(&usable);
     provider
 }
 
@@ -262,8 +288,13 @@ fn kaggle_offers(accounts: &[crate::jobs::kaggle::AccountStatus]) -> Vec<Offer> 
         .collect()
 }
 
-fn colab_offers(account: &crate::jobs::colab_account::Account) -> Vec<Offer> {
-    let mut offers: Vec<Offer> = account
+/// Rates are per accelerator, the same on every account; hours left and
+/// availability add up over the accounts.
+fn colab_offers(accounts: &[&crate::jobs::colab_account::Account]) -> Vec<Offer> {
+    let Some(first) = accounts.first() else {
+        return Vec::new();
+    };
+    let mut offers: Vec<Offer> = first
         .rates
         .iter()
         .filter_map(|rate| {
@@ -271,6 +302,17 @@ fn colab_offers(account: &crate::jobs::colab_account::Account) -> Vec<Offer> {
                 .iter()
                 .find(|a| a.id == rate.id)?;
             let gpu = (accelerator.kind == "gpu").then(|| accelerator.cli_value.to_string());
+            let runways: Vec<f64> = accounts
+                .iter()
+                .filter_map(|account| account.balance)
+                .filter(|_| rate.cu_per_hour > 0.0)
+                .map(|balance| balance / rate.cu_per_hour)
+                .collect();
+            let eligibility: Vec<bool> = accounts
+                .iter()
+                .filter_map(|account| account.eligible.as_ref())
+                .map(|eligible| eligible.iter().any(|id| id == &rate.id))
+                .collect();
             Some(Offer {
                 flavor: rate.id.clone(),
                 gpu_count: u32::from(gpu.is_some()),
@@ -278,14 +320,8 @@ fn colab_offers(account: &crate::jobs::colab_account::Account) -> Vec<Offer> {
                 vram_gb: (accelerator.memory_gb > 0).then_some(accelerator.memory_gb as f64),
                 usd_per_hour: Some(rate.cu_per_hour * COLAB_USD_PER_UNIT),
                 units_per_hour: Some(rate.cu_per_hour),
-                runway_hours: account
-                    .balance
-                    .filter(|_| rate.cu_per_hour > 0.0)
-                    .map(|balance| balance / rate.cu_per_hour),
-                available: account
-                    .eligible
-                    .as_ref()
-                    .map(|eligible| eligible.iter().any(|id| id == &rate.id)),
+                runway_hours: (!runways.is_empty()).then(|| runways.iter().sum()),
+                available: (!eligibility.is_empty()).then(|| eligibility.iter().any(|ok| *ok)),
                 estimated: !rate.measured,
                 host: None,
             })
@@ -840,7 +876,7 @@ mod tests {
             ],
             ..Account::default()
         };
-        let offers = colab_offers(&account);
+        let offers = colab_offers(&[&account]);
         assert_eq!(offers[0].flavor, "t4");
         assert_eq!(offers[0].runway_hours, Some(50.0));
         assert_eq!(offers[0].available, Some(true));
@@ -848,6 +884,17 @@ mod tests {
         assert_eq!(offers[1].runway_hours, Some(20.0));
         assert_eq!(offers[1].available, Some(false));
         assert!(offers[1].estimated);
+
+        // A second account adds its hours and its plan's accelerators.
+        let pro = Account {
+            balance: Some(50.0),
+            eligible: Some(vec!["t4".into(), "a100".into()]),
+            ..account.clone()
+        };
+        let offers = colab_offers(&[&account, &pro]);
+        assert_eq!(offers[0].runway_hours, Some(75.0));
+        assert_eq!(offers[1].runway_hours, Some(30.0));
+        assert_eq!(offers[1].available, Some(true));
     }
 
     #[test]
