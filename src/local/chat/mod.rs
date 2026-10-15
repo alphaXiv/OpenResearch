@@ -5761,7 +5761,7 @@ impl ChatHost {
             // Captured before the harness runs: it may rewrite both.
             let base_text = ctx.text.clone();
             let resumed_native = ctx.native_session_id.is_some();
-            ctx.select_account();
+            ctx.select_account().await;
             let mut result = run_harness_turn(&mut ctx).await;
             ctx.record_account_attempt(&result);
             let mut tried = vec![ctx.harness.clone()];
@@ -5776,7 +5776,7 @@ impl ChatHost {
                 match step {
                     FailoverStep::Harness(next, reason, permission) => {
                         ctx.fail_over(&next, &reason, permission, &base_text, resumed_native);
-                        ctx.select_account();
+                        ctx.select_account().await;
                         steer_route = ctx.host.clone().refresh_steering(&mut ctx, steer_route);
                     }
                     FailoverStep::Account {
@@ -5964,6 +5964,9 @@ impl ChatHost {
                 }
             }
         }
+        if let Some(step) = self.decided_failover(ctx, &policy, message, tried).await {
+            return Some(step);
+        }
         for id in policy.candidates(&ctx.harness, tried) {
             if !self.owns_turn(&ctx.session_id, &ctx.turn_id).await {
                 return None;
@@ -5991,6 +5994,94 @@ impl ChatHost {
             }
         }
         None
+    }
+
+    /// The fallback harness the decision model picks among every ready one,
+    /// when it is on and more than one is ready. `None` leaves the user's
+    /// fallback order to decide; harnesses found not ready are added to
+    /// `tried` either way, and the picked one too.
+    async fn decided_failover(
+        &self,
+        ctx: &TurnCtx,
+        policy: &crate::local::harness::HarnessFailover,
+        message: &str,
+        tried: &mut Vec<String>,
+    ) -> Option<FailoverStep> {
+        use crate::local::decision;
+        use crate::local::harness::accounts;
+        if !decision::settings().active() {
+            return None;
+        }
+        let mut ready = Vec::new();
+        for id in policy.candidates(&ctx.harness, tried) {
+            let Some(permission) = crate::local::harness::carry_permission(
+                &ctx.harness,
+                ctx.permission_mode,
+                ctx.plan_mode,
+                &id,
+            ) else {
+                tried.push(id);
+                continue;
+            };
+            let info = tokio::time::timeout(
+                FAILOVER_DETECT_TIMEOUT,
+                crate::local::harness::detect_harness(&id),
+            )
+            .await
+            .ok()
+            .flatten()
+            .filter(|info| info.agent_ready);
+            match info {
+                Some(info) => ready.push((id, permission, info)),
+                None => tried.push(id),
+            }
+        }
+        if ready.len() < 2 || !self.owns_turn(&ctx.session_id, &ctx.turn_id).await {
+            return None;
+        }
+        let now = crate::store::now_ms();
+        let mut request = decision::RouteRequest::new(decision::Purpose::Failover, &ctx.text);
+        request.current = decision::Current {
+            harness: Some(ctx.harness.clone()),
+            model: ctx.model.clone(),
+            account: ctx.account.clone(),
+        };
+        request.harnesses = ready
+            .iter()
+            .map(|(id, _, info)| decision::HarnessOption {
+                id: id.clone(),
+                vendor: crate::commands::agent::harness_vendor(id).to_string(),
+                models: decision::model_ids(&info.models),
+                recommended_model: info.recommended_model.clone(),
+            })
+            .collect();
+        if let Ok(statuses) = accounts::statuses(None) {
+            request.accounts = statuses
+                .iter()
+                .filter(|account| account.signed_in && !account.paused)
+                .filter(|account| ready.iter().any(|(id, _, _)| *id == account.harness))
+                .flat_map(|account| {
+                    account.pools.iter().map(|pool| {
+                        decision::AccountOption::from_status(
+                            &account.harness,
+                            &account.id,
+                            pool,
+                            now,
+                        )
+                    })
+                })
+                .collect();
+        }
+        let picked = match decision::decide(&request).await {
+            Ok(route) => route.and_then(|route| route.harness)?,
+            Err(error) => {
+                eprintln!("orx up: decision model unavailable, using the fallback order: {error}");
+                return None;
+            }
+        };
+        let (id, permission, _) = ready.into_iter().find(|(id, _, _)| *id == picked)?;
+        tried.push(id.clone());
+        Some(FailoverStep::Harness(id, message.to_string(), permission))
     }
 
     /// Point the session's steering at the harness a turn failed over to:
@@ -7766,8 +7857,10 @@ impl TurnCtx {
     }
 
     /// Run this turn on the account with the most quota left for its model,
-    /// staying on the chat's last account while that one has room.
-    fn select_account(&mut self) {
+    /// staying on the chat's last account while that one has room. When that
+    /// account runs low and the decision model is on, it picks among the
+    /// accounts with room instead.
+    async fn select_account(&mut self) {
         use crate::local::harness::accounts;
         if !accounts::supports_accounts(&self.harness) {
             self.account = None;
@@ -7783,11 +7876,45 @@ impl TurnCtx {
             })
             .flatten()
             .filter(|id| accounts::find(&self.harness, id).is_some());
-        let chosen = accounts::choose(&self.harness, self.model.as_deref(), sticky.as_deref())
+        let chosen = self
+            .decided_account(sticky.as_deref())
+            .await
+            .or_else(|| accounts::choose(&self.harness, self.model.as_deref(), sticky.as_deref()))
             .or_else(|| sticky.clone())
             .unwrap_or_else(|| accounts::DEFAULT.to_string());
         let previous = sticky.unwrap_or_else(|| accounts::DEFAULT.to_string());
         self.adopt_account(&chosen, &previous);
+    }
+
+    /// The account the decision model picks for this turn, when it is on and
+    /// there is a choice to make. `None` leaves the choice to quota alone.
+    async fn decided_account(&self, sticky: Option<&str>) -> Option<String> {
+        use crate::local::decision;
+        use crate::local::harness::accounts;
+        if !decision::settings().active() {
+            return None;
+        }
+        let options = accounts::open_choice(&self.harness, self.model.as_deref(), sticky)?;
+        let now = crate::store::now_ms();
+        let mut request = decision::RouteRequest::new(decision::Purpose::Turn, &self.text);
+        request.current = decision::Current {
+            harness: Some(self.harness.clone()),
+            model: self.model.clone(),
+            account: sticky.map(str::to_string),
+        };
+        request.accounts = options
+            .iter()
+            .map(|(id, status)| {
+                decision::AccountOption::from_status(&self.harness, id, status, now)
+            })
+            .collect();
+        match decision::decide(&request).await {
+            Ok(route) => route.and_then(|route| route.account),
+            Err(error) => {
+                eprintln!("orx up: decision model unavailable, routing by quota: {error}");
+                None
+            }
+        }
     }
 
     fn adopt_account(&mut self, account: &str, previous: &str) {

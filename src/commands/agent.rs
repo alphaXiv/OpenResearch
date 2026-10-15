@@ -5,6 +5,7 @@
 //!                                 create it on another agent, for cross-harness review
 //!   orx agent harnesses           list the agents a chat can run on, with their vendors
 //!   orx agent quota               quota left per harness account and model pool
+//!   orx agent route "<task>"      where new work should run, from the decision model
 
 use std::io::Read;
 
@@ -62,7 +63,197 @@ pub async fn run(args: crate::AgentArgs) -> Result<()> {
             refresh,
             json,
         } => quota(harness.as_deref(), refresh, json).await,
+        AgentCommand::Route { task, stdin, json } => {
+            let task = task_text(task, stdin).map_err(|_| {
+                anyhow!("Describe the work: orx agent route \"<task>\" (or --stdin).")
+            })?;
+            route(&task, json).await
+        }
     }
+}
+
+/// `orx agent route`: the harness, model, account, and compute new work
+/// should use. The decision model answers when it is on; otherwise, or when
+/// it fails, the route comes from quota and the user's settings alone.
+async fn route(task: &str, json: bool) -> Result<()> {
+    use crate::local::decision;
+    use crate::local::harness::accounts;
+    let now = crate::store::now_ms();
+    let ready: Vec<_> = crate::local::harness::detect_harnesses_snapshot()
+        .await
+        .into_iter()
+        .filter(|info| info.agent_ready)
+        .collect();
+    let mut request = decision::RouteRequest::new(decision::Purpose::Plan, task);
+    request.harnesses = ready
+        .iter()
+        .map(|info| decision::HarnessOption {
+            id: info.id.to_string(),
+            vendor: harness_vendor(info.id).to_string(),
+            models: decision::model_ids(&info.models),
+            recommended_model: info.recommended_model.clone(),
+        })
+        .collect();
+    request.accounts = accounts::statuses(None)?
+        .iter()
+        .filter(|account| account.signed_in && !account.paused)
+        .filter(|account| ready.iter().any(|info| info.id == account.harness))
+        .flat_map(|account| {
+            account.pools.iter().map(|pool| {
+                decision::AccountOption::from_status(&account.harness, &account.id, pool, now)
+            })
+        })
+        .collect();
+    let compute = super::up::compute_settings::routing_targets().await;
+    let default_compute = compute["defaultBackend"].as_str().unwrap_or("local");
+    request.compute = compute["targets"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter(|target| target["configured"] == true)
+        .filter_map(|target| {
+            let id = target["id"].as_str()?;
+            Some(decision::ComputeOption {
+                id: id.to_string(),
+                summary: target["summary"].as_str().unwrap_or_default().to_string(),
+                is_default: id == default_compute,
+            })
+        })
+        .collect();
+    request.default_gpu = compute["defaultFlavor"].as_str().map(str::to_string);
+
+    let fallback = quota_route(&request);
+    let settings = decision::settings();
+    let (route, source, note) = match decision::decide(&request).await {
+        Ok(Some(decided)) => (complete_route(decided, &fallback), "decision", None),
+        Ok(None) if !settings.enabled => (fallback, "quota", Some("The decision model is off (Settings → Harnesses).".to_string())),
+        Ok(None) if settings.key_source().is_none() => (fallback, "quota", Some("The decision model has no OpenAI API key (Settings → Harnesses).".to_string())),
+        Ok(None) => (fallback, "quota", Some("The decision model is paused after OpenAI refused it; it retries in a few minutes.".to_string())),
+        Err(error) => (fallback, "quota", Some(format!("The decision model is unavailable ({error}), so this route comes from quota alone."))),
+    };
+    if json {
+        println!(
+            "{}",
+            serde_json::to_string(&serde_json::json!({
+                "route": route,
+                "source": source,
+                "decisionModel": (source == "decision").then_some(settings.model.as_str()),
+                "note": note,
+            }))?
+        );
+        return Ok(());
+    }
+    let mut parts = Vec::new();
+    if let Some(harness) = &route.harness {
+        parts.push(format!("harness {harness}"));
+    }
+    if let Some(model) = &route.model {
+        parts.push(format!("model {model}"));
+    }
+    if let Some(account) = &route.account {
+        parts.push(format!("account {account}"));
+    }
+    match (&route.compute, &route.gpu) {
+        (Some(compute), Some(gpu)) => parts.push(format!("compute {compute} ({gpu})")),
+        (Some(compute), None) => parts.push(format!("compute {compute}")),
+        _ => {}
+    }
+    let by = match source {
+        "decision" => format!("decision model {}", settings.model),
+        _ => "quota".to_string(),
+    };
+    if parts.is_empty() {
+        println!("No route ({by}): no ready harness has room.");
+    } else {
+        println!("Route ({by}): {}", parts.join(" · "));
+    }
+    if !route.reason.is_empty() {
+        println!("Why: {}", route.reason);
+    }
+    if let Some(note) = note {
+        println!("{note}");
+    }
+    if let Some(harness) = &route.harness {
+        let model = route
+            .model
+            .as_ref()
+            .map(|model| format!(" --model {model}"))
+            .unwrap_or_default();
+        println!("Start it with: orx agent spawn --harness {harness}{model} \"<message>\"");
+    }
+    Ok(())
+}
+
+/// The route quota alone gives: the first ready harness in the user's
+/// fallback order with room on its default model's pool, the account a turn
+/// there would use, and the default compute target.
+fn quota_route(request: &crate::local::decision::RouteRequest) -> crate::local::decision::Route {
+    use crate::local::harness::accounts;
+    let order = crate::store::Store::open()
+        .ok()
+        .and_then(|store| store.ui_state().ok())
+        .map(|state| state.harness_failover.order)
+        .unwrap_or_default();
+    let mut harnesses: Vec<&crate::local::decision::HarnessOption> = order
+        .iter()
+        .filter_map(|id| request.harnesses.iter().find(|option| &option.id == id))
+        .collect();
+    for option in &request.harnesses {
+        if !harnesses.iter().any(|picked| picked.id == option.id) {
+            harnesses.push(option);
+        }
+    }
+    let has_room = |harness: &str, model: Option<&str>| {
+        !accounts::supports_accounts(harness)
+            || request.accounts.iter().any(|account| {
+                account.harness == harness
+                    && account.pool == accounts::pool_for(harness, model)
+                    && account.state != "blocked"
+            })
+    };
+    let pick = harnesses
+        .iter()
+        .find(|option| has_room(&option.id, option.recommended_model.as_deref()));
+    let compute = request
+        .compute
+        .iter()
+        .find(|option| option.is_default)
+        .map(|option| option.id.clone());
+    crate::local::decision::Route {
+        harness: pick.map(|option| option.id.clone()),
+        model: pick.and_then(|option| option.recommended_model.clone()),
+        account: pick.and_then(|option| {
+            accounts::choose(&option.id, option.recommended_model.as_deref(), None)
+        }),
+        gpu: compute
+            .as_deref()
+            .filter(|id| *id != "local")
+            .and(request.default_gpu.clone()),
+        compute,
+        reason: String::new(),
+    }
+}
+
+/// Fill what the decision model left open (the harness, and the account a
+/// turn there would use) from the quota route; compute stays as it said.
+fn complete_route(
+    mut decided: crate::local::decision::Route,
+    fallback: &crate::local::decision::Route,
+) -> crate::local::decision::Route {
+    if decided.harness.is_none() {
+        decided.harness.clone_from(&fallback.harness);
+        decided.model.clone_from(&fallback.model);
+        if decided.account.is_none() {
+            decided.account.clone_from(&fallback.account);
+        }
+    }
+    if decided.account.is_none() {
+        if let Some(harness) = &decided.harness {
+            decided.account =
+                crate::local::harness::accounts::choose(harness, decided.model.as_deref(), None);
+        }
+    }
+    decided
 }
 
 /// `orx agent quota`: what each account has left per quota pool, and the

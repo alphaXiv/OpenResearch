@@ -853,6 +853,19 @@ export interface TinkerSettings {
 export const getTinkerSettings = (signal?: AbortSignal) => get<TinkerSettings>("/api/settings/tinker", signal);
 export const saveTinkerKey = (key: string) => post<TinkerSettings>("/api/settings/tinker", { key });
 
+export interface DecisionModelSettings {
+  enabled: boolean;
+  model: string;
+  defaultModel: string;
+  keySource: "env" | "settings" | null;
+  maskedKey: string | null;
+  /** `null` right after a save, which skips the network check. */
+  validationStatus: "missing" | "valid" | "invalid" | "modelUnavailable" | null;
+}
+export const getDecisionModelSettings = (signal?: AbortSignal) => get<DecisionModelSettings>("/api/settings/decision-model", signal);
+export const saveDecisionModelSettings = (patch: { enabled?: boolean; model?: string; apiKey?: string }) =>
+  post<DecisionModelSettings>("/api/settings/decision-model", patch);
+
 // --- updates ------------------------------------------------------------------
 
 /** How orx was installed. `installer`, `app-bundle`, `appimage` and `portable` update themselves. */

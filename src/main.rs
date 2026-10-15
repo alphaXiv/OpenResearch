@@ -416,6 +416,18 @@ pub enum AgentCommand {
         #[arg(long)]
         json: bool,
     },
+    /// Ask the decision model (Settings → Harnesses) where new work should
+    /// run: harness, model, account, and compute. Without it, or when it is
+    /// unavailable, the answer comes from quota alone.
+    Route {
+        /// What the work is, in a sentence or a full brief.
+        task: Option<String>,
+        /// Read the task from stdin instead.
+        #[arg(long)]
+        stdin: bool,
+        #[arg(long)]
+        json: bool,
+    },
 }
 
 #[derive(Args, Debug)]

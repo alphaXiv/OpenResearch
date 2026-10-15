@@ -16,6 +16,7 @@ pub mod chat;
 pub mod claude;
 pub mod codex;
 pub mod datadir;
+pub mod decision;
 pub(crate) mod deep_research;
 pub mod demo;
 pub mod experiments;
