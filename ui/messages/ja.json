@@ -15,7 +15,6 @@
   "settings_environment_tab": "環境タブ",
   "settings_cpu_cores": "CPU コア: {count}",
   "settings_gpu_count": "GPU × {count}",
-  "$schema": "https://inlang.com/schema/inlang-message-format",
   "app_close_panel": "パネルを閉じる",
   "app_current_task": "現在のタスク",
   "app_entire_project": "プロジェクト全体",
@@ -1300,5 +1299,10 @@
   "settings_github_enable_under": "同期先を選んで有効化…",
   "settings_overleaf_file_sync": "論文ファイルを同期",
   "settings_overleaf_live_sync": "リアルタイムの編集を同期",
-  "settings_overleaf_intro": "認証情報はこの端末に保存されます。各論文はエディターからリンクします。"
+  "settings_overleaf_intro": "認証情報はこの端末に保存されます。各論文はエディターからリンクします。",
+  "mermaid_show_source": "ソースを表示",
+  "mermaid_show_diagram": "図を表示",
+  "mermaid_could_not_render": "この図をレンダリングできませんでした: {error}",
+  "mermaid_not_a_diagram": "図ではありません — 代わりにソースを表示します。",
+  "$schema": "https://inlang.com/schema/inlang-message-format"
 }

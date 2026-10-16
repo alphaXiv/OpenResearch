@@ -15,7 +15,6 @@
   "settings_environment_tab": "زبانهٔ محیط",
   "settings_cpu_cores": "{count} هستهٔ CPU",
   "settings_gpu_count": "{count} پردازندهٔ گرافیکی",
-  "$schema": "https://inlang.com/schema/inlang-message-format",
   "app_close_panel": "بستن پنل",
   "app_current_task": "وظیفهٔ فعلی",
   "app_entire_project": "کل پروژه",
@@ -1300,5 +1299,10 @@
   "settings_github_enable_under": "فعال‌سازی همگام‌سازی در…",
   "settings_overleaf_file_sync": "همگام‌سازی فایل‌های مقاله",
   "settings_overleaf_live_sync": "همگام‌سازی ویرایش‌های زنده",
-  "settings_overleaf_intro": "اطلاعات ورود روی این دستگاه می‌ماند. هر مقاله را از ویرایشگر پیوند دهید."
+  "settings_overleaf_intro": "اطلاعات ورود روی این دستگاه می‌ماند. هر مقاله را از ویرایشگر پیوند دهید.",
+  "mermaid_show_source": "نمایش کد مبدأ",
+  "mermaid_show_diagram": "نمایش نمودار",
+  "mermaid_could_not_render": "این نمودار رندر نشد: {error}",
+  "mermaid_not_a_diagram": "نمودار نیست — به‌جای آن کد مبدأ نمایش داده می‌شود.",
+  "$schema": "https://inlang.com/schema/inlang-message-format"
 }

@@ -15,7 +15,6 @@
   "settings_environment_tab": "تبويب البيئة",
   "settings_cpu_cores": "أنوية المعالج: {count}",
   "settings_gpu_count": "معالج رسومات × {count}",
-  "$schema": "https://inlang.com/schema/inlang-message-format",
   "app_close_panel": "إغلاق اللوحة",
   "app_current_task": "المهمة الحالية",
   "app_entire_project": "المشروع بالكامل",
@@ -1300,5 +1299,10 @@
   "settings_github_enable_under": "تفعيل المزامنة في…",
   "settings_overleaf_file_sync": "مزامنة ملفات الورقة",
   "settings_overleaf_live_sync": "مزامنة التعديلات المباشرة",
-  "settings_overleaf_intro": "تبقى بيانات الدخول على هذا الجهاز. اربط كل ورقة من المحرر."
+  "settings_overleaf_intro": "تبقى بيانات الدخول على هذا الجهاز. اربط كل ورقة من المحرر.",
+  "mermaid_show_source": "إظهار الشيفرة",
+  "mermaid_show_diagram": "إظهار المخطط",
+  "mermaid_could_not_render": "تعذّر عرض هذا المخطط: {error}",
+  "mermaid_not_a_diagram": "ليس مخططًا — يتم عرض الشيفرة بدلًا منه.",
+  "$schema": "https://inlang.com/schema/inlang-message-format"
 }

@@ -231,6 +231,8 @@ pub fn content_type_for_path(path: &str) -> &'static str {
         }
         "css" => "text/css; charset=utf-8",
         "js" | "jsx" | "mjs" => "text/javascript; charset=utf-8",
+        // Mermaid diagrams are plain text the dashboard can preview and render.
+        "mmd" | "mermaid" => "text/plain; charset=utf-8",
         _ => "application/octet-stream",
     }
 }
