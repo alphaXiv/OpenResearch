@@ -16,6 +16,8 @@
   "settings_cpu_cores": "CPU 코어: {count}",
   "settings_gpu_count": "GPU × {count}",
   "$schema": "https://inlang.com/schema/inlang-message-format",
+  "projects_delete_artifacts_kept": "아래 옵션을 선택하지 않으면 아티팩트가 유지됩니다. 빈 아티팩트 폴더는 자동으로 삭제됩니다.",
+  "projects_delete_artifacts_remove": "이 프로젝트의 아티팩트 파일 영구 삭제",
   "app_close_panel": "패널 닫기",
   "app_current_task": "현재 작업",
   "app_entire_project": "전체 프로젝트",

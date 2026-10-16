@@ -2013,11 +2013,22 @@ async fn update_project(
     Ok(Json(json!({ "project": project_json(&project) })))
 }
 
+#[derive(Default, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct DeleteProjectQuery {
+    #[serde(default)]
+    delete_artifacts: bool,
+}
+
 /// Delete a project and everything hanging off it. Refuses while runs are in
 /// flight (deleting their rows would strand the supervisor mid-job) — but
 /// requests their cancellation, so a retry shortly after goes through. The
 /// registered repository folder is left untouched.
-async fn delete_project(State(state): State<AppState>, Path(id): Path<String>) -> ApiResult {
+async fn delete_project(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+    Query(query): Query<DeleteProjectQuery>,
+) -> ApiResult {
     reject_if_moving(&state)?;
     let _deleting_project = state
         .project_lifecycle
@@ -2076,11 +2087,23 @@ async fn delete_project(State(state): State<AppState>, Path(id): Path<String>) -
         state.chat.claude.forget_session(&session.id).await;
         state.chat.acp.stop(&session.id).await;
     }
+    let projects = store.list_local_projects()?;
+    let artifacts_project = project.clone();
+    tokio::task::spawn_blocking(move || {
+        local::files::cleanup_project_artifacts(
+            &artifacts_project,
+            query.delete_artifacts,
+            &projects,
+        )
+    })
+    .await
+    .map_err(|error| ApiError::from(anyhow!("artifact cleanup task failed: {error}")))??;
     store.delete_local_project(&id)?;
     for session in &sessions {
         local::chat::cleanup_session_transcript_artifacts(&session.id);
         local::chat::cleanup_session_worktree(&project, &session.id);
     }
+    let _ = std::fs::remove_dir(local::git::worktrees_root(&id));
     Ok(Json(json!({ "ok": true })))
 }
 
@@ -9642,6 +9665,18 @@ mod tests {
             .as_str()
             .unwrap()
             .ends_with("files/demo"));
+    }
+
+    #[test]
+    fn project_deletion_preserves_artifacts_unless_explicitly_requested() {
+        for (uri, delete_artifacts) in [
+            ("/api/projects/p1", false),
+            ("/api/projects/p1?deleteArtifacts=true", true),
+        ] {
+            let Query(query) =
+                Query::<DeleteProjectQuery>::try_from_uri(&uri.parse().unwrap()).unwrap();
+            assert_eq!(query.delete_artifacts, delete_artifacts);
+        }
     }
 
     #[test]
