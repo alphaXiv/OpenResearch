@@ -2103,6 +2103,31 @@ mod initial_message_tests {
     }
 
     #[test]
+    fn global_instructions_wrap_new_and_resumed_turns_without_rewrapping_the_message() {
+        for native_session_id in [None, Some("native")] {
+            let context = with_turn_context(
+                native_session_id,
+                Some("prior context"),
+                Some("finish the experiment"),
+                None,
+                None,
+                Some("shell output"),
+                "continue".into(),
+            );
+            let turn =
+                crate::local::user_instructions::prepend(Some("Use free models."), context.clone());
+            assert!(turn.starts_with("<orx-user-instructions>\nUse free models.\n"));
+            assert_eq!(turn.matches("<orx-user-instructions>").count(), 1);
+            assert_eq!(turn.matches("<current-user-message>").count(), 1);
+            assert!(turn.ends_with(&context));
+            assert_eq!(
+                crate::local::user_instructions::prepend(None, context.clone()),
+                context
+            );
+        }
+    }
+
+    #[test]
     fn autonomy_rides_every_turn_after_the_goal() {
         let turn = with_turn_context(
             Some("native"),
@@ -5560,11 +5585,16 @@ impl ChatHost {
                 prepare_project_slash_worktree(&project, &message.text, &session.id).await;
             }
         }
-        let mut turn_text = prepared_input.unwrap_or_else(|| {
+        let mut turn_text = if let Some(prepared) = prepared_input {
+            // Recovery reuses the original request, including its instruction
+            // snapshot. Do not read a newer file or inject the block twice.
+            prepared
+        } else {
+            let instructions = super::user_instructions::load().await?;
             let expanded = contextualize_messages(messages, |text| {
                 expand_slash_skills(&project, text, Some(&session.harness), Some(&session.id))
             });
-            with_turn_context(
+            let contextualized = with_turn_context(
                 session.native_session_id.as_deref(),
                 session.bootstrap_context.as_deref(),
                 session.goal.as_deref(),
@@ -5572,8 +5602,11 @@ impl ChatHost {
                 super::demo::turn_context(&project.id),
                 shell_context.as_deref(),
                 expanded,
-            )
-        });
+            );
+            // One snapshot per new turn, across all projects and harnesses.
+            // Mid-turn steering keeps the running turn's context as-is.
+            super::user_instructions::prepend(instructions.as_deref(), contextualized)
+        };
         // Harnesses take plain text; attachments ride as on-disk paths every
         // CLI can open with its own file-reading tool (Read handles PDFs and
         // images alike).

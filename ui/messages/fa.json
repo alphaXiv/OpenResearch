@@ -1300,5 +1300,11 @@
   "settings_github_enable_under": "فعال‌سازی همگام‌سازی در…",
   "settings_overleaf_file_sync": "همگام‌سازی فایل‌های مقاله",
   "settings_overleaf_live_sync": "همگام‌سازی ویرایش‌های زنده",
-  "settings_overleaf_intro": "اطلاعات ورود روی این دستگاه می‌ماند. هر مقاله را از ویرایشگر پیوند دهید."
+  "settings_overleaf_intro": "اطلاعات ورود روی این دستگاه می‌ماند. هر مقاله را از ویرایشگر پیوند دهید.",
+  "settings_instructions_title": "دستورالعمل‌های عامل",
+  "settings_instructions_description": "بین همهٔ پروژه‌های این میزبان مشترک است. تغییرات از نوبت جدید بعدی گفتگو اعمال می‌شوند.",
+  "settings_instructions_edit": "ویرایش AGENTS.md",
+  "settings_instructions_discard": "تغییرات ذخیره‌نشده کنار گذاشته شوند؟",
+  "settings_instructions_saved": "دستورالعمل‌های عامل ذخیره شد.",
+  "settings_instructions_reload": "بارگیری مجدد فایل"
 }

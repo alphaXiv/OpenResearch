@@ -1300,5 +1300,11 @@
   "settings_github_enable_under": "Enable syncing in…",
   "settings_overleaf_file_sync": "Sync paper files",
   "settings_overleaf_live_sync": "Sync live edits",
-  "settings_overleaf_intro": "Credentials stay on this machine. Link individual papers from the editor."
+  "settings_overleaf_intro": "Credentials stay on this machine. Link individual papers from the editor.",
+  "settings_instructions_title": "Agent instructions",
+  "settings_instructions_description": "Shared by all projects on this host. Changes apply from the next new chat turn.",
+  "settings_instructions_edit": "Edit AGENTS.md",
+  "settings_instructions_discard": "Discard your unsaved changes?",
+  "settings_instructions_saved": "Agent instructions saved.",
+  "settings_instructions_reload": "Reload file"
 }

@@ -1300,5 +1300,11 @@
   "settings_github_enable_under": "تفعيل المزامنة في…",
   "settings_overleaf_file_sync": "مزامنة ملفات الورقة",
   "settings_overleaf_live_sync": "مزامنة التعديلات المباشرة",
-  "settings_overleaf_intro": "تبقى بيانات الدخول على هذا الجهاز. اربط كل ورقة من المحرر."
+  "settings_overleaf_intro": "تبقى بيانات الدخول على هذا الجهاز. اربط كل ورقة من المحرر.",
+  "settings_instructions_title": "تعليمات الوكيل",
+  "settings_instructions_description": "مشتركة بين جميع المشاريع على هذا المضيف. تسري التغييرات بدءًا من دور المحادثة الجديد التالي.",
+  "settings_instructions_edit": "تحرير AGENTS.md",
+  "settings_instructions_discard": "هل تريد تجاهل التغييرات غير المحفوظة؟",
+  "settings_instructions_saved": "تم حفظ تعليمات الوكيل.",
+  "settings_instructions_reload": "إعادة تحميل الملف"
 }

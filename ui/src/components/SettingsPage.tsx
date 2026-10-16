@@ -130,6 +130,7 @@ import { StatusBadge } from "./StatusBadge";
 import { OpenResearchSetupTerminal, SettingsCommandTerminal, SshConnectTerminal, SshTerminalTranscript } from "./SshConnectTerminal";
 import { SshExecutionSettings, SshDefaultHost } from "./SshExecutionSettings";
 import { SshConfigDialog } from "./SshConfigDialog";
+import { AgentInstructionsSettings } from "./AgentInstructionsSettings";
 import {
   Badge,
   Button,
@@ -3812,6 +3813,9 @@ export function SettingsView({
             </section>
             <section ref={tab === "harnesses" ? sectionRef : undefined} className={SETTINGS_STACK_SECTION_CLASS_NAME}>
               <HarnessesTab remote={remote} />
+            </section>
+            <section className={SETTINGS_STACK_SECTION_CLASS_NAME}>
+              <AgentInstructionsSettings cardClassName={SETTINGS_CARD_CLASS_NAME} />
             </section>
             <section className={SETTINGS_STACK_SECTION_CLASS_NAME}>
               <OverleafCard />

@@ -640,6 +640,10 @@ fn router(state: AppState, remote_auth: Option<RemoteAuth>) -> Router {
         )
         .route("/api/settings/env", get(env_settings).post(set_env_var))
         .route(
+            "/api/settings/agent-instructions",
+            get(agent_instructions).put(save_agent_instructions),
+        )
+        .route(
             "/api/settings/env/{key}",
             axum::routing::delete(delete_env_var),
         )
@@ -4757,6 +4761,37 @@ fn spawn_claude_auth_monitor(
             };
         }
     });
+}
+
+// --- global agent instructions ---------------------------------------------
+
+async fn agent_instructions() -> ApiResult {
+    Ok(Json(json!(local::user_instructions::inspect().await?)))
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct SaveAgentInstructionsReq {
+    content: String,
+    expected_revision: Option<String>,
+}
+
+async fn save_agent_instructions(Json(req): Json<SaveAgentInstructionsReq>) -> ApiResult {
+    if req.content.len() as u64 > FILE_WRITE_LIMIT {
+        return Err(bad_request("AGENTS.md is too large to save"));
+    }
+    blocking_api(move || {
+        let file = local::user_instructions::save(&req.content, req.expected_revision.as_deref())
+            .map_err(|error| {
+            if error.is::<local::user_instructions::InstructionsChanged>() {
+                ApiError(StatusCode::CONFLICT, error.to_string())
+            } else {
+                ApiError::from(error)
+            }
+        })?;
+        Ok(Json(json!(file)))
+    })
+    .await
 }
 
 // --- env var settings -------------------------------------------------------

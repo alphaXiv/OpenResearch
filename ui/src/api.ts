@@ -1017,6 +1017,18 @@ export interface SshConfigFile {
   content: string;
 }
 
+export interface AgentInstructionsFile {
+  path: string;
+  content: string;
+  revision: string | null;
+}
+
+export const getAgentInstructions = (signal?: AbortSignal) =>
+  get<AgentInstructionsFile>("/api/settings/agent-instructions", signal);
+
+export const saveAgentInstructions = (content: string, expectedRevision: string | null) =>
+  put<AgentInstructionsFile>("/api/settings/agent-instructions", { content, expectedRevision });
+
 export const getSshConfig = (signal?: AbortSignal) => get<SshConfigFile>("/api/settings/ssh/config", signal);
 
 export const saveSshConfig = (content: string, previousContent: string) =>

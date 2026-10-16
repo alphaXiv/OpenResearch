@@ -1300,5 +1300,11 @@
   "settings_github_enable_under": "启用同步到…",
   "settings_overleaf_file_sync": "同步论文文件",
   "settings_overleaf_live_sync": "同步实时编辑",
-  "settings_overleaf_intro": "凭据保存在本机。在编辑器中关联各篇论文。"
+  "settings_overleaf_intro": "凭据保存在本机。在编辑器中关联各篇论文。",
+  "settings_instructions_title": "智能体指令",
+  "settings_instructions_description": "此主机上的所有项目共用。更改从下一轮聊天开始生效。",
+  "settings_instructions_edit": "编辑 AGENTS.md",
+  "settings_instructions_discard": "放弃未保存的更改？",
+  "settings_instructions_saved": "智能体指令已保存。",
+  "settings_instructions_reload": "重新加载文件"
 }

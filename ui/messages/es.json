@@ -1300,5 +1300,11 @@
   "settings_github_enable_under": "Activar sincronización en…",
   "settings_overleaf_file_sync": "Sincronizar archivos del artículo",
   "settings_overleaf_live_sync": "Sincronizar ediciones en vivo",
-  "settings_overleaf_intro": "Las credenciales se guardan en este equipo. Vincula cada artículo desde el editor."
+  "settings_overleaf_intro": "Las credenciales se guardan en este equipo. Vincula cada artículo desde el editor.",
+  "settings_instructions_title": "Instrucciones del agente",
+  "settings_instructions_description": "Compartidas por todos los proyectos de este equipo. Los cambios se aplican a partir del siguiente turno del chat.",
+  "settings_instructions_edit": "Editar AGENTS.md",
+  "settings_instructions_discard": "¿Descartar los cambios sin guardar?",
+  "settings_instructions_saved": "Instrucciones del agente guardadas.",
+  "settings_instructions_reload": "Volver a cargar el archivo"
 }
