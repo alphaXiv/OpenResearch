@@ -456,7 +456,9 @@ impl Drop for ProjectDeletionLease {
 impl ProjectLifecycle {
     fn admit(&self, project_id: &str) -> Option<ProjectAdmissionLease> {
         let mut state = self.inner.lock().unwrap();
-        if state.deleting.contains(project_id) {
+        if state.deleting.contains(project_id)
+            || (project_id == "__project_create__" && !state.deleting.is_empty())
+        {
             return None;
         }
         *state.admissions.entry(project_id.to_string()).or_default() += 1;
@@ -2084,7 +2086,7 @@ async fn delete_project(
         let _ = state.chat.interrupt(&session.id).await;
         state.chat.opencode.kill_session(&session.id).await;
         state.chat.codex.kill_session(&session.id).await;
-        state.chat.claude.forget_session(&session.id).await;
+        state.chat.claude.kill_session(&session.id).await;
         state.chat.acp.stop(&session.id).await;
     }
     let projects = store.list_local_projects()?;
@@ -2100,6 +2102,7 @@ async fn delete_project(
     .map_err(|error| ApiError::from(anyhow!("artifact cleanup task failed: {error}")))??;
     store.delete_local_project(&id)?;
     for session in &sessions {
+        state.chat.claude.forget_session(&session.id).await;
         local::chat::cleanup_session_transcript_artifacts(&session.id);
         local::chat::cleanup_session_worktree(&project, &session.id);
     }
@@ -4390,8 +4393,12 @@ async fn absolute_raw_file(
 
 /// Listing of the project's artifacts dir — the filesystem is the source of
 /// truth; this scans it fresh on every call (and creates it if missing).
-async fn list_artifacts(Path(id): Path<String>) -> ApiResult {
+async fn list_artifacts(State(state): State<AppState>, Path(id): Path<String>) -> ApiResult {
     blocking_api(move || {
+        let _admission = state
+            .project_lifecycle
+            .admit(&id)
+            .ok_or_else(|| bad_request("project deletion is in progress"))?;
         let store = Store::open()?;
         let project = store
             .get_local_project(&id)?
@@ -4409,6 +4416,10 @@ async fn manage_artifact_file(
 ) -> ApiResult {
     reject_if_moving(&state)?;
     blocking_api(move || {
+        let _admission = state
+            .project_lifecycle
+            .admit(&id)
+            .ok_or_else(|| bad_request("project deletion is in progress"))?;
         let store = Store::open()?;
         let project = store
             .get_local_project(&id)?
@@ -9677,6 +9688,24 @@ mod tests {
                 Query::<DeleteProjectQuery>::try_from_uri(&uri.parse().unwrap()).unwrap();
             assert_eq!(query.delete_artifacts, delete_artifacts);
         }
+    }
+
+    #[test]
+    fn project_deletion_excludes_artifact_requests_and_project_creation() {
+        let lifecycle = ProjectLifecycle::default();
+        let artifact_request = lifecycle.admit("p1").unwrap();
+        assert!(lifecycle.begin_delete("p1").is_none());
+        drop(artifact_request);
+
+        let deletion = lifecycle.begin_delete("p1").unwrap();
+        assert!(lifecycle.admit("p1").is_none());
+        assert!(lifecycle.admit("__project_create__").is_none());
+        drop(deletion);
+
+        let creation = lifecycle.admit("__project_create__").unwrap();
+        assert!(lifecycle.begin_delete("p1").is_none());
+        drop(creation);
+        assert!(lifecycle.begin_delete("p1").is_some());
     }
 
     #[test]

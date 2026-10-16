@@ -100,6 +100,7 @@ fn cleanup_artifacts_at<'a>(
         let repository = match crate::paths::canonicalize(repository) {
             Ok(repository) => repository,
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(_) if !delete_artifacts => continue,
             Err(error) => return Err(error.into()),
         };
         if repository.starts_with(&canonical_dir) {
@@ -553,6 +554,23 @@ mod project_cleanup_tests {
         std::fs::create_dir(&dir).unwrap();
         cleanup_artifacts_at(&dir, false, repositories()).unwrap();
         assert!(!dir.exists());
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn keeping_artifacts_does_not_require_unrelated_repositories_to_resolve() {
+        let root =
+            std::env::temp_dir().join(format!("orx-artifact-unresolved-{}", uuid::Uuid::new_v4()));
+        let dir = root.join("artifacts");
+        std::fs::create_dir_all(&dir).unwrap();
+        let file = root.join("not-a-directory");
+        std::fs::write(&file, "file").unwrap();
+        let repo = file.join("repository");
+        std::fs::write(dir.join("report.md"), "keep").unwrap();
+        cleanup_artifacts_at(&dir, false, std::iter::once(repo.as_path())).unwrap();
+        assert!(dir.join("report.md").is_file());
+        assert!(cleanup_artifacts_at(&dir, true, std::iter::once(repo.as_path())).is_err());
+        assert!(dir.join("report.md").is_file());
         std::fs::remove_dir_all(root).unwrap();
     }
 
