@@ -1697,6 +1697,9 @@ pub(crate) struct RemoteOrx {
 
 const REMOTE_PATH_MARKER: &str = "ORX_REMOTE_PATH=";
 const REMOTE_VERSION_MARKER: &str = "ORX_REMOTE_VERSION=";
+const REMOTE_REJECTED_MARKER: &str = "ORX_REMOTE_REJECTED=";
+const REMOTE_REJECTED_OWNER_MARKER: &str = "ORX_REMOTE_REJECTED_OWNER=";
+const REMOTE_REJECTED_WRITABLE_MARKER: &str = "ORX_REMOTE_REJECTED_WRITABLE=";
 const REMOTE_INSTALL_PATH_MARKER: &str = "ORX_REMOTE_INSTALL_PATH=";
 const REMOTE_DATABASE_PATH_MARKER: &str = "ORX_REMOTE_DATABASE_PATH=";
 const REMOTE_CACHE_PATH_MARKER: &str = "ORX_REMOTE_CACHE_PATH=";
@@ -1752,6 +1755,82 @@ fn parse_remote_orx(output: &str) -> Option<RemoteOrx> {
         .find_map(|line| line.strip_prefix(REMOTE_VERSION_MARKER))?;
     let version = version.strip_prefix("orx ").unwrap_or(version).to_string();
     (!version.is_empty()).then_some(RemoteOrx { path, version })
+}
+
+/// What the remote trust probe found at one candidate path.
+enum RemoteOrxProbe {
+    /// Nothing executable there, or the candidate vanished mid-check.
+    Missing,
+    /// A binary that passed the ownership and permission checks.
+    Trusted(RemoteOrx),
+    /// A binary that exists but may not be executed; the reason it was refused.
+    Rejected(RemoteOrxRejection),
+}
+
+/// A remote `orx` candidate the probe refused to run, with the remote-reported
+/// reasons so the diagnostic can name the offending paths.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct RemoteOrxRejection {
+    path: String,
+    /// Not owned by the remote user or root.
+    not_owned: bool,
+    /// Group- or world-writable paths (the binary and/or its directory).
+    writable: Vec<String>,
+}
+
+fn parse_remote_orx_rejection(output: &str) -> Option<RemoteOrxRejection> {
+    let path = marker_value(output, REMOTE_REJECTED_MARKER)?;
+    Some(RemoteOrxRejection {
+        path,
+        not_owned: output
+            .lines()
+            .any(|line| line.starts_with(REMOTE_REJECTED_OWNER_MARKER)),
+        writable: output
+            .lines()
+            .filter_map(|line| line.strip_prefix(REMOTE_REJECTED_WRITABLE_MARKER))
+            .map(str::to_string)
+            .collect(),
+    })
+}
+
+/// Explain a refused `orx` candidate: what is wrong, how to inspect it, and
+/// that fixing ownership or permissions is an explicit manual step — a shared
+/// install directory is never modified automatically.
+fn remote_orx_rejection_error(host: &str, rejection: &RemoteOrxRejection) -> crate::error::Error {
+    let mut problems = Vec::new();
+    if rejection.not_owned {
+        problems.push(format!(
+            "{} is owned by neither the remote user nor root",
+            rejection.path
+        ));
+    }
+    problems.extend(
+        rejection
+            .writable
+            .iter()
+            .map(|entry| format!("{entry} is group- or world-writable")),
+    );
+    let problems = if problems.is_empty() {
+        format!("{} failed the executable trust checks", rejection.path)
+    } else {
+        problems.join("; ")
+    };
+    let inspect = std::iter::once(&rejection.path)
+        .chain(
+            rejection
+                .writable
+                .iter()
+                .filter(|entry| *entry != &rejection.path),
+        )
+        .map(|path| crate::jobs::ssh::sh_quote(path))
+        .collect::<Vec<_>>()
+        .join(" ");
+    anyhow!(
+        "An `orx` binary exists on '{host}' at {path}, but OpenResearch will not run it: {problems}. \
+         Inspect it over SSH with `ls -ld {inspect}` and repair the permissions or ownership yourself \
+         (for example `chmod go-w` on writable paths); OpenResearch does not modify an intentionally shared directory.",
+        path = rejection.path,
+    )
 }
 
 fn marker_value(output: &str, marker: &str) -> Option<String> {
@@ -1933,47 +2012,93 @@ pub(crate) async fn remote_install_paths(
 /// Resolve the authenticated remote user's existing binary once, then launch
 /// that exact path so a different non-interactive PATH cannot select another.
 pub(crate) async fn find_remote_orx(target: &SshTarget, host: &str) -> Result<Option<RemoteOrx>> {
-    let probe = remote_login_orx_cmd(&format!(
+    let probe = remote_login_orx_cmd(&remote_orx_probe(
         "p=$(command -v orx 2>/dev/null || true); \
-         p=$(readlink -f \"$p\" 2>/dev/null || realpath \"$p\" 2>/dev/null || true); \
+         p=$(readlink -f \"$p\" 2>/dev/null || realpath \"$p\" 2>/dev/null || true);",
+    ));
+    let output = crate::jobs::ssh::ssh_run(target, &probe, None)
+        .await
+        .map_err(|e| anyhow!("Can't reach '{host}' over SSH: {e}"))?;
+    let discovery_rejection = match classify_probe_output(&output) {
+        RemoteOrxProbe::Trusted(orx) => return Ok(Some(orx)),
+        RemoteOrxProbe::Rejected(rejection) => Some(rejection),
+        RemoteOrxProbe::Missing => None,
+    };
+    let paths = remote_install_paths(target, host).await?;
+    match probe_remote_orx_path(target, host, &paths.binary).await? {
+        RemoteOrxProbe::Trusted(orx) => Ok(Some(orx)),
+        RemoteOrxProbe::Rejected(rejection) => Err(remote_orx_rejection_error(host, &rejection)),
+        RemoteOrxProbe::Missing => match discovery_rejection {
+            Some(rejection) => Err(remote_orx_rejection_error(host, &rejection)),
+            None => Ok(None),
+        },
+    }
+}
+
+/// The remote trust probe shared by discovery and explicit-path checks.
+/// `resolve_candidate` assigns the candidate path to `p`. For a candidate that
+/// may be executed it prints the PATH/VERSION markers; for one that exists but
+/// fails the ownership/permission checks it prints REJECTED markers instead —
+/// the binary is never run, but the rejection reaches the user instead of
+/// looking like "no binary installed".
+///
+/// Every value is emitted line-by-line through `orx_probe_emit`, which puts the
+/// marker in front of *each* output line. A candidate path containing a newline
+/// (a file an attacker could plant in a shared directory) therefore produces
+/// extra marker-prefixed lines rather than raw lines that could forge a
+/// trusted PATH/VERSION result.
+fn remote_orx_probe(resolve_candidate: &str) -> String {
+    format!(
+        "orx_probe_emit() {{ while IFS= read -r orx_line; do printf '%s%s\\n' \"$1\" \"$orx_line\"; done; }}; \
+         {resolve_candidate} \
          if [ -n \"$p\" ] && [ -x \"$p\" ]; then \
          owner=$(find \"$p\" -prune \\( -user \"$(id -u)\" -o -user 0 \\) -print 2>/dev/null); \
          unsafe=$(find \"$p\" \"$(dirname \"$p\")\" -prune \\( -perm -020 -o -perm -002 \\) -print 2>/dev/null); \
          if [ -n \"$owner\" ] && [ -z \"$unsafe\" ]; then \
          v=$(\"$p\" --version 2>/dev/null || true); \
-         printf '{}%s\\n{}%s\\n' \"$p\" \"$v\"; fi; fi",
-        REMOTE_PATH_MARKER, REMOTE_VERSION_MARKER
-    ));
-    let output = crate::jobs::ssh::ssh_run(target, &probe, None)
-        .await
-        .map_err(|e| anyhow!("Can't reach '{host}' over SSH: {e}"))?;
-    if let Some(orx) = parse_remote_orx(&output) {
-        return Ok(Some(orx));
+         printf '%s\\n' \"$p\" | orx_probe_emit '{}'; \
+         printf '%s\\n' \"$v\" | orx_probe_emit '{}'; \
+         else \
+         printf '%s\\n' \"$p\" | orx_probe_emit '{}'; \
+         if [ -z \"$owner\" ]; then printf '%s\\n' \"$p\" | orx_probe_emit '{}'; fi; \
+         if [ -n \"$unsafe\" ]; then \
+         printf '%s\\n' \"$unsafe\" | orx_probe_emit '{}'; \
+         fi; fi; fi",
+        REMOTE_PATH_MARKER,
+        REMOTE_VERSION_MARKER,
+        REMOTE_REJECTED_MARKER,
+        REMOTE_REJECTED_OWNER_MARKER,
+        REMOTE_REJECTED_WRITABLE_MARKER,
+    )
+}
+
+/// Classify one probe result. Rejection markers take precedence over
+/// PATH/VERSION markers: the probe never prints both for one candidate, so a
+/// trusted-looking line next to a REJECTED marker was smuggled inside a value
+/// the probe echoed back, not emitted by the checks.
+fn classify_probe_output(output: &str) -> RemoteOrxProbe {
+    if let Some(rejection) = parse_remote_orx_rejection(output) {
+        RemoteOrxProbe::Rejected(rejection)
+    } else if let Some(orx) = parse_remote_orx(output) {
+        RemoteOrxProbe::Trusted(orx)
+    } else {
+        RemoteOrxProbe::Missing
     }
-    let paths = remote_install_paths(target, host).await?;
-    probe_remote_orx_path(target, host, &paths.binary).await
 }
 
 async fn probe_remote_orx_path(
     target: &SshTarget,
     host: &str,
     path: &str,
-) -> Result<Option<RemoteOrx>> {
+) -> Result<RemoteOrxProbe> {
     let path = crate::jobs::ssh::sh_quote(path);
-    let probe = remote_login_orx_cmd(&format!(
-        "p={path}; p=$(readlink -f \"$p\" 2>/dev/null || realpath \"$p\" 2>/dev/null || true); \
-         if [ -n \"$p\" ] && [ -x \"$p\" ]; then \
-         owner=$(find \"$p\" -prune \\( -user \"$(id -u)\" -o -user 0 \\) -print 2>/dev/null); \
-         unsafe=$(find \"$p\" \"$(dirname \"$p\")\" -prune \\( -perm -020 -o -perm -002 \\) -print 2>/dev/null); \
-         if [ -n \"$owner\" ] && [ -z \"$unsafe\" ]; then \
-         v=$(\"$p\" --version 2>/dev/null || true); \
-         printf '{}%s\\n{}%s\\n' \"$p\" \"$v\"; fi; fi",
-        REMOTE_PATH_MARKER, REMOTE_VERSION_MARKER,
-    ));
+    let probe = remote_login_orx_cmd(&remote_orx_probe(&format!(
+        "p={path}; p=$(readlink -f \"$p\" 2>/dev/null || realpath \"$p\" 2>/dev/null || true);"
+    )));
     let output = crate::jobs::ssh::ssh_run(target, &probe, None)
         .await
         .map_err(|error| anyhow!("Can't check OpenResearch on '{host}': {error}"))?;
-    Ok(parse_remote_orx(&output))
+    Ok(classify_probe_output(&output))
 }
 
 pub(crate) async fn install_remote_orx(
@@ -1989,11 +2114,13 @@ pub(crate) async fn install_remote_orx(
     crate::jobs::ssh::ssh_run(target, &command, None)
         .await
         .map_err(|error| anyhow!("Could not install OpenResearch on '{host}': {error}"))?;
-    probe_remote_orx_path(target, host, &paths.binary)
-        .await?
-        .ok_or_else(|| {
-            anyhow!("The installer finished, but no working `orx` binary was found on '{host}'.")
-        })
+    match probe_remote_orx_path(target, host, &paths.binary).await? {
+        RemoteOrxProbe::Trusted(orx) => Ok(orx),
+        RemoteOrxProbe::Rejected(rejection) => Err(remote_orx_rejection_error(host, &rejection)),
+        RemoteOrxProbe::Missing => Err(anyhow!(
+            "The installer finished, but no working `orx` binary was found on '{host}'."
+        )),
+    }
 }
 
 fn remote_installer(version: &str) -> String {
@@ -2495,6 +2622,144 @@ mod tests {
         .unwrap();
         assert_eq!(found.path, "/srv/users/me/bin/orx");
         assert_eq!(found.version, "1.2.3");
+    }
+
+    #[test]
+    fn discovery_reports_refused_candidates_with_the_reason() {
+        let rejection = parse_remote_orx_rejection(
+            "welcome\n\
+             ORX_REMOTE_REJECTED=/srv/shared/bin/orx\n\
+             ORX_REMOTE_REJECTED_WRITABLE=/srv/shared/bin\n",
+        )
+        .unwrap();
+        assert_eq!(rejection.path, "/srv/shared/bin/orx");
+        assert!(!rejection.not_owned);
+        assert_eq!(rejection.writable, ["/srv/shared/bin".to_string()]);
+
+        let rejection = parse_remote_orx_rejection(
+            "ORX_REMOTE_REJECTED=/opt/orx\nORX_REMOTE_REJECTED_OWNER=/opt/orx\n",
+        )
+        .unwrap();
+        assert!(rejection.not_owned);
+        assert!(rejection.writable.is_empty());
+
+        assert!(parse_remote_orx_rejection(
+            "ORX_REMOTE_PATH=/srv/users/me/bin/orx\nORX_REMOTE_VERSION=orx 1.2.3\n"
+        )
+        .is_none());
+        assert!(parse_remote_orx_rejection("garbage\n").is_none());
+
+        let error = remote_orx_rejection_error(
+            "example",
+            &RemoteOrxRejection {
+                path: "/srv/shared/bin/orx".into(),
+                not_owned: false,
+                writable: vec!["/srv/shared/bin".into()],
+            },
+        )
+        .to_string();
+        assert!(error.contains("/srv/shared/bin/orx"), "{error}");
+        assert!(
+            error.contains("/srv/shared/bin is group- or world-writable"),
+            "{error}"
+        );
+        assert!(error.contains("chmod go-w"), "{error}");
+    }
+
+    #[test]
+    fn probe_marks_refusals_without_running_the_binary() {
+        let probe = remote_orx_probe("p=/candidate;");
+        assert!(probe.contains("ORX_REMOTE_PATH="));
+        assert!(probe.contains("ORX_REMOTE_REJECTED="));
+        assert!(probe.contains("ORX_REMOTE_REJECTED_OWNER="));
+        assert!(probe.contains("ORX_REMOTE_REJECTED_WRITABLE="));
+        // `--version` runs the candidate: it must stay inside the trusted
+        // branch, before the `else` that only reports the refusal.
+        let version = probe.find("--version").unwrap();
+        let refusal = probe.find("ORX_REMOTE_REJECTED=").unwrap();
+        assert!(version < refusal);
+    }
+
+    #[test]
+    fn rejection_markers_outrank_injected_trust_lines() {
+        // A refused path can smuggle forged PATH/VERSION lines into the probe
+        // output (e.g. inside a filename containing a newline); the rejection
+        // must still win so the forged path is never executed.
+        let output = "ORX_REMOTE_REJECTED=/srv/shared/orx\n\
+                      ORX_REMOTE_PATH=/srv/shared/payload\n\
+                      ORX_REMOTE_VERSION=orx 0.2.18\n";
+        match classify_probe_output(output) {
+            RemoteOrxProbe::Rejected(rejection) => {
+                assert_eq!(rejection.path, "/srv/shared/orx")
+            }
+            _ => panic!("injected trust lines must not outrank a rejection"),
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn probe_executes_only_trusted_candidates() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let base = std::env::temp_dir().join(format!("orx-probe-{}", std::process::id()));
+        let trusted_dir = base.join("trusted");
+        let refused_dir = base.join("refused");
+        std::fs::create_dir_all(&trusted_dir).unwrap();
+        // A permissive umask must not turn the trusted fixture group-writable.
+        std::fs::set_permissions(&trusted_dir, std::fs::Permissions::from_mode(0o755)).unwrap();
+        std::fs::create_dir_all(&refused_dir).unwrap();
+        // World-writable install directory: the scenario the probe must refuse.
+        std::fs::set_permissions(&refused_dir, std::fs::Permissions::from_mode(0o777)).unwrap();
+
+        let flag = base.join("ran");
+        for dir in [&trusted_dir, &refused_dir] {
+            let binary = dir.join("orx");
+            std::fs::write(
+                &binary,
+                format!(
+                    "#!/bin/sh\ntouch {}\necho 'orx 9.9.9'\n",
+                    crate::jobs::ssh::sh_quote(flag.to_str().unwrap())
+                ),
+            )
+            .unwrap();
+            std::fs::set_permissions(&binary, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+
+        let run_probe = |binary: &std::path::Path| -> String {
+            let probe = remote_orx_probe(&format!(
+                "p={};",
+                crate::jobs::ssh::sh_quote(binary.to_str().unwrap())
+            ));
+            let output = std::process::Command::new("sh")
+                .arg("-c")
+                .arg(&probe)
+                .output()
+                .unwrap();
+            assert!(output.status.success(), "{output:?}");
+            String::from_utf8(output.stdout).unwrap()
+        };
+
+        let trusted = run_probe(&trusted_dir.join("orx"));
+        assert!(trusted.contains("ORX_REMOTE_PATH="), "{trusted}");
+        assert!(trusted.contains("ORX_REMOTE_VERSION="), "{trusted}");
+        assert!(flag.exists(), "trusted candidate should have run");
+        std::fs::remove_file(&flag).unwrap();
+
+        let refused = run_probe(&refused_dir.join("orx"));
+        assert!(refused.contains("ORX_REMOTE_REJECTED="), "{refused}");
+        assert!(
+            refused.contains("ORX_REMOTE_REJECTED_WRITABLE="),
+            "{refused}"
+        );
+        assert!(
+            !refused
+                .lines()
+                .any(|line| line.starts_with("ORX_REMOTE_PATH=")),
+            "{refused}"
+        );
+        assert!(!flag.exists(), "refused candidate must not run");
+
+        std::fs::remove_dir_all(&base).ok();
     }
 
     #[test]
