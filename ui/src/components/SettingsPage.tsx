@@ -2635,6 +2635,7 @@ const LOCALE_CHOICES: { id: Locale; label: string }[] = [
   { id: "ko", label: "한국어" },
   { id: "ja", label: "日本語" },
   { id: "pl", label: "Polski" },
+  { id: "ru", label: "Русский" },
 ];
 
 function AppearanceTab() {
