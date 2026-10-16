@@ -144,6 +144,42 @@ pub fn parse_mem(mem: &str) -> Result<String> {
     Ok(format!("{digits}{suffix}"))
 }
 
+/// Validate a per-run partition request: one partition name or a
+/// comma-separated list ("gpu", "gpu_p,batch"), which Slurm reads as "whichever
+/// starts the job first". Strict for the same reason as `parse_mem` — the value
+/// is interpolated into a `#SBATCH` directive — so names are limited to the
+/// characters Slurm partition names use in practice.
+pub fn parse_partition(partition: &str) -> Result<String> {
+    let names: Vec<&str> = partition.split(',').map(str::trim).collect();
+    let valid = |name: &&str| {
+        !name.is_empty()
+            && name
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '-' | '.'))
+    };
+    if !names.iter().all(valid) {
+        return Err(anyhow!(
+            "Unreadable partition {:?}. Use a partition name from `sinfo`, or a \
+             comma-separated list such as gpu,batch.",
+            partition
+        ));
+    }
+    Ok(names.join(","))
+}
+
+/// A per-run `--partition` wins over the saved default: one cluster often needs
+/// a different partition for its GPU runs than for its CPU runs. The saved
+/// default is passed through as stored, as it always has been.
+pub fn resolve_partition(explicit: Option<&str>, saved: Option<&str>) -> Result<Option<String>> {
+    match explicit {
+        Some(p) => parse_partition(p).map(Some),
+        None => Ok(saved
+            .map(str::trim)
+            .filter(|p| !p.is_empty())
+            .map(str::to_string)),
+    }
+}
+
 pub fn resolve_time_limit(explicit: Option<&str>, saved: Option<&str>) -> Result<Option<u64>> {
     explicit
         .or(saved)
@@ -615,6 +651,36 @@ mod tests {
         ] {
             assert!(parse_mem(bad).is_err(), "{bad:?} should be rejected");
         }
+    }
+
+    #[test]
+    fn partition_accepts_names_and_lists_and_rejects_the_rest() {
+        assert_eq!(parse_partition("gpu_p").unwrap(), "gpu_p");
+        assert_eq!(parse_partition(" gpu-a100.q ").unwrap(), "gpu-a100.q");
+        assert_eq!(parse_partition("gpu_p, batch").unwrap(), "gpu_p,batch");
+        for bad in [
+            "",
+            ",",
+            "gpu,",
+            "gpu p",
+            "gpu;id",
+            "gpu\n#SBATCH --account=someone-else",
+        ] {
+            assert!(parse_partition(bad).is_err(), "{bad:?} should be rejected");
+        }
+    }
+
+    #[test]
+    fn per_run_partition_overrides_the_saved_default() {
+        let resolve = |explicit, saved| resolve_partition(explicit, saved).unwrap();
+        assert_eq!(
+            resolve(Some("gpu_p"), Some("batch")).as_deref(),
+            Some("gpu_p")
+        );
+        assert_eq!(resolve(None, Some("batch")).as_deref(), Some("batch"));
+        assert_eq!(resolve(None, Some("  ")), None);
+        assert_eq!(resolve(None, None), None);
+        assert!(resolve_partition(Some("gpu p"), Some("batch")).is_err());
     }
 
     #[test]

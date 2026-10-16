@@ -7,6 +7,7 @@ committed snapshot, and submits the fixed command with `sbatch`.
 ```sh
 orx exp run <expId> --backend slurm --host login-node --flavor h100:2 --timeout 4h
 orx exp run <expId> --backend slurm --flavor h100:1 --cpus 16 --mem 128G
+orx exp run <expId> --backend slurm --partition gpu --flavor h100:1
 orx exp run <expId> --backend slurm
 ```
 
@@ -18,6 +19,11 @@ orx exp run <expId> --backend slurm
   the Slurm defaults saved by `orx compute configure slurm`, then the partition
   default, which is often one core and `DefMemPerCPU` of memory: too little to
   load most models. Size them for the workload, especially on GPU runs.
+- `--partition` sets `#SBATCH --partition` for this run, overriding the saved
+  default. Use it when the cluster keeps GPU and CPU nodes in separate
+  partitions; a comma-separated list (`gpu,batch`) lets Slurm use whichever
+  starts the job first. Unset falls back to the Slurm partition setting, then
+  the cluster's default partition.
 - There is no image flag. The cluster environment—modules, conda, and login
   profile—is used as-is.
 - `--timeout` covers the batch job. Unset falls back to the Slurm time-limit

@@ -736,6 +736,12 @@ pub fn validate_run_args(args: &crate::ExpRunArgs) -> Result<()> {
     if let Some(mem) = &args.mem {
         crate::jobs::slurm::parse_mem(mem)?;
     }
+    if let Some(partition) = &args.partition {
+        if args.backend.as_deref() != Some("slurm") {
+            return Err(anyhow!("--partition only applies with --backend slurm."));
+        }
+        crate::jobs::slurm::parse_partition(partition)?;
+    }
     if args.org.is_some() && args.backend.as_deref() != Some("openresearch") {
         return Err(anyhow!("--org only applies with --backend openresearch."));
     }
@@ -824,6 +830,7 @@ pub async fn submit(args: &crate::ExpRunArgs) -> Result<StoredRun> {
         timeout_secs: None,
         cpus_per_task: None,
         mem: None,
+        partition: None,
         source_digest: None,
         source_path: None,
         source_size: None,
@@ -1139,6 +1146,7 @@ pub(crate) mod tests {
             timeout: None,
             cpus: None,
             mem: None,
+            partition: None,
             force: false,
             chat_session_id: None,
             invocation_context: None,
@@ -1265,6 +1273,27 @@ pub(crate) mod tests {
         assert!(validate_run_args(&args).is_err());
         args.mem = None;
         args.cpus = Some(0);
+        assert!(validate_run_args(&args).is_err());
+    }
+
+    #[test]
+    fn partition_is_slurm_only_and_validated_before_submission() {
+        let mut args = tinker_args();
+        args.partition = Some("gpu".into());
+        for backend in crate::local::BACKENDS
+            .iter()
+            .filter(|backend| **backend != "slurm")
+        {
+            args.backend = Some(backend.to_string());
+            assert_eq!(
+                validate_run_args(&args).unwrap_err().to_string(),
+                "--partition only applies with --backend slurm.",
+                "{backend}"
+            );
+        }
+        args.backend = Some("slurm".into());
+        assert!(validate_run_args(&args).is_ok());
+        args.partition = Some("gpu\n#SBATCH --wrap=id".into());
         assert!(validate_run_args(&args).is_err());
     }
 

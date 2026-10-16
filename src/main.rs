@@ -578,6 +578,13 @@ pub struct ExpRunArgs {
     /// raises memory with it.
     #[arg(long)]
     pub mem: Option<String>,
+    /// Partition for the job (with `--backend slurm`): `#SBATCH --partition=`.
+    /// Omitted falls back to the slurm settings, then the cluster's default
+    /// partition. Clusters that keep GPU and CPU nodes in separate partitions
+    /// need this per run; a comma-separated list lets Slurm use whichever
+    /// starts the job first.
+    #[arg(long)]
+    pub partition: Option<String>,
     /// Launch even when another run is already in flight for this experiment.
     #[arg(long)]
     pub force: bool,

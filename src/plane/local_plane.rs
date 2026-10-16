@@ -280,6 +280,9 @@ impl LocalPlane {
                     let label = if backend == "local" { "dir" } else { "job" };
                     println!("  {label}  {job_id}");
                 }
+                if let Some(partition) = summary.slurm_partition {
+                    println!("  {partition}");
+                }
                 if let Some(resources) = summary.slurm_resources {
                     println!("  {resources}");
                 }
