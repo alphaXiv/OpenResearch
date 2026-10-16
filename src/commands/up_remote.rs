@@ -1697,6 +1697,7 @@ pub(crate) struct RemoteOrx {
 
 const REMOTE_PATH_MARKER: &str = "ORX_REMOTE_PATH=";
 const REMOTE_VERSION_MARKER: &str = "ORX_REMOTE_VERSION=";
+const REMOTE_UNSAFE_PERMISSIONS_MARKER: &str = "ORX_REMOTE_UNSAFE_PERMISSIONS=";
 const REMOTE_INSTALL_PATH_MARKER: &str = "ORX_REMOTE_INSTALL_PATH=";
 const REMOTE_DATABASE_PATH_MARKER: &str = "ORX_REMOTE_DATABASE_PATH=";
 const REMOTE_CACHE_PATH_MARKER: &str = "ORX_REMOTE_CACHE_PATH=";
@@ -1959,21 +1960,38 @@ async fn probe_remote_orx_path(
     host: &str,
     path: &str,
 ) -> Result<Option<RemoteOrx>> {
+    let probe = remote_login_orx_cmd(&remote_orx_path_probe(path));
+    let output = crate::jobs::ssh::ssh_run(target, &probe, None)
+        .await
+        .map_err(|error| anyhow!("Can't check OpenResearch on '{host}': {error}"))?;
+    parse_remote_orx_path_probe(&output, host)
+}
+
+fn remote_orx_path_probe(path: &str) -> String {
     let path = crate::jobs::ssh::sh_quote(path);
-    let probe = remote_login_orx_cmd(&format!(
+    format!(
         "p={path}; p=$(readlink -f \"$p\" 2>/dev/null || realpath \"$p\" 2>/dev/null || true); \
          if [ -n \"$p\" ] && [ -x \"$p\" ]; then \
          owner=$(find \"$p\" -prune \\( -user \"$(id -u)\" -o -user 0 \\) -print 2>/dev/null); \
          unsafe=$(find \"$p\" \"$(dirname \"$p\")\" -prune \\( -perm -020 -o -perm -002 \\) -print 2>/dev/null); \
          if [ -n \"$owner\" ] && [ -z \"$unsafe\" ]; then \
          v=$(\"$p\" --version 2>/dev/null || true); \
-         printf '{}%s\\n{}%s\\n' \"$p\" \"$v\"; fi; fi",
-        REMOTE_PATH_MARKER, REMOTE_VERSION_MARKER,
-    ));
-    let output = crate::jobs::ssh::ssh_run(target, &probe, None)
-        .await
-        .map_err(|error| anyhow!("Can't check OpenResearch on '{host}': {error}"))?;
-    Ok(parse_remote_orx(&output))
+         printf '{}%s\\n{}%s\\n' \"$p\" \"$v\"; \
+         elif [ -n \"$unsafe\" ]; then printf '{}%s\\n' \"$p\"; fi; fi",
+        REMOTE_PATH_MARKER, REMOTE_VERSION_MARKER, REMOTE_UNSAFE_PERMISSIONS_MARKER,
+    )
+}
+
+fn parse_remote_orx_path_probe(output: &str, host: &str) -> Result<Option<RemoteOrx>> {
+    if let Some(path) = marker_value(output, REMOTE_UNSAFE_PERMISSIONS_MARKER) {
+        return Err(anyhow!(
+            "OpenResearch found `orx` on '{host}' at '{path}', but it or its parent directory \
+             is writable by group or others. Review their permissions on the remote host; \
+             use `chmod go-w` only on paths that are not intentionally shared, then reconnect. \
+             Reinstalling alone does not fix existing directory permissions."
+        ));
+    }
+    Ok(parse_remote_orx(output))
 }
 
 pub(crate) async fn install_remote_orx(
@@ -2417,6 +2435,93 @@ mod tests {
         assert!(command.contains("/releases/download/v1.2.3/"));
         assert!(!command.contains("releases/latest"));
         assert!(command.contains("${CARGO_HOME:-$HOME/.cargo}/bin"));
+    }
+
+    #[test]
+    fn remote_orx_path_probe_explains_rejected_permissions() {
+        let error = parse_remote_orx_path_probe(
+            "login banner\nORX_REMOTE_UNSAFE_PERMISSIONS=/home/example/.cargo/bin/orx\n",
+            "example",
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(error.contains("group or others"));
+        assert!(error.contains("/home/example/.cargo/bin/orx"));
+        assert!(error.contains("chmod go-w"));
+        assert!(error.contains("shared"));
+        assert!(parse_remote_orx_path_probe("login banner\n", "example")
+            .unwrap()
+            .is_none());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn remote_orx_path_probe_rejects_writable_installations_without_executing_them() {
+        use std::os::unix::fs::{symlink, PermissionsExt};
+
+        let root = std::env::temp_dir().join(format!("orx-probe-{}", uuid::Uuid::new_v4()));
+        let bin = root.join("bin with 'quote");
+        std::fs::create_dir_all(&bin).unwrap();
+        let binary = bin.join("orx");
+        let ran = root.join("ran");
+        std::fs::write(
+            &binary,
+            format!(
+                "#!/bin/sh\nprintf ran > {}\nprintf 'orx 1.2.3\\n'\n",
+                crate::jobs::ssh::sh_quote(ran.to_str().unwrap())
+            ),
+        )
+        .unwrap();
+        let link = root.join("orx-link");
+        symlink(&binary, &link).unwrap();
+
+        for (dir_mode, file_mode) in [
+            (0o755, 0o755),
+            (0o775, 0o755),
+            (0o757, 0o755),
+            (0o755, 0o775),
+            (0o755, 0o757),
+        ] {
+            std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(dir_mode)).unwrap();
+            std::fs::set_permissions(&binary, std::fs::Permissions::from_mode(file_mode)).unwrap();
+            for path in [&binary, &link] {
+                let output = std::process::Command::new("sh")
+                    .arg("-c")
+                    .arg(remote_orx_path_probe(path.to_str().unwrap()))
+                    .output()
+                    .unwrap();
+                assert!(output.status.success());
+                let stdout = String::from_utf8(output.stdout).unwrap();
+                let result = parse_remote_orx_path_probe(&stdout, "example");
+                if dir_mode == 0o755 && file_mode == 0o755 {
+                    assert_eq!(result.unwrap().unwrap().version, "1.2.3");
+                    assert!(ran.exists());
+                    std::fs::remove_file(&ran).unwrap();
+                } else {
+                    assert!(!ran.exists(), "rejected binary must not be executed");
+                    assert!(
+                        result.is_err(),
+                        "permission rejection must be explained: {stdout}"
+                    );
+                }
+            }
+        }
+
+        std::fs::set_permissions(&binary, std::fs::Permissions::from_mode(0o644)).unwrap();
+        for path in [&binary, &root.join("missing-orx")] {
+            let output = std::process::Command::new("sh")
+                .arg("-c")
+                .arg(remote_orx_path_probe(path.to_str().unwrap()))
+                .output()
+                .unwrap();
+            assert!(output.status.success());
+            let stdout = String::from_utf8(output.stdout).unwrap();
+            assert!(parse_remote_orx_path_probe(&stdout, "example")
+                .unwrap()
+                .is_none());
+            assert!(!ran.exists());
+        }
+        std::fs::remove_dir_all(&root).unwrap();
     }
 
     #[test]
