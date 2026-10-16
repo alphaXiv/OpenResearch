@@ -234,9 +234,10 @@ fn render_sbatch(spec: &SlurmJobSpec) -> String {
     // sbatch payload runs the job — the login-node setup script (below) is a
     // git clone, so it keeps the raw env (see jobs::default_python_env).
     format!(
-        "#!/usr/bin/env bash\n{directives}\n{exports}\n(\ncd repo || exit 97\n{command}\n)\ncode=$?\necho \"$code\" > exit_code\nexit \"$code\"\n",
+        "#!/usr/bin/env bash\n{directives}\n{exports}\n{tensorboard}\n(\ncd repo || exit 97\n{command}\n)\ncode=$?\necho \"$code\" > exit_code\nexit \"$code\"\n",
         directives = directives.join("\n"),
         exports = render_exports(&super::default_python_env(&spec.env)),
+        tensorboard = crate::compute::TENSORBOARD_LOGDIR_EXPORT,
         command = spec.command,
     )
 }
