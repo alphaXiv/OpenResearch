@@ -4451,6 +4451,10 @@ async fn delete_artifact(
 ) -> ApiResult {
     reject_if_moving(&state)?;
     blocking_api(move || {
+        let _admission = state
+            .project_lifecycle
+            .admit(&id)
+            .ok_or_else(|| bad_request("project deletion is in progress"))?;
         let store = Store::open()?;
         let project = store
             .get_local_project(&id)?
@@ -9713,6 +9717,44 @@ mod tests {
         assert!(lifecycle.begin_delete("p1").is_none());
         drop(creation);
         assert!(lifecycle.begin_delete("p1").is_some());
+    }
+
+    #[tokio::test]
+    async fn artifact_delete_rejects_during_project_cleanup() {
+        let agent = Arc::new(AgentHost::new(None));
+        let codex = Arc::new(local::codex::CodexHost::new());
+        let claude = Arc::new(local::claude::ClaudeHost::new());
+        let lifecycle = Arc::new(ProjectLifecycle::default());
+        let _deletion = lifecycle.begin_delete("p1").unwrap();
+        let state = AppState {
+            agent: agent.clone(),
+            chat: Arc::new(ChatHost::new(agent, codex, claude.clone())),
+            claude,
+            harnesses: Default::default(),
+            project_lifecycle: lifecycle,
+            project_creation_lock: Default::default(),
+            publication_locks: Default::default(),
+            harness_fill_in_flight: Default::default(),
+            claude_catalog_queue: Default::default(),
+            data_dir_move_in_progress: Default::default(),
+            data_dir_gate: Default::default(),
+            remote_sessions: crate::commands::up_remote::RemoteSessionManager::new(),
+            remote_instance_id: None,
+            stopping: Default::default(),
+            dashboard_lock: Default::default(),
+            restart: Default::default(),
+        };
+        let error = delete_artifact(
+            State(state),
+            Path("p1".into()),
+            Query(ArtifactPathQuery {
+                path: "report.md".into(),
+            }),
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(error.0, StatusCode::BAD_REQUEST);
+        assert_eq!(error.1, "project deletion is in progress");
     }
 
     #[tokio::test]
