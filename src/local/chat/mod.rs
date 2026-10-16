@@ -2382,8 +2382,6 @@ pub struct ChatHost {
     /// Set once `orx up` commits to restarting into an update; no turn starts after.
     restarting: std::sync::atomic::AtomicBool,
     deleting_sessions: Arc<std::sync::Mutex<HashSet<String>>>,
-    /// Serialize shared-native ownership checks with local row removal.
-    pub(crate) native_deletion: Mutex<()>,
     /// Per-session serialization for `respond`. Answering a prompt reads the
     /// card, delivers the answer (a non-idempotent POST for inline harnesses),
     /// and marks it resolved — steps that must not interleave for one session,
@@ -3388,7 +3386,6 @@ impl ChatHost {
             durable_turns: std::sync::Mutex::new(HashMap::new()),
             restarting: std::sync::atomic::AtomicBool::new(false),
             deleting_sessions: Arc::new(std::sync::Mutex::new(HashSet::new())),
-            native_deletion: Mutex::new(()),
             respond_locks: Mutex::new(HashMap::new()),
             msg_write: std::sync::Mutex::new(()),
             pending_permissions: std::sync::Mutex::new(HashMap::new()),
@@ -6638,8 +6635,8 @@ impl ChatHost {
             .lock()
             .unwrap()
             .retain(|(queued_session_id, _), _| queued_session_id != session_id);
-        let _native_deletion = self.native_deletion.lock().await;
         let store = Store::open()?;
+        let _native_deletion = store.lock_native_deletion()?;
         let session = store.get_chat_session(session_id)?;
         let worktree_owner = store.chat_worktree_owner(session_id)?;
         Self::delete_native_sessions(&[session_id.to_string()]).await?;
