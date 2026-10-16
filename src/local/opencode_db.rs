@@ -179,6 +179,71 @@ fn sidecar(path: &Path, suffix: &str) -> PathBuf {
     PathBuf::from(name)
 }
 
+pub(super) fn delete_sessions(
+    path: &Path,
+    ids: &BTreeSet<String>,
+    retained: &BTreeSet<String>,
+) -> Result<()> {
+    if inspect(path)? == DatabaseState::Empty {
+        return Ok(());
+    }
+    let mut connection = Connection::open_with_flags(path, OpenFlags::SQLITE_OPEN_READ_WRITE)?;
+    connection.busy_timeout(std::time::Duration::from_secs(5))?;
+    connection.execute_batch("PRAGMA foreign_keys = ON;")?;
+    let transaction =
+        connection.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+    let mut deleting = ids.difference(retained).cloned().collect::<BTreeSet<_>>();
+    let mut children = Vec::new();
+    for table in ["session", "session_v2"] {
+        if !has_columns(&transaction, table, &["id", "parent_id"])? {
+            continue;
+        }
+        let mut query = transaction.prepare(&format!(
+            "SELECT id, parent_id FROM {table} WHERE parent_id IS NOT NULL"
+        ))?;
+        children.extend(
+            query
+                .query_map([], |row| {
+                    Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+                })?
+                .collect::<std::result::Result<Vec<_>, _>>()?,
+        );
+    }
+    loop {
+        let before = deleting.len();
+        for (child, parent) in &children {
+            if deleting.contains(parent) && !retained.contains(child) {
+                deleting.insert(child.clone());
+            }
+        }
+        if before == deleting.len() {
+            break;
+        }
+    }
+    for id in deleting {
+        // Explicit deletes also cover older stores without foreign-key cascades.
+        for (table, column) in [
+            ("event", "aggregate_id"),
+            ("event_sequence", "aggregate_id"),
+            ("part", "session_id"),
+            ("message", "session_id"),
+            ("session_message", "session_id"),
+            ("session_input", "session_id"),
+            ("session_context_epoch", "session_id"),
+            ("todo", "session_id"),
+            ("session_share", "session_id"),
+            ("session_v2", "id"),
+            ("session", "id"),
+        ] {
+            if has_columns(&transaction, table, &[column])? {
+                transaction.execute(&format!("DELETE FROM {table} WHERE {column} = ?1"), [&id])?;
+            }
+        }
+    }
+    transaction.commit()?;
+    Ok(())
+}
+
 #[derive(Serialize, Deserialize)]
 struct MigrationJournal {
     source_state: DatabaseState,
@@ -641,6 +706,104 @@ mod tests {
 
         fn path(&self) -> PathBuf {
             self.0.path().join("opencode.db")
+        }
+    }
+
+    #[test]
+    fn deleting_sessions_purges_content_and_children_but_preserves_other_chats() {
+        for schema in [V1.to_string(), V2.to_string(), format!("{V1}{V2}")] {
+            let fixture = Fixture::new();
+            let path = fixture.path();
+            let connection = Connection::open(&path).unwrap();
+            connection.execute_batch(&schema).unwrap();
+            connection.execute_batch(
+                "CREATE TABLE event_sequence (aggregate_id TEXT PRIMARY KEY);
+                 CREATE TABLE event (aggregate_id TEXT REFERENCES event_sequence(aggregate_id), data TEXT);",
+            ).unwrap();
+            for table in ["session", "session_v2"] {
+                if !has_columns(&connection, table, &["id"]).unwrap() {
+                    continue;
+                }
+                connection
+                    .execute_batch(&format!(
+                        "ALTER TABLE {table} ADD COLUMN parent_id TEXT;
+                     INSERT OR REPLACE INTO {table} (id, directory, parent_id) VALUES
+                       ('history', '/deleted', NULL), ('child', '/deleted', 'history'),
+                       ('grandchild', '/deleted', 'child'),
+                       ('retained', '/kept', 'history'), ('other', '/other', NULL);"
+                    ))
+                    .unwrap();
+            }
+            for id in ["history", "child", "grandchild", "retained", "other"] {
+                for table in ["message", "part", "session_message"] {
+                    if has_columns(&connection, table, &["session_id"]).unwrap() {
+                        connection.execute(
+                            &format!("INSERT INTO {table} (id, session_id, data) VALUES (?1, ?1, 'private content')"),
+                            [id],
+                        ).unwrap();
+                    }
+                }
+                connection
+                    .execute("INSERT INTO event_sequence VALUES (?1)", [id])
+                    .unwrap();
+                connection
+                    .execute("INSERT INTO event VALUES (?1, 'private event')", [id])
+                    .unwrap();
+            }
+            let ids = BTreeSet::from(["history".into()]);
+            let retained = BTreeSet::from(["retained".into()]);
+            delete_sessions(&path, &ids, &retained).unwrap();
+            delete_sessions(&path, &ids, &retained).unwrap();
+            for (table, column) in [
+                ("session", "id"),
+                ("session_v2", "id"),
+                ("message", "session_id"),
+                ("part", "session_id"),
+                ("session_message", "session_id"),
+                ("event", "aggregate_id"),
+                ("event_sequence", "aggregate_id"),
+            ] {
+                if !has_columns(&connection, table, &[column]).unwrap() {
+                    continue;
+                }
+                let mut query = connection
+                    .prepare(&format!("SELECT {column} FROM {table} ORDER BY {column}"))
+                    .unwrap();
+                let remaining = query
+                    .query_map([], |row| row.get::<_, String>(0))
+                    .unwrap()
+                    .collect::<std::result::Result<Vec<_>, _>>()
+                    .unwrap();
+                assert_eq!(remaining, ["other", "retained"], "{table}");
+            }
+        }
+    }
+
+    #[test]
+    fn native_deletion_rolls_back_on_failure_and_does_not_create_missing_databases() {
+        let fixture = Fixture::new();
+        let path = fixture.path();
+        let ids = BTreeSet::from(["history".into()]);
+        delete_sessions(&path, &ids, &BTreeSet::new()).unwrap();
+        assert!(!path.exists());
+        let connection = Connection::open(&path).unwrap();
+        connection.execute_batch(V1).unwrap();
+        connection
+            .execute_batch(
+                "INSERT INTO message VALUES ('msg', 'history', 'private content');
+             INSERT INTO part VALUES ('part', 'msg', 'history', 'private content');
+             CREATE TRIGGER fail_delete BEFORE DELETE ON session
+             BEGIN SELECT RAISE(ABORT, 'cannot purge'); END;",
+            )
+            .unwrap();
+        assert!(delete_sessions(&path, &ids, &BTreeSet::new()).is_err());
+        for table in ["session", "message", "part"] {
+            let count: i64 = connection
+                .query_row(&format!("SELECT COUNT(*) FROM {table}"), [], |row| {
+                    row.get(0)
+                })
+                .unwrap();
+            assert_eq!(count, 1, "{table}");
         }
     }
 

@@ -184,6 +184,21 @@ pub(crate) fn opencode_has_session(db: &Path, native_id: &str) -> Result<bool> {
     opencode_database::has_session(db, native_id)
 }
 
+pub fn delete_opencode_sessions(
+    ids: &std::collections::BTreeSet<String>,
+    retained: &std::collections::BTreeSet<String>,
+) -> Result<()> {
+    if ids.is_empty() {
+        return Ok(());
+    }
+    let isolated = opencode_db(NativeStore::Isolated);
+    let legacy = opencode_db(NativeStore::Legacy);
+    for db in std::collections::BTreeSet::from([isolated, legacy]) {
+        opencode_database::delete_sessions(&db, ids, retained)?;
+    }
+    Ok(())
+}
+
 pub fn codex_sqlite_override(store: NativeStore, home: &Path) -> Option<String> {
     (store == NativeStore::Isolated).then(|| format!("sqlite_home={}", toml_string(home)))
 }

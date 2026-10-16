@@ -2154,6 +2154,47 @@ impl Store {
         Ok(rows.collect::<std::result::Result<Vec<_>, _>>()?)
     }
 
+    pub fn opencode_sessions_for_deletion(
+        &self,
+        chat_ids: &[String],
+    ) -> Result<(
+        std::collections::BTreeSet<String>,
+        std::collections::BTreeSet<String>,
+    )> {
+        let mut query = self.conn.prepare(
+            "WITH refs AS (
+                SELECT id AS chat_id, native_session_id AS native_id FROM chat_sessions
+                WHERE harness = 'opencode'
+                UNION
+                SELECT s.id, m.base_native_session_id FROM chat_sessions s
+                JOIN chat_messages m ON m.session_id = s.id WHERE s.harness = 'opencode'
+                UNION
+                SELECT s.id, m.result_native_session_id FROM chat_sessions s
+                JOIN chat_messages m ON m.session_id = s.id WHERE s.harness = 'opencode'
+             )
+             SELECT native_id, MAX(chat_id IN (SELECT value FROM json_each(?1))),
+                 MAX(chat_id NOT IN (SELECT value FROM json_each(?1))) FROM refs
+             WHERE native_id IS NOT NULL GROUP BY native_id",
+        )?;
+        let mut deleting = std::collections::BTreeSet::new();
+        let mut retained = std::collections::BTreeSet::new();
+        for row in query.query_map([serde_json::to_string(chat_ids)?], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, bool>(1)?,
+                row.get::<_, bool>(2)?,
+            ))
+        })? {
+            let (native_id, belongs_to_chat, shared) = row?;
+            if shared {
+                retained.insert(native_id);
+            } else if belongs_to_chat {
+                deleting.insert(native_id);
+            }
+        }
+        Ok((deleting, retained))
+    }
+
     pub fn delete_chat_session(&self, id: &str) -> Result<()> {
         let tx = self.begin_immediate()?;
         let has_children: bool = tx.query_row(
@@ -4466,6 +4507,46 @@ mod tests {
             Some("m2")
         );
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn native_deletion_includes_inactive_branches_and_preserves_shared_sessions() {
+        let dir = crate::local::git::TemporaryDirectory::new("orx-native-delete-refs").unwrap();
+        let store = Store::open_at(dir.path().to_path_buf()).unwrap();
+        for (id, native_id) in [("delete", "current"), ("keep", "shared")] {
+            let mut session = chat_session_fixture(id);
+            session.harness = "opencode".into();
+            session.native_session_id = Some(native_id.into());
+            store.create_chat_session(&session).unwrap();
+        }
+        store
+            .conn
+            .execute_batch(
+                "INSERT INTO chat_messages (id, session_id, role, parts_json, created_at,
+                 base_native_session_id, result_native_session_id)
+             VALUES ('branch', 'delete', 'assistant', '[]', 1, 'old', 'shared'),
+                    ('other-branch', 'keep', 'assistant', '[]', 1, NULL, 'kept-branch');",
+            )
+            .unwrap();
+        let (deleting, retained) = store
+            .opencode_sessions_for_deletion(&["delete".into()])
+            .unwrap();
+        assert_eq!(deleting, ["current".into(), "old".into()].into());
+        assert_eq!(retained, ["kept-branch".into(), "shared".into()].into());
+        let (deleting, retained) = store
+            .opencode_sessions_for_deletion(&["delete".into(), "keep".into()])
+            .unwrap();
+        assert_eq!(
+            deleting,
+            [
+                "current".into(),
+                "old".into(),
+                "kept-branch".into(),
+                "shared".into()
+            ]
+            .into()
+        );
+        assert!(retained.is_empty());
     }
 
     fn chat_session_fixture(id: &str) -> StoredChatSession {

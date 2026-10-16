@@ -2100,6 +2100,11 @@ async fn delete_project_inner(state: AppState, id: String, query: DeleteProjectQ
     // Refuse before anything is deleted; remove only once the rows are gone.
     let artifacts =
         local::files::plan_project_artifact_cleanup(&project, query.delete_artifacts, &projects)?;
+    let session_ids = sessions
+        .iter()
+        .map(|session| session.id.clone())
+        .collect::<Vec<_>>();
+    local::chat::ChatHost::delete_native_sessions(&session_ids).await?;
     store.delete_local_project(&id)?;
     for session in &sessions {
         state.chat.claude.forget_session(&session.id).await;
