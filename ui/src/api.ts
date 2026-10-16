@@ -381,8 +381,8 @@ export const getProjectStarterPrompts = (
     signal,
   );
 
-export const deleteProject = (projectId: string) =>
-  writeResponse(`/api/projects/${projectId}`, { method: "DELETE" }).then(async (r) => {
+export const deleteProject = (projectId: string, deleteArtifacts = false) =>
+  writeResponse(`/api/projects/${projectId}?deleteArtifacts=${deleteArtifacts}`, { method: "DELETE" }).then(async (r) => {
     if (!r.ok) {
       const body = await r.json().catch(() => null);
       throw new Error(body?.error ?? `delete failed (${r.status})`);

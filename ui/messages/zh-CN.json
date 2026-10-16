@@ -16,6 +16,8 @@
   "settings_cpu_cores": "{count} 个 CPU 核心",
   "settings_gpu_count": "{count} 个 GPU",
   "$schema": "https://inlang.com/schema/inlang-message-format",
+  "projects_delete_artifacts_kept": "除非选中下方选项，否则将保留产物文件。空的产物文件夹会自动删除。",
+  "projects_delete_artifacts_remove": "永久删除此项目的产物文件",
   "app_close_panel": "关闭面板",
   "app_current_task": "当前任务",
   "app_entire_project": "整个项目",

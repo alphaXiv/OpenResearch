@@ -16,6 +16,8 @@
   "settings_cpu_cores": "CPU cores: {count}",
   "settings_gpu_count": "GPU × {count}",
   "$schema": "https://inlang.com/schema/inlang-message-format",
+  "projects_delete_artifacts_kept": "Artifacts are kept unless you select the option below. Empty artifact folders are removed automatically.",
+  "projects_delete_artifacts_remove": "Permanently delete this project's artifact files",
   "app_close_panel": "Close panel",
   "app_current_task": "Current task",
   "app_entire_project": "Entire project",

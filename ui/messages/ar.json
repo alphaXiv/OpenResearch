@@ -16,6 +16,8 @@
   "settings_cpu_cores": "أنوية المعالج: {count}",
   "settings_gpu_count": "معالج رسومات × {count}",
   "$schema": "https://inlang.com/schema/inlang-message-format",
+  "projects_delete_artifacts_kept": "تُحفظ الملفات الناتجة ما لم تحدد الخيار أدناه. تُحذف مجلدات الملفات الناتجة الفارغة تلقائيًا.",
+  "projects_delete_artifacts_remove": "حذف ملفات النتائج لهذا المشروع نهائيًا",
   "app_close_panel": "إغلاق اللوحة",
   "app_current_task": "المهمة الحالية",
   "app_entire_project": "المشروع بالكامل",

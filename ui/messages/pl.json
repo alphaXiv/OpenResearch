@@ -1,5 +1,7 @@
 {
   "$schema": "https://inlang.com/schema/inlang-message-format",
+  "projects_delete_artifacts_kept": "Artefakty zostaną zachowane, chyba że wybierzesz poniższą opcję. Puste foldery artefaktów są usuwane automatycznie.",
+  "projects_delete_artifacts_remove": "Trwale usuń pliki artefaktów tego projektu",
   "workspace_active_experiments": "Aktywne eksperymenty",
   "files_empty_description": "Tutaj pojawią się pliki obszaru roboczego. Poproś agenta o utworzenie pliku, aby rozpocząć.",
   "experiments_empty_description": "Tutaj pojawią się eksperymenty i ich uruchomienia. Poproś agenta o skonfigurowanie pierwszego eksperymentu.",
