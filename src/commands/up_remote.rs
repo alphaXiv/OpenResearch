@@ -2618,10 +2618,7 @@ mod tests {
 
     #[test]
     fn extra_opts_land_before_the_separator() {
-        let target = SshTarget {
-            dest: "mybox".into(),
-            extra_opts: vec!["-p".into(), "2222".into()],
-        };
+        let target = SshTarget::host_port("mybox".into(), 2222, HostKeyPolicy::UserConfig);
         let args =
             crate::jobs::ssh::forward_args(&target, "127.0.0.1:7:localhost:7", "orx up").unwrap();
         let sep = args.iter().position(|a| a == "--").unwrap();
