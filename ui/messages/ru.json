@@ -1021,6 +1021,13 @@
   "settings_not_initialized": "не инициализирован",
   "settings_use_existing_github_repository": "Использовать этот репозиторий для автоматической отправки веток экспериментов, если подключённый аккаунт может в него писать. Иначе OpenResearch создаст отдельный приватный репозиторий для совместной работы.",
   "settings_create_private_github_repository": "Создать приватный репозиторий и автоматически отправлять туда ветки экспериментов, чтобы их видели соавторы.",
+  "settings_github_new_repository_destination": "Где создавать новые репозитории",
+  "settings_github_resolving_account": "Определяем аккаунт…",
+  "settings_github_account_unavailable": "Аккаунт недоступен",
+  "settings_github_destination_organization": "Организация",
+  "settings_github_organization_label": "Организация GitHub",
+  "settings_github_destination_owner": "Если OpenResearch создаст приватный репозиторий, он появится в {url}.",
+  "settings_github_destination_choose_account": "Перед включением синхронизации выберите аккаунт GitHub или дождитесь, пока он определится.",
   "settings_make_default": "Сделать основным",
   "storage_source_env": "Переменная окружения ORX_DATA_DIR",
   "storage_source_saved": "Сохранённая настройка",
@@ -1287,5 +1294,11 @@
   "sidebar_reveal_project": "Показать в Finder",
   "sidebar_filter": "Фильтр",
   "sidebar_group_by": "Группировать по",
-  "sidebar_one_list": "Одним списком"
+  "sidebar_one_list": "Одним списком",
+  "settings_github_manage_project": "Управление существующим проектом",
+  "settings_github_choose_project": "Выберите проект…",
+  "settings_github_enable_under": "Включить синхронизацию в…",
+  "settings_overleaf_file_sync": "Синхронизировать файлы статьи",
+  "settings_overleaf_live_sync": "Синхронизировать правки в реальном времени",
+  "settings_overleaf_intro": "Учётные данные остаются на этом компьютере. Отдельные статьи подключаются из редактора."
 }

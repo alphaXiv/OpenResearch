@@ -1021,6 +1021,13 @@
   "settings_not_initialized": "nie zainicjowano",
   "settings_use_existing_github_repository": "Użyj tego repozytorium do automatycznego wysyłania gałęzi eksperymentów, jeśli połączone konto może w nim zapisywać. W przeciwnym razie OpenResearch utworzy osobne prywatne repozytorium do współpracy.",
   "settings_create_private_github_repository": "Utwórz prywatne repozytorium i automatycznie wysyłaj gałęzie eksperymentów, aby współpracownicy mogli je przeglądać.",
+  "settings_github_new_repository_destination": "Miejsce docelowe nowego repozytorium",
+  "settings_github_resolving_account": "Ustalanie konta…",
+  "settings_github_account_unavailable": "Konto niedostępne",
+  "settings_github_destination_organization": "Organizacja",
+  "settings_github_organization_label": "Organizacja GitHub",
+  "settings_github_destination_owner": "Jeśli OpenResearch utworzy prywatne repozytorium, znajdzie się ono w {url}.",
+  "settings_github_destination_choose_account": "Przed włączeniem synchronizacji wybierz lub ustal dokładne konto GitHub.",
   "settings_make_default": "Ustaw jako domyślne",
   "storage_source_env": "Zmienna środowiskowa ORX_DATA_DIR",
   "storage_source_saved": "zapisane ustawienie",
@@ -1287,5 +1294,11 @@
   "sidebar_reveal_project": "Pokaż w Finderze",
   "sidebar_filter": "Filtruj",
   "sidebar_group_by": "Grupuj według",
-  "sidebar_one_list": "Na jednej liście"
+  "sidebar_one_list": "Na jednej liście",
+  "settings_github_manage_project": "Zarządzaj istniejącym projektem",
+  "settings_github_choose_project": "Wybierz projekt…",
+  "settings_github_enable_under": "Włącz synchronizację w…",
+  "settings_overleaf_file_sync": "Synchronizuj pliki artykułu",
+  "settings_overleaf_live_sync": "Synchronizuj zmiany na żywo",
+  "settings_overleaf_intro": "Dane logowania pozostają na tym komputerze. Łącz poszczególne artykuły w edytorze."
 }

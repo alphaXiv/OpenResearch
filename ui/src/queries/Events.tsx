@@ -8,6 +8,7 @@ import {
   getUpdateStatusQuery,
 } from "./settings";
 import { dispatchChat } from "./chatStore";
+import { inputSummaryChanged } from "./chatState";
 import { useEffect } from "react";
 import {
   emitEntity,
@@ -73,10 +74,11 @@ export function QueryEvents() {
   useEffect(() => {
     let activityTimer: ReturnType<typeof setTimeout> | undefined;
     let sidebarTimer: ReturnType<typeof setTimeout> | undefined;
+    const promptStates = new Map<string, string>();
     const refreshSidebar = () => {
       sidebarTimer ??= setTimeout(() => {
         sidebarTimer = undefined;
-        invalidateFamilies(["listSidebarChatSessions"], scope);
+        invalidateFamilies(["listSidebarChatSessions", "listChatSessions"], scope);
       }, 100);
     };
     const refreshActivity = () => {
@@ -89,7 +91,7 @@ export function QueryEvents() {
     const offMove = onDataDirMove((event) => { if (event.type === "done") invalidateFamilies(["getDataDir"], scope); });
     const offChat = onChatEvent((event) => {
       if (!isCurrentScope(scope)) return;
-      if (event.type === "session" || event.type === "sessionDeleted") refreshSidebar();
+      if (inputSummaryChanged(event, promptStates)) refreshSidebar();
       if (event.type === "session") markLiveUpdate(queryClient, listChatSessionsQuery(event.session.projectId).queryKey, event.session.id);
       else if (event.type === "busy" || event.type === "usage") markLiveUpdate(queryClient, [...scope, "listChatSessions"], event.sessionId);
       if (event.type === "message" || event.type === "queued" || event.type === "branch") {

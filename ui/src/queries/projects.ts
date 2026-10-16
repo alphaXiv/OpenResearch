@@ -45,6 +45,12 @@ export const githubAccountQuery = () => queryOptions({
   staleTime: 300_000,
 });
 
+export const githubOrganizationsQuery = () => queryOptions({
+  queryKey: workspaceKey("githubOrganizations"),
+  queryFn: ({ signal }) => api.githubOrganizations(signal),
+  staleTime: 300_000,
+});
+
 export const githubProjectRepoPreviewQuery = (name: string) => queryOptions({
   queryKey: workspaceKey("githubProjectRepoPreview", name),
   queryFn: ({ signal }) => api.githubProjectRepoPreview(name, signal),

@@ -1020,6 +1020,13 @@
   "settings_not_initialized": "غير مهيّأ",
   "settings_use_existing_github_repository": "استخدم هذا المستودع لرفع فروع التجارب تلقائيًا عندما يملك حسابك المتصل صلاحية الكتابة فيه. وإلا، ينشئ OpenResearch مستودعًا خاصًا منفصلًا للتعاون.",
   "settings_create_private_github_repository": "أنشئ مستودعًا خاصًا وارفع فروع التجارب تلقائيًا ليطّلع عليها المتعاونون.",
+  "settings_github_new_repository_destination": "وجهة المستودع الجديد",
+  "settings_github_resolving_account": "جارٍ تحديد الحساب…",
+  "settings_github_account_unavailable": "الحساب غير متاح",
+  "settings_github_destination_organization": "مؤسسة",
+  "settings_github_organization_label": "مؤسسة GitHub",
+  "settings_github_destination_owner": "إذا أنشأ OpenResearch مستودعًا خاصًا، فسيكون ضمن {url}.",
+  "settings_github_destination_choose_account": "اختر حساب GitHub المحدد أو حدّده قبل تفعيل المزامنة.",
   "settings_make_default": "جعله افتراضيًا",
   "storage_source_env": "متغيّر البيئة ORX_DATA_DIR",
   "storage_source_saved": "إعدادك المحفوظ",
@@ -1287,5 +1294,11 @@
   "sidebar_reveal_project": "إظهار في Finder",
   "sidebar_filter": "تصفية",
   "sidebar_group_by": "تجميع حسب",
-  "sidebar_one_list": "في قائمة واحدة"
+  "sidebar_one_list": "في قائمة واحدة",
+  "settings_github_manage_project": "إدارة مشروع موجود",
+  "settings_github_choose_project": "اختر مشروعًا…",
+  "settings_github_enable_under": "تفعيل المزامنة في…",
+  "settings_overleaf_file_sync": "مزامنة ملفات الورقة",
+  "settings_overleaf_live_sync": "مزامنة التعديلات المباشرة",
+  "settings_overleaf_intro": "تبقى بيانات الدخول على هذا الجهاز. اربط كل ورقة من المحرر."
 }

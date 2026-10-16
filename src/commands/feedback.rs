@@ -36,7 +36,11 @@ struct Context {
 
 pub async fn run(args: crate::FeedbackArgs) -> Result<()> {
     // Same gate as analytics: nothing from development builds or opted-out users.
-    if crate::telemetry::effective_disabled_reason().is_some() {
+    if let Some(reason) = crate::telemetry::effective_disabled_reason() {
+        println!(
+            "Feedback not sent: analytics are off ({}).",
+            reason.as_str()
+        );
         return Ok(());
     }
     let feedback = Feedback {
@@ -58,7 +62,9 @@ pub async fn run(args: crate::FeedbackArgs) -> Result<()> {
         },
     };
     let creds = crate::config::load_credentials().await.ok().flatten();
-    crate::client::submit_feedback(creds.as_ref(), &feedback).await
+    crate::client::submit_feedback(creds.as_ref(), &feedback).await?;
+    println!("Feedback submitted.");
+    Ok(())
 }
 
 #[cfg(test)]
