@@ -1826,20 +1826,35 @@ impl Store {
             Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => return Ok(()),
             Err(error) => return Err(error.into()),
         };
+        self.cleanup_run_artifacts_locked(None)
+    }
+
+    fn cleanup_run_artifacts_locked(&self, deleting_project: Option<&str>) -> Result<()> {
         self.validate_run_artifact_roots()?;
         let mut retained_runs = std::collections::HashSet::new();
         let mut retained_snapshots = std::collections::HashSet::new();
-        let mut statement = self.conn.prepare("SELECT id, backend_json FROM runs")?;
+        let mut deleted_runs = std::collections::HashSet::new();
+        let mut statement = self
+            .conn
+            .prepare("SELECT id, backend_json, project_id FROM runs")?;
         for row in statement.query_map([], |row| {
-            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, String>(2)?,
+            ))
         })? {
-            let (id, json) = row?;
+            let (id, json, project) = row?;
+            if deleting_project == Some(project.as_str()) {
+                deleted_runs.insert(id);
+                continue;
+            }
             retained_runs.insert(id);
             if let Some(digest) = crate::jobs::BackendDescriptor::parse(&json)?.source_digest {
                 retained_snapshots.insert(digest);
             }
         }
-        let mut candidates = std::collections::HashSet::new();
+        let mut candidates = deleted_runs.clone();
         for (name, suffix) in [
             ("local-runs", ""),
             ("run-logs", ".log"),
@@ -1865,7 +1880,7 @@ impl Store {
                 Ok(json) => {
                     let descriptor = crate::jobs::BackendDescriptor::parse(&json)?;
                     // Rowless remote handles may be the only way to cancel a still-live provider job.
-                    if descriptor.kind != "local_job" {
+                    if descriptor.kind != "local_job" && !deleted_runs.contains(id) {
                         retained_runs.insert(id.clone());
                         if let Some(digest) = descriptor.source_digest {
                             retained_snapshots.insert(digest);
@@ -1876,7 +1891,15 @@ impl Store {
                 Err(error) => return Err(error.into()),
             }
             let dir = self.data_dir.join("local-runs").join(id);
-            if dir.exists() && crate::jobs::localbox::inspect_job(&dir).stage == "RUNNING" {
+            if dir.exists()
+                && (!deleted_runs.contains(id) || dir.join("pid").exists())
+                && crate::jobs::localbox::inspect_job(&dir).stage == "RUNNING"
+            {
+                if deleted_runs.contains(id) {
+                    return Err(anyhow!(
+                        "Local run {id} is still running; retry project deletion once it stops."
+                    ));
+                }
                 retained_runs.insert(id.clone());
                 retain_all_snapshots = true;
             }
@@ -1888,6 +1911,9 @@ impl Store {
             match supervisor.try_write() {
                 Ok(_) => {}
                 Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                    if deleted_runs.contains(id) {
+                        return Err(anyhow!("Run {id} still has a supervisor; retry project deletion once it stops."));
+                    }
                     retained_runs.insert(id.clone());
                     retain_all_snapshots = true;
                 }
@@ -1931,7 +1957,6 @@ impl Store {
                 "Cannot delete a project with runs still in flight."
             ));
         }
-        let mut snapshots = std::collections::HashSet::new();
         for run in &runs {
             if run.id.is_empty()
                 || !run
@@ -1946,33 +1971,9 @@ impl Store {
                 if digest.len() != 64 || !digest.bytes().all(|c| c.is_ascii_hexdigit()) {
                     return Err(anyhow!("Invalid source digest for run {}", run.id));
                 }
-                snapshots.insert(digest);
             }
         }
-        let mut statement = self
-            .conn
-            .prepare("SELECT backend_json FROM runs WHERE project_id != ?1")?;
-        for json in statement.query_map([project_id], |row| row.get::<_, String>(0))? {
-            let descriptor = crate::jobs::BackendDescriptor::parse(&json?)?;
-            if let Some(digest) = descriptor.source_digest {
-                snapshots.remove(&digest);
-            }
-        }
-        self.validate_run_artifact_roots()?;
-        for run in runs {
-            self.remove_run_artifacts(&run.id)?;
-        }
-        for digest in snapshots {
-            for extension in ["tar", "hf"] {
-                remove_run_artifact(
-                    &self
-                        .data_dir
-                        .join("source-snapshots")
-                        .join(format!("{digest}.{extension}")),
-                )?;
-            }
-        }
-        Ok(())
+        self.cleanup_run_artifacts_locked(Some(project_id))
     }
 
     /// Delete a project and its execution artifacts. GitHub repo and cache clone are kept.
@@ -3818,6 +3819,15 @@ mod tests {
             .join("source-snapshots")
             .join(format!("{digest}.tar"))
             .is_file());
+        project_with_run_artifacts(&store, "deleting", "deleted-run", &digest);
+        store.delete_local_project("deleting").unwrap();
+        assert!(dir
+            .join("source-snapshots")
+            .join(format!("{digest}.tar"))
+            .is_file());
+        project_with_run_artifacts(&store, "deleting-remote", "deleted-remote", &"e".repeat(64));
+        store.delete_local_project("deleting-remote").unwrap();
+        assert!(remote_snapshot.is_file());
         std::fs::write(run_dir.join("exit_code"), "0").unwrap();
         let path = dir.join("run-logs").join(format!("{live}.supervisor.lock"));
         let mut supervisor = open_lifecycle_lock_at(&path).unwrap();
@@ -3846,7 +3856,16 @@ mod tests {
         let shared = "a".repeat(64);
         project_with_run_artifacts(&store, "first", "run-first", &shared);
         project_with_run_artifacts(&store, "second", "run-second", &shared);
+        let zip = dir
+            .join("source-snapshots")
+            .join(format!("{}.zip", "f".repeat(64)));
+        std::fs::write(
+            &zip,
+            "Ray upload package with a different digest from the TAR",
+        )
+        .unwrap();
         store.delete_local_project("first").unwrap();
+        assert!(!zip.exists());
         for name in [
             "local-runs/run-first",
             "run-logs/run-first.log",
