@@ -1019,6 +1019,29 @@ pub(super) async fn ray_preflight(Json(req): Json<RayPreflightReq>) -> ApiResult
     }
 }
 
+/// The saved Trackio server for run links; never the write token.
+pub(super) async fn trackio_settings() -> ApiResult {
+    Ok(Json(json!({
+        "serverUrl": crate::local::trackio::server_url(),
+        "project": crate::local::trackio::project(),
+    })))
+}
+
+/// Live check of the saved Trackio server and write token.
+pub(super) async fn trackio_preflight() -> ApiResult {
+    use crate::local::trackio;
+    let Some(base) = trackio::server_url() else {
+        return Err(bad_request(format!(
+            "Save an http(s) {} first.",
+            trackio::SERVER_URL
+        )));
+    };
+    let token = crate::config::synced_env_var(trackio::WRITE_TOKEN);
+    Ok(Json(json!(
+        trackio::preflight(&base, token.as_deref()).await
+    )))
+}
+
 // --- compute targets (unified settings list + default) --------------------------
 
 /// The whole payload for the Compute tab's collapsed list, in one round trip.

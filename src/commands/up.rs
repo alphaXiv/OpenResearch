@@ -709,6 +709,8 @@ fn router(state: AppState, remote_auth: Option<RemoteAuth>) -> Router {
             get(ray_settings).post(set_ray_settings),
         )
         .route("/api/settings/ray/preflight", post(ray_preflight))
+        .route("/api/settings/trackio", get(trackio_settings))
+        .route("/api/settings/trackio/preflight", post(trackio_preflight))
         .route("/api/settings/compute", get(compute_settings))
         .route("/api/settings/compute/default", post(set_compute_default))
         .route("/api/settings/local", get(local_machine_settings))
@@ -4767,9 +4769,11 @@ fn env_settings_json() -> Value {
     let vars: Vec<Value> = crate::config::list_synced_env()
         .iter()
         .map(|(key, value)| {
+            let plain = crate::local::trackio::plain_value(key, value);
             json!({
                 "key": key,
-                "maskedValue": mask_token(value),
+                "maskedValue": mask_token(plain.as_deref().unwrap_or(value)),
+                "value": plain,
                 "inProcessEnv": std::env::var_os(key).is_some(),
             })
         })
