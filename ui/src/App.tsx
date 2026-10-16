@@ -2180,6 +2180,7 @@ export default function App({ runtime, projectId, pane }: { runtime: RuntimeInfo
                     <ChatPanel
                       key={sideTab.sessionId}
                       embedded
+                      composerFocusNonce={1}
                       projectId={projectId}
                       projectName={activeProject?.name ?? ""}
                       railOpen={false}
