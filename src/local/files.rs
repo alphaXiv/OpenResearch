@@ -563,9 +563,7 @@ mod project_cleanup_tests {
             std::env::temp_dir().join(format!("orx-artifact-unresolved-{}", uuid::Uuid::new_v4()));
         let dir = root.join("artifacts");
         std::fs::create_dir_all(&dir).unwrap();
-        let file = root.join("not-a-directory");
-        std::fs::write(&file, "file").unwrap();
-        let repo = file.join("repository");
+        let repo = root.join("invalid\0repository");
         std::fs::write(dir.join("report.md"), "keep").unwrap();
         cleanup_artifacts_at(&dir, false, std::iter::once(repo.as_path())).unwrap();
         assert!(dir.join("report.md").is_file());
