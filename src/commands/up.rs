@@ -1538,8 +1538,9 @@ async fn create_project(
     };
     let shallow_clone = local::github::should_shallow_clone(repo_size_kb);
     let run_command = req.run_command;
-    let creation_guard = state.project_creation_lock.lock().await;
-    let result = tokio::task::spawn_blocking(move || -> Result<local::model::LocalProject> {
+    let creation_guard = state.project_creation_lock.clone().lock_owned().await;
+    let result = tokio::task::spawn_blocking(move || -> Result<_> {
+        let _creation_guard = creation_guard;
         let store = Store::open()?;
         let project = local::projects::create_project(
             &store,
@@ -1556,15 +1557,14 @@ async fn create_project(
                 paper_pdf,
             },
         )?;
-        Ok(project)
+        Ok((project, create_admission))
     })
     .await
     .map_err(|e| anyhow!("project task failed: {e}"))?;
-    let project = result.map_err(bad_request)?;
+    let (project, create_admission) = result.map_err(bad_request)?;
     // Starter prompts take a model call; start it now so the empty chat that
     // opens next usually finds them cached.
     local::starter::warm(project.clone(), locale);
-    drop(creation_guard);
     let _project_admission = state
         .project_lifecycle
         .admit(&project.id)
@@ -2031,6 +2031,13 @@ async fn delete_project(
     Path(id): Path<String>,
     Query(query): Query<DeleteProjectQuery>,
 ) -> ApiResult {
+    // Finish destructive cleanup even if the HTTP request is canceled.
+    tokio::spawn(delete_project_inner(state, id, query))
+        .await
+        .map_err(|error| ApiError::from(anyhow!("project deletion task failed: {error}")))?
+}
+
+async fn delete_project_inner(state: AppState, id: String, query: DeleteProjectQuery) -> ApiResult {
     reject_if_moving(&state)?;
     let _deleting_project = state
         .project_lifecycle
@@ -9705,6 +9712,49 @@ mod tests {
         let creation = lifecycle.admit("__project_create__").unwrap();
         assert!(lifecycle.begin_delete("p1").is_none());
         drop(creation);
+        assert!(lifecycle.begin_delete("p1").is_some());
+    }
+
+    #[tokio::test]
+    async fn project_cleanup_leases_survive_canceled_request_waiters() {
+        let lifecycle = ProjectLifecycle::default();
+        let deletion = lifecycle.begin_delete("p1").unwrap();
+        let (release, blocked) = std::sync::mpsc::channel();
+        let (finished, completion) = tokio::sync::oneshot::channel();
+        let cleanup = tokio::spawn(async move {
+            let _deletion = deletion;
+            tokio::task::spawn_blocking(move || blocked.recv().unwrap())
+                .await
+                .unwrap();
+            drop(_deletion);
+            finished.send(()).unwrap();
+        });
+        let request = tokio::spawn(async move { cleanup.await.unwrap() });
+        request.abort();
+        assert!(request.await.err().unwrap().is_cancelled());
+        assert!(lifecycle.admit("p1").is_none());
+        assert!(lifecycle.admit("__project_create__").is_none());
+        release.send(()).unwrap();
+        completion.await.unwrap();
+
+        let creation = lifecycle.admit("__project_create__").unwrap();
+        let (release, blocked) = std::sync::mpsc::channel();
+        let worker = tokio::task::spawn_blocking(move || {
+            blocked.recv().unwrap();
+            creation
+        });
+        let request = tokio::spawn(async move { worker.await.unwrap() });
+        request.abort();
+        assert!(request.await.err().unwrap().is_cancelled());
+        assert!(lifecycle.begin_delete("p1").is_none());
+        release.send(()).unwrap();
+        tokio::time::timeout(Duration::from_secs(2), async {
+            while lifecycle.operation_count() != 0 {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
         assert!(lifecycle.begin_delete("p1").is_some());
     }
 
