@@ -45,6 +45,88 @@ impl Drop for Sandbox {
 }
 
 #[test]
+fn experiment_checkout_hint_runs_in_a_project_path_with_spaces_and_apostrophes() {
+    let sandbox = Sandbox::new();
+    let repo = sandbox.0.join("researcher's project");
+    std::fs::create_dir(&repo).unwrap();
+    for args in [
+        vec!["init", "-b", "main"],
+        vec![
+            "-c",
+            "user.name=Test",
+            "-c",
+            "user.email=test@example.com",
+            "commit",
+            "--allow-empty",
+            "-m",
+            "initial",
+        ],
+    ] {
+        assert!(Command::new("git")
+            .current_dir(&repo)
+            .args(args)
+            .status()
+            .unwrap()
+            .success());
+    }
+    sandbox.json(&["projects", "--json"]);
+    let db = rusqlite::Connection::open(sandbox.0.join("data/orx.db")).unwrap();
+    db.execute(
+        "INSERT INTO local_projects (id, name, slug, github_owner, github_repo, github_sync_enabled, baseline_branch, repo_path, created_at, updated_at) VALUES ('project', 'Research', 'research', '', '', 0, 'main', ?1, 0, 0)",
+        [repo.to_str().unwrap()],
+    ).unwrap();
+    let output = sandbox.run(&["create-experiment", "project", "--title", "Baseline"]);
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let text = String::from_utf8(output.stdout).unwrap();
+    let cd = text
+        .lines()
+        .map(str::trim)
+        .find(|line| line.starts_with("cd "))
+        .unwrap();
+    let checkout = text
+        .lines()
+        .map(str::trim)
+        .find(|line| line.starts_with("git checkout "))
+        .unwrap();
+    #[cfg(windows)]
+    let shell = {
+        // Git for Windows supplies the POSIX shell used by orx experiments.
+        let output = Command::new("git").arg("--exec-path").output().unwrap();
+        assert!(output.status.success());
+        PathBuf::from(String::from_utf8(output.stdout).unwrap().trim())
+            .ancestors()
+            .map(|parent| parent.join("bin/bash.exe"))
+            .find(|path| path.is_file())
+            .expect("Git for Windows bash")
+    };
+    #[cfg(not(windows))]
+    let shell = PathBuf::from("sh");
+    let output = Command::new(shell)
+        .current_dir(&sandbox.0)
+        .args([
+            "-c",
+            &format!("{cd} && {checkout} && git rev-parse --show-toplevel"),
+        ])
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(
+        PathBuf::from(String::from_utf8(output.stdout).unwrap().trim())
+            .canonicalize()
+            .unwrap(),
+        repo.canonicalize().unwrap()
+    );
+}
+
+#[test]
 fn standalone_settings_defaults_and_instruction_conflicts() {
     let sandbox = Sandbox::new();
     let saved = sandbox.json(&[
