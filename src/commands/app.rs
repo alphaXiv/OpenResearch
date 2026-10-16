@@ -599,11 +599,27 @@ mod imp {
     #[cfg(target_os = "macos")]
     use objc2::MainThreadMarker;
     #[cfg(target_os = "macos")]
-    use objc2_app_kit::{NSAlert, NSAlertFirstButtonReturn};
+    use objc2_app_kit::{NSAlert, NSAlertFirstButtonReturn, NSApplication};
     #[cfg(target_os = "macos")]
     use objc2_foundation::NSString;
     #[cfg(target_os = "macos")]
     use wry::WebViewExtMacOS;
+
+    #[cfg(target_os = "macos")]
+    const MACOS_ESCAPE_SCRIPT: &str = r#"
+        window.addEventListener("keydown", (event) => {
+            if (event.key !== "Escape" || event.defaultPrevented) return;
+            if (event.target?.matches?.("input[type=search]:enabled:not([readonly])")) return;
+            // WebKit resends Escape to AppKit after its own dialog/popover dismissal, so dismiss here instead.
+            event.preventDefault();
+            // shortcut: last open popover stands in for the topmost; revisit if nested popovers render out of DOM order.
+            const popover = CSS.supports("selector(:popover-open)") && [...document.querySelectorAll("[popover]:popover-open:not([popover=manual])")].pop();
+            if (popover) return popover.hidePopover();
+            // shortcut: old WebKit treats open dialogs as modal; revisit if non-modal dialogs are added.
+            const dialog = [...document.querySelectorAll(CSS.supports("selector(:modal)") ? "dialog:modal" : "dialog[open]")].pop();
+            if (dialog?.dispatchEvent(new Event("cancel", { cancelable: true }))) dialog.close();
+        });
+    "#;
 
     enum UserEvent {
         ServerReady,
@@ -831,7 +847,10 @@ mod imp {
             }
         });
         #[cfg(target_os = "macos")]
-        let builder = builder.with_initialization_script("window.__ORX_MAC_TITLEBAR__ = true;");
+        // Run after dashboard handlers; keep overlay dismissal, not WebKit's native fullscreen exit.
+        let builder = builder
+            .with_initialization_script("window.__ORX_MAC_TITLEBAR__ = true;")
+            .with_initialization_script_for_main_only(MACOS_ESCAPE_SCRIPT, false);
         #[cfg(windows)]
         let builder = builder.with_initialization_script("window.__ORX_WIN_TITLEBAR__ = true;");
         #[cfg(not(target_os = "linux"))]
@@ -926,9 +945,9 @@ mod imp {
                 event: WindowEvent::CloseRequested,
                 ..
             } => {
-                // Closing hides, like other Mac apps; the Dock icon brings it back.
                 #[cfg(target_os = "macos")]
-                window.set_visible(false);
+                // AppKit switches Spaces when hiding the app, unlike ordering out its window.
+                NSApplication::sharedApplication(MainThreadMarker::new().unwrap()).hide(None);
                 #[cfg(not(target_os = "macos"))]
                 begin_quit(&mut quit, &window, &webview, control_flow);
             }

@@ -29,8 +29,9 @@ body {
   background: var(--chat-annotation-highlight);
 }
 
+/* The highlighted overlay draws the text; painting it here too doubles every glyph. */
 .file-view-editarea::selection {
-  color: var(--selection-text);
+  color: transparent;
   background: var(--editor-selection);
 }
 

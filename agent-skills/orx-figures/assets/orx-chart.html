@@ -115,7 +115,10 @@ function draw(){
  legends.forEach((node,i)=>node.setAttribute('aria-pressed',String(enabled.has(i))));
  chart.setAttribute('aria-label',`${data.title}: ${metric.label}. Use arrow keys to inspect steps.`);
  document.querySelector("#reset").hidden=domain===null;
- const width=chart.clientWidth,height=chart.clientHeight,left=52,right=14,top=document.querySelector("#legend").offsetHeight+64,bottom=52;
+ chart.style.height='';
+ const legendHeight=document.querySelector("#legend").offsetHeight,width=chart.clientWidth,left=52,right=14,top=legendHeight+64,bottom=52;
+ const height=Math.max(chart.clientHeight,legendHeight+260);
+ if(height>chart.clientHeight)chart.style.height=`${height}px`;
  if(metric.type==='diagram'){drawDiagram(width,height,left,right,bottom);return}
  if(metric.type==='dot'){drawDots(width,height,left,right,bottom);return}
  if(['heatmap','confusion'].includes(metric.type)){drawHeatmap(width,height,left,right,bottom);return}
