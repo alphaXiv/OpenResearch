@@ -794,7 +794,7 @@ pub async fn submit(args: &crate::ExpRunArgs) -> Result<StoredRun> {
         ));
     }
     let artifacts_lock = store.run_artifacts_lock()?;
-    let artifacts_guard = artifacts_lock
+    let _artifacts_guard = artifacts_lock
         .try_read()
         .map_err(|error| anyhow!("Run artifacts are busy; retry the run submission: {error}"))?;
     let experiment = store
@@ -881,8 +881,6 @@ pub async fn submit(args: &crate::ExpRunArgs) -> Result<StoredRun> {
         identity.as_ref(),
         report.as_ref(),
     )?;
-    drop(artifacts_guard);
-    drop(artifacts_lock);
     let pending_backend_json = descriptor.to_json();
     match backend.submit(args, source, run_id.clone()).await {
         Ok(run) => {
