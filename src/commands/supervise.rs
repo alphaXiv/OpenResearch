@@ -1124,48 +1124,74 @@ async fn run_local(
         dir.clone(),
         path.clone(),
         run_id.clone(),
-        done_rx,
+        done_rx.clone(),
+        None,
     ));
 
     let mut last_status = status_of(&stored)?;
     let mut cancel_sent = false;
 
     loop {
+        if !cancel_sent && local_cancel_requested(&store, &run_id) {
+            cancel_local(&dir, &run_id, &mut cancel_sent);
+            if !cancel_sent {
+                tokio::time::sleep(POLL_INTERVAL).await;
+                continue;
+            }
+        }
         let job = localbox::inspect_job(&dir);
         let stage = job.stage.as_str();
-        let status = run_status_for_stage(&store, &run_id, cancel_sent, stage);
+        let status = stage_to_run_status(stage);
 
         if is_terminal_stage(stage) {
-            let _ = done_tx.send(true);
-            if tokio::time::timeout(Duration::from_secs(20), &mut log_task)
-                .await
-                .is_err()
-            {
-                log_task.abort();
-            }
-            let applied = store.update_status(&run_id, status, Some(now_ms()), None)?;
-            if applied && status == RunStatus::Failed {
-                if let Some(msg) = &job.message {
-                    if let Err(err) =
-                        store.set_result_markdown(&run_id, &format!("Job failed: {msg}"))
-                    {
-                        eprintln!("supervise {run_id}: could not record failure reason: {err}");
+            let mut copied = None;
+            loop {
+                let _ = done_tx.send(true);
+                match tokio::time::timeout(Duration::from_secs(20), &mut log_task).await {
+                    Ok(Ok(position)) => copied = Some(position),
+                    _ => log_task.abort(),
+                }
+                let tx = store.begin_immediate()?;
+                if !cancel_sent && local_cancel_requested(&store, &run_id) {
+                    drop(tx);
+                    let _ = done_tx.send(false);
+                    log_task = tokio::spawn(tail_logs_local(
+                        dir.clone(),
+                        path.clone(),
+                        run_id.clone(),
+                        done_rx.clone(),
+                        copied.clone(),
+                    ));
+                    cancel_local(&dir, &run_id, &mut cancel_sent);
+                    if !cancel_sent {
+                        tokio::time::sleep(POLL_INTERVAL).await;
+                    }
+                    continue;
+                }
+                let status = if cancel_sent && status == RunStatus::Failed {
+                    RunStatus::Cancelled
+                } else {
+                    status
+                };
+                let applied = store.update_status(&run_id, status, Some(now_ms()), None)?;
+                tx.commit()?;
+                if applied && status == RunStatus::Failed {
+                    if let Some(msg) = &job.message {
+                        if let Err(err) =
+                            store.set_result_markdown(&run_id, &format!("Job failed: {msg}"))
+                        {
+                            eprintln!("supervise {run_id}: could not record failure reason: {err}");
+                        }
                     }
                 }
+                eprintln!("supervise {run_id}: finished ({status})");
+                return Ok(());
             }
-            eprintln!("supervise {run_id}: finished ({status})");
-            return Ok(());
         }
 
         if status != last_status && store.update_status(&run_id, status, None, None)? {
-            let cancel_requested = local_cancel_requested(&store, &run_id);
             eprintln!("supervise {run_id}: {last_status} -> {status} (stage {stage})");
             last_status = status;
-            if cancel_requested && !cancel_sent {
-                cancel_local(&dir, &run_id, &mut cancel_sent);
-            }
-        } else if !cancel_sent && local_cancel_requested(&store, &run_id) {
-            cancel_local(&dir, &run_id, &mut cancel_sent);
         }
 
         tokio::time::sleep(POLL_INTERVAL).await;
@@ -1174,12 +1200,14 @@ async fn run_local(
 
 /// Local twin of `tail_logs_ssh` — mirrors the run dir's log into the store's
 /// log file so `orx logs` and the dashboard read the usual place.
+/// `resume` appends after an earlier drain so live readers never see copied bytes rewritten.
 async fn tail_logs_local(
     dir: std::path::PathBuf,
     path: std::path::PathBuf,
     run_id: String,
     done: tokio::sync::watch::Receiver<bool>,
-) {
+    resume: Option<(u64, String)>,
+) -> (u64, String) {
     let mut log = match RunLog::open(&path) {
         Ok(log) => log,
         Err(err) => {
@@ -1187,13 +1215,44 @@ async fn tail_logs_local(
                 "supervise {run_id}: could not open {}: {err}",
                 path.display()
             );
-            return;
+            return resume.unwrap_or_default();
         }
     };
-    let mut seen = 0u64;
+    let (mut seen, mut last) = resume.unwrap_or_default();
+    let mut prefix = None;
+    if seen > 0 {
+        if let Err(err) = log.file.seek(std::io::SeekFrom::End(0)) {
+            eprintln!(
+                "supervise {run_id}: could not resume {}: {err}",
+                path.display()
+            );
+            return (seen, last);
+        }
+        log.replaying = true;
+        // Re-read the last copied line: a drained partial line may have been continued.
+        seen -= 1;
+        prefix = Some(last.clone());
+    }
     loop {
         let draining = *done.borrow();
-        let mut sink = |line: &str| log.line(line);
+        let mut sink = |full: &str| {
+            if let Some(prefix) = prefix.take() {
+                let line = full
+                    .strip_prefix(prefix.as_str())
+                    .or_else(|| {
+                        prefix
+                            .strip_suffix('\r')
+                            .and_then(|prefix| full.strip_prefix(prefix))
+                    })
+                    .unwrap_or(full);
+                if !line.is_empty() {
+                    log.line(line);
+                }
+            } else {
+                log.line(full);
+            }
+            last = full.to_string();
+        };
         let drained = match localbox::stream_logs(&dir, seen, draining, &mut sink) {
             Ok(s) => {
                 seen = s;
@@ -1206,7 +1265,7 @@ async fn tail_logs_local(
         };
         let _ = log.file.flush();
         if draining && drained {
-            return;
+            return (seen + u64::from(prefix.is_some()), last);
         }
         tokio::time::sleep(Duration::from_secs(2)).await;
     }
@@ -1532,6 +1591,140 @@ mod tests {
     use super::*;
     use crate::store::StoredRun;
 
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    async fn local_cancel_retries_cleanup_before_reporting_a_dead_launcher_cancelled() {
+        use std::os::unix::process::CommandExt;
+        for (legacy, late) in [(false, false), (true, false), (false, true)] {
+            let temp = crate::local::git::TemporaryDirectory::new("orx-local-cancel-test").unwrap();
+            let dir = temp.path().join("run");
+            std::fs::create_dir(&dir).unwrap();
+            let script = dir.join("run.sh");
+            std::fs::write(&script, "cd \"$(dirname \"$0\")\"; bash -c 'trap \"echo term > term-received\" TERM; echo $$ > worker; while :; do sleep 0.1; done' & wait").unwrap();
+            let token = uuid::Uuid::new_v4().to_string();
+            let mut launcher = std::process::Command::new("bash")
+                .arg(&script)
+                .env("ORX_LOCAL_RUN_TOKEN", &token)
+                .process_group(0)
+                .spawn()
+                .unwrap();
+            let pid = launcher.id().to_string();
+            std::fs::write(dir.join("pid"), &pid).unwrap();
+            std::fs::write(dir.join("pid_script"), script.to_string_lossy().as_bytes()).unwrap();
+            std::fs::write(dir.join("process_token"), "unverified").unwrap();
+            for _ in 0..100 {
+                if dir.join("worker").exists() {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+            let worker = std::fs::read_to_string(dir.join("worker")).unwrap();
+            assert!(worker.trim().parse::<u32>().is_ok_and(|pid| pid > 0));
+            launcher.kill().unwrap();
+            if !legacy {
+                launcher.wait().unwrap();
+            }
+
+            let db = temp.path().join("db");
+            let store = Store::open_at(db.clone()).unwrap();
+            let descriptor = BackendDescriptor::parse(
+                &serde_json::json!({"kind": "local_job", "jobId": dir}).to_string(),
+            )
+            .unwrap();
+            let run = StoredRun {
+                id: uuid::Uuid::new_v4().to_string(),
+                experiment_id: "experiment".into(),
+                project_id: "project".into(),
+                status: "running".into(),
+                backend_json: descriptor.to_json(),
+                command: String::new(),
+                created_at: 1,
+                updated_at: 1,
+                ended_at: None,
+                exit_code: None,
+                commit_sha: None,
+                result_markdown: None,
+                cancel_requested: false,
+                cancel_reason: None,
+                chat_session_id: None,
+            };
+            store.upsert_run(&run).unwrap();
+            if !late {
+                store.request_cancel(&run.id, "test").unwrap();
+            }
+            let observer = Store::open_at(db.clone()).unwrap();
+            let write_check = late.then(|| {
+                let term = dir.join("term-received");
+                let id = run.id.clone();
+                std::thread::spawn(move || {
+                    for _ in 0..2000 {
+                        if term.exists() {
+                            break;
+                        }
+                        std::thread::sleep(Duration::from_millis(10));
+                    }
+                    assert!(term.exists(), "cleanup must send TERM");
+                    let started = std::time::Instant::now();
+                    let writer = Store::open_at(db).unwrap();
+                    assert_eq!(writer.get_run(&id).unwrap().unwrap().status, "running");
+                    writer
+                        .set_result_markdown(&id, "write during TERM grace")
+                        .unwrap();
+                    assert!(
+                        started.elapsed() < Duration::from_secs(2),
+                        "cleanup must not hold the database lock"
+                    );
+                })
+            });
+            if late {
+                std::fs::write(dir.join("exit_code"), "137\n").unwrap();
+                assert_eq!(localbox::inspect_job(&dir).stage, "ERROR");
+            }
+            let mut supervisor =
+                Box::pin(run_local(store, run.clone(), descriptor, run.id.clone()));
+            if late {
+                let first_poll = std::future::poll_fn(|cx| {
+                    std::task::Poll::Ready(std::future::Future::poll(supervisor.as_mut(), cx))
+                })
+                .await;
+                assert!(first_poll.is_pending());
+                observer.request_cancel(&run.id, "test").unwrap();
+            }
+            let task = tokio::spawn(supervisor);
+            tokio::time::sleep(Duration::from_millis(200)).await;
+            let pending = observer.get_run(&run.id).unwrap().unwrap();
+            observer
+                .set_result_markdown(&run.id, "cleanup retry releases the database lock")
+                .unwrap();
+            if legacy {
+                std::fs::remove_file(dir.join("process_token")).unwrap();
+            } else {
+                std::fs::write(dir.join("process_token"), &token).unwrap();
+            }
+            let completed = tokio::time::timeout(Duration::from_secs(15), task).await;
+            let terminal = observer.get_run(&run.id).unwrap().unwrap();
+            let state = std::process::Command::new("ps")
+                .args(["-o", "stat=", "-p", worker.trim()])
+                .output()
+                .unwrap();
+            let _ = std::process::Command::new("kill")
+                .args(["-KILL", "--", &format!("-{pid}")])
+                .stderr(std::process::Stdio::null())
+                .status();
+            launcher.wait().unwrap();
+            if let Some(writer) = write_check {
+                writer.join().unwrap();
+            }
+            assert_eq!(pending.status, "running");
+            assert_eq!(pending.ended_at, None);
+            completed.unwrap().unwrap().unwrap();
+            assert_eq!(terminal.status, "cancelled");
+            assert!(state.status.success() || state.status.code() == Some(1));
+            let state = String::from_utf8_lossy(&state.stdout);
+            assert!(state.trim().is_empty() || state.trim().starts_with('Z'));
+        }
+    }
+
     #[test]
     fn recovered_cancel_intent_only_overrides_failed_terminal_state() {
         let dir = std::env::temp_dir().join(format!(
@@ -1585,7 +1778,7 @@ mod tests {
 
         // A respawned supervisor with nothing to replay leaves the log alone.
         let (_tx, rx) = tokio::sync::watch::channel(true);
-        tail_logs_local(source.clone(), path.clone(), "run".into(), rx).await;
+        tail_logs_local(source.clone(), path.clone(), "run".into(), rx, None).await;
         assert_eq!(std::fs::read_to_string(&path).unwrap(), "kept\n");
 
         // A record flushed mid-line stays whole, and the final drain keeps
@@ -1597,15 +1790,72 @@ mod tests {
             path.clone(),
             "run".into(),
             rx,
+            None,
         ));
         tokio::time::sleep(Duration::from_millis(200)).await;
         assert_eq!(std::fs::read_to_string(&path).unwrap(), "a\n");
         std::fs::write(source.join("log"), "a\n{\"big\": 1}\nlast").unwrap();
         tx.send(true).unwrap();
-        running.await.unwrap();
+        let copied = running.await.unwrap();
         assert_eq!(
             std::fs::read_to_string(&path).unwrap(),
             "a\n{\"big\": 1}\nlast\n"
+        );
+        std::fs::write(source.join("log"), "a\n{\"big\": 1}\nlast shutdown\n").unwrap();
+        let (_tx, rx) = tokio::sync::watch::channel(true);
+        let copied =
+            tail_logs_local(source.clone(), path.clone(), "run".into(), rx, Some(copied)).await;
+        // Already-copied bytes stay put for live byte-offset readers.
+        assert_eq!(
+            std::fs::read_to_string(&path).unwrap(),
+            "a\n{\"big\": 1}\nlast\n shutdown\n"
+        );
+        std::fs::write(source.join("log"), "a\n{\"big\": 1}\nlast shutdown\ndone\n").unwrap();
+        let (_tx, rx) = tokio::sync::watch::channel(true);
+        tail_logs_local(source.clone(), path.clone(), "run".into(), rx, Some(copied)).await;
+        assert_eq!(
+            std::fs::read_to_string(&path).unwrap(),
+            "a\n{\"big\": 1}\nlast\n shutdown\ndone\n"
+        );
+        let split = temp.path().join("split.log");
+        std::fs::write(source.join("log"), "a\n\nlast\r").unwrap();
+        let (_tx, rx) = tokio::sync::watch::channel(true);
+        let copied = tail_logs_local(source.clone(), split.clone(), "run".into(), rx, None).await;
+        let before = std::fs::read(&split).unwrap();
+        std::fs::write(source.join("log"), "a\n\nlast\r\n\nshutdown\n").unwrap();
+        let (_tx, rx) = tokio::sync::watch::channel(true);
+        tail_logs_local(
+            source.clone(),
+            split.clone(),
+            "run".into(),
+            rx,
+            Some(copied),
+        )
+        .await;
+        let after = std::fs::read(&split).unwrap();
+        assert!(after.starts_with(&before));
+        assert_eq!(&after[before.len()..], b"\nshutdown\n");
+        std::fs::write(source.join("log"), "a\nlast").unwrap();
+        let missing = temp.path().join("missing.log");
+        let (_tx, rx) = tokio::sync::watch::channel(true);
+        let copied = tail_logs_local(source.clone(), missing.clone(), "run".into(), rx, None).await;
+        std::fs::remove_file(source.join("log")).unwrap();
+        let (_tx, rx) = tokio::sync::watch::channel(true);
+        let unchanged = tail_logs_local(
+            source.clone(),
+            missing.clone(),
+            "run".into(),
+            rx,
+            Some(copied.clone()),
+        )
+        .await;
+        assert_eq!(unchanged, copied);
+        std::fs::write(source.join("log"), "a\nlast shutdown\n").unwrap();
+        let (_tx, rx) = tokio::sync::watch::channel(true);
+        tail_logs_local(source, missing.clone(), "run".into(), rx, Some(unchanged)).await;
+        assert_eq!(
+            std::fs::read_to_string(missing).unwrap(),
+            "a\nlast\n shutdown\n"
         );
     }
 
