@@ -91,6 +91,9 @@ pub async fn run(args: UpArgs) -> Result<()> {
     {
         let store = Store::open()?;
         local::chat::reconcile_unfinished_turns(&store)?;
+        if let Err(error) = store.cleanup_orphaned_run_artifacts() {
+            eprintln!("orx up: could not clean orphaned run artifacts: {error}");
+        }
         for run in store.list_active_runs()? {
             if store.get_local_experiment(&run.experiment_id)?.is_some() {
                 if let Err(err) = crate::commands::exp::spawn_detached_supervise(&run.id) {
@@ -4572,6 +4575,9 @@ async fn adopt_orphaned_runs(moving: Arc<AtomicBool>, gate: Arc<tokio::sync::Mut
 /// Spawns the missing supervisors and returns the runs whose spawn failed.
 fn adopt_orphaned_runs_once() -> Result<Vec<(String, crate::error::Error)>> {
     let store = Store::open()?;
+    if let Err(error) = store.cleanup_orphaned_run_artifacts() {
+        eprintln!("orx up: could not clean orphaned run artifacts: {error}");
+    }
     let mut failures = Vec::new();
     for run in store.list_active_runs()? {
         // Without a job handle the launch may still be submitting, and a supervisor would fail it.
