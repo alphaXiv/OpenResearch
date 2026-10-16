@@ -22,7 +22,6 @@ import {
   ExternalLink,
   FileOutput,
   FileText,
-  FolderOpen,
   GitBranch,
   X,
 } from "lucide-react";
@@ -33,7 +32,6 @@ import {
   FileChangedError,
   openFileInEditor,
   projectFileUrl,
-  revealFileInManager,
   saveProjectFile,
   type ArtifactEntry,
 } from "../api";
@@ -65,6 +63,9 @@ import { OverleafButton } from "./OverleafPanel";
 import { MediaPreview, mediaPreviewKind } from "./MediaPreview";
 import { MediaToolbarSlot } from "./mediaToolbar";
 import { Md } from "./Md";
+import { FilePathDetails } from "./FilePathDetails";
+import { loadedFileLocation } from "../fileLocation";
+import { FileActionScope } from "./FileLinkActions";
 import { Button, IconButton, IconButtonLink, Spinner, showAlert } from "./ui";
 
 const NO_ARTIFACT_ENTRIES: ArtifactEntry[] = [];
@@ -488,9 +489,6 @@ export function FileViewer({
   const openEditor = useOsFileAction(() =>
     openFileInEditor(projectId, filePath, { sessionId }),
   );
-  const revealManager = useOsFileAction(() =>
-    revealFileInManager(projectId, filePath, { sessionId }),
-  );
   const osActionBlocker = remote
     ? m.file_viewer_os_action_local_only()
     : data?.notFound
@@ -589,6 +587,7 @@ export function FileViewer({
   };
 
   return (
+    <FileActionScope value={loaded ? loadedFileLocation(loaded, sessionId, gitRef) : { sessionId, ref: gitRef }}>
     <div className="file-view flex flex-col h-full min-h-0 min-w-0" onKeyDown={selectViewerContents}>
       <div className="file-view-header @container flex w-full min-w-0 min-h-9 items-center gap-1 px-4 py-1 bg-background text-text shrink-0">
         <FileTypeIcon name={filePath} />
@@ -705,22 +704,12 @@ export function FileViewer({
             >
               {openEditor.busy ? <Spinner /> : <ExternalLink size={13} />}
             </IconButton>
-            <IconButton
-              size="small"
-              data-tip={osActionBlocker ?? revealManager.error ?? m.file_viewer_reveal_in_file_manager()}
-              data-tip-align="end"
-              aria-label={m.file_viewer_reveal_in_file_manager()}
-              aria-description={osActionBlocker ?? undefined}
-              disabled={revealManager.busy || osActionBlocker != null}
-              onClick={() => void revealManager.trigger()}
-            >
-              {revealManager.busy ? <Spinner /> : <FolderOpen size={13} />}
-            </IconButton>
           </>
         )}
       </div>
       {/* Outside the scroll body, unlike its siblings: this state can be
           editable, and the editor's `h-full` would push it out of view. */}
+      {loaded && !loaded.file.notFound && <FilePathDetails projectId={projectId} request={loadedFileLocation(loaded, sessionId, gitRef)} remote={remote} />}
       {!error && viaCheckout && loaded?.source === "checkout" && (
         <div className="file-view-note py-2.5 px-4 text-sm text-muted border-b border-b-border-variant shrink-0">
           {m.file_viewer_not_in_artifacts_showing_root({ root: loaded.file.root === "worktree" ? m.file_viewer_session_worktree() : m.file_viewer_project_clone() })}
@@ -943,5 +932,6 @@ export function FileViewer({
         )}
       </div>
     </div>
+    </FileActionScope>
   );
 }

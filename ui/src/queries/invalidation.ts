@@ -26,7 +26,7 @@ export function invalidateFamilies(families: readonly string[], scope = workspac
 }
 
 const fileBodies = ["resolvedFile", "getProjectFile", "getArtifactFileText", "getArtifactFileMetadata"];
-export const artifactFamilies = ["getArtifacts", "getArtifactFileText", "getArtifactFileMetadata"];
+export const artifactFamilies = ["getArtifacts", "getArtifactFileText", "getArtifactFileMetadata", "searchArtifacts", "getFileLocation"];
 export const liveFamilies = ["listProjects", "listProjectActivity", "listSidebarChatSessions", "listExperiments", "listRuns", "listChatSessions", "getChatMessages", "getHarnesses", "getUpdateStatus", ...artifactFamilies, ...fileBodies, "getAbsoluteFile", "fileVersion", "getCodeTree", "getSessionWorktree", "getRunDiff", "getExperimentDiff"];
 
 export function invalidateProjectFiles(projectId: string, scope = workspaceScope(), cancelReads = false) {

@@ -1300,5 +1300,20 @@
   "settings_github_enable_under": "Włącz synchronizację w…",
   "settings_overleaf_file_sync": "Synchronizuj pliki artykułu",
   "settings_overleaf_live_sync": "Synchronizuj zmiany na żywo",
-  "settings_overleaf_intro": "Dane logowania pozostają na tym komputerze. Łącz poszczególne artykuły w edytorze."
+  "settings_overleaf_intro": "Dane logowania pozostają na tym komputerze. Łącz poszczególne artykuły w edytorze.",
+  "file_actions_open_in_panel": "Otwórz w prawym panelu",
+  "file_actions_copy_absolute_path": "Kopiuj ścieżkę bezwzględną",
+  "file_actions_resolving": "Ustalanie lokalizacji pliku…",
+  "file_actions_remote_path": "Ścieżka zdalna: {path}",
+  "artifacts_search_placeholder": "Szukaj artefaktów według nazwy lub ścieżki",
+  "artifacts_search_searching": "Wyszukiwanie…",
+  "artifacts_search_no_results": "Brak pasujących artefaktów",
+  "artifacts_search_load_more": "Wczytaj więcej wyników",
+  "artifacts_search_incomplete": "Nie udało się przeszukać niektórych folderów. Wyniki mogą być niepełne.",
+  "artifacts_search_slow": "Wyszukiwanie trwa długo. Folder artefaktów może zawierać wiele plików lub zamontowany zasób sieciowy. Kontynuować wyszukiwanie?",
+  "artifacts_search_next_budget": "Kontynuuj przez maksymalnie 15 kolejnych minut.",
+  "artifacts_search_unlimited_warning": "Kontynuowanie usuwa limit czasu. W razie awarii systemu plików ta operacja może nigdy się nie zakończyć. Nadal możesz anulować dalsze przeszukiwanie, ale nie można przerwać już zablokowanego wywołania systemu plików.",
+  "artifacts_search_continue": "Kontynuuj",
+  "artifacts_search_cancel": "Anuluj wyszukiwanie",
+  "artifacts_search_cancelled": "Wyszukiwanie anulowane. Zmień zapytanie, aby rozpocząć nowe wyszukiwanie."
 }

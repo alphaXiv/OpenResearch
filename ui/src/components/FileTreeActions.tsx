@@ -12,13 +12,23 @@ import { ltr } from "../i18n";
 import { Input, MenuItem, showAlert } from "./ui";
 
 export function copyFilePath(root: string, path: string) {
+  copyAbsoluteFilePath(path ? `${root.replace(/[\\/]+$/, "")}/${path}` : root);
+}
+
+export function copyAbsoluteFilePath(path: string | Promise<string>) {
   const clipboard = navigator.clipboard;
   if (!clipboard) {
+    if (typeof path !== "string") void path.catch(() => {});
     showAlert(m.file_tree_clipboard_unavailable(), "error");
     return;
   }
-  void clipboard
-    .writeText(`${root.replace(/[\\/]+$/, "")}/${path}`)
+  // WebKit requires the write to begin inside the user gesture, even when
+  // canonicalizing a tree entry needs an asynchronous server round trip.
+  const write = typeof path === "string" ? clipboard.writeText(path)
+    : typeof ClipboardItem !== "undefined" && clipboard.write
+      ? clipboard.write([new ClipboardItem({ "text/plain": path.then(value => new Blob([value], { type: "text/plain" })) })])
+      : path.then(value => clipboard.writeText(value));
+  void write
     .then(() => showAlert(m.common_copied(), "success"))
     .catch((error) => showAlert(error instanceof Error ? error.message : String(error), "error"));
 }
@@ -80,8 +90,8 @@ export interface FileContextMenuTarget {
 }
 
 export type FileContextMenuEvent =
-  | ReactMouseEvent<HTMLButtonElement>
-  | ReactKeyboardEvent<HTMLButtonElement>;
+  | ReactMouseEvent<HTMLElement>
+  | ReactKeyboardEvent<HTMLElement>;
 
 export function fileContextMenuTarget(
   event: FileContextMenuEvent,
@@ -104,14 +114,22 @@ export function FileContextMenu({
   onDuplicate,
   onCopyPath,
   onDelete,
+  onReveal,
+  pathStatus,
+  copyLabel,
+  openLabel,
   onClose,
 }: {
   target: FileContextMenuTarget;
-  onOpen: () => void;
+  onOpen?: () => void;
   onRename?: () => void;
   onDuplicate?: () => void;
-  onCopyPath: () => void;
+  onCopyPath?: () => void;
   onDelete?: () => void;
+  onReveal?: () => void;
+  pathStatus?: string;
+  copyLabel?: string;
+  openLabel?: string;
   onClose: () => void;
 }) {
   const menuRef = useRef<HTMLDivElement>(null);
@@ -125,12 +143,17 @@ export function FileContextMenu({
     const previousFocus = document.activeElement instanceof HTMLElement
       ? document.activeElement
       : null;
-    setPosition({
+    const reposition = () => setPosition({
       x: Math.max(8, Math.min(target.x, window.innerWidth - menu.offsetWidth - 8)),
       y: Math.max(8, Math.min(target.y, window.innerHeight - menu.offsetHeight - 8)),
     });
+    reposition();
+    // Resolving a chat link adds its path and OS actions after the menu opens.
+    const observer = new ResizeObserver(reposition);
+    observer.observe(menu);
     menu.querySelector<HTMLButtonElement>("button")?.focus();
     return () => {
+      observer.disconnect();
       if (menu.contains(document.activeElement)) previousFocus?.focus();
     };
   }, [target]);
@@ -192,10 +215,12 @@ export function FileContextMenu({
         items[(current + step + items.length) % items.length]?.focus();
       }}
     >
-      {item(m.file_tree_open(), onOpen)}
+      {pathStatus && <p role="status" className="m-0 max-w-80 break-all px-2 py-1 text-xs text-subtext" dir="auto">{pathStatus}</p>}
+      {onOpen && item(openLabel ?? m.file_tree_open(), onOpen)}
       {onRename && item(m.chat_panel_rename(), onRename)}
       {onDuplicate && item(m.file_tree_duplicate(), onDuplicate)}
-      {item(m.artifacts_copy_path(), onCopyPath)}
+      {onCopyPath && item(copyLabel ?? m.artifacts_copy_path(), onCopyPath)}
+      {onReveal && item(m.file_viewer_reveal_in_file_manager(), onReveal)}
       {onDelete && item(m.chat_panel_delete(), onDelete, true)}
     </div>,
     document.body,
