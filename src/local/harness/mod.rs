@@ -588,6 +588,9 @@ pub struct CompactCtx {
     pub session_id: String,
     pub native_session_id: Option<String>,
     pub model: Option<String>,
+    pub project: crate::local::model::LocalProject,
+    pub permission_mode: Option<PermissionMode>,
+    pub service_tier: Option<String>,
 }
 
 #[derive(Debug, PartialEq, Eq)]
