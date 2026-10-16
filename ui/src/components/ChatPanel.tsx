@@ -4322,7 +4322,7 @@ export function ChatPanel({
   runtime: RuntimeInfo;
   /** Reopen the demo welcome modal from the chat header. */
   onOpenDemoWelcome?: () => void;
-  /** Increments when the demo welcome hands focus to the composer. */
+  /** Requests composer focus on change; a nonzero value also focuses on mount. */
   composerFocusNonce?: number;
   /** Demo run currently executing, for the monitor-it hint above the composer. */
   activeSessionId: string | null;
@@ -5459,18 +5459,24 @@ export function ChatPanel({
     setSkillMenuDismissed(false);
     setComposerCursor(composerPrefill.length);
   }, [composerPrefill]);
+  const focusedComposerNonce = useRef(0);
   useEffect(() => {
-    if (composerFocusNonce === 0) return;
+    // The composer is inert while its chat is loading. Keep the
+    // request pending until it can take focus, and consume it only once.
+    if (composerFocusNonce === 0 || composerFocusNonce === focusedComposerNonce.current
+      || contentLoading || contentError || historyLoading) return;
     // The welcome dialog restores its previous focus on unmount; run after that.
     const frame = window.requestAnimationFrame(() => {
       const el = composerRef.current;
       if (!el) return;
       el.focus();
+      if (document.activeElement !== el) return;
+      focusedComposerNonce.current = composerFocusNonce;
       el.setSelectionRange(el.value.length, el.value.length);
       el.scrollIntoView({ block: "nearest" });
     });
     return () => window.cancelAnimationFrame(frame);
-  }, [composerFocusNonce]);
+  }, [composerFocusNonce, contentLoading, contentError, historyLoading]);
   const demoHintId = useId();
   const demoHintVisible =
     projectId === DEMO_PROJECT_ID && draft === DEMO_RUN_EXPERIMENT_PROMPT && !demoHintDismissed;
