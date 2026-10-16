@@ -1,7 +1,8 @@
-// Brand mark for a harness/provider, rendered inline because the UI is
-// rust-embedded and CSP-locked.
+// Brand mark for a harness/provider. Vector marks render inline because the UI
+// is rust-embedded and CSP-locked; a raster mark ships as a bundled asset.
 
 import type { HarnessId } from "../api";
+import minimaxLogo from "../assets/minimax-logo.png";
 
 export function HarnessLogo({ harness, size = 16 }: { harness: HarnessId; size?: number }) {
   const cls = "block shrink-0";
@@ -52,6 +53,26 @@ export function HarnessLogo({ harness, size = 16 }: { harness: HarnessId; size?:
     return (
       <svg className={cls} width={size} height={size} viewBox="13 18 85 80" fill="#3186FF" aria-hidden="true">
         <path d="M89.6992 93.695C94.3659 97.195 101.366 94.8617 94.9492 88.445C75.6992 69.7783 79.7825 18.445 55.8659 18.445C31.9492 18.445 36.0325 69.7783 16.7825 88.445C9.78251 95.445 17.3658 97.195 22.0325 93.695C40.1159 81.445 38.9492 59.8617 55.8659 59.8617C72.7825 59.8617 71.6159 81.445 89.6992 93.695Z" />
+      </svg>
+    );
+  }
+  // Kimi and Z.ai marks from @lobehub/icons (MIT).
+  if (harness === "kimi-code") {
+    return (
+      <svg className={cls} width={size} height={size} viewBox="0 0 24 24" fill="currentColor" fillRule="evenodd" aria-hidden="true">
+        <path fill="#1783FF" d="M21.846 0a1.923 1.923 0 110 3.846H20.15a.226.226 0 01-.227-.226V1.923C19.923.861 20.784 0 21.846 0z" />
+        <path d="M11.065 11.199l7.257-7.2c.137-.136.06-.41-.116-.41H14.3a.164.164 0 00-.117.051l-7.82 7.756c-.122.12-.302.013-.302-.179V3.82c0-.127-.083-.23-.185-.23H3.186c-.103 0-.186.103-.186.23V19.77c0 .128.083.23.186.23h2.69c.103 0 .186-.102.186-.23v-3.25c0-.069.025-.135.069-.178l2.424-2.406a.158.158 0 01.205-.023l6.484 4.772a7.677 7.677 0 003.453 1.283c.108.012.2-.095.2-.23v-3.06c0-.117-.07-.212-.164-.227a5.028 5.028 0 01-2.027-.807l-5.613-4.064c-.117-.078-.132-.279-.028-.381z" />
+      </svg>
+    );
+  }
+  if (harness === "minimax-code") {
+    // MiniMax's app icon after its 2026 rebrand.
+    return <img className={cls} src={minimaxLogo} width={size} height={size} alt="" aria-hidden="true" />;
+  }
+  if (harness === "zcode") {
+    return (
+      <svg className={cls} width={size} height={size} viewBox="0 0 24 24" fill="currentColor" fillRule="evenodd" aria-hidden="true">
+        <path d="M12.105 2L9.927 4.953H.653L2.83 2h9.276zM23.254 19.048L21.078 22h-9.242l2.174-2.952h9.244zM24 2L9.264 22H0L14.736 2H24z" />
       </svg>
     );
   }

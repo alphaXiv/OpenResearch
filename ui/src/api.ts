@@ -1555,7 +1555,15 @@ export const reportLocale = (locale: string, signal?: AbortSignal) =>
     body: JSON.stringify({ locale }),
   }).then((r) => json<{ locale: string }>(r));
 
-export type HarnessId = "claude-code" | "codex" | "opencode" | "cursor" | "antigravity";
+export type HarnessId =
+  | "claude-code"
+  | "codex"
+  | "opencode"
+  | "cursor"
+  | "antigravity"
+  | "kimi-code"
+  | "minimax-code"
+  | "zcode";
 
 export interface HarnessModel {
   id: string;
@@ -1581,6 +1589,10 @@ export interface HarnessModel {
   serviceTiers?: OptionChoice[];
   /** Whether the model accepts images; absent when the catalog doesn't say. */
   imageInput?: boolean;
+  /** How the harness reaches this model, when it has more than one way
+   * (ZCode: `coding-plan` sign-in or an `api-key` provider). The composer
+   * offers these as a provider switch over the model list. */
+  providerGroup?: OptionChoice;
 }
 
 /** Display label for a harness model: the catalog's own name when it has one,
@@ -1614,6 +1626,9 @@ export interface HarnessOptions {
   planActivation?: "permission" | "command" | null;
   reasoningLevels: OptionChoice[];
   defaultReasoningLevel?: string | null;
+  /** How the harness reaches its models: the composer's provider switch,
+   * offered even before a group has models (see {@link HarnessModel.providerGroup}). */
+  providerGroups?: OptionChoice[];
 }
 
 /**
@@ -1749,12 +1764,13 @@ export interface Harness {
 }
 
 export interface HarnessSetupCommands {
-  install: string;
+  /** Absent for an agent orx signs in but does not install or update (ZCode). */
+  install?: string;
   /** The vendor bootstrap URL an install note quotes; `install` runs the
    * platform's own installer, which on Windows is a PowerShell script. */
   installUrl?: string;
   login: string;
-  update: string;
+  update?: string;
   requiresNpm: boolean;
 }
 

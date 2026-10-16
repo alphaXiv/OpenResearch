@@ -27,6 +27,7 @@ import { IconButton, MenuItem } from "./ui";
 import { cn } from "./ui/cn";
 
 import { LocalModelSetup } from "./LocalModelSetup";
+import { providerGroups, providerSwitchTarget } from "../providerGroups";
 
 const MODEL_GROUP_CLASS_NAME = [
   "model-group flex items-center justify-between gap-2",
@@ -48,6 +49,9 @@ export const HARNESS_LABELS: Record<HarnessId, string> = {
   opencode: "OpenCode",
   cursor: "Cursor",
   antigravity: "Google Antigravity",
+  "kimi-code": "Kimi Code",
+  "minimax-code": "MiniMax Code",
+  zcode: "ZCode",
 };
 
 /** First harness that can actually run — the fallback when nothing is picked.
@@ -116,6 +120,8 @@ export function ModelPicker({
   onSelectReasoning,
   autonomy,
   onSelectAutonomy,
+  planMode = false,
+  onTogglePlan,
   lockHarness = false,
   openRequest = 0,
   className,
@@ -131,6 +137,10 @@ export function ModelPicker({
   onSelectReasoning?: (id: string) => void;
   autonomy?: Autonomy;
   onSelectAutonomy?: (autonomy: Autonomy) => void;
+  /** Plan mode, for harnesses that enter it by command (`/plan`): offered as
+   * a toggle in the Mode menu. */
+  planMode?: boolean;
+  onTogglePlan?: () => void;
   /** When set (a session is open), only the current harness is offered — its
    * harness is fixed for its lifetime, so you can still switch models within it
    * but not switch to a different harness. */
@@ -146,7 +156,7 @@ export function ModelPicker({
   const submenuHeaderRef = useRef<HTMLButtonElement>(null);
   const { open, setOpen, ref: rootRef } = usePopover(triggerRef);
   const [filter, setFilter] = useState("");
-  const [page, setPage] = useState<"root" | "models" | "reasoning" | "speed" | "permissions" | "autonomy">("root");
+  const [page, setPage] = useState<"root" | "models" | "providers" | "reasoning" | "speed" | "permissions" | "autonomy">("root");
 
   const close = () => {
     setOpen(false);
@@ -165,10 +175,19 @@ export function ModelPicker({
   }, [openRequest, setOpen]);
 
   useEffect(() => {
-    if (open && (page === "reasoning" || page === "speed" || page === "permissions")) {
+    if (open && (page === "providers" || page === "reasoning" || page === "speed" || page === "permissions")) {
       submenuHeaderRef.current?.focus();
     }
   }, [open, page]);
+
+  const selectedHarness = harnesses.find((harness) => harness.id === value?.harness);
+  const providers = providerGroups(selectedHarness?.models ?? [], selectedHarness?.options.providerGroups);
+  const selectedProvider =
+    providers.length > 1
+      ? selectedHarness?.models.find((entry) => entry.id === value?.model)?.providerGroup ??
+        providers.find((group) => group.available) ??
+        providers[0]
+      : undefined;
 
   const groups = useMemo(() => {
     const q = filter.trim().toLowerCase();
@@ -176,13 +195,18 @@ export function ModelPicker({
     const shown =
       lockHarness && value ? harnesses.filter((h) => h.id === value.harness) : harnesses;
     return shown.map((h) => {
-      let models = h.models;
+      // The provider switch narrows the selected harness to that provider's models.
+      const offered =
+        selectedProvider && h.id === value?.harness
+          ? h.models.filter((entry) => entry.providerGroup?.id === selectedProvider.id)
+          : h.models;
+      let models = offered;
       if (q) models = models.filter((m) => `${m.id} ${harnessModelLabel(m)}`.toLowerCase().includes(q));
       // Large catalogs stay behind the filter box.
-      else if (h.id === "opencode" || h.id === "cursor" || h.id === "antigravity") models = models.slice(0, 5);
-      return { harness: h, models, hidden: q ? 0 : h.models.length - models.length };
+      else if (h.id === "opencode" || h.id === "cursor" || h.id === "antigravity" || h.id === "kimi-code" || h.id === "minimax-code") models = models.slice(0, 5);
+      return { harness: h, models, hidden: q ? 0 : offered.length - models.length };
     });
-  }, [harnesses, filter, lockHarness, value]);
+  }, [harnesses, filter, lockHarness, value, selectedProvider]);
 
   /** Switch harness → reseed mode defaults for that harness.
    *
@@ -234,7 +258,6 @@ export function ModelPicker({
   const effectivePermissionId = value?.permissionMode ?? defaultPermissionId ?? permissionChoices[0]?.id;
   const permissionLabel = permissionChoices.find((choice) => choice.id === effectivePermissionId)?.label;
   const reasoningAxisLabel = value?.harness === "opencode" ? m.model_picker_variant() : m.model_picker_effort();
-  const selectedHarness = harnesses.find((harness) => harness.id === value?.harness);
   const speedChoices = serviceTiersFor(selectedHarness, value?.model);
   const effectiveServiceTier = reconcileServiceTier(
     selectedHarness,
@@ -249,8 +272,28 @@ export function ModelPicker({
   };
 
   const choosePermission = (id: string) => {
+    // A normal mode picked while Plan is on leaves Plan.
+    if (planMode) onTogglePlan?.();
     onSelectPermission?.(id);
     close();
+  };
+
+  const togglePlan = () => {
+    onTogglePlan?.();
+    close();
+  };
+
+  /** Switch provider: the same model there when it has it, else its first.
+   * A provider with no models yet opens the agent's settings, which say how
+   * to set it up. */
+  const chooseProvider = (id: string) => {
+    const next = selectedHarness && providerSwitchTarget(selectedHarness.models, value?.model, id, harnessModelLabel);
+    if (selectedHarness && next) {
+      pick(selectedHarness, next);
+      return;
+    }
+    close();
+    onOpenSettings();
   };
 
   const autonomyChoices: (OptionChoice & { id: Autonomy })[] = [
@@ -388,10 +431,11 @@ export function ModelPicker({
         <div className="model-menu absolute bottom-[calc(100%_+_8px)] start-0 max-h-100 flex flex-col bg-background border border-border rounded-md shadow-dropdown z-50 overflow-hidden w-72 [&.align-right]:start-auto [&.align-right]:end-0 [&_input]:rounded-none [&_input]:border-0 [&_input]:border-b [&_input]:border-b-border-variant [&_input]:bg-none [&_input]:bg-transparent [&_input]:py-2 [&_input]:px-2.5 [&_input]:text-sm [&_input]:outline-none align-right">
           {page === "root" && (
             <div className="model-root-menu p-1">
+              {selectedProvider && menuRow(m.model_picker_provider(), providerLabel(selectedProvider), "providers")}
               {menuRow(m.model_picker_model(), label, "models")}
               {reasoningChoices.length > 0 && menuRow(reasoningAxisLabel, reasoningLabel, "reasoning")}
               {speedChoices.length > 0 && menuRow(m.model_picker_speed(), speedLabel, "speed")}
-              {permissionChoices.length > 0 && menuRow(m.model_picker_mode(), permissionLabel, "permissions")}
+              {permissionChoices.length > 0 && menuRow(m.model_picker_mode(), planMode ? m.chat_plan() : permissionLabel, "permissions")}
               {onSelectAutonomy && menuRow(m.model_picker_autonomy(), autonomyLabel, "autonomy")}
             </div>
           )}
@@ -494,10 +538,42 @@ export function ModelPicker({
               {choiceList(reasoningChoices, effectiveReasoningId, defaultReasoningId, chooseReasoning)}
             </>
           )}
+          {page === "providers" && (
+            <>
+              {submenuHeader(m.model_picker_provider())}
+              {choiceList(
+                providers.map((group) => ({
+                  id: group.id,
+                  label: providerLabel(group),
+                  description: group.available
+                    ? undefined
+                    : group.id === "api-key"
+                      ? m.model_picker_provider_needs_key({ harness: selectedHarness?.name ?? "" })
+                      : m.model_picker_provider_needs_sign_in(),
+                })),
+                selectedProvider?.id,
+                undefined,
+                chooseProvider,
+              )}
+            </>
+          )}
           {page === "permissions" && (
             <>
               {submenuHeader(m.model_picker_mode())}
-              {choiceList(permissionChoices, effectivePermissionId, defaultPermissionId, choosePermission)}
+              {choiceList(permissionChoices, planMode ? undefined : effectivePermissionId, defaultPermissionId, choosePermission)}
+              {onTogglePlan && (
+                <div className="model-plan-toggle border-t border-border-variant p-1.5">
+                  <MenuItem onClick={togglePlan}>
+                    <span className="flex min-w-0 flex-col items-start gap-0.5">
+                      <span>{m.chat_plan()}</span>
+                      <span className="max-w-72 text-sm font-normal leading-snug text-muted">
+                        {m.model_picker_plan_description()}
+                      </span>
+                    </span>
+                    {planMode && <Check size={13} />}
+                  </MenuItem>
+                </div>
+              )}
             </>
           )}
           {page === "autonomy" && (
@@ -713,3 +789,8 @@ export function OptionPicker({
 }
 
 const EMPTY_HARNESSES: Harness[] = [];
+
+/** A provider group's label: "API key" is translated, product names are not. */
+function providerLabel(group: OptionChoice): string {
+  return group.id === "api-key" ? m.onboarding_api_key() : group.label;
+}

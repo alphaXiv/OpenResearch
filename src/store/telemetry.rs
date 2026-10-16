@@ -33,9 +33,7 @@ fn valid_model_label(label: &str) -> bool {
 
 impl InvocationIdentity {
     pub fn validate(&self) -> Result<()> {
-        if !["claude-code", "codex", "opencode", "cursor", "antigravity"]
-            .contains(&self.harness.as_str())
-        {
+        if !crate::telemetry::harness::IDS.contains(&self.harness.as_str()) {
             return Err(anyhow!("Invalid invoking harness"));
         }
         for label in std::iter::once(self.model.as_str()).chain(self.provider.as_deref()) {

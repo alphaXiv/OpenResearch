@@ -26,7 +26,8 @@ export function HarnessSetupDialog({ harness, commands, onReady, onClose }: {
   const [needsRepair, setNeedsRepair] = useState(harness.needsConfigRepair);
   const [error, setError] = useState<string | null>(harness.needsConfigRepair ? harness.agentNote ?? null : null);
   const busy = phase === "running" || phase === "checking";
-  const command = commands[action].includes("\n") ? undefined : commands[action];
+  const text = commands[action];
+  const command = text && !text.includes("\n") ? text : undefined;
 
   useEffect(() => {
     cancelled.current = false;

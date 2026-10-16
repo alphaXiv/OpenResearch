@@ -7194,6 +7194,12 @@ export function ChatPanel({
                   onSelectReasoning={setReasoningLevel}
                   autonomy={openSession?.autonomy ?? preferredAutonomy}
                   onSelectAutonomy={setAutonomy}
+                  planMode={planActive}
+                  onTogglePlan={
+                    opts?.planActivation === "command" && activeHarness?.agentReady
+                      ? () => void togglePlanMode()
+                      : undefined
+                  }
                   lockHarness={!!openSession}
                   openRequest={modelPickerRequest}
                 />
