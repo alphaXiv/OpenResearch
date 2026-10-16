@@ -45,6 +45,52 @@ pub(crate) fn supervisor_running(run_id: &str) -> bool {
     lock_held(&supervisor_lock_path(run_id))
 }
 
+/// CLI monitoring must also recover native runs when `orx up` is not running.
+pub(crate) async fn refresh_local_run(
+    stored: crate::store::StoredRun,
+    wait_for_terminal: bool,
+) -> Result<crate::store::StoredRun> {
+    if !matches!(stored.status.as_str(), "starting" | "running") {
+        return Ok(stored);
+    }
+    let Ok(descriptor) = BackendDescriptor::parse(&stored.backend_json) else {
+        return Ok(stored);
+    };
+    let Ok(dir) = descriptor.local_ref() else {
+        return Ok(stored);
+    };
+    if supervisor_running(&stored.id) {
+        return Ok(stored);
+    }
+    // Wait commands must not extend their deadline to drain a finished worker's log.
+    if !wait_for_terminal {
+        crate::commands::exp::spawn_detached_supervise(&stored.id)?;
+        return Ok(stored);
+    }
+    if is_terminal_stage(&localbox::inspect_job(std::path::Path::new(dir)).stage) {
+        // Reuse the supervisor's lock, final log drain, and cancellation-aware transition.
+        let mut lock = open_supervisor_lock(&supervisor_lock_path(&stored.id))?;
+        let _guard = match lock.try_write() {
+            Ok(guard) => guard,
+            Err(err) if err.kind() == std::io::ErrorKind::WouldBlock => return Ok(stored),
+            Err(err) => return Err(err.into()),
+        };
+        let store = Store::open()?;
+        let current = store
+            .get_run(&stored.id)?
+            .ok_or_else(|| anyhow!("Run {} not found in the local store.", stored.id))?;
+        if status_of(&current)?.is_terminal() {
+            return Ok(current);
+        }
+        run_local(store, current, descriptor, stored.id.clone()).await?;
+    } else {
+        crate::commands::exp::spawn_detached_supervise(&stored.id)?;
+    }
+    Store::open()?
+        .get_run(&stored.id)?
+        .ok_or_else(|| anyhow!("Run {} not found in the local store.", stored.id))
+}
+
 fn lock_held(path: &std::path::Path) -> bool {
     let Ok(mut lock) = open_supervisor_lock(path) else {
         return false;
