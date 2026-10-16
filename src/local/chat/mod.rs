@@ -2382,6 +2382,8 @@ pub struct ChatHost {
     /// Set once `orx up` commits to restarting into an update; no turn starts after.
     restarting: std::sync::atomic::AtomicBool,
     deleting_sessions: Arc<std::sync::Mutex<HashSet<String>>>,
+    /// Serialize shared-native ownership checks with local row removal.
+    pub(crate) native_deletion: Mutex<()>,
     /// Per-session serialization for `respond`. Answering a prompt reads the
     /// card, delivers the answer (a non-idempotent POST for inline harnesses),
     /// and marks it resolved — steps that must not interleave for one session,
@@ -3386,6 +3388,7 @@ impl ChatHost {
             durable_turns: std::sync::Mutex::new(HashMap::new()),
             restarting: std::sync::atomic::AtomicBool::new(false),
             deleting_sessions: Arc::new(std::sync::Mutex::new(HashSet::new())),
+            native_deletion: Mutex::new(()),
             respond_locks: Mutex::new(HashMap::new()),
             msg_write: std::sync::Mutex::new(()),
             pending_permissions: std::sync::Mutex::new(HashMap::new()),
@@ -6611,7 +6614,7 @@ impl ChatHost {
         // too, so reap it before `cleanup_session_worktree` below.
         self.opencode.kill_session(session_id).await;
         self.codex.kill_session(session_id).await;
-        self.claude.forget_session(session_id).await;
+        self.claude.kill_session(session_id).await;
         self.acp.stop(session_id).await;
         self.respond_locks.lock().await.remove(session_id);
         self.recovery_locks.lock().await.remove(session_id);
@@ -6635,11 +6638,13 @@ impl ChatHost {
             .lock()
             .unwrap()
             .retain(|(queued_session_id, _), _| queued_session_id != session_id);
+        let _native_deletion = self.native_deletion.lock().await;
         let store = Store::open()?;
         let session = store.get_chat_session(session_id)?;
         let worktree_owner = store.chat_worktree_owner(session_id)?;
         Self::delete_native_sessions(&[session_id.to_string()]).await?;
         store.delete_chat_session(session_id)?;
+        self.claude.forget_session(session_id).await;
         self.emit("chat.session.deleted", json!({ "sessionId": session_id }));
         if let Some(session) = session {
             cleanup_session_transcript_artifacts(&session.id);

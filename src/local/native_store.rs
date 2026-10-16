@@ -193,10 +193,7 @@ pub fn delete_opencode_sessions(
     }
     let isolated = opencode_db(NativeStore::Isolated);
     let legacy = opencode_db(NativeStore::Legacy);
-    for db in std::collections::BTreeSet::from([isolated, legacy]) {
-        opencode_database::delete_sessions(&db, ids, retained)?;
-    }
-    Ok(())
+    opencode_database::delete_sessions(&[isolated, legacy], ids, retained)
 }
 
 pub fn codex_sqlite_override(store: NativeStore, home: &Path) -> Option<String> {

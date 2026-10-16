@@ -180,13 +180,39 @@ fn sidecar(path: &Path, suffix: &str) -> PathBuf {
 }
 
 pub(super) fn delete_sessions(
+    paths: &[PathBuf],
+    ids: &BTreeSet<String>,
+    retained: &BTreeSet<String>,
+) -> Result<()> {
+    let mut leases = Vec::new();
+    for path in paths.iter().collect::<BTreeSet<_>>() {
+        let major = match inspect(path)? {
+            DatabaseState::Empty => continue,
+            DatabaseState::V1 => 1,
+            DatabaseState::V2Pending | DatabaseState::V2Ready => 2,
+        };
+        let lease = DatabaseLease::acquire(path, major)?;
+        if lease.requires_migration() {
+            return Err(anyhow!(
+                "Complete the OpenCode V2 upgrade before deleting chats in {}",
+                path.display()
+            ));
+        }
+        leases.push(lease);
+    }
+    for lease in &leases {
+        delete_session_rows(lease.path(), ids, retained).map_err(|error| {
+            anyhow!("Could not finish native cleanup in {}: {error}. Cleanup may be partial; retry deleting the chat or project to finish", lease.path().display())
+        })?;
+    }
+    Ok(())
+}
+
+fn delete_session_rows(
     path: &Path,
     ids: &BTreeSet<String>,
     retained: &BTreeSet<String>,
 ) -> Result<()> {
-    if inspect(path)? == DatabaseState::Empty {
-        return Ok(());
-    }
     let mut connection = Connection::open_with_flags(path, OpenFlags::SQLITE_OPEN_READ_WRITE)?;
     connection.busy_timeout(std::time::Duration::from_secs(5))?;
     connection.execute_batch("PRAGMA foreign_keys = ON;")?;
@@ -716,6 +742,13 @@ mod tests {
             let path = fixture.path();
             let connection = Connection::open(&path).unwrap();
             connection.execute_batch(&schema).unwrap();
+            if schema.contains("session_v2") && schema.contains("CREATE TABLE session (") {
+                connection
+                    .execute_batch(
+                        "INSERT INTO kv VALUES ('migration.v1-v2', '{\"phase\":\"completed\"}');",
+                    )
+                    .unwrap();
+            }
             connection.execute_batch(
                 "CREATE TABLE event_sequence (aggregate_id TEXT PRIMARY KEY);
                  CREATE TABLE event (aggregate_id TEXT REFERENCES event_sequence(aggregate_id), data TEXT);",
@@ -752,8 +785,8 @@ mod tests {
             }
             let ids = BTreeSet::from(["history".into()]);
             let retained = BTreeSet::from(["retained".into()]);
-            delete_sessions(&path, &ids, &retained).unwrap();
-            delete_sessions(&path, &ids, &retained).unwrap();
+            delete_sessions(std::slice::from_ref(&path), &ids, &retained).unwrap();
+            delete_sessions(std::slice::from_ref(&path), &ids, &retained).unwrap();
             for (table, column) in [
                 ("session", "id"),
                 ("session_v2", "id"),
@@ -784,7 +817,7 @@ mod tests {
         let fixture = Fixture::new();
         let path = fixture.path();
         let ids = BTreeSet::from(["history".into()]);
-        delete_sessions(&path, &ids, &BTreeSet::new()).unwrap();
+        delete_sessions(std::slice::from_ref(&path), &ids, &BTreeSet::new()).unwrap();
         assert!(!path.exists());
         let connection = Connection::open(&path).unwrap();
         connection.execute_batch(V1).unwrap();
@@ -796,7 +829,7 @@ mod tests {
              BEGIN SELECT RAISE(ABORT, 'cannot purge'); END;",
             )
             .unwrap();
-        assert!(delete_sessions(&path, &ids, &BTreeSet::new()).is_err());
+        assert!(delete_sessions(std::slice::from_ref(&path), &ids, &BTreeSet::new()).is_err());
         for table in ["session", "message", "part"] {
             let count: i64 = connection
                 .query_row(&format!("SELECT COUNT(*) FROM {table}"), [], |row| {
@@ -805,6 +838,52 @@ mod tests {
                 .unwrap();
             assert_eq!(count, 1, "{table}");
         }
+    }
+
+    #[test]
+    fn native_deletion_defers_to_active_and_interrupted_migrations() {
+        let fixture = Fixture::new();
+        let path = fixture.path();
+        let connection = Connection::open(&path).unwrap();
+        connection.execute_batch(V1).unwrap();
+        let ids = BTreeSet::from(["history".into()]);
+        let lease = DatabaseLease::acquire(&path, 2).unwrap();
+        lease.prepare_with_sessions(ids.clone()).unwrap();
+        assert!(delete_sessions(std::slice::from_ref(&path), &ids, &BTreeSet::new()).is_err());
+        drop(lease);
+        assert!(delete_sessions(std::slice::from_ref(&path), &ids, &BTreeSet::new()).is_err());
+        connection.execute_batch(V2).unwrap();
+        assert!(delete_sessions(std::slice::from_ref(&path), &ids, &BTreeSet::new()).is_err());
+        let lease = DatabaseLease::acquire(&path, 2).unwrap();
+        lease.prepare_with_sessions(ids).unwrap();
+        assert!(table_has_session(&connection, "session", "history").unwrap());
+    }
+
+    #[test]
+    fn native_deletion_preflights_stores_and_can_retry_partial_cleanup() {
+        let fixture = Fixture::new();
+        let paths = [fixture.0.path().join("a.db"), fixture.0.path().join("b.db")];
+        let first = Connection::open(&paths[0]).unwrap();
+        let second = Connection::open(&paths[1]).unwrap();
+        first.execute_batch(V1).unwrap();
+        second
+            .execute_batch("CREATE TABLE unsupported (id TEXT);")
+            .unwrap();
+        let ids = BTreeSet::from(["history".into()]);
+        assert!(delete_sessions(&paths, &ids, &BTreeSet::new()).is_err());
+        assert!(table_has_session(&first, "session", "history").unwrap());
+        second.execute_batch("DROP TABLE unsupported;").unwrap();
+        second.execute_batch(V1).unwrap();
+        second.execute_batch("CREATE TRIGGER fail_delete BEFORE DELETE ON session BEGIN SELECT RAISE(ABORT, 'cannot purge'); END;").unwrap();
+        let error = delete_sessions(&paths, &ids, &BTreeSet::new())
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("retry deleting"));
+        assert!(!table_has_session(&first, "session", "history").unwrap());
+        assert!(table_has_session(&second, "session", "history").unwrap());
+        second.execute_batch("DROP TRIGGER fail_delete;").unwrap();
+        delete_sessions(&paths, &ids, &BTreeSet::new()).unwrap();
+        assert!(!table_has_session(&second, "session", "history").unwrap());
     }
 
     #[test]

@@ -2104,6 +2104,7 @@ async fn delete_project_inner(state: AppState, id: String, query: DeleteProjectQ
         .iter()
         .map(|session| session.id.clone())
         .collect::<Vec<_>>();
+    let _native_deletion = state.chat.native_deletion.lock().await;
     local::chat::ChatHost::delete_native_sessions(&session_ids).await?;
     store.delete_local_project(&id)?;
     for session in &sessions {
