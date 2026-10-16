@@ -6519,7 +6519,7 @@ impl ChatHost {
             .begin_session_delete(session_id)
             .ok_or_else(|| anyhow!("session deletion is already in progress"))?;
         for side_chat in Store::open()?.side_chats_of(session_id)? {
-            let _ = Box::pin(self.delete_session(&side_chat)).await;
+            Box::pin(self.delete_session(&side_chat)).await?;
         }
         self.clear_queue(session_id)?;
         let _ = self.interrupt(session_id).await;
@@ -6528,7 +6528,7 @@ impl ChatHost {
         // too, so reap it before `cleanup_session_worktree` below.
         self.opencode.kill_session(session_id).await;
         self.codex.kill_session(session_id).await;
-        self.claude.forget_session(session_id).await;
+        self.claude.kill_session(session_id).await;
         self.respond_locks.lock().await.remove(session_id);
         self.recovery_locks.lock().await.remove(session_id);
         self.queue_dispatch_cancelled
@@ -6552,9 +6552,12 @@ impl ChatHost {
             .unwrap()
             .retain(|(queued_session_id, _), _| queued_session_id != session_id);
         let store = Store::open()?;
+        let _native_deletion = store.lock_native_deletion()?;
         let session = store.get_chat_session(session_id)?;
         let worktree_owner = store.chat_worktree_owner(session_id)?;
+        Self::delete_native_sessions(&[session_id.to_string()]).await?;
         store.delete_chat_session(session_id)?;
+        self.claude.forget_session(session_id).await;
         self.emit("chat.session.deleted", json!({ "sessionId": session_id }));
         if let Some(session) = session {
             cleanup_session_transcript_artifacts(&session.id);
@@ -6565,6 +6568,15 @@ impl ChatHost {
                 }
             }
         }
+        Ok(())
+    }
+
+    pub async fn delete_native_sessions(session_ids: &[String]) -> Result<()> {
+        let (ids, retained) = Store::open()?.opencode_sessions_for_deletion(session_ids)?;
+        tokio::task::spawn_blocking(move || {
+            crate::local::native_store::delete_opencode_sessions(&ids, &retained)
+        })
+        .await??;
         Ok(())
     }
 }
