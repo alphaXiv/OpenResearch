@@ -1,4 +1,5 @@
 import { useQuery } from "@tanstack/react-query";
+import { useBlocker } from "@tanstack/react-router";
 import { X } from "lucide-react";
 import { useEffect, useRef, useState, useSyncExternalStore } from "react";
 import { createPortal } from "react-dom";
@@ -44,15 +45,11 @@ export function AgentInstructionsDialog({ onClose }: { onClose: () => void }) {
     setDraft(fileQuery.data.content);
   }, [fileQuery.data]);
 
-  useEffect(() => {
-    const preventLoss = (event: BeforeUnloadEvent) => {
-      if (!dirtyRef.current && !busyRef.current) return;
-      event.preventDefault();
-      event.returnValue = "";
-    };
-    window.addEventListener("beforeunload", preventLoss);
-    return () => window.removeEventListener("beforeunload", preventLoss);
-  }, []);
+  useBlocker({
+    shouldBlockFn: () => busyRef.current
+      || (dirtyRef.current && !window.confirm(m.settings_instructions_discard())),
+    enableBeforeUnload: () => dirtyRef.current || busyRef.current,
+  });
 
   const close = () => {
     if (busyRef.current) return;
@@ -60,6 +57,13 @@ export function AgentInstructionsDialog({ onClose }: { onClose: () => void }) {
     onClose();
   };
   useDialogFocus(dialogRef, close, "textarea");
+
+  // The focus trap mounts before the first fetch finishes. Focus the editor
+  // when it appears, without stealing focus on subsequent file refreshes.
+  const loaded = file !== null;
+  useEffect(() => {
+    if (loaded) dialogRef.current?.querySelector<HTMLTextAreaElement>("textarea")?.focus();
+  }, [loaded]);
 
   async function save() {
     if (!file || !dirty || busyRef.current || !isCurrentScope(options.queryKey)) return;
