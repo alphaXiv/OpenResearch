@@ -69,9 +69,10 @@ test("only recognized concrete destinations can be saved for automatic resume", 
   for (const location of [
     "/projects", "/projects/demo/tasks/new", "/projects/demo/tasks/archived",
     "/projects/demo/skills", ...settingsTabs.map((tab) => `/projects/demo/settings/${tab}`),
-    "/projects/demo/settings/%67it", `/projects/demo/tasks/new?%70ane=${encodeURIComponent(JSON.stringify(panes[0]))}&`,
+    "/projects/demo/settings/%73ettings", `/projects/demo/tasks/new?%70ane=${encodeURIComponent(JSON.stringify(panes[0]))}&`,
   ]) assert.equal(safeLocation(location), location);
   for (const location of [
+    "/projects/demo/settings/git", "/projects/demo/settings/%67it",
     null, undefined, 42, "", "/", "/projects/demo", "/projects/demo/", "/remote-launch",
     "https://example.com/projects", "javascript:alert(1)", "//example.com/projects",
     "/\\example.com/projects", "/projects/../tasks/new", "/projects/%2e%2e/tasks/new",

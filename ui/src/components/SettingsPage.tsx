@@ -32,7 +32,7 @@ import {
 } from "../queries/settings";
 
 import { getOverleafSettingsQuery } from "../queries/files";
-import { listRunsQuery } from "../queries/projects";
+import { githubAccountQuery, githubOrganizationsQuery, listProjectsQuery, listRunsQuery, repoAccessQuery } from "../queries/projects";
 import {
   ArrowLeft,
   ArrowRight,
@@ -123,7 +123,7 @@ import { renderNote } from "./agentNote";
 import { claudeProviderLabel } from "./claudeProvider";
 import { BackendBadge, BackendLogo } from "./BackendLogos";
 import { ProgressBar } from "./ProgressBar";
-import { OptionPicker } from "./ModelPicker";
+import { OptionPicker, usePopover } from "./ModelPicker";
 import { HarnessLogo } from "./HarnessLogo";
 import { LocalModelSetup } from "./LocalModelSetup";
 import { StatusBadge } from "./StatusBadge";
@@ -138,6 +138,7 @@ import {
   IconButtonLink,
   Input,
   LoadingRow,
+  MenuItem,
   showAlert,
   Spinner,
   Switch,
@@ -258,26 +259,6 @@ const PROJECT_DEFAULT_ROW_CLASS_NAME = [
   "project-default-row flex items-center justify-between gap-6",
   "pt-3.5 border-t border-t-border-variant [&_p]:mt-[3px] [&_p]:mx-0 [&_p]:mb-0",
   "[&_.project-default-title]:text-base [&_p]:text-sm [&_p]:leading-relaxed [&_p]:text-text",
-].join(" ");
-
-const GIT_SETTINGS_CARD_CLASS_NAME = [
-  "settings-card [&_>_.error]:text-accent-red [&_>_.error]:text-base",
-  "[&_>_.error]:whitespace-pre-wrap bg-background border border-border",
-  "rounded-lg mb-4 [&_h3]:mt-0 [&_h3]:mx-0 [&_h3]:mb-2.5 [&_h3]:text-base",
-  "[&_h3]:font-semibold [&_h3]:text-text [&_.settings-sub]:mb-3",
-  "[&_>_.project-default-row:first-child]:pt-0 [&_>_.project-default-row:first-child]:border-t-0",
-  "git-settings-card py-3.5 px-4 [&_h3]:mb-3",
-  "[&_.kv]:grid-cols-[132px_minmax(0,_1fr)] [&_.kv]:items-center [&_.kv]:gap-y-[9px] [&_.kv]:gap-x-4.5",
-  "[&_.kv_.k]:text-sm [&_.kv_.v]:flex [&_.kv_.v]:items-center",
-  "[&_.kv_.v]:flex-wrap [&_.kv_.v]:gap-[7px] [&_.kv_.v]:min-w-0 [&_.kv_.v]:font-sans",
-  "[&_.kv_.v]:text-base [&_.kv_.v]:break-normal",
-  "[@media((max-width:_640px))]:[&_.kv]:grid-cols-1",
-  "[@media((max-width:_640px))]:[&_.kv]:gap-[3px] [@media((max-width:_640px))]:[&_.kv_.v_+_.k]:mt-[7px]",
-].join(" ");
-
-const GIT_CARD_ACTIONS_CLASS_NAME = [
-  "git-card-actions flex flex-wrap gap-2 mt-3.5 pt-3.5",
-  "border-t border-t-border-variant",
 ].join(" ");
 
 const SETTINGS_STACK_SECTION_CLASS_NAME = [
@@ -3009,12 +2990,20 @@ function InstallCliRow({
 
 // --- project defaults ----------------------------------------------------------
 
-function ProjectDefaultsTab({ remote }: { remote: boolean }) {
+function GithubSettings({ remote, onProjectUpdate }: {
+  remote: boolean;
+  onProjectUpdate: (project: Project) => void;
+}) {
+  const projectsQuery = useQuery(listProjectsQuery());
+  const [selectedProjectId, setSelectedProjectId] = useState("");
+  const selectedProject = projectsQuery.data?.find((project) => project.id === selectedProjectId);
   const setProjectDefaultsMutation = useMutation({ mutationFn: (args: Parameters<typeof setProjectDefaults>) => setProjectDefaults(...args) });
 
   const settingsOptions = getProjectDefaultsQuery();
   const settingsQuery = useQuery(settingsOptions);
   const settings = settingsQuery.data ?? null;
+  useQuery({ ...githubAccountQuery(), enabled: Boolean(settings?.githubAuthenticated) });
+  useQuery({ ...githubOrganizationsQuery(), enabled: Boolean(settings?.githubAuthenticated) });
   const setSettings = (value: React.SetStateAction<ProjectDefaultsSettings | null>) => {
     setScopedQueryData(settingsOptions.queryKey, (current) => (typeof value === "function" ? value(current ?? null) : value) ?? undefined);
   };
@@ -3022,7 +3011,14 @@ function ProjectDefaultsTab({ remote }: { remote: boolean }) {
   const [actionError, setError] = useState<string | null>(null);
   const error = actionError ?? settingsQuery.error?.message ?? null;
 
-  const load = async () => { await settingsQuery.refetch({ cancelRefetch: false }); };
+  const load = async () => {
+    await settingsQuery.refetch({ cancelRefetch: false });
+    if (selectedProjectId) await queryClient.invalidateQueries(getProjectGitStatusQuery(selectedProjectId));
+    await Promise.all([
+      queryClient.invalidateQueries(githubAccountQuery()),
+      queryClient.invalidateQueries(githubOrganizationsQuery()),
+    ]);
+  };
   const gh = useCommandRun();
 
   const toggle = () => {
@@ -3038,18 +3034,33 @@ function ProjectDefaultsTab({ remote }: { remote: boolean }) {
 
   return (
     <>
-      <h2>{m.settings_page_general()}</h2>
+      <h2>{m.settings_page_git_hub_publishing()}</h2>
       {!settings ? (
-        error ? <div className="error">{error}</div> : <LoadingRow><Spinner /> {m.settings_page_loading()}</LoadingRow>
+        error ? <div className="error">{error}</div> : (
+          <div className={`${SETTINGS_CARD_CLASS_NAME} mt-3`} role="status" aria-label={m.settings_page_loading()} aria-busy="true">
+            <div aria-hidden="true" className="motion-safe:animate-pulse">
+              <div className="mb-4 flex justify-start"><div className="h-6 w-48 rounded-full bg-surface" /></div>
+              <div className="flex items-center justify-between gap-6">
+                <div className="flex-1 space-y-2">
+                  <div className="h-5 w-2/3 rounded bg-surface" />
+                  <div className="h-4 rounded bg-surface" />
+                  <div className="h-4 w-3/4 rounded bg-surface" />
+                </div>
+                <div className="h-6 w-10 shrink-0 rounded-full bg-surface" />
+              </div>
+              <div className="mt-6 h-4 w-44 rounded bg-surface" />
+              <div className="mt-2 h-8 rounded bg-surface" />
+            </div>
+          </div>
+        )
       ) : (
-        <div className={`${SETTINGS_CARD_CLASS_NAME} mt-3 project-defaults-card [&_.settings-card-head]:justify-between [&_.settings-card-head]:mb-0 [&_.settings-card-head]:pb-3 [&_.settings-card-head_h3]:m-0`}>
-          <div className="settings-card-head flex items-center gap-2.5 mb-3">
-            <h3>{m.settings_page_git_hub_publishing()}</h3>
+        <div className={`${SETTINGS_CARD_CLASS_NAME} mt-3`}>
+          <div className="mb-4 flex justify-start">
             <Badge variant={settings.githubAuthenticated ? "success" : settings.ghInstalled ? "warning" : "error"}>
               {settings.githubAuthenticated ? m.settings_connected_via_github_cli() : m.settings_not_connected()}
             </Badge>
           </div>
-          <div className={PROJECT_DEFAULT_ROW_CLASS_NAME}>
+          <div className="flex items-center justify-between gap-6 [&_p]:mt-1 [&_p]:mb-0 [&_p]:text-sm [&_p]:leading-relaxed">
             <div>
               <div className="project-default-title text-base font-medium">{m.settings_page_enable_git_hub_syncing_for_new_projects()}</div>
               <p>
@@ -3065,12 +3076,33 @@ function ProjectDefaultsTab({ remote }: { remote: boolean }) {
             />
           </div>
           {!settings.githubAuthenticated && (
-            <div className="mt-3.5 pt-3.5 border-t border-t-border-variant">
+            <div className="mt-4">
               <GitHubCliHelp ghInstalled={settings.ghInstalled} remote={remote} onCheck={load} onRun={gh.start} />
             </div>
           )}
           <CommandRunTerminal run={gh.run} onComplete={() => void load()} onClose={gh.clear} />
           {error && <div className="error">{error}</div>}
+          <div className="mt-6">
+            <div className="mb-2 text-sm font-medium">{m.settings_github_manage_project()}</div>
+            <OptionPicker
+              variant="field"
+              dropDown
+              title={m.settings_github_manage_project()}
+              value={selectedProjectId}
+              choices={[
+                { id: "", label: m.settings_github_choose_project() },
+                ...(projectsQuery.data ?? []).map((project) => ({ id: project.id, label: project.name })),
+              ]}
+              onSelect={setSelectedProjectId}
+            />
+            {projectsQuery.error && (
+              <div className="mt-2 text-sm text-text">
+                <p className="m-0">{projectsQuery.error.message}</p>
+                <Button size="small" onClick={() => void projectsQuery.refetch()}>{m.app_retry()}</Button>
+              </div>
+            )}
+            {selectedProject && <GitTab key={selectedProject.id} project={selectedProject} onProjectUpdate={onProjectUpdate} />}
+          </div>
         </div>
       )}
     </>
@@ -3120,124 +3152,111 @@ function GitHubCliHelp({
   );
 }
 
-/** The Overleaf Git authentication token and session cookie are machine-wide.
- * Which Overleaf *project* a paper pushes to is per-paper, and lives on the
- * .tex tab. */
 function OverleafCard() {
-  const deleteOverleafTokenMutation = useMutation({ mutationFn: deleteOverleafToken });
-  const deleteOverleafSessionMutation = useMutation({ mutationFn: deleteOverleafSession });
-
+  const deleteToken = useMutation({ mutationFn: deleteOverleafToken });
+  const deleteSession = useMutation({ mutationFn: deleteOverleafSession });
   const tokenOptions = getOverleafSettingsQuery();
   const settings = useQuery(tokenOptions);
-  const hasToken = settings.data?.hasToken ?? null;
-  const hasSession = settings.data?.hasSession ?? null;
+  const [tokenOpen, setTokenOpen] = useState(false);
+  const [sessionOpen, setSessionOpen] = useState(false);
+  const [removing, setRemoving] = useState<"token" | "session" | null>(null);
   const patch = (next: Partial<OverleafSettings>) =>
-    setScopedQueryData(tokenOptions.queryKey, {
-      hasToken: hasToken ?? false,
-      hasSession: hasSession ?? false,
-      ...next,
-    });
-  const setHasToken = (value: boolean) => patch({ hasToken: value });
-  const [saving, setSaving] = useState(false);
-  const [actionError, setError] = useState<string | null>(null);
+    setScopedQueryData(tokenOptions.queryKey, (current) => current ? { ...current, ...next } : current);
 
-  const error = actionError ?? settings.error?.message;
+  const remove = async (kind: "token" | "session") => {
+    setRemoving(kind);
+    try {
+      patch(await (kind === "token" ? deleteToken.mutateAsync() : deleteSession.mutateAsync()));
+    } catch (err) {
+      showAlert(err instanceof Error ? err.message : String(err), "error");
+    } finally {
+      setRemoving(null);
+    }
+  };
 
   return (
-    <div className={GIT_SETTINGS_CARD_CLASS_NAME}>
-      <h3>{m.settings_page_overleaf()}</h3>
-      <div className={KV_CLASS_NAME}>
-        <span className="k">{m.settings_page_git_token()}</span>
-        <span className="v">
-          <Badge variant={hasToken ? "success" : "default"}>
-            {hasToken === null ? (error ? m.model_picker_unavailable() : m.common_checking()) : hasToken ? m.settings_saved() : m.settings_not_set()}
-          </Badge>
-        </span>
-      </div>
-      <p className="git-card-helper mt-3.5 mx-0 mb-0 text-sm leading-relaxed text-text">
-        {m.settings_page_with_a_token_saved_a_paper_opened_in()}
-      </p>
-      {hasToken ? (
-        <div className={GIT_CARD_ACTIONS_CLASS_NAME}>
-          <Button
-            disabled={saving}
-            onClick={() => {
-              setSaving(true);
-              setError(null);
-              void deleteOverleafTokenMutation.mutateAsync()
-                .then((s) => setHasToken(s.hasToken))
-                .catch((err) => setError(err instanceof Error ? err.message : String(err)))
-                .finally(() => setSaving(false));
-            }}
-          >
-            {saving ? m.settings_removing() : m.settings_remove_token()}
-          </Button>
+    <>
+      <h2>{m.settings_page_overleaf()}</h2>
+      <p className="mt-1 mb-3 text-sm text-text">{m.settings_overleaf_intro()}</p>
+      <div className={`${SETTINGS_CARD_CLASS_NAME} space-y-5`}>
+        <div>
+          <div className="flex items-center justify-between gap-4">
+            <div className="flex flex-wrap items-center gap-2">
+              <span className="text-base font-medium">{m.settings_overleaf_file_sync()}</span>
+              <Badge variant={settings.data?.hasToken ? "success" : "default"}>
+                {settings.isPending ? m.common_checking() : !settings.data ? m.model_picker_unavailable() : settings.data.hasToken ? m.settings_saved() : m.settings_not_set()}
+              </Badge>
+            </div>
+            {settings.data?.hasToken ? (
+              <Button size="small" disabled={removing !== null} onClick={() => void remove("token")}>
+                {removing === "token" ? m.settings_removing() : m.remote_disconnect()}
+              </Button>
+            ) : (
+              <Button size="small" disabled={!settings.data} aria-expanded={tokenOpen} onClick={() => setTokenOpen(!tokenOpen)}>
+                {tokenOpen ? m.tour_close() : m.settings_connect()}
+              </Button>
+            )}
+          </div>
+          {tokenOpen && !settings.data?.hasToken && (
+            <div className="mt-3">
+              <p className="mt-0 mb-2 text-sm leading-relaxed text-text">{m.overleaf_token_instructions()}</p>
+              <TokenForm
+                save={saveOverleafToken}
+                onSaved={(result) => { patch(result); setTokenOpen(false); }}
+                placeholder={m.settings_page_overleaf_git_authentication_token()}
+                createHref="https://www.overleaf.com/user/settings"
+              />
+            </div>
+          )}
         </div>
-      ) : (
-        <TokenForm
-          save={saveOverleafToken}
-          onSaved={(result) => setHasToken(result.hasToken)}
-          placeholder={m.settings_page_overleaf_git_authentication_token()}
-          createHref="https://www.overleaf.com/user/settings"
-        />
-      )}
-      <div className={KV_CLASS_NAME}>
-        <span className="k">{m.settings_page_session_cookie()}</span>
-        <span className="v">
-          <Badge variant={hasSession ? "success" : "default"}>
-            {hasSession === null ? (error ? m.model_picker_unavailable() : m.common_checking()) : hasSession ? m.settings_saved() : m.settings_not_set()}
-          </Badge>
-        </span>
-      </div>
-      <p className="git-card-helper mt-3.5 mx-0 mb-0 text-sm leading-relaxed text-text">
-        {m.settings_page_session_cookie_help()}
-      </p>
-      {hasSession ? (
-        <div className={GIT_CARD_ACTIONS_CLASS_NAME}>
-          <Button
-            disabled={saving}
-            onClick={() => {
-              setSaving(true);
-              setError(null);
-              void deleteOverleafSessionMutation.mutateAsync()
-                .then((s) => patch({ hasSession: s.hasSession }))
-                .catch((err) => setError(err instanceof Error ? err.message : String(err)))
-                .finally(() => setSaving(false));
-            }}
-          >
-            {saving ? m.settings_removing() : m.settings_remove_session()}
-          </Button>
+        <div>
+          <div className="flex items-center justify-between gap-4">
+            <div className="flex flex-wrap items-center gap-2">
+              <span className="text-base font-medium">{m.settings_overleaf_live_sync()}</span>
+              <Badge variant={settings.data?.hasSession ? "success" : "default"}>
+                {settings.isPending ? m.common_checking() : !settings.data ? m.model_picker_unavailable() : settings.data.hasSession ? m.settings_saved() : m.settings_not_set()}
+              </Badge>
+            </div>
+            {settings.data?.hasSession ? (
+              <Button size="small" disabled={removing !== null} onClick={() => void remove("session")}>
+                {removing === "session" ? m.settings_removing() : m.remote_disconnect()}
+              </Button>
+            ) : (
+              <Button size="small" disabled={!settings.data} aria-expanded={sessionOpen} onClick={() => setSessionOpen(!sessionOpen)}>
+                {sessionOpen ? m.tour_close() : m.settings_connect()}
+              </Button>
+            )}
+          </div>
+          {sessionOpen && !settings.data?.hasSession && (
+            <div className="mt-3">
+              <p className="mt-0 mb-2 text-sm leading-relaxed text-text">{m.overleaf_session_instructions()}</p>
+              <TokenForm
+                save={saveOverleafSession}
+                onSaved={(result) => { patch(result); setSessionOpen(false); }}
+                placeholder={m.overleaf_session_cookie()}
+                createHref="https://www.overleaf.com/project"
+                createLabel={m.overleaf_open_overleaf()}
+              />
+            </div>
+          )}
         </div>
-      ) : (
-        <TokenForm
-          save={(session) => saveOverleafSession(session)}
-          onSaved={(result) => patch({ hasSession: result.hasSession })}
-          placeholder={m.overleaf_session_cookie()}
-          createHref="https://www.overleaf.com/project"
-          createLabel={m.overleaf_open_overleaf()}
-        />
-      )}
-      {error && <div className="error">{error}</div>}
-    </div>
+        {settings.error && <div className="error">{settings.error.message}</div>}
+      </div>
+    </>
   );
 }
 
 // --- git -----------------------------------------------------------------------
 
-function GitTab({
+export function GitTab({
   project,
   onProjectUpdate,
-  remote,
 }: {
   project: Project | null;
   onProjectUpdate: (project: Project) => void;
-  remote: boolean;
 }) {
-  const setProjectDefaultsMutation = useMutation({ mutationFn: (args: Parameters<typeof setProjectDefaults>) => setProjectDefaults(...args) });
-
   const statusOptions = { ...getProjectGitStatusQuery(project?.id ?? ""), enabled: Boolean(project) };
   const statusQuery = useQuery(statusOptions);
-  const gh = useCommandRun();
   const status = statusQuery.data ?? null;
   const setStatus = (value: React.SetStateAction<ProjectGitStatus | null>) => {
     setScopedQueryData(statusOptions.queryKey, (current) => (typeof value === "function" ? value(current ?? null) : value) ?? undefined);
@@ -3245,15 +3264,29 @@ function GitTab({
   const [saving, setSaving] = useState(false);
   const [actionError, setError] = useState<string | null>(null);
   const error = actionError ?? statusQuery.error?.message ?? null;
-  const [defaultPromptOpen, setDefaultPromptOpen] = useState(false);
-  const [defaultPromptSaving, setDefaultPromptSaving] = useState(false);
-  const [defaultPromptError, setDefaultPromptError] = useState<string | null>(null);
   const hasGithubRepository = Boolean(status?.github.owner && status.github.repo);
-
-  const load = async () => { await statusQuery.refetch({ cancelRefetch: false }); };
+  const accessQuery = useQuery({
+    ...repoAccessQuery(status?.github.owner ?? "", status?.github.repo ?? ""),
+    enabled: hasGithubRepository && Boolean(status?.github.authenticated) && !status?.github.enabled,
+  });
+  const checkingAccess = hasGithubRepository && !accessQuery.data && !accessQuery.error;
+  const canResumeRepository = hasGithubRepository && Boolean(accessQuery.data?.canPush);
+  const triggerRef = useRef<HTMLButtonElement>(null);
+  const ownerMenu = usePopover(triggerRef);
+  const accountQuery = useQuery({ ...githubAccountQuery(), enabled: ownerMenu.open });
+  const organizationsQuery = useQuery({ ...githubOrganizationsQuery(), enabled: ownerMenu.open });
+  const githubLogin = accountQuery.data?.login ?? null;
+  const owners = [
+    ...(githubLogin ? [githubLogin] : []),
+    ...(organizationsQuery.data?.organizations ?? []),
+  ];
 
   const syncErrorMessage = (err: unknown) => {
     const message = err instanceof Error ? err.message : String(err);
+    // Repository creation names the organization and how to regain access.
+    if (message.startsWith("GitHub denied repository creation")) {
+      return message;
+    }
     if (message.toLowerCase().includes("archived")) {
       return m.settings_github_archived_error();
     }
@@ -3266,128 +3299,97 @@ function GitTab({
     return message;
   };
 
-  const enableSync = () => {
+  const enableSync = (owner?: string) => {
+    ownerMenu.setOpen(false);
     if (!project) return;
     setSaving(true);
     setError(null);
-    void enableProjectGithub(project.id)
+    void enableProjectGithub(project.id, owner === githubLogin ? undefined : owner)
       .then((result) => {
         setStatus(result.git);
         onProjectUpdate(result.project);
-        void queryClient.fetchQuery(getProjectDefaultsQuery())
-          .then((defaults) => {
-            if (!defaults.githubForNewProjects && !defaults.githubDefaultPromptSeen) {
-              setDefaultPromptOpen(true);
-            }
-          })
-          .catch(() => {});
       })
       .catch((err) => setError(syncErrorMessage(err)))
       .finally(() => setSaving(false));
   };
 
-  const finishDefaultPrompt = (enabled: boolean) => {
-    setDefaultPromptSaving(true);
-    setDefaultPromptError(null);
-    void setProjectDefaultsMutation.mutateAsync([enabled, true])
-      .then(() => setDefaultPromptOpen(false))
-      .catch((err) => setDefaultPromptError(err instanceof Error ? err.message : String(err)))
-      .finally(() => setDefaultPromptSaving(false));
-  };
-
   return (
     <>
-      <h1>{m.settings_page_repository()}</h1>
-      <p className="settings-sub mt-0 mx-0 mb-4.5 text-base leading-relaxed text-text">
-        {m.settings_repository_description({ project: project?.name ?? m.settings_current_project() })}
-      </p>
       {!project ? (
         <div className={SETTINGS_CARD_CLASS_NAME}><p className={SETTINGS_NOTE_CLASS_NAME}>{m.settings_page_open_a_project_to_inspect_its_repository_and()}</p></div>
       ) : error && !status ? (
         <div className="error">{error}</div>
       ) : !status ? (
-        <LoadingRow>
-          <Spinner /> {m.settings_page_loading()}
-        </LoadingRow>
+        <div className="mt-4 min-h-22" role="status" aria-label={m.settings_page_loading()} aria-busy="true">
+          <div aria-hidden="true" className="motion-safe:animate-pulse">
+            <div className="flex items-center gap-4">
+              <div className="h-4 w-16 rounded bg-surface" />
+              <div className="h-6 w-24 rounded-full bg-surface" />
+            </div>
+            <div className="mt-3.5 h-8 w-48 rounded bg-surface" />
+          </div>
+        </div>
       ) : (
         <>
-          <div className={GIT_SETTINGS_CARD_CLASS_NAME}>
-            <h3>{m.settings_page_local_repository()}</h3>
+          <div className="mt-4 min-h-22">
+            {!status.initialized && <div className="flex flex-wrap gap-2 mt-3.5"><Button variant="primary" onClick={() => void initializeProjectGit(project.id).then(setStatus).catch((err) => setError(String(err)))}>{m.settings_page_initialize_git()}</Button></div>}
             <div className={KV_CLASS_NAME}>
-              <span className="k">{m.settings_page_path()}</span><span className="v">{status.path}</span>
-              <span className="k">Git</span><span className="v">{status.gitVersion ?? m.onboarding_not_found()}</span>
-              <span className="k">{m.settings_page_state()}</span><span className="v">{status.initialized ? m.settings_git_state({ branch: ltr(status.currentBranch ?? m.settings_detached()), state: status.clean ? m.settings_clean() : m.settings_has_changes() }) : m.settings_not_initialized()}</span>
-              <span className="k">{m.settings_page_baseline()}</span><span className="v">{status.baselineBranch}</span>
-              <span className="k">{m.settings_page_remotes()}</span><span className="v">{status.remotes.length ? status.remotes.map((remote) => `${remote.name}: ${remote.url}`).join(" · ") : m.settings_none()}</span>
-            </div>
-            {!status.initialized && <div className={GIT_CARD_ACTIONS_CLASS_NAME}><Button variant="primary" onClick={() => void initializeProjectGit(project.id).then(setStatus).catch((err) => setError(String(err)))}>{m.settings_page_initialize_git()}</Button></div>}
-          </div>
-          <div className={GIT_SETTINGS_CARD_CLASS_NAME}>
-            <h3>GitHub</h3>
-            <div className={KV_CLASS_NAME}>
-              <span className="k">{m.settings_page_authentication()}</span><span className="v"><Badge variant={status.github.authenticated ? "success" : status.github.ghInstalled ? "warning" : "error"}>{status.github.authenticated ? m.settings_connected_via_github_cli() : m.settings_not_connected()}</Badge></span>
               <span className="k">{m.settings_page_project()}</span><span className="v">{hasGithubRepository ? <><span>{status.github.owner}/{status.github.repo}</span>{!status.github.enabled && <Badge>{m.settings_page_syncing_off()}</Badge>}</> : <Badge>{m.settings_page_local_only()}</Badge>}</span>
               {status.github.enabled && <><span className="k">{m.settings_page_sync()}</span><span className="v">{status.github.syncStatus}</span></>}
             </div>
-            {!status.github.authenticated && (
-              <div className="mt-3.5 pt-3.5 border-t border-t-border-variant">
-                <GitHubCliHelp ghInstalled={status.github.ghInstalled} remote={remote} onCheck={() => load()} onRun={gh.start} />
-              </div>
-            )}
-            <CommandRunTerminal run={gh.run} onComplete={() => void load()} onClose={gh.clear} />
             {status.github.authenticated && !status.github.enabled && (
-              <>
-                <p className="git-card-helper mt-3.5 mx-0 mb-0 text-sm leading-relaxed text-text">
-                  {hasGithubRepository
-                    ? m.settings_use_existing_github_repository()
-                    : m.settings_create_private_github_repository()}
-                </p>
-                <div className={GIT_CARD_ACTIONS_CLASS_NAME}>
-                  {hasGithubRepository && status.github.url && <ButtonLink href={status.github.url} target="_blank" rel="noreferrer">{m.settings_page_open_on_git_hub()} <ExternalLink size={12} /></ButtonLink>}
-                  <Button variant="primary" disabled={saving} onClick={enableSync}>{saving ? m.repository_enabling() : m.repository_enable_syncing()}</Button>
+              <div className="flex flex-wrap gap-2 mt-3.5">
+                {hasGithubRepository && status.github.url && <ButtonLink href={status.github.url} target="_blank" rel="noreferrer">{m.settings_page_open_on_git_hub()} <ExternalLink size={12} /></ButtonLink>}
+                <div ref={ownerMenu.ref} className="relative">
+                  <Button variant="primary" disabled={saving || checkingAccess || Boolean(accessQuery.error)} aria-expanded={ownerMenu.open} aria-haspopup={canResumeRepository ? undefined : "menu"} onClick={(event) => {
+                    triggerRef.current = event.currentTarget;
+                    if (canResumeRepository) enableSync();
+                    else ownerMenu.setOpen(!ownerMenu.open);
+                  }}>{saving ? m.repository_enabling() : checkingAccess ? m.common_checking() : m.repository_enable_syncing()} {!canResumeRepository && !checkingAccess && <ChevronDown size={14} />}</Button>
+                  {ownerMenu.open && (
+                    <div role="menu" aria-label={m.settings_github_new_repository_destination()} className="absolute start-0 top-full z-50 mt-2 w-72 max-w-[calc(100vw-2rem)] max-h-64 overflow-y-auto rounded-lg border border-border bg-background p-2 shadow-modal">
+                      <div className="px-2 py-1 text-sm font-medium text-subtext">{m.settings_github_enable_under()}</div>
+                      {hasGithubRepository && <p className="px-2 py-1 m-0 text-sm text-text">{m.settings_create_private_github_repository()}</p>}
+                      {owners.map((owner) => <MenuItem key={owner} role="menuitem" onClick={() => enableSync(owner)}>{owner}</MenuItem>)}
+                      {!owners.length && (accountQuery.isFetching || organizationsQuery.isFetching) && (
+                        <div role="status" aria-label={m.settings_page_loading()} aria-busy="true" className="px-2 py-2">
+                          <div aria-hidden="true" className="space-y-3 motion-safe:animate-pulse">
+                            <div className="h-4 w-28 rounded bg-surface" />
+                            <div className="h-4 w-36 rounded bg-surface" />
+                          </div>
+                        </div>
+                      )}
+                      {(accountQuery.error || organizationsQuery.error || !githubLogin && !accountQuery.isFetching) && (
+                        <div className="px-2 py-1 text-sm text-text">
+                          <p className="m-0">{accountQuery.error?.message ?? organizationsQuery.error?.message ?? m.settings_github_account_unavailable()}</p>
+                          <Button size="small" className="mt-2" onClick={() => { void accountQuery.refetch(); void organizationsQuery.refetch(); }}>{m.app_retry()}</Button>
+                        </div>
+                      )}
+                    </div>
+                  )}
                 </div>
-              </>
+                {accessQuery.error && (
+                  <div className="basis-full text-sm text-text">
+                    <p className="mt-2 mb-0">{accessQuery.error.message}</p>
+                    <Button size="small" className="mt-2" onClick={() => void accessQuery.refetch()}>{m.app_retry()}</Button>
+                  </div>
+                )}
+              </div>
             )}
             {status.github.enabled && (
               <>
                 <p className="git-card-helper mt-3.5 mx-0 mb-0 text-sm leading-relaxed text-text">
                   {m.settings_page_disabling_syncing_stops_automatic_pushes_compute_continues_to()}
                 </p>
-                <div className={GIT_CARD_ACTIONS_CLASS_NAME}>
+                <div className="flex flex-wrap gap-2 mt-3.5">
                   {status.github.url && <ButtonLink href={status.github.url} target="_blank" rel="noreferrer">{m.settings_page_open_on_git_hub()} <ExternalLink size={12} /></ButtonLink>}
                   <Button disabled={saving} onClick={() => { setSaving(true); void disableProjectGithub(project.id).then((result) => { setStatus(result.git); onProjectUpdate(result.project); }).catch((err) => setError(err instanceof Error ? err.message : String(err))).finally(() => setSaving(false)); }}>{saving ? m.repository_updating() : m.repository_disable_syncing()}</Button>
                 </div>
               </>
             )}
           </div>
-          <OverleafCard />
           {error && <div className="error">{syncErrorMessage(error)}</div>}
         </>
-      )}
-      {defaultPromptOpen && (
-        <div className="modal-backdrop fixed inset-0 bg-modal-backdrop-light flex items-start justify-center pt-[var(--modal-top)] px-4 pb-6 overflow-y-auto z-100" onClick={() => finishDefaultPrompt(false)}>
-          <div
-            className="modal max-w-[94vw] max-h-[calc(100vh_-_var(--modal-top)_-_48px)] overflow-y-auto bg-background border border-border rounded-xl shadow-modal p-6 [&_h2]:mt-0 [&_h2]:mx-0 [&_h2]:mb-3.5 [&_h2]:text-xl github-default-modal w-110 [&_>_p]:m-0 [&_>_p]:text-sm [&_>_p]:leading-relaxed [&_>_p]:text-text [&_>_.error]:mt-3.5"
-            role="dialog"
-            aria-modal="true"
-            aria-labelledby="github-default-title"
-            onClick={(event) => event.stopPropagation()}
-          >
-            <h2 id="github-default-title">{m.settings_page_make_git_hub_syncing_the_default()}</h2>
-            <p>
-              {m.settings_page_this_is_useful_when_collaborators_follow_project_changes()}
-            </p>
-            {defaultPromptError && <div className="error">{defaultPromptError}</div>}
-            <div className="github-default-actions flex justify-end gap-2.5 mt-5.5">
-              <Button disabled={defaultPromptSaving} onClick={() => finishDefaultPrompt(false)}>
-                {m.settings_page_not_now()}
-              </Button>
-              <Button variant="primary" disabled={defaultPromptSaving} onClick={() => finishDefaultPrompt(true)}>
-                {defaultPromptSaving ? m.common_saving() : m.settings_make_default()}
-              </Button>
-            </div>
-          </div>
-        </div>
       )}
     </>
   );
@@ -3830,10 +3832,16 @@ export function SettingsView({
               <AppearanceTab />
             </section>
             <section ref={tab === "projects" ? sectionRef : undefined} className={SETTINGS_STACK_SECTION_CLASS_NAME}>
-              <ProjectDefaultsTab remote={remote} />
+              <GithubSettings
+                remote={remote}
+                onProjectUpdate={onProjectUpdate}
+              />
             </section>
             <section ref={tab === "harnesses" ? sectionRef : undefined} className={SETTINGS_STACK_SECTION_CLASS_NAME}>
               <HarnessesTab remote={remote} />
+            </section>
+            <section className={SETTINGS_STACK_SECTION_CLASS_NAME}>
+              <OverleafCard />
             </section>
             {!remote && (
               <section ref={tab === "storage" ? sectionRef : undefined} className={SETTINGS_STACK_SECTION_CLASS_NAME}>
@@ -3867,13 +3875,6 @@ export function SettingsView({
           <h1>{m.settings_page_environment()}</h1>
           <EnvVarsSection />
         </>
-      )}
-      {tab === "git" && (
-        <GitTab
-          project={project}
-          onProjectUpdate={onProjectUpdate}
-          remote={remote}
-        />
       )}
     </div>
   );

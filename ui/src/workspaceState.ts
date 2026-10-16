@@ -40,7 +40,7 @@ export interface GlobalWorkspace {
   experimentsView: "tree" | "table";
 }
 
-export const settingsTabs = ["settings", "harnesses", "projects", "compute", "instances", "environment", "git", "storage"] as const;
+export const settingsTabs = ["settings", "harnesses", "projects", "compute", "instances", "environment", "storage"] as const;
 export type SettingsSection = typeof settingsTabs[number];
 export const isSettingsSection = (value: unknown): value is SettingsSection =>
   settingsTabs.some((tab) => tab === value);

@@ -1776,7 +1776,8 @@ Host b
         assert_eq!(names(&ssh_hosts_in(home.path())), ["hash", "literal"]);
     }
 
-    #[cfg(unix)]
+    // APFS refuses to create non-UTF-8 names (EILSEQ), so the fixture needs Linux.
+    #[cfg(target_os = "linux")]
     #[test]
     fn ssh_include_globs_skip_non_utf8_filenames_without_panicking() {
         use std::os::unix::ffi::OsStringExt;

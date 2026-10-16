@@ -144,6 +144,7 @@ import {
   withoutDuplicateTurnError,
   partIsVisible,
   pendingQuestionId,
+  hasPendingInput,
   partsTailToolId,
   streamTailIsText,
   streamTailTool,
@@ -4037,7 +4038,7 @@ function SessionRow({
   active: boolean;
   unread: boolean;
   busy: boolean;
-  /** Turn held on an unanswered card: steady dot, not the working pulse. */
+  /** An actionable question or held approval needs the user's attention. */
   waiting: boolean;
   /** Nonce set while this row's freshly auto-generated title should play its
    * reveal; it doubles as the remount key so a second retitle replays it.
@@ -4135,11 +4136,16 @@ function SessionRow({
           />
         </span>
       )}
+      {waiting && !editing && (
+        <Tooltip content={m.chat_panel_waiting_for_your_input()} className="shrink-0 text-accent-amber">
+          <HelpCircle size={14} aria-hidden="true" />
+        </Tooltip>
+      )}
       <span className="session-dot">
-        {busy ? (
-          <span className={`busy-dot ${waiting ? "waiting" : ""}`} />
+        {busy && !waiting ? (
+          <span className="busy-dot" />
         ) : (
-          unread && <span className="unread-dot" />
+          unread && !waiting && <span className="unread-dot" />
         )}
       </span>
       <button
@@ -5270,29 +5276,18 @@ export function ChatPanel({
     }
   }, [queued]);
   const historyLoading = !!activeId && historyQuery.isPending;
-  // A busy turn blocked on an unanswered HELD card (nativeId — a bridge or
-  // inline mid-turn request) is waiting on the user, not the model. Drives
-  // the status line and the rail dot (the composer button is keyed on
-  // `pendingQuestion` instead — what send() can actually service). End-turn
-  // cards (no nativeId) never coexist with a busy turn of their own, so
-  // keying on nativeId avoids false positives from stale cards. (Sessions
-  // whose transcripts aren't loaded fall back to plain busy.) Memoized so the
-  // messages × parts scan stays off the per-keystroke render path.
   const waitingSessions = useMemo(() => {
     const waiting = new Set<string>();
-    for (const id of state.busySessions) {
-      if (
-        (state.messagesBySession[id] ?? []).some((m) =>
-          m.parts.some(
-            (p) => p.type === "prompt" && p.prompt && !p.prompt.resolved && p.prompt.nativeId,
-          ),
-        )
-      )
-        waiting.add(id);
+    for (const [id, messages] of Object.entries(state.messagesBySession)) {
+      const busy = state.busySessions.has(id);
+      if (hasPendingInput(activePath(messages, state.activeLeafBySession[id]), busy)) waiting.add(id);
     }
     return waiting;
-  }, [state.busySessions, state.messagesBySession]);
-  const awaitingInput = activeId ? waitingSessions.has(activeId) : false;
+  }, [state.busySessions, state.messagesBySession, state.activeLeafBySession]);
+  // Async questions can await an answer while the agent continues working.
+  const awaitingInput = busy && messages.some((message) => message.parts.some(
+    (part) => part.type === "prompt" && part.prompt && !part.prompt.resolved && part.prompt.nativeId,
+  ));
   const activeSession = openSession;
   // Nonce while the open session's title is mid-reveal; undefined = static.
   const activeTitleReveal = activeSession ? titleReveals.get(activeSession.id) : undefined;
@@ -6209,6 +6204,8 @@ export function ChatPanel({
     return () => document.removeEventListener("keydown", onKeyDown);
   }, [startNewTask, embedded]);
 
+  const sessionWaiting = (session: ChatSession) => state.messagesBySession[session.id]
+    ? waitingSessions.has(session.id) : session.awaitingInput === true;
   const sessionBusy = (project: Project, session: ChatSession) => project.id === projectId ? state.busySessions.has(session.id) : session.busy;
   const sidebarRows: SidebarRow[] = [];
   if (sidebarGrouping === "projects") shownProjects.forEach((project, index) => {
@@ -6222,7 +6219,7 @@ export function ChatPanel({
     const selected = matching.find((session) => session.id === activeId);
     if (selected && !visible.some((session) => session.id === activeId)) visible = [...visible.slice(0, chatLimit - 1), selected];
     const collapsed = collapsedProjects.includes(project.id);
-    sidebarRows.push({ kind: "project", project, collapsed, busy: collapsed && matching.some((session) => sessionBusy(project, session) && !waitingSessions.has(session.id)) });
+    sidebarRows.push({ kind: "project", project, collapsed, busy: collapsed && matching.some((session) => sessionBusy(project, session) && !sessionWaiting(session)) });
     if (collapsed) return;
     visible.forEach((session) => sidebarRows.push({ kind: "chat", project, session }));
     if (matching.length > chatLimit) sidebarRows.push({ kind: "more", project });
@@ -6378,7 +6375,7 @@ export function ChatPanel({
                       active={s.id === activeId && mainView === "chat"}
                       unread={unreadSessionIds.has(s.id)}
                       busy={sessionBusy(project, s)}
-                      waiting={waitingSessions.has(s.id)}
+                      waiting={sessionWaiting(s)}
                       revealTitle={titleReveals.get(s.id)}
                       onOpen={() => {
                         if (project.id === projectId) onActiveSessionChange(s.id);

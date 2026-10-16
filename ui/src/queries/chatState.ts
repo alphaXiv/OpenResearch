@@ -1,4 +1,5 @@
 import type { ChatMessage, ChatPart, QueuedMessage } from "../api";
+import type { ChatEvent } from "../events";
 
 export interface ChatState {
   // Every branch of the transcript, not just the one on screen — switching
@@ -34,6 +35,17 @@ export type Action =
 export const LOCAL_PREFIX = "local-";
 /** Server-side `USER_SHELL_TOOL`: a composer `!` command on a user message. */
 export const SHELL_TOOL = "bash";
+
+export function inputSummaryChanged(event: ChatEvent, promptStates: Map<string, string>): boolean {
+  if (event.type === "session" || event.type === "sessionDeleted" || event.type === "branch") return true;
+  if (event.type !== "message") return false;
+  const key = JSON.stringify(event.message.parts.filter((part) => part.type === "prompt")
+    .map((part) => [part.id, part.prompt?.resolved]));
+  const previous = promptStates.get(event.message.id) ?? "[]";
+  if (key === "[]") promptStates.delete(event.message.id);
+  else promptStates.set(event.message.id, key);
+  return key !== previous;
+}
 
 function upsertMessage(list: ChatMessage[], message: ChatMessage): ChatMessage[] {
   const i = list.findIndex((m) => m.id === message.id);

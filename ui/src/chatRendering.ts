@@ -1,5 +1,13 @@
 import type { ChatMessage, ChatPart, ChatSession } from "./api";
 
+export function hasPendingInput(messages: ChatMessage[], busy: boolean): boolean {
+  return messages.some((message) => message.parts.some((part) => {
+    const prompt = part.prompt;
+    return part.type === "prompt" && prompt && !prompt.resolved
+      && (prompt.nativeId ? busy : prompt.kind === "question");
+  }));
+}
+
 export function pendingQuestionId(
   messages: ChatMessage[],
   harness: ChatSession["harness"] | undefined,
