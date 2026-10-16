@@ -217,14 +217,28 @@ export function HarnessAccountsCard({ harness, remote }: { harness: Harness; rem
                   </IconButton>
                 )}
               </div>
-              <ul className="mt-1.5 mb-0 flex list-none flex-col gap-1 p-0">
-                {account.pools.map((pool) => (
-                  <li key={pool.pool} className="flex items-baseline gap-2 text-subtext">
-                    <span aria-hidden="true" className={cn("size-1.5 shrink-0 translate-y-[-1px] rounded-full", QUOTA_DOT[pool.state])} />
-                    <span className="shrink-0 text-text">{pool.label}</span>
-                    <span className="min-w-0">{poolSummary(pool)}</span>
-                  </li>
-                ))}
+              <ul className="mt-2 mb-0 flex list-none flex-col gap-1.5 p-0">
+                {account.pools.map((pool) => {
+                  const pct = pool.remaining != null ? Math.max(0, Math.min(100, Math.round(pool.remaining * 100))) : null;
+                  return (
+                    <li key={pool.pool} className="flex flex-wrap items-center gap-2 text-subtext">
+                      <span aria-hidden="true" className={cn("size-2 shrink-0 rounded-full", QUOTA_DOT[pool.state])} />
+                      <span className="shrink-0 font-medium text-text">{pool.label}</span>
+                      {pct != null && (
+                        <span
+                          aria-hidden="true"
+                          className="h-1.5 w-16 shrink-0 overflow-hidden rounded-full bg-panel"
+                        >
+                          <span
+                            className={cn("block h-full rounded-full transition-[width] duration-150", QUOTA_DOT[pool.state])}
+                            style={{ width: `${pct}%` }}
+                          />
+                        </span>
+                      )}
+                      <span className="min-w-0 flex-1 text-xs">{poolSummary(pool)}</span>
+                    </li>
+                  );
+                })}
               </ul>
               {account.readError && (
                 <p className="mt-1.5 mb-0 text-sm text-subtext">{m.settings_accounts_read_error({ error: account.readError })}</p>
@@ -605,7 +619,10 @@ export function ProviderPricesCard() {
                   {shown.map(({ provider, offer }) => (
                     <tr
                       key={`${provider}:${offer.flavor}`}
-                      className={cn("[&_td]:border-b [&_td]:border-border [&_td]:py-1.5", offer.available === false && "text-subtext")}
+                      className={cn(
+                        "transition-colors hover:bg-surface [&_td]:border-b [&_td]:border-border [&_td]:py-1.5",
+                        offer.available === false && "text-subtext",
+                      )}
                     >
                       <td className="font-medium">
                         {offer.gpu}

@@ -52,6 +52,7 @@ import {
   Input,
   LoadingRow,
   Spinner,
+  StatusIndicator,
 } from "../../components/ui";
 import { COMPUTE_DIAGNOSTIC_CLASS_NAME, FORM_CLASS_NAME, KV_CLASS_NAME } from "../../components/SettingsPage";
 
@@ -153,7 +154,8 @@ function ColabAccountCard({
       {saved.runtimes && saved.runtimes.length > 0 && (
         <ul className="m-0 mt-2 flex list-none flex-col gap-1.5 p-0 text-sm">
           {saved.runtimes.map((runtime) => (
-            <li key={runtime.endpoint} className="flex items-center gap-3 rounded-md border border-border px-3 py-1.5">
+            <li key={runtime.endpoint} className="flex items-center gap-3 rounded-md border border-border bg-surface px-3 py-1.5">
+              <StatusIndicator tone={runtime.orphaned ? "warning" : "success"} live={!runtime.orphaned} />
               <code>{runtime.accelerator ?? "?"}{runtime.highMem ? ":highmem" : ""}</code>
               <span className="min-w-0 flex-1 truncate text-subtext">
                 {runtime.orphaned
@@ -400,7 +402,10 @@ export function ColabSection() {
                   return (
                     <tr
                       key={accelerator.id}
-                      className={cn("[&_td]:border-b [&_td]:border-border [&_td]:py-1.5", available === false && "text-subtext")}
+                      className={cn(
+                        "transition-colors hover:bg-surface [&_td]:border-b [&_td]:border-border [&_td]:py-1.5",
+                        available === false && "text-subtext",
+                      )}
                     >
                       <td>
                         <code className="me-2">{accelerator.id}</code>
@@ -457,6 +462,41 @@ const fmtHours = (hours: number) => hours.toLocaleString(undefined, { maximumFra
 
 function kaggleQuotaText(line: { remainingHours: number; totalHours: number } | null | undefined): string {
   return line ? m.settings_kaggle_quota_left({ left: fmtHours(line.remainingHours), total: fmtHours(line.totalHours) }) : "—";
+}
+
+function KaggleQuotaMeter({
+  label,
+  quota,
+}: {
+  label: string;
+  quota: { remainingHours: number; totalHours: number } | null | undefined;
+}) {
+  const pct =
+    quota && quota.totalHours > 0
+      ? Math.max(0, Math.min(100, Math.round((quota.remainingHours / quota.totalHours) * 100)))
+      : null;
+  const fillClass =
+    pct == null
+      ? "bg-muted"
+      : pct <= 10
+        ? "bg-accent-red"
+        : pct <= 30
+          ? "bg-accent-amber"
+          : "bg-accent-green";
+  return (
+    <span className="inline-flex items-center gap-1.5 text-xs text-subtext">
+      <span className="font-medium text-text">{label}</span>
+      {pct != null && (
+        <span aria-hidden="true" className="h-1.5 w-14 shrink-0 overflow-hidden rounded-full bg-panel">
+          <span
+            className={cn("block h-full rounded-full transition-[width] duration-150", fillClass)}
+            style={{ width: `${pct}%` }}
+          />
+        </span>
+      )}
+      <span className="tabular-nums">{kaggleQuotaText(quota)}</span>
+    </span>
+  );
 }
 
 function kaggleMethodLabel(method: KaggleAccount["method"]): string {
@@ -571,17 +611,22 @@ export function KaggleSection() {
               ) : (
                 <ul className="m-0 flex list-none flex-col gap-1.5 p-0 text-sm">
                   {s.accounts.map((account) => (
-                    <li key={account.username} className="flex flex-wrap items-center gap-x-3 gap-y-1 rounded-md border border-border px-3 py-2">
+                    <li key={account.username} className="flex flex-wrap items-center gap-x-3 gap-y-1.5 rounded-md border border-border px-3 py-2">
                       <span className="font-medium text-text">{account.username}</span>
                       <Badge size="small">{kaggleMethodLabel(account.method)}</Badge>
                       {account.active && <Badge size="small" variant="success">{m.settings_kaggle_default()}</Badge>}
-                      <span className="min-w-0 flex-1 truncate text-subtext">
-                        {account.error
-                          ? account.error
-                          : account.quota
-                            ? `${m.settings_kaggle_gpu()} ${kaggleQuotaText(account.quota.gpu)} · ${m.settings_kaggle_tpu()} ${kaggleQuotaText(account.quota.tpu)}`
-                            : m.settings_kaggle_quota_unknown()}
-                      </span>
+                      <div className="min-w-0 flex-1 text-subtext">
+                        {account.error ? (
+                          <span className="text-accent-red">{account.error}</span>
+                        ) : account.quota ? (
+                          <span className="flex flex-wrap items-center gap-x-4 gap-y-1">
+                            <KaggleQuotaMeter label={m.settings_kaggle_gpu()} quota={account.quota.gpu} />
+                            <KaggleQuotaMeter label={m.settings_kaggle_tpu()} quota={account.quota.tpu} />
+                          </span>
+                        ) : (
+                          m.settings_kaggle_quota_unknown()
+                        )}
+                      </div>
                       {!account.active && (
                         <Button size="small" variant="ghost" disabled={busy != null} onClick={() => void run(`active:${account.username}`, () => setKaggleActiveAccount(account.username))}>
                           {m.settings_kaggle_make_default()}
@@ -668,7 +713,7 @@ export function KaggleSection() {
               </thead>
               <tbody>
                 {s.accelerators.map((accelerator) => (
-                  <tr key={accelerator.id} className="[&_td]:border-b [&_td]:border-border [&_td]:py-1.5">
+                  <tr key={accelerator.id} className="transition-colors hover:bg-surface [&_td]:border-b [&_td]:border-border [&_td]:py-1.5">
                     <td>
                       <code className="me-2">{accelerator.id}</code>
                       {accelerator.label}

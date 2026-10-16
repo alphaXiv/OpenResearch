@@ -4,7 +4,8 @@ import { m } from "../paraglide/messages.js";
 import { ltr } from "../i18n";
 import { FlaskConical, CircleStop, FolderTree, GitBranch, Search, Terminal, X, Clock3, ArrowDownWideNarrow } from "lucide-react";
 import { useMemo, useRef, useState } from "react";
-import { fmtNumber, runDisplayStatus, timeAgo, type Experiment, type Run } from "../api";
+import { fmtDuration, fmtNumber, runDisplayStatus, timeAgo, type Experiment, type Run } from "../api";
+import { BackendBadge } from "./BackendLogos";
 import { StatusBadge } from "./StatusBadge";
 import { tabOpenGestureHandlers, type TabOpenIntent } from "../tabPreview";
 import { Button, IconButton, Input } from "./ui";
@@ -159,17 +160,24 @@ export function ExperimentsTable({
                   {experiment.title || experiment.slug}
                 </button>
                 {experiment.archived && <span className="text-muted text-xs">{m.tree_archived()}</span>}
+                {experiment.description && (
+                  <p className="mt-1 mb-0 line-clamp-2 text-xs leading-relaxed text-subtext">{experiment.description}</p>
+                )}
                 <span className="experiment-table-subtitle flex items-center min-w-0 gap-1.5 mt-1.5 overflow-hidden text-subtext text-xs [&_>_svg]:shrink-0 [&_code]:min-w-0 [&_code]:overflow-hidden [&_code]:text-ellipsis [&_code]:whitespace-nowrap" title={experiment.branchName}>
                   <GitBranch size={14} aria-hidden="true" />
                   <code>{experiment.branchName}</code>
                 </span>
               </div>
               <div className="experiment-table-meta flex flex-wrap items-center gap-x-3 gap-y-2 text-xs @2xl:justify-end">
-                <div className="experiment-table-status flex items-center min-w-0">
+                <div className="experiment-table-status flex items-center gap-2 min-w-0">
                   <StatusBadge status={status} />
+                  {logsRun?.backend && <BackendBadge backend={logsRun.backend} />}
                 </div>
                 <div className="experiment-run-summary flex items-center min-w-0 gap-2 text-subtext text-xs">
                   <span>{experimentRuns.length === 1 ? m.experiments_one_run() : m.experiments_run_count({ count: fmtNumber(experimentRuns.length) })}</span>
+                  {logsRun?.endedAt != null && (
+                    <span className="tabular-nums">· {fmtDuration(logsRun.endedAt - logsRun.createdAt)}</span>
+                  )}
                 </div>
                 <div className="experiment-table-latest flex items-center gap-1.5 min-w-0 text-subtext text-xs whitespace-nowrap">
                   <Clock3 size={12} aria-hidden="true" /><span>{latestRun ? timeAgo(latestRun.createdAt) : m.experiments_not_run_yet()}</span>

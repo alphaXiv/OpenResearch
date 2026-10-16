@@ -36,7 +36,7 @@ export function filterExperimentRows(
     if (filter === "active" && !row.liveRun) return false;
     if (filter === "failed" && !row.failed) return false;
     const experiment = row.experiment;
-    const text = [experiment.title, experiment.slug, experiment.branchName].join(" ").toLocaleLowerCase(locale);
+    const text = [experiment.title, experiment.slug, experiment.branchName, experiment.description ?? ""].join(" ").toLocaleLowerCase(locale);
     return terms.every((term) => text.includes(term));
   }).sort((a, b) => {
     if (sort === "name") {

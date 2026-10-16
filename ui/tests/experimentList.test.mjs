@@ -18,9 +18,13 @@ test("failed filter uses the latest outcome, with live retries taking precedence
   assert.equal(rows.find((row) => row.experiment.id === "idle").latestRun, undefined);
 });
 
-test("search matches all words across the title and branch, ignoring whitespace and case", () => {
-  const rows = experimentRows([experiment("lr-probe", "Learning rate"), experiment("vocab", "Vocabulary probe")], []);
+test("search matches all words across the title, description, and branch, ignoring whitespace and case", () => {
+  const rows = experimentRows([
+    { ...experiment("lr-probe", "Learning rate"), description: "Cosine warmup schedule" },
+    experiment("vocab", "Vocabulary probe"),
+  ], []);
   assert.deepEqual(ids(rows, { search: "  LEARNING   orx/lr  " }), ["lr-probe"]);
+  assert.deepEqual(ids(rows, { search: "cosine warmup" }), ["lr-probe"]);
   assert.deepEqual(ids(rows, { search: "missing" }), []);
   assert.deepEqual(ids(rows, { search: "probe", filter: "active" }), []);
 });
