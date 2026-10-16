@@ -1880,7 +1880,9 @@ impl Store {
                 Ok(json) => {
                     let descriptor = crate::jobs::BackendDescriptor::parse(&json)?;
                     // Rowless remote handles may be the only way to cancel a still-live provider job.
-                    if descriptor.kind != "local_job" && !deleted_runs.contains(id) {
+                    if !matches!(descriptor.kind.as_str(), "local_job" | "tinker_job")
+                        && !deleted_runs.contains(id)
+                    {
                         retained_runs.insert(id.clone());
                         if let Some(digest) = descriptor.source_digest {
                             retained_snapshots.insert(digest);
@@ -1891,10 +1893,7 @@ impl Store {
                 Err(error) => return Err(error.into()),
             }
             let dir = self.data_dir.join("local-runs").join(id);
-            if dir.exists()
-                && (!deleted_runs.contains(id) || dir.join("pid").exists())
-                && crate::jobs::localbox::inspect_job(&dir).stage == "RUNNING"
-            {
+            if dir.exists() && crate::jobs::localbox::orphaned_job_is_running(&dir)? {
                 if deleted_runs.contains(id) {
                     return Err(anyhow!(
                         "Local run {id} is still running; retry project deletion once it stops."
@@ -3733,16 +3732,29 @@ mod tests {
         let orphan = uuid::Uuid::new_v4().to_string();
         let shared_orphan = uuid::Uuid::new_v4().to_string();
         let surviving = uuid::Uuid::new_v4().to_string();
+        let abandoned = uuid::Uuid::new_v4().to_string();
+        let tinker = uuid::Uuid::new_v4().to_string();
         let unreferenced = "a".repeat(64);
         let shared = "b".repeat(64);
         project_with_run_artifacts(&store, "old", &orphan, &unreferenced);
         project_with_run_artifacts(&store, "old-shared", &shared_orphan, &shared);
         project_with_run_artifacts(&store, "surviving", &surviving, &shared);
+        project_with_run_artifacts(&store, "abandoned", &abandoned, &unreferenced);
+        project_with_run_artifacts(&store, "tinker", &tinker, &unreferenced);
+        let tinker_handle = dir
+            .join("submission-handles")
+            .join(format!("{tinker}.json"));
+        let mut descriptor: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&tinker_handle).unwrap()).unwrap();
+        descriptor["kind"] = serde_json::json!("tinker_job");
+        std::fs::write(tinker_handle, descriptor.to_string()).unwrap();
+        let abandoned_dir = dir.join("local-runs").join(&abandoned);
+        std::fs::write(abandoned_dir.join("run.sh"), "echo never started").unwrap();
         store
             .conn
             .execute("DELETE FROM runs WHERE project_id != 'surviving'", [])
             .unwrap();
-        for id in [&orphan, &shared_orphan] {
+        for id in [&orphan, &shared_orphan, &tinker] {
             std::fs::write(dir.join("local-runs").join(id).join("exit_code"), "0").unwrap();
         }
         let zip = dir
@@ -3758,7 +3770,7 @@ mod tests {
         drop(staging_lock);
         store.cleanup_orphaned_run_artifacts().unwrap();
         store.cleanup_orphaned_run_artifacts().unwrap();
-        for id in [&orphan, &shared_orphan] {
+        for id in [&orphan, &shared_orphan, &abandoned, &tinker] {
             assert!(!dir.join("local-runs").join(id).exists());
             assert!(!dir.join("run-logs").join(format!("{id}.log")).exists());
             assert!(!dir
