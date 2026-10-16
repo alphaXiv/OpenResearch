@@ -86,7 +86,7 @@ pub struct BackendDescriptor {
     pub ssh_port: Option<i64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub ssh_user: Option<String>,
-    /// Requested execution limit for OpenResearch and Slurm jobs.
+    /// Requested execution limit for OpenResearch, Hugging Face, and Slurm jobs.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub timeout_secs: Option<u64>,
     /// Requested `#SBATCH --cpus-per-task` (slurm_job only).
