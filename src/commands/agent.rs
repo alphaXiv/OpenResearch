@@ -79,25 +79,17 @@ async fn route(task: &str, json: bool) -> Result<()> {
     use crate::local::decision;
     use crate::local::harness::accounts;
     let now = crate::store::now_ms();
-    let ready: Vec<_> = crate::local::harness::detect_harnesses_snapshot()
-        .await
-        .into_iter()
-        .filter(|info| info.agent_ready)
-        .collect();
     let mut request = decision::RouteRequest::new(decision::Purpose::Plan, task);
-    request.harnesses = ready
-        .iter()
-        .map(|info| decision::HarnessOption {
-            id: info.id.to_string(),
-            vendor: harness_vendor(info.id).to_string(),
-            models: decision::model_ids(&info.models),
-            recommended_model: info.recommended_model.clone(),
-        })
-        .collect();
+    request.harnesses = ready_harnesses().await;
     request.accounts = accounts::statuses(None)?
         .iter()
         .filter(|account| account.signed_in && !account.paused)
-        .filter(|account| ready.iter().any(|info| info.id == account.harness))
+        .filter(|account| {
+            request
+                .harnesses
+                .iter()
+                .any(|option| option.id == account.harness)
+        })
         .flat_map(|account| {
             account.pools.iter().map(|pool| {
                 decision::AccountOption::from_status(&account.harness, &account.id, pool, now)
@@ -182,6 +174,54 @@ async fn route(task: &str, json: bool) -> Result<()> {
         println!("Start it with: orx agent spawn --harness {harness}{model} \"<message>\"");
     }
     Ok(())
+}
+
+/// The harnesses a chat can run on right now, with their models: the
+/// running server's catalog when there is one (it is warm), else a full
+/// detection pass. A snapshot pass is no use here: it never reports a
+/// harness ready, since readiness is only confirmed by the full pass.
+async fn ready_harnesses() -> Vec<crate::local::decision::HarnessOption> {
+    if let Some(port) = chat::trusted_up_port().ok().flatten() {
+        if let Some(catalog) = harness_catalog(port).await {
+            return harness_options_from_catalog(&catalog);
+        }
+    }
+    crate::local::harness::detect_harnesses()
+        .await
+        .into_iter()
+        .filter(|info| info.agent_ready)
+        .map(|info| crate::local::decision::HarnessOption {
+            id: info.id.to_string(),
+            vendor: harness_vendor(info.id).to_string(),
+            models: crate::local::decision::model_ids(&info.models),
+            recommended_model: info.recommended_model.clone(),
+        })
+        .collect()
+}
+
+fn harness_options_from_catalog(
+    catalog: &[serde_json::Value],
+) -> Vec<crate::local::decision::HarnessOption> {
+    catalog
+        .iter()
+        .filter(|entry| entry["agentReady"] == true)
+        .filter_map(|entry| {
+            let id = entry["id"].as_str()?;
+            let models: Vec<String> = entry["models"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .filter_map(|model| model["id"].as_str().map(str::to_string))
+                .take(16)
+                .collect();
+            Some(crate::local::decision::HarnessOption {
+                id: id.to_string(),
+                vendor: harness_vendor(id).to_string(),
+                models,
+                recommended_model: entry["recommendedModel"].as_str().map(str::to_string),
+            })
+        })
+        .collect()
 }
 
 /// The route quota alone gives: the first ready harness in the user's
@@ -654,7 +694,22 @@ async fn spawn(
 
 #[cfg(test)]
 mod tests {
-    use super::{not_ready, task_text};
+    use super::{harness_options_from_catalog, not_ready, task_text};
+
+    #[test]
+    fn route_offers_only_ready_harnesses_from_the_catalog() {
+        let catalog = vec![
+            serde_json::json!({"id": "codex", "agentReady": true, "recommendedModel": "gpt-6.1-sol",
+                "models": [{"id": "gpt-6.1-sol"}, {"id": "gpt-6-luna"}]}),
+            serde_json::json!({"id": "cursor", "agentReady": false, "models": []}),
+        ];
+        let options = harness_options_from_catalog(&catalog);
+        assert_eq!(options.len(), 1);
+        assert_eq!(options[0].id, "codex");
+        assert_eq!(options[0].vendor, "OpenAI");
+        assert_eq!(options[0].models, ["gpt-6.1-sol", "gpt-6-luna"]);
+        assert_eq!(options[0].recommended_model.as_deref(), Some("gpt-6.1-sol"));
+    }
 
     #[test]
     fn a_harness_chat_is_refused_only_when_the_harness_is_not_ready() {
