@@ -1,5 +1,6 @@
 import { ComposerProjectPicker } from "./ComposerProjectPicker";
 import { ProjectInfoCard } from "./ProjectInfoCard";
+import { ChatSearch } from "./ChatSearch";
 import { fitSidebarRows, sidebarRowHeight, type SidebarRow } from "../sidebarLayout";
 import { useVirtualizer, defaultRangeExtractor, type Range as VirtualRange } from "@tanstack/react-virtual";
 import { markLiveUpdate } from "../queries/live";
@@ -3746,6 +3747,7 @@ const Transcript = memo(function Transcript({
   recoveringTurnId,
   onRecover,
   skills,
+  findOpen,
 }: {
   /** The branch on screen, oldest first. */
   messages: ChatMessage[];
@@ -3772,6 +3774,7 @@ const Transcript = memo(function Transcript({
   recoveringTurnId?: string | null;
   onRecover?: (turnId: string, action: "retry" | "continue") => void;
   skills?: SkillInfo[];
+  findOpen: boolean;
 }) {
   useLocale();
   const activePermissionId = firstPendingPermission(messages)?.id ?? null;
@@ -3791,13 +3794,13 @@ const Transcript = memo(function Transcript({
   const [fullHistory, setFullHistory] = useState(false);
   const getItemKey = useCallback((index: number) => visibleMessages[index].id, [visibleMessages]);
   const rangeExtractor = useCallback((range: VirtualRange) => {
-    if (fullHistory) return visibleMessages.map((_, index) => index);
+    if (fullHistory || findOpen) return visibleMessages.map((_, index) => index);
     const indexes = new Set(defaultRangeExtractor(range));
     visibleMessages.forEach((message, index) => {
       if (retainedRows.current.has(message.id)) indexes.add(index);
     });
     return [...indexes].sort((a, b) => a - b);
-  }, [visibleMessages, fullHistory]);
+  }, [visibleMessages, fullHistory, findOpen]);
   const virtualizer = useVirtualizer({
     count: visibleMessages.length,
     useFlushSync: false,
@@ -3808,7 +3811,7 @@ const Transcript = memo(function Transcript({
     initialRect: { width: scrollRef.current?.clientWidth ?? 0, height: scrollRef.current?.clientHeight ?? 0 },
     initialOffset: () => Math.max(0, visibleMessages.length * 400 - (scrollRef.current?.clientHeight ?? 0)),
     anchorTo: stickToBottom.current ? "end" : "start",
-    followOnAppend: true,
+    followOnAppend: !findOpen,
     scrollEndThreshold: 60,
     rangeExtractor,
   });
@@ -4520,10 +4523,31 @@ export function ChatPanel({
   // alone (syncSessionList snapshots it before fetching).
   const threadRef = useRef<HTMLDivElement>(null);
   const threadInnerRef = useRef<HTMLDivElement>(null);
+  const chatPaneRef = useRef<HTMLElement>(null);
+  const findInputRef = useRef<HTMLInputElement>(null);
+  const [findOpen, setFindOpen] = useState(false);
+  const findReturnFocus = useRef<HTMLElement | null>(null);
   const scrollToEndRef = useRef<(() => void) | null>(null);
   const stickToBottom = useRef(true);
   const [transcriptAtBottom, setTranscriptAtBottom] = useState(true);
   const composerRef = useRef<HTMLTextAreaElement>(null);
+  const openFind = useCallback(() => {
+    if (document.activeElement instanceof HTMLElement && document.activeElement !== findInputRef.current) {
+      findReturnFocus.current = document.activeElement;
+    }
+    stickToBottom.current = false;
+    setFindOpen(true);
+    findInputRef.current?.focus();
+    findInputRef.current?.select();
+  }, []);
+  const closeFind = useCallback(() => {
+    setFindOpen(false);
+    const target = findReturnFocus.current;
+    if (target?.isConnected) target.focus({ preventScroll: true });
+    else composerRef.current?.focus({ preventScroll: true });
+  }, []);
+  const navigateFind = useCallback(() => { stickToBottom.current = false; }, []);
+  useEffect(() => { setFindOpen(false); }, [activeId, projectId, mainView]);
   const [resumeOpen, setResumeOpen] = useState(false);
   const dataSources = usePopover();
   const addTranscriptSelection = useCallback((selection: Pick<SelectionAction, "text" | "range">) => {
@@ -5476,9 +5500,9 @@ export function ChatPanel({
     projectId === DEMO_PROJECT_ID && draft === DEMO_RUN_EXPERIMENT_PROMPT && !demoHintDismissed;
   const updateTranscriptBottom = useCallback((el: HTMLDivElement) => {
     const atBottom = el.scrollHeight - el.scrollTop - el.clientHeight < 60;
-    stickToBottom.current = atBottom;
+    stickToBottom.current = atBottom && !findOpen;
     setTranscriptAtBottom(atBottom);
-  }, []);
+  }, [findOpen]);
   const pinTranscriptToBottom = useCallback(() => {
     stickToBottom.current = true;
     setTranscriptAtBottom(true);
@@ -6019,11 +6043,36 @@ export function ChatPanel({
   }
 
   const lastPointerInSide = useRef(false);
+  const lastPointerInChat = useRef(!embedded);
   useEffect(() => {
-    const onDown = (e: PointerEvent) => { lastPointerInSide.current = inSideChat(e.target); };
+    const onDown = (e: PointerEvent) => {
+      lastPointerInSide.current = inSideChat(e.target);
+      lastPointerInChat.current = e.target instanceof Node && !!chatPaneRef.current?.contains(e.target);
+    };
     document.addEventListener("pointerdown", onDown, true);
     return () => document.removeEventListener("pointerdown", onDown, true);
   }, []);
+
+  const canFind = threadMounted && !contentLoading && !contentError && !historyLoading && !historyError;
+  useEffect(() => {
+    if (!canFind) return;
+    const onKey = (event: KeyboardEvent) => {
+      if (event.defaultPrevented || event.isComposing) return;
+      const ownsFocus = event.target === document.body
+        ? lastPointerInChat.current
+        : event.target instanceof Node && chatPaneRef.current?.contains(event.target);
+      if (!ownsFocus) return;
+      if ((event.metaKey || event.ctrlKey) && !event.altKey && !event.shiftKey && event.key.toLowerCase() === "f") {
+        event.preventDefault();
+        openFind();
+      } else if (event.key === "Escape" && findOpen) {
+        event.preventDefault();
+        closeFind();
+      }
+    };
+    document.addEventListener("keydown", onKey);
+    return () => document.removeEventListener("keydown", onKey);
+  }, [canFind, embedded, findOpen, openFind, closeFind]);
 
   // Escape stops the streaming turn and drops focus back into the composer,
   // mirroring the Claude Code desktop app. Harness-agnostic — `stop()` →
@@ -6039,7 +6088,7 @@ export function ChatPanel({
   //   - the composer pickers (usePopover) stopPropagation in the capture phase,
   //     so their Escape never reaches this listener at all.
   useEffect(() => {
-    if (!busy || mainView !== "chat") return;
+    if (!busy || mainView !== "chat" || findOpen) return;
     function onKey(e: KeyboardEvent) {
       if (e.key !== "Escape" || e.defaultPrevented) return;
       // Clicking a transcript leaves focus on body; the click says which pane it was.
@@ -6051,7 +6100,7 @@ export function ChatPanel({
     }
     document.addEventListener("keydown", onKey);
     return () => document.removeEventListener("keydown", onKey);
-  }, [busy, activeId, mainView, embedded]);
+  }, [busy, activeId, mainView, embedded, findOpen]);
 
   /** Drop every trace of a session — the local row, the open-thread selection,
    * and the cached transcript. Used on delete (ours or another dashboard's). */
@@ -6482,7 +6531,7 @@ export function ChatPanel({
   return (
     <>
       {railOpen && rail}
-      <section data-side-chat={embedded || undefined} className={`chat-pane flex-1 min-w-0 flex flex-col bg-background min-h-0 ${embedded ? "" : "mt-5"}`}>
+      <section ref={chatPaneRef} data-side-chat={embedded || undefined} className={`chat-pane flex-1 min-w-0 flex flex-col bg-background min-h-0 ${embedded ? "" : "mt-5"}`}>
         {/* Header — session title on the left, end-pane view switchers on the
           right, fading into the chat below (sessions live in the rail). */}
         <div className={railOpen || embedded ? "contents" : "grid shrink-0 grid-cols-[2rem_minmax(0,1fr)_2rem] mac-titlebar:grid-cols-[6rem_minmax(0,1fr)_6rem] items-center"}>
@@ -6504,6 +6553,11 @@ export function ChatPanel({
               </span>
             </>}
           </div>
+          {canFind && (
+            <IconButton title={m.chat_find()} aria-label={m.chat_find()} aria-expanded={findOpen} onClick={openFind}>
+              <Search size={15} />
+            </IconButton>
+          )}
           {onOpenDemoWelcome && (
             <IconButton
               data-tip={m.chat_panel_about_this_demo()}
@@ -6515,6 +6569,18 @@ export function ChatPanel({
           )}
           </div>
         </div>
+
+        {findOpen && canFind && (
+          <ChatSearch
+            key={`${projectId}/${activeId}`}
+            rootRef={threadInnerRef}
+            scrollRef={threadRef}
+            inputRef={findInputRef}
+            embedded={embedded}
+            onClose={closeFind}
+            onNavigate={navigateFind}
+          />
+        )}
 
         {contentError ? (
           <div className="flex flex-1 flex-col items-center justify-center gap-3 p-5 text-subtext" role="alert">
@@ -6659,6 +6725,7 @@ export function ChatPanel({
                   recoveringTurnId={recoveringTurnId}
                   onRecover={recoverFailedTurn}
                   skills={transcriptSkills}
+                  findOpen={findOpen}
                 />
               </ChatImageScope>
               {busy && awaitingInput && (

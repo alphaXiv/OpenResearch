@@ -1305,5 +1305,11 @@
   "settings_github_enable_under": "启用同步到…",
   "settings_overleaf_file_sync": "同步论文文件",
   "settings_overleaf_live_sync": "同步实时编辑",
-  "settings_overleaf_intro": "凭据保存在本机。在编辑器中关联各篇论文。"
+  "settings_overleaf_intro": "凭据保存在本机。在编辑器中关联各篇论文。",
+  "chat_find": "在聊天中查找",
+  "chat_find_no_matches": "无匹配结果",
+  "chat_find_count": "{current} / {total}",
+  "chat_find_previous": "上一个匹配项 (Shift+Enter)",
+  "chat_find_next": "下一个匹配项 (Enter)",
+  "chat_find_close": "关闭搜索 (Esc)"
 }

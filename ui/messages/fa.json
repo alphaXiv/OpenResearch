@@ -1305,5 +1305,11 @@
   "settings_github_enable_under": "فعال‌سازی همگام‌سازی در…",
   "settings_overleaf_file_sync": "همگام‌سازی فایل‌های مقاله",
   "settings_overleaf_live_sync": "همگام‌سازی ویرایش‌های زنده",
-  "settings_overleaf_intro": "اطلاعات ورود روی این دستگاه می‌ماند. هر مقاله را از ویرایشگر پیوند دهید."
+  "settings_overleaf_intro": "اطلاعات ورود روی این دستگاه می‌ماند. هر مقاله را از ویرایشگر پیوند دهید.",
+  "chat_find": "جستجو در گفتگو",
+  "chat_find_no_matches": "نتیجه‌ای یافت نشد",
+  "chat_find_count": "{current} از {total}",
+  "chat_find_previous": "نتیجهٔ قبلی (Shift+Enter)",
+  "chat_find_next": "نتیجهٔ بعدی (Enter)",
+  "chat_find_close": "بستن جستجو (Esc)"
 }

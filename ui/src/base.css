@@ -29,6 +29,18 @@ body {
   background: var(--chat-annotation-highlight);
 }
 
+::highlight(chat-find),
+::highlight(side-chat-find) {
+  background: var(--accent-amber-subtle);
+  color: var(--text);
+}
+
+::highlight(chat-find-active),
+::highlight(side-chat-find-active) {
+  background: var(--chat-annotation-highlight);
+  color: var(--text);
+}
+
 /* The highlighted overlay draws the text; painting it here too doubles every glyph. */
 .file-view-editarea::selection {
   color: transparent;

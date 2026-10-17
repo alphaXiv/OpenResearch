@@ -1305,5 +1305,11 @@
   "settings_github_enable_under": "تفعيل المزامنة في…",
   "settings_overleaf_file_sync": "مزامنة ملفات الورقة",
   "settings_overleaf_live_sync": "مزامنة التعديلات المباشرة",
-  "settings_overleaf_intro": "تبقى بيانات الدخول على هذا الجهاز. اربط كل ورقة من المحرر."
+  "settings_overleaf_intro": "تبقى بيانات الدخول على هذا الجهاز. اربط كل ورقة من المحرر.",
+  "chat_find": "البحث في المحادثة",
+  "chat_find_no_matches": "لا توجد نتائج",
+  "chat_find_count": "{current} من {total}",
+  "chat_find_previous": "النتيجة السابقة (Shift+Enter)",
+  "chat_find_next": "النتيجة التالية (Enter)",
+  "chat_find_close": "إغلاق البحث (Esc)"
 }

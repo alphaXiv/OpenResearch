@@ -1305,5 +1305,11 @@
   "settings_github_enable_under": "同期先を選んで有効化…",
   "settings_overleaf_file_sync": "論文ファイルを同期",
   "settings_overleaf_live_sync": "リアルタイムの編集を同期",
-  "settings_overleaf_intro": "認証情報はこの端末に保存されます。各論文はエディターからリンクします。"
+  "settings_overleaf_intro": "認証情報はこの端末に保存されます。各論文はエディターからリンクします。",
+  "chat_find": "チャット内を検索",
+  "chat_find_no_matches": "一致する結果はありません",
+  "chat_find_count": "{current} / {total}",
+  "chat_find_previous": "前の一致箇所 (Shift+Enter)",
+  "chat_find_next": "次の一致箇所 (Enter)",
+  "chat_find_close": "検索を閉じる (Esc)"
 }

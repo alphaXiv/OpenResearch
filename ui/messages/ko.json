@@ -1305,5 +1305,11 @@
   "settings_github_enable_under": "다음 계정에서 동기화 활성화…",
   "settings_overleaf_file_sync": "논문 파일 동기화",
   "settings_overleaf_live_sync": "실시간 편집 동기화",
-  "settings_overleaf_intro": "인증 정보는 이 기기에 저장됩니다. 각 논문은 편집기에서 연결하세요."
+  "settings_overleaf_intro": "인증 정보는 이 기기에 저장됩니다. 각 논문은 편집기에서 연결하세요.",
+  "chat_find": "채팅에서 찾기",
+  "chat_find_no_matches": "일치하는 결과 없음",
+  "chat_find_count": "{current} / {total}",
+  "chat_find_previous": "이전 일치 항목 (Shift+Enter)",
+  "chat_find_next": "다음 일치 항목 (Enter)",
+  "chat_find_close": "검색 닫기 (Esc)"
 }
