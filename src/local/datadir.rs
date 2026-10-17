@@ -406,6 +406,7 @@ fn device_of(_path: &Path) -> Option<u64> {
 /// Free bytes available to a non-root user on the filesystem containing `path`.
 /// `None` when it can't be determined (non-unix, or the syscall fails).
 #[cfg(unix)]
+#[allow(clippy::unnecessary_cast)] // statvfs field widths vary between Unix targets.
 fn available_bytes(path: &Path) -> Option<u64> {
     use std::ffi::CString;
     use std::os::unix::ffi::OsStrExt;

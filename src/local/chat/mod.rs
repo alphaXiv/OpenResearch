@@ -2944,18 +2944,16 @@ fn selected_slash_skills(
                     instructions,
                 });
             }
-        } else {
-            if let Some(instructions) = crate::local::user_skills::instructions(
-                &name,
-                harness,
-                session_id
-                    .map(|id| crate::local::git::existing_session_worktree_path(project, id))
-                    .as_deref(),
-                Some(std::path::Path::new(&project.repo_path)),
-            ) {
-                seen.insert(name);
-                selected.push(SelectedSlashSkill::User { instructions });
-            }
+        } else if let Some(instructions) = crate::local::user_skills::instructions(
+            &name,
+            harness,
+            session_id
+                .map(|id| crate::local::git::existing_session_worktree_path(project, id))
+                .as_deref(),
+            Some(std::path::Path::new(&project.repo_path)),
+        ) {
+            seen.insert(name);
+            selected.push(SelectedSlashSkill::User { instructions });
         }
     }
     (selected, has_request)
