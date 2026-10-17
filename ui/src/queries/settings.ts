@@ -87,6 +87,12 @@ export const getSshConfigQuery = () => queryOptions({
   staleTime: 300_000,
 });
 
+export const getAgentInstructionsQuery = () => queryOptions({
+  queryKey: workspaceKey("getAgentInstructions"),
+  queryFn: ({ signal }) => api.getAgentInstructions(signal),
+  staleTime: 0,
+});
+
 export const getSshMasterStatusQuery = (host: string) => queryOptions({
   queryKey: workspaceKey("getSshMasterStatus", host),
   queryFn: ({ signal }) => api.getSshMasterStatus(host, signal),

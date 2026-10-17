@@ -97,6 +97,28 @@ easy to see what your agents have done and inspect the evidence behind each resu
 conversations, experiments, logs, and artifacts stay on your machine, under your
 control.
 
+## Shared agent instructions
+
+Put instructions for all your OpenResearch projects in
+`~/.config/openresearch/AGENTS.md`, or
+`$XDG_CONFIG_HOME/openresearch/AGENTS.md` when `XDG_CONFIG_HOME` is set. This is
+one file on the host running OpenResearch, independent of project repositories
+and the data directory.
+
+Edit it in **Settings → Agent instructions → Edit AGENTS.md**, or use your own
+text editor. Save with the button or Cmd/Ctrl+S. If the file changed elsewhere,
+the editor keeps your draft and asks you to reload before saving.
+
+OpenResearch reads the file at the start of each new chat turn, including turns
+in existing chats, and prepends its contents in an `<orx-user-instructions>`
+block for every chat engine. Messages sent into a running turn do not repeat
+the block. Retries and recovery of an already prepared request keep its saved
+snapshot. Edits take effect on the next new turn without restarting the app.
+
+A missing or blank file adds nothing. Removing the file stops future injection;
+it does not erase instructions already present in a chat's history. An existing
+file that cannot be read as UTF-8 reports an error before the request is sent.
+
 ## Usage analytics
 
 Official release builds send opt-out, coarse product analytics events and detailed agent feedback in the background tied to a random

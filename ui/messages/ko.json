@@ -1305,5 +1305,11 @@
   "settings_github_enable_under": "다음 계정에서 동기화 활성화…",
   "settings_overleaf_file_sync": "논문 파일 동기화",
   "settings_overleaf_live_sync": "실시간 편집 동기화",
-  "settings_overleaf_intro": "인증 정보는 이 기기에 저장됩니다. 각 논문은 편집기에서 연결하세요."
+  "settings_overleaf_intro": "인증 정보는 이 기기에 저장됩니다. 각 논문은 편집기에서 연결하세요.",
+  "settings_instructions_title": "에이전트 지침",
+  "settings_instructions_description": "이 호스트의 모든 프로젝트에서 공유됩니다. 변경 사항은 다음 새 채팅 턴부터 적용됩니다.",
+  "settings_instructions_edit": "AGENTS.md 편집",
+  "settings_instructions_discard": "저장하지 않은 변경 사항을 버리시겠습니까?",
+  "settings_instructions_saved": "에이전트 지침을 저장했습니다.",
+  "settings_instructions_reload": "파일 다시 불러오기"
 }

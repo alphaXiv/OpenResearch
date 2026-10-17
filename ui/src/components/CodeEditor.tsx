@@ -22,6 +22,7 @@ export function CodeEditor({
   onSave,
   onBlur,
   readOnly = false,
+  ariaLabel,
   path,
   highlightLine,
   scrollRequest,
@@ -36,6 +37,7 @@ export function CodeEditor({
   /** Focus left the editor — the viewer saves any pending edit. */
   onBlur?: () => void;
   readOnly?: boolean;
+  ariaLabel?: string;
   path: string;
   /** 1-based line to scroll to and place the caret on (from a `file:line` chip). */
   highlightLine?: number;
@@ -96,12 +98,12 @@ export function CodeEditor({
   }, [path, scrollRequest]);
 
   const onKeyDown = (e: React.KeyboardEvent<HTMLTextAreaElement>) => {
-    if (readOnly) return;
     if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === "s") {
       e.preventDefault();
-      onSave();
+      if (!readOnly) onSave();
       return;
     }
+    if (readOnly) return;
     if (e.key === "Tab") {
       e.preventDefault();
       const ta = e.currentTarget;
@@ -152,6 +154,7 @@ export function CodeEditor({
       </div>
       <textarea
         ref={taRef}
+        aria-label={ariaLabel}
         className={`file-view-editarea ${layerClassName} overflow-y-auto overflow-x-hidden resize-none border-0 bg-transparent text-transparent caret-text outline-none`}
         style={{ paddingInlineStart: `${codeCh}ch` }}
         value={value}

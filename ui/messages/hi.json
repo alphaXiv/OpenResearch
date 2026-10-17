@@ -1305,5 +1305,11 @@
   "settings_github_enable_under": "इसमें सिंक चालू करें…",
   "settings_overleaf_file_sync": "पेपर की फ़ाइलें सिंक करें",
   "settings_overleaf_live_sync": "लाइव बदलाव सिंक करें",
-  "settings_overleaf_intro": "लॉगिन जानकारी इसी मशीन पर रहती है। हर पेपर को एडिटर से लिंक करें।"
+  "settings_overleaf_intro": "लॉगिन जानकारी इसी मशीन पर रहती है। हर पेपर को एडिटर से लिंक करें।",
+  "settings_instructions_title": "एजेंट के निर्देश",
+  "settings_instructions_description": "इस होस्ट के सभी प्रोजेक्ट के लिए साझा निर्देश। बदलाव अगली नई चैट बारी से लागू होंगे।",
+  "settings_instructions_edit": "AGENTS.md संपादित करें",
+  "settings_instructions_discard": "बिना सहेजे बदलाव छोड़ दें?",
+  "settings_instructions_saved": "एजेंट के निर्देश सहेजे गए।",
+  "settings_instructions_reload": "फ़ाइल फिर से लोड करें"
 }

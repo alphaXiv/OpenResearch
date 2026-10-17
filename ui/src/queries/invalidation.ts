@@ -67,6 +67,7 @@ const settingsFamilies: Record<string, readonly string[]> = {
   ray: ["getRaySettings", "getComputeSettings"],
   env: ["getEnvVars", "getHfSettings", "getTinkerSettings", "getModalSettings", "getSlurmSettings", "getRaySettings", "getK8sSettings", "getOpenResearchSettings", "getComputeSettings", "getHarnesses", "getTrackioSettings"],
   "data-dir": ["getDataDir"],
+  "agent-instructions": ["getAgentInstructions"],
   ssh: ["getSshSettings", "getSshConfig", "getSshMasterStatus", "getComputeSettings"],
   compute: ["getComputeSettings"],
   git: ["githubAccount", "repoAccess", "getProjectGitStatus"],
