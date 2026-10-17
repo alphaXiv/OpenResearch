@@ -1,17 +1,23 @@
 import { WorkspaceEmptyState } from "./WorkspaceEmptyState";
 import { m } from "../paraglide/messages.js";
 import { ltr } from "../i18n";
-import { FlaskConical, CircleStop, FolderTree, GitBranch, Terminal } from "lucide-react";
-import { useState } from "react";
+import { FlaskConical, CircleStop, FolderTree, Terminal } from "lucide-react";
+import { useLayoutEffect, useMemo, useRef, useState } from "react";
 import { fmtNumber, runDisplayStatus, timeAgo, type Experiment, type Run } from "../api";
 import { StatusBadge } from "./StatusBadge";
 import { tabOpenGestureHandlers, type TabOpenIntent } from "../tabPreview";
-import { Button } from "./ui";
+import { IconButton, Tooltip } from "./ui";
 import { ArchiveMenu, type ArchiveActions } from "./ArchiveMenu";
+import { Rail, type HistoryOrder, type Placed } from "./ExperimentLineage";
+import { buildHistoryNodes, laneCount, layoutChronological, layoutLineage } from "./experimentLineageModel";
+
+const NO_HIGHLIGHT = new Set<string>();
 
 export function ExperimentsTable({
   runs,
   experiments,
+  showLineage,
+  order,
   archiveActions,
   emptyHint,
   onOpen,
@@ -22,6 +28,8 @@ export function ExperimentsTable({
 }: {
   runs: Run[];
   experiments: Experiment[];
+  showLineage: boolean;
+  order: HistoryOrder;
   archiveActions: Map<string, ArchiveActions>;
   emptyHint?: string;
   onOpen: (experiment: Experiment, intent: TabOpenIntent) => void;
@@ -32,6 +40,33 @@ export function ExperimentsTable({
 }) {
   const [pendingCancellation, setPendingCancellation] = useState<ReadonlySet<string>>(new Set());
   const [cancelError, setCancelError] = useState<string | null>(null);
+  const listRef = useRef<HTMLDivElement>(null);
+  const [placed, setPlaced] = useState<Placed[]>([]);
+  const rows = useMemo(() => {
+    const group = { key: "table", title: "", nodes: buildHistoryNodes(experiments, runs) };
+    return order === "lineage" ? layoutLineage(group) : layoutChronological(group, order === "newest");
+  }, [experiments, runs, order]);
+  const railWidth = 15 + 14 * laneCount(rows) + 8;
+  const lastPlaced = placed.at(-1);
+
+  useLayoutEffect(() => {
+    const list = listRef.current;
+    if (!list) return;
+    const elements = [...list.children].filter((child) => child instanceof HTMLDivElement);
+    const measure = () => {
+      setPlaced(rows.flatMap((row, index) => {
+        const element = elements[index];
+        if (!element) return [];
+        const top = element.offsetTop;
+        const height = element.offsetHeight;
+        return [{ row, top, height, y: top + height / 2 }];
+      }));
+    };
+    const observer = new ResizeObserver(measure);
+    for (const element of elements) observer.observe(element);
+    measure();
+    return () => observer.disconnect();
+  }, [rows]);
   const runsByExperiment = new Map<string, Run[]>();
   for (const run of runs) {
     const experimentRuns = runsByExperiment.get(run.experimentId);
@@ -42,13 +77,7 @@ export function ExperimentsTable({
     experimentRuns.sort((a, b) => b.createdAt - a.createdAt);
   }
 
-  const sortedExperiments = [...experiments].sort((a, b) => {
-    const aActivity = runsByExperiment.get(a.id)?.[0]?.createdAt ?? a.createdAt;
-    const bActivity = runsByExperiment.get(b.id)?.[0]?.createdAt ?? b.createdAt;
-    return bActivity - aActivity;
-  });
-
-  if (sortedExperiments.length === 0) {
+  if (rows.length === 0) {
     return (
       <WorkspaceEmptyState
         icon={FlaskConical}
@@ -80,8 +109,11 @@ export function ExperimentsTable({
           {m.experiments_table_stop_failed()} {cancelError}
         </div>
       )}
-      <div className="experiments-table w-full text-sm bg-background" role="list" aria-label={m.experiments_table_experiments()}>
-        {sortedExperiments.map((experiment) => {
+      <div ref={listRef} className="experiments-table relative w-full text-sm bg-background" role="list" aria-label={m.experiments_table_experiments()}>
+        {showLineage && <Rail placed={placed} height={lastPlaced ? lastPlaced.top + lastPlaced.height : 0} path={NO_HIGHLIGHT} selectedId={null} />}
+        {rows.map((row) => {
+          if (row.kind !== "experiment") return null;
+          const experiment = row.node.experiment;
           const experimentRuns = runsByExperiment.get(experiment.id) ?? [];
           const latestRun = experimentRuns[0] ?? null;
           const liveRun = experimentRuns.find(
@@ -102,7 +134,8 @@ export function ExperimentsTable({
           return (
             <div
               key={experiment.id}
-              className="experiment-table-group grid grid-cols-[minmax(0,_1fr)_auto] [grid-template-areas:'name_meta'_'actions_actions'] gap-x-8 items-center py-4 px-5 gap-y-[7px] border-b border-b-divider-subtle bg-background cursor-pointer [&:hover]:bg-surface [&:last-child]:border-b-0 [@container((max-width:_560px))]:grid-cols-[minmax(0,_1fr)_auto] [@container((max-width:_560px))]:gap-x-3.5 [@container((max-width:_560px))]:gap-y-[9px] [@container((max-width:_400px))]:grid-cols-[minmax(0,_1fr)] [@container((max-width:_400px))]:[grid-template-areas:'name'_'meta'_'actions']"
+              style={{ paddingLeft: showLineage ? railWidth + 12 : 20 }}
+              className="experiment-table-group grid min-h-11 grid-cols-[minmax(0,_1fr)_4.5rem_4rem_4rem_auto] [grid-template-areas:'name_status_attempts_latest_actions'] items-center gap-x-3 gap-y-1 py-2 pe-3 border-b border-b-divider-subtle bg-background cursor-pointer [&:hover]:bg-surface [&:last-child]:border-b-0 [@container(max-width:640px)]:grid-cols-[auto_auto_minmax(0,_1fr)_auto] [@container(max-width:640px)]:[grid-template-areas:'name_name_name_name'_'status_attempts_latest_actions'] [@container(max-width:640px)]:gap-x-3"
               role="listitem"
               onClick={() => onOpen(experiment, "preview")}
               onDoubleClick={() => onOpen(experiment, "keepOpen")}
@@ -112,10 +145,10 @@ export function ExperimentsTable({
                 onOpen(experiment, "keepOpen");
               }}
             >
-              <div className="experiment-table-name [grid-area:name] self-start min-w-0">
+              <div className="experiment-table-name [grid-area:name] min-w-0">
                 <button
                   type="button"
-                  className="experiment-table-title block w-full overflow-hidden text-text font-semibold text-start text-ellipsis whitespace-nowrap"
+                  className="experiment-table-title line-clamp-2 w-full overflow-hidden text-text font-medium text-start"
                   {...tabOpenGestureHandlers<HTMLButtonElement>((intent) =>
                     onOpen(experiment, intent),
                   { stopPropagation: true })}
@@ -123,69 +156,69 @@ export function ExperimentsTable({
                   {experiment.title || experiment.slug}
                 </button>
                 {experiment.archived && <span className="text-muted text-xs">{m.tree_archived()}</span>}
-                <span className="experiment-table-subtitle flex items-center min-w-0 gap-1.5 mt-1 overflow-hidden text-subtext text-sm [&_>_svg]:shrink-0 [&_code]:min-w-0 [&_code]:overflow-hidden [&_code]:text-ellipsis [&_code]:whitespace-nowrap" title={experiment.branchName}>
-                  <GitBranch size={14} aria-hidden="true" />
-                  <code>{experiment.branchName}</code>
-                </span>
               </div>
-              <div className="experiment-table-meta [grid-area:meta] self-start flex items-center justify-end gap-4.5 whitespace-nowrap [@container((max-width:_560px))]:flex-col [@container((max-width:_560px))]:items-end [@container((max-width:_560px))]:gap-1.5 [@container((max-width:_400px))]:!flex-row [@container((max-width:_400px))]:!items-center [@container((max-width:_400px))]:flex-wrap [@container((max-width:_400px))]:justify-start [@container((max-width:_400px))]:gap-3">
-                <div className="experiment-table-status flex items-center min-w-0">
-                  <StatusBadge status={status} />
-                </div>
-                <div className="experiment-run-summary flex items-center min-w-0 gap-2 text-subtext text-sm font-medium">
-                  <span>{experimentRuns.length === 1 ? m.experiments_one_run() : m.experiments_run_count({ count: fmtNumber(experimentRuns.length) })}</span>
-                </div>
-                <div className="experiment-table-latest flex items-center gap-1.5 min-w-0 text-subtext text-sm font-medium whitespace-nowrap">
-                  <span>{latestRun ? timeAgo(latestRun.createdAt) : m.experiments_not_run_yet()}</span>
-                </div>
+              <div className="experiment-table-status [grid-area:status] min-w-0">
+                <StatusBadge status={status} />
+              </div>
+              <div className="experiment-run-summary [grid-area:attempts] flex items-center gap-2 whitespace-nowrap text-sm text-subtext">
+                <span>{experimentRuns.length === 1 ? m.experiments_one_run() : m.experiments_run_count({ count: fmtNumber(experimentRuns.length) })}</span>
+              </div>
+              <div className="experiment-table-latest [grid-area:latest] whitespace-nowrap text-xs tabular-nums text-subtext">
+                {latestRun ? timeAgo(latestRun.createdAt) : "–"}
               </div>
               <div
-                className="experiment-table-actions [grid-area:actions] flex flex-wrap items-center justify-start gap-2 mt-3"
+                className="experiment-table-actions [grid-area:actions] flex items-center justify-end gap-1"
                 role="group"
                 aria-label={m.a11y_actions_for({ name: experiment.title || experiment.slug })}
                 onClick={(event) => event.stopPropagation()}
                 onDoubleClick={(event) => event.stopPropagation()}
                 onAuxClick={(event) => event.stopPropagation()}
               >
-                <Button
-                  size="small"
-                  disabled={!logsRun}
-                  title={logsRun ? m.experiments_open_logs() : m.experiments_no_runs_yet()}
-                  {...tabOpenGestureHandlers<HTMLButtonElement>((intent) => {
-                    if (logsRun) onOpenLogs(experiment.id, logsRun.id, intent);
-                  }, { stopPropagation: true })}
-                >
-                  <Terminal size={15} />
-                  {m.experiments_table_logs()}
-                </Button>
-                <Button
-                  size="small"
-                  title={m.a11y_browse_code_on({ branch: ltr(experiment.branchName) })}
-                  {...tabOpenGestureHandlers<HTMLButtonElement>((intent) =>
-                    onOpenCode(experiment.id, intent),
-                  { stopPropagation: true })}
-                >
-                  <FolderTree size={15} />
-                  {m.experiments_table_code()}
-                </Button>
-                {liveRun && (
-                  <Button
+                <Tooltip interactive content={logsRun ? m.experiments_open_logs() : m.experiments_no_runs_yet()}>
+                  <IconButton
                     size="small"
-                    variant="danger"
-                    disabled={cancelling}
-                    title={cancelling ? m.experiments_stop_requested() : m.experiments_stop_run()}
-                    onClick={() => void requestCancel(liveRun.id)}
+                    disabled={!logsRun}
+                    aria-label={m.experiments_table_logs()}
+                    {...tabOpenGestureHandlers<HTMLButtonElement>((intent) => {
+                      if (logsRun) onOpenLogs(experiment.id, logsRun.id, intent);
+                    }, { stopPropagation: true })}
                   >
-                    <CircleStop size={15} />
-                    {cancelling ? m.common_stopping() : m.common_stop()}
-                  </Button>
+                    <Terminal size={15} />
+                  </IconButton>
+                </Tooltip>
+                <Tooltip interactive content={m.experiments_table_code()}>
+                  <IconButton
+                    size="small"
+                    aria-label={m.a11y_browse_code_on({ branch: ltr(experiment.branchName) })}
+                    {...tabOpenGestureHandlers<HTMLButtonElement>((intent) =>
+                      onOpenCode(experiment.id, intent),
+                    { stopPropagation: true })}
+                  >
+                    <FolderTree size={15} />
+                  </IconButton>
+                </Tooltip>
+                {liveRun && (
+                  <Tooltip interactive content={cancelling ? m.experiments_stop_requested() : m.experiments_stop_run()}>
+                    <IconButton
+                      size="small"
+                      variant="stop"
+                      disabled={cancelling}
+                      aria-label={cancelling ? m.common_stopping() : m.common_stop()}
+                      onClick={() => void requestCancel(liveRun.id)}
+                    >
+                      <CircleStop size={15} />
+                    </IconButton>
+                  </Tooltip>
                 )}
-                <ArchiveMenu
-                  id={experiment.id}
-                  name={experiment.title || experiment.slug}
-                  actions={archiveActions.get(experiment.id)!}
-                  onArchive={onArchive}
-                />
+                <Tooltip interactive content={m.tree_archive_manage()}>
+                  <ArchiveMenu
+                    compact
+                    id={experiment.id}
+                    name={experiment.title || experiment.slug}
+                    actions={archiveActions.get(experiment.id)!}
+                    onArchive={onArchive}
+                  />
+                </Tooltip>
               </div>
             </div>
           );
