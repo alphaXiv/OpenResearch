@@ -1305,5 +1305,11 @@
   "settings_github_enable_under": "इसमें सिंक चालू करें…",
   "settings_overleaf_file_sync": "पेपर की फ़ाइलें सिंक करें",
   "settings_overleaf_live_sync": "लाइव बदलाव सिंक करें",
-  "settings_overleaf_intro": "लॉगिन जानकारी इसी मशीन पर रहती है। हर पेपर को एडिटर से लिंक करें।"
+  "settings_overleaf_intro": "लॉगिन जानकारी इसी मशीन पर रहती है। हर पेपर को एडिटर से लिंक करें।",
+  "chat_find": "चैट में खोजें",
+  "chat_find_no_matches": "कोई मेल नहीं मिला",
+  "chat_find_count": "{total} में से {current}",
+  "chat_find_previous": "पिछला मिलान (Shift+Enter)",
+  "chat_find_next": "अगला मिलान (Enter)",
+  "chat_find_close": "खोज बंद करें (Esc)"
 }

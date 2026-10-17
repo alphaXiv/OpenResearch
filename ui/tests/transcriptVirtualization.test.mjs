@@ -28,6 +28,7 @@ test("virtual history retains interacted rows outside the viewport and drops abs
     visibleMessages: ["a", "b", "c", "d", "e"].map(id => ({ id })),
     retainedRows,
     fullHistory: false,
+    findOpen: false,
     defaultRangeExtractor,
   });
   assert.deepEqual(extract({ startIndex: 3, endIndex: 4, overscan: 0, count: 5 }), [0, 3, 4]);
@@ -56,9 +57,21 @@ test("accessible full history includes every message", () => {
   const extract = evaluate(`return ${expression.getText(file)}`, {
     useCallback: callback => callback,
     visibleMessages: ["a", "b", "c"].map(id => ({ id })),
-    retainedRows: { current: new Set() }, fullHistory: true, defaultRangeExtractor,
+    retainedRows: { current: new Set() }, fullHistory: true, findOpen: false, defaultRangeExtractor,
   });
   assert.deepEqual(extract({ startIndex: 2, endIndex: 2, overscan: 0, count: 3 }), [0, 1, 2]);
+});
+
+test("chat find includes offscreen messages and returns to virtualization when closed", () => {
+  const expression = find(node => ts.isVariableDeclaration(node) && node.name.getText(file) === "rangeExtractor").initializer;
+  for (const findOpen of [true, false]) {
+    const extract = evaluate(`return ${expression.getText(file)}`, {
+      useCallback: callback => callback,
+      visibleMessages: ["a", "b", "c"].map(id => ({ id })),
+      retainedRows: { current: new Set() }, fullHistory: false, findOpen, defaultRangeExtractor,
+    });
+    assert.deepEqual(extract({ startIndex: 2, endIndex: 2, overscan: 0, count: 3 }), findOpen ? [0, 1, 2] : [2]);
+  }
 });
 
 test("viewport and footer resizing preserve bottom pin without moving a reader", () => {

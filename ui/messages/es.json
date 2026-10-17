@@ -1305,5 +1305,11 @@
   "settings_github_enable_under": "Activar sincronización en…",
   "settings_overleaf_file_sync": "Sincronizar archivos del artículo",
   "settings_overleaf_live_sync": "Sincronizar ediciones en vivo",
-  "settings_overleaf_intro": "Las credenciales se guardan en este equipo. Vincula cada artículo desde el editor."
+  "settings_overleaf_intro": "Las credenciales se guardan en este equipo. Vincula cada artículo desde el editor.",
+  "chat_find": "Buscar en el chat",
+  "chat_find_no_matches": "Sin coincidencias",
+  "chat_find_count": "{current} de {total}",
+  "chat_find_previous": "Coincidencia anterior (Shift+Enter)",
+  "chat_find_next": "Siguiente coincidencia (Enter)",
+  "chat_find_close": "Cerrar búsqueda (Esc)"
 }

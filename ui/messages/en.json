@@ -1305,5 +1305,11 @@
   "settings_github_enable_under": "Enable syncing in…",
   "settings_overleaf_file_sync": "Sync paper files",
   "settings_overleaf_live_sync": "Sync live edits",
-  "settings_overleaf_intro": "Credentials stay on this machine. Link individual papers from the editor."
+  "settings_overleaf_intro": "Credentials stay on this machine. Link individual papers from the editor.",
+  "chat_find": "Find in chat",
+  "chat_find_no_matches": "No matches",
+  "chat_find_count": "{current} of {total}",
+  "chat_find_previous": "Previous match (Shift+Enter)",
+  "chat_find_next": "Next match (Enter)",
+  "chat_find_close": "Close search (Esc)"
 }
