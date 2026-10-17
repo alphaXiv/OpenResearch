@@ -93,7 +93,7 @@ pub async fn submit_local_ray_with_source(
     // The job env: everything the user synced (API keys), plus the tokens the
     // run step expects. Ray renders runtime_env in its dashboard, but anyone
     // with dashboard access can submit jobs anyway — same trust boundary.
-    let mut env: HashMap<String, String> = crate::config::list_synced_env().into_iter().collect();
+    let mut env = crate::config::run_env(&run_id);
     if let Ok(hf_token) = huggingface::resolve_token() {
         env.entry("HF_TOKEN".to_string()).or_insert(hf_token);
     }

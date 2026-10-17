@@ -85,7 +85,14 @@ async fn submit_controller_run(
 
     // The run's env: everything the user synced (API keys), plus the tokens
     // the run script expects. Passed to the launcher process.
-    let mut env: HashMap<String, String> = crate::config::list_synced_env().into_iter().collect();
+    let mut env = crate::config::run_env(&run_id);
+    env.insert(
+        crate::compute::TENSORBOARD_LOGDIR.to_string(),
+        crate::jobs::localbox::run_dir(&run_id)
+            .join("tensorboard")
+            .to_string_lossy()
+            .into_owned(),
+    );
     if let Ok(hf_token) = crate::jobs::huggingface::resolve_token() {
         env.entry("HF_TOKEN".to_string()).or_insert(hf_token);
     }
@@ -102,7 +109,6 @@ async fn submit_controller_run(
     let mut secret_env = HashMap::new();
     // Every local controller inherits this key without persisting it in run.sh.
     let tinker_key = if kind == "tinker_job" {
-        env.insert("ORX_RUN_ID".to_string(), run_id.clone());
         Some(crate::jobs::tinker::resolve_api_key()?)
     } else {
         env.get(crate::jobs::tinker::API_KEY_ENV).cloned()

@@ -47,6 +47,7 @@ pub mod ssh;
 pub mod ssh_identity;
 pub mod starter;
 pub mod storage;
+pub mod trackio;
 pub(crate) mod user_instructions;
 pub mod user_skills;
 

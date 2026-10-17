@@ -1,10 +1,12 @@
 import { m } from "../paraglide/messages.js";
-import { ChevronDown, CircleStop } from "lucide-react";
+import { ChartLine, ChevronDown, CircleStop } from "lucide-react";
+import { useQuery } from "@tanstack/react-query";
 import { useEffect, useRef, useState } from "react";
 import {
   cancelRun,
   runDisplayStatus,
   timeAgo,
+  trackioRunUrl,
   type Experiment,
   type Project,
   type Run,
@@ -14,7 +16,8 @@ import type { CodeView } from "./CodeTab";
 import { LogTerminal } from "./LogTerminal";
 import { StatusBadge } from "./StatusBadge";
 import type { TabOpenIntent } from "../tabPreview";
-import { Button, MenuItem } from "./ui";
+import { Button, ButtonLink, MenuItem } from "./ui";
+import { getTrackioSettingsQuery } from "../queries/settings";
 
 export type ExperimentView = "overview" | "terminal";
 
@@ -94,6 +97,8 @@ function TerminalView({
     ? expRuns.find((run) => run.id === selectedRunId) ?? null
     : expRuns[0] ?? null;
   const live = selectedRun?.status === "running" || selectedRun?.status === "starting";
+  const trackio = useQuery(getTrackioSettingsQuery()).data;
+  const trackioUrl = selectedRun ? trackioRunUrl(trackio, selectedRun) : null;
   const cancelling = Boolean(
     selectedRun && live && (selectedRun.cancelRequested || pendingRunId === selectedRun.id),
   );
@@ -137,6 +142,19 @@ function TerminalView({
           <span className="error" role="alert">
             {error}
           </span>
+        )}
+        {trackioUrl && (
+          <ButtonLink
+            size="small"
+            variant="ghost"
+            title={m.a11y_open_in_trackio()}
+            href={trackioUrl}
+            target="_blank"
+            rel="noopener noreferrer"
+          >
+            <ChartLine size={13} />
+            Trackio
+          </ButtonLink>
         )}
         {live && (
           <Button size="small" variant="ghost" disabled={cancelling} onClick={() => void stop()}>

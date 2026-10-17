@@ -5,8 +5,6 @@
 //! cores and host memory. The run row lives in the local store only; a
 //! detached `orx supervise` watches the job.
 
-use std::collections::HashMap;
-
 use crate::commands::exp::spawn_detached_supervise;
 use crate::compute::SourceSnapshot;
 use crate::error::{anyhow, Result};
@@ -133,7 +131,7 @@ pub async fn submit_local_slurm_with_source(
 
     // The job env: everything the user synced (API keys), plus the tokens the
     // run step expects. Exported in the setup script and job.sbatch.
-    let mut env: HashMap<String, String> = crate::config::list_synced_env().into_iter().collect();
+    let mut env = crate::config::run_env(&run_id);
     if let Ok(hf_token) = huggingface::resolve_token() {
         env.entry("HF_TOKEN".to_string()).or_insert(hf_token);
     }
