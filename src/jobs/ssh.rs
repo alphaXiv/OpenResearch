@@ -1363,6 +1363,21 @@ mod tests {
         assert!(without_member);
     }
 
+    // Signal handlers do not guarantee that blocking syscalls restart automatically.
+    #[cfg(unix)]
+    fn retry_interrupted(mut syscall: impl FnMut() -> isize) -> std::io::Result<isize> {
+        loop {
+            let result = syscall();
+            if result != -1 {
+                return Ok(result);
+            }
+            let error = std::io::Error::last_os_error();
+            if error.kind() != std::io::ErrorKind::Interrupted {
+                return Err(error);
+            }
+        }
+    }
+
     #[cfg(unix)]
     #[test]
     fn host_cancel_escalates_to_kill_when_the_leader_is_gone() {
@@ -1408,12 +1423,24 @@ mod tests {
             events: libc::POLLIN,
             revents: 0,
         };
-        assert_eq!(unsafe { libc::poll(&mut pfd, 1, 10_000) }, 1);
+        let deadline = std::time::Instant::now() + Duration::from_secs(10);
+        let result = retry_interrupted(|| {
+            let remaining = deadline.saturating_duration_since(std::time::Instant::now());
+            assert!(
+                !remaining.is_zero(),
+                "timed out waiting for worker readiness"
+            );
+            // SIGCHLD can interrupt poll even when the handler uses SA_RESTART.
+            unsafe { libc::poll(&mut pfd, 1, remaining.as_millis().max(1) as i32) as isize }
+        })
+        .expect("polling worker readiness failed");
+        assert_eq!(result, 1, "timed out waiting for worker readiness");
         let mut byte = 0u8;
-        assert_eq!(
-            unsafe { libc::read(ready[0], &mut byte as *mut u8 as *mut libc::c_void, 1) },
-            1
-        );
+        let result = retry_interrupted(|| unsafe {
+            libc::read(ready[0], &mut byte as *mut u8 as *mut libc::c_void, 1)
+        })
+        .expect("reading worker readiness failed");
+        assert_eq!(result, 1, "worker exited without confirming readiness");
         unsafe { libc::close(ready[0]) };
         let mut leader_dead = false;
         for _ in 0..500 {
