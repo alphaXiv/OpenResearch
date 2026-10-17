@@ -1,6 +1,6 @@
 import { ChevronDown, ChevronUp, Search, X } from "lucide-react";
 import { useEffect, useLayoutEffect, useRef, useState, type RefObject } from "react";
-import { transcriptSearchRanges } from "../chatSearch";
+import { scrollTranscriptSearchRangeIntoView, transcriptSearchRanges } from "../chatSearch";
 import { fmtNumber } from "../api";
 import { m } from "../paraglide/messages.js";
 import { IconButton } from "./ui";
@@ -74,16 +74,7 @@ export function ChatSearch({ rootRef, scrollRef, inputRef, embedded, onClose, on
     const frame = requestAnimationFrame(() => {
       const scroll = scrollRef.current;
       if (!scroll || !range.startContainer.isConnected) return;
-      const rect = range.getBoundingClientRect();
-      const viewport = scroll.getBoundingClientRect();
-      scroll.scrollTop += rect.top - viewport.top - (scroll.clientHeight - rect.height) / 2;
-      // Code blocks can scroll horizontally without moving the chat pane.
-      for (let parent = range.startContainer.parentElement; parent && parent !== scroll; parent = parent.parentElement) {
-        if (parent.scrollWidth <= parent.clientWidth || !/(auto|scroll)/.test(getComputedStyle(parent).overflowX)) continue;
-        const match = range.getBoundingClientRect();
-        const bounds = parent.getBoundingClientRect();
-        parent.scrollLeft += match.left - bounds.left - (parent.clientWidth - match.width) / 2;
-      }
+      scrollTranscriptSearchRangeIntoView(range, scroll);
       lastScrolled.current = { node: range.startContainer, offset: range.startOffset, query };
     });
     return () => cancelAnimationFrame(frame);

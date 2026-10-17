@@ -13,7 +13,7 @@ export function findTextMatches(text: string, query: string): TextMatch[] {
   }));
 }
 
-const BLOCK = "p,pre,li,blockquote,td,th,h1,h2,h3,h4,h5,h6,[data-message-id],.msg-user,.msg-steer";
+const BLOCK = "p,pre,li,blockquote,td,th,h1,h2,h3,h4,h5,h6,details,summary,[data-message-id],.msg-user,.msg-steer";
 const EXCLUDED = "button,input,textarea,select,script,style,svg,math,.sr-only,.katex-mathml,[hidden],[inert],[aria-hidden=true]";
 
 /** Search rendered text, joining inline markup but never separate paragraphs or
@@ -43,6 +43,12 @@ export function transcriptSearchRanges(root: HTMLElement, query: string): Range[
   };
   const walker = root.ownerDocument.createTreeWalker(root, NodeFilter.SHOW_ELEMENT | NodeFilter.SHOW_TEXT, {
     acceptNode(node) {
+      // Only the first direct summary is displayed while a details is closed.
+      // Reject text nodes too: disclosure bodies need not have an element wrapper.
+      const parent = node.parentElement;
+      if (parent?.matches("details:not([open])") && node !== parent.querySelector(":scope > summary")) {
+        return NodeFilter.FILTER_REJECT;
+      }
       if (node instanceof Element) {
         if (node.matches(EXCLUDED)) return NodeFilter.FILTER_REJECT;
         return node.tagName === "BR" ? NodeFilter.FILTER_ACCEPT : NodeFilter.FILTER_SKIP;
@@ -63,4 +69,23 @@ export function transcriptSearchRanges(root: HTMLElement, query: string): Range[
   }
   flush();
   return ranges;
+}
+
+export function scrollTranscriptSearchRangeIntoView(range: Range, scroll: HTMLElement): void {
+  // Reveal the match from the innermost output/code viewport outwards. Read its
+  // position again after each scroll, then position the now-visible match in chat.
+  for (let parent = range.startContainer.parentElement; parent && parent !== scroll; parent = parent.parentElement) {
+    const style = getComputedStyle(parent);
+    const match = range.getBoundingClientRect();
+    const bounds = parent.getBoundingClientRect();
+    if (parent.scrollHeight > parent.clientHeight && /(auto|scroll)/.test(style.overflowY)) {
+      parent.scrollTop += match.top - bounds.top - parent.clientTop - (parent.clientHeight - match.height) / 2;
+    }
+    if (parent.scrollWidth > parent.clientWidth && /(auto|scroll)/.test(style.overflowX)) {
+      parent.scrollLeft += match.left - bounds.left - parent.clientLeft - (parent.clientWidth - match.width) / 2;
+    }
+  }
+  const rect = range.getBoundingClientRect();
+  const viewport = scroll.getBoundingClientRect();
+  scroll.scrollTop += rect.top - viewport.top - scroll.clientTop - (scroll.clientHeight - rect.height) / 2;
 }
