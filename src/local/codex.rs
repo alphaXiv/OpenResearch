@@ -1057,7 +1057,7 @@ impl CodexHost {
 /// orx's own death can't orphan them either. Mirrors
 /// `crate::jobs::localbox::windows`.
 #[cfg(windows)]
-mod windows_job {
+pub(crate) mod windows_job {
     use std::io;
     use std::os::windows::io::{AsRawHandle, FromRawHandle, OwnedHandle};
     use std::time::Duration;
@@ -1083,7 +1083,7 @@ mod windows_job {
     /// Suspended until the child is inside the job — a runnable npm wrapper
     /// could spawn its native descendants before enrollment; no console
     /// window, matching the localbox spawns.
-    pub(super) const SPAWN_FLAGS: u32 = CREATE_SUSPENDED | CREATE_NO_WINDOW;
+    pub(crate) const SPAWN_FLAGS: u32 = CREATE_SUSPENDED | CREATE_NO_WINDOW;
 
     fn own(handle: HANDLE) -> io::Result<OwnedHandle> {
         if handle.is_null() || handle == INVALID_HANDLE_VALUE {
@@ -1098,35 +1098,8 @@ mod windows_job {
     /// falls back to `kill_tree`; a resume failure is fatal (`Err`) because a
     /// suspended child can never answer a request.
     pub(super) fn enroll(child: &mut Child, pid: u32) -> Result<Option<OwnedHandle>> {
-        let assigned = (|| -> Result<OwnedHandle> {
-            // Anonymous job: the handle lives only on the client.
-            let job = own(unsafe { CreateJobObjectW(std::ptr::null(), std::ptr::null()) })?;
-            let mut limits = JOBOBJECT_EXTENDED_LIMIT_INFORMATION::default();
-            limits.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
-            // SAFETY: limits is live and correctly sized for the class requested.
-            if unsafe {
-                SetInformationJobObject(
-                    job.as_raw_handle(),
-                    JobObjectExtendedLimitInformation,
-                    std::ptr::from_ref(&limits).cast(),
-                    std::mem::size_of_val(&limits) as u32,
-                )
-            } == 0
-            {
-                return Err(io::Error::last_os_error().into());
-            }
-            let handle = child
-                .raw_handle()
-                .ok_or_else(|| anyhow!("codex app-server: spawned child has no handle"))?;
-            // SAFETY: both handles are live; the suspended child cannot have
-            // spawned descendants outside the job yet.
-            if unsafe { AssignProcessToJobObject(job.as_raw_handle(), handle) } == 0 {
-                return Err(io::Error::last_os_error().into());
-            }
-            Ok(job)
-        })();
+        let assigned = assign(child);
         if let Err(error) = resume(pid) {
-            // A suspended child would hang every request — kill it.
             let _ = child.start_kill();
             return Err(error.context("codex app-server: could not resume spawned child"));
         }
@@ -1139,9 +1112,37 @@ mod windows_job {
         }
     }
 
+    pub(crate) fn assign(child: &Child) -> Result<OwnedHandle> {
+        // Anonymous job: the handle lives only on the client.
+        let job = own(unsafe { CreateJobObjectW(std::ptr::null(), std::ptr::null()) })?;
+        let mut limits = JOBOBJECT_EXTENDED_LIMIT_INFORMATION::default();
+        limits.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
+        // SAFETY: limits is live and correctly sized for the class requested.
+        if unsafe {
+            SetInformationJobObject(
+                job.as_raw_handle(),
+                JobObjectExtendedLimitInformation,
+                std::ptr::from_ref(&limits).cast(),
+                std::mem::size_of_val(&limits) as u32,
+            )
+        } == 0
+        {
+            return Err(io::Error::last_os_error().into());
+        }
+        let handle = child
+            .raw_handle()
+            .ok_or_else(|| anyhow!("codex app-server: spawned child has no handle"))?;
+        // SAFETY: both handles are live; the suspended child cannot have
+        // spawned descendants outside the job yet.
+        if unsafe { AssignProcessToJobObject(job.as_raw_handle(), handle) } == 0 {
+            return Err(io::Error::last_os_error().into());
+        }
+        Ok(job)
+    }
+
     /// Resume the suspended spawn's threads (the toolhelp enumeration from
     /// `jobs::localbox::windows::resume`).
-    fn resume(pid: u32) -> Result<()> {
+    pub(crate) fn resume(pid: u32) -> Result<()> {
         // SAFETY: the snapshot owns no process resources and is closed by OwnedHandle.
         let snapshot = own(unsafe { CreateToolhelp32Snapshot(TH32CS_SNAPTHREAD, 0) })?;
         let mut entry = THREADENTRY32 {

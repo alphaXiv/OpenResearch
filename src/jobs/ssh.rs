@@ -5,7 +5,7 @@
 //! `kubectl`), so auth is your `~/.ssh/config` + agent/keys — orx never reads a
 //! key. On unix, connections are multiplexed (ControlMaster) so the many status/log
 //! polls reuse one TCP session instead of a handshake apiece.
-//! Win32-OpenSSH cannot, so on Windows background calls need an agent key or no passphrase.
+//! Win32-OpenSSH cannot, so Windows reuses a single batch shell per target and process.
 //!
 //! The handle is a remote run directory `~/.orx/runs/<run_id>/` holding:
 //!   run.sh      the launcher (exported env + snapshot-and-run payload)
@@ -17,6 +17,8 @@
 mod container;
 #[cfg(unix)]
 mod prepared;
+#[cfg(any(windows, test))]
+mod session;
 #[cfg(unix)]
 mod sharing;
 pub use container::{
@@ -26,9 +28,11 @@ pub use container::{
 use std::collections::HashMap;
 #[cfg(unix)]
 use std::path::PathBuf;
+#[cfg(not(windows))]
 use std::process::Stdio;
 use std::time::Duration;
 
+#[cfg(not(windows))]
 use tokio::process::Command;
 
 use crate::error::{anyhow, Result};
@@ -549,6 +553,21 @@ async fn ssh_run_bytes(
     remote_cmd: &str,
     stdin: Option<&[u8]>,
 ) -> Result<String> {
+    #[cfg(windows)]
+    {
+        let input = stdin.unwrap_or_default();
+        return session::run(target, remote_cmd, &mut &input[..], input.len() as u64).await;
+    }
+    #[cfg(not(windows))]
+    ssh_run_bytes_once(target, remote_cmd, stdin).await
+}
+
+#[cfg(not(windows))]
+async fn ssh_run_bytes_once(
+    target: &SshTarget,
+    remote_cmd: &str,
+    stdin: Option<&[u8]>,
+) -> Result<String> {
     prepare_control_dir()?;
     #[cfg(unix)]
     if target.extra_opts.is_empty() {
@@ -603,6 +622,22 @@ async fn ssh_run_bytes(
 }
 
 async fn ssh_run_file(
+    target: &SshTarget,
+    remote_cmd: &str,
+    source: &std::path::Path,
+) -> Result<String> {
+    #[cfg(windows)]
+    {
+        let mut file = tokio::fs::File::open(source).await?;
+        let size = file.metadata().await?.len();
+        return session::run(target, remote_cmd, &mut file, size).await;
+    }
+    #[cfg(not(windows))]
+    ssh_run_file_once(target, remote_cmd, source).await
+}
+
+#[cfg(not(windows))]
+async fn ssh_run_file_once(
     target: &SshTarget,
     remote_cmd: &str,
     source: &std::path::Path,
