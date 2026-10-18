@@ -1305,5 +1305,10 @@
   "settings_github_enable_under": "تفعيل المزامنة في…",
   "settings_overleaf_file_sync": "مزامنة ملفات الورقة",
   "settings_overleaf_live_sync": "مزامنة التعديلات المباشرة",
-  "settings_overleaf_intro": "تبقى بيانات الدخول على هذا الجهاز. اربط كل ورقة من المحرر."
+  "settings_overleaf_intro": "تبقى بيانات الدخول على هذا الجهاز. اربط كل ورقة من المحرر.",
+  "app_routes": "المسارات",
+  "routes_archived_ancestor": "تجربة سابقة مؤرشفة",
+  "routes_other_task": "من مهمة أخرى",
+  "routes_missing_parent": "التجربة الأصلية غير متاحة",
+  "routes_invalid_lineage": "علاقة تجارب غير صالحة"
 }

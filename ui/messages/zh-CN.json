@@ -1305,5 +1305,10 @@
   "settings_github_enable_under": "启用同步到…",
   "settings_overleaf_file_sync": "同步论文文件",
   "settings_overleaf_live_sync": "同步实时编辑",
-  "settings_overleaf_intro": "凭据保存在本机。在编辑器中关联各篇论文。"
+  "settings_overleaf_intro": "凭据保存在本机。在编辑器中关联各篇论文。",
+  "app_routes": "路线",
+  "routes_archived_ancestor": "已归档的祖先",
+  "routes_other_task": "来自其他任务",
+  "routes_missing_parent": "父实验不可用",
+  "routes_invalid_lineage": "实验关系异常"
 }

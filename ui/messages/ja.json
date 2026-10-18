@@ -1305,5 +1305,10 @@
   "settings_github_enable_under": "同期先を選んで有効化…",
   "settings_overleaf_file_sync": "論文ファイルを同期",
   "settings_overleaf_live_sync": "リアルタイムの編集を同期",
-  "settings_overleaf_intro": "認証情報はこの端末に保存されます。各論文はエディターからリンクします。"
+  "settings_overleaf_intro": "認証情報はこの端末に保存されます。各論文はエディターからリンクします。",
+  "app_routes": "ルート",
+  "routes_archived_ancestor": "アーカイブ済みの祖先",
+  "routes_other_task": "別のタスクから",
+  "routes_missing_parent": "親実験が見つかりません",
+  "routes_invalid_lineage": "無効な実験関係"
 }
