@@ -1305,5 +1305,18 @@
   "settings_github_enable_under": "Włącz synchronizację w…",
   "settings_overleaf_file_sync": "Synchronizuj pliki artykułu",
   "settings_overleaf_live_sync": "Synchronizuj zmiany na żywo",
-  "settings_overleaf_intro": "Dane logowania pozostają na tym komputerze. Łącz poszczególne artykuły w edytorze."
+  "settings_overleaf_intro": "Dane logowania pozostają na tym komputerze. Łącz poszczególne artykuły w edytorze.",
+  "notifications_prompt_waiting": "Agent czeka na Twoją odpowiedź",
+  "notifications_run_done": "Uruchomienie zakończone",
+  "notifications_run_failed": "Uruchomienie nie powiodło się",
+  "notifications_turn_done": "Agent zakończył odpowiedź",
+  "settings_notifications_blocked": "Powiadomienia dla tej witryny są zablokowane. Zezwól na nie w ustawieniach witryny w przeglądarce.",
+  "settings_notifications_heading": "Powiadomienia",
+  "settings_notifications_prompts": "Agent czeka na odpowiedź",
+  "settings_notifications_runs": "Uruchomienie kończy się lub nie powiedzie",
+  "settings_notifications_turns": "Agent kończy odpowiedź",
+  "settings_notifications_description": "Otrzymuj powiadomienia ze wszystkich projektów, także w kartach i oknach w tle. Pozostaw otwartą co najmniej jedną kartę panelu. Ustawienia są zapisywane w tej przeglądarce.",
+  "settings_notifications_unsupported": "Powiadomienia wymagają HTTPS lub localhost oraz obsługiwanej przeglądarki na komputerze.",
+  "settings_notifications_test": "Wyślij powiadomienie testowe",
+  "settings_notifications_test_body": "Powiadomienia przeglądarki są włączone."
 }

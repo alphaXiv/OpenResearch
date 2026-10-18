@@ -1305,5 +1305,18 @@
   "settings_github_enable_under": "इसमें सिंक चालू करें…",
   "settings_overleaf_file_sync": "पेपर की फ़ाइलें सिंक करें",
   "settings_overleaf_live_sync": "लाइव बदलाव सिंक करें",
-  "settings_overleaf_intro": "लॉगिन जानकारी इसी मशीन पर रहती है। हर पेपर को एडिटर से लिंक करें।"
+  "settings_overleaf_intro": "लॉगिन जानकारी इसी मशीन पर रहती है। हर पेपर को एडिटर से लिंक करें।",
+  "notifications_prompt_waiting": "एजेंट आपके जवाब का इंतज़ार कर रहा है",
+  "notifications_run_done": "रन पूरा हुआ",
+  "notifications_run_failed": "रन विफल हुआ",
+  "notifications_turn_done": "एजेंट ने जवाब देना पूरा किया",
+  "settings_notifications_blocked": "इस साइट के लिए सूचनाएँ ब्लॉक हैं। उन्हें अपने ब्राउज़र की साइट सेटिंग में अनुमति दें।",
+  "settings_notifications_description": "सभी प्रोजेक्ट की सूचनाएँ पाएँ, पृष्ठभूमि के टैब और विंडो में भी। डैशबोर्ड का कम से कम एक टैब खुला रखें। सेटिंग्स इस ब्राउज़र में सहेजी जाती हैं।",
+  "settings_notifications_heading": "सूचनाएँ",
+  "settings_notifications_prompts": "एजेंट आपके जवाब का इंतज़ार कर रहा है",
+  "settings_notifications_runs": "रन पूरा या विफल होता है",
+  "settings_notifications_turns": "एजेंट जवाब देना पूरा करता है",
+  "settings_notifications_unsupported": "सूचनाओं के लिए HTTPS या localhost और एक समर्थित डेस्कटॉप ब्राउज़र चाहिए।",
+  "settings_notifications_test": "परीक्षण सूचना भेजें",
+  "settings_notifications_test_body": "ब्राउज़र सूचनाएँ चालू हैं।"
 }
