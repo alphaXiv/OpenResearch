@@ -9,6 +9,7 @@ import type {
   ChatSession,
   ContextUsage,
   Experiment,
+  HarnessId,
   OverleafLiveStatus,
   Project,
   QueuedMessage,
@@ -85,7 +86,8 @@ function emitProjectActivityEvent() {
 }
 
 export interface HarnessAuthEvent {
-  harness: string;
+  /** `*` after a reconnect: any harness may have changed while events were lost. */
+  harness: HarnessId | "*";
   authState: string;
 }
 

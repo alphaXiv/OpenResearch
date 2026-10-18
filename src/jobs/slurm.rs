@@ -198,6 +198,11 @@ fn render_sbatch(spec: &SlurmJobSpec) -> String {
         "#SBATCH --output=log".to_string(),
         "#SBATCH --error=log".to_string(),
         "#SBATCH --open-mode=append".to_string(),
+        // One task, stated rather than left to Slurm's default of one: some
+        // clusters' job-submit plugins refuse a job that names no task count
+        // ("You must specify a number of tasks"). Cores come from
+        // --cpus-per-task, so this changes nothing where the default applied.
+        "#SBATCH --ntasks=1".to_string(),
     ];
     if let Some(secs) = spec.time_limit_secs {
         directives.push(format!("#SBATCH --time={}", slurm_time(secs)));
@@ -229,9 +234,10 @@ fn render_sbatch(spec: &SlurmJobSpec) -> String {
     // sbatch payload runs the job — the login-node setup script (below) is a
     // git clone, so it keeps the raw env (see jobs::default_python_env).
     format!(
-        "#!/usr/bin/env bash\n{directives}\n{exports}\n(\ncd repo || exit 97\n{command}\n)\ncode=$?\necho \"$code\" > exit_code\nexit \"$code\"\n",
+        "#!/usr/bin/env bash\n{directives}\n{exports}\n{tensorboard}\n(\ncd repo || exit 97\n{command}\n)\ncode=$?\necho \"$code\" > exit_code\nexit \"$code\"\n",
         directives = directives.join("\n"),
         exports = render_exports(&super::default_python_env(&spec.env)),
+        tensorboard = crate::compute::TENSORBOARD_LOGDIR_EXPORT,
         command = spec.command,
     )
 }
@@ -543,6 +549,8 @@ mod tests {
         assert!(script.starts_with("#!/usr/bin/env bash\n"));
         assert!(script.contains("#SBATCH --job-name=orx-01234567\n"));
         assert!(script.contains("#SBATCH --output=log\n"));
+        // Always explicit: clusters may reject a job with no task count.
+        assert!(script.contains("#SBATCH --ntasks=1\n"));
         assert!(!script.contains("--partition"));
         assert!(!script.contains("--account"));
         assert!(!script.contains("--gres"));

@@ -1838,16 +1838,25 @@ impl Store {
     /// Full-row update by id (title / description / run_command / agent_status).
     ///
     /// `chat_session_id` is deliberately omitted: session ownership is stamped
-    /// once at creation and is immutable thereafter.
+    /// once at creation and is immutable thereafter. The parent changes only
+    /// through `set_experiment_parent`, so a stale row cannot undo a move.
     pub fn update_local_experiment(&self, e: &LocalExperiment) -> Result<()> {
         self.conn.execute(
-            "UPDATE local_experiments SET parent_experiment_id = ?2, slug = ?3, branch_name = ?4,
-                    title = ?5, description = ?6, run_command = ?7, agent_status = ?8, updated_at = ?9
+            "UPDATE local_experiments SET slug = ?2, branch_name = ?3,
+                    title = ?4, description = ?5, run_command = ?6, agent_status = ?7, updated_at = ?8
              WHERE id = ?1",
             params![
-                e.id, e.parent_experiment_id, e.slug, e.branch_name,
+                e.id, e.slug, e.branch_name,
                 e.title, e.description, e.run_command, e.agent_status, now_ms(),
             ],
+        )?;
+        Ok(())
+    }
+
+    pub fn set_experiment_parent(&self, id: &str, parent: Option<&str>) -> Result<()> {
+        self.conn.execute(
+            "UPDATE local_experiments SET parent_experiment_id = ?2, updated_at = MAX(updated_at + 1, ?3) WHERE id = ?1",
+            params![id, parent, now_ms()],
         )?;
         Ok(())
     }
@@ -1912,6 +1921,30 @@ impl Store {
         ))?;
         let mut rows = stmt.query_map(params![id], row_to_chat_session)?;
         Ok(rows.next().transpose()?)
+    }
+
+    pub fn chat_session_awaiting_input(&self, session_id: &str, busy: bool) -> Result<bool> {
+        Ok(self.conn.query_row(
+            "WITH RECURSIVE active(id, parent_id, parts_json) AS (
+                SELECT m.id, m.parent_id, m.parts_json FROM chat_messages m
+                JOIN chat_sessions s ON s.active_leaf_id = m.id AND s.id = m.session_id
+                WHERE s.id = ?1
+                UNION ALL
+                SELECT m.id, m.parent_id, m.parts_json FROM chat_messages m
+                JOIN active a ON a.parent_id = m.id WHERE m.session_id = ?1
+             )
+             SELECT EXISTS (
+                SELECT 1 FROM active a, json_each(a.parts_json) p
+                WHERE json_extract(p.value, '$.type') = 'prompt'
+                  AND COALESCE(json_extract(p.value, '$.prompt.resolved'), 0) = 0
+                  AND CASE WHEN json_extract(p.value, '$.prompt.nativeId') IS NOT NULL
+                    THEN ?2
+                    ELSE json_extract(p.value, '$.prompt.kind') = 'question'
+                  END
+             )",
+            params![session_id, busy],
+            |row| row.get(0),
+        )?)
     }
 
     pub fn list_chat_sessions_by_project(
@@ -4382,6 +4415,80 @@ mod tests {
     }
 
     #[test]
+    fn pending_input_summary_survives_reopen_and_follows_the_active_branch() {
+        let dir = std::env::temp_dir().join(format!("orx-store-pending-{}", uuid::Uuid::new_v4()));
+        let store = Store::open_at(dir.clone()).unwrap();
+        store
+            .create_chat_session(&chat_session_fixture("chat_pending"))
+            .unwrap();
+        for (id, parent_id, parts) in [
+            ("user", None, serde_json::json!([])),
+            (
+                "question",
+                Some("user"),
+                serde_json::json!([{"type":"prompt","prompt":{"kind":"question","resolved":false}}]),
+            ),
+            (
+                "retry",
+                Some("user"),
+                serde_json::json!([{"type":"text","text":"Done"}]),
+            ),
+        ] {
+            store
+                .upsert_chat_message(&StoredChatMessage {
+                    id: id.into(),
+                    session_id: "chat_pending".into(),
+                    role: "assistant".into(),
+                    parts_json: parts.to_string(),
+                    parent_id: parent_id.map(str::to_string),
+                    created_at: 1,
+                    completed_at: None,
+                    base_native_session_id: None,
+                    result_native_session_id: None,
+                })
+                .unwrap();
+        }
+        store
+            .set_chat_session_active_leaf("chat_pending", Some("question"))
+            .unwrap();
+        assert!(store
+            .chat_session_awaiting_input("chat_pending", false)
+            .unwrap());
+        drop(store);
+        let store = Store::open_at(dir.clone()).unwrap();
+        assert!(store
+            .chat_session_awaiting_input("chat_pending", false)
+            .unwrap());
+        store
+            .set_chat_session_active_leaf("chat_pending", Some("retry"))
+            .unwrap();
+        assert!(!store
+            .chat_session_awaiting_input("chat_pending", false)
+            .unwrap());
+        store
+            .set_chat_session_active_leaf("chat_pending", Some("question"))
+            .unwrap();
+        store.conn.execute("UPDATE chat_messages SET parts_json = ?1 WHERE id = 'question'", params![r#"[{"type":"prompt","prompt":{"kind":"question","resolved":false,"nativeId":"rpc-1"}}]"#]).unwrap();
+        assert!(!store
+            .chat_session_awaiting_input("chat_pending", false)
+            .unwrap());
+        assert!(store
+            .chat_session_awaiting_input("chat_pending", true)
+            .unwrap());
+        store
+            .conn
+            .execute(
+                "UPDATE chat_messages SET parts_json = ?1 WHERE id = 'question'",
+                params![r#"[{"type":"prompt","prompt":{"kind":"question","resolved":true}}]"#],
+            )
+            .unwrap();
+        assert!(!store
+            .chat_session_awaiting_input("chat_pending", true)
+            .unwrap());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
     fn chat_session_autonomy_roundtrips() {
         let dir = std::env::temp_dir().join(format!("orx-store-autonomy-{}", uuid::Uuid::new_v4()));
         let store = Store::open_at(dir.clone()).unwrap();
@@ -5516,6 +5623,7 @@ mod tests {
         // A later full-row update must not rewrite the owning session.
         let mut updated = experiment_fixture("exp_owned", None);
         updated.title = Some("renamed".into());
+        updated.parent_experiment_id = Some("stale-parent".into());
         store.update_local_experiment(&updated).unwrap();
 
         let stored = store.get_local_experiment("exp_owned").unwrap().unwrap();
@@ -5525,6 +5633,7 @@ mod tests {
             Some("chat_x".to_string()),
             "the creating session is never overwritten by a later update"
         );
+        assert_eq!(stored.parent_experiment_id, None, "only a move re-parents");
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

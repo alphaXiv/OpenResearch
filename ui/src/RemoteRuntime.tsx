@@ -1,6 +1,6 @@
 import { useQuery } from "@tanstack/react-query";
 
-import { getRuntimeQuery } from "./queries/settings";
+import { getRuntimeQuery, reportLocaleQuery } from "./queries/settings";
 import {
   activateWorkspace,
   workspaceScope,
@@ -30,7 +30,7 @@ import {
   type RuntimeInfo,
 } from "./api";
 import { ltr } from "./i18n";
-import { setLocale } from "./locale";
+import { setLocale, useLocale } from "./locale";
 import { m } from "./paraglide/messages.js";
 import { isLocale } from "./paraglide/runtime.js";
 import { setThemePreference } from "./theme";
@@ -384,6 +384,7 @@ function RemoteOverlay({ children }: { children: ReactNode }) {
 }
 
 export function RuntimeRoot() {
+  const locale = useLocale();
   useSyncExternalStore(subscribeWorkspace, getWorkspaceGeneration);
   useEffect(() => subscribeWorkspace(() => {
     resetGlobalWorkspace();
@@ -403,6 +404,11 @@ export function RuntimeRoot() {
     enabled: !launchPlaceholder,
     refetchInterval: (query) => query.state.status === "error" || query.state.data?.kind === "ssh" ? 2_000 : false,
     refetchIntervalInBackground: true,
+  });
+  useQuery({
+    ...reportLocaleQuery(locale),
+    enabled: !launchPlaceholder && (runtime?.kind === "local" ||
+      (runtime?.kind === "ssh" && runtime.session.status === "connected")),
   });
   useEffect(() => {
     if (launchPlaceholder) return;

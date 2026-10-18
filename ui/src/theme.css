@@ -190,7 +190,9 @@
   --term-app-ansi-bright-cyan: #209a84;
   --term-app-ansi-bright-white: #171717;
   --tool-shimmer: color-mix(in srgb, var(--text) 58%, var(--subtext));
-  --editor-selection: var(--code-selection);
+  /* Sits above the highlighted text, so a light translucent veil keeps selected syntax readable.
+     Literal rgb, not color-mix: macOS 11 WebKit would drop the selection entirely. */
+  --editor-selection: rgb(22 22 22 / 12%);
   /* Shared reading width for chat, markdown, and plan surfaces. */
   --readable-col: 840px;
   --border-strong: var(--border);
@@ -227,6 +229,7 @@
   --selection-background: #606060;
   --selection-text: #ffffff;
   --code-selection: var(--selection-background);
+  --editor-selection: rgb(255 255 255 / 16%);
   --text: #e5e5e5;
   --subtext: #a3a3a3;
   --muted: #737373;

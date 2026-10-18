@@ -1055,14 +1055,14 @@ impl Harness for Codex {
             .with_reasoning_levels(&CODEX_REASONING_LEVELS)
     }
 
-    /// Three prompt kinds resume differently:
+    /// Prompt kinds resume differently:
     ///
     /// * `permission` (native, held mid-turn): the answer is the JSON-RPC
     ///   `{decision}` reply, delivered inline over the live app-server child —
     ///   the still-running turn keeps streaming once codex unblocks
     ///   ([`ResumeAction::Handled`], never the new-message path).
-    /// * `question` (native, held mid-turn): a `request_user_input` reply,
-    ///   delivered inline the same way (`user_input_reply`).
+    /// * `question`: held requests receive `user_input_reply`; asynchronous
+    ///   questions receive a user message through the steering path.
     /// * `plan` (end-turn card, no `native_id`): resumes by a NEW user message
     ///   ([`ResumeAction::SendMessage`]) — approve sends the implementation
     ///   prompt with Plan cleared while preserving the selected permission;
@@ -1110,12 +1110,22 @@ impl Harness for Codex {
                     plan_mode: Some(plan_mode),
                 })
             }
-            // Native held cards (permission / question): reply inline over the
-            // live child. A reply only lands if the turn is still paused on it —
-            // after an interrupt/error the request was already settled and a
-            // late reply would be a stale answer into the void. Mirror Claude's
-            // zombie collapse so a card left by a crashed turn stops swallowing
-            // answers.
+            // Async questions are answered by steering, not a held JSON-RPC reply.
+            "question" if prompt.native_id.is_none() => {
+                let text = async_question_answer(prompt, answer)?;
+                ctx.host
+                    .steer_message(
+                        &ctx.session_id,
+                        text,
+                        Default::default(),
+                        Vec::new(),
+                        Vec::new(),
+                        None,
+                    )
+                    .await?;
+                Ok(ResumeAction::Handled { plan_mode: None })
+            }
+            // Held requests cannot receive answers after their turn ends.
             "permission" | "question" => {
                 if !ctx.is_busy().await {
                     ctx.host
@@ -1701,26 +1711,26 @@ fn tool_status(completed: bool, failed: bool) -> &'static str {
 }
 
 /// A ThreadItem (from `item/started` / `item/completed`) → WirePart, applied to
-/// the parent transcript. Thin wrapper over the pure [`item_to_part`]: it owns
+/// the parent transcript. Thin wrapper over the pure [`item_parts`]: it owns
 /// the streaming-merge guards that need `ctx` (never wipe a streamed part with
-/// an empty final text), then upserts. The sub-agent path calls `item_to_part`
+/// an empty final text), then upserts. The sub-agent path calls `item_parts`
 /// directly against its own bucket (see the turn loop's routing).
 fn apply_item(ctx: &mut TurnCtx, item: &Value, completed: bool) {
-    let Some(part) = item_to_part(item, completed, &ctx.assistant.parts) else {
-        return;
-    };
-    // agentMessage / reasoning / plan stream via deltas before the completed
-    // item lands; a completed item with empty text must not wipe what the
-    // deltas built. `item_to_part` produces the part with its final id (plan
-    // uses `plan_part_id`), so the guard keys off that id.
-    if completed
-        && streamed_text_kind(item)
-        && part_text_is_empty(&part)
-        && part_exists(ctx, &part.id)
-    {
-        return;
+    for part in item_parts(item, completed, &ctx.assistant.parts) {
+        // agentMessage / reasoning / plan stream via deltas before the completed
+        // item lands; a completed item with empty text must not wipe what the
+        // deltas built. `item_to_part` produces the part with its final id (plan
+        // uses `plan_part_id`), so the guard keys off that id.
+        if completed
+            && part.kind != "prompt"
+            && streamed_text_kind(item)
+            && part_text_is_empty(&part)
+            && part_exists(ctx, &part.id)
+        {
+            continue;
+        }
+        upsert_preserving_children(&mut ctx.assistant.parts, part);
     }
-    upsert_preserving_children(&mut ctx.assistant.parts, part);
 }
 
 async fn reconcile_turn_items(
@@ -1765,36 +1775,57 @@ fn reconcile_items(parts: &mut Vec<WirePart>, items: &[Value]) {
     let mut claimed: Vec<String> = Vec::new();
     for item in items {
         let completed = item.get("status").and_then(Value::as_str) != Some("inProgress");
-        let Some(part) = item_to_part(item, completed, parts) else {
-            continue;
-        };
-        let id_exists = parts.iter().any(|prior| prior.id == part.id);
-        if completed && streamed_text_kind(item) && part_text_is_empty(&part) && id_exists {
-            continue;
-        }
-        // `thread/read` re-mints ids (`item-N`) for content the live stream
-        // keyed by its Responses id (`msg_…`/`rs_…`), so an unknown id whose
-        // text continues a non-empty same-kind part is that part's item
-        // renamed, not new content (OR-181) — adopt the authoritative text in
-        // place. An empty part carries no evidence of which item it is.
-        if !id_exists && renamable_text_kind(item) {
-            let incoming = part.text.as_deref().unwrap_or("");
-            let renamed = parts.iter().position(|prior| {
-                let prior_text = prior.text.as_deref().unwrap_or("");
-                !claimed.contains(&prior.id)
-                    && !prior.id.starts_with("plan-item-")
-                    && prior.kind == part.kind
-                    && !prior_text.is_empty()
-                    && incoming.starts_with(prior_text)
-            });
-            if let Some(i) = renamed {
-                claimed.push(parts[i].id.clone());
-                parts[i].text = part.text;
-                parts[i].phase = part.phase.or(parts[i].phase);
+        for part in item_parts(item, completed, parts) {
+            let id_exists = parts.iter().any(|prior| prior.id == part.id);
+            if completed
+                && part.kind != "prompt"
+                && streamed_text_kind(item)
+                && part_text_is_empty(&part)
+                && id_exists
+            {
                 continue;
             }
+            // `thread/read` re-mints ids (`item-N`) for content the live stream
+            // keyed by its Responses id (`msg_…`/`rs_…`), so an unknown id whose
+            // text continues a non-empty same-kind part is that part's item
+            // renamed, not new content (OR-181) — adopt the authoritative text in
+            // place. An empty part carries no evidence of which item it is.
+            if !id_exists && renamable_text_kind(item) {
+                if let Some(question) = part.prompt.as_ref() {
+                    if let Some(previous) = parts.iter().find(|prior| {
+                        !claimed.contains(&prior.id)
+                            && prior.prompt.as_ref().is_some_and(|prompt| {
+                                prompt.native_id.is_none()
+                                    && prompt.question == question.question
+                                    && prompt
+                                        .options
+                                        .iter()
+                                        .map(|option| &option.label)
+                                        .eq(question.options.iter().map(|option| &option.label))
+                            })
+                    }) {
+                        claimed.push(previous.id.clone());
+                        continue;
+                    }
+                }
+                let incoming = part.text.as_deref().unwrap_or("");
+                let renamed = parts.iter().position(|prior| {
+                    let prior_text = prior.text.as_deref().unwrap_or("");
+                    !claimed.contains(&prior.id)
+                        && !prior.id.starts_with("plan-item-")
+                        && prior.kind == part.kind
+                        && !prior_text.is_empty()
+                        && incoming.starts_with(prior_text)
+                });
+                if let Some(i) = renamed {
+                    claimed.push(parts[i].id.clone());
+                    parts[i].text = part.text;
+                    parts[i].phase = part.phase.or(parts[i].phase);
+                    continue;
+                }
+            }
+            upsert_preserving_children(parts, part);
         }
-        upsert_preserving_children(parts, part);
     }
 }
 
@@ -1833,6 +1864,65 @@ fn streamed_text_kind(item: &Value) -> bool {
 /// Whether a built part carries no display text (its `text` is absent/empty).
 fn part_text_is_empty(part: &WirePart) -> bool {
     part.text.as_deref().unwrap_or("").is_empty()
+}
+
+fn async_question_answer(prompt: &WirePrompt, answer: &PromptAnswer) -> Result<String> {
+    let text = answer.contextualized_answer(answer.plain_answer_text());
+    if text.trim().is_empty() {
+        return Err(anyhow!("choose an option or enter an answer"));
+    }
+    Ok(match prompt.question.as_deref() {
+        Some(question) => format!("In response to: {question}\n\n{text}"),
+        None => text,
+    })
+}
+
+fn item_parts(item: &Value, completed: bool, prior: &[WirePart]) -> Vec<WirePart> {
+    let questions = item.get("questions").and_then(Value::as_array);
+    if item.get("type").and_then(Value::as_str) == Some("agentMessage") {
+        if let (Some(id), Some(questions)) = (item.get("id").and_then(Value::as_str), questions) {
+            let parts: Vec<_> = questions
+                .iter()
+                .enumerate()
+                .filter_map(|(index, question)| {
+                    let title = question.get("title").and_then(Value::as_str)?;
+                    let part_id = if index == 0 {
+                        id.to_string()
+                    } else {
+                        format!("{id}-question-{index}")
+                    };
+                    let mut prompt = WirePrompt {
+                        kind: "question".into(),
+                        question: Some(title.to_string()),
+                        options: question
+                            .get("options")
+                            .and_then(Value::as_array)
+                            .into_iter()
+                            .flatten()
+                            .filter_map(Value::as_str)
+                            .map(|label| WireQuestionOption {
+                                label: label.to_string(),
+                                description: None,
+                            })
+                            .collect(),
+                        ..Default::default()
+                    };
+                    if let Some(previous) = prior
+                        .iter()
+                        .find(|part| part.id == part_id)
+                        .and_then(|part| part.prompt.as_ref())
+                    {
+                        prompt = previous.clone();
+                    }
+                    Some(WirePart::prompt(part_id, prompt))
+                })
+                .collect();
+            if !parts.is_empty() {
+                return parts;
+            }
+        }
+    }
+    item_to_part(item, completed, prior).into_iter().collect()
 }
 
 fn agent_text_part(id: String, item: &Value) -> WirePart {
@@ -2250,7 +2340,7 @@ fn apply_sub_notification(
                 if let Some(id) = item.get("id").and_then(Value::as_str) {
                     scoped_item["id"] = Value::String(namespaced_part_id(tid, id));
                 }
-                if let Some(part) = item_to_part(&scoped_item, completed, bucket) {
+                for part in item_parts(&scoped_item, completed, bucket) {
                     // A grandchild spawn: register its threads under this part.
                     if part.tool.as_deref() == Some("subagent") {
                         for gtid in subagent_thread_ids(item) {
@@ -2261,8 +2351,10 @@ fn apply_sub_notification(
                             });
                         }
                     }
-                    let completed_streamed =
-                        completed && streamed_text_kind(item) && part_text_is_empty(&part);
+                    let completed_streamed = completed
+                        && part.kind != "prompt"
+                        && streamed_text_kind(item)
+                        && part_text_is_empty(&part);
                     if completed_streamed && bucket.iter().any(|p| p.id == part.id) {
                         // Don't wipe streamed deltas with an empty final.
                     } else {
@@ -4389,6 +4481,63 @@ requires_openai_auth = false
         assert!(!config_supports_auto_review(&serde_json::json!({
             "config": {"model_provider": 42, "openai_base_url": null}
         })));
+    }
+
+    #[test]
+    fn async_questions_replace_plain_text_and_preserve_answers_on_reconcile() {
+        let mut ctx = TurnCtx::test_stub();
+        apply_item(
+            &mut ctx,
+            &json!({"id":"ask", "type":"agentMessage", "text":""}),
+            false,
+        );
+        ctx.append_part_text("ask", "Choose a formatter:\n- Flash\n- Original");
+        let item = json!({"id":"ask", "type":"agentMessage", "text":"Choose a formatter:\n- Flash\n- Original", "questions":[
+            {"title":"Which formatter?", "options":["Flash", "Original"]},
+            {"title":"Any additional guidance?", "options":null}
+        ]});
+        apply_item(&mut ctx, &item, true);
+        assert_eq!(ctx.assistant.parts.len(), 2);
+        let prompt = ctx.assistant.parts[0].prompt.as_mut().unwrap();
+        assert_eq!(prompt.question.as_deref(), Some("Which formatter?"));
+        assert_eq!(prompt.options[0].label, "Flash");
+        assert!(prompt.native_id.is_none());
+        prompt.resolved = true;
+        prompt.answers = vec!["Flash".into()];
+        apply_item(&mut ctx, &item, true);
+        let mut renamed = item.clone();
+        renamed["id"] = json!("item-3");
+        reconcile_items(&mut ctx.assistant.parts, &[renamed]);
+        assert_eq!(ctx.assistant.parts.len(), 2);
+        let prompt = ctx.assistant.parts[0].prompt.as_ref().unwrap();
+        assert!(prompt.resolved);
+        assert_eq!(prompt.answers, ["Flash"]);
+        assert!(ctx.assistant.parts[1]
+            .prompt
+            .as_ref()
+            .unwrap()
+            .options
+            .is_empty());
+        assert!(!ctx.assistant.parts.iter().any(|part| part.kind == "text"));
+    }
+
+    #[test]
+    fn async_question_answer_includes_question_and_validates_input() {
+        let prompt = WirePrompt {
+            kind: "question".into(),
+            question: Some("Which formatter?".into()),
+            ..Default::default()
+        };
+        assert_eq!(
+            async_question_answer(&prompt, &answer(true, None, &["Flash"], None)).unwrap(),
+            "In response to: Which formatter?\n\nFlash"
+        );
+        assert_eq!(
+            async_question_answer(&prompt, &answer(true, None, &[], Some("Use our proxy")))
+                .unwrap(),
+            "In response to: Which formatter?\n\nUse our proxy"
+        );
+        assert!(async_question_answer(&prompt, &answer(true, None, &[], None)).is_err());
     }
 
     #[test]

@@ -99,8 +99,12 @@ control.
 
 ## Usage analytics
 
-Official release builds send opt-out, coarse usage events tied to a random
-installation ID. They do not include code, prompts, file contents or paths,
-repository names, tokens, emails, or project and experiment identifiers.
+Official release builds send opt-out, coarse product analytics events and detailed agent feedback in the background tied to a random
+installation ID. Your code, prompts, file contents or paths,
+repository names, tokens, emails, or project and experiment identifiers are not collected. Anonymized token/message counts are used to identify
+which models are being used across OpenResearch and can be seen at https://openresearch.sh/rankings. Feedback reports from the agent are sent for
+bug reports, feature requests, and general frustrations about OpenResearch. Agents are
+instructed to sanitize reports to exclude any sensitive information about your research or code. 
 
-You can turn usage analytics off in the desktop app's Settings or with `orx telemetry off`.
+You can turn off all usage analytics and agent feedback in the desktop app's
+Settings or with `orx telemetry off`.

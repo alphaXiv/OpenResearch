@@ -328,3 +328,14 @@ test("sidebar pages preserve indicators arriving during cold and subsequent page
   assert.equal(listeners.size, 0);
   client.clear();
 });
+
+test("cached idle chats keep pending questions available when another chat is selected", (t) => {
+  const { client, load } = setup(t, {});
+  const chat = load("chat");
+  client.setQueryData(chat.listChatSessionsQuery("p").queryKey, [{ id: "pending", busy: false }, { id: "active", busy: false }]);
+  const snapshot = { messages: [{ id: "m", parts: [{ type: "prompt", prompt: { kind: "question", resolved: false } }] }], queued: [], activeLeafId: "m" };
+  client.setQueryData(chat.getChatMessagesQuery("pending").queryKey, snapshot);
+  const state = load("chatStore").readChatState("p", "active");
+  assert.equal(state.messagesBySession.pending, snapshot.messages);
+  assert.equal(state.busySessions.has("pending"), false);
+});
