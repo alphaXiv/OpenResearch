@@ -195,3 +195,18 @@ test("paper ids route PMIDs, pmid: prefixes, and PubMed URLs to PubMed", () => {
   }
   assert.equal(parseOrxLit("orx paper 2410.12345")?.source, "alphaxiv");
 });
+
+test("fork discovery sources parse as their own source", () => {
+  assert.deepEqual(parseOrxLit('orx discover arxiv "au:hinton AND cat:cs.LG"'), {
+    kind: "discover",
+    source: "arxiv",
+    strategy: "arxiv",
+    query: "au:hinton AND cat:cs.LG",
+  });
+  assert.deepEqual(parseOrxLit("orx discover semanticscholar 'protein folding' --limit 5"), {
+    kind: "discover",
+    source: "semanticscholar",
+    strategy: "semanticscholar",
+    query: "protein folding",
+  });
+});

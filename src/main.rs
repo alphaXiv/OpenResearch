@@ -891,6 +891,10 @@ pub enum DiscoverCommand {
     Biorxiv(DiscoverySearchArgs),
     /// PubMed biomedical literature search through NCBI E-utilities.
     Pubmed(DiscoverySearchArgs),
+    /// arXiv search through the arXiv API: newest submissions and `au:`/`cat:`/`ti:` field queries.
+    Arxiv(DiscoverySearchArgs),
+    /// Semantic Scholar search across disciplines, with citation counts.
+    Semanticscholar(DiscoverySearchArgs),
 }
 
 #[derive(Args, Debug)]

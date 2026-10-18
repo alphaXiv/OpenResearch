@@ -577,6 +577,8 @@
   "activity_searched_openalex": "已搜索 OpenAlex",
   "activity_searched_biorxiv": "已搜索 bioRxiv",
   "activity_searched_pubmed": "已搜索 PubMed",
+  "activity_searched_arxiv": "已搜索 arXiv",
+  "activity_searched_semantic_scholar": "已搜索 Semantic Scholar",
   "activity_searched_literature": "已搜索文献",
   "activity_for_query": "{activity}：“{query}”",
   "activity_for_queries": "{activity}，共 {count} 个查询",

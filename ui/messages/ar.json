@@ -582,6 +582,8 @@
   "activity_searched_openalex": "بحث في OpenAlex",
   "activity_searched_biorxiv": "بحث في bioRxiv",
   "activity_searched_pubmed": "بحث في PubMed",
+  "activity_searched_arxiv": "بحث في arXiv",
+  "activity_searched_semantic_scholar": "بحث في Semantic Scholar",
   "activity_searched_literature": "بحث في الأدبيات",
   "activity_for_query": "{activity} عن «{query}»",
   "activity_for_queries": "{activity} لـ {count} استعلامات",

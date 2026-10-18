@@ -583,6 +583,8 @@
   "activity_searched_openalex": "Przeszukano OpenAlex",
   "activity_searched_biorxiv": "Przeszukano bioRxiv",
   "activity_searched_pubmed": "Przeszukano PubMed",
+  "activity_searched_arxiv": "Przeszukano arXiv",
+  "activity_searched_semantic_scholar": "Przeszukano Semantic Scholar",
   "activity_searched_literature": "Przeszukano literaturę",
   "activity_for_query": "{activity} dla „{query}”",
   "activity_for_queries": "{activity} dla {count} zapytań",

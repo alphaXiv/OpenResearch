@@ -1536,6 +1536,8 @@ function computeToolActivity(part: ChatPart): ToolActivity {
             openalex: m.activity_searched_openalex(),
             biorxiv: m.activity_searched_biorxiv(),
             pubmed: m.activity_searched_pubmed(),
+            arxiv: m.activity_searched_arxiv(),
+            semanticscholar: m.activity_searched_semantic_scholar(),
           }[litCall.strategy]
           : null;
         const label = litCall.kind === "discover"

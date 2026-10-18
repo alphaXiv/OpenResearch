@@ -9,8 +9,8 @@ launch jobs unless the brief explicitly authorizes the exact scope.
 
 For scientific research in OpenResearch, start with enabled `orx discover`
 connectors appropriate to the domain (keyword, embedding, openalex, biorxiv,
-pubmed). Use `orx paper <id>` to retrieve selected papers; read originals for
-methods and quantitative claims. Respect disabled sources. For policy, industry
+pubmed, arxiv, semanticscholar). Use `orx paper <id>` to retrieve selected
+papers; read originals for methods and quantitative claims. Respect disabled sources. For policy, industry
 or product questions, use primary official publications and original datasets.
 Use available web/internal search tools by their real names, not an assumed
 WebSearch/WebFetch interface. Fetch promising sources rather than treating

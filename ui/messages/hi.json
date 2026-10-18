@@ -583,6 +583,8 @@
   "activity_searched_openalex": "OpenAlex खोजा",
   "activity_searched_biorxiv": "bioRxiv खोजा",
   "activity_searched_pubmed": "PubMed खोजा",
+  "activity_searched_arxiv": "arXiv खोजा",
+  "activity_searched_semantic_scholar": "Semantic Scholar खोजा",
   "activity_searched_literature": "साहित्य खोजा",
   "activity_for_query": "“{query}” के लिए {activity}",
   "activity_for_queries": "{activity}: {count} क्वेरी",

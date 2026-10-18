@@ -1,11 +1,16 @@
-export type LitSource = "alphaxiv" | "openalex" | "biorxiv" | "pubmed";
+import type { ForkLitSource } from "./features/fork/litSourceMeta";
+
+// Fork sources (arXiv, Semantic Scholar) are searched as `orx discover <source>`.
+const isForkLitSource = (value: string): value is ForkLitSource => value === "arxiv" || value === "semanticscholar";
+
+export type LitSource = "alphaxiv" | "openalex" | "biorxiv" | "pubmed" | ForkLitSource;
 
 export type OrxLitCall =
   | { kind: "paper"; source: LitSource; id?: string }
   | {
       kind: "discover";
       source: LitSource;
-      strategy: "keyword" | "embedding" | "openalex" | "biorxiv" | "pubmed";
+      strategy: "keyword" | "embedding" | "openalex" | "biorxiv" | "pubmed" | ForkLitSource;
       query?: string;
     };
 
@@ -198,9 +203,10 @@ export function parseOrxLit(command: string | readonly string[]): OrxLitCall | n
     strategy !== "embedding" &&
     strategy !== "openalex" &&
     strategy !== "biorxiv" &&
-    strategy !== "pubmed"
+    strategy !== "pubmed" &&
+    !isForkLitSource(strategy)
   ) return null;
-  const discoverSource = strategy === "openalex" || strategy === "biorxiv" || strategy === "pubmed"
+  const discoverSource = strategy === "openalex" || strategy === "biorxiv" || strategy === "pubmed" || isForkLitSource(strategy)
     ? strategy
     : "alphaxiv";
   return { kind, source: discoverSource, strategy, query: positionals[1] || undefined };
