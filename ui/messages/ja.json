@@ -583,6 +583,8 @@
   "activity_searched_openalex": "OpenAlex を検索しました",
   "activity_searched_biorxiv": "bioRxiv を検索しました",
   "activity_searched_pubmed": "PubMed を検索しました",
+  "activity_searched_arxiv": "arXiv を検索しました",
+  "activity_searched_semantic_scholar": "Semantic Scholar を検索しました",
   "activity_searched_literature": "文献を検索しました",
   "activity_for_query": "「{query}」について {activity}",
   "activity_for_queries": "{count} 件の検索語について {activity}",

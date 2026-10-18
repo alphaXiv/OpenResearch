@@ -583,6 +583,8 @@
   "activity_searched_openalex": "Searched OpenAlex",
   "activity_searched_biorxiv": "Searched bioRxiv",
   "activity_searched_pubmed": "Searched PubMed",
+  "activity_searched_arxiv": "Searched arXiv",
+  "activity_searched_semantic_scholar": "Searched Semantic Scholar",
   "activity_searched_literature": "Searched the literature",
   "activity_for_query": "{activity} for “{query}”",
   "activity_for_queries": "{activity} for {count} queries",

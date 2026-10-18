@@ -6,11 +6,12 @@ import { m } from "../paraglide/messages.js";
 // which sources discovery and paper reading may use. State lives in settings.json
 // (same `/api/settings/lit-sources` endpoint the CLI enforces).
 
-import { setLitSources } from "../api";
-import { LitSourceLogo, LIT_SOURCE_NAME, type LitSource } from "./LitSourceLogo";
+import { setLitSources, type LitSourcesSettings } from "../api";
+import { LitSourceLogo, LIT_SOURCE_NAME } from "./LitSourceLogo";
 import { MenuItem, SwitchIndicator } from "./ui";
+import { ForkLitSourcesList } from "../features/fork/ForkLitSourcesList";
 
-const LIT_SOURCES: LitSource[] = ["alphaxiv", "openalex", "biorxiv", "pubmed"];
+const LIT_SOURCES: (keyof LitSourcesSettings)[] = ["alphaxiv", "openalex", "biorxiv", "pubmed"];
 
 export function LitSourcesList() {
   const options = getLitSourcesQuery();
@@ -20,7 +21,7 @@ export function LitSourcesList() {
     onSuccess: (settings) => setScopedQueryData(options.queryKey, settings),
   });
   const saving = mutation.isPending;
-  const toggle = (key: LitSource) => {
+  const toggle = (key: keyof LitSourcesSettings) => {
     if (settings && !saving) mutation.mutate({ ...settings, [key]: !settings[key] });
   };
 
@@ -48,6 +49,7 @@ export function LitSourcesList() {
           </MenuItem>
         );
       })}
+      <ForkLitSourcesList />
     </div>
   );
 }

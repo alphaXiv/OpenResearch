@@ -4,6 +4,7 @@
 //! `.merge(fork_settings::routes())`. See `docs/fork-maintenance.md`.
 
 use super::*;
+use crate::commands::discover::extra_sources;
 
 pub(super) fn routes() -> Router<AppState> {
     Router::new()
@@ -47,7 +48,57 @@ pub(super) fn routes() -> Router<AppState> {
             "/api/settings/decision-model",
             get(harness_accounts::decision_settings).post(harness_accounts::set_decision_settings),
         )
+        .route(
+            "/api/settings/fork-lit-sources",
+            get(fork_lit_sources_settings).post(set_fork_lit_sources_settings),
+        )
         .merge(fork_compute::routes())
+}
+
+/// arXiv and Semantic Scholar toggles, kept apart from upstream's four so the
+/// upstream `/api/settings/lit-sources` request shape stays unchanged.
+fn fork_lit_sources_json() -> Value {
+    let disabled = crate::config::disabled_lit_sources();
+    let enabled = |name: &str| !disabled.iter().any(|d| d == name);
+    json!({
+        "arxiv": enabled(extra_sources::ARXIV),
+        "semanticscholar": enabled(extra_sources::SEMANTIC_SCHOLAR),
+    })
+}
+
+async fn fork_lit_sources_settings() -> ApiResult {
+    tokio::task::spawn_blocking(|| Ok(Json(fork_lit_sources_json())))
+        .await
+        .map_err(|e| ApiError::from(anyhow!("lit-sources task failed: {e}")))?
+}
+
+#[derive(Deserialize)]
+struct SetForkLitSourcesReq {
+    arxiv: bool,
+    semanticscholar: bool,
+}
+
+async fn set_fork_lit_sources_settings(Json(req): Json<SetForkLitSourcesReq>) -> ApiResult {
+    tokio::task::spawn_blocking(move || {
+        let fork = [
+            (req.arxiv, extra_sources::ARXIV),
+            (req.semanticscholar, extra_sources::SEMANTIC_SCHOLAR),
+        ];
+        let mut disabled: Vec<String> = crate::config::disabled_lit_sources()
+            .into_iter()
+            .filter(|name| !fork.iter().any(|(_, source)| source == name))
+            .collect();
+        disabled.extend(
+            fork.iter()
+                .filter(|(enabled, _)| !enabled)
+                .map(|(_, source)| source.to_string()),
+        );
+        crate::telemetry::set_disabled_lit_sources(disabled)
+            .map_err(|e| ApiError::from(anyhow!("could not save literature sources: {e}")))?;
+        Ok(Json(fork_lit_sources_json()))
+    })
+    .await
+    .map_err(|e| ApiError::from(anyhow!("lit-sources task failed: {e}")))?
 }
 
 fn cross_harness_settings_json() -> Value {

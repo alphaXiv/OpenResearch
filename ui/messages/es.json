@@ -583,6 +583,8 @@
   "activity_searched_openalex": "Buscó en OpenAlex",
   "activity_searched_biorxiv": "Buscó en bioRxiv",
   "activity_searched_pubmed": "Buscó en PubMed",
+  "activity_searched_arxiv": "Buscó en arXiv",
+  "activity_searched_semantic_scholar": "Buscó en Semantic Scholar",
   "activity_searched_literature": "Buscó en la literatura",
   "activity_for_query": "{activity}: “{query}”",
   "activity_for_queries": "{activity} para {count} consultas",

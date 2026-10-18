@@ -5700,7 +5700,11 @@ struct SetLitSourcesReq {
 
 async fn set_lit_sources_settings(Json(req): Json<SetLitSourcesReq>) -> ApiResult {
     tokio::task::spawn_blocking(move || {
-        let mut disabled = Vec::new();
+        // Keep toggles this request doesn't carry (the fork's sources in `fork_settings.rs`).
+        let mut disabled: Vec<String> = crate::config::disabled_lit_sources()
+            .into_iter()
+            .filter(|name| !["alphaxiv", "openalex", "biorxiv", "pubmed"].contains(&name.as_str()))
+            .collect();
         for (enabled, source) in [
             (req.alphaxiv, crate::LitSource::Alphaxiv),
             (req.openalex, crate::LitSource::Openalex),

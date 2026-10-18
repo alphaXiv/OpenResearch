@@ -577,6 +577,8 @@
   "activity_searched_openalex": "OpenAlex جست‌وجو شد",
   "activity_searched_biorxiv": "bioRxiv جست‌وجو شد",
   "activity_searched_pubmed": "PubMed جست‌وجو شد",
+  "activity_searched_arxiv": "arXiv جست‌وجو شد",
+  "activity_searched_semantic_scholar": "Semantic Scholar جست‌وجو شد",
   "activity_searched_literature": "منابع علمی جست‌وجو شد",
   "activity_for_query": "{activity}: «{query}»",
   "activity_for_queries": "{activity} برای {count} جستجو",

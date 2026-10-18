@@ -583,6 +583,8 @@
   "activity_searched_openalex": "OpenAlex 검색 완료",
   "activity_searched_biorxiv": "bioRxiv 검색 완료",
   "activity_searched_pubmed": "PubMed 검색 완료",
+  "activity_searched_arxiv": "arXiv 검색 완료",
+  "activity_searched_semantic_scholar": "Semantic Scholar 검색 완료",
   "activity_searched_literature": "문헌 검색 완료",
   "activity_for_query": "“{query}”에 대한 {activity}",
   "activity_for_queries": "{count}개 검색어에 대한 {activity}",
