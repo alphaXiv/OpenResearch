@@ -1,4 +1,7 @@
 {
+  "settings_harness_refresh_complete": "Actualización completada. Se muestran el estado y los modelos que informa la CLI.",
+  "settings_harness_refresh_failed": "Error al actualizar: {error}",
+  "settings_codex_catalog_source": "Los modelos disponibles dependen de la versión de Codex CLI y de tu cuenta. Actualizar consulta el catálogo; no actualiza Codex. Actualiza la CLI indicada arriba para buscar modelos más recientes.",
   "workspace_active_experiments": "Experimentos activos",
   "files_empty_description": "Los archivos de este espacio de trabajo aparecerán aquí. Pídele al agente que cree un archivo para empezar.",
   "experiments_empty_description": "Los experimentos y sus ejecuciones aparecerán aquí. Pídele al agente que configure un experimento para empezar.",

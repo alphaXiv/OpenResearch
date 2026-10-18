@@ -382,15 +382,24 @@ function HarnessesTab({ remote }: { remote: boolean }) {
   const { data: harnesses = null } = useQuery(harnessesOptions);
   const [active, setActive] = useState<HarnessId | null>(null);
   const [refreshing, setRefreshing] = useState(false);
+  const [refreshResult, setRefreshResult] = useState<{ error: string | null } | null>(null);
   const setupRun = useCommandRun();
   const [setupHarness, setSetupHarness] = useState<Harness | null>(null);
   const setupCommands = useQuery(getHarnessSetupCommandsQuery());
 
-  const load = (refresh: boolean, retryRejected = false) => {
+  const load = async () => {
+    if (refreshing) return;
+    const scope = workspaceScope();
     setRefreshing(true);
-    refreshHarnesses(refresh, retryRejected)
-      .catch(() => {})
-      .finally(() => setRefreshing(false));
+    setRefreshResult(null);
+    try {
+      await refreshHarnesses(true, true);
+      if (isCurrentScope(scope)) setRefreshResult({ error: null });
+    } catch (error) {
+      if (isCurrentScope(scope)) setRefreshResult({ error: error instanceof Error ? error.message : String(error) });
+    } finally {
+      setRefreshing(false);
+    }
   };
 
   const orderedHarnesses = [...(harnesses ?? [])].sort(
@@ -454,10 +463,15 @@ function HarnessesTab({ remote }: { remote: boolean }) {
                 <SquareTerminal size={14} /> {m.harness_setup_login()}
               </Button>
             )}
-            <Button size="small" onClick={() => load(true, true)} disabled={refreshing}>
-              <RefreshCw size={12} className={refreshing ? "animate-[spin_0.9s_linear_infinite]" : ""} /> {m.settings_page_refresh()}
+            <Button size="small" onClick={() => void load()} disabled={refreshing}>
+              <RefreshCw size={12} className={refreshing ? "animate-[spin_0.9s_linear_infinite]" : ""} /> {refreshing ? m.common_checking() : m.settings_page_refresh()}
             </Button>
           </div>
+          {refreshResult && (
+            <p role={refreshResult.error === null ? "status" : "alert"} className={cn("mt-0 mb-3 text-sm", refreshResult.error === null ? "text-subtext" : "text-accent-red")}>
+              {refreshResult.error === null ? m.settings_harness_refresh_complete() : m.settings_harness_refresh_failed({ error: refreshResult.error })}
+            </p>
+          )}
           <div className={cn(KV_CLASS_NAME, "[&_.v]:text-sm")}>
             <span className="k">{m.settings_page_binary()}</span>
             <span className="v">{h.binPath ?? m.settings_not_found_on_path()}</span>
@@ -490,6 +504,9 @@ function HarnessesTab({ remote }: { remote: boolean }) {
                 : h.agentReady ? m.model_picker_default_model() : m.settings_none()}
             </span>
           </div>
+          {h.id === "codex" && (
+            <p className={cn(SETTINGS_NOTE_CLASS_NAME, "text-sm")}>{m.settings_codex_catalog_source()}</p>
+          )}
           <RunnableNote
             note={h.agentNote}
             className={cn(SETTINGS_NOTE_CLASS_NAME, "text-sm")}
@@ -501,7 +518,7 @@ function HarnessesTab({ remote }: { remote: boolean }) {
             // Hidden, not unmounted, while another harness tab is showing: a
             // switch mid-OAuth must not kill the sign-in.
             <div hidden={setupRun.run.owner !== h.id}>
-              <CommandRunTerminal run={setupRun.run} onComplete={() => load(true, true)} onClose={setupRun.clear} />
+              <CommandRunTerminal run={setupRun.run} onComplete={() => void load()} onClose={setupRun.clear} />
             </div>
           )}
           {h.id === "opencode" && <LocalModelSetup installed={h.installed} />}

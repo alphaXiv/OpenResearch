@@ -1,4 +1,7 @@
 {
+  "settings_harness_refresh_complete": "刷新完成。当前显示的是 CLI 报告的状态和模型。",
+  "settings_harness_refresh_failed": "刷新失败：{error}",
+  "settings_codex_catalog_source": "可用模型取决于 Codex CLI 版本和你的账户。刷新只检查模型目录，不会更新 Codex。请更新上方所示的 CLI 以检查是否有更新的模型。",
   "workspace_active_experiments": "活跃实验",
   "files_empty_description": "此工作区中的文件会显示在这里。让智能体创建一个文件即可开始。",
   "experiments_empty_description": "实验及其运行会显示在这里。让智能体设置一个实验即可开始。",

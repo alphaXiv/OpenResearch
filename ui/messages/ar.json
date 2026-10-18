@@ -1,4 +1,7 @@
 {
+  "settings_harness_refresh_complete": "اكتمل التحديث. يتم عرض الحالة والنماذج التي أبلغت عنها واجهة سطر الأوامر.",
+  "settings_harness_refresh_failed": "فشل التحديث: {error}",
+  "settings_codex_catalog_source": "تعتمد النماذج المتاحة على إصدار Codex CLI وحسابك. يتحقق زر التحديث من الكتالوج ولا يحدّث Codex نفسه. حدّث واجهة سطر الأوامر الموضحة أعلاه للتحقق من النماذج الأحدث.",
   "workspace_active_experiments": "التجارب النشطة",
   "files_empty_description": "ستظهر ملفات مساحة العمل هنا. اطلب من الوكيل إنشاء ملف للبدء.",
   "experiments_empty_description": "ستظهر التجارب وعمليات تشغيلها هنا. اطلب من الوكيل إعداد تجربة للبدء.",

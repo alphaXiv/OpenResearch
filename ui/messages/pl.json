@@ -1,4 +1,7 @@
 {
+  "settings_harness_refresh_complete": "Odświeżanie zakończone. Wyświetlono stan i modele zgłoszone przez CLI.",
+  "settings_harness_refresh_failed": "Odświeżanie nie powiodło się: {error}",
+  "settings_codex_catalog_source": "Dostępne modele zależą od wersji Codex CLI i Twojego konta. Odświeżanie sprawdza katalog, ale nie aktualizuje Codex. Zaktualizuj wskazane wyżej CLI, aby sprawdzić nowsze modele.",
   "$schema": "https://inlang.com/schema/inlang-message-format",
   "workspace_active_experiments": "Aktywne eksperymenty",
   "files_empty_description": "Tutaj pojawią się pliki obszaru roboczego. Poproś agenta o utworzenie pliku, aby rozpocząć.",

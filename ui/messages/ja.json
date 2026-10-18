@@ -1,4 +1,7 @@
 {
+  "settings_harness_refresh_complete": "更新が完了しました。CLI が報告した状態とモデルを表示しています。",
+  "settings_harness_refresh_failed": "更新に失敗しました: {error}",
+  "settings_codex_catalog_source": "利用可能なモデルは Codex CLI のバージョンとアカウントによって異なります。更新ボタンはモデル一覧を確認するだけで、Codex 自体は更新しません。新しいモデルを確認するには、上記の CLI を更新してください。",
   "workspace_active_experiments": "進行中の実験",
   "files_empty_description": "このワークスペースのファイルがここに表示されます。エージェントにファイルの作成を依頼して始めましょう。",
   "experiments_empty_description": "実験と実行履歴がここに表示されます。エージェントに実験の設定を依頼して始めましょう。",

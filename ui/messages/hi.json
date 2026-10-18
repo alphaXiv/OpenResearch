@@ -1,4 +1,7 @@
 {
+  "settings_harness_refresh_complete": "रीफ़्रेश पूरा हुआ। CLI द्वारा बताई गई स्थिति और मॉडल दिखाए जा रहे हैं।",
+  "settings_harness_refresh_failed": "रीफ़्रेश विफल: {error}",
+  "settings_codex_catalog_source": "उपलब्ध मॉडल Codex CLI के संस्करण और आपके खाते पर निर्भर करते हैं। रीफ़्रेश केवल मॉडल सूची जाँचता है; यह Codex को अपडेट नहीं करता। नए मॉडल जाँचने के लिए ऊपर दिखाए गए CLI को अपडेट करें।",
   "workspace_active_experiments": "सक्रिय प्रयोग",
   "files_empty_description": "इस वर्कस्पेस की फ़ाइलें यहाँ दिखेंगी। शुरू करने के लिए एजेंट से एक फ़ाइल बनाने को कहें।",
   "experiments_empty_description": "प्रयोग और उनके रन यहाँ दिखेंगे। शुरू करने के लिए एजेंट से एक प्रयोग सेट अप करने को कहें।",

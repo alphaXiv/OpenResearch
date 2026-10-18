@@ -1,4 +1,7 @@
 {
+  "settings_harness_refresh_complete": "새로고침이 완료되었습니다. CLI가 보고한 상태와 모델을 표시합니다.",
+  "settings_harness_refresh_failed": "새로고침 실패: {error}",
+  "settings_codex_catalog_source": "사용 가능한 모델은 Codex CLI 버전과 계정에 따라 다릅니다. 새로고침은 모델 목록만 확인하며 Codex를 업데이트하지 않습니다. 새 모델을 확인하려면 위에 표시된 CLI를 업데이트하세요.",
   "workspace_active_experiments": "활성 실험",
   "files_empty_description": "이 작업 공간의 파일이 여기에 표시됩니다. 에이전트에게 파일 생성을 요청하여 시작하세요.",
   "experiments_empty_description": "실험과 실행 내역이 여기에 표시됩니다. 에이전트에게 실험 설정을 요청하여 시작하세요.",
