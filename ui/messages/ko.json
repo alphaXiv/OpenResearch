@@ -1305,5 +1305,18 @@
   "settings_github_enable_under": "다음 계정에서 동기화 활성화…",
   "settings_overleaf_file_sync": "논문 파일 동기화",
   "settings_overleaf_live_sync": "실시간 편집 동기화",
-  "settings_overleaf_intro": "인증 정보는 이 기기에 저장됩니다. 각 논문은 편집기에서 연결하세요."
+  "settings_overleaf_intro": "인증 정보는 이 기기에 저장됩니다. 각 논문은 편집기에서 연결하세요.",
+  "notifications_prompt_waiting": "에이전트가 응답을 기다리고 있습니다",
+  "notifications_run_done": "실행이 완료되었습니다",
+  "notifications_run_failed": "실행이 실패했습니다",
+  "notifications_turn_done": "에이전트 응답이 완료되었습니다",
+  "settings_notifications_blocked": "이 사이트의 알림이 차단되어 있습니다. 브라우저의 사이트 설정에서 허용하세요.",
+  "settings_notifications_heading": "알림",
+  "settings_notifications_prompts": "에이전트가 응답을 기다릴 때",
+  "settings_notifications_runs": "실행이 완료되거나 실패할 때",
+  "settings_notifications_turns": "에이전트 응답이 완료될 때",
+  "settings_notifications_description": "모든 프로젝트의 알림을 백그라운드 탭과 창에서도 받습니다. 대시보드 탭을 하나 이상 열어 두세요. 설정은 이 브라우저에 저장됩니다.",
+  "settings_notifications_unsupported": "알림에는 HTTPS 또는 localhost와 알림을 지원하는 데스크톱 브라우저가 필요합니다.",
+  "settings_notifications_test": "테스트 알림 보내기",
+  "settings_notifications_test_body": "브라우저 알림이 켜져 있습니다."
 }

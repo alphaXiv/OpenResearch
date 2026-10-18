@@ -1305,5 +1305,18 @@
   "settings_github_enable_under": "Activar sincronización en…",
   "settings_overleaf_file_sync": "Sincronizar archivos del artículo",
   "settings_overleaf_live_sync": "Sincronizar ediciones en vivo",
-  "settings_overleaf_intro": "Las credenciales se guardan en este equipo. Vincula cada artículo desde el editor."
+  "settings_overleaf_intro": "Las credenciales se guardan en este equipo. Vincula cada artículo desde el editor.",
+  "notifications_prompt_waiting": "El agente espera tu respuesta",
+  "notifications_run_done": "Ejecución terminada",
+  "notifications_run_failed": "Ejecución fallida",
+  "notifications_turn_done": "El agente ha terminado de responder",
+  "settings_notifications_blocked": "Las notificaciones están bloqueadas para este sitio. Permítelas en la configuración del sitio de tu navegador.",
+  "settings_notifications_description": "Recibe avisos de todos los proyectos, también en pestañas y ventanas en segundo plano. Mantén abierta al menos una pestaña del panel. La configuración se guarda en este navegador.",
+  "settings_notifications_heading": "Notificaciones",
+  "settings_notifications_prompts": "El agente espera tu respuesta",
+  "settings_notifications_runs": "Una ejecución termina o falla",
+  "settings_notifications_turns": "El agente termina de responder",
+  "settings_notifications_unsupported": "Las notificaciones requieren HTTPS o localhost y un navegador de escritorio compatible.",
+  "settings_notifications_test": "Enviar notificación de prueba",
+  "settings_notifications_test_body": "Las notificaciones del navegador están activadas."
 }

@@ -25,6 +25,7 @@ import { listProjectsQuery, listRunsQuery, listExperimentsQuery } from "./projec
 import { listChatSessionsQuery } from "./chat";
 
 import { artifactFamilies, liveFamilies, invalidateFamilies, removeSession } from "./invalidation";
+import { useBrowserNotifications } from "../useBrowserNotifications";
 
 function upsert<T extends { id: string; updatedAt: number }>(rows: T[] | undefined, next: T) {
   if (!rows) return undefined;
@@ -35,6 +36,7 @@ function upsert<T extends { id: string; updatedAt: number }>(rows: T[] | undefin
 
 export function QueryEvents() {
   const scope = workspaceScope();
+  useBrowserNotifications();
   useOrxEventStream({
     onRun(run) {
       if (!isCurrentScope(scope)) return;

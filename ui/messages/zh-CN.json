@@ -1305,5 +1305,18 @@
   "settings_github_enable_under": "启用同步到…",
   "settings_overleaf_file_sync": "同步论文文件",
   "settings_overleaf_live_sync": "同步实时编辑",
-  "settings_overleaf_intro": "凭据保存在本机。在编辑器中关联各篇论文。"
+  "settings_overleaf_intro": "凭据保存在本机。在编辑器中关联各篇论文。",
+  "notifications_prompt_waiting": "智能体正在等待你的回复",
+  "notifications_run_done": "运行已完成",
+  "notifications_run_failed": "运行失败",
+  "notifications_turn_done": "智能体已完成回复",
+  "settings_notifications_blocked": "此网站的通知已被阻止。请在浏览器的网站设置中允许通知。",
+  "settings_notifications_description": "所有项目都可提醒，切换标签页或窗口也能收到。请保留至少一个研究网页。设置保存在当前浏览器中。",
+  "settings_notifications_heading": "通知",
+  "settings_notifications_prompts": "智能体正在等待你的回复",
+  "settings_notifications_runs": "运行完成或失败",
+  "settings_notifications_turns": "智能体完成回复",
+  "settings_notifications_unsupported": "浏览器通知需要 HTTPS 或 localhost 地址，并使用支持通知的桌面浏览器。",
+  "settings_notifications_test": "发送测试通知",
+  "settings_notifications_test_body": "浏览器通知已开启。"
 }
