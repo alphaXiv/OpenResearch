@@ -91,6 +91,9 @@ enum Command {
     /// Show a run's compact log summary (path, size, and preview) by default.
     Logs(LogsArgs),
 
+    /// Print the command that opens a run's TensorBoard logs.
+    Tensorboard(TensorboardArgs),
+
     /// Add an experiment node to a local `orx up` project.
     #[command(name = "create-experiment")]
     CreateExperiment(CreateExperimentArgs),
@@ -255,6 +258,11 @@ pub struct RunsArgs {
 
 #[derive(Args, Debug)]
 pub struct LogsArgs {
+    pub run_id: String,
+}
+
+#[derive(Args, Debug)]
+pub struct TensorboardArgs {
     pub run_id: String,
 }
 
@@ -1311,6 +1319,7 @@ fn command_name(command: &Command) -> &'static str {
         Command::Strategy(_) => "strategy",
         Command::Runs(_) => "runs",
         Command::Logs(_) => "logs",
+        Command::Tensorboard(_) => "tensorboard",
         Command::CreateExperiment(_) => "create-experiment",
         Command::Compute(_) => "compute",
         Command::Instance(_) => "instance",
@@ -1362,6 +1371,7 @@ async fn dispatch(command: Command) -> error::Result<()> {
         Command::Strategy(args) => commands::strategy::run(args).await,
         Command::Runs(args) => commands::runs::run(args).await,
         Command::Logs(args) => commands::logs::run(args).await,
+        Command::Tensorboard(args) => commands::tensorboard::run(args).await,
         Command::CreateExperiment(args) => commands::create_experiment::run(args).await,
         Command::Compute(args) => commands::compute::run(args).await,
         Command::Instance(args) => commands::instance::run(args).await,

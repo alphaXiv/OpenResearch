@@ -768,6 +768,8 @@ pub struct WireQuestionOption {
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct WirePrompt {
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub native_choices: Vec<NativePermissionChoice>,
     /// `plan` | `permission` | `question`.
     pub kind: String,
     /// Whether this prompt has been answered (resolved permission cards
@@ -943,6 +945,14 @@ impl WirePart {
             children: Vec::new(),
         }
     }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct NativePermissionChoice {
+    pub id: String,
+    pub label: String,
+    pub kind: String,
 }
 
 // --- image attachments ---------------------------------------------------------
@@ -1215,19 +1225,33 @@ pub fn import_native_chat(
 }
 
 pub fn session_json(s: &StoredChatSession, busy: bool) -> Value {
+    let acp = s
+        .harness
+        .starts_with("acp:")
+        .then(|| Store::open().ok()?.acp_session_state(&s.id).ok().flatten())
+        .flatten();
     let context_usage = s
         .context_usage_json
         .as_deref()
         .and_then(|j| serde_json::from_str::<Value>(j).ok());
+    let native_model = acp.as_ref().and_then(|state| {
+        state.configuration["configOptions"]
+            .as_array()
+            .and_then(|options| options.iter().find(|option| option["category"] == "model"))
+            .and_then(|option| option["currentValue"].as_str())
+            .or_else(|| state.configuration["models"]["currentModelId"].as_str())
+    });
     json!({
         "id": s.id,
         "projectId": s.project_id,
         "harness": s.harness,
+        "harnessName": acp.as_ref().map(|state| state.launch.name.as_str()),
+        "nativeConfiguration": acp.as_ref().map(|state| &state.configuration),
         "title": s.title,
         // The UI animates the reveal of a harness-generated title, so it needs
         // to tell one from a placeholder or a user rename.
         "titleSource": s.title_source,
-        "model": s.model,
+        "model": native_model.or(s.model.as_deref()),
         "serviceTier": s.service_tier,
         "permissionMode": crate::local::harness::effective_permission_id(
             &s.harness,
@@ -1497,7 +1521,7 @@ async fn read_shell_stream<R: tokio::io::AsyncRead + Unpin>(pipe: Option<R>, kep
 /// Kill the command's whole process group: a pipeline or a backgrounded
 /// grandchild would otherwise outlive the timeout and hold the pipes open.
 #[cfg(unix)]
-fn kill_shell_group(pid: Option<u32>) {
+pub(crate) fn kill_shell_group(pid: Option<u32>) {
     if let Some(pid) = pid.and_then(|pid| libc::pid_t::try_from(pid).ok()) {
         // SAFETY: killpg is a plain syscall on a group this process spawned.
         unsafe {
@@ -1509,7 +1533,7 @@ fn kill_shell_group(pid: Option<u32>) {
 /// Windows has no group to signal, and the caller's second wait is untimed, so
 /// without this a timed-out command hangs the turn until the child exits.
 #[cfg(not(unix))]
-fn kill_shell_group(pid: Option<u32>) {
+pub(crate) fn kill_shell_group(pid: Option<u32>) {
     let Some(pid) = pid else {
         return;
     };
@@ -1615,7 +1639,7 @@ impl ChatHost {
                 .get_chat_session(session_id)?
                 .ok_or_else(|| anyhow!("chat session is gone"))?
         };
-        if crate::local::harness::chat_harness(&session.harness).is_none() {
+        if crate::local::harness::session_harness(&session.harness, session_id).is_none() {
             return Err(anyhow!("unknown harness `{}`", session.harness));
         }
         // Taken before the progress row exists, so the summary never describes
@@ -1711,7 +1735,7 @@ impl ChatHost {
         session: &StoredChatSession,
         snapshot: &str,
     ) -> Result<Option<String>> {
-        let harness = crate::local::harness::chat_harness(&session.harness)
+        let harness = crate::local::harness::session_harness(&session.harness, session_id)
             .ok_or_else(|| anyhow!("unknown harness `{}`", session.harness))?;
         let ctx = crate::local::harness::CompactCtx {
             host: self.clone(),
@@ -2410,6 +2434,7 @@ pub struct ChatHost {
     /// Persistent Claude Code child manager (one resident child per session;
     /// only the claude adapter spawns it).
     pub claude: Arc<crate::local::claude::ClaudeHost>,
+    pub acp: Arc<crate::local::acp::host::Host>,
     http: reqwest::Client,
     events: broadcast::Sender<(&'static str, Value)>,
     /// Sessions with a turn reserved, running, or settling after interruption.
@@ -3170,7 +3195,7 @@ mod persisted_queue_delay_tests {
 /// isn't already busy — closing the check-then-insert race. On drop (early
 /// error / panic) it clears the reservation; call `defuse` once the real abort
 /// handle has replaced it so the running turn's slot survives.
-struct TurnGuard {
+pub(crate) struct TurnGuard {
     host: Arc<ChatHost>,
     session_id: String,
     armed: bool,
@@ -3197,7 +3222,7 @@ impl TurnGuard {
     }
 
     /// `Some` if the slot was free and is now reserved; `None` if already busy.
-    async fn claim(
+    pub(crate) async fn claim(
         host: &Arc<ChatHost>,
         session_id: &str,
         overrides: Option<&mut TurnOverrides>,
@@ -3416,6 +3441,7 @@ impl ChatHost {
             opencode,
             codex,
             claude,
+            acp: Arc::new(crate::local::acp::host::Host::new(events.clone())),
             http: crate::net::loopback_client()
                 .build()
                 .expect("loopback http client"),
@@ -3451,6 +3477,7 @@ impl ChatHost {
         let _ = self.up_port.set(port);
         self.opencode.set_up_port(port);
         self.codex.set_up_port(port);
+        self.acp.set_up_port(port);
     }
 
     /// The bound `orx up` port, if this host runs under a server (None in
@@ -3753,6 +3780,7 @@ impl ChatHost {
         self.opencode.shutdown().await;
         self.codex.shutdown().await;
         self.claude.shutdown().await;
+        self.acp.shutdown().await;
     }
 
     pub async fn busy_sessions(&self) -> Vec<String> {
@@ -5057,7 +5085,23 @@ impl ChatHost {
         let session = store
             .get_chat_session(session_id)?
             .ok_or_else(|| anyhow!("chat session not found"))?;
-        let rewind = rewind_target(anchor);
+        let acp = session.harness.starts_with("acp:");
+        let rewind = if acp {
+            Some(None)
+        } else {
+            rewind_target(anchor)
+        };
+        if acp {
+            self.acp.stop(session_id).await;
+            let snapshot = anchor
+                .parent_id
+                .as_deref()
+                .map(|leaf| {
+                    crate::local::harness::transcript_snapshot(active_path(&messages, Some(leaf)))
+                })
+                .unwrap_or_default();
+            store.set_chat_session_bootstrap_context(session_id, Some(&snapshot))?;
+        }
         store.set_chat_session_active_leaf(session_id, leaf.as_deref())?;
         if let Some(native) = &rewind {
             store.set_chat_session_native_id(session_id, native.as_deref())?;
@@ -5088,6 +5132,12 @@ impl ChatHost {
         // rewind is worse than either end state.
         let started = matches!(&submitted, Ok(TurnSubmission::Started(_)));
         if !started {
+            if acp {
+                let _ = store.set_chat_session_bootstrap_context(
+                    session_id,
+                    session.bootstrap_context.as_deref(),
+                );
+            }
             if rewind.is_some() {
                 let _ = store
                     .set_chat_session_native_id(session_id, session.native_session_id.as_deref());
@@ -5131,7 +5181,18 @@ impl ChatHost {
                     .clone()
                     .or_else(|| m.base_native_session_id.clone())
             });
-        store.set_chat_session_native_id(session_id, resume.as_deref())?;
+        let session = store
+            .get_chat_session(session_id)?
+            .ok_or_else(|| anyhow!("chat session not found"))?;
+        if session.harness.starts_with("acp:") {
+            self.acp.stop(session_id).await;
+            let snapshot =
+                crate::local::harness::transcript_snapshot(active_path(&messages, Some(&tip.id)));
+            store.set_chat_session_bootstrap_context(session_id, Some(&snapshot))?;
+            store.set_chat_session_native_id(session_id, None)?;
+        } else {
+            store.set_chat_session_native_id(session_id, resume.as_deref())?;
+        }
         self.emit(
             "chat.branch",
             json!({ "sessionId": session_id, "activeLeafId": tip.id }),
@@ -6420,6 +6481,8 @@ impl ChatHost {
                             return host.codex.interrupt_session(&session_id).await;
                         } else if session.harness == "claude-code" {
                             host.claude.kill_session(&session_id).await;
+                        } else if session.harness.starts_with("acp:") {
+                            host.acp.stop(&session_id).await;
                         }
                     }
                 }
@@ -6554,6 +6617,11 @@ impl ChatHost {
         // catch clear `busy` on a session whose turn is still streaming; a plain
         // `Ok` leaves the live turn (and its busy state) untouched.
         let Some(prompt) = unresolved_prompt(&req.session_id, &req.prompt_id)? else {
+            if session.harness.starts_with("acp:") {
+                return Err(anyhow!(
+                    "This agent permission request is no longer pending"
+                ));
+            }
             return Ok(());
         };
         if prompt.kind == "permission"
@@ -6567,7 +6635,7 @@ impl ChatHost {
                 return Err(anyhow!("invalid resume mode for selected harness"));
             }
         }
-        let harness = crate::local::harness::chat_harness(&session.harness)
+        let harness = crate::local::harness::session_harness(&session.harness, &session.id)
             .ok_or_else(|| anyhow!("unknown harness: {}", session.harness))?;
 
         // Ask the harness how the answer resumes. Inline harnesses deliver the
@@ -6939,6 +7007,7 @@ impl ChatHost {
         self.opencode.kill_session(session_id).await;
         self.codex.kill_session(session_id).await;
         self.claude.forget_session(session_id).await;
+        self.acp.stop(session_id).await;
         self.respond_locks.lock().await.remove(session_id);
         self.recovery_locks.lock().await.remove(session_id);
         self.queue_dispatch_cancelled
@@ -7260,7 +7329,7 @@ fn resolve_stale_prompts_in_parts(parts: &mut [WirePart], native_only: bool) -> 
 
 impl ChatHost {
     /// [`resolve_stale_prompts`] + broadcast, for harness turn-entry use.
-    pub async fn resolve_stale_prompts(&self, session_id: &str, native_only: bool) -> Result<()> {
+    pub fn resolve_stale_prompts(&self, session_id: &str, native_only: bool) -> Result<()> {
         for msg in resolve_stale_prompts(&self.msg_write, session_id, native_only)? {
             self.emit("chat.message", message_json(&msg, session_id));
         }
@@ -7549,7 +7618,7 @@ enum FailoverStep {
 const FAILOVER_DETECT_TIMEOUT: Duration = Duration::from_secs(30);
 
 async fn run_harness_turn(ctx: &mut TurnCtx) -> crate::local::harness::TurnResult {
-    match crate::local::harness::chat_harness(&ctx.harness) {
+    match crate::local::harness::session_harness(&ctx.harness, &ctx.session_id) {
         Some(harness) => harness.run_turn(ctx).await,
         None => Err(crate::local::harness::TurnFailure {
             kind: "unknown_harness",

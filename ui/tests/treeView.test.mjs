@@ -73,6 +73,8 @@ function mountTree(overrides = {}) {
     "./TreeInspector": {},
     "../treeLayout": treeLayout,
     "../treeCollapse": treeCollapse,
+    "@tanstack/react-query": { useQuery: () => ({ data: undefined }) },
+    "../queries/settings": { getTrackioSettingsQuery: () => ({}) },
   };
   const exports = {};
   new Function("require", "exports", compiled)((name) => mocks[name] ?? require(name), exports);

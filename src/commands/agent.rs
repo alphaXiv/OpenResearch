@@ -192,7 +192,7 @@ async fn ready_harnesses() -> Vec<crate::local::decision::HarnessOption> {
         .filter(|info| info.agent_ready)
         .map(|info| crate::local::decision::HarnessOption {
             id: info.id.to_string(),
-            vendor: harness_vendor(info.id).to_string(),
+            vendor: harness_vendor(&info.id).to_string(),
             models: crate::local::decision::model_ids(&info.models),
             recommended_model: info.recommended_model.clone(),
         })
@@ -532,8 +532,8 @@ fn not_ready(harness: &str, entry: &serde_json::Value) -> Option<String> {
 #[derive(serde::Serialize)]
 #[serde(rename_all = "camelCase")]
 struct HarnessRow {
-    id: &'static str,
-    name: &'static str,
+    id: String,
+    name: String,
     vendor: &'static str,
     /// `None` when the OpenResearch server could not be asked.
     installed: Option<bool>,
@@ -560,8 +560,8 @@ async fn harnesses(json: bool) -> Result<()> {
         .into_iter()
         .filter(|harness| harness.supports_chat())
         .map(|harness| HarnessRow {
-            id: harness.id(),
-            name: harness.name(),
+            id: harness.id().to_string(),
+            name: harness.name().to_string(),
             vendor: harness_vendor(harness.id()),
             installed: catalog.as_ref().map(|all| {
                 all.iter()

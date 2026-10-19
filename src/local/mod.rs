@@ -7,6 +7,7 @@
 //! Experiment and run identifiers resolve only when their records belong to a
 //! project registered in the local store.
 
+pub mod acp;
 pub mod agent_lifecycle;
 pub mod agent_skills;
 pub mod auto_compact;
@@ -53,6 +54,7 @@ pub mod ssh_identity;
 pub mod starter;
 pub mod storage;
 pub mod strategy;
+pub mod trackio;
 pub mod user_skills;
 
 use crate::error::{anyhow, Result};

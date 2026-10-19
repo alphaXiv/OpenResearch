@@ -4,6 +4,8 @@ import { fitSidebarRows, sidebarRowHeight, type SidebarRow } from "../sidebarLay
 import { useVirtualizer, defaultRangeExtractor, type Range as VirtualRange } from "@tanstack/react-virtual";
 import { markLiveUpdate } from "../queries/live";
 import { removeSession as removeCachedSession } from "../queries/invalidation";
+import { nativeOptions, sessionAcpHarness } from "../acp";
+import { setChatConfiguration } from "../api";
 import {
   isCurrentScope,
   setScopedQueryData,
@@ -145,6 +147,7 @@ import {
   withoutDuplicateTurnError,
   partIsVisible,
   pendingQuestionId,
+  hasPendingInput,
   partsTailToolId,
   streamTailIsText,
   streamTailTool,
@@ -188,7 +191,7 @@ import { ComposerSkillChips, MessageWithChips, skillMarginSpaces } from "./Skill
 import { WorkspaceConnection } from "./WorkspaceConnection";
 import {
   defaultSelection,
-  HARNESS_LABELS,
+  harnessLabel,
   ModelPicker,
   usePopover,
   type ModelSelection,
@@ -2751,7 +2754,7 @@ function PromptCard({
     const reason =
       (typeof p.toolInput?.reason === "string" && p.toolInput.reason) || "";
     const description = inputString(toolInput, "description") || "";
-    const explanation = reason || description || permissionActivityLabel(p.tool, toolInput);
+    const explanation = p.header || reason || description || permissionActivityLabel(p.tool, toolInput);
     const headingId = `permission-heading-${part.id}`;
     return (
       <div
@@ -2772,7 +2775,15 @@ function PromptCard({
               {summary}
             </code>
           )}
-          {!done && (
+          {!done && p.nativeChoices?.length ? (
+            <div className="prompt-actions flex flex-wrap items-center justify-end gap-2 pt-0.5">
+              {p.nativeChoices.map((choice) => (
+                <Button key={choice.id} size="small" onClick={() => respond({ answers: [choice.id], approve: choice.kind.startsWith("allow") })}>
+                  {choice.label}
+                </Button>
+              ))}
+            </div>
+          ) : !done && (
             // No resumeMode: the harness picks the right one for an approval.
             // Claude resumes under `bypassPermissions` (the only mode that grants a
             // blocked tool — acceptEdits would re-deny Bash); inline harnesses
@@ -4051,7 +4062,7 @@ function SessionRow({
   active: boolean;
   unread: boolean;
   busy: boolean;
-  /** Turn held on an unanswered card: steady dot, not the working pulse. */
+  /** An actionable question or held approval needs the user's attention. */
   waiting: boolean;
   /** Nonce set while this row's freshly auto-generated title should play its
    * reveal; it doubles as the remount key so a second retitle replays it.
@@ -4097,7 +4108,7 @@ function SessionRow({
       className={`session-row relative flex items-center gap-2 w-full text-start py-[7px] ps-2.5 pe-1.5 rounded-md text-sm text-text cursor-pointer select-none [&:hover:not(.active)]:bg-surface [&.active]:bg-panel [&.active]:font-medium [&_.session-dot:empty]:hidden [&_.session-dot]:w-4 [&_.session-dot]:inline-flex [&_.session-dot]:items-center [&_.session-dot]:justify-center [&_.session-dot]:shrink-0 [&_.session-title]:flex-1 [&_.session-title]:min-w-0 [&_.session-title]:overflow-hidden [&_.session-title]:[mask-image:linear-gradient(to_right,black_calc(100%_-_16px),transparent)] [&_.session-title]:whitespace-nowrap [&_.session-menu-btn]:hidden [&_.session-menu-btn]:items-center [&_.session-menu-btn]:justify-center [&_.session-menu-btn]:w-4 [&_.session-menu-btn]:h-4 [&_.session-menu-btn]:-my-0.5 [&_.session-menu-btn]:mx-0 [&_.session-menu-btn]:rounded-sm [&_.session-menu-btn]:text-muted [&_.session-menu-btn]:shrink-0 [&_.session-menu-btn:hover]:text-text [&_.session-menu-btn:hover]:bg-panel [&:hover_.session-menu-btn]:inline-flex [&:focus-visible_.session-menu-btn]:inline-flex [&_.session-menu-btn:focus-visible]:inline-flex [&.menu-open_.session-menu-btn]:inline-flex [&:hover_.session-dot]:hidden [&:focus-visible_.session-dot]:hidden [&:has(.session-menu-btn:focus-visible)_.session-dot]:hidden [&.menu-open_.session-dot]:hidden [&_.busy-dot]:w-[7px] [&_.busy-dot]:h-[7px] [&_.busy-dot]:rounded-full [&_.busy-dot]:bg-primary [&_.busy-dot]:animate-[or-pulse_1.2s_infinite] [&_.busy-dot]:shrink-0 [&_.unread-dot]:w-[7px] [&_.unread-dot]:h-[7px] [&_.unread-dot]:rounded-full [&_.unread-dot]:bg-primary [&_.unread-dot]:shrink-0 [&_.busy-dot.waiting]:animate-none [&_.session-title-input]:flex-1 [&_.session-title-input]:min-w-0 [&_.session-title-input]:py-px [&_.session-title-input]:px-[5px] [&_.session-title-input]:-my-0.5 [&_.session-title-input]:mx-0 [&_.session-title-input]:[font:inherit] [&_.session-title-input]:text-text [&_.session-title-input]:bg-background [&_.session-title-input]:border [&_.session-title-input]:border-primary [&_.session-title-input]:rounded-sm [&_.session-title-input]:outline-none [&.editing]:bg-surface [&.editing]:cursor-default [&.editing_.session-menu-btn]:hidden [&.editing_.session-dot]:hidden ${active ? "active" : ""}  ${unread ? "unread" : ""}  ${open ? "menu-open" : ""}  ${
         editing ? "editing" : ""
         }`}
-      title={`${HARNESS_LABELS[session.harness]}${session.model ? ` · ${session.model}` : ""}`}
+      title={`${harnessLabel(session.harness, session.harnessName)}${session.model ? ` · ${session.model}` : ""}`}
       onClick={() => {
         // While editing, a body click is a no-op; blur/Enter/Esc drive it.
         if (editing) return;
@@ -4149,11 +4160,16 @@ function SessionRow({
           />
         </span>
       )}
+      {waiting && !editing && (
+        <Tooltip content={m.chat_panel_waiting_for_your_input()} className="shrink-0 text-accent-amber">
+          <HelpCircle size={14} aria-hidden="true" />
+        </Tooltip>
+      )}
       <span className="session-dot">
-        {busy ? (
-          <span className={`busy-dot ${waiting ? "waiting" : ""}`} />
+        {busy && !waiting ? (
+          <span className="busy-dot" />
         ) : (
-          unread && <span className="unread-dot" />
+          unread && !waiting && <span className="unread-dot" />
         )}
       </span>
       <button
@@ -4715,9 +4731,12 @@ export function ChatPanel({
       ? { ...savedSelection, ...sessionOverride }
       : null;
   const { data: skills = EMPTY_SKILLS } = useQuery(getSkillsQuery(rawSelection?.harness, projectId));
-  const activeHarness = rawSelection
+  const catalogHarness = rawSelection
     ? harnesses.find((h) => h.id === rawSelection.harness)
     : undefined;
+  const activeHarness = sessionAcpHarness(openSession, catalogHarness);
+  const acpOptions = nativeOptions(openSession?.nativeConfiguration, { model: m.model_picker_model(), mode: m.model_picker_mode() });
+  const acpModel = acpOptions.find((option) => option.category === "model");
   const opts = activeHarness?.options;
   const { data: setupCommands } = useQuery({ ...getHarnessSetupCommandsQuery(), enabled: !!onRunSetup });
   const setupPath = (command: string) => {
@@ -4769,7 +4788,7 @@ export function ChatPanel({
   useEffect(() => setMentionIdx(0), [mentionQuery]);
   // Reconcile the selected model's settings, including stale saved preferences,
   // without replacing custom model IDs that are absent from the catalog.
-  const composerSelection = deriveComposerSelection(rawSelection, activeHarness);
+  const composerSelection = deriveComposerSelection(acpModel && rawSelection ? { ...rawSelection, model: acpModel.currentValue } : rawSelection, activeHarness);
   // Reasoning choices follow the *selected model*, not just the harness — an
   // OpenCode model with no `variants` hides the picker entirely, and Codex's
   // top tiers appear only on the models that accept them.
@@ -4798,6 +4817,10 @@ export function ChatPanel({
   // permission mode would write a reasoning level the user never chose, and the
   // next send would persist it over their real setting.
   const selectModel = (next: Partial<ModelSelection>) => {
+    if (openSession?.harness.startsWith("acp:") && acpModel && next.model) {
+      void setChatConfiguration(openSession.id, acpModel.id, next.model).catch((error: unknown) => showAlert(error instanceof Error ? error.message : String(error), "error"));
+      return;
+    }
     if (!composerSelection) return;
     const merged = { ...composerSelection, ...next };
     const changed: Partial<ModelSelection> = {};
@@ -5012,7 +5035,7 @@ export function ChatPanel({
         const markdown = openSession
           ? transcriptMarkdown(title, messages, {
             user: m.chat_export_you(),
-            assistant: HARNESS_LABELS[openSession.harness],
+            assistant: harnessLabel(openSession.harness, openSession.harnessName),
           })
           : null;
         if (markdown) downloadMarkdown(transcriptFileName(title), markdown);
@@ -5289,29 +5312,18 @@ export function ChatPanel({
     }
   }, [queued]);
   const historyLoading = !!activeId && historyQuery.isPending;
-  // A busy turn blocked on an unanswered HELD card (nativeId — a bridge or
-  // inline mid-turn request) is waiting on the user, not the model. Drives
-  // the status line and the rail dot (the composer button is keyed on
-  // `pendingQuestion` instead — what send() can actually service). End-turn
-  // cards (no nativeId) never coexist with a busy turn of their own, so
-  // keying on nativeId avoids false positives from stale cards. (Sessions
-  // whose transcripts aren't loaded fall back to plain busy.) Memoized so the
-  // messages × parts scan stays off the per-keystroke render path.
   const waitingSessions = useMemo(() => {
     const waiting = new Set<string>();
-    for (const id of state.busySessions) {
-      if (
-        (state.messagesBySession[id] ?? []).some((m) =>
-          m.parts.some(
-            (p) => p.type === "prompt" && p.prompt && !p.prompt.resolved && p.prompt.nativeId,
-          ),
-        )
-      )
-        waiting.add(id);
+    for (const [id, messages] of Object.entries(state.messagesBySession)) {
+      const busy = state.busySessions.has(id);
+      if (hasPendingInput(activePath(messages, state.activeLeafBySession[id]), busy)) waiting.add(id);
     }
     return waiting;
-  }, [state.busySessions, state.messagesBySession]);
-  const awaitingInput = activeId ? waitingSessions.has(activeId) : false;
+  }, [state.busySessions, state.messagesBySession, state.activeLeafBySession]);
+  // Async questions can await an answer while the agent continues working.
+  const awaitingInput = busy && messages.some((message) => message.parts.some(
+    (part) => part.type === "prompt" && part.prompt && !part.prompt.resolved && part.prompt.nativeId,
+  ));
   const activeSession = openSession;
   // Nonce while the open session's title is mid-reveal; undefined = static.
   const activeTitleReveal = activeSession ? titleReveals.get(activeSession.id) : undefined;
@@ -6228,6 +6240,8 @@ export function ChatPanel({
     return () => document.removeEventListener("keydown", onKeyDown);
   }, [startNewTask, embedded]);
 
+  const sessionWaiting = (session: ChatSession) => state.messagesBySession[session.id]
+    ? waitingSessions.has(session.id) : session.awaitingInput === true;
   const sessionBusy = (project: Project, session: ChatSession) => project.id === projectId ? state.busySessions.has(session.id) : session.busy;
   const sidebarRows: SidebarRow[] = [];
   if (sidebarGrouping === "projects") shownProjects.forEach((project, index) => {
@@ -6241,7 +6255,7 @@ export function ChatPanel({
     const selected = matching.find((session) => session.id === activeId);
     if (selected && !visible.some((session) => session.id === activeId)) visible = [...visible.slice(0, chatLimit - 1), selected];
     const collapsed = collapsedProjects.includes(project.id);
-    sidebarRows.push({ kind: "project", project, collapsed, busy: collapsed && matching.some((session) => sessionBusy(project, session) && !waitingSessions.has(session.id)) });
+    sidebarRows.push({ kind: "project", project, collapsed, busy: collapsed && matching.some((session) => sessionBusy(project, session) && !sessionWaiting(session)) });
     if (collapsed) return;
     visible.forEach((session) => sidebarRows.push({ kind: "chat", project, session }));
     if (matching.length > chatLimit) sidebarRows.push({ kind: "more", project });
@@ -6399,7 +6413,7 @@ export function ChatPanel({
                       active={s.id === activeId && mainView === "chat"}
                       unread={unreadSessionIds.has(s.id)}
                       busy={sessionBusy(project, s)}
-                      waiting={waitingSessions.has(s.id)}
+                      waiting={sessionWaiting(s)}
                       revealTitle={titleReveals.get(s.id)}
                       onOpen={() => {
                         if (project.id === projectId) onActiveSessionChange(s.id);
@@ -6747,7 +6761,7 @@ export function ChatPanel({
             <PlanStrip
               synthesized={pendingPlan.synthesized}
               agentLabel={
-                activeSession ? HARNESS_LABELS[activeSession.harness] : m.chat_the_agent()
+                activeSession ? harnessLabel(activeSession.harness, activeSession.harnessName) : m.chat_the_agent()
               }
               showResumeModes={activeSession?.harness === "claude-code"}
               onView={(intent) => openPlan?.(pendingPlan.plan, pendingPlan.promptId, intent)}
@@ -6983,11 +6997,11 @@ export function ChatPanel({
                   pendingQuestion
                     ? m.chat_type_custom_answer()
                     : steering && activeHarness
-                      ? m.chat_steer_placeholder({ harness: ltr(HARNESS_LABELS[activeHarness.id]), shortcut: ltr(queueChord) })
+                      ? m.chat_steer_placeholder({ harness: ltr(activeHarness.name), shortcut: ltr(queueChord) })
                       : composerSelection
                         ? activeHarness?.agentReady
-                          ? m.chat_message_harness({ harness: ltr(HARNESS_LABELS[composerSelection.harness]) })
-                          : m.chat_harness_unavailable({ harness: ltr(HARNESS_LABELS[composerSelection.harness]) })
+                          ? m.chat_message_harness({ harness: ltr(harnessLabel(composerSelection.harness, activeHarness?.name)) })
+                          : m.chat_harness_unavailable({ harness: ltr(harnessLabel(composerSelection.harness, activeHarness?.name)) })
                         : m.chat_ask_agent_placeholder()
                 }
                 rows={2}
@@ -7209,6 +7223,7 @@ export function ChatPanel({
                 message. */}
               <div className="flex min-w-0 items-center">
                 <ModelPicker
+                  sessionHarness={openSession?.harness.startsWith("acp:") ? activeHarness : undefined}
                   value={composerSelection}
                   onSelect={selectModel}
                   onOpenSettings={() => onSelectMainView("harnesses")}
@@ -7224,6 +7239,11 @@ export function ChatPanel({
                   onOpenSleep={openSession ? () => setSleepDialogOpen(true) : undefined}
                   lockHarness={!!openSession}
                   openRequest={modelPickerRequest}
+                  nativeOptions={openSession?.harness.startsWith("acp:") ? acpOptions.filter((option) => option.category !== "model") : []}
+                  onSelectNativeOption={(optionId, value) => {
+                    if (!openSession) return;
+                    void setChatConfiguration(openSession.id, optionId, value).catch((error: unknown) => showAlert(error instanceof Error ? error.message : String(error), "error"));
+                  }}
                 />
                 <ContextMeter usage={openSession?.contextUsage} busy={busy} onCompact={openSession ? () => void compactSession() : undefined} />
                 {sleepStatus && !sleepStatus.state.finished && (

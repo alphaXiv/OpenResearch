@@ -230,6 +230,11 @@ pub fn snapshot_script(archive_path: &str, command: &str) -> String {
     )
 }
 
+pub const TENSORBOARD_LOGDIR: &str = "TENSORBOARD_LOGDIR";
+
+/// Run before `cd repo`, so `$PWD` is the run's own directory (inside the container for container runs).
+pub const TENSORBOARD_LOGDIR_EXPORT: &str = "export TENSORBOARD_LOGDIR=\"$PWD/tensorboard\";";
+
 pub fn staged_script(command: &str) -> String {
     format!("set -eo pipefail; cd repo; {command}")
 }

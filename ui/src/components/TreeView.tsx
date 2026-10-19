@@ -20,6 +20,7 @@ import {
 } from "@xyflow/react";
 import {
   Archive,
+  ChartLine,
   ChevronDown,
   ChevronUp,
   CircleStop,
@@ -37,6 +38,8 @@ import {
   ZoomOut,
   Workflow,
 } from "lucide-react";
+import { useQuery } from "@tanstack/react-query";
+import { getTrackioSettingsQuery } from "../queries/settings";
 import { createPortal } from "react-dom";
 import { BackendBadge, GitHubMark } from "./BackendLogos";
 import { memo, useCallback, useEffect, useMemo, useRef, useState, type Dispatch, type ReactNode, type SetStateAction } from "react";
@@ -45,6 +48,7 @@ import {
   fmtDuration,
   fmtNumber,
   runDisplayStatus,
+  trackioRunUrl,
   timeAgo,
   type Experiment,
   type Project,
@@ -499,6 +503,8 @@ const ExpNode = memo(function ExpNode({ data }: NodeProps<ExpFlowNode>) {
   const live = status === "running" || status === "starting" || status === "cancelling";
   const kind = isBaseline ? m.tree_baseline() : live ? m.tree_running() : m.tree_experiment();
   const squares = runs.slice(-MAX_SQUARES);
+  const trackio = useQuery(getTrackioSettingsQuery()).data;
+  const trackioUrl = latestRun ? trackioRunUrl(trackio, latestRun) : null;
 
   const rootRef = useRef<HTMLDivElement>(null);
   const hover = useHoverIntent(rootRef, data);
@@ -628,6 +634,17 @@ const ExpNode = memo(function ExpNode({ data }: NodeProps<ExpFlowNode>) {
           onClick={(e) => e.stopPropagation()}
         >
           <GitHubMark size={13} />
+        </a>}
+        {trackioUrl && <a
+          className="node-action"
+          title={m.a11y_open_in_trackio()}
+          aria-label={m.a11y_open_in_trackio()}
+          href={trackioUrl}
+          target="_blank"
+          rel="noopener noreferrer"
+          onClick={(e) => e.stopPropagation()}
+        >
+          <ChartLine size={13} />
         </a>}
         <ArchiveMenu id={exp.id} name={exp.title || exp.slug} actions={actions} onArchive={onArchive} compact />
       </div>

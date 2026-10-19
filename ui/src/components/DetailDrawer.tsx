@@ -1,10 +1,12 @@
 import { m } from "../paraglide/messages.js";
-import { ChevronDown, CircleStop } from "lucide-react";
+import { ChartLine, ChevronDown, CircleStop } from "lucide-react";
+import { useQuery } from "@tanstack/react-query";
 import { useEffect, useRef, useState } from "react";
 import {
   cancelRun,
   runDisplayStatus,
   timeAgo,
+  trackioRunUrl,
   type Experiment,
   type Project,
   type Run,
@@ -14,7 +16,9 @@ import type { CodeView } from "./CodeTab";
 import { LogTerminal } from "./LogTerminal";
 import { StatusBadge } from "./StatusBadge";
 import type { TabOpenIntent } from "../tabPreview";
-import { Button, MenuItem } from "./ui";
+import { Button, ButtonLink, MenuItem } from "./ui";
+import { buildHistoryNodes, historyBackendLabel, historyJobId } from "./experimentLineageModel";
+import { getTrackioSettingsQuery } from "../queries/settings";
 
 export type ExperimentView = "overview" | "terminal";
 
@@ -22,6 +26,7 @@ export type ExperimentView = "overview" | "terminal";
  *  keyed by `${experiment.id}:${view}` so per-view state resets on switch. */
 export function DetailDrawer({
   experiment,
+  experiments,
   project,
   view,
   runs,
@@ -30,8 +35,10 @@ export function DetailDrawer({
   parentExperiment,
   onOpenView,
   onOpenCode,
+  onOpenExperiment,
 }: {
   experiment: Experiment;
+  experiments: Experiment[];
   /** Owning project — supplies owner/repo for the GitHub branch link. */
   project: Project;
   view: ExperimentView;
@@ -41,20 +48,25 @@ export function DetailDrawer({
   parentExperiment: Experiment | null;
   onOpenView: (view: ExperimentView, runId: string | undefined, intent: TabOpenIntent) => void;
   onOpenCode: (view: CodeView, intent: TabOpenIntent) => void;
+  onOpenExperiment: (id: string, intent: TabOpenIntent) => void;
 }) {
   const expRuns = runs
     .filter((r) => r.experimentId === experiment.id)
     .sort((a, b) => b.createdAt - a.createdAt);
 
   if (view === "overview") {
+    const node = buildHistoryNodes(experiments, runs).find((node) => node.id === experiment.id);
     return (
       <ExperimentOverview
+        lineageNode={node ?? null}
+        onOpenExperiment={onOpenExperiment}
         experiment={experiment}
         parentExperiment={parentExperiment}
         project={project}
         runs={expRuns}
         onOpenLogs={(runId, intent) => onOpenView("terminal", runId, intent)}
         onOpenCode={(intent) => onOpenCode("files", intent)}
+        onOpenDiff={(intent) => onOpenCode("changes", intent)}
      />
     );
   }
@@ -94,6 +106,8 @@ function TerminalView({
     ? expRuns.find((run) => run.id === selectedRunId) ?? null
     : expRuns[0] ?? null;
   const live = selectedRun?.status === "running" || selectedRun?.status === "starting";
+  const trackio = useQuery(getTrackioSettingsQuery()).data;
+  const trackioUrl = selectedRun ? trackioRunUrl(trackio, selectedRun) : null;
   const cancelling = Boolean(
     selectedRun && live && (selectedRun.cancelRequested || pendingRunId === selectedRun.id),
   );
@@ -138,6 +152,19 @@ function TerminalView({
             {error}
           </span>
         )}
+        {trackioUrl && (
+          <ButtonLink
+            size="small"
+            variant="ghost"
+            title={m.a11y_open_in_trackio()}
+            href={trackioUrl}
+            target="_blank"
+            rel="noopener noreferrer"
+          >
+            <ChartLine size={13} />
+            Trackio
+          </ButtonLink>
+        )}
         {live && (
           <Button size="small" variant="ghost" disabled={cancelling} onClick={() => void stop()}>
             <CircleStop size={13} />
@@ -179,6 +206,23 @@ function TerminalView({
           </div>
         )}
       </div>
+
+      {selectedRun && (
+        <div className="term-provenance" aria-label={m.detail_drawer_run_provenance()}>
+          <span>
+            {m.detail_drawer_provenance_run()} <code>{selectedRun.id}</code>
+          </span>
+          <span>
+            {m.detail_drawer_provenance_commit()} <code>{selectedRun.commitSha || m.history_commit_unavailable()}</code>
+          </span>
+          <span>
+            {m.detail_drawer_provenance_backend()} <code>{historyBackendLabel(selectedRun)}</code>
+          </span>
+          <span>
+            {m.detail_drawer_provenance_scheduler()} <code>{historyJobId(selectedRun)}</code>
+          </span>
+        </div>
+      )}
 
       <div className="term-fill flex-1 min-h-0 bg-terminal pt-1 pe-0 pb-1 ps-1.5">
         {selectedRun ? (
