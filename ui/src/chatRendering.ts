@@ -165,7 +165,7 @@ export function transcriptFileName(title: string): string {
 
 export function isModelAccessLimitPart(part: ChatPart): boolean {
   return part.type === "tool" && part.tool === "error"
-    && /^(?:ActionRequiredError:\s*)?Named models unavailable\b/i.test(part.state?.error?.trim() ?? "");
+    && /^(?:(?:ActionRequiredError:\s*)?Named models unavailable\b|ZCode turn failed:\s*1113\b)/i.test(part.state?.error?.trim() ?? "");
 }
 
 export function isUsageLimitPart(part: ChatPart): boolean {

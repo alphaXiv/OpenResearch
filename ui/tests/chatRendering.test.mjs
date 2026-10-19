@@ -131,6 +131,12 @@ test("Cursor model restrictions use the limit disclosure without treating them a
   assert.equal(isModelAccessLimitPart({ type: "tool", tool: "error", state: { error: "Rate limit reached" } }), false);
 });
 
+test("Z.ai billing rejection is model access unavailable rather than a session quota", async () => {
+  const { isModelAccessLimitPart } = await import("../src/chatRendering.ts");
+  assert.equal(isModelAccessLimitPart({ type: "tool", tool: "error", state: { error: "ZCode turn failed: 1113 Insufficient balance or no resource package" } }), true);
+  assert.equal(isModelAccessLimitPart({ type: "tool", tool: "error", state: { error: "ZCode turn failed: CONFIGURATION_ERROR" } }), false);
+});
+
 test("Codex and OpenCode terminal limits use the shared disclosure without classifying ordinary tool failures", async () => {
   const { isUsageLimitPart } = await import("../src/chatRendering.ts");
   for (const error of [

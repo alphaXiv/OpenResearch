@@ -2114,8 +2114,12 @@ mod tests {
             })
         );
         assert_eq!(
-            event_frame(3, "joinDoc", &[json!("id"), json!({"encodeRanges": true})]),
-            r#"5:3+::{"args":["id",{"encodeRanges":true}],"name":"joinDoc"}"#
+            parse_packet(&event_frame(
+                3,
+                "joinDoc",
+                &[json!("id"), json!({"encodeRanges": true})],
+            )),
+            parse_packet(r#"5:3+::{"args":["id",{"encodeRanges":true}],"name":"joinDoc"}"#)
         );
     }
 
@@ -2353,7 +2357,11 @@ mod tests {
         assert_eq!(c.out.len(), 1);
         let frame = c.out.remove(0);
         assert!(frame.contains(r#""applyOtUpdate""#), "{frame}");
-        assert!(frame.contains(r#"{"i":"big ","p":6}"#), "{frame}");
+        assert!(
+            matches!(parse_packet(&frame), Some(Packet::Event { args, .. })
+            if args[1]["op"] == json!([{"i":"big ","p":6}])),
+            "{frame}"
+        );
         assert!(frame.contains(r#""v":5"#), "{frame}");
 
         // A second save while that op is in flight waits as pending...
@@ -2448,7 +2456,12 @@ mod tests {
         c.handle_ack(1, joined_ack("draft, extended!", 12)).unwrap();
         assert_eq!(from_text(&c.docs["d1"].text), "Draft, extended!");
         assert_eq!(c.out.len(), 1);
-        assert!(c.out[0].contains(r#"{"d":"d","p":0}"#), "{}", c.out[0]);
+        assert!(
+            matches!(parse_packet(&c.out[0]), Some(Packet::Event { args, .. })
+            if args[1]["op"].as_array().unwrap().contains(&json!({"d":"d","p":0}))),
+            "{}",
+            c.out[0]
+        );
         assert!(!c.out[0].contains("!"), "{}", c.out[0]);
         c.flush();
         assert_eq!(paper.read("main.tex"), "Draft, extended!");
@@ -2653,7 +2666,12 @@ mod tests {
         c.out.clear();
         c.handle_ack(1, joined_ack(">draft", 2)).unwrap();
         assert_eq!(c.out.len(), 1, "the unechoed edit is sent again");
-        assert!(c.out[0].contains(r#"{"i":"!","p":6}"#), "{}", c.out[0]);
+        assert!(
+            matches!(parse_packet(&c.out[0]), Some(Packet::Event { args, .. })
+            if args[1]["op"] == json!([{"i":"!","p":6}])),
+            "{}",
+            c.out[0]
+        );
         assert_eq!(from_text(&c.docs["d1"].text), ">draft!");
         c.flush();
         assert_eq!(paper.read("main.tex"), ">draft!");

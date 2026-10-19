@@ -1,9 +1,13 @@
 import { cn } from "./ui/cn";
+import { formatAcpCommand } from "../acp";
 import { TARGET_LABELS } from "../computeTargets";
+import { AcpAuthDialog } from "./AcpAuthDialog";
 import { HarnessSetupDialog } from "./HarnessSetupDialog";
+import { AcpHarnessDialog } from "./AcpHarnessDialog";
 import {
   setScopedQueryData,
   workspaceScope,
+  workspaceKey,
   isCurrentScope,
   queryClient,
 } from "../queries/client";
@@ -53,6 +57,9 @@ import {
 import { useEffect, useLayoutEffect, useRef, useState } from "react";
 import {
   deleteEnvVar,
+  listAcpHarnesses,
+  removeAcpHarness,
+  type AcpDefinition,
   deleteOverleafSession,
   deleteOverleafToken,
   fmtBytes,
@@ -338,6 +345,8 @@ function CommandRunTerminal({ run, onComplete, onClose }: {
 function harnessStatus(h: Harness): { cls: string; variant: BadgeVariant; label: string } {
   if (h.catalogPending) return { cls: "warn", variant: "warning", label: m.onboarding_checking() };
   if (h.authCheckFailed) return { cls: "warn", variant: "warning", label: m.settings_page_unable_to_verify() };
+  if (h.id.startsWith("acp:") && h.authState === "needsLogin") return { cls: "warn", variant: "warning", label: m.acp_auth_setup_needed() };
+  if (h.id.startsWith("acp:") && h.authState === "ready") return { cls: "ok", variant: "success", label: m.acp_credentials_configured() };
   if (h.agentReady && !h.authenticated && h.authMethod !== "local") return { cls: "warn", variant: "warning", label: m.onboarding_not_signed_in() };
   if (h.agentReady) return { cls: "ok", variant: "success", label: h.authMethod === "thirdParty" || claudeProviderLabel(h) ? m.settings_page_ready_to_use() : h.authMethod === "local" ? m.onboarding_ready() : m.settings_page_signed_in() };
   // Not installed — the same blocker whether or not there's saved auth: the
@@ -384,7 +393,15 @@ function HarnessesTab({ remote }: { remote: boolean }) {
   const [refreshing, setRefreshing] = useState(false);
   const setupRun = useCommandRun();
   const [setupHarness, setSetupHarness] = useState<Harness | null>(null);
+  const [authHarness, setAuthHarness] = useState<Harness | null>(null);
   const setupCommands = useQuery(getHarnessSetupCommandsQuery());
+  const definitions = useQuery({ queryKey: workspaceKey("getAcpHarnesses"), queryFn: listAcpHarnesses });
+  const [acpDialog, setAcpDialog] = useState<AcpDefinition | "new" | null>(null);
+  const reloadAcp = () => { void definitions.refetch(); load(true); };
+  const removeAcp = async (id: string) => {
+    try { await removeAcpHarness(id); reloadAcp(); }
+    catch (error) { showAlert(error instanceof Error ? error.message : String(error), "error"); }
+  };
 
   const load = (refresh: boolean, retryRejected = false) => {
     setRefreshing(true);
@@ -397,10 +414,13 @@ function HarnessesTab({ remote }: { remote: boolean }) {
     (a, b) => Number(b.agentReady) - Number(a.agentReady),
   );
   const h = orderedHarnesses.find((x) => x.id === active) ?? orderedHarnesses[0];
+  const acp = definitions.data?.find((definition) => definition.id === h?.id);
 
   return (
     <>
       <h2>{m.settings_page_harnesses()}</h2>
+      {acpDialog && <AcpHarnessDialog definition={acpDialog === "new" ? undefined : acpDialog} onClose={() => setAcpDialog(null)} onSaved={reloadAcp} />}
+      {authHarness && <AcpAuthDialog remote={remote} harness={authHarness} onClose={() => setAuthHarness(null)} />}
       {!remote && setupHarness && setupCommands.data && (
         <HarnessSetupDialog
           harness={setupHarness}
@@ -408,37 +428,40 @@ function HarnessesTab({ remote }: { remote: boolean }) {
           onClose={() => setSetupHarness(null)}
         />
       )}
-      <div className="mt-3 mb-3.5 w-fit max-w-full [&_.option-menu]:w-max">
-        <OptionPicker
-          variant="field"
-          dropDown
-          title={m.settings_page_harnesses()}
-          choices={orderedHarnesses.map((harness) => ({ id: harness.id, label: harness.name }))}
-          value={h?.id ?? null}
-          onSelect={(id) => {
-            const selected = orderedHarnesses.find((harness) => harness.id === id);
-            if (selected) setActive(selected.id);
-          }}
-          renderIcon={(choice) => {
-            const harness = orderedHarnesses.find((harness) => harness.id === choice.id);
-            return harness && <HarnessLogo harness={harness.id} />;
-          }}
-          renderLabel={(choice) => {
-            const harness = orderedHarnesses.find((harness) => harness.id === choice.id);
-            const status = harness && harnessStatus(harness);
-            return (
-              <span className="inline-flex items-center gap-2 whitespace-nowrap">
-                {choice.label}
-                {status && (
-                  <>
-                    <span aria-hidden="true" className={`size-1.5 shrink-0 rounded-full bg-muted [&.ok]:bg-accent-green [&.err]:bg-accent-red [&.warn]:bg-accent-amber ${status.cls}`} />
-                    <span className="sr-only">{status.label}</span>
-                  </>
-                )}
-              </span>
-            );
-          }}
-        />
+      <div className="mt-3 mb-3.5 flex w-full flex-wrap items-center justify-between gap-3 [&_.option-menu]:w-max">
+        <div className="w-96 max-w-full">
+          <OptionPicker
+            variant="field"
+            dropDown
+            title={m.settings_page_harnesses()}
+            choices={orderedHarnesses.map((harness) => ({ id: harness.id, label: harness.name }))}
+            value={h?.id ?? null}
+            onSelect={(id) => {
+              const selected = orderedHarnesses.find((harness) => harness.id === id);
+              if (selected) setActive(selected.id);
+            }}
+            renderIcon={(choice) => {
+              const harness = orderedHarnesses.find((harness) => harness.id === choice.id);
+              return harness && <HarnessLogo harness={harness.id} logo={harness.logo} />;
+            }}
+            renderLabel={(choice) => {
+              const harness = orderedHarnesses.find((harness) => harness.id === choice.id);
+              const status = harness && harnessStatus(harness);
+              return (
+                <span className="inline-flex items-center gap-2 whitespace-nowrap">
+                  {choice.label}
+                  {status && (
+                    <>
+                      <span aria-hidden="true" className={`size-1.5 shrink-0 rounded-full bg-muted [&.ok]:bg-accent-green [&.err]:bg-accent-red [&.warn]:bg-accent-amber ${status.cls}`} />
+                      <span className="sr-only">{status.label}</span>
+                    </>
+                  )}
+                </span>
+              );
+            }}
+          />
+        </div>
+        <Button className="ms-auto shrink-0" onClick={() => setAcpDialog("new")} aria-haspopup="dialog"><Plus size={14} />{m.acp_add()}</Button>
       </div>
       {!harnesses ? (
         <LoadingRow>
@@ -447,9 +470,13 @@ function HarnessesTab({ remote }: { remote: boolean }) {
       ) : !h ? null : (
         <div className={SETTINGS_CARD_CLASS_NAME}>
           <div className="settings-card-head flex items-center gap-2.5 mb-3">
-            <Badge variant={harnessStatus(h).variant}>{harnessStatus(h).label}</Badge>
+            {h.id.startsWith("acp:") && <span className="text-sm text-subtext">{m.acp_via()}</span>}
+            <Badge variant={harnessStatus(h).variant}>{h.adapterMissing ? m.acp_adapter_required() : harnessStatus(h).label}</Badge>
             <div className="spacer flex-1" />
-            {!remote && !h.catalogPending && h.installed && !h.installBroken && !h.authenticated && !h.needsConfigRepair && (h.id === "claude-code" ? h.loginEligible : h.authMethod !== "local" && h.authMethod !== "apiKey" && h.authState !== "unsupported") && (
+            {!remote && h.adapterMissing && <Button size="small" onClick={() => setSetupHarness(h)} disabled={!setupCommands.data?.[h.id]} aria-haspopup="dialog"><SquareTerminal size={14} />{m.acp_install_adapter()}</Button>}
+            {h.id.startsWith("acp:") && !h.adapterMissing && !h.agentReady && !h.catalogPending && <Button size="small" onClick={() => setAuthHarness(h)} aria-haspopup="dialog">{harnessStatus(h).label}</Button>}
+            {acp && <><Button size="small" onClick={() => setAcpDialog(acp)}>{m.activity_edit()}</Button><Button size="small" onClick={() => void removeAcp(acp.id)}>{m.chat_panel_remove()}</Button></>}
+            {!h.id.startsWith("acp:") && !remote && !h.catalogPending && h.installed && !h.installBroken && !h.authenticated && !h.needsConfigRepair && (h.id === "claude-code" ? h.loginEligible : h.authMethod !== "local" && h.authMethod !== "apiKey" && h.authState !== "unsupported") && (
               <Button size="small" onClick={() => setSetupHarness(h)} disabled={!setupCommands.data} aria-haspopup="dialog">
                 <SquareTerminal size={14} /> {m.harness_setup_login()}
               </Button>
@@ -459,8 +486,8 @@ function HarnessesTab({ remote }: { remote: boolean }) {
             </Button>
           </div>
           <div className={cn(KV_CLASS_NAME, "[&_.v]:text-sm")}>
-            <span className="k">{m.settings_page_binary()}</span>
-            <span className="v">{h.binPath ?? m.settings_not_found_on_path()}</span>
+            <span className="k">{acp ? m.acp_executable() : m.settings_page_binary()}</span>
+            <span className="v">{acp ? formatAcpCommand(acp.executable, acp.arguments) : h.binPath ?? m.settings_not_found_on_path()}</span>
             <span className="k">{m.settings_page_version()}</span>
             <span className="v">{h.version ?? "—"}</span>
             {(h.authMethod === "apiKey" || h.authMethod === "thirdParty" || h.authMethod === "local" || claudeProviderLabel(h)) && (
@@ -490,13 +517,14 @@ function HarnessesTab({ remote }: { remote: boolean }) {
                 : h.agentReady ? m.model_picker_default_model() : m.settings_none()}
             </span>
           </div>
-          <RunnableNote
+          {acp ? (h.agentNote || !h.agentReady ? <p className={cn(SETTINGS_NOTE_CLASS_NAME, "text-sm")}>{h.agentNote ?? m.acp_setup_help()}</p> : null) : <RunnableNote
             note={h.agentNote}
             className={cn(SETTINGS_NOTE_CLASS_NAME, "text-sm")}
             disabled={remote}
             resolve={(command) => harnessSetupPath(h, setupCommands.data?.[h.id], command) ?? settingsCommandPath(command)}
             onRun={(command, path) => setupRun.start(command, path, h.id)}
-          />
+          />}
+          {!h.installed && h.needsConnectionAdapter && <p className={cn(SETTINGS_NOTE_CLASS_NAME, "text-sm")}>{m.acp_adapter_help({ name: h.name })}</p>}
           {setupRun.run && (
             // Hidden, not unmounted, while another harness tab is showing: a
             // switch mid-OAuth must not kill the sign-in.

@@ -24,6 +24,7 @@ const mocks = {
     Button: ({ children }) => React.createElement("button", null, children),
     ButtonLink: ({ children, href }) => React.createElement("a", { href }, children),
   },
+  "./experimentLineageModel": { historyBackendLabel: () => "local", historyJobId: () => "—" },
   "lucide-react": { ChartLine: () => null, ChevronDown: () => null, CircleStop: () => null },
 };
 const exports = {};

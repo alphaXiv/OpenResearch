@@ -144,6 +144,7 @@ pub enum Scope {
 #[serde(rename_all = "camelCase")]
 pub enum ExperimentsView {
     Tree,
+    #[serde(alias = "history")]
     Table,
 }
 

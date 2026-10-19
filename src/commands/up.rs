@@ -278,6 +278,7 @@ pub async fn run(args: UpArgs) -> Result<()> {
     agent.shutdown().await;
     codex.shutdown().await;
     claude.shutdown().await;
+    state.chat.acp.shutdown().await;
     if let Some(server) = control_server {
         server.shutdown().await;
     }
@@ -726,6 +727,16 @@ fn router(state: AppState, remote_auth: Option<RemoteAuth>) -> Router {
             get(lit_sources_settings).post(set_lit_sources_settings),
         )
         .route("/api/harnesses", get(list_harnesses))
+        .route(
+            "/api/harnesses/acp",
+            get(list_acp_harnesses).post(create_acp_harness),
+        )
+        .route("/api/harnesses/acp/test", post(test_acp_harness))
+        .route("/api/harnesses/acp/presets", get(list_acp_presets))
+        .route(
+            "/api/harnesses/acp/{id}",
+            axum::routing::put(update_acp_harness).delete(delete_acp_harness),
+        )
         .route("/api/harnesses/{id}/snapshot", get(harness_snapshot))
         .route(
             "/api/harnesses/setup/commands",
@@ -767,6 +778,10 @@ fn router(state: AppState, remote_auth: Option<RemoteAuth>) -> Router {
                 .patch(update_chat_session),
         )
         .route("/api/chat/sessions/{id}/messages", get(chat_messages))
+        .route(
+            "/api/chat/sessions/{id}/configuration",
+            post(set_chat_configuration),
+        )
         .route("/api/chat/sessions/{id}/worktree", get(session_worktree))
         .route("/api/chat/sessions/{id}/message", post(send_chat_message))
         .route("/api/chat/sessions/{id}/shell", post(run_shell_command))
@@ -2065,6 +2080,7 @@ async fn delete_project(State(state): State<AppState>, Path(id): Path<String>) -
         state.chat.opencode.kill_session(&session.id).await;
         state.chat.codex.kill_session(&session.id).await;
         state.chat.claude.forget_session(&session.id).await;
+        state.chat.acp.stop(&session.id).await;
     }
     store.delete_local_project(&id)?;
     for session in &sessions {
@@ -6250,7 +6266,7 @@ async fn openresearch_terminal(
     let program = crate::paths::spawnable_exe()
         .map(|exe| exe.to_string_lossy().into_owned())
         .map_err(anyhow::Error::from);
-    command_terminal(&headers, ws, program, args, false).await
+    command_terminal(&headers, ws, program, args, Vec::new(), false).await
 }
 
 /// Commands the settings page may run, keyed by the exact note text. The
@@ -6260,6 +6276,16 @@ const SETTINGS_COMMANDS: &[(&str, &[&str])] = &[
     ("gh auth login", &["gh", "auth", "login"]),
     ("hf auth login", &["hf", "auth", "login"]),
     ("claude auth status", &["claude", "auth", "status"]),
+    ("kimi login", &["kimi", "login"]),
+    (
+        "mcode login --region global",
+        &["mcode", "login", "--region", "global"],
+    ),
+    ("devin auth login", &["devin", "auth", "login"]),
+    ("grok login", &["grok", "login"]),
+    ("pi", &["pi"]),
+    ("zcode login zai", &["zcode", "login", "zai"]),
+    ("zcode login bigmodel", &["zcode", "login", "bigmodel"]),
 ];
 
 fn settings_command(command: &str) -> Option<&'static [&'static str]> {
@@ -6286,11 +6312,75 @@ async fn run_settings_command(
     let Some(argv) = settings_command(req.command.trim()) else {
         return bad_request("command is not runnable from settings").into_response();
     };
-    let program = local::shell_env::find_on_path(argv[0])
-        .map(|path| path.to_string_lossy().into_owned())
-        .ok_or_else(|| anyhow!("{} is not installed", argv[0]));
-    let args = argv[1..].iter().map(|arg| arg.to_string()).collect();
-    command_terminal(&headers, ws, program, args, true).await
+    let mut args: Vec<String> = argv[1..].iter().map(|arg| arg.to_string()).collect();
+    let mut env = Vec::new();
+    let program = if argv[0] == "zcode" && local::acp::executable_path("zcode").is_none() {
+        let mut candidates = Vec::new();
+        if let Some(home) = dirs::home_dir() {
+            candidates.push(home.join("Applications/ZCode.app/Contents/Resources/glm/zcode.cjs"));
+        }
+        candidates.push(std::path::PathBuf::from(
+            "/Applications/ZCode.app/Contents/Resources/glm/zcode.cjs",
+        ));
+        if let Some(data) = dirs::data_local_dir() {
+            candidates.push(data.join("Programs/ZCode/resources/glm/zcode.cjs"));
+        }
+        match (
+            local::acp::executable_path("node"),
+            candidates.into_iter().find(|path| path.is_file()),
+        ) {
+            (Some(node), Some(cli)) => {
+                let home = local::shell_env::var("ZCODE_HOME")
+                    .or_else(|| {
+                        crate::config::synced_env_var("ZCODE_HOME").map(std::ffi::OsString::from)
+                    })
+                    .filter(|home| !home.is_empty())
+                    .map(std::path::PathBuf::from)
+                    .unwrap_or_else(|| dirs::home_dir().unwrap_or_default().join(".zcode"));
+                env = zcode_provider_env(&cli, &home);
+                env.push(("ZCODE_HOME", home.into_os_string()));
+                args.insert(0, cli.to_string_lossy().into_owned());
+                Ok(node.to_string_lossy().into_owned())
+            }
+            _ => Err(anyhow!(
+                "ZCode CLI not found. Install ZCode and Node.js, then retry."
+            )),
+        }
+    } else {
+        local::acp::executable_path(argv[0])
+            .map(|path| path.to_string_lossy().into_owned())
+            .ok_or_else(|| anyhow!("{} is not installed", argv[0]))
+    };
+    command_terminal(&headers, ws, program, args, env, true).await
+}
+
+fn zcode_provider_env(
+    cli: &std::path::Path,
+    home: &std::path::Path,
+) -> Vec<(&'static str, std::ffi::OsString)> {
+    let Some(directory) = cli.parent() else {
+        return Vec::new();
+    };
+    let provider = [
+        directory.join("provider/zcode-builtin.json"),
+        directory.join("../config/provider/zcode-builtin.json"),
+    ]
+    .into_iter()
+    .find(|path| path.is_file());
+    let Some(provider) = provider else {
+        return Vec::new();
+    };
+    // ZCode uses the bundled table verbatim only when both paths are explicit.
+    vec![
+        (
+            "ZCODE_BUILTIN_PROVIDER_CONFIG_FILE",
+            provider.into_os_string(),
+        ),
+        (
+            "ZCODE_PERSONAL_PROVIDER_CONFIG_FILE",
+            home.join("v2/provider_config.json").into_os_string(),
+        ),
+    ]
 }
 
 /// The user's interactive login shell, so follow-up commands see the PATH a
@@ -6318,6 +6408,7 @@ async fn command_terminal(
     ws: WebSocketUpgrade,
     program: Result<String>,
     args: Vec<String>,
+    env: Vec<(&'static str, std::ffi::OsString)>,
     shell_after: bool,
 ) -> Response {
     if let Some(rejected) = reject_cross_origin(headers) {
@@ -6328,7 +6419,7 @@ async fn command_terminal(
         let _active = active;
         let mut size = DEFAULT_PTY_SIZE;
         let started = match program {
-            Ok(program) => spawn_pty(program, args, Vec::new(), size).await,
+            Ok(program) => spawn_pty(program, args, env, size).await,
             Err(error) => Err(error),
         };
         let session = match started {
@@ -6806,6 +6897,70 @@ async fn list_harnesses(
     Json(harnesses_payload(&state, &q).await)
 }
 
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct AcpHarnessInput {
+    name: String,
+    executable: String,
+    #[serde(default)]
+    arguments: Vec<String>,
+}
+
+impl AcpHarnessInput {
+    fn definition(self, id: String) -> local::acp::Definition {
+        local::acp::Definition {
+            id,
+            name: self.name,
+            executable: self.executable,
+            arguments: self.arguments,
+        }
+    }
+}
+
+async fn list_acp_harnesses() -> Json<Value> {
+    Json(json!(local::acp::definitions()))
+}
+
+async fn list_acp_presets() -> Json<Value> {
+    Json(json!(local::acp::presets()))
+}
+
+async fn create_acp_harness(
+    State(state): State<AppState>,
+    Json(input): Json<AcpHarnessInput>,
+) -> ApiResult {
+    let definition = input.definition(format!("acp:{}", uuid::Uuid::new_v4()));
+    local::acp::save(definition.clone(), true).map_err(bad_request)?;
+    *state.harnesses.lock().await = None;
+    Ok(Json(json!(definition)))
+}
+
+async fn update_acp_harness(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+    Json(input): Json<AcpHarnessInput>,
+) -> ApiResult {
+    let definition = input.definition(id);
+    local::acp::save(definition.clone(), false).map_err(bad_request)?;
+    *state.harnesses.lock().await = None;
+    Ok(Json(json!(definition)))
+}
+
+async fn delete_acp_harness(State(state): State<AppState>, Path(id): Path<String>) -> ApiResult {
+    local::acp::remove(&id).map_err(bad_request)?;
+    *state.harnesses.lock().await = None;
+    Ok(Json(json!({"ok": true})))
+}
+
+async fn test_acp_harness(Json(input): Json<AcpHarnessInput>) -> ApiResult {
+    let definition = input.definition(format!("acp:{}", uuid::Uuid::new_v4()));
+    Ok(Json(
+        local::acp::test_connection(&definition)
+            .await
+            .map_err(bad_request)?,
+    ))
+}
+
 /// The shared detection path behind `GET /api/harnesses` and the startup
 /// preflight: the snapshot pass runs under the cache lock, so whoever arrives
 /// first does the probing and everyone else in the TTL window reads the same
@@ -6897,10 +7052,10 @@ async fn publish_harness(state: &AppState, info: &local::harness::HarnessInfo) {
     let Some((at, payload)) = cache.as_mut() else {
         return;
     };
-    let Some(slot) = payload["harnesses"]
-        .as_array_mut()
-        .and_then(|all| all.iter_mut().find(|h| h["id"].as_str() == Some(info.id)))
-    else {
+    let Some(slot) = payload["harnesses"].as_array_mut().and_then(|all| {
+        all.iter_mut()
+            .find(|h| h["id"].as_str() == Some(info.id.as_str()))
+    }) else {
         return;
     };
     *slot = json!(info);
@@ -7134,7 +7289,8 @@ fn spawn_catalog_fill(state: AppState, snapshot_at: std::time::Instant, fill_id:
                         if *at == snapshot_at {
                             if let Some(slot) =
                                 payload["harnesses"].as_array_mut().and_then(|all| {
-                                    all.iter_mut().find(|h| h["id"].as_str() == Some(info.id))
+                                    all.iter_mut()
+                                        .find(|h| h["id"].as_str() == Some(info.id.as_str()))
                                 })
                             {
                                 *slot = json!(info);
@@ -7621,6 +7777,88 @@ struct UpdateChatSessionReq {
     #[serde(default, deserialize_with = "present_nullable_string")]
     goal: Option<Option<String>>,
     autonomy: Option<Autonomy>,
+}
+
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct NativeConfigurationInput {
+    option_id: String,
+    value: String,
+}
+
+async fn set_chat_configuration(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+    Json(input): Json<NativeConfigurationInput>,
+) -> ApiResult {
+    reject_if_moving(&state)?;
+    let store = Store::open()?;
+    let session = store
+        .get_chat_session(&id)?
+        .ok_or_else(|| not_found("chat session"))?;
+    let saved = store
+        .acp_session_state(&id)?
+        .ok_or_else(|| bad_request("This chat is not an ACP session"))?;
+    let _reservation;
+    let client = match state.chat.acp.connected(&id).await {
+        Ok(client) => {
+            _reservation = None;
+            client
+        }
+        Err(_) => {
+            _reservation = Some(
+                local::chat::TurnGuard::claim(&state.chat, &id, None)
+                    .await
+                    .ok_or_else(|| {
+                        bad_request(
+                            "Chat is busy; try changing the option again after the turn finishes",
+                        )
+                    })?,
+            );
+            let native_id = session.native_session_id.as_deref().ok_or_else(|| {
+                bad_request("Start the conversation before changing agent options")
+            })?;
+            let project = store
+                .get_local_project(&session.project_id)?
+                .ok_or_else(|| not_found("project"))?;
+            let session_id = id.clone();
+            let (cwd, _) = tokio::task::spawn_blocking(move || {
+                local::opencode::ensure_playbook(&project, &session_id, None)
+            })
+            .await
+            .map_err(bad_request)?
+            .map_err(bad_request)?;
+            let client = state
+                .chat
+                .acp
+                .get(&id, &saved.launch, &cwd)
+                .await
+                .map_err(bad_request)?;
+            match client.restore(native_id, &cwd).await {
+                Ok(configuration) => store.set_acp_configuration(&id, &configuration)?,
+                Err(error) => {
+                    state.chat.acp.stop(&id).await;
+                    return Err(bad_request(error));
+                }
+            }
+            client.end_turn();
+            client
+        }
+    };
+    client
+        .configure(&id, &input.option_id, &input.value)
+        .await
+        .map_err(bad_request)?;
+    let session = Store::open()?.get_chat_session(&id)?;
+    let session = state
+        .chat
+        .emit_session(session)
+        .await
+        .ok_or_else(|| bad_request("Chat session no longer exists"))?;
+    Ok(Json(local::chat::session_json(
+        &session,
+        state.chat.is_busy(&id).await,
+    )))
 }
 
 async fn update_chat_session(
@@ -8926,6 +9164,32 @@ mod tests {
     }
 
     #[test]
+    fn bundled_zcode_login_has_both_provider_paths() {
+        let root = std::env::temp_dir().join(format!("orx-zcode-login-{}", uuid::Uuid::new_v4()));
+        let cli = root.join("Resources/glm/zcode.cjs");
+        let provider = root.join("Resources/config/provider/zcode-builtin.json");
+        std::fs::create_dir_all(cli.parent().unwrap()).unwrap();
+        std::fs::create_dir_all(provider.parent().unwrap()).unwrap();
+        std::fs::write(&provider, "{}").unwrap();
+        let home = root.join("test-home");
+        let env = zcode_provider_env(&cli, &home);
+        assert_eq!(env.len(), 2);
+        assert_eq!(
+            std::fs::canonicalize(&env[0].1).unwrap(),
+            std::fs::canonicalize(provider).unwrap()
+        );
+        assert_eq!(
+            env[1],
+            (
+                "ZCODE_PERSONAL_PROVIDER_CONFIG_FILE",
+                home.join("v2/provider_config.json").into_os_string()
+            )
+        );
+        assert!(zcode_provider_env(&root.join("missing/zcode.cjs"), &home).is_empty());
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
     fn settings_commands_are_an_exact_allowlist() {
         assert_eq!(
             settings_command("gh auth login"),
@@ -8933,6 +9197,11 @@ mod tests {
         );
         assert_eq!(settings_command("gh auth login; rm -rf ~"), None);
         assert_eq!(settings_command("gh"), None);
+        assert_eq!(
+            settings_command("zcode login zai"),
+            Some(&["zcode", "login", "zai"][..])
+        );
+        assert_eq!(settings_command("zcode login zai; echo token"), None);
     }
 
     #[tokio::test]
