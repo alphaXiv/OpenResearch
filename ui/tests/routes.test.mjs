@@ -57,14 +57,14 @@ test("real file routes distinguish task/new, task IDs, project index, and settin
     ["/projects/p/tasks/new", "/projects/$projectId/tasks/new"],
     ["/projects/p/tasks/old", "/projects/$projectId/tasks/$sessionId"],
     ["/projects/p/skills", "/projects/$projectId/skills"],
-    ["/projects/p/settings/git", "/projects/$projectId/settings/$tab"],
+    ["/projects/p/settings/settings", "/projects/$projectId/settings/$tab"],
     ["/remote-launch", "/remote-launch"],
   ]) {
     const router = await match(path);
     assert.equal(router.state.matches.at(-1).routeId, routeId, path);
     assert.equal(router.state.matches.at(-1).status, "success", path);
   }
-  for (const path of ["/projects/p/settings/unknown", "/projects/p/tasks/%00"]) {
+  for (const path of ["/projects/p/settings/git", "/projects/p/settings/unknown", "/projects/p/tasks/%00"]) {
     const invalid = await match(path);
     assert(invalid.state.matches.some((route) => route.status === "notFound"), path);
   }

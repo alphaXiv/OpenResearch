@@ -1910,7 +1910,8 @@ mod tests {
 
     #[test]
     fn prewarmed_onboarding_seeds_full_demo() {
-        for prewarmed in [false, true] {
+        let acp_id = crate::local::acp::presets()[0].launch.id.clone();
+        for (prewarmed, harness) in [(false, "codex"), (true, "codex"), (false, acp_id.as_str())] {
             let root = super::super::git::TemporaryDirectory::new("orx-demo-onboarding").unwrap();
             let data = root.path().join("data");
             let repo = data.join("repos").join(OWNER).join(REPO);
@@ -1927,7 +1928,7 @@ mod tests {
                 &data,
                 &repo,
                 DemoSelection {
-                    harness: "codex".into(),
+                    harness: harness.into(),
                     model: None,
                     permission_mode: None,
                     reasoning_level: None,
@@ -1940,6 +1941,14 @@ mod tests {
                 started.elapsed().as_millis()
             );
             assert_eq!(completion.project.id, PROJECT_ID);
+            if harness.starts_with("acp:") {
+                for id in [SESSION_ID, FIGURE_SESSION_ID, LITERATURE_SESSION_ID] {
+                    assert_eq!(
+                        store.acp_session_state(id).unwrap().unwrap().launch.id,
+                        harness
+                    );
+                }
+            }
             assert_eq!(
                 store.list_experiments_by_project(PROJECT_ID).unwrap().len(),
                 3

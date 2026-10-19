@@ -95,7 +95,7 @@ pub async fn submit_local_hf_with_source(
             command: vec!["bash".to_string(), "-c".to_string(), script],
             docker_image: image.clone(),
             flavor: flavor.clone(),
-            environment: HashMap::new(),
+            environment: HashMap::from([(crate::config::RUN_ID_ENV.to_string(), run_id.clone())]),
             secrets,
             timeout_seconds,
             labels,

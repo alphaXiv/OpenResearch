@@ -11,14 +11,21 @@ const source = readFileSync(new URL("../src/components/DetailDrawer.tsx", import
 const compiled = ts.transpileModule(source, {
   compilerOptions: { module: ts.ModuleKind.CommonJS, jsx: ts.JsxEmit.ReactJSX },
 }).outputText;
+let trackioUrl = null;
 const mocks = {
   "../paraglide/messages.js": { m: new Proxy({}, { get: (_, name) => () => String(name) }) },
-  "../api": { runDisplayStatus: () => "complete", timeAgo: () => "now" },
+  "../api": { runDisplayStatus: () => "complete", timeAgo: () => "now", trackioRunUrl: () => trackioUrl },
+  "../queries/settings": { getTrackioSettingsQuery: () => ({}) },
+  "@tanstack/react-query": { useQuery: () => ({ data: undefined }) },
   "./ExperimentOverview": { ExperimentOverview: () => null },
   "./LogTerminal": { LogTerminal: ({ runId }) => `LOG:${runId}` },
   "./StatusBadge": { StatusBadge: () => null },
-  "./ui": { Button: ({ children }) => React.createElement("button", null, children) },
-  "lucide-react": { ChevronDown: () => null, CircleStop: () => null },
+  "./ui": {
+    Button: ({ children }) => React.createElement("button", null, children),
+    ButtonLink: ({ children, href }) => React.createElement("a", { href }, children),
+  },
+  "./experimentLineageModel": { historyBackendLabel: () => "local", historyJobId: () => "—" },
+  "lucide-react": { ChartLine: () => null, ChevronDown: () => null, CircleStop: () => null },
 };
 const exports = {};
 new Function("require", "exports", compiled)((name) => mocks[name] ?? require(name), exports);
@@ -47,5 +54,15 @@ test("missing and foreign explicit runs render unavailable without substituting 
     const html = render(id);
     assert.doesNotMatch(html, /LOG:/);
     assert.match(html, /model_picker_unavailable/);
+  }
+});
+
+test("the header links to Trackio only when the run has a dashboard URL", () => {
+  assert.doesNotMatch(render(null), /a11y_open_in_trackio/);
+  trackioUrl = "http://trackio.example:7860/?project=p&runs=run-new";
+  try {
+    assert.match(render(null), /href="http:\/\/trackio\.example:7860\/\?project=p&amp;runs=run-new"/);
+  } finally {
+    trackioUrl = null;
   }
 });

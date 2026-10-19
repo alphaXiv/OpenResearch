@@ -8,6 +8,7 @@
 //! Data dir: `$ORX_DATA_DIR`, else `$XDG_DATA_HOME/openresearch`, else
 //! `~/.local/share/openresearch`.
 
+mod acp;
 pub(crate) mod harness_accounts;
 pub(crate) mod run_metrics;
 pub(crate) mod sleep;
@@ -699,6 +700,11 @@ impl Store {
                 root       TEXT NOT NULL DEFAULT '',
                 PRIMARY KEY (project_id, tex_path)
             );
+            CREATE TABLE IF NOT EXISTS acp_sessions (
+                session_id TEXT PRIMARY KEY REFERENCES chat_sessions(id) ON DELETE CASCADE,
+                launch_json TEXT NOT NULL,
+                configuration_json TEXT NOT NULL DEFAULT '[]'
+            );
             CREATE TABLE IF NOT EXISTS ui_state (
                 id                       INTEGER PRIMARY KEY CHECK (id = 1),
                 onboarding_completed     INTEGER NOT NULL DEFAULT 0,
@@ -759,6 +765,7 @@ impl Store {
             let _ = conn.execute(ddl, []);
         }
         conn.execute_batch("CREATE TRIGGER IF NOT EXISTS delete_chat_invocation_identities AFTER DELETE ON chat_sessions BEGIN DELETE FROM native_invocation_identities WHERE session_id = OLD.id; END;")?;
+        conn.execute_batch("CREATE TRIGGER IF NOT EXISTS delete_acp_session AFTER DELETE ON chat_sessions BEGIN DELETE FROM acp_sessions WHERE session_id = OLD.id; END;")?;
         conn.execute(
             "DELETE FROM native_invocation_identities WHERE session_id IS NULL AND created_at < ?1",
             [now_ms() - 7 * 24 * 60 * 60 * 1000],
@@ -1678,6 +1685,9 @@ impl Store {
                     session.updated_at,
                 ],
             )?;
+            if let Some(state) = self.acp_launch_for_session(session)? {
+                self.save_acp_session_state(&session.id, &state)?;
+            }
         }
         for message in messages {
             tx.execute(
@@ -1903,6 +1913,12 @@ impl Store {
     // --- chat sessions / messages ------------------------------------------
 
     pub fn create_chat_session(&self, s: &StoredChatSession) -> Result<()> {
+        let acp_state = self.acp_launch_for_session(s)?;
+        let transaction = if acp_state.is_some() && self.conn.is_autocommit() {
+            Some(self.conn.unchecked_transaction()?)
+        } else {
+            None
+        };
         self.conn.execute(
             "INSERT INTO chat_sessions (id, project_id, harness, native_session_id, title, title_source, model,
                                         service_tier, permission_mode, plan_mode, plan_reset_pending, reasoning_level, archived, bootstrap_context,
@@ -1931,6 +1947,12 @@ impl Store {
                 s.side_parent_session_id,
             ],
         )?;
+        if let Some(state) = acp_state {
+            self.save_acp_session_state(&s.id, &state)?;
+        }
+        if let Some(transaction) = transaction {
+            transaction.commit()?;
+        }
         Ok(())
     }
 
@@ -1940,6 +1962,30 @@ impl Store {
         ))?;
         let mut rows = stmt.query_map(params![id], row_to_chat_session)?;
         Ok(rows.next().transpose()?)
+    }
+
+    pub fn chat_session_awaiting_input(&self, session_id: &str, busy: bool) -> Result<bool> {
+        Ok(self.conn.query_row(
+            "WITH RECURSIVE active(id, parent_id, parts_json) AS (
+                SELECT m.id, m.parent_id, m.parts_json FROM chat_messages m
+                JOIN chat_sessions s ON s.active_leaf_id = m.id AND s.id = m.session_id
+                WHERE s.id = ?1
+                UNION ALL
+                SELECT m.id, m.parent_id, m.parts_json FROM chat_messages m
+                JOIN active a ON a.parent_id = m.id WHERE m.session_id = ?1
+             )
+             SELECT EXISTS (
+                SELECT 1 FROM active a, json_each(a.parts_json) p
+                WHERE json_extract(p.value, '$.type') = 'prompt'
+                  AND COALESCE(json_extract(p.value, '$.prompt.resolved'), 0) = 0
+                  AND CASE WHEN json_extract(p.value, '$.prompt.nativeId') IS NOT NULL
+                    THEN ?2
+                    ELSE json_extract(p.value, '$.prompt.kind') = 'question'
+                  END
+             )",
+            params![session_id, busy],
+            |row| row.get(0),
+        )?)
     }
 
     pub fn list_chat_sessions_by_project(
@@ -4440,6 +4486,167 @@ mod tests {
             created_at: 1,
             updated_at: 1,
         }
+    }
+
+    #[test]
+    fn acp_first_turn_repairs_missing_state_without_redirecting_native_sessions() {
+        let dir = std::env::temp_dir().join(format!("orx-acp-repair-{}", uuid::Uuid::new_v4()));
+        let store = Store::open_at(dir.clone()).unwrap();
+        let mut session = chat_session_fixture("legacy-demo");
+        session.harness = crate::local::acp::presets()[0].launch.id.clone();
+        store.create_chat_session(&session).unwrap();
+        store
+            .conn
+            .execute(
+                "DELETE FROM acp_sessions WHERE session_id = ?1",
+                [&session.id],
+            )
+            .unwrap();
+        let repaired = store
+            .ensure_acp_session_state(&session.id)
+            .unwrap()
+            .unwrap();
+        assert_eq!(repaired.launch.id, session.harness);
+        store
+            .conn
+            .execute(
+                "UPDATE chat_sessions SET native_session_id = 'native' WHERE id = ?1",
+                [&session.id],
+            )
+            .unwrap();
+        store
+            .conn
+            .execute(
+                "DELETE FROM acp_sessions WHERE session_id = ?1",
+                [&session.id],
+            )
+            .unwrap();
+        assert!(store.ensure_acp_session_state(&session.id).is_err());
+        drop(store);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn acp_side_chat_keeps_launch_snapshot_and_deletes_its_state() {
+        let dir = std::env::temp_dir().join(format!("orx-acp-store-{}", uuid::Uuid::new_v4()));
+        let store = Store::open_at(dir.clone()).unwrap();
+        let parent = chat_session_fixture("parent");
+        store.create_chat_session(&parent).unwrap();
+        let launch = crate::local::acp::Definition {
+            id: format!("acp:{}", uuid::Uuid::new_v4()),
+            name: "Saved agent".into(),
+            executable: "original-agent".into(),
+            arguments: vec!["original argument".into()],
+        };
+        store.conn.execute(
+            "INSERT INTO acp_sessions(session_id, launch_json, configuration_json) VALUES (?1, ?2, ?3)",
+            params![parent.id, serde_json::to_string(&launch).unwrap(), "[]"],
+        ).unwrap();
+        let mut side = chat_session_fixture("side");
+        side.harness = launch.id.clone();
+        side.side_parent_session_id = Some(parent.id.clone());
+        store.create_chat_session(&side).unwrap();
+        assert_eq!(
+            store.acp_session_state("side").unwrap().unwrap().launch,
+            launch
+        );
+        assert!(store
+            .get_chat_session("side")
+            .unwrap()
+            .unwrap()
+            .native_session_id
+            .is_none());
+        let configuration = serde_json::json!([{"id":"model", "currentValue":"native/model"}]);
+        store.set_acp_configuration("side", &configuration).unwrap();
+        drop(store);
+        let store = Store::open_at(dir.clone()).unwrap();
+        assert_eq!(
+            store
+                .acp_session_state("side")
+                .unwrap()
+                .unwrap()
+                .configuration,
+            configuration
+        );
+        store.delete_chat_session("side").unwrap();
+        assert!(store.acp_session_state("side").unwrap().is_none());
+        assert!(store.acp_session_state("parent").unwrap().is_some());
+        drop(store);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn pending_input_summary_survives_reopen_and_follows_the_active_branch() {
+        let dir = std::env::temp_dir().join(format!("orx-store-pending-{}", uuid::Uuid::new_v4()));
+        let store = Store::open_at(dir.clone()).unwrap();
+        store
+            .create_chat_session(&chat_session_fixture("chat_pending"))
+            .unwrap();
+        for (id, parent_id, parts) in [
+            ("user", None, serde_json::json!([])),
+            (
+                "question",
+                Some("user"),
+                serde_json::json!([{"type":"prompt","prompt":{"kind":"question","resolved":false}}]),
+            ),
+            (
+                "retry",
+                Some("user"),
+                serde_json::json!([{"type":"text","text":"Done"}]),
+            ),
+        ] {
+            store
+                .upsert_chat_message(&StoredChatMessage {
+                    id: id.into(),
+                    session_id: "chat_pending".into(),
+                    role: "assistant".into(),
+                    parts_json: parts.to_string(),
+                    parent_id: parent_id.map(str::to_string),
+                    created_at: 1,
+                    completed_at: None,
+                    base_native_session_id: None,
+                    result_native_session_id: None,
+                })
+                .unwrap();
+        }
+        store
+            .set_chat_session_active_leaf("chat_pending", Some("question"))
+            .unwrap();
+        assert!(store
+            .chat_session_awaiting_input("chat_pending", false)
+            .unwrap());
+        drop(store);
+        let store = Store::open_at(dir.clone()).unwrap();
+        assert!(store
+            .chat_session_awaiting_input("chat_pending", false)
+            .unwrap());
+        store
+            .set_chat_session_active_leaf("chat_pending", Some("retry"))
+            .unwrap();
+        assert!(!store
+            .chat_session_awaiting_input("chat_pending", false)
+            .unwrap());
+        store
+            .set_chat_session_active_leaf("chat_pending", Some("question"))
+            .unwrap();
+        store.conn.execute("UPDATE chat_messages SET parts_json = ?1 WHERE id = 'question'", params![r#"[{"type":"prompt","prompt":{"kind":"question","resolved":false,"nativeId":"rpc-1"}}]"#]).unwrap();
+        assert!(!store
+            .chat_session_awaiting_input("chat_pending", false)
+            .unwrap());
+        assert!(store
+            .chat_session_awaiting_input("chat_pending", true)
+            .unwrap());
+        store
+            .conn
+            .execute(
+                "UPDATE chat_messages SET parts_json = ?1 WHERE id = 'question'",
+                params![r#"[{"type":"prompt","prompt":{"kind":"question","resolved":true}}]"#],
+            )
+            .unwrap();
+        assert!(!store
+            .chat_session_awaiting_input("chat_pending", true)
+            .unwrap());
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

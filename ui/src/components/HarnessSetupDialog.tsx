@@ -91,9 +91,9 @@ export function HarnessSetupDialog({ harness, commands, onReady, onClose }: {
       }}
     >
       <div className="flex items-center gap-3">
-        <HarnessLogo harness={harness.id} size={26} />
+        <HarnessLogo harness={harness.id} logo={harness.logo} size={26} />
         <h2 id="harness-setup-title" className="m-0 text-xl font-medium">
-          {m.harness_setup_title({ agent: harness.name })}
+          {harness.adapterMissing ? m.acp_install_adapter() : m.harness_setup_title({ agent: harness.name })}
         </h2>
       </div>
       {phase === "preview" ? (
@@ -121,7 +121,7 @@ export function HarnessSetupDialog({ harness, commands, onReady, onClose }: {
       {terminalMounted(phase, started) && <CommandTerminal
         key={`${action}-${attempt}`}
         path={`/api/harnesses/setup?${new URLSearchParams({ harness: harness.id, action })}`}
-        label={m.harness_setup_title({ agent: harness.name })}
+        label={harness.adapterMissing ? m.acp_install_adapter() : m.harness_setup_title({ agent: harness.name })}
         command={command}
         heightClass="h-96"
         active={phase === "running"}

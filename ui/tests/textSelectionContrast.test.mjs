@@ -38,6 +38,8 @@ function hexToken(css, name) {
   return match[1];
 }
 
+const rgb = (hex) => hex.slice(1).match(/.{2}/g).map((channel) => Number.parseInt(channel, 16));
+
 function luminance(hex) {
   const channels = hex
     .slice(1)
@@ -76,11 +78,29 @@ test("chat annotations stay separate from active selection", () => {
   }
 });
 
-test("editor selection uses the readable shared foreground over syntax highlighting", () => {
+test("editor selection tints the highlighted overlay instead of redrawing its text", () => {
   assert.deepEqual(declarations(base, ".file-view-editarea::selection"), {
-    color: "var(--selection-text)",
+    color: "transparent",
     background: "var(--editor-selection)",
   });
+  for (const { name, css } of themeTokens()) {
+    const tint = css.match(/--editor-selection: rgb\((\d+) (\d+) (\d+) \/ (\d+)%\)/);
+    assert.ok(tint, `${name} editor selection must be a translucent rgb() (no color-mix on macOS 11 WebKit)`);
+    const veil = (hex) =>
+      `#${rgb(hex)
+        .map((channel, i) => Math.round(channel + (Number(tint[i + 1]) - channel) * (Number(tint[4]) / 100)))
+        .map((channel) => channel.toString(16).padStart(2, "0"))
+        .join("")}`;
+    const background = hexToken(css, "base");
+    const selected = veil(background);
+    const boundary = contrast(background, selected);
+    assert.ok(boundary >= 1.2, `${name} editor selection boundary contrast ${boundary.toFixed(2)} is below 1.2`);
+    const text = contrast(veil(hexToken(css, "syntax-text")), selected);
+    assert.ok(text >= 4.5, `${name} selected code contrast ${text.toFixed(2)} is below 4.5`);
+    const comment = hexToken(css, "syntax-comment");
+    const ratio = contrast(veil(comment), selected) / contrast(comment, background);
+    assert.ok(ratio >= 0.8, `${name} selection costs comments ${((1 - ratio) * 100).toFixed(0)}% of their contrast`);
+  }
 });
 
 test("shimmering labels select with the same foreground as the surrounding text", () => {
@@ -97,7 +117,6 @@ test("diff selections use the readable shared foreground and background", () => 
   const diff = read("components/GitDiff.tsx");
   assert.ok(diff.includes("--diff-selection-text-color:var(--selection-text)"));
   assert.ok(!diff.includes("--diff-selection-text-color:var(--primary)"));
-  assert.ok(theme.includes("--editor-selection: var(--code-selection)"));
   assert.ok(theme.includes("--code-selection: var(--selection-background)"));
 });
 

@@ -806,7 +806,7 @@ export default function App({ runtime, projectId, pane }: { runtime: RuntimeInfo
     if (prefs) {
       setRailOpen(prefs.railOpen);
       setPanelWidth(Math.min(prefs.panelWidth, panelMaxWidth()));
-      setView(prefs.experimentsView);
+      setView(prefs.experimentsView === "tree" ? "tree" : "table");
     }
   }, [uiState]);
   useEffect(() => {
@@ -1531,7 +1531,7 @@ export default function App({ runtime, projectId, pane }: { runtime: RuntimeInfo
 
   const onProjectCreated = (project: Project, publicationError: string | null) => {
     setProjects((cur) => (cur ? upsert(cur, project) : [project]));
-    void router.navigate({ href: `/projects/${encodeURIComponent(project.id)}${publicationError ? "/settings/git" : ""}` });
+    void router.navigate({ href: `/projects/${encodeURIComponent(project.id)}${publicationError ? "/settings/projects" : ""}` });
     if (publicationError) {
       showAlert(publicationError, "error");
     }
@@ -2022,7 +2022,7 @@ export default function App({ runtime, projectId, pane }: { runtime: RuntimeInfo
                         toolbarActions={experimentToolbarActions}
                       />
                     )
-                  ) : (
+                  ) : view === "table" ? (
                     <ExperimentsTable
                       toolbarActions={experimentToolbarActions}
                       archiveActions={archiveActions}
@@ -2054,7 +2054,7 @@ export default function App({ runtime, projectId, pane }: { runtime: RuntimeInfo
                       onArchive={archiveExperiment}
                       onCancel={cancelRun}
                     />
-                  )}
+                  ) : null}
                 </div>
               </TabBody>
             ) : rightTab === "files" ? (
@@ -2292,6 +2292,10 @@ export default function App({ runtime, projectId, pane }: { runtime: RuntimeInfo
                   <DetailDrawer
                     key={`${expTab.id}:${expTab.view}`}
                     experiment={tabExperiment}
+                    experiments={experiments}
+                    onOpenExperiment={(id, intent) =>
+                      openFromRightTab(expTab, () => openExperimentTab(id, "overview", intent))
+                    }
                     project={activeProject}
                     view={expTab.view}
                     runs={runs}

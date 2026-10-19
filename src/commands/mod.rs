@@ -49,6 +49,7 @@ pub mod ssh_key;
 pub mod strategy;
 pub mod supervise;
 pub mod telemetry;
+pub mod tensorboard;
 pub mod up;
 pub mod up_remote;
 pub mod update;

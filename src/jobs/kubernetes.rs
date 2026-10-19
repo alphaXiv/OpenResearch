@@ -471,7 +471,7 @@ fn resource_handle(doc: &Value) -> String {
 /// primary Job's containers must reference `$ORX_SCRIPT`.
 ///
 /// Injections: run labels on every doc (and the primary Job's pod template);
-/// `ORX_SCRIPT` env + `orx-env` envFrom on the primary Job's containers;
+/// `ORX_SCRIPT` and `ORX_RUN_ID` env + `orx-env` envFrom on the primary Job's containers;
 /// `activeDeadlineSeconds` / `ttlSecondsAfterFinished` / `backoffLimit`
 /// defaults on the primary Job when absent.
 fn prepare_docs(
@@ -623,9 +623,13 @@ fn prepare_docs(
             .unwrap_or_default();
         let mut env: Vec<Value> = env
             .into_iter()
-            .filter(|e| e["name"] != "ORX_SCRIPT")
+            .filter(|e| e["name"] != "ORX_SCRIPT" && e["name"] != crate::config::RUN_ID_ENV)
             .collect();
         env.push(json!({ "name": "ORX_SCRIPT", "value": script }));
+        // Per-pod, not in the shared `orx-env` Secret a pending pod may read after a later launch.
+        if let Some(run_id) = labels.get("or_run") {
+            env.push(json!({ "name": crate::config::RUN_ID_ENV, "value": run_id }));
+        }
         // Default the container's Python to unbuffered so the job's prints
         // stream live (kubectl logs -f can't flush what the app never wrote).
         // A user-set value in the manifest wins.
@@ -1022,6 +1026,8 @@ mod tests {
         let c = &j["spec"]["template"]["spec"]["containers"][0];
         assert_eq!(c["env"][0]["name"], "ORX_SCRIPT");
         assert_eq!(c["env"][0]["value"], "echo hi");
+        assert_eq!(c["env"][1]["name"], "ORX_RUN_ID");
+        assert_eq!(c["env"][1]["value"], "r1");
         assert_eq!(c["envFrom"][0]["secretRef"]["name"], ENV_SECRET);
     }
 
@@ -1160,19 +1166,21 @@ mod tests {
     #[test]
     fn author_orx_script_env_is_replaced_and_secret_not_duplicated() {
         let mut j = job("train");
-        j["spec"]["template"]["spec"]["containers"][0]["env"] =
-            json!([{ "name": "ORX_SCRIPT", "value": "evil" }, { "name": "FOO", "value": "1" }]);
+        j["spec"]["template"]["spec"]["containers"][0]["env"] = json!([{ "name": "ORX_SCRIPT", "value": "evil" }, { "name": "ORX_RUN_ID", "value": "evil" }, { "name": "FOO", "value": "1" }]);
         j["spec"]["template"]["spec"]["containers"][0]["envFrom"] =
             json!([{ "secretRef": { "name": ENV_SECRET } }]);
         let (docs, _) = prepare(j).unwrap();
         let c = &docs[0]["spec"]["template"]["spec"]["containers"][0];
         let env = c["env"].as_array().unwrap();
-        // FOO + rewritten ORX_SCRIPT + the two injected CPython defaults.
-        assert_eq!(env.len(), 4);
+        // FOO + rewritten ORX_SCRIPT + ORX_RUN_ID + the two injected CPython defaults.
+        assert_eq!(env.len(), 5);
         assert!(env.iter().any(|e| e["name"] == "FOO"));
         assert!(env
             .iter()
             .any(|e| e["name"] == "ORX_SCRIPT" && e["value"] == "echo hi"));
+        assert!(env
+            .iter()
+            .any(|e| e["name"] == "ORX_RUN_ID" && e["value"] == "r1"));
         assert_eq!(c["envFrom"].as_array().unwrap().len(), 1);
     }
 
