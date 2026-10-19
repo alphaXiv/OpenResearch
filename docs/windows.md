@@ -102,11 +102,15 @@ Set-ItemProperty -Path 'HKLM:\SYSTEM\CurrentControlSet\Control\FileSystem' -Name
 |---|---|
 | `orx up --remote-host` | Refused. The control channel is a Unix domain socket. |
 | Restart after an update | There is no `exec`, so a restarting `orx up` starts a new process and exits. In a terminal the prompt comes back while the server keeps running in that console, where Ctrl+C still stops it; a supervisor sees the old process exit. |
-| SSH connection reuse | Windows' OpenSSH cannot multiplex, so each status or log poll opens its own connection, and the Settings page uses the most recent preflight result instead of reporting a missing multiplexed master as a disconnection. Use a key held by an agent, or one without a passphrase. |
+| SSH connection reuse | Windows' OpenSSH cannot multiplex. Each orx process instead keeps one batch SSH shell per target, shared by staging, launch, status and log commands. A detached supervisor opens its own shell and reuses it across polls. Use a key held by an agent, or one without a passphrase. The Settings page uses the most recent preflight result rather than checking for a multiplexed master. |
 | The PATH guard | Not applied; it needs a POSIX shell startup file. |
 | Data directory | Still `%USERPROFILE%\.local\share\openresearch`, not `%APPDATA%`. |
 | Signing out or upgrading while the app runs | Windows ends the app at once, without stopping the agents it started or saving the last workspace state. |
 | Starting the app while it is quitting | The new launch finds the old one still running and exits, so start it again once it has closed. |
+
+On servers that rate-limit new SSH connections, connection timeouts are retried before any remote command is sent, with delays of 30, 60 and 120 seconds. A command whose connection drops after submission is not automatically replayed: it may already have launched a job. Separate launches and supervisors still have separate connections, so many concurrent runs can require a higher server limit.
+
+Set `ORX_SSH_POLL_INTERVAL_SECS` before launching orx to change SSH supervisor status and log polling (for example, `60` for once a minute). Positive integer seconds are accepted; unset, zero or invalid values keep the defaults of five seconds for status and two seconds for logs. This also affects SSH-backed managed instances and Slurm log polling. A longer interval delays status updates and cancellation checks; it does not close the reused SSH connection.
 
 ## Releasing the app
 

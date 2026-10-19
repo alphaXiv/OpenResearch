@@ -59,8 +59,8 @@ fn lock_held(path: &std::path::Path) -> bool {
 async fn log_pass<T>(
     done: &mut tokio::sync::watch::Receiver<bool>,
     draining: bool,
-    pass: impl std::future::Future<Output = Result<T>>,
-) -> Option<Result<T>> {
+    pass: impl std::future::Future<Output = T>,
+) -> Option<T> {
     if draining {
         return Some(pass.await);
     }
@@ -634,6 +634,13 @@ async fn cancel_modal(sandbox_id: &str, run_id: &str, cancel_sent: &mut bool) {
 // it dead without an exit_code (ERROR) — so once cancel is sent we report the
 // terminal state as `cancelled`.
 
+fn ssh_poll_interval(value: Option<&str>, default: Duration) -> Duration {
+    value
+        .and_then(|value| value.parse::<std::num::NonZeroU64>().ok())
+        .map(|seconds| Duration::from_secs(seconds.get()))
+        .unwrap_or(default)
+}
+
 async fn run_ssh(
     store: Store,
     stored: crate::store::StoredRun,
@@ -670,6 +677,10 @@ async fn watch_ssh_job(
     sandbox: Option<(&Credentials, &str)>,
 ) -> Result<RunStatus> {
     let container = descriptor.ssh_container.clone();
+    let interval = ssh_poll_interval(
+        std::env::var("ORX_SSH_POLL_INTERVAL_SECS").ok().as_deref(),
+        POLL_INTERVAL,
+    );
     let path = log_path(run_id);
     let (done_tx, done_rx) = tokio::sync::watch::channel(false);
     let (log_error_tx, log_error_rx) = tokio::sync::watch::channel(None);
@@ -747,7 +758,7 @@ async fn watch_ssh_job(
                 },
                 _ => {
                     missing_polls = 0;
-                    tokio::time::sleep(POLL_INTERVAL).await;
+                    tokio::time::sleep(interval).await;
                     continue;
                 }
             },
@@ -756,7 +767,7 @@ async fn watch_ssh_job(
         if job.message.as_deref() == Some(ssh::RUN_DIR_MISSING) {
             missing_polls += 1;
             if missing_polls < 3 {
-                tokio::time::sleep(POLL_INTERVAL).await;
+                tokio::time::sleep(interval).await;
                 continue;
             }
         } else {
@@ -815,7 +826,7 @@ async fn watch_ssh_job(
             cancel_ssh(&target, &dir, container.as_ref(), run_id, &mut cancel_sent).await;
         }
 
-        tokio::time::sleep(POLL_INTERVAL).await;
+        tokio::time::sleep(interval).await;
     }
 }
 
@@ -826,9 +837,13 @@ async fn tail_logs_ssh(
     dir: String,
     path: std::path::PathBuf,
     run_id: String,
-    done: tokio::sync::watch::Receiver<bool>,
+    mut done: tokio::sync::watch::Receiver<bool>,
     errors: Option<tokio::sync::watch::Sender<Option<String>>>,
 ) {
+    let interval = ssh_poll_interval(
+        std::env::var("ORX_SSH_POLL_INTERVAL_SECS").ok().as_deref(),
+        Duration::from_secs(2),
+    );
     let mut log = match RunLog::open(&path) {
         Ok(log) => log,
         Err(err) => {
@@ -852,7 +867,7 @@ async fn tail_logs_ssh(
                 seen = s;
                 last_error = None;
             }
-            // Retries every 2s through an outage; log each distinct failure once.
+            // Retry through an outage; log each distinct failure once.
             Err(err) => {
                 let err = err.to_string();
                 if last_error.as_ref() != Some(&err) {
@@ -868,7 +883,7 @@ async fn tail_logs_ssh(
         if draining && last_error.is_none() {
             return;
         }
-        tokio::time::sleep(Duration::from_secs(2)).await;
+        log_pass(&mut done, draining, tokio::time::sleep(interval)).await;
     }
 }
 
@@ -1619,7 +1634,7 @@ mod tests {
         };
         let (interrupted, ()) = tokio::join!(log_pass(&mut rx, false, stalled), flip);
         assert!(interrupted.is_none());
-        let drained = log_pass(&mut rx, true, async { Ok(7) }).await;
+        let drained = log_pass(&mut rx, true, async { Ok::<_, anyhow::Error>(7) }).await;
         assert_eq!(drained.unwrap().unwrap(), 7);
     }
 
@@ -1642,6 +1657,32 @@ mod tests {
         drop(first);
         drop(second);
         let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn ssh_polling_accepts_positive_seconds_and_preserves_defaults() {
+        let default = Duration::from_secs(5);
+        assert_eq!(
+            ssh_poll_interval(Some("60"), default),
+            Duration::from_secs(60)
+        );
+        for value in [None, Some("0"), Some("-1"), Some("invalid")] {
+            assert_eq!(ssh_poll_interval(value, default), default);
+        }
+    }
+
+    #[tokio::test]
+    async fn completion_wakes_a_long_ssh_poll_sleep_for_final_drain() {
+        let (tx, mut rx) = tokio::sync::watch::channel(false);
+        tx.send(true).unwrap();
+        assert!(tokio::time::timeout(
+            Duration::from_secs(1),
+            log_pass(&mut rx, false, tokio::time::sleep(Duration::from_secs(60))),
+        )
+        .await
+        .unwrap()
+        .is_none());
+        assert!(*rx.borrow());
     }
 
     #[test]
