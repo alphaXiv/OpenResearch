@@ -116,6 +116,8 @@ export function ModelPicker({
   onSelectReasoning,
   autonomy,
   onSelectAutonomy,
+  sleepDetail,
+  onOpenSleep,
   lockHarness = false,
   openRequest = 0,
   className,
@@ -131,6 +133,9 @@ export function ModelPicker({
   onSelectReasoning?: (id: string) => void;
   autonomy?: Autonomy;
   onSelectAutonomy?: (autonomy: Autonomy) => void;
+  /** Sleep mode's state for the open session; the row opens its dialog. */
+  sleepDetail?: string;
+  onOpenSleep?: () => void;
   /** When set (a session is open), only the current harness is offered — its
    * harness is fixed for its lifetime, so you can still switch models within it
    * but not switch to a different harness. */
@@ -393,6 +398,18 @@ export function ModelPicker({
               {speedChoices.length > 0 && menuRow(m.model_picker_speed(), speedLabel, "speed")}
               {permissionChoices.length > 0 && menuRow(m.model_picker_mode(), permissionLabel, "permissions")}
               {onSelectAutonomy && menuRow(m.model_picker_autonomy(), autonomyLabel, "autonomy")}
+              {onOpenSleep && (
+                <button
+                  type="button"
+                  className="model-root-row flex w-full items-center gap-2 rounded-sm px-2 py-1.5 text-start text-sm text-text hover:bg-surface"
+                  aria-haspopup="dialog"
+                  onClick={() => { close(); onOpenSleep(); }}
+                >
+                  <span className="flex-1">{m.sleep_mode_title()}</span>
+                  {sleepDetail && <span className="max-w-36 truncate text-sm text-muted">{sleepDetail}</span>}
+                  <ChevronRight size={14} className="shrink-0 text-muted" />
+                </button>
+              )}
             </div>
           )}
           {page === "models" && (

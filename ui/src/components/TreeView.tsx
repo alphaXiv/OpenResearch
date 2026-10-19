@@ -1343,6 +1343,9 @@ export function TreeView({
           onPaneClick={() => setSelectedId(null)}
           viewport={viewport}
           agentSessionId={agentSessionId}
+          autoLayout={autoLayout}
+          onToggleAutoLayout={handleToggleAutoLayout}
+          toolbarActions={toolbarActions}
         >
           {/* Slide-over Inspector Panel */}
           {selectedExp && (

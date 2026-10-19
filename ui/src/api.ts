@@ -2462,3 +2462,67 @@ export const discoverLocalModels = (request: { baseUrl: string; apiKey: string }
 export const connectLocalModel = (request: { name: string; baseUrl: string; apiKey: string; model: string; contextWindow: number }) => post<{ model: string }>("/api/local-models", request);
 export const checkLocalModel = (id: string) => post<{ models: string[] }>(`/api/local-models/${encodeURIComponent(id)}/check`, {});
 export const removeLocalModel = (id: string) => writeResponse(`/api/local-models/${encodeURIComponent(id)}`, { method: "DELETE" }).then((r) => json<{ ok: boolean }>(r));
+
+// --- sleep mode -----------------------------------------------------------------
+
+export interface SleepMeasured {
+  runId: string;
+  value: number;
+}
+
+/** A chat's unattended (overnight) plan with its GPU ledger and progress; see `orx sleep`. */
+export interface SleepStatus {
+  sessionId: string;
+  projectId: string;
+  startedAt: number;
+  chatPrompts: boolean;
+  plan: {
+    gpuBudgetUsd: number;
+    until?: number;
+    objective?: {
+      metric: string;
+      direction: "max" | "min";
+      improvePct?: number;
+      baselineValue?: number;
+    };
+    keepAwake: boolean;
+  };
+  state: {
+    finished?: { reason: string; detail: string; at: number };
+    assessment?: { verdict: string; note: string; revisedImprovePct?: number };
+    researchRounds?: number;
+    interrupts?: number;
+  };
+  budget: { limitUsd: number; spentUsd: number; leftUsd: number; burnUsdPerHour: number };
+  progress: {
+    baseline: SleepMeasured | null;
+    best: SleepMeasured | null;
+    improvementPct: number | null;
+    targetPct: number | null;
+    met: boolean;
+    runsSinceBest: number;
+  } | null;
+}
+
+export interface SleepRequest {
+  budgetUsd: number;
+  hours: number | null;
+  metric: string | null;
+  direction: "max" | "min";
+  targetPct: number | null;
+  baselineValue: number | null;
+}
+
+export const getChatSleep = (sessionId: string, signal?: AbortSignal) =>
+  get<{ sleep: SleepStatus | null }>(`/api/chat/sessions/${sessionId}/sleep`, signal).then((r) => r.sleep);
+
+export const startChatSleep = (sessionId: string, request: SleepRequest) =>
+  put<{ sleep: SleepStatus | null }>(`/api/chat/sessions/${sessionId}/sleep`, request).then((r) => r.sleep);
+
+export const stopChatSleep = (sessionId: string) =>
+  post<{ sleep: SleepStatus | null }>(`/api/chat/sessions/${sessionId}/sleep/stop`, {}).then((r) => r.sleep);
+
+export const turnOffChatSleep = (sessionId: string) =>
+  writeResponse(`/api/chat/sessions/${sessionId}/sleep`, { method: "DELETE" })
+    .then((r) => json<{ sleep: SleepStatus | null }>(r))
+    .then((r) => r.sleep);

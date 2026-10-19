@@ -52,6 +52,16 @@ pub(super) fn routes() -> Router<AppState> {
             "/api/settings/fork-lit-sources",
             get(fork_lit_sources_settings).post(set_fork_lit_sources_settings),
         )
+        .route(
+            "/api/chat/sessions/{id}/sleep",
+            get(sleep_mode::get_sleep)
+                .put(sleep_mode::put_sleep)
+                .delete(sleep_mode::delete_sleep),
+        )
+        .route(
+            "/api/chat/sessions/{id}/sleep/stop",
+            post(sleep_mode::stop_sleep),
+        )
         .merge(fork_compute::routes())
 }
 
