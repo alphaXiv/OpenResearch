@@ -9,6 +9,7 @@
 
 pub mod agent_lifecycle;
 pub mod agent_skills;
+pub mod auto_compact;
 pub mod autonomy;
 pub mod bash;
 pub mod browser_cookies;

@@ -14,6 +14,7 @@ import {
   getGcpSettingsQuery,
   getCrossHarnessSettingsQuery,
   getComputeRoutingSettingsQuery,
+  getAutoCompactSettingsQuery,
   getComputePricesQuery,
   getDecisionModelSettingsQuery,
 } from "../../queries/settings";
@@ -56,6 +57,7 @@ import {
   updateUiState,
   setCrossHarnessSettings,
   setComputeRoutingSettings,
+  setAutoCompactSettings,
 } from "../../api";
 import { m } from "../../paraglide/messages.js";
 import { fmtUnits } from "../../features/fork/ComputeSections";
@@ -501,6 +503,61 @@ export function ComputeRoutingCard({ targets }: { targets: ComputeTargetSummary[
         </ul>
       )}
       {enabled && usable.length < 2 && <p className="mt-3 mb-0 text-sm text-subtext">{m.settings_compute_routing_needs_two()}</p>}
+      {error && <div className="error">{error}</div>}
+    </div>
+  );
+}
+
+/** Thresholds offered for auto-compact, in percent of the context window. */
+const AUTO_COMPACT_PERCENTS = [60, 70, 75, 80, 85, 90, 95];
+
+/** Compacts a chat on its own once a turn ends with the context this full. */
+export function AutoCompactCard() {
+  const options = getAutoCompactSettingsQuery();
+  const query = useQuery(options);
+  const mutation = useMutation({ mutationFn: setAutoCompactSettings });
+  const [error, setError] = useState<string | null>(null);
+  const enabled = query.data?.enabled ?? true;
+  const percent = query.data?.percent ?? 80;
+  const choices = AUTO_COMPACT_PERCENTS.includes(percent) ? AUTO_COMPACT_PERCENTS : [...AUTO_COMPACT_PERCENTS, percent].sort((a, b) => a - b);
+
+  async function save(update: { enabled?: boolean; percent?: number }) {
+    setError(null);
+    try {
+      const next = await mutation.mutateAsync(update);
+      setScopedQueryData(options.queryKey, () => next);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : String(err));
+    }
+  }
+
+  return (
+    <div className={cn(SETTINGS_CARD_CLASS_NAME, "mb-8")}>
+      <div className="flex items-center justify-between gap-6">
+        <div>
+          <div className="text-base font-medium">{m.settings_auto_compact_title()}</div>
+          <p className="mt-[3px] mb-0 text-sm leading-relaxed text-text">{m.settings_auto_compact_description()}</p>
+        </div>
+        <Switch
+          type="button"
+          checked={enabled}
+          aria-label={m.settings_auto_compact_title()}
+          disabled={!query.data || mutation.isPending}
+          onClick={() => void save({ enabled: !enabled })}
+        />
+      </div>
+      <div className="mt-3 flex items-center gap-2.5 text-sm">
+        <span>{m.settings_auto_compact_threshold()}</span>
+        <OptionPicker
+          variant="field"
+          dropDown
+          title={m.settings_auto_compact_threshold()}
+          disabled={!query.data || !enabled || mutation.isPending}
+          choices={choices.map((value) => ({ id: String(value), label: `${value}%` }))}
+          value={String(percent)}
+          onSelect={(id) => void save({ percent: Number(id) })}
+        />
+      </div>
       {error && <div className="error">{error}</div>}
     </div>
   );

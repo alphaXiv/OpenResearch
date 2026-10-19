@@ -1,9 +1,12 @@
+import { useQuery } from "@tanstack/react-query";
 import { m } from "../paraglide/messages.js";
 import { ltr } from "../i18n";
 import { getLocale } from "../paraglide/runtime.js";
 import { fmtTokens, type ContextUsage } from "../api";
 import { usePopover } from "./ModelPicker";
 import { ProgressBar } from "./ProgressBar";
+import { Button } from "./ui";
+import { getAutoCompactSettingsQuery } from "../queries/settings";
 
 /** Amber ≥80%, red ≥95% — mirrors Claude Desktop's context meter. */
 function tone(pct: number): string {
@@ -19,13 +22,14 @@ const RING_C = 2 * Math.PI * RING_R;
  * used, drawn as a small progress ring (token-count text when the window is
  * unknown). Hidden until the harness first reports usage; the popover holds
  * the breakdown. */
-export function ContextMeter({ usage }: { usage?: ContextUsage }) {
+export function ContextMeter({ usage, busy = false, onCompact }: { usage?: ContextUsage; busy?: boolean; onCompact?: () => void }) {
   if (!usage || usage.usedTokens <= 0) return null;
-  return <VisibleContextMeter usage={usage} />;
+  return <VisibleContextMeter usage={usage} busy={busy} onCompact={onCompact} />;
 }
 
-function VisibleContextMeter({ usage }: { usage: ContextUsage }) {
+function VisibleContextMeter({ usage, busy, onCompact }: { usage: ContextUsage; busy: boolean; onCompact?: () => void }) {
   const { open, setOpen, ref } = usePopover();
+  const autoCompact = useQuery({ ...getAutoCompactSettingsQuery(), enabled: open }).data;
   const { usedTokens, contextWindow } = usage;
   const pct =
     contextWindow && contextWindow > 0
@@ -82,6 +86,27 @@ function VisibleContextMeter({ usage }: { usage: ContextUsage }) {
           </div>
           {pct !== null && (
             <ProgressBar value={usedTokens} max={contextWindow!} fillColor={fill} />
+          )}
+          {autoCompact && (
+            <div className="context-meter-auto mt-2 text-sm text-muted">
+              {!autoCompact.enabled
+                ? m.context_meter_auto_compact_off()
+                : pct === null
+                  ? m.context_meter_auto_compact_unknown()
+                  : m.context_meter_auto_compact_at({ percent: ltr(`${autoCompact.percent}%`) })}
+            </div>
+          )}
+          {onCompact && (
+            <Button
+              type="button"
+              size="small"
+              className="mt-2.5 w-full"
+              disabled={busy}
+              title={busy ? m.chat_compact_busy() : undefined}
+              onClick={() => { setOpen(false); onCompact(); }}
+            >
+              {m.context_meter_compact_now()}
+            </Button>
           )}
         </div>
       )}

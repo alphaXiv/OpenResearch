@@ -972,6 +972,19 @@ export const getComputePrices = (signal?: AbortSignal, fresh = false) =>
 export const setComputeRoutingSettings = (update: { enabled?: boolean; excluded?: ComputeTargetId[] }) =>
   post<ComputeRoutingSettings>("/api/settings/compute-routing", update);
 
+/** Compact a chat on its own once a turn ends with its context this full. */
+export interface AutoCompactSettings {
+  enabled: boolean;
+  /** Threshold in percent of the context window (50–95). */
+  percent: number;
+}
+
+export const getAutoCompactSettings = (signal?: AbortSignal) =>
+  get<AutoCompactSettings>("/api/settings/auto-compact", signal);
+
+export const setAutoCompactSettings = (update: { enabled?: boolean; percent?: number }) =>
+  post<AutoCompactSettings>("/api/settings/auto-compact", update);
+
 export interface CrossHarnessSettings {
   enabled: boolean;
   /** Harnesses the user turned off for review. */
