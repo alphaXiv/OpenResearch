@@ -10,6 +10,7 @@
 
 pub(crate) mod harness_accounts;
 pub(crate) mod run_metrics;
+pub(crate) mod sleep;
 mod telemetry;
 pub(crate) use telemetry::{InvocationIdentity, TokenUsage};
 

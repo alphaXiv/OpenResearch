@@ -45,6 +45,7 @@ pub mod ray;
 pub mod resolve;
 pub mod shell_env;
 pub mod skills;
+pub mod sleep;
 pub mod slurm;
 pub mod ssh;
 pub mod ssh_identity;

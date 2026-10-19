@@ -5560,6 +5560,8 @@ impl ChatHost {
                 prepare_project_slash_worktree(&project, &message.text, &session.id).await;
             }
         }
+        // Sleep mode replaces the autonomy level: nobody is there to ask.
+        let sleep_context = super::sleep::turn_context(&store, &session.id);
         let mut turn_text = prepared_input.unwrap_or_else(|| {
             let expanded = contextualize_messages(messages, |text| {
                 expand_slash_skills(&project, text, Some(&session.harness), Some(&session.id))
@@ -5568,7 +5570,9 @@ impl ChatHost {
                 session.native_session_id.as_deref(),
                 session.bootstrap_context.as_deref(),
                 session.goal.as_deref(),
-                Autonomy::from_stored(session.autonomy.as_deref()).turn_context(),
+                sleep_context
+                    .as_deref()
+                    .or(Autonomy::from_stored(session.autonomy.as_deref()).turn_context()),
                 super::demo::turn_context(&project.id),
                 shell_context.as_deref(),
                 expanded,
@@ -5933,7 +5937,13 @@ impl ChatHost {
                 });
             }
         }
-        let policy = Store::open().ok()?.ui_state().ok()?.harness_failover;
+        let store = Store::open().ok()?;
+        let mut policy = store.ui_state().ok()?.harness_failover;
+        // Nobody is there to switch harnesses by hand while sleep mode runs.
+        if !policy.enabled && store.get_sleep(&ctx.session_id).ok().flatten().is_some() {
+            policy.enabled = true;
+        }
+        drop(store);
         // Then a model in another of the harness's quota pools (Antigravity's
         // Gemini models and its Claude/GPT models are metered apart).
         if policy.enabled && accounts::pools(&ctx.harness).len() > 1 {
@@ -8964,6 +8974,7 @@ pub async fn watch_runs(
     data_dir_move_in_progress: Arc<std::sync::atomic::AtomicBool>,
     data_dir_gate: Arc<tokio::sync::Mutex<()>>,
 ) {
+    let mut last_sleep_tick = Instant::now() - SLEEP_TICK;
     loop {
         tokio::time::sleep(Duration::from_secs(3)).await;
         if data_dir_move_in_progress.load(std::sync::atomic::Ordering::SeqCst) {
@@ -8982,7 +8993,107 @@ pub async fn watch_runs(
         {
             eprintln!("orx up: run watcher: {err}");
         }
+        if last_sleep_tick.elapsed() >= SLEEP_TICK {
+            last_sleep_tick = Instant::now();
+            if let Err(err) = process_sleep_sessions(&chat).await {
+                eprintln!("orx up: sleep mode: {err}");
+            }
+        }
     }
+}
+
+const SLEEP_TICK: Duration = Duration::from_secs(30);
+
+/// One watchdog pass over every sleep-mode chat: enforce the GPU budget,
+/// finish plans, interrupt hung turns, and wake idle chats. See
+/// [`super::sleep`].
+async fn process_sleep_sessions(chat: &Arc<ChatHost>) -> Result<()> {
+    use super::sleep::{self, Action, Budget, Observation};
+    let sleeps = Store::open()?.list_sleeps()?;
+    sleep::keep_awake::set(
+        sleeps
+            .iter()
+            .any(|s| s.plan.keep_awake && s.state.finished.is_none()),
+    );
+    for stored in sleeps {
+        let session_id = stored.session_id.clone();
+        let busy = chat.is_busy(&session_id).await;
+        let now = now_ms();
+        // The store is not `Send`, so each step opens its own.
+        let (charges, actions, mut state) = {
+            let store = Store::open()?;
+            let charges = store.sleep_charges(&session_id)?;
+            let runs = store.list_runs_by_project(&stored.project_id)?;
+            let observation = Observation {
+                now,
+                busy,
+                total_runs: runs.len(),
+                active_runs: runs
+                    .iter()
+                    .filter(|run| !crate::local::is_terminal(&run.status))
+                    .count(),
+                budget: Some(Budget::of(&stored.plan, &charges, now)),
+                progress: sleep::progress_from_store(&store, &stored)?,
+            };
+            let mut state = stored.state.clone();
+            let actions = sleep::tick(&stored.plan, &mut state, &observation);
+            (charges, actions, state)
+        };
+        for action in actions {
+            match action {
+                Action::CancelPaidRuns(reason) => {
+                    let store = Store::open()?;
+                    for charge in charges
+                        .iter()
+                        .filter(|c| c.usd_per_hour > 0.0 && !crate::local::is_terminal(&c.status))
+                    {
+                        if let Err(err) = crate::commands::exp::request_local_run_cancel(
+                            &store,
+                            &charge.run_id,
+                            &reason,
+                        ) {
+                            eprintln!("orx up: sleep mode: cancel {}: {err}", charge.run_id);
+                        }
+                    }
+                }
+                Action::Interrupt => {
+                    let _ = chat.interrupt(&session_id).await;
+                }
+                Action::Nudge(text) => {
+                    let delivered = match TurnGuard::claim_hidden(chat, &session_id).await {
+                        Some(guard) => matches!(
+                            chat.send_hidden_message(&session_id, text, guard).await,
+                            Ok(TurnSubmission::Started(_))
+                        ),
+                        None => false,
+                    };
+                    if !delivered {
+                        // Retry later, backing off, instead of losing the nudge.
+                        state = stored.state.clone();
+                        state.nudges = state.nudges.saturating_add(1);
+                        state.idle_since = Some(now);
+                    }
+                }
+            }
+        }
+        if state != stored.state {
+            let store = Store::open()?;
+            // `orx sleep assess|stop|start` may have written meanwhile; theirs win.
+            if let Some(latest) = store.get_sleep(&session_id)? {
+                if latest.created_at == stored.created_at {
+                    if latest.state.assessment != stored.state.assessment {
+                        state.assessment = latest.state.assessment;
+                    }
+                    if latest.state.finished != stored.state.finished {
+                        state.finished = latest.state.finished;
+                        state.finish_notified = latest.state.finish_notified;
+                    }
+                    store.set_sleep_state(&session_id, &state)?;
+                }
+            }
+        }
+    }
+    Ok(())
 }
 
 /// The PATH a child gets: this orx first, so an agent shelling out to `orx`

@@ -2374,7 +2374,18 @@ async fn create_run(State(state): State<AppState>, Json(req): Json<CreateRunReq>
     // Dashboard callers may omit compute options; forwarded CLI requests arrive resolved.
     let args = req.into_run_args();
     crate::compute::validate_run_args(&args).map_err(bad_request)?;
+    let admission = local::sleep::admit_run(&experiment.project_id, &args)
+        .await
+        .map_err(bad_request)?;
     let run = crate::compute::submit(&args).await.map_err(bad_request)?;
+    if let Some(admission) = admission {
+        Store::open()?.record_sleep_charge(
+            &admission.session_id,
+            &run.id,
+            admission.usd_per_hour,
+            run.created_at,
+        )?;
+    }
     Ok(Json(json!({ "run": ApiRun::from(&run) })))
 }
 
