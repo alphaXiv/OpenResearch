@@ -6873,7 +6873,8 @@ impl ChatHost {
         let messages = store.list_chat_messages(&parent.id)?;
         let from = crate::local::harness::chat_harness(&parent.harness)
             .map_or_else(|| parent.harness.clone(), |h| h.name().to_string());
-        session.bootstrap_context = handoff_bootstrap_context(parent, &messages, &from, &left_behind);
+        session.bootstrap_context =
+            handoff_bootstrap_context(parent, &messages, &from, &left_behind);
         session.title = parent.title.clone();
         session.title_source = parent.title.as_ref().map(|_| "fallback".to_string());
         // Unlike a side chat, the new chat owns its worktree and outlives the
