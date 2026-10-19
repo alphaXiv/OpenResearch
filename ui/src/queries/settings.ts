@@ -88,6 +88,12 @@ export const getComputeRoutingSettingsQuery = () => queryOptions({
   staleTime: 300_000,
 });
 
+export const getAutoCompactSettingsQuery = () => queryOptions({
+  queryKey: workspaceKey("getAutoCompactSettings"),
+  queryFn: ({ signal }) => api.getAutoCompactSettings(signal),
+  staleTime: 300_000,
+});
+
 export const getComputePricesQuery = () => queryOptions({
   queryKey: workspaceKey("getComputePrices"),
   queryFn: ({ signal }) => api.getComputePrices(signal),

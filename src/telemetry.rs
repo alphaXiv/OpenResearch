@@ -182,6 +182,14 @@ pub(crate) struct Settings {
     /// Backend ids the user kept out of per-run routing.
     #[serde(default)]
     pub compute_routing_excluded: Vec<String>,
+    /// Compact a chat on its own once its context passes the threshold below.
+    /// Absent = on.
+    #[serde(default)]
+    pub auto_compact: Option<bool>,
+    /// How full the context window may get, in percent, before auto-compact.
+    /// Absent = `auto_compact::DEFAULT_PERCENT`.
+    #[serde(default)]
+    pub auto_compact_percent: Option<u8>,
     /// Surfaces whose `first_action` event has already been sent, so a restart
     /// cannot re-report a later action as the user's first one.
     #[serde(default)]
@@ -345,6 +353,23 @@ pub(crate) fn compute_routing() -> bool {
 
 pub(crate) fn set_compute_routing(enabled: bool) -> std::io::Result<()> {
     mutate_settings(|settings| settings.compute_routing = Some(enabled))
+}
+
+pub(crate) fn auto_compact() -> (Option<bool>, Option<u8>) {
+    load_settings()
+        .map(|settings| (settings.auto_compact, settings.auto_compact_percent))
+        .unwrap_or_default()
+}
+
+pub(crate) fn set_auto_compact(enabled: Option<bool>, percent: Option<u8>) -> std::io::Result<()> {
+    mutate_settings(|settings| {
+        if let Some(enabled) = enabled {
+            settings.auto_compact = Some(enabled);
+        }
+        if let Some(percent) = percent {
+            settings.auto_compact_percent = Some(percent);
+        }
+    })
 }
 
 pub(crate) fn compute_routing_excluded() -> Vec<String> {
