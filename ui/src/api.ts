@@ -2486,6 +2486,7 @@ export interface SleepStatus {
       baselineValue?: number;
     };
     keepAwake: boolean;
+    selfImprove: boolean;
   };
   state: {
     finished?: { reason: string; detail: string; at: number };
@@ -2502,6 +2503,34 @@ export interface SleepStatus {
     met: boolean;
     runsSinceBest: number;
   } | null;
+  /** Self-improvement: the strategy version in force and the one on trial; see `orx strategy`. */
+  strategy: SleepStrategy | null;
+}
+
+export interface StrategyStats {
+  launched: number;
+  wins: number;
+  losses: number;
+  pending: number;
+  spendUsd: number;
+}
+
+export interface StrategyVersion {
+  version: number;
+  parent: number | null;
+  status: string;
+  author: string;
+  rationale: string;
+  decision: string | null;
+  stats: StrategyStats | null;
+}
+
+export interface SleepStrategy {
+  selfImprove: boolean;
+  measurable: boolean;
+  incumbent: StrategyVersion;
+  candidate: (StrategyVersion & { control: StrategyStats | null }) | null;
+  events: { at: number; kind: string; version: number; detail: string }[];
 }
 
 export interface SleepRequest {
@@ -2511,6 +2540,7 @@ export interface SleepRequest {
   direction: "max" | "min";
   targetPct: number | null;
   baselineValue: number | null;
+  selfImprove: boolean;
 }
 
 export const getChatSleep = (sessionId: string, signal?: AbortSignal) =>
@@ -2521,6 +2551,9 @@ export const startChatSleep = (sessionId: string, request: SleepRequest) =>
 
 export const stopChatSleep = (sessionId: string) =>
   post<{ sleep: SleepStatus | null }>(`/api/chat/sessions/${sessionId}/sleep/stop`, {}).then((r) => r.sleep);
+
+export const decideChatSleepStrategy = (sessionId: string, action: "promote" | "reject" | "rollback") =>
+  post<{ sleep: SleepStatus | null }>(`/api/chat/sessions/${sessionId}/sleep/strategy`, { action }).then((r) => r.sleep);
 
 export const turnOffChatSleep = (sessionId: string) =>
   writeResponse(`/api/chat/sessions/${sessionId}/sleep`, { method: "DELETE" })

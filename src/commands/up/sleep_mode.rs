@@ -34,6 +34,7 @@ pub(super) struct SleepReq {
     target_pct: Option<f64>,
     baseline_value: Option<f64>,
     keep_awake: Option<bool>,
+    self_improve: Option<bool>,
 }
 
 pub(super) async fn put_sleep(Path(id): Path<String>, Json(req): Json<SleepReq>) -> ApiResult {
@@ -69,6 +70,7 @@ pub(super) async fn put_sleep(Path(id): Path<String>, Json(req): Json<SleepReq>)
             .map(|h| crate::store::now_ms() + (h * 3_600_000.0) as i64),
         objective,
         keep_awake: req.keep_awake.unwrap_or(previous.keep_awake),
+        self_improve: req.self_improve.unwrap_or(previous.self_improve),
         ..previous
     }
     .validated()
@@ -107,5 +109,47 @@ pub(super) async fn stop_sleep(Path(id): Path<String>, Json(req): Json<StopReq>)
 pub(super) async fn delete_sleep(Path(id): Path<String>) -> ApiResult {
     let store = Store::open()?;
     store.delete_sleep(&id)?;
+    status(&store, &id)
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub(super) struct StrategyReq {
+    /// `promote` or `reject` the candidate on trial, or `rollback` to the
+    /// version the one in force replaced.
+    action: String,
+}
+
+/// The user's decisions over self-improvement, from the Sleep mode dialog.
+pub(super) async fn strategy_action(
+    Path(id): Path<String>,
+    Json(req): Json<StrategyReq>,
+) -> ApiResult {
+    use crate::local::strategy::{self, VersionStatus};
+    let store = Store::open()?;
+    let session = chat(&store, &id)?;
+    let project = &session.project_id;
+    match req.action.as_str() {
+        "promote" => {
+            strategy::promote(&store, project, "promoted by the user").map_err(bad_request)?;
+        }
+        "reject" => {
+            strategy::close_candidate(
+                &store,
+                project,
+                VersionStatus::Rejected,
+                "rejected by the user",
+            )?
+            .ok_or_else(|| bad_request(anyhow!("No strategy is on trial.")))?;
+        }
+        "rollback" => {
+            strategy::rollback(&store, project, None, "user").map_err(bad_request)?;
+        }
+        _ => {
+            return Err(bad_request(anyhow!(
+                "Action is promote, reject, or rollback."
+            )))
+        }
+    }
     status(&store, &id)
 }

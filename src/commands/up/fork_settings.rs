@@ -62,6 +62,10 @@ pub(super) fn routes() -> Router<AppState> {
             "/api/chat/sessions/{id}/sleep/stop",
             post(sleep_mode::stop_sleep),
         )
+        .route(
+            "/api/chat/sessions/{id}/sleep/strategy",
+            post(sleep_mode::strategy_action),
+        )
         .merge(fork_compute::routes())
 }
 

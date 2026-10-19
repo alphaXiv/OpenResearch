@@ -101,6 +101,10 @@ pub struct StartArgs {
     /// Let the computer sleep as usual.
     #[arg(long)]
     pub no_keep_awake: bool,
+    /// Keep the agent's strategy fixed: no retrospectives or trials
+    /// (`orx strategy`).
+    #[arg(long)]
+    pub no_self_improve: bool,
     #[arg(long)]
     pub session: Option<String>,
 }
@@ -236,6 +240,7 @@ fn start(store: &Store, args: StartArgs) -> Result<()> {
             None => defaults.max_turn_secs,
         },
         keep_awake: !args.no_keep_awake,
+        self_improve: !args.no_self_improve,
     }
     .validated()?;
     if sleep::apply_plan(store, &session, &chat.project_id, &plan)? {
@@ -320,6 +325,16 @@ fn status(store: &Store, session: &str, json: bool) -> Result<()> {
     }
     if let Some(finish) = &stored.state.finished {
         println!("  done    {}", finish.detail);
+    }
+    if let Ok(lineup) = crate::local::strategy::lineup(store, &stored.project_id) {
+        let mut line = format!("  strategy v{}", lineup.incumbent.version);
+        match (&lineup.candidate, crate::local::strategy::active(&stored)) {
+            (Some(c), true) => line.push_str(&format!(", v{} on trial", c.version)),
+            (_, false) if !stored.plan.self_improve => line.push_str(", self-improvement off"),
+            (_, false) => line.push_str(", self-improvement needs a target metric"),
+            _ => {}
+        }
+        println!("{line}  (orx strategy show)");
     }
     if stored.state.research_rounds > 0 || stored.state.interrupts > 0 {
         println!(

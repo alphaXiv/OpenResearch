@@ -2380,12 +2380,21 @@ async fn create_run(State(state): State<AppState>, Json(req): Json<CreateRunReq>
         .map_err(bad_request)?;
     let run = crate::compute::submit(&args).await.map_err(bad_request)?;
     if let Some(admission) = admission {
-        Store::open()?.record_sleep_charge(
+        let store = Store::open()?;
+        store.record_sleep_charge(
             &admission.session_id,
             &run.id,
             admission.usd_per_hour,
             run.created_at,
         )?;
+        // Self-improvement: credit the run to the strategy its turn ran under.
+        if let Some(sleep) = store.get_sleep(&admission.session_id)? {
+            if let Err(err) =
+                local::strategy::attribute_run(&store, &sleep, &run.id, run.created_at)
+            {
+                eprintln!("orx up: strategy: {err}");
+            }
+        }
     }
     Ok(Json(json!({ "run": ApiRun::from(&run) })))
 }
