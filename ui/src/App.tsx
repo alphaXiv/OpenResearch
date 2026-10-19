@@ -23,6 +23,7 @@ import { readHarnesses } from "./queries/settings";
 import { useBlocker, useRouter, useRouterState } from "@tanstack/react-router";
 import {
   getTaskWorkspace,
+  initialExperimentTreeState,
   parseDestination,
   safeLocation,
   taskLocation,
@@ -374,7 +375,8 @@ export default function App({ runtime, projectId, pane }: { runtime: RuntimeInfo
   const artifacts = artifactsQuery.data ?? null;
 
   const [view, setView] = useState<ExperimentsView>("table");
-  const [showArchivedExperiments, setShowArchivedExperiments] = useState(false);
+  const [treeState, setTreeState] = useState(initialExperimentTreeState);
+  const showArchivedExperiments = treeState.showArchived;
   // Experiments pane scope: "agent" narrows to the open chat session's work.
   // Falls back to "project" whenever there is no usable experiment attribution.
   const [scope, setScope] = useState<"agent" | "project">("project");
@@ -639,7 +641,8 @@ export default function App({ runtime, projectId, pane }: { runtime: RuntimeInfo
     panelOpen,
     panelMax,
     treeViewport,
-  }), [rightTab, tabHistory, experimentsTabOpen, filesTabOpen, artifactsTabOpen, terminalTabOpen, expTabs, fileTabs, planTabs, subagentTabs, sideTabs, codeTabs, contentTabOrder, previewTab, filesView, filesToggled, selectedRunId, scope, panelOpen, panelMax, treeViewport]);
+    treeState,
+  }), [rightTab, tabHistory, experimentsTabOpen, filesTabOpen, artifactsTabOpen, terminalTabOpen, expTabs, fileTabs, planTabs, subagentTabs, sideTabs, codeTabs, contentTabOrder, previewTab, filesView, filesToggled, selectedRunId, scope, panelOpen, panelMax, treeViewport, treeState]);
   currentRightPaneStateRef.current = rightPaneState;
   const getFileScroll = useCallback(() => Object.fromEntries(fileScrollPositionsRef.current), []);
   const scrollSaveTimer = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
@@ -668,6 +671,7 @@ export default function App({ runtime, projectId, pane }: { runtime: RuntimeInfo
     setScope(state.scope);
     setPanelMax(state.panelMax);
     setTreeViewport(state.treeViewport);
+    setTreeState(state.treeState);
     setDemoOverviewLeading(navigationRef.current.activeSessionId === DEMO_MAIN_SESSION_ID && state.fileTabs.some((tab) => sameFileTab(tab, { path: DEMO_OVERVIEW_ARTIFACT, source: "artifacts" })));
     if (restored) {
       for (const [key, position] of Object.entries(saved?.scroll ?? {})) fileScrollPositionsRef.current.set(key, position);
@@ -1743,6 +1747,87 @@ export default function App({ runtime, projectId, pane }: { runtime: RuntimeInfo
     />
   );
 
+  const experimentToolbarActions = (
+    <div className="experiments-toolbar-controls inline-flex shrink-0 items-center gap-2">
+                    <div className="option-picker relative inline-flex" ref={scopeMenuRef}>
+                      <IconButton size="small"
+                        ref={scopeTriggerRef}
+                        className="experiment-scope-trigger"
+                        active={effectiveScope === "agent"}
+                        title={m.app_experiment_filter({ scope: effectiveScope === "agent" ? m.app_current_task() : m.app_entire_project() })}
+                        aria-label={m.app_filter_experiments()}
+                        aria-expanded={scopeMenuOpen}
+                        onClick={() => setScopeMenuOpen((open) => !open)}
+                      >
+                        <Filter size={16} strokeWidth={2.5} />
+                      </IconButton>
+                      {scopeMenuOpen && (
+                        <div className="option-menu absolute bottom-[calc(100%_+_8px)] start-0 max-h-95 flex flex-col bg-background border border-border rounded-lg shadow-menu z-50 overflow-hidden min-w-47.5 p-1.5 [&.align-right]:start-auto [&.align-right]:end-0 [&.drop-down]:bottom-auto [&.drop-down]:top-[calc(100%_+_4px)] [&.session-menu]:start-auto [&.session-menu]:end-1.5 [&.session-menu]:top-[calc(100%_-_2px)] [&.session-menu]:min-w-35 drop-down align-right experiment-scope-menu [&_.model-item]:whitespace-nowrap [&_.model-item:disabled]:text-muted [&_.model-item:disabled]:cursor-default [&_.model-item:disabled:hover]:bg-transparent">
+                          <MenuItem
+                            aria-pressed={effectiveScope === "agent"}
+                            disabled={!activeSessionId || !allExperimentsAttributed}
+                            title={
+                              !activeSessionId
+                                ? m.app_open_task_to_filter()
+                                : !allExperimentsAttributed
+                                  ? m.app_filter_unavailable_unattributed()
+                                  : undefined
+                            }
+                            onClick={() => {
+                              setScope("agent");
+                              setScopeMenuOpen(false);
+                            }}
+                          >
+                            <span>{m.app_current_task()}</span>
+                            {effectiveScope === "agent" && <Check size={13} />}
+                          </MenuItem>
+                          <MenuItem
+                            aria-pressed={effectiveScope === "project"}
+                            onClick={() => {
+                              setScope("project");
+                              setScopeMenuOpen(false);
+                            }}
+                          >
+                            <span>{m.app_entire_project()}</span>
+                            {effectiveScope === "project" && <Check size={13} />}
+                          </MenuItem>
+                          <div className="my-1 border-t border-border-variant" />
+                          <MenuItem
+                            aria-pressed={showArchivedExperiments}
+                            onClick={() => {
+                              setTreeState((current) => ({ ...current, showArchived: !current.showArchived }));
+                              setScopeMenuOpen(false);
+                            }}
+                          >
+                            <span>{m.app_show_archived_experiments()}</span>
+                            {showArchivedExperiments && <Check size={13} />}
+                          </MenuItem>
+                        </div>
+                      )}
+                    </div>
+                    <div
+                      className="seg inline-flex items-center gap-0.5 rounded-md bg-hover-subtle [&_button]:font-medium [&_button]:text-text [&_button]:rounded-sm [&_button:not(:disabled):hover]:text-text [&_button.active]:bg-background [&_button.active]:shadow-segment [&_button:disabled]:text-muted [&_button:disabled]:cursor-default experiments-view-toggle h-8 p-0.5 [&_button]:h-7 [&_button]:px-2.5 [&_button]:text-xs"
+                      role="group"
+                      aria-label={m.app_experiment_view()}
+                    >
+                      <button
+                        className={view === "table" ? "active" : ""}
+                        aria-pressed={view === "table"}
+                        onClick={() => setView("table")}
+                      >
+                        {m.app_table()}
+                      </button>
+                      <button
+                        className={view === "tree" ? "active" : ""}
+                        aria-pressed={view === "tree"}
+                        onClick={() => setView("tree")}
+                      >
+                        {m.app_tree()}
+                      </button>
+                    </div>
+                  </div>
+  );
+
   return (
     <div className="app flex flex-col h-full">
       {runtime.kind === "local" && <OfflineBanner />}
@@ -1914,87 +1999,11 @@ export default function App({ runtime, projectId, pane }: { runtime: RuntimeInfo
               </TabBody>
             ) : rightTab === "experiments" ? (
               <TabBody>
-                <div className="pane-toolbar flex shrink-0 flex-wrap items-center gap-2 bg-background px-3 pt-2.5 pb-2">
-                  <span className="flex-1" />
-                  <div className="experiments-toolbar-controls inline-flex items-center gap-[5px]">
-                    <div className="option-picker relative inline-flex" ref={scopeMenuRef}>
-                      <IconButton size="small"
-                        ref={scopeTriggerRef}
-                        className="experiment-scope-trigger"
-                        active={effectiveScope === "agent"}
-                        title={m.app_experiment_filter({ scope: effectiveScope === "agent" ? m.app_current_task() : m.app_entire_project() })}
-                        aria-label={m.app_filter_experiments()}
-                        aria-expanded={scopeMenuOpen}
-                        onClick={() => setScopeMenuOpen((open) => !open)}
-                      >
-                        <Filter size={16} strokeWidth={2.5} />
-                      </IconButton>
-                      {scopeMenuOpen && (
-                        <div className="option-menu absolute bottom-[calc(100%_+_8px)] start-0 max-h-95 flex flex-col bg-background border border-border rounded-lg shadow-menu z-50 overflow-hidden min-w-47.5 p-1.5 [&.align-right]:start-auto [&.align-right]:end-0 [&.drop-down]:bottom-auto [&.drop-down]:top-[calc(100%_+_4px)] [&.session-menu]:start-auto [&.session-menu]:end-1.5 [&.session-menu]:top-[calc(100%_-_2px)] [&.session-menu]:min-w-35 drop-down align-right experiment-scope-menu [&_.model-item]:whitespace-nowrap [&_.model-item:disabled]:text-muted [&_.model-item:disabled]:cursor-default [&_.model-item:disabled:hover]:bg-transparent">
-                          <MenuItem
-                            aria-pressed={effectiveScope === "agent"}
-                            disabled={!activeSessionId || !allExperimentsAttributed}
-                            title={
-                              !activeSessionId
-                                ? m.app_open_task_to_filter()
-                                : !allExperimentsAttributed
-                                  ? m.app_filter_unavailable_unattributed()
-                                  : undefined
-                            }
-                            onClick={() => {
-                              setScope("agent");
-                              setScopeMenuOpen(false);
-                            }}
-                          >
-                            <span>{m.app_current_task()}</span>
-                            {effectiveScope === "agent" && <Check size={13} />}
-                          </MenuItem>
-                          <MenuItem
-                            aria-pressed={effectiveScope === "project"}
-                            onClick={() => {
-                              setScope("project");
-                              setScopeMenuOpen(false);
-                            }}
-                          >
-                            <span>{m.app_entire_project()}</span>
-                            {effectiveScope === "project" && <Check size={13} />}
-                          </MenuItem>
-                          <div className="my-1 border-t border-border-variant" />
-                          <MenuItem
-                            aria-pressed={showArchivedExperiments}
-                            onClick={() => {
-                              setShowArchivedExperiments((show) => !show);
-                              setScopeMenuOpen(false);
-                            }}
-                          >
-                            <span>{m.app_show_archived_experiments()}</span>
-                            {showArchivedExperiments && <Check size={13} />}
-                          </MenuItem>
-                        </div>
-                      )}
-                    </div>
-                    <div
-                      className="seg inline-flex items-center gap-0.5 rounded-md bg-hover-subtle [&_button]:font-medium [&_button]:text-text [&_button]:rounded-sm [&_button:not(:disabled):hover]:text-text [&_button.active]:bg-background [&_button.active]:shadow-segment [&_button:disabled]:text-muted [&_button:disabled]:cursor-default experiments-view-toggle p-0.5 [&_button]:py-0.5 [&_button]:px-2 [&_button]:text-sm"
-                      role="group"
-                      aria-label={m.app_experiment_view()}
-                    >
-                      <button
-                        className={view === "table" ? "active" : ""}
-                        aria-pressed={view === "table"}
-                        onClick={() => setView("table")}
-                      >
-                        {m.app_table()}
-                      </button>
-                      <button
-                        className={view === "tree" ? "active" : ""}
-                        aria-pressed={view === "tree"}
-                        onClick={() => setView("tree")}
-                      >
-                        {m.app_tree()}
-                      </button>
-                    </div>
+                {view === "table" && (
+                  <div className="pane-toolbar flex shrink-0 items-center justify-end border-b border-border bg-background px-3 py-2">
+                    {experimentToolbarActions}
                   </div>
-                </div>
+                )}
                 <div className="pane-content flex-1 min-h-0 relative bg-background">
                   {view === "tree" ? (
                     activeProject && (
@@ -2012,6 +2021,10 @@ export default function App({ runtime, projectId, pane }: { runtime: RuntimeInfo
                         onRestoreRegion={restoreArchivedRegion}
                         viewport={treeViewport}
                         onViewportChange={setTreeViewport}
+                        state={treeState}
+                        onStateChange={setTreeState}
+                        onCancel={cancelRun}
+                        toolbarActions={experimentToolbarActions}
                       />
                     )
                   ) : (

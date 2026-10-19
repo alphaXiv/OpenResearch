@@ -7,6 +7,24 @@ export type Pane =
   | { kind: "subagent"; sessionId: string; spawnPartId: string }
   | { kind: "side"; sessionId: string };
 
+export interface ExperimentTreeState {
+  positions: Record<string, { x: number; y: number }>;
+  /** Missing on older workspaces: infer manual mode when positions are saved. */
+  autoLayout?: boolean;
+  search: string;
+  statusFilter: "all" | "active" | "failed";
+  matchIndex: number;
+  selectedId: string | null;
+  showMiniMap: boolean;
+  showArchived: boolean;
+  inspectorTab: "overview" | "runs" | "diff";
+}
+
+export const initialExperimentTreeState = (): ExperimentTreeState => ({
+  positions: {}, autoLayout: true, search: "", statusFilter: "all", matchIndex: 0, selectedId: null,
+  showMiniMap: false, showArchived: false, inspectorTab: "overview",
+});
+
 export interface TaskWorkspace {
   tabs: Pane[];
   active: Pane | null;
@@ -20,6 +38,7 @@ export interface TaskWorkspace {
   panelMax: boolean;
   /** Last React Flow viewport for the experiments tree, if it was opened. */
   treeViewport?: { x: number; y: number; zoom: number } | null;
+  treeState?: ExperimentTreeState;
 }
 
 export interface ProjectWorkspace {

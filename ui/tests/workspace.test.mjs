@@ -19,7 +19,7 @@ function load(name, dependencies) {
   return exports;
 }
 const demo = { DEMO_MAIN_SESSION_ID: "demo-main", DEMO_FIGURE_SESSION_ID: "demo-figures", DEMO_LITERATURE_SESSION_ID: "demo-literature" };
-const tabs = load("workspaceTabs", { "./api": demo });
+const tabs = load("workspaceTabs", { "./api": demo, "./workspaceState": workspace });
 const clean = (value) => JSON.parse(JSON.stringify(value));
 const deferred = () => {
   let resolve, reject;
@@ -73,6 +73,7 @@ function host(api) {
     hook, readiness, scroll,
     get result() { return result; },
     get state() { return state; },
+    updateState(update) { state = { ...state, ...update }; changed = true; },
     navigate(projectId, taskKey, pane) {
       props = { ...props, projectId, taskKey, pane, location: workspace.taskLocation(projectId, taskKey === "new" ? null : taskKey, pane) };
       state = { ...state, rightTab: pane ? tabs.paneTab(pane) : "experiments", panelOpen: Boolean(pane), selectedRunId: pane?.kind === "experiment" ? pane.runId ?? null : null };
@@ -112,6 +113,7 @@ test("all tab variants retain ordering, preview, history, expansion and view met
   saved.expanded = { files: ["src"], [tabs.rightTabKey(tabs.paneTab(code))]: ["src/utils"] };
   saved.scroll = { file: { top: 100, left: 8 } }; saved.sourceModes = { file: true }; saved.panelMax = true;
   saved.treeViewport = { x: 24, y: -18, zoom: 1.4 };
+  saved.treeState = { positions: { exp: { x: -350, y: 600 } }, search: "trial", statusFilter: "active", matchIndex: 1, selectedId: "exp", showMiniMap: true, showArchived: true, inspectorTab: "diff" };
   const restored = tabs.restoreWorkspace(saved, file);
   assert.deepEqual(clean(tabs.rememberWorkspace(restored, saved.scroll, saved.sourceModes)), clean(saved));
   const selected = tabs.applyPane(restored, { ...code, view: "files" });
@@ -123,6 +125,38 @@ test("all tab variants retain ordering, preview, history, expansion and view met
   const line = tabs.applyPane(restored, { ...file, line: 20 });
   assert.equal(line.fileTabs[0].branchLabel, "experiment-branch");
   assert.equal(line.fileTabs[0].line, 20);
+});
+
+test("older workspaces restore default tree settings without losing their viewport", () => {
+  const saved = savedTask();
+  delete saved.treeState;
+  saved.treeViewport = { x: 20, y: -15, zoom: 0.8 };
+  const restored = tabs.restoreWorkspace(saved, undefined);
+  assert.deepEqual(restored.treeState, workspace.initialExperimentTreeState());
+  assert.deepEqual(restored.treeViewport, saved.treeViewport);
+});
+
+test("closing and reopening restores the latest tree layout and view settings", async () => {
+  let stored = { ...workspace.emptyProjectWorkspace(), tasks: { one: savedTask([{ kind: "home", view: "experiments" }]) } };
+  const api = {
+    getProjectUiState: async () => clean(stored),
+    saveProjectUiState: async (_, value) => { stored = clean(value); return stored; },
+  };
+  const app = host(api);
+  await app.flush();
+  const treeState = { ...workspace.initialExperimentTreeState(), positions: { exp: { x: -350, y: 600 } }, search: "trial", statusFilter: "active", selectedId: "exp", showMiniMap: true, showArchived: true, inspectorTab: "diff" };
+  const treeViewport = { x: -200, y: 90, zoom: 0.65 };
+  app.updateState({ treeState, treeViewport });
+  await app.flush();
+  assert.deepEqual(stored.tasks.one.treeState.positions, treeState.positions);
+  assert.deepEqual(stored.tasks.one.treeViewport, treeViewport);
+  app.unmount();
+  await Promise.resolve();
+  const reopened = host(api);
+  await reopened.flush();
+  assert.deepEqual(reopened.state.treeState, treeState);
+  assert.deepEqual(reopened.state.treeViewport, treeViewport);
+  reopened.unmount();
 });
 
 test("demo defaults open the welcome pane and keep figures and literature closed", () => {

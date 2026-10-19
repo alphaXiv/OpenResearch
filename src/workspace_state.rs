@@ -37,6 +37,48 @@ pub struct TaskWorkspace {
     panel_max: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     tree_viewport: Option<TreeViewport>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    tree_state: Option<ExperimentTreeState>,
+}
+
+#[derive(Debug, Clone, Default, Deserialize, Serialize, PartialEq)]
+#[serde(default, rename_all = "camelCase", deny_unknown_fields)]
+struct ExperimentTreeState {
+    positions: BTreeMap<String, TreePosition>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    auto_layout: Option<bool>,
+    search: String,
+    status_filter: TreeStatusFilter,
+    match_index: u64,
+    selected_id: Option<String>,
+    show_mini_map: bool,
+    show_archived: bool,
+    inspector_tab: TreeInspectorTab,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
+#[serde(deny_unknown_fields)]
+struct TreePosition {
+    x: f64,
+    y: f64,
+}
+
+#[derive(Debug, Clone, Default, Deserialize, Serialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+enum TreeStatusFilter {
+    #[default]
+    All,
+    Active,
+    Failed,
+}
+
+#[derive(Debug, Clone, Default, Deserialize, Serialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+enum TreeInspectorTab {
+    #[default]
+    Overview,
+    Runs,
+    Diff,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
@@ -204,6 +246,13 @@ impl WorkspaceState {
                             || !viewport.zoom.is_finite()
                             || viewport.zoom <= 0.0
                     })
+                    || task.tree_state.as_ref().is_some_and(|tree| {
+                        tree.match_index > 9_007_199_254_740_991
+                            || tree.selected_id.as_ref().is_some_and(String::is_empty)
+                            || tree.positions.iter().any(|(id, position)| {
+                                id.is_empty() || !position.x.is_finite() || !position.y.is_finite()
+                            })
+                    })
                     || task.scroll.values().any(|position| {
                         !position.top.is_finite()
                             || !position.left.is_finite()
@@ -336,6 +385,55 @@ mod tests {
             .unwrap()
             .tree_viewport
             .as_mut()
+            .unwrap()
+            .x = f64::INFINITY;
+        assert!(state.validate().is_err());
+    }
+
+    #[test]
+    fn tree_state_is_optional_and_validated() {
+        let mut value = json!({"version":1,"tasks":{"new":{
+            "tabs":[],"active":null,"previewKey":null,"history":[],"expanded":{},
+            "scroll":{},"sourceModes":{},"filesView":"files","scope":"project","panelMax":false
+        }}});
+        for tree in [
+            json!(null),
+            json!({}),
+            json!({"positions":{"trial":{"x":-350.0,"y":600.0}},"search":"trial",
+                "statusFilter":"active","matchIndex":1,"selectedId":"trial",
+                "showMiniMap":true,"showArchived":true,"inspectorTab":"diff"}),
+        ] {
+            value["tasks"]["new"]["treeState"] = tree;
+            let state = WorkspaceState::from_stored(&value.to_string()).unwrap();
+            assert_eq!(
+                WorkspaceState::from_stored(&serde_json::to_string(&state).unwrap()),
+                Some(state)
+            );
+        }
+        for invalid in [
+            json!({"positions":{"trial":{"x":null,"y":0}}}),
+            json!({"positions":{"":{"x":0,"y":0}}}),
+            json!({"statusFilter":"unknown"}),
+            json!({"inspectorTab":"unknown"}),
+            json!({"selectedId":""}),
+            json!({"matchIndex":-1}),
+            json!({"matchIndex":9_007_199_254_740_992_u64}),
+            json!({"content":"not tree metadata"}),
+        ] {
+            value["tasks"]["new"]["treeState"] = invalid;
+            assert!(WorkspaceState::from_stored(&value.to_string()).is_none());
+        }
+        value["tasks"]["new"]["treeState"] = json!({"positions":{"trial":{"x":0,"y":0}}});
+        let mut state: WorkspaceState = serde_json::from_value(value).unwrap();
+        state
+            .tasks
+            .get_mut("new")
+            .unwrap()
+            .tree_state
+            .as_mut()
+            .unwrap()
+            .positions
+            .get_mut("trial")
             .unwrap()
             .x = f64::INFINITY;
         assert!(state.validate().is_err());

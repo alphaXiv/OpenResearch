@@ -13,7 +13,7 @@ import { ltr } from "../i18n";
 
 import { useCallback, useEffect, useMemo, useRef, useState, type RefObject } from "react";
 import { createPortal } from "react-dom";
-import { FolderTree, GitBranch, Terminal } from "lucide-react";
+import { CircleStop, FolderTree, GitBranch, Terminal } from "lucide-react";
 import { parseDiff, type FileData } from "react-diff-view";
 import {
   backendKind,
@@ -123,21 +123,27 @@ export function ExpHoverCard({
   exp,
   runs,
   latestRun,
+  liveRun,
   parentSlug,
   anchor,
   onOpenLogs,
   onOpenCode,
+  onCancel,
+  cancelling,
   onMouseEnter,
   onMouseLeave,
 }: {
   exp: Experiment;
   runs: Run[];
   latestRun: Run | null;
+  liveRun?: Run | null;
   parentSlug: string | null;
   /** Viewport rect of the hovered node (kept fresh by useHoverIntent). */
   anchor: DOMRect;
   onOpenLogs?: (intent: TabOpenIntent) => void;
   onOpenCode: (intent: TabOpenIntent) => void;
+  onCancel?: (runId: string) => Promise<void>;
+  cancelling?: boolean;
   onMouseEnter: () => void;
   onMouseLeave: () => void;
 }) {
@@ -197,8 +203,16 @@ export function ExpHoverCard({
     else if (r.status === "cancelled") counts.cancelled += 1;
     else counts.live += 1; // starting | running
   }
-  const duration = latestRun
-    ? fmtDuration((latestRun.endedAt ?? Date.now()) - latestRun.createdAt)
+  const logsRun = liveRun ?? latestRun;
+  const status = liveRun
+    ? cancelling
+      ? "cancelling"
+      : runDisplayStatus(liveRun)
+    : latestRun
+      ? runDisplayStatus(latestRun)
+      : "idle";
+  const duration = logsRun
+    ? fmtDuration((logsRun.endedAt ?? Date.now()) - logsRun.createdAt)
     : null;
   // Local runs leave resultMarkdown empty on success (the agent freezes its
   // findings into the experiment description instead); on failure it holds a
@@ -238,7 +252,7 @@ export function ExpHoverCard({
     >
       <div className="hc-head">
         <span className="hc-slug">{exp.slug}</span>
-        <StatusBadge status={latestRun ? runDisplayStatus(latestRun) : "idle"} />
+        <StatusBadge status={status} />
       </div>
       {exp.title && <div className="hc-title">{exp.title}</div>}
       <div className="hc-actions">
@@ -258,6 +272,18 @@ export function ExpHoverCard({
           <FolderTree size={13} />
           {m.exp_hover_card_code()}
         </button>
+        {liveRun && onCancel && (
+          <button
+            type="button"
+            className="text-accent-red hover:border-danger hover:bg-danger-subtle hover:text-accent-red disabled:opacity-60"
+            disabled={cancelling}
+            title={cancelling ? m.experiments_stop_requested() : m.experiments_stop_run()}
+            onClick={() => void onCancel(liveRun.id)}
+          >
+            <CircleStop size={13} />
+            {cancelling ? m.common_stopping() : m.common_stop()}
+          </button>
+        )}
       </div>
       {body && (
         <div className={`hc-body${expanded ? " expanded" : ""}`} ref={bodyRef}>
@@ -285,9 +311,9 @@ export function ExpHoverCard({
             ...(counts.live > 0 ? [m.hover_live_count({ count: fmtNumber(counts.live) })] : []),
           ])}
         </span>
-        {latestRun && backendKind(latestRun.backend) && <BackendBadge backend={latestRun.backend} />}
+        {logsRun && backendKind(logsRun.backend) && <BackendBadge backend={logsRun.backend} />}
         {duration && <span>{duration}</span>}
-        {latestRun && <span>{timeAgo(latestRun.createdAt)}</span>}
+        {logsRun && <span>{timeAgo(logsRun.createdAt)}</span>}
       </div>
       <div className="hc-git">
         <div className="hc-git-row">

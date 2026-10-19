@@ -3495,7 +3495,10 @@ mod tests {
                 "history":["home", "file:paper.tex"], "expanded":{"files":["src"]},
                 "scroll":{"file:paper.tex":{"top":23.5,"left":2.0}}, "sourceModes":{"file:paper.tex":true},
                 "filesView":"changes", "scope":"agent", "panelMax":true,
-                "treeViewport":{"x":-24.0,"y":18.0,"zoom":1.4}
+                "treeViewport":{"x":-24.0,"y":18.0,"zoom":1.4},
+                "treeState":{"positions":{"trial":{"x":-350.0,"y":600.0}},"search":"trial",
+                    "statusFilter":"active","matchIndex":1,"selectedId":"trial",
+                    "showMiniMap":true,"showArchived":true,"inspectorTab":"diff"}
             }}
         });
         let workspace: WorkspaceState = serde_json::from_value(value.clone()).unwrap();
