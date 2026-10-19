@@ -238,34 +238,15 @@ fn start(store: &Store, args: StartArgs) -> Result<()> {
         keep_awake: !args.no_keep_awake,
     }
     .validated()?;
-    match existing {
-        // A running plan keeps its ledger, so a changed budget still counts
-        // what was spent.
-        Some(existing) if existing.state.finished.is_none() => {
-            store.update_sleep_plan(&session, &plan)?;
-            println!("\u{2713} Sleep mode plan updated.");
-        }
-        _ => {
-            store.put_sleep(&session, &chat.project_id, &plan)?;
-            println!(
-                "\u{2713} Sleep mode is on. OpenResearch (`orx up`) must keep running; it wakes \
-                 the chat, enforces the budget, and keeps the computer awake."
-            );
-        }
+    if sleep::apply_plan(store, &session, &chat.project_id, &plan)? {
+        println!("\u{2713} Sleep mode plan updated.");
+    } else {
+        println!(
+            "\u{2713} Sleep mode is on. OpenResearch (`orx up`) must keep running; it wakes \
+             the chat, enforces the budget, and keeps the computer awake."
+        );
     }
-    let permission = crate::local::harness::effective_permission_id(
-        &chat.harness,
-        chat.permission_mode.as_deref(),
-    )
-    .and_then(|id| crate::local::harness::PermissionMode::from_id(&id));
-    if matches!(
-        permission,
-        Some(
-            crate::local::harness::PermissionMode::Ask
-                | crate::local::harness::PermissionMode::AcceptEdits
-                | crate::local::harness::PermissionMode::Plan
-        )
-    ) {
+    if sleep::chat_prompts(&chat) {
         eprintln!(
             "! This chat asks before some actions, and nobody will answer while you sleep; \
              a turn that waits is interrupted after the turn limit. Switch the chat to Auto \
@@ -284,34 +265,7 @@ fn status(store: &Store, session: &str, json: bool) -> Result<()> {
     let budget = Budget::of(&stored.plan, &charges, now);
     let progress = sleep::progress_from_store(store, &stored)?;
     if json {
-        let value = serde_json::json!({
-            "sessionId": stored.session_id,
-            "projectId": stored.project_id,
-            "startedAt": stored.created_at,
-            "plan": stored.plan,
-            "state": stored.state,
-            "budget": {
-                "limitUsd": budget.limit,
-                "spentUsd": budget.spent,
-                "leftUsd": budget.left(),
-                "burnUsdPerHour": budget.burn,
-            },
-            "progress": progress.as_ref().map(|p| serde_json::json!({
-                "baseline": p.baseline.as_ref().map(|m| serde_json::json!({"runId": m.run_id, "value": m.value})),
-                "best": p.best.as_ref().map(|m| serde_json::json!({"runId": m.run_id, "value": m.value})),
-                "improvementPct": p.improvement_pct,
-                "targetPct": p.target_pct,
-                "met": p.met,
-                "runsSinceBest": p.runs_since_best,
-            })),
-            "charges": charges.iter().map(|c| serde_json::json!({
-                "runId": c.run_id,
-                "usdPerHour": c.usd_per_hour,
-                "startedAt": c.started_at,
-                "endedAt": c.ended_at,
-                "status": c.status,
-            })).collect::<Vec<_>>(),
-        });
+        let value = sleep::status_json(store, &stored)?;
         println!("{}", serde_json::to_string_pretty(&value)?);
         return Ok(());
     }

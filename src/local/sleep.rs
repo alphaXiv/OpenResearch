@@ -434,6 +434,80 @@ pub fn progress_from_store(store: &Store, sleep: &StoredSleep) -> Result<Option<
     )))
 }
 
+/// Starts the session's plan, or changes a running one in place so its
+/// ledger keeps counting. Returns whether a running plan was updated.
+pub fn apply_plan(
+    store: &Store,
+    session_id: &str,
+    project_id: &str,
+    plan: &SleepPlan,
+) -> Result<bool> {
+    match store.get_sleep(session_id)? {
+        Some(existing) if existing.state.finished.is_none() => {
+            store.update_sleep_plan(session_id, plan)?;
+            Ok(true)
+        }
+        _ => {
+            store.put_sleep(session_id, project_id, plan)?;
+            Ok(false)
+        }
+    }
+}
+
+/// Whether the chat's permission mode would stop a turn to ask the user.
+pub fn chat_prompts(chat: &crate::store::StoredChatSession) -> bool {
+    use crate::local::harness::PermissionMode;
+    matches!(
+        crate::local::harness::effective_permission_id(
+            &chat.harness,
+            chat.permission_mode.as_deref()
+        )
+        .and_then(|id| PermissionMode::from_id(&id)),
+        Some(PermissionMode::Ask | PermissionMode::AcceptEdits | PermissionMode::Plan)
+    )
+}
+
+/// The plan, ledger, and progress as the dashboard and `orx sleep status --json` show them.
+pub fn status_json(store: &Store, stored: &StoredSleep) -> Result<serde_json::Value> {
+    use serde_json::json;
+    let charges = store.sleep_charges(&stored.session_id)?;
+    let budget = Budget::of(&stored.plan, &charges, crate::store::now_ms());
+    let progress = progress_from_store(store, stored)?;
+    let measured = |m: &Measured| json!({ "runId": m.run_id, "value": m.value });
+    let prompts = store
+        .get_chat_session(&stored.session_id)?
+        .is_some_and(|chat| chat_prompts(&chat));
+    Ok(json!({
+        "sessionId": stored.session_id,
+        "projectId": stored.project_id,
+        "startedAt": stored.created_at,
+        "plan": stored.plan,
+        "state": stored.state,
+        "chatPrompts": prompts,
+        "budget": {
+            "limitUsd": budget.limit,
+            "spentUsd": budget.spent,
+            "leftUsd": budget.left(),
+            "burnUsdPerHour": budget.burn,
+        },
+        "progress": progress.as_ref().map(|p| json!({
+            "baseline": p.baseline.as_ref().map(measured),
+            "best": p.best.as_ref().map(measured),
+            "improvementPct": p.improvement_pct,
+            "targetPct": p.target_pct,
+            "met": p.met,
+            "runsSinceBest": p.runs_since_best,
+        })),
+        "charges": charges.iter().map(|c| json!({
+            "runId": c.run_id,
+            "usdPerHour": c.usd_per_hour,
+            "startedAt": c.started_at,
+            "endedAt": c.ended_at,
+            "status": c.status,
+        })).collect::<Vec<_>>(),
+    }))
+}
+
 // --- budget -------------------------------------------------------------------
 
 fn hours(from: i64, to: i64) -> f64 {

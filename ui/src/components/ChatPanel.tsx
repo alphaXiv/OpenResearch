@@ -56,6 +56,7 @@ import {
   Lightbulb,
   MessageSquareQuote,
   MessagesSquare,
+  MoonStar,
   MoreHorizontal,
   PanelLeft,
   Paperclip,
@@ -179,6 +180,7 @@ import { LitSourceLogo, parseOrxLit, paperUrl } from "./LitSourceLogo";
 import { LitSourcesList } from "./LitSourcesPicker";
 import { ChatImageScope, Md } from "./Md";
 import { PlanStrip } from "./PlanStrip";
+import { SleepModeDialog, chatSleepQuery, sleepLabel } from "./SleepModeDialog";
 import { SETTINGS_NAV, harnessSetupPath, type SettingsTab } from "./SettingsPage";
 import { SkillMenu } from "./SkillMenu";
 import { FileMentionMenu } from "./FileMentionMenu";
@@ -4682,6 +4684,11 @@ export function ChatPanel({
   // The open session, if any (its harness is locked; its model/mode/reasoning
   // are what the composer should reflect and edit).
   const openSession = sessions.find((s) => s.id === activeId);
+  const { data: sleepStatus } = useQuery({
+    ...chatSleepQuery(openSession?.id ?? ""),
+    enabled: !!openSession,
+  });
+  const [sleepDialogOpen, setSleepDialogOpen] = useState(false);
 
   // The selection the composer displays and edits:
   //  * with a session open — that session's stored settings, with any unsent
@@ -7208,10 +7215,27 @@ export function ChatPanel({
                   onSelectReasoning={setReasoningLevel}
                   autonomy={openSession?.autonomy ?? preferredAutonomy}
                   onSelectAutonomy={setAutonomy}
+                  sleepDetail={sleepLabel(sleepStatus)}
+                  onOpenSleep={openSession ? () => setSleepDialogOpen(true) : undefined}
                   lockHarness={!!openSession}
                   openRequest={modelPickerRequest}
                 />
                 <ContextMeter usage={openSession?.contextUsage} />
+                {sleepStatus && !sleepStatus.state.finished && (
+                  <IconButton
+                    type="button"
+                    size="small"
+                    className="sleep-mode-indicator"
+                    title={`${m.sleep_mode_title()} · ${sleepLabel(sleepStatus)}`}
+                    aria-label={m.sleep_mode_title()}
+                    onClick={() => setSleepDialogOpen(true)}
+                  >
+                    <MoonStar size={14} aria-hidden="true" />
+                  </IconButton>
+                )}
+                {sleepDialogOpen && openSession && (
+                  <SleepModeDialog sessionId={openSession.id} onClose={() => setSleepDialogOpen(false)} />
+                )}
               </div>
               {busy && !pendingQuestion ? (
                 // Stop whenever the turn is busy and typed text has nowhere to

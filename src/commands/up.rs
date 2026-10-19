@@ -54,6 +54,7 @@ mod fork_settings;
 mod harness_accounts;
 mod harness_setup;
 mod research_tools;
+mod sleep_mode;
 use compute_settings::*;
 
 pub async fn run(args: UpArgs) -> Result<()> {
