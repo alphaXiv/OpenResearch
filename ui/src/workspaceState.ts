@@ -18,11 +18,18 @@ export interface ExperimentTreeState {
   showMiniMap: boolean;
   showArchived: boolean;
   inspectorTab: "overview" | "runs" | "diff";
+  /** Nodes whose subtree the user folded. Missing on older workspaces. */
+  collapsed?: string[];
+  /** Nodes the user reopened after auto-tidy folded them. */
+  expanded?: string[];
+  /** Fold quiet side branches automatically. Missing = on. */
+  autoCollapse?: boolean;
 }
 
 export const initialExperimentTreeState = (): ExperimentTreeState => ({
   positions: {}, autoLayout: true, search: "", statusFilter: "all", matchIndex: 0, selectedId: null,
   showMiniMap: false, showArchived: false, inspectorTab: "overview",
+  collapsed: [], expanded: [], autoCollapse: true,
 });
 
 export interface TaskWorkspace {

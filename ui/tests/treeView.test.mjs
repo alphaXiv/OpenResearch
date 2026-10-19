@@ -5,6 +5,8 @@ import test from "node:test";
 import React from "react";
 import ts from "typescript";
 import { initialExperimentTreeState } from "../src/workspaceState.ts";
+import * as treeLayout from "../src/treeLayout.ts";
+import * as treeCollapse from "../src/treeCollapse.ts";
 
 const require = createRequire(import.meta.url);
 const source = readFileSync(new URL("../src/components/TreeView.tsx", import.meta.url), "utf8");
@@ -69,6 +71,8 @@ function mountTree(overrides = {}) {
     "./ui": {},
     "./StatusBadge": {},
     "./TreeInspector": {},
+    "../treeLayout": treeLayout,
+    "../treeCollapse": treeCollapse,
   };
   const exports = {};
   new Function("require", "exports", compiled)((name) => mocks[name] ?? require(name), exports);
@@ -185,7 +189,9 @@ test("drag commits survive a remount and data refreshes during dragging", () => 
   tree.props.runs = [{ ...tree.props.runs[0], updatedAt: 50 }];
   assert.deepEqual(trial(canvas(tree.render())).position, position);
   canvas(tree.render()).onNodesChange([{ type: "position", id: "trial", position, dragging: false }]);
-  assert.deepEqual(tree.props.state.positions, { trial: position });
+  // Leaving auto layout pins every card, so the dragged one keeps its drop point.
+  assert.deepEqual(tree.props.state.positions.trial, position);
+  assert.equal(tree.props.state.autoLayout, false);
   const reopened = mountTree({ state: JSON.parse(JSON.stringify(tree.props.state)) });
   assert.deepEqual(trial(canvas(reopened.render())).position, position);
   canvas(reopened.render()).onResetLayout();
@@ -210,4 +216,60 @@ test("search, status, minimap, selection, inspector tab and programmatic viewpor
   assert.equal(trial(reopened).data.isSelected, true);
   assert.equal(reopened.children.props.tab, "runs");
   assert.deepEqual(reopened.viewport, viewport);
+});
+
+test("folding a card hides its subtree and survives a remount; matches reveal it", () => {
+  const now = Date.now();
+  const tree = mountTree({
+    experiments: [
+      { id: "baseline", slug: "baseline", createdAt: now, parentExperimentId: null },
+      { id: "trial", slug: "trial", createdAt: now, parentExperimentId: "baseline" },
+      { id: "child", slug: "child", createdAt: now, parentExperimentId: "trial" },
+      { id: "leaf", slug: "deep-leaf", createdAt: now, parentExperimentId: "child" },
+    ],
+  });
+  const open = canvas(tree.render());
+  assert.equal(open.nodes.length, 4);
+  assert.equal(trial(open).data.subtreeCount, 2);
+  trial(open).data.onToggleFold("trial", false);
+  const folded = canvas(tree.render());
+  assert.deepEqual(folded.nodes.map((node) => node.id), ["baseline", "trial"]);
+  assert.equal(trial(folded).data.foldedCount, 2);
+  assert.equal(folded.foldedCount, 2);
+  assert.deepEqual(tree.props.state.collapsed, ["trial"]);
+
+  const reopened = mountTree({ experiments: tree.props.experiments, state: JSON.parse(JSON.stringify(tree.props.state)) });
+  assert.equal(canvas(reopened.render()).nodes.length, 2);
+  canvas(reopened.render()).onSearchChange("deep");
+  assert.equal(canvas(reopened.render()).nodes.length, 4);
+  canvas(reopened.render()).onSearchChange("");
+  canvas(reopened.render()).onExpandAll();
+  assert.equal(canvas(reopened.render()).nodes.length, 4);
+  assert.equal(reopened.props.state.autoCollapse, false);
+});
+
+test("auto tidy folds failed side branches but keeps the newest branch open", () => {
+  const now = Date.now();
+  const tree = mountTree({
+    experiments: [
+      { id: "baseline", slug: "baseline", createdAt: now - 10, parentExperimentId: null },
+      { id: "dead", slug: "dead", createdAt: now - 9, parentExperimentId: "baseline" },
+      { id: "dead-child", slug: "dead-child", createdAt: now - 8, parentExperimentId: "dead" },
+      { id: "trial", slug: "trial", createdAt: now - 7, parentExperimentId: "baseline" },
+      { id: "trial-child", slug: "trial-child", createdAt: now - 6, parentExperimentId: "trial" },
+    ],
+    runs: [
+      { id: "r1", experimentId: "dead", status: "failed", createdAt: now - 5 },
+      { id: "r2", experimentId: "trial", status: "done", createdAt: now - 4 },
+      { id: "r3", experimentId: "trial-child", status: "done", createdAt: now - 3 },
+    ],
+  });
+  const view = canvas(tree.render());
+  assert.deepEqual(view.nodes.map((node) => node.id).sort(), ["baseline", "dead", "trial", "trial-child"]);
+  assert.deepEqual(view.statusCounts, { active: 0, failed: 1 });
+  view.nodes.find((node) => node.id === "dead").data.onToggleFold("dead", true);
+  assert.equal(canvas(tree.render()).nodes.length, 5);
+  assert.deepEqual(tree.props.state.expanded, ["dead"]);
+  canvas(tree.render()).onToggleAutoCollapse();
+  assert.equal(tree.props.state.autoCollapse, false);
 });
