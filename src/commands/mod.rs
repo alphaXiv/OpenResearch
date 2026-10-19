@@ -46,6 +46,7 @@ pub mod serve;
 pub mod skill;
 pub mod sleep;
 pub mod ssh_key;
+pub mod strategy;
 pub mod supervise;
 pub mod telemetry;
 pub mod up;

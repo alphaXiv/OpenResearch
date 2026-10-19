@@ -2,6 +2,7 @@ import { useRef, useState } from "react";
 import { createPortal } from "react-dom";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import {
+  decideChatSleepStrategy,
   getChatSleep,
   startChatSleep,
   stopChatSleep,
@@ -11,7 +12,7 @@ import {
 import { ltr } from "../i18n";
 import { m } from "../paraglide/messages.js";
 import { getLocale } from "../paraglide/runtime.js";
-import { Button, Input } from "./ui";
+import { Button, Input, Switch } from "./ui";
 import { useDialogFocus } from "./useDialogFocus";
 
 export const chatSleepQuery = (sessionId: string) => ({
@@ -55,6 +56,7 @@ export function SleepModeDialog({ sessionId, onClose }: { sessionId: string; onC
   const [baseline, setBaseline] = useState(
     objective?.baselineValue != null ? String(objective.baselineValue) : "",
   );
+  const [selfImprove, setSelfImprove] = useState(plan?.selfImprove ?? true);
   const [error, setError] = useState<string | null>(null);
   const [saving, setSaving] = useState(false);
   const active = !!sleep && !sleep.state.finished;
@@ -97,12 +99,16 @@ export function SleepModeDialog({ sessionId, onClose }: { sessionId: string; onC
           direction,
           targetPct,
           baselineValue,
+          selfImprove,
         }),
       true,
     );
   };
 
   const progress = sleep?.progress;
+  const strategy = sleep?.strategy;
+  const record = (stats: { wins: number; losses: number } | null | undefined) =>
+    m.sleep_mode_strategy_record({ wins: ltr(String(stats?.wins ?? 0)), judged: ltr(String((stats?.wins ?? 0) + (stats?.losses ?? 0))) });
 
   return createPortal(
     <div
@@ -150,6 +156,49 @@ export function SleepModeDialog({ sessionId, onClose }: { sessionId: string; onC
                 <span className="text-muted">{sleep.state.assessment.note}</span>
               </p>
             )}
+            {strategy && (
+              <div className="sleep-mode-strategy mt-2 space-y-1 border-t border-border-variant pt-2">
+                <p className="m-0">
+                  {m.sleep_mode_strategy_in_force({ version: ltr(String(strategy.incumbent.version)) })}{" "}
+                  <span className="text-muted">{record(strategy.incumbent.stats)}</span>
+                </p>
+                {strategy.candidate && (
+                  <p className="m-0">
+                    {m.sleep_mode_strategy_trial({
+                      version: ltr(String(strategy.candidate.version)),
+                      candidate: record(strategy.candidate.stats),
+                      control: record(strategy.candidate.control),
+                    })}{" "}
+                    <span className="text-muted">{strategy.candidate.rationale}</span>
+                  </p>
+                )}
+                {!strategy.measurable && strategy.selfImprove && (
+                  <p className="m-0 text-muted">{m.sleep_mode_strategy_needs_metric()}</p>
+                )}
+                {strategy.events.slice(0, 3).map((event) => (
+                  <p key={`${event.at}-${event.kind}`} className="m-0 truncate text-muted" title={event.detail}>
+                    v{event.version} {event.kind.replace("_", " ")}: {event.detail}
+                  </p>
+                ))}
+                <div className="flex flex-wrap gap-2 pt-1">
+                  {strategy.candidate && (
+                    <>
+                      <Button size="small" disabled={saving} onClick={() => void run(() => decideChatSleepStrategy(sessionId, "promote"), false)}>
+                        {m.sleep_mode_strategy_promote()}
+                      </Button>
+                      <Button size="small" disabled={saving} onClick={() => void run(() => decideChatSleepStrategy(sessionId, "reject"), false)}>
+                        {m.sleep_mode_strategy_reject()}
+                      </Button>
+                    </>
+                  )}
+                  {strategy.incumbent.parent != null && (
+                    <Button size="small" disabled={saving} onClick={() => void run(() => decideChatSleepStrategy(sessionId, "rollback"), false)}>
+                      {m.sleep_mode_strategy_rollback()}
+                    </Button>
+                  )}
+                </div>
+              </div>
+            )}
             {sleep.state.finished && <p className="m-0 text-muted">{sleep.state.finished.detail}</p>}
             {sleep.chatPrompts && !sleep.state.finished && (
               <p className="m-0 text-accent-amber">{m.sleep_mode_prompts_warning()}</p>
@@ -194,6 +243,17 @@ export function SleepModeDialog({ sessionId, onClose }: { sessionId: string; onC
               </label>
             </>
           )}
+          <label className="col-span-2 flex items-start gap-2.5">
+            <Switch
+              checked={selfImprove}
+              aria-label={m.sleep_mode_self_improve()}
+              onClick={() => setSelfImprove((value) => !value)}
+            />
+            <span className="flex flex-col gap-0.5">
+              {m.sleep_mode_self_improve()}
+              <span className="text-muted">{m.sleep_mode_self_improve_hint()}</span>
+            </span>
+          </label>
         </div>
 
         {error && <p className="mt-3 mb-0 text-sm text-accent-red">{error}</p>}

@@ -9087,6 +9087,7 @@ const SLEEP_TICK: Duration = Duration::from_secs(30);
 /// [`super::sleep`].
 async fn process_sleep_sessions(chat: &Arc<ChatHost>) -> Result<()> {
     use super::sleep::{self, Action, Budget, Observation};
+    use super::strategy;
     let sleeps = Store::open()?.list_sleeps()?;
     sleep::keep_awake::set(
         sleeps
@@ -9102,19 +9103,33 @@ async fn process_sleep_sessions(chat: &Arc<ChatHost>) -> Result<()> {
             let store = Store::open()?;
             let charges = store.sleep_charges(&session_id)?;
             let runs = store.list_runs_by_project(&stored.project_id)?;
+            let active_runs = runs
+                .iter()
+                .filter(|run| !crate::local::is_terminal(&run.status))
+                .count();
+            // Self-improvement: decide the open strategy trial on the runs so far.
+            match strategy::advance(&store, &stored, active_runs, now) {
+                Ok(Some(decision)) => eprintln!("orx up: strategy: {decision}"),
+                Ok(None) => {}
+                Err(err) => eprintln!("orx up: strategy: {err}"),
+            }
             let observation = Observation {
                 now,
                 busy,
                 total_runs: runs.len(),
-                active_runs: runs
-                    .iter()
-                    .filter(|run| !crate::local::is_terminal(&run.status))
-                    .count(),
+                active_runs,
                 budget: Some(Budget::of(&stored.plan, &charges, now)),
                 progress: sleep::progress_from_store(&store, &stored)?,
+                retrospective: strategy::retrospective_due(&store, &stored, now).unwrap_or_else(
+                    |err| {
+                        eprintln!("orx up: strategy: {err}");
+                        None
+                    },
+                ),
             };
             let mut state = stored.state.clone();
-            let actions = sleep::tick(&stored.plan, &mut state, &observation);
+            let plan = strategy::effective_plan(&store, &stored);
+            let actions = sleep::tick(&plan, &mut state, &observation);
             (charges, actions, state)
         };
         for action in actions {

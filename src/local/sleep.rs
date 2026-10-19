@@ -65,7 +65,7 @@ impl Direction {
         }
     }
 
-    fn better(self, a: f64, b: f64) -> bool {
+    pub fn better(self, a: f64, b: f64) -> bool {
         match self {
             Self::Max => a > b,
             Self::Min => a < b,
@@ -114,6 +114,10 @@ pub struct SleepPlan {
     /// Keep the computer from sleeping while the plan is active.
     #[serde(default = "default_true")]
     pub keep_awake: bool,
+    /// Let the agent revise its strategy, kept only when runs show it does
+    /// better. See [`crate::local::strategy`].
+    #[serde(default = "default_true")]
+    pub self_improve: bool,
 }
 
 fn default_idle_secs() -> u64 {
@@ -139,6 +143,7 @@ impl Default for SleepPlan {
             stall_runs: default_stall_runs(),
             max_turn_secs: default_max_turn_secs(),
             keep_awake: true,
+            self_improve: true,
         }
     }
 }
@@ -267,6 +272,11 @@ pub struct SleepState {
     pub finish_notified: bool,
     #[serde(default)]
     pub interrupts: u32,
+    /// Which retrospective window the agent was last asked to reflect on.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub retrospective_key: Option<String>,
+    #[serde(default)]
+    pub retrospectives: u32,
 }
 
 // --- progress -----------------------------------------------------------------
@@ -313,21 +323,24 @@ pub fn improvement_pct(direction: Direction, baseline: f64, value: f64) -> f64 {
     }
 }
 
-pub fn progress(
+fn value_of(objective: &Objective, e: &RunEvidence<'_>) -> Option<f64> {
+    e.metrics
+        .and_then(|m| m.metrics.get(&objective.metric).copied())
+}
+
+/// The dataset and split a result must share with the baseline to compare.
+pub type Scope = (String, String);
+
+/// The baseline measurement, and the scope of the run it came from.
+pub fn baseline_and_scope(
     objective: &Objective,
-    assessment: Option<&Assessment>,
-    started_at: i64,
     evidence: &[RunEvidence<'_>],
-) -> Progress {
-    let value_of = |e: &RunEvidence<'_>| -> Option<f64> {
-        e.metrics
-            .and_then(|m| m.metrics.get(&objective.metric).copied())
-    };
+) -> (Option<Measured>, Option<Scope>) {
     let baseline_evidence = match &objective.baseline_run {
         Some(id) => evidence.iter().find(|e| &e.run.id == id),
         None => evidence
             .iter()
-            .filter(|e| e.root && e.run.status == "done" && value_of(e).is_some())
+            .filter(|e| e.root && e.run.status == "done" && value_of(objective, e).is_some())
             .max_by_key(|e| e.run.ended_at.unwrap_or(e.run.created_at)),
     };
     let baseline = match objective.baseline_value {
@@ -336,7 +349,7 @@ pub fn progress(
             value,
         }),
         None => baseline_evidence.and_then(|e| {
-            value_of(e).map(|value| Measured {
+            value_of(objective, e).map(|value| Measured {
                 run_id: e.run.id.clone(),
                 value,
             })
@@ -347,14 +360,29 @@ pub fn progress(
         .filter(|_| objective.baseline_value.is_none())
         .and_then(|e| e.metrics)
         .map(|m| (m.dataset.clone(), m.split.clone()));
-    let comparable = |e: &&RunEvidence<'_>| {
-        e.run.status == "done"
-            && value_of(e).is_some()
-            && scope.as_ref().is_none_or(|(dataset, split)| {
-                e.metrics
-                    .is_some_and(|m| &m.dataset == dataset && &m.split == split)
-            })
-    };
+    (baseline, scope)
+}
+
+/// The run's objective value, when it finished and is comparable.
+pub fn comparable_value(
+    objective: &Objective,
+    scope: Option<&Scope>,
+    e: &RunEvidence<'_>,
+) -> Option<f64> {
+    let in_scope = scope.is_none_or(|(dataset, split)| {
+        e.metrics
+            .is_some_and(|m| &m.dataset == dataset && &m.split == split)
+    });
+    value_of(objective, e).filter(|_| e.run.status == "done" && in_scope)
+}
+
+pub fn progress(
+    objective: &Objective,
+    assessment: Option<&Assessment>,
+    started_at: i64,
+    evidence: &[RunEvidence<'_>],
+) -> Progress {
+    let (baseline, scope) = baseline_and_scope(objective, evidence);
     let mut ordered: Vec<&RunEvidence<'_>> = evidence.iter().collect();
     ordered.sort_by_key(|e| e.run.ended_at.unwrap_or(e.run.created_at));
     let mut best: Option<(&RunEvidence<'_>, f64)> = None;
@@ -364,7 +392,7 @@ pub fn progress(
         if !finished {
             continue;
         }
-        let value = value_of(e).filter(|_| comparable(&e));
+        let value = comparable_value(objective, scope.as_ref(), e);
         match (value, best) {
             (Some(value), None) => {
                 best = Some((e, value));
@@ -405,32 +433,50 @@ pub fn progress(
     }
 }
 
+/// A project's runs with their measurements, loaded once.
+pub struct ProjectEvidence {
+    runs: Vec<StoredRun>,
+    metrics: std::collections::BTreeMap<String, RunMetrics>,
+    roots: HashSet<String>,
+}
+
+impl ProjectEvidence {
+    pub fn load(store: &Store, project_id: &str) -> Result<Self> {
+        Ok(Self {
+            runs: store.list_runs_by_project(project_id)?,
+            metrics: store.project_run_metrics(project_id)?,
+            roots: store
+                .list_experiments_by_project(project_id)?
+                .into_iter()
+                .filter(|e| e.parent_experiment_id.is_none())
+                .map(|e| e.id)
+                .collect(),
+        })
+    }
+
+    pub fn evidence(&self) -> Vec<RunEvidence<'_>> {
+        self.runs
+            .iter()
+            .map(|run| RunEvidence {
+                run,
+                metrics: self.metrics.get(&run.id),
+                root: self.roots.contains(&run.experiment_id),
+            })
+            .collect()
+    }
+}
+
 /// The plan's progress from the store.
 pub fn progress_from_store(store: &Store, sleep: &StoredSleep) -> Result<Option<Progress>> {
     let Some(objective) = &sleep.plan.objective else {
         return Ok(None);
     };
-    let runs = store.list_runs_by_project(&sleep.project_id)?;
-    let metrics = store.project_run_metrics(&sleep.project_id)?;
-    let roots: HashSet<String> = store
-        .list_experiments_by_project(&sleep.project_id)?
-        .into_iter()
-        .filter(|e| e.parent_experiment_id.is_none())
-        .map(|e| e.id)
-        .collect();
-    let evidence: Vec<RunEvidence<'_>> = runs
-        .iter()
-        .map(|run| RunEvidence {
-            run,
-            metrics: metrics.get(&run.id),
-            root: roots.contains(&run.experiment_id),
-        })
-        .collect();
+    let loaded = ProjectEvidence::load(store, &sleep.project_id)?;
     Ok(Some(progress(
         objective,
         sleep.state.assessment.as_ref(),
         sleep.created_at,
-        &evidence,
+        &loaded.evidence(),
     )))
 }
 
@@ -498,6 +544,9 @@ pub fn status_json(store: &Store, stored: &StoredSleep) -> Result<serde_json::Va
             "met": p.met,
             "runsSinceBest": p.runs_since_best,
         })),
+        "strategy": crate::local::strategy::status_json(store, stored)
+            .map_err(|err| eprintln!("orx: strategy: {err}"))
+            .ok(),
         "charges": charges.iter().map(|c| json!({
             "runId": c.run_id,
             "usdPerHour": c.usd_per_hour,
@@ -699,6 +748,8 @@ pub struct Observation {
     pub active_runs: usize,
     pub budget: Option<Budget>,
     pub progress: Option<Progress>,
+    /// A self-improvement retrospective that is due.
+    pub retrospective: Option<crate::local::strategy::Retrospective>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -716,6 +767,7 @@ enum NudgeKind {
     Kickoff,
     Continue,
     Research,
+    Retrospective,
     Finished,
 }
 
@@ -797,13 +849,20 @@ pub fn tick(plan: &SleepPlan, state: &mut SleepState, obs: &Observation) -> Vec<
                 state.research_rounds += 1;
                 NudgeKind::Research
             }
-            _ => NudgeKind::Continue,
+            _ => match &obs.retrospective {
+                Some(due) if state.retrospective_key.as_deref() != Some(due.key.as_str()) => {
+                    state.retrospective_key = Some(due.key.clone());
+                    state.retrospectives += 1;
+                    NudgeKind::Retrospective
+                }
+                _ => NudgeKind::Continue,
+            },
         }
     };
     match kind {
         NudgeKind::Kickoff => state.kicked_off = true,
         NudgeKind::Finished => state.finish_notified = true,
-        NudgeKind::Continue | NudgeKind::Research => state.nudges += 1,
+        NudgeKind::Continue | NudgeKind::Research | NudgeKind::Retrospective => state.nudges += 1,
     }
     state.idle_since = None;
     state.last_nudge_at = Some(obs.now);
@@ -845,6 +904,17 @@ fn nudge_text(kind: NudgeKind, plan: &SleepPlan, state: &SleepState, obs: &Obser
              new hypotheses, reassess feasibility with `orx sleep assess`, then launch the most \
              promising ones, including at least one that departs from the current approach.",
             obs.progress.as_ref().map_or(0, |p| p.runs_since_best)
+        ),
+        NudgeKind::Retrospective => format!(
+            "[orx] Sleep mode: a self-improvement retrospective is due. {}\n{status}\n\
+             Review how you have been working, as the retrospective rules in your strategy \
+             describe (`orx strategy stats --runs`, `orx strategy show`). Then either propose a \
+             revised strategy with `orx strategy propose --rationale \"…\" --file -`, which orx \
+             trials against the current one on the next runs, or keep it with `orx strategy keep \
+             --reason \"…\"`. Then continue the research.",
+            obs.retrospective
+                .as_ref()
+                .map_or("", |due| due.summary.as_str())
         ),
         NudgeKind::Finished => format!(
             "[orx] Sleep mode finished: {}.\n{status}\nDo not start new paid runs. Let runs in \
@@ -949,6 +1019,11 @@ pub fn turn_context(store: &Store, session_id: &str) -> Option<String> {
         .map(|charges| Budget::of(&sleep.plan, &charges, now));
     let progress = progress_from_store(store, &sleep).ok().flatten();
     let status = status_lines(&sleep.plan, &sleep.state, budget, progress.as_ref());
+    // The strategy is how the agent works; a broken one must not cost the turn
+    // its hard rules.
+    let strategy = crate::local::strategy::turn_context(store, &sleep)
+        .map_err(|err| eprintln!("orx: strategy: {err}"))
+        .ok();
     Some(format!(
         "<orx-sleep>\n\
 Sleep mode is on. The user is away (often asleep) and cannot answer, approve, or unblock anything. \
@@ -958,8 +1033,7 @@ Rules:\n\
 - Never ask the user a question or wait for approval: decide, write down why in the experiment \
 description, and continue. Avoid actions that would need a permission prompt.\n\
 - The GPU budget is a hard limit. orx refuses launches that do not fit and cancels paid runs \
-before it is exceeded; plan around it. Prefer free hardware and the cheapest GPU that fits, \
-check `orx compute prices`, and keep spend proportional to the expected information gain.\n\
+before it is exceeded; plan around it.\n\
 - Never block a turn: launch with `orx exp run`, register `orx exp wake <expId>`, and end your \
 turn. orx wakes you when runs finish and checks in when the chat is idle.\n\
 - If your harness runs out of quota, orx continues the chat on another account or harness; \
@@ -973,23 +1047,18 @@ task, the compute each idea needs, and the noise between seeds. Record it with `
 --verdict feasible|uncertain|infeasible --note \"…\"`; when the target is out of reach, commit \
 to the most ambitious target you judge reachable with `--revised-target <pct>` and pursue that. \
 Reassess after every research round.\n\
-- Explore as well as exploit: in every round of experiments, include at least one idea that \
-departs from the obvious next step (a different mechanism, an idea borrowed from another field, \
-an assumption of the baseline removed). Surprising results are the goal; record negative ones \
-too.\n\
-- When finished runs stop improving the best result, run a research round before more compute: \
-use your harness's native subagents on its cheapest, fastest model (or `orx agent spawn \
---harness <h> --model <cheap model>` with an explicit ban on compute launches; check `orx agent \
-quota` first). Give each a distinct source: papers via `orx discover`/`orx paper` (alphaXiv, \
-arXiv, Semantic Scholar, OpenAlex, bioRxiv, PubMed), code and issues on GitHub, model and dataset \
-cards on Hugging Face, benchmark leaderboards, and the web. Ask each for concrete, citable \
-techniques with expected gains; synthesize them into ranked hypotheses yourself.\n\
+- When finished runs stop improving the best result, run a research round before more compute, \
+as your strategy describes.\n\
 - If you conclude with evidence that nothing more is worth spending on, stop with `orx sleep stop \
 --reason \"…\"`.\n\
 - When sleep mode finishes, write a morning report in the artifacts directory: what was tried, \
 the best result against the baseline with run ids, spend, the feasibility verdict, surprising \
-findings, and recommended next steps.\n\
-</orx-sleep>"
+findings, the strategy changes and trial results (`orx strategy log`), and recommended next \
+steps.\n\
+</orx-sleep>{}",
+        strategy
+            .map(|block| format!("\n{block}"))
+            .unwrap_or_default()
     ))
 }
 
@@ -1306,6 +1375,39 @@ mod tests {
         state.idle_since = Some(0);
         stalled.now = 10_000_000;
         assert!(nudge(tick(&plan, &mut state, &stalled)).contains("check-in"));
+    }
+
+    #[test]
+    fn watchdog_asks_for_each_due_retrospective_once() {
+        let plan = SleepPlan {
+            idle_secs: 60,
+            ..SleepPlan::default()
+        };
+        let mut state = SleepState {
+            kicked_off: true,
+            ..SleepState::default()
+        };
+        let mut obs = Observation {
+            now: 0,
+            retrospective: Some(crate::local::strategy::Retrospective {
+                key: "0@0".into(),
+                summary: "6 run(s) judged".into(),
+            }),
+            ..Observation::default()
+        };
+        assert!(tick(&plan, &mut state, &obs).is_empty());
+        obs.now = 61_000;
+        let actions = tick(&plan, &mut state, &obs);
+        assert!(
+            matches!(&actions[0], Action::Nudge(text) if text.contains("retrospective is due"))
+        );
+        assert_eq!(state.retrospectives, 1);
+        // The same window is not asked about again.
+        obs.now = 100_000;
+        assert!(tick(&plan, &mut state, &obs).is_empty());
+        obs.now = 10_000_000;
+        let actions = tick(&plan, &mut state, &obs);
+        assert!(matches!(&actions[0], Action::Nudge(text) if text.contains("check-in")));
     }
 
     #[test]

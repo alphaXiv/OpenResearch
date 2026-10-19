@@ -82,6 +82,9 @@ enum Command {
     /// Let a chat research unattended (overnight) under a hard GPU budget.
     Sleep(commands::sleep::SleepArgs),
 
+    /// The versioned way of working that sleep mode improves from run results.
+    Strategy(commands::strategy::StrategyArgs),
+
     /// List a project's runs.
     Runs(RunsArgs),
 
@@ -1305,6 +1308,7 @@ fn command_name(command: &Command) -> &'static str {
         Command::Project(_) => "project",
         Command::Agent(_) => "agent",
         Command::Sleep(_) => "sleep",
+        Command::Strategy(_) => "strategy",
         Command::Runs(_) => "runs",
         Command::Logs(_) => "logs",
         Command::CreateExperiment(_) => "create-experiment",
@@ -1355,6 +1359,7 @@ async fn dispatch(command: Command) -> error::Result<()> {
         Command::Project(args) => commands::project::run(args).await,
         Command::Agent(args) => commands::agent::run(args).await,
         Command::Sleep(args) => commands::sleep::run(args).await,
+        Command::Strategy(args) => commands::strategy::run(args).await,
         Command::Runs(args) => commands::runs::run(args).await,
         Command::Logs(args) => commands::logs::run(args).await,
         Command::CreateExperiment(args) => commands::create_experiment::run(args).await,

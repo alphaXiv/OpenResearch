@@ -52,6 +52,7 @@ pub mod ssh;
 pub mod ssh_identity;
 pub mod starter;
 pub mod storage;
+pub mod strategy;
 pub mod user_skills;
 
 use crate::error::{anyhow, Result};
