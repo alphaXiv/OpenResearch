@@ -99,11 +99,14 @@ group below has a module (`orx skill <name>`) with the full flags and rules.
 | `orx exp move/archive/unarchive <localExpId>` | Re-parent, hide, or restore experiment nodes; see `orx-experiment-tree`. |
 | `orx exp desc <expId> [--set "<text>" \| --stdin]` | Read or overwrite the experiment's description. |
 | `orx agent spawn "<task>" [--title "<t>"] [--stdin] [--no-wake]` | Delegate an independent task to a helper session; see `orx-agent-delegation`. |
+| `orx agent harnesses [--json]` | List the harnesses a helper can run on, with each one's model vendor. |
+| `orx sleep start --budget <usd> [--for 8h] [--metric <m> --target <pct>]` / `status` / `assess` / `stop` | Run this chat unattended (the user is away) under a hard GPU budget and stop condition; start it only when the user asks. Its rules arrive with every turn. |
+| `orx strategy show` / `stats --runs` / `log` / `diff` / `propose --rationale "…" --file -` / `keep --reason "…"` | Your versioned sleep-mode strategy. In a retrospective, propose a revision backed by run evidence; orx trials it against the version in force and keeps it only if its runs win more often. Budget, deadline and permissions are not part of it. |
 
 To **read or edit** a node's code—including diffing what a run changed—use plain
 Git in the local session worktree. See the `orx-git` module.
 
-### Literature & papers — alphaXiv / OpenAlex / bioRxiv / PubMed (no login required) — module `orx-lit-review`
+### Literature & papers — alphaXiv / OpenAlex / bioRxiv / PubMed / arXiv / Semantic Scholar (no login required) — module `orx-lit-review`
 Use before any web search for academic/research queries (paper, author, blog, model release).
 | Command | What it does |
 |---|---|
@@ -112,6 +115,8 @@ Use before any web search for academic/research queries (paper, author, blog, mo
 | `orx discover openalex "<query>"` | Search the cross-disciplinary OpenAlex scholarly graph. |
 | `orx discover biorxiv "<query>"` | Search bioRxiv preprints through OpenAlex's bioRxiv index. |
 | `orx discover pubmed "<query>"` | Search PubMed biomedical literature through NCBI E-utilities. |
+| `orx discover arxiv "<query>"` | Search arXiv directly: newest submissions and `au:`/`cat:`/`ti:` field queries. |
+| `orx discover semanticscholar "<query>"` | Search Semantic Scholar across disciplines, with citation counts. |
 | `orx paper <id\|url> [--source ...] [--full]` | Fetch a paper: alphaXiv report with automatic full-text fallback (`--full` forces raw text), or OpenAlex/bioRxiv/PubMed metadata+abstract. Source auto-detected from the id. |
 
 ### Skills & templates — module `orx-customize`

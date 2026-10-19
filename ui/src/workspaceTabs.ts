@@ -2,7 +2,7 @@ import type { ExperimentView } from "./components/DetailDrawer";
 import type { CodeView } from "./components/CodeTab";
 import type { WorktreeView } from "./components/WorktreeTab";
 import { DEMO_MAIN_SESSION_ID } from "./api";
-import type { Pane, TaskWorkspace } from "./workspaceState";
+import { initialExperimentTreeState, type ExperimentTreeState, type Pane, type TaskWorkspace } from "./workspaceState";
 
 export function tabPane(tab: RightTab, runId?: string | null): Pane {
   if (typeof tab === "string") return { kind: "home", view: tab };
@@ -45,7 +45,7 @@ export function rememberWorkspace(state: RightPaneSessionState, scroll: TaskWork
     history: state.tabHistory.map(rightTabKey),
     expanded: Object.fromEntries([["files", [...state.filesToggled]], ...state.codeTabs.map((tab) => [rightTabKey(tab), [...tab.toggled]])]),
     scroll, sourceModes, filesView: state.filesView, scope: state.scope, panelMax: state.panelMax,
-    treeViewport: state.treeViewport };
+    treeViewport: state.treeViewport, treeState: state.treeState };
 }
 
 export function restoreWorkspace(saved: TaskWorkspace | undefined, pane: Pane | undefined): RightPaneSessionState {
@@ -56,6 +56,7 @@ export function restoreWorkspace(saved: TaskWorkspace | undefined, pane: Pane | 
     state.scope = saved.scope;
     state.panelMax = saved.panelMax;
     state.treeViewport = saved.treeViewport ?? null;
+    state.treeState = saved.treeState ?? initialExperimentTreeState();
   }
   const tabs = [...(saved?.tabs ?? [])];
   if (pane) {
@@ -253,6 +254,7 @@ export interface RightPaneSessionState {
   panelOpen: boolean;
   panelMax: boolean;
   treeViewport: { x: number; y: number; zoom: number } | null;
+  treeState: ExperimentTreeState;
 }
 
 export function initialRightPaneSessionState(
@@ -281,6 +283,7 @@ export function initialRightPaneSessionState(
     panelOpen: false,
     panelMax: false,
     treeViewport: null,
+    treeState: initialExperimentTreeState(),
   };
   if (sessionId === DEMO_MAIN_SESSION_ID && firstDemoOpen) {
     // First demo open shows only the experiments tab so the idle follow-ups

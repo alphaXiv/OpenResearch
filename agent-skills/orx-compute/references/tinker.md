@@ -1,8 +1,9 @@
 # Tinker (`--backend tinker`)
 
-Use Tinker when the user asks for it or it is the configured default. The
-experiment controller runs as a supervised process on the machine running orx;
-Tinker SDK model operations run remotely.
+Use Tinker when the user asks for it or it is the configured default (or the
+playbook's compute routing lists it). The experiment controller runs as a
+supervised process on the machine running orx; Tinker SDK model operations run
+remotely.
 
 ```sh
 orx exp run <expId> --backend tinker

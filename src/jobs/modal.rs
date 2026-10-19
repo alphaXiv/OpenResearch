@@ -24,11 +24,16 @@ use tokio::process::Command;
 use super::managed_env::ManagedEnv;
 use crate::error::{anyhow, Result};
 
+// Credit and price tracking added by the tuandang304 fork; see docs/fork-maintenance.md.
+mod credit;
+pub use credit::*;
+
 /// Bundled Python launcher. Subcommands (argv[1]):
 ///   submit          spec JSON on stdin -> prints {"sandboxId": "sb-..."}
 ///   status <id>     -> prints {"stage": "...", "message": "..."?}
 ///   logs   <id>     streams the sandbox's merged stdout/stderr, line per line
 ///   cancel <id>     terminate the sandbox
+///   billing         -> prints the workspace's rates and this month's spend
 ///
 /// Exit 3 = the `modal` package isn't importable (surfaced as a friendly hint).
 const LAUNCHER: &str = r#"
@@ -107,6 +112,35 @@ def cancel(sid):
     modal = _modal()
     modal.Sandbox.from_id(sid).terminate()
 
+def billing(since_ms=None):
+    modal = _modal()
+    out = {}
+    try:
+        manager = modal.Workspace.from_context().billing
+    except Exception as e:
+        print(json.dumps({"error": "This modal version has no billing API (%s)." % type(e).__name__}))
+        return
+    try:
+        out["rates"] = {str(k): str(v) for k, v in manager.rates().items()}
+    except Exception as e:
+        out["ratesError"] = str(e)[:300]
+    try:
+        summary = manager.summary()
+        out["meteredCost"] = str(summary.metered_cost)
+        out["billedCost"] = str(summary.billed_cost)
+        out["adjustments"] = {str(k): str(v) for k, v in summary.adjustments.items()}
+    except Exception as e:
+        out["summaryError"] = str(e)[:300]
+    if since_ms:
+        try:
+            from datetime import datetime, timezone
+            start = datetime.fromtimestamp(int(since_ms) / 1000, timezone.utc)
+            items = manager.report(start=start, resolution="h")
+            out["spentSince"] = str(sum(item.cost for item in items))
+        except Exception as e:
+            out["reportError"] = str(e)[:300]
+    print(json.dumps(out))
+
 cmd = sys.argv[1] if len(sys.argv) > 1 else ""
 if cmd == "submit":
     submit()
@@ -116,6 +150,8 @@ elif cmd == "logs":
     logs(sys.argv[2])
 elif cmd == "cancel":
     cancel(sys.argv[2])
+elif cmd == "billing":
+    billing(sys.argv[2] if len(sys.argv) > 2 else None)
 else:
     sys.stderr.write("unknown launcher subcommand: %r" % cmd)
     sys.exit(2)

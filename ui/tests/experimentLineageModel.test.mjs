@@ -31,6 +31,7 @@ const i18n = load("i18n.ts", { "./paraglide/runtime.js": runtime });
 const api = load("api.ts", {
   "./queries/client": {},
   "./queries/invalidation": {},
+  "./features/fork/computeApi": {},
   "./paraglide/messages.js": messages,
   "./paraglide/runtime.js": runtime,
   "./i18n": i18n,

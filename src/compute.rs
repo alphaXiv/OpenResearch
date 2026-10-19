@@ -437,10 +437,79 @@ backend_adapter!(
     false,
     "local archive",
     false,
-    preflight | _args | ready(),
+    preflight | _args | {
+        // A local run shares this machine's RAM; refuse before it can starve it.
+        let snapshot = tokio::task::spawn_blocking(crate::jobs::localbox::memory_snapshot)
+            .await
+            .map_err(|error| anyhow!("memory probe task failed: {error}"))?;
+        match snapshot.and_then(|memory| memory.launch_refusal()) {
+            Some(reason) => Ok(not_ready(reason)),
+            None => ready(),
+        }
+    },
     submit | args,
     source,
     run_id | crate::local::localrun::submit_local_run_with_source(args, source, run_id).await
+);
+
+backend_adapter!(
+    ColabCompute,
+    "colab",
+    "Google Colab",
+    true,
+    true,
+    false,
+    "colab upload",
+    false,
+    preflight | args | {
+        let flavor = match crate::jobs::colab::parse_flavor(args.flavor.as_deref()) {
+            Ok(flavor) => flavor,
+            Err(error) => return Ok(not_ready(error.to_string())),
+        };
+        if let Err(error) = crate::jobs::colab::preflight().await {
+            return Ok(not_ready(error.to_string()));
+        }
+        if let crate::jobs::colab_accounts::AccountChoice::Named(_) = flavor.account {
+            if let Err(error) = crate::jobs::colab_accounts::resolve_account(&flavor).await {
+                return Ok(not_ready(error.to_string()));
+            }
+        }
+        ready()
+    },
+    submit | args,
+    source,
+    run_id | crate::local::localrun::submit_colab_run_with_source(args, source, run_id).await
+);
+
+backend_adapter!(
+    KaggleCompute,
+    "kaggle",
+    "Kaggle",
+    true,
+    true,
+    false,
+    "private Kaggle dataset",
+    false,
+    preflight | args | {
+        let flavor = match crate::jobs::kaggle::parse_flavor(args.flavor.as_deref()) {
+            Ok(flavor) => flavor,
+            Err(error) => return Ok(not_ready(error.to_string())),
+        };
+        if let Err(error) = crate::jobs::kaggle::preflight().await {
+            return Ok(not_ready(error.to_string()));
+        }
+        if let crate::jobs::kaggle::AccountChoice::Named(_) = flavor.account {
+            if let Err(error) =
+                crate::jobs::kaggle::resolve_account(&flavor.account, flavor.accelerator.kind).await
+            {
+                return Ok(not_ready(error.to_string()));
+            }
+        }
+        ready()
+    },
+    submit | args,
+    source,
+    run_id | crate::local::localrun::submit_kaggle_run_with_source(args, source, run_id).await
 );
 
 backend_adapter!(
@@ -672,10 +741,38 @@ backend_adapter!(
             .await
 );
 
+backend_adapter!(
+    GcpCompute,
+    "gcp",
+    "Google Cloud",
+    true,
+    true,
+    false,
+    "SSH tar stream",
+    false,
+    preflight | args | {
+        if let Some(flavor) = args.flavor.as_deref() {
+            crate::jobs::gcp::parse_flavor(flavor)?;
+        }
+        let settings = crate::jobs::gcp::load_settings()?.unwrap_or_default();
+        let check = crate::jobs::gcp::preflight(&settings).await;
+        if !check.compute_ready {
+            return Ok(not_ready(check.error.unwrap_or_else(|| {
+                "Google Cloud is not ready. Run `orx compute test gcp`.".to_string()
+            })));
+        }
+        ready()
+    },
+    submit | args,
+    source,
+    run_id | crate::local::gcp::submit_local_gcp_with_source(args, source, run_id).await
+);
+
 pub fn backend(id: &str) -> Result<Box<dyn ComputeBackend>> {
     match id {
         "local" => Ok(Box::new(LocalCompute)),
         "tinker" => Ok(Box::new(TinkerCompute)),
+        "colab" => Ok(Box::new(ColabCompute)),
         "hf" => Ok(Box::new(HuggingFaceCompute)),
         "modal" => Ok(Box::new(ModalCompute)),
         "k8s" => Ok(Box::new(KubernetesCompute)),
@@ -683,6 +780,8 @@ pub fn backend(id: &str) -> Result<Box<dyn ComputeBackend>> {
         "slurm" => Ok(Box::new(SlurmCompute)),
         "ray" => Ok(Box::new(RayCompute)),
         "openresearch" => Ok(Box::new(OpenResearchCompute)),
+        "gcp" => Ok(Box::new(GcpCompute)),
+        "kaggle" => Ok(Box::new(KaggleCompute)),
         _ => Err(anyhow!("Unknown compute backend '{id}'.")),
     }
 }
@@ -770,7 +869,7 @@ pub fn validate_run_args(args: &crate::ExpRunArgs) -> Result<()> {
                  modal (Modal serverless GPUs), k8s (your Kubernetes cluster), ssh (your own box), \
                  slurm (your Slurm cluster), ray (a Ray Jobs cluster), \
                  openresearch (an ephemeral OpenResearch box), tinker (local controller with remote model compute), \
-                 local (this machine).",
+                 colab (a Google Colab GPU runtime), gcp (a Google Cloud GPU VM), kaggle (a Kaggle kernel), local (this machine).",
                 backend
             ));
         }

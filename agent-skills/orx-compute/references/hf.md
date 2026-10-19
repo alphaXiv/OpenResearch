@@ -1,8 +1,8 @@
 # Hugging Face Jobs (`--backend hf`)
 
 Use this backend only when the user explicitly requests Hugging Face Jobs or it
-is the configured default. A connected token only makes the backend available;
-it does not select it.
+is the configured default (or the playbook's compute routing lists it). A
+connected token only makes the backend available; it does not select it.
 
 Jobs run in the user's Hugging Face account and are billed there. Authentication
 uses `HF_TOKEN` from the environment.

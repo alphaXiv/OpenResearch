@@ -91,8 +91,10 @@ function save(id: string, location: string, key?: string, task?: TaskWorkspace) 
   const oldTask = key ? getTaskWorkspace(previous, key) : undefined;
   if (lastLocation === previous.lastLocation && lastTaskId === previous.lastTaskId && (!task || JSON.stringify(task) === JSON.stringify(oldTask))) return;
   const next = { ...previous, lastLocation, lastTaskId, tasks: key && task ? { ...previous.tasks, [key]: task } : previous.tasks };
+  // Final drag positions and viewport changes save immediately; coalesce text,
+  // inspector and scroll updates, which can arrive more frequently.
   const metadataOnly = oldTask && task && lastLocation === previous.lastLocation
-    && JSON.stringify({ ...oldTask, scroll: {}, sourceModes: {} }) === JSON.stringify({ ...task, scroll: {}, sourceModes: {} });
+    && JSON.stringify({ ...oldTask, scroll: {}, sourceModes: {}, treeState: oldTask.treeState?.positions ?? {} }) === JSON.stringify({ ...task, scroll: {}, sourceModes: {}, treeState: task.treeState?.positions ?? {} });
   projectCache.set(id, next);
   writerFor(id).queue(next, metadataOnly ? 250 : 0);
 }

@@ -1,23 +1,21 @@
 import { WorkspaceEmptyState } from "./WorkspaceEmptyState";
+import { RunComparison } from "../features/research/RunComparison";
 import { m } from "../paraglide/messages.js";
 import { ltr } from "../i18n";
-import { FlaskConical, CircleStop, FolderTree, Terminal } from "lucide-react";
-import { useLayoutEffect, useMemo, useRef, useState } from "react";
-import { fmtNumber, runDisplayStatus, timeAgo, type Experiment, type Run } from "../api";
+import { FlaskConical, CircleStop, FolderTree, GitBranch, Search, Terminal, X, Clock3, ArrowDownWideNarrow } from "lucide-react";
+import { useMemo, useRef, useState, type ReactNode } from "react";
+import { fmtDuration, fmtNumber, runDisplayStatus, timeAgo, type Experiment, type Run } from "../api";
+import { BackendBadge } from "./BackendLogos";
 import { StatusBadge } from "./StatusBadge";
 import { tabOpenGestureHandlers, type TabOpenIntent } from "../tabPreview";
-import { IconButton, Tooltip } from "./ui";
+import { Button, IconButton, Input } from "./ui";
 import { ArchiveMenu, type ArchiveActions } from "./ArchiveMenu";
-import { Rail, type HistoryOrder, type Placed } from "./ExperimentLineage";
-import { buildHistoryNodes, laneCount, layoutChronological, layoutLineage } from "./experimentLineageModel";
-
-const NO_HIGHLIGHT = new Set<string>();
+import { experimentRows, filterExperimentRows, type ExperimentFilter, type ExperimentSort } from "../experimentList";
+import { useLocale } from "../locale";
 
 export function ExperimentsTable({
   runs,
   experiments,
-  showLineage,
-  order,
   archiveActions,
   emptyHint,
   onOpen,
@@ -25,11 +23,10 @@ export function ExperimentsTable({
   onOpenCode,
   onArchive,
   onCancel,
+  toolbarActions,
 }: {
   runs: Run[];
   experiments: Experiment[];
-  showLineage: boolean;
-  order: HistoryOrder;
   archiveActions: Map<string, ArchiveActions>;
   emptyHint?: string;
   onOpen: (experiment: Experiment, intent: TabOpenIntent) => void;
@@ -37,53 +34,35 @@ export function ExperimentsTable({
   onOpenCode: (experimentId: string, intent: TabOpenIntent) => void;
   onArchive: (id: string, direction: "ancestors" | "descendants" | "only", archived: boolean) => void;
   onCancel: (runId: string) => Promise<void>;
+  /** View and scope controls shared with the tree view. */
+  toolbarActions?: ReactNode;
 }) {
   const [pendingCancellation, setPendingCancellation] = useState<ReadonlySet<string>>(new Set());
   const [cancelError, setCancelError] = useState<string | null>(null);
-  const listRef = useRef<HTMLDivElement>(null);
-  const [placed, setPlaced] = useState<Placed[]>([]);
-  const rows = useMemo(() => {
-    const group = { key: "table", title: "", nodes: buildHistoryNodes(experiments, runs) };
-    return order === "lineage" ? layoutLineage(group) : layoutChronological(group, order === "newest");
-  }, [experiments, runs, order]);
-  const railWidth = 15 + 14 * laneCount(rows) + 8;
-  const lastPlaced = placed.at(-1);
-
-  useLayoutEffect(() => {
-    const list = listRef.current;
-    if (!list) return;
-    const elements = [...list.children].filter((child) => child instanceof HTMLDivElement);
-    const measure = () => {
-      setPlaced(rows.flatMap((row, index) => {
-        const element = elements[index];
-        if (!element) return [];
-        const top = element.offsetTop;
-        const height = element.offsetHeight;
-        return [{ row, top, height, y: top + height / 2 }];
-      }));
-    };
-    const observer = new ResizeObserver(measure);
-    for (const element of elements) observer.observe(element);
-    measure();
-    return () => observer.disconnect();
-  }, [rows]);
-  const runsByExperiment = new Map<string, Run[]>();
-  for (const run of runs) {
-    const experimentRuns = runsByExperiment.get(run.experimentId);
-    if (experimentRuns) experimentRuns.push(run);
-    else runsByExperiment.set(run.experimentId, [run]);
-  }
-  for (const experimentRuns of runsByExperiment.values()) {
-    experimentRuns.sort((a, b) => b.createdAt - a.createdAt);
-  }
+  const [search, setSearch] = useState("");
+  const [filter, setFilter] = useState<ExperimentFilter>("all");
+  const [sort, setSort] = useState<ExperimentSort>("recent");
+  const searchRef = useRef<HTMLInputElement>(null);
+  const locale = useLocale();
+  const rows = useMemo(() => experimentRows(experiments, runs), [experiments, runs]);
+  const visibleRows = filterExperimentRows(rows, { search, filter, sort, locale });
+  const filters = [
+    { id: "all", label: m.chat_panel_all(), count: rows.length },
+    { id: "active", label: m.chat_panel_active(), count: rows.filter((row) => row.liveRun).length },
+    { id: "failed", label: m.status_failed(), count: rows.filter((row) => row.failed).length },
+  ] as const;
+  const resetFilters = () => { setSearch(""); setFilter("all"); searchRef.current?.focus(); };
 
   if (rows.length === 0) {
     return (
-      <WorkspaceEmptyState
-        icon={FlaskConical}
-        title={emptyHint ?? m.experiments_none_yet()}
-        description={emptyHint ? undefined : m.experiments_empty_description()}
-      />
+      <div className="absolute inset-0 flex flex-col bg-background">
+        {toolbarActions && <div className="flex shrink-0 justify-end border-b border-border px-3 py-2">{toolbarActions}</div>}
+        <WorkspaceEmptyState
+          icon={FlaskConical}
+          title={emptyHint ?? m.experiments_none_yet()}
+          description={emptyHint ? undefined : m.experiments_empty_description()}
+        />
+      </div>
     );
   }
 
@@ -104,21 +83,55 @@ export function ExperimentsTable({
 
   return (
     <div className="experiments-table-wrap absolute inset-0 overflow-auto bg-background @container">
+      <div className="sticky top-0 z-10 flex flex-col gap-3 border-b border-border bg-background p-4">
+        <div className="flex flex-wrap items-center gap-2">
+          <h2 className="m-0 flex items-center gap-2 text-base font-semibold">
+            <FlaskConical size={17} className="text-primary" aria-hidden="true" />
+            {m.experiments_table_experiments()}
+            <span className="rounded-full bg-surface px-2 py-0.5 text-xs font-medium text-subtext tabular-nums">{fmtNumber(rows.length)}</span>
+          </h2>
+          {toolbarActions && <div className="ms-auto">{toolbarActions}</div>}
+        </div>
+        <div className="relative">
+          <Search size={15} className="pointer-events-none absolute start-3 top-3 text-subtext" aria-hidden="true" />
+          <Input ref={searchRef} type="search" value={search} onChange={(event) => setSearch(event.target.value)}
+            onKeyDown={(event) => { if (event.key === "Escape" && search) { event.preventDefault(); event.stopPropagation(); setSearch(""); } }}
+            placeholder={m.experiments_search()} aria-label={m.experiments_search()}
+            className="h-10 bg-surface ps-9 pe-10 [&::-webkit-search-cancel-button]:appearance-none" />
+          {search && <IconButton className="absolute end-1 top-1" aria-label={m.experiments_clear_search()} onClick={() => { setSearch(""); searchRef.current?.focus(); }}><X size={14} /></IconButton>}
+        </div>
+        <div className="flex flex-wrap gap-1" role="group" aria-label={m.app_filter_experiments()}>
+          {filters.map((item) => <Button key={item.id} size="small" variant="ghost"
+            className={filter === item.id ? "bg-primary-subtle text-primary hover:bg-primary-subtle" : "text-subtext"}
+            aria-pressed={filter === item.id} onClick={() => setFilter(item.id)}>
+            {item.label}<span className="rounded px-1 text-xs tabular-nums">{fmtNumber(item.count)}</span>
+          </Button>)}
+        </div>
+        <div className="flex flex-wrap items-center justify-between gap-2 border-t border-border-variant pt-3">
+          <span className="text-xs text-subtext" role="status">{m.experiments_result_count({ count: fmtNumber(visibleRows.length) })}</span>
+          <label className="flex min-w-0 items-center gap-1.5 text-xs text-subtext">
+            <ArrowDownWideNarrow size={14} aria-hidden="true" />
+            <select aria-label={m.experiments_sort()} value={sort} onChange={(event) => setSort(event.target.value as ExperimentSort)}
+              className="max-w-full cursor-pointer rounded-md border-border-variant bg-background py-1 ps-2 pe-6 text-xs text-text">
+              <option value="recent">{m.experiments_sort_recent()}</option>
+              <option value="name">{m.experiments_sort_name()}</option>
+            </select>
+          </label>
+        </div>
+      </div>
+      <RunComparison key={experiments[0]?.projectId} runs={runs} experiments={experiments} />
       {cancelError && (
         <div className="experiments-table-error py-2 px-3 text-accent-red text-sm border-b border-b-border" role="alert">
           {m.experiments_table_stop_failed()} {cancelError}
         </div>
       )}
-      <div ref={listRef} className="experiments-table relative w-full text-sm bg-background" role="list" aria-label={m.experiments_table_experiments()}>
-        {showLineage && <Rail placed={placed} height={lastPlaced ? lastPlaced.top + lastPlaced.height : 0} path={NO_HIGHLIGHT} selectedId={null} />}
-        {rows.map((row) => {
-          if (row.kind !== "experiment") return null;
-          const experiment = row.node.experiment;
-          const experimentRuns = runsByExperiment.get(experiment.id) ?? [];
-          const latestRun = experimentRuns[0] ?? null;
-          const liveRun = experimentRuns.find(
-            (run) => run.status === "running" || run.status === "starting",
-          );
+      {visibleRows.length === 0 && <div className="flex flex-col items-center gap-3 px-6 py-12 text-center text-subtext">
+          <Search size={28} aria-hidden="true" />
+          <p className="m-0 text-sm">{m.experiments_no_matches()}</p>
+          <Button onClick={resetFilters}>{m.experiments_reset_filters()}</Button>
+        </div>}
+      <div className="experiments-table flex w-full flex-col gap-3 bg-canvas p-3 text-sm" role="list" aria-label={m.experiments_table_experiments()}>
+        {visibleRows.map(({ experiment, runs: experimentRuns, latestRun, liveRun }) => {
           const logsRun = liveRun ?? latestRun;
           const cancelling = Boolean(
             liveRun && (liveRun.cancelRequested || pendingCancellation.has(liveRun.id)),
@@ -134,8 +147,7 @@ export function ExperimentsTable({
           return (
             <div
               key={experiment.id}
-              style={{ paddingLeft: showLineage ? railWidth + 12 : 20 }}
-              className="experiment-table-group grid min-h-11 grid-cols-[minmax(0,_1fr)_4.5rem_4rem_4rem_auto] [grid-template-areas:'name_status_attempts_latest_actions'] items-center gap-x-3 gap-y-1 py-2 pe-3 border-b border-b-divider-subtle bg-background cursor-pointer [&:hover]:bg-surface [&:last-child]:border-b-0 [@container(max-width:640px)]:grid-cols-[auto_auto_minmax(0,_1fr)_auto] [@container(max-width:640px)]:[grid-template-areas:'name_name_name_name'_'status_attempts_latest_actions'] [@container(max-width:640px)]:gap-x-3"
+              className="experiment-table-group grid grid-cols-1 gap-3 rounded-xl border border-border-variant bg-background p-4 cursor-pointer transition-colors hover:border-border-strong focus-within:border-primary @2xl:grid-cols-[minmax(0,1fr)_auto]"
               role="listitem"
               onClick={() => onOpen(experiment, "preview")}
               onDoubleClick={() => onOpen(experiment, "keepOpen")}
@@ -145,10 +157,11 @@ export function ExperimentsTable({
                 onOpen(experiment, "keepOpen");
               }}
             >
-              <div className="experiment-table-name [grid-area:name] min-w-0">
+              <div className="experiment-table-name self-start min-w-0">
                 <button
                   type="button"
-                  className="experiment-table-title line-clamp-2 w-full overflow-hidden text-text font-medium text-start"
+                  className="experiment-table-title line-clamp-2 w-full text-text font-semibold text-start leading-relaxed wrap-anywhere"
+                  title={experiment.title || experiment.slug}
                   {...tabOpenGestureHandlers<HTMLButtonElement>((intent) =>
                     onOpen(experiment, intent),
                   { stopPropagation: true })}
@@ -156,69 +169,76 @@ export function ExperimentsTable({
                   {experiment.title || experiment.slug}
                 </button>
                 {experiment.archived && <span className="text-muted text-xs">{m.tree_archived()}</span>}
+                {experiment.description && (
+                  <p className="mt-1 mb-0 line-clamp-2 text-xs leading-relaxed text-subtext">{experiment.description}</p>
+                )}
+                <span className="experiment-table-subtitle flex items-center min-w-0 gap-1.5 mt-1.5 overflow-hidden text-subtext text-xs [&_>_svg]:shrink-0 [&_code]:min-w-0 [&_code]:overflow-hidden [&_code]:text-ellipsis [&_code]:whitespace-nowrap" title={experiment.branchName}>
+                  <GitBranch size={14} aria-hidden="true" />
+                  <code>{experiment.branchName}</code>
+                </span>
               </div>
-              <div className="experiment-table-status [grid-area:status] min-w-0">
-                <StatusBadge status={status} />
-              </div>
-              <div className="experiment-run-summary [grid-area:attempts] flex items-center gap-2 whitespace-nowrap text-sm text-subtext">
-                <span>{experimentRuns.length === 1 ? m.experiments_one_run() : m.experiments_run_count({ count: fmtNumber(experimentRuns.length) })}</span>
-              </div>
-              <div className="experiment-table-latest [grid-area:latest] whitespace-nowrap text-xs tabular-nums text-subtext">
-                {latestRun ? timeAgo(latestRun.createdAt) : "–"}
+              <div className="experiment-table-meta flex flex-wrap items-center gap-x-3 gap-y-2 text-xs @2xl:justify-end">
+                <div className="experiment-table-status flex items-center gap-2 min-w-0">
+                  <StatusBadge status={status} />
+                  {logsRun?.backend && <BackendBadge backend={logsRun.backend} />}
+                </div>
+                <div className="experiment-run-summary flex items-center min-w-0 gap-2 text-subtext text-xs">
+                  <span>{experimentRuns.length === 1 ? m.experiments_one_run() : m.experiments_run_count({ count: fmtNumber(experimentRuns.length) })}</span>
+                  {logsRun?.endedAt != null && (
+                    <span className="tabular-nums">· {fmtDuration(logsRun.endedAt - logsRun.createdAt)}</span>
+                  )}
+                </div>
+                <div className="experiment-table-latest flex items-center gap-1.5 min-w-0 text-subtext text-xs whitespace-nowrap">
+                  <Clock3 size={12} aria-hidden="true" /><span>{latestRun ? timeAgo(latestRun.createdAt) : m.experiments_not_run_yet()}</span>
+                </div>
               </div>
               <div
-                className="experiment-table-actions [grid-area:actions] flex items-center justify-end gap-1"
+                className="experiment-table-actions flex flex-wrap items-center gap-2 border-t border-border-variant pt-3 @2xl:col-span-2"
                 role="group"
                 aria-label={m.a11y_actions_for({ name: experiment.title || experiment.slug })}
                 onClick={(event) => event.stopPropagation()}
                 onDoubleClick={(event) => event.stopPropagation()}
                 onAuxClick={(event) => event.stopPropagation()}
               >
-                <Tooltip interactive content={logsRun ? m.experiments_open_logs() : m.experiments_no_runs_yet()}>
-                  <IconButton
-                    size="small"
-                    disabled={!logsRun}
-                    aria-label={m.experiments_table_logs()}
-                    {...tabOpenGestureHandlers<HTMLButtonElement>((intent) => {
-                      if (logsRun) onOpenLogs(experiment.id, logsRun.id, intent);
-                    }, { stopPropagation: true })}
-                  >
-                    <Terminal size={15} />
-                  </IconButton>
-                </Tooltip>
-                <Tooltip interactive content={m.experiments_table_code()}>
-                  <IconButton
-                    size="small"
-                    aria-label={m.a11y_browse_code_on({ branch: ltr(experiment.branchName) })}
-                    {...tabOpenGestureHandlers<HTMLButtonElement>((intent) =>
-                      onOpenCode(experiment.id, intent),
-                    { stopPropagation: true })}
-                  >
-                    <FolderTree size={15} />
-                  </IconButton>
-                </Tooltip>
+                <Button
+                  size="small"
+                  disabled={!logsRun}
+                  title={logsRun ? m.experiments_open_logs() : m.experiments_no_runs_yet()}
+                  {...tabOpenGestureHandlers<HTMLButtonElement>((intent) => {
+                    if (logsRun) onOpenLogs(experiment.id, logsRun.id, intent);
+                  }, { stopPropagation: true })}
+                >
+                  <Terminal size={15} />
+                  {m.experiments_table_logs()}
+                </Button>
+                <Button
+                  size="small"
+                  title={m.a11y_browse_code_on({ branch: ltr(experiment.branchName) })}
+                  {...tabOpenGestureHandlers<HTMLButtonElement>((intent) =>
+                    onOpenCode(experiment.id, intent),
+                  { stopPropagation: true })}
+                >
+                  <FolderTree size={15} />
+                  {m.experiments_table_code()}
+                </Button>
                 {liveRun && (
-                  <Tooltip interactive content={cancelling ? m.experiments_stop_requested() : m.experiments_stop_run()}>
-                    <IconButton
-                      size="small"
-                      variant="stop"
-                      disabled={cancelling}
-                      aria-label={cancelling ? m.common_stopping() : m.common_stop()}
-                      onClick={() => void requestCancel(liveRun.id)}
-                    >
-                      <CircleStop size={15} />
-                    </IconButton>
-                  </Tooltip>
+                  <Button
+                    size="small"
+                    variant="danger"
+                    disabled={cancelling}
+                    title={cancelling ? m.experiments_stop_requested() : m.experiments_stop_run()}
+                    onClick={() => void requestCancel(liveRun.id)}
+                  >
+                    <CircleStop size={15} />
+                    {cancelling ? m.common_stopping() : m.common_stop()}
+                  </Button>
                 )}
-                <Tooltip interactive content={m.tree_archive_manage()}>
-                  <ArchiveMenu
-                    compact
-                    id={experiment.id}
-                    name={experiment.title || experiment.slug}
-                    actions={archiveActions.get(experiment.id)!}
-                    onArchive={onArchive}
-                  />
-                </Tooltip>
+                <ArchiveMenu
+                  id={experiment.id}
+                  name={experiment.title || experiment.slug}
+                  actions={archiveActions.get(experiment.id)!}
+                  onArchive={onArchive}
+                />
               </div>
             </div>
           );

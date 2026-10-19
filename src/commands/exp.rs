@@ -32,6 +32,7 @@ pub async fn run(args: crate::ExpArgs) -> Result<()> {
     }
     let mut store = Store::open()?;
     match args.command {
+        ExpCommand::Metrics(args) => super::run_metrics::run(&store, args),
         ExpCommand::Archive {
             exp_id,
             ancestors,

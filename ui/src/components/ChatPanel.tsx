@@ -58,6 +58,7 @@ import {
   Lightbulb,
   MessageSquareQuote,
   MessagesSquare,
+  MoonStar,
   MoreHorizontal,
   PanelLeft,
   Paperclip,
@@ -89,6 +90,7 @@ import {
   cancelQueuedMessage,
   chatAttachmentUrl,
   createChatSession,
+  handoffChatSession,
   getChatSession,
   deleteChatSession,
   DEMO_FIGURE_SESSION_ID,
@@ -182,6 +184,7 @@ import { LitSourceLogo, parseOrxLit, paperUrl } from "./LitSourceLogo";
 import { LitSourcesList } from "./LitSourcesPicker";
 import { ChatImageScope, Md } from "./Md";
 import { PlanStrip } from "./PlanStrip";
+import { SleepModeDialog, chatSleepQuery, sleepLabel } from "./SleepModeDialog";
 import { SETTINGS_NAV, harnessSetupPath, type SettingsTab } from "./SettingsPage";
 import { SkillMenu } from "./SkillMenu";
 import { FileMentionMenu } from "./FileMentionMenu";
@@ -227,6 +230,7 @@ import {
   tableMarkdown,
 } from "./annotationMarkdown";
 import { Button, IconButton, LoadingRow, MenuItem, showAlert, Spinner, Tooltip } from "./ui";
+import { cn } from "./ui/cn";
 import { PaperTitle } from "./PaperTitle";
 
 const TOOL_LINE_CLASS_NAME = "tool-line flex-1 min-w-0 line-clamp-2 break-words text-base leading-6";
@@ -1539,6 +1543,8 @@ function computeToolActivity(part: ChatPart): ToolActivity {
             openalex: m.activity_searched_openalex(),
             biorxiv: m.activity_searched_biorxiv(),
             pubmed: m.activity_searched_pubmed(),
+            arxiv: m.activity_searched_arxiv(),
+            semanticscholar: m.activity_searched_semantic_scholar(),
           }[litCall.strategy]
           : null;
         const label = litCall.kind === "discover"
@@ -1804,19 +1810,29 @@ function computeToolActivity(part: ChatPart): ToolActivity {
       return { kind: "agent", label: subagentLine(normalizedInput) };
     case "error":
       return { kind: "command", label: m.chat_panel_tool_failed() };
+    case "harnessfailover": {
+      const from = inputString(normalizedInput, "fromName", "from");
+      const to = inputString(normalizedInput, "toName", "to");
+      return { kind: "agent", label: from && to ? m.activity_switched_harness({ from: ltr(from), to: ltr(to) }) : part.state?.title ?? tool };
+    }
     case "importedchat":
       return { kind: "project", label: m.activity_imported_chat() };
-    case "contextcompaction":
+    case "contextcompaction": {
+      // orx's auto-compact marks its row with the fill that triggered it.
+      const autoPercent = normalizedInput.auto === true && typeof normalizedInput.percent === "number"
+        ? ltr(`${normalizedInput.percent}%`)
+        : null;
       return {
         kind: "command",
         label: part.state?.status === "error"
           ? m.activity_compacting_failed()
           // A row left running (the host died mid-compaction) is not a success.
           : part.state?.status === "running"
-            ? m.activity_compacting_context()
-            : m.activity_compacted_context(),
-        progressLabel: m.activity_compacting_context(),
+            ? autoPercent ? m.activity_auto_compacting_context({ percent: autoPercent }) : m.activity_compacting_context()
+            : autoPercent ? m.activity_auto_compacted_context({ percent: autoPercent }) : m.activity_compacted_context(),
+        progressLabel: autoPercent ? m.activity_auto_compacting_context({ percent: autoPercent }) : m.activity_compacting_context(),
       };
+    }
     default: {
       const detail = description ?? filePath ?? rawCommand ?? part.state?.title ?? "";
       return { kind: "command", label: detail ? `${tool}: ${detail}` : tool };
@@ -2288,10 +2304,15 @@ function TurnStatusRow({
   onRecover,
   usageLimited = false,
   temporaryApiError = false,
+  superseded = false,
 }: {
   part: ChatPart;
   usageLimited?: boolean;
   temporaryApiError?: boolean;
+  /** The failure no longer describes what the next send will do — a later
+   * turn followed it, or the user picked another model since — so it reads
+   * as history instead of a live alarm. Retry stays: it runs on the new pick. */
+  superseded?: boolean;
   busy: boolean;
   recovering: boolean;
   onRecover?: (turnId: string, action: "retry" | "continue") => void;
@@ -2328,11 +2349,11 @@ function TurnStatusRow({
   const Icon = temporaryApiError ? WifiOff : usageLimited ? Gauge : TriangleAlert;
   const errorMessage = cleanToolError(part.state?.error || m.chat_turn_incomplete());
   return (
-    <details className="turn-usage-limit group/limit text-base text-subtext">
+    <details className={cn("turn-usage-limit group/limit text-base", superseded ? "text-muted" : "text-subtext")} data-superseded={superseded || undefined}>
       <summary className="flex w-fit max-w-full items-center gap-2 cursor-pointer list-none rounded-sm focus-visible:outline-2 focus-visible:outline-text [&::-webkit-details-marker]:hidden">
-        <Icon size={18} className={temporaryApiError ? "shrink-0 text-subtext" : "shrink-0 text-accent-red"} aria-hidden="true" />
+        <Icon size={superseded ? 16 : 18} className={temporaryApiError || superseded ? "shrink-0 text-muted" : "shrink-0 text-accent-red"} aria-hidden="true" />
         <span>{label}</span>
-        <ChevronRight size={16} className="shrink-0 text-text transition-transform duration-120 ease-standard group-open/limit:rotate-90 motion-reduce:transition-none" aria-hidden="true" />
+        <ChevronRight size={16} className={cn("shrink-0 transition-transform duration-120 ease-standard group-open/limit:rotate-90 motion-reduce:transition-none", superseded ? "text-muted" : "text-text")} aria-hidden="true" />
       </summary>
       <pre className="mt-2 rounded-md bg-surface p-2 text-sm font-mono whitespace-pre-wrap wrap-anywhere">
         {errorMessage}
@@ -2990,6 +3011,7 @@ export const Message = memo(function Message({
   busy = false,
   recoveringTurnId,
   onRecover,
+  statusSuperseded = false,
   skills,
   predictTextTail = false,
   forkCount,
@@ -3018,6 +3040,8 @@ export const Message = memo(function Message({
   busy?: boolean;
   recoveringTurnId?: string | null;
   onRecover?: (turnId: string, action: "retry" | "continue") => void;
+  /** Render this turn's failure row as history (see `TurnStatusRow`). */
+  statusSuperseded?: boolean;
   /** Known slash-skills, for rendering a `/name` token as a command chip. */
   skills?: SkillInfo[];
   predictTextTail?: boolean;
@@ -3183,6 +3207,7 @@ export const Message = memo(function Message({
           busy={busy}
           recovering={recoveringTurnId === turnStatus.state?.input?.turnId}
           onRecover={onRecover}
+          superseded={statusSuperseded}
         />
       )}
       {copyText && (
@@ -3733,6 +3758,14 @@ function useTranscriptAnnouncement(messages: ChatMessage[]): TranscriptAnnouncem
   return announcement;
 }
 
+/** Id of the newest assistant message in `messages` (oldest first), if any. */
+function newestAssistantId(messages: readonly ChatMessage[]): string | null {
+  for (let i = messages.length - 1; i >= 0; i--) {
+    if (messages[i].role === "assistant") return messages[i].id;
+  }
+  return null;
+}
+
 const Transcript = memo(function Transcript({
   messages,
   scrollRef,
@@ -3755,6 +3788,7 @@ const Transcript = memo(function Transcript({
   onOpenSubagent,
   recoveringTurnId,
   onRecover,
+  modelSwitchedAfterId = null,
   skills,
 }: {
   /** The branch on screen, oldest first. */
@@ -3781,6 +3815,9 @@ const Transcript = memo(function Transcript({
   onOpenSubagent?: OpenSubagent;
   recoveringTurnId?: string | null;
   onRecover?: (turnId: string, action: "retry" | "continue") => void;
+  /** Newest assistant message when the user last picked another model; its
+   * failure (and everything older) no longer predicts the next send. */
+  modelSwitchedAfterId?: string | null;
   skills?: SkillInfo[];
 }) {
   useLocale();
@@ -3841,6 +3878,12 @@ const Transcript = memo(function Transcript({
     return () => document.removeEventListener("selectionchange", retainSelection);
   }, [scrollRef]);
   const activeMessage = visibleMessages.at(-1);
+  // Only the newest reply's failure is live; older ones were followed by more
+  // turns, and the newest goes quiet once the user picks another model.
+  const liveStatusMessageId = useMemo(() => {
+    const newest = newestAssistantId(visibleMessages);
+    return newest === modelSwitchedAfterId ? null : newest;
+  }, [visibleMessages, modelSwitchedAfterId]);
   const transcriptAnnouncement = useTranscriptAnnouncement(messages);
   const pendingTailTool = busy ? streamTailTool(messages) : null;
   return (
@@ -3899,6 +3942,7 @@ const Transcript = memo(function Transcript({
             busy={recoveryDisabled}
             recoveringTurnId={turnId === recoveringTurnId ? recoveringTurnId : null}
             onRecover={onRecover}
+            statusSuperseded={m.id !== liveStatusMessageId}
             skills={skills}
             predictTextTail={busy && m === activeMessage && m.role === "assistant"}
           />
@@ -4215,15 +4259,15 @@ const blankStarterPrompts = (): StarterPrompt[] => [
   { title: m.chat_panel_starter_blank_3_title(), prompt: m.chat_panel_starter_blank_3_prompt() },
   { title: m.chat_panel_starter_blank_4_title(), prompt: m.chat_panel_starter_blank_4_prompt() },
 ];
-// One outline colour per step so the four boxes read as distinct choices.
+// Color accents distinguish the research starting points on hover.
 const STARTER_TONES = [
-  { box: "border-accent-blue/45", icon: "text-accent-blue" },
-  { box: "border-accent-green/45", icon: "text-accent-green" },
-  { box: "border-accent-amber/45", icon: "text-accent-amber" },
-  { box: "border-primary/45", icon: "text-primary" },
+  { box: "hover:border-accent-blue/45", icon: "text-accent-blue" },
+  { box: "hover:border-accent-green/45", icon: "text-accent-green" },
+  { box: "hover:border-accent-amber/45", icon: "text-accent-amber" },
+  { box: "hover:border-primary/45", icon: "text-primary" },
 ];
 const STARTER_GRID_CLASS =
-  "mt-7 grid w-full max-w-readable grid-cols-1 gap-3 sm:grid-cols-2";
+  "mt-7 grid w-full max-w-readable grid-cols-1 gap-3 @min-[36rem]:grid-cols-2";
 
 /** Reconcile the settings attached to a selected model without treating the
  * catalog as an allowlist. The picker deliberately accepts free-form ids, so
@@ -4489,6 +4533,10 @@ export function ChatPanel({
     };
   }, [stashKey, composerPrefill]);
   const [settingsError, setSettingsError] = useState<string | null>(null);
+  // The newest assistant message when the user last picked another model in
+  // this session: its failure row stops shouting, since the next send runs on
+  // the new pick. Per session, so it resets when the session changes.
+  const [modelSwitchedAfter, setModelSwitchedAfter] = useState<{ sessionId: string; messageId: string } | null>(null);
   const settingsMutationTail = useRef<Promise<void>>(Promise.resolve());
   const settingsMutationSeq = useRef(0);
   const planMutationSeq = useRef(0);
@@ -4691,6 +4739,11 @@ export function ChatPanel({
   // The open session, if any (its harness is locked; its model/mode/reasoning
   // are what the composer should reflect and edit).
   const openSession = sessions.find((s) => s.id === activeId);
+  const { data: sleepStatus } = useQuery({
+    ...chatSleepQuery(openSession?.id ?? ""),
+    enabled: !!openSession,
+  });
+  const [sleepDialogOpen, setSleepDialogOpen] = useState(false);
 
   // The selection the composer displays and edits:
   //  * with a session open — that session's stored settings, with any unsent
@@ -4798,6 +4851,11 @@ export function ChatPanel({
   // permission mode would write a reasoning level the user never chose, and the
   // next send would persist it over their real setting.
   const selectModel = (next: Partial<ModelSelection>) => {
+    if (openSession && next.model !== undefined && next.model !== composerSelection?.model) {
+      const newest = newestAssistantId(messages);
+      setModelSwitchedAfter(newest ? { sessionId: openSession.id, messageId: newest } : null);
+      setSettingsError(null);
+    }
     if (openSession?.harness.startsWith("acp:") && acpModel && next.model) {
       void setChatConfiguration(openSession.id, acpModel.id, next.model).catch((error: unknown) => showAlert(error instanceof Error ? error.message : String(error), "error"));
       return;
@@ -5030,6 +5088,22 @@ export function ChatPanel({
     if (embedded) showAlert(m.side_chat_nested(), "info");
     else if (!openSession || !onOpenSideChat) showAlert(m.side_chat_needs_a_chat(), "info");
     else onOpenSideChat(openSession.id, question);
+  }
+
+  /** Continue the open chat in a new chat on another harness, then open it. */
+  async function handoffChat(selection: ModelSelection) {
+    if (!openSession) return;
+    setSettingsError(null);
+    const visit = projectVisitRef.current;
+    try {
+      const session = await handoffChatSession(openSession.id, selection);
+      if (projectVisitRef.current !== visit) return;
+      setSessions((current) => [session, ...current.filter((row) => row.id !== session.id)]);
+      onActiveSessionChange(session.id, { projectId: session.projectId });
+    } catch (err) {
+      if (projectVisitRef.current !== visit) return;
+      setSettingsError(m.chat_handoff_failed({ error: ltr(err instanceof Error ? err.message : String(err)) }));
+    }
   }
 
   /** Adopt a chat from an agent's own CLI into this project, then open it. */
@@ -6288,11 +6362,11 @@ export function ChatPanel({
   }, [sidebarGrouping, railOpen, embedded, lastVisibleIndex, sidebarRows.length, flatSessions.hasNextPage, flatSessions.isFetching, flatSessions.isError, flatSessions.fetchNextPage]);
 
   const rail = (
-    <aside className="session-rail w-75 shrink-0 flex flex-col mt-5 mac-titlebar:mt-8 me-3.5 mb-5 ms-0 bg-background min-h-0 [&_.rail-body]:flex-1 [&_.rail-body]:min-h-0 [&_.rail-body]:pt-0 [&_.rail-body]:pb-0 [&_.rail-body]:ps-2 [&_.rail-body]:pe-1 border border-border rounded-lg overflow-visible shadow-elevated">
+    <aside className="session-rail w-68 shrink-0 flex flex-col mt-5 mac-titlebar:mt-8 me-3.5 mb-5 ms-0 bg-background min-h-0 [&_.rail-body]:flex-1 [&_.rail-body]:min-h-0 [&_.rail-body]:pt-0 [&_.rail-body]:pb-0 [&_.rail-body]:ps-2 [&_.rail-body]:pe-1 border border-border rounded-lg overflow-visible shadow-elevated">
       {railHeader}
-      <nav className="rail-nav flex flex-col gap-0.5 p-2 shrink-0">
+      <nav className="rail-nav flex flex-col gap-1 p-3 shrink-0 border-b border-border-variant">
         <button
-          className="rail-nav-item flex items-center gap-2.5 py-[7px] px-2.5 text-base text-text rounded-md text-start hover:bg-surface [&[data-tip]::after]:top-auto [&[data-tip]::after]:bottom-[calc(100%_+_6px)]"
+          className="rail-nav-item flex items-center gap-2.5 py-2.5 px-3 mb-1 text-sm font-medium text-primary bg-primary-subtle rounded-lg text-start hover:bg-primary-subtle/70 [&[data-tip]::after]:top-auto [&[data-tip]::after]:bottom-[calc(100%_+_6px)]"
           data-onboarding="new-session"
           data-tip={newTaskShortcut}
           aria-keyshortcuts="Meta+Shift+Enter Control+Shift+Enter"
@@ -6302,7 +6376,8 @@ export function ChatPanel({
           {m.chat_panel_new_chat()}
         </button>
         <button
-          className={`rail-nav-item flex items-center gap-2.5 py-[7px] px-2.5 text-base text-text rounded-md text-start [&:hover:not(.active)]:bg-surface [&.active]:bg-panel [&.active]:font-medium ${mainView === "skills" ? "active" : ""}`}
+          className={`rail-nav-item flex items-center gap-2.5 py-2 px-3 text-sm text-subtext rounded-md text-start [&:hover:not(.active)]:bg-surface [&:hover]:text-text [&.active]:bg-surface [&.active]:text-text [&.active]:font-medium ${mainView === "skills" ? "active" : ""}`}
+          aria-current={mainView === "skills" ? "page" : undefined}
           onClick={() => onSelectMainView("skills")}
         >
           <Blocks size={15} />
@@ -6311,7 +6386,8 @@ export function ChatPanel({
         {SETTINGS_NAV.map((item) => (
           <button
             key={item.id}
-            className={`rail-nav-item flex items-center gap-2.5 py-[7px] px-2.5 text-base text-text rounded-md text-start [&:hover:not(.active)]:bg-surface [&.active]:bg-panel [&.active]:font-medium ${mainView !== "chat" && mainView !== "skills" && item.activeTabs.includes(mainView) ? "active" : ""}`}
+            className={`rail-nav-item flex items-center gap-2.5 py-2 px-3 text-sm text-subtext rounded-md text-start [&:hover:not(.active)]:bg-surface [&:hover]:text-text [&.active]:bg-surface [&.active]:text-text [&.active]:font-medium ${mainView !== "chat" && mainView !== "skills" && item.activeTabs.includes(mainView) ? "active" : ""}`}
+            aria-current={mainView !== "chat" && mainView !== "skills" && item.activeTabs.includes(mainView) ? "page" : undefined}
             data-onboarding={item.id === "compute" ? "nav-compute" : undefined}
             onClick={() => onSelectMainView(item.id)}
           >
@@ -6566,18 +6642,19 @@ export function ChatPanel({
             <p className="m-0 text-balance">{m.side_chat_empty()}</p>
           </div>
         ) : !threadMounted ? (
-          <div className="chat-empty flex-1 flex flex-col items-center justify-center text-text p-8 text-center [&_h2]:m-0 [&_h2]:text-5xl [&_h2]:font-medium [&_h2]:tracking-[-0.015em] [&_h2]:text-text">
-            <div className="chat-empty-mark w-10.5 h-10.5 mb-5.5 [&_svg]:block [&_svg]:w-full [&_svg]:h-full">
+          <div className="chat-empty @container flex-1 min-h-0 overflow-y-auto flex flex-col items-center text-text px-6 py-10 text-center [@media(max-height:800px)]:py-4">
+            <div className="chat-empty-mark [@media(max-height:800px)]:hidden mt-auto flex size-16 shrink-0 items-center justify-center mb-5 rounded-2xl border border-border-variant bg-background shadow-control-subtle text-primary [&_svg]:block [&_svg]:size-9">
               <BrandMark />
             </div>
-            <h2>{m.chat_panel_what_should_we_research()}</h2>
+            <h2 className="m-0 text-3xl font-medium tracking-tight text-balance text-text @min-[36rem]:text-4xl">{m.chat_panel_what_should_we_research()}</h2>
+            <p className="mt-3 mb-0 max-w-105 text-sm leading-relaxed text-subtext">{starterLoading || starterPrompts?.length ? m.chat_panel_start_hint() : m.onboarding_the_local_first_workspace_for_research_agents()}</p>
             {starterLoading && (
               <>
                 <div className={STARTER_GRID_CLASS} aria-hidden="true">
                   {STARTER_ICONS.map((Icon, index) => (
                     <div
                       key={index}
-                      className={`flex min-h-22 animate-pulse flex-col items-start justify-center gap-2.5 rounded-xl border bg-background px-5 py-4 ${STARTER_TONES[index].box}`}
+                      className="flex min-h-32 motion-safe:animate-pulse flex-col items-start justify-center gap-2.5 rounded-xl border border-border-variant bg-background px-5 py-4"
                     >
                       <span className={`flex w-full items-center gap-2.5 ${STARTER_TONES[index].icon}`}>
                         <Icon size={17} />
@@ -6614,14 +6691,14 @@ export function ChatPanel({
                     <div key={index} className="relative min-w-0">
                       <button
                         type="button"
-                        className={`flex h-full min-h-22 w-full min-w-0 cursor-pointer flex-col items-start justify-center gap-1.5 rounded-xl border bg-background py-4 ps-5 pe-11 text-start font-sans transition-colors duration-120 ease-standard hover:bg-surface ${tone.box}`}
+                        className={`group flex h-full min-h-32 w-full min-w-0 cursor-pointer flex-col items-start gap-3 rounded-xl border border-border-variant bg-background py-4 ps-4 pe-10 text-start font-sans shadow-hairline transition-[background,border-color,box-shadow] duration-150 hover:bg-surface hover:shadow-control-subtle ${tone.box}`}
                         onClick={() => pickStarter(false)}
                       >
-                        <span className="flex items-center gap-2.5 text-base font-medium text-text">
-                          <Icon size={17} className={tone.icon} />
+                        <span className="flex items-center gap-2.5 text-sm font-semibold text-text">
+                          <Icon size={18} className={`shrink-0 ${tone.icon}`} />
                           {item.title}
                         </span>
-                        <span className="w-full truncate text-sm text-subtext">{item.prompt}</span>
+                        <span className="line-clamp-3 w-full text-sm leading-relaxed text-subtext">{item.prompt}</span>
                       </button>
                       <IconButton
                         size="small"
@@ -6637,6 +6714,7 @@ export function ChatPanel({
                 })}
               </div>
             )}
+            <div className="mb-auto" />
           </div>
         ) : (
           <div
@@ -6675,6 +6753,7 @@ export function ChatPanel({
                   onOpenSubagent={openSubagent}
                   recoveringTurnId={recoveringTurnId}
                   onRecover={recoverFailedTurn}
+                  modelSwitchedAfterId={modelSwitchedAfter?.sessionId === activeId ? modelSwitchedAfter.messageId : null}
                   skills={transcriptSkills}
                 />
               </ChatImageScope>
@@ -7212,7 +7291,10 @@ export function ChatPanel({
                   onSelectReasoning={setReasoningLevel}
                   autonomy={openSession?.autonomy ?? preferredAutonomy}
                   onSelectAutonomy={setAutonomy}
+                  sleepDetail={sleepLabel(sleepStatus)}
+                  onOpenSleep={openSession ? () => setSleepDialogOpen(true) : undefined}
                   lockHarness={!!openSession}
+                  onHandoff={openSession && !openSession.sideParentSessionId ? (selection) => void handoffChat(selection) : undefined}
                   openRequest={modelPickerRequest}
                   nativeOptions={openSession?.harness.startsWith("acp:") ? acpOptions.filter((option) => option.category !== "model") : []}
                   onSelectNativeOption={(optionId, value) => {
@@ -7220,7 +7302,22 @@ export function ChatPanel({
                     void setChatConfiguration(openSession.id, optionId, value).catch((error: unknown) => showAlert(error instanceof Error ? error.message : String(error), "error"));
                   }}
                 />
-                <ContextMeter usage={openSession?.contextUsage} />
+                <ContextMeter usage={openSession?.contextUsage} busy={busy} onCompact={openSession ? () => void compactSession() : undefined} />
+                {sleepStatus && !sleepStatus.state.finished && (
+                  <IconButton
+                    type="button"
+                    size="small"
+                    className="sleep-mode-indicator"
+                    title={`${m.sleep_mode_title()} · ${sleepLabel(sleepStatus)}`}
+                    aria-label={m.sleep_mode_title()}
+                    onClick={() => setSleepDialogOpen(true)}
+                  >
+                    <MoonStar size={14} aria-hidden="true" />
+                  </IconButton>
+                )}
+                {sleepDialogOpen && openSession && (
+                  <SleepModeDialog sessionId={openSession.id} onClose={() => setSleepDialogOpen(false)} />
+                )}
               </div>
               {busy && !pendingQuestion ? (
                 // Stop whenever the turn is busy and typed text has nowhere to

@@ -258,7 +258,7 @@ fn iso_ms(timestamp: Option<&Value>) -> i64 {
         .unwrap_or_else(crate::store::now_ms)
 }
 
-fn parse_iso_ms(stamp: &str) -> Option<i64> {
+pub(crate) fn parse_iso_ms(stamp: &str) -> Option<i64> {
     let (date, rest) = stamp.split_once('T')?;
     let mut date = date.split('-');
     let (year, month, day) = (

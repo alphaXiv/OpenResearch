@@ -23,6 +23,8 @@ import {
   getSshSettingsQuery,
   getSlurmSettingsQuery,
   getRaySettingsQuery,
+  getKaggleLiveKernelsQuery,
+  getComputePricesQuery,
   getOpenResearchSettingsQuery,
   getLocalMachineQuery,
   getComputeSettingsQuery,
@@ -76,6 +78,7 @@ import {
   saveHfToken,
   saveTinkerKey,
   saveModalToken,
+  saveModalCredit,
   saveK8sSettings,
   saveRaySettings,
   saveSlurmSettings,
@@ -100,10 +103,12 @@ import {
   type Harness,
   type HarnessSetupCommands,
   type HarnessId,
+  harnessModelLabel,
   type HfSettings,
   type TinkerSettings,
   type K8sSettings,
   type LocalMachine,
+  type KaggleLiveKernel,
   type ModalSettings,
   type RayPreflight,
   type TrackioPreflight,
@@ -124,6 +129,9 @@ import { onDataDirMove } from "../events";
 import { releaseNotesUrl, useRestartApp, useUpdateStatus } from "./UpdateBanner";
 import { useThemePreference, type ThemePreference } from "../theme";
 import { m } from "../paraglide/messages.js";
+import { ComputeDoctor } from "../features/research/ComputeDoctor";
+import { ColabSection, KaggleSection } from "../features/fork/ComputeSections";
+import { ACCOUNT_HARNESSES, HarnessAccountsCard, CrossHarnessCard, AutoCompactCard, ComputeRoutingCard, fmtUsd, ProviderPricesCard, GcpSection, DecisionModelCard, HarnessFailoverCard } from "../features/fork/SettingsCards";
 import { ltr } from "../i18n";
 import { setLocale, useLocale } from "../locale";
 import { isLocale, type Locale } from "../paraglide/runtime.js";
@@ -155,7 +163,7 @@ import {
   type BadgeVariant,
 } from "./ui";
 
-const SETTINGS_CARD_CLASS_NAME = [
+export const SETTINGS_CARD_CLASS_NAME = [
   "settings-card [&_>_.error]:text-accent-red [&_>_.error]:text-base",
   "[&_>_.error]:whitespace-pre-wrap bg-background border border-border",
   "rounded-lg py-4 px-4.5 mb-4 [&_h3]:mt-0 [&_h3]:mx-0 [&_h3]:mb-2.5",
@@ -164,7 +172,7 @@ const SETTINGS_CARD_CLASS_NAME = [
   "[&_>_.project-default-row:first-child]:pt-0 [&_>_.project-default-row:first-child]:border-t-0",
 ].join(" ");
 
-const KV_CLASS_NAME = [
+export const KV_CLASS_NAME = [
   "kv grid grid-cols-[auto_1fr] items-baseline gap-y-[3px] gap-x-3.5 text-base",
   "[&_.k]:text-sm [&_.k]:text-subtext [&_.v]:text-base [&_.v]:text-text",
   "[&_.v]:break-all",
@@ -177,7 +185,7 @@ const COMPUTE_DETAILS_CLASS_NAME = [
   "[&_.v]:font-sans [&_.v]:text-base [&_.v]:text-text [&_.v]:break-words",
 ].join(" ");
 
-const COMPUTE_DIAGNOSTIC_CLASS_NAME =
+export const COMPUTE_DIAGNOSTIC_CLASS_NAME =
   "mt-3 mx-0 mb-0 ps-3 border-s-2 border-s-accent-red font-sans text-base leading-relaxed text-text whitespace-pre-wrap";
 
 const SETTINGS_NOTE_CLASS_NAME = [
@@ -186,7 +194,7 @@ const SETTINGS_NOTE_CLASS_NAME = [
   "text-accent-amber font-medium",
 ].join(" ");
 
-const FORM_CLASS_NAME = [
+export const FORM_CLASS_NAME = [
   "form font-sans text-sm text-text [&_.form-seg]:self-start [&_.form-seg]:mb-0.5",
   "[&_.form-seg_button]:py-[5px] [&_.form-seg_button]:px-3",
   "[&_.repo-hint]:font-normal [&_.repo-hint]:text-sm",
@@ -263,7 +271,7 @@ const FORM_CLASS_NAME = [
   "settings-form mt-3.5 pt-3.5 border-t border-t-border",
 ].join(" ");
 
-const PROJECT_DEFAULT_ROW_CLASS_NAME = [
+export const PROJECT_DEFAULT_ROW_CLASS_NAME = [
   "project-default-row flex items-center justify-between gap-6",
   "pt-3.5 border-t border-t-border-variant [&_p]:mt-[3px] [&_p]:mx-0 [&_p]:mb-0",
   "[&_.project-default-title]:text-base [&_p]:text-sm [&_p]:leading-relaxed [&_p]:text-text",
@@ -291,7 +299,7 @@ type CommandRun = { command: string; path: string; attempt: number; owner?: stri
 
 /** The run outlives the note that started it: a successful sign-in removes
  * the note (and often its whole card section), and the terminal must stay. */
-function useCommandRun() {
+export function useCommandRun() {
   const [run, setRun] = useState<CommandRun | null>(null);
   const start = (command: string, path: string, owner?: string) =>
     setRun((current) => ({ command, path, owner, attempt: (current?.attempt ?? 0) + 1 }));
@@ -322,7 +330,7 @@ function RunnableNote({ note, className, disabled, resolve = settingsCommandPath
   );
 }
 
-function CommandRunTerminal({ run, onComplete, onClose }: {
+export function CommandRunTerminal({ run, onComplete, onClose }: {
   run: CommandRun | null;
   onComplete: () => void;
   onClose: () => void;
@@ -342,7 +350,7 @@ function CommandRunTerminal({ run, onComplete, onClose }: {
 
 // --- harnesses ---------------------------------------------------------------
 
-function harnessStatus(h: Harness): { cls: string; variant: BadgeVariant; label: string } {
+export function harnessStatus(h: Harness): { cls: string; variant: BadgeVariant; label: string } {
   if (h.catalogPending) return { cls: "warn", variant: "warning", label: m.onboarding_checking() };
   if (h.authCheckFailed) return { cls: "warn", variant: "warning", label: m.settings_page_unable_to_verify() };
   if (h.id.startsWith("acp:") && h.authState === "needsLogin") return { cls: "warn", variant: "warning", label: m.acp_auth_setup_needed() };
@@ -414,6 +422,7 @@ function HarnessesTab({ remote }: { remote: boolean }) {
     (a, b) => Number(b.agentReady) - Number(a.agentReady),
   );
   const h = orderedHarnesses.find((x) => x.id === active) ?? orderedHarnesses[0];
+  const recommended = h?.models.find((model) => model.id === h.recommendedModel);
   const acp = definitions.data?.find((definition) => definition.id === h?.id);
 
   return (
@@ -512,6 +521,14 @@ function HarnessesTab({ remote }: { remote: boolean }) {
             <span className="v">
               {h.catalogPending
                 ? m.onboarding_checking()
+                : recommended && h.models.length > 1
+                ? (
+                  <Tooltip content={m.settings_models_recommended_hint()}>
+                    <span>{m.settings_models_recommended({ model: harnessModelLabel(recommended), count: fmtNumber(h.models.length - 1) })}</span>
+                  </Tooltip>
+                )
+                : recommended
+                ? harnessModelLabel(recommended)
                 : h.models.length > 0
                 ? m.settings_models_available({ count: fmtNumber(h.models.length) })
                 : h.agentReady ? m.model_picker_default_model() : m.settings_none()}
@@ -535,6 +552,11 @@ function HarnessesTab({ remote }: { remote: boolean }) {
           {h.id === "opencode" && <LocalModelSetup installed={h.installed} />}
         </div>
       )}
+      {h && ACCOUNT_HARNESSES.includes(h.id) && <HarnessAccountsCard harness={h} remote={remote} />}
+      {harnesses && <HarnessFailoverCard harnesses={harnesses} />}
+      <DecisionModelCard />
+      <CrossHarnessCard harnesses={harnesses} />
+      <AutoCompactCard />
     </>
   );
 }
@@ -712,9 +734,24 @@ function ModalSection() {
   const error = actionError ?? sQuery.error?.message ?? null;
   const [tokenId, setTokenId] = useState("");
   const [tokenSecret, setTokenSecret] = useState("");
+  const [credit, setCredit] = useState("");
   const [refreshing, setRefreshing] = useState(false);
   const loading = sQuery.isPending || refreshing;
   const [saving, setSaving] = useState(false);
+
+  async function saveCredit(update: Parameters<typeof saveModalCredit>[0]) {
+    setSaving(true);
+    setError(null);
+    try {
+      setS(await saveModalCredit(update));
+      setCredit("");
+      void queryClient.invalidateQueries({ queryKey: getComputePricesQuery().queryKey });
+    } catch (err) {
+      setError(err instanceof Error ? err.message : String(err));
+    } finally {
+      setSaving(false);
+    }
+  }
 
   async function refresh() {
     if (loading || saving) return;
@@ -762,6 +799,57 @@ function ModalSection() {
         </dl>
       )}
       {s?.processEnv && <p className="mt-2 mb-0 text-sm text-subtext">{m.settings_modal_env_override()}</p>}
+      {s?.tokenConfigured && (
+        <div className="mt-4 rounded-lg border border-border bg-surface px-4 py-3">
+          <div className="text-sm text-subtext">{m.settings_gcp_available()}</div>
+          <div className={cn("mt-1 text-2xl font-semibold tabular-nums", s.balance && s.balance.availableUsd <= 0 ? "text-accent-red" : "text-text")}>
+            {s.balance ? `≈ ${fmtUsd(s.balance.availableUsd)}` : "—"}
+          </div>
+          {s.balance ? (
+            <div className="mt-0.5 text-sm text-subtext">
+              {m.settings_gcp_balance_detail({
+                credit: fmtUsd(s.balance.creditUsd),
+                date: new Date(s.balance.asOf).toLocaleDateString(),
+                spent: fmtUsd(s.balance.spentUsd),
+              })}{" "}
+              {s.balance.source === "report" ? m.settings_modal_source_report() : m.settings_modal_source_estimate()}
+            </div>
+          ) : (
+            <div className="mt-0.5 text-sm text-subtext">{m.settings_modal_no_credit()}</div>
+          )}
+          {s.balance?.error && <div className="mt-1 text-sm text-subtext">{s.balance.error}</div>}
+          <form
+            className="mt-3 flex flex-wrap items-end gap-2"
+            onSubmit={(event) => {
+              event.preventDefault();
+              const amount = Number(credit);
+              if (credit.trim() && Number.isFinite(amount) && amount >= 0) void saveCredit({ creditUsd: amount });
+            }}
+          >
+            <label className="flex min-w-48 flex-1 flex-col gap-1 text-sm">
+              {m.settings_gcp_credit_label()}
+              <Input
+                type="number"
+                min="0"
+                step="0.01"
+                inputMode="decimal"
+                value={credit}
+                onChange={(event) => setCredit(event.target.value)}
+                placeholder={s.settings.creditUsd != null ? String(s.settings.creditUsd) : "30.00"}
+              />
+            </label>
+            <Button type="submit" disabled={saving || loading || !credit.trim()}>
+              {m.common_save()}
+            </Button>
+            {s.settings.creditUsd != null && (
+              <Button type="button" variant="ghost" disabled={saving || loading} onClick={() => void saveCredit({ clearCredit: true })}>
+                {m.settings_gcp_clear_credit()}
+              </Button>
+            )}
+          </form>
+          <p className="mt-1.5 mb-0 text-sm text-subtext">{m.settings_modal_credit_hint()}</p>
+        </div>
+      )}
       <form className="mt-5 flex flex-col gap-4" onSubmit={submit}>
         <label className="flex flex-col gap-2 text-sm font-medium text-subtext">
           {s?.tokenConfigured ? m.settings_modal_replace_id() : m.settings_modal_token_id()}
@@ -1452,7 +1540,11 @@ function PreflightBadge({ test }: { test: "testing" | { reachable: boolean } | n
 
 function localMachineSummary(hw: LocalMachine) {
   const processor = hw.chip ?? `${hw.os}/${hw.arch}`;
-  const memory = hw.memBytes === null ? null : fmtBytes(hw.memBytes);
+  const memory = hw.memBytes === null
+    ? null
+    : hw.memAvailableBytes === null
+      ? fmtBytes(hw.memBytes)
+      : m.settings_memory_free({ free: fmtBytes(hw.memAvailableBytes), total: fmtBytes(hw.memBytes) });
   const gpu = hw.gpus.length === 0 ? null : m.settings_gpu_count({ count: hw.gpus.length });
   return [processor, hw.cpuCount > 0 ? m.settings_cpu_cores({ count: hw.cpuCount }) : null, memory, gpu]
     .filter(Boolean)
@@ -1580,18 +1672,22 @@ const TARGET_CARD_DESCRIPTIONS: Record<ComputeTargetId, () => string> = {
   local: m.compute_description_local,
   ssh: m.compute_description_ssh,
   tinker: m.compute_description_tinker,
+  colab: m.compute_description_colab,
   hf: m.compute_description_hf,
   modal: m.compute_description_modal,
   k8s: m.compute_description_k8s,
   slurm: m.compute_description_slurm,
   ray: m.compute_description_ray,
   openresearch: m.compute_description_openresearch,
+  gcp: m.compute_description_gcp,
+  kaggle: m.compute_description_kaggle,
 };
 
 /** Kind strings from the runs table — reuses the instances-table logos. */
-const TARGET_KIND: Record<ComputeTargetId, string> = {
+export const TARGET_KIND: Record<ComputeTargetId, string> = {
   local: "local_job",
   tinker: "tinker_job",
+  colab: "colab_job",
   hf: "hf_job",
   modal: "modal_job",
   k8s: "k8s_job",
@@ -1599,28 +1695,36 @@ const TARGET_KIND: Record<ComputeTargetId, string> = {
   slurm: "slurm_job",
   ray: "ray_job",
   openresearch: "openresearch_job",
+  gcp: "gcp_job",
+  kaggle: "kaggle_job",
 };
 
 /** Backends whose launches take --flavor; mirrors the server's validation. */
-const FLAVORED_TARGETS: ComputeTargetId[] = ["hf", "modal", "slurm", "ray", "openresearch"];
+const FLAVORED_TARGETS: ComputeTargetId[] = ["hf", "modal", "colab", "slurm", "ray", "openresearch", "gcp", "kaggle"];
 /** Of those, the ones where a launch *requires* a flavor. */
 const FLAVOR_REQUIRED: ComputeTargetId[] = ["hf", "modal", "openresearch"];
 
 const FLAVOR_SUGGESTIONS: Partial<Record<ComputeTargetId, string[]>> = {
   hf: ["cpu-basic", "t4-small", "a10g-small", "a10g-large", "a100-large", "h100", "h200"],
   modal: ["cpu", "t4", "l4", "a10g", "a100", "a100-80gb", "l40s", "h100", "h100:2"],
+  colab: ["t4", "l4", "a100", "h100", "g4", "a100:highmem", "cpu", "v5e1", "v6e1"],
   slurm: ["gpu", "h100:1", "h100:2", "a100:4"],
   ray: ["cpu", "cpu:2", "gpu", "gpu:1", "gpu:1,cpu:4", "gpu:1,mem:8GiB"],
   openresearch: ["h100_sxm", "h100_sxm:2", "cpu5c", "cpu5g", "cpu5m"],
+  gcp: ["t4", "l4", "v100", "a100", "a100-80gb", "h100", "a100:2", "cpu"],
+  kaggle: ["t4", "t4@auto", "p100", "p100@auto", "tpu", "tpu@auto", "cpu"],
 };
 
-const QUICK_SETUP_TARGETS: ComputeTargetId[] = ["tinker", "hf", "modal", "ray", "k8s"];
+const QUICK_SETUP_TARGETS: ComputeTargetId[] = ["tinker", "colab", "kaggle", "gcp", "hf", "modal", "ray", "k8s"];
 
 const TARGET_USAGE: Partial<Record<ComputeTargetId, () => string>> = {
   tinker: m.compute_usage_tinker,
+  colab: m.compute_usage_colab,
   hf: m.compute_usage_hf,
   modal: m.compute_usage_modal,
   openresearch: m.compute_usage_openresearch,
+  gcp: m.compute_usage_gcp,
+  kaggle: m.compute_usage_kaggle,
 };
 
 const CUSTOM_FLAVOR_ID = "__custom__";
@@ -1982,6 +2086,9 @@ function QuickSetupDialog({ target, remote, onClose }: { target: ComputeTargetSu
         </IconButton>
       </div>
       {target.id === "tinker" && <TinkerSection target={target} />}
+      {target.id === "colab" && <ColabSection />}
+      {target.id === "gcp" && <GcpSection />}
+      {target.id === "kaggle" && <KaggleSection />}
       {target.id === "hf" && <HfSection remote={remote} />}
       {target.id === "modal" && <ModalSection />}
       {target.id === "ray" && <RaySection />}
@@ -2063,6 +2170,7 @@ function ComputeTab({
         {m.settings_page_connect_compute_backends_and_choose_where_new_runs()}
       </p>
       <ComputeActivity projectId={project?.id} onViewHistory={onViewHistory} />
+      <ComputeDoctor />
       {loadError ? (
         <div className="error">{loadError}</div>
       ) : !settings ? (
@@ -2077,6 +2185,8 @@ function ComputeTab({
             projectId={project?.id}
             onSaved={apply}
           />
+          <ComputeRoutingCard targets={configuredTargets} />
+          <ProviderPricesCard />
           <section className="mb-8">
             <h2 className="mt-0 mx-0 mb-2 text-lg">{m.settings_page_ready_to_use()}</h2>
             <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-3">
@@ -3668,9 +3778,18 @@ function runtimeLabel(inst: Run): string {
   return "—";
 }
 
-/** One section's table: backend (logo + flavor), status, started, runtime. */
-function InstancesTable({ instances, emptyLabel }: { instances: Run[]; emptyLabel: string }) {
-  if (instances.length === 0) {
+/** Kaggle reports naive UTC timestamps. */
+function kaggleTime(value: string | null): number | null {
+  if (!value) return null;
+  const ms = Date.parse(/[zZ]|[+-]\d\d:?\d\d$/.test(value) ? value : `${value}Z`);
+  return Number.isNaN(ms) ? null : ms;
+}
+
+/** One section's table: backend (logo + flavor), status, started, runtime.
+ *  `kernels` adds Kaggle kernels that are live on the user's accounts but are
+ *  not one of `instances` (started elsewhere, or no longer followed by orx). */
+function InstancesTable({ instances, kernels = [], emptyLabel }: { instances: Run[]; kernels?: KaggleLiveKernel[]; emptyLabel: string }) {
+  if (instances.length === 0 && kernels.length === 0) {
     return <p className="instances-empty m-0 rounded-lg border border-border bg-background py-3.5 px-4 text-base text-subtext">{emptyLabel}</p>;
   }
   return (
@@ -3715,6 +3834,38 @@ function InstancesTable({ instances, emptyLabel }: { instances: Run[]; emptyLabe
               </tr>
             );
           })}
+          {kernels.map((kernel) => {
+            const started = kaggleTime(kernel.lastRunTime);
+            return (
+              <tr key={kernel.kernel} className="kaggle-kernel-row">
+                <td>
+                  <span className="backend-cell inline-flex items-center gap-0.5">
+                    <span className="backend-badge inline-flex items-center gap-[7px] [&_svg]:flex-none [&_svg]:block [&_.backend-name]:font-medium [&_.backend-detail]:text-muted">
+                      <BackendLogo kind="kaggle" />
+                      <span className="backend-name">Kaggle</span>
+                      <span className="backend-detail text-sm" title={kernel.kernel}>
+                        {m.settings_kaggle_live_kernel_detail({ account: kernel.account, title: kernel.title })}
+                      </span>
+                    </span>
+                    <IconButtonLink size="small"
+                      href={kernel.url}
+                      target="_blank"
+                      rel="noreferrer"
+                      title={m.settings_page_open_job_page()}
+                      aria-label={m.settings_page_open_job_page()}
+                    >
+                      <ExternalLink size={12} />
+                    </IconButtonLink>
+                  </span>
+                </td>
+                <td>
+                  <StatusBadge status={kernel.status === "running" ? "running" : "starting"} />
+                </td>
+                <td>{started ? timeAgo(started) : "—"}</td>
+                <td>{started ? fmtDuration(Date.now() - started) : "—"}</td>
+              </tr>
+            );
+          })}
         </tbody>
       </table>
     </div>
@@ -3725,7 +3876,8 @@ function ComputeActivity({ projectId, onViewHistory }: { projectId?: string; onV
   const query = useQuery({ ...listRunsQuery(projectId ?? ""), enabled: Boolean(projectId), subscribed: Boolean(projectId) });
   const instances = projectId ? query.data ?? (query.error ? [] : null) : [];
   const error = query.error?.message;
-  const refreshing = query.isFetching;
+  const kaggleQuery = useQuery(getKaggleLiveKernelsQuery());
+  const refreshing = query.isFetching || kaggleQuery.isFetching;
 
   // Re-render every 30s so live rows' Runtime keeps counting (client-side
   // only — the minute-level display doesn't warrant a refetch).
@@ -3735,11 +3887,17 @@ function ComputeActivity({ projectId, onViewHistory }: { projectId?: string; onV
     return () => clearInterval(t);
   }, []);
 
-  const load = () => { if (projectId) void query.refetch(); };
+  const load = () => {
+    if (projectId) void query.refetch();
+    void kaggleQuery.refetch();
+  };
 
   const byRecent = (a: Run, b: Run) => b.createdAt - a.createdAt;
   const running = instances?.filter((i) => isLive(i.status)).sort(byRecent);
   const past = instances?.filter((i) => !isLive(i.status)).sort(byRecent);
+  const followed = new Set(running?.map((i) => i.backend?.url).filter((url): url is string => typeof url === "string"));
+  const kernels = (kaggleQuery.data ?? []).filter((kernel) => !followed.has(kernel.url));
+  const liveCount = (running?.length ?? 0) + kernels.length;
 
   return (
     <section className="compute-activity [&_.count-badge]:inline-flex [&_.count-badge]:items-center [&_.count-badge]:justify-center [&_.count-badge]:min-w-4.5 [&_.count-badge]:h-4.5 [&_.count-badge]:py-0 [&_.count-badge]:px-[5px] [&_.count-badge]:rounded-md [&_.count-badge]:bg-surface [&_.count-badge]:border [&_.count-badge]:border-border [&_.count-badge]:text-xs [&_.count-badge]:font-medium [&_.count-badge]:text-text mt-5.5 mx-0 mb-8">
@@ -3747,7 +3905,7 @@ function ComputeActivity({ projectId, onViewHistory }: { projectId?: string; onV
         <div>
           <h2>
             {m.settings_page_running_instances()}
-            {running && running.length > 0 && <span className="count-badge">{running.length}</span>}
+            {liveCount > 0 && <span className="count-badge">{liveCount}</span>}
           </h2>
         </div>
         <div className="compute-activity-actions flex gap-2 flex-none [@media((max-width:_640px))]:justify-start">
@@ -3764,7 +3922,7 @@ function ComputeActivity({ projectId, onViewHistory }: { projectId?: string; onV
         <LoadingRow>
           <Spinner /> {m.settings_page_loading()}
         </LoadingRow>
-      ) : <InstancesTable instances={running} emptyLabel={projectId ? m.instances_nothing_running() : m.instances_select_project_runs()} />}
+      ) : <InstancesTable instances={running} kernels={kernels} emptyLabel={projectId ? m.instances_nothing_running() : m.instances_select_project_runs()} />}
     </section>
   );
 }

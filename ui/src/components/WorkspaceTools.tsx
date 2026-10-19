@@ -46,14 +46,15 @@ export function WorkspaceTools({ expanded, experiments, runs, onOpenExperiment, 
   return (
     <div className={`workspace-tools absolute end-3.5 top-7 z-30 ${rightOffset === undefined ? "win-titlebar:top-10" : ""}`} style={{ insetInlineEnd: rightOffset }}>
       {!expanded ? (
-        <nav aria-label={m.workspace_tools_heading()} className="flex items-center justify-end gap-3">
+        <nav aria-label={m.workspace_tools_heading()} className="flex items-center justify-end gap-1 rounded-xl border border-border-variant bg-background p-1 shadow-hairline">
           {items.map(({ id, label, Icon, onClick }) => (
-            <IconButton key={id} active={activeView === id} className="text-text [&.active]:text-text" data-tip={label} data-tip-align={id === "experiments" ? "end" : undefined} aria-label={label} aria-pressed={activeView === id} onClick={onClick}>
-              <Icon size={15} />
+            <IconButton key={id} active={activeView === id} className="workspace-tool-button gap-2 text-subtext [&.active]:bg-primary-subtle [&.active]:text-primary" data-tip={label} data-tip-align={id === "experiments" ? "end" : undefined} aria-label={label} aria-pressed={activeView === id} onClick={onClick}>
+              <Icon size={16} className="shrink-0" />
+              <span className="workspace-tool-label hidden truncate text-xs font-medium">{label}</span>
             </IconButton>
           ))}
           <div className="relative">
-            <IconButton ref={moreTrigger} active={activeView === "terminal" || more.open} className="text-text [&.active]:text-text" data-tip={more.open ? undefined : m.workspace_more_tools()} data-tip-align="end" aria-label={m.workspace_more_tools()} aria-expanded={more.open} aria-haspopup="menu" onClick={() => more.setOpen((open) => !open)}>
+            <IconButton ref={moreTrigger} active={activeView === "terminal" || more.open} className="[&.active]:bg-primary-subtle [&.active]:text-primary" data-tip={more.open ? undefined : m.workspace_more_tools()} data-tip-align="end" aria-label={m.workspace_more_tools()} aria-expanded={more.open} aria-haspopup="menu" onClick={() => more.setOpen((open) => !open)}>
               <MoreHorizontal size={15} />
             </IconButton>
             {more.open && (
@@ -72,9 +73,9 @@ export function WorkspaceTools({ expanded, experiments, runs, onOpenExperiment, 
         </nav>
       ) : (
         <nav aria-label={m.workspace_tools_heading()} className="workspace-tools-card flex w-60 flex-col gap-0.5 rounded-xl border border-border bg-background px-1.5 py-2 shadow-elevated">
-          <h2 className="m-0 px-2 pt-1 pb-2 text-sm font-normal text-subtext">{m.workspace_tools_heading()}</h2>
+          <h2 className="m-0 px-2 pt-1 pb-2 text-xs font-semibold text-subtext">{m.workspace_tools_heading()}</h2>
           {items.filter((item) => item.id !== "files").map(({ id, label: itemLabel, Icon, onClick }) => (
-            <MenuItem key={id} className="min-h-7 py-1"
+            <MenuItem key={id} className="min-h-9 py-2" active={activeView === id}
               data-onboarding={id === "artifacts" ? "nav-artifacts" : undefined}
               onClick={onClick}>
               <span className="flex items-center gap-4"><Icon size={15} />{itemLabel}</span>
@@ -90,7 +91,7 @@ export function WorkspaceTools({ expanded, experiments, runs, onOpenExperiment, 
             </span>
           </MenuItem>
           <div className="mt-2 border-t border-border/50 pt-3">
-            <h2 className="m-0 px-2 pt-1 pb-2 text-sm font-normal text-subtext">{m.workspace_this_worktree()}</h2>
+            <h2 className="m-0 px-2 pt-1 pb-2 text-xs font-semibold text-subtext">{m.workspace_this_worktree()}</h2>
             <MenuItem className="min-h-7 py-1" onClick={onFiles}>
               <span className="flex items-center gap-4"><FolderOpen size={15} />{m.app_files()}</span>
             </MenuItem>

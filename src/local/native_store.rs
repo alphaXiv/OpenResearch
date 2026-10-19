@@ -378,6 +378,151 @@ pub fn prepare_codex(store: NativeStore) -> Result<PathBuf> {
     Ok(crate::paths::canonicalize(&root).unwrap_or(root))
 }
 
+/// A Claude config home for one extra account: its own credentials and
+/// `.claude.json`, with the user's settings, skills, and plugins linked in, and
+/// transcripts shared with the isolated home so a chat resumes on any account.
+pub fn prepare_claude_account(home: &Path) -> Result<PathBuf> {
+    let isolated = claude_home(NativeStore::Isolated);
+    let legacy = claude_home(NativeStore::Legacy);
+    std::fs::create_dir_all(isolated.join("projects"))?;
+    prepare_links(
+        home,
+        &legacy,
+        &[
+            legacy.join("settings.json"),
+            legacy.join("settings.local.json"),
+            legacy.join("CLAUDE.md"),
+            legacy.join("plugins"),
+            legacy.join("skills"),
+            isolated.join("projects"),
+        ],
+    )?;
+    Ok(home.to_path_buf())
+}
+
+/// A `CODEX_HOME` for one extra account: its own `auth.json`, the user's
+/// config linked in, and rollouts shared with the isolated home.
+pub fn prepare_codex_account(home: &Path) -> Result<PathBuf> {
+    let isolated = prepare_codex(NativeStore::Isolated)?;
+    let legacy = codex_home(NativeStore::Legacy);
+    for tree in ["sessions", "archived_sessions"] {
+        std::fs::create_dir_all(isolated.join(tree))?;
+    }
+    let mut sources = vec![
+        legacy.join("config.toml"),
+        legacy.join("AGENTS.md"),
+        legacy.join("plugins"),
+        legacy.join("skills"),
+        legacy.join("prompts"),
+        legacy.join("packages"),
+        isolated.join("sessions"),
+        isolated.join("archived_sessions"),
+    ];
+    if let Ok(entries) = std::fs::read_dir(&legacy) {
+        sources.extend(entries.flatten().map(|entry| entry.path()).filter(|path| {
+            path.file_name()
+                .and_then(|name| name.to_str())
+                .is_some_and(|name| name.ends_with(".config.toml"))
+        }));
+    }
+    prepare_links(home, &legacy, &sources)?;
+    Ok(crate::paths::canonicalize(home).unwrap_or_else(|_| home.to_path_buf()))
+}
+
+/// The thread store every Codex account shares, so a resumed thread is found
+/// whichever account's `CODEX_HOME` the app-server runs under.
+pub fn codex_account_sqlite_override() -> String {
+    let isolated = codex_home(NativeStore::Isolated);
+    format!(
+        "sqlite_home={}",
+        toml_string(&crate::paths::canonicalize(&isolated).unwrap_or(isolated))
+    )
+}
+
+/// Paths under `~/.gemini` that hold who `agy` is signed in as. An account's
+/// home keeps its own copies; everything else is linked to the user's.
+#[cfg(unix)]
+const AGY_ACCOUNT_OWNED: &[&str] = &[
+    "antigravity-cli",
+    "oauth_creds.json",
+    "google_accounts.json",
+];
+
+/// A home folder for one extra Antigravity account. `agy` keeps its sign-in
+/// and conversations under `$HOME/.gemini`, so the account gets its own
+/// `.gemini/antigravity-cli` while every other entry of the user's home is a
+/// link back, which keeps the agent's shell, git, and tool configuration the
+/// user's own.
+#[cfg(unix)]
+pub fn prepare_agy_account(home: &Path) -> Result<PathBuf> {
+    let real = home_dir();
+    let _guard = LINK_LOCK.lock().unwrap_or_else(|error| error.into_inner());
+    let gemini = home.join(".gemini");
+    let cli = gemini.join("antigravity-cli");
+    std::fs::create_dir_all(&cli)?;
+    overlay_links(&real, home, &[".gemini"])?;
+    overlay_links(&real.join(".gemini"), &gemini, AGY_ACCOUNT_OWNED)?;
+    // Skills and plugins the user installed for agy apply to every account.
+    for shared in ["skills", "plugins", "bin"] {
+        let source = real.join(".gemini/antigravity-cli").join(shared);
+        if source.exists() {
+            link_entry(&source, &cli.join(shared))?;
+        }
+    }
+    Ok(home.to_path_buf())
+}
+
+#[cfg(not(unix))]
+pub fn prepare_agy_account(_home: &Path) -> Result<PathBuf> {
+    Err(anyhow!(
+        "More than one Antigravity account needs macOS or Linux."
+    ))
+}
+
+/// Link every entry of `source` into `target` except `owned`, and drop links
+/// whose target is gone. Entries the account wrote itself are left alone.
+#[cfg(unix)]
+fn overlay_links(source: &Path, target: &Path, owned: &[&str]) -> Result<()> {
+    std::fs::create_dir_all(target)?;
+    if let Ok(entries) = std::fs::read_dir(source) {
+        for entry in entries.flatten() {
+            let name = entry.file_name();
+            if owned
+                .iter()
+                .any(|owned| name == std::ffi::OsStr::new(owned))
+            {
+                continue;
+            }
+            link_entry(&entry.path(), &target.join(&name))?;
+        }
+    }
+    for entry in std::fs::read_dir(target)?.flatten() {
+        let path = entry.path();
+        if entry.file_type().is_ok_and(|kind| kind.is_symlink()) && !path.exists() {
+            let _ = std::fs::remove_file(&path);
+        }
+    }
+    Ok(())
+}
+
+#[cfg(unix)]
+fn link_entry(source: &Path, destination: &Path) -> Result<()> {
+    match std::fs::symlink_metadata(destination) {
+        Ok(metadata) if metadata.file_type().is_symlink() => {
+            if std::fs::read_link(destination).is_ok_and(|target| target == source) {
+                return Ok(());
+            }
+            std::fs::remove_file(destination)?;
+        }
+        // The account's own file or folder wins over the user's.
+        Ok(_) => return Ok(()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => return Err(error.into()),
+    }
+    create_symlink(source, destination)?;
+    Ok(())
+}
+
 pub fn prepare_cursor(store: NativeStore) -> Result<PathBuf> {
     let root = cursor_home(store);
     let legacy = cursor_home(NativeStore::Legacy);

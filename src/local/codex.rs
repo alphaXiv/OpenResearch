@@ -216,6 +216,8 @@ pub struct CodexClient {
     /// child (crash/restart replacement) — the DB signal covers that case.
     last_collab_mode: std::sync::Mutex<Option<&'static str>>,
     native_store: NativeStore,
+    /// The extra account this child runs on; `None` for the default sign-in.
+    account: Option<String>,
     session_id: String,
     /// Each native (thread, turn)'s model, outliving any one orx turn: sub-agents do.
     turn_models: std::sync::Mutex<HashMap<(String, String), String>>,
@@ -452,6 +454,10 @@ impl CodexClient {
         self.native_store
     }
 
+    pub fn account(&self) -> Option<&str> {
+        self.account.as_deref()
+    }
+
     pub fn session_id(&self) -> &str {
         &self.session_id
     }
@@ -678,16 +684,27 @@ async fn spawn_client(
     session_id: &str,
     up_port: Option<u16>,
     native_store: NativeStore,
+    account: Option<String>,
 ) -> Result<Arc<CodexClient>> {
     let bin = find_codex_required()?;
-    let codex_home = tokio::task::spawn_blocking(move || {
-        crate::local::native_store::prepare_codex(native_store)
+    let account_id = account.clone();
+    let codex_home = tokio::task::spawn_blocking(move || match account_id {
+        Some(id) => crate::local::harness::accounts::launch_env("codex", &id)?
+            .into_iter()
+            .find(|(key, _)| *key == "CODEX_HOME")
+            .map(|(_, home)| std::path::PathBuf::from(home))
+            .ok_or_else(|| anyhow!("Codex account `{id}` has no home")),
+        None => crate::local::native_store::prepare_codex(native_store),
     })
     .await
     .map_err(|error| anyhow!("Codex config preparation failed: {error}"))??;
     let mut cmd = Command::new(&bin);
     cmd.arg("app-server");
-    if let Some(override_arg) = native_store::codex_sqlite_override(native_store, &codex_home) {
+    if account.is_some() {
+        cmd.args(["-c", &native_store::codex_account_sqlite_override()]);
+    } else if let Some(override_arg) =
+        native_store::codex_sqlite_override(native_store, &codex_home)
+    {
         cmd.args(["-c", &override_arg]);
     }
     cmd.stdin(Stdio::piped())
@@ -760,6 +777,7 @@ async fn spawn_client(
         thread_model: std::sync::Mutex::new(None),
         last_collab_mode: std::sync::Mutex::new(None),
         native_store,
+        account,
         session_id: session_id.to_string(),
         turn_models: std::sync::Mutex::new(HashMap::new()),
         last_active: std::sync::Mutex::new(Instant::now()),
@@ -848,12 +866,14 @@ impl CodexHost {
         self: &Arc<Self>,
         session_id: &str,
         native_store: NativeStore,
+        account: Option<&str>,
     ) -> Result<Arc<CodexClient>> {
         let _spawning = self.spawn_lock.lock().await;
         {
             let mut guard = self.inner.lock().await;
             if let Some(client) = guard.get(session_id) {
                 if client.native_store() == native_store
+                    && client.account() == account
                     && matches!(client.child.lock().await.try_wait(), Ok(None))
                 {
                     client.touch();
@@ -866,8 +886,15 @@ impl CodexHost {
         }
         let host = self.clone();
         let session = session_id.to_string();
+        let account = account.map(str::to_string);
         tokio::spawn(async move {
-            let client = spawn_client(&session, host.up_port.get().copied(), native_store).await?;
+            let client = spawn_client(
+                &session,
+                host.up_port.get().copied(),
+                native_store,
+                account.clone(),
+            )
+            .await?;
             // Never displace a live entry: if an abandoned bring-up's insert
             // races a successor's (spawn_lock was released by the abort), the
             // loser kills its own child and defers to the live one.
@@ -875,6 +902,7 @@ impl CodexHost {
                 let mut guard = host.inner.lock().await;
                 if let Some(existing) = guard.get(&session) {
                     if existing.native_store() == native_store
+                        && existing.account() == account.as_deref()
                         && matches!(existing.child.lock().await.try_wait(), Ok(None))
                     {
                         let existing = existing.clone();
@@ -1292,6 +1320,7 @@ mod tests {
             thread_model: std::sync::Mutex::new(None),
             last_collab_mode: std::sync::Mutex::new(None),
             native_store: NativeStore::Isolated,
+            account: None,
             session_id: String::new(),
             turn_models: std::sync::Mutex::new(HashMap::new()),
             last_active: std::sync::Mutex::new(last_active),
@@ -1422,6 +1451,7 @@ mod tests {
             thread_model: std::sync::Mutex::new(None),
             last_collab_mode: std::sync::Mutex::new(None),
             native_store: NativeStore::Isolated,
+            account: None,
             session_id: String::new(),
             turn_models: std::sync::Mutex::new(HashMap::new()),
             last_active: std::sync::Mutex::new(Instant::now()),

@@ -111,6 +111,12 @@ Method:
 
 pub const CATALOG: &[Skill] = &[
     Skill {
+        name: "deep-research",
+        description: "Research across sources and harnesses, then write a cited report",
+        template: super::deep_research::CONTENT,
+        empty_request: "(none given — ask which research question the report should answer)",
+    },
+    Skill {
         name: "lit-review",
         description: "Multi-hop literature review across alphaXiv, OpenAlex, bioRxiv, and PubMed",
         template: LIT_REVIEW_TEMPLATE,
@@ -136,7 +142,7 @@ pub fn instructions(name: &str, has_request: bool, github_enabled: bool) -> Opti
     let skill = CATALOG
         .iter()
         .find(|skill| skill.name.eq_ignore_ascii_case(name))?;
-    if skill.name == "lit-review" {
+    if matches!(skill.name, "lit-review" | "deep-research") {
         let after_open = skill
             .template
             .strip_prefix("---\n")

@@ -1,5 +1,9 @@
 //! Shared compute settings operations for the dashboard and standalone CLI.
 
+use super::fork_compute::{
+    colab_settings_with, configure_colab, configure_kaggle, gcp_settings, kaggle_settings_with,
+    set_gcp_settings,
+};
 use super::*;
 
 // --- HF token settings ------------------------------------------------------
@@ -175,23 +179,86 @@ pub(super) fn modal_settings_json() -> crate::error::Result<Value> {
         "maskedTokenId": token.as_ref().map(|token| mask_token(&token.id)),
         "maskedTokenSecret": token.as_ref().map(|token| mask_token(&token.secret)),
         "processEnv": std::env::var_os("MODAL_TOKEN_ID").is_some() || std::env::var_os("MODAL_TOKEN_SECRET").is_some(),
+        "settings": modal::load_settings()?.unwrap_or_default(),
     }))
 }
 
+/// The settings plus, once a credit is entered, what is left of it — which
+/// asks Modal for the spend since, so it costs a launcher round trip.
 pub(super) async fn modal_settings() -> ApiResult {
-    Ok(Json(modal_settings_json().map_err(bad_request)?))
+    let mut value = modal_settings_json().map_err(bad_request)?;
+    let settings = modal::load_settings().ok().flatten().unwrap_or_default();
+    if let Some(as_of) = settings
+        .credit_usd
+        .map(|_| settings.credit_as_of.unwrap_or(0))
+    {
+        let billing = if value["tokenConfigured"] == true {
+            match tokio::time::timeout(
+                std::time::Duration::from_secs(30),
+                modal::billing(Some(as_of)),
+            )
+            .await
+            {
+                Ok(Ok(billing)) => Ok(billing),
+                Ok(Err(error)) => Err(error.to_string()),
+                Err(_) => Err("Modal did not answer in time.".to_string()),
+            }
+        } else {
+            Err("Connect Modal to read its spend.".to_string())
+        };
+        value["balance"] = json!(modal::balance(
+            &settings,
+            billing.as_ref().map_err(String::clone)
+        ));
+    }
+    Ok(Json(value))
 }
 
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub(super) struct SetModalTokenReq {
-    token_id: String,
-    token_secret: String,
+pub(super) struct SetModalSettingsReq {
+    token_id: Option<String>,
+    token_secret: Option<String>,
+    /// Credit left in USD from the Modal dashboard; counting restarts now.
+    credit_usd: Option<f64>,
+    clear_credit: Option<bool>,
 }
 
-pub(super) async fn set_modal_token(Json(req): Json<SetModalTokenReq>) -> ApiResult {
-    let id = req.token_id.trim().to_string();
-    let secret = req.token_secret.trim().to_string();
+/// Saves a token and/or the credit left; a request may carry either.
+pub(super) async fn set_modal_settings(Json(req): Json<SetModalSettingsReq>) -> ApiResult {
+    if let Some(credit) = req.credit_usd {
+        if !credit.is_finite() || credit < 0.0 {
+            return Err(bad_request("The credit must be a positive amount in USD."));
+        }
+    }
+    if req.token_id.is_some() || req.token_secret.is_some() {
+        set_modal_token(
+            req.token_id.unwrap_or_default(),
+            req.token_secret.unwrap_or_default(),
+        )
+        .await?;
+    }
+    if req.credit_usd.is_some() || req.clear_credit == Some(true) {
+        let mut settings = modal::load_settings()
+            .map_err(|e| ApiError::from(anyhow!("{e}")))?
+            .unwrap_or_default();
+        if let Some(credit) = req.credit_usd {
+            settings.credit_usd = Some(credit);
+            settings.credit_as_of = Some(crate::store::now_ms());
+        }
+        if req.clear_credit == Some(true) {
+            settings.credit_usd = None;
+            settings.credit_as_of = None;
+        }
+        modal::save_settings(&settings).map_err(|e| ApiError::from(anyhow!("{e}")))?;
+        crate::jobs::provider_prices::invalidate().await;
+    }
+    modal_settings().await
+}
+
+async fn set_modal_token(id: String, secret: String) -> std::result::Result<(), ApiError> {
+    let id = id.trim().to_string();
+    let secret = secret.trim().to_string();
     if id.is_empty() || secret.is_empty() {
         return Err(bad_request(
             "Both the Modal token ID and secret are required.",
@@ -204,8 +271,6 @@ pub(super) async fn set_modal_token(Json(req): Json<SetModalTokenReq>) -> ApiRes
     }
     // Modal loads and validates its profile file even when credentials come from env.
     modal::resolve_token().map_err(bad_request)?;
-    let masked_id = mask_token(&id);
-    let masked_secret = mask_token(&secret);
     tokio::task::spawn_blocking(move || {
         crate::config::write_synced_env_vars(&[
             ("MODAL_TOKEN_ID", &id),
@@ -214,10 +279,7 @@ pub(super) async fn set_modal_token(Json(req): Json<SetModalTokenReq>) -> ApiRes
     })
     .await
     .map_err(|e| anyhow!("env write task failed: {e}"))??;
-    Ok(Json(json!({
-        "tokenConfigured": true, "tokenSource": "syncedEnv", "processEnv": false,
-        "maskedTokenId": masked_id, "maskedTokenSecret": masked_secret,
-    })))
+    Ok(())
 }
 
 // --- kubernetes settings ------------------------------------------------------
@@ -1107,6 +1169,12 @@ pub(super) fn openresearch_summary(logged_in: bool, ssh: &SshReadiness) -> Strin
     }
 }
 
+/// The compute targets and default, as the Compute settings show them, for
+/// routing work with the decision model.
+pub(crate) async fn routing_targets() -> Value {
+    compute_settings_json(openresearch_ssh_readiness().await)
+}
+
 pub(super) fn compute_settings_json(ssh: SshReadiness) -> Value {
     let default = crate::config::compute_default();
     let (default_backend, default_flavor) = match &default {
@@ -1117,6 +1185,12 @@ pub(super) fn compute_settings_json(ssh: SshReadiness) -> Value {
     let hf = crate::jobs::huggingface::resolve_token_with_source().ok();
     let tinker = crate::jobs::tinker::resolve_api_key_with_source().ok();
     let modal_source = crate::jobs::modal::token_source();
+    let colab_cli = crate::jobs::colab::find_cli();
+    let colab_configured = crate::jobs::colab_accounts::configured();
+    let colab_accounts = crate::jobs::colab_accounts::load_accounts();
+    let colab_paused = colab_accounts.accounts.iter().filter(|a| a.paused).count();
+    let kaggle_cli = crate::jobs::kaggle::find_cli().is_some();
+    let kaggle_accounts = crate::jobs::kaggle::load_accounts();
     let k8s_settings = k8s::load_settings().ok().flatten();
     let ssh_hosts = list_ssh_hosts().len();
     let slurm_settings = crate::jobs::slurm::load_settings().ok().flatten();
@@ -1132,6 +1206,19 @@ pub(super) fn compute_settings_json(ssh: SshReadiness) -> Value {
     // Presence of the credentials file only — whether the token still works is
     // the expanded row's (network) question.
     let or_logged_in = crate::config::credentials_present();
+    let gcp_settings = crate::jobs::gcp::load_settings()
+        .ok()
+        .flatten()
+        .unwrap_or_default();
+    let gcp_cli = crate::jobs::gcp::find_cli().is_some();
+    let gcp_project = gcp_settings
+        .project
+        .clone()
+        .or_else(crate::jobs::gcp::configured_project_on_disk);
+    let gcp_zone = gcp_settings
+        .zone
+        .clone()
+        .unwrap_or_else(|| "gcloud default".into());
 
     // Same spellings as the expanded rows' SOURCE_LABELS/MODAL_TOKEN_LABELS
     // in the UI — the collapsed head stays visible above the open row, so the
@@ -1164,6 +1251,32 @@ pub(super) fn compute_settings_json(ssh: SshReadiness) -> Value {
                 Some(crate::jobs::tinker::ApiKeySource::Env) => "TINKER_API_KEY env var",
                 Some(crate::jobs::tinker::ApiKeySource::OpenresearchEnv) => "Key from Environment tab",
                 None => "No API key",
+            },
+        },
+        {
+            "id": "colab",
+            // Paused accounts are not offered to routing.
+            "configured": colab_configured && (colab_accounts.accounts.is_empty() || colab_paused < colab_accounts.accounts.len()),
+            "summary": match (&colab_cli, colab_configured, colab_accounts.accounts.len(), &colab_accounts.active) {
+                (None, _, _, _) => "Colab CLI not installed".to_string(),
+                (Some(_), false, _, _) => "Colab CLI installed, no Google account".to_string(),
+                (Some(_), true, 0, _) => "Colab CLI signed in".to_string(),
+                (Some(_), true, n, _) if colab_paused == n => format!("{n} accounts, all paused"),
+                (Some(_), true, 1, Some(active)) => format!("Account {active}"),
+                (Some(_), true, n, Some(active)) if colab_paused > 0 => format!("{n} accounts ({colab_paused} paused), default {active}"),
+                (Some(_), true, n, Some(active)) => format!("{n} accounts, default {active}"),
+                (Some(_), true, n, None) => format!("{n} accounts"),
+            },
+        },
+        {
+            "id": "kaggle",
+            "configured": kaggle_cli && !kaggle_accounts.accounts.is_empty(),
+            "summary": match (kaggle_cli, kaggle_accounts.accounts.len(), &kaggle_accounts.active) {
+                (false, _, _) => "Kaggle CLI not installed".to_string(),
+                (true, 0, _) => "Kaggle CLI installed, no account".to_string(),
+                (true, 1, Some(active)) => format!("Account {active}"),
+                (true, n, Some(active)) => format!("{n} accounts, default {active}"),
+                (true, n, None) => format!("{n} accounts"),
             },
         },
         {
@@ -1216,6 +1329,15 @@ pub(super) fn compute_settings_json(ssh: SshReadiness) -> Value {
                 format!("{ray_source_label} ({ray_resolved})")
             } else {
                 ray_source_label.to_string()
+            },
+        },
+        {
+            "id": "gcp",
+            "configured": gcp_cli && gcp_project.is_some(),
+            "summary": match (gcp_cli, &gcp_project) {
+                (false, _) => "Google Cloud CLI not installed".to_string(),
+                (true, None) => "gcloud installed, no project".to_string(),
+                (true, Some(project)) => format!("Project {project} / zone {gcp_zone}"),
             },
         },
         {
@@ -1388,8 +1510,11 @@ pub(crate) async fn show(backend: &str) -> Result<Value> {
         "hf" => Ok(hf_settings().await),
         "modal" => modal_settings().await,
         "tinker" => tinker_settings().await,
+        "colab" => colab_settings_with(true).await,
         "k8s" => k8s_settings().await,
         "openresearch" => openresearch_settings().await,
+        "gcp" => gcp_settings().await,
+        "kaggle" => kaggle_settings_with(true).await,
         _ => return Err(anyhow!("Unknown compute backend: {backend}")),
     })?;
     if backend == "ssh" {
@@ -1467,8 +1592,11 @@ pub(crate) async fn configure(backend: &str, body: Value) -> Result<Value> {
         "ray" => set_ray_settings(Json(serde_json::from_value(body)?)).await,
         "k8s" => set_k8s_settings(Json(serde_json::from_value(body)?)).await,
         "hf" => set_hf_token(Json(serde_json::from_value(body)?)).await,
-        "modal" => set_modal_token(Json(serde_json::from_value(body)?)).await,
+        "modal" => set_modal_settings(Json(serde_json::from_value(body)?)).await,
         "tinker" => set_tinker_key(Json(serde_json::from_value(body)?)).await,
+        "gcp" => set_gcp_settings(Json(serde_json::from_value(body)?)).await,
+        "kaggle" => configure_kaggle(body).await,
+        "colab" => configure_colab(body).await,
         _ => {
             return Err(anyhow!(
                 "{backend} has no saved configuration; use compute connect or default set."
@@ -1533,7 +1661,25 @@ pub(crate) async fn check(
                 && value["sshKeyStatus"] == "matched"
                 && value["error"].is_null()
         }
-        "modal" => value["ready"] == true,
+        "modal" | "gcp" => value["ready"] == true,
+        // Ready once some unpaused account answered with its sign-in.
+        "colab" => {
+            value["ready"] == true
+                && value["accounts"].as_array().is_some_and(|accounts| {
+                    accounts.iter().any(|a| {
+                        a["paused"] == false
+                            && a["account"].is_object()
+                            && a["account"]["error"].is_null()
+                    })
+                })
+        }
+        // Ready once some account answered with its credentials.
+        "kaggle" => {
+            value["ready"] == true
+                && value["accounts"]
+                    .as_array()
+                    .is_some_and(|accounts| accounts.iter().any(|a| a["error"].is_null()))
+        }
         _ => false,
     };
     value["ready"] = json!(ready);

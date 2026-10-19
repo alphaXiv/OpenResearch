@@ -230,7 +230,7 @@ fn transport_error(base: &str, err: reqwest::Error) -> crate::error::Error {
     anyhow!("Could not reach alphaXiv at {}: {}", base, detail)
 }
 
-fn http() -> &'static Client {
+pub(crate) fn http() -> &'static Client {
     static CLIENT: OnceLock<Client> = OnceLock::new();
     CLIENT.get_or_init(|| crate::net::remote_client().build().expect("http client"))
 }
@@ -453,7 +453,7 @@ fn retry_after_secs(value: &str) -> Option<u64> {
 
 /// Send a keyless literature GET, retrying 429s: parallel agent calls routinely
 /// burst past these hosts' per-IP limits. Other statuses are left to the caller.
-async fn public_get(
+pub(crate) async fn public_get(
     request: impl Fn() -> reqwest::RequestBuilder,
     service: &str,
     unreachable: impl Fn(reqwest::Error) -> crate::error::Error,
@@ -1466,7 +1466,11 @@ fn rerank_pubmed_articles(articles: &mut [PubmedArticle], prioritize: &str) {
 }
 
 /// Undated records sort last in either direction.
-fn compare_dates(a: &Option<String>, b: &Option<String>, newest_first: bool) -> std::cmp::Ordering {
+pub(crate) fn compare_dates(
+    a: &Option<String>,
+    b: &Option<String>,
+    newest_first: bool,
+) -> std::cmp::Ordering {
     match (a, b) {
         (Some(a), Some(b)) if newest_first => b.cmp(a),
         (Some(a), Some(b)) => a.cmp(b),

@@ -49,7 +49,12 @@ use crate::workspace_state::{GlobalWorkspaceState, WorkspaceState};
 use crate::{browser, UpArgs};
 
 pub(crate) mod compute_settings;
+mod fork_compute;
+mod fork_settings;
+mod harness_accounts;
 mod harness_setup;
+mod research_tools;
+mod sleep_mode;
 use compute_settings::*;
 
 pub async fn run(args: UpArgs) -> Result<()> {
@@ -637,7 +642,7 @@ fn router(state: AppState, remote_auth: Option<RemoteAuth>) -> Router {
         )
         .route(
             "/api/settings/modal",
-            get(modal_settings).post(set_modal_token),
+            get(modal_settings).post(set_modal_settings),
         )
         .route("/api/settings/env", get(env_settings).post(set_env_var))
         .route(
@@ -715,6 +720,7 @@ fn router(state: AppState, remote_auth: Option<RemoteAuth>) -> Router {
         .route("/api/settings/compute", get(compute_settings))
         .route("/api/settings/compute/default", post(set_compute_default))
         .route("/api/settings/local", get(local_machine_settings))
+        .merge(fork_settings::routes())
         .route("/api/settings/openresearch", get(openresearch_settings))
         .route("/api/settings/openresearch/login", get(openresearch_login))
         .route("/api/settings/commands/run", get(run_settings_command))
@@ -796,6 +802,10 @@ fn router(state: AppState, remote_auth: Option<RemoteAuth>) -> Router {
             post(recover_chat_turn),
         )
         .route("/api/chat/sessions/{id}/side", post(open_side_chat))
+        .route(
+            "/api/chat/sessions/{id}/handoff",
+            post(handoff_chat_session),
+        )
         .route("/api/chat/sessions/{id}/fork", post(fork_chat_turn))
         .route("/api/chat/sessions/{id}/branch", post(select_chat_branch))
         .route("/api/chat/sessions/{id}/interrupt", post(interrupt_chat))
@@ -883,6 +893,7 @@ fn remote_route_forbidden(path: &str) -> bool {
             | "/api/settings/openresearch/login"
             | "/api/settings/commands/run"
             | "/api/harnesses/setup"
+            | "/api/harnesses/accounts/login"
     ) || path.starts_with("/api/remote/")
         || (path.starts_with("/api/projects/")
             && (path.ends_with("/file/open") || path.ends_with("/file/reveal")))
@@ -2411,7 +2422,27 @@ async fn create_run(State(state): State<AppState>, Json(req): Json<CreateRunReq>
     // Dashboard callers may omit compute options; forwarded CLI requests arrive resolved.
     let args = req.into_run_args();
     crate::compute::validate_run_args(&args).map_err(bad_request)?;
+    let admission = local::sleep::admit_run(&experiment.project_id, &args)
+        .await
+        .map_err(bad_request)?;
     let run = crate::compute::submit(&args).await.map_err(bad_request)?;
+    if let Some(admission) = admission {
+        let store = Store::open()?;
+        store.record_sleep_charge(
+            &admission.session_id,
+            &run.id,
+            admission.usd_per_hour,
+            run.created_at,
+        )?;
+        // Self-improvement: credit the run to the strategy its turn ran under.
+        if let Some(sleep) = store.get_sleep(&admission.session_id)? {
+            if let Err(err) =
+                local::strategy::attribute_run(&store, &sleep, &run.id, run.created_at)
+            {
+                eprintln!("orx up: strategy: {err}");
+            }
+        }
+    }
     Ok(Json(json!({ "run": ApiRun::from(&run) })))
 }
 
@@ -4481,6 +4512,14 @@ fn spawn_background_tasks(check_updates: bool) {
             crate::telemetry::retry_outbox();
         }
     });
+    // A Colab runtime or Google Cloud VM outliving its run keeps billing.
+    tokio::spawn(async {
+        loop {
+            crate::jobs::colab_runtimes::reap_orphans().await;
+            crate::jobs::gcp::reap_orphans().await;
+            tokio::time::sleep(crate::jobs::colab_runtimes::REAP_INTERVAL).await;
+        }
+    });
 }
 
 /// Requests and terminals in flight, which an automatic restart would cut off.
@@ -5630,6 +5669,7 @@ struct SetUiStateReq {
     preferred_agent: Option<StoredAgentSelectionReq>,
     workspace: Option<GlobalWorkspaceState>,
     preferred_autonomy: Option<Autonomy>,
+    harness_failover: Option<local::harness::HarnessFailover>,
 }
 
 #[derive(Deserialize)]
@@ -5676,6 +5716,10 @@ async fn set_ui_state(Json(req): Json<SetUiStateReq>) -> ApiResult {
                 })
             })
             .transpose()?;
+        let failover = req
+            .harness_failover
+            .map(local::harness::HarnessFailover::validated)
+            .transpose()?;
         if let Some(completed) = req.tour_completed {
             store.set_tour_completed(completed)?;
         }
@@ -5684,6 +5728,9 @@ async fn set_ui_state(Json(req): Json<SetUiStateReq>) -> ApiResult {
         }
         if let Some(autonomy) = req.preferred_autonomy {
             store.set_preferred_autonomy(autonomy)?;
+        }
+        if let Some(failover) = failover {
+            store.set_harness_failover(&failover)?;
         }
         if let Some(workspace) = req.workspace {
             store.set_global_workspace_state(&workspace)?;
@@ -5723,7 +5770,11 @@ struct SetLitSourcesReq {
 
 async fn set_lit_sources_settings(Json(req): Json<SetLitSourcesReq>) -> ApiResult {
     tokio::task::spawn_blocking(move || {
-        let mut disabled = Vec::new();
+        // Keep toggles this request doesn't carry (the fork's sources in `fork_settings.rs`).
+        let mut disabled: Vec<String> = crate::config::disabled_lit_sources()
+            .into_iter()
+            .filter(|name| !["alphaxiv", "openalex", "biorxiv", "pubmed"].contains(&name.as_str()))
+            .collect();
         for (enabled, source) in [
             (req.alphaxiv, crate::LitSource::Alphaxiv),
             (req.openalex, crate::LitSource::Openalex),
@@ -7613,6 +7664,20 @@ async fn create_chat_session(
         .await;
         req = new_chat_settings(req.project_id, preferences, &catalog).map_err(bad_request)?;
     }
+    let session = build_chat_session(&state, req).await?;
+    store.create_chat_session(&session)?;
+    state.chat.emit_session(Some(session.clone())).await;
+    Ok(Json(
+        json!({ "session": local::chat::session_json(&session, false) }),
+    ))
+}
+
+/// Validate a new chat's settings against its harness and resolve its model.
+/// Shared by fresh chats and harness handoffs; the caller inserts the row.
+async fn build_chat_session(
+    state: &AppState,
+    req: CreateChatSessionReq,
+) -> std::result::Result<StoredChatSession, ApiError> {
     let harness = req
         .harness
         .ok_or_else(|| bad_request("no agent selected"))?;
@@ -7639,19 +7704,35 @@ async fn create_chat_session(
             "this harness activates Plan through permissions",
         ));
     }
-    let session = StoredChatSession {
+    // Nobody picked a model: run the harness's strongest one rather than
+    // whatever its CLI defaults to.
+    let mut reasoning_level = nonempty(req.reasoning_level);
+    let model = match nonempty(req.model) {
+        Some(model) => Some(model),
+        None => match recommended_model(state, &harness).await {
+            Some((model, levels)) => {
+                // An effort chosen for the CLI's default model may not exist on this one.
+                if let Some(levels) = levels {
+                    reasoning_level = reasoning_level.filter(|level| levels.contains(level));
+                }
+                Some(model)
+            }
+            None => None,
+        },
+    };
+    Ok(StoredChatSession {
         id: format!("chat_{}", uuid::Uuid::new_v4()),
         project_id: req.project_id,
         harness,
         native_session_id: None,
         title: None,
         title_source: None,
-        model: nonempty(req.model),
+        model,
         service_tier,
         permission_mode,
         plan_mode: req.plan_mode,
         plan_reset_pending: false,
-        reasoning_level: nonempty(req.reasoning_level),
+        reasoning_level,
         archived: false,
         context_usage_json: None,
         bootstrap_context: None,
@@ -7661,12 +7742,34 @@ async fn create_chat_session(
         side_parent_session_id: None,
         created_at: now_ms(),
         updated_at: now_ms(),
-    };
-    store.create_chat_session(&session)?;
-    state.chat.emit_session(Some(session.clone())).await;
-    Ok(Json(
-        json!({ "session": local::chat::session_json(&session, false) }),
-    ))
+    })
+}
+
+/// The cached catalog's strongest model for `harness`, if detection has one,
+/// with the reasoning ids that model accepts when the catalog lists them.
+async fn recommended_model(
+    state: &AppState,
+    harness: &str,
+) -> Option<(String, Option<Vec<String>>)> {
+    let cache = state.harnesses.lock().await;
+    let (_, payload) = cache.as_ref()?;
+    let entry = payload["harnesses"]
+        .as_array()?
+        .iter()
+        .find(|entry| entry["id"] == harness)?;
+    let model = entry["recommendedModel"].as_str()?;
+    let levels = entry["models"]
+        .as_array()?
+        .iter()
+        .find(|item| item["id"] == model)?["reasoningLevels"]
+        .as_array()
+        .map(|levels| {
+            levels
+                .iter()
+                .filter_map(|level| level["id"].as_str().map(str::to_string))
+                .collect()
+        });
+    Some((model.to_string(), levels))
 }
 
 /// Chats the user had in an agent's own CLI, for the composer's `/resume`
@@ -7755,6 +7858,60 @@ async fn open_side_chat(State(state): State<AppState>, Path(id): Path<String>) -
         .admit(&parent.project_id)
         .ok_or_else(|| bad_request("project deletion is in progress"))?;
     let session = state.chat.open_side_chat(&parent).await?;
+    Ok(Json(
+        json!({ "session": local::chat::session_json(&session, false) }),
+    ))
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct HandoffChatReq {
+    harness: String,
+    model: Option<String>,
+    service_tier: Option<String>,
+    permission_mode: Option<String>,
+    reasoning_level: Option<String>,
+}
+
+/// Continue `id` in a new chat on another harness. The original is left
+/// untouched; the new chat gets a transcript snapshot as its first-turn
+/// context and a worktree seeded from the original's current checkout.
+async fn handoff_chat_session(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+    Json(req): Json<HandoffChatReq>,
+) -> ApiResult {
+    reject_if_moving(&state)?;
+    let parent = Store::open()?
+        .get_chat_session(&id)?
+        .ok_or_else(|| not_found("chat session"))?;
+    if parent.side_parent_session_id.is_some() {
+        return Err(bad_request(
+            "a side chat cannot be continued on another harness",
+        ));
+    }
+    if req.harness == parent.harness {
+        return Err(bad_request("the chat already runs on this harness"));
+    }
+    let _admission = state
+        .project_lifecycle
+        .admit(&parent.project_id)
+        .ok_or_else(|| bad_request("project deletion is in progress"))?;
+    let session = build_chat_session(
+        &state,
+        CreateChatSessionReq {
+            project_id: parent.project_id.clone(),
+            harness: Some(req.harness),
+            model: req.model,
+            service_tier: req.service_tier,
+            permission_mode: req.permission_mode,
+            plan_mode: false,
+            reasoning_level: req.reasoning_level,
+            autonomy: parent.autonomy.as_deref().and_then(Autonomy::from_id),
+        },
+    )
+    .await?;
+    let session = state.chat.open_handoff_chat(&parent, session).await?;
     Ok(Json(
         json!({ "session": local::chat::session_json(&session, false) }),
     ))
@@ -8721,6 +8878,7 @@ mod tests {
             onboarding_completed: true,
             tour_completed: true,
             workspace: None,
+            harness_failover: Default::default(),
             preferred_autonomy: Some(Autonomy::Copilot),
             preferred_agent: Some(StoredAgentSelection {
                 harness: "codex".into(),
@@ -8750,6 +8908,7 @@ mod tests {
             onboarding_completed: false,
             tour_completed: false,
             workspace: None,
+            harness_failover: Default::default(),
             preferred_autonomy: None,
             preferred_agent: None,
         };
@@ -8982,6 +9141,7 @@ mod tests {
             preferred_agent: None,
             workspace: Some(invalid),
             preferred_autonomy: None,
+            harness_failover: None,
         }))
         .await;
         assert_eq!(result.err().unwrap().0, StatusCode::BAD_REQUEST);

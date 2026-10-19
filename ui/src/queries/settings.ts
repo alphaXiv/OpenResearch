@@ -15,6 +15,12 @@ export const getTinkerSettingsQuery = () => queryOptions({
   staleTime: 300_000,
 });
 
+export const getDecisionModelSettingsQuery = () => queryOptions({
+  queryKey: workspaceKey("getDecisionModelSettings"),
+  queryFn: ({ signal }) => api.getDecisionModelSettings(signal),
+  staleTime: 300_000,
+});
+
 export const getK8sSettingsQuery = () => queryOptions({
   queryKey: workspaceKey("getK8sSettings"),
   queryFn: ({ signal }) => api.getK8sSettings(signal),
@@ -48,6 +54,55 @@ export const getComputeSettingsQuery = (projectId?: string) => queryOptions({
 export const getLocalMachineQuery = () => queryOptions({
   queryKey: workspaceKey("getLocalMachine"),
   queryFn: ({ signal }) => api.getLocalMachine(signal),
+  staleTime: 300_000,
+});
+
+export const getColabSettingsQuery = () => queryOptions({
+  queryKey: workspaceKey("getColabSettings"),
+  queryFn: ({ signal }) => api.getColabSettings(signal),
+  staleTime: 30_000,
+});
+
+export const getKaggleSettingsQuery = () => queryOptions({
+  queryKey: workspaceKey("getKaggleSettings"),
+  queryFn: ({ signal }) => api.getKaggleSettings(signal),
+  staleTime: 30_000,
+});
+
+export const getKaggleLiveKernelsQuery = () => queryOptions({
+  queryKey: workspaceKey("getKaggleLiveKernels"),
+  queryFn: ({ signal }) => api.getKaggleLiveKernels(signal),
+  staleTime: 30_000,
+  refetchInterval: 60_000,
+});
+
+export const getGcpSettingsQuery = () => queryOptions({
+  queryKey: workspaceKey("getGcpSettings"),
+  queryFn: ({ signal }) => api.getGcpSettings(signal),
+  staleTime: 30_000,
+});
+
+export const getComputeRoutingSettingsQuery = () => queryOptions({
+  queryKey: workspaceKey("getComputeRoutingSettings"),
+  queryFn: ({ signal }) => api.getComputeRoutingSettings(signal),
+  staleTime: 300_000,
+});
+
+export const getAutoCompactSettingsQuery = () => queryOptions({
+  queryKey: workspaceKey("getAutoCompactSettings"),
+  queryFn: ({ signal }) => api.getAutoCompactSettings(signal),
+  staleTime: 300_000,
+});
+
+export const getComputePricesQuery = () => queryOptions({
+  queryKey: workspaceKey("getComputePrices"),
+  queryFn: ({ signal }) => api.getComputePrices(signal),
+  staleTime: 300_000,
+});
+
+export const getCrossHarnessSettingsQuery = () => queryOptions({
+  queryKey: workspaceKey("getCrossHarnessSettings"),
+  queryFn: ({ signal }) => api.getCrossHarnessSettings(signal),
   staleTime: 300_000,
 });
 
@@ -145,6 +200,12 @@ export const getHarnessSetupCommandsQuery = () => queryOptions({
   queryKey: workspaceKey("getHarnessSetupCommands"),
   queryFn: ({ signal }) => api.getHarnessSetupCommands(signal),
   staleTime: Infinity,
+});
+
+export const getHarnessAccountsQuery = () => queryOptions({
+  queryKey: workspaceKey("getHarnessAccounts"),
+  queryFn: ({ signal }) => api.getHarnessAccounts(signal),
+  staleTime: 30_000,
 });
 
 export const getHarnessesQuery = () => queryOptions({

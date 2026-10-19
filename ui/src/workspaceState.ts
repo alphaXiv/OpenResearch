@@ -7,6 +7,31 @@ export type Pane =
   | { kind: "subagent"; sessionId: string; spawnPartId: string }
   | { kind: "side"; sessionId: string };
 
+export interface ExperimentTreeState {
+  positions: Record<string, { x: number; y: number }>;
+  /** Missing on older workspaces: infer manual mode when positions are saved. */
+  autoLayout?: boolean;
+  search: string;
+  statusFilter: "all" | "active" | "failed";
+  matchIndex: number;
+  selectedId: string | null;
+  showMiniMap: boolean;
+  showArchived: boolean;
+  inspectorTab: "overview" | "runs" | "diff";
+  /** Nodes whose subtree the user folded. Missing on older workspaces. */
+  collapsed?: string[];
+  /** Nodes the user reopened after auto-tidy folded them. */
+  expanded?: string[];
+  /** Fold quiet side branches automatically. Missing = on. */
+  autoCollapse?: boolean;
+}
+
+export const initialExperimentTreeState = (): ExperimentTreeState => ({
+  positions: {}, autoLayout: true, search: "", statusFilter: "all", matchIndex: 0, selectedId: null,
+  showMiniMap: false, showArchived: false, inspectorTab: "overview",
+  collapsed: [], expanded: [], autoCollapse: true,
+});
+
 export interface TaskWorkspace {
   tabs: Pane[];
   active: Pane | null;
@@ -20,6 +45,7 @@ export interface TaskWorkspace {
   panelMax: boolean;
   /** Last React Flow viewport for the experiments tree, if it was opened. */
   treeViewport?: { x: number; y: number; zoom: number } | null;
+  treeState?: ExperimentTreeState;
 }
 
 export interface ProjectWorkspace {

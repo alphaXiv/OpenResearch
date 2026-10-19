@@ -2,7 +2,7 @@ import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { getHarnessesQuery } from "../queries/settings";
 import { m } from "../paraglide/messages.js";
 import { ltr } from "../i18n";
-import { Check, ChevronDown, ChevronLeft, ChevronRight, Lock, Plus, Settings, Zap } from "lucide-react";
+import { ArrowRightLeft, Check, ChevronDown, ChevronLeft, ChevronRight, Lock, Plus, Settings, Zap } from "lucide-react";
 import { useEffect, useLayoutEffect, useMemo, useRef, useState, type ReactNode, type RefObject } from "react";
 import {
   fmtNumber,
@@ -121,12 +121,15 @@ export function ModelPicker({
   onSelectReasoning,
   autonomy,
   onSelectAutonomy,
+  sleepDetail,
+  onOpenSleep,
   lockHarness = false,
   openRequest = 0,
   className,
   sessionHarness,
   nativeOptions = [],
   onSelectNativeOption,
+  onHandoff,
 }: {
   value: ModelSelection | null;
   onSelect: (value: ModelSelection) => void;
@@ -139,6 +142,9 @@ export function ModelPicker({
   onSelectReasoning?: (id: string) => void;
   autonomy?: Autonomy;
   onSelectAutonomy?: (autonomy: Autonomy) => void;
+  /** Sleep mode's state for the open session; the row opens its dialog. */
+  sleepDetail?: string;
+  onOpenSleep?: () => void;
   /** When set (a session is open), only the current harness is offered — its
    * harness is fixed for its lifetime, so you can still switch models within it
    * but not switch to a different harness. */
@@ -149,6 +155,9 @@ export function ModelPicker({
   sessionHarness?: Harness;
   nativeOptions?: NativeOption[];
   onSelectNativeOption?: (optionId: string, value: string) => void;
+  /** With `lockHarness`, lists the other harnesses too: picking one of their
+   * models continues the open session in a new chat on that harness. */
+  onHandoff?: (value: ModelSelection) => void;
 }) {
   const { data: catalog = EMPTY_HARNESSES } = useQuery(getHarnessesQuery());
   const harnesses = useMemo(() => sessionHarness ? [sessionHarness, ...catalog.filter((harness) => harness.id !== sessionHarness.id)] : catalog, [catalog, sessionHarness]);
@@ -189,17 +198,23 @@ export function ModelPicker({
 
   const groups = useMemo(() => {
     const q = filter.trim().toLowerCase();
-    // Locked to the open session's harness: only offer that one.
-    const shown =
-      lockHarness && value ? harnesses.filter((h) => h.id === value.harness) : harnesses;
+    const locked = lockHarness && value ? value.harness : null;
+    // Locked to the open session's harness: offer that one, then — when a
+    // handoff is possible — the others as "continue in a new chat" targets.
+    const shown = locked
+      ? [
+        ...harnesses.filter((h) => h.id === locked),
+        ...(onHandoff ? harnesses.filter((h) => h.id !== locked) : []),
+      ]
+      : harnesses;
     return shown.map((h) => {
       let models = h.models;
       if (q) models = models.filter((m) => `${m.id} ${harnessModelLabel(m)}`.toLowerCase().includes(q));
       // Large catalogs stay behind the filter box.
       else if (h.id === "opencode" || h.id === "cursor" || h.id === "antigravity" || h.id.startsWith("acp:")) models = models.slice(0, 5);
-      return { harness: h, models, hidden: q ? 0 : h.models.length - models.length };
+      return { harness: h, models, hidden: q ? 0 : h.models.length - models.length, handoff: locked !== null && h.id !== locked };
     });
-  }, [harnesses, filter, lockHarness, value]);
+  }, [harnesses, filter, lockHarness, value, onHandoff]);
 
   /** Switch harness → reseed mode defaults for that harness.
    *
@@ -209,7 +224,7 @@ export function ModelPicker({
    * model rejects, so it falls back to that model's default. */
   const pick = (harness: Harness, model: string | null) => {
     const sameHarness = value?.harness === harness.id;
-    onSelect({
+    const next: ModelSelection = {
       harness: harness.id,
       model,
       serviceTier: reconcileServiceTier(
@@ -227,7 +242,9 @@ export function ModelPicker({
           ? value!.reasoningLevel
           : null,
       ),
-    });
+    };
+    if (lockHarness && onHandoff && !sameHarness) onHandoff(next);
+    else onSelect(next);
     close();
   };
 
@@ -417,6 +434,18 @@ export function ModelPicker({
               {speedChoices.length > 0 && menuRow(m.model_picker_speed(), speedLabel, "speed")}
               {permissionChoices.length > 0 && menuRow(m.model_picker_mode(), permissionLabel, "permissions")}
               {onSelectAutonomy && menuRow(m.model_picker_autonomy(), autonomyLabel, "autonomy")}
+              {onOpenSleep && (
+                <button
+                  type="button"
+                  className="model-root-row flex w-full items-center gap-2 rounded-sm px-2 py-1.5 text-start text-sm text-text hover:bg-surface"
+                  aria-haspopup="dialog"
+                  onClick={() => { close(); onOpenSleep(); }}
+                >
+                  <span className="flex-1">{m.sleep_mode_title()}</span>
+                  {sleepDetail && <span className="max-w-36 truncate text-sm text-muted">{sleepDetail}</span>}
+                  <ChevronRight size={14} className="shrink-0 text-muted" />
+                </button>
+              )}
             </div>
           )}
           {page === "models" && (
@@ -430,8 +459,17 @@ export function ModelPicker({
                 onChange={(e) => setFilter(e.target.value)}
               />
               <div className="model-menu-list overflow-y-auto p-1.5">
-                {groups.map(({ harness, models, hidden }) => (
+                {groups.map(({ harness, models, hidden, handoff }, index) => (
                   <div key={harness.id} className="[&_.model-item]:ps-6">
+                    {handoff && !groups[index - 1]?.handoff && (
+                      <div className="model-handoff-header mt-1.5 mb-1 px-2 pt-2 border-t border-t-border-variant">
+                        <div className="inline-flex items-center gap-1.5 text-sm font-medium text-text">
+                          <ArrowRightLeft size={13} aria-hidden="true" />
+                          {m.model_picker_continue_in_new_chat()}
+                        </div>
+                        <p className="m-0 mt-0.5 text-xs leading-normal text-muted">{m.model_picker_continue_in_new_chat_hint()}</p>
+                      </div>
+                    )}
                     <div className={MODEL_GROUP_CLASS_NAME}>
                       <span className="inline-flex items-center gap-1.5">
                         <HarnessLogo harness={harness.id} logo={harness.logo} size={14} />

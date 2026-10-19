@@ -11,6 +11,7 @@ import biorxivSvg from "../assets/lit-sources/biorxiv.svg?raw";
 import openalexSvg from "../assets/lit-sources/openalex.svg?raw";
 import pubmedSvg from "../assets/lit-sources/pubmed.svg?raw";
 import type { LitSource } from "../orxCommand";
+import { FORK_LIT_SOURCE_NAME, FORK_LIT_SOURCE_SVG } from "../features/fork/litSourceMeta";
 export { parseOrxLit, type LitSource, type OrxLitCall } from "../orxCommand";
 
 export const LIT_SOURCE_NAME: Record<LitSource, string> = {
@@ -18,6 +19,7 @@ export const LIT_SOURCE_NAME: Record<LitSource, string> = {
   openalex: "OpenAlex",
   biorxiv: "bioRxiv",
   pubmed: "PubMed",
+  ...FORK_LIT_SOURCE_NAME,
 };
 
 const LIT_SOURCE_SVG: Record<LitSource, string> = {
@@ -25,6 +27,7 @@ const LIT_SOURCE_SVG: Record<LitSource, string> = {
   openalex: openalexSvg,
   biorxiv: biorxivSvg,
   pubmed: pubmedSvg,
+  ...FORK_LIT_SOURCE_SVG,
 };
 
 /** `decorative` when the source name is already shown as adjacent text (Settings

@@ -6,7 +6,9 @@ description: "Explain and compare scientific or technical concepts using origina
 # Literature retrieval
 
 Use this skill for scientific explanations and comparisons, even without a named
-paper. Never delegate retrieval to a sub-agent.
+paper. Keep ordinary retrieval with this agent. When following the
+`orx-deep-research` report workflow, its coordinator may delegate independent
+subtopics; each assigned researcher owns the retrieval loop for its scope.
 
 Use enabled literature connectors appropriate to the topic. General web search
 is a fallback only when relevant connectors provide no useful evidence. Do not
@@ -38,6 +40,8 @@ orx discover embedding "<semantic description in the user's terms>"
 orx discover openalex "<scholarly search query>"
 orx discover biorxiv "<biology preprint query>"
 orx discover pubmed "<biomedical query>"
+orx discover arxiv "<arXiv query or au:/cat:/ti: field query>"
+orx discover semanticscholar "<cross-disciplinary query>"
 ```
 
 - `keyword` searches title, abstract, and full text. Results include the match
@@ -55,10 +59,23 @@ orx discover pubmed "<biomedical query>"
   through NCBI E-utilities, ranked by PubMed's Best Match. It
   accepts PubMed query syntax such as field tags (`[ti]`, `[au]`, `[mh]`).
   Result ids are PMIDs.
+- `arxiv` searches arXiv's own API. It covers the same corpus as alphaXiv but
+  includes submissions as soon as arXiv lists them and accepts arXiv field
+  syntax (`au:`, `ti:`, `abs:`, `cat:cs.LG`, combined with `AND`/`OR`/`ANDNOT`);
+  plain words are ANDed. Use it for the newest preprints, an author's work, or
+  a category. Result ids are arXiv ids, read through alphaXiv. arXiv allows one
+  request every three seconds, so run arXiv calls one at a time.
+- `semanticscholar` searches the Semantic Scholar graph across disciplines and
+  returns citation counts. Result ids are the arXiv id, else the DOI, else
+  `pmid:<id>`, so `orx paper` reads them; a hit with none of these has a
+  semanticscholar.org URL as its id, which `orx paper` cannot read. Keyless
+  requests share a throttled pool, so a 429 is common; report it and use
+  OpenAlex instead rather than retrying in a loop.
 - Every primitive returns the same JSON shape: `source`, self-routing `id`,
   title, abstract, and publication date. alphaXiv results may include votes and
   full-text snippets; OpenAlex and bioRxiv results may include citations.
-  PubMed results carry no votes or citations.
+  PubMed and arXiv results carry no votes or citations; Semantic Scholar
+  results may include citations.
 
 ## Date and ranking controls
 
@@ -89,7 +106,10 @@ orx discover pubmed "<query>" --published-after 2020-01-01 --prioritize recency
   vote-aware ranking.
 - PubMed applies the window as a publication-date filter and reranks its
   relevance pool by date for `recency` and `historical`. It has no citation
-  counts, so `popular` keeps PubMed's relevance order.
+  counts, so `popular` keeps PubMed's relevance order. arXiv behaves the same
+  way, filtering on submission date.
+- Semantic Scholar applies the window as a publication-date filter and reranks
+  its relevance pool by date or citations, like OpenAlex.
 - Use `recency` for explicitly new/latest work. Use `historical` for seminal or
   foundational work. Use `popular` only when the user asks about votes,
   popularity, or community standing.
@@ -120,6 +140,9 @@ orx discover pubmed "<query>" --published-after 2020-01-01 --prioritize recency
    cross-disciplinary coverage. Use bioRxiv for biology and adjacent
    life-science preprints and PubMed for biomedical, clinical, and
    life-science journal literature, not as ritual calls for unrelated topics.
+   Use arXiv for preprints newer than alphaXiv returns or for author and
+   category lookups, and Semantic Scholar as a second cross-disciplinary index
+   alongside OpenAlex.
    When the corpus is genuinely ambiguous or interdisciplinary, query multiple
    relevant sources concurrently. If the initial round includes alphaXiv
    keyword and its terms mix other terms with one or more 2–10 character tokens
@@ -135,7 +158,8 @@ orx discover pubmed "<query>" --published-after 2020-01-01 --prioritize recency
    cross-source fallback. Prefer the alphaXiv representation of an arXiv
    duplicate because it supports full-text reading. bioRxiv is a subset of
    OpenAlex, and PubMed journal records largely overlap OpenAlex, so overlap
-   between those calls is expected. Within each source,
+   between those calls is expected. arXiv hits duplicate alphaXiv ones, and
+   Semantic Scholar overlaps OpenAlex. Within each source,
    the API order already blends topical relevance with the requested priority:
    - With `recency`, freshness is already upranked and old accumulated votes
      are damped. Reorder only for topical fit; do not exclude an older but much

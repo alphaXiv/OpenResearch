@@ -1584,6 +1584,55 @@ impl ChatHost {
         let Some(guard) = TurnGuard::claim(self, session_id, None).await else {
             return Err(anyhow!("session is busy — interrupt it first"));
         };
+        self.start_compaction(guard, session_id, None).await
+    }
+
+    /// Auto-compact a session whose turn just ended `percent` full (see
+    /// [`crate::local::auto_compact`]). Runs ahead of any queued message: a
+    /// slot left draining for the queue is taken over, and the queue drains
+    /// once the compaction finishes. `false` when the session is busy with
+    /// something else or has nothing to compact.
+    async fn auto_compact(self: &Arc<Self>, session_id: &str, percent: u8) -> bool {
+        let guard = {
+            let mut turns = self.turns.lock().await;
+            match turns.get(session_id) {
+                Some(TurnState::Draining) => {
+                    turns.insert(
+                        session_id.to_string(),
+                        TurnState::Reserved { turn_id: None },
+                    );
+                    Some(TurnGuard::adopt(self, session_id))
+                }
+                Some(_) => None,
+                None => {
+                    drop(turns);
+                    TurnGuard::claim(self, session_id, None).await
+                }
+            }
+        };
+        let Some(guard) = guard else {
+            return false;
+        };
+        match self
+            .start_compaction(guard, session_id, Some(percent))
+            .await
+        {
+            Ok(_) => true,
+            Err(error) => {
+                eprintln!("orx up: auto-compact {session_id}: {error}");
+                false
+            }
+        }
+    }
+
+    /// Start compacting in the slot `guard` holds. `auto` is the fill
+    /// percentage that triggered an auto-compact, `None` for a manual one.
+    async fn start_compaction(
+        self: &Arc<Self>,
+        guard: TurnGuard,
+        session_id: &str,
+        auto: Option<u8>,
+    ) -> Result<WireMessage> {
         let session = {
             let store = Store::open()?;
             store
@@ -1601,7 +1650,8 @@ impl ChatHost {
         }
         let marker = {
             let store = Store::open()?;
-            self.publish_compaction_marker(&store, session_id, None, "running", None)?
+            let input = auto.map(|percent| json!({ "auto": true, "percent": percent }));
+            self.publish_compaction_marker(&store, session_id, None, "running", None, input)?
         };
 
         let host = self.clone();
@@ -1609,7 +1659,7 @@ impl ChatHost {
         let owned_marker = marker.clone();
         let mut turns = self.turns.lock().await;
         let handle = tokio::spawn(async move {
-            host.run_compaction(owned_session, session, snapshot, owned_marker)
+            host.run_compaction(owned_session, session, snapshot, owned_marker, auto)
                 .await;
         });
         turns.insert(
@@ -1640,6 +1690,7 @@ impl ChatHost {
         session: StoredChatSession,
         snapshot: String,
         marker: WireMessage,
+        auto: Option<u8>,
     ) {
         let outcome = self
             .compaction_outcome(&session_id, &session, &snapshot)
@@ -1656,6 +1707,9 @@ impl ChatHost {
                     Some(error) => ("error", Some(error.to_string())),
                     None => ("completed", None),
                 };
+                if auto.is_some() {
+                    crate::local::auto_compact::record_outcome(&session_id, settled.is_none());
+                }
                 // Stop can land mid-write; its `error` row is the truthful one.
                 if self.owns_compaction(&session_id, &marker.id).await {
                     let _ = self.publish_compaction_marker(
@@ -1664,6 +1718,7 @@ impl ChatHost {
                         Some(&marker),
                         status,
                         detail,
+                        None,
                     );
                 }
             }
@@ -1712,6 +1767,12 @@ impl ChatHost {
             store.set_chat_session_native_id(session_id, None)?;
         }
         store.clear_chat_session_context_usage(session_id)?;
+        // Live clients keep the last usage they saw until told otherwise, which
+        // would leave the meter pinned at the pre-compaction fill.
+        self.emit(
+            "chat.usage",
+            json!({ "sessionId": session_id, "usage": { "usedTokens": 0 } }),
+        );
         // Compacting is activity, and activity unarchives as sending does.
         store.set_chat_session_archived(session_id, false)?;
         Ok(())
@@ -1768,7 +1829,15 @@ impl ChatHost {
         previous: Option<&WireMessage>,
         status: &str,
         error: Option<String>,
+        input: Option<Value>,
     ) -> Result<WireMessage> {
+        // An in-place update keeps what the row was opened with (auto or not).
+        let input = input.or_else(|| {
+            previous
+                .and_then(|previous| previous.parts.first())
+                .and_then(|part| part.state.as_ref())
+                .and_then(|state| state.input.clone())
+        });
         let mut message = match previous {
             Some(previous) => previous.clone(),
             None => WireMessage {
@@ -1780,12 +1849,11 @@ impl ChatHost {
                 parent_id: None,
             },
         };
-        message.parts = vec![WirePart::tool(
-            COMPACTED_TOOL,
-            COMPACTED_TOOL,
-            status,
-            error,
-        )];
+        let mut part = WirePart::tool(COMPACTED_TOOL, COMPACTED_TOOL, status, error);
+        if let Some(state) = part.state.as_mut() {
+            state.input = input;
+        }
+        message.parts = vec![part];
         message.completed_at = (status != "running").then(now_ms);
         let stored = StoredChatMessage {
             id: message.id.clone(),
@@ -5621,6 +5689,8 @@ impl ChatHost {
                 prepare_project_slash_worktree(&project, &message.text, &session.id).await;
             }
         }
+        // Sleep mode replaces the autonomy level: nobody is there to ask.
+        let sleep_context = super::sleep::turn_context(&store, &session.id);
         let mut turn_text = prepared_input.unwrap_or_else(|| {
             let expanded = contextualize_messages(messages, |text| {
                 expand_slash_skills(&project, text, Some(&session.harness), Some(&session.id))
@@ -5629,7 +5699,9 @@ impl ChatHost {
                 session.native_session_id.as_deref(),
                 session.bootstrap_context.as_deref(),
                 session.goal.as_deref(),
-                Autonomy::from_stored(session.autonomy.as_deref()).turn_context(),
+                sleep_context
+                    .as_deref()
+                    .or(Autonomy::from_stored(session.autonomy.as_deref()).turn_context()),
                 super::demo::turn_context(&project.id),
                 shell_context.as_deref(),
                 expanded,
@@ -5819,15 +5891,36 @@ impl ChatHost {
                     None,
                 )
             });
-            let result = match crate::local::harness::session_harness(&ctx.harness, &ctx.session_id)
+            // Captured before the harness runs: it may rewrite both.
+            let base_text = ctx.text.clone();
+            let resumed_native = ctx.native_session_id.is_some();
+            ctx.select_account().await;
+            let mut result = run_harness_turn(&mut ctx).await;
+            ctx.record_account_attempt(&result);
+            let mut tried = vec![ctx.harness.clone()];
+            let mut tried_accounts = Vec::new();
+            let mut steer_route = steer_route;
+            while let Some(step) = ctx
+                .host
+                .clone()
+                .failover_target(&ctx, &result, &mut tried, &mut tried_accounts)
+                .await
             {
-                Some(harness) => harness.run_turn(&mut ctx).await,
-                None => Err(crate::local::harness::TurnFailure {
-                    kind: "unknown_harness",
-                    message: format!("unknown harness: {}", ctx.harness),
-                    delivery: DeliveryState::Rejected,
-                }),
-            };
+                match step {
+                    FailoverStep::Harness(next, reason, permission) => {
+                        ctx.fail_over(&next, &reason, permission, &base_text, resumed_native);
+                        ctx.select_account().await;
+                        steer_route = ctx.host.clone().refresh_steering(&mut ctx, steer_route);
+                    }
+                    FailoverStep::Account {
+                        account,
+                        model,
+                        reason,
+                    } => ctx.switch_account(&account, model, &reason, &base_text),
+                }
+                result = run_harness_turn(&mut ctx).await;
+                ctx.record_account_attempt(&result);
+            }
             drop(steer_route);
             if let Some(mut steering) = ctx.steering.take() {
                 steering.close();
@@ -5910,9 +6003,19 @@ impl ChatHost {
                     let _ = store.set_chat_session_context_usage(&ctx.session_id, &json);
                 }
             }
+            let auto_compact = ctx
+                .context_usage
+                .as_ref()
+                .and_then(|usage| crate::local::auto_compact::due(&ctx.session_id, usage));
             ctx.host
                 .finish_turn(&ctx.session_id, Some(&ctx.assistant.id))
                 .await;
+            // The compaction drains the queue itself once it finishes.
+            if let Some(percent) = auto_compact {
+                if ctx.host.auto_compact(&ctx.session_id, percent).await {
+                    return;
+                }
+            }
             ctx.host.drain_queue(&ctx.session_id).await;
         });
         turns.insert(
@@ -5928,6 +6031,312 @@ impl ChatHost {
         }
         guard.defuse();
         Ok(TurnSubmission::Started(turn_id))
+    }
+
+    /// The harness to continue a turn on after it stopped on a usage limit,
+    /// with the failure that caused the switch. `None` when the failure is not
+    /// a limit, failover is off, the turn was interrupted, or no other
+    /// harness is ready. Harnesses checked here are added to `tried`.
+    async fn failover_target(
+        &self,
+        ctx: &TurnCtx,
+        result: &crate::local::harness::TurnResult,
+        tried: &mut Vec<String>,
+        tried_accounts: &mut Vec<(String, String)>,
+    ) -> Option<FailoverStep> {
+        use crate::local::harness::accounts;
+        let (kind, message) = match (&ctx.terminal_error, result) {
+            (Some((kind, message)), _) => (kind.as_str(), message.as_str()),
+            (None, Err(failure)) => (failure.kind, failure.message.as_str()),
+            (None, Ok(_)) => return None,
+        };
+        if !crate::local::harness::is_usage_limit_failure(kind, message) {
+            return None;
+        }
+        // Another account of the same harness keeps the chat where it is.
+        if let Some(account) = ctx.account.clone() {
+            accounts::record_limit(&ctx.harness, &account, ctx.model.as_deref(), message);
+            let pool = accounts::pool_for(&ctx.harness, ctx.model.as_deref()).to_string();
+            tried_accounts.push((pool.clone(), account.clone()));
+            if !self.owns_turn(&ctx.session_id, &ctx.turn_id).await {
+                return None;
+            }
+            let tried_here: Vec<String> = tried_accounts
+                .iter()
+                .filter(|(tried_pool, _)| *tried_pool == pool)
+                .map(|(_, id)| id.clone())
+                .collect();
+            if let Some(next) =
+                accounts::next_account(&ctx.harness, ctx.model.as_deref(), &tried_here)
+            {
+                return Some(FailoverStep::Account {
+                    account: next,
+                    model: None,
+                    reason: message.to_string(),
+                });
+            }
+        }
+        let store = Store::open().ok()?;
+        let mut policy = store.ui_state().ok()?.harness_failover;
+        // Nobody is there to switch harnesses by hand while sleep mode runs.
+        if !policy.enabled && store.get_sleep(&ctx.session_id).ok().flatten().is_some() {
+            policy.enabled = true;
+        }
+        drop(store);
+        // Then a model in another of the harness's quota pools (Antigravity's
+        // Gemini models and its Claude/GPT models are metered apart).
+        if policy.enabled && accounts::pools(&ctx.harness).len() > 1 {
+            let info = tokio::time::timeout(
+                FAILOVER_DETECT_TIMEOUT,
+                crate::local::harness::detect_harness(&ctx.harness),
+            )
+            .await
+            .ok()
+            .flatten();
+            if let Some(info) = info.filter(|info| info.agent_ready) {
+                let current = ctx
+                    .account
+                    .clone()
+                    .unwrap_or_else(|| accounts::DEFAULT.to_string());
+                if let Some((model, account)) = accounts::other_pool_model(
+                    &ctx.harness,
+                    ctx.model.as_deref(),
+                    &current,
+                    &info.models,
+                    info.recommended_model.as_deref(),
+                ) {
+                    return Some(FailoverStep::Account {
+                        account,
+                        model: Some(model),
+                        reason: message.to_string(),
+                    });
+                }
+            }
+        }
+        if let Some(step) = self.decided_failover(ctx, &policy, message, tried).await {
+            return Some(step);
+        }
+        for id in policy.candidates(&ctx.harness, tried) {
+            if !self.owns_turn(&ctx.session_id, &ctx.turn_id).await {
+                return None;
+            }
+            tried.push(id.clone());
+            // A harness that cannot run as narrowly as this chat is not a fallback.
+            let Some(permission) = crate::local::harness::carry_permission(
+                &ctx.harness,
+                ctx.permission_mode,
+                ctx.plan_mode,
+                &id,
+            ) else {
+                continue;
+            };
+            let ready = tokio::time::timeout(
+                FAILOVER_DETECT_TIMEOUT,
+                crate::local::harness::detect_harness(&id),
+            )
+            .await
+            .ok()
+            .flatten()
+            .is_some_and(|info| info.agent_ready);
+            if ready {
+                return Some(FailoverStep::Harness(id, message.to_string(), permission));
+            }
+        }
+        None
+    }
+
+    /// The fallback harness the decision model picks among every ready one,
+    /// when it is on and more than one is ready. `None` leaves the user's
+    /// fallback order to decide; harnesses found not ready are added to
+    /// `tried` either way, and the picked one too.
+    async fn decided_failover(
+        &self,
+        ctx: &TurnCtx,
+        policy: &crate::local::harness::HarnessFailover,
+        message: &str,
+        tried: &mut Vec<String>,
+    ) -> Option<FailoverStep> {
+        use crate::local::decision;
+        use crate::local::harness::accounts;
+        if !decision::settings().active() {
+            return None;
+        }
+        let mut ready = Vec::new();
+        for id in policy.candidates(&ctx.harness, tried) {
+            let Some(permission) = crate::local::harness::carry_permission(
+                &ctx.harness,
+                ctx.permission_mode,
+                ctx.plan_mode,
+                &id,
+            ) else {
+                tried.push(id);
+                continue;
+            };
+            let info = tokio::time::timeout(
+                FAILOVER_DETECT_TIMEOUT,
+                crate::local::harness::detect_harness(&id),
+            )
+            .await
+            .ok()
+            .flatten()
+            .filter(|info| info.agent_ready);
+            match info {
+                Some(info) => ready.push((id, permission, info)),
+                None => tried.push(id),
+            }
+        }
+        if ready.len() < 2 || !self.owns_turn(&ctx.session_id, &ctx.turn_id).await {
+            return None;
+        }
+        let now = crate::store::now_ms();
+        let mut request = decision::RouteRequest::new(decision::Purpose::Failover, &ctx.text);
+        request.current = decision::Current {
+            harness: Some(ctx.harness.clone()),
+            model: ctx.model.clone(),
+            account: ctx.account.clone(),
+        };
+        request.harnesses = ready
+            .iter()
+            .map(|(id, _, info)| decision::HarnessOption {
+                id: id.clone(),
+                vendor: crate::commands::agent::harness_vendor(id).to_string(),
+                models: decision::model_ids(&info.models),
+                recommended_model: info.recommended_model.clone(),
+            })
+            .collect();
+        if let Ok(statuses) = accounts::statuses(None) {
+            request.accounts = statuses
+                .iter()
+                .filter(|account| account.signed_in && !account.paused)
+                .filter(|account| ready.iter().any(|(id, _, _)| *id == account.harness))
+                .flat_map(|account| {
+                    account.pools.iter().map(|pool| {
+                        decision::AccountOption::from_status(
+                            &account.harness,
+                            &account.id,
+                            pool,
+                            now,
+                        )
+                    })
+                })
+                .collect();
+        }
+        let picked = match decision::decide(&request).await {
+            Ok(route) => route.and_then(|route| route.harness)?,
+            Err(error) => {
+                eprintln!("orx up: decision model unavailable, using the fallback order: {error}");
+                return None;
+            }
+        };
+        let (id, permission, _) = ready.into_iter().find(|(id, _, _)| *id == picked)?;
+        tried.push(id.clone());
+        Some(FailoverStep::Harness(id, message.to_string(), permission))
+    }
+
+    /// Point the session's steering at the harness a turn failed over to:
+    /// open a channel if the new harness steers and the old one did not, close
+    /// it (parking what was sent) if the reverse, and match sends against the
+    /// settings the turn now runs under.
+    fn refresh_steering(
+        self: Arc<Self>,
+        ctx: &mut TurnCtx,
+        route: Option<SteerRoute>,
+    ) -> Option<SteerRoute> {
+        let steers = crate::local::harness::supports_steering(&ctx.harness);
+        match route {
+            Some(route) if steers => {
+                if let Some(sink) = self.steering.lock().unwrap().get_mut(&ctx.session_id) {
+                    if sink.tx.same_channel(&route.tx) {
+                        sink.settings = TurnSettings::of(ctx);
+                    }
+                }
+                Some(route)
+            }
+            Some(route) => {
+                drop(route);
+                if let Some(mut steering) = ctx.steering.take() {
+                    steering.close();
+                    while let Ok(message) = steering.try_recv() {
+                        if let Err(error) = self.park_steer(&ctx.session_id, message) {
+                            ctx.push_error(format!("Could not preserve steering message: {error}"));
+                        }
+                    }
+                }
+                None
+            }
+            None if steers => {
+                let (tx, rx) = mpsc::unbounded_channel();
+                ctx.steering = Some(rx);
+                Some(self.register_steering(&ctx.session_id, tx, TurnSettings::of(ctx)))
+            }
+            None => None,
+        }
+    }
+
+    /// Carry queued messages onto the harness the session failed over to:
+    /// their model, tier and effort belonged to the old harness, and their
+    /// permission is narrowed the same way the turn's was.
+    fn carry_queue_over(
+        &self,
+        session_id: &str,
+        from: &str,
+        to: &str,
+        fallback: &crate::local::harness::CarriedPermission,
+    ) {
+        let _mutation = self.queue_persistence.lock().unwrap();
+        let Ok(store) = Store::open() else {
+            return;
+        };
+        let mut changed = false;
+        if let Some(queue) = self.queued.lock().unwrap().get_mut(session_id) {
+            for item in queue.iter_mut() {
+                let overrides = &item.overrides;
+                let permission = overrides
+                    .permission_mode
+                    .as_deref()
+                    .and_then(|id| crate::local::harness::permission_mode_for(from, id));
+                let carried = (permission.is_some() || overrides.plan_mode.is_some())
+                    .then(|| {
+                        crate::local::harness::carry_permission(
+                            from,
+                            permission,
+                            overrides.plan_mode.unwrap_or(false),
+                            to,
+                        )
+                    })
+                    .flatten()
+                    .unwrap_or_else(|| fallback.clone());
+                item.overrides = TurnOverrides {
+                    model: None,
+                    clear_model: false,
+                    service_tier: None,
+                    permission_mode: carried.permission_id,
+                    permission_revision: None,
+                    plan_mode: crate::local::harness::supports_command_plan(to)
+                        .then_some(carried.plan_mode),
+                    plan_revision: None,
+                    reasoning_level: None,
+                };
+                if let Ok(payload) = serde_json::to_string(&*item) {
+                    let _ = store.update_queued_chat_message(&item.id, &payload);
+                }
+                changed = true;
+            }
+        }
+        drop(_mutation);
+        if changed {
+            self.emit_queued(session_id);
+        }
+    }
+
+    async fn owns_turn(&self, session_id: &str, turn_id: &str) -> bool {
+        if self.deleting_sessions.lock().unwrap().contains(session_id) {
+            return false;
+        }
+        matches!(
+            self.turns.lock().await.get(session_id),
+            Some(TurnState::Active(active)) if active.turn_id == turn_id
+        )
     }
 
     /// Turn cleanup: drop the handle, bump the session, broadcast idle.
@@ -6434,6 +6843,47 @@ impl ChatHost {
         {
             store.delete_chat_session(&session.id)?;
             return Err(anyhow!("chat session is gone"));
+        }
+        self.emit_session(Some(session.clone())).await;
+        Ok(session)
+    }
+
+    /// Continue `parent` in `session`, a new chat on another harness built by
+    /// the caller. The worktree is seeded from the parent's checkout before the
+    /// row exists, so the new chat's first turn never races an empty worktree;
+    /// the parent is only read.
+    pub async fn open_handoff_chat(
+        &self,
+        parent: &StoredChatSession,
+        mut session: StoredChatSession,
+    ) -> Result<StoredChatSession> {
+        let project = Store::open()?.get_local_project(&parent.project_id)?;
+        let left_behind = match project.clone() {
+            Some(project) => {
+                let (parent_id, child_id) = (parent.id.clone(), session.id.clone());
+                tokio::task::spawn_blocking(move || {
+                    crate::local::git::seed_session_worktree(&project, &parent_id, &child_id)
+                })
+                .await
+                .map_err(|e| anyhow!("worktree seeding failed: {e}"))??
+            }
+            None => Vec::new(),
+        };
+        let store = Store::open()?;
+        let messages = store.list_chat_messages(&parent.id)?;
+        let from = crate::local::harness::chat_harness(&parent.harness)
+            .map_or_else(|| parent.harness.clone(), |h| h.name().to_string());
+        session.bootstrap_context =
+            handoff_bootstrap_context(parent, &messages, &from, &left_behind);
+        session.title = parent.title.clone();
+        session.title_source = parent.title.as_ref().map(|_| "fallback".to_string());
+        // Unlike a side chat, the new chat owns its worktree and outlives the
+        // parent, so only a failed insert needs undoing.
+        if let Err(error) = store.create_chat_session(&session) {
+            if let Some(project) = project.as_ref() {
+                cleanup_session_worktree(project, &session.id);
+            }
+            return Err(error);
         }
         self.emit_session(Some(session.clone())).await;
         Ok(session)
@@ -7100,6 +7550,9 @@ pub struct TurnCtx {
     terminal_error: Option<(String, String)>,
     pub session_id: String,
     pub harness: String,
+    /// The harness account this turn runs on (`default` is the harness's own
+    /// sign-in); `None` for harnesses without accounts.
+    pub account: Option<String>,
     pub native_session_id: Option<String>,
     pub model: Option<String>,
     pub reset_codex_model: bool,
@@ -7158,6 +7611,7 @@ fn turn_ctx_from_stored(
         terminal_error: None,
         session_id: session.id.clone(),
         harness: session.harness.clone(),
+        account: None,
         native_session_id: session.native_session_id.clone(),
         model: session.model.clone(),
         reset_codex_model: serde_json::from_str::<TurnOverrides>(&turn.settings_json)
@@ -7185,6 +7639,33 @@ fn turn_ctx_from_stored(
         target_event_offset: 0,
         pending_target_events: Vec::new(),
         target_event_bindings: HashMap::new(),
+    }
+}
+
+/// Where a turn that stopped on a usage limit continues.
+enum FailoverStep {
+    /// Another harness, with the permission settings carried over.
+    Harness(String, String, crate::local::harness::CarriedPermission),
+    /// Another account of the same harness, on `model` when the switch moves
+    /// to another quota pool.
+    Account {
+        account: String,
+        model: Option<String>,
+        reason: String,
+    },
+}
+
+/// How long a failover waits to learn whether the next harness is ready.
+const FAILOVER_DETECT_TIMEOUT: Duration = Duration::from_secs(30);
+
+async fn run_harness_turn(ctx: &mut TurnCtx) -> crate::local::harness::TurnResult {
+    match crate::local::harness::session_harness(&ctx.harness, &ctx.session_id) {
+        Some(harness) => harness.run_turn(ctx).await,
+        None => Err(crate::local::harness::TurnFailure {
+            kind: "unknown_harness",
+            message: format!("unknown harness: {}", ctx.harness),
+            delivery: DeliveryState::Rejected,
+        }),
     }
 }
 
@@ -7515,6 +7996,325 @@ impl TurnCtx {
         self.upsert_part_raw(part);
     }
 
+    /// Start another attempt of this turn after a usage limit: reset the
+    /// attempt's delivery state, move the earlier attempt's parts out of the
+    /// way, and record the switch as a `harnessFailover` part.
+    fn begin_failover_attempt(&mut self, title: String, input: serde_json::Value) {
+        self.terminal_error = None;
+        self.delivery_state = DeliveryState::NotSent;
+        self.retry_owner = None;
+        self.retry_started_emitted = false;
+        self.retry_exhausted = false;
+        self.orx_retry_started = None;
+        self.orx_retry_count = 0;
+
+        // Harnesses number their parts from scratch (`text-1`, …); move the
+        // earlier attempt's parts out of the way so the next one cannot
+        // overwrite them.
+        self.apply_target_events();
+        let attempt = self
+            .assistant
+            .parts
+            .iter()
+            .filter(|part| part.tool.as_deref() == Some("harnessFailover"))
+            .count();
+        let prefix = format!("attempt{attempt}-");
+        let mut renamed = HashMap::new();
+        for part in &mut self.assistant.parts {
+            if part.id.starts_with("attempt")
+                || part.id.starts_with("harness-failover-")
+                || part.id == "turn-retry"
+            {
+                continue;
+            }
+            let id = format!("{prefix}{}", part.id);
+            renamed.insert(std::mem::replace(&mut part.id, id.clone()), id);
+        }
+        for ids in self.target_event_bindings.values_mut() {
+            for id in ids.iter_mut() {
+                if let Some(new) = renamed.get(id) {
+                    *id = new.clone();
+                }
+            }
+        }
+
+        let mut part = WirePart::tool(
+            format!("harness-failover-{attempt}"),
+            "harnessFailover",
+            "completed",
+            None,
+        );
+        if let Some(state) = part.state.as_mut() {
+            state.title = Some(title);
+            state.input = Some(input);
+        }
+        self.clear_retry_status();
+        self.upsert_part_raw(part);
+        let _ = self.flush();
+        self.usage_execution_id = uuid::Uuid::new_v4().to_string();
+    }
+
+    /// Run this turn on the account with the most quota left for its model,
+    /// staying on the chat's last account while that one has room. When that
+    /// account runs low and the decision model is on, it picks among the
+    /// accounts with room instead.
+    async fn select_account(&mut self) {
+        use crate::local::harness::accounts;
+        if !accounts::supports_accounts(&self.harness) {
+            self.account = None;
+            return;
+        }
+        let store = Store::open().ok();
+        let sticky = store
+            .as_ref()
+            .and_then(|store| {
+                store
+                    .chat_session_account(&self.session_id, &self.harness)
+                    .ok()
+            })
+            .flatten()
+            .filter(|id| accounts::find(&self.harness, id).is_some());
+        let chosen = self
+            .decided_account(sticky.as_deref())
+            .await
+            .or_else(|| accounts::choose(&self.harness, self.model.as_deref(), sticky.as_deref()))
+            .or_else(|| sticky.clone())
+            .unwrap_or_else(|| accounts::DEFAULT.to_string());
+        let previous = sticky.unwrap_or_else(|| accounts::DEFAULT.to_string());
+        self.adopt_account(&chosen, &previous);
+    }
+
+    /// The account the decision model picks for this turn, when it is on and
+    /// there is a choice to make. `None` leaves the choice to quota alone.
+    async fn decided_account(&self, sticky: Option<&str>) -> Option<String> {
+        use crate::local::decision;
+        use crate::local::harness::accounts;
+        if !decision::settings().active() {
+            return None;
+        }
+        let options = accounts::open_choice(&self.harness, self.model.as_deref(), sticky)?;
+        let now = crate::store::now_ms();
+        let mut request = decision::RouteRequest::new(decision::Purpose::Turn, &self.text);
+        request.current = decision::Current {
+            harness: Some(self.harness.clone()),
+            model: self.model.clone(),
+            account: sticky.map(str::to_string),
+        };
+        request.accounts = options
+            .iter()
+            .map(|(id, status)| {
+                decision::AccountOption::from_status(&self.harness, id, status, now)
+            })
+            .collect();
+        match decision::decide(&request).await {
+            Ok(route) => route.and_then(|route| route.account),
+            Err(error) => {
+                eprintln!("orx up: decision model unavailable, routing by quota: {error}");
+                None
+            }
+        }
+    }
+
+    fn adopt_account(&mut self, account: &str, previous: &str) {
+        if self.harness == "antigravity"
+            && account != previous
+            && self.native_session_id.take().is_some()
+        {
+            // Each Antigravity account keeps its own conversations.
+            if let Some(recovery) =
+                crate::local::harness::native_recovery_context(self, "Google Antigravity")
+            {
+                self.text = format!("{recovery}\n\n{}", self.text);
+            }
+        }
+        self.account = Some(account.to_string());
+        if let Ok(store) = Store::open() {
+            let _ = store.set_chat_session_account(&self.session_id, &self.harness, account);
+        }
+    }
+
+    /// Record the attempt that just ended against the account it ran on.
+    fn record_account_attempt(&self, result: &crate::local::harness::TurnResult) {
+        let Some(account) = &self.account else {
+            return;
+        };
+        let failed = self.terminal_error.is_some() || result.is_err();
+        crate::local::harness::accounts::record_turn(
+            &self.harness,
+            account,
+            self.model.as_deref(),
+            &self.usage_execution_id,
+            if failed { "failed" } else { "done" },
+        );
+    }
+
+    /// Continue this turn on another account of the same harness after the
+    /// current one stopped on a usage limit, and on `model` when the account
+    /// only has room in another of the harness's quota pools.
+    fn switch_account(
+        &mut self,
+        account: &str,
+        model: Option<String>,
+        reason: &str,
+        base_text: &str,
+    ) {
+        use crate::local::harness::chat_harness;
+        let harness_name = chat_harness(&self.harness)
+            .map_or_else(|| self.harness.clone(), |h| h.name().to_string());
+        let from = self
+            .account
+            .clone()
+            .unwrap_or_else(|| crate::local::harness::accounts::DEFAULT.to_string());
+        let label = |id: &str, model: Option<&str>| match model {
+            Some(model) => format!("{harness_name} ({id}, {model})"),
+            None => format!("{harness_name} ({id})"),
+        };
+        let switching_model = model.is_some();
+        let from_name = label(
+            &from,
+            switching_model.then_some(self.model.as_deref()).flatten(),
+        );
+        let to_name = label(account, model.as_deref());
+        let input = json!({
+            "from": self.harness,
+            "to": self.harness,
+            "fromName": from_name,
+            "toName": to_name,
+            "fromAccount": from,
+            "toAccount": account,
+            "toModel": model,
+            "reason": reason,
+        });
+        self.begin_failover_attempt(
+            format!("Switched from {from_name} to {to_name} after a usage limit"),
+            input,
+        );
+        if let Some(model) = model {
+            self.model = Some(model.clone());
+            self.reasoning_level = None;
+            if let Ok(store) = Store::open() {
+                let _ = store.set_chat_session_model(&self.session_id, &model);
+            }
+        }
+        self.text = base_text.to_string();
+        self.adopt_account(account, &from);
+        if let Ok(store) = Store::open() {
+            let _ =
+                store.begin_usage_execution(&self.usage_execution_id, &self.turn_id, &self.harness);
+            if let Ok(Some(session)) = store.get_chat_session(&self.session_id) {
+                self.host.emit(
+                    "chat.session",
+                    json!({ "session": session_json(&session, true) }),
+                );
+            }
+        }
+        crate::telemetry::capture(
+            "chat_account_failover",
+            json!({ "harness": self.harness, "model_switch": switching_model }),
+        );
+    }
+
+    /// Continue this turn on `to` after the current harness stopped on a usage
+    /// limit. The session moves to `to` with that harness's defaults, and the
+    /// turn's prompt is reseeded with the transcript so far, since `to` has
+    /// no native history of this chat.
+    fn fail_over(
+        &mut self,
+        to: &str,
+        reason: &str,
+        permission: crate::local::harness::CarriedPermission,
+        base_text: &str,
+        resumed_native: bool,
+    ) {
+        use crate::local::harness::{chat_harness, permission_mode_for, supports_command_plan};
+        let from = std::mem::replace(&mut self.harness, to.to_string());
+        let name =
+            |id: &str| chat_harness(id).map_or_else(|| id.to_string(), |h| h.name().to_string());
+        let (from_name, to_name) = (name(&from), name(to));
+        let command_plan = supports_command_plan(to);
+        let permission_id = permission.permission_id.clone();
+        self.permission_mode = permission_id
+            .as_deref()
+            .and_then(|id| permission_mode_for(to, id));
+        self.plan_mode = permission.plan_mode;
+        self.plan_reset_pending = false;
+        self.native_session_id = None;
+        self.model = None;
+        self.reset_codex_model = false;
+        self.service_tier = None;
+        self.reasoning_level = None;
+        self.context_usage = None;
+        let input = json!({
+            "from": from,
+            "to": to,
+            "fromName": from_name,
+            "toName": to_name,
+            "reason": reason,
+        });
+        self.begin_failover_attempt(
+            format!("Switched from {from_name} to {to_name} after a usage limit"),
+            input,
+        );
+
+        let store = Store::open().ok();
+        let bootstrap = resumed_native
+            .then(|| {
+                store
+                    .as_ref()?
+                    .get_chat_session(&self.session_id)
+                    .ok()??
+                    .bootstrap_context
+            })
+            .flatten()
+            .filter(|context| !context.trim().is_empty());
+        let snapshot =
+            crate::local::harness::native_recovery_snapshot(&self.session_id, &self.turn_id);
+        let prior = [bootstrap.as_deref(), Some(snapshot.as_str())]
+            .into_iter()
+            .flatten()
+            .filter(|text| !text.is_empty())
+            .collect::<Vec<_>>()
+            .join("\n\n");
+        self.text = if prior.is_empty() {
+            base_text.to_string()
+        } else {
+            format!(
+                "<orx-harness-failover>\nThis chat was running on {from_name}, which stopped on a usage limit; you are continuing it. Use this ORX transcript snapshot as prior context; do not repeat completed tool actions.\n{prior}\n</orx-harness-failover>\n\n{base_text}"
+            )
+        };
+
+        if let Some(store) = store.as_ref() {
+            let _ = store.switch_chat_session_harness(
+                &self.session_id,
+                to,
+                permission_id.as_deref(),
+                self.plan_mode,
+            );
+            if let Ok(settings) = serde_json::to_string(&TurnOverrides {
+                model: None,
+                clear_model: false,
+                service_tier: None,
+                permission_mode: permission_id.clone(),
+                permission_revision: None,
+                plan_mode: command_plan.then_some(self.plan_mode),
+                plan_revision: None,
+                reasoning_level: None,
+            }) {
+                let _ = store.set_chat_turn_settings(&self.turn_id, &settings);
+            }
+            let _ = store.begin_usage_execution(&self.usage_execution_id, &self.turn_id, to);
+            self.host
+                .carry_queue_over(&self.session_id, &from, to, &permission);
+            if let Ok(Some(session)) = store.get_chat_session(&self.session_id) {
+                self.host.emit(
+                    "chat.session",
+                    json!({ "session": session_json(&session, true) }),
+                );
+            }
+        }
+        crate::telemetry::capture("chat_harness_failover", json!({ "from": from, "to": to }));
+    }
+
     fn upsert_part_raw(&mut self, part: WirePart) {
         upsert_preserving_children(&mut self.assistant.parts, part);
     }
@@ -7545,6 +8345,7 @@ impl TurnCtx {
             terminal_error: None,
             session_id: "test-session".into(),
             harness: "test".into(),
+            account: None,
             native_session_id: None,
             model: None,
             reset_codex_model: false,
@@ -8000,6 +8801,41 @@ fn active_path<'a>(
     path
 }
 
+/// First-turn context for a chat continued from `parent` on another harness:
+/// whatever context the parent itself was seeded with, then a snapshot of its
+/// live branch. The new harness has no native history of the conversation.
+fn handoff_bootstrap_context(
+    parent: &StoredChatSession,
+    messages: &[StoredChatMessage],
+    from_name: &str,
+    left_behind: &[String],
+) -> Option<String> {
+    let snapshot = crate::local::harness::transcript_snapshot(active_path(
+        messages,
+        parent.active_leaf_id.as_deref(),
+    ));
+    let prior = [parent.bootstrap_context.as_deref(), Some(snapshot.as_str())]
+        .into_iter()
+        .flatten()
+        .filter(|text| !text.trim().is_empty())
+        .collect::<Vec<_>>()
+        .join("\n\n");
+    if prior.is_empty() && left_behind.is_empty() {
+        return None;
+    }
+    let left_behind = if left_behind.is_empty() {
+        String::new()
+    } else {
+        format!(
+            "\nThese untracked paths were too large (or not plain files) to copy and remain only in the original chat's worktree: {}\n",
+            left_behind.join(", ")
+        )
+    };
+    Some(format!(
+        "<orx-harness-handoff>\nThe user moved this chat here from {from_name} to continue it on another harness. Your worktree starts where that chat's left off: the same commit, with its uncommitted edits and untracked files copied. Use this ORX transcript snapshot as prior context; do not repeat completed tool actions.\n{left_behind}{prior}\n</orx-harness-handoff>"
+    ))
+}
+
 fn side_chat_session(
     parent: &StoredChatSession,
     messages: &[StoredChatMessage],
@@ -8361,6 +9197,7 @@ pub async fn watch_runs(
     data_dir_move_in_progress: Arc<std::sync::atomic::AtomicBool>,
     data_dir_gate: Arc<tokio::sync::Mutex<()>>,
 ) {
+    let mut last_sleep_tick = Instant::now() - SLEEP_TICK;
     loop {
         tokio::time::sleep(Duration::from_secs(3)).await;
         if data_dir_move_in_progress.load(std::sync::atomic::Ordering::SeqCst) {
@@ -8379,7 +9216,122 @@ pub async fn watch_runs(
         {
             eprintln!("orx up: run watcher: {err}");
         }
+        if last_sleep_tick.elapsed() >= SLEEP_TICK {
+            last_sleep_tick = Instant::now();
+            if let Err(err) = process_sleep_sessions(&chat).await {
+                eprintln!("orx up: sleep mode: {err}");
+            }
+        }
     }
+}
+
+const SLEEP_TICK: Duration = Duration::from_secs(30);
+
+/// One watchdog pass over every sleep-mode chat: enforce the GPU budget,
+/// finish plans, interrupt hung turns, and wake idle chats. See
+/// [`super::sleep`].
+async fn process_sleep_sessions(chat: &Arc<ChatHost>) -> Result<()> {
+    use super::sleep::{self, Action, Budget, Observation};
+    use super::strategy;
+    let sleeps = Store::open()?.list_sleeps()?;
+    sleep::keep_awake::set(
+        sleeps
+            .iter()
+            .any(|s| s.plan.keep_awake && s.state.finished.is_none()),
+    );
+    for stored in sleeps {
+        let session_id = stored.session_id.clone();
+        let busy = chat.is_busy(&session_id).await;
+        let now = now_ms();
+        // The store is not `Send`, so each step opens its own.
+        let (charges, actions, mut state) = {
+            let store = Store::open()?;
+            let charges = store.sleep_charges(&session_id)?;
+            let runs = store.list_runs_by_project(&stored.project_id)?;
+            let active_runs = runs
+                .iter()
+                .filter(|run| !crate::local::is_terminal(&run.status))
+                .count();
+            // Self-improvement: decide the open strategy trial on the runs so far.
+            match strategy::advance(&store, &stored, active_runs, now) {
+                Ok(Some(decision)) => eprintln!("orx up: strategy: {decision}"),
+                Ok(None) => {}
+                Err(err) => eprintln!("orx up: strategy: {err}"),
+            }
+            let observation = Observation {
+                now,
+                busy,
+                total_runs: runs.len(),
+                active_runs,
+                budget: Some(Budget::of(&stored.plan, &charges, now)),
+                progress: sleep::progress_from_store(&store, &stored)?,
+                retrospective: strategy::retrospective_due(&store, &stored, now).unwrap_or_else(
+                    |err| {
+                        eprintln!("orx up: strategy: {err}");
+                        None
+                    },
+                ),
+            };
+            let mut state = stored.state.clone();
+            let plan = strategy::effective_plan(&store, &stored);
+            let actions = sleep::tick(&plan, &mut state, &observation);
+            (charges, actions, state)
+        };
+        for action in actions {
+            match action {
+                Action::CancelPaidRuns(reason) => {
+                    let store = Store::open()?;
+                    for charge in charges
+                        .iter()
+                        .filter(|c| c.usd_per_hour > 0.0 && !crate::local::is_terminal(&c.status))
+                    {
+                        if let Err(err) = crate::commands::exp::request_local_run_cancel(
+                            &store,
+                            &charge.run_id,
+                            &reason,
+                        ) {
+                            eprintln!("orx up: sleep mode: cancel {}: {err}", charge.run_id);
+                        }
+                    }
+                }
+                Action::Interrupt => {
+                    let _ = chat.interrupt(&session_id).await;
+                }
+                Action::Nudge(text) => {
+                    let delivered = match TurnGuard::claim_hidden(chat, &session_id).await {
+                        Some(guard) => matches!(
+                            chat.send_hidden_message(&session_id, text, guard).await,
+                            Ok(TurnSubmission::Started(_))
+                        ),
+                        None => false,
+                    };
+                    if !delivered {
+                        // Retry later, backing off, instead of losing the nudge.
+                        state = stored.state.clone();
+                        state.nudges = state.nudges.saturating_add(1);
+                        state.idle_since = Some(now);
+                    }
+                }
+            }
+        }
+        if state != stored.state {
+            let store = Store::open()?;
+            // `orx sleep assess|stop|start` may have written meanwhile; theirs win.
+            if let Some(latest) = store.get_sleep(&session_id)? {
+                if latest.created_at == stored.created_at {
+                    if latest.state.assessment != stored.state.assessment {
+                        state.assessment = latest.state.assessment;
+                    }
+                    if latest.state.finished != stored.state.finished {
+                        state.finished = latest.state.finished;
+                        state.finish_notified = latest.state.finish_notified;
+                    }
+                    store.set_sleep_state(&session_id, &state)?;
+                }
+            }
+        }
+    }
+    Ok(())
 }
 
 /// The PATH a child gets: this orx first, so an agent shelling out to `orx`
@@ -9029,18 +9981,30 @@ mod cap_tests {
         ));
 
         let running = host
-            .publish_compaction_marker(&store, "session", None, "running", None)
+            .publish_compaction_marker(
+                &store,
+                "session",
+                None,
+                "running",
+                None,
+                Some(json!({ "auto": true, "percent": 85 })),
+            )
             .unwrap();
         assert_eq!(running.parts[0].state.as_ref().unwrap().status, "running");
         assert!(running.completed_at.is_none());
 
         let done = host
-            .publish_compaction_marker(&store, "session", Some(&running), "completed", None)
+            .publish_compaction_marker(&store, "session", Some(&running), "completed", None, None)
             .unwrap();
         assert_eq!(done.id, running.id, "the row is updated, not replaced");
         assert_eq!(done.parent_id, running.parent_id);
         assert!(done.completed_at.is_some());
         assert_eq!(done.parts[0].state.as_ref().unwrap().status, "completed");
+        assert_eq!(
+            done.parts[0].state.as_ref().unwrap().input,
+            Some(json!({ "auto": true, "percent": 85 })),
+            "an auto-compact row stays marked as one when it settles"
+        );
         // One row on the branch: a second would read as a new branch root.
         assert_eq!(store.list_chat_messages("session").unwrap().len(), 1);
 
@@ -9239,6 +10203,25 @@ mod cap_tests {
         assert!(error.contains("busy"), "unexpected error: {error}");
         // The live turn's slot survives the refusal.
         assert!(host.turns.lock().await.contains_key("session"));
+    }
+
+    #[tokio::test]
+    async fn auto_compact_leaves_a_running_turn_alone() {
+        let host = Arc::new(ChatHost::new(
+            Arc::new(AgentHost::new(None)),
+            Arc::new(crate::local::codex::CodexHost::new()),
+            Arc::new(crate::local::claude::ClaudeHost::new()),
+        ));
+        host.turns
+            .lock()
+            .await
+            .insert("session".into(), TurnState::Reserved { turn_id: None });
+
+        assert!(!host.auto_compact("session", 90).await);
+        assert!(matches!(
+            host.turns.lock().await.get("session"),
+            Some(TurnState::Reserved { .. })
+        ));
     }
 
     #[test]
