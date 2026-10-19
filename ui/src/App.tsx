@@ -1750,7 +1750,7 @@ export default function App({ runtime, projectId, pane }: { runtime: RuntimeInfo
   const experimentToolbarActions = (
     <div className="experiments-toolbar-controls inline-flex shrink-0 items-center gap-2">
                     <div className="option-picker relative inline-flex" ref={scopeMenuRef}>
-                      <IconButton size="small"
+                      <IconButton
                         ref={scopeTriggerRef}
                         className="experiment-scope-trigger"
                         active={effectiveScope === "agent"}
@@ -1999,11 +1999,6 @@ export default function App({ runtime, projectId, pane }: { runtime: RuntimeInfo
               </TabBody>
             ) : rightTab === "experiments" ? (
               <TabBody>
-                {view === "table" && (
-                  <div className="pane-toolbar flex shrink-0 items-center justify-end border-b border-border bg-background px-3 py-2">
-                    {experimentToolbarActions}
-                  </div>
-                )}
                 <div className="pane-content flex-1 min-h-0 relative bg-background">
                   {view === "tree" ? (
                     activeProject && (
@@ -2029,6 +2024,7 @@ export default function App({ runtime, projectId, pane }: { runtime: RuntimeInfo
                     )
                   ) : (
                     <ExperimentsTable
+                      toolbarActions={experimentToolbarActions}
                       archiveActions={archiveActions}
                       runs={scopedRuns}
                       emptyHint={

@@ -3,7 +3,7 @@ import { RunComparison } from "../features/research/RunComparison";
 import { m } from "../paraglide/messages.js";
 import { ltr } from "../i18n";
 import { FlaskConical, CircleStop, FolderTree, GitBranch, Search, Terminal, X, Clock3, ArrowDownWideNarrow } from "lucide-react";
-import { useMemo, useRef, useState } from "react";
+import { useMemo, useRef, useState, type ReactNode } from "react";
 import { fmtDuration, fmtNumber, runDisplayStatus, timeAgo, type Experiment, type Run } from "../api";
 import { BackendBadge } from "./BackendLogos";
 import { StatusBadge } from "./StatusBadge";
@@ -23,6 +23,7 @@ export function ExperimentsTable({
   onOpenCode,
   onArchive,
   onCancel,
+  toolbarActions,
 }: {
   runs: Run[];
   experiments: Experiment[];
@@ -33,6 +34,8 @@ export function ExperimentsTable({
   onOpenCode: (experimentId: string, intent: TabOpenIntent) => void;
   onArchive: (id: string, direction: "ancestors" | "descendants" | "only", archived: boolean) => void;
   onCancel: (runId: string) => Promise<void>;
+  /** View and scope controls shared with the tree view. */
+  toolbarActions?: ReactNode;
 }) {
   const [pendingCancellation, setPendingCancellation] = useState<ReadonlySet<string>>(new Set());
   const [cancelError, setCancelError] = useState<string | null>(null);
@@ -52,11 +55,14 @@ export function ExperimentsTable({
 
   if (rows.length === 0) {
     return (
-      <WorkspaceEmptyState
-        icon={FlaskConical}
-        title={emptyHint ?? m.experiments_none_yet()}
-        description={emptyHint ? undefined : m.experiments_empty_description()}
-      />
+      <div className="absolute inset-0 flex flex-col bg-background">
+        {toolbarActions && <div className="flex shrink-0 justify-end border-b border-border px-3 py-2">{toolbarActions}</div>}
+        <WorkspaceEmptyState
+          icon={FlaskConical}
+          title={emptyHint ?? m.experiments_none_yet()}
+          description={emptyHint ? undefined : m.experiments_empty_description()}
+        />
+      </div>
     );
   }
 
@@ -78,11 +84,14 @@ export function ExperimentsTable({
   return (
     <div className="experiments-table-wrap absolute inset-0 overflow-auto bg-background @container">
       <div className="sticky top-0 z-10 flex flex-col gap-3 border-b border-border bg-background p-4">
-        <h2 className="m-0 flex items-center gap-2 text-base font-semibold">
-          <FlaskConical size={17} className="text-primary" aria-hidden="true" />
-          {m.experiments_table_experiments()}
-          <span className="rounded-full bg-surface px-2 py-0.5 text-xs font-medium text-subtext tabular-nums">{fmtNumber(rows.length)}</span>
-        </h2>
+        <div className="flex flex-wrap items-center gap-2">
+          <h2 className="m-0 flex items-center gap-2 text-base font-semibold">
+            <FlaskConical size={17} className="text-primary" aria-hidden="true" />
+            {m.experiments_table_experiments()}
+            <span className="rounded-full bg-surface px-2 py-0.5 text-xs font-medium text-subtext tabular-nums">{fmtNumber(rows.length)}</span>
+          </h2>
+          {toolbarActions && <div className="ms-auto">{toolbarActions}</div>}
+        </div>
         <div className="relative">
           <Search size={15} className="pointer-events-none absolute start-3 top-3 text-subtext" aria-hidden="true" />
           <Input ref={searchRef} type="search" value={search} onChange={(event) => setSearch(event.target.value)}

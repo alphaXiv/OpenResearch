@@ -24,11 +24,13 @@ import {
   ChevronUp,
   CircleStop,
   Ellipsis,
+  FoldVertical,
   FolderTree,
   Map as MapIcon,
   Maximize2,
   RotateCcw,
   Search,
+  UnfoldVertical,
   Terminal,
   X,
   ZoomIn,
@@ -59,6 +61,7 @@ import { tabOpenGestureHandlers, type TabOpenIntent } from "../tabPreview";
 import { TreeInspector } from "./TreeInspector";
 import type { ExperimentTreeState } from "../workspaceState";
 import { compactTreeLayout, type TreeLayoutNode } from "../treeLayout";
+import { autoCollapsedIds, effectiveCollapsedIds, toggleCollapsed, type BranchActivity, type CollapsibleNode } from "../treeCollapse";
 
 const EMPTY_STATE_CLASS_NAME = [
   "empty-state absolute inset-0 flex flex-col items-center",
@@ -101,6 +104,11 @@ type ExpNodeData = {
   isAncestor?: boolean;
   isDimmed?: boolean;
   onSelect?: () => void;
+  /** Experiments hidden under this card while its subtree is folded. */
+  foldedCount: number;
+  /** Experiments below this card while it is open (0 = leaf). */
+  subtreeCount: number;
+  onToggleFold: (id: string, folded: boolean) => void;
 };
 type ExpFlowNode = Node<ExpNodeData, "exp">;
 
@@ -222,6 +230,29 @@ function collapseArchivedRegions(roots: DisplayNode[]): DisplayNode[] {
   return roots.map(visit);
 }
 
+function displayCount(node: DisplayNode): number {
+  return node.kind === "exp" ? 1 : node.count;
+}
+
+/** Drop the children of folded cards, remembering how many experiments each
+ * card hides (folded) or carries (open) for its fold toggle. */
+function foldForest(roots: DisplayNode[], collapsed: ReadonlySet<string>) {
+  const counts = new Map<string, { folded: number; subtree: number }>();
+  function below(node: DisplayNode): number {
+    return node.children.reduce((sum, child) => sum + displayCount(child) + below(child), 0);
+  }
+  function visit(node: DisplayNode): DisplayNode {
+    if (node.kind === "exp" && node.children.length > 0 && collapsed.has(node.exp.id)) {
+      counts.set(node.exp.id, { folded: below(node), subtree: 0 });
+      return { ...node, children: [] };
+    }
+    const children = node.children.map(visit);
+    if (node.kind === "exp") counts.set(node.exp.id, { folded: 0, subtree: below(node) });
+    return { ...node, children };
+  }
+  return { roots: roots.map(visit), counts };
+}
+
 function nodeWidth(node: DisplayNode): number {
   return node.kind === "exp" ? NODE_W : node.kind === "archived" ? ARCHIVED_W : ELIDED_W;
 }
@@ -243,10 +274,14 @@ function runSquareClass(status: string): string {
 
 function TreeControls({
   onResetLayout,
+  autoLayout,
+  onToggleAutoLayout,
   showMiniMap,
   onToggleMiniMap,
 }: {
   onResetLayout: () => void;
+  autoLayout: boolean;
+  onToggleAutoLayout: () => void;
   showMiniMap: boolean;
   onToggleMiniMap: () => void;
 }) {
@@ -295,6 +330,18 @@ function TreeControls({
         >
           <RotateCcw size={14} />
         </button>
+        <button
+          type="button"
+          onClick={onToggleAutoLayout}
+          aria-pressed={autoLayout}
+          className={`flex h-7 w-7 items-center justify-center rounded-md transition-colors hover:bg-surface cursor-pointer ${
+            autoLayout ? "bg-surface text-primary" : "text-text"
+          }`}
+          title={m.tree_auto_layout_hint()}
+          aria-label={m.tree_auto_layout_hint()}
+        >
+          <Workflow size={14} />
+        </button>
         <div className="mx-0.5 h-3.5 w-px bg-border-variant" />
         <button
           type="button"
@@ -314,71 +361,103 @@ function TreeControls({
 }
 
 function TreeSearchToolbar({
-  search, onSearchChange, statusFilter, onStatusFilterChange,
+  search, onSearchChange, statusFilter, onStatusFilterChange, statusCounts,
   matchCount, currentMatchIndex, onNextMatch, onPrevMatch,
-  onArrange, autoLayout, onToggleAutoLayout, hasNodes, actions,
+  autoCollapse, onToggleAutoCollapse, foldedCount, onExpandAll, actions,
 }: {
   search: string;
   onSearchChange: (value: string) => void;
   statusFilter: "all" | "active" | "failed";
   onStatusFilterChange: (filter: "all" | "active" | "failed") => void;
+  statusCounts: { active: number; failed: number };
   matchCount: number;
   currentMatchIndex: number;
   onNextMatch: () => void;
   onPrevMatch: () => void;
-  onArrange: () => void;
-  autoLayout: boolean;
-  onToggleAutoLayout: () => void;
-  hasNodes: boolean;
+  autoCollapse: boolean;
+  onToggleAutoCollapse: () => void;
+  /** Experiments currently hidden under folded cards. */
+  foldedCount: number;
+  onExpandAll: () => void;
   actions?: ReactNode;
 }) {
   const searchInputRef = useRef<HTMLInputElement>(null);
   const filtering = search.trim().length > 0 || statusFilter !== "all";
 
   return (
-    <div className="tree-search-toolbar z-50 flex shrink-0 flex-wrap items-center gap-2 border-b border-border bg-background px-3 py-2" role="toolbar" aria-label={m.app_experiment_view()}>
-      <div className="relative flex min-w-44 flex-1 basis-52 items-center" role="search">
-        <Search size={14} className="pointer-events-none absolute start-2.5 text-muted" aria-hidden="true" />
-        <input
-          ref={searchInputRef}
-          type="search"
-          value={search}
-          onChange={(event) => onSearchChange(event.target.value)}
-          onKeyDown={(event) => {
-            if (event.key === "Enter") {
-              event.preventDefault();
-              if (event.shiftKey) onPrevMatch();
-              else onNextMatch();
-            } else if (event.key === "Escape") {
-              event.stopPropagation();
-              onSearchChange("");
-            }
-          }}
-          placeholder={m.experiments_search()}
-          aria-label={m.experiments_search()}
-          className={`h-8 w-full min-w-0 rounded-lg border border-border-variant bg-surface/50 ps-8 text-xs text-text placeholder:text-muted focus:border-border-strong focus:outline-2 focus:outline-accent [&::-webkit-search-cancel-button]:appearance-none ${filtering ? "pe-28" : "pe-3"}`}
-        />
-        {filtering && (
-          <div className="absolute end-1.5 flex items-center gap-0.5">
-            <span className="px-1 text-xs tabular-nums text-subtext" role="status" aria-live="polite">{matchCount > 0 ? `${currentMatchIndex + 1}/${matchCount}` : "0"}</span>
-            <button type="button" disabled={matchCount === 0} onClick={onPrevMatch} className="flex h-6 w-5 cursor-pointer items-center justify-center rounded text-subtext hover:bg-hover-subtle hover:text-text disabled:pointer-events-none disabled:opacity-30" title={`${m.pdf_preview_previous_match()} (Shift+Enter)`} aria-label={m.pdf_preview_previous_match()}><ChevronUp size={12} /></button>
-            <button type="button" disabled={matchCount === 0} onClick={onNextMatch} className="flex h-6 w-5 cursor-pointer items-center justify-center rounded text-subtext hover:bg-hover-subtle hover:text-text disabled:pointer-events-none disabled:opacity-30" title={`${m.pdf_preview_next_match()} (Enter)`} aria-label={m.pdf_preview_next_match()}><ChevronDown size={12} /></button>
-            {search && <button type="button" onClick={() => { onSearchChange(""); searchInputRef.current?.focus(); }} className="ms-0.5 flex h-6 w-5 cursor-pointer items-center justify-center rounded text-subtext hover:bg-hover-subtle hover:text-text" title={m.experiments_clear_search()} aria-label={m.experiments_clear_search()}><X size={12} /></button>}
-          </div>
-        )}
+    <div className="tree-search-toolbar z-20 flex shrink-0 flex-col gap-2 border-b border-border bg-background px-3 py-2" role="toolbar" aria-label={m.app_experiment_view()}>
+      <div className="flex min-w-0 items-center gap-2">
+        <div className="relative flex min-w-0 flex-1 items-center" role="search">
+          <Search size={14} className="pointer-events-none absolute start-2.5 text-muted" aria-hidden="true" />
+          <input
+            ref={searchInputRef}
+            type="search"
+            value={search}
+            onChange={(event) => onSearchChange(event.target.value)}
+            onKeyDown={(event) => {
+              if (event.key === "Enter") {
+                event.preventDefault();
+                if (event.shiftKey) onPrevMatch();
+                else onNextMatch();
+              } else if (event.key === "Escape") {
+                event.stopPropagation();
+                onSearchChange("");
+              }
+            }}
+            placeholder={m.experiments_search()}
+            aria-label={m.experiments_search()}
+            className={`h-8 w-full min-w-0 rounded-md border border-border-variant bg-background ps-8 text-xs text-text transition-colors placeholder:text-muted hover:border-border focus:border-border-strong focus:outline-2 focus:outline-accent [&::-webkit-search-cancel-button]:appearance-none ${filtering ? "pe-28" : "pe-3"}`}
+          />
+          {filtering && (
+            <div className="absolute end-1.5 flex items-center gap-0.5">
+              <span className="px-1 text-xs tabular-nums text-subtext" role="status" aria-live="polite">{matchCount > 0 ? `${currentMatchIndex + 1}/${matchCount}` : "0"}</span>
+              <button type="button" disabled={matchCount === 0} onClick={onPrevMatch} className="flex h-6 w-5 cursor-pointer items-center justify-center rounded text-subtext hover:bg-hover-subtle hover:text-text disabled:pointer-events-none disabled:opacity-30" title={`${m.pdf_preview_previous_match()} (Shift+Enter)`} aria-label={m.pdf_preview_previous_match()}><ChevronUp size={12} /></button>
+              <button type="button" disabled={matchCount === 0} onClick={onNextMatch} className="flex h-6 w-5 cursor-pointer items-center justify-center rounded text-subtext hover:bg-hover-subtle hover:text-text disabled:pointer-events-none disabled:opacity-30" title={`${m.pdf_preview_next_match()} (Enter)`} aria-label={m.pdf_preview_next_match()}><ChevronDown size={12} /></button>
+              {search && <button type="button" onClick={() => { onSearchChange(""); searchInputRef.current?.focus(); }} className="ms-0.5 flex h-6 w-5 cursor-pointer items-center justify-center rounded text-subtext hover:bg-hover-subtle hover:text-text" title={m.experiments_clear_search()} aria-label={m.experiments_clear_search()}><X size={12} /></button>}
+            </div>
+          )}
+        </div>
+        {actions}
       </div>
-      <div className="inline-flex h-8 shrink-0 items-center gap-0.5 rounded-lg bg-surface p-0.5" role="group" aria-label={m.app_filter_experiments()}>
-        {(["all", "active", "failed"] as const).map((key) => (
-          <button key={key} type="button" aria-pressed={statusFilter === key} onClick={() => onStatusFilterChange(key)} className={`h-7 cursor-pointer rounded-md px-2.5 text-xs font-medium transition-colors ${statusFilter === key ? "bg-background text-text shadow-xs" : "text-subtext hover:text-text"}`}>
-            {key === "all" ? m.chat_panel_all() : key === "active" ? m.chat_panel_active() : m.status_failed()}
+      <div className="flex min-w-0 flex-wrap items-center gap-2">
+        <div className="inline-flex h-8 shrink-0 items-center gap-0.5 rounded-md bg-hover-subtle p-0.5" role="group" aria-label={m.app_filter_experiments()}>
+          {(["all", "active", "failed"] as const).map((key) => {
+            const count = key === "all" ? 0 : statusCounts[key];
+            return (
+              <button key={key} type="button" aria-pressed={statusFilter === key} onClick={() => onStatusFilterChange(key)} className={`inline-flex h-7 cursor-pointer items-center gap-1 rounded-sm px-2.5 text-xs font-medium transition-colors ${statusFilter === key ? "bg-background text-text shadow-segment" : "text-subtext hover:text-text"}`}>
+                {key === "all" ? m.chat_panel_all() : key === "active" ? m.chat_panel_active() : m.status_failed()}
+                {count > 0 && (
+                  <span className={`tabular-nums ${key === "failed" ? "text-accent-red" : "text-accent-teal"}`}>{fmtNumber(count)}</span>
+                )}
+              </button>
+            );
+          })}
+        </div>
+        <div className="inline-flex h-8 shrink-0 items-center gap-0.5 rounded-md bg-hover-subtle p-0.5">
+          <button
+            type="button"
+            onClick={onToggleAutoCollapse}
+            aria-pressed={autoCollapse}
+            className={`inline-flex h-7 cursor-pointer items-center gap-1.5 rounded-sm px-2.5 text-xs font-medium transition-colors ${autoCollapse ? "bg-background text-text shadow-segment" : "text-subtext hover:text-text"}`}
+            title={m.tree_auto_collapse_hint()}
+          >
+            <FoldVertical size={13} className={autoCollapse ? "text-primary" : undefined} aria-hidden="true" />
+            {m.tree_auto_collapse()}
           </button>
-        ))}
+          {foldedCount > 0 && (
+            <button
+              type="button"
+              onClick={onExpandAll}
+              className="inline-flex h-7 cursor-pointer items-center gap-1 rounded-sm px-2 text-xs font-medium tabular-nums text-subtext transition-colors hover:bg-background hover:text-text"
+              title={m.tree_expand_all_hint({ count: fmtNumber(foldedCount) })}
+              aria-label={m.tree_expand_all_hint({ count: fmtNumber(foldedCount) })}
+            >
+              <UnfoldVertical size={13} aria-hidden="true" />
+              {fmtNumber(foldedCount)}
+            </button>
+          )}
+        </div>
       </div>
-      <div className="inline-flex h-8 shrink-0 items-center gap-0.5 rounded-lg border border-border-variant bg-surface/50 p-0.5">
-        <button type="button" onClick={onArrange} disabled={!hasNodes} className="inline-flex h-7 cursor-pointer items-center gap-1.5 rounded-md px-2 text-xs font-medium text-text transition-colors hover:bg-hover-subtle disabled:cursor-default disabled:opacity-40" title={m.tree_arrange_hint()} aria-label={m.tree_arrange_hint()}><Workflow size={14} aria-hidden="true" />{m.tree_arrange()}</button>
-        <button type="button" onClick={onToggleAutoLayout} aria-pressed={autoLayout} className={`inline-flex h-6 cursor-pointer items-center gap-1 rounded-md px-1.5 text-xs font-medium transition-colors ${autoLayout ? "bg-primary-subtle text-primary" : "text-muted hover:bg-hover-subtle hover:text-text"}`} title={m.tree_auto_layout_hint()} aria-label={m.tree_auto_layout_hint()}><span className={`h-1.5 w-1.5 rounded-full ${autoLayout ? "bg-primary" : "bg-muted"}`} aria-hidden="true" />{m.tree_auto_layout()}</button>
-      </div>
-      {actions && <div className="ms-auto flex shrink-0 items-center">{actions}</div>}
     </div>
   );
 }
@@ -404,7 +483,11 @@ const ExpNode = memo(function ExpNode({ data }: NodeProps<ExpFlowNode>) {
     isAncestor,
     isDimmed,
     onSelect,
+    foldedCount,
+    subtreeCount,
+    onToggleFold,
   } = data;
+  const folded = foldedCount > 0;
   const logsRun = liveRun ?? latestRun;
   const status = liveRun
     ? cancelling
@@ -423,7 +506,7 @@ const ExpNode = memo(function ExpNode({ data }: NodeProps<ExpFlowNode>) {
   return (
     <div
       ref={rootRef}
-      className={`exp-node w-66 border rounded-md bg-background py-2.5 px-3 text-sm transition-all duration-120 ease-standard cursor-grab active:cursor-grabbing ${
+      className={`exp-node group/node relative w-66 border rounded-md bg-background py-2.5 px-3 text-sm transition-all duration-120 ease-standard cursor-grab active:cursor-grabbing ${
         isSelected
           ? "border-accent-teal ring-2 ring-accent-teal shadow-tree-live"
           : isAncestor
@@ -431,7 +514,7 @@ const ExpNode = memo(function ExpNode({ data }: NodeProps<ExpFlowNode>) {
             : live
               ? "border-accent-teal shadow-tree-live live"
               : "border-border shadow-tree hover:shadow-tree-hover"
-      } ${isDimmed ? "opacity-25 hover:opacity-100" : ""} ${exp.archived ? "opacity-80" : ""} [&_.node-overview-link]:block [&_.node-overview-link]:w-full [&_.node-overview-link]:p-0 [&_.node-overview-link]:border-0 [&_.node-overview-link]:bg-transparent [&_.node-overview-link]:text-inherit [&_.node-overview-link]:[font:inherit] [&_.node-overview-link]:text-start [&_.node-overview-link]:cursor-pointer [&_.node-overview-link:hover_.node-slug]:underline [&_.node-overview-link:hover_.node-slug]:underline-offset-[3px] [&_.node-overview-link:focus-visible]:outline-2 [&_.node-overview-link:focus-visible]:outline-solid [&_.node-overview-link:focus-visible]:outline-accent [&_.node-overview-link:focus-visible]:outline-offset-4 [&_.node-overview-link:focus-visible]:rounded-xs [&_.node-eyebrow]:flex [&_.node-eyebrow]:items-center [&_.node-eyebrow]:justify-between [&_.node-eyebrow]:gap-2 [&_.node-eyebrow]:mb-1.5 [&_.node-eyebrow]:text-xs [&_.node-eyebrow]:font-medium [&_.node-eyebrow]:text-muted [&_.node-head]:flex [&_.node-head]:items-center [&_.node-head]:gap-[7px] [&_.node-head]:min-w-0 [&_.node-status]:w-2 [&_.node-status]:h-2 [&_.node-status]:rounded-full [&_.node-status]:shrink-0 [&_.node-slug]:text-sm [&_.node-slug]:font-semibold [&_.node-slug]:text-text [&_.node-slug]:flex-1 [&_.node-slug]:min-w-0 [&_.node-slug]:overflow-hidden [&_.node-slug]:text-ellipsis [&_.node-slug]:whitespace-nowrap [&_.node-title]:mt-1 [&_.node-title]:text-text [&_.node-title]:text-sm [&_.node-title]:line-clamp-2 [&_.node-meta]:mt-2 [&_.node-meta]:flex [&_.node-meta]:items-center [&_.node-meta]:gap-2 [&_.node-meta]:text-xs [&_.node-meta]:text-muted [&_.node-actions]:mt-2 [&_.node-actions]:pt-1.5 [&_.node-actions]:border-t [&_.node-actions]:border-t-border-variant [&_.node-actions]:flex [&_.node-actions]:items-center [&_.node-actions]:gap-[3px] [&_.node-action]:inline-flex [&_.node-action]:items-center [&_.node-action]:gap-[5px] [&_.node-action]:py-[3px] [&_.node-action]:px-1.5 [&_.node-action]:text-sm [&_.node-action]:font-medium [&_.node-action]:text-text [&_.node-action]:rounded-sm [&_.node-action]:no-underline [&_.node-action:hover]:text-text [&_.node-action:hover]:bg-surface [&_.node-action-ext]:ms-auto [&_.node-action-ext]:py-[3px] [&_.node-action-ext]:px-[5px]`}
+      } ${isDimmed ? "opacity-25 hover:opacity-100" : ""} ${exp.archived ? "opacity-80" : ""} [&_.node-overview-link]:block [&_.node-overview-link]:w-full [&_.node-overview-link]:p-0 [&_.node-overview-link]:border-0 [&_.node-overview-link]:bg-transparent [&_.node-overview-link]:text-inherit [&_.node-overview-link]:[font:inherit] [&_.node-overview-link]:text-start [&_.node-overview-link]:cursor-pointer [&_.node-overview-link:hover_.node-slug]:underline [&_.node-overview-link:hover_.node-slug]:underline-offset-[3px] [&_.node-overview-link:focus-visible]:outline-2 [&_.node-overview-link:focus-visible]:outline-solid [&_.node-overview-link:focus-visible]:outline-accent [&_.node-overview-link:focus-visible]:outline-offset-4 [&_.node-overview-link:focus-visible]:rounded-xs [&_.node-eyebrow]:flex [&_.node-eyebrow]:items-center [&_.node-eyebrow]:justify-between [&_.node-eyebrow]:gap-2 [&_.node-eyebrow]:mb-1.5 [&_.node-eyebrow]:text-xs [&_.node-eyebrow]:font-medium [&_.node-eyebrow]:text-muted [&_.node-head]:flex [&_.node-head]:items-center [&_.node-head]:gap-[7px] [&_.node-head]:min-w-0 [&_.node-status]:w-2 [&_.node-status]:h-2 [&_.node-status]:rounded-full [&_.node-status]:shrink-0 [&_.node-slug]:text-sm [&_.node-slug]:font-semibold [&_.node-slug]:text-text [&_.node-slug]:flex-1 [&_.node-slug]:min-w-0 [&_.node-slug]:overflow-hidden [&_.node-slug]:text-ellipsis [&_.node-slug]:whitespace-nowrap [&_.node-title]:mt-1 [&_.node-title]:text-text [&_.node-title]:text-sm [&_.node-title]:line-clamp-2 [&_.node-meta]:mt-2 [&_.node-meta]:flex [&_.node-meta]:items-center [&_.node-meta]:gap-2 [&_.node-meta]:text-xs [&_.node-meta]:text-muted [&_.node-actions]:mt-2 [&_.node-actions]:pt-1.5 [&_.node-actions]:border-t [&_.node-actions]:border-t-border-variant [&_.node-actions]:flex [&_.node-actions]:items-center [&_.node-actions]:gap-[3px] [&_.node-action]:inline-flex [&_.node-action]:items-center [&_.node-action]:gap-[5px] [&_.node-action]:py-[3px] [&_.node-action]:px-1.5 [&_.node-action]:text-xs [&_.node-action]:font-medium [&_.node-action]:text-text [&_.node-action]:rounded-sm [&_.node-action]:no-underline [&_.node-action:hover]:text-text [&_.node-action:hover]:bg-surface [&_.node-action-ext]:ms-auto [&_.node-action-ext]:py-[3px] [&_.node-action-ext]:px-[5px]`}
       onClick={onSelect}
       onMouseEnter={hover.onMouseEnter}
       onMouseLeave={hover.onMouseLeave}
@@ -548,6 +631,34 @@ const ExpNode = memo(function ExpNode({ data }: NodeProps<ExpFlowNode>) {
         </a>}
         <ArchiveMenu id={exp.id} name={exp.title || exp.slug} actions={actions} onArchive={onArchive} compact />
       </div>
+      {/* A folded card reads as a stack: the hidden subtree sits behind it. */}
+      {folded && (
+        <div className="pointer-events-none absolute inset-x-2 -bottom-1.5 -z-10 h-full rounded-md border border-border bg-background" aria-hidden="true" />
+      )}
+      {(folded || subtreeCount > 0) && (
+        <button
+          type="button"
+          className={`fold-toggle nodrag absolute start-1/2 -bottom-3 z-10 inline-flex h-6 -translate-x-1/2 items-center gap-1 rounded-full border bg-background px-2 text-xs font-medium tabular-nums shadow-xs transition-[opacity,background-color,color] duration-120 ease-standard cursor-pointer rtl:translate-x-1/2 hover:bg-surface hover:text-text focus-visible:opacity-100 ${
+            folded
+              ? "border-accent-teal text-text"
+              : `border-border text-subtext ${isSelected ? "opacity-100" : "opacity-0 group-hover/node:opacity-100"}`
+          }`}
+          title={folded
+            ? m.tree_unfold_hint({ count: fmtNumber(foldedCount) })
+            : m.tree_fold_hint({ count: fmtNumber(subtreeCount) })}
+          aria-label={folded
+            ? m.tree_unfold_hint({ count: fmtNumber(foldedCount) })
+            : m.tree_fold_hint({ count: fmtNumber(subtreeCount) })}
+          aria-expanded={!folded}
+          onClick={(e) => {
+            e.stopPropagation();
+            onToggleFold(exp.id, folded);
+          }}
+        >
+          {folded ? <ChevronDown size={12} aria-hidden="true" /> : <ChevronUp size={12} aria-hidden="true" />}
+          {folded && <span>{m.tree_fold_hidden({ count: fmtNumber(foldedCount) })}</span>}
+        </button>
+      )}
       <Handle type="source" position={Position.Bottom} />
       {/* Node and card share one leave handler */}
       {hover.rect && (
@@ -679,8 +790,14 @@ function TreeCanvasBody({
   children,
   autoLayout,
   onToggleAutoLayout,
+  statusCounts,
+  autoCollapse,
+  onToggleAutoCollapse,
+  foldedCount,
+  onExpandAll,
   toolbarActions,
   emptyState,
+  foldAnchor,
 }: {
   nodes: FlowNode[];
   edges: Edge[];
@@ -705,10 +822,29 @@ function TreeCanvasBody({
   children?: ReactNode;
   autoLayout: boolean;
   onToggleAutoLayout: () => void;
+  statusCounts: { active: number; failed: number };
+  autoCollapse: boolean;
+  onToggleAutoCollapse: () => void;
+  foldedCount: number;
+  onExpandAll: () => void;
   toolbarActions?: ReactNode;
   emptyState?: ReactNode;
+  foldAnchor?: { current: { id: string; x: number; y: number } | null };
 }) {
-  const { setCenter, getNode, fitView } = useReactFlow();
+  const { setCenter, getNode, fitView, getViewport, setViewport } = useReactFlow();
+
+  // Folding re-lays out the tree; pan so the toggled card stays put on screen.
+  useEffect(() => {
+    const anchor = foldAnchor?.current;
+    const node = anchor && nodes.find((item) => item.id === anchor.id);
+    if (!anchor || !node) return;
+    foldAnchor.current = null;
+    const dx = node.position.x - anchor.x;
+    const dy = node.position.y - anchor.y;
+    if (dx === 0 && dy === 0) return;
+    const { x, y, zoom } = getViewport();
+    void setViewport({ x: x - dx * zoom, y: y - dy * zoom, zoom }, { duration: 200 });
+  }, [nodes, foldAnchor, getViewport, setViewport]);
 
   const navigateToMatch = useCallback(
     (index: number) => {
@@ -761,13 +897,11 @@ function TreeCanvasBody({
         currentMatchIndex={currentMatchIndex}
         onNextMatch={handleNextMatch}
         onPrevMatch={handlePrevMatch}
-        onArrange={handleAutoArrange}
-        autoLayout={autoLayout}
-        onToggleAutoLayout={() => {
-          onToggleAutoLayout();
-          if (!autoLayout) requestAnimationFrame(() => void fitView({ duration: 250, padding: 0.2, maxZoom: 1 }));
-        }}
-        hasNodes={nodes.length > 0}
+        statusCounts={statusCounts}
+        autoCollapse={autoCollapse}
+        onToggleAutoCollapse={onToggleAutoCollapse}
+        foldedCount={foldedCount}
+        onExpandAll={onExpandAll}
         actions={toolbarActions}
       />
       <div className="tree-canvas relative min-h-0 flex-1">
@@ -799,6 +933,11 @@ function TreeCanvasBody({
 
           <TreeControls
             onResetLayout={handleAutoArrange}
+            autoLayout={autoLayout}
+            onToggleAutoLayout={() => {
+              onToggleAutoLayout();
+              if (!autoLayout) requestAnimationFrame(() => void fitView({ duration: 250, padding: 0.2, maxZoom: 1 }));
+            }}
             showMiniMap={showMiniMap}
             onToggleMiniMap={onToggleMiniMap}
           />
@@ -908,6 +1047,7 @@ export function TreeView({
 }) {
   const { selectedId, search, statusFilter, showMiniMap } = state;
   const autoLayout = state.autoLayout ?? Object.keys(state.positions).length === 0;
+  const autoCollapse = state.autoCollapse ?? true;
   const [nodeSizes, setNodeSizes] = useState<Record<string, { width: number; height: number }>>({});
   const updateState = useCallback(
     (patch: Partial<ExperimentTreeState>) => {
@@ -1048,6 +1188,69 @@ export function TreeView({
     return showArchived ? scopedRoots : collapseArchivedRegions(scopedRoots);
   }, [experiments, agentSessionId, showArchived]);
 
+  const activityById = useMemo(() => {
+    const map = new Map<string, BranchActivity>();
+    for (const exp of experiments) {
+      const expRuns = runsByExp.get(exp.id) ?? [];
+      const live = expRuns.some((r) => r.status === "running" || r.status === "starting");
+      const latest = expRuns[expRuns.length - 1];
+      const lastActivity = expRuns.reduce((max, r) => Math.max(max, r.endedAt ?? r.createdAt), exp.createdAt);
+      map.set(exp.id, { live, failed: !live && latest?.status === "failed", lastActivity });
+    }
+    return map;
+  }, [experiments, runsByExp]);
+
+  // Manual folds, plus auto-tidy's quiet side branches; the path to the
+  // selection and to search matches always stays open.
+  const collapsedIds = useMemo(() => {
+    const parents = new Map<string, string>();
+    const link = (node: DisplayNode) => node.children.forEach((child) => {
+      parents.set(nodeId(child), nodeId(node));
+      link(child);
+    });
+    forest.forEach(link);
+    const reveal = new Set<string>();
+    for (const id of selectedId ? [...matchingIds, selectedId] : matchingIds) {
+      for (let parent = parents.get(id); parent && !reveal.has(parent); parent = parents.get(parent)) reveal.add(parent);
+    }
+    const collapsible = (node: DisplayNode): CollapsibleNode => ({ id: nodeId(node), children: node.children.map(collapsible) });
+    return effectiveCollapsedIds({
+      manualCollapsed: state.collapsed ?? [],
+      manualExpanded: state.expanded ?? [],
+      auto: autoCollapse ? autoCollapsedIds(forest.map(collapsible), (id) => activityById.get(id), Date.now()) : null,
+      reveal,
+    });
+  }, [forest, selectedId, matchingIds, state.collapsed, state.expanded, autoCollapse, activityById]);
+
+  const folded = useMemo(() => foldForest(forest, collapsedIds), [forest, collapsedIds]);
+  const foldedTotal = useMemo(
+    () => [...folded.counts.values()].reduce((sum, count) => sum + count.folded, 0),
+    [folded],
+  );
+  const statusCounts = useMemo(() => {
+    let active = 0;
+    let failed = 0;
+    for (const info of activityById.values()) {
+      if (info.live) active += 1;
+      else if (info.failed) failed += 1;
+    }
+    return { active, failed };
+  }, [activityById]);
+
+  // Where the toggled card sat, so the canvas can keep it under the pointer.
+  const foldAnchor = useRef<{ id: string; x: number; y: number } | null>(null);
+  const handleToggleFold = useCallback(
+    (id: string, isFolded: boolean) => {
+      const position = nodesRef.current.find((node) => node.id === id)?.position;
+      foldAnchor.current = position ? { id, ...position } : null;
+      onStateChange((current) => ({
+        ...current,
+        ...toggleCollapsed({ collapsed: current.collapsed ?? [], expanded: current.expanded ?? [] }, id, isFolded),
+      }));
+    },
+    [onStateChange],
+  );
+
   const layoutPositions = useMemo(() => {
     const sized = (node: DisplayNode): TreeLayoutNode => ({
       id: nodeId(node),
@@ -1055,8 +1258,8 @@ export function TreeView({
       height: nodeSizes[nodeId(node)]?.height ?? nodeHeight(node),
       children: node.children.map(sized),
     });
-    return compactTreeLayout(forest.map(sized));
-  }, [forest, nodeSizes]);
+    return compactTreeLayout(folded.roots.map(sized));
+  }, [folded, nodeSizes]);
 
   const computedTree = useMemo(() => {
     const nodes: FlowNode[] = [];
@@ -1098,6 +1301,9 @@ export function TreeView({
             actions: archiveActions.get(node.exp.id)!,
             onCancel: handleCancel,
             cancelling,
+            foldedCount: folded.counts.get(node.exp.id)?.folded ?? 0,
+            subtreeCount: folded.counts.get(node.exp.id)?.subtree ?? 0,
+            onToggleFold: handleToggleFold,
           },
         });
       } else if (node.kind === "archived") {
@@ -1133,10 +1339,11 @@ export function TreeView({
       }
     }
 
-    forest.forEach(visit);
+    folded.roots.forEach(visit);
     return { nodes, edges };
   }, [
-    forest,
+    folded,
+    handleToggleFold,
     layoutPositions,
     nodeSizes,
     archiveActions,
@@ -1280,30 +1487,25 @@ export function TreeView({
     });
   }, [computedTree.edges, selectedId, selectedLineage.edgeIds]);
 
-  if (experiments.length === 0) {
-    return (
-      <div className={EMPTY_STATE_CLASS_NAME}>
-        <p className="empty-state-title">{m.tree_view_no_experiments_yet()}</p>
-        <p className="empty-state-hint">
-          {m.tree_view_ask_the_agent_in_chat_to_create_and()}
-        </p>
-      </div>
-    );
-  }
-
-  // Only Current task scope can filter a non-empty forest down to nothing.
-  if (computedTree.nodes.length === 0 && agentSessionId) {
-    return (
-      <div className={EMPTY_STATE_CLASS_NAME}>
-        <p className="empty-state-title">
-          {m.tree_view_no_experiments_from_the_current_task_yet()}
-        </p>
-        <p className="empty-state-hint">
-          {m.tree_view_ask_in_this_task_to_create_one_or()}
-        </p>
-      </div>
-    );
-  }
+  // Empty states keep the toolbar so the view toggle and filters stay reachable.
+  const emptyState = experiments.length === 0 ? (
+    <div className={EMPTY_STATE_CLASS_NAME}>
+      <p className="empty-state-title">{m.tree_view_no_experiments_yet()}</p>
+      <p className="empty-state-hint">
+        {m.tree_view_ask_the_agent_in_chat_to_create_and()}
+      </p>
+    </div>
+  ) : computedTree.nodes.length === 0 && agentSessionId ? (
+    // Only Current task scope can filter a non-empty forest down to nothing.
+    <div className={EMPTY_STATE_CLASS_NAME}>
+      <p className="empty-state-title">
+        {m.tree_view_no_experiments_from_the_current_task_yet()}
+      </p>
+      <p className="empty-state-hint">
+        {m.tree_view_ask_in_this_task_to_create_one_or()}
+      </p>
+    </div>
+  ) : undefined;
 
   const selectedExp = selectedId
     ? (experiments.find((e) => e.id === selectedId) ?? null)
@@ -1345,7 +1547,14 @@ export function TreeView({
           agentSessionId={agentSessionId}
           autoLayout={autoLayout}
           onToggleAutoLayout={handleToggleAutoLayout}
+          statusCounts={statusCounts}
+          autoCollapse={autoCollapse}
+          onToggleAutoCollapse={() => updateState({ autoCollapse: !autoCollapse })}
+          foldedCount={foldedTotal}
+          onExpandAll={() => updateState({ collapsed: [], expanded: [], autoCollapse: false })}
           toolbarActions={toolbarActions}
+          emptyState={emptyState}
+          foldAnchor={foldAnchor}
         >
           {/* Slide-over Inspector Panel */}
           {selectedExp && (

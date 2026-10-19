@@ -54,6 +54,12 @@ struct ExperimentTreeState {
     show_mini_map: bool,
     show_archived: bool,
     inspector_tab: TreeInspectorTab,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    collapsed: Option<Vec<String>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    expanded: Option<Vec<String>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    auto_collapse: Option<bool>,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
@@ -252,6 +258,11 @@ impl WorkspaceState {
                             || tree.positions.iter().any(|(id, position)| {
                                 id.is_empty() || !position.x.is_finite() || !position.y.is_finite()
                             })
+                            || [&tree.collapsed, &tree.expanded]
+                                .into_iter()
+                                .flatten()
+                                .flatten()
+                                .any(String::is_empty)
                     })
                     || task.scroll.values().any(|position| {
                         !position.top.is_finite()
@@ -402,6 +413,7 @@ mod tests {
             json!({"positions":{"trial":{"x":-350.0,"y":600.0}},"search":"trial",
                 "statusFilter":"active","matchIndex":1,"selectedId":"trial",
                 "showMiniMap":true,"showArchived":true,"inspectorTab":"diff"}),
+            json!({"collapsed":["trial"],"expanded":["baseline"],"autoCollapse":false}),
         ] {
             value["tasks"]["new"]["treeState"] = tree;
             let state = WorkspaceState::from_stored(&value.to_string()).unwrap();
@@ -416,6 +428,8 @@ mod tests {
             json!({"statusFilter":"unknown"}),
             json!({"inspectorTab":"unknown"}),
             json!({"selectedId":""}),
+            json!({"collapsed":[""]}),
+            json!({"expanded":[1]}),
             json!({"matchIndex":-1}),
             json!({"matchIndex":9_007_199_254_740_992_u64}),
             json!({"content":"not tree metadata"}),
