@@ -100,6 +100,7 @@ group below has a module (`orx skill <name>`) with the full flags and rules.
 | `orx exp desc <expId> [--set "<text>" \| --stdin]` | Read or overwrite the experiment's description. |
 | `orx agent spawn "<task>" [--title "<t>"] [--stdin] [--no-wake]` | Delegate an independent task to a helper session; see `orx-agent-delegation`. |
 | `orx agent harnesses [--json]` | List the harnesses a helper can run on, with each one's model vendor. |
+| `orx sleep start --budget <usd> [--for 8h] [--metric <m> --target <pct>]` / `status` / `assess` / `stop` | Run this chat unattended (the user is away) under a hard GPU budget and stop condition; start it only when the user asks. Its rules arrive with every turn. |
 
 To **read or edit** a node's code—including diffing what a run changed—use plain
 Git in the local session worktree. See the `orx-git` module.
