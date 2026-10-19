@@ -90,6 +90,7 @@ import {
   cancelQueuedMessage,
   chatAttachmentUrl,
   createChatSession,
+  handoffChatSession,
   getChatSession,
   deleteChatSession,
   DEMO_FIGURE_SESSION_ID,
@@ -5089,6 +5090,22 @@ export function ChatPanel({
     else onOpenSideChat(openSession.id, question);
   }
 
+  /** Continue the open chat in a new chat on another harness, then open it. */
+  async function handoffChat(selection: ModelSelection) {
+    if (!openSession) return;
+    setSettingsError(null);
+    const visit = projectVisitRef.current;
+    try {
+      const session = await handoffChatSession(openSession.id, selection);
+      if (projectVisitRef.current !== visit) return;
+      setSessions((current) => [session, ...current.filter((row) => row.id !== session.id)]);
+      onActiveSessionChange(session.id, { projectId: session.projectId });
+    } catch (err) {
+      if (projectVisitRef.current !== visit) return;
+      setSettingsError(m.chat_handoff_failed({ error: ltr(err instanceof Error ? err.message : String(err)) }));
+    }
+  }
+
   /** Adopt a chat from an agent's own CLI into this project, then open it. */
   async function importChat(chat: NativeChat) {
     setSettingsError(null);
@@ -7277,6 +7294,7 @@ export function ChatPanel({
                   sleepDetail={sleepLabel(sleepStatus)}
                   onOpenSleep={openSession ? () => setSleepDialogOpen(true) : undefined}
                   lockHarness={!!openSession}
+                  onHandoff={openSession && !openSession.sideParentSessionId ? (selection) => void handoffChat(selection) : undefined}
                   openRequest={modelPickerRequest}
                   nativeOptions={openSession?.harness.startsWith("acp:") ? acpOptions.filter((option) => option.category !== "model") : []}
                   onSelectNativeOption={(optionId, value) => {

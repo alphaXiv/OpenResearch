@@ -1535,7 +1535,12 @@ pub fn seed_session_worktree(
         let _ = std::fs::remove_dir_all(&child_dir);
         let _ = git(
             Some(repo),
-            &["worktree", "remove", "--force", &child_dir.to_string_lossy()],
+            &[
+                "worktree",
+                "remove",
+                "--force",
+                &child_dir.to_string_lossy(),
+            ],
         );
     }
     seeded
@@ -1557,7 +1562,10 @@ fn seed_worktree_from(repo: &Path, parent_dir: &Path, child_dir: PathBuf) -> Res
         &[],
     )?;
     let mut skipped = Vec::new();
-    for raw in listed.split(|byte| *byte == 0).filter(|raw| !raw.is_empty()) {
+    for raw in listed
+        .split(|byte| *byte == 0)
+        .filter(|raw| !raw.is_empty())
+    {
         let relative = path_from_git_bytes(raw)?;
         let (source, target) = (parent_dir.join(&relative), dir.join(&relative));
         let Ok(meta) = std::fs::symlink_metadata(&source) else {

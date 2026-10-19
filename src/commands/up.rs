@@ -802,7 +802,10 @@ fn router(state: AppState, remote_auth: Option<RemoteAuth>) -> Router {
             post(recover_chat_turn),
         )
         .route("/api/chat/sessions/{id}/side", post(open_side_chat))
-        .route("/api/chat/sessions/{id}/handoff", post(handoff_chat_session))
+        .route(
+            "/api/chat/sessions/{id}/handoff",
+            post(handoff_chat_session),
+        )
         .route("/api/chat/sessions/{id}/fork", post(fork_chat_turn))
         .route("/api/chat/sessions/{id}/branch", post(select_chat_branch))
         .route("/api/chat/sessions/{id}/interrupt", post(interrupt_chat))
@@ -7883,7 +7886,9 @@ async fn handoff_chat_session(
         .get_chat_session(&id)?
         .ok_or_else(|| not_found("chat session"))?;
     if parent.side_parent_session_id.is_some() {
-        return Err(bad_request("a side chat cannot be continued on another harness"));
+        return Err(bad_request(
+            "a side chat cannot be continued on another harness",
+        ));
     }
     if req.harness == parent.harness {
         return Err(bad_request("the chat already runs on this harness"));
