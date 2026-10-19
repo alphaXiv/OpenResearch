@@ -6848,6 +6848,46 @@ impl ChatHost {
         Ok(session)
     }
 
+    /// Continue `parent` in `session`, a new chat on another harness built by
+    /// the caller. The worktree is seeded from the parent's checkout before the
+    /// row exists, so the new chat's first turn never races an empty worktree;
+    /// the parent is only read.
+    pub async fn open_handoff_chat(
+        &self,
+        parent: &StoredChatSession,
+        mut session: StoredChatSession,
+    ) -> Result<StoredChatSession> {
+        let project = Store::open()?.get_local_project(&parent.project_id)?;
+        let left_behind = match project.clone() {
+            Some(project) => {
+                let (parent_id, child_id) = (parent.id.clone(), session.id.clone());
+                tokio::task::spawn_blocking(move || {
+                    crate::local::git::seed_session_worktree(&project, &parent_id, &child_id)
+                })
+                .await
+                .map_err(|e| anyhow!("worktree seeding failed: {e}"))??
+            }
+            None => Vec::new(),
+        };
+        let store = Store::open()?;
+        let messages = store.list_chat_messages(&parent.id)?;
+        let from = crate::local::harness::chat_harness(&parent.harness)
+            .map_or_else(|| parent.harness.clone(), |h| h.name().to_string());
+        session.bootstrap_context = handoff_bootstrap_context(parent, &messages, &from, &left_behind);
+        session.title = parent.title.clone();
+        session.title_source = parent.title.as_ref().map(|_| "fallback".to_string());
+        // Unlike a side chat, the new chat owns its worktree and outlives the
+        // parent, so only a failed insert needs undoing.
+        if let Err(error) = store.create_chat_session(&session) {
+            if let Some(project) = project.as_ref() {
+                cleanup_session_worktree(project, &session.id);
+            }
+            return Err(error);
+        }
+        self.emit_session(Some(session.clone())).await;
+        Ok(session)
+    }
+
     /// Set (or, with `None`, clear) the goal every turn is reminded of.
     pub async fn set_goal(
         &self,
@@ -8758,6 +8798,41 @@ fn active_path<'a>(
     }
     path.reverse();
     path
+}
+
+/// First-turn context for a chat continued from `parent` on another harness:
+/// whatever context the parent itself was seeded with, then a snapshot of its
+/// live branch. The new harness has no native history of the conversation.
+fn handoff_bootstrap_context(
+    parent: &StoredChatSession,
+    messages: &[StoredChatMessage],
+    from_name: &str,
+    left_behind: &[String],
+) -> Option<String> {
+    let snapshot = crate::local::harness::transcript_snapshot(active_path(
+        messages,
+        parent.active_leaf_id.as_deref(),
+    ));
+    let prior = [parent.bootstrap_context.as_deref(), Some(snapshot.as_str())]
+        .into_iter()
+        .flatten()
+        .filter(|text| !text.trim().is_empty())
+        .collect::<Vec<_>>()
+        .join("\n\n");
+    if prior.is_empty() && left_behind.is_empty() {
+        return None;
+    }
+    let left_behind = if left_behind.is_empty() {
+        String::new()
+    } else {
+        format!(
+            "\nThese untracked paths were too large (or not plain files) to copy and remain only in the original chat's worktree: {}\n",
+            left_behind.join(", ")
+        )
+    };
+    Some(format!(
+        "<orx-harness-handoff>\nThe user moved this chat here from {from_name} to continue it on another harness. Your worktree starts where that chat's left off: the same commit, with its uncommitted edits and untracked files copied. Use this ORX transcript snapshot as prior context; do not repeat completed tool actions.\n{left_behind}{prior}\n</orx-harness-handoff>"
+    ))
 }
 
 fn side_chat_session(

@@ -229,6 +229,7 @@ import {
   tableMarkdown,
 } from "./annotationMarkdown";
 import { Button, IconButton, LoadingRow, MenuItem, showAlert, Spinner, Tooltip } from "./ui";
+import { cn } from "./ui/cn";
 import { PaperTitle } from "./PaperTitle";
 
 const TOOL_LINE_CLASS_NAME = "tool-line flex-1 min-w-0 line-clamp-2 break-words text-base leading-6";
@@ -2302,10 +2303,15 @@ function TurnStatusRow({
   onRecover,
   usageLimited = false,
   temporaryApiError = false,
+  superseded = false,
 }: {
   part: ChatPart;
   usageLimited?: boolean;
   temporaryApiError?: boolean;
+  /** The failure no longer describes what the next send will do — a later
+   * turn followed it, or the user picked another model since — so it reads
+   * as history instead of a live alarm. Retry stays: it runs on the new pick. */
+  superseded?: boolean;
   busy: boolean;
   recovering: boolean;
   onRecover?: (turnId: string, action: "retry" | "continue") => void;
@@ -2342,11 +2348,11 @@ function TurnStatusRow({
   const Icon = temporaryApiError ? WifiOff : usageLimited ? Gauge : TriangleAlert;
   const errorMessage = cleanToolError(part.state?.error || m.chat_turn_incomplete());
   return (
-    <details className="turn-usage-limit group/limit text-base text-subtext">
+    <details className={cn("turn-usage-limit group/limit text-base", superseded ? "text-muted" : "text-subtext")} data-superseded={superseded || undefined}>
       <summary className="flex w-fit max-w-full items-center gap-2 cursor-pointer list-none rounded-sm focus-visible:outline-2 focus-visible:outline-text [&::-webkit-details-marker]:hidden">
-        <Icon size={18} className={temporaryApiError ? "shrink-0 text-subtext" : "shrink-0 text-accent-red"} aria-hidden="true" />
+        <Icon size={superseded ? 16 : 18} className={temporaryApiError || superseded ? "shrink-0 text-muted" : "shrink-0 text-accent-red"} aria-hidden="true" />
         <span>{label}</span>
-        <ChevronRight size={16} className="shrink-0 text-text transition-transform duration-120 ease-standard group-open/limit:rotate-90 motion-reduce:transition-none" aria-hidden="true" />
+        <ChevronRight size={16} className={cn("shrink-0 transition-transform duration-120 ease-standard group-open/limit:rotate-90 motion-reduce:transition-none", superseded ? "text-muted" : "text-text")} aria-hidden="true" />
       </summary>
       <pre className="mt-2 rounded-md bg-surface p-2 text-sm font-mono whitespace-pre-wrap wrap-anywhere">
         {errorMessage}
@@ -3004,6 +3010,7 @@ export const Message = memo(function Message({
   busy = false,
   recoveringTurnId,
   onRecover,
+  statusSuperseded = false,
   skills,
   predictTextTail = false,
   forkCount,
@@ -3032,6 +3039,8 @@ export const Message = memo(function Message({
   busy?: boolean;
   recoveringTurnId?: string | null;
   onRecover?: (turnId: string, action: "retry" | "continue") => void;
+  /** Render this turn's failure row as history (see `TurnStatusRow`). */
+  statusSuperseded?: boolean;
   /** Known slash-skills, for rendering a `/name` token as a command chip. */
   skills?: SkillInfo[];
   predictTextTail?: boolean;
@@ -3197,6 +3206,7 @@ export const Message = memo(function Message({
           busy={busy}
           recovering={recoveringTurnId === turnStatus.state?.input?.turnId}
           onRecover={onRecover}
+          superseded={statusSuperseded}
         />
       )}
       {copyText && (
@@ -3747,6 +3757,14 @@ function useTranscriptAnnouncement(messages: ChatMessage[]): TranscriptAnnouncem
   return announcement;
 }
 
+/** Id of the newest assistant message in `messages` (oldest first), if any. */
+function newestAssistantId(messages: readonly ChatMessage[]): string | null {
+  for (let i = messages.length - 1; i >= 0; i--) {
+    if (messages[i].role === "assistant") return messages[i].id;
+  }
+  return null;
+}
+
 const Transcript = memo(function Transcript({
   messages,
   scrollRef,
@@ -3769,6 +3787,7 @@ const Transcript = memo(function Transcript({
   onOpenSubagent,
   recoveringTurnId,
   onRecover,
+  modelSwitchedAfterId = null,
   skills,
 }: {
   /** The branch on screen, oldest first. */
@@ -3795,6 +3814,9 @@ const Transcript = memo(function Transcript({
   onOpenSubagent?: OpenSubagent;
   recoveringTurnId?: string | null;
   onRecover?: (turnId: string, action: "retry" | "continue") => void;
+  /** Newest assistant message when the user last picked another model; its
+   * failure (and everything older) no longer predicts the next send. */
+  modelSwitchedAfterId?: string | null;
   skills?: SkillInfo[];
 }) {
   useLocale();
@@ -3855,6 +3877,12 @@ const Transcript = memo(function Transcript({
     return () => document.removeEventListener("selectionchange", retainSelection);
   }, [scrollRef]);
   const activeMessage = visibleMessages.at(-1);
+  // Only the newest reply's failure is live; older ones were followed by more
+  // turns, and the newest goes quiet once the user picks another model.
+  const liveStatusMessageId = useMemo(() => {
+    const newest = newestAssistantId(visibleMessages);
+    return newest === modelSwitchedAfterId ? null : newest;
+  }, [visibleMessages, modelSwitchedAfterId]);
   const transcriptAnnouncement = useTranscriptAnnouncement(messages);
   const pendingTailTool = busy ? streamTailTool(messages) : null;
   return (
@@ -3913,6 +3941,7 @@ const Transcript = memo(function Transcript({
             busy={recoveryDisabled}
             recoveringTurnId={turnId === recoveringTurnId ? recoveringTurnId : null}
             onRecover={onRecover}
+            statusSuperseded={m.id !== liveStatusMessageId}
             skills={skills}
             predictTextTail={busy && m === activeMessage && m.role === "assistant"}
           />
@@ -4503,6 +4532,10 @@ export function ChatPanel({
     };
   }, [stashKey, composerPrefill]);
   const [settingsError, setSettingsError] = useState<string | null>(null);
+  // The newest assistant message when the user last picked another model in
+  // this session: its failure row stops shouting, since the next send runs on
+  // the new pick. Per session, so it resets when the session changes.
+  const [modelSwitchedAfter, setModelSwitchedAfter] = useState<{ sessionId: string; messageId: string } | null>(null);
   const settingsMutationTail = useRef<Promise<void>>(Promise.resolve());
   const settingsMutationSeq = useRef(0);
   const planMutationSeq = useRef(0);
@@ -4817,6 +4850,11 @@ export function ChatPanel({
   // permission mode would write a reasoning level the user never chose, and the
   // next send would persist it over their real setting.
   const selectModel = (next: Partial<ModelSelection>) => {
+    if (openSession && next.model !== undefined && next.model !== composerSelection?.model) {
+      const newest = newestAssistantId(messages);
+      setModelSwitchedAfter(newest ? { sessionId: openSession.id, messageId: newest } : null);
+      setSettingsError(null);
+    }
     if (openSession?.harness.startsWith("acp:") && acpModel && next.model) {
       void setChatConfiguration(openSession.id, acpModel.id, next.model).catch((error: unknown) => showAlert(error instanceof Error ? error.message : String(error), "error"));
       return;
@@ -6698,6 +6736,7 @@ export function ChatPanel({
                   onOpenSubagent={openSubagent}
                   recoveringTurnId={recoveringTurnId}
                   onRecover={recoverFailedTurn}
+                  modelSwitchedAfterId={modelSwitchedAfter?.sessionId === activeId ? modelSwitchedAfter.messageId : null}
                   skills={transcriptSkills}
                 />
               </ChatImageScope>

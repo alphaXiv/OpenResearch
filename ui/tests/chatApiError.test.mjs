@@ -9,6 +9,7 @@ import * as bashCommand from "../src/bashCommand.ts";
 import * as chatRecovery from "../src/chatRecovery.ts";
 import * as chatRendering from "../src/chatRendering.ts";
 import * as orxCommand from "../src/orxCommand.ts";
+import * as cnModule from "../src/components/ui/cn.ts";
 
 const require = createRequire(import.meta.url);
 const source = readFileSync(new URL("../src/components/ChatPanel.tsx", import.meta.url), "utf8");
@@ -28,13 +29,14 @@ const mocks = {
   "./ui": new Proxy({}, {
     get: (_, name) => (name === "Button" ? ({ children }) => React.createElement("button", null, children) : stub[name]),
   }),
+  "./ui/cn": cnModule,
 };
 const exports = {};
 new Function("require", "exports", compiled)(
   (name) => mocks[name] ?? (name.startsWith(".") ? stub : require(name)),
   exports,
 );
-const renderMessage = (parts) => renderToStaticMarkup(React.createElement(exports.Message, {
+const renderMessage = (parts, props = {}) => renderToStaticMarkup(React.createElement(exports.Message, {
   message: { id: "msg-1", role: "assistant", parts, createdAt: 0, completedAt: 1000 },
   activePermissionId: null,
   forkDisabled: false,
@@ -42,6 +44,7 @@ const renderMessage = (parts) => renderToStaticMarkup(React.createElement(export
   onFork: () => {},
   onSelectFork: () => {},
   onRecover: () => {},
+  ...props,
 }));
 
 const detail = "API Error: Connection dropped (ECONNRESET)";
@@ -80,4 +83,14 @@ test("unrelated errors are not absorbed into recovery", () => {
   assert.match(html, /chat_panel_temporary_api_error/);
   assert.match(html, /chat_turn_incomplete/);
   assert.match(html, /Other failure/);
+});
+
+test("a superseded failure reads as history but keeps its recovery action", () => {
+  const generic = { ...apiError, tool: "error" };
+  const retry = { ...recovery, state: { ...recovery.state, input: { ...recovery.state.input, recoveryAction: "retry" } } };
+  const html = renderMessage([bash, generic, retry], { statusSuperseded: true });
+  assert.match(html, /chat_turn_incomplete/);
+  assert.match(html, /data-superseded="true"/);
+  assert.doesNotMatch(html, /text-accent-red/);
+  assert.match(html, /app_retry/);
 });

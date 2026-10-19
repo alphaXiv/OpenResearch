@@ -2302,6 +2302,23 @@ export const openSideChat = (sessionId: string) =>
     (r) => r.session,
   );
 
+/** Continue `sessionId` in a new chat on another harness. The original stays
+ * as it is; the new chat starts from a transcript snapshot and a worktree
+ * copied from the original's current checkout. */
+export const handoffChatSession = (
+  sessionId: string,
+  selection: {
+    harness: HarnessId;
+    model: string | null;
+    serviceTier?: string | null;
+    permissionMode?: string | null;
+    reasoningLevel?: string | null;
+  },
+) =>
+  post<{ session: ChatSession }>(`/api/chat/sessions/${sessionId}/handoff`, selection).then(
+    (r) => r.session,
+  );
+
 /** `null` clears the goal. */
 export const setChatSessionGoal = (sessionId: string, goal: string | null) =>
   patch<{ session: ChatSession }>(`/api/chat/sessions/${sessionId}`, { goal }).then(

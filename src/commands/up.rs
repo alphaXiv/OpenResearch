@@ -802,6 +802,7 @@ fn router(state: AppState, remote_auth: Option<RemoteAuth>) -> Router {
             post(recover_chat_turn),
         )
         .route("/api/chat/sessions/{id}/side", post(open_side_chat))
+        .route("/api/chat/sessions/{id}/handoff", post(handoff_chat_session))
         .route("/api/chat/sessions/{id}/fork", post(fork_chat_turn))
         .route("/api/chat/sessions/{id}/branch", post(select_chat_branch))
         .route("/api/chat/sessions/{id}/interrupt", post(interrupt_chat))
@@ -7660,6 +7661,20 @@ async fn create_chat_session(
         .await;
         req = new_chat_settings(req.project_id, preferences, &catalog).map_err(bad_request)?;
     }
+    let session = build_chat_session(&state, req).await?;
+    store.create_chat_session(&session)?;
+    state.chat.emit_session(Some(session.clone())).await;
+    Ok(Json(
+        json!({ "session": local::chat::session_json(&session, false) }),
+    ))
+}
+
+/// Validate a new chat's settings against its harness and resolve its model.
+/// Shared by fresh chats and harness handoffs; the caller inserts the row.
+async fn build_chat_session(
+    state: &AppState,
+    req: CreateChatSessionReq,
+) -> std::result::Result<StoredChatSession, ApiError> {
     let harness = req
         .harness
         .ok_or_else(|| bad_request("no agent selected"))?;
@@ -7691,7 +7706,7 @@ async fn create_chat_session(
     let mut reasoning_level = nonempty(req.reasoning_level);
     let model = match nonempty(req.model) {
         Some(model) => Some(model),
-        None => match recommended_model(&state, &harness).await {
+        None => match recommended_model(state, &harness).await {
             Some((model, levels)) => {
                 // An effort chosen for the CLI's default model may not exist on this one.
                 if let Some(levels) = levels {
@@ -7702,7 +7717,7 @@ async fn create_chat_session(
             None => None,
         },
     };
-    let session = StoredChatSession {
+    Ok(StoredChatSession {
         id: format!("chat_{}", uuid::Uuid::new_v4()),
         project_id: req.project_id,
         harness,
@@ -7724,12 +7739,7 @@ async fn create_chat_session(
         side_parent_session_id: None,
         created_at: now_ms(),
         updated_at: now_ms(),
-    };
-    store.create_chat_session(&session)?;
-    state.chat.emit_session(Some(session.clone())).await;
-    Ok(Json(
-        json!({ "session": local::chat::session_json(&session, false) }),
-    ))
+    })
 }
 
 /// The cached catalog's strongest model for `harness`, if detection has one,
@@ -7845,6 +7855,58 @@ async fn open_side_chat(State(state): State<AppState>, Path(id): Path<String>) -
         .admit(&parent.project_id)
         .ok_or_else(|| bad_request("project deletion is in progress"))?;
     let session = state.chat.open_side_chat(&parent).await?;
+    Ok(Json(
+        json!({ "session": local::chat::session_json(&session, false) }),
+    ))
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct HandoffChatReq {
+    harness: String,
+    model: Option<String>,
+    service_tier: Option<String>,
+    permission_mode: Option<String>,
+    reasoning_level: Option<String>,
+}
+
+/// Continue `id` in a new chat on another harness. The original is left
+/// untouched; the new chat gets a transcript snapshot as its first-turn
+/// context and a worktree seeded from the original's current checkout.
+async fn handoff_chat_session(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+    Json(req): Json<HandoffChatReq>,
+) -> ApiResult {
+    reject_if_moving(&state)?;
+    let parent = Store::open()?
+        .get_chat_session(&id)?
+        .ok_or_else(|| not_found("chat session"))?;
+    if parent.side_parent_session_id.is_some() {
+        return Err(bad_request("a side chat cannot be continued on another harness"));
+    }
+    if req.harness == parent.harness {
+        return Err(bad_request("the chat already runs on this harness"));
+    }
+    let _admission = state
+        .project_lifecycle
+        .admit(&parent.project_id)
+        .ok_or_else(|| bad_request("project deletion is in progress"))?;
+    let session = build_chat_session(
+        &state,
+        CreateChatSessionReq {
+            project_id: parent.project_id.clone(),
+            harness: Some(req.harness),
+            model: req.model,
+            service_tier: req.service_tier,
+            permission_mode: req.permission_mode,
+            plan_mode: false,
+            reasoning_level: req.reasoning_level,
+            autonomy: parent.autonomy.as_deref().and_then(Autonomy::from_id),
+        },
+    )
+    .await?;
+    let session = state.chat.open_handoff_chat(&parent, session).await?;
     Ok(Json(
         json!({ "session": local::chat::session_json(&session, false) }),
     ))

@@ -1505,6 +1505,89 @@ pub fn remove_session_worktree(project: &crate::local::model::LocalProject, sess
     }
 }
 
+/// Untracked files above this size stay behind when a worktree is seeded from
+/// another: copying datasets or checkpoints would stall the handoff and double
+/// their disk use. The caller tells the agent which ones were left.
+const SEED_COPY_LIMIT_BYTES: u64 = 256 * 1024 * 1024;
+
+/// Give `child_id` a worktree that picks up where `parent_id`'s left off: the
+/// same commit (detached, since git lets one worktree hold a branch), with
+/// the parent's uncommitted tracked edits and untracked non-ignored files
+/// carried over. The parent checkout is only read. A parent that never got a
+/// worktree seeds nothing; the child then starts from the baseline as usual.
+/// Returns the untracked files left behind for size.
+pub fn seed_session_worktree(
+    project: &crate::local::model::LocalProject,
+    parent_id: &str,
+    child_id: &str,
+) -> Result<Vec<String>> {
+    let repo = Path::new(&project.repo_path);
+    if !is_repository(repo) {
+        return Ok(Vec::new());
+    }
+    let parent_dir = existing_session_worktree_path(project, parent_id);
+    if !parent_dir.join(".git").exists() {
+        return Ok(Vec::new());
+    }
+    let child_dir = session_worktree_path(&project.id, child_id);
+    let seeded = seed_worktree_from(repo, &parent_dir, child_dir.clone());
+    if seeded.is_err() {
+        let _ = std::fs::remove_dir_all(&child_dir);
+        let _ = git(
+            Some(repo),
+            &["worktree", "remove", "--force", &child_dir.to_string_lossy()],
+        );
+    }
+    seeded
+}
+
+fn seed_worktree_from(repo: &Path, parent_dir: &Path, child_dir: PathBuf) -> Result<Vec<String>> {
+    let head = git(Some(parent_dir), &["rev-parse", "--verify", "HEAD"])?;
+    let dir = ensure_worktree_from(repo, child_dir, &head, false)?;
+    // `stash create` records index + tracked edits as a dangling commit without
+    // touching the parent; worktrees share the object store, so the child can
+    // apply it directly. Empty output means nothing tracked was modified.
+    let stash = git(Some(parent_dir), &["stash", "create"])?;
+    if !stash.is_empty() && git(Some(&dir), &["stash", "apply", "--index", &stash]).is_err() {
+        git(Some(&dir), &["stash", "apply", &stash])?;
+    }
+    let listed = git_bytes(
+        parent_dir,
+        &["ls-files", "--others", "--exclude-standard", "-z"],
+        &[],
+    )?;
+    let mut skipped = Vec::new();
+    for raw in listed.split(|byte| *byte == 0).filter(|raw| !raw.is_empty()) {
+        let relative = path_from_git_bytes(raw)?;
+        let (source, target) = (parent_dir.join(&relative), dir.join(&relative));
+        let Ok(meta) = std::fs::symlink_metadata(&source) else {
+            continue;
+        };
+        if let Some(parent) = target.parent() {
+            std::fs::create_dir_all(parent)
+                .map_err(|e| anyhow!("Could not create {}: {}", parent.display(), e))?;
+        }
+        if meta.file_type().is_symlink() {
+            #[cfg(unix)]
+            {
+                let link = std::fs::read_link(&source)
+                    .map_err(|e| anyhow!("Could not read {}: {}", source.display(), e))?;
+                std::os::unix::fs::symlink(link, &target)
+                    .map_err(|e| anyhow!("Could not link {}: {}", target.display(), e))?;
+            }
+            #[cfg(not(unix))]
+            skipped.push(relative.to_string_lossy().into_owned());
+        } else if meta.is_dir() || meta.len() > SEED_COPY_LIMIT_BYTES {
+            // Directories here are nested repositories, which git lists whole.
+            skipped.push(relative.to_string_lossy().into_owned());
+        } else {
+            std::fs::copy(&source, &target)
+                .map_err(|e| anyhow!("Could not copy {}: {}", source.display(), e))?;
+        }
+    }
+    Ok(skipped)
+}
+
 /// Seed a fresh (empty) GitHub repo from the tip of another repo — the
 /// fork-by-copy the platform does on import. Shallow-clones the source
 /// (`src_branch`, or its default branch), re-roots the snapshot as a single

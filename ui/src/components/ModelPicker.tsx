@@ -129,6 +129,7 @@ export function ModelPicker({
   sessionHarness,
   nativeOptions = [],
   onSelectNativeOption,
+  onHandoff,
 }: {
   value: ModelSelection | null;
   onSelect: (value: ModelSelection) => void;
@@ -154,6 +155,9 @@ export function ModelPicker({
   sessionHarness?: Harness;
   nativeOptions?: NativeOption[];
   onSelectNativeOption?: (optionId: string, value: string) => void;
+  /** With `lockHarness`, lists the other harnesses too: picking one of their
+   * models continues the open session in a new chat on that harness. */
+  onHandoff?: (value: ModelSelection) => void;
 }) {
   const { data: catalog = EMPTY_HARNESSES } = useQuery(getHarnessesQuery());
   const harnesses = useMemo(() => sessionHarness ? [sessionHarness, ...catalog.filter((harness) => harness.id !== sessionHarness.id)] : catalog, [catalog, sessionHarness]);
@@ -194,17 +198,23 @@ export function ModelPicker({
 
   const groups = useMemo(() => {
     const q = filter.trim().toLowerCase();
-    // Locked to the open session's harness: only offer that one.
-    const shown =
-      lockHarness && value ? harnesses.filter((h) => h.id === value.harness) : harnesses;
+    const locked = lockHarness && value ? value.harness : null;
+    // Locked to the open session's harness: offer that one, then — when a
+    // handoff is possible — the others as "continue in a new chat" targets.
+    const shown = locked
+      ? [
+        ...harnesses.filter((h) => h.id === locked),
+        ...(onHandoff ? harnesses.filter((h) => h.id !== locked) : []),
+      ]
+      : harnesses;
     return shown.map((h) => {
       let models = h.models;
       if (q) models = models.filter((m) => `${m.id} ${harnessModelLabel(m)}`.toLowerCase().includes(q));
       // Large catalogs stay behind the filter box.
       else if (h.id === "opencode" || h.id === "cursor" || h.id === "antigravity" || h.id.startsWith("acp:")) models = models.slice(0, 5);
-      return { harness: h, models, hidden: q ? 0 : h.models.length - models.length };
+      return { harness: h, models, hidden: q ? 0 : h.models.length - models.length, handoff: locked !== null && h.id !== locked };
     });
-  }, [harnesses, filter, lockHarness, value]);
+  }, [harnesses, filter, lockHarness, value, onHandoff]);
 
   /** Switch harness → reseed mode defaults for that harness.
    *
@@ -214,7 +224,7 @@ export function ModelPicker({
    * model rejects, so it falls back to that model's default. */
   const pick = (harness: Harness, model: string | null) => {
     const sameHarness = value?.harness === harness.id;
-    onSelect({
+    const next: ModelSelection = {
       harness: harness.id,
       model,
       serviceTier: reconcileServiceTier(
@@ -232,7 +242,9 @@ export function ModelPicker({
           ? value!.reasoningLevel
           : null,
       ),
-    });
+    };
+    if (lockHarness && onHandoff && !sameHarness) onHandoff(next);
+    else onSelect(next);
     close();
   };
 
@@ -447,8 +459,17 @@ export function ModelPicker({
                 onChange={(e) => setFilter(e.target.value)}
               />
               <div className="model-menu-list overflow-y-auto p-1.5">
-                {groups.map(({ harness, models, hidden }) => (
+                {groups.map(({ harness, models, hidden, handoff }, index) => (
                   <div key={harness.id} className="[&_.model-item]:ps-6">
+                    {handoff && !groups[index - 1]?.handoff && (
+                      <div className="model-handoff-header mt-1.5 mb-1 px-2 pt-2 border-t border-t-border-variant">
+                        <div className="inline-flex items-center gap-1.5 text-sm font-medium text-text">
+                          <ArrowRightLeft size={13} aria-hidden="true" />
+                          {m.model_picker_continue_in_new_chat()}
+                        </div>
+                        <p className="m-0 mt-0.5 text-xs leading-normal text-muted">{m.model_picker_continue_in_new_chat_hint()}</p>
+                      </div>
+                    )}
                     <div className={MODEL_GROUP_CLASS_NAME}>
                       <span className="inline-flex items-center gap-1.5">
                         <HarnessLogo harness={harness.id} logo={harness.logo} size={14} />
