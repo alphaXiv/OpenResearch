@@ -42,21 +42,27 @@ import { githubAccountQuery, githubOrganizationsQuery, listProjectsQuery, listRu
 import {
   ArrowLeft,
   ArrowRight,
+  Bot,
   ChevronDown,
   Cpu,
   ExternalLink,
+  HardDrive,
   Info,
+  MessagesSquare,
   Monitor,
   Moon,
+  Plug,
   Plus,
   RefreshCw,
   Settings,
+  SlidersHorizontal,
   SquareTerminal,
   Sun,
   Trash2,
   X,
 } from "lucide-react";
-import { useEffect, useLayoutEffect, useRef, useState } from "react";
+import { useEffect, useRef, useState } from "react";
+import { useNavOrder } from "../navOrder";
 import {
   deleteEnvVar,
   listAcpHarnesses,
@@ -556,7 +562,6 @@ function HarnessesTab({ remote }: { remote: boolean }) {
       {harnesses && <HarnessFailoverCard harnesses={harnesses} />}
       <DecisionModelCard />
       <CrossHarnessCard harnesses={harnesses} />
-      <AutoCompactCard />
     </>
   );
 }
@@ -3971,7 +3976,19 @@ type SettingsNavItem = {
   activeTabs: Tab[];
 };
 
-const SETTINGS_SECTIONS: Tab[] = ["projects", "harnesses", "storage"];
+const SETTINGS_SECTIONS: Tab[] = ["projects", "harnesses", "context", "storage"];
+
+type SettingsPane = "settings" | "harnesses" | "context" | "projects" | "storage";
+
+/** The Settings page's own sidebar, in its default order. */
+const SETTINGS_PANES: { id: SettingsPane; label: () => string; icon: React.ReactNode }[] = [
+  { id: "settings", label: m.settings_nav_general, icon: <SlidersHorizontal size={15} /> },
+  { id: "harnesses", label: m.settings_nav_agents, icon: <Bot size={15} /> },
+  { id: "context", label: m.settings_nav_chat, icon: <MessagesSquare size={15} /> },
+  { id: "projects", label: m.settings_nav_integrations, icon: <Plug size={15} /> },
+  { id: "storage", label: m.settings_nav_storage, icon: <HardDrive size={15} /> },
+];
+const SETTINGS_PANE_IDS = SETTINGS_PANES.map((pane) => pane.id);
 
 /** Primary rail entries. Configuration sections share the Settings entry. */
 export const SETTINGS_NAV: SettingsNavItem[] = [
@@ -4009,59 +4026,89 @@ export function SettingsView({
   remote?: boolean;
 }) {
   const showsSettings = tab === "settings" || isSettingsSection(tab);
-  const sectionRef = useRef<HTMLElement>(null);
-  useLayoutEffect(() => {
-    const section = sectionRef.current;
-    const stack = section?.parentElement;
-    if (!section || !stack) return;
-    const reveal = () => section.scrollIntoView({ block: "start" });
-    // Earlier sections load asynchronously; keep the target visible until the user interacts.
-    const observer = new ResizeObserver(reveal);
-    observer.observe(stack);
-    reveal();
-    const stop = () => observer.disconnect();
-    const events = ["wheel", "touchstart", "pointerdown", "keydown"];
-    for (const event of events) window.addEventListener(event, stop, { passive: true });
-    return () => {
-      stop();
-      for (const event of events) window.removeEventListener(event, stop);
-    };
-  }, [tab, project?.id]);
+  const pane: SettingsPane = isSettingsSection(tab) ? tab as SettingsPane : "settings";
+  const panes = SETTINGS_PANES.filter((item) => !(remote && item.id === "storage"));
+  const nav = useNavOrder("settings-nav-order", SETTINGS_PANE_IDS);
 
   return (
     <div className="settings-view max-w-readable my-0 mx-auto pt-6 px-8 pb-15 [&_h1]:mt-0 [&_h1]:mx-0 [&_h1]:mb-1.5 [&_h1]:text-3xl [&_>_.error]:text-accent-red [&_>_.error]:text-base [&_>_.error]:whitespace-pre-wrap [&_>_.error]:mt-0 [&_>_.error]:mx-0 [&_>_.error]:mb-3">
       {showsSettings && (
         <>
           <h1>{m.settings_page_settings()}</h1>
-          <div className="settings-stack mt-4.5">
-            <section className={SETTINGS_STACK_SECTION_CLASS_NAME}>
-              <AppearanceTab />
-            </section>
-            <section ref={tab === "projects" ? sectionRef : undefined} className={SETTINGS_STACK_SECTION_CLASS_NAME}>
-              <GithubSettings
-                remote={remote}
-                onProjectUpdate={onProjectUpdate}
-              />
-            </section>
-            <section ref={tab === "harnesses" ? sectionRef : undefined} className={SETTINGS_STACK_SECTION_CLASS_NAME}>
-              <HarnessesTab remote={remote} />
-            </section>
-            <section className={SETTINGS_STACK_SECTION_CLASS_NAME}>
-              <OverleafCard />
-            </section>
-            {!remote && (
-              <section ref={tab === "storage" ? sectionRef : undefined} className={SETTINGS_STACK_SECTION_CLASS_NAME}>
-                <StorageTab />
-              </section>
-            )}
-            <section className={SETTINGS_STACK_SECTION_CLASS_NAME}>
-              <TelemetryTab />
-            </section>
-            {!remote && (
-              <section className={SETTINGS_STACK_SECTION_CLASS_NAME}>
-                <UpdatesTab />
-              </section>
-            )}
+          <div className="mt-4.5 flex flex-col gap-6 md:flex-row md:items-start">
+            <nav
+              aria-label={m.settings_page_settings()}
+              className="settings-nav flex shrink-0 gap-1 overflow-x-auto md:sticky md:top-0 md:w-48 md:flex-col md:overflow-visible"
+            >
+              {nav.order.map((id) => panes.find((item) => item.id === id)).filter((item) => item !== undefined).map((item) => (
+                <button
+                  key={item.id}
+                  type="button"
+                  {...nav.itemProps(item.id)}
+                  title={m.settings_nav_drag_hint()}
+                  className={`settings-nav-item flex shrink-0 cursor-grab items-center gap-2.5 py-2 px-3 text-sm text-subtext rounded-md text-start [&:hover:not(.active)]:bg-surface [&:hover]:text-text [&.active]:bg-surface [&.active]:text-text [&.active]:font-medium [&[data-dragging]]:opacity-50 ${pane === item.id ? "active" : ""}`}
+                  aria-current={pane === item.id ? "page" : undefined}
+                  onClick={() => onSelectTab(item.id)}
+                >
+                  {item.icon}
+                  {item.label()}
+                </button>
+              ))}
+              {nav.customized && (
+                <button
+                  type="button"
+                  className="shrink-0 py-1.5 px-3 text-sm text-muted text-start hover:text-text"
+                  onClick={nav.reset}
+                >
+                  {m.settings_nav_reset_order()}
+                </button>
+              )}
+            </nav>
+            <div className="settings-stack min-w-0 flex-1">
+              {pane === "settings" && (
+                <>
+                  <section className={SETTINGS_STACK_SECTION_CLASS_NAME}>
+                    <AppearanceTab />
+                  </section>
+                  <section className={SETTINGS_STACK_SECTION_CLASS_NAME}>
+                    <TelemetryTab />
+                  </section>
+                  {!remote && (
+                    <section className={SETTINGS_STACK_SECTION_CLASS_NAME}>
+                      <UpdatesTab />
+                    </section>
+                  )}
+                </>
+              )}
+              {pane === "harnesses" && (
+                <section className={SETTINGS_STACK_SECTION_CLASS_NAME}>
+                  <HarnessesTab remote={remote} />
+                </section>
+              )}
+              {pane === "context" && (
+                <section className={SETTINGS_STACK_SECTION_CLASS_NAME}>
+                  <AutoCompactCard />
+                </section>
+              )}
+              {pane === "projects" && (
+                <>
+                  <section className={SETTINGS_STACK_SECTION_CLASS_NAME}>
+                    <GithubSettings
+                      remote={remote}
+                      onProjectUpdate={onProjectUpdate}
+                    />
+                  </section>
+                  <section className={SETTINGS_STACK_SECTION_CLASS_NAME}>
+                    <OverleafCard />
+                  </section>
+                </>
+              )}
+              {pane === "storage" && !remote && (
+                <section className={SETTINGS_STACK_SECTION_CLASS_NAME}>
+                  <StorageTab />
+                </section>
+              )}
+            </div>
           </div>
         </>
       )}

@@ -186,6 +186,7 @@ import { ChatImageScope, Md } from "./Md";
 import { PlanStrip } from "./PlanStrip";
 import { SleepModeDialog, chatSleepQuery, sleepLabel } from "./SleepModeDialog";
 import { SETTINGS_NAV, harnessSetupPath, type SettingsTab } from "./SettingsPage";
+import { useNavOrder } from "../navOrder";
 import { SkillMenu } from "./SkillMenu";
 import { FileMentionMenu } from "./FileMentionMenu";
 import { ComposerSkillChips, MessageWithChips, skillMarginSpaces } from "./SkillChips";
@@ -6361,6 +6362,9 @@ export function ChatPanel({
     }
   }, [sidebarGrouping, railOpen, embedded, lastVisibleIndex, sidebarRows.length, flatSessions.hasNextPage, flatSessions.isFetching, flatSessions.isError, flatSessions.fetchNextPage]);
 
+  // Rail entries below New Chat, in their default order; the user can drag them.
+  const railNav = useNavOrder("rail-nav-order", ["skills", ...SETTINGS_NAV.map((item) => item.id)]);
+
   const rail = (
     <aside className="session-rail w-68 shrink-0 flex flex-col mt-5 mac-titlebar:mt-8 me-3.5 mb-5 ms-0 bg-background min-h-0 [&_.rail-body]:flex-1 [&_.rail-body]:min-h-0 [&_.rail-body]:pt-0 [&_.rail-body]:pb-0 [&_.rail-body]:ps-2 [&_.rail-body]:pe-1 border border-border rounded-lg overflow-visible shadow-elevated">
       {railHeader}
@@ -6375,26 +6379,25 @@ export function ChatPanel({
           <Plus size={15} />
           {m.chat_panel_new_chat()}
         </button>
-        <button
-          className={`rail-nav-item flex items-center gap-2.5 py-2 px-3 text-sm text-subtext rounded-md text-start [&:hover:not(.active)]:bg-surface [&:hover]:text-text [&.active]:bg-surface [&.active]:text-text [&.active]:font-medium ${mainView === "skills" ? "active" : ""}`}
-          aria-current={mainView === "skills" ? "page" : undefined}
-          onClick={() => onSelectMainView("skills")}
-        >
-          <Blocks size={15} />
-          {m.chat_panel_customize()}
-        </button>
-        {SETTINGS_NAV.map((item) => (
-          <button
-            key={item.id}
-            className={`rail-nav-item flex items-center gap-2.5 py-2 px-3 text-sm text-subtext rounded-md text-start [&:hover:not(.active)]:bg-surface [&:hover]:text-text [&.active]:bg-surface [&.active]:text-text [&.active]:font-medium ${mainView !== "chat" && mainView !== "skills" && item.activeTabs.includes(mainView) ? "active" : ""}`}
-            aria-current={mainView !== "chat" && mainView !== "skills" && item.activeTabs.includes(mainView) ? "page" : undefined}
-            data-onboarding={item.id === "compute" ? "nav-compute" : undefined}
-            onClick={() => onSelectMainView(item.id)}
-          >
-            {item.icon}
-            {item.label()}
-          </button>
-        ))}
+        {railNav.order.map((id) => {
+          const item = SETTINGS_NAV.find((entry) => entry.id === id);
+          const active = item
+            ? mainView !== "chat" && mainView !== "skills" && item.activeTabs.includes(mainView)
+            : mainView === "skills";
+          return (
+            <button
+              key={id}
+              {...railNav.itemProps(id)}
+              className={`rail-nav-item flex items-center gap-2.5 py-2 px-3 text-sm text-subtext rounded-md text-start [&:hover:not(.active)]:bg-surface [&:hover]:text-text [&.active]:bg-surface [&.active]:text-text [&.active]:font-medium [&[data-dragging]]:opacity-50 ${active ? "active" : ""}`}
+              aria-current={active ? "page" : undefined}
+              data-onboarding={id === "compute" ? "nav-compute" : undefined}
+              onClick={() => onSelectMainView(id)}
+            >
+              {item ? item.icon : <Blocks size={15} />}
+              {item ? item.label() : m.chat_panel_customize()}
+            </button>
+          );
+        })}
       </nav>
       <div className="rail-section-head flex items-center justify-between shrink-0 pt-3.5 pe-2.5 pb-0 ps-4.5">
         <div className="rail-section-label p-0 text-sm font-medium text-subtext">
