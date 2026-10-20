@@ -1991,7 +1991,7 @@ export interface ChatSession {
   /** Hidden from the default Recents list, but fully intact and resumable. */
   archived: boolean;
   /** Chat this side chat branched from. Side chats share its worktree and
-   * stay out of history; closing the tab deletes one. */
+   * stay out of top-level history; deleting the parent deletes its side chats. */
   sideParentSessionId?: string | null;
   createdAt: number;
   updatedAt: number;
@@ -2084,7 +2084,7 @@ export const setChatSessionPlanMode = (sessionId: string, planMode: boolean) =>
     (r) => r.session,
   );
 
-/** Branch a temporary side chat off a snapshot of `sessionId`'s transcript. */
+/** Branch a persistent side chat off a snapshot of `sessionId`'s transcript. */
 export const openSideChat = (sessionId: string) =>
   post<{ session: ChatSession }>(`/api/chat/sessions/${sessionId}/side`, {}).then(
     (r) => r.session,

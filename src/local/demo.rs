@@ -567,6 +567,7 @@ fn seed_at(
         autonomy: None,
         active_leaf_id: Some(ASSISTANT_MESSAGE_ID.into()),
         side_parent_session_id: None,
+        side_parent_leaf_id: None,
         created_at: ago(seeded_at, 240, 0),
         // Sessions list by updated_at DESC, the order validate_snapshot asserts.
         updated_at: ago(seeded_at, 9, 30),
@@ -613,6 +614,7 @@ fn seed_at(
         autonomy: None,
         active_leaf_id: Some(FIGURE_ASSISTANT_MESSAGE_ID.into()),
         side_parent_session_id: None,
+        side_parent_leaf_id: None,
         created_at: ago(seeded_at, 70, 0),
         updated_at: ago(seeded_at, 69, 40),
     };
@@ -661,6 +663,7 @@ fn seed_at(
         autonomy: None,
         active_leaf_id: Some(LITERATURE_ASSISTANT_MESSAGE_ID.into()),
         side_parent_session_id: None,
+        side_parent_leaf_id: None,
         created_at: ago(seeded_at, 95, 0),
         updated_at: ago(seeded_at, 94, 40),
     };

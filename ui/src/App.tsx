@@ -1,5 +1,8 @@
 import {
   setScopedQueryData,
+  deletedSessionIds,
+  isCurrentScope,
+  workspaceScope,
   queryClient,
 } from "./queries/client";
 import { useMutation, useQuery } from "@tanstack/react-query";
@@ -17,7 +20,7 @@ import {
 
 import { listChatSessionsQuery, getChatMessagesQuery } from "./queries/chat";
 import { listProjectsQuery, getUiStateQuery, listRunsQuery, listExperimentsQuery } from "./queries/projects";
-import { deleteChatSession, openSideChat, sendChatMessage, setExperimentArchived } from "./api";
+import { openSideChat, sendChatMessage, setExperimentArchived } from "./api";
 import { getArtifactsQuery } from "./queries/files";
 import { readHarnesses } from "./queries/settings";
 import { useBlocker, useRouter, useRouterState } from "@tanstack/react-router";
@@ -1279,7 +1282,7 @@ export default function App({ runtime, projectId, pane }: { runtime: RuntimeInfo
     [forgetRightTab, rightTab, subagentTabs],
   );
 
-  const openSideTab = useCallback((sessionId: string) => {
+  const openSideTab = useCallback((sessionId: string | null) => {
     const tab: SideChatViewDef = { kind: "side", sessionId };
     setSideTabs((prev) => prev.some((t) => t.sessionId === sessionId) ? prev : [...prev, tab]);
     setPanelWidth((width) => Math.max(width, sideChatPanelWidth()));
@@ -1295,14 +1298,19 @@ export default function App({ runtime, projectId, pane }: { runtime: RuntimeInfo
     [forgetRightTab, rightTab, sideTabs],
   );
 
-  // Side chats are deleted when orx restarts; drop saved tabs whose chat is gone.
+  // Drop saved tabs only when their persisted session has been deleted.
   useEffect(() => {
     const live = sessionsQuery.data;
     if (!live) return;
-    for (const tab of sideTabs) if (!live.some((session) => session.id === tab.sessionId)) forgetSideTab(tab);
+    for (const tab of sideTabs) if (tab.sessionId !== null && !live.some((session) => session.id === tab.sessionId)) forgetSideTab(tab);
   }, [sessionsQuery.data, sideTabs, forgetSideTab]);
 
   const startSideChat = useCallback(async (parentSessionId: string, question: string) => {
+    if (!question.trim()) {
+      openSideTab(null);
+      return;
+    }
+    const scope = workspaceScope();
     let session;
     try {
       session = await openSideChat(parentSessionId);
@@ -1310,16 +1318,10 @@ export default function App({ runtime, projectId, pane }: { runtime: RuntimeInfo
       showAlert(m.side_chat_open_failed({ error: errorText(error) }), "error");
       return;
     }
-    // The user moved to another task while it opened; its tab belongs nowhere now.
-    if (navigationRef.current.activeSessionId !== parentSessionId) {
-      void deleteChatSession(session.id).catch((error) => {
-        showAlert(m.side_chat_close_failed({ error: errorText(error) }), "error");
-      });
-      return;
-    }
+    if (!isCurrentScope(scope) || deletedSessionIds.has(session.id) || deletedSessionIds.has(parentSessionId)) return;
     setScopedQueryData(listChatSessionsQuery(session.projectId).queryKey, (current) =>
       current && [session, ...current.filter((row) => row.id !== session.id)]);
-    openSideTab(session.id);
+    if (navigationRef.current.activeSessionId === parentSessionId) openSideTab(session.id);
     if (!question) return;
     try {
       // Seed the transcript first so the live stream has a cache to land the question in.
@@ -1330,16 +1332,7 @@ export default function App({ runtime, projectId, pane }: { runtime: RuntimeInfo
     }
   }, [openSideTab]);
 
-  // Side chats are temporary: closing the tab is what deletes one.
-  const closeSideTab = useCallback(
-    (tab: SideChatViewDef) => {
-      forgetSideTab(tab);
-      void deleteChatSession(tab.sessionId).catch((error) => {
-        showAlert(m.side_chat_close_failed({ error: errorText(error) }), "error");
-      });
-    },
-    [forgetSideTab],
-  );
+  const closeSideTab = forgetSideTab;
 
   // Live title + running state for open sub-agent tabs, straight off the spawn
   // parts' message stream — so a tab is named for its task and shimmers while
@@ -1586,6 +1579,16 @@ export default function App({ runtime, projectId, pane }: { runtime: RuntimeInfo
       ? rightTab
       : null;
   const sideSession = sideTab ? sessionsQuery.data?.find((session) => session.id === sideTab.sessionId) : undefined;
+  const sideParentSession = sessionsQuery.data?.find((session) => session.id === activeSessionId);
+  const sideDraftAgent = useMemo(() => sideParentSession ? {
+    harness: sideParentSession.harness,
+    model: sideParentSession.model,
+    serviceTier: sideParentSession.serviceTier,
+    permissionMode: sideParentSession.permissionMode === "plan" ? null : sideParentSession.permissionMode,
+    reasoningLevel: sideParentSession.reasoningLevel,
+  } : null, [sideParentSession?.harness, sideParentSession?.model,
+    sideParentSession?.serviceTier, sideParentSession?.permissionMode,
+    sideParentSession?.reasoningLevel]);
   const requestedCodeTab =
     typeof rightTab === "object" && "code" in rightTab ? rightTab : null;
   const codeTab = requestedCodeTab
@@ -1663,7 +1666,7 @@ export default function App({ runtime, projectId, pane }: { runtime: RuntimeInfo
         <ClosableTab
           key={rightTabKey(tab)}
           active={sideTab !== null && sideTab.sessionId === tab.sessionId}
-          label={session?.title?.trim() || m.side_chat_open()}
+          label={tab.sessionId === null ? m.side_chat_new() : session?.title?.trim() || m.side_chat_open()}
           shimmer={session?.busy ?? false}
           icon={<MessagesSquare size={12} className="shrink-0" />}
           preview={isPreviewTab(tab)}
@@ -1779,9 +1782,6 @@ export default function App({ runtime, projectId, pane }: { runtime: RuntimeInfo
             onRunSetup={runtime.kind === "ssh" ? undefined : runSetup}
             composerFocusNonce={composerFocusNonce}
             runtime={runtime}
-            onOpenDemoWelcome={
-              activeProject && isDemoProjectId(activeProject.id) ? openDemoWelcome : undefined
-            }
             activeSessionId={activeSessionId}
             onActiveSessionChange={onActiveSessionChange}
             preferredAgent={uiState.preferredAgent}
@@ -1822,6 +1822,8 @@ export default function App({ runtime, projectId, pane }: { runtime: RuntimeInfo
             onArtifacts={openArtifactsTab}
             onExperiments={() => openExperimentsTab()}
             onSideChat={activeSessionId ? () => void startSideChat(activeSessionId, "") : undefined}
+            sessions={sessionsQuery.data ?? []}
+            onSelectSideChat={openSideTab}
           />
         )}
         {mainView === "chat" && panelOpen && (
@@ -2218,10 +2220,9 @@ export default function App({ runtime, projectId, pane }: { runtime: RuntimeInfo
               </TabBody>
             ) : sideTab && projectId ? (
               <TabBody>
-                {sideSession ? (
+                {sideSession || sideTab.sessionId === null ? (
                   <div className="flex min-h-0 flex-1">
                     <ChatPanel
-                      key={sideTab.sessionId}
                       embedded
                       projectId={projectId}
                       projectName={activeProject?.name ?? ""}
@@ -2246,17 +2247,32 @@ export default function App({ runtime, projectId, pane }: { runtime: RuntimeInfo
                       }
                       runtime={runtime}
                       activeSessionId={sideTab.sessionId}
+                      sideParentSessionId={sideTab.sessionId === null ? activeSessionId ?? undefined : undefined}
                       onOpenSideChat={(parentSessionId, question) => void startSideChat(parentSessionId, question)}
                       onActiveSessionChange={(sessionId, options) => {
+                        if (sideTab.sessionId === null && sessionId !== null) {
+                          const session = queryClient.getQueryData(listChatSessionsQuery(projectId).queryKey)
+                            ?.find((row) => row.id === sessionId);
+                          if (session?.sideParentSessionId !== activeSessionId) {
+                            onActiveSessionChange(sessionId, options);
+                            return;
+                          }
+                          const navigation = navigationRef.current;
+                          if (navigation.activeSessionId !== activeSessionId || navigation.pane?.kind !== "side" || navigation.pane.sessionId !== null) return;
+                          setSideTabs((current) => current.filter((tab) => tab.sessionId !== null));
+                          forgetRightTab(sideTab, false);
+                          openSideTab(sessionId);
+                          return;
+                        }
                         // Null after a delete drops the tab; anything else (`/resume`) is the main chat's.
                         const deleted = !queryClient.getQueryData(listChatSessionsQuery(projectId).queryKey)
                           ?.some((session) => session.id === sideTab.sessionId);
                         if (sessionId === null && deleted) forgetSideTab(sideTab);
                         else onActiveSessionChange(sessionId, options);
                       }}
-                      preferredAgent={uiState.preferredAgent}
+                      preferredAgent={sideTab.sessionId === null ? sideDraftAgent : uiState.preferredAgent}
                       onPreferredAgentChange={persistPreferredAgent}
-                      preferredAutonomy={uiState.preferredAutonomy ?? DEFAULT_AUTONOMY}
+                      preferredAutonomy={sideTab.sessionId === null ? sideParentSession?.autonomy ?? DEFAULT_AUTONOMY : uiState.preferredAutonomy ?? DEFAULT_AUTONOMY}
                       onPreferredAutonomyChange={persistPreferredAutonomy}
                     />
                   </div>

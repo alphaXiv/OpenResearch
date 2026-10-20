@@ -106,7 +106,7 @@ function savedTask(panes = [file, code]) {
 }
 
 test("all tab variants retain ordering, preview, history, expansion and view metadata", () => {
-  const panes = [file, code, { kind: "experiment", experimentId: "exp", view: "terminal", runId: "old" }, { kind: "plan", sessionId: "one", promptId: "plan" }, { kind: "subagent", sessionId: "one", spawnPartId: "spawn" }, { kind: "side", sessionId: "two" }];
+  const panes = [file, code, { kind: "experiment", experimentId: "exp", view: "terminal", runId: "old" }, { kind: "plan", sessionId: "one", promptId: "plan" }, { kind: "subagent", sessionId: "one", spawnPartId: "spawn" }, { kind: "side", sessionId: "two" }, { kind: "side", sessionId: null }];
   const saved = savedTask(panes);
   saved.previewKey = tabs.rightTabKey(tabs.paneTab(file));
   saved.expanded = { files: ["src"], [tabs.rightTabKey(tabs.paneTab(code))]: ["src/utils"] };

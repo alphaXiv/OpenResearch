@@ -565,6 +565,8 @@ export function ModelPicker({
  * with a "· Default" note, then the full numbered list. */
 export function OptionPicker({
   triggerIcon,
+  onTriggerClick,
+  menuAction,
   choices,
   value,
   defaultId,
@@ -579,10 +581,13 @@ export function OptionPicker({
   renderIcon,
   renderLabel,
   floating = false,
+  openOnHover = false,
   onSelect,
   className,
 }: {
   triggerIcon?: ReactNode;
+  onTriggerClick?: () => void;
+  menuAction?: { label: string; onSelect: () => void };
   choices: OptionChoice[];
   value: string | null;
   /** The harness's default id — pinned at top of the menu and used when
@@ -602,6 +607,7 @@ export function OptionPicker({
   renderIcon?: (choice: OptionChoice) => ReactNode;
   renderLabel?: (choice: OptionChoice) => ReactNode;
   floating?: boolean;
+  openOnHover?: boolean;
   onSelect: (id: string) => void;
   className?: string;
 }) {
@@ -609,6 +615,10 @@ export function OptionPicker({
   const { open, setOpen, ref } = usePopover(buttonRef);
   const menuRef = useRef<HTMLDivElement>(null);
   const [filter, setFilter] = useState("");
+  const openedByHover = useRef(false);
+  const touchTrigger = useRef(false);
+  const closeTimer = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
+  useEffect(() => () => clearTimeout(closeTimer.current), []);
   useLayoutEffect(() => {
     const menu = menuRef.current;
     const anchor = ref.current;
@@ -637,7 +647,7 @@ export function OptionPicker({
       window.removeEventListener("scroll", position, true);
     };
   }, [open, floating, dropDown, filter, choices.length, ref]);
-  if (choices.length === 0) return null;
+  if (choices.length === 0 && !menuAction) return null;
 
   const effectiveId = value ?? defaultId ?? choices[0]?.id ?? null;
   const current = choices.find((c) => c.id === effectiveId);
@@ -655,6 +665,17 @@ export function OptionPicker({
   const visible = rest.filter((c) => `${c.label} ${c.id}`.toLowerCase().includes(filter.toLowerCase()));
   const label = current?.label ?? choices[0]?.label ?? "";
 
+  const activateTrigger = () => {
+    openedByHover.current = false;
+    setFilter("");
+    if (onTriggerClick && !touchTrigger.current) {
+      setOpen(false);
+      onTriggerClick();
+    } else {
+      setOpen((value) => !value);
+    }
+  };
+
   const choose = (id: string) => {
     onSelect(id);
     setOpen(false);
@@ -662,16 +683,44 @@ export function OptionPicker({
   };
 
   return (
-    <div className={`option-picker relative inline-flex${variant === "field" ? " w-full" : ""}`} ref={ref}>
+    <div className={`option-picker relative inline-flex${variant === "field" ? " w-full" : ""}`} ref={ref}
+      onPointerEnter={(event) => {
+        if (!openOnHover || disabled || event.pointerType !== "mouse") return;
+        clearTimeout(closeTimer.current);
+        if (!open) {
+          openedByHover.current = true;
+          setFilter("");
+          setOpen(true);
+        }
+      }}
+      onPointerLeave={() => {
+        if (!openOnHover) return;
+        closeTimer.current = setTimeout(() => {
+          if (!menuRef.current?.contains(document.activeElement)) setOpen(false);
+        }, 150);
+      }}
+    >
       {triggerIcon ? (
         <IconButton
           ref={buttonRef}
           size="small"
+          active={open}
+          className={className}
           aria-label={title ?? header ?? label}
           aria-haspopup="menu"
           aria-expanded={open}
           disabled={disabled}
-          onClick={() => { setFilter(""); setOpen((v) => !v); }}
+          onPointerDown={(event) => { touchTrigger.current = event.pointerType === "touch"; }}
+          onClick={activateTrigger}
+          onKeyDown={(event) => {
+            touchTrigger.current = false;
+            if (!onTriggerClick || event.key !== "ArrowDown") return;
+            event.preventDefault();
+            openedByHover.current = false;
+            setFilter("");
+            setOpen(true);
+            menuRef.current?.querySelector("input")?.focus();
+          }}
         >
           {triggerIcon}
         </IconButton>
@@ -689,7 +738,7 @@ export function OptionPicker({
         aria-haspopup="menu"
         aria-expanded={open}
         disabled={disabled}
-        onClick={() => { setFilter(""); setOpen((v) => !v); }}
+        onClick={activateTrigger}
       >
         <span className="inline-flex min-w-0 items-center gap-2">
           {current && renderIcon?.(current)}
@@ -703,7 +752,12 @@ export function OptionPicker({
           style={floating ? { position: "fixed", inset: "auto", margin: 0 } : undefined}
           className={`option-menu absolute bottom-[calc(100%_+_8px)] start-0 max-h-95 flex flex-col bg-background border border-border rounded-lg shadow-menu z-50 overflow-hidden min-w-47.5 p-1.5 [&.align-right]:start-auto [&.align-right]:end-0 [&.drop-down]:bottom-auto [&.drop-down]:top-[calc(100%_+_4px)] [&.session-menu]:start-auto [&.session-menu]:end-1.5 [&.session-menu]:top-[calc(100%_-_2px)] [&.session-menu]:min-w-35 ${choices.some((choice) => choice.description) ? "min-w-80" : ""} ${variant === "field" ? "min-w-full text-text" : ""} ${align === "right" ? "align-right" : ""} ${dropDown ? "drop-down" : ""}`}>
           {header && <div className={MODEL_GROUP_CLASS_NAME}>{header}</div>}
-          {searchPlaceholder && <input autoFocus aria-label={searchPlaceholder} placeholder={searchPlaceholder} value={filter} onChange={(e) => setFilter(e.target.value)} className="shrink-0 border-b border-border bg-background px-2 py-2 text-sm outline-none" />}
+          {menuAction && <MenuItem type="button" onClick={() => {
+            setOpen(false);
+            buttonRef.current?.focus();
+            menuAction.onSelect();
+          }}><span className="flex items-center gap-2"><Plus size={14} />{menuAction.label}</span></MenuItem>}
+          {searchPlaceholder && <input autoFocus={!openedByHover.current} aria-label={searchPlaceholder} placeholder={searchPlaceholder} value={filter} onChange={(e) => setFilter(e.target.value)} className="mb-2 shrink-0 border-b border-border bg-background px-2 py-2 text-sm outline-none" />}
           <div className="min-h-0 overflow-y-auto">
           {pinned && (
             <>

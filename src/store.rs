@@ -751,6 +751,7 @@ impl Store {
             "ALTER TABLE chat_sessions ADD COLUMN goal TEXT",
             "ALTER TABLE chat_sessions ADD COLUMN autonomy TEXT",
             "ALTER TABLE chat_sessions ADD COLUMN side_parent_session_id TEXT",
+            "ALTER TABLE chat_sessions ADD COLUMN side_parent_leaf_id TEXT",
             "ALTER TABLE ui_state ADD COLUMN preferred_service_tier TEXT",
             "ALTER TABLE ui_state ADD COLUMN workspace_state_json TEXT",
             "ALTER TABLE ui_state ADD COLUMN preferred_autonomy TEXT",
@@ -1643,8 +1644,8 @@ impl Store {
                                             title_source, model, service_tier, permission_mode, plan_mode,
                                             plan_reset_pending, reasoning_level,
                                             archived, context_usage_json, bootstrap_context,
-                                            active_leaf_id, created_at, updated_at)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18)",
+                                            active_leaf_id, created_at, updated_at, side_parent_session_id, side_parent_leaf_id)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20)",
                 params![
                     session.id,
                     session.project_id,
@@ -1664,6 +1665,8 @@ impl Store {
                     session.active_leaf_id,
                     session.created_at,
                     session.updated_at,
+                    session.side_parent_session_id,
+                    session.side_parent_leaf_id,
                 ],
             )?;
             if let Some(state) = self.acp_launch_for_session(session)? {
@@ -1904,8 +1907,8 @@ impl Store {
             "INSERT INTO chat_sessions (id, project_id, harness, native_session_id, title, title_source, model,
                                         service_tier, permission_mode, plan_mode, plan_reset_pending, reasoning_level, archived, bootstrap_context,
                                         active_leaf_id, created_at, updated_at, autonomy,
-                                        side_parent_session_id)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19)",
+                                        side_parent_session_id, side_parent_leaf_id)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20)",
             params![
                 s.id,
                 s.project_id,
@@ -1926,6 +1929,7 @@ impl Store {
                 s.updated_at,
                 s.autonomy,
                 s.side_parent_session_id,
+                s.side_parent_leaf_id,
             ],
         )?;
         if let Some(state) = acp_state {
@@ -2011,14 +2015,6 @@ impl Store {
             ],
             row_to_chat_session,
         )?;
-        Ok(rows.collect::<std::result::Result<Vec<_>, _>>()?)
-    }
-
-    pub fn side_chat_ids(&self) -> Result<Vec<String>> {
-        let mut stmt = self
-            .conn
-            .prepare("SELECT id FROM chat_sessions WHERE side_parent_session_id IS NOT NULL")?;
-        let rows = stmt.query_map([], |row| row.get(0))?;
         Ok(rows.collect::<std::result::Result<Vec<_>, _>>()?)
     }
 
@@ -2124,7 +2120,15 @@ impl Store {
     }
 
     pub fn delete_chat_session(&self, id: &str) -> Result<()> {
-        let tx = self.begin()?;
+        let tx = self.begin_immediate()?;
+        let has_children: bool = tx.query_row(
+            "SELECT EXISTS(SELECT 1 FROM chat_sessions WHERE side_parent_session_id = ?1)",
+            [id],
+            |row| row.get(0),
+        )?;
+        if has_children {
+            return Err(anyhow!("delete side chats before deleting their parent"));
+        }
         tx.execute(
             "DELETE FROM chat_queued_messages WHERE session_id = ?1",
             params![id],
@@ -3165,6 +3169,8 @@ pub struct StoredChatSession {
     /// Chat this side chat branched from. Side chats share that chat's
     /// worktree, stay out of history, and are deleted with it.
     pub side_parent_session_id: Option<String>,
+    /// Parent branch tip captured when this side chat was created.
+    pub side_parent_leaf_id: Option<String>,
     pub created_at: i64,
     pub updated_at: i64,
 }
@@ -3314,7 +3320,7 @@ fn row_to_chat_turn(
 const CHAT_SESSION_COLS: &str = "id, project_id, harness, native_session_id, title, model, service_tier, \
      permission_mode, plan_mode, plan_reset_pending, reasoning_level, archived, context_usage_json, \
      created_at, updated_at, title_source, bootstrap_context, active_leaf_id, \
-     goal, autonomy, side_parent_session_id";
+     goal, autonomy, side_parent_session_id, side_parent_leaf_id";
 
 fn row_to_chat_session(
     row: &rusqlite::Row<'_>,
@@ -3341,6 +3347,7 @@ fn row_to_chat_session(
         goal: row.get(18)?,
         autonomy: row.get(19)?,
         side_parent_session_id: row.get(20)?,
+        side_parent_leaf_id: row.get(21)?,
     })
 }
 
@@ -4431,6 +4438,7 @@ mod tests {
             autonomy: None,
             active_leaf_id: None,
             side_parent_session_id: None,
+            side_parent_leaf_id: None,
             created_at: 1,
             updated_at: 1,
         }
@@ -4632,15 +4640,15 @@ mod tests {
             .collect();
         assert_eq!(all, ["chat_parent"]);
         assert_eq!(store.side_chats_of("chat_parent").unwrap(), ["chat_side"]);
-        assert_eq!(store.side_chat_ids().unwrap(), ["chat_side"]);
         assert_eq!(
             store.chat_worktree_owner("chat_side").unwrap(),
             "chat_parent"
         );
         assert_eq!(store.chat_worktree_owner("chat_gone").unwrap(), "chat_gone");
-        // An orphan whose parent row is gone owns its own worktree again.
+        assert!(store.delete_chat_session("chat_parent").is_err());
+        assert!(store.get_chat_session("chat_parent").unwrap().is_some());
+        store.delete_chat_session("chat_side").unwrap();
         store.delete_chat_session("chat_parent").unwrap();
-        assert_eq!(store.chat_worktree_owner("chat_side").unwrap(), "chat_side");
 
         let _ = std::fs::remove_dir_all(&dir);
     }
