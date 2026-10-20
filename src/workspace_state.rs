@@ -131,6 +131,7 @@ pub enum FileSource {
 pub enum FilesView {
     Files,
     Changes,
+    Folder,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
