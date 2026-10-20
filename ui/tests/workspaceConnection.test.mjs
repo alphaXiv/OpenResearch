@@ -76,7 +76,7 @@ for (const corner of [true, false]) {
 }
 
 for (const kind of ["local", "ssh"]) {
-  for (const scenario of ["loading", "error", "onboarding", "projects"]) {
+  for (const scenario of ["loading", "error", "onboarding", "no-projects", "projects"]) {
     test(`${kind} project home connection control during ${scenario}`, () => {
       const runtime = { kind, version: "test" };
       const { ProjectsPage } = load("routePages.tsx", {
@@ -93,7 +93,7 @@ for (const kind of ["local", "ssh"]) {
         "./demoSessionState": {}, "./routeResume": {}, "./workspacePersistence": {}, "./panelLayout": {},
         "./paraglide/messages.js": messages,
         "./components/Onboarding": { Onboarding: "Onboarding" },
-        "./components/ProjectsHome": { ProjectsHome: "ProjectsHome" },
+        "./components/ProjectsHome": { ProjectsHome: "ProjectsHome", ProjectsEmptyState: "ProjectsEmptyState" },
         "./components/OfflineBanner": { OfflineBanner: "OfflineBanner" },
         "./components/WorkspaceConnection": { WorkspaceConnection: "WorkspaceConnection" },
         "./components/UpdateBanner": { UpdateBanner: "UpdateBanner", useUpdateStatus: () => ({}) },
@@ -101,7 +101,10 @@ for (const kind of ["local", "ssh"]) {
         "./components/ui": {},
       });
       const connection = nodes(ProjectsPage()).find((node) => node.type === "WorkspaceConnection");
-      if (kind === "local" && scenario !== "projects") {
+      // The local corner belongs to the project home: it stays away while the
+      // first-run walkthrough runs and before the state has loaded.
+      const expected = kind === "ssh" || !["loading", "error", "onboarding"].includes(scenario);
+      if (!expected) {
         assert.equal(connection, undefined);
         return;
       }
