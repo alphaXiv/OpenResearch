@@ -233,6 +233,7 @@ pub struct StoredRun {
     pub experiment_id: String,
     pub project_id: String,
     pub status: String,
+    #[serde(serialize_with = "serialize_public_backend")]
     pub backend_json: String,
     pub command: String,
     /// Unix millis.
@@ -253,6 +254,25 @@ pub struct StoredRun {
     pub chat_session_id: Option<String>,
 }
 
+pub fn public_backend(value: &str) -> Option<serde_json::Value> {
+    let mut backend = serde_json::from_str::<serde_json::Value>(value).ok()?;
+    if let Some(fields) = backend.as_object_mut() {
+        fields.remove("rentalLease");
+    }
+    Some(backend)
+}
+
+fn serialize_public_backend<S: serde::Serializer>(
+    value: &str,
+    serializer: S,
+) -> Result<S::Ok, S::Error> {
+    serializer.serialize_str(
+        &public_backend(value)
+            .map(|value| value.to_string())
+            .unwrap_or_default(),
+    )
+}
+
 /// Run lifecycle: active states can finish once; terminal outcomes never change.
 /// Both status updates and submission upserts enforce these transitions.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -267,16 +287,19 @@ pub enum RunStatus {
     Failed,
     /// Terminal: cancellation was requested and honored.
     Cancelled,
+    /// Terminal: the rental ended before its execution outcome could be retrieved.
+    Lost,
 }
 
 impl RunStatus {
     #[cfg(test)]
-    const ALL: [RunStatus; 5] = [
+    const ALL: [RunStatus; 6] = [
         Self::Starting,
         Self::Running,
         Self::Done,
         Self::Failed,
         Self::Cancelled,
+        Self::Lost,
     ];
 
     pub fn as_str(self) -> &'static str {
@@ -286,6 +309,7 @@ impl RunStatus {
             Self::Done => "done",
             Self::Failed => "failed",
             Self::Cancelled => "cancelled",
+            Self::Lost => "lost",
         }
     }
 
@@ -299,21 +323,25 @@ impl RunStatus {
             "done" => Self::Done,
             "failed" => Self::Failed,
             "cancelled" => Self::Cancelled,
+            "lost" => Self::Lost,
             _ => return None,
         })
     }
 
     /// A run in a terminal state is finished and will never change again.
     pub fn is_terminal(self) -> bool {
-        matches!(self, Self::Done | Self::Failed | Self::Cancelled)
+        matches!(
+            self,
+            Self::Done | Self::Failed | Self::Cancelled | Self::Lost
+        )
     }
 
     fn can_transition_to(self, to: RunStatus) -> bool {
         use RunStatus::*;
         match self {
             Starting => true,
-            Running => matches!(to, Running | Done | Failed | Cancelled),
-            Done | Failed | Cancelled => false,
+            Running => matches!(to, Running | Done | Failed | Cancelled | Lost),
+            Done | Failed | Cancelled | Lost => false,
         }
     }
 }
@@ -494,6 +522,13 @@ impl Store {
         data_dir_move_lock_path: PathBuf,
         busy_timeout: Duration,
     ) -> Result<Self> {
+        std::fs::create_dir_all(&dir)?;
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            // SQLite and its sidecars contain scoped rental capabilities.
+            std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o700))?;
+        }
         std::fs::create_dir_all(dir.join("run-logs"))
             .map_err(|e| anyhow!("Could not create {}: {}", dir.display(), e))?;
         let conn = Connection::open(dir.join("orx.db"))?;
@@ -1316,7 +1351,7 @@ impl Store {
 
     pub fn list_ready_run_wakeups(&self) -> Result<Vec<RunWakeup>> {
         self.list_run_wakeups(
-            "w.state IN ('pending', 'claimed') AND r.status IN ('done', 'failed')
+            "w.state IN ('pending', 'claimed') AND r.status IN ('done', 'failed', 'lost')
              ORDER BY COALESCE(r.ended_at, r.updated_at), w.requested_at, r.id",
         )
     }
@@ -3394,6 +3429,22 @@ pub fn now_ms() -> i64 {
 mod tests {
     use super::*;
 
+    #[cfg(unix)]
+    #[test]
+    fn store_protects_existing_data_and_sqlite_sidecars() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = std::env::temp_dir().join(format!("orx-private-store-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let store = Store::open_at(dir.clone()).unwrap();
+        assert_eq!(
+            std::fs::metadata(&dir).unwrap().permissions().mode() & 0o777,
+            0o700
+        );
+        drop(store);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
     #[test]
     fn lifecycle_lock_keeps_legacy_inode() {
         let config_dir = std::env::temp_dir().join(format!("orx-lock-{}", uuid::Uuid::new_v4()));
@@ -4939,10 +4990,12 @@ mod tests {
             (Starting, Done),
             (Starting, Failed),
             (Starting, Cancelled),
+            (Starting, Lost),
             (Running, Running),
             (Running, Done),
             (Running, Failed),
             (Running, Cancelled),
+            (Running, Lost),
         ];
         for from in RunStatus::ALL {
             for to in RunStatus::ALL {
@@ -5029,7 +5082,7 @@ mod tests {
                 status.is_terminal(),
                 matches!(
                     status,
-                    RunStatus::Done | RunStatus::Failed | RunStatus::Cancelled
+                    RunStatus::Done | RunStatus::Failed | RunStatus::Cancelled | RunStatus::Lost
                 )
             );
         }
@@ -5265,6 +5318,25 @@ mod tests {
             None
         );
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn lost_run_wakes_its_waiting_chat() {
+        let dir = std::env::temp_dir().join(format!("orx-lost-wake-{}", uuid::Uuid::new_v4()));
+        let store = Store::open_at(dir.clone()).unwrap();
+        store
+            .create_chat_session(&chat_session_fixture("chat_A"))
+            .unwrap();
+        store
+            .upsert_run(&run_fixture("run_lost", "lost", Some("chat_A")))
+            .unwrap();
+        store.register_run_wakeup("run_lost", "chat_A").unwrap();
+        store.prune_run_wakeups().unwrap();
+        let ready = store.list_ready_run_wakeups().unwrap();
+        assert_eq!(ready.len(), 1);
+        assert_eq!(ready[0].run.id, "run_lost");
+        drop(store);
+        std::fs::remove_dir_all(dir).unwrap();
     }
 
     #[test]

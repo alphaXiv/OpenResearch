@@ -814,6 +814,7 @@ pub async fn submit(args: &crate::ExpRunArgs) -> Result<StoredRun> {
         ssh_container: None,
         monitoring_error: None,
         cancellation_accepted: false,
+        rental_lease: None,
         kind: format!("{}_job", backend_id),
         namespace: None,
         job_id: None,
@@ -857,7 +858,7 @@ pub async fn submit(args: &crate::ExpRunArgs) -> Result<StoredRun> {
         None => None,
     };
     let identity = args.invocation_identity()?;
-    let report = (!args.telemetry_suppressed)
+    let report = (!args.telemetry_suppressed && backend_id != "openresearch")
         .then(|| {
             crate::telemetry::pending_event_payload(
                 "experiment_finished",
@@ -1010,7 +1011,7 @@ pub fn record_submission_handle(run_id: &str, descriptor: &BackendDescriptor) ->
         .and_then(|store| store.set_backend_json(run_id, &descriptor.to_json()))
         .err();
     let dir = crate::store::data_dir().join("submission-handles");
-    if let Err(error) = std::fs::create_dir_all(&dir) {
+    if let Err(error) = prepare_snapshot_dir(&dir) {
         return match database_error {
             None => {
                 eprintln!("warning: could not create submission recovery directory: {error}");
@@ -1023,9 +1024,18 @@ pub fn record_submission_handle(run_id: &str, descriptor: &BackendDescriptor) ->
     }
     let destination = dir.join(format!("{run_id}.json"));
     let temporary = dir.join(format!(".{run_id}.{}.tmp", uuid::Uuid::new_v4()));
-    let file_error = std::fs::write(&temporary, descriptor.to_json())
-        .and_then(|()| std::fs::rename(&temporary, destination))
-        .err();
+    let file_error = (|| -> std::io::Result<()> {
+        use std::io::Write;
+        let mut options = std::fs::OpenOptions::new();
+        options.write(true).create_new(true);
+        #[cfg(unix)]
+        options.mode(0o600);
+        options
+            .open(&temporary)?
+            .write_all(descriptor.to_json().as_bytes())
+    })()
+    .and_then(|()| std::fs::rename(&temporary, destination))
+    .err();
     if let Some(error) = file_error {
         let _ = std::fs::remove_file(temporary);
         if let Some(database_error) = database_error {

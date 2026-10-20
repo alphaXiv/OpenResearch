@@ -129,6 +129,7 @@ async fn submit_controller_run(
         ssh_container: None,
         monitoring_error: None,
         cancellation_accepted: false,
+        rental_lease: None,
         kind: kind.to_string(),
         namespace: None,
         job_id: Some(dir.to_string_lossy().into_owned()),

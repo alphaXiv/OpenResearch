@@ -332,7 +332,7 @@ impl LocalPlane {
         };
         // Key event, fired only on a successful launch. Coarse backend only.
         // Validation above guarantees a known backend before either dispatch path.
-        if result.is_ok() {
+        if result.is_ok() && backend_label.as_deref() != Some("openresearch") {
             let target = backend_label.as_deref().unwrap_or("unknown");
             crate::telemetry::capture_experiment_started("run", true, Some(target));
             // A launch out of the bundled demo is the clearest signal the demo

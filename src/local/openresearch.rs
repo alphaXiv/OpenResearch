@@ -2,7 +2,7 @@
 //! one run. Unlike `local/ssh.rs`, submit does NOT launch the payload: the box
 //! takes minutes to provision and has no SSH endpoint yet, so submit records
 //! the run as `starting` and the detached supervisor does the rest (wait for
-//! online, launch over ssh, watch, tear the box down at terminal state).
+//! online, launch over ssh, and collect directly; remote supervision releases the box).
 
 use crate::client::{create_sandbox, list_orgs, CreateSandboxBody};
 use crate::commands::exp::spawn_detached_supervise;
@@ -24,7 +24,9 @@ pub async fn launch_local_openresearch(args: &crate::ExpRunArgs) -> Result<()> {
     if let Ok(Some(creds)) = crate::config::load_credentials().await {
         if let Ok(envelope) = crate::client::get_sandbox(&creds, sandbox_id).await {
             if let Some(price) = envelope.sandbox.price_per_hour {
-                println!("  price   ${price:.2}/hr (until the run ends)");
+                println!(
+                    "  price   ${price:.2}/hr (includes up to 60 seconds of final collection)"
+                );
             }
         }
     }
@@ -151,21 +153,38 @@ pub async fn submit_local_openresearch_with_source(
         .or_else(|| project.run_command.clone().filter(|c| !c.trim().is_empty()))
         .ok_or_else(|| anyhow!("{}", crate::invocation::no_run_command(&project.id)))?;
 
-    let sandbox = create_sandbox(
+    let created = create_sandbox(
         &creds,
         &CreateSandboxBody {
             organization_id: org_id.clone(),
             target,
+            rental_lease: Some(crate::client::CreateRentalLease {
+                version: 1,
+                max_active_seconds: timeout_secs,
+            }),
         },
     )
     .await
-    .map_err(billing_friendly)?
-    .sandbox;
+    .map_err(billing_friendly)?;
+    let sandbox = created.sandbox;
+    let capability = match created.rental_lease.filter(|lease| lease.version == 1) {
+        Some(capability) => capability,
+        None => {
+            let _ = openresearch::teardown(&creds, &sandbox.id).await;
+            return Err(anyhow!("The server does not support rental supervision; update the service before launching."));
+        }
+    };
+    let rental = crate::jobs::rental::Rental {
+        api_url: creds.api_url.clone(),
+        sandbox_id: sandbox.id.clone(),
+        token: capability.token,
+    };
 
     let mut descriptor = BackendDescriptor {
         ssh_container: None,
         monitoring_error: None,
         cancellation_accepted: false,
+        rental_lease: Some(rental),
         kind: "openresearch_job".to_string(),
         namespace: Some(org_id),
         job_id: Some(sandbox.id.clone()),

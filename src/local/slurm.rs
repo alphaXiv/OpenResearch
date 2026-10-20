@@ -162,6 +162,7 @@ pub async fn submit_local_slurm_with_source(
         ssh_container: None,
         monitoring_error: None,
         cancellation_accepted: false,
+        rental_lease: None,
         kind: "slurm_job".to_string(),
         namespace: Some(host.clone()),
         job_id: Some(job_id.clone()),
