@@ -50,7 +50,7 @@ function connectionResult(value: unknown): SshConnectResult | null {
   return null;
 }
 
-function isComplete(value: unknown) {
+export function isComplete(value: unknown) {
   return isRecord(value) && value.type === "complete";
 }
 

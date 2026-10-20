@@ -363,6 +363,7 @@ esac
             let _ = self.0.wait();
         }
     }
+    let supervisor_log = sandbox.0.join("supervisor.log");
     let mut child = ChildGuard(
         sandbox
             .command()
@@ -370,7 +371,7 @@ esac
             .env("PATH", format!("{}:/usr/bin:/bin", bin.display()))
             .args(["supervise", "run"])
             .stdout(std::process::Stdio::null())
-            .stderr(std::process::Stdio::null())
+            .stderr(std::fs::File::create(&supervisor_log).unwrap())
             .spawn()
             .unwrap(),
     );
@@ -387,7 +388,9 @@ esac
         while !condition() {
             assert!(
                 Instant::now() < deadline,
-                "supervisor did not reach expected state"
+                "supervisor did not reach expected state; metadata: {}; stderr: {}",
+                metadata(),
+                std::fs::read_to_string(&supervisor_log).unwrap_or_default()
             );
             std::thread::sleep(Duration::from_millis(100));
         }

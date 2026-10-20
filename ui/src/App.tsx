@@ -117,6 +117,7 @@ import { WorktreeTab, type WorktreeView } from "./components/WorktreeTab";
 import { ArtifactsTab, findArtifactEntry } from "./components/ArtifactsTab";
 import { SkillsTab } from "./components/SkillsTab";
 import { ClosableTab } from "./components/ClosableTab";
+import { TabStrip } from "./components/TabStrip";
 import { DetailDrawer, type ExperimentView } from "./components/DetailDrawer";
 import { FileViewer, type FileScrollPosition } from "./components/FileViewer";
 import { confirmFileDiscard, FileBufferSession } from "./fileSync";
@@ -1838,7 +1839,7 @@ export default function App({ runtime, projectId, pane }: { runtime: RuntimeInfo
               onPointerDown={resizePanel}
             />
             <div className="tabs flex items-end gap-0 pt-1 pe-1.5 pb-0 ps-2 h-10 border-b border-b-border bg-background shrink-0">
-              <div className="tab-strip flex items-end gap-0.5 flex-1 min-w-0 overflow-x-auto [scrollbar-width:none] [&::-webkit-scrollbar]:hidden">
+              <TabStrip activeKey={rightTabKey(rightTab)}>
                 {leadingFileTabs.map(renderFileTab)}
                 {filesTabOpen && (
                   <ClosableTab
@@ -1877,7 +1878,7 @@ export default function App({ runtime, projectId, pane }: { runtime: RuntimeInfo
                   />
                 )}
                 {orderedContentTabs.map(renderContentTab)}
-              </div>
+              </TabStrip>
               <div className="panel-controls inline-flex items-center gap-0.5 self-center py-0 px-1.5 shrink-0">
                 <IconButton
                   title={panelMax ? m.app_restore_panel() : m.app_expand_panel()}
