@@ -2356,7 +2356,8 @@ pub fn list_ignored_files(
             let had = files.len();
             files.clear();
             *cut = walk_files(repo, dir, files, per_dir.min(had + share.min(room)));
-            room -= files.len() - had;
+            // The re-walk can find fewer files than before if some were deleted.
+            room = room + had - files.len();
         }
     }
     for (_, files, cut) in folders {
