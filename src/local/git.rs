@@ -2304,6 +2304,25 @@ pub fn list_worktree_files(repo: &Path) -> Result<Vec<String>> {
     Ok(entries)
 }
 
+/// The gitignored untracked files `list_worktree_files` leaves out (logs,
+/// data, build output). Repo-relative, unsorted.
+pub fn list_ignored_files(repo: &Path) -> Result<Vec<String>> {
+    let bytes = git_bytes(
+        repo,
+        &[
+            "ls-files",
+            "--others",
+            "--ignored",
+            "--exclude-standard",
+            "-z",
+        ],
+        &[],
+    )?;
+    let mut entries = split_nul(&bytes);
+    entries.retain(|e| !e.ends_with('/'));
+    Ok(entries)
+}
+
 /// Resolve a branch name to its commit sha — the *local* ref first, then
 /// origin's: the code browser wants the agent's latest work, which lives
 /// locally before any push (the opposite preference of `branch_head_sha`,
@@ -2490,6 +2509,24 @@ mod tests {
         assert!(text.contains("/checkpoint.bin\n"));
         assert_eq!(text.matches(MANAGED_IGNORE_START).count(), 1);
         assert_eq!(text.matches(MANAGED_IGNORE_END).count(), 1);
+    }
+
+    #[test]
+    fn ignored_listing_returns_only_gitignored_untracked_files() {
+        let dir = std::env::temp_dir().join(format!("orx-git-ignored-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        run(&dir, &["init", "-q"]);
+        write(&dir, ".gitignore", "results/\n*.log\n");
+        write(&dir, "notes.md", "notes\n");
+        write(&dir, "run.log", "log\n");
+        write(&dir, "results/metrics.csv", "1\n");
+        let mut ignored = list_ignored_files(&dir).unwrap();
+        ignored.sort();
+        let mut listed = list_worktree_files(&dir).unwrap();
+        listed.sort();
+        let _ = std::fs::remove_dir_all(&dir);
+        assert_eq!(ignored, ["results/metrics.csv", "run.log"]);
+        assert_eq!(listed, [".gitignore", "notes.md"]);
     }
 
     #[test]

@@ -9,6 +9,9 @@ export function CodeBrowserHeader({
   view,
   onViewChange,
   showViewToggle = true,
+  showChanges = true,
+  folderActive = false,
+  onFolder,
   branchLabel,
   branchTitle,
   githubHref,
@@ -19,6 +22,10 @@ export function CodeBrowserHeader({
   view: CodeBrowserView;
   onViewChange: (view: CodeBrowserView) => void;
   showViewToggle?: boolean;
+  showChanges?: boolean;
+  /** The project-folder button, shown when `onFolder` is given. */
+  folderActive?: boolean;
+  onFolder?: () => void;
   branchLabel?: string;
   branchTitle?: string;
   githubHref?: string;
@@ -32,20 +39,32 @@ export function CodeBrowserHeader({
         <div className="seg inline-flex items-center gap-0.5 p-[3px] rounded-md bg-hover-subtle [&_button]:py-[3px] [&_button]:px-3 [&_button]:text-sm [&_button]:font-medium [&_button]:text-text [&_button]:rounded-sm [&_button:not(:disabled):hover]:text-text [&_button.active]:bg-background [&_button.active]:shadow-segment [&_button:disabled]:text-muted [&_button:disabled]:cursor-default" role="group" aria-label={m.code_browser_header_code_browser_view()}>
           <button
             type="button"
-            className={view === "files" ? "active" : ""}
-            aria-pressed={view === "files"}
+            className={!folderActive && view === "files" ? "active" : ""}
+            aria-pressed={!folderActive && view === "files"}
             onClick={() => onViewChange("files")}
           >
             {m.code_browser_header_files()}
           </button>
-          <button
-            type="button"
-            className={view === "changes" ? "active" : ""}
-            aria-pressed={view === "changes"}
-            onClick={() => onViewChange("changes")}
-          >
-            {m.code_browser_header_changes()}
-          </button>
+          {showChanges && (
+            <button
+              type="button"
+              className={!folderActive && view === "changes" ? "active" : ""}
+              aria-pressed={!folderActive && view === "changes"}
+              onClick={() => onViewChange("changes")}
+            >
+              {m.code_browser_header_changes()}
+            </button>
+          )}
+          {onFolder && (
+            <button
+              type="button"
+              className={folderActive ? "active" : ""}
+              aria-pressed={folderActive}
+              onClick={onFolder}
+            >
+              {m.code_browser_header_project_folder()}
+            </button>
+          )}
         </div>
       )}
       {branchLabel && (

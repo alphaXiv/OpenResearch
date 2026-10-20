@@ -2883,6 +2883,10 @@ struct CodeTreeQuery {
     /// Files pane wants). Absent falls back to the hub clone's checkout.
     /// Mutually exclusive with `ref` — a committed tree has no live worktree.
     session_id: Option<String>,
+    /// Also list gitignored files of the live checkout (the project folder
+    /// view, where run logs, data and results live).
+    #[serde(default)]
+    ignored: bool,
 }
 
 /// Cap on entries returned by the code-tree listing.
@@ -2891,7 +2895,8 @@ const CODE_TREE_LIMIT: usize = 20_000;
 /// Flat file listing for the UI code browser. With `ref`: the committed tree
 /// of that branch (local ref first, then origin's), independent of any
 /// checkout. Without: the hub clone's checkout via `git ls-files`, so
-/// gitignored trees are excluded and untracked-but-new files are included.
+/// gitignored trees are excluded (unless `ignored`) and untracked-but-new
+/// files are included.
 /// Paths are repo-relative; the client builds the nested tree.
 async fn project_code_tree(Path(id): Path<String>, Query(q): Query<CodeTreeQuery>) -> ApiResult {
     blocking_api(move || {
@@ -2932,8 +2937,16 @@ async fn project_code_tree(Path(id): Path<String>, Query(q): Query<CodeTreeQuery
         // During a merge conflict `ls-files --cached` emits an unmerged path
         // once per stage — collapse to one entry (they'd be duplicate keys).
         entries.dedup();
+        if q.ignored && ref_name.is_none() {
+            // Appended after the sort so a huge ignored tree (`.venv/`) is what
+            // the cap drops, not the project's own files.
+            let mut ignored = local::git::list_ignored_files(&root)?;
+            ignored.sort();
+            entries.extend(ignored);
+        }
         let truncated = entries.len() > CODE_TREE_LIMIT;
         entries.truncate(CODE_TREE_LIMIT);
+        entries.sort();
         Ok(Json(json!({
             "root": root_kind,
             "path": path,
