@@ -169,12 +169,15 @@ async fn auto_compact_settings() -> ApiResult {
 struct SetAutoCompactReq {
     enabled: Option<bool>,
     percent: Option<u8>,
+    /// `0` turns the token limit off.
+    #[serde(rename = "maxTokens")]
+    max_tokens: Option<u64>,
 }
 
 /// Read at the end of every turn, so a change applies from the next one.
 async fn set_auto_compact_settings(Json(req): Json<SetAutoCompactReq>) -> ApiResult {
     tokio::task::spawn_blocking(move || {
-        crate::local::auto_compact::set_settings(req.enabled, req.percent)
+        crate::local::auto_compact::set_settings(req.enabled, req.percent, req.max_tokens)
             .map(|settings| Json(json!(settings)))
             .map_err(|error| {
                 ApiError::from(anyhow!("could not save the auto-compact setting: {error}"))
