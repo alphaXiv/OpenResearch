@@ -192,6 +192,10 @@ pub(crate) struct Settings {
     /// Absent = `auto_compact::DEFAULT_PERCENT`.
     #[serde(default)]
     pub auto_compact_percent: Option<u8>,
+    /// Token count that also triggers auto-compact, whatever the window size.
+    /// Absent = `auto_compact::DEFAULT_MAX_TOKENS`; `0` = no token limit.
+    #[serde(default)]
+    pub auto_compact_max_tokens: Option<u64>,
     /// Surfaces whose `first_action` event has already been sent, so a restart
     /// cannot re-report a later action as the user's first one.
     #[serde(default)]
@@ -357,19 +361,32 @@ pub(crate) fn set_compute_routing(enabled: bool) -> std::io::Result<()> {
     mutate_settings(|settings| settings.compute_routing = Some(enabled))
 }
 
-pub(crate) fn auto_compact() -> (Option<bool>, Option<u8>) {
+pub(crate) fn auto_compact() -> (Option<bool>, Option<u8>, Option<u64>) {
     load_settings()
-        .map(|settings| (settings.auto_compact, settings.auto_compact_percent))
+        .map(|settings| {
+            (
+                settings.auto_compact,
+                settings.auto_compact_percent,
+                settings.auto_compact_max_tokens,
+            )
+        })
         .unwrap_or_default()
 }
 
-pub(crate) fn set_auto_compact(enabled: Option<bool>, percent: Option<u8>) -> std::io::Result<()> {
+pub(crate) fn set_auto_compact(
+    enabled: Option<bool>,
+    percent: Option<u8>,
+    max_tokens: Option<u64>,
+) -> std::io::Result<()> {
     mutate_settings(|settings| {
         if let Some(enabled) = enabled {
             settings.auto_compact = Some(enabled);
         }
         if let Some(percent) = percent {
             settings.auto_compact_percent = Some(percent);
+        }
+        if let Some(max_tokens) = max_tokens {
+            settings.auto_compact_max_tokens = Some(max_tokens);
         }
     })
 }

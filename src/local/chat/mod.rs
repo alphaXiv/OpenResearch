@@ -1707,8 +1707,10 @@ impl ChatHost {
                     Some(error) => ("error", Some(error.to_string())),
                     None => ("completed", None),
                 };
-                if auto.is_some() {
-                    crate::local::auto_compact::record_outcome(&session_id, settled.is_none());
+                if settled.is_none() {
+                    crate::local::auto_compact::record_compacted(&session_id);
+                } else if auto.is_some() {
+                    crate::local::auto_compact::record_failure(&session_id);
                 }
                 // Stop can land mid-write; its `error` row is the truthful one.
                 if self.owns_compaction(&session_id, &marker.id).await {
@@ -8522,6 +8524,7 @@ impl TurnCtx {
                 usage.context_window = prev.context_window;
             }
         }
+        crate::local::auto_compact::observe(&self.session_id, usage.used_tokens);
         self.context_usage = Some(usage.clone());
         self.host.emit(
             "chat.usage",
