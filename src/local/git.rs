@@ -2333,6 +2333,7 @@ pub fn list_ignored_files(
     let mut truncated = entries.len() > limit;
     entries.truncate(limit);
     let mut room = limit - entries.len();
+    let mut unreadable = false;
     // (folder, its files so far, cut short); unwalked folders count as cut.
     let mut folders: Vec<_> = dirs
         .into_iter()
@@ -2355,7 +2356,13 @@ pub fn list_ignored_files(
             }
             let had = files.len();
             files.clear();
-            *cut = walk_files(repo, dir, files, per_dir.min(had + share.min(room)));
+            *cut = walk_files(
+                repo,
+                dir,
+                files,
+                per_dir.min(had + share.min(room)),
+                &mut unreadable,
+            );
             // The re-walk can find fewer files than before if some were deleted.
             room = room + had - files.len();
         }
@@ -2364,15 +2371,23 @@ pub fn list_ignored_files(
         truncated |= cut;
         entries.extend(files);
     }
-    Ok((entries, truncated))
+    Ok((entries, truncated || unreadable))
 }
 
 /// Pushes the files under `repo/dir` (symlinks not followed, nested `.git`
-/// skipped) until `entries` holds `cap`; true if it stopped early.
-fn walk_files(repo: &Path, dir: &str, entries: &mut Vec<String>, cap: usize) -> bool {
+/// skipped) until `entries` holds `cap`; true if it stopped early. Sets
+/// `unreadable` when a folder can't be listed.
+fn walk_files(
+    repo: &Path,
+    dir: &str,
+    entries: &mut Vec<String>,
+    cap: usize,
+    unreadable: &mut bool,
+) -> bool {
     let mut stack = vec![dir.to_string()];
     while let Some(rel) = stack.pop() {
         let Ok(read) = std::fs::read_dir(repo.join(&rel)) else {
+            *unreadable = true;
             continue;
         };
         let mut items: Vec<_> = read
