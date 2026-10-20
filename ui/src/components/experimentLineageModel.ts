@@ -9,7 +9,7 @@ import { ltr } from "../i18n";
 import { m } from "../paraglide/messages.js";
 
 /** Outcome of an experiment's latest attempt; "none" when it has never run. */
-export type HistoryStatus = "done" | "failed" | "cancelled" | "running" | "none";
+export type HistoryStatus = "done" | "failed" | "cancelled" | "lost" | "running" | "none";
 
 export interface HistoryNode {
   id: string;
@@ -50,7 +50,7 @@ export const NO_TASK = "__no_task";
 
 export function historyStatus(run: Run): HistoryStatus {
   const status = runDisplayStatus(run);
-  if (status === "done" || status === "failed" || status === "cancelled") return status;
+  if (status === "done" || status === "failed" || status === "cancelled" || status === "lost") return status;
   return "running";
 }
 

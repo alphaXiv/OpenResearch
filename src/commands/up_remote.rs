@@ -1996,7 +1996,7 @@ pub(crate) async fn install_remote_orx(
         })
 }
 
-fn remote_installer(version: &str) -> String {
+pub(crate) fn remote_installer(version: &str) -> String {
     format!(
         "curl --proto '=https' --tlsv1.2 -LsSf {}/releases/download/v{version}/openresearch-cli-installer.sh | sh",
         crate::updates::REPO_URL
@@ -2229,7 +2229,7 @@ fn remote_orx_cmd(cmd: &str) -> String {
 
 /// Discover through the account's login environment, then hand the probe back
 /// to POSIX sh so custom bash/zsh/fish startup syntax cannot change its meaning.
-fn remote_login_orx_cmd(cmd: &str) -> String {
+pub(crate) fn remote_login_orx_cmd(cmd: &str) -> String {
     let body = format!(r#"export PATH="{REMOTE_ORX_PATH}:$PATH"; {cmd}"#);
     let login_command = format!("exec /bin/sh -c {}", crate::jobs::ssh::sh_quote(&body));
     let outer = format!(

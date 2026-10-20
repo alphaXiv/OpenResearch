@@ -180,9 +180,9 @@ export function ExperimentOverview({
         </section>
 
         {runs.length > 0 && (
-          <section className={EXPERIMENT_OVERVIEW_SECTION_CLASS_NAME}>
+          <section className={`${EXPERIMENT_OVERVIEW_SECTION_CLASS_NAME} @container`}>
             <h2>{m.experiment_overview_run_history()}</h2>
-            <div className="experiment-run-history divide-y divide-border-variant [&_button]:w-full [&_button]:grid [&_button]:grid-cols-[minmax(72px,_0.7fr)_minmax(100px,_1fr)_minmax(70px,_0.7fr)_60px_16px] [&_button]:items-center [&_button]:gap-3.5 [&_button]:py-[11px] [&_button]:px-0.5 [&_button]:text-text [&_button]:text-start [&_button]:text-sm [&_button:hover]:bg-surface [@media((max-width:_720px))]:[&_button]:grid-cols-[65px_1fr_60px_16px] [@media((max-width:_720px))]:[&_button_>_:nth-child(3)]:hidden">
+            <div className="experiment-run-history divide-y divide-border-variant [&_button]:w-full [&_button]:grid [&_button]:grid-cols-[minmax(72px,_0.7fr)_minmax(100px,_1fr)_minmax(70px,_0.7fr)_60px_16px] [&_button]:items-center [&_button]:gap-3.5 [&_button]:py-[11px] [&_button]:px-0.5 [&_button]:text-text [&_button]:text-start [&_button]:text-sm [&_button:hover]:bg-surface @max-lg:[&_button]:grid-cols-[48px_minmax(0,_1fr)_40px_16px] @max-lg:[&_button_>_:nth-child(3)]:hidden">
               {runs.map((run, index) => (
                 <button
                   key={run.id}
@@ -191,7 +191,7 @@ export function ExperimentOverview({
                   )}
                 >
                   <span className="experiment-run-number text-xs font-medium">{m.experiment_overview_run()} {runs.length - index}</span>
-                  <StatusBadge status={runDisplayStatus(run)} />
+                  <StatusBadge status={runDisplayStatus(run)} className="min-w-0" />
                   <span>{timeAgo(run.createdAt)}</span>
                   <span>{runDuration(run, now)}</span>
                   <Terminal size={13} />
