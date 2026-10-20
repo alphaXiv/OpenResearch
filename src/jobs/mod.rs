@@ -12,6 +12,7 @@ mod managed_env;
 pub mod modal;
 pub mod openresearch;
 pub mod ray;
+pub mod rental;
 pub mod slurm;
 pub mod ssh;
 pub mod tinker;
@@ -57,6 +58,8 @@ pub struct BackendDescriptor {
     pub monitoring_error: Option<String>,
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub cancellation_accepted: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rental_lease: Option<rental::Rental>,
     pub kind: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub namespace: Option<String>,
@@ -273,6 +276,7 @@ mod tests {
             ssh_container: None,
             monitoring_error: None,
             cancellation_accepted: false,
+            rental_lease: None,
             kind: "openresearch_job".to_string(),
             namespace: Some("org_1".to_string()),
             job_id: Some("sb_1".to_string()),

@@ -195,7 +195,7 @@ export function ExpHoverCard({
     if (r.status === "done") counts.done += 1;
     else if (r.status === "failed") counts.failed += 1;
     else if (r.status === "cancelled") counts.cancelled += 1;
-    else counts.live += 1; // starting | running
+    else if (r.status === "starting" || r.status === "running") counts.live += 1;
   }
   const duration = latestRun
     ? fmtDuration((latestRun.endedAt ?? Date.now()) - latestRun.createdAt)

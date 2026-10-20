@@ -8213,6 +8213,13 @@ fn materialize_unfinished_turns(
 // --- run watcher ----------------------------------------------------------------
 
 fn run_wakeup_text(run: &crate::store::StoredRun) -> Option<String> {
+    if run.status == "lost" {
+        return Some(format!(
+            "[orx] Run `{}` ended with **Outcome unavailable**. Its final outcome could not be \
+             collected. Inspect any partial logs using `orx logs {}`; do not assume success or failure.",
+            run.id, run.id
+        ));
+    }
     matches!(run.status.as_str(), "done" | "failed").then(|| {
         format!(
             "[orx] Run `{}` finished with status **{}**. You can compare this result with other \
@@ -10198,6 +10205,10 @@ with other project runs using `orx runs p1` and inspect the file located by `orx
             )
         );
         assert!(run_wakeup_text(&run("cancelled")).is_none());
+        assert_eq!(
+            run_wakeup_text(&run("lost")).as_deref(),
+            Some("[orx] Run `run_x` ended with **Outcome unavailable**. Its final outcome could not be collected. Inspect any partial logs using `orx logs run_x`; do not assume success or failure.")
+        );
     }
 
     #[test]
