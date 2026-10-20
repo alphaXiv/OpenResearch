@@ -757,7 +757,7 @@ export function OptionPicker({
             buttonRef.current?.focus();
             menuAction.onSelect();
           }}><span className="flex items-center gap-2"><Plus size={14} />{menuAction.label}</span></MenuItem>}
-          {searchPlaceholder && <input autoFocus={!openedByHover.current} aria-label={searchPlaceholder} placeholder={searchPlaceholder} value={filter} onChange={(e) => setFilter(e.target.value)} className="mb-2 shrink-0 border-b border-border bg-background px-2 py-2 text-sm outline-none" />}
+          {searchPlaceholder && <input autoFocus={!openedByHover.current} aria-label={searchPlaceholder} placeholder={searchPlaceholder} value={filter} onChange={(e) => setFilter(e.target.value)} className={cn("mb-2 shrink-0 border-b border-border bg-background px-2 py-2 text-sm outline-none", menuAction && "mt-1.5")} />}
           <div className="min-h-0 overflow-y-auto">
           {pinned && (
             <>

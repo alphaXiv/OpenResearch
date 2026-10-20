@@ -1667,7 +1667,7 @@ export default function App({ runtime, projectId, pane }: { runtime: RuntimeInfo
         <ClosableTab
           key={rightTabKey(tab)}
           active={sideTab !== null && sideTab.sessionId === tab.sessionId}
-          label={tab.sessionId === null ? m.side_chat_new() : session?.title?.trim() || m.side_chat_open()}
+          label={session?.title?.trim() || m.side_chat_open()}
           shimmer={session?.busy ?? false}
           icon={<MessagesSquare size={12} className="shrink-0" />}
           preview={isPreviewTab(tab)}
