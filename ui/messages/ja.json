@@ -540,6 +540,7 @@
   "status_running": "実行中",
   "status_starting": "開始中",
   "status_cancelling": "キャンセル中",
+  "status_lost": "結果を取得できません",
   "status_cancelled": "キャンセル済み",
   "status_editing": "編集中",
   "status_idle": "待機中",
