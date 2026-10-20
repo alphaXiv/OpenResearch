@@ -88,7 +88,7 @@ for (const kind of ["local", "ssh"]) {
           error: scenario === "error" ? new Error("offline") : null,
         }) },
         "./queries/projects": { listProjectsQuery: () => ({ kind: "projects" }), getUiStateQuery: () => ({ kind: "state" }) },
-        "@tanstack/react-router": { useNavigate: () => () => {} },
+        "@tanstack/react-router": { useNavigate: () => () => {}, useRouteContext: () => ({ queryClient: {} }) },
         "./RemoteRuntime": { useRuntime: () => runtime },
         "./demoSessionState": {}, "./routeResume": {}, "./workspacePersistence": {}, "./panelLayout": {},
         "./paraglide/messages.js": messages,

@@ -66,6 +66,7 @@ export function ResumeProject({ projectId }: { projectId: string }) { return <Re
 export function ProjectsPage() {
   const runtime = useRuntime();
   const navigate = useNavigate();
+  const { queryClient } = useRouteContext({ from: "__root__" });
   const projectsOptions = listProjectsQuery();
   const projectsQuery = useQuery(projectsOptions);
   const stateQuery = useQuery(getUiStateQuery());
@@ -104,6 +105,7 @@ export function ProjectsPage() {
             <ProjectsEmptyState
               remote={runtime.kind === "ssh"}
               onCreated={(project, publicationError) => {
+                queryClient.setQueryData(projectsOptions.queryKey, (cur) => [...(cur ?? []).filter((p) => p.id !== project.id), project]);
                 void navigate({
                   href: `/projects/${encodeURIComponent(project.id)}${publicationError ? "/settings/projects" : ""}`,
                 });
