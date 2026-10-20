@@ -88,7 +88,7 @@ export function WorktreeTab({
   const source = folder ? { ignored: true } : sessionId && wt?.exists ? { sessionId } : { ref: project.baselineBranch };
   const files = useQuery({ ...getCodeTreeQuery(projectId, source), enabled: folder || !sessionId || worktree.isSuccess, refetchInterval: busy ? 5_000 : false });
   const tree = files.data;
-  const error = (worktree.error ?? files.error)?.message;
+  const error = (folder ? files.error : (worktree.error ?? files.error))?.message;
   const loading = worktree.isFetching || files.isFetching;
   const [contextMenu, setContextMenu] = useState<FileContextMenuTarget | null>(null);
   const [renamingPath, setRenamingPath] = useState<string | null>(null);
@@ -167,7 +167,7 @@ export function WorktreeTab({
         onRefresh={load}
       />
       {error && (wt || tree) && <CodeTabNote>{m.worktree_tab_refresh_failed()} {ltr(error)}</CodeTabNote>}
-      {!tree || (sessionId && !wt) ? (
+      {!tree || (!folder && sessionId && !wt) ? (
         <CodeTabBody>
           <CodeTabNote>{error ? m.common_failed_to_load({ error: ltr(error) }) : m.common_loading()}</CodeTabNote>
         </CodeTabBody>
