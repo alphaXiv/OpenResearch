@@ -333,6 +333,7 @@ fn valid_location(location: &str) -> bool {
                         tab.as_ref(),
                         "settings"
                             | "harnesses"
+                            | "context"
                             | "projects"
                             | "compute"
                             | "instances"
@@ -484,6 +485,7 @@ mod tests {
         );
         assert!(valid_location(&location));
         assert!(valid_location("/projects/demo/settings/%67it"));
+        assert!(valid_location("/projects/demo/settings/context"));
         assert!(valid_location(&format!(
             "/projects/demo/tasks/new?%70ane={}&",
             urlencoding::encode(&pane.to_string())

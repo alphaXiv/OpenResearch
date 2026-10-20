@@ -514,6 +514,12 @@ const AUTO_COMPACT_PERCENTS = [60, 70, 75, 80, 85, 90, 95];
 /** Token limits offered for auto-compact; `0` is no limit. */
 const AUTO_COMPACT_TOKENS = [100_000, 150_000, 200_000, 300_000, 500_000, 0];
 
+/** Tokens at which a `window`-token chat auto-compacts; `maxTokens` 0 is no limit. */
+function autoCompactLimit(window: number, percent: number, maxTokens: number): number {
+  const byPercent = (window * percent) / 100;
+  return maxTokens ? Math.min(byPercent, maxTokens) : byPercent;
+}
+
 /** Compacts a chat on its own once a turn ends with the context this full. */
 export function AutoCompactCard() {
   const options = getAutoCompactSettingsQuery();
@@ -574,6 +580,27 @@ export function AutoCompactCard() {
         />
       </div>
       <p className="mt-2 mb-0 text-sm leading-relaxed text-subtext">{m.settings_auto_compact_cost_hint()}</p>
+      <div className="mt-4 pt-3.5 border-t border-t-border-variant">
+        <div className="text-sm font-medium">{m.settings_auto_compact_how_title()}</div>
+        <ul className="mt-1.5 mb-0 ps-5 list-disc flex flex-col gap-1.5 text-sm leading-relaxed text-text">
+          <li>
+            {m.settings_auto_compact_how_when({
+              percent: `${percent}%`,
+              tokens: maxTokens ? fmtTokens(maxTokens) : "—",
+            })}
+          </li>
+          <li>
+            {m.settings_auto_compact_how_examples({
+              small: fmtTokens(autoCompactLimit(200_000, percent, maxTokens)),
+              large: fmtTokens(autoCompactLimit(1_000_000, percent, maxTokens)),
+            })}
+          </li>
+          <li>{m.settings_auto_compact_how_method()}</li>
+          <li>{m.settings_auto_compact_how_kept()}</li>
+          <li>{m.settings_auto_compact_how_skip()}</li>
+          <li>{m.settings_auto_compact_how_manual()}</li>
+        </ul>
+      </div>
       {error && <div className="error">{error}</div>}
     </div>
   );
