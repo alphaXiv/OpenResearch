@@ -267,10 +267,15 @@ function RemoteSetup({
                     <Button
                       variant="ghost"
                       size="small"
-                      onClick={() => {
-                        void navigator.clipboard.writeText(session.repairCommand ?? "");
-                        setCopied(true);
-                        window.setTimeout(() => setCopied(false), 1500);
+                      onClick={async () => {
+                        try {
+                          await navigator.clipboard.writeText(session.repairCommand ?? "");
+                          setCopied(true);
+                          window.setTimeout(() => setCopied(false), 1500);
+                        } catch {
+                          setCopied(false);
+                          showAlert(m.file_tree_clipboard_unavailable(), "error");
+                        }
                       }}
                     >
                       {copied ? m.remote_repair_copied() : m.remote_repair_copy()}
@@ -289,7 +294,10 @@ function RemoteSetup({
                         void reconnect(true);
                         return true;
                       }}
-                      onClosed={() => setRepairTerminalOpen(false)}
+                      onError={(error) => {
+                        setRepairTerminalOpen(false);
+                        showAlert(error, "error");
+                      }}
                     />
                   )}
                 </div>
