@@ -9,7 +9,7 @@ export function TabStrip({ activeKey, children }: { activeKey: string; children:
   const hovered = useRef(false);
   const hideTimer = useRef<number | undefined>(undefined);
   const drag = useRef<{ x: number; scrollLeft: number } | null>(null);
-  const revealPending = useRef(true);
+  const followActive = useRef(true);
 
   const measure = useCallback(() => {
     const strip = stripRef.current;
@@ -26,7 +26,6 @@ export function TabStrip({ activeKey, children }: { activeKey: string; children:
     const strip = stripRef.current;
     const tab = strip?.querySelector<HTMLElement>(".tab.active");
     if (!strip || !tab) return;
-    revealPending.current = false;
     if (tab.offsetLeft < strip.scrollLeft) strip.scrollLeft = tab.offsetLeft;
     else if (tab.offsetLeft + tab.offsetWidth > strip.scrollLeft + strip.clientWidth) {
       strip.scrollLeft = tab.offsetLeft + tab.offsetWidth - strip.clientWidth;
@@ -48,9 +47,9 @@ export function TabStrip({ activeKey, children }: { activeKey: string; children:
     const content = strip?.firstElementChild;
     if (!strip || !content) return;
     const stripObserver = new ResizeObserver(measure);
-    // Tabs can render after the active key changes, so retry the reveal until it lands.
+    // Tabs load and relabel after mount; keep the active one in view until the user scrolls away.
     const contentObserver = new ResizeObserver(() => {
-      if (revealPending.current) revealActiveTab();
+      if (followActive.current) revealActiveTab();
       measure();
     });
     stripObserver.observe(strip);
@@ -74,7 +73,7 @@ export function TabStrip({ activeKey, children }: { activeKey: string; children:
   }, [overflowing, measure]);
 
   useEffect(() => {
-    revealPending.current = true;
+    followActive.current = true;
     revealActiveTab();
   }, [activeKey, revealActiveTab]);
 
@@ -89,8 +88,11 @@ export function TabStrip({ activeKey, children }: { activeKey: string; children:
           flashThumb();
         }}
         onWheel={(event) => {
-          if (event.ctrlKey || Math.abs(event.deltaY) <= Math.abs(event.deltaX)) return;
-          event.currentTarget.scrollLeft += event.deltaY * (event.deltaMode === 1 ? 16 : 1);
+          if (event.ctrlKey) return;
+          followActive.current = false;
+          if (Math.abs(event.deltaY) <= Math.abs(event.deltaX)) return;
+          const strip = event.currentTarget;
+          strip.scrollLeft += event.deltaY * (event.deltaMode === 1 ? 16 : event.deltaMode === 2 ? strip.clientWidth : 1);
         }}
       >
         <div className="flex items-end w-max">{children}</div>
@@ -111,6 +113,7 @@ export function TabStrip({ activeKey, children }: { activeKey: string; children:
             const strip = stripRef.current;
             if (!strip) return;
             event.preventDefault();
+            followActive.current = false;
             event.currentTarget.setPointerCapture(event.pointerId);
             drag.current = { x: event.clientX, scrollLeft: strip.scrollLeft };
           }}
