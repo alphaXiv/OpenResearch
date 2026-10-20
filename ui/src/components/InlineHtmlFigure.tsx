@@ -1,6 +1,6 @@
-import { useCallback, useEffect, useState } from "react";
+import { useEffect, useState } from "react";
 import { m } from "../paraglide/messages.js";
-import { isExternalMarkdownTarget, type ImageCandidate } from "../markdownTarget";
+import type { ImageCandidate } from "../markdownTarget";
 import { HtmlPreview } from "./HtmlPreview";
 
 export function InlineHtmlFigure({ candidates, name }: { candidates: ImageCandidate[]; name: string }) {
@@ -27,12 +27,8 @@ export function InlineHtmlFigure({ candidates, name }: { candidates: ImageCandid
     void load();
     return () => controller.abort();
   }, [candidates]);
-  const resolveAsset = useCallback((src: string) => {
-    if (isExternalMarkdownTarget(src)) return src;
-    return document?.resolveAsset(src) ?? null;
-  }, [document]);
   return <div className="inline-html-figure my-2 w-full min-w-0">
-    {document ? <HtmlPreview html={document.html} truncated={false} url={document.url} name={name} resolveSrc={resolveAsset} fitContent />
+    {document ? <HtmlPreview html={document.html} truncated={false} url={document.url} name={name} resolveSrc={document.resolveAsset} fitContent />
       : <div className="flex h-90 items-center justify-center text-sm text-subtext">
         {error ? <a href={candidates[0]?.url} target="_blank" rel="noopener noreferrer">{m.file_viewer_failed_to_load_file()}</a> : m.file_viewer_loading()}
       </div>}

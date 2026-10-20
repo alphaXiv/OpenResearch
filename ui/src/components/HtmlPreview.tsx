@@ -97,7 +97,7 @@ async function assembleDocument(
       if (!element.matches(selector)) continue;
       const value = element.getAttribute(attribute);
       if (!value) continue;
-      const url = resolveSrc(value);
+      const url = isExternalMarkdownTarget(value) ? value : resolveSrc(value);
       if (!url) continue;
       // Unchanged means external (a CDN script, an https image): the frame
       // fetches that for itself.

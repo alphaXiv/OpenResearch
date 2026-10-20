@@ -20,7 +20,6 @@ function mount(props) {
       if (!(slot in slots)) slots[slot] = initial;
       return [slots[slot], (value) => { slots[slot] = value; render(); }];
     },
-    useCallback: (fn) => fn,
     useEffect: (effect, deps) => {
       const slot = index++;
       const previous = slots[slot];
@@ -36,7 +35,6 @@ function mount(props) {
     react,
     "react/jsx-runtime": { jsx: element, jsxs: element },
     "../paraglide/messages.js": { m: new Proxy({}, { get: (_, key) => () => String(key) }) },
-    "../markdownTarget": { isExternalMarkdownTarget: (src) => /^https?:/.test(src) },
     "./HtmlPreview": { HtmlPreview },
   })[name], exports);
   function render() {
@@ -56,15 +54,14 @@ test("the fallback candidate that served the HTML resolves its assets", async (t
   const fetched = [];
   const replies = { "/a": response(404, "text/html"), "/b": response(200, "image/png"), "/c": response(200, "text/html; charset=utf-8", "<p>c</p>"), "/d": response(200, "text/html") };
   t.mock.method(globalThis, "fetch", async (url) => { fetched.push(url); return replies[url]; });
-  const candidate = (url) => ({ url, resolveAsset: (src) => `${url}:${src}` });
-  const view = mount({ candidates: ["/a", "/b", "/c", "/d"].map(candidate), name: "chart" });
+  const candidates = ["/a", "/b", "/c", "/d"].map((url) => ({ url, resolveAsset: (src) => `${url}:${src}` }));
+  const view = mount({ candidates, name: "chart" });
   await settle();
   const preview = view.preview();
   assert.deepEqual(fetched, ["/a", "/b", "/c"]);
   assert.equal(preview.url, "/c");
   assert.equal(preview.html, "<p>c</p>");
-  assert.equal(preview.resolveSrc("../../shared.png"), "/c:../../shared.png");
-  assert.equal(preview.resolveSrc("https://cdn.example/x.js"), "https://cdn.example/x.js");
+  assert.equal(preview.resolveSrc, candidates[2].resolveAsset);
 });
 
 test("changing candidates aborts the previous load, and all-failed shows a bounded error", async (t) => {
