@@ -64,9 +64,9 @@ export function TabStrip({ activeKey, children }: { activeKey: string; children:
   useEffect(() => {
     if (overflowing) {
       measure();
+      setThumbVisible(hovered.current);
       return;
     }
-    hovered.current = false;
     drag.current = null;
     window.clearTimeout(hideTimer.current);
     setThumbVisible(false);
@@ -78,7 +78,18 @@ export function TabStrip({ activeKey, children }: { activeKey: string; children:
   }, [activeKey, revealActiveTab]);
 
   return (
-    <div className="relative flex-1 min-w-0">
+    <div
+      className="relative flex-1 min-w-0"
+      onPointerEnter={() => {
+        hovered.current = true;
+        window.clearTimeout(hideTimer.current);
+        setThumbVisible(true);
+      }}
+      onPointerLeave={() => {
+        hovered.current = false;
+        flashThumb();
+      }}
+    >
       {/* `relative` makes the strip the tabs' offsetParent for the reveal math. */}
       <div
         ref={stripRef}
@@ -101,14 +112,7 @@ export function TabStrip({ activeKey, children }: { activeKey: string; children:
         <div
           ref={thumbRef}
           aria-hidden="true"
-          className={`absolute start-0 -bottom-px flex items-end h-1 ${thumbVisible ? "" : "pointer-events-none"}`}
-          onPointerEnter={() => {
-            hovered.current = true;
-          }}
-          onPointerLeave={() => {
-            hovered.current = false;
-            flashThumb();
-          }}
+          className={`absolute start-0 -bottom-px flex items-end h-0.5 ${thumbVisible ? "" : "pointer-events-none"}`}
           onPointerDown={(event) => {
             const strip = stripRef.current;
             if (!strip) return;

@@ -83,7 +83,7 @@ export function WorkspaceTools({ expanded, experiments, runs, onOpenExperiment, 
               <span className="flex items-center gap-4"><Terminal size={15} />{m.workspace_terminal()}</span>
             </MenuItem>
             {onSideChat && sessionId && (
-              <div className="flex items-center gap-3 px-2">
+              <div className="flex items-center gap-2.25 px-0.5">
                 <SideChatPicker parentId={sessionId} sessions={sessions} onSelect={onSelectSideChat} onCreate={onSideChat} />
                 <span className="text-sm text-text">{m.side_chat_open()}</span>
               </div>
@@ -132,7 +132,7 @@ function SideChatPicker({ parentId, sessions, onSelect, onCreate }: {
     value=""
     dropDown
     align="right"
-    searchPlaceholder={m.side_chat_search()}
+    searchPlaceholder={children.length > 0 ? m.side_chat_search() : undefined}
     menuAction={{ label: m.side_chat_new(), onSelect: onCreate }}
     renderLabel={(choice) => <span className="block max-w-60 truncate">{choice.label}</span>}
     renderIcon={(choice) => children.find((session) => session.id === choice.id)?.busy
