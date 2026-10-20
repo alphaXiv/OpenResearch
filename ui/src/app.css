@@ -365,9 +365,9 @@
   }
 }
 
-/* Reserve room for the four workspace buttons and their gaps. */
+/* Reserve room for the workspace toolbar. */
 .workspace-body > .chat-pane .chat-header {
-  padding-inline-end: 12rem;
+  padding-inline-end: 11rem;
 }
 
 .workspace-card-visible > .chat-pane {
