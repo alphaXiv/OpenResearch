@@ -1845,6 +1845,12 @@ fn repair_command_for(error: &crate::error::Error) -> Option<String> {
 
 fn parse_remote_orx_rejection(output: &str) -> Option<RemoteOrxRejection> {
     let path = marker_value(output, REMOTE_REJECTED_MARKER)?;
+    // Multiple path records mean a newline split the path; no fragment is safe to repair.
+    let repairable = output
+        .lines()
+        .filter(|line| line.starts_with(REMOTE_REJECTED_MARKER))
+        .count()
+        == 1;
     // The probe's `find "$p" "$(dirname "$p")" -prune` can only report the
     // binary or its directory; any other writable marker is an injected line
     // and must not become a chmod target in the repair command.
@@ -1856,7 +1862,7 @@ fn parse_remote_orx_rejection(output: &str) -> Option<RemoteOrxRejection> {
             .lines()
             .filter_map(|line| line.strip_prefix(REMOTE_REJECTED_WRITABLE_MARKER))
             .map(str::to_string)
-            .filter(|entry| entry == &path || Some(entry.as_str()) == parent)
+            .filter(|entry| repairable && (entry == &path || Some(entry.as_str()) == parent))
             .collect(),
         path,
         not_owned: output
@@ -2935,6 +2941,30 @@ mod tests {
             },
         );
         assert_eq!(repair_command_for(&error), None);
+    }
+
+    #[test]
+    fn newline_split_rejection_paths_offer_no_repair() {
+        let rejection = parse_remote_orx_rejection(
+            "ORX_REMOTE_REJECTED=/srv/shared/prefix\n\
+             ORX_REMOTE_REJECTED=/home/user/project/orx\n\
+             ORX_REMOTE_REJECTED_WRITABLE=/srv/shared/prefix\n\
+             ORX_REMOTE_REJECTED_WRITABLE=/home/user/project/orx\n\
+             ORX_REMOTE_REJECTED_WRITABLE=/srv/shared/prefix\n\
+             ORX_REMOTE_REJECTED_WRITABLE=/home/user/project\n",
+        )
+        .unwrap();
+        assert!(rejection.writable.is_empty());
+        assert_eq!(rejection.repair_command(), None);
+        assert!(matches!(
+            classify_probe_output(
+                "ORX_REMOTE_REJECTED=/srv/shared/prefix\n\
+                 ORX_REMOTE_REJECTED=/home/user/project/orx\n\
+                 ORX_REMOTE_PATH=/trusted/orx\n\
+                 ORX_REMOTE_VERSION=orx 9.9.9\n"
+            ),
+            RemoteOrxProbe::Rejected(_)
+        ));
     }
 
     #[test]
