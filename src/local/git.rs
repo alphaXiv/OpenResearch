@@ -2306,9 +2306,9 @@ pub fn list_worktree_files(repo: &Path) -> Result<Vec<String>> {
 
 /// The gitignored untracked files `list_worktree_files` leaves out (logs,
 /// data, build output), repo-relative, at most `limit`. `--directory` keeps
-/// git out of ignored folders; each is then walked for at most `per_dir`
-/// files and its share of `limit`, so `.venv/` can't crowd out `results/`. The flag is true when
-/// anything was left out.
+/// git out of ignored folders; each is walked for at most `per_dir` files,
+/// sharing `limit` max-min fairly so `.venv/` can't crowd out `results/`. The
+/// flag is true when anything was left out.
 pub fn list_ignored_files(
     repo: &Path,
     per_dir: usize,
@@ -2322,28 +2322,46 @@ pub fn list_ignored_files(
             "--ignored",
             "--exclude-standard",
             "--directory",
+            "--no-empty-directory",
             "-z",
         ],
         &[],
     )?;
-    let found = split_nul(&bytes);
-    // An equal share of the room left after the loose files, so the folders
-    // that sort first can't take it all.
-    let dirs = found.iter().filter(|e| e.ends_with('/')).count();
-    let share = per_dir.min((limit.saturating_sub(found.len() - dirs) / dirs.max(1)).max(1));
-    let mut entries = Vec::new();
-    let mut truncated = false;
-    for entry in found {
-        if entries.len() >= limit {
-            return Ok((entries, true));
+    let (dirs, mut entries): (Vec<_>, Vec<_>) = split_nul(&bytes)
+        .into_iter()
+        .partition(|e| e.ends_with('/'));
+    let mut truncated = entries.len() > limit;
+    entries.truncate(limit);
+    let mut room = limit - entries.len();
+    // (folder, its files so far, cut short); unwalked folders count as cut.
+    let mut folders: Vec<_> = dirs
+        .into_iter()
+        .map(|d| (d.trim_end_matches('/').to_string(), Vec::new(), true))
+        .collect();
+    // Re-walk the folders still cut short with an equal share of the room the
+    // others left, until it's used up or every folder fits.
+    loop {
+        let open = folders
+            .iter()
+            .filter(|f| f.2 && f.1.len() < per_dir)
+            .count();
+        if open == 0 || room == 0 {
+            break;
         }
-        match entry.strip_suffix('/') {
-            None => entries.push(entry),
-            Some(dir) => {
-                let cap = limit.min(entries.len() + share);
-                truncated |= walk_files(repo, dir, &mut entries, cap);
+        let share = (room / open).max(1);
+        for (dir, files, cut) in folders.iter_mut().filter(|f| f.2 && f.1.len() < per_dir) {
+            if room == 0 {
+                break;
             }
+            let had = files.len();
+            files.clear();
+            *cut = walk_files(repo, dir, files, per_dir.min(had + share.min(room)));
+            room -= files.len() - had;
         }
+    }
+    for (_, files, cut) in folders {
+        truncated |= cut;
+        entries.extend(files);
     }
     Ok((entries, truncated))
 }
@@ -2569,7 +2587,7 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("orx-git-ignored-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(&dir).unwrap();
         run(&dir, &["init", "-q"]);
-        write(&dir, ".gitignore", "build/\nresults/\n*.log\n");
+        write(&dir, ".gitignore", "build/\ncache/\nresults/\n*.log\n");
         write(&dir, "notes.md", "notes\n");
         write(&dir, "run.log", "log\n");
         write(&dir, "results/metrics.csv", "1\n");
@@ -2577,10 +2595,12 @@ mod tests {
         for name in ["a", "b", "c"] {
             write(&dir, &format!("build/{name}.o"), "");
         }
+        write(&dir, "cache/x", "");
         let (mut ignored, truncated) = list_ignored_files(&dir, 10, 10).unwrap();
         ignored.sort();
         let (capped, capped_truncated) = list_ignored_files(&dir, 1, 10).unwrap();
-        let (shared, _) = list_ignored_files(&dir, 10, 3).unwrap();
+        let (shared, _) = list_ignored_files(&dir, 10, 4).unwrap();
+        let (refilled, refilled_truncated) = list_ignored_files(&dir, 10, 6).unwrap();
         let mut listed = list_worktree_files(&dir).unwrap();
         listed.sort();
         let _ = std::fs::remove_dir_all(&dir);
@@ -2590,6 +2610,7 @@ mod tests {
                 "build/a.o",
                 "build/b.o",
                 "build/c.o",
+                "cache/x",
                 "results/deep/b.csv",
                 "results/metrics.csv",
                 "run.log"
@@ -2597,12 +2618,19 @@ mod tests {
         );
         assert!(!truncated);
         // One file per ignored folder, and the folders don't hide `run.log`.
-        assert_eq!(capped.len(), 3);
+        assert_eq!(capped.len(), 4);
         assert!(capped.contains(&"run.log".to_string()));
         assert!(capped_truncated);
         // A tight limit is split between folders, not used up by `build/`.
-        assert_eq!(shared.len(), 3);
+        assert_eq!(shared.len(), 4);
         assert!(shared.iter().any(|e| e.starts_with("results/")));
+        // Room `cache/` leaves goes to the folders it cut short.
+        assert_eq!(refilled.len(), 6);
+        assert_eq!(
+            refilled.iter().filter(|e| e.starts_with("build/")).count(),
+            2
+        );
+        assert!(refilled_truncated);
         assert_eq!(listed, [".gitignore", "notes.md"]);
     }
 
