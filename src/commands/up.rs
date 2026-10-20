@@ -5857,6 +5857,28 @@ pub(crate) async fn ssh_connect_to_target(
     })
 }
 
+/// Open a terminal that SSHes to `target` and runs a fixed `command`. Used by
+/// the remote gateway's repair flow: the command is server-derived, so unlike
+/// [`ssh_connect_to_target`] the client never supplies it, and no preflight
+/// runs afterwards.
+pub(crate) async fn ssh_run_to_target(
+    headers: HeaderMap,
+    ws: WebSocketUpgrade,
+    host: String,
+    target: crate::jobs::ssh::SshTarget,
+    command: String,
+) -> Response {
+    if !same_origin(&headers) {
+        return ApiError(StatusCode::FORBIDDEN, "SSH terminal origin rejected".into())
+            .into_response();
+    }
+    let active = Active::new();
+    ws.on_upgrade(move |socket| async move {
+        let _active = active;
+        ssh_run_socket(socket, host, target, command).await
+    })
+}
+
 const DEFAULT_PTY_SIZE: PtySize = PtySize {
     rows: 24,
     cols: 80,
@@ -5982,7 +6004,7 @@ async fn ssh_connect_socket(
     backend: SshConnectBackend,
     target: crate::jobs::ssh::SshTarget,
 ) {
-    let connection = match crate::jobs::ssh::interactive_args(&target, None).await {
+    let connection = match crate::jobs::ssh::interactive_args(&target, None, None).await {
         Ok(connection) => connection,
         Err(error) => {
             send_ssh_connect_error(&mut socket, &host, backend, error.to_string()).await;
@@ -6065,6 +6087,81 @@ async fn ssh_connect_socket(
             record_ssh_host_test(&test).await;
         }
         close_socket(&mut socket).await;
+    }
+}
+
+async fn send_ws_error(socket: &mut WebSocket, error: String) {
+    let _ = socket
+        .send(Message::Text(
+            json!({ "type": "error", "error": error })
+                .to_string()
+                .into(),
+        ))
+        .await;
+    close_socket(socket).await;
+}
+
+async fn ssh_run_socket(
+    mut socket: WebSocket,
+    host: String,
+    target: crate::jobs::ssh::SshTarget,
+    command: String,
+) {
+    let connection = match crate::jobs::ssh::interactive_args(&target, None, Some(command)).await {
+        Ok(connection) => connection,
+        Err(error) => {
+            send_ws_error(&mut socket, error.to_string()).await;
+            return;
+        }
+    };
+    let args = connection.args.clone();
+    let session = match tokio::task::spawn_blocking(move || start_pty("ssh", args)).await {
+        Ok(Ok(session)) => session,
+        Ok(Err(error)) => {
+            send_ws_error(&mut socket, error.to_string()).await;
+            return;
+        }
+        Err(error) => {
+            send_ws_error(&mut socket, format!("SSH terminal task failed: {error}")).await;
+            return;
+        }
+    };
+    let mut size = DEFAULT_PTY_SIZE;
+    let Some(status) = relay_pty(&mut socket, session, None, &mut size, None).await else {
+        return;
+    };
+
+    match status {
+        Ok(status) if status.success() => {
+            if let Some(warning) = crate::jobs::ssh::setup_connection_sharing(&target).await {
+                let _ = socket
+                    .send(Message::Binary(
+                        format!("\r\norx: warning: {warning}\r\n")
+                            .into_bytes()
+                            .into(),
+                    ))
+                    .await;
+            }
+            if socket
+                .send(Message::Text(
+                    json!({ "type": "complete" }).to_string().into(),
+                ))
+                .await
+                .is_ok()
+            {
+                close_socket(&mut socket).await;
+            }
+        }
+        Ok(status) => {
+            send_ws_error(
+                &mut socket,
+                format!("ssh {host} exited with code {}", status.exit_code()),
+            )
+            .await;
+        }
+        Err(error) => {
+            send_ws_error(&mut socket, error).await;
+        }
     }
 }
 

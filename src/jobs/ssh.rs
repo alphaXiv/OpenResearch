@@ -350,6 +350,7 @@ pub(crate) struct InteractiveConnection {
 pub(crate) async fn interactive_args(
     target: &SshTarget,
     persist: Option<u64>,
+    remote_command: Option<String>,
 ) -> Result<InteractiveConnection> {
     prepare_control_dir()?;
     #[cfg(unix)]
@@ -407,7 +408,11 @@ pub(crate) async fn interactive_args(
         args.extend(["-o".into(), format!("ControlPersist={seconds}")]);
     }
     args.extend(options);
-    args.extend(["--".into(), target.dest.clone(), "true".into()]);
+    args.extend([
+        "--".into(),
+        target.dest.clone(),
+        remote_command.unwrap_or_else(|| "true".into()),
+    ]);
     Ok(InteractiveConnection {
         args,
         #[cfg(unix)]
@@ -1187,22 +1192,23 @@ mod tests {
         prepare_control_dir().unwrap();
         let path = resolved_control_path(&target).await.unwrap();
         drop(UnixListener::bind(&path).unwrap());
-        interactive_args(&target, None).await.unwrap();
+        interactive_args(&target, None, None).await.unwrap();
         assert!(std::fs::symlink_metadata(&path).is_err());
         symlink(path.with_extension("missing"), &path).unwrap();
-        let args = interactive_args(&target, Some(120)).await.unwrap();
+        let args = interactive_args(&target, Some(120), None).await.unwrap();
         assert!(std::fs::symlink_metadata(&path).is_err());
         assert_eq!(args.args[..2], ["-o", "ControlPersist=120"]);
         let socket = UnixListener::bind(&path).unwrap();
-        assert!(
-            tokio::time::timeout(Duration::from_millis(100), interactive_args(&target, None))
-                .await
-                .is_err()
-        );
+        assert!(tokio::time::timeout(
+            Duration::from_millis(100),
+            interactive_args(&target, None, None)
+        )
+        .await
+        .is_err());
         assert!(path.exists());
         drop(socket);
         drop(args);
-        assert!(interactive_args(&target, None).await.is_ok());
+        assert!(interactive_args(&target, None, None).await.is_ok());
         let opts = ssh_opts(&target, true);
         for option in [
             "ServerAliveInterval=30",

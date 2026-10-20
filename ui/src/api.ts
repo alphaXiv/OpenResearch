@@ -1051,6 +1051,9 @@ export interface RemoteSessionInfo {
   dashboardProtocol: number | null;
   gatewayUrl: string;
   error: string | null;
+  /** Server-derived repair command for a permission rejection, shown inline so
+   * the user can copy it or run it in the terminal. */
+  repairCommand: string | null;
   installPaths: RemoteInstallPaths | null;
   uiPreferences: { theme: string | null; locale: string | null };
   canStartNewHost: boolean;
