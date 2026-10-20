@@ -978,12 +978,15 @@ export interface AutoCompactSettings {
   enabled: boolean;
   /** Threshold in percent of the context window (50–95). */
   percent: number;
+  /** Also compact once this many tokens are in use; `null` = no token limit. */
+  maxTokens: number | null;
 }
 
 export const getAutoCompactSettings = (signal?: AbortSignal) =>
   get<AutoCompactSettings>("/api/settings/auto-compact", signal);
 
-export const setAutoCompactSettings = (update: { enabled?: boolean; percent?: number }) =>
+/** `maxTokens: 0` turns the token limit off. */
+export const setAutoCompactSettings = (update: { enabled?: boolean; percent?: number; maxTokens?: number }) =>
   post<AutoCompactSettings>("/api/settings/auto-compact", update);
 
 export interface CrossHarnessSettings {

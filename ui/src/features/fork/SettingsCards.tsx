@@ -58,6 +58,7 @@ import {
   setCrossHarnessSettings,
   setComputeRoutingSettings,
   setAutoCompactSettings,
+  fmtTokens,
 } from "../../api";
 import { m } from "../../paraglide/messages.js";
 import { fmtUnits } from "../../features/fork/ComputeSections";
@@ -510,6 +511,8 @@ export function ComputeRoutingCard({ targets }: { targets: ComputeTargetSummary[
 
 /** Thresholds offered for auto-compact, in percent of the context window. */
 const AUTO_COMPACT_PERCENTS = [60, 70, 75, 80, 85, 90, 95];
+/** Token limits offered for auto-compact; `0` is no limit. */
+const AUTO_COMPACT_TOKENS = [100_000, 150_000, 200_000, 300_000, 500_000, 0];
 
 /** Compacts a chat on its own once a turn ends with the context this full. */
 export function AutoCompactCard() {
@@ -520,8 +523,10 @@ export function AutoCompactCard() {
   const enabled = query.data?.enabled ?? true;
   const percent = query.data?.percent ?? 80;
   const choices = AUTO_COMPACT_PERCENTS.includes(percent) ? AUTO_COMPACT_PERCENTS : [...AUTO_COMPACT_PERCENTS, percent].sort((a, b) => a - b);
+  const maxTokens = query.data ? query.data.maxTokens ?? 0 : 200_000;
+  const tokenChoices = AUTO_COMPACT_TOKENS.includes(maxTokens) ? AUTO_COMPACT_TOKENS : [...AUTO_COMPACT_TOKENS.slice(0, -1), maxTokens].sort((a, b) => a - b).concat(0);
 
-  async function save(update: { enabled?: boolean; percent?: number }) {
+  async function save(update: { enabled?: boolean; percent?: number; maxTokens?: number }) {
     setError(null);
     try {
       const next = await mutation.mutateAsync(update);
@@ -546,7 +551,7 @@ export function AutoCompactCard() {
           onClick={() => void save({ enabled: !enabled })}
         />
       </div>
-      <div className="mt-3 flex items-center gap-2.5 text-sm">
+      <div className="mt-3 flex flex-wrap items-center gap-2.5 text-sm">
         <span>{m.settings_auto_compact_threshold()}</span>
         <OptionPicker
           variant="field"
@@ -557,7 +562,18 @@ export function AutoCompactCard() {
           value={String(percent)}
           onSelect={(id) => void save({ percent: Number(id) })}
         />
+        <span>{m.settings_auto_compact_max_tokens()}</span>
+        <OptionPicker
+          variant="field"
+          dropDown
+          title={m.settings_auto_compact_max_tokens()}
+          disabled={!query.data || !enabled || mutation.isPending}
+          choices={tokenChoices.map((value) => ({ id: String(value), label: value ? fmtTokens(value) : m.settings_auto_compact_no_limit() }))}
+          value={String(maxTokens)}
+          onSelect={(id) => void save({ maxTokens: Number(id) })}
+        />
       </div>
+      <p className="mt-2 mb-0 text-sm leading-relaxed text-subtext">{m.settings_auto_compact_cost_hint()}</p>
       {error && <div className="error">{error}</div>}
     </div>
   );

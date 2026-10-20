@@ -2,7 +2,7 @@ import { useQuery } from "@tanstack/react-query";
 import { m } from "../paraglide/messages.js";
 import { ltr } from "../i18n";
 import { getLocale } from "../paraglide/runtime.js";
-import { fmtTokens, type ContextUsage } from "../api";
+import { fmtTokens, type AutoCompactSettings, type ContextUsage } from "../api";
 import { usePopover } from "./ModelPicker";
 import { ProgressBar } from "./ProgressBar";
 import { Button } from "./ui";
@@ -93,7 +93,7 @@ function VisibleContextMeter({ usage, busy, onCompact }: { usage: ContextUsage; 
                 ? m.context_meter_auto_compact_off()
                 : pct === null
                   ? m.context_meter_auto_compact_unknown()
-                  : m.context_meter_auto_compact_at({ percent: ltr(`${autoCompact.percent}%`) })}
+                  : m.context_meter_auto_compact_at({ percent: ltr(autoCompactPoint(autoCompact, contextWindow!)) })}
             </div>
           )}
           {onCompact && (
@@ -112,4 +112,13 @@ function VisibleContextMeter({ usage, busy, onCompact }: { usage: ContextUsage; 
       )}
     </div>
   );
+}
+
+/** Where auto-compact fires for this window: the percentage, or the token
+ * limit when that comes first. */
+function autoCompactPoint(settings: AutoCompactSettings, contextWindow: number): string {
+  const byPercent = (contextWindow * settings.percent) / 100;
+  return settings.maxTokens !== null && settings.maxTokens < byPercent
+    ? fmtTokens(settings.maxTokens)
+    : `${settings.percent}%`;
 }
