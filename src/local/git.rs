@@ -2322,7 +2322,6 @@ pub fn list_ignored_files(
             "--ignored",
             "--exclude-standard",
             "--directory",
-            "--no-empty-directory",
             "-z",
         ],
         &[],
@@ -2617,6 +2616,18 @@ mod tests {
         let (capped, capped_truncated) = list_ignored_files(&dir, 1, 10).unwrap();
         let (shared, _) = list_ignored_files(&dir, 10, 4).unwrap();
         let (refilled, refilled_truncated) = list_ignored_files(&dir, 10, 6).unwrap();
+        #[cfg(unix)]
+        let unreadable = {
+            use std::os::unix::fs::PermissionsExt;
+            let cache = dir.join("cache");
+            std::fs::set_permissions(&cache, std::fs::Permissions::from_mode(0o000)).unwrap();
+            // Root can read it anyway; nothing to check then.
+            let result = std::fs::read_dir(&cache)
+                .is_err()
+                .then(|| list_ignored_files(&dir, 10, 10).unwrap());
+            std::fs::set_permissions(&cache, std::fs::Permissions::from_mode(0o755)).unwrap();
+            result
+        };
         let mut listed = list_worktree_files(&dir).unwrap();
         listed.sort();
         let _ = std::fs::remove_dir_all(&dir);
@@ -2647,6 +2658,12 @@ mod tests {
             2
         );
         assert!(refilled_truncated);
+        // An unreadable ignored folder marks the listing incomplete.
+        #[cfg(unix)]
+        if let Some((files, cut)) = unreadable {
+            assert!(!files.iter().any(|e| e.starts_with("cache/")));
+            assert!(cut);
+        }
         assert_eq!(listed, [".gitignore", "notes.md"]);
     }
 
