@@ -536,6 +536,7 @@
   "status_running": "در حال اجرا",
   "status_starting": "در حال آغاز",
   "status_cancelling": "در حال لغو",
+  "status_lost": "نتیجه در دسترس نیست",
   "status_cancelled": "لغوشده",
   "status_editing": "در حال ویرایش",
   "status_idle": "بی‌کار",

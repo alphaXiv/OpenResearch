@@ -184,7 +184,7 @@ pub async fn launched(target: &super::ssh::SshTarget, run_id: &str) -> Result<bo
         target,
         &format!(
             "d=\"$HOME/{dir}\"; \
-             if [ -e \"$d/pid\" ] || [ -e \"$d/exit_code\" ]; then echo STARTED; else echo FRESH; fi"
+             if [ -e \"$d/pid\" ] || [ -e \"$d/exit_code\" ] || [ -e \"$d/launch_started\" ]; then echo STARTED; else echo FRESH; fi"
         ),
         None,
     )
@@ -242,6 +242,7 @@ mod tests {
     fn parse_flavor_sends_uppercase_gpu_id() {
         let body = crate::client::CreateSandboxBody {
             organization_id: "org".into(),
+            rental_lease: None,
             target: parse_flavor("rtx_3090", 100, None).unwrap(),
         };
         let body = serde_json::to_value(&body).unwrap();

@@ -16,6 +16,7 @@ const STATUS_WORD: Record<HistoryStatus, () => string> = {
   done: m.status_done,
   failed: m.status_failed,
   cancelled: m.status_cancelled,
+  lost: m.status_lost,
   running: m.status_running,
   none: m.history_status_not_run,
 };
@@ -23,6 +24,7 @@ const STATUS_TONE: Record<HistoryStatus, string> = {
   done: "var(--accent-green)",
   failed: "var(--accent-red)",
   cancelled: "var(--muted)",
+  lost: "var(--muted)",
   running: "var(--accent-teal)",
   none: "var(--muted)",
 };
@@ -55,7 +57,7 @@ function StatusShape({ status, cx, cy, r, color, background = "var(--base)" }: {
         <path d={`M${cx} ${cy - inner}A${inner} ${inner} 0 0 1 ${cx} ${cy + inner}Z`} fill={color} />
       </g>
     );
-  if (status === "cancelled") {
+  if (status === "cancelled" || status === "lost") {
     const s = (r - stroke) * 0.7;
     return (
       <g>
