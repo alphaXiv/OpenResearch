@@ -6435,7 +6435,9 @@ export function ChatPanel({
                 onBlurCapture={(event) => {
                   if (!event.currentTarget.contains(event.relatedTarget)) setFocusedSidebarRow(null);
                 }}
-                className={sidebarScrollable ? "absolute top-0 start-0 w-full" : "relative"}
+                // Each row is its own stacking context (translateY), so a row with an
+                // open session menu has to sit above the rows painted after it.
+                className={`${sidebarScrollable ? "absolute top-0 start-0 w-full" : "relative"} has-[.option-menu]:z-10`}
                 style={{ height: sidebarRowHeight(row), transform: sidebarScrollable ? `translateY(${top}px)` : undefined }}
               >
                 {row.kind === "project" ? (
