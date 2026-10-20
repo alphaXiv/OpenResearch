@@ -540,6 +540,7 @@
   "status_running": "실행 중",
   "status_starting": "시작 중",
   "status_cancelling": "취소 중",
+  "status_lost": "결과를 확인할 수 없음",
   "status_cancelled": "취소됨",
   "status_editing": "편집 중",
   "status_idle": "대기 중",

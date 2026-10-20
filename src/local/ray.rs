@@ -126,6 +126,7 @@ pub async fn submit_local_ray_with_source(
         ssh_container: None,
         monitoring_error: None,
         cancellation_accepted: false,
+        rental_lease: None,
         kind: "ray_job".to_string(),
         namespace: Some(address.clone()),
         job_id: Some(submission_id.clone()),

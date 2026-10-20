@@ -540,6 +540,7 @@
   "status_running": "W toku",
   "status_starting": "Uruchamianie",
   "status_cancelling": "Anulowanie",
+  "status_lost": "Wynik niedostępny",
   "status_cancelled": "Anulowano",
   "status_editing": "Edytowanie",
   "status_idle": "Bezczynny",

@@ -89,7 +89,7 @@ export interface Experiment {
   archived: boolean;
 }
 
-export type RunStatus = "starting" | "running" | "done" | "failed" | "cancelled";
+export type RunStatus = "starting" | "running" | "done" | "failed" | "cancelled" | "lost";
 export type RunDisplayStatus = RunStatus | "cancelling";
 
 export interface Run {

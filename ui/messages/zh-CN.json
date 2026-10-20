@@ -536,6 +536,7 @@
   "status_running": "运行中",
   "status_starting": "正在启动",
   "status_cancelling": "正在取消",
+  "status_lost": "结果不可用",
   "status_cancelled": "已取消",
   "status_editing": "正在编辑",
   "status_idle": "空闲",

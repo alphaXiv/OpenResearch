@@ -86,6 +86,7 @@ pub async fn submit_local_ssh_with_source(
         ssh_container: container.clone(),
         monitoring_error: None,
         cancellation_accepted: false,
+        rental_lease: None,
         kind: "ssh_job".to_string(),
         namespace: Some(target.dest.clone()),
         job_id: Some(remote_dir.clone()),

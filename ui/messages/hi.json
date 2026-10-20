@@ -540,6 +540,7 @@
   "status_running": "चल रहा है",
   "status_starting": "शुरू हो रहा है",
   "status_cancelling": "रद्द हो रहा है",
+  "status_lost": "परिणाम उपलब्ध नहीं",
   "status_cancelled": "रद्द किया गया",
   "status_editing": "संपादित हो रहा है",
   "status_idle": "निष्क्रिय",
