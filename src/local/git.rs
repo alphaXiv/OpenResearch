@@ -2305,8 +2305,15 @@ pub fn list_worktree_files(repo: &Path) -> Result<Vec<String>> {
 }
 
 /// The gitignored untracked files `list_worktree_files` leaves out (logs,
-/// data, build output). Repo-relative, unsorted.
-pub fn list_ignored_files(repo: &Path) -> Result<Vec<String>> {
+/// data, build output), repo-relative, at most `limit`. `--directory` keeps
+/// git out of ignored folders; each is then walked for at most `per_dir`
+/// files, so one `.venv/` can't crowd out `results/`. The flag is true when
+/// anything was left out.
+pub fn list_ignored_files(
+    repo: &Path,
+    per_dir: usize,
+    limit: usize,
+) -> Result<(Vec<String>, bool)> {
     let bytes = git_bytes(
         repo,
         &[
@@ -2314,13 +2321,54 @@ pub fn list_ignored_files(repo: &Path) -> Result<Vec<String>> {
             "--others",
             "--ignored",
             "--exclude-standard",
+            "--directory",
             "-z",
         ],
         &[],
     )?;
-    let mut entries = split_nul(&bytes);
-    entries.retain(|e| !e.ends_with('/'));
-    Ok(entries)
+    let mut entries = Vec::new();
+    let mut truncated = false;
+    for entry in split_nul(&bytes) {
+        if entries.len() >= limit {
+            return Ok((entries, true));
+        }
+        match entry.strip_suffix('/') {
+            None => entries.push(entry),
+            Some(dir) => {
+                let cap = limit.min(entries.len() + per_dir);
+                truncated |= walk_files(repo, dir, &mut entries, cap);
+            }
+        }
+    }
+    Ok((entries, truncated))
+}
+
+/// Pushes the files under `repo/dir` (symlinks not followed, nested `.git`
+/// skipped) until `entries` holds `cap`; true if it stopped early.
+fn walk_files(repo: &Path, dir: &str, entries: &mut Vec<String>, cap: usize) -> bool {
+    let mut stack = vec![dir.to_string()];
+    while let Some(rel) = stack.pop() {
+        let Ok(read) = std::fs::read_dir(repo.join(&rel)) else {
+            continue;
+        };
+        let mut items: Vec<_> = read
+            .flatten()
+            .filter_map(|item| Some((item.file_name().into_string().ok()?, item.file_type().ok()?)))
+            .filter(|(name, _)| name != ".git")
+            .collect();
+        items.sort_by(|a, b| b.0.cmp(&a.0));
+        for (name, kind) in items {
+            let path = format!("{rel}/{name}");
+            if kind.is_dir() {
+                stack.push(path);
+            } else if entries.len() >= cap {
+                return true;
+            } else {
+                entries.push(path);
+            }
+        }
+    }
+    false
 }
 
 /// Resolve a branch name to its commit sha — the *local* ref first, then
@@ -2520,12 +2568,22 @@ mod tests {
         write(&dir, "notes.md", "notes\n");
         write(&dir, "run.log", "log\n");
         write(&dir, "results/metrics.csv", "1\n");
-        let mut ignored = list_ignored_files(&dir).unwrap();
+        write(&dir, "results/deep/b.csv", "2\n");
+        let (mut ignored, truncated) = list_ignored_files(&dir, 10, 10).unwrap();
         ignored.sort();
+        let (capped, capped_truncated) = list_ignored_files(&dir, 1, 10).unwrap();
         let mut listed = list_worktree_files(&dir).unwrap();
         listed.sort();
         let _ = std::fs::remove_dir_all(&dir);
-        assert_eq!(ignored, ["results/metrics.csv", "run.log"]);
+        assert_eq!(
+            ignored,
+            ["results/deep/b.csv", "results/metrics.csv", "run.log"]
+        );
+        assert!(!truncated);
+        // One file per ignored folder, and the folder doesn't hide `run.log`.
+        assert_eq!(capped.len(), 2);
+        assert!(capped.contains(&"run.log".to_string()));
+        assert!(capped_truncated);
         assert_eq!(listed, [".gitignore", "notes.md"]);
     }
 

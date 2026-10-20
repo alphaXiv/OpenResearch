@@ -2891,6 +2891,8 @@ struct CodeTreeQuery {
 
 /// Cap on entries returned by the code-tree listing.
 const CODE_TREE_LIMIT: usize = 20_000;
+/// Most files listed per gitignored folder in the project folder view.
+const IGNORED_DIR_LIMIT: usize = 2_000;
 
 /// Flat file listing for the UI code browser. With `ref`: the committed tree
 /// of that branch (local ref first, then origin's), independent of any
@@ -2937,14 +2939,15 @@ async fn project_code_tree(Path(id): Path<String>, Query(q): Query<CodeTreeQuery
         // During a merge conflict `ls-files --cached` emits an unmerged path
         // once per stage — collapse to one entry (they'd be duplicate keys).
         entries.dedup();
+        let mut truncated = entries.len() > CODE_TREE_LIMIT;
         if q.ignored && ref_name.is_none() {
-            // Appended after the sort so a huge ignored tree (`.venv/`) is what
-            // the cap drops, not the project's own files.
-            let mut ignored = local::git::list_ignored_files(&root)?;
-            ignored.sort();
+            // Only the room the project's own files leave, and a share per
+            // ignored folder so `.venv/` can't hide `results/`.
+            let room = CODE_TREE_LIMIT.saturating_sub(entries.len());
+            let (ignored, cut) = local::git::list_ignored_files(&root, IGNORED_DIR_LIMIT, room)?;
             entries.extend(ignored);
+            truncated |= cut;
         }
-        let truncated = entries.len() > CODE_TREE_LIMIT;
         entries.truncate(CODE_TREE_LIMIT);
         entries.sort();
         Ok(Json(json!({
