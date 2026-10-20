@@ -55,17 +55,15 @@ export function encodeMarkdownPath(path: string): string {
   return path.replace(/[%#?:]/g, encodeURIComponent);
 }
 
-/** An asset `src` inside an inline HTML figure, joined to the figure's folder
- * as a target for the figure's own image resolver. */
-export function htmlFigureAssetTarget(source: string, src: string): string | null {
-  let folder: string;
-  try {
-    folder = decodeURIComponent(source.replaceAll("\\", "/").split("/").slice(0, -1).join("/"));
-  } catch {
-    return null;
-  }
-  const target = resolveMarkdownTarget(folder, src, true);
-  return target ? encodeMarkdownPath(target.path) + target.hash : null;
+/** An asset `src` of the document at decoded `documentPath`, in the document's own root. */
+export function documentAssetTarget(documentPath: string, src: string, preserveLeadingSlash = false): MarkdownTarget | null {
+  return resolveMarkdownTarget(documentPath.split("/").slice(0, -1).join("/"), src, preserveLeadingSlash);
+}
+
+/** One place an image may load from; `resolveAsset` serves an HTML document's assets from that same place. */
+export interface ImageCandidate {
+  url: string;
+  resolveAsset: (src: string) => string | null;
 }
 
 /** A cited file link's path; `resolveFilePath` takes the still-encoded target. */
@@ -120,6 +118,16 @@ export function chatImageTarget(src: string): (Pick<MarkdownTarget, "path" | "ha
     return { ...target, path: target.path.slice("artifacts/".length), source: "artifact" };
   }
   return { ...target, source: "checkout" };
+}
+
+/** `artifacts/` is both the legacy prefix for the artifact root and a real folder
+ * inside it, so try each reading in the established order. */
+export function chatImageTargets(src: string): NonNullable<ReturnType<typeof chatImageTarget>>[] {
+  const target = chatImageTarget(src);
+  if (!target) return [];
+  if (target.source !== "artifact") return [target];
+  const path = `artifacts/${target.path}`;
+  return [target, { ...target, path, source: "checkout" }, { ...target, path }];
 }
 
 interface HastNode {
