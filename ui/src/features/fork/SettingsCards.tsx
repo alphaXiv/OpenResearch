@@ -520,6 +520,47 @@ function autoCompactLimit(window: number, percent: number, maxTokens: number): n
   return maxTokens ? Math.min(byPercent, maxTokens) : byPercent;
 }
 
+/** A number the user types, saved on Enter or when focus leaves; Escape
+ * restores the saved value. `suggestions` fill the browser's dropdown. */
+function NumberField({ id, value, min, max, placeholder, suggestions, disabled, onCommit }: {
+  id: string;
+  value: string;
+  min?: number;
+  max?: number;
+  placeholder?: string;
+  suggestions: number[];
+  disabled: boolean;
+  onCommit: (text: string) => void;
+}) {
+  const [draft, setDraft] = useState(value);
+  const commit = () => { if (draft !== value) onCommit(draft); };
+  return (
+    <>
+      <Input
+        id={id}
+        type="number"
+        inputMode="numeric"
+        min={min}
+        max={max}
+        list={`${id}-suggestions`}
+        placeholder={placeholder}
+        value={draft}
+        disabled={disabled}
+        className="h-9 tabular-nums"
+        onChange={(event) => setDraft(event.target.value)}
+        onBlur={commit}
+        onKeyDown={(event) => {
+          if (event.key === "Enter") { event.preventDefault(); commit(); }
+          else if (event.key === "Escape") setDraft(value);
+        }}
+      />
+      <datalist id={`${id}-suggestions`}>
+        {suggestions.map((suggestion) => <option key={suggestion} value={suggestion} />)}
+      </datalist>
+    </>
+  );
+}
+
 /** Compacts a chat on its own once a turn ends with the context this full. */
 export function AutoCompactCard() {
   const options = getAutoCompactSettingsQuery();
@@ -528,9 +569,7 @@ export function AutoCompactCard() {
   const [error, setError] = useState<string | null>(null);
   const enabled = query.data?.enabled ?? true;
   const percent = query.data?.percent ?? 80;
-  const choices = AUTO_COMPACT_PERCENTS.includes(percent) ? AUTO_COMPACT_PERCENTS : [...AUTO_COMPACT_PERCENTS, percent].sort((a, b) => a - b);
   const maxTokens = query.data ? query.data.maxTokens ?? 0 : 200_000;
-  const tokenChoices = AUTO_COMPACT_TOKENS.includes(maxTokens) ? AUTO_COMPACT_TOKENS : [...AUTO_COMPACT_TOKENS.slice(0, -1), maxTokens].sort((a, b) => a - b).concat(0);
 
   async function save(update: { enabled?: boolean; percent?: number; maxTokens?: number }) {
     setError(null);
@@ -557,28 +596,41 @@ export function AutoCompactCard() {
           onClick={() => void save({ enabled: !enabled })}
         />
       </div>
-      <div className="mt-3 flex flex-wrap items-center gap-2.5 text-sm">
-        <span>{m.settings_auto_compact_threshold()}</span>
-        <OptionPicker
-          variant="field"
-          dropDown
-          title={m.settings_auto_compact_threshold()}
-          disabled={!query.data || !enabled || mutation.isPending}
-          choices={choices.map((value) => ({ id: String(value), label: `${value}%` }))}
+      <div className="mt-3 grid grid-cols-[auto_minmax(0,9rem)_auto] items-center gap-x-2.5 gap-y-2 text-sm">
+        <label htmlFor="auto-compact-percent">{m.settings_auto_compact_threshold()}</label>
+        <NumberField
+          id="auto-compact-percent"
+          key={`percent-${percent}`}
           value={String(percent)}
-          onSelect={(id) => void save({ percent: Number(id) })}
-        />
-        <span>{m.settings_auto_compact_max_tokens()}</span>
-        <OptionPicker
-          variant="field"
-          dropDown
-          title={m.settings_auto_compact_max_tokens()}
+          min={50}
+          max={95}
+          suggestions={AUTO_COMPACT_PERCENTS}
           disabled={!query.data || !enabled || mutation.isPending}
-          choices={tokenChoices.map((value) => ({ id: String(value), label: value ? fmtTokens(value) : m.settings_auto_compact_no_limit() }))}
-          value={String(maxTokens)}
-          onSelect={(id) => void save({ maxTokens: Number(id) })}
+          onCommit={(text) => {
+            const value = Number(text);
+            if (!Number.isInteger(value) || value < 50 || value > 95) return setError(m.settings_auto_compact_percent_invalid());
+            if (value !== percent) void save({ percent: value });
+          }}
         />
+        <span className="text-subtext">%</span>
+        <label htmlFor="auto-compact-tokens">{m.settings_auto_compact_max_tokens()}</label>
+        <NumberField
+          id="auto-compact-tokens"
+          key={`tokens-${maxTokens}`}
+          value={maxTokens ? String(maxTokens / 1000) : ""}
+          min={50}
+          placeholder={m.settings_auto_compact_no_limit()}
+          suggestions={AUTO_COMPACT_TOKENS.filter(Boolean).map((tokens) => tokens / 1000)}
+          disabled={!query.data || !enabled || mutation.isPending}
+          onCommit={(text) => {
+            const value = text.trim() === "" ? 0 : Math.round(Number(text) * 1000);
+            if (!Number.isFinite(value) || (value !== 0 && value < 50_000)) return setError(m.settings_auto_compact_tokens_invalid());
+            if (value !== maxTokens) void save({ maxTokens: value });
+          }}
+        />
+        <span className="text-subtext">{m.settings_auto_compact_tokens_unit()}</span>
       </div>
+      <p className="mt-2 mb-0 text-sm leading-relaxed text-subtext">{m.settings_auto_compact_input_hint()}</p>
       <p className="mt-2 mb-0 text-sm leading-relaxed text-subtext">{m.settings_auto_compact_cost_hint()}</p>
       <div className="mt-4 pt-3.5 border-t border-t-border-variant">
         <div className="text-sm font-medium">{m.settings_auto_compact_how_title()}</div>
