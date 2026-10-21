@@ -2168,7 +2168,7 @@ fn subagent_thread_ids(item: &Value) -> Vec<String> {
 /// Build the "subagent" spawn part for a collab/sub-activity item. The UI reads
 /// `state.input` to label the row ("Spawned agent", "Sub-agent started", …); the
 /// sub-agent's streamed transcript is hung under `children` by the turn loop,
-/// and the UI locates it via this part's id, not any thread id in the payload.
+/// and thread identity links other events to the same transcript.
 fn subagent_spawn_part(id: &str, item: &Value, completed: bool) -> WirePart {
     // collabAgentToolCall carries a `status` (inProgress|completed|failed);
     // subAgentActivity has no status — treat it as a completed marker row.
@@ -2183,11 +2183,12 @@ fn subagent_spawn_part(id: &str, item: &Value, completed: bool) -> WirePart {
     } else {
         "completed"
     };
-    // Surface only what the UI labels the row from (`toolLine`'s subagent arm
-    // reads `tool` / `prompt` / `kind` / `nickname`) — the transcript is
-    // located via the spawn part id + `children`, not via any thread id in the
-    // payload.
+    // Keep thread identity so every event can open the same agent transcript.
     let mut input = serde_json::Map::new();
+    input.insert(
+        "agentThreadIds".into(),
+        serde_json::json!(subagent_thread_ids(item)),
+    );
     for key in ["tool", "prompt", "kind"] {
         if let Some(v) = item.get(key) {
             input.insert(key.into(), v.clone());
@@ -5102,6 +5103,20 @@ requires_openai_auth = false
                 .status,
             "completed"
         );
+    }
+
+    #[test]
+    fn subagent_events_preserve_target_thread_identity() {
+        for item in [
+            json!({"receiverThreadIds": ["child"], "tool": "spawnAgent", "status": "inProgress"}),
+            json!({"agentThreadId": "child", "kind": "interacted"}),
+        ] {
+            let part = subagent_spawn_part("event", &item, false);
+            assert_eq!(
+                part.state.unwrap().input.unwrap()["agentThreadIds"],
+                json!(["child"])
+            );
+        }
     }
 
     /// A later collab item (`sendInput`) on an already-spawned thread re-points

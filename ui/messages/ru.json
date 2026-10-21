@@ -619,6 +619,7 @@
   "activity_waiting_on_agent": "Ожидание агента",
   "activity_closed_agent": "Закрытие агента",
   "activity_subagent_started": "Субагент запущен",
+  "activity_sent_update_to_parent": "Отправлено обновление родительскому агенту",
   "activity_agent_reported_back": "Агент отчитался",
   "activity_subagent_interrupted": "Субагент прерван",
   "activity_subagent": "Субагент",
@@ -1412,5 +1413,9 @@
   "acp_sign_in_help": "Войдите в {name} в терминале ниже.",
   "acp_get_api_key": "Получить API-ключ DeepSeek",
   "acp_sign_in_bigmodel": "Войти через BigModel",
-  "acp_adapter_required": "Нужен адаптер ACP"
+  "acp_adapter_required": "Нужен адаптер ACP",
+  "chat_experiment_running": "Эксперимент выполняется",
+  "chat_experiment_starting": "Эксперимент запускается",
+  "chat_experiment_cancelling": "Эксперимент отменяется",
+  "chat_experiments_running": "Выполняется экспериментов: {count}"
 }

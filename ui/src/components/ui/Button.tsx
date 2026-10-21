@@ -1,7 +1,7 @@
 import type { AnchorHTMLAttributes, ButtonHTMLAttributes } from "react";
 import { cn } from "./cn";
 
-type ButtonVariant = "default" | "primary" | "ghost" | "danger" | "warning";
+type ButtonVariant = "default" | "primary" | "ghost" | "danger" | "warning" | "purple" | "amber";
 type ButtonSize = "default" | "small" | "large";
 
 const BASE = [
@@ -17,6 +17,8 @@ const VARIANTS: Record<ButtonVariant, string> = {
   ghost: "border-transparent bg-transparent text-text [&:hover:not(:disabled)]:bg-surface [&:active:not(:disabled)]:bg-highlight [&.active]:bg-surface [&.active]:text-muted",
   danger: "border-border bg-background text-accent-red [&:hover:not(:disabled)]:bg-danger-hover [&:active:not(:disabled)]:bg-danger-active",
   warning: "border-accent-amber bg-background text-accent-amber [&:hover:not(:disabled)]:bg-accent-amber-subtle [&:active:not(:disabled)]:bg-highlight",
+  purple: "border-transparent bg-accent-purple-subtle text-accent-purple [&:hover:not(:disabled)]:bg-accent-purple/15 [&:active:not(:disabled)]:bg-accent-purple/20",
+  amber: "border-transparent bg-accent-amber-subtle text-accent-amber [&:hover:not(:disabled)]:bg-accent-amber/15 [&:active:not(:disabled)]:bg-accent-amber/20",
 };
 
 const SIZES: Record<ButtonSize, string> = {

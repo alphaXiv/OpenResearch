@@ -25,6 +25,15 @@
   color-scheme: dark;
 }
 
+@keyframes or-experiment-pulse {
+  0%, 100% {
+    opacity: 1;
+  }
+  50% {
+    opacity: 0.55;
+  }
+}
+
 @keyframes or-pulse {
   50% {
     opacity: 0.35;
@@ -292,6 +301,11 @@
   text-decoration-color: var(--border-strong);
   outline: 1px solid var(--border-strong);
   outline-offset: 2px;
+}
+
+.experiment-run-link:is(:hover, :focus-visible) {
+  color: inherit;
+  text-decoration-color: currentColor;
 }
 
 @media (prefers-reduced-motion: reduce) {

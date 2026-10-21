@@ -445,6 +445,16 @@ export default function App({ runtime, projectId, pane }: { runtime: RuntimeInfo
   };
   const [planTabs, setPlanTabs] = useState<PlanViewDef[]>([]);
   const [subagentTabs, setSubagentTabs] = useState<SubagentViewDef[]>([]);
+  const subagentExpansions = useRef(new Map<string, Map<string, boolean>>());
+  const getSubagentExpansionState = (tab: SubagentViewDef) => {
+    const key = `${tab.sessionId}:${tab.spawnPartId}`;
+    let state = subagentExpansions.current.get(key);
+    if (!state) {
+      state = new Map();
+      subagentExpansions.current.set(key, state);
+    }
+    return state;
+  };
   const [sideTabs, setSideTabs] = useState<SideChatViewDef[]>([]);
   const [codeTabs, setCodeTabs] = useState<CodeTabDef[]>([]);
   const [contentTabOrder, setContentTabOrderState] = useState<string[]>([]);
@@ -485,6 +495,7 @@ export default function App({ runtime, projectId, pane }: { runtime: RuntimeInfo
   // the slot order because the replacement must land at this exact position.
   const retireRightTab = useCallback((tab: ContentTab) => {
     const key = rightTabKey(tab);
+    if (typeof tab === "object" && "spawnPartId" in tab) subagentExpansions.current.delete(`${tab.sessionId}:${tab.spawnPartId}`);
     setExpTabs((prev) => withoutTab(prev, key));
     setFileTabs((prev) => withoutTab(prev, key));
     setPlanTabs((prev) => withoutTab(prev, key));
@@ -599,6 +610,7 @@ export default function App({ runtime, projectId, pane }: { runtime: RuntimeInfo
 
   const forgetRightTab = useCallback((tab: RightTab, selectFallback: boolean) => {
     const key = rightTabKey(tab);
+    if (typeof tab === "object" && "spawnPartId" in tab) subagentExpansions.current.delete(`${tab.sessionId}:${tab.spawnPartId}`);
     const preview = previewTabRef.current;
     if (preview && rightTabKey(preview) === key) setPreviewTab(null);
     const contentState = closeTab(
@@ -1268,7 +1280,7 @@ export default function App({ runtime, projectId, pane }: { runtime: RuntimeInfo
   ) => {
     const tab: SubagentViewDef = { kind: "subagent", sessionId, spawnPartId, label };
     setSubagentTabs((prev) =>
-      prev.some((t) => t.spawnPartId === spawnPartId) ? prev : [...prev, tab],
+      prev.some((t) => t.spawnPartId === tab.spawnPartId) ? prev : [...prev, tab],
     );
     openRightTab(tab, intent);
   }, [openRightTab]);
@@ -1667,7 +1679,7 @@ export default function App({ runtime, projectId, pane }: { runtime: RuntimeInfo
         <ClosableTab
           key={rightTabKey(tab)}
           active={sideTab !== null && sideTab.sessionId === tab.sessionId}
-          label={tab.sessionId === null ? m.side_chat_new() : session?.title?.trim() || m.side_chat_open()}
+          label={session?.title?.trim() || m.side_chat_open()}
           shimmer={session?.busy ?? false}
           icon={<MessagesSquare size={12} className="shrink-0" />}
           preview={isPreviewTab(tab)}
@@ -2290,6 +2302,7 @@ export default function App({ runtime, projectId, pane }: { runtime: RuntimeInfo
                 key={subagentTab.spawnPartId}
                 sessionId={subagentTab.sessionId}
                 spawnPartId={subagentTab.spawnPartId}
+                expansionState={getSubagentExpansionState(subagentTab)}
                 onOpenFile={(path, line, exp, ref, intent) =>
                   openFromRightTab(subagentTab, () =>
                     openChatFile(path, subagentTab.sessionId, line, exp, ref, intent),
