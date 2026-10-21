@@ -71,7 +71,8 @@ change the configured backend or authorize bypassing the launch contract.
 - `local`, `tinker`, `ssh` and `slurm` runs also get `TENSORBOARD_LOGDIR`, a
   per-run directory; pass it as the trainer's `logging_dir`/`log_dir`. `orx
   tensorboard <runId>` prints the command that opens it (not for SSH
-  container runs).
+  container runs). Finished SSH/Slurm run dirs are removed unless
+  `orx compute configure ssh --keep-remote-runs true` is set.
 
 ## Resolve the backend, then read one guide
 

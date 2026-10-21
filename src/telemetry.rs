@@ -361,6 +361,10 @@ pub(crate) fn set_ssh_host(
     })
 }
 
+pub(crate) fn set_ssh_keep_remote_runs(keep: bool) -> std::io::Result<()> {
+    mutate_settings(|settings| settings.ssh.keep_remote_runs = keep)
+}
+
 pub(crate) fn set_ssh_default(host: Option<String>) -> std::io::Result<()> {
     mutate_settings(|settings| settings.ssh.default_host = host)
 }

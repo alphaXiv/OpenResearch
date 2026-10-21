@@ -60,8 +60,10 @@ changes cannot redirect an existing run. Do not kill the supervisor.
 
 Once a run finishes and its log is collected, the supervisor removes its run dir
 (host and container) and any source archive no run has staged in the last ten
-minutes. Export `ORX_KEEP_REMOTE_RUNS=1` before launching to keep run dirs, for
-example to open TensorBoard on the host. Deleting a project removes its runs'
+minutes. Everything the run wrote there (checkpoints, TensorBoard logs, `repo/`) goes
+with it; copy outputs elsewhere from the job, or run
+`orx compute configure ssh --keep-remote-runs true` (SSH and Slurm) to keep run
+dirs, e.g. to open TensorBoard on the host. Deleting a project removes its runs'
 remote files. Cleanups that fail (unreachable host, log not yet collected) are
 retried the next time `orx up` starts. Leased managed-sandbox runs free their run
 dir on the box once collected.

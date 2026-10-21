@@ -130,6 +130,7 @@ pub async fn submit_local_ssh_with_source(
                 None,
             )?;
             store.set_result_markdown(&run_id, &format!("Compute submission failed: {error:#}"))?;
+            crate::commands::supervise::clean_finished_remote_run(&run_id, &descriptor, true).await;
             return Err(error);
         }
         Ok(_) if container.is_none() => {
