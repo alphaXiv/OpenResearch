@@ -2885,15 +2885,22 @@ struct CodeTreeQuery {
     /// Files pane wants). Absent falls back to the hub clone's checkout.
     /// Mutually exclusive with `ref` — a committed tree has no live worktree.
     session_id: Option<String>,
+    /// Also list gitignored files of the live checkout (the project folder
+    /// view, where run logs, data and results live).
+    #[serde(default)]
+    ignored: bool,
 }
 
 /// Cap on entries returned by the code-tree listing.
 const CODE_TREE_LIMIT: usize = 20_000;
+/// Most files listed per gitignored folder in the project folder view.
+const IGNORED_DIR_LIMIT: usize = 2_000;
 
 /// Flat file listing for the UI code browser. With `ref`: the committed tree
 /// of that branch (local ref first, then origin's), independent of any
 /// checkout. Without: the hub clone's checkout via `git ls-files`, so
-/// gitignored trees are excluded and untracked-but-new files are included.
+/// gitignored trees are excluded (unless `ignored`) and untracked-but-new
+/// files are included.
 /// Paths are repo-relative; the client builds the nested tree.
 async fn project_code_tree(Path(id): Path<String>, Query(q): Query<CodeTreeQuery>) -> ApiResult {
     blocking_api(move || {
@@ -2934,8 +2941,17 @@ async fn project_code_tree(Path(id): Path<String>, Query(q): Query<CodeTreeQuery
         // During a merge conflict `ls-files --cached` emits an unmerged path
         // once per stage — collapse to one entry (they'd be duplicate keys).
         entries.dedup();
-        let truncated = entries.len() > CODE_TREE_LIMIT;
+        let mut truncated = entries.len() > CODE_TREE_LIMIT;
+        if q.ignored && ref_name.is_none() {
+            // Only the room the project's own files leave, and a share per
+            // ignored folder so `.venv/` can't hide `results/`.
+            let room = CODE_TREE_LIMIT.saturating_sub(entries.len());
+            let (ignored, cut) = local::git::list_ignored_files(&root, IGNORED_DIR_LIMIT, room)?;
+            entries.extend(ignored);
+            truncated |= cut;
+        }
         entries.truncate(CODE_TREE_LIMIT);
+        entries.sort();
         Ok(Json(json!({
             "root": root_kind,
             "path": path,

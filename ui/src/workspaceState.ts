@@ -15,7 +15,7 @@ export interface TaskWorkspace {
   expanded: Record<string, string[]>;
   scroll: Record<string, { top: number; left: number }>;
   sourceModes: Record<string, boolean>;
-  filesView: "files" | "changes";
+  filesView: "files" | "changes" | "folder";
   scope: "agent" | "project";
   panelMax: boolean;
   /** Last React Flow viewport for the experiments tree, if it was opened. */

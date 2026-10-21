@@ -2304,6 +2304,117 @@ pub fn list_worktree_files(repo: &Path) -> Result<Vec<String>> {
     Ok(entries)
 }
 
+/// The gitignored untracked files `list_worktree_files` leaves out (logs,
+/// data, build output), repo-relative, at most `limit`. `--directory` keeps
+/// git out of ignored folders; each is walked for at most `per_dir` files,
+/// sharing `limit` max-min fairly so `.venv/` can't crowd out `results/`. The
+/// flag is true when anything was left out.
+pub fn list_ignored_files(
+    repo: &Path,
+    per_dir: usize,
+    limit: usize,
+) -> Result<(Vec<String>, bool)> {
+    let bytes = git_bytes(
+        repo,
+        &[
+            "ls-files",
+            "--others",
+            "--ignored",
+            "--exclude-standard",
+            "--directory",
+            "-z",
+        ],
+        &[],
+    )?;
+    let (dirs, mut entries): (Vec<_>, Vec<_>) = split_nul(&bytes)
+        .into_iter()
+        .partition(|e| e.ends_with('/'));
+    let mut truncated = entries.len() > limit;
+    entries.truncate(limit);
+    let mut room = limit - entries.len();
+    let mut unreadable = false;
+    // (folder, its files so far, cut short); unwalked folders count as cut.
+    let mut folders: Vec<_> = dirs
+        .into_iter()
+        .map(|d| (d.trim_end_matches('/').to_string(), Vec::new(), true))
+        .collect();
+    // Re-walk the folders still cut short with an equal share of the room the
+    // others left, until it's used up or every folder fits.
+    loop {
+        let open = folders
+            .iter()
+            .filter(|f| f.2 && f.1.len() < per_dir)
+            .count();
+        if open == 0 || room == 0 {
+            break;
+        }
+        let share = (room / open).max(1);
+        for (dir, files, cut) in folders.iter_mut().filter(|f| f.2 && f.1.len() < per_dir) {
+            if room == 0 {
+                break;
+            }
+            let had = files.len();
+            files.clear();
+            *cut = walk_files(
+                repo,
+                dir,
+                files,
+                per_dir.min(had + share.min(room)),
+                &mut unreadable,
+            );
+            // The re-walk can find fewer files than before if some were deleted.
+            room = room + had - files.len();
+        }
+    }
+    for (_, files, cut) in folders {
+        truncated |= cut;
+        entries.extend(files);
+    }
+    Ok((entries, truncated || unreadable))
+}
+
+/// Pushes the files under `repo/dir` (symlinks not followed, nested `.git`
+/// skipped) until `entries` holds `cap`; true if it stopped early. Sets
+/// `unreadable` when a folder can't be listed.
+fn walk_files(
+    repo: &Path,
+    dir: &str,
+    entries: &mut Vec<String>,
+    cap: usize,
+    unreadable: &mut bool,
+) -> bool {
+    let mut stack = vec![dir.to_string()];
+    while let Some(rel) = stack.pop() {
+        let Ok(read) = std::fs::read_dir(repo.join(&rel)) else {
+            *unreadable = true;
+            continue;
+        };
+        let mut items: Vec<_> = read
+            .flatten()
+            .filter_map(|item| Some((item.file_name().into_string().ok()?, item.file_type().ok()?)))
+            .filter(|(name, _)| name != ".git")
+            .collect();
+        items.sort_by(|a, b| b.0.cmp(&a.0));
+        for (name, kind) in items {
+            let path = format!("{rel}/{name}");
+            if kind.is_dir() {
+                stack.push(path);
+            } else if !(kind.is_file()
+                || kind.is_symlink()
+                    && std::fs::metadata(repo.join(&path)).is_ok_and(|m| m.is_file()))
+            {
+                // Pipes and sockets (or links to them) would block the file viewer on open.
+                continue;
+            } else if entries.len() >= cap {
+                return true;
+            } else {
+                entries.push(path);
+            }
+        }
+    }
+    false
+}
+
 /// Resolve a branch name to its commit sha — the *local* ref first, then
 /// origin's: the code browser wants the agent's latest work, which lives
 /// locally before any push (the opposite preference of `branch_head_sha`,
@@ -2490,6 +2601,85 @@ mod tests {
         assert!(text.contains("/checkpoint.bin\n"));
         assert_eq!(text.matches(MANAGED_IGNORE_START).count(), 1);
         assert_eq!(text.matches(MANAGED_IGNORE_END).count(), 1);
+    }
+
+    #[test]
+    fn ignored_listing_returns_only_gitignored_untracked_files() {
+        let dir = std::env::temp_dir().join(format!("orx-git-ignored-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        run(&dir, &["init", "-q"]);
+        write(&dir, ".gitignore", "build/\ncache/\nresults/\n*.log\n");
+        write(&dir, "notes.md", "notes\n");
+        write(&dir, "run.log", "log\n");
+        write(&dir, "results/metrics.csv", "1\n");
+        write(&dir, "results/deep/b.csv", "2\n");
+        for name in ["a", "b", "c"] {
+            write(&dir, &format!("build/{name}.o"), "");
+        }
+        write(&dir, "cache/x", "");
+        #[cfg(unix)]
+        assert!(std::process::Command::new("mkfifo")
+            .arg(dir.join("results/pipe"))
+            .status()
+            .unwrap()
+            .success());
+        #[cfg(unix)]
+        std::os::unix::fs::symlink(dir.join("results/pipe"), dir.join("results/pipe-link"))
+            .unwrap();
+        let (mut ignored, truncated) = list_ignored_files(&dir, 10, 10).unwrap();
+        ignored.sort();
+        let (capped, capped_truncated) = list_ignored_files(&dir, 1, 10).unwrap();
+        let (shared, _) = list_ignored_files(&dir, 10, 4).unwrap();
+        let (refilled, refilled_truncated) = list_ignored_files(&dir, 10, 6).unwrap();
+        #[cfg(unix)]
+        let unreadable = {
+            use std::os::unix::fs::PermissionsExt;
+            let cache = dir.join("cache");
+            std::fs::set_permissions(&cache, std::fs::Permissions::from_mode(0o000)).unwrap();
+            // Root can read it anyway; nothing to check then.
+            let result = std::fs::read_dir(&cache)
+                .is_err()
+                .then(|| list_ignored_files(&dir, 10, 10).unwrap());
+            std::fs::set_permissions(&cache, std::fs::Permissions::from_mode(0o755)).unwrap();
+            result
+        };
+        let mut listed = list_worktree_files(&dir).unwrap();
+        listed.sort();
+        let _ = std::fs::remove_dir_all(&dir);
+        assert_eq!(
+            ignored,
+            [
+                "build/a.o",
+                "build/b.o",
+                "build/c.o",
+                "cache/x",
+                "results/deep/b.csv",
+                "results/metrics.csv",
+                "run.log"
+            ]
+        );
+        assert!(!truncated);
+        // One file per ignored folder, and the folders don't hide `run.log`.
+        assert_eq!(capped.len(), 4);
+        assert!(capped.contains(&"run.log".to_string()));
+        assert!(capped_truncated);
+        // A tight limit is split between folders, not used up by `build/`.
+        assert_eq!(shared.len(), 4);
+        assert!(shared.iter().any(|e| e.starts_with("results/")));
+        // Room `cache/` leaves goes to the folders it cut short.
+        assert_eq!(refilled.len(), 6);
+        assert_eq!(
+            refilled.iter().filter(|e| e.starts_with("build/")).count(),
+            2
+        );
+        assert!(refilled_truncated);
+        // An unreadable ignored folder marks the listing incomplete.
+        #[cfg(unix)]
+        if let Some((files, cut)) = unreadable {
+            assert!(!files.iter().any(|e| e.starts_with("cache/")));
+            assert!(cut);
+        }
+        assert_eq!(listed, [".gitignore", "notes.md"]);
     }
 
     #[test]

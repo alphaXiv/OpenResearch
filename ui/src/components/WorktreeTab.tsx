@@ -16,6 +16,8 @@ import { ltr } from "../i18n";
 // remains committed-state only.
 //
 //   Files (default): the full live worktree tree.
+//   Project folder: the project's own checkout, gitignored files included
+//     (run logs, data, results the session worktree never has).
 //   Changes: the unified diff vs the baseline merge-base, untracked
 //     files included as new-file chunks — the same per-file-card rendering as
 //     the experiment Changes view (the header's file count comes from a
@@ -47,7 +49,7 @@ import {
 } from "./FileTreeActions";
 import { showAlert } from "./ui";
 
-export type WorktreeView = CodeBrowserView;
+export type WorktreeView = CodeBrowserView | "folder";
 
 export function WorktreeTab({
   sessionId,
@@ -82,10 +84,11 @@ export function WorktreeTab({
   const busy = sessions.data?.some((session) => session.id === sessionId && session.busy) ?? false;
   const worktree = useQuery({ ...getSessionWorktreeQuery(sessionId ?? ""), enabled: Boolean(sessionId), refetchInterval: busy ? 5_000 : false });
   const wt = worktree.data;
-  const source = sessionId && wt?.exists ? { sessionId } : { ref: project.baselineBranch };
-  const files = useQuery({ ...getCodeTreeQuery(projectId, source), enabled: !sessionId || worktree.isSuccess, refetchInterval: busy ? 5_000 : false });
+  const folder = view === "folder";
+  const source = folder ? { ignored: true } : sessionId && wt?.exists ? { sessionId } : { ref: project.baselineBranch };
+  const files = useQuery({ ...getCodeTreeQuery(projectId, source), enabled: folder || !sessionId || worktree.isSuccess, refetchInterval: busy ? 5_000 : false });
   const tree = files.data;
-  const error = (worktree.error ?? files.error)?.message;
+  const error = (folder ? files.error : (worktree.error ?? files.error))?.message;
   const loading = worktree.isFetching || files.isFetching;
   const [contextMenu, setContextMenu] = useState<FileContextMenuTarget | null>(null);
   const [renamingPath, setRenamingPath] = useState<string | null>(null);
@@ -116,12 +119,16 @@ export function WorktreeTab({
     liveWorktree?.branch ??
     (liveWorktree?.baselineBranch ? m.worktree_detached_at({ branch: ltr(liveWorktree.baselineBranch) }) : m.settings_detached());
   const fileCount = liveWorktree?.files?.length ?? 0;
-  const branchChip = liveWorktree
+  const branchChip = folder
+    ? m.worktree_project_folder({ path: ltr(project.repoPath) })
+    : liveWorktree
     ? m.worktree_current({ branch: ltr(`${checkedOut}${fileCount > 0 ? "*" : ""}`) })
     : m.worktree_default_branch({ branch: ltr(project.baselineBranch) });
-  const githubBranch = liveWorktree ? liveWorktree.branch : project.baselineBranch;
+  const githubBranch = folder ? tree?.branch : liveWorktree ? liveWorktree.branch : project.baselineBranch;
   const openFile = (path: string, intent: TabOpenIntent) =>
-    liveWorktree
+    folder
+      ? onOpenFile(path, undefined, undefined, intent)
+      : liveWorktree
       ? onOpenFile(path, sessionId, undefined, intent)
       : onOpenFile(path, undefined, project.baselineBranch, intent);
   const canManageFiles = tree?.root === "worktree";
@@ -143,9 +150,11 @@ export function WorktreeTab({
   return (
     <div className="code-tab flex flex-col h-full min-h-0 wt-tab">
       <CodeBrowserHeader
-        view={liveWorktree ? view : "files"}
+        view={liveWorktree && view === "changes" ? "changes" : "files"}
         onViewChange={onViewChange}
-        showViewToggle={Boolean(liveWorktree)}
+        showChanges={Boolean(liveWorktree)}
+        folderActive={folder}
+        onFolder={() => onViewChange("folder")}
         branchLabel={branchChip}
         branchTitle={branchChip}
         githubHref={
@@ -158,7 +167,7 @@ export function WorktreeTab({
         onRefresh={load}
       />
       {error && (wt || tree) && <CodeTabNote>{m.worktree_tab_refresh_failed()} {ltr(error)}</CodeTabNote>}
-      {!tree || (sessionId && !wt) ? (
+      {!tree || (!folder && sessionId && !wt) ? (
         <CodeTabBody>
           <CodeTabNote>{error ? m.common_failed_to_load({ error: ltr(error) }) : m.common_loading()}</CodeTabNote>
         </CodeTabBody>

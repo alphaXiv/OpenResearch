@@ -31,7 +31,7 @@ export const getAbsoluteFileQuery = (path: string) => queryOptions({
   refetchOnWindowFocus: "always",
 });
 
-export const getCodeTreeQuery = (projectId: string, opts: api.CheckoutRef = {}) => queryOptions({
+export const getCodeTreeQuery = (projectId: string, opts: api.CodeTreeRef = {}) => queryOptions({
   queryKey: workspaceKey("getCodeTree", projectId, { ...opts }),
   queryFn: ({ signal }) => api.getCodeTree(projectId, opts, signal),
   staleTime: opts.ref && isCommit(opts.ref) ? Infinity : 30_000,

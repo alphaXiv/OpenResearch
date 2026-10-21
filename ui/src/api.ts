@@ -758,6 +758,9 @@ export const overleafUploadUrl = (
   opts: { sessionId?: string } = {},
 ) => `/api/projects/${projectId}/file/overleaf/upload?${checkoutQuery(opts, new URLSearchParams({ path }))}`;
 
+/** A live listing may also include gitignored files (the project folder view). */
+export type CodeTreeRef = CheckoutRef & { ignored?: boolean };
+
 export interface CodeTree {
   root: CheckoutRoot;
   /** Absolute live checkout path; absent for committed branch listings. */
@@ -765,7 +768,7 @@ export interface CodeTree {
   /** The listed branch (`ref` mode), else the checked-out branch, else null
    * (detached HEAD). */
   branch: string | null;
-  /** Repo-relative file paths (gitignored trees excluded), sorted. */
+  /** Repo-relative file paths (gitignored trees excluded unless `ignored`), sorted. */
   entries: string[];
   /** True when the listing hit the server-side cap (20,000 entries). */
   truncated: boolean;
@@ -775,8 +778,10 @@ export interface CodeTree {
  * given, else a chat session's live worktree when `sessionId` is given, else
  * the hub clone's checkout — plus the branch name. `ref` and `sessionId` are
  * mutually exclusive (the server rejects both). */
-export const getCodeTree = (projectId: string, opts: CheckoutRef = {}, signal?: AbortSignal) => {
-  const qs = checkoutQuery(opts).toString();
+export const getCodeTree = (projectId: string, opts: CodeTreeRef = {}, signal?: AbortSignal) => {
+  const params = checkoutQuery(opts);
+  if (opts.ignored) params.set("ignored", "true");
+  const qs = params.toString();
   return get<CodeTree>(`/api/projects/${projectId}/code-tree${qs ? `?${qs}` : ""}`, signal);
 };
 

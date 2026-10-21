@@ -2124,16 +2124,9 @@ export default function App({ runtime, projectId, pane }: { runtime: RuntimeInfo
                         sessionId: activeSessionId ?? undefined,
                       }),
                     )?.needsProtection}
+                    // Tree paths are checkout-relative, so skip chat-path guessing (e.g. `artifacts/…`).
                     onOpenFile={(path, sessionId, ref, intent) =>
-                      openFileTab(
-                        path,
-                        sessionId,
-                        ref,
-                        undefined,
-                        undefined,
-                        undefined,
-                        intent,
-                      )
+                      openResolvedFileTab({ path, source: "repo", sessionId, ref }, intent)
                     }
                   />
                 ) : (
