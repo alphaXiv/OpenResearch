@@ -2266,8 +2266,9 @@ async fn finish_completed_turn(
 
 /// How long a quiet post-parent drain waits before settling the turn. The
 /// parent's turn is already complete, so only actively-streaming agents
-/// justify waiting; settling early degrades gracefully because codex delivers
-/// a finished agent's report on the next turn either way.
+/// justify waiting. shortcut: a sub-agent that is silent this long and finishes
+/// after the settle never wakes the parent (only `record_unowned` sees it); a
+/// turn-outliving listener would cover it if long silent sub-agents matter.
 const DRAIN_QUIET_SETTLE: Duration = Duration::from_secs(180);
 
 /// How long a turn may stay quiet before the loop acts on it. Held absolute by
