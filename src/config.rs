@@ -469,6 +469,9 @@ pub struct SshSettings {
     pub default_host: Option<String>,
     #[serde(default)]
     pub hosts: std::collections::BTreeMap<String, SshHostSettings>,
+    /// Keep finished SSH and Slurm run dirs on the host instead of removing them.
+    #[serde(default)]
+    pub keep_remote_runs: bool,
 }
 
 pub fn ssh_settings() -> Result<SshSettings> {
@@ -478,6 +481,11 @@ pub fn ssh_settings() -> Result<SshSettings> {
 pub fn set_ssh_host(host: String, options: SshHostSettings) -> Result<()> {
     crate::jobs::ssh::validate_host_options(&options)?;
     crate::telemetry::set_ssh_host(host, options)?;
+    Ok(())
+}
+
+pub fn set_ssh_keep_remote_runs(keep: bool) -> Result<()> {
+    crate::telemetry::set_ssh_keep_remote_runs(keep)?;
     Ok(())
 }
 

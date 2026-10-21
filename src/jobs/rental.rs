@@ -131,6 +131,12 @@ pub async fn supervise(config: &Path) -> Result<()> {
     while !directory.join("final_collected").exists() && tokio::time::Instant::now() < deadline {
         tokio::time::sleep(Duration::from_millis(200)).await;
     }
+    if remove_collected_run_dir(&directory) {
+        let _ = tokio::process::Command::new("sh")
+            .args(["-c", &crate::jobs::ssh::source_sweep_command()])
+            .status()
+            .await;
+    }
     drop(_heartbeat);
     loop {
         if config.rental.operation("release").await.is_ok() {
@@ -236,6 +242,16 @@ pub async fn launch(
     Ok(())
 }
 
+#[cfg(unix)]
+/// Free a collected run's dir: the leased box outlives this run.
+fn remove_collected_run_dir(directory: &std::path::Path) -> bool {
+    directory.join("final_collected").exists()
+        && directory
+            .parent()
+            .is_some_and(|runs| runs.ends_with(".orx/runs"))
+        && std::fs::remove_dir_all(directory).is_ok()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -318,6 +334,24 @@ mod tests {
         assert_eq!(HEARTBEAT.as_secs(), 30);
         assert_eq!(COLLECTION_GRACE.as_secs(), 60);
     }
+    #[cfg(unix)]
+    #[test]
+    fn only_collected_run_dirs_under_orx_runs_are_removed() {
+        let temp = crate::local::git::TemporaryDirectory::new("orx-rental-cleanup").unwrap();
+        let collected = temp.path().join(".orx/runs/collected");
+        let uncollected = temp.path().join(".orx/runs/uncollected");
+        let elsewhere = temp.path().join("other/collected");
+        for dir in [&collected, &uncollected, &elsewhere] {
+            std::fs::create_dir_all(dir).unwrap();
+        }
+        std::fs::write(collected.join("final_collected"), "").unwrap();
+        std::fs::write(elsewhere.join("final_collected"), "").unwrap();
+        assert!(remove_collected_run_dir(&collected));
+        assert!(!remove_collected_run_dir(&uncollected));
+        assert!(!remove_collected_run_dir(&elsewhere));
+        assert!(!collected.exists() && uncollected.exists() && elsewhere.exists());
+    }
+
     #[cfg(unix)]
     #[tokio::test]
     async fn remote_supervisor_releases_after_ack_without_sending_experiment_data() {

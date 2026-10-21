@@ -24,3 +24,12 @@ orx exp run <expId> --backend slurm
   setting, then the cluster's limit.
 - A detached `orx supervise` process records scheduler status and logs; do not
   kill it.
+
+Once a job finishes and its log is collected, the supervisor removes
+`~/.orx/runs/<runId>/` and any source archive no run has staged in the last ten
+minutes. Everything the run wrote there (checkpoints, TensorBoard logs, `repo/`) goes
+with it; copy outputs elsewhere from the job, or run
+`orx compute configure ssh --keep-remote-runs true` (SSH and Slurm) to keep run
+dirs, e.g. to open TensorBoard on the cluster. Deleting a project removes its runs'
+remote files. Cleanups that fail (unreachable host, log not yet collected) are
+retried the next time `orx up` starts.

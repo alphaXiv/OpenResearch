@@ -845,6 +845,9 @@ async fn watch_ssh_job(
                 )
                 .await;
             }
+            if sandbox.is_none() {
+                clean_finished_remote_run(run_id, descriptor, collected).await;
+            }
             eprintln!("supervise {run_id}: finished ({status})");
             return Ok(status);
         }
@@ -1199,6 +1202,169 @@ async fn run_openresearch(
     Ok(())
 }
 
+/// Free a finished run's remote files unless the user keeps them
+/// (`orx compute configure ssh --keep-remote-runs true`); unreadable settings keep them.
+pub(crate) async fn clean_finished_remote_run(
+    run_id: &str,
+    descriptor: &BackendDescriptor,
+    collected: bool,
+) {
+    if !crate::config::ssh_settings().map_or(true, |settings| settings.keep_remote_runs) {
+        remove_remote_run_files(run_id, descriptor, !collected).await;
+    }
+}
+
+/// Days a failed cleanup is retried before its host is given up on.
+// shortcut: an abandoned host keeps its files silently; surface it in the UI if that matters.
+const PENDING_CLEANUP_DAYS: u64 = 30;
+
+#[derive(serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct PendingCleanup {
+    run_id: String,
+    backend: BackendDescriptor,
+    collect_log: bool,
+    #[serde(default)]
+    since_ms: i64,
+}
+
+fn pending_cleanup_dir() -> std::path::PathBuf {
+    crate::store::data_dir().join("remote-cleanup")
+}
+
+fn pending_cleanup_path(dir: &std::path::Path, run_id: &str) -> std::path::PathBuf {
+    let log = crate::store::log_path(run_id);
+    dir.join(log.file_name().unwrap_or_default())
+        .with_extension("json")
+}
+
+fn read_pending_cleanup(path: &std::path::Path) -> Option<PendingCleanup> {
+    serde_json::from_slice(&std::fs::read(path).ok()?).ok()
+}
+
+/// Remove a run's remote files, or record them for `retry_remote_cleanups`
+/// when the host is unreachable or the local log still needs collecting.
+pub async fn remove_remote_run_files(run_id: &str, backend: &BackendDescriptor, collect_log: bool) {
+    remove_remote_run_files_in(&pending_cleanup_dir(), run_id, backend, collect_log).await;
+}
+
+async fn remove_remote_run_files_in(
+    dir: &std::path::Path,
+    run_id: &str,
+    backend: &BackendDescriptor,
+    collect_log: bool,
+) {
+    let path = pending_cleanup_path(dir, run_id);
+    let result = if collect_log {
+        Err(anyhow!("the log was not fully collected"))
+    } else {
+        ssh::remove_run_files(run_id, backend).await
+    };
+    let recorded = match result {
+        Ok(()) => match std::fs::remove_file(&path) {
+            Err(err) if err.kind() != std::io::ErrorKind::NotFound => Err(err.into()),
+            _ => Ok(()),
+        },
+        Err(err) => {
+            eprintln!("{run_id}: remote cleanup deferred: {err:#}");
+            record_pending_cleanup(
+                &path,
+                &PendingCleanup {
+                    run_id: run_id.to_string(),
+                    backend: backend.clone(),
+                    collect_log,
+                    since_ms: read_pending_cleanup(&path).map_or_else(now_ms, |p| p.since_ms),
+                },
+            )
+        }
+    };
+    if let Err(err) = recorded {
+        eprintln!("{run_id}: could not record remote cleanup state: {err:#}");
+    }
+}
+
+fn record_pending_cleanup(path: &std::path::Path, pending: &PendingCleanup) -> Result<()> {
+    std::fs::create_dir_all(path.parent().unwrap_or(path))?;
+    std::fs::write(path, serde_json::to_vec(pending)?)?;
+    Ok(())
+}
+
+/// Retry cleanups recorded by `remove_remote_run_files`, first finishing log
+/// collection where the supervisor could not.
+pub async fn retry_remote_cleanups() {
+    retry_remote_cleanups_in(&pending_cleanup_dir(), |run_id| {
+        Store::open()
+            .and_then(|store| store.get_run(run_id))
+            .map(|run| run.is_some())
+    })
+    .await;
+}
+
+async fn retry_remote_cleanups_in(dir: &std::path::Path, run_exists: fn(&str) -> Result<bool>) {
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return;
+    };
+    let expired_before = now_ms() - (PENDING_CLEANUP_DAYS * 86_400_000) as i64;
+    for entry in entries.flatten() {
+        let path = entry.path();
+        let Some(mut pending) =
+            read_pending_cleanup(&path).filter(|pending| pending.since_ms > expired_before)
+        else {
+            let _ = std::fs::remove_file(&path);
+            continue;
+        };
+        let Ok(exists) = run_exists(&pending.run_id) else {
+            continue;
+        };
+        // A deleted run's log has no reader left, so only its remote files matter.
+        pending.collect_log &= exists;
+        if pending.collect_log && !recollect_log(&pending).await {
+            continue;
+        }
+        if exists
+            && crate::config::ssh_settings().map_or(true, |settings| settings.keep_remote_runs)
+        {
+            let _ = std::fs::remove_file(&path);
+            continue;
+        }
+        remove_remote_run_files_in(dir, &pending.run_id, &pending.backend, false).await;
+    }
+}
+
+/// Re-stream the whole remote log beside the partial local copy, replacing it
+/// only once complete.
+async fn recollect_log(pending: &PendingCleanup) -> bool {
+    let run_id = &pending.run_id;
+    let (host, dir) = match pending.backend.kind.as_str() {
+        "ssh_job" => match pending.backend.ssh_ref() {
+            Ok((host, dir)) => (host, dir.to_string()),
+            Err(_) => return false,
+        },
+        "slurm_job" => match pending.backend.slurm_ref() {
+            Ok((host, _)) => (host, slurm::run_dir(run_id)),
+            Err(_) => return false,
+        },
+        _ => return false,
+    };
+    let path = crate::store::log_path(run_id);
+    let partial = path.with_extension("recollect");
+    let _ = std::fs::remove_file(&partial);
+    let (_done_tx, done) = tokio::sync::watch::channel(true);
+    let collected = tokio::time::timeout(
+        Duration::from_secs(60),
+        tail_logs_ssh(
+            ssh::SshTarget::alias(host),
+            dir,
+            partial.clone(),
+            run_id.clone(),
+            done,
+            None,
+        ),
+    )
+    .await;
+    matches!(collected, Ok(true)) && std::fs::rename(&partial, &path).is_ok()
+}
+
 /// Delete the run's box; on failure warn loudly and leave a cleanup hint on
 /// the run. Teardown failure never changes the run's status — the run's
 /// outcome and the box's fate are separate facts.
@@ -1430,10 +1596,11 @@ async fn run_slurm(
 
         if is_terminal_stage(stage) {
             let _ = done_tx.send(true);
-            if tokio::time::timeout(Duration::from_secs(20), &mut log_task)
-                .await
-                .is_err()
-            {
+            let collected = matches!(
+                tokio::time::timeout(Duration::from_secs(20), &mut log_task).await,
+                Ok(Ok(true))
+            );
+            if !collected {
                 log_task.abort();
             }
             let applied = store.update_status(&run_id, status, Some(now_ms()), None)?;
@@ -1446,6 +1613,7 @@ async fn run_slurm(
                     }
                 }
             }
+            clean_finished_remote_run(&run_id, &descriptor, collected).await;
             eprintln!("supervise {run_id}: finished ({status})");
             return Ok(());
         }
@@ -1652,6 +1820,45 @@ async fn cancel_ray(address: &str, submission_id: &str, run_id: &str, cancel_sen
 mod tests {
     use super::*;
     use crate::store::StoredRun;
+
+    #[tokio::test]
+    async fn pending_cleanups_retry_drop_expired_and_skip_deleted_run_logs() {
+        let root = crate::store::data_dir().join("remote-cleanup");
+        assert_eq!(
+            pending_cleanup_path(&root, "../../x").parent(),
+            Some(root.as_path())
+        );
+        let dir =
+            std::env::temp_dir().join(format!("orx-pending-cleanup-{}", uuid::Uuid::new_v4()));
+        let local = BackendDescriptor::parse(r#"{"kind":"local_job"}"#).unwrap();
+        let ssh = BackendDescriptor::parse(
+            r#"{"kind":"ssh_job","namespace":"unreachable.invalid","jobId":".orx/runs/old"}"#,
+        )
+        .unwrap();
+        for (run_id, backend, collect_log, since_ms) in [
+            ("done", &local, false, now_ms()),
+            ("deleted-run", &local, true, now_ms()),
+            ("old", &ssh, false, 0),
+        ] {
+            record_pending_cleanup(
+                &pending_cleanup_path(&dir, run_id),
+                &PendingCleanup {
+                    run_id: run_id.into(),
+                    backend: backend.clone(),
+                    collect_log,
+                    since_ms,
+                },
+            )
+            .unwrap();
+        }
+        remove_remote_run_files_in(&dir, "uncollected", &local, true).await;
+        let pending = read_pending_cleanup(&pending_cleanup_path(&dir, "uncollected")).unwrap();
+        assert!(pending.collect_log && pending.since_ms > 0);
+
+        retry_remote_cleanups_in(&dir, |_| Ok(false)).await;
+        assert_eq!(std::fs::read_dir(&dir).unwrap().count(), 0);
+        let _ = std::fs::remove_dir_all(dir);
+    }
 
     #[test]
     fn recovered_cancel_intent_only_overrides_failed_terminal_state() {

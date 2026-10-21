@@ -130,6 +130,11 @@ pub async fn submit_local_ssh_with_source(
                 None,
             )?;
             store.set_result_markdown(&run_id, &format!("Compute submission failed: {error:#}"))?;
+            // A lost launch response may hide a running job, so only a clean failure frees its files.
+            if !error.is::<ssh::LaunchUncertain>() {
+                crate::commands::supervise::clean_finished_remote_run(&run_id, &descriptor, true)
+                    .await;
+            }
             return Err(error);
         }
         Ok(_) if container.is_none() => {

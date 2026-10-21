@@ -727,7 +727,7 @@ pub async fn stage_source(
 /// a short cached file reads as absent and is replaced by the next upload.
 fn source_cache_commands(cache: &str, size: u64) -> (String, String) {
     let check = format!(
-        "f=\"$HOME/{cache}\"; test -f \"$f\" && test $(wc -c < \"$f\") -eq {size} && echo present || true"
+        "f=\"$HOME/{cache}\"; test -f \"$f\" && test $(wc -c < \"$f\") -eq {size} && touch \"$f\" && echo present || true"
     );
     let upload = format!(
         "umask 077; mkdir -p \"$HOME/.orx/source\"; tmp=\"$HOME/{cache}.tmp.$$\"; \
@@ -735,6 +735,55 @@ fn source_cache_commands(cache: &str, size: u64) -> (String, String) {
          || {{ rm -f \"$tmp\"; echo \"source archive upload incomplete\" >&2; exit 1; }}"
     );
     (check, upload)
+}
+
+/// Minutes a source archive must sit unused before cleanup deletes it;
+/// staging touches a reused archive, so this covers a concurrent extraction.
+const SOURCE_GC_MINUTES: u32 = 10;
+
+/// Remove a finished SSH or Slurm run's remote run dir (and container copy),
+/// plus every source archive on the host that no staging has used recently.
+pub async fn remove_run_files(run_id: &str, backend: &super::BackendDescriptor) -> Result<()> {
+    let host = match backend.kind.as_str() {
+        "ssh_job" => backend.ssh_ref()?.0,
+        "slurm_job" => backend.slurm_ref()?.0,
+        _ => return Ok(()),
+    };
+    let command = remove_run_files_command(run_id, backend.ssh_container.as_ref())?;
+    ssh_run(&SshTarget::alias(host), &command, None).await?;
+    Ok(())
+}
+
+fn remove_run_files_command(run_id: &str, container: Option<&ContainerRun>) -> Result<String> {
+    if run_id.is_empty()
+        || !run_id
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '-')
+    {
+        return Err(anyhow!(
+            "Refusing to remove remote files for run id {run_id:?}"
+        ));
+    }
+    let mut command = format!("rm -rf \"$HOME/.orx/runs/{run_id}\"");
+    if let Some(container) = container {
+        if !container.run_dir.ends_with(&format!("/.orx/runs/{run_id}")) {
+            return Err(anyhow!(
+                "Refusing to remove unexpected container run dir {}",
+                container.run_dir
+            ));
+        }
+        let remove = container.exec(&format!("rm -rf {}", sh_quote(&container.run_dir)));
+        command = format!("{{ {remove} || true; }}; {command}");
+    }
+    Ok(format!("{command} && {}", source_sweep_command()))
+}
+
+/// Delete cached source archives no staging has used in `SOURCE_GC_MINUTES`.
+// shortcut: the last run's archive stays until the host's next cleanup; add a sweep if that matters.
+pub(crate) fn source_sweep_command() -> String {
+    format!(
+        "{{ [ ! -d \"$HOME/.orx/source\" ] || find \"$HOME/.orx/source\" -maxdepth 1 -name '*.tar' -mmin +{SOURCE_GC_MINUTES} -delete; }}"
+    )
 }
 
 /// Single-quote a value for safe embedding in the remote bash script.
@@ -1098,6 +1147,60 @@ mod tests {
         assert_eq!(inspect(), "PENDING");
         std::fs::write(dir.join("exit_code"), "0\n").unwrap();
         assert_eq!(inspect(), "EXIT 0");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn remove_run_files_deletes_run_dir_and_stale_source_archives_only() {
+        let home = crate::local::git::TemporaryDirectory::new("orx-ssh-remove-run").unwrap();
+        let run = home.path().join(".orx/runs/r-1");
+        let other = home.path().join(".orx/runs/r-2");
+        std::fs::create_dir_all(run.join("repo")).unwrap();
+        std::fs::create_dir_all(&other).unwrap();
+        let source = home.path().join(".orx/source");
+        std::fs::create_dir_all(&source).unwrap();
+        let stale = source.join("ab.tar");
+        let fresh = source.join("cd.tar");
+        std::fs::write(&stale, b"x").unwrap();
+        std::fs::write(&fresh, b"x").unwrap();
+        assert!(std::process::Command::new("touch")
+            .args(["-t", "202001010000"])
+            .arg(&stale)
+            .status()
+            .unwrap()
+            .success());
+        let sh = |command: String| {
+            assert!(std::process::Command::new("sh")
+                .args(["-c", &command])
+                .env("HOME", home.path())
+                .status()
+                .unwrap()
+                .success());
+        };
+        sh(remove_run_files_command("r-1", None).unwrap());
+        sh(remove_run_files_command("r-2", None).unwrap());
+        assert!(!run.exists() && !other.exists());
+        assert!(!stale.exists());
+        assert!(
+            fresh.exists(),
+            "a recently staged archive may still be extracting"
+        );
+        std::fs::remove_dir_all(&source).unwrap();
+        sh(remove_run_files_command("r-3", None).unwrap());
+
+        assert!(remove_run_files_command("../x", None).is_err());
+        assert!(remove_run_files_command("", None).is_err());
+        let mut container = ContainerRun {
+            reference: "img".into(),
+            id: "c1".into(),
+            started_at: "t".into(),
+            run_dir: "/root/.orx/runs/r1".into(),
+        };
+        let command = remove_run_files_command("r1", Some(&container)).unwrap();
+        assert!(command.starts_with("{ docker exec -i 'c1' bash -c "));
+        assert!(command.contains("|| true; }; rm -rf \"$HOME/.orx/runs/r1\" && "));
+        container.run_dir = "/root".into();
+        assert!(remove_run_files_command("r1", Some(&container)).is_err());
     }
 
     #[cfg(unix)]

@@ -609,9 +609,11 @@ pub(super) async fn ssh_settings() -> ApiResult {
             };
             h["lastTest"] = json!(t);
         }
-        Ok(Json(
-            json!({ "hosts": hosts, "defaultHost": settings.default_host }),
-        ))
+        Ok(Json(json!({
+            "hosts": hosts,
+            "defaultHost": settings.default_host,
+            "keepRemoteRuns": settings.keep_remote_runs,
+        })))
     })
     .await
     .map_err(|e| ApiError::from(anyhow!("ssh task failed: {e}")))?
@@ -1458,6 +1460,15 @@ pub(crate) async fn configure(backend: &str, body: Value) -> Result<Value> {
                     save_ssh_default(Json(SaveSshDefaultReq {
                         host: serde_json::from_value(host.clone())?,
                     }))
+                    .await,
+                )?;
+            }
+            if let Some(keep) = body.get("keepRemoteRuns").and_then(Value::as_bool) {
+                cli_result(
+                    blocking_api(move || {
+                        crate::config::set_ssh_keep_remote_runs(keep)?;
+                        Ok(Json(json!({"ok": true})))
+                    })
                     .await,
                 )?;
             }

@@ -34,7 +34,7 @@ fn viewer_command(run_id: &str, backend: &BackendDescriptor) -> Result<String> {
     };
     let remote = format!("tensorboard --logdir \"$HOME\"/{dir}/tensorboard --port {PORT}");
     Ok(format!(
-        "ssh -L {PORT}:localhost:{PORT} {} {}\nThen open http://localhost:{PORT}",
+        "ssh -L {PORT}:localhost:{PORT} {} {}\nThen open http://localhost:{PORT}\nFinished runs keep these logs only with `orx compute configure ssh --keep-remote-runs true`.",
         sh_quote(host),
         sh_quote(&remote)
     ))

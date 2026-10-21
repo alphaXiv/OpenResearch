@@ -1177,6 +1177,7 @@ pub(crate) mod tests {
                 ),
                 ("direct".into(), SshHostSettings { container: None }),
             ]),
+            keep_remote_runs: false,
         };
         let mut args = tinker_args();
         args.backend = Some("ssh".into());

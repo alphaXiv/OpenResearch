@@ -237,6 +237,9 @@ pub struct ConfigureArgs {
     container: Option<String>,
     #[arg(long)]
     default_host: Option<String>,
+    /// Keep finished SSH and Slurm run dirs on the host (ssh only; default false).
+    #[arg(long)]
+    keep_remote_runs: Option<bool>,
     #[arg(long)]
     partition: Option<String>,
     #[arg(long)]
@@ -321,7 +324,7 @@ impl ConfigureArgs {
     fn body(self) -> Result<Value> {
         let backend = self.backend.name();
         let allowed: &[&str] = match backend {
-            "ssh" => &["host", "container", "defaultHost"],
+            "ssh" => &["host", "container", "defaultHost", "keepRemoteRuns"],
             "slurm" => &[
                 "host",
                 "partition",
@@ -353,6 +356,9 @@ impl ConfigureArgs {
             if let Some(value) = value {
                 body.insert(key.into(), json!(value));
             }
+        }
+        if let Some(keep) = self.keep_remote_runs {
+            body.insert("keepRemoteRuns".into(), json!(keep));
         }
         if let Some(cpus) = self.cpus_per_task {
             body.insert("cpusPerTask".into(), json!(cpus));
