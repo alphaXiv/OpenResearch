@@ -67,7 +67,7 @@ pub fn snapshot(session: &StoredChatSession, spawn: &WirePart) -> Result<Option<
             if kind != "assistant" {
                 continue;
             }
-            running = message.pointer("/time/completed").is_none() || message["finish"] != "stop";
+            running = opencode_message_running(&message);
             if let Some(content) = message["content"].as_array() {
                 for (index, item) in content.iter().enumerate() {
                     let id = format!("{}:{id}:{index}", spawn.id);
@@ -114,13 +114,24 @@ pub fn snapshot(session: &StoredChatSession, spawn: &WirePart) -> Result<Option<
                 children.push(part);
             }
         }
-        running = children.iter().any(|part| {
-            part.state
-                .as_ref()
-                .is_some_and(|state| state.status == "running")
-        });
+        let last: Option<String> = db.query_row(
+            "SELECT data FROM message WHERE session_id=?1 AND json_extract(data,'$.role')='assistant' ORDER BY time_created DESC,id DESC LIMIT 1",
+            [&child], |row| row.get(0),
+        ).optional()?;
+        running = match last {
+            Some(data) => opencode_message_running(&serde_json::from_str(&data)?),
+            None => true,
+        };
     }
     Ok(Some(with_children(spawn, children, running)))
+}
+
+fn opencode_message_running(message: &Value) -> bool {
+    message
+        .pointer("/time/completed")
+        .and_then(Value::as_i64)
+        .is_none()
+        || message["finish"] == "tool-calls"
 }
 
 fn opencode_child(spawn: &WirePart) -> Option<String> {
@@ -247,6 +258,22 @@ fn with_children(spawn: &WirePart, children: Vec<WirePart>, running: bool) -> Wi
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn opencode_polls_until_the_assistant_finishes_its_response() {
+        for message in [
+            serde_json::json!({"time":{"created":1},"content":[]}),
+            serde_json::json!({"time":{"created":1,"completed":null}}),
+            serde_json::json!({"time":{"created":1},"content":[{"type":"text","text":"Still writing"}]}),
+            serde_json::json!({"time":{"completed":2},"finish":"tool-calls"}),
+        ] {
+            assert!(opencode_message_running(&message));
+        }
+        for finish in ["stop", "length", "error"] {
+            assert!(!opencode_message_running(
+                &serde_json::json!({"time":{"completed":3},"finish":finish})
+            ));
+        }
+    }
     #[test]
     fn antigravity_children_preserve_tools_and_parent_update_without_reasoning() {
         let spawn = WirePart::tool("spawn", "task", "completed", None);

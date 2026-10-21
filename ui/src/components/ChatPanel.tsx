@@ -148,7 +148,7 @@ import {
   isModelAccessLimitPart,
   unreadAfterBusyChange,
   isTurnStatusPart,
-  withoutDuplicateTurnError,
+  splitResponseTurn,
   partIsVisible,
   pendingQuestionId,
   hasPendingInput,
@@ -3190,13 +3190,8 @@ export const Message = memo(function Message({
       </div>
     );
   }
-  const usageLimit = message.parts.find((part) => part.type === "tool" && isUsageLimitPart(part));
-  const turnStatus = message.parts.find(isTurnStatusPart) ?? usageLimit;
-  const turnParts = message.parts.filter((part) => part !== turnStatus && !(usageLimit && isUsageLimitPart(part)));
-  const regularParts = withoutDuplicateTurnError(turnParts, turnStatus);
-  const temporaryApiError = regularParts.length < turnParts.length && turnParts.at(-1)?.tool === "api_error";
-  const turns = (responseMessages ?? [message]).map((turn) =>
-    turn === message ? { ...turn, parts: regularParts } : turn);
+  const responseTurns = (responseMessages ?? [message]).map(splitResponseTurn);
+  const turns = responseTurns.map((turn) => turn.message);
   const response = splitResponseParts(turns, predictTextTail);
   const predictingAnswer = predictTextTail && response.answerMessageId === message.id;
   const copyText = predictingAnswer && !message.completedAt ? "" : responseText({ ...message, parts: response.answer });
@@ -3216,8 +3211,9 @@ export const Message = memo(function Message({
         onOpenSubagent,
         predictTextTail,
       }} />
-      {turnStatus && (
+      {responseTurns.map(({ message: turn, turnStatus, usageLimit, temporaryApiError }) => turnStatus && (
         <TurnStatusRow
+          key={turn.id}
           part={turnStatus}
           usageLimited={Boolean(usageLimit)}
           temporaryApiError={temporaryApiError}
@@ -3225,7 +3221,7 @@ export const Message = memo(function Message({
           recovering={recoveringTurnId === turnStatus.state?.input?.turnId}
           onRecover={onRecover}
         />
-      )}
+      ))}
       {copyText && (
         <div className="mt-2 flex justify-end opacity-0 transition-opacity duration-80 ease-standard group-hover/turn:opacity-100 group-focus-within/turn:opacity-100">
           <IconButton
@@ -3894,11 +3890,10 @@ const Transcript = memo(function Transcript({
         const group = visibleMessages[item.index];
         const m = group[group.length - 1];
         const rowId = group[0].id;
-        const turnStatus = m.parts.find(isTurnStatusPart);
-        const turnId = turnStatus?.state?.input?.turnId;
+
         // A session owns one turn slot, so one recovery disables every status
         // card until its durable admission resolves.
-        const recoveryDisabled = turnStatus ? busy || recoveringTurnId !== null : false;
+        const recoveryDisabled = busy || recoveringTurnId !== null;
         return (
           <div
             key={rowId}
@@ -3938,7 +3933,7 @@ const Transcript = memo(function Transcript({
             onOpenPlan={onOpenPlan}
             onOpenSubagent={onOpenSubagent}
             busy={recoveryDisabled}
-            recoveringTurnId={turnId === recoveringTurnId ? recoveringTurnId : null}
+            recoveringTurnId={recoveringTurnId}
             onRecover={onRecover}
             skills={skills}
             predictTextTail={busy && m === activeMessage && m.role === "assistant"}

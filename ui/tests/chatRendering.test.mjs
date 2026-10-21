@@ -359,3 +359,19 @@ test("Claude handbacks show their actual update and empty Codex markers remain s
   assert.equal(parentUpdateText(handback), "HELPER_DONE");
   assert.equal(parentUpdateText({ id: "child:update", tool: "subagent", state: { input: { kind: "interacted" } } }), null);
 });
+
+test("a wakeup continuation retains each earlier turn's recovery controls", async () => {
+  const { groupResponseMessages, splitResponseTurn, splitResponseParts } = await import("../src/chatRendering.ts");
+  const recovery = { id: "turn-recovery", type: "tool", tool: "error", state: {
+    status: "error", error: "Disconnected", input: { turnId: "failed-turn", recoveryAction: "continue" },
+  } };
+  const failed = { ...message({ id: "answer", type: "text", text: "Experiment launched" }, recovery), id: "failed" };
+  const wakeup = { ...message({ id: "wakeup-answer", type: "text", text: "Experiment finished" }), id: "wakeup" };
+  const turns = groupResponseMessages([failed, wakeup])[0].map(splitResponseTurn);
+  assert.equal(turns[0].turnStatus, recovery);
+  assert.equal(turns[0].turnStatus.state.input.turnId, "failed-turn");
+  assert.equal(turns[1].turnStatus, undefined);
+  const response = splitResponseParts(turns.map(turn => turn.message), false);
+  assert.deepEqual(response.answer, wakeup.parts);
+  assert.ok(response.work.every(turn => !turn.parts.includes(recovery)));
+});

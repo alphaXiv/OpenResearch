@@ -63,6 +63,7 @@ export function SubagentTab({
     refetchIntervalInBackground: true,
     refetchOnMount: "always",
   });
+  const loading = messages === null || nativeTranscript.isPending;
   // Same stick-to-bottom contract as the main transcript: pinned on mount,
   // unpinned when the user scrolls up, re-pinned within 60px of the bottom.
   const scrollRef = useRef<HTMLDivElement | null>(null);
@@ -92,9 +93,9 @@ export function SubagentTab({
     ro.observe(inner);
     ro.observe(el);
     return () => ro.disconnect();
-  }, [messages === null]);
+  }, [loading]);
 
-  if (messages === null || nativeTranscript.isPending) {
+  if (loading) {
     return (
       <TabBody>
         <div className={PANE_CONTENT_CLASS_NAME}>

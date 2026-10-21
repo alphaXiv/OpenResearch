@@ -102,6 +102,19 @@ export function withoutDuplicateTurnError(parts: ChatPart[], turnStatus: ChatPar
     && last.state?.error && last.state.error === turnStatus.state?.error ? parts.slice(0, -1) : parts;
 }
 
+export function splitResponseTurn(message: ChatMessage) {
+  const usageLimit = message.parts.find((part) => part.type === "tool" && isUsageLimitPart(part));
+  const turnStatus = message.parts.find(isTurnStatusPart) ?? usageLimit;
+  const turnParts = message.parts.filter((part) => part !== turnStatus && !(usageLimit && isUsageLimitPart(part)));
+  const regularParts = withoutDuplicateTurnError(turnParts, turnStatus);
+  return {
+    message: { ...message, parts: regularParts },
+    turnStatus,
+    usageLimit,
+    temporaryApiError: regularParts.length < turnParts.length && turnParts.at(-1)?.tool === "api_error",
+  };
+}
+
 /** The last visible part, when it is a non-errored tool. */
 export function partsTailToolId(parts: ChatPart[]): string | null {
   for (let index = parts.length - 1; index >= 0; index--) {
