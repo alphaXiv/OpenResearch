@@ -6677,7 +6677,8 @@ impl ChatHost {
         let attachments = store.chat_attachment_ids(Some(session_id))?;
         store.delete_chat_session(session_id)?;
         self.emit("chat.session.deleted", json!({ "sessionId": session_id }));
-        if let Err(err) = remove_unreferenced_attachments(&store, &attachments_dir()?, &attachments)
+        if let Err(err) = attachments_dir()
+            .and_then(|dir| remove_unreferenced_attachments(&store, &dir, &attachments))
         {
             eprintln!("could not remove chat attachments: {err}");
         }

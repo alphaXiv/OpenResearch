@@ -4396,7 +4396,7 @@ mod tests {
     }
 
     #[test]
-    fn chat_attachment_ids_cover_messages_turns_and_queue_per_session() {
+    fn deleting_a_chat_removes_only_its_unreferenced_attachments() {
         let dir = std::env::temp_dir().join(format!("orx-store-att-{}", uuid::Uuid::new_v4()));
         let store = Store::open_at(dir.clone()).unwrap();
         let a = format!("att-{}", uuid::Uuid::new_v4());
