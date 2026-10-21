@@ -620,6 +620,7 @@
   "activity_closed_agent": "エージェントを閉じました",
   "activity_subagent_started": "サブエージェントが開始しました",
   "activity_agent_reported_back": "エージェントが結果を報告しました",
+  "activity_sent_update_to_parent": "親エージェントに更新を送信しました",
   "activity_subagent_interrupted": "サブエージェントが中断されました",
   "activity_subagent": "サブエージェント",
   "activity_compacted_context": "コンテキストを圧縮しました",
@@ -1412,5 +1413,9 @@
   "acp_sign_in_help": "下のターミナルで{name}にサインインしてください。",
   "acp_get_api_key": "DeepSeek APIキーを取得",
   "acp_sign_in_bigmodel": "BigModelでサインイン",
-  "acp_adapter_required": "ACP アダプターが必要です"
+  "acp_adapter_required": "ACP アダプターが必要です",
+  "chat_experiment_running": "実験を実行中",
+  "chat_experiment_starting": "実験を開始中",
+  "chat_experiment_cancelling": "実験をキャンセル中",
+  "chat_experiments_running": "{count} 件の実験を実行中"
 }

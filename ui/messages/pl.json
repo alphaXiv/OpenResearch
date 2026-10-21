@@ -620,6 +620,7 @@
   "activity_closed_agent": "Zamknięto agenta",
   "activity_subagent_started": "Uruchomiono podagenta",
   "activity_agent_reported_back": "Agent przekazał wyniki",
+  "activity_sent_update_to_parent": "Wysłano aktualizację do agenta nadrzędnego",
   "activity_subagent_interrupted": "Przerwano działanie podagenta",
   "activity_subagent": "Podagent",
   "activity_compacted_context": "Skrócono kontekst",
@@ -1412,5 +1413,9 @@
   "acp_sign_in_help": "Zaloguj się do {name} w terminalu poniżej.",
   "acp_get_api_key": "Uzyskaj klucz API DeepSeek",
   "acp_sign_in_bigmodel": "Zaloguj się przez BigModel",
-  "acp_adapter_required": "Wymagany adapter ACP"
+  "acp_adapter_required": "Wymagany adapter ACP",
+  "chat_experiment_running": "Eksperyment trwa",
+  "chat_experiment_starting": "Uruchamianie eksperymentu",
+  "chat_experiment_cancelling": "Anulowanie eksperymentu",
+  "chat_experiments_running": "Trwające eksperymenty: {count}"
 }

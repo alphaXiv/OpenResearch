@@ -1,5 +1,54 @@
 import type { ChatMessage, ChatPart, ChatSession } from "./api";
 
+export function isParentUpdate(part: ChatPart): boolean {
+  return part.tool?.toLowerCase() === "subagenthandback" || part.tool === "subagent" && part.state?.input?.kind === "interacted"
+    && part.id.includes(":") && !part.children?.length;
+}
+
+export function parentUpdateText(part: ChatPart): string | null {
+  const message = part.state?.input?.message;
+  return isParentUpdate(part) && typeof message === "string" && message.trim() ? message : null;
+}
+
+export function agentTranscript(messages: ChatMessage[], eventId: string): ChatPart | null {
+  const events: ChatPart[] = [];
+  function collect(parts: ChatPart[]) {
+    for (const part of parts) {
+      events.push(part);
+      if (part.children) collect(part.children);
+    }
+  }
+  for (const message of messages) collect(message.parts);
+  const selected = events.find((part) => part.id === eventId);
+  if (!selected) return null;
+  if (isParentUpdate(selected)) return selected;
+  const threadIds = (part: ChatPart): string[] => {
+    const ids = part.state?.input?.agentThreadIds;
+    return Array.isArray(ids) ? ids.filter((id): id is string => typeof id === "string") : [];
+  };
+  const targets = threadIds(selected);
+  if (targets.length === 0) return selected;
+  const belongsToAgent = (part: ChatPart) => targets.some((id) => part.id.startsWith(`${id}:`));
+  const related = events.filter((part) => part === selected
+    || threadIds(part).some((id) => targets.includes(id))
+    || part.children?.some(belongsToAgent));
+  const children = new Map<string, ChatPart>();
+  for (const event of related) {
+    for (const child of event.children ?? []) {
+      if (belongsToAgent(child)) children.set(child.id, child);
+    }
+  }
+  const latest = related.at(-1) ?? selected;
+  return {
+    ...selected,
+    state: latest.state && {
+      ...latest.state,
+      status: related.some((event) => event.state?.status === "running") ? "running" : latest.state.status,
+    },
+    children: [...children.values()],
+  };
+}
+
 export function hasPendingInput(messages: ChatMessage[], busy: boolean): boolean {
   return messages.some((message) => message.parts.some((part) => {
     const prompt = part.prompt;
@@ -114,6 +163,46 @@ export function splitTurnParts(parts: ChatPart[], streaming: boolean): { work: C
   return finalIndex < 0 || (!streaming && !parts.slice(finalIndex).some((part) => partIsVisible(part))) || !parts.slice(0, finalIndex).some((part) => partIsVisible(part))
     ? { work: [], answer: parts }
     : { work: parts.slice(0, finalIndex), answer: parts.slice(finalIndex) };
+}
+
+export function groupResponseMessages(messages: ChatMessage[], previousGroups: ChatMessage[][] = []): ChatMessage[][] {
+  const groups: ChatMessage[][] = [];
+  for (const message of messages) {
+    const previous = groups.at(-1);
+    if (message.role === "assistant" && previous?.[0].role === "assistant") {
+      previous.push(message);
+    } else {
+      groups.push([message]);
+    }
+  }
+  return groups.map((group, index) => {
+    const previous = previousGroups[index];
+    return previous?.length === group.length && group.every((message, i) => message === previous[i])
+      ? previous : group;
+  });
+}
+
+export function splitResponseParts(messages: ChatMessage[], streaming: boolean) {
+  const turns = messages.map((message, index) => {
+    const active = streaming && index === messages.length - 1;
+    const split = splitTurnParts(message.parts, active);
+    // A continuation's commentary belongs to activity until it has an answer.
+    if (messages.length > 1 && active && !message.parts.some((part) =>
+      (part.type === "text" && part.phase === "final_answer" && Boolean(part.text))
+      || (part.type === "prompt" && !part.prompt?.resolved))) {
+      return { message, work: message.parts, answer: [] };
+    }
+    return { message, ...split };
+  });
+  const current = [...turns].reverse().find((turn) => turn.answer.some((part) => partIsVisible(part)));
+  return {
+    answer: current?.answer ?? [],
+    answerMessageId: current?.message.id,
+    work: turns.map((turn) => ({
+      id: turn.message.id,
+      parts: turn === current ? turn.work : [...turn.work, ...turn.answer],
+    })).filter((turn) => turn.parts.some((part) => partIsVisible(part))),
+  };
 }
 
 function textPartsText(parts: ChatPart[]): string {

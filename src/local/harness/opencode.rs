@@ -1140,7 +1140,7 @@ fn opencode_variant(level: Option<&str>) -> Option<&str> {
 }
 
 /// opencode part → wire part (the shapes are already close).
-fn to_wire_part(part: &Value) -> Option<WirePart> {
+pub(crate) fn to_wire_part(part: &Value) -> Option<WirePart> {
     let id = part.get("id")?.as_str()?.to_string();
     let kind = part.get("type")?.as_str()?;
     match kind {
@@ -1205,7 +1205,9 @@ fn newest_task_part_id(parts: &[WirePart], claimed: &HashMap<String, String>) ->
     parts
         .iter()
         .rev()
-        .find(|p| p.tool.as_deref() == Some("task") && !taken.contains(p.id.as_str()))
+        .find(|p| {
+            matches!(p.tool.as_deref(), Some("task" | "subagent")) && !taken.contains(p.id.as_str())
+        })
         .map(|p| p.id.clone())
 }
 
