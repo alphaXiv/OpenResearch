@@ -4447,13 +4447,24 @@ mod tests {
         let files = dir.join("chat-attachments");
         std::fs::create_dir_all(&files).unwrap();
         let fresh_orphan = format!("att-{}__z.png", uuid::Uuid::new_v4());
+        let old_orphan = format!("att-{}__o.png", uuid::Uuid::new_v4());
         for name in [
             format!("{a}__x.png"),
             format!("{b}__y.pdf"),
             format!("{c}__z.png"),
             fresh_orphan.clone(),
+            old_orphan.clone(),
         ] {
             std::fs::write(files.join(name), b"x").unwrap();
+        }
+        let two_hours_ago = std::time::SystemTime::now() - Duration::from_secs(2 * 60 * 60);
+        for name in [format!("{c}__z.png"), old_orphan.clone()] {
+            std::fs::File::options()
+                .write(true)
+                .open(files.join(name))
+                .unwrap()
+                .set_modified(two_hours_ago)
+                .unwrap();
         }
         let deleted = HashSet::from([a.clone(), b.clone()]);
         store.delete_chat_session("chat_2").unwrap();
@@ -4470,8 +4481,12 @@ mod tests {
         assert!(files.join(&fresh_orphan).exists(), "not the deleted chat's");
         remove_unreferenced_attachments(&store, &files, None).unwrap();
         assert!(
-            !files.join(&fresh_orphan).exists(),
+            !files.join(&old_orphan).exists(),
             "startup sweep reclaims it"
+        );
+        assert!(
+            files.join(&fresh_orphan).exists(),
+            "may be a send in flight"
         );
         assert!(
             files.join(format!("{c}__z.png")).exists(),

@@ -993,14 +993,16 @@ pub fn attachments_dir() -> Result<std::path::PathBuf> {
     Ok(dir)
 }
 
-/// Remove attachment files no chat row mentions any more: only `deleted` (a
-/// deleted chat's) while the server runs, since a send in flight saves its
-/// file before recording the message; every orphan when `None`, at startup.
+/// Remove attachment files no chat row mentions any more: `deleted` (a deleted
+/// chat's) when given, else every orphan older than an hour. A send in flight
+/// saves its file before recording the message, possibly in another server
+/// sharing the data dir, so a young orphan waits for a later sweep.
 pub fn remove_unreferenced_attachments(
     store: &Store,
     dir: &std::path::Path,
     deleted: Option<&HashSet<String>>,
 ) -> Result<()> {
+    const SWEEP_AGE: Duration = Duration::from_secs(60 * 60);
     let referenced = store.chat_attachment_ids(None)?;
     let entries =
         std::fs::read_dir(dir).map_err(|e| anyhow!("Could not read {}: {}", dir.display(), e))?;
@@ -1013,7 +1015,15 @@ pub fn remove_unreferenced_attachments(
         else {
             continue;
         };
-        if !referenced.contains(id) && deleted.is_none_or(|deleted| deleted.contains(id)) {
+        let orphaned = !referenced.contains(id)
+            && match deleted {
+                Some(deleted) => deleted.contains(id),
+                None => entry
+                    .metadata()
+                    .and_then(|m| m.modified())
+                    .is_ok_and(|t| t.elapsed().is_ok_and(|age| age > SWEEP_AGE)),
+            };
+        if orphaned {
             if let Err(err) = std::fs::remove_file(entry.path()) {
                 eprintln!("could not remove {}: {err}", entry.path().display());
             }
