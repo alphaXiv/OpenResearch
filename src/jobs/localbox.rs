@@ -230,6 +230,19 @@ fn exit_code_state(dir: &Path) -> Option<JobState> {
     })
 }
 
+/// Reclaims a finished run's rebuildable environment and package cache; logs,
+/// exit_code and outputs (artifacts, checkpoints, tensorboard) stay.
+pub fn slim_run_dir(dir: &Path) {
+    for sub in ["repo/.venv", "repo/.cache/uv"] {
+        let path = dir.join(sub);
+        if let Err(err) = std::fs::remove_dir_all(&path) {
+            if err.kind() != std::io::ErrorKind::NotFound {
+                eprintln!("could not reclaim {}: {err}", path.display());
+            }
+        }
+    }
+}
+
 /// Job state in the shared stage vocabulary (see `jobs::stage_to_run_status`).
 /// exit_code present -> finished; pid alive -> running; pid dead & no
 /// exit_code -> killed/crashed.
@@ -472,6 +485,40 @@ mod tests {
         assert_eq!(odd.len(), 1, "GPU kept even without a memory field");
         assert_eq!(odd[0].name, "Tesla T4");
         assert_eq!(odd[0].mem_mib, None);
+    }
+
+    #[test]
+    fn slim_run_dir_keeps_logs_and_outputs() {
+        let dir = std::env::temp_dir().join(format!("orx-slim-test-{}", uuid::Uuid::new_v4()));
+        for sub in [
+            "repo/.venv/lib",
+            "repo/.cache/uv/wheels",
+            "repo/.cache/nanochat",
+            "repo/artifacts",
+        ] {
+            std::fs::create_dir_all(dir.join(sub)).unwrap();
+        }
+        for file in [
+            "log",
+            "exit_code",
+            "repo/artifacts/results.json",
+            "repo/.venv/lib/x.py",
+        ] {
+            std::fs::write(dir.join(file), "x").unwrap();
+        }
+        slim_run_dir(&dir);
+        slim_run_dir(&dir);
+        assert!(!dir.join("repo/.venv").exists());
+        assert!(!dir.join("repo/.cache/uv").exists());
+        for kept in [
+            "log",
+            "exit_code",
+            "repo/artifacts/results.json",
+            "repo/.cache/nanochat",
+        ] {
+            assert!(dir.join(kept).exists(), "{kept} must survive");
+        }
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 
     fn wait_terminal(dir: &Path) -> JobState {
