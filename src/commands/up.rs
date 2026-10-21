@@ -164,20 +164,28 @@ pub async fn run(args: UpArgs) -> Result<()> {
         let gate = state.data_dir_gate.clone();
         tokio::task::spawn_blocking(move || local::demo::prewarm(move_in_progress, gate));
     }
-    // Deliver explicitly registered run wake-ups once their chat becomes idle.
-    tokio::spawn(async {
+    let moving = state.data_dir_move_in_progress.clone();
+    let gate = state.data_dir_gate.clone();
+    tokio::spawn(async move {
         let mut hourly = tokio::time::interval(Duration::from_secs(60 * 60));
         loop {
             hourly.tick().await;
-            let swept = Store::open().and_then(|store| {
+            let _guard = gate.lock().await;
+            if moving.load(std::sync::atomic::Ordering::SeqCst) {
+                continue;
+            }
+            let swept = tokio::task::spawn_blocking(|| {
+                let store = Store::open()?;
                 let dir = local::chat::attachments_dir()?;
                 local::chat::remove_unreferenced_attachments(&store, &dir, None)
-            });
-            if let Err(err) = swept {
+            })
+            .await;
+            if let Ok(Err(err)) = swept {
                 eprintln!("orx up: could not sweep chat attachments: {err}");
             }
         }
     });
+    // Deliver explicitly registered run wake-ups once their chat becomes idle.
     tokio::spawn(local::chat::watch_runs(
         state.chat.clone(),
         state.data_dir_move_in_progress.clone(),
