@@ -469,6 +469,41 @@ fn migrate_chat_spawns(conn: &Connection) -> Result<()> {
 /// to ride out ordinary writer bursts, short enough that a dead writer doesn't
 /// stall a command for long.
 pub(crate) const BUSY_TIMEOUT: Duration = Duration::from_millis(5000);
+/// How long submission and project deletion wait out each other or an orphan scan before failing as busy.
+#[cfg(not(test))]
+pub(crate) const RUN_ARTIFACTS_WAIT: Duration = Duration::from_secs(60);
+#[cfg(test)]
+pub(crate) const RUN_ARTIFACTS_WAIT: Duration = Duration::from_secs(1);
+pub(crate) const RUN_ARTIFACTS_POLL: Duration = Duration::from_millis(250);
+/// Bounds removal time per orphan pass; classification is unbudgeted but cheap for finished runs.
+const ORPHAN_PASS_BUDGET: Duration = Duration::from_secs(5);
+
+const SUBMISSION_HANDLE: (&str, &str) = ("submission-handles", ".json");
+const SUPERVISOR_LOCK: (&str, &str) = ("run-logs", ".supervisor.lock");
+/// Per-run files as (data-dir root, name suffix); the supervisor lock goes last so it excludes until the end.
+const RUN_ARTIFACTS: [(&str, &str); 7] = [
+    ("local-runs", ""),
+    ("run-logs", ".log"),
+    ("run-logs", ".supervisor.log"),
+    ("run-logs", ".supervisor.log.1"),
+    ("run-logs", ".cancel.lock"),
+    SUBMISSION_HANDLE,
+    SUPERVISOR_LOCK,
+];
+
+#[derive(Default)]
+pub(crate) struct OrphanPass {
+    /// The pass stopped at [`ORPHAN_PASS_BUDGET`] with orphans left to reclaim.
+    pub more: bool,
+    /// Orphans kept because they could not be classified or removed.
+    pub kept: Vec<(String, crate::error::Error)>,
+}
+
+enum OrphanFate {
+    Reclaim,
+    Keep { snapshot: Option<String> },
+    KeepWithAllSnapshots,
+}
 
 pub struct Store {
     conn: Connection,
@@ -1782,13 +1817,16 @@ impl Store {
         open_lifecycle_lock_at(&self.data_dir.join("run-artifacts.lock"))
     }
 
+    fn run_artifact_path(&self, (root, suffix): (&str, &str), run_id: &str) -> PathBuf {
+        self.data_dir.join(root).join(format!("{run_id}{suffix}"))
+    }
+
     fn validate_run_artifact_roots(&self) -> Result<()> {
-        for name in [
-            "local-runs",
-            "run-logs",
-            "submission-handles",
-            "source-snapshots",
-        ] {
+        for name in RUN_ARTIFACTS
+            .iter()
+            .map(|(root, _)| *root)
+            .chain(["source-snapshots"])
+        {
             let path = self.data_dir.join(name);
             match std::fs::symlink_metadata(&path) {
                 Ok(metadata) if !metadata.file_type().is_dir() => {
@@ -1806,34 +1844,37 @@ impl Store {
     }
 
     fn remove_run_artifacts(&self, run_id: &str) -> Result<()> {
-        for path in [
-            self.data_dir.join("local-runs").join(run_id),
-            self.data_dir.join("run-logs").join(format!("{run_id}.log")),
-            self.data_dir
-                .join("submission-handles")
-                .join(format!("{run_id}.json")),
-        ] {
-            remove_run_artifact(&path)?;
+        for artifact in RUN_ARTIFACTS {
+            remove_run_artifact(&self.run_artifact_path(artifact, run_id))?;
         }
         Ok(())
     }
 
     /// Reclaim legacy local artifacts whose run rows have already disappeared.
-    pub(crate) fn cleanup_orphaned_run_artifacts(&self) -> Result<()> {
+    pub(crate) fn cleanup_orphaned_run_artifacts(&self) -> Result<OrphanPass> {
         let mut lock = self.run_artifacts_lock()?;
         let _guard = match lock.try_write() {
             Ok(guard) => guard,
-            Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => return Ok(()),
+            Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                return Ok(OrphanPass::default())
+            }
             Err(error) => return Err(error.into()),
         };
+        // Another dashboard may be copying this data directory.
+        if self.data_dir_move_claimed()? {
+            return Ok(OrphanPass::default());
+        }
         self.cleanup_run_artifacts_locked(None)
     }
 
-    fn cleanup_run_artifacts_locked(&self, deleting_project: Option<&str>) -> Result<()> {
+    fn cleanup_run_artifacts_locked(&self, deleting_project: Option<&str>) -> Result<OrphanPass> {
+        let started = std::time::Instant::now();
+        let mut pass = OrphanPass::default();
         self.validate_run_artifact_roots()?;
         let mut retained_runs = std::collections::HashSet::new();
         let mut retained_snapshots = std::collections::HashSet::new();
         let mut deleted_runs = std::collections::HashSet::new();
+        let mut retain_all_snapshots = false;
         let mut statement = self
             .conn
             .prepare("SELECT id, backend_json, project_id FROM runs")?;
@@ -1850,17 +1891,15 @@ impl Store {
                 continue;
             }
             retained_runs.insert(id);
-            if let Some(digest) = crate::jobs::BackendDescriptor::parse(&json)?.source_digest {
-                retained_snapshots.insert(digest);
+            match crate::jobs::BackendDescriptor::parse(&json) {
+                Ok(descriptor) => retained_snapshots.extend(descriptor.source_digest),
+                // An unparseable row could reference any snapshot.
+                Err(_) => retain_all_snapshots = true,
             }
         }
         let mut candidates = deleted_runs.clone();
-        for (name, suffix) in [
-            ("local-runs", ""),
-            ("run-logs", ".log"),
-            ("submission-handles", ".json"),
-        ] {
-            for entry in artifact_entries(&self.data_dir.join(name))? {
+        for (root, suffix) in RUN_ARTIFACTS {
+            for entry in artifact_entries(&self.data_dir.join(root))? {
                 let name = entry.file_name();
                 let Some(id) = name.to_str().and_then(|name| name.strip_suffix(suffix)) else {
                     continue;
@@ -1870,57 +1909,44 @@ impl Store {
                 }
             }
         }
-        let mut retain_all_snapshots = false;
+        let mut reclaimable = Vec::new();
         for id in &candidates {
-            let handle = self
-                .data_dir
-                .join("submission-handles")
-                .join(format!("{id}.json"));
-            match std::fs::read_to_string(handle) {
-                Ok(json) => {
-                    let descriptor = crate::jobs::BackendDescriptor::parse(&json)?;
-                    // Rowless remote handles may be the only way to cancel a still-live provider job.
-                    if !matches!(descriptor.kind.as_str(), "local_job" | "tinker_job")
-                        && !deleted_runs.contains(id)
-                    {
-                        retained_runs.insert(id.clone());
-                        if let Some(digest) = descriptor.source_digest {
-                            retained_snapshots.insert(digest);
-                        }
-                    }
+            let deleting = deleted_runs.contains(id);
+            let fate = match self.orphan_fate(id, deleting) {
+                Ok(fate) => fate,
+                Err(error) if deleting => return Err(error),
+                // One unreadable orphan must not stall reclaiming the rest.
+                Err(error) => {
+                    pass.kept.push((id.clone(), error));
+                    OrphanFate::KeepWithAllSnapshots
                 }
-                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-                Err(error) => return Err(error.into()),
-            }
-            let dir = self.data_dir.join("local-runs").join(id);
-            if dir.exists() && crate::jobs::localbox::orphaned_job_is_running(&dir)? {
-                if deleted_runs.contains(id) {
-                    return Err(anyhow!(
-                        "Local run {id} is still running; retry project deletion once it stops."
-                    ));
-                }
-                retained_runs.insert(id.clone());
-                retain_all_snapshots = true;
-            }
-            let path = self
-                .data_dir
-                .join("run-logs")
-                .join(format!("{id}.supervisor.lock"));
-            let mut supervisor = open_lifecycle_lock_at(&path)?;
-            match supervisor.try_write() {
-                Ok(_) => {}
-                Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
-                    if deleted_runs.contains(id) {
-                        return Err(anyhow!("Run {id} still has a supervisor; retry project deletion once it stops."));
-                    }
-                    retained_runs.insert(id.clone());
-                    retain_all_snapshots = true;
-                }
-                Err(error) => return Err(error.into()),
             };
+            match fate {
+                // Project deletion leaves unrelated orphans to the periodic scan.
+                OrphanFate::Reclaim if deleting || deleting_project.is_none() => {
+                    reclaimable.push(id)
+                }
+                OrphanFate::Reclaim => {}
+                OrphanFate::Keep { snapshot } => retained_snapshots.extend(snapshot),
+                OrphanFate::KeepWithAllSnapshots => retain_all_snapshots = true,
+            }
         }
-        for id in candidates.difference(&retained_runs) {
-            self.remove_run_artifacts(id)?;
+        let mut remaining = reclaimable.len();
+        for id in reclaimable {
+            match self.remove_run_artifacts(id) {
+                Ok(()) => {}
+                Err(error) if deleted_runs.contains(id) => return Err(error),
+                Err(error) => pass.kept.push((id.clone(), error)),
+            }
+            remaining -= 1;
+            // Checked after a removal so every pass makes progress.
+            if deleting_project.is_none()
+                && remaining > 0
+                && started.elapsed() >= ORPHAN_PASS_BUDGET
+            {
+                pass.more = true;
+                return Ok(pass);
+            }
         }
         if !retain_all_snapshots {
             for entry in artifact_entries(&self.data_dir.join("source-snapshots"))? {
@@ -1940,7 +1966,56 @@ impl Store {
                 }
             }
         }
-        Ok(())
+        Ok(pass)
+    }
+
+    /// Only a run being deleted turns a live job into an error; other errors are the caller's to absorb.
+    fn orphan_fate(&self, id: &str, deleting: bool) -> Result<OrphanFate> {
+        let live = |reason: &str| {
+            if deleting {
+                Err(anyhow!(
+                    "Run {id} {reason}; retry project deletion once it stops."
+                ))
+            } else {
+                Ok(OrphanFate::KeepWithAllSnapshots)
+            }
+        };
+        let mut fate = OrphanFate::Reclaim;
+        if !deleting {
+            match std::fs::read_to_string(self.run_artifact_path(SUBMISSION_HANDLE, id)) {
+                Ok(json) => {
+                    let descriptor = crate::jobs::BackendDescriptor::parse(&json)?;
+                    // Rowless remote handles may be the only way to cancel a still-live provider job.
+                    if !matches!(descriptor.kind.as_str(), "local_job" | "tinker_job") {
+                        fate = OrphanFate::Keep {
+                            snapshot: descriptor.source_digest,
+                        };
+                    }
+                }
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                Err(error) => return Err(error.into()),
+            }
+        }
+        let dir = self.data_dir.join("local-runs").join(id);
+        if dir.exists() && crate::jobs::localbox::orphaned_job_is_running(&dir)? {
+            return live("is still running");
+        }
+        let path = self.run_artifact_path(SUPERVISOR_LOCK, id);
+        match std::fs::symlink_metadata(&path) {
+            // Probing must not create lock files for runs that never had a supervisor.
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(fate),
+            Err(error) => return Err(error.into()),
+            Ok(_) => {}
+        }
+        let mut supervisor = open_lifecycle_lock_at(&path)?;
+        let probe = supervisor.try_write().map(drop);
+        match probe {
+            Ok(()) => Ok(fate),
+            Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                live("still has a supervisor")
+            }
+            Err(error) => Err(error.into()),
+        }
     }
 
     fn cleanup_project_run_artifacts(&self, project_id: &str) -> Result<()> {
@@ -1965,22 +2040,46 @@ impl Store {
             {
                 return Err(anyhow!("Invalid run id for artifact cleanup: {}", run.id));
             }
-            let descriptor = crate::jobs::BackendDescriptor::parse(&run.backend_json)?;
-            if let Some(digest) = descriptor.source_digest {
-                if digest.len() != 64 || !digest.bytes().all(|c| c.is_ascii_hexdigit()) {
-                    return Err(anyhow!("Invalid source digest for run {}", run.id));
-                }
-            }
         }
-        self.cleanup_run_artifacts_locked(Some(project_id))
+        self.cleanup_run_artifacts_locked(Some(project_id))?;
+        Ok(())
+    }
+
+    fn data_dir_move_claimed(&self) -> Result<bool> {
+        self.clear_stale_data_dir_move_lease()?;
+        Ok(self.conn.query_row(
+            "SELECT EXISTS (SELECT 1 FROM data_dir_move_lease WHERE id = 1)",
+            [],
+            |row| row.get(0),
+        )?)
     }
 
     /// Delete a project and its execution artifacts. GitHub repo and cache clone are kept.
+    /// Blocks up to [`RUN_ARTIFACTS_WAIT`] while a submission or orphan scan holds the artifacts lock.
     pub fn delete_local_project(&self, id: &str) -> Result<()> {
         let mut lock = self.run_artifacts_lock()?;
-        let _guard = lock
-            .try_write()
-            .map_err(|error| anyhow!("Run artifacts are busy; retry project deletion: {error}"))?;
+        let deadline = std::time::Instant::now() + RUN_ARTIFACTS_WAIT;
+        let _guard = loop {
+            match lock.try_write() {
+                Ok(guard) => break guard,
+                Err(error)
+                    if error.kind() == std::io::ErrorKind::WouldBlock
+                        && std::time::Instant::now() < deadline =>
+                {
+                    std::thread::sleep(RUN_ARTIFACTS_POLL);
+                }
+                Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                    return Err(anyhow!("Run artifacts are busy; retry project deletion."))
+                }
+                Err(error) => return Err(error.into()),
+            }
+        };
+        // A move can start while this waits; its copy must not race the removals below.
+        if self.data_dir_move_claimed()? {
+            return Err(anyhow!(
+                "The data directory is being moved; retry project deletion afterwards."
+            ));
+        }
         // Keep rows on filesystem errors so deletion can be retried with the same handles.
         self.cleanup_project_run_artifacts(id)?;
         let tx = self.begin()?;
@@ -3762,6 +3861,15 @@ mod tests {
             .join(format!("{}.zip", "c".repeat(64)));
         std::fs::write(&zip, "upload-only").unwrap();
         std::fs::write(dir.join("source-snapshots/keep.txt"), "not an archive").unwrap();
+        let sidecar_only = uuid::Uuid::new_v4().to_string();
+        for name in [
+            format!("{orphan}.supervisor.log"),
+            format!("{orphan}.cancel.lock"),
+            format!("{orphan}.supervisor.lock"),
+            format!("{sidecar_only}.supervisor.log"),
+        ] {
+            std::fs::write(dir.join("run-logs").join(name), "").unwrap();
+        }
         let staging_lock = store.run_artifacts_lock().unwrap();
         let staging = staging_lock.read().unwrap();
         store.cleanup_orphaned_run_artifacts().unwrap();
@@ -3770,6 +3878,13 @@ mod tests {
         drop(staging_lock);
         store.cleanup_orphaned_run_artifacts().unwrap();
         store.cleanup_orphaned_run_artifacts().unwrap();
+        assert_eq!(
+            std::fs::read_dir(dir.join("run-logs"))
+                .unwrap()
+                .map(|entry| entry.unwrap().file_name())
+                .collect::<Vec<_>>(),
+            [std::ffi::OsString::from(format!("{surviving}.log"))]
+        );
         for id in [&orphan, &shared_orphan, &abandoned, &tinker] {
             assert!(!dir.join("local-runs").join(id).exists());
             assert!(!dir.join("run-logs").join(format!("{id}.log")).exists());
@@ -3797,6 +3912,44 @@ mod tests {
             .is_file());
         assert!(dir.join("repo-old/keep").is_file());
         assert!(dir.join("repo-surviving/keep").is_file());
+        drop(store);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn orphan_cleanup_skips_malformed_rows_and_keeps_every_snapshot() {
+        let dir = std::env::temp_dir().join(format!("orx-malformed-{}", uuid::Uuid::new_v4()));
+        let store = Store::open_at(dir.clone()).unwrap();
+        let orphan = uuid::Uuid::new_v4().to_string();
+        let unreferenced = "f".repeat(64);
+        project_with_run_artifacts(&store, "old", &orphan, &unreferenced);
+        project_with_run_artifacts(&store, "malformed", "malformed-run", &"0".repeat(64));
+        store
+            .conn
+            .execute("DELETE FROM runs WHERE project_id = 'old'", [])
+            .unwrap();
+        store
+            .conn
+            .execute("UPDATE runs SET backend_json = 'not json'", [])
+            .unwrap();
+        std::fs::write(dir.join("local-runs").join(&orphan).join("exit_code"), "0").unwrap();
+        let unreadable = uuid::Uuid::new_v4().to_string();
+        let unreadable_handle = dir
+            .join("submission-handles")
+            .join(format!("{unreadable}.json"));
+        std::fs::create_dir_all(&unreadable_handle).unwrap();
+        let pass = store.cleanup_orphaned_run_artifacts().unwrap();
+        assert!(!pass.more);
+        assert_eq!(pass.kept.len(), 1);
+        assert_eq!(pass.kept[0].0, unreadable);
+        assert!(!dir.join("local-runs").join(&orphan).exists());
+        assert!(unreadable_handle.is_dir());
+        assert!(dir
+            .join("source-snapshots")
+            .join(format!("{unreferenced}.tar"))
+            .is_file());
+        store.delete_local_project("malformed").unwrap();
+        assert!(!dir.join("local-runs/malformed-run").exists());
         drop(store);
         std::fs::remove_dir_all(dir).unwrap();
     }
@@ -3854,8 +4007,13 @@ mod tests {
             .join("source-snapshots")
             .join(format!("{digest}.tar"))
             .exists());
+        assert!(!path.exists());
         assert!(remote_handle.is_file());
         assert!(remote_snapshot.is_file());
+        assert!(!dir
+            .join("run-logs")
+            .join(format!("{remote}.supervisor.lock"))
+            .exists());
         drop(store);
         std::fs::remove_dir_all(dir).unwrap();
     }
@@ -3940,7 +4098,21 @@ mod tests {
         assert!(dir.join("local-runs/run/repo/output").exists());
         drop(staging);
         drop(staging_lock);
+        let lock_path = dir.join("run-artifacts.lock");
+        let (held_tx, held_rx) = std::sync::mpsc::channel();
+        let holder = std::thread::spawn(move || {
+            let lock = open_lifecycle_lock_at(&lock_path).unwrap();
+            let _staging = lock.read().unwrap();
+            held_tx.send(()).unwrap();
+            std::thread::sleep(Duration::from_millis(300));
+        });
+        held_rx.recv().unwrap();
+        let started = std::time::Instant::now();
+        // Deletion waits out a submission that finishes within RUN_ARTIFACTS_WAIT.
         store.delete_local_project("project").unwrap();
+        assert!(started.elapsed() >= Duration::from_millis(200));
+        holder.join().unwrap();
+        assert!(!dir.join("local-runs/run").exists());
         drop(store);
         std::fs::remove_dir_all(dir).unwrap();
     }
@@ -3962,10 +4134,10 @@ mod tests {
                 [r#"{"kind":"local_job","sourceDigest":"../repo-project"}"#],
             )
             .unwrap();
-        assert!(store.delete_local_project("project").is_err());
-        assert!(store.get_local_project("project").unwrap().is_some());
+        // Snapshot removal works from directory names, so a bad digest cannot steer it.
+        store.delete_local_project("project").unwrap();
         assert!(dir.join("repo-project/keep").is_file());
-        assert!(dir.join("local-runs/run/repo/output").is_file());
+        assert!(!dir.join("local-runs/run").exists());
         drop(store);
         std::fs::remove_dir_all(dir).unwrap();
     }

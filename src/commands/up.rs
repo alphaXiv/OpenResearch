@@ -91,9 +91,6 @@ pub async fn run(args: UpArgs) -> Result<()> {
     {
         let store = Store::open()?;
         local::chat::reconcile_unfinished_turns(&store)?;
-        if let Err(error) = store.cleanup_orphaned_run_artifacts() {
-            eprintln!("orx up: could not clean orphaned run artifacts: {error}");
-        }
         for run in store.list_active_runs()? {
             if store.get_local_experiment(&run.experiment_id)?.is_some() {
                 if let Err(err) = crate::commands::exp::spawn_detached_supervise(&run.id) {
@@ -174,6 +171,10 @@ pub async fn run(args: UpArgs) -> Result<()> {
         state.data_dir_gate.clone(),
     ));
     tokio::spawn(adopt_orphaned_runs(
+        state.data_dir_move_in_progress.clone(),
+        state.data_dir_gate.clone(),
+    ));
+    tokio::spawn(reclaim_orphaned_run_artifacts(
         state.data_dir_move_in_progress.clone(),
         state.data_dir_gate.clone(),
     ));
@@ -2079,11 +2080,19 @@ async fn delete_project(State(state): State<AppState>, Path(id): Path<String>) -
         state.chat.claude.forget_session(&session.id).await;
         state.chat.acp.stop(&session.id).await;
     }
-    store.delete_local_project(&id)?;
-    for session in &sessions {
-        local::chat::cleanup_session_transcript_artifacts(&session.id);
-        local::chat::cleanup_session_worktree(&project, &session.id);
-    }
+    // The leases and cleanup ride in the blocking task so a disconnect during the lock wait cannot drop them.
+    let leases = (_deleting_project, _session_deletions);
+    tokio::task::spawn_blocking(move || {
+        let _leases = leases;
+        store.delete_local_project(&id)?;
+        for session in &sessions {
+            local::chat::cleanup_session_transcript_artifacts(&session.id);
+            local::chat::cleanup_session_worktree(&project, &session.id);
+        }
+        Ok::<_, crate::error::Error>(())
+    })
+    .await
+    .map_err(|error| anyhow!("project deletion task failed: {error}"))??;
     Ok(Json(json!({ "ok": true })))
 }
 
@@ -4584,12 +4593,54 @@ async fn adopt_orphaned_runs(moving: Arc<AtomicBool>, gate: Arc<tokio::sync::Mut
     }
 }
 
+/// Background task so a large first reclaim never delays startup; it releases the gate between passes.
+async fn reclaim_orphaned_run_artifacts(
+    moving: Arc<AtomicBool>,
+    gate: Arc<tokio::sync::Mutex<()>>,
+) {
+    // Demo prewarm skips itself when the gate is contended at startup.
+    tokio::time::sleep(Duration::from_secs(5)).await;
+    // Orphans whose failure is already logged, so a stuck one logs once.
+    let mut reported = HashSet::new();
+    loop {
+        let mut more = false;
+        if !moving.load(Ordering::SeqCst) {
+            let _gate = gate.lock().await;
+            if !moving.load(Ordering::SeqCst) {
+                match tokio::task::spawn_blocking(|| {
+                    Store::open()?.cleanup_orphaned_run_artifacts()
+                })
+                .await
+                {
+                    Ok(Ok(pass)) => {
+                        more = pass.more;
+                        for (run_id, error) in pass.kept {
+                            if reported.insert(run_id.clone()) {
+                                eprintln!("orx up: keeping run artifacts for {run_id}: {error}");
+                            }
+                        }
+                    }
+                    Ok(Err(error)) => {
+                        eprintln!("orx up: could not clean orphaned run artifacts: {error}")
+                    }
+                    Err(error) => {
+                        eprintln!("orx up: orphaned run artifact cleanup failed: {error}")
+                    }
+                }
+            }
+        }
+        let pause = if more {
+            Duration::from_secs(1)
+        } else {
+            ORPHANED_RUN_SCAN_INTERVAL
+        };
+        tokio::time::sleep(pause).await;
+    }
+}
+
 /// Spawns the missing supervisors and returns the runs whose spawn failed.
 fn adopt_orphaned_runs_once() -> Result<Vec<(String, crate::error::Error)>> {
     let store = Store::open()?;
-    if let Err(error) = store.cleanup_orphaned_run_artifacts() {
-        eprintln!("orx up: could not clean orphaned run artifacts: {error}");
-    }
     let mut failures = Vec::new();
     for run in store.list_active_runs()? {
         // Without a job handle the launch may still be submitting, and a supervisor would fail it.

@@ -794,9 +794,22 @@ pub async fn submit(args: &crate::ExpRunArgs) -> Result<StoredRun> {
         ));
     }
     let artifacts_lock = store.run_artifacts_lock()?;
-    let _artifacts_guard = artifacts_lock
-        .try_read()
-        .map_err(|error| anyhow!("Run artifacts are busy; retry the run submission: {error}"))?;
+    let deadline = std::time::Instant::now() + crate::store::RUN_ARTIFACTS_WAIT;
+    let _artifacts_guard = loop {
+        match artifacts_lock.try_read() {
+            Ok(guard) => break guard,
+            Err(error)
+                if error.kind() == std::io::ErrorKind::WouldBlock
+                    && std::time::Instant::now() < deadline =>
+            {
+                tokio::time::sleep(crate::store::RUN_ARTIFACTS_POLL).await;
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                return Err(anyhow!("Run artifacts are busy; retry the run submission."))
+            }
+            Err(error) => return Err(error.into()),
+        }
+    };
     let experiment = store
         .get_local_experiment(&args.exp_id)?
         .ok_or_else(|| anyhow!("Local experiment {} not found.", args.exp_id))?;
