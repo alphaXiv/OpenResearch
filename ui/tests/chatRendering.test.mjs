@@ -2,6 +2,8 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import {
   unreadAfterBusyChange,
+  isParentUpdate,
+  parentUpdateText,
   partIsVisible,
   pendingQuestionId,
   partsTailToolId,
@@ -252,4 +254,124 @@ test("switching conversation branches clears hidden pending questions", async ()
   assert.equal(hasPendingInput(activePath(messages, "old"), false), true);
   assert.equal(hasPendingInput(activePath(messages, "retry"), false), false);
   assert.equal(hasPendingInput(activePath(messages, "old"), false), true);
+});
+
+test("automatic continuations share a response until the next user message", async () => {
+  const { groupResponseMessages } = await import("../src/chatRendering.ts");
+  const user = { id: "user", role: "user", parts: [], createdAt: 0 };
+  const first = { ...message(), id: "first" };
+  const continuation = { ...message(), id: "continuation" };
+  const nextUser = { ...user, id: "next-user" };
+  const groups = groupResponseMessages([user, first, continuation, nextUser]);
+  assert.deepEqual(groups, [[user], [first, continuation], [nextUser]]);
+  assert.equal(groupResponseMessages([user, first, continuation, nextUser], groups)[1], groups[1]);
+});
+
+test("a continuation retains the previous answer until a new answer arrives", async () => {
+  const { splitResponseParts } = await import("../src/chatRendering.ts");
+  const oldAnswer = { id: "old-answer", type: "text", phase: "final_answer", text: "Run launched" };
+  const progress = { id: "progress", type: "text", phase: "commentary", text: "Checking the result" };
+  const newAnswer = { id: "new-answer", type: "text", phase: "final_answer", text: "Run repaired" };
+  const first = { ...message(oldAnswer), id: "first", completedAt: 10 };
+  const continuation = { ...message(progress), id: "continuation", createdAt: 100 };
+  const waiting = splitResponseParts([first, continuation], true);
+  assert.deepEqual(waiting.answer, [oldAnswer]);
+  assert.deepEqual(waiting.work, [{ id: "continuation", parts: [progress] }]);
+  const updated = splitResponseParts([first, { ...continuation, parts: [progress, newAnswer] }], true);
+  assert.deepEqual(updated.answer, [newAnswer]);
+  assert.deepEqual(updated.work, [
+    { id: "first", parts: [oldAnswer] },
+    { id: "continuation", parts: [progress] },
+  ]);
+});
+
+test("continuation prompts stay outside collapsed activity", async () => {
+  const { splitResponseParts } = await import("../src/chatRendering.ts");
+  const first = message({ id: "answer", type: "text", phase: "final_answer", text: "Started" });
+  const prompt = { id: "question", type: "prompt", prompt: { kind: "question", resolved: false } };
+  assert.deepEqual(splitResponseParts([first, { ...message(prompt), id: "next" }], true).answer, [prompt]);
+});
+
+test("every event for an agent resolves to its combined live transcript", async () => {
+  const { agentTranscript } = await import("../src/chatRendering.ts");
+  const event = (id, threads, children = [], status = "completed") => ({
+    id, type: "tool", tool: "subagent", children,
+    state: { status, input: { agentThreadIds: threads } },
+  });
+  const first = { id: "child:first", type: "text", text: "First update" };
+  const next = { id: "child:next", type: "text", text: "Still working" };
+  const other = { id: "other:text", type: "text", text: "Different agent" };
+  const spawn = event("spawn", ["child"], [first]);
+  const report = event("report", ["child"]);
+  const continuation = event("continuation", ["child", "other"], [next, other], "running");
+  const messages = [message(spawn, report, continuation)];
+  for (const id of ["spawn", "report"]) {
+    const transcript = agentTranscript(messages, id);
+    assert.deepEqual(transcript.children, [first, next]);
+    assert.equal(transcript.state.status, "running");
+  }
+  assert.equal(agentTranscript(messages, "missing"), null);
+});
+
+test("an agent transcript can open before content arrives and then receive updates", async () => {
+  const { agentTranscript } = await import("../src/chatRendering.ts");
+  const spawn = { id: "spawn", type: "tool", tool: "subagent", children: [],
+    state: { status: "running", input: { agentThreadIds: ["child"] } } };
+  assert.deepEqual(agentTranscript([message(spawn)], "spawn").children, []);
+  const update = { id: "child:update", type: "text", text: "Working" };
+  assert.deepEqual(agentTranscript([message({ ...spawn, children: [update] })], "spawn").children, [update]);
+  const legacy = { ...spawn, state: { status: "running" }, children: [update] };
+  assert.equal(agentTranscript([message(legacy)], "spawn"), legacy);
+});
+
+test("nested report-back markers retain their own update rather than reopening the agent", async () => {
+  const { agentTranscript } = await import("../src/chatRendering.ts");
+  const markers = ["one", "two", "three", "four"].map((id) => ({
+    id: `audit:${id}`, type: "tool", tool: "subagent",
+    state: { status: "completed", input: { kind: "interacted" } },
+  }));
+  const audit = { id: "audit-spawn", type: "tool", tool: "subagent",
+    state: { status: "completed", input: { nickname: "audit" } },
+    children: [{ id: "audit:read", type: "tool", tool: "read" }, ...markers],
+  };
+  for (const marker of markers) {
+    assert.equal(agentTranscript([message(audit)], marker.id), marker);
+  }
+  const linkedMarker = { ...markers[0], state: { ...markers[0].state,
+    input: { kind: "interacted", agentThreadIds: ["parent"] } } };
+  const linkedAudit = { ...audit, children: [linkedMarker] };
+  assert.equal(agentTranscript([message(linkedAudit)], linkedMarker.id), linkedMarker);
+});
+
+
+test("outgoing parent updates are distinct from transcript-owning agent events", async () => {
+  const { isParentUpdate } = await import("../src/chatRendering.ts");
+  const update = { id: "child:report", type: "tool", tool: "subagent",
+    state: { input: { kind: "interacted" } } };
+  assert.equal(isParentUpdate(update), true);
+  assert.equal(isParentUpdate({ ...update, id: "agent-spawn" }), false);
+  assert.equal(isParentUpdate({ ...update, children: [{ id: "child:message", type: "text", text: "Result" }] }), false);
+});
+
+test("Claude handbacks show their actual update and empty Codex markers remain static", () => {
+  const handback = { id: "spawn:handback", type: "tool", tool: "SubagentHandback", state: { input: { message: "HELPER_DONE" } } };
+  assert.equal(isParentUpdate(handback), true);
+  assert.equal(parentUpdateText(handback), "HELPER_DONE");
+  assert.equal(parentUpdateText({ id: "child:update", tool: "subagent", state: { input: { kind: "interacted" } } }), null);
+});
+
+test("a wakeup continuation retains each earlier turn's recovery controls", async () => {
+  const { groupResponseMessages, splitResponseTurn, splitResponseParts } = await import("../src/chatRendering.ts");
+  const recovery = { id: "turn-recovery", type: "tool", tool: "error", state: {
+    status: "error", error: "Disconnected", input: { turnId: "failed-turn", recoveryAction: "continue" },
+  } };
+  const failed = { ...message({ id: "answer", type: "text", text: "Experiment launched" }, recovery), id: "failed" };
+  const wakeup = { ...message({ id: "wakeup-answer", type: "text", text: "Experiment finished" }), id: "wakeup" };
+  const turns = groupResponseMessages([failed, wakeup])[0].map(splitResponseTurn);
+  assert.equal(turns[0].turnStatus, recovery);
+  assert.equal(turns[0].turnStatus.state.input.turnId, "failed-turn");
+  assert.equal(turns[1].turnStatus, undefined);
+  const response = splitResponseParts(turns.map(turn => turn.message), false);
+  assert.deepEqual(response.answer, wakeup.parts);
+  assert.ok(response.work.every(turn => !turn.parts.includes(recovery)));
 });

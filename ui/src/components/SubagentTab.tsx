@@ -3,9 +3,11 @@ import { useQuery } from "@tanstack/react-query";
 import { getChatMessagesQuery } from "../queries/chat";
 import { m } from "../paraglide/messages.js";
 import { useEffect, useLayoutEffect, useRef } from "react";
-import { type ChatPart } from "../api";
+import { getSubagentTranscript } from "../api";
+import { workspaceKey } from "../queries/client";
+import { agentTranscript } from "../chatRendering";
 
-import { findPartById, SubagentTranscript } from "./ChatPanel";
+import { SubagentTranscript } from "./ChatPanel";
 import type { TabOpenIntent } from "../tabPreview";
 import { ChatImageScope } from "./Md";
 import { TabBody } from "./layout/TabBody";
@@ -17,15 +19,12 @@ const PANE_CONTENT_CLASS_NAME = [
   "bg-background py-8 px-4",
 ].join(" ");
 
-/** Right-pane tab body for a sub-agent transcript. The spawn part (and its
- * streamed `children`) lives on the parent session's chat messages, so this
- * seeds from `getChatMessages` and then follows the live `chat.message` stream —
- * the same source the inline block renders from, so it stays in sync as the
- * sub-agent works. No dedicated fetch endpoint needed. */
+/** Resolves agent events to one transcript and follows the live message cache. */
 export function SubagentTab({
   projectId,
   sessionId,
   spawnPartId,
+  expansionState,
   onOpenFile,
   onOpenRun,
   runExperimentName,
@@ -36,6 +35,7 @@ export function SubagentTab({
   projectId: string;
   sessionId: string;
   spawnPartId: string;
+  expansionState: Map<string, boolean>;
   onOpenFile?: (
     path: string,
     line: number | undefined,
@@ -55,6 +55,15 @@ export function SubagentTab({
 }) {
   const query = useQuery(getChatMessagesQuery(sessionId));
   const messages = query.data?.messages ?? (query.isError ? [] : null);
+  const selectedSpawn = agentTranscript(messages ?? [], spawnPartId);
+  const nativeTranscript = useQuery({
+    queryKey: workspaceKey("getSubagentTranscript", sessionId, spawnPartId, selectedSpawn?.state?.input?.nativeTranscript ?? null, selectedSpawn?.state?.output?.match(/\(sessionID: (ses_\w+)\)/)?.[1] ?? null),
+    queryFn: ({ signal }) => getSubagentTranscript(sessionId, spawnPartId, signal),
+    refetchInterval: (query) => query.state.data?.state?.status === "running" ? 1500 : false,
+    refetchIntervalInBackground: true,
+    refetchOnMount: "always",
+  });
+  const loading = messages === null || nativeTranscript.isPending;
   // Same stick-to-bottom contract as the main transcript: pinned on mount,
   // unpinned when the user scrolls up, re-pinned within 60px of the bottom.
   const scrollRef = useRef<HTMLDivElement | null>(null);
@@ -70,7 +79,7 @@ export function SubagentTab({
   useLayoutEffect(() => {
     const el = scrollRef.current;
     if (el && stickToBottom.current) el.scrollTop = el.scrollHeight;
-  }, [messages]);
+  }, [messages, nativeTranscript.data]);
 
   // Re-pin on growth without a message change — tool rows expanding, images
   // loading, the pane resizing.
@@ -84,9 +93,9 @@ export function SubagentTab({
     ro.observe(inner);
     ro.observe(el);
     return () => ro.disconnect();
-  }, [messages === null]);
+  }, [loading]);
 
-  if (messages === null) {
+  if (loading) {
     return (
       <TabBody>
         <div className={PANE_CONTENT_CLASS_NAME}>
@@ -96,12 +105,7 @@ export function SubagentTab({
     );
   }
 
-  // Locate the spawn part across all messages; its `children` are the transcript.
-  let spawn: ChatPart | null = null;
-  for (const m of messages) {
-    spawn = findPartById(m.parts, spawnPartId);
-    if (spawn) break;
-  }
+  const spawn = nativeTranscript.data ?? selectedSpawn;
 
   return (
     <TabBody>
@@ -118,6 +122,7 @@ export function SubagentTab({
             <ChatImageScope projectId={projectId} sessionId={sessionId}>
               <SubagentTranscript
                 spawn={spawn}
+                expansionState={expansionState}
                 onOpenFile={onOpenFile}
                 onOpenRun={onOpenRun}
                 runExperimentName={runExperimentName}
