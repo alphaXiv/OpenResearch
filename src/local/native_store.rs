@@ -330,8 +330,10 @@ pub fn purge_isolated_sessions(doomed: impl Fn(&str) -> bool) -> Result<()> {
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
     // A home override can point legacy at the isolated path; then the user owns it.
-    let owns =
-        |home: fn(NativeStore) -> PathBuf| home(NativeStore::Isolated) != home(NativeStore::Legacy);
+    let resolved = |path: PathBuf| crate::paths::canonicalize(&path).unwrap_or(path);
+    let owns = |home: fn(NativeStore) -> PathBuf| {
+        resolved(home(NativeStore::Isolated)) != resolved(home(NativeStore::Legacy))
+    };
     if owns(claude_home) {
         let claude = claude_home(NativeStore::Isolated);
         for tree in ["projects", "file-history", "session-env", "todos", "debug"] {
