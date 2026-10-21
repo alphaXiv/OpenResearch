@@ -993,17 +993,13 @@ pub fn attachments_dir() -> Result<std::path::PathBuf> {
     Ok(dir)
 }
 
-/// How long an unreferenced attachment is spared while the server runs: a send
-/// in flight saves its file before recording the message.
-pub const ATTACHMENT_GRACE: Duration = Duration::from_secs(10 * 60);
-
-/// Remove attachment files no chat row mentions any more: `deleted` (a deleted
-/// chat's) at once, any other orphan once it is older than `grace`.
+/// Remove attachment files no chat row mentions any more: only `deleted` (a
+/// deleted chat's) while the server runs, since a send in flight saves its
+/// file before recording the message; every orphan when `None`, at startup.
 pub fn remove_unreferenced_attachments(
     store: &Store,
     dir: &std::path::Path,
-    deleted: &HashSet<String>,
-    grace: Duration,
+    deleted: Option<&HashSet<String>>,
 ) -> Result<()> {
     let referenced = store.chat_attachment_ids(None)?;
     let entries =
@@ -1017,13 +1013,7 @@ pub fn remove_unreferenced_attachments(
         else {
             continue;
         };
-        let stale = || {
-            entry
-                .metadata()
-                .and_then(|m| m.modified())
-                .is_ok_and(|t| t.elapsed().is_ok_and(|age| age >= grace))
-        };
-        if !referenced.contains(id) && (deleted.contains(id) || stale()) {
+        if !referenced.contains(id) && deleted.is_none_or(|deleted| deleted.contains(id)) {
             if let Err(err) = std::fs::remove_file(entry.path()) {
                 eprintln!("could not remove {}: {err}", entry.path().display());
             }
@@ -6680,9 +6670,9 @@ impl ChatHost {
         let attachments = store.chat_attachment_ids(Some(session_id))?;
         store.delete_chat_session(session_id)?;
         self.emit("chat.session.deleted", json!({ "sessionId": session_id }));
-        if let Err(err) = attachments_dir().and_then(|dir| {
-            remove_unreferenced_attachments(&store, &dir, &attachments, ATTACHMENT_GRACE)
-        }) {
+        if let Err(err) = attachments_dir()
+            .and_then(|dir| remove_unreferenced_attachments(&store, &dir, Some(&attachments)))
+        {
             eprintln!("could not remove chat attachments: {err}");
         }
         if let Some(session) = session {

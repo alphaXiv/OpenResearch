@@ -4457,8 +4457,8 @@ mod tests {
         }
         let deleted = HashSet::from([a.clone(), b.clone()]);
         store.delete_chat_session("chat_2").unwrap();
-        use crate::local::chat::{remove_unreferenced_attachments, ATTACHMENT_GRACE};
-        remove_unreferenced_attachments(&store, &files, &deleted, ATTACHMENT_GRACE).unwrap();
+        use crate::local::chat::remove_unreferenced_attachments;
+        remove_unreferenced_attachments(&store, &files, Some(&deleted)).unwrap();
         assert!(
             files.join(format!("{a}__x.png")).exists(),
             "still referenced"
@@ -4467,11 +4467,8 @@ mod tests {
             !files.join(format!("{b}__y.pdf")).exists(),
             "deleted chat's file"
         );
-        assert!(
-            files.join(&fresh_orphan).exists(),
-            "within the grace period"
-        );
-        remove_unreferenced_attachments(&store, &files, &HashSet::new(), Duration::ZERO).unwrap();
+        assert!(files.join(&fresh_orphan).exists(), "not the deleted chat's");
+        remove_unreferenced_attachments(&store, &files, None).unwrap();
         assert!(
             !files.join(&fresh_orphan).exists(),
             "startup sweep reclaims it"
