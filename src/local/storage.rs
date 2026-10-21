@@ -326,18 +326,22 @@ fn references(data: &Path, mappings: &[(PathBuf, PathBuf)]) -> Result<References
     }
     // Registrations also find moved worktrees whose project/database was deleted.
     let mut discovered = Vec::new();
-    for repo in &repos {
-        let external = !mappings
+    let external = |repo: &Path| {
+        !mappings
             .iter()
-            .any(|(from, to)| repo.starts_with(from) || repo.starts_with(to));
-        if external && cloud_only(&repo.join(".git/config")) {
-            eprintln!("Skipping cloud-only repository {}", repo.display());
+            .any(|(from, to)| repo.starts_with(from) || repo.starts_with(to))
+    };
+    for repo in &repos {
+        // An unrelated cloud-only repository cannot hold files moved by this migration.
+        if external(repo) && cloud_only(&repo.join(".git/config")) {
             continue;
         }
         let needs_repair = if repo.join(".git").is_dir() {
             match config_may_need_repair(repo, mappings) {
                 Ok(needed) => needed,
-                Err(error) if error.kind() == std::io::ErrorKind::PermissionDenied && external => {
+                Err(error)
+                    if error.kind() == std::io::ErrorKind::PermissionDenied && external(repo) =>
+                {
                     eprintln!(
                         "Skipping inaccessible repository {}: {error}",
                         repo.display()
@@ -385,7 +389,7 @@ fn references(data: &Path, mappings: &[(PathBuf, PathBuf)]) -> Result<References
     repos.extend(discovered);
     for repo in repos {
         let gitfile = repo.join(".git");
-        if !gitfile.is_file() {
+        if !gitfile.is_file() || (external(&repo) && cloud_only(&gitfile)) {
             continue;
         }
         let Ok(contents) = std::fs::read_to_string(&gitfile) else {
