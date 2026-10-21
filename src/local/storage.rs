@@ -248,6 +248,7 @@ fn cloud_only(path: &Path) -> bool {
     std::fs::symlink_metadata(path).is_ok_and(|metadata| metadata.st_flags() & SF_DATALESS != 0)
 }
 
+// shortcut: other platforms have no stat-visible placeholder flag; add one if Windows cloud folders hang.
 #[cfg(not(target_os = "macos"))]
 fn cloud_only(_: &Path) -> bool {
     false
