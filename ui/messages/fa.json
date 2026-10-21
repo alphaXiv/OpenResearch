@@ -613,6 +613,7 @@
   "activity_waiting_on_agent": "در انتظار عامل",
   "activity_closed_agent": "عامل بسته شد",
   "activity_subagent_started": "عامل فرعی آغاز شد",
+  "activity_sent_update_to_parent": "به عامل اصلی به‌روزرسانی فرستاد",
   "activity_agent_reported_back": "عامل نتیجه را گزارش کرد",
   "activity_subagent_interrupted": "عامل فرعی متوقف شد",
   "activity_subagent": "عامل فرعی",
@@ -1412,5 +1413,9 @@
   "acp_sign_in_help": "در ترمینال زیر به {name} وارد شوید.",
   "acp_get_api_key": "دریافت کلید API دیپ‌سیک",
   "acp_sign_in_bigmodel": "ورود با BigModel",
-  "acp_adapter_required": "مبدل ACP لازم است"
+  "acp_adapter_required": "مبدل ACP لازم است",
+  "chat_experiment_running": "آزمایش در حال اجراست",
+  "chat_experiment_starting": "آزمایش در حال شروع است",
+  "chat_experiment_cancelling": "در حال لغو آزمایش",
+  "chat_experiments_running": "{count} آزمایش در حال اجرا"
 }

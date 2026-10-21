@@ -619,6 +619,7 @@
   "activity_waiting_on_agent": "एजेंट का इंतज़ार है",
   "activity_closed_agent": "एक एजेंट बंद किया",
   "activity_subagent_started": "सब-एजेंट शुरू हुआ",
+  "activity_sent_update_to_parent": "मुख्य एजेंट को अपडेट भेजा",
   "activity_agent_reported_back": "एजेंट ने रिपोर्ट भेजी",
   "activity_subagent_interrupted": "सब-एजेंट बाधित हुआ",
   "activity_subagent": "सब-एजेंट",
@@ -1412,5 +1413,9 @@
   "acp_sign_in_help": "नीचे दिए गए टर्मिनल में {name} में साइन इन करें।",
   "acp_get_api_key": "DeepSeek API कुंजी प्राप्त करें",
   "acp_sign_in_bigmodel": "BigModel से साइन इन करें",
-  "acp_adapter_required": "ACP अडैप्टर आवश्यक है"
+  "acp_adapter_required": "ACP अडैप्टर आवश्यक है",
+  "chat_experiment_running": "प्रयोग चल रहा है",
+  "chat_experiment_starting": "प्रयोग शुरू हो रहा है",
+  "chat_experiment_cancelling": "प्रयोग रद्द किया जा रहा है",
+  "chat_experiments_running": "{count} प्रयोग चल रहे हैं"
 }

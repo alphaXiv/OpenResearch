@@ -614,6 +614,7 @@ pub(crate) fn normalize_tool<'a>(
     params: Option<&Value>,
 ) -> (&'a str, Option<Value>) {
     let (tool, aliases): (&str, &[(&str, &str)]) = match name {
+        "invoke_subagent" => ("task", &[("Role", "description")]),
         "run_command" => ("Bash", &[("CommandLine", "command"), ("Cwd", "cwd")]),
         "view_file" => ("Read", &[("AbsolutePath", "file_path")]),
         "write_to_file" => (
@@ -746,6 +747,37 @@ fn apply_event(ctx: &mut TurnCtx, state: &mut TurnState, event: &Value) -> bool 
                 let step_type = step.get("step_type").and_then(Value::as_str).unwrap_or("");
                 let step_state = step.get("state").and_then(Value::as_str).unwrap_or("");
 
+                if own.is_some() && own != state.conversation_id.as_deref() {
+                    return false;
+                }
+                if step_type == "subagent" {
+                    let index = step["step_index"].as_i64().unwrap_or(0);
+                    if let Some(agents) = step
+                        .pointer("/subagent_info/subagents")
+                        .and_then(Value::as_array)
+                    {
+                        for (offset, agent) in agents.iter().enumerate() {
+                            let Some(child) = agent["conversation_id"].as_str() else {
+                                continue;
+                            };
+                            let id = if offset == 0 {
+                                format!("tool-{index}-invoke_subagent")
+                            } else {
+                                format!("tool-{index}-invoke_subagent:{child}")
+                            };
+                            let mut part = WirePart::tool(id, "task", "completed", None);
+                            if let Some(tool) = part.state.as_mut() {
+                                tool.input = Some(serde_json::json!({
+                                    "description": agent["role"],
+                                    "prompt": agent["initial_prompt"],
+                                    "nativeTranscript": {"antigravityConversationId": child}
+                                }));
+                            }
+                            ctx.upsert_part_preserving_children(part);
+                        }
+                    }
+                    return false;
+                }
                 match step_type {
                     "agent_response" => {
                         if let Some(delta) = step.get("text_delta").and_then(Value::as_str) {
