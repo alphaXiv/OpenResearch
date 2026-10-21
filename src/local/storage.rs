@@ -376,7 +376,7 @@ fn references(data: &Path, mappings: &[(PathBuf, PathBuf)]) -> Result<References
             for entry in std::fs::read_dir(registrations)? {
                 let entry = entry?;
                 let backlink = entry.path().join("gitdir");
-                if backlink.is_file() {
+                if backlink.is_file() && !(external(repo) && cloud_only(&backlink)) {
                     let old = std::fs::read_to_string(backlink)?;
                     let path = mapped(Path::new(old.trim()), mappings);
                     if let Some(worktree) = path.parent().filter(|_| path.is_file()) {
@@ -401,6 +401,9 @@ fn references(data: &Path, mappings: &[(PathBuf, PathBuf)]) -> Result<References
         let old = repo.join(old);
         let admin = mapped(&old, mappings);
         let backlink = admin.join("gitdir");
+        if external(&admin) && cloud_only(&backlink) {
+            continue;
+        }
         let actual = match std::fs::read_to_string(&backlink) {
             Ok(actual) => admin.join(actual.trim()),
             Err(_) if admin == old => continue,
