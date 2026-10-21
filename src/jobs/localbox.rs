@@ -236,7 +236,7 @@ pub fn slim_finished_run_dirs(root: &Path) {
         return;
     };
     for dir in entries.flatten().map(|entry| entry.path()) {
-        if dir.join("exit_code").is_file() {
+        if inspect_job(&dir).stage != "RUNNING" {
             slim_run_dir(&dir);
         }
     }
@@ -554,12 +554,21 @@ mod tests {
     #[test]
     fn slim_finished_run_dirs_skips_live_runs() {
         let root = std::env::temp_dir().join(format!("orx-slim-all-{}", uuid::Uuid::new_v4()));
-        for run in ["done", "live"] {
+        for run in ["done", "dead", "live"] {
             std::fs::create_dir_all(root.join(run).join("repo/.venv")).unwrap();
         }
         std::fs::write(root.join("done/exit_code"), "0").unwrap();
+        let pid = root.join("dead/pid");
+        std::fs::write(&pid, "2147483646").unwrap();
+        std::fs::File::options()
+            .write(true)
+            .open(&pid)
+            .unwrap()
+            .set_modified(std::time::SystemTime::now() - std::time::Duration::from_secs(60))
+            .unwrap();
         slim_finished_run_dirs(&root);
         assert!(!root.join("done/repo/.venv").exists());
+        assert!(!root.join("dead/repo/.venv").exists());
         assert!(root.join("live/repo/.venv").exists());
         std::fs::remove_dir_all(&root).unwrap();
     }
