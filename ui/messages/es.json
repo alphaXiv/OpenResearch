@@ -15,7 +15,6 @@
   "settings_environment_tab": "pestaña Entorno",
   "settings_cpu_cores": "Núcleos de CPU: {count}",
   "settings_gpu_count": "GPU × {count}",
-  "$schema": "https://inlang.com/schema/inlang-message-format",
   "app_close_panel": "Cerrar panel",
   "app_current_task": "Tarea actual",
   "app_entire_project": "Todo el proyecto",
@@ -1417,5 +1416,10 @@
   "chat_experiment_running": "Experimento en ejecución",
   "chat_experiment_starting": "Iniciando experimento",
   "chat_experiment_cancelling": "Cancelando experimento",
-  "chat_experiments_running": "{count} experimentos en ejecución"
+  "chat_experiments_running": "{count} experimentos en ejecución",
+  "mermaid_show_source": "Mostrar el código",
+  "mermaid_show_diagram": "Mostrar el diagrama",
+  "mermaid_could_not_render": "No se pudo renderizar este diagrama: {error}",
+  "mermaid_not_a_diagram": "No es un diagrama: se muestra el código en su lugar.",
+  "$schema": "https://inlang.com/schema/inlang-message-format"
 }

@@ -15,7 +15,6 @@
   "settings_environment_tab": "एनवायरनमेंट टैब",
   "settings_cpu_cores": "CPU कोर: {count}",
   "settings_gpu_count": "GPU × {count}",
-  "$schema": "https://inlang.com/schema/inlang-message-format",
   "app_close_panel": "पैनल बंद करें",
   "app_current_task": "मौजूदा टास्क",
   "app_entire_project": "पूरा प्रोजेक्ट",
@@ -1417,5 +1416,10 @@
   "chat_experiment_running": "प्रयोग चल रहा है",
   "chat_experiment_starting": "प्रयोग शुरू हो रहा है",
   "chat_experiment_cancelling": "प्रयोग रद्द किया जा रहा है",
-  "chat_experiments_running": "{count} प्रयोग चल रहे हैं"
+  "chat_experiments_running": "{count} प्रयोग चल रहे हैं",
+  "mermaid_show_source": "स्रोत दिखाएँ",
+  "mermaid_show_diagram": "आरेख दिखाएँ",
+  "mermaid_could_not_render": "यह आरेख प्रदर्शित नहीं हो सका: {error}",
+  "mermaid_not_a_diagram": "यह आरेख नहीं है — इसके बजाय स्रोत दिखाया जा रहा है।",
+  "$schema": "https://inlang.com/schema/inlang-message-format"
 }

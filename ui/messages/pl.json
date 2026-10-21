@@ -1,5 +1,4 @@
 {
-  "$schema": "https://inlang.com/schema/inlang-message-format",
   "workspace_active_experiments": "Aktywne eksperymenty",
   "files_empty_description": "Tutaj pojawią się pliki obszaru roboczego. Poproś agenta o utworzenie pliku, aby rozpocząć.",
   "experiments_empty_description": "Tutaj pojawią się eksperymenty i ich uruchomienia. Poproś agenta o skonfigurowanie pierwszego eksperymentu.",
@@ -1417,5 +1416,10 @@
   "chat_experiment_running": "Eksperyment trwa",
   "chat_experiment_starting": "Uruchamianie eksperymentu",
   "chat_experiment_cancelling": "Anulowanie eksperymentu",
-  "chat_experiments_running": "Trwające eksperymenty: {count}"
+  "chat_experiments_running": "Trwające eksperymenty: {count}",
+  "mermaid_show_source": "Pokaż źródło",
+  "mermaid_show_diagram": "Pokaż diagram",
+  "mermaid_could_not_render": "Nie udało się wyrenderować tego diagramu: {error}",
+  "mermaid_not_a_diagram": "To nie jest diagram — pokazujemy zamiast tego źródło.",
+  "$schema": "https://inlang.com/schema/inlang-message-format"
 }

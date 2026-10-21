@@ -6,9 +6,13 @@
 import type { ReactNode } from "react";
 import { refractor } from "refractor";
 import latex from "refractor/latex";
+import mermaid from "refractor/mermaid";
 
-// The common bundle stops short of latex, and .tex is a first-class file here.
+// The common bundle stops short of latex and mermaid, and both are
+// first-class here: .tex compiles in this app, and a mermaid block's source
+// stays readable whenever it is shown instead of drawn.
 refractor.register(latex);
+refractor.register(mermaid);
 
 interface HastNode {
   type: string;

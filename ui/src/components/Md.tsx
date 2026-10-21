@@ -21,6 +21,7 @@ import { resolveSyntaxLanguage } from "../syntaxLanguage";
 import { highlight } from "../syntaxHighlight";
 import { remarkFigures } from "../remarkFigures";
 import { normalizeMarkdownForRendering } from "../markdownNormalization";
+import { isMermaidLanguage } from "../mermaid";
 import { tabOpenGestureHandlers, type TabOpenIntent } from "../tabPreview";
 import { Button, IconButton, IconButtonLink } from "./ui";
 import { absoluteFileUrl, artifactUrl, projectFileUrl } from "../api";
@@ -28,6 +29,7 @@ import { InlineHtmlFigure } from "./InlineHtmlFigure";
 import { ImageCarousel, ImageCarouselContext } from "./ImageCarousel";
 import { imageWheelZoom } from "../imageZoom";
 import { chatImageTarget, chatImageTargets, citedFilePath, documentAssetTarget, encodeMarkdownPath, firstCitedLine, rehypeSafeUrls, splitLineSuffix, type ImageCandidate } from "../markdownTarget";
+import { MermaidDiagram } from "./Mermaid";
 
 const ImageResolverContext = createContext<((src: string) => ImageCandidate[]) | undefined>(undefined);
 
@@ -371,8 +373,9 @@ function isFileHref(href: string): boolean {
 }
 
 /** Shared `code`/`pre` renderers: fenced blocks (language-*) become
- * highlighted CodeBlocks with a copy button; inline code stays a plain
- * <code> chip. The <pre> wrapper is handled inside CodeBlock, so
+ * highlighted CodeBlocks with a copy button; a ```mermaid fence becomes a
+ * drawn diagram whose source the toggle falls back to; inline code stays a
+ * plain <code> chip. The <pre> wrapper is handled inside CodeBlock, so
  * react-markdown's is unwrapped. Reused by the Artifacts markdown renderer. */
 export const mdCodeComponents: Record<string, (props: any) => ReactNode> = {
   code: ({ node: _node, className, children, ...rest }: any) => {
@@ -387,6 +390,7 @@ export const mdCodeComponents: Record<string, (props: any) => ReactNode> = {
         </code>
       );
     }
+    if (match && isMermaidLanguage(match[1])) return <MermaidDiagram code={raw} />;
     const lang = match ? resolveSyntaxLanguage(match[1]) : null;
     return <CodeBlock code={raw} lang={lang} />;
   },
