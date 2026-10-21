@@ -742,27 +742,19 @@ fn source_cache_commands(cache: &str, size: u64) -> (String, String) {
 const SOURCE_GC_MINUTES: u32 = 10;
 
 /// Remove a finished SSH or Slurm run's remote run dir (and container copy),
-/// plus its source archive once no staging has used it recently.
+/// plus every source archive on the host that no staging has used recently.
 pub async fn remove_run_files(run_id: &str, backend: &super::BackendDescriptor) -> Result<()> {
     let host = match backend.kind.as_str() {
         "ssh_job" => backend.ssh_ref()?.0,
         "slurm_job" => backend.slurm_ref()?.0,
         _ => return Ok(()),
     };
-    let command = remove_run_files_command(
-        run_id,
-        backend.source_digest.as_deref(),
-        backend.ssh_container.as_ref(),
-    )?;
+    let command = remove_run_files_command(run_id, backend.ssh_container.as_ref())?;
     ssh_run(&SshTarget::alias(host), &command, None).await?;
     Ok(())
 }
 
-fn remove_run_files_command(
-    run_id: &str,
-    digest: Option<&str>,
-    container: Option<&ContainerRun>,
-) -> Result<String> {
+fn remove_run_files_command(run_id: &str, container: Option<&ContainerRun>) -> Result<String> {
     if run_id.is_empty()
         || !run_id
             .chars()
@@ -783,14 +775,10 @@ fn remove_run_files_command(
         let remove = container.exec(&format!("rm -rf {}", sh_quote(&container.run_dir)));
         command = format!("{{ {remove} || true; }}; {command}");
     }
-    if let Some(digest) = digest {
-        if digest.is_empty() || !digest.chars().all(|c| c.is_ascii_hexdigit()) {
-            return Err(anyhow!("Refusing to remove source archive {digest:?}"));
-        }
-        command.push_str(&format!(
-            "; find \"$HOME/.orx/source\" -maxdepth 1 -name '{digest}.tar' -mmin +{SOURCE_GC_MINUTES} -delete 2>/dev/null; true"
-        ));
-    }
+    // shortcut: the last run's archive stays until the host's next cleanup; add a sweep if that matters.
+    command.push_str(&format!(
+        "; find \"$HOME/.orx/source\" -maxdepth 1 -name '*.tar' -mmin +{SOURCE_GC_MINUTES} -delete 2>/dev/null; true"
+    ));
     Ok(command)
 }
 
@@ -1159,7 +1147,7 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
-    fn remove_run_files_deletes_run_dir_and_stale_source_archive_only() {
+    fn remove_run_files_deletes_run_dir_and_stale_source_archives_only() {
         let home = crate::local::git::TemporaryDirectory::new("orx-ssh-remove-run").unwrap();
         let run = home.path().join(".orx/runs/r-1");
         let other = home.path().join(".orx/runs/r-2");
@@ -1185,8 +1173,8 @@ mod tests {
                 .unwrap()
                 .success());
         };
-        sh(remove_run_files_command("r-1", Some("ab"), None).unwrap());
-        sh(remove_run_files_command("r-2", Some("cd"), None).unwrap());
+        sh(remove_run_files_command("r-1", None).unwrap());
+        sh(remove_run_files_command("r-2", None).unwrap());
         assert!(!run.exists() && !other.exists());
         assert!(!stale.exists());
         assert!(
@@ -1194,20 +1182,19 @@ mod tests {
             "a recently staged archive may still be extracting"
         );
 
-        assert!(remove_run_files_command("../x", None, None).is_err());
-        assert!(remove_run_files_command("", None, None).is_err());
-        assert!(remove_run_files_command("r1", Some("*"), None).is_err());
+        assert!(remove_run_files_command("../x", None).is_err());
+        assert!(remove_run_files_command("", None).is_err());
         let mut container = ContainerRun {
             reference: "img".into(),
             id: "c1".into(),
             started_at: "t".into(),
             run_dir: "/root/.orx/runs/r1".into(),
         };
-        let command = remove_run_files_command("r1", None, Some(&container)).unwrap();
+        let command = remove_run_files_command("r1", Some(&container)).unwrap();
         assert!(command.starts_with("{ docker exec -i 'c1' bash -c "));
-        assert!(command.ends_with("|| true; }; rm -rf \"$HOME/.orx/runs/r1\""));
+        assert!(command.contains("|| true; }; rm -rf \"$HOME/.orx/runs/r1\";"));
         container.run_dir = "/root".into();
-        assert!(remove_run_files_command("r1", None, Some(&container)).is_err());
+        assert!(remove_run_files_command("r1", Some(&container)).is_err());
     }
 
     #[cfg(unix)]
