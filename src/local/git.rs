@@ -2399,8 +2399,11 @@ fn walk_files(
             let path = format!("{rel}/{name}");
             if kind.is_dir() {
                 stack.push(path);
-            } else if !(kind.is_file() || kind.is_symlink()) {
-                // Pipes and sockets would block the file viewer on open.
+            } else if !(kind.is_file()
+                || kind.is_symlink()
+                    && std::fs::metadata(repo.join(&path)).is_ok_and(|m| m.is_file()))
+            {
+                // Pipes and sockets (or links to them) would block the file viewer on open.
                 continue;
             } else if entries.len() >= cap {
                 return true;
@@ -2620,6 +2623,9 @@ mod tests {
             .status()
             .unwrap()
             .success());
+        #[cfg(unix)]
+        std::os::unix::fs::symlink(dir.join("results/pipe"), dir.join("results/pipe-link"))
+            .unwrap();
         let (mut ignored, truncated) = list_ignored_files(&dir, 10, 10).unwrap();
         ignored.sort();
         let (capped, capped_truncated) = list_ignored_files(&dir, 1, 10).unwrap();
