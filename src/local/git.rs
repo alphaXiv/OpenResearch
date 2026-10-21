@@ -2399,6 +2399,9 @@ fn walk_files(
             let path = format!("{rel}/{name}");
             if kind.is_dir() {
                 stack.push(path);
+            } else if !(kind.is_file() || kind.is_symlink()) {
+                // Pipes and sockets would block the file viewer on open.
+                continue;
             } else if entries.len() >= cap {
                 return true;
             } else {
@@ -2611,6 +2614,12 @@ mod tests {
             write(&dir, &format!("build/{name}.o"), "");
         }
         write(&dir, "cache/x", "");
+        #[cfg(unix)]
+        assert!(std::process::Command::new("mkfifo")
+            .arg(dir.join("results/pipe"))
+            .status()
+            .unwrap()
+            .success());
         let (mut ignored, truncated) = list_ignored_files(&dir, 10, 10).unwrap();
         ignored.sort();
         let (capped, capped_truncated) = list_ignored_files(&dir, 1, 10).unwrap();
