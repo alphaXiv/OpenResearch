@@ -613,6 +613,7 @@
   "activity_waiting_on_agent": "正在等待智能体",
   "activity_closed_agent": "已关闭智能体",
   "activity_subagent_started": "子智能体已启动",
+  "activity_sent_update_to_parent": "已向父代理发送更新",
   "activity_agent_reported_back": "智能体已返回结果",
   "activity_subagent_interrupted": "子智能体已中断",
   "activity_subagent": "子智能体",
@@ -1412,5 +1413,9 @@
   "acp_sign_in_help": "在下方终端中登录 {name}。",
   "acp_get_api_key": "获取 DeepSeek API 密钥",
   "acp_sign_in_bigmodel": "使用 BigModel 登录",
-  "acp_adapter_required": "需要 ACP 适配器"
+  "acp_adapter_required": "需要 ACP 适配器",
+  "chat_experiment_running": "实验运行中",
+  "chat_experiment_starting": "实验启动中",
+  "chat_experiment_cancelling": "正在取消实验",
+  "chat_experiments_running": "{count} 个实验运行中"
 }

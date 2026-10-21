@@ -498,10 +498,14 @@ fn render_tool(ctx: &mut TurnCtx, id: &str, tool: &Value, terminals: &HashMap<St
     };
     let mut part = WirePart::tool(
         format!("acp-tool-{id}"),
-        match tool["kind"].as_str() {
-            Some("execute") => "bash",
-            Some(kind) => kind,
-            None => "tool",
+        match tool["title"].as_str() {
+            Some("subagent" | "task" | "Agent" | "Task") => "task",
+            Some("SubagentHandback") => "SubagentHandback",
+            _ => match tool["kind"].as_str() {
+                Some("execute") => "bash",
+                Some(kind) => kind,
+                None => "tool",
+            },
         },
         status,
         None,

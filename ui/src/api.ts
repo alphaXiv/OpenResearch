@@ -2323,3 +2323,15 @@ export const discoverLocalModels = (request: { baseUrl: string; apiKey: string }
 export const connectLocalModel = (request: { name: string; baseUrl: string; apiKey: string; model: string; contextWindow: number }) => post<{ model: string }>("/api/local-models", request);
 export const checkLocalModel = (id: string) => post<{ models: string[] }>(`/api/local-models/${encodeURIComponent(id)}/check`, {});
 export const removeLocalModel = (id: string) => writeResponse(`/api/local-models/${encodeURIComponent(id)}`, { method: "DELETE" }).then((r) => json<{ ok: boolean }>(r));
+
+export interface ChatActiveRun {
+  sessionId: string;
+  run: Run;
+  experimentName: string | null;
+}
+
+export const listChatActiveRuns = (signal?: AbortSignal) =>
+  get<ChatActiveRun[]>("/api/chat/active-runs", signal);
+
+export const getSubagentTranscript = (sessionId: string, partId: string, signal?: AbortSignal) =>
+  get<ChatPart | null>(`/api/chat/sessions/${sessionId}/subagent?partId=${encodeURIComponent(partId)}`, signal);

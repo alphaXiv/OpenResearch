@@ -76,3 +76,9 @@ export async function readSidebarChatPage(filter: "active" | "archived" | "all",
     return { ...page, sessions: page.sessions.map((session) => ({ ...session, ...indicators.get(session.id) })) };
   } finally { off(); }
 }
+
+export const listChatActiveRunsQuery = () => queryOptions({
+  queryKey: workspaceKey("listChatActiveRuns"),
+  queryFn: ({ signal }) => api.listChatActiveRuns(signal),
+  staleTime: Infinity,
+});
