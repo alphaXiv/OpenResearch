@@ -341,7 +341,7 @@ pub fn purge_isolated_sessions(doomed: impl Fn(&str) -> bool) -> Result<()> {
         .into_iter()
         .filter(|path| path.extension().and_then(|ext| ext.to_str()) == Some("sqlite"))
         .collect();
-    let threads = purge_databases(
+    let (threads, children) = purge_databases(
         &databases,
         &[
             "threads.id",
@@ -353,7 +353,7 @@ pub fn purge_isolated_sessions(doomed: impl Fn(&str) -> bool) -> Result<()> {
         &[("thread_spawn_edges", "child_thread_id", "parent_thread_id")],
         &doomed,
     )?;
-    let doomed_thread = |id: &str| doomed(id) || threads.contains(id);
+    let doomed_thread = |id: &str| threads.contains(id) || (doomed(id) && !children.contains(id));
     for tree in ["sessions", "archived_sessions", "shell_snapshots"] {
         purge_session_tree(&codex.join(tree), &doomed_thread)?;
     }
@@ -446,14 +446,17 @@ fn purge_history(path: &Path, key: &str, doomed: &impl Fn(&str) -> bool) -> Resu
 /// Delete every row of the doomed sessions (and their descendants via
 /// `parents`: `(table, child, parent)`) from a native SQLite store. `ids`
 /// columns (`column` or `table.column`) hold session ids; `also` columns are
-/// only cleared. Rows are zeroed and the WAL truncated so no copy remains.
+/// only cleared. Returns the purged ids and every known child id. Rows are zeroed and the WAL truncated so no copy remains.
 fn purge_databases(
     paths: &[PathBuf],
     ids: &[&str],
     also: &[&str],
     parents: &[(&str, &str, &str)],
     doomed: &impl Fn(&str) -> bool,
-) -> Result<std::collections::HashSet<String>> {
+) -> Result<(
+    std::collections::HashSet<String>,
+    std::collections::HashSet<String>,
+)> {
     let named = |table: &str, column: &str, names: &[&str]| {
         names
             .iter()
@@ -500,21 +503,27 @@ fn purge_databases(
         }
         databases.push((connection, columns));
     }
-    let mut purged: std::collections::HashSet<String> =
-        candidates.into_iter().filter(|id| doomed(id)).collect();
+    let parent_of: std::collections::HashMap<&str, &str> = edges
+        .iter()
+        .filter(|(_, parent)| candidates.contains(parent))
+        .map(|(child, parent)| (child.as_str(), parent.as_str()))
+        .collect();
+    // orx records only top-level ids, so a child goes with its parent, never alone.
+    let mut purged: std::collections::HashSet<String> = candidates
+        .iter()
+        .filter(|id| !parent_of.contains_key(id.as_str()) && doomed(id))
+        .cloned()
+        .collect();
     loop {
         let before = purged.len();
         for (child, parent) in &edges {
-            if purged.contains(parent) {
+            if parent_of.contains_key(child.as_str()) && purged.contains(parent) {
                 purged.insert(child.clone());
             }
         }
         if purged.len() == before {
             break;
         }
-    }
-    if purged.is_empty() {
-        return Ok(purged);
     }
     for (connection, columns) in databases {
         for (table, column) in columns
@@ -528,9 +537,18 @@ fn purge_databases(
                 )?;
             }
         }
-        connection.query_row("PRAGMA wal_checkpoint(TRUNCATE)", [], |_| Ok(()))?;
+        // Every pass, so a checkpoint an open reader blocked last time is retried.
+        let busy: bool =
+            connection.query_row("PRAGMA wal_checkpoint(TRUNCATE)", [], |row| row.get(0))?;
+        if busy {
+            return Err(anyhow::anyhow!(
+                "{} is busy; its WAL may still hold purged rows",
+                connection.path().unwrap_or_default()
+            ));
+        }
     }
-    Ok(purged)
+    let children = parent_of.into_keys().map(String::from).collect();
+    Ok((purged, children))
 }
 
 pub fn prepare_opencode(store: NativeStore) -> Result<PathBuf> {
@@ -943,7 +961,7 @@ mod tests {
         let is_doomed = |id: &str| id != kept;
         let only_doomed = |id: &str| id == doomed;
 
-        let threads = purge_databases(
+        let (threads, _) = purge_databases(
             std::slice::from_ref(&db),
             &[
                 "threads.id",
@@ -994,6 +1012,60 @@ mod tests {
             assert_eq!(ids, [kept]);
         }
         std::fs::remove_dir_all(root).ok();
+    }
+
+    #[test]
+    fn database_purge_takes_children_but_the_sweep_spares_live_ones() {
+        let db = std::env::temp_dir().join(format!("orx-db-purge-{}.db", uuid::Uuid::new_v4()));
+        let connection = rusqlite::Connection::open(&db).unwrap();
+        connection
+            .execute_batch(
+                "CREATE TABLE session (id TEXT, parent_id TEXT);
+                 CREATE TABLE message (session_id TEXT, data TEXT);
+                 CREATE TABLE event (aggregate_id TEXT, data TEXT);
+                 INSERT INTO session VALUES ('gone', NULL), ('gone-child', 'gone'),
+                   ('live', NULL), ('live-child', 'live');
+                 INSERT INTO message VALUES ('gone', 'secret'), ('gone-child', 'secret'),
+                   ('live', 'x'), ('live-child', 'x');
+                 INSERT INTO event VALUES ('gone', 'secret'), ('live', 'x'), ('other', 'x');",
+            )
+            .unwrap();
+        let purge = |doomed: &dyn Fn(&str) -> bool| {
+            purge_databases(
+                std::slice::from_ref(&db),
+                &["session.id", "session_v2.id", "session_id"],
+                &["aggregate_id"],
+                &[
+                    ("session", "id", "parent_id"),
+                    ("session_v2", "id", "parent_id"),
+                ],
+                &doomed,
+            )
+            .unwrap()
+        };
+        let set = |ids: &[&str]| ids.iter().map(|id| id.to_string()).collect();
+
+        let (purged, children) = purge(&|id| id == "gone");
+        assert_eq!(purged, set(&["gone", "gone-child"]));
+        assert_eq!(children, set(&["gone-child", "live-child"]));
+        // The sweep only knows top-level ids; a live chat's child must survive it.
+        assert_eq!(purge(&|id| id != "live").0, set(&[]));
+
+        for (table, column, expected) in [
+            ("session", "id", ["live", "live-child"]),
+            ("message", "session_id", ["live", "live-child"]),
+            ("event", "aggregate_id", ["live", "other"]),
+        ] {
+            let ids: Vec<String> = connection
+                .prepare(&format!("SELECT {column} FROM {table} ORDER BY rowid"))
+                .unwrap()
+                .query_map([], |row| row.get(0))
+                .unwrap()
+                .flatten()
+                .collect();
+            assert_eq!(ids, expected);
+        }
+        std::fs::remove_file(db).ok();
     }
 
     #[test]

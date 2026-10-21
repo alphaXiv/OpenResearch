@@ -2261,7 +2261,11 @@ impl Store {
              UNION SELECT base_native_session_id FROM chat_messages
                WHERE ?1 IS NULL OR session_id = ?1
              UNION SELECT result_native_session_id FROM chat_messages
-               WHERE ?1 IS NULL OR session_id = ?1",
+               WHERE ?1 IS NULL OR session_id = ?1
+             UNION SELECT thread.value FROM chat_messages m, json_each(m.parts_json) part,
+               json_each(part.value, '$.state.input.agentThreadIds') thread
+               WHERE (?1 IS NULL OR m.session_id = ?1) AND json_valid(m.parts_json)
+                 AND m.parts_json LIKE '%agentThreadIds%'",
         )?;
         let rows = stmt.query_map(params![session_id], |row| row.get::<_, Option<String>>(0))?;
         Ok(rows
@@ -3880,7 +3884,7 @@ mod tests {
                 id: "msg_1".into(),
                 session_id: "chat_1".into(),
                 role: "assistant".into(),
-                parts_json: "[]".into(),
+                parts_json: r#"[{"state":{"input":{"agentThreadIds":["child"]}}}]"#.into(),
                 created_at: 1,
                 completed_at: None,
                 parent_id: None,
@@ -3892,8 +3896,13 @@ mod tests {
             .set_chat_session_native_id("chat_2", Some("other"))
             .unwrap();
         let ids = store.chat_native_session_ids(Some("chat_1")).unwrap();
-        assert_eq!(ids, ["current", "base", "rotated"].map(String::from).into());
-        assert_eq!(store.chat_native_session_ids(None).unwrap().len(), 4);
+        assert_eq!(
+            ids,
+            ["current", "base", "rotated", "child"]
+                .map(String::from)
+                .into()
+        );
+        assert_eq!(store.chat_native_session_ids(None).unwrap().len(), 5);
         let _ = std::fs::remove_dir_all(&dir);
     }
 
