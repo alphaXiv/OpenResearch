@@ -3,7 +3,7 @@ import { getHarnessesQuery } from "../queries/settings";
 import { m } from "../paraglide/messages.js";
 import { ltr } from "../i18n";
 import { Check, ChevronDown, ChevronLeft, ChevronRight, Lock, Plus, Settings, Zap } from "lucide-react";
-import { useEffect, useLayoutEffect, useMemo, useRef, useState, type ReactNode, type RefObject } from "react";
+import { useEffect, useLayoutEffect, useMemo, useRef, useState, type ButtonHTMLAttributes, type ReactNode, type RefObject } from "react";
 import {
   fmtNumber,
   harnessModelLabel,
@@ -565,6 +565,7 @@ export function ModelPicker({
  * with a "· Default" note, then the full numbered list. */
 export function OptionPicker({
   triggerIcon,
+  triggerLabel,
   onTriggerClick,
   menuAction,
   choices,
@@ -586,6 +587,7 @@ export function OptionPicker({
   className,
 }: {
   triggerIcon?: ReactNode;
+  triggerLabel?: string;
   onTriggerClick?: () => void;
   menuAction?: { label: string; onSelect: () => void };
   choices: OptionChoice[];
@@ -682,8 +684,26 @@ export function OptionPicker({
     buttonRef.current?.focus();
   };
 
+  const iconTriggerProps: ButtonHTMLAttributes<HTMLButtonElement> = {
+    "aria-label": triggerLabel ?? title ?? header ?? label,
+    "aria-haspopup": "menu",
+    "aria-expanded": open,
+    disabled,
+    onPointerDown: (event) => { touchTrigger.current = event.pointerType === "touch"; },
+    onClick: activateTrigger,
+    onKeyDown: (event) => {
+      touchTrigger.current = false;
+      if (!onTriggerClick || event.key !== "ArrowDown") return;
+      event.preventDefault();
+      openedByHover.current = false;
+      setFilter("");
+      setOpen(true);
+      menuRef.current?.querySelector("input")?.focus();
+    },
+  };
+
   return (
-    <div className={`option-picker relative inline-flex${variant === "field" ? " w-full" : ""}`} ref={ref}
+    <div className={`option-picker relative inline-flex${variant === "field" || triggerLabel ? " w-full" : ""}`} ref={ref}
       onPointerEnter={(event) => {
         if (!openOnHover || disabled || event.pointerType !== "mouse") return;
         clearTimeout(closeTimer.current);
@@ -701,29 +721,15 @@ export function OptionPicker({
       }}
     >
       {triggerIcon ? (
-        <IconButton
-          ref={buttonRef}
-          size="small"
-          active={open}
-          className={className}
-          aria-label={title ?? header ?? label}
-          aria-haspopup="menu"
-          aria-expanded={open}
-          disabled={disabled}
-          onPointerDown={(event) => { touchTrigger.current = event.pointerType === "touch"; }}
-          onClick={activateTrigger}
-          onKeyDown={(event) => {
-            touchTrigger.current = false;
-            if (!onTriggerClick || event.key !== "ArrowDown") return;
-            event.preventDefault();
-            openedByHover.current = false;
-            setFilter("");
-            setOpen(true);
-            menuRef.current?.querySelector("input")?.focus();
-          }}
-        >
-          {triggerIcon}
-        </IconButton>
+        triggerLabel ? (
+          <MenuItem {...iconTriggerProps} ref={buttonRef} active={open} className={cn("min-h-7 py-1", className)}>
+            <span className="flex items-center gap-4">{triggerIcon}{triggerLabel}</span>
+          </MenuItem>
+        ) : (
+          <IconButton {...iconTriggerProps} ref={buttonRef} size="small" active={open} className={className}>
+            {triggerIcon}
+          </IconButton>
+        )
       ) : (
       <button
         ref={buttonRef}
