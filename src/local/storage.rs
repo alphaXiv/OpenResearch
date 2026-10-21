@@ -240,6 +240,19 @@ fn repositories(root: &Path, found: &mut BTreeSet<PathBuf>) -> Result<()> {
     Ok(())
 }
 
+/// Reading a dataless File Provider file (iCloud, Dropbox) blocks until it downloads.
+#[cfg(target_os = "macos")]
+fn cloud_only(path: &Path) -> bool {
+    use std::os::macos::fs::MetadataExt;
+    const SF_DATALESS: u32 = 0x4000_0000;
+    std::fs::symlink_metadata(path).is_ok_and(|metadata| metadata.st_flags() & SF_DATALESS != 0)
+}
+
+#[cfg(not(target_os = "macos"))]
+fn cloud_only(_: &Path) -> bool {
+    false
+}
+
 fn config_may_need_repair(repo: &Path, mappings: &[(PathBuf, PathBuf)]) -> std::io::Result<bool> {
     let config = match std::fs::read_to_string(repo.join(".git/config")) {
         Ok(config) => config,
@@ -314,15 +327,17 @@ fn references(data: &Path, mappings: &[(PathBuf, PathBuf)]) -> Result<References
     // Registrations also find moved worktrees whose project/database was deleted.
     let mut discovered = Vec::new();
     for repo in &repos {
+        let external = !mappings
+            .iter()
+            .any(|(from, to)| repo.starts_with(from) || repo.starts_with(to));
+        if external && cloud_only(&repo.join(".git/config")) {
+            eprintln!("Skipping cloud-only repository {}", repo.display());
+            continue;
+        }
         let needs_repair = if repo.join(".git").is_dir() {
             match config_may_need_repair(repo, mappings) {
                 Ok(needed) => needed,
-                Err(error)
-                    if error.kind() == std::io::ErrorKind::PermissionDenied
-                        && !mappings
-                            .iter()
-                            .any(|(from, to)| repo.starts_with(from) || repo.starts_with(to)) =>
-                {
+                Err(error) if error.kind() == std::io::ErrorKind::PermissionDenied && external => {
                     eprintln!(
                         "Skipping inaccessible repository {}: {error}",
                         repo.display()
