@@ -323,6 +323,12 @@ pub fn toml_string(path: &Path) -> String {
 /// agents run in their global homes, so neither is ever purged. Cursor chats
 /// run in the isolated `CURSOR_DATA_DIR`; only its config is read from legacy.
 pub fn purge_isolated_sessions(doomed: impl Fn(&str) -> bool) -> Result<()> {
+    // One purge at a time: overlapping rewrites of a shared history.jsonl would
+    // restore each other's deleted lines.
+    static PURGE: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    let _purge = PURGE
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
     let claude = claude_home(NativeStore::Isolated);
     for tree in ["projects", "file-history", "session-env", "todos", "debug"] {
         purge_session_tree(&claude.join(tree), &doomed)?;
