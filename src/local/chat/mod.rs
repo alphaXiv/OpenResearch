@@ -1001,7 +1001,7 @@ pub fn remove_unreferenced_attachments(
     dir: &std::path::Path,
     deleted: &HashSet<String>,
 ) -> Result<()> {
-    const GRACE: Duration = Duration::from_secs(60 * 60);
+    const GRACE: Duration = Duration::from_secs(10 * 60);
     let referenced = store.chat_attachment_ids(None)?;
     let entries =
         std::fs::read_dir(dir).map_err(|e| anyhow!("Could not read {}: {}", dir.display(), e))?;

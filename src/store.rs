@@ -4437,8 +4437,31 @@ mod tests {
         );
         assert_eq!(
             store.chat_attachment_ids(None).unwrap(),
-            HashSet::from([a, b])
+            HashSet::from([a.clone(), b.clone()])
         );
+
+        let files = dir.join("chat-attachments");
+        std::fs::create_dir_all(&files).unwrap();
+        let fresh_orphan = format!("att-{}__z.png", uuid::Uuid::new_v4());
+        for name in [
+            format!("{a}__x.png"),
+            format!("{b}__y.pdf"),
+            fresh_orphan.clone(),
+        ] {
+            std::fs::write(files.join(name), b"x").unwrap();
+        }
+        let deleted = HashSet::from([a.clone(), b.clone()]);
+        store.delete_chat_session("chat_2").unwrap();
+        crate::local::chat::remove_unreferenced_attachments(&store, &files, &deleted).unwrap();
+        assert!(
+            files.join(format!("{a}__x.png")).exists(),
+            "still referenced"
+        );
+        assert!(
+            !files.join(format!("{b}__y.pdf")).exists(),
+            "deleted chat's file"
+        );
+        assert!(files.join(fresh_orphan).exists(), "within the grace period");
         let _ = std::fs::remove_dir_all(&dir);
     }
 
