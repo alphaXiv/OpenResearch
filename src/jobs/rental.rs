@@ -242,6 +242,7 @@ pub async fn launch(
     Ok(())
 }
 
+#[cfg(unix)]
 /// Free a collected run's dir: the leased box outlives this run.
 fn remove_collected_run_dir(directory: &std::path::Path) -> bool {
     directory.join("final_collected").exists()
