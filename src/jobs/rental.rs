@@ -131,6 +131,18 @@ pub async fn supervise(config: &Path) -> Result<()> {
     while !directory.join("final_collected").exists() && tokio::time::Instant::now() < deadline {
         tokio::time::sleep(Duration::from_millis(200)).await;
     }
+    if directory.join("final_collected").exists()
+        && directory
+            .parent()
+            .is_some_and(|runs| runs.ends_with(".orx/runs"))
+    {
+        // Collected: the leased box outlives this run, so free its disk now.
+        let _ = std::fs::remove_dir_all(&directory);
+        let _ = tokio::process::Command::new("sh")
+            .args(["-c", &crate::jobs::ssh::source_sweep_command()])
+            .status()
+            .await;
+    }
     drop(_heartbeat);
     loop {
         if config.rental.operation("release").await.is_ok() {

@@ -99,6 +99,7 @@ pub async fn run(args: UpArgs) -> Result<()> {
             }
         }
     }
+    tokio::spawn(crate::commands::supervise::retry_remote_cleanups());
 
     // Harnesses spawn lazily on the first message to one of their sessions;
     // no eager agent bring-up. (--no-agent is now a no-op kept for compat.)
@@ -2074,18 +2075,13 @@ async fn delete_project(State(state): State<AppState>, Path(id): Path<String>) -
         state.chat.acp.stop(&session.id).await;
     }
     store.delete_local_project(&id)?;
-    // Best effort: unreachable hosts keep their files, and the response does not wait on ssh.
+    // Unreachable hosts are recorded for retry; the response does not wait on ssh.
     tokio::spawn(async move {
         for run in runs {
             let Ok(backend) = crate::jobs::BackendDescriptor::parse(&run.backend_json) else {
                 continue;
             };
-            if let Err(err) = crate::jobs::ssh::remove_run_files(&run.id, &backend).await {
-                eprintln!(
-                    "orx up: could not remove remote files for run {}: {err:#}",
-                    run.id
-                );
-            }
+            crate::commands::supervise::remove_remote_run_files(&run.id, &backend, false).await;
         }
     });
     for session in &sessions {

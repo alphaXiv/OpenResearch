@@ -775,11 +775,15 @@ fn remove_run_files_command(run_id: &str, container: Option<&ContainerRun>) -> R
         let remove = container.exec(&format!("rm -rf {}", sh_quote(&container.run_dir)));
         command = format!("{{ {remove} || true; }}; {command}");
     }
-    // shortcut: the last run's archive stays until the host's next cleanup; add a sweep if that matters.
-    command.push_str(&format!(
-        "; find \"$HOME/.orx/source\" -maxdepth 1 -name '*.tar' -mmin +{SOURCE_GC_MINUTES} -delete 2>/dev/null; true"
-    ));
-    Ok(command)
+    Ok(format!("{command}; {}", source_sweep_command()))
+}
+
+/// Delete cached source archives no staging has used in `SOURCE_GC_MINUTES`.
+// shortcut: the last run's archive stays until the host's next cleanup; add a sweep if that matters.
+pub(crate) fn source_sweep_command() -> String {
+    format!(
+        "find \"$HOME/.orx/source\" -maxdepth 1 -name '*.tar' -mmin +{SOURCE_GC_MINUTES} -delete 2>/dev/null; true"
+    )
 }
 
 /// Single-quote a value for safe embedding in the remote bash script.
