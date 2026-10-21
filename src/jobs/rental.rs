@@ -352,6 +352,7 @@ mod tests {
         assert!(!collected.exists() && uncollected.exists() && elsewhere.exists());
     }
 
+    #[cfg(unix)]
     #[tokio::test]
     async fn remote_supervisor_releases_after_ack_without_sending_experiment_data() {
         use axum::{

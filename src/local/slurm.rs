@@ -143,7 +143,7 @@ pub async fn submit_local_slurm_with_source(
         None,
     )
     .await?;
-    let job_id = match slurm::run_job(&slurm::SlurmJobSpec {
+    let job_id = slurm::run_job(&slurm::SlurmJobSpec {
         host: host.clone(),
         run_id: run_id.clone(),
         setup_script: "test -d repo".to_string(),
@@ -156,17 +156,7 @@ pub async fn submit_local_slurm_with_source(
         cpus_per_task,
         mem: mem.clone(),
     })
-    .await
-    {
-        Ok(job_id) => job_id,
-        Err(error) => {
-            // No run row exists yet, so nothing else would remove the staged source.
-            let target = crate::jobs::ssh::SshTarget::alias(&host);
-            let remove = format!("rm -rf \"$HOME/{}\"", slurm::run_dir(&run_id));
-            let _ = crate::jobs::ssh::ssh_run(&target, &remove, None).await;
-            return Err(error);
-        }
-    };
+    .await?;
 
     let mut descriptor = BackendDescriptor {
         ssh_container: None,
