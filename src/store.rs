@@ -2250,6 +2250,27 @@ impl Store {
         Ok(rows.flatten().collect())
     }
 
+    /// Every native id a chat (or, with `None`, any chat) has used: the
+    /// current one plus ids rotated out and still recorded on its messages.
+    pub fn chat_native_session_ids(
+        &self,
+        session_id: Option<&str>,
+    ) -> Result<std::collections::HashSet<String>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT native_session_id FROM chat_sessions WHERE ?1 IS NULL OR id = ?1
+             UNION SELECT base_native_session_id FROM chat_messages
+               WHERE ?1 IS NULL OR session_id = ?1
+             UNION SELECT result_native_session_id FROM chat_messages
+               WHERE ?1 IS NULL OR session_id = ?1",
+        )?;
+        let rows = stmt.query_map(params![session_id], |row| row.get::<_, Option<String>>(0))?;
+        Ok(rows
+            .collect::<std::result::Result<Vec<_>, _>>()?
+            .into_iter()
+            .flatten()
+            .collect())
+    }
+
     pub fn set_chat_session_autonomy(&self, id: &str, autonomy: Autonomy) -> Result<()> {
         self.conn.execute(
             "UPDATE chat_sessions SET autonomy = ?2, updated_at = ?3 WHERE id = ?1",
@@ -3839,6 +3860,40 @@ mod tests {
             .unwrap();
         assert!(store.has_chat_messages("chat_1").unwrap());
 
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn chat_native_session_ids_include_rotated_ids() {
+        let dir = std::env::temp_dir().join(format!("orx-store-native-{}", uuid::Uuid::new_v4()));
+        let store = Store::open_at(dir.clone()).unwrap();
+        for id in ["chat_1", "chat_2"] {
+            store
+                .create_chat_session(&chat_session_fixture(id))
+                .unwrap();
+        }
+        store
+            .set_chat_session_native_id("chat_1", Some("current"))
+            .unwrap();
+        store
+            .upsert_chat_message(&StoredChatMessage {
+                id: "msg_1".into(),
+                session_id: "chat_1".into(),
+                role: "assistant".into(),
+                parts_json: "[]".into(),
+                created_at: 1,
+                completed_at: None,
+                parent_id: None,
+                base_native_session_id: Some("base".into()),
+                result_native_session_id: Some("rotated".into()),
+            })
+            .unwrap();
+        store
+            .set_chat_session_native_id("chat_2", Some("other"))
+            .unwrap();
+        let ids = store.chat_native_session_ids(Some("chat_1")).unwrap();
+        assert_eq!(ids, ["current", "base", "rotated"].map(String::from).into());
+        assert_eq!(store.chat_native_session_ids(None).unwrap().len(), 4);
         let _ = std::fs::remove_dir_all(&dir);
     }
 

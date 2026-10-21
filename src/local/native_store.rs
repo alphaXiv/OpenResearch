@@ -318,6 +318,118 @@ pub fn toml_string(path: &Path) -> String {
         .replace('\u{7f}', "\\u007F")
 }
 
+/// Remove the isolated native sessions `doomed` selects. Only stores orx owns
+/// are touched: legacy homes hold the user's own (and imported) chats, and ACP
+/// agents run in their global homes, so neither is ever purged.
+pub fn purge_isolated_sessions(doomed: impl Fn(&str) -> bool) -> Result<()> {
+    purge_session_tree(
+        &claude_home(NativeStore::Isolated).join("projects"),
+        &doomed,
+    )?;
+    let codex = codex_home(NativeStore::Isolated);
+    for tree in ["sessions", "archived_sessions"] {
+        purge_session_tree(&codex.join(tree), &doomed)?;
+    }
+    purge_codex_databases(&codex, &doomed)?;
+    let cursor = cursor_home(NativeStore::Isolated);
+    for tree in ["chats", "acp-sessions"] {
+        purge_session_tree(&cursor.join(tree), &doomed)?;
+    }
+    Ok(())
+}
+
+/// The native id a session file or directory is named after: `<id>/`,
+/// `<id>.jsonl`, or Codex's `rollout-<timestamp>-<id>.jsonl`.
+fn session_entry_id(name: &str, is_dir: bool) -> Option<&str> {
+    let is_id = |id: &str| uuid::Uuid::parse_str(id).is_ok();
+    if is_dir {
+        return is_id(name).then_some(name);
+    }
+    let stem = name.strip_suffix(".jsonl")?;
+    if is_id(stem) {
+        return Some(stem);
+    }
+    let id = stem.get(stem.len().checked_sub(36)?..)?;
+    (stem[..stem.len() - 36].ends_with('-') && is_id(id)).then_some(id)
+}
+
+fn purge_session_tree(root: &Path, doomed: &impl Fn(&str) -> bool) -> Result<()> {
+    let entries = match std::fs::read_dir(root) {
+        Ok(entries) => entries,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(error) => return Err(error.into()),
+    };
+    for entry in entries {
+        let entry = entry?;
+        let path = entry.path();
+        let is_dir = entry.file_type()?.is_dir();
+        let name = entry.file_name();
+        match name
+            .to_str()
+            .and_then(|name| session_entry_id(name, is_dir))
+        {
+            Some(id) if doomed(id) && is_dir => std::fs::remove_dir_all(&path)?,
+            Some(id) if doomed(id) => std::fs::remove_file(&path)?,
+            _ if is_dir => purge_session_tree(&path, doomed)?,
+            _ => {}
+        }
+    }
+    Ok(())
+}
+
+/// Codex also indexes each thread (title, items, logs) in SQLite next to its
+/// rollout. Deleted rows are zeroed and the WAL truncated so no copy remains.
+fn purge_codex_databases(home: &Path, doomed: &impl Fn(&str) -> bool) -> Result<()> {
+    let entries = match std::fs::read_dir(home) {
+        Ok(entries) => entries,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(error) => return Err(error.into()),
+    };
+    for entry in entries {
+        let path = entry?.path();
+        if path.extension().and_then(|ext| ext.to_str()) != Some("sqlite") {
+            continue;
+        }
+        let connection = rusqlite::Connection::open_with_flags(
+            &path,
+            rusqlite::OpenFlags::SQLITE_OPEN_READ_WRITE,
+        )?;
+        connection.busy_timeout(std::time::Duration::from_secs(5))?;
+        connection.pragma_update(None, "secure_delete", true)?;
+        let columns = connection
+            .prepare(
+                "SELECT m.name, p.name FROM sqlite_master m, pragma_table_info(m.name) p
+                 WHERE m.type = 'table' AND (p.name IN
+                   ('thread_id', 'parent_thread_id', 'child_thread_id')
+                   OR (m.name = 'threads' AND p.name = 'id'))",
+            )?
+            .query_map([], |row| {
+                Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+            })?
+            .collect::<std::result::Result<Vec<_>, _>>()?;
+        let mut purged = false;
+        for (table, column) in columns {
+            let ids = connection
+                .prepare(&format!(
+                    "SELECT DISTINCT \"{column}\" FROM \"{table}\" WHERE \"{column}\" IS NOT NULL"
+                ))?
+                .query_map([], |row| row.get::<_, String>(0))?
+                .collect::<std::result::Result<Vec<_>, _>>()?;
+            for id in ids.iter().filter(|id| doomed(id)) {
+                connection.execute(
+                    &format!("DELETE FROM \"{table}\" WHERE \"{column}\" = ?1"),
+                    [id],
+                )?;
+                purged = true;
+            }
+        }
+        if purged {
+            connection.query_row("PRAGMA wal_checkpoint(TRUNCATE)", [], |_| Ok(()))?;
+        }
+    }
+    Ok(())
+}
+
 pub fn prepare_opencode(store: NativeStore) -> Result<PathBuf> {
     let db = opencode_db(store);
     if let Some(parent) = db.parent() {
@@ -668,6 +780,78 @@ mod hard_link_tests {
 #[cfg(all(test, unix))]
 mod tests {
     use super::*;
+
+    #[test]
+    fn purge_removes_only_doomed_sessions() {
+        let root = std::env::temp_dir().join(format!("orx-native-purge-{}", uuid::Uuid::new_v4()));
+        let doomed = "01a160a3-b998-7ec2-8a30-d4aebfea7643";
+        let kept = "36bd48a2-7757-4640-b698-cbffd6adf96c";
+        let project = root.join(format!("projects/-worktrees-chat-{kept}"));
+        std::fs::create_dir_all(project.join(doomed).join("subagents")).unwrap();
+        std::fs::create_dir_all(root.join("sessions/2026/10")).unwrap();
+        for file in [
+            project.join(format!("{doomed}.jsonl")),
+            project.join(format!("{kept}.jsonl")),
+            root.join(format!(
+                "sessions/2026/10/rollout-2026-10-21T22-45-05-{doomed}.jsonl"
+            )),
+            root.join(format!(
+                "sessions/2026/10/rollout-2026-10-21T22-45-05-{kept}.jsonl"
+            )),
+        ] {
+            std::fs::write(file, "secret").unwrap();
+        }
+        let db = root.join("state_5.sqlite");
+        let connection = rusqlite::Connection::open(&db).unwrap();
+        connection
+            .execute_batch(
+                "CREATE TABLE threads (id TEXT, title TEXT);
+                 CREATE TABLE thread_items (thread_id TEXT, item_json TEXT);",
+            )
+            .unwrap();
+        for id in [doomed, kept] {
+            connection
+                .execute("INSERT INTO threads VALUES (?1, 'secret')", [id])
+                .unwrap();
+            connection
+                .execute("INSERT INTO thread_items VALUES (?1, 'secret')", [id])
+                .unwrap();
+        }
+        let is_doomed = |id: &str| id == doomed;
+
+        purge_session_tree(&root.join("projects"), &is_doomed).unwrap();
+        purge_session_tree(&root.join("sessions"), &is_doomed).unwrap();
+        purge_codex_databases(&root, &is_doomed).unwrap();
+
+        assert!(project.join(format!("{kept}.jsonl")).exists());
+        assert!(!project.join(format!("{doomed}.jsonl")).exists());
+        assert!(!project.join(doomed).exists());
+        let rollouts: Vec<_> = std::fs::read_dir(root.join("sessions/2026/10"))
+            .unwrap()
+            .flatten()
+            .map(|entry| entry.file_name().into_string().unwrap())
+            .collect();
+        assert_eq!(
+            rollouts,
+            [format!("rollout-2026-10-21T22-45-05-{kept}.jsonl")]
+        );
+        for table in ["threads", "thread_items"] {
+            let column = if table == "threads" {
+                "id"
+            } else {
+                "thread_id"
+            };
+            let ids: Vec<String> = connection
+                .prepare(&format!("SELECT {column} FROM {table}"))
+                .unwrap()
+                .query_map([], |row| row.get(0))
+                .unwrap()
+                .flatten()
+                .collect();
+            assert_eq!(ids, [kept]);
+        }
+        std::fs::remove_dir_all(root).ok();
+    }
 
     #[test]
     fn native_store_smoke_test() {

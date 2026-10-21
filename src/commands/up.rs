@@ -102,6 +102,10 @@ pub async fn run(args: UpArgs) -> Result<()> {
 
     // Harnesses spawn lazily on the first message to one of their sessions;
     // no eager agent bring-up. (--no-agent is now a no-op kept for compat.)
+    // Before any chat can start a native session the sweep would not know of.
+    if let Err(error) = local::chat::purge_native_sessions(None) {
+        eprintln!("orx up: native session sweep failed: {error}");
+    }
     let agent = Arc::new(AgentHost::new(args.model.clone()));
     let codex = Arc::new(local::codex::CodexHost::new());
     let claude = Arc::new(local::claude::ClaudeHost::new());
@@ -2076,7 +2080,12 @@ async fn delete_project(State(state): State<AppState>, Path(id): Path<String>) -
         state.chat.claude.forget_session(&session.id).await;
         state.chat.acp.stop(&session.id).await;
     }
+    let mut native_ids = std::collections::HashSet::new();
+    for session in &sessions {
+        native_ids.extend(store.chat_native_session_ids(Some(&session.id))?);
+    }
     store.delete_local_project(&id)?;
+    local::chat::purge_native_sessions_in_background(native_ids);
     for session in &sessions {
         local::chat::cleanup_session_transcript_artifacts(&session.id);
         local::chat::cleanup_session_worktree(&project, &session.id);

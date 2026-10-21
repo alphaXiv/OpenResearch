@@ -617,6 +617,25 @@ fn remove_target_pointer_if_matches(session_id: &str, message_id: &str) {
     }
 }
 
+/// Purge isolated native sessions no remaining chat uses: the given ids, or,
+/// with `None`, every orphan (the startup sweep, which also retries any purge
+/// that failed after its chat was deleted).
+pub fn purge_native_sessions(ids: Option<HashSet<String>>) -> Result<()> {
+    let kept = Store::open()?.chat_native_session_ids(None)?;
+    crate::local::native_store::purge_isolated_sessions(|id| {
+        !kept.contains(id) && ids.as_ref().is_none_or(|ids| ids.contains(id))
+    })
+}
+
+/// Off the request path: walking the native stores is blocking.
+pub fn purge_native_sessions_in_background(ids: HashSet<String>) {
+    tokio::task::spawn_blocking(move || {
+        if let Err(error) = purge_native_sessions(Some(ids)) {
+            eprintln!("orx up: native session purge failed: {error}");
+        }
+    });
+}
+
 pub fn cleanup_session_transcript_artifacts(session_id: &str) {
     let directory = crate::store::data_dir().join("chat-targets");
     let prefix = format!("{}-", safe_session_name(session_id));
@@ -6638,7 +6657,9 @@ impl ChatHost {
         let store = Store::open()?;
         let session = store.get_chat_session(session_id)?;
         let worktree_owner = store.chat_worktree_owner(session_id)?;
+        let native_ids = store.chat_native_session_ids(Some(session_id))?;
         store.delete_chat_session(session_id)?;
+        purge_native_sessions_in_background(native_ids);
         self.emit("chat.session.deleted", json!({ "sessionId": session_id }));
         if let Some(session) = session {
             cleanup_session_transcript_artifacts(&session.id);
