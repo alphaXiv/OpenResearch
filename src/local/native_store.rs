@@ -320,17 +320,56 @@ pub fn toml_string(path: &Path) -> String {
 
 /// Remove the isolated native sessions `doomed` selects. Only stores orx owns
 /// are touched: legacy homes hold the user's own (and imported) chats, and ACP
-/// agents run in their global homes, so neither is ever purged.
+/// agents run in their global homes, so neither is ever purged. Cursor chats
+/// run in the isolated `CURSOR_DATA_DIR`; only its config is read from legacy.
 pub fn purge_isolated_sessions(doomed: impl Fn(&str) -> bool) -> Result<()> {
-    purge_session_tree(
-        &claude_home(NativeStore::Isolated).join("projects"),
+    let claude = claude_home(NativeStore::Isolated);
+    for tree in ["projects", "file-history", "session-env", "todos", "debug"] {
+        purge_session_tree(&claude.join(tree), &doomed)?;
+    }
+    purge_history(&claude.join("history.jsonl"), "sessionId", &doomed)?;
+
+    let codex = codex_home(NativeStore::Isolated);
+    let databases = match std::fs::read_dir(&codex) {
+        Ok(entries) => entries
+            .map(|entry| entry.map(|entry| entry.path()))
+            .collect::<std::io::Result<Vec<_>>>()?,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Vec::new(),
+        Err(error) => return Err(error.into()),
+    };
+    let databases: Vec<_> = databases
+        .into_iter()
+        .filter(|path| path.extension().and_then(|ext| ext.to_str()) == Some("sqlite"))
+        .collect();
+    let threads = purge_databases(
+        &databases,
+        &[
+            "threads.id",
+            "thread_id",
+            "parent_thread_id",
+            "child_thread_id",
+        ],
+        &[],
+        &[("thread_spawn_edges", "child_thread_id", "parent_thread_id")],
         &doomed,
     )?;
-    let codex = codex_home(NativeStore::Isolated);
-    for tree in ["sessions", "archived_sessions"] {
-        purge_session_tree(&codex.join(tree), &doomed)?;
+    let doomed_thread = |id: &str| doomed(id) || threads.contains(id);
+    for tree in ["sessions", "archived_sessions", "shell_snapshots"] {
+        purge_session_tree(&codex.join(tree), &doomed_thread)?;
     }
-    purge_codex_databases(&codex, &doomed)?;
+    purge_history(&codex.join("history.jsonl"), "session_id", &doomed_thread)?;
+
+    purge_databases(
+        &[opencode_db(NativeStore::Isolated)],
+        &["session.id", "session_v2.id", "session_id"],
+        &["aggregate_id"],
+        &[
+            ("session", "id", "parent_id"),
+            ("session_v2", "id", "parent_id"),
+        ],
+        &doomed,
+    )?;
+
     let cursor = cursor_home(NativeStore::Isolated);
     for tree in ["chats", "acp-sessions"] {
         purge_session_tree(&cursor.join(tree), &doomed)?;
@@ -339,16 +378,20 @@ pub fn purge_isolated_sessions(doomed: impl Fn(&str) -> bool) -> Result<()> {
 }
 
 /// The native id a session file or directory is named after: `<id>/`,
-/// `<id>.jsonl`, or Codex's `rollout-<timestamp>-<id>.jsonl`.
+/// `<id>.jsonl`, `<id>-agent-….json`, or Codex's `rollout-<time>-<id>.jsonl`.
 fn session_entry_id(name: &str, is_dir: bool) -> Option<&str> {
-    let is_id = |id: &str| uuid::Uuid::parse_str(id).is_ok();
+    // Hyphenated only: Cursor's 32-hex workspace dirs also parse as UUIDs.
+    let is_id = |id: &str| id.len() == 36 && uuid::Uuid::parse_str(id).is_ok();
     if is_dir {
         return is_id(name).then_some(name);
     }
-    let stem = name.strip_suffix(".jsonl")?;
-    if is_id(stem) {
-        return Some(stem);
+    if let Some(id) = name
+        .get(..36)
+        .filter(|id| is_id(id) && name[36..].starts_with(['.', '-']))
+    {
+        return Some(id);
     }
+    let stem = name.strip_suffix(".jsonl")?;
     let id = stem.get(stem.len().checked_sub(36)?..)?;
     (stem[..stem.len() - 36].ends_with('-') && is_id(id)).then_some(id)
 }
@@ -377,21 +420,51 @@ fn purge_session_tree(root: &Path, doomed: &impl Fn(&str) -> bool) -> Result<()>
     Ok(())
 }
 
-/// Codex also indexes each thread (title, items, logs) in SQLite next to its
-/// rollout. Deleted rows are zeroed and the WAL truncated so no copy remains.
-fn purge_codex_databases(home: &Path, doomed: &impl Fn(&str) -> bool) -> Result<()> {
-    let entries = match std::fs::read_dir(home) {
-        Ok(entries) => entries,
+/// Drop the prompt-history lines a doomed session wrote.
+fn purge_history(path: &Path, key: &str, doomed: &impl Fn(&str) -> bool) -> Result<()> {
+    let text = match std::fs::read_to_string(path) {
+        Ok(text) => text,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
         Err(error) => return Err(error.into()),
     };
-    for entry in entries {
-        let path = entry?.path();
-        if path.extension().and_then(|ext| ext.to_str()) != Some("sqlite") {
-            continue;
-        }
+    let kept: String = text
+        .lines()
+        .filter(|line| {
+            !serde_json::from_str::<serde_json::Value>(line)
+                .ok()
+                .and_then(|entry| entry.get(key)?.as_str().map(doomed))
+                .unwrap_or(false)
+        })
+        .map(|line| format!("{line}\n"))
+        .collect();
+    if kept.len() != text.len() {
+        std::fs::write(path, kept)?;
+    }
+    Ok(())
+}
+
+/// Delete every row of the doomed sessions (and their descendants via
+/// `parents`: `(table, child, parent)`) from a native SQLite store. `ids`
+/// columns (`column` or `table.column`) hold session ids; `also` columns are
+/// only cleared. Rows are zeroed and the WAL truncated so no copy remains.
+fn purge_databases(
+    paths: &[PathBuf],
+    ids: &[&str],
+    also: &[&str],
+    parents: &[(&str, &str, &str)],
+    doomed: &impl Fn(&str) -> bool,
+) -> Result<std::collections::HashSet<String>> {
+    let named = |table: &str, column: &str, names: &[&str]| {
+        names
+            .iter()
+            .any(|name| *name == column || *name == format!("{table}.{column}"))
+    };
+    let mut databases = Vec::new();
+    let mut candidates = std::collections::HashSet::new();
+    let mut edges = Vec::new();
+    for path in paths.iter().filter(|path| path.exists()) {
         let connection = rusqlite::Connection::open_with_flags(
-            &path,
+            path,
             rusqlite::OpenFlags::SQLITE_OPEN_READ_WRITE,
         )?;
         connection.busy_timeout(std::time::Duration::from_secs(5))?;
@@ -399,35 +472,65 @@ fn purge_codex_databases(home: &Path, doomed: &impl Fn(&str) -> bool) -> Result<
         let columns = connection
             .prepare(
                 "SELECT m.name, p.name FROM sqlite_master m, pragma_table_info(m.name) p
-                 WHERE m.type = 'table' AND (p.name IN
-                   ('thread_id', 'parent_thread_id', 'child_thread_id')
-                   OR (m.name = 'threads' AND p.name = 'id'))",
+                 WHERE m.type = 'table'",
             )?
             .query_map([], |row| {
                 Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
             })?
             .collect::<std::result::Result<Vec<_>, _>>()?;
-        let mut purged = false;
-        for (table, column) in columns {
-            let ids = connection
-                .prepare(&format!(
-                    "SELECT DISTINCT \"{column}\" FROM \"{table}\" WHERE \"{column}\" IS NOT NULL"
-                ))?
-                .query_map([], |row| row.get::<_, String>(0))?
-                .collect::<std::result::Result<Vec<_>, _>>()?;
-            for id in ids.iter().filter(|id| doomed(id)) {
+        for (table, column) in columns.iter().filter(|(t, c)| named(t, c, ids)) {
+            let mut query = connection.prepare(&format!(
+                "SELECT DISTINCT \"{column}\" FROM \"{table}\" WHERE \"{column}\" IS NOT NULL"
+            ))?;
+            for id in query.query_map([], |row| row.get::<_, String>(0))? {
+                candidates.insert(id?);
+            }
+        }
+        for (table, child, parent) in parents {
+            if columns.iter().any(|(t, c)| t == table && c == parent) {
+                let mut query = connection.prepare(&format!(
+                    "SELECT \"{child}\", \"{parent}\" FROM \"{table}\" WHERE \"{parent}\" IS NOT NULL"
+                ))?;
+                for edge in query.query_map([], |row| {
+                    Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+                })? {
+                    edges.push(edge?);
+                }
+            }
+        }
+        databases.push((connection, columns));
+    }
+    let mut purged: std::collections::HashSet<String> =
+        candidates.into_iter().filter(|id| doomed(id)).collect();
+    loop {
+        let before = purged.len();
+        for (child, parent) in &edges {
+            if purged.contains(parent) {
+                purged.insert(child.clone());
+            }
+        }
+        if purged.len() == before {
+            break;
+        }
+    }
+    if purged.is_empty() {
+        return Ok(purged);
+    }
+    for (connection, columns) in databases {
+        for (table, column) in columns
+            .iter()
+            .filter(|(t, c)| named(t, c, ids) || named(t, c, also))
+        {
+            for id in &purged {
                 connection.execute(
                     &format!("DELETE FROM \"{table}\" WHERE \"{column}\" = ?1"),
                     [id],
                 )?;
-                purged = true;
             }
         }
-        if purged {
-            connection.query_row("PRAGMA wal_checkpoint(TRUNCATE)", [], |_| Ok(()))?;
-        }
+        connection.query_row("PRAGMA wal_checkpoint(TRUNCATE)", [], |_| Ok(()))?;
     }
-    Ok(())
+    Ok(purged)
 }
 
 pub fn prepare_opencode(store: NativeStore) -> Result<PathBuf> {
@@ -785,15 +888,27 @@ mod tests {
     fn purge_removes_only_doomed_sessions() {
         let root = std::env::temp_dir().join(format!("orx-native-purge-{}", uuid::Uuid::new_v4()));
         let doomed = "01a160a3-b998-7ec2-8a30-d4aebfea7643";
+        let child = "11a160a3-b998-7ec2-8a30-d4aebfea7643";
         let kept = "36bd48a2-7757-4640-b698-cbffd6adf96c";
         let project = root.join(format!("projects/-worktrees-chat-{kept}"));
-        std::fs::create_dir_all(project.join(doomed).join("subagents")).unwrap();
-        std::fs::create_dir_all(root.join("sessions/2026/10")).unwrap();
+        let workspace = root.join("chats/0123456789abcdef0123456789abcdef");
+        for dir in [
+            project.join(doomed).join("subagents"),
+            root.join("sessions/2026/10"),
+            root.join("todos"),
+            workspace.join(kept),
+        ] {
+            std::fs::create_dir_all(dir).unwrap();
+        }
         for file in [
             project.join(format!("{doomed}.jsonl")),
             project.join(format!("{kept}.jsonl")),
+            root.join(format!("todos/{doomed}-agent-{doomed}.json")),
             root.join(format!(
                 "sessions/2026/10/rollout-2026-10-21T22-45-05-{doomed}.jsonl"
+            )),
+            root.join(format!(
+                "sessions/2026/10/rollout-2026-10-21T22-45-05-{child}.jsonl"
             )),
             root.join(format!(
                 "sessions/2026/10/rollout-2026-10-21T22-45-05-{kept}.jsonl"
@@ -801,15 +916,23 @@ mod tests {
         ] {
             std::fs::write(file, "secret").unwrap();
         }
+        let history = root.join("history.jsonl");
+        std::fs::write(
+            &history,
+            format!("{{\"session_id\":\"{doomed}\",\"text\":\"secret\"}}\n{{\"session_id\":\"{kept}\"}}\n"),
+        )
+        .unwrap();
         let db = root.join("state_5.sqlite");
         let connection = rusqlite::Connection::open(&db).unwrap();
         connection
-            .execute_batch(
+            .execute_batch(&format!(
                 "CREATE TABLE threads (id TEXT, title TEXT);
-                 CREATE TABLE thread_items (thread_id TEXT, item_json TEXT);",
-            )
+                 CREATE TABLE thread_items (thread_id TEXT, item_json TEXT);
+                 CREATE TABLE thread_spawn_edges (parent_thread_id TEXT, child_thread_id TEXT);
+                 INSERT INTO thread_spawn_edges VALUES ('{doomed}', '{child}');"
+            ))
             .unwrap();
-        for id in [doomed, kept] {
+        for id in [doomed, child, kept] {
             connection
                 .execute("INSERT INTO threads VALUES (?1, 'secret')", [id])
                 .unwrap();
@@ -817,15 +940,36 @@ mod tests {
                 .execute("INSERT INTO thread_items VALUES (?1, 'secret')", [id])
                 .unwrap();
         }
-        let is_doomed = |id: &str| id == doomed;
+        let is_doomed = |id: &str| id != kept;
+        let only_doomed = |id: &str| id == doomed;
 
-        purge_session_tree(&root.join("projects"), &is_doomed).unwrap();
-        purge_session_tree(&root.join("sessions"), &is_doomed).unwrap();
-        purge_codex_databases(&root, &is_doomed).unwrap();
+        let threads = purge_databases(
+            std::slice::from_ref(&db),
+            &[
+                "threads.id",
+                "thread_id",
+                "parent_thread_id",
+                "child_thread_id",
+            ],
+            &[],
+            &[("thread_spawn_edges", "child_thread_id", "parent_thread_id")],
+            &only_doomed,
+        )
+        .unwrap();
+        assert_eq!(threads, [doomed, child].map(String::from).into());
+        let doomed_thread = |id: &str| threads.contains(id);
+        for tree in ["projects", "todos", "sessions", "chats"] {
+            purge_session_tree(&root.join(tree), &doomed_thread).unwrap();
+        }
+        purge_history(&history, "session_id", &doomed_thread).unwrap();
+        // The sweep form never mistakes a workspace hash dir for a session.
+        purge_session_tree(&root.join("chats"), &is_doomed).unwrap();
 
         assert!(project.join(format!("{kept}.jsonl")).exists());
         assert!(!project.join(format!("{doomed}.jsonl")).exists());
         assert!(!project.join(doomed).exists());
+        assert!(workspace.join(kept).exists());
+        assert_eq!(std::fs::read_dir(root.join("todos")).unwrap().count(), 0);
         let rollouts: Vec<_> = std::fs::read_dir(root.join("sessions/2026/10"))
             .unwrap()
             .flatten()
@@ -835,12 +979,11 @@ mod tests {
             rollouts,
             [format!("rollout-2026-10-21T22-45-05-{kept}.jsonl")]
         );
-        for table in ["threads", "thread_items"] {
-            let column = if table == "threads" {
-                "id"
-            } else {
-                "thread_id"
-            };
+        assert_eq!(
+            std::fs::read_to_string(&history).unwrap(),
+            format!("{{\"session_id\":\"{kept}\"}}\n")
+        );
+        for (table, column) in [("threads", "id"), ("thread_items", "thread_id")] {
             let ids: Vec<String> = connection
                 .prepare(&format!("SELECT {column} FROM {table}"))
                 .unwrap()
