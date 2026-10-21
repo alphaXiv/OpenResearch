@@ -329,56 +329,68 @@ pub fn purge_isolated_sessions(doomed: impl Fn(&str) -> bool) -> Result<()> {
     let _purge = PURGE
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
-    let claude = claude_home(NativeStore::Isolated);
-    for tree in ["projects", "file-history", "session-env", "todos", "debug"] {
-        purge_session_tree(&claude.join(tree), &doomed)?;
+    // A home override can point legacy at the isolated path; then the user owns it.
+    let owns =
+        |home: fn(NativeStore) -> PathBuf| home(NativeStore::Isolated) != home(NativeStore::Legacy);
+    if owns(claude_home) {
+        let claude = claude_home(NativeStore::Isolated);
+        for tree in ["projects", "file-history", "session-env", "todos", "debug"] {
+            purge_session_tree(&claude.join(tree), &doomed)?;
+        }
+        purge_history(&claude.join("history.jsonl"), "sessionId", &doomed)?;
     }
-    purge_history(&claude.join("history.jsonl"), "sessionId", &doomed)?;
 
-    let codex = codex_home(NativeStore::Isolated);
-    let databases = match std::fs::read_dir(&codex) {
-        Ok(entries) => entries
-            .map(|entry| entry.map(|entry| entry.path()))
-            .collect::<std::io::Result<Vec<_>>>()?,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Vec::new(),
-        Err(error) => return Err(error.into()),
-    };
-    let databases: Vec<_> = databases
-        .into_iter()
-        .filter(|path| path.extension().and_then(|ext| ext.to_str()) == Some("sqlite"))
-        .collect();
-    let (threads, children) = purge_databases(
-        &databases,
-        &[
-            "threads.id",
-            "thread_id",
-            "parent_thread_id",
-            "child_thread_id",
-        ],
-        &[],
-        &[("thread_spawn_edges", "child_thread_id", "parent_thread_id")],
-        &doomed,
-    )?;
-    let doomed_thread = |id: &str| threads.contains(id) || (doomed(id) && !children.contains(id));
-    for tree in ["sessions", "archived_sessions", "shell_snapshots"] {
-        purge_session_tree(&codex.join(tree), &doomed_thread)?;
+    if owns(codex_home) {
+        let codex = codex_home(NativeStore::Isolated);
+        let databases = match std::fs::read_dir(&codex) {
+            Ok(entries) => entries
+                .map(|entry| entry.map(|entry| entry.path()))
+                .collect::<std::io::Result<Vec<_>>>()?,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Vec::new(),
+            Err(error) => return Err(error.into()),
+        };
+        let databases: Vec<_> = databases
+            .into_iter()
+            .filter(|path| path.extension().and_then(|ext| ext.to_str()) == Some("sqlite"))
+            .collect();
+        let (threads, children) = purge_databases(
+            &databases,
+            &[
+                "threads.id",
+                "thread_id",
+                "parent_thread_id",
+                "child_thread_id",
+            ],
+            &[],
+            &[("thread_spawn_edges", "child_thread_id", "parent_thread_id")],
+            &doomed,
+        )?;
+        let doomed_thread =
+            |id: &str| threads.contains(id) || (doomed(id) && !children.contains(id));
+        for tree in ["sessions", "archived_sessions", "shell_snapshots"] {
+            purge_session_tree(&codex.join(tree), &doomed_thread)?;
+        }
+        purge_history(&codex.join("history.jsonl"), "session_id", &doomed_thread)?;
     }
-    purge_history(&codex.join("history.jsonl"), "session_id", &doomed_thread)?;
 
-    purge_databases(
-        &[opencode_db(NativeStore::Isolated)],
-        &["session.id", "session_v2.id", "session_id"],
-        &["aggregate_id"],
-        &[
-            ("session", "id", "parent_id"),
-            ("session_v2", "id", "parent_id"),
-        ],
-        &doomed,
-    )?;
+    if owns(opencode_db) {
+        purge_databases(
+            &[opencode_db(NativeStore::Isolated)],
+            &["session.id", "session_v2.id", "session_id"],
+            &["aggregate_id"],
+            &[
+                ("session", "id", "parent_id"),
+                ("session_v2", "id", "parent_id"),
+            ],
+            &doomed,
+        )?;
+    }
 
-    let cursor = cursor_home(NativeStore::Isolated);
-    for tree in ["chats", "acp-sessions"] {
-        purge_session_tree(&cursor.join(tree), &doomed)?;
+    if owns(cursor_home) {
+        let cursor = cursor_home(NativeStore::Isolated);
+        for tree in ["chats", "acp-sessions"] {
+            purge_session_tree(&cursor.join(tree), &doomed)?;
+        }
     }
     Ok(())
 }
