@@ -848,6 +848,7 @@ async fn inspect_host_job(target: &SshTarget, dir: &str) -> Result<JobState> {
 }
 
 /// The run dir exists before any supervisor polls it, so a missing one means the job is gone.
+/// The wrapper writes exit_code just before it exits, so re-read it after a dead pid.
 fn host_job_script(dir: &str) -> String {
     format!(
         "{HOST_PROCESS_HELPERS}\n\
@@ -855,6 +856,7 @@ fn host_job_script(dir: &str) -> String {
          if [ ! -d \"$d\" ]; then echo MISSING; \
          elif [ -f \"$d/exit_code\" ]; then echo \"EXIT $(cat \"$d/exit_code\")\"; \
          elif [ -f \"$d/pid\" ] && host_process_alive \"$(cat \"$d/pid\")\"; then echo RUNNING; \
+         elif [ -f \"$d/exit_code\" ]; then echo \"EXIT $(cat \"$d/exit_code\")\"; \
          elif [ -f \"$d/pid\" ]; then echo DEAD; else echo PENDING; fi",
     )
 }
@@ -1098,6 +1100,26 @@ mod tests {
         assert_eq!(inspect(), "PENDING");
         std::fs::write(dir.join("exit_code"), "0\n").unwrap();
         assert_eq!(inspect(), "EXIT 0");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn host_inspect_rereads_exit_code_written_as_the_wrapper_exits() {
+        let home = crate::local::git::TemporaryDirectory::new("orx-ssh-inspect-race").unwrap();
+        let dir = home.path().join(".orx/runs/r1");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("pid"), "999999999\n").unwrap();
+        // Writes exit_code when the pid is read, i.e. after the first exit_code check.
+        let race = r#"cat() { case "$1" in */pid) echo 0 > "${1%pid}exit_code";; esac; command cat "$@"; }"#;
+        let out = std::process::Command::new("bash")
+            .args([
+                "-c",
+                &format!("{race}\n{}", host_job_script(".orx/runs/r1")),
+            ])
+            .env("HOME", home.path())
+            .output()
+            .unwrap();
+        assert_eq!(String::from_utf8(out.stdout).unwrap().trim(), "EXIT 0");
     }
 
     #[cfg(unix)]
