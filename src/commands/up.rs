@@ -770,6 +770,7 @@ fn router(state: AppState, remote_auth: Option<RemoteAuth>) -> Router {
                 .patch(update_chat_session),
         )
         .route("/api/chat/sessions/{id}/messages", get(chat_messages))
+        .route("/api/chat/sessions/{id}/subagent", get(chat_subagent))
         .route(
             "/api/chat/sessions/{id}/configuration",
             post(set_chat_configuration),
@@ -781,6 +782,7 @@ fn router(state: AppState, remote_auth: Option<RemoteAuth>) -> Router {
             "/api/chat/sessions/{id}/compact",
             post(compact_chat_session),
         )
+        .route("/api/chat/active-runs", get(chat_active_runs))
         .route("/api/chat/native-sessions", get(list_native_chats))
         .route("/api/chat/native-sessions/import", post(import_native_chat))
         .route(
@@ -7518,6 +7520,40 @@ fn sidebar_session_json(store: &Store, session: &StoredChatSession, busy: bool) 
     Ok(value)
 }
 
+fn chat_active_runs_json(store: &Store) -> Result<Value> {
+    let mut associations: Vec<_> = store
+        .list_active_run_wakeups()?
+        .into_iter()
+        .map(|wakeup| (wakeup.chat_session_id, wakeup.run))
+        .collect();
+    for run in store.list_active_runs()? {
+        if let Some(session_id) = run.chat_session_id.clone() {
+            associations.push((session_id, run));
+        }
+    }
+    let mut seen = HashSet::new();
+    let mut rows = Vec::new();
+    for (session_id, run) in associations {
+        if !seen.insert((session_id.clone(), run.id.clone())) {
+            continue;
+        }
+        let experiment_name = store
+            .get_local_experiment(&run.experiment_id)?
+            .map(|experiment| experiment.display_name().to_string());
+        rows.push(json!({
+            "sessionId": session_id,
+            "run": ApiRun::from(&run),
+            "experimentName": experiment_name,
+        }));
+    }
+    rows.sort_by_key(|row| (row["sessionId"].to_string(), row["run"]["id"].to_string()));
+    Ok(json!(rows))
+}
+
+async fn chat_active_runs() -> ApiResult {
+    Ok(Json(chat_active_runs_json(&Store::open()?)?))
+}
+
 async fn list_chat_sessions(
     State(state): State<AppState>,
     Query(q): Query<SessionsQuery>,
@@ -8007,6 +8043,26 @@ async fn update_chat_session(
     Ok(Json(
         json!({ "session": local::chat::session_json(&session, busy) }),
     ))
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct SubagentQuery {
+    part_id: String,
+}
+
+async fn chat_subagent(Path(id): Path<String>, Query(query): Query<SubagentQuery>) -> ApiResult {
+    let session = Store::open()?
+        .get_chat_session(&id)?
+        .ok_or_else(|| not_found("chat session"))?;
+    let mut messages = local::chat::list_messages(&id)?;
+    let spawn = messages
+        .iter_mut()
+        .find_map(|message| local::chat::find_part_mut(&mut message.parts, &query.part_id))
+        .ok_or_else(|| not_found("subagent"))?;
+    Ok(Json(json!(local::chat::subagent::snapshot(
+        &session, spawn
+    )?)))
 }
 
 async fn chat_messages(State(state): State<AppState>, Path(id): Path<String>) -> ApiResult {
@@ -8545,6 +8601,7 @@ struct EventCursor {
     files: HashMap<String, u64>,
     runs: HashMap<String, (String, i64)>,
     log_offsets: HashMap<String, u64>,
+    chat_active_runs: Option<Value>,
     /// Last update status sent. Unlike the rest of the cursor this isn't store
     /// state — the updater is a separate process, so its progress reaches the UI
     /// through the same diff the store changes do.
@@ -8666,6 +8723,11 @@ fn collect_events(cursor: &mut EventCursor, first: bool) -> Result<Vec<Event>> {
         }
         // Terminal runs were seeded at EOF above, so this is a no-op for them.
         push_log_delta(&run, cursor, &mut out, &mut log_budget);
+    }
+    let active_runs = chat_active_runs_json(&store)?;
+    if cursor.chat_active_runs.as_ref() != Some(&active_runs) {
+        out.push(json_event("chat.runs", &json!({})));
+        cursor.chat_active_runs = Some(active_runs);
     }
     // Committed only now that the batch is certain to be returned.
     if let Some(update) = sampled_update {
@@ -8804,6 +8866,41 @@ pub(crate) async fn spa(uri: Uri) -> Response {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn chat_active_runs_tracks_owners_and_watchers_until_terminal() {
+        let dir = std::env::temp_dir().join(format!("orx-chat-runs-{}", uuid::Uuid::new_v4()));
+        let store = Store::open_at(dir.clone()).unwrap();
+        let mut run = StoredRun {
+            id: "run-1".into(),
+            experiment_id: "experiment-1".into(),
+            project_id: "project-1".into(),
+            status: "running".into(),
+            backend_json: "{}".into(),
+            command: String::new(),
+            created_at: 1,
+            updated_at: 2,
+            ended_at: None,
+            exit_code: None,
+            commit_sha: None,
+            result_markdown: None,
+            cancel_requested: false,
+            cancel_reason: None,
+            chat_session_id: Some("owner".into()),
+        };
+        store.upsert_run(&run).unwrap();
+        store.register_run_wakeup(&run.id, "owner").unwrap();
+        store.register_run_wakeup(&run.id, "watcher").unwrap();
+        let rows = chat_active_runs_json(&store).unwrap();
+        assert_eq!(rows.as_array().unwrap().len(), 2);
+        assert_eq!(rows[0]["sessionId"], "owner");
+        assert_eq!(rows[1]["sessionId"], "watcher");
+        run.status = "done".into();
+        store.upsert_run(&run).unwrap();
+        assert_eq!(chat_active_runs_json(&store).unwrap(), json!([]));
+        drop(store);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
 
     #[test]
     fn new_chat_uses_saved_preferences_and_normalizes_model_settings() {
