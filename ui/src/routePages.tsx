@@ -9,11 +9,12 @@ import { clearReadDemoSessions } from "./demoSessionState";
 import { globalResumeLocation, projectResumeLocation } from "./routeResume";
 import { m } from "./paraglide/messages.js";
 import { Onboarding } from "./components/Onboarding";
+import { ProjectsEmptyState } from "./components/ProjectsHome";
 import { OfflineBanner } from "./components/OfflineBanner";
 import { WorkspaceConnection } from "./components/WorkspaceConnection";
 import { UpdateBanner, useUpdateStatus } from "./components/UpdateBanner";
 import { DesktopAppBanner } from "./components/DesktopAppBanner";
-import { Button, Spinner } from "./components/ui";
+import { Button, Spinner, showAlert } from "./components/ui";
 
 export function RoutePending() {
   return <div className="flex flex-1 h-full items-center justify-center"><Spinner /></div>;
@@ -65,12 +66,18 @@ export function ResumeProject({ projectId }: { projectId: string }) { return <Re
 export function ProjectsPage() {
   const runtime = useRuntime();
   const navigate = useNavigate();
+  const { queryClient } = useRouteContext({ from: "__root__" });
   const projectsOptions = listProjectsQuery();
   const projectsQuery = useQuery(projectsOptions);
   const stateQuery = useQuery(getUiStateQuery());
   const projects = projectsQuery.data;
   const state = stateQuery.data;
-  const onboarding = projects?.length === 0;
+  const noProjects = projects?.length === 0;
+  const onboarded = state?.onboardingCompleted ?? false;
+  // The walkthrough is a one-time setup, so the persisted flag gates it and not
+  // the project count: onboarding installs a demo project, and counting projects
+  // replayed the whole walkthrough the moment that demo was deleted.
+  const onboarding = noProjects && !onboarded;
   const error = projectsQuery.error ?? stateQuery.error;
   const retry = () => { void projectsQuery.refetch(); void stateQuery.refetch(); };
   const { status } = useUpdateStatus(runtime.kind === "local");
@@ -92,6 +99,17 @@ export function ProjectsPage() {
               onDone={(project) => {
                 clearReadDemoSessions();
                 openProject(project.id);
+              }}
+            />
+          ) : noProjects ? (
+            <ProjectsEmptyState
+              remote={runtime.kind === "ssh"}
+              onCreated={(project, publicationError) => {
+                queryClient.setQueryData(projectsOptions.queryKey, (cur) => [...(cur ?? []).filter((p) => p.id !== project.id), project]);
+                void navigate({
+                  href: `/projects/${encodeURIComponent(project.id)}${publicationError ? "/settings/projects" : ""}`,
+                });
+                if (publicationError) showAlert(publicationError, "error");
               }}
             />
           ) : (
