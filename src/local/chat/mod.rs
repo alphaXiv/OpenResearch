@@ -996,7 +996,7 @@ pub fn attachments_dir() -> Result<std::path::PathBuf> {
 /// Remove attachment files no chat row mentions any more: `deleted` (a deleted
 /// chat's) when given, else every orphan older than an hour. A send in flight
 /// saves its file before recording the message, possibly in another server
-/// sharing the data dir, so a young orphan waits for a later sweep.
+/// sharing the data dir, so a young orphan waits for the next hourly sweep.
 pub fn remove_unreferenced_attachments(
     store: &Store,
     dir: &std::path::Path,

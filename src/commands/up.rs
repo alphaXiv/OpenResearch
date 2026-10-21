@@ -91,11 +91,6 @@ pub async fn run(args: UpArgs) -> Result<()> {
     {
         let store = Store::open()?;
         local::chat::reconcile_unfinished_turns(&store)?;
-        if let Err(err) = local::chat::attachments_dir()
-            .and_then(|dir| local::chat::remove_unreferenced_attachments(&store, &dir, None))
-        {
-            eprintln!("orx up: could not sweep chat attachments: {err}");
-        }
         for run in store.list_active_runs()? {
             if store.get_local_experiment(&run.experiment_id)?.is_some() {
                 if let Err(err) = crate::commands::exp::spawn_detached_supervise(&run.id) {
@@ -170,6 +165,19 @@ pub async fn run(args: UpArgs) -> Result<()> {
         tokio::task::spawn_blocking(move || local::demo::prewarm(move_in_progress, gate));
     }
     // Deliver explicitly registered run wake-ups once their chat becomes idle.
+    tokio::spawn(async {
+        let mut hourly = tokio::time::interval(Duration::from_secs(60 * 60));
+        loop {
+            hourly.tick().await;
+            let swept = Store::open().and_then(|store| {
+                let dir = local::chat::attachments_dir()?;
+                local::chat::remove_unreferenced_attachments(&store, &dir, None)
+            });
+            if let Err(err) = swept {
+                eprintln!("orx up: could not sweep chat attachments: {err}");
+            }
+        }
+    });
     tokio::spawn(local::chat::watch_runs(
         state.chat.clone(),
         state.data_dir_move_in_progress.clone(),
