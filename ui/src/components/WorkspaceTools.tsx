@@ -83,10 +83,7 @@ export function WorkspaceTools({ expanded, experiments, runs, onOpenExperiment, 
               <span className="flex items-center gap-4"><Terminal size={15} />{m.workspace_terminal()}</span>
             </MenuItem>
             {onSideChat && sessionId && (
-              <div className="flex items-center gap-2.25 px-0.5">
-                <SideChatPicker parentId={sessionId} sessions={sessions} onSelect={onSelectSideChat} onCreate={onSideChat} />
-                <span className="text-sm text-text">{m.side_chat_open()}</span>
-              </div>
+              <SideChatPicker parentId={sessionId} sessions={sessions} onSelect={onSelectSideChat} onCreate={onSideChat} expanded />
             )}
             {sessionId && <ChatBranch key={sessionId} sessionId={sessionId} busy={busy} onChanges={onChanges} />}
             {experimentRows.length > 0 && (
@@ -109,7 +106,8 @@ export function WorkspaceTools({ expanded, experiments, runs, onOpenExperiment, 
   );
 }
 
-function SideChatPicker({ parentId, sessions, onSelect, onCreate }: {
+function SideChatPicker({ parentId, sessions, onSelect, onCreate, expanded = false }: {
+  expanded?: boolean;
   parentId: string;
   sessions: ChatSession[];
   onSelect: (sessionId: string) => void;
@@ -119,6 +117,7 @@ function SideChatPicker({ parentId, sessions, onSelect, onCreate }: {
     .sort((a, b) => b.updatedAt - a.updatedAt || a.id.localeCompare(b.id));
   return <OptionPicker
     triggerIcon={<MessagesSquare size={15} />}
+    triggerLabel={expanded ? m.side_chat_open() : undefined}
     title={m.side_chat_new()}
     onTriggerClick={onCreate}
     header={m.side_chat_list({ count: children.length })}
