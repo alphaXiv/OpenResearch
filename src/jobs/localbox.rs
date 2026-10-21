@@ -230,6 +230,18 @@ fn exit_code_state(dir: &Path) -> Option<JobState> {
     })
 }
 
+/// Slims every finished run under `root`, so runs that ended before slimming existed are reclaimed too.
+pub fn slim_finished_run_dirs(root: &Path) {
+    let Ok(entries) = std::fs::read_dir(root) else {
+        return;
+    };
+    for dir in entries.flatten().map(|entry| entry.path()) {
+        if dir.join("exit_code").is_file() {
+            slim_run_dir(&dir);
+        }
+    }
+}
+
 /// Reclaims a finished run's rebuildable environment and package cache; logs,
 /// exit_code and outputs (artifacts, checkpoints, tensorboard) stay.
 pub fn slim_run_dir(dir: &Path) {
@@ -529,6 +541,19 @@ mod tests {
             assert!(dir.join(kept).exists(), "{kept} must survive");
         }
         std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn slim_finished_run_dirs_skips_live_runs() {
+        let root = std::env::temp_dir().join(format!("orx-slim-all-{}", uuid::Uuid::new_v4()));
+        for run in ["done", "live"] {
+            std::fs::create_dir_all(root.join(run).join("repo/.venv")).unwrap();
+        }
+        std::fs::write(root.join("done/exit_code"), "0").unwrap();
+        slim_finished_run_dirs(&root);
+        assert!(!root.join("done/repo/.venv").exists());
+        assert!(root.join("live/repo/.venv").exists());
+        std::fs::remove_dir_all(&root).unwrap();
     }
 
     #[cfg(unix)]

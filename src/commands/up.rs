@@ -4556,6 +4556,7 @@ const ORPHANED_RUN_SETTLE_MS: i64 = 5 * 60 * 1000;
 async fn adopt_orphaned_runs(moving: Arc<AtomicBool>, gate: Arc<tokio::sync::Mutex<()>>) {
     // Runs whose spawn failure is already logged, so a stuck run logs once.
     let mut reported = HashSet::new();
+    let mut slimmed = false;
     loop {
         tokio::time::sleep(ORPHANED_RUN_SCAN_INTERVAL).await;
         if moving.load(Ordering::SeqCst) {
@@ -4564,6 +4565,13 @@ async fn adopt_orphaned_runs(moving: Arc<AtomicBool>, gate: Arc<tokio::sync::Mut
         let _gate = gate.lock().await;
         if moving.load(Ordering::SeqCst) {
             continue;
+        }
+        if !std::mem::replace(&mut slimmed, true) {
+            let root = crate::store::data_dir().join("local-runs");
+            let _ = tokio::task::spawn_blocking(move || {
+                crate::jobs::localbox::slim_finished_run_dirs(&root)
+            })
+            .await;
         }
         match tokio::task::spawn_blocking(adopt_orphaned_runs_once).await {
             Ok(Ok(failures)) => {
