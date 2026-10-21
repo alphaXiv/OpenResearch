@@ -993,15 +993,18 @@ pub fn attachments_dir() -> Result<std::path::PathBuf> {
     Ok(dir)
 }
 
-/// Remove attachment files no chat row mentions any more: only `candidates`
-/// (a deleted chat's) when given, else every file past a grace period, since a
-/// send in flight has saved its file before recording the message.
-pub fn remove_unreferenced_attachments(candidates: Option<&HashSet<String>>) -> Result<()> {
+/// Remove attachment files no chat row mentions any more: `deleted` (a deleted
+/// chat's) at once, others only past a grace period, since a send in flight
+/// saves its file before recording the message.
+pub fn remove_unreferenced_attachments(
+    store: &Store,
+    dir: &std::path::Path,
+    deleted: &HashSet<String>,
+) -> Result<()> {
     const GRACE: Duration = Duration::from_secs(60 * 60);
-    let referenced = Store::open()?.chat_attachment_ids(None)?;
-    let dir = attachments_dir()?;
+    let referenced = store.chat_attachment_ids(None)?;
     let entries =
-        std::fs::read_dir(&dir).map_err(|e| anyhow!("Could not read {}: {}", dir.display(), e))?;
+        std::fs::read_dir(dir).map_err(|e| anyhow!("Could not read {}: {}", dir.display(), e))?;
     for entry in entries.flatten() {
         let name = entry.file_name();
         let Some(id) = name
@@ -1011,16 +1014,16 @@ pub fn remove_unreferenced_attachments(candidates: Option<&HashSet<String>>) -> 
         else {
             continue;
         };
-        let orphaned = !referenced.contains(id)
-            && match candidates {
-                Some(candidates) => candidates.contains(id),
-                None => entry
-                    .metadata()
-                    .and_then(|m| m.modified())
-                    .is_ok_and(|t| t.elapsed().is_ok_and(|age| age > GRACE)),
-            };
-        if orphaned {
-            let _ = std::fs::remove_file(entry.path());
+        let stale = || {
+            entry
+                .metadata()
+                .and_then(|m| m.modified())
+                .is_ok_and(|t| t.elapsed().is_ok_and(|age| age > GRACE))
+        };
+        if !referenced.contains(id) && (deleted.contains(id) || stale()) {
+            if let Err(err) = std::fs::remove_file(entry.path()) {
+                eprintln!("could not remove {}: {err}", entry.path().display());
+            }
         }
     }
     Ok(())
@@ -6674,8 +6677,9 @@ impl ChatHost {
         let attachments = store.chat_attachment_ids(Some(session_id))?;
         store.delete_chat_session(session_id)?;
         self.emit("chat.session.deleted", json!({ "sessionId": session_id }));
-        if let Err(err) = remove_unreferenced_attachments(Some(&attachments)) {
-            eprintln!("orx up: could not remove chat attachments: {err}");
+        if let Err(err) = remove_unreferenced_attachments(&store, &attachments_dir()?, &attachments)
+        {
+            eprintln!("could not remove chat attachments: {err}");
         }
         if let Some(session) = session {
             cleanup_session_transcript_artifacts(&session.id);

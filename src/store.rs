@@ -2194,6 +2194,7 @@ impl Store {
             let text: String = row.get(0)?;
             ids.extend(text.match_indices("att-").filter_map(|(start, _)| {
                 let id = text.get(start..start + 40)?;
+                text.get(start + 40..)?.starts_with("__").then_some(())?;
                 uuid::Uuid::parse_str(&id[4..]).ok().map(|_| id.to_string())
             }));
         }

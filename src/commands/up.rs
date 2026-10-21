@@ -91,7 +91,9 @@ pub async fn run(args: UpArgs) -> Result<()> {
     {
         let store = Store::open()?;
         local::chat::reconcile_unfinished_turns(&store)?;
-        if let Err(err) = local::chat::remove_unreferenced_attachments(None) {
+        if let Err(err) = local::chat::attachments_dir().and_then(|dir| {
+            local::chat::remove_unreferenced_attachments(&store, &dir, &HashSet::new())
+        }) {
             eprintln!("orx up: could not sweep chat attachments: {err}");
         }
         for run in store.list_active_runs()? {
@@ -2084,7 +2086,9 @@ async fn delete_project(State(state): State<AppState>, Path(id): Path<String>) -
         attachments.extend(store.chat_attachment_ids(Some(&session.id))?);
     }
     store.delete_local_project(&id)?;
-    if let Err(err) = local::chat::remove_unreferenced_attachments(Some(&attachments)) {
+    if let Err(err) = local::chat::attachments_dir()
+        .and_then(|dir| local::chat::remove_unreferenced_attachments(&store, &dir, &attachments))
+    {
         eprintln!("orx up: could not remove chat attachments: {err}");
     }
     for session in &sessions {
