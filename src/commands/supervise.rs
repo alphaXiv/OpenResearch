@@ -845,6 +845,9 @@ async fn watch_ssh_job(
                 )
                 .await;
             }
+            if sandbox.is_none() && collected {
+                remove_remote_run_files(run_id, descriptor).await;
+            }
             eprintln!("supervise {run_id}: finished ({status})");
             return Ok(status);
         }
@@ -1199,6 +1202,17 @@ async fn run_openresearch(
     Ok(())
 }
 
+/// Free the remote run dir once its log is collected, unless
+/// `ORX_KEEP_REMOTE_RUNS` asks to keep results on the host.
+async fn remove_remote_run_files(run_id: &str, descriptor: &BackendDescriptor) {
+    if std::env::var_os("ORX_KEEP_REMOTE_RUNS").is_some() {
+        return;
+    }
+    if let Err(err) = ssh::remove_run_files(run_id, descriptor).await {
+        eprintln!("supervise {run_id}: could not remove remote run files: {err:#}");
+    }
+}
+
 /// Delete the run's box; on failure warn loudly and leave a cleanup hint on
 /// the run. Teardown failure never changes the run's status — the run's
 /// outcome and the box's fate are separate facts.
@@ -1430,10 +1444,11 @@ async fn run_slurm(
 
         if is_terminal_stage(stage) {
             let _ = done_tx.send(true);
-            if tokio::time::timeout(Duration::from_secs(20), &mut log_task)
-                .await
-                .is_err()
-            {
+            let collected = matches!(
+                tokio::time::timeout(Duration::from_secs(20), &mut log_task).await,
+                Ok(Ok(true))
+            );
+            if !collected {
                 log_task.abort();
             }
             let applied = store.update_status(&run_id, status, Some(now_ms()), None)?;
@@ -1445,6 +1460,9 @@ async fn run_slurm(
                         eprintln!("supervise {run_id}: could not record failure reason: {err}");
                     }
                 }
+            }
+            if collected {
+                remove_remote_run_files(&run_id, &descriptor).await;
             }
             eprintln!("supervise {run_id}: finished ({status})");
             return Ok(());

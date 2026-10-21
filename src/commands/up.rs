@@ -2028,11 +2028,8 @@ async fn delete_project(State(state): State<AppState>, Path(id): Path<String>) -
     let project = store
         .get_local_project(&id)?
         .ok_or_else(|| not_found("project"))?;
-    let in_flight: Vec<_> = store
-        .list_runs_by_project(&id)?
-        .into_iter()
-        .filter(|r| !is_terminal(&r.status))
-        .collect();
+    let runs = store.list_runs_by_project(&id)?;
+    let in_flight: Vec<_> = runs.iter().filter(|r| !is_terminal(&r.status)).collect();
     if !in_flight.is_empty() {
         let mut failures = Vec::new();
         for run in &in_flight {
@@ -2077,6 +2074,20 @@ async fn delete_project(State(state): State<AppState>, Path(id): Path<String>) -
         state.chat.acp.stop(&session.id).await;
     }
     store.delete_local_project(&id)?;
+    // Best effort: unreachable hosts keep their files, and the response does not wait on ssh.
+    tokio::spawn(async move {
+        for run in runs {
+            let Ok(backend) = crate::jobs::BackendDescriptor::parse(&run.backend_json) else {
+                continue;
+            };
+            if let Err(err) = crate::jobs::ssh::remove_run_files(&run.id, &backend).await {
+                eprintln!(
+                    "orx up: could not remove remote files for run {}: {err:#}",
+                    run.id
+                );
+            }
+        }
+    });
     for session in &sessions {
         local::chat::cleanup_session_transcript_artifacts(&session.id);
         local::chat::cleanup_session_worktree(&project, &session.id);

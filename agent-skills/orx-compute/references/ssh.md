@@ -58,6 +58,12 @@ host's `~/.orx/runs/<runId>/`, so container removal does not erase them. A detac
 supervisor reattaches using the saved container ID and start time; later settings
 changes cannot redirect an existing run. Do not kill the supervisor.
 
+Once a run finishes and its log is collected, the supervisor removes its run dir
+(host and container) and any source archive no run has staged in the last ten
+minutes. Export `ORX_KEEP_REMOTE_RUNS=1` before launching to keep run dirs, for
+example to open TensorBoard on the host. Deleting a project removes its runs'
+remote files on every reachable host.
+
 Cancellation targets only the experiment process group, waits five seconds for
 TERM, then uses KILL if needed. It leaves the container and unrelated processes
 running. Paused containers must be unpaused by the user before cancellation can
