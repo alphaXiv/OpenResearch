@@ -775,14 +775,14 @@ fn remove_run_files_command(run_id: &str, container: Option<&ContainerRun>) -> R
         let remove = container.exec(&format!("rm -rf {}", sh_quote(&container.run_dir)));
         command = format!("{{ {remove} || true; }}; {command}");
     }
-    Ok(format!("{command}; {}", source_sweep_command()))
+    Ok(format!("{command} && {}", source_sweep_command()))
 }
 
 /// Delete cached source archives no staging has used in `SOURCE_GC_MINUTES`.
 // shortcut: the last run's archive stays until the host's next cleanup; add a sweep if that matters.
 pub(crate) fn source_sweep_command() -> String {
     format!(
-        "find \"$HOME/.orx/source\" -maxdepth 1 -name '*.tar' -mmin +{SOURCE_GC_MINUTES} -delete 2>/dev/null; true"
+        "{{ [ ! -d \"$HOME/.orx/source\" ] || find \"$HOME/.orx/source\" -maxdepth 1 -name '*.tar' -mmin +{SOURCE_GC_MINUTES} -delete; }}"
     )
 }
 
@@ -1185,6 +1185,8 @@ mod tests {
             fresh.exists(),
             "a recently staged archive may still be extracting"
         );
+        std::fs::remove_dir_all(&source).unwrap();
+        sh(remove_run_files_command("r-3", None).unwrap());
 
         assert!(remove_run_files_command("../x", None).is_err());
         assert!(remove_run_files_command("", None).is_err());
@@ -1196,7 +1198,7 @@ mod tests {
         };
         let command = remove_run_files_command("r1", Some(&container)).unwrap();
         assert!(command.starts_with("{ docker exec -i 'c1' bash -c "));
-        assert!(command.contains("|| true; }; rm -rf \"$HOME/.orx/runs/r1\";"));
+        assert!(command.contains("|| true; }; rm -rf \"$HOME/.orx/runs/r1\" && "));
         container.run_dir = "/root".into();
         assert!(remove_run_files_command("r1", Some(&container)).is_err());
     }

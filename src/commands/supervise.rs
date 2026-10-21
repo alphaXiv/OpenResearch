@@ -1316,15 +1316,15 @@ async fn retry_remote_cleanups_in(dir: &std::path::Path, run_exists: fn(&str) ->
         let Ok(exists) = run_exists(&pending.run_id) else {
             continue;
         };
+        // A deleted run's log has no reader left, so only its remote files matter.
+        pending.collect_log &= exists;
+        if pending.collect_log && !recollect_log(&pending).await {
+            continue;
+        }
         if exists
             && crate::config::ssh_settings().map_or(true, |settings| settings.keep_remote_runs)
         {
             let _ = std::fs::remove_file(&path);
-            continue;
-        }
-        // A deleted run's log has no reader left, so only its remote files matter.
-        pending.collect_log &= exists;
-        if pending.collect_log && !recollect_log(&pending).await {
             continue;
         }
         remove_remote_run_files_in(dir, &pending.run_id, &pending.backend, false).await;
