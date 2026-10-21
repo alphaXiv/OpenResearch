@@ -3110,6 +3110,7 @@ export const Message = memo(function Message({
           <div className="msg-user-edit w-full bg-panel rounded-[16px] py-2.5 px-[15px] flex flex-col gap-2">
             <textarea
               dir="auto"
+              {...{ writingsuggestions: "false" }}
               className="w-full bg-transparent text-base text-text resize-none outline-none field-sizing-content min-h-16"
               aria-label={m.chat_panel_edit_message()}
               value={editDraft}
@@ -7066,6 +7067,7 @@ export function ChatPanel({
             <div className={`composer-input relative flex overflow-hidden [&_textarea]:flex-1 ${bashActive ? "[&_textarea]:font-mono [&_textarea]:text-sm" : ""}`}>
               <textarea
                 dir="auto"
+                {...{ writingsuggestions: "false" }}
                 ref={composerRef}
                 aria-describedby={demoHintVisible ? demoHintId : undefined}
                 // Native prose stays visible; the aligned mirror paints only skill tokens.
