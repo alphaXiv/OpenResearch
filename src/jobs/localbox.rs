@@ -242,11 +242,17 @@ pub fn slim_finished_run_dirs(root: &Path) {
     }
 }
 
-/// Reclaims a finished run's rebuildable environment and package cache; logs,
+/// Reclaims a finished run's rebuildable environment, package cache and dataset; logs,
 /// exit_code and outputs (artifacts, checkpoints, tensorboard) stay.
 pub fn slim_run_dir(dir: &Path) {
     let linked = |p: &Path| std::fs::symlink_metadata(p).is_ok_and(|m| m.is_symlink());
-    for sub in ["repo/.venv", "repo/.cache/uv"] {
+    // nanochat's re-downloadable dataset shards (old and current dir names); checkpoints stay.
+    for sub in [
+        "repo/.venv",
+        "repo/.cache/uv",
+        "repo/.cache/nanochat/base_data",
+        "repo/.cache/nanochat/base_data_climbmix",
+    ] {
         let path = dir.join(sub);
         // A linked parent (e.g. `.cache` -> a shared cache) would delete outside the run.
         if path
@@ -515,7 +521,8 @@ mod tests {
         for sub in [
             "repo/.venv/lib",
             "repo/.cache/uv/wheels",
-            "repo/.cache/nanochat",
+            "repo/.cache/nanochat/base_data_climbmix",
+            "repo/.cache/nanochat/base_checkpoints",
             "repo/artifacts",
         ] {
             std::fs::create_dir_all(dir.join(sub)).unwrap();
@@ -532,11 +539,12 @@ mod tests {
         slim_run_dir(&dir);
         assert!(!dir.join("repo/.venv").exists());
         assert!(!dir.join("repo/.cache/uv").exists());
+        assert!(!dir.join("repo/.cache/nanochat/base_data_climbmix").exists());
         for kept in [
             "log",
             "exit_code",
             "repo/artifacts/results.json",
-            "repo/.cache/nanochat",
+            "repo/.cache/nanochat/base_checkpoints",
         ] {
             assert!(dir.join(kept).exists(), "{kept} must survive");
         }
