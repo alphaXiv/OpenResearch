@@ -91,6 +91,9 @@ pub async fn run(args: UpArgs) -> Result<()> {
     {
         let store = Store::open()?;
         local::chat::reconcile_unfinished_turns(&store)?;
+        if let Err(err) = local::chat::remove_unreferenced_attachments(None) {
+            eprintln!("orx up: could not sweep chat attachments: {err}");
+        }
         for run in store.list_active_runs()? {
             if store.get_local_experiment(&run.experiment_id)?.is_some() {
                 if let Err(err) = crate::commands::exp::spawn_detached_supervise(&run.id) {
@@ -2076,7 +2079,14 @@ async fn delete_project(State(state): State<AppState>, Path(id): Path<String>) -
         state.chat.claude.forget_session(&session.id).await;
         state.chat.acp.stop(&session.id).await;
     }
+    let mut attachments = HashSet::new();
+    for session in &sessions {
+        attachments.extend(store.chat_attachment_ids(Some(&session.id))?);
+    }
     store.delete_local_project(&id)?;
+    if let Err(err) = local::chat::remove_unreferenced_attachments(Some(&attachments)) {
+        eprintln!("orx up: could not remove chat attachments: {err}");
+    }
     for session in &sessions {
         local::chat::cleanup_session_transcript_artifacts(&session.id);
         local::chat::cleanup_session_worktree(&project, &session.id);

@@ -993,6 +993,39 @@ pub fn attachments_dir() -> Result<std::path::PathBuf> {
     Ok(dir)
 }
 
+/// Remove attachment files no chat row mentions any more: only `candidates`
+/// (a deleted chat's) when given, else every file past a grace period, since a
+/// send in flight has saved its file before recording the message.
+pub fn remove_unreferenced_attachments(candidates: Option<&HashSet<String>>) -> Result<()> {
+    const GRACE: Duration = Duration::from_secs(60 * 60);
+    let referenced = Store::open()?.chat_attachment_ids(None)?;
+    let dir = attachments_dir()?;
+    let entries =
+        std::fs::read_dir(&dir).map_err(|e| anyhow!("Could not read {}: {}", dir.display(), e))?;
+    for entry in entries.flatten() {
+        let name = entry.file_name();
+        let Some(id) = name
+            .to_str()
+            .filter(|n| n.starts_with("att-"))
+            .and_then(|n| n.get(..40))
+        else {
+            continue;
+        };
+        let orphaned = !referenced.contains(id)
+            && match candidates {
+                Some(candidates) => candidates.contains(id),
+                None => entry
+                    .metadata()
+                    .and_then(|m| m.modified())
+                    .is_ok_and(|t| t.elapsed().is_ok_and(|age| age > GRACE)),
+            };
+        if orphaned {
+            let _ = std::fs::remove_file(entry.path());
+        }
+    }
+    Ok(())
+}
+
 fn image_ext(media_type: &str) -> Option<&'static str> {
     match media_type {
         "image/png" => Some("png"),
@@ -6638,8 +6671,12 @@ impl ChatHost {
         let store = Store::open()?;
         let session = store.get_chat_session(session_id)?;
         let worktree_owner = store.chat_worktree_owner(session_id)?;
+        let attachments = store.chat_attachment_ids(Some(session_id))?;
         store.delete_chat_session(session_id)?;
         self.emit("chat.session.deleted", json!({ "sessionId": session_id }));
+        if let Err(err) = remove_unreferenced_attachments(Some(&attachments)) {
+            eprintln!("orx up: could not remove chat attachments: {err}");
+        }
         if let Some(session) = session {
             cleanup_session_transcript_artifacts(&session.id);
             // A side chat runs in its parent's worktree, which outlives it.
