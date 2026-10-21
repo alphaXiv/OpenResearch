@@ -2290,6 +2290,8 @@ struct SubThread {
     /// the NEXT turn), so the parent's `turn/completed` doesn't end our turn
     /// while any of these are live — see the drain in `run_turn_app_server`.
     live: bool,
+    /// The thread's latest completed agent message — its report once it retires.
+    last_message: Option<String>,
 }
 
 /// Where an incoming notification/request should be routed.
@@ -2477,12 +2479,15 @@ fn register_sub_thread(
     spawn_part_id: String,
     arms: bool,
 ) {
-    let live = arms || sub_threads.get(&thread_id).is_some_and(|s| s.live);
+    let existing = sub_threads.get(&thread_id);
+    let live = arms || existing.is_some_and(|s| s.live);
+    let last_message = existing.and_then(|s| s.last_message.clone());
     sub_threads.insert(
         thread_id,
         SubThread {
             spawn_part_id,
             live,
+            last_message,
         },
     );
 }
@@ -2542,6 +2547,15 @@ fn route_sub_event(
         }
         return;
     }
+    if method == "item/completed" {
+        let item = params.get("item");
+        if item.and_then(|i| i.get("type")).and_then(Value::as_str) == Some("agentMessage") {
+            let text = item.and_then(|i| i.get("text")).and_then(Value::as_str);
+            if let (Some(sub), Some(text)) = (sub_threads.get_mut(tid), text) {
+                sub.last_message = Some(text.to_string());
+            }
+        }
+    }
     let live = sub_threads.get(tid).is_some_and(|s| s.live);
     let Some(spawn_part) = find_part_mut(&mut ctx.assistant.parts, &spawn_part_id) else {
         return;
@@ -2572,6 +2586,24 @@ fn route_sub_event(
             found.arms,
         );
     }
+}
+
+/// The hidden message that resumes the parent with reports from sub-agents that
+/// finished after its turn ended.
+fn subagent_wakeup_text<'a>(reports: impl Iterator<Item = Option<&'a str>>) -> String {
+    let reports = reports
+        .map(|report| {
+            format!(
+                "<sub-agent-report>\n{}\n</sub-agent-report>",
+                report.unwrap_or("(no final message)")
+            )
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+    format!(
+        "[orx] Sub-agents you spawned finished after your turn ended. Continue the task using \
+         their reports:\n{reports}"
+    )
 }
 
 /// Stamp any still-`running` `subagent` spawn parts (at any depth) to
@@ -2942,6 +2974,9 @@ async fn run_turn_app_server(ctx: &mut TurnCtx) -> Result<()> {
     // still live — we're draining their tails before ending the turn (bounded
     // by DRAIN_QUIET_SETTLE, see the deadline below).
     let mut parent_done = false;
+    // Threads still live when the parent yielded: codex queues their reports
+    // without starting a parent turn, so orx wakes the parent once they retire.
+    let mut awaited: Vec<String> = Vec::new();
 
     loop {
         // Watchdog (see TURN_WATCHDOG for the false-positive trade-off).
@@ -3043,6 +3078,13 @@ async fn run_turn_app_server(ctx: &mut TurnCtx) -> Result<()> {
                                 &mut open_requests,
                             )
                             .await;
+                            let reports = awaited.iter().map(|tid| {
+                                sub_threads.get(tid).and_then(|s| s.last_message.as_deref())
+                            });
+                            ctx.host.wake_when_idle(
+                                ctx.session_id.clone(),
+                                subagent_wakeup_text(reports),
+                            );
                             return Ok(());
                         }
                         continue;
@@ -3078,6 +3120,11 @@ async fn run_turn_app_server(ctx: &mut TurnCtx) -> Result<()> {
                         // thread that never does. An interrupt ends everything.
                         if !interrupted && sub_threads.values().any(|s| s.live) {
                             parent_done = true;
+                            awaited = sub_threads
+                                .iter()
+                                .filter(|(_, s)| s.live)
+                                .map(|(tid, _)| tid.clone())
+                                .collect();
                             deadline = tokio::time::Instant::now() + turn_phase_quiet(parent_done);
                             let _ = ctx.flush();
                             continue;
@@ -4933,6 +4980,7 @@ requires_openai_auth = false
             SubThread {
                 spawn_part_id: "spawn1".into(),
                 live: true,
+                last_message: None,
             },
         );
         // Same turn as parent → Parent.
@@ -5203,6 +5251,34 @@ requires_openai_auth = false
             !subs.contains_key("parent-thread"),
             "handoff item must not re-register the parent"
         );
+    }
+
+    #[test]
+    fn retired_sub_agent_report_reaches_the_wakeup_text() {
+        let mut ctx = TurnCtx::test_stub();
+        let mut subs: HashMap<String, SubThread> = HashMap::new();
+        let spawn = json!({"item":{"type":"collabAgentToolCall","id":"spawn1",
+            "tool":"spawnAgent","status":"inProgress","receiverThreadIds":["child"]},
+            "threadId":"parent-thread","turnId":"turn1"});
+        register_sub_threads_from("parent-thread", "item/started", &spawn, &mut subs);
+        apply_notification(&mut ctx, "item/started", &spawn);
+        let report = json!({"item":{"type":"agentMessage","id":"m1","text":"SUBAGENT_RESULT=42"},
+            "threadId":"child","turnId":"childturn"});
+        route_sub_event(
+            &mut ctx,
+            &mut subs,
+            "parent-thread",
+            "child",
+            "item/completed",
+            &report,
+        );
+        let text = subagent_wakeup_text(
+            ["child", "unknown"]
+                .iter()
+                .map(|tid| subs.get(*tid).and_then(|s| s.last_message.as_deref())),
+        );
+        assert!(text.contains("<sub-agent-report>\nSUBAGENT_RESULT=42\n</sub-agent-report>"));
+        assert!(text.contains("(no final message)"));
     }
 
     #[test]

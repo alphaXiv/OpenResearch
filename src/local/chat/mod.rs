@@ -5166,6 +5166,24 @@ impl ChatHost {
         .await
     }
 
+    /// Send a hidden message once the session's current turn has released its slot.
+    pub(crate) fn wake_when_idle(self: &Arc<Self>, session_id: String, text: String) {
+        let host = self.clone();
+        tokio::spawn(async move {
+            // shortcut: in-memory and bounded to ~30s, so an orx restart or a long
+            // user turn drops the wake-up; persist like run wake-ups if that matters.
+            for _ in 0..120 {
+                if let Some(guard) = TurnGuard::claim_hidden(&host, &session_id).await {
+                    if let Err(err) = host.send_hidden_message(&session_id, text, guard).await {
+                        eprintln!("orx up: sub-agent wake-up: {err}");
+                    }
+                    return;
+                }
+                tokio::time::sleep(Duration::from_millis(250)).await;
+            }
+        });
+    }
+
     /// Persists one displayed user turn, then expands and contextualizes each
     /// raw annotated message separately for the harness. `transcript_text`
     /// overrides the displayed text; an empty override records no user message.
