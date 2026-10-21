@@ -4431,13 +4431,17 @@ mod tests {
                 created_at: 1,
             })
             .unwrap();
+        let c = format!("att-{}", uuid::Uuid::new_v4());
+        let mut turn = chat_turn_fixture("turn_1", "client_1");
+        turn.prepared_input = format!("see /data/chat-attachments/{c}__z.png");
+        store.admit_chat_turn(None, &turn).unwrap();
         assert_eq!(
             store.chat_attachment_ids(Some("chat_1")).unwrap(),
-            HashSet::from([a.clone()])
+            HashSet::from([a.clone(), c.clone()])
         );
         assert_eq!(
             store.chat_attachment_ids(None).unwrap(),
-            HashSet::from([a.clone(), b.clone()])
+            HashSet::from([a.clone(), b.clone(), c.clone()])
         );
 
         let files = dir.join("chat-attachments");
@@ -4446,13 +4450,15 @@ mod tests {
         for name in [
             format!("{a}__x.png"),
             format!("{b}__y.pdf"),
+            format!("{c}__z.png"),
             fresh_orphan.clone(),
         ] {
             std::fs::write(files.join(name), b"x").unwrap();
         }
         let deleted = HashSet::from([a.clone(), b.clone()]);
         store.delete_chat_session("chat_2").unwrap();
-        crate::local::chat::remove_unreferenced_attachments(&store, &files, &deleted).unwrap();
+        use crate::local::chat::{remove_unreferenced_attachments, ATTACHMENT_GRACE};
+        remove_unreferenced_attachments(&store, &files, &deleted, ATTACHMENT_GRACE).unwrap();
         assert!(
             files.join(format!("{a}__x.png")).exists(),
             "still referenced"
@@ -4461,7 +4467,19 @@ mod tests {
             !files.join(format!("{b}__y.pdf")).exists(),
             "deleted chat's file"
         );
-        assert!(files.join(fresh_orphan).exists(), "within the grace period");
+        assert!(
+            files.join(&fresh_orphan).exists(),
+            "within the grace period"
+        );
+        remove_unreferenced_attachments(&store, &files, &HashSet::new(), Duration::ZERO).unwrap();
+        assert!(
+            !files.join(&fresh_orphan).exists(),
+            "startup sweep reclaims it"
+        );
+        assert!(
+            files.join(format!("{c}__z.png")).exists(),
+            "referenced by a turn"
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 

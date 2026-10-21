@@ -993,15 +993,18 @@ pub fn attachments_dir() -> Result<std::path::PathBuf> {
     Ok(dir)
 }
 
+/// How long an unreferenced attachment is spared while the server runs: a send
+/// in flight saves its file before recording the message.
+pub const ATTACHMENT_GRACE: Duration = Duration::from_secs(10 * 60);
+
 /// Remove attachment files no chat row mentions any more: `deleted` (a deleted
-/// chat's) at once, others only past a grace period, since a send in flight
-/// saves its file before recording the message.
+/// chat's) at once, any other orphan once it is older than `grace`.
 pub fn remove_unreferenced_attachments(
     store: &Store,
     dir: &std::path::Path,
     deleted: &HashSet<String>,
+    grace: Duration,
 ) -> Result<()> {
-    const GRACE: Duration = Duration::from_secs(10 * 60);
     let referenced = store.chat_attachment_ids(None)?;
     let entries =
         std::fs::read_dir(dir).map_err(|e| anyhow!("Could not read {}: {}", dir.display(), e))?;
@@ -1018,7 +1021,7 @@ pub fn remove_unreferenced_attachments(
             entry
                 .metadata()
                 .and_then(|m| m.modified())
-                .is_ok_and(|t| t.elapsed().is_ok_and(|age| age > GRACE))
+                .is_ok_and(|t| t.elapsed().is_ok_and(|age| age >= grace))
         };
         if !referenced.contains(id) && (deleted.contains(id) || stale()) {
             if let Err(err) = std::fs::remove_file(entry.path()) {
@@ -6677,9 +6680,9 @@ impl ChatHost {
         let attachments = store.chat_attachment_ids(Some(session_id))?;
         store.delete_chat_session(session_id)?;
         self.emit("chat.session.deleted", json!({ "sessionId": session_id }));
-        if let Err(err) = attachments_dir()
-            .and_then(|dir| remove_unreferenced_attachments(&store, &dir, &attachments))
-        {
+        if let Err(err) = attachments_dir().and_then(|dir| {
+            remove_unreferenced_attachments(&store, &dir, &attachments, ATTACHMENT_GRACE)
+        }) {
             eprintln!("could not remove chat attachments: {err}");
         }
         if let Some(session) = session {
