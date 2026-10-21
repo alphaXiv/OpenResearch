@@ -5166,24 +5166,6 @@ impl ChatHost {
         .await
     }
 
-    /// Send a hidden message once the session's current turn has released its slot.
-    pub(crate) fn wake_when_idle(self: &Arc<Self>, session_id: String, text: String) {
-        let host = self.clone();
-        tokio::spawn(async move {
-            // shortcut: in-memory and bounded to ~30s, so an orx restart or a long
-            // user turn drops the wake-up; persist like run wake-ups if that matters.
-            for _ in 0..120 {
-                if let Some(guard) = TurnGuard::claim_hidden(&host, &session_id).await {
-                    if let Err(err) = host.send_hidden_message(&session_id, text, guard).await {
-                        eprintln!("orx up: sub-agent wake-up: {err}");
-                    }
-                    return;
-                }
-                tokio::time::sleep(Duration::from_millis(250)).await;
-            }
-        });
-    }
-
     /// Persists one displayed user turn, then expands and contextualizes each
     /// raw annotated message separately for the harness. `transcript_text`
     /// overrides the displayed text; an empty override records no user message.
@@ -5941,6 +5923,17 @@ impl ChatHost {
                 .finish_turn(&ctx.session_id, Some(&ctx.assistant.id))
                 .await;
             ctx.host.drain_queue(&ctx.session_id).await;
+            if let Some(text) = ctx.wake_after_turn.take() {
+                if let Some(guard) = TurnGuard::claim_hidden(&ctx.host, &ctx.session_id).await {
+                    if let Err(err) = ctx
+                        .host
+                        .send_hidden_message(&ctx.session_id, text, guard)
+                        .await
+                    {
+                        eprintln!("orx up: sub-agent wake-up: {err}");
+                    }
+                }
+            }
         });
         turns.insert(
             sid.clone(),
@@ -7157,6 +7150,8 @@ pub struct TurnCtx {
     /// Messages the user sends into this turn while it runs. `None` on
     /// harnesses that can't take mid-turn input — those park sends instead.
     pub steering: Option<SteerReceiver>,
+    /// Hidden message to send once this turn ends, unless the user queued one.
+    pub(crate) wake_after_turn: Option<String>,
     last_flush: Instant,
     last_flushed_tool_states: Vec<(String, String)>,
     last_attempted_tool_states: Vec<(String, String)>,
@@ -7210,6 +7205,7 @@ fn turn_ctx_from_stored(
             .as_deref()
             .and_then(|json| serde_json::from_str(json).ok()),
         steering: None,
+        wake_after_turn: None,
         last_flush: Instant::now() - FLUSH_INTERVAL,
         last_flushed_tool_states: Vec::new(),
         last_attempted_tool_states: Vec::new(),
@@ -7610,6 +7606,7 @@ impl TurnCtx {
             },
             context_usage: None,
             steering: None,
+            wake_after_turn: None,
             last_flush: Instant::now(),
             last_flushed_tool_states: Vec::new(),
             last_attempted_tool_states: Vec::new(),

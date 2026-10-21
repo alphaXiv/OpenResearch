@@ -2589,22 +2589,30 @@ fn route_sub_event(
     }
 }
 
-/// The hidden message that resumes the parent with reports from sub-agents that
-/// finished after its turn ended.
-fn subagent_wakeup_text<'a>(reports: impl Iterator<Item = Option<&'a str>>) -> String {
-    let reports = reports
-        .map(|report| {
+/// The hidden message that resumes the parent with the reports of the sub-agents
+/// it yielded on (`awaited`), once all of them have retired.
+fn subagent_wakeup_text(
+    awaited: &[String],
+    sub_threads: &HashMap<String, SubThread>,
+) -> Option<String> {
+    if awaited.is_empty() || sub_threads.values().any(|s| s.live) {
+        return None;
+    }
+    let reports = awaited
+        .iter()
+        .map(|tid| {
+            let report = sub_threads.get(tid).and_then(|s| s.last_message.as_deref());
             format!(
-                "<sub-agent-report>\n{}\n</sub-agent-report>",
+                "<sub-agent-report thread=\"{tid}\">\n{}\n</sub-agent-report>",
                 report.unwrap_or("(no final message)")
             )
         })
         .collect::<Vec<_>>()
         .join("\n");
-    format!(
+    Some(format!(
         "[orx] Sub-agents you spawned finished after your turn ended. Continue the task using \
          their reports:\n{reports}"
-    )
+    ))
 }
 
 /// Stamp any still-`running` `subagent` spawn parts (at any depth) to
@@ -3079,13 +3087,7 @@ async fn run_turn_app_server(ctx: &mut TurnCtx) -> Result<()> {
                                 &mut open_requests,
                             )
                             .await;
-                            let reports = awaited.iter().map(|tid| {
-                                sub_threads.get(tid).and_then(|s| s.last_message.as_deref())
-                            });
-                            ctx.host.wake_when_idle(
-                                ctx.session_id.clone(),
-                                subagent_wakeup_text(reports),
-                            );
+                            ctx.wake_after_turn = subagent_wakeup_text(&awaited, &sub_threads);
                             return Ok(());
                         }
                         continue;
@@ -5255,31 +5257,50 @@ requires_openai_auth = false
     }
 
     #[test]
-    fn retired_sub_agent_report_reaches_the_wakeup_text() {
+    fn wakeup_waits_for_every_awaited_sub_agent_and_carries_reports() {
         let mut ctx = TurnCtx::test_stub();
         let mut subs: HashMap<String, SubThread> = HashMap::new();
         let spawn = json!({"item":{"type":"collabAgentToolCall","id":"spawn1",
-            "tool":"spawnAgent","status":"inProgress","receiverThreadIds":["child"]},
+            "tool":"spawnAgent","status":"inProgress","receiverThreadIds":["a","b"]},
             "threadId":"parent-thread","turnId":"turn1"});
         register_sub_threads_from("parent-thread", "item/started", &spawn, &mut subs);
         apply_notification(&mut ctx, "item/started", &spawn);
-        let report = json!({"item":{"type":"agentMessage","id":"m1","text":"SUBAGENT_RESULT=42"},
-            "threadId":"child","turnId":"childturn"});
+        // Nothing awaited (children finished inside the parent turn): no wake-up.
+        assert!(subagent_wakeup_text(&[], &subs).is_none());
+        let awaited = vec!["a".to_string(), "b".to_string()];
+        let report = json!({"item":{"type":"agentMessage","id":"m1","text":"SUBAGENT_RESULT=42"}});
+        let done = json!({"turn":{"status":"completed"}});
         route_sub_event(
             &mut ctx,
             &mut subs,
             "parent-thread",
-            "child",
+            "a",
             "item/completed",
             &report,
         );
-        let text = subagent_wakeup_text(
-            ["child", "unknown"]
-                .iter()
-                .map(|tid| subs.get(*tid).and_then(|s| s.last_message.as_deref())),
+        route_sub_event(
+            &mut ctx,
+            &mut subs,
+            "parent-thread",
+            "a",
+            "turn/completed",
+            &done,
         );
-        assert!(text.contains("<sub-agent-report>\nSUBAGENT_RESULT=42\n</sub-agent-report>"));
-        assert!(text.contains("(no final message)"));
+        assert!(
+            subagent_wakeup_text(&awaited, &subs).is_none(),
+            "b is still live"
+        );
+        route_sub_event(
+            &mut ctx,
+            &mut subs,
+            "parent-thread",
+            "b",
+            "turn/completed",
+            &done,
+        );
+        let text = subagent_wakeup_text(&awaited, &subs).unwrap();
+        assert!(text.contains("<sub-agent-report thread=\"a\">\nSUBAGENT_RESULT=42\n"));
+        assert!(text.contains("<sub-agent-report thread=\"b\">\n(no final message)\n"));
     }
 
     #[test]
