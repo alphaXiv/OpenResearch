@@ -332,7 +332,7 @@ fn references(data: &Path, mappings: &[(PathBuf, PathBuf)]) -> Result<References
             .any(|(from, to)| repo.starts_with(from) || repo.starts_with(to))
     };
     for repo in &repos {
-        // An unrelated cloud-only repository cannot hold files moved by this migration.
+        // Hydrating an unrelated repository would block every command; it is rechecked once downloaded.
         if external(repo) && cloud_only(&repo.join(".git/config")) {
             continue;
         }
