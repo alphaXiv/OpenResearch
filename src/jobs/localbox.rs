@@ -233,8 +233,18 @@ fn exit_code_state(dir: &Path) -> Option<JobState> {
 /// Reclaims a finished run's rebuildable environment and package cache; logs,
 /// exit_code and outputs (artifacts, checkpoints, tensorboard) stay.
 pub fn slim_run_dir(dir: &Path) {
+    let linked = |p: &Path| std::fs::symlink_metadata(p).is_ok_and(|m| m.is_symlink());
     for sub in ["repo/.venv", "repo/.cache/uv"] {
         let path = dir.join(sub);
+        // A linked parent (e.g. `.cache` -> a shared cache) would delete outside the run.
+        if path
+            .ancestors()
+            .skip(1)
+            .take_while(|a| *a != dir)
+            .any(linked)
+        {
+            continue;
+        }
         if let Err(err) = std::fs::remove_dir_all(&path) {
             if err.kind() != std::io::ErrorKind::NotFound {
                 eprintln!("could not reclaim {}: {err}", path.display());
@@ -519,6 +529,22 @@ mod tests {
             assert!(dir.join(kept).exists(), "{kept} must survive");
         }
         std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn slim_run_dir_skips_linked_cache() {
+        let base = std::env::temp_dir().join(format!("orx-slim-link-{}", uuid::Uuid::new_v4()));
+        let shared = base.join("shared");
+        std::fs::create_dir_all(shared.join("uv")).unwrap();
+        std::fs::create_dir_all(base.join("run/repo")).unwrap();
+        std::os::unix::fs::symlink(&shared, base.join("run/repo/.cache")).unwrap();
+        slim_run_dir(&base.join("run"));
+        assert!(
+            shared.join("uv").exists(),
+            "a shared cache outside the run must survive"
+        );
+        std::fs::remove_dir_all(&base).unwrap();
     }
 
     fn wait_terminal(dir: &Path) -> JobState {
