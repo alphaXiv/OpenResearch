@@ -830,6 +830,114 @@ async fn discover_models(endpoint: &AgentEndpoint) -> Result<(Value, Value)> {
     catalog.ok_or_else(|| anyhow!("OpenCode model discovery timed out"))
 }
 
+/// One-shot text generation against a running V2 server.
+///
+/// The sessionless route (`/api/experimental/generate`, or `/api/generate` on
+/// older builds) is refused for OpenCode's free tier with "free tier can only
+/// be used from within OpenCode" — a policy on that *endpoint*, enforced by the
+/// provider gateway, not by the model, the database, or this client. Creating a
+/// throwaway session and generating on it takes the same prompt through the
+/// session-scoped route the free tier allows, and returns the same
+/// `/data/text` shape. Servers that predate `/api/session/{id}/generate` fall
+/// back to the sessionless route.
+async fn generate_text(
+    endpoint: &AgentEndpoint,
+    model: Option<&str>,
+    prompt: &str,
+) -> Result<String> {
+    let model = model
+        .and_then(|model| model.split_once('/'))
+        .map(|(provider, id)| json!({ "providerID": provider, "id": id }));
+    let mut body = json!({ "prompt": prompt });
+    if let Some(model) = &model {
+        body["model"] = model.clone();
+    }
+    if let Some(text) = session_generate(endpoint, model.as_ref(), &body).await? {
+        return Ok(text);
+    }
+    decode_generate(
+        endpoint
+            .client
+            .post(format!(
+                "{}{}",
+                endpoint.base_url,
+                endpoint.v2_generate_path()
+            ))
+            .json(&body)
+            .send()
+            .await?,
+    )
+    .await
+}
+
+/// Create a throwaway session, then generate on it. `Ok(None)` when the server
+/// has no session-generate route (an older V2 build), so the caller can fall
+/// back; the session carries no work of its own and is never resumed.
+async fn session_generate(
+    endpoint: &AgentEndpoint,
+    model: Option<&Value>,
+    body: &Value,
+) -> Result<Option<String>> {
+    let mut session_body = json!({});
+    if let Some(model) = model {
+        session_body["model"] = model.clone();
+    }
+    let created = endpoint
+        .client
+        .post(format!("{}/api/session", endpoint.base_url))
+        .json(&session_body)
+        .send()
+        .await?;
+    if created.status() == reqwest::StatusCode::NOT_FOUND {
+        return Ok(None);
+    }
+    let created = created.error_for_status()?.json::<Value>().await?;
+    let Some(session) = created.pointer("/data/id").and_then(Value::as_str) else {
+        return Ok(None);
+    };
+    let response = endpoint
+        .client
+        .post(format!(
+            "{}/api/session/{session}/generate",
+            endpoint.base_url
+        ))
+        .json(body)
+        .send()
+        .await;
+    let result = match response {
+        Ok(response) if response.status() == reqwest::StatusCode::NOT_FOUND => Ok(None),
+        Ok(response) => decode_generate(response).await.map(Some),
+        Err(error) => Err(error.into()),
+    };
+    // The session is throwaway either way; best-effort cleanup, never reported
+    // over the generation result (older servers may not route the delete).
+    let _ = endpoint
+        .client
+        .delete(format!("{}/api/session/{session}", endpoint.base_url))
+        .send()
+        .await;
+    result
+}
+
+/// Read `/data/text` from a generate reply, or surface the provider's reason.
+async fn decode_generate(response: reqwest::Response) -> Result<String> {
+    let status = response.status();
+    if !status.is_success() {
+        // The body carries the provider's reason; the URL is a throwaway local port.
+        let body = response.text().await.unwrap_or_default();
+        return Err(anyhow!(
+            "{status}: {}",
+            crate::local::harness::one_line(&body, 300)
+        ));
+    }
+    let response: Value = response.json().await?;
+    response
+        .pointer("/data/text")
+        .and_then(Value::as_str)
+        .map(str::to_owned)
+        .ok_or_else(|| anyhow!("returned no reply"))
+}
+
 pub(super) async fn generate(
     binary: crate::local::opencode::ResolvedBinary,
     model: Option<String>,
@@ -845,40 +953,11 @@ pub(super) async fn generate(
             .env("OPENCODE_CONFIG_PROJECT_DISABLE", "1")
             .current_dir(std::env::temp_dir());
         let (mut child, endpoint) = crate::local::opencode::start_server(&binary, cmd).await?;
-        let mut body = json!({"prompt":prompt});
-        if let Some((provider, model)) = model.as_deref().and_then(|model| model.split_once('/')) {
-            body["model"] = json!({"providerID":provider,"id":model});
-        }
-        let result = tokio::time::timeout(timeout, async {
-            let response = endpoint
-                .client
-                .post(format!(
-                    "{}{}",
-                    endpoint.base_url,
-                    endpoint.v2_generate_path()
-                ))
-                .json(&body)
-                .send()
-                .await?;
-            let status = response.status();
-            if !status.is_success() {
-                // The body carries the provider's reason; the URL is a throwaway local port.
-                let body = response.text().await.unwrap_or_default();
-                return Err(anyhow!(
-                    "{status}: {}",
-                    crate::local::harness::one_line(&body, 300)
-                ));
-            }
-            let response: Value = response.json().await?;
-            response
-                .pointer("/data/text")
-                .and_then(Value::as_str)
-                .map(str::to_owned)
-                .ok_or_else(|| anyhow!("returned no reply"))
-        })
-        .await
-        .map_err(|_| anyhow!("timed out after {}s", timeout.as_secs()))
-        .and_then(|result| result);
+        let result =
+            tokio::time::timeout(timeout, generate_text(&endpoint, model.as_deref(), &prompt))
+                .await
+                .map_err(|_| anyhow!("timed out after {}s", timeout.as_secs()))
+                .and_then(|result| result);
         let _ = child.kill().await;
         let _ = child.wait().await;
         result
@@ -927,6 +1006,131 @@ mod tests {
         let (models, _) = discover_models(&endpoint).await.unwrap();
         assert_eq!(models["data"][0]["id"], "fixture");
         assert_eq!(requests.load(Ordering::SeqCst), 2);
+        server.abort();
+    }
+
+    /// A V2 endpoint bound to a mock server, like `discover_models` uses.
+    fn mock_endpoint(listener: &tokio::net::TcpListener, legacy_v2_api: bool) -> AgentEndpoint {
+        AgentEndpoint {
+            base_url: format!("http://{}", listener.local_addr().unwrap()),
+            client: crate::net::loopback_client().build().unwrap(),
+            protocol: crate::local::opencode::Protocol::V2,
+            legacy_v2_api,
+        }
+    }
+
+    /// One-shot generation must ride the session-scoped route: the sessionless
+    /// one is refused for the free tier, so the sessionless route must not be
+    /// touched once a session can be created.
+    #[tokio::test]
+    async fn one_shot_generation_goes_through_a_session() {
+        use axum::{routing::post, Json, Router};
+        use std::sync::{Arc, Mutex};
+
+        let hits = Arc::new(Mutex::new(Vec::<&'static str>::new()));
+        let (created, generated, sessionless, deleted) =
+            (hits.clone(), hits.clone(), hits.clone(), hits.clone());
+        let app = Router::new()
+            .route(
+                "/api/session",
+                post(move || {
+                    let hits = created.clone();
+                    async move {
+                        hits.lock().unwrap().push("created");
+                        Json(json!({"data":{"id":"ses_test"}}))
+                    }
+                }),
+            )
+            .route(
+                "/api/session/{session}/generate",
+                post(move || {
+                    let hits = generated.clone();
+                    async move {
+                        hits.lock().unwrap().push("session-generate");
+                        Json(json!({"data":{"text":"OK"}}))
+                    }
+                }),
+            )
+            .route(
+                "/api/session/{session}",
+                axum::routing::delete(move || {
+                    let hits = deleted.clone();
+                    async move {
+                        hits.lock().unwrap().push("deleted");
+                        axum::http::StatusCode::NO_CONTENT
+                    }
+                }),
+            )
+            .route(
+                "/api/experimental/generate",
+                post(move || {
+                    let hits = sessionless.clone();
+                    async move {
+                        hits.lock().unwrap().push("sessionless");
+                        Json(json!({"data":{"text":"wrong"}}))
+                    }
+                }),
+            );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let endpoint = mock_endpoint(&listener, false);
+        let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+
+        let text = generate_text(&endpoint, Some("opencode/beam-free"), "hi")
+            .await
+            .unwrap();
+        assert_eq!(text, "OK");
+        assert_eq!(
+            *hits.lock().unwrap(),
+            vec!["created", "session-generate", "deleted"]
+        );
+        server.abort();
+    }
+
+    /// Older V2 servers without `/api/session/{id}/generate` keep working
+    /// through the sessionless route the caller names.
+    #[tokio::test]
+    async fn one_shot_generation_falls_back_without_a_session_route() {
+        use axum::{routing::post, Json, Router};
+
+        let app = Router::new()
+            .route(
+                "/api/session",
+                post(|| async { axum::http::StatusCode::NOT_FOUND }),
+            )
+            .route(
+                "/api/experimental/generate",
+                post(|| async { Json(json!({"data":{"text":"OK"}})) }),
+            );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let endpoint = mock_endpoint(&listener, false);
+        let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+
+        let text = generate_text(&endpoint, None, "hi").await.unwrap();
+        assert_eq!(text, "OK");
+        server.abort();
+    }
+
+    /// A pre-2.0.4 server serves the sessionless route off `/api`, not
+    /// `/api/experimental`; the fallback must follow `v2_generate_path`.
+    #[tokio::test]
+    async fn one_shot_generation_fallback_uses_the_legacy_path() {
+        use axum::{routing::post, Json, Router};
+
+        let app = Router::new()
+            .route(
+                "/api/session",
+                post(|| async { axum::http::StatusCode::NOT_FOUND }),
+            )
+            .route(
+                "/api/generate",
+                post(|| async { Json(json!({"data":{"text":"OK"}})) }),
+            );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let endpoint = mock_endpoint(&listener, true);
+        let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+
+        let text = generate_text(&endpoint, None, "hi").await.unwrap();
+        assert_eq!(text, "OK");
         server.abort();
     }
 
