@@ -26,6 +26,105 @@ const POLL_INTERVAL: Duration = Duration::from_secs(5);
 const LOG_IDLE: Duration = Duration::from_secs(30);
 /// How long monitoring must keep failing before it is reported on the run.
 const MONITORING_GRACE: Duration = Duration::from_secs(60);
+/// How long a requested cancel may go undelivered to an unreachable host
+/// before the run is cancelled locally anyway. A machine that dropped off the
+/// network must not keep its run live, and unstoppable, until it returns.
+const UNDELIVERED_CANCEL_GRACE: Duration = Duration::from_secs(30);
+/// After a local-only cancel, how long the supervisor keeps delivering the
+/// real one, so a host that comes back does not keep running an orphan.
+const LATE_CANCEL_WINDOW: Duration = Duration::from_secs(30 * 60);
+const LATE_CANCEL_INTERVAL: Duration = Duration::from_secs(30);
+/// Bound on one supervisor round-trip to a remote host. ssh's keepalives take
+/// ~90s to notice a dead multiplexed connection; the loop must keep honoring
+/// cancel meanwhile. Dropping the call kills its ssh child.
+const REMOTE_CALL_TIMEOUT: Duration = Duration::from_secs(30);
+
+async fn remote<T>(call: impl std::future::Future<Output = Result<T>>) -> Result<T> {
+    tokio::time::timeout(REMOTE_CALL_TIMEOUT, call)
+        .await
+        .unwrap_or_else(|_| {
+            Err(anyhow!(
+                "the host did not respond within {}s",
+                REMOTE_CALL_TIMEOUT.as_secs()
+            ))
+        })
+}
+
+/// Tracks a cancel the host has not acknowledged while the host is unreachable.
+#[derive(Default)]
+struct UndeliveredCancel {
+    since: Option<std::time::Instant>,
+}
+
+impl UndeliveredCancel {
+    /// Record one poll: whether a cancel is still owed and whether the host
+    /// answered. True once the run should be cancelled locally. A reachable
+    /// host resets the clock — cancel there is retried, never assumed.
+    fn give_up(&mut self, owed: bool, reachable: bool, now: std::time::Instant) -> bool {
+        if !owed || reachable {
+            self.since = None;
+            return false;
+        }
+        let since = *self.since.get_or_insert(now);
+        now.duration_since(since) >= UNDELIVERED_CANCEL_GRACE
+    }
+}
+
+/// End a run whose cancel could not reach its host. Returns whether this
+/// call ended it (a racing terminal status wins).
+fn cancel_unreachable_run(store: &Store, run_id: &str, error: &str, next: &str) -> Result<bool> {
+    if !store.update_status(run_id, RunStatus::Cancelled, Some(now_ms()), None)? {
+        return Ok(false);
+    }
+    append_result_note(
+        store,
+        run_id,
+        &format!(
+            "**Cancelled without reaching the host.** The cancel could not be delivered \
+             ({error}), so the remote job may still be running. {next}"
+        ),
+    );
+    Ok(true)
+}
+
+/// Keep delivering a cancel that already ended the run locally, for a bounded
+/// window; `attempt` reports whether the host acknowledged it.
+async fn deliver_late_cancel<F, Fut>(store: &Store, run_id: &str, mut attempt: F)
+where
+    F: FnMut() -> Fut,
+    Fut: std::future::Future<Output = bool>,
+{
+    let deadline = std::time::Instant::now() + LATE_CANCEL_WINDOW;
+    while std::time::Instant::now() < deadline {
+        tokio::time::sleep(LATE_CANCEL_INTERVAL).await;
+        if attempt().await {
+            eprintln!("supervise {run_id}: host is back — remote job stopped");
+            append_result_note(
+                store,
+                run_id,
+                "The host came back and orx stopped the remote job.",
+            );
+            return;
+        }
+    }
+    eprintln!("supervise {run_id}: gave up stopping the remote job");
+}
+
+fn append_result_note(store: &Store, run_id: &str, note: &str) {
+    let existing = store
+        .get_run(run_id)
+        .ok()
+        .flatten()
+        .and_then(|r| r.result_markdown)
+        .filter(|text| !text.trim().is_empty());
+    let text = match existing {
+        Some(existing) => format!("{existing}\n\n{note}"),
+        None => note.to_string(),
+    };
+    if let Err(err) = store.set_result_markdown(run_id, &text) {
+        eprintln!("supervise {run_id}: could not record cancel note: {err}");
+    }
+}
 
 fn open_supervisor_lock(path: &std::path::Path) -> Result<fd_lock::RwLock<std::fs::File>> {
     let file = std::fs::OpenOptions::new()
@@ -697,6 +796,7 @@ async fn watch_ssh_job(
     let mut failing_since = None;
     let mut last_error = None;
     let mut missing_polls = 0;
+    let mut undelivered = UndeliveredCancel::default();
 
     loop {
         if !cancel_sent && local_cancel_requested(store, run_id) {
@@ -710,7 +810,7 @@ async fn watch_ssh_job(
             )
             .await;
         }
-        let observed = ssh::inspect_job(&target, &dir, container.as_ref()).await;
+        let observed = remote(ssh::inspect_job(&target, &dir, container.as_ref())).await;
         let polling_error = observed
             .as_ref()
             .err()
@@ -755,6 +855,36 @@ async fn watch_ssh_job(
                 Err(err) => eprintln!("supervise {run_id}: could not save monitoring state: {err}"),
             }
         }
+        let cancel_owed = !cancel_sent && local_cancel_requested(store, run_id);
+        let give_up = undelivered.give_up(cancel_owed, observed.is_ok(), std::time::Instant::now());
+        if let (true, Err(err)) = (give_up, &observed) {
+            let _ = done_tx.send(true);
+            log_task.abort();
+            // A platform box is deleted through the API once this returns.
+            let late_cancel = sandbox.is_none() || descriptor.rental_lease.is_some();
+            let next = if late_cancel {
+                format!(
+                    "orx keeps trying to stop it for {} minutes in case the host comes back; \
+                     after that, stop it on {} yourself (its run directory is `~/{dir}`).",
+                    LATE_CANCEL_WINDOW.as_secs() / 60,
+                    target.dest
+                )
+            } else {
+                "The box is being deleted, which stops it.".into()
+            };
+            eprintln!("supervise {run_id}: host unreachable — cancelling locally: {err}");
+            if cancel_unreachable_run(store, run_id, &err.to_string(), &next)? && late_cancel {
+                let leased = descriptor.rental_lease.is_some();
+                let (target, dir, container) = (&target, dir.as_str(), container.as_ref());
+                deliver_late_cancel(store, run_id, move || async move {
+                    let mut sent = false;
+                    cancel_ssh(target, dir, container, leased, run_id, &mut sent).await;
+                    sent
+                })
+                .await;
+            }
+            return Ok(RunStatus::Cancelled);
+        }
         let job = match observed {
             Ok(job) => job,
             Err(_) => match sandbox {
@@ -787,10 +917,14 @@ async fn watch_ssh_job(
         let mut job = job;
         let mut exit_code = None;
         if descriptor.rental_lease.is_some() && is_terminal_stage(&job.stage) {
-            exit_code = ssh::ssh_run(&target, &format!("cat \"$HOME/{dir}/exit_code\""), None)
-                .await
-                .ok()
-                .and_then(|value| value.trim().parse::<i64>().ok());
+            exit_code = remote(ssh::ssh_run(
+                &target,
+                &format!("cat \"$HOME/{dir}/exit_code\""),
+                None,
+            ))
+            .await
+            .ok()
+            .and_then(|value| value.trim().parse::<i64>().ok());
             if let Some(code) = exit_code {
                 job.stage = if code == 0 { "COMPLETED" } else { "ERROR" }.into();
                 job.message = (code != 0).then(|| format!("exited with code {code}"));
@@ -838,11 +972,11 @@ async fn watch_ssh_job(
                 && collected
                 && exit_code.is_some()
             {
-                let _ = ssh::ssh_run(
+                let _ = remote(ssh::ssh_run(
                     &target,
                     &format!("touch \"$HOME/{dir}/final_collected\""),
                     None,
-                )
+                ))
                 .await;
             }
             eprintln!("supervise {run_id}: finished ({status})");
@@ -858,7 +992,7 @@ async fn watch_ssh_job(
                 "printf '%s\\n' {} >> \"$HOME/{dir}/log\"",
                 ssh::sh_quote(&message)
             );
-            match ssh::ssh_run(&target, &command, None).await {
+            match remote(ssh::ssh_run(&target, &command, None)).await {
                 Ok(_) => last_message = job.message,
                 Err(error) => {
                     eprintln!("supervise {run_id}: could not log container status: {error}")
@@ -960,9 +1094,9 @@ async fn cancel_ssh(
 ) {
     eprintln!("supervise {run_id}: cancel requested — killing remote process group");
     let result = if leased {
-        crate::jobs::rental::cancel(target, dir).await
+        remote(crate::jobs::rental::cancel(target, dir)).await
     } else {
-        ssh::cancel_job(target, dir, container).await
+        remote(ssh::cancel_job(target, dir, container)).await
     };
     match result {
         Ok(()) => *cancel_sent = true,
@@ -1377,12 +1511,13 @@ async fn run_slurm(
     let mut cancel_sent = descriptor.cancellation_accepted;
     let mut failing_since = None;
     let mut last_error = None;
+    let mut undelivered = UndeliveredCancel::default();
 
     loop {
         if !cancel_sent && local_cancel_requested(&store, &run_id) {
             cancel_slurm(&host, &job_id, &run_id, &mut cancel_sent).await;
         }
-        let mut observed = slurm::inspect_job(&host, &run_id, &job_id).await;
+        let mut observed = remote(slurm::inspect_job(&host, &run_id, &job_id)).await;
         if let Ok(job) = &mut observed {
             if cancel_sent && job.stage == "GONE" {
                 job.stage = "CANCELED".into();
@@ -1419,6 +1554,28 @@ async fn run_slurm(
                 Ok(()) => descriptor = updated,
                 Err(err) => eprintln!("supervise {run_id}: could not save monitoring state: {err}"),
             }
+        }
+        let cancel_owed = !cancel_sent && local_cancel_requested(&store, &run_id);
+        let give_up = undelivered.give_up(cancel_owed, observed.is_ok(), std::time::Instant::now());
+        if let (true, Err(err)) = (give_up, &observed) {
+            let _ = done_tx.send(true);
+            log_task.abort();
+            eprintln!("supervise {run_id}: login node unreachable — cancelling locally: {err}");
+            let next = format!(
+                "orx keeps trying `scancel {job_id}` for {} minutes in case {host} comes back; \
+                 after that, run it on the cluster yourself.",
+                LATE_CANCEL_WINDOW.as_secs() / 60
+            );
+            if cancel_unreachable_run(&store, &run_id, &err.to_string(), &next)? {
+                let (host, job_id, run_id) = (host.as_str(), job_id.as_str(), run_id.as_str());
+                deliver_late_cancel(&store, run_id, move || async move {
+                    let mut sent = false;
+                    cancel_slurm(host, job_id, run_id, &mut sent).await;
+                    sent
+                })
+                .await;
+            }
+            return Ok(());
         }
         if error.is_some() {
             tokio::time::sleep(POLL_INTERVAL).await;
@@ -1461,7 +1618,7 @@ async fn run_slurm(
 
 async fn cancel_slurm(host: &str, job_id: &str, run_id: &str, cancel_sent: &mut bool) {
     eprintln!("supervise {run_id}: cancel requested — scancel {job_id}");
-    match slurm::cancel_job(host, job_id).await {
+    match remote(slurm::cancel_job(host, job_id)).await {
         Ok(()) => *cancel_sent = true,
         Err(err) => eprintln!("supervise {run_id}: scancel failed (will retry): {err}"),
     }
@@ -1750,6 +1907,75 @@ mod tests {
         assert!(interrupted.is_none());
         let drained = log_pass(&mut rx, true, async { Ok(7) }).await;
         assert_eq!(drained.unwrap().unwrap(), 7);
+    }
+
+    #[test]
+    fn an_undelivered_cancel_gives_up_only_while_the_host_stays_unreachable() {
+        let start = std::time::Instant::now();
+        let later = |secs| start + Duration::from_secs(secs);
+        let mut cancel = UndeliveredCancel::default();
+        assert!(!cancel.give_up(true, false, start));
+        assert!(!cancel.give_up(true, false, later(29)));
+        // A reachable host resets the clock: cancel is retried there, not assumed.
+        assert!(!cancel.give_up(true, true, later(30)));
+        assert!(!cancel.give_up(true, false, later(31)));
+        assert!(!cancel.give_up(true, false, later(60)));
+        assert!(cancel.give_up(true, false, later(61)));
+        // No cancel owed, no give-up, however long the outage.
+        let mut idle = UndeliveredCancel::default();
+        assert!(!idle.give_up(false, false, start));
+        assert!(!idle.give_up(false, false, later(3600)));
+    }
+
+    #[test]
+    fn an_unreachable_cancel_ends_the_run_and_keeps_its_notes() {
+        let dir = std::env::temp_dir().join(format!(
+            "orx-supervise-unreachable-test-{}",
+            uuid::Uuid::new_v4()
+        ));
+        let store = Store::open_at(dir.clone()).unwrap();
+        let run = StoredRun {
+            id: "run-1".into(),
+            experiment_id: "experiment-1".into(),
+            project_id: "project-1".into(),
+            status: "running".into(),
+            backend_json: "{}".into(),
+            command: String::new(),
+            created_at: 1,
+            updated_at: 1,
+            ended_at: None,
+            exit_code: None,
+            commit_sha: None,
+            result_markdown: Some("Agent notes.".into()),
+            cancel_requested: false,
+            cancel_reason: None,
+            chat_session_id: None,
+        };
+        store.upsert_run(&run).unwrap();
+        assert!(store.request_cancel(&run.id, "test").unwrap());
+
+        assert!(
+            cancel_unreachable_run(&store, &run.id, "ssh timed out", "Stop it by hand.").unwrap()
+        );
+        let ended = store.get_run(&run.id).unwrap().unwrap();
+        assert_eq!(ended.status, "cancelled");
+        assert!(ended.ended_at.is_some());
+        let notes = ended.result_markdown.unwrap();
+        assert!(notes.starts_with("Agent notes.\n\n"), "{notes}");
+        assert!(notes.contains("(ssh timed out)"), "{notes}");
+        assert!(notes.ends_with("Stop it by hand."), "{notes}");
+
+        // A run that already ended is left as it is.
+        assert!(!cancel_unreachable_run(&store, &run.id, "again", "again").unwrap());
+        append_result_note(&store, &run.id, "Late note.");
+        assert!(store
+            .get_run(&run.id)
+            .unwrap()
+            .unwrap()
+            .result_markdown
+            .unwrap()
+            .ends_with("Stop it by hand.\n\nLate note."));
+        let _ = std::fs::remove_dir_all(dir);
     }
 
     #[test]

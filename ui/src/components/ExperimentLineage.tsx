@@ -18,6 +18,7 @@ const STATUS_WORD: Record<HistoryStatus, () => string> = {
   cancelled: m.status_cancelled,
   lost: m.status_lost,
   running: m.status_running,
+  unreachable: m.status_unreachable,
   none: m.history_status_not_run,
 };
 const STATUS_TONE: Record<HistoryStatus, string> = {
@@ -26,6 +27,7 @@ const STATUS_TONE: Record<HistoryStatus, string> = {
   cancelled: "var(--muted)",
   lost: "var(--muted)",
   running: "var(--accent-teal)",
+  unreachable: "var(--muted)",
   none: "var(--muted)",
 };
 // Only runtime theme variables: an @theme colour that no class uses is dropped from the build.
@@ -33,7 +35,7 @@ const INK = "var(--lineage)";
 const LINE_OPACITY = 0.48;
 const DOT_OPACITY = 1;
 
-/** Status as a shape, so colour is never the only signal: ● done, ◆ failed, ⊘ cancelled, ◐ running, ○ not run. */
+/** Status as a shape, so colour is never the only signal: ● done, ◆ failed, ⊘ cancelled, ◐ running or unreachable, ○ not run. */
 function StatusShape({ status, cx, cy, r, color, background = "var(--base)" }: {
   status: HistoryStatus;
   cx: number;
@@ -50,7 +52,7 @@ function StatusShape({ status, cx, cy, r, color, background = "var(--base)" }: {
     return <path d={`M${cx} ${cy - d}L${cx + d} ${cy}L${cx} ${cy + d}L${cx - d} ${cy}Z`} fill={color} />;
   }
   const ring = <circle cx={cx} cy={cy} r={inner} fill={background} stroke={color} strokeWidth={stroke} />;
-  if (status === "running")
+  if (status === "running" || status === "unreachable")
     return (
       <g>
         {ring}

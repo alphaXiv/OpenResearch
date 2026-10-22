@@ -90,7 +90,7 @@ export interface Experiment {
 }
 
 export type RunStatus = "starting" | "running" | "done" | "failed" | "cancelled" | "lost";
-export type RunDisplayStatus = RunStatus | "cancelling";
+export type RunDisplayStatus = RunStatus | "cancelling" | "unreachable";
 
 export interface Run {
   id: string;
@@ -108,9 +108,14 @@ export interface Run {
   cancelRequested: boolean;
 }
 
-export function runDisplayStatus(run: Pick<Run, "status" | "cancelRequested">): RunDisplayStatus {
+/** A live run its supervisor cannot observe shows as unreachable, not running. */
+export function runDisplayStatus(
+  run: Pick<Run, "status" | "cancelRequested"> & Partial<Pick<Run, "backend">>,
+): RunDisplayStatus {
   const live = run.status === "running" || run.status === "starting";
-  return live && run.cancelRequested ? "cancelling" : run.status;
+  if (live && run.cancelRequested) return "cancelling";
+  if (live && runMonitoringError({ status: run.status, backend: run.backend })) return "unreachable";
+  return run.status;
 }
 
 /** Why the supervisor can't currently observe a live run, if it can't. */

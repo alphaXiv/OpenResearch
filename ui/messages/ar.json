@@ -541,6 +541,7 @@
   "status_running": "قيد التشغيل",
   "status_starting": "جارٍ البدء",
   "status_cancelling": "جارٍ الإلغاء",
+  "status_unreachable": "يتعذر الوصول",
   "status_lost": "النتيجة غير متاحة",
   "status_cancelled": "ملغى",
   "status_editing": "قيد التعديل",

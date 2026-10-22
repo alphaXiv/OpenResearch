@@ -542,6 +542,7 @@
   "status_running": "En ejecución",
   "status_starting": "Iniciando",
   "status_cancelling": "Cancelando",
+  "status_unreachable": "Inaccesible",
   "status_lost": "Resultado no disponible",
   "status_cancelled": "Cancelado",
   "status_editing": "Editando",
