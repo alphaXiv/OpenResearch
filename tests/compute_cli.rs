@@ -3,6 +3,8 @@ use serde_json::json;
 use serde_json::Value;
 use std::path::PathBuf;
 use std::process::{Command, Output};
+#[cfg(unix)]
+use std::time::{Duration, Instant};
 
 struct Sandbox(PathBuf);
 impl Sandbox {
@@ -37,10 +39,296 @@ impl Sandbox {
         );
         serde_json::from_slice(&output.stdout).unwrap()
     }
+
+    fn native_run(&self) -> (rusqlite::Connection, PathBuf) {
+        self.json(&["projects", "--json"]);
+        let db = rusqlite::Connection::open(self.0.join("data/orx.db")).unwrap();
+        db.execute("INSERT INTO local_projects (id, name, slug, github_owner, github_repo, github_sync_enabled, baseline_branch, repo_path, created_at, updated_at) VALUES ('project','P','p','o','r',0,'main','.',0,0)", []).unwrap();
+        db.execute("INSERT INTO local_experiments (id, project_id, slug, branch_name, run_command, created_at, updated_at) VALUES ('exp','project','exp','main','true',0,0)", []).unwrap();
+        let dir = self.0.join("data/local-runs/run");
+        std::fs::create_dir_all(&dir).unwrap();
+        let backend = serde_json::json!({"kind":"local_job", "jobId":dir});
+        db.execute("INSERT INTO runs (id, experiment_id, project_id, status, backend_json, created_at, updated_at) VALUES ('run','exp','project','running',?1,0,0)", [backend.to_string()]).unwrap();
+        (db, dir)
+    }
 }
 impl Drop for Sandbox {
     fn drop(&mut self) {
         let _ = std::fs::remove_dir_all(&self.0);
+    }
+}
+
+#[test]
+fn native_monitoring_recovers_terminal_status_and_final_logs_without_up() {
+    for args in [vec!["runs", "project"], vec!["exp", "status", "exp"]] {
+        for (kind, code, cancel, expected) in [
+            ("local_job", "0", false, "done"),
+            ("local_job", "2", false, "failed"),
+            ("local_job", "143", true, "cancelled"),
+            ("tinker_job", "0", true, "done"),
+        ] {
+            let sandbox = Sandbox::new();
+            let (db, dir) = sandbox.native_run();
+            db.execute(
+                "UPDATE runs SET backend_json=?1, cancel_requested=?2 WHERE id='run'",
+                rusqlite::params![
+                    serde_json::json!({"kind":kind, "jobId":dir}).to_string(),
+                    cancel
+                ],
+            )
+            .unwrap();
+            std::fs::write(dir.join("exit_code"), code).unwrap();
+            std::fs::write(dir.join("log"), "started\nfinished").unwrap();
+            let mirrored = sandbox.0.join("data/run-logs/run.log");
+            std::fs::write(&mirrored, "started\n").unwrap();
+
+            let output = sandbox.run(&args);
+            assert!(
+                output.status.success(),
+                "{}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+            assert!(String::from_utf8_lossy(&output.stdout).contains(expected));
+            let (status, ended_at): (String, Option<i64>) = db
+                .query_row(
+                    "SELECT status, ended_at FROM runs WHERE id='run'",
+                    [],
+                    |r| Ok((r.get(0)?, r.get(1)?)),
+                )
+                .unwrap();
+            assert_eq!(status, expected);
+            assert!(ended_at.is_some());
+            assert_eq!(
+                std::fs::read_to_string(&mirrored).unwrap(),
+                "started\nfinished\n"
+            );
+        }
+    }
+}
+
+#[test]
+fn native_wait_recovers_orphaned_completed_runs() {
+    for args in [
+        vec!["exp", "wait", "exp", "--interval", "1", "--timeout", "5"],
+        vec![
+            "exp",
+            "wait",
+            "--project",
+            "project",
+            "--interval",
+            "1",
+            "--timeout",
+            "5",
+        ],
+    ] {
+        let sandbox = Sandbox::new();
+        let (db, dir) = sandbox.native_run();
+        std::fs::write(dir.join("exit_code"), "0").unwrap();
+        std::fs::write(dir.join("log"), "started\nfinished\n").unwrap();
+        let output = sandbox.run(&args);
+        assert!(
+            output.status.success(),
+            "{}: {}",
+            args.join(" "),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert!(String::from_utf8_lossy(&output.stdout).contains("done"));
+        let status: String = db
+            .query_row("SELECT status FROM runs WHERE id='run'", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(status, "done");
+        assert_eq!(
+            std::fs::read_to_string(sandbox.0.join("data/run-logs/run.log")).unwrap(),
+            "started\nfinished\n"
+        );
+    }
+}
+
+#[test]
+fn native_wait_keeps_short_deadlines_during_recovery() {
+    use std::io::{BufRead, Read};
+    use std::time::{Duration, Instant};
+
+    for target in [vec!["exp"], vec!["--project", "project"]] {
+        let sandbox = Sandbox::new();
+        let (db, dir) = sandbox.native_run();
+        std::fs::write(dir.join("exit_code"), "0").unwrap();
+        std::fs::write(dir.join("log"), "finished\n").unwrap();
+        let mut lock = fd_lock::RwLock::new(
+            std::fs::OpenOptions::new()
+                .create(true)
+                .truncate(false)
+                .write(true)
+                .open(sandbox.0.join("data/run-logs/run.supervisor.lock"))
+                .unwrap(),
+        );
+        let guard = lock.write().unwrap();
+        let started = Instant::now();
+        let mut child = sandbox
+            .command()
+            .args(["exp", "wait"])
+            .args(target)
+            .args(["--interval", "1", "--timeout", "2"])
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped())
+            .spawn()
+            .unwrap();
+        let mut stderr = std::io::BufReader::new(child.stderr.take().unwrap());
+        let mut line = String::new();
+        loop {
+            assert!(stderr.read_line(&mut line).unwrap() > 0, "{line}");
+            if line.contains("run  running") || line.contains("Watching") {
+                break;
+            }
+        }
+        // The CLI's store is open; reads still work, but a recovering supervisor cannot write.
+        db.execute_batch("BEGIN IMMEDIATE").unwrap();
+        drop(guard);
+        let output = child.wait_with_output().unwrap();
+        let elapsed = started.elapsed();
+        db.execute_batch("ROLLBACK").unwrap();
+        stderr.read_to_string(&mut line).unwrap();
+        assert!(
+            elapsed < Duration::from_secs(3),
+            "recovery extended the wait deadline"
+        );
+        assert!(!output.status.success(), "{line}");
+        assert!(line.contains("Timed out"), "{line}");
+
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while db
+            .query_row("SELECT status FROM runs WHERE id='run'", [], |r| {
+                r.get::<_, String>(0)
+            })
+            .unwrap()
+            != "done"
+        {
+            assert!(
+                Instant::now() < deadline,
+                "detached recovery did not finish"
+            );
+            std::thread::sleep(Duration::from_millis(100));
+        }
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn native_monitoring_reattaches_to_a_live_worker() {
+    struct WorkerGuard(std::process::Child);
+    impl Drop for WorkerGuard {
+        fn drop(&mut self) {
+            let _ = self.0.kill();
+            let _ = self.0.wait();
+        }
+    }
+
+    let sandbox = Sandbox::new();
+    let (db, dir) = sandbox.native_run();
+    let mut worker = WorkerGuard(
+        Command::new("sh")
+            .current_dir(&dir)
+            .arg("-c")
+            .arg("printf 'started\\n' > log; until test -e finish; do sleep .1; done; printf 'finished\\n' >> log; printf '0\\n' > exit_code")
+            .spawn()
+            .unwrap(),
+    );
+    std::fs::write(dir.join("pid"), worker.0.id().to_string()).unwrap();
+
+    let output = sandbox.run(&["runs", "project"]);
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(String::from_utf8_lossy(&output.stdout).contains("running"));
+
+    let lock_path = sandbox.0.join("data/run-logs/run.supervisor.lock");
+    let deadline = Instant::now() + Duration::from_secs(15);
+    loop {
+        if std::fs::OpenOptions::new()
+            .write(true)
+            .open(&lock_path)
+            .is_ok_and(|file| {
+                let mut lock = fd_lock::RwLock::new(file);
+                lock.try_write()
+                    .is_err_and(|e| e.kind() == std::io::ErrorKind::WouldBlock)
+            })
+        {
+            break;
+        }
+        assert!(Instant::now() < deadline, "supervisor did not reattach");
+        std::thread::sleep(Duration::from_millis(100));
+    }
+
+    std::fs::write(dir.join("finish"), "").unwrap();
+    worker.0.wait().unwrap();
+    let deadline = Instant::now() + Duration::from_secs(15);
+    while db
+        .query_row("SELECT status FROM runs WHERE id='run'", [], |r| {
+            r.get::<_, String>(0)
+        })
+        .unwrap()
+        != "done"
+    {
+        assert!(
+            Instant::now() < deadline,
+            "supervisor did not finalize the run"
+        );
+        std::thread::sleep(Duration::from_millis(100));
+    }
+    assert_eq!(
+        std::fs::read_to_string(sandbox.0.join("data/run-logs/run.log")).unwrap(),
+        "started\nfinished\n"
+    );
+}
+
+#[test]
+fn native_monitoring_leaves_terminal_unsubmitted_remote_and_supervised_runs_alone() {
+    let sandbox = Sandbox::new();
+    let (db, dir) = sandbox.native_run();
+    std::fs::write(dir.join("exit_code"), "0").unwrap();
+    let mut lock = fd_lock::RwLock::new(
+        std::fs::OpenOptions::new()
+            .create(true)
+            .truncate(false)
+            .write(true)
+            .open(sandbox.0.join("data/run-logs/run.supervisor.lock"))
+            .unwrap(),
+    );
+    let guard = lock.write().unwrap();
+    let output = sandbox.run(&["runs", "project"]);
+    assert!(output.status.success());
+    assert!(String::from_utf8_lossy(&output.stdout).contains("running"));
+    drop(guard);
+
+    for (status, backend) in [
+        (
+            "cancelled",
+            serde_json::json!({"kind":"local_job", "jobId":dir}),
+        ),
+        ("starting", serde_json::json!({"kind":"local_job"})),
+        (
+            "running",
+            serde_json::json!({"kind":"slurm_job", "namespace":"lab", "jobId":"42"}),
+        ),
+    ] {
+        db.execute(
+            "UPDATE runs SET status=?1, backend_json=?2 WHERE id='run'",
+            rusqlite::params![status, backend.to_string()],
+        )
+        .unwrap();
+        let output = sandbox.run(&["runs", "project"]);
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert!(String::from_utf8_lossy(&output.stdout).contains(status));
+        let persisted: String = db
+            .query_row("SELECT status FROM runs WHERE id='run'", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(persisted, status);
     }
 }
 

@@ -51,7 +51,10 @@ impl LocalPlane {
             .map(|e| (e.id.clone(), e.display_name().to_string()))
             .collect();
 
-        let runs = store.list_runs_by_project(project_id)?;
+        let mut runs = Vec::new();
+        for run in store.list_runs_by_project(project_id)? {
+            runs.push(crate::commands::supervise::refresh_local_run(run, true).await?);
+        }
         let runs: Vec<Run> = runs.iter().map(Run::from).collect();
         Ok(RunListing { runs, titles })
     }
@@ -166,6 +169,7 @@ impl LocalPlane {
 
         match store.latest_run_for_experiment(&exp.id)? {
             Some(r) => {
+                let r = crate::commands::supervise::refresh_local_run(r, true).await?;
                 let run = Run::from(&r);
                 let commit = run
                     .commit_sha
@@ -397,6 +401,8 @@ impl LocalPlane {
                     }
                 }
                 Some(r) => {
+                    let r = crate::commands::supervise::refresh_local_run(r, false).await?;
+                    sleep_until_or_timeout(Duration::ZERO, deadline).await?;
                     if last_status.as_deref() != Some(r.status.as_str()) {
                         eprintln!("{}  {}", r.id, r.status);
                         last_status = Some(r.status.clone());
@@ -464,7 +470,9 @@ impl LocalPlane {
                 Err(error) => return Err(error),
             };
             let mut completed: Vec<(String, Option<String>)> = Vec::new();
-            for r in &current {
+            for r in current {
+                let r = crate::commands::supervise::refresh_local_run(r, false).await?;
+                sleep_until_or_timeout(Duration::ZERO, deadline).await?;
                 if !crate::local::is_terminal(&r.status) {
                     continue;
                 }
@@ -473,7 +481,7 @@ impl LocalPlane {
                     Some(prev) => format!("{} {} -> {}", r.id, prev, r.status),
                     None => format!("{} {} (new)", r.id, r.status),
                 };
-                completed.push((line, Run::from(r).failure_detail()));
+                completed.push((line, Run::from(&r).failure_detail()));
             }
             if !completed.is_empty() {
                 for (line, detail) in &completed {
