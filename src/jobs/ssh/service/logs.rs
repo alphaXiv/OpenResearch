@@ -14,6 +14,8 @@ struct Cursor {
     identity: String,
     boundary: String,
     bytes: u64,
+    #[serde(default)]
+    replay_until: Option<u64>,
 }
 
 struct Paths {
@@ -120,6 +122,7 @@ fn persist(
             identity: String::new(),
             boundary: String::new(),
             bytes: 0,
+            replay_until: chunk["size"].as_u64(),
         }
     } else {
         previous
@@ -155,7 +158,11 @@ fn persist(
         .to_owned();
     let eof = chunk["eof"] == true;
     let replacing = reset || pending.is_some();
-    if replacing && !eof {
+    if replacing && cursor.replay_until.is_none() {
+        cursor.replay_until = chunk["size"].as_u64();
+    }
+    let publish = eof || cursor.replay_until.is_some_and(|end| cursor.bytes >= end);
+    if replacing && !publish {
         save(&paths.pending(), &cursor)?;
     } else {
         if replacing {
@@ -165,11 +172,12 @@ fn persist(
                 Err(error) => return Err(error.into()),
             }
         }
+        cursor.replay_until = None;
         save(&paths.cursor(), &cursor)?;
     }
     for obsolete in [
         pending.as_ref(),
-        if eof { published.as_ref() } else { None },
+        if publish { published.as_ref() } else { None },
     ]
     .into_iter()
     .flatten()
@@ -297,6 +305,31 @@ mod tests {
         assert_eq!(replaced.offset, 0);
         assert_eq!(replaced.bytes, b"a larger replacement log");
         assert_ne!(replaced.generation, first.generation);
+    }
+
+    #[test]
+    fn replacement_publishes_at_its_initial_boundary_while_remote_log_keeps_growing() {
+        let temp = crate::local::git::TemporaryDirectory::new("orx-growing-log").unwrap();
+        let paths = Paths {
+            base: temp.path().join("run.log"),
+        };
+        std::fs::write(&paths.base, b"old").unwrap();
+        let mut first = chunk(0, b"abcd", true, false);
+        first["size"] = json!(8);
+        persist(&paths, None, None, first).unwrap();
+        assert_eq!(read_at(&paths, 0, 100, None).unwrap().bytes, b"old");
+        let pending = load(&paths.pending()).unwrap();
+        let mut next = chunk(4, b"efgh", false, false);
+        next["size"] = json!(1000);
+        persist(&paths, None, pending, next).unwrap();
+        assert_eq!(read_at(&paths, 0, 100, None).unwrap().bytes, b"abcdefgh");
+        assert!(!paths.pending().exists());
+        let published = load(&paths.cursor()).unwrap();
+        persist(&paths, published, None, chunk(8, b"ijkl", false, false)).unwrap();
+        assert_eq!(
+            read_at(&paths, 0, 100, None).unwrap().bytes,
+            b"abcdefghijkl"
+        );
     }
 
     #[test]

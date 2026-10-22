@@ -189,6 +189,7 @@ esac
 
     for case in [
         "healthy",
+        "backoff",
         "rejection",
         "exit_zero",
         "stop_failure",
@@ -207,9 +208,36 @@ esac
             }
         }
         builder.env("PATH", format!("{}:/usr/bin:/bin", bin.display()));
-        let data = sandbox.0.join(case);
+        let data = sandbox
+            .0
+            .join(if case == "backoff" { "healthy" } else { case });
+        if case == "backoff" {
+            let root = std::fs::read_dir(&data)
+                .unwrap()
+                .map(|entry| entry.unwrap().path())
+                .find(|path| {
+                    path.file_name()
+                        .unwrap()
+                        .to_string_lossy()
+                        .starts_with("ssh-service-")
+                })
+                .unwrap();
+            let db = rusqlite::Connection::open(root.join("state.sqlite3")).unwrap();
+            db.execute(
+                "UPDATE connections SET failures=6, next_at=?1",
+                [i64::try_from(
+                    std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .unwrap()
+                        .as_millis(),
+                )
+                .unwrap()
+                    + 300_000],
+            )
+            .unwrap();
+        }
         builder.env("ORX_DATA_DIR", &data);
-        builder.env("CASE", case);
+        builder.env("CASE", if case == "backoff" { "healthy" } else { case });
         builder.args(["compute", "connect", "ssh", "--host", "lab"]);
         let pair = native_pty_system().openpty(PtySize::default()).unwrap();
         let mut child = pair.slave.spawn_command(builder).unwrap();
@@ -225,7 +253,7 @@ esac
         let socket = PathBuf::from(std::fs::read_to_string(sandbox.0.join("socket-path")).unwrap());
         let output = String::from_utf8_lossy(&output);
         match case {
-            "healthy" => {
+            "healthy" | "backoff" => {
                 assert!(status.success(), "{output}");
                 assert!(!calls.contains("-O stop"));
                 assert!(socket.exists());

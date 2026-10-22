@@ -1,5 +1,6 @@
 import base64
 import json
+import importlib.util
 import os
 from pathlib import Path
 import struct
@@ -7,8 +8,25 @@ import subprocess
 import sys
 import tempfile
 import unittest
+from unittest.mock import patch
 
 HELPER = Path(__file__).resolve().parents[1] / "src/jobs/ssh/helper.py"
+
+
+class DeadlineTest(unittest.TestCase):
+    def test_setup_and_upload_are_not_limited_by_monitoring_deadline(self):
+        spec = importlib.util.spec_from_file_location("ssh_helper", HELPER)
+        helper = importlib.util.module_from_spec(spec)
+        with patch.object(sys, "dont_write_bytecode", True):
+            spec.loader.exec_module(helper)
+        with patch.object(helper, "execute", return_value={}) as execute:
+            helper.dispatch({"op": "exec", "command": "setup"})
+            self.assertIsNone(execute.call_args.args[2])
+            helper.dispatch({"op": "exec", "command": "status", "lane": "status"})
+            self.assertEqual(execute.call_args.args[2], 120)
+            token = helper.dispatch({"op": "upload_start"})["token"]
+            helper.dispatch({"op": "upload_commit", "command": "extract", "token": token})
+            self.assertEqual(len(execute.call_args.args), 2)
 
 
 class HelperTest(unittest.TestCase):

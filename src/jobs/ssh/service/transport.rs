@@ -79,7 +79,9 @@ impl Session {
         request["id"] = json!(id);
         let (tx, rx) = oneshot::channel();
         self.pending.lock().await.insert(id, tx);
-        let result = tokio::time::timeout(Duration::from_secs(130), async {
+        let long_running =
+            lane == 3 && matches!(request["op"].as_str(), Some("exec" | "upload_commit"));
+        let response = async {
             self.writer
                 .send(request)
                 .await
@@ -87,8 +89,12 @@ impl Session {
             rx.await.map_err(|_| {
                 anyhow!("SSH helper response lost; command outcome may be uncertain")
             })?
-        })
-        .await;
+        };
+        let result = if long_running {
+            Ok(response.await)
+        } else {
+            tokio::time::timeout(Duration::from_secs(130), response).await
+        };
         self.pending.lock().await.remove(&id);
         match result {
             Ok(result) => result,

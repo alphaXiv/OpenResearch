@@ -932,11 +932,11 @@ async fn tail_logs_ssh(
                 if let Some(errors) = &errors {
                     errors.send_replace(None);
                 }
-                if draining {
-                    if value["eof"] == true {
-                        return true;
-                    }
+                if value["eof"] != true {
                     continue;
+                }
+                if draining {
+                    return true;
                 }
             }
             Err(error) => {

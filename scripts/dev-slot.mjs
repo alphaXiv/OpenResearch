@@ -707,19 +707,19 @@ function printStatus(info) {
   console.log(`  State:   ${state ? slotPaths.statePath : 'legacy/unmanaged'}`)
 }
 
-async function stopSshServices(slotPaths) {
+export async function stopSshServices(slotPaths) {
   if (!existsSync(slotPaths.dataDir)) return
   for (const name of readdirSync(slotPaths.dataDir)) {
     if (!/^ssh-service-[a-f0-9]{64}$/.test(name)) continue
     const endpoint = readJson(path.join(slotPaths.dataDir, name, 'endpoint.json'))
     if (!endpoint) continue
-    await new Promise((resolve, reject) => {
+    const stopped = await new Promise((resolve, reject) => {
       const socket = net.createConnection({ host: '127.0.0.1', port: endpoint.port })
       let received = Buffer.alloc(0)
       socket.setTimeout(15_000, () => socket.destroy(new Error('SSH service shutdown timed out')))
-      socket.once('error', (error) => error.code === 'ECONNREFUSED' ? resolve() : reject(error))
+      socket.once('error', (error) => error.code === 'ECONNREFUSED' ? resolve(true) : reject(error))
       socket.once('connect', () => {
-        const body = Buffer.from(JSON.stringify({ ...endpoint, port: undefined, target: null, operation: { op: 'shutdown' } }))
+        const body = Buffer.from(JSON.stringify({ ...endpoint, port: undefined, target: null, operation: { op: 'shutdown_if_idle' } }))
         const header = Buffer.alloc(4)
         header.writeUInt32BE(body.length)
         socket.write(Buffer.concat([header, body]))
@@ -734,12 +734,12 @@ async function stopSshServices(slotPaths) {
           const response = JSON.parse(received.subarray(4, 4 + length).toString())
           socket.destroy()
           if (response.error) reject(new Error(response.error))
-          else resolve()
+          else resolve(response.value?.busy !== true)
         } catch (error) { socket.destroy(error) }
       })
       socket.once('end', () => { if (received.length === 0) reject(new Error('SSH service closed without acknowledging shutdown')) })
     })
-    await waitFor('SSH service to stop', 10_000, () => listenerPids(endpoint.port).length === 0)
+    if (stopped) await waitFor('SSH service to stop', 10_000, () => listenerPids(endpoint.port).length === 0)
   }
 }
 

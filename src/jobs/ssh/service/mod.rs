@@ -355,6 +355,7 @@ impl Broker {
         &self,
         target: &SshTarget,
         interactive: Option<&str>,
+        explicit: bool,
     ) -> Result<Arc<transport::Session>> {
         let host = self.host(target).await?;
         let mut host = host.lock().await;
@@ -362,7 +363,7 @@ impl Broker {
             return Ok(session.clone());
         }
         let next = state::retry_at(&host.resolved.key)?;
-        if next > crate::store::now_ms() {
+        if !explicit && next > crate::store::now_ms() {
             return Err(anyhow!("SSH connection unavailable; automatic retries are backing off. Use Connect if authentication is required."));
         }
         for run in crate::store::Store::open()?.list_active_runs()? {
@@ -501,7 +502,7 @@ impl Broker {
             let task_id = id.clone();
             let task = tokio::spawn(async move {
                 let result = broker
-                    .session(&target, Some(&task_id))
+                    .session(&target, Some(&task_id), true)
                     .await
                     .map(|_| ())
                     .map_err(|error| error.to_string());
@@ -525,7 +526,7 @@ impl Broker {
         if op == "attach" && target.extra_opts.is_empty() {
             super::prepared::prepare(&target, true).await?;
         }
-        let session = self.session(&target, None).await?;
+        let session = self.session(&target, None, op == "attach").await?;
         if op == "attach" {
             return Ok(json!({}));
         }
@@ -656,7 +657,8 @@ pub(crate) async fn run() -> Result<()> {
             if request.token != broker.endpoint.token || request.version != VERSION {
                 return;
             }
-            let shutting_down = request.operation["op"] == "shutdown";
+            let idle_only = request.operation["op"] == "shutdown_if_idle";
+            let shutting_down = idle_only || request.operation["op"] == "shutdown";
             let result = if shutting_down {
                 if limits.available_permits() == 127
                     && broker
@@ -689,6 +691,8 @@ pub(crate) async fn run() -> Result<()> {
                         }
                         None => Ok(json!({})),
                     }
+                } else if idle_only {
+                    Ok(json!({"busy":true}))
                 } else {
                     Err(anyhow!(
                         "SSH monitoring is busy; finish active work before moving storage."
@@ -697,7 +701,7 @@ pub(crate) async fn run() -> Result<()> {
             } else {
                 broker.dispatch(request.target, request.operation).await
             };
-            let stop = shutting_down && result.is_ok();
+            let stop = shutting_down && result.as_ref().is_ok_and(|value| value["busy"] != true);
             let response = match result {
                 Ok(value) => Response {
                     value: Some(value),

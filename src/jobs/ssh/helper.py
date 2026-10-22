@@ -49,13 +49,13 @@ def encode(data):
     return base64.b64encode(data).decode("ascii")
 
 
-def execute(command, source=None):
+def execute(command, source=None, timeout=None):
     with tempfile.TemporaryFile() as stdout, tempfile.TemporaryFile() as stderr:
         child = subprocess.Popen(command, shell=True, executable="/bin/sh",
                                  stdin=source or subprocess.DEVNULL,
                                  stdout=stdout, stderr=stderr, start_new_session=True)
         try:
-            child.wait(timeout=120)
+            child.wait(timeout=timeout)
         except subprocess.TimeoutExpired:
             os.killpg(child.pid, signal.SIGKILL)
             child.wait()
@@ -91,7 +91,7 @@ def log_chunk(request):
         file.seek(max(0, end - 64))
         boundary = hashlib.sha256(file.read(min(64, end))).hexdigest()
         return {"identity": identity, "reset": reset, "offset": offset,
-                "data": encode(data), "boundary": boundary, "eof": end >= stat.st_size}
+                "data": encode(data), "boundary": boundary, "size": stat.st_size, "eof": end >= stat.st_size}
 
 
 def slurm_status(jobs):
@@ -150,7 +150,8 @@ def dispatch(request):
         with tempfile.TemporaryFile() as source:
             source.write(data)
             source.seek(0)
-            return execute(request["command"], source)
+            return execute(request["command"], source,
+                           120 if request.get("lane") in ("control", "status") else None)
     if op == "upload_start":
         with upload_lock:
             for expired in [token for token, (_, touched) in uploads.items()
@@ -214,12 +215,13 @@ def main():
         lanes[lane].submit(handle, request, lane)
 
 
-try:
-    main()
-except EOFError:
-    pass
-except Exception as error:
-    print("OpenResearch SSH helper: " + str(error), file=sys.stderr, flush=True)
-finally:
-    # A lost controller must not keep the helper alive behind blocked commands.
-    os._exit(0)
+if __name__ == "__main__":
+    try:
+        main()
+    except EOFError:
+        pass
+    except Exception as error:
+        print("OpenResearch SSH helper: " + str(error), file=sys.stderr, flush=True)
+    finally:
+        # A lost controller must not keep the helper alive behind blocked commands.
+        os._exit(0)
