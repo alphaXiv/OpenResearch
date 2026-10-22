@@ -1166,10 +1166,10 @@ fn openalex_discovery_url(
     Ok(url)
 }
 
-/// An OpenAlex GET, authenticated with `OPENALEX_API_KEY` when set.
-fn openalex_request(url: impl reqwest::IntoUrl) -> reqwest::RequestBuilder {
+/// An OpenAlex GET, authenticated with the API key when one is configured.
+fn openalex_request(url: impl reqwest::IntoUrl, api_key: Option<&str>) -> reqwest::RequestBuilder {
     let request = http().get(url);
-    match crate::config::openalex_api_key() {
+    match api_key {
         Some(key) => request.bearer_auth(key),
         None => request,
     }
@@ -1199,9 +1199,10 @@ pub async fn discover_openalex(
 ) -> Result<Vec<LitHit>> {
     let base = crate::config::openalex_api_url();
     let mailto = crate::config::openalex_mailto();
+    let api_key = crate::config::openalex_api_key();
     let url = openalex_discovery_url(&base, query, mailto.as_deref(), options)?;
     let res = public_get(
-        || openalex_request(url.clone()),
+        || openalex_request(url.clone(), api_key.as_deref()),
         "OpenAlex",
         |e| anyhow!("Could not reach OpenAlex at {}: {}", base, e),
     )
@@ -1247,12 +1248,13 @@ fn openalex_selector(input: &str) -> String {
 /// 404 (unknown id) — a normal "not found" answer.
 pub async fn fetch_openalex_work(id_or_doi: &str) -> Result<Option<OpenAlexWork>> {
     let base = crate::config::openalex_api_url();
+    let api_key = crate::config::openalex_api_key();
     let mut url = format!("{}/works/{}", base, openalex_selector(id_or_doi));
     if let Some(mailto) = crate::config::openalex_mailto() {
         url.push_str(&format!("?mailto={}", urlencoding::encode(&mailto)));
     }
     let res = public_get(
-        || openalex_request(&url),
+        || openalex_request(&url, api_key.as_deref()),
         "OpenAlex",
         |e| anyhow!("Could not reach OpenAlex at {}: {}", base, e),
     )
@@ -1690,10 +1692,10 @@ fn parse_pubmed_articles(xml: &str) -> Result<Vec<PubmedArticle>> {
 #[cfg(test)]
 mod tests {
     use super::{
-        openalex_discovery_url, openalex_selector, paper_discovery_url, reconstruct_abstract,
-        rerank_openalex_works, CreateSandboxBody, ListCatalog, ListCpuCatalog, LitHit,
-        OpenAlexDiscoveryOptions, OpenAlexWork, PaperDiscoveryOptions, PaperHit, SandboxEnvelope,
-        SandboxTarget, BIORXIV_SOURCE_ID,
+        openalex_discovery_url, openalex_request, openalex_selector, paper_discovery_url,
+        reconstruct_abstract, rerank_openalex_works, CreateSandboxBody, ListCatalog,
+        ListCpuCatalog, LitHit, OpenAlexDiscoveryOptions, OpenAlexWork, PaperDiscoveryOptions,
+        PaperHit, SandboxEnvelope, SandboxTarget, BIORXIV_SOURCE_ID,
     };
     use super::{
         parse_pubmed_articles, public_get, pubmed_discovery_url, pubmed_fetch_url,
@@ -1961,6 +1963,20 @@ mod tests {
         let url = openalex_discovery_url("https://api.openalex.org", "fuzzing", None, options)
             .expect("valid OpenAlex URL");
         assert!(url.query_pairs().all(|(key, _)| key != "mailto"));
+    }
+
+    #[test]
+    fn openalex_request_sends_the_api_key_only_when_set() {
+        let url = "https://api.openalex.org/works";
+        let keyed = openalex_request(url, Some("k123")).build().unwrap();
+        assert_eq!(
+            keyed.headers()[reqwest::header::AUTHORIZATION],
+            "Bearer k123"
+        );
+        let keyless = openalex_request(url, None).build().unwrap();
+        assert!(!keyless
+            .headers()
+            .contains_key(reqwest::header::AUTHORIZATION));
     }
 
     #[test]
