@@ -83,6 +83,19 @@ pub async fn submit_local_hf_with_source(
     // Tokens travel as job secrets only — the command line stays tokenless.
     let mut secrets = HashMap::new();
     secrets.insert("HF_TOKEN".to_string(), token.clone());
+    // Only Trackio's variables, not every saved one; the URL may embed a write token.
+    use crate::local::trackio;
+    let mut environment: HashMap<String, String> = crate::config::run_context_env(&run_id)
+        .into_iter()
+        .collect();
+    if let Some(space) = crate::config::synced_env_var(trackio::SPACE_ID) {
+        environment.insert(trackio::SPACE_ID.to_string(), space);
+    }
+    for key in [trackio::SERVER_URL, trackio::WRITE_TOKEN] {
+        if let Some(value) = crate::config::synced_env_var(key) {
+            secrets.insert(key.to_string(), value);
+        }
+    }
     let mut labels = HashMap::new();
     labels.insert("or_run".to_string(), run_id.clone());
     labels.insert("or_experiment".to_string(), exp.id.clone());
@@ -95,7 +108,7 @@ pub async fn submit_local_hf_with_source(
             command: vec!["bash".to_string(), "-c".to_string(), script],
             docker_image: image.clone(),
             flavor: flavor.clone(),
-            environment: HashMap::from([(crate::config::RUN_ID_ENV.to_string(), run_id.clone())]),
+            environment,
             secrets,
             timeout_seconds,
             labels,

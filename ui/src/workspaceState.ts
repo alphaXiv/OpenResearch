@@ -1,6 +1,6 @@
 export type Pane =
   | { kind: "home"; view: "experiments" | "files" | "artifacts" | "terminal" }
-  | { kind: "experiment"; experimentId: string; view: "overview" | "terminal"; runId?: string }
+  | { kind: "experiment"; experimentId: string; view: "overview" | "terminal" | "trackio"; runId?: string }
   | { kind: "file"; path: string; source?: "repo" | "artifacts" | "abs"; sessionId?: string; ref?: string; line?: number; branchLabel?: string }
   | { kind: "code"; experimentId: string; branch: string; view: "files" | "changes" }
   | { kind: "plan"; sessionId: string; promptId: string }
@@ -59,7 +59,7 @@ export function parsePane(value: unknown): Pane | undefined {
         return { kind: "home", view: value.view };
       break;
     case "experiment":
-      if (only("kind", "experimentId", "view", "runId") && nonempty(value.experimentId) && (value.view === "overview" || value.view === "terminal") && optionalString(value.runId))
+      if (only("kind", "experimentId", "view", "runId") && nonempty(value.experimentId) && (value.view === "overview" || value.view === "terminal" || value.view === "trackio") && optionalString(value.runId))
         return { kind: "experiment", experimentId: value.experimentId, view: value.view, ...(nonempty(value.runId) ? { runId: value.runId } : {}) };
       break;
     case "file":

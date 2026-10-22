@@ -77,7 +77,7 @@ pub fn find_opencode() -> Result<PathBuf> {
 }
 
 /// Ask the OS for a free loopback port (bind :0, read it back, release).
-fn free_port() -> Result<u16> {
+pub(crate) fn free_port() -> Result<u16> {
     let listener = std::net::TcpListener::bind(("127.0.0.1", 0))
         .map_err(|e| anyhow!("Could not pick a free port: {}", e))?;
     Ok(listener.local_addr()?.port())

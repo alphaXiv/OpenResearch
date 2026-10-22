@@ -144,6 +144,7 @@ pub async fn submit_local_k8s_with_source(
             env,
             timeout_seconds,
             labels,
+            pod_env: crate::config::run_context_env(&run_id),
             source_archive: source.path.clone(),
         },
     )

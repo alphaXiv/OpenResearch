@@ -1,5 +1,5 @@
 import { m } from "../paraglide/messages.js";
-import { ChartLine, ChevronDown, CircleStop } from "lucide-react";
+import { ChartLine, ChevronDown, CircleStop, ExternalLink, ScrollText } from "lucide-react";
 import { useQuery } from "@tanstack/react-query";
 import { useEffect, useRef, useState } from "react";
 import {
@@ -18,9 +18,9 @@ import { StatusBadge } from "./StatusBadge";
 import type { TabOpenIntent } from "../tabPreview";
 import { Button, ButtonLink, MenuItem } from "./ui";
 import { buildHistoryNodes, historyBackendLabel, historyJobId } from "./experimentLineageModel";
-import { getTrackioSettingsQuery } from "../queries/settings";
+import { getTrackioRunsQuery } from "../queries/settings";
 
-export type ExperimentView = "overview" | "terminal";
+export type ExperimentView = "overview" | "terminal" | "trackio";
 
 /** An experiment's detail view, rendered as end-pane tab content. Mount it
  *  keyed by `${experiment.id}:${view}` so per-view state resets on switch. */
@@ -65,6 +65,7 @@ export function DetailDrawer({
         project={project}
         runs={expRuns}
         onOpenLogs={(runId, intent) => onOpenView("terminal", runId, intent)}
+        onOpenTrackio={(runId, intent) => onOpenView("trackio", runId, intent)}
         onOpenCode={(intent) => onOpenCode("files", intent)}
         onOpenDiff={(intent) => onOpenCode("changes", intent)}
      />
@@ -75,27 +76,33 @@ export function DetailDrawer({
     <TerminalView
       experiment={experiment}
       expRuns={expRuns}
+      view={view}
       selectedRunId={selectedRunId}
       onSelectRun={onSelectRun}
+      onOpenView={onOpenView}
    />
   );
 }
 
 /**
- * A run's terminal output filling the whole pane. The bar above carries the
- * stop button, the run's status and a history switcher — mirror of
- * openresearch.sh's ExperimentFullView TerminalView.
+ * A run's terminal output, or its Trackio charts, filling the whole pane. The
+ * bar above carries the stop button, the run's status and a history switcher —
+ * mirror of openresearch.sh's ExperimentFullView TerminalView.
  */
 function TerminalView({
   experiment,
   expRuns,
+  view,
   selectedRunId,
   onSelectRun,
+  onOpenView,
 }: {
   experiment: Experiment;
   expRuns: Run[];
+  view: ExperimentView;
   selectedRunId: string | null;
   onSelectRun: (id: string | null) => void;
+  onOpenView: (view: ExperimentView, runId: string | undefined, intent: TabOpenIntent) => void;
 }) {
   const [error, setError] = useState<string | null>(null);
   const [pendingRunId, setPendingRunId] = useState<string | null>(null);
@@ -106,8 +113,15 @@ function TerminalView({
     ? expRuns.find((run) => run.id === selectedRunId) ?? null
     : expRuns[0] ?? null;
   const live = selectedRun?.status === "running" || selectedRun?.status === "starting";
-  const trackio = useQuery(getTrackioSettingsQuery()).data;
-  const trackioUrl = selectedRun ? trackioRunUrl(trackio, selectedRun) : null;
+  const trackio = useQuery({
+    ...getTrackioRunsQuery(experiment.projectId),
+    refetchInterval: live ? 15_000 : false,
+  }).data;
+  const trackioUrl = selectedRun ? trackioRunUrl(trackio, selectedRun.id) : null;
+  const trackioEmbedUrl = view === "trackio" && selectedRun && trackioUrl
+    ? trackioRunUrl(trackio, selectedRun.id, { theme: document.documentElement.dataset.theme ?? "light" })
+    : null;
+  const showTrackio = trackioEmbedUrl !== null;
   const cancelling = Boolean(
     selectedRun && live && (selectedRun.cancelRequested || pendingRunId === selectedRun.id),
   );
@@ -152,19 +166,30 @@ function TerminalView({
             {error}
           </span>
         )}
-        {trackioUrl && (
-          <ButtonLink
-            size="small"
-            variant="ghost"
-            title={m.a11y_open_in_trackio()}
-            href={trackioUrl}
-            target="_blank"
-            rel="noopener noreferrer"
-          >
+        {trackioUrl && (showTrackio ? (
+          <>
+            <ButtonLink
+              size="small"
+              variant="ghost"
+              title={m.a11y_open_in_trackio()}
+              aria-label={m.a11y_open_in_trackio()}
+              href={trackioUrl}
+              target="_blank"
+              rel="noopener noreferrer"
+            >
+              <ExternalLink size={13} />
+            </ButtonLink>
+            <Button size="small" variant="ghost" onClick={() => onOpenView("terminal", selectedRun?.id, "preview")}>
+              <ScrollText size={13} />
+              {m.tree_view_logs()}
+            </Button>
+          </>
+        ) : (
+          <Button size="small" variant="ghost" title={m.a11y_trackio_charts()} onClick={() => onOpenView("trackio", selectedRun?.id, "preview")}>
             <ChartLine size={13} />
-            Trackio
-          </ButtonLink>
-        )}
+            {m.trackio_visualize()}
+          </Button>
+        ))}
         {live && (
           <Button size="small" variant="ghost" disabled={cancelling} onClick={() => void stop()}>
             <CircleStop size={13} />
@@ -224,8 +249,20 @@ function TerminalView({
         </div>
       )}
 
-      <div className="term-fill flex-1 min-h-0 bg-terminal pt-1 pe-0 pb-1 ps-1.5">
-        {selectedRun ? (
+      <div className={showTrackio ? "term-fill flex-1 min-h-0 bg-background" : "term-fill flex-1 min-h-0 bg-terminal pt-1 pe-0 pb-1 ps-1.5"}>
+        {showTrackio ? (
+          <iframe
+            key={trackioEmbedUrl}
+            className="trackio-embed block w-full h-full border-0 bg-background"
+            title={m.a11y_trackio_charts()}
+            src={trackioEmbedUrl}
+            referrerPolicy="no-referrer"
+            // Cross-origin, so allow-same-origin keeps the dashboard's own origin, never orx's.
+            sandbox="allow-scripts allow-same-origin allow-popups allow-forms allow-downloads"
+          />
+        ) : view === "trackio" ? (
+          <div className="term-empty h-full flex items-center justify-center p-6 text-center text-sm text-muted">{m.detail_drawer_trackio_no_data()}</div>
+        ) : selectedRun ? (
           // Key by run id so switching runs in the history dropdown remounts
           // the terminal with the selected run's output.
           <LogTerminal key={selectedRun.id} runId={selectedRun.id} />

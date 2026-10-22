@@ -243,6 +243,8 @@ pub struct ManifestSpec {
     /// Injected as `activeDeadlineSeconds` when the manifest doesn't set one.
     pub timeout_seconds: u64,
     pub labels: HashMap<String, String>,
+    /// Set on the primary Job's containers, not in the shared `orx-env` Secret.
+    pub pod_env: Vec<(String, String)>,
     pub source_archive: PathBuf,
 }
 
@@ -305,6 +307,7 @@ pub async fn run_manifest(
         &spec.script,
         spec.timeout_seconds,
         &spec.labels,
+        &spec.pod_env,
     )?;
 
     // Create one resource at a time so a failure can roll back exactly what
@@ -471,7 +474,7 @@ fn resource_handle(doc: &Value) -> String {
 /// primary Job's containers must reference `$ORX_SCRIPT`.
 ///
 /// Injections: run labels on every doc (and the primary Job's pod template);
-/// `ORX_SCRIPT` and `ORX_RUN_ID` env + `orx-env` envFrom on the primary Job's containers;
+/// `ORX_SCRIPT` and the run context env + `orx-env` envFrom on the primary Job's containers;
 /// `activeDeadlineSeconds` / `ttlSecondsAfterFinished` / `backoffLimit`
 /// defaults on the primary Job when absent.
 fn prepare_docs(
@@ -480,6 +483,7 @@ fn prepare_docs(
     script: &str,
     timeout_seconds: u64,
     labels: &HashMap<String, String>,
+    pod_env: &[(String, String)],
 ) -> Result<(Vec<Value>, String)> {
     // Flatten kubectl's shapes: a stream of objects, any of which may itself
     // be a v1 List.
@@ -623,12 +627,14 @@ fn prepare_docs(
             .unwrap_or_default();
         let mut env: Vec<Value> = env
             .into_iter()
-            .filter(|e| e["name"] != "ORX_SCRIPT" && e["name"] != crate::config::RUN_ID_ENV)
+            .filter(|e| {
+                e["name"] != "ORX_SCRIPT" && !pod_env.iter().any(|(key, _)| e["name"] == *key)
+            })
             .collect();
         env.push(json!({ "name": "ORX_SCRIPT", "value": script }));
         // Per-pod, not in the shared `orx-env` Secret a pending pod may read after a later launch.
-        if let Some(run_id) = labels.get("or_run") {
-            env.push(json!({ "name": crate::config::RUN_ID_ENV, "value": run_id }));
+        for (name, value) in pod_env {
+            env.push(json!({ "name": name, "value": value }));
         }
         // Default the container's Python to unbuffered so the job's prints
         // stream live (kubectl logs -f can't flush what the app never wrote).
@@ -1008,8 +1014,12 @@ mod tests {
         HashMap::from([("or_run".to_string(), "r1".to_string())])
     }
 
+    fn pod_env() -> Vec<(String, String)> {
+        vec![(crate::config::RUN_ID_ENV.to_string(), "r1".to_string())]
+    }
+
     fn prepare(v: Value) -> Result<(Vec<Value>, String)> {
-        prepare_docs(vec![v], "default", "echo hi", 14400, &labels())
+        prepare_docs(vec![v], "default", "echo hi", 14400, &labels(), &pod_env())
     }
 
     #[test]
@@ -1066,6 +1076,7 @@ mod tests {
             "echo hi",
             14400,
             &labels(),
+            &pod_env(),
         )
         .unwrap();
         assert_eq!(docs.len(), 2);

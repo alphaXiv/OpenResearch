@@ -578,13 +578,12 @@ impl LocalPlane {
     }
 }
 
-/// hf runs get no saved variables, so only other remote backends can be misdirected.
 fn warn_unreachable_trackio(backend: &str) {
-    let Some(url) = crate::local::trackio::server_url() else {
+    let crate::local::trackio::Target::Server(url) = crate::local::trackio::target() else {
         return;
     };
     let remote = crate::compute::backend(backend).is_ok_and(|b| b.capabilities().remote);
-    if remote && backend != "hf" && crate::local::trackio::is_local_only(&url) {
+    if remote && crate::local::trackio::is_local_only(&url) {
         eprintln!(
             "warning: {} is {url}, which a {backend} run may not reach, so its Trackio metrics may not arrive. Save an address the remote machine can reach.",
             crate::local::trackio::SERVER_URL

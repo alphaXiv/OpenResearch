@@ -126,6 +126,7 @@ pub async fn run(args: UpArgs) -> Result<()> {
         stopping: stopping.clone(),
         dashboard_lock: Arc::new(std::sync::Mutex::new(Some(dashboard_lock))),
         restart: Arc::new(tokio::sync::Notify::new()),
+        trackio: Arc::default(),
     };
     // Plan-mode turns hand this port to the `orx mcp-gate` permission bridge.
     state.chat.set_up_port(actual_port);
@@ -398,6 +399,7 @@ struct AppState {
     dashboard_lock: Arc<std::sync::Mutex<Option<DashboardLock>>>,
     /// Fired by `POST /api/update/restart`; the serve loop relaunches on it.
     restart: Arc<tokio::sync::Notify>,
+    trackio: Arc<crate::local::trackio::LocalServer>,
 }
 
 async fn project_publication_lock(
@@ -702,7 +704,7 @@ fn router(state: AppState, remote_auth: Option<RemoteAuth>) -> Router {
             get(ray_settings).post(set_ray_settings),
         )
         .route("/api/settings/ray/preflight", post(ray_preflight))
-        .route("/api/settings/trackio", get(trackio_settings))
+        .route("/api/trackio/projects/{id}/runs", get(trackio_project_runs))
         .route("/api/settings/trackio/preflight", post(trackio_preflight))
         .route("/api/settings/compute", get(compute_settings))
         .route("/api/settings/compute/default", post(set_compute_default))

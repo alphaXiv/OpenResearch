@@ -370,11 +370,49 @@ pub fn list_synced_env() -> Vec<(String, String)> {
 /// Names the run inside its job, e.g. as a metric tracker's run name.
 pub const RUN_ID_ENV: &str = "ORX_RUN_ID";
 
-/// A run's environment: the synced env file plus its own run id.
+/// A run's environment: the synced env file plus what the run knows about itself.
 pub fn run_env(run_id: &str) -> std::collections::HashMap<String, String> {
     let mut env: std::collections::HashMap<String, String> =
         list_synced_env().into_iter().collect();
-    env.insert(RUN_ID_ENV.to_string(), run_id.to_string());
+    env.extend(run_context_env(run_id));
+    env
+}
+
+/// The run's id, experiment, parent, commit and Trackio project, read from its reserved row.
+pub fn run_context_env(run_id: &str) -> Vec<(String, String)> {
+    let mut env = vec![(RUN_ID_ENV.to_string(), run_id.to_string())];
+    let mut context = || -> Result<()> {
+        let store = crate::store::Store::open()?;
+        let Some(run) = store.get_run(run_id)? else {
+            return Ok(());
+        };
+        if let Some(experiment) = store.get_local_experiment(&run.experiment_id)? {
+            env.push(("ORX_EXPERIMENT".to_string(), experiment.slug.clone()));
+            if let Some(title) = experiment.title.filter(|title| !title.trim().is_empty()) {
+                env.push(("ORX_EXPERIMENT_TITLE".to_string(), title));
+            }
+            let parent = match &experiment.parent_experiment_id {
+                Some(id) => store.get_local_experiment(id)?,
+                None => None,
+            };
+            if let Some(parent) = parent {
+                env.push(("ORX_PARENT_EXPERIMENT".to_string(), parent.slug));
+            }
+        }
+        if let Some(commit) = run.commit_sha.filter(|sha| !sha.is_empty()) {
+            env.push(("ORX_COMMIT".to_string(), commit));
+        }
+        if let Some(project) = store.get_local_project(&run.project_id)? {
+            env.push((
+                crate::local::trackio::PROJECT.to_string(),
+                crate::local::trackio::project_for(&project.slug),
+            ));
+        }
+        Ok(())
+    };
+    if let Err(error) = context() {
+        eprintln!("warning: could not read run {run_id}'s experiment for its environment: {error}");
+    }
     env
 }
 

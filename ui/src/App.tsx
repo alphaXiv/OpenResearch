@@ -69,6 +69,7 @@ import { m } from "./paraglide/messages.js";
 import { useLocale } from "./locale";
 import { autoDir, ltr } from "./i18n";
 import {
+  ChartLine,
   ChartSpline,
   ArrowDownWideNarrow,
   Check,
@@ -1636,6 +1637,8 @@ export default function App({ runtime, projectId, pane }: { runtime: RuntimeInfo
           icon={
             tab.view === "overview" ? (
               <ChartSpline size={12} className="shrink-0" />
+            ) : tab.view === "trackio" ? (
+              <ChartLine size={12} className="shrink-0" />
             ) : (
               <Terminal size={12} className="shrink-0" />
             )

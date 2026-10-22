@@ -14,7 +14,7 @@ import {
 } from "@xyflow/react";
 import { Archive, ChartLine, Ellipsis, FolderTree, Terminal } from "lucide-react";
 import { useQuery } from "@tanstack/react-query";
-import { getTrackioSettingsQuery } from "../queries/settings";
+import { getTrackioRunsQuery } from "../queries/settings";
 import { createPortal } from "react-dom";
 import { GitHubMark } from "./BackendLogos";
 import { memo, useMemo, useRef, useState } from "react";
@@ -228,8 +228,8 @@ const ExpNode = memo(function ExpNode({ data }: NodeProps<ExpFlowNode>) {
   const live = status === "running" || status === "starting" || status === "cancelling";
   const kind = isBaseline ? m.tree_baseline() : live ? m.tree_running() : m.tree_experiment();
   const squares = runs.slice(-MAX_SQUARES);
-  const trackio = useQuery(getTrackioSettingsQuery()).data;
-  const trackioUrl = latestRun ? trackioRunUrl(trackio, latestRun) : null;
+  const trackio = useQuery({ ...getTrackioRunsQuery(exp.projectId), refetchInterval: live ? 15_000 : false }).data;
+  const trackioUrl = latestRun ? trackioRunUrl(trackio, latestRun.id) : null;
 
   // `data` is rebuilt on every experiments/runs change (a superset of the
   // re-layouts that matter), so it doubles as the hover card's re-measure

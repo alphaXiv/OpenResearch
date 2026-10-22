@@ -93,6 +93,7 @@ async fn submit_controller_run(
             .to_string_lossy()
             .into_owned(),
     );
+    env.extend(crate::local::trackio::local_run_env());
     if let Ok(hf_token) = crate::jobs::huggingface::resolve_token() {
         env.entry("HF_TOKEN".to_string()).or_insert(hf_token);
     }
