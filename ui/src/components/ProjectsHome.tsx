@@ -1,7 +1,7 @@
 import { m } from "../paraglide/messages.js";
 import { useEffect, useRef, useState } from "react";
 import { FolderOpen, Plus } from "lucide-react";
-import { type Project } from "../api";
+import { type AgentSelection, type Project } from "../api";
 
 import { NewProjectForm } from "./NewProjectForm";
 import { Button } from "./ui";
@@ -9,9 +9,11 @@ import { Button } from "./ui";
 /** The projects home once every project is gone; onboarding must not replay here. */
 export function ProjectsEmptyState({
   remote = false,
+  preferredAgent,
   onCreated,
 }: {
   remote?: boolean;
+  preferredAgent: AgentSelection | null;
   onCreated: (project: Project, githubPublicationError: string | null) => void;
 }) {
   const [dialogOpen, setDialogOpen] = useState(false);
@@ -27,6 +29,7 @@ export function ProjectsEmptyState({
       {dialogOpen && (
         <NewProjectDialog
           remote={remote}
+          preferredAgent={preferredAgent}
           onClose={() => setDialogOpen(false)}
           onCreated={(project, publicationError) => {
             setDialogOpen(false);
@@ -42,10 +45,12 @@ export function NewProjectDialog({
   onClose,
   onCreated,
   remote = false,
+  preferredAgent,
 }: {
   onClose: () => void;
   onCreated: (project: Project, githubPublicationError: string | null) => void;
   remote?: boolean;
+  preferredAgent: AgentSelection | null;
 }) {
   const dialogRef = useRef<HTMLDivElement>(null);
   const onCloseRef = useRef(onClose);
@@ -119,7 +124,7 @@ export function NewProjectDialog({
         tabIndex={-1}
       >
         <h2 id="new-project-dialog-title">{m.projects_home_new_project()}</h2>
-        <NewProjectForm onCancel={onClose} onCreated={onCreated} remote={remote} />
+        <NewProjectForm onCancel={onClose} onCreated={onCreated} remote={remote} preferredAgent={preferredAgent} />
       </div>
     </div>
   );
