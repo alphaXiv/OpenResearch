@@ -2154,7 +2154,7 @@ impl Store {
         Ok(rows.collect::<std::result::Result<Vec<_>, _>>()?)
     }
 
-    /// Hold through ownership lookup, native purge and local row deletion, across backends.
+    /// Hold through ownership lookup, native purge and local row deletion, across dashboard processes.
     pub fn lock_native_deletion(&self) -> Result<std::fs::File> {
         let path = self
             .conn

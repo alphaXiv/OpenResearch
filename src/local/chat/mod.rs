@@ -6636,11 +6636,12 @@ impl ChatHost {
             .unwrap()
             .retain(|(queued_session_id, _), _| queued_session_id != session_id);
         let store = Store::open()?;
-        let _native_deletion = store.lock_native_deletion()?;
+        let native_deletion = store.lock_native_deletion()?;
         let session = store.get_chat_session(session_id)?;
         let worktree_owner = store.chat_worktree_owner(session_id)?;
         Self::delete_native_sessions(&[session_id.to_string()]).await?;
         store.delete_chat_session(session_id)?;
+        drop(native_deletion);
         self.claude.forget_session(session_id).await;
         self.emit("chat.session.deleted", json!({ "sessionId": session_id }));
         if let Some(session) = session {
