@@ -517,7 +517,8 @@ function TreeRows({
  * on disk. Tree on the left; the selected entry renders inline on the right
  * (markdown as documents, images and PDFs directly, code as highlighted source). */
 // Module-level so `useQueries` keeps a stable combined result between renders.
-const loadedEntries = (results: { data?: ProjectArtifacts }[]) => results.map((r) => r.data?.entries);
+const loadedEntries = (results: { data?: ProjectArtifacts; error: unknown }[]) =>
+  results.map((r) => (r.error ? undefined : r.data?.entries));
 
 export function ArtifactsTab({
   project,
@@ -541,8 +542,8 @@ export function ArtifactsTab({
   // Partial folders the user opened; each is listed on its own with a fresh cap.
   const [loadDirs, setLoadDirs] = useState<string[]>([]);
   const loadedDirs = useQueries({
-    // Opened partial folders sit outside the SSE change fingerprint, so poll
-    // the ones still on screen; a failed (deleted or renamed) folder stops.
+    // Opened partial folders sit outside the SSE change fingerprint, so poll the
+    // ones on screen. A failed one stops and closes; opening it again retries.
     queries: loadDirs.map((dir) => ({
       ...getArtifactsQuery(project.id, dir),
       refetchInterval: (query: { state: { error: unknown } }) =>
