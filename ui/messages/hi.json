@@ -16,6 +16,8 @@
   "settings_cpu_cores": "CPU कोर: {count}",
   "settings_gpu_count": "GPU × {count}",
   "$schema": "https://inlang.com/schema/inlang-message-format",
+  "projects_delete_artifacts_kept": "जब तक आप नीचे दिया गया विकल्प नहीं चुनते, आर्टिफ़ैक्ट सुरक्षित रखे जाते हैं। खाली आर्टिफ़ैक्ट फ़ोल्डर अपने-आप हटा दिए जाते हैं।",
+  "projects_delete_artifacts_remove": "इस प्रोजेक्ट की आर्टिफ़ैक्ट फ़ाइलें स्थायी रूप से हटाएँ",
   "app_close_panel": "पैनल बंद करें",
   "app_current_task": "मौजूदा टास्क",
   "app_entire_project": "पूरा प्रोजेक्ट",

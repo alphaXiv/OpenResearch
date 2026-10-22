@@ -1495,13 +1495,20 @@ fn lost_worktree_head(repo: &Path, dir: &Path) -> Option<String> {
 pub fn remove_session_worktree(project: &crate::local::model::LocalProject, session_id: &str) {
     let repo_path = Path::new(&project.repo_path);
     let dir = existing_session_worktree_path(project, session_id);
-    let _ = std::fs::remove_dir_all(&dir);
+    remove_session_worktree_at(repo_path, &dir);
+}
+
+fn remove_session_worktree_at(repo_path: &Path, dir: &Path) {
+    let _ = std::fs::remove_dir_all(dir);
     // Once the dir is gone, `worktree remove` drops only this registration (unlike prune).
     if is_repository(repo_path) {
         let _ = git(
             Some(repo_path),
             &["worktree", "remove", "--force", &dir.to_string_lossy()],
         );
+    }
+    if let Some(parent) = dir.parent() {
+        let _ = std::fs::remove_dir(parent);
     }
 }
 
@@ -2441,6 +2448,26 @@ pub fn file_bytes_at_capped(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn removing_worktrees_prunes_only_the_empty_project_parent() {
+        let repo = temp_repo();
+        let parent = repo.with_extension("worktrees");
+        let first = parent.join("first");
+        let second = parent.join("second");
+        ensure_worktree_from(&repo, first.clone(), "main", true).unwrap();
+        ensure_worktree_from(&repo, second.clone(), "main", true).unwrap();
+
+        remove_session_worktree_at(&repo, &first);
+        assert!(!first.exists());
+        assert!(second.is_dir());
+        assert!(parent.is_dir());
+        remove_session_worktree_at(&repo, &second);
+        assert!(!parent.exists());
+        assert!(repo.join(".git").is_dir());
+        remove_session_worktree_at(&repo, &second);
+        std::fs::remove_dir_all(repo).unwrap();
+    }
 
     #[test]
     fn github_git_uses_only_the_command_scoped_gh_credential_helper() {
