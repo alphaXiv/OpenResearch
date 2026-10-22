@@ -47,6 +47,7 @@ The submit-time contract is:
   also supplies defaults for `activeDeadlineSeconds` and `backoffLimit: 0`
   when absent. Finished Jobs stay until the supervisor records their outcome,
   then get `ttlSecondsAfterFinished: 86400` unless the manifest sets one.
+  A Job that disappears without an orx cancel marks the run `lost`.
 - Auxiliary resources may accompany the Job and are deleted on cancellation.
   They must reference the `orx-env` Secret themselves when needed.
 - The run log follows the primary Job's sole pod.
