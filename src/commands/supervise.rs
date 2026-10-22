@@ -405,6 +405,22 @@ async fn run_k8s(
         let status = k8s_run_status(&store, &run_id, cancel_sent, stage);
 
         if is_terminal_stage(stage) {
+            if matches!(stage, "COMPLETED" | "ERROR") {
+                if let Err(err) =
+                    k8s::expire_finished_job(context.as_deref(), &namespace, &job_name).await
+                {
+                    // Without a TTL the finished Job is never collected, so retry
+                    // unless RBAC forbids the patch outright.
+                    if !err.to_string().contains("Forbidden") {
+                        eprintln!(
+                            "supervise {run_id}: could not set the Job's TTL (will retry): {err}"
+                        );
+                        tokio::time::sleep(POLL_INTERVAL).await;
+                        continue;
+                    }
+                    eprintln!("supervise {run_id}: not allowed to set the Job's TTL: {err}");
+                }
+            }
             let _ = done_tx.send(true);
             if tokio::time::timeout(Duration::from_secs(20), &mut log_task)
                 .await
@@ -423,13 +439,6 @@ async fn run_k8s(
             if let Some(reason) = reason.filter(|_| applied) {
                 if let Err(err) = store.set_result_markdown(&run_id, &reason) {
                     eprintln!("supervise {run_id}: could not record failure reason: {err}");
-                }
-            }
-            if matches!(stage, "COMPLETED" | "ERROR") {
-                if let Err(err) =
-                    k8s::expire_finished_job(context.as_deref(), &namespace, &job_name).await
-                {
-                    eprintln!("supervise {run_id}: could not set the Job's TTL: {err}");
                 }
             }
             eprintln!("supervise {run_id}: finished ({status})");
