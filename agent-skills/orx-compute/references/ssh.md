@@ -33,7 +33,7 @@ orx exp run <expId> --backend ssh --host lab --no-container
 ```
 
 Machine-local SSH settings can save a container name or ID for each host, and
-an absolute remote storage root (`--remote-root /data/<user>/orx`) used instead
+an absolute remote storage root (`--remote-root /data/alice/orx`) used instead
 of `~/.orx` for that host's runs and cached source archives. Each run keeps the
 root it was launched with.
 A saved default SSH host lets launches omit `--host`.
