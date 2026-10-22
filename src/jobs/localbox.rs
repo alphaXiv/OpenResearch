@@ -274,6 +274,45 @@ pub fn inspect_job(dir: &Path) -> JobState {
     }
 }
 
+/// Called only while submission is excluded and a supervisor lock is checked separately.
+pub fn orphaned_job_is_running(dir: &Path) -> Result<bool> {
+    if exit_code_state(dir).is_some() {
+        return Ok(false);
+    }
+    match std::fs::read_to_string(dir.join("pid")) {
+        Ok(_) => return Ok(inspect_job(dir).stage == "RUNNING"),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => return Err(error.into()),
+    }
+    #[cfg(not(windows))]
+    {
+        let script = match dir.join("run.sh").canonicalize() {
+            Ok(script) => script,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(false),
+            Err(error) => return Err(error.into()),
+        };
+        let output = std::process::Command::new("ps")
+            .args(["-A", "-ww", "-o", "stat=,command="])
+            .output()?;
+        if !output.status.success() {
+            return Err(anyhow!("Could not inspect orphaned local processes"));
+        }
+        Ok(String::from_utf8_lossy(&output.stdout).lines().any(|line| {
+            line.trim()
+                .split_once(char::is_whitespace)
+                .is_some_and(|(stat, command)| {
+                    !stat.starts_with('Z')
+                        && command
+                            .strip_suffix(script.to_string_lossy().as_ref())
+                            .is_some_and(|prefix| prefix.ends_with(' '))
+                })
+        }))
+    }
+    #[cfg(windows)]
+    // The native launcher records its PID before resuming the suspended process.
+    Ok(false)
+}
+
 /// One poll of the log past `skip` lines (the supervisor loops every ~2s).
 /// A missing log file just means the payload hasn't printed yet.
 pub fn stream_logs(
@@ -454,6 +493,27 @@ fn parse_nvidia_smi_csv(out: &str) -> Vec<Gpu> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(unix)]
+    #[test]
+    fn orphaned_job_probe_distinguishes_an_abandoned_launch_from_a_missing_pid() {
+        let dir = std::env::temp_dir().join(format!("orx orphan probe-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let script = dir.join("run.sh");
+        std::fs::write(&script, "read -r value\n").unwrap();
+        assert!(!orphaned_job_is_running(&dir).unwrap());
+        let mut child = std::process::Command::new(crate::local::bash::program())
+            .arg(script.canonicalize().unwrap())
+            .stdin(std::process::Stdio::piped())
+            .spawn()
+            .unwrap();
+        let running = orphaned_job_is_running(&dir).unwrap();
+        drop(child.stdin.take());
+        child.wait().unwrap();
+        assert!(running);
+        assert!(!orphaned_job_is_running(&dir).unwrap());
+        std::fs::remove_dir_all(dir).unwrap();
+    }
 
     #[test]
     fn nvidia_smi_csv_two_gpus() {
