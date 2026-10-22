@@ -277,12 +277,6 @@ fn run_status_for_stage(store: &Store, run_id: &str, cancel_sent: bool, stage: &
     }
 }
 
-/// Retry a failed TTL patch for about a minute before recording the outcome
-/// anyway; a Job already collected needs no TTL.
-fn retry_ttl_patch(err: &str, attempts: u32) -> bool {
-    attempts < 12 && !err.contains("NotFound")
-}
-
 /// A Job orx did not cancel can vanish only through TTL cleanup or an
 /// external delete, so its outcome is unknown rather than cancelled.
 fn k8s_run_status(store: &Store, run_id: &str, cancel_sent: bool, stage: &str) -> RunStatus {
@@ -397,7 +391,6 @@ async fn run_k8s(
 
     let mut last_status = status_of(&stored)?;
     let mut cancel_sent = false;
-    let mut ttl_attempts = 0;
 
     loop {
         let job = match k8s::inspect_job(context.as_deref(), &namespace, &job_name).await {
@@ -412,21 +405,6 @@ async fn run_k8s(
         let status = k8s_run_status(&store, &run_id, cancel_sent, stage);
 
         if is_terminal_stage(stage) {
-            if matches!(stage, "COMPLETED" | "ERROR") {
-                if let Err(err) =
-                    k8s::expire_finished_job(context.as_deref(), &namespace, &job_name).await
-                {
-                    ttl_attempts += 1;
-                    if retry_ttl_patch(&err.to_string(), ttl_attempts) {
-                        eprintln!(
-                            "supervise {run_id}: could not set the Job's TTL (will retry): {err}"
-                        );
-                        tokio::time::sleep(POLL_INTERVAL).await;
-                        continue;
-                    }
-                    eprintln!("supervise {run_id}: could not set the Job's TTL: {err}");
-                }
-            }
             let _ = done_tx.send(true);
             if tokio::time::timeout(Duration::from_secs(20), &mut log_task)
                 .await
@@ -445,6 +423,13 @@ async fn run_k8s(
             if let Some(reason) = reason.filter(|_| applied) {
                 if let Err(err) = store.set_result_markdown(&run_id, &reason) {
                     eprintln!("supervise {run_id}: could not record failure reason: {err}");
+                }
+            }
+            if matches!(stage, "COMPLETED" | "ERROR") {
+                if let Err(err) =
+                    k8s::expire_finished_job(context.as_deref(), &namespace, &job_name).await
+                {
+                    eprintln!("supervise {run_id}: could not shorten the Job's TTL: {err}");
                 }
             }
             eprintln!("supervise {run_id}: finished ({status})");
@@ -1686,14 +1671,6 @@ async fn cancel_ray(address: &str, submission_id: &str, run_id: &str, cancel_sen
 mod tests {
     use super::*;
     use crate::store::StoredRun;
-
-    #[test]
-    fn ttl_patch_retries_are_bounded_and_skip_collected_jobs() {
-        let gone = r#"Error from server (NotFound): jobs.batch "x" not found"#;
-        assert!(retry_ttl_patch("connection refused", 1));
-        assert!(!retry_ttl_patch("connection refused", 12));
-        assert!(!retry_ttl_patch(gone, 1));
-    }
 
     #[test]
     fn recovered_cancel_intent_only_overrides_failed_terminal_state() {
