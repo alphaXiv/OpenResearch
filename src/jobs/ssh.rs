@@ -241,6 +241,53 @@ fn ssh_opts(target: &SshTarget, batch: bool) -> Vec<String> {
     ssh_options(target, batch, multiplexing_opts(target), None)
 }
 
+/// Batch options that ride a live master the user's own ssh_config already
+/// authenticated (e.g. a Duo login), falling back to the orx-managed socket.
+async fn batch_opts(target: &SshTarget) -> Vec<String> {
+    #[cfg(unix)]
+    if let Some(path) = user_master(target).await {
+        let multiplexing = vec![
+            "-o".into(),
+            "ControlMaster=no".into(),
+            "-o".into(),
+            format!("ControlPath={}", path.display()),
+        ];
+        return ssh_options(target, true, multiplexing, None);
+    }
+    ssh_opts(target, true)
+}
+
+#[cfg(unix)]
+async fn user_master(target: &SshTarget) -> Option<PathBuf> {
+    if !target.extra_opts.is_empty() {
+        return None;
+    }
+    let output = Command::new("ssh")
+        .env("ORX_SSH_PROBE", "1")
+        .args(["-G", "--", &target.dest])
+        .stdin(Stdio::null())
+        .kill_on_drop(true)
+        .output();
+    let output = tokio::time::timeout(Duration::from_secs(10), output)
+        .await
+        .ok()?
+        .ok()?;
+    let path = configured_control_path(&String::from_utf8_lossy(&output.stdout))?;
+    master_accepts_sessions(target, &path, &[])
+        .await
+        .ok()?
+        .then_some(path)
+}
+
+#[cfg(unix)]
+fn configured_control_path(config: &str) -> Option<PathBuf> {
+    config
+        .lines()
+        .find_map(|line| line.strip_prefix("controlpath "))
+        .filter(|path| *path != "none")
+        .map(PathBuf::from)
+}
+
 #[cfg(unix)]
 fn ssh_opts_prepared(
     target: &SshTarget,
@@ -561,7 +608,7 @@ async fn ssh_run_bytes(
     }
     let mut cmd = Command::new("ssh");
     cmd.env("ORX_SSH_PROBE", "1");
-    cmd.args(ssh_opts(target, true))
+    cmd.args(batch_opts(target).await)
         .arg("--")
         .arg(&target.dest)
         .arg(remote_cmd)
@@ -619,7 +666,7 @@ async fn ssh_run_file(
     }
     let mut child = Command::new("ssh")
         .env("ORX_SSH_PROBE", "1")
-        .args(ssh_opts(target, true))
+        .args(batch_opts(target).await)
         .arg("--")
         .arg(&target.dest)
         .arg(remote_cmd)
@@ -1563,6 +1610,17 @@ mod tests {
         };
 
         assert_eq!(option(true), option(false));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn configured_control_path_reads_the_user_socket() {
+        assert_eq!(
+            configured_control_path("user hpc\ncontrolpath /home/me/.ssh/cm-abc\nport 22\n"),
+            Some(PathBuf::from("/home/me/.ssh/cm-abc"))
+        );
+        assert_eq!(configured_control_path("controlpath none\n"), None);
+        assert_eq!(configured_control_path("user hpc\n"), None);
     }
 
     #[test]
