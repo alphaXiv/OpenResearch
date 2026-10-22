@@ -113,6 +113,10 @@ pub fn run_job(spec: &LocalJobSpec) -> Result<PathBuf> {
     windows::spawn(&mut cmd, &dir).map_err(|e| anyhow!("Could not launch the local run: {}", e))?;
     #[cfg(not(windows))]
     {
+        // Descendants retain this identity after the launcher exits.
+        let token = uuid::Uuid::new_v4().to_string();
+        std::fs::write(dir.join("process_token"), &token)?;
+        cmd.env("ORX_LOCAL_RUN_TOKEN", token);
         let mut child = cmd
             .spawn()
             .map_err(|e| anyhow!("Could not launch the local run: {}", e))?;
@@ -160,12 +164,17 @@ fn run_alive_via(ps: &str, dir: &Path, pid: &str) -> bool {
         return false;
     }
     match std::fs::read_to_string(dir.join("pid_script")) {
-        Ok(script) => command
-            .strip_suffix(&script)
-            .is_some_and(|prefix| prefix.ends_with(' ')),
+        Ok(script) => command_runs_script(command, &script),
         // Runs launched before pid_script existed still use their original PID contract.
         Err(error) => error.kind() == std::io::ErrorKind::NotFound,
     }
+}
+
+#[cfg(not(windows))]
+fn command_runs_script(command: &str, script: &str) -> bool {
+    command
+        .strip_suffix(script)
+        .is_some_and(|prefix| prefix.ends_with(' '))
 }
 
 /// EPERM still means the process exists, just not one we may signal.
@@ -294,7 +303,8 @@ pub fn stream_logs(
     Ok(seen)
 }
 
-/// TERM the process group (pid == pgid), else the pid alone; on Windows, the process tree.
+/// TERM the process group, escalate to KILL after five seconds, and wait for it to stop.
+/// On Windows, terminate the process tree.
 pub fn cancel_job(dir: &Path) -> Result<()> {
     let pid = std::fs::read_to_string(dir.join("pid"))
         .map_err(|e| anyhow!("Could not read the run's pid: {}", e))?;
@@ -305,10 +315,11 @@ pub fn cancel_job(dir: &Path) -> Result<()> {
     }
     #[cfg(not(windows))]
     {
-        if !run_alive(dir, &pid) {
+        if !group_alive(dir, &pid)? && (dir.join("process_token").exists() || !run_alive(dir, &pid))
+        {
             return Ok(());
         }
-        terminate_group(&pid)
+        terminate_group(dir, &pid)
     }
 }
 
@@ -333,7 +344,7 @@ fn terminate_tree(pid: &str) -> Result<()> {
 }
 
 #[cfg(not(windows))]
-fn terminate_group(pid: &str) -> Result<()> {
+fn terminate_group(dir: &Path, pid: &str) -> Result<()> {
     let group = std::process::Command::new("kill")
         .args(["-TERM", "--", &format!("-{pid}")])
         .stdout(std::process::Stdio::null())
@@ -353,7 +364,171 @@ fn terminate_group(pid: &str) -> Result<()> {
             return Err(anyhow!("Could not terminate local process group {pid}"));
         }
     }
-    Ok(())
+    let target = if group { format!("-{pid}") } else { pid.into() };
+    let alive = || {
+        if group {
+            group_alive(dir, pid)
+        } else {
+            Ok(run_alive(dir, pid))
+        }
+    };
+    for attempts in [50, 10] {
+        for _ in 0..attempts {
+            if !alive()? {
+                return Ok(());
+            }
+            std::thread::sleep(std::time::Duration::from_millis(100));
+        }
+        if !alive()? {
+            return Ok(());
+        }
+        if attempts == 50 {
+            let status = std::process::Command::new("kill")
+                .args(["-KILL", "--", &target])
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null())
+                .status()?;
+            if !status.success() && alive()? {
+                return Err(anyhow!("Could not kill local process group {pid}"));
+            }
+        }
+    }
+    Err(anyhow!("Local process group {pid} is still alive"))
+}
+
+#[cfg(not(windows))]
+fn group_alive(dir: &Path, pid: &str) -> Result<bool> {
+    if !pid.parse::<u32>().is_ok_and(|pid| pid > 0) {
+        return Err(anyhow!("Invalid local process group {pid}"));
+    }
+    let token = match std::fs::read_to_string(dir.join("process_token")) {
+        Ok(token) => Some(format!("ORX_LOCAL_RUN_TOKEN={token}")),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
+        Err(error) => return Err(error.into()),
+    };
+    let script = std::fs::read_to_string(dir.join("pid_script")).ok();
+    #[cfg(target_os = "linux")]
+    let run_dir = crate::paths::canonicalize(dir)?;
+    let mut alive = false;
+    let mut owned = false;
+    #[cfg(target_os = "linux")]
+    'members: for entry in std::fs::read_dir("/proc")? {
+        let entry = entry?;
+        let path = entry.path();
+        let Ok(stat) = std::fs::read_to_string(path.join("stat")) else {
+            continue;
+        };
+        let Some((_, fields)) = stat.rsplit_once(") ") else {
+            continue;
+        };
+        let mut fields = fields.split_whitespace();
+        let state = fields.next();
+        fields.next();
+        if fields.next() != Some(pid) || matches!(state, Some("Z" | "X")) {
+            continue;
+        }
+        let identity = path.join(if token.is_some() {
+            "environ"
+        } else {
+            "cmdline"
+        });
+        let command = match std::fs::read(identity) {
+            Ok(command) => command,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(error) => {
+                for _ in 0..50 {
+                    let stat = match std::fs::read_to_string(path.join("stat")) {
+                        Ok(stat) => stat,
+                        Err(err) if err.kind() == std::io::ErrorKind::NotFound => continue 'members,
+                        Err(_) => return Err(error.into()),
+                    };
+                    let Some((_, fields)) = stat.rsplit_once(") ") else {
+                        return Err(error.into());
+                    };
+                    let mut fields = fields.split_whitespace();
+                    if matches!(fields.next(), Some("Z" | "X")) {
+                        continue 'members;
+                    }
+                    if fields
+                        .nth(5)
+                        .and_then(|flags| flags.parse::<u64>().ok())
+                        .is_some_and(|flags| flags & 4 != 0)
+                    {
+                        std::thread::sleep(std::time::Duration::from_millis(10));
+                        continue;
+                    }
+                    return Err(error.into());
+                }
+                return Err(error.into());
+            }
+        };
+        owned |= token.as_ref().is_some_and(|token| {
+            command
+                .split(|b| *b == 0)
+                .any(|arg| arg == token.as_bytes())
+        }) || (token.is_none()
+            // Legacy snapshots retain their private cwd even after the launcher exits.
+            && (std::fs::read_link(path.join("cwd")).is_ok_and(|cwd| cwd.starts_with(&run_dir))
+                || script.as_ref().is_some_and(|script| {
+                    command.split(|b| *b == 0).any(|arg| arg == script.as_bytes())
+                })));
+        alive = true;
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        let output = std::process::Command::new("ps")
+            .args([
+                if token.is_some() { "-wwE" } else { "-ww" },
+                "-e",
+                "-o",
+                "pid=,pgid=,stat=,command=",
+            ])
+            .output()?;
+        if !output.status.success() {
+            return Err(anyhow!("Could not inspect local process group {pid}"));
+        }
+        for line in String::from_utf8_lossy(&output.stdout).lines() {
+            let mut fields = line.split_whitespace();
+            fields.next();
+            if fields.next() != Some(pid)
+                || fields
+                    .next()
+                    .is_none_or(|stat| stat.starts_with(['Z', 'X']))
+            {
+                continue;
+            }
+            alive = true;
+            owned |= fields.any(|field| token.as_deref() == Some(field))
+                || (token.is_none()
+                    && script
+                        .as_ref()
+                        .is_some_and(|script| command_runs_script(line.trim_end(), script)));
+        }
+    }
+    if alive && !owned {
+        if let Some(script) = &script {
+            let output = std::process::Command::new("ps")
+                .args(["-ww", "-o", "stat=,command=", "-p", pid])
+                .output()?;
+            let text = String::from_utf8_lossy(&output.stdout);
+            if output.status.success() {
+                if let Some((state, command)) = text.trim().split_once(char::is_whitespace) {
+                    if !state.starts_with(['Z', 'X'])
+                        && !command.trim().is_empty()
+                        && !command.ends_with("<defunct>")
+                        && !command_runs_script(command.trim(), script)
+                    {
+                        return Ok(false);
+                    }
+                }
+            }
+        }
+        // shortcut: unidentifiable legacy orphans need verified manual cleanup; new runs inherit tokens.
+        return Err(anyhow!(
+            "Could not verify ownership of local process group {pid}"
+        ));
+    }
+    Ok(alive)
 }
 
 /// What "this machine" is, for the Compute settings card: the hardware a
@@ -504,6 +679,25 @@ mod tests {
 
     #[cfg(not(windows))]
     #[test]
+    fn script_identity_preserves_spaces_but_rejects_longer_paths() {
+        let script = "/tmp/run directory/run.sh";
+        assert!(command_runs_script(&format!("bash {script}"), script));
+        assert!(!command_runs_script(
+            &format!("bash {script}.backup"),
+            script
+        ));
+        assert!(!command_runs_script(
+            &format!("bash /prefix{script}"),
+            script
+        ));
+        assert!(!command_runs_script(
+            &format!("bash {script} other"),
+            script
+        ));
+    }
+
+    #[cfg(not(windows))]
+    #[test]
     fn run_alive_without_ps_probes_the_pid() {
         let dir = std::env::temp_dir();
         let unrunnable_ps = "/nonexistent/orx-test-ps";
@@ -526,7 +720,10 @@ mod tests {
     #[test]
     fn local_job_lifecycle() {
         // The only test that touches ORX_DATA_DIR, so the global env is safe.
-        let base = std::env::temp_dir().join(format!("orx-localbox-test-{}", uuid::Uuid::new_v4()));
+        let base = std::env::temp_dir().join(format!(
+            "orx-localbox-test-{} with spaces",
+            uuid::Uuid::new_v4()
+        ));
         std::env::set_var("ORX_DATA_DIR", &base);
 
         let dir = run_job(&LocalJobSpec {
@@ -708,11 +905,93 @@ mod tests {
         }
 
         #[cfg(unix)]
+        for dead_leader in 0..if cfg!(target_os = "linux") { 6 } else { 4 } {
+            let resistant = run_job(&LocalJobSpec {
+                run_id: format!("term-resistant-{dead_leader}"),
+                script: "bash -c 'trap \"\" TERM; echo $$ > worker-pid; while :; do echo tick >> heartbeat; sleep 0.1; done' & wait".into(),
+                env: HashMap::new(),
+                secret_env: HashMap::new(),
+            })
+            .unwrap();
+            if dead_leader >= 3 {
+                std::fs::remove_file(resistant.join("process_token")).unwrap();
+            }
+            for _ in 0..100 {
+                if resistant.join("heartbeat").exists() {
+                    break;
+                }
+                std::thread::sleep(std::time::Duration::from_millis(20));
+            }
+            let started = resistant.join("heartbeat").exists();
+            let group = std::fs::read_to_string(resistant.join("pid")).unwrap();
+            let worker = std::fs::read_to_string(resistant.join("worker-pid")).unwrap();
+            assert!(worker.trim().parse::<u32>().is_ok_and(|pid| pid > 0));
+            if dead_leader % 3 == 2 {
+                let parent = std::process::Command::new("ps")
+                    .args(["-o", "ppid=", "-p", worker.trim()])
+                    .output()
+                    .unwrap();
+                assert!(parent.status.success());
+                let parent = String::from_utf8_lossy(&parent.stdout);
+                assert!(parent.trim().parse::<u32>().is_ok_and(|pid| pid > 0));
+                std::process::Command::new("kill")
+                    .args(["-KILL", parent.trim()])
+                    .status()
+                    .unwrap();
+            }
+            if dead_leader % 3 != 0 {
+                std::process::Command::new("kill")
+                    .args(["-KILL", group.trim()])
+                    .stderr(std::process::Stdio::null())
+                    .status()
+                    .unwrap();
+                assert_reaped(&resistant);
+                assert!(!run_alive(&resistant, group.trim()));
+            }
+            let mut unrelated = std::process::Command::new("sleep")
+                .arg("60")
+                .spawn()
+                .unwrap();
+            let start = std::time::Instant::now();
+            let cancelled = cancel_job(&resistant);
+            let elapsed = start.elapsed();
+            let survivors = group_alive(&resistant, group.trim()).unwrap();
+            let worker_state = std::process::Command::new("ps")
+                .args(["-o", "stat=", "-p", worker.trim()])
+                .output()
+                .unwrap();
+            assert!(worker_state.status.success() || worker_state.status.code() == Some(1));
+            assert!(worker_state.stderr.is_empty());
+            let worker_state = String::from_utf8_lossy(&worker_state.stdout);
+            let unrelated_alive = unrelated.try_wait().unwrap().is_none();
+            // Clean up even when testing the pre-fix implementation.
+            let _ = std::process::Command::new("kill")
+                .args(["-KILL", "--", &format!("-{}", group.trim())])
+                .stderr(std::process::Stdio::null())
+                .status();
+            let _ = unrelated.kill();
+            unrelated.wait().unwrap();
+            assert!(started, "the TERM-resistant worker did not start");
+            cancelled.unwrap();
+            assert!(elapsed >= std::time::Duration::from_secs(5));
+            assert!(
+                !survivors,
+                "cancel returned while the group still had live workers"
+            );
+            assert!(worker_state.trim().is_empty() || worker_state.trim().starts_with('Z'));
+            assert!(unrelated_alive, "cancellation killed an unrelated process");
+            assert_eq!(wait_terminal(&resistant).stage, "ERROR");
+            assert_reaped(&resistant);
+        }
+
+        #[cfg(unix)]
         {
             let stale = base.join("stale-pid");
             std::fs::create_dir_all(&stale).unwrap();
+            use std::os::unix::process::CommandExt;
             let mut unrelated = std::process::Command::new("sleep")
                 .arg("60")
+                .process_group(0)
                 .spawn()
                 .unwrap();
             std::fs::write(stale.join("pid"), unrelated.id().to_string()).unwrap();
@@ -725,11 +1004,41 @@ mod tests {
             let state = inspect_job(&stale);
             let cancelled = cancel_job(&stale);
             let alive = unrelated.try_wait().unwrap().is_none();
+            std::fs::remove_file(stale.join("pid_script")).unwrap();
+            let unowned = cancel_job(&stale);
+            let unowned_alive = unrelated.try_wait().unwrap().is_none();
             let _ = unrelated.kill();
             unrelated.wait().unwrap();
             assert_eq!(state.stage, "ERROR");
             cancelled.unwrap();
             assert!(alive, "cancellation must not signal a reused PID");
+            assert!(unowned.is_err(), "missing identity must fail closed");
+            assert!(
+                unowned_alive,
+                "missing identity must not signal unrelated work"
+            );
+            for reaped in [false, true] {
+                let mut leader = std::process::Command::new("bash")
+                    .args(["-c", "trap '' TERM; sleep 60 & sleep 0.003"])
+                    .current_dir("/")
+                    .process_group(0)
+                    .spawn()
+                    .unwrap();
+                std::fs::write(stale.join("pid"), leader.id().to_string()).unwrap();
+                std::thread::sleep(std::time::Duration::from_millis(50));
+                if reaped {
+                    leader.wait().unwrap();
+                }
+                let cancelled = cancel_job(&stale);
+                let _ = std::process::Command::new("kill")
+                    .args(["-KILL", "--", &format!("-{}", leader.id())])
+                    .status();
+                leader.wait().unwrap();
+                assert!(
+                    cancelled.is_err(),
+                    "exited legacy leader must not prove reuse"
+                );
+            }
         }
 
         std::env::remove_var("ORX_DATA_DIR");
