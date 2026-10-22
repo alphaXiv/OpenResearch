@@ -2054,7 +2054,7 @@ impl Store {
         )?)
     }
 
-    /// Delete a project and its execution artifacts. GitHub repo and cache clone are kept.
+    /// Delete a project, its rows and its run artifacts; its artifacts folder is the caller's. GitHub repo and cache clone are kept.
     /// Blocks up to [`RUN_ARTIFACTS_WAIT`] while a submission or orphan scan holds the artifacts lock.
     pub fn delete_local_project(&self, id: &str) -> Result<()> {
         let mut lock = self.run_artifacts_lock()?;

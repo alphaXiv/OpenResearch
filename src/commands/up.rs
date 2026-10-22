@@ -2108,7 +2108,7 @@ async fn delete_project_inner(state: AppState, id: String, query: DeleteProjectQ
     // Deletion waits for the run-artifacts lock, so keep it off the async workers.
     tokio::task::spawn_blocking(move || store.delete_local_project(&project_id))
         .await
-        .map_err(|error| anyhow!("project deletion task failed: {error}"))??;
+        .map_err(|error| anyhow!("project row deletion task failed: {error}"))??;
     for session in &sessions {
         state.chat.claude.forget_session(&session.id).await;
         local::chat::cleanup_session_transcript_artifacts(&session.id);
