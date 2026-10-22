@@ -419,6 +419,7 @@ fn collect_tree(
     seen: &mut usize,
 ) -> (Vec<ArtifactEntry>, bool) {
     let mut out = Vec::new();
+    let mut dirs = Vec::new();
     let mut truncated = false;
     let Ok(entries) = std::fs::read_dir(dir) else {
         return (out, false);
@@ -442,6 +443,7 @@ fn collect_tree(
             format!("{rel_prefix}/{name}")
         };
         if md.is_dir() {
+            dirs.push((out.len(), entry.path()));
             out.push(ArtifactEntry {
                 name,
                 path: rel,
@@ -464,9 +466,13 @@ fn collect_tree(
             });
         }
     }
-    for e in out.iter_mut().filter(|e| e.is_dir) {
-        let (children, hit) = collect_tree(canonical_base, &dir.join(&e.name), &e.path, seen);
-        e.children = children;
+    for (i, path) in dirs {
+        if *seen >= MAX_ENTRIES {
+            truncated = true;
+            break;
+        }
+        let (children, hit) = collect_tree(canonical_base, &path, &out[i].path, seen);
+        out[i].children = children;
         truncated |= hit;
     }
     out.sort_by(|a, b| b.is_dir.cmp(&a.is_dir).then(a.name.cmp(&b.name)));
