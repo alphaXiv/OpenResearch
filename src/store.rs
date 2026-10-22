@@ -1928,6 +1928,7 @@ impl Store {
         }
         // A cancelled run is terminal before its process group finishes exiting.
         if crate::jobs::localbox::orphaned_job_is_running(&root.join(id))?
+            || crate::jobs::localbox::process_group_alive(&root.join(id))
             || self.supervisor_is_held(id)?
         {
             return Ok(false);

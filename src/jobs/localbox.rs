@@ -168,16 +168,21 @@ fn run_alive_via(ps: &str, dir: &Path, pid: &str) -> bool {
     }
 }
 
-/// EPERM still means the process exists, just not one we may signal.
 #[cfg(not(windows))]
 fn pid_alive(pid: &str) -> bool {
     let Ok(pid) = pid.parse::<libc::pid_t>() else {
         return false;
     };
-    // SAFETY: signal 0 only checks existence; pid > 0 excludes group and broadcast targets.
-    pid > 0
-        && (unsafe { libc::kill(pid, 0) } == 0
-            || std::io::Error::last_os_error().raw_os_error() == Some(libc::EPERM))
+    // pid > 0 excludes group and broadcast targets.
+    pid > 0 && signal_target_exists(pid)
+}
+
+/// EPERM still means the target exists, just not one we may signal.
+#[cfg(not(windows))]
+fn signal_target_exists(target: libc::pid_t) -> bool {
+    // SAFETY: signal 0 only checks existence; callers exclude broadcast targets.
+    (unsafe { libc::kill(target, 0) }) == 0
+        || std::io::Error::last_os_error().raw_os_error() == Some(libc::EPERM)
 }
 
 #[cfg(windows)]
@@ -311,6 +316,25 @@ pub fn orphaned_job_is_running(dir: &Path) -> Result<bool> {
     #[cfg(windows)]
     // The native launcher records its PID before resuming the suspended process.
     Ok(false)
+}
+
+/// Whether any process remains in the run's group (pgid == recorded pid); a reused PGID only defers cleanup.
+#[cfg(not(windows))]
+pub fn process_group_alive(dir: &Path) -> bool {
+    let Ok(pid) = std::fs::read_to_string(dir.join("pid")) else {
+        return false;
+    };
+    let Ok(group) = pid.trim().parse::<libc::pid_t>() else {
+        return false;
+    };
+    // -1 would broadcast to every process.
+    group > 1 && signal_target_exists(-group)
+}
+
+/// Windows cancel waits for an empty job object; deleting files a survivor holds open fails and is retried.
+#[cfg(windows)]
+pub fn process_group_alive(_dir: &Path) -> bool {
+    false
 }
 
 /// One poll of the log past `skip` lines (the supervisor loops every ~2s).
@@ -493,6 +517,33 @@ fn parse_nvidia_smi_csv(out: &str) -> Vec<Gpu> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(unix)]
+    #[test]
+    fn process_group_stays_alive_while_a_child_outlives_the_launcher() {
+        use std::os::unix::process::CommandExt;
+        let dir = std::env::temp_dir().join(format!("orx-group-probe-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        assert!(!process_group_alive(&dir));
+        let mut launcher = std::process::Command::new(crate::local::bash::program())
+            .args(["-c", "sleep 30 & echo $! > child"])
+            .current_dir(&dir)
+            .process_group(0)
+            .spawn()
+            .unwrap();
+        std::fs::write(dir.join("pid"), launcher.id().to_string()).unwrap();
+        launcher.wait().unwrap();
+        assert!(process_group_alive(&dir));
+        let child = std::fs::read_to_string(dir.join("child")).unwrap();
+        // SAFETY: the pid names the sleep this test started.
+        unsafe { libc::kill(child.trim().parse().unwrap(), libc::SIGKILL) };
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        while process_group_alive(&dir) && std::time::Instant::now() < deadline {
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+        assert!(!process_group_alive(&dir));
+        std::fs::remove_dir_all(dir).unwrap();
+    }
 
     #[cfg(unix)]
     #[test]
