@@ -45,6 +45,10 @@ pub(crate) fn supervisor_running(run_id: &str) -> bool {
     lock_held(&supervisor_lock_path(run_id))
 }
 
+pub(crate) fn uses_shared_ssh(run_id: &str) -> bool {
+    lock_held(&log_path(run_id).with_extension("supervisor.shared-ssh.lock"))
+}
+
 fn lock_held(path: &std::path::Path) -> bool {
     let Ok(mut lock) = open_supervisor_lock(path) else {
         return false;
@@ -111,6 +115,9 @@ pub async fn run(args: crate::SuperviseArgs) -> Result<()> {
         Err(err) if err.kind() == std::io::ErrorKind::WouldBlock => return Ok(()),
         Err(err) => return Err(err.into()),
     };
+    let mut protocol_lock =
+        open_supervisor_lock(&log_path(&run_id).with_extension("supervisor.shared-ssh.lock"))?;
+    let _protocol_guard = protocol_lock.try_write()?;
     let stored = store
         .get_run(&run_id)?
         .ok_or_else(|| anyhow!("Run {} not found in the local store.", run_id))?;
@@ -651,7 +658,7 @@ async fn run_ssh(
 ) -> Result<()> {
     let (host, dir) = descriptor.ssh_ref()?;
     eprintln!("supervise {run_id}: watching ssh job {host}:{dir}");
-    let target = ssh::SshTarget::alias(host);
+    let target = ssh::SshTarget::alias(host).for_run(&run_id);
     let dir = dir.to_string();
     watch_ssh_job(
         &store,
@@ -907,44 +914,41 @@ async fn tail_logs_ssh(
     done: tokio::sync::watch::Receiver<bool>,
     errors: Option<tokio::sync::watch::Sender<Option<String>>>,
 ) -> bool {
-    let mut log = match RunLog::open(&path) {
-        Ok(log) => log,
-        Err(err) => {
-            if let Some(errors) = &errors {
-                errors.send_replace(Some(format!("could not open local run log: {err}")));
-            }
-            eprintln!(
-                "supervise {run_id}: could not open {}: {err}",
-                path.display()
-            );
-            return false;
-        }
-    };
-    let mut seen = 0u64;
+    let _ = path;
+    let target = target.for_run(&run_id);
     let mut last_error = None;
     loop {
         let draining = *done.borrow();
-        let mut sink = |line: &str| log.line(line);
-        match ssh::stream_logs(&target, &dir, seen, LOG_IDLE, draining, &mut sink).await {
-            Ok(s) => {
-                seen = s;
+        let result = ssh::service::request(
+            &target,
+            serde_json::json!({
+                "op":"collect", "run":run_id, "dir":dir,
+            }),
+        )
+        .await;
+        match result {
+            Ok(value) => {
                 last_error = None;
-            }
-            // Retries every 2s through an outage; log each distinct failure once.
-            Err(err) => {
-                let err = err.to_string();
-                if last_error.as_ref() != Some(&err) {
-                    eprintln!("supervise {run_id}: log stream error (will retry): {err}");
-                    last_error = Some(err);
+                if let Some(errors) = &errors {
+                    errors.send_replace(None);
                 }
+                if draining {
+                    if value["eof"] == true {
+                        return true;
+                    }
+                    continue;
+                }
+            }
+            Err(error) => {
+                let error = error.to_string();
+                if last_error.as_ref() != Some(&error) {
+                    eprintln!("supervise {run_id}: log collection unavailable: {error}");
+                }
+                last_error = Some(error);
             }
         }
         if let Some(errors) = &errors {
             errors.send_replace(last_error.clone());
-        }
-        log.write_failed |= log.file.flush().is_err();
-        if draining && last_error.is_none() {
-            return !log.write_failed && log.file.sync_all().is_ok();
         }
         tokio::time::sleep(Duration::from_secs(2)).await;
     }
@@ -1062,6 +1066,8 @@ async fn run_openresearch(
                 .ok_or_else(|| anyhow!("box {sandbox_id} came online without an SSH endpoint"))?
         }
     };
+
+    let target = target.for_run(&run_id);
 
     // Launch, unless a previous supervisor already did (restart mid-run just
     // reattaches to the watch loop). An unreachable box reads as fresh here;
@@ -1364,13 +1370,14 @@ async fn run_slurm(
 
     let path = log_path(&run_id);
     let (done_tx, done_rx) = tokio::sync::watch::channel(false);
+    let (log_error_tx, log_error_rx) = tokio::sync::watch::channel(None);
     let mut log_task = tokio::spawn(tail_logs_ssh(
-        ssh::SshTarget::alias(&host),
+        ssh::SshTarget::alias(&host).for_run(&run_id),
         dir.clone(),
         path.clone(),
         run_id.clone(),
         done_rx,
-        None,
+        Some(log_error_tx),
     ));
 
     let mut last_status = status_of(&stored)?;
@@ -1392,7 +1399,7 @@ async fn run_slurm(
             Err(err) => Some(format!("Monitoring unavailable: {err}. Reconnect with orx compute connect slurm --host {}. The job has not been declared stopped.", ssh::sh_quote(&host))),
             Ok(job) if matches!(job.stage.as_str(), "GONE" | "UNAVAILABLE") => Some("Monitoring unavailable: no exit status or scheduler record. Check cluster/accounting availability; the job has not been declared stopped.".into()),
             _ => None,
-        };
+        }.or_else(|| log_error_rx.borrow().clone());
         match (&error, &last_error) {
             (Some(message), last) if last.as_ref() != Some(message) => {
                 eprintln!("supervise {run_id}: {message}");
@@ -1461,7 +1468,7 @@ async fn run_slurm(
 
 async fn cancel_slurm(host: &str, job_id: &str, run_id: &str, cancel_sent: &mut bool) {
     eprintln!("supervise {run_id}: cancel requested — scancel {job_id}");
-    match slurm::cancel_job(host, job_id).await {
+    match slurm::cancel_job(host, run_id, job_id).await {
         Ok(()) => *cancel_sent = true,
         Err(err) => eprintln!("supervise {run_id}: scancel failed (will retry): {err}"),
     }

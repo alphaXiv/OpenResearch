@@ -982,6 +982,25 @@ fn explain_removed_spawn_flags(mut error: clap::Error) -> clap::Error {
 // on worker threads. A `current_thread` flavor would deadlock. See commands::app.
 #[tokio::main]
 async fn main() {
+    if std::env::var_os("ORX_SSH_ASKPASS_ENDPOINT").is_some() {
+        if jobs::ssh::service::askpass().await.is_err() {
+            std::process::exit(1);
+        }
+        return;
+    }
+    if std::env::args().nth(1).as_deref() == Some("ssh-service") {
+        let result = if std::env::args().nth(2).as_deref() == Some("stop") {
+            jobs::ssh::service::shutdown_idle().await
+        } else {
+            jobs::ssh::service::run().await
+        };
+        if let Err(error) = result {
+            eprintln!("{error}");
+            std::process::exit(1);
+        }
+        return;
+    }
+
     #[cfg(windows)]
     {
         install_panic_reporter();

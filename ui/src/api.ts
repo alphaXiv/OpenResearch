@@ -415,13 +415,15 @@ export const cancelRun = (runId: string) =>
   post<{ ok: boolean }>(`/api/runs/${runId}/cancel`).then(() => undefined);
 
 export interface LogChunk {
+  generation: string;
+  offset: number;
   dataBase64: string;
   nextOffset: number;
   eof: boolean;
 }
 
-export const fetchLog = (runId: string, offset: number) =>
-  get<LogChunk>(`/api/runs/${runId}/log?offset=${offset}`);
+export const fetchLog = (runId: string, offset: number, generation?: string) =>
+  get<LogChunk>(`/api/runs/${runId}/log?offset=${offset}${generation ? `&generation=${encodeURIComponent(generation)}` : ""}`);
 
 export interface DiffPayload {
   diff: string;

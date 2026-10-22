@@ -231,11 +231,13 @@ impl BackendDescriptor {
         // Stored as i64 (SQLite); a real SSH port fits u16. Bail rather than
         // panic if the row somehow holds an out-of-range value.
         let port = u16::try_from(self.ssh_port?).ok()?;
-        Some(ssh::SshTarget::host_port(
+        let mut target = ssh::SshTarget::host_port(
             format!("{user}@{host}"),
             port,
             ssh::HostKeyPolicy::Ephemeral,
-        ))
+        );
+        target.managed_generation = Some(self.job_id.clone()?);
+        Some(target)
     }
 }
 

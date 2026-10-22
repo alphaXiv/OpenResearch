@@ -19,7 +19,7 @@ use sha2::{Digest as _, Sha256};
 use crate::error::{anyhow, Result};
 use crate::jobs::BackendDescriptor;
 use crate::local::model::{LocalExperiment, LocalProject};
-use crate::store::{log_path, RunStatus, Store, StoredRun};
+use crate::store::{RunStatus, Store, StoredRun};
 
 #[derive(Debug, Clone)]
 pub struct SourceSnapshot {
@@ -272,12 +272,14 @@ pub struct Preflight {
 #[derive(Debug, Clone)]
 pub struct StagedSource(pub SourceSnapshot);
 
-#[derive(Debug, Clone, Copy, Default)]
-pub struct LogCursor(pub u64);
+#[derive(Debug, Clone, Default)]
+pub struct LogCursor(pub u64, pub Option<String>);
 
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct LogBatch {
+    pub generation: String,
+    pub offset: u64,
     pub data_base64: String,
     pub next_cursor: u64,
     pub eof: bool,
@@ -309,28 +311,19 @@ pub trait ComputeBackend: Send + Sync {
 
     async fn logs(&self, handle: &StoredRun, cursor: LogCursor) -> Result<LogBatch> {
         use base64::Engine as _;
-        use std::io::{Read as _, Seek as _};
-        let path = log_path(&handle.id);
-        let mut file = match std::fs::File::open(&path) {
-            Ok(file) => file,
-            Err(_) => {
-                return Ok(LogBatch {
-                    data_base64: String::new(),
-                    next_cursor: cursor.0,
-                    eof: crate::local::is_terminal(&handle.status),
-                })
-            }
-        };
-        let len = file.metadata()?.len();
-        let start = cursor.0.min(len);
-        file.seek(std::io::SeekFrom::Start(start))?;
-        let mut data = Vec::new();
-        file.take(256 * 1024).read_to_end(&mut data)?;
-        let next = start + data.len() as u64;
+        let snapshot = crate::jobs::ssh::service::logs::read(
+            &handle.id,
+            cursor.0,
+            256 * 1024,
+            cursor.1.as_deref(),
+        )?;
+        let next = snapshot.offset + snapshot.bytes.len() as u64;
         Ok(LogBatch {
-            data_base64: base64::engine::general_purpose::STANDARD.encode(data),
+            generation: snapshot.generation,
+            offset: snapshot.offset,
+            data_base64: base64::engine::general_purpose::STANDARD.encode(snapshot.bytes),
             next_cursor: next,
-            eof: crate::local::is_terminal(&handle.status) && next >= len,
+            eof: crate::local::is_terminal(&handle.status) && next >= snapshot.size,
         })
     }
 

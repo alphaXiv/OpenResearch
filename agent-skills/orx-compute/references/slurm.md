@@ -2,7 +2,11 @@
 
 Use this backend only when the user explicitly requests their Slurm cluster or
 it is the configured default. `orx` reaches the login node over SSH, stages the
-committed snapshot, and submits the fixed command with `sbatch`.
+committed snapshot, and submits the fixed command with `sbatch`. The login node
+needs Python 3.8 or newer; no Python packages or administrator installation are required.
+All runs on the same connection share one monitoring channel and batched scheduler
+queries. Transport failures back off together, and fresh authentication requires
+explicit Connect. Reconnect with `orx compute connect slurm --host login-node`.
 
 ```sh
 orx exp run <expId> --backend slurm --host login-node --flavor h100:2 --timeout 4h

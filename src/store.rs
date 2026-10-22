@@ -106,18 +106,26 @@ impl Drop for DataDirMoveLock {
     }
 }
 
-fn acquire_data_dir_move_lock(path: PathBuf) -> Result<DataDirMoveLock> {
+fn acquire_data_dir_lock(path: PathBuf, exclusive: bool) -> Result<DataDirMoveLock> {
     let (ready_tx, ready_rx) = std::sync::mpsc::sync_channel(1);
     let (release_tx, release_rx) = std::sync::mpsc::channel();
     let thread = std::thread::spawn(move || {
         let result = (|| -> Result<()> {
             let mut lock = open_lifecycle_lock_at(&path)?;
-            let _guard = lock.try_write()?;
-            ready_tx
-                .send(Ok(()))
-                .map_err(|_| anyhow!("data-directory move lock receiver closed"))?;
-            let _ = release_rx.recv();
-            Ok(())
+            let wait = || -> Result<()> {
+                ready_tx
+                    .send(Ok(()))
+                    .map_err(|_| anyhow!("data-directory move lock receiver closed"))?;
+                let _ = release_rx.recv();
+                Ok(())
+            };
+            if exclusive {
+                let _guard = lock.try_write()?;
+                wait()
+            } else {
+                let _guard = lock.try_read()?;
+                wait()
+            }
         })();
         if let Err(error) = result {
             let _ = ready_tx.send(Err(error.to_string()));
@@ -137,6 +145,10 @@ fn acquire_data_dir_move_lock(path: PathBuf) -> Result<DataDirMoveLock> {
             Err(anyhow!("data-directory move lock thread exited"))
         }
     }
+}
+
+pub(crate) fn acquire_data_dir_read_lock() -> Result<DataDirMoveLock> {
+    acquire_data_dir_lock(data_dir_move_lock_path(), false)
 }
 
 /// Read an env var as a path, treating unset **and empty** the same (an empty
@@ -1522,7 +1534,7 @@ impl Store {
     }
 
     pub(crate) fn acquire_data_dir_move_lock(&self) -> Result<DataDirMoveLock> {
-        acquire_data_dir_move_lock(self.data_dir_move_lock_path.clone())
+        acquire_data_dir_lock(self.data_dir_move_lock_path.clone(), true)
     }
 
     fn clear_stale_data_dir_move_lease(&self) -> Result<()> {
@@ -1537,8 +1549,8 @@ impl Store {
         let Some(token) = token else {
             return Ok(());
         };
-        let mut lock = open_lifecycle_lock_at(&self.data_dir_move_lock_path)?;
-        match lock.try_write() {
+        let lock = open_lifecycle_lock_at(&self.data_dir_move_lock_path)?;
+        match lock.try_read() {
             Ok(_guard) => {
                 self.conn.execute(
                     "DELETE FROM data_dir_move_lease WHERE id = 1 AND claim_token = ?1",
@@ -5589,8 +5601,12 @@ mod tests {
         second.release_data_dir_move("move_B").unwrap();
         assert!(!second.claim_chat_turn("chat_A", "token_B").unwrap());
         drop(move_lock);
+        let service_lock =
+            acquire_data_dir_lock(first.data_dir_move_lock_path.clone(), false).unwrap();
+        assert!(first.acquire_data_dir_move_lock().is_err());
         assert!(second.claim_chat_turn("chat_A", "token_B").unwrap());
 
+        drop(service_lock);
         drop(second);
         drop(first);
         let _ = std::fs::remove_dir_all(dir);

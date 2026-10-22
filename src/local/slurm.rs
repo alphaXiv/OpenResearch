@@ -136,7 +136,7 @@ pub async fn submit_local_slurm_with_source(
         env.entry("HF_TOKEN".to_string()).or_insert(hf_token);
     }
     crate::jobs::ssh::stage_source(
-        &crate::jobs::ssh::SshTarget::alias(&host),
+        &crate::jobs::ssh::SshTarget::alias(&host).for_run(&run_id),
         &run_id,
         &source.path,
         &source.digest,
@@ -184,7 +184,7 @@ pub async fn submit_local_slurm_with_source(
     };
     source.apply_to_descriptor(&mut descriptor);
     if let Err(error) = crate::compute::record_submission_handle(&run_id, &descriptor) {
-        let _ = slurm::cancel_job(&host, &job_id).await;
+        let _ = slurm::cancel_job(&host, &run_id, &job_id).await;
         return Err(error);
     }
     let run = StoredRun {

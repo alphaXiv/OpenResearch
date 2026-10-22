@@ -23,6 +23,11 @@ socket naming, reconnect once; existing masters are not terminated.
 Changing a configured route requires reconnecting before ordinary commands can
 reuse it. For command-line proxy overrides, use a separate configured alias or
 `-S none`; native SSH does not expose those overrides to the sharing predicate.
+Experiment monitors share one persistent SSH channel per resolved host and authentication
+context. Windows Connect keeps the authenticated SSH process alive after its dialog closes.
+Background monitoring never starts a fresh login on user hosts. Transport failures
+back off together (5 seconds up to 5 minutes); restarting OpenResearch or adding
+runs does not reset the retry schedule. Remote command errors do not reset the connection.
 Monitoring outages are reported after 60 seconds without declaring the remote
 job stopped. Reconnecting resumes status and log polling.
 
@@ -46,7 +51,8 @@ example, a committed `run.sh` can source Conda, activate the environment, and
 then run the experiment. Those paths must exist in the selected execution
 environment (host or container). There is no separate SSH setup command.
 
-The SSH host needs Bash and tar. Container execution also requires host Docker
+The SSH host needs Bash, tar, and Python 3.8 or newer (standard library only).
+OpenResearch does not install Python automatically. Container execution also requires host Docker
 access and an already running, unpaused Linux container with Bash, tar, working
 `setsid --wait`, and an absolute writable `$HOME`. Execution uses the container's
 configured user. There is no `sudo`, user override, Podman support, container

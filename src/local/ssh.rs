@@ -56,7 +56,7 @@ pub async fn submit_local_ssh_with_source(
         .or_else(|| project.run_command.clone().filter(|c| !c.trim().is_empty()))
         .ok_or_else(|| anyhow!("{}", crate::invocation::no_run_command(&project.id)))?;
 
-    let target = launch.target.clone();
+    let target = launch.target.clone().for_run(&run_id);
     let container = launch
         .container
         .as_ref()

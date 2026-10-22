@@ -265,7 +265,7 @@ elif group_alive; then echo RUNNING
 else echo DEAD; fi
 "#
     );
-    let inner = ssh_run(target, &container.exec(&probe), None).await?;
+    let inner = super::ssh_status(target, &container.exec(&probe), None).await?;
     match inner.trim() {
         "RUNNING" if state == "RUNNING" => Ok(JobState {
             stage: "RUNNING".into(),
@@ -297,7 +297,7 @@ else echo DEAD; fi
             if final_state.stage != "RUNNING" {
                 return Ok(final_state);
             }
-            let waited = ssh_run(target, &format!(r#"d="$HOME/{dir}"; umask 077; if [ ! -f "$d/completion_wait" ]; then date +%s > "$d/completion_wait.tmp" && mv "$d/completion_wait.tmp" "$d/completion_wait"; fi; echo "$(( $(date +%s) - $(cat "$d/completion_wait") ))""#), None).await?;
+            let waited = super::ssh_status(target, &format!(r#"d="$HOME/{dir}"; umask 077; if [ ! -f "$d/completion_wait" ]; then date +%s > "$d/completion_wait.tmp" && mv "$d/completion_wait.tmp" "$d/completion_wait"; fi; echo "$(( $(date +%s) - $(cat "$d/completion_wait") ))""#), None).await?;
             if waited.trim().parse::<i64>()? >= 30 {
                 let final_state = super::inspect_host_job(target, dir).await?;
                 if final_state.stage != "RUNNING" {
@@ -343,7 +343,7 @@ echo 'Experiment process group is still alive' >&2
 exit 1
 "#
     );
-    ssh_run(target, &container.exec(&script), None).await?;
+    super::ssh_control(target, &container.exec(&script), None).await?;
     Ok(())
 }
 

@@ -42,7 +42,7 @@ use crate::local::chat::ChatHost;
 use crate::local::is_terminal;
 use crate::local::opencode::AgentHost;
 use crate::store::{
-    log_path, now_ms, SshHostTest, Store, StoredAgentSelection, StoredChatSession, StoredRun,
+    now_ms, SshHostTest, Store, StoredAgentSelection, StoredChatSession, StoredRun,
 };
 use crate::updates;
 use crate::workspace_state::{GlobalWorkspaceState, WorkspaceState};
@@ -2494,6 +2494,7 @@ async fn cancel_run(
 #[derive(Deserialize)]
 struct LogsQuery {
     cursor: Option<u64>,
+    generation: Option<String>,
 }
 
 async fn run_logs(Path(id): Path<String>, Query(q): Query<LogsQuery>) -> ApiResult {
@@ -2501,7 +2502,10 @@ async fn run_logs(Path(id): Path<String>, Query(q): Query<LogsQuery>) -> ApiResu
         .get_run(&id)?
         .ok_or_else(|| not_found("run"))?;
     let batch = backend_for_run(&run)?
-        .logs(&run, crate::compute::LogCursor(q.cursor.unwrap_or(0)))
+        .logs(
+            &run,
+            crate::compute::LogCursor(q.cursor.unwrap_or(0), q.generation),
+        )
         .await
         .map_err(bad_request)?;
     Ok(Json(json!(batch)))
@@ -2510,18 +2514,23 @@ async fn run_logs(Path(id): Path<String>, Query(q): Query<LogsQuery>) -> ApiResu
 #[derive(Deserialize)]
 struct LogQuery {
     offset: Option<u64>,
+    generation: Option<String>,
 }
 
 async fn run_log(Path(id): Path<String>, Query(q): Query<LogQuery>) -> ApiResult {
     let store = Store::open()?;
     store.get_run(&id)?.ok_or_else(|| not_found("run"))?;
     let offset = q.offset.unwrap_or(0);
-    let chunk = read_log_from(&id, offset, 4_000_000);
-    let next_offset = offset + chunk.len() as u64;
+    let snapshot =
+        crate::jobs::ssh::service::logs::read(&id, offset, 4_000_000, q.generation.as_deref())?;
+    let chunk = snapshot.bytes;
+    let next_offset = snapshot.offset + chunk.len() as u64;
     Ok(Json(json!({
         "dataBase64": base64::engine::general_purpose::STANDARD.encode(&chunk),
         "nextOffset": next_offset,
-        "eof": next_offset >= log_size(&id),
+        "eof": next_offset >= snapshot.size,
+        "offset": snapshot.offset,
+        "generation": snapshot.generation,
     })))
 }
 
@@ -5017,6 +5026,10 @@ async fn move_data_dir(State(state): State<AppState>, Json(req): Json<DataDirReq
     let data_dir_guard = state.data_dir_gate.clone().lock_owned().await;
     let source_data_dir = crate::store::data_dir();
     let move_token = uuid::Uuid::new_v4().to_string();
+    if let Err(error) = crate::jobs::ssh::service::shutdown_idle().await {
+        release(&state);
+        return ApiError(StatusCode::CONFLICT, error.to_string()).into_response();
+    }
     let (move_store, move_lock) = match Store::open().and_then(|store| {
         let lock = store.acquire_data_dir_move_lock()?;
         Ok((store, lock))
@@ -6006,65 +6019,76 @@ async fn ssh_connect_socket(
     backend: SshConnectBackend,
     target: crate::jobs::ssh::SshTarget,
 ) {
-    let connection = match crate::jobs::ssh::interactive_args(&target, None, None).await {
-        Ok(connection) => connection,
-        Err(error) => {
-            send_ssh_connect_error(&mut socket, &host, backend, error.to_string()).await;
-            return;
-        }
-    };
-    let args = connection.args.clone();
-    let session = match tokio::task::spawn_blocking(move || start_pty("ssh", args)).await {
-        Ok(Ok(session)) => session,
-        Ok(Err(error)) => {
-            send_ssh_connect_error(&mut socket, &host, backend, error.to_string()).await;
-            return;
-        }
-        Err(error) => {
-            send_ssh_connect_error(
-                &mut socket,
-                &host,
-                backend,
-                format!("SSH terminal task failed: {error}"),
-            )
-            .await;
-            return;
-        }
-    };
-    let mut size = DEFAULT_PTY_SIZE;
-    let Some(status) = relay_pty(&mut socket, session, None, &mut size, None).await else {
+    #[cfg(windows)]
+    if !ssh_service_connect(&mut socket, &target).await {
         return;
-    };
+    }
+    #[cfg(unix)]
+    if !crate::jobs::ssh::service::healthy(&target).await {
+        let connection = match crate::jobs::ssh::interactive_args(&target, None, None).await {
+            Ok(connection) => connection,
+            Err(error) => {
+                send_ssh_connect_error(&mut socket, &host, backend, error.to_string()).await;
+                return;
+            }
+        };
+        let args = connection.args.clone();
+        let session = match tokio::task::spawn_blocking(move || start_pty("ssh", args)).await {
+            Ok(Ok(session)) => session,
+            Ok(Err(error)) => {
+                send_ssh_connect_error(&mut socket, &host, backend, error.to_string()).await;
+                return;
+            }
+            Err(error) => {
+                send_ssh_connect_error(
+                    &mut socket,
+                    &host,
+                    backend,
+                    format!("SSH terminal task failed: {error}"),
+                )
+                .await;
+                return;
+            }
+        };
+        let mut size = DEFAULT_PTY_SIZE;
+        let Some(status) = relay_pty(&mut socket, session, None, &mut size, None).await else {
+            return;
+        };
 
-    match status {
-        Ok(status) if status.success() => {
-            if let Some(warning) = crate::jobs::ssh::setup_connection_sharing(&target).await {
-                let _ = socket
-                    .send(Message::Binary(
-                        format!("\r\norx: warning: {warning}\r\n")
-                            .into_bytes()
-                            .into(),
-                    ))
-                    .await;
+        match status {
+            Ok(status) if status.success() => {
+                if let Some(warning) = crate::jobs::ssh::setup_connection_sharing(&target).await {
+                    let _ = socket
+                        .send(Message::Binary(
+                            format!("\r\norx: warning: {warning}\r\n")
+                                .into_bytes()
+                                .into(),
+                        ))
+                        .await;
+                }
+            }
+            Ok(status) => {
+                send_ssh_connect_error(
+                    &mut socket,
+                    &host,
+                    backend,
+                    format!("ssh {host} exited with code {}", status.exit_code()),
+                )
+                .await;
+                return;
+            }
+            Err(error) => {
+                send_ssh_connect_error(&mut socket, &host, backend, error).await;
+                return;
             }
         }
-        Ok(status) => {
-            send_ssh_connect_error(
-                &mut socket,
-                &host,
-                backend,
-                format!("ssh {host} exited with code {}", status.exit_code()),
-            )
-            .await;
-            return;
-        }
-        Err(error) => {
-            send_ssh_connect_error(&mut socket, &host, backend, error).await;
-            return;
-        }
-    }
 
-    drop(connection);
+        drop(connection);
+    }
+    if let Err(error) = crate::jobs::ssh::service::attach(&target).await {
+        send_ssh_connect_error(&mut socket, &host, backend, error.to_string()).await;
+        return;
+    }
     let (backend_name, result, ssh_test) = match backend {
         SshConnectBackend::Ssh => {
             let test = probe_ssh_host_preflight(host.clone()).await;
@@ -6090,6 +6114,85 @@ async fn ssh_connect_socket(
         }
         close_socket(&mut socket).await;
     }
+}
+
+#[cfg(windows)]
+async fn ssh_service_connect(socket: &mut WebSocket, target: &crate::jobs::ssh::SshTarget) -> bool {
+    use crate::jobs::ssh::service;
+    let start = match service::request(target, json!({"op":"connect_start"})).await {
+        Ok(start) => start,
+        Err(error) => {
+            send_ws_error(socket, error.to_string()).await;
+            return false;
+        }
+    };
+    let Some(attempt) = start["attempt"].as_str() else {
+        return false;
+    };
+    let mut prompt = None;
+    let mut answer = String::new();
+    let success = loop {
+        let status =
+            match service::request(target, json!({"op":"connect_status", "attempt":attempt})).await
+            {
+                Ok(status) => status,
+                Err(error) => {
+                    send_ws_error(socket, error.to_string()).await;
+                    break false;
+                }
+            };
+        if status["done"] == true {
+            if let Some(error) = status["error"].as_str() {
+                send_ws_error(socket, error.to_owned()).await;
+                break false;
+            }
+            break true;
+        }
+        if let Some(text) = status["prompt"].as_str() {
+            if prompt.as_deref() != Some(text) {
+                prompt = Some(text.to_owned());
+                answer.clear();
+                let clean: String = text
+                    .chars()
+                    .filter(|character| !character.is_control())
+                    .collect();
+                if socket
+                    .send(Message::Binary(format!("\r\n{clean} ").into_bytes().into()))
+                    .await
+                    .is_err()
+                {
+                    break false;
+                }
+            }
+        }
+        tokio::select! {
+            message = socket.recv() => {
+                match message {
+                    Some(Ok(Message::Binary(bytes))) if prompt.is_some() => {
+                        let mut submit = false;
+                        for character in String::from_utf8_lossy(&bytes).chars() {
+                            match character {
+                                '\r' | '\n' => {submit = true; break;},
+                                '\u{8}' | '\u{7f}' => {answer.pop();},
+                                character if !character.is_control() && answer.len() < 16384 => answer.push(character),
+                                _ => {},
+                            }
+                        }
+                        if submit {
+                            let result = service::request(target, json!({"op":"connect_answer", "attempt":attempt, "answer":answer})).await;
+                            answer.clear(); prompt = None;
+                            if let Err(error) = result {send_ws_error(socket, error.to_string()).await; break false;}
+                        }
+                    }
+                    None | Some(Err(_)) | Some(Ok(Message::Close(_))) => break false,
+                    _ => {},
+                }
+            }
+            _ = tokio::time::sleep(Duration::from_millis(150)) => {},
+        }
+    };
+    let _ = service::request(target, json!({"op":"connect_cancel", "attempt":attempt})).await;
+    success
 }
 
 async fn send_ws_error(socket: &mut WebSocket, error: String) {
@@ -8601,6 +8704,7 @@ struct EventCursor {
     files: HashMap<String, u64>,
     runs: HashMap<String, (String, i64)>,
     log_offsets: HashMap<String, u64>,
+    log_generations: HashMap<String, String>,
     chat_active_runs: Option<Value>,
     /// Last update status sent. Unlike the rest of the cursor this isn't store
     /// state — the updater is a separate process, so its progress reaches the UI
@@ -8761,43 +8865,32 @@ fn push_log_delta(
     budget: &mut u64,
 ) {
     let offset = *cursor.log_offsets.entry(run.id.clone()).or_insert(0);
-    let size = log_size(&run.id);
-    if size <= offset || *budget == 0 {
+    let expected = cursor.log_generations.get(&run.id).map(String::as_str);
+    let Ok(snapshot) = crate::jobs::ssh::service::logs::read(&run.id, offset, *budget, expected)
+    else {
+        return;
+    };
+    let reset = expected.is_some_and(|generation| generation != snapshot.generation)
+        || snapshot.offset != offset;
+    if snapshot.bytes.is_empty() && !reset {
         return;
     }
-    let chunk = read_log_from(&run.id, offset, *budget);
-    *budget -= chunk.len() as u64;
+    *budget -= snapshot.bytes.len() as u64;
+    cursor.log_offsets.insert(
+        run.id.clone(),
+        snapshot.offset + snapshot.bytes.len() as u64,
+    );
     cursor
-        .log_offsets
-        .insert(run.id.clone(), offset + chunk.len() as u64);
-    // base64: chunk boundaries are arbitrary byte positions, and exact byte
-    // lengths are what lets the client dedup replays.
-    out.push(json_event(
-        "run.log",
-        &json!({
-            "runId": run.id,
-            "dataBase64": base64::engine::general_purpose::STANDARD.encode(&chunk),
-            "offset": offset,
-        }),
-    ));
+        .log_generations
+        .insert(run.id.clone(), snapshot.generation.clone());
+    out.push(json_event("run.log", &json!({
+        "runId":run.id, "dataBase64":base64::engine::general_purpose::STANDARD.encode(&snapshot.bytes),
+        "offset":snapshot.offset, "generation":snapshot.generation,
+    })));
 }
 
 fn log_size(run_id: &str) -> u64 {
-    std::fs::metadata(log_path(run_id))
-        .map(|m| m.len())
-        .unwrap_or(0)
-}
-
-fn read_log_from(run_id: &str, offset: u64, max: u64) -> Vec<u8> {
-    use std::io::{Read, Seek, SeekFrom};
-    let Ok(mut f) = std::fs::File::open(log_path(run_id)) else {
-        return Vec::new();
-    };
-    let mut out = Vec::new();
-    if f.seek(SeekFrom::Start(offset)).is_ok() {
-        let _ = f.take(max).read_to_end(&mut out);
-    }
-    out
+    crate::jobs::ssh::service::logs::read(run_id, 0, 0, None).map_or(0, |snapshot| snapshot.size)
 }
 
 // --- embedded SPA ----------------------------------------------------------
@@ -9259,14 +9352,14 @@ mod tests {
 
     #[cfg(windows)]
     #[tokio::test]
-    async fn windows_ssh_master_status_is_not_a_disconnection() {
+    async fn windows_ssh_status_reports_missing_persistent_connection() {
         let response = ssh_master_status(Query(SshPreflightReq {
             host: "unused-host".into(),
             container: None,
         }))
         .await
         .unwrap_or_else(|error| panic!("{}", error.1));
-        assert!(response.0["running"].is_null());
+        assert_eq!(response.0["running"], false);
     }
 
     #[test]

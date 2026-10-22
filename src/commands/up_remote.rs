@@ -1340,7 +1340,7 @@ async fn gateway_stop_host(
     let result = async {
         let (_, _, remote_orx, paths) = remote_stop_context(&session).await?;
         let body = format!("{}\n", serde_json::to_string(&request)?);
-        let output = crate::jobs::ssh::ssh_run(
+        let output = crate::jobs::ssh::direct_run(
             &session.target,
             &remote_host_cmd(&remote_orx.path, &paths, "stop")?,
             Some(&body),
@@ -1992,7 +1992,7 @@ async fn read_remote_settings(
     let command = remote_orx_cmd(&format!(
         "if [ -f {quoted} ]; then cat {quoted}; else printf '{{}}'; fi"
     ));
-    let raw = crate::jobs::ssh::ssh_run(target, &command, None)
+    let raw = crate::jobs::ssh::direct_run(target, &command, None)
         .await
         .map_err(|error| anyhow!("Could not read OpenResearch settings on '{host}': {error}"))?;
     let settings: serde_json::Value = serde_json::from_str(&raw)
@@ -2020,7 +2020,7 @@ async fn write_remote_json(
          trap 'rm -f \"$tmp\"' EXIT && cat > \"$tmp\" && chmod 600 \"$tmp\" && \
          mv \"$tmp\" {quoted_path} && trap - EXIT"
     ));
-    crate::jobs::ssh::ssh_run(target, &command, Some(&body))
+    crate::jobs::ssh::direct_run(target, &command, Some(&body))
         .await
         .map_err(|error| anyhow!("Could not save OpenResearch settings on '{host}': {error}"))?;
     Ok(())
@@ -2061,7 +2061,7 @@ pub(crate) async fn remote_install_paths(
         REMOTE_CACHE_PATH_MARKER,
         REMOTE_SETTINGS_PATH_MARKER,
     ));
-    let output = crate::jobs::ssh::ssh_run(target, &probe, None)
+    let output = crate::jobs::ssh::direct_run(target, &probe, None)
         .await
         .map_err(|error| anyhow!("Can't resolve OpenResearch paths on '{host}': {error}"))?;
     let mut paths = parse_remote_install_paths(&output)
@@ -2101,7 +2101,7 @@ pub(crate) async fn find_remote_orx(target: &SshTarget, host: &str) -> Result<Op
         "p=$(command -v orx 2>/dev/null || true); \
          p=$(readlink -f \"$p\" 2>/dev/null || realpath \"$p\" 2>/dev/null || true);",
     ));
-    let output = crate::jobs::ssh::ssh_run(target, &probe, None)
+    let output = crate::jobs::ssh::direct_run(target, &probe, None)
         .await
         .map_err(|e| anyhow!("Can't reach '{host}' over SSH: {e}"))?;
     let discovery_rejection = match classify_probe_output(&output) {
@@ -2180,7 +2180,7 @@ async fn probe_remote_orx_path(
     let probe = remote_login_orx_cmd(&remote_orx_probe(&format!(
         "p={path}; p=$(readlink -f \"$p\" 2>/dev/null || realpath \"$p\" 2>/dev/null || true);"
     )));
-    let output = crate::jobs::ssh::ssh_run(target, &probe, None)
+    let output = crate::jobs::ssh::direct_run(target, &probe, None)
         .await
         .map_err(|error| anyhow!("Can't check OpenResearch on '{host}': {error}"))?;
     Ok(classify_probe_output(&output))
@@ -2196,7 +2196,7 @@ pub(crate) async fn install_remote_orx(
     let version = env!("CARGO_PKG_VERSION");
     let installer = remote_installer(version);
     let command = remote_login_orx_cmd(&format!("export CARGO_HOME={cargo}; {installer}"));
-    crate::jobs::ssh::ssh_run(target, &command, None)
+    crate::jobs::ssh::direct_run(target, &command, None)
         .await
         .map_err(|error| anyhow!("Could not install OpenResearch on '{host}': {error}"))?;
     match probe_remote_orx_path(target, host, &paths.binary).await? {
@@ -2350,7 +2350,7 @@ async fn remote_host_control_status(
         "{} 2>/dev/null || true",
         remote_host_cmd(path, paths, "status")?
     );
-    let output = crate::jobs::ssh::ssh_run(target, &command, None).await?;
+    let output = crate::jobs::ssh::direct_run(target, &command, None).await?;
     Ok(
         parse_control_response(&output).and_then(|response| match response {
             ControlResponse::Status {
@@ -2378,7 +2378,8 @@ async fn ensure_remote_host(
         },
     );
     let output =
-        crate::jobs::ssh::ssh_run(target, &remote_host_cmd(path, paths, &operation)?, None).await?;
+        crate::jobs::ssh::direct_run(target, &remote_host_cmd(path, paths, &operation)?, None)
+            .await?;
     output
         .lines()
         .find_map(|line| line.strip_prefix(HOST_MARKER))
@@ -2402,7 +2403,7 @@ async fn remote_dashboard_protocol(
     let command = remote_orx_cmd(&format!(
         "{path} version --dashboard-protocol 2>/dev/null || true"
     ));
-    let output = crate::jobs::ssh::ssh_run(target, &command, None)
+    let output = crate::jobs::ssh::direct_run(target, &command, None)
         .await
         .map_err(|error| {
             anyhow!("Could not check OpenResearch compatibility on '{host}': {error}")
@@ -3040,6 +3041,9 @@ mod tests {
     fn extra_opts_land_before_the_separator() {
         let target = SshTarget {
             dest: "mybox".into(),
+            managed_generation: None,
+            auth_agent: None,
+            run_id: None,
             extra_opts: vec!["-p".into(), "2222".into()],
         };
         let args =

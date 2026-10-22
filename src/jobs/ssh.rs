@@ -3,9 +3,9 @@
 //! No scheduler: the target is a plain server you can `ssh` into. Everything
 //! shells out to the `ssh` binary (like the k8s backend shells out to
 //! `kubectl`), so auth is your `~/.ssh/config` + agent/keys — orx never reads a
-//! key. On unix, connections are multiplexed (ControlMaster) so the many status/log
-//! polls reuse one TCP session instead of a handshake apiece.
-//! Win32-OpenSSH cannot, so on Windows background calls need an agent key or no passphrase.
+//! key. A detached local service shares one persistent helper channel per target.
+//! Unix attaches only to an authenticated master; Windows keeps the explicitly
+//! authenticated ssh process alive. Background user-host work never logs in.
 //!
 //! The handle is a remote run directory `~/.orx/runs/<run_id>/` holding:
 //!   run.sh      the launcher (exported env + snapshot-and-run payload)
@@ -17,6 +17,7 @@
 mod container;
 #[cfg(unix)]
 mod prepared;
+pub(crate) mod service;
 #[cfg(unix)]
 mod sharing;
 pub use container::{
@@ -140,10 +141,16 @@ pub async fn resolve_launch(args: &crate::ExpRunArgs) -> Result<ResolvedLaunch> 
 /// (`SshTarget::alias`); backends that learn an endpoint at runtime (an
 /// OpenResearch box on a provider-assigned host:port) pass an explicit
 /// `user@host` plus the options no config file knows about.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct SshTarget {
     /// What goes after `--`: an alias, or `user@host`.
     pub dest: String,
+    #[serde(default)]
+    pub managed_generation: Option<String>,
+    #[serde(default)]
+    pub auth_agent: Option<String>,
+    #[serde(default)]
+    pub run_id: Option<String>,
     /// Extra ssh args before `--` (e.g. `["-p", "2222", "-o", …]`).
     pub extra_opts: Vec<String>,
 }
@@ -167,10 +174,19 @@ pub enum HostKeyPolicy {
 }
 
 impl SshTarget {
+    pub fn for_run(mut self, run_id: &str) -> Self {
+        self.run_id = Some(run_id.to_owned());
+        self
+    }
+
     /// A bare alias — `~/.ssh/config` alone decides the endpoint.
     pub fn alias(host: &str) -> Self {
         Self {
             dest: host.to_string(),
+            managed_generation: None,
+            auth_agent: crate::local::shell_env::var("SSH_AUTH_SOCK")
+                .map(|value| value.to_string_lossy().into_owned()),
+            run_id: None,
             extra_opts: Vec::new(),
         }
     }
@@ -198,7 +214,14 @@ impl SshTarget {
                 ]);
             }
         }
-        Self { dest, extra_opts }
+        Self {
+            dest,
+            extra_opts,
+            managed_generation: None,
+            auth_agent: crate::local::shell_env::var("SSH_AUTH_SOCK")
+                .map(|value| value.to_string_lossy().into_owned()),
+            run_id: None,
+        }
     }
 }
 
@@ -226,6 +249,7 @@ fn control_path(target: &SshTarget) -> PathBuf {
     let mut h = std::collections::hash_map::DefaultHasher::new();
     target.dest.hash(&mut h);
     target.extra_opts.hash(&mut h);
+    target.auth_agent.hash(&mut h);
     control_dir().join(format!("{:016x}", h.finish()))
 }
 
@@ -420,35 +444,6 @@ pub(crate) async fn interactive_args(
     })
 }
 
-#[cfg(not(unix))]
-pub(crate) async fn master_is_running(_target: &SshTarget) -> Result<bool> {
-    Ok(false)
-}
-
-#[cfg(unix)]
-pub(crate) async fn master_is_running(target: &SshTarget) -> Result<bool> {
-    prepare_control_dir()?;
-    if target.extra_opts.is_empty() {
-        let connection = prepared::prepare(target, false).await?;
-        return control_master(
-            target,
-            &connection
-                .path
-                .with_file_name(&connection.publication.socket_name),
-            &ssh_opts_prepared(target, true, &connection),
-            "check",
-        )
-        .await;
-    }
-    control_master(
-        target,
-        &control_path(target),
-        &ssh_opts(target, true),
-        "check",
-    )
-    .await
-}
-
 #[cfg(unix)]
 async fn control_master(
     target: &SshTarget,
@@ -546,10 +541,34 @@ pub(crate) async fn ssh_run(
     remote_cmd: &str,
     stdin: Option<&str>,
 ) -> Result<String> {
-    ssh_run_bytes(target, remote_cmd, stdin.map(str::as_bytes)).await
+    service::execute(target, remote_cmd, stdin.map(str::as_bytes)).await
 }
 
-async fn ssh_run_bytes(
+pub(crate) async fn ssh_status(
+    target: &SshTarget,
+    command: &str,
+    input: Option<&str>,
+) -> Result<String> {
+    service::execute_lane(target, command, input.map(str::as_bytes), "status").await
+}
+
+pub(crate) async fn ssh_control(
+    target: &SshTarget,
+    command: &str,
+    input: Option<&str>,
+) -> Result<String> {
+    service::execute_lane(target, command, input.map(str::as_bytes), "control").await
+}
+
+pub(crate) async fn direct_run(
+    target: &SshTarget,
+    command: &str,
+    input: Option<&str>,
+) -> Result<String> {
+    direct_run_bytes(target, command, input.map(str::as_bytes)).await
+}
+
+pub(crate) async fn direct_run_bytes(
     target: &SshTarget,
     remote_cmd: &str,
     stdin: Option<&[u8]>,
@@ -612,40 +631,7 @@ async fn ssh_run_file(
     remote_cmd: &str,
     source: &std::path::Path,
 ) -> Result<String> {
-    prepare_control_dir()?;
-    #[cfg(unix)]
-    if target.extra_opts.is_empty() {
-        prepared::prepare(target, false).await?;
-    }
-    let mut child = Command::new("ssh")
-        .env("ORX_SSH_PROBE", "1")
-        .args(ssh_opts(target, true))
-        .arg("--")
-        .arg(&target.dest)
-        .arg(remote_cmd)
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .kill_on_drop(true)
-        .spawn()
-        .map_err(|e| anyhow!("Could not run ssh: {e}"))?;
-    let mut file = tokio::fs::File::open(source).await?;
-    if let Some(mut pipe) = child.stdin.take() {
-        tokio::io::copy(&mut file, &mut pipe).await?;
-        drop(pipe);
-    }
-    let out = child
-        .wait_with_output()
-        .await
-        .map_err(|e| anyhow!("ssh wait failed: {e}"))?;
-    if !out.status.success() {
-        return Err(anyhow!(
-            "ssh {} failed: {}",
-            target.dest,
-            String::from_utf8_lossy(&out.stderr).trim()
-        ));
-    }
-    Ok(String::from_utf8_lossy(&out.stdout).into_owned())
+    service::upload(target, remote_cmd, source).await
 }
 
 /// Source uploads are restarted a few times on failure: a dropped SSH
@@ -843,7 +829,7 @@ pub async fn inspect_job(
 
 async fn inspect_host_job(target: &SshTarget, dir: &str) -> Result<JobState> {
     let script = host_job_script(dir);
-    let out = ssh_run(target, &format!("bash -c {}", sh_quote(&script)), None).await?;
+    let out = ssh_status(target, &format!("bash -c {}", sh_quote(&script)), None).await?;
     parse_job_state(out.trim())
 }
 
@@ -944,6 +930,7 @@ pub const RUN_DIR_MISSING: &str = "the remote run directory no longer exists (wa
 
 /// One poll of the remote log past `skip` lines. Unlike the streaming backends
 /// this returns promptly (the supervisor loops every ~2s); `idle` is unused.
+#[cfg(test)]
 pub async fn stream_logs(
     target: &SshTarget,
     dir: &str,
@@ -985,7 +972,7 @@ pub async fn cancel_job(
     }
 
     let script = host_cancel_script(dir);
-    ssh_run(target, &format!("bash -c {}", sh_quote(&script)), None).await?;
+    ssh_control(target, &format!("bash -c {}", sh_quote(&script)), None).await?;
     Ok(())
 }
 
@@ -1529,6 +1516,10 @@ mod tests {
         };
         let mk = |port: &str| SshTarget {
             dest: "root@h".to_string(),
+            managed_generation: None,
+            auth_agent: crate::local::shell_env::var("SSH_AUTH_SOCK")
+                .map(|value| value.to_string_lossy().into_owned()),
+            run_id: None,
             extra_opts: vec!["-p".into(), port.into()],
         };
         assert_ne!(control_path(&mk("22022")), control_path(&mk("22023")));

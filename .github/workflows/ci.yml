@@ -49,6 +49,9 @@ jobs:
       - name: Interactive chart authoring tests
         run: python3 scripts/test_orx_chart.py
 
+      - name: Shared SSH helper protocol tests
+        run: python3 scripts/test_ssh_helper.py
+
       - name: Release notes composition
         run: python3 scripts/test_release_notes.py
 

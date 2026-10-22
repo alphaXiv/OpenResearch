@@ -283,7 +283,7 @@ pub async fn run_job(spec: &SlurmJobSpec) -> Result<String> {
         script = spec.setup_script,
     );
     ssh_run(
-        &SshTarget::alias(&spec.host),
+        &SshTarget::alias(&spec.host).for_run(&spec.run_id),
         &format!("mkdir -p \"$HOME/{dir}\" && chmod 700 \"$HOME/{dir}\" && bash -s"),
         Some(&setup),
     )
@@ -292,13 +292,13 @@ pub async fn run_job(spec: &SlurmJobSpec) -> Result<String> {
 
     // Write the batch script (owner-only: it embeds tokens) and submit.
     ssh_run(
-        &SshTarget::alias(&spec.host),
+        &SshTarget::alias(&spec.host).for_run(&spec.run_id),
         &format!("umask 077 && cat > \"$HOME/{dir}/job.sbatch\""),
         Some(&render_sbatch(spec)),
     )
     .await?;
     let out = ssh_run(
-        &SshTarget::alias(&spec.host),
+        &SshTarget::alias(&spec.host).for_run(&spec.run_id),
         &format!("cd \"$HOME/{dir}\" && sbatch --parsable job.sbatch"),
         None,
     )
@@ -336,20 +336,15 @@ fn queue_probe(job_id: &str) -> String {
 /// `GONE` means monitoring is unavailable, not that the job terminated.
 /// Accounting can be disabled or unavailable while a job still runs.
 pub async fn inspect_job(host: &str, run_id: &str, job_id: &str) -> Result<JobState> {
-    let dir = run_dir(run_id);
-    let queue = queue_probe(job_id);
-    let cmd = format!(
-        "d=\"$HOME/{dir}\"; \
-         if [ -f \"$d/exit_code\" ]; then echo \"EXIT $(cat \"$d/exit_code\")\"; \
-         else queue=$({queue}); \
-         case \"$queue\" in \
-         SQ*) echo \"$queue\";; \
-         *) if st=$(sacct -nPX -j {job_id} -o State 2>/dev/null) && [ -n \"$st\" ]; then echo \"SA $st\"; \
-         elif [ \"$queue\" = GONE ]; then echo GONE; else echo UNAVAILABLE; fi;; esac; fi",
-        job_id = sh_quote(job_id),
-    );
-    let out = ssh_run(&SshTarget::alias(host), &cmd, None).await?;
-    Ok(map_inspect_token(out.trim()))
+    let value = super::ssh::service::request(
+        &SshTarget::alias(host).for_run(run_id),
+        serde_json::json!({"op":"slurm", "run":run_id, "job":job_id}),
+    )
+    .await?;
+    let token = value["token"]
+        .as_str()
+        .ok_or_else(|| anyhow!("Missing Slurm status response"))?;
+    Ok(map_inspect_token(token.trim()))
 }
 
 /// Pure token → stage mapping (unit-tested; Slurm state names are stable).
@@ -417,10 +412,10 @@ fn map_inspect_token(out: &str) -> JobState {
 }
 
 /// Cancellation succeeds when accepted or the controller confirms the job is absent.
-pub async fn cancel_job(host: &str, job_id: &str) -> Result<()> {
+pub async fn cancel_job(host: &str, run_id: &str, job_id: &str) -> Result<()> {
     let queue = queue_probe(job_id);
-    ssh_run(
-        &SshTarget::alias(host),
+    super::ssh::ssh_control(
+        &SshTarget::alias(host).for_run(run_id),
         &format!(
             "if error=$(scancel {} 2>&1); then exit 0; \
              elif [ \"$({queue})\" = GONE ]; then exit 0; \
@@ -706,7 +701,7 @@ mod tests {
         // Cancel path: scancel'd job leaves the queue without an exit code.
         let job_b = run_job(&mk(&run_b, "sleep 300")).await.unwrap();
         poll(run_b.clone(), job_b.clone(), &["RUNNING", "SCHEDULING"]).await;
-        cancel_job(&host, &job_b).await.unwrap();
+        cancel_job(&host, &run_b, &job_b).await.unwrap();
         let after = poll(run_b, job_b, &["CANCELED", "GONE", "ERROR"]).await;
         // Best-effort teardown before asserting — don't litter the cluster.
         let _ = ssh_run(&SshTarget::alias(&host), &cleanup, None).await;

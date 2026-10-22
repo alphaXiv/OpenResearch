@@ -746,14 +746,8 @@ pub(super) async fn ssh_master_status(Query(req): Query<SshPreflightReq>) -> Api
     if host.is_empty() {
         return Err(bad_request("host is required"));
     }
-    // A missing master is meaningful only on platforms that support multiplexing.
-    // Windows opens a new SSH connection for each command; reporting false here
-    // makes a successful preflight immediately look disconnected in the dashboard.
-    let running = if cfg!(unix) {
-        Some(crate::jobs::ssh::master_is_running(&crate::jobs::ssh::SshTarget::alias(host)).await?)
-    } else {
-        None
-    };
+    let running =
+        crate::jobs::ssh::service::healthy(&crate::jobs::ssh::SshTarget::alias(host)).await;
     Ok(Json(json!({ "running": running })))
 }
 
