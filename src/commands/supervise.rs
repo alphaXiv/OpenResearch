@@ -1395,11 +1395,14 @@ async fn run_slurm(
                 job.stage = "CANCELED".into();
             }
         }
-        let error = match &observed {
+        let status_error = match &observed {
             Err(err) => Some(format!("Monitoring unavailable: {err}. Reconnect with orx compute connect slurm --host {}. The job has not been declared stopped.", ssh::sh_quote(&host))),
             Ok(job) if matches!(job.stage.as_str(), "GONE" | "UNAVAILABLE") => Some("Monitoring unavailable: no exit status or scheduler record. Check cluster/accounting availability; the job has not been declared stopped.".into()),
             _ => None,
-        }.or_else(|| log_error_rx.borrow().clone());
+        };
+        let error = status_error
+            .clone()
+            .or_else(|| log_error_rx.borrow().clone());
         match (&error, &last_error) {
             (Some(message), last) if last.as_ref() != Some(message) => {
                 eprintln!("supervise {run_id}: {message}");
@@ -1427,7 +1430,7 @@ async fn run_slurm(
                 Err(err) => eprintln!("supervise {run_id}: could not save monitoring state: {err}"),
             }
         }
-        if error.is_some() {
+        if status_error.is_some() {
             tokio::time::sleep(POLL_INTERVAL).await;
             continue;
         }

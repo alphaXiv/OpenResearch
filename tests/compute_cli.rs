@@ -712,8 +712,39 @@ esac
     drop(restarted);
     // Cancelling after the scheduler has already forgotten the job also finishes.
     db.execute("UPDATE runs SET status='running', ended_at=NULL, backend_json='{\"kind\":\"slurm_job\",\"namespace\":\"lab\",\"jobId\":\"42\"}' WHERE id='00000000-0000-4000-8000-000000000001'", []).unwrap();
-    let _already_gone = spawn();
+    let already_gone = spawn();
     wait(&|| status() == "cancelled");
+    drop(already_gone);
+
+    // Queued jobs can be cancelled before Slurm creates their log.
+    std::fs::remove_file(
+        sandbox
+            .0
+            .join(".orx/runs/00000000-0000-4000-8000-000000000001/log"),
+    )
+    .unwrap();
+    db.execute("UPDATE runs SET status='starting', ended_at=NULL, backend_json='{\"kind\":\"slurm_job\",\"namespace\":\"lab\",\"jobId\":\"42\",\"monitoringError\":\"Waiting for logs\"}' WHERE id='00000000-0000-4000-8000-000000000001'", []).unwrap();
+    std::fs::write(sandbox.0.join("phase"), "hidden").unwrap();
+    let _without_log = spawn();
+    wait(&|| {
+        metadata()["monitoringError"]
+            .as_str()
+            .is_some_and(|error| error.contains("Remote log is not available"))
+    });
+    assert_ne!(status(), "cancelled");
+    std::fs::write(sandbox.0.join("accept"), "").unwrap();
+    std::fs::write(sandbox.0.join("phase"), "gone").unwrap();
+    let deadline = Instant::now() + Duration::from_secs(35);
+    while status() != "cancelled" {
+        assert!(
+            Instant::now() < deadline,
+            "missing logs blocked cancellation"
+        );
+        std::thread::sleep(Duration::from_millis(100));
+    }
+    assert!(metadata()["monitoringError"]
+        .as_str()
+        .is_some_and(|error| error.contains("Remote log is not available")));
 }
 
 #[test]
