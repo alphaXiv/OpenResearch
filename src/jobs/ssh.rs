@@ -640,9 +640,9 @@ async fn ssh_run_file(
     Ok(String::from_utf8_lossy(&out.stdout).into_owned())
 }
 
-/// Writes `source` to the child's stdin and waits for it. A write failure is
-/// returned only if the child succeeded, so a remote command that exits early
-/// (e.g. on a quota error) reports its own stderr instead of a broken pipe.
+/// Writes `source` to the child's stdin and waits for it. If the child failed,
+/// its stderr leads, so a remote command that exits early (e.g. on a quota
+/// error) is reported instead of a broken pipe.
 async fn feed_and_wait(
     mut child: tokio::process::Child,
     source: &std::path::Path,
@@ -652,12 +652,18 @@ async fn feed_and_wait(
         Some(mut pipe) => tokio::io::copy(&mut file, &mut pipe).await.map(|_| ()),
         None => Ok(()),
     };
-    let out = child
+    let mut out = child
         .wait_with_output()
         .await
         .map_err(|e| anyhow!("ssh wait failed: {e}"))?;
-    if out.status.success() {
-        copied?;
+    match copied {
+        Err(e) if out.status.success() => return Err(e.into()),
+        // A broken pipe just means the remote exited early; anything else (e.g. a local read error) is context.
+        Err(e) if e.kind() != std::io::ErrorKind::BrokenPipe => {
+            out.stderr
+                .extend_from_slice(format!("\n(local archive stream failed: {e})").as_bytes());
+        }
+        _ => {}
     }
     Ok(out)
 }
