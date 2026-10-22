@@ -522,25 +522,37 @@ fn parse_nvidia_smi_csv(out: &str) -> Vec<Gpu> {
         .collect()
 }
 
+/// Writes `dir/pid` for a group whose leader has exited; the caller owns and must reap the survivor.
+#[cfg(all(test, unix))]
+pub(crate) fn spawn_lingering_group(dir: &Path) -> std::process::Child {
+    use std::os::unix::process::CommandExt;
+    let mut leader = std::process::Command::new("sleep")
+        .arg("30")
+        .process_group(0)
+        .spawn()
+        .unwrap();
+    let survivor = std::process::Command::new("sleep")
+        .arg("30")
+        .process_group(i32::try_from(leader.id()).unwrap())
+        .spawn()
+        .unwrap();
+    leader.kill().unwrap();
+    leader.wait().unwrap();
+    std::fs::write(dir.join("pid"), leader.id().to_string()).unwrap();
+    survivor
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
     #[cfg(unix)]
     #[test]
-    fn process_group_stays_alive_while_a_child_outlives_the_launcher() {
-        use std::os::unix::process::CommandExt;
+    fn process_group_stays_alive_while_a_survivor_outlives_the_leader() {
         let dir = std::env::temp_dir().join(format!("orx-group-probe-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(&dir).unwrap();
         assert!(!process_group_alive(&dir));
-        let mut launcher = std::process::Command::new(crate::local::bash::program())
-            .args(["-c", "sleep 30 & echo $! > child"])
-            .current_dir(&dir)
-            .process_group(0)
-            .spawn()
-            .unwrap();
-        std::fs::write(dir.join("pid"), launcher.id().to_string()).unwrap();
-        launcher.wait().unwrap();
+        let mut survivor = spawn_lingering_group(&dir);
         assert!(process_group_alive(&dir));
         std::fs::write(dir.join("exit_code"), "143").unwrap();
         assert!(orphaned_job_is_running(&dir).unwrap());
@@ -551,13 +563,8 @@ mod tests {
             .set_modified(std::time::SystemTime::now() - 2 * LINGERING_GROUP_WINDOW)
             .unwrap();
         assert!(!orphaned_job_is_running(&dir).unwrap());
-        let child = std::fs::read_to_string(dir.join("child")).unwrap();
-        // SAFETY: the pid names the sleep this test started.
-        unsafe { libc::kill(child.trim().parse().unwrap(), libc::SIGKILL) };
-        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
-        while process_group_alive(&dir) && std::time::Instant::now() < deadline {
-            std::thread::sleep(std::time::Duration::from_millis(20));
-        }
+        survivor.kill().unwrap();
+        survivor.wait().unwrap();
         assert!(!process_group_alive(&dir));
         std::fs::remove_dir_all(dir).unwrap();
     }

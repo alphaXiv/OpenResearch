@@ -4234,20 +4234,12 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn orphan_cleanup_keeps_a_finished_run_while_its_process_group_lives() {
-        use std::os::unix::process::CommandExt;
         let dir = std::env::temp_dir().join(format!("orx-group-orphan-{}", uuid::Uuid::new_v4()));
         let store = Store::open_at(dir.clone()).unwrap();
         let run = uuid::Uuid::new_v4().to_string();
         project_with_run_artifacts(&store, "cancelled", &run, &"f".repeat(64));
         let run_dir = dir.join("local-runs").join(&run);
-        let mut launcher = std::process::Command::new(crate::local::bash::program())
-            .args(["-c", "sleep 30 & echo $! > child"])
-            .current_dir(&run_dir)
-            .process_group(0)
-            .spawn()
-            .unwrap();
-        std::fs::write(run_dir.join("pid"), launcher.id().to_string()).unwrap();
-        launcher.wait().unwrap();
+        let mut survivor = crate::jobs::localbox::spawn_lingering_group(&run_dir);
         std::fs::write(run_dir.join("exit_code"), "143").unwrap();
         let refused = store.delete_local_project("cancelled").unwrap_err();
         assert!(
@@ -4257,16 +4249,8 @@ mod tests {
         store.conn.execute("DELETE FROM runs", []).unwrap();
         store.cleanup_orphaned_run_artifacts().unwrap();
         assert!(run_dir.join("repo/output").is_file());
-        let child = std::fs::read_to_string(run_dir.join("child")).unwrap();
-        // SAFETY: the pid names the sleep this test started.
-        unsafe { libc::kill(child.trim().parse().unwrap(), libc::SIGKILL) };
-        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
-        while crate::jobs::localbox::orphaned_job_is_running(&run_dir).unwrap()
-            && std::time::Instant::now() < deadline
-        {
-            std::thread::sleep(std::time::Duration::from_millis(20));
-        }
-        assert!(!crate::jobs::localbox::orphaned_job_is_running(&run_dir).unwrap());
+        survivor.kill().unwrap();
+        survivor.wait().unwrap();
         store.cleanup_orphaned_run_artifacts().unwrap();
         assert!(!run_dir.exists());
         drop(store);
