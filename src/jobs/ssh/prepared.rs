@@ -199,9 +199,17 @@ fn snapshot_contents(
         }
         for line in query.output.lines() {
             if let Some((key, value)) = line.split_once(' ') {
+                // ssh -G loses filename-list quoting; let the included config preserve it.
                 if !matches!(
                     key,
-                    "hostname" | "user" | "port" | "controlpath" | "proxyjump" | "proxycommand"
+                    "hostname"
+                        | "user"
+                        | "port"
+                        | "controlpath"
+                        | "proxyjump"
+                        | "proxycommand"
+                        | "userknownhostsfile"
+                        | "globalknownhostsfile"
                 ) {
                     let value = if matches!(
                         key,
@@ -520,6 +528,35 @@ mod tests {
             snapshot_contents(std::slice::from_ref(&query), &proxies, config, false).unwrap();
         assert!(without_system.ends_with("Include \"/home/me/.ssh/config\"\n"));
         assert!(!without_system.contains("/etc/ssh/ssh_config"));
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn known_hosts_lists_keep_quoted_filenames() {
+        let temp = crate::local::git::TemporaryDirectory::new("orx-known-hosts").unwrap();
+        let config = temp.path().join("config");
+        std::fs::write(
+            &config,
+            "Host lab\n HostName example.invalid\n IdentityFile none\n IdentityAgent none\n UserKnownHostsFile \"~/research keys/known_hosts\" \"~/second keyfile\"\n GlobalKnownHostsFile \"/tmp/global hostkeys\" /tmp/other\n StrictHostKeyChecking yes\n",
+        ).unwrap();
+        let prepared = resolve("lab", Some(&config)).await.unwrap();
+        let output = Command::new("ssh")
+            .args(["-vvv", "-F"])
+            .arg(&prepared.snapshot)
+            .args(["-oProxyCommand=false", "-oBatchMode=yes", "lab", "true"])
+            .output()
+            .await
+            .unwrap();
+        let debug = String::from_utf8_lossy(&output.stderr);
+        for path in ["~/research keys/known_hosts", "~/second keyfile"] {
+            assert!(
+                debug.contains(&format!("expanded UserKnownHostsFile '{path}' ->")),
+                "{debug}"
+            );
+        }
+        let snapshot = std::fs::read_to_string(&prepared.snapshot).unwrap();
+        assert!(!snapshot.contains("  userknownhostsfile "));
+        assert!(!snapshot.contains("  globalknownhostsfile "));
     }
 
     fn owner_check_error() -> crate::error::Error {
