@@ -267,6 +267,9 @@ impl LocalPlane {
             args.backend = Some("local".to_string());
         }
         crate::compute::validate_run_args(&args)?;
+        if let Some(backend) = args.backend.as_deref() {
+            warn_unreachable_trackio(backend);
+        }
         args.agent_origin = crate::agent_origin();
         // Coarse backend label for analytics; the backend name is already an
         // enum, never user data. Recorded before the (borrowing) dispatch below.
@@ -329,7 +332,7 @@ impl LocalPlane {
         };
         // Key event, fired only on a successful launch. Coarse backend only.
         // Validation above guarantees a known backend before either dispatch path.
-        if result.is_ok() {
+        if result.is_ok() && backend_label.as_deref() != Some("openresearch") {
             let target = backend_label.as_deref().unwrap_or("unknown");
             crate::telemetry::capture_experiment_started("run", true, Some(target));
             // A launch out of the bundled demo is the clearest signal the demo
@@ -572,6 +575,20 @@ impl LocalPlane {
         println!("  # …edit, then…");
         println!("  git commit -am \"<msg>\"");
         Ok(())
+    }
+}
+
+/// hf runs get no saved variables, so only other remote backends can be misdirected.
+fn warn_unreachable_trackio(backend: &str) {
+    let Some(url) = crate::local::trackio::server_url() else {
+        return;
+    };
+    let remote = crate::compute::backend(backend).is_ok_and(|b| b.capabilities().remote);
+    if remote && backend != "hf" && crate::local::trackio::is_local_only(&url) {
+        eprintln!(
+            "warning: {} is {url}, which a {backend} run may not reach, so its Trackio metrics may not arrive. Save an address the remote machine can reach.",
+            crate::local::trackio::SERVER_URL
+        );
     }
 }
 

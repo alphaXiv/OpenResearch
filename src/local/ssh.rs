@@ -4,8 +4,6 @@
 //! server). The run row lives in the local store only; a detached
 //! `orx supervise` watches the remote process.
 
-use std::collections::HashMap;
-
 use crate::commands::exp::spawn_detached_supervise;
 use crate::compute::SourceSnapshot;
 use crate::error::{anyhow, Result};
@@ -71,11 +69,15 @@ pub async fn submit_local_ssh_with_source(
         container.as_ref(),
     )
     .await?;
-    let script = crate::compute::staged_script(&run_command);
+    let script = format!(
+        "{} {}",
+        crate::compute::TENSORBOARD_LOGDIR_EXPORT,
+        crate::compute::staged_script(&run_command)
+    );
 
     // The remote env: everything the user synced (API keys), plus the tokens
     // the run script expects. Exported inside run.sh (written owner-only).
-    let mut env: HashMap<String, String> = crate::config::list_synced_env().into_iter().collect();
+    let mut env = crate::config::run_env(&run_id);
     if let Ok(hf_token) = crate::jobs::huggingface::resolve_token() {
         env.entry("HF_TOKEN".to_string()).or_insert(hf_token);
     }
@@ -84,6 +86,7 @@ pub async fn submit_local_ssh_with_source(
         ssh_container: container.clone(),
         monitoring_error: None,
         cancellation_accepted: false,
+        rental_lease: None,
         kind: "ssh_job".to_string(),
         namespace: Some(target.dest.clone()),
         job_id: Some(remote_dir.clone()),

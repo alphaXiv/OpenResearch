@@ -3,6 +3,7 @@
   --color-transparent: transparent;
   --color-current: currentColor;
   --color-white: #fff;
+  --color-black: #000;
   --color-background: var(--base);
   --color-canvas: var(--canvas);
   --color-panel: var(--panel);
@@ -22,6 +23,7 @@
   --color-accent-red: var(--accent-red);
   --color-accent-teal: var(--accent-teal);
   --color-accent-blue: var(--accent-blue);
+  --color-lineage: var(--lineage);
   --color-accent-amber: var(--accent-amber);
   --color-accent-green: var(--accent-green);
   --color-accent-purple: var(--accent-purple);
@@ -98,6 +100,7 @@
   --shadow-plan-menu: 0 6px 20px rgb(0 0 0 / 12%);
   --shadow-logo: 0 0 0 1px rgb(0 0 0 / 8%);
   --shadow-tree: 0 1px 2px rgb(0 0 0 / 4%);
+  --shadow-row-selected: inset 2px 0 0 var(--primary);
   --shadow-tree-hover: 0 2px 8px rgb(0 0 0 / 8%);
   --shadow-tree-live: 0 2px 12px rgb(32 154 132 / 20%);
   --shadow-file-line: inset 2px 0 0 var(--accent-blue);
@@ -141,6 +144,7 @@
   --accent-red: #d94654;
   --accent-teal: #209a84;
   --accent-blue: #3a8dff;
+  --lineage: #527aa3;
   --accent-amber: #da9100;
   --accent-green: #5eb64c;
   --accent-purple: #9c5cff;
@@ -190,7 +194,9 @@
   --term-app-ansi-bright-cyan: #209a84;
   --term-app-ansi-bright-white: #171717;
   --tool-shimmer: color-mix(in srgb, var(--text) 58%, var(--subtext));
-  --editor-selection: var(--code-selection);
+  /* Sits above the highlighted text, so a light translucent veil keeps selected syntax readable.
+     Literal rgb, not color-mix: macOS 11 WebKit would drop the selection entirely. */
+  --editor-selection: rgb(22 22 22 / 12%);
   /* Shared reading width for chat, markdown, and plan surfaces. */
   --readable-col: 840px;
   --border-strong: var(--border);
@@ -227,10 +233,12 @@
   --selection-background: #606060;
   --selection-text: #ffffff;
   --code-selection: var(--selection-background);
+  --editor-selection: rgb(255 255 255 / 16%);
   --text: #e5e5e5;
   --subtext: #a3a3a3;
   --muted: #737373;
   --primary: #ffb3ad;
+  --lineage: #8eafd2;
   --primary-subtle: #33191b;
   --border: #525252;
   --border-variant: #404040;

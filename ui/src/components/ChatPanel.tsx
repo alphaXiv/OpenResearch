@@ -4,6 +4,8 @@ import { fitSidebarRows, sidebarRowHeight, type SidebarRow } from "../sidebarLay
 import { useVirtualizer, defaultRangeExtractor, type Range as VirtualRange } from "@tanstack/react-virtual";
 import { markLiveUpdate } from "../queries/live";
 import { removeSession as removeCachedSession } from "../queries/invalidation";
+import { nativeOptions, sessionAcpHarness } from "../acp";
+import { setChatConfiguration } from "../api";
 import {
   isCurrentScope,
   setScopedQueryData,
@@ -21,7 +23,7 @@ import {
   getHarnessSetupCommandsQuery,
   getSkillsQuery,
 } from "../queries/settings";
-import { listChatSessionsQuery, getChatMessagesQuery, listNativeChatsQuery, readSidebarChatPage } from "../queries/chat";
+import { listChatActiveRunsQuery, listChatSessionsQuery, getChatMessagesQuery, listNativeChatsQuery, readSidebarChatPage } from "../queries/chat";
 import { getProjectStarterPromptsQuery, listProjectsQuery, listProjectActivityQuery } from "../queries/projects";
 import { getCodeTreeQuery } from "../queries/files";
 import {
@@ -66,6 +68,7 @@ import {
   SquareTerminal,
   ToggleRight,
   TriangleAlert,
+  Trash2,
   Users,
   WifiOff,
   X,
@@ -87,6 +90,7 @@ import {
   cancelQueuedMessage,
   chatAttachmentUrl,
   createChatSession,
+  openSideChat,
   getChatSession,
   deleteChatSession,
   DEMO_FIGURE_SESSION_ID,
@@ -136,14 +140,18 @@ import {
 import { getLocale } from "../paraglide/runtime.js";
 import { activePath, forkPositions } from "../transcriptTree";
 import {
-  splitTurnParts,
+  groupResponseMessages,
+  isParentUpdate,
+  parentUpdateText,
+  splitResponseParts,
   isUsageLimitPart,
   isModelAccessLimitPart,
   unreadAfterBusyChange,
   isTurnStatusPart,
-  withoutDuplicateTurnError,
+  splitResponseTurn,
   partIsVisible,
   pendingQuestionId,
+  hasPendingInput,
   partsTailToolId,
   streamTailIsText,
   streamTailTool,
@@ -179,6 +187,7 @@ import { LitSourceLogo, parseOrxLit, paperUrl } from "./LitSourceLogo";
 import { LitSourcesList } from "./LitSourcesPicker";
 import { ChatImageScope, Md } from "./Md";
 import { PlanStrip } from "./PlanStrip";
+import { ExperimentRunBanner } from "./ExperimentRunBanner";
 import { SETTINGS_NAV, harnessSetupPath, type SettingsTab } from "./SettingsPage";
 import { SkillMenu } from "./SkillMenu";
 import { FileMentionMenu } from "./FileMentionMenu";
@@ -186,7 +195,7 @@ import { ComposerSkillChips, MessageWithChips, skillMarginSpaces } from "./Skill
 import { WorkspaceConnection } from "./WorkspaceConnection";
 import {
   defaultSelection,
-  HARNESS_LABELS,
+  harnessLabel,
   ModelPicker,
   usePopover,
   type ModelSelection,
@@ -1474,6 +1483,7 @@ function computeToolActivity(part: ChatPart): ToolActivity {
   const resourceExperimentIds = normalizedTargetIds(inputStringArray(normalizedInput, "experimentTargetIds"));
   const filePath = inputString(normalizedInput, "filePath", "file_path", "notebookPath", "notebook_path", "path");
   const description = inputString(normalizedInput, "description");
+  if (part.state?.title === "subagent") return { kind: "agent", label: description ?? m.activity_ran_subagent() };
   const toolSegments = tool.toLowerCase().split(/(?::|\.|__)+/);
   const baseTool = toolSegments.at(-1) ?? tool.toLowerCase();
   if (baseTool === "run" && toolSegments.includes("web")) {
@@ -1505,6 +1515,7 @@ function computeToolActivity(part: ChatPart): ToolActivity {
     ["subagentactivity", "subagent"],
   ]).get(baseTool) ?? baseTool;
   switch (normalizedTool) {
+    case "shell":
     case "bash": {
       if (!rawCommand && !commandArgv?.length) return { kind: "command", label: m.chat_panel_ran_a_command() };
       const command = meaningfulCommand(rawCommand ?? commandArgv?.join(" ") ?? "");
@@ -1798,7 +1809,7 @@ function computeToolActivity(part: ChatPart): ToolActivity {
       // liveness is the shimmer, and the current step lives in its tab.
       return { kind: "agent", label: description ?? m.activity_ran_subagent() };
     case "subagent":
-      return { kind: "agent", label: subagentLine(normalizedInput) };
+      return { kind: "agent", label: isParentUpdate(part) ? m.activity_sent_update_to_parent() : description ?? subagentLine(normalizedInput) };
     case "error":
       return { kind: "command", label: m.chat_panel_tool_failed() };
     case "importedchat":
@@ -2247,7 +2258,7 @@ interface SquashedToolPart {
 }
 
 function squashableToolPartKey(part: ChatPart, activity: ToolActivity): string | null {
-  if (part.state?.status !== "completed") return null;
+  if (isSubagentPart(part) || part.state?.status !== "completed") return null;
   return JSON.stringify([
     activity.kind,
     activity.label,
@@ -2310,7 +2321,7 @@ function TurnStatusRow({
   if (part.id === "turn-retry") {
     const label = retryStatusLabel(input ?? {}, now);
     return (
-      <div className="turn-retry-row flex items-center gap-2 py-1 px-1 text-sm text-subtext">
+      <div className="turn-retry-row mt-4 flex items-center gap-2 py-1 px-1 text-sm text-subtext">
         <Spinner />
         <span>{label}</span>
       </div>
@@ -2325,7 +2336,7 @@ function TurnStatusRow({
   const Icon = temporaryApiError ? WifiOff : usageLimited ? Gauge : TriangleAlert;
   const errorMessage = cleanToolError(part.state?.error || m.chat_turn_incomplete());
   return (
-    <details className="turn-usage-limit group/limit text-base text-subtext">
+    <details className="turn-usage-limit group/limit mt-4 text-base text-subtext">
       <summary className="flex w-fit max-w-full items-center gap-2 cursor-pointer list-none rounded-sm focus-visible:outline-2 focus-visible:outline-text [&::-webkit-details-marker]:hidden">
         <Icon size={18} className={temporaryApiError ? "shrink-0 text-subtext" : "shrink-0 text-accent-red"} aria-hidden="true" />
         <span>{label}</span>
@@ -2444,7 +2455,10 @@ function ToolRow({
  * aggregate description and a collapsible list of semantic rows. */
 function ToolGroup({
   parts,
+  expansionState,
   pendingTail,
+  streaming = false,
+  onOpenSubagent,
   onOpenFile,
   onOpenRun,
   onOpenSpawnedSession,
@@ -2453,7 +2467,10 @@ function ToolGroup({
   experimentName,
 }: {
   parts: ChatPart[];
+  expansionState?: Map<string, boolean>;
   pendingTail?: boolean;
+  streaming?: boolean;
+  onOpenSubagent?: OpenSubagent;
   onOpenFile?: OpenTranscriptFile;
   onOpenRun?: OpenTranscriptTarget;
   onOpenSpawnedSession?: (sessionId: string) => void;
@@ -2461,15 +2478,18 @@ function ToolGroup({
   onOpenExperiment?: OpenTranscriptTarget;
   experimentName?: (experimentId: string) => string;
 }) {
-  const [open, setOpen] = useState(false);
-  const [hasOpened, setHasOpened] = useState(false);
+  const [open, setOpen] = useState(() => expansionState?.get(parts[0].id) ?? false);
+  const [hasOpened, setHasOpened] = useState(open);
   const toggle = () => {
     setHasOpened(true);
-    setOpen((value) => !value);
+    expansionState?.set(parts[0].id, !open);
+    setOpen(!open);
   };
   const displayParts = squashToolParts(parts);
   const activities = displayParts.map(({ activity }) => activity);
-  const tail = pendingTail ? displayParts.at(-1) : undefined;
+  const tail = pendingTail ? displayParts.at(-1) : streaming
+    ? [...displayParts].reverse().find(({ part }) => isSubagentPart(part) && part.state?.status === "running")
+    : undefined;
   const tailPart = tail?.part;
   const tailActivity = tail?.activity;
   const rawPending = tailPart?.state?.status !== "error"
@@ -2487,6 +2507,17 @@ function ToolGroup({
     ? pendingActivity.label
     : m.chat_panel_used_tools();
   if (parts.length === 1) {
+    if (isSubagentPart(parts[0])) {
+      return (
+        <div className="tool-group my-3.5 mx-0">
+          <SubagentBlock
+            part={parts[0]}
+            pendingTail={pendingTail || (streaming && parts[0].state?.status === "running")}
+            onOpenSubagent={onOpenSubagent}
+          />
+        </div>
+      );
+    }
     if (pendingActivity) {
       return (
         <div className="tool-group my-3.5 mx-0">
@@ -2572,7 +2603,14 @@ function ToolGroup({
       >
         <div className="tool-group-disclosure-inner">
           <div className="tool-group-rows flex flex-col gap-px mt-0.5 me-0 mb-1 ms-6">
-            {hasOpened && displayParts.map(({ part, count, activity }) => (
+            {hasOpened && displayParts.map(({ part, count, activity }) => isSubagentPart(part) ? (
+              <SubagentBlock
+                key={part.id}
+                part={part}
+                pendingTail={(streaming && part.state?.status === "running") || (pendingTail && part.id === tailPart?.id)}
+                onOpenSubagent={onOpenSubagent}
+              />
+            ) : (
               <ToolRow
                 key={part.id}
                 part={part}
@@ -2737,7 +2775,7 @@ function PromptCard({
     const reason =
       (typeof p.toolInput?.reason === "string" && p.toolInput.reason) || "";
     const description = inputString(toolInput, "description") || "";
-    const explanation = reason || description || permissionActivityLabel(p.tool, toolInput);
+    const explanation = p.header || reason || description || permissionActivityLabel(p.tool, toolInput);
     const headingId = `permission-heading-${part.id}`;
     return (
       <div
@@ -2758,7 +2796,15 @@ function PromptCard({
               {summary}
             </code>
           )}
-          {!done && (
+          {!done && p.nativeChoices?.length ? (
+            <div className="prompt-actions flex flex-wrap items-center justify-end gap-2 pt-0.5">
+              {p.nativeChoices.map((choice) => (
+                <Button key={choice.id} size="small" onClick={() => respond({ answers: [choice.id], approve: choice.kind.startsWith("allow") })}>
+                  {choice.label}
+                </Button>
+              ))}
+            </div>
+          ) : !done && (
             // No resumeMode: the harness picks the right one for an approval.
             // Claude resumes under `bypassPermissions` (the only mode that grants a
             // blocked tool — acceptEdits would re-deny Bash); inline harnesses
@@ -2965,6 +3011,7 @@ function ForkControls({
 
 export const Message = memo(function Message({
   message,
+  responseMessages,
   activePermissionId,
   pendingTailToolId,
   onOpenFile,
@@ -2991,6 +3038,7 @@ export const Message = memo(function Message({
   onSelectFork,
 }: {
   message: ChatMessage;
+  responseMessages?: ChatMessage[];
   activePermissionId: string | null;
   pendingTailToolId?: string | null;
   onOpenFile?: OpenTranscriptFile;
@@ -3062,6 +3110,7 @@ export const Message = memo(function Message({
           <div className="msg-user-edit w-full bg-panel rounded-[16px] py-2.5 px-[15px] flex flex-col gap-2">
             <textarea
               dir="auto"
+              {...{ writingsuggestions: "false" }}
               className="w-full bg-transparent text-base text-text resize-none outline-none field-sizing-content min-h-16"
               aria-label={m.chat_panel_edit_message()}
               value={editDraft}
@@ -3142,15 +3191,14 @@ export const Message = memo(function Message({
       </div>
     );
   }
-  const usageLimit = message.parts.find((part) => part.type === "tool" && isUsageLimitPart(part));
-  const turnStatus = message.parts.find(isTurnStatusPart) ?? usageLimit;
-  const turnParts = message.parts.filter((part) => part !== turnStatus && !(usageLimit && isUsageLimitPart(part)));
-  const regularParts = withoutDuplicateTurnError(turnParts, turnStatus);
-  const temporaryApiError = regularParts.length < turnParts.length && turnParts.at(-1)?.tool === "api_error";
-  const copyText = predictTextTail && !message.completedAt ? "" : responseText(message);
+  const responseTurns = (responseMessages ?? [message]).map(splitResponseTurn);
+  const turns = responseTurns.map((turn) => turn.message);
+  const response = splitResponseParts(turns, predictTextTail);
+  const predictingAnswer = predictTextTail && response.answerMessageId === message.id;
+  const copyText = predictingAnswer && !message.completedAt ? "" : responseText({ ...message, parts: response.answer });
   return (
     <div className="msg-assistant group/turn text-base leading-[1.62] text-text min-w-0">
-      <AssistantTurn message={message} parts={regularParts} options={{
+      <AssistantTurn messages={turns} response={response} options={{
         activePermissionId,
         pendingTailToolId,
         onOpenFile,
@@ -3164,8 +3212,9 @@ export const Message = memo(function Message({
         onOpenSubagent,
         predictTextTail,
       }} />
-      {turnStatus && (
+      {responseTurns.map(({ message: turn, turnStatus, usageLimit, temporaryApiError }) => turnStatus && (
         <TurnStatusRow
+          key={turn.id}
           part={turnStatus}
           usageLimited={Boolean(usageLimit)}
           temporaryApiError={temporaryApiError}
@@ -3173,9 +3222,9 @@ export const Message = memo(function Message({
           recovering={recoveringTurnId === turnStatus.state?.input?.turnId}
           onRecover={onRecover}
         />
-      )}
+      ))}
       {copyText && (
-        <div className="flex opacity-0 transition-opacity duration-80 ease-standard group-hover/turn:opacity-100 group-focus-within/turn:opacity-100">
+        <div className="mt-2 flex justify-end opacity-0 transition-opacity duration-80 ease-standard group-hover/turn:opacity-100 group-focus-within/turn:opacity-100">
           <IconButton
             size="small"
             title={m.chat_copy_response()}
@@ -3190,13 +3239,15 @@ export const Message = memo(function Message({
   );
 });
 
-function AssistantTurn({ message, parts, options }: {
-  message: ChatMessage;
-  parts: ChatPart[];
+function AssistantTurn({ messages, response, options }: {
+  messages: ChatMessage[];
+  response: ReturnType<typeof splitResponseParts>;
   options: Parameters<typeof renderParts>[1];
 }) {
   const streaming = options.predictTextTail ?? false;
-  const { work, answer } = splitTurnParts(parts, streaming);
+  const { work, answer, answerMessageId } = response;
+  const message = messages[messages.length - 1];
+  const answerOptions = { ...options, predictTextTail: streaming && answerMessageId === message.id };
   const [expanded, setExpanded] = useState(false);
   const [, tick] = useState(0);
   useEffect(() => {
@@ -3204,9 +3255,11 @@ function AssistantTurn({ message, parts, options }: {
     const timer = window.setInterval(() => tick((value) => value + 1), 1000);
     return () => window.clearInterval(timer);
   }, [streaming, message.completedAt, work.length]);
-  if (work.length === 0) return <>{renderParts(answer, options)}</>;
-  const end = message.completedAt ?? (streaming ? Date.now() : null);
-  const elapsed = end === null ? null : end - message.createdAt;
+  if (work.length === 0) return <>{renderParts(answer, answerOptions)}</>;
+  const elapsed = messages.reduce<number | null>((total, turn) => {
+    const end = turn.completedAt ?? (streaming && turn.id === message.id ? Date.now() : null);
+    return end === null ? total : (total ?? 0) + Math.max(0, end - turn.createdAt);
+  }, null);
   const duration = elapsed === null ? null : elapsed < 60_000 || elapsed >= 3_600_000
     ? fmtDuration(elapsed)
     : m.chat_work_duration({ minutes: fmtNumber(Math.floor(elapsed / 60_000)), seconds: fmtNumber(Math.floor(elapsed / 1000) % 60) });
@@ -3225,11 +3278,15 @@ function AssistantTurn({ message, parts, options }: {
         </button>
         <div className={`tool-group-disclosure ${expanded ? "open" : ""}`} aria-hidden={!expanded} inert={!expanded}>
           <div className="tool-group-disclosure-inner">
-            <div className="turn-work-content pt-4">{renderParts(work, { ...options, predictTextTail: false, pendingTailToolId: null })}</div>
+            <div className="turn-work-content flex flex-col gap-4 pt-4">
+              {work.map((turn) => (
+                <div key={turn.id}>{renderParts(turn.parts, { ...options, predictTextTail: false, pendingTailToolId: turn.id === message.id ? options.pendingTailToolId : null })}</div>
+              ))}
+            </div>
           </div>
         </div>
       </div>
-      <div className="turn-answer">{renderParts(answer, options)}</div>
+      <div className="turn-answer">{renderParts(answer, answerOptions)}</div>
     </>
   );
 }
@@ -3281,13 +3338,12 @@ function ShellExchangeCard({ part }: { part: ChatPart }) {
 
 /** Shared assistant-parts renderer, reused for a message body and (recursively)
  * for a sub-agent's nested transcript. Coalesces consecutive tool parts into one
- * collapsed group (Claude-desktop style); text / prompt parts break a run and
- * render inline, while reasoning parts are never rendered. A sub-agent spawn
- * part (tool `subagent`) also breaks the run and renders as its own nested
- * block. */
+ * collapsed group, including clickable sub-agent rows. Text and prompts break
+ * a run and render inline; reasoning parts are never rendered. */
 function renderParts(
   parts: ChatPart[],
   opts: {
+    expansionState?: Map<string, boolean>;
     activePermissionId?: string | null;
     pendingTailToolId?: string | null;
     onOpenFile?: OpenTranscriptFile;
@@ -3303,6 +3359,7 @@ function renderParts(
   },
 ): React.ReactNode[] {
   const {
+    expansionState,
     activePermissionId,
     pendingTailToolId,
     onOpenFile,
@@ -3329,7 +3386,10 @@ function renderParts(
       <ToolGroup
         key={`tg-${toolRun[0].id}`}
         parts={toolRun}
+        expansionState={expansionState}
         pendingTail={toolRun.some((part) => part.id === pendingTailToolId)}
+        streaming={predictTextTail}
+        onOpenSubagent={onOpenSubagent}
         onOpenFile={onOpenFile}
         onOpenRun={onOpenRun}
         onOpenSpawnedSession={onOpenSpawnedSession}
@@ -3350,30 +3410,6 @@ function renderParts(
     if (part.type === "tool" && part.tool === "api_error") {
       flushTools();
       rendered.push(<TurnStatusRow key={part.id} part={part} busy={false} recovering={false} temporaryApiError />);
-      continue;
-    }
-    // A sub-agent spawn part streams its own transcript in `children` — render
-    // it as a standalone nested block, not folded into a tool run. Codex tags
-    // its rows `subagent`; Claude's `Task`/`Agent` and OpenCode's `task` are
-    // spawn tools by name (a prose-only agent may have zero children yet still
-    // carry a final report); anything else with children streamed into it is a
-    // spawn too.
-    if (
-      part.type === "tool" &&
-      (isSpawnTool(part.tool) || (part.children?.length ?? 0) > 0)
-    ) {
-      flushTools();
-      rendered.push(
-        <SubagentBlock
-          key={part.id}
-          part={part}
-          // A spawn row runs in parallel with whatever streams after it, so its
-          // shimmer follows its own status while the turn is live — the shared
-          // tail-tool id only ever points at one row and would freeze the rest.
-          pendingTail={(predictTextTail && part.state?.status === "running") || part.id === pendingTailToolId}
-          onOpenSubagent={onOpenSubagent}
-        />,
-      );
       continue;
     }
     if (part.type === "tool") {
@@ -3434,13 +3470,17 @@ function isSpawnTool(tool: string | undefined): boolean {
   return name === "subagent" || name === "task" || name === "agent";
 }
 
+function isSubagentPart(part: ChatPart): boolean {
+  return part.type === "tool" && (isParentUpdate(part) || isSpawnTool(part.tool) || part.state?.title === "subagent" || (part.children?.length ?? 0) > 0);
+}
+
 /** The spawn tool result that stands in for a prose-less sub-agent transcript
  * (a sync Claude agent's final report is delivered as the tool output). The
  * async-launch acknowledgement is internal metadata, not a report — newly
  * stored parts omit it, and the prefix guard covers older transcripts. */
 function spawnFinalReport(part: ChatPart): string {
   const output = part.state?.status === "completed" ? (part.state?.output ?? "") : "";
-  return output.startsWith("Async agent launched") ? "" : output;
+  return output.startsWith("Async agent launched") || output.startsWith("The subagent is working in the background") ? "" : output;
 }
 
 /** Find a part by id anywhere in a parts tree (depth-first). Used by the
@@ -3459,6 +3499,7 @@ export function findPartById(parts: ChatPart[], id: string): ChatPart | null {
  * `renderParts`, so nested sub-agents are themselves click-to-open rows. */
 export function SubagentTranscript({
   spawn,
+  expansionState,
   onOpenFile,
   onOpenRun,
   runExperimentName,
@@ -3467,6 +3508,7 @@ export function SubagentTranscript({
   onOpenSubagent,
 }: {
   spawn: ChatPart;
+  expansionState?: Map<string, boolean>;
   onOpenFile?: OpenTranscriptFile;
   onOpenRun?: OpenTranscriptTarget;
   runExperimentName?: (runId: string) => string;
@@ -3474,6 +3516,7 @@ export function SubagentTranscript({
   experimentName?: (experimentId: string) => string;
   onOpenSubagent?: OpenSubagent;
 }) {
+  if (isParentUpdate(spawn)) return <AgentUpdateRow part={spawn} />;
   const parts = spawn.children ?? [];
   const running = spawn.state?.status === "running";
   const errored = spawn.state?.status === "error";
@@ -3483,6 +3526,7 @@ export function SubagentTranscript({
   // Gate the empty state on what actually renders, not the raw part count — a
   // stored transcript of nothing but invisible parts must still read as empty.
   const rendered = renderParts(parts, {
+    expansionState,
     onOpenFile,
     onOpenRun,
     runExperimentName,
@@ -3519,11 +3563,21 @@ export function SubagentTranscript({
   );
 }
 
-/** A Codex/Claude/OpenCode sub-agent spawn row: a one-liner (icon + label)
- * whether the agent is running (shimmer) or done. Click-to-open — the
- * transcript shows in a right-side panel tab, never inline — when there is
- * anything to open (streamed children, a final report, or an error); a pure
- * interaction marker renders as an inert status line instead. */
+function AgentUpdateRow({ part }: { part: ChatPart }) {
+  const text = parentUpdateText(part);
+  const label = <><ToolActivityIcon activity={{ kind: "agent", label: m.activity_sent_update_to_parent() }} className="text-muted" /><span className={`${TOOL_LINE_CLASS_NAME} text-subtext`}>{m.activity_sent_update_to_parent()}</span></>;
+  if (!text) return <div className="tool-row flex items-start gap-2 min-w-0 py-[3px] px-1">{label}</div>;
+  return (
+    <details className="min-w-0 [&[open]_.update-chevron]:rotate-90">
+      <summary className="tool-row flex cursor-pointer list-none items-center gap-2 min-w-0 py-[3px] px-1 rounded-sm focus-visible:outline-2 focus-visible:outline-text [&::-webkit-details-marker]:hidden">
+        {label}<ChevronRight size={12} className="update-chevron text-muted" aria-hidden="true" />
+      </summary>
+      <div className="ps-7 py-2 text-sm"><Md text={text} /></div>
+    </details>
+  );
+}
+
+/** Agent events open their transcript even before its first content arrives. */
 function SubagentBlock({
   part,
   pendingTail,
@@ -3539,10 +3593,7 @@ function SubagentBlock({
     ? activityInProgress(toolActivity(part))
     : toolActivity(part);
   const shimmering = useDelayedToolShimmer(Boolean(pendingTail && !errored));
-  // Openable when there is anything to show in the tab: streamed children, a
-  // final report standing in for them, or an error. Only a pure interaction
-  // marker (codex's "reported back" rows) is inert.
-  const inert = (part.children?.length ?? 0) === 0 && !errored && !spawnFinalReport(part);
+  if (isParentUpdate(part)) return <AgentUpdateRow part={part} />;
   const line = (
     <>
       {errored && <span className="sr-only">{m.chat_panel_failed()} </span>}
@@ -3558,19 +3609,9 @@ function SubagentBlock({
       <span className={`${TOOL_LINE_CLASS_NAME} ${shimmering ? "tool-running-shimmer" : errored ? "text-accent-red" : "text-subtext"}`}>{activity.label}</span>
     </>
   );
-  // Only a row that actually owns a transcript is click-to-open. Codex's
-  // interaction markers (and a spawn row before any activity arrived) have no
-  // children — offering a transcript there opens an empty pane.
-  if (inert) {
-    return (
-      <div className="subagent-row flex items-start gap-2 w-full my-3.5 mx-0 py-[3px] px-1 text-text text-base text-start rounded-sm">
-        {line}
-      </div>
-    );
-  }
   return (
     <button
-      className="subagent-row flex items-start gap-2 w-full my-3.5 mx-0 py-[3px] px-1 cursor-pointer text-text text-base text-start rounded-sm [&:hover:not(:disabled)]:bg-surface [&:disabled]:cursor-default"
+      className="subagent-row flex items-start gap-2 w-full py-[3px] px-1 cursor-pointer text-text text-base text-start rounded-sm [&:hover:not(:disabled)]:bg-surface [&:disabled]:cursor-default"
       title={errored && errorMessage ? errorMessage : m.chat_open_subagent_transcript()}
       {...tabOpenGestureHandlers<HTMLButtonElement>((intent) =>
         onOpenSubagent?.(part.id, activity.label, intent),
@@ -3774,26 +3815,31 @@ const Transcript = memo(function Transcript({
 }) {
   useLocale();
   const activePermissionId = firstPendingPermission(messages)?.id ?? null;
+  const responseGroups = useRef<ChatMessage[][]>([]);
   const visibleMessages = useMemo(
-    () => messages.filter((message) => messageHasVisibleContent(message, activePermissionId)),
+    () => {
+      responseGroups.current = groupResponseMessages(messages, responseGroups.current);
+      return responseGroups.current.filter((group) =>
+        group.some((message) => messageHasVisibleContent(message, activePermissionId)));
+    },
     [messages, activePermissionId],
   );
   // forkPositions indexes only non-local ids, so a local bearer would page as 0/1.
   const positions = useMemo(() => {
     const bearers = visibleMessages.filter(
-      (m) => m.role === "user" && !m.id.startsWith(LOCAL_PREFIX),
+      (group) => group[0].role === "user" && !group[0].id.startsWith(LOCAL_PREFIX),
     );
-    return forkPositions(allMessages, messages, bearers, (id) => id.startsWith(LOCAL_PREFIX));
+    return forkPositions(allMessages, messages, bearers.map((group) => group[0]), (id) => id.startsWith(LOCAL_PREFIX));
   }, [messages, visibleMessages, allMessages]);
   // ponytail: interacted rows stay mounted for this visit; lift row state if retention becomes costly.
   const retainedRows = useRef(new Set<string>());
   const [fullHistory, setFullHistory] = useState(false);
-  const getItemKey = useCallback((index: number) => visibleMessages[index].id, [visibleMessages]);
+  const getItemKey = useCallback((index: number) => visibleMessages[index][0].id, [visibleMessages]);
   const rangeExtractor = useCallback((range: VirtualRange) => {
     if (fullHistory) return visibleMessages.map((_, index) => index);
     const indexes = new Set(defaultRangeExtractor(range));
-    visibleMessages.forEach((message, index) => {
-      if (retainedRows.current.has(message.id)) indexes.add(index);
+    visibleMessages.forEach((group, index) => {
+      if (retainedRows.current.has(group[0].id)) indexes.add(index);
     });
     return [...indexes].sort((a, b) => a - b);
   }, [visibleMessages, fullHistory]);
@@ -3829,7 +3875,7 @@ const Transcript = memo(function Transcript({
     document.addEventListener("selectionchange", retainSelection);
     return () => document.removeEventListener("selectionchange", retainSelection);
   }, [scrollRef]);
-  const activeMessage = visibleMessages.at(-1);
+  const activeMessage = messages.at(-1);
   const transcriptAnnouncement = useTranscriptAnnouncement(messages);
   const pendingTailTool = busy ? streamTailTool(messages) : null;
   return (
@@ -3842,17 +3888,18 @@ const Transcript = memo(function Transcript({
       </button>
       <div className="relative" style={{ height: virtualizer.getTotalSize() }}>
       {virtualizer.getVirtualItems().map((item) => {
-        const m = visibleMessages[item.index];
-        const turnStatus = m.parts.find(isTurnStatusPart);
-        const turnId = turnStatus?.state?.input?.turnId;
+        const group = visibleMessages[item.index];
+        const m = group[group.length - 1];
+        const rowId = group[0].id;
+
         // A session owns one turn slot, so one recovery disables every status
         // card until its durable admission resolves.
-        const recoveryDisabled = turnStatus ? busy || recoveringTurnId !== null : false;
+        const recoveryDisabled = busy || recoveringTurnId !== null;
         return (
           <div
-            key={m.id}
+            key={rowId}
             data-index={item.index}
-            data-message-id={m.id}
+            data-message-id={rowId}
             ref={virtualizer.measureElement}
             className="absolute left-0 w-full pb-4"
             style={{ top: item.start }}
@@ -3861,11 +3908,12 @@ const Transcript = memo(function Transcript({
               stickToBottom.current = false;
               virtualizer.setOptions({ ...virtualizer.options, anchorTo: "start" });
             }}
-            onPointerDownCapture={() => retainedRows.current.add(m.id)}
-            onFocusCapture={() => retainedRows.current.add(m.id)}
+            onPointerDownCapture={() => retainedRows.current.add(rowId)}
+            onFocusCapture={() => retainedRows.current.add(rowId)}
           >
           <Message
             message={m}
+            responseMessages={group}
             forkCount={positions.get(m.id)?.count}
             forkIndex={positions.get(m.id)?.index}
             forkPrevId={positions.get(m.id)?.prevId}
@@ -3886,7 +3934,7 @@ const Transcript = memo(function Transcript({
             onOpenPlan={onOpenPlan}
             onOpenSubagent={onOpenSubagent}
             busy={recoveryDisabled}
-            recoveringTurnId={turnId === recoveringTurnId ? recoveringTurnId : null}
+            recoveringTurnId={recoveringTurnId}
             onRecover={onRecover}
             skills={skills}
             predictTextTail={busy && m === activeMessage && m.role === "assistant"}
@@ -4027,6 +4075,7 @@ function SessionRow({
   unread,
   busy,
   waiting,
+  experimentRunning,
   revealTitle,
   onOpen,
   onRename,
@@ -4037,8 +4086,9 @@ function SessionRow({
   active: boolean;
   unread: boolean;
   busy: boolean;
-  /** Turn held on an unanswered card: steady dot, not the working pulse. */
+  /** An actionable question or held approval needs the user's attention. */
   waiting: boolean;
+  experimentRunning: boolean;
   /** Nonce set while this row's freshly auto-generated title should play its
    * reveal; it doubles as the remount key so a second retitle replays it.
    * Undefined the rest of the time (static title). */
@@ -4083,7 +4133,7 @@ function SessionRow({
       className={`session-row relative flex items-center gap-2 w-full text-start py-[7px] ps-2.5 pe-1.5 rounded-md text-sm text-text cursor-pointer select-none [&:hover:not(.active)]:bg-surface [&.active]:bg-panel [&.active]:font-medium [&_.session-dot:empty]:hidden [&_.session-dot]:w-4 [&_.session-dot]:inline-flex [&_.session-dot]:items-center [&_.session-dot]:justify-center [&_.session-dot]:shrink-0 [&_.session-title]:flex-1 [&_.session-title]:min-w-0 [&_.session-title]:overflow-hidden [&_.session-title]:[mask-image:linear-gradient(to_right,black_calc(100%_-_16px),transparent)] [&_.session-title]:whitespace-nowrap [&_.session-menu-btn]:hidden [&_.session-menu-btn]:items-center [&_.session-menu-btn]:justify-center [&_.session-menu-btn]:w-4 [&_.session-menu-btn]:h-4 [&_.session-menu-btn]:-my-0.5 [&_.session-menu-btn]:mx-0 [&_.session-menu-btn]:rounded-sm [&_.session-menu-btn]:text-muted [&_.session-menu-btn]:shrink-0 [&_.session-menu-btn:hover]:text-text [&_.session-menu-btn:hover]:bg-panel [&:hover_.session-menu-btn]:inline-flex [&:focus-visible_.session-menu-btn]:inline-flex [&_.session-menu-btn:focus-visible]:inline-flex [&.menu-open_.session-menu-btn]:inline-flex [&:hover_.session-dot]:hidden [&:focus-visible_.session-dot]:hidden [&:has(.session-menu-btn:focus-visible)_.session-dot]:hidden [&.menu-open_.session-dot]:hidden [&_.busy-dot]:w-[7px] [&_.busy-dot]:h-[7px] [&_.busy-dot]:rounded-full [&_.busy-dot]:bg-primary [&_.busy-dot]:animate-[or-pulse_1.2s_infinite] [&_.busy-dot]:shrink-0 [&_.unread-dot]:w-[7px] [&_.unread-dot]:h-[7px] [&_.unread-dot]:rounded-full [&_.unread-dot]:bg-primary [&_.unread-dot]:shrink-0 [&_.busy-dot.waiting]:animate-none [&_.session-title-input]:flex-1 [&_.session-title-input]:min-w-0 [&_.session-title-input]:py-px [&_.session-title-input]:px-[5px] [&_.session-title-input]:-my-0.5 [&_.session-title-input]:mx-0 [&_.session-title-input]:[font:inherit] [&_.session-title-input]:text-text [&_.session-title-input]:bg-background [&_.session-title-input]:border [&_.session-title-input]:border-primary [&_.session-title-input]:rounded-sm [&_.session-title-input]:outline-none [&.editing]:bg-surface [&.editing]:cursor-default [&.editing_.session-menu-btn]:hidden [&.editing_.session-dot]:hidden ${active ? "active" : ""}  ${unread ? "unread" : ""}  ${open ? "menu-open" : ""}  ${
         editing ? "editing" : ""
         }`}
-      title={`${HARNESS_LABELS[session.harness]}${session.model ? ` · ${session.model}` : ""}`}
+      title={`${harnessLabel(session.harness, session.harnessName)}${session.model ? ` · ${session.model}` : ""}`}
       onClick={() => {
         // While editing, a body click is a no-op; blur/Enter/Esc drive it.
         if (editing) return;
@@ -4135,11 +4185,21 @@ function SessionRow({
           />
         </span>
       )}
+      {experimentRunning && !editing && (
+        <Tooltip content={m.chat_experiment_running()} className="shrink-0 text-accent-green">
+          <FlaskConical size={14} className="motion-safe:animate-[or-experiment-pulse_3s_ease-in-out_infinite]" aria-label={m.chat_experiment_running()} />
+        </Tooltip>
+      )}
+      {waiting && !editing && (
+        <Tooltip content={m.chat_panel_waiting_for_your_input()} className="shrink-0 text-accent-amber">
+          <HelpCircle size={14} aria-hidden="true" />
+        </Tooltip>
+      )}
       <span className="session-dot">
-        {busy ? (
-          <span className={`busy-dot ${waiting ? "waiting" : ""}`} />
+        {busy && !waiting ? (
+          <span className="busy-dot" />
         ) : (
-          unread && <span className="unread-dot" />
+          unread && !waiting && <span className="unread-dot" />
         )}
       </span>
       <button
@@ -4248,7 +4308,6 @@ export function ChatPanel({
   onOpenPlan,
   onOpenSubagent,
   runtime,
-  onOpenDemoWelcome,
   composerFocusNonce = 0,
   activeSessionId,
   onActiveSessionChange,
@@ -4257,6 +4316,7 @@ export function ChatPanel({
   preferredAutonomy,
   onPreferredAutonomyChange,
   embedded = false,
+  sideParentSessionId,
   onOpenSideChat,
   onRunSetup,
   children,
@@ -4314,8 +4374,6 @@ export function ChatPanel({
     intent: TabOpenIntent,
   ) => void;
   runtime: RuntimeInfo;
-  /** Reopen the demo welcome modal from the chat header. */
-  onOpenDemoWelcome?: () => void;
   /** Increments when the demo welcome hands focus to the composer. */
   composerFocusNonce?: number;
   /** Demo run currently executing, for the monitor-it hint above the composer. */
@@ -4329,6 +4387,7 @@ export function ChatPanel({
   /** A second instance hosting a side chat in the right pane: no rail, and
    * global shortcuts act on it only while focus is inside it. */
   embedded?: boolean;
+  sideParentSessionId?: string;
   /** Branch a side chat off `parentSessionId`; a question, if given, is its first message. */
   onOpenSideChat?: (parentSessionId: string, question: string) => void;
   /** Middle-pane content when a settings section is active. */
@@ -4339,6 +4398,7 @@ export function ChatPanel({
   const setChatSessionAutonomyMutation = useMutation({ mutationFn: (args: Parameters<typeof setChatSessionAutonomy>) => setChatSessionAutonomy(...args) });
   const setChatSessionGoalMutation = useMutation({ mutationFn: (args: Parameters<typeof setChatSessionGoal>) => setChatSessionGoal(...args) });
   const importNativeChatMutation = useMutation({ mutationFn: (args: Parameters<typeof importNativeChat>) => importNativeChat(...args) });
+  const openSideChatMutation = useMutation({ mutationFn: openSideChat });
   const createChatSessionMutation = useMutation({ mutationFn: (args: Parameters<typeof createChatSession>) => createChatSession(...args) });
   const setChatSessionArchivedMutation = useMutation({ mutationFn: (args: Parameters<typeof setChatSessionArchived>) => setChatSessionArchived(...args) });
   const renameChatSessionMutation = useMutation({ mutationFn: (args: Parameters<typeof renameChatSession>) => renameChatSession(...args) });
@@ -4430,6 +4490,8 @@ export function ChatPanel({
     || composerScopeRef.current.mainView !== mainView) {
     composerScopeRef.current = { projectId, activeId, mainView };
   }
+  const [goalScope, setGoalScope] = useState<typeof composerScopeRef.current | null>(null);
+  const goalArmed = goalScope === composerScopeRef.current;
   // Pasted/dropped/uploaded attachments waiting in the composer, as data URLs.
   const [attachments, setAttachments] = useState<ComposerAttachment[]>([]);
   const [attachError, setAttachError] = useState<string | null>(null);
@@ -4480,6 +4542,7 @@ export function ChatPanel({
   const planModeOverrideRef = useRef<boolean | null>(null);
   const queuedPlanOverrideSeen = useRef(false);
   const fileInputRef = useRef<HTMLInputElement>(null);
+  const { data: activeRuns = [] } = useQuery(listChatActiveRunsQuery());
   const [state, dispatch, historyQuery] = useChatState(projectId, mainView === "chat" ? activeId : null);
   const { data: harnesses = EMPTY_HARNESSES } = useQuery(getHarnessesQuery());
   const [selection, setSelection] = useState<ModelSelection | null>(preferredAgent);
@@ -4490,6 +4553,8 @@ export function ChatPanel({
   // active session changes. Distinct from `selection`, which is the sticky
   // global preference that seeds *new* sessions.
   const [sessionOverride, setSessionOverride] = useState<Partial<ModelSelection>>({});
+  const [sideDraftAutonomy, setSideDraftAutonomy] = useState<Autonomy | null>(null);
+  useEffect(() => setSideDraftAutonomy(null), [sideParentSessionId]);
   const [recoveryOverrides, setRecoveryOverrides] = useState<
     Partial<ModelSelection> & { planMode?: boolean }
   >(EMPTY_RECOVERY_OVERRIDES);
@@ -4551,11 +4616,8 @@ export function ChatPanel({
   // Only reachable while the menu is open, which needs a live slash context.
   function pickSkill(skill: SkillInfo) {
     if (!slashContext) return;
-    // Goal is the one command picked from the menu that inserts its token
-    // instead of running: the goal itself is typed after it.
     if (
       !pendingQuestion && skill.source === "command" && isComposerCommand(skill.name)
-      && skill.name !== "goal"
     ) {
       activateComposerCommand(skill.name, draft, slashContext);
       return;
@@ -4696,10 +4758,15 @@ export function ChatPanel({
       ? { ...savedSelection, ...sessionOverride }
       : null;
   const { data: skills = EMPTY_SKILLS } = useQuery(getSkillsQuery(rawSelection?.harness, projectId));
-  const activeHarness = rawSelection
+  const catalogHarness = rawSelection
     ? harnesses.find((h) => h.id === rawSelection.harness)
     : undefined;
+  const activeHarness = sessionAcpHarness(openSession, catalogHarness);
+  const acpOptions = nativeOptions(openSession?.nativeConfiguration, { model: m.model_picker_model(), mode: m.model_picker_mode() });
+  const acpModel = acpOptions.find((option) => option.category === "model");
+  const acpMode = acpOptions.find((option) => option.category === "mode" && option.choices.some((choice) => choice.id === "plan"));
   const opts = activeHarness?.options;
+  const planActivation = acpMode ? "command" : opts?.planActivation;
   const { data: setupCommands } = useQuery({ ...getHarnessSetupCommandsQuery(), enabled: !!onRunSetup });
   const setupPath = (command: string) => {
     if (!activeHarness) return undefined;
@@ -4709,8 +4776,8 @@ export function ChatPanel({
     return harnessSetupPath(activeHarness, setup, command);
   };
   const commands = useMemo(
-    () => commandsForHarness(skills, opts?.planActivation),
-    [skills, opts?.planActivation],
+    () => commandsForHarness(skills, planActivation),
+    [skills, planActivation],
   );
   // `!` at the start of the draft is a shell command, not a message (Claude
   // Code's bash mode); the slash menu stays shut over paths like `!ls /tmp`.
@@ -4750,7 +4817,7 @@ export function ChatPanel({
   useEffect(() => setMentionIdx(0), [mentionQuery]);
   // Reconcile the selected model's settings, including stale saved preferences,
   // without replacing custom model IDs that are absent from the catalog.
-  const composerSelection = deriveComposerSelection(rawSelection, activeHarness);
+  const composerSelection = deriveComposerSelection(acpModel && rawSelection ? { ...rawSelection, model: acpModel.currentValue } : rawSelection, activeHarness);
   // Reasoning choices follow the *selected model*, not just the harness — an
   // OpenCode model with no `variants` hides the picker entirely, and Codex's
   // top tiers appear only on the models that accept them.
@@ -4779,6 +4846,10 @@ export function ChatPanel({
   // permission mode would write a reasoning level the user never chose, and the
   // next send would persist it over their real setting.
   const selectModel = (next: Partial<ModelSelection>) => {
+    if (openSession?.harness.startsWith("acp:") && acpModel && next.model) {
+      void setChatConfiguration(openSession.id, acpModel.id, next.model).catch((error: unknown) => showAlert(error instanceof Error ? error.message : String(error), "error"));
+      return;
+    }
     if (!composerSelection) return;
     const merged = { ...composerSelection, ...next };
     const changed: Partial<ModelSelection> = {};
@@ -4862,7 +4933,8 @@ export function ChatPanel({
   const setReasoningLevel = (id: string) => selectModel({ reasoningLevel: id });
   const setAutonomy = (autonomy: Autonomy) => {
     if (!openSession) {
-      onPreferredAutonomyChange(autonomy);
+      if (sideParentSessionId) setSideDraftAutonomy(autonomy);
+      else onPreferredAutonomyChange(autonomy);
       return;
     }
     const sessionId = openSession.id;
@@ -4887,9 +4959,9 @@ export function ChatPanel({
       });
   };
   const sessionGoal = openSession?.goal?.trim() || "";
-  const planActive = composerSelection?.harness === "claude-code"
+  const planActive = acpMode ? acpMode.currentValue === "plan" : composerSelection?.harness === "claude-code"
     ? composerSelection.permissionMode === "plan"
-    : opts?.planActivation === "command"
+    : planActivation === "command"
       ? planModeOverride ?? openSession?.planMode ?? false
       : false;
   useEffect(() => {
@@ -4899,6 +4971,12 @@ export function ChatPanel({
   }, [openSession?.planMode, planModeOverride]);
 
   async function setIndependentPlanMode(planMode: boolean) {
+    if (acpMode && openSession) {
+      const next = planMode ? "plan" : acpMode.choices.find((choice) => choice.id !== "plan")?.id;
+      if (!next) throw new Error(m.chat_toggle_plan_failed());
+      await queueSessionMutation(() => setChatConfiguration(openSession.id, acpMode.id, next));
+      return;
+    }
     setRecoveryOverrides((current) => ({ ...current, planMode }));
     planModeOverrideRef.current = planMode;
     setPlanModeOverride(planMode);
@@ -4943,7 +5021,7 @@ export function ChatPanel({
     try {
       if (composerSelection?.harness === "claude-code") {
         setPermissionMode(nextPlanMode ? "plan" : "auto");
-      } else if (opts?.planActivation === "command") {
+      } else if (planActivation === "command") {
         await setIndependentPlanMode(nextPlanMode);
       } else {
         throw new Error(m.chat_selected_harness_unavailable());
@@ -4962,7 +5040,8 @@ export function ChatPanel({
       case "new":
         // In a side chat, a new chat is another side chat off the same parent.
         if (embedded) {
-          if (openSession?.sideParentSessionId) onOpenSideChat?.(openSession.sideParentSessionId, "");
+          const parent = openSession?.sideParentSessionId ?? sideParentSessionId;
+          if (parent) onOpenSideChat?.(parent, "");
         } else startNewTask();
         return false;
       case "resume":
@@ -4975,7 +5054,7 @@ export function ChatPanel({
         void compactSession();
         return false;
       case "goal":
-        void setGoal(argument);
+        setGoalScope(composerScopeRef.current);
         return false;
       case "side":
         openSide(argument);
@@ -4993,7 +5072,7 @@ export function ChatPanel({
         const markdown = openSession
           ? transcriptMarkdown(title, messages, {
             user: m.chat_export_you(),
-            assistant: HARNESS_LABELS[openSession.harness],
+            assistant: harnessLabel(openSession.harness, openSession.harnessName),
           })
           : null;
         if (markdown) downloadMarkdown(transcriptFileName(title), markdown);
@@ -5050,7 +5129,7 @@ export function ChatPanel({
       try {
         sessionId = (await openNewSession(
           composerSelection,
-          effectiveCommandPlanMode(opts?.planActivation, undefined, planModeOverrideRef.current),
+          effectiveCommandPlanMode(planActivation, undefined, planModeOverrideRef.current),
         )).id;
       } catch (err) {
         setSettingsError(m.chat_goal_failed({ error: ltr(err instanceof Error ? err.message : String(err)) }));
@@ -5103,6 +5182,7 @@ export function ChatPanel({
     setSkillMenuDismissed(true);
     if (runComposerCommand(name)) return;
     window.requestAnimationFrame(() => {
+      if (composerRef.current?.value !== next.text) return;
       composerRef.current?.focus();
       composerRef.current?.setSelectionRange(next.cursor, next.cursor);
       setComposerCursor(next.cursor);
@@ -5211,6 +5291,9 @@ export function ChatPanel({
 
   useEffect(() => onChatEvent((event) => {
     if (event.type === "reconnected") void syncSessionList(true);
+    if (event.type === "runsChanged" || event.type === "reconnected") {
+      void queryClient.invalidateQueries({ queryKey: listChatActiveRunsQuery().queryKey });
+    }
   }), [syncSessionList]);
 
   // Every fork stays loaded; only the branch on screen drives the transcript,
@@ -5270,29 +5353,18 @@ export function ChatPanel({
     }
   }, [queued]);
   const historyLoading = !!activeId && historyQuery.isPending;
-  // A busy turn blocked on an unanswered HELD card (nativeId — a bridge or
-  // inline mid-turn request) is waiting on the user, not the model. Drives
-  // the status line and the rail dot (the composer button is keyed on
-  // `pendingQuestion` instead — what send() can actually service). End-turn
-  // cards (no nativeId) never coexist with a busy turn of their own, so
-  // keying on nativeId avoids false positives from stale cards. (Sessions
-  // whose transcripts aren't loaded fall back to plain busy.) Memoized so the
-  // messages × parts scan stays off the per-keystroke render path.
   const waitingSessions = useMemo(() => {
     const waiting = new Set<string>();
-    for (const id of state.busySessions) {
-      if (
-        (state.messagesBySession[id] ?? []).some((m) =>
-          m.parts.some(
-            (p) => p.type === "prompt" && p.prompt && !p.prompt.resolved && p.prompt.nativeId,
-          ),
-        )
-      )
-        waiting.add(id);
+    for (const [id, messages] of Object.entries(state.messagesBySession)) {
+      const busy = state.busySessions.has(id);
+      if (hasPendingInput(activePath(messages, state.activeLeafBySession[id]), busy)) waiting.add(id);
     }
     return waiting;
-  }, [state.busySessions, state.messagesBySession]);
-  const awaitingInput = activeId ? waitingSessions.has(activeId) : false;
+  }, [state.busySessions, state.messagesBySession, state.activeLeafBySession]);
+  // Async questions can await an answer while the agent continues working.
+  const awaitingInput = busy && messages.some((message) => message.parts.some(
+    (part) => part.type === "prompt" && part.prompt && !part.prompt.resolved && part.prompt.nativeId,
+  ));
   const activeSession = openSession;
   // Nonce while the open session's title is mid-reveal; undefined = static.
   const activeTitleReveal = activeSession ? titleReveals.get(activeSession.id) : undefined;
@@ -5515,9 +5587,23 @@ export function ChatPanel({
     // skill and supplies this exact message as their shared request context.
     const originalText = (starter ?? draft).trim();
     const composerCommand = !pendingQuestion && starter === undefined
-      ? parseComposerCommand(originalText, opts?.planActivation)
+      ? parseComposerCommand(originalText, planActivation)
       : null;
-    if (composerCommand && composerCommand.name !== "plan") {
+    const goalCommand = composerCommand?.name === "goal";
+    if (goalCommand && !composerCommand.prompt) {
+      setDraft("");
+      setSkillMenuDismissed(false);
+      setGoalScope(composerScopeRef.current);
+      return;
+    }
+    if (!pendingQuestion && (goalCommand || goalArmed)
+      && /^(clear|none|off)$/i.test(goalCommand ? composerCommand.prompt : originalText)) {
+      setDraft("");
+      setGoalScope(null);
+      await setGoal("clear");
+      return;
+    }
+    if (composerCommand && composerCommand.name !== "plan" && !goalCommand) {
       setDraft(takesArgument(composerCommand.name) ? "" : composerCommand.prompt);
       setSkillMenuDismissed(false);
       runComposerCommand(composerCommand.name, composerCommand.prompt);
@@ -5532,10 +5618,11 @@ export function ChatPanel({
       });
     }
     if (preparingSend.current) return;
-    const planRequested = !!composerCommand;
+    const planRequested = composerCommand?.name === "plan";
+    const goalRequested = !pendingQuestion && (goalCommand || goalArmed);
     const toggledPlanMode = !planActive;
     const independentPlanMode = effectiveCommandPlanMode(
-      opts?.planActivation,
+      acpMode ? undefined : planActivation,
       planRequested ? toggledPlanMode : undefined,
       planModeOverrideRef.current,
     );
@@ -5560,6 +5647,7 @@ export function ChatPanel({
     const restoreComposer = () => {
       if (!inSourceScope()) return;
       setDraft((current) => current || originalText);
+      if (goalRequested) setGoalScope(composerScopeRef.current);
       setAttachments((current) => (current.length ? current : pending));
       setAnnotations((current) => (current.length ? current : pendingAnnotations));
     };
@@ -5569,7 +5657,7 @@ export function ChatPanel({
       try {
         if (activeHarness?.id === "claude-code") {
           setPermissionMode(toggledPlanMode ? "plan" : "auto");
-        } else if (opts?.planActivation === "command") {
+        } else if (planActivation === "command") {
           await setIndependentPlanMode(toggledPlanMode);
         } else {
           throw new Error(m.chat_selected_harness_unavailable());
@@ -5580,6 +5668,14 @@ export function ChatPanel({
       }
       return;
     }
+    if (planRequested && acpMode) {
+      try {
+        await setIndependentPlanMode(toggledPlanMode);
+      } catch {
+        if (inSourceScope()) setSettingsError(m.chat_toggle_plan_failed());
+        return;
+      }
+    }
     const effective = composerSelection
       ? {
         ...composerSelection,
@@ -5589,7 +5685,7 @@ export function ChatPanel({
     if (planPermissionMode) setPermissionMode(planPermissionMode);
     let planCommandMutation: number | null = null;
     const previousPlanModeOverride = planModeOverrideRef.current;
-    if (planRequested && opts?.planActivation === "command") {
+    if (planRequested && !acpMode && planActivation === "command") {
       planCommandMutation = ++planMutationSeq.current;
       planModeOverrideRef.current = toggledPlanMode;
       setPlanModeOverride(toggledPlanMode);
@@ -5600,7 +5696,12 @@ export function ChatPanel({
       planModeOverrideRef.current = previousPlanModeOverride;
       setPlanModeOverride(previousPlanModeOverride);
     };
-    if (!text && pending.length === 0 && pendingAnnotations.length === 0) return;
+    if ((!text && pending.length === 0 && pendingAnnotations.length === 0) || (goalRequested && !text)) return;
+    const persistMessageGoal = async (sessionId: string) => {
+      if (!goalRequested) return;
+      const session = await setChatSessionGoalMutation.mutateAsync([sessionId, text]);
+      setSessions((current) => current.map((candidate) => candidate.id === session.id ? session : candidate));
+    };
     // A pending question card owns plain typed text as a custom answer
     // (Claude-desktop behavior). This also works while the turn is HELD on
     // the card — where a new message would be rejected as busy and silently
@@ -5622,6 +5723,7 @@ export function ChatPanel({
     }
     const turnSignature = JSON.stringify({
       text,
+      goal: goalRequested ? text : undefined,
       images: pending.map((attachment) => ({
         mediaType: attachment.mediaType,
         name: attachment.name,
@@ -5671,7 +5773,7 @@ export function ChatPanel({
           // toggle that already persisted would otherwise reach the server
           // as "no change" and steer into a turn still running without it.
           planMode:
-            opts?.planActivation === "command"
+            planActivation === "command"
               ? (independentPlanMode ?? openSession?.planMode)
               : independentPlanMode,
           reasoningLevel: effective.reasoningLevel,
@@ -5684,19 +5786,24 @@ export function ChatPanel({
         name: a.name,
       }));
       try {
-        const sendBusy = () =>
-          sendChatMessage(
+        const sendBusy = async () => {
+          await persistMessageGoal(sid);
+          return sendChatMessage(
             sid,
             text,
             turnOpts,
             images.length ? images : undefined,
             wireAnnotations,
             clientTurnId,
-            steering && !queue && !planRequested ? "steer" : undefined,
+            steering && !queue && !planRequested && !goalRequested ? "steer" : undefined,
           );
+        };
         const response = await queueSessionMutation(sendBusy);
         if (response.turn?.existing) await reseedSession(sid);
-        if (inSourceScope()) setRecoveryOverrides(EMPTY_RECOVERY_OVERRIDES);
+        if (inSourceScope()) {
+          setRecoveryOverrides(EMPTY_RECOVERY_OVERRIDES);
+          if (goalRequested) setGoalScope(null);
+        }
         if (pendingClientTurn.current?.id === clientTurnId) pendingClientTurn.current = null;
       } catch {
         // Never reached the turn — restore the composer so a retry is one keypress.
@@ -5776,8 +5883,9 @@ export function ChatPanel({
       }));
       const targetSessionId = sid;
       if (!targetSessionId) throw new Error(m.chat_session_not_created());
-      const sendTurn = () =>
-        sendChatMessage(
+      const sendTurn = async () => {
+        await persistMessageGoal(targetSessionId);
+        return sendChatMessage(
           targetSessionId,
           text,
           turnOpts,
@@ -5785,9 +5893,13 @@ export function ChatPanel({
           wireAnnotations,
           clientTurnId,
         );
+      };
       const response = await queueSessionMutation(sendTurn);
       if (response.turn?.existing) await reseedSession(targetSessionId);
-      if (inSourceScope()) setRecoveryOverrides(EMPTY_RECOVERY_OVERRIDES);
+      if (inSourceScope()) {
+        setRecoveryOverrides(EMPTY_RECOVERY_OVERRIDES);
+        if (goalRequested) setGoalScope(null);
+      }
       if (pendingClientTurn.current?.id === clientTurnId) pendingClientTurn.current = null;
     } catch (err) {
       if (!isCurrentScope(sessionsOptions.queryKey)) return;
@@ -5826,19 +5938,24 @@ export function ChatPanel({
   async function openNewSession(selection: ModelSelection, planMode: boolean | undefined) {
     const scope = composerScopeRef.current;
     const visit = projectVisitRef.current;
-    const session = await createChatSessionMutation.mutateAsync([projectId, selection.harness, {
-      model: selection.model,
-      serviceTier: selection.serviceTier,
-      permissionMode: selection.permissionMode,
-      planMode,
-      reasoningLevel: selection.reasoningLevel,
-      autonomy: preferredAutonomy,
-    }]);
-    if (projectVisitRef.current === visit) {
+    let session = sideParentSessionId
+      ? await openSideChatMutation.mutateAsync(sideParentSessionId)
+      : await createChatSessionMutation.mutateAsync([projectId, selection.harness, {
+        model: selection.model,
+        serviceTier: selection.serviceTier,
+        permissionMode: selection.permissionMode,
+        planMode,
+        reasoningLevel: selection.reasoningLevel,
+        autonomy: preferredAutonomy,
+      }]);
+    if (sideParentSessionId && sideDraftAutonomy !== null && session.autonomy !== sideDraftAutonomy) {
+      session = await setChatSessionAutonomyMutation.mutateAsync([session.id, sideDraftAutonomy]);
+    }
+    if (isCurrentScope(sessionsOptions.queryKey) && projectVisitRef.current === visit) {
       setSessions((cur) => [session, ...cur.filter((row) => row.id !== session.id)]);
       if (!queryClient.getQueryData(sessionsOptions.queryKey)) void syncSessionList(true);
     }
-    if (projectVisitRef.current === visit && composerScopeRef.current === scope) {
+    if (isCurrentScope(sessionsOptions.queryKey) && projectVisitRef.current === visit && composerScopeRef.current === scope) {
       onActiveSessionChangeRef.current(session.id, { replace: true });
       composerScopeRef.current = { ...scope, activeId: session.id };
     }
@@ -5889,7 +6006,7 @@ export function ChatPanel({
       }
       try {
         const planMode = effectiveCommandPlanMode(
-          opts?.planActivation,
+          planActivation,
           undefined,
           planModeOverrideRef.current,
         );
@@ -6209,6 +6326,8 @@ export function ChatPanel({
     return () => document.removeEventListener("keydown", onKeyDown);
   }, [startNewTask, embedded]);
 
+  const sessionWaiting = (session: ChatSession) => state.messagesBySession[session.id]
+    ? waitingSessions.has(session.id) : session.awaitingInput === true;
   const sessionBusy = (project: Project, session: ChatSession) => project.id === projectId ? state.busySessions.has(session.id) : session.busy;
   const sidebarRows: SidebarRow[] = [];
   if (sidebarGrouping === "projects") shownProjects.forEach((project, index) => {
@@ -6222,7 +6341,7 @@ export function ChatPanel({
     const selected = matching.find((session) => session.id === activeId);
     if (selected && !visible.some((session) => session.id === activeId)) visible = [...visible.slice(0, chatLimit - 1), selected];
     const collapsed = collapsedProjects.includes(project.id);
-    sidebarRows.push({ kind: "project", project, collapsed, busy: collapsed && matching.some((session) => sessionBusy(project, session) && !waitingSessions.has(session.id)) });
+    sidebarRows.push({ kind: "project", project, collapsed, busy: collapsed && matching.some((session) => sessionBusy(project, session) && !sessionWaiting(session)) });
     if (collapsed) return;
     visible.forEach((session) => sidebarRows.push({ kind: "chat", project, session }));
     if (matching.length > chatLimit) sidebarRows.push({ kind: "more", project });
@@ -6378,7 +6497,8 @@ export function ChatPanel({
                       active={s.id === activeId && mainView === "chat"}
                       unread={unreadSessionIds.has(s.id)}
                       busy={sessionBusy(project, s)}
-                      waiting={waitingSessions.has(s.id)}
+                      waiting={sessionWaiting(s)}
+                      experimentRunning={activeRuns.some((item) => item.sessionId === s.id)}
                       revealTitle={titleReveals.get(s.id)}
                       onOpen={() => {
                         if (project.id === projectId) onActiveSessionChange(s.id);
@@ -6473,7 +6593,8 @@ export function ChatPanel({
         {railOpen && rail}
         <section className="chat-pane flex-1 min-w-0 flex flex-col bg-background min-h-0">
           {!railOpen && <div className="flex h-12 shrink-0 items-center">{railReopen}</div>}
-          <div className="settings-view-scroll flex-1 min-h-0 overflow-y-auto [scrollbar-gutter:stable_both-edges]">
+          {/* Keyed per view so no tab inherits the chat thread's or another tab's scroll offset. */}
+          <div key={mainView} className="settings-view-scroll flex-1 min-h-0 overflow-y-auto [scrollbar-gutter:stable_both-edges]">
             {contentError ? <div role="alert" className="p-6 text-subtext">{contentError}<Button onClick={onRetryContent}>{m.app_retry()}</Button></div>
               : contentLoading ? <LoadingRow className="p-6"><Spinner />{m.chat_panel_loading_conversation()}</LoadingRow> : children}
           </div>
@@ -6507,13 +6628,9 @@ export function ChatPanel({
               </span>
             </>}
           </div>
-          {onOpenDemoWelcome && (
-            <IconButton
-              data-tip={m.chat_panel_about_this_demo()}
-              aria-label={m.chat_panel_about_this_demo()}
-              onClick={onOpenDemoWelcome}
-            >
-              <HelpCircle size={15} />
+          {embedded && activeSession && (
+            <IconButton aria-label={m.side_chat_delete()} data-tip={m.side_chat_delete()} onClick={() => void removeSession(activeSession)}>
+              <Trash2 size={15} />
             </IconButton>
           )}
           </div>
@@ -6546,7 +6663,7 @@ export function ChatPanel({
               <div className="ms-auto h-16 w-1/2 shrink-0 rounded-lg bg-panel" />
             </div>
           </div>
-        ) : !threadMounted && activeSession?.sideParentSessionId ? (
+        ) : !threadMounted && (activeSession?.sideParentSessionId || sideParentSessionId) ? (
           <div className="chat-empty flex flex-1 flex-col items-center justify-center gap-3 p-8 text-center text-subtext">
             <MessagesSquare size={22} />
             <p className="m-0 text-balance">{m.side_chat_empty()}</p>
@@ -6712,6 +6829,11 @@ export function ChatPanel({
               )}
             </IconButton>
           )}
+          <ExperimentRunBanner
+            key={activeId}
+            runs={activeRuns.filter((item) => item.sessionId === activeId)}
+            onOpenRun={onOpenRun}
+          />
           {/* Inside the composer so the composer's popovers (mode/model pickers,
             z 50 within this stacking context) layer above the strip — as a
             sibling, the composer's own z-index: 4 capped them below it. */}
@@ -6724,7 +6846,7 @@ export function ChatPanel({
             <PlanStrip
               synthesized={pendingPlan.synthesized}
               agentLabel={
-                activeSession ? HARNESS_LABELS[activeSession.harness] : m.chat_the_agent()
+                activeSession ? harnessLabel(activeSession.harness, activeSession.harnessName) : m.chat_the_agent()
               }
               showResumeModes={activeSession?.harness === "claude-code"}
               onView={(intent) => openPlan?.(pendingPlan.plan, pendingPlan.promptId, intent)}
@@ -6945,6 +7067,7 @@ export function ChatPanel({
             <div className={`composer-input relative flex overflow-hidden [&_textarea]:flex-1 ${bashActive ? "[&_textarea]:font-mono [&_textarea]:text-sm" : ""}`}>
               <textarea
                 dir="auto"
+                {...{ writingsuggestions: "false" }}
                 ref={composerRef}
                 aria-describedby={demoHintVisible ? demoHintId : undefined}
                 // Native prose stays visible; the aligned mirror paints only skill tokens.
@@ -6960,11 +7083,11 @@ export function ChatPanel({
                   pendingQuestion
                     ? m.chat_type_custom_answer()
                     : steering && activeHarness
-                      ? m.chat_steer_placeholder({ harness: ltr(HARNESS_LABELS[activeHarness.id]), shortcut: ltr(queueChord) })
+                      ? m.chat_steer_placeholder({ harness: ltr(activeHarness.name), shortcut: ltr(queueChord) })
                       : composerSelection
                         ? activeHarness?.agentReady
-                          ? m.chat_message_harness({ harness: ltr(HARNESS_LABELS[composerSelection.harness]) })
-                          : m.chat_harness_unavailable({ harness: ltr(HARNESS_LABELS[composerSelection.harness]) })
+                          ? m.chat_message_harness({ harness: ltr(harnessLabel(composerSelection.harness, activeHarness?.name)) })
+                          : m.chat_harness_unavailable({ harness: ltr(harnessLabel(composerSelection.harness, activeHarness?.name)) })
                         : m.chat_ask_agent_placeholder()
                 }
                 rows={2}
@@ -6995,7 +7118,7 @@ export function ChatPanel({
                     : "";
                   if (
                     completedCommand && completedName
-                    && (completedName === "plan" || (!takesArgument(completedName) && !restOfDraft))
+                    && (completedName === "plan" || completedName === "goal" || (!takesArgument(completedName) && !restOfDraft))
                     && commands.some((command) => command.name === completedName)
                   ) {
                     activateComposerCommand(completedName, v, completedCommand);
@@ -7129,15 +7252,18 @@ export function ChatPanel({
               >
                 <Paperclip size={16} />
               </IconButton>
-              {sessionGoal && (
+              {(sessionGoal || goalArmed) && (
                 <Button
                   type="button"
-                  variant="ghost"
+                  variant="purple"
                   active
                   className="group max-w-60"
-                  title={m.chat_panel_clear_goal({ goal: autoDir(sessionGoal) })}
-                  aria-label={m.chat_panel_clear_goal({ goal: autoDir(sessionGoal) })}
-                  onClick={() => void setGoal("clear")}
+                  title={goalArmed ? m.goal_command_description() : m.chat_panel_clear_goal({ goal: autoDir(sessionGoal) })}
+                  aria-label={goalArmed ? m.chat_panel_goal() : m.chat_panel_clear_goal({ goal: autoDir(sessionGoal) })}
+                  onClick={() => {
+                    setGoalScope(null);
+                    if (sessionGoal) void setGoal("clear");
+                  }}
                 >
                   <span className="relative size-4" aria-hidden="true">
                     <Goal className="absolute inset-0 transition-opacity group-hover:opacity-0 group-focus-visible:opacity-0" size={16} strokeWidth={1.6} />
@@ -7149,7 +7275,7 @@ export function ChatPanel({
               {planActive && (
                 <Button
                   type="button"
-                  variant="ghost"
+                  variant="amber"
                   active
                   className="group"
                   title={m.chat_panel_exit_plan_mode()}
@@ -7186,6 +7312,7 @@ export function ChatPanel({
                 message. */}
               <div className="flex min-w-0 items-center">
                 <ModelPicker
+                  sessionHarness={openSession?.harness.startsWith("acp:") ? activeHarness : undefined}
                   value={composerSelection}
                   onSelect={selectModel}
                   onOpenSettings={() => onSelectMainView("harnesses")}
@@ -7195,10 +7322,15 @@ export function ChatPanel({
                   reasoningChoices={activeHarness?.agentReady ? reasoning.choices : []}
                   defaultReasoningId={reasoning.defaultId}
                   onSelectReasoning={setReasoningLevel}
-                  autonomy={openSession?.autonomy ?? preferredAutonomy}
+                  autonomy={openSession?.autonomy ?? sideDraftAutonomy ?? preferredAutonomy}
                   onSelectAutonomy={setAutonomy}
-                  lockHarness={!!openSession}
+                  lockHarness={!!openSession || !!sideParentSessionId}
                   openRequest={modelPickerRequest}
+                  nativeOptions={openSession?.harness.startsWith("acp:") ? acpOptions.filter((option) => option.category !== "model") : []}
+                  onSelectNativeOption={(optionId, value) => {
+                    if (!openSession) return;
+                    void setChatConfiguration(openSession.id, optionId, value).catch((error: unknown) => showAlert(error instanceof Error ? error.message : String(error), "error"));
+                  }}
                 />
                 <ContextMeter usage={openSession?.contextUsage} />
               </div>

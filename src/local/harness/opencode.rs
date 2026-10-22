@@ -1002,7 +1002,7 @@ fn opencode_variant(level: Option<&str>) -> Option<&str> {
 }
 
 /// opencode part → wire part (the shapes are already close).
-fn to_wire_part(part: &Value) -> Option<WirePart> {
+pub(crate) fn to_wire_part(part: &Value) -> Option<WirePart> {
     let id = part.get("id")?.as_str()?.to_string();
     let kind = part.get("type")?.as_str()?;
     match kind {
@@ -1067,7 +1067,9 @@ fn newest_task_part_id(parts: &[WirePart], claimed: &HashMap<String, String>) ->
     parts
         .iter()
         .rev()
-        .find(|p| p.tool.as_deref() == Some("task") && !taken.contains(p.id.as_str()))
+        .find(|p| {
+            matches!(p.tool.as_deref(), Some("task" | "subagent")) && !taken.contains(p.id.as_str())
+        })
         .map(|p| p.id.clone())
 }
 
@@ -1443,9 +1445,7 @@ async fn opencode_pre_accept_setup(
 async fn run_turn(ctx: &mut TurnCtx) -> Result<()> {
     // Native permission and question requests die with their turn. Clear any
     // crash/restart leftovers before a new live request can be surfaced.
-    ctx.host
-        .resolve_stale_prompts(&ctx.session_id, true)
-        .await?;
+    ctx.host.resolve_stale_prompts(&ctx.session_id, true)?;
 
     let native_session = match ctx.native_session_id.clone() {
         Some(id) => tokio::task::spawn_blocking(move || native_store::opencode_session(&id))

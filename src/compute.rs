@@ -230,6 +230,11 @@ pub fn snapshot_script(archive_path: &str, command: &str) -> String {
     )
 }
 
+pub const TENSORBOARD_LOGDIR: &str = "TENSORBOARD_LOGDIR";
+
+/// Run before `cd repo`, so `$PWD` is the run's own directory (inside the container for container runs).
+pub const TENSORBOARD_LOGDIR_EXPORT: &str = "export TENSORBOARD_LOGDIR=\"$PWD/tensorboard\";";
+
 pub fn staged_script(command: &str) -> String {
     format!("set -eo pipefail; cd repo; {command}")
 }
@@ -778,12 +783,6 @@ pub async fn submit(args: &crate::ExpRunArgs) -> Result<StoredRun> {
     let backend_id = args.backend.as_deref().unwrap_or("local");
     let backend = backend(backend_id)?;
     let store = Store::open()?;
-    let experiment = store
-        .get_local_experiment(&args.exp_id)?
-        .ok_or_else(|| anyhow!("Local experiment {} not found.", args.exp_id))?;
-    let project = store
-        .get_local_project(&experiment.project_id)?
-        .ok_or_else(|| anyhow!("Local project {} not found.", experiment.project_id))?;
     let preflight = backend.preflight(args).await?;
     if !preflight.ready {
         return Err(anyhow!(
@@ -794,6 +793,29 @@ pub async fn submit(args: &crate::ExpRunArgs) -> Result<StoredRun> {
                 .unwrap_or_else(|| "Compute backend is not ready.".to_string())
         ));
     }
+    let artifacts_lock = store.run_artifacts_lock()?;
+    let deadline = std::time::Instant::now() + crate::store::RUN_ARTIFACTS_WAIT;
+    let _artifacts_guard = loop {
+        match artifacts_lock.try_read() {
+            Ok(guard) => break guard,
+            Err(error)
+                if error.kind() == std::io::ErrorKind::WouldBlock
+                    && std::time::Instant::now() < deadline =>
+            {
+                tokio::time::sleep(crate::store::RUN_ARTIFACTS_POLL).await;
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                return Err(anyhow!("Run artifacts are busy; retry the run submission."))
+            }
+            Err(error) => return Err(error.into()),
+        }
+    };
+    let experiment = store
+        .get_local_experiment(&args.exp_id)?
+        .ok_or_else(|| anyhow!("Local experiment {} not found.", args.exp_id))?;
+    let project = store
+        .get_local_project(&experiment.project_id)?
+        .ok_or_else(|| anyhow!("Local project {} not found.", experiment.project_id))?;
     let source = backend.stage_source(&project, &experiment).await?;
     let run_id = uuid::Uuid::new_v4().to_string();
     let command = Some(experiment.run_command.clone())
@@ -809,6 +831,7 @@ pub async fn submit(args: &crate::ExpRunArgs) -> Result<StoredRun> {
         ssh_container: None,
         monitoring_error: None,
         cancellation_accepted: false,
+        rental_lease: None,
         kind: format!("{}_job", backend_id),
         namespace: None,
         job_id: None,
@@ -852,7 +875,7 @@ pub async fn submit(args: &crate::ExpRunArgs) -> Result<StoredRun> {
         None => None,
     };
     let identity = args.invocation_identity()?;
-    let report = (!args.telemetry_suppressed)
+    let report = (!args.telemetry_suppressed && backend_id != "openresearch")
         .then(|| {
             crate::telemetry::pending_event_payload(
                 "experiment_finished",
@@ -1005,7 +1028,7 @@ pub fn record_submission_handle(run_id: &str, descriptor: &BackendDescriptor) ->
         .and_then(|store| store.set_backend_json(run_id, &descriptor.to_json()))
         .err();
     let dir = crate::store::data_dir().join("submission-handles");
-    if let Err(error) = std::fs::create_dir_all(&dir) {
+    if let Err(error) = prepare_snapshot_dir(&dir) {
         return match database_error {
             None => {
                 eprintln!("warning: could not create submission recovery directory: {error}");
@@ -1018,9 +1041,18 @@ pub fn record_submission_handle(run_id: &str, descriptor: &BackendDescriptor) ->
     }
     let destination = dir.join(format!("{run_id}.json"));
     let temporary = dir.join(format!(".{run_id}.{}.tmp", uuid::Uuid::new_v4()));
-    let file_error = std::fs::write(&temporary, descriptor.to_json())
-        .and_then(|()| std::fs::rename(&temporary, destination))
-        .err();
+    let file_error = (|| -> std::io::Result<()> {
+        use std::io::Write;
+        let mut options = std::fs::OpenOptions::new();
+        options.write(true).create_new(true);
+        #[cfg(unix)]
+        options.mode(0o600);
+        options
+            .open(&temporary)?
+            .write_all(descriptor.to_json().as_bytes())
+    })()
+    .and_then(|()| std::fs::rename(&temporary, destination))
+    .err();
     if let Some(error) = file_error {
         let _ = std::fs::remove_file(temporary);
         if let Some(database_error) = database_error {

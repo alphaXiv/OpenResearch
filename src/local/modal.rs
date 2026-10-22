@@ -86,7 +86,7 @@ pub async fn submit_local_modal_with_source(
     // The sandbox's env: everything the user synced (API keys), plus the tokens
     // the run script and common tooling expect. Rides an ephemeral Modal
     // Secret, never the plain env arg.
-    let mut env: HashMap<String, String> = crate::config::list_synced_env().into_iter().collect();
+    let mut env = crate::config::run_env(&run_id);
     if let Ok(hf_token) = hf::resolve_token() {
         env.entry("HF_TOKEN".to_string()).or_insert(hf_token);
     }
@@ -113,6 +113,7 @@ pub async fn submit_local_modal_with_source(
         ssh_container: None,
         monitoring_error: None,
         cancellation_accepted: false,
+        rental_lease: None,
         kind: "modal_job".to_string(),
         namespace: Some(MODAL_APP.to_string()),
         job_id: Some(sandbox_id.clone()),

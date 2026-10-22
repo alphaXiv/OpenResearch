@@ -12,7 +12,9 @@ import {
   type NodeProps,
   type Viewport,
 } from "@xyflow/react";
-import { Archive, Ellipsis, FolderTree, Terminal } from "lucide-react";
+import { Archive, ChartLine, Ellipsis, FolderTree, Terminal } from "lucide-react";
+import { useQuery } from "@tanstack/react-query";
+import { getTrackioSettingsQuery } from "../queries/settings";
 import { createPortal } from "react-dom";
 import { GitHubMark } from "./BackendLogos";
 import { memo, useMemo, useRef, useState } from "react";
@@ -20,6 +22,7 @@ import {
   githubBranchUrl,
   fmtNumber,
   runDisplayStatus,
+  trackioRunUrl,
   timeAgo,
   type Experiment,
   type Project,
@@ -225,6 +228,8 @@ const ExpNode = memo(function ExpNode({ data }: NodeProps<ExpFlowNode>) {
   const live = status === "running" || status === "starting" || status === "cancelling";
   const kind = isBaseline ? m.tree_baseline() : live ? m.tree_running() : m.tree_experiment();
   const squares = runs.slice(-MAX_SQUARES);
+  const trackio = useQuery(getTrackioSettingsQuery()).data;
+  const trackioUrl = latestRun ? trackioRunUrl(trackio, latestRun) : null;
 
   // `data` is rebuilt on every experiments/runs change (a superset of the
   // re-layouts that matter), so it doubles as the hover card's re-measure
@@ -313,6 +318,17 @@ const ExpNode = memo(function ExpNode({ data }: NodeProps<ExpFlowNode>) {
           onClick={(e) => e.stopPropagation()}
         >
           <GitHubMark size={13} />
+        </a>}
+        {trackioUrl && <a
+          className="node-action"
+          title={m.a11y_open_in_trackio()}
+          aria-label={m.a11y_open_in_trackio()}
+          href={trackioUrl}
+          target="_blank"
+          rel="noopener noreferrer"
+          onClick={(e) => e.stopPropagation()}
+        >
+          <ChartLine size={13} />
         </a>}
         <ArchiveMenu id={exp.id} name={exp.slug} actions={actions} onArchive={onArchive} compact />
       </div>

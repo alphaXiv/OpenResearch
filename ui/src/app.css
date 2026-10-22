@@ -25,6 +25,15 @@
   color-scheme: dark;
 }
 
+@keyframes or-experiment-pulse {
+  0%, 100% {
+    opacity: 1;
+  }
+  50% {
+    opacity: 0.55;
+  }
+}
+
 @keyframes or-pulse {
   50% {
     opacity: 0.35;
@@ -294,6 +303,11 @@
   outline-offset: 2px;
 }
 
+.experiment-run-link:is(:hover, :focus-visible) {
+  color: inherit;
+  text-decoration-color: currentColor;
+}
+
 @media (prefers-reduced-motion: reduce) {
   .activity-pulse {
     animation: none;
@@ -365,9 +379,9 @@
   }
 }
 
-/* Reserve room for the four workspace buttons and their gaps. */
+/* Reserve room for the workspace toolbar. */
 .workspace-body > .chat-pane .chat-header {
-  padding-inline-end: 12rem;
+  padding-inline-end: 11rem;
 }
 
 .workspace-card-visible > .chat-pane {
@@ -394,4 +408,25 @@
 .code-source-wrap,
 .openresearch-diff .diff-code {
   @apply whitespace-pre-wrap break-normal break-words;
+}
+
+@layer components {
+.term-provenance {
+  display: flex;
+  align-items: center;
+  gap: 6px 14px;
+  min-height: 32px;
+  padding: 6px 10px;
+  overflow-x: auto;
+  border-bottom: 1px solid var(--border);
+  background: var(--surface);
+  color: var(--subtext);
+  font-size: 11px;
+  white-space: nowrap;
+  flex-shrink: 0;
+}
+.term-provenance code {
+  color: var(--text);
+  font-size: inherit;
+}
 }

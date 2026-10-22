@@ -24,6 +24,7 @@ const panes = [
   { kind: "plan", sessionId: "session", promptId: "prompt" },
   { kind: "subagent", sessionId: "session", spawnPartId: "part" },
   { kind: "side", sessionId: "session" },
+  { kind: "side", sessionId: null },
 ];
 
 test("every pane variant round-trips through a concrete task URL", () => {
@@ -59,6 +60,8 @@ test("pane validation rejects malformed identifiers, views, line numbers and ext
     { kind: "code", experimentId: "exp", branch: "", view: "files" },
     { kind: "plan", sessionId: "session", promptId: "" },
     { kind: "subagent", sessionId: "", spawnPartId: "part" },
+    { kind: "side", sessionId: "" },
+    { kind: "side" },
     ...panes.map((pane) => ({ ...pane, content: "do not persist file or transcript content" })),
   ]) assert.equal(parsePane(invalid), undefined, JSON.stringify(invalid));
 });
@@ -69,9 +72,10 @@ test("only recognized concrete destinations can be saved for automatic resume", 
   for (const location of [
     "/projects", "/projects/demo/tasks/new", "/projects/demo/tasks/archived",
     "/projects/demo/skills", ...settingsTabs.map((tab) => `/projects/demo/settings/${tab}`),
-    "/projects/demo/settings/%67it", `/projects/demo/tasks/new?%70ane=${encodeURIComponent(JSON.stringify(panes[0]))}&`,
+    "/projects/demo/settings/%73ettings", `/projects/demo/tasks/new?%70ane=${encodeURIComponent(JSON.stringify(panes[0]))}&`,
   ]) assert.equal(safeLocation(location), location);
   for (const location of [
+    "/projects/demo/settings/git", "/projects/demo/settings/%67it",
     null, undefined, 42, "", "/", "/projects/demo", "/projects/demo/", "/remote-launch",
     "https://example.com/projects", "javascript:alert(1)", "//example.com/projects",
     "/\\example.com/projects", "/projects/../tasks/new", "/projects/%2e%2e/tasks/new",

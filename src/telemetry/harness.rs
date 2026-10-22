@@ -219,6 +219,9 @@ impl SetupAttempt {
         exit_code: Option<u32>,
         output: Option<&str>,
     ) {
+        if self.harness.starts_with("acp:") {
+            return;
+        }
         // Ingestion rejects the whole event on a value outside the companion
         // schema, so a new call site fails here in any debug run that hits it.
         debug_assert!(contract::OUTCOMES.contains(&outcome), "{outcome}");

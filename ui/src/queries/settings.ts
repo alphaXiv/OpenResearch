@@ -63,6 +63,12 @@ export const getEnvVarsQuery = () => queryOptions({
   staleTime: 300_000,
 });
 
+export const getTrackioSettingsQuery = () => queryOptions({
+  queryKey: workspaceKey("getTrackioSettings"),
+  queryFn: ({ signal }) => api.getTrackioSettings(signal),
+  staleTime: 300_000,
+});
+
 export const getDataDirQuery = () => queryOptions({
   queryKey: workspaceKey("getDataDir"),
   queryFn: ({ signal }) => api.getDataDir(signal),

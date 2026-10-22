@@ -85,6 +85,9 @@ enum Command {
     /// Show a run's compact log summary (path, size, and preview) by default.
     Logs(LogsArgs),
 
+    /// Print the command that opens a run's TensorBoard logs.
+    Tensorboard(TensorboardArgs),
+
     /// Add an experiment node to a local `orx up` project.
     #[command(name = "create-experiment")]
     CreateExperiment(CreateExperimentArgs),
@@ -141,6 +144,9 @@ enum Command {
     /// Supervise one local run: tail backend logs, persist status, and honor
     /// local cancel intent. Spawned detached by `exp run`.
     Supervise(SuperviseArgs),
+
+    #[command(hide = true)]
+    RentalSupervise { config: std::path::PathBuf },
 
     /// Start the local autoresearch dashboard on 127.0.0.1: embedded UI,
     /// JSON/SSE API over the local store, and the opencode agent proxy.
@@ -249,6 +255,11 @@ pub struct RunsArgs {
 
 #[derive(Args, Debug)]
 pub struct LogsArgs {
+    pub run_id: String,
+}
+
+#[derive(Args, Debug)]
+pub struct TensorboardArgs {
     pub run_id: String,
 }
 
@@ -1232,6 +1243,7 @@ fn should_capture_command(command: &Command) -> bool {
     !matches!(
         command,
         Command::Supervise(_)
+            | Command::RentalSupervise { .. }
             | Command::Update(UpdateArgs {
                 background: true,
                 ..
@@ -1251,6 +1263,7 @@ fn command_name(command: &Command) -> &'static str {
         Command::Agent(_) => "agent",
         Command::Runs(_) => "runs",
         Command::Logs(_) => "logs",
+        Command::Tensorboard(_) => "tensorboard",
         Command::CreateExperiment(_) => "create-experiment",
         Command::Compute(_) => "compute",
         Command::Instance(_) => "instance",
@@ -1268,6 +1281,7 @@ fn command_name(command: &Command) -> &'static str {
         Command::Delete(_) => "delete",
         Command::Serve(_) => "serve",
         Command::Supervise(_) => "supervise",
+        Command::RentalSupervise { .. } => "rental-supervise",
         Command::Up(_) => "up",
         Command::Telemetry(_) => "telemetry",
         Command::Feedback(_) => "feedback",
@@ -1300,6 +1314,7 @@ async fn dispatch(command: Command) -> error::Result<()> {
         Command::Agent(args) => commands::agent::run(args).await,
         Command::Runs(args) => commands::runs::run(args).await,
         Command::Logs(args) => commands::logs::run(args).await,
+        Command::Tensorboard(args) => commands::tensorboard::run(args).await,
         Command::CreateExperiment(args) => commands::create_experiment::run(args).await,
         Command::Compute(args) => commands::compute::run(args).await,
         Command::Instance(args) => commands::instance::run(args).await,
@@ -1320,6 +1335,7 @@ async fn dispatch(command: Command) -> error::Result<()> {
         Command::Delete(args) => commands::delete::run(args).await,
         Command::Serve(args) => commands::serve::run(args).await,
         Command::Supervise(args) => commands::supervise::run(args).await,
+        Command::RentalSupervise { config } => jobs::rental::supervise(&config).await,
         Command::Up(args) => match args.remote.clone() {
             Some(host) => commands::up_remote::run(&host, args).await,
             None => commands::up::run(args).await,

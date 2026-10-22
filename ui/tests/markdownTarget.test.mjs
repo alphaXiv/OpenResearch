@@ -6,10 +6,11 @@ import { unified } from "unified";
 
 import {
   chatImageTarget,
+  chatImageTargets,
   citedFilePath,
+  documentAssetTarget,
   encodeMarkdownPath,
   firstCitedLine,
-  htmlFigureAssetTarget,
   isExternalMarkdownTarget,
   markdownTargetUrl,
   rehypeSafeUrls,
@@ -68,27 +69,25 @@ test("re-resolved markdown paths are decoded only once", () => {
   assert.equal(docLink(encodeMarkdownPath(figure.path)), "docs/figures/chart#1.png");
 });
 
-test("inline html figure assets resolve relative to the figure once", () => {
-  const asset = (source, src) => chatImageTarget(htmlFigureAssetTarget(source, src));
-  assert.deepEqual(asset("my%20figs/plot.html", "chart%231.png#x"), {
-    path: "my figs/chart#1.png",
-    hash: "#x",
-    source: "checkout",
-  });
+test("document assets resolve relative to the decoded document path once", () => {
+  const asset = (path, src) => documentAssetTarget(path, src, true);
+  assert.deepEqual(asset("my figs/plot.html", "chart%231.png#x"), { path: "my figs/chart#1.png", query: "", hash: "#x" });
   assert.equal(asset("figs/plot.html", "chart%25231.png").path, "figs/chart%231.png");
+  assert.equal(asset("figs/a%25b/plot.html", "c.png").path, "figs/a%25b/c.png");
   assert.equal(asset("figs/plot.html", "a%3Fb.png").path, "figs/a?b.png");
   assert.equal(asset("plot.html", "a%3Ab.png").path, "a:b.png");
   assert.equal(asset("/tmp/r/plot.html", "../a%231.png").path, "/tmp/a#1.png");
-  assert.equal(htmlFigureAssetTarget("%E0%A4%A/plot.html", "a.png"), null);
+  assert.equal(asset("C:/figs/plot.html", "chart.png").path, "C:/figs/chart.png");
+  for (const src of ["%E0%A4%A", "a%00.png", "../../x.png"]) assert.equal(asset("figs/plot.html", src), null, src);
 });
 
-test("inline html figure assets on Windows figures stay absolute", () => {
-  const asset = (source, src) => chatImageTarget(htmlFigureAssetTarget(source, src));
-  for (const source of ["C:/figs/plot.html", String.raw`C:\figs\plot.html`, "C%3A/figs/plot.html"]) {
-    assert.deepEqual(asset(source, "chart.png"), {
-      path: "C:/figs/chart.png", hash: "", source: "absolute",
-    }, source);
-  }
+test("markdown -> nested HTML -> parent-relative image resolves against the Markdown folder first", () => {
+  const html = resolveMarkdownTarget("/tmp/reports", "run/chart.html", true);
+  assert.equal(html.path, "/tmp/reports/run/chart.html");
+  assert.equal(documentAssetTarget(html.path, "../../shared.png", true).path, "/tmp/shared.png");
+  const stored = resolveMarkdownTarget("reports", "run/chart.html");
+  assert.equal(documentAssetTarget(stored.path, "../../shared.png").path, "shared.png");
+  assert.equal(documentAssetTarget(stored.path, "../../../shared.png"), null);
 });
 
 test("markdown paths cannot escape their root", () => {
@@ -151,6 +150,47 @@ test("chat image URLs discard injected query parameters and preserve SVG fragmen
   });
   assert.equal(chatImageTarget("figures/100%25.png").path, "figures/100%.png");
   assert.equal(chatImageTarget(String.raw`C:\papers\figure.png`).path, "C:/papers/figure.png");
+});
+
+test("chat artifact images retain existing lookup order before trying a nested artifacts folder", () => {
+  for (const ext of ["html", "svg", "png"]) {
+    const path = `tiny-learning-rate-comparison/chart.${ext}`;
+    assert.deepEqual(chatImageTargets(`artifacts/${path}`), [
+      { path, hash: "", source: "artifact" },
+      { path: `artifacts/${path}`, hash: "", source: "checkout" },
+      { path: `artifacts/${path}`, hash: "", source: "artifact" },
+    ]);
+  }
+  assert.deepEqual(chatImageTargets("artifacts/chart%25231.svg?path=/secret#plot"), [
+    { path: "chart%231.svg", hash: "#plot", source: "artifact" },
+    { path: "artifacts/chart%231.svg", hash: "#plot", source: "checkout" },
+    { path: "artifacts/chart%231.svg", hash: "#plot", source: "artifact" },
+  ]);
+});
+
+test("HTML assets resolve in the root of the candidate that served the document", () => {
+  const [artifact, checkout, nested] = chatImageTargets("artifacts/run/chart.html");
+  const asset = (figure, src) => documentAssetTarget(figure.path, src, true)?.path ?? null;
+  assert.deepEqual([artifact, checkout, nested].map(figure => asset(figure, "chart%231.png")),
+    ["run/chart#1.png", "artifacts/run/chart#1.png", "artifacts/run/chart#1.png"]);
+  assert.equal(asset(artifact, "../shared.png"), "shared.png");
+  assert.equal(asset(artifact, "../../shared.png"), null);
+  assert.equal(asset(checkout, "../../shared.png"), "shared.png");
+  assert.equal(asset(nested, "../../shared.png"), "shared.png");
+  assert.deepEqual(documentAssetTarget(nested.path, "chart%25231.svg?path=/secret#plot", true),
+    { path: "artifacts/run/chart%231.svg", query: "path=/secret", hash: "#plot" });
+  for (const src of ["../../../secret.png", "..%2F..%2F..%2Fsecret.png", "%E0%A4%A", "a%00.png"]) {
+    assert.equal(asset(nested, src), null, src);
+  }
+});
+
+test("non-artifact images do not gain fallbacks and invalid paths stay rejected", () => {
+  for (const src of ["paper/figure.png", "/tmp/figure.png", "~/figure.png", "C:/papers/figure.png"]) {
+    assert.deepEqual(chatImageTargets(src), [chatImageTarget(src)]);
+  }
+  for (const src of ["../secret.png", "artifacts/../../secret.png", "%E0%A4%A", "javascript:1", "https://example.com/image.png"]) {
+    assert.deepEqual(chatImageTargets(src), [], src);
+  }
 });
 
 test("file citations split off their line suffix", () => {

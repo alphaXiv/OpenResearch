@@ -367,6 +367,17 @@ pub fn list_synced_env() -> Vec<(String, String)> {
     out
 }
 
+/// Names the run inside its job, e.g. as a metric tracker's run name.
+pub const RUN_ID_ENV: &str = "ORX_RUN_ID";
+
+/// A run's environment: the synced env file plus its own run id.
+pub fn run_env(run_id: &str) -> std::collections::HashMap<String, String> {
+    let mut env: std::collections::HashMap<String, String> =
+        list_synced_env().into_iter().collect();
+    env.insert(RUN_ID_ENV.to_string(), run_id.to_string());
+    env
+}
+
 /// Drop `key`'s line from the synced env file. Missing file/key is a no-op.
 pub fn remove_synced_env_var(key: &str) -> Result<()> {
     let Some(path) = dirs::home_dir().map(|h| h.join(".openresearch").join("env")) else {

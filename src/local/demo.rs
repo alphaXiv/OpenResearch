@@ -42,7 +42,7 @@ fn probe_uv() -> String {
         "curl -LsSf https://astral.sh/uv/install.sh | sh"
     };
     format!(
-        "export NANOCHAT_BASE_DIR=\"$PWD/.cache/nanochat\" UV_CACHE_DIR=\"$PWD/.cache/uv\" \
+        "export NANOCHAT_BASE_DIR=\"$PWD/.cache/nanochat\" UV_CACHE_DIR=\"${{ORX_CACHE_DIR:-$HOME/.cache/openresearch}}/uv\" \
          && mkdir -p \"$NANOCHAT_BASE_DIR\" \"$UV_CACHE_DIR\" \
          && {{ command -v uv >/dev/null || {{ {install_uv} && export PATH=\"$HOME/.local/bin:$PATH\"; }}; }}"
     )
@@ -567,6 +567,7 @@ fn seed_at(
         autonomy: None,
         active_leaf_id: Some(ASSISTANT_MESSAGE_ID.into()),
         side_parent_session_id: None,
+        side_parent_leaf_id: None,
         created_at: ago(seeded_at, 240, 0),
         // Sessions list by updated_at DESC, the order validate_snapshot asserts.
         updated_at: ago(seeded_at, 9, 30),
@@ -613,6 +614,7 @@ fn seed_at(
         autonomy: None,
         active_leaf_id: Some(FIGURE_ASSISTANT_MESSAGE_ID.into()),
         side_parent_session_id: None,
+        side_parent_leaf_id: None,
         created_at: ago(seeded_at, 70, 0),
         updated_at: ago(seeded_at, 69, 40),
     };
@@ -661,6 +663,7 @@ fn seed_at(
         autonomy: None,
         active_leaf_id: Some(LITERATURE_ASSISTANT_MESSAGE_ID.into()),
         side_parent_session_id: None,
+        side_parent_leaf_id: None,
         created_at: ago(seeded_at, 95, 0),
         updated_at: ago(seeded_at, 94, 40),
     };
@@ -1910,7 +1913,8 @@ mod tests {
 
     #[test]
     fn prewarmed_onboarding_seeds_full_demo() {
-        for prewarmed in [false, true] {
+        let acp_id = crate::local::acp::presets()[0].launch.id.clone();
+        for (prewarmed, harness) in [(false, "codex"), (true, "codex"), (false, acp_id.as_str())] {
             let root = super::super::git::TemporaryDirectory::new("orx-demo-onboarding").unwrap();
             let data = root.path().join("data");
             let repo = data.join("repos").join(OWNER).join(REPO);
@@ -1927,7 +1931,7 @@ mod tests {
                 &data,
                 &repo,
                 DemoSelection {
-                    harness: "codex".into(),
+                    harness: harness.into(),
                     model: None,
                     permission_mode: None,
                     reasoning_level: None,
@@ -1940,6 +1944,14 @@ mod tests {
                 started.elapsed().as_millis()
             );
             assert_eq!(completion.project.id, PROJECT_ID);
+            if harness.starts_with("acp:") {
+                for id in [SESSION_ID, FIGURE_SESSION_ID, LITERATURE_SESSION_ID] {
+                    assert_eq!(
+                        store.acp_session_state(id).unwrap().unwrap().launch.id,
+                        harness
+                    );
+                }
+            }
             assert_eq!(
                 store.list_experiments_by_project(PROJECT_ID).unwrap().len(),
                 3
@@ -2242,6 +2254,10 @@ mod tests {
         assert!(setup.contains(". .venv/bin/activate"), "{setup}");
         assert!(setup.contains(". .venv/Scripts/activate"), "{setup}");
         assert!(!setup.contains('\n'), "{setup}");
+        assert!(
+            setup.contains("UV_CACHE_DIR=\"${ORX_CACHE_DIR:-$HOME/.cache/openresearch}/uv\""),
+            "{setup}"
+        );
         assert!(!setup.contains("  "), "double space: {setup}");
     }
 
