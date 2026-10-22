@@ -545,10 +545,9 @@ pub fn delete_entry(project: &LocalProject, rel_path: &str) -> Result<()> {
 pub fn fingerprint(project: &LocalProject) -> u64 {
     let mut hasher = DefaultHasher::new();
     if let Ok(canonical) = crate::paths::canonicalize(files_dir(project)) {
-        hash_entries(
-            &collect_tree(&canonical, &canonical, "", &mut 0).0,
-            &mut hasher,
-        );
+        let (entries, truncated) = collect_tree(&canonical, &canonical, "", &mut 0);
+        hash_entries(&entries, &mut hasher);
+        truncated.hash(&mut hasher);
     }
     hasher.finish()
 }
@@ -557,6 +556,7 @@ fn hash_entries(entries: &[ArtifactEntry], hasher: &mut DefaultHasher) {
     for e in entries {
         e.path.hash(hasher);
         if e.is_dir {
+            e.partial.hash(hasher);
             hash_entries(&e.children, hasher);
         } else {
             e.size.hash(hasher);
