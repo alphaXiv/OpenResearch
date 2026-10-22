@@ -581,6 +581,9 @@ fn prepare_docs(
     if job["spec"]["activeDeadlineSeconds"].is_null() {
         job["spec"]["activeDeadlineSeconds"] = json!(timeout_seconds);
     }
+    if let Some(annotations) = job["metadata"]["annotations"].as_object_mut() {
+        annotations.remove(DEFAULT_TTL_ANNOTATION);
+    }
     if job["spec"]["ttlSecondsAfterFinished"].is_null() {
         job["spec"]["ttlSecondsAfterFinished"] = json!(UNSEEN_JOB_TTL_SECS);
         job["metadata"]["annotations"][DEFAULT_TTL_ANNOTATION] = json!("true");
@@ -1057,6 +1060,16 @@ mod tests {
 
     fn prepare(v: Value) -> Result<(Vec<Value>, String)> {
         prepare_docs(vec![v], "default", "echo hi", 14400, &labels())
+    }
+
+    #[test]
+    fn manifest_ttl_is_never_marked_as_orx_default() {
+        let mut manifest = job("train-r1");
+        manifest["spec"]["ttlSecondsAfterFinished"] = json!(604800);
+        manifest["metadata"]["annotations"][DEFAULT_TTL_ANNOTATION] = json!("true");
+        let (docs, _) = prepare(manifest).unwrap();
+        assert_eq!(docs[0]["spec"]["ttlSecondsAfterFinished"], 604800);
+        assert!(docs[0]["metadata"]["annotations"][DEFAULT_TTL_ANNOTATION].is_null());
     }
 
     #[test]
