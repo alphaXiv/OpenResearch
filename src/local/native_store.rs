@@ -318,6 +318,19 @@ pub fn toml_string(path: &Path) -> String {
         .replace('\u{7f}', "\\u007F")
 }
 
+/// Whether `isolated` is an existing store other than the user's `legacy` home,
+/// which a home override (even through a symlink) can point at it.
+fn distinct_store(isolated: &Path, legacy: &Path) -> bool {
+    match (
+        crate::paths::canonicalize(isolated),
+        crate::paths::canonicalize(legacy),
+    ) {
+        (Ok(isolated), Ok(legacy)) => isolated != legacy,
+        (Ok(_), Err(error)) => error.kind() == std::io::ErrorKind::NotFound,
+        (Err(_), _) => false,
+    }
+}
+
 /// Remove the isolated native sessions `doomed` selects. Only stores orx owns
 /// are touched: legacy homes hold the user's own (and imported) chats, and ACP
 /// agents run in their global homes, so neither is ever purged. Cursor chats
@@ -329,10 +342,8 @@ pub fn purge_isolated_sessions(doomed: impl Fn(&str) -> bool) -> Result<()> {
     let _purge = PURGE
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
-    // A home override can point legacy at the isolated path; then the user owns it.
-    let resolved = |path: PathBuf| crate::paths::canonicalize(&path).unwrap_or(path);
     let owns = |home: fn(NativeStore) -> PathBuf| {
-        resolved(home(NativeStore::Isolated)) != resolved(home(NativeStore::Legacy))
+        distinct_store(&home(NativeStore::Isolated), &home(NativeStore::Legacy))
     };
     if owns(claude_home) {
         let claude = claude_home(NativeStore::Isolated);
@@ -921,6 +932,24 @@ mod hard_link_tests {
 #[cfg(all(test, unix))]
 mod tests {
     use super::*;
+
+    #[test]
+    fn distinct_store_spots_a_legacy_home_aliasing_the_isolated_one() {
+        let root = std::env::temp_dir().join(format!("orx-native-home-{}", uuid::Uuid::new_v4()));
+        let (isolated, other) = (root.join("isolated"), root.join("other"));
+        std::fs::create_dir_all(&isolated).unwrap();
+        std::fs::create_dir_all(&other).unwrap();
+        assert!(distinct_store(&isolated, &other));
+        assert!(distinct_store(&isolated, &root.join("missing")));
+        assert!(!distinct_store(&isolated, &isolated));
+        assert!(!distinct_store(&root.join("missing"), &other));
+        #[cfg(unix)]
+        {
+            std::os::unix::fs::symlink(&isolated, root.join("link")).unwrap();
+            assert!(!distinct_store(&isolated, &root.join("link")));
+        }
+        std::fs::remove_dir_all(root).unwrap();
+    }
 
     #[test]
     fn purge_removes_only_doomed_sessions() {
