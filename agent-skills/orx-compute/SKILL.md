@@ -64,8 +64,8 @@ change the configured backend or authorize bypassing the launch contract.
 - Every run gets `ORX_RUN_ID`, `ORX_EXPERIMENT`, `ORX_EXPERIMENT_TITLE`,
   `ORX_PARENT_EXPERIMENT` (when it has a parent), `ORX_COMMIT` and
   `TRACKIO_PROJECT`. Saved environment variables reach every backend except
-  `hf`, which gets only the Trackio ones. To track metrics, log with Trackio;
-  orx shows its charts beside the run:
+  `hf`, which gets only the `ORX_*` and Trackio ones. To track metrics, log
+  with Trackio; orx shows its charts beside the run:
   `trackio.init(project=os.environ.get("TRACKIO_PROJECT", <name>),
   name=os.environ.get("ORX_RUN_ID"), group=os.environ.get("ORX_EXPERIMENT"),
   config={"hypothesis": os.environ.get("ORX_EXPERIMENT_TITLE"), "parent":

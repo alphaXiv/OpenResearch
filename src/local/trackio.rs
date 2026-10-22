@@ -1,8 +1,10 @@
-//! Reads the saved Trackio variables for the Settings check, run links and launch warning,
-//! and runs the local dashboard when no Space or server is saved.
+//! Trackio for orx: where runs log, the Settings check, which runs logged and their metrics,
+//! and the local dashboard when no Space or server is saved.
 
+use std::collections::HashMap;
 use std::path::PathBuf;
 use std::process::Stdio;
+use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
 use serde::Serialize;
@@ -17,7 +19,6 @@ pub const WRITE_TOKEN: &str = "TRACKIO_WRITE_TOKEN";
 const DIR: &str = "TRACKIO_DIR";
 /// 0.43 is the release the dashboard's `runs`, `sidebar` and `navbar` params were checked against.
 const LOCAL_REQUIREMENT: &str = "trackio>=0.43,<1";
-const HF_API: &str = "https://huggingface.co/api";
 
 /// Where runs log, in Trackio's own precedence: a Space wins over a server URL.
 pub enum Target {
@@ -30,24 +31,15 @@ pub fn target() -> Target {
     if let Some(id) = synced_env_var(SPACE_ID) {
         return Target::Space(id);
     }
-    match server_url() {
+    match synced_env_var(SERVER_URL).and_then(|raw| base_url(&raw)) {
         Some(url) => Target::Server(url),
         None => Target::Local,
     }
 }
 
-/// The saved server URL, stripped to scheme, host, port and path.
-pub fn server_url() -> Option<String> {
-    synced_env_var(SERVER_URL).and_then(|raw| base_url(&raw))
-}
-
-pub fn project() -> Option<String> {
-    synced_env_var(PROJECT)
-}
-
 /// The Trackio project an orx project's runs log to: the saved one, else the orx project's slug.
 pub fn project_for(orx_project_slug: &str) -> String {
-    project().unwrap_or_else(|| orx_project_slug.to_string())
+    synced_env_var(PROJECT).unwrap_or_else(|| orx_project_slug.to_string())
 }
 
 /// The value the Environment page may show and edit in the clear; `None` keeps it masked.
@@ -117,6 +109,17 @@ pub fn local_run_env() -> Option<(String, String)> {
     Some((DIR.to_string(), local_dir()?.to_string_lossy().into_owned()))
 }
 
+/// Something has logged to this machine's local store, so the user relies on Trackio.
+pub fn used_locally() -> bool {
+    local_dir()
+        .and_then(|dir| std::fs::read_dir(dir).ok())
+        .is_some_and(|entries| {
+            entries
+                .flatten()
+                .any(|entry| entry.path().extension().is_some_and(|ext| ext == "db"))
+        })
+}
+
 /// Trackio's on-disk project name (`trackio.utils.canonical_project_name`).
 fn canonical_project_name(project: &str) -> String {
     let safe: String = project
@@ -135,6 +138,10 @@ fn has_local_project(project: &str) -> bool {
         dir.join(format!("{}.db", canonical_project_name(project)))
             .is_file()
     })
+}
+
+fn hf_api() -> String {
+    format!("{}/api", crate::jobs::huggingface::endpoint())
 }
 
 /// No redirects: tokens must only ever reach the host they were sent to.
@@ -184,7 +191,7 @@ async fn version(
 pub struct Preflight {
     pub reachable: bool,
     pub version: Option<String>,
-    /// `None` when no write token is saved or the check failed (see `error`).
+    /// `None` when no token is saved or the check was inconclusive.
     pub write_access: Option<bool>,
     pub error: Option<String>,
     /// The Space's runtime stage (e.g. `SLEEPING`); `None` for a self-hosted server.
@@ -213,7 +220,7 @@ pub async fn check() -> Result<Preflight, String> {
 }
 
 /// `GET /version`, then (with a token) Trackio's read-only write-access check.
-pub async fn preflight(base: &str, token: Option<&str>) -> Preflight {
+async fn preflight(base: &str, token: Option<&str>) -> Preflight {
     let client = match client(base) {
         Ok(client) => client,
         Err(error) => return Preflight::failed(error),
@@ -258,6 +265,7 @@ pub async fn preflight(base: &str, token: Option<&str>) -> Preflight {
     }
 }
 
+#[derive(Clone)]
 struct Space {
     repo: String,
     host: String,
@@ -297,10 +305,11 @@ fn space_host(raw: &str) -> Option<String> {
     (url.scheme() == "https" && host.ends_with(".hf.space")).then(|| format!("https://{host}"))
 }
 
-/// `None` when the Space does not exist yet (or is private and the token cannot see it).
+/// `None` when the Space does not exist yet (or is private and no token can see it).
 async fn space(id: &str, token: Option<&str>) -> Result<Option<Space>, String> {
     let repo = space_repo(id, token).await?;
-    let mut req = client(HF_API)?.get(format!("{HF_API}/spaces/{repo}"));
+    let api = hf_api();
+    let mut req = client(&api)?.get(format!("{api}/spaces/{repo}"));
     if let Some(token) = token {
         req = req.bearer_auth(token);
     }
@@ -308,14 +317,22 @@ async fn space(id: &str, token: Option<&str>) -> Result<Option<Space>, String> {
         .send()
         .await
         .map_err(|error| format!("Could not reach Hugging Face: {}", error.without_url()))?;
-    if matches!(res.status().as_u16(), 401 | 404) {
-        return Ok(None);
-    }
-    if !res.status().is_success() {
-        return Err(format!(
-            "Hugging Face answered {} for Space {repo}",
-            res.status()
-        ));
+    match res.status().as_u16() {
+        404 => return Ok(None),
+        401 if token.is_none() => return Ok(None),
+        401 => return Err("Hugging Face rejected HF_TOKEN; save a current token.".to_string()),
+        300..=399 => {
+            return Err(format!(
+                "Space {repo} moved on Hugging Face; update {SPACE_ID}."
+            ))
+        }
+        _ if !res.status().is_success() => {
+            return Err(format!(
+                "Hugging Face answered {} for Space {repo}",
+                res.status()
+            ))
+        }
+        _ => {}
     }
     let body: Value = res
         .json()
@@ -333,23 +350,61 @@ async fn space(id: &str, token: Option<&str>) -> Result<Option<Space>, String> {
     }))
 }
 
+/// Caches are keyed by which token answered, so saving another account's token starts afresh.
+fn token_key(token: Option<&str>) -> u64 {
+    use std::hash::{Hash, Hasher};
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    token.hash(&mut hasher);
+    hasher.finish()
+}
+
+/// Long enough that dashboard polls never reach `whoami`, which Hugging Face rate-limits hard.
+const SPACE_REUSE: Duration = Duration::from_secs(60);
+/// Shorter than a poll, so a Space created by the first run shows up on the next check.
+const MISSING_SPACE_REUSE: Duration = Duration::from_secs(10);
+
+/// Failures are cached too, so a rejected token does not reach `whoami` on every poll.
+async fn cached_space(id: &str, token: Option<&str>) -> Result<Option<Space>, String> {
+    type Spaces = Mutex<HashMap<(String, u64), (Result<Option<Space>, String>, Instant)>>;
+    static SPACES: OnceLock<Spaces> = OnceLock::new();
+    let key = (id.to_string(), token_key(token));
+    let spaces = SPACES.get_or_init(Mutex::default);
+    if let Some((space, at)) = spaces.lock().unwrap().get(&key) {
+        let reuse = if matches!(space, Ok(None)) {
+            MISSING_SPACE_REUSE
+        } else {
+            SPACE_REUSE
+        };
+        if at.elapsed() < reuse {
+            return space.clone();
+        }
+    }
+    let space = space(id, token).await;
+    spaces
+        .lock()
+        .unwrap()
+        .insert(key, (space.clone(), Instant::now()));
+    space
+}
+
 /// Refetched well before Hugging Face's 24-hour expiry, and stable in between so an open embed never reloads.
 const SPACE_SIGN_REUSE: Duration = Duration::from_secs(12 * 3600);
 
 /// Hugging Face's read-only JWT for one Space: a private Space's browser URLs need it as `__sign`,
 /// as the Space page on huggingface.co does, or they 404 even for a signed-in owner.
 async fn space_sign(repo: &str, token: &str) -> Result<String, String> {
-    use std::collections::HashMap;
-    use std::sync::{Mutex, OnceLock};
-    static SIGNS: OnceLock<Mutex<HashMap<String, (String, Instant)>>> = OnceLock::new();
+    type Signs = Mutex<HashMap<(String, u64), (String, Instant)>>;
+    static SIGNS: OnceLock<Signs> = OnceLock::new();
+    let key = (repo.to_string(), token_key(Some(token)));
     let signs = SIGNS.get_or_init(Mutex::default);
-    if let Some((sign, at)) = signs.lock().unwrap().get(repo) {
+    if let Some((sign, at)) = signs.lock().unwrap().get(&key) {
         if at.elapsed() < SPACE_SIGN_REUSE {
             return Ok(sign.clone());
         }
     }
-    let res = client(HF_API)?
-        .get(format!("{HF_API}/spaces/{repo}/jwt"))
+    let api = hf_api();
+    let res = client(&api)?
+        .get(format!("{api}/spaces/{repo}/jwt"))
         .bearer_auth(token)
         .send()
         .await
@@ -371,7 +426,7 @@ async fn space_sign(repo: &str, token: &str) -> Result<String, String> {
     signs
         .lock()
         .unwrap()
-        .insert(repo.to_string(), (sign.clone(), Instant::now()));
+        .insert(key, (sign.clone(), Instant::now()));
     Ok(sign)
 }
 
@@ -390,8 +445,9 @@ async fn space_preflight(id: &str) -> Preflight {
         Some(token) => space_write_access(&space.repo, token).await,
         None => None,
     };
+    let bearer = token.as_deref().filter(|_| space.private);
     let (version, error) = match client(&space.host) {
-        Ok(client) => match version(&client, &space.host, token.as_deref()).await {
+        Ok(client) => match version(&client, &space.host, bearer).await {
             Ok(version) => (Some(version), None),
             Err(error) => (None, Some(error)),
         },
@@ -408,9 +464,10 @@ async fn space_preflight(id: &str) -> Preflight {
 
 /// Hugging Face's own write check, the one Trackio runs before logging to a Space.
 async fn space_write_access(repo: &str, token: &str) -> Option<bool> {
-    let res = client(HF_API)
+    let api = hf_api();
+    let res = client(&api)
         .ok()?
-        .get(format!("{HF_API}/spaces/{repo}/auth-check/write"))
+        .get(format!("{api}/spaces/{repo}/auth-check/write"))
         .bearer_auth(token)
         .send()
         .await
@@ -468,39 +525,36 @@ async fn run_names(base: &str, project: &str, bearer: Option<&str>) -> Result<Ve
 
 struct Dashboard {
     base: String,
-    /// The HF token, for a Space's API.
+    /// The HF token, only for a private Space; a public Space's code never sees it.
     bearer: Option<String>,
-    /// A private Space's browser `__sign`, or why it could not be minted.
-    sign: Option<Result<String, String>>,
+    /// A private Space's `owner/name`, which its browser links are signed for.
+    private_repo: Option<String>,
 }
 
-/// The dashboard `project` logs to; `None` when nothing has logged to the local store.
-async fn dashboard(local: &LocalServer, project: &str) -> Result<Option<Dashboard>, String> {
+/// The dashboard `project` logs to; `None` when nothing has logged yet (no local data, or no Space yet).
+async fn dashboard(local: &Arc<LocalServer>, project: &str) -> Result<Option<Dashboard>, String> {
     match target() {
         Target::Space(id) => {
             let token = crate::jobs::huggingface::resolve_token().ok();
-            let space = space(&id, token.as_deref())
-                .await?
-                .ok_or_else(|| format!("Space {id} does not exist yet"))?;
-            let sign = match (space.private, token.as_deref()) {
-                (true, Some(token)) => Some(space_sign(&space.repo, token).await),
-                _ => None,
+            // Not created yet is the normal first-use state, not a failure.
+            let Some(space) = cached_space(&id, token.as_deref()).await? else {
+                return Ok(None);
             };
             Ok(Some(Dashboard {
                 base: space.host,
-                bearer: token,
-                sign,
+                bearer: token.filter(|_| space.private),
+                private_repo: space.private.then_some(space.repo),
             }))
         }
         Target::Server(base) => Ok(Some(Dashboard {
             base,
             bearer: None,
-            sign: None,
+            private_repo: None,
         })),
         Target::Local if has_local_project(project) => Ok(Some(Dashboard {
             base: local.url().await?,
             bearer: None,
-            sign: None,
+            private_repo: None,
         })),
         Target::Local => Ok(None),
     }
@@ -509,44 +563,39 @@ async fn dashboard(local: &LocalServer, project: &str) -> Result<Option<Dashboar
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ProjectRuns {
-    /// `None` until something has logged to the local store.
+    /// `None` until something has logged (to the local store, or creating the Space).
     pub dashboard_url: Option<String>,
     pub project: String,
     /// Run ids and names that have logged, matched against `ORX_RUN_ID`.
     pub runs: Vec<String>,
     /// A private Space's `__sign` for browser URLs: read-only, for that Space only.
     pub dashboard_sign: Option<String>,
-    pub error: Option<String>,
 }
 
 /// The dashboard for `project` and which runs have logged to it.
-pub async fn project_runs(local: &LocalServer, project: String) -> ProjectRuns {
-    let mut out = ProjectRuns {
-        dashboard_url: None,
+pub async fn project_runs(
+    local: &Arc<LocalServer>,
+    project: String,
+) -> Result<ProjectRuns, String> {
+    let Some(dashboard) = dashboard(local, &project).await? else {
+        return Ok(ProjectRuns {
+            dashboard_url: None,
+            project,
+            runs: Vec::new(),
+            dashboard_sign: None,
+        });
+    };
+    let dashboard_sign = match (&dashboard.private_repo, dashboard.bearer.as_deref()) {
+        (Some(repo), Some(token)) => Some(space_sign(repo, token).await?),
+        _ => None,
+    };
+    let runs = run_names(&dashboard.base, &project, dashboard.bearer.as_deref()).await?;
+    Ok(ProjectRuns {
+        dashboard_url: Some(dashboard.base),
         project,
-        runs: Vec::new(),
-        dashboard_sign: None,
-        error: None,
-    };
-    let dashboard = match dashboard(local, &out.project).await {
-        Ok(Some(dashboard)) => dashboard,
-        Ok(None) => return out,
-        Err(error) => {
-            out.error = Some(error);
-            return out;
-        }
-    };
-    match dashboard.sign {
-        Some(Ok(sign)) => out.dashboard_sign = Some(sign),
-        Some(Err(error)) => out.error = Some(error),
-        None => {}
-    }
-    match run_names(&dashboard.base, &out.project, dashboard.bearer.as_deref()).await {
-        Ok(runs) => out.runs = runs,
-        Err(error) => out.error = Some(error),
-    }
-    out.dashboard_url = Some(dashboard.base);
-    out
+        runs,
+        dashboard_sign,
+    })
 }
 
 /// How many evenly spaced points the statistics are computed over.
@@ -579,6 +628,7 @@ pub struct MetricSummary {
 pub struct RunMetrics {
     pub run: String,
     pub project: String,
+    /// `None` until something has logged (to the local store, or creating the Space).
     pub dashboard_url: Option<String>,
     /// Steps the run logged; `None` when it never logged to Trackio.
     pub logged_steps: Option<u64>,
@@ -590,6 +640,8 @@ pub struct RunMetrics {
     pub metrics: Vec<MetricSummary>,
     /// Metrics with no numeric values, such as images or tables.
     pub other_metrics: Vec<String>,
+    /// What could not be read; the rest of the report still stands.
+    pub errors: Vec<String>,
 }
 
 /// `rows` as Trackio's `get_metric_values` returns them; `None` when none is numeric.
@@ -634,12 +686,12 @@ fn summarize(name: &str, rows: &[Value], series_points: usize) -> Option<MetricS
 
 /// What `run` logged to Trackio, summarized for an agent to read.
 pub async fn run_metrics(
-    local: &LocalServer,
+    local: &Arc<LocalServer>,
     project: String,
     run: String,
     filters: &[String],
     series_points: usize,
-) -> Result<RunMetrics, String> {
+) -> RunMetrics {
     let mut out = RunMetrics {
         run,
         project,
@@ -651,17 +703,29 @@ pub async fn run_metrics(
         alerts: Vec::new(),
         metrics: Vec::new(),
         other_metrics: Vec::new(),
+        errors: Vec::new(),
     };
-    let Some(dashboard) = dashboard(local, &out.project).await? else {
-        return Ok(out);
+    let dashboard = match dashboard(local, &out.project).await {
+        Ok(Some(dashboard)) => dashboard,
+        Ok(None) => return out,
+        Err(error) => {
+            out.errors.push(error);
+            return out;
+        }
     };
     let (base, bearer) = (dashboard.base.as_str(), dashboard.bearer.as_deref());
     out.dashboard_url = Some(base.to_string());
     let target = json!({ "project": out.project, "run": out.run });
-    let summary = call(base, bearer, "get_run_summary", target.clone()).await?;
+    let summary = match call(base, bearer, "get_run_summary", target.clone()).await {
+        Ok(summary) => summary,
+        Err(error) => {
+            out.errors.push(error);
+            return out;
+        }
+    };
     let logged = summary["num_logs"].as_u64().unwrap_or(0);
     if logged == 0 {
-        return Ok(out);
+        return out;
     }
     out.logged_steps = Some(logged);
     out.last_step = summary["last_step"].as_i64();
@@ -697,29 +761,35 @@ pub async fn run_metrics(
             "get_metric_values",
             json!({ "project": out.project, "run": out.run, "metric_name": name, "max_points": STATS_POINTS }),
         )
-        .await?;
-        match summarize(
-            name,
-            rows.as_array().map(Vec::as_slice).unwrap_or_default(),
-            series_points,
-        ) {
-            Some(summary) => out.metrics.push(summary),
-            None => out.other_metrics.push(name.to_string()),
+        .await;
+        match rows {
+            Ok(rows) => match summarize(
+                name,
+                rows.as_array().map(Vec::as_slice).unwrap_or_default(),
+                series_points,
+            ) {
+                Some(summary) => out.metrics.push(summary),
+                None => out.other_metrics.push(name.to_string()),
+            },
+            Err(error) => out.errors.push(format!("{name}: {error}")),
         }
     }
-    Ok(out)
+    out
 }
 
 /// The `trackio show` that `orx up` starts on first use, so local runs need no setup.
 #[derive(Default)]
 pub struct LocalServer {
-    state: tokio::sync::Mutex<LocalState>,
+    state: Mutex<LocalState>,
 }
+
+type Started = Option<Result<String, String>>;
 
 #[derive(Default)]
 enum LocalState {
     #[default]
     Idle,
+    Starting(tokio::sync::watch::Receiver<Started>),
     Running {
         child: LocalChild,
         url: String,
@@ -745,57 +815,82 @@ const LOCAL_RETRY_AFTER: Duration = Duration::from_secs(60);
 const LOCAL_START_TIMEOUT: Duration = Duration::from_secs(180);
 
 impl LocalServer {
-    pub async fn url(&self) -> Result<String, String> {
-        let mut state = self.state.lock().await;
-        match &mut *state {
-            LocalState::Running { child, url } => {
+    /// Starting runs in its own task, so a caller that gives up neither kills it nor blocks the others.
+    pub async fn url(self: &Arc<Self>) -> Result<String, String> {
+        let mut started = {
+            let mut state = self.state.lock().unwrap();
+            if let LocalState::Running { child, url } = &mut *state {
                 if matches!(child.0.try_wait(), Ok(None)) {
                     return Ok(url.clone());
                 }
             }
-            LocalState::Failed { at, error } if at.elapsed() < LOCAL_RETRY_AFTER => {
-                return Err(error.clone())
+            match &*state {
+                LocalState::Failed { at, error } if at.elapsed() < LOCAL_RETRY_AFTER => {
+                    return Err(error.clone())
+                }
+                LocalState::Starting(started) => started.clone(),
+                _ => {
+                    let (done, started) = tokio::sync::watch::channel(None);
+                    *state = LocalState::Starting(started.clone());
+                    let server = Arc::clone(self);
+                    tokio::spawn(async move {
+                        let result = start_local().await;
+                        let outcome = result
+                            .as_ref()
+                            .map(|(_, url)| url.clone())
+                            .map_err(String::clone);
+                        *server.state.lock().unwrap() = match result {
+                            Ok((child, url)) => LocalState::Running { child, url },
+                            Err(error) => LocalState::Failed {
+                                at: Instant::now(),
+                                error,
+                            },
+                        };
+                        let _ = done.send(Some(outcome));
+                    });
+                    started
+                }
             }
-            _ => {}
-        }
-        match start_local().await {
-            Ok((child, url)) => {
-                *state = LocalState::Running {
-                    child,
-                    url: url.clone(),
-                };
-                Ok(url)
-            }
-            Err(error) => {
-                *state = LocalState::Failed {
-                    at: Instant::now(),
-                    error: error.clone(),
-                };
-                Err(error)
-            }
-        }
+        };
+        let outcome = started
+            .wait_for(Option::is_some)
+            .await
+            .ok()
+            .and_then(|outcome| outcome.clone());
+        outcome.unwrap_or_else(|| Err("Trackio's dashboard stopped while starting".to_string()))
     }
 }
 
+/// Exits when its stdin closes, so the dashboard dies with orx however orx ends (restart, crash, kill).
+const SHOW_SCRIPT: &str = "import os, sys, threading, trackio; threading.Thread(target=lambda: (sys.stdin.read(), os._exit(0)), daemon=True).start(); trackio.show(open_browser=False, block_thread=True, footer=False, server_port=int(sys.argv[1]))";
+
+/// Windows' Store stub for a missing `python`.
+const WINDOWS_STUB_EXIT: i32 = 9009;
+
 async fn start_local() -> Result<(LocalChild, String), String> {
     use crate::local::shell_env::find_on_path;
+    let install = "Install uv, or run `pip install trackio`, to see local runs in Trackio.";
     let dir = local_dir().ok_or("No home directory for Trackio's local store")?;
-    let port = crate::local::opencode::free_port().map_err(|error| error.to_string())?;
-    let script = format!(
-        "import trackio; trackio.show(open_browser=False, block_thread=True, footer=False, server_port={port})"
-    );
+    let port = crate::local::opencode::free_port()
+        .map_err(|error| error.to_string())?
+        .to_string();
     let mut cmd = if let Some(uvx) = find_on_path("uvx") {
         let mut cmd = tokio::process::Command::new(uvx);
-        cmd.args(["--from", LOCAL_REQUIREMENT, "python", "-c", &script]);
+        cmd.args([
+            "--from",
+            LOCAL_REQUIREMENT,
+            "python",
+            "-c",
+            SHOW_SCRIPT,
+            &port,
+        ]);
         cmd
     } else if let Some(python) = find_on_path(if cfg!(windows) { "python" } else { "python3" }) {
         let mut cmd = tokio::process::Command::new(python);
-        cmd.args(["-c", &script]);
+        cmd.args(["-c", SHOW_SCRIPT, &port]);
         cmd
     } else {
-        return Err(
-            "Install uv, or run `pip install trackio`, to see local runs in Trackio.".to_string(),
-        );
+        return Err(install.to_string());
     };
     let log_path = crate::store::data_dir().join("trackio.log");
     let log = std::fs::OpenOptions::new()
@@ -805,12 +900,11 @@ async fn start_local() -> Result<(LocalChild, String), String> {
         .map_err(|error| error.to_string())?;
     cmd.envs(crate::config::list_synced_env())
         .env(DIR, &dir)
-        .stdin(Stdio::null())
+        .stdin(Stdio::piped())
         .stdout(Stdio::from(
             log.try_clone().map_err(|error| error.to_string())?,
         ))
-        .stderr(Stdio::from(log))
-        .kill_on_drop(true);
+        .stderr(Stdio::from(log));
     #[cfg(unix)]
     cmd.process_group(0);
     let mut child = LocalChild(
@@ -822,6 +916,9 @@ async fn start_local() -> Result<(LocalChild, String), String> {
     let deadline = Instant::now() + LOCAL_START_TIMEOUT;
     loop {
         if let Ok(Some(status)) = child.0.try_wait() {
+            if status.code() == Some(WINDOWS_STUB_EXIT) {
+                return Err(install.to_string());
+            }
             return Err(format!(
                 "Trackio exited ({status}) before its dashboard started; see {}",
                 log_path.display()

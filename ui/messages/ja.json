@@ -673,7 +673,7 @@
   "a11y_open_on_github": "GitHub で {name} を開く",
   "a11y_open_in_trackio": "この実行を Trackio で開く",
   "a11y_trackio_charts": "この実行の Trackio グラフ",
-  "trackio_visualize": "可視化",
+  "experiment_overview_visualize": "可視化",
   "detail_drawer_trackio_no_data": "この実行はまだ Trackio に記録していません。",
   "a11y_preview_skill": "/{name} スキルをプレビュー",
   "a11y_skill": "{name} スキル",

@@ -667,7 +667,7 @@
   "a11y_open_on_github": "在 GitHub 上打开 {name}",
   "a11y_open_in_trackio": "在 Trackio 中打开此运行",
   "a11y_trackio_charts": "此运行的 Trackio 图表",
-  "trackio_visualize": "可视化",
+  "experiment_overview_visualize": "可视化",
   "detail_drawer_trackio_no_data": "此运行尚未向 Trackio 记录数据。",
   "a11y_preview_skill": "预览 /{name} 技能",
   "a11y_skill": "{name} 技能",

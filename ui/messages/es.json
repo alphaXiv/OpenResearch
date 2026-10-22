@@ -673,7 +673,7 @@
   "a11y_open_on_github": "Abrir {name} en GitHub",
   "a11y_open_in_trackio": "Abrir esta ejecución en Trackio",
   "a11y_trackio_charts": "Gráficos de Trackio de esta ejecución",
-  "trackio_visualize": "Visualizar",
+  "experiment_overview_visualize": "Visualizar",
   "detail_drawer_trackio_no_data": "Esta ejecución aún no ha registrado datos en Trackio.",
   "a11y_preview_skill": "Vista previa de la skill /{name}",
   "a11y_skill": "Skill {name}",

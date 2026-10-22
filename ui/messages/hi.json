@@ -673,7 +673,7 @@
   "a11y_open_on_github": "{name} को GitHub पर खोलें",
   "a11y_open_in_trackio": "इस रन को Trackio में खोलें",
   "a11y_trackio_charts": "इस रन के Trackio चार्ट",
-  "trackio_visualize": "विज़ुअलाइज़ करें",
+  "experiment_overview_visualize": "विज़ुअलाइज़ करें",
   "detail_drawer_trackio_no_data": "इस रन ने अभी तक Trackio में लॉग नहीं किया है।",
   "a11y_preview_skill": "/{name} स्किल का पूर्वावलोकन करें",
   "a11y_skill": "{name} स्किल",

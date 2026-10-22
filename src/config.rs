@@ -378,42 +378,54 @@ pub fn run_env(run_id: &str) -> std::collections::HashMap<String, String> {
     env
 }
 
+const EXPERIMENT_ENV: &str = "ORX_EXPERIMENT";
+const EXPERIMENT_TITLE_ENV: &str = "ORX_EXPERIMENT_TITLE";
+const PARENT_EXPERIMENT_ENV: &str = "ORX_PARENT_EXPERIMENT";
+const COMMIT_ENV: &str = "ORX_COMMIT";
+
 /// The run's id, experiment, parent, commit and Trackio project, read from its reserved row.
 pub fn run_context_env(run_id: &str) -> Vec<(String, String)> {
     let mut env = vec![(RUN_ID_ENV.to_string(), run_id.to_string())];
-    let mut context = || -> Result<()> {
-        let store = crate::store::Store::open()?;
-        let Some(run) = store.get_run(run_id)? else {
-            return Ok(());
-        };
-        if let Some(experiment) = store.get_local_experiment(&run.experiment_id)? {
-            env.push(("ORX_EXPERIMENT".to_string(), experiment.slug.clone()));
-            if let Some(title) = experiment.title.filter(|title| !title.trim().is_empty()) {
-                env.push(("ORX_EXPERIMENT_TITLE".to_string(), title));
-            }
-            let parent = match &experiment.parent_experiment_id {
-                Some(id) => store.get_local_experiment(id)?,
-                None => None,
-            };
-            if let Some(parent) = parent {
-                env.push(("ORX_PARENT_EXPERIMENT".to_string(), parent.slug));
-            }
+    match stored_run_context(run_id) {
+        Ok(context) => env.extend(context),
+        Err(error) => {
+            eprintln!(
+                "warning: could not read run {run_id}'s experiment for its environment: {error}"
+            )
         }
-        if let Some(commit) = run.commit_sha.filter(|sha| !sha.is_empty()) {
-            env.push(("ORX_COMMIT".to_string(), commit));
-        }
-        if let Some(project) = store.get_local_project(&run.project_id)? {
-            env.push((
-                crate::local::trackio::PROJECT.to_string(),
-                crate::local::trackio::project_for(&project.slug),
-            ));
-        }
-        Ok(())
-    };
-    if let Err(error) = context() {
-        eprintln!("warning: could not read run {run_id}'s experiment for its environment: {error}");
     }
     env
+}
+
+fn stored_run_context(run_id: &str) -> Result<Vec<(String, String)>> {
+    let store = crate::store::Store::open()?;
+    let Some(run) = store.get_run(run_id)? else {
+        return Ok(Vec::new());
+    };
+    let mut env = Vec::new();
+    if let Some(experiment) = store.get_local_experiment(&run.experiment_id)? {
+        let parent = match &experiment.parent_experiment_id {
+            Some(id) => store.get_local_experiment(id)?,
+            None => None,
+        };
+        if let Some(parent) = parent {
+            env.push((PARENT_EXPERIMENT_ENV.to_string(), parent.slug));
+        }
+        if let Some(title) = experiment.title.filter(|title| !title.trim().is_empty()) {
+            env.push((EXPERIMENT_TITLE_ENV.to_string(), title));
+        }
+        env.push((EXPERIMENT_ENV.to_string(), experiment.slug));
+    }
+    if let Some(commit) = run.commit_sha.filter(|sha| !sha.is_empty()) {
+        env.push((COMMIT_ENV.to_string(), commit));
+    }
+    if let Some(project) = store.get_local_project(&run.project_id)? {
+        env.push((
+            crate::local::trackio::PROJECT.to_string(),
+            crate::local::trackio::project_for(&project.slug),
+        ));
+    }
+    Ok(env)
 }
 
 /// Drop `key`'s line from the synced env file. Missing file/key is a no-op.

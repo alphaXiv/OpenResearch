@@ -1,6 +1,5 @@
 import { m } from "../paraglide/messages.js";
 import { getLocale } from "../paraglide/runtime.js";
-import { useQuery } from "@tanstack/react-query";
 import {
   CalendarDays,
   ChartLine,
@@ -21,7 +20,7 @@ import {
   type Project,
   type Run,
 } from "../api";
-import { getTrackioRunsQuery } from "../queries/settings";
+import { useTrackioRuns } from "../queries/settings";
 import { tabOpenGestureHandlers, type TabOpenIntent } from "../tabPreview";
 import { BackendBadge } from "./BackendLogos";
 import { BranchPill } from "./BranchPill";
@@ -85,10 +84,7 @@ export function ExperimentOverview({
     (run) => run.status === "running" || run.status === "starting",
   );
   const [now, setNow] = useState(() => Date.now());
-  const trackio = useQuery({
-    ...getTrackioRunsQuery(experiment.projectId),
-    refetchInterval: hasLiveRun ? 15_000 : false,
-  }).data;
+  const trackio = useTrackioRuns(experiment.projectId, hasLiveRun).data;
   const hasTrackio = latestRun !== null && trackioRunUrl(trackio, latestRun.id) !== null;
 
   useEffect(() => {
@@ -128,7 +124,7 @@ export function ExperimentOverview({
               )}
             >
               <ChartLine size={15} />
-              {m.trackio_visualize()}
+              {m.experiment_overview_visualize()}
             </Button>
           )}
           <Button

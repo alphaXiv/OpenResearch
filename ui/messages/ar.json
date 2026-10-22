@@ -672,7 +672,7 @@
   "a11y_open_on_github": "فتح {name} على GitHub",
   "a11y_open_in_trackio": "فتح هذا التشغيل في Trackio",
   "a11y_trackio_charts": "مخططات Trackio لهذا التشغيل",
-  "trackio_visualize": "تصوّر",
+  "experiment_overview_visualize": "تصوّر",
   "detail_drawer_trackio_no_data": "لم يسجّل هذا التشغيل أي بيانات في Trackio بعد.",
   "a11y_preview_skill": "معاينة مهارة /{name}",
   "a11y_skill": "مهارة {name}",

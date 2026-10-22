@@ -1028,9 +1028,11 @@ pub(super) async fn trackio_project_runs(
         .get_local_project(&id)?
         .ok_or_else(|| not_found("project"))?;
     let project = crate::local::trackio::project_for(&project.slug);
-    Ok(Json(json!(
-        crate::local::trackio::project_runs(&state.trackio, project).await
-    )))
+    // A gateway error, not a 200 with no runs, so the dashboard keeps an open embed through a blip.
+    let runs = crate::local::trackio::project_runs(&state.trackio, project)
+        .await
+        .map_err(|error| ApiError(StatusCode::BAD_GATEWAY, error))?;
+    Ok(Json(json!(runs)))
 }
 
 /// Live check of the saved Trackio Space or server and its write access.

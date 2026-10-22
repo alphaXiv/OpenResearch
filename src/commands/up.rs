@@ -9818,6 +9818,7 @@ mod tests {
             stopping: Default::default(),
             dashboard_lock: Default::default(),
             restart: Default::default(),
+            trackio: Default::default(),
         };
         let error = delete_artifact(
             State(state),

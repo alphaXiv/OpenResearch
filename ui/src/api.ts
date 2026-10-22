@@ -1193,7 +1193,6 @@ export interface TrackioRuns {
   runs: string[];
   /** A private Space's read-only `__sign`; without it the browser gets a 404. */
   dashboardSign: string | null;
-  error: string | null;
 }
 
 export const getTrackioRuns = (projectId: string, signal?: AbortSignal) =>

@@ -9,7 +9,7 @@ use crate::store::Store;
 pub async fn run(args: crate::MetricsArgs) -> Result<()> {
     let store = Store::open()?;
     // Dropped at exit, which stops a local dashboard this command had to start.
-    let local = trackio::LocalServer::default();
+    let local = std::sync::Arc::new(trackio::LocalServer::default());
     let mut reports = Vec::new();
     for id in &args.run_ids {
         let run = crate::local::resolve::resolve_run(&store, id)?;
@@ -23,8 +23,7 @@ pub async fn run(args: crate::MetricsArgs) -> Result<()> {
             &args.metrics,
             args.points,
         )
-        .await
-        .map_err(|error| anyhow!("{error}"))?;
+        .await;
         reports.push(report);
     }
     if args.json {
@@ -32,6 +31,12 @@ pub async fn run(args: crate::MetricsArgs) -> Result<()> {
     } else {
         let text: Vec<String> = reports.iter().map(render).collect();
         print!("{}", text.join("\n"));
+    }
+    if reports
+        .iter()
+        .all(|report| report.logged_steps.is_none() && !report.errors.is_empty())
+    {
+        return Err(anyhow!("Could not read Trackio for any of these runs."));
     }
     Ok(())
 }
@@ -47,11 +52,29 @@ fn render(report: &RunMetrics) -> String {
         let _ = write!(out, " · group {group}");
     }
     out.push('\n');
+    for error in &report.errors {
+        let _ = writeln!(out, "Could not read: {error}");
+    }
     let Some(steps) = report.logged_steps else {
-        let _ = writeln!(
-            out,
-            "Nothing logged to Trackio for this run. It logs only if the code calls trackio.init with name=ORX_RUN_ID."
-        );
+        if report.dashboard_url.is_none() && report.errors.is_empty() {
+            let _ = match trackio::target() {
+                trackio::Target::Space(id) => writeln!(
+                    out,
+                    "Space {id} does not exist yet, or HF_TOKEN cannot see it; Trackio creates it on the first logged run."
+                ),
+                _ => writeln!(
+                    out,
+                    "Nothing logged to this machine's Trackio store for this project, and no Space or server is saved. Remote runs log to Trackio only with {} or {} saved.",
+                    trackio::SPACE_ID,
+                    trackio::SERVER_URL
+                ),
+            };
+        } else if report.errors.is_empty() {
+            let _ = writeln!(
+                out,
+                "Nothing logged to Trackio for this run. It logs only if the code calls trackio.init with name=ORX_RUN_ID."
+            );
+        }
         return out;
     };
     let last = report

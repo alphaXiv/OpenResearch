@@ -625,17 +625,19 @@ fn prepare_docs(
             .as_array_mut()
             .map(std::mem::take)
             .unwrap_or_default();
-        let mut env: Vec<Value> = env
+        let manifest_env: Vec<Value> = env
             .into_iter()
-            .filter(|e| {
-                e["name"] != "ORX_SCRIPT" && !pod_env.iter().any(|(key, _)| e["name"] == *key)
-            })
+            .filter(|e| e["name"] != "ORX_SCRIPT" && e["name"] != crate::config::RUN_ID_ENV)
             .collect();
-        env.push(json!({ "name": "ORX_SCRIPT", "value": script }));
-        // Per-pod, not in the shared `orx-env` Secret a pending pod may read after a later launch.
+        let mut env = vec![json!({ "name": "ORX_SCRIPT", "value": script })];
+        // Per-pod, not in the shared `orx-env` Secret a pending pod may read after a later launch;
+        // first, so manifest entries can reference them as `$(ORX_RUN_ID)`.
         for (name, value) in pod_env {
-            env.push(json!({ "name": name, "value": value }));
+            if !manifest_env.iter().any(|e| e["name"] == *name) {
+                env.push(json!({ "name": name, "value": value }));
+            }
         }
+        env.extend(manifest_env);
         // Default the container's Python to unbuffered so the job's prints
         // stream live (kubectl logs -f can't flush what the app never wrote).
         // A user-set value in the manifest wins.
@@ -1172,6 +1174,34 @@ mod tests {
         let mut j = job("train");
         j["metadata"]["namespace"] = json!("other");
         assert!(prepare(j).unwrap_err().to_string().contains("namespace"));
+    }
+
+    #[test]
+    fn manifest_values_win_over_run_context_except_the_run_id() {
+        let mut j = job("train");
+        j["spec"]["template"]["spec"]["containers"][0]["env"] = json!([
+            { "name": "TRACKIO_PROJECT", "value": "mine" },
+            { "name": "ORX_RUN_ID", "value": "stale" }
+        ]);
+        let pod_env = [
+            (crate::config::RUN_ID_ENV.to_string(), "r1".to_string()),
+            ("TRACKIO_PROJECT".to_string(), "orx-project".to_string()),
+            ("ORX_EXPERIMENT".to_string(), "baseline".to_string()),
+        ];
+        let (docs, _) =
+            prepare_docs(vec![j], "default", "echo hi", 14400, &labels(), &pod_env).unwrap();
+        let env = docs[0]["spec"]["template"]["spec"]["containers"][0]["env"]
+            .as_array()
+            .unwrap()
+            .clone();
+        let value = |name: &str| {
+            let values: Vec<&Value> = env.iter().filter(|e| e["name"] == name).collect();
+            assert_eq!(values.len(), 1, "{name}");
+            values[0]["value"].clone()
+        };
+        assert_eq!(value("TRACKIO_PROJECT"), "mine");
+        assert_eq!(value("ORX_RUN_ID"), "r1");
+        assert_eq!(value("ORX_EXPERIMENT"), "baseline");
     }
 
     #[test]

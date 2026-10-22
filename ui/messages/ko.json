@@ -673,7 +673,7 @@
   "a11y_open_on_github": "GitHub에서 {name} 열기",
   "a11y_open_in_trackio": "Trackio에서 이 실행 열기",
   "a11y_trackio_charts": "이 실행의 Trackio 차트",
-  "trackio_visualize": "시각화",
+  "experiment_overview_visualize": "시각화",
   "detail_drawer_trackio_no_data": "이 실행은 아직 Trackio에 기록하지 않았습니다.",
   "a11y_preview_skill": "/{name} 스킬 미리보기",
   "a11y_skill": "{name} 스킬",

@@ -2624,6 +2624,14 @@ function TrackioCheck({ space }: { space: boolean }) {
   }
 
   const result = test === null || test === "testing" ? null : test;
+  const details = result
+    ? [
+        result.version && m.settings_trackio_version({ version: ltr(result.version) }),
+        result.spaceStage && result.spaceStage !== "RUNNING" && m.settings_trackio_space_stage({ stage: ltr(result.spaceStage) }),
+        result.writeAccess === true && (space ? m.settings_trackio_hf_write_ok() : m.settings_trackio_write_ok()),
+        result.writeAccess === false && (space ? m.settings_trackio_hf_write_rejected() : m.settings_trackio_write_rejected()),
+      ].filter(Boolean)
+    : [];
   return (
     <div className="mt-3">
       <div className="flex items-center gap-2.5">
@@ -2632,16 +2640,7 @@ function TrackioCheck({ space }: { space: boolean }) {
         </Button>
         <PreflightBadge test={test} />
       </div>
-      {(result?.version || result?.spaceStage || result?.writeAccess != null) && (
-        <p className="m-0 mt-2 text-sm text-subtext">
-          {[
-            result.version && m.settings_trackio_version({ version: ltr(result.version) }),
-            result.spaceStage && result.spaceStage !== "RUNNING" && m.settings_trackio_space_stage({ stage: ltr(result.spaceStage) }),
-            result.writeAccess === true && (space ? m.settings_trackio_hf_write_ok() : m.settings_trackio_write_ok()),
-            result.writeAccess === false && (space ? m.settings_trackio_hf_write_rejected() : m.settings_trackio_write_rejected()),
-          ].filter(Boolean).join(" · ")}
-        </p>
-      )}
+      {details.length > 0 && <p className="m-0 mt-2 text-sm text-subtext">{details.join(" · ")}</p>}
       {result?.error && <p className={COMPUTE_DIAGNOSTIC_CLASS_NAME}>{result.error}</p>}
     </div>
   );

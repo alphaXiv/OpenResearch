@@ -15,8 +15,9 @@ let trackioUrl = null;
 const mocks = {
   "../paraglide/messages.js": { m: new Proxy({}, { get: (_, name) => () => String(name) }) },
   "../api": { runDisplayStatus: () => "complete", timeAgo: () => "now", trackioRunUrl: () => trackioUrl },
-  "../queries/settings": { getTrackioRunsQuery: () => ({}) },
-  "@tanstack/react-query": { useQuery: () => ({ data: undefined }) },
+  "../queries/settings": { useTrackioRuns: () => ({ data: undefined }) },
+  "../tabPreview": { tabOpenGestureHandlers: () => ({}) },
+  "../theme": { useResolvedTheme: () => "light" },
   "./ExperimentOverview": { ExperimentOverview: () => null },
   "./LogTerminal": { LogTerminal: ({ runId }) => `LOG:${runId}` },
   "./StatusBadge": { StatusBadge: () => null },
@@ -58,11 +59,11 @@ test("missing and foreign explicit runs render unavailable without substituting 
 });
 
 test("the header offers Trackio only once the run has logged there", () => {
-  assert.doesNotMatch(render(null), />trackio_visualize</);
+  assert.doesNotMatch(render(null), />experiment_overview_visualize</);
   trackioUrl = "http://trackio.example:7860/?project=p&runs=run-new";
   try {
     const html = render(null);
-    assert.match(html, />trackio_visualize</);
+    assert.match(html, />experiment_overview_visualize</);
     assert.match(html, /LOG:run-new/);
   } finally {
     trackioUrl = null;
@@ -73,4 +74,16 @@ test("the trackio view says so when the run has not logged there", () => {
   const html = renderToStaticMarkup(React.createElement(exports.DetailDrawer, { ...props, view: "trackio", selectedRunId: null }));
   assert.doesNotMatch(html, /LOG:/);
   assert.match(html, /detail_drawer_trackio_no_data/);
+});
+
+test("the trackio view embeds the run's charts in place of its logs", () => {
+  trackioUrl = "http://127.0.0.1:7860/?project=p&runs=run-new&sidebar=hidden";
+  try {
+    const html = renderToStaticMarkup(React.createElement(exports.DetailDrawer, { ...props, view: "trackio", selectedRunId: null }));
+    assert.match(html, /<iframe[^>]*src="http:\/\/127\.0\.0\.1:7860\/\?project=p&amp;runs=run-new&amp;sidebar=hidden"/);
+    assert.match(html, /experiment_overview_logs/);
+    assert.doesNotMatch(html, /LOG:/);
+  } finally {
+    trackioUrl = null;
+  }
 });

@@ -667,7 +667,7 @@
   "a11y_open_on_github": "باز کردن {name} در GitHub",
   "a11y_open_in_trackio": "باز کردن این اجرا در Trackio",
   "a11y_trackio_charts": "نمودارهای Trackio برای این اجرا",
-  "trackio_visualize": "مصورسازی",
+  "experiment_overview_visualize": "مصورسازی",
   "detail_drawer_trackio_no_data": "این اجرا هنوز چیزی در Trackio ثبت نکرده است.",
   "a11y_preview_skill": "پیش‌نمایش مهارت ‎/{name}",
   "a11y_skill": "مهارت {name}",
