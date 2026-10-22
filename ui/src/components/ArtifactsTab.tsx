@@ -541,7 +541,8 @@ export function ArtifactsTab({
   // Partial folders the user opened; each is listed on its own with a fresh cap.
   const [loadDirs, setLoadDirs] = useState<string[]>([]);
   const loadedDirs = useQueries({
-    queries: loadDirs.map((dir) => getArtifactsQuery(project.id, dir)),
+    // Opened partial folders sit outside the SSE change fingerprint, so poll them.
+    queries: loadDirs.map((dir) => ({ ...getArtifactsQuery(project.id, dir), refetchInterval: 2_000 })),
     combine: loadedEntries,
   });
   const entries = useMemo(() => {
@@ -604,12 +605,18 @@ export function ArtifactsTab({
 
   const toggle = (path: string) => {
     if (findArtifactEntry(entries, path)?.partial) {
-      setLoadDirs((prev) => (prev.includes(path) ? prev : [...prev, path]));
-      setCollapsed((prev) => {
-        const next = new Set(prev);
-        next.delete(path);
-        return next;
-      });
+      // Fetch first so a failure is shown and the next click retries.
+      void queryClient.fetchQuery(getArtifactsQuery(project.id, path)).then(
+        () => {
+          setLoadDirs((prev) => (prev.includes(path) ? prev : [...prev, path]));
+          setCollapsed((prev) => {
+            const next = new Set(prev);
+            next.delete(path);
+            return next;
+          });
+        },
+        (error) => showAlert(error instanceof Error ? error.message : String(error), "error"),
+      );
       return;
     }
     setCollapsed((prev) => {
