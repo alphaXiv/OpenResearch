@@ -43,13 +43,14 @@ agents still connect directly to the host.
 - Omitted container selection uses the host's saved target. `--container`
   overrides it; `--no-container` explicitly runs on the host. The flags conflict.
 
-Once a run finishes and its log is collected, the running OpenResearch app
-removes the run's host dir except `tensorboard/` (a container's copy goes
-entirely), so anything written into `repo/` goes with it. While cleaning a
+Each project's three newest SSH and Slurm runs stay whole on their hosts. Once
+an older finished run's log is collected, the running OpenResearch app removes
+the run's host dir except `tensorboard/` (a container's copy goes entirely),
+so anything written into `repo/` goes with it. While cleaning a
 host it also removes orx's cached source archives that no active run uses and
 that have been idle for an hour. Unreachable hosts are retried later.
-`orx compute configure ssh --host lab --keep-remote-runs true` keeps that
-host's runs not yet cleaned up. Deleting a project removes its runs' remote
+`orx compute configure ssh --host lab --keep-remote-runs true` keeps all of
+that host's runs not yet cleaned up. Deleting a project removes its runs' remote
 dirs entirely, regardless of that setting.
 
 Keep environment preparation in the project's committed setup/run scripts and

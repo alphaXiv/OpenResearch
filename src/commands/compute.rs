@@ -238,7 +238,7 @@ pub struct ConfigureArgs {
     /// Absolute remote dir for runs and the source cache (SSH per host, or Slurm); default ~/.orx.
     #[arg(long)]
     remote_root: Option<String>,
-    /// true keeps finished runs' remote dirs; false (the default) removes them once logs are collected.
+    /// true keeps every finished run's remote dir; false (the default) keeps each project's newest few.
     #[arg(long)]
     keep_remote_runs: Option<bool>,
     #[arg(long)]
