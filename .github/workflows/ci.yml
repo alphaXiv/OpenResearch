@@ -50,7 +50,13 @@ jobs:
         run: python3 scripts/test_orx_chart.py
 
       - name: Shared SSH helper protocol tests
-        run: python3 scripts/test_ssh_helper.py
+        run: |
+          python3 scripts/test_ssh_helper.py
+          for version in 3.6.15-slim-buster 3.7.17-slim-bullseye 3.8.20-slim-bookworm; do
+            docker run --rm --network none \
+              -v "$GITHUB_WORKSPACE:/work:ro" -w /work \
+              "python:$version" python scripts/test_ssh_helper.py
+          done
 
       - name: Release notes composition
         run: python3 scripts/test_release_notes.py

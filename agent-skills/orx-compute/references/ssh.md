@@ -51,7 +51,7 @@ example, a committed `run.sh` can source Conda, activate the environment, and
 then run the experiment. Those paths must exist in the selected execution
 environment (host or container). There is no separate SSH setup command.
 
-The SSH host needs Bash, tar, and Python 3.8 or newer (standard library only).
+The SSH host needs Bash, tar, and Python 3.6 or newer (standard library only).
 OpenResearch does not install Python automatically. Container execution also requires host Docker
 access and an already running, unpaused Linux container with Bash, tar, working
 `setsid --wait`, and an absolute writable `$HOME`. Execution uses the container's

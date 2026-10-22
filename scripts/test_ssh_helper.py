@@ -21,12 +21,12 @@ class DeadlineTest(unittest.TestCase):
             spec.loader.exec_module(helper)
         with patch.object(helper, "execute", return_value={}) as execute:
             helper.dispatch({"op": "exec", "command": "setup"})
-            self.assertIsNone(execute.call_args.args[2])
+            self.assertIsNone(execute.call_args[0][2])
             helper.dispatch({"op": "exec", "command": "status", "lane": "status"})
-            self.assertEqual(execute.call_args.args[2], 120)
+            self.assertEqual(execute.call_args[0][2], 120)
             token = helper.dispatch({"op": "upload_start"})["token"]
             helper.dispatch({"op": "upload_commit", "command": "extract", "token": token})
-            self.assertEqual(len(execute.call_args.args), 2)
+            self.assertEqual(len(execute.call_args[0]), 2)
 
 
 class HelperTest(unittest.TestCase):

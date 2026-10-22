@@ -244,7 +244,7 @@ pub(super) async fn connect(
         let detail = String::from_utf8_lossy(&diagnostics.lock().await)
             .trim()
             .to_owned();
-        return Err(anyhow!("SSH helper did not start. Python 3.8+ is required. Use Connect if authentication expired. {detail}"));
+        return Err(anyhow!("SSH helper did not start. Python 3.6+ is required. Use Connect if authentication expired. {detail}"));
     }
     let (writer, mut queue) = mpsc::channel(32);
     let pending: Pending = Arc::new(Mutex::new(HashMap::new()));

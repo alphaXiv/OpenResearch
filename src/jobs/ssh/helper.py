@@ -11,8 +11,8 @@ import tempfile
 import threading
 import time
 
-if sys.version_info < (3, 8):
-    raise RuntimeError("OpenResearch SSH monitoring requires Python 3.8 or newer")
+if sys.version_info < (3, 6):
+    raise RuntimeError("OpenResearch SSH monitoring requires Python 3.6 or newer")
 
 VERSION = 1
 LIMIT = 1024 * 1024
