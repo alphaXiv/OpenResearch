@@ -17,17 +17,27 @@ const HOST_TIMEOUT: Duration = Duration::from_secs(120);
 /// A run's remote dir, checked against the layout orx writes before anything removes it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RemoteRun {
-    pub run_id: String,
-    pub host: String,
-    pub root: Option<String>,
+    pub(crate) run_id: String,
+    pub(crate) host: String,
+    root: Option<String>,
     dir: String,
     /// Docker id and in-container run dir for container runs.
     container: Option<(String, String)>,
+    /// `orx tensorboard` reads a finished run's remote `tensorboard/`; only deletion removes it.
+    keep_tensorboard: bool,
 }
 
 impl RemoteRun {
-    /// `Ok(None)` for backends whose remote state orx does not own.
-    pub fn from_descriptor(run_id: &str, descriptor: &BackendDescriptor) -> Result<Option<Self>> {
+    /// `Ok(None)` when orx owns no remote dir for the run; `deleted` also removes TensorBoard logs.
+    pub fn from_descriptor(
+        run_id: &str,
+        descriptor: &BackendDescriptor,
+        deleted: bool,
+    ) -> Result<Option<Self>> {
+        // A submission that failed before choosing a host left nothing remote.
+        let Some(host) = descriptor.namespace.clone().filter(|host| !host.is_empty()) else {
+            return Ok(None);
+        };
         if !matches!(descriptor.kind.as_str(), "ssh_job" | "slurm_job") {
             return Ok(None);
         }
@@ -43,11 +53,6 @@ impl RemoteRun {
         if descriptor.kind == "ssh_job" && descriptor.job_id.as_deref().is_some_and(|d| d != dir) {
             return Err(anyhow!("Run {run_id} has an unexpected remote dir"));
         }
-        let host = descriptor
-            .namespace
-            .clone()
-            .filter(|host| !host.is_empty())
-            .ok_or_else(|| anyhow!("Run {run_id} has no remote host"))?;
         let container = match &descriptor.ssh_container {
             Some(container)
                 if container.run_dir.starts_with('/')
@@ -64,16 +69,17 @@ impl RemoteRun {
             root,
             dir,
             container,
+            keep_tensorboard: !deleted,
         }))
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Outcome {
     Removed,
     /// The run's process group is still alive on the host.
     Busy,
-    Failed,
+    Failed(String),
 }
 
 /// One script per host: remove each run dir whose process group is gone, then cached tars
@@ -91,10 +97,16 @@ fn host_script(runs: &[RemoteRun], keep_digests: &BTreeSet<String>) -> String {
                     sh_quote(dir)
                 )
             });
+        let remove = if run.keep_tensorboard {
+            "if [ -d \"$d/tensorboard\" ]; then find \"$d\" -mindepth 1 -maxdepth 1 ! -name tensorboard -exec rm -rf -- {} +; else rm -rf -- \"$d\"; fi"
+        } else {
+            "rm -rf -- \"$d\""
+        };
         script.push_str(&format!(
             "d={dir}; p=$(cat \"$d/pid\" 2>/dev/null); case \"$p\" in ''|*[!0-9]*) p=;; esac; \
              if [ -n \"$p\" ] && host_group_alive \"$p\"; then echo 'BUSY {id}'; \
-             else {inner}rm -rf -- \"$d\" && echo 'REMOVED {id}'; fi\n",
+             else {inner}if err=$({{ {remove}; }} 2>&1); then echo 'REMOVED {id}'; \
+             else printf 'FAILED {id} %s\\n' \"$(printf '%s' \"$err\" | head -n 1)\"; fi; fi\n",
             dir = shell_path(&run.dir),
             id = run.run_id,
         ));
@@ -106,10 +118,15 @@ fn host_script(runs: &[RemoteRun], keep_digests: &BTreeSet<String>) -> String {
         .join(" ");
     let roots: BTreeSet<_> = runs.iter().map(|run| run.root.as_deref()).collect();
     for root in roots {
+        // Only names orx writes (`<sha256>.tar` and its upload temps): a root may hold the user's own tars.
         script.push_str(&format!(
             "s={source}; if [ -d \"$s\" ]; then \
-             find \"$s\" -maxdepth 1 -type f \\( -name '*.tar' -o -name '*.tar.tmp.*' \\) -mmin +{SOURCE_IDLE_MINUTES} \
-             | while IFS= read -r f; do n=${{f##*/}}; case ' {keep} ' in *\" ${{n%%.tar*}} \"*) ;; *) rm -f -- \"$f\";; esac; done; fi\n",
+             find \"$s\" -maxdepth 1 -type f -mmin +{SOURCE_IDLE_MINUTES} | while IFS= read -r f; do \
+             n=${{f##*/}}; b=${{n%%.tar*}}; \
+             case \"$b\" in ''|*[!0-9a-f]*) continue;; esac; [ ${{#b}} -eq 64 ] || continue; \
+             case \"$n\" in \"$b.tar\"|\"$b.tar.tmp.\"*) ;; *) continue;; esac; \
+             case ' {keep} ' in *\" $b \"*) continue;; esac; \
+             [ -n \"$(find \"$f\" -mmin +{SOURCE_IDLE_MINUTES})\" ] && rm -f -- \"$f\"; done; fi\n",
             source = shell_path(&remote_source_dir(root)),
         ));
     }
@@ -118,21 +135,28 @@ fn host_script(runs: &[RemoteRun], keep_digests: &BTreeSet<String>) -> String {
 }
 
 fn parse_outcomes(runs: &[RemoteRun], output: &str) -> BTreeMap<String, Outcome> {
+    let mut reported = BTreeMap::new();
+    for line in output.lines() {
+        let mut words = line.splitn(3, ' ');
+        let outcome = match words.next() {
+            Some("REMOVED") => Outcome::Removed,
+            Some("BUSY") => Outcome::Busy,
+            Some("FAILED") => Outcome::Failed(String::new()),
+            _ => continue,
+        };
+        if let Some(id) = words.next() {
+            let outcome = match outcome {
+                Outcome::Failed(_) => Outcome::Failed(words.next().unwrap_or_default().into()),
+                outcome => outcome,
+            };
+            reported.insert(id.to_string(), outcome);
+        }
+    }
     runs.iter()
         .map(|run| {
-            let outcome = if output
-                .lines()
-                .any(|line| line == format!("REMOVED {}", run.run_id))
-            {
-                Outcome::Removed
-            } else if output
-                .lines()
-                .any(|line| line == format!("BUSY {}", run.run_id))
-            {
-                Outcome::Busy
-            } else {
-                Outcome::Failed
-            };
+            let outcome = reported
+                .remove(&run.run_id)
+                .unwrap_or_else(|| Outcome::Failed("no result from the host".into()));
             (run.run_id.clone(), outcome)
         })
         .collect()
@@ -144,11 +168,11 @@ pub async fn clean_host(
     runs: &[RemoteRun],
     keep_digests: &BTreeSet<String>,
 ) -> Result<BTreeMap<String, Outcome>> {
+    // Over stdin: a large batch would overrun Windows' command-line limit.
     let script = host_script(runs, keep_digests);
-    let command = format!("bash -c {}", sh_quote(&script));
     let output = tokio::time::timeout(
         HOST_TIMEOUT,
-        ssh_run(&SshTarget::alias(host), &command, None),
+        ssh_run(&SshTarget::alias(host), "bash -s", Some(&script)),
     )
     .await
     .map_err(|_| anyhow!("Timed out cleaning up runs on {host}"))??;
@@ -165,65 +189,70 @@ mod tests {
         BackendDescriptor::parse(json).unwrap()
     }
 
+    fn cleanable(json: &str) -> Result<Option<RemoteRun>> {
+        RemoteRun::from_descriptor(RUN, &descriptor(json), false)
+    }
+
     #[test]
     fn only_orx_layout_dirs_are_cleanable() {
-        let ssh = descriptor(&format!(
-            r#"{{"kind":"ssh_job","namespace":"lab","jobId":".orx/runs/{RUN}"}}"#
-        ));
-        let run = RemoteRun::from_descriptor(RUN, &ssh).unwrap().unwrap();
-        assert_eq!(run.dir, format!(".orx/runs/{RUN}"));
-        let rooted = descriptor(&format!(
-            r#"{{"kind":"ssh_job","namespace":"lab","jobId":"/scratch/orx/runs/{RUN}","remoteRoot":"/scratch/orx"}}"#
-        ));
-        assert!(RemoteRun::from_descriptor(RUN, &rooted).unwrap().is_some());
-        let slurm =
-            descriptor(r#"{"kind":"slurm_job","namespace":"login","remoteRoot":"/scratch/orx"}"#);
+        let ssh = format!(r#"{{"kind":"ssh_job","namespace":"lab","jobId":".orx/runs/{RUN}"}}"#);
         assert_eq!(
-            RemoteRun::from_descriptor(RUN, &slurm)
-                .unwrap()
-                .unwrap()
-                .dir,
+            cleanable(&ssh).unwrap().unwrap().dir,
+            format!(".orx/runs/{RUN}")
+        );
+        let rooted = format!(
+            r#"{{"kind":"ssh_job","namespace":"lab","jobId":"/scratch/orx/runs/{RUN}","remoteRoot":"/scratch/orx"}}"#
+        );
+        assert!(cleanable(&rooted).unwrap().is_some());
+        let slurm = r#"{"kind":"slurm_job","namespace":"login","remoteRoot":"/scratch/orx"}"#;
+        assert_eq!(
+            cleanable(slurm).unwrap().unwrap().dir,
             format!("/scratch/orx/runs/{RUN}")
         );
         for json in [
             r#"{"kind":"ssh_job","namespace":"lab","jobId":"/home/me"}"#.to_string(),
             r#"{"kind":"slurm_job","namespace":"login","remoteRoot":"/a b"}"#.to_string(),
-            format!(r#"{{"kind":"ssh_job","jobId":".orx/runs/{RUN}"}}"#),
             format!(
                 r#"{{"kind":"ssh_job","namespace":"lab","jobId":".orx/runs/{RUN}","sshContainer":{{"reference":"c","id":"i","startedAt":"t","runDir":"/root"}}}}"#
             ),
         ] {
-            assert!(
-                RemoteRun::from_descriptor(RUN, &descriptor(&json)).is_err(),
-                "{json}"
-            );
+            assert!(cleanable(&json).is_err(), "{json}");
         }
-        assert!(RemoteRun::from_descriptor("../x", &ssh).is_err());
+        assert!(RemoteRun::from_descriptor("../x", &descriptor(&ssh), false).is_err());
+        let unsubmitted = format!(r#"{{"kind":"ssh_job","jobId":".orx/runs/{RUN}"}}"#);
+        assert!(cleanable(&unsubmitted).unwrap().is_none());
         for kind in ["openresearch_job", "k8s_job", "local_job"] {
-            let other = descriptor(&format!(r#"{{"kind":"{kind}","namespace":"x"}}"#));
-            assert!(RemoteRun::from_descriptor(RUN, &other).unwrap().is_none());
+            assert!(
+                cleanable(&format!(r#"{{"kind":"{kind}","namespace":"x"}}"#))
+                    .unwrap()
+                    .is_none()
+            );
         }
     }
 
-    fn run(id: &str, root: Option<&str>) -> RemoteRun {
+    fn run(id: &str, root: Option<&str>, deleted: bool) -> RemoteRun {
         RemoteRun {
             run_id: id.into(),
             host: "lab".into(),
             root: root.map(Into::into),
             dir: remote_run_dir(root, id),
             container: None,
+            keep_tensorboard: !deleted,
         }
     }
 
     #[cfg(unix)]
     #[test]
-    fn host_script_removes_finished_dirs_and_stale_unreferenced_tars() {
+    fn host_script_removes_finished_dirs_and_stale_orx_tars_only() {
         use std::os::unix::process::CommandExt as _;
         let home = crate::local::git::TemporaryDirectory::new("orx-cleanup-home").unwrap();
         let runs = home.path().join(".orx/runs");
         let source = home.path().join(".orx/source");
-        for id in ["done", "busy"] {
+        for id in ["done", "busy", "charted", "deleted"] {
             std::fs::create_dir_all(runs.join(id).join("repo")).unwrap();
+        }
+        for id in ["charted", "deleted"] {
+            std::fs::create_dir_all(runs.join(id).join("tensorboard")).unwrap();
         }
         let mut sleeper = std::process::Command::new("sleep")
             .arg("30")
@@ -233,20 +262,35 @@ mod tests {
         std::fs::write(runs.join("busy/pid"), sleeper.id().to_string()).unwrap();
         std::fs::write(runs.join("done/pid"), "999999").unwrap();
         std::fs::create_dir_all(&source).unwrap();
-        for name in ["old.tar", "kept.tar", "fresh.tar", "old.tar.tmp.12"] {
+        let (old, kept, fresh) = ("a".repeat(64), "b".repeat(64), "c".repeat(64));
+        let names = [
+            format!("{old}.tar"),
+            format!("{old}.tar.tmp.12"),
+            format!("{kept}.tar"),
+            format!("{fresh}.tar"),
+            "dataset.tar".to_string(),
+            format!("{old}.tar.bak"),
+        ];
+        for name in &names {
             std::fs::write(source.join(name), "x").unwrap();
+            if !name.starts_with(&fresh) {
+                assert!(std::process::Command::new("touch")
+                    .args(["-t", "202001010000"])
+                    .arg(source.join(name))
+                    .status()
+                    .unwrap()
+                    .success());
+            }
         }
-        for name in ["old.tar", "kept.tar", "old.tar.tmp.12"] {
-            assert!(std::process::Command::new("touch")
-                .args(["-t", "202001010000"])
-                .arg(source.join(name))
-                .status()
-                .unwrap()
-                .success());
-        }
-        let batch = [run("done", None), run("busy", None), run("never", None)];
+        let batch = [
+            run("done", None, false),
+            run("busy", None, false),
+            run("never", None, false),
+            run("charted", None, false),
+            run("deleted", None, true),
+        ];
         let out = std::process::Command::new("bash")
-            .args(["-c", &host_script(&batch, &BTreeSet::from(["kept".into()]))])
+            .args(["-c", &host_script(&batch, &BTreeSet::from([kept.clone()]))])
             .env("HOME", home.path())
             .output()
             .unwrap();
@@ -254,23 +298,33 @@ mod tests {
         let _ = sleeper.wait();
         assert!(out.status.success());
         let outcomes = parse_outcomes(&batch, &String::from_utf8(out.stdout).unwrap());
-        assert_eq!(outcomes["done"], Outcome::Removed);
+        for id in ["done", "never", "charted", "deleted"] {
+            assert_eq!(outcomes[id], Outcome::Removed, "{id}");
+        }
         assert_eq!(outcomes["busy"], Outcome::Busy);
-        // An already-missing dir counts as removed.
-        assert_eq!(outcomes["never"], Outcome::Removed);
         assert!(!runs.join("done").exists());
         assert!(runs.join("busy/repo").exists());
+        assert!(runs.join("charted/tensorboard").is_dir());
+        assert!(!runs.join("charted/repo").exists());
+        assert!(!runs.join("deleted").exists());
         let mut left: Vec<_> = std::fs::read_dir(&source)
             .unwrap()
             .map(|e| e.unwrap().file_name().into_string().unwrap())
             .collect();
         left.sort();
-        assert_eq!(left, ["fresh.tar", "kept.tar"]);
+        let mut expected = vec![
+            format!("{kept}.tar"),
+            format!("{fresh}.tar"),
+            "dataset.tar".to_string(),
+            format!("{old}.tar.bak"),
+        ];
+        expected.sort();
+        assert_eq!(left, expected);
     }
 
     #[test]
     fn host_script_quotes_rooted_and_container_paths() {
-        let mut rooted = run(RUN, Some("/scratch/orx"));
+        let mut rooted = run(RUN, Some("/scratch/orx"), true);
         rooted.container = Some(("abc".into(), format!("/root/.orx/runs/{RUN}")));
         let script = host_script(&[rooted], &BTreeSet::new());
         assert!(script.contains(&format!("d='/scratch/orx/runs/{RUN}';")));
@@ -278,6 +332,12 @@ mod tests {
             "docker exec 'abc' rm -rf -- '/root/.orx/runs/{RUN}'"
         )));
         assert!(script.contains("s='/scratch/orx/source';"));
-        assert!(parse_outcomes(&[run(RUN, None)], "REMOVED other\n")[RUN] == Outcome::Failed);
+        let batch = [run(RUN, None, false), run("other", None, false)];
+        let outcomes = parse_outcomes(&batch, &format!("FAILED {RUN} rm: Permission denied\n"));
+        assert_eq!(
+            outcomes[RUN],
+            Outcome::Failed("rm: Permission denied".into())
+        );
+        assert!(matches!(outcomes["other"], Outcome::Failed(_)));
     }
 }

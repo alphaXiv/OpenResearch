@@ -37,19 +37,20 @@ an absolute remote storage root (`--remote-root /data/alice/orx`) used instead
 of `~/.orx` for that host's runs and cached source archives. Each run keeps the
 root it was launched with.
 
-Once a run finishes and its log is collected, the running OpenResearch app
-removes the run's remote dir (including anything written into `repo/`) and
-cached source archives that no active run uses. Unreachable hosts are retried
-later. `orx compute configure ssh --host lab --keep-remote-runs true` keeps that
-host's finished runs. Deleting a project removes its runs' remote dirs
-regardless.
-
 A saved default SSH host lets launches omit `--host`.
 These defaults apply only to SSH experiments; dashboards, terminals and coding
 agents still connect directly to the host.
 
 - Omitted container selection uses the host's saved target. `--container`
   overrides it; `--no-container` explicitly runs on the host. The flags conflict.
+
+Once a run finishes and its log is collected, the running OpenResearch app
+removes the run's remote dir except `tensorboard/`, so anything written into
+`repo/` goes with it. It also removes orx's cached source archives that no
+active run uses and that have been idle for an hour. Unreachable hosts are
+retried later. `orx compute configure ssh --host lab --keep-remote-runs true`
+keeps that host's runs that finish while it is set. Deleting a project removes
+its runs' remote dirs entirely, regardless of that setting.
 
 Keep environment preparation in the project's committed setup/run scripts and
 invoke them through the fixed run command, just as with other backends. For
@@ -66,8 +67,9 @@ creation or lifecycle management. `--image` and `--flavor` are unsupported.
 The committed source archive is cached on the host, then streamed into the
 container's `$HOME/.orx/runs/<runId>/repo`. Host logs and exit status stay in the
 host's `<root>/runs/<runId>/` (`~/.orx` unless a remote root is saved), so
-container removal does not erase them. A detached supervisor reattaches using the saved container ID and start time; later settings
-changes cannot redirect an existing run. Do not kill the supervisor.
+container removal does not erase them before they are collected. A detached
+supervisor reattaches using the saved container ID and start time; later
+settings changes cannot redirect an existing run. Do not kill the supervisor.
 
 Cancellation targets only the experiment process group, waits five seconds for
 TERM, then uses KILL if needed. It leaves the container and unrelated processes

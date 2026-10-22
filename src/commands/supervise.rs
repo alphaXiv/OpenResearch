@@ -849,7 +849,7 @@ async fn watch_ssh_job(
                 )
                 .await;
             }
-            if descriptor.kind == "ssh_job" && collected {
+            if collected {
                 queue_remote_cleanup(store, run_id);
             }
             eprintln!("supervise {run_id}: finished ({status})");

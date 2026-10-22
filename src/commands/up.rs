@@ -4621,6 +4621,7 @@ impl axum::body::HttpBody for ActiveBody {
 }
 
 const ORPHANED_RUN_SCAN_INTERVAL: Duration = Duration::from_secs(60);
+const REMOTE_CLEANUP_INTERVAL: Duration = Duration::from_secs(60);
 /// SSH container launches record their handle before the job starts; leave them this long to finish.
 const ORPHANED_RUN_SETTLE_MS: i64 = 5 * 60 * 1000;
 
@@ -4721,8 +4722,10 @@ async fn with_gated_store<T: Send + 'static>(
 
 /// Removes queued remote run dirs; the gate is held only around store access, never over SSH.
 async fn reclaim_remote_run_dirs(moving: Arc<AtomicBool>, gate: Arc<tokio::sync::Mutex<()>>) {
+    // Startup's own SSH traffic (supervisor adoption, settings checks) goes first.
     tokio::time::sleep(Duration::from_secs(30)).await;
     let mut reported = HashSet::new();
+    let mut plan_error = None;
     loop {
         let mut report = |failures: Vec<(String, String)>| {
             for (run_id, error) in failures {
@@ -4750,10 +4753,16 @@ async fn reclaim_remote_run_dirs(moving: Arc<AtomicBool>, gate: Arc<tokio::sync:
                     }
                 }
             }
-            Some(Err(error)) => eprintln!("orx up: could not plan remote cleanup: {error}"),
+            Some(Err(error)) => {
+                let error = error.to_string();
+                if plan_error.as_ref() != Some(&error) {
+                    eprintln!("orx up: could not plan remote cleanup: {error}");
+                    plan_error = Some(error);
+                }
+            }
             None => {}
         }
-        tokio::time::sleep(ORPHANED_RUN_SCAN_INTERVAL).await;
+        tokio::time::sleep(REMOTE_CLEANUP_INTERVAL).await;
     }
 }
 

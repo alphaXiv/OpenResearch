@@ -238,7 +238,7 @@ pub struct ConfigureArgs {
     /// Absolute remote dir for runs and the source cache (SSH per host, or Slurm); default ~/.orx.
     #[arg(long)]
     remote_root: Option<String>,
-    /// Keep finished runs' remote dirs (true) instead of removing them once logs are collected.
+    /// true keeps finished runs' remote dirs; false (the default) removes them once logs are collected.
     #[arg(long)]
     keep_remote_runs: Option<bool>,
     #[arg(long)]
@@ -408,6 +408,7 @@ impl ConfigureArgs {
                 "cpus-per-task" => "cpusPerTask",
                 "default-host" => "defaultHost",
                 "remote-root" => "remoteRoot",
+                "keep-remote-runs" => "keepRemoteRuns",
                 other => other,
             };
             if !allowed.contains(&key)
@@ -425,6 +426,8 @@ impl ConfigureArgs {
                     Value::Null
                 } else if key == "cpusPerTask" {
                     json!(0)
+                } else if key == "keepRemoteRuns" {
+                    json!(false)
                 } else {
                     json!("")
                 },

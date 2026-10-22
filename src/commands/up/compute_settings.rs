@@ -624,8 +624,9 @@ pub(super) async fn ssh_settings() -> ApiResult {
 pub(super) struct SaveSshSettingsReq {
     host: String,
     container: Option<String>,
-    /// Unlike `container`, `None` keeps the saved value (the UI never sends these); `Some("")` clears the root.
+    /// Unlike `container`, `None` keeps the saved root (the UI never sends it); `Some("")` clears it.
     remote_root: Option<String>,
+    /// `None` keeps the saved value.
     keep_remote_runs: Option<bool>,
 }
 

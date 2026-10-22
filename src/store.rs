@@ -515,13 +515,26 @@ pub(crate) struct RemoteCleanup {
     pub deleted: bool,
 }
 
-const QUEUE_REMOTE_CLEANUP: &str =
-    "INSERT INTO remote_cleanups (run_id, backend_json, deleted, next_attempt_at)";
-// Appended to a SELECT's WHERE, which SQLite needs before ON CONFLICT; deletion wins over a pending finish.
-const UPSERT_REMOTE_CLEANUP: &str = "AND CASE WHEN json_valid(backend_json)
-       THEN json_extract(backend_json, '$.kind') END IN ('ssh_job', 'slurm_job')
-     ON CONFLICT(run_id) DO UPDATE SET backend_json = excluded.backend_json,
-       deleted = MAX(deleted, excluded.deleted), next_attempt_at = excluded.next_attempt_at";
+/// Queues the SSH/Slurm runs whose `column` equals `value`; deletion wins over a pending finish.
+fn queue_remote_cleanups(
+    conn: &Connection,
+    column: &str,
+    value: &str,
+    deleted: bool,
+) -> Result<()> {
+    conn.execute(
+        &format!(
+            "INSERT INTO remote_cleanups (run_id, backend_json, deleted, next_attempt_at)
+             SELECT id, backend_json, ?2, ?3 FROM runs
+             WHERE {column} = ?1 AND CASE WHEN json_valid(backend_json)
+               THEN json_extract(backend_json, '$.kind') END IN ('ssh_job', 'slurm_job')
+             ON CONFLICT(run_id) DO UPDATE SET backend_json = excluded.backend_json,
+               deleted = MAX(deleted, excluded.deleted), next_attempt_at = excluded.next_attempt_at"
+        ),
+        params![value, deleted, now_ms()],
+    )?;
+    Ok(())
+}
 /// Failed remote cleanups retry after 5 minutes, doubling up to a day.
 const REMOTE_CLEANUP_RETRY_MS: i64 = 5 * 60 * 1000;
 const REMOTE_CLEANUP_MAX_RETRY_MS: i64 = 24 * 60 * 60 * 1000;
@@ -2149,11 +2162,7 @@ impl Store {
 
     /// Queues a finished run's remote dir for removal; non-SSH/Slurm runs are ignored.
     pub(crate) fn queue_finished_remote_cleanup(&self, run_id: &str) -> Result<()> {
-        self.conn.execute(
-            &format!("{QUEUE_REMOTE_CLEANUP} SELECT id, backend_json, 0, ?2 FROM runs WHERE id = ?1 {UPSERT_REMOTE_CLEANUP}"),
-            params![run_id, now_ms()],
-        )?;
-        Ok(())
+        queue_remote_cleanups(&self.conn, "id", run_id, false)
     }
 
     pub(crate) fn due_remote_cleanups(&self, limit: usize) -> Result<Vec<RemoteCleanup>> {
@@ -2193,24 +2202,6 @@ impl Store {
             ],
         )?;
         Ok(())
-    }
-
-    /// Source digests that unfinished SSH/Slurm runs on `host` may still stage.
-    pub(crate) fn active_remote_source_digests(
-        &self,
-        host: &str,
-    ) -> Result<std::collections::BTreeSet<String>> {
-        let mut digests = std::collections::BTreeSet::new();
-        for run in self.list_active_runs()? {
-            if let Ok(descriptor) = crate::jobs::BackendDescriptor::parse(&run.backend_json) {
-                if matches!(descriptor.kind.as_str(), "ssh_job" | "slurm_job")
-                    && descriptor.namespace.as_deref() == Some(host)
-                {
-                    digests.extend(descriptor.source_digest);
-                }
-            }
-        }
-        Ok(digests)
     }
 
     fn data_dir_move_claimed(&self) -> Result<bool> {
@@ -2274,10 +2265,7 @@ impl Store {
             "DELETE FROM chat_sessions WHERE project_id = ?1",
             params![id],
         )?;
-        tx.execute(
-            &format!("{QUEUE_REMOTE_CLEANUP} SELECT id, backend_json, 1, ?2 FROM runs WHERE project_id = ?1 {UPSERT_REMOTE_CLEANUP}"),
-            params![id, now_ms()],
-        )?;
+        queue_remote_cleanups(&tx, "project_id", id, true)?;
         self.conn
             .execute("DELETE FROM runs WHERE project_id = ?1", params![id])?;
         self.conn.execute(
@@ -4292,10 +4280,6 @@ mod tests {
                 .collect::<Vec<_>>()
         };
         assert_eq!(due(&store), [("ssh".to_string(), false)]);
-        assert_eq!(
-            store.active_remote_source_digests("lab").unwrap(),
-            std::collections::BTreeSet::from(["live".to_string()])
-        );
         store.defer_remote_cleanup("ssh", "unreachable").unwrap();
         assert!(due(&store).is_empty());
         store
