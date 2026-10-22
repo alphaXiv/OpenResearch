@@ -106,6 +106,9 @@ pub struct BackendDescriptor {
     pub source_path: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub source_size: Option<u64>,
+    /// The host's storage root at submit (ssh/slurm); `None` is `~/.orx`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub remote_root: Option<String>,
 }
 
 impl BackendDescriptor {
@@ -295,6 +298,7 @@ mod tests {
             source_digest: None,
             source_path: None,
             source_size: None,
+            remote_root: None,
         }
     }
 

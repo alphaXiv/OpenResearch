@@ -30,12 +30,13 @@ async fn prepare(
         .status()
         .unwrap()
         .success());
-    let dir = ssh::stage_source(target, &id, &archive, &id, container.as_ref())
+    let dir = ssh::stage_source(target, &id, &archive, &id, container.as_ref(), None)
         .await
         .unwrap();
     let spec = SshJobSpec {
         target: target.clone(),
         run_id: id,
+        remote_root: None,
         script: crate::compute::staged_script("bash run.sh"),
         env: HashMap::from([(
             "ORX_TEST_SECRET".into(),
