@@ -4,8 +4,8 @@ export type SetupAction = "install" | "update" | "login";
 export type SetupPhase = "preview" | "running" | "checking" | "success" | "error";
 
 /** `unsupported` also covers states no update repairs; those set needsConfigRepair. */
-export function setupAction(h: Pick<Harness, "installed" | "installBroken" | "authState" | "needsConfigRepair">): SetupAction {
-  if (!h.installed || h.installBroken) return "install";
+export function setupAction(h: Pick<Harness, "installed" | "installBroken" | "authState" | "needsConfigRepair" | "adapterMissing">): SetupAction {
+  if (h.adapterMissing || !h.installed || h.installBroken) return "install";
   return h.authState === "unsupported" && !h.needsConfigRepair ? "update" : "login";
 }
 

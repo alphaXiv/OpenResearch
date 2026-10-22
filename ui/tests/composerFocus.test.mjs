@@ -13,13 +13,13 @@ function visit(node) {
 visit(source);
 assert.ok(focusEffect);
 
-test("the embedded side-chat caller requests focus on mount", () => {
+test("the embedded side-chat caller uses activation requests without remounting", () => {
   const app = ts.createSourceFile("App.tsx", readFileSync(new URL("../src/App.tsx", import.meta.url), "utf8"), ts.ScriptTarget.Latest, true, ts.ScriptKind.TSX);
   const callers = [];
   function visit(node) {
     if (ts.isJsxSelfClosingElement(node) && node.tagName.getText(app) === "ChatPanel"
       && node.attributes.properties.some(prop => ts.isJsxAttribute(prop)
-        && prop.name.text === "key" && prop.initializer?.getText(app) === "{sideTab.sessionId}")) callers.push(node);
+        && prop.name.text === "embedded")) callers.push(node);
     ts.forEachChild(node, visit);
   }
   visit(app);
@@ -27,8 +27,41 @@ test("the embedded side-chat caller requests focus on mount", () => {
   const attributes = callers[0].attributes.properties.filter(ts.isJsxAttribute);
   assert.ok(attributes.some(prop => prop.name.text === "embedded"));
   const nonce = attributes.find(prop => prop.name.text === "composerFocusNonce")?.initializer;
-  assert.ok(nonce && ts.isJsxExpression(nonce) && nonce.expression && ts.isNumericLiteral(nonce.expression));
-  assert.ok(Number(nonce.expression.text) > 0);
+  assert.equal(nonce?.getText(app), "{sideComposerFocusNonce}");
+  assert.ok(!attributes.some(prop => prop.name.text === "key"));
+  const promotion = attributes.find(prop => prop.name.text === "onActiveSessionChange").initializer.getText(app);
+  assert.match(promotion, /openSideTab\(sessionId\)/);
+  assert.doesNotMatch(promotion, /focusSideTab|setSideComposerFocusNonce/);
+  assert.match(app.text, /onSelectSideChat=\{focusSideTab\}/);
+});
+
+test("repeated explicit openings request focus while navigation alone does not", () => {
+  const app = ts.createSourceFile("App.tsx", readFileSync(new URL("../src/App.tsx", import.meta.url), "utf8"), ts.ScriptTarget.Latest, true, ts.ScriptKind.TSX);
+  let activation;
+  let start;
+  function visit(node) {
+    if (ts.isVariableDeclaration(node) && node.name.getText(app) === "focusSideTab") activation = node.initializer;
+    if (ts.isVariableDeclaration(node) && node.name.getText(app) === "startSideChat") start = node.initializer;
+    ts.forEachChild(node, visit);
+  }
+  visit(app);
+  assert.ok(activation);
+  assert.match(start.getText(app), /focusSideTab\(null\)/);
+  assert.match(start.getText(app), /focusSideTab\(session.id\)/);
+  let nonce = 0;
+  const opened = [];
+  const navigate = id => opened.push(id);
+  const activate = new Function("useCallback", "setSideComposerFocusNonce", "openSideTab",
+    `return ${ts.transpile(activation.getText(app))}`)(
+    callback => callback,
+    update => { nonce = update(nonce); },
+    navigate,
+  );
+  for (const id of [null, null, "existing-side"]) activate(id);
+  assert.equal(nonce, 3);
+  navigate("persisted-draft");
+  assert.equal(nonce, 3);
+  assert.deepEqual(opened, [null, null, "existing-side", "persisted-draft"]);
 });
 
 function composer() {

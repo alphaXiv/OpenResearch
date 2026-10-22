@@ -3,7 +3,7 @@ import { getHarnessesQuery } from "../queries/settings";
 import { m } from "../paraglide/messages.js";
 import { ltr } from "../i18n";
 import { Check, ChevronDown, ChevronLeft, ChevronRight, Lock, Plus, Settings, Zap } from "lucide-react";
-import { useEffect, useLayoutEffect, useMemo, useRef, useState, type ReactNode, type RefObject } from "react";
+import { useEffect, useLayoutEffect, useMemo, useRef, useState, type ButtonHTMLAttributes, type ReactNode, type RefObject } from "react";
 import {
   fmtNumber,
   harnessModelLabel,
@@ -21,6 +21,7 @@ import {
   DEFAULT_AUTONOMY,
 } from "../api";
 import { renderNote } from "./agentNote";
+import type { NativeOption } from "../acp";
 import { HarnessLogo } from "./HarnessLogo";
 
 import { IconButton, MenuItem } from "./ui";
@@ -49,6 +50,10 @@ export const HARNESS_LABELS: Record<HarnessId, string> = {
   cursor: "Cursor",
   antigravity: "Google Antigravity",
 };
+
+export function harnessLabel(id: HarnessId, name?: string | null): string {
+  return name || HARNESS_LABELS[id] || (id.startsWith("acp:") ? "ACP" : id);
+}
 
 /** First harness that can actually run — the fallback when nothing is picked.
  * Seeds mode/reasoning from that harness's advertised defaults. */
@@ -119,6 +124,9 @@ export function ModelPicker({
   lockHarness = false,
   openRequest = 0,
   className,
+  sessionHarness,
+  nativeOptions = [],
+  onSelectNativeOption,
 }: {
   value: ModelSelection | null;
   onSelect: (value: ModelSelection) => void;
@@ -138,15 +146,24 @@ export function ModelPicker({
   /** Bumped to open the picker from elsewhere (the composer's `/model`). */
   openRequest?: number;
   className?: string;
+  sessionHarness?: Harness;
+  nativeOptions?: NativeOption[];
+  onSelectNativeOption?: (optionId: string, value: string) => void;
 }) {
-  const { data: harnesses = EMPTY_HARNESSES } = useQuery(getHarnessesQuery());
+  const { data: catalog = EMPTY_HARNESSES } = useQuery(getHarnessesQuery());
+  const harnesses = useMemo(() => sessionHarness ? [sessionHarness, ...catalog.filter((harness) => harness.id !== sessionHarness.id)] : catalog, [catalog, sessionHarness]);
   const queryClient = useQueryClient();
   const [addingLocalModel, setAddingLocalModel] = useState(false);
   const triggerRef = useRef<HTMLButtonElement>(null);
   const submenuHeaderRef = useRef<HTMLButtonElement>(null);
   const { open, setOpen, ref: rootRef } = usePopover(triggerRef);
   const [filter, setFilter] = useState("");
-  const [page, setPage] = useState<"root" | "models" | "reasoning" | "speed" | "permissions" | "autonomy">("root");
+  const [page, setPage] = useState<"root" | "models" | "reasoning" | "speed" | "permissions" | "autonomy" | { nativeOptionId: string }>("root");
+  const nativeOption = typeof page === "object" ? nativeOptions.find((option) => option.id === page.nativeOptionId) : undefined;
+
+  useEffect(() => {
+    if (typeof page === "object" && !nativeOption) setPage("root");
+  }, [page, nativeOption]);
 
   const close = () => {
     setOpen(false);
@@ -165,7 +182,7 @@ export function ModelPicker({
   }, [openRequest, setOpen]);
 
   useEffect(() => {
-    if (open && (page === "reasoning" || page === "speed" || page === "permissions")) {
+    if (open && (page === "reasoning" || page === "speed" || page === "permissions" || typeof page === "object")) {
       submenuHeaderRef.current?.focus();
     }
   }, [open, page]);
@@ -179,7 +196,7 @@ export function ModelPicker({
       let models = h.models;
       if (q) models = models.filter((m) => `${m.id} ${harnessModelLabel(m)}`.toLowerCase().includes(q));
       // Large catalogs stay behind the filter box.
-      else if (h.id === "opencode" || h.id === "cursor" || h.id === "antigravity") models = models.slice(0, 5);
+      else if (h.id === "opencode" || h.id === "cursor" || h.id === "antigravity" || h.id.startsWith("acp:")) models = models.slice(0, 5);
       return { harness: h, models, hidden: q ? 0 : h.models.length - models.length };
     });
   }, [harnesses, filter, lockHarness, value]);
@@ -226,7 +243,9 @@ export function ModelPicker({
     ? value.model
       ? selected
         ? harnessModelLabel(selected)
-        : `${modelLabel(value.model)} · ${m.model_picker_unverified()}`
+        : value.harness.startsWith("acp:") && value.model === "default"
+          ? m.model_picker_default_model()
+          : `${modelLabel(value.model)} · ${m.model_picker_unverified()}`
       : m.model_picker_default_model()
     : m.model_picker_model();
   const effectiveReasoningId = value?.reasoningLevel ?? defaultReasoningId ?? reasoningChoices[0]?.id;
@@ -289,8 +308,8 @@ export function ModelPicker({
       aria-haspopup="menu"
       onClick={() => setPage(next)}
     >
-      <span className="flex-1">{title}</span>
-      {detail && <span className="max-w-36 truncate text-sm text-muted">{detail}</span>}
+      <span className="flex-1 capitalize">{title}</span>
+      {detail && <span className={cn("max-w-36 truncate text-sm text-muted", next !== "models" && "capitalize")}>{detail}</span>}
       <ChevronRight size={14} className="shrink-0 text-muted" />
     </button>
   );
@@ -310,7 +329,7 @@ export function ModelPicker({
       >
         <ChevronLeft size={15} />
       </IconButton>
-      <span className="min-w-0 flex-1 text-sm font-medium text-text">{title}</span>
+      <span className="min-w-0 flex-1 text-sm font-medium text-text capitalize">{title}</span>
       {page === "models" && (
         <IconButton
           type="button"
@@ -334,7 +353,7 @@ export function ModelPicker({
       {choices.map((choice) => (
         <MenuItem key={choice.id} onClick={() => choose(choice.id)}>
           <span className="flex min-w-0 flex-col items-start gap-0.5">
-            <span>
+            <span className="capitalize">
               {choice.label}
               {choice.id === defaultId && (
                 <span className="font-normal text-muted"> {m.model_picker_default()}</span>
@@ -375,12 +394,12 @@ export function ModelPicker({
         {effectiveServiceTier === "priority" ? (
           <Zap size={14} fill="currentColor" aria-hidden="true" />
         ) : value?.harness ? (
-          <HarnessLogo harness={value.harness} size={14} />
+          <HarnessLogo harness={value.harness} logo={selectedHarness?.logo} size={14} />
         ) : null}
         {effectiveServiceTier === "priority" && <span className="sr-only">{m.model_picker_fast_speed()} </span>}
         <span className="model-picker-label min-w-0 overflow-hidden text-ellipsis whitespace-nowrap">
           {label}
-          {reasoningLabel && <span className="model-picker-reasoning ms-1 text-muted">{reasoningLabel}</span>}
+          {reasoningLabel && <span className="model-picker-reasoning ms-1 text-muted capitalize">{reasoningLabel}</span>}
         </span>
         <ChevronDown size={14} className="shrink-0 text-muted" />
       </button>
@@ -389,6 +408,11 @@ export function ModelPicker({
           {page === "root" && (
             <div className="model-root-menu p-1">
               {menuRow(m.model_picker_model(), label, "models")}
+              {nativeOptions.map((option) => (
+                <div key={option.id}>
+                  {menuRow(option.name, option.choices.find((choice) => choice.id === option.currentValue)?.label, { nativeOptionId: option.id })}
+                </div>
+              ))}
               {reasoningChoices.length > 0 && menuRow(reasoningAxisLabel, reasoningLabel, "reasoning")}
               {speedChoices.length > 0 && menuRow(m.model_picker_speed(), speedLabel, "speed")}
               {permissionChoices.length > 0 && menuRow(m.model_picker_mode(), permissionLabel, "permissions")}
@@ -410,7 +434,7 @@ export function ModelPicker({
                   <div key={harness.id} className="[&_.model-item]:ps-6">
                     <div className={MODEL_GROUP_CLASS_NAME}>
                       <span className="inline-flex items-center gap-1.5">
-                        <HarnessLogo harness={harness.id} size={14} />
+                        <HarnessLogo harness={harness.id} logo={harness.logo} size={14} />
                         {harness.name}
                       </span>
                       {!harness.agentReady && (
@@ -425,7 +449,7 @@ export function ModelPicker({
                       </div>
                     ) : (
                       <>
-                        {!filter.trim() && (
+                        {!filter.trim() && !harness.id.startsWith("acp:") && (
                           <MenuItem onClick={() => pick(harness, null)}>
                             <span>{m.model_picker_default_model()}</span>
                             {value?.harness === harness.id && value?.model === null && (
@@ -450,7 +474,7 @@ export function ModelPicker({
                           </MenuItem>
                         ))}
                         {/* An explicit ID is passed to the CLI without claiming availability. */}
-                        {filter.trim().length > 0 &&
+                        {filter.trim().length > 0 && !harness.id.startsWith("acp:") &&
                           !harness.models.some((m) => m.id === filter.trim()) && (
                             <MenuItem
                               onClick={() => pick(harness, filter.trim())}
@@ -494,6 +518,15 @@ export function ModelPicker({
               {choiceList(reasoningChoices, effectiveReasoningId, defaultReasoningId, chooseReasoning)}
             </>
           )}
+          {nativeOption && (
+            <>
+              {submenuHeader(nativeOption.name)}
+              {choiceList(nativeOption.choices, nativeOption.currentValue, null, (value) => {
+                onSelectNativeOption?.(nativeOption.id, value);
+                close();
+              })}
+            </>
+          )}
           {page === "permissions" && (
             <>
               {submenuHeader(m.model_picker_mode())}
@@ -531,6 +564,10 @@ export function ModelPicker({
  * Claude Code composer menu: a header, the current-default row pinned at top
  * with a "· Default" note, then the full numbered list. */
 export function OptionPicker({
+  triggerIcon,
+  triggerLabel,
+  onTriggerClick,
+  menuAction,
   choices,
   value,
   defaultId,
@@ -545,9 +582,14 @@ export function OptionPicker({
   renderIcon,
   renderLabel,
   floating = false,
+  openOnHover = false,
   onSelect,
   className,
 }: {
+  triggerIcon?: ReactNode;
+  triggerLabel?: string;
+  onTriggerClick?: () => void;
+  menuAction?: { label: string; onSelect: () => void };
   choices: OptionChoice[];
   value: string | null;
   /** The harness's default id — pinned at top of the menu and used when
@@ -567,6 +609,7 @@ export function OptionPicker({
   renderIcon?: (choice: OptionChoice) => ReactNode;
   renderLabel?: (choice: OptionChoice) => ReactNode;
   floating?: boolean;
+  openOnHover?: boolean;
   onSelect: (id: string) => void;
   className?: string;
 }) {
@@ -574,6 +617,10 @@ export function OptionPicker({
   const { open, setOpen, ref } = usePopover(buttonRef);
   const menuRef = useRef<HTMLDivElement>(null);
   const [filter, setFilter] = useState("");
+  const openedByHover = useRef(false);
+  const touchTrigger = useRef(false);
+  const closeTimer = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
+  useEffect(() => () => clearTimeout(closeTimer.current), []);
   useLayoutEffect(() => {
     const menu = menuRef.current;
     const anchor = ref.current;
@@ -602,7 +649,7 @@ export function OptionPicker({
       window.removeEventListener("scroll", position, true);
     };
   }, [open, floating, dropDown, filter, choices.length, ref]);
-  if (choices.length === 0) return null;
+  if (choices.length === 0 && !menuAction) return null;
 
   const effectiveId = value ?? defaultId ?? choices[0]?.id ?? null;
   const current = choices.find((c) => c.id === effectiveId);
@@ -620,14 +667,70 @@ export function OptionPicker({
   const visible = rest.filter((c) => `${c.label} ${c.id}`.toLowerCase().includes(filter.toLowerCase()));
   const label = current?.label ?? choices[0]?.label ?? "";
 
+  const activateTrigger = () => {
+    openedByHover.current = false;
+    setFilter("");
+    if (onTriggerClick && !touchTrigger.current) {
+      setOpen(false);
+      onTriggerClick();
+    } else {
+      setOpen((value) => !value);
+    }
+  };
+
   const choose = (id: string) => {
     onSelect(id);
     setOpen(false);
     buttonRef.current?.focus();
   };
 
+  const iconTriggerProps: ButtonHTMLAttributes<HTMLButtonElement> = {
+    "aria-label": triggerLabel ?? title ?? header ?? label,
+    "aria-haspopup": "menu",
+    "aria-expanded": open,
+    disabled,
+    onPointerDown: (event) => { touchTrigger.current = event.pointerType === "touch"; },
+    onClick: activateTrigger,
+    onKeyDown: (event) => {
+      touchTrigger.current = false;
+      if (!onTriggerClick || event.key !== "ArrowDown") return;
+      event.preventDefault();
+      openedByHover.current = false;
+      setFilter("");
+      setOpen(true);
+      menuRef.current?.querySelector("input")?.focus();
+    },
+  };
+
   return (
-    <div className={`option-picker relative inline-flex${variant === "field" ? " w-full" : ""}`} ref={ref}>
+    <div className={`option-picker relative inline-flex${variant === "field" || triggerLabel ? " w-full" : ""}`} ref={ref}
+      onPointerEnter={(event) => {
+        if (!openOnHover || disabled || event.pointerType !== "mouse") return;
+        clearTimeout(closeTimer.current);
+        if (!open) {
+          openedByHover.current = true;
+          setFilter("");
+          setOpen(true);
+        }
+      }}
+      onPointerLeave={() => {
+        if (!openOnHover) return;
+        closeTimer.current = setTimeout(() => {
+          if (!menuRef.current?.contains(document.activeElement)) setOpen(false);
+        }, 150);
+      }}
+    >
+      {triggerIcon ? (
+        triggerLabel ? (
+          <MenuItem {...iconTriggerProps} ref={buttonRef} active={open} className={cn("min-h-7 py-1", className)}>
+            <span className="flex items-center gap-4">{triggerIcon}{triggerLabel}</span>
+          </MenuItem>
+        ) : (
+          <IconButton {...iconTriggerProps} ref={buttonRef} size="small" active={open} className={className}>
+            {triggerIcon}
+          </IconButton>
+        )
+      ) : (
       <button
         ref={buttonRef}
         type="button"
@@ -641,7 +744,7 @@ export function OptionPicker({
         aria-haspopup="menu"
         aria-expanded={open}
         disabled={disabled}
-        onClick={() => { setFilter(""); setOpen((v) => !v); }}
+        onClick={activateTrigger}
       >
         <span className="inline-flex min-w-0 items-center gap-2">
           {current && renderIcon?.(current)}
@@ -649,12 +752,18 @@ export function OptionPicker({
         </span>
         <ChevronDown size={12} />
       </button>
+      )}
       {open && (
         <div ref={menuRef} popover={floating ? "manual" : undefined}
           style={floating ? { position: "fixed", inset: "auto", margin: 0 } : undefined}
           className={`option-menu absolute bottom-[calc(100%_+_8px)] start-0 max-h-95 flex flex-col bg-background border border-border rounded-lg shadow-menu z-50 overflow-hidden min-w-47.5 p-1.5 [&.align-right]:start-auto [&.align-right]:end-0 [&.drop-down]:bottom-auto [&.drop-down]:top-[calc(100%_+_4px)] [&.session-menu]:start-auto [&.session-menu]:end-1.5 [&.session-menu]:top-[calc(100%_-_2px)] [&.session-menu]:min-w-35 ${choices.some((choice) => choice.description) ? "min-w-80" : ""} ${variant === "field" ? "min-w-full text-text" : ""} ${align === "right" ? "align-right" : ""} ${dropDown ? "drop-down" : ""}`}>
           {header && <div className={MODEL_GROUP_CLASS_NAME}>{header}</div>}
-          {searchPlaceholder && <input autoFocus aria-label={searchPlaceholder} placeholder={searchPlaceholder} value={filter} onChange={(e) => setFilter(e.target.value)} className="shrink-0 border-b border-border bg-background px-2 py-2 text-sm outline-none" />}
+          {menuAction && <MenuItem type="button" onClick={() => {
+            setOpen(false);
+            buttonRef.current?.focus();
+            menuAction.onSelect();
+          }}><span className="flex items-center gap-2"><Plus size={14} />{menuAction.label}</span></MenuItem>}
+          {searchPlaceholder && <input autoFocus={!openedByHover.current} aria-label={searchPlaceholder} placeholder={searchPlaceholder} value={filter} onChange={(e) => setFilter(e.target.value)} className={cn("mb-2 shrink-0 border-b border-border bg-background px-2 py-2 text-sm outline-none", menuAction && "mt-1.5")} />}
           <div className="min-h-0 overflow-y-auto">
           {pinned && (
             <>

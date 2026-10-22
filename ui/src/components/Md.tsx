@@ -27,23 +27,29 @@ import { absoluteFileUrl, artifactUrl, projectFileUrl } from "../api";
 import { InlineHtmlFigure } from "./InlineHtmlFigure";
 import { ImageCarousel, ImageCarouselContext } from "./ImageCarousel";
 import { imageWheelZoom } from "../imageZoom";
-import { chatImageTarget, citedFilePath, encodeMarkdownPath, firstCitedLine, rehypeSafeUrls, splitLineSuffix } from "../markdownTarget";
+import { chatImageTarget, chatImageTargets, citedFilePath, documentAssetTarget, encodeMarkdownPath, firstCitedLine, rehypeSafeUrls, splitLineSuffix, type ImageCandidate } from "../markdownTarget";
 
-const ImageResolverContext = createContext<((src: string, fallback?: boolean) => string | null) | undefined>(undefined);
+const ImageResolverContext = createContext<((src: string) => ImageCandidate[]) | undefined>(undefined);
 
 export function ChatImageScope({ projectId, sessionId, children }: {
   projectId: string;
   sessionId?: string | null;
   children: ReactNode;
 }) {
-  const resolver = useMemo(() => (src: string, fallback = false) => {
-    if (/^(https?:)?\/\//i.test(src)) return src;
-    const target = chatImageTarget(src);
-    if (!target) return null;
-    const url = target.source === "absolute" ? absoluteFileUrl(target.path)
-      : target.source === "artifact" && !fallback ? artifactUrl(projectId, target.path)
-      : projectFileUrl(projectId, target.source === "artifact" ? `artifacts/${target.path}` : target.path, { sessionId: sessionId ?? undefined });
-    return url + target.hash;
+  const resolver = useMemo(() => {
+    const url = (target: NonNullable<ReturnType<typeof chatImageTarget>>) => (target.source === "absolute" ? absoluteFileUrl(target.path)
+      : target.source === "artifact" ? artifactUrl(projectId, target.path)
+      : projectFileUrl(projectId, target.path, { sessionId: sessionId ?? undefined })) + target.hash;
+    return (src: string): ImageCandidate[] => /^(https?:)?\/\//i.test(src) ? [{ url: src, resolveAsset: () => null }]
+      : chatImageTargets(src).map(target => ({
+        url: url(target),
+        resolveAsset: (child: string) => {
+          const absolute = chatImageTarget(child);
+          if (absolute?.source === "absolute") return url(absolute);
+          const asset = documentAssetTarget(target.path, child, true);
+          return asset ? url({ ...target, path: asset.path, hash: asset.hash }) : null;
+        },
+      }));
   }, [projectId, sessionId]);
   return <ImageResolverContext value={resolver}>{children}</ImageResolverContext>;
 }
@@ -115,12 +121,12 @@ function ImageModal({ src, alt, name, onClose }: { src: string; alt: string; nam
   );
 }
 
-function MarkdownImage({ src, fallbackSrc, downloadName, alt = "", ...props }: ImgHTMLAttributes<HTMLImageElement> & { fallbackSrc?: string | null; downloadName?: string }) {
-  const [failed, setFailed] = useState(false);
+function MarkdownImage({ sources, downloadName, alt = "", ...props }: ImgHTMLAttributes<HTMLImageElement> & { sources: string[]; downloadName?: string }) {
+  const [attempt, setAttempt] = useState(0);
   const [expanded, setExpanded] = useState(false);
   const carousel = useContext(ImageCarouselContext);
   const changeExpanded = carousel?.setExpanded ?? setExpanded;
-  const displayedSrc = failed && fallbackSrc ? fallbackSrc : src;
+  const displayedSrc = sources[attempt];
   return <>
     <img {...props} src={displayedSrc} alt={alt} role="button" tabIndex={0} aria-haspopup="dialog"
       onClick={(event) => { event.preventDefault(); event.stopPropagation(); changeExpanded(true); }}
@@ -129,7 +135,7 @@ function MarkdownImage({ src, fallbackSrc, downloadName, alt = "", ...props }: I
           event.preventDefault(); event.stopPropagation(); changeExpanded(true);
         }
       }}
-      onError={!failed && fallbackSrc && fallbackSrc !== src ? () => setFailed(true) : undefined} />
+      onError={attempt + 1 < sources.length ? () => setAttempt(attempt + 1) : undefined} />
     {(carousel?.expanded ?? expanded) && displayedSrc && <ImageModal src={displayedSrc} alt={alt} name={downloadName} onClose={() => changeExpanded(false)} />}
   </>;
 }
@@ -420,35 +426,32 @@ export const Md = memo(function Md({
   ) => void;
   onOpenRun?: (runId: string, intent: TabOpenIntent) => void;
   resolveFilePath?: (path: string) => string | null;
-  resolveImageSrc?: (src: string) => string | null;
+  resolveImageSrc?: (src: string) => ImageCandidate[];
   predict?: boolean;
 }) {
   useLocale();
   const chatImageSrc = useContext(ImageResolverContext);
   const imageSrc = resolveImageSrc ?? chatImageSrc;
   // Callers pass fresh callbacks; a new `img` type would remount every image.
-  const img = useMemo(() => ({ node: _node, src, alt, className, ...rest }: any) => {
-    if (!src || typeof src !== "string") return null;
-    const resolved = imageSrc ? imageSrc(src) : src;
+  const img = useMemo(() => function MarkdownImg({ node: _node, src, alt, className, ...rest }: any) {
+    const sources = useMemo(() => typeof src === "string" && src ? imageSrc?.(src) ?? [{ url: src, resolveAsset: () => null }] : [], [src, imageSrc]);
+    const resolved = sources[0]?.url;
     if (!resolved) return null;
     if (imageSrc && chatImageTarget(src)?.path.match(/\.html?$/i)) {
-      return <InlineHtmlFigure key={resolved} source={src} url={resolved}
-        fallbackUrl={!resolveImageSrc ? chatImageSrc?.(src, true) : null}
-        name={alt || src} resolveSrc={imageSrc} />;
+      return <InlineHtmlFigure key={resolved} candidates={sources} name={alt || src} />;
     }
     return (
       <MarkdownImage
         {...rest}
         key={resolved}
         downloadName={src.split(/[\\/]/).pop()?.split(/[?#]/)[0]}
-        src={resolved}
-        fallbackSrc={!resolveImageSrc ? chatImageSrc?.(src, true) : null}
+        sources={sources.map(source => source.url)}
         alt={alt ?? ""}
         loading="lazy"
         className={`block max-w-full h-auto my-3 rounded-sm border border-border cursor-zoom-in focus-visible:outline-2 focus-visible:outline-primary ${className ?? ""}`}
      />
     );
-  }, [resolveImageSrc, chatImageSrc, imageSrc]);
+  }, [imageSrc]);
   const components: Record<string, (props: any) => ReactNode> = useMemo(() => ({
     "image-carousel": ({ children }) => <ImageCarousel>{children}</ImageCarousel>,
     "file-mention": (props) => {

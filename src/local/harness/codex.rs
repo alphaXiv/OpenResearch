@@ -1112,6 +1112,9 @@ impl Harness for Codex {
             }
             // Async questions are answered by steering, not a held JSON-RPC reply.
             "question" if prompt.native_id.is_none() => {
+                if !answer.approve {
+                    return Ok(ResumeAction::Handled { plan_mode: None });
+                }
                 let text = async_question_answer(prompt, answer)?;
                 ctx.host
                     .steer_message(
@@ -2168,7 +2171,7 @@ fn subagent_thread_ids(item: &Value) -> Vec<String> {
 /// Build the "subagent" spawn part for a collab/sub-activity item. The UI reads
 /// `state.input` to label the row ("Spawned agent", "Sub-agent started", …); the
 /// sub-agent's streamed transcript is hung under `children` by the turn loop,
-/// and the UI locates it via this part's id, not any thread id in the payload.
+/// and thread identity links other events to the same transcript.
 fn subagent_spawn_part(id: &str, item: &Value, completed: bool) -> WirePart {
     // collabAgentToolCall carries a `status` (inProgress|completed|failed);
     // subAgentActivity has no status — treat it as a completed marker row.
@@ -2183,11 +2186,12 @@ fn subagent_spawn_part(id: &str, item: &Value, completed: bool) -> WirePart {
     } else {
         "completed"
     };
-    // Surface only what the UI labels the row from (`toolLine`'s subagent arm
-    // reads `tool` / `prompt` / `kind` / `nickname`) — the transcript is
-    // located via the spawn part id + `children`, not via any thread id in the
-    // payload.
+    // Keep thread identity so every event can open the same agent transcript.
     let mut input = serde_json::Map::new();
+    input.insert(
+        "agentThreadIds".into(),
+        serde_json::json!(subagent_thread_ids(item)),
+    );
     for key in ["tool", "prompt", "kind"] {
         if let Some(v) = item.get(key) {
             input.insert(key.into(), v.clone());
@@ -2725,9 +2729,7 @@ async fn run_turn_app_server(ctx: &mut TurnCtx) -> Result<()> {
     // resume by message — the next user message replaces them, exactly like
     // Claude's precedent. Behavior-preserving for the pre-plan-mode cards (all
     // of which were native).
-    ctx.host
-        .resolve_stale_prompts(&ctx.session_id, true)
-        .await?;
+    ctx.host.resolve_stale_prompts(&ctx.session_id, true)?;
     let project = ctx.project.clone();
     let session_id = ctx.session_id.clone();
     // The modular orx skills land in the harness's session-skills dir, fresh,
@@ -3375,6 +3377,9 @@ fn user_input_card(turn: Option<&str>, id: &Value, params: &Value) -> Option<(St
 /// contextualized annotation answer; every other stashed id gets an empty
 /// `{"answers": []}`. `Err` when none were provided leaves the card actionable.
 fn user_input_reply(prompt: &WirePrompt, answer: &PromptAnswer) -> Result<Value> {
+    if !answer.approve {
+        return Ok(serde_json::json!({ "answers": {} }));
+    }
     let note = answer.note.as_deref().filter(|s| !s.trim().is_empty());
     let mut selected: Vec<String> = if !answer.answers.is_empty() {
         answer.answers.clone()
@@ -5106,6 +5111,20 @@ requires_openai_auth = false
         );
     }
 
+    #[test]
+    fn subagent_events_preserve_target_thread_identity() {
+        for item in [
+            json!({"receiverThreadIds": ["child"], "tool": "spawnAgent", "status": "inProgress"}),
+            json!({"agentThreadId": "child", "kind": "interacted"}),
+        ] {
+            let part = subagent_spawn_part("event", &item, false);
+            assert_eq!(
+                part.state.unwrap().input.unwrap()["agentThreadIds"],
+                json!(["child"])
+            );
+        }
+    }
+
     /// A later collab item (`sendInput`) on an already-spawned thread re-points
     /// the thread to the new spawn row, so its continued activity streams under
     /// the new row — not the original, already-completed spawn.
@@ -6136,6 +6155,10 @@ requires_openai_auth = false
 
         // Neither selection nor note → Err (card stays actionable).
         assert!(user_input_reply(&prompt, &answer(true, None, &[], None)).is_err());
+        assert_eq!(
+            user_input_reply(&prompt, &answer(false, None, &[], None)).unwrap(),
+            serde_json::json!({ "answers": {} })
+        );
     }
 
     /// Numeric question ids stringify to their JSON text as map keys.
@@ -6175,6 +6198,20 @@ requires_openai_auth = false
             session_id: "s".into(),
             native_session_id: None,
         }
+    }
+
+    #[tokio::test]
+    async fn skipped_async_question_closes_without_sending_a_message() {
+        let prompt = WirePrompt {
+            kind: "question".into(),
+            question: Some("Which color?".into()),
+            ..Default::default()
+        };
+        let action = Codex
+            .resume_from_prompt(&test_resume_ctx(), &prompt, &answer(false, None, &[], None))
+            .await
+            .unwrap();
+        assert!(matches!(action, ResumeAction::Handled { plan_mode: None }));
     }
 
     /// The codex plan card resume arms: approve → "Implement the plan." with

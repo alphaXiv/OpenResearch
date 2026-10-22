@@ -24,6 +24,7 @@ const panes = [
   { kind: "plan", sessionId: "session", promptId: "prompt" },
   { kind: "subagent", sessionId: "session", spawnPartId: "part" },
   { kind: "side", sessionId: "session" },
+  { kind: "side", sessionId: null },
 ];
 
 test("every pane variant round-trips through a concrete task URL", () => {
@@ -59,6 +60,8 @@ test("pane validation rejects malformed identifiers, views, line numbers and ext
     { kind: "code", experimentId: "exp", branch: "", view: "files" },
     { kind: "plan", sessionId: "session", promptId: "" },
     { kind: "subagent", sessionId: "", spawnPartId: "part" },
+    { kind: "side", sessionId: "" },
+    { kind: "side" },
     ...panes.map((pane) => ({ ...pane, content: "do not persist file or transcript content" })),
   ]) assert.equal(parsePane(invalid), undefined, JSON.stringify(invalid));
 });

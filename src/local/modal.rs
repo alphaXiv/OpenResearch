@@ -113,6 +113,7 @@ pub async fn submit_local_modal_with_source(
         ssh_container: None,
         monitoring_error: None,
         cancellation_accepted: false,
+        rental_lease: None,
         kind: "modal_job".to_string(),
         namespace: Some(MODAL_APP.to_string()),
         job_id: Some(sandbox_id.clone()),

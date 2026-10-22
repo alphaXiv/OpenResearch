@@ -8,6 +8,8 @@
 //! normalized parts into the per-turn assistant message; every flush persists
 //! the message and broadcasts it as a `chat.message` SSE event.
 
+pub(crate) mod subagent;
+
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::io::{Read, Seek, SeekFrom, Write};
 use std::path::PathBuf;
@@ -768,6 +770,8 @@ pub struct WireQuestionOption {
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct WirePrompt {
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub native_choices: Vec<NativePermissionChoice>,
     /// `plan` | `permission` | `question`.
     pub kind: String,
     /// Whether this prompt has been answered (resolved permission cards
@@ -943,6 +947,14 @@ impl WirePart {
             children: Vec::new(),
         }
     }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct NativePermissionChoice {
+    pub id: String,
+    pub label: String,
+    pub kind: String,
 }
 
 // --- image attachments ---------------------------------------------------------
@@ -1187,6 +1199,7 @@ pub fn import_native_chat(
         autonomy: None,
         active_leaf_id: None,
         side_parent_session_id: None,
+        side_parent_leaf_id: None,
         created_at: now_ms(),
         updated_at: now_ms(),
     };
@@ -1215,19 +1228,33 @@ pub fn import_native_chat(
 }
 
 pub fn session_json(s: &StoredChatSession, busy: bool) -> Value {
+    let acp = s
+        .harness
+        .starts_with("acp:")
+        .then(|| Store::open().ok()?.acp_session_state(&s.id).ok().flatten())
+        .flatten();
     let context_usage = s
         .context_usage_json
         .as_deref()
         .and_then(|j| serde_json::from_str::<Value>(j).ok());
+    let native_model = acp.as_ref().and_then(|state| {
+        state.configuration["configOptions"]
+            .as_array()
+            .and_then(|options| options.iter().find(|option| option["category"] == "model"))
+            .and_then(|option| option["currentValue"].as_str())
+            .or_else(|| state.configuration["models"]["currentModelId"].as_str())
+    });
     json!({
         "id": s.id,
         "projectId": s.project_id,
         "harness": s.harness,
+        "harnessName": acp.as_ref().map(|state| state.launch.name.as_str()),
+        "nativeConfiguration": acp.as_ref().map(|state| &state.configuration),
         "title": s.title,
         // The UI animates the reveal of a harness-generated title, so it needs
         // to tell one from a placeholder or a user rename.
         "titleSource": s.title_source,
-        "model": s.model,
+        "model": native_model.or(s.model.as_deref()),
         "serviceTier": s.service_tier,
         "permissionMode": crate::local::harness::effective_permission_id(
             &s.harness,
@@ -1497,7 +1524,7 @@ async fn read_shell_stream<R: tokio::io::AsyncRead + Unpin>(pipe: Option<R>, kep
 /// Kill the command's whole process group: a pipeline or a backgrounded
 /// grandchild would otherwise outlive the timeout and hold the pipes open.
 #[cfg(unix)]
-fn kill_shell_group(pid: Option<u32>) {
+pub(crate) fn kill_shell_group(pid: Option<u32>) {
     if let Some(pid) = pid.and_then(|pid| libc::pid_t::try_from(pid).ok()) {
         // SAFETY: killpg is a plain syscall on a group this process spawned.
         unsafe {
@@ -1509,7 +1536,7 @@ fn kill_shell_group(pid: Option<u32>) {
 /// Windows has no group to signal, and the caller's second wait is untimed, so
 /// without this a timed-out command hangs the turn until the child exits.
 #[cfg(not(unix))]
-fn kill_shell_group(pid: Option<u32>) {
+pub(crate) fn kill_shell_group(pid: Option<u32>) {
     let Some(pid) = pid else {
         return;
     };
@@ -1566,8 +1593,20 @@ impl ChatHost {
                 .get_chat_session(session_id)?
                 .ok_or_else(|| anyhow!("chat session is gone"))?
         };
-        if crate::local::harness::chat_harness(&session.harness).is_none() {
+        if crate::local::harness::session_harness(&session.harness, session_id).is_none() {
             return Err(anyhow!("unknown harness `{}`", session.harness));
+        }
+        if session.harness == "opencode"
+            && session
+                .model
+                .as_deref()
+                .is_none_or(|model| model.trim().is_empty())
+            && (session.native_session_id.is_none()
+                || self.opencode.resident_model(session_id).await.is_none())
+        {
+            return Err(anyhow!(
+                "Select an OpenCode model before compacting this chat"
+            ));
         }
         // Taken before the progress row exists, so the summary never describes
         // its own compaction.
@@ -1656,7 +1695,7 @@ impl ChatHost {
         session: &StoredChatSession,
         snapshot: &str,
     ) -> Result<Option<String>> {
-        let harness = crate::local::harness::chat_harness(&session.harness)
+        let harness = crate::local::harness::session_harness(&session.harness, session_id)
             .ok_or_else(|| anyhow!("unknown harness `{}`", session.harness))?;
         let ctx = crate::local::harness::CompactCtx {
             host: self.clone(),
@@ -1710,7 +1749,18 @@ impl ChatHost {
         harness: &dyn crate::local::harness::Harness,
         snapshot: &str,
     ) -> Result<String> {
-        let prior = session.bootstrap_context.as_deref().unwrap_or("");
+        if harness.id() == "opencode"
+            && session
+                .model
+                .as_deref()
+                .is_none_or(|model| model.trim().is_empty())
+        {
+            return Err(anyhow!(
+                "Select an OpenCode model before compacting this chat"
+            ));
+        }
+        let bootstrap = effective_bootstrap_context(&Store::open()?, session)?;
+        let prior = bootstrap.as_deref().unwrap_or("");
         let prompt = format!(
             "<orx-transcript>\n{prior}{}{snapshot}\n</orx-transcript>",
             if prior.is_empty() { "" } else { "\n\n" }
@@ -2342,6 +2392,7 @@ pub struct ChatHost {
     /// Persistent Claude Code child manager (one resident child per session;
     /// only the claude adapter spawns it).
     pub claude: Arc<crate::local::claude::ClaudeHost>,
+    pub acp: Arc<crate::local::acp::host::Host>,
     http: reqwest::Client,
     events: broadcast::Sender<(&'static str, Value)>,
     /// Sessions with a turn reserved, running, or settling after interruption.
@@ -3102,7 +3153,7 @@ mod persisted_queue_delay_tests {
 /// isn't already busy — closing the check-then-insert race. On drop (early
 /// error / panic) it clears the reservation; call `defuse` once the real abort
 /// handle has replaced it so the running turn's slot survives.
-struct TurnGuard {
+pub(crate) struct TurnGuard {
     host: Arc<ChatHost>,
     session_id: String,
     armed: bool,
@@ -3129,7 +3180,7 @@ impl TurnGuard {
     }
 
     /// `Some` if the slot was free and is now reserved; `None` if already busy.
-    async fn claim(
+    pub(crate) async fn claim(
         host: &Arc<ChatHost>,
         session_id: &str,
         overrides: Option<&mut TurnOverrides>,
@@ -3348,6 +3399,7 @@ impl ChatHost {
             opencode,
             codex,
             claude,
+            acp: Arc::new(crate::local::acp::host::Host::new(events.clone())),
             http: crate::net::loopback_client()
                 .build()
                 .expect("loopback http client"),
@@ -3383,6 +3435,7 @@ impl ChatHost {
         let _ = self.up_port.set(port);
         self.opencode.set_up_port(port);
         self.codex.set_up_port(port);
+        self.acp.set_up_port(port);
     }
 
     /// The bound `orx up` port, if this host runs under a server (None in
@@ -3434,8 +3487,8 @@ impl ChatHost {
         // The endpoint grants tool permissions, so unlike the rest of the
         // localhost API it authenticates: the bridge must echo the token its
         // child was spawned with.
-        let (plan_mode, bypass) = match self.gate_tokens.lock().unwrap().get(session_id) {
-            Some(gate) if gate.value == token => (gate.plan_mode, gate.bypass),
+        let plan_mode = match self.gate_tokens.lock().unwrap().get(session_id) {
+            Some(gate) if gate.value == token => gate.plan_mode,
             _ => return Err(anyhow!("unknown or stale gate token")),
         };
         // A bridge child that outlived its turn has nothing left to approve.
@@ -3443,24 +3496,6 @@ impl ChatHost {
             return Ok(PermissionDecision::deny(
                 "the turn this approval belonged to has already ended",
             ));
-        }
-
-        let is_bypass = self
-            .permission_changes
-            .lock()
-            .unwrap()
-            .get(session_id)
-            .map(|(_, mode)| mode == "bypass")
-            .unwrap_or(bypass);
-
-        if is_bypass
-            && !plan_mode
-            && tool_name != "ExitPlanMode"
-            && crate::local::harness::question_prompt(tool_name, Some(&tool_input)).is_none()
-        {
-            return Ok(PermissionDecision::Allow {
-                updated_input: Some(tool_input),
-            });
         }
 
         // Tier 1 — Plan has a small automatic read/deny policy. Manual and
@@ -3480,9 +3515,55 @@ impl ChatHost {
             .clone();
         let _review = review_lock.lock().await;
 
-        // This request may have waited behind another review. Revalidate the
-        // child and turn before exposing it: an interrupt or respawn while it
-        // was queued makes the old request stale.
+        if tool_name == "AskUserQuestion" {
+            if let Some(questions) = tool_input
+                .get("questions")
+                .and_then(Value::as_array)
+                .filter(|q| !q.is_empty())
+            {
+                let mut answers = serde_json::Map::new();
+                for question in questions {
+                    let input = json!({ "questions": [question] });
+                    let decision = self
+                        .present_permission(session_id, token, tool_name, input)
+                        .await?;
+                    match decision {
+                        PermissionDecision::Allow {
+                            updated_input: Some(input),
+                        } => {
+                            let returned =
+                                input.get("answers").and_then(Value::as_object).ok_or_else(
+                                    || anyhow!("question response did not contain answers"),
+                                )?;
+                            answers.extend(returned.clone());
+                        }
+                        decision => return Ok(decision),
+                    }
+                }
+                if answers.is_empty() {
+                    return Ok(PermissionDecision::deny(
+                        crate::local::harness::SKIPPED_QUESTION_MESSAGE,
+                    ));
+                }
+                let mut input = tool_input.clone();
+                input["answers"] = Value::Object(answers);
+                return Ok(PermissionDecision::Allow {
+                    updated_input: Some(input),
+                });
+            }
+        }
+        self.present_permission(session_id, token, tool_name, tool_input)
+            .await
+    }
+
+    async fn present_permission(
+        self: &Arc<Self>,
+        session_id: &str,
+        token: &str,
+        tool_name: &str,
+        tool_input: Value,
+    ) -> Result<PermissionDecision> {
+        // Revalidate after queued approvals and between questions in a batch.
         let gate_is_current = self
             .gate_tokens
             .lock()
@@ -3495,15 +3576,6 @@ impl ChatHost {
             ));
         }
 
-        // Tier 2 — the user decides. ExitPlanMode becomes the plan card (the
-        // hook routes it here with an "ask" so headless can't self-approve);
-        // AskUserQuestion becomes the QUESTION card itself, held mid-turn —
-        // gating it behind a permission card would be a pointless double
-        // interaction, and *allowing* it is worse: headless the tool returns
-        // no answer, so the model guesses and keeps going instead of blocking.
-        // Holding the call is the only shape that actually blocks the turn on
-        // the user's answer. Everything else — gray-area Bash, MCP tools, … —
-        // a permission card.
         let prompt_id = format!("perm_{}", uuid::Uuid::new_v4());
         let prompt = if tool_name == "ExitPlanMode" {
             WirePrompt {
@@ -3528,6 +3600,7 @@ impl ChatHost {
             // tool call is a saner fallback than an options-less card.
             WirePrompt {
                 native_id: Some(prompt_id.clone()),
+                tool_input: Some(tool_input),
                 ..question
             }
         } else {
@@ -3685,6 +3758,7 @@ impl ChatHost {
         self.opencode.shutdown().await;
         self.codex.shutdown().await;
         self.claude.shutdown().await;
+        self.acp.shutdown().await;
     }
 
     pub async fn busy_sessions(&self) -> Vec<String> {
@@ -4989,7 +5063,23 @@ impl ChatHost {
         let session = store
             .get_chat_session(session_id)?
             .ok_or_else(|| anyhow!("chat session not found"))?;
-        let rewind = rewind_target(anchor);
+        let acp = session.harness.starts_with("acp:");
+        let rewind = if acp {
+            Some(None)
+        } else {
+            rewind_target(anchor)
+        };
+        if acp {
+            self.acp.stop(session_id).await;
+            let snapshot = anchor
+                .parent_id
+                .as_deref()
+                .map(|leaf| {
+                    crate::local::harness::transcript_snapshot(active_path(&messages, Some(leaf)))
+                })
+                .unwrap_or_default();
+            store.set_chat_session_bootstrap_context(session_id, Some(&snapshot))?;
+        }
         store.set_chat_session_active_leaf(session_id, leaf.as_deref())?;
         if let Some(native) = &rewind {
             store.set_chat_session_native_id(session_id, native.as_deref())?;
@@ -5020,6 +5110,12 @@ impl ChatHost {
         // rewind is worse than either end state.
         let started = matches!(&submitted, Ok(TurnSubmission::Started(_)));
         if !started {
+            if acp {
+                let _ = store.set_chat_session_bootstrap_context(
+                    session_id,
+                    session.bootstrap_context.as_deref(),
+                );
+            }
             if rewind.is_some() {
                 let _ = store
                     .set_chat_session_native_id(session_id, session.native_session_id.as_deref());
@@ -5063,7 +5159,18 @@ impl ChatHost {
                     .clone()
                     .or_else(|| m.base_native_session_id.clone())
             });
-        store.set_chat_session_native_id(session_id, resume.as_deref())?;
+        let session = store
+            .get_chat_session(session_id)?
+            .ok_or_else(|| anyhow!("chat session not found"))?;
+        if session.harness.starts_with("acp:") {
+            self.acp.stop(session_id).await;
+            let snapshot =
+                crate::local::harness::transcript_snapshot(active_path(&messages, Some(&tip.id)));
+            store.set_chat_session_bootstrap_context(session_id, Some(&snapshot))?;
+            store.set_chat_session_native_id(session_id, None)?;
+        } else {
+            store.set_chat_session_native_id(session_id, resume.as_deref())?;
+        }
         self.emit(
             "chat.branch",
             json!({ "sessionId": session_id, "activeLeafId": tip.id }),
@@ -5560,13 +5667,18 @@ impl ChatHost {
                 prepare_project_slash_worktree(&project, &message.text, &session.id).await;
             }
         }
+        let bootstrap = if prepared_input.is_none() && session.native_session_id.is_none() {
+            effective_bootstrap_context(&store, &session)?
+        } else {
+            None
+        };
         let mut turn_text = prepared_input.unwrap_or_else(|| {
             let expanded = contextualize_messages(messages, |text| {
                 expand_slash_skills(&project, text, Some(&session.harness), Some(&session.id))
             });
             with_turn_context(
                 session.native_session_id.as_deref(),
-                session.bootstrap_context.as_deref(),
+                bootstrap.as_deref(),
                 session.goal.as_deref(),
                 Autonomy::from_stored(session.autonomy.as_deref()).turn_context(),
                 super::demo::turn_context(&project.id),
@@ -5758,7 +5870,8 @@ impl ChatHost {
                     None,
                 )
             });
-            let result = match crate::local::harness::chat_harness(&ctx.harness) {
+            let result = match crate::local::harness::session_harness(&ctx.harness, &ctx.session_id)
+            {
                 Some(harness) => harness.run_turn(&mut ctx).await,
                 None => Err(crate::local::harness::TurnFailure {
                     kind: "unknown_harness",
@@ -6010,6 +6123,8 @@ impl ChatHost {
                             return host.codex.interrupt_session(&session_id).await;
                         } else if session.harness == "claude-code" {
                             host.claude.kill_session(&session_id).await;
+                        } else if session.harness.starts_with("acp:") {
+                            host.acp.stop(&session_id).await;
                         }
                     }
                 }
@@ -6039,6 +6154,8 @@ impl ChatHost {
                 let _ = std::fs::remove_file(target_event_path(&session_id, &active.message_id));
                 remove_target_pointer_if_matches(&session_id, &active.message_id);
             }
+            // Settle dead native requests after the final flush, before a new turn can start.
+            let _ = host.resolve_stale_prompts(&session_id, true);
             host.finish_interruption(&session_id).await;
         });
         let _ = settlement.await;
@@ -6144,6 +6261,11 @@ impl ChatHost {
         // catch clear `busy` on a session whose turn is still streaming; a plain
         // `Ok` leaves the live turn (and its busy state) untouched.
         let Some(prompt) = unresolved_prompt(&req.session_id, &req.prompt_id)? else {
+            if session.harness.starts_with("acp:") {
+                return Err(anyhow!(
+                    "This agent permission request is no longer pending"
+                ));
+            }
             return Ok(());
         };
         if prompt.kind == "permission"
@@ -6157,7 +6279,7 @@ impl ChatHost {
                 return Err(anyhow!("invalid resume mode for selected harness"));
             }
         }
-        let harness = crate::local::harness::chat_harness(&session.harness)
+        let harness = crate::local::harness::session_harness(&session.harness, &session.id)
             .ok_or_else(|| anyhow!("unknown harness: {}", session.harness))?;
 
         // Ask the harness how the answer resumes. Inline harnesses deliver the
@@ -6355,9 +6477,14 @@ impl ChatHost {
     /// live branch as it is right now.
     pub async fn open_side_chat(&self, parent: &StoredChatSession) -> Result<StoredChatSession> {
         let store = Store::open()?;
+        let transaction = store.begin_immediate()?;
+        let parent = store
+            .get_chat_session(&parent.id)?
+            .ok_or_else(|| anyhow!("chat session is gone"))?;
         let messages = store.list_chat_messages(&parent.id)?;
-        let session = side_chat_session(parent, &messages);
+        let session = side_chat_session(&parent, &messages);
         store.create_chat_session(&session)?;
+        transaction.commit()?;
         // Checked after the insert: a parent delete that began earlier has
         // already listed its side chats and would miss this one.
         if self.deleting_sessions.lock().unwrap().contains(&parent.id)
@@ -6434,6 +6561,45 @@ impl ChatHost {
         }
         self.emit_queued(session_id);
         Ok(self.emit_session(store.get_chat_session(session_id)?).await)
+    }
+
+    pub(crate) async fn sync_claude_permission_mode(
+        &self,
+        session_id: &str,
+        previous: crate::local::harness::PermissionMode,
+        mode: crate::local::harness::PermissionMode,
+    ) -> Result<()> {
+        use crate::local::harness::{permission_id_for_mode, permission_mode_for, PermissionMode};
+        let updated = {
+            let store = Store::open()?;
+            let mut changes = self.permission_changes.lock().unwrap();
+            let Some(session) = store.get_chat_session(session_id)? else {
+                return Ok(());
+            };
+            let selected = session
+                .permission_mode
+                .as_deref()
+                .and_then(|id| permission_mode_for(&session.harness, id))
+                .unwrap_or(PermissionMode::Auto);
+            // A newer user selection takes precedence over an old child's status.
+            if session.harness != "claude-code" || selected != previous {
+                return Ok(());
+            }
+            let id = permission_id_for_mode("claude-code", mode)
+                .ok_or_else(|| anyhow!("unsupported Claude permission mode"))?;
+            store.set_chat_session_permission_mode(session_id, &id)?;
+            let revision = changes
+                .get(session_id)
+                .map_or(1, |(revision, _)| revision + 1);
+            changes.insert(session_id.to_string(), (revision, id));
+            if let Some(gate) = self.gate_tokens.lock().unwrap().get_mut(session_id) {
+                gate.plan_mode = mode == PermissionMode::Plan;
+                gate.bypass = mode == PermissionMode::Bypass;
+            }
+            store.get_chat_session(session_id)?
+        };
+        self.emit_session(updated).await;
+        Ok(())
     }
 
     pub async fn set_permission_mode(
@@ -6519,7 +6685,7 @@ impl ChatHost {
             .begin_session_delete(session_id)
             .ok_or_else(|| anyhow!("session deletion is already in progress"))?;
         for side_chat in Store::open()?.side_chats_of(session_id)? {
-            let _ = Box::pin(self.delete_session(&side_chat)).await;
+            Box::pin(self.delete_session(&side_chat)).await?;
         }
         self.clear_queue(session_id)?;
         let _ = self.interrupt(session_id).await;
@@ -6528,7 +6694,8 @@ impl ChatHost {
         // too, so reap it before `cleanup_session_worktree` below.
         self.opencode.kill_session(session_id).await;
         self.codex.kill_session(session_id).await;
-        self.claude.forget_session(session_id).await;
+        self.claude.kill_session(session_id).await;
+        self.acp.stop(session_id).await;
         self.respond_locks.lock().await.remove(session_id);
         self.recovery_locks.lock().await.remove(session_id);
         self.queue_dispatch_cancelled
@@ -6552,9 +6719,13 @@ impl ChatHost {
             .unwrap()
             .retain(|(queued_session_id, _), _| queued_session_id != session_id);
         let store = Store::open()?;
+        let native_deletion = store.lock_native_deletion()?;
         let session = store.get_chat_session(session_id)?;
         let worktree_owner = store.chat_worktree_owner(session_id)?;
+        Self::delete_native_sessions(&[session_id.to_string()]).await?;
         store.delete_chat_session(session_id)?;
+        drop(native_deletion);
+        self.claude.forget_session(session_id).await;
         self.emit("chat.session.deleted", json!({ "sessionId": session_id }));
         if let Some(session) = session {
             cleanup_session_transcript_artifacts(&session.id);
@@ -6565,6 +6736,15 @@ impl ChatHost {
                 }
             }
         }
+        Ok(())
+    }
+
+    pub async fn delete_native_sessions(session_ids: &[String]) -> Result<()> {
+        let (ids, retained) = Store::open()?.opencode_sessions_for_deletion(session_ids)?;
+        tokio::task::spawn_blocking(move || {
+            crate::local::native_store::delete_opencode_sessions(&ids, &retained)
+        })
+        .await??;
         Ok(())
     }
 }
@@ -6585,7 +6765,7 @@ pub fn cleanup_session_worktree(project: &LocalProject, session_id: &str) {
 pub struct PromptAnswer {
     pub session_id: String,
     pub prompt_id: String,
-    /// Approve (proceed) vs reject (dismiss). For questions, always true.
+    /// Approve (proceed) vs reject (dismiss). False skips a question.
     #[serde(default = "default_true")]
     pub approve: bool,
     /// For plan/permission approval: a provider-owned permission id to resume
@@ -6850,7 +7030,7 @@ fn resolve_stale_prompts_in_parts(parts: &mut [WirePart], native_only: bool) -> 
 
 impl ChatHost {
     /// [`resolve_stale_prompts`] + broadcast, for harness turn-entry use.
-    pub async fn resolve_stale_prompts(&self, session_id: &str, native_only: bool) -> Result<()> {
+    pub fn resolve_stale_prompts(&self, session_id: &str, native_only: bool) -> Result<()> {
         for msg in resolve_stale_prompts(&self.msg_write, session_id, native_only)? {
             self.emit("chat.message", message_json(&msg, session_id));
         }
@@ -7930,19 +8110,49 @@ fn active_path<'a>(
     path
 }
 
+fn side_chat_context<'a>(
+    messages: impl IntoIterator<Item = &'a StoredChatMessage>,
+) -> Option<String> {
+    let snapshot = crate::local::harness::transcript_snapshot(messages);
+    (!snapshot.is_empty()).then(|| format!(
+        "<orx-side-chat-context>\nThis is a side chat branched from another chat, which may still be running in this same worktree. Use this snapshot of that chat, taken when the side chat opened, to answer questions about its work. Do not modify files unless the user asks.\n{snapshot}\n</orx-side-chat-context>"
+    ))
+}
+
+fn effective_bootstrap_context(
+    store: &Store,
+    session: &StoredChatSession,
+) -> Result<Option<String>> {
+    if let Some(context) = &session.bootstrap_context {
+        return Ok(Some(context.clone()));
+    }
+    let (Some(parent), Some(leaf)) = (
+        &session.side_parent_session_id,
+        &session.side_parent_leaf_id,
+    ) else {
+        return Ok(None);
+    };
+    let messages = store.list_chat_messages(parent)?;
+    if !messages.iter().any(|message| &message.id == leaf) {
+        return Err(anyhow!("side chat parent context is unavailable"));
+    }
+    Ok(side_chat_context(active_path(&messages, Some(leaf))))
+}
+
 fn side_chat_session(
     parent: &StoredChatSession,
     messages: &[StoredChatMessage],
 ) -> StoredChatSession {
-    let snapshot = crate::local::harness::transcript_snapshot(active_path(
-        messages,
-        parent.active_leaf_id.as_deref(),
-    ));
-    let bootstrap_context = (!snapshot.is_empty()).then(|| {
-        format!(
-            "<orx-side-chat-context>\nThis is a side chat branched from another chat, which may still be running in this same worktree. Use this snapshot of that chat, taken when the side chat opened, to answer questions about its work. Do not modify files unless the user asks.\n{snapshot}\n</orx-side-chat-context>"
-        )
-    });
+    let leaf = parent
+        .active_leaf_id
+        .as_ref()
+        .filter(|id| messages.iter().any(|m| &m.id == *id));
+    // Legacy transcripts without a valid leaf keep their existing snapshot semantics.
+    let bootstrap_context = if leaf.is_none() && !messages.is_empty() {
+        side_chat_context(messages.iter())
+    } else {
+        None
+    };
     let now = now_ms();
     StoredChatSession {
         id: format!("chat_{}", uuid::Uuid::new_v4()),
@@ -7968,6 +8178,7 @@ fn side_chat_session(
         autonomy: parent.autonomy.clone(),
         active_leaf_id: None,
         side_parent_session_id: Some(parent.id.clone()),
+        side_parent_leaf_id: leaf.cloned(),
         created_at: now,
         updated_at: now,
     }
@@ -8100,6 +8311,13 @@ fn materialize_unfinished_turns(
 // --- run watcher ----------------------------------------------------------------
 
 fn run_wakeup_text(run: &crate::store::StoredRun) -> Option<String> {
+    if run.status == "lost" {
+        return Some(format!(
+            "[orx] Run `{}` ended with **Outcome unavailable**. Its final outcome could not be \
+             collected. Inspect any partial logs using `orx logs {}`; do not assume success or failure.",
+            run.id, run.id
+        ));
+    }
     matches!(run.status.as_str(), "done" | "failed").then(|| {
         format!(
             "[orx] Run `{}` finished with status **{}**. You can compare this result with other \
@@ -8272,17 +8490,6 @@ async fn process_run_monitoring_alerts(
 }
 
 // --- spawned agents -------------------------------------------------------------
-
-/// How much of a helper's closing reply, and of the brief echoed back with it,
-/// rides into the parent's context. Both are agent-authored and unbounded; the
-/// user can open the helper's session for the rest.
-/// Side chats last only as long as the app run that opened them.
-pub async fn delete_side_chats(chat: &Arc<ChatHost>) -> Result<()> {
-    for session_id in Store::open()?.side_chat_ids()? {
-        chat.delete_session(&session_id).await?;
-    }
-    Ok(())
-}
 
 /// Resume explicitly subscribed agent sessions after a run finishes. Busy and
 /// draining sessions retain their durable wake-up until they become idle.
@@ -8948,6 +9155,7 @@ mod cap_tests {
                 autonomy: None,
                 active_leaf_id: None,
                 side_parent_session_id: None,
+                side_parent_leaf_id: None,
                 created_at: 1,
                 updated_at: 1,
             })
@@ -9056,6 +9264,7 @@ mod cap_tests {
             autonomy: None,
             active_leaf_id: None,
             side_parent_session_id: None,
+            side_parent_leaf_id: None,
             created_at: 1,
             updated_at: 1,
         };
@@ -9113,6 +9322,7 @@ mod cap_tests {
             autonomy: None,
             active_leaf_id: None,
             side_parent_session_id: None,
+            side_parent_leaf_id: None,
             created_at: 1,
             updated_at: 1,
         };
@@ -9702,6 +9912,73 @@ mod bridge_tests {
         assert!(parts[0].children[0].prompt.as_ref().unwrap().resolved);
     }
 
+    #[test]
+    fn interrupted_prompt_cleanup_preserves_answers_and_later_plan_approval() {
+        let mut parts = vec![
+            WirePart::prompt(
+                "permission",
+                WirePrompt {
+                    kind: "permission".into(),
+                    native_id: Some("request-1".into()),
+                    ..Default::default()
+                },
+            ),
+            WirePart::prompt(
+                "plan",
+                WirePrompt {
+                    kind: "plan".into(),
+                    native_id: Some("request-2".into()),
+                    ..Default::default()
+                },
+            ),
+            WirePart::prompt(
+                "answered",
+                WirePrompt {
+                    kind: "question".into(),
+                    native_id: Some("request-3".into()),
+                    resolved: true,
+                    approved: Some(true),
+                    answers: vec!["Blue".into()],
+                    ..Default::default()
+                },
+            ),
+            WirePart::prompt(
+                "async-question",
+                WirePrompt {
+                    kind: "question".into(),
+                    ..Default::default()
+                },
+            ),
+        ];
+        assert!(resolve_stale_prompts_in_parts(&mut parts, true));
+        let permission = parts[0].prompt.as_ref().unwrap();
+        assert!(permission.resolved);
+        assert_eq!(permission.approved, None);
+        assert!(permission.answers.is_empty());
+        assert!(permission.note.is_none());
+        let answered = parts[2].prompt.as_ref().unwrap();
+        assert_eq!(answered.answers, ["Blue"]);
+        assert_eq!(answered.approved, Some(true));
+        assert!(!parts[3].prompt.as_ref().unwrap().resolved);
+        let plan = parts[1].prompt.as_mut().unwrap();
+        assert!(plan.resolved);
+        assert_eq!(plan.approved, None);
+        stamp_resolved(
+            plan,
+            Some(&PromptAnswer {
+                session_id: "session".into(),
+                prompt_id: "plan".into(),
+                approve: true,
+                resume_mode: None,
+                answers: Vec::new(),
+                note: Some("Keep the tests".into()),
+                annotations: Vec::new(),
+            }),
+        );
+        assert_eq!(plan.approved, Some(true));
+        assert_eq!(plan.note.as_deref(), Some("Keep the tests"));
+    }
+
     /// The decision wire shapes are Claude Code's permission-prompt-tool
     /// contract verbatim — the bridge stringifies them unchanged, so a drift
     /// here breaks every approval.
@@ -9887,9 +10164,108 @@ mod bridge_tests {
             autonomy: None,
             active_leaf_id: None,
             side_parent_session_id: None,
+            side_parent_leaf_id: None,
             created_at: 1,
             updated_at: 1,
         }
+    }
+
+    #[tokio::test]
+    async fn opencode_fallback_compaction_requires_a_model() {
+        let host = test_host();
+        let mut session = bare_session();
+        session.harness = "opencode".into();
+        let harness = crate::local::harness::chat_harness("opencode").unwrap();
+        for model in [None, Some("  ".into())] {
+            session.model = model;
+            let error = host
+                .compaction_summary(&session, harness.as_ref(), "history")
+                .await
+                .unwrap_err();
+            assert!(error.to_string().contains("Select an OpenCode model"));
+        }
+    }
+
+    #[test]
+    fn missing_opencode_compaction_model_leaves_history_unchanged() {
+        const CHILD: &str = "ORX_TEST_MISSING_COMPACTION_MODEL";
+        if std::env::var_os(CHILD).is_some() {
+            tokio::runtime::Runtime::new().unwrap().block_on(async {
+                let host = Arc::new(test_host());
+                let store = Store::open().unwrap();
+                for (index, (model, native_id)) in [
+                    (None, None),
+                    (Some("  ".to_string()), None),
+                    (None, Some("native".to_string())),
+                    (Some("  ".to_string()), Some("native".to_string())),
+                ]
+                .into_iter()
+                .enumerate()
+                {
+                    let mut session = bare_session();
+                    session.id = format!("missing-model-{index}");
+                    session.harness = "opencode".into();
+                    session.model = model;
+                    session.native_session_id = native_id;
+                    session.archived = true;
+                    session.bootstrap_context = Some("earlier context".into());
+                    session.context_usage_json = Some(r#"{"usedTokens":9000}"#.into());
+                    store.create_chat_session(&session).unwrap();
+                    store
+                        .upsert_chat_message_on_branch(&StoredChatMessage {
+                            id: format!("message-{index}"),
+                            session_id: session.id.clone(),
+                            role: "user".into(),
+                            parts_json: serde_json::to_string(&vec![WirePart::text(
+                                "text",
+                                "History to preserve",
+                            )])
+                            .unwrap(),
+                            created_at: 1,
+                            completed_at: Some(1),
+                            parent_id: None,
+                            base_native_session_id: None,
+                            result_native_session_id: None,
+                        })
+                        .unwrap();
+                    store
+                        .set_chat_session_context_usage(
+                            &session.id,
+                            session.context_usage_json.as_deref().unwrap(),
+                        )
+                        .unwrap();
+                    let before = store.list_chat_messages(&session.id).unwrap();
+                    let error = host.compact_session(&session.id).await.unwrap_err();
+                    assert!(
+                        error.to_string().contains("Select an OpenCode model"),
+                        "{error}"
+                    );
+                    let after = store.list_chat_messages(&session.id).unwrap();
+                    assert_eq!(after.len(), before.len());
+                    assert_eq!(after[0].id, before[0].id);
+                    assert_eq!(after[0].parts_json, before[0].parts_json);
+                    let saved = store.get_chat_session(&session.id).unwrap().unwrap();
+                    assert_eq!(saved.native_session_id, session.native_session_id);
+                    assert_eq!(saved.bootstrap_context, session.bootstrap_context);
+                    assert_eq!(saved.context_usage_json, session.context_usage_json);
+                    assert!(saved.archived);
+                }
+            });
+            return;
+        }
+        let fixture =
+            crate::local::git::TemporaryDirectory::new("orx-missing-compaction-model").unwrap();
+        let output = std::process::Command::new(std::env::current_exe().unwrap())
+            .args(["--exact", "local::chat::bridge_tests::missing_opencode_compaction_model_leaves_history_unchanged", "--nocapture"])
+            .env(CHILD,"1")
+            .env("ORX_DATA_DIR",fixture.path())
+            .output().unwrap();
+        assert!(
+            output.status.success(),
+            "{}\n{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
     }
 
     #[test]
@@ -10043,6 +10419,7 @@ mod run_wakeup_tests {
                 autonomy: None,
                 active_leaf_id: None,
                 side_parent_session_id: None,
+                side_parent_leaf_id: None,
                 created_at: 1,
                 updated_at: 1,
             })
@@ -10091,6 +10468,10 @@ with other project runs using `orx runs p1` and inspect the file located by `orx
             )
         );
         assert!(run_wakeup_text(&run("cancelled")).is_none());
+        assert_eq!(
+            run_wakeup_text(&run("lost")).as_deref(),
+            Some("[orx] Run `run_x` ended with **Outcome unavailable**. Its final outcome could not be collected. Inspect any partial logs using `orx logs run_x`; do not assume success or failure.")
+        );
     }
 
     #[test]
@@ -10447,6 +10828,7 @@ mod transcript_tree_tests {
             autonomy: None,
             active_leaf_id: Some("a3".into()),
             side_parent_session_id: None,
+            side_parent_leaf_id: None,
             created_at: 1,
             updated_at: 1,
         }
@@ -10462,7 +10844,10 @@ mod transcript_tree_tests {
             said("a3", "assistant", Some("u2"), "loss is falling"),
         ];
         let side = side_chat_session(&parent_session("codex"), &messages);
-        let context = side.bootstrap_context.unwrap();
+        assert_eq!(side.bootstrap_context, None);
+        assert_eq!(side.side_parent_leaf_id.as_deref(), Some("a3"));
+        let context =
+            side_chat_context(active_path(&messages, side.side_parent_leaf_id.as_deref())).unwrap();
         assert!(context.contains("kept branch") && context.contains("loss is falling"));
         assert!(!context.contains("abandoned retry"));
         assert_eq!(side.side_parent_session_id.as_deref(), Some("chat_parent"));
@@ -10484,6 +10869,99 @@ mod transcript_tree_tests {
     fn a_side_chat_of_an_empty_chat_has_no_seed_context() {
         let side = side_chat_session(&parent_session("claude-code"), &[]);
         assert_eq!(side.bootstrap_context, None);
+    }
+
+    #[test]
+    fn side_context_references_survive_restart_and_parent_branch_changes() {
+        let dir = std::env::temp_dir().join(format!("orx-side-context-{}", uuid::Uuid::new_v4()));
+        let store = Store::open_at(dir.clone()).unwrap();
+        let parent = parent_session("codex");
+        store.create_chat_session(&parent).unwrap();
+        let mut messages = vec![
+            said("u1", "user", None, "train the model"),
+            said("a1", "assistant", Some("u1"), "kept branch"),
+            said("a2", "assistant", Some("u1"), "abandoned retry"),
+            said("u2", "user", Some("a1"), "how is it going"),
+            said("a3", "assistant", Some("u2"), "loss is falling"),
+        ];
+        for message in &mut messages {
+            message.session_id = parent.id.clone();
+            store.upsert_chat_message(message).unwrap();
+        }
+        let side = side_chat_session(&parent, &messages);
+        store.create_chat_session(&side).unwrap();
+        let expected = side_chat_context(active_path(&messages, parent.active_leaf_id.as_deref()));
+        assert_eq!(
+            effective_bootstrap_context(&store, &side).unwrap(),
+            expected
+        );
+
+        store
+            .set_chat_session_active_leaf(&parent.id, Some("a2"))
+            .unwrap();
+        let mut later = said("later", "user", Some("a3"), "do not inherit this");
+        later.session_id = parent.id.clone();
+        store.upsert_chat_message(&later).unwrap();
+        drop(store);
+        let store = Store::open_at(dir.clone()).unwrap();
+        let mut side = store.get_chat_session(&side.id).unwrap().unwrap();
+        assert_eq!(side.side_parent_leaf_id.as_deref(), Some("a3"));
+        assert_eq!(
+            effective_bootstrap_context(&store, &side).unwrap(),
+            expected
+        );
+
+        // Parent content changes are accepted, but the saved branch boundary stays fixed.
+        messages[4].parts_json = said("a3", "assistant", None, "updated result").parts_json;
+        store.upsert_chat_message(&messages[4]).unwrap();
+        assert!(effective_bootstrap_context(&store, &side)
+            .unwrap()
+            .unwrap()
+            .contains("updated result"));
+        side.bootstrap_context = Some("compaction or legacy snapshot".into());
+        assert_eq!(
+            effective_bootstrap_context(&store, &side)
+                .unwrap()
+                .as_deref(),
+            Some("compaction or legacy snapshot")
+        );
+        side.bootstrap_context = None;
+        side.side_parent_leaf_id = Some("missing".into());
+        assert!(effective_bootstrap_context(&store, &side).is_err());
+        drop(store);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn an_empty_side_context_stays_empty_after_parent_messages_arrive() {
+        let dir =
+            std::env::temp_dir().join(format!("orx-empty-side-context-{}", uuid::Uuid::new_v4()));
+        let store = Store::open_at(dir.clone()).unwrap();
+        let mut parent = parent_session("codex");
+        parent.active_leaf_id = None;
+        store.create_chat_session(&parent).unwrap();
+        let side = side_chat_session(&parent, &[]);
+        store.create_chat_session(&side).unwrap();
+        let mut later = said("later", "user", None, "new parent context");
+        later.session_id = parent.id.clone();
+        store.upsert_chat_message(&later).unwrap();
+        assert_eq!(effective_bootstrap_context(&store, &side).unwrap(), None);
+        drop(store);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn side_context_keeps_legacy_fallback_and_utf8_snapshot_limit() {
+        let mut parent = parent_session("codex");
+        parent.active_leaf_id = None;
+        let messages = vec![said("u1", "user", None, &"界".repeat(20_000))];
+        let side = side_chat_session(&parent, &messages);
+        assert_eq!(side.side_parent_leaf_id, None);
+        let expected = crate::local::harness::transcript_snapshot(messages.iter());
+        assert!(expected.len() <= 32 * 1024);
+        assert!(expected.ends_with('界'));
+        assert_eq!(side.bootstrap_context, side_chat_context(messages.iter()));
+        assert!(side.bootstrap_context.unwrap().contains(&expected));
     }
 
     #[test]
@@ -10583,6 +11061,7 @@ mod steering_tests {
                 autonomy: None,
                 active_leaf_id: None,
                 side_parent_session_id: None,
+                side_parent_leaf_id: None,
                 created_at: 1,
                 updated_at: 1,
             })

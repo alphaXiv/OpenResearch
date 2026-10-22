@@ -89,7 +89,7 @@ export interface Experiment {
   archived: boolean;
 }
 
-export type RunStatus = "starting" | "running" | "done" | "failed" | "cancelled";
+export type RunStatus = "starting" | "running" | "done" | "failed" | "cancelled" | "lost";
 export type RunDisplayStatus = RunStatus | "cancelling";
 
 export interface Run {
@@ -290,6 +290,7 @@ export interface NewProject {
   githubSyncEnabled?: boolean;
   /** UI locale for the starter prompts the server warms up on creation. */
   locale?: string;
+  starterAgent?: Pick<AgentSelection, "harness" | "model">;
 }
 
 export interface CreateProjectResult {
@@ -354,8 +355,8 @@ export interface ProjectStarterPrompts {
   /** Empty when the project already has experiments or is blank; null when
    *  the harness could not answer. */
   prompts: StarterPrompt[] | null;
-  /** The project has nothing to read yet, so the UI offers its pre-written
-   *  prompts instead of model-generated ones. */
+  /** Use pre-written prompts when there is no project brief or no selected
+   *  OpenCode model for generation. */
   blank: boolean;
 }
 
@@ -366,6 +367,7 @@ export const prewarmStarterPrompts = (body: {
   paperId?: string;
   path?: string;
   locale: string;
+  starterAgent?: Pick<AgentSelection, "harness" | "model">;
 }) => post<{ ok: boolean }>("/api/projects/starter-prompts/prewarm", body);
 
 /** Slow on a cache miss (one headless model call over a brief of the project). */
@@ -381,13 +383,12 @@ export const getProjectStarterPrompts = (
     signal,
   );
 
-export const deleteProject = (projectId: string) =>
-  writeResponse(`/api/projects/${projectId}`, { method: "DELETE" }).then(async (r) => {
-    if (!r.ok) {
-      const body = await r.json().catch(() => null);
-      throw new Error(body?.error ?? `delete failed (${r.status})`);
-    }
+export const deleteProject = (projectId: string, deleteArtifacts = false) =>
+  writeResponse(`/api/projects/${projectId}?deleteArtifacts=${deleteArtifacts}`, { method: "DELETE" }).then(async (r) => {
+    const body = await r.json().catch(() => null);
+    if (!r.ok) throw new Error(body?.error ?? `delete failed (${r.status})`);
     removeProject(projectId);
+    return typeof body?.artifactsError === "string" ? body.artifactsError : undefined;
   });
 
 export const listExperiments = (projectId: string, signal?: AbortSignal) =>
@@ -1051,6 +1052,9 @@ export interface RemoteSessionInfo {
   dashboardProtocol: number | null;
   gatewayUrl: string;
   error: string | null;
+  /** Server-derived repair command for a permission rejection, shown inline so
+   * the user can copy it or run it in the terminal. */
+  repairCommand: string | null;
   installPaths: RemoteInstallPaths | null;
   uiPreferences: { theme: string | null; locale: string | null };
   canStartNewHost: boolean;
@@ -1555,7 +1559,7 @@ export const reportLocale = (locale: string, signal?: AbortSignal) =>
     body: JSON.stringify({ locale }),
   }).then((r) => json<{ locale: string }>(r));
 
-export type HarnessId = "claude-code" | "codex" | "opencode" | "cursor" | "antigravity";
+export type HarnessId = "claude-code" | "codex" | "opencode" | "cursor" | "antigravity" | `acp:${string}`;
 
 export interface HarnessModel {
   id: string;
@@ -1586,6 +1590,7 @@ export interface HarnessModel {
 /** Display label for a harness model: the catalog's own name when it has one,
  * else prettified from the id. */
 export function harnessModelLabel(model: HarnessModel): string {
+  if (model.id === "default" && !model.displayName) return m.model_picker_default_model();
   if (!model.id.startsWith("orx-local-")) return model.displayName ?? modelLabel(model.id);
   const provider = model.displayName?.split(" · ").slice(1).join(" · ").replace(/ \(local\)$/, "");
   const endpoint = provider === "OpenAI-compatible server" || provider === "Custom endpoint" || provider === "Custom Endpoint"
@@ -1733,6 +1738,11 @@ export interface Harness {
   plan?: string;
   agentReady: boolean;
   agentNote?: string;
+  setupUrl?: string;
+  authEnvKey?: string;
+  needsConnectionAdapter?: boolean;
+  adapterMissing?: boolean;
+  logo?: string;
   /** Setup is blocked by something no install/update/login command repairs —
    * an environment credential overriding the saved login, a database the CLI
    * will not open. `agentNote` carries the repair; offer no setup button. */
@@ -1770,6 +1780,23 @@ export const getHarnesses = (refresh = false, retryRejected = false, signal?: Ab
   return get<{ harnesses: Harness[] }>(`/api/harnesses${query}`, signal).then((r) => r.harnesses);
 };
 
+export interface AcpDefinition {
+  id: `acp:${string}`;
+  name: string;
+  executable: string;
+  arguments: string[];
+}
+
+export const listAcpHarnesses = () => get<AcpDefinition[]>("/api/harnesses/acp");
+export interface AcpPreset extends AcpDefinition { setupUrl: string; needsConnectionAdapter: boolean }
+export const listAcpPresets = () => get<AcpPreset[]>("/api/harnesses/acp/presets");
+export const saveAcpHarness = (definition: Omit<AcpDefinition, "id">, id?: string) => id
+  ? put<AcpDefinition>(`/api/harnesses/acp/${encodeURIComponent(id)}`, definition)
+  : post<AcpDefinition>("/api/harnesses/acp", definition);
+export const removeAcpHarness = (id: string) => writeResponse(`/api/harnesses/acp/${encodeURIComponent(id)}`, { method: "DELETE" }).then((response) => json<{ ok: boolean }>(response));
+export const testAcpHarness = (definition: Omit<AcpDefinition, "id">) => post<{ status: string; agentInfo?: { version?: string } }>("/api/harnesses/acp/test", definition);
+export const setChatConfiguration = (sessionId: string, optionId: string, value: string) => post<ChatSession>(`/api/chat/sessions/${sessionId}/configuration`, { optionId, value });
+
 /** Slash-skill offered in the composer's `/` dropdown; expanded server-side. */
 export interface SkillInfo {
   name: string;
@@ -1782,7 +1809,7 @@ export interface SkillInfo {
 
 export const getSkills = (signal?: AbortSignal, harness?: string, projectId?: string) => {
   const query = new URLSearchParams({ ...(harness ? { harness } : {}), ...(projectId ? { project: projectId } : {}) });
-  return get<{ skills: SkillInfo[]; importing: boolean }>(`/api/skills${query.size ? `?${query}` : ""}`, signal);
+  return get<{ skills: SkillInfo[] }>(`/api/skills${query.size ? `?${query}` : ""}`, signal);
 };
 
 export const getSkillContent = (name: string, projectId?: string, signal?: AbortSignal, harness?: string | null) =>
@@ -1828,7 +1855,7 @@ export interface UserSkill {
 }
 
 export const listUserSkills = (signal?: AbortSignal) =>
-  get<{ skills: UserSkill[]; importing: boolean }>("/api/user-skills", signal);
+  get<{ skills: UserSkill[] }>("/api/user-skills", signal);
 
 /** Upload a SKILL.md file or a .zip of a skill folder. `contentBase64` is the
  * raw file bytes; `filename`'s extension selects single-file vs archive. */
@@ -1887,6 +1914,7 @@ export interface ChatQuestionOption {
 
 /** An interactive request the user acts on before the harness continues. */
 export interface ChatPrompt {
+  nativeChoices?: { id: string; label: string; kind: string }[];
   kind: "plan" | "permission" | "question";
   resolved: boolean;
   plan?: string;
@@ -1948,6 +1976,8 @@ export interface ChatSession {
   id: string;
   projectId: string;
   harness: HarnessId;
+  harnessName?: string | null;
+  nativeConfiguration?: unknown;
   title: string | null;
   /** Who wrote `title`: `"fallback"` (first-line placeholder), `"generated"`
    * (harness auto-title), `"user"` (explicitly chosen — a rename, or an agent's
@@ -1965,7 +1995,7 @@ export interface ChatSession {
   /** Hidden from the default Recents list, but fully intact and resumable. */
   archived: boolean;
   /** Chat this side chat branched from. Side chats share its worktree and
-   * stay out of history; closing the tab deletes one. */
+   * stay out of top-level history; deleting the parent deletes its side chats. */
   sideParentSessionId?: string | null;
   createdAt: number;
   updatedAt: number;
@@ -2058,7 +2088,7 @@ export const setChatSessionPlanMode = (sessionId: string, planMode: boolean) =>
     (r) => r.session,
   );
 
-/** Branch a temporary side chat off a snapshot of `sessionId`'s transcript. */
+/** Branch a persistent side chat off a snapshot of `sessionId`'s transcript. */
 export const openSideChat = (sessionId: string) =>
   post<{ session: ChatSession }>(`/api/chat/sessions/${sessionId}/side`, {}).then(
     (r) => r.session,
@@ -2294,3 +2324,15 @@ export const discoverLocalModels = (request: { baseUrl: string; apiKey: string }
 export const connectLocalModel = (request: { name: string; baseUrl: string; apiKey: string; model: string; contextWindow: number }) => post<{ model: string }>("/api/local-models", request);
 export const checkLocalModel = (id: string) => post<{ models: string[] }>(`/api/local-models/${encodeURIComponent(id)}/check`, {});
 export const removeLocalModel = (id: string) => writeResponse(`/api/local-models/${encodeURIComponent(id)}`, { method: "DELETE" }).then((r) => json<{ ok: boolean }>(r));
+
+export interface ChatActiveRun {
+  sessionId: string;
+  run: Run;
+  experimentName: string | null;
+}
+
+export const listChatActiveRuns = (signal?: AbortSignal) =>
+  get<ChatActiveRun[]>("/api/chat/active-runs", signal);
+
+export const getSubagentTranscript = (sessionId: string, partId: string, signal?: AbortSignal) =>
+  get<ChatPart | null>(`/api/chat/sessions/${sessionId}/subagent?partId=${encodeURIComponent(partId)}`, signal);

@@ -2,8 +2,31 @@
 // rust-embedded and CSP-locked.
 
 import type { HarnessId } from "../api";
+import { Plug } from "lucide-react";
+import deepseek from "../assets/harnesses/deepseek.png";
+import kimi from "../assets/harnesses/kimi.svg";
+import minimax from "../assets/harnesses/minimax-code.svg";
+import zcode from "../assets/harnesses/zcode.png";
+import pi from "../assets/harnesses/pi-acp.svg";
+import devin from "../assets/harnesses/devin.svg";
+import grok from "../assets/harnesses/grok-build.svg";
 
-export function HarnessLogo({ harness, size = 16 }: { harness: HarnessId; size?: number }) {
+const ACP_LOGOS: Record<string, string> = { dsh: deepseek, kimi, mcode: minimax, "zcode-acp-server": zcode, "pi-acp": pi, devin, grok };
+const ACP_PRESET_LOGOS: Record<string, string> = {
+  "acp:dee4a440-fd64-4217-a4a7-1d4c148c0dd1": deepseek,
+  "acp:a8b48911-e95c-42cb-bc35-bab3aa83e5e2": kimi,
+  "acp:1dba9897-707b-4cd8-b595-c8c26115f563": minimax,
+  "acp:2f1639e0-3f0f-4594-bb5b-a4078c36d5a4": zcode,
+  "acp:467b1900-c3c3-47c1-8b87-09389e1c44b5": pi,
+  "acp:565e351e-62c7-488f-a58a-914d30cc5776": devin,
+  "acp:ac7f713b-b520-40d2-9b56-75deca1574c7": grok,
+};
+
+export function HarnessLogo({ harness, logo, size = 16 }: { harness: HarnessId; logo?: string; size?: number }) {
+  const image = (logo && ACP_LOGOS[logo]) || ACP_PRESET_LOGOS[harness];
+  if (image === deepseek || image === zcode) return <img src={image} width={size} height={size} className="block shrink-0 object-contain" alt="" aria-hidden="true" />;
+  if (image) return <span className="block shrink-0 bg-current" style={{ width: size, height: size, maskImage: `url(${JSON.stringify(image)})`, maskSize: "contain", maskPosition: "center", maskRepeat: "no-repeat" }} aria-hidden="true" />;
+  if (harness.startsWith("acp:")) return <Plug size={size} className="block shrink-0" aria-hidden="true" />;
   const cls = "block shrink-0";
   if (harness === "claude-code") {
     return (

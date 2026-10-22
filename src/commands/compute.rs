@@ -609,7 +609,7 @@ async fn connect(args: &CheckArgs, persist: Option<u64>) -> Result<()> {
             }
             .ok_or_else(|| anyhow!("Pass --host or configure a default host."))?;
             let target = crate::jobs::ssh::SshTarget::alias(&host);
-            let connection = crate::jobs::ssh::interactive_args(&target, persist).await?;
+            let connection = crate::jobs::ssh::interactive_args(&target, persist, None).await?;
             interactive_command("ssh", &connection.args).await?;
             if let Some(warning) = crate::jobs::ssh::setup_connection_sharing(&target).await {
                 eprintln!("orx: warning: {warning}");

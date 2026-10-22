@@ -97,6 +97,7 @@ export function PlanStrip({
         <>
           <textarea
             dir="auto"
+            {...{ writingsuggestions: "false" }}
             ref={textareaRef}
             className="plan-strip-revise-input w-full resize-none border border-border rounded-md py-[9px] px-[11px] text-sm font-[inherit] bg-background text-text [&:focus]:border-accent-blue"
             placeholder={m.plan_strip_what_should_change_optional()}

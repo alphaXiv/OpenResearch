@@ -24,3 +24,18 @@ export function Input({ variant = "default", className, ...props }: InputProps) 
     />
   );
 }
+
+export function Textarea({ variant = "default", className, ...props }: ComponentProps<"textarea"> & { variant?: InputVariant }) {
+  return (
+    <textarea
+      className={cn(
+        "w-full font-sans font-normal text-text outline-none placeholder:text-muted disabled:cursor-default disabled:opacity-45",
+        variant === "inline"
+          ? "min-h-8 max-h-32 field-sizing-content resize-none border-0 bg-transparent py-1 text-base focus-visible:ring-1 focus-visible:ring-border rounded-sm"
+          : "min-h-16 resize-y rounded-md border border-border bg-background px-2.5 py-1.5 text-sm focus:border-text",
+        className,
+      )}
+      {...props}
+    />
+  );
+}
