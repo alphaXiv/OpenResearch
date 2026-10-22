@@ -4655,7 +4655,7 @@ export function ChatPanel({
 
   // Only reachable while the menu is open, which needs a live slash context.
   function pickSkill(skill: SkillInfo) {
-    if (!slashContext) return;
+    if (!slashContext || skill.disabled) return;
     if (
       skill.source === "command" && isComposerCommand(skill.name)
     ) {
@@ -4816,8 +4816,8 @@ export function ChatPanel({
     return harnessSetupPath(activeHarness, setup, command);
   };
   const commands = useMemo(
-    () => commandsForHarness(skills, planActivation),
-    [skills, planActivation],
+    () => commandsForHarness(skills, planActivation, activeHarness?.supportsCompaction),
+    [skills, planActivation, activeHarness?.supportsCompaction],
   );
   // `!` at the start of the draft is a shell command, not a message (Claude
   // Code's bash mode); the slash menu stays shut over paths like `!ls /tmp`.
@@ -5197,6 +5197,10 @@ export function ChatPanel({
       showAlert(m.chat_nothing_to_compact(), "info");
       return;
     }
+    if (!activeHarness?.supportsCompaction) {
+      setSettingsError(m.chat_compact_unsupported());
+      return;
+    }
     if (busy) {
       setSettingsError(m.chat_compact_busy());
       return;
@@ -5206,10 +5210,9 @@ export function ChatPanel({
     if (sessionFilter === "archived") setSessionFilter("active");
     const sourceScope = composerScopeRef.current;
     try {
-      // The row lands over SSE too; upserting the response paints it without
-      // waiting for the broadcast, as the `!` shell path does.
+      // SSE may deliver the final result before this initial progress response.
       const { message } = await compactChatSession(sessionId);
-      dispatch({ type: "upsertMessage", sessionId, message });
+      dispatch({ type: "upsertMessage", sessionId, message, onlyIfMissing: true });
     } catch (err) {
       if (composerScopeRef.current.activeId !== sourceScope.activeId) return;
       setSettingsError(m.chat_compact_failed({ error: ltr(err instanceof Error ? err.message : String(err)) }));

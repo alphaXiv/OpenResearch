@@ -1762,6 +1762,7 @@ export interface Harness {
   /** A running turn takes further input, so the composer steers instead of
    * queueing. Narrowed per installation (codex's legacy exec path can't). */
   supportsSteering: boolean;
+  supportsCompaction: boolean;
   /** A snapshot answer whose model catalog is still filling in the
    * background — `models` stays empty until `harness.catalog`
    * arrives and a plain re-read swaps in the real list. */
@@ -1812,6 +1813,7 @@ export const setChatConfiguration = (sessionId: string, optionId: string, value:
 /** Slash-skill offered in the composer's `/` dropdown; expanded server-side. */
 export interface SkillInfo {
   name: string;
+  disabled?: boolean;
   plugin?: string | null;
   harness?: string | null;
   description: string;

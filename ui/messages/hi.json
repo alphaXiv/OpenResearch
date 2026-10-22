@@ -1094,6 +1094,7 @@
   "resume_command_description": "पिछली चैट फिर से खोलें",
   "model_command_description": "इस चैट के लिए मॉडल चुनें",
   "compact_command_description": "इस चैट का कॉन्टेक्स्ट छोटा करें",
+  "chat_compact_unsupported": "यह एजेंट कॉन्टेक्स्ट संक्षिप्त करने का समर्थन नहीं करता है।",
   "chat_nothing_to_compact": "छोटा करने के लिए अभी कुछ नहीं है",
   "chat_compact_busy": "छोटा करने से पहले टर्न पूरा होने का इंतज़ार करें।",
   "chat_compact_failed": "छोटा करना विफल: {error}",

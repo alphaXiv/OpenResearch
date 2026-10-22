@@ -31,11 +31,13 @@ const COMMAND_DESCRIPTIONS: Record<ComposerCommandName, () => string> = {
   side: () => m.side_command_description(),
 };
 
-function composerCommand(name: ComposerCommandName): SkillInfo {
+function composerCommand(name: ComposerCommandName, supportsCompaction: boolean): SkillInfo {
+  const disabled = name === "compact" && !supportsCompaction;
   return {
     name,
+    disabled,
     get description() {
-      return COMMAND_DESCRIPTIONS[name]();
+      return disabled ? m.chat_compact_unsupported() : COMMAND_DESCRIPTIONS[name]();
     },
     source: "command",
   };
@@ -167,10 +169,11 @@ function availableCommands(
 export function commandsForHarness(
   skills: SkillInfo[],
   planActivation: "permission" | "command" | null | undefined,
+  supportsCompaction = false,
 ): SkillInfo[] {
   // Keep dashboard commands ahead of skills with the same name or alias.
   const availableSkills = skills.filter((skill) => !resolveComposerCommand(skill.name));
-  for (const name of availableCommands(planActivation)) availableSkills.push(composerCommand(name));
+  for (const name of availableCommands(planActivation)) availableSkills.push(composerCommand(name, supportsCompaction));
   return availableSkills.sort((a, b) => {
     const group = Number(b.source === "command") - Number(a.source === "command");
     return group || commandLabel(a).localeCompare(commandLabel(b), undefined, { sensitivity: "base" });

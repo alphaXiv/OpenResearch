@@ -180,3 +180,32 @@ test("ACP Plan configuration failure keeps the draft and prevents sending", asyn
     assert.deepEqual(calls, succeeds ? ["send"] : ["plan failed"]);
   }
 });
+
+test("unsupported compaction shows an explanation without requesting an agent turn", async () => {
+  let compact;
+  function find(node) {
+    if (ts.isFunctionDeclaration(node) && node.name?.text === "compactSession") compact = node;
+    ts.forEachChild(node, find);
+  }
+  find(file);
+  assert.ok(compact);
+  for (const supportsCompaction of [false, true]) {
+    const calls = [];
+    const bindings = {
+      activeId: "saved-chat", activeHarness: { supportsCompaction }, busy: false,
+      m: { chat_compact_unsupported: () => "unsupported" },
+      setSettingsError: (error) => calls.push(error),
+      sessionFilter: "active", composerScopeRef: { current: { activeId: "saved-chat" } },
+      compactChatSession: async (id) => { calls.push(["compact", id]); return { message: { id: "marker" } }; },
+      dispatch: (action) => calls.push(action),
+    };
+    const compiled = ts.transpileModule(compact.getText(file), {
+      compilerOptions: { target: ts.ScriptTarget.ES2022 },
+    }).outputText;
+    await new Function(...Object.keys(bindings), `${compiled}; return compactSession();`)(...Object.values(bindings));
+    assert.deepEqual(calls, supportsCompaction ? [
+      null, ["compact", "saved-chat"],
+      { type: "upsertMessage", sessionId: "saved-chat", message: { id: "marker" }, onlyIfMissing: true },
+    ] : ["unsupported"]);
+  }
+});

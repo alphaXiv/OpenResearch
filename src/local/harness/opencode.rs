@@ -44,7 +44,7 @@ use crate::local::chat::{
 };
 use crate::local::local_models::is_loopback_url;
 use crate::local::native_store::{self, NativeStore};
-use crate::local::opencode::{find_opencode, ResolvedBinary, SummarizeOutcome};
+use crate::local::opencode::{find_opencode, ResolvedBinary};
 
 const OPENCODE_REINSTALL: &str =
     "Reinstall opencode (curl -fsSL https://opencode.ai/install | bash)";
@@ -354,28 +354,24 @@ impl Harness for OpenCode {
         true
     }
 
-    /// opencode compacts through its own summarize endpoint, which needs a live
-    /// server and a native session; without either, the shared fallback runs.
+    fn supports_compaction(&self) -> bool {
+        true
+    }
+
     async fn compact(&self, ctx: &CompactCtx) -> Result<CompactOutcome> {
         let Some(native_id) = ctx.native_session_id.as_deref() else {
             return Ok(CompactOutcome::Fallback);
         };
-        // A live session is still resumable, so a failure to compact it in
-        // place is reported rather than traded for a summary of its transcript.
-        match ctx
-            .host
+        ctx.host
             .opencode
-            .summarize(&ctx.session_id, native_id, ctx.model.as_deref())
-            .await?
-        {
-            SummarizeOutcome::Compacted => Ok(CompactOutcome::Native),
-            SummarizeOutcome::NoServer => Err(anyhow!(
-                "OpenCode is not running for this chat — send a message first, then compact"
-            )),
-            SummarizeOutcome::NoModel | SummarizeOutcome::ModelChanged => {
-                Ok(CompactOutcome::Fallback)
-            }
-        }
+            .compact(
+                &ctx.project,
+                &ctx.session_id,
+                native_id,
+                ctx.model.as_deref(),
+            )
+            .await?;
+        Ok(CompactOutcome::Native)
     }
 
     async fn one_shot(&self, request: OneShot<'_>) -> Result<String> {
