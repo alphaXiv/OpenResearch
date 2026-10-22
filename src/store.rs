@@ -2457,6 +2457,67 @@ impl Store {
         Ok(rows.collect::<std::result::Result<Vec<_>, _>>()?)
     }
 
+    /// Hold through ownership lookup, native purge and local row deletion, across dashboard processes.
+    pub fn lock_native_deletion(&self) -> Result<std::fs::File> {
+        let path = self
+            .conn
+            .path()
+            .ok_or_else(|| anyhow!("Store has no database path"))?;
+        let lock = std::fs::OpenOptions::new()
+            .create(true)
+            .truncate(false)
+            .read(true)
+            .write(true)
+            .open(Path::new(path).with_extension("native-deletion.lock"))?;
+        lock.try_lock().map_err(|error| {
+            anyhow!(
+                "Could not lock native chat deletion; retry when other deletions finish: {error}"
+            )
+        })?;
+        Ok(lock)
+    }
+
+    pub fn opencode_sessions_for_deletion(
+        &self,
+        chat_ids: &[String],
+    ) -> Result<(
+        std::collections::BTreeSet<String>,
+        std::collections::BTreeSet<String>,
+    )> {
+        let mut query = self.conn.prepare(
+            "WITH refs AS (
+                SELECT id AS chat_id, native_session_id AS native_id FROM chat_sessions
+                WHERE harness = 'opencode'
+                UNION
+                SELECT s.id, m.base_native_session_id FROM chat_sessions s
+                JOIN chat_messages m ON m.session_id = s.id WHERE s.harness = 'opencode'
+                UNION
+                SELECT s.id, m.result_native_session_id FROM chat_sessions s
+                JOIN chat_messages m ON m.session_id = s.id WHERE s.harness = 'opencode'
+             )
+             SELECT native_id, MAX(chat_id IN (SELECT value FROM json_each(?1))),
+                 MAX(chat_id NOT IN (SELECT value FROM json_each(?1))) FROM refs
+             WHERE native_id IS NOT NULL GROUP BY native_id",
+        )?;
+        let mut deleting = std::collections::BTreeSet::new();
+        let mut retained = std::collections::BTreeSet::new();
+        for row in query.query_map([serde_json::to_string(chat_ids)?], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, bool>(1)?,
+                row.get::<_, bool>(2)?,
+            ))
+        })? {
+            let (native_id, belongs_to_chat, shared) = row?;
+            if shared {
+                retained.insert(native_id);
+            } else if belongs_to_chat {
+                deleting.insert(native_id);
+            }
+        }
+        Ok((deleting, retained))
+    }
+
     pub fn delete_chat_session(&self, id: &str) -> Result<()> {
         let tx = self.begin_immediate()?;
         let has_children: bool = tx.query_row(
@@ -5183,6 +5244,100 @@ mod tests {
             Some("m2")
         );
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn native_deletion_includes_inactive_branches_and_preserves_shared_sessions() {
+        let dir = crate::local::git::TemporaryDirectory::new("orx-native-delete-refs").unwrap();
+        let store = Store::open_at(dir.path().to_path_buf()).unwrap();
+        for (id, native_id) in [("delete", "current"), ("keep", "shared")] {
+            let mut session = chat_session_fixture(id);
+            session.harness = "opencode".into();
+            session.native_session_id = Some(native_id.into());
+            store.create_chat_session(&session).unwrap();
+        }
+        store
+            .conn
+            .execute_batch(
+                "INSERT INTO chat_messages (id, session_id, role, parts_json, created_at,
+                 base_native_session_id, result_native_session_id)
+             VALUES ('branch', 'delete', 'assistant', '[]', 1, 'old', 'shared'),
+                    ('other-branch', 'keep', 'assistant', '[]', 1, NULL, 'kept-branch');",
+            )
+            .unwrap();
+        let (deleting, retained) = store
+            .opencode_sessions_for_deletion(&["delete".into()])
+            .unwrap();
+        assert_eq!(deleting, ["current".into(), "old".into()].into());
+        assert_eq!(retained, ["kept-branch".into(), "shared".into()].into());
+        let (deleting, retained) = store
+            .opencode_sessions_for_deletion(&["delete".into(), "keep".into()])
+            .unwrap();
+        assert_eq!(
+            deleting,
+            [
+                "current".into(),
+                "old".into(),
+                "kept-branch".into(),
+                "shared".into()
+            ]
+            .into()
+        );
+        assert!(retained.is_empty());
+    }
+
+    #[test]
+    fn native_deletion_lock_serializes_shared_owners_across_processes() {
+        const CHILD_DIR: &str = "ORX_TEST_NATIVE_DELETE_DIR";
+        const CHILD_PHASE: &str = "ORX_TEST_NATIVE_DELETE_PHASE";
+        if let Some(dir) = std::env::var_os(CHILD_DIR) {
+            let store = Store::open_at(dir.into()).unwrap();
+            if std::env::var(CHILD_PHASE).unwrap() == "blocked" {
+                assert!(store.lock_native_deletion().is_err());
+            } else {
+                let _lock = store.lock_native_deletion().unwrap();
+                let (deleting, retained) = store
+                    .opencode_sessions_for_deletion(&["second".into()])
+                    .unwrap();
+                assert_eq!(deleting, ["shared".into()].into());
+                assert!(retained.is_empty());
+                store.delete_chat_session("second").unwrap();
+            }
+            return;
+        }
+        let dir = crate::local::git::TemporaryDirectory::new("orx-native-delete-lock").unwrap();
+        let store = Store::open_at(dir.path().to_path_buf()).unwrap();
+        for id in ["first", "second"] {
+            let mut session = chat_session_fixture(id);
+            session.harness = "opencode".into();
+            session.native_session_id = Some("shared".into());
+            store.create_chat_session(&session).unwrap();
+        }
+        let run_child = |phase| {
+            let output = std::process::Command::new(std::env::current_exe().unwrap())
+                .args([
+                    "--exact",
+                    "store::tests::native_deletion_lock_serializes_shared_owners_across_processes",
+                    "--nocapture",
+                ])
+                .env(CHILD_DIR, dir.path())
+                .env(CHILD_PHASE, phase)
+                .output()
+                .unwrap();
+            assert!(output.status.success(), "{output:?}");
+        };
+        let lock = store.lock_native_deletion().unwrap();
+        let (deleting, retained) = store
+            .opencode_sessions_for_deletion(&["first".into()])
+            .unwrap();
+        assert!(deleting.is_empty());
+        assert_eq!(retained, ["shared".into()].into());
+        run_child("blocked");
+        store.delete_chat_session("first").unwrap();
+        drop(lock);
+        run_child("retry");
+        let _lock = store.lock_native_deletion().unwrap();
+        assert!(store.get_chat_session("second").unwrap().is_none());
     }
 
     fn chat_session_fixture(id: &str) -> StoredChatSession {
