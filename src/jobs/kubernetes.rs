@@ -625,9 +625,15 @@ fn prepare_docs(
             .as_array_mut()
             .map(std::mem::take)
             .unwrap_or_default();
+        // orx finds a run's Trackio data by these, so the manifest cannot override them.
+        let forced = [
+            "ORX_SCRIPT",
+            crate::config::RUN_ID_ENV,
+            crate::local::trackio::PROJECT,
+        ];
         let manifest_env: Vec<Value> = env
             .into_iter()
-            .filter(|e| e["name"] != "ORX_SCRIPT" && e["name"] != crate::config::RUN_ID_ENV)
+            .filter(|e| !forced.iter().any(|name| e["name"] == *name))
             .collect();
         let mut env = vec![json!({ "name": "ORX_SCRIPT", "value": script })];
         // Per-pod, not in the shared `orx-env` Secret a pending pod may read after a later launch;
@@ -1177,11 +1183,12 @@ mod tests {
     }
 
     #[test]
-    fn manifest_values_win_over_run_context_except_the_run_id() {
+    fn manifest_values_win_over_run_context_except_trackio_linkage() {
         let mut j = job("train");
         j["spec"]["template"]["spec"]["containers"][0]["env"] = json!([
             { "name": "TRACKIO_PROJECT", "value": "mine" },
-            { "name": "ORX_RUN_ID", "value": "stale" }
+            { "name": "ORX_RUN_ID", "value": "stale" },
+            { "name": "ORX_EXPERIMENT", "value": "mine-too" }
         ]);
         let pod_env = [
             (crate::config::RUN_ID_ENV.to_string(), "r1".to_string()),
@@ -1199,9 +1206,9 @@ mod tests {
             assert_eq!(values.len(), 1, "{name}");
             values[0]["value"].clone()
         };
-        assert_eq!(value("TRACKIO_PROJECT"), "mine");
+        assert_eq!(value("TRACKIO_PROJECT"), "orx-project");
         assert_eq!(value("ORX_RUN_ID"), "r1");
-        assert_eq!(value("ORX_EXPERIMENT"), "baseline");
+        assert_eq!(value("ORX_EXPERIMENT"), "mine-too");
     }
 
     #[test]

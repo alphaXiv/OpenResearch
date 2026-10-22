@@ -742,11 +742,10 @@ pub async fn run_metrics(
                 .collect(),
         );
     }
-    out.alerts = call(base, bearer, "get_alerts", target.clone())
-        .await
-        .ok()
-        .and_then(|alerts| alerts.as_array().cloned())
-        .unwrap_or_default();
+    match call(base, bearer, "get_alerts", target.clone()).await {
+        Ok(alerts) => out.alerts = alerts.as_array().cloned().unwrap_or_default(),
+        Err(error) => out.errors.push(format!("alerts: {error}")),
+    }
     let names = summary["metrics"].as_array().cloned().unwrap_or_default();
     let wanted = names.iter().filter_map(Value::as_str).filter(|name| {
         filters.is_empty()
@@ -790,8 +789,9 @@ enum LocalState {
     #[default]
     Idle,
     Starting(tokio::sync::watch::Receiver<Started>),
+    /// Boxed: a Windows `Child` dwarfs the other variants.
     Running {
-        child: LocalChild,
+        child: Box<LocalChild>,
         url: String,
     },
     /// Keeps a missing install from respawning on every dashboard poll.
@@ -840,7 +840,10 @@ impl LocalServer {
                             .map(|(_, url)| url.clone())
                             .map_err(String::clone);
                         *server.state.lock().unwrap() = match result {
-                            Ok((child, url)) => LocalState::Running { child, url },
+                            Ok((child, url)) => LocalState::Running {
+                                child: Box::new(child),
+                                url,
+                            },
                             Err(error) => LocalState::Failed {
                                 at: Instant::now(),
                                 error,

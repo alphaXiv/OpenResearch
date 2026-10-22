@@ -1029,9 +1029,18 @@ pub(super) async fn trackio_project_runs(
         .ok_or_else(|| not_found("project"))?;
     let project = crate::local::trackio::project_for(&project.slug);
     // A gateway error, not a 200 with no runs, so the dashboard keeps an open embed through a blip.
-    let runs = crate::local::trackio::project_runs(&state.trackio, project)
+    let mut runs = crate::local::trackio::project_runs(&state.trackio, project)
         .await
         .map_err(|error| ApiError(StatusCode::BAD_GATEWAY, error))?;
+    // An SSH workspace's browser cannot reach this host's loopback dashboard, so offer no embed.
+    if state.remote_instance_id.is_some()
+        && runs
+            .dashboard_url
+            .as_deref()
+            .is_some_and(crate::local::trackio::is_local_only)
+    {
+        runs.dashboard_url = None;
+    }
     Ok(Json(json!(runs)))
 }
 
