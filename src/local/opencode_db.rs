@@ -314,26 +314,7 @@ impl DatabaseLease {
         let migration = major == 2
             && (state != DatabaseState::V2Ready
                 || journal.as_ref().is_some_and(|journal| !journal.completed));
-        let lock = OpenOptions::new()
-            .create(true)
-            .truncate(false)
-            .read(true)
-            .write(true)
-            .open(sidecar(&path, ".orx-lock"))?;
-        let locked = if migration {
-            lock.try_lock()
-        } else {
-            lock.try_lock_shared()
-        };
-        locked.map_err(|error| match error {
-            std::fs::TryLockError::WouldBlock => {
-                anyhow::Error::new(DatabaseBusy { path: path.clone() })
-            }
-            std::fs::TryLockError::Error(error) => anyhow!(
-                "Could not lock OpenCode database {}: {error}",
-                path.display()
-            ),
-        })?;
+        let lock = lock(&path, migration)?;
         let current = inspect(&path)?;
         let journal = read_journal(&path)?;
         if current != state
@@ -513,6 +494,64 @@ impl DatabaseLease {
         }
         Ok(())
     }
+}
+
+fn lock(path: &Path, exclusive: bool) -> Result<File> {
+    let lock = OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .read(true)
+        .write(true)
+        .open(sidecar(path, ".orx-lock"))?;
+    let locked = if exclusive {
+        lock.try_lock()
+    } else {
+        lock.try_lock_shared()
+    };
+    locked.map_err(|error| match error {
+        std::fs::TryLockError::WouldBlock => anyhow::Error::new(DatabaseBusy {
+            path: path.to_path_buf(),
+        }),
+        std::fs::TryLockError::Error(error) => anyhow!(
+            "Could not lock OpenCode database {}: {error}",
+            path.display()
+        ),
+    })?;
+    Ok(lock)
+}
+
+/// Deletes sessions while no upgrade runs, then drops them from the upgrade
+/// journal so a retried upgrade doesn't refuse over a deliberately deleted chat.
+pub fn purge_sessions(
+    path: &Path,
+    deleted: impl Fn(&str) -> bool,
+    purge: impl FnOnce() -> Result<std::collections::HashSet<String>>,
+) -> Result<()> {
+    if !path.exists() {
+        return Ok(());
+    }
+    let path = normalize_path(path)?;
+    let _lock = lock(&path, false)?;
+    let purged = purge()?;
+    let Some(mut journal) = read_journal(&path)? else {
+        return Ok(());
+    };
+    let connection = open_readonly(&path)?;
+    let mut expected = BTreeSet::new();
+    for id in &journal.expected_sessions {
+        // Also catches ids a previous purge removed before its journal write failed.
+        if !(purged.contains(id) || deleted(id))
+            || table_has_session(&connection, "session", id)?
+            || table_has_session(&connection, "session_v2", id)?
+        {
+            expected.insert(id.clone());
+        }
+    }
+    if expected != journal.expected_sessions {
+        journal.expected_sessions = expected;
+        write_journal(&path, &journal)?;
+    }
+    Ok(())
 }
 
 fn cleanup_backup(path: &Path, journal: &mut MigrationJournal) {
@@ -708,6 +747,42 @@ mod tests {
         assert!(error.contains("No OpenResearch migration journal or backup is recorded"));
         assert!(error.contains("start a new OpenResearch chat"));
         assert!(!error.contains("Migration journal not found"));
+    }
+
+    #[test]
+    fn purging_a_session_unblocks_an_unfinished_upgrade() {
+        let fixture = Fixture::new();
+        let path = fixture.path();
+        let connection = Connection::open(&path).unwrap();
+        connection.execute_batch(V1).unwrap();
+        connection
+            .execute_batch("INSERT INTO session VALUES ('gone', '/tmp/project');")
+            .unwrap();
+        let lease = DatabaseLease::acquire(&path, 2).unwrap();
+        lease
+            .prepare_with_sessions(BTreeSet::from(["history".into(), "gone".into()]))
+            .unwrap();
+        let purge = || {
+            connection
+                .execute_batch("DELETE FROM session WHERE id = 'gone';")
+                .unwrap();
+            Ok(std::collections::HashSet::from(["gone".to_string()]))
+        };
+        let busy = purge_sessions(&path, |_| false, purge).unwrap_err();
+        assert!(busy.downcast_ref::<DatabaseBusy>().is_some());
+        drop(lease);
+
+        purge_sessions(&path, |_| false, purge).unwrap();
+        let journal = read_journal(&path).unwrap().unwrap();
+        assert_eq!(
+            journal.expected_sessions,
+            BTreeSet::from(["history".into()])
+        );
+        assert!(!journal.completed);
+        DatabaseLease::acquire(&path, 2)
+            .unwrap()
+            .prepare_with_sessions(BTreeSet::new())
+            .unwrap();
     }
 
     #[test]

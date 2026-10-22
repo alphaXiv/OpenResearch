@@ -387,16 +387,20 @@ pub fn purge_isolated_sessions(doomed: impl Fn(&str) -> bool) -> Result<()> {
     }
 
     if owns(opencode_db) {
-        purge_databases(
-            &[opencode_db(NativeStore::Isolated)],
-            &["session.id", "session_v2.id", "session_id"],
-            &["aggregate_id"],
-            &[
-                ("session", "id", "parent_id"),
-                ("session_v2", "id", "parent_id"),
-            ],
-            &doomed,
-        )?;
+        let db = opencode_db(NativeStore::Isolated);
+        opencode_database::purge_sessions(&db, &doomed, || {
+            purge_databases(
+                std::slice::from_ref(&db),
+                &["session.id", "session_v2.id", "session_id"],
+                &["aggregate_id"],
+                &[
+                    ("session", "id", "parent_id"),
+                    ("session_v2", "id", "parent_id"),
+                ],
+                &doomed,
+            )
+            .map(|(purged, _)| purged)
+        })?;
     }
 
     if owns(cursor_home) {
