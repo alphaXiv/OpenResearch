@@ -44,8 +44,9 @@ The submit-time contract is:
 - Every resource needs `metadata.name`; do not use `generateName` or set a
   foreign namespace. Include `{{ORX_RUN}}` in names to prevent rerun collisions.
 - `orx` injects run labels and the `orx-env` Secret into primary containers. It
-  also supplies defaults for `activeDeadlineSeconds`,
-  `ttlSecondsAfterFinished`, and `backoffLimit: 0` when absent.
+  also supplies defaults for `activeDeadlineSeconds` and `backoffLimit: 0`
+  when absent. Finished Jobs stay until the supervisor records their outcome,
+  then get `ttlSecondsAfterFinished: 86400` unless the manifest sets one.
 - Auxiliary resources may accompany the Job and are deleted on cancellation.
   They must reference the `orx-env` Secret themselves when needed.
 - The run log follows the primary Job's sole pod.

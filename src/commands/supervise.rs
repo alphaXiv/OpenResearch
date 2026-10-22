@@ -413,6 +413,13 @@ async fn run_k8s(
                     }
                 }
             }
+            if matches!(stage, "COMPLETED" | "ERROR") {
+                if let Err(err) =
+                    k8s::expire_finished_job(context.as_deref(), &namespace, &job_name).await
+                {
+                    eprintln!("supervise {run_id}: could not set the Job's TTL: {err}");
+                }
+            }
             eprintln!("supervise {run_id}: finished ({status})");
             return Ok(());
         }

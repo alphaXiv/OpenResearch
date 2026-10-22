@@ -16,8 +16,9 @@
 //!   env var holding the snapshot-and-run script (the run command stays the
 //!   experiment's fixed contract);
 //! - orx injects run labels, the `orx-env` Secret ref, and defaults for
-//!   `activeDeadlineSeconds` / `ttlSecondsAfterFinished` / `backoffLimit`
-//!   when the manifest doesn't set them;
+//!   `activeDeadlineSeconds` / `backoffLimit` when the manifest doesn't set
+//!   them; the supervisor sets a default `ttlSecondsAfterFinished` only after
+//!   it has recorded the outcome, so a Job is never garbage-collected unseen;
 //! - `{{ORX_RUN}}` in the manifest text is replaced with a run-unique,
 //!   DNS-safe id — use it in resource names so re-runs don't collide;
 //! - every applied resource is recorded on the run, and cancel deletes
@@ -472,8 +473,8 @@ fn resource_handle(doc: &Value) -> String {
 ///
 /// Injections: run labels on every doc (and the primary Job's pod template);
 /// `ORX_SCRIPT` and `ORX_RUN_ID` env + `orx-env` envFrom on the primary Job's containers;
-/// `activeDeadlineSeconds` / `ttlSecondsAfterFinished` / `backoffLimit`
-/// defaults on the primary Job when absent.
+/// `activeDeadlineSeconds` / `backoffLimit` defaults on the primary Job when
+/// absent. No default TTL here: see [`expire_finished_job`].
 fn prepare_docs(
     converted: Vec<Value>,
     namespace: &str,
@@ -578,9 +579,6 @@ fn prepare_docs(
     label_map(&mut job["spec"]["template"]["metadata"]["labels"]);
     if job["spec"]["activeDeadlineSeconds"].is_null() {
         job["spec"]["activeDeadlineSeconds"] = json!(timeout_seconds);
-    }
-    if job["spec"]["ttlSecondsAfterFinished"].is_null() {
-        job["spec"]["ttlSecondsAfterFinished"] = json!(86400);
     }
     // A replacement pod would not share the pod-local snapshot staged by kubectl cp.
     job["spec"]["backoffLimit"] = json!(0);
@@ -779,6 +777,43 @@ pub async fn inspect_job(context: Option<&str>, namespace: &str, name: &str) -> 
         stage: "SCHEDULING".to_string(),
         message: waiting_msg,
     })
+}
+
+/// Once the supervisor has recorded a finished Job's outcome, let Kubernetes
+/// collect it after a day unless the manifest chose its own TTL.
+pub async fn expire_finished_job(context: Option<&str>, namespace: &str, name: &str) -> Result<()> {
+    let ttl = kubectl(
+        context,
+        &[
+            "get",
+            "job",
+            name,
+            "-n",
+            namespace,
+            "-o",
+            "jsonpath={.spec.ttlSecondsAfterFinished}",
+        ],
+        None,
+    )
+    .await?;
+    if ttl.trim().is_empty() {
+        kubectl(
+            context,
+            &[
+                "patch",
+                "job",
+                name,
+                "-n",
+                namespace,
+                "--type=merge",
+                "-p",
+                r#"{"spec":{"ttlSecondsAfterFinished":86400}}"#,
+            ],
+            None,
+        )
+        .await?;
+    }
+    Ok(())
 }
 
 /// Cancel/cleanup = delete the run's recorded resources (`kind/name` handles,
@@ -1021,7 +1056,7 @@ mod tests {
         assert_eq!(j["metadata"]["labels"]["or_run"], "r1");
         assert_eq!(j["spec"]["template"]["metadata"]["labels"]["or_run"], "r1");
         assert_eq!(j["spec"]["activeDeadlineSeconds"], 14400);
-        assert_eq!(j["spec"]["ttlSecondsAfterFinished"], 86400);
+        assert!(j["spec"]["ttlSecondsAfterFinished"].is_null());
         assert_eq!(j["spec"]["backoffLimit"], 0);
         let c = &j["spec"]["template"]["spec"]["containers"][0];
         assert_eq!(c["env"][0]["name"], "ORX_SCRIPT");
