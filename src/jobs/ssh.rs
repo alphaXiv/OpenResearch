@@ -273,7 +273,7 @@ async fn user_master(target: &SshTarget) -> Option<PathBuf> {
         .ok()?
         .ok()?;
     let path = configured_control_path(&String::from_utf8_lossy(&output.stdout))?;
-    control_master(target, &path, &[], "check")
+    master_accepts_sessions(target, &path, &[])
         .await
         .ok()?
         .then_some(path)
