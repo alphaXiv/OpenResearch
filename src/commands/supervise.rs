@@ -410,15 +410,17 @@ async fn run_k8s(
                     k8s::expire_finished_job(context.as_deref(), &namespace, &job_name).await
                 {
                     // Without a TTL the finished Job is never collected, so retry
-                    // unless RBAC forbids the patch outright.
-                    if !err.to_string().contains("Forbidden") {
+                    // unless it is already gone or RBAC forbids the patch outright.
+                    let msg = err.to_string();
+                    if msg.contains("Forbidden") {
+                        eprintln!("supervise {run_id}: not allowed to set the Job's TTL: {err}");
+                    } else if !msg.contains("NotFound") {
                         eprintln!(
                             "supervise {run_id}: could not set the Job's TTL (will retry): {err}"
                         );
                         tokio::time::sleep(POLL_INTERVAL).await;
                         continue;
                     }
-                    eprintln!("supervise {run_id}: not allowed to set the Job's TTL: {err}");
                 }
             }
             let _ = done_tx.send(true);
