@@ -16,6 +16,8 @@
   "settings_cpu_cores": "CPU कोर: {count}",
   "settings_gpu_count": "GPU × {count}",
   "$schema": "https://inlang.com/schema/inlang-message-format",
+  "projects_delete_artifacts_kept": "जब तक आप नीचे दिया गया विकल्प नहीं चुनते, आर्टिफ़ैक्ट सुरक्षित रखे जाते हैं। खाली आर्टिफ़ैक्ट फ़ोल्डर अपने-आप हटा दिए जाते हैं।",
+  "projects_delete_artifacts_remove": "इस प्रोजेक्ट की आर्टिफ़ैक्ट फ़ाइलें स्थायी रूप से हटाएँ",
   "app_close_panel": "पैनल बंद करें",
   "app_current_task": "मौजूदा टास्क",
   "app_entire_project": "पूरा प्रोजेक्ट",
@@ -622,6 +624,7 @@
   "activity_waiting_on_agent": "एजेंट का इंतज़ार है",
   "activity_closed_agent": "एक एजेंट बंद किया",
   "activity_subagent_started": "सब-एजेंट शुरू हुआ",
+  "activity_sent_update_to_parent": "मुख्य एजेंट को अपडेट भेजा",
   "activity_agent_reported_back": "एजेंट ने रिपोर्ट भेजी",
   "activity_subagent_interrupted": "सब-एजेंट बाधित हुआ",
   "activity_subagent": "सब-एजेंट",
@@ -843,6 +846,10 @@
   "chat_plan": "प्लान",
   "chat_proposed_plan": "प्रस्तावित प्लान",
   "chat_question": "प्रश्न",
+  "chat_question_your_answer": "आपका उत्तर",
+  "chat_question_skip": "छोड़ें",
+  "chat_question_skipped": "छोड़ दिया गया",
+  "chat_question_custom_response": "या अपना जवाब लिखें",
   "chat_resolved": "सुलझाया गया",
   "chat_plan_ready": "प्लान मोड — आगे बढ़ने के लिए तैयार?",
   "chat_open_subagent_transcript": "सब-एजेंट ट्रांसक्रिप्ट खोलें",
@@ -1418,5 +1425,9 @@
   "acp_sign_in_help": "नीचे दिए गए टर्मिनल में {name} में साइन इन करें।",
   "acp_get_api_key": "DeepSeek API कुंजी प्राप्त करें",
   "acp_sign_in_bigmodel": "BigModel से साइन इन करें",
-  "acp_adapter_required": "ACP अडैप्टर आवश्यक है"
+  "acp_adapter_required": "ACP अडैप्टर आवश्यक है",
+  "chat_experiment_running": "प्रयोग चल रहा है",
+  "chat_experiment_starting": "प्रयोग शुरू हो रहा है",
+  "chat_experiment_cancelling": "प्रयोग रद्द किया जा रहा है",
+  "chat_experiments_running": "{count} प्रयोग चल रहे हैं"
 }

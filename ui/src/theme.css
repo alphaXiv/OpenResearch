@@ -3,6 +3,7 @@
   --color-transparent: transparent;
   --color-current: currentColor;
   --color-white: #fff;
+  --color-black: #000;
   --color-background: var(--base);
   --color-canvas: var(--canvas);
   --color-panel: var(--panel);

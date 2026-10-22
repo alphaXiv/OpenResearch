@@ -16,6 +16,8 @@
   "settings_cpu_cores": "{count} هستهٔ CPU",
   "settings_gpu_count": "{count} پردازندهٔ گرافیکی",
   "$schema": "https://inlang.com/schema/inlang-message-format",
+  "projects_delete_artifacts_kept": "فایل‌های خروجی حفظ می‌شوند مگر اینکه گزینهٔ زیر را انتخاب کنید. پوشه‌های خروجی خالی به‌طور خودکار حذف می‌شوند.",
+  "projects_delete_artifacts_remove": "حذف دائمی فایل‌های خروجی این پروژه",
   "app_close_panel": "بستن پنل",
   "app_current_task": "وظیفهٔ فعلی",
   "app_entire_project": "کل پروژه",
@@ -616,6 +618,7 @@
   "activity_waiting_on_agent": "در انتظار عامل",
   "activity_closed_agent": "عامل بسته شد",
   "activity_subagent_started": "عامل فرعی آغاز شد",
+  "activity_sent_update_to_parent": "به عامل اصلی به‌روزرسانی فرستاد",
   "activity_agent_reported_back": "عامل نتیجه را گزارش کرد",
   "activity_subagent_interrupted": "عامل فرعی متوقف شد",
   "activity_subagent": "عامل فرعی",
@@ -837,6 +840,10 @@
   "chat_plan": "طرح",
   "chat_proposed_plan": "طرح پیشنهادی",
   "chat_question": "پرسش",
+  "chat_question_your_answer": "پاسخ شما",
+  "chat_question_skip": "رد کردن",
+  "chat_question_skipped": "رد شد",
+  "chat_question_custom_response": "یا پاسخ خود را بنویسید",
   "chat_resolved": "رسیدگی شد",
   "chat_plan_ready": "حالت طرح — آماده‌اید ادامه دهید؟",
   "chat_open_subagent_transcript": "باز کردن متن گفت‌وگوی عامل فرعی",
@@ -1418,5 +1425,9 @@
   "acp_sign_in_help": "در ترمینال زیر به {name} وارد شوید.",
   "acp_get_api_key": "دریافت کلید API دیپ‌سیک",
   "acp_sign_in_bigmodel": "ورود با BigModel",
-  "acp_adapter_required": "مبدل ACP لازم است"
+  "acp_adapter_required": "مبدل ACP لازم است",
+  "chat_experiment_running": "آزمایش در حال اجراست",
+  "chat_experiment_starting": "آزمایش در حال شروع است",
+  "chat_experiment_cancelling": "در حال لغو آزمایش",
+  "chat_experiments_running": "{count} آزمایش در حال اجرا"
 }

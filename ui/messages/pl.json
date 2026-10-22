@@ -1,5 +1,7 @@
 {
   "$schema": "https://inlang.com/schema/inlang-message-format",
+  "projects_delete_artifacts_kept": "Artefakty zostaną zachowane, chyba że wybierzesz poniższą opcję. Puste foldery artefaktów są usuwane automatycznie.",
+  "projects_delete_artifacts_remove": "Trwale usuń pliki artefaktów tego projektu",
   "workspace_active_experiments": "Aktywne eksperymenty",
   "files_empty_description": "Tutaj pojawią się pliki obszaru roboczego. Poproś agenta o utworzenie pliku, aby rozpocząć.",
   "experiments_empty_description": "Tutaj pojawią się eksperymenty i ich uruchomienia. Poproś agenta o skonfigurowanie pierwszego eksperymentu.",
@@ -623,6 +625,7 @@
   "activity_closed_agent": "Zamknięto agenta",
   "activity_subagent_started": "Uruchomiono podagenta",
   "activity_agent_reported_back": "Agent przekazał wyniki",
+  "activity_sent_update_to_parent": "Wysłano aktualizację do agenta nadrzędnego",
   "activity_subagent_interrupted": "Przerwano działanie podagenta",
   "activity_subagent": "Podagent",
   "activity_compacted_context": "Skrócono kontekst",
@@ -843,6 +846,10 @@
   "chat_plan": "Plan",
   "chat_proposed_plan": "Proponowany plan",
   "chat_question": "Pytanie",
+  "chat_question_your_answer": "Twoja odpowiedź",
+  "chat_question_skip": "Pomiń",
+  "chat_question_skipped": "Pominięto",
+  "chat_question_custom_response": "Lub napisz własną odpowiedź",
   "chat_resolved": "Rozstrzygnięto",
   "chat_plan_ready": "Tryb planowania — można kontynuować?",
   "chat_open_subagent_transcript": "Otwórz historię podagenta",
@@ -1418,5 +1425,9 @@
   "acp_sign_in_help": "Zaloguj się do {name} w terminalu poniżej.",
   "acp_get_api_key": "Uzyskaj klucz API DeepSeek",
   "acp_sign_in_bigmodel": "Zaloguj się przez BigModel",
-  "acp_adapter_required": "Wymagany adapter ACP"
+  "acp_adapter_required": "Wymagany adapter ACP",
+  "chat_experiment_running": "Eksperyment trwa",
+  "chat_experiment_starting": "Uruchamianie eksperymentu",
+  "chat_experiment_cancelling": "Anulowanie eksperymentu",
+  "chat_experiments_running": "Trwające eksperymenty: {count}"
 }

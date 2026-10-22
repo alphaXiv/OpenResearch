@@ -30,7 +30,7 @@ function composer(editor, overrides = {}) {
   let stopped = false;
   const record = name => (...args) => calls.push([name, ...args]);
   const bindings = {
-    composingRef: { current: false }, skillMenuOpen: false, mentionMenuOpen: false, bashActive: false,
+    composingRef: { current: false }, skillMenuOpen: false, mentionMenuOpen: false, bashMode: false,
     activeSkillIdx: 0, skillMatches: ["skill"], activeMentionIdx: 0, mentionMatches: ["file"], mentionQuery: "file",
     setSkillIdx: record("skillIndex"), pickSkill: record("skill"), setMentionIdx: record("mentionIndex"),
     pickFileMention: record("mention"), setSkillMenuDismissed: record("dismiss"),
@@ -113,10 +113,70 @@ for (const modifier of ["metaKey", "ctrlKey"]) {
   });
 }
 
-for (const [mode, action] of [["bashActive", "shell"], ["skillMenuOpen", "skill"], ["mentionMenuOpen", "mention"]]) {
+for (const [mode, action] of [["bashMode", "shell"], ["skillMenuOpen", "skill"], ["mentionMenuOpen", "mention"]]) {
   test(`${mode} still handles normal Enter`, () => {
     const input = composer(false, { [mode]: true });
     input.press();
     assert.deepEqual(input.calls, [["preventDefault"], action === "shell" ? [action] : [action, action === "skill" ? "skill" : "file"]]);
   });
 }
+
+test("activating Goal removes its token without moving the caret behind newly typed text", async () => {
+  const { removeSlashCommand } = await import("../src/composerCommands.ts");
+  let activation;
+  function find(node) {
+    if (ts.isFunctionDeclaration(node) && node.name?.text === "activateComposerCommand") activation = node;
+    ts.forEachChild(node, find);
+  }
+  find(file);
+  assert.ok(activation);
+  const compiled = ts.transpileModule(`const activate = ${activation.getText(file)};`, {
+    compilerOptions: { target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.ESNext },
+  }).outputText;
+  const calls = [];
+  let frame;
+  const textarea = { value: "/goal", focus: () => calls.push("focus"),
+    setSelectionRange: (...range) => calls.push(range) };
+  const bindings = {
+    removeSlashCommand, composerRef: { current: textarea },
+    setDraft: (text) => { textarea.value = text; },
+    setSkillMenuDismissed: () => {},
+    runComposerCommand: (name) => { calls.push(name); return false; },
+    setComposerCursor: () => {},
+    window: { requestAnimationFrame: (callback) => { frame = callback; } },
+  };
+  const activate = new Function(...Object.keys(bindings), `${compiled}\nreturn activate;`)(...Object.values(bindings));
+  activate("goal", "/goal", { start: 0, end: 5, query: "goal" });
+  assert.equal(textarea.value, "");
+  assert.deepEqual(calls, ["goal"]);
+  textarea.value = "R";
+  frame();
+  assert.equal(textarea.value, "R");
+  assert.deepEqual(calls, ["goal"]);
+});
+
+test("ACP Plan configuration failure keeps the draft and prevents sending", async () => {
+  let configure;
+  function find(node) {
+    if (ts.isIfStatement(node) && node.expression.getText(file) === "planRequested && acpMode") configure = node;
+    ts.forEachChild(node, find);
+  }
+  find(file);
+  assert.ok(configure);
+  for (const succeeds of [false, true]) {
+    const calls = [];
+    const bindings = {
+      planRequested: true, acpMode: {}, toggledPlanMode: true,
+      setIndependentPlanMode: async () => { if (!succeeds) throw new Error("disconnected"); },
+      inSourceScope: () => true,
+      setSettingsError: error => calls.push(error),
+      m: { chat_toggle_plan_failed: () => "plan failed" },
+      calls,
+    };
+    const compiled = ts.transpileModule(`async function send() { ${configure.getText(file)}; calls.push("send"); }`, {
+      compilerOptions: { target: ts.ScriptTarget.ES2022 },
+    }).outputText;
+    await new Function(...Object.keys(bindings), `${compiled}; return send();`)(...Object.values(bindings));
+    assert.deepEqual(calls, succeeds ? ["send"] : ["plan failed"]);
+  }
+});

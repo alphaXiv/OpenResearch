@@ -16,6 +16,8 @@
   "settings_cpu_cores": "CPU 코어: {count}",
   "settings_gpu_count": "GPU × {count}",
   "$schema": "https://inlang.com/schema/inlang-message-format",
+  "projects_delete_artifacts_kept": "아래 옵션을 선택하지 않으면 아티팩트가 유지됩니다. 빈 아티팩트 폴더는 자동으로 삭제됩니다.",
+  "projects_delete_artifacts_remove": "이 프로젝트의 아티팩트 파일 영구 삭제",
   "app_close_panel": "패널 닫기",
   "app_current_task": "현재 작업",
   "app_entire_project": "전체 프로젝트",
@@ -623,6 +625,7 @@
   "activity_closed_agent": "에이전트 종료 완료",
   "activity_subagent_started": "하위 에이전트 시작됨",
   "activity_agent_reported_back": "에이전트 결과 보고됨",
+  "activity_sent_update_to_parent": "상위 에이전트에 업데이트를 보냈습니다",
   "activity_subagent_interrupted": "하위 에이전트 중단됨",
   "activity_subagent": "하위 에이전트",
   "activity_compacted_context": "컨텍스트 압축 완료",
@@ -843,6 +846,10 @@
   "chat_plan": "계획",
   "chat_proposed_plan": "제안된 계획",
   "chat_question": "질문",
+  "chat_question_your_answer": "답변",
+  "chat_question_skip": "건너뛰기",
+  "chat_question_skipped": "건너뜀",
+  "chat_question_custom_response": "또는 직접 답변을 입력하세요",
   "chat_resolved": "처리됨",
   "chat_plan_ready": "계획 모드 — 진행할까요?",
   "chat_open_subagent_transcript": "하위 에이전트 대화 기록 열기",
@@ -1418,5 +1425,9 @@
   "acp_sign_in_help": "아래 터미널에서 {name}에 로그인하세요.",
   "acp_get_api_key": "DeepSeek API 키 발급",
   "acp_sign_in_bigmodel": "BigModel로 로그인",
-  "acp_adapter_required": "ACP 어댑터 필요"
+  "acp_adapter_required": "ACP 어댑터 필요",
+  "chat_experiment_running": "실험 실행 중",
+  "chat_experiment_starting": "실험 시작 중",
+  "chat_experiment_cancelling": "실험 취소 중",
+  "chat_experiments_running": "실험 {count}개 실행 중"
 }

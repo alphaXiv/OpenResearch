@@ -42,7 +42,7 @@ fn probe_uv() -> String {
         "curl -LsSf https://astral.sh/uv/install.sh | sh"
     };
     format!(
-        "export NANOCHAT_BASE_DIR=\"$PWD/.cache/nanochat\" UV_CACHE_DIR=\"$PWD/.cache/uv\" \
+        "export NANOCHAT_BASE_DIR=\"$PWD/.cache/nanochat\" UV_CACHE_DIR=\"${{ORX_CACHE_DIR:-$HOME/.cache/openresearch}}/uv\" \
          && mkdir -p \"$NANOCHAT_BASE_DIR\" \"$UV_CACHE_DIR\" \
          && {{ command -v uv >/dev/null || {{ {install_uv} && export PATH=\"$HOME/.local/bin:$PATH\"; }}; }}"
     )
@@ -2254,6 +2254,10 @@ mod tests {
         assert!(setup.contains(". .venv/bin/activate"), "{setup}");
         assert!(setup.contains(". .venv/Scripts/activate"), "{setup}");
         assert!(!setup.contains('\n'), "{setup}");
+        assert!(
+            setup.contains("UV_CACHE_DIR=\"${ORX_CACHE_DIR:-$HOME/.cache/openresearch}/uv\""),
+            "{setup}"
+        );
         assert!(!setup.contains("  "), "double space: {setup}");
     }
 

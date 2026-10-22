@@ -569,11 +569,7 @@ impl LocalPlane {
             println!("  command: {}", experiment.run_command);
         }
         println!();
-        println!("To edit it, check out the branch in the project's local clone:");
-        println!("  cd {}", project.repo_path);
-        println!("  git checkout {}", experiment.branch_name);
-        println!("  # …edit, then…");
-        println!("  git commit -am \"<msg>\"");
+        super::checkout_hint::print(&project.repo_path, &experiment.branch_name);
         Ok(())
     }
 }

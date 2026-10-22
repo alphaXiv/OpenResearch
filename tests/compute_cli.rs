@@ -44,6 +44,201 @@ impl Drop for Sandbox {
     }
 }
 
+enum HintShell {
+    Posix(PathBuf),
+    #[cfg(windows)]
+    Cmd,
+    #[cfg(windows)]
+    PowerShell,
+}
+
+impl HintShell {
+    fn quote(&self, path: &str) -> String {
+        match self {
+            Self::Posix(_) => format!("'{}'", path.replace('\'', "'\\''")),
+            #[cfg(windows)]
+            Self::PowerShell => format!("'{}'", path.replace('\'', "''")),
+            #[cfg(windows)]
+            Self::Cmd => format!("\"{path}\""),
+        }
+    }
+
+    fn run(&self, sandbox: &Sandbox, cwd: &std::path::Path, script: &str) -> Output {
+        let mut command = match self {
+            Self::Posix(path) => {
+                let mut command = Command::new(path);
+                command.args(["-c", script]);
+                command
+            }
+            #[cfg(windows)]
+            Self::Cmd => {
+                use std::os::windows::process::CommandExt;
+                let mut command = Command::new("cmd.exe");
+                command
+                    .args(["/d", "/s", "/c"])
+                    .raw_arg(format!("\"{script}\""));
+                command
+            }
+            #[cfg(windows)]
+            Self::PowerShell => {
+                let mut command = Command::new("powershell.exe");
+                command.args(["-NoProfile", "-NonInteractive", "-Command", script]);
+                command
+            }
+        };
+        for (key, value) in sandbox.command().get_envs() {
+            match value {
+                Some(value) => command.env(key, value),
+                None => command.env_remove(key),
+            };
+        }
+        command.current_dir(cwd).output().unwrap()
+    }
+}
+
+fn checkout_shells() -> Vec<HintShell> {
+    #[cfg(windows)]
+    {
+        let output = Command::new("git").arg("--exec-path").output().unwrap();
+        assert!(output.status.success());
+        let bash = PathBuf::from(String::from_utf8(output.stdout).unwrap().trim())
+            .ancestors()
+            .map(|parent| parent.join("bin/bash.exe"))
+            .find(|path| path.is_file())
+            .expect("Git for Windows bash");
+        vec![
+            HintShell::Cmd,
+            HintShell::PowerShell,
+            HintShell::Posix(bash),
+        ]
+    }
+    #[cfg(unix)]
+    {
+        vec![HintShell::Posix(PathBuf::from("sh"))]
+    }
+}
+
+fn init_checkout_repo(repo: &std::path::Path) {
+    std::fs::create_dir(repo).unwrap();
+    for args in [
+        vec!["init", "-b", "main"],
+        vec![
+            "-c",
+            "user.name=Test",
+            "-c",
+            "user.email=test@example.com",
+            "commit",
+            "--allow-empty",
+            "-m",
+            "initial",
+        ],
+    ] {
+        assert!(Command::new("git")
+            .current_dir(repo)
+            .args(args)
+            .output()
+            .unwrap()
+            .status
+            .success());
+    }
+}
+
+fn current_checkout(repo: &std::path::Path) -> String {
+    let output = Command::new("git")
+        .current_dir(repo)
+        .args(["branch", "--show-current"])
+        .output()
+        .unwrap();
+    assert!(output.status.success());
+    String::from_utf8(output.stdout).unwrap().trim().to_string()
+}
+
+#[test]
+fn experiment_checkout_hint_matches_the_invoking_shell_and_stops_when_cd_fails() {
+    for shell in checkout_shells() {
+        let sandbox = Sandbox::new();
+        let repo = sandbox.0.join("researcher's project $ [baseline] & notes");
+        let unrelated = sandbox.0.join("unrelated");
+        init_checkout_repo(&repo);
+        init_checkout_repo(&unrelated);
+        assert!(Command::new("git")
+            .current_dir(&unrelated)
+            .args(["branch", "orx/baseline"])
+            .status()
+            .unwrap()
+            .success());
+        sandbox.json(&["projects", "--json"]);
+        let db = rusqlite::Connection::open(sandbox.0.join("data/orx.db")).unwrap();
+        db.execute(
+            "INSERT INTO local_projects (id, name, slug, github_owner, github_repo, github_sync_enabled, baseline_branch, repo_path, created_at, updated_at) VALUES ('project', 'Research', 'research', '', '', 0, 'main', ?1, 0, 0)",
+            [repo.to_str().unwrap()],
+        ).unwrap();
+        let executable = shell.quote(env!("CARGO_BIN_EXE_orx"));
+        let call = match &shell {
+            #[cfg(windows)]
+            HintShell::PowerShell => "& ",
+            _ => "",
+        };
+        let separator = match &shell {
+            #[cfg(windows)]
+            HintShell::Cmd => "&",
+            _ => ";",
+        };
+        // A following command keeps sh alive rather than letting it exec the CLI.
+        let output = shell.run(&sandbox, &unrelated, &format!(
+            "{call}{executable} --no-telemetry create-experiment project --title Baseline {separator} echo shell-still-running"
+        ));
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let text = String::from_utf8(output.stdout).unwrap();
+        let command = text
+            .lines()
+            .map(str::trim)
+            .find(|line| line.starts_with("cd ") || line.starts_with("Set-Location "))
+            .unwrap_or_else(|| {
+                panic!(
+                    "No checkout command in {text}\n{}",
+                    String::from_utf8_lossy(&output.stderr)
+                )
+            });
+        let location = "git rev-parse --show-toplevel";
+        let output = shell.run(
+            &sandbox,
+            &unrelated,
+            &format!("{command} {separator} {location}"),
+        );
+        assert!(
+            output.status.success(),
+            "{command}\n{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let stdout = String::from_utf8(output.stdout).unwrap();
+        assert_eq!(
+            PathBuf::from(stdout.lines().last().unwrap().trim())
+                .canonicalize()
+                .unwrap(),
+            repo.canonicalize().unwrap()
+        );
+        assert_eq!(current_checkout(&repo), "orx/baseline");
+        assert_eq!(current_checkout(&unrelated), "main");
+
+        std::fs::rename(&repo, sandbox.0.join("moved-project")).unwrap();
+        let output = shell.run(&sandbox, &unrelated, command);
+        assert!(
+            !output.status.success(),
+            "Missing project must fail: {command}"
+        );
+        assert_eq!(
+            current_checkout(&unrelated),
+            "main",
+            "Failed cd must not check out the unrelated repository"
+        );
+    }
+}
+
 #[test]
 fn standalone_settings_defaults_and_instruction_conflicts() {
     let sandbox = Sandbox::new();

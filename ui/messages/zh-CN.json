@@ -16,6 +16,8 @@
   "settings_cpu_cores": "{count} 个 CPU 核心",
   "settings_gpu_count": "{count} 个 GPU",
   "$schema": "https://inlang.com/schema/inlang-message-format",
+  "projects_delete_artifacts_kept": "除非选中下方选项，否则将保留产物文件。空的产物文件夹会自动删除。",
+  "projects_delete_artifacts_remove": "永久删除此项目的产物文件",
   "app_close_panel": "关闭面板",
   "app_current_task": "当前任务",
   "app_entire_project": "整个项目",
@@ -616,6 +618,7 @@
   "activity_waiting_on_agent": "正在等待智能体",
   "activity_closed_agent": "已关闭智能体",
   "activity_subagent_started": "子智能体已启动",
+  "activity_sent_update_to_parent": "已向父代理发送更新",
   "activity_agent_reported_back": "智能体已返回结果",
   "activity_subagent_interrupted": "子智能体已中断",
   "activity_subagent": "子智能体",
@@ -837,6 +840,10 @@
   "chat_plan": "计划",
   "chat_proposed_plan": "提议的计划",
   "chat_question": "问题",
+  "chat_question_your_answer": "你的回答",
+  "chat_question_skip": "跳过",
+  "chat_question_skipped": "已跳过",
+  "chat_question_custom_response": "或输入你自己的回答",
   "chat_resolved": "已处理",
   "chat_plan_ready": "计划模式 — 准备好继续了吗？",
   "chat_open_subagent_transcript": "打开子智能体记录",
@@ -1418,5 +1425,9 @@
   "acp_sign_in_help": "在下方终端中登录 {name}。",
   "acp_get_api_key": "获取 DeepSeek API 密钥",
   "acp_sign_in_bigmodel": "使用 BigModel 登录",
-  "acp_adapter_required": "需要 ACP 适配器"
+  "acp_adapter_required": "需要 ACP 适配器",
+  "chat_experiment_running": "实验运行中",
+  "chat_experiment_starting": "实验启动中",
+  "chat_experiment_cancelling": "正在取消实验",
+  "chat_experiments_running": "{count} 个实验运行中"
 }

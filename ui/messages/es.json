@@ -16,6 +16,8 @@
   "settings_cpu_cores": "Núcleos de CPU: {count}",
   "settings_gpu_count": "GPU × {count}",
   "$schema": "https://inlang.com/schema/inlang-message-format",
+  "projects_delete_artifacts_kept": "Los artefactos se conservan a menos que selecciones la opción siguiente. Las carpetas de artefactos vacías se eliminan automáticamente.",
+  "projects_delete_artifacts_remove": "Eliminar permanentemente los archivos de artefactos de este proyecto",
   "app_close_panel": "Cerrar panel",
   "app_current_task": "Tarea actual",
   "app_entire_project": "Todo el proyecto",
@@ -622,6 +624,7 @@
   "activity_waiting_on_agent": "Esperando a un agente",
   "activity_closed_agent": "Cerró un agente",
   "activity_subagent_started": "Subagente iniciado",
+  "activity_sent_update_to_parent": "Envió una actualización al agente principal",
   "activity_agent_reported_back": "El agente informó de los resultados",
   "activity_subagent_interrupted": "Subagente interrumpido",
   "activity_subagent": "Subagente",
@@ -843,6 +846,10 @@
   "chat_plan": "Plan",
   "chat_proposed_plan": "Plan propuesto",
   "chat_question": "Pregunta",
+  "chat_question_your_answer": "Tu respuesta",
+  "chat_question_skip": "Omitir",
+  "chat_question_skipped": "Omitido",
+  "chat_question_custom_response": "O escribe tu propia respuesta",
   "chat_resolved": "Resuelto",
   "chat_plan_ready": "Modo Plan — ¿listo para continuar?",
   "chat_open_subagent_transcript": "Abrir la transcripción del subagente",
@@ -1418,5 +1425,9 @@
   "acp_sign_in_help": "Inicia sesión en {name} en el terminal de abajo.",
   "acp_get_api_key": "Obtener una clave API de DeepSeek",
   "acp_sign_in_bigmodel": "Iniciar sesión con BigModel",
-  "acp_adapter_required": "Se necesita un adaptador ACP"
+  "acp_adapter_required": "Se necesita un adaptador ACP",
+  "chat_experiment_running": "Experimento en ejecución",
+  "chat_experiment_starting": "Iniciando experimento",
+  "chat_experiment_cancelling": "Cancelando experimento",
+  "chat_experiments_running": "{count} experimentos en ejecución"
 }
