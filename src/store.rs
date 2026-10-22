@@ -1926,9 +1926,7 @@ impl Store {
         if targets.is_empty() {
             return Ok(false);
         }
-        // A cancelled run is terminal before its process group finishes exiting.
         if crate::jobs::localbox::orphaned_job_is_running(&root.join(id))?
-            || crate::jobs::localbox::process_group_alive(&root.join(id))
             || self.supervisor_is_held(id)?
         {
             return Ok(false);
@@ -2070,7 +2068,7 @@ impl Store {
         }
         let dir = self.data_dir.join("local-runs").join(id);
         if dir.exists() && crate::jobs::localbox::orphaned_job_is_running(&dir)? {
-            return live("is still running");
+            return live("still has running processes");
         }
         if self.supervisor_is_held(id)? {
             return live("still has a supervisor");
@@ -4207,6 +4205,8 @@ mod tests {
         store.delete_local_project("deleting-remote").unwrap();
         assert!(remote_snapshot.is_file());
         std::fs::write(run_dir.join("exit_code"), "0").unwrap();
+        // The pid is this test process, whose own group the probe would read as live.
+        std::fs::remove_file(run_dir.join("pid")).unwrap();
         let path = dir.join("run-logs").join(format!("{live}.supervisor.lock"));
         let mut supervisor = open_lifecycle_lock_at(&path).unwrap();
         let guard = supervisor.write().unwrap();
@@ -4227,6 +4227,48 @@ mod tests {
             .join("run-logs")
             .join(format!("{remote}.supervisor.lock"))
             .exists());
+        drop(store);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn orphan_cleanup_keeps_a_finished_run_while_its_process_group_lives() {
+        use std::os::unix::process::CommandExt;
+        let dir = std::env::temp_dir().join(format!("orx-group-orphan-{}", uuid::Uuid::new_v4()));
+        let store = Store::open_at(dir.clone()).unwrap();
+        let run = uuid::Uuid::new_v4().to_string();
+        project_with_run_artifacts(&store, "cancelled", &run, &"f".repeat(64));
+        let run_dir = dir.join("local-runs").join(&run);
+        let mut launcher = std::process::Command::new(crate::local::bash::program())
+            .args(["-c", "sleep 30 & echo $! > child"])
+            .current_dir(&run_dir)
+            .process_group(0)
+            .spawn()
+            .unwrap();
+        std::fs::write(run_dir.join("pid"), launcher.id().to_string()).unwrap();
+        launcher.wait().unwrap();
+        std::fs::write(run_dir.join("exit_code"), "143").unwrap();
+        let refused = store.delete_local_project("cancelled").unwrap_err();
+        assert!(
+            refused.to_string().contains("still has running processes"),
+            "{refused}"
+        );
+        store.conn.execute("DELETE FROM runs", []).unwrap();
+        store.cleanup_orphaned_run_artifacts().unwrap();
+        assert!(run_dir.join("repo/output").is_file());
+        let child = std::fs::read_to_string(run_dir.join("child")).unwrap();
+        // SAFETY: the pid names the sleep this test started.
+        unsafe { libc::kill(child.trim().parse().unwrap(), libc::SIGKILL) };
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        while crate::jobs::localbox::orphaned_job_is_running(&run_dir).unwrap()
+            && std::time::Instant::now() < deadline
+        {
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+        assert!(!crate::jobs::localbox::orphaned_job_is_running(&run_dir).unwrap());
+        store.cleanup_orphaned_run_artifacts().unwrap();
+        assert!(!run_dir.exists());
         drop(store);
         std::fs::remove_dir_all(dir).unwrap();
     }

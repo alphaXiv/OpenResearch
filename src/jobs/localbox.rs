@@ -279,10 +279,18 @@ pub fn inspect_job(dir: &Path) -> JobState {
     }
 }
 
+const LINGERING_GROUP_WINDOW: std::time::Duration = std::time::Duration::from_secs(60 * 60);
+
+/// Whether the run may still have live processes, including a group lingering after exit_code.
 /// Called only while submission is excluded and a supervisor lock is checked separately.
 pub fn orphaned_job_is_running(dir: &Path) -> Result<bool> {
     if exit_code_state(dir).is_some() {
-        return Ok(false);
+        // Children may outlive exit_code briefly; after the window a live PGID is likely reused.
+        let age = std::fs::metadata(dir.join("exit_code"))?
+            .modified()?
+            .elapsed()
+            .unwrap_or_default();
+        return Ok(age < LINGERING_GROUP_WINDOW && process_group_alive(dir));
     }
     match std::fs::read_to_string(dir.join("pid")) {
         Ok(_) => return Ok(inspect_job(dir).stage == "RUNNING"),
@@ -318,9 +326,9 @@ pub fn orphaned_job_is_running(dir: &Path) -> Result<bool> {
     Ok(false)
 }
 
-/// Whether any process remains in the run's group (pgid == recorded pid); a reused PGID only defers cleanup.
+/// Whether any process remains in the run's group (pgid == recorded pid).
 #[cfg(not(windows))]
-pub fn process_group_alive(dir: &Path) -> bool {
+fn process_group_alive(dir: &Path) -> bool {
     let Ok(pid) = std::fs::read_to_string(dir.join("pid")) else {
         return false;
     };
@@ -333,7 +341,7 @@ pub fn process_group_alive(dir: &Path) -> bool {
 
 /// Windows cancel waits for an empty job object; deleting files a survivor holds open fails and is retried.
 #[cfg(windows)]
-pub fn process_group_alive(_dir: &Path) -> bool {
+fn process_group_alive(_dir: &Path) -> bool {
     false
 }
 
@@ -534,6 +542,15 @@ mod tests {
         std::fs::write(dir.join("pid"), launcher.id().to_string()).unwrap();
         launcher.wait().unwrap();
         assert!(process_group_alive(&dir));
+        std::fs::write(dir.join("exit_code"), "143").unwrap();
+        assert!(orphaned_job_is_running(&dir).unwrap());
+        std::fs::File::options()
+            .write(true)
+            .open(dir.join("exit_code"))
+            .unwrap()
+            .set_modified(std::time::SystemTime::now() - 2 * LINGERING_GROUP_WINDOW)
+            .unwrap();
+        assert!(!orphaned_job_is_running(&dir).unwrap());
         let child = std::fs::read_to_string(dir.join("child")).unwrap();
         // SAFETY: the pid names the sleep this test started.
         unsafe { libc::kill(child.trim().parse().unwrap(), libc::SIGKILL) };
