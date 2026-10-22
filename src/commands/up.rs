@@ -2117,7 +2117,7 @@ async fn delete_project_inner(state: AppState, id: String, query: DeleteProjectQ
         Some(lock)
     };
     let project_id = id.clone();
-    // Deletion waits for the run-artifacts lock, so keep it off the async workers.
+    // Row deletion can wait up to RUN_ARTIFACTS_WAIT for the run-artifacts lock, so keep it off the async workers.
     tokio::task::spawn_blocking(move || store.delete_local_project(&project_id))
         .await
         .map_err(|error| anyhow!("project row deletion task failed: {error}"))??;
