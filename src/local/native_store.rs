@@ -318,6 +318,274 @@ pub fn toml_string(path: &Path) -> String {
         .replace('\u{7f}', "\\u007F")
 }
 
+/// Whether `isolated` is an existing store other than the user's `legacy` home,
+/// which a home override (even through a symlink) can point at it.
+fn distinct_store(isolated: &Path, legacy: &Path) -> bool {
+    match (
+        crate::paths::canonicalize(isolated),
+        crate::paths::canonicalize(legacy),
+    ) {
+        (Ok(isolated), Ok(legacy)) => isolated != legacy,
+        (Ok(_), Err(error)) => error.kind() == std::io::ErrorKind::NotFound,
+        (Err(_), _) => false,
+    }
+}
+
+/// Remove the isolated native sessions `doomed` selects. Only stores orx owns
+/// are touched: legacy homes hold the user's own (and imported) chats, and ACP
+/// agents run in their global homes, so neither is ever purged. Cursor chats
+/// run in the isolated `CURSOR_DATA_DIR`; only its config is read from legacy.
+pub fn purge_isolated_sessions(doomed: impl Fn(&str) -> bool) -> Result<()> {
+    // One purge at a time: overlapping rewrites of a shared history.jsonl would
+    // restore each other's deleted lines.
+    static PURGE: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    let _purge = PURGE
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let owns = |home: fn(NativeStore) -> PathBuf| {
+        distinct_store(&home(NativeStore::Isolated), &home(NativeStore::Legacy))
+    };
+    if owns(claude_home) {
+        let claude = claude_home(NativeStore::Isolated);
+        for tree in ["projects", "file-history", "session-env", "todos", "debug"] {
+            purge_session_tree(&claude.join(tree), &doomed)?;
+        }
+        purge_history(&claude.join("history.jsonl"), "sessionId", &doomed)?;
+    }
+
+    if owns(codex_home) {
+        let codex = codex_home(NativeStore::Isolated);
+        let databases = match std::fs::read_dir(&codex) {
+            Ok(entries) => entries
+                .map(|entry| entry.map(|entry| entry.path()))
+                .collect::<std::io::Result<Vec<_>>>()?,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Vec::new(),
+            Err(error) => return Err(error.into()),
+        };
+        let databases: Vec<_> = databases
+            .into_iter()
+            .filter(|path| path.extension().and_then(|ext| ext.to_str()) == Some("sqlite"))
+            .collect();
+        let (threads, children) = purge_databases(
+            &databases,
+            &[
+                "threads.id",
+                "thread_id",
+                "parent_thread_id",
+                "child_thread_id",
+            ],
+            &[],
+            &[("thread_spawn_edges", "child_thread_id", "parent_thread_id")],
+            &doomed,
+        )?;
+        let doomed_thread =
+            |id: &str| threads.contains(id) || (doomed(id) && !children.contains(id));
+        for tree in ["sessions", "archived_sessions", "shell_snapshots"] {
+            purge_session_tree(&codex.join(tree), &doomed_thread)?;
+        }
+        purge_history(&codex.join("history.jsonl"), "session_id", &doomed_thread)?;
+    }
+
+    if owns(opencode_db) {
+        let db = opencode_db(NativeStore::Isolated);
+        opencode_database::purge_sessions(&db, &doomed, || {
+            purge_databases(
+                std::slice::from_ref(&db),
+                &["session.id", "session_v2.id", "session_id"],
+                &["aggregate_id"],
+                &[
+                    ("session", "id", "parent_id"),
+                    ("session_v2", "id", "parent_id"),
+                ],
+                &doomed,
+            )
+            .map(|(purged, _)| purged)
+        })?;
+    }
+
+    if owns(cursor_home) {
+        let cursor = cursor_home(NativeStore::Isolated);
+        for tree in ["chats", "acp-sessions"] {
+            purge_session_tree(&cursor.join(tree), &doomed)?;
+        }
+    }
+    Ok(())
+}
+
+/// The native id a session file or directory is named after: `<id>/`,
+/// `<id>.jsonl`, `<id>-agent-….json`, or Codex's `rollout-<time>-<id>.jsonl`.
+fn session_entry_id(name: &str, is_dir: bool) -> Option<&str> {
+    // Hyphenated only: Cursor's 32-hex workspace dirs also parse as UUIDs.
+    let is_id = |id: &str| id.len() == 36 && uuid::Uuid::parse_str(id).is_ok();
+    if is_dir {
+        return is_id(name).then_some(name);
+    }
+    if let Some(id) = name
+        .get(..36)
+        .filter(|id| is_id(id) && name[36..].starts_with(['.', '-']))
+    {
+        return Some(id);
+    }
+    let stem = name.strip_suffix(".jsonl")?;
+    let id = stem.get(stem.len().checked_sub(36)?..)?;
+    (stem[..stem.len() - 36].ends_with('-') && is_id(id)).then_some(id)
+}
+
+fn purge_session_tree(root: &Path, doomed: &impl Fn(&str) -> bool) -> Result<()> {
+    let entries = match std::fs::read_dir(root) {
+        Ok(entries) => entries,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(error) => return Err(error.into()),
+    };
+    for entry in entries {
+        let entry = entry?;
+        let path = entry.path();
+        let is_dir = entry.file_type()?.is_dir();
+        let name = entry.file_name();
+        match name
+            .to_str()
+            .and_then(|name| session_entry_id(name, is_dir))
+        {
+            Some(id) if doomed(id) && is_dir => std::fs::remove_dir_all(&path)?,
+            Some(id) if doomed(id) => std::fs::remove_file(&path)?,
+            _ if is_dir => purge_session_tree(&path, doomed)?,
+            _ => {}
+        }
+    }
+    Ok(())
+}
+
+/// Drop the prompt-history lines a doomed session wrote.
+fn purge_history(path: &Path, key: &str, doomed: &impl Fn(&str) -> bool) -> Result<()> {
+    let text = match std::fs::read_to_string(path) {
+        Ok(text) => text,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(error) => return Err(error.into()),
+    };
+    let kept: String = text
+        .lines()
+        .filter(|line| {
+            !serde_json::from_str::<serde_json::Value>(line)
+                .ok()
+                .and_then(|entry| entry.get(key)?.as_str().map(doomed))
+                .unwrap_or(false)
+        })
+        .map(|line| format!("{line}\n"))
+        .collect();
+    if kept.len() != text.len() {
+        std::fs::write(path, kept)?;
+    }
+    Ok(())
+}
+
+/// Delete every row of the doomed sessions (and their descendants via
+/// `parents`: `(table, child, parent)`) from a native SQLite store. `ids`
+/// columns (`column` or `table.column`) hold session ids; `also` columns are
+/// only cleared. Returns the purged ids and every known child id. Rows are zeroed and the WAL truncated so no copy remains.
+fn purge_databases(
+    paths: &[PathBuf],
+    ids: &[&str],
+    also: &[&str],
+    parents: &[(&str, &str, &str)],
+    doomed: &impl Fn(&str) -> bool,
+) -> Result<(
+    std::collections::HashSet<String>,
+    std::collections::HashSet<String>,
+)> {
+    let named = |table: &str, column: &str, names: &[&str]| {
+        names
+            .iter()
+            .any(|name| *name == column || *name == format!("{table}.{column}"))
+    };
+    let mut databases = Vec::new();
+    let mut candidates = std::collections::HashSet::new();
+    let mut edges = Vec::new();
+    for path in paths.iter().filter(|path| path.exists()) {
+        let connection = rusqlite::Connection::open_with_flags(
+            path,
+            rusqlite::OpenFlags::SQLITE_OPEN_READ_WRITE,
+        )?;
+        connection.busy_timeout(std::time::Duration::from_secs(5))?;
+        connection.pragma_update(None, "secure_delete", true)?;
+        let columns = connection
+            .prepare(
+                "SELECT m.name, p.name FROM sqlite_master m, pragma_table_info(m.name) p
+                 WHERE m.type = 'table'",
+            )?
+            .query_map([], |row| {
+                Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+            })?
+            .collect::<std::result::Result<Vec<_>, _>>()?;
+        for (table, column) in columns.iter().filter(|(t, c)| named(t, c, ids)) {
+            let mut query = connection.prepare(&format!(
+                "SELECT DISTINCT \"{column}\" FROM \"{table}\" WHERE \"{column}\" IS NOT NULL"
+            ))?;
+            for id in query.query_map([], |row| row.get::<_, String>(0))? {
+                candidates.insert(id?);
+            }
+        }
+        for (table, child, parent) in parents {
+            if columns.iter().any(|(t, c)| t == table && c == parent) {
+                let mut query = connection.prepare(&format!(
+                    "SELECT \"{child}\", \"{parent}\" FROM \"{table}\" WHERE \"{parent}\" IS NOT NULL"
+                ))?;
+                for edge in query.query_map([], |row| {
+                    Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+                })? {
+                    edges.push(edge?);
+                }
+            }
+        }
+        databases.push((connection, columns));
+    }
+    let parent_of: std::collections::HashMap<&str, &str> = edges
+        .iter()
+        .filter(|(_, parent)| candidates.contains(parent))
+        .map(|(child, parent)| (child.as_str(), parent.as_str()))
+        .collect();
+    // orx records only top-level ids, so a child goes with its parent, never alone.
+    let mut purged: std::collections::HashSet<String> = candidates
+        .iter()
+        .filter(|id| !parent_of.contains_key(id.as_str()) && doomed(id))
+        .cloned()
+        .collect();
+    loop {
+        let before = purged.len();
+        for (child, parent) in &edges {
+            if parent_of.contains_key(child.as_str()) && purged.contains(parent) {
+                purged.insert(child.clone());
+            }
+        }
+        if purged.len() == before {
+            break;
+        }
+    }
+    for (connection, columns) in databases {
+        for (table, column) in columns
+            .iter()
+            .filter(|(t, c)| named(t, c, ids) || named(t, c, also))
+        {
+            for id in &purged {
+                connection.execute(
+                    &format!("DELETE FROM \"{table}\" WHERE \"{column}\" = ?1"),
+                    [id],
+                )?;
+            }
+        }
+        // Every pass, so a checkpoint an open reader blocked last time is retried.
+        let busy: bool =
+            connection.query_row("PRAGMA wal_checkpoint(TRUNCATE)", [], |row| row.get(0))?;
+        if busy {
+            return Err(anyhow::anyhow!(
+                "{} is busy; its WAL may still hold purged rows",
+                connection.path().unwrap_or_default()
+            ));
+        }
+    }
+    let children = parent_of.into_keys().map(String::from).collect();
+    Ok((purged, children))
+}
+
 pub fn prepare_opencode(store: NativeStore) -> Result<PathBuf> {
     let db = opencode_db(store);
     if let Some(parent) = db.parent() {
@@ -668,6 +936,190 @@ mod hard_link_tests {
 #[cfg(all(test, unix))]
 mod tests {
     use super::*;
+
+    #[test]
+    fn distinct_store_spots_a_legacy_home_aliasing_the_isolated_one() {
+        let root = std::env::temp_dir().join(format!("orx-native-home-{}", uuid::Uuid::new_v4()));
+        let (isolated, other) = (root.join("isolated"), root.join("other"));
+        std::fs::create_dir_all(&isolated).unwrap();
+        std::fs::create_dir_all(&other).unwrap();
+        assert!(distinct_store(&isolated, &other));
+        assert!(distinct_store(&isolated, &root.join("missing")));
+        assert!(!distinct_store(&isolated, &isolated));
+        assert!(!distinct_store(&root.join("missing"), &other));
+        #[cfg(unix)]
+        {
+            std::os::unix::fs::symlink(&isolated, root.join("link")).unwrap();
+            assert!(!distinct_store(&isolated, &root.join("link")));
+        }
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn purge_removes_only_doomed_sessions() {
+        let root = std::env::temp_dir().join(format!("orx-native-purge-{}", uuid::Uuid::new_v4()));
+        let doomed = "01a160a3-b998-7ec2-8a30-d4aebfea7643";
+        let child = "11a160a3-b998-7ec2-8a30-d4aebfea7643";
+        let kept = "36bd48a2-7757-4640-b698-cbffd6adf96c";
+        let project = root.join(format!("projects/-worktrees-chat-{kept}"));
+        let workspace = root.join("chats/0123456789abcdef0123456789abcdef");
+        for dir in [
+            project.join(doomed).join("subagents"),
+            root.join("sessions/2026/10"),
+            root.join("todos"),
+            workspace.join(kept),
+        ] {
+            std::fs::create_dir_all(dir).unwrap();
+        }
+        for file in [
+            project.join(format!("{doomed}.jsonl")),
+            project.join(format!("{kept}.jsonl")),
+            root.join(format!("todos/{doomed}-agent-{doomed}.json")),
+            root.join(format!(
+                "sessions/2026/10/rollout-2026-10-21T22-45-05-{doomed}.jsonl"
+            )),
+            root.join(format!(
+                "sessions/2026/10/rollout-2026-10-21T22-45-05-{child}.jsonl"
+            )),
+            root.join(format!(
+                "sessions/2026/10/rollout-2026-10-21T22-45-05-{kept}.jsonl"
+            )),
+        ] {
+            std::fs::write(file, "secret").unwrap();
+        }
+        let history = root.join("history.jsonl");
+        std::fs::write(
+            &history,
+            format!("{{\"session_id\":\"{doomed}\",\"text\":\"secret\"}}\n{{\"session_id\":\"{kept}\"}}\n"),
+        )
+        .unwrap();
+        let db = root.join("state_5.sqlite");
+        let connection = rusqlite::Connection::open(&db).unwrap();
+        connection
+            .execute_batch(&format!(
+                "CREATE TABLE threads (id TEXT, title TEXT);
+                 CREATE TABLE thread_items (thread_id TEXT, item_json TEXT);
+                 CREATE TABLE thread_spawn_edges (parent_thread_id TEXT, child_thread_id TEXT);
+                 INSERT INTO thread_spawn_edges VALUES ('{doomed}', '{child}');"
+            ))
+            .unwrap();
+        for id in [doomed, child, kept] {
+            connection
+                .execute("INSERT INTO threads VALUES (?1, 'secret')", [id])
+                .unwrap();
+            connection
+                .execute("INSERT INTO thread_items VALUES (?1, 'secret')", [id])
+                .unwrap();
+        }
+        let is_doomed = |id: &str| id != kept;
+        let only_doomed = |id: &str| id == doomed;
+
+        let (threads, _) = purge_databases(
+            std::slice::from_ref(&db),
+            &[
+                "threads.id",
+                "thread_id",
+                "parent_thread_id",
+                "child_thread_id",
+            ],
+            &[],
+            &[("thread_spawn_edges", "child_thread_id", "parent_thread_id")],
+            &only_doomed,
+        )
+        .unwrap();
+        assert_eq!(threads, [doomed, child].map(String::from).into());
+        let doomed_thread = |id: &str| threads.contains(id);
+        for tree in ["projects", "todos", "sessions", "chats"] {
+            purge_session_tree(&root.join(tree), &doomed_thread).unwrap();
+        }
+        purge_history(&history, "session_id", &doomed_thread).unwrap();
+        // The sweep form never mistakes a workspace hash dir for a session.
+        purge_session_tree(&root.join("chats"), &is_doomed).unwrap();
+
+        assert!(project.join(format!("{kept}.jsonl")).exists());
+        assert!(!project.join(format!("{doomed}.jsonl")).exists());
+        assert!(!project.join(doomed).exists());
+        assert!(workspace.join(kept).exists());
+        assert_eq!(std::fs::read_dir(root.join("todos")).unwrap().count(), 0);
+        let rollouts: Vec<_> = std::fs::read_dir(root.join("sessions/2026/10"))
+            .unwrap()
+            .flatten()
+            .map(|entry| entry.file_name().into_string().unwrap())
+            .collect();
+        assert_eq!(
+            rollouts,
+            [format!("rollout-2026-10-21T22-45-05-{kept}.jsonl")]
+        );
+        assert_eq!(
+            std::fs::read_to_string(&history).unwrap(),
+            format!("{{\"session_id\":\"{kept}\"}}\n")
+        );
+        for (table, column) in [("threads", "id"), ("thread_items", "thread_id")] {
+            let ids: Vec<String> = connection
+                .prepare(&format!("SELECT {column} FROM {table}"))
+                .unwrap()
+                .query_map([], |row| row.get(0))
+                .unwrap()
+                .flatten()
+                .collect();
+            assert_eq!(ids, [kept]);
+        }
+        std::fs::remove_dir_all(root).ok();
+    }
+
+    #[test]
+    fn database_purge_takes_children_but_the_sweep_spares_live_ones() {
+        let db = std::env::temp_dir().join(format!("orx-db-purge-{}.db", uuid::Uuid::new_v4()));
+        let connection = rusqlite::Connection::open(&db).unwrap();
+        connection
+            .execute_batch(
+                "CREATE TABLE session (id TEXT, parent_id TEXT);
+                 CREATE TABLE message (session_id TEXT, data TEXT);
+                 CREATE TABLE event (aggregate_id TEXT, data TEXT);
+                 INSERT INTO session VALUES ('gone', NULL), ('gone-child', 'gone'),
+                   ('live', NULL), ('live-child', 'live');
+                 INSERT INTO message VALUES ('gone', 'secret'), ('gone-child', 'secret'),
+                   ('live', 'x'), ('live-child', 'x');
+                 INSERT INTO event VALUES ('gone', 'secret'), ('live', 'x'), ('other', 'x');",
+            )
+            .unwrap();
+        let purge = |doomed: &dyn Fn(&str) -> bool| {
+            purge_databases(
+                std::slice::from_ref(&db),
+                &["session.id", "session_v2.id", "session_id"],
+                &["aggregate_id"],
+                &[
+                    ("session", "id", "parent_id"),
+                    ("session_v2", "id", "parent_id"),
+                ],
+                &doomed,
+            )
+            .unwrap()
+        };
+        let set = |ids: &[&str]| ids.iter().map(|id| id.to_string()).collect();
+
+        let (purged, children) = purge(&|id| id == "gone");
+        assert_eq!(purged, set(&["gone", "gone-child"]));
+        assert_eq!(children, set(&["gone-child", "live-child"]));
+        // The sweep only knows top-level ids; a live chat's child must survive it.
+        assert_eq!(purge(&|id| id != "live").0, set(&[]));
+
+        for (table, column, expected) in [
+            ("session", "id", ["live", "live-child"]),
+            ("message", "session_id", ["live", "live-child"]),
+            ("event", "aggregate_id", ["live", "other"]),
+        ] {
+            let ids: Vec<String> = connection
+                .prepare(&format!("SELECT {column} FROM {table} ORDER BY rowid"))
+                .unwrap()
+                .query_map([], |row| row.get(0))
+                .unwrap()
+                .flatten()
+                .collect();
+            assert_eq!(ids, expected);
+        }
+        std::fs::remove_file(db).ok();
+    }
 
     #[test]
     fn native_store_smoke_test() {
