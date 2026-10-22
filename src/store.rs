@@ -481,6 +481,8 @@ const ORPHAN_PASS_BUDGET: Duration = Duration::from_secs(5);
 const FULL_RUNS_PER_PROJECT: i64 = 3;
 /// Uploads are written before the message naming them, so the sweep spares recent files.
 const CHAT_ATTACHMENT_SETTLE: Duration = Duration::from_secs(24 * 60 * 60);
+/// A harness writes its session before orx records the id, so the sweep spares recent ones.
+const NATIVE_SESSION_SETTLE: Duration = Duration::from_secs(24 * 60 * 60);
 const SLIMMED_RUN_PATHS: [&[&str]; 2] = [&["repo", ".venv"], &["repo", ".cache", "uv"]];
 
 const SUBMISSION_HANDLE: (&str, &str) = ("submission-handles", ".json");
@@ -836,6 +838,11 @@ impl Store {
         ] {
             let _ = conn.execute(ddl, []);
         }
+        // Covers the periodic native-id scan so it never reads the large parts_json.
+        conn.execute_batch(
+            "CREATE INDEX IF NOT EXISTS idx_chat_messages_native_ids
+             ON chat_messages(base_native_session_id, result_native_session_id);",
+        )?;
         conn.execute_batch("CREATE TRIGGER IF NOT EXISTS delete_chat_invocation_identities AFTER DELETE ON chat_sessions BEGIN DELETE FROM native_invocation_identities WHERE session_id = OLD.id; END;")?;
         conn.execute_batch("CREATE TRIGGER IF NOT EXISTS delete_acp_session AFTER DELETE ON chat_sessions BEGIN DELETE FROM acp_sessions WHERE session_id = OLD.id; END;")?;
         conn.execute(
@@ -2579,9 +2586,10 @@ impl Store {
         Ok(lock)
     }
 
-    pub fn opencode_sessions_for_deletion(
+    pub fn native_sessions_for_deletion(
         &self,
         chat_ids: &[String],
+        harnesses: &[&str],
     ) -> Result<(
         std::collections::BTreeSet<String>,
         std::collections::BTreeSet<String>,
@@ -2589,13 +2597,13 @@ impl Store {
         let mut query = self.conn.prepare(
             "WITH refs AS (
                 SELECT id AS chat_id, native_session_id AS native_id FROM chat_sessions
-                WHERE harness = 'opencode'
+                WHERE harness IN (SELECT value FROM json_each(?2))
                 UNION
-                SELECT s.id, m.base_native_session_id FROM chat_sessions s
-                JOIN chat_messages m ON m.session_id = s.id WHERE s.harness = 'opencode'
+                SELECT s.id, m.base_native_session_id FROM chat_sessions s JOIN chat_messages m
+                ON m.session_id = s.id WHERE s.harness IN (SELECT value FROM json_each(?2))
                 UNION
-                SELECT s.id, m.result_native_session_id FROM chat_sessions s
-                JOIN chat_messages m ON m.session_id = s.id WHERE s.harness = 'opencode'
+                SELECT s.id, m.result_native_session_id FROM chat_sessions s JOIN chat_messages m
+                ON m.session_id = s.id WHERE s.harness IN (SELECT value FROM json_each(?2))
              )
              SELECT native_id, MAX(chat_id IN (SELECT value FROM json_each(?1))),
                  MAX(chat_id NOT IN (SELECT value FROM json_each(?1))) FROM refs
@@ -2603,13 +2611,19 @@ impl Store {
         )?;
         let mut deleting = std::collections::BTreeSet::new();
         let mut retained = std::collections::BTreeSet::new();
-        for row in query.query_map([serde_json::to_string(chat_ids)?], |row| {
-            Ok((
-                row.get::<_, String>(0)?,
-                row.get::<_, bool>(1)?,
-                row.get::<_, bool>(2)?,
-            ))
-        })? {
+        for row in query.query_map(
+            [
+                serde_json::to_string(chat_ids)?,
+                serde_json::to_string(harnesses)?,
+            ],
+            |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, bool>(1)?,
+                    row.get::<_, bool>(2)?,
+                ))
+            },
+        )? {
             let (native_id, belongs_to_chat, shared) = row?;
             if shared {
                 retained.insert(native_id);
@@ -2728,6 +2742,30 @@ impl Store {
             }
         }
         Ok(false)
+    }
+
+    /// Reclaim orx-launched agent history no chat records; returns whether the budget ran out first.
+    pub(crate) fn cleanup_orphaned_native_sessions(&self) -> Result<bool> {
+        // Another dashboard may be copying this data directory.
+        if self.data_dir_move_claimed()? {
+            return Ok(false);
+        }
+        let mut query = self.conn.prepare(
+            "SELECT native_session_id FROM chat_sessions WHERE native_session_id IS NOT NULL
+             UNION SELECT base_native_session_id FROM chat_messages
+             WHERE base_native_session_id IS NOT NULL
+             UNION SELECT result_native_session_id FROM chat_messages
+             WHERE result_native_session_id IS NOT NULL",
+        )?;
+        let referenced = query
+            .query_map([], |row| row.get::<_, String>(0))?
+            .collect::<std::result::Result<_, _>>()?;
+        crate::local::native_store::sweep_isolated_sessions(
+            &self.data_dir.join("agents"),
+            referenced,
+            NATIVE_SESSION_SETTLE,
+            ORPHAN_PASS_BUDGET,
+        )
     }
 
     /// `None` clears it, which a fork of the session's very first turn needs:
@@ -5702,9 +5740,13 @@ mod tests {
     fn native_deletion_includes_inactive_branches_and_preserves_shared_sessions() {
         let dir = crate::local::git::TemporaryDirectory::new("orx-native-delete-refs").unwrap();
         let store = Store::open_at(dir.path().to_path_buf()).unwrap();
-        for (id, native_id) in [("delete", "current"), ("keep", "shared")] {
+        for (id, harness, native_id) in [
+            ("delete", "opencode", "current"),
+            ("keep", "claude-code", "shared"),
+            ("cursor", "cursor", "current"),
+        ] {
             let mut session = chat_session_fixture(id);
-            session.harness = "opencode".into();
+            session.harness = harness.into();
             session.native_session_id = Some(native_id.into());
             store.create_chat_session(&session).unwrap();
         }
@@ -5718,12 +5760,15 @@ mod tests {
             )
             .unwrap();
         let (deleting, retained) = store
-            .opencode_sessions_for_deletion(&["delete".into()])
+            .native_sessions_for_deletion(&["delete".into()], &["opencode", "claude-code"])
             .unwrap();
         assert_eq!(deleting, ["current".into(), "old".into()].into());
         assert_eq!(retained, ["kept-branch".into(), "shared".into()].into());
         let (deleting, retained) = store
-            .opencode_sessions_for_deletion(&["delete".into(), "keep".into()])
+            .native_sessions_for_deletion(
+                &["delete".into(), "keep".into()],
+                &["opencode", "claude-code"],
+            )
             .unwrap();
         assert_eq!(
             deleting,
@@ -5749,7 +5794,7 @@ mod tests {
             } else {
                 let _lock = store.lock_native_deletion().unwrap();
                 let (deleting, retained) = store
-                    .opencode_sessions_for_deletion(&["second".into()])
+                    .native_sessions_for_deletion(&["second".into()], &["opencode", "claude-code"])
                     .unwrap();
                 assert_eq!(deleting, ["shared".into()].into());
                 assert!(retained.is_empty());
@@ -5780,7 +5825,7 @@ mod tests {
         };
         let lock = store.lock_native_deletion().unwrap();
         let (deleting, retained) = store
-            .opencode_sessions_for_deletion(&["first".into()])
+            .native_sessions_for_deletion(&["first".into()], &["opencode", "claude-code"])
             .unwrap();
         assert!(deleting.is_empty());
         assert_eq!(retained, ["shared".into()].into());

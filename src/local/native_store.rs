@@ -196,6 +196,245 @@ pub fn delete_opencode_sessions(
     opencode_database::delete_sessions(&[isolated, legacy], ids, retained)
 }
 
+/// Removes Claude Code, Codex and Cursor history from orx's isolated homes only, never the user's own.
+pub fn delete_isolated_sessions(
+    ids: &std::collections::BTreeSet<String>,
+    retained: &std::collections::BTreeSet<String>,
+) -> Result<()> {
+    if ids.is_empty() {
+        return Ok(());
+    }
+    remove_isolated_sessions(
+        &crate::store::data_dir().join("agents"),
+        ids.difference(retained),
+    )
+}
+
+fn remove_isolated_sessions<'a>(
+    agents: &Path,
+    ids: impl Iterator<Item = &'a String>,
+) -> Result<()> {
+    let files = isolated_session_files(agents)?;
+    for id in ids {
+        for path in files.get(id).into_iter().flatten() {
+            remove_session_path(path)?;
+        }
+    }
+    Ok(())
+}
+
+/// Remove orx-launched sessions no chat records once they have settled; returns whether the budget ran out.
+pub(crate) fn sweep_isolated_sessions(
+    agents: &Path,
+    mut referenced: std::collections::HashSet<String>,
+    settle: std::time::Duration,
+    budget: std::time::Duration,
+) -> Result<bool> {
+    let codex = agents.join("codex");
+    // Without the spawn edges a referenced thread's sub-agents would look orphaned.
+    let codex_readable = match codex_spawned_threads(&codex, &referenced) {
+        Ok(spawned) => {
+            referenced.extend(spawned);
+            true
+        }
+        Err(_) => false,
+    };
+    let settled = |path: &PathBuf| {
+        std::fs::symlink_metadata(path)
+            .and_then(|metadata| metadata.modified())
+            .is_ok_and(|at| at.elapsed().unwrap_or_default() >= settle)
+    };
+    let sessions = isolated_session_files(agents)?;
+    let started = std::time::Instant::now();
+    for (id, paths) in sessions {
+        if started.elapsed() >= budget {
+            return Ok(true);
+        }
+        if referenced.contains(&id)
+            || !paths.iter().all(settled)
+            || (!codex_readable && paths.iter().any(|path| path.starts_with(&codex)))
+        {
+            continue;
+        }
+        for path in &paths {
+            // A path that cannot be removed is retried next pass without stalling the rest.
+            let _ = remove_session_path(path);
+        }
+    }
+    // After the files, so an unhealthy OpenCode database never holds them back.
+    let database = agents.join("opencode/opencode.db");
+    if !same_home(&database, &opencode_db(NativeStore::Legacy)) {
+        let orphans = opencode_database::stale_root_sessions(&database, settle)?
+            .into_iter()
+            .filter(|id| !referenced.contains(id))
+            .collect::<std::collections::BTreeSet<_>>();
+        if !orphans.is_empty() {
+            let retained = referenced.into_iter().collect();
+            let purged = opencode_database::delete_sessions(
+                std::slice::from_ref(&database),
+                &orphans,
+                &retained,
+            );
+            // A busy database is retried next pass.
+            if let Err(error) = purged {
+                if error
+                    .downcast_ref::<opencode_database::DatabaseBusy>()
+                    .is_none()
+                {
+                    return Err(error);
+                }
+            }
+        }
+        opencode_database::compact(&database)?;
+    }
+    Ok(false)
+}
+
+/// A user home pointed at orx's isolated one is the user's, so it is never purged.
+fn same_home(isolated: &Path, legacy: &Path) -> bool {
+    isolated == legacy
+        || matches!(
+            (crate::paths::canonicalize(isolated), crate::paths::canonicalize(legacy)),
+            (Ok(isolated), Ok(legacy)) if isolated == legacy
+        )
+}
+
+/// Session files in orx's isolated Claude Code, Codex and Cursor homes, by native id.
+fn isolated_session_files(
+    agents: &Path,
+) -> Result<std::collections::BTreeMap<String, Vec<PathBuf>>> {
+    let mut sessions = std::collections::BTreeMap::<String, Vec<PathBuf>>::new();
+    let mut add = |id: Option<&str>, path: PathBuf| {
+        // Hyphenated only: Claude, Codex and Cursor ids, and nothing else in those trees.
+        if let Some(id) = id.filter(|id| id.len() == 36 && uuid::Uuid::parse_str(id).is_ok()) {
+            sessions.entry(id.to_string()).or_default().push(path);
+        }
+    };
+    let name = |path: &Path| {
+        path.file_name()
+            .and_then(|name| name.to_str())
+            .map(str::to_string)
+    };
+    let claude = agents.join("claude");
+    if !same_home(&claude, &claude_home(NativeStore::Legacy)) {
+        for project in child_dirs(&claude.join("projects"))? {
+            // `<id>.jsonl` is the transcript; a sibling `<id>/` holds its subagents and tool results.
+            for path in child_paths(&project)? {
+                let name = name(&path);
+                add(
+                    name.as_deref()
+                        .map(|name| name.strip_suffix(".jsonl").unwrap_or(name)),
+                    path,
+                );
+            }
+        }
+        for tree in ["session-env", "file-history"] {
+            for path in child_paths(&claude.join(tree))? {
+                add(name(&path).as_deref(), path);
+            }
+        }
+    }
+    let codex = agents.join("codex");
+    if !same_home(&codex, &codex_home(NativeStore::Legacy)) {
+        for tree in ["sessions", "archived_sessions"] {
+            for path in tree_files(&codex.join(tree))? {
+                // Rollouts are `rollout-<timestamp>-<thread id>.jsonl`.
+                let stem =
+                    name(&path).and_then(|name| name.strip_suffix(".jsonl").map(str::to_string));
+                add(
+                    stem.as_deref()
+                        .and_then(|stem| stem.get(stem.len().saturating_sub(36)..)),
+                    path,
+                );
+            }
+        }
+    }
+    let cursor = agents.join("cursor");
+    if !same_home(&cursor, &cursor_home(NativeStore::Legacy)) {
+        for workspace in child_dirs(&cursor.join("chats"))? {
+            for path in child_paths(&workspace)? {
+                add(name(&path).as_deref(), path);
+            }
+        }
+        for path in child_paths(&cursor.join("acp-sessions"))? {
+            add(name(&path).as_deref(), path);
+        }
+    }
+    Ok(sessions)
+}
+
+/// Threads Codex spawned as sub-agents of the given ones, transitively.
+fn codex_spawned_threads(
+    codex: &Path,
+    parents: &std::collections::HashSet<String>,
+) -> Result<Vec<String>> {
+    let database = codex.join("state_5.sqlite");
+    if !database.exists() {
+        return Ok(Vec::new());
+    }
+    let connection = rusqlite::Connection::open_with_flags(
+        database,
+        rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
+    )?;
+    let mut query = connection.prepare(
+        "WITH RECURSIVE spawned(id) AS (
+            SELECT value FROM json_each(?1)
+            UNION SELECT child_thread_id FROM thread_spawn_edges JOIN spawned ON parent_thread_id = spawned.id
+         ) SELECT id FROM spawned",
+    )?;
+    let spawned = query
+        .query_map([serde_json::to_string(parents)?], |row| row.get(0))?
+        .collect::<rusqlite::Result<_>>()?;
+    Ok(spawned)
+}
+
+/// Entries that vanish while listing are skipped: a harness may be moving them.
+fn child_paths(root: &Path) -> Result<Vec<PathBuf>> {
+    match std::fs::read_dir(root) {
+        Ok(entries) => Ok(entries.flatten().map(|entry| entry.path()).collect()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(Vec::new()),
+        Err(error) => Err(error.into()),
+    }
+}
+
+fn child_dirs(root: &Path) -> Result<Vec<PathBuf>> {
+    Ok(child_paths(root)?
+        .into_iter()
+        .filter(|path| std::fs::symlink_metadata(path).is_ok_and(|metadata| metadata.is_dir()))
+        .collect())
+}
+
+fn tree_files(root: &Path) -> Result<Vec<PathBuf>> {
+    let mut files = Vec::new();
+    for path in child_paths(root)? {
+        let Ok(metadata) = std::fs::symlink_metadata(&path) else {
+            continue;
+        };
+        if metadata.is_dir() {
+            files.extend(tree_files(&path)?);
+        } else if metadata.is_file() {
+            files.push(path);
+        }
+    }
+    Ok(files)
+}
+
+/// Symlinks are removed, never followed.
+fn remove_session_path(path: &Path) -> Result<()> {
+    let result = match std::fs::symlink_metadata(path) {
+        Ok(metadata) if metadata.is_dir() => std::fs::remove_dir_all(path),
+        Ok(_) => std::fs::remove_file(path),
+        Err(error) => Err(error),
+    };
+    match result {
+        Err(error) if error.kind() != std::io::ErrorKind::NotFound => Err(anyhow!(
+            "Could not remove native chat history {}: {error}",
+            path.display()
+        )),
+        _ => Ok(()),
+    }
+}
+
 pub fn codex_sqlite_override(store: NativeStore, home: &Path) -> Option<String> {
     (store == NativeStore::Isolated).then(|| format!("sqlite_home={}", toml_string(home)))
 }
@@ -749,6 +988,138 @@ mod tests {
             .unwrap();
         assert!(opencode_has_session(&db, "id").unwrap());
         assert!(!opencode_has_session(&db, "missing").unwrap());
+        std::fs::remove_dir_all(root).ok();
+    }
+
+    fn write_aged(path: &Path, age: std::time::Duration) {
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(path, "private transcript").unwrap();
+        std::fs::File::options()
+            .write(true)
+            .open(path)
+            .unwrap()
+            .set_modified(std::time::SystemTime::now() - age)
+            .unwrap();
+    }
+
+    #[test]
+    fn isolated_history_is_purged_by_id_and_swept_only_when_unreferenced_and_settled() {
+        let root = std::env::temp_dir().join(format!("orx-native-sweep-{}", uuid::Uuid::new_v4()));
+        let agents = root.join("agents");
+        let day = std::time::Duration::from_secs(24 * 60 * 60);
+        let id = |n: u8| format!("00000000-0000-4000-8000-{n:012}");
+        let project = agents.join("claude/projects/-tmp-chat");
+        let rollout = |dir: &str, n: u8| {
+            agents.join(format!(
+                "codex/{dir}/rollout-2026-09-29T16-57-41-{}.jsonl",
+                id(n)
+            ))
+        };
+        let deleted = [
+            project.join(format!("{}.jsonl", id(1))),
+            project.join(id(1)).join("subagents/agent-a.jsonl"),
+            agents.join("claude/session-env").join(id(1)).join("env"),
+            agents
+                .join("cursor/chats/abc123")
+                .join(id(1))
+                .join("store.db"),
+        ];
+        let orphan = project.join(format!("{}.jsonl", id(2)));
+        let fresh = project.join(format!("{}.jsonl", id(3)));
+        let referenced_claude = project.join(format!("{}.jsonl", id(4)));
+        let orphan_rollout = rollout("sessions/2026/09/29", 5);
+        let referenced_rollout = rollout("archived_sessions", 6);
+        let spawned_rollout = rollout("sessions/2026/09/29", 7);
+        let not_a_session = project.join("notes.jsonl");
+        for path in deleted.iter().chain([
+            &orphan,
+            &referenced_claude,
+            &orphan_rollout,
+            &referenced_rollout,
+            &spawned_rollout,
+            &not_a_session,
+        ]) {
+            write_aged(path, 2 * day);
+        }
+        write_aged(&fresh, std::time::Duration::ZERO);
+        let state = rusqlite::Connection::open(agents.join("codex/state_5.sqlite")).unwrap();
+        state
+            .execute_batch(&format!(
+                "CREATE TABLE thread_spawn_edges (parent_thread_id TEXT, child_thread_id TEXT, status TEXT);
+                 INSERT INTO thread_spawn_edges VALUES ('{}', '{}', 'done');",
+                id(6),
+                id(7)
+            ))
+            .unwrap();
+        drop(state);
+
+        remove_isolated_sessions(&agents, [id(1)].iter()).unwrap();
+        assert!(deleted.iter().all(|path| !path.exists()));
+        assert!(!project.join(id(1)).exists());
+        assert!(orphan.exists());
+
+        let referenced = || [id(4), id(6)].into_iter().collect();
+        assert!(
+            sweep_isolated_sessions(&agents, referenced(), day, std::time::Duration::ZERO).unwrap()
+        );
+        assert!(orphan.exists(), "an exhausted budget removes nothing");
+        assert!(!sweep_isolated_sessions(&agents, referenced(), day, day).unwrap());
+        assert!(!orphan.exists() && !orphan_rollout.exists());
+        for kept in [
+            &fresh,
+            &referenced_claude,
+            &referenced_rollout,
+            &spawned_rollout,
+            &not_a_session,
+        ] {
+            assert!(kept.exists(), "{}", kept.display());
+        }
+        std::fs::remove_dir_all(root).ok();
+    }
+
+    #[test]
+    fn opencode_sweep_purges_settled_unreferenced_roots_and_compacts() {
+        let root =
+            std::env::temp_dir().join(format!("orx-opencode-sweep-{}", uuid::Uuid::new_v4()));
+        let agents = root.join("agents");
+        let db = agents.join("opencode/opencode.db");
+        std::fs::create_dir_all(db.parent().unwrap()).unwrap();
+        let day = std::time::Duration::from_secs(24 * 60 * 60);
+        let old = crate::store::now_ms() - 2 * 24 * 60 * 60 * 1000;
+        let connection = rusqlite::Connection::open(&db).unwrap();
+        connection
+            .execute_batch(&format!(
+                "CREATE TABLE session (id TEXT PRIMARY KEY, directory TEXT, parent_id TEXT, time_updated INTEGER);
+                 CREATE TABLE message (id TEXT, session_id TEXT, data TEXT);
+                 CREATE TABLE part (id TEXT, message_id TEXT, session_id TEXT, data TEXT);
+                 INSERT INTO session VALUES ('orphan', '/tmp', NULL, {old}), ('child', '/tmp', 'orphan', {old}),
+                   ('kept', '/tmp', NULL, {old}), ('fresh', '/tmp', NULL, {now});",
+                now = crate::store::now_ms()
+            ))
+            .unwrap();
+        for id in ["orphan", "child", "kept", "fresh"] {
+            connection
+                .execute(
+                    "INSERT INTO message VALUES (?1, ?1, ?2)",
+                    rusqlite::params![id, "x".repeat(64 * 1024)],
+                )
+                .unwrap();
+        }
+        drop(connection);
+        let before = std::fs::metadata(&db).unwrap().len();
+        let referenced = ["kept".to_string()].into_iter().collect();
+        sweep_isolated_sessions(&agents, referenced, day, day).unwrap();
+        let connection = rusqlite::Connection::open(&db).unwrap();
+        let mut query = connection
+            .prepare("SELECT id FROM session ORDER BY id")
+            .unwrap();
+        let remaining = query
+            .query_map([], |row| row.get::<_, String>(0))
+            .unwrap()
+            .collect::<rusqlite::Result<Vec<_>>>()
+            .unwrap();
+        assert_eq!(remaining, ["fresh", "kept"]);
+        assert!(std::fs::metadata(&db).unwrap().len() < before);
         std::fs::remove_dir_all(root).ok();
     }
 }
