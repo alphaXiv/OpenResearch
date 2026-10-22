@@ -130,7 +130,7 @@ export function ArchiveMenu({ id, name, actions, onArchive, onDelete, compact = 
           {actions.restoreOnly && <MenuItem onClick={() => choose("only", false)}>{m.tree_restore_only()}</MenuItem>}
           {actions.restoreAbove && <MenuItem onClick={() => choose("ancestors", false)}>{m.tree_restore_above()}</MenuItem>}
           {actions.restoreDown && <MenuItem onClick={() => choose("descendants", false)}>{m.tree_restore_down()}</MenuItem>}
-          {actions.remove && <MenuItem onClick={remove}>{m.tree_delete_experiment()}</MenuItem>}
+          {actions.remove && <MenuItem danger onClick={remove}>{m.tree_delete_experiment()}</MenuItem>}
         </div>, document.body,
       )}
     </div>

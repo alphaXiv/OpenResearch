@@ -1949,16 +1949,16 @@ pub fn publication_sync_status(
     "synced"
 }
 
-/// Delete a local branch and return its last commit; `Ok(None)` when it is already gone.
+/// Delete a local branch and return its last commit; `Ok(None)` when it or the repo is gone.
 /// Git refuses while any worktree has the branch checked out.
 pub fn delete_branch(repo_path: &Path, branch: &str) -> Result<Option<String>> {
     let reference = format!("refs/heads/{branch}");
-    let Ok(sha) = git(
-        Some(repo_path),
-        &["rev-parse", "--verify", "--quiet", &reference],
-    ) else {
+    if !repo_path.exists()
+        || git(Some(repo_path), &["for-each-ref", "--format=x", &reference])?.is_empty()
+    {
         return Ok(None);
-    };
+    }
+    let sha = git(Some(repo_path), &["rev-parse", "--verify", &reference])?;
     git(Some(repo_path), &["branch", "-D", branch])?;
     Ok(Some(sha))
 }

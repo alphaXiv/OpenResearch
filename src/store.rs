@@ -2029,7 +2029,7 @@ impl Store {
                 }
             };
             match fate {
-                // Project deletion leaves unrelated orphans to the periodic scan.
+                // Deletion leaves unrelated orphans to the periodic scan.
                 OrphanFate::Reclaim if deleting || deleting_runs.is_none() => reclaimable.push(id),
                 OrphanFate::Reclaim => {}
                 OrphanFate::Keep { snapshot } => retained_snapshots.extend(snapshot),
@@ -2216,13 +2216,28 @@ impl Store {
                 "Cannot delete this experiment while its runs are still in flight."
             ));
         }
+        // Refuse a run whose job or supervisor is still winding down before `before_rows` acts.
+        for run in &runs {
+            self.orphan_fate(&run.id, true)?;
+        }
         before_rows()?;
         // Keep rows on filesystem errors so deletion can be retried with the same handles.
         self.cleanup_deleted_run_artifacts(&runs, "experiment")?;
         let tx = self.begin()?;
         queue_remote_cleanups(&tx, "experiment_id", id, true)?;
         tx.execute("DELETE FROM runs WHERE experiment_id = ?1", params![id])?;
-        tx.execute("DELETE FROM local_experiments WHERE id = ?1", params![id])?;
+        // Creating or moving an experiment does not take the artifacts lock, so recheck for children.
+        if tx.execute(
+            "DELETE FROM local_experiments WHERE id = ?1 AND NOT EXISTS
+               (SELECT 1 FROM local_experiments WHERE parent_experiment_id = ?1)",
+            params![id],
+        )? == 0
+            && self.get_local_experiment(id)?.is_some()
+        {
+            return Err(anyhow!(
+                "Experiment {id} gained a child experiment; delete or move it first."
+            ));
+        }
         tx.commit()?;
         Ok(())
     }
@@ -4303,24 +4318,46 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("orx-exp-artifacts-{}", uuid::Uuid::new_v4()));
         let store = Store::open_at(dir.clone()).unwrap();
         let run = uuid::Uuid::new_v4().to_string();
-        let digest = "d".repeat(64);
+        let sibling = uuid::Uuid::new_v4().to_string();
+        let (digest, shared) = ("d".repeat(64), "e".repeat(64));
         project_with_run_artifacts(&store, "p", &run, &digest);
+        project_with_run_artifacts(&store, "q", &sibling, &shared);
         store
             .conn
-            .execute("UPDATE runs SET status = 'running'", [])
+            .execute(
+                "UPDATE runs SET experiment_id = 'other' WHERE id = ?1",
+                params![sibling],
+            )
             .unwrap();
-        let mut called = false;
-        assert!(store
-            .delete_local_experiment("experiment", || {
-                called = true;
-                Ok(())
-            })
-            .is_err());
-        assert!(!called);
+        let refused = |store: &Store| {
+            let mut called = false;
+            assert!(store
+                .delete_local_experiment("experiment", || {
+                    called = true;
+                    Ok(())
+                })
+                .is_err());
+            assert!(!called);
+        };
+        store
+            .conn
+            .execute(
+                "UPDATE runs SET status = 'running' WHERE id = ?1",
+                params![run],
+            )
+            .unwrap();
+        refused(&store);
         store
             .conn
             .execute("UPDATE runs SET status = 'done'", [])
             .unwrap();
+        // A terminal run whose supervisor is still finishing is refused before anything is undone.
+        let mut supervisor =
+            open_lifecycle_lock_at(&dir.join("run-logs").join(format!("{run}.supervisor.lock")))
+                .unwrap();
+        let held = supervisor.write().unwrap();
+        refused(&store);
+        drop(held);
         store
             .delete_local_experiment("experiment", || Ok(()))
             .unwrap();
@@ -4331,6 +4368,16 @@ mod tests {
             .join(format!("{digest}.tar"))
             .exists());
         assert!(store.get_run(&run).unwrap().is_none());
+        assert!(dir
+            .join("local-runs")
+            .join(&sibling)
+            .join("repo/output")
+            .is_file());
+        assert!(dir
+            .join("source-snapshots")
+            .join(format!("{shared}.tar"))
+            .is_file());
+        assert!(store.get_run(&sibling).unwrap().is_some());
         assert!(store.get_local_project("p").unwrap().is_some());
         std::fs::remove_dir_all(dir).unwrap();
     }

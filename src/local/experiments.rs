@@ -194,20 +194,24 @@ pub fn delete_experiment(store: &Store, id: &str) -> Result<DeletedExperiment> {
             .iter()
             .any(|other| other.id != experiment.id && other.branch_name == experiment.branch_name);
     let runs = store.list_runs_by_experiment(id)?.len();
+    let branch = &experiment.branch_name;
     let mut branch_commit = None;
-    store.delete_local_experiment(id, || {
+    let deleted = store.delete_local_experiment(id, || {
         if owns_branch {
-            branch_commit =
-                git::delete_branch(Path::new(&project.repo_path), &experiment.branch_name)
-                    .map_err(|error| {
-                        anyhow!(
-                    "Could not delete branch {}; check it out of every worktree first. {error}",
-                    experiment.branch_name
-                )
-                    })?;
+            branch_commit = git::delete_branch(Path::new(&project.repo_path), branch)
+                .map_err(|error| anyhow!("Could not delete branch {branch}: {error}"))?;
         }
         Ok(())
-    })?;
+    });
+    if let Err(error) = deleted {
+        // The branch and its reflog are gone, so a retry could not report its commit.
+        return Err(match &branch_commit {
+            Some(sha) => anyhow!(
+                "{error} Branch {branch} was already deleted; restore it with `git branch {branch} {sha}`."
+            ),
+            None => error,
+        });
+    }
     Ok(DeletedExperiment {
         experiment,
         runs,
@@ -625,6 +629,10 @@ mod tests {
             .unwrap()
             .to_string()
             .contains("child experiment"));
+        assert!(store.get_local_experiment("root").unwrap().is_some());
+        assert!(git::resolve_branch_commit(&repo, "orx/root")
+            .unwrap()
+            .is_some());
         let worktree = dir.join("worktree");
         git(&["worktree", "add", worktree.to_str().unwrap(), "orx/leaf"]);
         assert!(delete_experiment(&store, "leaf").is_err());
@@ -632,6 +640,8 @@ mod tests {
         assert!(git::resolve_branch_commit(&repo, "orx/leaf")
             .unwrap()
             .is_some());
+        assert!(store.get_run(&run_id).unwrap().is_some());
+        assert!(store.due_remote_cleanups(10).unwrap().is_empty());
         git(&["worktree", "remove", worktree.to_str().unwrap()]);
 
         let deleted = delete_experiment(&store, "leaf").unwrap();
@@ -643,7 +653,9 @@ mod tests {
             .unwrap()
             .is_none());
         let queued = store.due_remote_cleanups(10).unwrap();
-        assert!(queued.len() == 1 && queued[0].run_id == run_id && queued[0].deleted);
+        assert_eq!(queued.len(), 1);
+        assert_eq!(queued[0].run_id, run_id);
+        assert!(queued[0].deleted);
         assert!(delete_experiment(&store, "leaf").is_err());
 
         // The root is now a leaf; the legacy root keeps the project's base branch.
