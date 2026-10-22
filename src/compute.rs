@@ -1192,6 +1192,7 @@ pub(crate) mod tests {
                     SshHostSettings {
                         container: Some("research".into()),
                         remote_root: Some("/scratch/lab/orx".into()),
+                        keep_remote_runs: false,
                     },
                 ),
                 ("direct".into(), SshHostSettings::default()),

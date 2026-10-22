@@ -27,5 +27,11 @@ orx exp run <expId> --backend slurm
   absolute directory, such as scratch space when home quota is small. It must
   be on a filesystem the compute nodes share. Each run keeps the root it was
   submitted with; `--clear remote-root` restores the default for new runs.
+- Once a run finishes and its log is collected, the running OpenResearch app
+  removes its remote run dir, along with cached source archives that no active
+  run uses. Anything the job wrote into `repo/` goes with it. To keep results
+  on the cluster, run `orx compute configure slurm --keep-remote-runs true`, or
+  write outputs outside the run dir. Deleting a project removes its runs'
+  remote dirs regardless.
 - A detached `orx supervise` process records scheduler status and logs; do not
   kill it.

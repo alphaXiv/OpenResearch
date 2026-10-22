@@ -508,6 +508,24 @@ enum OrphanFate {
     KeepWithAllSnapshots,
 }
 
+/// Remote dirs waiting for removal; `deleted` entries ignore a target's keep setting.
+pub(crate) struct RemoteCleanup {
+    pub run_id: String,
+    pub backend_json: String,
+    pub deleted: bool,
+}
+
+const QUEUE_REMOTE_CLEANUP: &str =
+    "INSERT INTO remote_cleanups (run_id, backend_json, deleted, next_attempt_at)";
+// Appended to a SELECT's WHERE, which SQLite needs before ON CONFLICT; deletion wins over a pending finish.
+const UPSERT_REMOTE_CLEANUP: &str = "AND CASE WHEN json_valid(backend_json)
+       THEN json_extract(backend_json, '$.kind') END IN ('ssh_job', 'slurm_job')
+     ON CONFLICT(run_id) DO UPDATE SET backend_json = excluded.backend_json,
+       deleted = MAX(deleted, excluded.deleted), next_attempt_at = excluded.next_attempt_at";
+/// Failed remote cleanups retry after 5 minutes, doubling up to a day.
+const REMOTE_CLEANUP_RETRY_MS: i64 = 5 * 60 * 1000;
+const REMOTE_CLEANUP_MAX_RETRY_MS: i64 = 24 * 60 * 60 * 1000;
+
 pub struct Store {
     conn: Connection,
     data_dir: PathBuf,
@@ -759,6 +777,14 @@ impl Store {
                 missing_tools TEXT NOT NULL DEFAULT '',
                 error     TEXT,
                 tested_at INTEGER NOT NULL
+            );
+            CREATE TABLE IF NOT EXISTS remote_cleanups (
+                run_id          TEXT PRIMARY KEY,
+                backend_json    TEXT NOT NULL,
+                deleted         INTEGER NOT NULL,
+                attempts        INTEGER NOT NULL DEFAULT 0,
+                next_attempt_at INTEGER NOT NULL,
+                last_error      TEXT
             );
             CREATE TABLE IF NOT EXISTS overleaf_links (
                 project_id TEXT NOT NULL,
@@ -2121,6 +2147,72 @@ impl Store {
         Ok(())
     }
 
+    /// Queues a finished run's remote dir for removal; non-SSH/Slurm runs are ignored.
+    pub(crate) fn queue_finished_remote_cleanup(&self, run_id: &str) -> Result<()> {
+        self.conn.execute(
+            &format!("{QUEUE_REMOTE_CLEANUP} SELECT id, backend_json, 0, ?2 FROM runs WHERE id = ?1 {UPSERT_REMOTE_CLEANUP}"),
+            params![run_id, now_ms()],
+        )?;
+        Ok(())
+    }
+
+    pub(crate) fn due_remote_cleanups(&self, limit: usize) -> Result<Vec<RemoteCleanup>> {
+        let mut statement = self.conn.prepare(
+            "SELECT run_id, backend_json, deleted FROM remote_cleanups
+             WHERE next_attempt_at <= ?1 ORDER BY next_attempt_at LIMIT ?2",
+        )?;
+        let rows = statement.query_map(params![now_ms(), limit as i64], |row| {
+            Ok(RemoteCleanup {
+                run_id: row.get(0)?,
+                backend_json: row.get(1)?,
+                deleted: row.get(2)?,
+            })
+        })?;
+        Ok(rows.collect::<std::result::Result<Vec<_>, _>>()?)
+    }
+
+    pub(crate) fn finish_remote_cleanup(&self, run_id: &str) -> Result<()> {
+        self.conn.execute(
+            "DELETE FROM remote_cleanups WHERE run_id = ?1",
+            params![run_id],
+        )?;
+        Ok(())
+    }
+
+    pub(crate) fn defer_remote_cleanup(&self, run_id: &str, error: &str) -> Result<()> {
+        self.conn.execute(
+            "UPDATE remote_cleanups SET attempts = attempts + 1, last_error = ?2,
+               next_attempt_at = ?3 + MIN(?4 * (1 << MIN(attempts, 10)), ?5)
+             WHERE run_id = ?1",
+            params![
+                run_id,
+                error,
+                now_ms(),
+                REMOTE_CLEANUP_RETRY_MS,
+                REMOTE_CLEANUP_MAX_RETRY_MS
+            ],
+        )?;
+        Ok(())
+    }
+
+    /// Source digests that unfinished SSH/Slurm runs on `host` may still stage.
+    pub(crate) fn active_remote_source_digests(
+        &self,
+        host: &str,
+    ) -> Result<std::collections::BTreeSet<String>> {
+        let mut digests = std::collections::BTreeSet::new();
+        for run in self.list_active_runs()? {
+            if let Ok(descriptor) = crate::jobs::BackendDescriptor::parse(&run.backend_json) {
+                if matches!(descriptor.kind.as_str(), "ssh_job" | "slurm_job")
+                    && descriptor.namespace.as_deref() == Some(host)
+                {
+                    digests.extend(descriptor.source_digest);
+                }
+            }
+        }
+        Ok(digests)
+    }
+
     fn data_dir_move_claimed(&self) -> Result<bool> {
         self.clear_stale_data_dir_move_lease()?;
         Ok(self.conn.query_row(
@@ -2181,6 +2273,10 @@ impl Store {
         tx.execute(
             "DELETE FROM chat_sessions WHERE project_id = ?1",
             params![id],
+        )?;
+        tx.execute(
+            &format!("{QUEUE_REMOTE_CLEANUP} SELECT id, backend_json, 1, ?2 FROM runs WHERE project_id = ?1 {UPSERT_REMOTE_CLEANUP}"),
+            params![id, now_ms()],
         )?;
         self.conn
             .execute("DELETE FROM runs WHERE project_id = ?1", params![id])?;
@@ -4163,6 +4259,63 @@ mod tests {
         store.delete_local_project("malformed").unwrap();
         assert!(!dir.join("local-runs/malformed-run").exists());
         drop(store);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn remote_cleanups_queue_on_finish_and_project_delete_then_back_off() {
+        let dir = std::env::temp_dir().join(format!("orx-remote-cleanup-{}", uuid::Uuid::new_v4()));
+        let store = Store::open_at(dir.clone()).unwrap();
+        project_with_run_artifacts(&store, "p", "local", &"d".repeat(64));
+        let insert = |id: &str, status: &str, kind: &str| {
+            let descriptor =
+                serde_json::json!({"kind": kind, "namespace": "lab", "sourceDigest": id});
+            store.conn.execute(
+                "INSERT INTO runs (id, experiment_id, project_id, status, backend_json, created_at, updated_at)
+                 VALUES (?1, 'experiment', 'p', ?2, ?3, 1, 1)",
+                params![id, status, descriptor.to_string()],
+            ).unwrap();
+        };
+        insert("ssh", "done", "ssh_job");
+        insert("slurm", "failed", "slurm_job");
+        insert("box", "done", "openresearch_job");
+        insert("live", "running", "ssh_job");
+        for id in ["ssh", "box", "local"] {
+            store.queue_finished_remote_cleanup(id).unwrap();
+        }
+        let due = |store: &Store| {
+            store
+                .due_remote_cleanups(10)
+                .unwrap()
+                .into_iter()
+                .map(|entry| (entry.run_id, entry.deleted))
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(due(&store), [("ssh".to_string(), false)]);
+        assert_eq!(
+            store.active_remote_source_digests("lab").unwrap(),
+            std::collections::BTreeSet::from(["live".to_string()])
+        );
+        store.defer_remote_cleanup("ssh", "unreachable").unwrap();
+        assert!(due(&store).is_empty());
+        store
+            .conn
+            .execute("UPDATE runs SET status = 'done'", [])
+            .unwrap();
+        store.delete_local_project("p").unwrap();
+        let mut entries = due(&store);
+        entries.sort();
+        // Deletion marks every SSH/Slurm run, including one already waiting to retry.
+        assert_eq!(
+            entries,
+            [
+                ("live".to_string(), true),
+                ("slurm".to_string(), true),
+                ("ssh".to_string(), true)
+            ]
+        );
+        store.finish_remote_cleanup("ssh").unwrap();
+        assert_eq!(due(&store).len(), 2);
         std::fs::remove_dir_all(dir).unwrap();
     }
 

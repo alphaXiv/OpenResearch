@@ -849,6 +849,9 @@ async fn watch_ssh_job(
                 )
                 .await;
             }
+            if descriptor.kind == "ssh_job" && collected {
+                queue_remote_cleanup(store, run_id);
+            }
             eprintln!("supervise {run_id}: finished ({status})");
             return Ok(status);
         }
@@ -1436,10 +1439,11 @@ async fn run_slurm(
 
         if is_terminal_stage(stage) {
             let _ = done_tx.send(true);
-            if tokio::time::timeout(Duration::from_secs(20), &mut log_task)
-                .await
-                .is_err()
-            {
+            let collected = matches!(
+                tokio::time::timeout(Duration::from_secs(20), &mut log_task).await,
+                Ok(Ok(true))
+            );
+            if !collected {
                 log_task.abort();
             }
             let applied = store.update_status(&run_id, status, Some(now_ms()), None)?;
@@ -1452,6 +1456,9 @@ async fn run_slurm(
                     }
                 }
             }
+            if collected {
+                queue_remote_cleanup(&store, &run_id);
+            }
             eprintln!("supervise {run_id}: finished ({status})");
             return Ok(());
         }
@@ -1462,6 +1469,13 @@ async fn run_slurm(
         }
 
         tokio::time::sleep(POLL_INTERVAL).await;
+    }
+}
+
+/// Once logs are local, `orx up` removes the remote run dir unless the target keeps results.
+fn queue_remote_cleanup(store: &Store, run_id: &str) {
+    if let Err(err) = store.queue_finished_remote_cleanup(run_id) {
+        eprintln!("supervise {run_id}: could not queue remote cleanup: {err}");
     }
 }
 

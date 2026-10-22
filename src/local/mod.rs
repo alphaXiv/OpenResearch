@@ -40,6 +40,7 @@ pub mod overleaf_live;
 pub mod portable_git;
 pub mod projects;
 pub mod ray;
+pub mod remote_cleanup;
 pub mod resolve;
 pub mod shell_env;
 pub mod skills;

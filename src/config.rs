@@ -464,6 +464,9 @@ pub struct SshHostSettings {
     /// Absolute storage root for runs and the source cache; `None` is `~/.orx`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub remote_root: Option<String>,
+    /// Keep finished runs' remote dirs instead of removing them once logs are collected.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub keep_remote_runs: bool,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]

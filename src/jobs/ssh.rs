@@ -14,6 +14,7 @@
 //!   exit_code   written when the payload finishes
 //! A restarted `orx supervise` reattaches purely from that directory.
 
+pub(crate) mod cleanup;
 mod container;
 #[cfg(unix)]
 mod prepared;
@@ -124,11 +125,15 @@ pub fn remote_run_dir(root: Option<&str>, run_id: &str) -> String {
     }
 }
 
-fn remote_source_cache(root: Option<&str>, digest: &str) -> String {
+fn remote_source_dir(root: Option<&str>) -> String {
     match root {
-        Some(root) => format!("{root}/source/{digest}.tar"),
-        None => format!(".orx/source/{digest}.tar"),
+        Some(root) => format!("{root}/source"),
+        None => ".orx/source".into(),
     }
+}
+
+fn remote_source_cache(root: Option<&str>, digest: &str) -> String {
+    format!("{}/{digest}.tar", remote_source_dir(root))
 }
 
 /// One shell word for a remote path; relative paths resolve against `$HOME`.
@@ -163,10 +168,7 @@ pub fn resolve_options(
     } else {
         args.container.clone().or_else(|| saved.container.clone())
     };
-    let options = crate::config::SshHostSettings {
-        container,
-        remote_root: saved.remote_root,
-    };
+    let options = crate::config::SshHostSettings { container, ..saved };
     validate_host_options(&options)?;
     Ok((host, options))
 }
@@ -791,10 +793,11 @@ pub async fn stage_source(
 /// Remote (check, upload) scripts for a cached source tar. An interrupted upload
 /// still lets `cat` exit 0 on EOF, so both sides require the exact byte length;
 /// a short cached file reads as absent and is replaced by the next upload.
+/// A reused tar is touched so cache cleanup sees it as recently used.
 fn source_cache_commands(cache: &str, size: u64) -> (String, String) {
     let (dir, file) = (shell_path(parent_dir(cache)), shell_path(cache));
     let check = format!(
-        "f={file}; test -f \"$f\" && test $(wc -c < \"$f\") -eq {size} && echo present || true"
+        "f={file}; test -f \"$f\" && test $(wc -c < \"$f\") -eq {size} && touch \"$f\" && echo present || true"
     );
     let upload = format!(
         "umask 077; mkdir -p {dir}; f={file}; tmp=\"$f.tmp.$$\"; \

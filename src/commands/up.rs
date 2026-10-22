@@ -178,6 +178,10 @@ pub async fn run(args: UpArgs) -> Result<()> {
         state.data_dir_move_in_progress.clone(),
         state.data_dir_gate.clone(),
     ));
+    tokio::spawn(reclaim_remote_run_dirs(
+        state.data_dir_move_in_progress.clone(),
+        state.data_dir_gate.clone(),
+    ));
     spawn_claude_auth_monitor(
         state.chat.clone(),
         claude.clone(),
@@ -4692,6 +4696,64 @@ async fn reclaim_orphaned_run_artifacts(
             ORPHANED_RUN_SCAN_INTERVAL
         };
         tokio::time::sleep(pause).await;
+    }
+}
+
+/// Runs `f` on a fresh store under the data-dir gate; `None` while the data dir is moving.
+async fn with_gated_store<T: Send + 'static>(
+    moving: &AtomicBool,
+    gate: &tokio::sync::Mutex<()>,
+    f: impl FnOnce(&Store) -> Result<T> + Send + 'static,
+) -> Option<Result<T>> {
+    if moving.load(Ordering::SeqCst) {
+        return None;
+    }
+    let _gate = gate.lock().await;
+    if moving.load(Ordering::SeqCst) {
+        return None;
+    }
+    Some(
+        tokio::task::spawn_blocking(move || f(&Store::open()?))
+            .await
+            .unwrap_or_else(|error| Err(anyhow!("store task failed: {error}"))),
+    )
+}
+
+/// Removes queued remote run dirs; the gate is held only around store access, never over SSH.
+async fn reclaim_remote_run_dirs(moving: Arc<AtomicBool>, gate: Arc<tokio::sync::Mutex<()>>) {
+    tokio::time::sleep(Duration::from_secs(30)).await;
+    let mut reported = HashSet::new();
+    loop {
+        let mut report = |failures: Vec<(String, String)>| {
+            for (run_id, error) in failures {
+                if reported.insert(run_id.clone()) {
+                    eprintln!("orx up: remote cleanup for run {run_id}: {error}");
+                }
+            }
+        };
+        match with_gated_store(&moving, &gate, local::remote_cleanup::plan).await {
+            Some(Ok((batches, rejected))) => {
+                report(rejected);
+                if !batches.is_empty() {
+                    let results = local::remote_cleanup::clean(batches).await;
+                    match with_gated_store(&moving, &gate, move |store| {
+                        local::remote_cleanup::record(store, results)
+                    })
+                    .await
+                    {
+                        Some(Ok(failures)) => report(failures),
+                        Some(Err(error)) => {
+                            eprintln!("orx up: could not record remote cleanup: {error}")
+                        }
+                        // Unrecorded entries stay due and removal is idempotent.
+                        None => {}
+                    }
+                }
+            }
+            Some(Err(error)) => eprintln!("orx up: could not plan remote cleanup: {error}"),
+            None => {}
+        }
+        tokio::time::sleep(ORPHANED_RUN_SCAN_INTERVAL).await;
     }
 }
 
