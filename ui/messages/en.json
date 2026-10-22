@@ -1146,7 +1146,7 @@
   "a11y_run_id": "Run {id}",
   "a11y_open_branch_github": "Open {branch} on GitHub",
   "settings_updates_disabled_by_env": " Updates are switched off for this environment by ORX_NO_UPDATE_CHECK, so this setting has no effect.",
-  "skills_description": "Invoke skills with /name in chat. Skills from your coding agents are screened for research relevance before importing. Upload a skill to include it yourself. Alternatively, tell your OpenResearch agent to create and add a reusable skill for you.",
+  "skills_description": "Invoke skills with /name in chat. Skills from your coding agents appear automatically. Upload a skill to include it yourself. Alternatively, tell your OpenResearch agent to create and add a reusable skill for you.",
   "remote_ssh_host": "SSH: {host}",
   "remote_dialog_title": "Connect to remote",
   "remote_dialog_description": "Choose a configured SSH host.",

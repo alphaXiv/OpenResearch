@@ -1146,7 +1146,7 @@
   "a11y_run_id": "Uruchomienie {id}",
   "a11y_open_branch_github": "Otwórz gałąź {branch} w GitHubie",
   "settings_updates_disabled_by_env": " Aktualizacje są wyłączone w tym środowisku przez ORX_NO_UPDATE_CHECK, więc to ustawienie nie ma wpływu.",
-  "skills_description": "Wywołuj umiejętności na czacie za pomocą /nazwa. Umiejętności agentów programistycznych są przed importem oceniane pod kątem przydatności badawczej. Możesz też samodzielnie przesłać umiejętność lub poprosić agenta OpenResearch o utworzenie nowej.",
+  "skills_description": "Wywołuj umiejętności na czacie za pomocą /nazwa. Umiejętności agentów programistycznych pojawiają się automatycznie. Możesz też samodzielnie przesłać umiejętność lub poprosić agenta OpenResearch o utworzenie nowej.",
   "remote_ssh_host": "SSH: {host}",
   "remote_dialog_title": "Połącz ze zdalnym komputerem",
   "remote_dialog_description": "Wybierz skonfigurowany host SSH.",

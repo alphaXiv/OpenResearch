@@ -168,16 +168,21 @@ fn run_alive_via(ps: &str, dir: &Path, pid: &str) -> bool {
     }
 }
 
-/// EPERM still means the process exists, just not one we may signal.
 #[cfg(not(windows))]
 fn pid_alive(pid: &str) -> bool {
     let Ok(pid) = pid.parse::<libc::pid_t>() else {
         return false;
     };
-    // SAFETY: signal 0 only checks existence; pid > 0 excludes group and broadcast targets.
-    pid > 0
-        && (unsafe { libc::kill(pid, 0) } == 0
-            || std::io::Error::last_os_error().raw_os_error() == Some(libc::EPERM))
+    // pid > 0 excludes group and broadcast targets.
+    pid > 0 && signal_target_exists(pid)
+}
+
+/// EPERM still means the target exists, just not one we may signal.
+#[cfg(not(windows))]
+fn signal_target_exists(target: libc::pid_t) -> bool {
+    // SAFETY: signal 0 only checks existence; callers exclude broadcast targets.
+    (unsafe { libc::kill(target, 0) }) == 0
+        || std::io::Error::last_os_error().raw_os_error() == Some(libc::EPERM)
 }
 
 #[cfg(windows)]
@@ -274,10 +279,18 @@ pub fn inspect_job(dir: &Path) -> JobState {
     }
 }
 
+const LINGERING_GROUP_WINDOW: std::time::Duration = std::time::Duration::from_secs(60 * 60);
+
+/// Whether the run may still have live processes, including a group lingering after exit_code.
 /// Called only while submission is excluded and a supervisor lock is checked separately.
 pub fn orphaned_job_is_running(dir: &Path) -> Result<bool> {
     if exit_code_state(dir).is_some() {
-        return Ok(false);
+        // Children may outlive exit_code briefly; after the window a live PGID is likely reused.
+        let age = std::fs::metadata(dir.join("exit_code"))?
+            .modified()?
+            .elapsed()
+            .unwrap_or_default();
+        return Ok(age < LINGERING_GROUP_WINDOW && process_group_alive(dir));
     }
     match std::fs::read_to_string(dir.join("pid")) {
         Ok(_) => return Ok(inspect_job(dir).stage == "RUNNING"),
@@ -311,6 +324,25 @@ pub fn orphaned_job_is_running(dir: &Path) -> Result<bool> {
     #[cfg(windows)]
     // The native launcher records its PID before resuming the suspended process.
     Ok(false)
+}
+
+/// Whether any process remains in the run's group (pgid == recorded pid).
+#[cfg(not(windows))]
+fn process_group_alive(dir: &Path) -> bool {
+    let Ok(pid) = std::fs::read_to_string(dir.join("pid")) else {
+        return false;
+    };
+    let Ok(group) = pid.trim().parse::<libc::pid_t>() else {
+        return false;
+    };
+    // -1 would broadcast to every process.
+    group > 1 && signal_target_exists(-group)
+}
+
+/// Windows cancel waits for an empty job object; deleting files a survivor holds open fails and is retried.
+#[cfg(windows)]
+fn process_group_alive(_dir: &Path) -> bool {
+    false
 }
 
 /// One poll of the log past `skip` lines (the supervisor loops every ~2s).
@@ -490,9 +522,52 @@ fn parse_nvidia_smi_csv(out: &str) -> Vec<Gpu> {
         .collect()
 }
 
+/// Writes `dir/pid` for a group whose leader has exited; the caller owns and must reap the survivor.
+#[cfg(all(test, unix))]
+pub(crate) fn spawn_lingering_group(dir: &Path) -> std::process::Child {
+    use std::os::unix::process::CommandExt;
+    let mut leader = std::process::Command::new("sleep")
+        .arg("30")
+        .process_group(0)
+        .spawn()
+        .unwrap();
+    let survivor = std::process::Command::new("sleep")
+        .arg("30")
+        .process_group(i32::try_from(leader.id()).unwrap())
+        .spawn()
+        .unwrap();
+    leader.kill().unwrap();
+    leader.wait().unwrap();
+    std::fs::write(dir.join("pid"), leader.id().to_string()).unwrap();
+    survivor
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(unix)]
+    #[test]
+    fn process_group_stays_alive_while_a_survivor_outlives_the_leader() {
+        let dir = std::env::temp_dir().join(format!("orx-group-probe-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        assert!(!process_group_alive(&dir));
+        let mut survivor = spawn_lingering_group(&dir);
+        assert!(process_group_alive(&dir));
+        std::fs::write(dir.join("exit_code"), "143").unwrap();
+        assert!(orphaned_job_is_running(&dir).unwrap());
+        std::fs::File::options()
+            .write(true)
+            .open(dir.join("exit_code"))
+            .unwrap()
+            .set_modified(std::time::SystemTime::now() - 2 * LINGERING_GROUP_WINDOW)
+            .unwrap();
+        assert!(!orphaned_job_is_running(&dir).unwrap());
+        survivor.kill().unwrap();
+        survivor.wait().unwrap();
+        assert!(!process_group_alive(&dir));
+        std::fs::remove_dir_all(dir).unwrap();
+    }
 
     #[cfg(unix)]
     #[test]
