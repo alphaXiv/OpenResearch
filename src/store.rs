@@ -537,6 +537,20 @@ fn queue_remote_cleanups(
     Ok(())
 }
 
+fn validate_deleted_runs(runs: &[StoredRun]) -> Result<()> {
+    for run in runs {
+        if run.id.is_empty()
+            || !run
+                .id
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
+        {
+            return Err(anyhow!("Invalid run id for artifact cleanup: {}", run.id));
+        }
+    }
+    Ok(())
+}
+
 /// Failed remote cleanups retry after 5 minutes, doubling up to a day.
 const REMOTE_CLEANUP_RETRY_MS: i64 = 5 * 60 * 1000;
 const REMOTE_CLEANUP_MAX_RETRY_MS: i64 = 24 * 60 * 60 * 1000;
@@ -2136,16 +2150,7 @@ impl Store {
                 "Cannot delete this {noun} while its runs are still in flight."
             ));
         }
-        for run in runs {
-            if run.id.is_empty()
-                || !run
-                    .id
-                    .chars()
-                    .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
-            {
-                return Err(anyhow!("Invalid run id for artifact cleanup: {}", run.id));
-            }
-        }
+        validate_deleted_runs(runs)?;
         let ids = runs.iter().map(|run| run.id.clone()).collect();
         self.cleanup_run_artifacts_locked(Some(&ids))?;
         Ok(())
@@ -2215,7 +2220,9 @@ impl Store {
                 "Cannot delete this experiment while its runs are still in flight."
             ));
         }
-        // Refuse a run whose job or supervisor is still winding down before `before_rows` acts.
+        // Refuse what cleanup would, such as a supervisor still winding down, before `before_rows` acts.
+        validate_deleted_runs(&runs)?;
+        self.validate_run_artifact_roots()?;
         for run in &runs {
             self.orphan_fate(&run.id, true)?;
         }
@@ -4348,7 +4355,10 @@ mod tests {
         refused(&store);
         store
             .conn
-            .execute("UPDATE runs SET status = 'done'", [])
+            .execute(
+                "UPDATE runs SET status = 'done' WHERE id = ?1",
+                params![run],
+            )
             .unwrap();
         // A terminal run whose supervisor is still finishing is refused before anything is undone.
         let mut supervisor =
