@@ -32,7 +32,7 @@
   "artifacts_tab_delete_folder": "删除文件夹",
   "artifacts_tab_failed_to_load": "加载失败：",
   "artifacts_tab_file_truncated_showing_the_first_512_kb": "文件已截断——仅显示前 512 KB。",
-  "artifacts_tab_listing_truncated_the_folder_has_more_artifacts": "列表已截断——文件夹中还有更多产物。",
+  "artifacts_tab_listing_truncated_the_folder_has_more_artifacts": "仅显示前 {limit} 个产物。其余文件仍在磁盘上的 {dir} 中。",
   "artifacts_tab_loading": "正在加载…",
   "artifacts_tab_loading_artifacts": "正在加载产物…",
   "artifacts_tab_modified": "修改时间",

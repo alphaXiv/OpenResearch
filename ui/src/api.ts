@@ -1319,6 +1319,7 @@ export interface ProjectArtifacts {
   dir: string;
   entries: ArtifactEntry[];
   truncated: boolean;
+  limit: number;
 }
 
 export const getArtifacts = (projectId: string, signal?: AbortSignal) =>

@@ -663,7 +663,7 @@ export function ArtifactsTab({
         <div className="ftree-scroll flex-1 min-h-0 overflow-y-auto file-tree py-1.5 px-0 text-sm">
           {tree(artifacts.entries)}
           {artifacts.truncated && (
-            <p className="files-truncated m-0 py-2 px-3.5 text-sm text-muted">{m.artifacts_tab_listing_truncated_the_folder_has_more_artifacts()}</p>
+            <p className="files-truncated m-0 py-2 px-3.5 text-sm text-muted">{m.artifacts_tab_listing_truncated_the_folder_has_more_artifacts({ limit: artifacts.limit.toLocaleString(), dir: artifacts.dir })}</p>
           )}
         </div>
       </div>

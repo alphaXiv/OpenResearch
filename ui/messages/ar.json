@@ -32,7 +32,7 @@
   "artifacts_tab_delete_folder": "حذف المجلد",
   "artifacts_tab_failed_to_load": "تعذّر التحميل:",
   "artifacts_tab_file_truncated_showing_the_first_512_kb": "تم اقتطاع الملف — عرض أول 512 كيلوبايت.",
-  "artifacts_tab_listing_truncated_the_folder_has_more_artifacts": "تم اقتطاع القائمة — يحتوي المجلد على مُخرَجات أخرى.",
+  "artifacts_tab_listing_truncated_the_folder_has_more_artifacts": "يتم عرض أول {limit} من المُخرَجات. البقية لا تزال على القرص في {dir}.",
   "artifacts_tab_loading": "جارٍ التحميل…",
   "artifacts_tab_loading_artifacts": "جارٍ تحميل المُخرَجات…",
   "artifacts_tab_modified": "عُدّل",
