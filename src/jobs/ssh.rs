@@ -617,7 +617,7 @@ async fn ssh_run_file(
     if target.extra_opts.is_empty() {
         prepared::prepare(target, false).await?;
     }
-    let mut child = Command::new("ssh")
+    let child = Command::new("ssh")
         .env("ORX_SSH_PROBE", "1")
         .args(ssh_opts(target, true))
         .arg("--")
@@ -629,15 +629,7 @@ async fn ssh_run_file(
         .kill_on_drop(true)
         .spawn()
         .map_err(|e| anyhow!("Could not run ssh: {e}"))?;
-    let mut file = tokio::fs::File::open(source).await?;
-    if let Some(mut pipe) = child.stdin.take() {
-        tokio::io::copy(&mut file, &mut pipe).await?;
-        drop(pipe);
-    }
-    let out = child
-        .wait_with_output()
-        .await
-        .map_err(|e| anyhow!("ssh wait failed: {e}"))?;
+    let out = feed_and_wait(child, source).await?;
     if !out.status.success() {
         return Err(anyhow!(
             "ssh {} failed: {}",
@@ -646,6 +638,34 @@ async fn ssh_run_file(
         ));
     }
     Ok(String::from_utf8_lossy(&out.stdout).into_owned())
+}
+
+/// Writes `source` to the child's stdin and waits for it. If the child failed,
+/// its stderr leads, so a remote command that exits early (e.g. on a quota
+/// error) is reported instead of a broken pipe.
+async fn feed_and_wait(
+    mut child: tokio::process::Child,
+    source: &std::path::Path,
+) -> Result<std::process::Output> {
+    let mut file = tokio::fs::File::open(source).await?;
+    let copied = match child.stdin.take() {
+        Some(mut pipe) => tokio::io::copy(&mut file, &mut pipe).await.map(|_| ()),
+        None => Ok(()),
+    };
+    let mut out = child
+        .wait_with_output()
+        .await
+        .map_err(|e| anyhow!("ssh wait failed: {e}"))?;
+    match copied {
+        Err(e) if out.status.success() => return Err(e.into()),
+        // A broken pipe just means the remote exited early; anything else (e.g. a local read error) is context.
+        Err(e) if e.kind() != std::io::ErrorKind::BrokenPipe => {
+            out.stderr
+                .extend_from_slice(format!("\n(local archive stream failed: {e})").as_bytes());
+        }
+        _ => {}
+    }
+    Ok(out)
 }
 
 /// Source uploads are restarted a few times on failure: a dropped SSH
@@ -1169,6 +1189,24 @@ mod tests {
         );
         assert!(msg.contains(&SOURCE_UPLOAD_ATTEMPTS.to_string()), "{msg}");
         assert!(msg.contains("os error 232"), "{msg}");
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn feed_and_wait_reports_remote_stderr_when_the_remote_closes_stdin_early() {
+        let dir = crate::local::git::TemporaryDirectory::new("orx-ssh-feed").unwrap();
+        let source = dir.path().join("archive.tar");
+        std::fs::write(&source, vec![0u8; 8 << 20]).unwrap();
+        let child = Command::new("sh")
+            .args(["-c", "echo 'Disk quota exceeded' >&2; exit 1"])
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .unwrap();
+        let out = feed_and_wait(child, &source).await.unwrap();
+        assert!(!out.status.success());
+        assert!(String::from_utf8_lossy(&out.stderr).contains("Disk quota exceeded"));
     }
 
     #[tokio::test]
