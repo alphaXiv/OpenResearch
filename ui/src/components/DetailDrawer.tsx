@@ -5,6 +5,7 @@ import { useEffect, useRef, useState } from "react";
 import {
   cancelRun,
   runDisplayStatus,
+  runMonitoringError,
   timeAgo,
   trackioRunUrl,
   type Experiment,
@@ -105,6 +106,7 @@ function TerminalView({
   const selectedRun = selectedRunId
     ? expRuns.find((run) => run.id === selectedRunId) ?? null
     : expRuns[0] ?? null;
+  const monitoringError = selectedRun ? runMonitoringError(selectedRun) : null;
   const live = selectedRun?.status === "running" || selectedRun?.status === "starting";
   const trackio = useQuery(getTrackioSettingsQuery()).data;
   const trackioUrl = selectedRun ? trackioRunUrl(trackio, selectedRun) : null;
@@ -222,6 +224,12 @@ function TerminalView({
             {m.detail_drawer_provenance_scheduler()} <code>{historyJobId(selectedRun)}</code>
           </span>
         </div>
+      )}
+
+      {monitoringError && (
+        <p role="status" className="m-0 shrink-0 border-b border-border-variant px-3 py-2 text-sm text-accent-amber wrap-anywhere">
+          {monitoringError}
+        </p>
       )}
 
       <div className="term-fill flex-1 min-h-0 bg-terminal pt-1 pe-0 pb-1 ps-1.5">

@@ -223,7 +223,6 @@ export function CommandTerminal({ path, label, command, heightClass = "h-40", fr
     socket.binaryType = "arraybuffer";
     let completed = false;
     let failed = false;
-    let receivedOutput = false;
     const fail = (message: string, sessionEnded: boolean) => {
       if (failed) {
         // A later failure (the follow-up shell not starting) still deserves a line.
@@ -231,7 +230,7 @@ export function CommandTerminal({ path, label, command, heightClass = "h-40", fr
         return;
       }
       failed = true;
-      if (!receivedOutput || shellAfter) terminal.writeln(message);
+      terminal.writeln(`\r\n${message}`);
       errorRef.current?.(message, sessionEnded);
       // A server-reported failure is followed by the shell, which still takes input.
       if (shellAfter && !sessionEnded) return;
@@ -254,7 +253,6 @@ export function CommandTerminal({ path, label, command, heightClass = "h-40", fr
     };
     socket.onmessage = (event) => {
       if (event.data instanceof ArrayBuffer) {
-        receivedOutput = true;
         terminal.write(new Uint8Array(event.data));
         return;
       }
