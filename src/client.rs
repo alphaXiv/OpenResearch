@@ -1130,7 +1130,7 @@ const OPENALEX_SELECT: &str =
 fn openalex_discovery_url(
     base: &str,
     query: &str,
-    mailto: &str,
+    mailto: Option<&str>,
     options: OpenAlexDiscoveryOptions<'_>,
 ) -> Result<reqwest::Url> {
     // Preserve relevance by reranking a broader page instead of sorting the whole corpus by date.
@@ -1144,7 +1144,9 @@ fn openalex_discovery_url(
         let mut params = url.query_pairs_mut();
         params.append_pair("search", query);
         params.append_pair("per_page", &fetch_limit.clamp(1, 200).to_string());
-        params.append_pair("mailto", mailto);
+        if let Some(mailto) = mailto {
+            params.append_pair("mailto", mailto);
+        }
         params.append_pair("select", OPENALEX_SELECT);
 
         let mut filters = Vec::new();
@@ -1162,6 +1164,15 @@ fn openalex_discovery_url(
         }
     }
     Ok(url)
+}
+
+/// An OpenAlex GET, authenticated with `OPENALEX_API_KEY` when set.
+fn openalex_request(url: impl reqwest::IntoUrl) -> reqwest::RequestBuilder {
+    let request = http().get(url);
+    match crate::config::openalex_api_key() {
+        Some(key) => request.bearer_auth(key),
+        None => request,
+    }
 }
 
 fn rerank_openalex_works(works: &mut [OpenAlexWork], prioritize: &str) {
@@ -1187,9 +1198,10 @@ pub async fn discover_openalex(
     options: OpenAlexDiscoveryOptions<'_>,
 ) -> Result<Vec<LitHit>> {
     let base = crate::config::openalex_api_url();
-    let url = openalex_discovery_url(&base, query, &crate::config::openalex_mailto(), options)?;
+    let mailto = crate::config::openalex_mailto();
+    let url = openalex_discovery_url(&base, query, mailto.as_deref(), options)?;
     let res = public_get(
-        || http().get(url.clone()),
+        || openalex_request(url.clone()),
         "OpenAlex",
         |e| anyhow!("Could not reach OpenAlex at {}: {}", base, e),
     )
@@ -1235,14 +1247,12 @@ fn openalex_selector(input: &str) -> String {
 /// 404 (unknown id) — a normal "not found" answer.
 pub async fn fetch_openalex_work(id_or_doi: &str) -> Result<Option<OpenAlexWork>> {
     let base = crate::config::openalex_api_url();
-    let url = format!(
-        "{}/works/{}?mailto={}",
-        base,
-        openalex_selector(id_or_doi),
-        urlencoding::encode(&crate::config::openalex_mailto()),
-    );
+    let mut url = format!("{}/works/{}", base, openalex_selector(id_or_doi));
+    if let Some(mailto) = crate::config::openalex_mailto() {
+        url.push_str(&format!("?mailto={}", urlencoding::encode(&mailto)));
+    }
     let res = public_get(
-        || http().get(&url),
+        || openalex_request(&url),
         "OpenAlex",
         |e| anyhow!("Could not reach OpenAlex at {}: {}", base, e),
     )
@@ -1906,7 +1916,7 @@ mod tests {
         let url = openalex_discovery_url(
             "https://api.openalex.org",
             "protein folding & agents",
-            "dev@example.org",
+            Some("dev@example.org"),
             OpenAlexDiscoveryOptions {
                 limit: 15,
                 published_after: Some("2024-01-01"),
@@ -1933,6 +1943,24 @@ mod tests {
             params.get("filter").map(|value| value.as_ref()),
             Some("primary_location.source.id:S4306402567,from_publication_date:2024-01-01,to_publication_date:2026-01-31")
         );
+        assert_eq!(
+            params.get("mailto").map(|value| value.as_ref()),
+            Some("dev@example.org")
+        );
+    }
+
+    #[test]
+    fn openalex_discovery_url_omits_mailto_by_default() {
+        let options = OpenAlexDiscoveryOptions {
+            limit: 10,
+            published_after: None,
+            published_before: None,
+            prioritize: "default",
+            source_filter: None,
+        };
+        let url = openalex_discovery_url("https://api.openalex.org", "fuzzing", None, options)
+            .expect("valid OpenAlex URL");
+        assert!(url.query_pairs().all(|(key, _)| key != "mailto"));
     }
 
     #[test]
