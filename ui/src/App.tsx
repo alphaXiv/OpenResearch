@@ -69,6 +69,7 @@ import { m } from "./paraglide/messages.js";
 import { useLocale } from "./locale";
 import { autoDir, ltr } from "./i18n";
 import {
+  ChartLine,
   ChartSpline,
   ArrowDownWideNarrow,
   Check,
@@ -889,7 +890,7 @@ export default function App({ runtime, projectId, pane }: { runtime: RuntimeInfo
     reportFirstAction("open_experiment");
     const tab = { id, view };
     setExpTabs((prev) => (prev.some((t) => sameExpTab(t, tab)) ? prev : [...prev, tab]));
-    if (view === "terminal" && isDemoProjectId(projectIdRef.current)) {
+    if (view !== "overview" && isDemoProjectId(projectIdRef.current)) {
       setPanelWidth((width) => Math.max(width, sideChatPanelWidth()));
     }
     openRightTab(tab, intent, runId);
@@ -1648,6 +1649,8 @@ export default function App({ runtime, projectId, pane }: { runtime: RuntimeInfo
           icon={
             tab.view === "overview" ? (
               <ChartSpline size={12} className="shrink-0" />
+            ) : tab.view === "trackio" ? (
+              <ChartLine size={12} className="shrink-0" />
             ) : (
               <Terminal size={12} className="shrink-0" />
             )

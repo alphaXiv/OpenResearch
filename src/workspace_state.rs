@@ -116,6 +116,7 @@ pub enum HomeView {
 pub enum ExperimentView {
     Overview,
     Terminal,
+    Trackio,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]

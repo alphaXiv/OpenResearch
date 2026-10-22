@@ -1187,29 +1187,41 @@ export interface RayPreflight {
 export const rayPreflight = (address?: string) =>
   post<RayPreflight>("/api/settings/ray/preflight", { address: address ?? null });
 
-export interface TrackioSettings {
-  serverUrl: string | null;
-  project: string | null;
+export interface TrackioRuns {
+  /** Null until something has logged to the local store. */
+  dashboardUrl: string | null;
+  project: string;
+  /** Run ids and names that have logged to the project. */
+  runs: string[];
+  /** A private Space's read-only `__sign`; without it the browser gets a 404. */
+  dashboardSign: string | null;
 }
 
-export const getTrackioSettings = (signal?: AbortSignal) =>
-  get<TrackioSettings>("/api/settings/trackio", signal);
+export const getTrackioRuns = (projectId: string, signal?: AbortSignal) =>
+  get<TrackioRuns>(`/api/trackio/projects/${encodeURIComponent(projectId)}/runs`, signal);
 
 export interface TrackioPreflight {
   reachable: boolean;
   version: string | null;
   writeAccess: boolean | null;
   error: string | null;
+  /** The Space's runtime stage, e.g. SLEEPING; null for a self-hosted server. */
+  spaceStage: string | null;
 }
 
 export const trackioPreflight = () => post<TrackioPreflight>("/api/settings/trackio/preflight", {});
 
-/** The run on the saved Trackio dashboard; hf runs never receive the Trackio variables. */
-export function trackioRunUrl(settings: TrackioSettings | undefined, run: Pick<Run, "id" | "backend">) {
-  if (!settings?.serverUrl || backendKind(run.backend) === "hf_job") return null;
-  if (!settings.project) return settings.serverUrl;
-  const query = new URLSearchParams({ project: settings.project, runs: run.id });
-  return `${settings.serverUrl}/?${query}`;
+/** The run on its Trackio dashboard, only once it has logged there. `embed` hides the dashboard chrome. */
+export function trackioRunUrl(trackio: TrackioRuns | undefined, runId: string, embed?: { theme: string }) {
+  if (!trackio?.dashboardUrl || !trackio.runs.includes(runId)) return null;
+  const query = new URLSearchParams({ project: trackio.project, runs: runId });
+  if (trackio.dashboardSign) query.set("__sign", trackio.dashboardSign);
+  if (embed) {
+    query.set("sidebar", "hidden");
+    query.set("navbar", "hidden");
+    query.set("__theme", embed.theme);
+  }
+  return `${trackio.dashboardUrl}/?${query}`;
 }
 
 // --- settings: compute targets (unified list + default) ------------------------

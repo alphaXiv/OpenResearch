@@ -2599,16 +2599,19 @@ function EnvVarsSection() {
             </tbody>
           </table>
         )}
-        {vars?.some((v) => v.key === "TRACKIO_SERVER_URL") && (
+        {vars?.some((v) => v.key === "TRACKIO_SERVER_URL" || v.key === "TRACKIO_SPACE_ID") && (
           // Any change to the saved Trackio values, from here or elsewhere, resets an old result.
-          <TrackioCheck key={vars.filter((v) => v.key.startsWith("TRACKIO_")).map((v) => `${v.key}=${v.value ?? v.maskedValue}`).join()} />
+          <TrackioCheck
+            key={vars.filter((v) => v.key.startsWith("TRACKIO_")).map((v) => `${v.key}=${v.value ?? v.maskedValue}`).join()}
+            space={vars.some((v) => v.key === "TRACKIO_SPACE_ID")}
+          />
         )}
       </div>
     </>
   );
 }
 
-function TrackioCheck() {
+function TrackioCheck({ space }: { space: boolean }) {
   const [test, setTest] = useState<"testing" | TrackioPreflight | null>(null);
 
   async function runPreflight() {
@@ -2616,11 +2619,19 @@ function TrackioCheck() {
     try {
       setTest(await trackioPreflight());
     } catch (err) {
-      setTest({ reachable: false, version: null, writeAccess: null, error: err instanceof Error ? err.message : String(err) });
+      setTest({ reachable: false, version: null, writeAccess: null, spaceStage: null, error: err instanceof Error ? err.message : String(err) });
     }
   }
 
   const result = test === null || test === "testing" ? null : test;
+  const details = result
+    ? [
+        result.version && m.settings_trackio_version({ version: ltr(result.version) }),
+        result.spaceStage && result.spaceStage !== "RUNNING" && m.settings_trackio_space_stage({ stage: ltr(result.spaceStage) }),
+        result.writeAccess === true && (space ? m.settings_trackio_hf_write_ok() : m.settings_trackio_write_ok()),
+        result.writeAccess === false && (space ? m.settings_trackio_hf_write_rejected() : m.settings_trackio_write_rejected()),
+      ].filter(Boolean)
+    : [];
   return (
     <div className="mt-3">
       <div className="flex items-center gap-2.5">
@@ -2629,13 +2640,7 @@ function TrackioCheck() {
         </Button>
         <PreflightBadge test={test} />
       </div>
-      {result?.version && (
-        <p className="m-0 mt-2 text-sm text-subtext">
-          {m.settings_trackio_version({ version: ltr(result.version) })}
-          {result.writeAccess === true && <> · {m.settings_trackio_write_ok()}</>}
-          {result.writeAccess === false && <> · {m.settings_trackio_write_rejected()}</>}
-        </p>
-      )}
+      {details.length > 0 && <p className="m-0 mt-2 text-sm text-subtext">{details.join(" · ")}</p>}
       {result?.error && <p className={COMPUTE_DIAGNOSTIC_CLASS_NAME}>{result.error}</p>}
     </div>
   );
