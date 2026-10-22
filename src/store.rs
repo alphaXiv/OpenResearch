@@ -489,6 +489,9 @@ pub(crate) const RUN_ARTIFACTS_WAIT: Duration = Duration::from_secs(1);
 pub(crate) const RUN_ARTIFACTS_POLL: Duration = Duration::from_millis(250);
 /// Bounds removal time per orphan pass; classification is unbudgeted but cheap for finished runs.
 const ORPHAN_PASS_BUDGET: Duration = Duration::from_secs(5);
+/// Finished runs older than each project's newest few local runs lose their rebuildable environments.
+const FULL_RUNS_PER_PROJECT: i64 = 3;
+const SLIMMED_RUN_PATHS: [&[&str]; 2] = [&["repo", ".venv"], &["repo", ".cache", "uv"]];
 
 const SUBMISSION_HANDLE: (&str, &str) = ("submission-handles", ".json");
 const SUPERVISOR_LOCK: (&str, &str) = ("run-logs", ".supervisor.lock");
@@ -509,9 +512,9 @@ const RUN_ARTIFACTS: [(&str, &str); 11] = [
 
 #[derive(Default)]
 pub(crate) struct OrphanPass {
-    /// The pass stopped at [`ORPHAN_PASS_BUDGET`] with orphans left to reclaim.
+    /// The pass stopped at [`ORPHAN_PASS_BUDGET`] with artifacts left to reclaim.
     pub more: bool,
-    /// Orphans kept because they could not be classified or removed.
+    /// Runs whose artifacts were kept because they could not be classified or removed.
     pub kept: Vec<(String, crate::error::Error)>,
 }
 
@@ -1871,7 +1874,7 @@ impl Store {
         Ok(())
     }
 
-    /// Reclaim legacy local artifacts whose run rows have already disappeared.
+    /// Reclaim artifacts of deleted runs, then slim finished runs past each project's newest few.
     pub(crate) fn cleanup_orphaned_run_artifacts(&self) -> Result<OrphanPass> {
         let mut lock = self.run_artifacts_lock()?;
         let _guard = match lock.try_write() {
@@ -1885,7 +1888,75 @@ impl Store {
         if self.data_dir_move_claimed()? {
             return Ok(OrphanPass::default());
         }
-        self.cleanup_run_artifacts_locked(None)
+        let started = std::time::Instant::now();
+        let mut pass = self.cleanup_run_artifacts_locked(None)?;
+        if !pass.more {
+            self.slim_finished_runs_locked(started, &mut pass)?;
+        }
+        Ok(pass)
+    }
+
+    fn slim_finished_runs_locked(
+        &self,
+        started: std::time::Instant,
+        pass: &mut OrphanPass,
+    ) -> Result<()> {
+        let mut statement = self.conn.prepare(
+            "SELECT id, status FROM (
+               SELECT id, status, ROW_NUMBER() OVER
+                 (PARTITION BY project_id ORDER BY created_at DESC, id DESC) AS position
+               FROM runs
+               WHERE CASE WHEN json_valid(backend_json) THEN json_extract(backend_json, '$.kind') END
+                 IN ('local_job', 'tinker_job'))
+             WHERE position > ?1",
+        )?;
+        let runs = statement
+            .query_map(params![FULL_RUNS_PER_PROJECT], |row| {
+                Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+            })?
+            .collect::<std::result::Result<Vec<_>, _>>()?;
+        let mut remaining = runs.len();
+        for (id, status) in runs {
+            remaining -= 1;
+            if !is_terminal_status(&status) || uuid::Uuid::parse_str(&id).is_err() {
+                continue;
+            }
+            match self.slim_run(&id) {
+                Ok(false) => continue,
+                Ok(true) => {}
+                Err(error) => pass.kept.push((id, error)),
+            }
+            if remaining > 0 && started.elapsed() >= ORPHAN_PASS_BUDGET {
+                pass.more = true;
+                return Ok(());
+            }
+        }
+        Ok(())
+    }
+
+    /// Returns whether anything was removed.
+    fn slim_run(&self, id: &str) -> Result<bool> {
+        let root = self.data_dir.join("local-runs");
+        let mut targets = Vec::new();
+        for parts in SLIMMED_RUN_PATHS {
+            targets.extend(real_path_under(
+                &root,
+                std::iter::once(id).chain(parts.iter().copied()),
+            )?);
+        }
+        if targets.is_empty() {
+            return Ok(false);
+        }
+        // A cancelled run is terminal before its process group finishes exiting.
+        if crate::jobs::localbox::orphaned_job_is_running(&root.join(id))?
+            || self.supervisor_is_held(id)?
+        {
+            return Ok(false);
+        }
+        for target in &targets {
+            remove_run_artifact(target)?;
+        }
+        Ok(true)
     }
 
     fn cleanup_run_artifacts_locked(&self, deleting_project: Option<&str>) -> Result<OrphanPass> {
@@ -2029,20 +2100,25 @@ impl Store {
         if dir.exists() && crate::jobs::localbox::orphaned_job_is_running(&dir)? {
             return live("is still running");
         }
+        if self.supervisor_is_held(id)? {
+            return live("still has a supervisor");
+        }
+        Ok(fate)
+    }
+
+    fn supervisor_is_held(&self, id: &str) -> Result<bool> {
         let path = self.run_artifact_path(SUPERVISOR_LOCK, id);
         match std::fs::symlink_metadata(&path) {
             // Probing must not create lock files for runs that never had a supervisor.
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(fate),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(false),
             Err(error) => return Err(error.into()),
             Ok(_) => {}
         }
         let mut supervisor = open_lifecycle_lock_at(&path)?;
         let probe = supervisor.try_write().map(drop);
         match probe {
-            Ok(()) => Ok(fate),
-            Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
-                live("still has a supervisor")
-            }
+            Ok(()) => Ok(false),
+            Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => Ok(true),
             Err(error) => Err(error.into()),
         }
     }
@@ -3848,6 +3924,24 @@ fn remove_run_artifact(path: &Path) -> Result<()> {
     }
 }
 
+/// Resolves `parts` under `root` through real directories only, so symlinks cannot redirect removal.
+fn real_path_under<'a>(
+    root: &Path,
+    parts: impl IntoIterator<Item = &'a str>,
+) -> Result<Option<PathBuf>> {
+    let mut path = root.to_path_buf();
+    for part in parts {
+        path.push(part);
+        match std::fs::symlink_metadata(&path) {
+            Ok(metadata) if metadata.file_type().is_dir() => {}
+            Ok(_) => return Ok(None),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+            Err(error) => return Err(error.into()),
+        }
+    }
+    Ok(Some(path))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -4008,6 +4102,63 @@ mod tests {
             .is_file());
         assert!(dir.join("repo-old/keep").is_file());
         assert!(dir.join("repo-surviving/keep").is_file());
+        drop(store);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn orphan_cleanup_slims_only_finished_runs_beyond_each_projects_newest() {
+        let dir = std::env::temp_dir().join(format!("orx-slim-runs-{}", uuid::Uuid::new_v4()));
+        let store = Store::open_at(dir.clone()).unwrap();
+        let run_dir = |id: &str| dir.join("local-runs").join(id);
+        let outside = dir.join("outside");
+        std::fs::create_dir_all(outside.join("uv")).unwrap();
+        let mut runs = Vec::new();
+        for (created_at, project, status, kind) in [
+            (1, "busy", "done", "local_job"),
+            (2, "busy", "running", "local_job"),
+            (3, "busy", "failed", "local_job"),
+            (4, "busy", "cancelled", "local_job"),
+            (5, "busy", "done", "local_job"),
+            (6, "busy", "done", "local_job"),
+            (7, "busy", "done", "local_job"),
+            (8, "busy", "done", "ssh_job"),
+            (1, "quiet", "done", "local_job"),
+        ] {
+            let id = uuid::Uuid::new_v4().to_string();
+            store.conn.execute(
+                "INSERT INTO runs (id, experiment_id, project_id, status, backend_json, created_at, updated_at)
+                 VALUES (?1, 'experiment', ?2, ?3, json_object('kind', ?4), ?5, ?5)",
+                params![id, project, status, kind, created_at],
+            ).unwrap();
+            for path in ["repo/.venv/bin", "repo/.cache/nanochat", "tensorboard"] {
+                std::fs::create_dir_all(run_dir(&id).join(path)).unwrap();
+            }
+            std::fs::write(run_dir(&id).join("exit_code"), "0").unwrap();
+            runs.push(id);
+        }
+        let (oldest, running, symlinked, supervised) = (&runs[0], &runs[1], &runs[2], &runs[3]);
+        std::fs::create_dir_all(run_dir(oldest).join("repo/.cache/uv")).unwrap();
+        let symlinked_repo = run_dir(symlinked).join("repo");
+        std::fs::remove_dir_all(symlinked_repo.join(".cache")).unwrap();
+        std::os::unix::fs::symlink(&outside, symlinked_repo.join(".cache")).unwrap();
+        let mut supervisor =
+            open_lifecycle_lock_at(&store.run_artifact_path(SUPERVISOR_LOCK, supervised)).unwrap();
+        let held = supervisor.write().unwrap();
+        store.cleanup_orphaned_run_artifacts().unwrap();
+        drop(held);
+        assert!(!run_dir(oldest).join("repo/.venv").exists());
+        assert!(!run_dir(oldest).join("repo/.cache/uv").exists());
+        for kept in ["repo/.cache/nanochat", "tensorboard", "exit_code"] {
+            assert!(run_dir(oldest).join(kept).exists(), "{kept}");
+        }
+        assert!(!symlinked_repo.join(".venv").exists());
+        assert!(outside.join("uv").is_dir());
+        let newest_and_quiet = &runs[4..];
+        for kept in [running, supervised].into_iter().chain(newest_and_quiet) {
+            assert!(run_dir(kept).join("repo/.venv").is_dir(), "{kept}");
+        }
         drop(store);
         std::fs::remove_dir_all(dir).unwrap();
     }
