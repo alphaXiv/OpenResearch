@@ -1303,11 +1303,14 @@ export default function App({ runtime, projectId, pane }: { runtime: RuntimeInfo
     openRightTab(tab, "keepOpen");
   }, [openRightTab]);
 
+  // Cleared once handled, so a remounted side chat does not replay an old request.
   const [sideComposerFocusNonce, setSideComposerFocusNonce] = useState(0);
+  const sideFocusRequests = useRef(0);
   const focusSideTab = useCallback((sessionId: string | null) => {
-    setSideComposerFocusNonce((nonce) => nonce + 1);
+    setSideComposerFocusNonce(++sideFocusRequests.current);
     openSideTab(sessionId);
   }, [openSideTab]);
+  const clearSideComposerFocus = useCallback(() => setSideComposerFocusNonce(0), []);
 
   const forgetSideTab = useCallback(
     (tab: SideChatViewDef) => {
@@ -2247,6 +2250,7 @@ export default function App({ runtime, projectId, pane }: { runtime: RuntimeInfo
                     <ChatPanel
                       embedded
                       composerFocusNonce={sideComposerFocusNonce}
+                      onComposerFocusHandled={clearSideComposerFocus}
                       projectId={projectId}
                       projectName={activeProject?.name ?? ""}
                       railOpen={false}

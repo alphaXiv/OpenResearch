@@ -28,6 +28,8 @@ test("the embedded side-chat caller uses activation requests without remounting"
   assert.ok(attributes.some(prop => prop.name.text === "embedded"));
   const nonce = attributes.find(prop => prop.name.text === "composerFocusNonce")?.initializer;
   assert.equal(nonce?.getText(app), "{sideComposerFocusNonce}");
+  assert.equal(attributes.find(prop => prop.name.text === "onComposerFocusHandled")?.initializer.getText(app), "{clearSideComposerFocus}");
+  assert.match(app.text, /clearSideComposerFocus = useCallback\(\(\) => setSideComposerFocusNonce\(0\), \[\]\)/);
   assert.ok(!attributes.some(prop => prop.name.text === "key"));
   const promotion = attributes.find(prop => prop.name.text === "onActiveSessionChange").initializer.getText(app);
   assert.match(promotion, /openSideTab\(sessionId\)/);
@@ -51,10 +53,11 @@ test("repeated explicit openings request focus while navigation alone does not",
   let nonce = 0;
   const opened = [];
   const navigate = id => opened.push(id);
-  const activate = new Function("useCallback", "setSideComposerFocusNonce", "openSideTab",
+  const activate = new Function("useCallback", "setSideComposerFocusNonce", "sideFocusRequests", "openSideTab",
     `return ${ts.transpile(activation.getText(app))}`)(
     callback => callback,
-    update => { nonce = update(nonce); },
+    value => { nonce = value; },
+    { current: 0 },
     navigate,
   );
   for (const id of [null, null, "existing-side"]) activate(id);
@@ -66,7 +69,13 @@ test("repeated explicit openings request focus while navigation alone does not",
 
 function composer() {
   const frames = new Map();
-  const document = { activeElement: null };
+  const listeners = new Set();
+  const document = {
+    activeElement: null,
+    addEventListener(type, listener) { listeners.add(listener); },
+    removeEventListener(type, listener) { listeners.delete(listener); },
+  };
+  const handled = [];
   const calls = [];
   const focusedComposerNonce = { current: 0 };
   let nextFrame = 0;
@@ -77,9 +86,11 @@ function composer() {
     focus() { document.activeElement = input; calls.push("focus"); },
     setSelectionRange(start, end) { calls.push([start, end]); },
     scrollIntoView() {},
+    contains(node) { return node === input; },
   };
   const bindings = {
     composerFocusNonce: 0, contentLoading: false, contentError: null, historyLoading: false,
+    onComposerFocusHandled: () => handled.push(bindings.composerFocusNonce),
     focusedComposerNonce, composerRef: { current: input }, document,
     window: {
       requestAnimationFrame(callback) { frames.set(++nextFrame, callback); return nextFrame; },
@@ -87,10 +98,11 @@ function composer() {
     },
   };
   return {
-    calls, document, input,
+    calls, document, input, handled,
+    click(target) { [...listeners].forEach(listener => listener({ target })); },
     render(props) {
       Object.assign(bindings, props);
-      const evaluate = node => new Function(...Object.keys(bindings), `return (${node.getText(source)})`)(...Object.values(bindings));
+      const evaluate = node => new Function(...Object.keys(bindings), `return ${ts.transpile(`(${node.getText(source)})`)}`)(...Object.values(bindings));
       const deps = evaluate(focusEffect.arguments[1]);
       if (previousDeps?.every((value, index) => Object.is(value, deps[index]))) return;
       cleanup?.();
@@ -163,4 +175,28 @@ test("unsuccessful focus leaves the request pending", () => {
   chat.render({ historyLoading: false });
   chat.flush();
   assert.equal(chat.document.activeElement, chat.input);
+});
+
+test("a click elsewhere drops a request still waiting on loading", () => {
+  const chat = composer();
+  chat.render({ composerFocusNonce: 1, historyLoading: true });
+  chat.click(chat.input);
+  assert.deepEqual(chat.handled, []);
+  chat.click({});
+  assert.deepEqual(chat.handled, [1]);
+  chat.render({ historyLoading: false });
+  chat.flush();
+  assert.deepEqual(chat.calls, []);
+  chat.click({});
+  assert.deepEqual(chat.handled, [1]);
+});
+
+test("a fulfilled request is reported so the caller can clear it", () => {
+  const chat = composer();
+  chat.render({ composerFocusNonce: 1 });
+  chat.flush();
+  assert.deepEqual(chat.handled, [1]);
+  chat.render({ composerFocusNonce: 0 });
+  chat.click({});
+  assert.deepEqual(chat.handled, [1]);
 });

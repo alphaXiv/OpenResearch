@@ -4349,6 +4349,7 @@ export function ChatPanel({
   onOpenSubagent,
   runtime,
   composerFocusNonce = 0,
+  onComposerFocusHandled,
   activeSessionId,
   onActiveSessionChange,
   preferredAgent,
@@ -4416,6 +4417,8 @@ export function ChatPanel({
   runtime: RuntimeInfo;
   /** Requests composer focus on change; a nonzero value also focuses on mount. */
   composerFocusNonce?: number;
+  /** Called once a focus request is fulfilled or dropped because the user clicked elsewhere. */
+  onComposerFocusHandled?: () => void;
   /** Demo run currently executing, for the monitor-it hint above the composer. */
   activeSessionId: string | null;
   onActiveSessionChange: (sessionId: string | null, options?: { replace?: boolean; projectId?: string }) => void;
@@ -5570,22 +5573,33 @@ export function ChatPanel({
   }, [composerPrefill]);
   const focusedComposerNonce = useRef(0);
   useEffect(() => {
+    if (composerFocusNonce === 0 || composerFocusNonce === focusedComposerNonce.current) return;
+    const settle = () => {
+      focusedComposerNonce.current = composerFocusNonce;
+      onComposerFocusHandled?.();
+    };
+    // A click elsewhere while the request waits means the user chose another target.
+    const drop = (event: PointerEvent) => {
+      if (!composerRef.current?.contains(event.target as Node)) settle();
+    };
+    document.addEventListener("pointerdown", drop, true);
     // The composer is inert while its chat is loading. Keep the
     // request pending until it can take focus, and consume it only once.
-    if (composerFocusNonce === 0 || composerFocusNonce === focusedComposerNonce.current
-      || contentLoading || contentError || historyLoading) return;
     // The welcome dialog restores its previous focus on unmount; run after that.
-    const frame = window.requestAnimationFrame(() => {
+    const frame = contentLoading || contentError || historyLoading ? 0 : window.requestAnimationFrame(() => {
       const el = composerRef.current;
       if (!el) return;
       el.focus();
       if (document.activeElement !== el) return;
-      focusedComposerNonce.current = composerFocusNonce;
+      settle();
       el.setSelectionRange(el.value.length, el.value.length);
       el.scrollIntoView({ block: "nearest" });
     });
-    return () => window.cancelAnimationFrame(frame);
-  }, [composerFocusNonce, contentLoading, contentError, historyLoading]);
+    return () => {
+      document.removeEventListener("pointerdown", drop, true);
+      window.cancelAnimationFrame(frame);
+    };
+  }, [composerFocusNonce, contentLoading, contentError, historyLoading, onComposerFocusHandled]);
   const demoHintId = useId();
   const demoHintVisible =
     projectId === DEMO_PROJECT_ID && draft === DEMO_RUN_EXPERIMENT_PROMPT && !demoHintDismissed;
