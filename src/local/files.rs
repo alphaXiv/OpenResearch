@@ -425,13 +425,13 @@ fn collect_tree(
         return (out, false);
     };
     for entry in entries.flatten() {
-        if *seen >= MAX_ENTRIES {
-            truncated = true;
-            break;
-        }
         let name = entry.file_name().to_string_lossy().into_owned();
         if is_ignored(&name) {
             continue;
+        }
+        if *seen >= MAX_ENTRIES {
+            truncated = true;
+            break;
         }
         let Some(md) = followed_metadata(canonical_base, &entry) else {
             continue;
@@ -467,8 +467,7 @@ fn collect_tree(
         }
     }
     for (i, path) in dirs {
-        if *seen >= MAX_ENTRIES {
-            truncated = true;
+        if truncated {
             break;
         }
         let (children, hit) = collect_tree(canonical_base, &path, &out[i].path, seen);
@@ -767,6 +766,19 @@ mod tests {
         assert_eq!(names, ["class_a", "class_b", "class_c"]);
         assert_eq!(entries[0].children.len(), MAX_ENTRIES - 3);
         assert!(truncated);
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn listing_exactly_at_cap_is_not_truncated() {
+        let (root, base, _) = scratch();
+        for i in 0..MAX_ENTRIES {
+            std::fs::create_dir(base.join(format!("d{i}"))).unwrap();
+        }
+        let canonical = crate::paths::canonicalize(&base).unwrap();
+        let (entries, truncated) = collect_tree(&canonical, &canonical, "", &mut 0);
+        assert_eq!(entries.len(), MAX_ENTRIES);
+        assert!(!truncated);
         let _ = std::fs::remove_dir_all(root);
     }
 
