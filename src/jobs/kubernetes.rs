@@ -583,6 +583,7 @@ fn prepare_docs(
     }
     if job["spec"]["ttlSecondsAfterFinished"].is_null() {
         job["spec"]["ttlSecondsAfterFinished"] = json!(UNSEEN_JOB_TTL_SECS);
+        job["metadata"]["annotations"][DEFAULT_TTL_ANNOTATION] = json!("true");
     }
     // A replacement pod would not share the pod-local snapshot staged by kubectl cp.
     job["spec"]["backoffLimit"] = json!(0);
@@ -785,11 +786,13 @@ pub async fn inspect_job(context: Option<&str>, namespace: &str, name: &str) -> 
 
 /// Default TTL until a supervisor has recorded the Job's outcome.
 const UNSEEN_JOB_TTL_SECS: u64 = 7 * 86400;
+/// Marks a TTL orx defaulted, so only that one is shortened later.
+const DEFAULT_TTL_ANNOTATION: &str = "or_default_ttl";
 
 /// Once the supervisor has recorded a finished Job's outcome, shorten orx's
 /// default TTL to a day; a TTL the manifest chose is left alone.
 pub async fn expire_finished_job(context: Option<&str>, namespace: &str, name: &str) -> Result<()> {
-    let ttl = kubectl(
+    let defaulted = kubectl(
         context,
         &[
             "get",
@@ -799,12 +802,12 @@ pub async fn expire_finished_job(context: Option<&str>, namespace: &str, name: &
             namespace,
             "--request-timeout=20s",
             "-o",
-            "jsonpath={.spec.ttlSecondsAfterFinished}",
+            "jsonpath={.metadata.annotations.or_default_ttl}",
         ],
         None,
     )
     .await?;
-    if ttl.trim() == UNSEEN_JOB_TTL_SECS.to_string() {
+    if defaulted.trim() == "true" {
         kubectl(
             context,
             &[
@@ -1066,6 +1069,7 @@ mod tests {
         assert_eq!(j["spec"]["template"]["metadata"]["labels"]["or_run"], "r1");
         assert_eq!(j["spec"]["activeDeadlineSeconds"], 14400);
         assert_eq!(j["spec"]["ttlSecondsAfterFinished"], UNSEEN_JOB_TTL_SECS);
+        assert_eq!(j["metadata"]["annotations"][DEFAULT_TTL_ANNOTATION], "true");
         assert_eq!(j["spec"]["backoffLimit"], 0);
         let c = &j["spec"]["template"]["spec"]["containers"][0];
         assert_eq!(c["env"][0]["name"], "ORX_SCRIPT");
