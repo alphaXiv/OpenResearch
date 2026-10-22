@@ -65,31 +65,56 @@ pub fn ensure_dir(project: &LocalProject) -> Result<PathBuf> {
     Ok(dir)
 }
 
-pub fn cleanup_project_artifacts(
+/// What project deletion does with the artifacts folder.
+#[must_use]
+pub enum ArtifactCleanup {
+    Keep,
+    PruneIfEmpty(PathBuf),
+    DeleteAll(PathBuf),
+}
+
+impl ArtifactCleanup {
+    pub fn apply(self) -> Result<()> {
+        match self {
+            Self::Keep => Ok(()),
+            Self::PruneIfEmpty(dir) => {
+                let _ = std::fs::remove_dir(dir);
+                Ok(())
+            }
+            Self::DeleteAll(dir) => std::fs::remove_dir_all(&dir).map_err(|error| {
+                anyhow!("Could not delete artifacts at {}: {error}", dir.display())
+            }),
+        }
+    }
+}
+
+pub fn plan_project_artifact_cleanup(
     project: &LocalProject,
     delete_artifacts: bool,
     projects: &[LocalProject],
-) -> Result<()> {
-    cleanup_artifacts_at(
+) -> Result<ArtifactCleanup> {
+    plan_artifact_cleanup_at(
         &files_dir(project),
         delete_artifacts,
         projects.iter().map(|project| Path::new(&project.repo_path)),
     )
 }
 
-fn cleanup_artifacts_at<'a>(
+fn plan_artifact_cleanup_at<'a>(
     dir: &Path,
     delete_artifacts: bool,
     repositories: impl Iterator<Item = &'a Path>,
-) -> Result<()> {
+) -> Result<ArtifactCleanup> {
     let metadata = match std::fs::symlink_metadata(dir) {
         Ok(metadata) => metadata,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            return Ok(ArtifactCleanup::Keep)
+        }
         Err(error) => return Err(error.into()),
     };
     if metadata.file_type().is_symlink() {
         if !delete_artifacts {
-            return Ok(());
+            return Ok(ArtifactCleanup::Keep);
         }
         return Err(anyhow!(
             "The artifacts folder is a symbolic link. Keep artifacts or remove it manually."
@@ -105,17 +130,16 @@ fn cleanup_artifacts_at<'a>(
         };
         if repository.starts_with(&canonical_dir) {
             if !delete_artifacts {
-                return Ok(());
+                return Ok(ArtifactCleanup::Keep);
             }
             return Err(anyhow!("The artifacts folder contains a project source folder. Keep artifacts to preserve it."));
         }
     }
-    if !delete_artifacts {
-        let _ = std::fs::remove_dir(dir);
-        return Ok(());
-    }
-    std::fs::remove_dir_all(dir)
-        .map_err(|error| anyhow!("Could not delete artifacts at {}: {error}", dir.display()))
+    Ok(if delete_artifacts {
+        ArtifactCleanup::DeleteAll(dir.to_path_buf())
+    } else {
+        ArtifactCleanup::PruneIfEmpty(dir.to_path_buf())
+    })
 }
 
 /// Relative, no `..`/`.` segments, no backslashes — a requested path can't
@@ -529,6 +553,14 @@ fn hash_dir(base: &Path, dir: &Path, hasher: &mut DefaultHasher, seen: &mut usiz
 #[cfg(test)]
 mod project_cleanup_tests {
     use super::*;
+
+    fn cleanup_artifacts_at<'a>(
+        dir: &Path,
+        delete_artifacts: bool,
+        repositories: impl Iterator<Item = &'a Path>,
+    ) -> Result<()> {
+        plan_artifact_cleanup_at(dir, delete_artifacts, repositories)?.apply()
+    }
 
     #[test]
     fn artifacts_require_opt_in_but_empty_folders_are_pruned() {

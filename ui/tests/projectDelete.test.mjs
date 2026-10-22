@@ -10,7 +10,7 @@ const source = readFileSync(new URL("../src/components/ProjectInfoCard.tsx", imp
 const compiled = ts.transpileModule(`${source}\nexport { DeleteProjectDialog };`, {
   compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022, jsx: ts.JsxEmit.ReactJSX },
 }).outputText;
-let state, index, calls, closed, removed, failure;
+let state, index, calls, closed, removed, failure, artifactsError, alerts;
 const exports = {};
 new Function("require", "exports", compiled)((name) => {
   if (name === "react") return { ...React, useState: (initial) => {
@@ -21,10 +21,11 @@ new Function("require", "exports", compiled)((name) => {
   if (name === "../api") return { deleteProject: async (...args) => {
     calls.push(args);
     if (failure) throw new Error(failure);
+    return artifactsError;
   } };
   if (name === "../paraglide/messages.js") return { m: new Proxy({}, { get: (_, key) => () => key }) };
   if (name === "./useDialogFocus") return { useDialogFocus: () => {} };
-  if (name === "./ui") return { Button: "button" };
+  if (name === "./ui") return { Button: "button", showAlert: (...args) => { alerts.push(args); } };
   return require(name);
 }, exports);
 
@@ -40,7 +41,8 @@ function reset() {
   state = [];
   calls = [];
   closed = removed = 0;
-  failure = null;
+  failure = artifactsError = null;
+  alerts = [];
 }
 async function confirm(tree) {
   elements(tree).find((node) => node.props.children === "projects_home_delete_project_action" && node.type === "button").props.onClick();
@@ -69,4 +71,13 @@ test("artifact deletion requires checkbox opt-in and errors leave the dialog ope
   assert.equal(closed, 0);
   assert.equal(removed, 0);
   assert.equal(elements(render()).find((node) => node.props.role === "alert").props.children, failure);
+});
+
+test("a failed artifact removal after deletion still closes the dialog and reports it", async () => {
+  reset();
+  artifactsError = "The project was deleted. Could not delete artifacts at /files/project: denied";
+  await confirm(render());
+  assert.equal(closed, 1);
+  assert.equal(removed, 1);
+  assert.deepEqual(alerts, [[artifactsError, "error"]]);
 });

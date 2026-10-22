@@ -2097,16 +2097,9 @@ async fn delete_project_inner(state: AppState, id: String, query: DeleteProjectQ
         state.chat.acp.stop(&session.id).await;
     }
     let projects = store.list_local_projects()?;
-    let artifacts_project = project.clone();
-    tokio::task::spawn_blocking(move || {
-        local::files::cleanup_project_artifacts(
-            &artifacts_project,
-            query.delete_artifacts,
-            &projects,
-        )
-    })
-    .await
-    .map_err(|error| ApiError::from(anyhow!("artifact cleanup task failed: {error}")))??;
+    // Refuse before anything is deleted; remove only once the rows are gone.
+    let artifacts =
+        local::files::plan_project_artifact_cleanup(&project, query.delete_artifacts, &projects)?;
     store.delete_local_project(&id)?;
     for session in &sessions {
         state.chat.claude.forget_session(&session.id).await;
@@ -2114,7 +2107,17 @@ async fn delete_project_inner(state: AppState, id: String, query: DeleteProjectQ
         local::chat::cleanup_session_worktree(&project, &session.id);
     }
     let _ = std::fs::remove_dir(local::git::worktrees_root(&id));
-    Ok(Json(json!({ "ok": true })))
+    // The rows are gone, so a failure here is reported without failing the deletion.
+    let artifacts_error = match tokio::task::spawn_blocking(move || artifacts.apply()).await {
+        Ok(Ok(())) => None,
+        Ok(Err(error)) => Some(format!("The project was deleted. {error}")),
+        Err(error) => Some(format!(
+            "The project was deleted. Artifact cleanup failed: {error}"
+        )),
+    };
+    Ok(Json(
+        json!({ "ok": true, "artifactsError": artifacts_error }),
+    ))
 }
 
 async fn list_experiments(Path(id): Path<String>) -> ApiResult {

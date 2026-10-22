@@ -383,11 +383,10 @@ export const getProjectStarterPrompts = (
 
 export const deleteProject = (projectId: string, deleteArtifacts = false) =>
   writeResponse(`/api/projects/${projectId}?deleteArtifacts=${deleteArtifacts}`, { method: "DELETE" }).then(async (r) => {
-    if (!r.ok) {
-      const body = await r.json().catch(() => null);
-      throw new Error(body?.error ?? `delete failed (${r.status})`);
-    }
+    const body = await r.json().catch(() => null);
+    if (!r.ok) throw new Error(body?.error ?? `delete failed (${r.status})`);
     removeProject(projectId);
+    return typeof body?.artifactsError === "string" ? body.artifactsError : undefined;
   });
 
 export const listExperiments = (projectId: string, signal?: AbortSignal) =>

@@ -119,7 +119,12 @@ function DeleteProjectDialog({ project, onClose, onRemoved }: { project: Project
     if (pending) return;
     setPending(true);
     setError("");
-    try { await deleteProject(project.id, deleteArtifacts); onClose(); onRemoved(); }
+    try {
+      const artifactsError = await deleteProject(project.id, deleteArtifacts);
+      onClose();
+      onRemoved();
+      if (artifactsError) showAlert(artifactsError, "error");
+    }
     catch (err) { setError(err instanceof Error ? err.message : String(err)); }
     finally { setPending(false); }
   }
