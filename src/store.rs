@@ -493,9 +493,13 @@ const ORPHAN_PASS_BUDGET: Duration = Duration::from_secs(5);
 const SUBMISSION_HANDLE: (&str, &str) = ("submission-handles", ".json");
 const SUPERVISOR_LOCK: (&str, &str) = ("run-logs", ".supervisor.lock");
 /// Per-run files as (data-dir root, name suffix); the supervisor lock goes last so it excludes until the end.
-const RUN_ARTIFACTS: [(&str, &str); 7] = [
+const RUN_ARTIFACTS: [(&str, &str); 11] = [
     ("local-runs", ""),
     ("run-logs", ".log"),
+    ("run-logs", ".cursor.json"),
+    ("run-logs", ".pending.json"),
+    ("run-logs", ".cursor.lock"),
+    ("run-logs", ".supervisor.shared-ssh.lock"),
     ("run-logs", ".supervisor.log"),
     ("run-logs", ".supervisor.log.1"),
     ("run-logs", ".cancel.lock"),
@@ -1856,6 +1860,11 @@ impl Store {
     }
 
     fn remove_run_artifacts(&self, run_id: &str) -> Result<()> {
+        for entry in artifact_entries(&self.data_dir.join("run-logs"))? {
+            if entry.file_name().to_str().and_then(log_generation_run_id) == Some(run_id) {
+                remove_run_artifact(&entry.path())?;
+            }
+        }
         for artifact in RUN_ARTIFACTS {
             remove_run_artifact(&self.run_artifact_path(artifact, run_id))?;
         }
@@ -1913,8 +1922,16 @@ impl Store {
         for (root, suffix) in RUN_ARTIFACTS {
             for entry in artifact_entries(&self.data_dir.join(root))? {
                 let name = entry.file_name();
-                let Some(id) = name.to_str().and_then(|name| name.strip_suffix(suffix)) else {
+                let Some(name) = name.to_str() else {
                     continue;
+                };
+                let Some(id) = name.strip_suffix(suffix) else {
+                    continue;
+                };
+                let id = if root == "run-logs" && suffix == ".log" {
+                    log_generation_run_id(name).unwrap_or(id)
+                } else {
+                    id
                 };
                 if uuid::Uuid::parse_str(id).is_ok() && !retained_runs.contains(id) {
                     candidates.insert(id.to_string());
@@ -3801,6 +3818,12 @@ pub fn now_ms() -> i64 {
         .unwrap_or(0)
 }
 
+fn log_generation_run_id(name: &str) -> Option<&str> {
+    let (run, generation) = name.strip_suffix(".log")?.split_once('.')?;
+    uuid::Uuid::parse_str(generation).ok()?;
+    Some(run)
+}
+
 fn artifact_entries(path: &Path) -> Result<Vec<std::fs::DirEntry>> {
     match std::fs::read_dir(path) {
         Ok(entries) => Ok(entries.collect::<std::io::Result<Vec<_>>>()?),
@@ -3985,6 +4008,63 @@ mod tests {
             .is_file());
         assert!(dir.join("repo-old/keep").is_file());
         assert!(dir.join("repo-surviving/keep").is_file());
+        drop(store);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn shared_ssh_log_cleanup_preserves_retained_runs_and_removes_deleted_generations() {
+        let dir =
+            std::env::temp_dir().join(format!("orx-ssh-log-cleanup-{}", uuid::Uuid::new_v4()));
+        let store = Store::open_at(dir.clone()).unwrap();
+        let deleted = uuid::Uuid::new_v4().to_string();
+        let retained = uuid::Uuid::new_v4().to_string();
+        project_with_run_artifacts(&store, "deleted", &deleted, &"a".repeat(64));
+        project_with_run_artifacts(&store, "retained", &retained, &"b".repeat(64));
+        let suffixes = [
+            "cursor.json".to_string(),
+            "pending.json".to_string(),
+            "cursor.lock".to_string(),
+            "supervisor.shared-ssh.lock".to_string(),
+            format!("{}.log", uuid::Uuid::new_v4()),
+            format!("{}.log", uuid::Uuid::new_v4()),
+        ];
+        for run in [&deleted, &retained] {
+            for suffix in &suffixes {
+                std::fs::write(dir.join("run-logs").join(format!("{run}.{suffix}")), "log")
+                    .unwrap();
+            }
+        }
+        let orphan = dir.join("run-logs").join(format!(
+            "{}.{}.log",
+            uuid::Uuid::new_v4(),
+            uuid::Uuid::new_v4()
+        ));
+        std::fs::write(&orphan, "interrupted generation").unwrap();
+        let unrelated = dir.join("run-logs").join(format!("{deleted}.notes.log"));
+        std::fs::write(&unrelated, "unrecognized file").unwrap();
+        store.cleanup_orphaned_run_artifacts().unwrap();
+        assert!(!orphan.exists());
+        for run in [&deleted, &retained] {
+            for suffix in &suffixes {
+                assert!(dir
+                    .join("run-logs")
+                    .join(format!("{run}.{suffix}"))
+                    .is_file());
+            }
+        }
+        store.delete_local_project("deleted").unwrap();
+        for suffix in &suffixes {
+            assert!(!dir
+                .join("run-logs")
+                .join(format!("{deleted}.{suffix}"))
+                .exists());
+            assert!(dir
+                .join("run-logs")
+                .join(format!("{retained}.{suffix}"))
+                .is_file());
+        }
+        assert!(unrelated.is_file());
         drop(store);
         std::fs::remove_dir_all(dir).unwrap();
     }
