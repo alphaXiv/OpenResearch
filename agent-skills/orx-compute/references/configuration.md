@@ -11,6 +11,7 @@ orx compute configure ssh --default-host lab
 orx compute configure ssh --host lab --container research
 orx compute configure ssh --host lab --clear container
 orx compute configure ssh --host lab --remote-root /data/me/orx  # runs + source cache; default ~/.orx
+orx compute configure ssh --host lab --clear remote-root
 orx compute test ssh --host lab                     # tests saved container too
 orx compute test ssh --host lab --no-container      # explicitly tests host
 orx compute connect ssh --host lab                 # interactive login/MFA

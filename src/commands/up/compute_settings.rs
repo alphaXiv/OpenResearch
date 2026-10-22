@@ -623,8 +623,7 @@ pub(super) async fn ssh_settings() -> ApiResult {
 pub(super) struct SaveSshSettingsReq {
     host: String,
     container: Option<String>,
-    /// `None` keeps the saved root; `Some("")` restores the `~/.orx` default.
-    #[serde(default)]
+    /// Unlike `container`, `None` keeps the saved root (the UI never sends it); `Some("")` clears it.
     remote_root: Option<String>,
 }
 
@@ -1473,7 +1472,7 @@ pub(crate) async fn configure(backend: &str, body: Value) -> Result<Value> {
                 let container = match body.get("container") {
                     Some(container) => container.clone(),
                     None => {
-                        let host = body["host"].as_str().unwrap_or_default();
+                        let host = body["host"].as_str().unwrap_or_default().trim();
                         json!(crate::config::ssh_settings()?
                             .hosts
                             .get(host)

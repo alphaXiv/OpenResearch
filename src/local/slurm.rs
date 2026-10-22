@@ -88,6 +88,9 @@ pub async fn submit_local_slurm_with_source(
     }
 
     let settings = slurm::load_settings()?.unwrap_or_default();
+    if let Some(root) = &settings.remote_root {
+        crate::jobs::ssh::validate_remote_root(root)?;
+    }
     let host = args
         .host
         .clone()

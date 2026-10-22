@@ -8,7 +8,7 @@
 //! the login node — the same trade SkyPilot makes.
 //!
 //! The remote layout extends the ssh backend's convention. A run owns
-//! `~/.orx/runs/<run_id>/` on the cluster's shared filesystem:
+//! `<root>/runs/<run_id>/` (root defaults to `~/.orx`) on the cluster's shared filesystem:
 //!   repo/       the experiment branch, cloned on the login node at submit
 //!               time (compute nodes often have no internet, so cloning
 //!               inside the job — the other backends' pattern — would break)
@@ -17,7 +17,7 @@
 //!   exit_code   written by job.sbatch's closing lines when the payload ends
 //!
 //! The reattach handle is (host, slurm job id); the run dir derives from the
-//! run id. Job state is read exit_code-first (scheduler-independent truth,
+//! run id and the root recorded at submit. Job state is read exit_code-first (scheduler-independent truth,
 //! like the ssh backend), then `squeue` for live jobs, then `sacct` for jobs
 //! that left the queue without writing an exit code (scancel/timeout/node
 //! failure). `sacct` may be disabled cluster-wide, so it's a best-effort
@@ -687,9 +687,9 @@ mod tests {
         let run_a = format!("e2e-a-{}", uuid::Uuid::new_v4());
         let run_b = format!("e2e-b-{}", uuid::Uuid::new_v4());
         let cleanup = format!(
-            "rm -rf \"$HOME/{}\" \"$HOME/{}\"",
-            run_dir(None, &run_a),
-            run_dir(None, &run_b)
+            "rm -rf {} {}",
+            shell_path(&run_dir(None, &run_a)),
+            shell_path(&run_dir(None, &run_b))
         );
 
         // Happy path: runs, completes, logs arrive.

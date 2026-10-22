@@ -7,7 +7,7 @@
 //! polls reuse one TCP session instead of a handshake apiece.
 //! Win32-OpenSSH cannot, so on Windows background calls need an agent key or no passphrase.
 //!
-//! The handle is a remote run directory `~/.orx/runs/<run_id>/` holding:
+//! The handle is a remote run directory `<root>/runs/<run_id>/` (root defaults to `~/.orx`) holding:
 //!   run.sh      the launcher (exported env + snapshot-and-run payload)
 //!   log         merged stdout/stderr
 //!   pid         the detached process-group leader
@@ -110,7 +110,7 @@ pub fn validate_remote_root(root: &str) -> Result<()> {
     });
     if !valid {
         return Err(anyhow!(
-            "Remote storage root must be an absolute path such as /scratch/$USER/orx, using letters, numbers, '.', '_', '-', '+' or '@' (no trailing slash)."
+            "Remote storage root must be an absolute path like /scratch/<user>/orx (letters, digits, . _ - + @; no trailing slash)."
         ));
     }
     Ok(())

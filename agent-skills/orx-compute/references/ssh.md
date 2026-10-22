@@ -57,8 +57,8 @@ creation or lifecycle management. `--image` and `--flavor` are unsupported.
 
 The committed source archive is cached on the host, then streamed into the
 container's `$HOME/.orx/runs/<runId>/repo`. Host logs and exit status stay in the
-host's `~/.orx/runs/<runId>/` (or the saved remote root), so container removal does not erase them. A detached
-supervisor reattaches using the saved container ID and start time; later settings
+host's `<root>/runs/<runId>/` (`~/.orx` unless a remote root is saved), so
+container removal does not erase them. A detached supervisor reattaches using the saved container ID and start time; later settings
 changes cannot redirect an existing run. Do not kill the supervisor.
 
 Cancellation targets only the experiment process group, waits five seconds for

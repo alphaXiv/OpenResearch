@@ -429,7 +429,7 @@ impl ConfigureArgs {
         }
         let host_setting = body.contains_key("container") || body.contains_key("remoteRoot");
         if backend == "ssh" && body.contains_key("host") && !host_setting {
-            return Err(anyhow!("--host selects a host setting; supply --container, --remote-root, or --clear for one of them. Use --default-host to select a default."));
+            return Err(anyhow!("--host needs --container, --remote-root, or a matching --clear; use --default-host to pick a default."));
         }
         if backend == "ssh" && host_setting && !body.contains_key("host") {
             return Err(anyhow!(
