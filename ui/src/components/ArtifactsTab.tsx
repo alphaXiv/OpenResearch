@@ -541,8 +541,13 @@ export function ArtifactsTab({
   // Partial folders the user opened; each is listed on its own with a fresh cap.
   const [loadDirs, setLoadDirs] = useState<string[]>([]);
   const loadedDirs = useQueries({
-    // Opened partial folders sit outside the SSE change fingerprint, so poll them.
-    queries: loadDirs.map((dir) => ({ ...getArtifactsQuery(project.id, dir), refetchInterval: 2_000 })),
+    // Opened partial folders sit outside the SSE change fingerprint, so poll
+    // the ones still on screen; a failed (deleted or renamed) folder stops.
+    queries: loadDirs.map((dir) => ({
+      ...getArtifactsQuery(project.id, dir),
+      refetchInterval: (query: { state: { error: unknown } }) =>
+        !query.state.error && dir.split("/").every((_, i, parts) => !collapsed.has(parts.slice(0, i + 1).join("/"))) ? 2_000 : false,
+    })),
     combine: loadedEntries,
   });
   const entries = useMemo(() => {
