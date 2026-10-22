@@ -126,7 +126,6 @@ import {
   type ChatImageAttachment,
   type ChatMessage,
   type ChatPart,
-  type ChatPrompt,
   type Autonomy,
   type ChatSession,
   type Harness,
@@ -150,7 +149,8 @@ import {
   isTurnStatusPart,
   splitResponseTurn,
   partIsVisible,
-  pendingQuestionId,
+  questionReplies,
+  type QuestionReplies,
   hasPendingInput,
   partsTailToolId,
   streamTailIsText,
@@ -232,7 +232,7 @@ import {
   shouldRecoverLegacyMath,
   tableMarkdown,
 } from "./annotationMarkdown";
-import { Button, IconButton, LoadingRow, MenuItem, showAlert, Spinner, Tooltip } from "./ui";
+import { Button, IconButton, LoadingRow, MenuItem, showAlert, Spinner, Textarea, Tooltip } from "./ui";
 import { PaperTitle } from "./PaperTitle";
 
 const TOOL_LINE_CLASS_NAME = "tool-line flex-1 min-w-0 line-clamp-2 break-words text-base leading-6";
@@ -763,14 +763,6 @@ function ComposerAnnotations(props: Omit<React.ComponentProps<typeof Annotations
   return <AnnotationsPopover {...props} variant="composer" />;
 }
 
-const PROMPT_COLLAPSED_CLASS_NAME = [
-  "prompt-collapsed text-muted text-base font-[375] my-3.5 mx-0 [&_summary]:flex",
-  "[&_summary]:items-center [&_summary]:gap-2 [&_summary]:cursor-pointer",
-  "[&_summary]:list-none [&_summary]:select-none [&_summary::-webkit-details-marker]:hidden",
-  "[&_summary::after]:content-['›'] [&_summary::after]:text-muted",
-  "[&_summary::after]:transition-transform [&_summary::after]:duration-80 [&_summary::after]:ease-standard [&[open]_summary::after]:rotate-90",
-].join(" ");
-
 const PROMPT_COLLAPSED_BODY_CLASS_NAME = [
   "prompt-collapsed-body mt-1.5 ps-3 border-s-2 border-s-border",
   "text-sm text-subtext",
@@ -784,11 +776,6 @@ const PLAN_RESOLVED_CLASS_NAME = [
   "[&_summary::-webkit-details-marker]:hidden",
   "[&_summary_.plan-chevron]:transition-transform [&_summary_.plan-chevron]:duration-120",
   "[&_summary_.plan-chevron]:ease-standard [&[open]_summary_.plan-chevron]:rotate-90",
-].join(" ");
-
-const PROMPT_HEAD_CLASS_NAME = [
-  "prompt-head text-sm font-medium text-text",
-  "[&_code]:font-mono [&_code]:text-sm [&_code]:text-text",
 ].join(" ");
 
 const PROMPT_ACTIONS_CLASS_NAME = "prompt-actions flex flex-wrap gap-2";
@@ -2638,22 +2625,39 @@ function ToolGroup({
  * chosen answer — all inline at the card's chronological position. */
 function PromptCard({
   part,
+  questionText = part.prompt?.question,
+  answerInTranscript = false,
   onRespond,
   onOpenFile,
   onOpenPlan,
 }: {
   part: ChatPart;
-  onRespond?: (answer: PromptAnswer) => void;
+  questionText?: string;
+  answerInTranscript?: boolean;
+  onRespond?: (answer: PromptAnswer) => Promise<boolean>;
   onOpenFile?: OpenTranscriptFile;
   onOpenPlan?: (plan: string, promptId: string, intent: TabOpenIntent) => void;
 }) {
-  const p = part.prompt as ChatPrompt;
+  const p = part.prompt;
   const [picked, setPicked] = useState<string[]>([]);
+  const [answerText, setAnswerText] = useState("");
+  const [submitting, setSubmitting] = useState(false);
+  if (!p) return null;
   // Read-only host (no onRespond): actions disabled or hidden, card visible.
-  const done = !onRespond;
+  const done = !onRespond || submitting;
 
-  const respond = (answer: Omit<PromptAnswer, "promptId">) =>
-    onRespond?.({ promptId: part.id, ...answer });
+  const respond = async (answer: Omit<PromptAnswer, "promptId">) => {
+    if (!onRespond || submitting) return;
+    setSubmitting(true);
+    try {
+      if (await onRespond({ promptId: part.id, ...answer })) {
+        setAnswerText("");
+        setPicked([]);
+      }
+    } finally {
+      setSubmitting(false);
+    }
+  };
 
   // Resolved rendering, keyed off `resolved` alone (`done` also covers
   // read-only hosts, where an *unresolved* card must stay visible).
@@ -2685,38 +2689,33 @@ function PromptCard({
         </details>
       );
     }
-    // question — one line: header/question + what was chosen (or the typed
-    // custom answer). No echo at all (stale-resolved): neutral "Resolved",
-    // matching the plan row.
-    const chosen = (p.answers ?? []).join(", ") || p.note || "";
+    const chosen = [(p.answers ?? []).join(", "), p.note].filter(Boolean).join("\n\n");
+    if (p.approved === false && !chosen) {
+      return (
+        <details className="group/question py-1 text-base text-subtext">
+          <summary className="flex w-fit max-w-full items-center gap-2 cursor-pointer list-none rounded-sm focus-visible:outline-2 focus-visible:outline-text [&::-webkit-details-marker]:hidden">
+            <span>{m.chat_question()} — {m.chat_question_skipped()}</span>
+            <ChevronRight size={16} className="shrink-0 text-text transition-transform duration-120 ease-standard group-open/question:rotate-90 motion-reduce:transition-none" aria-hidden="true" />
+          </summary>
+          <div className="mt-1 leading-normal text-subtext whitespace-pre-line wrap-anywhere">{questionText}</div>
+        </details>
+      );
+    }
     const annotations: ComposerAnnotation[] = (p.annotations ?? []).map((annotation, index) => ({
       id: `${part.id}-annotation-${index}`,
       text: annotation.text,
     }));
+    if (!chosen) return annotations.length > 0 ? <AnnotationsPopover annotations={annotations} variant="sent" /> : null;
     return (
-      <div className="flex flex-col items-end gap-1.5">
-        {annotations.length > 0 && <AnnotationsPopover annotations={annotations} variant="sent" />}
-        <details className={PROMPT_COLLAPSED_CLASS_NAME}>
-          <summary>
-            <span className="prompt-collapsed-title font-[375] wrap-anywhere">{p.header || p.question || m.chat_question()}</span>
-            <span className={`prompt-outcome font-[375] text-subtext wrap-anywhere [&.approved]:text-accent-green [&.chosen]:text-accent-green [&.approved::before]:content-['✓_'] [&.chosen::before]:content-['✓_'] [&.revised]:text-accent-amber [&.rejected]:text-accent-amber ${chosen ? "chosen" : ""}`}>{chosen || m.chat_resolved()}</span>
-          </summary>
-          <div className={PROMPT_COLLAPSED_BODY_CLASS_NAME}>
-            {/* The summary title already shows the question when there's no header. */}
-            {p.header && p.question && <div className="prompt-q text-base font-semibold leading-normal text-text">{p.question}</div>}
-            {(p.options ?? []).length > 0 && (
-              <ul className="prompt-collapsed-options mt-1.5 mx-0 mb-0 ps-4.5 [&_.sel]:text-text [&_.sel]:font-medium">
-                {(p.options ?? []).map((o) => (
-                  <li key={o.label} className={p.answers?.includes(o.label) ? "sel" : ""}>
-                    {o.label}
-                  </li>
-                ))}
-              </ul>
-            )}
-            {/* A note-only answer is already the summary outcome — don't echo it twice. */}
-            {p.note && p.note !== chosen && <div className="prompt-collapsed-note mt-1.5 italic">{p.note}</div>}
+      <div className="flex flex-col gap-3 py-1">
+        {questionText && <div className="text-base text-text leading-normal whitespace-pre-line wrap-anywhere">{questionText}</div>}
+        {!answerInTranscript && (
+          <div className="ms-auto max-w-[88%] rounded-2xl bg-panel px-4 py-3 text-base text-text whitespace-pre-wrap wrap-anywhere">
+            {questionText && <div className="mb-1 truncate text-subtext">{questionText}</div>}
+            {chosen}
           </div>
-        </details>
+        )}
+        {annotations.length > 0 && <AnnotationsPopover annotations={annotations} variant="sent" />}
       </div>
     );
   }
@@ -2775,7 +2774,7 @@ function PromptCard({
     const reason =
       (typeof p.toolInput?.reason === "string" && p.toolInput.reason) || "";
     const description = inputString(toolInput, "description") || "";
-    const explanation = p.header || reason || description || permissionActivityLabel(p.tool, toolInput);
+    const explanation = p.header || reason || description || (summary ? "" : permissionActivityLabel(p.tool, toolInput));
     const headingId = `permission-heading-${part.id}`;
     return (
       <div
@@ -2790,7 +2789,7 @@ function PromptCard({
           <span id={headingId} className="text-base font-semibold text-text">{m.chat_panel_approval_required()}</span>
         </div>
         <div className="flex flex-col gap-3 px-3.5 py-3">
-          <div className="prompt-sub text-base font-normal leading-normal text-text wrap-anywhere">{explanation}</div>
+          {explanation && <div className="prompt-sub text-base font-normal leading-normal text-text wrap-anywhere">{explanation}</div>}
           {summary && (
             <code className="prompt-command block max-h-36 overflow-auto whitespace-pre-wrap wrap-anywhere rounded-md border border-border-variant bg-surface px-3 py-2 font-mono text-sm leading-relaxed text-text">
               {summary}
@@ -2831,46 +2830,74 @@ function PromptCard({
     );
   }
 
-  // question
-  const toggle = (label: string) =>
-    setPicked((cur) =>
-      p.multiSelect
-        ? cur.includes(label)
-          ? cur.filter((l) => l !== label)
-          : [...cur, label]
-        : [label],
-    );
+  const toggle = (label: string) => {
+    setAnswerText("");
+    setPicked((cur) => p.multiSelect
+      ? cur.includes(label) ? cur.filter((item) => item !== label) : [...cur, label]
+      : [label]);
+  };
+  const submit = () => {
+    if (!done && (answerText.trim() || picked.length > 0)) {
+      void respond({ answers: picked, note: answerText.trim() || undefined });
+    }
+  };
+  const skip = () => void respond({ approve: false });
   return (
-    <div className={`prompt-card my-2 mx-0 py-3 px-3.5 border border-border border-s-[3px] border-s-border rounded-sm bg-accent-purple-subtle flex flex-col gap-[9px] [&.plan]:border-s-accent-blue [&.permission]:border-s-accent-amber [&.question]:border-s-accent-purple [&.readonly]:opacity-60 question ${done ? "readonly" : ""}`}>
-      {p.header && <div className={PROMPT_HEAD_CLASS_NAME}>{p.header}</div>}
-      {p.question && <div className="prompt-q text-base font-semibold leading-normal text-text">{p.question}</div>}
-      <div className="prompt-options flex flex-col gap-1.5">
-        {(p.options ?? []).map((o) => {
-          const sel = picked.includes(o.label);
-          return (
-            <button
-              key={o.label}
-              className={`prompt-option flex flex-col items-start gap-0.5 w-full py-2 px-[11px] text-start border border-border rounded-sm bg-background text-text cursor-pointer transition-[border-color,background] duration-80 ease-standard [&:hover:not(:disabled)]:border-border-strong [&:hover:not(:disabled)]:bg-surface [&.sel]:border-primary [&.sel]:bg-primary-subtle [&:disabled]:cursor-default ${sel ? "sel" : ""}`}
-              disabled={done}
-              onClick={() => (done ? undefined : p.multiSelect ? toggle(o.label) : respond({ answers: [o.label] }))}
-            >
-              <span className="prompt-option-label block text-sm font-medium">{o.label}</span>
-              {o.description && <span className="prompt-option-desc block text-sm font-normal leading-[1.45] text-subtext">{o.description}</span>}
-            </button>
-          );
-        })}
+    <div className="prompt-card question flex flex-col gap-2 rounded-2xl border border-border bg-surface p-3" role="group" aria-labelledby={`question-${part.id}`}>
+      <div className="flex items-center gap-2 text-subtext">
+        <HelpCircle size={18} aria-hidden="true" />
+        <span className="flex-1 text-sm">{p.header || m.chat_question()}</span>
+        {onRespond && <IconButton aria-label={m.chat_question_skip()} disabled={done} onClick={skip}><X size={16} /></IconButton>}
       </div>
-      {p.multiSelect && !done && (
-        <div className={PROMPT_ACTIONS_CLASS_NAME}>
-          <Button
-            size="small"
-            variant="primary"
-            disabled={picked.length === 0}
-            onClick={() => respond({ answers: picked })}
-          >
-            {m.chat_panel_submit()}
-          </Button>
+      <div id={`question-${part.id}`} className="text-base font-medium leading-snug text-text whitespace-pre-line wrap-anywhere">{p.question?.replace(/\n\s*\n/g, "\n")}</div>
+      {(p.options?.length ?? 0) > 0 && (
+        <div className="prompt-options flex flex-col">
+          {p.options?.map((option, index) => {
+            const selected = picked.includes(option.label);
+            return (
+              <button
+                type="button"
+                key={option.label}
+                aria-pressed={selected}
+                className={`prompt-option flex w-full items-start gap-2 rounded-lg px-2 py-1.5 text-start text-text cursor-pointer transition-colors duration-120 ease-standard enabled:hover:bg-highlight focus-visible:bg-highlight focus-visible:outline-2 focus-visible:outline-text disabled:cursor-default ${selected ? "bg-panel" : ""}`}
+                disabled={done}
+                onClick={() => toggle(option.label)}
+              >
+                <span className={`flex size-6 shrink-0 items-center justify-center rounded-md border text-sm ${selected ? "border-primary bg-primary-subtle text-text" : "border-border bg-background text-subtext"}`}>{selected ? <Check size={14} /> : index + 1}</span>
+                <span className="min-w-0 text-base">
+                  <span>{option.label}</span>
+                  {option.description && <span className="ms-2 text-sm text-subtext">{option.description}</span>}
+                </span>
+              </button>
+            );
+          })}
         </div>
+      )}
+      {onRespond && (
+        <form className="flex flex-wrap items-end gap-2" onSubmit={(event) => { event.preventDefault(); submit(); }}>
+          <div className="flex min-w-0 basis-48 grow items-start gap-2">
+            <Pencil size={18} className="mt-2 shrink-0 text-subtext" aria-hidden="true" />
+            <Textarea
+              variant="inline"
+              aria-label={m.chat_question_your_answer()}
+              placeholder={m.chat_question_custom_response()}
+              value={answerText}
+              onChange={(event) => { setAnswerText(event.target.value); setPicked([]); }}
+              onKeyDown={(event) => {
+                if (event.key === "Enter" && !event.shiftKey && !event.nativeEvent.isComposing && event.nativeEvent.keyCode !== 229) {
+                  event.preventDefault();
+                  submit();
+                }
+              }}
+              disabled={done}
+              rows={1}
+            />
+          </div>
+          <div className="ms-auto flex items-center gap-2">
+            <Button type="button" className="rounded-full" disabled={done} onClick={skip}>{m.chat_question_skip()}</Button>
+            <Button type="submit" variant="primary" className="rounded-full" disabled={done || (!answerText.trim() && picked.length === 0)}>{m.chat_panel_send()}</Button>
+          </div>
+        </form>
       )}
     </div>
   );
@@ -3012,6 +3039,7 @@ function ForkControls({
 export const Message = memo(function Message({
   message,
   responseMessages,
+  replies,
   activePermissionId,
   pendingTailToolId,
   onOpenFile,
@@ -3039,6 +3067,7 @@ export const Message = memo(function Message({
 }: {
   message: ChatMessage;
   responseMessages?: ChatMessage[];
+  replies?: QuestionReplies;
   activePermissionId: string | null;
   pendingTailToolId?: string | null;
   onOpenFile?: OpenTranscriptFile;
@@ -3047,7 +3076,7 @@ export const Message = memo(function Message({
   runExperimentName?: (runId: string) => string;
   onOpenExperiment?: OpenTranscriptTarget;
   experimentName?: (experimentId: string) => string;
-  onRespond?: (answer: PromptAnswer) => void;
+  onRespond?: (answer: PromptAnswer) => Promise<boolean>;
   /** Open a plan's full markdown in the right pane (plan cards/strip). */
   onOpenPlan?: (plan: string, promptId: string, intent: TabOpenIntent) => void;
   /** Open a sub-agent's transcript in the right pane (spawn-row "view"). */
@@ -3077,7 +3106,7 @@ export const Message = memo(function Message({
   const shell = shellExchangePart(message);
   if (shell) return <ShellExchangeCard part={shell} />;
   if (message.role === "user") {
-    const text = message.parts
+    const text = replies?.textById.get(message.id) ?? message.parts
       .filter((p) => p.type === "text")
       .map((p) => p.text ?? "")
       .join("\n");
@@ -3153,6 +3182,7 @@ export const Message = memo(function Message({
           <AnnotationsPopover annotations={annotations} variant="sent" />
         )}
         <div dir="auto" className="msg-user max-w-full bg-panel rounded-[16px] py-2.5 px-[15px] text-base whitespace-pre-wrap wrap-anywhere [&_.skill-chip]:align-baseline">
+          {replies?.questionById.has(message.id) && <div className="mb-1 truncate text-subtext">{replies.questionById.get(message.id)}</div>}
           <MessageWithChips text={text} isCommand={isCommand} />
           {images.length > 0 && (
             <div className="msg-images flex flex-wrap gap-1.5 mt-2 [&_img]:max-w-55 [&_img]:max-h-40 [&_img]:border [&_img]:border-border-variant [&_img]:rounded-xs [&_img]:block">
@@ -3193,12 +3223,13 @@ export const Message = memo(function Message({
   }
   const responseTurns = (responseMessages ?? [message]).map(splitResponseTurn);
   const turns = responseTurns.map((turn) => turn.message);
-  const response = splitResponseParts(turns, predictTextTail);
+  const response = splitResponseParts(turns, predictTextTail, replies);
   const predictingAnswer = predictTextTail && response.answerMessageId === message.id;
   const copyText = predictingAnswer && !message.completedAt ? "" : responseText({ ...message, parts: response.answer });
   return (
     <div className="msg-assistant group/turn text-base leading-[1.62] text-text min-w-0">
       <AssistantTurn messages={turns} response={response} options={{
+        replies,
         activePermissionId,
         pendingTailToolId,
         onOpenFile,
@@ -3343,6 +3374,7 @@ function ShellExchangeCard({ part }: { part: ChatPart }) {
 function renderParts(
   parts: ChatPart[],
   opts: {
+    replies?: QuestionReplies;
     expansionState?: Map<string, boolean>;
     activePermissionId?: string | null;
     pendingTailToolId?: string | null;
@@ -3352,13 +3384,14 @@ function renderParts(
     runExperimentName?: (runId: string) => string;
     onOpenExperiment?: OpenTranscriptTarget;
     experimentName?: (experimentId: string) => string;
-    onRespond?: (answer: PromptAnswer) => void;
+    onRespond?: (answer: PromptAnswer) => Promise<boolean>;
     onOpenPlan?: (plan: string, promptId: string, intent: TabOpenIntent) => void;
     onOpenSubagent?: OpenSubagent;
     predictTextTail?: boolean;
   },
 ): React.ReactNode[] {
   const {
+    replies,
     expansionState,
     activePermissionId,
     pendingTailToolId,
@@ -3440,14 +3473,19 @@ function renderParts(
           aria-label={m.chat_panel_you_mid_task()}
           className="msg-steer my-2 ms-auto w-fit max-w-[88%] bg-panel rounded-[16px] py-2.5 px-[15px] text-base whitespace-pre-wrap wrap-anywhere"
         >
-          {part.text}
+          {replies?.questionById.has(part.id) && <div className="mb-1 truncate text-subtext">{replies.questionById.get(part.id)}</div>}
+          {replies?.textById.get(part.id) ?? part.text}
         </div>,
       );
+    else if (part.type === "prompt" && part.prompt?.kind === "question" && !part.prompt.resolved)
+      continue;
     else if (part.type === "prompt" && part.prompt)
       rendered.push(
         <PromptCard
           key={part.id}
           part={part}
+          questionText={replies?.questionById.get(part.id)}
+          answerInTranscript={replies?.prompts.has(part.id)}
           onRespond={onRespond}
           onOpenFile={onOpenFile}
           onOpenPlan={onOpenPlan}
@@ -3806,7 +3844,7 @@ const Transcript = memo(function Transcript({
   runExperimentName?: (runId: string) => string;
   onOpenExperiment?: OpenTranscriptTarget;
   experimentName?: (experimentId: string) => string;
-  onRespond?: (answer: PromptAnswer) => void;
+  onRespond?: (answer: PromptAnswer) => Promise<boolean>;
   onOpenPlan?: (plan: string, promptId: string, intent: TabOpenIntent) => void;
   onOpenSubagent?: OpenSubagent;
   recoveringTurnId?: string | null;
@@ -3814,6 +3852,7 @@ const Transcript = memo(function Transcript({
   skills?: SkillInfo[];
 }) {
   useLocale();
+  const replies = useMemo(() => questionReplies(messages), [messages]);
   const activePermissionId = firstPendingPermission(messages)?.id ?? null;
   const responseGroups = useRef<ChatMessage[][]>([]);
   const visibleMessages = useMemo(
@@ -3914,6 +3953,7 @@ const Transcript = memo(function Transcript({
           <Message
             message={m}
             responseMessages={group}
+            replies={replies}
             forkCount={positions.get(m.id)?.count}
             forkIndex={positions.get(m.id)?.index}
             forkPrevId={positions.get(m.id)?.prevId}
@@ -4617,7 +4657,7 @@ export function ChatPanel({
   function pickSkill(skill: SkillInfo) {
     if (!slashContext) return;
     if (
-      !pendingQuestion && skill.source === "command" && isComposerCommand(skill.name)
+      skill.source === "command" && isComposerCommand(skill.name)
     ) {
       activateComposerCommand(skill.name, draft, slashContext);
       return;
@@ -5365,6 +5405,9 @@ export function ChatPanel({
   const awaitingInput = busy && messages.some((message) => message.parts.some(
     (part) => part.type === "prompt" && part.prompt && !part.prompt.resolved && part.prompt.nativeId,
   ));
+  const pendingQuestions = useMemo(() => messages.flatMap((message) => message.parts.filter((part) =>
+    part.type === "prompt" && part.prompt?.kind === "question" && !part.prompt.resolved && (!part.prompt.nativeId || busy),
+  )), [messages, busy]);
   const activeSession = openSession;
   // Nonce while the open session's title is mid-reveal; undefined = static.
   const activeTitleReveal = activeSession ? titleReveals.get(activeSession.id) : undefined;
@@ -5387,18 +5430,8 @@ export function ChatPanel({
     return null;
   }, [messages]);
 
-  // Native questions own the composer only while their turn is still running.
-  const pendingQuestion = useMemo(
-    () => activeId ? pendingQuestionId(messages, activeSession?.harness, state.busySessions.has(activeId)) : null,
-    [messages, activeSession?.harness, activeId, state.busySessions],
-  );
-  // A pending question card owns typed text, so `!` is just an answer there.
-  const bashActive = bashMode && !pendingQuestion;
-
-  // A pending question card owns the composer's text as a plain answer — no
-  // command in it is ever expanded, so none of it is chipped either.
   const knownCommand = (name: string) => {
-    if (pendingQuestion || bashMode) return false;
+    if (bashMode) return false;
     const resolved = resolveComposerCommand(name);
     const command = commands.find((candidate) => candidate.name === canonicalSkillName(resolved ?? name));
     if (!command || command.source !== "command") return !!command;
@@ -5432,14 +5465,13 @@ export function ChatPanel({
 
   const pendingPermission = useMemo(() => firstPendingPermission(messages), [messages]);
   // Enter hands the message to the running turn. Attachments still park (only
-  // a full turn builds their on-disk preamble), and a pending card owns typed
-  // text — there the card is the affordance, not a steer.
+  // a full turn builds their on-disk preamble). Held prompts must be answered first.
   const steering =
     busy &&
     !!activeHarness?.supportsSteering &&
     !!activeHarness?.agentReady &&
     !pendingPlan &&
-    !pendingQuestion &&
+    !awaitingInput &&
     !pendingPermission &&
     attachments.length === 0 &&
     annotations.length === 0;
@@ -5586,7 +5618,7 @@ export function ChatPanel({
     // Slash tokens stay in the wire form: the server resolves every selected
     // skill and supplies this exact message as their shared request context.
     const originalText = (starter ?? draft).trim();
-    const composerCommand = !pendingQuestion && starter === undefined
+    const composerCommand = starter === undefined
       ? parseComposerCommand(originalText, planActivation)
       : null;
     const goalCommand = composerCommand?.name === "goal";
@@ -5596,7 +5628,7 @@ export function ChatPanel({
       setGoalScope(composerScopeRef.current);
       return;
     }
-    if (!pendingQuestion && (goalCommand || goalArmed)
+    if ((goalCommand || goalArmed)
       && /^(clear|none|off)$/i.test(goalCommand ? composerCommand.prompt : originalText)) {
       setDraft("");
       setGoalScope(null);
@@ -5619,7 +5651,7 @@ export function ChatPanel({
     }
     if (preparingSend.current) return;
     const planRequested = composerCommand?.name === "plan";
-    const goalRequested = !pendingQuestion && (goalCommand || goalArmed);
+    const goalRequested = (goalCommand || goalArmed);
     const toggledPlanMode = !planActive;
     const independentPlanMode = effectiveCommandPlanMode(
       acpMode ? undefined : planActivation,
@@ -5702,25 +5734,6 @@ export function ChatPanel({
       const session = await setChatSessionGoalMutation.mutateAsync([sessionId, text]);
       setSessions((current) => current.map((candidate) => candidate.id === session.id ? session : candidate));
     };
-    // A pending question card owns plain typed text as a custom answer
-    // (Claude-desktop behavior). This also works while the turn is HELD on
-    // the card — where a new message would be rejected as busy and silently
-    // dropped. A failed answer restores the draft so the text isn't lost.
-    // (Nothing is chipped or expanded while a card is pending — a `/command`
-    // in the answer serializes into the note text exactly as it reads.)
-    if ((text || pendingAnnotations.length > 0) && pendingQuestion && pending.length === 0) {
-      setDraft("");
-      setAnnotations([]);
-      void respond({
-        promptId: pendingQuestion,
-        answers: [],
-        note: text || undefined,
-        annotations: wireAnnotations,
-      }).then((ok) => {
-        if (!ok) restoreComposer();
-      });
-      return;
-    }
     const turnSignature = JSON.stringify({
       text,
       goal: goalRequested ? text : undefined,
@@ -6253,7 +6266,10 @@ export function ChatPanel({
       dispatch({ type: "busy", sessionId: sid, busy: true });
       return queueSessionMutation(() => respondChat(sid, answer))
         .then(() => true)
-        .catch(() => false)
+        .catch((error: unknown) => {
+          showAlert(error instanceof Error ? error.message : String(error), "error");
+          return false;
+        })
         .finally(() => {
           if (!isCurrentScope(sessionsOptions.queryKey)) return;
           // Reconcile with the store: if this tab's copy of the card was stale
@@ -6811,6 +6827,12 @@ export function ChatPanel({
           </Button>
         )}
 
+        {pendingQuestions.length > 0 && (
+          <div inert={contentLoading || Boolean(contentError) || historyLoading} className="mx-auto mb-2 flex max-h-96 w-full max-w-readable shrink-0 flex-col gap-2 overflow-y-auto px-3">
+            {pendingQuestions.map((part) => <PromptCard key={`${activeId}-${part.id}`} part={part} onRespond={respond} />)}
+          </div>
+        )}
+
         {/* Docked while a plan awaits a decision, so the approval controls never
           scroll away. Actions mirror the (now compact) inline card's wire. */}
         <div inert={contentLoading || Boolean(contentError) || historyLoading} className="composer px-3 pb-5 shrink-0 relative z-4 bg-background w-full max-w-readable my-0 mx-auto [&_textarea]:border-0 [&_textarea]:bg-none [&_textarea]:bg-transparent [&_textarea]:resize-none [&_textarea]:pt-2.5 [&_textarea]:px-3 [&_textarea]:pb-1 [&_textarea]:text-base [&_textarea]:field-sizing-content [&_textarea]:min-h-18 [&_textarea]:max-h-45">
@@ -6962,7 +6984,7 @@ export function ChatPanel({
               }}
             />
           )}
-          <div className={`composer-box relative flex flex-col border ${bashActive ? "border-accent-amber" : "border-border"} rounded-lg bg-background shadow-elevated`} data-onboarding="composer">
+          <div className={`composer-box relative flex flex-col border ${bashMode ? "border-accent-amber" : "border-border"} rounded-lg bg-background shadow-elevated`} data-onboarding="composer">
             {activeHarness && !activeHarness.agentReady && (
               <div className="composer-harness-warning py-2 px-3 text-subtext text-sm leading-normal border-b border-b-border-variant [&_strong]:text-accent-amber [&_strong]:font-medium [&_code]:font-mono [&_code]:text-text">
                 {activeHarness.catalogPending ? (
@@ -7064,7 +7086,7 @@ export function ChatPanel({
                 {settingsError}
               </div>
             )}
-            <div className={`composer-input relative flex overflow-hidden [&_textarea]:flex-1 ${bashActive ? "[&_textarea]:font-mono [&_textarea]:text-sm" : ""}`}>
+            <div className={`composer-input relative flex overflow-hidden [&_textarea]:flex-1 ${bashMode ? "[&_textarea]:font-mono [&_textarea]:text-sm" : ""}`}>
               <textarea
                 dir="auto"
                 {...{ writingsuggestions: "false" }}
@@ -7074,21 +7096,13 @@ export function ChatPanel({
                 className="relative z-1 bg-transparent"
                 value={draft}
                 placeholder={
-                  // A pending question card owns typed text (see send()); say so.
-                  // While a steerable turn runs, Enter goes to that turn, so name
-                  // the gesture and its queue chord — the send button is a Stop
-                  // button for the whole busy stretch.
-                  // Otherwise follow `composerSelection` so the name tracks the
-                  // picker for a new session and the open session once one exists.
-                  pendingQuestion
-                    ? m.chat_type_custom_answer()
-                    : steering && activeHarness
-                      ? m.chat_steer_placeholder({ harness: ltr(activeHarness.name), shortcut: ltr(queueChord) })
-                      : composerSelection
-                        ? activeHarness?.agentReady
-                          ? m.chat_message_harness({ harness: ltr(harnessLabel(composerSelection.harness, activeHarness?.name)) })
-                          : m.chat_harness_unavailable({ harness: ltr(harnessLabel(composerSelection.harness, activeHarness?.name)) })
-                        : m.chat_ask_agent_placeholder()
+                  steering && activeHarness
+                    ? m.chat_steer_placeholder({ harness: ltr(activeHarness.name), shortcut: ltr(queueChord) })
+                    : composerSelection
+                      ? activeHarness?.agentReady
+                        ? m.chat_message_harness({ harness: ltr(harnessLabel(composerSelection.harness, activeHarness?.name)) })
+                        : m.chat_harness_unavailable({ harness: ltr(harnessLabel(composerSelection.harness, activeHarness?.name)) })
+                      : m.chat_ask_agent_placeholder()
                 }
                 rows={2}
                 onPaste={onComposerPaste}
@@ -7105,11 +7119,10 @@ export function ChatPanel({
                   const cursor = e.target.selectionStart;
                   setComposerCursor(cursor);
                   // Composer commands run rather than send: each fires the moment
-                  // its space lands. Not while a question card is pending (its
-                  // answer is a note, never a command) and not mid-IME-composition,
+                  // its space lands, but not mid-IME-composition,
                   // where the text can transiently look complete.
                   const completedCommand =
-                    cursor > 0 && /\s/.test(v[cursor - 1]) && !pendingQuestion && !composingRef.current && bashCommand(v) === null
+                    cursor > 0 && /\s/.test(v[cursor - 1]) && !composingRef.current && bashCommand(v) === null
                       ? slashCommandContext(v, cursor - 1)
                       : null;
                   const completedName = completedCommand && resolveComposerCommand(completedCommand.query);
@@ -7193,7 +7206,7 @@ export function ChatPanel({
                   }
                   if (e.key === "Enter" && !e.shiftKey) {
                     e.preventDefault();
-                    if (bashActive) {
+                    if (bashMode) {
                       void runShell();
                       return;
                     }
@@ -7289,7 +7302,7 @@ export function ChatPanel({
                   <span>{m.chat_panel_plan()}</span>
                 </Button>
               )}
-              {bashActive && (
+              {bashMode && (
                 <Button
                   type="button"
                   variant="ghost"
@@ -7334,12 +7347,7 @@ export function ChatPanel({
                 />
                 <ContextMeter usage={openSession?.contextUsage} />
               </div>
-              {busy && !pendingQuestion ? (
-                // Stop whenever the turn is busy and typed text has nowhere to
-                // go — actively streaming, or held on a plan/permission card
-                // (their cards are the affordance; send() can't service them).
-                // Send stays only when it actually works: idle, or a held
-                // QUESTION card that owns typed text.
+              {busy ? (
                 <IconButton className="send-btn" variant="stop" title={m.chat_panel_stop()} aria-label={m.chat_panel_stop()} onClick={stop}>
                   <X size={16} />
                 </IconButton>
@@ -7347,11 +7355,11 @@ export function ChatPanel({
                 <IconButton
                   className={`send-btn ${demoHintVisible && activeHarness?.agentReady ? "ring-2 ring-primary ring-offset-2 ring-offset-background" : ""}`}
                   variant="primary"
-                  title={bashActive ? m.chat_panel_run() : m.chat_panel_send()}
-                  aria-label={bashActive ? m.chat_panel_run() : m.chat_panel_send()}
-                  onClick={() => void (bashActive ? runShell() : send())}
+                  title={bashMode ? m.chat_panel_run() : m.chat_panel_send()}
+                  aria-label={bashMode ? m.chat_panel_run() : m.chat_panel_send()}
+                  onClick={() => void (bashMode ? runShell() : send())}
                   disabled={
-                    bashActive
+                    bashMode
                       ? !shellCommand || (!activeId && !activeHarness?.agentReady)
                       : !activeHarness?.agentReady ||
                       (!draft.trim() && attachments.length === 0 && annotations.length === 0)

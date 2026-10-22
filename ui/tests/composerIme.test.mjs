@@ -30,7 +30,7 @@ function composer(editor, overrides = {}) {
   let stopped = false;
   const record = name => (...args) => calls.push([name, ...args]);
   const bindings = {
-    composingRef: { current: false }, skillMenuOpen: false, mentionMenuOpen: false, bashActive: false,
+    composingRef: { current: false }, skillMenuOpen: false, mentionMenuOpen: false, bashMode: false,
     activeSkillIdx: 0, skillMatches: ["skill"], activeMentionIdx: 0, mentionMatches: ["file"], mentionQuery: "file",
     setSkillIdx: record("skillIndex"), pickSkill: record("skill"), setMentionIdx: record("mentionIndex"),
     pickFileMention: record("mention"), setSkillMenuDismissed: record("dismiss"),
@@ -113,7 +113,7 @@ for (const modifier of ["metaKey", "ctrlKey"]) {
   });
 }
 
-for (const [mode, action] of [["bashActive", "shell"], ["skillMenuOpen", "skill"], ["mentionMenuOpen", "mention"]]) {
+for (const [mode, action] of [["bashMode", "shell"], ["skillMenuOpen", "skill"], ["mentionMenuOpen", "mention"]]) {
   test(`${mode} still handles normal Enter`, () => {
     const input = composer(false, { [mode]: true });
     input.press();

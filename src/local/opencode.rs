@@ -88,11 +88,7 @@ pub fn agent_log_path() -> PathBuf {
     store::data_dir().join("agent-opencode.log")
 }
 
-/// Project-local opencode config. Every real permission is pre-approved so a
-/// headless turn never stalls on a TUI prompt; the interactive `question` tool
-/// is denied AND disabled (it would deadlock serve mode — nothing can answer
-/// it), repeated on the default `build` agent because the tool filter is
-/// agent-scoped. The model default keeps local subagents on the same endpoint.
+/// Chat-server config; native questions are answered through the dashboard.
 fn opencode_config_json(model: Option<&str>, instructions: &str, plugin: Option<&str>) -> String {
     let mut cfg = json!({
         "$schema": "https://opencode.ai/config.json",
@@ -109,11 +105,6 @@ fn opencode_config_json(model: Option<&str>, instructions: &str, plugin: Option<
             "lsp": "allow",
             "doom_loop": "allow",
             "external_directory": "allow",
-            "question": "deny",
-        },
-        "tools": { "question": false },
-        "agent": {
-            "build": { "tools": { "question": false }, "permission": { "question": "deny" } }
         },
         "instructions": [instructions],
     });

@@ -1319,9 +1319,10 @@ async fn reply_inline(ctx: &ResumeCtx, prompt: &WirePrompt, answer: &PromptAnswe
     // The reply only lands if the turn is still paused waiting for it. If the
     // turn already ended (errored / interrupted), serve may still accept the
     // POST but no one is consuming the resumed stream, so the reply would be
-    // lost and the card would falsely mark resolved. Reject it instead — the
-    // card stays actionable and the user sees the turn is no longer live.
+    // lost and the card would falsely mark answered.
     if !ctx.is_busy().await {
+        ctx.host
+            .resolve_zombie_prompt(&ctx.session_id, &answer.prompt_id);
         return Err(anyhow!(
             "this turn is no longer running — its prompt can't be answered"
         ));
@@ -1343,17 +1344,15 @@ async fn reply_inline(ctx: &ResumeCtx, prompt: &WirePrompt, answer: &PromptAnswe
 
     match prompt.kind.as_str() {
         "permission" => {
-            // approve → "always" (so the same tool won't re-prompt this turn);
-            // reject closes it. The reply is session-scoped in opencode's v1 API.
             let native_session = ctx.native_session_id.as_deref().ok_or_else(|| {
                 anyhow!("opencode session has no native id — cannot deliver the reply")
             })?;
-            let response = if answer.approve { "always" } else { "reject" };
+            let response = if answer.approve { "once" } else { "reject" };
             post_permission(http, &base, native_session, request_id, response).await?;
         }
         "question" => {
             let submitted = submitted_answers(&answer.answers, answer.note.as_ref());
-            if submitted.is_empty() {
+            if !answer.approve || submitted.is_empty() {
                 // No selection: reject the question rather than reply empty, so
                 // opencode surfaces the model's fallback path.
                 http.post(format!("{base}/question/{request_id}/reject"))
@@ -2050,7 +2049,7 @@ fn surface_card(ctx: &mut TurnCtx, card: WirePrompt) {
 /// for this session. Returns `true` if it consumed the event (so the caller
 /// skips `handle_event`), `false` otherwise.
 ///
-/// Permissions honor the session's policy: Auto-approve replies `always` to an
+/// Permissions honor the session's policy: Auto-approve replies `once` to an
 /// `ask` request, while Default surfaces a card. Explicit denies never emit an
 /// approval request, so neither policy overrides them. Questions always surface — there's no
 /// sensible auto-answer. A single flaky auto-reply must not lose the whole turn,
@@ -2085,8 +2084,7 @@ async fn handle_prompt_event(
                     // Reply without surfacing a card — keep the turn flowing. If
                     // the reply POST fails, don't kill the turn: fall back to a
                     // card so the user can decide.
-                    if let Err(err) =
-                        post_permission(ctx.http(), base, native_id, id, "always").await
+                    if let Err(err) = post_permission(ctx.http(), base, native_id, id, "once").await
                     {
                         eprintln!("orx up: opencode auto-approve failed, surfacing card: {err}");
                         surface_card(ctx, card);

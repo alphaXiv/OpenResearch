@@ -2,7 +2,7 @@ export { Badge } from "./Badge";
 export type { BadgeVariant } from "./Badge";
 export { Button, ButtonLink } from "./Button";
 export { IconButton, IconButtonLink } from "./IconButton";
-export { Input } from "./Input";
+export { Input, Textarea } from "./Input";
 export type { InputProps } from "./Input";
 export { MenuItem } from "./MenuItem";
 export { LoadingRow, Spinner } from "./Spinner";
