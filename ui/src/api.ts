@@ -1319,7 +1319,8 @@ export interface ProjectArtifacts {
   dir: string;
   entries: ArtifactEntry[];
   truncated: boolean;
-  limit: number;
+  /** Absent from older hosts, whose cap was 2,000. */
+  limit?: number;
 }
 
 export const getArtifacts = (projectId: string, signal?: AbortSignal) =>
