@@ -1146,7 +1146,7 @@
   "a11y_run_id": "Ejecución {id}",
   "a11y_open_branch_github": "Abrir {branch} en GitHub",
   "settings_updates_disabled_by_env": " ORX_NO_UPDATE_CHECK desactiva las actualizaciones en este entorno, así que este ajuste no tiene efecto.",
-  "skills_description": "Usa las skills con /nombre en el chat. Las skills de tus agentes de programación se filtran según su relevancia para la investigación antes de importarlas. Sube una skill para incluirla tú mismo. También puedes pedirle a tu agente de OpenResearch que cree y añada una skill reutilizable por ti.",
+  "skills_description": "Usa las skills con /nombre en el chat. Las skills de tus agentes de programación aparecen automáticamente. Sube una skill para incluirla tú mismo. También puedes pedirle a tu agente de OpenResearch que cree y añada una skill reutilizable por ti.",
   "remote_ssh_host": "SSH: {host}",
   "remote_dialog_title": "Conectar a un host remoto",
   "remote_dialog_description": "Elige un host SSH configurado.",

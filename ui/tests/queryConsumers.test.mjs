@@ -121,7 +121,7 @@ for (const [card, family, field, upload] of [
     const { QueryObserver } = await import("@tanstack/react-query");
     const { queryModules } = await import("./queryModules.mjs");
     let fail = false, calls = 0;
-    const { client, load } = queryModules({ [family]: async () => { calls++; if (fail) throw new Error("offline"); return family === "listUserSkills" ? { skills: [{ name: "cached" }], importing: false } : [{ name: "cached" }]; } }, { nativeClient: true });
+    const { client, load } = queryModules({ [family]: async () => { calls++; if (fail) throw new Error("offline"); return family === "listUserSkills" ? { skills: [{ name: "cached" }] } : [{ name: "cached" }]; } }, { nativeClient: true });
     const options = load("settings")[`${family}Query`]();
     await client.fetchQuery(options);
     const observer = new QueryObserver(client, options);

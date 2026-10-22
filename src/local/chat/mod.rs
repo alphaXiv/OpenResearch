@@ -1596,6 +1596,18 @@ impl ChatHost {
         if crate::local::harness::session_harness(&session.harness, session_id).is_none() {
             return Err(anyhow!("unknown harness `{}`", session.harness));
         }
+        if session.harness == "opencode"
+            && session
+                .model
+                .as_deref()
+                .is_none_or(|model| model.trim().is_empty())
+            && (session.native_session_id.is_none()
+                || self.opencode.resident_model(session_id).await.is_none())
+        {
+            return Err(anyhow!(
+                "Select an OpenCode model before compacting this chat"
+            ));
+        }
         // Taken before the progress row exists, so the summary never describes
         // its own compaction.
         let snapshot = crate::local::harness::compaction_snapshot(session_id);
@@ -1737,6 +1749,16 @@ impl ChatHost {
         harness: &dyn crate::local::harness::Harness,
         snapshot: &str,
     ) -> Result<String> {
+        if harness.id() == "opencode"
+            && session
+                .model
+                .as_deref()
+                .is_none_or(|model| model.trim().is_empty())
+        {
+            return Err(anyhow!(
+                "Select an OpenCode model before compacting this chat"
+            ));
+        }
         let bootstrap = effective_bootstrap_context(&Store::open()?, session)?;
         let prior = bootstrap.as_deref().unwrap_or("");
         let prompt = format!(
@@ -10146,6 +10168,104 @@ mod bridge_tests {
             created_at: 1,
             updated_at: 1,
         }
+    }
+
+    #[tokio::test]
+    async fn opencode_fallback_compaction_requires_a_model() {
+        let host = test_host();
+        let mut session = bare_session();
+        session.harness = "opencode".into();
+        let harness = crate::local::harness::chat_harness("opencode").unwrap();
+        for model in [None, Some("  ".into())] {
+            session.model = model;
+            let error = host
+                .compaction_summary(&session, harness.as_ref(), "history")
+                .await
+                .unwrap_err();
+            assert!(error.to_string().contains("Select an OpenCode model"));
+        }
+    }
+
+    #[test]
+    fn missing_opencode_compaction_model_leaves_history_unchanged() {
+        const CHILD: &str = "ORX_TEST_MISSING_COMPACTION_MODEL";
+        if std::env::var_os(CHILD).is_some() {
+            tokio::runtime::Runtime::new().unwrap().block_on(async {
+                let host = Arc::new(test_host());
+                let store = Store::open().unwrap();
+                for (index, (model, native_id)) in [
+                    (None, None),
+                    (Some("  ".to_string()), None),
+                    (None, Some("native".to_string())),
+                    (Some("  ".to_string()), Some("native".to_string())),
+                ]
+                .into_iter()
+                .enumerate()
+                {
+                    let mut session = bare_session();
+                    session.id = format!("missing-model-{index}");
+                    session.harness = "opencode".into();
+                    session.model = model;
+                    session.native_session_id = native_id;
+                    session.archived = true;
+                    session.bootstrap_context = Some("earlier context".into());
+                    session.context_usage_json = Some(r#"{"usedTokens":9000}"#.into());
+                    store.create_chat_session(&session).unwrap();
+                    store
+                        .upsert_chat_message_on_branch(&StoredChatMessage {
+                            id: format!("message-{index}"),
+                            session_id: session.id.clone(),
+                            role: "user".into(),
+                            parts_json: serde_json::to_string(&vec![WirePart::text(
+                                "text",
+                                "History to preserve",
+                            )])
+                            .unwrap(),
+                            created_at: 1,
+                            completed_at: Some(1),
+                            parent_id: None,
+                            base_native_session_id: None,
+                            result_native_session_id: None,
+                        })
+                        .unwrap();
+                    store
+                        .set_chat_session_context_usage(
+                            &session.id,
+                            session.context_usage_json.as_deref().unwrap(),
+                        )
+                        .unwrap();
+                    let before = store.list_chat_messages(&session.id).unwrap();
+                    let error = host.compact_session(&session.id).await.unwrap_err();
+                    assert!(
+                        error.to_string().contains("Select an OpenCode model"),
+                        "{error}"
+                    );
+                    let after = store.list_chat_messages(&session.id).unwrap();
+                    assert_eq!(after.len(), before.len());
+                    assert_eq!(after[0].id, before[0].id);
+                    assert_eq!(after[0].parts_json, before[0].parts_json);
+                    let saved = store.get_chat_session(&session.id).unwrap().unwrap();
+                    assert_eq!(saved.native_session_id, session.native_session_id);
+                    assert_eq!(saved.bootstrap_context, session.bootstrap_context);
+                    assert_eq!(saved.context_usage_json, session.context_usage_json);
+                    assert!(saved.archived);
+                }
+            });
+            return;
+        }
+        let fixture =
+            crate::local::git::TemporaryDirectory::new("orx-missing-compaction-model").unwrap();
+        let output = std::process::Command::new(std::env::current_exe().unwrap())
+            .args(["--exact", "local::chat::bridge_tests::missing_opencode_compaction_model_leaves_history_unchanged", "--nocapture"])
+            .env(CHILD,"1")
+            .env("ORX_DATA_DIR",fixture.path())
+            .output().unwrap();
+        assert!(
+            output.status.success(),
+            "{}\n{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
     }
 
     #[test]

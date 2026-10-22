@@ -13,7 +13,7 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use serde::Serialize;
-use serde_json::json;
+use serde_json::{json, Value};
 use tokio::process::{Child, Command};
 use tokio::sync::Mutex;
 
@@ -459,7 +459,7 @@ async fn spawn_agent(
     cmd.current_dir(&repo);
     // This orx first on PATH (the agent shells out to plain `orx`), the imported
     // shell environment, and the dashboard's Environment tab vars.
-    crate::local::local_models::prepare_env(&mut cmd, model)?;
+    crate::local::local_models::prepare_generation_env(&mut cmd, model, binary.protocol)?;
     cmd.env("OPENCODE_DB", database.path())
         .env("OPENCODE_DISABLE_AUTOUPDATE", "1");
     // Tag runs the agent launches (`orx exp run`) with this session so they can
@@ -474,7 +474,13 @@ async fn spawn_agent(
             .env("OPENCODE_DISABLE_PROJECT_CONFIG", "1")
             .env("OPENCODE_CONFIG_PROJECT_DISABLE", "1");
     }
-    let (child, endpoint) = runtime::start_server(&binary, cmd).await?;
+    let (mut child, endpoint) = runtime::start_server(&binary, cmd).await?;
+    if let Some(model) = model {
+        if let Err(error) = verify_generation_models(&endpoint, model).await {
+            let _ = child.kill().await;
+            return Err(error);
+        }
+    }
     let port = endpoint.port()?;
     Ok(AgentChild {
         child,
@@ -489,18 +495,121 @@ async fn spawn_agent(
     })
 }
 
+pub(crate) async fn verify_generation_models(endpoint: &AgentEndpoint, model: &str) -> Result<()> {
+    let path = match endpoint.protocol {
+        Protocol::V1 => "/agent",
+        Protocol::V2 => "/api/agent",
+    };
+    let mut mismatch = None;
+    tokio::time::timeout(Duration::from_secs(30), async {
+        loop {
+            let response: Value = endpoint.client.get(format!("{}{path}", endpoint.base_url))
+                .send().await?.error_for_status()?.json().await?;
+            let agents = match endpoint.protocol {
+                Protocol::V1 => response.as_array(),
+                Protocol::V2 => response.get("data").and_then(Value::as_array),
+            }.ok_or_else(|| anyhow!("OpenCode returned no effective agent configuration"))?;
+            if agents.is_empty() {
+                tokio::time::sleep(Duration::from_millis(100)).await;
+                continue;
+            }
+            mismatch = None;
+            for name in ["title", "compaction"] {
+                let id_key = if endpoint.protocol == Protocol::V1 { "name" } else { "id" };
+                let Some(agent) = agents.iter().find(|agent| agent[id_key] == name) else {
+                    continue;
+                };
+                let configured = agent.get("model");
+                let model_key = if endpoint.protocol == Protocol::V1 { "modelID" } else { "id" };
+                let actual = configured.and_then(|value| Some(format!("{}/{}",
+                    value.get("providerID")?.as_str()?, value.get(model_key)?.as_str()?)));
+                if actual.as_deref() != Some(model) {
+                    mismatch = Some(name);
+                    break;
+                }
+            }
+            if mismatch.is_none() {
+                return Ok(());
+            }
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+    }).await.map_err(|_| match mismatch {
+        Some(name) => anyhow!("OpenCode's effective {name} model does not match the selected model. Check managed OpenCode settings."),
+        None => anyhow!("OpenCode agent configuration timed out"),
+    })?
+}
+
+async fn compact_v2(
+    endpoint: &AgentEndpoint,
+    native_id: &str,
+    provider: &str,
+    model: &str,
+) -> Result<()> {
+    let base = format!("{}/api/session/{native_id}", endpoint.base_url);
+    endpoint
+        .client
+        .post(format!("{base}/model"))
+        .json(&json!({"model":{"providerID":provider,"id":model}}))
+        .send()
+        .await?
+        .error_for_status()?;
+    let admitted: Value = endpoint
+        .client
+        .post(format!("{base}/compact"))
+        .json(&json!({}))
+        .send()
+        .await?
+        .error_for_status()?
+        .json()
+        .await?;
+    let id = admitted
+        .pointer("/data/id")
+        .and_then(Value::as_str)
+        .ok_or_else(|| anyhow!("OpenCode compaction response has no id"))?;
+    tokio::time::timeout(Duration::from_secs(120), async {
+        loop {
+            let response = endpoint
+                .client
+                .get(format!("{base}/message/{id}"))
+                .send()
+                .await?;
+            // Admission precedes the durable message projection.
+            if response.status() != reqwest::StatusCode::NOT_FOUND {
+                let message: Value = response.error_for_status()?.json().await?;
+                match message.pointer("/data/status").and_then(Value::as_str) {
+                    Some("completed") => return Ok(()),
+                    Some("failed") => {
+                        return Err(anyhow!(
+                            "OpenCode compaction failed: {}",
+                            message
+                                .pointer("/data/error/message")
+                                .and_then(Value::as_str)
+                                .unwrap_or("unknown error")
+                        ))
+                    }
+                    _ => {}
+                }
+            }
+            tokio::time::sleep(Duration::from_millis(200)).await;
+        }
+    })
+    .await
+    .map_err(|_| anyhow!("OpenCode compaction timed out"))?
+}
+
 /// Why a summarize attempt did or did not compact in place.
 pub(crate) enum SummarizeOutcome {
     Compacted,
     NoServer,
     NoModel,
+    ModelChanged,
 }
 
 /// The `orx up` opencode host: one serve child per chat session, keyed by the
 /// orx session id, each running in that session's worktree. Share as
 /// `Arc<AgentHost>` in axum state.
 pub struct AgentHost {
-    /// `orx up --model` default when the session does not select a local model.
+    /// Explicit `orx up --model` default when the session has no model.
     model_override: Option<String>,
     /// Serializes ensure() spawns (across all sessions — a spawn is seconds,
     /// and one at a time keeps clone/fetch traffic sane). Never taken by
@@ -527,6 +636,13 @@ impl Drop for StartupRegistration<'_> {
 }
 
 impl AgentHost {
+    fn selected_model<'a>(&'a self, model: Option<&'a str>) -> Option<&'a str> {
+        model.filter(|model| !model.trim().is_empty()).or(self
+            .model_override
+            .as_deref()
+            .filter(|model| !model.trim().is_empty()))
+    }
+
     pub fn new(model_override: Option<String>) -> Self {
         Self {
             model_override,
@@ -560,6 +676,19 @@ impl AgentHost {
         }
     }
 
+    pub(crate) async fn resident_model(&self, session_id: &str) -> Option<String> {
+        let mut guard = self.inner.lock().await;
+        let agent = guard.get_mut(session_id)?;
+        if !matches!(agent.child.try_wait(), Ok(None)) {
+            return None;
+        }
+        agent
+            .model
+            .as_ref()
+            .filter(|model| !model.trim().is_empty())
+            .cloned()
+    }
+
     pub(crate) async fn interrupt(&self, session_id: &str, native_id: &str) -> Result<()> {
         let Some(endpoint) = self.endpoint_for(session_id).await else {
             return Ok(());
@@ -588,20 +717,29 @@ impl AgentHost {
         let Some(endpoint) = self.endpoint_for(session_id).await else {
             return Ok(SummarizeOutcome::NoServer);
         };
-        // Summarize needs a named model. A session can legitimately have none
-        // (a custom provider advertises no models), and there is no way to call
-        // this endpoint without one — so the caller knowingly trades this
-        // resumable session for a summary rather than leaving `/compact` broken.
-        let Some((provider, model_id)) = model.and_then(|model| model.split_once('/')) else {
+        // Native compaction can retain the model already bound to its resident process.
+        let resident_model = self.resident_model(session_id).await;
+        let model = self.selected_model(model).or(resident_model.as_deref());
+        let Some((provider, model_id)) = model
+            .and_then(|model| model.split_once('/'))
+            .filter(|(provider, id)| !provider.trim().is_empty() && !id.trim().is_empty())
+        else {
             return Ok(SummarizeOutcome::NoModel);
         };
-        let path = match endpoint.protocol {
-            Protocol::V1 => format!("/session/{native_id}/summarize"),
-            Protocol::V2 => format!("/api/session/{native_id}/summarize"),
-        };
+        if resident_model.as_deref() != model {
+            return Ok(SummarizeOutcome::ModelChanged);
+        }
+        verify_generation_models(&endpoint, model.unwrap_or_default()).await?;
+        if endpoint.protocol == Protocol::V2 {
+            compact_v2(&endpoint, native_id, provider, model_id).await?;
+            return Ok(SummarizeOutcome::Compacted);
+        }
         endpoint
             .client
-            .post(format!("{}{path}", endpoint.base_url))
+            .post(format!(
+                "{}/session/{native_id}/summarize",
+                endpoint.base_url
+            ))
             .json(&json!({ "providerID": provider, "modelID": model_id }))
             .send()
             .await?
@@ -653,9 +791,7 @@ impl AgentHost {
             database: database_path,
             store: native_store,
         } = runtime;
-        let model = model
-            .filter(|model| model.starts_with("orx-local-"))
-            .or(self.model_override.as_deref());
+        let model = self.selected_model(model);
         let database_path = native_store::opencode_database::normalize_path(&database_path)?;
         if binary.protocol == Protocol::V1 {
             let path = database_path.clone();
@@ -676,7 +812,13 @@ impl AgentHost {
                     && agent.model.as_deref() == model
                     && matches!(agent.child.try_wait(), Ok(None))
                 {
-                    return Ok(agent.status());
+                    let status = agent.status();
+                    let endpoint = agent.endpoint.clone();
+                    drop(guard);
+                    if let Some(model) = model {
+                        verify_generation_models(&endpoint, model).await?;
+                    }
+                    return Ok(status);
                 }
             }
             if let Some(mut old) = guard.remove(session_id) {
@@ -758,6 +900,228 @@ impl AgentHost {
 mod tests {
     use super::*;
     use crate::local::agent_skills::{self, SkillSet};
+
+    #[test]
+    fn resident_selection_keeps_cloud_session_ahead_of_host_default() {
+        let host = AgentHost::new(Some("host/default".into()));
+        assert_eq!(
+            host.selected_model(Some("openrouter/selected")),
+            Some("openrouter/selected")
+        );
+        assert_eq!(
+            host.selected_model(Some("orx-local-test/qwen")),
+            Some("orx-local-test/qwen")
+        );
+        assert_eq!(host.selected_model(None), Some("host/default"));
+        assert_eq!(host.selected_model(Some(" ")), Some("host/default"));
+        assert_eq!(AgentHost::new(None).selected_model(None), None);
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn resident_reuses_selected_cloud_model_and_falls_back_before_mismatched_compaction() {
+        use axum::{
+            routing::{get, post},
+            Json, Router,
+        };
+        use std::os::unix::fs::PermissionsExt;
+        use std::sync::{
+            atomic::{AtomicUsize, Ordering},
+            Arc,
+        };
+        let fixture = git::TemporaryDirectory::new("orx-resident-model").unwrap();
+        let path = fixture.path().join("opencode");
+        std::fs::write(&path, "#!/bin/sh\necho 1.19.0\n").unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o700)).unwrap();
+        let binary = resolve_binary_at(path).await.unwrap();
+        let database_path = fixture.path().join("opencode.db");
+        let database =
+            native_store::opencode_database::DatabaseLease::acquire(&database_path, 1).unwrap();
+        let requests = Arc::new(AtomicUsize::new(0));
+        let count = requests.clone();
+        let compacted = Arc::new(AtomicUsize::new(0));
+        let summaries = compacted.clone();
+        let app = Router::new().route(
+            "/agent",
+            get(move || {
+                count.fetch_add(1, Ordering::SeqCst);
+                async {
+                    Json(json!([
+                        {"name":"title","model":{"providerID":"cloud","modelID":"selected"}},
+                        {"name":"compaction","model":{"providerID":"cloud","modelID":"selected"}}
+                    ]))
+                }
+            }),
+        ).route("/session/native/summarize", post(move |Json(body): Json<Value>| {
+            summaries.fetch_add(1, Ordering::SeqCst);
+            async move {
+                assert_eq!(body, json!({"providerID":"cloud","modelID":"selected"}));
+            }
+        }));
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let endpoint = AgentEndpoint {
+            base_url: format!("http://127.0.0.1:{port}"),
+            client: crate::net::loopback_client().build().unwrap(),
+            protocol: Protocol::V1,
+            legacy_v2_api: false,
+        };
+        let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        let child = Command::new("sleep")
+            .arg("60")
+            .kill_on_drop(true)
+            .spawn()
+            .unwrap();
+        let pid = child.id();
+        let project = sample_project();
+        let mut host = AgentHost::new(Some("host/default".into()));
+        host.inner.lock().await.insert(
+            "chat".into(),
+            AgentChild {
+                child,
+                port,
+                project_id: project.id.clone(),
+                session_id: "chat".into(),
+                model: Some("cloud/selected".into()),
+                native_store: NativeStore::Isolated,
+                binary: binary.clone(),
+                endpoint,
+                database,
+            },
+        );
+        let (progress, _) = tokio::sync::watch::channel(String::new());
+        let status = host
+            .ensure(
+                &project,
+                "chat",
+                Some("cloud/selected"),
+                ResolvedRuntime {
+                    binary,
+                    database: database_path,
+                    store: NativeStore::Isolated,
+                },
+                progress,
+            )
+            .await
+            .unwrap();
+        assert_eq!(status.model.as_deref(), Some("cloud/selected"));
+        assert_eq!(host.inner.lock().await["chat"].child.id(), pid);
+        let before = requests.load(Ordering::SeqCst);
+        assert!(matches!(
+            host.summarize("chat", "native", Some("cloud/switched"))
+                .await
+                .unwrap(),
+            SummarizeOutcome::ModelChanged
+        ));
+        assert_eq!(requests.load(Ordering::SeqCst), before);
+        assert_eq!(compacted.load(Ordering::SeqCst), 0);
+        host.model_override = None;
+        assert_eq!(
+            host.resident_model("chat").await.as_deref(),
+            Some("cloud/selected")
+        );
+        assert!(matches!(
+            host.summarize("chat", "native", None).await.unwrap(),
+            SummarizeOutcome::Compacted
+        ));
+        assert_eq!(compacted.load(Ordering::SeqCst), 1);
+        host.shutdown().await;
+        assert!(host.resident_model("chat").await.is_none());
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn effective_agent_models_reject_overrides_but_allow_disabled_agents() {
+        use axum::{routing::get, Json, Router};
+        for protocol in [Protocol::V1, Protocol::V2] {
+            for (models, expected) in [
+                (vec!["selected", "selected"], true),
+                (vec!["managed", "selected"], false),
+                (vec![], true),
+            ] {
+                let agents: Vec<_> = ["title", "compaction"]
+                    .iter()
+                    .zip(models)
+                    .map(|(name, model)| {
+                        if protocol == Protocol::V1 {
+                            json!({"name":name,"model":{"providerID":"custom","modelID":model}})
+                        } else {
+                            json!({"id":name,"model":{"providerID":"custom","id":model}})
+                        }
+                    })
+                    .chain(std::iter::once(json!({"id":"build","name":"build"})))
+                    .collect();
+                let body = if protocol == Protocol::V1 {
+                    json!(agents)
+                } else {
+                    json!({"data":agents})
+                };
+                let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+                let endpoint = AgentEndpoint {
+                    base_url: format!("http://{}", listener.local_addr().unwrap()),
+                    client: crate::net::loopback_client().build().unwrap(),
+                    protocol,
+                    legacy_v2_api: false,
+                };
+                let app = Router::new().route(
+                    if protocol == Protocol::V1 {
+                        "/agent"
+                    } else {
+                        "/api/agent"
+                    },
+                    get(move || {
+                        let body = body.clone();
+                        async move { Json(body) }
+                    }),
+                );
+                let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+                let result = verify_generation_models(&endpoint, "custom/selected").await;
+                assert_eq!(result.is_ok(), expected, "{result:?}");
+                server.abort();
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn v2_compaction_waits_for_completion_and_propagates_failure() {
+        use axum::{
+            routing::{get, post},
+            Json, Router,
+        };
+        use std::sync::{
+            atomic::{AtomicUsize, Ordering},
+            Arc,
+        };
+        for failed in [false, true] {
+            let polls = Arc::new(AtomicUsize::new(0));
+            let count = polls.clone();
+            let app = Router::new()
+                .route("/api/session/chat/model", post(|Json(body): Json<Value>| async move {
+                    assert_eq!(body, json!({"model":{"providerID":"custom","id":"selected"}}));
+                }))
+                .route("/api/session/chat/compact", post(|| async { Json(json!({"data":{"id":"compact-id"}})) }))
+                .route("/api/session/chat/message/compact-id", get(move || {
+                    let count = count.clone();
+                    async move { Json(json!({"data": if count.fetch_add(1, Ordering::SeqCst) == 0 { json!({"status":"running"}) } else if failed { json!({"status":"failed","error":{"message":"fixture failure"}}) } else { json!({"status":"completed"}) }})) }
+                }));
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let endpoint = AgentEndpoint {
+                base_url: format!("http://{}", listener.local_addr().unwrap()),
+                client: crate::net::loopback_client().build().unwrap(),
+                protocol: Protocol::V2,
+                legacy_v2_api: false,
+            };
+            let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+            let result = compact_v2(&endpoint, "chat", "custom", "selected").await;
+            assert_eq!(polls.load(Ordering::SeqCst), 2);
+            if failed {
+                assert!(result.unwrap_err().to_string().contains("fixture failure"));
+            } else {
+                result.unwrap();
+            }
+            server.abort();
+        }
+    }
 
     #[tokio::test]
     async fn cancellation_does_not_wait_for_migration_or_allow_late_startup() {
