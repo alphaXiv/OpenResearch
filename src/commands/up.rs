@@ -4425,7 +4425,11 @@ async fn absolute_raw_file(
 
 /// Listing of the project's artifacts dir — the filesystem is the source of
 /// truth; this scans it fresh on every call (and creates it if missing).
-async fn list_artifacts(State(state): State<AppState>, Path(id): Path<String>) -> ApiResult {
+async fn list_artifacts(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+    Query(q): Query<ArtifactListQuery>,
+) -> ApiResult {
     blocking_api(move || {
         let _admission = state
             .project_lifecycle
@@ -4435,7 +4439,7 @@ async fn list_artifacts(State(state): State<AppState>, Path(id): Path<String>) -
         let project = store
             .get_local_project(&id)?
             .ok_or_else(|| not_found("project"))?;
-        let listing = local::files::list(&project)?;
+        let listing = local::files::list(&project, q.dir.as_deref())?;
         Ok(Json(json!(listing)))
     })
     .await
@@ -4461,6 +4465,11 @@ async fn manage_artifact_file(
         Ok(Json(json!({ "ok": true, "path": path })))
     })
     .await
+}
+
+#[derive(Deserialize)]
+struct ArtifactListQuery {
+    dir: Option<String>,
 }
 
 #[derive(Deserialize)]

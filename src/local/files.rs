@@ -381,6 +381,9 @@ pub struct ArtifactEntry {
     pub presentation: Option<FilePresentation>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub children: Vec<ArtifactEntry>,
+    /// Folder the capped listing didn't finish; list it on its own via `?dir=`.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub partial: bool,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -452,6 +455,7 @@ fn collect_tree(
                 modified_at: mtime_ms(&md),
                 presentation: None,
                 children: Vec::new(),
+                partial: false,
             });
         } else if md.is_file() {
             let presentation = presentation_for_path(&rel);
@@ -463,28 +467,38 @@ fn collect_tree(
                 modified_at: mtime_ms(&md),
                 presentation: Some(presentation),
                 children: Vec::new(),
+                partial: false,
             });
         }
     }
     for (i, path) in dirs {
         if truncated {
-            break;
+            out[i].partial = true;
+            continue;
         }
         let (children, hit) = collect_tree(canonical_base, &path, &out[i].path, seen);
         out[i].children = children;
+        out[i].partial = hit;
         truncated |= hit;
     }
     out.sort_by(|a, b| b.is_dir.cmp(&a.is_dir).then(a.name.cmp(&b.name)));
     (out, truncated)
 }
 
-/// Scan the artifacts dir (creating it if missing) into a plain file tree.
-pub fn list(project: &LocalProject) -> Result<ArtifactsListing> {
+/// Scan the artifacts dir (creating it if missing) into a plain file tree,
+/// or just the `sub` folder in it, with its own `MAX_ENTRIES` budget.
+pub fn list(project: &LocalProject, sub: Option<&str>) -> Result<ArtifactsListing> {
     let dir = ensure_dir(project)?;
     let canonical = crate::paths::canonicalize(&dir)
         .map_err(|e| anyhow!("Could not resolve {}: {}", dir.display(), e))?;
-    let mut seen = 0;
-    let (entries, truncated) = collect_tree(&canonical, &canonical, "", &mut seen);
+    let (start, prefix) = match sub {
+        Some(rel) => (resolve_contained(&canonical, rel)?, rel),
+        None => (canonical.clone(), ""),
+    };
+    if !start.is_dir() {
+        return Err(anyhow!("not a folder: {prefix}"));
+    }
+    let (entries, truncated) = collect_tree(&canonical, &start, prefix, &mut 0);
     Ok(ArtifactsListing {
         dir: dir.to_string_lossy().into_owned(),
         entries,
@@ -766,6 +780,13 @@ mod tests {
         assert_eq!(names, ["class_a", "class_b", "class_c"]);
         assert_eq!(entries[0].children.len(), MAX_ENTRIES - 3);
         assert!(truncated);
+        assert!(entries[0].partial);
+        // A partial folder listed on its own gets a fresh budget.
+        let (children, truncated) =
+            collect_tree(&canonical, &canonical.join("class_a"), "class_a", &mut 0);
+        assert_eq!(children.len(), MAX_ENTRIES);
+        assert!(children[0].path.starts_with("class_a/"));
+        assert!(!truncated);
         let _ = std::fs::remove_dir_all(root);
     }
 

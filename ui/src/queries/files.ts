@@ -43,9 +43,9 @@ export const getSessionWorktreeQuery = (sessionId: string) => queryOptions({
   staleTime: 30_000,
 });
 
-export const getArtifactsQuery = (projectId: string) => queryOptions({
-  queryKey: workspaceKey("getArtifacts", projectId),
-  queryFn: ({ signal }) => api.getArtifacts(projectId, signal),
+export const getArtifactsQuery = (projectId: string, dir?: string) => queryOptions({
+  queryKey: workspaceKey("getArtifacts", projectId, ...(dir ? [dir] : [])),
+  queryFn: ({ signal }) => api.getArtifacts(projectId, signal, dir),
   staleTime: 30_000,
 });
 

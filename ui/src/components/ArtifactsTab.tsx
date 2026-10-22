@@ -1,7 +1,7 @@
 import { WorkspaceEmptyState } from "./WorkspaceEmptyState";
-import { useQuery } from "@tanstack/react-query";
+import { useQueries, useQuery } from "@tanstack/react-query";
 import { queryClient } from "../queries/client";
-import { getArtifactFileTextQuery } from "../queries/files";
+import { getArtifactFileTextQuery, getArtifactsQuery } from "../queries/files";
 import { m } from "../paraglide/messages.js";
 import { ltr } from "../i18n";
 import { getLocale } from "../paraglide/runtime.js";
@@ -396,7 +396,7 @@ function TreeRows({
       {entries.map((e) => {
         const indent = { paddingInlineStart: 8 + Math.min(depth, TREE_MAX_INDENT_DEPTH) * 14 };
         if (e.isDir) {
-          const open = !collapsed.has(e.path);
+          const open = !e.partial && !collapsed.has(e.path);
           return (
             <div key={e.path} className="min-w-0 max-w-full">
               <div className="file-tree-row flex w-full min-w-0 items-center gap-1.5 py-[3px] px-2.5 border-0 bg-transparent text-text text-start cursor-pointer font-[inherit] [&:hover]:bg-panel [&_>_svg]:shrink-0 [&_>_svg]:text-subtext [&_>_svg.file-tree-chevron]:text-muted artifact-tree-row [&.selected]:bg-panel [&.selected:hover]:bg-panel [&:hover_.ft-row-delete]:opacity-100" style={indent} onClick={() => onToggle(e.path)}>
@@ -516,6 +516,9 @@ function TreeRows({
 /** Middle-pane Artifacts tab — a split explorer over the project's durable outputs
  * on disk. Tree on the left; the selected entry renders inline on the right
  * (markdown as documents, images and PDFs directly, code as highlighted source). */
+// Module-level so `useQueries` keeps a stable combined result between renders.
+const loadedEntries = (results: { data?: ProjectArtifacts }[]) => results.map((r) => r.data?.entries);
+
 export function ArtifactsTab({
   project,
   artifacts,
@@ -535,6 +538,22 @@ export function ArtifactsTab({
   const [contextMenu, setContextMenu] = useState<FileContextMenuTarget | null>(null);
   const [renamingPath, setRenamingPath] = useState<string | null>(null);
   const treeRef = useRef<HTMLDivElement>(null);
+  // Partial folders the user opened; each is listed on its own with a fresh cap.
+  const [loadDirs, setLoadDirs] = useState<string[]>([]);
+  const loadedDirs = useQueries({
+    queries: loadDirs.map((dir) => getArtifactsQuery(project.id, dir)),
+    combine: loadedEntries,
+  });
+  const entries = useMemo(() => {
+    const loaded = new Map(loadDirs.map((dir, i) => [dir, loadedDirs[i]]));
+    const graft = (list: ArtifactEntry[]): ArtifactEntry[] =>
+      list.map((e) => {
+        const children = e.partial ? loaded.get(e.path) : e.children;
+        if (e.partial && !children) return e;
+        return children ? { ...e, partial: false, children: graft(children) } : e;
+      });
+    return graft(artifacts?.entries ?? []);
+  }, [artifacts, loadDirs, loadedDirs]);
   useEffect(() => {
     try {
       localStorage.setItem(
@@ -579,17 +598,27 @@ export function ArtifactsTab({
   // Clear a selection that vanished or became a directory on disk.
   useEffect(() => {
     if (!selected || !artifacts) return;
-    const entry = findArtifactEntry(artifacts.entries, selected);
+    const entry = findArtifactEntry(entries, selected);
     if (!entry || entry.isDir) setSelected(null);
-  }, [selected, artifacts]);
+  }, [selected, artifacts, entries]);
 
-  const toggle = (path: string) =>
+  const toggle = (path: string) => {
+    if (findArtifactEntry(entries, path)?.partial) {
+      setLoadDirs((prev) => (prev.includes(path) ? prev : [...prev, path]));
+      setCollapsed((prev) => {
+        const next = new Set(prev);
+        next.delete(path);
+        return next;
+      });
+      return;
+    }
     setCollapsed((prev) => {
       const next = new Set(prev);
       if (next.has(path)) next.delete(path);
       else next.add(path);
       return next;
     });
+  };
 
   const remove = (path: string) => {
     if (selected === path || selected?.startsWith(path + "/")) setSelected(null);
@@ -644,9 +673,9 @@ export function ArtifactsTab({
       onCancelRename={() => setRenamingPath(null)}
     />
   );
-  const selectedEntry = selected ? findArtifactEntry(artifacts.entries, selected) : null;
+  const selectedEntry = selected ? findArtifactEntry(entries, selected) : null;
 
-  if (artifacts.entries.length === 0) {
+  if (entries.length === 0) {
     return (
       <WorkspaceEmptyState
         icon={Package}
@@ -661,7 +690,7 @@ export function ArtifactsTab({
       <div className="ftree-pane relative shrink-0 flex flex-col min-h-0 border-s border-s-border-variant border-e border-e-border-variant bg-background [@container((max-width:_720px))]:!w-full" ref={treeRef} style={{ width: treeWidth }}>
         <div className="ftree-resizer absolute -end-[3px] top-0 bottom-0 w-1.5 cursor-col-resize z-30 [&:hover]:bg-resizer-hover [&:active]:bg-resizer-hover [@container((max-width:_720px))]:hidden" onPointerDown={resizeTree} />
         <div className="ftree-scroll flex-1 min-h-0 overflow-y-auto file-tree py-1.5 px-0 text-sm">
-          {tree(artifacts.entries)}
+          {tree(entries)}
           {artifacts.truncated && (
             <p className="files-truncated m-0 py-2 px-3.5 text-sm text-muted">{m.artifacts_tab_listing_truncated_the_folder_has_more_artifacts({ limit: (artifacts.limit ?? 2000).toLocaleString(), dir: artifacts.dir })}</p>
           )}
@@ -675,7 +704,7 @@ export function ArtifactsTab({
           projectId={project.id}
           entry={selectedEntry}
           onDelete={remove}
-          artifactEntries={artifacts.entries}
+          artifactEntries={entries}
         />
       ) : (
         <div className="fpreview flex-1 min-w-0 flex flex-col min-h-0 bg-background fpreview-none items-center justify-center gap-2 text-sm text-muted [@container((max-width:_720px))]:hidden">
