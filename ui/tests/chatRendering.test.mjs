@@ -5,7 +5,7 @@ import {
   isParentUpdate,
   parentUpdateText,
   partIsVisible,
-  pendingQuestionId,
+  questionReplies,
   partsTailToolId,
   streamTailIsText,
   streamTailTool,
@@ -13,9 +13,33 @@ import {
   transcriptFileName,
   transcriptMarkdown,
   withoutDuplicateTurnError,
+  splitResponseParts,
 } from "../src/chatRendering.ts";
 
 const message = (...parts) => ({ id: "assistant", role: "assistant", parts, createdAt: 0 });
+
+test("question display uses the original question without an adapter-added title", () => {
+  const tool = { id: "tool", type: "tool", state: { input: { questions: [{ header: "Color", question: "Which color?" }] } } };
+  const prompt = { id: "prompt", type: "prompt", prompt: { kind: "question", question: "Color\n\nWhich color?" } };
+  assert.equal(questionReplies([message(tool, prompt)]).questionById.get("prompt"), "Which color?");
+  const contextual = { ...prompt, prompt: { ...prompt.prompt, question: "Keep this context.\n\nWhich color?" } };
+  assert.equal(questionReplies([message(tool, contextual)]).questionById.get("prompt"), contextual.prompt.question);
+});
+
+test("question replies stay visible and only represented question tool echoes disappear", () => {
+  const prompt = { id: "prompt", type: "prompt", prompt: { kind: "question", question: "Color\n\nWhich color?", resolved: true, answers: ["Green"] } };
+  const tool = { id: "tool", type: "tool", tool: "question", state: { status: "completed", input: { questions: [{ question: "Which color?" }] } } };
+  const reply = { id: "reply", type: "steer", text: "In response to: Color\n\nWhich color?\n\nGreen" };
+  const final = { id: "final", type: "text", phase: "final_answer", text: "Received." };
+  const messages = [message(tool, prompt, reply, final)];
+  const result = splitResponseParts(messages, false, questionReplies(messages));
+  assert.ok(result.answer.includes(reply));
+  assert.ok(result.answer.includes(final));
+  assert.ok(![...result.answer, ...result.work.flatMap(turn => turn.parts)].includes(tool));
+  const failed = { ...tool, state: { ...tool.state, status: "error", error: "Could not deliver question" } };
+  assert.ok(splitResponseParts([message(failed, prompt)], false).answer.includes(failed));
+  assert.ok(splitResponseParts([message(tool)], false).answer.includes(tool));
+});
 
 test("a recovery error replaces the identical terminal error without hiding other errors", () => {
   const duplicate = { id: "err-0", type: "tool", tool: "error", state: { error: "Invalid model" } };
@@ -157,14 +181,24 @@ test("Codex and OpenCode terminal limits use the shared disclosure without class
   }
 });
 
-test("live OpenCode questions route composer text to the existing prompt", () => {
-  const question = { id: "question", type: "prompt", prompt: { kind: "question", nativeId: '["frm_test","answer"]', resolved: false } };
-  for (const harness of ["opencode", "claude-code", "codex"]) {
-    assert.equal(pendingQuestionId([message(question)], harness, true), "question");
-    assert.equal(pendingQuestionId([message(question)], harness, false), null);
-  }
-  assert.equal(pendingQuestionId([message({ ...question, prompt: { ...question.prompt, resolved: true } })], "opencode", true), null);
-  assert.equal(pendingQuestionId([message(question)], "cursor", true), null);
+test("async answers appear once without the generated question preamble", () => {
+  const prompt = { id: "q", type: "prompt", prompt: { kind: "question", question: "Can you free space?", resolved: true, note: "What is using memory?" } };
+  const reply = user("reply", "In response to: Can you free space?\n\nWhat is using memory?");
+  const messages = [message(prompt), reply];
+  const display = questionReplies(messages);
+  assert.equal(display.textById.get("reply"), "What is using memory?");
+  assert.equal(display.questionById.get("reply"), "Can you free space?");
+  assert.deepEqual([...display.prompts], ["q"]);
+  assert.equal(reply.parts[0].text, "In response to: Can you free space?\n\nWhat is using memory?");
+  assert.equal(questionReplies([reply]).textById.size, 0);
+  assert.equal(questionReplies([reply, message(prompt)]).textById.size, 0);
+  assert.equal(questionReplies([message({ ...prompt, prompt: { ...prompt.prompt, resolved: false } }), reply]).textById.size, 0);
+  assert.equal(questionReplies([message({ ...prompt, prompt: { ...prompt.prompt, nativeId: "rpc-1" } }), reply]).textById.size, 0);
+  assert.equal(questionReplies([message(prompt), user("unrelated", "A new question"), reply]).textById.size, 1);
+  assert.equal(questionReplies([...messages, user("repeat", reply.parts[0].text)]).textById.size, 1);
+  assert.equal(questionReplies([message(prompt), user("different", "In response to: Can you free space?\n\nDifferent text")]).textById.size, 0);
+  const steer = { id: "steer", type: "steer", text: reply.parts[0].text };
+  assert.equal(questionReplies([message(prompt, steer)]).textById.get("steer"), "What is using memory?");
 });
 
 const user = (id, text) => ({ id, role: "user", createdAt: 0, parts: [{ id: `${id}-t`, type: "text", text }] });
@@ -374,4 +408,34 @@ test("a wakeup continuation retains each earlier turn's recovery controls", asyn
   const response = splitResponseParts(turns.map(turn => turn.message), false);
   assert.deepEqual(response.answer, wakeup.parts);
   assert.ok(response.work.every(turn => !turn.parts.includes(recovery)));
+});
+
+
+test("answered questions stay visible when Claude continues with a final response", async () => {
+  const { splitResponseParts } = await import("../src/chatRendering.ts");
+  const color = { id: "color", type: "prompt", prompt: { kind: "question", resolved: true, question: "Color?", answers: ["Green"] } };
+  const shape = { id: "shape", type: "prompt", prompt: { kind: "question", resolved: true, question: "Shape?", answers: ["Square"] } };
+  const tool = { id: "tool", type: "tool", tool: "AskUserQuestion" };
+  const final = { id: "final", type: "text", phase: "final_answer", text: "Green and Square" };
+  const response = splitResponseParts([
+    { ...message(color), id: "first" },
+    { ...message(shape), id: "second" },
+    { ...message(tool, final), id: "last" },
+  ], false);
+  assert.deepEqual(response.answer, [color, shape, final]);
+  assert.deepEqual(response.work, [{ id: "last", parts: [tool] }]);
+});
+
+test("explicitly skipped questions stay visible without treating stale cleanup as a skip", async () => {
+  const { splitResponseParts } = await import("../src/chatRendering.ts");
+  const skipped = { id: "skipped", type: "prompt", prompt: { kind: "question", resolved: true, question: "Color?", approved: false } };
+  const historical = { id: "historical", type: "prompt", prompt: { kind: "question", resolved: true, question: "Shape?", note: "Skipped" } };
+  const stale = { id: "stale", type: "prompt", prompt: { kind: "question", resolved: true, question: "Size?" } };
+  const final = { id: "final", type: "text", phase: "final_answer", text: "Continuing" };
+  const response = splitResponseParts([
+    { ...message(skipped, historical, stale), id: "questions" },
+    { ...message(final), id: "last" },
+  ], false);
+  assert.deepEqual(response.answer, [skipped, historical, final]);
+  assert.deepEqual(response.work, [{ id: "questions", parts: [stale] }]);
 });

@@ -43,7 +43,9 @@ use crate::local::chat::{
 };
 use crate::store::Store;
 
-pub(crate) use claude::{question_prompt, should_synthesize_plan, synthesize_resume};
+pub(crate) use claude::{
+    question_prompt, should_synthesize_plan, synthesize_resume, SKIPPED_QUESTION_MESSAGE,
+};
 pub(crate) use detect::{
     detect_spawn_output_timed, probe_timing_scope, spawn_retrying_busy, unique as unique_bins,
     ProbeTiming, ProbeTimingSink,

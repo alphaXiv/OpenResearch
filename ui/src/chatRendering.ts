@@ -57,20 +57,56 @@ export function hasPendingInput(messages: ChatMessage[], busy: boolean): boolean
   }));
 }
 
-export function pendingQuestionId(
-  messages: ChatMessage[],
-  harness: ChatSession["harness"] | undefined,
-  busy: boolean,
-): string | null {
-  if (harness !== "claude-code" && harness !== "codex" && harness !== "opencode") return null;
-  for (let i = messages.length - 1; i >= 0; i--) {
-    for (const part of messages[i].parts) {
-      if (part.type !== "prompt" || part.prompt?.resolved || part.prompt?.kind !== "question") continue;
-      if (part.prompt.nativeId && !busy) return null;
-      return part.id;
+export interface QuestionReplies {
+  textById: ReadonlyMap<string, string>;
+  questionById: ReadonlyMap<string, string>;
+  prompts: ReadonlySet<string>;
+}
+
+// Codex stores async replies with a question preamble intended for the agent.
+export function questionReplies(messages: ChatMessage[]): QuestionReplies {
+  const textById = new Map<string, string>();
+  const questionById = new Map<string, string>();
+  const prompts = new Set<string>();
+  const pending = new Map<string, { id: string; answer: string; question: string }>();
+  const originalQuestions = new Map<string, string>();
+  for (const part of messages.flatMap((message) => message.parts)) {
+    const questions = part.type === "tool" && part.state?.input?.questions;
+    if (!Array.isArray(questions)) continue;
+    for (const question of questions) {
+      if (question && typeof question === "object" && "header" in question && typeof question.header === "string"
+        && "question" in question && typeof question.question === "string") {
+        originalQuestions.set(`${question.header}\n\n${question.question}`, question.question);
+      }
     }
   }
-  return null;
+  const matchReply = (id: string, text: string) => {
+    const reply = pending.get(text);
+    if (!reply) return;
+    textById.set(id, reply.answer);
+    questionById.set(id, reply.question);
+    prompts.add(reply.id);
+    pending.delete(text);
+  };
+  for (const message of messages) {
+    if (message.role === "user") {
+      matchReply(message.id, message.parts.filter((part) => part.type === "text").map((part) => part.text ?? "").join("\n"));
+      continue;
+    }
+    for (const part of message.parts) {
+      const prompt = part.prompt;
+      if (prompt?.kind === "question" && prompt.question) {
+        questionById.set(part.id, originalQuestions.get(prompt.question) ?? prompt.question);
+      }
+      if (part.type === "prompt" && prompt?.kind === "question" && prompt.resolved && !prompt.nativeId && prompt.question) {
+        const answer = [(prompt.answers ?? []).join(", "), prompt.note].filter(Boolean).join("\n\n");
+        if (answer) pending.set(`In response to: ${prompt.question}\n\n${answer}`, { id: part.id, answer, question: prompt.question });
+      } else if (part.type === "steer" && part.text) {
+        matchReply(part.id, part.text);
+      }
+    }
+  }
+  return { textById, questionById, prompts };
 }
 
 /** Whether a part paints anything in the transcript. */
@@ -195,8 +231,21 @@ export function groupResponseMessages(messages: ChatMessage[], previousGroups: C
   });
 }
 
-export function splitResponseParts(messages: ChatMessage[], streaming: boolean) {
-  const turns = messages.map((message, index) => {
+export function splitResponseParts(messages: ChatMessage[], streaming: boolean, replies?: QuestionReplies) {
+  const questions = messages.flatMap((message) => message.parts.filter((part) => part.prompt?.kind === "question"));
+  const turns = messages.map((original, index) => {
+    const parts = original.parts.filter((part) => {
+      if (part.type !== "tool" || !["question", "askuserquestion", "request_user_input", "request_user_input_async"].includes(part.tool?.toLowerCase() ?? "")) return true;
+      const asked = part.state?.input?.questions;
+      if (!Array.isArray(asked) || asked.length === 0) return true;
+      const represented = asked.every((item) => {
+        if (!item || typeof item !== "object") return false;
+        const text = "question" in item ? item.question : "title" in item ? item.title : undefined;
+        return typeof text === "string" && questions.some((question) => question.prompt?.question?.split(/\n\s*\n/).includes(text));
+      });
+      return !represented || (part.state?.status === "error" && part.state.error !== "The user dismissed this question");
+    });
+    const message = { ...original, parts };
     const active = streaming && index === messages.length - 1;
     const split = splitTurnParts(message.parts, active);
     // A continuation's commentary belongs to activity until it has an answer.
@@ -208,12 +257,19 @@ export function splitResponseParts(messages: ChatMessage[], streaming: boolean) 
     return { message, ...split };
   });
   const current = [...turns].reverse().find((turn) => turn.answer.some((part) => partIsVisible(part)));
+  const work = turns.map((turn) => ({
+    id: turn.message.id,
+    parts: turn === current ? turn.work : [...turn.work, ...turn.answer],
+  }));
+  const answeredQuestion = (part: ChatPart) => (part.type === "steer" && replies?.textById.has(part.id)) || (part.type === "prompt"
+    && part.prompt?.kind === "question" && part.prompt.resolved
+    && ((part.prompt.answers?.length ?? 0) > 0 || Boolean(part.prompt.note) || part.prompt.approved === false));
   return {
-    answer: current?.answer ?? [],
+    answer: [...work.flatMap((turn) => turn.parts.filter(answeredQuestion)), ...(current?.answer ?? [])],
     answerMessageId: current?.message.id,
-    work: turns.map((turn) => ({
-      id: turn.message.id,
-      parts: turn === current ? turn.work : [...turn.work, ...turn.answer],
+    work: work.map((turn) => ({
+      ...turn,
+      parts: turn.parts.filter((part) => !answeredQuestion(part)),
     })).filter((turn) => turn.parts.some((part) => partIsVisible(part))),
   };
 }
