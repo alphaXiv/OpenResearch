@@ -1019,27 +1019,35 @@ pub(super) async fn ray_preflight(Json(req): Json<RayPreflightReq>) -> ApiResult
     }
 }
 
-/// The saved Trackio server for run links; never the write token.
-pub(super) async fn trackio_settings() -> ApiResult {
-    Ok(Json(json!({
-        "serverUrl": crate::local::trackio::server_url(),
-        "project": crate::local::trackio::project(),
-    })))
+/// The project's Trackio dashboard and which runs have logged to it; never a token.
+pub(super) async fn trackio_project_runs(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+) -> ApiResult {
+    let project = Store::open()?
+        .get_local_project(&id)?
+        .ok_or_else(|| not_found("project"))?;
+    let project = crate::local::trackio::project_for(&project.slug);
+    // A gateway error, not a 200 with no runs, so the dashboard keeps an open embed through a blip.
+    let mut runs = crate::local::trackio::project_runs(&state.trackio, project)
+        .await
+        .map_err(|error| ApiError(StatusCode::BAD_GATEWAY, error))?;
+    // An SSH workspace's browser cannot reach this host's loopback dashboard, so offer no embed.
+    if state.remote_instance_id.is_some()
+        && runs
+            .dashboard_url
+            .as_deref()
+            .is_some_and(crate::local::trackio::is_local_only)
+    {
+        runs.dashboard_url = None;
+    }
+    Ok(Json(json!(runs)))
 }
 
-/// Live check of the saved Trackio server and write token.
+/// Live check of the saved Trackio Space or server and its write access.
 pub(super) async fn trackio_preflight() -> ApiResult {
-    use crate::local::trackio;
-    let Some(base) = trackio::server_url() else {
-        return Err(bad_request(format!(
-            "Save an http(s) {} first.",
-            trackio::SERVER_URL
-        )));
-    };
-    let token = crate::config::synced_env_var(trackio::WRITE_TOKEN);
-    Ok(Json(json!(
-        trackio::preflight(&base, token.as_deref()).await
-    )))
+    let preflight = crate::local::trackio::check().await.map_err(bad_request)?;
+    Ok(Json(json!(preflight)))
 }
 
 // --- compute targets (unified settings list + default) --------------------------
