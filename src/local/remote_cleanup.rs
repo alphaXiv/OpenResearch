@@ -19,8 +19,8 @@ pub struct HostBatch {
     keep_digests: BTreeSet<String>,
 }
 
-/// Groups due entries by host. The keep setting is read now, so it covers runs finishing while
-/// it is on. Entries that need no cleanup leave the queue; ones orx cannot safely clean leave it
+/// Groups due entries by host. The keep setting is read when a run comes due, so it covers runs
+/// not yet cleaned up. Entries that need no cleanup leave the queue; ones orx cannot safely clean leave it
 /// too and come back as failures.
 pub fn plan(store: &Store) -> Result<(Vec<HostBatch>, Failures)> {
     let ssh = crate::config::ssh_settings()?;

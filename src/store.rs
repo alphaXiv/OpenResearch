@@ -477,8 +477,10 @@ pub(crate) const RUN_ARTIFACTS_WAIT: Duration = Duration::from_secs(1);
 pub(crate) const RUN_ARTIFACTS_POLL: Duration = Duration::from_millis(250);
 /// Bounds removal time per orphan pass; classification is unbudgeted but cheap for finished runs.
 const ORPHAN_PASS_BUDGET: Duration = Duration::from_secs(5);
-/// Finished runs older than each project's newest few local runs lose their rebuildable environments.
+/// Finished runs older than each project's newest few lose their rebuildable environments
+/// (local runs) or their remote dirs (SSH and Slurm runs).
 const FULL_RUNS_PER_PROJECT: i64 = 3;
+
 const SLIMMED_RUN_PATHS: [&[&str]; 2] = [&["repo", ".venv"], &["repo", ".cache", "uv"]];
 
 const SUBMISSION_HANDLE: (&str, &str) = ("submission-handles", ".json");
@@ -513,6 +515,19 @@ pub(crate) struct RemoteCleanup {
     pub run_id: String,
     pub backend_json: String,
     pub deleted: bool,
+}
+
+/// `(id, status)` of runs of `kinds` past each project's newest [`FULL_RUNS_PER_PROJECT`].
+fn runs_past_newest(kinds: &'static str) -> String {
+    format!(
+        "SELECT id, status FROM (
+           SELECT id, status, ROW_NUMBER() OVER
+             (PARTITION BY project_id ORDER BY created_at DESC, id DESC) AS position
+           FROM runs
+           WHERE CASE WHEN json_valid(backend_json) THEN json_extract(backend_json, '$.kind') END
+             IN ({kinds}))
+         WHERE position > {FULL_RUNS_PER_PROJECT}"
+    )
 }
 
 /// Queues the SSH/Slurm runs whose `column` equals `value`; deletion wins over a pending finish.
@@ -1933,17 +1948,11 @@ impl Store {
         started: std::time::Instant,
         pass: &mut OrphanPass,
     ) -> Result<()> {
-        let mut statement = self.conn.prepare(
-            "SELECT id, status FROM (
-               SELECT id, status, ROW_NUMBER() OVER
-                 (PARTITION BY project_id ORDER BY created_at DESC, id DESC) AS position
-               FROM runs
-               WHERE CASE WHEN json_valid(backend_json) THEN json_extract(backend_json, '$.kind') END
-                 IN ('local_job', 'tinker_job'))
-             WHERE position > ?1",
-        )?;
+        let mut statement = self
+            .conn
+            .prepare(&runs_past_newest("'local_job', 'tinker_job'"))?;
         let runs = statement
-            .query_map(params![FULL_RUNS_PER_PROJECT], |row| {
+            .query_map([], |row| {
                 Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
             })?
             .collect::<std::result::Result<Vec<_>, _>>()?;
@@ -2253,11 +2262,15 @@ impl Store {
         queue_remote_cleanups(&self.conn, "id", run_id, false)
     }
 
+    /// Due entries; a finished run waits until newer runs push it past its project's newest few.
     pub(crate) fn due_remote_cleanups(&self, limit: usize) -> Result<Vec<RemoteCleanup>> {
-        let mut statement = self.conn.prepare(
+        let mut statement = self.conn.prepare(&format!(
             "SELECT run_id, backend_json, deleted FROM remote_cleanups
-             WHERE next_attempt_at <= ?1 ORDER BY next_attempt_at LIMIT ?2",
-        )?;
+             WHERE next_attempt_at <= ?1 AND (deleted = 1 OR run_id IN
+               (SELECT id FROM ({})))
+             ORDER BY next_attempt_at LIMIT ?2",
+            runs_past_newest("'ssh_job', 'slurm_job'")
+        ))?;
         let rows = statement.query_map(params![now_ms(), limit as i64], |row| {
             Ok(RemoteCleanup {
                 run_id: row.get(0)?,
@@ -4392,55 +4405,70 @@ mod tests {
     }
 
     #[test]
-    fn remote_cleanups_queue_on_finish_and_project_delete_then_back_off() {
+    fn remote_cleanups_keep_each_projects_newest_runs_until_project_delete() {
         let dir = std::env::temp_dir().join(format!("orx-remote-cleanup-{}", uuid::Uuid::new_v4()));
         let store = Store::open_at(dir.clone()).unwrap();
         project_with_run_artifacts(&store, "p", "local", &"d".repeat(64));
-        let insert = |id: &str, status: &str, kind: &str| {
+        store
+            .conn
+            .execute("UPDATE runs SET created_at = 10 WHERE id = 'local'", [])
+            .unwrap();
+        let insert = |id: &str, status: &str, kind: &str, created_at: i64| {
             let descriptor =
                 serde_json::json!({"kind": kind, "namespace": "lab", "sourceDigest": id});
             store.conn.execute(
                 "INSERT INTO runs (id, experiment_id, project_id, status, backend_json, created_at, updated_at)
-                 VALUES (?1, 'experiment', 'p', ?2, ?3, 1, 1)",
-                params![id, status, descriptor.to_string()],
+                 VALUES (?1, 'experiment', 'p', ?2, ?3, ?4, ?4)",
+                params![id, status, descriptor.to_string(), created_at],
             ).unwrap();
         };
-        insert("ssh", "done", "ssh_job");
-        insert("slurm", "failed", "slurm_job");
-        insert("box", "done", "openresearch_job");
-        insert("live", "running", "ssh_job");
-        for id in ["ssh", "box", "local"] {
-            store.queue_finished_remote_cleanup(id).unwrap();
-        }
         let due = |store: &Store| {
-            store
+            let mut entries = store
                 .due_remote_cleanups(10)
                 .unwrap()
                 .into_iter()
                 .map(|entry| (entry.run_id, entry.deleted))
+                .collect::<Vec<_>>();
+            entries.sort();
+            entries
+        };
+        let finished = |ids: &[&str]| {
+            ids.iter()
+                .map(|id| (id.to_string(), false))
                 .collect::<Vec<_>>()
         };
-        assert_eq!(due(&store), [("ssh".to_string(), false)]);
-        store.defer_remote_cleanup("ssh", "unreachable").unwrap();
+        insert("r1", "done", "ssh_job", 1);
+        insert("r2", "failed", "slurm_job", 2);
+        insert("r3", "done", "ssh_job", 3);
+        insert("box", "done", "openresearch_job", 4);
+        for id in ["r1", "r2", "r3", "box", "local"] {
+            store.queue_finished_remote_cleanup(id).unwrap();
+        }
+        // The newest three remote runs stay whole; local and other kinds don't count.
         assert!(due(&store).is_empty());
+        insert("r4", "done", "ssh_job", 5);
+        store.queue_finished_remote_cleanup("r4").unwrap();
+        assert_eq!(due(&store), finished(&["r1"]));
+        // As locally, an unfinished newer run takes one of the slots.
+        insert("r5", "running", "slurm_job", 6);
+        assert_eq!(due(&store), finished(&["r1", "r2"]));
+        store.defer_remote_cleanup("r1", "unreachable").unwrap();
+        assert_eq!(due(&store), finished(&["r2"]));
         store
             .conn
             .execute("UPDATE runs SET status = 'done'", [])
             .unwrap();
         store.delete_local_project("p").unwrap();
-        let mut entries = due(&store);
-        entries.sort();
-        // Deletion marks every SSH/Slurm run, including one already waiting to retry.
+        // Deletion marks every SSH/Slurm run, including the newest and one waiting to retry.
         assert_eq!(
-            entries,
-            [
-                ("live".to_string(), true),
-                ("slurm".to_string(), true),
-                ("ssh".to_string(), true)
-            ]
+            due(&store),
+            ["r1", "r2", "r3", "r4", "r5"]
+                .iter()
+                .map(|id| (id.to_string(), true))
+                .collect::<Vec<_>>()
         );
-        store.finish_remote_cleanup("ssh").unwrap();
-        assert_eq!(due(&store).len(), 2);
+        store.finish_remote_cleanup("r1").unwrap();
+        assert_eq!(due(&store).len(), 4);
         std::fs::remove_dir_all(dir).unwrap();
     }
 
