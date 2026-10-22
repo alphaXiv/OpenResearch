@@ -16,6 +16,8 @@
   "settings_cpu_cores": "{count} هستهٔ CPU",
   "settings_gpu_count": "{count} پردازندهٔ گرافیکی",
   "$schema": "https://inlang.com/schema/inlang-message-format",
+  "projects_delete_artifacts_kept": "فایل‌های خروجی حفظ می‌شوند مگر اینکه گزینهٔ زیر را انتخاب کنید. پوشه‌های خروجی خالی به‌طور خودکار حذف می‌شوند.",
+  "projects_delete_artifacts_remove": "حذف دائمی فایل‌های خروجی این پروژه",
   "app_close_panel": "بستن پنل",
   "app_current_task": "وظیفهٔ فعلی",
   "app_entire_project": "کل پروژه",
