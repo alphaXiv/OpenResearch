@@ -175,7 +175,8 @@ intended flow — do **not** edit a frozen node or rewrite the run command:
 7. **Analyze each finish as it lands, then iterate.** Do the per-completion read
    *inside the loop above*, not deferred to the end — when a run finishes,
    **actually read its results** from the file reported by `orx logs <runId>`
-   (see `orx-logs`), then use `orx-results` to interpret the outcome. To see exactly what a finished node changed, diff its
+   (see `orx-logs`) and, when it logged to Trackio, its curves with
+   `orx metrics <runId> <parentRunId>`, then use `orx-results` to interpret the outcome. To see exactly what a finished node changed, diff its
    branch against its parent's
    branch (see `orx-git`). Don't infer from status alone. Each
    completion is a decision point with four moves:
