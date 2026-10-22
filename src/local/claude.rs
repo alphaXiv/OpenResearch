@@ -34,7 +34,7 @@ use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::process::Stdio;
 use std::sync::atomic::{AtomicBool, AtomicI64, AtomicU64, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, Weak};
 use std::time::{Duration, Instant};
 
 use serde_json::{json, Value};
@@ -135,9 +135,7 @@ pub struct SpawnConfig {
     pub effort: Option<String>,
     pub model: Option<String>,
     pub native_store: NativeStore,
-    /// Whether the mcp-gate permission bridge was actually wired at spawn (plan
-    /// mode + a bound `orx up` port + a successful config write). A plan turn
-    /// that wanted the bridge but got `false` respawns next turn to try again.
+    /// Whether the child has its input bridge; failed setup is retried on the next turn.
     pub bridge_active: bool,
 }
 
@@ -221,6 +219,7 @@ pub fn classify_line(line: &str) -> ClaudeLine {
 
 /// A live connection to one session's resident `claude` child.
 pub struct ClaudeClient {
+    chat: Weak<crate::local::chat::ChatHost>,
     session_id: String,
     child: Mutex<Child>,
     #[cfg(unix)]
@@ -435,6 +434,23 @@ impl Drop for TurnRoute {
     }
 }
 
+fn reported_permission_mode(event: &Value) -> Option<PermissionMode> {
+    if event.get("type").and_then(Value::as_str) != Some("system") {
+        return None;
+    }
+    match event.get("subtype").and_then(Value::as_str) {
+        Some("init" | "status") => match event.get("permissionMode").and_then(Value::as_str)? {
+            "default" | "manual" => Some(PermissionMode::Ask),
+            "auto" => Some(PermissionMode::Auto),
+            "acceptEdits" => Some(PermissionMode::AcceptEdits),
+            "plan" => Some(PermissionMode::Plan),
+            "bypassPermissions" => Some(PermissionMode::Bypass),
+            _ => None,
+        },
+        _ => None,
+    }
+}
+
 /// Reader task: pump child stdout, route each line. On EOF every pending control
 /// request fails and the live turn (if any) gets [`TurnEvent::Closed`].
 async fn read_loop(client: Arc<ClaudeClient>, stdout: tokio::process::ChildStdout) {
@@ -447,6 +463,26 @@ async fn read_loop(client: Arc<ClaudeClient>, stdout: tokio::process::ChildStdou
                 }
             }
             ClaudeLine::Event(value) => {
+                if let Some(mode) = reported_permission_mode(&value) {
+                    let previous = {
+                        let mut config = client.config.lock().unwrap();
+                        let previous = config.permission_mode.unwrap_or(PermissionMode::Auto);
+                        config.permission_mode = Some(mode);
+                        previous
+                    };
+                    if previous != mode && !client.terminated.load(Ordering::Acquire) {
+                        if let Some(chat) = client.chat.upgrade() {
+                            if let Err(error) = chat
+                                .sync_claude_permission_mode(&client.session_id, previous, mode)
+                                .await
+                            {
+                                eprintln!(
+                                    "orx up: could not synchronize Claude permission mode: {error}"
+                                );
+                            }
+                        }
+                    }
+                }
                 // Route to the live turn; dropped if none is listening (a
                 // between-turns line, or an aborted turn's tail) once its tool identities are recorded.
                 let turn = client.turn.lock().unwrap();
@@ -571,11 +607,7 @@ async fn spawn_client(spec: &SpawnSpec, auth_generation: u64) -> Result<Arc<Clau
         cmd.args(["--resume", native_id]);
     }
 
-    // Plan-mode extras, iff the child was spawned in Plan. `bridge_active` on the
-    // config records what we ACHIEVED, not what we wanted: forced false here, set
-    // true only on a successful bridge write. A failed write thus leaves it false
-    // — the next plan turn's wanted-true mismatch respawns to retry, degrading to
-    // today's no-bridge plan gating, never worse.
+    // Record successful bridge setup so reconciliation retries failures next turn.
     let mut config = spec.config.clone();
     config.bridge_active = false;
     let settings = write_settings(
@@ -657,6 +689,7 @@ async fn spawn_client(spec: &SpawnSpec, auth_generation: u64) -> Result<Arc<Clau
 
     let started_at = Instant::now();
     let client = Arc::new(ClaudeClient {
+        chat: Arc::downgrade(&spec.chat),
         session_id: spec.session_id.clone(),
         child: Mutex::new(child),
         #[cfg(unix)]
@@ -1317,6 +1350,7 @@ mod tests {
         let process_group_id = child.id().unwrap();
         let stdin = child.stdin.take().unwrap();
         Arc::new(ClaudeClient {
+            chat: Weak::new(),
             session_id: session_id.to_string(),
             child: Mutex::new(child),
             process_group_id,
@@ -1359,6 +1393,38 @@ mod tests {
             native_store: NativeStore::Isolated,
             bridge_active: bridge,
         }
+    }
+
+    #[test]
+    fn native_permission_status_reports_fallback_and_ignores_unrelated_events() {
+        assert_eq!(
+            reported_permission_mode(
+                &json!({"type":"system","subtype":"status","permissionMode":"default"})
+            ),
+            Some(PermissionMode::Ask)
+        );
+        assert_eq!(
+            reported_permission_mode(
+                &json!({"type":"system","subtype":"init","permissionMode":"auto"})
+            ),
+            Some(PermissionMode::Auto)
+        );
+        assert_eq!(
+            reported_permission_mode(
+                &json!({"type":"system","subtype":"status","status":"compacting"})
+            ),
+            None
+        );
+        assert_eq!(
+            reported_permission_mode(&json!({"type":"assistant","permissionMode":"default"})),
+            None
+        );
+        assert_eq!(
+            reported_permission_mode(
+                &json!({"type":"system","subtype":"status","permissionMode":"unknown"})
+            ),
+            None
+        );
     }
 
     #[test]

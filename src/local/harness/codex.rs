@@ -1112,6 +1112,9 @@ impl Harness for Codex {
             }
             // Async questions are answered by steering, not a held JSON-RPC reply.
             "question" if prompt.native_id.is_none() => {
+                if !answer.approve {
+                    return Ok(ResumeAction::Handled { plan_mode: None });
+                }
                 let text = async_question_answer(prompt, answer)?;
                 ctx.host
                     .steer_message(
@@ -3374,6 +3377,9 @@ fn user_input_card(turn: Option<&str>, id: &Value, params: &Value) -> Option<(St
 /// contextualized annotation answer; every other stashed id gets an empty
 /// `{"answers": []}`. `Err` when none were provided leaves the card actionable.
 fn user_input_reply(prompt: &WirePrompt, answer: &PromptAnswer) -> Result<Value> {
+    if !answer.approve {
+        return Ok(serde_json::json!({ "answers": {} }));
+    }
     let note = answer.note.as_deref().filter(|s| !s.trim().is_empty());
     let mut selected: Vec<String> = if !answer.answers.is_empty() {
         answer.answers.clone()
@@ -6149,6 +6155,10 @@ requires_openai_auth = false
 
         // Neither selection nor note → Err (card stays actionable).
         assert!(user_input_reply(&prompt, &answer(true, None, &[], None)).is_err());
+        assert_eq!(
+            user_input_reply(&prompt, &answer(false, None, &[], None)).unwrap(),
+            serde_json::json!({ "answers": {} })
+        );
     }
 
     /// Numeric question ids stringify to their JSON text as map keys.
@@ -6188,6 +6198,20 @@ requires_openai_auth = false
             session_id: "s".into(),
             native_session_id: None,
         }
+    }
+
+    #[tokio::test]
+    async fn skipped_async_question_closes_without_sending_a_message() {
+        let prompt = WirePrompt {
+            kind: "question".into(),
+            question: Some("Which color?".into()),
+            ..Default::default()
+        };
+        let action = Codex
+            .resume_from_prompt(&test_resume_ctx(), &prompt, &answer(false, None, &[], None))
+            .await
+            .unwrap();
+        assert!(matches!(action, ResumeAction::Handled { plan_mode: None }));
     }
 
     /// The codex plan card resume arms: approve → "Implement the plan." with
