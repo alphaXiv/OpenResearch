@@ -518,7 +518,7 @@ pub(crate) struct RemoteCleanup {
 /// Queues the SSH/Slurm runs whose `column` equals `value`; deletion wins over a pending finish.
 fn queue_remote_cleanups(
     conn: &Connection,
-    column: &str,
+    column: &'static str,
     value: &str,
     deleted: bool,
 ) -> Result<()> {
@@ -529,12 +529,14 @@ fn queue_remote_cleanups(
              WHERE {column} = ?1 AND CASE WHEN json_valid(backend_json)
                THEN json_extract(backend_json, '$.kind') END IN ('ssh_job', 'slurm_job')
              ON CONFLICT(run_id) DO UPDATE SET backend_json = excluded.backend_json,
-               deleted = MAX(deleted, excluded.deleted), next_attempt_at = excluded.next_attempt_at"
+               deleted = MAX(deleted, excluded.deleted), attempts = 0,
+               next_attempt_at = excluded.next_attempt_at"
         ),
         params![value, deleted, now_ms()],
     )?;
     Ok(())
 }
+
 /// Failed remote cleanups retry after 5 minutes, doubling up to a day.
 const REMOTE_CLEANUP_RETRY_MS: i64 = 5 * 60 * 1000;
 const REMOTE_CLEANUP_MAX_RETRY_MS: i64 = 24 * 60 * 60 * 1000;

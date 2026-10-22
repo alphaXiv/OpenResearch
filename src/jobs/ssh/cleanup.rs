@@ -92,7 +92,7 @@ fn host_script(runs: &[RemoteRun], keep_digests: &BTreeSet<String>) -> String {
             .as_ref()
             .map_or_else(String::new, |(id, dir)| {
                 format!(
-                    "docker exec {} rm -rf -- {} >/dev/null 2>&1; ",
+                    "docker exec {} rm -rf -- {} </dev/null >/dev/null 2>&1; ",
                     sh_quote(id),
                     sh_quote(dir)
                 )
@@ -122,7 +122,7 @@ fn host_script(runs: &[RemoteRun], keep_digests: &BTreeSet<String>) -> String {
         script.push_str(&format!(
             "s={source}; if [ -d \"$s\" ]; then \
              find \"$s\" -maxdepth 1 -type f -mmin +{SOURCE_IDLE_MINUTES} | while IFS= read -r f; do \
-             n=${{f##*/}}; b=${{n%%.tar*}}; \
+             case \"$f\" in \"$s\"/*) ;; *) continue;; esac; n=${{f##*/}}; b=${{n%%.tar*}}; \
              case \"$b\" in ''|*[!0-9a-f]*) continue;; esac; [ ${{#b}} -eq 64 ] || continue; \
              case \"$n\" in \"$b.tar\"|\"$b.tar.tmp.\"*) ;; *) continue;; esac; \
              case ' {keep} ' in *\" $b \"*) continue;; esac; \
@@ -138,19 +138,16 @@ fn parse_outcomes(runs: &[RemoteRun], output: &str) -> BTreeMap<String, Outcome>
     let mut reported = BTreeMap::new();
     for line in output.lines() {
         let mut words = line.splitn(3, ' ');
-        let outcome = match words.next() {
-            Some("REMOVED") => Outcome::Removed,
-            Some("BUSY") => Outcome::Busy,
-            Some("FAILED") => Outcome::Failed(String::new()),
+        let (Some(tag), Some(id)) = (words.next(), words.next()) else {
+            continue;
+        };
+        let outcome = match tag {
+            "REMOVED" => Outcome::Removed,
+            "BUSY" => Outcome::Busy,
+            "FAILED" => Outcome::Failed(words.next().unwrap_or_default().into()),
             _ => continue,
         };
-        if let Some(id) = words.next() {
-            let outcome = match outcome {
-                Outcome::Failed(_) => Outcome::Failed(words.next().unwrap_or_default().into()),
-                outcome => outcome,
-            };
-            reported.insert(id.to_string(), outcome);
-        }
+        reported.insert(id.to_string(), outcome);
     }
     runs.iter()
         .map(|run| {

@@ -4726,16 +4726,17 @@ async fn reclaim_remote_run_dirs(moving: Arc<AtomicBool>, gate: Arc<tokio::sync:
     tokio::time::sleep(Duration::from_secs(30)).await;
     let mut reported = HashSet::new();
     let mut plan_error = None;
-    loop {
-        let mut report = |failures: Vec<(String, String)>| {
-            for (run_id, error) in failures {
-                if reported.insert(run_id.clone()) {
-                    eprintln!("orx up: remote cleanup for run {run_id}: {error}");
-                }
+    let mut report = |failures: Vec<(String, String)>| {
+        for (run_id, error) in failures {
+            if reported.insert(run_id.clone()) {
+                eprintln!("orx up: remote cleanup for run {run_id}: {error}");
             }
-        };
+        }
+    };
+    loop {
         match with_gated_store(&moving, &gate, local::remote_cleanup::plan).await {
             Some(Ok((batches, rejected))) => {
+                plan_error = None;
                 report(rejected);
                 if !batches.is_empty() {
                     let results = local::remote_cleanup::clean(batches).await;

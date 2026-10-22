@@ -451,7 +451,7 @@ impl ConfigureArgs {
         }
         if backend == "ssh" && host_setting && !body.contains_key("host") {
             return Err(anyhow!(
-                "A container or remote root change requires --host."
+                "A container, remote root, or keep-remote-runs change requires --host."
             ));
         }
         Ok(Value::Object(body))

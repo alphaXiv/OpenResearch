@@ -28,11 +28,11 @@ orx exp run <expId> --backend slurm
   be on a filesystem the compute nodes share. Each run keeps the root it was
   submitted with; `--clear remote-root` restores the default for new runs.
 - Once a run finishes and its log is collected, the running OpenResearch app
-  removes its remote run dir except `tensorboard/`, along with orx's cached
-  source archives that no active run uses and that have been idle for an hour.
-  Anything the job wrote into `repo/` goes with it. To keep results on the
-  cluster, set `orx compute configure slurm --keep-remote-runs true` before
-  runs finish, or write outputs outside the run dir. Deleting a project
+  removes its remote run dir except `tensorboard/`, and while there, orx's
+  cached source archives that no active run uses and that have been idle for an
+  hour. Anything the job wrote into `repo/` goes with it. To keep results on
+  the cluster, set `orx compute configure slurm --keep-remote-runs true`
+  (it covers runs not yet cleaned up), or write outputs outside the run dir. Deleting a project
   removes its runs' remote dirs entirely regardless.
 - A detached `orx supervise` process records scheduler status and logs; do not
   kill it.

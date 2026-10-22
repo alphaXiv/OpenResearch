@@ -36,7 +36,6 @@ Machine-local SSH settings can save a container name or ID for each host, and
 an absolute remote storage root (`--remote-root /data/alice/orx`) used instead
 of `~/.orx` for that host's runs and cached source archives. Each run keeps the
 root it was launched with.
-
 A saved default SSH host lets launches omit `--host`.
 These defaults apply only to SSH experiments; dashboards, terminals and coding
 agents still connect directly to the host.
@@ -45,12 +44,13 @@ agents still connect directly to the host.
   overrides it; `--no-container` explicitly runs on the host. The flags conflict.
 
 Once a run finishes and its log is collected, the running OpenResearch app
-removes the run's remote dir except `tensorboard/`, so anything written into
-`repo/` goes with it. It also removes orx's cached source archives that no
-active run uses and that have been idle for an hour. Unreachable hosts are
-retried later. `orx compute configure ssh --host lab --keep-remote-runs true`
-keeps that host's runs that finish while it is set. Deleting a project removes
-its runs' remote dirs entirely, regardless of that setting.
+removes the run's host dir except `tensorboard/` (a container's copy goes
+entirely), so anything written into `repo/` goes with it. While cleaning a
+host it also removes orx's cached source archives that no active run uses and
+that have been idle for an hour. Unreachable hosts are retried later.
+`orx compute configure ssh --host lab --keep-remote-runs true` keeps that
+host's runs not yet cleaned up. Deleting a project removes its runs' remote
+dirs entirely, regardless of that setting.
 
 Keep environment preparation in the project's committed setup/run scripts and
 invoke them through the fixed run command, just as with other backends. For
