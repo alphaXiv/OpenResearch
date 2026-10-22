@@ -12,6 +12,7 @@ mod acp;
 mod telemetry;
 pub(crate) use telemetry::{InvocationIdentity, TokenUsage};
 
+use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
@@ -2176,6 +2177,28 @@ impl Store {
         tx.execute("DELETE FROM chat_sessions WHERE id = ?1", params![id])?;
         tx.commit()?;
         Ok(())
+    }
+
+    /// `att-<uuid>` ids of the chat attachments that rows still mention, across
+    /// every chat or only `session_id`'s.
+    pub fn chat_attachment_ids(&self, session_id: Option<&str>) -> Result<HashSet<String>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT parts_json FROM chat_messages WHERE ?1 IS NULL OR session_id = ?1
+             UNION ALL SELECT prepared_input FROM chat_turns WHERE ?1 IS NULL OR session_id = ?1
+             UNION ALL SELECT payload_json FROM chat_queued_messages
+               WHERE ?1 IS NULL OR session_id = ?1",
+        )?;
+        let mut rows = stmt.query(params![session_id])?;
+        let mut ids = HashSet::new();
+        while let Some(row) = rows.next()? {
+            let text: String = row.get(0)?;
+            ids.extend(text.match_indices("att-").filter_map(|(start, _)| {
+                let id = text.get(start..start + 40)?;
+                text.get(start + 40..)?.starts_with("__").then_some(())?;
+                uuid::Uuid::parse_str(&id[4..]).ok().map(|_| id.to_string())
+            }));
+        }
+        Ok(ids)
     }
 
     /// `None` clears it, which a fork of the session's very first turn needs:
@@ -4369,6 +4392,106 @@ mod tests {
         assert!(recovered.permission_mode.is_none());
         assert!(recovered.plan_mode);
         assert_eq!(recovered.reasoning_level.as_deref(), Some("low"));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn deleting_a_chat_removes_only_its_unreferenced_attachments() {
+        let dir = std::env::temp_dir().join(format!("orx-store-att-{}", uuid::Uuid::new_v4()));
+        let store = Store::open_at(dir.clone()).unwrap();
+        let a = format!("att-{}", uuid::Uuid::new_v4());
+        let b = format!("att-{}", uuid::Uuid::new_v4());
+        for id in ["chat_1", "chat_2"] {
+            store
+                .create_chat_session(&chat_session_fixture(id))
+                .unwrap();
+        }
+        store
+            .upsert_chat_message(&StoredChatMessage {
+                id: "m1".into(),
+                session_id: "chat_1".into(),
+                role: "user".into(),
+                parts_json: format!(
+                    "[{{\"kind\":\"image\",\"text\":\"{a}__x.png\"}}, \"att-nope\"]"
+                ),
+                created_at: 1,
+                completed_at: None,
+                parent_id: None,
+                base_native_session_id: None,
+                result_native_session_id: None,
+            })
+            .unwrap();
+        store
+            .insert_queued_chat_message(&StoredQueuedChatMessage {
+                id: "q1".into(),
+                session_id: "chat_2".into(),
+                client_turn_id: "c1".into(),
+                request_hash: "h1".into(),
+                payload_json: format!("{{\"fileName\":\"{b}__y.pdf\"}}"),
+                created_at: 1,
+            })
+            .unwrap();
+        let c = format!("att-{}", uuid::Uuid::new_v4());
+        let mut turn = chat_turn_fixture("turn_1", "client_1");
+        turn.prepared_input = format!("see /data/chat-attachments/{c}__z.png");
+        store.admit_chat_turn(None, &turn).unwrap();
+        assert_eq!(
+            store.chat_attachment_ids(Some("chat_1")).unwrap(),
+            HashSet::from([a.clone(), c.clone()])
+        );
+        assert_eq!(
+            store.chat_attachment_ids(None).unwrap(),
+            HashSet::from([a.clone(), b.clone(), c.clone()])
+        );
+
+        let files = dir.join("chat-attachments");
+        std::fs::create_dir_all(&files).unwrap();
+        let fresh_orphan = format!("att-{}__z.png", uuid::Uuid::new_v4());
+        let old_orphan = format!("att-{}__o.png", uuid::Uuid::new_v4());
+        for name in [
+            format!("{a}__x.png"),
+            format!("{b}__y.pdf"),
+            format!("{c}__z.png"),
+            fresh_orphan.clone(),
+            old_orphan.clone(),
+        ] {
+            std::fs::write(files.join(name), b"x").unwrap();
+        }
+        let two_hours_ago = std::time::SystemTime::now() - Duration::from_secs(2 * 60 * 60);
+        for name in [format!("{c}__z.png"), old_orphan.clone()] {
+            std::fs::File::options()
+                .write(true)
+                .open(files.join(name))
+                .unwrap()
+                .set_modified(two_hours_ago)
+                .unwrap();
+        }
+        let deleted = HashSet::from([a.clone(), b.clone()]);
+        store.delete_chat_session("chat_2").unwrap();
+        use crate::local::chat::remove_unreferenced_attachments;
+        remove_unreferenced_attachments(&store, &files, Some(&deleted)).unwrap();
+        assert!(
+            files.join(format!("{a}__x.png")).exists(),
+            "still referenced"
+        );
+        assert!(
+            !files.join(format!("{b}__y.pdf")).exists(),
+            "deleted chat's file"
+        );
+        assert!(files.join(&fresh_orphan).exists(), "not the deleted chat's");
+        remove_unreferenced_attachments(&store, &files, None).unwrap();
+        assert!(
+            !files.join(&old_orphan).exists(),
+            "startup sweep reclaims it"
+        );
+        assert!(
+            files.join(&fresh_orphan).exists(),
+            "may be a send in flight"
+        );
+        assert!(
+            files.join(format!("{c}__z.png")).exists(),
+            "referenced by a turn"
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 

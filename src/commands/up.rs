@@ -164,6 +164,27 @@ pub async fn run(args: UpArgs) -> Result<()> {
         let gate = state.data_dir_gate.clone();
         tokio::task::spawn_blocking(move || local::demo::prewarm(move_in_progress, gate));
     }
+    let moving = state.data_dir_move_in_progress.clone();
+    let gate = state.data_dir_gate.clone();
+    tokio::spawn(async move {
+        let mut hourly = tokio::time::interval(Duration::from_secs(60 * 60));
+        loop {
+            hourly.tick().await;
+            let _guard = gate.lock().await;
+            if moving.load(std::sync::atomic::Ordering::SeqCst) {
+                continue;
+            }
+            let swept = tokio::task::spawn_blocking(|| {
+                let store = Store::open()?;
+                let dir = local::chat::attachments_dir()?;
+                local::chat::remove_unreferenced_attachments(&store, &dir, None)
+            })
+            .await;
+            if let Ok(Err(err)) = swept {
+                eprintln!("orx up: could not sweep chat attachments: {err}");
+            }
+        }
+    });
     // Deliver explicitly registered run wake-ups once their chat becomes idle.
     tokio::spawn(local::chat::watch_runs(
         state.chat.clone(),
@@ -2096,11 +2117,20 @@ async fn delete_project_inner(state: AppState, id: String, query: DeleteProjectQ
         state.chat.claude.kill_session(&session.id).await;
         state.chat.acp.stop(&session.id).await;
     }
+    let mut attachments = HashSet::new();
+    for session in &sessions {
+        attachments.extend(store.chat_attachment_ids(Some(&session.id))?);
+    }
     let projects = store.list_local_projects()?;
     // Refuse before anything is deleted; remove only once the rows are gone.
     let artifacts =
         local::files::plan_project_artifact_cleanup(&project, query.delete_artifacts, &projects)?;
     store.delete_local_project(&id)?;
+    if let Err(err) = local::chat::attachments_dir().and_then(|dir| {
+        local::chat::remove_unreferenced_attachments(&store, &dir, Some(&attachments))
+    }) {
+        eprintln!("orx up: could not remove chat attachments: {err}");
+    }
     for session in &sessions {
         state.chat.claude.forget_session(&session.id).await;
         local::chat::cleanup_session_transcript_artifacts(&session.id);

@@ -993,6 +993,45 @@ pub fn attachments_dir() -> Result<std::path::PathBuf> {
     Ok(dir)
 }
 
+/// Remove attachment files no chat row mentions any more: `deleted` (a deleted
+/// chat's) when given, else every orphan older than an hour. A send in flight
+/// saves its file before recording the message, possibly in another server
+/// sharing the data dir, so a young orphan waits for the next hourly sweep.
+pub fn remove_unreferenced_attachments(
+    store: &Store,
+    dir: &std::path::Path,
+    deleted: Option<&HashSet<String>>,
+) -> Result<()> {
+    const SWEEP_AGE: Duration = Duration::from_secs(60 * 60);
+    let referenced = store.chat_attachment_ids(None)?;
+    let entries =
+        std::fs::read_dir(dir).map_err(|e| anyhow!("Could not read {}: {}", dir.display(), e))?;
+    for entry in entries.flatten() {
+        let name = entry.file_name();
+        let Some(id) = name
+            .to_str()
+            .filter(|n| n.starts_with("att-"))
+            .and_then(|n| n.get(..40))
+        else {
+            continue;
+        };
+        let orphaned = !referenced.contains(id)
+            && match deleted {
+                Some(deleted) => deleted.contains(id),
+                None => entry
+                    .metadata()
+                    .and_then(|m| m.modified())
+                    .is_ok_and(|t| t.elapsed().is_ok_and(|age| age > SWEEP_AGE)),
+            };
+        if orphaned {
+            if let Err(err) = std::fs::remove_file(entry.path()) {
+                eprintln!("could not remove {}: {err}", entry.path().display());
+            }
+        }
+    }
+    Ok(())
+}
+
 fn image_ext(media_type: &str) -> Option<&'static str> {
     match media_type {
         "image/png" => Some("png"),
@@ -6638,8 +6677,14 @@ impl ChatHost {
         let store = Store::open()?;
         let session = store.get_chat_session(session_id)?;
         let worktree_owner = store.chat_worktree_owner(session_id)?;
+        let attachments = store.chat_attachment_ids(Some(session_id))?;
         store.delete_chat_session(session_id)?;
         self.emit("chat.session.deleted", json!({ "sessionId": session_id }));
+        if let Err(err) = attachments_dir()
+            .and_then(|dir| remove_unreferenced_attachments(&store, &dir, Some(&attachments)))
+        {
+            eprintln!("could not remove chat attachments: {err}");
+        }
         if let Some(session) = session {
             cleanup_session_transcript_artifacts(&session.id);
             // A side chat runs in its parent's worktree, which outlives it.
