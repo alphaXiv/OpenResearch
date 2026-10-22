@@ -560,6 +560,10 @@ fn router(state: AppState, remote_auth: Option<RemoteAuth>) -> Router {
         .route("/api/runs/{id}/diff", get(run_diff))
         .route("/api/experiments/{id}/diff", get(experiment_diff))
         .route(
+            "/api/experiments/{id}",
+            axum::routing::delete(delete_experiment),
+        )
+        .route(
             "/api/experiments/{id}/archive",
             axum::routing::patch(set_experiment_archive),
         )
@@ -2183,6 +2187,22 @@ async fn set_experiment_archive(
     }
     let ids = local::experiments::set_archived(&mut store, &id, direction, request.archived)?;
     Ok(Json(json!({ "ids": ids })))
+}
+
+async fn delete_experiment(State(state): State<AppState>, Path(id): Path<String>) -> ApiResult {
+    reject_if_moving(&state)?;
+    // Deletion can wait up to RUN_ARTIFACTS_WAIT for the run-artifacts lock.
+    blocking_api(move || {
+        let store = Store::open()?;
+        if store.get_local_experiment(&id)?.is_none() {
+            return Err(not_found("experiment"));
+        }
+        let deleted = local::experiments::delete_experiment(&store, &id).map_err(bad_request)?;
+        Ok(Json(
+            json!({ "ok": true, "branchCommit": deleted.branch_commit }),
+        ))
+    })
+    .await
 }
 
 async fn list_project_runs(Path(id): Path<String>) -> ApiResult {

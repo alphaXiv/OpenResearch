@@ -20,7 +20,7 @@ import {
 
 import { listChatSessionsQuery, getChatMessagesQuery } from "./queries/chat";
 import { listProjectsQuery, getUiStateQuery, listRunsQuery, listExperimentsQuery } from "./queries/projects";
-import { openSideChat, sendChatMessage, setExperimentArchived } from "./api";
+import { deleteExperiment, openSideChat, sendChatMessage, setExperimentArchived } from "./api";
 import { getArtifactsQuery } from "./queries/files";
 import { readHarnesses } from "./queries/settings";
 import { useBlocker, useRouter, useRouterState } from "@tanstack/react-router";
@@ -406,6 +406,17 @@ export default function App({ runtime, projectId, pane }: { runtime: RuntimeInfo
     try {
       await setExperimentArchived(id, direction, archived);
       await queryClient.invalidateQueries({ queryKey: listExperimentsQuery(projectId).queryKey });
+    } catch (error) {
+      showAlert(error instanceof Error ? error.message : String(error), "error");
+    }
+  }, [projectId]);
+  const deleteExperimentNode = useCallback(async (id: string) => {
+    try {
+      await deleteExperiment(id);
+      await Promise.all([
+        queryClient.invalidateQueries({ queryKey: listExperimentsQuery(projectId).queryKey }),
+        queryClient.invalidateQueries({ queryKey: listRunsQuery(projectId).queryKey }),
+      ]);
     } catch (error) {
       showAlert(error instanceof Error ? error.message : String(error), "error");
     }
@@ -2063,6 +2074,7 @@ export default function App({ runtime, projectId, pane }: { runtime: RuntimeInfo
                         onOpenView={openExperimentTab}
                         onOpenCode={openCodeTabForExperiment}
                         onArchive={archiveExperiment}
+                        onDelete={deleteExperimentNode}
                         agentSessionId={effectiveScope === "agent" ? activeSessionId : null}
                         onShowProjectScope={showProjectScope}
                         onRestoreRegion={restoreArchivedRegion}
@@ -2101,6 +2113,7 @@ export default function App({ runtime, projectId, pane }: { runtime: RuntimeInfo
                           );
                       }}
                       onArchive={archiveExperiment}
+                      onDelete={deleteExperimentNode}
                       onCancel={cancelRun}
                     />
                   ) : null}
