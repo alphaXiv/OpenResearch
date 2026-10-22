@@ -72,7 +72,7 @@ def execute(command, source=None, timeout=None):
 def log_chunk(request):
     path = os.path.join(os.path.expanduser("~"), request["dir"], "log")
     try:
-        file = open(path, "rb")
+        file = open(path, "rb", buffering=0)
     except FileNotFoundError:
         return {"missing": True}
     with file:
@@ -80,18 +80,24 @@ def log_chunk(request):
         identity = "%s:%s" % (stat.st_dev, stat.st_ino)
         offset = request.get("offset", 0)
         reset = request.get("identity") != identity or stat.st_size < offset
+        prefix = b""
         if not reset and offset:
             file.seek(max(0, offset - 64))
-            reset = hashlib.sha256(file.read(min(64, offset))).hexdigest() != request.get("boundary")
+            prefix = file.read(min(64, offset))
+            reset = hashlib.sha256(prefix).hexdigest() != request.get("boundary")
         if reset:
             offset = 0
+            prefix = b""
         file.seek(offset)
         data = file.read(CHUNK)
         end = offset + len(data)
-        file.seek(max(0, end - 64))
-        boundary = hashlib.sha256(file.read(min(64, end))).hexdigest()
+        collected = prefix + data
+        file.seek(offset - len(prefix))
+        if file.read(len(collected)) != collected:
+            raise RuntimeError("Remote log changed during collection; retrying.")
+        boundary = hashlib.sha256(collected[-64:]).hexdigest()
         return {"identity": identity, "reset": reset, "offset": offset,
-                "data": encode(data), "boundary": boundary, "size": stat.st_size, "eof": end >= stat.st_size}
+                "data": encode(data), "boundary": boundary, "size": stat.st_size, "eof": end >= os.fstat(file.fileno()).st_size}
 
 
 def slurm_status(jobs):

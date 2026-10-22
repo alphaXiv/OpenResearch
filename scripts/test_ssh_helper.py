@@ -29,6 +29,58 @@ class DeadlineTest(unittest.TestCase):
             self.assertEqual(len(execute.call_args[0]), 2)
 
 
+class LogReadRaceTest(unittest.TestCase):
+    def test_rewrite_during_collection_is_retried_but_append_is_allowed(self):
+        spec = importlib.util.spec_from_file_location("ssh_helper", HELPER)
+        helper = importlib.util.module_from_spec(spec)
+        with patch.object(sys, "dont_write_bytecode", True):
+            spec.loader.exec_module(helper)
+        with tempfile.TemporaryDirectory() as home:
+            path = Path(home) / "log"
+            original = b"a" * helper.CHUNK
+            replacement = b"b" * (helper.CHUNK * 2)
+            real_open = open
+
+            class ChangingFile:
+                def __init__(self, file, change):
+                    self.file = file
+                    self.change = change
+
+                def __enter__(self):
+                    return self
+
+                def __exit__(self, *args):
+                    self.file.close()
+
+                def __getattr__(self, name):
+                    return getattr(self.file, name)
+
+                def read(self, size):
+                    data = self.file.read(size)
+                    if self.change:
+                        change, self.change = self.change, None
+                        with real_open(path, change) as writer:
+                            writer.write(replacement)
+                    return data
+
+            with patch.dict(os.environ, {"HOME": home}):
+                for mode in ("wb", "ab"):
+                    with self.subTest(mode=mode):
+                        path.write_bytes(original)
+                        with patch.object(helper, "open", side_effect=lambda *args, **kwargs:
+                                          ChangingFile(real_open(*args, **kwargs), mode), create=True):
+                            if mode == "wb":
+                                with self.assertRaisesRegex(RuntimeError, "changed during collection"):
+                                    helper.log_chunk({"dir": ""})
+                            else:
+                                chunk = helper.log_chunk({"dir": ""})
+                                self.assertEqual(base64.b64decode(chunk["data"]), original)
+                                self.assertFalse(chunk["eof"])
+                        retry = helper.log_chunk({"dir": ""})
+                        expected = replacement if mode == "wb" else original
+                        self.assertEqual(base64.b64decode(retry["data"]), expected[:helper.CHUNK])
+
+
 class HelperTest(unittest.TestCase):
     def setUp(self):
         self.home = tempfile.TemporaryDirectory()
