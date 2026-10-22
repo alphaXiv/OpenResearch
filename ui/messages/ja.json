@@ -16,6 +16,8 @@
   "settings_cpu_cores": "CPU コア: {count}",
   "settings_gpu_count": "GPU × {count}",
   "$schema": "https://inlang.com/schema/inlang-message-format",
+  "projects_delete_artifacts_kept": "下のオプションを選択しない限り、成果物は保持されます。空の成果物フォルダーは自動的に削除されます。",
+  "projects_delete_artifacts_remove": "このプロジェクトの成果物ファイルを完全に削除する",
   "app_close_panel": "パネルを閉じる",
   "app_current_task": "現在のタスク",
   "app_entire_project": "プロジェクト全体",

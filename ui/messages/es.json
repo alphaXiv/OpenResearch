@@ -16,6 +16,8 @@
   "settings_cpu_cores": "Núcleos de CPU: {count}",
   "settings_gpu_count": "GPU × {count}",
   "$schema": "https://inlang.com/schema/inlang-message-format",
+  "projects_delete_artifacts_kept": "Los artefactos se conservan a menos que selecciones la opción siguiente. Las carpetas de artefactos vacías se eliminan automáticamente.",
+  "projects_delete_artifacts_remove": "Eliminar permanentemente los archivos de artefactos de este proyecto",
   "app_close_panel": "Cerrar panel",
   "app_current_task": "Tarea actual",
   "app_entire_project": "Todo el proyecto",
