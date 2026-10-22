@@ -238,7 +238,8 @@ pub struct ConfigureArgs {
     /// Absolute remote dir for runs and the source cache (SSH per host, or Slurm); default ~/.orx.
     #[arg(long)]
     remote_root: Option<String>,
-    /// true keeps every finished run's remote dir; false (the default) keeps each project's newest few.
+    /// true keeps every finished run's remote dir; false (the default) keeps each project's 3 newest
+    /// SSH/Slurm runs and removes older ones except tensorboard/.
     #[arg(long)]
     keep_remote_runs: Option<bool>,
     #[arg(long)]

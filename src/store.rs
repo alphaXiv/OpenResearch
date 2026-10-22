@@ -481,18 +481,6 @@ const ORPHAN_PASS_BUDGET: Duration = Duration::from_secs(5);
 /// (local runs) or their remote dirs (SSH and Slurm runs).
 const FULL_RUNS_PER_PROJECT: i64 = 3;
 
-/// `(id, status)` of runs of `kinds` past each project's newest [`FULL_RUNS_PER_PROJECT`].
-fn runs_past_newest(kinds: &str) -> String {
-    format!(
-        "SELECT id, status FROM (
-           SELECT id, status, ROW_NUMBER() OVER
-             (PARTITION BY project_id ORDER BY created_at DESC, id DESC) AS position
-           FROM runs
-           WHERE CASE WHEN json_valid(backend_json) THEN json_extract(backend_json, '$.kind') END
-             IN ({kinds}))
-         WHERE position > {FULL_RUNS_PER_PROJECT}"
-    )
-}
 const SLIMMED_RUN_PATHS: [&[&str]; 2] = [&["repo", ".venv"], &["repo", ".cache", "uv"]];
 
 const SUBMISSION_HANDLE: (&str, &str) = ("submission-handles", ".json");
@@ -527,6 +515,19 @@ pub(crate) struct RemoteCleanup {
     pub run_id: String,
     pub backend_json: String,
     pub deleted: bool,
+}
+
+/// `(id, status)` of runs of `kinds` past each project's newest [`FULL_RUNS_PER_PROJECT`].
+fn runs_past_newest(kinds: &'static str) -> String {
+    format!(
+        "SELECT id, status FROM (
+           SELECT id, status, ROW_NUMBER() OVER
+             (PARTITION BY project_id ORDER BY created_at DESC, id DESC) AS position
+           FROM runs
+           WHERE CASE WHEN json_valid(backend_json) THEN json_extract(backend_json, '$.kind') END
+             IN ({kinds}))
+         WHERE position > {FULL_RUNS_PER_PROJECT}"
+    )
 }
 
 /// Queues the SSH/Slurm runs whose `column` equals `value`; deletion wins over a pending finish.
@@ -4268,6 +4269,10 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("orx-remote-cleanup-{}", uuid::Uuid::new_v4()));
         let store = Store::open_at(dir.clone()).unwrap();
         project_with_run_artifacts(&store, "p", "local", &"d".repeat(64));
+        store
+            .conn
+            .execute("UPDATE runs SET created_at = 10 WHERE id = 'local'", [])
+            .unwrap();
         let insert = |id: &str, status: &str, kind: &str, created_at: i64| {
             let descriptor =
                 serde_json::json!({"kind": kind, "namespace": "lab", "sourceDigest": id});

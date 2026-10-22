@@ -1472,8 +1472,8 @@ async fn run_slurm(
     }
 }
 
-/// Once logs are local, `orx up` removes the remote run dir when it is past its project's newest
-/// few, unless the target keeps results.
+/// Queues the remote run dir once logs are local; `orx up` removes it when it falls past its
+/// project's newest few, unless the target keeps results.
 fn queue_remote_cleanup(store: &Store, run_id: &str) {
     if let Err(err) = store.queue_finished_remote_cleanup(run_id) {
         eprintln!("supervise {run_id}: could not queue remote cleanup: {err}");
