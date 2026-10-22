@@ -145,8 +145,10 @@ test('stopping a dashboard leaves busy SSH monitoring alive', async () => {
       received = Buffer.concat([received, chunk])
       if (received.length < 4 || received.length < 4 + received.readUInt32BE()) return
       const request = JSON.parse(received.subarray(4).toString())
-      assert.equal(request.operation.op, 'shutdown_if_idle')
-      const response = Buffer.from(JSON.stringify({ value: { busy: true }, error: null }))
+      assert.ok(['shutdown_if_idle', 'shutdown'].includes(request.operation.op))
+      const response = Buffer.from(JSON.stringify(request.operation.op === 'shutdown'
+        ? { value: null, error: 'SSH monitoring is busy' }
+        : { value: { busy: true }, error: null }))
       const header = Buffer.alloc(4)
       header.writeUInt32BE(response.length)
       socket.end(Buffer.concat([header, response]))
@@ -156,6 +158,8 @@ test('stopping a dashboard leaves busy SSH monitoring alive', async () => {
   try {
     writeFileSync(path.join(root, 'endpoint.json'), JSON.stringify({ port: server.address().port, token: 'fixture', version: 1 }))
     await stopSshServices({ dataDir })
+    assert.equal(server.listening, true)
+    await assert.rejects(stopSshServices({ dataDir }, true), /SSH monitoring is busy/)
     assert.equal(server.listening, true)
   } finally {
     await new Promise((resolve) => server.close(resolve))
