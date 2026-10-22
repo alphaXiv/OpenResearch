@@ -176,7 +176,7 @@ export const getSkillsQuery = (harness?: string, projectId?: string) => queryOpt
   queryKey: workspaceKey("getSkills", harness ?? null, projectId ?? null),
   queryFn: ({ signal }) => api.getSkills(signal, harness, projectId),
   select: (data) => data.skills,
-  refetchInterval: (query) => query.state.data?.importing ? 2_000 : 30_000,
+  refetchInterval: 30_000,
   staleTime: 300_000,
 });
 
@@ -197,7 +197,7 @@ export const listUserSkillsQuery = () => queryOptions({
   queryKey: workspaceKey("listUserSkills"),
   queryFn: ({ signal }) => api.listUserSkills(signal),
   select: (data) => data.skills,
-  refetchInterval: (query) => query.state.data?.importing ? 2_000 : 30_000,
+  refetchInterval: 30_000,
   staleTime: 300_000,
 });
 

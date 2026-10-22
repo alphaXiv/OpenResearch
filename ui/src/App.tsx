@@ -2422,6 +2422,7 @@ export default function App({ runtime, projectId, pane }: { runtime: RuntimeInfo
       </div>
       {newProjectOpen && (
         <NewProjectDialog
+          preferredAgent={uiState.preferredAgent}
           remote={runtime.kind === "ssh"}
           onClose={() => setNewProjectOpen(false)}
           onCreated={(project, publicationError) => {
