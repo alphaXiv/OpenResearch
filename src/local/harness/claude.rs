@@ -914,15 +914,7 @@ impl Harness for ClaudeCode {
                         plan_mode: None,
                     })
                 }
-                ("question", false) => {
-                    let (message, _) = synthesize_resume("question", answer);
-                    ctx.host.settle_permission(
-                        native_id,
-                        crate::local::chat::PermissionDecision::Deny { message },
-                    )?;
-                    Ok(ResumeAction::Handled { plan_mode: None })
-                }
-                ("question", true) => {
+                ("question", _) => {
                     let input = question_answer_input(prompt, answer)?;
                     ctx.host.settle_permission(
                         native_id,
@@ -1195,10 +1187,7 @@ pub(crate) fn synthesize_resume(
             let text = "The user approved that action. Continue.".to_string();
             (text, chosen.or(Some(PermissionMode::Bypass)))
         }
-        "question" if !req.approve => (
-            "The user skipped this question. Do not retry it or treat it as answered.".to_string(),
-            None,
-        ),
+        "question" if !req.approve => (SKIPPED_QUESTION_MESSAGE.to_string(), None),
         // question (or anything else): feed the selection back as the user's reply.
         _ => (req.contextualized_answer(req.plain_answer_text()), None),
     }
@@ -1237,7 +1226,19 @@ fn plan_prompt(name: &str, input: Option<&Value>) -> Option<WirePrompt> {
     })
 }
 
+pub(crate) const SKIPPED_QUESTION_MESSAGE: &str =
+    "The user skipped this question. Do not retry it or treat it as answered.";
+
 fn question_answer_input(prompt: &WirePrompt, answer: &PromptAnswer) -> Result<Value> {
+    let mut input = prompt
+        .tool_input
+        .clone()
+        .ok_or_else(|| anyhow!("question input is missing"))?;
+    if !answer.approve {
+        // The batch continues; an entirely skipped call is denied by the host.
+        input["answers"] = serde_json::json!({});
+        return Ok(input);
+    }
     let text = answer.contextualized_answer(answer.plain_answer_text());
     if text.trim().is_empty() {
         return Err(anyhow!("select an option (or add a note) to answer"));
@@ -1246,10 +1247,6 @@ fn question_answer_input(prompt: &WirePrompt, answer: &PromptAnswer) -> Result<V
         .question
         .as_deref()
         .ok_or_else(|| anyhow!("question text is missing"))?;
-    let mut input = prompt
-        .tool_input
-        .clone()
-        .ok_or_else(|| anyhow!("question input is missing"))?;
     input["answers"] = serde_json::json!({ question: text });
     Ok(input)
 }
@@ -2774,6 +2771,9 @@ mod tests {
             serde_json::json!({"Which colors?":"Blue"})
         );
         assert!(question_answer_input(&prompt, &answer(true, None, &[], None)).is_err());
+        let skipped = question_answer_input(&prompt, &answer(false, None, &[], None)).unwrap();
+        assert_eq!(skipped["questions"], input["questions"]);
+        assert_eq!(skipped["answers"], serde_json::json!({}));
     }
 
     #[test]

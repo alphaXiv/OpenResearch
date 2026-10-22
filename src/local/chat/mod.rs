@@ -3518,6 +3518,11 @@ impl ChatHost {
                         decision => return Ok(decision),
                     }
                 }
+                if answers.is_empty() {
+                    return Ok(PermissionDecision::deny(
+                        crate::local::harness::SKIPPED_QUESTION_MESSAGE,
+                    ));
+                }
                 let mut input = tool_input.clone();
                 input["answers"] = Value::Object(answers);
                 return Ok(PermissionDecision::Allow {
