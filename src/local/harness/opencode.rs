@@ -23,11 +23,7 @@
 
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
-use std::sync::{Mutex, OnceLock};
 use std::time::Duration;
-
-/// A key probe is one short reply; a cold CLI start is most of it.
-const KEY_PROBE_TIMEOUT: Duration = Duration::from_secs(15);
 
 use async_trait::async_trait;
 use futures::StreamExt;
@@ -60,7 +56,7 @@ pub struct OpenCode;
 
 impl OpenCode {
     /// `snapshot` skips every catalog probe — `models`/`debug config` children,
-    /// the V2 server bring-up, local-server and dead-key checks — and answers
+    /// the V2 server bring-up and local-server checks — and answers
     /// install/auth only; readiness is deferred entirely and the entry is
     /// marked `catalog_pending` until a full pass replaces it. The one
     /// non-free check kept is the isolated DB lease preflight (file I/O, no
@@ -290,45 +286,9 @@ impl OpenCode {
             info.agent_ready = info.installed && !info.install_broken && !models.is_empty();
         }
         if info.agent_ready {
-            // Hide the models of providers whose stored key a live request rejects.
-            let cloud_providers: Vec<_> = providers
-                .iter()
-                .filter(|id| !local.iter().any(|(local_id, _)| local_id == id))
-                .cloned()
-                .collect();
-            let dead = match &resolved_binary {
-                Some(binary) => dead_providers(binary, &cloud_providers, &models).await,
-                None => Vec::new(),
-            };
-            if !dead.is_empty() {
-                models.retain(|model| !dead.iter().any(|p| model_provider(&model.id) == p));
-                info.account = Some(
-                    providers
-                        .iter()
-                        .map(|p| {
-                            if dead.contains(p) {
-                                format!("{p} (key rejected)")
-                            } else {
-                                p.clone()
-                            }
-                        })
-                        .collect::<Vec<_>>()
-                        .join(", "),
-                );
-                let note = format!(
-                    "{} rejected the stored API key, so its models are hidden. Re-add it with `opencode auth login`.",
-                    dead.join(", ")
-                );
-                info.agent_note = Some(match info.agent_note.take() {
-                    Some(local_note) => format!("{local_note} {note}"),
-                    None => note,
-                });
-            }
-            // Every key rejected and nothing free left: nothing can run a turn.
-            if models.is_empty() {
-                info.agent_ready = false;
-                info.auth_state = HarnessAuthState::NeedsLogin;
-            }
+            // Detection must not generate text: a stored provider key does not
+            // authorize a paid request on that provider's first catalogued model.
+            // Authentication failures are reported by user-initiated requests.
             info.models = models;
         } else if info.install_broken {
             info.agent_note = Some(info.broken_note(OPENCODE_REINSTALL));
@@ -412,11 +372,14 @@ impl Harness for OpenCode {
             SummarizeOutcome::NoServer => Err(anyhow!(
                 "OpenCode is not running for this chat — send a message first, then compact"
             )),
-            SummarizeOutcome::NoModel => Ok(CompactOutcome::Fallback),
+            SummarizeOutcome::NoModel | SummarizeOutcome::ModelChanged => {
+                Ok(CompactOutcome::Fallback)
+            }
         }
     }
 
     async fn one_shot(&self, request: OneShot<'_>) -> Result<String> {
+        selected_generation_model(request.model)?;
         opencode_one_shot(&crate::local::opencode::resolve_binary().await?, request).await
     }
 
@@ -589,104 +552,6 @@ fn opencode_providers() -> Vec<String> {
     }
 }
 
-/// Providers whose stored key a live request rejects: one tiny read-only
-/// request per provider on its first catalogued model. Verdicts are kept per
-/// auth.json version so a paid probe runs once, not once per detection, and
-/// only when the child actually answered — a timeout or spawn failure is not
-/// remembered, so a dead key is still found on the next detection.
-async fn dead_providers(
-    binary: &ResolvedBinary,
-    providers: &[String],
-    models: &[ModelInfo],
-) -> Vec<String> {
-    static VERDICTS: OnceLock<Mutex<HashMap<String, bool>>> = OnceLock::new();
-    let verdicts = VERDICTS.get_or_init(Default::default);
-    let version = opencode_auth_path()
-        .and_then(|p| std::fs::metadata(p).ok())
-        .and_then(|m| m.modified().ok())
-        .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
-        .map(|d| d.as_secs())
-        .unwrap_or(0);
-    let probes = providers.iter().filter_map(|provider| {
-        let model = models
-            .iter()
-            .find(|model| model_provider(&model.id) == provider)?
-            .id
-            .clone();
-        let key = format!("{version}:{provider}");
-        let cached = verdicts
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .get(&key)
-            .copied();
-        Some(async move {
-            let dead = match cached {
-                Some(dead) => dead,
-                None => {
-                    let dead = probe_rejects_key(binary, &model).await;
-                    if let Some(dead) = dead {
-                        verdicts
-                            .lock()
-                            .unwrap_or_else(|e| e.into_inner())
-                            .insert(key, dead);
-                    }
-                    dead.unwrap_or(false)
-                }
-            };
-            dead.then(|| provider.clone())
-        })
-    });
-    futures::future::join_all(probes)
-        .await
-        .into_iter()
-        .flatten()
-        .collect()
-}
-
-/// `Some(true)` when the provider answered with an authentication error,
-/// `Some(false)` for any other answer, `None` when the child never answered.
-async fn probe_rejects_key(binary: &ResolvedBinary, model: &str) -> Option<bool> {
-    let out = opencode_child(
-        binary,
-        Some(model),
-        "Reply with the single word ok",
-        KEY_PROBE_TIMEOUT,
-    )
-    .await?;
-    let text = format!(
-        "{}\n{}",
-        String::from_utf8_lossy(&out.stdout),
-        String::from_utf8_lossy(&out.stderr)
-    );
-    Some(!out.status.success() && is_auth_rejection(&text))
-}
-
-/// Phrases the major providers use when a key is invalid, revoked, or expired.
-/// A bare `401` is deliberately absent: line numbers and counts contain it.
-const AUTH_REJECTION_MARKERS: &[&str] = &[
-    "api key not valid",
-    "invalid api key",
-    "incorrect api key",
-    "invalid x-api-key",
-    "invalid_api_key",
-    "authentication_error",
-    "authentication failed",
-    "unauthorized",
-    "status 401",
-    "http 401",
-    "code 401",
-    "error 401",
-    "(401)",
-    "key has expired",
-    "api key expired",
-    "no auth credentials",
-];
-
-fn is_auth_rejection(output: &str) -> bool {
-    let lower = output.to_ascii_lowercase();
-    AUTH_REJECTION_MARKERS.iter().any(|m| lower.contains(m))
-}
-
 /// The `provider` half of an opencode `provider/model` id.
 fn model_provider(id: &str) -> &str {
     id.split_once('/').map(|(p, _)| p).unwrap_or(id)
@@ -806,31 +671,20 @@ async fn opencode_models(bin: PathBuf) -> (Vec<super::ModelInfo>, HashSet<String
     )
 }
 
-/// One headless request on a throwaway `opencode run` child on
-/// `request.model`, else the user's default model. opencode's server no
-/// longer retitles parent sessions itself (only sub-agent child sessions get
-/// task-description titles), so titles run through here like the
-/// claude/codex one-shot children. opencode has no system-prompt flag, so
-/// `system` leads the message.
+/// One throwaway request on the selected model; V1 prepends the system prompt to its message.
 async fn opencode_one_shot(binary: &ResolvedBinary, request: OneShot<'_>) -> Result<String> {
+    let model = selected_generation_model(request.model)?;
     let message = format!("{}\n\n{}", request.system, request.prompt);
     if binary.protocol == crate::local::opencode::Protocol::V2 {
         return v2::generate(
             binary.clone(),
-            request.model.map(str::to_owned),
+            Some(model.to_owned()),
             message,
             request.timeout,
         )
         .await;
     }
-    let out = opencode_child(binary, request.model, &message, request.timeout)
-        .await
-        .ok_or_else(|| {
-            anyhow!(
-                "could not run (setup failed or timed out after {}s)",
-                request.timeout.as_secs()
-            )
-        })?;
+    let out = opencode_child(binary, model, &message, request.timeout).await?;
     if !out.status.success() {
         return Err(super::one_shot_exit_error(
             out.status,
@@ -840,7 +694,13 @@ async fn opencode_one_shot(binary: &ResolvedBinary, request: OneShot<'_>) -> Res
     Ok(String::from_utf8_lossy(&out.stdout).into_owned())
 }
 
-/// Run one unattended `opencode run` to completion, or `None` if it could
+fn selected_generation_model(model: Option<&str>) -> Result<&str> {
+    model
+        .filter(|model| !model.trim().is_empty())
+        .ok_or_else(|| anyhow!("Select an OpenCode model before generating text."))
+}
+
+/// Run one unattended `opencode run` to completion, or an error if it could
 /// not be started, had no isolated store, or ran past `timeout`.
 ///
 /// The message embeds untrusted text, so the child must not be able to act on
@@ -850,24 +710,22 @@ async fn opencode_one_shot(binary: &ResolvedBinary, request: OneShot<'_>) -> Res
 /// until the timeout kills it.
 async fn opencode_child(
     binary: &ResolvedBinary,
-    model: Option<&str>,
+    model: &str,
     message: &str,
     timeout: Duration,
-) -> Option<std::process::Output> {
-    let db = native_store::prepare_opencode(NativeStore::Isolated).ok()?;
-    let lease = crate::local::opencode::prepare_database(binary, &db)
-        .await
-        .ok()?;
+) -> Result<std::process::Output> {
+    let db = native_store::prepare_opencode(NativeStore::Isolated)?;
+    let lease = crate::local::opencode::prepare_database(binary, &db).await?;
     let mut cmd = tokio::process::Command::new(&binary.path);
     cmd.args(["run", "--agent", "plan", "--pure"]);
-    cmd.args(model.iter().flat_map(|model| ["--model", model]))
+    cmd.args(["--model", model])
         .arg(message)
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped())
         .kill_on_drop(true)
         .current_dir(std::env::temp_dir());
-    crate::local::local_models::prepare_env(&mut cmd, model).ok()?;
+    crate::local::local_models::prepare_generation_env(&mut cmd, Some(model), binary.protocol)?;
     // Stateless V1 calls must not race chat startup when initializing its database.
     cmd.env("OPENCODE_DB", ":memory:");
     cmd.env("OPENCODE_DISABLE_PROJECT_CONFIG", "1")
@@ -876,6 +734,52 @@ async fn opencode_child(
     // Plain text only — an ANSI-colorizing CLI (or a synced FORCE_COLOR) would
     // otherwise write escape codes straight into the reply.
     cmd.env("NO_COLOR", "1");
+    let mut config = tokio::process::Command::new(&binary.path);
+    config
+        .args(["debug", "config", "--pure"])
+        .current_dir(std::env::temp_dir())
+        .stdin(std::process::Stdio::null())
+        .stderr(std::process::Stdio::piped())
+        .kill_on_drop(true);
+    for (key, value) in cmd.as_std().get_envs() {
+        match value {
+            Some(value) => {
+                config.env(key, value);
+            }
+            None => {
+                config.env_remove(key);
+            }
+        }
+    }
+    let capture = crate::local::git::TemporaryDirectory::new("orx-opencode-config")?;
+    let config_path = capture.path().join("config.json");
+    let mut options = std::fs::OpenOptions::new();
+    options.write(true).create_new(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600);
+    }
+    config.stdout(std::process::Stdio::from(options.open(&config_path)?));
+    let output = tokio::time::timeout(timeout, async { config.spawn()?.wait_with_output().await })
+        .await
+        .map_err(|_| anyhow!("OpenCode effective configuration check timed out"))??;
+    if !output.status.success() {
+        return Err(super::one_shot_exit_error(
+            output.status,
+            &[&output.stderr, &output.stdout],
+        ));
+    }
+    let config: Value = serde_json::from_slice(&std::fs::read(&config_path)?)?;
+    if (config["agent"]["title"]["disable"] != true
+        && config["small_model"].as_str() != Some(model))
+        || ["title", "compaction"].iter().any(|name| {
+            config["agent"][name]["disable"] != true
+                && config["agent"][name]["model"].as_str() != Some(model)
+        })
+    {
+        return Err(anyhow!("OpenCode's effective auxiliary models do not match the selected model. Check managed OpenCode settings."));
+    }
     let binary = binary.clone();
     tokio::spawn(async move {
         use tokio::io::AsyncReadExt;
@@ -911,9 +815,13 @@ async fn opencode_child(
             stderr: stderr?,
         })
     })
-    .await
-    .ok()
-    .flatten()
+    .await?
+    .ok_or_else(|| {
+        anyhow!(
+            "could not run (setup failed or timed out after {}s)",
+            timeout.as_secs()
+        )
+    })
 }
 
 /// Run `opencode <args>` in the home dir, returning stdout on success.
@@ -2195,6 +2103,188 @@ async fn handle_prompt_event(
 mod tests {
     use super::*;
 
+    #[cfg(unix)]
+    #[test]
+    fn v1_one_shot_verifies_file_captured_config_and_generates_on_selected_model() {
+        const CHILD: &str = "ORX_TEST_OPENCODE_GENERATION";
+        if let Some(path) = std::env::var_os(CHILD) {
+            tokio::runtime::Runtime::new().unwrap().block_on(async {
+                let binary = crate::local::opencode::resolve_binary_at(PathBuf::from(path))
+                    .await
+                    .unwrap();
+                let output = opencode_one_shot(
+                    &binary,
+                    OneShot {
+                        model: Some("custom/provider/model"),
+                        ..super::super::title::title_request("hello")
+                    },
+                )
+                .await
+                .unwrap();
+                let (model, config) = output.split_once('\n').unwrap();
+                assert_eq!(model, "custom/provider/model");
+                let config: Value = serde_json::from_str(config).unwrap();
+                assert_eq!(config["small_model"], model);
+                assert_eq!(config["agent"]["title"]["model"], model);
+                assert_eq!(config["agent"]["compaction"]["model"], model);
+                assert_eq!(config["agent"]["title"]["hidden"], true);
+                assert_eq!(config["model"], "global/default");
+            });
+            return;
+        }
+        let fixture =
+            crate::local::git::TemporaryDirectory::new("orx-one-shot-generation").unwrap();
+        let script = sh_script("opencode", "#!/bin/sh\ncase \"$1\" in\ndebug) printf '%s' \"$OPENCODE_CONFIG_CONTENT\";;\nrun) printf '%s\\n' \"$6\"; printf '%s' \"$OPENCODE_CONFIG_CONTENT\";;\n*) exit 99;;\nesac\n");
+        let root = fixture.path();
+        let output = std::process::Command::new(std::env::current_exe().unwrap())
+            .env_clear()
+            .args(["--exact", "local::harness::opencode::tests::v1_one_shot_verifies_file_captured_config_and_generates_on_selected_model", "--nocapture"])
+            .env(CHILD, &script)
+            .env("HOME", root)
+            .env("PATH", "/usr/bin:/bin")
+            .env("XDG_DATA_HOME", root.join("data"))
+            .env("XDG_CONFIG_HOME", root.join("config"))
+            .env("XDG_CACHE_HOME", root.join("cache"))
+            .env("ORX_DATA_DIR", root.join("orx"))
+            .env("OPENCODE_CONFIG_CONTENT", r#"{"model":"global/default","small_model":"global/small","agent":{"title":{"model":"global/title","hidden":true},"compaction":{"model":"global/compact"}}}"#)
+            .output().unwrap();
+        std::fs::remove_dir_all(script.parent().unwrap()).unwrap();
+        assert!(
+            output.status.success(),
+            "{}\n{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+
+    #[tokio::test]
+    async fn one_shot_without_a_model_fails_before_binary_resolution() {
+        for model in [None, Some(""), Some(" \t")] {
+            let error = OpenCode
+                .one_shot(OneShot {
+                    model,
+                    ..super::super::title::title_request("hello")
+                })
+                .await
+                .unwrap_err();
+            assert!(error.to_string().contains("Select an OpenCode model"));
+        }
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn v2_invalid_model_fails_before_launch() {
+        let path = sh_script("unused", "#!/bin/sh\nexit 99\n");
+        let mut binary = crate::local::opencode::resolve_binary_at(path.clone())
+            .await
+            .unwrap();
+        binary.protocol = crate::local::opencode::Protocol::V2;
+        std::fs::remove_dir_all(path.parent().unwrap()).unwrap();
+        for model in [
+            None,
+            Some(""),
+            Some(" "),
+            Some("bare"),
+            Some("/model"),
+            Some("provider/"),
+            Some(" /model"),
+        ] {
+            let error = v2::generate(
+                binary.clone(),
+                model.map(str::to_owned),
+                "hello".into(),
+                Duration::from_secs(1),
+            )
+            .await
+            .unwrap_err();
+            assert!(error.to_string().contains("model"), "{error}");
+            assert!(!error.to_string().contains("No such file"), "{error}");
+        }
+    }
+
+    #[test]
+    fn detection_lists_cloud_models_without_generating() {
+        const CHILD: &str = "ORX_TEST_OPENCODE_DETECTION";
+        if std::env::var_os(CHILD).is_some() {
+            let runtime = tokio::runtime::Runtime::new().unwrap();
+            let info = runtime.block_on(OpenCode.detect()).unwrap();
+            assert!(info.installed && info.authenticated && info.agent_ready);
+            assert!(info
+                .models
+                .iter()
+                .any(|model| model.id == "openrouter/paid"));
+            let calls = std::fs::read_to_string(std::env::var_os("ORX_TEST_OPENCODE_LOG").unwrap())
+                .unwrap();
+            assert!(calls.lines().any(|line| line.starts_with("models")));
+            assert!(
+                !calls.lines().any(|line| line.starts_with("run")),
+                "detection generated text: {calls}"
+            );
+            return;
+        }
+
+        // A subprocess isolates HOME, credentials and detection caches from
+        // other tests. The CLI fixture records commands; it never calls a model.
+        let fixture =
+            crate::local::git::TemporaryDirectory::new("orx-detect-no-generation").unwrap();
+        let root = fixture.path();
+        let bin = root.join("bin");
+        std::fs::create_dir_all(&bin).unwrap();
+        let data = root.join("data");
+        std::fs::create_dir_all(data.join("opencode")).unwrap();
+        std::fs::write(
+            data.join("opencode/auth.json"),
+            r#"{"openrouter":{"type":"api","key":"fixture-only"}}"#,
+        )
+        .unwrap();
+        #[cfg(windows)]
+        let cli = bin.join("opencode.cmd");
+        #[cfg(not(windows))]
+        let cli = bin.join("opencode");
+        #[cfg(windows)]
+        let script = "@echo off\r\necho %*>>\"%ORX_TEST_OPENCODE_LOG%\"\r\nif \"%1\"==\"--version\" (echo 1.18.35& exit /b 0)\r\nif \"%1\"==\"models\" (echo openrouter/paid& exit /b 0)\r\nexit /b 0\r\n";
+        #[cfg(not(windows))]
+        let script = "#!/bin/sh\nprintf '%s\\n' \"$*\" >> \"$ORX_TEST_OPENCODE_LOG\"\ncase \"$1\" in\n--version) echo 1.18.35;;\nmodels) echo openrouter/paid;;\nesac\n";
+        std::fs::write(&cli, script).unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&cli, std::fs::Permissions::from_mode(0o700)).unwrap();
+        }
+        let mut child = std::process::Command::new(std::env::current_exe().unwrap());
+        child.env_clear();
+        for key in ["SystemRoot", "COMSPEC", "TEMP", "TMP"] {
+            if let Some(value) = std::env::var_os(key) {
+                child.env(key, value);
+            }
+        }
+        let output = child
+            .args([
+                "--exact",
+                "local::harness::opencode::tests::detection_lists_cloud_models_without_generating",
+                "--nocapture",
+            ])
+            .env(CHILD, "1")
+            .env("ORX_TEST_OPENCODE_LOG", root.join("calls.log"))
+            .env("HOME", root)
+            .env("USERPROFILE", root)
+            .env("PATH", &bin)
+            .env("PATHEXT", ".CMD;.EXE")
+            .env("XDG_DATA_HOME", &data)
+            .env("XDG_CONFIG_HOME", root.join("config"))
+            .env("XDG_CACHE_HOME", root.join("cache"))
+            .env("ORX_DATA_DIR", root.join("orx"))
+            .env("OPENCODE_CONFIG_CONTENT", "{}")
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{}\n{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+
     #[tokio::test]
     async fn local_models_require_an_enabled_loopback_server_and_matching_model() {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -2807,22 +2897,6 @@ opencode/unknown
             &json!({"info":{"time":{"created":99}}}),
             100
         ));
-    }
-
-    #[test]
-    fn auth_rejections_are_recognized_but_other_failures_are_not() {
-        assert!(is_auth_rejection(
-            "Error: API key not valid. Please pass a valid API key."
-        ));
-        assert!(is_auth_rejection("Incorrect API key provided: sk-abc"));
-        assert!(is_auth_rejection("{\"type\":\"authentication_error\"}"));
-        assert!(is_auth_rejection("HTTP 401 Unauthorized"));
-        assert!(!is_auth_rejection("Error: fetch failed (ENOTFOUND)"));
-        assert!(!is_auth_rejection(
-            "    at plugin.ts:401:12\ncontext: 1401 tokens"
-        ));
-        assert!(!is_auth_rejection("ok"));
-        assert!(!is_auth_rejection("model not found: google/nope"));
     }
 
     #[test]
