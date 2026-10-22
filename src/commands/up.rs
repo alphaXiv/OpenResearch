@@ -2100,7 +2100,20 @@ async fn delete_project_inner(state: AppState, id: String, query: DeleteProjectQ
     // Refuse before anything is deleted; remove only once the rows are gone.
     let artifacts =
         local::files::plan_project_artifact_cleanup(&project, query.delete_artifacts, &projects)?;
+    let session_ids = sessions
+        .iter()
+        .map(|session| session.id.clone())
+        .collect::<Vec<_>>();
+    // Other deletions fail fast on this lock, so it covers only the purge and the row delete.
+    let native_deletion = if session_ids.is_empty() {
+        None
+    } else {
+        let lock = store.lock_native_deletion()?;
+        local::chat::ChatHost::delete_native_sessions(&session_ids).await?;
+        Some(lock)
+    };
     store.delete_local_project(&id)?;
+    drop(native_deletion);
     for session in &sessions {
         state.chat.claude.forget_session(&session.id).await;
         local::chat::cleanup_session_transcript_artifacts(&session.id);
@@ -8039,7 +8052,11 @@ async fn open_side_chat(State(state): State<AppState>, Path(id): Path<String>) -
 
 async fn delete_chat_session(State(state): State<AppState>, Path(id): Path<String>) -> ApiResult {
     reject_if_moving(&state)?;
-    state.chat.delete_session(&id).await?;
+    // Detached so a canceled request cannot stop between the native purge and the row delete.
+    let chat = state.chat.clone();
+    tokio::spawn(async move { chat.delete_session(&id).await })
+        .await
+        .map_err(|error| anyhow!("chat deletion task failed: {error}"))??;
     Ok(Json(json!({ "ok": true })))
 }
 
