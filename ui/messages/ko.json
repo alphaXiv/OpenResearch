@@ -1146,7 +1146,7 @@
   "a11y_run_id": "실행 {id}",
   "a11y_open_branch_github": "GitHub에서 {branch} 열기",
   "settings_updates_disabled_by_env": " ORX_NO_UPDATE_CHECK가 이 환경의 업데이트를 비활성화하여 이 설정이 적용되지 않습니다.",
-  "skills_description": "채팅에서 /name으로 스킬을 호출하세요. 코딩 에이전트의 스킬은 연구 관련성을 확인한 후 가져옵니다. 직접 포함하려면 스킬을 업로드하세요. 또는 OpenResearch 에이전트에게 재사용 가능한 스킬 생성 및 추가를 요청하세요.",
+  "skills_description": "채팅에서 /name으로 스킬을 호출하세요. 코딩 에이전트의 스킬이 자동으로 표시됩니다. 직접 포함하려면 스킬을 업로드하세요. 또는 OpenResearch 에이전트에게 재사용 가능한 스킬 생성 및 추가를 요청하세요.",
   "remote_ssh_host": "SSH: {host}",
   "remote_dialog_title": "원격 연결",
   "remote_dialog_description": "설정된 SSH 호스트를 선택하세요.",

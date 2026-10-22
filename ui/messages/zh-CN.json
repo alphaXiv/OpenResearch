@@ -1140,7 +1140,7 @@
   "a11y_run_id": "运行 {id}",
   "a11y_open_branch_github": "在 GitHub 上打开 {branch}",
   "settings_updates_disabled_by_env": " 此环境已通过 ORX_NO_UPDATE_CHECK 关闭更新，因此此设置不会生效。",
-  "skills_description": "在聊天中使用 /name 调用技能。来自编程代理的技能会先经过研究相关性筛选，再导入。您也可以自行上传技能，或让 OpenResearch 代理为您创建并添加可复用技能。",
+  "skills_description": "在聊天中使用 /name 调用技能。编程代理的技能会自动显示。您也可以自行上传技能，或让 OpenResearch 代理为您创建并添加可复用技能。",
   "remote_ssh_host": "SSH：{host}",
   "remote_dialog_title": "连接到远程主机",
   "remote_dialog_description": "选择已配置的 SSH 主机。",

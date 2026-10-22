@@ -1146,7 +1146,7 @@
   "a11y_run_id": "実行 {id}",
   "a11y_open_branch_github": "GitHub で {branch} を開く",
   "settings_updates_disabled_by_env": " この環境では ORX_NO_UPDATE_CHECK により更新が無効になっているため、この設定は適用されません。",
-  "skills_description": "チャットで /name を使ってスキルを呼び出せます。コーディングエージェントのスキルは研究との関連性を確認してから取り込みます。自分で追加するにはスキルをアップロードしてください。OpenResearch エージェントに再利用可能なスキルの作成と追加を依頼することもできます。",
+  "skills_description": "チャットで /name を使ってスキルを呼び出せます。コーディングエージェントのスキルは自動的に表示されます。自分で追加するにはスキルをアップロードしてください。OpenResearch エージェントに再利用可能なスキルの作成と追加を依頼することもできます。",
   "remote_ssh_host": "SSH: {host}",
   "remote_dialog_title": "リモートに接続",
   "remote_dialog_description": "設定済みの SSH ホストを選択してください。",
