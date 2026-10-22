@@ -789,6 +789,22 @@ pub async fn submit(args: &crate::ExpRunArgs) -> Result<StoredRun> {
     let project = store
         .get_local_project(&experiment.project_id)?
         .ok_or_else(|| anyhow!("Local project {} not found.", experiment.project_id))?;
+    let command = Some(experiment.run_command.clone())
+        .filter(|value| !value.trim().is_empty())
+        .or_else(|| {
+            project
+                .run_command
+                .clone()
+                .filter(|value| !value.trim().is_empty())
+        })
+        .unwrap_or_default();
+    let namespace = crate::local::localrun::mount_namespace(backend_id)?;
+    crate::local::localrun::check_mount_namespace(
+        &store,
+        &project.id,
+        &command,
+        namespace.as_deref(),
+    )?;
     let preflight = backend.preflight(args).await?;
     if !preflight.ready {
         return Err(anyhow!(
@@ -801,22 +817,13 @@ pub async fn submit(args: &crate::ExpRunArgs) -> Result<StoredRun> {
     }
     let source = backend.stage_source(&project, &experiment).await?;
     let run_id = uuid::Uuid::new_v4().to_string();
-    let command = Some(experiment.run_command.clone())
-        .filter(|value| !value.trim().is_empty())
-        .or_else(|| {
-            project
-                .run_command
-                .clone()
-                .filter(|value| !value.trim().is_empty())
-        })
-        .unwrap_or_default();
     let mut descriptor = BackendDescriptor {
         ssh_container: None,
         monitoring_error: None,
         cancellation_accepted: false,
         rental_lease: None,
         kind: format!("{}_job", backend_id),
-        namespace: None,
+        namespace,
         job_id: None,
         flavor: args.flavor.clone(),
         image: args.image.clone(),
@@ -876,6 +883,7 @@ pub async fn submit(args: &crate::ExpRunArgs) -> Result<StoredRun> {
         args.force,
         identity.as_ref(),
         report.as_ref(),
+        &crate::store::data_dir().join("submission-locks"),
     )?;
     let pending_backend_json = descriptor.to_json();
     match backend.submit(args, source, run_id.clone()).await {
@@ -972,9 +980,9 @@ fn reserve_run(
     force: bool,
     identity: Option<&crate::store::InvocationIdentity>,
     report: Option<&(String, serde_json::Value)>,
+    dir: &std::path::Path,
 ) -> Result<()> {
-    let dir = crate::store::data_dir().join("submission-locks");
-    std::fs::create_dir_all(&dir)?;
+    std::fs::create_dir_all(dir)?;
     let file = std::fs::OpenOptions::new()
         .create(true)
         .read(true)
@@ -999,7 +1007,16 @@ fn reserve_run(
             ));
         }
     }
-    let tx = store.begin()?;
+    let tx = store.begin_immediate()?;
+    let descriptor = BackendDescriptor::parse(&pending.backend_json)?;
+    if descriptor.kind == "local_job" {
+        crate::local::localrun::check_mount_namespace(
+            store,
+            &pending.project_id,
+            &pending.command,
+            descriptor.namespace.as_deref(),
+        )?;
+    }
     store.reserve_run_telemetry(&pending.id, identity, report)?;
     store.upsert_run(pending)?;
     tx.commit()?;
@@ -1069,6 +1086,79 @@ fn not_ready(detail: impl Into<String>) -> Preflight {
 #[cfg(test)]
 pub(crate) mod tests {
     use super::*;
+
+    #[test]
+    fn different_namespaces_cannot_reserve_concurrent_runs_across_experiments() {
+        let root = std::env::temp_dir().join(format!("orx-reservation-{}", uuid::Uuid::new_v4()));
+        let stores = [
+            Store::open_at(root.clone()).unwrap(),
+            Store::open_at(root.clone()).unwrap(),
+        ];
+        let barrier = std::sync::Arc::new(std::sync::Barrier::new(2));
+        let handles: Vec<_> = stores
+            .into_iter()
+            .enumerate()
+            .map(|(index, store)| {
+                let barrier = barrier.clone();
+                let locks = root.join("submission-locks");
+                std::thread::spawn(move || {
+                    let pending = StoredRun {
+                        id: format!("run-{index}"),
+                        experiment_id: format!("exp-{index}"),
+                        project_id: "project".into(),
+                        status: "starting".into(),
+                        backend_json: serde_json::json!({
+                            "kind": "local_job",
+                            "namespace": format!("boot/mnt:[{index}]")
+                        })
+                        .to_string(),
+                        command: "train".into(),
+                        created_at: 1,
+                        updated_at: 1,
+                        ended_at: None,
+                        exit_code: None,
+                        commit_sha: None,
+                        result_markdown: None,
+                        cancel_requested: false,
+                        cancel_reason: None,
+                        chat_session_id: None,
+                    };
+                    barrier.wait();
+                    let result = reserve_run(&store, &pending, false, None, None, &locks);
+                    (pending.id, result)
+                })
+            })
+            .collect();
+        let results: Vec<_> = handles
+            .into_iter()
+            .map(|handle| handle.join().unwrap())
+            .collect();
+        assert_eq!(
+            results.iter().filter(|(_, result)| result.is_ok()).count(),
+            1
+        );
+        let (rejected_id, error) = results.iter().find(|(_, result)| result.is_err()).unwrap();
+        assert!(error
+            .as_ref()
+            .unwrap_err()
+            .to_string()
+            .contains("mount namespace mismatch"));
+        let store = Store::open_at(root.clone()).unwrap();
+        assert_eq!(store.list_runs_by_project("project").unwrap().len(), 1);
+        assert!(store.get_run(rejected_id).unwrap().is_none());
+        let conn = rusqlite::Connection::open(root.join("orx.db")).unwrap();
+        let (total, rejected): (i64, i64) = conn
+            .query_row(
+                "SELECT count(*), count(CASE WHEN run_id = ?1 THEN 1 END) FROM run_telemetry",
+                [rejected_id],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!((total, rejected), (1, 0));
+        drop(conn);
+        drop(store);
+        std::fs::remove_dir_all(root).unwrap();
+    }
 
     #[test]
     fn run_reports_name_the_native_invoker_or_an_explicit_exception() {

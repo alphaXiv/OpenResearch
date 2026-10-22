@@ -12,6 +12,63 @@ use crate::error::{anyhow, Result};
 use crate::jobs::{localbox, BackendDescriptor};
 use crate::store::{now_ms, Store, StoredRun};
 
+pub(crate) fn mount_namespace(backend: &str) -> Result<Option<String>> {
+    if backend != "local" {
+        return Ok(None);
+    }
+    #[cfg(target_os = "linux")]
+    {
+        let boot = std::fs::read_to_string("/proc/sys/kernel/random/boot_id")
+            .map_err(|error| anyhow!("Could not identify the local run's Linux boot: {error}"))?;
+        let namespace = std::fs::read_link("/proc/self/ns/mnt").map_err(|error| {
+            anyhow!("Could not identify the local run's mount namespace: {error}")
+        })?;
+        Ok(Some(format!("{}/{}", boot.trim(), namespace.display())))
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        Ok(None)
+    }
+}
+
+pub(crate) fn check_mount_namespace(
+    store: &Store,
+    project_id: &str,
+    command: &str,
+    namespace: Option<&str>,
+) -> Result<()> {
+    let Some((boot, current)) = namespace.and_then(|namespace| namespace.split_once('/')) else {
+        return Ok(());
+    };
+    for run in store.list_runs_by_project(project_id)? {
+        if !matches!(run.status.as_str(), "starting" | "running" | "done") || run.command != command
+        {
+            continue;
+        }
+        let descriptor = BackendDescriptor::parse(&run.backend_json)?;
+        if descriptor.kind != "local_job" {
+            continue;
+        }
+        let Some((previous_boot, previous)) = descriptor
+            .namespace
+            .as_deref()
+            .and_then(|namespace| namespace.split_once('/'))
+        else {
+            continue;
+        };
+        if previous_boot == boot && previous != current {
+            return Err(anyhow!(
+                "Local mount namespace mismatch: this session uses {current}, but run {} \
+                 uses {previous} for the same project and command. Data, Conda and GPU mounts \
+                 may not be visible here. Launch from the same mounted environment as that run; \
+                 no run was created.",
+                run.id
+            ));
+        }
+    }
+    Ok(())
+}
+
 /// Submit a local controller and print its run directory.
 pub async fn launch_local_run(args: &crate::ExpRunArgs) -> Result<()> {
     let run = crate::compute::submit(args).await?;
@@ -118,6 +175,7 @@ async fn submit_controller_run(
         secret_env.insert(crate::jobs::tinker::API_KEY_ENV.to_string(), key);
     }
 
+    let namespace = mount_namespace(backend)?;
     let dir = localbox::run_job(&localbox::LocalJobSpec {
         run_id: run_id.clone(),
         script,
@@ -131,7 +189,7 @@ async fn submit_controller_run(
         cancellation_accepted: false,
         rental_lease: None,
         kind: kind.to_string(),
-        namespace: None,
+        namespace,
         job_id: Some(dir.to_string_lossy().into_owned()),
         flavor: None,
         image: None,
@@ -177,4 +235,138 @@ async fn submit_controller_run(
 
     spawn_detached_supervise(&run_id)?;
     Ok(run)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn namespace_preflight_rejects_only_comparable_local_runs() {
+        let dir = std::env::temp_dir().join(format!("orx-namespace-{}", uuid::Uuid::new_v4()));
+        let store = Store::open_at(dir.clone()).unwrap();
+        for (index, (kind, status, namespace, command, blocked)) in [
+            (
+                "local_job",
+                "starting",
+                Some("boot/mnt:[1]"),
+                "source /data/conda.sh",
+                true,
+            ),
+            (
+                "local_job",
+                "running",
+                Some("boot/mnt:[1]"),
+                "source /data/conda.sh",
+                true,
+            ),
+            (
+                "local_job",
+                "done",
+                Some("boot/mnt:[1]"),
+                "source /data/conda.sh",
+                true,
+            ),
+            (
+                "local_job",
+                "done",
+                Some("boot/mnt:[2]"),
+                "source /data/conda.sh",
+                false,
+            ),
+            (
+                "local_job",
+                "done",
+                Some("old-boot/mnt:[1]"),
+                "source /data/conda.sh",
+                false,
+            ),
+            ("local_job", "done", None, "source /data/conda.sh", false),
+            (
+                "local_job",
+                "failed",
+                Some("boot/mnt:[1]"),
+                "source /data/conda.sh",
+                false,
+            ),
+            (
+                "local_job",
+                "cancelled",
+                Some("boot/mnt:[1]"),
+                "source /data/conda.sh",
+                false,
+            ),
+            (
+                "ssh_job",
+                "done",
+                Some("boot/mnt:[1]"),
+                "source /data/conda.sh",
+                false,
+            ),
+            (
+                "local_job",
+                "done",
+                Some("boot/mnt:[1]"),
+                "new command",
+                false,
+            ),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let project_id = format!("project-{index}");
+            let run = StoredRun {
+                id: format!("run-{index}"),
+                experiment_id: "other-experiment".into(),
+                project_id: project_id.clone(),
+                status: status.into(),
+                backend_json: serde_json::json!({"kind": kind, "namespace": namespace}).to_string(),
+                command: command.into(),
+                created_at: 1,
+                updated_at: 1,
+                ended_at: None,
+                exit_code: None,
+                commit_sha: None,
+                result_markdown: None,
+                cancel_requested: false,
+                cancel_reason: None,
+                chat_session_id: None,
+            };
+            store.upsert_run(&run).unwrap();
+            let result = check_mount_namespace(
+                &store,
+                &project_id,
+                "source /data/conda.sh",
+                Some("boot/mnt:[2]"),
+            );
+            assert_eq!(result.is_err(), blocked, "case {index}: {result:?}");
+            if let Err(error) = result {
+                let message = error.to_string();
+                assert!(message.contains(&run.id));
+                assert!(message.contains("no run was created"));
+            }
+            assert!(check_mount_namespace(&store, &project_id, command, None).is_ok());
+            assert_eq!(store.list_runs_by_project(&project_id).unwrap().len(), 1);
+        }
+        assert!(check_mount_namespace(
+            &store,
+            "unrelated-project",
+            "source /data/conda.sh",
+            Some("boot/mnt:[2]"),
+        )
+        .is_ok());
+        drop(store);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn only_linux_local_runs_record_a_mount_namespace() {
+        assert!(mount_namespace("ssh").unwrap().is_none());
+        assert!(mount_namespace("tinker").unwrap().is_none());
+        let namespace = mount_namespace("local").unwrap();
+        #[cfg(target_os = "linux")]
+        assert!(namespace.unwrap().contains("/mnt:["));
+        #[cfg(not(target_os = "linux"))]
+        assert!(namespace.is_none());
+    }
 }

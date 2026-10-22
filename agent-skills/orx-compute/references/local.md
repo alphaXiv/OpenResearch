@@ -15,4 +15,10 @@ orx exp run <expId> --backend local
   executing the fixed command. Never train directly from the worktree.
 - Runs live under `<orx data dir>/local-runs/<runId>/`. Cancellation terminates
   the process group.
+- On Linux, an active or successful local run establishes the mount namespace
+  for that project's fixed command for this boot. A different namespace is
+  rejected before creating a run; launch from the same mounted environment
+  rather than repairing the command. Legacy runs without namespace metadata
+  cannot establish this check. Namespace identity does not validate mounts
+  within a namespace or discover missing dependencies on the first launch.
 - A detached `orx supervise` process watches the run; do not kill it.
