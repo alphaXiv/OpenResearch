@@ -2,6 +2,7 @@ import { m } from "../paraglide/messages.js";
 import { getLocale } from "../paraglide/runtime.js";
 import {
   CalendarDays,
+  ChartLine,
   Clock3,
   FolderTree,
   GitCommitHorizontal,
@@ -14,10 +15,12 @@ import {
   fmtDuration,
   runDisplayStatus,
   timeAgo,
+  trackioRunUrl,
   type Experiment,
   type Project,
   type Run,
 } from "../api";
+import { useTrackioRuns } from "../queries/settings";
 import { tabOpenGestureHandlers, type TabOpenIntent } from "../tabPreview";
 import { BackendBadge } from "./BackendLogos";
 import { BranchPill } from "./BranchPill";
@@ -60,6 +63,7 @@ export function ExperimentOverview({
   project,
   runs,
   onOpenLogs,
+  onOpenTrackio,
   onOpenCode,
   onOpenDiff,
 }: {
@@ -70,6 +74,7 @@ export function ExperimentOverview({
   project: Project;
   runs: Run[];
   onOpenLogs: (runId: string, intent: TabOpenIntent) => void;
+  onOpenTrackio: (runId: string, intent: TabOpenIntent) => void;
   onOpenCode: (intent: TabOpenIntent) => void;
   onOpenDiff: (intent: TabOpenIntent) => void;
 }) {
@@ -79,6 +84,8 @@ export function ExperimentOverview({
     (run) => run.status === "running" || run.status === "starting",
   );
   const [now, setNow] = useState(() => Date.now());
+  const trackio = useTrackioRuns(experiment.projectId, hasLiveRun).data;
+  const hasTrackio = latestRun !== null && trackioRunUrl(trackio, latestRun.id) !== null;
 
   useEffect(() => {
     if (!hasLiveRun) return;
@@ -107,6 +114,17 @@ export function ExperimentOverview({
             >
               <Terminal size={15} />
               {m.experiment_overview_logs()}
+            </Button>
+          )}
+          {latestRun && hasTrackio && (
+            <Button
+              title={m.a11y_trackio_charts()}
+              {...tabOpenGestureHandlers<HTMLButtonElement>((intent) =>
+                onOpenTrackio(latestRun.id, intent),
+              )}
+            >
+              <ChartLine size={15} />
+              {m.experiment_overview_visualize()}
             </Button>
           )}
           <Button
