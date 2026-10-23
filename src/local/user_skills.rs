@@ -484,6 +484,7 @@ pub struct SkillDiscovery {
     pub agent: String,
     pub harness: String,
     pub origin: String,
+    #[serde(serialize_with = "serialize_diagnostic_path")]
     pub path: PathBuf,
     pub status: SkillRootStatus,
     pub accepted: usize,
@@ -500,8 +501,16 @@ pub enum SkillRootStatus {
 
 #[derive(Debug, Serialize)]
 pub struct SkippedSkill {
+    #[serde(serialize_with = "serialize_diagnostic_path")]
     pub path: PathBuf,
     pub reason: String,
+}
+
+fn serialize_diagnostic_path<S: serde::Serializer>(
+    path: &Path,
+    serializer: S,
+) -> std::result::Result<S::Ok, S::Error> {
+    serializer.serialize_str(&path.to_string_lossy())
 }
 
 impl SkillDiscovery {
@@ -1332,6 +1341,29 @@ mod tests {
             w.finish().unwrap();
         }
         buf
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn diagnostic_paths_with_non_utf8_names_serialize() {
+        use std::os::unix::ffi::OsStringExt;
+        let root = temp_root();
+        let unusual = root.join(std::ffi::OsString::from_vec(vec![b'x', 0xff]));
+        fs::create_dir_all(root.join("valid")).unwrap();
+        fs::write(root.join("valid/SKILL.md"), skill_md("valid")).unwrap();
+        let mut native = Vec::new();
+        let mut report = collect_mirrored(&root, "Cursor", "cursor", false, &mut native);
+        assert_eq!(native.len(), 1);
+        // APFS cannot create this filename, but Linux scans can return it.
+        report.skip(unusual.clone(), "no SKILL.md");
+        let json = serde_json::to_value(&report).unwrap();
+        assert_eq!(
+            json["skipped"][0]["path"],
+            unusual.to_string_lossy().as_ref()
+        );
+        report.path = unusual;
+        assert!(serde_json::to_value(&report).is_ok());
+        fs::remove_dir_all(root).unwrap();
     }
 
     #[cfg(unix)]

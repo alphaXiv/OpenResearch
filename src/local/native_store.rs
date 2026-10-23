@@ -776,10 +776,17 @@ fn prepare_cursor_in(root: &Path, legacy: &Path, skills: &Path) -> Result<()> {
         ]);
     }
     if root.join("skills") != skills {
-        if root == legacy && skills.exists() {
-            match std::fs::symlink_metadata(root.join("skills")) {
-                Ok(metadata) if !metadata.file_type().is_symlink() => {
-                    return Err(anyhow!("Cannot link native Cursor skills: {} already exists; its contents were left untouched", root.join("skills").display()));
+        if root == legacy {
+            let destination = root.join("skills");
+            match std::fs::symlink_metadata(&destination) {
+                Ok(_)
+                    if !skills.exists()
+                        || same_file::is_same_file(&destination, skills).unwrap_or(false) =>
+                {
+                    return Ok(())
+                }
+                Ok(_) => {
+                    return Err(anyhow!("Cannot link native Cursor skills: {} already exists; its contents were left untouched", destination.display()));
                 }
                 Err(error) if error.kind() != std::io::ErrorKind::NotFound => {
                     return Err(error.into())
@@ -1016,6 +1023,27 @@ fn create_junction(source: &Path, destination: &Path) -> std::io::Result<()> {
 #[cfg(test)]
 mod hard_link_tests {
     use super::*;
+
+    #[test]
+    fn cursor_preserves_custom_legacy_skill_links() {
+        let temp = std::env::temp_dir().join(format!("orx-cursor-link-{}", uuid::Uuid::new_v4()));
+        let legacy = temp.join("legacy");
+        let custom = temp.join("custom");
+        let native = temp.join("native/skills");
+        std::fs::create_dir_all(&legacy).unwrap();
+        std::fs::create_dir_all(&custom).unwrap();
+        std::fs::create_dir_all(&native).unwrap();
+        std::fs::write(custom.join("keep.txt"), "custom skill").unwrap();
+        create_symlink(&custom, &legacy.join("skills")).unwrap();
+        assert!(prepare_cursor_in(&legacy, &legacy, &native).is_err());
+        assert!(same_file::is_same_file(legacy.join("skills"), &custom).unwrap());
+        assert_eq!(
+            std::fs::read_to_string(legacy.join("skills/keep.txt")).unwrap(),
+            "custom skill"
+        );
+        prepare_cursor_in(&legacy, &legacy, &custom).unwrap();
+        std::fs::remove_dir_all(temp).unwrap();
+    }
 
     #[test]
     fn cursor_does_not_move_existing_legacy_skill_directories() {
