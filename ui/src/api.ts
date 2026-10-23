@@ -396,6 +396,8 @@ export const listExperiments = (projectId: string, signal?: AbortSignal) =>
     (r) => r.experiments,
   );
 
+export const deleteExperiment = (id: string) =>
+  writeResponse(`/api/experiments/${id}`, { method: "DELETE" }).then((r) => json<{ ok: boolean; branchCommit: string | null }>(r));
 export const setExperimentArchived = (id: string, direction: "ancestors" | "descendants" | "only" | "region" | "taskRegion", archived: boolean) =>
   patch<{ ids: string[] }>(`/api/experiments/${id}/archive`, { direction, archived });
 

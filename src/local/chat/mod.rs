@@ -6743,7 +6743,7 @@ impl ChatHost {
         let native_deletion = store.lock_native_deletion()?;
         let session = store.get_chat_session(session_id)?;
         let worktree_owner = store.chat_worktree_owner(session_id)?;
-        Self::delete_native_sessions(&[session_id.to_string()]).await?;
+        Self::purge_native_history(&[session_id.to_string()]).await?;
         store.delete_chat_session(session_id)?;
         drop(native_deletion);
         self.claude.forget_session(session_id).await;
@@ -6760,17 +6760,25 @@ impl ChatHost {
         Ok(())
     }
 
-    pub async fn delete_native_sessions(session_ids: &[String]) -> Result<()> {
+    pub async fn purge_native_history(session_ids: &[String]) -> Result<()> {
         let session_ids = session_ids.to_vec();
         tokio::task::spawn_blocking(move || {
-            Self::delete_native_sessions_blocking(&Store::open()?, &session_ids)
+            Self::purge_native_history_blocking(&Store::open()?, &session_ids)
         })
         .await?
     }
 
-    pub fn delete_native_sessions_blocking(store: &Store, session_ids: &[String]) -> Result<()> {
-        let (ids, retained) = store.opencode_sessions_for_deletion(session_ids)?;
-        crate::local::native_store::delete_opencode_sessions(&ids, &retained)
+    pub fn purge_native_history_blocking(store: &Store, session_ids: &[String]) -> Result<()> {
+        let (ids, retained) = store.native_sessions_for_deletion(session_ids, &["opencode"])?;
+        crate::local::native_store::delete_opencode_sessions(&ids, &retained)?;
+        // ACP agents keep history in homes orx does not own, so it is left alone.
+        // Survivors span every harness: a Codex sub-agent may be recorded by any other chat.
+        let (ids, _) =
+            store.native_sessions_for_deletion(session_ids, &["claude-code", "codex", "cursor"])?;
+        crate::local::native_store::delete_isolated_sessions(
+            &ids,
+            &store.native_ids_outside(session_ids)?,
+        )
     }
 }
 

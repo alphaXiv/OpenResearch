@@ -1291,6 +1291,8 @@
   "tree_archive_manage_experiment": "{name} प्रबंधित करें",
   "tree_archive_manage": "प्रबंधित करें",
   "tree_archive_only": "इस प्रयोग को संग्रहीत करें",
+  "tree_delete_experiment": "स्थायी रूप से हटाएँ…",
+  "tree_delete_experiment_confirm": "“{name}” को स्थायी रूप से हटाएँ?\n\nइसके रन, उनके लॉग और फ़ाइलें, और इसकी ब्रांच हटा दी जाएँगी। इसे पूर्ववत नहीं किया जा सकता।",
   "tree_archive_above": "पूर्वजों को संग्रहीत करें",
   "tree_archive_down": "वंशजों को संग्रहीत करें",
   "tree_restore_only": "इस प्रयोग को पुनर्स्थापित करें",

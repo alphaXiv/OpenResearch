@@ -4,20 +4,24 @@ on:
   push:
     branches: [main]
   pull_request:
-  # Run the suite against a branch before it has a PR — the Windows job below
-  # is the only Windows machine most changes will meet.
   workflow_dispatch:
   workflow_call:
     inputs:
-      # Unused, but part of cargo-dist's calling convention: release.yml's
-      # generated `custom-ci` job always passes it.
+      # Required by cargo-dist's custom-ci calling convention.
       plan:
         required: true
         type: string
+      source-sha:
+        required: false
+        type: string
+        default: ''
+      release:
+        required: false
+        type: boolean
+        default: false
 
-# Cancel superseded PR/push checks without cancelling independent releases.
 concurrency:
-  group: ci-${{ github.workflow }}-${{ github.event_name == 'workflow_dispatch' && github.run_id || github.ref }}
+  group: ci-${{ github.workflow }}-${{ inputs.release && format('release-{0}', github.run_id) || (github.event_name == 'workflow_dispatch' && github.run_id || github.ref) }}
   cancel-in-progress: true
 
 permissions:
@@ -27,50 +31,59 @@ env:
   CARGO_TERM_COLOR: always
 
 jobs:
-  check:
-    name: fmt, clippy, test
+  changes:
+    name: Select checks
     runs-on: ubuntu-24.04
+    outputs:
+      frontend: ${{ steps.changes.outputs.frontend }}
+      rust: ${{ steps.changes.outputs.rust }}
+      windows: ${{ steps.changes.outputs.windows }}
+      linux: ${{ steps.changes.outputs.linux }}
+      macos: ${{ steps.changes.outputs.macos }}
+      dev_slot: ${{ steps.changes.outputs.dev_slot }}
+      chart: ${{ steps.changes.outputs.chart }}
+      release_notes: ${{ steps.changes.outputs.release_notes }}
+      javascript: ${{ steps.changes.outputs.javascript }}
     steps:
       - uses: actions/checkout@v4
-
+        with:
+          ref: ${{ inputs.source-sha || github.sha }}
+          fetch-depth: 1
       - uses: actions/setup-node@v4
         with:
           node-version: 22
+      - name: CI selection and release safety tests
+        run: node --test scripts/ci-changes.test.mjs scripts/ci-workflows.test.mjs
+      - name: Select checks for changed files
+        id: changes
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.before }}
+          HEAD_SHA: ${{ inputs.source-sha || github.sha }}
+          FORCE_ALL: ${{ github.event_name == 'workflow_dispatch' || inputs.release || inputs.plan != '' }}
+        run: node scripts/ci-changes.mjs
 
+  frontend:
+    name: Frontend
+    needs: changes
+    if: needs.changes.outputs.frontend == 'true'
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.source-sha || github.sha }}
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
       - name: Localization catalogs
         run: node ui/scripts/check-i18n.mjs
-
       - name: Style tokens
         run: node ui/scripts/check-styles.mjs
-
-      - name: Dev-slot helper tests
-        run: node --test scripts/dev-slot.test.mjs
-
-      - name: Interactive chart authoring tests
-        run: python3 scripts/test_orx_chart.py
-
-      - name: Release notes composition
-        run: python3 scripts/test_release_notes.py
-
       - uses: pnpm/action-setup@v4
         with:
           version: 10
-
       - name: Install UI dependencies
         working-directory: ui
         run: pnpm install --frozen-lockfile
-
-      - name: Generate localized messages
-        working-directory: ui
-        run: pnpm exec paraglide-js compile --silent --emit-ts-declarations
-
-      - name: UI typecheck
-        working-directory: ui
-        run: pnpm typecheck
-
-      - name: UI unit tests
-        run: node --test --experimental-strip-types ui/tests/*.test.mjs
-
       - name: Committed UI bundle matches source
         working-directory: ui
         run: |
@@ -81,157 +94,173 @@ jobs:
             echo "::error::ui/dist is stale; run pnpm build in ui/ and commit the result."
             exit 1
           fi
+      - name: UI typecheck
+        working-directory: ui
+        run: pnpm typecheck
+      - name: UI unit tests
+        run: node --test --experimental-strip-types ui/tests/*.test.mjs
 
+  helpers:
+    name: Helper tests
+    needs: changes
+    if: needs.changes.outputs.dev_slot == 'true' || needs.changes.outputs.chart == 'true' || needs.changes.outputs.release_notes == 'true' || needs.changes.outputs.javascript == 'true'
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.source-sha || github.sha }}
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: Dev-slot helper tests
+        if: needs.changes.outputs.dev_slot == 'true'
+        run: node --test scripts/dev-slot.test.mjs
+      - name: Interactive chart authoring tests
+        if: needs.changes.outputs.chart == 'true'
+        run: python3 scripts/test_orx_chart.py
+      - name: Embedded JavaScript tests
+        if: needs.changes.outputs.javascript == 'true'
+        run: node --test ui/tests/zcodeOauth.test.mjs ui/tests/macosEscape.test.mjs ui/tests/orxChart.test.mjs
+      - name: Release notes composition
+        if: needs.changes.outputs.release_notes == 'true'
+        run: python3 scripts/test_release_notes.py
+
+  rust:
+    name: Rust
+    needs: changes
+    if: needs.changes.outputs.rust == 'true'
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.source-sha || github.sha }}
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt, clippy
-
       - uses: Swatinem/rust-cache@v2
-
+        with:
+          shared-key: check # Preserve the former Rust job's cache namespace.
       - name: Format
         run: |
           cargo fmt --all --check
           cargo fmt --manifest-path windows/launcher/Cargo.toml --check
-
       - name: Clippy
-        run: cargo clippy --all-targets -- -D warnings
-
-      - name: Build
-        run: cargo build --locked
-
-      - name: Source builds cannot enable production telemetry
+        run: cargo clippy --all-targets --locked -- -D warnings
+      - name: Test
+        shell: bash
+        run: |
+          if [ "${{ github.event_name }}" = 'pull_request' ] && [ "${{ inputs.release }}" != 'true' ]; then
+            cargo test --locked -- --skip slurm_supervisor_survives_connection_and_accounting_loss --skip ssh_supervisor_survives_proxy_output_without_skipping_logs
+          else
+            cargo test --locked
+          fi
+      - name: Source builds disable production telemetry
+        shell: bash
+        run: test "$(target/debug/orx --no-telemetry version --build-channel)" = "development"
+      - name: Optimized source builds disable production telemetry
+        if: inputs.release && github.event_name != 'pull_request'
         shell: bash
         run: |
           set -euo pipefail
-          test "$(target/debug/orx --no-telemetry version --build-channel)" = "development"
           cargo build --release --locked
           test "$(target/release/orx --no-telemetry version --build-channel)" = "development"
 
-      - name: Test
-        run: cargo test --locked
-
-  # The Linux desktop app: a glibc build with the `desktop` feature, packaged as
-  # an AppImage on the oldest Ubuntu it supports and launched under a virtual
-  # display. The checks above cover the default, GTK-free build.
   linux-app:
-    name: linux app (${{ matrix.arch }})
+    name: linux app (${{ matrix.arch }}, ${{ matrix.mode }})
+    needs: changes
+    if: needs.changes.outputs.linux == 'true'
     strategy:
       fail-fast: false
       matrix:
-        include:
-          - arch: x86_64
-            runner: ubuntu-22.04
-          - arch: aarch64
-            runner: ubuntu-22.04-arm
-    runs-on: ${{ matrix.runner }}
+        include: ${{ fromJSON(github.event_name == 'pull_request' && !inputs.release && '[{"arch":"x86_64","mode":"all"},{"arch":"aarch64","mode":"lint"},{"arch":"aarch64","mode":"build"}]' || '[{"arch":"x86_64","mode":"all"},{"arch":"aarch64","mode":"all"}]') }}
+    runs-on: ${{ matrix.arch == 'aarch64' && 'ubuntu-22.04-arm' || 'ubuntu-22.04' }}
     steps:
       - uses: actions/checkout@v4
-
-      - name: Install WebKitGTK and packaging tools
+        with:
+          ref: ${{ inputs.source-sha || github.sha }}
+      - name: Install WebKitGTK
         run: |
           sudo apt-get update
-          sudo apt-get install -y libwebkit2gtk-4.1-dev libgtk-3-dev librsvg2-dev file patchelf xvfb xdotool
-
+          sudo apt-get install -y --no-install-recommends libwebkit2gtk-4.1-dev libgtk-3-dev
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
         with:
           components: clippy
-
       - uses: Swatinem/rust-cache@v2
-
+        with:
+          shared-key: linux-app
+          save-if: ${{ matrix.mode == 'all' }}
       - name: Clippy
+        if: matrix.mode != 'build'
         run: cargo clippy --all-targets --locked --features desktop -- -D warnings
-
+      - name: Build
+        if: github.event_name == 'pull_request' && !inputs.release && matrix.mode != 'lint'
+        run: cargo build --locked --features desktop
       - name: Test
+        if: github.event_name != 'pull_request' || inputs.release
         run: cargo test --locked --features desktop
 
-      - name: Build release
-        if: ${{ !inputs.plan }}
-        run: cargo build --release --locked --features desktop
-
-      - name: Package the AppImage
-        if: ${{ !inputs.plan }}
-        run: scripts/build-linux-appimage.sh target/release/orx app-dist
-
-      # Otherwise the host's WebKit would stand in for a broken bundled one.
-      - name: Remove WebKitGTK from the runner
-        if: ${{ !inputs.plan }}
-        run: sudo apt-get remove -y libwebkit2gtk-4.1-0 libjavascriptcoregtk-4.1-0
-
-      - name: Smoke-test the AppImage
-        if: ${{ !inputs.plan }}
-        run: scripts/smoke-test-linux-appimage.sh app-dist/OpenResearch-${{ matrix.arch }}.AppImage
-
-      - name: Upload the AppImage
-        if: ${{ !inputs.plan }}
-        uses: actions/upload-artifact@v4
-        with:
-          name: openresearch-linux-${{ matrix.arch }}-appimage
-          path: app-dist/OpenResearch-${{ matrix.arch }}.AppImage
-          if-no-files-found: error
-
-  # Only what differs by platform: the checks above are platform-independent,
-  # and ui/dist is committed, so no Node here.
   windows:
-    name: windows build, test
+    name: windows (${{ matrix.mode }})
+    needs: changes
+    if: needs.changes.outputs.windows == 'true'
+    strategy:
+      fail-fast: false
+      matrix:
+        mode: ${{ fromJSON(github.event_name == 'pull_request' && !inputs.release && '["lint", "build"]' || '["all"]') }}
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v4
-
+        with:
+          ref: ${{ inputs.source-sha || github.sha }}
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
         with:
-          components: clippy
-
+          components: clippy, rustfmt
       - uses: Swatinem/rust-cache@v2
-
+        with:
+          shared-key: windows
+          save-if: ${{ matrix.mode == 'all' }}
+          workspaces: |
+            . -> target
+            windows/launcher -> target
       - name: Clippy
-        run: cargo clippy --all-targets -- -D warnings
-
+        if: matrix.mode != 'build'
+        run: cargo clippy --all-targets --locked -- -D warnings
+      - name: Format app launcher
+        if: matrix.mode != 'build'
+        run: cargo fmt --manifest-path windows/launcher/Cargo.toml --check
       - name: Clippy (app launcher)
+        if: matrix.mode != 'build'
         run: cargo clippy --manifest-path windows/launcher/Cargo.toml --locked -- -D warnings
-
       - name: Build
+        if: matrix.mode == 'build'
         run: cargo build --locked
-
+      - name: Build app launcher
+        if: matrix.mode != 'lint'
+        run: cargo build --manifest-path windows/launcher/Cargo.toml --locked
       - name: Test
+        if: matrix.mode == 'all'
         run: cargo test --locked
 
-      # A debug orx.exe is slow enough to colour a tester's impression of the
-      # dashboard, so the artifact is the build they would actually be given.
-      - name: Build release
-        if: ${{ !inputs.plan }}
-        run: cargo build --release --locked
-
-      - name: Upload orx.exe
-        if: ${{ !inputs.plan }}
-        uses: actions/upload-artifact@v4
+  check:
+    name: fmt, clippy, test
+    if: always()
+    needs: [changes, frontend, helpers, rust, linux-app, windows]
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
         with:
-          name: orx-windows-x86_64
-          path: target/release/orx.exe
-          if-no-files-found: error
-
-      # The same installer a release attaches, around this run's orx.exe.
-      - name: Build the desktop app installer
-        if: ${{ !inputs.plan }}
-        shell: pwsh
-        run: |
-          cargo build --release --locked --manifest-path windows/launcher/Cargo.toml
-          if ($LASTEXITCODE) { exit $LASTEXITCODE }
-          New-Item -ItemType Directory -Force app-staging | Out-Null
-          Copy-Item windows/launcher/target/release/OpenResearch.exe, target/release/orx.exe app-staging
-          $version = (Select-String -Path Cargo.toml -Pattern '^version = "(.*)"' | Select-Object -First 1).Matches[0].Groups[1].Value
-          & "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe" "/DAppVersion=$version" "/DSourceDir=$PWD\app-staging" "/DOutputDir=$PWD\app-installer" windows\OpenResearch.iss
-          if ($LASTEXITCODE) { exit $LASTEXITCODE }
-
-      - name: Upload the desktop app installer
-        if: ${{ !inputs.plan }}
-        uses: actions/upload-artifact@v4
+          ref: ${{ inputs.source-sha || github.sha }}
+      - uses: actions/setup-node@v4
         with:
-          name: openresearch-windows-installer
-          path: app-installer/OpenResearch-Setup.exe
-          if-no-files-found: error
+          node-version: 22
+      - name: Verify all selected checks passed
+        env:
+          NEEDS_JSON: ${{ toJSON(needs) }}
+          FLAGS_JSON: ${{ toJSON(needs.changes.outputs) }}
+        run: node scripts/ci-check-result.mjs
 
   # Guards the version-bump release flow (release-on-bump.yml): the version in
   # Cargo.toml may only move forward, may not reuse an already-released tag,
@@ -245,7 +274,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
-          fetch-depth: 0
+          fetch-depth: 1
 
       - name: Version must move forward (with a fresh lockfile)
         env:
@@ -255,6 +284,7 @@ jobs:
 
           pkg_version() { grep -m1 '^version = ' "$1" | sed -E 's/version = "(.*)"/\1/'; }
 
+          git fetch --no-tags --depth=1 origin "$BASE_SHA"
           git show "${BASE_SHA}:Cargo.toml" > /tmp/base-Cargo.toml
           base=$(pkg_version /tmp/base-Cargo.toml)
           head=$(pkg_version Cargo.toml)

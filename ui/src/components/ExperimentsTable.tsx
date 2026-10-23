@@ -24,6 +24,7 @@ export function ExperimentsTable({
   onOpenLogs,
   onOpenCode,
   onArchive,
+  onDelete,
   onCancel,
 }: {
   runs: Run[];
@@ -36,6 +37,7 @@ export function ExperimentsTable({
   onOpenLogs: (experimentId: string, runId: string, intent: TabOpenIntent) => void;
   onOpenCode: (experimentId: string, intent: TabOpenIntent) => void;
   onArchive: (id: string, direction: "ancestors" | "descendants" | "only", archived: boolean) => void;
+  onDelete: (id: string) => void;
   onCancel: (runId: string) => Promise<void>;
 }) {
   const [pendingCancellation, setPendingCancellation] = useState<ReadonlySet<string>>(new Set());
@@ -217,6 +219,7 @@ export function ExperimentsTable({
                     name={experiment.title || experiment.slug}
                     actions={archiveActions.get(experiment.id)!}
                     onArchive={onArchive}
+                    onDelete={onDelete}
                   />
                 </Tooltip>
               </div>

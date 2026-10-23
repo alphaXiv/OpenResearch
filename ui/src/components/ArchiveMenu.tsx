@@ -13,6 +13,7 @@ export type ArchiveActions = {
   restoreOnly: boolean;
   restoreAbove: boolean;
   restoreDown: boolean;
+  remove: boolean;
 };
 
 export function archiveActionsByExperiment(experiments: Experiment[]): Map<string, ArchiveActions> {
@@ -57,16 +58,18 @@ export function archiveActionsByExperiment(experiments: Experiment[]): Map<strin
       restoreOnly: experiment.archived,
       restoreAbove: !experiment.archived && archivedAbove,
       restoreDown: hasArchivedBelow(experiment.id),
+      remove: !children.has(experiment.id),
     });
   }
   return actions;
 }
 
-export function ArchiveMenu({ id, name, actions, onArchive, compact = false }: {
+export function ArchiveMenu({ id, name, actions, onArchive, onDelete, compact = false }: {
   id: string;
   name: string;
   actions: ArchiveActions;
   onArchive: (id: string, direction: "ancestors" | "descendants" | "only", archived: boolean) => void;
+  onDelete: (id: string) => void;
   compact?: boolean;
 }) {
   const triggerRef = useRef<HTMLButtonElement>(null);
@@ -87,6 +90,10 @@ export function ArchiveMenu({ id, name, actions, onArchive, compact = false }: {
   const choose = (direction: "ancestors" | "descendants" | "only", archived: boolean) => {
     menu.setOpen(false);
     onArchive(id, direction, archived);
+  };
+  const remove = () => {
+    menu.setOpen(false);
+    if (window.confirm(m.tree_delete_experiment_confirm({ name }))) onDelete(id);
   };
 
   return (
@@ -123,6 +130,7 @@ export function ArchiveMenu({ id, name, actions, onArchive, compact = false }: {
           {actions.restoreOnly && <MenuItem onClick={() => choose("only", false)}>{m.tree_restore_only()}</MenuItem>}
           {actions.restoreAbove && <MenuItem onClick={() => choose("ancestors", false)}>{m.tree_restore_above()}</MenuItem>}
           {actions.restoreDown && <MenuItem onClick={() => choose("descendants", false)}>{m.tree_restore_down()}</MenuItem>}
+          {actions.remove && <MenuItem danger onClick={remove}>{m.tree_delete_experiment()}</MenuItem>}
         </div>, document.body,
       )}
     </div>

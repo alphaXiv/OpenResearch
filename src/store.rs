@@ -477,10 +477,13 @@ pub(crate) const RUN_ARTIFACTS_WAIT: Duration = Duration::from_secs(1);
 pub(crate) const RUN_ARTIFACTS_POLL: Duration = Duration::from_millis(250);
 /// Bounds removal time per orphan pass; classification is unbudgeted but cheap for finished runs.
 const ORPHAN_PASS_BUDGET: Duration = Duration::from_secs(5);
-/// Finished runs older than each project's newest few local runs lose their rebuildable environments.
+/// Finished runs older than each project's newest few lose their rebuildable environments
+/// (local runs) or their remote dirs (SSH and Slurm runs).
 const FULL_RUNS_PER_PROJECT: i64 = 3;
 /// Uploads are written before the message naming them, so the sweep spares recent files.
 const CHAT_ATTACHMENT_SETTLE: Duration = Duration::from_secs(24 * 60 * 60);
+/// A harness writes its session before orx records the id, so the sweep spares recent ones.
+const NATIVE_SESSION_SETTLE: Duration = Duration::from_secs(24 * 60 * 60);
 const SLIMMED_RUN_PATHS: [&[&str]; 2] = [&["repo", ".venv"], &["repo", ".cache", "uv"]];
 
 const SUBMISSION_HANDLE: (&str, &str) = ("submission-handles", ".json");
@@ -509,6 +512,68 @@ enum OrphanFate {
     Keep { snapshot: Option<String> },
     KeepWithAllSnapshots,
 }
+
+/// Remote dirs waiting for removal; `deleted` entries ignore a target's keep setting.
+pub(crate) struct RemoteCleanup {
+    pub run_id: String,
+    pub backend_json: String,
+    pub deleted: bool,
+}
+
+/// `(id, status)` of runs of `kinds` past each project's newest [`FULL_RUNS_PER_PROJECT`].
+fn runs_past_newest(kinds: &'static str) -> String {
+    format!(
+        "SELECT id, status FROM (
+           SELECT id, status, ROW_NUMBER() OVER
+             (PARTITION BY project_id ORDER BY created_at DESC, id DESC) AS position
+           FROM runs
+           WHERE CASE WHEN json_valid(backend_json) THEN json_extract(backend_json, '$.kind') END
+             IN ({kinds}))
+         WHERE position > {FULL_RUNS_PER_PROJECT}"
+    )
+}
+
+/// Queues the SSH/Slurm runs whose `column` equals `value`; deletion wins over a pending finish.
+fn queue_remote_cleanups(
+    conn: &Connection,
+    column: &'static str,
+    value: &str,
+    deleted: bool,
+) -> Result<()> {
+    conn.execute(
+        &format!(
+            "INSERT INTO remote_cleanups (run_id, backend_json, deleted, next_attempt_at)
+             SELECT id, backend_json, ?2, ?3 FROM runs
+             WHERE {column} = ?1 AND CASE WHEN json_valid(backend_json)
+               THEN json_extract(backend_json, '$.kind') END IN ('ssh_job', 'slurm_job')
+             ON CONFLICT(run_id) DO UPDATE SET backend_json = excluded.backend_json,
+               deleted = MAX(deleted, excluded.deleted), attempts = 0,
+               next_attempt_at = excluded.next_attempt_at"
+        ),
+        params![value, deleted, now_ms()],
+    )?;
+    Ok(())
+}
+
+fn validate_deleted_runs(runs: &[StoredRun]) -> Result<()> {
+    for run in runs {
+        if run.id.is_empty()
+            || !run
+                .id
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
+        {
+            return Err(anyhow!("Invalid run id for artifact cleanup: {}", run.id));
+        }
+    }
+    Ok(())
+}
+
+/// Failed remote cleanups retry after 5 minutes, doubling up to a day.
+const REMOTE_CLEANUP_RETRY_MS: i64 = 5 * 60 * 1000;
+const REMOTE_CLEANUP_MAX_RETRY_MS: i64 = 24 * 60 * 60 * 1000;
+/// Just past the source cache's idle window, so tars a pass had to skip are removable.
+const SOURCE_SWEEP_DELAY_MS: i64 = (crate::jobs::ssh::cleanup::SOURCE_IDLE_MINUTES + 1) * 60 * 1000;
 
 pub struct Store {
     conn: Connection,
@@ -762,6 +827,20 @@ impl Store {
                 error     TEXT,
                 tested_at INTEGER NOT NULL
             );
+            CREATE TABLE IF NOT EXISTS remote_cleanups (
+                run_id          TEXT PRIMARY KEY,
+                backend_json    TEXT NOT NULL,
+                deleted         INTEGER NOT NULL,
+                attempts        INTEGER NOT NULL DEFAULT 0,
+                next_attempt_at INTEGER NOT NULL,
+                last_error      TEXT
+            );
+            CREATE TABLE IF NOT EXISTS remote_source_sweeps (
+                host   TEXT NOT NULL,
+                root   TEXT NOT NULL,
+                due_at INTEGER NOT NULL,
+                PRIMARY KEY (host, root)
+            );
             CREATE TABLE IF NOT EXISTS overleaf_links (
                 project_id TEXT NOT NULL,
                 tex_path   TEXT NOT NULL,
@@ -836,6 +915,11 @@ impl Store {
         ] {
             let _ = conn.execute(ddl, []);
         }
+        // Covers the periodic native-id scan so it never reads the large parts_json.
+        conn.execute_batch(
+            "CREATE INDEX IF NOT EXISTS idx_chat_messages_native_ids
+             ON chat_messages(base_native_session_id, result_native_session_id, session_id);",
+        )?;
         conn.execute_batch("CREATE TRIGGER IF NOT EXISTS delete_chat_invocation_identities AFTER DELETE ON chat_sessions BEGIN DELETE FROM native_invocation_identities WHERE session_id = OLD.id; END;")?;
         conn.execute_batch("CREATE TRIGGER IF NOT EXISTS delete_acp_session AFTER DELETE ON chat_sessions BEGIN DELETE FROM acp_sessions WHERE session_id = OLD.id; END;")?;
         conn.execute(
@@ -1307,8 +1391,6 @@ impl Store {
         Ok(rows.collect::<std::result::Result<Vec<_>, _>>()?)
     }
 
-    // Consumed by later local-mode stages (supervise + `orx up` API).
-    #[allow(dead_code)]
     pub fn list_runs_by_experiment(&self, experiment_id: &str) -> Result<Vec<StoredRun>> {
         let mut stmt = self.conn.prepare(&format!(
             "{SELECT_RUN} WHERE experiment_id = ?1 ORDER BY created_at DESC"
@@ -1882,17 +1964,11 @@ impl Store {
         started: std::time::Instant,
         pass: &mut OrphanPass,
     ) -> Result<()> {
-        let mut statement = self.conn.prepare(
-            "SELECT id, status FROM (
-               SELECT id, status, ROW_NUMBER() OVER
-                 (PARTITION BY project_id ORDER BY created_at DESC, id DESC) AS position
-               FROM runs
-               WHERE CASE WHEN json_valid(backend_json) THEN json_extract(backend_json, '$.kind') END
-                 IN ('local_job', 'tinker_job'))
-             WHERE position > ?1",
-        )?;
+        let mut statement = self
+            .conn
+            .prepare(&runs_past_newest("'local_job', 'tinker_job'"))?;
         let runs = statement
-            .query_map(params![FULL_RUNS_PER_PROJECT], |row| {
+            .query_map([], |row| {
                 Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
             })?
             .collect::<std::result::Result<Vec<_>, _>>()?;
@@ -1939,7 +2015,10 @@ impl Store {
         Ok(true)
     }
 
-    fn cleanup_run_artifacts_locked(&self, deleting_project: Option<&str>) -> Result<OrphanPass> {
+    fn cleanup_run_artifacts_locked(
+        &self,
+        deleting_runs: Option<&std::collections::HashSet<String>>,
+    ) -> Result<OrphanPass> {
         let started = std::time::Instant::now();
         let mut pass = OrphanPass::default();
         self.validate_run_artifact_roots()?;
@@ -1947,18 +2026,12 @@ impl Store {
         let mut retained_snapshots = std::collections::HashSet::new();
         let mut deleted_runs = std::collections::HashSet::new();
         let mut retain_all_snapshots = false;
-        let mut statement = self
-            .conn
-            .prepare("SELECT id, backend_json, project_id FROM runs")?;
+        let mut statement = self.conn.prepare("SELECT id, backend_json FROM runs")?;
         for row in statement.query_map([], |row| {
-            Ok((
-                row.get::<_, String>(0)?,
-                row.get::<_, String>(1)?,
-                row.get::<_, String>(2)?,
-            ))
+            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
         })? {
-            let (id, json, project) = row?;
-            if deleting_project == Some(project.as_str()) {
+            let (id, json) = row?;
+            if deleting_runs.is_some_and(|ids| ids.contains(&id)) {
                 deleted_runs.insert(id);
                 continue;
             }
@@ -1994,10 +2067,8 @@ impl Store {
                 }
             };
             match fate {
-                // Project deletion leaves unrelated orphans to the periodic scan.
-                OrphanFate::Reclaim if deleting || deleting_project.is_none() => {
-                    reclaimable.push(id)
-                }
+                // Deletion leaves unrelated orphans to the periodic scan.
+                OrphanFate::Reclaim if deleting || deleting_runs.is_none() => reclaimable.push(id),
                 OrphanFate::Reclaim => {}
                 OrphanFate::Keep { snapshot } => retained_snapshots.extend(snapshot),
                 OrphanFate::KeepWithAllSnapshots => retain_all_snapshots = true,
@@ -2012,10 +2083,7 @@ impl Store {
             }
             remaining -= 1;
             // Checked after a removal so every pass makes progress.
-            if deleting_project.is_none()
-                && remaining > 0
-                && started.elapsed() >= ORPHAN_PASS_BUDGET
-            {
+            if deleting_runs.is_none() && remaining > 0 && started.elapsed() >= ORPHAN_PASS_BUDGET {
                 pass.more = true;
                 return Ok(pass);
             }
@@ -2046,7 +2114,7 @@ impl Store {
         let live = |reason: &str| {
             if deleting {
                 Err(anyhow!(
-                    "Run {id} {reason}; retry project deletion once it stops."
+                    "Run {id} {reason}; retry the deletion once it stops."
                 ))
             } else {
                 Ok(OrphanFate::KeepWithAllSnapshots)
@@ -2095,8 +2163,7 @@ impl Store {
         }
     }
 
-    fn cleanup_project_run_artifacts(&self, project_id: &str) -> Result<()> {
-        let runs = self.list_runs_by_project(project_id)?;
+    fn cleanup_deleted_run_artifacts(&self, runs: &[StoredRun], noun: &str) -> Result<()> {
         if runs.is_empty() {
             return Ok(());
         }
@@ -2105,20 +2172,211 @@ impl Store {
             .any(|run| !crate::local::is_terminal(&run.status))
         {
             return Err(anyhow!(
-                "Cannot delete a project with runs still in flight."
+                "Cannot delete this {noun} while its runs are still in flight."
             ));
         }
-        for run in &runs {
-            if run.id.is_empty()
-                || !run
-                    .id
-                    .chars()
-                    .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
-            {
-                return Err(anyhow!("Invalid run id for artifact cleanup: {}", run.id));
+        validate_deleted_runs(runs)?;
+        let ids = runs.iter().map(|run| run.id.clone()).collect();
+        self.cleanup_run_artifacts_locked(Some(&ids))?;
+        Ok(())
+    }
+
+    /// Runs `f` holding run artifacts shared, excluding deletes and orphan scans; waits up to
+    /// [`RUN_ARTIFACTS_WAIT`].
+    pub(crate) fn with_run_artifacts_shared<T>(&self, f: impl FnOnce() -> Result<T>) -> Result<T> {
+        let lock = self.run_artifacts_lock()?;
+        let deadline = std::time::Instant::now() + RUN_ARTIFACTS_WAIT;
+        let _guard = loop {
+            match lock.try_read() {
+                Ok(guard) => break guard,
+                Err(error)
+                    if error.kind() == std::io::ErrorKind::WouldBlock
+                        && std::time::Instant::now() < deadline =>
+                {
+                    std::thread::sleep(RUN_ARTIFACTS_POLL);
+                }
+                Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                    return Err(anyhow!(
+                        "A deletion or artifact cleanup is in progress; retry shortly."
+                    ))
+                }
+                Err(error) => return Err(error.into()),
             }
+        };
+        f()
+    }
+
+    /// Runs `delete` with exclusive use of run artifacts, waiting up to [`RUN_ARTIFACTS_WAIT`].
+    fn while_deleting(&self, noun: &str, delete: impl FnOnce() -> Result<()>) -> Result<()> {
+        let mut lock = self.run_artifacts_lock()?;
+        let deadline = std::time::Instant::now() + RUN_ARTIFACTS_WAIT;
+        let _guard = loop {
+            match lock.try_write() {
+                Ok(guard) => break guard,
+                Err(error)
+                    if error.kind() == std::io::ErrorKind::WouldBlock
+                        && std::time::Instant::now() < deadline =>
+                {
+                    std::thread::sleep(RUN_ARTIFACTS_POLL);
+                }
+                Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                    return Err(anyhow!("Run artifacts are busy; retry {noun} deletion."))
+                }
+                Err(error) => return Err(error.into()),
+            }
+        };
+        // A move can start while this waits; its copy must not race the removals below.
+        if self.data_dir_move_claimed()? {
+            return Err(anyhow!(
+                "The data directory is being moved; retry {noun} deletion afterwards."
+            ));
         }
-        self.cleanup_run_artifacts_locked(Some(project_id))?;
+        delete()
+    }
+
+    /// Delete a childless experiment with its runs' rows and local artifacts, queueing their
+    /// remote dirs. `before_rows` runs once the checks pass, so a refusal leaves it undone.
+    pub fn delete_local_experiment(
+        &self,
+        id: &str,
+        before_rows: impl FnOnce() -> Result<()>,
+    ) -> Result<()> {
+        self.while_deleting("experiment", || {
+            self.delete_local_experiment_locked(id, before_rows)
+        })
+    }
+
+    fn delete_local_experiment_locked(
+        &self,
+        id: &str,
+        before_rows: impl FnOnce() -> Result<()>,
+    ) -> Result<()> {
+        // A concurrent delete may have won, and a new experiment may now own its branch.
+        if self.get_local_experiment(id)?.is_none() {
+            return Err(anyhow!("Experiment {id} not found."));
+        }
+        let children: i64 = self.conn.query_row(
+            "SELECT COUNT(*) FROM local_experiments WHERE parent_experiment_id = ?1",
+            params![id],
+            |row| row.get(0),
+        )?;
+        if children > 0 {
+            return Err(anyhow!(
+                "Experiment {id} has {children} child experiment(s); delete them or move them with `orx exp move` first."
+            ));
+        }
+        let runs = self.list_runs_by_experiment(id)?;
+        if runs
+            .iter()
+            .any(|run| !crate::local::is_terminal(&run.status))
+        {
+            return Err(anyhow!(
+                "Cannot delete this experiment while its runs are still in flight."
+            ));
+        }
+        // Refuse what cleanup would, such as a supervisor still winding down, before `before_rows` acts.
+        validate_deleted_runs(&runs)?;
+        self.validate_run_artifact_roots()?;
+        for run in &runs {
+            self.orphan_fate(&run.id, true)?;
+        }
+        before_rows()?;
+        // Keep rows on filesystem errors so deletion can be retried with the same handles.
+        self.cleanup_deleted_run_artifacts(&runs, "experiment")?;
+        let tx = self.begin()?;
+        queue_remote_cleanups(&tx, "experiment_id", id, true)?;
+        tx.execute("DELETE FROM runs WHERE experiment_id = ?1", params![id])?;
+        tx.execute("DELETE FROM local_experiments WHERE id = ?1", params![id])?;
+        tx.commit()?;
+        Ok(())
+    }
+
+    /// Queues a finished run's remote dir for removal; non-SSH/Slurm runs are ignored.
+    pub(crate) fn queue_finished_remote_cleanup(&self, run_id: &str) -> Result<()> {
+        queue_remote_cleanups(&self.conn, "id", run_id, false)
+    }
+
+    /// Due entries; a finished run waits until newer runs push it past its project's newest few.
+    pub(crate) fn due_remote_cleanups(&self, limit: usize) -> Result<Vec<RemoteCleanup>> {
+        let mut statement = self.conn.prepare(&format!(
+            "SELECT run_id, backend_json, deleted FROM remote_cleanups
+             WHERE next_attempt_at <= ?1 AND (deleted = 1 OR run_id IN
+               (SELECT id FROM ({})))
+             ORDER BY next_attempt_at LIMIT ?2",
+            runs_past_newest("'ssh_job', 'slurm_job'")
+        ))?;
+        let rows = statement.query_map(params![now_ms(), limit as i64], |row| {
+            Ok(RemoteCleanup {
+                run_id: row.get(0)?,
+                backend_json: row.get(1)?,
+                deleted: row.get(2)?,
+            })
+        })?;
+        Ok(rows.collect::<std::result::Result<Vec<_>, _>>()?)
+    }
+
+    /// `deleted` is what the pass acted on; a deletion queued meanwhile stays for the next pass.
+    pub(crate) fn finish_remote_cleanup(&self, run_id: &str, deleted: bool) -> Result<()> {
+        self.conn.execute(
+            "DELETE FROM remote_cleanups WHERE run_id = ?1 AND deleted = ?2",
+            params![run_id, deleted],
+        )?;
+        Ok(())
+    }
+
+    pub(crate) fn defer_remote_cleanup(
+        &self,
+        run_id: &str,
+        deleted: bool,
+        error: &str,
+    ) -> Result<()> {
+        self.conn.execute(
+            "UPDATE remote_cleanups SET attempts = attempts + 1, last_error = ?3,
+               next_attempt_at = ?4 + MIN(?5 * (1 << MIN(attempts, 10)), ?6)
+             WHERE run_id = ?1 AND deleted = ?2",
+            params![
+                run_id,
+                deleted,
+                error,
+                now_ms(),
+                REMOTE_CLEANUP_RETRY_MS,
+                REMOTE_CLEANUP_MAX_RETRY_MS
+            ],
+        )?;
+        Ok(())
+    }
+
+    /// Revisits a host's source cache once its tars from this pass have gone idle.
+    pub(crate) fn schedule_source_sweep(&self, host: &str, root: Option<&str>) -> Result<()> {
+        self.conn.execute(
+            "INSERT INTO remote_source_sweeps (host, root, due_at) VALUES (?1, ?2, ?3)
+             ON CONFLICT(host, root) DO UPDATE SET due_at = excluded.due_at",
+            params![
+                host,
+                root.unwrap_or_default(),
+                now_ms() + SOURCE_SWEEP_DELAY_MS
+            ],
+        )?;
+        Ok(())
+    }
+
+    /// Due (host, root) source-cache sweeps; `None` is the default root.
+    pub(crate) fn due_source_sweeps(&self) -> Result<Vec<(String, Option<String>)>> {
+        let mut statement = self
+            .conn
+            .prepare("SELECT host, root FROM remote_source_sweeps WHERE due_at <= ?1")?;
+        let rows = statement.query_map(params![now_ms()], |row| {
+            let root: String = row.get(1)?;
+            Ok((row.get(0)?, Some(root).filter(|root| !root.is_empty())))
+        })?;
+        Ok(rows.collect::<std::result::Result<Vec<_>, _>>()?)
+    }
+
+    pub(crate) fn finish_source_sweep(&self, host: &str, root: Option<&str>) -> Result<()> {
+        self.conn.execute(
+            "DELETE FROM remote_source_sweeps WHERE host = ?1 AND root = ?2",
+            params![host, root.unwrap_or_default()],
+        )?;
         Ok(())
     }
 
@@ -2148,35 +2406,22 @@ impl Store {
         id: &str,
         native_purge: Option<impl FnOnce() -> Result<()>>,
     ) -> Result<()> {
-        let mut lock = self.run_artifacts_lock()?;
-        let deadline = std::time::Instant::now() + RUN_ARTIFACTS_WAIT;
-        let _guard = loop {
-            match lock.try_write() {
-                Ok(guard) => break guard,
-                Err(error)
-                    if error.kind() == std::io::ErrorKind::WouldBlock
-                        && std::time::Instant::now() < deadline =>
-                {
-                    std::thread::sleep(RUN_ARTIFACTS_POLL);
-                }
-                Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
-                    return Err(anyhow!("Run artifacts are busy; retry project deletion."))
-                }
-                Err(error) => return Err(error.into()),
-            }
-        };
-        // A move can start while this waits; its copy must not race the removals below.
-        if self.data_dir_move_claimed()? {
-            return Err(anyhow!(
-                "The data directory is being moved; retry project deletion afterwards."
-            ));
-        }
+        self.while_deleting("project", || {
+            self.delete_local_project_locked(id, native_purge)
+        })
+    }
+
+    fn delete_local_project_locked(
+        &self,
+        id: &str,
+        native_purge: Option<impl FnOnce() -> Result<()>>,
+    ) -> Result<()> {
         let _native_deletion = native_purge
             .is_some()
             .then(|| self.lock_native_deletion())
             .transpose()?;
         // Keep rows on filesystem errors so deletion can be retried with the same handles.
-        self.cleanup_project_run_artifacts(id)?;
+        self.cleanup_deleted_run_artifacts(&self.list_runs_by_project(id)?, "project")?;
         if let Some(purge) = native_purge {
             purge()?;
         }
@@ -2210,6 +2455,7 @@ impl Store {
             "DELETE FROM chat_sessions WHERE project_id = ?1",
             params![id],
         )?;
+        queue_remote_cleanups(&tx, "project_id", id, true)?;
         self.conn
             .execute("DELETE FROM runs WHERE project_id = ?1", params![id])?;
         self.conn.execute(
@@ -2582,9 +2828,10 @@ impl Store {
         Ok(lock)
     }
 
-    pub fn opencode_sessions_for_deletion(
+    pub fn native_sessions_for_deletion(
         &self,
         chat_ids: &[String],
+        harnesses: &[&str],
     ) -> Result<(
         std::collections::BTreeSet<String>,
         std::collections::BTreeSet<String>,
@@ -2592,13 +2839,13 @@ impl Store {
         let mut query = self.conn.prepare(
             "WITH refs AS (
                 SELECT id AS chat_id, native_session_id AS native_id FROM chat_sessions
-                WHERE harness = 'opencode'
+                WHERE harness IN (SELECT value FROM json_each(?2))
                 UNION
-                SELECT s.id, m.base_native_session_id FROM chat_sessions s
-                JOIN chat_messages m ON m.session_id = s.id WHERE s.harness = 'opencode'
+                SELECT s.id, m.base_native_session_id FROM chat_sessions s JOIN chat_messages m
+                ON m.session_id = s.id WHERE s.harness IN (SELECT value FROM json_each(?2))
                 UNION
-                SELECT s.id, m.result_native_session_id FROM chat_sessions s
-                JOIN chat_messages m ON m.session_id = s.id WHERE s.harness = 'opencode'
+                SELECT s.id, m.result_native_session_id FROM chat_sessions s JOIN chat_messages m
+                ON m.session_id = s.id WHERE s.harness IN (SELECT value FROM json_each(?2))
              )
              SELECT native_id, MAX(chat_id IN (SELECT value FROM json_each(?1))),
                  MAX(chat_id NOT IN (SELECT value FROM json_each(?1))) FROM refs
@@ -2606,13 +2853,19 @@ impl Store {
         )?;
         let mut deleting = std::collections::BTreeSet::new();
         let mut retained = std::collections::BTreeSet::new();
-        for row in query.query_map([serde_json::to_string(chat_ids)?], |row| {
-            Ok((
-                row.get::<_, String>(0)?,
-                row.get::<_, bool>(1)?,
-                row.get::<_, bool>(2)?,
-            ))
-        })? {
+        for row in query.query_map(
+            [
+                serde_json::to_string(chat_ids)?,
+                serde_json::to_string(harnesses)?,
+            ],
+            |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, bool>(1)?,
+                    row.get::<_, bool>(2)?,
+                ))
+            },
+        )? {
             let (native_id, belongs_to_chat, shared) = row?;
             if shared {
                 retained.insert(native_id);
@@ -2749,6 +3002,42 @@ impl Store {
             }
         }
         Ok(false)
+    }
+
+    /// Reclaim orx-launched agent history no chat records; returns whether the budget ran out first.
+    pub(crate) fn cleanup_orphaned_native_sessions(&self) -> Result<bool> {
+        let Some(_move_hold) = self.hold_off_data_dir_move()? else {
+            return Ok(false);
+        };
+        crate::local::native_store::sweep_isolated_sessions(
+            &self.data_dir.join("agents"),
+            self.native_ids_outside(&[])?,
+            NATIVE_SESSION_SETTLE,
+            ORPHAN_PASS_BUDGET,
+        )
+    }
+
+    /// Every native id recorded by chats other than `chat_ids`.
+    pub fn native_ids_outside(
+        &self,
+        chat_ids: &[String],
+    ) -> Result<std::collections::HashSet<String>> {
+        let mut query = self.conn.prepare(
+            "SELECT native_session_id FROM chat_sessions
+             WHERE native_session_id IS NOT NULL AND id NOT IN (SELECT value FROM json_each(?1))
+             UNION SELECT base_native_session_id FROM chat_messages
+             WHERE base_native_session_id IS NOT NULL
+               AND session_id NOT IN (SELECT value FROM json_each(?1))
+             UNION SELECT result_native_session_id FROM chat_messages
+             WHERE result_native_session_id IS NOT NULL
+               AND session_id NOT IN (SELECT value FROM json_each(?1))",
+        )?;
+        let ids = query
+            .query_map([serde_json::to_string(chat_ids)?], |row| {
+                row.get::<_, String>(0)
+            })?
+            .collect::<std::result::Result<_, _>>()?;
+        Ok(ids)
     }
 
     /// `None` clears it, which a fork of the session's very first turn needs:
@@ -4300,6 +4589,189 @@ mod tests {
     }
 
     #[test]
+    fn experiment_delete_reclaims_its_run_artifacts_only_after_checks_pass() {
+        let dir = std::env::temp_dir().join(format!("orx-exp-artifacts-{}", uuid::Uuid::new_v4()));
+        let store = Store::open_at(dir.clone()).unwrap();
+        let run = uuid::Uuid::new_v4().to_string();
+        let sibling = uuid::Uuid::new_v4().to_string();
+        let (digest, shared) = ("d".repeat(64), "e".repeat(64));
+        project_with_run_artifacts(&store, "p", &run, &digest);
+        project_with_run_artifacts(&store, "q", &sibling, &shared);
+        store
+            .conn
+            .execute(
+                "INSERT INTO local_experiments (id, project_id, slug, branch_name, title, description,
+                   run_command, agent_status, created_at, updated_at)
+                 VALUES ('experiment', 'p', 'e', 'orx/e', NULL, NULL, '', 'idle', 1, 1)",
+                [],
+            )
+            .unwrap();
+        store
+            .conn
+            .execute(
+                "UPDATE runs SET experiment_id = 'other' WHERE id = ?1",
+                params![sibling],
+            )
+            .unwrap();
+        let refused = |store: &Store| {
+            let mut called = false;
+            assert!(store
+                .delete_local_experiment("experiment", || {
+                    called = true;
+                    Ok(())
+                })
+                .is_err());
+            assert!(!called);
+        };
+        store
+            .conn
+            .execute(
+                "UPDATE runs SET status = 'running' WHERE id = ?1",
+                params![run],
+            )
+            .unwrap();
+        refused(&store);
+        store
+            .conn
+            .execute(
+                "UPDATE runs SET status = 'done' WHERE id = ?1",
+                params![run],
+            )
+            .unwrap();
+        // A terminal run whose supervisor is still finishing is refused before anything is undone.
+        let mut supervisor =
+            open_lifecycle_lock_at(&dir.join("run-logs").join(format!("{run}.supervisor.lock")))
+                .unwrap();
+        let held = supervisor.write().unwrap();
+        refused(&store);
+        drop(held);
+        store
+            .delete_local_experiment("experiment", || Ok(()))
+            .unwrap();
+        // A repeat delete is refused before touching anything.
+        refused(&store);
+        assert!(!dir.join("local-runs").join(&run).exists());
+        assert!(!dir.join("run-logs").join(format!("{run}.log")).exists());
+        assert!(!dir
+            .join("source-snapshots")
+            .join(format!("{digest}.tar"))
+            .exists());
+        assert!(store.get_run(&run).unwrap().is_none());
+        assert!(dir
+            .join("local-runs")
+            .join(&sibling)
+            .join("repo/output")
+            .is_file());
+        assert!(dir
+            .join("source-snapshots")
+            .join(format!("{shared}.tar"))
+            .is_file());
+        assert!(store.get_run(&sibling).unwrap().is_some());
+        assert!(store.get_local_project("p").unwrap().is_some());
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn remote_cleanups_keep_each_projects_newest_runs_until_project_delete() {
+        let dir = std::env::temp_dir().join(format!("orx-remote-cleanup-{}", uuid::Uuid::new_v4()));
+        let store = Store::open_at(dir.clone()).unwrap();
+        project_with_run_artifacts(&store, "p", "local", &"d".repeat(64));
+        store
+            .conn
+            .execute("UPDATE runs SET created_at = 10 WHERE id = 'local'", [])
+            .unwrap();
+        let insert = |id: &str, status: &str, kind: &str, created_at: i64| {
+            let descriptor =
+                serde_json::json!({"kind": kind, "namespace": "lab", "sourceDigest": id});
+            store.conn.execute(
+                "INSERT INTO runs (id, experiment_id, project_id, status, backend_json, created_at, updated_at)
+                 VALUES (?1, 'experiment', 'p', ?2, ?3, ?4, ?4)",
+                params![id, status, descriptor.to_string(), created_at],
+            ).unwrap();
+        };
+        let due = |store: &Store| {
+            let mut entries = store
+                .due_remote_cleanups(10)
+                .unwrap()
+                .into_iter()
+                .map(|entry| (entry.run_id, entry.deleted))
+                .collect::<Vec<_>>();
+            entries.sort();
+            entries
+        };
+        let finished = |ids: &[&str]| {
+            ids.iter()
+                .map(|id| (id.to_string(), false))
+                .collect::<Vec<_>>()
+        };
+        insert("r1", "done", "ssh_job", 1);
+        insert("r2", "failed", "slurm_job", 2);
+        insert("r3", "done", "ssh_job", 3);
+        insert("box", "done", "openresearch_job", 4);
+        for id in ["r1", "r2", "r3", "box", "local"] {
+            store.queue_finished_remote_cleanup(id).unwrap();
+        }
+        // The newest three remote runs stay whole; local and other kinds don't count.
+        assert!(due(&store).is_empty());
+        insert("r4", "done", "ssh_job", 5);
+        store.queue_finished_remote_cleanup("r4").unwrap();
+        assert_eq!(due(&store), finished(&["r1"]));
+        // As locally, an unfinished newer run takes one of the slots.
+        insert("r5", "running", "slurm_job", 6);
+        assert_eq!(due(&store), finished(&["r1", "r2"]));
+        store
+            .defer_remote_cleanup("r1", false, "unreachable")
+            .unwrap();
+        assert_eq!(due(&store), finished(&["r2"]));
+        store
+            .conn
+            .execute("UPDATE runs SET status = 'done'", [])
+            .unwrap();
+        store.delete_local_project("p").unwrap();
+        // Deletion marks every SSH/Slurm run, including the newest and one waiting to retry.
+        assert_eq!(
+            due(&store),
+            ["r1", "r2", "r3", "r4", "r5"]
+                .iter()
+                .map(|id| (id.to_string(), true))
+                .collect::<Vec<_>>()
+        );
+        // A pass that started before the deletion queued only finishes what it acted on.
+        store.finish_remote_cleanup("r2", false).unwrap();
+        store.defer_remote_cleanup("r2", false, "stale").unwrap();
+        store.finish_remote_cleanup("r1", true).unwrap();
+        assert_eq!(due(&store).len(), 4);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn source_sweeps_come_due_after_the_idle_window() {
+        let dir = std::env::temp_dir().join(format!("orx-source-sweep-{}", uuid::Uuid::new_v4()));
+        let store = Store::open_at(dir.clone()).unwrap();
+        store.schedule_source_sweep("lab", None).unwrap();
+        store
+            .schedule_source_sweep("lab", Some("/scratch/orx"))
+            .unwrap();
+        assert!(store.due_source_sweeps().unwrap().is_empty());
+        store
+            .conn
+            .execute("UPDATE remote_source_sweeps SET due_at = 0", [])
+            .unwrap();
+        let mut sweeps = store.due_source_sweeps().unwrap();
+        sweeps.sort();
+        assert_eq!(
+            sweeps,
+            [
+                ("lab".to_string(), None),
+                ("lab".to_string(), Some("/scratch/orx".to_string()))
+            ]
+        );
+        store.finish_source_sweep("lab", None).unwrap();
+        assert_eq!(store.due_source_sweeps().unwrap().len(), 1);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
     fn orphan_cleanup_preserves_live_local_runs_and_remote_recovery_handles() {
         let dir = std::env::temp_dir().join(format!("orx-live-orphan-{}", uuid::Uuid::new_v4()));
         let store = Store::open_at(dir.clone()).unwrap();
@@ -5775,9 +6247,13 @@ mod tests {
     fn native_deletion_includes_inactive_branches_and_preserves_shared_sessions() {
         let dir = crate::local::git::TemporaryDirectory::new("orx-native-delete-refs").unwrap();
         let store = Store::open_at(dir.path().to_path_buf()).unwrap();
-        for (id, native_id) in [("delete", "current"), ("keep", "shared")] {
+        for (id, harness, native_id) in [
+            ("delete", "opencode", "current"),
+            ("keep", "claude-code", "shared"),
+            ("cursor", "cursor", "current"),
+        ] {
             let mut session = chat_session_fixture(id);
-            session.harness = "opencode".into();
+            session.harness = harness.into();
             session.native_session_id = Some(native_id.into());
             store.create_chat_session(&session).unwrap();
         }
@@ -5791,12 +6267,15 @@ mod tests {
             )
             .unwrap();
         let (deleting, retained) = store
-            .opencode_sessions_for_deletion(&["delete".into()])
+            .native_sessions_for_deletion(&["delete".into()], &["opencode", "claude-code"])
             .unwrap();
         assert_eq!(deleting, ["current".into(), "old".into()].into());
         assert_eq!(retained, ["kept-branch".into(), "shared".into()].into());
         let (deleting, retained) = store
-            .opencode_sessions_for_deletion(&["delete".into(), "keep".into()])
+            .native_sessions_for_deletion(
+                &["delete".into(), "keep".into()],
+                &["opencode", "claude-code"],
+            )
             .unwrap();
         assert_eq!(
             deleting,
@@ -5812,6 +6291,34 @@ mod tests {
     }
 
     #[test]
+    fn native_ids_outside_skips_only_the_given_chats() {
+        let dir = crate::local::git::TemporaryDirectory::new("orx-native-outside").unwrap();
+        let store = Store::open_at(dir.path().to_path_buf()).unwrap();
+        for (id, native_id) in [("gone", "own"), ("kept", "other")] {
+            let mut session = chat_session_fixture(id);
+            session.native_session_id = Some(native_id.into());
+            store.create_chat_session(&session).unwrap();
+        }
+        store
+            .conn
+            .execute_batch(
+                "INSERT INTO chat_messages (id, session_id, role, parts_json, created_at,
+                 base_native_session_id, result_native_session_id)
+             VALUES ('a', 'gone', 'assistant', '[]', 1, 'own-base', 'own-result'),
+                    ('b', 'kept', 'assistant', '[]', 1, 'other-base', 'other-result');",
+            )
+            .unwrap();
+        let outside = store.native_ids_outside(&["gone".into()]).unwrap();
+        assert_eq!(
+            outside,
+            ["other", "other-base", "other-result"]
+                .map(String::from)
+                .into()
+        );
+        assert_eq!(store.native_ids_outside(&[]).unwrap().len(), 6);
+    }
+
+    #[test]
     fn native_deletion_lock_serializes_shared_owners_across_processes() {
         const CHILD_DIR: &str = "ORX_TEST_NATIVE_DELETE_DIR";
         const CHILD_PHASE: &str = "ORX_TEST_NATIVE_DELETE_PHASE";
@@ -5822,7 +6329,7 @@ mod tests {
             } else {
                 let _lock = store.lock_native_deletion().unwrap();
                 let (deleting, retained) = store
-                    .opencode_sessions_for_deletion(&["second".into()])
+                    .native_sessions_for_deletion(&["second".into()], &["opencode", "claude-code"])
                     .unwrap();
                 assert_eq!(deleting, ["shared".into()].into());
                 assert!(retained.is_empty());
@@ -5853,7 +6360,7 @@ mod tests {
         };
         let lock = store.lock_native_deletion().unwrap();
         let (deleting, retained) = store
-            .opencode_sessions_for_deletion(&["first".into()])
+            .native_sessions_for_deletion(&["first".into()], &["opencode", "claude-code"])
             .unwrap();
         assert!(deleting.is_empty());
         assert_eq!(retained, ["shared".into()].into());

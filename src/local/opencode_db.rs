@@ -215,7 +215,8 @@ fn delete_session_rows(
 ) -> Result<()> {
     let mut connection = Connection::open_with_flags(path, OpenFlags::SQLITE_OPEN_READ_WRITE)?;
     connection.busy_timeout(std::time::Duration::from_secs(5))?;
-    connection.execute_batch("PRAGMA foreign_keys = ON;")?;
+    // Zero deleted content in place so chat text does not linger in free pages.
+    connection.execute_batch("PRAGMA foreign_keys = ON; PRAGMA secure_delete = ON;")?;
     let transaction =
         connection.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
     let mut deleting = ids.difference(retained).cloned().collect::<BTreeSet<_>>();
@@ -267,6 +268,71 @@ fn delete_session_rows(
         }
     }
     transaction.commit()?;
+    // Older WAL frames still hold the deleted text; waiting out a live reader would stall
+    // OpenCode's writers, so the periodic `compact` of orx's own database retries it.
+    connection.busy_timeout(std::time::Duration::ZERO)?;
+    let _ = connection.query_row("PRAGMA wal_checkpoint(TRUNCATE)", [], |_| Ok(()));
+    Ok(())
+}
+
+/// Top-level sessions untouched for `settle`; children go with their parent.
+pub(super) fn stale_root_sessions(
+    path: &Path,
+    settle: std::time::Duration,
+) -> Result<BTreeSet<String>> {
+    let mut ids = BTreeSet::new();
+    if inspect(path)? == DatabaseState::Empty {
+        return Ok(ids);
+    }
+    let connection = open_readonly(path)?;
+    let cutoff = crate::store::now_ms() - i64::try_from(settle.as_millis())?;
+    for table in ["session", "session_v2"] {
+        if !has_columns(&connection, table, &["id", "parent_id", "time_updated"])? {
+            continue;
+        }
+        let mut query = connection.prepare(&format!(
+            "SELECT id FROM {table} WHERE parent_id IS NULL AND time_updated < ?1"
+        ))?;
+        for id in query.query_map([cutoff], |row| row.get::<_, String>(0))? {
+            ids.insert(id?);
+        }
+    }
+    Ok(ids)
+}
+
+/// Truncates the WAL without waiting on readers, then VACUUMs once free pages are a tenth of the file and no OpenCode holds it.
+pub(super) fn compact(path: &Path) -> Result<()> {
+    if inspect(path)? == DatabaseState::Empty {
+        return Ok(());
+    }
+    let path = normalize_path(path)?;
+    let connection = Connection::open_with_flags(&path, OpenFlags::SQLITE_OPEN_READ_WRITE)?;
+    connection.busy_timeout(std::time::Duration::ZERO)?;
+    let _ = connection.query_row("PRAGMA wal_checkpoint(TRUNCATE)", [], |_| Ok(()));
+    let (free, pages): (i64, i64) = connection.query_row(
+        "SELECT freelist_count, page_count FROM pragma_freelist_count(), pragma_page_count()",
+        [],
+        |row| Ok((row.get(0)?, row.get(1)?)),
+    )?;
+    if free == 0 || free * 10 < pages {
+        return Ok(());
+    }
+    // orx's OpenCode children hold a shared lease, so an exclusive one means none is running.
+    let lock = OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .read(true)
+        .write(true)
+        .open(sidecar(&path, ".orx-lock"))?;
+    // Windows' exclusive-open check would see this process's own connection as another user.
+    drop(connection);
+    if lock.try_lock().is_err() || ensure_no_external_users(&path).is_err() {
+        return Ok(());
+    }
+    let connection = Connection::open_with_flags(&path, OpenFlags::SQLITE_OPEN_READ_WRITE)?;
+    connection.busy_timeout(std::time::Duration::from_secs(5))?;
+    connection.execute_batch("VACUUM;")?;
+    let _ = connection.query_row("PRAGMA wal_checkpoint(TRUNCATE)", [], |_| Ok(()));
     Ok(())
 }
 
@@ -809,6 +875,35 @@ mod tests {
                     .unwrap();
                 assert_eq!(remaining, ["other", "retained"], "{table}");
             }
+        }
+    }
+
+    #[test]
+    fn deleted_session_text_does_not_linger_in_the_file_or_wal() {
+        let fixture = Fixture::new();
+        let path = fixture.path();
+        let connection = Connection::open(&path).unwrap();
+        connection
+            .execute_batch(&format!(
+                "PRAGMA journal_mode=WAL; {V1}
+                 INSERT INTO message VALUES ('msg', 'history', 'deleted-secret-marker');"
+            ))
+            .unwrap();
+        delete_sessions(
+            std::slice::from_ref(&path),
+            &BTreeSet::from(["history".into()]),
+            &BTreeSet::new(),
+        )
+        .unwrap();
+        drop(connection);
+        for suffix in ["", "-wal"] {
+            let bytes = std::fs::read(sidecar(&path, suffix)).unwrap_or_default();
+            assert!(
+                !bytes
+                    .windows(b"deleted-secret-marker".len())
+                    .any(|window| window == b"deleted-secret-marker"),
+                "{suffix}"
+            );
         }
     }
 

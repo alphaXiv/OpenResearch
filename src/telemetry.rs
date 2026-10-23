@@ -1630,6 +1630,7 @@ mod tests {
         let options = SshHostSettings {
             container: Some("research".into()),
             remote_root: Some("/scratch/lab/orx".into()),
+            keep_remote_runs: true,
         };
         set_ssh_host("lab".into(), options.clone()).unwrap();
         set_ssh_default(Some("lab".into())).unwrap();

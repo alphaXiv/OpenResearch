@@ -179,6 +179,10 @@ pub async fn run(args: UpArgs) -> Result<()> {
         state.data_dir_move_in_progress.clone(),
         state.data_dir_gate.clone(),
     ));
+    tokio::spawn(reclaim_remote_run_dirs(
+        state.data_dir_move_in_progress.clone(),
+        state.data_dir_gate.clone(),
+    ));
     spawn_claude_auth_monitor(
         state.chat.clone(),
         claude.clone(),
@@ -557,6 +561,10 @@ fn router(state: AppState, remote_auth: Option<RemoteAuth>) -> Router {
         .route("/api/runs/{id}/logs", get(run_logs))
         .route("/api/runs/{id}/diff", get(run_diff))
         .route("/api/experiments/{id}/diff", get(experiment_diff))
+        .route(
+            "/api/experiments/{id}",
+            axum::routing::delete(delete_experiment),
+        )
         .route(
             "/api/experiments/{id}/archive",
             axum::routing::patch(set_experiment_archive),
@@ -2113,7 +2121,7 @@ async fn delete_project_inner(state: AppState, id: String, query: DeleteProjectQ
     // Row deletion can wait up to RUN_ARTIFACTS_WAIT for the run-artifacts lock, so keep it off the async workers.
     tokio::task::spawn_blocking(move || {
         let native_purge = (!session_ids.is_empty()).then_some(|| {
-            local::chat::ChatHost::delete_native_sessions_blocking(&store, &session_ids)
+            local::chat::ChatHost::purge_native_history_blocking(&store, &session_ids)
         });
         store.delete_local_project_with(&project_id, native_purge)
     })
@@ -2176,6 +2184,26 @@ async fn set_experiment_archive(
     }
     let ids = local::experiments::set_archived(&mut store, &id, direction, request.archived)?;
     Ok(Json(json!({ "ids": ids })))
+}
+
+async fn delete_experiment(State(state): State<AppState>, Path(id): Path<String>) -> ApiResult {
+    reject_if_moving(&state)?;
+    // Deletion can wait up to RUN_ARTIFACTS_WAIT for the run-artifacts lock.
+    blocking_api(move || {
+        let store = Store::open()?;
+        let experiment = store
+            .get_local_experiment(&id)?
+            .ok_or_else(|| not_found("experiment"))?;
+        let _admission = state
+            .project_lifecycle
+            .admit(&experiment.project_id)
+            .ok_or_else(|| bad_request("project deletion is in progress"))?;
+        let deleted = local::experiments::delete_experiment(&store, &id).map_err(bad_request)?;
+        Ok(Json(
+            json!({ "ok": true, "branchCommit": deleted.branch_commit }),
+        ))
+    })
+    .await
 }
 
 async fn list_project_runs(Path(id): Path<String>) -> ApiResult {
@@ -4625,6 +4653,7 @@ impl axum::body::HttpBody for ActiveBody {
 }
 
 const ORPHANED_RUN_SCAN_INTERVAL: Duration = Duration::from_secs(60);
+const REMOTE_CLEANUP_INTERVAL: Duration = Duration::from_secs(60);
 /// SSH container launches record their handle before the job starts; leave them this long to finish.
 const ORPHANED_RUN_SETTLE_MS: i64 = 5 * 60 * 1000;
 
@@ -4665,7 +4694,7 @@ async fn reclaim_orphaned_run_artifacts(
 ) {
     // Demo prewarm skips itself when the gate is contended at startup.
     tokio::time::sleep(Duration::from_secs(5)).await;
-    // Orphans whose failure is already logged, so a stuck one logs once.
+    // Orphans and sweep failures already logged, so a stuck one logs once.
     let mut reported = HashSet::new();
     loop {
         let mut more = false;
@@ -4692,16 +4721,26 @@ async fn reclaim_orphaned_run_artifacts(
                         eprintln!("orx up: orphaned run artifact cleanup failed: {error}")
                     }
                 }
-                match tokio::task::spawn_blocking(|| {
-                    Store::open()?.cleanup_orphaned_chat_attachments()
-                })
-                .await
-                {
-                    Ok(Ok(left)) => more |= left,
-                    Ok(Err(error)) => {
-                        eprintln!("orx up: could not clean orphaned chat attachments: {error}")
+                let sweeps = [
+                    (
+                        "chat attachments",
+                        Store::cleanup_orphaned_chat_attachments as fn(&Store) -> Result<bool>,
+                    ),
+                    (
+                        "native chat history",
+                        Store::cleanup_orphaned_native_sessions,
+                    ),
+                ];
+                for (label, sweep) in sweeps {
+                    match tokio::task::spawn_blocking(move || sweep(&Store::open()?)).await {
+                        Ok(Ok(left)) => more |= left,
+                        Ok(Err(error)) => {
+                            if reported.insert(format!("{label}: {error}")) {
+                                eprintln!("orx up: could not clean orphaned {label}: {error}");
+                            }
+                        }
+                        Err(error) => eprintln!("orx up: orphaned {label} cleanup failed: {error}"),
                     }
-                    Err(error) => eprintln!("orx up: chat attachment cleanup failed: {error}"),
                 }
             }
         }
@@ -4711,6 +4750,73 @@ async fn reclaim_orphaned_run_artifacts(
             ORPHANED_RUN_SCAN_INTERVAL
         };
         tokio::time::sleep(pause).await;
+    }
+}
+
+/// Runs `f` on a fresh store under the data-dir gate; `None` while the data dir is moving.
+async fn with_gated_store<T: Send + 'static>(
+    moving: &AtomicBool,
+    gate: &tokio::sync::Mutex<()>,
+    f: impl FnOnce(&Store) -> Result<T> + Send + 'static,
+) -> Option<Result<T>> {
+    if moving.load(Ordering::SeqCst) {
+        return None;
+    }
+    let _gate = gate.lock().await;
+    if moving.load(Ordering::SeqCst) {
+        return None;
+    }
+    Some(
+        tokio::task::spawn_blocking(move || f(&Store::open()?))
+            .await
+            .unwrap_or_else(|error| Err(anyhow!("store task failed: {error}"))),
+    )
+}
+
+/// Removes queued remote run dirs; the gate is held only around store access, never over SSH.
+async fn reclaim_remote_run_dirs(moving: Arc<AtomicBool>, gate: Arc<tokio::sync::Mutex<()>>) {
+    // Startup's own SSH traffic (supervisor adoption, settings checks) goes first.
+    tokio::time::sleep(Duration::from_secs(30)).await;
+    let mut reported = HashSet::new();
+    let mut plan_error = None;
+    let mut report = |failures: Vec<(String, String)>| {
+        for (run_id, error) in failures {
+            if reported.insert(run_id.clone()) {
+                eprintln!("orx up: remote cleanup for run {run_id}: {error}");
+            }
+        }
+    };
+    loop {
+        match with_gated_store(&moving, &gate, local::remote_cleanup::plan).await {
+            Some(Ok((batches, rejected))) => {
+                plan_error = None;
+                report(rejected);
+                if !batches.is_empty() {
+                    let results = local::remote_cleanup::clean(batches).await;
+                    match with_gated_store(&moving, &gate, move |store| {
+                        local::remote_cleanup::record(store, results)
+                    })
+                    .await
+                    {
+                        Some(Ok(failures)) => report(failures),
+                        Some(Err(error)) => {
+                            eprintln!("orx up: could not record remote cleanup: {error}")
+                        }
+                        // Unrecorded entries stay due and removal is idempotent.
+                        None => {}
+                    }
+                }
+            }
+            Some(Err(error)) => {
+                let error = error.to_string();
+                if plan_error.as_ref() != Some(&error) {
+                    eprintln!("orx up: could not plan remote cleanup: {error}");
+                    plan_error = Some(error);
+                }
+            }
+            None => {}
+        }
+        tokio::time::sleep(REMOTE_CLEANUP_INTERVAL).await;
     }
 }
 

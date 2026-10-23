@@ -588,6 +588,7 @@ pub(super) async fn ssh_settings() -> ApiResult {
                 .unwrap_or_default();
             host["container"] = json!(options.container);
             host["remoteRoot"] = json!(options.remote_root);
+            host["keepRemoteRuns"] = json!(options.keep_remote_runs);
         }
         // Best-effort, like the preflight write: a store hiccup shouldn't take
         // out the host listing — hosts just render as never tested.
@@ -625,22 +626,26 @@ pub(super) struct SaveSshSettingsReq {
     container: Option<String>,
     /// Unlike `container`, `None` keeps the saved root (the UI never sends it); `Some("")` clears it.
     remote_root: Option<String>,
+    /// `None` keeps the saved value.
+    keep_remote_runs: Option<bool>,
 }
 
 pub(super) async fn save_ssh_settings(Json(req): Json<SaveSshSettingsReq>) -> ApiResult {
     let host = req.host.trim().to_string();
     require_configured_ssh_host(&host).await?;
     blocking_api(move || {
-        let remote_root = match req.remote_root {
-            Some(root) => Some(root.trim().to_string()).filter(|root| !root.is_empty()),
-            None => crate::config::ssh_settings()?
-                .hosts
-                .get(&host)
-                .and_then(|saved| saved.remote_root.clone()),
-        };
+        let saved = crate::config::ssh_settings()?
+            .hosts
+            .get(&host)
+            .cloned()
+            .unwrap_or_default();
         let options = crate::config::SshHostSettings {
             container: req.container,
-            remote_root,
+            remote_root: match req.remote_root {
+                Some(root) => Some(root.trim().to_string()).filter(|root| !root.is_empty()),
+                None => saved.remote_root,
+            },
+            keep_remote_runs: req.keep_remote_runs.unwrap_or(saved.keep_remote_runs),
         };
         crate::jobs::ssh::validate_host_options(&options).map_err(bad_request)?;
         crate::config::set_ssh_host(host, options)?;
@@ -860,6 +865,7 @@ pub(super) fn slurm_settings_json() -> Value {
         "cpusPerTask": settings.cpus_per_task,
         "mem": settings.mem,
         "remoteRoot": settings.remote_root,
+        "keepRemoteRuns": settings.keep_remote_runs,
         "hosts": list_ssh_hosts(),
     })
 }
@@ -882,6 +888,7 @@ pub(super) struct SetSlurmSettingsReq {
     cpus_per_task: Option<u32>,
     mem: Option<String>,
     remote_root: Option<String>,
+    keep_remote_runs: Option<bool>,
 }
 
 pub(super) async fn set_slurm_settings(Json(req): Json<SetSlurmSettingsReq>) -> ApiResult {
@@ -924,6 +931,9 @@ pub(super) async fn set_slurm_settings(Json(req): Json<SetSlurmSettingsReq>) -> 
                 crate::jobs::ssh::validate_remote_root(root).map_err(bad_request)?;
             }
             settings.remote_root = root;
+        }
+        if let Some(keep) = req.keep_remote_runs {
+            settings.keep_remote_runs = keep;
         }
         slurm::save_settings(&settings)?;
         Ok(Json(slurm_settings_json()))
@@ -1475,8 +1485,11 @@ pub(crate) async fn configure(backend: &str, body: Value) -> Result<Value> {
                     .await
                     .map_err(|ApiError(_, message)| anyhow!(message))?;
             }
-            if body.get("container").is_some() || body.get("remoteRoot").is_some() {
-                // A root-only change keeps the host's saved container.
+            if ["container", "remoteRoot", "keepRemoteRuns"]
+                .iter()
+                .any(|key| body.get(*key).is_some())
+            {
+                // A change without --container keeps the host's saved container.
                 let container = match body.get("container") {
                     Some(container) => container.clone(),
                     None => {
@@ -1488,8 +1501,10 @@ pub(crate) async fn configure(backend: &str, body: Value) -> Result<Value> {
                     }
                 };
                 let mut req = json!({"host": body["host"], "container": container});
-                if let Some(root) = body.get("remoteRoot") {
-                    req["remoteRoot"] = root.clone();
+                for key in ["remoteRoot", "keepRemoteRuns"] {
+                    if let Some(value) = body.get(key) {
+                        req[key] = value.clone();
+                    }
                 }
                 let req: SaveSshSettingsReq = serde_json::from_value(req)?;
                 cli_result(save_ssh_settings(Json(req)).await)?;

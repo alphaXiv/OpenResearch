@@ -1291,6 +1291,8 @@
   "tree_archive_manage_experiment": "{name} を管理",
   "tree_archive_manage": "管理",
   "tree_archive_only": "この実験をアーカイブ",
+  "tree_delete_experiment": "完全に削除…",
+  "tree_delete_experiment_confirm": "「{name}」を完全に削除しますか？\n\n実行、そのログとファイル、ブランチが削除されます。この操作は元に戻せません。",
   "tree_archive_above": "祖先の実験をアーカイブ",
   "tree_archive_down": "子孫の実験をアーカイブ",
   "tree_restore_only": "この実験を復元",

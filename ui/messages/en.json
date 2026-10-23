@@ -1291,6 +1291,8 @@
   "tree_archive_manage_experiment": "Manage {name}",
   "tree_archive_manage": "Manage",
   "tree_archive_only": "Archive this experiment",
+  "tree_delete_experiment": "Delete permanently…",
+  "tree_delete_experiment_confirm": "Permanently delete “{name}”?\n\nIts runs, their logs and files, and its branch are removed. This cannot be undone.",
   "tree_archive_above": "Archive ancestors",
   "tree_archive_down": "Archive descendants",
   "tree_restore_only": "Restore this experiment",

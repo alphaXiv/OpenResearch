@@ -462,6 +462,10 @@ pub enum ExpCommand {
         descendants: bool,
     },
 
+    /// Permanently delete an experiment with no child experiments or active runs, its runs, and
+    /// its orx/ branch (refused while any worktree has it checked out).
+    Delete { exp_id: String },
+
     /// Re-parent an experiment and its subtree. Only the tree changes; git branches stay put.
     #[command(group(clap::ArgGroup::new("move_target").required(true)))]
     Move {
