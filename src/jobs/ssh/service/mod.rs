@@ -374,7 +374,19 @@ impl Broker {
             ) && crate::commands::supervise::supervisor_running(&run.id)
                 && !crate::commands::supervise::uses_shared_ssh(&run.id)
             {
-                return Err(anyhow!("Run {} is monitored by an older OpenResearch process. Restart that monitor with the updated version before using shared SSH; its lock has not been taken over.", run.id));
+                let legacy_target = match descriptor.kind.as_str() {
+                    "ssh_job" | "slurm_job" => {
+                        descriptor.namespace.as_deref().map(SshTarget::alias)
+                    }
+                    "openresearch_job" => descriptor.openresearch_ssh_target(),
+                    _ => None,
+                };
+                if let Some(legacy_target) = legacy_target {
+                    let legacy = state::resolve(&legacy_target.for_run(&run.id)).await?;
+                    if legacy.key == host.resolved.key {
+                        return Err(anyhow!("Run {} is monitored by an older OpenResearch process. Restart that monitor with the updated version before using shared SSH; its lock has not been taken over.", run.id));
+                    }
+                }
             }
         }
         state::reserve_attempt(&host.resolved.key)?;

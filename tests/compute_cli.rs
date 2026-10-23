@@ -385,6 +385,8 @@ esac
     for case in [
         "healthy",
         "backoff",
+        "legacy_other",
+        "legacy_same",
         "rejection",
         "exit_zero",
         "stop_failure",
@@ -431,8 +433,41 @@ esac
             )
             .unwrap();
         }
+        let legacy = matches!(case, "legacy_other" | "legacy_same");
+        let mut legacy_lock = if legacy {
+            let output = sandbox
+                .command()
+                .env("ORX_DATA_DIR", &data)
+                .args(["projects", "--json"])
+                .output()
+                .unwrap();
+            assert!(output.status.success());
+            let db = rusqlite::Connection::open(data.join("orx.db")).unwrap();
+            let host = if case == "legacy_same" {
+                "lab"
+            } else {
+                "unrelated-host"
+            };
+            let backend = json!({"kind":"ssh_job", "namespace":host, "jobId":".orx/runs/legacy"});
+            db.execute("INSERT INTO local_experiments (id, project_id, slug, branch_name, run_command, created_at, updated_at) VALUES ('exp','project','exp','main','true',0,0)", []).unwrap();
+            db.execute("INSERT INTO runs (id, experiment_id, project_id, status, backend_json, created_at, updated_at) VALUES ('legacy','exp','project','running',?1,0,0)", [backend.to_string()]).unwrap();
+            std::fs::create_dir_all(data.join("run-logs")).unwrap();
+            Some(fd_lock::RwLock::new(
+                std::fs::File::create(data.join("run-logs/legacy.supervisor.lock")).unwrap(),
+            ))
+        } else {
+            None
+        };
+        let _legacy_guard = legacy_lock.as_mut().map(|lock| lock.write().unwrap());
         builder.env("ORX_DATA_DIR", &data);
-        builder.env("CASE", if case == "backoff" { "healthy" } else { case });
+        builder.env(
+            "CASE",
+            if case == "backoff" || legacy {
+                "healthy"
+            } else {
+                case
+            },
+        );
         builder.args(["compute", "connect", "ssh", "--host", "lab"]);
         let pair = native_pty_system().openpty(PtySize::default()).unwrap();
         let mut child = pair.slave.spawn_command(builder).unwrap();
@@ -447,12 +482,22 @@ esac
         let calls = std::fs::read_to_string(sandbox.0.join("calls")).unwrap();
         let socket = PathBuf::from(std::fs::read_to_string(sandbox.0.join("socket-path")).unwrap());
         let output = String::from_utf8_lossy(&output);
+        if legacy {
+            rusqlite::Connection::open(data.join("orx.db"))
+                .unwrap()
+                .execute("UPDATE runs SET status='cancelled' WHERE id='legacy'", [])
+                .unwrap();
+        }
         match case {
-            "healthy" | "backoff" => {
+            "healthy" | "backoff" | "legacy_other" => {
                 assert!(status.success(), "{output}");
                 assert!(!calls.contains("-O stop"));
                 assert!(socket.exists());
                 assert!(output.contains("LOGIN"));
+            }
+            "legacy_same" => {
+                assert!(!status.success(), "{output}");
+                assert!(output.contains("older OpenResearch process"), "{output}");
             }
             "rejection" | "exit_zero" => {
                 assert!(status.success(), "{output}");

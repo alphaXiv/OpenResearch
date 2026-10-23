@@ -163,6 +163,24 @@ class HelperTest(unittest.TestCase):
         path.unlink()
         self.assertTrue(self.rpc(op="log", dir=".orx/runs/test")["missing"])
 
+    def test_rewrite_with_unchanged_suffix_replaces_the_collected_prefix(self):
+        folder = Path(self.home.name) / ".orx/runs/test"
+        folder.mkdir(parents=True)
+        path = folder / "log"
+        original = b"a" * (256 * 1024) + b"z" * 64
+        path.write_bytes(original)
+        first = self.rpc(op="log", dir=str(folder))
+        second = self.rpc(op="log", dir=str(folder), offset=256 * 1024,
+                          identity=first["identity"], boundary=first["boundary"])
+        for replacement in (b"b" * (256 * 1024) + b"z" * 64,
+                            b"c" * (256 * 1024) + b"z" * 64 + b"appended"):
+            path.write_bytes(replacement)
+            changed = self.rpc(op="log", dir=str(folder), offset=len(original),
+                               identity=second["identity"], boundary=second["boundary"])
+            self.assertTrue(changed["reset"])
+            self.assertEqual(changed["offset"], 0)
+            self.assertEqual(base64.b64decode(changed["data"]), replacement[:256 * 1024])
+
     def test_large_logs_are_bounded_and_uploads_do_not_mix(self):
         folder = Path(self.home.name) / ".orx/runs/test"
         folder.mkdir(parents=True)

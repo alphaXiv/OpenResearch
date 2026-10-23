@@ -69,6 +69,18 @@ def execute(command, source=None, timeout=None):
         return {"code": child.returncode, "stdout": encode(result), "stderr": encode(error)}
 
 
+def prefix_digest(file, length):
+    file.seek(0)
+    digest = hashlib.sha256()
+    while length:
+        chunk = file.read(min(CHUNK, length))
+        if not chunk:
+            raise RuntimeError("Remote log changed during collection; retrying.")
+        digest.update(chunk)
+        length -= len(chunk)
+    return digest
+
+
 def log_chunk(request):
     path = os.path.join(os.path.expanduser("~"), request["dir"], "log")
     try:
@@ -80,22 +92,20 @@ def log_chunk(request):
         identity = "%s:%s" % (stat.st_dev, stat.st_ino)
         offset = request.get("offset", 0)
         reset = request.get("identity") != identity or stat.st_size < offset
-        prefix = b""
+        digest = hashlib.sha256()
         if not reset and offset:
-            file.seek(max(0, offset - 64))
-            prefix = file.read(min(64, offset))
-            reset = hashlib.sha256(prefix).hexdigest() != request.get("boundary")
+            digest = prefix_digest(file, offset)
+            reset = digest.hexdigest() != request.get("boundary")
         if reset:
             offset = 0
-            prefix = b""
+            digest = hashlib.sha256()
         file.seek(offset)
         data = file.read(CHUNK)
         end = offset + len(data)
-        collected = prefix + data
-        file.seek(offset - len(prefix))
-        if file.read(len(collected)) != collected:
+        digest.update(data)
+        boundary = digest.hexdigest()
+        if prefix_digest(file, end).hexdigest() != boundary:
             raise RuntimeError("Remote log changed during collection; retrying.")
-        boundary = hashlib.sha256(collected[-64:]).hexdigest()
         return {"identity": identity, "reset": reset, "offset": offset,
                 "data": encode(data), "boundary": boundary, "size": stat.st_size, "eof": end >= os.fstat(file.fileno()).st_size}
 
