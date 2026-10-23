@@ -32,7 +32,7 @@
   "artifacts_tab_delete_folder": "フォルダーを削除",
   "artifacts_tab_failed_to_load": "読み込みに失敗:",
   "artifacts_tab_file_truncated_showing_the_first_512_kb": "ファイルが省略されています。先頭の 512 KB を表示しています。",
-  "artifacts_tab_listing_truncated_the_folder_has_more_artifacts": "一覧が省略されています。フォルダーには他にも成果物があります。",
+  "artifacts_tab_listing_truncated_the_folder_has_more_artifacts": "最初の {limit} 件の成果物を表示しています。残りは {dir} にそのまま保存されています。",
   "artifacts_tab_loading": "読み込み中…",
   "artifacts_tab_loading_artifacts": "成果物を読み込み中…",
   "artifacts_tab_modified": "変更済み",

@@ -1326,6 +1326,8 @@ export interface ArtifactEntry {
   modifiedAt: number;
   presentation?: FilePresentation;
   children?: ArtifactEntry[];
+  /** The capped listing didn't finish this folder; fetch it with `getArtifacts(…, path)`. */
+  partial?: boolean;
 }
 
 export type FilePresentation = "image" | "audio" | "video" | "pdf" | "text" | "unknown" | "download";
@@ -1335,10 +1337,12 @@ export interface ProjectArtifacts {
   dir: string;
   entries: ArtifactEntry[];
   truncated: boolean;
+  /** Absent from older hosts, whose cap was 2,000. */
+  limit?: number;
 }
 
-export const getArtifacts = (projectId: string, signal?: AbortSignal) =>
-  get<ProjectArtifacts>(`/api/projects/${projectId}/files`, signal);
+export const getArtifacts = (projectId: string, signal?: AbortSignal, dir?: string) =>
+  get<ProjectArtifacts>(`/api/projects/${projectId}/files${dir ? `?dir=${encodeURIComponent(dir)}` : ""}`, signal);
 
 /** Delete a file or folder in the artifacts directory. */
 export const deleteArtifact = (projectId: string, path: string) =>

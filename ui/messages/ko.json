@@ -32,7 +32,7 @@
   "artifacts_tab_delete_folder": "폴더 삭제",
   "artifacts_tab_failed_to_load": "불러오기 실패:",
   "artifacts_tab_file_truncated_showing_the_first_512_kb": "파일이 잘렸습니다. 처음 512 KB만 표시합니다.",
-  "artifacts_tab_listing_truncated_the_folder_has_more_artifacts": "목록이 잘렸습니다. 폴더에 더 많은 결과물이 있습니다.",
+  "artifacts_tab_listing_truncated_the_folder_has_more_artifacts": "처음 {limit}개의 결과물만 표시합니다. 나머지는 {dir}에 그대로 있습니다.",
   "artifacts_tab_loading": "불러오는 중…",
   "artifacts_tab_loading_artifacts": "결과물 불러오는 중…",
   "artifacts_tab_modified": "수정됨",

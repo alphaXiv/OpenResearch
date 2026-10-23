@@ -24,7 +24,8 @@ use super::model::LocalProject;
 const IGNORED: &[&str] = &[".DS_Store", "Thumbs.db"];
 
 /// Listing cap — a runaway directory shouldn't stall the 2Hz event loop.
-const MAX_ENTRIES: usize = 2000;
+/// Sized so a typical extracted image dataset still lists in full.
+const MAX_ENTRIES: usize = 10_000;
 
 /// `<data dir>/files/`. The physical name stays stable for compatibility even
 /// though the product surface is called Artifacts. A pre-v0.1.48 `artifacts/`
@@ -380,6 +381,9 @@ pub struct ArtifactEntry {
     pub presentation: Option<FilePresentation>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub children: Vec<ArtifactEntry>,
+    /// Folder the capped listing didn't finish; list it on its own via `?dir=`.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub partial: bool,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -390,6 +394,8 @@ pub struct ArtifactsListing {
     pub dir: String,
     pub entries: Vec<ArtifactEntry>,
     pub truncated: bool,
+    /// `MAX_ENTRIES`, so the UI can explain the cap when `truncated`.
+    pub limit: usize,
 }
 
 fn mtime_ms(md: &std::fs::Metadata) -> i64 {
@@ -407,6 +413,8 @@ fn is_ignored(name: &str) -> bool {
 /// Recursively build the tree under `dir`, counting nodes against
 /// `MAX_ENTRIES`. Returns (children, hit_cap). Symlinks resolving outside
 /// `canonical_base` are skipped — the serve endpoints would refuse them.
+/// Siblings are listed before descending, so a capped tree still shows every
+/// folder it reaches instead of dropping whole later folders.
 fn collect_tree(
     canonical_base: &Path,
     dir: &Path,
@@ -414,17 +422,19 @@ fn collect_tree(
     seen: &mut usize,
 ) -> (Vec<ArtifactEntry>, bool) {
     let mut out = Vec::new();
+    let mut dirs = Vec::new();
     let mut truncated = false;
     let Ok(entries) = std::fs::read_dir(dir) else {
         return (out, false);
     };
     for entry in entries.flatten() {
-        if *seen >= MAX_ENTRIES {
-            return (out, true);
-        }
         let name = entry.file_name().to_string_lossy().into_owned();
         if is_ignored(&name) {
             continue;
+        }
+        if *seen >= MAX_ENTRIES {
+            truncated = true;
+            break;
         }
         let Some(md) = followed_metadata(canonical_base, &entry) else {
             continue;
@@ -436,8 +446,7 @@ fn collect_tree(
             format!("{rel_prefix}/{name}")
         };
         if md.is_dir() {
-            let (children, hit) = collect_tree(canonical_base, &entry.path(), &rel, seen);
-            truncated |= hit;
+            dirs.push((out.len(), entry.path()));
             out.push(ArtifactEntry {
                 name,
                 path: rel,
@@ -445,7 +454,8 @@ fn collect_tree(
                 size: 0,
                 modified_at: mtime_ms(&md),
                 presentation: None,
-                children,
+                children: Vec::new(),
+                partial: false,
             });
         } else if md.is_file() {
             let presentation = presentation_for_path(&rel);
@@ -457,24 +467,43 @@ fn collect_tree(
                 modified_at: mtime_ms(&md),
                 presentation: Some(presentation),
                 children: Vec::new(),
+                partial: false,
             });
         }
+    }
+    for (i, path) in dirs {
+        if truncated {
+            out[i].partial = true;
+            continue;
+        }
+        let (children, hit) = collect_tree(canonical_base, &path, &out[i].path, seen);
+        out[i].children = children;
+        out[i].partial = hit;
+        truncated |= hit;
     }
     out.sort_by(|a, b| b.is_dir.cmp(&a.is_dir).then(a.name.cmp(&b.name)));
     (out, truncated)
 }
 
-/// Scan the artifacts dir (creating it if missing) into a plain file tree.
-pub fn list(project: &LocalProject) -> Result<ArtifactsListing> {
+/// Scan the artifacts dir (creating it if missing) into a plain file tree,
+/// or just the `sub` folder in it, with its own `MAX_ENTRIES` budget.
+pub fn list(project: &LocalProject, sub: Option<&str>) -> Result<ArtifactsListing> {
     let dir = ensure_dir(project)?;
     let canonical = crate::paths::canonicalize(&dir)
         .map_err(|e| anyhow!("Could not resolve {}: {}", dir.display(), e))?;
-    let mut seen = 0;
-    let (entries, truncated) = collect_tree(&canonical, &canonical, "", &mut seen);
+    let (start, prefix) = match sub {
+        Some(rel) => (resolve_contained(&canonical, rel)?, rel),
+        None => (canonical.clone(), ""),
+    };
+    if !start.is_dir() {
+        return Err(anyhow!("not a folder: {prefix}"));
+    }
+    let (entries, truncated) = collect_tree(&canonical, &start, prefix, &mut 0);
     Ok(ArtifactsListing {
         dir: dir.to_string_lossy().into_owned(),
         entries,
         truncated,
+        limit: MAX_ENTRIES,
     })
 }
 
@@ -512,40 +541,26 @@ pub fn delete_entry(project: &LocalProject, rel_path: &str) -> Result<()> {
 
 /// Cheap change fingerprint (paths + sizes + mtimes) for the SSE diff loop.
 /// A missing dir hashes to a stable value, so first creation is a change.
+/// Built from `collect_tree`, so it tracks exactly what's listed.
 pub fn fingerprint(project: &LocalProject) -> u64 {
     let mut hasher = DefaultHasher::new();
     if let Ok(canonical) = crate::paths::canonicalize(files_dir(project)) {
-        hash_dir(&canonical, &canonical, &mut hasher, &mut 0);
+        let (entries, truncated) = collect_tree(&canonical, &canonical, "", &mut 0);
+        hash_entries(&entries, &mut hasher);
+        truncated.hash(&mut hasher);
     }
     hasher.finish()
 }
 
-/// Hash the tree under `dir`, skipping (like `collect_tree`) symlinks that
-/// resolve outside `base`, so the fingerprint tracks exactly what's listed.
-fn hash_dir(base: &Path, dir: &Path, hasher: &mut DefaultHasher, seen: &mut usize) {
-    let Ok(entries) = std::fs::read_dir(dir) else {
-        return;
-    };
-    for entry in entries.flatten() {
-        if *seen >= MAX_ENTRIES {
-            return;
-        }
-        let name = entry.file_name().to_string_lossy().into_owned();
-        if is_ignored(&name) {
-            continue;
-        }
-        let Some(md) = followed_metadata(base, &entry) else {
-            continue;
-        };
-        *seen += 1;
-        if let Ok(rel) = entry.path().strip_prefix(base) {
-            rel.to_string_lossy().hash(hasher);
-        }
-        if md.is_dir() {
-            hash_dir(base, &entry.path(), hasher, seen);
+fn hash_entries(entries: &[ArtifactEntry], hasher: &mut DefaultHasher) {
+    for e in entries {
+        e.path.hash(hasher);
+        if e.is_dir {
+            e.partial.hash(hasher);
+            hash_entries(&e.children, hasher);
         } else {
-            md.len().hash(hasher);
-            mtime_ms(&md).hash(hasher);
+            e.size.hash(hasher);
+            e.modified_at.hash(hasher);
         }
     }
 }
@@ -747,6 +762,44 @@ mod tests {
             .map(|entry| entry.name.as_str())
             .collect();
         assert_eq!(names, ["analysis.md", "report.md"]);
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn capped_listing_keeps_every_sibling_folder() {
+        let (root, base, _) = scratch();
+        for class in ["class_a", "class_b", "class_c"] {
+            std::fs::create_dir(base.join(class)).unwrap();
+        }
+        for i in 0..MAX_ENTRIES {
+            std::fs::write(base.join(format!("class_a/{i}.png")), "").unwrap();
+        }
+        let canonical = crate::paths::canonicalize(&base).unwrap();
+        let (entries, truncated) = collect_tree(&canonical, &canonical, "", &mut 0);
+        let names: Vec<&str> = entries.iter().map(|e| e.name.as_str()).collect();
+        assert_eq!(names, ["class_a", "class_b", "class_c"]);
+        assert_eq!(entries[0].children.len(), MAX_ENTRIES - 3);
+        assert!(truncated);
+        assert!(entries[0].partial);
+        // A partial folder listed on its own gets a fresh budget.
+        let (children, truncated) =
+            collect_tree(&canonical, &canonical.join("class_a"), "class_a", &mut 0);
+        assert_eq!(children.len(), MAX_ENTRIES);
+        assert!(children[0].path.starts_with("class_a/"));
+        assert!(!truncated);
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn listing_exactly_at_cap_is_not_truncated() {
+        let (root, base, _) = scratch();
+        for i in 0..MAX_ENTRIES {
+            std::fs::create_dir(base.join(format!("d{i}"))).unwrap();
+        }
+        let canonical = crate::paths::canonicalize(&base).unwrap();
+        let (entries, truncated) = collect_tree(&canonical, &canonical, "", &mut 0);
+        assert_eq!(entries.len(), MAX_ENTRIES);
+        assert!(!truncated);
         let _ = std::fs::remove_dir_all(root);
     }
 

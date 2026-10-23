@@ -32,7 +32,7 @@
   "artifacts_tab_delete_folder": "फ़ोल्डर हटाएं",
   "artifacts_tab_failed_to_load": "लोड नहीं हो सका:",
   "artifacts_tab_file_truncated_showing_the_first_512_kb": "फ़ाइल छोटी की गई — पहले 512 KB दिखाए जा रहे हैं।",
-  "artifacts_tab_listing_truncated_the_folder_has_more_artifacts": "सूची छोटी की गई — इस फ़ोल्डर में और भी आर्टिफ़ैक्ट हैं।",
+  "artifacts_tab_listing_truncated_the_folder_has_more_artifacts": "पहले {limit} आर्टिफ़ैक्ट दिखाए जा रहे हैं। बाकी अभी भी डिस्क पर {dir} में हैं।",
   "artifacts_tab_loading": "लोड हो रहा है…",
   "artifacts_tab_loading_artifacts": "आर्टिफ़ैक्ट लोड हो रहे हैं…",
   "artifacts_tab_modified": "बदला गया",
