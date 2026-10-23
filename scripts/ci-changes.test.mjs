@@ -21,8 +21,8 @@ test('helper tests are independent and combine with other changes', () => {
   assert.deepEqual(enabled(['scripts/dev-slot.mjs', 'scripts/test_orx_chart.py', 'scripts/release_notes.py', 'ui/package.json']), ['frontend', 'dev_slot', 'chart', 'release_notes'])
 })
 test('docs skip builds, workflow changes and unknown files select all', () => {
-  assert.deepEqual(enabled(['README.md', 'docs/linux.md', 'LICENSE', '.github/readme-assets/banner.png']), [])
-  for (const path of ['.github/workflows/ci.yml', 'scripts/ci-changes.mjs', '.cargo/config.toml', 'new-build-input']) assert.equal(enabled([path]).length, 8)
+  assert.deepEqual(enabled(['README.md', 'docs/linux.md', 'LICENSE', '.github/readme-assets/banner.png', 'macos/DISTRIBUTION.md', 'windows/README.md', 'ui/README.md']), [])
+  for (const path of ['.github/workflows/ci.yml', 'scripts/ci-changes.mjs', '.cargo/config.toml', 'new-build-input']) assert.equal(enabled([path]).length, 9)
 })
 test('embedded chart changes also run chart tests', () => {
   assert.equal(classifyChanges(['agent-skills/orx-figures/assets/orx_chart.py']).chart, true)
@@ -51,4 +51,15 @@ test('aggregate rejects failures, cancellations, missing and unexpectedly skippe
   assert.throws(() => checkResults({ ...needs, rust: { result: 'failure' } }, flags))
   assert.throws(() => checkResults({ ...needs, changes: { result: 'failure' } }, flags))
   assert.throws(() => checkResults(needs, { ...flags, rust: undefined }))
+})
+
+test('backend and embedded JavaScript inputs run their suites without a frontend build', () => {
+  for (const path of ['src/local/acp/zcode-runtime.cjs', 'src/commands/app.rs', 'agent-skills/orx-figures/assets/orx-chart.html']) {
+    const checks = classifyChanges([path])
+    assert.equal(checks.javascript, true, path)
+    assert.equal(checks.frontend, false, path)
+  }
+  const selected = { ...flags, frontend: 'false', javascript: 'true' }
+  assert.throws(() => checkResults({ ...needs, frontend: { result: 'skipped' } }, selected))
+  checkResults({ ...needs, frontend: { result: 'skipped' }, helpers: { result: 'success' } }, selected)
 })

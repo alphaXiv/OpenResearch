@@ -3,26 +3,28 @@ import { appendFileSync } from 'node:fs'
 import { resolve } from 'node:path'
 import { pathToFileURL } from 'node:url'
 
-const names = ['frontend', 'rust', 'windows', 'linux', 'macos', 'dev_slot', 'chart', 'release_notes']
+const names = ['frontend', 'rust', 'windows', 'linux', 'macos', 'dev_slot', 'chart', 'release_notes', 'javascript']
 const all = () => Object.fromEntries(names.map(name => [name, true]))
 
 export function classifyChanges(paths) {
   const checks = Object.fromEntries(names.map(name => [name, false]))
   const rust = () => Object.assign(checks, { rust: true, windows: true, linux: true, macos: true })
   for (const path of paths) {
+    if (['src/local/acp/zcode-runtime.cjs', 'src/commands/app.rs', 'agent-skills/orx-figures/assets/orx-chart.html'].includes(path)) checks.javascript = true
     if (path.startsWith('.github/workflows/') || path.startsWith('.github/actions/') || path === '.github/build-setup.yml' || path.startsWith('.cargo/') || /^scripts\/ci-/.test(path)) return all()
+    if (/^ui\/(README\.md|project\.inlang\/README\.md)$/.test(path)) continue
     if (path.startsWith('ui/')) checks.frontend = true
     else if (/^(src\/|tests\/|agent-skills\/|demo\/|Cargo\.(toml|lock)$|build\.rs$|SKILL\.md$|SYSTEM_PROMPT\.md$)/.test(path)) {
       rust()
       if (path.startsWith('agent-skills/orx-figures/assets/')) checks.chart = true
     }
+    else if (path.startsWith('.github/readme-assets/') || path.startsWith('.github/ISSUE_TEMPLATE/') || path.startsWith('docs/') || /\.(md|txt)$/.test(path) || /^(LICENSE|NOTICE|\.gitignore)$/.test(path)) continue
     else if (path.startsWith('windows/')) checks.windows = true
     else if (path.startsWith('linux/') || /scripts\/(build|smoke-test)-linux/.test(path)) checks.linux = true
     else if (path.startsWith('macos/') || /scripts\/(build|package)-macos/.test(path)) Object.assign(checks, { rust: true, macos: true })
     else if (/^scripts\/dev-slot(\.test)?\.mjs$/.test(path)) checks.dev_slot = true
     else if (/^scripts\/(test_orx_chart|orx_chart)\.py$/.test(path)) checks.chart = true
     else if (/^scripts\/(test_release_notes|release_notes)\.py$/.test(path)) checks.release_notes = true
-    else if (path.startsWith('.github/readme-assets/') || path.startsWith('.github/ISSUE_TEMPLATE/') || path.startsWith('docs/') || /\.(md|txt)$/.test(path) || /^(LICENSE|NOTICE|\.gitignore)$/.test(path)) continue
     else return all()
   }
   return checks
