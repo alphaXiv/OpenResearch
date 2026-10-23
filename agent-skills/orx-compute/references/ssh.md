@@ -46,9 +46,10 @@ agents still connect directly to the host.
 Each project's three newest SSH and Slurm runs, counted together across hosts
 and including unfinished ones, stay whole. Once an older finished run's log is
 collected, the running OpenResearch app removes its host dir except
-`tensorboard/` (a container's copy goes entirely), so anything written into
-`repo/` goes with it. While cleaning a host it also removes orx's cached source
-archives that no active run uses and that have been idle for an hour.
+`tensorboard/`, and the container's copy entirely (retried while the container
+is stopped), so anything written into `repo/` goes with it. While cleaning a host it also removes orx's cached source
+archives that no active run uses and that have been idle for an hour, and
+checks again an hour later.
 Unreachable hosts are retried later.
 `orx compute configure ssh --host lab --keep-remote-runs true` keeps all of
 that host's runs not yet cleaned up. Deleting a project removes its runs'

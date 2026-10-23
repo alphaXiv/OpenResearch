@@ -569,6 +569,8 @@ fn validate_deleted_runs(runs: &[StoredRun]) -> Result<()> {
 /// Failed remote cleanups retry after 5 minutes, doubling up to a day.
 const REMOTE_CLEANUP_RETRY_MS: i64 = 5 * 60 * 1000;
 const REMOTE_CLEANUP_MAX_RETRY_MS: i64 = 24 * 60 * 60 * 1000;
+/// Just past the source cache's idle window, so tars a pass had to skip are removable.
+const SOURCE_SWEEP_DELAY_MS: i64 = (crate::jobs::ssh::cleanup::SOURCE_IDLE_MINUTES + 1) * 60 * 1000;
 
 pub struct Store {
     conn: Connection,
@@ -829,6 +831,12 @@ impl Store {
                 attempts        INTEGER NOT NULL DEFAULT 0,
                 next_attempt_at INTEGER NOT NULL,
                 last_error      TEXT
+            );
+            CREATE TABLE IF NOT EXISTS remote_source_sweeps (
+                host   TEXT NOT NULL,
+                root   TEXT NOT NULL,
+                due_at INTEGER NOT NULL,
+                PRIMARY KEY (host, root)
             );
             CREATE TABLE IF NOT EXISTS overleaf_links (
                 project_id TEXT NOT NULL,
@@ -2281,26 +2289,67 @@ impl Store {
         Ok(rows.collect::<std::result::Result<Vec<_>, _>>()?)
     }
 
-    pub(crate) fn finish_remote_cleanup(&self, run_id: &str) -> Result<()> {
+    /// `deleted` is what the pass acted on; a deletion queued meanwhile stays for the next pass.
+    pub(crate) fn finish_remote_cleanup(&self, run_id: &str, deleted: bool) -> Result<()> {
         self.conn.execute(
-            "DELETE FROM remote_cleanups WHERE run_id = ?1",
-            params![run_id],
+            "DELETE FROM remote_cleanups WHERE run_id = ?1 AND deleted = ?2",
+            params![run_id, deleted],
         )?;
         Ok(())
     }
 
-    pub(crate) fn defer_remote_cleanup(&self, run_id: &str, error: &str) -> Result<()> {
+    pub(crate) fn defer_remote_cleanup(
+        &self,
+        run_id: &str,
+        deleted: bool,
+        error: &str,
+    ) -> Result<()> {
         self.conn.execute(
-            "UPDATE remote_cleanups SET attempts = attempts + 1, last_error = ?2,
-               next_attempt_at = ?3 + MIN(?4 * (1 << MIN(attempts, 10)), ?5)
-             WHERE run_id = ?1",
+            "UPDATE remote_cleanups SET attempts = attempts + 1, last_error = ?3,
+               next_attempt_at = ?4 + MIN(?5 * (1 << MIN(attempts, 10)), ?6)
+             WHERE run_id = ?1 AND deleted = ?2",
             params![
                 run_id,
+                deleted,
                 error,
                 now_ms(),
                 REMOTE_CLEANUP_RETRY_MS,
                 REMOTE_CLEANUP_MAX_RETRY_MS
             ],
+        )?;
+        Ok(())
+    }
+
+    /// Revisits a host's source cache once its tars from this pass have gone idle.
+    pub(crate) fn schedule_source_sweep(&self, host: &str, root: Option<&str>) -> Result<()> {
+        self.conn.execute(
+            "INSERT INTO remote_source_sweeps (host, root, due_at) VALUES (?1, ?2, ?3)
+             ON CONFLICT(host, root) DO UPDATE SET due_at = excluded.due_at",
+            params![
+                host,
+                root.unwrap_or_default(),
+                now_ms() + SOURCE_SWEEP_DELAY_MS
+            ],
+        )?;
+        Ok(())
+    }
+
+    /// Due (host, root) source-cache sweeps; `None` is the default root.
+    pub(crate) fn due_source_sweeps(&self) -> Result<Vec<(String, Option<String>)>> {
+        let mut statement = self
+            .conn
+            .prepare("SELECT host, root FROM remote_source_sweeps WHERE due_at <= ?1")?;
+        let rows = statement.query_map(params![now_ms()], |row| {
+            let root: String = row.get(1)?;
+            Ok((row.get(0)?, Some(root).filter(|root| !root.is_empty())))
+        })?;
+        Ok(rows.collect::<std::result::Result<Vec<_>, _>>()?)
+    }
+
+    pub(crate) fn finish_source_sweep(&self, host: &str, root: Option<&str>) -> Result<()> {
+        self.conn.execute(
+            "DELETE FROM remote_source_sweeps WHERE host = ?1 AND root = ?2",
+            params![host, root.unwrap_or_default()],
         )?;
         Ok(())
     }
@@ -4475,7 +4524,9 @@ mod tests {
         // As locally, an unfinished newer run takes one of the slots.
         insert("r5", "running", "slurm_job", 6);
         assert_eq!(due(&store), finished(&["r1", "r2"]));
-        store.defer_remote_cleanup("r1", "unreachable").unwrap();
+        store
+            .defer_remote_cleanup("r1", false, "unreachable")
+            .unwrap();
         assert_eq!(due(&store), finished(&["r2"]));
         store
             .conn
@@ -4490,8 +4541,38 @@ mod tests {
                 .map(|id| (id.to_string(), true))
                 .collect::<Vec<_>>()
         );
-        store.finish_remote_cleanup("r1").unwrap();
+        // A pass that started before the deletion queued only finishes what it acted on.
+        store.finish_remote_cleanup("r2", false).unwrap();
+        store.defer_remote_cleanup("r2", false, "stale").unwrap();
+        store.finish_remote_cleanup("r1", true).unwrap();
         assert_eq!(due(&store).len(), 4);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn source_sweeps_come_due_after_the_idle_window() {
+        let dir = std::env::temp_dir().join(format!("orx-source-sweep-{}", uuid::Uuid::new_v4()));
+        let store = Store::open_at(dir.clone()).unwrap();
+        store.schedule_source_sweep("lab", None).unwrap();
+        store
+            .schedule_source_sweep("lab", Some("/scratch/orx"))
+            .unwrap();
+        assert!(store.due_source_sweeps().unwrap().is_empty());
+        store
+            .conn
+            .execute("UPDATE remote_source_sweeps SET due_at = 0", [])
+            .unwrap();
+        let mut sweeps = store.due_source_sweeps().unwrap();
+        sweeps.sort();
+        assert_eq!(
+            sweeps,
+            [
+                ("lab".to_string(), None),
+                ("lab".to_string(), Some("/scratch/orx".to_string()))
+            ]
+        );
+        store.finish_source_sweep("lab", None).unwrap();
+        assert_eq!(store.due_source_sweeps().unwrap().len(), 1);
         std::fs::remove_dir_all(dir).unwrap();
     }
 
