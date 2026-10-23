@@ -129,8 +129,7 @@ test('ARM PR lanes preserve desktop lint and linking; other validation remains c
         .filter(([, , condition]) => !condition || runInNewContext(condition, { ...context, matrix }))
         .map(([, , , command]) => command))
       assert.equal(commands.filter(command => command === 'cargo clippy --all-targets --locked --features desktop -- -D warnings').length, 1)
-      assert.equal(commands.filter(command => command === 'cargo build --locked --features desktop').length, pr && arch === 'x86_64' ? 1 : 0)
-      assert.equal(commands.filter(command => command === 'cargo rustc --locked --features desktop --bin orx -- -C codegen-units=64').length, pr && arch === 'aarch64' ? 1 : 0)
+      assert.equal(commands.filter(command => command === 'cargo build --locked --features desktop').length, pr ? 1 : 0)
       assert.equal(commands.filter(command => command === 'cargo test --locked --features desktop').length, pr ? 0 : 1)
     }
   }
