@@ -17,7 +17,9 @@
 //!   experiment's fixed contract);
 //! - orx injects run labels, the `orx-env` Secret ref, and defaults for
 //!   `activeDeadlineSeconds` / `ttlSecondsAfterFinished` / `backoffLimit`
-//!   when the manifest doesn't set them;
+//!   when the manifest doesn't set them; the default TTL is a week so a
+//!   restarted supervisor can still read the outcome, and the supervisor
+//!   shortens it to a day once it has recorded the outcome;
 //! - `{{ORX_RUN}}` in the manifest text is replaced with a run-unique,
 //!   DNS-safe id — use it in resource names so re-runs don't collide;
 //! - every applied resource is recorded on the run, and cancel deletes
@@ -583,8 +585,12 @@ fn prepare_docs(
     if job["spec"]["activeDeadlineSeconds"].is_null() {
         job["spec"]["activeDeadlineSeconds"] = json!(timeout_seconds);
     }
+    if let Some(annotations) = job["metadata"]["annotations"].as_object_mut() {
+        annotations.remove(DEFAULT_TTL_ANNOTATION);
+    }
     if job["spec"]["ttlSecondsAfterFinished"].is_null() {
-        job["spec"]["ttlSecondsAfterFinished"] = json!(86400);
+        job["spec"]["ttlSecondsAfterFinished"] = json!(UNSEEN_JOB_TTL_SECS);
+        job["metadata"]["annotations"][DEFAULT_TTL_ANNOTATION] = json!("true");
     }
     // A replacement pod would not share the pod-local snapshot staged by kubectl cp.
     job["spec"]["backoffLimit"] = json!(0);
@@ -793,6 +799,50 @@ pub async fn inspect_job(context: Option<&str>, namespace: &str, name: &str) -> 
         stage: "SCHEDULING".to_string(),
         message: waiting_msg,
     })
+}
+
+/// Default TTL until a supervisor has recorded the Job's outcome.
+const UNSEEN_JOB_TTL_SECS: u64 = 7 * 86400;
+/// Marks a TTL orx defaulted, so only that one is shortened later.
+const DEFAULT_TTL_ANNOTATION: &str = "or_default_ttl";
+
+/// Once the supervisor has recorded a finished Job's outcome, shorten orx's
+/// default TTL to a day; a TTL the manifest chose is left alone.
+pub async fn expire_finished_job(context: Option<&str>, namespace: &str, name: &str) -> Result<()> {
+    let defaulted = kubectl(
+        context,
+        &[
+            "get",
+            "job",
+            name,
+            "-n",
+            namespace,
+            "--request-timeout=20s",
+            "-o",
+            "jsonpath={.metadata.annotations.or_default_ttl}",
+        ],
+        None,
+    )
+    .await?;
+    if defaulted.trim() == "true" {
+        kubectl(
+            context,
+            &[
+                "patch",
+                "job",
+                name,
+                "-n",
+                namespace,
+                "--request-timeout=20s",
+                "--type=merge",
+                "-p",
+                r#"{"spec":{"ttlSecondsAfterFinished":86400}}"#,
+            ],
+            None,
+        )
+        .await?;
+    }
+    Ok(())
 }
 
 /// Cancel/cleanup = delete the run's recorded resources (`kind/name` handles,
@@ -1031,6 +1081,16 @@ mod tests {
     }
 
     #[test]
+    fn manifest_ttl_is_never_marked_as_orx_default() {
+        let mut manifest = job("train-r1");
+        manifest["spec"]["ttlSecondsAfterFinished"] = json!(604800);
+        manifest["metadata"]["annotations"][DEFAULT_TTL_ANNOTATION] = json!("true");
+        let (docs, _) = prepare(manifest).unwrap();
+        assert_eq!(docs[0]["spec"]["ttlSecondsAfterFinished"], 604800);
+        assert!(docs[0]["metadata"]["annotations"][DEFAULT_TTL_ANNOTATION].is_null());
+    }
+
+    #[test]
     fn single_job_gets_defaults_labels_script_and_secret() {
         let (docs, name) = prepare(job("train-r1")).unwrap();
         assert_eq!(name, "train-r1");
@@ -1039,7 +1099,8 @@ mod tests {
         assert_eq!(j["metadata"]["labels"]["or_run"], "r1");
         assert_eq!(j["spec"]["template"]["metadata"]["labels"]["or_run"], "r1");
         assert_eq!(j["spec"]["activeDeadlineSeconds"], 14400);
-        assert_eq!(j["spec"]["ttlSecondsAfterFinished"], 86400);
+        assert_eq!(j["spec"]["ttlSecondsAfterFinished"], UNSEEN_JOB_TTL_SECS);
+        assert_eq!(j["metadata"]["annotations"][DEFAULT_TTL_ANNOTATION], "true");
         assert_eq!(j["spec"]["backoffLimit"], 0);
         let c = &j["spec"]["template"]["spec"]["containers"][0];
         assert_eq!(c["env"][0]["name"], "ORX_SCRIPT");
