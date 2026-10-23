@@ -518,7 +518,7 @@ function TreeRows({
  * (markdown as documents, images and PDFs directly, code as highlighted source). */
 // Module-level so `useQueries` keeps a stable combined result between renders.
 const loadedEntries = (results: { data?: ProjectArtifacts; error: unknown }[]) =>
-  results.map((r) => (r.error ? undefined : r.data?.entries));
+  results.map((r) => (r.error ? undefined : r.data));
 
 export function ArtifactsTab({
   project,
@@ -555,7 +555,7 @@ export function ArtifactsTab({
     const loaded = new Map(loadDirs.map((dir, i) => [dir, loadedDirs[i]]));
     const graft = (list: ArtifactEntry[]): ArtifactEntry[] =>
       list.map((e) => {
-        const children = e.partial ? loaded.get(e.path) : e.children;
+        const children = e.partial ? loaded.get(e.path)?.entries : e.children;
         if (e.partial && !children) return e;
         return children ? { ...e, partial: false, children: graft(children) } : e;
       });
@@ -704,9 +704,9 @@ export function ArtifactsTab({
         <div className="ftree-resizer absolute -end-[3px] top-0 bottom-0 w-1.5 cursor-col-resize z-30 [&:hover]:bg-resizer-hover [&:active]:bg-resizer-hover [@container((max-width:_720px))]:hidden" onPointerDown={resizeTree} />
         <div className="ftree-scroll flex-1 min-h-0 overflow-y-auto file-tree py-1.5 px-0 text-sm">
           {tree(entries)}
-          {artifacts.truncated && (
-            <p className="files-truncated m-0 py-2 px-3.5 text-sm text-muted">{m.artifacts_tab_listing_truncated_the_folder_has_more_artifacts({ limit: (artifacts.limit ?? 2000).toLocaleString(), dir: artifacts.dir })}</p>
-          )}
+          {[artifacts, ...loadedDirs].map((listing, i) => listing?.truncated && (
+            <p key={i} className="files-truncated m-0 py-2 px-3.5 text-sm text-muted">{m.artifacts_tab_listing_truncated_the_folder_has_more_artifacts({ limit: (listing.limit ?? 2000).toLocaleString(), dir: i ? `${artifacts.dir}/${loadDirs[i - 1]}` : artifacts.dir })}</p>
+          ))}
         </div>
       </div>
       {selectedEntry ? (
