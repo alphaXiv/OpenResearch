@@ -152,6 +152,10 @@ pub async fn supervise(_config: &Path) -> Result<()> {
     ))
 }
 
+// Some hosts ship a ~/.config the login user cannot write; installers and orx need one.
+const WRITABLE_CONFIG_HOME: &str = "c=\"${XDG_CONFIG_HOME:-$HOME/.config}\"; \
+     { mkdir -p \"$c\" && [ -w \"$c\" ]; } 2>/dev/null || export XDG_CONFIG_HOME=\"$HOME/.orx/config\"; ";
+
 fn remote_bash_command(script: &str) -> String {
     crate::commands::up_remote::remote_login_orx_cmd(&format!(
         "bash -c {}",
@@ -163,7 +167,7 @@ fn remote_supervisor_command(binary: &str, directory: &str) -> String {
     use super::ssh::sh_quote;
     // An asynchronous `cd && nohup` list keeps the SSH output pipes open.
     format!(
-        "cd {} || exit; nohup {} rental-supervise {} </dev/null > supervisor.log 2>&1 &",
+        "{WRITABLE_CONFIG_HOME}cd {} || exit; nohup {} rental-supervise {} </dev/null > supervisor.log 2>&1 &",
         sh_quote(directory),
         sh_quote(binary),
         sh_quote(&format!("{directory}/rental.json"))
@@ -202,7 +206,7 @@ pub async fn launch(
     let directory = super::openresearch::run_dir(run_id);
     let installer = crate::commands::up_remote::remote_installer(env!("CARGO_PKG_VERSION"));
     let install = format!(
-        "set -eo pipefail; touch \"$HOME/.no_auto_tmux\"; \
+        "set -eo pipefail; {WRITABLE_CONFIG_HOME}touch \"$HOME/.no_auto_tmux\"; \
          if ! command -v uv >/dev/null; then \
          curl --proto '=https' --tlsv1.2 -LsSf https://astral.sh/uv/0.8.22/install.sh | env UV_NO_MODIFY_PATH=1 sh; fi; \
          if ! command -v orx >/dev/null || ! orx rental-supervise --help >/dev/null 2>&1; then {installer}; fi; command -v orx"
@@ -272,6 +276,36 @@ mod tests {
         .await
         .unwrap();
     }
+    #[cfg(unix)]
+    #[test]
+    fn unwritable_config_home_falls_back_under_the_run_root() {
+        use std::os::unix::fs::PermissionsExt;
+        let home = crate::local::git::TemporaryDirectory::new("orx-rental-config").unwrap();
+        let config_home = |home: &Path| {
+            let output = std::process::Command::new("/bin/sh")
+                .args([
+                    "-c",
+                    &format!("{WRITABLE_CONFIG_HOME}printf '%s' \"$XDG_CONFIG_HOME\""),
+                ])
+                .env("HOME", home)
+                .env_remove("XDG_CONFIG_HOME")
+                .output()
+                .unwrap();
+            String::from_utf8(output.stdout).unwrap()
+        };
+        assert_eq!(config_home(home.path()), "");
+        let config = home.path().join(".config");
+        std::fs::set_permissions(&config, std::fs::Permissions::from_mode(0o555)).unwrap();
+        // Root can write anywhere, so the fallback is only observable for other users.
+        if std::fs::write(config.join("probe"), "").is_err() {
+            assert_eq!(
+                config_home(home.path()),
+                format!("{}/.orx/config", home.path().display())
+            );
+        }
+        std::fs::set_permissions(&config, std::fs::Permissions::from_mode(0o755)).unwrap();
+    }
+
     #[cfg(unix)]
     #[test]
     fn cancellation_waits_for_a_pid_or_terminal_acknowledgment() {
