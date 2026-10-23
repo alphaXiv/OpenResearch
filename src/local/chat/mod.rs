@@ -986,8 +986,10 @@ pub struct SavedAttachment {
     pub is_pdf: bool,
 }
 
+pub const ATTACHMENTS_DIR: &str = "chat-attachments";
+
 pub fn attachments_dir() -> Result<std::path::PathBuf> {
-    let dir = crate::store::data_dir().join("chat-attachments");
+    let dir = crate::store::data_dir().join(ATTACHMENTS_DIR);
     std::fs::create_dir_all(&dir)
         .map_err(|e| anyhow!("Could not create {}: {}", dir.display(), e))?;
     Ok(dir)
@@ -1036,6 +1038,15 @@ fn safe_attachment_name(original: Option<&str>, ext: &str) -> String {
         };
     }
     format!("{safe}.{ext}")
+}
+
+/// Matches the `att-<uuid>__<name>.<ext>` names `save_images` mints.
+pub(crate) fn is_attachment_name(name: &str) -> bool {
+    name.starts_with("att-")
+        && !name.contains("..")
+        && name
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '-' | '.'))
 }
 
 /// Decode pasted/uploaded attachments to the attachments dir. The original file

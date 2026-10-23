@@ -6484,7 +6484,7 @@ export function ChatPanel({
                   if (!event.currentTarget.contains(event.relatedTarget)) setFocusedSidebarRow(null);
                 }}
                 className={sidebarScrollable ? "absolute top-0 start-0 w-full" : "relative"}
-                style={{ height: sidebarRowHeight(row), transform: sidebarScrollable ? `translateY(${top}px)` : undefined }}
+                style={{ height: sidebarRowHeight(row), top: sidebarScrollable ? top : undefined }}
               >
                 {row.kind === "project" ? (
                   <div className="group h-9 flex items-end gap-1 rounded-md px-2.5 text-text">
