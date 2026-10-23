@@ -46,6 +46,24 @@ fn log_tail_has_traceback(path: &std::path::Path) -> bool {
     String::from_utf8_lossy(&tail).contains("Traceback (most recent call last):")
 }
 
+/// Warning for a live run that went silent right after an unhandled Python traceback.
+fn traceback_stall(
+    run_id: &str,
+    running: bool,
+    quiet: Duration,
+    log: &std::path::Path,
+) -> Option<String> {
+    // A crashed main thread can leave a non-daemon worker (e.g. vLLM's EngineCore) blocking shutdown.
+    (running && quiet >= TRACEBACK_STALL && log_tail_has_traceback(log)).then(|| {
+        format!(
+            "Run looks stalled: it printed a Python traceback and has written no output for {} \
+             minutes, but its process is still alive. Check `orx logs {run_id}` and cancel the \
+             experiment if it failed.",
+            TRACEBACK_STALL.as_secs() / 60
+        )
+    })
+}
+
 fn open_supervisor_lock(path: &std::path::Path) -> Result<fd_lock::RwLock<std::fs::File>> {
     let file = std::fs::OpenOptions::new()
         .create(true)
@@ -766,18 +784,12 @@ async fn watch_ssh_job(
             log_len = len;
             log_quiet_since = std::time::Instant::now();
         }
-        // A crashed main thread can leave a non-daemon worker (e.g. vLLM's EngineCore) blocking shutdown.
-        let stalled = (observed.as_ref().is_ok_and(|job| job.stage == "RUNNING")
-            && log_quiet_since.elapsed() >= TRACEBACK_STALL
-            && log_tail_has_traceback(&path))
-        .then(|| {
-            format!(
-                "Run looks stalled: it printed a Python traceback and has written no output for {} \
-                 minutes, but its process is still alive. Check `orx logs {run_id}` and cancel the \
-                 experiment if it failed.",
-                TRACEBACK_STALL.as_secs() / 60
-            )
-        });
+        let stalled = traceback_stall(
+            run_id,
+            observed.as_ref().is_ok_and(|job| job.stage == "RUNNING"),
+            log_quiet_since.elapsed(),
+            &path,
+        );
         let reported = error
             .clone()
             .filter(|_| {
@@ -1729,6 +1741,11 @@ mod tests {
         assert!(log_tail_has_traceback(&path));
         std::fs::write(&path, format!("{crash}{}", "x".repeat(20_000))).unwrap();
         assert!(!log_tail_has_traceback(&path));
+        let just_under = TRACEBACK_STALL - Duration::from_secs(1);
+        assert!(traceback_stall("r", true, just_under, &path).is_none());
+        std::fs::write(&path, crash).unwrap();
+        assert!(traceback_stall("r", true, TRACEBACK_STALL, &path).is_some());
+        assert!(traceback_stall("r", false, TRACEBACK_STALL, &path).is_none());
         let _ = std::fs::remove_file(&path);
         assert!(!log_tail_has_traceback(&path));
     }
