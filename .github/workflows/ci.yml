@@ -53,7 +53,7 @@ jobs:
         with:
           node-version: 22
       - name: CI selection and release safety tests
-        run: node --test scripts/ci-changes.test.mjs scripts/ci-workflows.test.mjs scripts/ci-cargo-fetch.test.mjs
+        run: node --test scripts/ci-changes.test.mjs scripts/ci-workflows.test.mjs
       - name: Select checks for changed files
         id: changes
         env:
@@ -144,8 +144,6 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           shared-key: check # Preserve the former Rust job's cache namespace.
-      - name: Prepare cached Cargo dependencies
-        run: bash scripts/ci-cargo-fetch.sh
       - name: Format
         run: |
           cargo fmt --all --check
@@ -196,14 +194,15 @@ jobs:
         with:
           shared-key: linux-app
           save-if: ${{ matrix.mode == 'all' }}
-      - name: Prepare cached Cargo dependencies
-        run: bash scripts/ci-cargo-fetch.sh
       - name: Clippy
         if: matrix.mode != 'build'
         run: cargo clippy --all-targets --locked --features desktop -- -D warnings
       - name: Build
-        if: github.event_name == 'pull_request' && !inputs.release && matrix.mode != 'lint'
-        run: cargo build --locked --features desktop --timings
+        if: github.event_name == 'pull_request' && !inputs.release && matrix.arch == 'x86_64'
+        run: cargo build --locked --features desktop
+      - name: Build ARM
+        if: github.event_name == 'pull_request' && !inputs.release && matrix.mode == 'build'
+        run: cargo rustc --locked --features desktop --bin orx -- -C codegen-units=64
         env:
           RUSTC_LOG: rustc_codegen_ssa::back::link=info
       - name: Test
@@ -234,9 +233,6 @@ jobs:
           workspaces: |
             . -> target
             windows/launcher -> target
-      - name: Prepare cached Cargo dependencies
-        shell: bash
-        run: bash scripts/ci-cargo-fetch.sh Cargo.toml windows/launcher/Cargo.toml
       - name: Clippy
         if: matrix.mode != 'build'
         run: cargo clippy --all-targets --locked -- -D warnings
