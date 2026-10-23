@@ -223,7 +223,8 @@ def dispatch(request):
             file, _ = uploads.pop(request["token"])
         with file:
             file.seek(0)
-            return execute(request["command"], file)
+            return execute(request["command"], file,
+                           120 if request.get("lane") in ("control", "status") else None)
     raise ValueError("Unsupported helper operation")
 
 

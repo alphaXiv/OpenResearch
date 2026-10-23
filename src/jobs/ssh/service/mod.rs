@@ -19,6 +19,7 @@ use super::SshTarget;
 use crate::error::{anyhow, Result};
 
 const VERSION: u32 = 1;
+const UPLOAD_CHUNK: usize = 256 * 1024;
 
 #[derive(Clone, Serialize, Deserialize)]
 struct Endpoint {
@@ -297,8 +298,23 @@ pub(crate) async fn execute_lane(
     input: Option<&[u8]>,
     lane: &str,
 ) -> Result<String> {
-    let value = request(
-        target,
+    let endpoint = ensure().await?;
+    execute_at(&endpoint, target, command, input, lane).await
+}
+
+async fn execute_at(
+    endpoint: &Endpoint,
+    target: &SshTarget,
+    command: &str,
+    input: Option<&[u8]>,
+    lane: &str,
+) -> Result<String> {
+    if let Some(input) = input.filter(|input| input.len() > UPLOAD_CHUNK) {
+        return upload_reader(endpoint, target, command, input, lane).await;
+    }
+    let value = exchange(
+        endpoint,
+        Some(target.clone()),
         json!({"op":"exec", "command":command, "lane":lane,
         "input":base64::engine::general_purpose::STANDARD.encode(input.unwrap_or_default())}),
     )
@@ -329,23 +345,44 @@ fn output(value: Value) -> Result<String> {
 }
 
 pub(crate) async fn upload(target: &SshTarget, command: &str, path: &Path) -> Result<String> {
+    let file = tokio::fs::File::open(path).await?;
+    let endpoint = ensure().await?;
+    upload_reader(&endpoint, target, command, file, "commands").await
+}
+
+async fn upload_reader(
+    endpoint: &Endpoint,
+    target: &SshTarget,
+    command: &str,
+    mut input: impl tokio::io::AsyncRead + Unpin,
+    lane: &str,
+) -> Result<String> {
     use tokio::io::AsyncReadExt;
-    let start = request(target, json!({"op":"upload_start"})).await?;
+    let start = exchange(
+        endpoint,
+        Some(target.clone()),
+        json!({"op":"upload_start", "lane":lane}),
+    )
+    .await?;
     let token = start["token"]
         .as_str()
         .ok_or_else(|| anyhow!("Missing remote upload token"))?;
     let result = async {
-        let mut file = tokio::fs::File::open(path).await?;
-        let mut chunk = vec![0; 256 * 1024];
+        let mut chunk = vec![0; UPLOAD_CHUNK];
         loop {
-            let count = file.read(&mut chunk).await?;
+            let count = input.read(&mut chunk).await?;
             if count == 0 {break;}
-            request(target, json!({"op":"upload_chunk", "token":token, "data":base64::engine::general_purpose::STANDARD.encode(&chunk[..count])})).await?;
+            exchange(endpoint, Some(target.clone()), json!({"op":"upload_chunk", "lane":lane, "token":token, "data":base64::engine::general_purpose::STANDARD.encode(&chunk[..count])})).await?;
         }
-        output(request(target, json!({"op":"upload_commit", "token":token, "command":command})).await?)
+        output(exchange(endpoint, Some(target.clone()), json!({"op":"upload_commit", "lane":lane, "token":token, "command":command})).await?)
     }.await;
     if result.is_err() {
-        let _ = request(target, json!({"op":"upload_abort", "token":token})).await;
+        let _ = exchange(
+            endpoint,
+            Some(target.clone()),
+            json!({"op":"upload_abort", "lane":lane, "token":token}),
+        )
+        .await;
     }
     result
 }
@@ -807,4 +844,76 @@ pub(crate) async fn askpass() -> Result<()> {
             .ok_or_else(|| anyhow!("SSH prompt cancelled"))?
     );
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn large_command_input_crosses_bounded_frames_without_losing_bytes() {
+        let input = (0..2 * 1024 * 1024 + 17)
+            .map(|i| (i % 251) as u8)
+            .collect::<Vec<_>>();
+        let expected = input.clone();
+        let listener = TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0))
+            .await
+            .unwrap();
+        let endpoint = Endpoint {
+            port: listener.local_addr().unwrap().port(),
+            token: "test".into(),
+            version: VERSION,
+        };
+        let server = tokio::spawn(async move {
+            let mut received = Vec::new();
+            loop {
+                let (mut stream, _) = listener.accept().await.unwrap();
+                let request: Request = wire::read(&mut stream).await.unwrap();
+                assert_eq!(request.token, "test");
+                let operation = request.operation;
+                assert_eq!(operation["lane"], "control");
+                let result = match operation["op"].as_str().unwrap() {
+                    "upload_start" => json!({"token":"upload"}),
+                    "upload_chunk" => {
+                        assert_eq!(operation["token"], "upload");
+                        received.extend(
+                            base64::engine::general_purpose::STANDARD
+                                .decode(operation["data"].as_str().unwrap())
+                                .unwrap(),
+                        );
+                        json!({})
+                    }
+                    "upload_commit" => {
+                        assert_eq!(operation["token"], "upload");
+                        assert_eq!(operation["command"], "consume");
+                        assert_eq!(received, expected);
+                        json!({"code":0,"stdout":"YWNjZXB0ZWQ=","stderr":""})
+                    }
+                    other => panic!("Unexpected input operation: {other}"),
+                };
+                wire::write(
+                    &mut stream,
+                    &Response {
+                        value: Some(result),
+                        error: None,
+                    },
+                )
+                .await
+                .unwrap();
+                if operation["op"] == "upload_commit" {
+                    break;
+                }
+            }
+        });
+        let result = execute_at(
+            &endpoint,
+            &SshTarget::alias("lab"),
+            "consume",
+            Some(&input),
+            "control",
+        )
+        .await;
+        assert_eq!(result.unwrap(), "accepted");
+        server.await.unwrap();
+    }
 }

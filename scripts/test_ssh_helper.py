@@ -1,5 +1,6 @@
 import base64
 import json
+import hashlib
 import importlib.util
 import os
 from pathlib import Path
@@ -26,7 +27,11 @@ class DeadlineTest(unittest.TestCase):
             self.assertEqual(execute.call_args[0][2], 120)
             token = helper.dispatch({"op": "upload_start"})["token"]
             helper.dispatch({"op": "upload_commit", "command": "extract", "token": token})
-            self.assertEqual(len(execute.call_args[0]), 2)
+            self.assertIsNone(execute.call_args[0][2])
+            for lane in ("control", "status"):
+                token = helper.dispatch({"op": "upload_start"})["token"]
+                helper.dispatch({"op": "upload_commit", "command": "check", "token": token, "lane": lane})
+                self.assertEqual(execute.call_args[0][2], 120)
 
 
 class LogReadRaceTest(unittest.TestCase):
@@ -240,6 +245,19 @@ class HelperTest(unittest.TestCase):
         self.assertEqual(base64.b64decode(result["stdout"]), b"beta")
         result = self.rpc(op="upload_commit", token=one, command="cat")
         self.assertEqual(base64.b64decode(result["stdout"]), b"alpha")
+
+    def test_multiframe_command_input_preserves_all_bytes(self):
+        data = bytes(range(251)) * 9000
+        token = self.rpc(op="upload_start")["token"]
+        for offset in range(0, len(data), 256 * 1024):
+            self.rpc(op="upload_chunk", token=token,
+                     data=base64.b64encode(data[offset:offset + 256 * 1024]).decode())
+        result = self.rpc(op="upload_commit", token=token, command=
+                          "python3 -c 'import hashlib,sys; print(hashlib.sha256(sys.stdin.buffer.read()).hexdigest())'")
+        self.assertEqual(result["code"], 0)
+        self.assertEqual(base64.b64decode(result["stdout"]).decode().strip(),
+                         hashlib.sha256(data).hexdigest())
+        self.assertEqual(base64.b64decode(result["stderr"]), b"")
 
     def test_slurm_reads_exit_code_from_custom_remote_directory(self):
         directory = Path(self.home.name) / "scratch" / "run-one"
