@@ -106,6 +106,9 @@ pub struct BackendDescriptor {
     pub source_path: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub source_size: Option<u64>,
+    /// The host's storage root at submit; Slurm derives its run dir from it, SSH keeps it for source-cache cleanup.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub remote_root: Option<String>,
 }
 
 impl BackendDescriptor {
@@ -154,7 +157,7 @@ impl BackendDescriptor {
     }
 
     /// The Slurm (host, job id) handle; the login-node host rides on
-    /// `namespace`, and the run dir derives from the run id.
+    /// `namespace`, and the run dir derives from the run id and `remote_root`.
     pub fn slurm_ref(&self) -> Result<(&str, &str)> {
         if self.kind != "slurm_job" {
             return Err(anyhow!("Unsupported backend kind: {}", self.kind));
@@ -295,6 +298,7 @@ mod tests {
             source_digest: None,
             source_path: None,
             source_size: None,
+            remote_root: None,
         }
     }
 

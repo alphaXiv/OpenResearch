@@ -787,10 +787,14 @@ async fn watch_ssh_job(
         let mut job = job;
         let mut exit_code = None;
         if descriptor.rental_lease.is_some() && is_terminal_stage(&job.stage) {
-            exit_code = ssh::ssh_run(&target, &format!("cat \"$HOME/{dir}/exit_code\""), None)
-                .await
-                .ok()
-                .and_then(|value| value.trim().parse::<i64>().ok());
+            exit_code = ssh::ssh_run(
+                &target,
+                &format!("cat {}/exit_code", ssh::shell_path(&dir)),
+                None,
+            )
+            .await
+            .ok()
+            .and_then(|value| value.trim().parse::<i64>().ok());
             if let Some(code) = exit_code {
                 job.stage = if code == 0 { "COMPLETED" } else { "ERROR" }.into();
                 job.message = (code != 0).then(|| format!("exited with code {code}"));
@@ -840,7 +844,7 @@ async fn watch_ssh_job(
             {
                 let _ = ssh::ssh_run(
                     &target,
-                    &format!("touch \"$HOME/{dir}/final_collected\""),
+                    &format!("touch {}/final_collected", ssh::shell_path(&dir)),
                     None,
                 )
                 .await;
@@ -855,8 +859,9 @@ async fn watch_ssh_job(
                 job.message.as_deref().unwrap_or("Container running.")
             );
             let command = format!(
-                "printf '%s\\n' {} >> \"$HOME/{dir}/log\"",
-                ssh::sh_quote(&message)
+                "printf '%s\\n' {} >> {}/log",
+                ssh::sh_quote(&message),
+                ssh::shell_path(&dir)
             );
             match ssh::ssh_run(&target, &command, None).await {
                 Ok(_) => last_message = job.message,
@@ -1131,7 +1136,7 @@ async fn run_openresearch(
                 return Ok(());
             }
             let staged =
-                ssh::stage_source(&target, &run_id, &source.path, &source.digest, None).await;
+                ssh::stage_source(&target, &run_id, &source.path, &source.digest, None, None).await;
             if let Err(err) = staged {
                 eprintln!("supervise {run_id}: source staging failed (will retry): {err}");
                 launch_err = Some(err);
@@ -1144,6 +1149,7 @@ async fn run_openresearch(
                     container: None,
                     target: target.clone(),
                     run_id: run_id.clone(),
+                    remote_root: None,
                     script: script.clone(),
                     env: env.clone(),
                 })
@@ -1358,7 +1364,7 @@ async fn run_slurm(
     let (host, job_id) = descriptor.slurm_ref()?;
     let host = host.to_string();
     let job_id = job_id.to_string();
-    let dir = slurm::run_dir(&run_id);
+    let dir = slurm::run_dir(descriptor.remote_root.as_deref(), &run_id);
 
     eprintln!("supervise {run_id}: watching slurm job {job_id} on {host}");
 
@@ -1382,7 +1388,7 @@ async fn run_slurm(
         if !cancel_sent && local_cancel_requested(&store, &run_id) {
             cancel_slurm(&host, &job_id, &run_id, &mut cancel_sent).await;
         }
-        let mut observed = slurm::inspect_job(&host, &run_id, &job_id).await;
+        let mut observed = slurm::inspect_job(&host, &dir, &job_id).await;
         if let Ok(job) = &mut observed {
             if cancel_sent && job.stage == "GONE" {
                 job.stage = "CANCELED".into();

@@ -2129,9 +2129,19 @@ impl Store {
         )?)
     }
 
+    #[cfg(test)]
+    pub fn delete_local_project(&self, id: &str) -> Result<()> {
+        self.delete_local_project_with(id, None::<fn() -> Result<()>>)
+    }
+
     /// Delete a project, its rows and its run artifacts; its artifacts folder is the caller's. GitHub repo and cache clone are kept.
     /// Blocks up to [`RUN_ARTIFACTS_WAIT`] while a submission or orphan scan holds the artifacts lock.
-    pub fn delete_local_project(&self, id: &str) -> Result<()> {
+    /// `native_purge` runs under the native-deletion lock after run-artifact cleanup, just before the rows go.
+    pub fn delete_local_project_with(
+        &self,
+        id: &str,
+        native_purge: Option<impl FnOnce() -> Result<()>>,
+    ) -> Result<()> {
         let mut lock = self.run_artifacts_lock()?;
         let deadline = std::time::Instant::now() + RUN_ARTIFACTS_WAIT;
         let _guard = loop {
@@ -2155,8 +2165,15 @@ impl Store {
                 "The data directory is being moved; retry project deletion afterwards."
             ));
         }
+        let _native_deletion = native_purge
+            .is_some()
+            .then(|| self.lock_native_deletion())
+            .transpose()?;
         // Keep rows on filesystem errors so deletion can be retried with the same handles.
         self.cleanup_project_run_artifacts(id)?;
+        if let Some(purge) = native_purge {
+            purge()?;
+        }
         let tx = self.begin()?;
         tx.execute(
             "DELETE FROM overleaf_links WHERE project_id = ?1",
@@ -4352,6 +4369,87 @@ mod tests {
         assert!(started.elapsed() >= Duration::from_millis(200));
         holder.join().unwrap();
         assert!(!dir.join("local-runs/run").exists());
+        drop(store);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn refused_project_deletion_never_reaches_the_native_purge() {
+        let dir = std::env::temp_dir().join(format!("orx-delete-order-{}", uuid::Uuid::new_v4()));
+        let store = Store::open_at(dir.clone()).unwrap();
+        project_with_run_artifacts(&store, "project", "run", &"e".repeat(64));
+        let mut session = chat_session_fixture("chat");
+        session.project_id = "project".into();
+        session.harness = "opencode".into();
+        session.native_session_id = Some("native".into());
+        store.create_chat_session(&session).unwrap();
+        let purged = std::cell::Cell::new(false);
+        let purge = || {
+            purged.set(true);
+            Ok(())
+        };
+        let refuse = |reason: &str| {
+            let error = store
+                .delete_local_project_with("project", Some(purge))
+                .unwrap_err();
+            assert!(error.to_string().contains(reason), "{error}");
+            assert!(!purged.get());
+            assert!(store.get_chat_session("chat").unwrap().is_some());
+        };
+
+        store
+            .conn
+            .execute("UPDATE runs SET status = 'running'", [])
+            .unwrap();
+        refuse("in flight");
+        store
+            .conn
+            .execute("UPDATE runs SET status = 'done'", [])
+            .unwrap();
+
+        let staging_lock = store.run_artifacts_lock().unwrap();
+        let staging = staging_lock.read().unwrap();
+        refuse("busy");
+        drop(staging);
+
+        let moving = store.acquire_data_dir_move_lock().unwrap();
+        assert!(store.claim_data_dir_move("move").unwrap());
+        refuse("being moved");
+        store.release_data_dir_move("move").unwrap();
+        drop(moving);
+
+        let native_deletion = store.lock_native_deletion().unwrap();
+        refuse("native chat deletion");
+        drop(native_deletion);
+        assert!(dir.join("local-runs/run/repo/output").is_file());
+
+        #[cfg(unix)]
+        {
+            std::fs::rename(dir.join("local-runs"), dir.join("outside")).unwrap();
+            std::os::unix::fs::symlink(dir.join("outside"), dir.join("local-runs")).unwrap();
+            refuse("Refusing artifact cleanup");
+            std::fs::remove_file(dir.join("local-runs")).unwrap();
+            std::fs::rename(dir.join("outside"), dir.join("local-runs")).unwrap();
+        }
+
+        assert!(store
+            .delete_local_project_with("project", Some(|| Err(anyhow!("purge failed"))))
+            .is_err());
+        assert!(store.get_chat_session("chat").unwrap().is_some());
+
+        store
+            .delete_local_project_with(
+                "project",
+                Some(|| {
+                    assert!(store.run_artifacts_lock()?.try_read().is_err());
+                    assert!(store.lock_native_deletion().is_err());
+                    purge()
+                }),
+            )
+            .unwrap();
+        assert!(purged.get());
+        assert!(store.get_chat_session("chat").unwrap().is_none());
+        assert!(store.get_local_project("project").unwrap().is_none());
         drop(store);
         std::fs::remove_dir_all(dir).unwrap();
     }

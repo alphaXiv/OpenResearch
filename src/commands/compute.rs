@@ -235,6 +235,9 @@ pub struct ConfigureArgs {
     host: Option<String>,
     #[arg(long)]
     container: Option<String>,
+    /// Absolute remote dir for runs and the source cache (SSH per host, or Slurm); default ~/.orx.
+    #[arg(long)]
+    remote_root: Option<String>,
     #[arg(long)]
     default_host: Option<String>,
     #[arg(long)]
@@ -321,7 +324,7 @@ impl ConfigureArgs {
     fn body(self) -> Result<Value> {
         let backend = self.backend.name();
         let allowed: &[&str] = match backend {
-            "ssh" => &["host", "container", "defaultHost"],
+            "ssh" => &["host", "container", "remoteRoot", "defaultHost"],
             "slurm" => &[
                 "host",
                 "partition",
@@ -329,6 +332,7 @@ impl ConfigureArgs {
                 "timeLimit",
                 "cpusPerTask",
                 "mem",
+                "remoteRoot",
             ],
             "k8s" => &["context", "namespace"],
             "ray" => &["address"],
@@ -341,6 +345,7 @@ impl ConfigureArgs {
         for (key, value) in [
             ("host", self.host),
             ("container", self.container),
+            ("remoteRoot", self.remote_root),
             ("defaultHost", self.default_host),
             ("partition", self.partition),
             ("account", self.account),
@@ -389,6 +394,7 @@ impl ConfigureArgs {
                 "time-limit" => "timeLimit",
                 "cpus-per-task" => "cpusPerTask",
                 "default-host" => "defaultHost",
+                "remote-root" => "remoteRoot",
                 other => other,
             };
             if !allowed.contains(&key)
@@ -421,11 +427,14 @@ impl ConfigureArgs {
                 "Supply settings to change; use compute show {backend} to inspect."
             ));
         }
-        if backend == "ssh" && body.contains_key("host") && !body.contains_key("container") {
-            return Err(anyhow!("--host selects a container setting; supply --container or --clear container. Use --default-host to select a default."));
+        let host_setting = body.contains_key("container") || body.contains_key("remoteRoot");
+        if backend == "ssh" && body.contains_key("host") && !host_setting {
+            return Err(anyhow!("--host needs --container, --remote-root, or a matching --clear; use --default-host to pick a default."));
         }
-        if backend == "ssh" && body.contains_key("container") && !body.contains_key("host") {
-            return Err(anyhow!("A container change requires --host."));
+        if backend == "ssh" && host_setting && !body.contains_key("host") {
+            return Err(anyhow!(
+                "A container or remote root change requires --host."
+            ));
         }
         Ok(Value::Object(body))
     }
@@ -766,6 +775,15 @@ mod tests {
             body(&["ssh", "--host", "lab", "--clear", "container"]).unwrap(),
             json!({"host":"lab", "container":null})
         );
+        assert_eq!(
+            body(&["ssh", "--host", "lab", "--remote-root", "/scratch/me/orx"]).unwrap(),
+            json!({"host":"lab", "remoteRoot":"/scratch/me/orx"})
+        );
+        assert_eq!(
+            body(&["slurm", "--clear", "remote-root"]).unwrap(),
+            json!({"remoteRoot":""})
+        );
+        assert!(body(&["ssh", "--remote-root", "/scratch/me/orx"]).is_err());
         assert!(crate::Cli::try_parse_from(["orx", "compute", "status", "--json"]).is_ok());
     }
 }

@@ -22,5 +22,10 @@ orx exp run <expId> --backend slurm
   profile—is used as-is.
 - `--timeout` covers the batch job. Unset falls back to the Slurm time-limit
   setting, then the cluster's limit.
+- Runs and the cached source archive live under `~/.orx` on the cluster unless
+  `orx compute configure slurm --remote-root /scratch/alice/orx` names another
+  absolute directory, such as scratch space when home quota is small. It must
+  be on a filesystem the compute nodes share. Each run keeps the root it was
+  submitted with; `--clear remote-root` restores the default for new runs.
 - A detached `orx supervise` process records scheduler status and logs; do not
   kill it.

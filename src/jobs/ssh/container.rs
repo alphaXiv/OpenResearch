@@ -1,6 +1,6 @@
 use serde::{Deserialize, Serialize};
 
-use super::{sh_quote, ssh_run, JobState, SshTarget};
+use super::{sh_quote, shell_path, ssh_run, JobState, SshTarget};
 use crate::error::{anyhow, Result};
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -215,7 +215,8 @@ pub(super) fn host_script(dir: &str, container: &ContainerRun) -> String {
     let check = sh_quote("{{.State.StartedAt}} {{.State.Status}}");
     let expected = sh_quote(&format!("{} running", container.started_at));
     let id = sh_quote(&container.id);
-    format!("#!/usr/bin/env bash\ncd \"$HOME/{dir}\" || exit 97\nprintf '%s\\n' \"$$\" > pid\n(\nactual=$(docker container inspect --format {check} -- {id}) || exit $?\n[ \"$actual\" = {expected} ] || {{ echo 'Container generation or readiness changed before launch' >&2; exit 97; }}\ndocker exec {id} setsid --wait bash {inner} </dev/null\n) >> log 2>&1\nprintf '%s\\n' \"$?\" > exit_code\n")
+    let dir = shell_path(dir);
+    format!("#!/usr/bin/env bash\ncd {dir} || exit 97\nprintf '%s\\n' \"$$\" > pid\n(\nactual=$(docker container inspect --format {check} -- {id}) || exit $?\n[ \"$actual\" = {expected} ] || {{ echo 'Container generation or readiness changed before launch' >&2; exit 97; }}\ndocker exec {id} setsid --wait bash {inner} </dev/null\n) >> log 2>&1\nprintf '%s\\n' \"$?\" > exit_code\n")
 }
 
 fn failed(message: String) -> JobState {
@@ -226,7 +227,8 @@ fn failed(message: String) -> JobState {
 }
 
 async fn host_state(target: &SshTarget, dir: &str) -> Result<String> {
-    ssh_run(target, &format!(r#"d="$HOME/{dir}"; if [ -f "$d/exit_code" ]; then echo "EXIT $(cat "$d/exit_code")"; elif [ -f "$d/pid" ] && kill -0 "$(cat "$d/pid")" 2>/dev/null; then echo RUNNING; else echo DEAD; fi; if [ -f "$d/launch_time" ]; then echo "$(( $(date +%s) - $(cat "$d/launch_time") ))"; else echo 0; fi"#), None).await
+    let dir = shell_path(dir);
+    ssh_run(target, &format!(r#"d={dir}; if [ -f "$d/exit_code" ]; then echo "EXIT $(cat "$d/exit_code")"; elif [ -f "$d/pid" ] && kill -0 "$(cat "$d/pid")" 2>/dev/null; then echo RUNNING; else echo DEAD; fi; if [ -f "$d/launch_time" ]; then echo "$(( $(date +%s) - $(cat "$d/launch_time") ))"; else echo 0; fi"#), None).await
 }
 
 pub(super) async fn inspect(
@@ -297,7 +299,8 @@ else echo DEAD; fi
             if final_state.stage != "RUNNING" {
                 return Ok(final_state);
             }
-            let waited = ssh_run(target, &format!(r#"d="$HOME/{dir}"; umask 077; if [ ! -f "$d/completion_wait" ]; then date +%s > "$d/completion_wait.tmp" && mv "$d/completion_wait.tmp" "$d/completion_wait"; fi; echo "$(( $(date +%s) - $(cat "$d/completion_wait") ))""#), None).await?;
+            let d = shell_path(dir);
+            let waited = ssh_run(target, &format!(r#"d={d}; umask 077; if [ ! -f "$d/completion_wait" ]; then date +%s > "$d/completion_wait.tmp" && mv "$d/completion_wait.tmp" "$d/completion_wait"; fi; echo "$(( $(date +%s) - $(cat "$d/completion_wait") ))""#), None).await?;
             if waited.trim().parse::<i64>()? >= 30 {
                 let final_state = super::inspect_host_job(target, dir).await?;
                 if final_state.stage != "RUNNING" {

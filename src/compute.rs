@@ -850,6 +850,7 @@ pub async fn submit(args: &crate::ExpRunArgs) -> Result<StoredRun> {
         source_digest: None,
         source_path: None,
         source_size: None,
+        remote_root: None,
     };
     source.0.apply_to_descriptor(&mut descriptor);
     let now = crate::store::now_ms();
@@ -1190,9 +1191,10 @@ pub(crate) mod tests {
                     "lab".into(),
                     SshHostSettings {
                         container: Some("research".into()),
+                        remote_root: Some("/scratch/lab/orx".into()),
                     },
                 ),
-                ("direct".into(), SshHostSettings { container: None }),
+                ("direct".into(), SshHostSettings::default()),
             ]),
         };
         let mut args = tinker_args();
@@ -1219,6 +1221,11 @@ pub(crate) mod tests {
             let (host, options) = crate::jobs::ssh::resolve_options(&args, &settings).unwrap();
             assert_eq!(host, expected_host);
             assert_eq!(options.container.as_deref(), expected_container);
+            assert_eq!(
+                options.remote_root.is_some(),
+                host == "lab",
+                "the saved root follows the host, not the container"
+            );
         }
         args.host = None;
         assert!(crate::jobs::ssh::resolve_options(&args, &SshSettings::default()).is_err());
