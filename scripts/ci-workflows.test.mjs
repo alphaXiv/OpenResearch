@@ -4,6 +4,7 @@ import { readFileSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
 import { execFileSync } from 'node:child_process'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
+import { runInNewContext } from 'node:vm'
 
 const workflow = name => readFileSync(new URL(`../.github/workflows/${name}.yml`, import.meta.url), 'utf8')
 const release = workflow('release')
@@ -72,4 +73,39 @@ test('PR comparison jobs avoid full history downloads without skipping version v
   const version = ci.split('\n  version-guard:')[1]
   assert.match(version, /git fetch --no-tags --depth=1 origin "\$BASE_SHA"/)
   assert.match(version, /git show "\$\{BASE_SHA\}:Cargo.toml"/)
+})
+
+test('Windows PR lanes preserve lint and linking; full validation keeps one cache writer', () => {
+  const windows = ci.split('\n  windows:')[1].split('\n  check:')[0]
+  const modesExpression = windows.match(/mode: \$\{\{ (.+) \}\}/)[1]
+  const steps = [...windows.matchAll(/- name: (.+)\n(?:        if: (.+)\n)?        run: (.+)/g)]
+  const saveExpression = windows.match(/save-if: \$\{\{ (.+) \}\}/)[1]
+  assert.match(windows, /fail-fast: false/)
+  assert.match(windows, /shared-key: windows/)
+  assert.match(ci, /needs: \[changes, frontend, helpers, rust, linux-app, windows\]/)
+  for (const [event, release, expectedModes] of [
+    ['pull_request', false, ['lint', 'build']],
+    ['pull_request', true, ['all']],
+    ['push', false, ['all']],
+    ['workflow_dispatch', false, ['all']],
+    ['workflow_call', true, ['all']],
+  ]) {
+    const context = { github: { event_name: event }, inputs: { release }, fromJSON: JSON.parse }
+    const modes = runInNewContext(modesExpression, context)
+    assert.deepEqual(modes, expectedModes)
+    const commands = []
+    for (const mode of modes) {
+      const lane = { ...context, matrix: { mode } }
+      assert.equal(runInNewContext(saveExpression, lane), mode === 'all')
+      for (const [, , condition, command] of steps) {
+        if (!condition || runInNewContext(condition, lane)) commands.push(command)
+      }
+    }
+    assert.equal(commands.filter(command => command === 'cargo clippy --all-targets --locked -- -D warnings').length, 1)
+    assert.equal(commands.filter(command => command === 'cargo fmt --manifest-path windows/launcher/Cargo.toml --check').length, 1)
+    assert.equal(commands.filter(command => command === 'cargo clippy --manifest-path windows/launcher/Cargo.toml --locked -- -D warnings').length, 1)
+    assert.equal(commands.filter(command => command === 'cargo build --manifest-path windows/launcher/Cargo.toml --locked').length, 1)
+    assert.equal(commands.includes('cargo build --locked'), event === 'pull_request' && !release)
+    assert.equal(commands.includes('cargo test --locked'), event !== 'pull_request' || release)
+  }
 })

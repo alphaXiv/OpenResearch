@@ -205,9 +205,13 @@ jobs:
         run: cargo test --locked --features desktop
 
   windows:
-    name: windows build, test
+    name: windows (${{ matrix.mode }})
     needs: changes
     if: needs.changes.outputs.windows == 'true'
+    strategy:
+      fail-fast: false
+      matrix:
+        mode: ${{ fromJSON(github.event_name == 'pull_request' && !inputs.release && '["lint", "build"]' || '["all"]') }}
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v4
@@ -219,22 +223,28 @@ jobs:
           components: clippy, rustfmt
       - uses: Swatinem/rust-cache@v2
         with:
+          shared-key: windows
+          save-if: ${{ matrix.mode == 'all' }}
           workspaces: |
             . -> target
             windows/launcher -> target
       - name: Clippy
+        if: matrix.mode != 'build'
         run: cargo clippy --all-targets --locked -- -D warnings
       - name: Format app launcher
+        if: matrix.mode != 'build'
         run: cargo fmt --manifest-path windows/launcher/Cargo.toml --check
       - name: Clippy (app launcher)
+        if: matrix.mode != 'build'
         run: cargo clippy --manifest-path windows/launcher/Cargo.toml --locked -- -D warnings
       - name: Build
-        if: github.event_name == 'pull_request' && !inputs.release
+        if: matrix.mode == 'build'
         run: cargo build --locked
       - name: Build app launcher
+        if: matrix.mode != 'lint'
         run: cargo build --manifest-path windows/launcher/Cargo.toml --locked
       - name: Test
-        if: github.event_name != 'pull_request' || inputs.release
+        if: matrix.mode == 'all'
         run: cargo test --locked
 
   check:
