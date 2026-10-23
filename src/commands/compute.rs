@@ -710,6 +710,13 @@ async fn interactive_command(program: &str, args: &[String]) -> Result<()> {
     Ok(())
 }
 
+fn credential_line(value: &str) -> &str {
+    value
+        .strip_suffix("\r\n")
+        .or_else(|| value.strip_suffix('\n'))
+        .unwrap_or(value)
+}
+
 #[cfg(unix)]
 async fn secret_prompt(label: &str) -> Result<String> {
     use std::process::{Command, Stdio};
@@ -749,7 +756,7 @@ async fn secret_prompt(label: &str) -> Result<String> {
         value = tokio::task::spawn_blocking(|| -> Result<String> {
             let mut value = String::new();
             std::io::stdin().read_line(&mut value)?;
-            Ok(value.trim().to_owned())
+            Ok(credential_line(&value).to_owned())
         }) => value?,
         _ = tokio::signal::ctrl_c() => Err(anyhow!("Credential entry cancelled.")),
     }
@@ -763,13 +770,25 @@ async fn secret_prompt(label: &str) -> Result<String> {
             "Credential prompt failed; use --credentials-file instead."
         ));
     }
-    Ok(String::from_utf8(output.stdout)?.trim().to_owned())
+    Ok(credential_line(&String::from_utf8(output.stdout)?).to_owned())
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use clap::Parser;
+
+    #[test]
+    fn credential_entry_preserves_spaces_and_removes_only_the_submitted_newline() {
+        for newline in ["\n", "\r\n", ""] {
+            assert_eq!(
+                credential_line(&format!(" \tsecret \t{newline}")),
+                " \tsecret \t"
+            );
+        }
+        assert_eq!(credential_line("\n"), "");
+        assert_eq!(credential_line("secret\r"), "secret\r");
+    }
 
     #[test]
     fn configuration_rejects_unsupported_and_conflicting_fields() {
