@@ -2124,6 +2124,10 @@ impl Store {
 
     fn data_dir_move_claimed(&self) -> Result<bool> {
         self.clear_stale_data_dir_move_lease()?;
+        self.data_dir_move_lease_exists()
+    }
+
+    fn data_dir_move_lease_exists(&self) -> Result<bool> {
         Ok(self.conn.query_row(
             "SELECT EXISTS (SELECT 1 FROM data_dir_move_lease WHERE id = 1)",
             [],
@@ -2667,10 +2671,12 @@ impl Store {
 
     /// Best effort once the rows are gone; the periodic sweep retries what is left.
     fn remove_unreferenced_chat_attachments(&self, names: std::collections::HashSet<String>) {
-        // Another dashboard may be copying this data directory.
-        if names.is_empty() || self.data_dir_move_claimed().unwrap_or(true) {
+        if names.is_empty() {
             return;
         }
+        let Ok(Some(_move_hold)) = self.hold_off_data_dir_move() else {
+            return;
+        };
         let Ok(referenced) = self.chat_attachment_names_where("1", []) else {
             return;
         };
@@ -2682,24 +2688,40 @@ impl Store {
         }
     }
 
+    /// Keeps any dashboard from starting a data-dir move until dropped; `None` while a move holds or claims it.
+    fn hold_off_data_dir_move(&self) -> Result<Option<std::fs::File>> {
+        if self.data_dir_move_claimed()? {
+            return Ok(None);
+        }
+        // A move takes this lock exclusively before claiming its lease.
+        let hold = open_lifecycle_lock_at(&self.data_dir_move_lock_path)?.into_inner();
+        match hold.try_lock_shared() {
+            Ok(()) => {}
+            Err(std::fs::TryLockError::WouldBlock) => return Ok(None),
+            Err(std::fs::TryLockError::Error(error)) => return Err(error.into()),
+        }
+        Ok((!self.data_dir_move_lease_exists()?).then_some(hold))
+    }
+
     /// Remove attachment files no message shows; returns whether the budget ran out first.
     pub(crate) fn cleanup_orphaned_chat_attachments(&self) -> Result<bool> {
-        // Another dashboard may be copying this data directory.
-        if self.data_dir_move_claimed()? {
+        self.cleanup_orphaned_chat_attachments_within(ORPHAN_PASS_BUDGET)
+    }
+
+    /// The budget starts at the first removal, so every pass makes progress; removed files leave the listing.
+    fn cleanup_orphaned_chat_attachments_within(&self, budget: Duration) -> Result<bool> {
+        let Some(_move_hold) = self.hold_off_data_dir_move()? else {
             return Ok(false);
-        }
+        };
         let entries =
             match std::fs::read_dir(self.data_dir.join(crate::local::chat::ATTACHMENTS_DIR)) {
                 Ok(entries) => entries,
                 Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(false),
                 Err(error) => return Err(error.into()),
             };
-        let mut started = std::time::Instant::now();
+        let mut started = None;
         let mut referenced = None;
         for entry in entries.flatten() {
-            if started.elapsed() >= ORPHAN_PASS_BUDGET {
-                return Ok(true);
-            }
             let Some(name) = entry.file_name().to_str().map(str::to_string) else {
                 continue;
             };
@@ -2712,18 +2734,18 @@ impl Store {
             if !crate::local::chat::is_attachment_name(&name) || settled.is_none() {
                 continue;
             }
-            // Built only once a candidate exists, and kept out of the removal budget.
             let referenced = match &mut referenced {
                 Some(referenced) => referenced,
-                None => {
-                    let names = self.chat_attachment_names_where("1", [])?;
-                    started = std::time::Instant::now();
-                    referenced.insert(names)
-                }
+                None => referenced.insert(self.chat_attachment_names_where("1", [])?),
             };
-            if !referenced.contains(&name) {
-                // A file that cannot be removed is retried next pass without stalling the rest.
-                let _ = std::fs::remove_file(entry.path());
+            if referenced.contains(&name) {
+                continue;
+            }
+            let started = *started.get_or_insert_with(std::time::Instant::now);
+            // A file that cannot be removed is retried next pass without stalling the rest.
+            let _ = std::fs::remove_file(entry.path());
+            if started.elapsed() >= budget {
+                return Ok(true);
             }
         }
         Ok(false)
@@ -4648,11 +4670,35 @@ mod tests {
         store.release_data_dir_move("move").unwrap();
         drop(moving);
 
+        let hold = store.hold_off_data_dir_move().unwrap().unwrap();
+        assert!(store.acquire_data_dir_move_lock().is_err());
+        drop(hold);
+
         assert!(!store.cleanup_orphaned_chat_attachments().unwrap());
         assert!(!attachments.join("att-2__orphan.png").exists());
         for kept in ["att-1__shown.png", "att-3__unsent.png", "notes.txt"] {
             assert!(attachments.join(kept).exists(), "{kept}");
         }
+
+        let orphans = ["att-4__a.png", "att-5__b.png", "att-6__c.png"];
+        for file in orphans {
+            let file = std::fs::File::create(attachments.join(file)).unwrap();
+            file.set_modified(old).unwrap();
+        }
+        let passes = (0..=orphans.len())
+            .take_while(|_| {
+                store
+                    .cleanup_orphaned_chat_attachments_within(Duration::ZERO)
+                    .unwrap()
+            })
+            .count();
+        assert_eq!(
+            passes,
+            orphans.len(),
+            "each exhausted pass still removes one"
+        );
+        assert!(orphans.iter().all(|file| !attachments.join(file).exists()));
+        assert!(attachments.join("att-1__shown.png").exists());
         drop(store);
         std::fs::remove_dir_all(dir).unwrap();
     }
