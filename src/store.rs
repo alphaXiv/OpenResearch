@@ -2173,6 +2173,28 @@ impl Store {
         Ok(())
     }
 
+    /// Runs `f` holding run artifacts shared (excluding deletes), waiting up to [`RUN_ARTIFACTS_WAIT`].
+    pub(crate) fn with_run_artifacts_shared<T>(&self, f: impl FnOnce() -> Result<T>) -> Result<T> {
+        let lock = self.run_artifacts_lock()?;
+        let deadline = std::time::Instant::now() + RUN_ARTIFACTS_WAIT;
+        let _guard = loop {
+            match lock.try_read() {
+                Ok(guard) => break guard,
+                Err(error)
+                    if error.kind() == std::io::ErrorKind::WouldBlock
+                        && std::time::Instant::now() < deadline =>
+                {
+                    std::thread::sleep(RUN_ARTIFACTS_POLL);
+                }
+                Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                    return Err(anyhow!("Run artifacts are busy; retry shortly."))
+                }
+                Err(error) => return Err(error.into()),
+            }
+        };
+        f()
+    }
+
     /// Runs `delete` with exclusive use of run artifacts, waiting up to [`RUN_ARTIFACTS_WAIT`].
     fn while_deleting(&self, noun: &str, delete: impl FnOnce() -> Result<()>) -> Result<()> {
         let mut lock = self.run_artifacts_lock()?;

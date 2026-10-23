@@ -222,6 +222,15 @@ pub fn delete_experiment(store: &Store, id: &str) -> Result<DeletedExperiment> {
 /// Re-parent an experiment under `parent`, or make it a root when `None`.
 /// Returns the pre-move row.
 pub fn move_experiment(store: &Store, id: &str, parent: Option<&str>) -> Result<LocalExperiment> {
+    // Deletes hold this lock exclusively, so a node can't gain a child mid-delete.
+    store.with_run_artifacts_shared(|| move_experiment_locked(store, id, parent))
+}
+
+fn move_experiment_locked(
+    store: &Store,
+    id: &str,
+    parent: Option<&str>,
+) -> Result<LocalExperiment> {
     // Concurrent moves must not both pass the cycle check against the same tree.
     let tx = store.begin_immediate()?;
     let selected = store
@@ -293,6 +302,34 @@ pub fn effective_run_command<'a>(
 /// node — it stays mutable (README, notebooks, publication surface) while
 /// `orx/*` branches hold the experiment nodes' recorded code.
 pub fn create_experiment(
+    store: &Store,
+    project: &LocalProject,
+    parent: Option<&LocalExperiment>,
+    slug: Option<&str>,
+    title: Option<String>,
+    description: Option<String>,
+    run_command: Option<String>,
+) -> Result<LocalExperiment> {
+    // Deletes hold this lock exclusively, so the parent can't be deleted between fork and insert.
+    store.with_run_artifacts_shared(|| {
+        if let Some(p) = parent {
+            if store.get_local_experiment(&p.id)?.is_none() {
+                return Err(anyhow!("Parent experiment {} no longer exists.", p.id));
+            }
+        }
+        create_experiment_locked(
+            store,
+            project,
+            parent,
+            slug,
+            title,
+            description,
+            run_command,
+        )
+    })
+}
+
+fn create_experiment_locked(
     store: &Store,
     project: &LocalProject,
     parent: Option<&LocalExperiment>,
@@ -566,6 +603,28 @@ mod tests {
         move_experiment(&store, "selected", Some("root")).unwrap();
         let back = store.get_local_experiment("selected").unwrap().unwrap();
         assert_eq!(back.parent_experiment_id.as_deref(), Some("root"));
+        // A delete's exclusive artifacts lock keeps the tree still until it finishes.
+        let mut lock = store.run_artifacts_lock().unwrap();
+        let deleting = lock.write().unwrap();
+        assert!(move_experiment(&store, "selected", None)
+            .unwrap_err()
+            .to_string()
+            .contains("busy"));
+        drop(deleting);
+        let mut gone = experiment(None, "orx/gone");
+        gone.id = "gone".into();
+        assert!(create_experiment(
+            &store,
+            &project("main"),
+            Some(&gone),
+            None,
+            None,
+            None,
+            None
+        )
+        .unwrap_err()
+        .to_string()
+        .contains("no longer exists"));
         drop(store);
         let _ = std::fs::remove_dir_all(dir);
     }
