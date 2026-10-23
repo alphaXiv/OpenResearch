@@ -109,3 +109,28 @@ test('Windows PR lanes preserve lint and linking; full validation keeps one cach
     assert.equal(commands.includes('cargo test --locked'), event !== 'pull_request' || release)
   }
 })
+
+test('ARM PR lanes preserve desktop lint and linking; other validation remains combined', () => {
+  const linux = ci.split('\n  linux-app:')[1].split('\n  windows:')[0]
+  const matrixExpression = linux.match(/include: \$\{\{ (.+) \}\}/)[1]
+  const steps = [...linux.matchAll(/- name: (.+)\n(?:        if: (.+)\n)?        run: (.+)/g)]
+  assert.match(linux, /fail-fast: false/)
+  assert.match(linux, /shared-key: linux-app/)
+  assert.match(linux, /save-if: \$\{\{ matrix.mode == 'all' \}\}/)
+  for (const [event, release] of [['pull_request', false], ['pull_request', true], ['push', false], ['workflow_dispatch', false], ['workflow_call', true]]) {
+    const context = { github: { event_name: event }, inputs: { release }, fromJSON: JSON.parse }
+    const rows = runInNewContext(matrixExpression, context)
+    const pr = event === 'pull_request' && !release
+    assert.deepEqual(rows, pr
+      ? [{ arch: 'x86_64', mode: 'all' }, { arch: 'aarch64', mode: 'lint' }, { arch: 'aarch64', mode: 'build' }]
+      : [{ arch: 'x86_64', mode: 'all' }, { arch: 'aarch64', mode: 'all' }])
+    for (const arch of ['x86_64', 'aarch64']) {
+      const commands = rows.filter(row => row.arch === arch).flatMap(matrix => steps
+        .filter(([, , condition]) => !condition || runInNewContext(condition, { ...context, matrix }))
+        .map(([, , , command]) => command))
+      assert.equal(commands.filter(command => command === 'cargo clippy --all-targets --locked --features desktop -- -D warnings').length, 1)
+      assert.equal(commands.filter(command => command === 'cargo build --locked --features desktop --timings').length, pr ? 1 : 0)
+      assert.equal(commands.filter(command => command === 'cargo test --locked --features desktop').length, pr ? 0 : 1)
+    }
+  }
+})

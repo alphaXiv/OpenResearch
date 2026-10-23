@@ -172,18 +172,14 @@ jobs:
           test "$(target/release/orx --no-telemetry version --build-channel)" = "development"
 
   linux-app:
-    name: linux app (${{ matrix.arch }})
+    name: linux app (${{ matrix.arch }}, ${{ matrix.mode }})
     needs: changes
     if: needs.changes.outputs.linux == 'true'
     strategy:
       fail-fast: false
       matrix:
-        include:
-          - arch: x86_64
-            runner: ubuntu-22.04
-          - arch: aarch64
-            runner: ubuntu-22.04-arm
-    runs-on: ${{ matrix.runner }}
+        include: ${{ fromJSON(github.event_name == 'pull_request' && !inputs.release && '[{"arch":"x86_64","mode":"all"},{"arch":"aarch64","mode":"lint"},{"arch":"aarch64","mode":"build"}]' || '[{"arch":"x86_64","mode":"all"},{"arch":"aarch64","mode":"all"}]') }}
+    runs-on: ${{ matrix.arch == 'aarch64' && 'ubuntu-22.04-arm' || 'ubuntu-22.04' }}
     steps:
       - uses: actions/checkout@v4
         with:
@@ -197,13 +193,19 @@ jobs:
         with:
           components: clippy
       - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: linux-app
+          save-if: ${{ matrix.mode == 'all' }}
       - name: Prepare cached Cargo dependencies
         run: bash scripts/ci-cargo-fetch.sh
       - name: Clippy
+        if: matrix.mode != 'build'
         run: cargo clippy --all-targets --locked --features desktop -- -D warnings
       - name: Build
-        if: github.event_name == 'pull_request' && !inputs.release
-        run: cargo build --locked --features desktop
+        if: github.event_name == 'pull_request' && !inputs.release && matrix.mode != 'lint'
+        run: cargo build --locked --features desktop --timings
+        env:
+          RUSTC_LOG: rustc_codegen_ssa::back::link=info
       - name: Test
         if: github.event_name != 'pull_request' || inputs.release
         run: cargo test --locked --features desktop
