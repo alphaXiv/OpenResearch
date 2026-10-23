@@ -21,6 +21,9 @@ pub async fn launch_local_slurm(args: &crate::ExpRunArgs) -> Result<()> {
         backend.namespace.as_deref().unwrap_or(""),
         backend.job_id.as_deref().unwrap_or("")
     );
+    if let Some(partition) = requested_partition(&backend) {
+        println!("  {partition}");
+    }
     if let Some(resources) = requested_resources(&backend) {
         println!("  {resources}");
     }
@@ -30,6 +33,15 @@ pub async fn launch_local_slurm(args: &crate::ExpRunArgs) -> Result<()> {
         crate::invocation::follow_up(&run.experiment_id, &run.id)
     );
     Ok(())
+}
+
+/// The launch-summary line for a Slurm job that named a partition, per run or
+/// from the saved default.
+pub fn requested_partition(backend: &BackendDescriptor) -> Option<String> {
+    backend
+        .partition
+        .as_deref()
+        .map(|partition| format!("partition {partition}"))
 }
 
 /// The launch-summary line for a Slurm job that asked for cores or memory.
@@ -116,6 +128,8 @@ pub async fn submit_local_slurm_with_source(
         Some(m) => Some(slurm::parse_mem(m)?),
         None => None,
     };
+    let partition =
+        slurm::resolve_partition(args.partition.as_deref(), settings.partition.as_deref())?;
 
     let store = Store::open()?;
     let exp = store
@@ -155,7 +169,7 @@ pub async fn submit_local_slurm_with_source(
         command: run_command.clone(),
         env,
         gres: args.flavor.as_deref().and_then(slurm::resolve_gres),
-        partition: settings.partition.clone(),
+        partition: partition.clone(),
         account: settings.account.clone(),
         time_limit_secs,
         cpus_per_task,
@@ -183,6 +197,7 @@ pub async fn submit_local_slurm_with_source(
         timeout_secs: time_limit_secs,
         cpus_per_task,
         mem,
+        partition,
         source_digest: None,
         source_path: None,
         source_size: None,

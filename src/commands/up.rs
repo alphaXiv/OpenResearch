@@ -2235,6 +2235,7 @@ struct CreateRunReq {
     backend: Option<String>,
     cpus: Option<u32>,
     mem: Option<String>,
+    partition: Option<String>,
     flavor: Option<String>,
     host: Option<String>,
     container: Option<String>,
@@ -2267,6 +2268,7 @@ impl CreateRunReq {
             backend: args.backend.clone(),
             cpus: args.cpus,
             mem: args.mem.clone(),
+            partition: args.partition.clone(),
             flavor: args.flavor.clone(),
             host: args.host.clone(),
             container: args.container.clone(),
@@ -2305,6 +2307,7 @@ impl CreateRunReq {
             timeout: self.timeout,
             cpus: self.cpus,
             mem: self.mem,
+            partition: self.partition,
             force: self.force,
             chat_session_id: self.chat_session_id,
             agent_origin: self.agent_origin,
@@ -2322,6 +2325,7 @@ pub(crate) struct RunLaunchSummary {
     pub run_id: String,
     pub experiment_id: String,
     pub job_id: Option<String>,
+    pub slurm_partition: Option<String>,
     pub slurm_resources: Option<String>,
 }
 
@@ -2393,16 +2397,16 @@ pub(crate) async fn submit_run_via_up(
         .and_then(|backend| backend.get("jobId"))
         .and_then(Value::as_str)
         .map(str::to_string);
-    let slurm_resources = response
+    let backend: Option<crate::jobs::BackendDescriptor> = response
         .run
         .backend
-        .and_then(|backend| serde_json::from_value(backend).ok())
-        .and_then(|backend| local::slurm::requested_resources(&backend));
+        .and_then(|backend| serde_json::from_value(backend).ok());
     Ok(RunLaunchSummary {
         run_id: response.run.id,
         experiment_id: args.exp_id.clone(),
         job_id,
-        slurm_resources,
+        slurm_partition: backend.as_ref().and_then(local::slurm::requested_partition),
+        slurm_resources: backend.as_ref().and_then(local::slurm::requested_resources),
     })
 }
 
@@ -9902,6 +9906,7 @@ mod tests {
             timeout: None,
             cpus: Some(8),
             mem: Some("64G".into()),
+            partition: Some("gpu".into()),
             force: true,
             chat_session_id: Some("session-1".into()),
             agent_origin: None,
@@ -9913,6 +9918,7 @@ mod tests {
         assert_eq!(value["experimentId"], "experiment-1");
         assert_eq!(value["cpus"], 8);
         assert_eq!(value["mem"], "64G");
+        assert_eq!(value["partition"], "gpu");
         assert_eq!(value["chatSessionId"], "session-1");
         assert_eq!(value["force"], true);
         let forwarded = serde_json::from_value::<CreateRunReq>(value)
@@ -9920,6 +9926,7 @@ mod tests {
             .into_run_args();
         assert_eq!(forwarded.cpus, Some(8));
         assert_eq!(forwarded.mem.as_deref(), Some("64G"));
+        assert_eq!(forwarded.partition.as_deref(), Some("gpu"));
         assert_eq!(forwarded.chat_session_id.as_deref(), Some("session-1"));
         assert!(forwarded.force);
     }
