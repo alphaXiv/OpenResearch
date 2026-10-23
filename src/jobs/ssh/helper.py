@@ -145,7 +145,7 @@ def slurm_status(jobs):
                 directory = os.path.join(os.path.expanduser("~"), directory)
             with open(os.path.join(directory, "exit_code")) as file:
                 result[run] = "EXIT " + file.read(64).strip()
-        except FileNotFoundError:
+        except (OSError, UnicodeError):
             pending[job_id] = run
     if not pending:
         return result

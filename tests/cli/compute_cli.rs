@@ -331,6 +331,26 @@ fn standalone_settings_defaults_and_instruction_conflicts() {
 #[cfg(unix)]
 #[test]
 fn interactive_ssh_retires_rejected_masters_without_unlinking_unknown_connections() {
+    std::thread::scope(|scope| {
+        for case in [
+            "healthy",
+            "legacy_other",
+            "legacy_unresolvable",
+            "legacy_same",
+            "rejection",
+            "exit_zero",
+            "stop_failure",
+            "probe_timeout",
+            "check_timeout",
+            "stop_timeout",
+        ] {
+            scope.spawn(move || interactive_ssh_case(case));
+        }
+    });
+}
+
+#[cfg(unix)]
+fn interactive_ssh_case(case: &str) {
     use portable_pty::{native_pty_system, CommandBuilder, PtySize};
     use std::io::Read;
     use std::os::unix::fs::PermissionsExt;
@@ -386,19 +406,7 @@ esac
 "#).unwrap();
     std::fs::set_permissions(&ssh, std::fs::Permissions::from_mode(0o755)).unwrap();
 
-    for case in [
-        "healthy",
-        "backoff",
-        "legacy_other",
-        "legacy_unresolvable",
-        "legacy_same",
-        "rejection",
-        "exit_zero",
-        "stop_failure",
-        "probe_timeout",
-        "check_timeout",
-        "stop_timeout",
-    ] {
+    for case in std::iter::once(case).chain((case == "healthy").then_some("backoff")) {
         let _ = std::fs::remove_file(sandbox.0.join("calls"));
         let command = sandbox.command();
         let mut builder = CommandBuilder::new(command.get_program());
@@ -634,7 +642,7 @@ exec python3 "$HOME/ssh-monitor-fixture.py" "$cmd"
     std::fs::set_permissions(&ssh, std::fs::Permissions::from_mode(0o755)).unwrap();
     std::fs::write(
         sandbox.0.join("ssh-monitor-fixture.py"),
-        include_str!("ssh-monitor-fixture.py"),
+        include_str!("../ssh-monitor-fixture.py"),
     )
     .unwrap();
     let phase = sandbox.0.join("phase");

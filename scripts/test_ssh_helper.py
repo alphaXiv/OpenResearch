@@ -250,6 +250,33 @@ class HelperTest(unittest.TestCase):
                 "run": "run-one", "job": "42", "dir": path,
             }]), {"run-one": "EXIT 7"})
 
+    def test_slurm_exit_file_error_does_not_block_other_jobs(self):
+        home = Path(self.home.name)
+        broken = home / ".orx" / "runs" / "run-one"
+        healthy = home / ".orx" / "runs" / "run-two"
+        (broken / "exit_code").mkdir(parents=True)
+        healthy.mkdir(parents=True)
+        (healthy / "exit_code").write_text("0")
+        queue = self.bin / "squeue"
+        queue.write_text("#!/bin/sh\necho '42|RUNNING'\n")
+        queue.chmod(0o700)
+        self.assertEqual(self.rpc(op="slurm", jobs=[
+            {"run": "run-one", "job": "42"}, {"run": "run-two", "job": "43"},
+        ]), {"run-one": "SQ RUNNING", "run-two": "EXIT 0"})
+        queue.write_text("#!/bin/sh\nexit 1\n")
+        accounting = self.bin / "sacct"
+        accounting.write_text("#!/bin/sh\nexit 1\n")
+        accounting.chmod(0o700)
+        self.assertEqual(self.rpc(op="slurm", jobs=[
+            {"run": "run-one", "job": "42"}, {"run": "run-two", "job": "43"},
+        ]), {"run-one": "UNAVAILABLE", "run-two": "EXIT 0"})
+        (broken / "exit_code").rmdir()
+        (broken / "exit_code").write_bytes(b"\xff")
+        queue.write_text("#!/bin/sh\necho '42|RUNNING'\n")
+        self.assertEqual(self.rpc(op="slurm", jobs=[
+            {"run": "run-one", "job": "42"}, {"run": "run-two", "job": "43"},
+        ]), {"run-one": "SQ RUNNING", "run-two": "EXIT 0"})
+
     def test_slurm_batches_and_distinguishes_hidden_from_unavailable(self):
         queue = self.bin / "squeue"
         queue.write_text("#!/bin/sh\necho \"$*\" >> \"$HOME/queue-calls\"\ncase \"$*\" in\n *'-j '*) exit 1;;\n *--all*--states=all*) echo '42|SUSPENDED';;\nesac\n")

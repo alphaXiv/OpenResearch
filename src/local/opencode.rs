@@ -497,12 +497,20 @@ async fn spawn_agent(
 }
 
 pub(crate) async fn verify_generation_models(endpoint: &AgentEndpoint, model: &str) -> Result<()> {
+    verify_generation_models_with_timeout(endpoint, model, Duration::from_secs(30)).await
+}
+
+async fn verify_generation_models_with_timeout(
+    endpoint: &AgentEndpoint,
+    model: &str,
+    timeout: Duration,
+) -> Result<()> {
     let path = match endpoint.protocol {
         Protocol::V1 => "/agent",
         Protocol::V2 => "/api/agent",
     };
     let mut mismatch = None;
-    tokio::time::timeout(Duration::from_secs(30), async {
+    tokio::time::timeout(timeout, async {
         loop {
             let response: Value = endpoint.client.get(format!("{}{path}", endpoint.base_url))
                 .send().await?.error_for_status()?.json().await?;
@@ -1206,10 +1214,72 @@ mod tests {
                     }),
                 );
                 let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
-                let result = verify_generation_models(&endpoint, "custom/selected").await;
+                let result = verify_generation_models_with_timeout(
+                    &endpoint,
+                    "custom/selected",
+                    Duration::from_secs(1),
+                )
+                .await;
                 assert_eq!(result.is_ok(), expected, "{result:?}");
+                if !expected {
+                    assert!(result
+                        .unwrap_err()
+                        .to_string()
+                        .contains("effective title model"));
+                }
                 server.abort();
             }
+        }
+    }
+
+    #[tokio::test]
+    async fn effective_agent_models_wait_for_configuration_to_converge() {
+        use axum::{routing::get, Json, Router};
+        use std::sync::{
+            atomic::{AtomicUsize, Ordering},
+            Arc,
+        };
+
+        for protocol in [Protocol::V1, Protocol::V2] {
+            let polls = Arc::new(AtomicUsize::new(0));
+            let count = polls.clone();
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let endpoint = AgentEndpoint {
+                base_url: format!("http://{}", listener.local_addr().unwrap()),
+                client: crate::net::loopback_client().build().unwrap(),
+                protocol,
+                legacy_v2_api: false,
+            };
+            let path = if protocol == Protocol::V1 {
+                "/agent"
+            } else {
+                "/api/agent"
+            };
+            let app = Router::new().route(path, get(move || {
+                let count = count.clone();
+                async move {
+                    let poll = count.fetch_add(1, Ordering::SeqCst);
+                    let model = if poll == 1 { "managed" } else { "selected" };
+                    let agents = if poll == 0 {
+                        json!([])
+                    } else if protocol == Protocol::V1 {
+                        json!([{"name":"title","model":{"providerID":"custom","modelID":model}}])
+                    } else {
+                        json!([{"id":"title","model":{"providerID":"custom","id":model}}])
+                    };
+                    Json(if protocol == Protocol::V1 { agents } else { json!({"data":agents}) })
+                }
+            }));
+            let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+            verify_generation_models_with_timeout(
+                &endpoint,
+                "custom/selected",
+                Duration::from_secs(5),
+            )
+            .await
+            .unwrap();
+            assert_eq!(polls.load(Ordering::SeqCst), 3);
+            server.abort();
         }
     }
 
