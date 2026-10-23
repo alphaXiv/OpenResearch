@@ -185,9 +185,9 @@ export function BackendLogo({ kind, size = 16 }: { kind: string; size?: number }
 export function BackendBadge({ backend }: { backend: Run["backend"] }) {
   const kind = backendKind(backend);
   const detail = backendDetail(backend);
-  if (!kind) return <span className="backend-badge inline-flex items-center gap-[7px] [&_svg]:flex-none [&_svg]:block [&_.backend-name]:font-medium [&_.backend-detail]:text-muted [&.muted]:text-muted muted text-muted">—</span>;
+  if (!kind) return <span className="backend-badge inline-flex items-center gap-2 [&_svg]:flex-none [&_svg]:block [&_.backend-name]:font-medium [&_.backend-detail]:text-muted [&.muted]:text-muted muted text-muted">—</span>;
   return (
-    <span className="backend-badge inline-flex items-center gap-[7px] [&_svg]:flex-none [&_svg]:block [&_.backend-name]:font-medium [&_.backend-detail]:text-muted [&.muted]:text-muted">
+    <span className="backend-badge inline-flex items-center gap-2 [&_svg]:flex-none [&_svg]:block [&_.backend-name]:font-medium [&_.backend-detail]:text-muted [&.muted]:text-muted">
       <BackendLogo kind={kind} />
       <span className="backend-name">{backendName(kind)}</span>
       {detail && <span className="backend-detail text-sm">{detail}</span>}

@@ -37,7 +37,7 @@ const MODEL_GROUP_CLASS_NAME = [
 const MODEL_MORE_CLASS_NAME = [
   "model-more [&_code]:font-mono [&_code]:text-xs",
   "[&_code]:bg-surface [&_code]:border [&_code]:border-border-variant",
-  "[&_code]:rounded-xs [&_code]:py-px [&_code]:px-[5px] [&_code]:whitespace-nowrap",
+  "[&_code]:rounded-xs [&_code]:py-px [&_code]:px-1 [&_code]:whitespace-nowrap",
   "pt-1 px-2 pb-2 text-sm text-muted",
 ].join(" ");
 
@@ -327,7 +327,7 @@ export function ModelPicker({
           setFilter("");
         }}
       >
-        <ChevronLeft size={15} />
+        <ChevronLeft size={16} />
       </IconButton>
       <span className="min-w-0 flex-1 text-sm font-medium text-text capitalize">{title}</span>
       {page === "models" && (
@@ -337,7 +337,7 @@ export function ModelPicker({
           aria-label={m.settings_page_harnesses()}
           onClick={() => { close(); onOpenSettings(); }}
         >
-          <Settings size={15} aria-hidden="true" />
+          <Settings size={16} aria-hidden="true" />
         </IconButton>
       )}
     </div>
@@ -365,7 +365,7 @@ export function ModelPicker({
               </span>
             )}
           </span>
-          {choice.id === effectiveId && <Check size={13} />}
+          {choice.id === effectiveId && <Check size={14} />}
         </MenuItem>
       ))}
     </div>
@@ -377,7 +377,7 @@ export function ModelPicker({
         ref={triggerRef}
         type="button"
         className={cn(
-          "composer-pill inline-flex h-8 min-w-0 max-w-full items-center gap-[5px] rounded-md px-2 text-sm text-text whitespace-nowrap transition-[background,color] duration-150 ease-standard hover:bg-surface",
+          "composer-pill inline-flex h-8 min-w-0 max-w-full items-center gap-1 rounded-md px-2 text-sm text-text whitespace-nowrap transition-[background,color] duration-150 ease-standard hover:bg-surface",
           className,
         )}
         title={m.a11y_chat_model({ label: `${label}${reasoningLabel ? ` · ${reasoningLabel}` : ""}${speedLabel ? ` · ${speedLabel}` : ""}` })}
@@ -404,7 +404,7 @@ export function ModelPicker({
         <ChevronDown size={14} className="shrink-0 text-muted" />
       </button>
       {open && (
-        <div className="model-menu absolute bottom-[calc(100%_+_8px)] start-0 max-h-100 flex flex-col bg-background border border-border rounded-md shadow-dropdown z-50 overflow-hidden w-72 [&.align-right]:start-auto [&.align-right]:end-0 [&_input]:rounded-none [&_input]:border-0 [&_input]:border-b [&_input]:border-b-border-variant [&_input]:bg-none [&_input]:bg-transparent [&_input]:py-2 [&_input]:px-2.5 [&_input]:text-sm [&_input]:outline-none align-right">
+        <div className="model-menu absolute bottom-[calc(100%_+_8px)] start-0 max-h-100 flex flex-col bg-background border border-border rounded-lg shadow-dropdown z-50 overflow-hidden w-72 [&.align-right]:start-auto [&.align-right]:end-0 [&_input]:rounded-none [&_input]:border-0 [&_input]:border-b [&_input]:border-b-border-variant [&_input]:bg-none [&_input]:bg-transparent [&_input]:py-2 [&_input]:px-2.5 [&_input]:text-sm [&_input]:outline-none align-right">
           {page === "root" && (
             <div className="model-root-menu p-1">
               {menuRow(m.model_picker_model(), label, "models")}
@@ -444,7 +444,7 @@ export function ModelPicker({
                       )}
                     </div>
                     {!harness.agentReady ? (
-                      <div className="model-more [&_code]:font-mono [&_code]:text-xs [&_code]:bg-surface [&_code]:border [&_code]:border-border-variant [&_code]:rounded-xs [&_code]:py-px [&_code]:px-[5px] [&_code]:whitespace-nowrap pt-1 px-2 pb-2 text-sm text-muted model-unavailable leading-normal border-b border-b-border-variant">
+                      <div className="model-more [&_code]:font-mono [&_code]:text-xs [&_code]:bg-surface [&_code]:border [&_code]:border-border-variant [&_code]:rounded-xs [&_code]:py-px [&_code]:px-1 [&_code]:whitespace-nowrap pt-1 px-2 pb-2 text-sm text-muted model-unavailable leading-normal border-b border-b-border-variant">
                         {harness.catalogPending ? m.onboarding_checking() : harness.agentNote ? renderNote(harness.agentNote) : m.model_picker_not_available()}
                       </div>
                     ) : (
@@ -453,7 +453,7 @@ export function ModelPicker({
                           <MenuItem onClick={() => pick(harness, null)}>
                             <span>{m.model_picker_default_model()}</span>
                             {value?.harness === harness.id && value?.model === null && (
-                              <Check size={13} />
+                              <Check size={14} />
                             )}
                           </MenuItem>
                         )}
@@ -469,7 +469,7 @@ export function ModelPicker({
                           >
                             <span>{harnessModelLabel(m)}</span>
                             {value?.harness === harness.id && value?.model === m.id && (
-                              <Check size={13} />
+                              <Check size={14} />
                             )}
                           </MenuItem>
                         ))}
@@ -505,8 +505,8 @@ export function ModelPicker({
                 {harnesses.length === 0 && <div className={MODEL_MORE_CLASS_NAME}>{m.model_picker_detecting_harnesses()}</div>}
               </div>
               {lockHarness && value && harnesses.length > 1 && (
-                <div className="model-locked-note py-[7px] px-3 text-sm text-muted border-t border-t-border-variant">
-                  <Lock size={11} className="inline-block align-baseline me-1" aria-hidden="true" />
+                <div className="model-locked-note py-2 px-3 text-sm text-muted border-t border-t-border-variant">
+                  <Lock size={12} className="inline-block align-baseline me-1" aria-hidden="true" />
                   {m.model_picker_sessions_keep_their_harness_new_chat_to_switch()}
                 </div>
               )}
@@ -737,7 +737,7 @@ export function OptionPicker({
         className={cn(
           variant === "field"
             ? "inline-flex h-9 w-full items-center justify-between gap-2 rounded-md border border-border bg-background px-3 text-sm font-normal text-text transition-colors duration-120 ease-standard hover:bg-surface disabled:opacity-45"
-            : `inline-flex h-8 items-center rounded-md transition-[background,color] duration-150 ease-standard hover:bg-surface ${variant === "pill" ? "composer-pill gap-[5px] px-2 text-sm text-text whitespace-nowrap" : "composer-bare gap-[3px] px-1 text-sm text-text"}`,
+            : `inline-flex h-8 items-center rounded-md transition-[background,color] duration-150 ease-standard hover:bg-surface ${variant === "pill" ? "composer-pill gap-1 px-2 text-sm text-text whitespace-nowrap" : "composer-bare gap-1 px-1 text-sm text-text"}`,
           className,
         )}
         title={title}
@@ -781,9 +781,9 @@ export function OptionPicker({
                     </span>
                   </span>
                 </span>
-                {effectiveId === pinned.id && <Check size={13} />}
+                {effectiveId === pinned.id && <Check size={14} />}
               </MenuItem>
-              <div className="option-sep h-px my-[5px] mx-1 bg-border-variant" />
+              <div className="option-sep h-px m-1 bg-border-variant" />
             </>
           )}
           {visible.map((c, i) => (
@@ -808,7 +808,7 @@ export function OptionPicker({
                 </span>
               </span>
               {effectiveId === c.id ? (
-                <Check size={13} />
+                <Check size={14} />
               ) : (
                 numbered && <span className="option-num text-muted text-xs tabular-nums">{i + 1}</span>
               )}

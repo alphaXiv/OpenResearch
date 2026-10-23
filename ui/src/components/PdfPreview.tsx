@@ -188,7 +188,7 @@ export default function PdfPreview({
         data-tip-align="end"
         onClick={() => viewerRef.current?.decreaseScale()}
       >
-        <Minus size={13} />
+        <Minus size={14} />
       </IconButton>
       <IconButton
         size="small"
@@ -200,7 +200,7 @@ export default function PdfPreview({
           if (viewerRef.current) viewerRef.current.currentScaleValue = "page-width";
         }}
       >
-        <MoveHorizontal size={13} />
+        <MoveHorizontal size={14} />
       </IconButton>
       <IconButton
         size="small"
@@ -209,10 +209,10 @@ export default function PdfPreview({
         data-tip-align="end"
         onClick={() => viewerRef.current?.increaseScale()}
       >
-        <Plus size={13} />
+        <Plus size={14} />
       </IconButton>
-      <div className="flex h-7 w-36 min-w-20 shrink items-center overflow-hidden gap-0.5 rounded-md border border-border bg-background ps-2 pe-0.5 focus-within:border-text">
-        <Search size={13} className="shrink-0 text-muted" />
+      <div className="flex h-7 w-36 min-w-20 shrink items-center overflow-hidden gap-0.5 rounded-md border border-border bg-background ps-2 pe-0.5 focus-within:border-focus-border focus-within:ring-3 focus-within:ring-focus-ring">
+        <Search size={14} className="shrink-0 text-muted" />
         <Input
           ref={findInputRef}
           variant="inline"
@@ -250,7 +250,7 @@ export default function PdfPreview({
           disabled={!query}
           onClick={() => find(query, true, true)}
         >
-          <ChevronUp size={13} />
+          <ChevronUp size={14} />
         </IconButton>
         <IconButton
           size="small"
@@ -261,7 +261,7 @@ export default function PdfPreview({
           disabled={!query}
           onClick={() => find(query, true)}
         >
-          <ChevronDown size={13} />
+          <ChevronDown size={14} />
         </IconButton>
       </div>
       {download && <MediaDownloadButton url={url} name={name} />}
@@ -280,7 +280,7 @@ export default function PdfPreview({
           role="document"
           aria-label={name}
           tabIndex={0}
-          className="absolute inset-0 overflow-auto focus-visible:outline-2 focus-visible:outline-solid focus-visible:outline-text focus-visible:-outline-offset-2"
+          className="absolute inset-0 overflow-auto focus-visible:outline-2 focus-visible:outline-solid focus-visible:outline-focus focus-visible:-outline-offset-2"
         >
           <div className="pdfViewer" />
         </div>

@@ -16,7 +16,7 @@ import {
 import { tabOpenGestureHandlers, type TabOpenIntent } from "../tabPreview";
 
 const FILE_TREE_ROW_CLASS_NAME = [
-  "file-tree-row flex items-center gap-1.5 w-full py-[3px] px-2.5 border-0",
+  "file-tree-row flex items-center gap-1.5 w-full py-1 px-2.5 border-0",
   "bg-transparent text-text text-start cursor-pointer font-[inherit]",
   "[&:hover]:bg-panel [&_>_svg]:shrink-0",
   "[&_>_svg]:text-subtext [&_>_svg.file-tree-chevron]:text-muted",
@@ -24,8 +24,8 @@ const FILE_TREE_ROW_CLASS_NAME = [
 
 const FILE_TREE_CHEVRON_CLASS_NAME = [
   "file-tree-chevron text-muted shrink-0 [button&]:inline-flex",
-  "[button&]:items-center [button&]:justify-center [button&]:w-[13px]",
-  "[button&]:h-[13px] [button&]:p-0 [button&]:border-0 [button&]:bg-transparent",
+  "[button&]:items-center [button&]:justify-center [button&]:size-3.5",
+  "[button&]:p-0 [button&]:border-0 [button&]:bg-transparent",
   "[button&_>_svg]:transition-transform [button&_>_svg]:duration-120 [button&_>_svg]:ease-standard [button&_>_svg.open]:rotate-90",
 ].join(" ");
 
@@ -104,9 +104,9 @@ function DirRow({
         title={path}
       >
         {isOpen ? (
-          <ChevronDown size={13} className={FILE_TREE_CHEVRON_CLASS_NAME} />
+          <ChevronDown size={14} className={FILE_TREE_CHEVRON_CLASS_NAME} />
         ) : (
-          <ChevronRight size={13} className={FILE_TREE_CHEVRON_CLASS_NAME} />
+          <ChevronRight size={14} className={FILE_TREE_CHEVRON_CLASS_NAME} />
         )}
         <span className="file-tree-name flex-1 min-w-0 overflow-hidden text-ellipsis whitespace-nowrap">{name}</span>
       </button>
