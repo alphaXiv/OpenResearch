@@ -300,13 +300,14 @@ pub(super) fn stale_root_sessions(
     Ok(ids)
 }
 
-/// Checkpoints the WAL, then reclaims free pages once they are a tenth of the file while no OpenCode holds it.
+/// Truncates the WAL without waiting on readers, then VACUUMs once free pages are a tenth of the file and no OpenCode holds it.
 pub(super) fn compact(path: &Path) -> Result<()> {
     if inspect(path)? == DatabaseState::Empty {
         return Ok(());
     }
     let path = normalize_path(path)?;
     let connection = Connection::open_with_flags(&path, OpenFlags::SQLITE_OPEN_READ_WRITE)?;
+    connection.busy_timeout(std::time::Duration::ZERO)?;
     let _ = connection.query_row("PRAGMA wal_checkpoint(TRUNCATE)", [], |_| Ok(()));
     let (free, pages): (i64, i64) = connection.query_row(
         "SELECT freelist_count, page_count FROM pragma_freelist_count(), pragma_page_count()",
@@ -323,9 +324,12 @@ pub(super) fn compact(path: &Path) -> Result<()> {
         .read(true)
         .write(true)
         .open(sidecar(&path, ".orx-lock"))?;
+    // Windows' exclusive-open check would see this process's own connection as another user.
+    drop(connection);
     if lock.try_lock().is_err() || ensure_no_external_users(&path).is_err() {
         return Ok(());
     }
+    let connection = Connection::open_with_flags(&path, OpenFlags::SQLITE_OPEN_READ_WRITE)?;
     connection.busy_timeout(std::time::Duration::from_secs(5))?;
     connection.execute_batch("VACUUM;")?;
     let _ = connection.query_row("PRAGMA wal_checkpoint(TRUNCATE)", [], |_| Ok(()));

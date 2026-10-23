@@ -199,29 +199,73 @@ pub fn delete_opencode_sessions(
 /// Removes Claude Code, Codex and Cursor history from orx's isolated homes only, never the user's own.
 pub fn delete_isolated_sessions(
     ids: &std::collections::BTreeSet<String>,
-    retained: &std::collections::BTreeSet<String>,
+    surviving: &std::collections::HashSet<String>,
 ) -> Result<()> {
     if ids.is_empty() {
         return Ok(());
     }
-    remove_isolated_sessions(
-        &crate::store::data_dir().join("agents"),
-        ids.difference(retained),
-    )
+    remove_isolated_sessions(&crate::store::data_dir().join("agents"), ids, surviving)
 }
 
-fn remove_isolated_sessions<'a>(
+/// `surviving` holds every id other chats still record; their Codex sub-agents stay too.
+fn remove_isolated_sessions(
     agents: &Path,
-    ids: impl Iterator<Item = &'a String>,
+    ids: &std::collections::BTreeSet<String>,
+    surviving: &std::collections::HashSet<String>,
 ) -> Result<()> {
+    let mut deleting = ids
+        .iter()
+        .filter(|id| !surviving.contains(*id))
+        .cloned()
+        .collect::<std::collections::HashSet<_>>();
+    let codex = agents.join("codex");
+    // Unreadable spawn edges leave sub-agents to the sweep, which skips Codex until they can be read.
+    if let (Ok(spawned), Ok(kept)) = (
+        codex_spawned_threads(&codex, &deleting),
+        codex_spawned_threads(&codex, surviving),
+    ) {
+        deleting = spawned
+            .into_iter()
+            .filter(|id| !kept.contains(id))
+            .collect();
+    }
     let files = isolated_session_files(agents)?;
-    for id in ids {
+    for id in &deleting {
         for path in files.get(id).into_iter().flatten() {
             remove_session_path(path)?;
         }
     }
     Ok(())
 }
+
+#[derive(Clone, Copy)]
+enum IsolatedHome {
+    Claude,
+    Codex,
+    Cursor,
+}
+
+const ISOLATED_HOMES: [IsolatedHome; 3] = [
+    IsolatedHome::Claude,
+    IsolatedHome::Codex,
+    IsolatedHome::Cursor,
+];
+
+#[derive(Clone, Copy)]
+enum SweepTarget {
+    Home(IsolatedHome),
+    OpenCode,
+}
+
+const SWEEP_ORDER: [SweepTarget; 4] = [
+    SweepTarget::Home(IsolatedHome::Claude),
+    SweepTarget::Home(IsolatedHome::Codex),
+    SweepTarget::Home(IsolatedHome::Cursor),
+    SweepTarget::OpenCode,
+];
+
+/// Rotates which target a sweep pass starts with, so one slow target cannot starve the others.
+static NEXT_SWEEP_TARGET: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
 
 /// Remove orx-launched sessions no chat records once they have settled; returns whether the budget ran out.
 pub(crate) fn sweep_isolated_sessions(
@@ -230,29 +274,53 @@ pub(crate) fn sweep_isolated_sessions(
     settle: std::time::Duration,
     budget: std::time::Duration,
 ) -> Result<bool> {
-    let codex = agents.join("codex");
+    let deadline = std::time::Instant::now() + budget;
     // Without the spawn edges a referenced thread's sub-agents would look orphaned.
-    let codex_readable = match codex_spawned_threads(&codex, &referenced) {
+    let codex_readable = match codex_spawned_threads(&agents.join("codex"), &referenced) {
         Ok(spawned) => {
             referenced.extend(spawned);
             true
         }
         Err(_) => false,
     };
-    let settled = |path: &PathBuf| {
-        std::fs::symlink_metadata(path)
-            .and_then(|metadata| metadata.modified())
-            .is_ok_and(|at| at.elapsed().unwrap_or_default() >= settle)
-    };
-    let sessions = isolated_session_files(agents)?;
-    let started = std::time::Instant::now();
-    for (id, paths) in sessions {
-        if started.elapsed() >= budget {
+    let first = NEXT_SWEEP_TARGET.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let mut failure = None;
+    for step in 0..SWEEP_ORDER.len() {
+        // More work keeps the fast re-run; a failure is reported by a pass that finishes.
+        if std::time::Instant::now() >= deadline {
             return Ok(true);
         }
+        // Each target fails on its own, so an unhealthy one never holds the others back.
+        let swept = match SWEEP_ORDER[(first + step) % SWEEP_ORDER.len()] {
+            SweepTarget::Home(IsolatedHome::Codex) if !codex_readable => Ok(false),
+            SweepTarget::Home(home) => {
+                sweep_isolated_home(agents, home, &referenced, settle, deadline)
+            }
+            SweepTarget::OpenCode => sweep_opencode(agents, &referenced, settle).map(|()| false),
+        };
+        match swept {
+            Ok(true) => return Ok(true),
+            Ok(false) => {}
+            Err(error) => {
+                failure.get_or_insert(error);
+            }
+        }
+    }
+    failure.map_or(Ok(false), Err)
+}
+
+fn sweep_isolated_home(
+    agents: &Path,
+    home: IsolatedHome,
+    referenced: &std::collections::HashSet<String>,
+    settle: std::time::Duration,
+    deadline: std::time::Instant,
+) -> Result<bool> {
+    for (id, paths) in home_session_files(agents, home)? {
         if referenced.contains(&id)
-            || !paths.iter().all(settled)
-            || (!codex_readable && paths.iter().any(|path| path.starts_with(&codex)))
+            || !paths.iter().all(|path| {
+                newest_modified(path).is_some_and(|at| at.elapsed().unwrap_or_default() >= settle)
+            })
         {
             continue;
         }
@@ -260,34 +328,57 @@ pub(crate) fn sweep_isolated_sessions(
             // A path that cannot be removed is retried next pass without stalling the rest.
             let _ = remove_session_path(path);
         }
-    }
-    // After the files, so an unhealthy OpenCode database never holds them back.
-    let database = agents.join("opencode/opencode.db");
-    if !same_home(&database, &opencode_db(NativeStore::Legacy)) {
-        let orphans = opencode_database::stale_root_sessions(&database, settle)?
-            .into_iter()
-            .filter(|id| !referenced.contains(id))
-            .collect::<std::collections::BTreeSet<_>>();
-        if !orphans.is_empty() {
-            let retained = referenced.into_iter().collect();
-            let purged = opencode_database::delete_sessions(
-                std::slice::from_ref(&database),
-                &orphans,
-                &retained,
-            );
-            // A busy database is retried next pass.
-            if let Err(error) = purged {
-                if error
-                    .downcast_ref::<opencode_database::DatabaseBusy>()
-                    .is_none()
-                {
-                    return Err(error);
-                }
-            }
+        // Checked after a removal, so a home whose walk outlasts the budget still progresses.
+        if std::time::Instant::now() >= deadline {
+            return Ok(true);
         }
-        opencode_database::compact(&database)?;
     }
     Ok(false)
+}
+
+fn sweep_opencode(
+    agents: &Path,
+    referenced: &std::collections::HashSet<String>,
+    settle: std::time::Duration,
+) -> Result<()> {
+    let database = agents.join("opencode/opencode.db");
+    if same_home(&database, &opencode_db(NativeStore::Legacy)) {
+        return Ok(());
+    }
+    let orphans = opencode_database::stale_root_sessions(&database, settle)?
+        .into_iter()
+        .filter(|id| !referenced.contains(id))
+        .collect::<std::collections::BTreeSet<_>>();
+    if !orphans.is_empty() {
+        let retained = referenced.iter().cloned().collect();
+        let purged = opencode_database::delete_sessions(
+            std::slice::from_ref(&database),
+            &orphans,
+            &retained,
+        );
+        // A busy database is retried next pass.
+        if let Err(error) = purged {
+            if error
+                .downcast_ref::<opencode_database::DatabaseBusy>()
+                .is_none()
+            {
+                return Err(error);
+            }
+        }
+    }
+    opencode_database::compact(&database)
+}
+
+/// A directory's own mtime misses writes to files already inside it, so the newest one counts.
+fn newest_modified(path: &Path) -> Option<std::time::SystemTime> {
+    let metadata = std::fs::symlink_metadata(path).ok()?;
+    let mut newest = metadata.modified().ok()?;
+    if metadata.is_dir() {
+        for child in child_paths(path).ok()? {
+            newest = newest.max(newest_modified(&child)?);
+        }
+    }
+    Some(newest)
 }
 
 /// A user home pointed at orx's isolated one is the user's, so it is never purged.
@@ -304,6 +395,19 @@ fn isolated_session_files(
     agents: &Path,
 ) -> Result<std::collections::BTreeMap<String, Vec<PathBuf>>> {
     let mut sessions = std::collections::BTreeMap::<String, Vec<PathBuf>>::new();
+    for home in ISOLATED_HOMES {
+        for (id, paths) in home_session_files(agents, home)? {
+            sessions.entry(id).or_default().extend(paths);
+        }
+    }
+    Ok(sessions)
+}
+
+fn home_session_files(
+    agents: &Path,
+    home: IsolatedHome,
+) -> Result<std::collections::BTreeMap<String, Vec<PathBuf>>> {
+    let mut sessions = std::collections::BTreeMap::<String, Vec<PathBuf>>::new();
     let mut add = |id: Option<&str>, path: PathBuf| {
         // Hyphenated only: Claude, Codex and Cursor ids, and nothing else in those trees.
         if let Some(id) = id.filter(|id| id.len() == 36 && uuid::Uuid::parse_str(id).is_ok()) {
@@ -315,62 +419,73 @@ fn isolated_session_files(
             .and_then(|name| name.to_str())
             .map(str::to_string)
     };
-    let claude = agents.join("claude");
-    if !same_home(&claude, &claude_home(NativeStore::Legacy)) {
-        for project in child_dirs(&claude.join("projects"))? {
-            // `<id>.jsonl` is the transcript; a sibling `<id>/` holds its subagents and tool results.
-            for path in child_paths(&project)? {
-                let name = name(&path);
-                add(
-                    name.as_deref()
-                        .map(|name| name.strip_suffix(".jsonl").unwrap_or(name)),
-                    path,
-                );
+    match home {
+        IsolatedHome::Claude => {
+            let claude = agents.join("claude");
+            if same_home(&claude, &claude_home(NativeStore::Legacy)) {
+                return Ok(sessions);
+            }
+            for project in child_dirs(&claude.join("projects"))? {
+                // `<id>.jsonl` is the transcript; a sibling `<id>/` holds its subagents and tool results.
+                for path in child_paths(&project)? {
+                    let name = name(&path);
+                    add(
+                        name.as_deref()
+                            .map(|name| name.strip_suffix(".jsonl").unwrap_or(name)),
+                        path,
+                    );
+                }
+            }
+            for tree in ["session-env", "file-history"] {
+                for path in child_paths(&claude.join(tree))? {
+                    add(name(&path).as_deref(), path);
+                }
             }
         }
-        for tree in ["session-env", "file-history"] {
-            for path in child_paths(&claude.join(tree))? {
+        IsolatedHome::Codex => {
+            let codex = agents.join("codex");
+            if same_home(&codex, &codex_home(NativeStore::Legacy)) {
+                return Ok(sessions);
+            }
+            for tree in ["sessions", "archived_sessions"] {
+                for path in tree_files(&codex.join(tree))? {
+                    // Rollouts are `rollout-<timestamp>-<thread id>.jsonl`.
+                    let stem = name(&path)
+                        .and_then(|name| name.strip_suffix(".jsonl").map(str::to_string));
+                    add(
+                        stem.as_deref()
+                            .and_then(|stem| stem.get(stem.len().saturating_sub(36)..)),
+                        path,
+                    );
+                }
+            }
+        }
+        IsolatedHome::Cursor => {
+            let cursor = agents.join("cursor");
+            if same_home(&cursor, &cursor_home(NativeStore::Legacy)) {
+                return Ok(sessions);
+            }
+            for workspace in child_dirs(&cursor.join("chats"))? {
+                for path in child_paths(&workspace)? {
+                    add(name(&path).as_deref(), path);
+                }
+            }
+            for path in child_paths(&cursor.join("acp-sessions"))? {
                 add(name(&path).as_deref(), path);
             }
-        }
-    }
-    let codex = agents.join("codex");
-    if !same_home(&codex, &codex_home(NativeStore::Legacy)) {
-        for tree in ["sessions", "archived_sessions"] {
-            for path in tree_files(&codex.join(tree))? {
-                // Rollouts are `rollout-<timestamp>-<thread id>.jsonl`.
-                let stem =
-                    name(&path).and_then(|name| name.strip_suffix(".jsonl").map(str::to_string));
-                add(
-                    stem.as_deref()
-                        .and_then(|stem| stem.get(stem.len().saturating_sub(36)..)),
-                    path,
-                );
-            }
-        }
-    }
-    let cursor = agents.join("cursor");
-    if !same_home(&cursor, &cursor_home(NativeStore::Legacy)) {
-        for workspace in child_dirs(&cursor.join("chats"))? {
-            for path in child_paths(&workspace)? {
-                add(name(&path).as_deref(), path);
-            }
-        }
-        for path in child_paths(&cursor.join("acp-sessions"))? {
-            add(name(&path).as_deref(), path);
         }
     }
     Ok(sessions)
 }
 
-/// Threads Codex spawned as sub-agents of the given ones, transitively.
+/// The given threads plus every sub-agent Codex spawned from them, transitively.
 fn codex_spawned_threads(
     codex: &Path,
     parents: &std::collections::HashSet<String>,
-) -> Result<Vec<String>> {
+) -> Result<std::collections::HashSet<String>> {
     let database = codex.join("state_5.sqlite");
     if !database.exists() {
-        return Ok(Vec::new());
+        return Ok(parents.clone());
     }
     let connection = rusqlite::Connection::open_with_flags(
         database,
@@ -1042,21 +1157,45 @@ mod tests {
             write_aged(path, 2 * day);
         }
         write_aged(&fresh, std::time::Duration::ZERO);
+        let active_chat = agents.join("cursor/chats/abc123").join(id(8));
+        write_aged(&active_chat.join("store.db"), std::time::Duration::ZERO);
+        std::fs::File::open(&active_chat)
+            .unwrap()
+            .set_modified(std::time::SystemTime::now() - 2 * day)
+            .unwrap();
+        let (parent, child, kept_child) = (
+            rollout("sessions/2026/09/29", 9),
+            rollout("sessions/2026/09/29", 10),
+            rollout("sessions/2026/09/29", 11),
+        );
+        for path in [&parent, &child, &kept_child] {
+            write_aged(path, 2 * day);
+        }
         let state = rusqlite::Connection::open(agents.join("codex/state_5.sqlite")).unwrap();
         state
-            .execute_batch(&format!(
-                "CREATE TABLE thread_spawn_edges (parent_thread_id TEXT, child_thread_id TEXT, status TEXT);
-                 INSERT INTO thread_spawn_edges VALUES ('{}', '{}', 'done');",
-                id(6),
-                id(7)
-            ))
+            .execute_batch("CREATE TABLE thread_spawn_edges (parent_thread_id TEXT, child_thread_id TEXT, status TEXT);")
             .unwrap();
+        for (parent, child) in [(6, 7), (9, 10), (9, 11)] {
+            state
+                .execute(
+                    "INSERT INTO thread_spawn_edges VALUES (?1, ?2, 'done')",
+                    [id(parent), id(child)],
+                )
+                .unwrap();
+        }
         drop(state);
 
-        remove_isolated_sessions(&agents, [id(1)].iter()).unwrap();
+        let none = std::collections::HashSet::new();
+        remove_isolated_sessions(&agents, &[id(1)].into(), &none).unwrap();
         assert!(deleted.iter().all(|path| !path.exists()));
         assert!(!project.join(id(1)).exists());
         assert!(orphan.exists());
+        remove_isolated_sessions(&agents, &[id(9)].into(), &[id(11)].into()).unwrap();
+        assert!(
+            !parent.exists() && !child.exists(),
+            "sub-agents go with their parent"
+        );
+        assert!(kept_child.exists(), "a surviving chat still records it");
 
         let referenced = || [id(4), id(6)].into_iter().collect();
         assert!(
@@ -1071,6 +1210,7 @@ mod tests {
             &referenced_rollout,
             &spawned_rollout,
             &not_a_session,
+            &active_chat,
         ] {
             assert!(kept.exists(), "{}", kept.display());
         }

@@ -6762,9 +6762,13 @@ impl ChatHost {
         let (ids, retained) = store.native_sessions_for_deletion(session_ids, &["opencode"])?;
         crate::local::native_store::delete_opencode_sessions(&ids, &retained)?;
         // ACP agents keep history in homes orx does not own, so it is left alone.
-        let (ids, retained) =
+        // Survivors span every harness: a Codex sub-agent may be recorded by any other chat.
+        let (ids, _) =
             store.native_sessions_for_deletion(session_ids, &["claude-code", "codex", "cursor"])?;
-        crate::local::native_store::delete_isolated_sessions(&ids, &retained)
+        crate::local::native_store::delete_isolated_sessions(
+            &ids,
+            &store.native_ids_outside(session_ids)?,
+        )
     }
 }
 

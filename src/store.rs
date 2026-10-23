@@ -841,7 +841,7 @@ impl Store {
         // Covers the periodic native-id scan so it never reads the large parts_json.
         conn.execute_batch(
             "CREATE INDEX IF NOT EXISTS idx_chat_messages_native_ids
-             ON chat_messages(base_native_session_id, result_native_session_id);",
+             ON chat_messages(base_native_session_id, result_native_session_id, session_id);",
         )?;
         conn.execute_batch("CREATE TRIGGER IF NOT EXISTS delete_chat_invocation_identities AFTER DELETE ON chat_sessions BEGIN DELETE FROM native_invocation_identities WHERE session_id = OLD.id; END;")?;
         conn.execute_batch("CREATE TRIGGER IF NOT EXISTS delete_acp_session AFTER DELETE ON chat_sessions BEGIN DELETE FROM acp_sessions WHERE session_id = OLD.id; END;")?;
@@ -2767,26 +2767,38 @@ impl Store {
 
     /// Reclaim orx-launched agent history no chat records; returns whether the budget ran out first.
     pub(crate) fn cleanup_orphaned_native_sessions(&self) -> Result<bool> {
-        // Another dashboard may be copying this data directory.
-        if self.data_dir_move_claimed()? {
+        let Some(_move_hold) = self.hold_off_data_dir_move()? else {
             return Ok(false);
-        }
-        let mut query = self.conn.prepare(
-            "SELECT native_session_id FROM chat_sessions WHERE native_session_id IS NOT NULL
-             UNION SELECT base_native_session_id FROM chat_messages
-             WHERE base_native_session_id IS NOT NULL
-             UNION SELECT result_native_session_id FROM chat_messages
-             WHERE result_native_session_id IS NOT NULL",
-        )?;
-        let referenced = query
-            .query_map([], |row| row.get::<_, String>(0))?
-            .collect::<std::result::Result<_, _>>()?;
+        };
         crate::local::native_store::sweep_isolated_sessions(
             &self.data_dir.join("agents"),
-            referenced,
+            self.native_ids_outside(&[])?,
             NATIVE_SESSION_SETTLE,
             ORPHAN_PASS_BUDGET,
         )
+    }
+
+    /// Every native id recorded by chats other than `chat_ids`.
+    pub fn native_ids_outside(
+        &self,
+        chat_ids: &[String],
+    ) -> Result<std::collections::HashSet<String>> {
+        let mut query = self.conn.prepare(
+            "SELECT native_session_id FROM chat_sessions
+             WHERE native_session_id IS NOT NULL AND id NOT IN (SELECT value FROM json_each(?1))
+             UNION SELECT base_native_session_id FROM chat_messages
+             WHERE base_native_session_id IS NOT NULL
+               AND session_id NOT IN (SELECT value FROM json_each(?1))
+             UNION SELECT result_native_session_id FROM chat_messages
+             WHERE result_native_session_id IS NOT NULL
+               AND session_id NOT IN (SELECT value FROM json_each(?1))",
+        )?;
+        let ids = query
+            .query_map([serde_json::to_string(chat_ids)?], |row| {
+                row.get::<_, String>(0)
+            })?
+            .collect::<std::result::Result<_, _>>()?;
+        Ok(ids)
     }
 
     /// `None` clears it, which a fork of the session's very first turn needs:
@@ -5854,6 +5866,34 @@ mod tests {
             .into()
         );
         assert!(retained.is_empty());
+    }
+
+    #[test]
+    fn native_ids_outside_skips_only_the_given_chats() {
+        let dir = crate::local::git::TemporaryDirectory::new("orx-native-outside").unwrap();
+        let store = Store::open_at(dir.path().to_path_buf()).unwrap();
+        for (id, native_id) in [("gone", "own"), ("kept", "other")] {
+            let mut session = chat_session_fixture(id);
+            session.native_session_id = Some(native_id.into());
+            store.create_chat_session(&session).unwrap();
+        }
+        store
+            .conn
+            .execute_batch(
+                "INSERT INTO chat_messages (id, session_id, role, parts_json, created_at,
+                 base_native_session_id, result_native_session_id)
+             VALUES ('a', 'gone', 'assistant', '[]', 1, 'own-base', 'own-result'),
+                    ('b', 'kept', 'assistant', '[]', 1, 'other-base', 'other-result');",
+            )
+            .unwrap();
+        let outside = store.native_ids_outside(&["gone".into()]).unwrap();
+        assert_eq!(
+            outside,
+            ["other", "other-base", "other-result"]
+                .map(String::from)
+                .into()
+        );
+        assert_eq!(store.native_ids_outside(&[]).unwrap().len(), 6);
     }
 
     #[test]
