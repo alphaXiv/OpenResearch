@@ -815,7 +815,9 @@ fn reconcile_link(source: &Path, destination: &Path) -> Result<()> {
     };
     match std::fs::symlink_metadata(destination) {
         Ok(metadata) if metadata.file_type().is_symlink() => {
-            if std::fs::read_link(destination).is_ok_and(|target| target == source) {
+            if !untrusted_link(destination)
+                && std::fs::read_link(destination).is_ok_and(|target| target == source)
+            {
                 write_marker(&marker, source)?;
                 return Ok(());
             }
@@ -833,19 +835,36 @@ fn reconcile_link(source: &Path, destination: &Path) -> Result<()> {
                 preserve_conflict(destination)?;
             }
         }
+        Ok(metadata)
+            if cfg!(windows) && metadata.is_dir() && source.is_dir() && marker.is_file() =>
+        {
+            return Ok(copy_tree(source, destination)?);
+        }
         Ok(_) => {
             preserve_conflict(destination)?;
         }
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
         Err(error) => return Err(error.into()),
     }
-    create_symlink(source, destination).map_err(|error| {
-        anyhow!(
-            "could not link {} to {}: {error}",
-            destination.display(),
-            source.display()
-        )
-    })?;
+    create_symlink(source, destination)
+        .and_then(|()| {
+            if !untrusted_link(destination) {
+                return Ok(());
+            }
+            remove_link(destination)?;
+            if source.is_dir() {
+                copy_tree(source, destination)
+            } else {
+                std::fs::hard_link(source, destination)
+            }
+        })
+        .map_err(|error| {
+            anyhow!(
+                "could not link {} to {}: {error}",
+                destination.display(),
+                source.display()
+            )
+        })?;
     write_marker(&marker, source)?;
     Ok(())
 }
@@ -893,6 +912,47 @@ fn file_hash(path: &Path) -> Result<Option<String>> {
 
 fn write_marker(marker: &Path, source: &Path) -> Result<()> {
     std::fs::write(marker, file_hash(source)?.unwrap_or_default())?;
+    Ok(())
+}
+
+/// Windows' Redirection Guard refuses to traverse reparse points a non-admin created (error 448);
+/// hard links and plain copies are not reparse points.
+#[cfg(windows)]
+fn untrusted_link(path: &Path) -> bool {
+    std::fs::metadata(path)
+        .err()
+        .and_then(|error| error.raw_os_error())
+        == Some(windows_sys::Win32::Foundation::ERROR_UNTRUSTED_MOUNT_POINT as i32)
+}
+
+#[cfg(not(windows))]
+fn untrusted_link(_path: &Path) -> bool {
+    false
+}
+
+/// shortcut: merges the source over the copy on each launch, so deletions in the source are not
+/// mirrored; replace with a real link if Windows ever trusts user-made reparse points again.
+fn copy_tree(source: &Path, destination: &Path) -> std::io::Result<()> {
+    std::fs::create_dir_all(destination)?;
+    for entry in std::fs::read_dir(source)? {
+        let from = entry?.path();
+        let to = destination.join(from.file_name().unwrap_or_default());
+        // A nested link the guard refuses is unreadable to the agent anyway.
+        if untrusted_link(&from) {
+            continue;
+        }
+        if from.is_dir() {
+            copy_tree(&from, &to)?;
+            continue;
+        }
+        let (Ok(old), Ok(new)) = (std::fs::metadata(&to), std::fs::metadata(&from)) else {
+            std::fs::copy(&from, &to)?;
+            continue;
+        };
+        if old.len() != new.len() || old.modified()? != new.modified()? {
+            std::fs::copy(&from, &to)?;
+        }
+    }
     Ok(())
 }
 
@@ -1027,6 +1087,98 @@ mod hard_link_tests {
             .unwrap()
             .file_type()
             .is_symlink());
+        std::fs::remove_dir_all(root).ok();
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn a_copied_directory_picks_up_new_source_files_and_keeps_its_own() {
+        let root = std::env::temp_dir().join(format!("orx-dir-copy-{}", uuid::Uuid::new_v4()));
+        let legacy = root.join("legacy");
+        let isolated = root.join("isolated");
+        let source = legacy.join("skills");
+        let destination = isolated.join("skills");
+        std::fs::create_dir_all(source.join("a")).unwrap();
+        std::fs::write(source.join("a/SKILL.md"), "first").unwrap();
+        copy_tree(&source, &destination).unwrap();
+        std::fs::write(isolated.join("skills.orx-managed-link"), "").unwrap();
+        std::fs::write(destination.join("installed.md"), "mine").unwrap();
+
+        std::fs::write(source.join("a/SKILL.md"), "second!").unwrap();
+        std::fs::write(source.join("new.md"), "new").unwrap();
+        prepare_links(&isolated, &legacy, std::slice::from_ref(&source)).unwrap();
+
+        assert!(!std::fs::symlink_metadata(&destination)
+            .unwrap()
+            .file_type()
+            .is_symlink());
+        assert_eq!(
+            std::fs::read_to_string(destination.join("a/SKILL.md")).unwrap(),
+            "second!"
+        );
+        assert_eq!(
+            std::fs::read_to_string(destination.join("new.md")).unwrap(),
+            "new"
+        );
+        assert_eq!(
+            std::fs::read_to_string(destination.join("installed.md")).unwrap(),
+            "mine"
+        );
+        std::fs::remove_dir_all(root).ok();
+    }
+
+    /// Re-runs itself under the Redirection Guard mitigation, which is process-wide and permanent.
+    /// Links an admin creates stay trusted, so the fallback itself only runs for non-admin users.
+    #[cfg(windows)]
+    #[test]
+    fn untrusted_links_are_replaced_with_hard_links_and_copies() {
+        if std::env::var_os("ORX_TEST_REDIRECTION_GUARD").is_none() {
+            let status = std::process::Command::new(std::env::current_exe().unwrap())
+                .args([
+                    "--exact",
+                    "local::native_store::hard_link_tests::untrusted_links_are_replaced_with_hard_links_and_copies",
+                ])
+                .env("ORX_TEST_REDIRECTION_GUARD", "1")
+                .status()
+                .unwrap();
+            assert!(status.success());
+            return;
+        }
+        let root = std::env::temp_dir().join(format!("orx-untrusted-{}", uuid::Uuid::new_v4()));
+        let legacy = root.join("legacy");
+        let isolated = root.join("isolated");
+        std::fs::create_dir_all(legacy.join("skills")).unwrap();
+        std::fs::write(legacy.join("config.toml"), "config").unwrap();
+        std::fs::write(legacy.join("skills/SKILL.md"), "skill").unwrap();
+        let sources = [legacy.join("config.toml"), legacy.join("skills")];
+        // Links made before the guard was on stand in for a store an older build created.
+        prepare_links(&isolated, &legacy, &sources).unwrap();
+        let enforce: u32 = 1;
+        assert_ne!(
+            unsafe {
+                windows_sys::Win32::System::Threading::SetProcessMitigationPolicy(
+                    windows_sys::Win32::System::Threading::ProcessRedirectionTrustPolicy,
+                    std::ptr::from_ref(&enforce).cast(),
+                    std::mem::size_of_val(&enforce),
+                )
+            },
+            0
+        );
+        prepare_links(&isolated, &legacy, &sources).unwrap();
+
+        for name in ["config.toml", "skills"] {
+            let path = isolated.join(name);
+            assert!(!untrusted_link(&path));
+        }
+
+        assert_eq!(
+            std::fs::read_to_string(isolated.join("config.toml")).unwrap(),
+            "config"
+        );
+        assert_eq!(
+            std::fs::read_to_string(isolated.join("skills/SKILL.md")).unwrap(),
+            "skill"
+        );
         std::fs::remove_dir_all(root).ok();
     }
 }
