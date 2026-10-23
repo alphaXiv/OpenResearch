@@ -4837,7 +4837,8 @@ export function ChatPanel({
   const skillMatches =
     typingCommand && !skillMenuDismissed ? completions : [];
   const skillMenuOpen = skillMatches.length > 0;
-  const activeSkillIdx = Math.min(skillIdx, Math.max(0, skillMatches.length - 1));
+  const selectableSkillIndices = skillMatches.flatMap((skill, index) => skill.disabled ? [] : [index]);
+  const activeSkillIdx = selectableSkillIndices.includes(skillIdx) ? skillIdx : selectableSkillIndices[0] ?? -1;
   useEffect(() => setSkillIdx(0), [slashToken]);
   // `@path` mentions list the checkout the agent works in; the text is sent as typed.
   const mentionContext = bashMode ? null : fileMentionContext(draft, composerCursor);
@@ -7160,12 +7161,13 @@ export function ChatPanel({
                     if (e.key === "ArrowDown" || e.key === "ArrowUp") {
                       e.preventDefault();
                       const delta = e.key === "ArrowDown" ? 1 : -1;
-                      setSkillIdx(
-                        (activeSkillIdx + delta + skillMatches.length) % skillMatches.length,
-                      );
+                      if (activeSkillIdx >= 0) {
+                        const index = selectableSkillIndices.indexOf(activeSkillIdx);
+                        setSkillIdx(selectableSkillIndices[(index + delta + selectableSkillIndices.length) % selectableSkillIndices.length]);
+                      }
                       return;
                     }
-                    if (e.key === "Tab" || e.key === "Enter") {
+                    if ((e.key === "Tab" || e.key === "Enter") && activeSkillIdx >= 0) {
                       e.preventDefault();
                       pickSkill(skillMatches[activeSkillIdx]);
                       return;

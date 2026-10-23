@@ -38,7 +38,7 @@ export function SkillMenu({
             e.preventDefault();
             onPick(s);
           }}
-          onMouseEnter={() => onHover(i)}
+          onMouseEnter={() => { if (!s.disabled) onHover(i); }}
         >
           <CommandIcon name={s.name} className="shrink-0" />
           <span className="skill-name shrink-0">
