@@ -353,8 +353,9 @@ pub fn stream_logs(
     drain: bool,
     sink: &mut (dyn FnMut(&str) + Send),
 ) -> Result<u64> {
-    let content = match std::fs::read_to_string(dir.join("log")) {
-        Ok(c) => c,
+    // Native Windows tools (MATLAB, cmd.exe) write the console code page, not UTF-8.
+    let content = match std::fs::read(dir.join("log")) {
+        Ok(bytes) => String::from_utf8_lossy(&bytes).into_owned(),
         Err(_) => return Ok(skip),
     };
     let mut seen = skip;
@@ -656,6 +657,18 @@ mod tests {
         assert!(!run_alive_via(unrunnable_ps, &dir, "0"));
         // pid 1 always exists: 0 as root, EPERM otherwise.
         assert!(run_alive_via(unrunnable_ps, &dir, "1"));
+    }
+
+    #[test]
+    fn stream_logs_keeps_lines_that_are_not_utf8() {
+        let dir = std::env::temp_dir().join(format!("orx-localbox-log-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("log"), b"iter 1\r\nfinal 25\xf8C\r\nDONE\n").unwrap();
+        let mut lines = Vec::new();
+        let seen = stream_logs(&dir, 0, true, &mut |l| lines.push(l.to_string())).unwrap();
+        std::fs::remove_dir_all(&dir).unwrap();
+        assert_eq!(seen, 3);
+        assert_eq!(lines, ["iter 1", "final 25\u{fffd}C", "DONE"]);
     }
 
     #[test]
