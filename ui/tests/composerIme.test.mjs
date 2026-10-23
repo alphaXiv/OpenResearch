@@ -154,7 +154,7 @@ test("a menu containing only disabled commands leaves Tab available for focus na
   assert.deepEqual(input.calls, [["preventDefault"]]);
 });
 
-test("Enter on typed unsupported compact and its alias reaches the explanation without sending", async () => {
+test("Enter on typed unsupported compact and its alias silently does nothing", async () => {
   const { parseComposerCommand, takesArgument } = await import("../src/composerCommands.ts");
   const declarations = [];
   function find(node) {
@@ -178,7 +178,7 @@ test("Enter on typed unsupported compact and its alias reaches the explanation w
     const input = composer(false, { skillMenuOpen: true, skillMatches, ...skillSelection(skillMatches), send });
     input.press();
     assert.deepEqual(input.calls, [["preventDefault"]]);
-    assert.deepEqual(calls, ["unsupported"]);
+    assert.deepEqual(calls, []);
   }
 });
 
@@ -242,7 +242,7 @@ test("ACP Plan configuration failure keeps the draft and prevents sending", asyn
   }
 });
 
-test("unsupported compaction shows an explanation without requesting an agent turn", async () => {
+test("unsupported compaction silently skips the agent turn", async () => {
   let compact;
   function find(node) {
     if (ts.isFunctionDeclaration(node) && node.name?.text === "compactSession") compact = node;
@@ -267,6 +267,6 @@ test("unsupported compaction shows an explanation without requesting an agent tu
     assert.deepEqual(calls, supportsCompaction ? [
       null, ["compact", "saved-chat"],
       { type: "upsertMessage", sessionId: "saved-chat", message: { id: "marker" }, onlyIfMissing: true },
-    ] : ["unsupported"]);
+    ] : []);
   }
 });

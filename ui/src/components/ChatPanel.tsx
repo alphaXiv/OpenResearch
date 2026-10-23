@@ -5198,10 +5198,7 @@ export function ChatPanel({
       showAlert(m.chat_nothing_to_compact(), "info");
       return;
     }
-    if (!activeHarness?.supportsCompaction) {
-      setSettingsError(m.chat_compact_unsupported());
-      return;
-    }
+    if (!activeHarness?.supportsCompaction) return;
     if (busy) {
       setSettingsError(m.chat_compact_busy());
       return;
