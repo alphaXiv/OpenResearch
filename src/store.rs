@@ -1935,7 +1935,6 @@ impl Store {
         if targets.is_empty() {
             return Ok(false);
         }
-        // A cancelled run is terminal before its process group finishes exiting.
         if crate::jobs::localbox::orphaned_job_is_running(&root.join(id))?
             || self.supervisor_is_held(id)?
         {
@@ -2078,7 +2077,7 @@ impl Store {
         }
         let dir = self.data_dir.join("local-runs").join(id);
         if dir.exists() && crate::jobs::localbox::orphaned_job_is_running(&dir)? {
-            return live("is still running");
+            return live("still has running processes");
         }
         if self.supervisor_is_held(id)? {
             return live("still has a supervisor");
@@ -2132,6 +2131,10 @@ impl Store {
 
     fn data_dir_move_claimed(&self) -> Result<bool> {
         self.clear_stale_data_dir_move_lease()?;
+        self.data_dir_move_lease_exists()
+    }
+
+    fn data_dir_move_lease_exists(&self) -> Result<bool> {
         Ok(self.conn.query_row(
             "SELECT EXISTS (SELECT 1 FROM data_dir_move_lease WHERE id = 1)",
             [],
@@ -2682,10 +2685,12 @@ impl Store {
 
     /// Best effort once the rows are gone; the periodic sweep retries what is left.
     fn remove_unreferenced_chat_attachments(&self, names: std::collections::HashSet<String>) {
-        // Another dashboard may be copying this data directory.
-        if names.is_empty() || self.data_dir_move_claimed().unwrap_or(true) {
+        if names.is_empty() {
             return;
         }
+        let Ok(Some(_move_hold)) = self.hold_off_data_dir_move() else {
+            return;
+        };
         let Ok(referenced) = self.chat_attachment_names_where("1", []) else {
             return;
         };
@@ -2697,24 +2702,40 @@ impl Store {
         }
     }
 
+    /// Keeps any dashboard from starting a data-dir move until dropped; `None` while a move holds or claims it.
+    fn hold_off_data_dir_move(&self) -> Result<Option<std::fs::File>> {
+        if self.data_dir_move_claimed()? {
+            return Ok(None);
+        }
+        // A move takes this lock exclusively before claiming its lease.
+        let hold = open_lifecycle_lock_at(&self.data_dir_move_lock_path)?.into_inner();
+        match hold.try_lock_shared() {
+            Ok(()) => {}
+            Err(std::fs::TryLockError::WouldBlock) => return Ok(None),
+            Err(std::fs::TryLockError::Error(error)) => return Err(error.into()),
+        }
+        Ok((!self.data_dir_move_lease_exists()?).then_some(hold))
+    }
+
     /// Remove attachment files no message shows; returns whether the budget ran out first.
     pub(crate) fn cleanup_orphaned_chat_attachments(&self) -> Result<bool> {
-        // Another dashboard may be copying this data directory.
-        if self.data_dir_move_claimed()? {
+        self.cleanup_orphaned_chat_attachments_within(ORPHAN_PASS_BUDGET)
+    }
+
+    /// The budget starts at the first removal, so every pass makes progress; removed files leave the listing.
+    fn cleanup_orphaned_chat_attachments_within(&self, budget: Duration) -> Result<bool> {
+        let Some(_move_hold) = self.hold_off_data_dir_move()? else {
             return Ok(false);
-        }
+        };
         let entries =
             match std::fs::read_dir(self.data_dir.join(crate::local::chat::ATTACHMENTS_DIR)) {
                 Ok(entries) => entries,
                 Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(false),
                 Err(error) => return Err(error.into()),
             };
-        let mut started = std::time::Instant::now();
+        let mut started = None;
         let mut referenced = None;
         for entry in entries.flatten() {
-            if started.elapsed() >= ORPHAN_PASS_BUDGET {
-                return Ok(true);
-            }
             let Some(name) = entry.file_name().to_str().map(str::to_string) else {
                 continue;
             };
@@ -2727,18 +2748,18 @@ impl Store {
             if !crate::local::chat::is_attachment_name(&name) || settled.is_none() {
                 continue;
             }
-            // Built only once a candidate exists, and kept out of the removal budget.
             let referenced = match &mut referenced {
                 Some(referenced) => referenced,
-                None => {
-                    let names = self.chat_attachment_names_where("1", [])?;
-                    started = std::time::Instant::now();
-                    referenced.insert(names)
-                }
+                None => referenced.insert(self.chat_attachment_names_where("1", [])?),
             };
-            if !referenced.contains(&name) {
-                // A file that cannot be removed is retried next pass without stalling the rest.
-                let _ = std::fs::remove_file(entry.path());
+            if referenced.contains(&name) {
+                continue;
+            }
+            let started = *started.get_or_insert_with(std::time::Instant::now);
+            // A file that cannot be removed is retried next pass without stalling the rest.
+            let _ = std::fs::remove_file(entry.path());
+            if started.elapsed() >= budget {
+                return Ok(true);
             }
         }
         Ok(false)
@@ -4356,6 +4377,8 @@ mod tests {
         store.delete_local_project("deleting-remote").unwrap();
         assert!(remote_snapshot.is_file());
         std::fs::write(run_dir.join("exit_code"), "0").unwrap();
+        // The pid is this test process, whose own group the probe would read as live.
+        std::fs::remove_file(run_dir.join("pid")).unwrap();
         let path = dir.join("run-logs").join(format!("{live}.supervisor.lock"));
         let mut supervisor = open_lifecycle_lock_at(&path).unwrap();
         let guard = supervisor.write().unwrap();
@@ -4376,6 +4399,32 @@ mod tests {
             .join("run-logs")
             .join(format!("{remote}.supervisor.lock"))
             .exists());
+        drop(store);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn orphan_cleanup_keeps_a_finished_run_while_its_process_group_lives() {
+        let dir = std::env::temp_dir().join(format!("orx-group-orphan-{}", uuid::Uuid::new_v4()));
+        let store = Store::open_at(dir.clone()).unwrap();
+        let run = uuid::Uuid::new_v4().to_string();
+        project_with_run_artifacts(&store, "cancelled", &run, &"f".repeat(64));
+        let run_dir = dir.join("local-runs").join(&run);
+        let mut survivor = crate::jobs::localbox::spawn_lingering_group(&run_dir);
+        std::fs::write(run_dir.join("exit_code"), "143").unwrap();
+        let refused = store.delete_local_project("cancelled").unwrap_err();
+        assert!(
+            refused.to_string().contains("still has running processes"),
+            "{refused}"
+        );
+        store.conn.execute("DELETE FROM runs", []).unwrap();
+        store.cleanup_orphaned_run_artifacts().unwrap();
+        assert!(run_dir.join("repo/output").is_file());
+        survivor.kill().unwrap();
+        survivor.wait().unwrap();
+        store.cleanup_orphaned_run_artifacts().unwrap();
+        assert!(!run_dir.exists());
         drop(store);
         std::fs::remove_dir_all(dir).unwrap();
     }
@@ -4659,11 +4708,35 @@ mod tests {
         store.release_data_dir_move("move").unwrap();
         drop(moving);
 
+        let hold = store.hold_off_data_dir_move().unwrap().unwrap();
+        assert!(store.acquire_data_dir_move_lock().is_err());
+        drop(hold);
+
         assert!(!store.cleanup_orphaned_chat_attachments().unwrap());
         assert!(!attachments.join("att-2__orphan.png").exists());
         for kept in ["att-1__shown.png", "att-3__unsent.png", "notes.txt"] {
             assert!(attachments.join(kept).exists(), "{kept}");
         }
+
+        let orphans = ["att-4__a.png", "att-5__b.png", "att-6__c.png"];
+        for file in orphans {
+            let file = std::fs::File::create(attachments.join(file)).unwrap();
+            file.set_modified(old).unwrap();
+        }
+        let passes = (0..=orphans.len())
+            .take_while(|_| {
+                store
+                    .cleanup_orphaned_chat_attachments_within(Duration::ZERO)
+                    .unwrap()
+            })
+            .count();
+        assert_eq!(
+            passes,
+            orphans.len(),
+            "each exhausted pass still removes one"
+        );
+        assert!(orphans.iter().all(|file| !attachments.join(file).exists()));
+        assert!(attachments.join("att-1__shown.png").exists());
         drop(store);
         std::fs::remove_dir_all(dir).unwrap();
     }

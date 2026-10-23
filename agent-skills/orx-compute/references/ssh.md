@@ -32,7 +32,10 @@ orx exp run <expId> --backend ssh --host lab --container research
 orx exp run <expId> --backend ssh --host lab --no-container
 ```
 
-Machine-local SSH settings can save a container name or ID for each host.
+Machine-local SSH settings can save a container name or ID for each host, and
+an absolute remote storage root (`--remote-root /data/alice/orx`) used instead
+of `~/.orx` for that host's runs and cached source archives. Each run keeps the
+root it was launched with.
 A saved default SSH host lets launches omit `--host`.
 These defaults apply only to SSH experiments; dashboards, terminals and coding
 agents still connect directly to the host.
@@ -54,8 +57,8 @@ creation or lifecycle management. `--image` and `--flavor` are unsupported.
 
 The committed source archive is cached on the host, then streamed into the
 container's `$HOME/.orx/runs/<runId>/repo`. Host logs and exit status stay in the
-host's `~/.orx/runs/<runId>/`, so container removal does not erase them. A detached
-supervisor reattaches using the saved container ID and start time; later settings
+host's `<root>/runs/<runId>/` (`~/.orx` unless a remote root is saved), so
+container removal does not erase them. A detached supervisor reattaches using the saved container ID and start time; later settings
 changes cannot redirect an existing run. Do not kill the supervisor.
 
 Cancellation targets only the experiment process group, waits five seconds for

@@ -881,18 +881,30 @@ pub(super) async fn generate(
     prompt: String,
     timeout: Duration,
 ) -> Result<String> {
+    let model = selected_generation_model(model.as_deref())?.to_owned();
+    let (provider, id) = model
+        .split_once('/')
+        .filter(|(provider, id)| !provider.trim().is_empty() && !id.trim().is_empty())
+        .ok_or_else(|| anyhow!("OpenCode V2 needs a model in provider/model form."))?;
+    let body = json!({"prompt":prompt,"model":{"providerID":provider,"id":id}});
     tokio::spawn(async move {
         let db = native_store::prepare_opencode(NativeStore::Isolated)?;
         let lease = crate::local::opencode::prepare_database(&binary, &db).await?;
         let mut cmd = tokio::process::Command::new(&binary.path);
-        crate::local::local_models::prepare_env(&mut cmd, model.as_deref())?;
+        crate::local::local_models::prepare_generation_env(
+            &mut cmd,
+            Some(&model),
+            binary.protocol,
+        )?;
         cmd.env("OPENCODE_DB", lease.path())
             .env("OPENCODE_CONFIG_PROJECT_DISABLE", "1")
             .current_dir(std::env::temp_dir());
         let (mut child, endpoint) = crate::local::opencode::start_server(&binary, cmd).await?;
-        let mut body = json!({"prompt":prompt});
-        if let Some((provider, model)) = model.as_deref().and_then(|model| model.split_once('/')) {
-            body["model"] = json!({"providerID":provider,"id":model});
+        if let Err(error) =
+            crate::local::opencode::verify_generation_models(&endpoint, &model).await
+        {
+            let _ = child.kill().await;
+            return Err(error);
         }
         let result = tokio::time::timeout(timeout, async {
             let response = endpoint
@@ -1075,7 +1087,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn discovery_waits_for_a_cold_v2_catalog() {
+    async fn discovery_waits_for_a_cold_v2_catalog_without_generation() {
         use axum::{routing::get, Json, Router};
         use std::sync::atomic::{AtomicUsize, Ordering};
         use std::sync::Arc;
@@ -1099,7 +1111,14 @@ mod tests {
             .route(
                 "/api/integration",
                 get(|| async { Json(json!({"data":[]})) }),
-            );
+            )
+            .layer(axum::middleware::from_fn(
+                |request: axum::extract::Request, next: axum::middleware::Next| async move {
+                    assert_eq!(request.method(), reqwest::Method::GET);
+                    assert!(["/api/model", "/api/integration"].contains(&request.uri().path()));
+                    next.run(request).await
+                },
+            ));
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let endpoint = AgentEndpoint {
             base_url: format!("http://{}", listener.local_addr().unwrap()),
