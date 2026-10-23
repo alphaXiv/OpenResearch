@@ -30,9 +30,9 @@ orx exp run <expId> --backend slurm
 - Each project's three newest SSH and Slurm runs, counted together across
   hosts and including unfinished ones, stay whole. Once an older finished
   run's log is collected, the running OpenResearch app removes its remote run
-  dir except `tensorboard/`, and while there (and again an hour later), orx's
-  cached source archives that no active run uses and that have been idle for
-  an hour. Anything the job wrote into `repo/` goes with it. To keep every run
+  dir except `tensorboard/`. It also removes orx's cached source archives that
+  no active run uses and that have been idle for an hour, then checks again an
+  hour later. Anything the job wrote into `repo/` goes with it. To keep every run
   on the cluster, set `orx compute configure slurm --keep-remote-runs true`
   (it covers runs not yet cleaned up), or write outputs outside the run dir.
   Deleting a project removes its runs' remote dirs entirely regardless.

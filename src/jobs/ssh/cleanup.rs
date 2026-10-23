@@ -11,7 +11,7 @@ use crate::error::{anyhow, Result};
 use crate::jobs::BackendDescriptor;
 
 /// Cached tars untouched this long are no longer being staged by any orx install.
-const SOURCE_IDLE_MINUTES: u32 = 60;
+pub(crate) const SOURCE_IDLE_MINUTES: i64 = 60;
 const HOST_TIMEOUT: Duration = Duration::from_secs(120);
 
 /// A run's remote dir, checked against the layout orx writes before anything removes it.
@@ -23,8 +23,9 @@ pub struct RemoteRun {
     dir: String,
     /// Docker id and in-container run dir for container runs.
     container: Option<(String, String)>,
-    /// `orx tensorboard` reads a finished run's remote `tensorboard/`; only deletion removes it.
-    keep_tensorboard: bool,
+    /// Queued by a project or experiment delete; otherwise `orx tensorboard` still reads the
+    /// finished run's remote `tensorboard/`, so it stays.
+    deleted: bool,
 }
 
 impl RemoteRun {
@@ -69,7 +70,7 @@ impl RemoteRun {
             root,
             dir,
             container,
-            keep_tensorboard: !deleted,
+            deleted,
         }))
     }
 
@@ -78,7 +79,7 @@ impl RemoteRun {
     }
 
     pub(crate) fn deleted(&self) -> bool {
-        !self.keep_tensorboard
+        self.deleted
     }
 }
 
@@ -99,19 +100,22 @@ fn host_script(
 ) -> String {
     let mut script = format!("{HOST_PROCESS_HELPERS}\n");
     for run in runs {
-        // A container that still exists but can't run the removal (stopped) keeps the run queued.
+        // A container that exists but can't run the removal (stopped), or a Docker daemon that
+        // can't say, keeps the run queued; only a container Docker reports gone counts as cleaned.
         let container_failed = run.container.as_ref().map_or_else(
             || "false".to_string(),
             |(id, dir)| {
                 format!(
-                    "docker container inspect -- {id} </dev/null >/dev/null 2>&1 && \
-                     ! cerr=$(docker exec {id} rm -rf -- {dir} </dev/null 2>&1)",
+                    "{{ if docker container inspect -- {id} </dev/null >/dev/null 2>&1; then \
+                     ! cerr=$(docker exec {id} rm -rf -- {dir} </dev/null 2>&1); \
+                     elif ! command -v docker >/dev/null 2>&1 || docker info </dev/null >/dev/null 2>&1; then false; \
+                     else cerr='Docker is unavailable'; fi; }}",
                     id = sh_quote(id),
                     dir = sh_quote(dir)
                 )
             },
         );
-        let remove = if run.keep_tensorboard {
+        let remove = if !run.deleted {
             "if [ -d \"$d/tensorboard\" ]; then find \"$d\" -mindepth 1 -maxdepth 1 ! -name tensorboard -exec rm -rf -- {} +; else rm -rf -- \"$d\"; fi"
         } else {
             "rm -rf -- \"$d\""
@@ -119,10 +123,10 @@ fn host_script(
         script.push_str(&format!(
             "d={dir}; p=$(cat \"$d/pid\" 2>/dev/null); case \"$p\" in ''|*[!0-9]*) p=;; esac; \
              if [ -n \"$p\" ] && host_group_alive \"$p\"; then echo 'BUSY {id}'; \
-             elif {container_failed}; then \
-             printf 'FAILED {id} container: %s\\n' \"$(printf '%s' \"$cerr\" | head -n 1)\"; \
-             elif err=$({{ {remove}; }} 2>&1); then echo 'REMOVED {id}'; \
-             else printf 'FAILED {id} %s\\n' \"$(printf '%s' \"$err\" | head -n 1)\"; fi\n",
+             else cf=; if {container_failed}; then cf=1; fi; \
+             if ! err=$({{ {remove}; }} 2>&1); then printf 'FAILED {id} %s\\n' \"$(printf '%s' \"$err\" | head -n 1)\"; \
+             elif [ -n \"$cf\" ]; then printf 'FAILED {id} container: %s\\n' \"$(printf '%s' \"$cerr\" | head -n 1)\"; \
+             else echo 'REMOVED {id}'; fi; fi\n",
             dir = shell_path(&run.dir),
             id = run.run_id,
         ));
@@ -149,7 +153,8 @@ fn host_script(
     script
 }
 
-fn parse_outcomes(runs: &[RemoteRun], output: &str) -> BTreeMap<String, Outcome> {
+/// One outcome per run, in `runs` order.
+fn parse_outcomes(runs: &[RemoteRun], output: &str) -> Vec<Outcome> {
     let mut reported = BTreeMap::new();
     for line in output.lines() {
         let mut words = line.splitn(3, ' ');
@@ -166,10 +171,9 @@ fn parse_outcomes(runs: &[RemoteRun], output: &str) -> BTreeMap<String, Outcome>
     }
     runs.iter()
         .map(|run| {
-            let outcome = reported
+            reported
                 .remove(&run.run_id)
-                .unwrap_or_else(|| Outcome::Failed("no result from the host".into()));
-            (run.run_id.clone(), outcome)
+                .unwrap_or_else(|| Outcome::Failed("no result from the host".into()))
         })
         .collect()
 }
@@ -180,7 +184,7 @@ pub async fn clean_host(
     runs: &[RemoteRun],
     roots: &BTreeSet<Option<String>>,
     keep_digests: &BTreeSet<String>,
-) -> Result<BTreeMap<String, Outcome>> {
+) -> Result<Vec<Outcome>> {
     // Over stdin: a large batch would overrun Windows' command-line limit.
     let script = host_script(runs, roots, keep_digests);
     let output = tokio::time::timeout(
@@ -243,6 +247,13 @@ mod tests {
         }
     }
 
+    fn outcomes_by_id(runs: &[RemoteRun], output: &str) -> BTreeMap<String, Outcome> {
+        runs.iter()
+            .map(|run| run.run_id.clone())
+            .zip(parse_outcomes(runs, output))
+            .collect()
+    }
+
     fn run(id: &str, root: Option<&str>, deleted: bool) -> RemoteRun {
         RemoteRun {
             run_id: id.into(),
@@ -250,7 +261,7 @@ mod tests {
             root: root.map(Into::into),
             dir: remote_run_dir(root, id),
             container: None,
-            keep_tensorboard: !deleted,
+            deleted,
         }
     }
 
@@ -317,7 +328,7 @@ mod tests {
         let _ = sleeper.kill();
         let _ = sleeper.wait();
         assert!(out.status.success());
-        let outcomes = parse_outcomes(&batch, &String::from_utf8(out.stdout).unwrap());
+        let outcomes = outcomes_by_id(&batch, &String::from_utf8(out.stdout).unwrap());
         for id in ["done", "never", "charted", "deleted"] {
             assert_eq!(outcomes[id], Outcome::Removed, "{id}");
         }
@@ -344,39 +355,55 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
-    fn a_stopped_container_keeps_its_run_queued() {
+    fn container_runs_stay_queued_until_docker_reports_the_container_gone() {
         use std::os::unix::fs::PermissionsExt as _;
-        let home = crate::local::git::TemporaryDirectory::new("orx-cleanup-container").unwrap();
-        let bin = home.path().join("bin");
-        std::fs::create_dir_all(&bin).unwrap();
-        let docker = bin.join("docker");
-        // Inspect finds the container; exec fails as it does for a stopped one.
-        std::fs::write(
-            &docker,
-            "#!/bin/sh\n[ \"$1\" = container ] && exit 0\necho 'container is not running' >&2\nexit 1\n",
-        )
-        .unwrap();
-        std::fs::set_permissions(&docker, std::fs::Permissions::from_mode(0o755)).unwrap();
-        let mut stopped = run("stopped", None, false);
-        stopped.container = Some(("abc".into(), "/root/.orx/runs/stopped".into()));
-        let dir = home.path().join(".orx/runs/stopped");
-        std::fs::create_dir_all(&dir).unwrap();
-        let path = format!("{}:{}", bin.display(), std::env::var("PATH").unwrap());
-        let out = std::process::Command::new("bash")
-            .args([
-                "-c",
-                &host_script(&[stopped.clone()], &BTreeSet::new(), &BTreeSet::new()),
-            ])
-            .env("HOME", home.path())
-            .env("PATH", path)
-            .output()
+        // (inspect exit, info exit, expected outcome): stopped, removed, daemon down.
+        for (inspect, info, expected) in [
+            (
+                0,
+                0,
+                Outcome::Failed("container: container is not running".into()),
+            ),
+            (1, 0, Outcome::Removed),
+            (
+                1,
+                1,
+                Outcome::Failed("container: Docker is unavailable".into()),
+            ),
+        ] {
+            let home = crate::local::git::TemporaryDirectory::new("orx-cleanup-container").unwrap();
+            let bin = home.path().join("bin");
+            std::fs::create_dir_all(&bin).unwrap();
+            let docker = bin.join("docker");
+            std::fs::write(
+                &docker,
+                format!(
+                    "#!/bin/sh\ncase \"$1\" in container) exit {inspect};; info) exit {info};; esac\n\
+                     echo 'container is not running' >&2\nexit 1\n"
+                ),
+            )
             .unwrap();
-        let outcomes = parse_outcomes(&[stopped], &String::from_utf8(out.stdout).unwrap());
-        assert_eq!(
-            outcomes["stopped"],
-            Outcome::Failed("container: container is not running".into())
-        );
-        assert!(dir.exists());
+            std::fs::set_permissions(&docker, std::fs::Permissions::from_mode(0o755)).unwrap();
+            let mut container = run("c", None, false);
+            container.container = Some(("abc".into(), "/root/.orx/runs/c".into()));
+            let dir = home.path().join(".orx/runs/c");
+            std::fs::create_dir_all(dir.join("repo")).unwrap();
+            let path = format!("{}:{}", bin.display(), std::env::var("PATH").unwrap());
+            let batch = std::slice::from_ref(&container);
+            let out = std::process::Command::new("bash")
+                .args([
+                    "-c",
+                    &host_script(batch, &BTreeSet::new(), &BTreeSet::new()),
+                ])
+                .env("HOME", home.path())
+                .env("PATH", path)
+                .output()
+                .unwrap();
+            let outcomes = outcomes_by_id(batch, &String::from_utf8(out.stdout).unwrap());
+            assert_eq!(outcomes["c"], expected, "inspect {inspect} info {info}");
+            // The host copy goes either way; only the container's copy keeps the run queued.
+            assert!(!dir.exists());
+        }
     }
 
     #[test]
@@ -394,7 +421,7 @@ mod tests {
         )));
         assert!(script.contains("s='/scratch/orx/source';"));
         let batch = [run(RUN, None, false), run("other", None, false)];
-        let outcomes = parse_outcomes(&batch, &format!("FAILED {RUN} rm: Permission denied\n"));
+        let outcomes = outcomes_by_id(&batch, &format!("FAILED {RUN} rm: Permission denied\n"));
         assert_eq!(
             outcomes[RUN],
             Outcome::Failed("rm: Permission denied".into())

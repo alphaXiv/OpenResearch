@@ -555,8 +555,8 @@ fn queue_remote_cleanups(
 /// Failed remote cleanups retry after 5 minutes, doubling up to a day.
 const REMOTE_CLEANUP_RETRY_MS: i64 = 5 * 60 * 1000;
 const REMOTE_CLEANUP_MAX_RETRY_MS: i64 = 24 * 60 * 60 * 1000;
-/// Just past `jobs::ssh::cleanup`'s idle window, so tars a pass had to skip are removable.
-const SOURCE_SWEEP_DELAY_MS: i64 = 61 * 60 * 1000;
+/// Just past the source cache's idle window, so tars a pass had to skip are removable.
+const SOURCE_SWEEP_DELAY_MS: i64 = (crate::jobs::ssh::cleanup::SOURCE_IDLE_MINUTES + 1) * 60 * 1000;
 
 pub struct Store {
     conn: Connection,
@@ -4400,6 +4400,13 @@ mod tests {
         store.defer_remote_cleanup("r2", false, "stale").unwrap();
         store.finish_remote_cleanup("r1", true).unwrap();
         assert_eq!(due(&store).len(), 4);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn source_sweeps_come_due_after_the_idle_window() {
+        let dir = std::env::temp_dir().join(format!("orx-source-sweep-{}", uuid::Uuid::new_v4()));
+        let store = Store::open_at(dir.clone()).unwrap();
         store.schedule_source_sweep("lab", None).unwrap();
         store
             .schedule_source_sweep("lab", Some("/scratch/orx"))
