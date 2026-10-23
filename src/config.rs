@@ -511,6 +511,9 @@ pub fn write_synced_env_vars(values: &[(&str, &str)]) -> Result<()> {
 #[serde(rename_all = "camelCase")]
 pub struct SshHostSettings {
     pub container: Option<String>,
+    /// Absolute storage root for runs and the source cache; `None` is `~/.orx`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub remote_root: Option<String>,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]

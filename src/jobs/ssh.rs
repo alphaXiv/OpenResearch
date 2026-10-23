@@ -7,7 +7,7 @@
 //! polls reuse one TCP session instead of a handshake apiece.
 //! Win32-OpenSSH cannot, so on Windows background calls need an agent key or no passphrase.
 //!
-//! The handle is a remote run directory `~/.orx/runs/<run_id>/` holding:
+//! The handle is a remote run directory `<root>/runs/<run_id>/` (root defaults to `~/.orx`) holding:
 //!   run.sh      the launcher (exported env + snapshot-and-run payload)
 //!   log         merged stdout/stderr
 //!   pid         the detached process-group leader
@@ -83,13 +83,65 @@ fn prepare_control_dir() -> Result<()> {
 pub struct ResolvedLaunch {
     pub target: SshTarget,
     pub container: Option<ContainerRun>,
+    pub remote_root: Option<String>,
 }
 
 pub fn validate_host_options(options: &crate::config::SshHostSettings) -> Result<()> {
     if let Some(reference) = &options.container {
         validate_container_reference(reference)?;
     }
+    if let Some(root) = &options.remote_root {
+        validate_remote_root(root)?;
+    }
     Ok(())
+}
+
+/// A configured remote storage root: absolute and free of shell metacharacters,
+/// so it stays one path however a remote shell or batch script reads it.
+pub fn validate_remote_root(root: &str) -> Result<()> {
+    let components = root.strip_prefix('/').map(|rest| rest.split('/'));
+    let valid = components.is_some_and(|mut components| {
+        components.all(|part| {
+            !matches!(part, "" | "." | "..")
+                && part
+                    .chars()
+                    .all(|c| c.is_ascii_alphanumeric() || "._-+@".contains(c))
+        })
+    });
+    if !valid {
+        return Err(anyhow!(
+            "Remote storage root must be an absolute path like /scratch/<user>/orx (letters, digits, . _ - + @; no trailing slash)."
+        ));
+    }
+    Ok(())
+}
+
+/// A run's remote dir: under the configured root, or `$HOME`-relative by default.
+pub fn remote_run_dir(root: Option<&str>, run_id: &str) -> String {
+    match root {
+        Some(root) => format!("{root}/runs/{run_id}"),
+        None => format!(".orx/runs/{run_id}"),
+    }
+}
+
+fn remote_source_cache(root: Option<&str>, digest: &str) -> String {
+    match root {
+        Some(root) => format!("{root}/source/{digest}.tar"),
+        None => format!(".orx/source/{digest}.tar"),
+    }
+}
+
+/// One shell word for a remote path; relative paths resolve against `$HOME`.
+pub(crate) fn shell_path(path: &str) -> String {
+    if path.starts_with('/') {
+        sh_quote(path)
+    } else {
+        format!("\"$HOME/{path}\"")
+    }
+}
+
+fn parent_dir(path: &str) -> &str {
+    path.rsplit_once('/').map_or(path, |(parent, _)| parent)
 }
 
 pub fn resolve_options(
@@ -111,7 +163,10 @@ pub fn resolve_options(
     } else {
         args.container.clone().or_else(|| saved.container.clone())
     };
-    let options = crate::config::SshHostSettings { container };
+    let options = crate::config::SshHostSettings {
+        container,
+        remote_root: saved.remote_root,
+    };
     validate_host_options(&options)?;
     Ok((host, options))
 }
@@ -133,7 +188,11 @@ pub async fn resolve_launch(args: &crate::ExpRunArgs) -> Result<ResolvedLaunch> 
         Some(reference) => Some(container::resolve(&target, &reference).await?),
         None => None,
     };
-    Ok(ResolvedLaunch { target, container })
+    Ok(ResolvedLaunch {
+        target,
+        container,
+        remote_root: options.remote_root,
+    })
 }
 
 /// An ssh endpoint. The classic ssh backend connects by `~/.ssh/config` alias
@@ -689,9 +748,10 @@ pub async fn stage_source(
     archive: &std::path::Path,
     digest: &str,
     container: Option<&ContainerRun>,
+    root: Option<&str>,
 ) -> Result<String> {
-    let dir = format!(".orx/runs/{run_id}");
-    let cache = format!(".orx/source/{digest}.tar");
+    let dir = remote_run_dir(root, run_id);
+    let cache = remote_source_cache(root, digest);
     let size = tokio::fs::metadata(archive).await?.len();
     let (check, upload) = source_cache_commands(&cache, size);
     if ssh_run(target, &check, None).await?.trim() != "present" {
@@ -705,15 +765,21 @@ pub async fn stage_source(
         container.require_running(target).await?;
         let path = sh_quote(&container.run_dir);
         let extract = container.exec(&format!("set -e; umask 077; mkdir -p {path}/repo; chmod 700 {path} {path}/repo; tar -xf - -C {path}/repo"));
+        let (d, cache) = (shell_path(&dir), shell_path(&cache));
         // Start the bound here too: submission may fail before detached launch.
-        ssh_run(target, &format!("umask 077; mkdir -p \"$HOME/{dir}\" && chmod 700 \"$HOME/{dir}\" && {extract} < \"$HOME/{cache}\" && date +%s > \"$HOME/{dir}/launch_time.tmp\" && mv \"$HOME/{dir}/launch_time.tmp\" \"$HOME/{dir}/launch_time\""), None).await?;
+        ssh_run(target, &format!("umask 077; mkdir -p {d} && chmod 700 {d} && {extract} < {cache} && date +%s > {d}/launch_time.tmp && mv {d}/launch_time.tmp {d}/launch_time"), None).await?;
     } else {
+        let (runs, d, cache) = (
+            shell_path(parent_dir(&dir)),
+            shell_path(&dir),
+            shell_path(&cache),
+        );
         ssh_run(
             target,
             &format!(
-                "umask 077; mkdir -p \"$HOME/.orx/runs\" \"$HOME/{dir}/repo\"; \
-             chmod 700 \"$HOME/.orx/runs\" \"$HOME/{dir}\" \"$HOME/{dir}/repo\"; \
-             tar -xf \"$HOME/{cache}\" -C \"$HOME/{dir}/repo\""
+                "umask 077; mkdir -p {runs} {d}/repo; \
+             chmod 700 {runs} {d} {d}/repo; \
+             tar -xf {cache} -C {d}/repo"
             ),
             None,
         )
@@ -726,12 +792,13 @@ pub async fn stage_source(
 /// still lets `cat` exit 0 on EOF, so both sides require the exact byte length;
 /// a short cached file reads as absent and is replaced by the next upload.
 fn source_cache_commands(cache: &str, size: u64) -> (String, String) {
+    let (dir, file) = (shell_path(parent_dir(cache)), shell_path(cache));
     let check = format!(
-        "f=\"$HOME/{cache}\"; test -f \"$f\" && test $(wc -c < \"$f\") -eq {size} && echo present || true"
+        "f={file}; test -f \"$f\" && test $(wc -c < \"$f\") -eq {size} && echo present || true"
     );
     let upload = format!(
-        "umask 077; mkdir -p \"$HOME/.orx/source\"; tmp=\"$HOME/{cache}.tmp.$$\"; \
-         cat > \"$tmp\" && test $(wc -c < \"$tmp\") -eq {size} && mv \"$tmp\" \"$HOME/{cache}\" \
+        "umask 077; mkdir -p {dir}; f={file}; tmp=\"$f.tmp.$$\"; \
+         cat > \"$tmp\" && test $(wc -c < \"$tmp\") -eq {size} && mv \"$tmp\" \"$f\" \
          || {{ rm -f \"$tmp\"; echo \"source archive upload incomplete\" >&2; exit 1; }}"
     );
     (check, upload)
@@ -745,8 +812,10 @@ pub(crate) fn sh_quote(s: &str) -> String {
 pub struct SshJobSpec {
     /// Where to run: a config alias (the ssh backend) or an explicit endpoint.
     pub target: SshTarget,
-    /// Names the remote run dir `~/.orx/runs/<run_id>`.
+    /// Names the remote run dir `<root>/runs/<run_id>`.
     pub run_id: String,
+    /// Configured storage root; `None` is `~/.orx`.
+    pub remote_root: Option<String>,
     /// The shared snapshot-and-run payload (`bash` script body).
     pub script: String,
     /// Exported inside run.sh on the remote (tokens, synced env).
@@ -772,7 +841,8 @@ trap 'stop_child TERM 143' TERM
 trap 'stop_child INT 130' INT"#;
 
 fn host_script(dir: &str, exports: &str, script: &str) -> String {
-    format!("#!/usr/bin/env bash\ncd \"$HOME/{dir}\" || exit 97\nchild=\n{TERMINAL_TRAPS}\n(\n{exports}\n{script}\n) > log 2>&1 &\nchild=$!\nwait \"$child\"\n")
+    let dir = shell_path(dir);
+    format!("#!/usr/bin/env bash\ncd {dir} || exit 97\nchild=\n{TERMINAL_TRAPS}\n(\n{exports}\n{script}\n) > log 2>&1 &\nchild=$!\nwait \"$child\"\n")
 }
 
 #[derive(Debug)]
@@ -787,9 +857,9 @@ impl std::fmt::Display for LaunchUncertain {
 impl std::error::Error for LaunchUncertain {}
 
 /// Submit the job: write run.sh, launch it detached, record its pid. Returns
-/// the remote run dir (relative to `$HOME`) — the reattach handle.
+/// the remote run dir (absolute, or relative to `$HOME`) — the reattach handle.
 pub async fn run_job(spec: &SshJobSpec) -> Result<String> {
-    let dir = format!(".orx/runs/{}", spec.run_id);
+    let dir = remote_run_dir(spec.remote_root.as_deref(), &spec.run_id);
     let env = super::default_python_env(&spec.env);
     let exports: String = env
         .iter()
@@ -806,16 +876,15 @@ pub async fn run_job(spec: &SshJobSpec) -> Result<String> {
     };
 
     // Create the dir (owner-only) and write run.sh from stdin.
-    let setup = format!(
-        "umask 077; mkdir -p \"$HOME/{dir}\" && chmod 700 \"$HOME/{dir}\" && cat > \"$HOME/{dir}/run.sh\"",
-    );
+    let d = shell_path(&dir);
+    let setup = format!("umask 077; mkdir -p {d} && chmod 700 {d} && cat > {d}/run.sh");
     ssh_run(&spec.target, &setup, Some(&run_sh)).await?;
 
     // The container host wrapper records its own PID; direct runs retain the existing launcher.
     let launch = if spec.container.is_some() {
-        format!("cd \"$HOME/{dir}\" && date +%s > launch_time.tmp && mv launch_time.tmp launch_time && {{ if command -v setsid >/dev/null 2>&1; then setsid bash run.sh </dev/null >/dev/null 2>&1 & else nohup bash run.sh </dev/null >/dev/null 2>&1 & fi; }}")
+        format!("cd {d} && date +%s > launch_time.tmp && mv launch_time.tmp launch_time && {{ if command -v setsid >/dev/null 2>&1; then setsid bash run.sh </dev/null >/dev/null 2>&1 & else nohup bash run.sh </dev/null >/dev/null 2>&1 & fi; }}")
     } else {
-        format!("cd \"$HOME/{dir}\" && if command -v setsid >/dev/null 2>&1; then setsid bash run.sh </dev/null >/dev/null 2>&1 & else set -m; trap '' HUP; bash run.sh </dev/null >/dev/null 2>&1 & fi; echo $! > pid")
+        format!("cd {d} && if command -v setsid >/dev/null 2>&1; then setsid bash run.sh </dev/null >/dev/null 2>&1 & else set -m; trap '' HUP; bash run.sh </dev/null >/dev/null 2>&1 & fi; echo $! > pid")
     };
     ssh_run(&spec.target, &launch, None)
         .await
@@ -851,11 +920,12 @@ async fn inspect_host_job(target: &SshTarget, dir: &str) -> Result<JobState> {
 fn host_job_script(dir: &str) -> String {
     format!(
         "{HOST_PROCESS_HELPERS}\n\
-         d=\"$HOME/{dir}\"; \
+         d={}; \
          if [ ! -d \"$d\" ]; then echo MISSING; \
          elif [ -f \"$d/exit_code\" ]; then echo \"EXIT $(cat \"$d/exit_code\")\"; \
          elif [ -f \"$d/pid\" ] && host_process_alive \"$(cat \"$d/pid\")\"; then echo RUNNING; \
          elif [ -f \"$d/pid\" ]; then echo DEAD; else echo PENDING; fi",
+        shell_path(dir),
     )
 }
 
@@ -953,9 +1023,9 @@ pub async fn stream_logs(
     sink: &mut (dyn FnMut(&str) + Send),
 ) -> Result<u64> {
     let cmd = format!(
-        "printf '__ORX_LOG_START__\\n'; tail -n +{} \"$HOME/{}/log\" 2>/dev/null || true",
+        "printf '__ORX_LOG_START__\\n'; tail -n +{} {}/log 2>/dev/null || true",
         skip + 1,
-        dir
+        shell_path(dir)
     );
     let out = ssh_run(target, &cmd, None).await?;
     let out = out
@@ -995,7 +1065,7 @@ pub async fn cancel_job(
 fn host_cancel_script(dir: &str) -> String {
     format!(
         "{HOST_PROCESS_HELPERS}\n\
-         p=$(cat \"$HOME/{dir}/pid\" 2>/dev/null); \
+         p=$(cat {}/pid 2>/dev/null); \
          [ -n \"$p\" ] || exit 0; \
          case \"$p\" in ''|*[!0-9]*) exit 0;; esac; \
          kill -TERM -- -\"$p\" 2>/dev/null || kill -TERM \"$p\" 2>/dev/null || true; \
@@ -1003,6 +1073,7 @@ fn host_cancel_script(dir: &str) -> String {
          kill -KILL -- -\"$p\" 2>/dev/null || true; \
          for ((i=0; i<10; i++)); do host_group_alive \"$p\" || exit 0; sleep 0.1; done; \
          echo 'Experiment process group is still alive' >&2; exit 1",
+        shell_path(dir),
     )
 }
 
@@ -1130,6 +1201,73 @@ mod tests {
             std::fs::read_dir(cached.parent().unwrap()).unwrap().count(),
             1
         );
+    }
+
+    #[test]
+    fn remote_roots_are_absolute_plain_paths() {
+        for root in ["/scratch/me/orx", "/data/user.name/orx-1", "/gpfs/a+b@c"] {
+            validate_remote_root(root).unwrap();
+        }
+        for root in [
+            "",
+            "/",
+            "scratch/orx",
+            "~/orx",
+            "/scratch/orx/",
+            "/scratch//orx",
+            "/scratch/../etc",
+            "/scratch/$USER",
+            "/scratch/a b",
+            "/scratch/`id`",
+            "/scratch/x;rm",
+            "/scratch/'q'",
+        ] {
+            assert!(validate_remote_root(root).is_err(), "{root}");
+        }
+        assert_eq!(remote_run_dir(None, "r1"), ".orx/runs/r1");
+        assert_eq!(
+            remote_run_dir(Some("/scratch/orx"), "r1"),
+            "/scratch/orx/runs/r1"
+        );
+        assert_eq!(shell_path(".orx/runs/r1"), "\"$HOME/.orx/runs/r1\"");
+        assert_eq!(shell_path("/scratch/orx/runs/r1"), "'/scratch/orx/runs/r1'");
+        assert_eq!(
+            remote_source_cache(Some("/scratch/orx"), "d"),
+            "/scratch/orx/source/d.tar"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn configured_root_holds_the_source_cache_and_run_state() {
+        use std::io::Write;
+        let home = crate::local::git::TemporaryDirectory::new("orx-ssh-root-home").unwrap();
+        let scratch = crate::local::git::TemporaryDirectory::new("orx-ssh-root").unwrap();
+        let root = scratch.path().join("orx");
+        let root = root.to_str().unwrap();
+        let (_, upload) = source_cache_commands(&remote_source_cache(Some(root), "d"), 3);
+        let mut child = std::process::Command::new("sh")
+            .args(["-c", &upload])
+            .env("HOME", home.path())
+            .stdin(Stdio::piped())
+            .spawn()
+            .unwrap();
+        child.stdin.take().unwrap().write_all(b"abc").unwrap();
+        assert!(child.wait().unwrap().success());
+        assert_eq!(
+            std::fs::read(scratch.path().join("orx/source/d.tar")).unwrap(),
+            b"abc"
+        );
+        let dir = remote_run_dir(Some(root), "r1");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(format!("{dir}/exit_code"), "3\n").unwrap();
+        let out = std::process::Command::new("bash")
+            .args(["-c", &host_job_script(&dir)])
+            .env("HOME", home.path())
+            .output()
+            .unwrap();
+        assert_eq!(String::from_utf8(out.stdout).unwrap().trim(), "EXIT 3");
+        assert!(!home.path().join(".orx").exists());
     }
 
     #[tokio::test]

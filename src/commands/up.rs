@@ -2109,20 +2109,16 @@ async fn delete_project_inner(state: AppState, id: String, query: DeleteProjectQ
         .iter()
         .map(|session| session.id.clone())
         .collect::<Vec<_>>();
-    // Other deletions fail fast on this lock, so it covers only the purge and the row delete.
-    let native_deletion = if session_ids.is_empty() {
-        None
-    } else {
-        let lock = store.lock_native_deletion()?;
-        local::chat::ChatHost::delete_native_sessions(&session_ids).await?;
-        Some(lock)
-    };
     let project_id = id.clone();
     // Row deletion can wait up to RUN_ARTIFACTS_WAIT for the run-artifacts lock, so keep it off the async workers.
-    tokio::task::spawn_blocking(move || store.delete_local_project(&project_id))
-        .await
-        .map_err(|error| anyhow!("project row deletion task failed: {error}"))??;
-    drop(native_deletion);
+    tokio::task::spawn_blocking(move || {
+        let native_purge = (!session_ids.is_empty()).then_some(|| {
+            local::chat::ChatHost::delete_native_sessions_blocking(&store, &session_ids)
+        });
+        store.delete_local_project_with(&project_id, native_purge)
+    })
+    .await
+    .map_err(|error| anyhow!("project row deletion task failed: {error}"))??;
     for session in &sessions {
         state.chat.claude.forget_session(&session.id).await;
         local::chat::cleanup_session_transcript_artifacts(&session.id);

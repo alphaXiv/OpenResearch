@@ -88,6 +88,9 @@ pub async fn submit_local_slurm_with_source(
     }
 
     let settings = slurm::load_settings()?.unwrap_or_default();
+    if let Some(root) = &settings.remote_root {
+        crate::jobs::ssh::validate_remote_root(root)?;
+    }
     let host = args
         .host
         .clone()
@@ -141,11 +144,13 @@ pub async fn submit_local_slurm_with_source(
         &source.path,
         &source.digest,
         None,
+        settings.remote_root.as_deref(),
     )
     .await?;
     let job_id = slurm::run_job(&slurm::SlurmJobSpec {
         host: host.clone(),
         run_id: run_id.clone(),
+        remote_root: settings.remote_root.clone(),
         setup_script: "test -d repo".to_string(),
         command: run_command.clone(),
         env,
@@ -181,6 +186,7 @@ pub async fn submit_local_slurm_with_source(
         source_digest: None,
         source_path: None,
         source_size: None,
+        remote_root: settings.remote_root.clone(),
     };
     source.apply_to_descriptor(&mut descriptor);
     if let Err(error) = crate::compute::record_submission_handle(&run_id, &descriptor) {

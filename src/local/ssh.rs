@@ -67,6 +67,7 @@ pub async fn submit_local_ssh_with_source(
         &source.path,
         &source.digest,
         container.as_ref(),
+        launch.remote_root.as_deref(),
     )
     .await?;
     let script = format!(
@@ -105,6 +106,7 @@ pub async fn submit_local_ssh_with_source(
         source_digest: None,
         source_path: None,
         source_size: None,
+        remote_root: launch.remote_root.clone(),
     };
     source.apply_to_descriptor(&mut descriptor);
     if container.is_some() {
@@ -113,6 +115,7 @@ pub async fn submit_local_ssh_with_source(
     let submission = ssh::run_job(&ssh::SshJobSpec {
         target: target.clone(),
         run_id: run_id.clone(),
+        remote_root: launch.remote_root.clone(),
         script,
         env,
         container: container.clone(),
