@@ -59,13 +59,13 @@ export function removeProject(projectId: string) {
 }
 
 const settingsFamilies: Record<string, readonly string[]> = {
-  hf: ["getHfSettings", "getComputeSettings", "getEnvVars"],
+  hf: ["getHfSettings", "getComputeSettings", "getEnvVars", "getTrackioRuns"],
   tinker: ["getTinkerSettings", "getComputeSettings", "getEnvVars"],
   k8s: ["getK8sSettings", "getComputeSettings"],
   modal: ["getModalSettings", "getComputeSettings", "getEnvVars"],
   slurm: ["getSlurmSettings", "getComputeSettings"],
   ray: ["getRaySettings", "getComputeSettings"],
-  env: ["getEnvVars", "getHfSettings", "getTinkerSettings", "getModalSettings", "getSlurmSettings", "getRaySettings", "getK8sSettings", "getOpenResearchSettings", "getComputeSettings", "getHarnesses", "getTrackioSettings"],
+  env: ["getEnvVars", "getHfSettings", "getTinkerSettings", "getModalSettings", "getSlurmSettings", "getRaySettings", "getK8sSettings", "getOpenResearchSettings", "getComputeSettings", "getHarnesses", "getTrackioRuns"],
   "data-dir": ["getDataDir"],
   ssh: ["getSshSettings", "getSshConfig", "getSshMasterStatus", "getComputeSettings"],
   compute: ["getComputeSettings"],

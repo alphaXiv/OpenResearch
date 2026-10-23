@@ -914,25 +914,12 @@ impl Harness for ClaudeCode {
                         plan_mode: None,
                     })
                 }
-                // Mid-turn question (a bridge-held AskUserQuestion): the held
-                // tool call is denied with the user's answer as the message —
-                // the model reads the answer from the denial and continues the
-                // same turn. (Allowing the tool instead would run it headless,
-                // which returns no answer — the model would guess and move on
-                // rather than block; that's the bug this arm exists to avoid.)
                 ("question", _) => {
-                    let (text, _) = synthesize_resume("question", answer);
-                    if text.trim().is_empty() {
-                        return Err(anyhow!("select an option (or add a note) to answer"));
-                    }
+                    let input = question_answer_input(prompt, answer)?;
                     ctx.host.settle_permission(
                         native_id,
-                        crate::local::chat::PermissionDecision::Deny {
-                            message: format!(
-                                "The user answered: {text}. Treat this as their answer and \
-                                 continue — do not ask this question again. (Only the first \
-                                 question of the call was shown; ask any others separately.)"
-                            ),
+                        crate::local::chat::PermissionDecision::Allow {
+                            updated_input: Some(input),
                         },
                     )?;
                     Ok(ResumeAction::Handled { plan_mode: None })
@@ -1055,8 +1042,12 @@ pub(crate) fn claude_permission_mode(mode: Option<PermissionMode>) -> &'static s
 
 pub(crate) fn uses_permission_bridge(mode: Option<PermissionMode>) -> bool {
     matches!(
-        mode,
-        Some(PermissionMode::Ask | PermissionMode::AcceptEdits | PermissionMode::Plan)
+        mode.unwrap_or(PermissionMode::Auto),
+        PermissionMode::Ask
+            | PermissionMode::AcceptEdits
+            | PermissionMode::Plan
+            | PermissionMode::Auto
+            | PermissionMode::Bypass
     )
 }
 
@@ -1156,9 +1147,7 @@ fn claude_effort(level: Option<&str>) -> Option<&str> {
 /// resume strategy: a prompt ends the turn and the answer becomes a *new user
 /// message* that continues via `--resume`. `ChatHost` validates `resume_mode`
 /// against Claude's advertised choices before this helper parses it; an absent
-/// id falls through to the per-kind default. The question arm is
-/// also reused as a plain text builder by the bridge's mid-turn question
-/// resume (the denial message that carries the answer).
+/// id falls through to the per-kind default.
 pub(crate) fn synthesize_resume(
     kind: &str,
     req: &PromptAnswer,
@@ -1198,6 +1187,7 @@ pub(crate) fn synthesize_resume(
             let text = "The user approved that action. Continue.".to_string();
             (text, chosen.or(Some(PermissionMode::Bypass)))
         }
+        "question" if !req.approve => (SKIPPED_QUESTION_MESSAGE.to_string(), None),
         // question (or anything else): feed the selection back as the user's reply.
         _ => (req.contextualized_answer(req.plain_answer_text()), None),
     }
@@ -1236,9 +1226,34 @@ fn plan_prompt(name: &str, input: Option<&Value>) -> Option<WirePrompt> {
     })
 }
 
+pub(crate) const SKIPPED_QUESTION_MESSAGE: &str =
+    "The user skipped this question. Do not retry it or treat it as answered.";
+
+fn question_answer_input(prompt: &WirePrompt, answer: &PromptAnswer) -> Result<Value> {
+    let mut input = prompt
+        .tool_input
+        .clone()
+        .ok_or_else(|| anyhow!("question input is missing"))?;
+    if !answer.approve {
+        // The batch continues; an entirely skipped call is denied by the host.
+        input["answers"] = serde_json::json!({});
+        return Ok(input);
+    }
+    let text = answer.contextualized_answer(answer.plain_answer_text());
+    if text.trim().is_empty() {
+        return Err(anyhow!("select an option (or add a note) to answer"));
+    }
+    let question = prompt
+        .question
+        .as_deref()
+        .ok_or_else(|| anyhow!("question text is missing"))?;
+    input["answers"] = serde_json::json!({ question: text });
+    Ok(input)
+}
+
 /// AskUserQuestion → a `question` prompt. Claude's schema is
 /// `{questions: [{question, header, options: [{label, description}], multiSelect}]}`;
-/// we surface the first question (the composer answers one at a time). Also
+/// The bridge presents each question separately and collects the whole batch. Also
 /// used by the plan-mode bridge (`ChatHost::request_permission`, via the
 /// harness re-export) to build the held mid-turn question card.
 pub(crate) fn question_prompt(name: &str, input: Option<&Value>) -> Option<WirePrompt> {
@@ -2127,11 +2142,7 @@ fn spawn_config(ctx: &TurnCtx, native_store: NativeStore) -> SpawnConfig {
         effort: claude_effort(ctx.reasoning_level.as_deref()).map(str::to_string),
         model: ctx.model.clone(),
         native_store,
-        // The turn WANTS the bridge iff it's plan mode under a bound `orx up`
-        // port; whether the bridge was actually achieved is recorded on the
-        // spawned child's config (a failed write leaves it false and the next
-        // plan turn respawns). Keeping the wanted value here means a plan turn
-        // reconciles against a child that already has the bridge and reuses it.
+        // A failed bridge setup must respawn next turn rather than reuse a child without input.
         bridge_active: uses_permission_bridge(ctx.permission_mode) && ctx.host.up_port().is_some(),
     }
 }
@@ -2742,6 +2753,30 @@ mod tests {
     }
 
     #[test]
+    fn question_answers_preserve_native_input_and_return_structured_values() {
+        let input = serde_json::json!({"questions":[{"question":"Which colors?","header":"Colors","multiSelect":true,"options":[{"label":"Red","description":"First"},{"label":"Green","description":"Second"}]}]});
+        let mut prompt = question_prompt("AskUserQuestion", Some(&input)).unwrap();
+        prompt.tool_input = Some(input.clone());
+        let returned =
+            question_answer_input(&prompt, &answer(true, None, &["Red", "Green"], None)).unwrap();
+        assert_eq!(returned["questions"], input["questions"]);
+        assert_eq!(
+            returned["answers"],
+            serde_json::json!({"Which colors?":"Red, Green"})
+        );
+        let custom =
+            question_answer_input(&prompt, &answer(true, None, &[], Some("Blue"))).unwrap();
+        assert_eq!(
+            custom["answers"],
+            serde_json::json!({"Which colors?":"Blue"})
+        );
+        assert!(question_answer_input(&prompt, &answer(true, None, &[], None)).is_err());
+        let skipped = question_answer_input(&prompt, &answer(false, None, &[], None)).unwrap();
+        assert_eq!(skipped["questions"], input["questions"]);
+        assert_eq!(skipped["answers"], serde_json::json!({}));
+    }
+
+    #[test]
     fn permission_mode_maps_to_claude_cli_strings() {
         assert_eq!(claude_permission_mode(Some(PermissionMode::Ask)), "manual");
         assert_eq!(
@@ -2763,8 +2798,9 @@ mod tests {
         assert!(uses_permission_bridge(Some(PermissionMode::Ask)));
         assert!(uses_permission_bridge(Some(PermissionMode::AcceptEdits)));
         assert!(uses_permission_bridge(Some(PermissionMode::Plan)));
-        assert!(!uses_permission_bridge(Some(PermissionMode::Auto)));
-        assert!(!uses_permission_bridge(Some(PermissionMode::Bypass)));
+        assert!(uses_permission_bridge(Some(PermissionMode::Auto)));
+        assert!(uses_permission_bridge(None));
+        assert!(uses_permission_bridge(Some(PermissionMode::Bypass)));
     }
 
     #[test]
@@ -2813,6 +2849,16 @@ mod tests {
     fn question_feeds_selections_back_with_no_mode_change() {
         let (text, mode) = synthesize_resume("question", &answer(true, None, &["A", "B"], None));
         assert_eq!(text, "A, B");
+        assert_eq!(mode, None);
+    }
+
+    #[test]
+    fn skipped_question_resumes_without_an_answer_or_mode_change() {
+        let (text, mode) = synthesize_resume("question", &answer(false, None, &[], None));
+        assert_eq!(
+            text,
+            "The user skipped this question. Do not retry it or treat it as answered."
+        );
         assert_eq!(mode, None);
     }
 

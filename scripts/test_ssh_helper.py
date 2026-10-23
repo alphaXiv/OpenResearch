@@ -179,6 +179,15 @@ class HelperTest(unittest.TestCase):
         result = self.rpc(op="upload_commit", token=one, command="cat")
         self.assertEqual(base64.b64decode(result["stdout"]), b"alpha")
 
+    def test_slurm_reads_exit_code_from_custom_remote_directory(self):
+        directory = Path(self.home.name) / "scratch" / "run-one"
+        directory.mkdir(parents=True)
+        (directory / "exit_code").write_text("7")
+        for path in (str(directory), "scratch/run-one"):
+            self.assertEqual(self.rpc(op="slurm", jobs=[{
+                "run": "run-one", "job": "42", "dir": path,
+            }]), {"run-one": "EXIT 7"})
+
     def test_slurm_batches_and_distinguishes_hidden_from_unavailable(self):
         queue = self.bin / "squeue"
         queue.write_text("#!/bin/sh\necho \"$*\" >> \"$HOME/queue-calls\"\ncase \"$*\" in\n *'-j '*) exit 1;;\n *--all*--states=all*) echo '42|SUSPENDED';;\nesac\n")

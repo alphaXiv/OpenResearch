@@ -587,6 +587,7 @@ pub(super) async fn ssh_settings() -> ApiResult {
                 .cloned()
                 .unwrap_or_default();
             host["container"] = json!(options.container);
+            host["remoteRoot"] = json!(options.remote_root);
         }
         // Best-effort, like the preflight write: a store hiccup shouldn't take
         // out the host listing — hosts just render as never tested.
@@ -622,16 +623,26 @@ pub(super) async fn ssh_settings() -> ApiResult {
 pub(super) struct SaveSshSettingsReq {
     host: String,
     container: Option<String>,
+    /// Unlike `container`, `None` keeps the saved root (the UI never sends it); `Some("")` clears it.
+    remote_root: Option<String>,
 }
 
 pub(super) async fn save_ssh_settings(Json(req): Json<SaveSshSettingsReq>) -> ApiResult {
     let host = req.host.trim().to_string();
     require_configured_ssh_host(&host).await?;
-    let options = crate::config::SshHostSettings {
-        container: req.container,
-    };
-    crate::jobs::ssh::validate_host_options(&options).map_err(bad_request)?;
     blocking_api(move || {
+        let remote_root = match req.remote_root {
+            Some(root) => Some(root.trim().to_string()).filter(|root| !root.is_empty()),
+            None => crate::config::ssh_settings()?
+                .hosts
+                .get(&host)
+                .and_then(|saved| saved.remote_root.clone()),
+        };
+        let options = crate::config::SshHostSettings {
+            container: req.container,
+            remote_root,
+        };
+        crate::jobs::ssh::validate_host_options(&options).map_err(bad_request)?;
         crate::config::set_ssh_host(host, options)?;
         Ok(Json(json!({"ok": true})))
     })
@@ -842,6 +853,7 @@ pub(super) fn slurm_settings_json() -> Value {
         "timeLimit": settings.time_limit,
         "cpusPerTask": settings.cpus_per_task,
         "mem": settings.mem,
+        "remoteRoot": settings.remote_root,
         "hosts": list_ssh_hosts(),
     })
 }
@@ -863,6 +875,7 @@ pub(super) struct SetSlurmSettingsReq {
     /// Cores per job. `Some(0)` clears it (partition default).
     cpus_per_task: Option<u32>,
     mem: Option<String>,
+    remote_root: Option<String>,
 }
 
 pub(super) async fn set_slurm_settings(Json(req): Json<SetSlurmSettingsReq>) -> ApiResult {
@@ -898,6 +911,13 @@ pub(super) async fn set_slurm_settings(Json(req): Json<SetSlurmSettingsReq>) -> 
                 Some(m) => Some(slurm::parse_mem(&m).map_err(bad_request)?),
                 None => None,
             };
+        }
+        if let Some(root) = req.remote_root {
+            let root = norm(root);
+            if let Some(root) = &root {
+                crate::jobs::ssh::validate_remote_root(root).map_err(bad_request)?;
+            }
+            settings.remote_root = root;
         }
         slurm::save_settings(&settings)?;
         Ok(Json(slurm_settings_json()))
@@ -1013,27 +1033,35 @@ pub(super) async fn ray_preflight(Json(req): Json<RayPreflightReq>) -> ApiResult
     }
 }
 
-/// The saved Trackio server for run links; never the write token.
-pub(super) async fn trackio_settings() -> ApiResult {
-    Ok(Json(json!({
-        "serverUrl": crate::local::trackio::server_url(),
-        "project": crate::local::trackio::project(),
-    })))
+/// The project's Trackio dashboard and which runs have logged to it; never a token.
+pub(super) async fn trackio_project_runs(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+) -> ApiResult {
+    let project = Store::open()?
+        .get_local_project(&id)?
+        .ok_or_else(|| not_found("project"))?;
+    let project = crate::local::trackio::project_for(&project.slug);
+    // A gateway error, not a 200 with no runs, so the dashboard keeps an open embed through a blip.
+    let mut runs = crate::local::trackio::project_runs(&state.trackio, project)
+        .await
+        .map_err(|error| ApiError(StatusCode::BAD_GATEWAY, error))?;
+    // An SSH workspace's browser cannot reach this host's loopback dashboard, so offer no embed.
+    if state.remote_instance_id.is_some()
+        && runs
+            .dashboard_url
+            .as_deref()
+            .is_some_and(crate::local::trackio::is_local_only)
+    {
+        runs.dashboard_url = None;
+    }
+    Ok(Json(json!(runs)))
 }
 
-/// Live check of the saved Trackio server and write token.
+/// Live check of the saved Trackio Space or server and its write access.
 pub(super) async fn trackio_preflight() -> ApiResult {
-    use crate::local::trackio;
-    let Some(base) = trackio::server_url() else {
-        return Err(bad_request(format!(
-            "Save an http(s) {} first.",
-            trackio::SERVER_URL
-        )));
-    };
-    let token = crate::config::synced_env_var(trackio::WRITE_TOKEN);
-    Ok(Json(json!(
-        trackio::preflight(&base, token.as_deref()).await
-    )))
+    let preflight = crate::local::trackio::check().await.map_err(bad_request)?;
+    Ok(Json(json!(preflight)))
 }
 
 // --- compute targets (unified settings list + default) --------------------------
@@ -1441,10 +1469,23 @@ pub(crate) async fn configure(backend: &str, body: Value) -> Result<Value> {
                     .await
                     .map_err(|ApiError(_, message)| anyhow!(message))?;
             }
-            if body.get("container").is_some() {
-                let req: SaveSshSettingsReq = serde_json::from_value(
-                    json!({"host": body["host"], "container": body["container"]}),
-                )?;
+            if body.get("container").is_some() || body.get("remoteRoot").is_some() {
+                // A root-only change keeps the host's saved container.
+                let container = match body.get("container") {
+                    Some(container) => container.clone(),
+                    None => {
+                        let host = body["host"].as_str().unwrap_or_default().trim();
+                        json!(crate::config::ssh_settings()?
+                            .hosts
+                            .get(host)
+                            .and_then(|saved| saved.container.clone()))
+                    }
+                };
+                let mut req = json!({"host": body["host"], "container": container});
+                if let Some(root) = body.get("remoteRoot") {
+                    req["remoteRoot"] = root.clone();
+                }
+                let req: SaveSshSettingsReq = serde_json::from_value(req)?;
                 cli_result(save_ssh_settings(Json(req)).await)?;
             }
             if let Some(host) = body.get("defaultHost") {

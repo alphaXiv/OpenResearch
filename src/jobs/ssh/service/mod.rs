@@ -551,7 +551,7 @@ impl Broker {
                 .is_none_or(|sampled| sampled.elapsed() >= Duration::from_secs(5))
                 || cache.values.get(run).is_none()
             {
-                let mut jobs = vec![json!({"run":run, "job":job})];
+                let mut jobs = vec![json!({"run":run, "job":job, "dir":operation["dir"]})];
                 let active = crate::store::Store::open()?.list_active_runs()?;
                 let db = state::database()?;
                 for stored in active {
@@ -569,7 +569,11 @@ impl Broker {
                     )?;
                     if matches {
                         if let Some(job) = descriptor.job_id {
-                            jobs.push(json!({"run":stored.id, "job":job}));
+                            let dir = crate::jobs::slurm::run_dir(
+                                descriptor.remote_root.as_deref(),
+                                &stored.id,
+                            );
+                            jobs.push(json!({"run":stored.id, "job":job, "dir":dir}));
                         }
                     }
                 }

@@ -64,6 +64,21 @@ function subscribe(listener: () => void): () => void {
   return () => listeners.delete(listener);
 }
 
+function subscribeResolved(listener: () => void): () => void {
+  const observer = new MutationObserver(listener);
+  observer.observe(document.documentElement, { attributes: true, attributeFilter: ["data-theme"] });
+  return () => observer.disconnect();
+}
+
+/** The theme actually showing, including "system" resolved against the OS. */
+export function useResolvedTheme(): "light" | "dark" {
+  return useSyncExternalStore(
+    subscribeResolved,
+    () => (document.documentElement.dataset.theme === "dark" ? "dark" : "light"),
+    () => "light",
+  );
+}
+
 /** Current theme preference, reflected on <html data-theme> and persisted. */
 export function useThemePreference(): [
   ThemePreference,

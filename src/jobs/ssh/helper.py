@@ -108,7 +108,10 @@ def slurm_status(jobs):
         if not job_id.isdigit() or not all(c.isalnum() or c == "-" for c in run):
             raise ValueError("Invalid Slurm job identity")
         try:
-            with open(os.path.join(os.path.expanduser("~"), ".orx", "runs", run, "exit_code")) as file:
+            directory = job.get("dir") or os.path.join(".orx", "runs", run)
+            if not os.path.isabs(directory):
+                directory = os.path.join(os.path.expanduser("~"), directory)
+            with open(os.path.join(directory, "exit_code")) as file:
                 result[run] = "EXIT " + file.read(64).strip()
         except FileNotFoundError:
             pending[job_id] = run

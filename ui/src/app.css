@@ -418,12 +418,16 @@
   min-height: 32px;
   padding: 6px 10px;
   overflow-x: auto;
+  scrollbar-width: none;
   border-bottom: 1px solid var(--border);
   background: var(--surface);
   color: var(--subtext);
   font-size: 11px;
   white-space: nowrap;
   flex-shrink: 0;
+}
+.term-provenance::-webkit-scrollbar {
+  display: none;
 }
 .term-provenance code {
   color: var(--text);
