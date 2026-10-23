@@ -112,14 +112,7 @@ async fn configuration_key(target: &SshTarget, options: &[String]) -> Result<Str
     }
     let configuration = String::from_utf8(output.stdout)?;
     let mut digest = Sha256::new();
-    // Preserve the complete resolved auth/proxy context; never group by hostname alone.
-    for line in configuration
-        .lines()
-        .filter(|line| !line.starts_with("host "))
-    {
-        digest.update(line.as_bytes());
-        digest.update(b"\n");
-    }
+    digest.update(super::super::route_configuration(&configuration).as_bytes());
     digest.update(serde_json::to_vec(&target.managed_generation)?);
     digest.update(serde_json::to_vec(&target.auth_agent)?);
     Ok(format!("{:x}", digest.finalize()))
@@ -212,6 +205,35 @@ mod tests {
             .unwrap_err()
             .to_string()
             .contains("configuration changed"));
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn pinned_connection_accepts_unrelated_configuration_edits() {
+        let temp = crate::local::git::TemporaryDirectory::new("orx-route-unrelated").unwrap();
+        let path = temp.path().join("config");
+        let original = "Host lab\n HostName 127.0.0.1\n IdentityFile /original-key\n";
+        std::fs::write(&path, original).unwrap();
+        let target = crate::jobs::ssh::SshTarget::alias("lab");
+        let options = vec!["-F".into(), path.to_string_lossy().into_owned()];
+        let resolved = super::Resolved {
+            key: super::configuration_key(&target, &options).await.unwrap(),
+            target,
+            options,
+            socket: None,
+        };
+        std::fs::write(
+            &path,
+            format!("{original} SendEnv ORX_TEST\n ServerAliveInterval 17\n"),
+        )
+        .unwrap();
+        super::validate_configuration(&resolved).await.unwrap();
+        assert_eq!(
+            resolved.key,
+            super::configuration_key(&resolved.target, &resolved.options)
+                .await
+                .unwrap()
+        );
     }
 
     #[test]

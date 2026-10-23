@@ -6,7 +6,7 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use tokio::process::Command;
 
-use super::{control_dir, sh_quote, sharing::config_quote, SshTarget};
+use super::{control_dir, route_configuration, sh_quote, sharing::config_quote, SshTarget};
 use crate::error::{anyhow, Result};
 
 #[derive(Clone, Serialize, Deserialize)]
@@ -116,26 +116,12 @@ pub(super) fn probe_args() -> Vec<String> {
     .collect()
 }
 
-pub(super) const ROUTE_FIELDS: &str = "hostname|user|port|controlpath|proxyjump|proxycommand|identityfile|certificatefile|identityagent|identitiesonly|pubkeyauthentication|passwordauthentication|kbdinteractiveauthentication|preferredauthentications|gssapiauthentication|hostbasedauthentication|hostkeyalias|stricthostkeychecking|userknownhostsfile|globalknownhostsfile|hostkeyalgorithms|pubkeyacceptedalgorithms|proxyusefdpass|bindaddress|bindinterface";
-
 fn host(query: &Query) -> Result<&str> {
     query
         .args
         .last()
         .and_then(|dest| dest.rsplit('@').next())
         .ok_or_else(|| anyhow!("Missing SSH destination"))
-}
-
-pub(super) fn route_configuration(output: &str) -> String {
-    // Match final can repeat unrelated list settings such as SendEnv.
-    output
-        .lines()
-        .filter(|line| {
-            line.split_once(' ')
-                .is_some_and(|(key, _)| ROUTE_FIELDS.split('|').any(|field| field == key))
-        })
-        .collect::<Vec<_>>()
-        .join("\n")
 }
 
 async fn configuration(args: &[String], verbose: bool) -> Result<std::process::Output> {

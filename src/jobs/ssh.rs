@@ -34,6 +34,20 @@ use tokio::process::Command;
 
 use crate::error::{anyhow, Result};
 
+const ROUTE_FIELDS: &str = "hostname|user|port|controlpath|proxyjump|proxycommand|identityfile|certificatefile|identityagent|identitiesonly|pubkeyauthentication|passwordauthentication|kbdinteractiveauthentication|preferredauthentications|gssapiauthentication|hostbasedauthentication|hostkeyalias|stricthostkeychecking|userknownhostsfile|globalknownhostsfile|hostkeyalgorithms|pubkeyacceptedalgorithms|proxyusefdpass|bindaddress|bindinterface";
+
+fn route_configuration(output: &str) -> String {
+    // Match final can repeat unrelated list settings such as SendEnv.
+    output
+        .lines()
+        .filter(|line| {
+            line.split_once(' ')
+                .is_some_and(|(key, _)| ROUTE_FIELDS.split('|').any(|field| field == key))
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
 /// Keep sockets out of config paths, which can exceed macOS's 104-byte limit.
 #[cfg(unix)]
 fn control_dir() -> PathBuf {
