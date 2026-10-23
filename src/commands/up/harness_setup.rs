@@ -779,6 +779,7 @@ mod tests {
             logo: None,
             needs_config_repair: false,
             supports_steering: false,
+            supports_compaction: false,
             catalog_pending: false,
             models: Vec::new(),
             options: crate::local::harness::HarnessOptions::none(),

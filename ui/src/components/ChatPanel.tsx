@@ -4655,7 +4655,7 @@ export function ChatPanel({
 
   // Only reachable while the menu is open, which needs a live slash context.
   function pickSkill(skill: SkillInfo) {
-    if (!slashContext) return;
+    if (!slashContext || skill.disabled) return;
     if (
       skill.source === "command" && isComposerCommand(skill.name)
     ) {
@@ -4816,8 +4816,8 @@ export function ChatPanel({
     return harnessSetupPath(activeHarness, setup, command);
   };
   const commands = useMemo(
-    () => commandsForHarness(skills, planActivation),
-    [skills, planActivation],
+    () => commandsForHarness(skills, planActivation, activeHarness?.supportsCompaction),
+    [skills, planActivation, activeHarness?.supportsCompaction],
   );
   // `!` at the start of the draft is a shell command, not a message (Claude
   // Code's bash mode); the slash menu stays shut over paths like `!ls /tmp`.
@@ -4837,7 +4837,8 @@ export function ChatPanel({
   const skillMatches =
     typingCommand && !skillMenuDismissed ? completions : [];
   const skillMenuOpen = skillMatches.length > 0;
-  const activeSkillIdx = Math.min(skillIdx, Math.max(0, skillMatches.length - 1));
+  const selectableSkillIndices = skillMatches.flatMap((skill, index) => skill.disabled ? [] : [index]);
+  const activeSkillIdx = selectableSkillIndices.includes(skillIdx) ? skillIdx : selectableSkillIndices[0] ?? -1;
   useEffect(() => setSkillIdx(0), [slashToken]);
   // `@path` mentions list the checkout the agent works in; the text is sent as typed.
   const mentionContext = bashMode ? null : fileMentionContext(draft, composerCursor);
@@ -5192,6 +5193,7 @@ export function ChatPanel({
   /** Compaction runs in the backend; its progress is the transcript row it
    * publishes over SSE, so only a failure needs a toast. */
   async function compactSession() {
+    if (!activeHarness?.supportsCompaction) return;
     const sessionId = activeId;
     if (!sessionId) {
       showAlert(m.chat_nothing_to_compact(), "info");
@@ -5206,10 +5208,9 @@ export function ChatPanel({
     if (sessionFilter === "archived") setSessionFilter("active");
     const sourceScope = composerScopeRef.current;
     try {
-      // The row lands over SSE too; upserting the response paints it without
-      // waiting for the broadcast, as the `!` shell path does.
+      // SSE may deliver the final result before this initial progress response.
       const { message } = await compactChatSession(sessionId);
-      dispatch({ type: "upsertMessage", sessionId, message });
+      dispatch({ type: "upsertMessage", sessionId, message, onlyIfMissing: true });
     } catch (err) {
       if (composerScopeRef.current.activeId !== sourceScope.activeId) return;
       setSettingsError(m.chat_compact_failed({ error: ltr(err instanceof Error ? err.message : String(err)) }));
@@ -7163,12 +7164,13 @@ export function ChatPanel({
                     if (e.key === "ArrowDown" || e.key === "ArrowUp") {
                       e.preventDefault();
                       const delta = e.key === "ArrowDown" ? 1 : -1;
-                      setSkillIdx(
-                        (activeSkillIdx + delta + skillMatches.length) % skillMatches.length,
-                      );
+                      if (activeSkillIdx >= 0) {
+                        const index = selectableSkillIndices.indexOf(activeSkillIdx);
+                        setSkillIdx(selectableSkillIndices[(index + delta + selectableSkillIndices.length) % selectableSkillIndices.length]);
+                      }
                       return;
                     }
-                    if (e.key === "Tab" || e.key === "Enter") {
+                    if ((e.key === "Tab" || e.key === "Enter") && activeSkillIdx >= 0) {
                       e.preventDefault();
                       pickSkill(skillMatches[activeSkillIdx]);
                       return;

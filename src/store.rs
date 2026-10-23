@@ -479,6 +479,8 @@ pub(crate) const RUN_ARTIFACTS_POLL: Duration = Duration::from_millis(250);
 const ORPHAN_PASS_BUDGET: Duration = Duration::from_secs(5);
 /// Finished runs older than each project's newest few local runs lose their rebuildable environments.
 const FULL_RUNS_PER_PROJECT: i64 = 3;
+/// Uploads are written before the message naming them, so the sweep spares recent files.
+const CHAT_ATTACHMENT_SETTLE: Duration = Duration::from_secs(24 * 60 * 60);
 const SLIMMED_RUN_PATHS: [&[&str]; 2] = [&["repo", ".venv"], &["repo", ".cache", "uv"]];
 
 const SUBMISSION_HANDLE: (&str, &str) = ("submission-handles", ".json");
@@ -2122,6 +2124,10 @@ impl Store {
 
     fn data_dir_move_claimed(&self) -> Result<bool> {
         self.clear_stale_data_dir_move_lease()?;
+        self.data_dir_move_lease_exists()
+    }
+
+    fn data_dir_move_lease_exists(&self) -> Result<bool> {
         Ok(self.conn.query_row(
             "SELECT EXISTS (SELECT 1 FROM data_dir_move_lease WHERE id = 1)",
             [],
@@ -2134,7 +2140,7 @@ impl Store {
         self.delete_local_project_with(id, None::<fn() -> Result<()>>)
     }
 
-    /// Delete a project, its rows and its run artifacts; its artifacts folder is the caller's. GitHub repo and cache clone are kept.
+    /// Delete a project, its rows, run artifacts and chat attachments; its artifacts folder is the caller's. GitHub repo and cache clone are kept.
     /// Blocks up to [`RUN_ARTIFACTS_WAIT`] while a submission or orphan scan holds the artifacts lock.
     /// `native_purge` runs under the native-deletion lock after run-artifact cleanup, just before the rows go.
     pub fn delete_local_project_with(
@@ -2175,6 +2181,12 @@ impl Store {
             purge()?;
         }
         let tx = self.begin()?;
+        let attachments = self
+            .chat_attachment_names_where(
+                "m.session_id IN (SELECT id FROM chat_sessions WHERE project_id = ?1)",
+                [id],
+            )
+            .unwrap_or_default();
         tx.execute(
             "DELETE FROM overleaf_links WHERE project_id = ?1",
             params![id],
@@ -2207,6 +2219,7 @@ impl Store {
         self.conn
             .execute("DELETE FROM local_projects WHERE id = ?1", params![id])?;
         tx.commit()?;
+        self.remove_unreferenced_chat_attachments(attachments);
         Ok(())
     }
 
@@ -2620,6 +2633,9 @@ impl Store {
         if has_children {
             return Err(anyhow!("delete side chats before deleting their parent"));
         }
+        let attachments = self
+            .chat_attachment_names_where("m.session_id = ?1", [id])
+            .unwrap_or_default();
         tx.execute(
             "DELETE FROM chat_queued_messages WHERE session_id = ?1",
             params![id],
@@ -2631,7 +2647,108 @@ impl Store {
         )?;
         tx.execute("DELETE FROM chat_sessions WHERE id = ?1", params![id])?;
         tx.commit()?;
+        self.remove_unreferenced_chat_attachments(attachments);
         Ok(())
+    }
+
+    /// Attachment file names that image parts of matching messages show; only user messages carry them.
+    fn chat_attachment_names_where(
+        &self,
+        filter: &'static str,
+        params: impl rusqlite::Params,
+    ) -> Result<std::collections::HashSet<String>> {
+        let mut query = self.conn.prepare(&format!(
+            "SELECT DISTINCT json_extract(p.value, '$.text')
+             FROM chat_messages m, json_each(m.parts_json) p
+             WHERE m.role = 'user' AND json_extract(p.value, '$.type') = 'image'
+               AND json_extract(p.value, '$.text') IS NOT NULL AND {filter}"
+        ))?;
+        let names = query
+            .query_map(params, |row| row.get::<_, String>(0))?
+            .collect::<std::result::Result<_, _>>()?;
+        Ok(names)
+    }
+
+    /// Best effort once the rows are gone; the periodic sweep retries what is left.
+    fn remove_unreferenced_chat_attachments(&self, names: std::collections::HashSet<String>) {
+        if names.is_empty() {
+            return;
+        }
+        let Ok(Some(_move_hold)) = self.hold_off_data_dir_move() else {
+            return;
+        };
+        let Ok(referenced) = self.chat_attachment_names_where("1", []) else {
+            return;
+        };
+        let dir = self.data_dir.join(crate::local::chat::ATTACHMENTS_DIR);
+        for name in names.difference(&referenced) {
+            if crate::local::chat::is_attachment_name(name) {
+                let _ = std::fs::remove_file(dir.join(name));
+            }
+        }
+    }
+
+    /// Keeps any dashboard from starting a data-dir move until dropped; `None` while a move holds or claims it.
+    fn hold_off_data_dir_move(&self) -> Result<Option<std::fs::File>> {
+        if self.data_dir_move_claimed()? {
+            return Ok(None);
+        }
+        // A move takes this lock exclusively before claiming its lease.
+        let hold = open_lifecycle_lock_at(&self.data_dir_move_lock_path)?.into_inner();
+        match hold.try_lock_shared() {
+            Ok(()) => {}
+            Err(std::fs::TryLockError::WouldBlock) => return Ok(None),
+            Err(std::fs::TryLockError::Error(error)) => return Err(error.into()),
+        }
+        Ok((!self.data_dir_move_lease_exists()?).then_some(hold))
+    }
+
+    /// Remove attachment files no message shows; returns whether the budget ran out first.
+    pub(crate) fn cleanup_orphaned_chat_attachments(&self) -> Result<bool> {
+        self.cleanup_orphaned_chat_attachments_within(ORPHAN_PASS_BUDGET)
+    }
+
+    /// The budget starts at the first removal, so every pass makes progress; removed files leave the listing.
+    fn cleanup_orphaned_chat_attachments_within(&self, budget: Duration) -> Result<bool> {
+        let Some(_move_hold) = self.hold_off_data_dir_move()? else {
+            return Ok(false);
+        };
+        let entries =
+            match std::fs::read_dir(self.data_dir.join(crate::local::chat::ATTACHMENTS_DIR)) {
+                Ok(entries) => entries,
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(false),
+                Err(error) => return Err(error.into()),
+            };
+        let mut started = None;
+        let mut referenced = None;
+        for entry in entries.flatten() {
+            let Some(name) = entry.file_name().to_str().map(str::to_string) else {
+                continue;
+            };
+            let settled = entry.metadata().ok().filter(|metadata| {
+                metadata.is_file()
+                    && metadata
+                        .modified()
+                        .is_ok_and(|at| at.elapsed().unwrap_or_default() >= CHAT_ATTACHMENT_SETTLE)
+            });
+            if !crate::local::chat::is_attachment_name(&name) || settled.is_none() {
+                continue;
+            }
+            let referenced = match &mut referenced {
+                Some(referenced) => referenced,
+                None => referenced.insert(self.chat_attachment_names_where("1", [])?),
+            };
+            if referenced.contains(&name) {
+                continue;
+            }
+            let started = *started.get_or_insert_with(std::time::Instant::now);
+            // A file that cannot be removed is retried next pass without stalling the rest.
+            let _ = std::fs::remove_file(entry.path());
+            if started.elapsed() >= budget {
+                return Ok(true);
+            }
+        }
+        Ok(false)
     }
 
     /// `None` clears it, which a fork of the session's very first turn needs:
@@ -4450,6 +4567,138 @@ mod tests {
         assert!(purged.get());
         assert!(store.get_chat_session("chat").unwrap().is_none());
         assert!(store.get_local_project("project").unwrap().is_none());
+        drop(store);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn deleting_chats_removes_only_attachments_no_other_message_shows() {
+        let dir = std::env::temp_dir().join(format!("orx-attachments-{}", uuid::Uuid::new_v4()));
+        let store = Store::open_at(dir.clone()).unwrap();
+        project_with_run_artifacts(&store, "project", "run", &"a".repeat(64));
+        let attachments = dir.join(crate::local::chat::ATTACHMENTS_DIR);
+        std::fs::create_dir_all(&attachments).unwrap();
+        let chats: [(&str, &str, &[&str]); 3] = [
+            (
+                "first",
+                "project",
+                &["att-1__own.png", "att-2__shared.pdf", "keep.txt"],
+            ),
+            ("second", "project", &["att-3__own.png"]),
+            ("other", "elsewhere", &["att-2__shared.pdf"]),
+        ];
+        for (chat, project, files) in chats {
+            let mut session = chat_session_fixture(chat);
+            session.project_id = project.into();
+            store.create_chat_session(&session).unwrap();
+            let parts = files
+                .iter()
+                .enumerate()
+                .map(|(i, file)| serde_json::json!({ "id": format!("img{i}"), "type": "image", "text": file }))
+                .collect::<Vec<_>>();
+            store
+                .upsert_chat_message(&StoredChatMessage {
+                    id: format!("msg_{chat}"),
+                    session_id: chat.into(),
+                    role: "user".into(),
+                    parts_json: serde_json::Value::from(parts).to_string(),
+                    created_at: 1,
+                    completed_at: None,
+                    parent_id: None,
+                    base_native_session_id: None,
+                    result_native_session_id: None,
+                })
+                .unwrap();
+        }
+        for file in [
+            "att-1__own.png",
+            "att-2__shared.pdf",
+            "att-3__own.png",
+            "keep.txt",
+        ] {
+            std::fs::write(attachments.join(file), "bytes").unwrap();
+        }
+
+        store.delete_chat_session("first").unwrap();
+        assert!(!attachments.join("att-1__own.png").exists());
+        assert!(attachments.join("att-2__shared.pdf").exists());
+        store.delete_local_project("project").unwrap();
+        assert!(!attachments.join("att-3__own.png").exists());
+        assert!(attachments.join("att-2__shared.pdf").exists());
+        store.delete_chat_session("other").unwrap();
+        assert!(!attachments.join("att-2__shared.pdf").exists());
+        assert!(attachments.join("keep.txt").exists());
+        drop(store);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn attachment_sweep_spares_shown_recent_and_foreign_files() {
+        let dir =
+            std::env::temp_dir().join(format!("orx-attachment-sweep-{}", uuid::Uuid::new_v4()));
+        let store = Store::open_at(dir.clone()).unwrap();
+        assert!(!store.cleanup_orphaned_chat_attachments().unwrap());
+        store
+            .create_chat_session(&chat_session_fixture("chat"))
+            .unwrap();
+        store
+            .upsert_chat_message(&StoredChatMessage {
+                id: "msg".into(),
+                session_id: "chat".into(),
+                role: "user".into(),
+                parts_json: r#"[{"id":"img0","type":"image","text":"att-1__shown.png"}]"#.into(),
+                created_at: 1,
+                completed_at: None,
+                parent_id: None,
+                base_native_session_id: None,
+                result_native_session_id: None,
+            })
+            .unwrap();
+        let attachments = dir.join(crate::local::chat::ATTACHMENTS_DIR);
+        std::fs::create_dir_all(&attachments).unwrap();
+        let old = std::time::SystemTime::now() - 2 * CHAT_ATTACHMENT_SETTLE;
+        for file in ["att-1__shown.png", "att-2__orphan.png", "notes.txt"] {
+            let file = std::fs::File::create(attachments.join(file)).unwrap();
+            file.set_modified(old).unwrap();
+        }
+        std::fs::write(attachments.join("att-3__unsent.png"), "bytes").unwrap();
+
+        let moving = store.acquire_data_dir_move_lock().unwrap();
+        assert!(store.claim_data_dir_move("move").unwrap());
+        store.cleanup_orphaned_chat_attachments().unwrap();
+        assert!(attachments.join("att-2__orphan.png").exists());
+        store.release_data_dir_move("move").unwrap();
+        drop(moving);
+
+        let hold = store.hold_off_data_dir_move().unwrap().unwrap();
+        assert!(store.acquire_data_dir_move_lock().is_err());
+        drop(hold);
+
+        assert!(!store.cleanup_orphaned_chat_attachments().unwrap());
+        assert!(!attachments.join("att-2__orphan.png").exists());
+        for kept in ["att-1__shown.png", "att-3__unsent.png", "notes.txt"] {
+            assert!(attachments.join(kept).exists(), "{kept}");
+        }
+
+        let orphans = ["att-4__a.png", "att-5__b.png", "att-6__c.png"];
+        for file in orphans {
+            let file = std::fs::File::create(attachments.join(file)).unwrap();
+            file.set_modified(old).unwrap();
+        }
+        let passes = (0..=orphans.len())
+            .take_while(|_| {
+                store
+                    .cleanup_orphaned_chat_attachments_within(Duration::ZERO)
+                    .unwrap()
+            })
+            .count();
+        assert_eq!(
+            passes,
+            orphans.len(),
+            "each exhausted pass still removes one"
+        );
+        assert!(orphans.iter().all(|file| !attachments.join(file).exists()));
+        assert!(attachments.join("att-1__shown.png").exists());
         drop(store);
         std::fs::remove_dir_all(dir).unwrap();
     }

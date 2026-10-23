@@ -1094,6 +1094,7 @@
   "resume_command_description": "以前のチャットを再度開く",
   "model_command_description": "このチャットのモデルを選択",
   "compact_command_description": "このチャットのコンテキストを圧縮",
+  "chat_compact_unsupported": "このエージェントはコンテキストの圧縮に対応していません。",
   "chat_nothing_to_compact": "圧縮する内容はまだありません",
   "chat_compact_busy": "圧縮する前にターンの完了を待ってください。",
   "chat_compact_failed": "圧縮に失敗: {error}",
