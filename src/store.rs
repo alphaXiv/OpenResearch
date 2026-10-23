@@ -2173,7 +2173,7 @@ impl Store {
         Ok(())
     }
 
-    /// Runs `f` holding run artifacts shared (excluding deletes), waiting up to [`RUN_ARTIFACTS_WAIT`].
+    /// Runs `f` holding run artifacts shared (excluding deletes and orphan scans), waiting up to [`RUN_ARTIFACTS_WAIT`].
     pub(crate) fn with_run_artifacts_shared<T>(&self, f: impl FnOnce() -> Result<T>) -> Result<T> {
         let lock = self.run_artifacts_lock()?;
         let deadline = std::time::Instant::now() + RUN_ARTIFACTS_WAIT;
@@ -2187,7 +2187,9 @@ impl Store {
                     std::thread::sleep(RUN_ARTIFACTS_POLL);
                 }
                 Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
-                    return Err(anyhow!("Run artifacts are busy; retry shortly."))
+                    return Err(anyhow!(
+                        "A deletion or artifact cleanup is in progress; retry shortly."
+                    ))
                 }
                 Err(error) => return Err(error.into()),
             }
@@ -2240,6 +2242,10 @@ impl Store {
         id: &str,
         before_rows: impl FnOnce() -> Result<()>,
     ) -> Result<()> {
+        // A concurrent delete may have finished first, and its slug's branch been reused since.
+        if self.get_local_experiment(id)?.is_none() {
+            return Err(anyhow!("Experiment {id} not found."));
+        }
         let children: i64 = self.conn.query_row(
             "SELECT COUNT(*) FROM local_experiments WHERE parent_experiment_id = ?1",
             params![id],
@@ -2271,18 +2277,7 @@ impl Store {
         let tx = self.begin()?;
         queue_remote_cleanups(&tx, "experiment_id", id, true)?;
         tx.execute("DELETE FROM runs WHERE experiment_id = ?1", params![id])?;
-        // Creating or moving an experiment does not take the artifacts lock, so recheck for children.
-        if tx.execute(
-            "DELETE FROM local_experiments WHERE id = ?1 AND NOT EXISTS
-               (SELECT 1 FROM local_experiments WHERE parent_experiment_id = ?1)",
-            params![id],
-        )? == 0
-            && self.get_local_experiment(id)?.is_some()
-        {
-            return Err(anyhow!(
-                "Experiment {id} gained a child experiment; delete or move it first."
-            ));
-        }
+        tx.execute("DELETE FROM local_experiments WHERE id = ?1", params![id])?;
         tx.commit()?;
         Ok(())
     }
@@ -4435,6 +4430,15 @@ mod tests {
         let (digest, shared) = ("d".repeat(64), "e".repeat(64));
         project_with_run_artifacts(&store, "p", &run, &digest);
         project_with_run_artifacts(&store, "q", &sibling, &shared);
+        store
+            .conn
+            .execute(
+                "INSERT INTO local_experiments (id, project_id, slug, branch_name, title, description,
+                   run_command, agent_status, created_at, updated_at)
+                 VALUES ('experiment', 'p', 'e', 'orx/e', NULL, NULL, '', 'idle', 1, 1)",
+                [],
+            )
+            .unwrap();
         store
             .conn
             .execute(

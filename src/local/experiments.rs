@@ -310,17 +310,23 @@ pub fn create_experiment(
     description: Option<String>,
     run_command: Option<String>,
 ) -> Result<LocalExperiment> {
-    // Deletes hold this lock exclusively, so the parent can't be deleted between fork and insert.
+    // Deletes hold this lock exclusively, so the project and parent can't go between fork and insert.
     store.with_run_artifacts_shared(|| {
-        if let Some(p) = parent {
-            if store.get_local_experiment(&p.id)?.is_none() {
-                return Err(anyhow!("Parent experiment {} no longer exists.", p.id));
-            }
+        if store.get_local_project(&project.id)?.is_none() {
+            return Err(anyhow!("Project {} no longer exists.", project.id));
         }
+        let parent = match parent {
+            Some(p) => Some(
+                store
+                    .get_local_experiment(&p.id)?
+                    .ok_or_else(|| anyhow!("Parent experiment {} no longer exists.", p.id))?,
+            ),
+            None => None,
+        };
         create_experiment_locked(
             store,
             project,
-            parent,
+            parent.as_ref(),
             slug,
             title,
             description,
@@ -603,28 +609,6 @@ mod tests {
         move_experiment(&store, "selected", Some("root")).unwrap();
         let back = store.get_local_experiment("selected").unwrap().unwrap();
         assert_eq!(back.parent_experiment_id.as_deref(), Some("root"));
-        // A delete's exclusive artifacts lock keeps the tree still until it finishes.
-        let mut lock = store.run_artifacts_lock().unwrap();
-        let deleting = lock.write().unwrap();
-        assert!(move_experiment(&store, "selected", None)
-            .unwrap_err()
-            .to_string()
-            .contains("busy"));
-        drop(deleting);
-        let mut gone = experiment(None, "orx/gone");
-        gone.id = "gone".into();
-        assert!(create_experiment(
-            &store,
-            &project("main"),
-            Some(&gone),
-            None,
-            None,
-            None,
-            None
-        )
-        .unwrap_err()
-        .to_string()
-        .contains("no longer exists"));
         drop(store);
         let _ = std::fs::remove_dir_all(dir);
     }
@@ -722,6 +706,48 @@ mod tests {
         let deleted = delete_experiment(&store, "legacy").unwrap();
         assert!(deleted.branch_commit.is_none());
         assert!(git::resolve_branch_commit(&repo, "main").unwrap().is_some());
+        drop(store);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn tree_edits_wait_out_deletes_and_recheck_what_they_build_on() {
+        let dir = std::env::temp_dir().join(format!("orx-tree-edits-{}", uuid::Uuid::new_v4()));
+        let store = Store::open_at(dir.clone()).unwrap();
+        store.create_local_project(&project("main")).unwrap();
+        let mut root = experiment(None, "orx/root");
+        root.id = "root".into();
+        store.create_local_experiment(&root).unwrap();
+        let in_progress = |error: crate::error::Error| error.to_string().contains("in progress");
+        let mut lock = store.run_artifacts_lock().unwrap();
+        let deleting = lock.write().unwrap();
+        assert!(in_progress(
+            move_experiment(&store, "root", Some("root")).unwrap_err()
+        ));
+        assert!(in_progress(
+            create_experiment(&store, &project("main"), None, None, None, None, None).unwrap_err()
+        ));
+        drop(deleting);
+        let mut gone = experiment(None, "orx/gone");
+        gone.id = "gone".into();
+        let missing = |error: crate::error::Error| error.to_string().contains("no longer exists");
+        assert!(missing(
+            create_experiment(
+                &store,
+                &project("main"),
+                Some(&gone),
+                None,
+                None,
+                None,
+                None
+            )
+            .unwrap_err()
+        ));
+        let mut deleted = project("main");
+        deleted.id = "deleted".into();
+        assert!(missing(
+            create_experiment(&store, &deleted, None, None, None, None, None).unwrap_err()
+        ));
         drop(store);
         let _ = std::fs::remove_dir_all(dir);
     }
