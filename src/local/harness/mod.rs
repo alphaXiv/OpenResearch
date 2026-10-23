@@ -319,9 +319,12 @@ pub trait Harness: Send + Sync {
         false
     }
 
-    /// Compact this session's context in the harness's own store. Returning
-    /// `Fallback` asks the caller for the shared summarize-and-reseed path,
-    /// which every harness can take.
+    /// Whether native compaction or the shared summarize-and-reseed path is supported.
+    fn supports_compaction(&self) -> bool {
+        false
+    }
+
+    /// Compact the native context, or request the shared fallback with `Fallback`.
     async fn compact(&self, _ctx: &CompactCtx) -> Result<CompactOutcome> {
         Ok(CompactOutcome::Fallback)
     }
@@ -600,6 +603,10 @@ pub struct CompactCtx {
     pub session_id: String,
     pub native_session_id: Option<String>,
     pub model: Option<String>,
+    pub project: crate::local::model::LocalProject,
+    pub permission_mode: Option<PermissionMode>,
+    pub service_tier: Option<String>,
+    pub reasoning_level: Option<String>,
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -684,6 +691,7 @@ async fn detect_one(harness: &dyn Harness, snapshot: bool) -> Option<HarnessInfo
             info.auth_state = HarnessAuthState::Ready;
         }
         info.options = harness.options();
+        info.supports_compaction = harness.supports_compaction();
         // The trait is the ceiling: a `detect` narrows it for an installation
         // whose run path can't steer. A steering harness whose `detect` forgets
         // to set it reports false and silently queues every send.
@@ -839,6 +847,35 @@ $ARGUMENTS
 mod tests {
     use super::options::{PlanActivation, REASONING_DEFAULT_ID};
     use super::*;
+
+    #[test]
+    fn compaction_support_is_explicit_for_builtins_and_disabled_for_acp() {
+        let supported: [&dyn Harness; 5] = [
+            &claude::ClaudeCode,
+            &codex::Codex,
+            &opencode::OpenCode,
+            &cursor::Cursor,
+            &antigravity::Antigravity,
+        ];
+        for harness in supported {
+            assert!(harness.supports_compaction(), "{}", harness.id());
+        }
+        for preset in crate::local::acp::presets() {
+            let harness = acp::Acp(preset.launch);
+            assert!(!harness.supports_compaction(), "{}", harness.id());
+        }
+        struct DefaultHarness;
+        #[async_trait]
+        impl Harness for DefaultHarness {
+            fn id(&self) -> &str {
+                "default-fixture"
+            }
+            fn name(&self) -> &str {
+                "Default fixture"
+            }
+        }
+        assert!(!DefaultHarness.supports_compaction());
+    }
 
     #[tokio::test]
     async fn title_uses_only_the_selected_opencode_model() {

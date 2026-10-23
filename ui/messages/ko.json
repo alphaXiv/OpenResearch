@@ -1094,6 +1094,7 @@
   "resume_command_description": "이전 채팅 다시 열기",
   "model_command_description": "이 채팅의 모델 선택",
   "compact_command_description": "이 채팅의 컨텍스트 압축",
+  "chat_compact_unsupported": "이 에이전트는 컨텍스트 압축을 지원하지 않습니다.",
   "chat_nothing_to_compact": "아직 압축할 내용이 없습니다",
   "chat_compact_busy": "압축하기 전에 턴이 끝날 때까지 기다리세요.",
   "chat_compact_failed": "압축 실패: {error}",

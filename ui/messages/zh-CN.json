@@ -1088,6 +1088,7 @@
   "resume_command_description": "重新打开之前的聊天",
   "model_command_description": "选择此聊天的模型",
   "compact_command_description": "压缩此聊天的上下文",
+  "chat_compact_unsupported": "此智能体不支持上下文压缩。",
   "chat_nothing_to_compact": "还没有可压缩的内容",
   "chat_compact_busy": "请等待本轮结束后再压缩。",
   "chat_compact_failed": "压缩失败：{error}",

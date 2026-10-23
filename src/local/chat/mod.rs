@@ -1604,8 +1604,10 @@ impl ChatHost {
                 .get_chat_session(session_id)?
                 .ok_or_else(|| anyhow!("chat session is gone"))?
         };
-        if crate::local::harness::session_harness(&session.harness, session_id).is_none() {
-            return Err(anyhow!("unknown harness `{}`", session.harness));
+        let harness = crate::local::harness::session_harness(&session.harness, session_id)
+            .ok_or_else(|| anyhow!("unknown harness `{}`", session.harness))?;
+        if !harness.supports_compaction() {
+            return Err(anyhow!("Compaction is not supported by {}", harness.name()));
         }
         if session.harness == "opencode"
             && session
@@ -1713,6 +1715,14 @@ impl ChatHost {
             session_id: session_id.to_string(),
             native_session_id: session.native_session_id.clone(),
             model: session.model.clone(),
+            project: Store::open()?
+                .get_local_project(&session.project_id)?
+                .ok_or_else(|| anyhow!("project is gone"))?,
+            permission_mode: session.permission_mode.as_deref().and_then(|mode| {
+                crate::local::harness::permission_mode_for(&session.harness, mode)
+            }),
+            service_tier: session.service_tier.clone(),
+            reasoning_level: session.reasoning_level.clone(),
         };
         match harness.compact(&ctx).await? {
             crate::local::harness::CompactOutcome::Native => Ok(None),
@@ -10199,6 +10209,90 @@ mod bridge_tests {
                 .unwrap_err();
             assert!(error.to_string().contains("Select an OpenCode model"));
         }
+    }
+
+    #[test]
+    fn unsupported_compaction_leaves_history_unchanged() {
+        const CHILD: &str = "ORX_TEST_UNSUPPORTED_COMPACTION";
+        if std::env::var_os(CHILD).is_some() {
+            tokio::runtime::Runtime::new().unwrap().block_on(async {
+                let host = Arc::new(test_host());
+                let store = Store::open().unwrap();
+                let launch = crate::local::acp::presets().remove(0).launch;
+                let mut session = bare_session();
+                session.id = "unsupported-compaction".into();
+                session.harness = launch.id;
+                session.native_session_id = Some("saved-acp-session".into());
+                session.archived = true;
+                session.bootstrap_context = Some("earlier context".into());
+                store.create_chat_session(&session).unwrap();
+                store
+                    .upsert_chat_message_on_branch(&StoredChatMessage {
+                        id: "preserved-message".into(),
+                        session_id: session.id.clone(),
+                        role: "user".into(),
+                        parts_json: serde_json::to_string(&vec![WirePart::text(
+                            "text",
+                            "History to preserve",
+                        )])
+                        .unwrap(),
+                        created_at: 1,
+                        completed_at: Some(1),
+                        parent_id: None,
+                        base_native_session_id: None,
+                        result_native_session_id: None,
+                    })
+                    .unwrap();
+                store
+                    .set_chat_session_context_usage(&session.id, r#"{"usedTokens":9000}"#)
+                    .unwrap();
+                let before = store.get_chat_session(&session.id).unwrap().unwrap();
+                let messages = store.list_chat_messages(&session.id).unwrap();
+                let error = host.compact_session(&session.id).await.unwrap_err();
+                assert_eq!(
+                    error.to_string(),
+                    format!("Compaction is not supported by {}", launch.name)
+                );
+                tokio::time::timeout(Duration::from_secs(1), async {
+                    while host.is_busy(&session.id).await {
+                        tokio::task::yield_now().await;
+                    }
+                })
+                .await
+                .expect("unsupported compaction must release its turn reservation");
+                let after_messages = store.list_chat_messages(&session.id).unwrap();
+                assert_eq!(after_messages.len(), messages.len());
+                assert_eq!(after_messages[0].id, messages[0].id);
+                assert_eq!(after_messages[0].parts_json, messages[0].parts_json);
+                let after = store.get_chat_session(&session.id).unwrap().unwrap();
+                assert_eq!(after.native_session_id, before.native_session_id);
+                assert_eq!(after.bootstrap_context, before.bootstrap_context);
+                assert_eq!(after.context_usage_json, before.context_usage_json);
+                assert_eq!(after.active_leaf_id, before.active_leaf_id);
+                assert_eq!(after.updated_at, before.updated_at);
+                assert_eq!(after.archived, before.archived);
+            });
+            return;
+        }
+        let fixture =
+            crate::local::git::TemporaryDirectory::new("orx-unsupported-compaction").unwrap();
+        let output = std::process::Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "local::chat::bridge_tests::unsupported_compaction_leaves_history_unchanged",
+                "--nocapture",
+            ])
+            .env(CHILD, "1")
+            .env("ORX_DATA_DIR", fixture.path().join("data"))
+            .env("XDG_CONFIG_HOME", fixture.path().join("config"))
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{}\n{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
     }
 
     #[test]
