@@ -88,6 +88,9 @@ enum Command {
     /// Print the command that opens a run's TensorBoard logs.
     Tensorboard(TensorboardArgs),
 
+    /// Summarize the metrics runs logged to Trackio: local, a Hugging Face Space, or a server.
+    Metrics(MetricsArgs),
+
     /// Add an experiment node to a local `orx up` project.
     #[command(name = "create-experiment")]
     CreateExperiment(CreateExperimentArgs),
@@ -261,6 +264,22 @@ pub struct LogsArgs {
 #[derive(Args, Debug)]
 pub struct TensorboardArgs {
     pub run_id: String,
+}
+
+#[derive(Args, Debug)]
+pub struct MetricsArgs {
+    /// One or more run ids; several print one after another for comparison.
+    #[arg(required = true)]
+    pub run_ids: Vec<String>,
+    /// Only metrics whose name contains this text (case-insensitive). Repeatable.
+    #[arg(long = "metric")]
+    pub metrics: Vec<String>,
+    /// Sampled points per metric, first and last included.
+    #[arg(long, default_value_t = 20)]
+    pub points: usize,
+    /// Print JSON instead of the text summary.
+    #[arg(long)]
+    pub json: bool,
 }
 
 #[derive(Args, Debug)]
@@ -1264,6 +1283,7 @@ fn command_name(command: &Command) -> &'static str {
         Command::Runs(_) => "runs",
         Command::Logs(_) => "logs",
         Command::Tensorboard(_) => "tensorboard",
+        Command::Metrics(_) => "metrics",
         Command::CreateExperiment(_) => "create-experiment",
         Command::Compute(_) => "compute",
         Command::Instance(_) => "instance",
@@ -1315,6 +1335,7 @@ async fn dispatch(command: Command) -> error::Result<()> {
         Command::Runs(args) => commands::runs::run(args).await,
         Command::Logs(args) => commands::logs::run(args).await,
         Command::Tensorboard(args) => commands::tensorboard::run(args).await,
+        Command::Metrics(args) => commands::metrics::run(args).await,
         Command::CreateExperiment(args) => commands::create_experiment::run(args).await,
         Command::Compute(args) => commands::compute::run(args).await,
         Command::Instance(args) => commands::instance::run(args).await,

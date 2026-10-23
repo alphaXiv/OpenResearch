@@ -15,8 +15,9 @@ let trackioUrl = null;
 const mocks = {
   "../paraglide/messages.js": { m: new Proxy({}, { get: (_, name) => () => String(name) }) },
   "../api": { runDisplayStatus: () => "complete", timeAgo: () => "now", trackioRunUrl: () => trackioUrl },
-  "../queries/settings": { getTrackioSettingsQuery: () => ({}) },
-  "@tanstack/react-query": { useQuery: () => ({ data: undefined }) },
+  "../queries/settings": { useTrackioRuns: () => ({ data: undefined }) },
+  "../tabPreview": { tabOpenGestureHandlers: () => ({}) },
+  "../theme": { useResolvedTheme: () => "light" },
   "./ExperimentOverview": { ExperimentOverview: () => null },
   "./LogTerminal": { LogTerminal: ({ runId }) => `LOG:${runId}` },
   "./StatusBadge": { StatusBadge: () => null },
@@ -25,12 +26,12 @@ const mocks = {
     ButtonLink: ({ children, href }) => React.createElement("a", { href }, children),
   },
   "./experimentLineageModel": { historyBackendLabel: () => "local", historyJobId: () => "—" },
-  "lucide-react": { ChartLine: () => null, ChevronDown: () => null, CircleStop: () => null },
+  "lucide-react": { ChartLine: () => null, ChevronDown: () => null, CircleStop: () => null, ExternalLink: () => null, ScrollText: () => null },
 };
 const exports = {};
 new Function("require", "exports", compiled)((name) => mocks[name] ?? require(name), exports);
 const props = {
-  experiment: { id: "experiment-a", slug: "example" },
+  experiment: { id: "experiment-a", projectId: "project-a", slug: "example" },
   project: {},
   view: "terminal",
   runs: [
@@ -57,11 +58,31 @@ test("missing and foreign explicit runs render unavailable without substituting 
   }
 });
 
-test("the header links to Trackio only when the run has a dashboard URL", () => {
-  assert.doesNotMatch(render(null), /a11y_open_in_trackio/);
+test("the header offers Trackio only once the run has logged there", () => {
+  assert.doesNotMatch(render(null), />experiment_overview_visualize</);
   trackioUrl = "http://trackio.example:7860/?project=p&runs=run-new";
   try {
-    assert.match(render(null), /href="http:\/\/trackio\.example:7860\/\?project=p&amp;runs=run-new"/);
+    const html = render(null);
+    assert.match(html, />experiment_overview_visualize</);
+    assert.match(html, /LOG:run-new/);
+  } finally {
+    trackioUrl = null;
+  }
+});
+
+test("the trackio view says so when the run has not logged there", () => {
+  const html = renderToStaticMarkup(React.createElement(exports.DetailDrawer, { ...props, view: "trackio", selectedRunId: null }));
+  assert.doesNotMatch(html, /LOG:/);
+  assert.match(html, /detail_drawer_trackio_no_data/);
+});
+
+test("the trackio view embeds the run's charts in place of its logs", () => {
+  trackioUrl = "http://127.0.0.1:7860/?project=p&runs=run-new&sidebar=hidden";
+  try {
+    const html = renderToStaticMarkup(React.createElement(exports.DetailDrawer, { ...props, view: "trackio", selectedRunId: null }));
+    assert.match(html, /<iframe[^>]*src="http:\/\/127\.0\.0\.1:7860\/\?project=p&amp;runs=run-new&amp;sidebar=hidden"/);
+    assert.match(html, /experiment_overview_logs/);
+    assert.doesNotMatch(html, /LOG:/);
   } finally {
     trackioUrl = null;
   }

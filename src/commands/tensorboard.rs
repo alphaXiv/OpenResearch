@@ -25,14 +25,20 @@ fn viewer_command(run_id: &str, backend: &BackendDescriptor) -> Result<String> {
             let (host, dir) = backend.ssh_ref()?;
             (host, dir.to_string())
         }
-        "slurm_job" => (backend.slurm_ref()?.0, crate::jobs::slurm::run_dir(run_id)),
+        "slurm_job" => (
+            backend.slurm_ref()?.0,
+            crate::jobs::slurm::run_dir(backend.remote_root.as_deref(), run_id),
+        ),
         _ => {
             return Err(anyhow!(
                 "TensorBoard logs are kept only for local, Slurm, and SSH runs outside a container"
             ))
         }
     };
-    let remote = format!("tensorboard --logdir \"$HOME\"/{dir}/tensorboard --port {PORT}");
+    let remote = format!(
+        "tensorboard --logdir {}/tensorboard --port {PORT}",
+        crate::jobs::ssh::shell_path(&dir)
+    );
     Ok(format!(
         "ssh -L {PORT}:localhost:{PORT} {} {}\nThen open http://localhost:{PORT}",
         sh_quote(host),
@@ -65,9 +71,13 @@ mod tests {
                 format!(r#"{{"kind":"{kind}","namespace":"gpu-box","jobId":".orx/runs/r1"}}"#);
             let command = viewer_command("r1", &backend(&json)).unwrap();
             assert!(command.starts_with(
-                "ssh -L 6006:localhost:6006 'gpu-box' 'tensorboard --logdir \"$HOME\"/.orx/runs/r1/tensorboard --port 6006'"
+                "ssh -L 6006:localhost:6006 'gpu-box' 'tensorboard --logdir \"$HOME/.orx/runs/r1\"/tensorboard --port 6006'"
             ));
         }
+        let slurm = r#"{"kind":"slurm_job","namespace":"gpu-box","jobId":"7","remoteRoot":"/scratch/me/orx"}"#;
+        assert!(viewer_command("r1", &backend(slurm)).unwrap().contains(
+            "'tensorboard --logdir '\\''/scratch/me/orx/runs/r1'\\''/tensorboard --port 6006'"
+        ));
     }
 
     #[test]

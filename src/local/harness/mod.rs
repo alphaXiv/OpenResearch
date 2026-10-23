@@ -337,14 +337,17 @@ pub trait Harness: Send + Sync {
     /// `None` = failed; the caller keeps the first-line placeholder.
     ///
     /// Default: the shared title one-shot, sanitized; a harness without
-    /// `one_shot` gets none. OpenCode also still adopts a native `session.updated` title (minus its creation
-    /// seed) through `TurnCtx::set_title` if its server ever offers one, but
-    /// runs its own one-shot child since the server stopped titling parent
-    /// sessions.
+    /// `one_shot` gets none. OpenCode also adopts native session titles through
+    /// `TurnCtx::set_title` when its server provides them.
     async fn generate_title(&self, first_message: &str, model: Option<&str>) -> Option<String> {
+        let model = if self.id() == "opencode" {
+            Some(model.filter(|model| !model.trim().is_empty())?)
+        } else {
+            None
+        };
         let prompt = title::title_prompt(first_message);
         let request = OneShot {
-            model: model.filter(|model| self.id() == "opencode" && model.starts_with("orx-local-")),
+            model,
             ..title::title_request(&prompt)
         };
         let raw = self.one_shot(request).await.ok()?;
@@ -836,6 +839,66 @@ $ARGUMENTS
 mod tests {
     use super::options::{PlanActivation, REASONING_DEFAULT_ID};
     use super::*;
+
+    #[tokio::test]
+    async fn title_uses_only_the_selected_opencode_model() {
+        struct TitleHarness {
+            id: &'static str,
+            calls: std::sync::Mutex<Vec<Option<String>>>,
+        }
+        #[async_trait]
+        impl Harness for TitleHarness {
+            fn id(&self) -> &str {
+                self.id
+            }
+            fn name(&self) -> &str {
+                self.id
+            }
+            async fn one_shot(&self, request: OneShot<'_>) -> Result<String> {
+                self.calls
+                    .lock()
+                    .unwrap()
+                    .push(request.model.map(str::to_owned));
+                Ok("A test title".into())
+            }
+        }
+        let harness = TitleHarness {
+            id: "opencode",
+            calls: Default::default(),
+        };
+        for model in [None, Some(""), Some(" \t")] {
+            assert!(harness.generate_title("hello", model).await.is_none());
+        }
+        assert!(harness.calls.lock().unwrap().is_empty());
+        for model in [
+            "orx-local-test/qwen",
+            "openrouter/anthropic/claude",
+            "custom/model",
+        ] {
+            assert_eq!(
+                harness
+                    .generate_title("hello", Some(model))
+                    .await
+                    .as_deref(),
+                Some("A test title")
+            );
+            assert_eq!(
+                harness.calls.lock().unwrap().last(),
+                Some(&Some(model.to_owned()))
+            );
+        }
+        for id in ["claude-code", "codex", "cursor"] {
+            let harness = TitleHarness {
+                id,
+                calls: Default::default(),
+            };
+            harness
+                .generate_title("hello", Some("selected/model"))
+                .await
+                .unwrap();
+            assert_eq!(*harness.calls.lock().unwrap(), vec![None]);
+        }
+    }
 
     #[test]
     fn one_line_flattens_and_caps_on_a_char_boundary() {
