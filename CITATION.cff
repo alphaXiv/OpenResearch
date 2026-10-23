@@ -1,0 +1,22 @@
+cff-version: 1.2.0
+message: "If you use OpenResearch in your research, please cite it as below."
+type: software
+title: "OpenResearch: The local-first harness and workspace for research agents"
+abstract: >-
+  OpenResearch turns coding agents (Claude Code, Codex, OpenCode, Cursor,
+  Google Antigravity, and local models) into research agents that review
+  literature, develop hypotheses, run tracked experiments on local or remote
+  compute, and produce research artifacts, with every experiment recorded on
+  the researcher's own machine.
+authors:
+  - name: alphaXiv
+    website: "https://alphaxiv.org"
+repository-code: "https://github.com/alphaXiv/OpenResearch"
+url: "https://openresearch.sh"
+license: MIT
+keywords:
+  - research agents
+  - autoresearch
+  - coding agents
+  - experiment tracking
+  - AI for science
