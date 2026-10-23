@@ -235,6 +235,21 @@ fn exit_code_state(dir: &Path) -> Option<JobState> {
     })
 }
 
+/// When run.sh wrote exit_code, i.e. when the run actually ended, in epoch ms.
+pub fn exit_code_written_ms(dir: &Path) -> Option<i64> {
+    let modified = std::fs::metadata(dir.join("exit_code"))
+        .ok()?
+        .modified()
+        .ok()?;
+    i64::try_from(
+        modified
+            .duration_since(std::time::UNIX_EPOCH)
+            .ok()?
+            .as_millis(),
+    )
+    .ok()
+}
+
 /// Job state in the shared stage vocabulary (see `jobs::stage_to_run_status`).
 /// exit_code present -> finished; pid alive -> running; pid dead & no
 /// exit_code -> killed/crashed.
@@ -545,6 +560,22 @@ pub(crate) fn spawn_lingering_group(dir: &Path) -> std::process::Child {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn exit_code_write_time_is_the_run_end() {
+        let dir = std::env::temp_dir().join(format!("orx-exit-time-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        assert_eq!(exit_code_written_ms(&dir), None);
+        std::fs::write(dir.join("exit_code"), "3").unwrap();
+        std::fs::File::options()
+            .write(true)
+            .open(dir.join("exit_code"))
+            .unwrap()
+            .set_modified(std::time::UNIX_EPOCH + std::time::Duration::from_millis(1_234_567))
+            .unwrap();
+        assert_eq!(exit_code_written_ms(&dir), Some(1_234_567));
+        std::fs::remove_dir_all(dir).unwrap();
+    }
 
     #[cfg(unix)]
     #[test]
