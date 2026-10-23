@@ -382,7 +382,10 @@ impl Broker {
                     _ => None,
                 };
                 if let Some(legacy_target) = legacy_target {
-                    let legacy = state::resolve(&legacy_target.for_run(&run.id)).await?;
+                    // An obsolete alias must not prevent other hosts from connecting.
+                    let Ok(legacy) = state::resolve(&legacy_target.for_run(&run.id)).await else {
+                        continue;
+                    };
                     if legacy.key == host.resolved.key {
                         return Err(anyhow!("Run {} is monitored by an older OpenResearch process. Restart that monitor with the updated version before using shared SSH; its lock has not been taken over.", run.id));
                     }

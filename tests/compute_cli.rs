@@ -345,7 +345,11 @@ fn interactive_ssh_retires_rejected_masters_without_unlinking_unknown_connection
     std::fs::create_dir(&bin).unwrap();
     let ssh = bin.join("ssh");
     std::fs::write(&ssh, r#"#!/bin/sh
-if [ "$1" = -G ]; then exec /usr/bin/ssh -F /dev/null "$@"; fi
+if [ "$1" = -G ]; then
+  for dest do :; done
+  if [ "$dest" = unresolvable-host ]; then echo "Invalid legacy SSH route" >&2; exit 1; fi
+  exec /usr/bin/ssh -F /dev/null "$@"
+fi
 printf '%s\n' "$*" >> "$HOME/calls"
 case "$*" in
   *'-O check -S '*)
@@ -386,6 +390,7 @@ esac
         "healthy",
         "backoff",
         "legacy_other",
+        "legacy_unresolvable",
         "legacy_same",
         "rejection",
         "exit_zero",
@@ -433,7 +438,7 @@ esac
             )
             .unwrap();
         }
-        let legacy = matches!(case, "legacy_other" | "legacy_same");
+        let legacy = matches!(case, "legacy_other" | "legacy_same" | "legacy_unresolvable");
         let mut legacy_lock = if legacy {
             let output = sandbox
                 .command()
@@ -443,10 +448,10 @@ esac
                 .unwrap();
             assert!(output.status.success());
             let db = rusqlite::Connection::open(data.join("orx.db")).unwrap();
-            let host = if case == "legacy_same" {
-                "lab"
-            } else {
-                "unrelated-host"
+            let host = match case {
+                "legacy_same" => "lab",
+                "legacy_unresolvable" => "unresolvable-host",
+                _ => "unrelated-host",
             };
             let backend = json!({"kind":"ssh_job", "namespace":host, "jobId":".orx/runs/legacy"});
             db.execute("INSERT INTO local_experiments (id, project_id, slug, branch_name, run_command, created_at, updated_at) VALUES ('exp','project','exp','main','true',0,0)", []).unwrap();
@@ -487,9 +492,10 @@ esac
                 .unwrap()
                 .execute("UPDATE runs SET status='cancelled' WHERE id='legacy'", [])
                 .unwrap();
+            sandbox.stop_service(&data);
         }
         match case {
-            "healthy" | "backoff" | "legacy_other" => {
+            "healthy" | "backoff" | "legacy_other" | "legacy_unresolvable" => {
                 assert!(status.success(), "{output}");
                 assert!(!calls.contains("-O stop"));
                 assert!(socket.exists());

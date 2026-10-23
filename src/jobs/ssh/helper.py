@@ -1,5 +1,6 @@
 import base64
 import concurrent.futures
+from collections import OrderedDict
 import hashlib
 import json
 import os
@@ -20,6 +21,8 @@ CHUNK = 256 * 1024
 output_lock = threading.Lock()
 upload_lock = threading.Lock()
 uploads = {}
+log_cache = OrderedDict()
+log_cache_lock = threading.Lock()
 lanes = {name: concurrent.futures.ThreadPoolExecutor(max_workers=count)
          for name, count in (("control", 2), ("logs", 2), ("status", 2), ("commands", 4))}
 slots = {name: threading.BoundedSemaphore(count) for name, count in
@@ -81,6 +84,11 @@ def prefix_digest(file, length):
     return digest
 
 
+def log_fingerprint(stat):
+    # ctime also changes when a writer restores the old mtime.
+    return stat.st_dev, stat.st_ino, stat.st_size, stat.st_mtime_ns, stat.st_ctime_ns
+
+
 def log_chunk(request):
     path = os.path.join(os.path.expanduser("~"), request["dir"], "log")
     try:
@@ -92,9 +100,15 @@ def log_chunk(request):
         identity = "%s:%s" % (stat.st_dev, stat.st_ino)
         offset = request.get("offset", 0)
         reset = request.get("identity") != identity or stat.st_size < offset
+        fingerprint = log_fingerprint(stat)
+        with log_cache_lock:
+            cached = log_cache.get(path)
         digest = hashlib.sha256()
         if not reset and offset:
-            digest = prefix_digest(file, offset)
+            if cached and cached[0] == fingerprint and cached[1] == offset:
+                digest = cached[2].copy()
+            else:
+                digest = prefix_digest(file, offset)
             reset = digest.hexdigest() != request.get("boundary")
         if reset:
             offset = 0
@@ -104,10 +118,18 @@ def log_chunk(request):
         end = offset + len(data)
         digest.update(data)
         boundary = digest.hexdigest()
-        if prefix_digest(file, end).hexdigest() != boundary:
+        after_read = log_fingerprint(os.fstat(file.fileno()))
+        if after_read != fingerprint and prefix_digest(file, end).hexdigest() != boundary:
             raise RuntimeError("Remote log changed during collection; retrying.")
+        final = os.fstat(file.fileno())
+        if log_fingerprint(final) == after_read:
+            with log_cache_lock:
+                log_cache[path] = (after_read, end, digest.copy())
+                log_cache.move_to_end(path)
+                while len(log_cache) > 32:
+                    log_cache.popitem(last=False)
         return {"identity": identity, "reset": reset, "offset": offset,
-                "data": encode(data), "boundary": boundary, "size": stat.st_size, "eof": end >= os.fstat(file.fileno()).st_size}
+                "data": encode(data), "boundary": boundary, "size": stat.st_size, "eof": end >= final.st_size}
 
 
 def slurm_status(jobs):

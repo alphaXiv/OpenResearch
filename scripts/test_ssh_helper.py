@@ -30,6 +30,48 @@ class DeadlineTest(unittest.TestCase):
 
 
 class LogReadRaceTest(unittest.TestCase):
+    def test_unchanged_catchup_and_idle_polls_do_not_rescan_collected_bytes(self):
+        spec = importlib.util.spec_from_file_location("ssh_helper", HELPER)
+        helper = importlib.util.module_from_spec(spec)
+        with patch.object(sys, "dont_write_bytecode", True):
+            spec.loader.exec_module(helper)
+        with tempfile.TemporaryDirectory() as folder:
+            path = Path(folder) / "log"
+            data = b"a" * (helper.CHUNK * 5 + 10)
+            path.write_bytes(data)
+            read_bytes = []
+            real_open = open
+
+            class CountingFile:
+                def __init__(self, file):
+                    self.file = file
+
+                def __enter__(self):
+                    return self
+
+                def __exit__(self, *args):
+                    self.file.close()
+
+                def __getattr__(self, name):
+                    return getattr(self.file, name)
+
+                def read(self, size):
+                    result = self.file.read(size)
+                    read_bytes.append(len(result))
+                    return result
+
+            request = {"dir": folder}
+            collected = b""
+            with patch.object(helper, "open", side_effect=lambda *args, **kwargs:
+                              CountingFile(real_open(*args, **kwargs))):
+                for _ in range(10):
+                    chunk = helper.log_chunk(request)
+                    collected += base64.b64decode(chunk["data"])
+                    request.update(offset=chunk["offset"] + len(base64.b64decode(chunk["data"])),
+                                   identity=chunk["identity"], boundary=chunk["boundary"])
+            self.assertEqual(collected, data)
+            self.assertLessEqual(sum(read_bytes), len(data) * 2)
+
     def test_rewrite_during_collection_is_retried_but_append_is_allowed(self):
         spec = importlib.util.spec_from_file_location("ssh_helper", HELPER)
         helper = importlib.util.module_from_spec(spec)
@@ -174,7 +216,9 @@ class HelperTest(unittest.TestCase):
                           identity=first["identity"], boundary=first["boundary"])
         for replacement in (b"b" * (256 * 1024) + b"z" * 64,
                             b"c" * (256 * 1024) + b"z" * 64 + b"appended"):
+            before = path.stat()
             path.write_bytes(replacement)
+            os.utime(path, ns=(before.st_atime_ns, before.st_mtime_ns))
             changed = self.rpc(op="log", dir=str(folder), offset=len(original),
                                identity=second["identity"], boundary=second["boundary"])
             self.assertTrue(changed["reset"])
