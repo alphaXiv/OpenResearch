@@ -72,6 +72,14 @@ impl RemoteRun {
             keep_tensorboard: !deleted,
         }))
     }
+
+    pub(crate) fn root(&self) -> Option<&str> {
+        self.root.as_deref()
+    }
+
+    pub(crate) fn deleted(&self) -> bool {
+        !self.keep_tensorboard
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -83,20 +91,26 @@ pub enum Outcome {
 }
 
 /// One script per host: remove each run dir whose process group is gone, then cached tars
-/// that no active run references and nothing has touched recently.
-fn host_script(runs: &[RemoteRun], keep_digests: &BTreeSet<String>) -> String {
+/// under `roots` that no active run references and nothing has touched recently.
+fn host_script(
+    runs: &[RemoteRun],
+    roots: &BTreeSet<Option<String>>,
+    keep_digests: &BTreeSet<String>,
+) -> String {
     let mut script = format!("{HOST_PROCESS_HELPERS}\n");
     for run in runs {
-        let inner = run
-            .container
-            .as_ref()
-            .map_or_else(String::new, |(id, dir)| {
+        // A container that still exists but can't run the removal (stopped) keeps the run queued.
+        let container_failed = run.container.as_ref().map_or_else(
+            || "false".to_string(),
+            |(id, dir)| {
                 format!(
-                    "docker exec {} rm -rf -- {} </dev/null >/dev/null 2>&1; ",
-                    sh_quote(id),
-                    sh_quote(dir)
+                    "docker container inspect -- {id} </dev/null >/dev/null 2>&1 && \
+                     ! cerr=$(docker exec {id} rm -rf -- {dir} </dev/null 2>&1)",
+                    id = sh_quote(id),
+                    dir = sh_quote(dir)
                 )
-            });
+            },
+        );
         let remove = if run.keep_tensorboard {
             "if [ -d \"$d/tensorboard\" ]; then find \"$d\" -mindepth 1 -maxdepth 1 ! -name tensorboard -exec rm -rf -- {} +; else rm -rf -- \"$d\"; fi"
         } else {
@@ -105,8 +119,10 @@ fn host_script(runs: &[RemoteRun], keep_digests: &BTreeSet<String>) -> String {
         script.push_str(&format!(
             "d={dir}; p=$(cat \"$d/pid\" 2>/dev/null); case \"$p\" in ''|*[!0-9]*) p=;; esac; \
              if [ -n \"$p\" ] && host_group_alive \"$p\"; then echo 'BUSY {id}'; \
-             else {inner}if err=$({{ {remove}; }} 2>&1); then echo 'REMOVED {id}'; \
-             else printf 'FAILED {id} %s\\n' \"$(printf '%s' \"$err\" | head -n 1)\"; fi; fi\n",
+             elif {container_failed}; then \
+             printf 'FAILED {id} container: %s\\n' \"$(printf '%s' \"$cerr\" | head -n 1)\"; \
+             elif err=$({{ {remove}; }} 2>&1); then echo 'REMOVED {id}'; \
+             else printf 'FAILED {id} %s\\n' \"$(printf '%s' \"$err\" | head -n 1)\"; fi\n",
             dir = shell_path(&run.dir),
             id = run.run_id,
         ));
@@ -116,7 +132,6 @@ fn host_script(runs: &[RemoteRun], keep_digests: &BTreeSet<String>) -> String {
         .map(String::as_str)
         .collect::<Vec<_>>()
         .join(" ");
-    let roots: BTreeSet<_> = runs.iter().map(|run| run.root.as_deref()).collect();
     for root in roots {
         // Only names orx writes (`<sha256>.tar` and its upload temps): a root may hold the user's own tars.
         script.push_str(&format!(
@@ -127,7 +142,7 @@ fn host_script(runs: &[RemoteRun], keep_digests: &BTreeSet<String>) -> String {
              case \"$n\" in \"$b.tar\"|\"$b.tar.tmp.\"*) ;; *) continue;; esac; \
              case ' {keep} ' in *\" $b \"*) continue;; esac; \
              [ -n \"$(find \"$f\" -mmin +{SOURCE_IDLE_MINUTES})\" ] && rm -f -- \"$f\"; done; fi\n",
-            source = shell_path(&remote_source_dir(root)),
+            source = shell_path(&remote_source_dir(root.as_deref())),
         ));
     }
     script.push_str("exit 0\n");
@@ -159,14 +174,15 @@ fn parse_outcomes(runs: &[RemoteRun], output: &str) -> BTreeMap<String, Outcome>
         .collect()
 }
 
-/// Removes `runs` (all on `host`) and that host's unreferenced cached tars.
+/// Removes `runs` (all on `host`) and that host's unreferenced cached tars under `roots`.
 pub async fn clean_host(
     host: &str,
     runs: &[RemoteRun],
+    roots: &BTreeSet<Option<String>>,
     keep_digests: &BTreeSet<String>,
 ) -> Result<BTreeMap<String, Outcome>> {
     // Over stdin: a large batch would overrun Windows' command-line limit.
-    let script = host_script(runs, keep_digests);
+    let script = host_script(runs, roots, keep_digests);
     let output = tokio::time::timeout(
         HOST_TIMEOUT,
         ssh_run(&SshTarget::alias(host), "bash -s", Some(&script)),
@@ -287,7 +303,14 @@ mod tests {
             run("deleted", None, true),
         ];
         let out = std::process::Command::new("bash")
-            .args(["-c", &host_script(&batch, &BTreeSet::from([kept.clone()]))])
+            .args([
+                "-c",
+                &host_script(
+                    &batch,
+                    &BTreeSet::from([None]),
+                    &BTreeSet::from([kept.clone()]),
+                ),
+            ])
             .env("HOME", home.path())
             .output()
             .unwrap();
@@ -319,11 +342,52 @@ mod tests {
         assert_eq!(left, expected);
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn a_stopped_container_keeps_its_run_queued() {
+        use std::os::unix::fs::PermissionsExt as _;
+        let home = crate::local::git::TemporaryDirectory::new("orx-cleanup-container").unwrap();
+        let bin = home.path().join("bin");
+        std::fs::create_dir_all(&bin).unwrap();
+        let docker = bin.join("docker");
+        // Inspect finds the container; exec fails as it does for a stopped one.
+        std::fs::write(
+            &docker,
+            "#!/bin/sh\n[ \"$1\" = container ] && exit 0\necho 'container is not running' >&2\nexit 1\n",
+        )
+        .unwrap();
+        std::fs::set_permissions(&docker, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let mut stopped = run("stopped", None, false);
+        stopped.container = Some(("abc".into(), "/root/.orx/runs/stopped".into()));
+        let dir = home.path().join(".orx/runs/stopped");
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = format!("{}:{}", bin.display(), std::env::var("PATH").unwrap());
+        let out = std::process::Command::new("bash")
+            .args([
+                "-c",
+                &host_script(&[stopped.clone()], &BTreeSet::new(), &BTreeSet::new()),
+            ])
+            .env("HOME", home.path())
+            .env("PATH", path)
+            .output()
+            .unwrap();
+        let outcomes = parse_outcomes(&[stopped], &String::from_utf8(out.stdout).unwrap());
+        assert_eq!(
+            outcomes["stopped"],
+            Outcome::Failed("container: container is not running".into())
+        );
+        assert!(dir.exists());
+    }
+
     #[test]
     fn host_script_quotes_rooted_and_container_paths() {
         let mut rooted = run(RUN, Some("/scratch/orx"), true);
         rooted.container = Some(("abc".into(), format!("/root/.orx/runs/{RUN}")));
-        let script = host_script(&[rooted], &BTreeSet::new());
+        let script = host_script(
+            &[rooted],
+            &BTreeSet::from([Some("/scratch/orx".to_string())]),
+            &BTreeSet::new(),
+        );
         assert!(script.contains(&format!("d='/scratch/orx/runs/{RUN}';")));
         assert!(script.contains(&format!(
             "docker exec 'abc' rm -rf -- '/root/.orx/runs/{RUN}'"
