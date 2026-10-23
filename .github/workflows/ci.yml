@@ -53,7 +53,7 @@ jobs:
         with:
           node-version: 22
       - name: CI selection and release safety tests
-        run: node --test scripts/ci-changes.test.mjs scripts/ci-workflows.test.mjs
+        run: node --test scripts/ci-changes.test.mjs scripts/ci-workflows.test.mjs scripts/ci-cargo-fetch.test.mjs
       - name: Select checks for changed files
         id: changes
         env:
@@ -144,6 +144,8 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           shared-key: check # Preserve the former Rust job's cache namespace.
+      - name: Prepare cached Cargo dependencies
+        run: bash scripts/ci-cargo-fetch.sh
       - name: Format
         run: |
           cargo fmt --all --check
@@ -195,6 +197,8 @@ jobs:
         with:
           components: clippy
       - uses: Swatinem/rust-cache@v2
+      - name: Prepare cached Cargo dependencies
+        run: bash scripts/ci-cargo-fetch.sh
       - name: Clippy
         run: cargo clippy --all-targets --locked --features desktop -- -D warnings
       - name: Build
@@ -228,6 +232,9 @@ jobs:
           workspaces: |
             . -> target
             windows/launcher -> target
+      - name: Prepare cached Cargo dependencies
+        shell: bash
+        run: bash scripts/ci-cargo-fetch.sh Cargo.toml windows/launcher/Cargo.toml
       - name: Clippy
         if: matrix.mode != 'build'
         run: cargo clippy --all-targets --locked -- -D warnings
