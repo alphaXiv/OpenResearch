@@ -9,6 +9,8 @@ use crate::error::{anyhow, Result};
 #[derive(Clone, Serialize, Deserialize)]
 pub(super) struct Resolved {
     pub key: String,
+    #[serde(default)]
+    key_version: u8,
     pub target: SshTarget,
     pub options: Vec<String>,
     pub socket: Option<PathBuf>,
@@ -38,11 +40,17 @@ fn open_database(path: &std::path::Path) -> Result<Connection> {
 
 pub(super) async fn resolve(target: &SshTarget) -> Result<Resolved> {
     if let Some(run) = &target.run_id {
-        let saved: Option<String> = database()?.query_row(
+        let mut db = database()?;
+        let saved: Option<String> = db.query_row(
             "SELECT resolved FROM connections JOIN bindings ON connections.id = bindings.connection WHERE run = ?1",
             [run], |row| row.get(0)).optional()?;
         if let Some(saved) = saved {
-            return Ok(serde_json::from_str(&saved)?);
+            let resolved: Resolved = serde_json::from_str(&saved)?;
+            return if resolved.key_version == 0 {
+                migrate_configuration(&mut db, resolved).await
+            } else {
+                Ok(resolved)
+            };
         }
     }
     super::super::prepare_control_dir()?;
@@ -58,6 +66,7 @@ pub(super) async fn resolve(target: &SshTarget) -> Result<Resolved> {
     let socket = None;
     let resolved = Resolved {
         key,
+        key_version: 1,
         target: target.clone(),
         options,
         socket,
@@ -86,12 +95,60 @@ pub(super) async fn resolve(target: &SshTarget) -> Result<Resolved> {
 
 pub(super) async fn validate_configuration(resolved: &Resolved) -> Result<()> {
     if configuration_key(&resolved.target, &resolved.options).await? != resolved.key {
-        return Err(anyhow!("SSH configuration changed for this run's pinned connection. Restore its original route/authentication settings or start a new run with the new connection."));
+        return Err(anyhow!(CONFIGURATION_CHANGED));
     }
     Ok(())
 }
 
+const CONFIGURATION_CHANGED: &str = "SSH configuration changed for this run's pinned connection. Restore its original route/authentication settings or start a new run with the new connection.";
+
+async fn migrate_configuration(db: &mut Connection, mut resolved: Resolved) -> Result<Resolved> {
+    let configuration = configuration(&resolved.target, &resolved.options).await?;
+    let key = configuration_fingerprint(
+        &resolved.target,
+        &super::super::route_configuration(&configuration),
+    )?;
+    let legacy = configuration
+        .lines()
+        .filter(|line| !line.starts_with("host "))
+        .map(|line| format!("{line}\n"))
+        .collect::<String>();
+    if resolved.key != key && resolved.key != configuration_fingerprint(&resolved.target, &legacy)?
+    {
+        return Err(anyhow!(CONFIGURATION_CHANGED));
+    }
+    let old_key = std::mem::replace(&mut resolved.key, key);
+    resolved.key_version = 1;
+    let tx = db.transaction()?;
+    tx.execute(
+        "INSERT INTO connections(id,resolved,failures,next_at,last_error)
+         SELECT ?2,?3,failures,next_at,last_error FROM connections WHERE id=?1
+         ON CONFLICT(id) DO UPDATE SET resolved=excluded.resolved,
+           failures=MAX(connections.failures,excluded.failures),
+           next_at=MAX(connections.next_at,excluded.next_at),
+           last_error=CASE WHEN excluded.next_at>=connections.next_at
+             THEN COALESCE(excluded.last_error,connections.last_error)
+             ELSE COALESCE(connections.last_error,excluded.last_error) END",
+        params![old_key, resolved.key, serde_json::to_string(&resolved)?],
+    )?;
+    tx.execute(
+        "UPDATE bindings SET connection=?2 WHERE connection=?1",
+        params![old_key, resolved.key],
+    )?;
+    tx.execute(
+        "DELETE FROM connections WHERE id=?1 AND id<>?2",
+        params![old_key, resolved.key],
+    )?;
+    tx.commit()?;
+    Ok(resolved)
+}
+
 async fn configuration_key(target: &SshTarget, options: &[String]) -> Result<String> {
+    let configuration = configuration(target, options).await?;
+    configuration_fingerprint(target, &super::super::route_configuration(&configuration))
+}
+
+async fn configuration(target: &SshTarget, options: &[String]) -> Result<String> {
     let output = tokio::time::timeout(
         std::time::Duration::from_secs(10),
         tokio::process::Command::new("ssh")
@@ -110,9 +167,12 @@ async fn configuration_key(target: &SshTarget, options: &[String]) -> Result<Str
             String::from_utf8_lossy(&output.stderr)
         ));
     }
-    let configuration = String::from_utf8(output.stdout)?;
+    Ok(String::from_utf8(output.stdout)?)
+}
+
+fn configuration_fingerprint(target: &SshTarget, configuration: &str) -> Result<String> {
     let mut digest = Sha256::new();
-    digest.update(super::super::route_configuration(&configuration).as_bytes());
+    digest.update(configuration.as_bytes());
     digest.update(serde_json::to_vec(&target.managed_generation)?);
     digest.update(serde_json::to_vec(&target.auth_agent)?);
     Ok(format!("{:x}", digest.finalize()))
@@ -190,6 +250,7 @@ mod tests {
         let options = vec!["-F".into(), path.to_string_lossy().into_owned()];
         let resolved = super::Resolved {
             key: super::configuration_key(&target, &options).await.unwrap(),
+            key_version: 1,
             target,
             options,
             socket: None,
@@ -218,6 +279,7 @@ mod tests {
         let options = vec!["-F".into(), path.to_string_lossy().into_owned()];
         let resolved = super::Resolved {
             key: super::configuration_key(&target, &options).await.unwrap(),
+            key_version: 1,
             target,
             options,
             socket: None,
@@ -234,6 +296,109 @@ mod tests {
                 .await
                 .unwrap()
         );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn legacy_keys_migrate_all_bindings_and_preserve_retry_history() {
+        for (legacy_hash, existing_connection) in [(true, false), (true, true), (false, false)] {
+            let temp = crate::local::git::TemporaryDirectory::new("orx-key-migration").unwrap();
+            let path = temp.path().join("config");
+            let original = "Host lab\n HostName 127.0.0.1\n IdentityFile /original-key\n";
+            std::fs::write(&path, original).unwrap();
+            let target = crate::jobs::ssh::SshTarget::alias("lab");
+            let options = vec!["-F".into(), path.to_string_lossy().into_owned()];
+            let configuration = super::configuration(&target, &options).await.unwrap();
+            let old_configuration = if legacy_hash {
+                configuration
+                    .lines()
+                    .filter(|line| !line.starts_with("host "))
+                    .map(|line| format!("{line}\n"))
+                    .collect::<String>()
+            } else {
+                crate::jobs::ssh::route_configuration(&configuration)
+            };
+            let old_key = super::configuration_fingerprint(&target, &old_configuration).unwrap();
+            let current_key = super::configuration_key(&target, &options).await.unwrap();
+            let saved =
+                serde_json::json!({"key":old_key,"target":target,"options":options,"socket":null})
+                    .to_string();
+            let resolved: super::Resolved = serde_json::from_str(&saved).unwrap();
+            assert_eq!(resolved.key_version, 0);
+            let db_path = temp.path().join("state.db");
+            let mut db = super::open_database(&db_path).unwrap();
+            db.execute(
+                "INSERT INTO connections VALUES (?1,?2,4,1000,'old failure')",
+                rusqlite::params![old_key, saved],
+            )
+            .unwrap();
+            db.execute(
+                "INSERT INTO bindings VALUES ('run-a',?1),('run-b',?1)",
+                [&old_key],
+            )
+            .unwrap();
+            if existing_connection {
+                db.execute(
+                    "INSERT INTO connections VALUES (?1,'{}',5,2000,'new failure')",
+                    [&current_key],
+                )
+                .unwrap();
+            }
+            std::fs::write(&path, original.replace("original-key", "changed-key")).unwrap();
+            assert!(super::migrate_configuration(&mut db, resolved.clone())
+                .await
+                .is_err());
+            let unchanged: String = db
+                .query_row(
+                    "SELECT connection FROM bindings WHERE run='run-a'",
+                    [],
+                    |row| row.get(0),
+                )
+                .unwrap();
+            assert_eq!(unchanged, old_key);
+            std::fs::write(&path, original).unwrap();
+            let migrated = super::migrate_configuration(&mut db, resolved)
+                .await
+                .unwrap();
+            assert_eq!(migrated.key, current_key);
+            assert_eq!(migrated.key_version, 1);
+            super::validate_configuration(&migrated).await.unwrap();
+            drop(db);
+            let db = super::open_database(&db_path).unwrap();
+            let count: u32 = db
+                .query_row(
+                    "SELECT COUNT(*) FROM bindings WHERE connection=?1",
+                    [&current_key],
+                    |row| row.get(0),
+                )
+                .unwrap();
+            assert_eq!(count, 2);
+            let (json, failures, next, error): (String, u32, i64, String) = db
+                .query_row(
+                    "SELECT resolved,failures,next_at,last_error FROM connections WHERE id=?1",
+                    [&current_key],
+                    |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+                )
+                .unwrap();
+            assert_eq!(
+                (failures, next, error.as_str()),
+                if existing_connection {
+                    (5, 2000, "new failure")
+                } else {
+                    (4, 1000, "old failure")
+                }
+            );
+            assert_eq!(
+                serde_json::from_str::<super::Resolved>(&json)
+                    .unwrap()
+                    .key_version,
+                1
+            );
+            let remaining: u32 = db
+                .query_row("SELECT COUNT(*) FROM connections", [], |row| row.get(0))
+                .unwrap();
+            assert_eq!(remaining, 1);
+        }
     }
 
     #[test]
