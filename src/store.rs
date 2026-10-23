@@ -2173,7 +2173,8 @@ impl Store {
         Ok(())
     }
 
-    /// Runs `f` holding run artifacts shared (excluding deletes and orphan scans), waiting up to [`RUN_ARTIFACTS_WAIT`].
+    /// Runs `f` holding run artifacts shared, excluding deletes and orphan scans; waits up to
+    /// [`RUN_ARTIFACTS_WAIT`].
     pub(crate) fn with_run_artifacts_shared<T>(&self, f: impl FnOnce() -> Result<T>) -> Result<T> {
         let lock = self.run_artifacts_lock()?;
         let deadline = std::time::Instant::now() + RUN_ARTIFACTS_WAIT;
@@ -2242,7 +2243,7 @@ impl Store {
         id: &str,
         before_rows: impl FnOnce() -> Result<()>,
     ) -> Result<()> {
-        // A concurrent delete may have finished first, and its slug's branch been reused since.
+        // A concurrent delete may have won, and a new experiment may now own its branch.
         if self.get_local_experiment(id)?.is_none() {
             return Err(anyhow!("Experiment {id} not found."));
         }
@@ -4481,6 +4482,8 @@ mod tests {
         store
             .delete_local_experiment("experiment", || Ok(()))
             .unwrap();
+        // A repeat delete is refused before touching anything.
+        refused(&store);
         assert!(!dir.join("local-runs").join(&run).exists());
         assert!(!dir.join("run-logs").join(format!("{run}.log")).exists());
         assert!(!dir

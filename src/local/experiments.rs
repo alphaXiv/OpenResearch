@@ -310,11 +310,11 @@ pub fn create_experiment(
     description: Option<String>,
     run_command: Option<String>,
 ) -> Result<LocalExperiment> {
-    // Deletes hold this lock exclusively, so the project and parent can't go between fork and insert.
+    // Deletes hold this lock exclusively, so neither the project nor the parent can be deleted before insert.
     store.with_run_artifacts_shared(|| {
-        if store.get_local_project(&project.id)?.is_none() {
-            return Err(anyhow!("Project {} no longer exists.", project.id));
-        }
+        let project = store
+            .get_local_project(&project.id)?
+            .ok_or_else(|| anyhow!("Project {} no longer exists.", project.id))?;
         let parent = match parent {
             Some(p) => Some(
                 store
@@ -325,7 +325,7 @@ pub fn create_experiment(
         };
         create_experiment_locked(
             store,
-            project,
+            &project,
             parent.as_ref(),
             slug,
             title,
@@ -722,7 +722,7 @@ mod tests {
         let mut lock = store.run_artifacts_lock().unwrap();
         let deleting = lock.write().unwrap();
         assert!(in_progress(
-            move_experiment(&store, "root", Some("root")).unwrap_err()
+            move_experiment(&store, "root", None).unwrap_err()
         ));
         assert!(in_progress(
             create_experiment(&store, &project("main"), None, None, None, None, None).unwrap_err()
