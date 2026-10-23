@@ -2191,9 +2191,13 @@ async fn delete_experiment(State(state): State<AppState>, Path(id): Path<String>
     // Deletion can wait up to RUN_ARTIFACTS_WAIT for the run-artifacts lock.
     blocking_api(move || {
         let store = Store::open()?;
-        if store.get_local_experiment(&id)?.is_none() {
-            return Err(not_found("experiment"));
-        }
+        let experiment = store
+            .get_local_experiment(&id)?
+            .ok_or_else(|| not_found("experiment"))?;
+        let _admission = state
+            .project_lifecycle
+            .admit(&experiment.project_id)
+            .ok_or_else(|| bad_request("project deletion is in progress"))?;
         let deleted = local::experiments::delete_experiment(&store, &id).map_err(bad_request)?;
         Ok(Json(
             json!({ "ok": true, "branchCommit": deleted.branch_commit }),
