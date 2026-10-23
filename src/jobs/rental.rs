@@ -154,7 +154,7 @@ pub async fn supervise(_config: &Path) -> Result<()> {
 
 // Some hosts ship a ~/.config the login user cannot write; installers and orx need one.
 const WRITABLE_CONFIG_HOME: &str = "c=\"${XDG_CONFIG_HOME:-$HOME/.config}\"; \
-     { mkdir -p \"$c\" && [ -w \"$c\" ]; } 2>/dev/null || export XDG_CONFIG_HOME=\"$HOME/.orx/config\"; ";
+     { mkdir -p \"$c\" && [ -w \"$c\" ] && [ -x \"$c\" ]; } 2>/dev/null || export XDG_CONFIG_HOME=\"$HOME/.orx/config\"; ";
 
 fn remote_bash_command(script: &str) -> String {
     crate::commands::up_remote::remote_login_orx_cmd(&format!(
@@ -295,13 +295,15 @@ mod tests {
         };
         assert_eq!(config_home(home.path()), "");
         let config = home.path().join(".config");
-        std::fs::set_permissions(&config, std::fs::Permissions::from_mode(0o555)).unwrap();
-        // Root can write anywhere, so the fallback is only observable for other users.
-        if std::fs::write(config.join("probe"), "").is_err() {
-            assert_eq!(
-                config_home(home.path()),
-                format!("{}/.orx/config", home.path().display())
-            );
+        for mode in [0o555, 0o600] {
+            std::fs::set_permissions(&config, std::fs::Permissions::from_mode(mode)).unwrap();
+            // Root can write anywhere, so the fallback is only observable for other users.
+            if std::fs::write(config.join("probe"), "").is_err() {
+                assert_eq!(
+                    config_home(home.path()),
+                    format!("{}/.orx/config", home.path().display())
+                );
+            }
         }
         std::fs::set_permissions(&config, std::fs::Permissions::from_mode(0o755)).unwrap();
     }
