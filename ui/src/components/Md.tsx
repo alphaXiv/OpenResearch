@@ -27,7 +27,7 @@ import { absoluteFileUrl, artifactUrl, projectFileUrl } from "../api";
 import { InlineHtmlFigure } from "./InlineHtmlFigure";
 import { ImageCarousel, ImageCarouselContext } from "./ImageCarousel";
 import { imageWheelZoom } from "../imageZoom";
-import { chatImageTarget, chatImageTargets, citedFilePath, documentAssetTarget, encodeMarkdownPath, firstCitedLine, rehypeSafeUrls, splitLineSuffix, type ImageCandidate } from "../markdownTarget";
+import { chatImageTarget, chatImageTargets, citedFilePath, documentAssetTarget, encodeMarkdownPath, firstCitedLine, nativeMarkdownPath, rehypeSafeUrls, splitLineSuffix, type ImageCandidate } from "../markdownTarget";
 
 const ImageResolverContext = createContext<((src: string) => ImageCandidate[]) | undefined>(undefined);
 
@@ -365,6 +365,7 @@ const markdownProcessor = unified()
 
 /** A link target that is a file path rather than a web URL. */
 function isFileHref(href: string): boolean {
+  if (nativeMarkdownPath(href)) return true;
   if (/^[a-z][a-z0-9+.-]*:/i.test(href)) return false; // has a scheme
   if (href.startsWith("#") || href.startsWith("//")) return false;
   return true;
@@ -476,10 +477,11 @@ export const Md = memo(function Md({
       // file tabs instead of navigating the dashboard away.
       const target = typeof citedHref === "string" ? citedHref : href;
       const cited = target ? splitLineSuffix(target) : null;
-      if (cited && isFileHref(cited.path) && onOpenFile) {
+      if (cited && isFileHref(cited.path)) {
         const path = citedFilePath(cited.path, resolveFilePath);
-        return path ? <FileChip path={path} line={cited.line} onOpenFile={onOpenFile} /> : <span>{children}</span>;
+        return path && onOpenFile ? <FileChip path={path} line={cited.line} onOpenFile={onOpenFile} /> : <span>{children}</span>;
       }
+      if (!href) return <span>{children}</span>;
       return (
         <a href={href} target="_blank" rel="noopener noreferrer" {...rest}>
           {children}

@@ -13,6 +13,7 @@ import {
   firstCitedLine,
   isExternalMarkdownTarget,
   markdownTargetUrl,
+  nativeMarkdownPath,
   rehypeSafeUrls,
   resolveMarkdownTarget,
   splitLineSuffix,
@@ -224,4 +225,33 @@ test("cited hrefs are sanitized and carried out of band", () => {
   assert.deepEqual(link("javascript:1"), { href: "", "data-cited-href": "javascript:1" });
   assert.equal(link("javascript:alert(1)//x.py:1").href, "");
   assert.deepEqual(link("https://example.com/docs"), { href: "https://example.com/docs" });
+});
+
+test("native links reach the file handler without document-relative rebasing", () => {
+  const contextual = (path) => resolveMarkdownTarget("docs", path)?.path ?? null;
+  for (const [input, expected] of [
+    ["C:/reports/report.pdf", "C:/reports/report.pdf"],
+    [String.raw`C:\reports\notes.txt`, "C:/reports/notes.txt"],
+    ["C%3A%5Creports%5Cnotes.txt", "C:/reports/notes.txt"],
+    ["file:///C:/reports/report%20one.pdf", "C:/reports/report one.pdf"],
+    ["file://localhost/tmp/report.csv", "/tmp/report.csv"],
+    ["file:///tmp/a%2523%23.txt", "/tmp/a%23#.txt"],
+    ["file:///tmp/report.pdf?download=1#page=2", "/tmp/report.pdf"],
+  ]) {
+    assert.equal(nativeMarkdownPath(input), expected, input);
+    assert.equal(citedFilePath(input, contextual), expected, input);
+  }
+  assert.equal(citedFilePath("notes.txt", contextual), "docs/notes.txt");
+  for (const input of ["file://server/share/a.txt", "file:relative.txt", "file:///tmp/%00.txt", "file:///tmp/%ZZ", "file:////server/share/a.txt", "C:/bad%ZZ", "https://example.com/a.pdf", "//example.com/a.pdf"]) {
+    assert.equal(nativeMarkdownPath(input), null, input);
+  }
+});
+
+test("local-link metadata survives while browser href stays sanitized", () => {
+  const processor = unified().use(remarkParse).use(remarkRehype).use(rehypeSafeUrls);
+  for (const target of ["C:/report.pdf", "file:///tmp/notes.txt", "C%3A/report.pdf", "file:///C:/main.rs#L42"]) {
+    const properties = processor.runSync(processor.parse(`[x](${target})`)).children[0].children[0].properties;
+    assert.equal(properties["data-cited-href"], target);
+    if (!target.startsWith("C%3A")) assert.equal(properties.href, "");
+  }
 });
