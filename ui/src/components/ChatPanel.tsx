@@ -3801,6 +3801,9 @@ function useTranscriptAnnouncement(messages: ChatMessage[]): TranscriptAnnouncem
   return announcement;
 }
 
+// Measured heights outlive the per-chat remount so switching back paints at the real layout.
+const transcriptRowSizes = new Map<string, { size: number; width: number }>();
+
 const Transcript = memo(function Transcript({
   messages,
   scrollRef,
@@ -3882,15 +3885,26 @@ const Transcript = memo(function Transcript({
     });
     return [...indexes].sort((a, b) => a - b);
   }, [visibleMessages, fullHistory]);
+  // Seed via the measurement cache, not estimateSize, so remembered rows count as measured for anchoring.
+  const [initialMeasurementsCache] = useState(() => visibleMessages.flatMap((group, index) => {
+    const remembered = transcriptRowSizes.get(group[0].id);
+    if (!remembered || remembered.width !== scrollRef.current?.offsetWidth) return [];
+    const { size } = remembered;
+    return [{ key: group[0].id, index, start: 0, end: size, size, lane: 0 }];
+  }));
   const virtualizer = useVirtualizer({
     count: visibleMessages.length,
-    useFlushSync: false,
     getScrollElement: () => scrollRef.current,
     getItemKey,
     estimateSize: () => 400,
-    overscan: 1,
+    initialMeasurementsCache,
+    overscan: 4,
     initialRect: { width: scrollRef.current?.clientWidth ?? 0, height: scrollRef.current?.clientHeight ?? 0 },
-    initialOffset: () => Math.max(0, visibleMessages.length * 400 - (scrollRef.current?.clientHeight ?? 0)),
+    initialOffset: () => {
+      const remembered = initialMeasurementsCache.reduce((total, item) => total + item.size, 0);
+      const estimated = remembered + (visibleMessages.length - initialMeasurementsCache.length) * 400;
+      return Math.max(0, estimated - (scrollRef.current?.clientHeight ?? 0));
+    },
     anchorTo: stickToBottom.current ? "end" : "start",
     followOnAppend: true,
     scrollEndThreshold: 60,
@@ -3902,6 +3916,15 @@ const Transcript = memo(function Transcript({
     onPinToBottom();
     return () => { scrollToEndRef.current = null; };
   }, [virtualizer, scrollToEndRef, onPinToBottom]);
+  useLayoutEffect(() => () => {
+    const width = virtualizer.scrollRect?.width ?? 0;
+    for (const [key, size] of virtualizer.itemSizeCache) {
+      const id = String(key);
+      // Interacted rows remount with reset local state (e.g. collapsed work), so their height is stale.
+      if (retainedRows.current.has(id)) transcriptRowSizes.delete(id);
+      else transcriptRowSizes.set(id, { size, width });
+    }
+  }, [virtualizer]);
   useEffect(() => {
     const retainSelection = () => {
       const selection = window.getSelection();
