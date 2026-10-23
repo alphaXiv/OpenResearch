@@ -4683,6 +4683,17 @@ async fn reclaim_orphaned_run_artifacts(
                         eprintln!("orx up: orphaned run artifact cleanup failed: {error}")
                     }
                 }
+                match tokio::task::spawn_blocking(|| {
+                    Store::open()?.cleanup_orphaned_chat_attachments()
+                })
+                .await
+                {
+                    Ok(Ok(left)) => more |= left,
+                    Ok(Err(error)) => {
+                        eprintln!("orx up: could not clean orphaned chat attachments: {error}")
+                    }
+                    Err(error) => eprintln!("orx up: chat attachment cleanup failed: {error}"),
+                }
             }
         }
         let pause = if more {
@@ -5139,7 +5150,8 @@ async fn move_data_dir(State(state): State<AppState>, Json(req): Json<DataDirReq
             release(&state);
             return ApiError(
                 StatusCode::CONFLICT,
-                "Another dashboard is moving the data directory.".into(),
+                "Another dashboard is moving or cleaning up the data directory; retry shortly."
+                    .into(),
             )
             .into_response();
         }
