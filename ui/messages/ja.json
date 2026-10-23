@@ -1432,5 +1432,8 @@
   "chat_experiment_running": "実験を実行中",
   "chat_experiment_starting": "実験を開始中",
   "chat_experiment_cancelling": "実験をキャンセル中",
-  "chat_experiments_running": "{count} 件の実験を実行中"
+  "chat_experiments_running": "{count} 件の実験を実行中",
+  "skills_detection_details": "スキル検出の詳細",
+  "skills_detection_copy": "検出の詳細をコピー",
+  "skills_detection_accepted": "{count} 件を検出"
 }

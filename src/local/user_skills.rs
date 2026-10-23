@@ -15,7 +15,10 @@
 //! Both sources appear in the composer menu. Only explicit uploads are written
 //! into sessions; discovered skills remain owned by their native harness.
 
+use std::collections::HashSet;
 use std::fs;
+
+use serde::Serialize;
 use std::path::{Path, PathBuf};
 
 use crate::error::{anyhow, Result};
@@ -118,6 +121,10 @@ struct Frontmatter {
 /// indented lines. A skill whose frontmatter we can't read is a skill the user
 /// never sees, so this errs towards reading it.
 fn parse_frontmatter(content: &str) -> Result<Frontmatter> {
+    parse_frontmatter_with_name(content, None)
+}
+
+fn parse_frontmatter_with_name(content: &str, fallback_name: Option<&str>) -> Result<Frontmatter> {
     let content = content.strip_prefix('\u{feff}').unwrap_or(content);
     let after_open = content
         .strip_prefix("---")
@@ -158,6 +165,7 @@ fn parse_frontmatter(content: &str) -> Result<Frontmatter> {
     }
 
     let name = name
+        .or_else(|| fallback_name.map(str::to_owned))
         .filter(|s| !s.is_empty())
         .ok_or_else(|| anyhow!("SKILL.md frontmatter is missing a `name:` field"))?;
     let mut description = description
@@ -470,65 +478,169 @@ fn available_mirrored(root: &Path, skills: Vec<Mirrored>, harness: Option<&str>)
         .collect()
 }
 
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SkillDiscovery {
+    pub agent: String,
+    pub harness: String,
+    pub origin: String,
+    #[serde(serialize_with = "serialize_diagnostic_path")]
+    pub path: PathBuf,
+    pub status: SkillRootStatus,
+    pub accepted: usize,
+    pub skipped: Vec<SkippedSkill>,
+}
+
+#[derive(Debug, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "kebab-case")]
+pub enum SkillRootStatus {
+    Scanned,
+    Missing,
+    Unreadable,
+}
+
+#[derive(Debug, Serialize)]
+pub struct SkippedSkill {
+    #[serde(serialize_with = "serialize_diagnostic_path")]
+    pub path: PathBuf,
+    pub reason: String,
+}
+
+fn serialize_diagnostic_path<S: serde::Serializer>(
+    path: &Path,
+    serializer: S,
+) -> std::result::Result<S::Ok, S::Error> {
+    serializer.serialize_str(&path.to_string_lossy())
+}
+
+impl SkillDiscovery {
+    fn skip(&mut self, path: PathBuf, reason: impl Into<String>) {
+        self.skipped.push(SkippedSkill {
+            path,
+            reason: reason.into(),
+        });
+    }
+}
+
 fn discover_mirrored() -> Vec<Mirrored> {
+    discover_mirrored_with_details().0
+}
+
+fn discover_mirrored_with_details() -> (Vec<Mirrored>, Vec<SkillDiscovery>) {
     let mut out = Vec::new();
+    let mut reports = Vec::new();
     for harness in registry() {
         if harness.session_skills_dir().is_none() {
             continue;
         }
-        let global = harness.global_skills_dir();
-        if let Some(dir) = &global {
-            collect_mirrored(dir, harness.name(), harness.id(), false, &mut out);
-        }
-        if let Some(dir) = harness.config_home().map(|home| home.join("skills")) {
-            if global.as_ref() != Some(&dir) {
-                collect_mirrored(&dir, harness.name(), harness.id(), false, &mut out);
+        let roots = harness
+            .native_skill_roots()
+            .into_iter()
+            .map(|dir| (harness.name().to_string(), dir, false))
+            .chain(
+                harness
+                    .plugin_skills_dirs()
+                    .into_iter()
+                    .map(|(plugin, dir)| (plugin, dir, true)),
+            );
+        let mut seen = HashSet::new();
+        for (origin, dir, plugin) in roots {
+            let identity = crate::paths::canonicalize(&dir).unwrap_or_else(|_| dir.clone());
+            if !seen.insert(identity) {
+                continue;
             }
-        }
-        // Plugin references retain their namespace when invoked.
-        for (plugin, dir) in harness.plugin_skills_dirs() {
-            collect_mirrored(&dir, &plugin, harness.id(), true, &mut out);
+            let mut report = collect_mirrored(&dir, &origin, harness.id(), plugin, &mut out);
+            report.agent = harness.name().to_string();
+            reports.push(report);
         }
     }
     out.sort_by(|a, b| {
         (a.name.as_str(), a.origin.as_str()).cmp(&(b.name.as_str(), b.origin.as_str()))
     });
-    out
+    (out, reports)
 }
 
-/// Read one skills dir — a folder per skill, each with a `SKILL.md` — skipping
-/// the `orx` shim, the built-in namespace, and anything malformed or oddly
-/// named. A dir that isn't there yet is simply no skills.
 fn collect_mirrored(
     dir: &Path,
     origin: &str,
     harness: &str,
     plugin: bool,
     out: &mut Vec<Mirrored>,
-) {
-    let Ok(entries) = fs::read_dir(dir) else {
-        return;
+) -> SkillDiscovery {
+    let mut report = SkillDiscovery {
+        agent: origin.to_string(),
+        harness: harness.to_string(),
+        origin: origin.to_string(),
+        path: dir.to_path_buf(),
+        status: SkillRootStatus::Scanned,
+        accepted: 0,
+        skipped: Vec::new(),
     };
-    for entry in entries.flatten() {
+    let entries = match fs::read_dir(dir) {
+        Ok(entries) => entries,
+        Err(error) => {
+            report.status = if error.kind() == std::io::ErrorKind::NotFound {
+                SkillRootStatus::Missing
+            } else {
+                SkillRootStatus::Unreadable
+            };
+            return report;
+        }
+    };
+    for entry in entries {
+        let entry = match entry {
+            Ok(entry) => entry,
+            Err(error) => {
+                report.skip(
+                    dir.to_path_buf(),
+                    format!("unreadable entry ({:?})", error.kind()),
+                );
+                continue;
+            }
+        };
         let path = entry.path();
-        if !path.is_dir() {
-            continue;
+        match path.metadata() {
+            Ok(metadata) if !metadata.is_dir() => continue,
+            Ok(_) => {}
+            Err(error) => {
+                report.skip(path, format!("unreadable entry ({:?})", error.kind()));
+                continue;
+            }
         }
         let dir_name = entry.file_name().to_string_lossy().into_owned();
         if dir_name == "orx" || dir_name.starts_with("orx-") {
+            report.skip(path, "reserved name");
             continue;
         }
-        let Ok(content) = fs::read_to_string(path.join("SKILL.md")) else {
-            continue; // not a skill dir
+        let content = match fs::read_to_string(path.join("SKILL.md")) {
+            Ok(content) => content,
+            Err(error) => {
+                let reason = if error.kind() == std::io::ErrorKind::NotFound {
+                    "no SKILL.md".to_string()
+                } else {
+                    format!("unreadable SKILL.md ({:?})", error.kind())
+                };
+                report.skip(path, reason);
+                continue;
+            }
         };
-        let Ok(fm) = parse_frontmatter(&content) else {
-            continue;
+        let fallback = (harness == "antigravity").then_some(dir_name.as_str());
+        let fm = match parse_frontmatter_with_name(&content, fallback) {
+            Ok(fm) => fm,
+            Err(error) => {
+                report.skip(path, format!("malformed metadata: {error}"));
+                continue;
+            }
         };
-        // The frontmatter name is the `/name` and the dir we write into a
-        // session, so skip anything that isn't a clean, free slug.
-        if !is_valid_slug(&fm.name) || is_reserved(&fm.name) {
+        if !is_valid_slug(&fm.name) {
+            report.skip(path, "invalid name");
             continue;
         }
+        if is_reserved(&fm.name) {
+            report.skip(path, "reserved name");
+            continue;
+        }
+        report.accepted += 1;
         out.push(Mirrored {
             origin: origin.to_string(),
             harness: harness.to_string(),
@@ -538,6 +650,50 @@ fn collect_mirrored(
             description: fm.description,
         });
     }
+    report.skipped.sort_by(|a, b| a.path.cmp(&b.path));
+    report
+}
+
+pub fn list_with_discovery() -> (Vec<UserSkill>, Vec<SkillDiscovery>) {
+    let (skills, reports) = discover_mirrored_with_details();
+    catalog_in(&root(), skills, reports)
+}
+
+fn catalog_in(
+    root: &Path,
+    skills: Vec<Mirrored>,
+    mut reports: Vec<SkillDiscovery>,
+) -> (Vec<UserSkill>, Vec<SkillDiscovery>) {
+    let mut names: HashSet<_> = list_uploaded_in(root)
+        .into_iter()
+        .map(|skill| skill.name)
+        .collect();
+    let mut visible = Vec::new();
+    for skill in skills {
+        let reason = if root.join("excluded").join(&skill.name).exists() {
+            Some("excluded")
+        } else if !names.insert(skill.name.clone()) {
+            Some("shadowed by another skill with the same name")
+        } else {
+            None
+        };
+        if let Some(reason) = reason {
+            if let Some(report) = reports.iter_mut().find(|report| {
+                report.harness == skill.harness
+                    && report.origin == skill.origin
+                    && skill.dir.parent() == Some(&report.path)
+            }) {
+                report.accepted -= 1;
+                report.skip(skill.dir, reason);
+            }
+        } else {
+            visible.push(skill);
+        }
+    }
+    for report in &mut reports {
+        report.skipped.sort_by(|a, b| a.path.cmp(&b.path));
+    }
+    (list_in(root, &visible), reports)
 }
 
 // --- list / find / delete -----------------------------------------------------
@@ -1185,6 +1341,199 @@ mod tests {
             w.finish().unwrap();
         }
         buf
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn diagnostic_paths_with_non_utf8_names_serialize() {
+        use std::os::unix::ffi::OsStringExt;
+        let root = temp_root();
+        let unusual = root.join(std::ffi::OsString::from_vec(vec![b'x', 0xff]));
+        fs::create_dir_all(root.join("valid")).unwrap();
+        fs::write(root.join("valid/SKILL.md"), skill_md("valid")).unwrap();
+        let mut native = Vec::new();
+        let mut report = collect_mirrored(&root, "Cursor", "cursor", false, &mut native);
+        assert_eq!(native.len(), 1);
+        // APFS cannot create this filename, but Linux scans can return it.
+        report.skip(unusual.clone(), "no SKILL.md");
+        let json = serde_json::to_value(&report).unwrap();
+        assert_eq!(
+            json["skipped"][0]["path"],
+            unusual.to_string_lossy().as_ref()
+        );
+        report.path = unusual;
+        assert!(serde_json::to_value(&report).is_ok());
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn discovery_reports_permission_errors_without_losing_siblings() {
+        use std::os::unix::fs::PermissionsExt;
+        let root = temp_root();
+        fs::create_dir_all(root.join("blocked")).unwrap();
+        fs::create_dir_all(root.join("visible")).unwrap();
+        fs::write(root.join("blocked/SKILL.md"), skill_md("blocked")).unwrap();
+        fs::write(root.join("visible/SKILL.md"), skill_md("visible")).unwrap();
+        fs::set_permissions(
+            root.join("blocked/SKILL.md"),
+            fs::Permissions::from_mode(0o0),
+        )
+        .unwrap();
+        let mut skills = Vec::new();
+        let report = collect_mirrored(&root, "Cursor", "cursor", false, &mut skills);
+        fs::set_permissions(
+            root.join("blocked/SKILL.md"),
+            fs::Permissions::from_mode(0o600),
+        )
+        .unwrap();
+        assert_eq!(skills.len(), 1);
+        assert_eq!(report.accepted, 1);
+        assert!(report
+            .skipped
+            .iter()
+            .any(|skip| skip.reason.contains("PermissionDenied")));
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn discovery_reports_rejections_and_antigravity_name_fallback() {
+        let root = temp_root();
+        for (name, content) in [
+            ("valid", skill_md("valid")),
+            (
+                "unnamed",
+                "\u{feff}---\r\ndescription: Native research skill\r\n---\r\nbody".to_string(),
+            ),
+            ("invalid", skill_md("Bad_Name")),
+            (
+                "bad-metadata",
+                "private skill body without frontmatter".to_string(),
+            ),
+            ("orx-git", skill_md("orx-git")),
+            (
+                "no-description",
+                "---\nname: no-description\n---\nbody".to_string(),
+            ),
+        ] {
+            let dir = root.join(name);
+            fs::create_dir_all(&dir).unwrap();
+            fs::write(dir.join("SKILL.md"), content).unwrap();
+        }
+        fs::create_dir_all(root.join("empty")).unwrap();
+        let mut native = Vec::new();
+        let report = collect_mirrored(
+            &root,
+            "Google Antigravity",
+            "antigravity",
+            false,
+            &mut native,
+        );
+        let mut names: Vec<_> = native.iter().map(|skill| skill.name.as_str()).collect();
+        names.sort();
+        assert_eq!(names, ["unnamed", "valid"]);
+        assert_eq!(report.accepted, 2);
+        assert_eq!(report.status, SkillRootStatus::Scanned);
+        assert_eq!(report.skipped.len(), 5);
+        let json = serde_json::to_string(&report).unwrap();
+        assert!(json.contains("malformed metadata"));
+        assert!(json.contains("no SKILL.md"));
+        assert!(json.contains("invalid name"));
+        assert!(json.contains("reserved name"));
+        assert!(!json.contains("private skill body"));
+        let mut cursor = Vec::new();
+        collect_mirrored(&root, "Cursor", "cursor", false, &mut cursor);
+        assert_eq!(cursor.len(), 1);
+        let unnamed = fs::read_to_string(root.join("unnamed/SKILL.md")).unwrap();
+        assert!(parse_frontmatter(&unnamed).is_err());
+        assert!(save_skill_md_in(&temp_root(), unnamed.as_bytes()).is_err());
+        let mut refreshed = Vec::new();
+        fs::remove_dir_all(root.join("valid")).unwrap();
+        collect_mirrored(
+            &root,
+            "Google Antigravity",
+            "antigravity",
+            false,
+            &mut refreshed,
+        );
+        assert_eq!(refreshed.len(), 1);
+        let missing = collect_mirrored(
+            &root.join("absent"),
+            "Cursor",
+            "cursor",
+            false,
+            &mut Vec::new(),
+        );
+        assert_eq!(missing.status, SkillRootStatus::Missing);
+        fs::write(root.join("not-a-root"), "file").unwrap();
+        let unreadable = collect_mirrored(
+            &root.join("not-a-root"),
+            "Cursor",
+            "cursor",
+            false,
+            &mut Vec::new(),
+        );
+        assert_eq!(unreadable.status, SkillRootStatus::Unreadable);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn catalog_diagnostics_preserve_upload_precedence_exclusions_and_harness_selection() {
+        let root = temp_root();
+        let agent = temp_root();
+        save_skill_md_in(&root, skill_md("duplicate").as_bytes()).unwrap();
+        fs::create_dir_all(root.join("excluded")).unwrap();
+        fs::write(root.join("excluded/hidden"), "").unwrap();
+        for name in ["visible", "duplicate", "hidden"] {
+            let dir = agent.join(name);
+            fs::create_dir_all(&dir).unwrap();
+            fs::write(dir.join("SKILL.md"), skill_md(name)).unwrap();
+        }
+        let mut native = Vec::new();
+        let report = collect_mirrored(&agent, "Cursor", "cursor", false, &mut native);
+        assert!(available_mirrored(&root, native, Some("codex")).is_empty());
+        let mut native = Vec::new();
+        collect_mirrored(&agent, "Cursor", "cursor", false, &mut native);
+        let expected: Vec<_> = list_in(&root, &available_mirrored(&root, native, None))
+            .into_iter()
+            .map(|skill| (skill.name, skill.origin))
+            .collect();
+        let mut native = Vec::new();
+        collect_mirrored(&agent, "Cursor", "cursor", false, &mut native);
+        let (catalog, reports) = catalog_in(&root, native, vec![report]);
+        assert_eq!(
+            catalog
+                .into_iter()
+                .map(|skill| (skill.name, skill.origin))
+                .collect::<Vec<_>>(),
+            expected
+        );
+        assert_eq!(reports[0].accepted, 1);
+        assert!(reports[0]
+            .skipped
+            .iter()
+            .any(|skip| skip.reason == "excluded"));
+        assert!(reports[0]
+            .skipped
+            .iter()
+            .any(|skip| skip.reason.contains("shadowed")));
+        fs::remove_dir_all(root).unwrap();
+        fs::remove_dir_all(agent).unwrap();
+    }
+
+    #[test]
+    fn native_metadata_keeps_bom_and_windows_line_endings() {
+        let fm = parse_frontmatter(
+            "\u{feff}---\r\nname: valid\r\ndescription: Native research skill\r\n---\r\nbody",
+        )
+        .unwrap();
+        assert_eq!(fm.name, "valid");
+        assert_eq!(fm.description, "Native research skill");
+        assert!(parse_frontmatter_with_name(
+            "---\nname: \ndescription: text\n---\n",
+            Some("fallback")
+        )
+        .is_err());
     }
 
     #[test]

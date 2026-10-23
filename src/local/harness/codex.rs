@@ -1218,6 +1218,17 @@ impl Harness for Codex {
         Some(native_store::codex_home(NativeStore::Legacy))
     }
 
+    fn native_skill_roots(&self) -> Vec<PathBuf> {
+        let mut roots = Vec::new();
+        if let Some(home) = dirs::home_dir() {
+            roots.push(home.join(".agents/skills"));
+        }
+        if let Some(home) = self.config_home() {
+            roots.push(home.join("skills"));
+        }
+        roots
+    }
+
     fn skill_target(&self) -> Option<PathBuf> {
         // Codex now speaks native SKILL.md skills (`~/.agents/skills/`); the
         // legacy `~/.codex/prompts/` path is deprecated and model-invisible. The

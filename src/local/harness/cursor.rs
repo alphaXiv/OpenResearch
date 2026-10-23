@@ -230,13 +230,12 @@ impl Harness for Cursor {
         Some(native_store::cursor_home(NativeStore::Legacy))
     }
 
+    fn native_skill_roots(&self) -> Vec<PathBuf> {
+        vec![native_store::cursor_skills_dir()]
+    }
+
     fn skill_target(&self) -> Option<PathBuf> {
-        Some(
-            self.config_home()?
-                .join("skills")
-                .join("orx")
-                .join("SKILL.md"),
-        )
+        Some(native_store::cursor_skills_dir().join("orx/SKILL.md"))
     }
 
     fn skill_shim(&self) -> Option<&'static str> {

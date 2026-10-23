@@ -429,18 +429,12 @@ pub trait Harness: Send + Sync {
         self.config_home().map(|h| h.exists()).unwrap_or(false)
     }
 
-    /// The agent's global native-skills dir (`~/.claude/skills`,
-    /// `~/.agents/skills`, `<xdg>/opencode/skills`) — where the user's own
-    /// installed skills live. Derived from the `skills/orx/SKILL.md` shim
-    /// target every installable harness shares. `None` if not installable.
-    fn global_skills_dir(&self) -> Option<PathBuf> {
-        Some(self.skill_target()?.parent()?.parent()?.to_path_buf())
+    /// Native skill search roots, in precedence order, independent of session state.
+    fn native_skill_roots(&self) -> Vec<PathBuf> {
+        Vec::new()
     }
 
-    /// Further skills dirs this agent loads from, each labeled by where it came
-    /// from — the plugins installed into this agent. Same shape as
-    /// [`global_skills_dir`](Self::global_skills_dir): one skill folder per
-    /// entry. Default: none.
+    /// Installed plugin skill roots, labeled with their invocation namespace.
     fn plugin_skills_dirs(&self) -> Vec<(String, PathBuf)> {
         Vec::new()
     }
@@ -847,6 +841,22 @@ $ARGUMENTS
 mod tests {
     use super::options::{PlanActivation, REASONING_DEFAULT_ID};
     use super::*;
+
+    #[test]
+    fn skill_install_targets_are_declared_search_roots() {
+        for harness in registry() {
+            if let Some(target) = harness.skill_target() {
+                assert!(
+                    harness
+                        .native_skill_roots()
+                        .iter()
+                        .any(|root| target.starts_with(root)),
+                    "{} skill target is not discoverable",
+                    harness.id()
+                );
+            }
+        }
+    }
 
     #[test]
     fn compaction_support_is_explicit_for_builtins_and_disabled_for_acp() {
