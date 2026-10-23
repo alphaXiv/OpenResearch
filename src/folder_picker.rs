@@ -178,4 +178,26 @@ mod tests {
             "{stderr}"
         );
     }
+
+    #[test]
+    fn windows_picker_real_com_smoke_test() {
+        // Runs an unattended test that creates the real OpenResearch.FolderPicker COM
+        // object (bypassing the mock), checks options, and disposes it without opening UI.
+        let script = format!(
+            "{}\ntry {{ & {{ {} }} }} finally {{ Assert-PickerDisposed }}\nTest-FolderPickerSmoke",
+            include_str!("folder_picker_test.ps1"),
+            include_str!("folder_picker.ps1")
+        );
+        let output = windows_picker_command(&script)
+            .env("ORX_PICKER_TEST_RESULT", "ok")
+            .env("ORX_PICKER_TEST_PATH", r"C:\Research project")
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped())
+            .output()
+            .expect("run folder picker real COM smoke test");
+        assert!(output.status.success(), "{:?}", output);
+        assert!(output.stderr.is_empty(), "{:?}", output);
+    }
 }
+
