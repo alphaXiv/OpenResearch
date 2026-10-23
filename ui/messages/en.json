@@ -1432,5 +1432,8 @@
   "chat_experiment_running": "Experiment running",
   "chat_experiment_starting": "Experiment starting",
   "chat_experiment_cancelling": "Cancelling experiment",
-  "chat_experiments_running": "{count} experiments running"
+  "chat_experiments_running": "{count} experiments running",
+  "skills_detection_details": "Skill detection details",
+  "skills_detection_copy": "Copy detection details",
+  "skills_detection_accepted": "{count} accepted"
 }

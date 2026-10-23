@@ -1432,5 +1432,8 @@
   "chat_experiment_running": "آزمایش در حال اجراست",
   "chat_experiment_starting": "آزمایش در حال شروع است",
   "chat_experiment_cancelling": "در حال لغو آزمایش",
-  "chat_experiments_running": "{count} آزمایش در حال اجرا"
+  "chat_experiments_running": "{count} آزمایش در حال اجرا",
+  "skills_detection_details": "جزئیات شناسایی مهارت‌ها",
+  "skills_detection_copy": "کپی جزئیات شناسایی",
+  "skills_detection_accepted": "{count} پذیرفته‌شده"
 }

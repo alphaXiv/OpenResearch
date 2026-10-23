@@ -85,6 +85,17 @@ pub fn cursor_home(store: NativeStore) -> PathBuf {
     }
 }
 
+pub fn cursor_skills_dir() -> PathBuf {
+    cursor_skills_dir_in(&home_dir(), user_env_path("CURSOR_CONFIG_DIR"))
+}
+
+fn cursor_skills_dir_in(home: &Path, config: Option<PathBuf>) -> PathBuf {
+    // XDG redirects Cursor state, but is not a native skill search location.
+    config
+        .unwrap_or_else(|| home.join(".cursor"))
+        .join("skills")
+}
+
 pub fn opencode_session(native_id: &str) -> Result<Option<NativeSessionLocation>> {
     let isolated = opencode_db(NativeStore::Isolated);
     let legacy = opencode_db(NativeStore::Legacy);
@@ -746,22 +757,39 @@ pub fn prepare_codex(store: NativeStore) -> Result<PathBuf> {
 
 pub fn prepare_cursor(store: NativeStore) -> Result<PathBuf> {
     let root = cursor_home(store);
-    let legacy = cursor_home(NativeStore::Legacy);
-    if store == NativeStore::Legacy || root == legacy {
-        std::fs::create_dir_all(&root)?;
-        return Ok(root);
-    }
-    prepare_links(
+    prepare_cursor_in(
         &root,
-        &legacy,
-        &[
-            legacy.join("cli-config.json"),
-            legacy.join("skills"),
-            legacy.join("skills-cursor"),
-            legacy.join("plugins"),
-        ],
+        &cursor_home(NativeStore::Legacy),
+        &cursor_skills_dir(),
     )?;
     Ok(root)
+}
+
+fn prepare_cursor_in(root: &Path, legacy: &Path, skills: &Path) -> Result<()> {
+    std::fs::create_dir_all(root)?;
+    let mut sources = Vec::new();
+    if root != legacy {
+        sources.extend([
+            legacy.join("cli-config.json"),
+            legacy.join("skills-cursor"),
+            legacy.join("plugins"),
+        ]);
+    }
+    if root.join("skills") != skills {
+        if root == legacy && skills.exists() {
+            match std::fs::symlink_metadata(root.join("skills")) {
+                Ok(metadata) if !metadata.file_type().is_symlink() => {
+                    return Err(anyhow!("Cannot link native Cursor skills: {} already exists; its contents were left untouched", root.join("skills").display()));
+                }
+                Err(error) if error.kind() != std::io::ErrorKind::NotFound => {
+                    return Err(error.into())
+                }
+                _ => {}
+            }
+        }
+        sources.push(skills.to_path_buf());
+    }
+    prepare_links(root, legacy, &sources)
 }
 
 fn prepare_links(root: &Path, lock_root: &Path, sources: &[PathBuf]) -> Result<()> {
@@ -988,6 +1016,59 @@ fn create_junction(source: &Path, destination: &Path) -> std::io::Result<()> {
 #[cfg(test)]
 mod hard_link_tests {
     use super::*;
+
+    #[test]
+    fn cursor_does_not_move_existing_legacy_skill_directories() {
+        let temp =
+            std::env::temp_dir().join(format!("orx-cursor-conflict-{}", uuid::Uuid::new_v4()));
+        let legacy = temp.join("legacy");
+        std::fs::create_dir_all(legacy.join("skills")).unwrap();
+        std::fs::write(legacy.join("skills/keep.txt"), "user-owned").unwrap();
+        std::fs::create_dir_all(temp.join("native/skills")).unwrap();
+        assert!(prepare_cursor_in(&legacy, &legacy, &temp.join("native/skills")).is_err());
+        assert_eq!(
+            std::fs::read_to_string(legacy.join("skills/keep.txt")).unwrap(),
+            "user-owned"
+        );
+        std::fs::remove_dir_all(temp).unwrap();
+    }
+
+    #[test]
+    fn cursor_skill_roots_and_launch_links_are_independent_of_state() {
+        let temp = std::env::temp_dir().join(format!("orx-cursor-skills-{}", uuid::Uuid::new_v4()));
+        let home = temp.join("home");
+        let skills = cursor_skills_dir_in(&home, None);
+        assert_eq!(skills, home.join(".cursor/skills"));
+        let configured = temp.join("configured");
+        assert_eq!(
+            cursor_skills_dir_in(&home, Some(configured.clone())),
+            configured.join("skills")
+        );
+        std::fs::create_dir_all(skills.join("probe")).unwrap();
+        std::fs::write(skills.join("probe/SKILL.md"), "native skill").unwrap();
+        let legacy = temp.join("xdg/cursor");
+        let isolated = temp.join("isolated");
+        std::fs::create_dir_all(&legacy).unwrap();
+        std::fs::write(legacy.join("cli-config.json"), "{}").unwrap();
+        for target in [&isolated, &legacy] {
+            prepare_cursor_in(target, &legacy, &skills).unwrap();
+            assert_eq!(
+                std::fs::read_to_string(target.join("skills/probe/SKILL.md")).unwrap(),
+                "native skill"
+            );
+            assert!(same_file::is_same_file(target.join("skills"), &skills).unwrap());
+        }
+        assert_eq!(
+            std::fs::read_to_string(isolated.join("cli-config.json")).unwrap(),
+            "{}"
+        );
+        prepare_cursor_in(&home.join(".cursor"), &home.join(".cursor"), &skills).unwrap();
+        assert_eq!(
+            std::fs::read_to_string(skills.join("probe/SKILL.md")).unwrap(),
+            "native skill"
+        );
+        std::fs::remove_dir_all(temp).unwrap();
+    }
 
     #[test]
     fn a_hard_linked_destination_survives_an_edit_through_the_source() {

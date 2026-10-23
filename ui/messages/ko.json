@@ -1432,5 +1432,8 @@
   "chat_experiment_running": "실험 실행 중",
   "chat_experiment_starting": "실험 시작 중",
   "chat_experiment_cancelling": "실험 취소 중",
-  "chat_experiments_running": "실험 {count}개 실행 중"
+  "chat_experiments_running": "실험 {count}개 실행 중",
+  "skills_detection_details": "스킬 감지 세부 정보",
+  "skills_detection_copy": "감지 세부 정보 복사",
+  "skills_detection_accepted": "{count}개 수락됨"
 }
