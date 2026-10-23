@@ -34,7 +34,12 @@ export function changedChecks({ base, head = 'HEAD', forceAll = false }, git = a
   if (forceAll) return all()
   try {
     if (!base || /^0+$/.test(base)) return all()
-    for (const ref of [base, head]) git(['rev-parse', '--verify', `${ref}^{commit}`])
+    try {
+      git(['rev-parse', '--verify', '--quiet', `${base}^{commit}`])
+    } catch {
+      git(['fetch', '--no-tags', '--depth=1', 'origin', base])
+    }
+    git(['rev-parse', '--verify', `${head}^{commit}`])
     const paths = git(['diff', '--name-only', '--no-renames', '-z', base, head, '--']).split('\0').filter(Boolean)
     return classifyChanges(paths)
   } catch {

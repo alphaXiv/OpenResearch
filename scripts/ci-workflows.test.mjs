@@ -66,3 +66,10 @@ test('release source guard accepts merged source and rejects wrong tag, branch, 
     rmSync(root, { recursive: true, force: true })
   }
 })
+
+test('PR comparison jobs avoid full history downloads without skipping version validation', () => {
+  assert.doesNotMatch(ci, /fetch-depth: 0/)
+  const version = ci.split('\n  version-guard:')[1]
+  assert.match(version, /git fetch --no-tags --depth=1 origin "\$BASE_SHA"/)
+  assert.match(version, /git show "\$\{BASE_SHA\}:Cargo.toml"/)
+})

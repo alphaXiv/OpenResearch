@@ -48,7 +48,7 @@ jobs:
       - uses: actions/checkout@v4
         with:
           ref: ${{ inputs.source-sha || github.sha }}
-          fetch-depth: 0
+          fetch-depth: 1
       - uses: actions/setup-node@v4
         with:
           node-version: 22
@@ -267,7 +267,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
-          fetch-depth: 0
+          fetch-depth: 1
 
       - name: Version must move forward (with a fresh lockfile)
         env:
@@ -277,6 +277,7 @@ jobs:
 
           pkg_version() { grep -m1 '^version = ' "$1" | sed -E 's/version = "(.*)"/\1/'; }
 
+          git fetch --no-tags --depth=1 origin "$BASE_SHA"
           git show "${BASE_SHA}:Cargo.toml" > /tmp/base-Cargo.toml
           base=$(pkg_version /tmp/base-Cargo.toml)
           head=$(pkg_version Cargo.toml)

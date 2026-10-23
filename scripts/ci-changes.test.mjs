@@ -1,5 +1,10 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
+import { execFileSync } from 'node:child_process'
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
+import { pathToFileURL } from 'node:url'
 import { changedChecks, classifyChanges } from './ci-changes.mjs'
 import { checkResults } from './ci-check-result.mjs'
 
@@ -62,4 +67,36 @@ test('backend and embedded JavaScript inputs run their suites without a frontend
   const selected = { ...flags, frontend: 'false', javascript: 'true' }
   assert.throws(() => checkResults({ ...needs, frontend: { result: 'skipped' } }, selected))
   checkResults({ ...needs, frontend: { result: 'skipped' }, helpers: { result: 'success' } }, selected)
+})
+
+test('shallow checkouts fetch only the missing comparison commit', () => {
+  const root = mkdtempSync(join(tmpdir(), 'orx-ci-shallow-'))
+  const source = join(root, 'source')
+  const clone = join(root, 'clone')
+  mkdirSync(source)
+  const gitAt = cwd => args => execFileSync('git', args, { cwd, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] }).trim()
+  const git = gitAt(source)
+  try {
+    git(['init', '-b', 'main'])
+    git(['config', 'user.name', 'CI test'])
+    git(['config', 'user.email', 'ci-test@example.invalid'])
+    writeFileSync(join(source, 'README.md'), 'base')
+    git(['add', '.']); git(['commit', '-m', 'base'])
+    const base = git(['rev-parse', 'HEAD'])
+    mkdirSync(join(source, 'ui'))
+    writeFileSync(join(source, 'ui', 'app.ts'), 'changed')
+    git(['add', '.']); git(['commit', '-m', 'frontend'])
+    git(['clone', '--depth=1', pathToFileURL(source).href, clone])
+    const shallow = gitAt(clone)
+    assert.throws(() => shallow(['cat-file', '-e', base]))
+    const calls = []
+    const checks = changedChecks({ base }, args => { calls.push(args); return shallow(args) })
+    assert.equal(checks.frontend, true)
+    assert.equal(checks.rust, false)
+    assert.deepEqual(calls.find(args => args[0] === 'fetch'), ['fetch', '--no-tags', '--depth=1', 'origin', base])
+    assert.equal(shallow(['rev-parse', '--is-shallow-repository']), 'true')
+    assert.equal(shallow(['rev-list', '--count', 'HEAD']), '1')
+  } finally {
+    rmSync(root, { recursive: true, force: true })
+  }
 })
