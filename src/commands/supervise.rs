@@ -27,8 +27,23 @@ const LOG_IDLE: Duration = Duration::from_secs(30);
 /// How long monitoring must keep failing before it is reported on the run.
 const MONITORING_GRACE: Duration = Duration::from_secs(60);
 
+/// How long a run may stay silent after an unhandled Python traceback before it is flagged.
+const TRACEBACK_STALL: Duration = Duration::from_secs(5 * 60);
+
 fn should_report_monitoring_error(already_reported: bool, elapsed: Option<Duration>) -> bool {
     already_reported || elapsed.is_some_and(|elapsed| elapsed >= MONITORING_GRACE)
+}
+
+/// Whether the log's last 8 KiB hold a Python traceback header.
+fn log_tail_has_traceback(path: &std::path::Path) -> bool {
+    let Ok(mut file) = std::fs::File::open(path) else {
+        return false;
+    };
+    let len = file.metadata().map(|m| m.len()).unwrap_or(0);
+    let mut tail = Vec::new();
+    let _ = file.seek(std::io::SeekFrom::Start(len.saturating_sub(8192)));
+    let _ = std::io::Read::read_to_end(&mut file, &mut tail);
+    String::from_utf8_lossy(&tail).contains("Traceback (most recent call last):")
 }
 
 fn open_supervisor_lock(path: &std::path::Path) -> Result<fd_lock::RwLock<std::fs::File>> {
@@ -701,6 +716,8 @@ async fn watch_ssh_job(
     let mut failing_since = None;
     let mut last_error = None;
     let mut missing_polls = 0;
+    let mut log_len = None;
+    let mut log_quiet_since = std::time::Instant::now();
 
     loop {
         if !cancel_sent && local_cancel_requested(store, run_id) {
@@ -744,12 +761,32 @@ async fn watch_ssh_job(
         failing_since = error
             .as_ref()
             .map(|_| failing_since.unwrap_or_else(std::time::Instant::now));
-        let reported = error.clone().filter(|_| {
-            should_report_monitoring_error(
-                descriptor.monitoring_error.is_some(),
-                failing_since.map(|since| since.elapsed()),
+        let len = std::fs::metadata(&path).map(|m| m.len()).ok();
+        if len != log_len {
+            log_len = len;
+            log_quiet_since = std::time::Instant::now();
+        }
+        // A crashed main thread can leave a non-daemon worker (e.g. vLLM's EngineCore) blocking shutdown.
+        let stalled = (observed.as_ref().is_ok_and(|job| job.stage == "RUNNING")
+            && log_quiet_since.elapsed() >= TRACEBACK_STALL
+            && log_tail_has_traceback(&path))
+        .then(|| {
+            format!(
+                "Run looks stalled: it printed a Python traceback and has written no output for {} \
+                 minutes, but its process is still alive. Check `orx logs {run_id}` and cancel the \
+                 experiment if it failed.",
+                TRACEBACK_STALL.as_secs() / 60
             )
         });
+        let reported = error
+            .clone()
+            .filter(|_| {
+                should_report_monitoring_error(
+                    descriptor.monitoring_error.is_some(),
+                    failing_since.map(|since| since.elapsed()),
+                )
+            })
+            .or(stalled);
         if reported != descriptor.monitoring_error
             || cancel_sent != descriptor.cancellation_accepted
         {
@@ -1681,6 +1718,20 @@ async fn cancel_ray(address: &str, submission_id: &str, run_id: &str, cancel_sen
 mod tests {
     use super::*;
     use crate::store::StoredRun;
+
+    #[test]
+    fn log_tail_traceback_detection() {
+        let path = std::env::temp_dir().join(format!("orx-traceback-{}.log", std::process::id()));
+        std::fs::write(&path, "step 1\n").unwrap();
+        assert!(!log_tail_has_traceback(&path));
+        let crash = "Traceback (most recent call last):\n  File \"generate.py\", line 16\nRuntimeError: CUDA out of memory\n";
+        std::fs::write(&path, format!("{}{crash}", "x".repeat(20_000))).unwrap();
+        assert!(log_tail_has_traceback(&path));
+        std::fs::write(&path, format!("{crash}{}", "x".repeat(20_000))).unwrap();
+        assert!(!log_tail_has_traceback(&path));
+        let _ = std::fs::remove_file(&path);
+        assert!(!log_tail_has_traceback(&path));
+    }
 
     #[test]
     fn monitoring_errors_wait_for_grace_but_preserve_existing_reports() {
