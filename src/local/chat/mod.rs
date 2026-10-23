@@ -6740,12 +6740,16 @@ impl ChatHost {
     }
 
     pub async fn delete_native_sessions(session_ids: &[String]) -> Result<()> {
-        let (ids, retained) = Store::open()?.opencode_sessions_for_deletion(session_ids)?;
+        let session_ids = session_ids.to_vec();
         tokio::task::spawn_blocking(move || {
-            crate::local::native_store::delete_opencode_sessions(&ids, &retained)
+            Self::delete_native_sessions_blocking(&Store::open()?, &session_ids)
         })
-        .await??;
-        Ok(())
+        .await?
+    }
+
+    pub fn delete_native_sessions_blocking(store: &Store, session_ids: &[String]) -> Result<()> {
+        let (ids, retained) = store.opencode_sessions_for_deletion(session_ids)?;
+        crate::local::native_store::delete_opencode_sessions(&ids, &retained)
     }
 }
 
