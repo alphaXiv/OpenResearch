@@ -5,7 +5,7 @@ import { GitHubMark } from "./BackendLogos";
 
 const FILES_PILL_CLASS_NAME = [
   "files-pill inline-flex items-center gap-2 min-w-0 border border-border",
-  "rounded-md py-[7px] px-[11px] bg-background text-text",
+  "rounded-md py-2 px-3 bg-background text-text",
   "no-underline [&_code]:font-mono [&_code]:text-sm",
   "[&_code]:overflow-hidden [&_code]:text-ellipsis [&_code]:whitespace-nowrap",
   "[&_>_svg]:shrink-0 [&_>_svg]:text-muted [a&:hover]:border-muted",

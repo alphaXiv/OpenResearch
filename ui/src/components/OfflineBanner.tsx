@@ -26,7 +26,7 @@ export function OfflineBanner() {
           className="offline-banner flex items-center gap-2 shrink-0 py-1.5 px-3.5 mac-titlebar:ps-20 win-titlebar:pe-36 text-sm text-text bg-accent-amber-subtle border-b border-b-accent-amber"
           aria-hidden
         >
-          <CircleAlert size={13} className="shrink-0 text-accent-amber" />
+          <CircleAlert size={14} className="shrink-0 text-accent-amber" />
           <span dir="auto" className="min-w-0">{m.offline_banner_disconnected()}</span>
         </div>
       )}

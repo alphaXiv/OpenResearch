@@ -9,7 +9,7 @@ import { ProgressBar } from "./ProgressBar";
 function tone(pct: number): string {
   if (pct >= 95) return "var(--accent-red)";
   if (pct >= 80) return "var(--accent-amber)";
-  return "var(--accent)";
+  return "var(--subtext)";
 }
 
 const RING_R = 6.5;
@@ -31,7 +31,7 @@ function VisibleContextMeter({ usage }: { usage: ContextUsage }) {
     contextWindow && contextWindow > 0
       ? Math.min(100, Math.round((usedTokens / contextWindow) * 100))
       : null;
-  const fill = pct === null ? "var(--accent)" : tone(pct);
+  const fill = pct === null ? "var(--subtext)" : tone(pct);
   const percent = pct === null
     ? ""
     : new Intl.NumberFormat(getLocale(), { style: "percent" }).format(pct / 100);

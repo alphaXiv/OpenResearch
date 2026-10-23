@@ -78,7 +78,7 @@ export function PlanStrip({
   };
 
   return (
-    <div className="plan-strip relative w-full mt-0 mx-0 mb-2.5 py-[11px] px-[13px] flex flex-col items-stretch gap-2.5 border border-border border-s-[3px] border-s-accent-blue rounded-md bg-accent-blue-subtle shadow-plan">
+    <div className="plan-strip relative w-full mt-0 mx-0 mb-2.5 py-3 px-3.5 flex flex-col items-stretch gap-2.5 border border-accent-blue-border rounded-lg bg-accent-blue-subtle">
       <div className="plan-strip-info flex items-baseline gap-2 min-w-0">
         <ScrollText size={14} className="plan-strip-icon text-accent-blue shrink-0 self-center" />
         <span dir="auto" className="plan-strip-title text-sm font-semibold whitespace-nowrap">
@@ -99,7 +99,7 @@ export function PlanStrip({
             dir="auto"
             {...{ writingsuggestions: "false" }}
             ref={textareaRef}
-            className="plan-strip-revise-input w-full resize-none border border-border rounded-md py-[9px] px-[11px] text-sm font-[inherit] bg-background text-text [&:focus]:border-accent-blue"
+            className="plan-strip-revise-input w-full resize-none border border-border rounded-md py-2 px-3 text-sm font-[inherit] bg-background text-text [&:focus]:border-focus-border"
             placeholder={m.plan_strip_what_should_change_optional()}
             rows={2}
             value={note}
@@ -132,7 +132,7 @@ export function PlanStrip({
             <span className="plan-strip-spacer flex-1" />
             <Button size="small" variant="primary" onClick={submitRevision}>
               {m.plan_strip_revise()}
-              <CornerDownLeft size={13} />
+              <CornerDownLeft size={14} />
             </Button>
           </div>
         </>
@@ -157,10 +157,10 @@ export function PlanStrip({
                 aria-label={m.plan_strip_more_approval_options()}
                 onClick={() => setMenuOpen((o) => !o)}
               >
-                <ChevronDown size={13} />
+                <ChevronDown size={14} />
               </Button>
               {menuOpen && (
-                <div className="plan-strip-menu absolute end-0 bottom-[calc(100%_+_4px)] flex min-w-47.5 flex-col rounded-md border border-border bg-background p-1 shadow-plan-menu z-6">
+                <div className="plan-strip-menu absolute end-0 bottom-[calc(100%_+_4px)] flex min-w-47.5 flex-col rounded-md border border-border bg-background p-1 shadow-menu z-6">
                   <MenuItem
                     onClick={() => {
                       setMenuOpen(false);

@@ -735,6 +735,8 @@ mod imp {
                 .with_titlebar_transparent(true)
                 .with_title_hidden(true)
                 .with_fullsize_content_view(true)
+                // Centers the lights in the dashboard's 44px top bar (`mac-titlebar:h-11`).
+                .with_traffic_light_inset(tao::dpi::LogicalPosition::new(16.0, 22.0))
         };
         #[cfg(windows)]
         let window = {

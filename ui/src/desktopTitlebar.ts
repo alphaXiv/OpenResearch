@@ -73,7 +73,7 @@ const INTERACTIVE =
 
 // The macOS and Windows apps run the page under the titlebar, so the page's top
 // strip drags and zooms the window in its place.
-const DRAG_STRIP_HEIGHT = MAC_TITLEBAR ? 28 : WINDOWS_TITLEBAR ? 32 : 0;
+const DRAG_STRIP_HEIGHT = MAC_TITLEBAR ? 44 : WINDOWS_TITLEBAR ? 32 : 0;
 if (DRAG_STRIP_HEIGHT) {
   document.documentElement.classList.add(MAC_TITLEBAR ? "mac-titlebar" : "win-titlebar");
   // Dragging starts on the first move: the OS move loop would swallow a double-click's second press.

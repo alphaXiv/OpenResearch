@@ -4,7 +4,7 @@ import { m } from "../paraglide/messages.js";
 import { tabOpenGestureHandlers, type TabOpenIntent } from "../tabPreview";
 
 type OpenRun = (id: string, intent: TabOpenIntent) => void;
-const BANNER_CLASS = "mb-2.5 rounded-md border border-border border-s-3 border-s-accent-green bg-accent-green-subtle px-3 py-2.5 text-sm text-text shadow-plan";
+const BANNER_CLASS = "mb-2.5 rounded-lg border border-border bg-accent-green-subtle px-3 py-2.5 text-sm text-text";
 
 function ExperimentRunLink({ item, onOpenRun, className = "" }: { item: ChatActiveRun; onOpenRun?: OpenRun; className?: string }) {
   const { run, experimentName } = item;
@@ -30,7 +30,7 @@ export function ExperimentRunBanner({ runs, onOpenRun }: { runs: ChatActiveRun[]
   }
   return (
     <details className={`${BANNER_CLASS} [&[open]_.experiment-chevron]:rotate-90`}>
-      <summary className="flex cursor-pointer list-none items-center gap-2 rounded-sm focus-visible:outline-2 focus-visible:outline-text [&::-webkit-details-marker]:hidden">
+      <summary className="flex cursor-pointer list-none items-center gap-2 rounded-sm focus-visible:outline-2 focus-visible:outline-focus [&::-webkit-details-marker]:hidden">
         <FlaskConical size={16} className="shrink-0 text-accent-green" aria-hidden="true" />
         <span className="font-medium">{m.chat_experiments_running({ count: runs.length })}</span>
         <ChevronRight size={14} className="experiment-chevron ms-auto shrink-0 text-subtext" aria-hidden="true" />

@@ -5,6 +5,7 @@ export { IconButton, IconButtonLink } from "./IconButton";
 export { Input, Textarea } from "./Input";
 export type { InputProps } from "./Input";
 export { MenuItem } from "./MenuItem";
+export { SEGMENTED_CLASS_NAME } from "./Segmented";
 export { LoadingRow, Spinner } from "./Spinner";
 export { StatusIndicator } from "./StatusIndicator";
 export type { StatusTone } from "./StatusIndicator";

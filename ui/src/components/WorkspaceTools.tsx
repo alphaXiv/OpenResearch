@@ -45,30 +45,30 @@ export function WorkspaceTools({ expanded, experiments, runs, onOpenExperiment, 
     { id: "terminal", label: m.workspace_terminal(), Icon: Terminal, onClick: onTerminal },
   ];
   return (
-    <div className={`workspace-tools absolute end-3.5 top-7 z-30 ${rightOffset === undefined ? "win-titlebar:top-10" : ""}`} style={{ insetInlineEnd: rightOffset }}>
+    <div className="workspace-tools absolute end-3.5 top-2 mac-titlebar:top-1.5 z-30 win-titlebar:top-10" style={{ insetInlineEnd: rightOffset }}>
       {!expanded ? (
         <nav aria-label={m.workspace_tools_heading()} className="flex items-center justify-end gap-1">
           {items.map(({ id, label, Icon, onClick }) => (
-            <IconButton key={id} active={activeView === id} className="text-text [&.active]:text-text" data-tip={label} data-tip-align={id === "experiments" ? "end" : undefined} aria-label={label} aria-pressed={activeView === id} onClick={onClick}>
-              <Icon size={15} />
+            <IconButton key={id} active={activeView === id} className="text-text" data-tip={label} data-tip-align={id === "experiments" ? "end" : undefined} aria-label={label} aria-pressed={activeView === id} onClick={onClick}>
+              <Icon size={16} />
             </IconButton>
           ))}
           {onSideChat && sessionId && <SideChatPicker parentId={sessionId} sessions={sessions} onSelect={onSelectSideChat} onCreate={onSideChat} />}
         </nav>
       ) : (
-        <nav aria-label={m.workspace_tools_heading()} className="workspace-tools-card flex w-60 flex-col gap-0.5 rounded-xl border border-border bg-background px-1.5 py-2 shadow-elevated">
+        <nav aria-label={m.workspace_tools_heading()} className="workspace-tools-card flex w-60 flex-col gap-0.5 rounded-xl border border-border bg-background px-1.5 py-2 shadow-control-subtle">
           <h2 className="m-0 px-2 pt-1 pb-2 text-sm font-normal text-subtext">{m.workspace_tools_heading()}</h2>
           {items.filter((item) => item.id !== "files" && item.id !== "terminal").map(({ id, label: itemLabel, Icon, onClick }) => (
             <MenuItem key={id} className="min-h-7 py-1"
               data-onboarding={id === "artifacts" ? "nav-artifacts" : undefined}
               onClick={onClick}>
-              <span className="flex items-center gap-4"><Icon size={15} />{itemLabel}</span>
+              <span className="flex items-center gap-4"><Icon size={16} />{itemLabel}</span>
             </MenuItem>
           ))}
           <MenuItem className="py-1" onClick={onCompute}>
             <span className="flex min-w-0 flex-col gap-0.5">
-              <span className="flex items-center gap-4 text-sm text-text"><Cpu size={15} className="shrink-0" />{m.workspace_default_compute()}</span>
-              <span className="flex items-center gap-1.5 ps-[31px] text-menu text-subtext">
+              <span className="flex items-center gap-4 text-sm text-text"><Cpu size={16} className="shrink-0" />{m.workspace_default_compute()}</span>
+              <span className="flex items-center gap-1.5 ps-8 text-menu text-subtext">
                 {defaultBackend && <BackendLogo kind={`${defaultBackend}_job`} size={12} />}
                 <span className="wrap-anywhere">{computeLabel}</span>
               </span>
@@ -77,10 +77,10 @@ export function WorkspaceTools({ expanded, experiments, runs, onOpenExperiment, 
           <div className="mt-2 border-t border-border/50 pt-3">
             <h2 className="m-0 px-2 pt-1 pb-2 text-sm font-normal text-subtext">{m.workspace_this_worktree()}</h2>
             <MenuItem className="min-h-7 py-1" onClick={onFiles}>
-              <span className="flex items-center gap-4"><FolderOpen size={15} />{m.app_files()}</span>
+              <span className="flex items-center gap-4"><FolderOpen size={16} />{m.app_files()}</span>
             </MenuItem>
             <MenuItem className="min-h-7 py-1" onClick={onTerminal}>
-              <span className="flex items-center gap-4"><Terminal size={15} />{m.workspace_terminal()}</span>
+              <span className="flex items-center gap-4"><Terminal size={16} />{m.workspace_terminal()}</span>
             </MenuItem>
             {onSideChat && sessionId && (
               <SideChatPicker parentId={sessionId} sessions={sessions} onSelect={onSelectSideChat} onCreate={onSideChat} expanded />
@@ -94,7 +94,7 @@ export function WorkspaceTools({ expanded, experiments, runs, onOpenExperiment, 
                 </h2>
                 {experimentRows.map((row) => (
                   <MenuItem key={row.run.id} className="min-h-7 py-1" onClick={() => onOpenExperiment(row.experiment.id, row.run.id)}>
-                    <span className="min-w-0 truncate ps-[31px] text-menu text-subtext" title={`${row.experiment.title || row.experiment.slug} · ${statusLabel(runDisplayStatus(row.run))}`}>{row.experiment.title || row.experiment.slug}</span>
+                    <span className="min-w-0 truncate ps-8 text-menu text-subtext" title={`${row.experiment.title || row.experiment.slug} · ${statusLabel(runDisplayStatus(row.run))}`}>{row.experiment.title || row.experiment.slug}</span>
                   </MenuItem>
                 ))}
               </div>
@@ -116,13 +116,13 @@ function SideChatPicker({ parentId, sessions, onSelect, onCreate, expanded = fal
   const children = sessions.filter((session) => session.sideParentSessionId === parentId)
     .sort((a, b) => b.updatedAt - a.updatedAt || a.id.localeCompare(b.id));
   return <OptionPicker
-    triggerIcon={<MessagesSquare size={15} />}
+    triggerIcon={<MessagesSquare size={16} />}
     triggerLabel={expanded ? m.side_chat_open() : undefined}
     title={m.side_chat_new()}
     onTriggerClick={onCreate}
     header={m.side_chat_list({ count: children.length })}
     openOnHover
-    className="text-text [&.active]:text-text"
+    className="text-text"
     choices={children.map((session) => ({
       id: session.id,
       label: session.title?.trim() || m.side_chat_untitled(),
@@ -162,7 +162,7 @@ function ChatBranch({ sessionId, busy, onChanges }: { sessionId: string; busy: b
   return (
     <MenuItem className="min-h-7 py-1" onClick={onChanges} title={wt.branch ?? m.settings_detached()}>
       <span className="flex min-w-0 items-center gap-4">
-        <GitBranch size={15} className="shrink-0" />
+        <GitBranch size={16} className="shrink-0" />
         <span>{m.code_browser_header_changes()}</span>
       </span>
       {counts ? (

@@ -659,7 +659,7 @@ function AnnotationEntries({
           aria-label={m.a11y_remove_annotation({ number: fmtNumber(index + 1) })}
           onClick={() => onRemove(annotation.id)}
         >
-          <X size={13} />
+          <X size={14} />
         </IconButton>
       )}
     </div>
@@ -739,7 +739,7 @@ function AnnotationsPopover({
             aria-label={m.chat_panel_clear_annotations()}
             onClick={onClear}
           >
-            <X size={13} />
+            <X size={14} />
           </button>
         )}
       </div>
@@ -771,7 +771,7 @@ const PROMPT_COLLAPSED_BODY_CLASS_NAME = [
 const PLAN_RESOLVED_CLASS_NAME = [
   "prompt-collapsed plan-resolved text-subtext my-3.5 mx-0",
   "[&_summary]:flex [&_summary]:items-center [&_summary]:gap-2 [&_summary]:w-fit [&_summary]:max-w-full",
-  "[&_summary]:py-[3px] [&_summary]:px-1 [&_summary]:cursor-pointer [&_summary]:rounded-sm",
+  "[&_summary]:py-1 [&_summary]:px-1 [&_summary]:cursor-pointer [&_summary]:rounded-sm",
   "[&_summary]:list-none [&_summary]:select-none [&_summary:hover]:bg-surface",
   "[&_summary::-webkit-details-marker]:hidden",
   "[&_summary_.plan-chevron]:transition-transform [&_summary_.plan-chevron]:duration-120",
@@ -1989,7 +1989,7 @@ function ToolActivityLabel({
         rel="noopener noreferrer"
       >
         {activity.label}
-        <ArrowUpRight className="inline ms-1 opacity-50" size={13} aria-hidden="true" />
+        <ArrowUpRight className="inline ms-1 opacity-50" size={14} aria-hidden="true" />
       </a>
     );
   }
@@ -2324,7 +2324,7 @@ function TurnStatusRow({
   const errorMessage = cleanToolError(part.state?.error || m.chat_turn_incomplete());
   return (
     <details className="turn-usage-limit group/limit mt-4 text-base text-subtext">
-      <summary className="flex w-fit max-w-full items-center gap-2 cursor-pointer list-none rounded-sm focus-visible:outline-2 focus-visible:outline-text [&::-webkit-details-marker]:hidden">
+      <summary className="flex w-fit max-w-full items-center gap-2 cursor-pointer list-none rounded-sm focus-visible:outline-2 focus-visible:outline-focus [&::-webkit-details-marker]:hidden">
         <Icon size={18} className={temporaryApiError ? "shrink-0 text-subtext" : "shrink-0 text-accent-red"} aria-hidden="true" />
         <span>{label}</span>
         <ChevronRight size={16} className="shrink-0 text-text transition-transform duration-120 ease-standard group-open/limit:rotate-90 motion-reduce:transition-none" aria-hidden="true" />
@@ -2384,7 +2384,7 @@ function ToolRow({
       {failed && <span className="sr-only">{m.chat_panel_failed()} </span>}
       {failed ? (
         <span className="flex h-6 shrink-0 items-center text-accent-red">
-          <CircleX size={16} strokeWidth={1.75} className="tool-kind-icon" aria-hidden="true" />
+          <CircleX size={16} strokeWidth={1.5} className="tool-kind-icon" aria-hidden="true" />
         </span>
       ) : (
         <ToolActivityIcon activity={activity} className="text-muted" />
@@ -2409,12 +2409,12 @@ function ToolRow({
   );
 
   if (!hasDetail) {
-    return <div className="tool-row flex items-start gap-2 min-w-0 py-[3px] px-1">{line}</div>;
+    return <div className="tool-row flex items-start gap-2 min-w-0 py-1 px-1">{line}</div>;
   }
 
   return (
     <div className="tool-row tool-row-error flex flex-col min-w-0">
-      <div className="flex items-start gap-2 w-fit max-w-full py-[3px] px-1 min-w-0 rounded-sm">
+      <div className="flex items-start gap-2 w-fit max-w-full py-1 px-1 min-w-0 rounded-sm">
         {line}
         <button
           type="button"
@@ -2508,7 +2508,7 @@ function ToolGroup({
     if (pendingActivity) {
       return (
         <div className="tool-group my-3.5 mx-0">
-          <div className="tool-row flex items-start gap-2 min-w-0 py-[3px] px-1 text-base leading-6 text-subtext">
+          <div className="tool-row flex items-start gap-2 min-w-0 py-1 px-1 text-base leading-6 text-subtext">
             <ToolActivityIcon activity={pendingActivity} className={shimmering ? "tool-running-shimmer-icon" : "text-muted"} />
             <span
               className={`${shimmering ? "tool-running-shimmer" : ""} min-w-0 line-clamp-2 break-words`}
@@ -2546,7 +2546,7 @@ function ToolGroup({
 
   return (
     <div className="tool-group my-3.5 mx-0">
-      <div className="tool-group-summary flex items-start gap-2 w-fit max-w-full py-[3px] px-1 text-base leading-6 text-subtext text-start">
+      <div className="tool-group-summary flex items-start gap-2 w-fit max-w-full py-1 px-1 text-base leading-6 text-subtext text-start">
         <ToolActivityIcon activity={iconActivity} className={shimmering ? "tool-running-shimmer-icon" : "text-muted"} />
         {pendingActivity ? (
           <span
@@ -2675,11 +2675,11 @@ function PromptCard({
       return (
         <details className={PLAN_RESOLVED_CLASS_NAME}>
           <summary>
-            <span className="plan-resolved-label text-base font-[375] wrap-anywhere">
+            <span className="plan-resolved-label text-base font-normal wrap-anywhere">
               {p.synthesized ? m.chat_plan() : m.chat_proposed_plan()}
             </span>
-            <OutcomeIcon size={17} strokeWidth={1.8} className={`shrink-0 ${outcome.iconClass}`} />
-            <span className="plan-resolved-label prompt-outcome text-base font-[375] wrap-anywhere">{outcome.label}</span>
+            <OutcomeIcon size={16} strokeWidth={1.5} className={`shrink-0 ${outcome.iconClass}`} />
+            <span className="plan-resolved-label prompt-outcome text-base font-normal wrap-anywhere">{outcome.label}</span>
             <ChevronRight size={12} className="plan-chevron shrink-0 text-muted" />
           </summary>
           <div className={`${PROMPT_COLLAPSED_BODY_CLASS_NAME} ms-6`}>
@@ -2693,7 +2693,7 @@ function PromptCard({
     if (p.approved === false && !chosen) {
       return (
         <details className="group/question py-1 text-base text-subtext">
-          <summary className="flex w-fit max-w-full items-center gap-2 cursor-pointer list-none rounded-sm focus-visible:outline-2 focus-visible:outline-text [&::-webkit-details-marker]:hidden">
+          <summary className="flex w-fit max-w-full items-center gap-2 cursor-pointer list-none rounded-sm focus-visible:outline-2 focus-visible:outline-focus [&::-webkit-details-marker]:hidden">
             <span>{m.chat_question()} — {m.chat_question_skipped()}</span>
             <ChevronRight size={16} className="shrink-0 text-text transition-transform duration-120 ease-standard group-open/question:rotate-90 motion-reduce:transition-none" aria-hidden="true" />
           </summary>
@@ -2728,11 +2728,11 @@ function PromptCard({
     // harness-agnostic permission-mode wire ids).
     const docked = !!onOpenPlan;
     return (
-      <div className={`prompt-card my-2 mx-0 py-3 px-3.5 border border-border border-s-[3px] border-s-border rounded-sm bg-accent-blue-subtle flex flex-col gap-[9px] [&.plan]:border-s-accent-blue [&.permission]:border-s-accent-amber [&.question]:border-s-accent-purple [&.readonly]:opacity-60 plan ${done ? "readonly" : ""}`}>
+      <div className={`prompt-card my-2 mx-0 py-3 px-3.5 border border-accent-blue-border rounded-lg bg-accent-blue-subtle flex flex-col gap-2 [&.readonly]:opacity-60 plan ${done ? "readonly" : ""}`}>
         <div className="prompt-head text-base font-semibold text-text">
           {p.synthesized ? m.chat_plan_ready() : m.chat_proposed_plan()}
         </div>
-        <div className={`prompt-plan text-base leading-[1.6] text-text max-h-85 overflow-y-auto [&.clamped]:max-h-[9.5em] [&.clamped]:overflow-hidden [&.clamped]:relative [&.clamped::after]:content-[''] [&.clamped::after]:absolute [&.clamped::after]:inset-x-0 [&.clamped::after]:bottom-0 [&.clamped::after]:top-auto [&.clamped::after]:h-8.5 [&.clamped::after]:bg-[linear-gradient(to_bottom,_transparent,_var(--accent-blue-subtle))] [&.clamped::after]:pointer-events-none ${docked ? "clamped" : ""}`}>
+        <div className={`prompt-plan text-base leading-relaxed text-text max-h-85 overflow-y-auto [&.clamped]:max-h-[9.5em] [&.clamped]:overflow-hidden [&.clamped]:relative [&.clamped::after]:content-[''] [&.clamped::after]:absolute [&.clamped::after]:inset-x-0 [&.clamped::after]:bottom-0 [&.clamped::after]:top-auto [&.clamped::after]:h-8.5 [&.clamped::after]:bg-[linear-gradient(to_bottom,_transparent,_var(--accent-blue-subtle))] [&.clamped::after]:pointer-events-none ${docked ? "clamped" : ""}`}>
           <Md text={p.plan ?? ""} onOpenFile={onOpenFile} />
         </div>
         {docked && (
@@ -2778,13 +2778,13 @@ function PromptCard({
     const headingId = `permission-heading-${part.id}`;
     return (
       <div
-        className={`prompt-card permission my-3 w-full max-w-2xl overflow-hidden rounded-md border border-border bg-background shadow-hairline [&.readonly]:opacity-60 ${done ? "readonly" : ""}`}
+        className={`prompt-card permission my-3 w-full max-w-2xl overflow-hidden rounded-lg border border-border bg-background [&.readonly]:opacity-60 ${done ? "readonly" : ""}`}
         role="group"
         aria-labelledby={headingId}
       >
         <div className="flex items-center gap-2.5 px-3.5 pt-3 pb-0">
           <span className="flex size-7 shrink-0 items-center justify-center rounded-md bg-accent-amber-subtle text-accent-amber">
-            <TriangleAlert size={15} strokeWidth={1.8} aria-hidden="true" />
+            <TriangleAlert size={16} strokeWidth={1.5} aria-hidden="true" />
           </span>
           <span id={headingId} className="text-base font-semibold text-text">{m.chat_panel_approval_required()}</span>
         </div>
@@ -2843,7 +2843,7 @@ function PromptCard({
   };
   const skip = () => void respond({ approve: false });
   return (
-    <div className="prompt-card question flex flex-col gap-2 rounded-2xl border border-border bg-surface p-3" role="group" aria-labelledby={`question-${part.id}`}>
+    <div className="prompt-card question flex flex-col gap-2 rounded-lg border border-border bg-surface p-3" role="group" aria-labelledby={`question-${part.id}`}>
       <div className="flex items-center gap-2 text-subtext">
         <HelpCircle size={18} aria-hidden="true" />
         <span className="flex-1 text-sm">{p.header || m.chat_question()}</span>
@@ -2859,11 +2859,11 @@ function PromptCard({
                 type="button"
                 key={option.label}
                 aria-pressed={selected}
-                className={`prompt-option flex w-full items-start gap-2 rounded-lg px-2 py-1.5 text-start text-text cursor-pointer transition-colors duration-120 ease-standard enabled:hover:bg-highlight focus-visible:bg-highlight focus-visible:outline-2 focus-visible:outline-text disabled:cursor-default ${selected ? "bg-panel" : ""}`}
+                className={`prompt-option flex w-full items-start gap-2 rounded-lg px-2 py-1.5 text-start text-text cursor-pointer transition-colors duration-120 ease-standard enabled:hover:bg-highlight focus-visible:bg-highlight focus-visible:outline-2 focus-visible:outline-focus disabled:cursor-default ${selected ? "bg-panel" : ""}`}
                 disabled={done}
                 onClick={() => toggle(option.label)}
               >
-                <span className={`flex size-6 shrink-0 items-center justify-center rounded-md border text-sm ${selected ? "border-primary bg-primary-subtle text-text" : "border-border bg-background text-subtext"}`}>{selected ? <Check size={14} /> : index + 1}</span>
+                <span className={`flex size-6 shrink-0 items-center justify-center rounded-md border text-sm ${selected ? "border-text bg-surface text-text" : "border-border bg-background text-subtext"}`}>{selected ? <Check size={14} /> : index + 1}</span>
                 <span className="min-w-0 text-base">
                   <span>{option.label}</span>
                   {option.description && <span className="ms-2 text-sm text-subtext">{option.description}</span>}
@@ -2894,8 +2894,8 @@ function PromptCard({
             />
           </div>
           <div className="ms-auto flex items-center gap-2">
-            <Button type="button" className="rounded-full" disabled={done} onClick={skip}>{m.chat_question_skip()}</Button>
-            <Button type="submit" variant="primary" className="rounded-full" disabled={done || (!answerText.trim() && picked.length === 0)}>{m.chat_panel_send()}</Button>
+            <Button type="button" disabled={done} onClick={skip}>{m.chat_question_skip()}</Button>
+            <Button type="submit" variant="primary" disabled={done || (!answerText.trim() && picked.length === 0)}>{m.chat_panel_send()}</Button>
           </div>
         </form>
       )}
@@ -3021,7 +3021,7 @@ function ForkControls({
           {sentAt.toLocaleTimeString(getLocale(), { hour: "numeric", minute: "2-digit" })}
         </time>
         <IconButton size="small" aria-label={m.md_copy()} disabled={!text} onClick={copy}>
-          <Copy size={13} />
+          <Copy size={14} />
         </IconButton>
       </div>
       <IconButton size="small"
@@ -3030,7 +3030,7 @@ function ForkControls({
         disabled={editDisabled}
         onClick={onEdit}
       >
-        <Pencil size={13} />
+        <Pencil size={14} />
       </IconButton>
     </div>
   );
@@ -3136,11 +3136,11 @@ export const Message = memo(function Message({
       };
       return (
         <div className="msg-user-group ms-auto self-end flex w-full max-w-[88%] flex-col items-end gap-1.5">
-          <div className="msg-user-edit w-full bg-panel rounded-[16px] py-2.5 px-[15px] flex flex-col gap-2">
+          <div className="msg-user-edit w-full flex flex-col rounded-lg border border-border bg-background shadow-control-subtle focus-within:border-focus-border">
             <textarea
               dir="auto"
               {...{ writingsuggestions: "false" }}
-              className="w-full bg-transparent text-base text-text resize-none outline-none field-sizing-content min-h-16"
+              className="w-full border-0 rounded-none bg-transparent pt-2.5 px-3 pb-1 text-base text-text resize-none outline-none field-sizing-content min-h-16 max-h-60"
               aria-label={m.chat_panel_edit_message()}
               value={editDraft}
               autoFocus
@@ -3159,8 +3159,8 @@ export const Message = memo(function Message({
                 }
               }}
             />
-            <div className={`${PROMPT_ACTIONS_CLASS_NAME} justify-end`}>
-              <Button size="small" onClick={() => setEditDraft(null)}>
+            <div className={`${PROMPT_ACTIONS_CLASS_NAME} justify-end pt-1.5 px-2 pb-2`}>
+              <Button size="small" variant="ghost" onClick={() => setEditDraft(null)}>
                 {m.chat_panel_cancel()}
               </Button>
               <Button
@@ -3181,7 +3181,7 @@ export const Message = memo(function Message({
         {annotations.length > 0 && (
           <AnnotationsPopover annotations={annotations} variant="sent" />
         )}
-        <div dir="auto" className="msg-user max-w-full bg-panel rounded-[16px] py-2.5 px-[15px] text-base whitespace-pre-wrap wrap-anywhere [&_.skill-chip]:align-baseline">
+        <div dir="auto" className="msg-user max-w-full bg-panel rounded-2xl py-2.5 px-4 text-base whitespace-pre-wrap wrap-anywhere [&_.skill-chip]:align-baseline">
           {replies?.questionById.has(message.id) && <div className="mb-1 truncate text-subtext">{replies.questionById.get(message.id)}</div>}
           <MessageWithChips text={text} isCommand={isCommand} />
           {images.length > 0 && (
@@ -3196,8 +3196,8 @@ export const Message = memo(function Message({
           {files.length > 0 && (
             <div className="msg-files flex flex-wrap gap-1.5 mt-2">
               {files.map((a, i) => (
-                <a key={i} className="msg-file inline-flex items-center gap-1.5 max-w-60 py-1.5 px-2.5 border border-border-variant rounded-sm text-text no-underline [&:hover]:border-text [&_span]:overflow-hidden [&_span]:text-ellipsis [&_span]:whitespace-nowrap" href={a.src} target="_blank" rel="noreferrer">
-                  <FileText size={15} />
+                <a key={i} className="msg-file inline-flex items-center gap-1.5 max-w-60 py-1.5 px-2.5 border border-border-variant rounded-sm text-text no-underline [&:hover]:border-border-hover-strong [&_span]:overflow-hidden [&_span]:text-ellipsis [&_span]:whitespace-nowrap" href={a.src} target="_blank" rel="noreferrer">
+                  <FileText size={16} />
                   <span>{a.name}</span>
                 </a>
               ))}
@@ -3227,7 +3227,7 @@ export const Message = memo(function Message({
   const predictingAnswer = predictTextTail && response.answerMessageId === message.id;
   const copyText = predictingAnswer && !message.completedAt ? "" : responseText({ ...message, parts: response.answer });
   return (
-    <div className="msg-assistant group/turn text-base leading-[1.62] text-text min-w-0">
+    <div className="msg-assistant group/turn text-base leading-relaxed text-text min-w-0">
       <AssistantTurn messages={turns} response={response} options={{
         replies,
         activePermissionId,
@@ -3262,7 +3262,7 @@ export const Message = memo(function Message({
             aria-label={m.chat_copy_response()}
             onClick={() => void copyToClipboard(copyText)}
           >
-            <Copy size={13} />
+            <Copy size={14} />
           </IconButton>
         </div>
       )}
@@ -3299,7 +3299,7 @@ function AssistantTurn({ messages, response, options }: {
       <div className="turn-work mb-4">
         <button
           type="button"
-          className="flex w-full items-center gap-1.5 border-b border-border/50 pb-2 text-start text-base text-subtext cursor-pointer hover:text-text focus-visible:outline-2 focus-visible:outline-primary"
+          className="flex w-full items-center gap-1.5 border-b border-border/50 pb-2 text-start text-base text-subtext cursor-pointer hover:text-text focus-visible:outline-2 focus-visible:outline-focus"
           aria-expanded={expanded}
           data-work-toggle
           onClick={() => setExpanded((value) => !value)}
@@ -3343,12 +3343,12 @@ function ShellExchangeCard({ part }: { part: ChatPart }) {
       : null;
   return (
     <div className="msg-shell ms-auto self-end flex w-full max-w-[88%] flex-col items-stretch gap-1.5">
-      <div dir="ltr" className="max-w-full bg-panel rounded-[16px] py-2.5 px-[15px] text-base">
+      <div dir="ltr" className="max-w-full bg-panel rounded-2xl py-2.5 px-4 text-base">
         <div className="flex items-start gap-2 font-mono text-sm text-text whitespace-pre-wrap wrap-anywhere">
           <span className="sr-only">{m.chat_panel_bash()} </span>
           <SquareTerminal
             size={16}
-            strokeWidth={1.6}
+            strokeWidth={1.5}
             className={`mt-0.5 shrink-0 ${failed ? "text-accent-red" : "text-muted"}`}
             aria-hidden="true"
           />
@@ -3471,7 +3471,7 @@ function renderParts(
           dir="auto"
           role="note"
           aria-label={m.chat_panel_you_mid_task()}
-          className="msg-steer my-2 ms-auto w-fit max-w-[88%] bg-panel rounded-[16px] py-2.5 px-[15px] text-base whitespace-pre-wrap wrap-anywhere"
+          className="msg-steer my-2 ms-auto w-fit max-w-[88%] bg-panel rounded-2xl py-2.5 px-4 text-base whitespace-pre-wrap wrap-anywhere"
         >
           {replies?.questionById.has(part.id) && <div className="mb-1 truncate text-subtext">{replies.questionById.get(part.id)}</div>}
           {replies?.textById.get(part.id) ?? part.text}
@@ -3582,7 +3582,7 @@ export function SubagentTranscript({
   const hasProseChild = parts.some((p) => p.type === "text" && !!p.text);
   const finalReport = hasProseChild ? "" : spawnFinalReport(spawn);
   return (
-    <div className="msg-assistant text-base leading-[1.62] text-text min-w-0">
+    <div className="msg-assistant text-base leading-relaxed text-text min-w-0">
       {errored && <span className="sr-only">{m.chat_panel_failed()} </span>}
       {errorMessage && (
         <div className={TOOL_OUTPUT_CLASS_NAME}>
@@ -3590,7 +3590,7 @@ export function SubagentTranscript({
         </div>
       )}
       {rendered.length === 0 && !finalReport && !errorMessage ? (
-        <div className="subagent-empty py-[3px] px-1 text-sm text-muted">{running ? m.chat_working() : m.chat_no_activity()}</div>
+        <div className="subagent-empty py-1 px-1 text-sm text-muted">{running ? m.chat_working() : m.chat_no_activity()}</div>
       ) : (
         <>
           {rendered}
@@ -3604,10 +3604,10 @@ export function SubagentTranscript({
 function AgentUpdateRow({ part }: { part: ChatPart }) {
   const text = parentUpdateText(part);
   const label = <><ToolActivityIcon activity={{ kind: "agent", label: m.activity_sent_update_to_parent() }} className="text-muted" /><span className={`${TOOL_LINE_CLASS_NAME} text-subtext`}>{m.activity_sent_update_to_parent()}</span></>;
-  if (!text) return <div className="tool-row flex items-start gap-2 min-w-0 py-[3px] px-1">{label}</div>;
+  if (!text) return <div className="tool-row flex items-start gap-2 min-w-0 py-1 px-1">{label}</div>;
   return (
     <details className="min-w-0 [&[open]_.update-chevron]:rotate-90">
-      <summary className="tool-row flex cursor-pointer list-none items-center gap-2 min-w-0 py-[3px] px-1 rounded-sm focus-visible:outline-2 focus-visible:outline-text [&::-webkit-details-marker]:hidden">
+      <summary className="tool-row flex cursor-pointer list-none items-center gap-2 min-w-0 py-1 px-1 rounded-sm focus-visible:outline-2 focus-visible:outline-focus [&::-webkit-details-marker]:hidden">
         {label}<ChevronRight size={12} className="update-chevron text-muted" aria-hidden="true" />
       </summary>
       <div className="ps-7 py-2 text-sm"><Md text={text} /></div>
@@ -3637,7 +3637,7 @@ function SubagentBlock({
       {errored && <span className="sr-only">{m.chat_panel_failed()} </span>}
       {errored ? (
         <span className="flex h-6 shrink-0 items-center text-accent-red">
-          <CircleX size={16} strokeWidth={1.75} className="subagent-icon" aria-hidden="true" />
+          <CircleX size={16} strokeWidth={1.5} className="subagent-icon" aria-hidden="true" />
         </span>
       ) : (
         <ToolActivityIcon activity={activity} className={`subagent-icon ${shimmering ? "tool-running-shimmer-icon" : "text-muted"}`} />
@@ -3649,7 +3649,7 @@ function SubagentBlock({
   );
   return (
     <button
-      className="subagent-row flex items-start gap-2 w-full py-[3px] px-1 cursor-pointer text-text text-base text-start rounded-sm [&:hover:not(:disabled)]:bg-surface [&:disabled]:cursor-default"
+      className="subagent-row flex items-start gap-2 w-full py-1 px-1 cursor-pointer text-text text-base text-start rounded-sm [&:hover:not(:disabled)]:bg-surface [&:disabled]:cursor-default"
       title={errored && errorMessage ? errorMessage : m.chat_open_subagent_transcript()}
       {...tabOpenGestureHandlers<HTMLButtonElement>((intent) =>
         onOpenSubagent?.(part.id, activity.label, intent),
@@ -4029,7 +4029,7 @@ function SessionFilterMenu({
         aria-label={m.chat_panel_filter_sessions()}
         onClick={() => setOpen((v) => !v)}
       >
-        <SlidersHorizontal size={15} className="text-subtext" />
+        <SlidersHorizontal size={16} className="text-subtext" />
       </IconButton>
       {open && (
         <div className="option-menu absolute bottom-[calc(100%_+_8px)] start-0 max-h-95 flex flex-col bg-background border border-border rounded-lg shadow-menu z-50 overflow-hidden min-w-40 p-1 [&.align-right]:start-auto [&.align-right]:end-0 [&.drop-down]:bottom-auto [&.drop-down]:top-[calc(100%_+_4px)] [&.session-menu]:start-auto [&.session-menu]:end-1.5 [&.session-menu]:top-[calc(100%_-_2px)] [&.session-menu]:min-w-35 drop-down align-right">
@@ -4037,7 +4037,7 @@ function SessionFilterMenu({
           {(["projects", "list"] as const).map((mode) => (
             <MenuItem size="compact" className="text-sm" key={mode} onClick={() => { onGroupingChange(mode); setOpen(false); }}>
               <span>{mode === "projects" ? m.projects_home_projects() : m.sidebar_one_list()}</span>
-              {grouping === mode && <Check size={13} />}
+              {grouping === mode && <Check size={14} />}
             </MenuItem>
           ))}
           <div className="my-1 border-t border-border" />
@@ -4053,7 +4053,7 @@ function SessionFilterMenu({
               }}
             >
               <span>{f.label()}</span>
-              {value === f.id && <Check size={13} />}
+              {value === f.id && <Check size={14} />}
             </MenuItem>
           ))}
         </div>
@@ -4170,7 +4170,7 @@ function SessionRow({
       ref={ref}
       role="button"
       tabIndex={0}
-      className={`session-row relative flex items-center gap-2 w-full text-start py-[7px] ps-2.5 pe-1.5 rounded-md text-sm text-text cursor-pointer select-none [&:hover:not(.active)]:bg-surface [&.active]:bg-panel [&.active]:font-medium [&_.session-dot:empty]:hidden [&_.session-dot]:w-4 [&_.session-dot]:inline-flex [&_.session-dot]:items-center [&_.session-dot]:justify-center [&_.session-dot]:shrink-0 [&_.session-title]:flex-1 [&_.session-title]:min-w-0 [&_.session-title]:overflow-hidden [&_.session-title]:[mask-image:linear-gradient(to_right,black_calc(100%_-_16px),transparent)] [&_.session-title]:whitespace-nowrap [&_.session-menu-btn]:hidden [&_.session-menu-btn]:items-center [&_.session-menu-btn]:justify-center [&_.session-menu-btn]:w-4 [&_.session-menu-btn]:h-4 [&_.session-menu-btn]:-my-0.5 [&_.session-menu-btn]:mx-0 [&_.session-menu-btn]:rounded-sm [&_.session-menu-btn]:text-muted [&_.session-menu-btn]:shrink-0 [&_.session-menu-btn:hover]:text-text [&_.session-menu-btn:hover]:bg-panel [&:hover_.session-menu-btn]:inline-flex [&:focus-visible_.session-menu-btn]:inline-flex [&_.session-menu-btn:focus-visible]:inline-flex [&.menu-open_.session-menu-btn]:inline-flex [&:hover_.session-dot]:hidden [&:focus-visible_.session-dot]:hidden [&:has(.session-menu-btn:focus-visible)_.session-dot]:hidden [&.menu-open_.session-dot]:hidden [&_.busy-dot]:w-[7px] [&_.busy-dot]:h-[7px] [&_.busy-dot]:rounded-full [&_.busy-dot]:bg-primary [&_.busy-dot]:animate-[or-pulse_1.2s_infinite] [&_.busy-dot]:shrink-0 [&_.unread-dot]:w-[7px] [&_.unread-dot]:h-[7px] [&_.unread-dot]:rounded-full [&_.unread-dot]:bg-primary [&_.unread-dot]:shrink-0 [&_.busy-dot.waiting]:animate-none [&_.session-title-input]:flex-1 [&_.session-title-input]:min-w-0 [&_.session-title-input]:py-px [&_.session-title-input]:px-[5px] [&_.session-title-input]:-my-0.5 [&_.session-title-input]:mx-0 [&_.session-title-input]:[font:inherit] [&_.session-title-input]:text-text [&_.session-title-input]:bg-background [&_.session-title-input]:border [&_.session-title-input]:border-primary [&_.session-title-input]:rounded-sm [&_.session-title-input]:outline-none [&.editing]:bg-surface [&.editing]:cursor-default [&.editing_.session-menu-btn]:hidden [&.editing_.session-dot]:hidden ${active ? "active" : ""}  ${unread ? "unread" : ""}  ${open ? "menu-open" : ""}  ${
+      className={`session-row relative flex items-center gap-2 w-full h-8.5 text-start ps-2.5 pe-1.5 rounded-md text-sm text-text cursor-pointer select-none [&:hover:not(.active)]:bg-surface [&.active]:bg-panel [&.active]:font-medium [&_.session-dot:empty]:hidden [&_.session-dot]:w-4 [&_.session-dot]:inline-flex [&_.session-dot]:items-center [&_.session-dot]:justify-center [&_.session-dot]:shrink-0 [&_.session-title]:flex-1 [&_.session-title]:min-w-0 [&_.session-title]:overflow-hidden [&_.session-title]:[mask-image:linear-gradient(to_right,black_calc(100%_-_16px),transparent)] [&_.session-title]:whitespace-nowrap [&_.session-menu-btn]:hidden [&_.session-menu-btn]:items-center [&_.session-menu-btn]:justify-center [&_.session-menu-btn]:w-4 [&_.session-menu-btn]:h-4 [&_.session-menu-btn]:-my-0.5 [&_.session-menu-btn]:mx-0 [&_.session-menu-btn]:rounded-sm [&_.session-menu-btn]:text-muted [&_.session-menu-btn]:shrink-0 [&_.session-menu-btn:hover]:text-text [&_.session-menu-btn:hover]:bg-panel [&:hover_.session-menu-btn]:inline-flex [&:focus-visible_.session-menu-btn]:inline-flex [&_.session-menu-btn:focus-visible]:inline-flex [&.menu-open_.session-menu-btn]:inline-flex [&:hover_.session-dot]:hidden [&:focus-visible_.session-dot]:hidden [&:has(.session-menu-btn:focus-visible)_.session-dot]:hidden [&.menu-open_.session-dot]:hidden [&_.busy-dot]:w-[7px] [&_.busy-dot]:h-[7px] [&_.busy-dot]:rounded-full [&_.busy-dot]:bg-accent-teal [&_.busy-dot]:animate-[or-pulse_1.2s_infinite] [&_.busy-dot]:shrink-0 [&_.unread-dot]:w-[7px] [&_.unread-dot]:h-[7px] [&_.unread-dot]:rounded-full [&_.unread-dot]:bg-accent-blue [&_.unread-dot]:shrink-0 [&_.busy-dot.waiting]:animate-none [&_.session-title-input]:flex-1 [&_.session-title-input]:min-w-0 [&_.session-title-input]:py-px [&_.session-title-input]:px-1 [&_.session-title-input]:-my-0.5 [&_.session-title-input]:mx-0 [&_.session-title-input]:[font:inherit] [&_.session-title-input]:text-text [&_.session-title-input]:bg-background [&_.session-title-input]:border [&_.session-title-input]:border-focus-border [&_.session-title-input]:rounded-sm [&_.session-title-input]:outline-none [&.editing]:bg-surface [&.editing]:cursor-default [&.editing_.session-menu-btn]:hidden [&.editing_.session-dot]:hidden ${active ? "active" : ""}  ${unread ? "unread" : ""}  ${open ? "menu-open" : ""}  ${
         editing ? "editing" : ""
         }`}
       title={`${harnessLabel(session.harness, session.harnessName)}${session.model ? ` · ${session.model}` : ""}`}
@@ -4304,7 +4304,7 @@ const STARTER_TONES = [
   { box: "border-accent-blue/45", icon: "text-accent-blue" },
   { box: "border-accent-green/45", icon: "text-accent-green" },
   { box: "border-accent-amber/45", icon: "text-accent-amber" },
-  { box: "border-primary/45", icon: "text-primary" },
+  { box: "border-accent-purple/45", icon: "text-accent-purple" },
 ];
 const STARTER_GRID_CLASS =
   "mt-7 grid w-full max-w-readable grid-cols-1 gap-3 sm:grid-cols-2";
@@ -6416,30 +6416,30 @@ export function ChatPanel({
   }, [sidebarGrouping, railOpen, embedded, lastVisibleIndex, sidebarRows.length, flatSessions.hasNextPage, flatSessions.isFetching, flatSessions.isError, flatSessions.fetchNextPage]);
 
   const rail = (
-    <aside className="session-rail w-75 shrink-0 flex flex-col mt-5 mac-titlebar:mt-8 me-3.5 mb-5 ms-0 bg-background min-h-0 [&_.rail-body]:flex-1 [&_.rail-body]:min-h-0 [&_.rail-body]:pt-0 [&_.rail-body]:pb-0 [&_.rail-body]:ps-2 [&_.rail-body]:pe-1 border border-border rounded-lg overflow-visible shadow-elevated">
+    <aside className="session-rail w-75 shrink-0 flex flex-col win-titlebar:pt-8 bg-background min-h-0 [&_.rail-body]:flex-1 [&_.rail-body]:min-h-0 [&_.rail-body]:pt-0 [&_.rail-body]:pb-0 [&_.rail-body]:ps-2 [&_.rail-body]:pe-1 border-e border-e-border overflow-visible">
       {railHeader}
       <nav className="rail-nav flex flex-col gap-0.5 p-2 shrink-0">
         <button
-          className="rail-nav-item flex items-center gap-2.5 py-[7px] px-2.5 text-base text-text rounded-md text-start hover:bg-surface [&[data-tip]::after]:top-auto [&[data-tip]::after]:bottom-[calc(100%_+_6px)]"
+          className="rail-nav-item flex items-center gap-2.5 py-2 px-2.5 text-base text-text rounded-md text-start hover:bg-surface [&[data-tip]::after]:top-auto [&[data-tip]::after]:bottom-[calc(100%_+_6px)]"
           data-onboarding="new-session"
           data-tip={newTaskShortcut}
           aria-keyshortcuts="Meta+Shift+Enter Control+Shift+Enter"
           onClick={startNewTask}
         >
-          <Plus size={15} />
+          <Plus size={16} />
           {m.chat_panel_new_chat()}
         </button>
         <button
-          className={`rail-nav-item flex items-center gap-2.5 py-[7px] px-2.5 text-base text-text rounded-md text-start [&:hover:not(.active)]:bg-surface [&.active]:bg-panel [&.active]:font-medium ${mainView === "skills" ? "active" : ""}`}
+          className={`rail-nav-item flex items-center gap-2.5 py-2 px-2.5 text-base text-text rounded-md text-start [&:hover:not(.active)]:bg-surface [&.active]:bg-panel [&.active]:font-medium ${mainView === "skills" ? "active" : ""}`}
           onClick={() => onSelectMainView("skills")}
         >
-          <Blocks size={15} />
+          <Blocks size={16} />
           {m.chat_panel_customize()}
         </button>
         {SETTINGS_NAV.map((item) => (
           <button
             key={item.id}
-            className={`rail-nav-item flex items-center gap-2.5 py-[7px] px-2.5 text-base text-text rounded-md text-start [&:hover:not(.active)]:bg-surface [&.active]:bg-panel [&.active]:font-medium ${mainView !== "chat" && mainView !== "skills" && item.activeTabs.includes(mainView) ? "active" : ""}`}
+            className={`rail-nav-item flex items-center gap-2.5 py-2 px-2.5 text-base text-text rounded-md text-start [&:hover:not(.active)]:bg-surface [&.active]:bg-panel [&.active]:font-medium ${mainView !== "chat" && mainView !== "skills" && item.activeTabs.includes(mainView) ? "active" : ""}`}
             data-onboarding={item.id === "compute" ? "nav-compute" : undefined}
             onClick={() => onSelectMainView(item.id)}
           >
@@ -6455,7 +6455,7 @@ export function ChatPanel({
         <div className="rail-section-actions flex items-center gap-0.5">
           {onNewProject && <Tooltip interactive content={m.projects_home_new_project()} className="rounded-sm">
             <IconButton size="small" className="text-subtext" aria-label={m.projects_home_new_project()} onClick={onNewProject}>
-              <FolderPlus size={15} className="text-subtext" />
+              <FolderPlus size={16} className="text-subtext" />
             </IconButton>
           </Tooltip>}
           <SessionFilterMenu value={sessionFilter} onChange={setSessionFilter} grouping={sidebarGrouping} onGroupingChange={(grouping) => {
@@ -6598,13 +6598,13 @@ export function ChatPanel({
     </aside>
   );
 
-  const headerClass = `chat-header flex items-center gap-2 py-0 px-4 bg-background shrink-0 h-12 relative z-4 w-full max-w-readable my-0 mx-auto [&::after]:content-[''] [&::after]:absolute [&::after]:top-full [&::after]:start-0 [&::after]:end-0 [&::after]:h-6 [&::after]:bg-[linear-gradient(to_bottom,_var(--base),_transparent)] [&::after]:pointer-events-none`;
+  const headerClass = `chat-header flex items-center gap-2 py-0 px-4 bg-background shrink-0 h-12 mac-titlebar:h-11 relative z-4 w-full max-w-readable my-0 mx-auto [&::after]:content-[''] [&::after]:absolute [&::after]:top-full [&::after]:start-0 [&::after]:end-0 [&::after]:h-6 [&::after]:bg-[linear-gradient(to_bottom,_var(--base),_transparent)] [&::after]:pointer-events-none`;
   const railReopen = !railOpen && !embedded && (
     <IconButton
       title={m.chat_panel_show_sidebar()}
       aria-label={m.chat_panel_show_sidebar()}
       onClick={onShowRail}
-      className="mac-titlebar:ms-16"
+      className="mac-titlebar:ms-19"
     >
       <PanelLeft size={20} />
     </IconButton>
@@ -6614,8 +6614,8 @@ export function ChatPanel({
     return (
       <>
         {railOpen && rail}
-        <section className="chat-pane flex-1 min-w-0 flex flex-col bg-background min-h-0">
-          {!railOpen && <div className="flex h-12 shrink-0 items-center">{railReopen}</div>}
+        <section className="chat-pane flex-1 min-w-0 flex flex-col bg-background min-h-0 win-titlebar:pt-8">
+          {!railOpen && <div className="flex h-12 mac-titlebar:h-11 shrink-0 items-center">{railReopen}</div>}
           {/* Keyed per view so no tab inherits the chat thread's or another tab's scroll offset. */}
           <div key={mainView} className="settings-view-scroll flex-1 min-h-0 overflow-y-auto [scrollbar-gutter:stable_both-edges]">
             {contentError ? <div role="alert" className="p-6 text-subtext">{contentError}<Button onClick={onRetryContent}>{m.app_retry()}</Button></div>
@@ -6629,10 +6629,10 @@ export function ChatPanel({
   return (
     <>
       {railOpen && rail}
-      <section data-side-chat={embedded || undefined} className={`chat-pane flex-1 min-w-0 flex flex-col bg-background min-h-0 ${embedded ? "" : "mt-5"}`}>
+      <section data-side-chat={embedded || undefined} className={`chat-pane flex-1 min-w-0 flex flex-col bg-background min-h-0 ${embedded ? "" : "win-titlebar:pt-8"}`}>
         {/* Header — session title on the left, end-pane view switchers on the
           right, fading into the chat below (sessions live in the rail). */}
-        <div className={railOpen || embedded ? "contents" : "grid shrink-0 grid-cols-[2rem_minmax(0,1fr)_2rem] mac-titlebar:grid-cols-[6rem_minmax(0,1fr)_6rem] items-center"}>
+        <div className={railOpen || embedded ? "contents" : "grid shrink-0 grid-cols-[2rem_minmax(0,1fr)_2rem] mac-titlebar:grid-cols-[7.5rem_minmax(0,1fr)_7.5rem] items-center"}>
           {railReopen}
           <div className={headerClass}>
           <div className="flex min-w-0 flex-1 items-center gap-2">
@@ -6653,7 +6653,7 @@ export function ChatPanel({
           </div>
           {embedded && activeSession && (
             <IconButton aria-label={m.side_chat_delete()} data-tip={m.side_chat_delete()} onClick={() => void removeSession(activeSession)}>
-              <Trash2 size={15} />
+              <Trash2 size={16} />
             </IconButton>
           )}
           </div>
@@ -6674,13 +6674,13 @@ export function ChatPanel({
               <div className="ms-auto h-14 w-3/5 shrink-0 rounded-lg bg-panel" />
               <div className="flex shrink-0 flex-col gap-3">
                 {["w-5/6", "w-full", "w-11/12", "w-2/3", "w-full", "w-3/4", "w-1/2"].map((width, index) => (
-                  <div key={index} className={`h-3 rounded bg-panel ${width}`} />
+                  <div key={index} className={`h-3 rounded-xs bg-panel ${width}`} />
                 ))}
               </div>
               <div className="ms-auto h-10 w-2/5 shrink-0 rounded-lg bg-panel" />
               <div className="flex shrink-0 flex-col gap-3">
                 {["w-full", "w-11/12", "w-3/4", "w-5/6", "w-1/2", "w-full", "w-5/6", "w-11/12", "w-2/3", "w-3/4", "w-1/3"].map((width, index) => (
-                  <div key={index} className={`h-3 rounded bg-panel ${width}`} />
+                  <div key={index} className={`h-3 rounded-xs bg-panel ${width}`} />
                 ))}
               </div>
               <div className="ms-auto h-16 w-1/2 shrink-0 rounded-lg bg-panel" />
@@ -6692,7 +6692,7 @@ export function ChatPanel({
             <p className="m-0 text-balance">{m.side_chat_empty()}</p>
           </div>
         ) : !threadMounted ? (
-          <div className="chat-empty flex-1 flex flex-col items-center justify-center text-text p-8 text-center [&_h2]:m-0 [&_h2]:text-5xl [&_h2]:font-medium [&_h2]:tracking-[-0.015em] [&_h2]:text-text">
+          <div className="chat-empty flex-1 flex flex-col items-center justify-center text-text p-8 text-center [&_h2]:m-0 [&_h2]:text-5xl [&_h2]:font-medium [&_h2]:tracking-tight [&_h2]:text-text">
             <div className="chat-empty-mark w-10.5 h-10.5 mb-5.5 [&_svg]:block [&_svg]:w-full [&_svg]:h-full">
               <BrandMark />
             </div>
@@ -6706,10 +6706,10 @@ export function ChatPanel({
                       className={`flex min-h-22 animate-pulse flex-col items-start justify-center gap-2.5 rounded-xl border bg-background px-5 py-4 ${STARTER_TONES[index].box}`}
                     >
                       <span className={`flex w-full items-center gap-2.5 ${STARTER_TONES[index].icon}`}>
-                        <Icon size={17} />
-                        <span className="h-3.5 w-2/5 rounded bg-panel" />
+                        <Icon size={16} />
+                        <span className="h-3.5 w-2/5 rounded-xs bg-panel" />
                       </span>
-                      <span className="h-3 w-4/5 rounded bg-panel" />
+                      <span className="h-3 w-4/5 rounded-xs bg-panel" />
                     </div>
                   ))}
                 </div>
@@ -6744,7 +6744,7 @@ export function ChatPanel({
                         onClick={() => pickStarter(false)}
                       >
                         <span className="flex items-center gap-2.5 text-base font-medium text-text">
-                          <Icon size={17} className={tone.icon} />
+                          <Icon size={16} className={tone.icon} />
                           {item.title}
                         </span>
                         <span className="w-full truncate text-sm text-subtext">{item.prompt}</span>
@@ -6756,7 +6756,7 @@ export function ChatPanel({
                         title={m.chat_panel_starter_edit({ title: item.title })}
                         onClick={() => pickStarter(true)}
                       >
-                        <Pencil size={13} />
+                        <Pencil size={14} />
                       </IconButton>
                     </div>
                   );
@@ -6906,8 +6906,8 @@ export function ChatPanel({
                   title={q.error ? `${q.text}\n\n${q.error}` : q.text}
                 >
                   {q.dispatchState === "blocked"
-                    ? <TriangleAlert size={13} className="shrink-0 text-accent-amber" />
-                    : <Clock size={13} className="shrink-0 text-muted" />}
+                    ? <TriangleAlert size={14} className="shrink-0 text-accent-amber" />
+                    : <Clock size={14} className="shrink-0 text-muted" />}
                   <span className="flex-1 overflow-hidden text-ellipsis whitespace-nowrap text-text">
                     {q.text}
                   </span>
@@ -6924,7 +6924,7 @@ export function ChatPanel({
                         onClick={() => void retryQueued(q.id)}
                         aria-label={m.a11y_retry_queued_message({ text: q.text })}
                         disabled={retryingQueuedId !== null}
-                        className="shrink-0 px-1.5 py-0.5 border border-border rounded-sm text-sm text-text bg-background cursor-pointer disabled:opacity-50 disabled:cursor-default [&:hover:not(:disabled)]:border-text"
+                        className="shrink-0 px-1.5 py-0.5 border border-border rounded-sm text-sm text-text bg-background cursor-pointer disabled:opacity-50 disabled:cursor-default [&:hover:not(:disabled)]:border-border-hover-strong"
                       >
                         {retryingQueuedId === q.id ? m.retrying() : m.app_retry()}
                       </button>
@@ -6949,7 +6949,7 @@ export function ChatPanel({
                       onClick={() => cancelQueued(q.id)}
                       className="shrink-0 inline-flex items-center justify-center w-4 h-4 p-0 border-0 rounded-full text-muted cursor-pointer [&:hover]:bg-text [&:hover]:text-background"
                     >
-                      <X size={11} />
+                      <X size={12} />
                     </button>
                   )}
                 </div>
@@ -6963,7 +6963,7 @@ export function ChatPanel({
               className={`composer-demo-hint ${COMPOSER_HINT_CLASS}`}
             >
               <span className="flex-1" dir="auto">
-                <FlaskConical size={16} className="inline-block align-text-bottom me-2 text-primary" />
+                <FlaskConical size={16} className="inline-block align-text-bottom me-2 text-subtext" />
                 {m.chat_panel_demo_hint_body()}
               </span>
               <IconButton
@@ -6991,7 +6991,7 @@ export function ChatPanel({
               }}
             />
           )}
-          <div className={`composer-box relative flex flex-col border ${bashMode ? "border-accent-amber" : "border-border"} rounded-lg bg-background shadow-elevated`} data-onboarding="composer">
+          <div className={`composer-box relative flex flex-col border ${bashMode ? "border-accent-amber" : "border-border"} rounded-lg bg-background shadow-control-subtle`} data-onboarding="composer">
             {activeHarness && !activeHarness.agentReady && (
               <div className="composer-harness-warning py-2 px-3 text-subtext text-sm leading-normal border-b border-b-border-variant [&_strong]:text-accent-amber [&_strong]:font-medium [&_code]:font-mono [&_code]:text-text">
                 {activeHarness.catalogPending ? (
@@ -7069,14 +7069,14 @@ export function ChatPanel({
                       <FileText size={22} />
                       <span className="attachment-file-name overflow-hidden text-ellipsis whitespace-nowrap text-sm">{a.name ?? "document.pdf"}</span>
                       <button title={m.chat_panel_remove_file()} aria-label={m.chat_panel_remove_file()} onClick={remove}>
-                        <X size={11} />
+                        <X size={12} />
                       </button>
                     </div>
                   ) : (
                     <div key={i} className="attachment-thumb relative [&_img]:w-13 [&_img]:h-13 [&_img]:object-cover [&_img]:border [&_img]:border-border [&_img]:rounded-sm [&_img]:block [&_button]:absolute [&_button]:-top-[5px] [&_button]:-right-[5px] [&_button]:inline-flex [&_button]:items-center [&_button]:justify-center [&_button]:w-4 [&_button]:h-4 [&_button]:p-0 [&_button]:border [&_button]:border-border [&_button]:rounded-full [&_button]:bg-surface [&_button]:text-text [&_button]:cursor-pointer [&_button:hover]:bg-text [&_button:hover]:text-background">
                       <img src={a.dataUrl} alt={m.chat_pasted_image()} />
                       <button title={m.chat_panel_remove_image()} aria-label={m.chat_panel_remove_image()} onClick={remove}>
-                        <X size={11} />
+                        <X size={12} />
                       </button>
                     </div>
                   );
@@ -7247,7 +7247,7 @@ export function ChatPanel({
                   <ToggleRight size={16} />
                 </IconButton>
                 {dataSources.open && (
-                  <div className="composer-sources-menu absolute bottom-[calc(100%_+_8px)] start-0 z-50 flex min-w-55 flex-col gap-1 rounded-md border border-border bg-background p-2 shadow-dropdown">
+                  <div className="composer-sources-menu absolute bottom-[calc(100%_+_8px)] start-0 z-50 flex min-w-55 flex-col gap-1 rounded-lg border border-border bg-background p-2 shadow-dropdown">
                     <span className="px-1 text-sm font-medium text-muted">{m.chat_panel_data_sources()}</span>
                     <LitSourcesList />
                   </div>
@@ -7287,8 +7287,8 @@ export function ChatPanel({
                   }}
                 >
                   <span className="relative size-4" aria-hidden="true">
-                    <Goal className="absolute inset-0 transition-opacity group-hover:opacity-0 group-focus-visible:opacity-0" size={16} strokeWidth={1.6} />
-                    <X className="absolute inset-0 opacity-0 transition-opacity group-hover:opacity-100 group-focus-visible:opacity-100" size={16} strokeWidth={1.8} />
+                    <Goal className="absolute inset-0 transition-opacity group-hover:opacity-0 group-focus-visible:opacity-0" size={16} strokeWidth={1.5} />
+                    <X className="absolute inset-0 opacity-0 transition-opacity group-hover:opacity-100 group-focus-visible:opacity-100" size={16} strokeWidth={1.5} />
                   </span>
                   <span className="truncate">{m.chat_panel_goal()}</span>
                 </Button>
@@ -7304,8 +7304,8 @@ export function ChatPanel({
                   onClick={() => void exitPlanMode()}
                 >
                   <span className="relative size-4" aria-hidden="true">
-                    <Lightbulb className="absolute inset-0 transition-opacity group-hover:opacity-0 group-focus-visible:opacity-0" size={16} strokeWidth={1.6} />
-                    <X className="absolute inset-0 opacity-0 transition-opacity group-hover:opacity-100 group-focus-visible:opacity-100" size={16} strokeWidth={1.8} />
+                    <Lightbulb className="absolute inset-0 transition-opacity group-hover:opacity-0 group-focus-visible:opacity-0" size={16} strokeWidth={1.5} />
+                    <X className="absolute inset-0 opacity-0 transition-opacity group-hover:opacity-100 group-focus-visible:opacity-100" size={16} strokeWidth={1.5} />
                   </span>
                   <span>{m.chat_panel_plan()}</span>
                 </Button>
@@ -7321,8 +7321,8 @@ export function ChatPanel({
                   onClick={exitBashMode}
                 >
                   <span className="relative size-4" aria-hidden="true">
-                    <SquareTerminal className="absolute inset-0 transition-opacity group-hover:opacity-0 group-focus-visible:opacity-0" size={16} strokeWidth={1.6} />
-                    <X className="absolute inset-0 opacity-0 transition-opacity group-hover:opacity-100 group-focus-visible:opacity-100" size={16} strokeWidth={1.8} />
+                    <SquareTerminal className="absolute inset-0 transition-opacity group-hover:opacity-0 group-focus-visible:opacity-0" size={16} strokeWidth={1.5} />
+                    <X className="absolute inset-0 opacity-0 transition-opacity group-hover:opacity-100 group-focus-visible:opacity-100" size={16} strokeWidth={1.5} />
                   </span>
                   <span>{m.chat_panel_bash()}</span>
                 </Button>

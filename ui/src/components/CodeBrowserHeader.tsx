@@ -1,7 +1,7 @@
 import { m } from "../paraglide/messages.js";
 import { GitBranch, RotateCw } from "lucide-react";
 import { GitHubMark } from "./BackendLogos";
-import { IconButton, IconButtonLink, Spinner } from "./ui";
+import { IconButton, IconButtonLink, SEGMENTED_CLASS_NAME, Spinner } from "./ui";
 
 export type CodeBrowserView = "files" | "changes";
 
@@ -27,9 +27,9 @@ export function CodeBrowserHeader({
   onRefresh: () => void;
 }) {
   return (
-    <div className="code-tab-header flex items-center gap-2 py-1.5 px-3 border-b border-b-border-variant shrink-0 [&_>_.seg]:p-0.5 [&_>_.seg]:rounded-sm [&_>_.seg_button]:py-0.5 [&_>_.seg_button]:px-2 [&_>_.seg_button]:text-sm [&_>_.seg_button]:font-medium">
+    <div className="code-tab-header flex items-center gap-2 py-1.5 px-3 border-b border-b-border-variant shrink-0">
       {showViewToggle && (
-        <div className="seg inline-flex items-center gap-0.5 p-[3px] rounded-md bg-hover-subtle [&_button]:py-[3px] [&_button]:px-3 [&_button]:text-sm [&_button]:font-medium [&_button]:text-text [&_button]:rounded-sm [&_button:not(:disabled):hover]:text-text [&_button.active]:bg-background [&_button.active]:shadow-segment [&_button:disabled]:text-muted [&_button:disabled]:cursor-default" role="group" aria-label={m.code_browser_header_code_browser_view()}>
+        <div className={SEGMENTED_CLASS_NAME} role="group" aria-label={m.code_browser_header_code_browser_view()}>
           <button
             type="button"
             className={view === "files" ? "active" : ""}
@@ -62,12 +62,12 @@ export function CodeBrowserHeader({
           title={githubTitle}
           aria-label={githubTitle}
         >
-          <GitHubMark size={13} />
+          <GitHubMark size={14} />
         </IconButtonLink>
       )}
       <span className="flex-1" />
       <IconButton title={m.code_browser_header_refresh()} aria-label={m.code_browser_header_refresh()} onClick={onRefresh}>
-        {refreshing ? <Spinner /> : <RotateCw size={13} />}
+        {refreshing ? <Spinner /> : <RotateCw size={14} />}
       </IconButton>
     </div>
   );
