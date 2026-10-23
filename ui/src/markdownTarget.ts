@@ -68,9 +68,12 @@ export interface ImageCandidate {
 
 /** A cited file link's path; `resolveFilePath` takes the still-encoded target. */
 export function citedFilePath(path: string, resolveFilePath?: (path: string) => string | null): string | null {
+  const native = nativeMarkdownPath(path);
+  if (native || /^file:/i.test(path)) return native;
   if (resolveFilePath) return resolveFilePath(path);
   try {
-    return decodeURI(path);
+    const decoded = decodeURI(path);
+    return decoded.includes("\0") ? null : decoded;
   } catch {
     return null;
   }
@@ -97,6 +100,30 @@ export function firstCitedLine(lines: string): number | undefined {
 
 export function isWindowsDrivePath(src: string): boolean {
   return /^[a-z]:[\\/]/i.test(src);
+}
+
+export function nativeMarkdownPath(target: string): string | null {
+  let path = target;
+  const fileUrl = /^file:/i.test(target);
+  if (fileUrl) {
+    if (!/^file:\/\/(?:localhost)?\//i.test(target)) return null;
+    try {
+      const url = new URL(target);
+      if (url.hostname && url.hostname !== "localhost") return null;
+      path = url.pathname;
+    } catch {
+      return null;
+    }
+  }
+  try {
+    path = decodeURIComponent(path);
+  } catch {
+    return null;
+  }
+  if (path.includes("\0")) return null;
+  if (fileUrl && /^\/[a-z]:[\\/]/i.test(path)) path = path.slice(1);
+  if (isWindowsDrivePath(path)) return path.replaceAll("\\", "/");
+  return fileUrl && path.startsWith("/") && !path.startsWith("//") ? path : null;
 }
 
 export function chatImageTarget(src: string): (Pick<MarkdownTarget, "path" | "hash"> & { source: "absolute" | "artifact" | "checkout" }) | null {
@@ -142,9 +169,8 @@ export function rehypeSafeUrls() {
       for (const key of ["href", "src"]) {
         if (node.properties && Object.hasOwn(node.properties, key)) {
           const value = String(node.properties[key] || "");
-          // `Makefile:42` reads as an unknown protocol and is blanked, so the chip
-          // renderer gets the cited target out of band, never as a live href.
-          if (key === "href" && splitLineSuffix(value).line != null) node.properties["data-cited-href"] = value;
+          // File destinations travel out of band, never as live browser protocols.
+          if (key === "href" && (splitLineSuffix(value).line != null || nativeMarkdownPath(value))) node.properties["data-cited-href"] = value;
           node.properties[key] = key === "src" && node.tagName === "img" && isWindowsDrivePath(value)
             ? value : defaultUrlTransform(value);
         }

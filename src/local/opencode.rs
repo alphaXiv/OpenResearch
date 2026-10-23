@@ -36,6 +36,7 @@ pub(crate) use runtime::{
 pub(crate) const PLAYBOOK_REL: &str = ".openresearch/agent/autoresearch-local.md";
 
 const HEALTH_TIMEOUT: Duration = Duration::from_secs(30);
+const COMPACTION_TIMEOUT: Duration = Duration::from_secs(300);
 
 pub(crate) struct ResolvedRuntime {
     pub binary: ResolvedBinary,
@@ -496,12 +497,20 @@ async fn spawn_agent(
 }
 
 pub(crate) async fn verify_generation_models(endpoint: &AgentEndpoint, model: &str) -> Result<()> {
+    verify_generation_models_with_timeout(endpoint, model, Duration::from_secs(30)).await
+}
+
+async fn verify_generation_models_with_timeout(
+    endpoint: &AgentEndpoint,
+    model: &str,
+    timeout: Duration,
+) -> Result<()> {
     let path = match endpoint.protocol {
         Protocol::V1 => "/agent",
         Protocol::V2 => "/api/agent",
     };
     let mut mismatch = None;
-    tokio::time::timeout(Duration::from_secs(30), async {
+    tokio::time::timeout(timeout, async {
         loop {
             let response: Value = endpoint.client.get(format!("{}{path}", endpoint.base_url))
                 .send().await?.error_for_status()?.json().await?;
@@ -566,7 +575,7 @@ async fn compact_v2(
         .pointer("/data/id")
         .and_then(Value::as_str)
         .ok_or_else(|| anyhow!("OpenCode compaction response has no id"))?;
-    tokio::time::timeout(Duration::from_secs(120), async {
+    tokio::time::timeout(COMPACTION_TIMEOUT, async {
         loop {
             let response = endpoint
                 .client
@@ -705,6 +714,74 @@ impl AgentHost {
             .await?
             .error_for_status()?;
         Ok(())
+    }
+
+    pub(crate) async fn compact(
+        &self,
+        project: &LocalProject,
+        session_id: &str,
+        native_id: &str,
+        model: Option<&str>,
+    ) -> Result<()> {
+        let operation = async {
+            match self.summarize(session_id, native_id, model).await? {
+                SummarizeOutcome::Compacted => return Ok(()),
+                SummarizeOutcome::NoModel => {
+                    return Err(anyhow!(
+                        "Select an OpenCode model before compacting this chat"
+                    ));
+                }
+                SummarizeOutcome::NoServer | SummarizeOutcome::ModelChanged => {}
+            }
+            let resident_model = self.resident_model(session_id).await;
+            let model = self.selected_model(model).or(resident_model.as_deref());
+            let model = model
+                .filter(|model| {
+                    model.split_once('/').is_some_and(|(provider, id)| {
+                        !provider.trim().is_empty() && !id.trim().is_empty()
+                    })
+                })
+                .ok_or_else(|| anyhow!("Select an OpenCode model before compacting this chat"))?;
+            let saved_id = native_id.to_string();
+            let native =
+                tokio::task::spawn_blocking(move || native_store::opencode_session(&saved_id))
+                    .await
+                    .map_err(|error| anyhow!("OpenCode session lookup failed: {error}"))??
+                    .ok_or_else(|| {
+                        anyhow!("OpenCode's saved session is missing — cannot compact this chat")
+                    })?;
+            let binary = resolve_binary().await?;
+            let (progress, _) = tokio::sync::watch::channel(String::new());
+            self.ensure(
+                project,
+                session_id,
+                Some(model),
+                ResolvedRuntime {
+                    binary,
+                    database: native.path,
+                    store: native.store,
+                },
+                progress,
+            )
+            .await?;
+            match self.summarize(session_id, native_id, Some(model)).await? {
+                SummarizeOutcome::Compacted => Ok(()),
+                SummarizeOutcome::NoServer => Err(anyhow!("OpenCode stopped during compaction")),
+                SummarizeOutcome::NoModel | SummarizeOutcome::ModelChanged => Err(anyhow!(
+                    "OpenCode could not restore the selected compaction model"
+                )),
+            }
+        };
+        match tokio::time::timeout(COMPACTION_TIMEOUT, operation).await {
+            Ok(result) => result,
+            Err(_) => {
+                self.kill_session(session_id).await;
+                Err(anyhow!(
+                    "OpenCode did not finish compacting within {}s",
+                    COMPACTION_TIMEOUT.as_secs()
+                ))
+            }
+        }
     }
 
     /// Ask opencode to summarize (compact) a session in place.
@@ -919,7 +996,7 @@ mod tests {
 
     #[cfg(unix)]
     #[tokio::test]
-    async fn resident_reuses_selected_cloud_model_and_falls_back_before_mismatched_compaction() {
+    async fn native_compaction_reuses_the_resident_model_and_requires_reconfiguration_on_change() {
         use axum::{
             routing::{get, post},
             Json, Router,
@@ -1020,14 +1097,76 @@ mod tests {
             host.resident_model("chat").await.as_deref(),
             Some("cloud/selected")
         );
-        assert!(matches!(
-            host.summarize("chat", "native", None).await.unwrap(),
-            SummarizeOutcome::Compacted
-        ));
+        host.compact(&project, "chat", "native", None)
+            .await
+            .unwrap();
         assert_eq!(compacted.load(Ordering::SeqCst), 1);
         host.shutdown().await;
         assert!(host.resident_model("chat").await.is_none());
         server.abort();
+    }
+
+    #[tokio::test]
+    async fn cold_compaction_requires_a_valid_selected_model_before_startup() {
+        let host = AgentHost::new(None);
+        for model in [
+            None,
+            Some(" "),
+            Some("model"),
+            Some("provider/"),
+            Some("/model"),
+        ] {
+            let error = host
+                .compact(&sample_project(), "cold-chat", "native", model)
+                .await
+                .unwrap_err();
+            assert!(error.to_string().contains("Select an OpenCode model"));
+            assert!(host.inner.lock().await.is_empty());
+            assert!(host.starting.lock().unwrap().is_empty());
+        }
+    }
+
+    #[test]
+    fn cold_compaction_does_not_replace_a_missing_native_session() {
+        const CHILD: &str = "ORX_TEST_OPENCODE_MISSING_COMPACTION_SESSION";
+        if std::env::var_os(CHILD).is_some() {
+            tokio::runtime::Runtime::new().unwrap().block_on(async {
+                let host = AgentHost::new(None);
+                let error = host
+                    .compact(
+                        &sample_project(),
+                        "cold-chat",
+                        "missing-native",
+                        Some("provider/model"),
+                    )
+                    .await
+                    .unwrap_err();
+                assert!(error.to_string().contains("saved session is missing"));
+                assert!(host.status().await.is_empty());
+                assert!(!native_store::opencode_db(NativeStore::Isolated).exists());
+                assert!(!native_store::opencode_db(NativeStore::Legacy).exists());
+            });
+            return;
+        }
+        let fixture = git::TemporaryDirectory::new("orx-missing-opencode-compaction").unwrap();
+        let output = std::process::Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "local::opencode::tests::cold_compaction_does_not_replace_a_missing_native_session",
+                "--nocapture",
+            ])
+            .env(CHILD, "1")
+            .env("ORX_DATA_DIR", fixture.path().join("orx"))
+            .env("XDG_DATA_HOME", fixture.path().join("xdg"))
+            .env("OPENCODE_DB", fixture.path().join("missing.db"))
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{}\n{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
     }
 
     #[tokio::test]
@@ -1075,10 +1214,72 @@ mod tests {
                     }),
                 );
                 let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
-                let result = verify_generation_models(&endpoint, "custom/selected").await;
+                let result = verify_generation_models_with_timeout(
+                    &endpoint,
+                    "custom/selected",
+                    Duration::from_secs(1),
+                )
+                .await;
                 assert_eq!(result.is_ok(), expected, "{result:?}");
+                if !expected {
+                    assert!(result
+                        .unwrap_err()
+                        .to_string()
+                        .contains("effective title model"));
+                }
                 server.abort();
             }
+        }
+    }
+
+    #[tokio::test]
+    async fn effective_agent_models_wait_for_configuration_to_converge() {
+        use axum::{routing::get, Json, Router};
+        use std::sync::{
+            atomic::{AtomicUsize, Ordering},
+            Arc,
+        };
+
+        for protocol in [Protocol::V1, Protocol::V2] {
+            let polls = Arc::new(AtomicUsize::new(0));
+            let count = polls.clone();
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let endpoint = AgentEndpoint {
+                base_url: format!("http://{}", listener.local_addr().unwrap()),
+                client: crate::net::loopback_client().build().unwrap(),
+                protocol,
+                legacy_v2_api: false,
+            };
+            let path = if protocol == Protocol::V1 {
+                "/agent"
+            } else {
+                "/api/agent"
+            };
+            let app = Router::new().route(path, get(move || {
+                let count = count.clone();
+                async move {
+                    let poll = count.fetch_add(1, Ordering::SeqCst);
+                    let model = if poll == 1 { "managed" } else { "selected" };
+                    let agents = if poll == 0 {
+                        json!([])
+                    } else if protocol == Protocol::V1 {
+                        json!([{"name":"title","model":{"providerID":"custom","modelID":model}}])
+                    } else {
+                        json!([{"id":"title","model":{"providerID":"custom","id":model}}])
+                    };
+                    Json(if protocol == Protocol::V1 { agents } else { json!({"data":agents}) })
+                }
+            }));
+            let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+            verify_generation_models_with_timeout(
+                &endpoint,
+                "custom/selected",
+                Duration::from_secs(5),
+            )
+            .await
+            .unwrap();
+            assert_eq!(polls.load(Ordering::SeqCst), 3);
+            server.abort();
         }
     }
 

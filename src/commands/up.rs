@@ -2121,7 +2121,7 @@ async fn delete_project_inner(state: AppState, id: String, query: DeleteProjectQ
     // Row deletion can wait up to RUN_ARTIFACTS_WAIT for the run-artifacts lock, so keep it off the async workers.
     tokio::task::spawn_blocking(move || {
         let native_purge = (!session_ids.is_empty()).then_some(|| {
-            local::chat::ChatHost::delete_native_sessions_blocking(&store, &session_ids)
+            local::chat::ChatHost::purge_native_history_blocking(&store, &session_ids)
         });
         store.delete_local_project_with(&project_id, native_purge)
     })
@@ -4685,7 +4685,7 @@ async fn reclaim_orphaned_run_artifacts(
 ) {
     // Demo prewarm skips itself when the gate is contended at startup.
     tokio::time::sleep(Duration::from_secs(5)).await;
-    // Orphans whose failure is already logged, so a stuck one logs once.
+    // Orphans and sweep failures already logged, so a stuck one logs once.
     let mut reported = HashSet::new();
     loop {
         let mut more = false;
@@ -4712,16 +4712,26 @@ async fn reclaim_orphaned_run_artifacts(
                         eprintln!("orx up: orphaned run artifact cleanup failed: {error}")
                     }
                 }
-                match tokio::task::spawn_blocking(|| {
-                    Store::open()?.cleanup_orphaned_chat_attachments()
-                })
-                .await
-                {
-                    Ok(Ok(left)) => more |= left,
-                    Ok(Err(error)) => {
-                        eprintln!("orx up: could not clean orphaned chat attachments: {error}")
+                let sweeps = [
+                    (
+                        "chat attachments",
+                        Store::cleanup_orphaned_chat_attachments as fn(&Store) -> Result<bool>,
+                    ),
+                    (
+                        "native chat history",
+                        Store::cleanup_orphaned_native_sessions,
+                    ),
+                ];
+                for (label, sweep) in sweeps {
+                    match tokio::task::spawn_blocking(move || sweep(&Store::open()?)).await {
+                        Ok(Ok(left)) => more |= left,
+                        Ok(Err(error)) => {
+                            if reported.insert(format!("{label}: {error}")) {
+                                eprintln!("orx up: could not clean orphaned {label}: {error}");
+                            }
+                        }
+                        Err(error) => eprintln!("orx up: orphaned {label} cleanup failed: {error}"),
                     }
-                    Err(error) => eprintln!("orx up: chat attachment cleanup failed: {error}"),
                 }
             }
         }

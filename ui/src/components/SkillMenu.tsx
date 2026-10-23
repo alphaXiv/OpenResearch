@@ -30,13 +30,15 @@ export function SkillMenu({
           key={s.name}
           ref={i === activeIndex ? activeRef : undefined}
           type="button"
-          className={`skill-item flex items-center gap-2 w-full text-start py-1 px-2 rounded-full text-sm font-normal text-text/80 [&.active]:bg-hover-muted [&.active]:text-text ${i === activeIndex ? "active" : ""}`}
+          disabled={s.disabled}
+          title={s.disabled ? s.description : undefined}
+          className={`skill-item flex items-center gap-2 w-full text-start py-1 px-2 rounded-full text-sm font-normal text-text/80 disabled:opacity-50 disabled:cursor-not-allowed [&.active]:bg-hover-muted [&.active]:text-text ${i === activeIndex ? "active" : ""}`}
           // mousedown + preventDefault keeps the textarea focused.
           onMouseDown={(e) => {
             e.preventDefault();
             onPick(s);
           }}
-          onMouseEnter={() => onHover(i)}
+          onMouseEnter={() => { if (!s.disabled) onHover(i); }}
         >
           <CommandIcon name={s.name} className="shrink-0" />
           <span className="skill-name shrink-0">

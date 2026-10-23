@@ -1093,6 +1093,7 @@
   "resume_command_description": "إعادة فتح محادثة سابقة",
   "model_command_description": "اختيار نموذج هذه المحادثة",
   "compact_command_description": "اختصار سياق هذه المحادثة",
+  "chat_compact_unsupported": "هذا الوكيل لا يدعم ضغط السياق.",
   "chat_nothing_to_compact": "لا يوجد شيء لضغطه بعد",
   "chat_compact_busy": "انتظر انتهاء الجولة قبل الضغط.",
   "chat_compact_failed": "فشل الضغط: {error}",

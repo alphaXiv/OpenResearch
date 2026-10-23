@@ -1094,6 +1094,7 @@
   "resume_command_description": "Vuelve a abrir un chat anterior",
   "model_command_description": "Elige el modelo de este chat",
   "compact_command_description": "Comprime el contexto de este chat",
+  "chat_compact_unsupported": "Este agente no admite la compactación.",
   "chat_nothing_to_compact": "Aún no hay nada que comprimir",
   "chat_compact_busy": "Espera a que termine el turno antes de comprimir.",
   "chat_compact_failed": "Error al comprimir: {error}",

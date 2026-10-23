@@ -315,6 +315,23 @@ fn standalone_settings_defaults_and_instruction_conflicts() {
 #[cfg(unix)]
 #[test]
 fn interactive_ssh_retires_rejected_masters_without_unlinking_unknown_connections() {
+    std::thread::scope(|scope| {
+        for case in [
+            "healthy",
+            "rejection",
+            "exit_zero",
+            "stop_failure",
+            "probe_timeout",
+            "check_timeout",
+            "stop_timeout",
+        ] {
+            scope.spawn(move || interactive_ssh_case(case));
+        }
+    });
+}
+
+#[cfg(unix)]
+fn interactive_ssh_case(case: &str) {
     use portable_pty::{native_pty_system, CommandBuilder, PtySize};
     use std::io::Read;
     use std::os::unix::fs::PermissionsExt;
@@ -365,67 +382,56 @@ esac
 "#).unwrap();
     std::fs::set_permissions(&ssh, std::fs::Permissions::from_mode(0o755)).unwrap();
 
-    for case in [
-        "healthy",
-        "rejection",
-        "exit_zero",
-        "stop_failure",
-        "probe_timeout",
-        "check_timeout",
-        "stop_timeout",
-    ] {
-        let _ = std::fs::remove_file(sandbox.0.join("calls"));
-        let command = sandbox.command();
-        let mut builder = CommandBuilder::new(command.get_program());
-        builder.args(command.get_args());
-        for (key, value) in command.get_envs() {
-            match value {
-                Some(value) => builder.env(key, value),
-                None => builder.env_remove(key),
-            }
+    let command = sandbox.command();
+    let mut builder = CommandBuilder::new(command.get_program());
+    builder.args(command.get_args());
+    for (key, value) in command.get_envs() {
+        match value {
+            Some(value) => builder.env(key, value),
+            None => builder.env_remove(key),
         }
-        builder.env("PATH", format!("{}:/usr/bin:/bin", bin.display()));
-        builder.env("CASE", case);
-        builder.args(["compute", "connect", "ssh", "--host", "lab"]);
-        let pair = native_pty_system().openpty(PtySize::default()).unwrap();
-        let mut child = pair.slave.spawn_command(builder).unwrap();
-        drop(pair.slave);
-        let mut reader = pair.master.try_clone_reader().unwrap();
-        let mut output = Vec::new();
-        // Linux PTYs report EIO instead of EOF when the slave closes.
-        if let Err(error) = reader.read_to_end(&mut output) {
-            assert_eq!(error.raw_os_error(), Some(libc::EIO));
-        }
-        let status = child.wait().unwrap();
-        let calls = std::fs::read_to_string(sandbox.0.join("calls")).unwrap();
-        let socket = PathBuf::from(std::fs::read_to_string(sandbox.0.join("socket-path")).unwrap());
-        let output = String::from_utf8_lossy(&output);
-        match case {
-            "healthy" => {
-                assert!(status.success(), "{output}");
-                assert!(!calls.contains("-O stop"));
-                assert!(socket.exists());
-                assert!(output.contains("LOGIN"));
-            }
-            "rejection" | "exit_zero" => {
-                assert!(status.success(), "{output}");
-                assert!(calls.find("-O stop").unwrap() < calls.find("-- lab true").unwrap());
-                assert!(!socket.exists());
-                assert!(output.contains("LOGIN"));
-            }
-            _ => {
-                assert!(!status.success(), "{case}: {output}");
-                assert!(socket.exists(), "{case} removed an unknown/live socket");
-                assert!(!output.contains("LOGIN"));
-                if case != "stop_failure" && case != "stop_timeout" {
-                    assert!(!calls.contains("-O stop"));
-                }
-            }
-        }
-        assert!(!calls.contains("-O exit"));
-        let _ = std::fs::remove_file(&socket);
-        let _ = std::fs::remove_file(socket.with_extension("lock"));
     }
+    builder.env("PATH", format!("{}:/usr/bin:/bin", bin.display()));
+    builder.env("CASE", case);
+    builder.args(["compute", "connect", "ssh", "--host", "lab"]);
+    let pair = native_pty_system().openpty(PtySize::default()).unwrap();
+    let mut child = pair.slave.spawn_command(builder).unwrap();
+    drop(pair.slave);
+    let mut reader = pair.master.try_clone_reader().unwrap();
+    let mut output = Vec::new();
+    // Linux PTYs report EIO instead of EOF when the slave closes.
+    if let Err(error) = reader.read_to_end(&mut output) {
+        assert_eq!(error.raw_os_error(), Some(libc::EIO));
+    }
+    let status = child.wait().unwrap();
+    let calls = std::fs::read_to_string(sandbox.0.join("calls")).unwrap();
+    let socket = PathBuf::from(std::fs::read_to_string(sandbox.0.join("socket-path")).unwrap());
+    let output = String::from_utf8_lossy(&output);
+    match case {
+        "healthy" => {
+            assert!(status.success(), "{output}");
+            assert!(!calls.contains("-O stop"));
+            assert!(socket.exists());
+            assert!(output.contains("LOGIN"));
+        }
+        "rejection" | "exit_zero" => {
+            assert!(status.success(), "{output}");
+            assert!(calls.find("-O stop").unwrap() < calls.find("-- lab true").unwrap());
+            assert!(!socket.exists());
+            assert!(output.contains("LOGIN"));
+        }
+        _ => {
+            assert!(!status.success(), "{case}: {output}");
+            assert!(socket.exists(), "{case} removed an unknown/live socket");
+            assert!(!output.contains("LOGIN"));
+            if case != "stop_failure" && case != "stop_timeout" {
+                assert!(!calls.contains("-O stop"));
+            }
+        }
+    }
+    assert!(!calls.contains("-O exit"));
+    let _ = std::fs::remove_file(&socket);
+    let _ = std::fs::remove_file(socket.with_extension("lock"));
 }
 
 #[cfg(unix)]
