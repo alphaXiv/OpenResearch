@@ -597,7 +597,43 @@ async fn discover_papers(
             reason
         ));
     }
-    Ok(res.json::<Vec<PaperHit>>().await?)
+    let body = res.text().await?;
+    Ok(serde_json::from_str(&replace_lone_surrogates(&body))?)
+}
+
+/// alphaXiv cuts snippets mid surrogate pair, leaving lone `\uD8xx` escapes
+/// that serde_json rejects; swap them for U+FFFD.
+fn replace_lone_surrogates(json: &str) -> std::borrow::Cow<'_, str> {
+    fn escape_at(json: &str, i: usize) -> Option<u16> {
+        let hex = json.get(i..i + 6)?.strip_prefix("\\u")?;
+        u16::from_str_radix(hex, 16).ok()
+    }
+    let mut out = String::with_capacity(json.len());
+    let (mut copied, mut i) = (0, 0);
+    while let Some(off) = json.get(i..).and_then(|rest| rest.find('\\')) {
+        i += off;
+        let Some(unit) = escape_at(json, i) else {
+            i += 2; // any other escape, including `\\`
+            continue;
+        };
+        let paired = (0xD800..0xDC00).contains(&unit)
+            && escape_at(json, i + 6).is_some_and(|low| (0xDC00..0xE000).contains(&low));
+        if paired {
+            i += 12;
+        } else if (0xD800..0xE000).contains(&unit) {
+            out.push_str(&json[copied..i]);
+            out.push_str("\\uFFFD");
+            i += 6;
+            copied = i;
+        } else {
+            i += 6;
+        }
+    }
+    if copied == 0 {
+        return json.into();
+    }
+    out.push_str(&json[copied..]);
+    out.into()
 }
 
 pub async fn discover_papers_by_keyword(
@@ -1687,10 +1723,10 @@ mod tests {
     };
     use super::{
         parse_pubmed_articles, public_get, pubmed_discovery_url, pubmed_fetch_url,
-        rerank_pubmed_articles, retry_after_secs, retry_delay, PubmedArticle,
-        PubmedDiscoveryOptions,
+        replace_lone_surrogates, rerank_pubmed_articles, retry_after_secs, retry_delay,
+        PubmedArticle, PubmedDiscoveryOptions,
     };
-    use serde_json::json;
+    use serde_json::{json, Value};
 
     #[test]
     fn pubmed_discovery_url_fills_the_open_date_bound_and_widens_date_priorities() {
@@ -1863,6 +1899,16 @@ mod tests {
             super::paper_pdf_url("hep-th/9901001"),
             "https://export.arxiv.org/pdf/hep-th/9901001"
         );
+    }
+
+    #[test]
+    fn discovery_decodes_snippets_cut_mid_surrogate_pair() {
+        let body = r#"[{"paperId":"1","title":"\ud835\udc68 \\ud835 \u00e9","abstract":"\udc68","snippets":[{"snippet":"= \ud835..."}]}]"#;
+        let hits: Vec<PaperHit> = serde_json::from_str(&replace_lone_surrogates(body)).unwrap();
+        assert_eq!(hits[0].title, "\u{1D468} \\ud835 é");
+        assert!(serde_json::from_str::<Value>(&replace_lone_surrogates("\"\\")).is_err());
+        assert_eq!(hits[0].abstract_, "\u{FFFD}");
+        assert_eq!(hits[0].snippets[0].snippet, "= \u{FFFD}...");
     }
 
     #[test]
