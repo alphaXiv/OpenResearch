@@ -1,0 +1,54 @@
+import test from 'node:test'
+import assert from 'node:assert/strict'
+import { changedChecks, classifyChanges } from './ci-changes.mjs'
+import { checkResults } from './ci-check-result.mjs'
+
+const enabled = paths => Object.entries(classifyChanges(paths)).filter(([, value]) => value).map(([name]) => name)
+test('frontend changes do not select Rust, including generated bundles', () => {
+  assert.deepEqual(enabled(['ui/src/App.tsx', 'ui/dist/index.html', 'ui/pnpm-lock.yaml']), ['frontend'])
+})
+test('Rust and embedded resources select all existing Rust platforms', () => {
+  for (const path of ['src/main.rs', 'tests/compute_cli.rs', 'Cargo.lock', 'build.rs', 'agent-skills/orx-compute/SKILL.md', 'demo/nanochat/base/file.txt', 'SYSTEM_PROMPT.md', 'SKILL.md']) {
+    assert.deepEqual(enabled([path]), ['rust', 'windows', 'linux', 'macos'], path)
+  }
+})
+test('platform files select corresponding checks', () => {
+  assert.deepEqual(enabled(['windows/launcher/src/main.rs']), ['windows'])
+  assert.deepEqual(enabled(['linux/OpenResearch.png']), ['linux'])
+  assert.deepEqual(enabled(['macos/Info.plist']), ['rust', 'macos'])
+})
+test('helper tests are independent and combine with other changes', () => {
+  assert.deepEqual(enabled(['scripts/dev-slot.mjs', 'scripts/test_orx_chart.py', 'scripts/release_notes.py', 'ui/package.json']), ['frontend', 'dev_slot', 'chart', 'release_notes'])
+})
+test('docs skip builds, workflow changes and unknown files select all', () => {
+  assert.deepEqual(enabled(['README.md', 'docs/linux.md', 'LICENSE', '.github/readme-assets/banner.png']), [])
+  for (const path of ['.github/workflows/ci.yml', 'scripts/ci-changes.mjs', '.cargo/config.toml', 'new-build-input']) assert.equal(enabled([path]).length, 8)
+})
+test('embedded chart changes also run chart tests', () => {
+  assert.equal(classifyChanges(['agent-skills/orx-figures/assets/orx_chart.py']).chart, true)
+})
+test('diff reports both deleted and added paths for renames', () => {
+  const calls = []
+  const checks = changedChecks({ base: 'base', head: 'merge' }, args => {
+    calls.push(args)
+    return args[0] === 'diff' ? 'ui/old.ts\0src/new.rs\0' : 'sha\n'
+  })
+  assert.equal(checks.frontend, true)
+  assert.equal(checks.rust, true)
+  assert.deepEqual(calls[2], ['diff', '--name-only', '--no-renames', '-z', 'base', 'merge', '--'])
+})
+test('unavailable comparisons and forced runs select everything', () => {
+  for (const options of [{}, { base: '000000' }, { base: 'missing' }, { forceAll: true }]) {
+    const checks = changedChecks(options, () => { throw new Error('missing commit') })
+    assert.equal(Object.values(checks).every(Boolean), true)
+  }
+})
+const flags = Object.fromEntries(Object.entries(classifyChanges(['ui/src/App.tsx'])).map(([key, value]) => [key, String(value)]))
+const needs = { changes: { result: 'success' }, frontend: { result: 'success' }, rust: { result: 'skipped' }, windows: { result: 'skipped' }, 'linux-app': { result: 'skipped' }, helpers: { result: 'skipped' } }
+test('aggregate accepts intentional skips and successful selected jobs', () => checkResults(needs, flags))
+test('aggregate rejects failures, cancellations, missing and unexpectedly skipped jobs', () => {
+  for (const result of ['failure', 'cancelled', 'skipped', undefined]) assert.throws(() => checkResults({ ...needs, frontend: { result } }, flags))
+  assert.throws(() => checkResults({ ...needs, rust: { result: 'failure' } }, flags))
+  assert.throws(() => checkResults({ ...needs, changes: { result: 'failure' } }, flags))
+  assert.throws(() => checkResults(needs, { ...flags, rust: undefined }))
+})

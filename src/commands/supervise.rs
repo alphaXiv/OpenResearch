@@ -27,6 +27,10 @@ const LOG_IDLE: Duration = Duration::from_secs(30);
 /// How long monitoring must keep failing before it is reported on the run.
 const MONITORING_GRACE: Duration = Duration::from_secs(60);
 
+fn should_report_monitoring_error(already_reported: bool, elapsed: Option<Duration>) -> bool {
+    already_reported || elapsed.is_some_and(|elapsed| elapsed >= MONITORING_GRACE)
+}
+
 fn open_supervisor_lock(path: &std::path::Path) -> Result<fd_lock::RwLock<std::fs::File>> {
     let file = std::fs::OpenOptions::new()
         .create(true)
@@ -741,8 +745,10 @@ async fn watch_ssh_job(
             .as_ref()
             .map(|_| failing_since.unwrap_or_else(std::time::Instant::now));
         let reported = error.clone().filter(|_| {
-            descriptor.monitoring_error.is_some()
-                || failing_since.is_some_and(|since| since.elapsed() >= MONITORING_GRACE)
+            should_report_monitoring_error(
+                descriptor.monitoring_error.is_some(),
+                failing_since.map(|since| since.elapsed()),
+            )
         });
         if reported != descriptor.monitoring_error
             || cancel_sent != descriptor.cancellation_accepted
@@ -1412,8 +1418,10 @@ async fn run_slurm(
             .map(|_| failing_since.unwrap_or_else(std::time::Instant::now));
         // Brief outages recover on their own; a restarted supervisor keeps an existing report.
         let reported = error.clone().filter(|_| {
-            descriptor.monitoring_error.is_some()
-                || failing_since.is_some_and(|since| since.elapsed() >= MONITORING_GRACE)
+            should_report_monitoring_error(
+                descriptor.monitoring_error.is_some(),
+                failing_since.map(|since| since.elapsed()),
+            )
         });
         if reported != descriptor.monitoring_error
             || cancel_sent != descriptor.cancellation_accepted
@@ -1658,6 +1666,25 @@ async fn cancel_ray(address: &str, submission_id: &str, run_id: &str, cancel_sen
 mod tests {
     use super::*;
     use crate::store::StoredRun;
+
+    #[test]
+    fn monitoring_errors_wait_for_grace_but_preserve_existing_reports() {
+        assert!(!should_report_monitoring_error(false, None));
+        assert!(!should_report_monitoring_error(false, Some(Duration::ZERO)));
+        assert!(!should_report_monitoring_error(
+            false,
+            Some(MONITORING_GRACE - Duration::from_nanos(1)),
+        ));
+        assert!(should_report_monitoring_error(
+            false,
+            Some(MONITORING_GRACE)
+        ));
+        assert!(should_report_monitoring_error(
+            false,
+            Some(MONITORING_GRACE + Duration::from_nanos(1)),
+        ));
+        assert!(should_report_monitoring_error(true, Some(Duration::ZERO)));
+    }
 
     #[test]
     fn recovered_cancel_intent_only_overrides_failed_terminal_state() {
