@@ -47,13 +47,21 @@ fn log_tail_has_traceback(path: &std::path::Path) -> bool {
 }
 
 /// Warning for a live run that went silent right after an unhandled Python traceback.
+/// `log_len` and `quiet_since` carry the log size and when it last changed across polls.
 fn traceback_stall(
     run_id: &str,
     running: bool,
-    quiet: Duration,
     log: &std::path::Path,
+    log_len: &mut Option<u64>,
+    quiet_since: &mut std::time::Instant,
 ) -> Option<String> {
+    let len = std::fs::metadata(log).map(|m| m.len()).ok();
+    if len != *log_len {
+        *log_len = len;
+        *quiet_since = std::time::Instant::now();
+    }
     // A crashed main thread can leave a non-daemon worker (e.g. vLLM's EngineCore) blocking shutdown.
+    let quiet = quiet_since.elapsed();
     (running && quiet >= TRACEBACK_STALL && log_tail_has_traceback(log)).then(|| {
         format!(
             "Run looks stalled: it printed a Python traceback and has written no output for {} \
@@ -779,16 +787,12 @@ async fn watch_ssh_job(
         failing_since = error
             .as_ref()
             .map(|_| failing_since.unwrap_or_else(std::time::Instant::now));
-        let len = std::fs::metadata(&path).map(|m| m.len()).ok();
-        if len != log_len {
-            log_len = len;
-            log_quiet_since = std::time::Instant::now();
-        }
         let stalled = traceback_stall(
             run_id,
             observed.as_ref().is_ok_and(|job| job.stage == "RUNNING"),
-            log_quiet_since.elapsed(),
             &path,
+            &mut log_len,
+            &mut log_quiet_since,
         );
         let reported = error
             .clone()
@@ -1741,11 +1745,18 @@ mod tests {
         assert!(log_tail_has_traceback(&path));
         std::fs::write(&path, format!("{crash}{}", "x".repeat(20_000))).unwrap();
         assert!(!log_tail_has_traceback(&path));
-        let just_under = TRACEBACK_STALL - Duration::from_secs(1);
-        assert!(traceback_stall("r", true, just_under, &path).is_none());
         std::fs::write(&path, crash).unwrap();
-        assert!(traceback_stall("r", true, TRACEBACK_STALL, &path).is_some());
-        assert!(traceback_stall("r", false, TRACEBACK_STALL, &path).is_none());
+        let now = std::time::Instant::now();
+        let mut len = std::fs::metadata(&path).map(|m| m.len()).ok();
+        let mut since = now - (TRACEBACK_STALL - Duration::from_secs(1));
+        assert!(traceback_stall("r", true, &path, &mut len, &mut since).is_none());
+        since = now - TRACEBACK_STALL;
+        assert!(traceback_stall("r", true, &path, &mut len, &mut since).is_some());
+        // A finished or failed job is never flagged.
+        assert!(traceback_stall("r", false, &path, &mut len, &mut since).is_none());
+        // New output restarts the quiet timer and clears the warning.
+        std::fs::write(&path, format!("{crash}retrying\n")).unwrap();
+        assert!(traceback_stall("r", true, &path, &mut len, &mut since).is_none());
         let _ = std::fs::remove_file(&path);
         assert!(!log_tail_has_traceback(&path));
     }
