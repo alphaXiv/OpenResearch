@@ -1303,6 +1303,12 @@ export default function App({ runtime, projectId, pane }: { runtime: RuntimeInfo
     openRightTab(tab, "keepOpen");
   }, [openRightTab]);
 
+  const [sideComposerFocusNonce, setSideComposerFocusNonce] = useState(0);
+  const focusSideTab = useCallback((sessionId: string | null) => {
+    setSideComposerFocusNonce((nonce) => nonce + 1);
+    openSideTab(sessionId);
+  }, [openSideTab]);
+
   const forgetSideTab = useCallback(
     (tab: SideChatViewDef) => {
       if (!sideTabs.some((t) => t.sessionId === tab.sessionId)) return;
@@ -1321,7 +1327,7 @@ export default function App({ runtime, projectId, pane }: { runtime: RuntimeInfo
 
   const startSideChat = useCallback(async (parentSessionId: string, question: string) => {
     if (!question.trim()) {
-      openSideTab(null);
+      focusSideTab(null);
       return;
     }
     const scope = workspaceScope();
@@ -1335,7 +1341,7 @@ export default function App({ runtime, projectId, pane }: { runtime: RuntimeInfo
     if (!isCurrentScope(scope) || deletedSessionIds.has(session.id) || deletedSessionIds.has(parentSessionId)) return;
     setScopedQueryData(listChatSessionsQuery(session.projectId).queryKey, (current) =>
       current && [session, ...current.filter((row) => row.id !== session.id)]);
-    if (navigationRef.current.activeSessionId === parentSessionId) openSideTab(session.id);
+    if (navigationRef.current.activeSessionId === parentSessionId) focusSideTab(session.id);
     if (!question) return;
     try {
       // Seed the transcript first so the live stream has a cache to land the question in.
@@ -1344,7 +1350,7 @@ export default function App({ runtime, projectId, pane }: { runtime: RuntimeInfo
     } catch (error) {
       showAlert(errorText(error), "error");
     }
-  }, [openSideTab]);
+  }, [focusSideTab]);
 
   const closeSideTab = forgetSideTab;
 
@@ -1839,7 +1845,7 @@ export default function App({ runtime, projectId, pane }: { runtime: RuntimeInfo
             onExperiments={() => openExperimentsTab()}
             onSideChat={activeSessionId ? () => void startSideChat(activeSessionId, "") : undefined}
             sessions={sessionsQuery.data ?? []}
-            onSelectSideChat={openSideTab}
+            onSelectSideChat={focusSideTab}
           />
         )}
         {mainView === "chat" && panelOpen && (
@@ -2240,6 +2246,7 @@ export default function App({ runtime, projectId, pane }: { runtime: RuntimeInfo
                   <div className="flex min-h-0 flex-1">
                     <ChatPanel
                       embedded
+                      composerFocusNonce={sideComposerFocusNonce}
                       projectId={projectId}
                       projectName={activeProject?.name ?? ""}
                       railOpen={false}
