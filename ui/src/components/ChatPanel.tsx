@@ -5193,12 +5193,12 @@ export function ChatPanel({
   /** Compaction runs in the backend; its progress is the transcript row it
    * publishes over SSE, so only a failure needs a toast. */
   async function compactSession() {
+    if (!activeHarness?.supportsCompaction) return;
     const sessionId = activeId;
     if (!sessionId) {
       showAlert(m.chat_nothing_to_compact(), "info");
       return;
     }
-    if (!activeHarness?.supportsCompaction) return;
     if (busy) {
       setSettingsError(m.chat_compact_busy());
       return;

@@ -250,11 +250,12 @@ test("unsupported compaction silently skips the agent turn", async () => {
   }
   find(file);
   assert.ok(compact);
-  for (const supportsCompaction of [false, true]) {
+  for (const [supportsCompaction, activeId] of [[false, null], [false, "saved-chat"], [true, "saved-chat"]]) {
     const calls = [];
     const bindings = {
-      activeId: "saved-chat", activeHarness: { supportsCompaction }, busy: false,
-      m: { chat_compact_unsupported: () => "unsupported" },
+      activeId, activeHarness: { supportsCompaction }, busy: false,
+      m: { chat_nothing_to_compact: () => "nothing to compact" },
+      showAlert: (message) => calls.push(message),
       setSettingsError: (error) => calls.push(error),
       sessionFilter: "active", composerScopeRef: { current: { activeId: "saved-chat" } },
       compactChatSession: async (id) => { calls.push(["compact", id]); return { message: { id: "marker" } }; },
