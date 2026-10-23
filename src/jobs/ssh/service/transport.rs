@@ -327,3 +327,46 @@ pub(super) async fn connect(
     });
     Ok(session)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn dead_session_cannot_be_replaced_before_teardown_finishes() {
+        let (alive, _) = watch::channel(true);
+        let (finished_tx, finished) = watch::channel(false);
+        let (writer, _queue) = mpsc::channel(1);
+        let session = Arc::new(Session {
+            writer,
+            pending: Arc::new(Mutex::new(HashMap::new())),
+            sequence: AtomicU64::new(1),
+            alive: alive.clone(),
+            since: Instant::now(),
+            finished,
+            lanes: std::array::from_fn(|_| Semaphore::new(1)),
+        });
+        let host = super::super::Host {
+            resolved: serde_json::from_value(json!({
+                "key":"test", "key_version":1,
+                "target":crate::jobs::ssh::SshTarget::alias("test"),
+                "options":[], "socket":null,
+            }))
+            .unwrap(),
+            session: Some(session.clone()),
+        };
+        assert!(Arc::ptr_eq(
+            &host.reusable_session().await.unwrap().unwrap(),
+            &session
+        ));
+        alive.send_replace(false);
+        let mut replacement = Box::pin(host.reusable_session());
+        assert!(
+            tokio::time::timeout(Duration::from_millis(50), &mut replacement)
+                .await
+                .is_err()
+        );
+        finished_tx.send_replace(true);
+        assert!(replacement.await.unwrap().is_none());
+    }
+}

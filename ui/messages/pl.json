@@ -1291,6 +1291,8 @@
   "tree_archive_manage_experiment": "Zarządzaj eksperymentem {name}",
   "tree_archive_manage": "Zarządzaj",
   "tree_archive_only": "Archiwizuj ten eksperyment",
+  "tree_delete_experiment": "Usuń trwale…",
+  "tree_delete_experiment_confirm": "Trwale usunąć „{name}”?\n\nJego uruchomienia, ich logi i pliki oraz gałąź zostaną usunięte. Tej operacji nie można cofnąć.",
   "tree_archive_above": "Archiwizuj nadrzędne eksperymenty",
   "tree_archive_down": "Archiwizuj podrzędne eksperymenty",
   "tree_restore_only": "Przywróć ten eksperyment",

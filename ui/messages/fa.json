@@ -1291,6 +1291,8 @@
   "tree_archive_manage_experiment": "مدیریت {name}",
   "tree_archive_manage": "مدیریت",
   "tree_archive_only": "بایگانی این آزمایش",
+  "tree_delete_experiment": "حذف دائمی…",
+  "tree_delete_experiment_confirm": "«{name}» برای همیشه حذف شود؟\n\nاجراها، گزارش‌ها و فایل‌های آن‌ها و شاخهٔ آن حذف می‌شوند. این کار برگشت‌پذیر نیست.",
   "tree_archive_above": "بایگانی نیاکان",
   "tree_archive_down": "بایگانی نوادگان",
   "tree_restore_only": "بازیابی این آزمایش",

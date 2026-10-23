@@ -1291,6 +1291,8 @@
   "tree_archive_manage_experiment": "Gestionar {name}",
   "tree_archive_manage": "Gestionar",
   "tree_archive_only": "Archivar este experimento",
+  "tree_delete_experiment": "Eliminar permanentemente…",
+  "tree_delete_experiment_confirm": "¿Eliminar permanentemente «{name}»?\n\nSe eliminarán sus ejecuciones, sus registros y archivos, y su rama. Esta acción no se puede deshacer.",
   "tree_archive_above": "Archivar antepasados",
   "tree_archive_down": "Archivar descendientes",
   "tree_restore_only": "Restaurar este experimento",

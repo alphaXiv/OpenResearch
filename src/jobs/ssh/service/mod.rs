@@ -46,6 +46,20 @@ struct Host {
     resolved: state::Resolved,
     session: Option<Arc<transport::Session>>,
 }
+impl Host {
+    async fn reusable_session(&self) -> Result<Option<Arc<transport::Session>>> {
+        let Some(session) = &self.session else {
+            return Ok(None);
+        };
+        if session.alive() {
+            return Ok(Some(session.clone()));
+        }
+        // Teardown persists backoff before it signals completion.
+        session.stop_and_wait().await?;
+        Ok(None)
+    }
+}
+
 #[derive(Default)]
 struct SlurmCache {
     sampled: Option<std::time::Instant>,
@@ -359,8 +373,8 @@ impl Broker {
     ) -> Result<Arc<transport::Session>> {
         let host = self.host(target).await?;
         let mut host = host.lock().await;
-        if let Some(session) = host.session.as_ref().filter(|session| session.alive()) {
-            return Ok(session.clone());
+        if let Some(session) = host.reusable_session().await? {
+            return Ok(session);
         }
         let next = state::retry_at(&host.resolved.key)?;
         if !explicit && next > crate::store::now_ms() {

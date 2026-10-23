@@ -1291,6 +1291,8 @@
   "tree_archive_manage_experiment": "{name} 관리",
   "tree_archive_manage": "관리",
   "tree_archive_only": "이 실험 보관",
+  "tree_delete_experiment": "영구 삭제…",
+  "tree_delete_experiment_confirm": "“{name}”을(를) 영구 삭제할까요?\n\n실행, 해당 로그와 파일, 브랜치가 삭제됩니다. 이 작업은 되돌릴 수 없습니다.",
   "tree_archive_above": "상위 실험 보관",
   "tree_archive_down": "하위 실험 보관",
   "tree_restore_only": "이 실험 복원",

@@ -61,6 +61,9 @@ pub struct SlurmSettings {
     /// Absolute shared-filesystem root for runs and the source cache; `None` is `~/.orx`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub remote_root: Option<String>,
+    /// Keep every finished run's remote dir, not just each project's newest few.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub keep_remote_runs: bool,
 }
 
 fn settings_path() -> std::path::PathBuf {
@@ -392,12 +395,9 @@ fn map_inspect_token(out: &str) -> JobState {
         "RUNNING" | "COMPLETING" | "SUSPENDED" | "STAGE_OUT" | "SIGNALING" => {
             state("RUNNING", None)
         }
-        // Terminal per the scheduler but no exit_code file yet (NFS lag):
-        // job.sbatch exits with the payload's code, so sacct's verdict mirrors
-        // the payload — trust it. From squeue it's transient; keep polling.
-        "COMPLETED" if source == "sacct" => state("COMPLETED", None),
-        "COMPLETED" => state("RUNNING", None),
-        // Also transient from squeue: default JobRequeue=1 (and
+        // The batch script exits with the payload code, so either scheduler verdict is authoritative.
+        "COMPLETED" => state("COMPLETED", None),
+        // Transient from squeue: default JobRequeue=1 (and
         // PreemptMode=REQUEUE) re-queues these under the same job id — a poll
         // landing in the window must not finalize a run that's about to
         // re-run. If the job is NOT requeued it leaves the queue and the
@@ -739,9 +739,8 @@ mod tests {
         assert_eq!(map_inspect_token("SQ PENDING").stage, "SCHEDULING");
         assert_eq!(map_inspect_token("SQ RUNNING").stage, "RUNNING");
         assert_eq!(map_inspect_token("SQ COMPLETING").stage, "RUNNING");
-        // squeue COMPLETED without exit_code: transient, keep polling.
-        assert_eq!(map_inspect_token("SQ COMPLETED").stage, "RUNNING");
-        // sacct COMPLETED means the script (= payload) exited 0.
+        // Both scheduler sources confirm the script (= payload) exited successfully.
+        assert_eq!(map_inspect_token("SQ COMPLETED").stage, "COMPLETED");
         assert_eq!(map_inspect_token("SA COMPLETED").stage, "COMPLETED");
         assert_eq!(map_inspect_token("SA CANCELLED by 1234").stage, "CANCELED");
         // Fixed-width sacct truncates with a trailing '+'; -P avoids it, but

@@ -1291,6 +1291,8 @@
   "tree_archive_manage_experiment": "管理 {name}",
   "tree_archive_manage": "管理",
   "tree_archive_only": "归档此实验",
+  "tree_delete_experiment": "永久删除…",
+  "tree_delete_experiment_confirm": "永久删除“{name}”？\n\n其运行记录、日志和文件以及分支都将被删除。此操作无法撤销。",
   "tree_archive_above": "归档祖先节点",
   "tree_archive_down": "归档后代节点",
   "tree_restore_only": "恢复此实验",

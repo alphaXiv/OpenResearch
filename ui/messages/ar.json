@@ -1291,6 +1291,8 @@
   "tree_archive_manage_experiment": "إدارة {name}",
   "tree_archive_manage": "إدارة",
   "tree_archive_only": "أرشفة هذه التجربة",
+  "tree_delete_experiment": "حذف نهائي…",
+  "tree_delete_experiment_confirm": "هل تريد حذف «{name}» نهائيًا؟\n\nستُحذف عمليات تشغيلها وسجلاتها وملفاتها وفرعها. لا يمكن التراجع عن ذلك.",
   "tree_archive_above": "أرشفة الأسلاف",
   "tree_archive_down": "أرشفة الفروع التابعة",
   "tree_restore_only": "استعادة هذه التجربة",

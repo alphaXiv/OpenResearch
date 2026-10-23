@@ -1949,6 +1949,24 @@ pub fn publication_sync_status(
     "synced"
 }
 
+/// Delete a local branch and return its last commit; `Ok(None)` when it or the repo is gone.
+/// Git refuses while any worktree has the branch checked out.
+pub fn delete_branch(repo_path: &Path, branch: &str) -> Result<Option<String>> {
+    if !repo_path.exists() {
+        return Ok(None);
+    }
+    let reference = format!("refs/heads/{branch}");
+    let sha = git(
+        Some(repo_path),
+        &["for-each-ref", "--format=%(objectname)", &reference],
+    )?;
+    if sha.is_empty() {
+        return Ok(None);
+    }
+    git(Some(repo_path), &["branch", "-D", branch])?;
+    Ok(Some(sha))
+}
+
 /// Create `new_branch` from `parent_branch`'s local tip.
 pub fn create_experiment_branch(
     repo_path: &Path,

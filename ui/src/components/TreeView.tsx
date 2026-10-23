@@ -72,6 +72,7 @@ type ExpNodeData = {
     intent: TabOpenIntent,
   ) => void;
   onArchive: (id: string, direction: "ancestors" | "descendants" | "only", archived: boolean) => void;
+  onDelete: (id: string) => void;
   actions: ArchiveActions;
 };
 type ExpFlowNode = Node<ExpNodeData, "exp">;
@@ -222,7 +223,7 @@ function runSquareClass(status: string): string {
 
 const ExpNode = memo(function ExpNode({ data }: NodeProps<ExpFlowNode>) {
   useLocale();
-  const { exp, latestRun, runs, isBaseline, parentSlug, githubOwner, githubRepo, onOpenView, onOpenCode, onArchive, actions } = data;
+  const { exp, latestRun, runs, isBaseline, parentSlug, githubOwner, githubRepo, onOpenView, onOpenCode, onArchive, onDelete, actions } = data;
   const status = latestRun ? runDisplayStatus(latestRun) : undefined;
   const live = status === "running" || status === "starting" || status === "cancelling";
   const kind = isBaseline ? m.tree_baseline() : live ? m.tree_running() : m.tree_experiment();
@@ -330,7 +331,7 @@ const ExpNode = memo(function ExpNode({ data }: NodeProps<ExpFlowNode>) {
         >
           <GitHubMark size={13} />
         </a>}
-        <ArchiveMenu id={exp.id} name={exp.slug} actions={actions} onArchive={onArchive} compact />
+        <ArchiveMenu id={exp.id} name={exp.slug} actions={actions} onArchive={onArchive} onDelete={onDelete} compact />
       </div>
       <Handle type="source" position={Position.Bottom} />
       {/* Node and card share one leave handler — React's enter/leave pairing
@@ -451,6 +452,7 @@ export function TreeView({
   onOpenView,
   onOpenCode,
   onArchive,
+  onDelete,
   agentSessionId,
   onShowProjectScope,
   onRestoreRegion,
@@ -473,6 +475,7 @@ export function TreeView({
     intent: TabOpenIntent,
   ) => void;
   onArchive: (id: string, direction: "ancestors" | "descendants" | "only", archived: boolean) => void;
+  onDelete: (id: string) => void;
   /** Current task scope: show only this chat session's experiments, eliding the rest.
    * Null = Entire project scope (the whole forest). */
   agentSessionId: string | null;
@@ -521,6 +524,7 @@ export function TreeView({
             onOpenView,
             onOpenCode,
             onArchive,
+            onDelete,
             actions: archiveActions.get(node.exp.id)!,
           },
         });
@@ -573,6 +577,7 @@ export function TreeView({
     onOpenView,
     onOpenCode,
     onArchive,
+    onDelete,
     project.githubOwner,
     project.githubRepo,
     project.githubEnabled,
