@@ -1094,6 +1094,7 @@
   "resume_command_description": "Reopen a previous chat",
   "model_command_description": "Choose the model for this chat",
   "compact_command_description": "Shorten this chat's context",
+  "chat_compact_unsupported": "This agent does not support compaction.",
   "chat_nothing_to_compact": "There is nothing to compact yet",
   "chat_compact_busy": "Wait for the turn to finish before compacting.",
   "chat_compact_failed": "Compacting failed: {error}",

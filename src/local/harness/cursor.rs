@@ -156,6 +156,10 @@ impl Harness for Cursor {
         true
     }
 
+    fn supports_compaction(&self) -> bool {
+        true
+    }
+
     async fn detect(&self) -> Option<HarnessInfo> {
         self.detect_at(false).await
     }

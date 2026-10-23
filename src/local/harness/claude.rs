@@ -751,25 +751,49 @@ impl Harness for ClaudeCode {
         true
     }
 
-    /// Claude compacts in place through its own `/compact`, keeping the session
-    /// id. Without a live child there is nothing to compact against, so the
-    /// shared fallback runs instead.
+    fn supports_compaction(&self) -> bool {
+        true
+    }
+
     async fn compact(&self, ctx: &CompactCtx) -> Result<CompactOutcome> {
-        if ctx
-            .host
+        let Some(native_id) = ctx.native_session_id.clone() else {
+            return Ok(CompactOutcome::Fallback);
+        };
+        let lookup_id = native_id.clone();
+        let native_session =
+            tokio::task::spawn_blocking(move || native_store::claude_session(&lookup_id))
+                .await
+                .map_err(|error| anyhow!("Claude session lookup failed: {error}"))??
+                .ok_or_else(|| {
+                    anyhow!("Claude Code's saved conversation is unavailable for compaction")
+                })?;
+        let project = ctx.project.clone();
+        let session_id = ctx.session_id.clone();
+        let skills_dir = self.session_skills_dir();
+        let (repo, playbook) =
+            tokio::task::spawn_blocking(move || ensure_playbook(&project, &session_id, skills_dir))
+                .await
+                .map_err(|error| anyhow!("playbook task failed: {error}"))??;
+        let spec = SpawnSpec {
+            chat: ctx.host.clone(),
+            session_id: ctx.session_id.clone(),
+            repo,
+            playbook,
+            resume: Some(native_id),
+            config: SpawnConfig {
+                permission_mode: ctx.permission_mode,
+                effort: claude_effort(ctx.reasoning_level.as_deref()).map(str::to_string),
+                model: ctx.model.clone(),
+                native_store: native_session.store,
+                bridge_active: uses_permission_bridge(ctx.permission_mode)
+                    && ctx.host.up_port().is_some(),
+            },
+        };
+        ctx.host
             .claude
-            .compact_session(&ctx.session_id, CLAUDE_COMPACT_TIMEOUT)
-            .await?
-        {
-            return Ok(CompactOutcome::Native);
-        }
-        if ctx.native_session_id.is_some() {
-            // The session is still resumable; summarizing would throw it away.
-            return Err(anyhow!(
-                "Claude Code is not running for this chat — send a message first, then compact"
-            ));
-        }
-        Ok(CompactOutcome::Fallback)
+            .compact_session(spec, CLAUDE_COMPACT_TIMEOUT)
+            .await?;
+        Ok(CompactOutcome::Native)
     }
 
     /// The resident child holds stdin open, so a second stream-json user
@@ -1349,7 +1373,7 @@ fn replays_user_message(event: &Value, text: &str) -> bool {
 /// including a stale `result` that would end the turn instantly. The echo
 /// itself is consumed (returns `false`); everything after it belongs to the
 /// turn.
-fn belongs_to_current_turn(event: &Value, text: &str, saw_user_echo: &mut bool) -> bool {
+pub(crate) fn belongs_to_current_turn(event: &Value, text: &str, saw_user_echo: &mut bool) -> bool {
     if *saw_user_echo {
         return true;
     }

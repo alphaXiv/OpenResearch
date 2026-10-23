@@ -1088,6 +1088,7 @@
   "resume_command_description": "بازکردن دوبارهٔ گفت‌وگوی قبلی",
   "model_command_description": "انتخاب مدل این گفت‌وگو",
   "compact_command_description": "کوتاه‌کردن زمینهٔ این گفت‌وگو",
+  "chat_compact_unsupported": "این عامل از فشرده‌سازی زمینه پشتیبانی نمی‌کند.",
   "chat_nothing_to_compact": "هنوز چیزی برای فشرده‌سازی وجود ندارد",
   "chat_compact_busy": "پیش از فشرده‌سازی، منتظر پایان نوبت بمانید.",
   "chat_compact_failed": "فشرده‌سازی ناموفق بود: {error}",

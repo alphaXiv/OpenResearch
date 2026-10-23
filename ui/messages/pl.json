@@ -1094,6 +1094,7 @@
   "resume_command_description": "Wznów poprzedni czat",
   "model_command_description": "Wybierz model dla tego czatu",
   "compact_command_description": "Skróć kontekst tego czatu",
+  "chat_compact_unsupported": "Ten agent nie obsługuje kompresji kontekstu.",
   "chat_nothing_to_compact": "Nie ma jeszcze czego skracać",
   "chat_compact_busy": "Poczekaj na zakończenie odpowiedzi przed skróceniem kontekstu.",
   "chat_compact_failed": "Nie udało się skrócić kontekstu: {error}",

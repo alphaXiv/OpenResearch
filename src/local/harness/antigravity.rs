@@ -25,7 +25,10 @@ use super::detect::{resolve_symlinks, HarnessAuthState, HarnessInfo, ModelInfo};
 use super::options::{
     HarnessOptions, OptionChoice, PermissionMode, PlanActivation, REASONING_DEFAULT_ID,
 };
-use super::{Harness, ResumeAction, TurnFailure, TurnOutcome, TurnResult, TURN_WATCHDOG};
+use super::{
+    CompactCtx, CompactOutcome, Harness, ResumeAction, TurnFailure, TurnOutcome, TurnResult,
+    TURN_WATCHDOG,
+};
 use crate::error::{anyhow, Result};
 use crate::local::chat::{
     find_part_mut, harness_log, prepare_env, set_chat_session_env, DeliveryState, PromptAnswer,
@@ -37,6 +40,7 @@ use crate::local::shell_env::{find_in_dir, find_on_path};
 const AGY_REINSTALL: &str =
     "Reinstall Antigravity CLI via curl -fsSL https://antigravity.google/cli/install.sh | bash";
 const MODELS_TIMEOUT: Duration = Duration::from_secs(15);
+const COMPACT_TIMEOUT: Duration = Duration::from_secs(5 * 60);
 
 pub struct Antigravity;
 
@@ -116,6 +120,10 @@ impl Harness for Antigravity {
         true
     }
 
+    fn supports_compaction(&self) -> bool {
+        true
+    }
+
     async fn detect(&self) -> Option<HarnessInfo> {
         self.detect_at(false).await
     }
@@ -129,6 +137,49 @@ impl Harness for Antigravity {
             .await
             .map(|()| TurnOutcome::Completed)
             .map_err(|error| TurnFailure::adapter(error, ctx.delivery_state()))
+    }
+
+    async fn compact(&self, ctx: &CompactCtx) -> Result<CompactOutcome> {
+        let native_id = ctx
+            .native_session_id
+            .as_deref()
+            .ok_or_else(|| anyhow!("This Antigravity chat has no saved conversation to compact"))?;
+        let bin = find_agy().ok_or_else(|| {
+            anyhow!("agy not found on PATH — install Antigravity CLI and sign in first")
+        })?;
+        let project = ctx.project.clone();
+        let session_id = ctx.session_id.clone();
+        let (repo, _) = tokio::task::spawn_blocking(move || {
+            ensure_playbook(&project, &session_id, Antigravity.session_skills_dir())
+        })
+        .await??;
+        let mut cmd = Command::new(bin);
+        cmd.args([
+            "--conversation",
+            native_id,
+            "--print",
+            "/compact",
+            "--output-format",
+            "stream-json",
+            "--print-timeout",
+            "5m",
+        ]);
+        if let Some(model) = ctx.model.as_deref().filter(|model| !model.is_empty()) {
+            cmd.args(["--model", model]);
+        }
+        cmd.current_dir(&repo).arg("--add-dir").arg(&repo);
+        prepare_env(&mut cmd);
+        cmd.env("NO_COLOR", "1");
+        set_chat_session_env(&mut cmd, &ctx.session_id, "antigravity", ctx.host.up_port());
+        cmd.env("ORX_SESSION_ID", &ctx.session_id);
+        let log_name = format!("antigravity-compact-{}", uuid::Uuid::new_v4());
+        cmd.stderr(Stdio::from(harness_log(&log_name)?));
+        let log_path = crate::store::data_dir().join(format!("agent-{log_name}.log"));
+        compact_native(cmd, COMPACT_TIMEOUT)
+            .await
+            .map_err(|error| anyhow!("{error}; see {}", log_path.display()))?;
+        let _ = std::fs::remove_file(log_path);
+        Ok(CompactOutcome::Native)
     }
 
     fn options(&self) -> HarnessOptions {
@@ -468,6 +519,46 @@ async fn run_turn(ctx: &mut TurnCtx) -> Result<()> {
     Ok(())
 }
 
+async fn compact_native(mut cmd: Command, timeout: Duration) -> Result<()> {
+    cmd.stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .kill_on_drop(true);
+    let mut child = cmd.spawn()?;
+    let mut cancellation = TurnProcesses(child.id());
+    let stdout = child.stdout.take().ok_or_else(|| anyhow!("no stdout"))?;
+    tokio::time::timeout(timeout, async {
+        let mut lines = BufReader::new(stdout).lines();
+        let mut saw_result = false;
+        while let Some(line) = lines.next_line().await? {
+            let Ok(event) = serde_json::from_str::<Value>(&line) else {
+                continue;
+            };
+            if event.get("event").and_then(Value::as_str) == Some("result") {
+                if let Some((_, error)) = result_failure(&event["result"]) {
+                    return Err(anyhow!("Antigravity compaction failed: {error}"));
+                }
+                saw_result = true;
+            }
+        }
+        let status = child.wait().await?;
+        cancellation.0 = None;
+        if !status.success() {
+            return Err(anyhow!("Antigravity compaction exited with {status}"));
+        }
+        if !saw_result {
+            return Err(anyhow!("Antigravity compaction ended without a result"));
+        }
+        Ok(())
+    })
+    .await
+    .map_err(|_| {
+        anyhow!(
+            "Antigravity did not finish compacting within {}s",
+            timeout.as_secs()
+        )
+    })?
+}
+
 struct TurnProcesses(Option<u32>);
 
 impl Drop for TurnProcesses {
@@ -684,6 +775,19 @@ fn denied_actions_error(result: &Value) -> Option<String> {
     })
 }
 
+fn result_failure(result: &Value) -> Option<(&'static str, String)> {
+    let status = result
+        .get("status")
+        .and_then(Value::as_str)
+        .unwrap_or("INVALID");
+    if status != "SUCCESS" {
+        let error = result.get("error").and_then(error_text).unwrap_or(status);
+        Some(("antigravity_terminal", format!("Antigravity: {error}")))
+    } else {
+        denied_actions_error(result).map(|error| ("antigravity_permission_denied", error))
+    }
+}
+
 #[derive(Default)]
 struct TurnState {
     conversation_id: Option<String>,
@@ -879,20 +983,13 @@ fn apply_event(ctx: &mut TurnCtx, state: &mut TurnState, event: &Value) -> bool 
             {
                 state.conversation_id = Some(cid.to_string());
             }
-            let status = res
-                .get("status")
-                .and_then(Value::as_str)
-                .unwrap_or("INVALID");
-            if status != "SUCCESS" {
-                state.turn_errored = true;
-                let error = res.get("error").and_then(error_text).unwrap_or(status);
-                ctx.mark_terminal_failure("antigravity_terminal", format!("Antigravity: {error}"));
-            } else if let Some(error) = denied_actions_error(res) {
+            if res.get("status").and_then(Value::as_str) == Some("SUCCESS") {
                 ctx.mark_delivery(DeliveryState::Accepted);
+            }
+            if let Some((kind, error)) = result_failure(res) {
                 state.turn_errored = true;
-                ctx.mark_terminal_failure("antigravity_permission_denied", error);
+                ctx.mark_terminal_failure(kind, error);
             } else {
-                ctx.mark_delivery(DeliveryState::Accepted);
                 ctx.mark_final_text_tail();
             }
             true
@@ -938,6 +1035,97 @@ mod tests {
 
     use super::*;
     use serde_json::json;
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn compaction_requires_a_successful_result_and_exit() {
+        for (output, code, expected) in [
+            (
+                json!({"event":"result","result":{"status":"SUCCESS"}}),
+                "0",
+                None,
+            ),
+            (
+                json!({"event":"result","result":{"status":"ERROR","error":"quota exhausted"}}),
+                "0",
+                Some("quota exhausted"),
+            ),
+            (
+                json!({"event":"result","result":{"status":"SUCCESS"}}),
+                "7",
+                Some("exited with"),
+            ),
+            (
+                json!({"event":"init","conversation_id":"saved"}),
+                "0",
+                Some("without a result"),
+            ),
+            (json!({"event":"result","result":{}}), "0", Some("INVALID")),
+        ] {
+            let mut cmd = Command::new("sh");
+            cmd.args([
+                "-c",
+                "printf '%s\\n' \"$ORX_TEST_EVENT\"; exit \"$ORX_TEST_EXIT\"",
+            ])
+            .env("ORX_TEST_EVENT", output.to_string())
+            .env("ORX_TEST_EXIT", code);
+            let result = compact_native(cmd, Duration::from_secs(5)).await;
+            match expected {
+                None => result.unwrap(),
+                Some(message) => assert!(result.unwrap_err().to_string().contains(message)),
+            }
+        }
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn compaction_timeout_and_cancellation_stop_the_child() {
+        for cancel in [false, true] {
+            let dir = crate::local::git::TemporaryDirectory::new("orx-agy-compact-stop").unwrap();
+            let pid_file = dir.path().join("pid");
+            let mut cmd = Command::new("sh");
+            cmd.args(["-c", "echo $$ > \"$ORX_TEST_PID\"; sleep 60"])
+                .env("ORX_TEST_PID", &pid_file);
+            let task = tokio::spawn(compact_native(
+                cmd,
+                if cancel {
+                    Duration::from_secs(60)
+                } else {
+                    Duration::from_millis(200)
+                },
+            ));
+            let pid: libc::pid_t = tokio::time::timeout(Duration::from_secs(5), async {
+                loop {
+                    if let Ok(text) = std::fs::read_to_string(&pid_file) {
+                        if let Ok(pid) = text.trim().parse() {
+                            break pid;
+                        }
+                    }
+                    tokio::time::sleep(Duration::from_millis(10)).await;
+                }
+            })
+            .await
+            .unwrap();
+            if cancel {
+                task.abort();
+                assert!(task.await.unwrap_err().is_cancelled());
+            } else {
+                assert!(task
+                    .await
+                    .unwrap()
+                    .unwrap_err()
+                    .to_string()
+                    .contains("did not finish compacting"));
+            }
+            tokio::time::timeout(Duration::from_secs(5), async {
+                while unsafe { libc::kill(pid, 0) } == 0 {
+                    tokio::time::sleep(Duration::from_millis(10)).await;
+                }
+            })
+            .await
+            .expect("compaction child survived cancellation");
+        }
+    }
 
     fn fold(events: &[Value]) -> (TurnCtx, TurnState) {
         let mut ctx = TurnCtx::test_stub();
