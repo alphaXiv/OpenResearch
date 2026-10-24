@@ -1,7 +1,7 @@
 import { ComposerProjectPicker } from "./ComposerProjectPicker";
 import { ProjectInfoCard } from "./ProjectInfoCard";
 import { fitSidebarRows, sidebarRowHeight, type SidebarRow } from "../sidebarLayout";
-import { useVirtualizer, defaultRangeExtractor, type Range as VirtualRange } from "@tanstack/react-virtual";
+import { useVirtualizer, defaultRangeExtractor, measureElement as measureVirtualElement, type Range as VirtualRange } from "@tanstack/react-virtual";
 import { markLiveUpdate } from "../queries/live";
 import { removeSession as removeCachedSession } from "../queries/invalidation";
 import { nativeOptions, sessionAcpHarness } from "../acp";
@@ -3801,6 +3801,10 @@ function useTranscriptAnnouncement(messages: ChatMessage[]): TranscriptAnnouncem
   return announcement;
 }
 
+// Measured heights outlive the per-chat remount so switching back paints at the real layout.
+const transcriptRowSizes = new Map<string, { size: number; width: number }>();
+const TRANSCRIPT_ROW_SIZES_LIMIT = 5_000;
+
 const Transcript = memo(function Transcript({
   messages,
   scrollRef,
@@ -3882,15 +3886,34 @@ const Transcript = memo(function Transcript({
     });
     return [...indexes].sort((a, b) => a - b);
   }, [visibleMessages, fullHistory]);
+  // Seed via the measurement cache, not estimateSize, so remembered rows count as measured for anchoring.
+  const [initialMeasurementsCache] = useState(() => visibleMessages.flatMap((group, index) => {
+    const remembered = transcriptRowSizes.get(group[0].id);
+    if (!remembered || remembered.width !== scrollRef.current?.offsetWidth) return [];
+    const { size } = remembered;
+    return [{ key: group[0].id, index, start: 0, end: size, size, lane: 0 }];
+  }));
+  // Offscreen rows keep their old height through a resize, so each height carries its measuring width.
+  const measuredWidths = useRef(new Map<string, number>());
   const virtualizer = useVirtualizer({
     count: visibleMessages.length,
-    useFlushSync: false,
     getScrollElement: () => scrollRef.current,
     getItemKey,
     estimateSize: () => 400,
-    overscan: 1,
+    initialMeasurementsCache,
+    measureElement: (element, entry, instance) => {
+      const id = element.getAttribute("data-message-id");
+      // Entry-less calls may return the cached size unmeasured; width is read live since scrollRect lags row observers.
+      if (id && (entry || !instance.itemSizeCache.has(id))) measuredWidths.current.set(id, instance.scrollElement?.offsetWidth ?? 0);
+      return measureVirtualElement(element, entry, instance);
+    },
+    overscan: 4,
     initialRect: { width: scrollRef.current?.clientWidth ?? 0, height: scrollRef.current?.clientHeight ?? 0 },
-    initialOffset: () => Math.max(0, visibleMessages.length * 400 - (scrollRef.current?.clientHeight ?? 0)),
+    initialOffset: () => {
+      const remembered = initialMeasurementsCache.reduce((total, item) => total + item.size, 0);
+      const estimated = remembered + (visibleMessages.length - initialMeasurementsCache.length) * 400;
+      return Math.max(0, estimated - (scrollRef.current?.clientHeight ?? 0));
+    },
     anchorTo: stickToBottom.current ? "end" : "start",
     followOnAppend: true,
     scrollEndThreshold: 60,
@@ -3902,6 +3925,19 @@ const Transcript = memo(function Transcript({
     onPinToBottom();
     return () => { scrollToEndRef.current = null; };
   }, [virtualizer, scrollToEndRef, onPinToBottom]);
+  useLayoutEffect(() => () => {
+    for (const [key, size] of virtualizer.itemSizeCache) {
+      const id = String(key);
+      const width = measuredWidths.current.get(id) ?? transcriptRowSizes.get(id)?.width;
+      transcriptRowSizes.delete(id);
+      // Interacted rows remount with reset local state (e.g. collapsed work), so their height is stale.
+      if (!retainedRows.current.has(id) && width !== undefined) transcriptRowSizes.set(id, { size, width });
+    }
+    for (const id of transcriptRowSizes.keys()) {
+      if (transcriptRowSizes.size <= TRANSCRIPT_ROW_SIZES_LIMIT) break;
+      transcriptRowSizes.delete(id);
+    }
+  }, [virtualizer]);
   useEffect(() => {
     const retainSelection = () => {
       const selection = window.getSelection();
