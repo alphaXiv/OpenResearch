@@ -80,7 +80,10 @@ if (DRAG_STRIP_HEIGHT) {
   let pressed = false;
   window.addEventListener("mousedown", (event) => {
     pressed = false;
-    if (event.button !== 0 || event.defaultPrevented || event.clientY >= DRAG_STRIP_HEIGHT) return;
+    // The window controls and drag strip keep their size at every page zoom.
+    const zoom = Number(document.documentElement.style.getPropertyValue("--desktop-page-zoom")) || 1;
+    const height = DRAG_STRIP_HEIGHT / zoom;
+    if (event.button !== 0 || event.defaultPrevented || event.clientY >= height) return;
     if (event.target instanceof Element && event.target.closest(INTERACTIVE)) return;
     if (event.detail === 2) window.ipc?.postMessage("titlebar:zoom");
     else pressed = true;

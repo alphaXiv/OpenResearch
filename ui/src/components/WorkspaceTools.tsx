@@ -45,7 +45,7 @@ export function WorkspaceTools({ expanded, experiments, runs, onOpenExperiment, 
     { id: "terminal", label: m.workspace_terminal(), Icon: Terminal, onClick: onTerminal },
   ];
   return (
-    <div className="workspace-tools absolute end-3.5 top-2 mac-titlebar:top-1.5 z-30 win-titlebar:top-10" style={{ insetInlineEnd: rightOffset }}>
+    <div className="workspace-tools absolute end-3.5 top-2 mac-titlebar:top-1.5 z-30 win-titlebar:top-win-titlebar" style={{ insetInlineEnd: rightOffset }}>
       {!expanded ? (
         <nav aria-label={m.workspace_tools_heading()} className="flex items-center justify-end gap-1">
           {items.map(({ id, label, Icon, onClick }) => (
