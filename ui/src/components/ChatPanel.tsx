@@ -6452,7 +6452,7 @@ export function ChatPanel({
   }, [sidebarGrouping, railOpen, embedded, lastVisibleIndex, sidebarRows.length, flatSessions.hasNextPage, flatSessions.isFetching, flatSessions.isError, flatSessions.fetchNextPage]);
 
   const rail = (
-    <aside className="session-rail w-75 shrink-0 flex flex-col win-titlebar:pt-8 bg-background min-h-0 [&_.rail-body]:flex-1 [&_.rail-body]:min-h-0 [&_.rail-body]:pt-0 [&_.rail-body]:pb-0 [&_.rail-body]:ps-2 [&_.rail-body]:pe-1 border-e border-e-border overflow-visible">
+    <aside className="session-rail w-75 shrink-0 flex flex-col win-titlebar:pt-win-caption bg-background min-h-0 [&_.rail-body]:flex-1 [&_.rail-body]:min-h-0 [&_.rail-body]:pt-0 [&_.rail-body]:pb-0 [&_.rail-body]:ps-2 [&_.rail-body]:pe-1 border-e border-e-border overflow-visible">
       {railHeader}
       <nav className="rail-nav flex flex-col gap-0.5 p-2 shrink-0">
         <button
@@ -6634,13 +6634,13 @@ export function ChatPanel({
     </aside>
   );
 
-  const headerClass = `chat-header flex items-center gap-2 py-0 px-4 bg-background shrink-0 h-12 mac-titlebar:h-11 relative z-4 w-full max-w-readable my-0 mx-auto [&::after]:content-[''] [&::after]:absolute [&::after]:top-full [&::after]:start-0 [&::after]:end-0 [&::after]:h-6 [&::after]:bg-[linear-gradient(to_bottom,_var(--base),_transparent)] [&::after]:pointer-events-none`;
+  const headerClass = `chat-header flex items-center gap-2 py-0 px-4 bg-background shrink-0 h-12 mac-titlebar:h-titlebar relative z-4 w-full max-w-readable my-0 mx-auto [&::after]:content-[''] [&::after]:absolute [&::after]:top-full [&::after]:start-0 [&::after]:end-0 [&::after]:h-6 [&::after]:bg-[linear-gradient(to_bottom,_var(--base),_transparent)] [&::after]:pointer-events-none`;
   const railReopen = !railOpen && !embedded && (
     <IconButton
       title={m.chat_panel_show_sidebar()}
       aria-label={m.chat_panel_show_sidebar()}
       onClick={onShowRail}
-      className="mac-titlebar:ms-19"
+      className="mac-titlebar:ms-titlebar-inset"
     >
       <PanelLeft size={20} />
     </IconButton>
@@ -6650,8 +6650,8 @@ export function ChatPanel({
     return (
       <>
         {railOpen && rail}
-        <section className="chat-pane flex-1 min-w-0 flex flex-col bg-background min-h-0 win-titlebar:pt-8">
-          {!railOpen && <div className="flex h-12 mac-titlebar:h-11 shrink-0 items-center">{railReopen}</div>}
+        <section className="chat-pane flex-1 min-w-0 flex flex-col bg-background min-h-0 win-titlebar:pt-win-caption">
+          {!railOpen && <div className="flex h-12 mac-titlebar:h-titlebar shrink-0 items-center">{railReopen}</div>}
           {/* Keyed per view so no tab inherits the chat thread's or another tab's scroll offset. */}
           <div key={mainView} className="settings-view-scroll flex-1 min-h-0 overflow-y-auto [scrollbar-gutter:stable_both-edges]">
             {contentError ? <div role="alert" className="p-6 text-subtext">{contentError}<Button onClick={onRetryContent}>{m.app_retry()}</Button></div>
@@ -6665,10 +6665,10 @@ export function ChatPanel({
   return (
     <>
       {railOpen && rail}
-      <section data-side-chat={embedded || undefined} className={`chat-pane flex-1 min-w-0 flex flex-col bg-background min-h-0 ${embedded ? "" : "win-titlebar:pt-8"}`}>
+      <section data-side-chat={embedded || undefined} className={`chat-pane flex-1 min-w-0 flex flex-col bg-background min-h-0 ${embedded ? "" : "win-titlebar:pt-win-caption"}`}>
         {/* Header — session title on the left, end-pane view switchers on the
           right, fading into the chat below (sessions live in the rail). */}
-        <div className={railOpen || embedded ? "contents" : "grid shrink-0 grid-cols-[2rem_minmax(0,1fr)_2rem] mac-titlebar:grid-cols-[7.5rem_minmax(0,1fr)_7.5rem] items-center"}>
+        <div className={railOpen || embedded ? "contents" : "grid shrink-0 grid-cols-[2rem_minmax(0,1fr)_2rem] mac-titlebar:grid-cols-titlebar-chat items-center"}>
           {railReopen}
           <div className={headerClass}>
           <div className="flex min-w-0 flex-1 items-center gap-2">
@@ -7136,7 +7136,7 @@ export function ChatPanel({
                 ref={composerRef}
                 aria-describedby={demoHintVisible ? demoHintId : undefined}
                 // Native prose stays visible; the aligned mirror paints only skill tokens.
-                className="relative z-1 bg-transparent"
+                className="relative z-1 min-w-0 overflow-x-hidden bg-transparent"
                 value={draft}
                 placeholder={
                   steering && activeHarness

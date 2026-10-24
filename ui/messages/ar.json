@@ -1432,5 +1432,7 @@
   "chat_experiment_running": "التجربة قيد التشغيل",
   "chat_experiment_starting": "جارٍ بدء التجربة",
   "chat_experiment_cancelling": "جارٍ إلغاء التجربة",
-  "chat_experiments_running": "{count} تجارب قيد التشغيل"
+  "chat_experiments_running": "{count} تجارب قيد التشغيل",
+  "desktop_zoom_controls": "عناصر التحكم في التكبير",
+  "desktop_zoom_reset": "إعادة تعيين"
 }

@@ -1785,7 +1785,7 @@ export default function App({ runtime, projectId, pane }: { runtime: RuntimeInfo
       {runtime.kind === "local" && <OfflineBanner />}
       {runtime.kind === "local" && <UpdateBanner status={updateStatus} />}
       <DesktopAppBanner />
-      {workspaceError && <div role="alert" className="flex items-center gap-2 px-4 mac-titlebar:ps-20 win-titlebar:pe-36 py-2 text-subtext"><span>{workspaceError}</span><Button onClick={retryWorkspace}>{m.app_retry()}</Button></div>}
+      {workspaceError && <div role="alert" className="flex items-center gap-2 px-4 mac-titlebar:ps-titlebar-controls win-titlebar:pe-win-controls py-2 text-subtext"><span>{workspaceError}</span><Button onClick={retryWorkspace}>{m.app_retry()}</Button></div>}
       <div className={`app-body workspace-body relative flex flex-1 min-h-0 ${workspaceCardVisible ? "workspace-card-visible" : ""}`}>
         {projectId && (
           <ChatPanel
@@ -1857,7 +1857,7 @@ export default function App({ runtime, projectId, pane }: { runtime: RuntimeInfo
         )}
         {mainView === "chat" && panelOpen && (
           <aside
-            className={`right-pane relative shrink-0 min-w-0 flex flex-col win-titlebar:pt-8 bg-background [&.max]:fixed [&.max]:inset-0 mac-titlebar:[&.max]:pt-11 [&.max]:z-60 [&.max]:border-s-0 border-s border-s-border overflow-hidden ${panelMax ? "max" : ""}`}
+            className={`right-pane relative shrink-0 min-w-0 flex flex-col win-titlebar:pt-win-caption bg-background [&.max]:fixed [&.max]:inset-0 mac-titlebar:[&.max]:pt-titlebar [&.max]:z-60 [&.max]:border-s-0 border-s border-s-border overflow-hidden ${panelMax ? "max" : ""}`}
             style={panelMax ? undefined : { width: panelWidth }}
             data-onboarding="experiments"
           >
@@ -1866,7 +1866,7 @@ export default function App({ runtime, projectId, pane }: { runtime: RuntimeInfo
               title={panelMax ? m.app_drag_to_restore_panel() : m.app_drag_to_resize_panel()}
               onPointerDown={resizePanel}
             />
-            <div className="tabs flex items-end gap-0 pt-1 pe-1.5 pb-0 ps-2 h-10 mac-titlebar:h-11 border-b border-b-border bg-background shrink-0">
+            <div className="tabs flex items-end gap-0 pt-1 pe-1.5 pb-0 ps-2 h-10 mac-titlebar:h-titlebar border-b border-b-border bg-background shrink-0">
               <TabStrip activeKey={rightTabKey(rightTab)}>
                 {leadingFileTabs.map(renderFileTab)}
                 {filesTabOpen && (

@@ -85,6 +85,13 @@
   --text-menu: 0.8125rem;
   --text-menu--line-height: 1.25rem;
 
+  --spacing-win-titlebar: calc(2.5rem / min(1, var(--desktop-page-zoom, 1)));
+  --spacing-win-caption: calc(2rem / min(1, var(--desktop-page-zoom, 1)));
+  --spacing-win-controls: calc(9rem / min(1, var(--desktop-page-zoom, 1)));
+  --spacing-titlebar: calc(2.75rem / min(1, var(--desktop-page-zoom, 1)));
+  --spacing-titlebar-inset: calc(4.75rem / min(1, var(--desktop-page-zoom, 1)));
+  --spacing-titlebar-controls: calc(5rem / min(1, var(--desktop-page-zoom, 1)));
+
   --shadow-segment: 0 1px 3px rgb(0 0 0 / 14%);
   --shadow-menu: 0 12px 32px rgb(0 0 0 / 18%);
   --shadow-modal: 0 24px 60px rgb(0 0 0 / 22%);
@@ -112,6 +119,14 @@
   --radius-lg: 10px;
   --radius-xl: 12px;
   --radius-full: 999px;
+}
+
+@utility native-window-controls {
+  zoom: calc(1 / var(--desktop-page-zoom, 1));
+}
+
+@utility grid-cols-titlebar-chat {
+  grid-template-columns: calc(7.5rem / min(1, var(--desktop-page-zoom, 1))) minmax(0, 1fr) calc(7.5rem / min(1, var(--desktop-page-zoom, 1)));
 }
 
 :root {
