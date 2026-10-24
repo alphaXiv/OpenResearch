@@ -1731,6 +1731,41 @@ fn set_executable(path: PathBuf) -> Result<()> {
 mod tests {
     use super::*;
 
+    fn prepare_origin(bare: &Path) {
+        // Bundle copies keep each test's refs and objects independent without rebuilding history.
+        static BUNDLE: std::sync::OnceLock<Vec<u8>> = std::sync::OnceLock::new();
+        let bundle = BUNDLE.get_or_init(|| {
+            let root = super::super::git::TemporaryDirectory::new("orx-demo-fixture").unwrap();
+            let repo = root.path().join("repo");
+            std::fs::create_dir_all(&repo).unwrap();
+            build_worktree(&repo).unwrap();
+            ensure_follow_up_branches(&repo).unwrap();
+            let path = root.path().join("repo.bundle");
+            git(
+                &repo,
+                &["bundle", "create", &path.to_string_lossy(), "--all"],
+            )
+            .unwrap();
+            std::fs::read(path).unwrap()
+        });
+        let parent = bare.parent().unwrap();
+        std::fs::create_dir_all(parent).unwrap();
+        let path = bare.with_extension("bundle");
+        std::fs::write(&path, bundle).unwrap();
+        git(
+            parent,
+            &[
+                "clone",
+                "--bare",
+                &path.to_string_lossy(),
+                &bare.to_string_lossy(),
+            ],
+        )
+        .unwrap();
+        git(bare, &["remote", "remove", "origin"]).unwrap();
+        std::fs::remove_file(path).unwrap();
+    }
+
     #[test]
     fn transcript_variants_are_one_turn_and_use_native_tool_names() {
         for (harness, expected) in [
@@ -1833,7 +1868,9 @@ mod tests {
     fn every_demo_session_recovers_from_the_experiment_commit() {
         let root = std::env::temp_dir().join(format!("orx-demo-test-{}", uuid::Uuid::new_v4()));
         let repo = root.join("repo");
-        install_repository(&repo, &root.join("origin.git")).unwrap();
+        let bare = root.join("origin.git");
+        prepare_origin(&bare);
+        install_repository(&repo, &bare).unwrap();
         for session_id in [SESSION_ID, FIGURE_SESSION_ID, LITERATURE_SESSION_ID] {
             assert_eq!(
                 session_start_ref(&repo, OWNER, REPO, session_id),
@@ -1924,6 +1961,8 @@ mod tests {
                 prewarm_repository(&repo, &bare).unwrap();
                 assert!(!repo.exists());
                 assert!(bare.join("HEAD").is_file());
+            } else if harness.starts_with("acp:") {
+                prepare_origin(&bare);
             }
             let started = std::time::Instant::now();
             let completion = seed_at(
@@ -1971,6 +2010,7 @@ mod tests {
         let root = std::env::temp_dir().join(format!("orx-demo-test-{}", uuid::Uuid::new_v4()));
         let data = root.join("data");
         let repo = root.join("cache/repos").join(OWNER).join(REPO);
+        prepare_origin(&demo_bare_path_in(&data));
         let store = Store::open_at(data.clone()).unwrap();
         let selection = DemoSelection {
             harness: "codex".into(),
@@ -2197,6 +2237,7 @@ mod tests {
         let root = std::env::temp_dir().join(format!("orx-demo-test-{}", uuid::Uuid::new_v4()));
         let data = root.join("data");
         let repo = root.join("cache/repos").join(OWNER).join(REPO);
+        prepare_origin(&demo_bare_path_in(&data));
         let store = Store::open_at(data.clone()).unwrap();
         store
             .create_local_project(&LocalProject {
@@ -2282,6 +2323,7 @@ mod tests {
         let data = root.join("data");
         let moved = root.join("moved-data");
         let repo = root.join("cache/repos").join(OWNER).join(REPO);
+        prepare_origin(&demo_bare_path_in(&data));
         let store = Store::open_at(data.clone()).unwrap();
         seed_at(
             &store,
@@ -2315,6 +2357,7 @@ mod tests {
         let root = std::env::temp_dir().join(format!("orx-demo-test-{}", uuid::Uuid::new_v4()));
         let data = root.join("data");
         let repo = root.join("cache/repos").join(OWNER).join(REPO);
+        prepare_origin(&demo_bare_path_in(&data));
         let worktrees = data.join("worktrees").join(PROJECT_ID);
         let store = Store::open_at(data.clone()).unwrap();
         seed_at(
@@ -2385,6 +2428,7 @@ mod tests {
         let tmp = super::super::git::TemporaryDirectory::new("orx-demo-adopt").unwrap();
         let data = tmp.path().join("data");
         let repo = data.join("repos").join(OWNER).join(REPO);
+        prepare_origin(&demo_bare_path_in(&data));
         let selection = DemoSelection {
             harness: "codex".into(),
             model: None,
