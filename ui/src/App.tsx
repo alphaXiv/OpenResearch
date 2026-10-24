@@ -38,6 +38,7 @@ import {
   type ExpViewDef,
   sameExpTab,
   type FileViewDef,
+  artifactFolder,
   sameFileTab,
   fileTabKey,
   fileScrollKey,
@@ -437,6 +438,9 @@ export default function App({ runtime, projectId, pane }: { runtime: RuntimeInfo
   const [experimentsTabOpen, setExperimentsTabOpen] = useState(false);
   const [filesTabOpen, setFilesTabOpen] = useState(false);
   const [artifactsTabOpen, setArtifactsTabOpen] = useState(false);
+  // Folder a chat citation asked the Artifacts explorer to reveal.
+  const [artifactReveal, setArtifactReveal] = useState<string | null>(null);
+  const clearArtifactReveal = useCallback(() => setArtifactReveal(null), []);
   const [terminalTabOpen, setTerminalTabOpen] = useState(false);
   // Which checkout has a live shell; a restored-but-unselected tab spawns nothing until selected.
   const [terminalStartedFor, setTerminalStartedFor] = useState<string | null>(null);
@@ -1202,9 +1206,14 @@ export default function App({ runtime, projectId, pane }: { runtime: RuntimeInfo
       intent: TabOpenIntent = "preview",
     ) => {
       const tab = resolveFileTab(path, sessionId, ref, line, exp);
-      if (tab) openResolvedFileTab(tab, intent);
+      if (!tab) return;
+      const folder = artifactFolder(tab);
+      if (folder) {
+        setArtifactReveal(folder);
+        openArtifactsTab();
+      } else openResolvedFileTab(tab, intent);
     },
-    [openResolvedFileTab, resolveFileTab],
+    [openArtifactsTab, openResolvedFileTab, resolveFileTab],
   );
 
   // Following a chip or link out of a preview keeps the source open before the
@@ -1941,6 +1950,8 @@ export default function App({ runtime, projectId, pane }: { runtime: RuntimeInfo
                     key={activeProject.id}
                     project={activeProject}
                     artifacts={artifacts}
+                    reveal={artifactReveal}
+                    onRevealed={clearArtifactReveal}
                     onOpenFile={openArtifactFileTab}
                     canRenameFile={(path) => !fileBuffersRef.current.get(
                       fileScrollKey(activeProject.id, activeSessionId, { path, source: "artifacts" }),

@@ -134,6 +134,10 @@ export const sameFileTab = (a: FileViewDef, b: FileViewDef) =>
   a.sessionId === b.sessionId &&
   a.ref === b.ref;
 
+/** The folder an artifact citation names (`artifacts/dir/`), else null; file tabs can't show folders. */
+export const artifactFolder = (tab: FileViewDef): string | null =>
+  tab.source === "artifacts" && tab.path.endsWith("/") ? tab.path.replace(/\/+$/, "") : null;
+
 export const fileTabKey = (t: FileViewDef) =>
   `${t.source ?? "repo"}:${t.sessionId ?? ""}:${t.ref ?? ""}:${t.path}`;
 
