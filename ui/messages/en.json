@@ -1309,14 +1309,5 @@
   "notifications_prompt_waiting": "The agent is waiting for your response",
   "notifications_run_done": "Run finished",
   "notifications_run_failed": "Run failed",
-  "notifications_turn_done": "The agent finished responding",
-  "settings_notifications_blocked": "Notifications are blocked for this site. Allow them in your browser's site settings.",
-  "settings_notifications_description": "Notify across all projects, including background tabs and windows. Keep at least one dashboard tab open. Settings are saved in this browser.",
-  "settings_notifications_heading": "Notifications",
-  "settings_notifications_prompts": "Agent is waiting for your response",
-  "settings_notifications_runs": "Run finishes or fails",
-  "settings_notifications_turns": "Agent finishes responding",
-  "settings_notifications_unsupported": "Browser notifications require HTTPS or localhost and a supported desktop browser.",
-  "settings_notifications_test": "Send test notification",
-  "settings_notifications_test_body": "Browser notifications are enabled."
+  "notifications_turn_done": "The agent finished responding"
 }

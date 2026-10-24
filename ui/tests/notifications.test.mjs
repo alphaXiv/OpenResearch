@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { newPendingPrompts, runJustFinished } from "../src/notifications.ts";
 import { ChatCompletionTracker } from "../src/chatCompletion.ts";
-import { notify, setNotificationsEnabled } from "../src/notifications.ts";
+import { notify, requestNotificationPermissionOnce } from "../src/notifications.ts";
 
 const run = (id, status, cancelRequested = false) => ({ id, status, cancelRequested });
 const prompt = (id, resolved = false) => ({ id, type: "prompt", prompt: { kind: "permission", resolved } });
@@ -82,7 +82,6 @@ function browser(t) {
   };
   for (const [key, value] of Object.entries(globals)) Object.defineProperty(globalThis, key, { configurable: true, writable: true, value });
   t.after(() => { for (const [key, descriptor] of old) { if (descriptor) Object.defineProperty(globalThis, key, descriptor); else delete globalThis[key]; } });
-  setNotificationsEnabled("turns", true);
   return { shown, values, state };
 }
 
@@ -125,6 +124,41 @@ test("a delivery waiting for another tab's lock rechecks its workspace", async t
   valid = false; release();
   assert.equal(await result, false);
   assert.equal(shown.length, 0);
+});
+
+test("permission is requested once from the next trusted gesture", async t => {
+  const old = new Map(["window", "Notification", "localStorage"].map(key => [key, Object.getOwnPropertyDescriptor(globalThis, key)]));
+  const values = new Map();
+  const listeners = new Map();
+  let requests = 0;
+  class Notification {
+    static permission = "default";
+    static requestPermission() { requests += 1; this.permission = "granted"; return Promise.resolve(this.permission); }
+  }
+  const target = new EventTarget();
+  const fakeWindow = Object.assign(target, {
+    isSecureContext: true,
+    addEventListener(type, fn, capture) { listeners.set(type, fn); EventTarget.prototype.addEventListener.call(this, type, fn, capture); },
+    removeEventListener(type, fn, capture) { listeners.delete(type); EventTarget.prototype.removeEventListener.call(this, type, fn, capture); },
+  });
+  const globals = {
+    window: fakeWindow,
+    Notification,
+    localStorage: { getItem: key => values.get(key) ?? null, setItem: (key, value) => values.set(key, value) },
+  };
+  for (const [key, value] of Object.entries(globals)) Object.defineProperty(globalThis, key, { configurable: true, writable: true, value });
+  t.after(() => { for (const [key, descriptor] of old) { if (descriptor) Object.defineProperty(globalThis, key, descriptor); else delete globalThis[key]; } });
+  requestNotificationPermissionOnce();
+  assert.equal(requests, 0, "loading does not prompt");
+  listeners.get("pointerdown")({ isTrusted: false });
+  assert.equal(requests, 0, "a synthetic event does not prompt");
+  listeners.get("pointerdown")({ isTrusted: true });
+  await Promise.resolve();
+  assert.equal(requests, 1);
+  assert.equal(values.get("orx:notification-permission-asked"), "1");
+  assert.equal(listeners.has("keydown"), false, "one gesture retires both listeners");
+  requestNotificationPermissionOnce();
+  assert.equal(requests, 1, "a second call does not ask again");
 });
 
 test("an already delivered notification can be clicked after a follow-up starts", async t => {

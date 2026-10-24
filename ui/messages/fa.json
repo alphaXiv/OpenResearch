@@ -1309,14 +1309,5 @@
   "notifications_prompt_waiting": "عامل منتظر پاسخ شماست",
   "notifications_run_done": "اجرا تمام شد",
   "notifications_run_failed": "اجرا ناموفق بود",
-  "notifications_turn_done": "عامل پاسخ خود را تمام کرد",
-  "settings_notifications_blocked": "اعلان‌ها برای این سایت مسدود شده‌اند. آن‌ها را در تنظیمات سایت مرورگر خود مجاز کنید.",
-  "settings_notifications_description": "اعلان‌های همهٔ پروژه‌ها را حتی در زبانه‌ها و پنجره‌های پس‌زمینه دریافت کنید. دست‌کم یک زبانهٔ داشبورد را باز نگه دارید. تنظیمات در این مرورگر ذخیره می‌شوند.",
-  "settings_notifications_heading": "اعلان‌ها",
-  "settings_notifications_prompts": "عامل منتظر پاسخ شماست",
-  "settings_notifications_runs": "اجرا تمام می‌شود یا ناموفق است",
-  "settings_notifications_turns": "عامل پاسخ خود را تمام می‌کند",
-  "settings_notifications_unsupported": "اعلان‌ها به HTTPS یا localhost و یک مرورگر دسکتاپ سازگار نیاز دارند.",
-  "settings_notifications_test": "ارسال اعلان آزمایشی",
-  "settings_notifications_test_body": "اعلان‌های مرورگر فعال هستند."
+  "notifications_turn_done": "عامل پاسخ خود را تمام کرد"
 }

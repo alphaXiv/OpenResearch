@@ -1309,14 +1309,5 @@
   "notifications_prompt_waiting": "エージェントが応答を待っています",
   "notifications_run_done": "実行が完了しました",
   "notifications_run_failed": "実行に失敗しました",
-  "notifications_turn_done": "エージェントの応答が完了しました",
-  "settings_notifications_blocked": "このサイトの通知はブロックされています。ブラウザーのサイト設定で許可してください。",
-  "settings_notifications_heading": "通知",
-  "settings_notifications_prompts": "エージェントが応答を待っているとき",
-  "settings_notifications_runs": "実行が完了または失敗したとき",
-  "settings_notifications_turns": "エージェントの応答が完了したとき",
-  "settings_notifications_description": "すべてのプロジェクトについて、バックグラウンドのタブやウィンドウでも通知します。ダッシュボードのタブを少なくとも1つ開いておいてください。設定はこのブラウザーに保存されます。",
-  "settings_notifications_unsupported": "通知には HTTPS または localhost と、通知に対応したデスクトップブラウザーが必要です。",
-  "settings_notifications_test": "テスト通知を送信",
-  "settings_notifications_test_body": "ブラウザー通知が有効になっています。"
+  "notifications_turn_done": "エージェントの応答が完了しました"
 }

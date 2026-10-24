@@ -30,7 +30,7 @@ function setup(t, initial, { initialRead } = {}) {
     "./api": api,
     "./events": { onChatEvent: fn => { listener = fn; return () => { listener = undefined; }; }, useOrxEvents: handlers => { runListener = handlers.onRun; } },
     "./chatCompletion": { ChatCompletionTracker },
-    "./notifications": { ...tracking, notificationsEnabled: () => true, notify: async (kind, tag, title, body, onClick, valid) => {
+    "./notifications": { ...tracking, notificationsEnabled: () => true, requestNotificationPermissionOnce() {}, notify: async (kind, tag, title, body, onClick, valid) => {
       if (!valid() || sent.some(item => item.tag === tag)) return false;
       sent.push({ kind, tag, title, body, onClick }); return true;
     } },

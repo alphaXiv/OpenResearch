@@ -1,39 +1,43 @@
 import type { ChatMessage, ChatPart, Run, RunStatus } from "./api";
 
-const STORAGE_KEY = "orx:notifications";
-
 export const NOTIFICATION_KINDS = ["runs", "prompts", "turns"] as const;
 export type NotificationKind = typeof NOTIFICATION_KINDS[number];
 
 export const notificationsSupported = () => typeof Notification !== "undefined" && window.isSecureContext;
 export const NOTIFICATIONS_CHANGED = "orx:notifications-changed";
+const PERMISSION_ASKED_KEY = "orx:notification-permission-asked";
+let permissionRequestArmed = false;
 
 export function notificationSettingsSnapshot(): string {
-  return `${notificationsSupported() ? Notification.permission : "unsupported"}:${storedKinds().join(",")}`;
+  return notificationsSupported() ? Notification.permission : "unsupported";
 }
 
-function storedKinds(): NotificationKind[] {
+/** The browser permission is the only switch. Granted means every kind is on. */
+export function notificationsEnabled(_kind: NotificationKind): boolean {
+  return notificationsSupported() && Notification.permission === "granted";
+}
+
+/** Ask once, from the next click or keypress. Loading the page is not a user gesture,
+ * and Chrome and Firefox will not show the prompt without one. */
+export function requestNotificationPermissionOnce(): void {
+  if (permissionRequestArmed || !notificationsSupported() || Notification.permission !== "default") return;
   try {
-    const stored: unknown = JSON.parse(localStorage.getItem(STORAGE_KEY) ?? "[]");
-    return Array.isArray(stored) ? NOTIFICATION_KINDS.filter((kind) => stored.includes(kind)) : [];
+    if (localStorage.getItem(PERMISSION_ASKED_KEY) === "1") return;
   } catch {
-    return [];
+    return;
   }
-}
-
-/** Opted in to this kind on this browser, and the browser still grants permission. */
-export function notificationsEnabled(kind: NotificationKind): boolean {
-  return notificationsSupported() && Notification.permission === "granted" && storedKinds().includes(kind);
-}
-
-export function setNotificationsEnabled(kind: NotificationKind, enabled: boolean): void {
-  const kinds = storedKinds().filter((item) => item !== kind);
-  try {
-    localStorage.setItem(STORAGE_KEY, JSON.stringify(enabled ? [...kinds, kind] : kinds));
-  } catch {
-    // Non-fatal: the kind simply stays off.
-  }
-  window.dispatchEvent(new Event(NOTIFICATIONS_CHANGED));
+  permissionRequestArmed = true;
+  const ask = (event: Event) => {
+    if (!event.isTrusted) return;
+    window.removeEventListener("pointerdown", ask, true);
+    window.removeEventListener("keydown", ask, true);
+    try { localStorage.setItem(PERMISSION_ASKED_KEY, "1"); } catch { /* Ask this once even if storage is blocked. */ }
+    void Notification.requestPermission().catch(() => {}).finally(() => {
+      window.dispatchEvent(new Event(NOTIFICATIONS_CHANGED));
+    });
+  };
+  window.addEventListener("pointerdown", ask, true);
+  window.addEventListener("keydown", ask, true);
 }
 
 const runStatuses = new Map<string, RunStatus>();

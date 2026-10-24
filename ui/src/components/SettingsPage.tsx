@@ -116,8 +116,6 @@ import {
 import { onDataDirMove } from "../events";
 import { releaseNotesUrl, useRestartApp, useUpdateStatus } from "./UpdateBanner";
 import { useThemePreference, type ThemePreference } from "../theme";
-import { NOTIFICATION_KINDS, notificationsEnabled, notificationsSupported, notify, setNotificationsEnabled, type NotificationKind } from "../notifications";
-import { useNotificationSettings } from "../useBrowserNotifications";
 import { m } from "../paraglide/messages.js";
 import { ltr } from "../i18n";
 import { setLocale, useLocale } from "../locale";
@@ -2712,63 +2710,6 @@ function AppearanceTab() {
   );
 }
 
-// --- notifications -----------------------------------------------------------
-
-const NOTIFICATION_LABELS: Record<NotificationKind, () => string> = {
-  runs: m.settings_notifications_runs,
-  prompts: m.settings_notifications_prompts,
-  turns: m.settings_notifications_turns,
-};
-
-function NotificationsTab() {
-  useNotificationSettings();
-  const enabled = NOTIFICATION_KINDS.filter(notificationsEnabled);
-  const supported = notificationsSupported();
-  const blocked = supported && Notification.permission === "denied";
-  const [requesting, setRequesting] = useState(false);
-
-  const toggle = async (kind: NotificationKind) => {
-    if (enabled.includes(kind)) {
-      setNotificationsEnabled(kind, false);
-      return;
-    }
-    // Must run inside the click: browsers only prompt for permission on a user gesture.
-    setRequesting(true);
-    try {
-      const permission = await Notification.requestPermission();
-      setNotificationsEnabled(kind, permission === "granted");
-    } catch (error) {
-      showAlert(error instanceof Error ? error.message : String(error), "error");
-    } finally { setRequesting(false); }
-  };
-
-  return (
-    <>
-      <h2>{m.settings_notifications_heading()}</h2>
-      <p className="settings-sub mt-0 mx-0 mb-3 text-base leading-relaxed text-text">
-        {!supported ? m.settings_notifications_unsupported() : blocked ? m.settings_notifications_blocked() : m.settings_notifications_description()}
-      </p>
-      <div className={SETTINGS_CARD_CLASS_NAME}>
-        {NOTIFICATION_KINDS.map((kind, index) => (
-          <div key={kind} className={cn(PROJECT_DEFAULT_ROW_CLASS_NAME, index < NOTIFICATION_KINDS.length - 1 && "pb-3.5")}>
-            <div className="project-default-title text-base font-medium">{NOTIFICATION_LABELS[kind]()}</div>
-            <Switch
-              type="button"
-              checked={enabled.includes(kind)}
-              aria-label={NOTIFICATION_LABELS[kind]()}
-              disabled={!supported || blocked || requesting}
-              onClick={() => void toggle(kind)}
-            />
-          </div>
-        ))}
-      </div>
-      <Button className="mt-3" disabled={!enabled.length} onClick={() => void notify(enabled[0], `test:${crypto.randomUUID()}`, m.settings_notifications_heading(), m.settings_notifications_test_body(), () => {})}>
-        {m.settings_notifications_test()}
-      </Button>
-    </>
-  );
-}
-
 // --- updates -----------------------------------------------------------------
 
 const CHANNEL_LABELS: Record<InstallChannel, () => string> = {
@@ -3909,9 +3850,6 @@ export function SettingsView({
           <div className="settings-stack mt-4.5">
             <section className={SETTINGS_STACK_SECTION_CLASS_NAME}>
               <AppearanceTab />
-            </section>
-            <section className={SETTINGS_STACK_SECTION_CLASS_NAME}>
-              <NotificationsTab />
             </section>
             <section ref={tab === "projects" ? sectionRef : undefined} className={SETTINGS_STACK_SECTION_CLASS_NAME}>
               <GithubSettings

@@ -3,7 +3,7 @@ import { useRouter } from "@tanstack/react-router";
 import { getChatMessages, getChatSession, listAllChatSessions, type ChatMessage } from "./api";
 import { onChatEvent, useOrxEvents, type ChatEvent } from "./events";
 import { ChatCompletionTracker } from "./chatCompletion";
-import { NOTIFICATIONS_CHANGED, notificationSettingsSnapshot, notificationsEnabled, newPendingPrompts, notify, resetNotificationTracking, runJustFinished } from "./notifications";
+import { NOTIFICATIONS_CHANGED, notificationSettingsSnapshot, notificationsEnabled, newPendingPrompts, notify, requestNotificationPermissionOnce, resetNotificationTracking, runJustFinished } from "./notifications";
 import { isCurrentScope, queryClient, workspaceScope } from "./queries/client";
 import { listExperimentsQuery } from "./queries/projects";
 import { taskLocation } from "./workspaceState";
@@ -29,6 +29,11 @@ export function useBrowserNotifications(): void {
   const router = useRouter();
   const settings = useNotificationSettings();
   const open = (href: string) => { if (isCurrentScope(scope)) void router.navigate({ href }); };
+  useEffect(() => {
+    // A non-null value tells an older page shim that this app owns notifications.
+    try { localStorage.setItem("orx:notifications", "native"); } catch { /* Private mode still notifies in this tab. */ }
+    requestNotificationPermissionOnce();
+  }, []);
   useOrxEvents({
     onRun(run) {
       if (!isCurrentScope(scope) || !runJustFinished(run)) return;
