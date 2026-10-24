@@ -444,11 +444,6 @@ impl Broker {
             }
         }
         state::reserve_attempt(&host.resolved.key)?;
-        // A dead master otherwise waits for a manual Connect; prompts still need one.
-        #[cfg(unix)]
-        if !explicit && host.resolved.target.managed_generation.is_none() {
-            let _ = crate::jobs::ssh::restore_master(&host.resolved.target).await;
-        }
         let session = transport::connect(
             &host.resolved,
             interactive.map(|attempt| (&self.endpoint, attempt)),
