@@ -437,6 +437,9 @@ export default function App({ runtime, projectId, pane }: { runtime: RuntimeInfo
   const [experimentsTabOpen, setExperimentsTabOpen] = useState(false);
   const [filesTabOpen, setFilesTabOpen] = useState(false);
   const [artifactsTabOpen, setArtifactsTabOpen] = useState(false);
+  // Folder a chat citation asked the Artifacts explorer to reveal.
+  const [artifactReveal, setArtifactReveal] = useState<string | null>(null);
+  const clearArtifactReveal = useCallback(() => setArtifactReveal(null), []);
   const [terminalTabOpen, setTerminalTabOpen] = useState(false);
   // Which checkout has a live shell; a restored-but-unselected tab spawns nothing until selected.
   const [terminalStartedFor, setTerminalStartedFor] = useState<string | null>(null);
@@ -1204,8 +1207,10 @@ export default function App({ runtime, projectId, pane }: { runtime: RuntimeInfo
       const tab = resolveFileTab(path, sessionId, ref, line, exp);
       if (!tab) return;
       // A file tab can't show a folder; directory citations open the Artifacts explorer.
-      if (tab.source === "artifacts" && tab.path.endsWith("/")) openArtifactsTab();
-      else openResolvedFileTab(tab, intent);
+      if (tab.source === "artifacts" && tab.path.endsWith("/")) {
+        setArtifactReveal(tab.path.replace(/\/+$/, ""));
+        openArtifactsTab();
+      } else openResolvedFileTab(tab, intent);
     },
     [openArtifactsTab, openResolvedFileTab, resolveFileTab],
   );
@@ -1944,6 +1949,8 @@ export default function App({ runtime, projectId, pane }: { runtime: RuntimeInfo
                     key={activeProject.id}
                     project={activeProject}
                     artifacts={artifacts}
+                    reveal={artifactReveal}
+                    onRevealed={clearArtifactReveal}
                     onOpenFile={openArtifactFileTab}
                     canRenameFile={(path) => !fileBuffersRef.current.get(
                       fileScrollKey(activeProject.id, activeSessionId, { path, source: "artifacts" }),

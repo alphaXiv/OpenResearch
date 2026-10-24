@@ -399,7 +399,7 @@ function TreeRows({
           const open = !collapsed.has(e.path);
           return (
             <div key={e.path} className="min-w-0 max-w-full">
-              <div className="file-tree-row flex w-full min-w-0 items-center gap-1.5 py-1 px-2.5 border-0 bg-transparent text-text text-start cursor-pointer font-[inherit] [&:hover]:bg-panel [&_>_svg]:shrink-0 [&_>_svg]:text-subtext [&_>_svg.file-tree-chevron]:text-muted artifact-tree-row [&.selected]:bg-panel [&.selected:hover]:bg-panel [&:hover_.ft-row-delete]:opacity-100" style={indent} onClick={() => onToggle(e.path)}>
+              <div className="file-tree-row flex w-full min-w-0 items-center gap-1.5 py-1 px-2.5 border-0 bg-transparent text-text text-start cursor-pointer font-[inherit] [&:hover]:bg-panel [&_>_svg]:shrink-0 [&_>_svg]:text-subtext [&_>_svg.file-tree-chevron]:text-muted artifact-tree-row [&.selected]:bg-panel [&.selected:hover]:bg-panel [&:hover_.ft-row-delete]:opacity-100" data-artifact-dir={e.path} style={indent} onClick={() => onToggle(e.path)}>
                 <button
                   className="file-tree-chevron text-muted shrink-0 [button&]:inline-flex [button&]:items-center [button&]:justify-center [button&]:size-3.5 [button&]:p-0 [button&]:border-0 [button&]:bg-transparent [button&_>_svg]:transition-transform [button&_>_svg]:duration-120 [button&_>_svg]:ease-standard [button&_>_svg.open]:rotate-90"
                   aria-label={open ? m.artifact_collapse_folder({ name: ltr(e.name) }) : m.artifact_expand_folder({ name: ltr(e.name) })}
@@ -519,11 +519,16 @@ function TreeRows({
 export function ArtifactsTab({
   project,
   artifacts,
+  reveal,
+  onRevealed,
   onOpenFile,
   canRenameFile,
 }: {
   project: Project;
   artifacts: ProjectArtifacts | null;
+  /** Folder to expand and focus once, e.g. from a chat citation; `onRevealed` clears it. */
+  reveal?: string | null;
+  onRevealed?: () => void;
   onOpenFile: (path: string) => void;
   canRenameFile: (path: string) => boolean;
 }) {
@@ -535,6 +540,15 @@ export function ArtifactsTab({
   const [contextMenu, setContextMenu] = useState<FileContextMenuTarget | null>(null);
   const [renamingPath, setRenamingPath] = useState<string | null>(null);
   const treeRef = useRef<HTMLDivElement>(null);
+  useEffect(() => {
+    if (!reveal || !artifacts) return;
+    const path = reveal;
+    setCollapsed((prev) => new Set([...prev].filter((p) => p !== path && !path.startsWith(`${p}/`))));
+    requestAnimationFrame(() =>
+      treeRef.current?.querySelector<HTMLElement>(`[data-artifact-dir="${CSS.escape(path)}"] button`)?.focus(),
+    );
+    onRevealed?.();
+  }, [reveal, artifacts, onRevealed]);
   useEffect(() => {
     try {
       localStorage.setItem(
