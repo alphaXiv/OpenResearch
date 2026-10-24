@@ -38,6 +38,7 @@ import {
   type ExpViewDef,
   sameExpTab,
   type FileViewDef,
+  artifactFolder,
   sameFileTab,
   fileTabKey,
   fileScrollKey,
@@ -1206,9 +1207,9 @@ export default function App({ runtime, projectId, pane }: { runtime: RuntimeInfo
     ) => {
       const tab = resolveFileTab(path, sessionId, ref, line, exp);
       if (!tab) return;
-      // A file tab can't show a folder; directory citations open the Artifacts explorer.
-      if (tab.source === "artifacts" && tab.path.endsWith("/")) {
-        setArtifactReveal(tab.path.replace(/\/+$/, ""));
+      const folder = artifactFolder(tab);
+      if (folder) {
+        setArtifactReveal(folder);
         openArtifactsTab();
       } else openResolvedFileTab(tab, intent);
     },

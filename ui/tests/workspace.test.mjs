@@ -377,3 +377,10 @@ test("a newly running experiment opens its logs only on the first output", () =>
   callbacks.onRunLog({ runId: "other-project", dataBase64: "bG9n" });
   assert.deepEqual(opened, [run, earlyLogRun]);
 });
+
+test("artifact folder citations resolve to a folder, file citations do not", () => {
+  assert.equal(tabs.artifactFolder({ path: "report/", source: "artifacts" }), "report");
+  assert.equal(tabs.artifactFolder({ path: "report/sub/", source: "artifacts" }), "report/sub");
+  assert.equal(tabs.artifactFolder({ path: "report/findings.md", source: "artifacts" }), null);
+  assert.equal(tabs.artifactFolder({ path: "src/", sessionId: "s" }), null);
+});
