@@ -1,4 +1,5 @@
 import type { ChatMessage, ChatPart, ChatSession } from "./api";
+import { LOCAL_ERROR_PART_ID } from "./queries/chatState.ts";
 
 export function isParentUpdate(part: ChatPart): boolean {
   return part.tool?.toLowerCase() === "subagenthandback" || part.tool === "subagent" && part.state?.input?.kind === "interacted"
@@ -218,7 +219,7 @@ export function groupResponseMessages(messages: ChatMessage[], previousGroups: C
   const groups: ChatMessage[][] = [];
   for (const message of messages) {
     const previous = groups.at(-1);
-    if (message.role === "assistant" && previous?.[0].role === "assistant") {
+    if (message.role === "assistant" && previous?.[0].role === "assistant" && message.parts[0]?.id !== LOCAL_ERROR_PART_ID) {
       previous.push(message);
     } else {
       groups.push([message]);

@@ -301,6 +301,16 @@ test("automatic continuations share a response until the next user message", asy
   assert.equal(groupResponseMessages([user, first, continuation, nextUser], groups)[1], groups[1]);
 });
 
+test("a local send failure stands apart from the previous response", async () => {
+  const { groupResponseMessages } = await import("../src/chatRendering.ts");
+  const { LOCAL_ERROR_PART_ID } = await import("../src/queries/chatState.ts");
+  const user = { id: "user", role: "user", parts: [], createdAt: 0 };
+  const answer = { ...message({ id: "a", type: "text", text: "Plan", phase: "final_answer" }), id: "answer" };
+  const failure = { ...message({ id: LOCAL_ERROR_PART_ID, type: "tool", tool: "error", state: { status: "error", error: "Message not sent" } }), id: "local-senderr-1" };
+  const groups = groupResponseMessages([user, answer, failure]);
+  assert.deepEqual(groups, [[user], [answer], [failure]]);
+});
+
 test("a continuation retains the previous answer until a new answer arrives", async () => {
   const { splitResponseParts } = await import("../src/chatRendering.ts");
   const oldAnswer = { id: "old-answer", type: "text", phase: "final_answer", text: "Run launched" };
