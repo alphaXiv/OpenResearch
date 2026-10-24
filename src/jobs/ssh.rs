@@ -519,6 +519,32 @@ pub(crate) async fn interactive_args(
     })
 }
 
+/// Reopens a dropped master for key- or agent-authenticated hosts without
+/// prompting, so monitoring resumes once the host is reachable again.
+#[cfg(unix)]
+pub(crate) async fn restore_master(target: &SshTarget) -> Result<()> {
+    let connection = interactive_args(target, None, None).await?;
+    let mut command = Command::new("ssh");
+    match &target.auth_agent {
+        Some(agent) => command.env("SSH_AUTH_SOCK", agent),
+        None => command.env_remove("SSH_AUTH_SOCK"),
+    };
+    command
+        .arg("-oBatchMode=yes")
+        .args(&connection.args)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .kill_on_drop(true);
+    let status = tokio::time::timeout(Duration::from_secs(30), command.status())
+        .await
+        .map_err(|_| anyhow!("Timed out reopening the SSH connection"))??;
+    if !status.success() {
+        return Err(anyhow!("Reopening the SSH connection needs Connect"));
+    }
+    Ok(())
+}
+
 #[cfg(unix)]
 async fn control_master(
     target: &SshTarget,
