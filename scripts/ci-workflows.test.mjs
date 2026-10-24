@@ -75,7 +75,7 @@ test('PR comparison jobs avoid full history downloads without skipping version v
   assert.match(version, /git show "\$\{BASE_SHA\}:Cargo.toml"/)
 })
 
-test('Windows PR lanes preserve lint and linking; full validation keeps one cache writer', () => {
+test('Windows PR lanes execute the full test suite alongside lint; full validation keeps one cache writer', () => {
   const windows = ci.split('\n  windows:')[1].split('\n  check:')[0]
   const modesExpression = windows.match(/mode: \$\{\{ (.+) \}\}/)[1]
   const steps = [...windows.matchAll(/- name: (.+)\n(?:        if: (.+)\n)?        run: (.+)/g)]
@@ -84,7 +84,7 @@ test('Windows PR lanes preserve lint and linking; full validation keeps one cach
   assert.match(windows, /shared-key: windows/)
   assert.match(ci, /needs: \[changes, frontend, helpers, rust, linux-app, windows\]/)
   for (const [event, release, expectedModes] of [
-    ['pull_request', false, ['lint', 'build']],
+    ['pull_request', false, ['lint', 'test']],
     ['pull_request', true, ['all']],
     ['push', false, ['all']],
     ['workflow_dispatch', false, ['all']],
@@ -105,8 +105,8 @@ test('Windows PR lanes preserve lint and linking; full validation keeps one cach
     assert.equal(commands.filter(command => command === 'cargo fmt --manifest-path windows/launcher/Cargo.toml --check').length, 1)
     assert.equal(commands.filter(command => command === 'cargo clippy --manifest-path windows/launcher/Cargo.toml --locked -- -D warnings').length, 1)
     assert.equal(commands.filter(command => command === 'cargo build --manifest-path windows/launcher/Cargo.toml --locked').length, 1)
-    assert.equal(commands.includes('cargo build --locked'), event === 'pull_request' && !release)
-    assert.equal(commands.includes('cargo test --locked'), event !== 'pull_request' || release)
+    assert.equal(commands.includes('cargo build --locked'), false)
+    assert.equal(commands.filter(command => command === 'cargo test --locked').length, 1)
   }
 })
 

@@ -216,7 +216,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        mode: ${{ fromJSON(github.event_name == 'pull_request' && !inputs.release && '["lint", "build"]' || '["all"]') }}
+        mode: ${{ fromJSON(github.event_name == 'pull_request' && !inputs.release && '["lint", "test"]' || '["all"]') }}
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v4
@@ -234,22 +234,19 @@ jobs:
             . -> target
             windows/launcher -> target
       - name: Clippy
-        if: matrix.mode != 'build'
+        if: matrix.mode != 'test'
         run: cargo clippy --all-targets --locked -- -D warnings
       - name: Format app launcher
-        if: matrix.mode != 'build'
+        if: matrix.mode != 'test'
         run: cargo fmt --manifest-path windows/launcher/Cargo.toml --check
       - name: Clippy (app launcher)
-        if: matrix.mode != 'build'
+        if: matrix.mode != 'test'
         run: cargo clippy --manifest-path windows/launcher/Cargo.toml --locked -- -D warnings
-      - name: Build
-        if: matrix.mode == 'build'
-        run: cargo build --locked
       - name: Build app launcher
         if: matrix.mode != 'lint'
         run: cargo build --manifest-path windows/launcher/Cargo.toml --locked
       - name: Test
-        if: matrix.mode == 'all'
+        if: matrix.mode != 'lint'
         run: cargo test --locked
 
   check:
