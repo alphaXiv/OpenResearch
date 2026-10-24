@@ -13,8 +13,8 @@ import {
   queryClient,
   workspaceKey,
 } from "../queries/client";
-import { LOCAL_PREFIX, SHELL_TOOL } from "../queries/chatState";
-import { useInfiniteQuery, useMutation, useQueries, useQuery } from "@tanstack/react-query";
+import { LOCAL_ERROR_PART_ID, LOCAL_PREFIX, SHELL_TOOL } from "../queries/chatState";
+import { CancelledError, useInfiniteQuery, useMutation, useQueries, useQuery } from "@tanstack/react-query";
 import { useNavigate } from "@tanstack/react-router";
 import { useChatState } from "../queries/chatStore";
 
@@ -2376,6 +2376,14 @@ function ToolRow({
   const hasDetail = failed && Boolean(errorMessage);
   const [detailOpen, setDetailOpen] = useState(false);
   const detailId = `tool-error-${part.id.replace(/[^A-Za-z0-9_-]/g, "-")}`;
+  if (part.id === LOCAL_ERROR_PART_ID) {
+    return (
+      <div className="local-error mt-4 flex items-start gap-2 text-base text-subtext">
+        <TriangleAlert size={18} className="mt-0.5 shrink-0 text-accent-red" aria-hidden="true" />
+        <span className="wrap-anywhere">{errorMessage}</span>
+      </div>
+    );
+  }
   if (part.tool === "error") {
     return <TurnStatusRow part={part} busy={false} recovering={false} usageLimited={isUsageLimitPart(part)} />;
   }
@@ -5860,12 +5868,18 @@ export function ChatPanel({
           sourceSessionId = session.id;
         }
         if (!isCurrentScope(sessionsOptions.queryKey)) return;
-        const history = getChatMessagesQuery(sid);
-        // Join pending repair even when it has published an intermediate snapshot.
-        await queryClient.fetchQuery({
+        const historySid = sid;
+        const history = getChatMessagesQuery(historySid);
+        // Join pending repair even when it has published an intermediate snapshot. A live invalidation
+        // (e.g. SSE reconnect) can cancel the joined read; retrying joins its replacement or reads the cache.
+        const awaitHistory = (): Promise<unknown> => queryClient.fetchQuery({
           ...history,
           ...(queryClient.getQueryState(history.queryKey)?.fetchStatus === "fetching" ? { staleTime: 0 } : {}),
+        }).catch((cause: unknown) => {
+          if (cause instanceof CancelledError && isCurrentScope(sessionsOptions.queryKey) && !deletedSessionIds.has(historySid)) return awaitHistory();
+          throw cause;
         });
+        await awaitHistory();
       } finally {
         preparingSend.current = false;
       }
