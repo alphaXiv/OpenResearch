@@ -2,8 +2,9 @@
 
 import { execFileSync, spawn } from 'node:child_process'
 import { createHash, randomUUID } from 'node:crypto'
-import { closeSync, cpSync, existsSync, mkdirSync, openSync, readFileSync, realpathSync, renameSync, rmSync, writeFileSync } from 'node:fs'
+import { closeSync, cpSync, existsSync, mkdirSync, openSync, readFileSync, readdirSync, realpathSync, renameSync, rmSync, writeFileSync } from 'node:fs'
 import http from 'node:http'
+import net from 'node:net'
 import os from 'node:os'
 import path from 'node:path'
 import process from 'node:process'
@@ -312,7 +313,7 @@ function removeManagedDirectories(slotPaths, configuration, mainCheckout) {
   return true
 }
 
-function reclaimStaleReservations(info, registry) {
+async function reclaimStaleReservations(info, registry) {
   const configurations = [...registry.configurations]
   const removed = new Set()
   for (let slot = FIRST_SLOT; slot <= LAST_SLOT; slot += 1) {
@@ -327,6 +328,7 @@ function reclaimStaleReservations(info, registry) {
     const owner = { worktreePath: path.dirname(manifest), manifestPath: manifest }
     if (!managedStateMatches(state, owner, slotPaths)) continue
     if (processGroupExists(state.backendProcess?.pid) || processGroupExists(state.uiProcess?.pid)) continue
+    try { await stopSshServices(slotPaths, true) } catch { continue }
     if (!removeManagedDirectories(slotPaths, backend, info.mainCheckout)) continue
     removed.add(slot)
   }
@@ -383,7 +385,7 @@ async function reserveSlot(info, dbMode) {
   const release = await acquireAllocatorLock(info)
   try {
     const registry = loadRegistry(info)
-    reclaimStaleReservations(info, registry)
+    await reclaimStaleReservations(info, registry)
     const existing = registry.configurations.find((configuration) =>
       configuration.port >= 4901
       && configuration.port <= 4909
@@ -706,6 +708,42 @@ function printStatus(info) {
   console.log(`  State:   ${state ? slotPaths.statePath : 'legacy/unmanaged'}`)
 }
 
+export async function stopSshServices(slotPaths, requireIdle = false) {
+  if (!existsSync(slotPaths.dataDir)) return
+  for (const name of readdirSync(slotPaths.dataDir)) {
+    if (!/^ssh-service-[a-f0-9]{64}$/.test(name)) continue
+    const endpoint = readJson(path.join(slotPaths.dataDir, name, 'endpoint.json'))
+    if (!endpoint) continue
+    const stopped = await new Promise((resolve, reject) => {
+      const socket = net.createConnection({ host: '127.0.0.1', port: endpoint.port })
+      let received = Buffer.alloc(0)
+      socket.setTimeout(15_000, () => socket.destroy(new Error('SSH service shutdown timed out')))
+      socket.once('error', (error) => error.code === 'ECONNREFUSED' ? resolve(true) : reject(error))
+      socket.once('connect', () => {
+        const body = Buffer.from(JSON.stringify({ ...endpoint, port: undefined, target: null, operation: { op: requireIdle ? 'shutdown' : 'shutdown_if_idle' } }))
+        const header = Buffer.alloc(4)
+        header.writeUInt32BE(body.length)
+        socket.write(Buffer.concat([header, body]))
+      })
+      socket.on('data', (chunk) => {
+        received = Buffer.concat([received, chunk])
+        if (received.length < 4) return
+        const length = received.readUInt32BE()
+        if (length > 1024 * 1024) return socket.destroy(new Error('Invalid SSH service response'))
+        if (received.length < 4 + length) return
+        try {
+          const response = JSON.parse(received.subarray(4, 4 + length).toString())
+          socket.destroy()
+          if (response.error) reject(new Error(response.error))
+          else resolve(response.value?.busy !== true)
+        } catch (error) { socket.destroy(error) }
+      })
+      socket.once('end', () => { if (received.length === 0) reject(new Error('SSH service closed without acknowledging shutdown')) })
+    })
+    if (stopped) await waitFor('SSH service to stop', 10_000, () => listenerPids(endpoint.port).length === 0)
+  }
+}
+
 async function stopOwnedProcessesUnlocked(info) {
   const reservation = reservationFor(info)
   if (!reservation) return null
@@ -740,6 +778,7 @@ async function stopOwnedProcessesUnlocked(info) {
     && !processGroupExists(state.uiProcess?.pid)
     && listenerPids(slotPaths.backendPort).length === 0
     && listenerPids(slotPaths.uiPort).length === 0)
+  await stopSshServices(slotPaths)
   state.backendProcess = null
   state.uiProcess = null
   state.phase = 'stopped'
@@ -769,6 +808,7 @@ async function cleanupUnlocked(info) {
     reservation = reservationFor(info)
     if (!reservation) return
     const { slotPaths, state, backend } = reservation
+    await stopSshServices(slotPaths, true)
     if (listenerPids(slotPaths.backendPort).length > 0 || listenerPids(slotPaths.uiPort).length > 0) {
       throw new Error(`Refusing to clean ${slotPaths.slotKey} while its ports are listening`)
     }

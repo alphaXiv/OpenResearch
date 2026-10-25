@@ -4,7 +4,6 @@
 
 :root[data-theme="dark"] .tinker-logo {
   filter: invert(1);
-  mix-blend-mode: screen;
 }
 
 :root:is([lang="fa"], [lang="ar"]) #root :where(p, h1, h2, h3, h4, h5, h6, button, label, li, th, td, dt, dd, [role="status"], [role="alert"]) {
@@ -23,6 +22,15 @@
 
 .xterm {
   color-scheme: dark;
+}
+
+@keyframes or-experiment-pulse {
+  0%, 100% {
+    opacity: 1;
+  }
+  50% {
+    opacity: 0.55;
+  }
 }
 
 @keyframes or-pulse {
@@ -140,11 +148,6 @@
   transition: color 140ms ease, text-decoration-color 140ms ease;
 }
 
-.tool-line,
-.tool-group-summary {
-  font-weight: 375;
-}
-
 .tool-group-rows .tool-line {
   font-size: var(--text-sm);
 }
@@ -234,7 +237,7 @@
 
 .md .file-chip:hover:not(:disabled) .file-chip-label,
 .md .file-chip:focus-visible .file-chip-label {
-  text-decoration-color: var(--primary);
+  text-decoration-color: var(--text);
 }
 
 .md .file-chip:disabled .file-chip-label {
@@ -282,16 +285,21 @@
 
 .tool-target:hover,
 .tool-target-more:hover {
-  color: var(--primary);
+  color: var(--text);
   text-decoration-color: var(--border-strong);
 }
 
 .tool-target:focus-visible,
 .tool-target-more:focus-visible {
-  color: var(--primary);
+  color: var(--text);
   text-decoration-color: var(--border-strong);
-  outline: 1px solid var(--border-strong);
+  outline: 1px solid var(--focus);
   outline-offset: 2px;
+}
+
+.experiment-run-link:is(:hover, :focus-visible) {
+  color: inherit;
+  text-decoration-color: currentColor;
 }
 
 @media (prefers-reduced-motion: reduce) {
@@ -365,9 +373,9 @@
   }
 }
 
-/* Reserve room for the four workspace buttons and their gaps. */
+/* Reserve room for the workspace toolbar. */
 .workspace-body > .chat-pane .chat-header {
-  padding-inline-end: 12rem;
+  padding-inline-end: 11rem;
 }
 
 /* Tool names fit when the chat has the full desktop workspace. A split pane
@@ -393,11 +401,11 @@
 }
 
 .workspace-card-visible .workspace-tools {
-  top: 1.25rem;
+  top: 0.75rem;
 }
 
 .win-titlebar .workspace-card-visible .workspace-tools {
-  top: 2.5rem;
+  top: 2.75rem;
 }
 
 .code-source-text,
@@ -418,12 +426,16 @@
   min-height: 32px;
   padding: 6px 10px;
   overflow-x: auto;
+  scrollbar-width: none;
   border-bottom: 1px solid var(--border);
   background: var(--surface);
   color: var(--subtext);
   font-size: 11px;
   white-space: nowrap;
   flex-shrink: 0;
+}
+.term-provenance::-webkit-scrollbar {
+  display: none;
 }
 .term-provenance code {
   color: var(--text);

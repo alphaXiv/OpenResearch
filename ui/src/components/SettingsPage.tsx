@@ -162,6 +162,7 @@ import {
   Input,
   LoadingRow,
   MenuItem,
+  SEGMENTED_CLASS_NAME,
   showAlert,
   Spinner,
   Switch,
@@ -206,7 +207,7 @@ export const FORM_CLASS_NAME = [
   "[&_.repo-hint]:font-normal [&_.repo-hint]:text-sm",
   "[&_.repo-hint]:text-muted [&_.repo-hint.ok]:text-accent-teal",
   "[&_.folder-picker-control]:flex [&_.folder-picker-control]:items-center",
-  "[&_.folder-picker-control]:gap-[9px] [&_.folder-picker-control]:w-full",
+  "[&_.folder-picker-control]:gap-2 [&_.folder-picker-control]:w-full",
   "[&_.folder-picker-control]:min-w-0 [&_.folder-picker-control]:py-2 [&_.folder-picker-control]:px-2.5",
   "[&_.folder-picker-control]:overflow-hidden [&_.folder-picker-control]:bg-background",
   "[&_.folder-picker-control]:border [&_.folder-picker-control]:border-border",
@@ -215,7 +216,7 @@ export const FORM_CLASS_NAME = [
   "[&_.folder-picker-control]:transition-[border-color,box-shadow] [&_.folder-picker-control]:duration-120 [&_.folder-picker-control]:ease-standard",
   "[&_.folder-picker-control:hover:not(:disabled)]:border-muted",
   "[&_.folder-picker-control:hover:not(:disabled)]:shadow-control-subtle",
-  "[&_.folder-picker-control:focus-visible]:outline-2 [&_.folder-picker-control:focus-visible]:outline-solid [&_.folder-picker-control:focus-visible]:outline-text",
+  "[&_.folder-picker-control:focus-visible]:outline-2 [&_.folder-picker-control:focus-visible]:outline-solid [&_.folder-picker-control:focus-visible]:outline-focus",
   "[&_.folder-picker-control:focus-visible]:outline-offset-2 [&_.folder-picker-control_span]:flex-1",
   "[&_.folder-picker-control_span]:min-w-0 [&_.folder-picker-control_span]:overflow-hidden",
   "[&_.folder-picker-control_span]:text-ellipsis [&_.folder-picker-control_span]:whitespace-nowrap",
@@ -224,7 +225,7 @@ export const FORM_CLASS_NAME = [
   "[&_.folder-picker-chevron]:text-muted",
   "[&_.folder-picker-control:hover:not(:disabled)_.folder-picker-chevron]:text-subtext",
   "[&_.folder-picker-hint]:text-subtext [&_.folder-picker-hint]:text-sm",
-  "[&_.folder-picker-hint]:font-normal [&_.folder-picker-hint]:leading-[1.4]",
+  "[&_.folder-picker-hint]:font-normal [&_.folder-picker-hint]:leading-snug",
   "[&_.project-location-field]:flex [&_.project-location-field]:flex-col",
   "[&_.project-location-field]:gap-2 [&_.project-location-label]:text-text",
   "[&_.project-location-label]:text-base",
@@ -239,11 +240,11 @@ export const FORM_CLASS_NAME = [
   "[&_.paper-destination_code]:text-text [&_.paper-destination_code]:text-sm",
   "[&_.paper-destination_code]:font-normal",
   "[&_.paper-destination_code]:text-ellipsis [&_.paper-destination_code]:whitespace-nowrap",
-  "[&_.paper-destination_.btn]:flex-none [&_.project-path-notice]:py-[9px] [&_.project-path-notice]:px-[11px]",
+  "[&_.paper-destination_.btn]:flex-none [&_.project-path-notice]:py-2 [&_.project-path-notice]:px-3",
   "[&_.project-path-notice]:border [&_.project-path-notice]:border-border-variant",
   "[&_.project-path-notice]:rounded-sm [&_.project-path-notice]:bg-surface",
-  "[&_.project-path-notice]:text-base [&_.project-path-notice]:leading-relaxed [&_.project-path-notice]:text-text",
-  "[&_.project-path-notice]:leading-[1.4]",
+  "[&_.project-path-notice]:text-base [&_.project-path-notice]:text-text",
+  "[&_.project-path-notice]:leading-snug",
   "[&_.project-path-notice.error]:border-danger-notice-border",
   "[&_.paper-results]:flex [&_.paper-results]:flex-col",
   "[&_.paper-results]:border [&_.paper-results]:border-border [&_.paper-results]:rounded-md",
@@ -278,7 +279,7 @@ export const FORM_CLASS_NAME = [
 ].join(" ");
 
 export const PROJECT_DEFAULT_ROW_CLASS_NAME = [
-  "project-default-row flex items-center justify-between gap-6",
+  "project-default-row flex items-center justify-between gap-6 [.project-default-row+&]:mt-3.5",
   "pt-3.5 border-t border-t-border-variant [&_p]:mt-[3px] [&_p]:mx-0 [&_p]:mb-0",
   "[&_.project-default-title]:text-base [&_p]:text-sm [&_p]:leading-relaxed [&_p]:text-text",
 ].join(" ");
@@ -711,7 +712,7 @@ function K8sSection({
             {error && <p className="m-0 text-sm text-accent-red whitespace-pre-wrap break-words">{error}</p>}
             <div className="flex justify-end gap-2">
               <Button type="button" onClick={() => void checkAgain()} disabled={saving || checking || !unchanged}>
-                <RefreshCw size={13} /> {checking ? m.common_checking() : m.settings_check_again()}
+                <RefreshCw size={14} /> {checking ? m.common_checking() : m.settings_check_again()}
               </Button>
               <Button variant="primary" type="submit" disabled={saving || checking || unchanged}>
                 {saving ? m.common_saving() : m.common_save()}
@@ -872,7 +873,7 @@ function ModalSection() {
         {error && <p className="m-0 text-sm text-accent-red">{error}</p>}
         <div className="flex justify-end gap-2">
           <Button type="button" disabled={loading || saving} onClick={() => void refresh()}>
-            <RefreshCw size={13} /> {m.settings_page_refresh()}
+            <RefreshCw size={14} /> {m.settings_page_refresh()}
           </Button>
           <Button variant="primary" type="submit" disabled={!tokenId.trim() || !tokenSecret.trim() || loading || saving || s?.processEnv}>
             {saving ? m.common_saving() : m.common_save()}
@@ -1655,7 +1656,7 @@ function OpenResearchSection({ remote }: { remote: boolean }) {
       )}
       <div className="mt-4 flex justify-end gap-2">
         <Button onClick={() => void refresh()} disabled={busy || signingIn}>
-          <RefreshCw size={13} /> {busy ? m.common_checking() : m.settings_check_again()}
+          <RefreshCw size={14} /> {busy ? m.common_checking() : m.settings_check_again()}
         </Button>
         {!remote && s && (!s.loggedIn || s.sshKeyStatus !== "matched") && (
           <Button variant="primary" disabled={busy || signingIn} onClick={() => {
@@ -1663,7 +1664,7 @@ function OpenResearchSection({ remote }: { remote: boolean }) {
             setSigningIn(true);
             setLoginAttempt((attempt) => attempt + 1);
           }}>
-            {signingIn ? <Spinner /> : <SquareTerminal size={13} />} {s.loggedIn ? m.settings_setup_ssh_key() : m.settings_sign_in()}
+            {signingIn ? <Spinner /> : <SquareTerminal size={14} />} {s.loggedIn ? m.settings_setup_ssh_key() : m.settings_sign_in()}
           </Button>
         )}
       </div>
@@ -1856,7 +1857,7 @@ function DefaultDestinationEditor({
               {customFlavor ? (
                 <div className="relative">
                   <input
-                    className="h-9 w-full rounded-md border border-border bg-background py-0 pe-10 ps-3 font-sans text-sm text-text outline-none focus:border-text"
+                    className="h-9 w-full rounded-md border border-border bg-background py-0 pe-10 ps-3 font-sans text-sm text-text outline-none focus:border-focus-border focus:ring-3 focus:ring-focus-ring"
                     type="text"
                     value={flavor}
                     onChange={(event) => setFlavor(event.target.value)}
@@ -1950,12 +1951,12 @@ function TargetTile({
 
   return (
     <div
-      className={`group relative flex min-h-41 w-full flex-col items-start rounded-lg border border-border bg-background p-5 text-start font-sans ${onOpen && target.enabled ? "transition-colors duration-120 ease-standard hover:border-text hover:bg-surface" : ""} ${!target.enabled ? "opacity-52" : ""}`}
+      className={`group relative flex min-h-41 w-full flex-col items-start rounded-lg border border-border bg-background p-5 text-start font-sans ${onOpen && target.enabled ? "transition-colors duration-120 ease-standard hover:border-border-hover-strong hover:bg-surface" : ""} ${!target.enabled ? "opacity-52" : ""}`}
     >
       {onOpen && (
         <button
           type="button"
-          className="absolute inset-0 z-10 rounded-lg focus-visible:outline-2 focus-visible:outline-text focus-visible:outline-offset-2 disabled:cursor-default"
+          className="absolute inset-0 z-10 rounded-lg focus-visible:outline-2 focus-visible:outline-focus focus-visible:outline-offset-2 disabled:cursor-default"
           onClick={onOpen}
           disabled={!target.enabled}
           aria-label={TARGET_LABELS[target.id]()}
@@ -1976,7 +1977,7 @@ function TargetTile({
             {target.id === "tinker" ? m.settings_key_from() : m.settings_token_from()}{" "}
             <button
               type="button"
-              className="relative z-20 text-primary underline-offset-2 hover:text-primary-hover hover:underline"
+              className="relative z-20 text-accent-blue-strong underline-offset-2 hover:underline"
               onClick={onOpenEnvironment}
             >
               {m.settings_environment_tab()}
@@ -1985,7 +1986,7 @@ function TargetTile({
         ) : summary ?? target.summary}
       </span>
       <span className="mt-auto flex w-full items-center justify-between gap-3 pt-3 text-sm">
-        <span className={isDefault ? "font-medium text-primary" : "text-subtext"}>
+        <span className={isDefault ? "font-medium text-text" : "text-subtext"}>
           {isDefault
             ? m.settings_page_default_808d7dc()
             : target.configured
@@ -2032,7 +2033,7 @@ function BackendDetailPage({
           <h1 className="m-0 min-w-0 text-2xl">{TARGET_LABELS[target.id]()}</h1>
         </div>
         {isDefault && (
-          <Badge className="flex-none border-primary bg-primary-subtle text-primary">
+          <Badge className="flex-none">
             {m.settings_page_default_808d7dc()}
           </Badge>
         )}
@@ -2293,7 +2294,7 @@ function TinkerSection({ target }: { target: ComputeTargetSummary }) {
         {error && <p className="m-0 text-sm text-accent-red">{error}</p>}
         <div className="flex justify-end gap-2">
           <Button type="button" disabled={saving || checking} onClick={() => void refresh()}>
-            <RefreshCw size={13} /> {checking ? m.common_checking() : m.settings_check_again()}
+            <RefreshCw size={14} /> {checking ? m.common_checking() : m.settings_check_again()}
           </Button>
           <Button variant="primary" type="submit" disabled={!apiKey.trim() || saving || checking}>
             {saving ? m.settings_validating() : m.common_save()}
@@ -2316,7 +2317,7 @@ function HfStatusBadge({ settings }: { settings: HfSettings }) {
       <span className="inline-flex items-center gap-2">
         <Badge variant="warning">{m.settings_page_no_job_write_permission()}</Badge>
         <Tooltip content={m.settings_hf_write_permission_help()} className="text-subtext">
-          <Info size={15} />
+          <Info size={16} />
         </Tooltip>
       </span>
     );
@@ -2427,7 +2428,7 @@ function HfSection({ remote }: { remote: boolean }) {
         {error && <div className="error">{error}</div>}
         <div className="flex justify-end gap-2">
           <Button type="button" disabled={saving || refreshing || (!settings && !loadError)} onClick={() => void refresh()}>
-            <RefreshCw size={13} /> {refreshing ? m.common_checking() : m.settings_check_again()}
+            <RefreshCw size={14} /> {refreshing ? m.common_checking() : m.settings_check_again()}
           </Button>
           <Button variant="primary" type="submit" disabled={!token.trim() || saving || refreshing || (!settings && !loadError)}>
             {saving ? m.settings_validating() : m.common_save()}
@@ -2556,7 +2557,7 @@ function EnvRow({
               onClick={() => void remove()}
               disabled={saving}
             >
-              <Trash2 size={13} />
+              <Trash2 size={14} />
             </IconButton>
           ) : (
             value.trim() && (
@@ -2653,7 +2654,7 @@ function AddVarRow({
             onClick={onDone}
             disabled={saving}
           >
-            <X size={13} />
+            <X size={14} />
           </IconButton>
         </td>
       </tr>
@@ -2698,7 +2699,7 @@ function EnvVarsSection() {
             <Spinner /> {m.settings_page_loading()}
           </LoadingRow>
         ) : (
-          <table className="env-table w-full table-fixed border-collapse text-base [&_td:first-child]:w-[32%] [&_td:first-child]:wrap-anywhere [&_.badge]:ms-2 [&_td]:h-12 [&_td]:pt-0 [&_td]:pe-2.5 [&_td]:pb-0 [&_td]:ps-0 [&_td]:align-middle [&_td]:border-b [&_td]:border-b-border-variant [&_td:last-child]:w-29 [&_td:last-child]:whitespace-nowrap [&_td:last-child]:text-end [&_td[colspan]]:whitespace-normal [&_td[colspan]]:text-start [&_.icon-btn]:ms-2 [&_.icon-btn]:align-middle">
+          <table className="env-table w-full table-fixed border-collapse text-base [&_td:first-child]:w-[32%] [&_td:first-child]:wrap-anywhere [&_.badge]:ms-2 [&_td]:h-12 [&_td]:pt-0 [&_td]:pe-2.5 [&_td]:pb-0 [&_td]:ps-0 [&_td]:align-middle [&_td]:border-b [&_td]:border-b-border-variant [&_tr:last-child_td]:border-b-0 [&_td:last-child]:w-29 [&_td:last-child]:whitespace-nowrap [&_td:last-child]:text-end [&_td[colspan]]:whitespace-normal [&_td[colspan]]:text-start [&_.icon-btn]:ms-2 [&_.icon-btn]:align-middle">
             <tbody>
               {names.map((name) => (
                 <EnvRow
@@ -2714,16 +2715,19 @@ function EnvVarsSection() {
             </tbody>
           </table>
         )}
-        {vars?.some((v) => v.key === "TRACKIO_SERVER_URL") && (
+        {vars?.some((v) => v.key === "TRACKIO_SERVER_URL" || v.key === "TRACKIO_SPACE_ID") && (
           // Any change to the saved Trackio values, from here or elsewhere, resets an old result.
-          <TrackioCheck key={vars.filter((v) => v.key.startsWith("TRACKIO_")).map((v) => `${v.key}=${v.value ?? v.maskedValue}`).join()} />
+          <TrackioCheck
+            key={vars.filter((v) => v.key.startsWith("TRACKIO_")).map((v) => `${v.key}=${v.value ?? v.maskedValue}`).join()}
+            space={vars.some((v) => v.key === "TRACKIO_SPACE_ID")}
+          />
         )}
       </div>
     </>
   );
 }
 
-function TrackioCheck() {
+function TrackioCheck({ space }: { space: boolean }) {
   const [test, setTest] = useState<"testing" | TrackioPreflight | null>(null);
 
   async function runPreflight() {
@@ -2731,11 +2735,19 @@ function TrackioCheck() {
     try {
       setTest(await trackioPreflight());
     } catch (err) {
-      setTest({ reachable: false, version: null, writeAccess: null, error: err instanceof Error ? err.message : String(err) });
+      setTest({ reachable: false, version: null, writeAccess: null, spaceStage: null, error: err instanceof Error ? err.message : String(err) });
     }
   }
 
   const result = test === null || test === "testing" ? null : test;
+  const details = result
+    ? [
+        result.version && m.settings_trackio_version({ version: ltr(result.version) }),
+        result.spaceStage && result.spaceStage !== "RUNNING" && m.settings_trackio_space_stage({ stage: ltr(result.spaceStage) }),
+        result.writeAccess === true && (space ? m.settings_trackio_hf_write_ok() : m.settings_trackio_write_ok()),
+        result.writeAccess === false && (space ? m.settings_trackio_hf_write_rejected() : m.settings_trackio_write_rejected()),
+      ].filter(Boolean)
+    : [];
   return (
     <div className="mt-3">
       <div className="flex items-center gap-2.5">
@@ -2744,13 +2756,7 @@ function TrackioCheck() {
         </Button>
         <PreflightBadge test={test} />
       </div>
-      {result?.version && (
-        <p className="m-0 mt-2 text-sm text-subtext">
-          {m.settings_trackio_version({ version: ltr(result.version) })}
-          {result.writeAccess === true && <> · {m.settings_trackio_write_ok()}</>}
-          {result.writeAccess === false && <> · {m.settings_trackio_write_rejected()}</>}
-        </p>
-      )}
+      {details.length > 0 && <p className="m-0 mt-2 text-sm text-subtext">{details.join(" · ")}</p>}
       {result?.error && <p className={COMPUTE_DIAGNOSTIC_CLASS_NAME}>{result.error}</p>}
     </div>
   );
@@ -2810,10 +2816,10 @@ function AppearanceTab() {
     <>
       <h2>{m.settings_appearance_heading()}</h2>
       <div className={`${SETTINGS_CARD_CLASS_NAME} mt-3`}>
-        <div className={`${PROJECT_DEFAULT_ROW_CLASS_NAME} pb-3.5`}>
+        <div className={PROJECT_DEFAULT_ROW_CLASS_NAME}>
           <div className="project-default-title text-base font-medium">{m.settings_theme_heading()}</div>
           <div
-            className="theme-segmented inline-flex flex-none gap-0.5 p-0.5 border border-border rounded-md bg-surface"
+            className={`${SEGMENTED_CLASS_NAME} theme-segmented flex-none`}
             role="radiogroup"
             aria-label={m.settings_theme_heading()}
             onKeyDown={onKeyDown}
@@ -2825,7 +2831,7 @@ function AppearanceTab() {
                 role="radio"
                 aria-checked={preference === value}
                 tabIndex={preference === value ? 0 : -1}
-                className={`theme-segment inline-flex items-center gap-1.5 py-[5px] px-2.5 rounded-sm text-subtext text-sm cursor-pointer transition-[background,color] duration-120 ease-standard [&:hover:not(.on)]:text-text [&:hover:not(.on)]:bg-highlight [&.on]:text-background [&.on]:bg-primary [&:focus-visible]:outline-2 [&:focus-visible]:outline-solid [&:focus-visible]:outline-text [&:focus-visible]:outline-offset-2 ${preference === value ? "on" : ""}`}
+                className={`theme-segment ${preference === value ? "active" : ""}`}
                 onClick={() => setPreference(value)}
               >
                 <Icon size={14} />
@@ -3066,7 +3072,7 @@ function TelemetryTab() {
                     content={`${m.settings_page_currently_off()} ${settings.reason}.`}
                     className="text-subtext"
                   >
-                    <Info size={15} />
+                    <Info size={16} />
                   </Tooltip>
                 )}
               </div>
@@ -3205,14 +3211,14 @@ function GithubSettings({ remote, onProjectUpdate }: {
               <div className="mb-4 flex justify-start"><div className="h-6 w-48 rounded-full bg-surface" /></div>
               <div className="flex items-center justify-between gap-6">
                 <div className="flex-1 space-y-2">
-                  <div className="h-5 w-2/3 rounded bg-surface" />
-                  <div className="h-4 rounded bg-surface" />
-                  <div className="h-4 w-3/4 rounded bg-surface" />
+                  <div className="h-5 w-2/3 rounded-xs bg-surface" />
+                  <div className="h-4 rounded-xs bg-surface" />
+                  <div className="h-4 w-3/4 rounded-xs bg-surface" />
                 </div>
                 <div className="h-6 w-10 shrink-0 rounded-full bg-surface" />
               </div>
-              <div className="mt-6 h-4 w-44 rounded bg-surface" />
-              <div className="mt-2 h-8 rounded bg-surface" />
+              <div className="mt-6 h-4 w-44 rounded-xs bg-surface" />
+              <div className="mt-2 h-8 rounded-xs bg-surface" />
             </div>
           </div>
         )
@@ -3486,10 +3492,10 @@ export function GitTab({
         <div className="mt-4 min-h-22" role="status" aria-label={m.settings_page_loading()} aria-busy="true">
           <div aria-hidden="true" className="motion-safe:animate-pulse">
             <div className="flex items-center gap-4">
-              <div className="h-4 w-16 rounded bg-surface" />
+              <div className="h-4 w-16 rounded-xs bg-surface" />
               <div className="h-6 w-24 rounded-full bg-surface" />
             </div>
-            <div className="mt-3.5 h-8 w-48 rounded bg-surface" />
+            <div className="mt-3.5 h-8 w-48 rounded-xs bg-surface" />
           </div>
         </div>
       ) : (
@@ -3517,8 +3523,8 @@ export function GitTab({
                       {!owners.length && (accountQuery.isFetching || organizationsQuery.isFetching) && (
                         <div role="status" aria-label={m.settings_page_loading()} aria-busy="true" className="px-2 py-2">
                           <div aria-hidden="true" className="space-y-3 motion-safe:animate-pulse">
-                            <div className="h-4 w-28 rounded bg-surface" />
-                            <div className="h-4 w-36 rounded bg-surface" />
+                            <div className="h-4 w-28 rounded-xs bg-surface" />
+                            <div className="h-4 w-36 rounded-xs bg-surface" />
                           </div>
                         </div>
                       )}
@@ -3905,7 +3911,7 @@ function ComputeActivity({ projectId, onViewHistory }: { projectId?: string; onV
   const liveCount = (running?.length ?? 0) + kernels.length;
 
   return (
-    <section className="compute-activity [&_.count-badge]:inline-flex [&_.count-badge]:items-center [&_.count-badge]:justify-center [&_.count-badge]:min-w-4.5 [&_.count-badge]:h-4.5 [&_.count-badge]:py-0 [&_.count-badge]:px-[5px] [&_.count-badge]:rounded-md [&_.count-badge]:bg-surface [&_.count-badge]:border [&_.count-badge]:border-border [&_.count-badge]:text-xs [&_.count-badge]:font-medium [&_.count-badge]:text-text mt-5.5 mx-0 mb-8">
+    <section className="compute-activity [&_.count-badge]:inline-flex [&_.count-badge]:items-center [&_.count-badge]:justify-center [&_.count-badge]:min-w-4.5 [&_.count-badge]:h-4.5 [&_.count-badge]:py-0 [&_.count-badge]:px-1 [&_.count-badge]:rounded-md [&_.count-badge]:bg-surface [&_.count-badge]:border [&_.count-badge]:border-border [&_.count-badge]:text-xs [&_.count-badge]:font-medium [&_.count-badge]:text-text mt-5.5 mx-0 mb-8">
       <div className="compute-activity-head flex items-start justify-between gap-5 mb-3.5 [&_h2]:flex [&_h2]:items-center [&_h2]:gap-2 [&_h2]:m-0 [&_h2]:text-lg [@media((max-width:_640px))]:items-stretch [@media((max-width:_640px))]:flex-col">
         <div>
           <h2>
@@ -3995,14 +4001,14 @@ export const SETTINGS_NAV: SettingsNavItem[] = [
   {
     id: "compute",
     label: m.settings_page_compute,
-    icon: <Cpu size={15} />,
+    icon: <Cpu size={16} />,
     activeTabs: ["compute", "instances"],
   },
-  { id: "environment", label: m.settings_page_environment, icon: <SquareTerminal size={15} />, activeTabs: ["environment"] },
+  { id: "environment", label: m.settings_page_environment, icon: <SquareTerminal size={16} />, activeTabs: ["environment"] },
   {
     id: "settings",
     label: m.settings_page_settings,
-    icon: <Settings size={15} />,
+    icon: <Settings size={16} />,
     activeTabs: ["settings", ...SETTINGS_SECTIONS],
   },
 ];

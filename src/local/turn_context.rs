@@ -195,6 +195,7 @@ mod tests {
                 autonomy: None,
                 active_leaf_id: None,
                 side_parent_session_id: None,
+                side_parent_leaf_id: None,
                 created_at: 0,
                 updated_at: 0,
             };

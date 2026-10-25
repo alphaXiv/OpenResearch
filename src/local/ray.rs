@@ -126,6 +126,7 @@ pub async fn submit_local_ray_with_source(
         ssh_container: None,
         monitoring_error: None,
         cancellation_accepted: false,
+        rental_lease: None,
         kind: "ray_job".to_string(),
         namespace: Some(address.clone()),
         job_id: Some(submission_id.clone()),
@@ -144,6 +145,7 @@ pub async fn submit_local_ray_with_source(
         source_digest: None,
         source_path: None,
         source_size: None,
+        remote_root: None,
     };
     source.apply_to_descriptor(&mut descriptor);
     if let Err(error) = crate::compute::record_submission_handle(&run_id, &descriptor) {

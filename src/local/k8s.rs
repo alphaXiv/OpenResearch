@@ -144,6 +144,7 @@ pub async fn submit_local_k8s_with_source(
             env,
             timeout_seconds,
             labels,
+            pod_env: crate::config::run_context_env(&run_id),
             source_archive: source.path.clone(),
         },
     )
@@ -153,6 +154,7 @@ pub async fn submit_local_k8s_with_source(
         ssh_container: None,
         monitoring_error: None,
         cancellation_accepted: false,
+        rental_lease: None,
         kind: "k8s_job".to_string(),
         namespace: Some(namespace.clone()),
         job_id: Some(submitted.job_name.clone()),
@@ -171,6 +173,7 @@ pub async fn submit_local_k8s_with_source(
         source_digest: None,
         source_path: None,
         source_size: None,
+        remote_root: None,
     };
     source.apply_to_descriptor(&mut descriptor);
     if let Err(error) = crate::compute::record_submission_handle(&run_id, &descriptor) {

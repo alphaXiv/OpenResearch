@@ -16,6 +16,7 @@ const STATUS_WORD: Record<HistoryStatus, () => string> = {
   done: m.status_done,
   failed: m.status_failed,
   cancelled: m.status_cancelled,
+  lost: m.status_lost,
   running: m.status_running,
   none: m.history_status_not_run,
 };
@@ -23,6 +24,7 @@ const STATUS_TONE: Record<HistoryStatus, string> = {
   done: "var(--accent-green)",
   failed: "var(--accent-red)",
   cancelled: "var(--muted)",
+  lost: "var(--muted)",
   running: "var(--accent-teal)",
   none: "var(--muted)",
 };
@@ -55,7 +57,7 @@ function StatusShape({ status, cx, cy, r, color, background = "var(--base)" }: {
         <path d={`M${cx} ${cy - inner}A${inner} ${inner} 0 0 1 ${cx} ${cy + inner}Z`} fill={color} />
       </g>
     );
-  if (status === "cancelled") {
+  if (status === "cancelled" || status === "lost") {
     const s = (r - stroke) * 0.7;
     return (
       <g>
@@ -136,7 +138,7 @@ export function Rail({ placed, height, path, selectedId }: {
       key={key}
       d={edge.d}
       fill="none"
-      stroke={edge.hot ? "var(--primary)" : INK}
+      stroke={edge.hot ? "var(--text)" : INK}
       strokeOpacity={edge.hot ? 1 : LINE_OPACITY}
       strokeWidth={edge.hot ? 2 : 1.5}
       strokeLinecap="round"
@@ -160,11 +162,11 @@ export function Rail({ placed, height, path, selectedId }: {
         const node = item.row.node;
         const selected = node.id === selectedId;
         const hot = path.has(node.id);
-        const color = hot ? "var(--primary)" : INK;
+        const color = hot ? "var(--text)" : INK;
         return (
           <g key={index} opacity={hot ? 1 : DOT_OPACITY}>
             {!node.parent && !node.missingParentId && <circle cx={cx} cy={item.y} r={7} fill="none" stroke={color} strokeWidth={1} opacity={0.7} />}
-            {selected && <circle cx={cx} cy={item.y} r={8.5} fill="var(--primary)" fillOpacity={0.18} />}
+            {selected && <circle cx={cx} cy={item.y} r={8.5} fill="var(--text)" fillOpacity={0.18} />}
             <StatusShape status={node.status} cx={cx} cy={item.y} r={selected ? 4.6 : 4} color={color} background={selected ? "var(--highlight)" : "var(--base)"} />
           </g>
         );
@@ -209,7 +211,7 @@ export function ExperimentLineage({ node, onSelect }: { node: HistoryNode; onSel
             className="flex min-w-0 items-center gap-1.5 px-1.5 py-1 text-start text-xs text-subtext hover:text-text"
             title={folded.map((step) => step.label).join(" → ")}
           >
-            <ChevronRight size={11} className={`shrink-0 ${showAllAncestors ? "rotate-90" : ""}`} />
+            <ChevronRight size={12} className={`shrink-0 ${showAllAncestors ? "rotate-90" : ""}`} />
             <span className="truncate">
               {showAllAncestors ? m.common_show_less() : m.history_earlier_steps({ count: fmtNumber(folded.length), steps: folded.map((step) => shortName(step, 18)).join(" → ") })}
             </span>

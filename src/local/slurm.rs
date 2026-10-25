@@ -88,6 +88,9 @@ pub async fn submit_local_slurm_with_source(
     }
 
     let settings = slurm::load_settings()?.unwrap_or_default();
+    if let Some(root) = &settings.remote_root {
+        crate::jobs::ssh::validate_remote_root(root)?;
+    }
     let host = args
         .host
         .clone()
@@ -136,16 +139,18 @@ pub async fn submit_local_slurm_with_source(
         env.entry("HF_TOKEN".to_string()).or_insert(hf_token);
     }
     crate::jobs::ssh::stage_source(
-        &crate::jobs::ssh::SshTarget::alias(&host),
+        &crate::jobs::ssh::SshTarget::alias(&host).for_run(&run_id),
         &run_id,
         &source.path,
         &source.digest,
         None,
+        settings.remote_root.as_deref(),
     )
     .await?;
     let job_id = slurm::run_job(&slurm::SlurmJobSpec {
         host: host.clone(),
         run_id: run_id.clone(),
+        remote_root: settings.remote_root.clone(),
         setup_script: "test -d repo".to_string(),
         command: run_command.clone(),
         env,
@@ -162,6 +167,7 @@ pub async fn submit_local_slurm_with_source(
         ssh_container: None,
         monitoring_error: None,
         cancellation_accepted: false,
+        rental_lease: None,
         kind: "slurm_job".to_string(),
         namespace: Some(host.clone()),
         job_id: Some(job_id.clone()),
@@ -180,10 +186,11 @@ pub async fn submit_local_slurm_with_source(
         source_digest: None,
         source_path: None,
         source_size: None,
+        remote_root: settings.remote_root.clone(),
     };
     source.apply_to_descriptor(&mut descriptor);
     if let Err(error) = crate::compute::record_submission_handle(&run_id, &descriptor) {
-        let _ = slurm::cancel_job(&host, &job_id).await;
+        let _ = slurm::cancel_job(&host, &run_id, &job_id).await;
         return Err(error);
     }
     let run = StoredRun {

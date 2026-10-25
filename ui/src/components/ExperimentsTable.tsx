@@ -22,6 +22,7 @@ export function ExperimentsTable({
   onOpenLogs,
   onOpenCode,
   onArchive,
+  onDelete,
   onCancel,
   toolbarActions,
 }: {
@@ -33,6 +34,7 @@ export function ExperimentsTable({
   onOpenLogs: (experimentId: string, runId: string, intent: TabOpenIntent) => void;
   onOpenCode: (experimentId: string, intent: TabOpenIntent) => void;
   onArchive: (id: string, direction: "ancestors" | "descendants" | "only", archived: boolean) => void;
+  onDelete: (id: string) => void;
   onCancel: (runId: string) => Promise<void>;
   /** View and scope controls shared with the tree view. */
   toolbarActions?: ReactNode;
@@ -238,6 +240,7 @@ export function ExperimentsTable({
                   name={experiment.title || experiment.slug}
                   actions={archiveActions.get(experiment.id)!}
                   onArchive={onArchive}
+                  onDelete={onDelete}
                 />
               </div>
             </div>

@@ -265,6 +265,16 @@ impl Client {
         method: &str,
         params: impl serde::Serialize + Send,
     ) -> Result<Value> {
+        self.request_with_timeout(method, params, std::time::Duration::from_secs(30))
+            .await
+    }
+
+    async fn request_with_timeout(
+        &self,
+        method: &str,
+        params: impl serde::Serialize + Send,
+        timeout: std::time::Duration,
+    ) -> Result<Value> {
         let request = self
             .connection
             .send_request(UntypedMessage::new(method, params)?)
@@ -272,7 +282,7 @@ impl Client {
         if method == "session/prompt" {
             return Ok(request.await?);
         }
-        match tokio::time::timeout(std::time::Duration::from_secs(30), request).await {
+        match tokio::time::timeout(timeout, request).await {
             Ok(response) => Ok(response?),
             Err(_) => {
                 self.shutdown().await;
@@ -805,9 +815,10 @@ mod tests {
             .await
             .unwrap();
         let error = client
-            .request(
+            .request_with_timeout(
                 "session/new",
                 json!({"cwd": std::env::temp_dir(), "mcpServers": []}),
+                std::time::Duration::from_secs(1),
             )
             .await
             .unwrap_err();

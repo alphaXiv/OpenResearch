@@ -1,10 +1,10 @@
 import { m } from "../paraglide/messages.js";
-import { ChartLine, ChevronDown, CircleStop } from "lucide-react";
-import { useQuery } from "@tanstack/react-query";
+import { ChartLine, ChevronDown, CircleStop, ExternalLink, ScrollText } from "lucide-react";
 import { useEffect, useRef, useState } from "react";
 import {
   cancelRun,
   runDisplayStatus,
+  runMonitoringError,
   timeAgo,
   trackioRunUrl,
   type Experiment,
@@ -15,12 +15,13 @@ import { ExperimentOverview } from "./ExperimentOverview";
 import type { CodeView } from "./CodeTab";
 import { LogTerminal } from "./LogTerminal";
 import { StatusBadge } from "./StatusBadge";
-import type { TabOpenIntent } from "../tabPreview";
+import { tabOpenGestureHandlers, type TabOpenIntent } from "../tabPreview";
+import { useResolvedTheme } from "../theme";
 import { Button, ButtonLink, MenuItem } from "./ui";
 import { buildHistoryNodes, historyBackendLabel, historyJobId } from "./experimentLineageModel";
-import { getTrackioSettingsQuery } from "../queries/settings";
+import { useTrackioRuns } from "../queries/settings";
 
-export type ExperimentView = "overview" | "terminal";
+export type ExperimentView = "overview" | "terminal" | "trackio";
 
 /** An experiment's detail view, rendered as end-pane tab content. Mount it
  *  keyed by `${experiment.id}:${view}` so per-view state resets on switch. */
@@ -65,6 +66,7 @@ export function DetailDrawer({
         project={project}
         runs={expRuns}
         onOpenLogs={(runId, intent) => onOpenView("terminal", runId, intent)}
+        onOpenTrackio={(runId, intent) => onOpenView("trackio", runId, intent)}
         onOpenCode={(intent) => onOpenCode("files", intent)}
         onOpenDiff={(intent) => onOpenCode("changes", intent)}
      />
@@ -75,27 +77,33 @@ export function DetailDrawer({
     <TerminalView
       experiment={experiment}
       expRuns={expRuns}
+      view={view}
       selectedRunId={selectedRunId}
       onSelectRun={onSelectRun}
+      onOpenView={onOpenView}
    />
   );
 }
 
 /**
- * A run's terminal output filling the whole pane. The bar above carries the
- * stop button, the run's status and a history switcher — mirror of
- * openresearch.sh's ExperimentFullView TerminalView.
+ * A run's terminal output, or its Trackio charts, filling the whole pane. The
+ * bar above carries the stop button, the run's status and a history switcher —
+ * mirror of openresearch.sh's ExperimentFullView TerminalView.
  */
 function TerminalView({
   experiment,
   expRuns,
+  view,
   selectedRunId,
   onSelectRun,
+  onOpenView,
 }: {
   experiment: Experiment;
   expRuns: Run[];
+  view: ExperimentView;
   selectedRunId: string | null;
   onSelectRun: (id: string | null) => void;
+  onOpenView: (view: ExperimentView, runId: string | undefined, intent: TabOpenIntent) => void;
 }) {
   const [error, setError] = useState<string | null>(null);
   const [pendingRunId, setPendingRunId] = useState<string | null>(null);
@@ -105,9 +113,15 @@ function TerminalView({
   const selectedRun = selectedRunId
     ? expRuns.find((run) => run.id === selectedRunId) ?? null
     : expRuns[0] ?? null;
+  const monitoringError = selectedRun ? runMonitoringError(selectedRun) : null;
   const live = selectedRun?.status === "running" || selectedRun?.status === "starting";
-  const trackio = useQuery(getTrackioSettingsQuery()).data;
-  const trackioUrl = selectedRun ? trackioRunUrl(trackio, selectedRun) : null;
+  const theme = useResolvedTheme();
+  const trackioQuery = useTrackioRuns(experiment.projectId, live);
+  const trackio = trackioQuery.data;
+  const trackioUrl = selectedRun ? trackioRunUrl(trackio, selectedRun.id) : null;
+  const trackioEmbedUrl = view === "trackio" && selectedRun
+    ? trackioRunUrl(trackio, selectedRun.id, { theme })
+    : null;
   const cancelling = Boolean(
     selectedRun && live && (selectedRun.cancelRequested || pendingRunId === selectedRun.id),
   );
@@ -142,7 +156,7 @@ function TerminalView({
 
   return (
     <div className="term-view absolute inset-0 flex flex-col bg-background z-20">
-      <div className="term-bar flex items-center gap-2 h-10 py-0 px-2.5 border-b border-b-border shrink-0 [&_.error]:text-sm [&_.error]:text-accent-red [&_.btn]:inline-flex [&_.btn]:items-center [&_.btn]:gap-[5px]">
+      <div className="term-bar flex items-center gap-2 h-10 py-0 px-2.5 border-b border-b-border shrink-0 [&_.error]:text-sm [&_.error]:text-accent-red [&_.btn]:inline-flex [&_.btn]:items-center [&_.btn]:gap-1">
         <div className="term-title min-w-0 text-sm font-semibold text-text overflow-hidden text-ellipsis whitespace-nowrap" title={experiment.title || experiment.slug}>
           {experiment.title || experiment.slug}
         </div>
@@ -152,22 +166,44 @@ function TerminalView({
             {error}
           </span>
         )}
-        {trackioUrl && (
-          <ButtonLink
+        {view === "trackio" ? (
+          <>
+            {trackioUrl && (
+              <ButtonLink
+                size="small"
+                variant="ghost"
+                title={m.a11y_open_in_trackio()}
+                aria-label={m.a11y_open_in_trackio()}
+                href={trackioUrl}
+                target="_blank"
+                rel="noopener noreferrer"
+              >
+                <ExternalLink size={14} />
+              </ButtonLink>
+            )}
+            <Button
+              size="small"
+              variant="ghost"
+              {...tabOpenGestureHandlers<HTMLButtonElement>((intent) => onOpenView("terminal", selectedRun?.id, intent))}
+            >
+              <ScrollText size={14} />
+              {m.experiment_overview_logs()}
+            </Button>
+          </>
+        ) : trackioUrl && (
+          <Button
             size="small"
             variant="ghost"
-            title={m.a11y_open_in_trackio()}
-            href={trackioUrl}
-            target="_blank"
-            rel="noopener noreferrer"
+            title={m.a11y_trackio_charts()}
+            {...tabOpenGestureHandlers<HTMLButtonElement>((intent) => onOpenView("trackio", selectedRun?.id, intent))}
           >
-            <ChartLine size={13} />
-            Trackio
-          </ButtonLink>
+            <ChartLine size={14} />
+            {m.experiment_overview_visualize()}
+          </Button>
         )}
         {live && (
           <Button size="small" variant="ghost" disabled={cancelling} onClick={() => void stop()}>
-            <CircleStop size={13} />
+            <CircleStop size={14} />
             {cancelling ? m.common_cancelling() : m.common_stop()}
           </Button>
         )}
@@ -185,7 +221,7 @@ function TerminalView({
               <ChevronDown size={14} className="run-picker-chev text-muted shrink-0" />
             </Button>
             {historyOpen && (
-              <div className="history-menu absolute top-[calc(100%_+_6px)] end-0 min-w-57.5 max-h-80 overflow-y-auto bg-background border border-border rounded-lg shadow-menu p-[5px] z-50">
+              <div className="history-menu absolute top-[calc(100%_+_6px)] end-0 min-w-57.5 max-h-80 overflow-y-auto bg-background border border-border rounded-lg shadow-menu p-1 z-50">
                 {expRuns.map((r) => (
                   <MenuItem
                     key={r.id}
@@ -224,8 +260,28 @@ function TerminalView({
         </div>
       )}
 
-      <div className="term-fill flex-1 min-h-0 bg-terminal pt-1 pe-0 pb-1 ps-1.5">
-        {selectedRun ? (
+      {monitoringError && (
+        <p role="status" className="m-0 shrink-0 border-b border-border-variant px-3 py-2 text-sm text-accent-amber wrap-anywhere">
+          {monitoringError}
+        </p>
+      )}
+
+      <div className={`term-fill flex-1 min-h-0 ${view === "trackio" ? "bg-background" : "bg-terminal pt-1 pe-0 pb-1 ps-1.5"}`}>
+        {trackioEmbedUrl ? (
+          <iframe
+            key={trackioEmbedUrl}
+            className="block w-full h-full border-0"
+            title={m.a11y_trackio_charts()}
+            src={trackioEmbedUrl}
+            referrerPolicy="no-referrer"
+            // Cross-origin, so allow-same-origin keeps the dashboard's own origin, never orx's.
+            sandbox="allow-scripts allow-same-origin allow-popups allow-forms allow-downloads"
+          />
+        ) : view === "trackio" ? (
+          <div className="term-empty h-full flex items-center justify-center p-6 text-center text-sm text-muted">
+            {trackioQuery.isPending ? m.common_loading() : trackioQuery.error?.message ?? m.detail_drawer_trackio_no_data()}
+          </div>
+        ) : selectedRun ? (
           // Key by run id so switching runs in the history dropdown remounts
           // the terminal with the selected run's output.
           <LogTerminal key={selectedRun.id} runId={selectedRun.id} />

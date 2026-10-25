@@ -68,7 +68,7 @@ export function AcpAuthDialog({ harness, remote = false, onReady, onClose }: {
     </div>
     {harness.authEnvKey ? <form onSubmit={(event) => { event.preventDefault(); void verify(true); }} className="flex flex-col gap-3">
       <p className="m-0 text-sm">{m.acp_key_environment_help()}</p>
-      {harness.logo === "dsh" && <a href="https://platform.deepseek.com/api_keys" target="_blank" rel="noreferrer" className="text-sm text-primary underline">{m.acp_get_api_key()}</a>}
+      {harness.logo === "dsh" && <a href="https://platform.deepseek.com/api_keys" target="_blank" rel="noreferrer" className="text-sm text-accent-blue-strong underline">{m.acp_get_api_key()}</a>}
       <label className="flex flex-col gap-1 text-sm">
         {m.onboarding_api_key()}
         <Input type="password" autoFocus autoComplete="new-password" value={value}
@@ -86,8 +86,8 @@ export function AcpAuthDialog({ harness, remote = false, onReady, onClose }: {
         {commands.map((item) => <Button key={item} onClick={() => { setError(null); setCommand(item); setAttempt((attempt) => attempt + 1); }} disabled={busy}>
           <Terminal size={14} />{item === "zcode login zai" ? m.acp_sign_in_zai() : item === "zcode login bigmodel" ? m.acp_sign_in_bigmodel() : m.harness_setup_login()}
         </Button>)}
-        {harness.logo === "zcode-acp-server" && <a href="https://zcode.z.ai/en/docs/configuration" target="_blank" rel="noreferrer" className="self-center text-sm text-primary underline">{m.acp_other_provider_help()}</a>}
-        {!commands.length && harness.setupUrl && <a href={harness.setupUrl} target="_blank" rel="noreferrer" className="text-sm text-primary underline">{m.acp_setup_docs()}</a>}
+        {harness.logo === "zcode-acp-server" && <a href="https://zcode.z.ai/en/docs/configuration" target="_blank" rel="noreferrer" className="self-center text-sm text-accent-blue-strong underline">{m.acp_other_provider_help()}</a>}
+        {!commands.length && harness.setupUrl && <a href={harness.setupUrl} target="_blank" rel="noreferrer" className="text-sm text-accent-blue-strong underline">{m.acp_setup_docs()}</a>}
       </div>
       {command && <CommandTerminal key={`${command}:${attempt}`} path={`/api/settings/commands/run?${new URLSearchParams({ command })}`} label={command} command={command} shellAfter heightClass="h-64"
         onComplete={(message) => { if (typeof message === "object" && message !== null && "type" in message && message.type === "complete") { void verify(); return true; } return false; }}

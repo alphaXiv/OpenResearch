@@ -6,6 +6,7 @@ import { createRoot } from "react-dom/client";
 import { RouterProvider } from "@tanstack/react-router";
 import { router } from "./router";
 import { Toaster } from "./components/ui";
+import { DesktopZoomControls } from "./components/DesktopZoomControls";
 import { WindowControls } from "./components/WindowControls";
 import { WINDOWS_TITLEBAR } from "./desktopTitlebar";
 import { getLocale } from "./paraglide/runtime.js";
@@ -22,6 +23,7 @@ createRoot(document.getElementById("root")!).render(
       {import.meta.env.DEV && <ReactQueryDevtools initialIsOpen buttonPosition="bottom-right" />}
     </QueryClientProvider>
     <Toaster />
+    {"__ORX_DESKTOP__" in window && <DesktopZoomControls />}
     {WINDOWS_TITLEBAR && <WindowControls />}
   </StrictMode>,
 );

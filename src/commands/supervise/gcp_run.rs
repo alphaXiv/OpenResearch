@@ -96,7 +96,7 @@ pub(super) async fn run_gcp(
                 return Ok(());
             }
             if let Err(err) =
-                ssh::stage_source(&target, &run_id, &source.path, &source.digest, None).await
+                ssh::stage_source(&target, &run_id, &source.path, &source.digest, None, None).await
             {
                 eprintln!("supervise {run_id}: source staging failed (will retry): {err}");
                 launch_err = Some(err);
@@ -108,6 +108,7 @@ pub(super) async fn run_gcp(
                 run_id: run_id.clone(),
                 script: script.clone(),
                 env: env.clone(),
+                remote_root: None,
             })
             .await
             {
