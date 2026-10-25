@@ -33,6 +33,7 @@ import { FileTypeIcon, isMarkdownFile } from "./FileTypeIcon";
 import { MediaPreview, mediaPreviewKind, type MediaPreviewKind } from "./MediaPreview";
 import { MediaToolbarSlot } from "./mediaToolbar";
 import { normalizeMarkdownForRendering } from "../markdownNormalization";
+import { resolveMarkdownTarget } from "../markdownTarget";
 import { useFileVersion } from "../useFileVersion";
 import { mdCodeComponents, remarkMathOptions } from "./Md";
 import {
@@ -54,34 +55,14 @@ function isExternalSrc(src: string): boolean {
 /** Resolve a Markdown target within the artifacts root. URL suffixes stay
  * outside the encoded filesystem path, and upward escapes are rejected. */
 function artifactTarget(projectId: string, folder: string, src: string) {
-  const hashAt = src.indexOf("#");
-  const beforeHash = hashAt === -1 ? src : src.slice(0, hashAt);
-  const hash = hashAt === -1 ? "" : src.slice(hashAt);
-  const queryAt = beforeHash.indexOf("?");
-  const pathname = queryAt === -1 ? beforeHash : beforeHash.slice(0, queryAt);
-  const query = queryAt === -1 ? "" : beforeHash.slice(queryAt + 1);
-  const parts = pathname.startsWith("/")
-    ? []
-    : folder.split("/").filter((part) => part.length > 0);
-
-  for (const part of pathname.split("/")) {
-    if (!part || part === ".") continue;
-    if (part === "..") {
-      if (parts.length === 0) return null;
-      parts.pop();
-    } else {
-      parts.push(part);
-    }
-  }
-
-  const path = parts.join("/");
-  if (!path) return null;
-  const queryParams = new URLSearchParams(query);
+  const target = resolveMarkdownTarget(folder, src);
+  if (!target) return null;
+  const queryParams = new URLSearchParams(target.query);
   queryParams.delete("path");
   const querySuffix = queryParams.toString();
   return {
-    path,
-    url: `${artifactUrl(projectId, path)}${querySuffix ? `&${querySuffix}` : ""}${hash}`,
+    path: target.path,
+    url: `${artifactUrl(projectId, target.path)}${querySuffix ? `&${querySuffix}` : ""}${target.hash}`,
   };
 }
 

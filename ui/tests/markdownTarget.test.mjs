@@ -57,6 +57,13 @@ test("markdown paths decode percent-encoded reserved filename characters once", 
   });
 });
 
+test("markdown links to non-ASCII filenames resolve to the raw filename", async () => {
+  const tree = await unified().use(remarkParse).use(remarkRehype).run(unified().use(remarkParse).parse("[data](数据.md)"));
+  const href = tree.children[0].children[0].properties.href;
+  assert.equal(href, "%E6%95%B0%E6%8D%AE.md");
+  assert.equal(resolveMarkdownTarget("notes", href)?.path, "notes/数据.md");
+});
+
 test("re-resolved markdown paths are decoded only once", () => {
   for (const name of ["chart#1.png", "chart%231.png", "a?b&c:d.png", "100%.png", "my figs/a b.png"]) {
     assert.equal(resolveMarkdownTarget("", encodeMarkdownPath(name))?.path, name);
