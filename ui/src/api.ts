@@ -2590,6 +2590,7 @@ export interface SleepStatus {
   chatPrompts: boolean;
   plan: {
     gpuBudgetUsd: number;
+    goal?: string;
     until?: number;
     objective?: {
       metric: string;
@@ -2648,6 +2649,7 @@ export interface SleepStrategy {
 export interface SleepRequest {
   budgetUsd: number;
   hours: number | null;
+  goal: string | null;
   metric: string | null;
   direction: "max" | "min";
   targetPct: number | null;

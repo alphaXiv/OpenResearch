@@ -92,6 +92,37 @@ impl Delivered {
     }
 }
 
+/// The language the user reads the dashboard in, when agents should reply in
+/// it rather than in English. Only interface languages whose users asked for
+/// it are listed; the rest keep the harness's own default.
+pub fn reply_language() -> Option<&'static str> {
+    language_for_locale(crate::telemetry::dashboard_locale().as_deref()?)
+}
+
+fn language_for_locale(locale: &str) -> Option<&'static str> {
+    match locale {
+        "vi" => Some("Vietnamese"),
+        _ => None,
+    }
+}
+
+/// The `<orx-language>` block asking for replies in `language`. Written in
+/// English like the rest of the prompt: Vietnamese and other non-Latin-heavy
+/// scripts take several times the tokens for the same instruction.
+pub fn language_block(delivered: &Delivered, language: &str) -> String {
+    let body = format!(
+        "The user reads this workspace in {language}. Write every reply, question, plan, \
+         and report meant for the user in {language}, with correct spelling and \
+         diacritics, and keep it concise. Keep code, code comments, commands, file \
+         paths, identifiers, metric names, commit messages, and quotations in their \
+         original language."
+    );
+    format!(
+        "<orx-language>\n{}\n</orx-language>",
+        delivered.once("language", &body)
+    )
+}
+
 /// A short, stable fingerprint of a block's text.
 fn digest(text: &str) -> String {
     Sha256::digest(text.as_bytes())
@@ -122,6 +153,15 @@ mod tests {
         assert!(!Delivered::from_inputs(vec![later])
             .once("rules", "Be careful.")
             .contains("Unchanged"));
+    }
+
+    #[test]
+    fn vietnamese_interfaces_get_vietnamese_replies() {
+        assert_eq!(language_for_locale("vi"), Some("Vietnamese"));
+        assert_eq!(language_for_locale("en"), None);
+        let block = language_block(&Delivered::none(), "Vietnamese");
+        assert!(block.starts_with("<orx-language>\n[language #"));
+        assert!(block.contains("in Vietnamese"));
     }
 
     #[test]

@@ -35,10 +35,19 @@ pub(crate) fn title_request(prompt: &str) -> super::OneShot<'_> {
 }
 
 pub(crate) fn title_prompt(first_message: &str) -> String {
+    title_prompt_in(first_message, crate::local::turn_context::reply_language())
+}
+
+/// [`title_prompt`] with the title written in `language` when one is set, so
+/// the sidebar reads in the dashboard's language.
+fn title_prompt_in(first_message: &str, language: Option<&str>) -> String {
     let input: String = first_message.chars().take(TITLE_INPUT_CAP).collect();
+    let language = language.map_or(String::new(), |language| {
+        format!(" Write the title in {language}.")
+    });
     format!(
         "Generate a short title for a chat session that starts with the user \
-         message below. At most 6 words. Reply with the title text ONLY — no \
+         message below. At most 6 words.{language} Reply with the title text ONLY — no \
          quotes, no trailing punctuation, no explanation, nothing else.\n\n\
          User message:\n{input}"
     )
@@ -167,6 +176,13 @@ mod tests {
         let title = sanitize_title(&"word ".repeat(50)).unwrap();
         assert!(title.chars().count() <= TITLE_MAX_CHARS);
         assert!(!title.ends_with(' '));
+    }
+
+    #[test]
+    fn prompt_asks_for_the_dashboard_language() {
+        assert!(title_prompt_in("Tối ưu token", Some("Vietnamese"))
+            .contains("Write the title in Vietnamese."));
+        assert!(!title_prompt_in("Speed up training", None).contains("Write the title in"));
     }
 
     #[test]
