@@ -7,6 +7,7 @@
 //!   orx exp archive <expId> --ancestors|--only|--descendants   hide the chosen scope
 //!   orx exp unarchive <expId> --ancestors|--only|--descendants restore the same nodes
 //!   orx exp move <expId> --parent <expId>|--baseline          re-parent a subtree
+//!   orx exp delete <expId>            permanently delete a leaf node, its runs and branch
 //!
 //! Unlike the project-scoped data commands, every verb here takes an
 //! *experiment* id from `orx project view <projectId>`.
@@ -46,6 +47,7 @@ pub async fn run(args: crate::ExpArgs) -> Result<()> {
             descendants,
             ..
         } => archive(&mut store, &exp_id, ancestors, only, descendants, false),
+        ExpCommand::Delete { exp_id } => delete(&store, &exp_id),
         ExpCommand::Move { exp_id, parent, .. } => reparent(&store, &exp_id, parent.as_deref()),
         ExpCommand::Status { exp_id, scheduler } => {
             crate::local::chat::record_chat_target("experiments", &exp_id);
@@ -94,6 +96,21 @@ fn archive(
         if archived { "Archived" } else { "Restored" },
         ids.len()
     );
+    Ok(())
+}
+
+fn delete(store: &Store, id: &str) -> Result<()> {
+    let deleted = crate::local::experiments::delete_experiment(store, id)?;
+    println!(
+        "Deleted experiment {} ({}) and {} run(s).",
+        deleted.experiment.id,
+        deleted.experiment.display_name(),
+        deleted.runs
+    );
+    if let Some(sha) = &deleted.branch_commit {
+        let branch = &deleted.experiment.branch_name;
+        println!("  Deleted branch {branch} (restore with `git branch {branch} {sha}`).");
+    }
     Ok(())
 }
 

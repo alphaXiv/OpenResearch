@@ -107,6 +107,10 @@ fn flush_window() -> Duration {
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct Settings {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub desktop_zoom_percent: Option<i32>,
+    #[serde(default)]
+    pub acp_harnesses: Vec<crate::local::acp::Definition>,
     #[serde(default)]
     pub ssh: crate::config::SshSettings,
     /// Random anonymous id (uuid v4), generated once on first enabled run.
@@ -475,7 +479,7 @@ fn lock_settings_file() -> Option<fd_lock::RwLock<std::fs::File>> {
 /// mutation is REFUSED (writes nothing) so a persisted opt-out hiding in an
 /// unparseable file is never silently dropped — the caller's change is lost,
 /// but the user's privacy choice is preserved.
-fn mutate_settings<F: FnOnce(&mut Settings)>(f: F) -> std::io::Result<()> {
+pub(crate) fn mutate_settings<F: FnOnce(&mut Settings)>(f: F) -> std::io::Result<()> {
     let _guard = SETTINGS_LOCK
         .get_or_init(|| std::sync::Mutex::new(()))
         .lock()
@@ -1441,6 +1445,42 @@ mod tests {
     }
 
     #[test]
+    fn acp_definitions_are_independent_and_preserve_settings() {
+        let _guard = EnvGuard::new(OPT_VARS);
+        let dir = std::env::temp_dir().join(format!("orx-acp-settings-{}", uuid::Uuid::new_v4()));
+        std::env::set_var("XDG_CONFIG_HOME", &dir);
+        set_persisted_disabled(true).unwrap();
+        let first = crate::local::acp::Definition {
+            id: format!("acp:{}", uuid::Uuid::new_v4()),
+            name: "First".into(),
+            executable: "agent-one".into(),
+            arguments: vec!["a b".into(), "'quoted'".into()],
+        };
+        let second = crate::local::acp::Definition {
+            id: format!("acp:{}", uuid::Uuid::new_v4()),
+            name: "Second".into(),
+            executable: "agent-two".into(),
+            arguments: vec![],
+        };
+        crate::local::acp::save(first.clone(), true).unwrap();
+        crate::local::acp::save(second.clone(), true).unwrap();
+        assert_eq!(
+            crate::local::acp::definitions(),
+            [first.clone(), second.clone()]
+        );
+        assert!(crate::local::acp::save(first.clone(), true).is_err());
+        let mut edited = first.clone();
+        edited.executable = "new-agent".into();
+        crate::local::acp::save(edited.clone(), false).unwrap();
+        assert_eq!(crate::local::acp::definitions(), [edited, second.clone()]);
+        crate::local::acp::remove(&first.id).unwrap();
+        assert_eq!(crate::local::acp::definitions(), [second]);
+        assert!(crate::local::acp::save(first, false).is_err());
+        assert_eq!(load_settings().unwrap().telemetry_disabled, Some(true));
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
     fn data_dir_and_telemetry_fields_dont_clobber_each_other() {
         // Regression: the Storage feature persists `data_dir` in the *same*
         // settings.json telemetry owns. Both must go through mutate_settings so a
@@ -1591,6 +1631,8 @@ mod tests {
         set_persisted_disabled(true).unwrap();
         let options = SshHostSettings {
             container: Some("research".into()),
+            remote_root: Some("/scratch/lab/orx".into()),
+            keep_remote_runs: true,
         };
         set_ssh_host("lab".into(), options.clone()).unwrap();
         set_ssh_default(Some("lab".into())).unwrap();
@@ -1614,6 +1656,35 @@ mod tests {
             std::fs::write(settings_path(), raw).unwrap();
             assert!(ssh_settings().is_err(), "{raw}");
         }
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[cfg(desktop_app)]
+    #[test]
+    fn desktop_zoom_roundtrip_preserves_other_preferences() {
+        let _guard = EnvGuard::new(OPT_VARS);
+        let dir = std::env::temp_dir().join(format!("orx-desktop-zoom-{}", uuid::Uuid::new_v4()));
+        std::env::set_var("XDG_CONFIG_HOME", &dir);
+
+        assert_eq!(crate::config::desktop_zoom_percent(), 100);
+        set_persisted_disabled(true).unwrap();
+        crate::config::set_desktop_zoom_percent(130).unwrap();
+        set_compute_default(Some("local".into()), None).unwrap();
+        assert_eq!(crate::config::desktop_zoom_percent(), 130);
+        let saved = load_settings().unwrap();
+        assert_eq!(saved.desktop_zoom_percent, Some(130));
+        assert_eq!(saved.telemetry_disabled, Some(true));
+        assert_eq!(saved.default_backend.as_deref(), Some("local"));
+
+        for invalid in [0, 250] {
+            mutate_settings(|settings| settings.desktop_zoom_percent = Some(invalid)).unwrap();
+            assert_eq!(crate::config::desktop_zoom_percent(), 100);
+        }
+        crate::config::set_desktop_zoom_percent(100).unwrap();
+        assert_eq!(load_settings().unwrap().desktop_zoom_percent, Some(100));
+        assert_eq!(load_settings().unwrap().telemetry_disabled, Some(true));
+        std::fs::write(settings_path(), r#"{"telemetryDisabled":true}"#).unwrap();
+        assert_eq!(crate::config::desktop_zoom_percent(), 100);
         std::fs::remove_dir_all(dir).unwrap();
     }
 

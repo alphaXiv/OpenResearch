@@ -137,6 +137,27 @@ pub enum SandboxTarget {
 pub struct CreateSandboxBody {
     pub organization_id: String,
     pub target: SandboxTarget,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub rental_lease: Option<CreateRentalLease>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CreateRentalLease {
+    pub version: u8,
+    pub max_active_seconds: u64,
+}
+#[derive(Clone, Deserialize)]
+pub struct RentalLeaseCapability {
+    pub version: u8,
+    pub token: String,
+}
+impl std::fmt::Debug for RentalLeaseCapability {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("RentalLeaseCapability")
+            .field("version", &self.version)
+            .finish_non_exhaustive()
+    }
 }
 
 /// A sandbox as returned by `POST /sandboxes`. Mirrors the API's `zSandbox`;
@@ -172,6 +193,8 @@ pub struct Sandbox {
 #[derive(Debug, Clone, Deserialize)]
 pub struct SandboxEnvelope {
     pub sandbox: Sandbox,
+    #[serde(default, rename = "rentalLease")]
+    pub rental_lease: Option<RentalLeaseCapability>,
 }
 
 /// `GET /sandboxes` — each row is a `Sandbox` (the extra `connections` the
@@ -2090,6 +2113,7 @@ mod tests {
     fn serializes_create_sandbox_body_without_project() {
         let body = CreateSandboxBody {
             organization_id: "org_123".into(),
+            rental_lease: None,
             target: SandboxTarget::NewCpu {
                 cpu_flavor: "cpu5c".into(),
                 vcpu_count: 2,

@@ -2,8 +2,10 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import {
   unreadAfterBusyChange,
+  isParentUpdate,
+  parentUpdateText,
   partIsVisible,
-  pendingQuestionId,
+  questionReplies,
   partsTailToolId,
   streamTailIsText,
   streamTailTool,
@@ -11,9 +13,33 @@ import {
   transcriptFileName,
   transcriptMarkdown,
   withoutDuplicateTurnError,
+  splitResponseParts,
 } from "../src/chatRendering.ts";
 
 const message = (...parts) => ({ id: "assistant", role: "assistant", parts, createdAt: 0 });
+
+test("question display uses the original question without an adapter-added title", () => {
+  const tool = { id: "tool", type: "tool", state: { input: { questions: [{ header: "Color", question: "Which color?" }] } } };
+  const prompt = { id: "prompt", type: "prompt", prompt: { kind: "question", question: "Color\n\nWhich color?" } };
+  assert.equal(questionReplies([message(tool, prompt)]).questionById.get("prompt"), "Which color?");
+  const contextual = { ...prompt, prompt: { ...prompt.prompt, question: "Keep this context.\n\nWhich color?" } };
+  assert.equal(questionReplies([message(tool, contextual)]).questionById.get("prompt"), contextual.prompt.question);
+});
+
+test("question replies stay visible and only represented question tool echoes disappear", () => {
+  const prompt = { id: "prompt", type: "prompt", prompt: { kind: "question", question: "Color\n\nWhich color?", resolved: true, answers: ["Green"] } };
+  const tool = { id: "tool", type: "tool", tool: "question", state: { status: "completed", input: { questions: [{ question: "Which color?" }] } } };
+  const reply = { id: "reply", type: "steer", text: "In response to: Color\n\nWhich color?\n\nGreen" };
+  const final = { id: "final", type: "text", phase: "final_answer", text: "Received." };
+  const messages = [message(tool, prompt, reply, final)];
+  const result = splitResponseParts(messages, false, questionReplies(messages));
+  assert.ok(result.answer.includes(reply));
+  assert.ok(result.answer.includes(final));
+  assert.ok(![...result.answer, ...result.work.flatMap(turn => turn.parts)].includes(tool));
+  const failed = { ...tool, state: { ...tool.state, status: "error", error: "Could not deliver question" } };
+  assert.ok(splitResponseParts([message(failed, prompt)], false).answer.includes(failed));
+  assert.ok(splitResponseParts([message(tool)], false).answer.includes(tool));
+});
 
 test("a recovery error replaces the identical terminal error without hiding other errors", () => {
   const duplicate = { id: "err-0", type: "tool", tool: "error", state: { error: "Invalid model" } };
@@ -131,6 +157,12 @@ test("Cursor model restrictions use the limit disclosure without treating them a
   assert.equal(isModelAccessLimitPart({ type: "tool", tool: "error", state: { error: "Rate limit reached" } }), false);
 });
 
+test("Z.ai billing rejection is model access unavailable rather than a session quota", async () => {
+  const { isModelAccessLimitPart } = await import("../src/chatRendering.ts");
+  assert.equal(isModelAccessLimitPart({ type: "tool", tool: "error", state: { error: "ZCode turn failed: 1113 Insufficient balance or no resource package" } }), true);
+  assert.equal(isModelAccessLimitPart({ type: "tool", tool: "error", state: { error: "ZCode turn failed: CONFIGURATION_ERROR" } }), false);
+});
+
 test("Codex and OpenCode terminal limits use the shared disclosure without classifying ordinary tool failures", async () => {
   const { isUsageLimitPart } = await import("../src/chatRendering.ts");
   for (const error of [
@@ -149,14 +181,24 @@ test("Codex and OpenCode terminal limits use the shared disclosure without class
   }
 });
 
-test("live OpenCode questions route composer text to the existing prompt", () => {
-  const question = { id: "question", type: "prompt", prompt: { kind: "question", nativeId: '["frm_test","answer"]', resolved: false } };
-  for (const harness of ["opencode", "claude-code", "codex"]) {
-    assert.equal(pendingQuestionId([message(question)], harness, true), "question");
-    assert.equal(pendingQuestionId([message(question)], harness, false), null);
-  }
-  assert.equal(pendingQuestionId([message({ ...question, prompt: { ...question.prompt, resolved: true } })], "opencode", true), null);
-  assert.equal(pendingQuestionId([message(question)], "cursor", true), null);
+test("async answers appear once without the generated question preamble", () => {
+  const prompt = { id: "q", type: "prompt", prompt: { kind: "question", question: "Can you free space?", resolved: true, note: "What is using memory?" } };
+  const reply = user("reply", "In response to: Can you free space?\n\nWhat is using memory?");
+  const messages = [message(prompt), reply];
+  const display = questionReplies(messages);
+  assert.equal(display.textById.get("reply"), "What is using memory?");
+  assert.equal(display.questionById.get("reply"), "Can you free space?");
+  assert.deepEqual([...display.prompts], ["q"]);
+  assert.equal(reply.parts[0].text, "In response to: Can you free space?\n\nWhat is using memory?");
+  assert.equal(questionReplies([reply]).textById.size, 0);
+  assert.equal(questionReplies([reply, message(prompt)]).textById.size, 0);
+  assert.equal(questionReplies([message({ ...prompt, prompt: { ...prompt.prompt, resolved: false } }), reply]).textById.size, 0);
+  assert.equal(questionReplies([message({ ...prompt, prompt: { ...prompt.prompt, nativeId: "rpc-1" } }), reply]).textById.size, 0);
+  assert.equal(questionReplies([message(prompt), user("unrelated", "A new question"), reply]).textById.size, 1);
+  assert.equal(questionReplies([...messages, user("repeat", reply.parts[0].text)]).textById.size, 1);
+  assert.equal(questionReplies([message(prompt), user("different", "In response to: Can you free space?\n\nDifferent text")]).textById.size, 0);
+  const steer = { id: "steer", type: "steer", text: reply.parts[0].text };
+  assert.equal(questionReplies([message(prompt, steer)]).textById.get("steer"), "What is using memory?");
 });
 
 const user = (id, text) => ({ id, role: "user", createdAt: 0, parts: [{ id: `${id}-t`, type: "text", text }] });
@@ -246,4 +288,154 @@ test("switching conversation branches clears hidden pending questions", async ()
   assert.equal(hasPendingInput(activePath(messages, "old"), false), true);
   assert.equal(hasPendingInput(activePath(messages, "retry"), false), false);
   assert.equal(hasPendingInput(activePath(messages, "old"), false), true);
+});
+
+test("automatic continuations share a response until the next user message", async () => {
+  const { groupResponseMessages } = await import("../src/chatRendering.ts");
+  const user = { id: "user", role: "user", parts: [], createdAt: 0 };
+  const first = { ...message(), id: "first" };
+  const continuation = { ...message(), id: "continuation" };
+  const nextUser = { ...user, id: "next-user" };
+  const groups = groupResponseMessages([user, first, continuation, nextUser]);
+  assert.deepEqual(groups, [[user], [first, continuation], [nextUser]]);
+  assert.equal(groupResponseMessages([user, first, continuation, nextUser], groups)[1], groups[1]);
+});
+
+test("a continuation retains the previous answer until a new answer arrives", async () => {
+  const { splitResponseParts } = await import("../src/chatRendering.ts");
+  const oldAnswer = { id: "old-answer", type: "text", phase: "final_answer", text: "Run launched" };
+  const progress = { id: "progress", type: "text", phase: "commentary", text: "Checking the result" };
+  const newAnswer = { id: "new-answer", type: "text", phase: "final_answer", text: "Run repaired" };
+  const first = { ...message(oldAnswer), id: "first", completedAt: 10 };
+  const continuation = { ...message(progress), id: "continuation", createdAt: 100 };
+  const waiting = splitResponseParts([first, continuation], true);
+  assert.deepEqual(waiting.answer, [oldAnswer]);
+  assert.deepEqual(waiting.work, [{ id: "continuation", parts: [progress] }]);
+  const updated = splitResponseParts([first, { ...continuation, parts: [progress, newAnswer] }], true);
+  assert.deepEqual(updated.answer, [newAnswer]);
+  assert.deepEqual(updated.work, [
+    { id: "first", parts: [oldAnswer] },
+    { id: "continuation", parts: [progress] },
+  ]);
+});
+
+test("continuation prompts stay outside collapsed activity", async () => {
+  const { splitResponseParts } = await import("../src/chatRendering.ts");
+  const first = message({ id: "answer", type: "text", phase: "final_answer", text: "Started" });
+  const prompt = { id: "question", type: "prompt", prompt: { kind: "question", resolved: false } };
+  assert.deepEqual(splitResponseParts([first, { ...message(prompt), id: "next" }], true).answer, [prompt]);
+});
+
+test("every event for an agent resolves to its combined live transcript", async () => {
+  const { agentTranscript } = await import("../src/chatRendering.ts");
+  const event = (id, threads, children = [], status = "completed") => ({
+    id, type: "tool", tool: "subagent", children,
+    state: { status, input: { agentThreadIds: threads } },
+  });
+  const first = { id: "child:first", type: "text", text: "First update" };
+  const next = { id: "child:next", type: "text", text: "Still working" };
+  const other = { id: "other:text", type: "text", text: "Different agent" };
+  const spawn = event("spawn", ["child"], [first]);
+  const report = event("report", ["child"]);
+  const continuation = event("continuation", ["child", "other"], [next, other], "running");
+  const messages = [message(spawn, report, continuation)];
+  for (const id of ["spawn", "report"]) {
+    const transcript = agentTranscript(messages, id);
+    assert.deepEqual(transcript.children, [first, next]);
+    assert.equal(transcript.state.status, "running");
+  }
+  assert.equal(agentTranscript(messages, "missing"), null);
+});
+
+test("an agent transcript can open before content arrives and then receive updates", async () => {
+  const { agentTranscript } = await import("../src/chatRendering.ts");
+  const spawn = { id: "spawn", type: "tool", tool: "subagent", children: [],
+    state: { status: "running", input: { agentThreadIds: ["child"] } } };
+  assert.deepEqual(agentTranscript([message(spawn)], "spawn").children, []);
+  const update = { id: "child:update", type: "text", text: "Working" };
+  assert.deepEqual(agentTranscript([message({ ...spawn, children: [update] })], "spawn").children, [update]);
+  const legacy = { ...spawn, state: { status: "running" }, children: [update] };
+  assert.equal(agentTranscript([message(legacy)], "spawn"), legacy);
+});
+
+test("nested report-back markers retain their own update rather than reopening the agent", async () => {
+  const { agentTranscript } = await import("../src/chatRendering.ts");
+  const markers = ["one", "two", "three", "four"].map((id) => ({
+    id: `audit:${id}`, type: "tool", tool: "subagent",
+    state: { status: "completed", input: { kind: "interacted" } },
+  }));
+  const audit = { id: "audit-spawn", type: "tool", tool: "subagent",
+    state: { status: "completed", input: { nickname: "audit" } },
+    children: [{ id: "audit:read", type: "tool", tool: "read" }, ...markers],
+  };
+  for (const marker of markers) {
+    assert.equal(agentTranscript([message(audit)], marker.id), marker);
+  }
+  const linkedMarker = { ...markers[0], state: { ...markers[0].state,
+    input: { kind: "interacted", agentThreadIds: ["parent"] } } };
+  const linkedAudit = { ...audit, children: [linkedMarker] };
+  assert.equal(agentTranscript([message(linkedAudit)], linkedMarker.id), linkedMarker);
+});
+
+
+test("outgoing parent updates are distinct from transcript-owning agent events", async () => {
+  const { isParentUpdate } = await import("../src/chatRendering.ts");
+  const update = { id: "child:report", type: "tool", tool: "subagent",
+    state: { input: { kind: "interacted" } } };
+  assert.equal(isParentUpdate(update), true);
+  assert.equal(isParentUpdate({ ...update, id: "agent-spawn" }), false);
+  assert.equal(isParentUpdate({ ...update, children: [{ id: "child:message", type: "text", text: "Result" }] }), false);
+});
+
+test("Claude handbacks show their actual update and empty Codex markers remain static", () => {
+  const handback = { id: "spawn:handback", type: "tool", tool: "SubagentHandback", state: { input: { message: "HELPER_DONE" } } };
+  assert.equal(isParentUpdate(handback), true);
+  assert.equal(parentUpdateText(handback), "HELPER_DONE");
+  assert.equal(parentUpdateText({ id: "child:update", tool: "subagent", state: { input: { kind: "interacted" } } }), null);
+});
+
+test("a wakeup continuation retains each earlier turn's recovery controls", async () => {
+  const { groupResponseMessages, splitResponseTurn, splitResponseParts } = await import("../src/chatRendering.ts");
+  const recovery = { id: "turn-recovery", type: "tool", tool: "error", state: {
+    status: "error", error: "Disconnected", input: { turnId: "failed-turn", recoveryAction: "continue" },
+  } };
+  const failed = { ...message({ id: "answer", type: "text", text: "Experiment launched" }, recovery), id: "failed" };
+  const wakeup = { ...message({ id: "wakeup-answer", type: "text", text: "Experiment finished" }), id: "wakeup" };
+  const turns = groupResponseMessages([failed, wakeup])[0].map(splitResponseTurn);
+  assert.equal(turns[0].turnStatus, recovery);
+  assert.equal(turns[0].turnStatus.state.input.turnId, "failed-turn");
+  assert.equal(turns[1].turnStatus, undefined);
+  const response = splitResponseParts(turns.map(turn => turn.message), false);
+  assert.deepEqual(response.answer, wakeup.parts);
+  assert.ok(response.work.every(turn => !turn.parts.includes(recovery)));
+});
+
+
+test("answered questions stay visible when Claude continues with a final response", async () => {
+  const { splitResponseParts } = await import("../src/chatRendering.ts");
+  const color = { id: "color", type: "prompt", prompt: { kind: "question", resolved: true, question: "Color?", answers: ["Green"] } };
+  const shape = { id: "shape", type: "prompt", prompt: { kind: "question", resolved: true, question: "Shape?", answers: ["Square"] } };
+  const tool = { id: "tool", type: "tool", tool: "AskUserQuestion" };
+  const final = { id: "final", type: "text", phase: "final_answer", text: "Green and Square" };
+  const response = splitResponseParts([
+    { ...message(color), id: "first" },
+    { ...message(shape), id: "second" },
+    { ...message(tool, final), id: "last" },
+  ], false);
+  assert.deepEqual(response.answer, [color, shape, final]);
+  assert.deepEqual(response.work, [{ id: "last", parts: [tool] }]);
+});
+
+test("explicitly skipped questions stay visible without treating stale cleanup as a skip", async () => {
+  const { splitResponseParts } = await import("../src/chatRendering.ts");
+  const skipped = { id: "skipped", type: "prompt", prompt: { kind: "question", resolved: true, question: "Color?", approved: false } };
+  const historical = { id: "historical", type: "prompt", prompt: { kind: "question", resolved: true, question: "Shape?", note: "Skipped" } };
+  const stale = { id: "stale", type: "prompt", prompt: { kind: "question", resolved: true, question: "Size?" } };
+  const final = { id: "final", type: "text", phase: "final_answer", text: "Continuing" };
+  const response = splitResponseParts([
+    { ...message(skipped, historical, stale), id: "questions" },
+    { ...message(final), id: "last" },
+  ], false);
+  assert.deepEqual(response.answer, [skipped, historical, final]);
+  assert.deepEqual(response.work, [{ id: "questions", parts: [stale] }]);
 });

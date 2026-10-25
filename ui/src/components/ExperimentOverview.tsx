@@ -2,9 +2,11 @@ import { m } from "../paraglide/messages.js";
 import { getLocale } from "../paraglide/runtime.js";
 import {
   CalendarDays,
+  ChartLine,
   Clock3,
   FolderTree,
   GitCommitHorizontal,
+  GitCompareArrows,
   Terminal,
 } from "lucide-react";
 import { useEffect, useState } from "react";
@@ -13,16 +15,20 @@ import {
   fmtDuration,
   runDisplayStatus,
   timeAgo,
+  trackioRunUrl,
   type Experiment,
   type Project,
   type Run,
 } from "../api";
+import { useTrackioRuns } from "../queries/settings";
 import { tabOpenGestureHandlers, type TabOpenIntent } from "../tabPreview";
 import { BackendBadge } from "./BackendLogos";
 import { BranchPill } from "./BranchPill";
 import { Md } from "./Md";
 import { StatusBadge } from "./StatusBadge";
-import { Button } from "./ui";
+import { Button, Tooltip } from "./ui";
+import { ExperimentLineage } from "./ExperimentLineage";
+import type { HistoryNode } from "./experimentLineageModel";
 
 const EXPERIMENT_OVERVIEW_SECTION_CLASS_NAME = [
   "experiment-overview-section mt-5.5 pt-4.5 border-t border-t-border-variant",
@@ -31,7 +37,7 @@ const EXPERIMENT_OVERVIEW_SECTION_CLASS_NAME = [
 ].join(" ");
 
 const EXPERIMENT_OVERVIEW_COMMAND_CLASS_NAME = [
-  "experiment-overview-command block mt-[13px] text-text text-sm",
+  "experiment-overview-command block mt-3 text-text text-sm",
   "wrap-anywhere",
 ].join(" ");
 
@@ -51,18 +57,26 @@ function runDuration(run: Run, now: number): string {
 
 export function ExperimentOverview({
   experiment,
+  lineageNode,
+  onOpenExperiment,
   parentExperiment,
   project,
   runs,
   onOpenLogs,
+  onOpenTrackio,
   onOpenCode,
+  onOpenDiff,
 }: {
   experiment: Experiment;
+  lineageNode: HistoryNode | null;
+  onOpenExperiment: (id: string, intent: TabOpenIntent) => void;
   parentExperiment: Experiment | null;
   project: Project;
   runs: Run[];
   onOpenLogs: (runId: string, intent: TabOpenIntent) => void;
+  onOpenTrackio: (runId: string, intent: TabOpenIntent) => void;
   onOpenCode: (intent: TabOpenIntent) => void;
+  onOpenDiff: (intent: TabOpenIntent) => void;
 }) {
   const latestRun = runs[0] ?? null;
   const monitoringError = experimentMonitoringError(runs);
@@ -70,6 +84,8 @@ export function ExperimentOverview({
     (run) => run.status === "running" || run.status === "starting",
   );
   const [now, setNow] = useState(() => Date.now());
+  const trackio = useTrackioRuns(experiment.projectId, hasLiveRun).data;
+  const hasTrackio = latestRun !== null && trackioRunUrl(trackio, latestRun.id) !== null;
 
   useEffect(() => {
     if (!hasLiveRun) return;
@@ -84,32 +100,52 @@ export function ExperimentOverview({
         <header className="experiment-overview-head flex items-start justify-between gap-6">
           <div className="experiment-overview-heading min-w-0">
             <h1>{experiment.title || experiment.slug}</h1>
-            <div className="experiment-overview-slug mt-[5px] text-muted text-sm">{experiment.slug}</div>
+            <div className="experiment-overview-slug mt-1 text-muted text-sm">{experiment.slug}</div>
           </div>
           <StatusBadge status={latestRun ? runDisplayStatus(latestRun) : "idle"} />
         </header>
 
-        <div className="experiment-overview-actions flex gap-[7px] mt-4.5 [@media((max-width:_720px))]:flex-wrap">
+        <div className="experiment-overview-actions flex gap-2 mt-4.5 [@media((max-width:_720px))]:flex-wrap">
           {latestRun && (
             <Button
               {...tabOpenGestureHandlers<HTMLButtonElement>((intent) =>
                 onOpenLogs(latestRun.id, intent),
               )}
             >
-              <Terminal size={15} />
+              <Terminal size={16} />
               {m.experiment_overview_logs()}
+            </Button>
+          )}
+          {latestRun && hasTrackio && (
+            <Button
+              title={m.a11y_trackio_charts()}
+              {...tabOpenGestureHandlers<HTMLButtonElement>((intent) =>
+                onOpenTrackio(latestRun.id, intent),
+              )}
+            >
+              <ChartLine size={16} />
+              {m.experiment_overview_visualize()}
             </Button>
           )}
           <Button
             {...tabOpenGestureHandlers<HTMLButtonElement>(onOpenCode)}
           >
-            <FolderTree size={15} />
+            <FolderTree size={16} />
             {m.experiment_overview_code()}
           </Button>
+          <Tooltip interactive content={m.experiment_overview_diff_from_parent()}>
+            <Button
+              disabled={!parentExperiment}
+              {...tabOpenGestureHandlers<HTMLButtonElement>(onOpenDiff)}
+            >
+              <GitCompareArrows size={16} />
+              {m.experiment_overview_diff()}
+            </Button>
+          </Tooltip>
         </div>
 
         {experiment.description && (
-          <section className="experiment-overview-section mt-5.5 pt-4.5 border-t border-t-border-variant [&_h2]:mt-0 [&_h2]:mx-0 [&_h2]:mb-3.5 [&_h2]:text-text [&_h2]:text-sm [&_h2]:font-semibold overview-description [&_.md]:text-text [&_.md]:leading-[1.65]">
+          <section className="experiment-overview-section mt-5.5 pt-4.5 border-t border-t-border-variant [&_h2]:mt-0 [&_h2]:mx-0 [&_h2]:mb-3.5 [&_h2]:text-text [&_h2]:text-sm [&_h2]:font-semibold overview-description [&_.md]:text-text [&_.md]:leading-relaxed">
             <h2>{m.experiment_overview_description()}</h2>
             <Md text={experiment.description} />
           </section>
@@ -119,15 +155,15 @@ export function ExperimentOverview({
           <h2>{latestRun ? m.experiment_latest_run() : m.experiment_runs()}</h2>
           {latestRun && (
             <>
-              <div className="experiment-overview-meta flex items-center flex-wrap gap-y-2.5 gap-x-4.5 text-text text-sm [&_svg]:text-muted [&_.backend-badge]:text-text [&_.status-badge]:text-text [&_>_span]:inline-flex [&_>_span]:items-center [&_>_span]:gap-[5px] [&_code]:text-text [&_code]:text-xs">
+              <div className="experiment-overview-meta flex items-center flex-wrap gap-y-2.5 gap-x-4.5 text-text text-sm [&_svg]:text-muted [&_.backend-badge]:text-text [&_.status-badge]:text-text [&_>_span]:inline-flex [&_>_span]:items-center [&_>_span]:gap-1 [&_code]:text-text [&_code]:text-xs">
                 <StatusBadge status={runDisplayStatus(latestRun)} />
                 <BackendBadge backend={latestRun.backend} />
                 <span title={m.experiment_overview_started()}>
-                  <CalendarDays size={13} />
+                  <CalendarDays size={14} />
                   {fmtDate(latestRun.createdAt)}
                 </span>
                 <span title={m.experiment_overview_duration()}>
-                  <Clock3 size={13} />
+                  <Clock3 size={14} />
                   {runDuration(latestRun, now)}
                 </span>
                 {latestRun.commitSha && (
@@ -161,9 +197,37 @@ export function ExperimentOverview({
           )}
         </section>
 
+        {runs.length > 0 && (
+          <section className={`${EXPERIMENT_OVERVIEW_SECTION_CLASS_NAME} @container`}>
+            <h2>{m.experiment_overview_run_history()}</h2>
+            <div className="experiment-run-history divide-y divide-border-variant [&_button]:w-full [&_button]:grid [&_button]:grid-cols-[minmax(72px,_0.7fr)_minmax(100px,_1fr)_minmax(70px,_0.7fr)_60px_16px] [&_button]:items-center [&_button]:gap-3.5 [&_button]:py-3 [&_button]:px-0.5 [&_button]:text-text [&_button]:text-start [&_button]:text-sm [&_button:hover]:bg-surface @max-lg:[&_button]:grid-cols-[48px_minmax(0,_1fr)_40px_16px] @max-lg:[&_button_>_:nth-child(3)]:hidden">
+              {runs.map((run, index) => (
+                <button
+                  key={run.id}
+                  {...tabOpenGestureHandlers<HTMLButtonElement>((intent) =>
+                    onOpenLogs(run.id, intent),
+                  )}
+                >
+                  <span className="experiment-run-number text-xs font-medium">{m.experiment_overview_run()} {runs.length - index}</span>
+                  <StatusBadge status={runDisplayStatus(run)} className="min-w-0" />
+                  <span>{timeAgo(run.createdAt)}</span>
+                  <span>{runDuration(run, now)}</span>
+                  <Terminal size={14} />
+                </button>
+              ))}
+            </div>
+          </section>
+        )}
+
+        {lineageNode && (
+          <div className="mt-5.5 border-t border-border-variant pt-4.5">
+            <ExperimentLineage node={lineageNode} onSelect={onOpenExperiment} />
+          </div>
+        )}
+
         <section className={EXPERIMENT_OVERVIEW_SECTION_CLASS_NAME}>
           <h2>Git</h2>
-          <div className="experiment-overview-meta flex items-center flex-wrap text-text text-sm [&_svg]:text-muted [&_.backend-badge]:text-text [&_.status-badge]:text-text [&_>_span]:inline-flex [&_>_span]:items-center [&_>_span]:gap-[5px] [&_code]:text-text [&_code]:text-xs experiment-overview-git-meta gap-y-[9px] gap-x-3.5 [&_.files-pill]:py-[5px] [&_.files-pill]:px-2 [&_.files-pill]:rounded-sm [&_.files-pill_code]:text-xs">
+          <div className="experiment-overview-meta flex items-center flex-wrap text-text text-sm [&_svg]:text-muted [&_.backend-badge]:text-text [&_.status-badge]:text-text [&_>_span]:inline-flex [&_>_span]:items-center [&_>_span]:gap-1 [&_code]:text-text [&_code]:text-xs experiment-overview-git-meta gap-y-2 gap-x-3.5 [&_.files-pill]:py-1 [&_.files-pill]:px-2 [&_.files-pill]:rounded-sm [&_.files-pill_code]:text-xs">
             <BranchPill
               owner={project.githubEnabled ? project.githubOwner : ""}
               repo={project.githubEnabled ? project.githubRepo : ""}
@@ -183,27 +247,6 @@ export function ExperimentOverview({
           )}
         </section>
 
-        {runs.length > 0 && (
-          <section className={EXPERIMENT_OVERVIEW_SECTION_CLASS_NAME}>
-            <h2>{m.experiment_overview_run_history()}</h2>
-            <div className="experiment-run-history border-t border-t-border-variant [&_button]:w-full [&_button]:grid [&_button]:grid-cols-[minmax(72px,_0.7fr)_minmax(100px,_1fr)_minmax(70px,_0.7fr)_60px_16px] [&_button]:items-center [&_button]:gap-3.5 [&_button]:py-[11px] [&_button]:px-0.5 [&_button]:border-b [&_button]:border-b-border-variant [&_button]:text-text [&_button]:text-start [&_button]:text-sm [&_button:hover]:bg-surface [@media((max-width:_720px))]:[&_button]:grid-cols-[65px_1fr_60px_16px] [@media((max-width:_720px))]:[&_button_>_:nth-child(3)]:hidden">
-              {runs.map((run, index) => (
-                <button
-                  key={run.id}
-                  {...tabOpenGestureHandlers<HTMLButtonElement>((intent) =>
-                    onOpenLogs(run.id, intent),
-                  )}
-                >
-                  <span className="experiment-run-number text-xs font-medium">{m.experiment_overview_run()} {runs.length - index}</span>
-                  <StatusBadge status={runDisplayStatus(run)} />
-                  <span>{timeAgo(run.createdAt)}</span>
-                  <span>{runDuration(run, now)}</span>
-                  <Terminal size={13} />
-                </button>
-              ))}
-            </div>
-          </section>
-        )}
       </div>
     </div>
   );

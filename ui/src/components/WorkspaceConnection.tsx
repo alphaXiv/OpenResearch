@@ -6,6 +6,7 @@ import { RemoteHostDialog } from "./RemoteHostDialog";
 import { RemoteIcon } from "./RemoteIcon";
 import { RemoteStatus } from "./RemoteStatus";
 import { SshConfigDialog } from "./SshConfigDialog";
+import { BrandMark } from "./Wordmark";
 import { Button, IconButton } from "./ui";
 
 export function WorkspaceConnection({
@@ -46,7 +47,10 @@ export function WorkspaceConnection({
             </IconButton>
             <span className="flex min-w-0 flex-col gap-1 text-start text-text">
               <span className="truncate text-sm leading-tight">{m.projects_local()}</span>
-              <span className="truncate text-xs leading-tight text-subtext">OpenResearch {ltr(runtime.version)}</span>
+              <span className="flex min-w-0 items-center gap-1 text-xs leading-tight text-subtext">
+                <span className="size-3 shrink-0"><BrandMark /></span>
+                <span className="truncate">OpenResearch {ltr(runtime.version)}</span>
+              </span>
             </span>
           </div>
         </div>

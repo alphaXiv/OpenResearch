@@ -1,5 +1,8 @@
 import {
   setScopedQueryData,
+  deletedSessionIds,
+  isCurrentScope,
+  workspaceScope,
   queryClient,
 } from "./queries/client";
 import { useMutation, useQuery } from "@tanstack/react-query";
@@ -18,7 +21,7 @@ import {
 
 import { listChatSessionsQuery, getChatMessagesQuery } from "./queries/chat";
 import { listProjectsQuery, getUiStateQuery, listRunsQuery, listExperimentsQuery } from "./queries/projects";
-import { deleteChatSession, openSideChat, sendChatMessage, setExperimentArchived } from "./api";
+import { deleteExperiment, openSideChat, sendChatMessage, setExperimentArchived } from "./api";
 import { getArtifactsQuery } from "./queries/files";
 import { readHarnesses } from "./queries/settings";
 import { useBlocker, useRouter, useRouterState } from "@tanstack/react-router";
@@ -67,13 +70,16 @@ import { m } from "./paraglide/messages.js";
 import { useLocale } from "./locale";
 import { autoDir, ltr } from "./i18n";
 import {
+  ChartLine,
   ChartSpline,
+  ArrowDownWideNarrow,
   Check,
   FileCode,
   Filter,
   FlaskConical,
   FolderGit2,
   FolderOpen,
+  GitBranch,
   Maximize2,
   MessagesSquare,
   Minimize2,
@@ -106,13 +112,14 @@ import { ProjectTerminal } from "./components/ProjectTerminal";
 import { SettingsCommandTerminal } from "./components/SshConnectTerminal";
 import { isWindowsDrivePath } from "./markdownTarget";
 import { ChatPanel, findPartById, spawnRowTitle } from "./components/ChatPanel";
-import { usePopover } from "./components/ModelPicker";
+import { OptionPicker, usePopover } from "./components/ModelPicker";
 import { SubagentTab } from "./components/SubagentTab";
 import { CodeTab, type CodeView } from "./components/CodeTab";
 import { WorktreeTab, type WorktreeView } from "./components/WorktreeTab";
 import { ArtifactsTab, findArtifactEntry } from "./components/ArtifactsTab";
 import { SkillsTab } from "./components/SkillsTab";
 import { ClosableTab } from "./components/ClosableTab";
+import { TabStrip } from "./components/TabStrip";
 import { DetailDrawer, type ExperimentView } from "./components/DetailDrawer";
 import { FileViewer, type FileScrollPosition } from "./components/FileViewer";
 import { confirmFileDiscard, FileBufferSession } from "./fileSync";
@@ -123,13 +130,14 @@ import { OfflineBanner } from "./components/OfflineBanner";
 import { NewProjectDialog } from "./components/ProjectsHome";
 import { ExperimentsTable } from "./components/ExperimentsTable";
 import { archiveActionsByExperiment } from "./components/ArchiveMenu";
+import { type HistoryOrder } from "./components/ExperimentLineage";
 import { Md } from "./components/Md";
 import { SettingsView, type SettingsTab } from "./components/SettingsPage";
 import { DemoWelcomeModal } from "./components/Tour";
 import { TreeView } from "./components/TreeView";
 import { onChatEvent, useOrxEvents } from "./events";
 import { closeTab, openTab, type TabOpenIntent } from "./tabPreview";
-import { Button, IconButton, MenuItem, showAlert, Spinner } from "./components/ui";
+import { Button, IconButton, MenuItem, SEGMENTED_CLASS_NAME, showAlert, Spinner, Tooltip } from "./components/ui";
 import { CodeTabBody, TabBody } from "./components/layout/TabBody";
 import { RemoteStatus } from "./components/RemoteStatus";
 
@@ -232,8 +240,7 @@ function fileBranchLabel(tab: FileViewDef, baselineBranch?: string): string | un
 
 type ExperimentsView = "tree" | "table";
 
-const PANEL_MARGIN = 10;
-const WORKSPACE_CARD_MIN_WIDTH = 1448; // 1420px content plus the body’s 14px gutters.
+const WORKSPACE_CARD_MIN_WIDTH = 1420;
 // Once a drag pushes the panel past its usable max by this much, it snaps to
 // fullscreen — a bit of resistance you have to overcome deliberately.
 const FULLSCREEN_SNAP_SLOP = 80;
@@ -375,6 +382,8 @@ export default function App({ runtime, projectId, pane }: { runtime: RuntimeInfo
   const artifacts = artifactsQuery.data ?? null;
 
   const [view, setView] = useState<ExperimentsView>("table");
+  const [showTableLineage, setShowTableLineage] = useState(false);
+  const [tableOrder, setTableOrder] = useState<HistoryOrder>("lineage");
   const [showArchivedExperiments, setShowArchivedExperiments] = useState(false);
   // Experiments pane scope: "agent" narrows to the open chat session's work.
   // Falls back to "project" whenever there is no usable experiment attribution.
@@ -398,6 +407,17 @@ export default function App({ runtime, projectId, pane }: { runtime: RuntimeInfo
     try {
       await setExperimentArchived(id, direction, archived);
       await queryClient.invalidateQueries({ queryKey: listExperimentsQuery(projectId).queryKey });
+    } catch (error) {
+      showAlert(error instanceof Error ? error.message : String(error), "error");
+    }
+  }, [projectId]);
+  const deleteExperimentNode = useCallback(async (id: string) => {
+    try {
+      await deleteExperiment(id);
+      await Promise.all([
+        queryClient.invalidateQueries({ queryKey: listExperimentsQuery(projectId).queryKey }),
+        queryClient.invalidateQueries({ queryKey: listRunsQuery(projectId).queryKey }),
+      ]);
     } catch (error) {
       showAlert(error instanceof Error ? error.message : String(error), "error");
     }
@@ -437,20 +457,27 @@ export default function App({ runtime, projectId, pane }: { runtime: RuntimeInfo
   };
   const [planTabs, setPlanTabs] = useState<PlanViewDef[]>([]);
   const [subagentTabs, setSubagentTabs] = useState<SubagentViewDef[]>([]);
+  const subagentExpansions = useRef(new Map<string, Map<string, boolean>>());
+  const getSubagentExpansionState = (tab: SubagentViewDef) => {
+    const key = `${tab.sessionId}:${tab.spawnPartId}`;
+    let state = subagentExpansions.current.get(key);
+    if (!state) {
+      state = new Map();
+      subagentExpansions.current.set(key, state);
+    }
+    return state;
+  };
   const [sideTabs, setSideTabs] = useState<SideChatViewDef[]>([]);
   const [codeTabs, setCodeTabs] = useState<CodeTabDef[]>([]);
   const [contentTabOrder, setContentTabOrderState] = useState<string[]>([]);
   const [previewTab, setPreviewTabState] = useState<RightTab | null>(null);
   const [filesView, setFilesView] = useState<WorktreeView>("files");
   const [filesToggled, setFilesToggled] = useState<ReadonlySet<string>>(new Set());
-  // The right pane is a floating panel: closable, edge-resizable, expandable
-  // to (nearly) full screen. Width persists across sessions.
   const [panelMax, setPanelMax] = useState(false);
   const [treeViewport, setTreeViewport] = useState<Viewport | null>(null);
   const [panelWidth, setPanelWidth] = useState(initialPanelWidth);
   const [workspaceWide, setWorkspaceWide] = useState(() => window.innerWidth >= WORKSPACE_CARD_MIN_WIDTH);
   const workspaceCardVisible = mainView === "chat" && !panelOpen && workspaceWide;
-  // The agents rail is a floating panel too: fixed-width, collapsible.
   const [railOpen, setRailOpen] = useState(true);
   const [newProjectOpen, setNewProjectOpen] = useState(false);
   const currentRightPaneStateRef = useRef<RightPaneSessionState>(initialRightPaneSessionState());
@@ -477,6 +504,7 @@ export default function App({ runtime, projectId, pane }: { runtime: RuntimeInfo
   // the slot order because the replacement must land at this exact position.
   const retireRightTab = useCallback((tab: ContentTab) => {
     const key = rightTabKey(tab);
+    if (typeof tab === "object" && "spawnPartId" in tab) subagentExpansions.current.delete(`${tab.sessionId}:${tab.spawnPartId}`);
     setExpTabs((prev) => withoutTab(prev, key));
     setFileTabs((prev) => withoutTab(prev, key));
     setPlanTabs((prev) => withoutTab(prev, key));
@@ -591,6 +619,7 @@ export default function App({ runtime, projectId, pane }: { runtime: RuntimeInfo
 
   const forgetRightTab = useCallback((tab: RightTab, selectFallback: boolean) => {
     const key = rightTabKey(tab);
+    if (typeof tab === "object" && "spawnPartId" in tab) subagentExpansions.current.delete(`${tab.sessionId}:${tab.spawnPartId}`);
     const preview = previewTabRef.current;
     if (preview && rightTabKey(preview) === key) setPreviewTab(null);
     const contentState = closeTab(
@@ -803,7 +832,7 @@ export default function App({ runtime, projectId, pane }: { runtime: RuntimeInfo
     if (prefs) {
       setRailOpen(prefs.railOpen);
       setPanelWidth(Math.min(prefs.panelWidth, panelMaxWidth()));
-      setView(prefs.experimentsView);
+      setView(prefs.experimentsView === "tree" ? "tree" : "table");
     }
   }, [uiState]);
   useEffect(() => {
@@ -869,7 +898,7 @@ export default function App({ runtime, projectId, pane }: { runtime: RuntimeInfo
     reportFirstAction("open_experiment");
     const tab = { id, view };
     setExpTabs((prev) => (prev.some((t) => sameExpTab(t, tab)) ? prev : [...prev, tab]));
-    if (view === "terminal" && isDemoProjectId(projectIdRef.current)) {
+    if (view !== "overview" && isDemoProjectId(projectIdRef.current)) {
       setPanelWidth((width) => Math.max(width, sideChatPanelWidth()));
     }
     openRightTab(tab, intent, runId);
@@ -1270,7 +1299,7 @@ export default function App({ runtime, projectId, pane }: { runtime: RuntimeInfo
   ) => {
     const tab: SubagentViewDef = { kind: "subagent", sessionId, spawnPartId, label };
     setSubagentTabs((prev) =>
-      prev.some((t) => t.spawnPartId === spawnPartId) ? prev : [...prev, tab],
+      prev.some((t) => t.spawnPartId === tab.spawnPartId) ? prev : [...prev, tab],
     );
     openRightTab(tab, intent);
   }, [openRightTab]);
@@ -1285,12 +1314,18 @@ export default function App({ runtime, projectId, pane }: { runtime: RuntimeInfo
     [forgetRightTab, rightTab, subagentTabs],
   );
 
-  const openSideTab = useCallback((sessionId: string) => {
+  const openSideTab = useCallback((sessionId: string | null) => {
     const tab: SideChatViewDef = { kind: "side", sessionId };
     setSideTabs((prev) => prev.some((t) => t.sessionId === sessionId) ? prev : [...prev, tab]);
     setPanelWidth((width) => Math.max(width, sideChatPanelWidth()));
     openRightTab(tab, "keepOpen");
   }, [openRightTab]);
+
+  const [sideComposerFocusNonce, setSideComposerFocusNonce] = useState(0);
+  const focusSideTab = useCallback((sessionId: string | null) => {
+    setSideComposerFocusNonce((nonce) => nonce + 1);
+    openSideTab(sessionId);
+  }, [openSideTab]);
 
   const forgetSideTab = useCallback(
     (tab: SideChatViewDef) => {
@@ -1301,14 +1336,19 @@ export default function App({ runtime, projectId, pane }: { runtime: RuntimeInfo
     [forgetRightTab, rightTab, sideTabs],
   );
 
-  // Side chats are deleted when orx restarts; drop saved tabs whose chat is gone.
+  // Drop saved tabs only when their persisted session has been deleted.
   useEffect(() => {
     const live = sessionsQuery.data;
     if (!live) return;
-    for (const tab of sideTabs) if (!live.some((session) => session.id === tab.sessionId)) forgetSideTab(tab);
+    for (const tab of sideTabs) if (tab.sessionId !== null && !live.some((session) => session.id === tab.sessionId)) forgetSideTab(tab);
   }, [sessionsQuery.data, sideTabs, forgetSideTab]);
 
   const startSideChat = useCallback(async (parentSessionId: string, question: string) => {
+    if (!question.trim()) {
+      focusSideTab(null);
+      return;
+    }
+    const scope = workspaceScope();
     let session;
     try {
       session = await openSideChat(parentSessionId);
@@ -1316,16 +1356,10 @@ export default function App({ runtime, projectId, pane }: { runtime: RuntimeInfo
       showAlert(m.side_chat_open_failed({ error: errorText(error) }), "error");
       return;
     }
-    // The user moved to another task while it opened; its tab belongs nowhere now.
-    if (navigationRef.current.activeSessionId !== parentSessionId) {
-      void deleteChatSession(session.id).catch((error) => {
-        showAlert(m.side_chat_close_failed({ error: errorText(error) }), "error");
-      });
-      return;
-    }
+    if (!isCurrentScope(scope) || deletedSessionIds.has(session.id) || deletedSessionIds.has(parentSessionId)) return;
     setScopedQueryData(listChatSessionsQuery(session.projectId).queryKey, (current) =>
       current && [session, ...current.filter((row) => row.id !== session.id)]);
-    openSideTab(session.id);
+    if (navigationRef.current.activeSessionId === parentSessionId) focusSideTab(session.id);
     if (!question) return;
     try {
       // Seed the transcript first so the live stream has a cache to land the question in.
@@ -1334,18 +1368,9 @@ export default function App({ runtime, projectId, pane }: { runtime: RuntimeInfo
     } catch (error) {
       showAlert(errorText(error), "error");
     }
-  }, [openSideTab]);
+  }, [focusSideTab]);
 
-  // Side chats are temporary: closing the tab is what deletes one.
-  const closeSideTab = useCallback(
-    (tab: SideChatViewDef) => {
-      forgetSideTab(tab);
-      void deleteChatSession(tab.sessionId).catch((error) => {
-        showAlert(m.side_chat_close_failed({ error: errorText(error) }), "error");
-      });
-    },
-    [forgetSideTab],
-  );
+  const closeSideTab = forgetSideTab;
 
   // Live title + running state for open sub-agent tabs, straight off the spawn
   // parts' message stream — so a tab is named for its task and shimmers while
@@ -1519,7 +1544,7 @@ export default function App({ runtime, projectId, pane }: { runtime: RuntimeInfo
         window.removeEventListener("pointermove", onMove);
         return;
       }
-      const w = Math.round(window.innerWidth - ev.clientX - PANEL_MARGIN);
+      const w = Math.round(window.innerWidth - ev.clientX);
       const max = panelMaxWidth();
       // Drag past the usable max by the slop threshold → snap to fullscreen.
       // Dragging back below it drops out of fullscreen to the clamped width.
@@ -1592,6 +1617,16 @@ export default function App({ runtime, projectId, pane }: { runtime: RuntimeInfo
       ? rightTab
       : null;
   const sideSession = sideTab ? sessionsQuery.data?.find((session) => session.id === sideTab.sessionId) : undefined;
+  const sideParentSession = sessionsQuery.data?.find((session) => session.id === activeSessionId);
+  const sideDraftAgent = useMemo(() => sideParentSession ? {
+    harness: sideParentSession.harness,
+    model: sideParentSession.model,
+    serviceTier: sideParentSession.serviceTier,
+    permissionMode: sideParentSession.permissionMode === "plan" ? null : sideParentSession.permissionMode,
+    reasoningLevel: sideParentSession.reasoningLevel,
+  } : null, [sideParentSession?.harness, sideParentSession?.model,
+    sideParentSession?.serviceTier, sideParentSession?.permissionMode,
+    sideParentSession?.reasoningLevel]);
   const requestedCodeTab =
     typeof rightTab === "object" && "code" in rightTab ? rightTab : null;
   const codeTab = requestedCodeTab
@@ -1638,6 +1673,8 @@ export default function App({ runtime, projectId, pane }: { runtime: RuntimeInfo
           icon={
             tab.view === "overview" ? (
               <ChartSpline size={12} className="shrink-0" />
+            ) : tab.view === "trackio" ? (
+              <ChartLine size={12} className="shrink-0" />
             ) : (
               <Terminal size={12} className="shrink-0" />
             )
@@ -1760,8 +1797,8 @@ export default function App({ runtime, projectId, pane }: { runtime: RuntimeInfo
       {runtime.kind === "local" && <OfflineBanner />}
       {runtime.kind === "local" && <UpdateBanner status={updateStatus} />}
       <DesktopAppBanner />
-      {workspaceError && <div role="alert" className="flex items-center gap-2 px-4 mac-titlebar:ps-20 win-titlebar:pe-36 py-2 text-subtext"><span>{workspaceError}</span><Button onClick={retryWorkspace}>{m.app_retry()}</Button></div>}
-      <div className={`app-body workspace-body relative flex flex-1 min-h-0 py-0 px-3.5 ${workspaceCardVisible ? "workspace-card-visible" : ""}`}>
+      {workspaceError && <div role="alert" className="flex items-center gap-2 px-4 mac-titlebar:ps-titlebar-controls win-titlebar:pe-win-controls py-2 text-subtext"><span>{workspaceError}</span><Button onClick={retryWorkspace}>{m.app_retry()}</Button></div>}
+      <div className={`app-body workspace-body relative flex flex-1 min-h-0 ${workspaceCardVisible ? "workspace-card-visible" : ""}`}>
         {projectId && (
           <ChatPanel
             projectId={projectId}
@@ -1786,9 +1823,6 @@ export default function App({ runtime, projectId, pane }: { runtime: RuntimeInfo
             onRunSetup={runtime.kind === "ssh" ? undefined : runSetup}
             composerFocusNonce={composerFocusNonce}
             runtime={runtime}
-            onOpenDemoWelcome={
-              activeProject && isDemoProjectId(activeProject.id) ? openDemoWelcome : undefined
-            }
             activeSessionId={activeSessionId}
             onActiveSessionChange={onActiveSessionChange}
             preferredAgent={uiState.preferredAgent}
@@ -1817,7 +1851,7 @@ export default function App({ runtime, projectId, pane }: { runtime: RuntimeInfo
             experiments={experiments}
             runs={runs}
             onOpenExperiment={(id, runId) => openExperimentTab(id, "overview", "preview", runId)}
-            rightOffset={panelOpen ? panelWidth + 28 : undefined}
+            rightOffset={panelOpen ? panelWidth + 14 : undefined}
             activeView={panelOpen && (rightTab === "files" || rightTab === "artifacts" || rightTab === "experiments" || rightTab === "terminal") ? rightTab : null}
             projectId={activeProject.id}
             onCompute={() => selectMainView("compute")}
@@ -1829,11 +1863,13 @@ export default function App({ runtime, projectId, pane }: { runtime: RuntimeInfo
             onArtifacts={openArtifactsTab}
             onExperiments={() => openExperimentsTab()}
             onSideChat={activeSessionId ? () => void startSideChat(activeSessionId, "") : undefined}
+            sessions={sessionsQuery.data ?? []}
+            onSelectSideChat={focusSideTab}
           />
         )}
         {mainView === "chat" && panelOpen && (
           <aside
-            className={`right-pane relative shrink-0 min-w-0 flex flex-col mt-5 win-titlebar:mt-10 me-0 mb-5 ms-3.5 bg-background [&.max]:fixed [&.max]:inset-2.5 mac-titlebar:[&.max]:top-8 win-titlebar:[&.max]:top-10 [&.max]:m-0 [&.max]:z-60 [&.max]:shadow-panel-max border border-border rounded-lg overflow-hidden shadow-elevated ${panelMax ? "max" : ""}`}
+            className={`right-pane relative shrink-0 min-w-0 flex flex-col win-titlebar:pt-win-caption bg-background [&.max]:fixed [&.max]:inset-0 mac-titlebar:[&.max]:pt-titlebar [&.max]:z-60 [&.max]:border-s-0 border-s border-s-border overflow-hidden ${panelMax ? "max" : ""}`}
             style={panelMax ? undefined : { width: panelWidth }}
             data-onboarding="experiments"
           >
@@ -1842,8 +1878,8 @@ export default function App({ runtime, projectId, pane }: { runtime: RuntimeInfo
               title={panelMax ? m.app_drag_to_restore_panel() : m.app_drag_to_resize_panel()}
               onPointerDown={resizePanel}
             />
-            <div className="tabs flex items-end gap-0 pt-1 pe-1.5 pb-0 ps-2 h-10 border-b border-b-border bg-background shrink-0">
-              <div className="tab-strip flex items-end gap-0.5 flex-1 min-w-0 overflow-x-auto [scrollbar-width:none] [&::-webkit-scrollbar]:hidden">
+            <div className="tabs flex items-end gap-0 pt-1 pe-1.5 pb-0 ps-2 h-10 mac-titlebar:h-titlebar border-b border-b-border bg-background shrink-0">
+              <TabStrip activeKey={rightTabKey(rightTab)}>
                 {leadingFileTabs.map(renderFileTab)}
                 {filesTabOpen && (
                   <ClosableTab
@@ -1882,7 +1918,7 @@ export default function App({ runtime, projectId, pane }: { runtime: RuntimeInfo
                   />
                 )}
                 {orderedContentTabs.map(renderContentTab)}
-              </div>
+              </TabStrip>
               <div className="panel-controls inline-flex items-center gap-0.5 self-center py-0 px-1.5 shrink-0">
                 <IconButton
                   title={panelMax ? m.app_restore_panel() : m.app_expand_panel()}
@@ -1928,8 +1964,43 @@ export default function App({ runtime, projectId, pane }: { runtime: RuntimeInfo
             ) : rightTab === "experiments" ? (
               <TabBody>
                 <div className="pane-toolbar flex shrink-0 flex-wrap items-center gap-2 bg-background px-3 pt-2.5 pb-2">
-                  <span className="flex-1" />
-                  <div className="experiments-toolbar-controls inline-flex items-center gap-[5px]">
+                  <div className="experiments-toolbar-controls flex w-full items-center gap-1">
+                    {view === "table" && (
+                      <Tooltip interactive content={m.history_order()}>
+                      <OptionPicker
+                        triggerIcon={<ArrowDownWideNarrow size={16} />}
+                        choices={[
+                          { id: "lineage", label: m.history_lineage() },
+                          { id: "oldest", label: m.history_order_oldest() },
+                          { id: "newest", label: m.history_order_newest() },
+                        ]}
+                        value={tableOrder}
+                        header={m.history_order()}
+                        title={m.history_order()}
+                        variant="bare"
+                        dropDown
+                        align="left"
+                        onSelect={(id) => {
+                          if (id === "lineage" || id === "oldest" || id === "newest") setTableOrder(id);
+                        }}
+                      />
+                      </Tooltip>
+                    )}
+                    {view === "table" && (
+                      <Tooltip interactive content={m.history_show_lineage()}>
+                        <IconButton
+                          size="small"
+                          active={showTableLineage && tableOrder === "lineage"}
+                          className="[&.active]:text-text"
+                          disabled={tableOrder !== "lineage"}
+                          aria-label={m.history_show_lineage()}
+                          aria-pressed={showTableLineage && tableOrder === "lineage"}
+                          onClick={() => setShowTableLineage((show) => !show)}
+                        >
+                          <GitBranch size={16} />
+                        </IconButton>
+                      </Tooltip>
+                    )}
                     <div className="option-picker relative inline-flex" ref={scopeMenuRef}>
                       <IconButton size="small"
                         ref={scopeTriggerRef}
@@ -1943,7 +2014,7 @@ export default function App({ runtime, projectId, pane }: { runtime: RuntimeInfo
                         <Filter size={16} strokeWidth={2.5} />
                       </IconButton>
                       {scopeMenuOpen && (
-                        <div className="option-menu absolute bottom-[calc(100%_+_8px)] start-0 max-h-95 flex flex-col bg-background border border-border rounded-lg shadow-menu z-50 overflow-hidden min-w-47.5 p-1.5 [&.align-right]:start-auto [&.align-right]:end-0 [&.drop-down]:bottom-auto [&.drop-down]:top-[calc(100%_+_4px)] [&.session-menu]:start-auto [&.session-menu]:end-1.5 [&.session-menu]:top-[calc(100%_-_2px)] [&.session-menu]:min-w-35 drop-down align-right experiment-scope-menu [&_.model-item]:whitespace-nowrap [&_.model-item:disabled]:text-muted [&_.model-item:disabled]:cursor-default [&_.model-item:disabled:hover]:bg-transparent">
+                        <div className="option-menu absolute bottom-[calc(100%_+_8px)] start-0 max-h-95 flex flex-col bg-background border border-border rounded-lg shadow-menu z-50 overflow-hidden min-w-47.5 p-1.5 [&.align-right]:start-auto [&.align-right]:end-0 [&.drop-down]:bottom-auto [&.drop-down]:top-[calc(100%_+_4px)] [&.session-menu]:start-auto [&.session-menu]:end-1.5 [&.session-menu]:top-[calc(100%_-_2px)] [&.session-menu]:min-w-35 drop-down experiment-scope-menu [&_.model-item]:whitespace-nowrap [&_.model-item:disabled]:text-muted [&_.model-item:disabled]:cursor-default [&_.model-item:disabled:hover]:bg-transparent">
                           <MenuItem
                             aria-pressed={effectiveScope === "agent"}
                             disabled={!activeSessionId || !allExperimentsAttributed}
@@ -1960,7 +2031,7 @@ export default function App({ runtime, projectId, pane }: { runtime: RuntimeInfo
                             }}
                           >
                             <span>{m.app_current_task()}</span>
-                            {effectiveScope === "agent" && <Check size={13} />}
+                            {effectiveScope === "agent" && <Check size={14} />}
                           </MenuItem>
                           <MenuItem
                             aria-pressed={effectiveScope === "project"}
@@ -1970,7 +2041,7 @@ export default function App({ runtime, projectId, pane }: { runtime: RuntimeInfo
                             }}
                           >
                             <span>{m.app_entire_project()}</span>
-                            {effectiveScope === "project" && <Check size={13} />}
+                            {effectiveScope === "project" && <Check size={14} />}
                           </MenuItem>
                           <div className="my-1 border-t border-border-variant" />
                           <MenuItem
@@ -1981,13 +2052,14 @@ export default function App({ runtime, projectId, pane }: { runtime: RuntimeInfo
                             }}
                           >
                             <span>{m.app_show_archived_experiments()}</span>
-                            {showArchivedExperiments && <Check size={13} />}
+                            {showArchivedExperiments && <Check size={14} />}
                           </MenuItem>
                         </div>
                       )}
                     </div>
+                    <span className="flex-1" />
                     <div
-                      className="seg inline-flex items-center gap-0.5 rounded-md bg-hover-subtle [&_button]:font-medium [&_button]:text-text [&_button]:rounded-sm [&_button:not(:disabled):hover]:text-text [&_button.active]:bg-background [&_button.active]:shadow-segment [&_button:disabled]:text-muted [&_button:disabled]:cursor-default experiments-view-toggle p-0.5 [&_button]:py-0.5 [&_button]:px-2 [&_button]:text-sm"
+                      className={`${SEGMENTED_CLASS_NAME} experiments-view-toggle`}
                       role="group"
                       aria-label={m.app_experiment_view()}
                     >
@@ -2020,6 +2092,7 @@ export default function App({ runtime, projectId, pane }: { runtime: RuntimeInfo
                         onOpenView={openExperimentTab}
                         onOpenCode={openCodeTabForExperiment}
                         onArchive={archiveExperiment}
+                        onDelete={deleteExperimentNode}
                         agentSessionId={effectiveScope === "agent" ? activeSessionId : null}
                         onShowProjectScope={showProjectScope}
                         onRestoreRegion={restoreArchivedRegion}
@@ -2027,8 +2100,10 @@ export default function App({ runtime, projectId, pane }: { runtime: RuntimeInfo
                         onViewportChange={setTreeViewport}
                       />
                     )
-                  ) : (
+                  ) : view === "table" ? (
                     <ExperimentsTable
+                      showLineage={showTableLineage && tableOrder === "lineage"}
+                      order={tableOrder}
                       archiveActions={archiveActions}
                       runs={scopedRuns}
                       emptyHint={
@@ -2056,9 +2131,10 @@ export default function App({ runtime, projectId, pane }: { runtime: RuntimeInfo
                           );
                       }}
                       onArchive={archiveExperiment}
+                      onDelete={deleteExperimentNode}
                       onCancel={cancelRun}
                     />
-                  )}
+                  ) : null}
                 </div>
               </TabBody>
             ) : rightTab === "files" ? (
@@ -2188,11 +2264,11 @@ export default function App({ runtime, projectId, pane }: { runtime: RuntimeInfo
               </TabBody>
             ) : sideTab && projectId ? (
               <TabBody>
-                {sideSession ? (
+                {sideSession || sideTab.sessionId === null ? (
                   <div className="flex min-h-0 flex-1">
                     <ChatPanel
-                      key={sideTab.sessionId}
                       embedded
+                      composerFocusNonce={sideComposerFocusNonce}
                       projectId={projectId}
                       projectName={activeProject?.name ?? ""}
                       railOpen={false}
@@ -2216,17 +2292,32 @@ export default function App({ runtime, projectId, pane }: { runtime: RuntimeInfo
                       }
                       runtime={runtime}
                       activeSessionId={sideTab.sessionId}
+                      sideParentSessionId={sideTab.sessionId === null ? activeSessionId ?? undefined : undefined}
                       onOpenSideChat={(parentSessionId, question) => void startSideChat(parentSessionId, question)}
                       onActiveSessionChange={(sessionId, options) => {
+                        if (sideTab.sessionId === null && sessionId !== null) {
+                          const session = queryClient.getQueryData(listChatSessionsQuery(projectId).queryKey)
+                            ?.find((row) => row.id === sessionId);
+                          if (session?.sideParentSessionId !== activeSessionId) {
+                            onActiveSessionChange(sessionId, options);
+                            return;
+                          }
+                          const navigation = navigationRef.current;
+                          if (navigation.activeSessionId !== activeSessionId || navigation.pane?.kind !== "side" || navigation.pane.sessionId !== null) return;
+                          setSideTabs((current) => current.filter((tab) => tab.sessionId !== null));
+                          forgetRightTab(sideTab, false);
+                          openSideTab(sessionId);
+                          return;
+                        }
                         // Null after a delete drops the tab; anything else (`/resume`) is the main chat's.
                         const deleted = !queryClient.getQueryData(listChatSessionsQuery(projectId).queryKey)
                           ?.some((session) => session.id === sideTab.sessionId);
                         if (sessionId === null && deleted) forgetSideTab(sideTab);
                         else onActiveSessionChange(sessionId, options);
                       }}
-                      preferredAgent={uiState.preferredAgent}
+                      preferredAgent={sideTab.sessionId === null ? sideDraftAgent : uiState.preferredAgent}
                       onPreferredAgentChange={persistPreferredAgent}
-                      preferredAutonomy={uiState.preferredAutonomy ?? DEFAULT_AUTONOMY}
+                      preferredAutonomy={sideTab.sessionId === null ? sideParentSession?.autonomy ?? DEFAULT_AUTONOMY : uiState.preferredAutonomy ?? DEFAULT_AUTONOMY}
                       onPreferredAutonomyChange={persistPreferredAutonomy}
                     />
                   </div>
@@ -2243,6 +2334,7 @@ export default function App({ runtime, projectId, pane }: { runtime: RuntimeInfo
                 key={subagentTab.spawnPartId}
                 sessionId={subagentTab.sessionId}
                 spawnPartId={subagentTab.spawnPartId}
+                expansionState={getSubagentExpansionState(subagentTab)}
                 onOpenFile={(path, line, exp, ref, intent) =>
                   openFromRightTab(subagentTab, () =>
                     openChatFile(path, subagentTab.sessionId, line, exp, ref, intent),
@@ -2296,6 +2388,10 @@ export default function App({ runtime, projectId, pane }: { runtime: RuntimeInfo
                   <DetailDrawer
                     key={`${expTab.id}:${expTab.view}`}
                     experiment={tabExperiment}
+                    experiments={experiments}
+                    onOpenExperiment={(id, intent) =>
+                      openFromRightTab(expTab, () => openExperimentTab(id, "overview", intent))
+                    }
                     project={activeProject}
                     view={expTab.view}
                     runs={runs}
@@ -2355,6 +2451,7 @@ export default function App({ runtime, projectId, pane }: { runtime: RuntimeInfo
       </div>
       {newProjectOpen && (
         <NewProjectDialog
+          preferredAgent={uiState.preferredAgent}
           remote={runtime.kind === "ssh"}
           onClose={() => setNewProjectOpen(false)}
           onCreated={(project, publicationError) => {

@@ -1,9 +1,13 @@
 import { cn } from "./ui/cn";
+import { formatAcpCommand } from "../acp";
 import { TARGET_LABELS } from "../computeTargets";
+import { AcpAuthDialog } from "./AcpAuthDialog";
 import { HarnessSetupDialog } from "./HarnessSetupDialog";
+import { AcpHarnessDialog } from "./AcpHarnessDialog";
 import {
   setScopedQueryData,
   workspaceScope,
+  workspaceKey,
   isCurrentScope,
   queryClient,
 } from "../queries/client";
@@ -53,6 +57,9 @@ import {
 import { useEffect, useLayoutEffect, useRef, useState } from "react";
 import {
   deleteEnvVar,
+  listAcpHarnesses,
+  removeAcpHarness,
+  type AcpDefinition,
   deleteOverleafSession,
   deleteOverleafToken,
   fmtBytes,
@@ -78,6 +85,7 @@ import {
   type DataDirSettings,
   type DataDirValidation,
   rayPreflight,
+  trackioPreflight,
   runDisplayStatus,
   timeAgo,
   type ComputeSettings,
@@ -98,6 +106,7 @@ import {
   type LocalMachine,
   type ModalSettings,
   type RayPreflight,
+  type TrackioPreflight,
   type RaySettings,
   type Run,
   type SlurmPreflight,
@@ -139,6 +148,7 @@ import {
   Input,
   LoadingRow,
   MenuItem,
+  SEGMENTED_CLASS_NAME,
   showAlert,
   Spinner,
   Switch,
@@ -156,7 +166,7 @@ const SETTINGS_CARD_CLASS_NAME = [
 ].join(" ");
 
 const KV_CLASS_NAME = [
-  "kv grid grid-cols-[auto_1fr] items-baseline gap-y-[3px] gap-x-3.5 text-base",
+  "kv grid grid-cols-[auto_1fr] items-baseline gap-y-1 gap-x-3.5 text-base",
   "[&_.k]:text-sm [&_.k]:text-subtext [&_.v]:text-base [&_.v]:text-text",
   "[&_.v]:break-all",
 ].join(" ");
@@ -183,7 +193,7 @@ const FORM_CLASS_NAME = [
   "[&_.repo-hint]:font-normal [&_.repo-hint]:text-sm",
   "[&_.repo-hint]:text-muted [&_.repo-hint.ok]:text-accent-teal",
   "[&_.folder-picker-control]:flex [&_.folder-picker-control]:items-center",
-  "[&_.folder-picker-control]:gap-[9px] [&_.folder-picker-control]:w-full",
+  "[&_.folder-picker-control]:gap-2 [&_.folder-picker-control]:w-full",
   "[&_.folder-picker-control]:min-w-0 [&_.folder-picker-control]:py-2 [&_.folder-picker-control]:px-2.5",
   "[&_.folder-picker-control]:overflow-hidden [&_.folder-picker-control]:bg-background",
   "[&_.folder-picker-control]:border [&_.folder-picker-control]:border-border",
@@ -192,7 +202,7 @@ const FORM_CLASS_NAME = [
   "[&_.folder-picker-control]:transition-[border-color,box-shadow] [&_.folder-picker-control]:duration-120 [&_.folder-picker-control]:ease-standard",
   "[&_.folder-picker-control:hover:not(:disabled)]:border-muted",
   "[&_.folder-picker-control:hover:not(:disabled)]:shadow-control-subtle",
-  "[&_.folder-picker-control:focus-visible]:outline-2 [&_.folder-picker-control:focus-visible]:outline-solid [&_.folder-picker-control:focus-visible]:outline-text",
+  "[&_.folder-picker-control:focus-visible]:outline-2 [&_.folder-picker-control:focus-visible]:outline-solid [&_.folder-picker-control:focus-visible]:outline-focus",
   "[&_.folder-picker-control:focus-visible]:outline-offset-2 [&_.folder-picker-control_span]:flex-1",
   "[&_.folder-picker-control_span]:min-w-0 [&_.folder-picker-control_span]:overflow-hidden",
   "[&_.folder-picker-control_span]:text-ellipsis [&_.folder-picker-control_span]:whitespace-nowrap",
@@ -201,7 +211,7 @@ const FORM_CLASS_NAME = [
   "[&_.folder-picker-chevron]:text-muted",
   "[&_.folder-picker-control:hover:not(:disabled)_.folder-picker-chevron]:text-subtext",
   "[&_.folder-picker-hint]:text-subtext [&_.folder-picker-hint]:text-sm",
-  "[&_.folder-picker-hint]:font-normal [&_.folder-picker-hint]:leading-[1.4]",
+  "[&_.folder-picker-hint]:font-normal [&_.folder-picker-hint]:leading-snug",
   "[&_.project-location-field]:flex [&_.project-location-field]:flex-col",
   "[&_.project-location-field]:gap-2 [&_.project-location-label]:text-text",
   "[&_.project-location-label]:text-base",
@@ -216,11 +226,11 @@ const FORM_CLASS_NAME = [
   "[&_.paper-destination_code]:text-text [&_.paper-destination_code]:text-sm",
   "[&_.paper-destination_code]:font-normal",
   "[&_.paper-destination_code]:text-ellipsis [&_.paper-destination_code]:whitespace-nowrap",
-  "[&_.paper-destination_.btn]:flex-none [&_.project-path-notice]:py-[9px] [&_.project-path-notice]:px-[11px]",
+  "[&_.paper-destination_.btn]:flex-none [&_.project-path-notice]:py-2 [&_.project-path-notice]:px-3",
   "[&_.project-path-notice]:border [&_.project-path-notice]:border-border-variant",
   "[&_.project-path-notice]:rounded-sm [&_.project-path-notice]:bg-surface",
-  "[&_.project-path-notice]:text-base [&_.project-path-notice]:leading-relaxed [&_.project-path-notice]:text-text",
-  "[&_.project-path-notice]:leading-[1.4]",
+  "[&_.project-path-notice]:text-base [&_.project-path-notice]:text-text",
+  "[&_.project-path-notice]:leading-snug",
   "[&_.project-path-notice.error]:border-danger-notice-border",
   "[&_.paper-results]:flex [&_.paper-results]:flex-col",
   "[&_.paper-results]:border [&_.paper-results]:border-border [&_.paper-results]:rounded-md",
@@ -255,8 +265,8 @@ const FORM_CLASS_NAME = [
 ].join(" ");
 
 const PROJECT_DEFAULT_ROW_CLASS_NAME = [
-  "project-default-row flex items-center justify-between gap-6",
-  "pt-3.5 border-t border-t-border-variant [&_p]:mt-[3px] [&_p]:mx-0 [&_p]:mb-0",
+  "project-default-row flex items-center justify-between gap-6 [.project-default-row+&]:mt-3.5",
+  "pt-3.5 border-t border-t-border-variant [&_p]:mt-1 [&_p]:mx-0 [&_p]:mb-0",
   "[&_.project-default-title]:text-base [&_p]:text-sm [&_p]:leading-relaxed [&_p]:text-text",
 ].join(" ");
 
@@ -336,6 +346,8 @@ function CommandRunTerminal({ run, onComplete, onClose }: {
 function harnessStatus(h: Harness): { cls: string; variant: BadgeVariant; label: string } {
   if (h.catalogPending) return { cls: "warn", variant: "warning", label: m.onboarding_checking() };
   if (h.authCheckFailed) return { cls: "warn", variant: "warning", label: m.settings_page_unable_to_verify() };
+  if (h.id.startsWith("acp:") && h.authState === "needsLogin") return { cls: "warn", variant: "warning", label: m.acp_auth_setup_needed() };
+  if (h.id.startsWith("acp:") && h.authState === "ready") return { cls: "ok", variant: "success", label: m.acp_credentials_configured() };
   if (h.agentReady && !h.authenticated && h.authMethod !== "local") return { cls: "warn", variant: "warning", label: m.onboarding_not_signed_in() };
   if (h.agentReady) return { cls: "ok", variant: "success", label: h.authMethod === "thirdParty" || claudeProviderLabel(h) ? m.settings_page_ready_to_use() : h.authMethod === "local" ? m.onboarding_ready() : m.settings_page_signed_in() };
   // Not installed — the same blocker whether or not there's saved auth: the
@@ -382,7 +394,15 @@ function HarnessesTab({ remote }: { remote: boolean }) {
   const [refreshing, setRefreshing] = useState(false);
   const setupRun = useCommandRun();
   const [setupHarness, setSetupHarness] = useState<Harness | null>(null);
+  const [authHarness, setAuthHarness] = useState<Harness | null>(null);
   const setupCommands = useQuery(getHarnessSetupCommandsQuery());
+  const definitions = useQuery({ queryKey: workspaceKey("getAcpHarnesses"), queryFn: listAcpHarnesses });
+  const [acpDialog, setAcpDialog] = useState<AcpDefinition | "new" | null>(null);
+  const reloadAcp = () => { void definitions.refetch(); load(true); };
+  const removeAcp = async (id: string) => {
+    try { await removeAcpHarness(id); reloadAcp(); }
+    catch (error) { showAlert(error instanceof Error ? error.message : String(error), "error"); }
+  };
 
   const load = (refresh: boolean, retryRejected = false) => {
     setRefreshing(true);
@@ -395,10 +415,13 @@ function HarnessesTab({ remote }: { remote: boolean }) {
     (a, b) => Number(b.agentReady) - Number(a.agentReady),
   );
   const h = orderedHarnesses.find((x) => x.id === active) ?? orderedHarnesses[0];
+  const acp = definitions.data?.find((definition) => definition.id === h?.id);
 
   return (
     <>
       <h2>{m.settings_page_harnesses()}</h2>
+      {acpDialog && <AcpHarnessDialog definition={acpDialog === "new" ? undefined : acpDialog} onClose={() => setAcpDialog(null)} onSaved={reloadAcp} />}
+      {authHarness && <AcpAuthDialog remote={remote} harness={authHarness} onClose={() => setAuthHarness(null)} />}
       {!remote && setupHarness && setupCommands.data && (
         <HarnessSetupDialog
           harness={setupHarness}
@@ -406,37 +429,40 @@ function HarnessesTab({ remote }: { remote: boolean }) {
           onClose={() => setSetupHarness(null)}
         />
       )}
-      <div className="mt-3 mb-3.5 w-fit max-w-full [&_.option-menu]:w-max">
-        <OptionPicker
-          variant="field"
-          dropDown
-          title={m.settings_page_harnesses()}
-          choices={orderedHarnesses.map((harness) => ({ id: harness.id, label: harness.name }))}
-          value={h?.id ?? null}
-          onSelect={(id) => {
-            const selected = orderedHarnesses.find((harness) => harness.id === id);
-            if (selected) setActive(selected.id);
-          }}
-          renderIcon={(choice) => {
-            const harness = orderedHarnesses.find((harness) => harness.id === choice.id);
-            return harness && <HarnessLogo harness={harness.id} />;
-          }}
-          renderLabel={(choice) => {
-            const harness = orderedHarnesses.find((harness) => harness.id === choice.id);
-            const status = harness && harnessStatus(harness);
-            return (
-              <span className="inline-flex items-center gap-2 whitespace-nowrap">
-                {choice.label}
-                {status && (
-                  <>
-                    <span aria-hidden="true" className={`size-1.5 shrink-0 rounded-full bg-muted [&.ok]:bg-accent-green [&.err]:bg-accent-red [&.warn]:bg-accent-amber ${status.cls}`} />
-                    <span className="sr-only">{status.label}</span>
-                  </>
-                )}
-              </span>
-            );
-          }}
-        />
+      <div className="mt-3 mb-3.5 flex w-full flex-wrap items-center justify-between gap-3 [&_.option-menu]:w-max">
+        <div className="w-96 max-w-full">
+          <OptionPicker
+            variant="field"
+            dropDown
+            title={m.settings_page_harnesses()}
+            choices={orderedHarnesses.map((harness) => ({ id: harness.id, label: harness.name }))}
+            value={h?.id ?? null}
+            onSelect={(id) => {
+              const selected = orderedHarnesses.find((harness) => harness.id === id);
+              if (selected) setActive(selected.id);
+            }}
+            renderIcon={(choice) => {
+              const harness = orderedHarnesses.find((harness) => harness.id === choice.id);
+              return harness && <HarnessLogo harness={harness.id} logo={harness.logo} />;
+            }}
+            renderLabel={(choice) => {
+              const harness = orderedHarnesses.find((harness) => harness.id === choice.id);
+              const status = harness && harnessStatus(harness);
+              return (
+                <span className="inline-flex items-center gap-2 whitespace-nowrap">
+                  {choice.label}
+                  {status && (
+                    <>
+                      <span aria-hidden="true" className={`size-1.5 shrink-0 rounded-full bg-muted [&.ok]:bg-accent-green [&.err]:bg-accent-red [&.warn]:bg-accent-amber ${status.cls}`} />
+                      <span className="sr-only">{status.label}</span>
+                    </>
+                  )}
+                </span>
+              );
+            }}
+          />
+        </div>
+        <Button className="ms-auto shrink-0" onClick={() => setAcpDialog("new")} aria-haspopup="dialog"><Plus size={14} />{m.acp_add()}</Button>
       </div>
       {!harnesses ? (
         <LoadingRow>
@@ -445,9 +471,13 @@ function HarnessesTab({ remote }: { remote: boolean }) {
       ) : !h ? null : (
         <div className={SETTINGS_CARD_CLASS_NAME}>
           <div className="settings-card-head flex items-center gap-2.5 mb-3">
-            <Badge variant={harnessStatus(h).variant}>{harnessStatus(h).label}</Badge>
+            {h.id.startsWith("acp:") && <span className="text-sm text-subtext">{m.acp_via()}</span>}
+            <Badge variant={harnessStatus(h).variant}>{h.adapterMissing ? m.acp_adapter_required() : harnessStatus(h).label}</Badge>
             <div className="spacer flex-1" />
-            {!remote && !h.catalogPending && h.installed && !h.installBroken && !h.authenticated && !h.needsConfigRepair && (h.id === "claude-code" ? h.loginEligible : h.authMethod !== "local" && h.authMethod !== "apiKey" && h.authState !== "unsupported") && (
+            {!remote && h.adapterMissing && <Button size="small" onClick={() => setSetupHarness(h)} disabled={!setupCommands.data?.[h.id]} aria-haspopup="dialog"><SquareTerminal size={14} />{m.acp_install_adapter()}</Button>}
+            {h.id.startsWith("acp:") && !h.adapterMissing && !h.agentReady && !h.catalogPending && <Button size="small" onClick={() => setAuthHarness(h)} aria-haspopup="dialog">{harnessStatus(h).label}</Button>}
+            {acp && <><Button size="small" onClick={() => setAcpDialog(acp)}>{m.activity_edit()}</Button><Button size="small" onClick={() => void removeAcp(acp.id)}>{m.chat_panel_remove()}</Button></>}
+            {!h.id.startsWith("acp:") && !remote && !h.catalogPending && h.installed && !h.installBroken && !h.authenticated && !h.needsConfigRepair && (h.id === "claude-code" ? h.loginEligible : h.authMethod !== "local" && h.authMethod !== "apiKey" && h.authState !== "unsupported") && (
               <Button size="small" onClick={() => setSetupHarness(h)} disabled={!setupCommands.data} aria-haspopup="dialog">
                 <SquareTerminal size={14} /> {m.harness_setup_login()}
               </Button>
@@ -457,8 +487,8 @@ function HarnessesTab({ remote }: { remote: boolean }) {
             </Button>
           </div>
           <div className={cn(KV_CLASS_NAME, "[&_.v]:text-sm")}>
-            <span className="k">{m.settings_page_binary()}</span>
-            <span className="v">{h.binPath ?? m.settings_not_found_on_path()}</span>
+            <span className="k">{acp ? m.acp_executable() : m.settings_page_binary()}</span>
+            <span className="v">{acp ? formatAcpCommand(acp.executable, acp.arguments) : h.binPath ?? m.settings_not_found_on_path()}</span>
             <span className="k">{m.settings_page_version()}</span>
             <span className="v">{h.version ?? "—"}</span>
             {(h.authMethod === "apiKey" || h.authMethod === "thirdParty" || h.authMethod === "local" || claudeProviderLabel(h)) && (
@@ -488,13 +518,14 @@ function HarnessesTab({ remote }: { remote: boolean }) {
                 : h.agentReady ? m.model_picker_default_model() : m.settings_none()}
             </span>
           </div>
-          <RunnableNote
+          {acp ? (h.agentNote || !h.agentReady ? <p className={cn(SETTINGS_NOTE_CLASS_NAME, "text-sm")}>{h.agentNote ?? m.acp_setup_help()}</p> : null) : <RunnableNote
             note={h.agentNote}
             className={cn(SETTINGS_NOTE_CLASS_NAME, "text-sm")}
             disabled={remote}
             resolve={(command) => harnessSetupPath(h, setupCommands.data?.[h.id], command) ?? settingsCommandPath(command)}
             onRun={(command, path) => setupRun.start(command, path, h.id)}
-          />
+          />}
+          {!h.installed && h.needsConnectionAdapter && <p className={cn(SETTINGS_NOTE_CLASS_NAME, "text-sm")}>{m.acp_adapter_help({ name: h.name })}</p>}
           {setupRun.run && (
             // Hidden, not unmounted, while another harness tab is showing: a
             // switch mid-OAuth must not kill the sign-in.
@@ -654,7 +685,7 @@ function K8sSection({
             {error && <p className="m-0 text-sm text-accent-red whitespace-pre-wrap break-words">{error}</p>}
             <div className="flex justify-end gap-2">
               <Button type="button" onClick={() => void checkAgain()} disabled={saving || checking || !unchanged}>
-                <RefreshCw size={13} /> {checking ? m.common_checking() : m.settings_check_again()}
+                <RefreshCw size={14} /> {checking ? m.common_checking() : m.settings_check_again()}
               </Button>
               <Button variant="primary" type="submit" disabled={saving || checking || unchanged}>
                 {saving ? m.common_saving() : m.common_save()}
@@ -749,7 +780,7 @@ function ModalSection() {
         {error && <p className="m-0 text-sm text-accent-red">{error}</p>}
         <div className="flex justify-end gap-2">
           <Button type="button" disabled={loading || saving} onClick={() => void refresh()}>
-            <RefreshCw size={13} /> {m.settings_page_refresh()}
+            <RefreshCw size={14} /> {m.settings_page_refresh()}
           </Button>
           <Button variant="primary" type="submit" disabled={!tokenId.trim() || !tokenSecret.trim() || loading || saving || s?.processEnv}>
             {saving ? m.common_saving() : m.common_save()}
@@ -1397,7 +1428,7 @@ function RaySection() {
               >
                 {m.settings_page_test_connection()}
               </Button>
-              <RayTestBadge test={test} />
+              <PreflightBadge test={test} />
             </div>
             {preflight?.reachable && preflight.rayVersion && (
               <p className="m-0 text-sm text-subtext">
@@ -1411,7 +1442,7 @@ function RaySection() {
   );
 }
 
-function RayTestBadge({ test }: { test: "testing" | RayPreflight | null }) {
+function PreflightBadge({ test }: { test: "testing" | { reachable: boolean } | null }) {
   if (test === null) return null;
   if (test === "testing") return <Badge>{m.settings_page_testing()}</Badge>;
   if (test.reachable) return <Badge variant="success">{m.settings_page_reachable()}</Badge>;
@@ -1528,7 +1559,7 @@ function OpenResearchSection({ remote }: { remote: boolean }) {
       )}
       <div className="mt-4 flex justify-end gap-2">
         <Button onClick={() => void refresh()} disabled={busy || signingIn}>
-          <RefreshCw size={13} /> {busy ? m.common_checking() : m.settings_check_again()}
+          <RefreshCw size={14} /> {busy ? m.common_checking() : m.settings_check_again()}
         </Button>
         {!remote && s && (!s.loggedIn || s.sshKeyStatus !== "matched") && (
           <Button variant="primary" disabled={busy || signingIn} onClick={() => {
@@ -1536,7 +1567,7 @@ function OpenResearchSection({ remote }: { remote: boolean }) {
             setSigningIn(true);
             setLoginAttempt((attempt) => attempt + 1);
           }}>
-            {signingIn ? <Spinner /> : <SquareTerminal size={13} />} {s.loggedIn ? m.settings_setup_ssh_key() : m.settings_sign_in()}
+            {signingIn ? <Spinner /> : <SquareTerminal size={14} />} {s.loggedIn ? m.settings_setup_ssh_key() : m.settings_sign_in()}
           </Button>
         )}
       </div>
@@ -1717,7 +1748,7 @@ function DefaultDestinationEditor({
               {customFlavor ? (
                 <div className="relative">
                   <input
-                    className="h-9 w-full rounded-md border border-border bg-background py-0 pe-10 ps-3 font-sans text-sm text-text outline-none focus:border-text"
+                    className="h-9 w-full rounded-md border border-border bg-background py-0 pe-10 ps-3 font-sans text-sm text-text outline-none focus:border-focus-border focus:ring-3 focus:ring-focus-ring"
                     type="text"
                     value={flavor}
                     onChange={(event) => setFlavor(event.target.value)}
@@ -1811,12 +1842,12 @@ function TargetTile({
 
   return (
     <div
-      className={`group relative flex min-h-41 w-full flex-col items-start rounded-lg border border-border bg-background p-5 text-start font-sans ${onOpen && target.enabled ? "transition-colors duration-120 ease-standard hover:border-text hover:bg-surface" : ""} ${!target.enabled ? "opacity-52" : ""}`}
+      className={`group relative flex min-h-41 w-full flex-col items-start rounded-lg border border-border bg-background p-5 text-start font-sans ${onOpen && target.enabled ? "transition-colors duration-120 ease-standard hover:border-border-hover-strong hover:bg-surface" : ""} ${!target.enabled ? "opacity-52" : ""}`}
     >
       {onOpen && (
         <button
           type="button"
-          className="absolute inset-0 z-10 rounded-lg focus-visible:outline-2 focus-visible:outline-text focus-visible:outline-offset-2 disabled:cursor-default"
+          className="absolute inset-0 z-10 rounded-lg focus-visible:outline-2 focus-visible:outline-focus focus-visible:outline-offset-2 disabled:cursor-default"
           onClick={onOpen}
           disabled={!target.enabled}
           aria-label={TARGET_LABELS[target.id]()}
@@ -1837,7 +1868,7 @@ function TargetTile({
             {target.id === "tinker" ? m.settings_key_from() : m.settings_token_from()}{" "}
             <button
               type="button"
-              className="relative z-20 text-primary underline-offset-2 hover:text-primary-hover hover:underline"
+              className="relative z-20 text-accent-blue-strong underline-offset-2 hover:underline"
               onClick={onOpenEnvironment}
             >
               {m.settings_environment_tab()}
@@ -1846,7 +1877,7 @@ function TargetTile({
         ) : summary ?? target.summary}
       </span>
       <span className="mt-auto flex w-full items-center justify-between gap-3 pt-3 text-sm">
-        <span className={isDefault ? "font-medium text-primary" : "text-subtext"}>
+        <span className={isDefault ? "font-medium text-text" : "text-subtext"}>
           {isDefault
             ? m.settings_page_default_808d7dc()
             : target.configured
@@ -1893,7 +1924,7 @@ function BackendDetailPage({
           <h1 className="m-0 min-w-0 text-2xl">{TARGET_LABELS[target.id]()}</h1>
         </div>
         {isDefault && (
-          <Badge className="flex-none border-primary bg-primary-subtle text-primary">
+          <Badge className="flex-none">
             {m.settings_page_default_808d7dc()}
           </Badge>
         )}
@@ -2148,7 +2179,7 @@ function TinkerSection({ target }: { target: ComputeTargetSummary }) {
         {error && <p className="m-0 text-sm text-accent-red">{error}</p>}
         <div className="flex justify-end gap-2">
           <Button type="button" disabled={saving || checking} onClick={() => void refresh()}>
-            <RefreshCw size={13} /> {checking ? m.common_checking() : m.settings_check_again()}
+            <RefreshCw size={14} /> {checking ? m.common_checking() : m.settings_check_again()}
           </Button>
           <Button variant="primary" type="submit" disabled={!apiKey.trim() || saving || checking}>
             {saving ? m.settings_validating() : m.common_save()}
@@ -2171,7 +2202,7 @@ function HfStatusBadge({ settings }: { settings: HfSettings }) {
       <span className="inline-flex items-center gap-2">
         <Badge variant="warning">{m.settings_page_no_job_write_permission()}</Badge>
         <Tooltip content={m.settings_hf_write_permission_help()} className="text-subtext">
-          <Info size={15} />
+          <Info size={16} />
         </Tooltip>
       </span>
     );
@@ -2282,7 +2313,7 @@ function HfSection({ remote }: { remote: boolean }) {
         {error && <div className="error">{error}</div>}
         <div className="flex justify-end gap-2">
           <Button type="button" disabled={saving || refreshing || (!settings && !loadError)} onClick={() => void refresh()}>
-            <RefreshCw size={13} /> {refreshing ? m.common_checking() : m.settings_check_again()}
+            <RefreshCw size={14} /> {refreshing ? m.common_checking() : m.settings_check_again()}
           </Button>
           <Button variant="primary" type="submit" disabled={!token.trim() || saving || refreshing || (!settings && !loadError)}>
             {saving ? m.settings_validating() : m.common_save()}
@@ -2335,15 +2366,22 @@ function EnvRow({
   const setEnvVarMutation = useMutation({ mutationFn: (args: Parameters<typeof setEnvVar>) => setEnvVar(...args) });
   const deleteEnvVarMutation = useMutation({ mutationFn: deleteEnvVar });
 
-  const [value, setValue] = useState("");
+  const plain = entry?.value != null;
+  const stored = entry?.value ?? "";
+  const [value, setValue] = useState(stored);
   const [saving, setSaving] = useState(false);
+  useEffect(() => setValue(stored), [stored]);
+  const dirty = value.trim() !== stored;
 
   async function save() {
-    if (!value.trim() || saving) return;
+    // An unchanged plain row shows a cleaned value; resaving it would drop a token in the stored URL.
+    if (!value.trim() || saving || (plain && !dirty)) return;
     setSaving(true);
     try {
-      onVars(await setEnvVarMutation.mutateAsync([name, value.trim()]));
-      setValue("");
+      const vars = await setEnvVarMutation.mutateAsync([name, value.trim()]);
+      onVars(vars);
+      // The server may normalize a plain value back to what was already stored.
+      setValue(plain ? vars.find((v) => v.key === name)?.value ?? "" : "");
     } catch (err) {
       showEnvError(name, err);
     } finally {
@@ -2368,7 +2406,7 @@ function EnvRow({
       <tr>
         <td className="font-mono text-sm">{name}</td>
         <td className="text-base text-subtext">
-          {entry ? (
+          {entry && !plain ? (
             <>
               {entry.maskedValue}
               {entry.inProcessEnv && <Badge>{m.settings_page_overridden_by_env()}</Badge>}
@@ -2377,7 +2415,7 @@ function EnvRow({
             <Input
               variant="inline"
               className="text-base"
-              type="password"
+              type={plain ? "text" : "password"}
               value={value}
               onChange={(e) => setValue(e.target.value)}
               onKeyDown={(e) => {
@@ -2385,17 +2423,18 @@ function EnvRow({
                   e.preventDefault();
                   void save();
                 }
-                if (e.key === "Escape" && !saving) setValue("");
+                if (e.key === "Escape" && !saving) setValue(stored);
               }}
               placeholder={m.settings_page_value()}
               aria-label={m.a11y_value_for({ name: ltr(name) })}
-              autoComplete="new-password"
+              autoComplete={plain ? "off" : "new-password"}
               disabled={saving}
             />
           )}
+          {plain && entry?.inProcessEnv && <Badge>{m.settings_page_overridden_by_env()}</Badge>}
         </td>
         <td>
-          {entry ? (
+          {entry && !(plain && dirty && value.trim()) ? (
             <IconButton
               className="[&:hover:not(:disabled)]:text-accent-red"
               title={m.a11y_delete_item({ name: ltr(name) })}
@@ -2403,7 +2442,7 @@ function EnvRow({
               onClick={() => void remove()}
               disabled={saving}
             >
-              <Trash2 size={13} />
+              <Trash2 size={14} />
             </IconButton>
           ) : (
             value.trim() && (
@@ -2500,7 +2539,7 @@ function AddVarRow({
             onClick={onDone}
             disabled={saving}
           >
-            <X size={13} />
+            <X size={14} />
           </IconButton>
         </td>
       </tr>
@@ -2545,7 +2584,7 @@ function EnvVarsSection() {
             <Spinner /> {m.settings_page_loading()}
           </LoadingRow>
         ) : (
-          <table className="env-table w-full table-fixed border-collapse text-base [&_td:first-child]:w-[32%] [&_td:first-child]:wrap-anywhere [&_.badge]:ms-2 [&_td]:h-12 [&_td]:pt-0 [&_td]:pe-2.5 [&_td]:pb-0 [&_td]:ps-0 [&_td]:align-middle [&_td]:border-b [&_td]:border-b-border-variant [&_td:last-child]:w-29 [&_td:last-child]:whitespace-nowrap [&_td:last-child]:text-end [&_td[colspan]]:whitespace-normal [&_td[colspan]]:text-start [&_.icon-btn]:ms-2 [&_.icon-btn]:align-middle">
+          <table className="env-table w-full table-fixed border-collapse text-base [&_td:first-child]:w-[32%] [&_td:first-child]:wrap-anywhere [&_.badge]:ms-2 [&_td]:h-12 [&_td]:pt-0 [&_td]:pe-2.5 [&_td]:pb-0 [&_td]:ps-0 [&_td]:align-middle [&_td]:border-b [&_td]:border-b-border-variant [&_tr:last-child_td]:border-b-0 [&_td:last-child]:w-29 [&_td:last-child]:whitespace-nowrap [&_td:last-child]:text-end [&_td[colspan]]:whitespace-normal [&_td[colspan]]:text-start [&_.icon-btn]:ms-2 [&_.icon-btn]:align-middle">
             <tbody>
               {names.map((name) => (
                 <EnvRow
@@ -2561,8 +2600,50 @@ function EnvVarsSection() {
             </tbody>
           </table>
         )}
+        {vars?.some((v) => v.key === "TRACKIO_SERVER_URL" || v.key === "TRACKIO_SPACE_ID") && (
+          // Any change to the saved Trackio values, from here or elsewhere, resets an old result.
+          <TrackioCheck
+            key={vars.filter((v) => v.key.startsWith("TRACKIO_")).map((v) => `${v.key}=${v.value ?? v.maskedValue}`).join()}
+            space={vars.some((v) => v.key === "TRACKIO_SPACE_ID")}
+          />
+        )}
       </div>
     </>
+  );
+}
+
+function TrackioCheck({ space }: { space: boolean }) {
+  const [test, setTest] = useState<"testing" | TrackioPreflight | null>(null);
+
+  async function runPreflight() {
+    setTest("testing");
+    try {
+      setTest(await trackioPreflight());
+    } catch (err) {
+      setTest({ reachable: false, version: null, writeAccess: null, spaceStage: null, error: err instanceof Error ? err.message : String(err) });
+    }
+  }
+
+  const result = test === null || test === "testing" ? null : test;
+  const details = result
+    ? [
+        result.version && m.settings_trackio_version({ version: ltr(result.version) }),
+        result.spaceStage && result.spaceStage !== "RUNNING" && m.settings_trackio_space_stage({ stage: ltr(result.spaceStage) }),
+        result.writeAccess === true && (space ? m.settings_trackio_hf_write_ok() : m.settings_trackio_write_ok()),
+        result.writeAccess === false && (space ? m.settings_trackio_hf_write_rejected() : m.settings_trackio_write_rejected()),
+      ].filter(Boolean)
+    : [];
+  return (
+    <div className="mt-3">
+      <div className="flex items-center gap-2.5">
+        <Button type="button" size="small" onClick={() => void runPreflight()} disabled={test === "testing"}>
+          {m.settings_trackio_test()}
+        </Button>
+        <PreflightBadge test={test} />
+      </div>
+      {details.length > 0 && <p className="m-0 mt-2 text-sm text-subtext">{details.join(" · ")}</p>}
+      {result?.error && <p className={COMPUTE_DIAGNOSTIC_CLASS_NAME}>{result.error}</p>}
+    </div>
   );
 }
 
@@ -2620,10 +2701,10 @@ function AppearanceTab() {
     <>
       <h2>{m.settings_appearance_heading()}</h2>
       <div className={`${SETTINGS_CARD_CLASS_NAME} mt-3`}>
-        <div className={`${PROJECT_DEFAULT_ROW_CLASS_NAME} pb-3.5`}>
+        <div className={PROJECT_DEFAULT_ROW_CLASS_NAME}>
           <div className="project-default-title text-base font-medium">{m.settings_theme_heading()}</div>
           <div
-            className="theme-segmented inline-flex flex-none gap-0.5 p-0.5 border border-border rounded-md bg-surface"
+            className={`${SEGMENTED_CLASS_NAME} theme-segmented flex-none`}
             role="radiogroup"
             aria-label={m.settings_theme_heading()}
             onKeyDown={onKeyDown}
@@ -2635,7 +2716,7 @@ function AppearanceTab() {
                 role="radio"
                 aria-checked={preference === value}
                 tabIndex={preference === value ? 0 : -1}
-                className={`theme-segment inline-flex items-center gap-1.5 py-[5px] px-2.5 rounded-sm text-subtext text-sm cursor-pointer transition-[background,color] duration-120 ease-standard [&:hover:not(.on)]:text-text [&:hover:not(.on)]:bg-highlight [&.on]:text-background [&.on]:bg-primary [&:focus-visible]:outline-2 [&:focus-visible]:outline-solid [&:focus-visible]:outline-text [&:focus-visible]:outline-offset-2 ${preference === value ? "on" : ""}`}
+                className={`theme-segment ${preference === value ? "active" : ""}`}
                 onClick={() => setPreference(value)}
               >
                 <Icon size={14} />
@@ -2876,7 +2957,7 @@ function TelemetryTab() {
                     content={`${m.settings_page_currently_off()} ${settings.reason}.`}
                     className="text-subtext"
                   >
-                    <Info size={15} />
+                    <Info size={16} />
                   </Tooltip>
                 )}
               </div>
@@ -3015,14 +3096,14 @@ function GithubSettings({ remote, onProjectUpdate }: {
               <div className="mb-4 flex justify-start"><div className="h-6 w-48 rounded-full bg-surface" /></div>
               <div className="flex items-center justify-between gap-6">
                 <div className="flex-1 space-y-2">
-                  <div className="h-5 w-2/3 rounded bg-surface" />
-                  <div className="h-4 rounded bg-surface" />
-                  <div className="h-4 w-3/4 rounded bg-surface" />
+                  <div className="h-5 w-2/3 rounded-xs bg-surface" />
+                  <div className="h-4 rounded-xs bg-surface" />
+                  <div className="h-4 w-3/4 rounded-xs bg-surface" />
                 </div>
                 <div className="h-6 w-10 shrink-0 rounded-full bg-surface" />
               </div>
-              <div className="mt-6 h-4 w-44 rounded bg-surface" />
-              <div className="mt-2 h-8 rounded bg-surface" />
+              <div className="mt-6 h-4 w-44 rounded-xs bg-surface" />
+              <div className="mt-2 h-8 rounded-xs bg-surface" />
             </div>
           </div>
         )
@@ -3296,10 +3377,10 @@ export function GitTab({
         <div className="mt-4 min-h-22" role="status" aria-label={m.settings_page_loading()} aria-busy="true">
           <div aria-hidden="true" className="motion-safe:animate-pulse">
             <div className="flex items-center gap-4">
-              <div className="h-4 w-16 rounded bg-surface" />
+              <div className="h-4 w-16 rounded-xs bg-surface" />
               <div className="h-6 w-24 rounded-full bg-surface" />
             </div>
-            <div className="mt-3.5 h-8 w-48 rounded bg-surface" />
+            <div className="mt-3.5 h-8 w-48 rounded-xs bg-surface" />
           </div>
         </div>
       ) : (
@@ -3327,8 +3408,8 @@ export function GitTab({
                       {!owners.length && (accountQuery.isFetching || organizationsQuery.isFetching) && (
                         <div role="status" aria-label={m.settings_page_loading()} aria-busy="true" className="px-2 py-2">
                           <div aria-hidden="true" className="space-y-3 motion-safe:animate-pulse">
-                            <div className="h-4 w-28 rounded bg-surface" />
-                            <div className="h-4 w-36 rounded bg-surface" />
+                            <div className="h-4 w-28 rounded-xs bg-surface" />
+                            <div className="h-4 w-36 rounded-xs bg-surface" />
                           </div>
                         </div>
                       )}
@@ -3667,7 +3748,7 @@ function ComputeActivity({ projectId, onViewHistory }: { projectId?: string; onV
   const past = instances?.filter((i) => !isLive(i.status)).sort(byRecent);
 
   return (
-    <section className="compute-activity [&_.count-badge]:inline-flex [&_.count-badge]:items-center [&_.count-badge]:justify-center [&_.count-badge]:min-w-4.5 [&_.count-badge]:h-4.5 [&_.count-badge]:py-0 [&_.count-badge]:px-[5px] [&_.count-badge]:rounded-md [&_.count-badge]:bg-surface [&_.count-badge]:border [&_.count-badge]:border-border [&_.count-badge]:text-xs [&_.count-badge]:font-medium [&_.count-badge]:text-text mt-5.5 mx-0 mb-8">
+    <section className="compute-activity [&_.count-badge]:inline-flex [&_.count-badge]:items-center [&_.count-badge]:justify-center [&_.count-badge]:min-w-4.5 [&_.count-badge]:h-4.5 [&_.count-badge]:py-0 [&_.count-badge]:px-1 [&_.count-badge]:rounded-md [&_.count-badge]:bg-surface [&_.count-badge]:border [&_.count-badge]:border-border [&_.count-badge]:text-xs [&_.count-badge]:font-medium [&_.count-badge]:text-text mt-5.5 mx-0 mb-8">
       <div className="compute-activity-head flex items-start justify-between gap-5 mb-3.5 [&_h2]:flex [&_h2]:items-center [&_h2]:gap-2 [&_h2]:m-0 [&_h2]:text-lg [@media((max-width:_640px))]:items-stretch [@media((max-width:_640px))]:flex-col">
         <div>
           <h2>
@@ -3745,14 +3826,14 @@ export const SETTINGS_NAV: SettingsNavItem[] = [
   {
     id: "compute",
     label: m.settings_page_compute,
-    icon: <Cpu size={15} />,
+    icon: <Cpu size={16} />,
     activeTabs: ["compute", "instances"],
   },
-  { id: "environment", label: m.settings_page_environment, icon: <SquareTerminal size={15} />, activeTabs: ["environment"] },
+  { id: "environment", label: m.settings_page_environment, icon: <SquareTerminal size={16} />, activeTabs: ["environment"] },
   {
     id: "settings",
     label: m.settings_page_settings,
-    icon: <Settings size={15} />,
+    icon: <Settings size={16} />,
     activeTabs: ["settings", ...SETTINGS_SECTIONS],
   },
 ];

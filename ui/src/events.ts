@@ -18,6 +18,7 @@ import type {
 } from "./api";
 
 export interface RunLogEvent {
+  generation?: string;
   runId: string;
   dataBase64: string;
   offset: number;
@@ -45,6 +46,7 @@ function emitRunLog(ev: RunLogEvent) {
 
 // Chat events fan out the same way so ChatPanel shares the one EventSource.
 export type ChatEvent =
+  | { type: "runsChanged" }
   | { type: "session"; session: ChatSession }
   | { type: "sessionDeleted"; sessionId: string }
   | { type: "message"; sessionId: string; message: ChatMessage }
@@ -314,6 +316,7 @@ export function useOrxEventStream(handlers: OrxEventHandlers) {
           emitEntity.onRunLog(d);
         }
       });
+      es.addEventListener("chat.runs", () => emitChat({ type: "runsChanged" }));
       es.addEventListener("chat.session", (e) => {
         const d = parse<{ session: ChatSession }>(e as MessageEvent);
         if (d?.session) {

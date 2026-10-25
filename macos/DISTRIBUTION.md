@@ -73,14 +73,18 @@ artifact name with a rewritten `.sha256` and per-target manifest checksum, so th
 installers and `sha256.sum` built afterwards match the signed archives. It uses
 the same `release-signing` environment, so a release waits on one approval for
 it, then another for the DMG. Unlike the DMG, it ignores `MACOS_SIGNING_ENABLED`:
-every published release needs those secrets and that approval. Dry runs skip it,
-so the first real release is its first end-to-end run.
+every published release needs those secrets and that approval. PRs do not run
+release builds or signing; publication starts after a version bump merges.
 
 dist does not generate this job's `needs: build-local-artifacts`, so
 `dist-workspace.toml` sets `allow-dirty = ["ci"]`, which makes `dist generate`
 skip `release.yml` entirely: dist config changes no longer reach CI on their own.
-To regenerate, remove `allow-dirty`, run the pinned `dist generate`, re-add that `needs`
-line to `custom-sign-macos-cli`, and restore `allow-dirty`.
+To regenerate, remove `allow-dirty`, run the pinned `dist generate`, then restore
+the custom signing dependencies, release-only dispatch guard, immutable source SHA
+propagation, and required publication checks before restoring `allow-dirty`.
+Release recovery requires an explicit version tag; set `source-sha` to the original
+merged bump commit if `main` has advanced. Desktop attachment jobs resolve that
+published tag rather than rebuilding the current tip of `main`.
 
 ## Configure signing (CI)
 
@@ -163,6 +167,16 @@ logged. To see it, run the bundled binary from a terminal:
 ```bash
 /Applications/OpenResearch.app/Contents/MacOS/OpenResearch
 ```
+
+## Desktop page zoom
+
+The macOS View menu offers Zoom In (`Cmd =`), Zoom Out (`Cmd -`), and Actual Size
+(`Cmd 0`). Zoom ranges from 50% to 200% in 10-point steps. The app remembers your last
+zoom level in your local user preferences and restores it on launch (100% by
+default). A brief zoom popover shows the percentage, zoom buttons, and Reset.
+The titlebar preserves space for the native window controls.
+Windows and Linux use `Ctrl =` (or `Ctrl +`), `Ctrl -`, and `Ctrl 0` with the
+same range and window-local behavior.
 
 ## Coexisting with a CLI install
 

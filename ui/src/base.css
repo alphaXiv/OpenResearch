@@ -14,6 +14,9 @@ body {
   background: var(--base);
   color: var(--text);
   font-family: var(--sans);
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+  text-rendering: optimizeLegibility;
   font-size: 1rem;
   line-height: 1.45;
   overflow: hidden;
@@ -59,7 +62,7 @@ select {
 input:focus,
 textarea:focus,
 select:focus {
-  border-color: var(--text);
+  border-color: var(--focus-border);
 }
 
 input::placeholder,

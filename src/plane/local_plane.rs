@@ -267,6 +267,9 @@ impl LocalPlane {
             args.backend = Some("local".to_string());
         }
         crate::compute::validate_run_args(&args)?;
+        if let Some(backend) = args.backend.as_deref() {
+            warn_unreachable_trackio(backend);
+        }
         args.agent_origin = crate::agent_origin();
         // Coarse backend label for analytics; the backend name is already an
         // enum, never user data. Recorded before the (borrowing) dispatch below.
@@ -329,7 +332,7 @@ impl LocalPlane {
         };
         // Key event, fired only on a successful launch. Coarse backend only.
         // Validation above guarantees a known backend before either dispatch path.
-        if result.is_ok() {
+        if result.is_ok() && backend_label.as_deref() != Some("openresearch") {
             let target = backend_label.as_deref().unwrap_or("unknown");
             crate::telemetry::capture_experiment_started("run", true, Some(target));
             // A launch out of the bundled demo is the clearest signal the demo
@@ -566,12 +569,28 @@ impl LocalPlane {
             println!("  command: {}", experiment.run_command);
         }
         println!();
-        println!("To edit it, check out the branch in the project's local clone:");
-        println!("  cd {}", project.repo_path);
-        println!("  git checkout {}", experiment.branch_name);
-        println!("  # …edit, then…");
-        println!("  git commit -am \"<msg>\"");
+        super::checkout_hint::print(&project.repo_path, &experiment.branch_name);
         Ok(())
+    }
+}
+
+fn warn_unreachable_trackio(backend: &str) {
+    use crate::local::trackio::{self, Target};
+    if !crate::compute::backend(backend).is_ok_and(|b| b.capabilities().remote) {
+        return;
+    }
+    match trackio::target() {
+        Target::Server(url) if trackio::is_local_only(&url) => eprintln!(
+            "warning: {} is {url}, which a {backend} run may not reach, so its Trackio metrics may not arrive. Save an address the remote machine can reach.",
+            trackio::SERVER_URL
+        ),
+        // Only for someone already using Trackio, so non-users see no noise.
+        Target::Local if trackio::used_locally() => eprintln!(
+            "warning: no {} or {} is saved, so this {backend} run's Trackio metrics stay on that machine and orx will not show them.",
+            trackio::SPACE_ID,
+            trackio::SERVER_URL
+        ),
+        _ => {}
     }
 }
 

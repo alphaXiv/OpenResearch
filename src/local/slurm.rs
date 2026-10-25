@@ -5,8 +5,6 @@
 //! cores and host memory. The run row lives in the local store only; a
 //! detached `orx supervise` watches the job.
 
-use std::collections::HashMap;
-
 use crate::commands::exp::spawn_detached_supervise;
 use crate::compute::SourceSnapshot;
 use crate::error::{anyhow, Result};
@@ -90,6 +88,9 @@ pub async fn submit_local_slurm_with_source(
     }
 
     let settings = slurm::load_settings()?.unwrap_or_default();
+    if let Some(root) = &settings.remote_root {
+        crate::jobs::ssh::validate_remote_root(root)?;
+    }
     let host = args
         .host
         .clone()
@@ -133,21 +134,23 @@ pub async fn submit_local_slurm_with_source(
 
     // The job env: everything the user synced (API keys), plus the tokens the
     // run step expects. Exported in the setup script and job.sbatch.
-    let mut env: HashMap<String, String> = crate::config::list_synced_env().into_iter().collect();
+    let mut env = crate::config::run_env(&run_id);
     if let Ok(hf_token) = huggingface::resolve_token() {
         env.entry("HF_TOKEN".to_string()).or_insert(hf_token);
     }
     crate::jobs::ssh::stage_source(
-        &crate::jobs::ssh::SshTarget::alias(&host),
+        &crate::jobs::ssh::SshTarget::alias(&host).for_run(&run_id),
         &run_id,
         &source.path,
         &source.digest,
         None,
+        settings.remote_root.as_deref(),
     )
     .await?;
     let job_id = slurm::run_job(&slurm::SlurmJobSpec {
         host: host.clone(),
         run_id: run_id.clone(),
+        remote_root: settings.remote_root.clone(),
         setup_script: "test -d repo".to_string(),
         command: run_command.clone(),
         env,
@@ -164,6 +167,7 @@ pub async fn submit_local_slurm_with_source(
         ssh_container: None,
         monitoring_error: None,
         cancellation_accepted: false,
+        rental_lease: None,
         kind: "slurm_job".to_string(),
         namespace: Some(host.clone()),
         job_id: Some(job_id.clone()),
@@ -182,10 +186,11 @@ pub async fn submit_local_slurm_with_source(
         source_digest: None,
         source_path: None,
         source_size: None,
+        remote_root: settings.remote_root.clone(),
     };
     source.apply_to_descriptor(&mut descriptor);
     if let Err(error) = crate::compute::record_submission_handle(&run_id, &descriptor) {
-        let _ = slurm::cancel_job(&host, &job_id).await;
+        let _ = slurm::cancel_job(&host, &run_id, &job_id).await;
         return Err(error);
     }
     let run = StoredRun {

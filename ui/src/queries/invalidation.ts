@@ -27,7 +27,7 @@ export function invalidateFamilies(families: readonly string[], scope = workspac
 
 const fileBodies = ["resolvedFile", "getProjectFile", "getArtifactFileText", "getArtifactFileMetadata"];
 export const artifactFamilies = ["getArtifacts", "getArtifactFileText", "getArtifactFileMetadata", "searchArtifacts", "getFileLocation"];
-export const liveFamilies = ["listProjects", "listProjectActivity", "listSidebarChatSessions", "listExperiments", "listRuns", "listChatSessions", "getChatMessages", "getHarnesses", "getUpdateStatus", ...artifactFamilies, ...fileBodies, "getAbsoluteFile", "fileVersion", "getCodeTree", "getSessionWorktree", "getRunDiff", "getExperimentDiff"];
+export const liveFamilies = ["getSubagentTranscript", "listChatActiveRuns", "listProjects", "listProjectActivity", "listSidebarChatSessions", "listExperiments", "listRuns", "listChatSessions", "getChatMessages", "getHarnesses", "getUpdateStatus", ...artifactFamilies, ...fileBodies, "getAbsoluteFile", "fileVersion", "getCodeTree", "getSessionWorktree", "getRunDiff", "getExperimentDiff"];
 
 export function invalidateProjectFiles(projectId: string, scope = workspaceScope(), cancelReads = false) {
   const sessions = queryClient.getQueryData<ChatSession[]>([...scope, "listChatSessions", projectId]) ?? [];
@@ -59,13 +59,13 @@ export function removeProject(projectId: string) {
 }
 
 const settingsFamilies: Record<string, readonly string[]> = {
-  hf: ["getHfSettings", "getComputeSettings", "getEnvVars"],
+  hf: ["getHfSettings", "getComputeSettings", "getEnvVars", "getTrackioRuns"],
   tinker: ["getTinkerSettings", "getComputeSettings", "getEnvVars"],
   k8s: ["getK8sSettings", "getComputeSettings"],
   modal: ["getModalSettings", "getComputeSettings", "getEnvVars"],
   slurm: ["getSlurmSettings", "getComputeSettings"],
   ray: ["getRaySettings", "getComputeSettings"],
-  env: ["getEnvVars", "getHfSettings", "getTinkerSettings", "getModalSettings", "getSlurmSettings", "getRaySettings", "getK8sSettings", "getOpenResearchSettings", "getComputeSettings", "getHarnesses"],
+  env: ["getEnvVars", "getHfSettings", "getTinkerSettings", "getModalSettings", "getSlurmSettings", "getRaySettings", "getK8sSettings", "getOpenResearchSettings", "getComputeSettings", "getHarnesses", "getTrackioRuns"],
   "data-dir": ["getDataDir"],
   ssh: ["getSshSettings", "getSshConfig", "getSshMasterStatus", "getComputeSettings"],
   compute: ["getComputeSettings"],

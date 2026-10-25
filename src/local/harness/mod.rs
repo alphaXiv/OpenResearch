@@ -17,6 +17,7 @@
 //! in `registry()`; the dispatch, the ID list, the detection sweep, and the
 //! skill installer all pick it up with no further edits.
 
+pub(crate) mod acp;
 pub(crate) mod antigravity;
 pub(crate) mod claude;
 pub(crate) mod codex;
@@ -42,7 +43,9 @@ use crate::local::chat::{
 };
 use crate::store::Store;
 
-pub(crate) use claude::{question_prompt, should_synthesize_plan, synthesize_resume};
+pub(crate) use claude::{
+    question_prompt, should_synthesize_plan, synthesize_resume, SKIPPED_QUESTION_MESSAGE,
+};
 pub(crate) use detect::{
     detect_spawn_output_timed, probe_timing_scope, spawn_retrying_busy, unique as unique_bins,
     ProbeTiming, ProbeTimingSink,
@@ -265,10 +268,10 @@ pub enum ResumeAction {
 pub trait Harness: Send + Sync {
     /// Canonical, stable id used on the wire and in the store
     /// (e.g. `"claude-code"`). Must be unique across the registry.
-    fn id(&self) -> &'static str;
+    fn id(&self) -> &str;
 
     /// Human-readable name for UI and prompts (e.g. `"Claude Code"`).
-    fn name(&self) -> &'static str;
+    fn name(&self) -> &str;
 
     // --- chat capability ---------------------------------------------------
 
@@ -316,9 +319,12 @@ pub trait Harness: Send + Sync {
         false
     }
 
-    /// Compact this session's context in the harness's own store. Returning
-    /// `Fallback` asks the caller for the shared summarize-and-reseed path,
-    /// which every harness can take.
+    /// Whether native compaction or the shared summarize-and-reseed path is supported.
+    fn supports_compaction(&self) -> bool {
+        false
+    }
+
+    /// Compact the native context, or request the shared fallback with `Fallback`.
     async fn compact(&self, _ctx: &CompactCtx) -> Result<CompactOutcome> {
         Ok(CompactOutcome::Fallback)
     }
@@ -334,14 +340,17 @@ pub trait Harness: Send + Sync {
     /// `None` = failed; the caller keeps the first-line placeholder.
     ///
     /// Default: the shared title one-shot, sanitized; a harness without
-    /// `one_shot` gets none. OpenCode also still adopts a native `session.updated` title (minus its creation
-    /// seed) through `TurnCtx::set_title` if its server ever offers one, but
-    /// runs its own one-shot child since the server stopped titling parent
-    /// sessions.
+    /// `one_shot` gets none. OpenCode also adopts native session titles through
+    /// `TurnCtx::set_title` when its server provides them.
     async fn generate_title(&self, first_message: &str, model: Option<&str>) -> Option<String> {
+        let model = if self.id() == "opencode" {
+            Some(model.filter(|model| !model.trim().is_empty())?)
+        } else {
+            None
+        };
         let prompt = title::title_prompt(first_message);
         let request = OneShot {
-            model: model.filter(|model| self.id() == "opencode" && model.starts_with("orx-local-")),
+            model,
             ..title::title_request(&prompt)
         };
         let raw = self.one_shot(request).await.ok()?;
@@ -520,13 +529,19 @@ pub fn permission_id_for_mode(harness_id: &str, mode: PermissionMode) -> Option<
 /// The one registry. Every consumer — chat dispatch, detection sweep, the
 /// create-session allowlist, and the skill installer — iterates this.
 pub fn registry() -> Vec<Box<dyn Harness>> {
-    vec![
+    let mut harnesses: Vec<Box<dyn Harness>> = vec![
         Box::new(claude::ClaudeCode),
         Box::new(codex::Codex),
         Box::new(opencode::OpenCode),
         Box::new(cursor::Cursor),
         Box::new(antigravity::Antigravity),
-    ]
+    ];
+    harnesses.extend(
+        crate::local::acp::registered_definitions()
+            .into_iter()
+            .map(|definition| Box::new(acp::Acp(definition)) as Box<dyn Harness>),
+    );
+    harnesses
 }
 
 /// A single self-contained request for [`Harness::one_shot`].
@@ -588,6 +603,10 @@ pub struct CompactCtx {
     pub session_id: String,
     pub native_session_id: Option<String>,
     pub model: Option<String>,
+    pub project: crate::local::model::LocalProject,
+    pub permission_mode: Option<PermissionMode>,
+    pub service_tier: Option<String>,
+    pub reasoning_level: Option<String>,
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -606,6 +625,18 @@ pub fn chat_harness(id: &str) -> Option<Box<dyn Harness>> {
         .find(|h| h.id() == id && h.supports_chat())
 }
 
+pub fn session_harness(id: &str, session_id: &str) -> Option<Box<dyn Harness>> {
+    if id.starts_with("acp:") {
+        let state = Store::open()
+            .ok()?
+            .ensure_acp_session_state(session_id)
+            .ok()??;
+        return (state.launch.id == id)
+            .then(|| Box::new(acp::Acp(state.launch)) as Box<dyn Harness>);
+    }
+    chat_harness(id)
+}
+
 /// True if `id` names a chat-capable harness (create-session allowlist).
 pub fn is_chat_harness(id: &str) -> bool {
     registry().iter().any(|h| h.id() == id && h.supports_chat())
@@ -622,7 +653,17 @@ async fn detect_one(harness: &dyn Harness, snapshot: bool) -> Option<HarnessInfo
     // The per-harness wall clock joins the fill's probe timings as the
     // `"total"` row — the snapshot pass is covered by its own pass event.
     if !snapshot {
-        detect::record_probe_timing(harness.id(), "total", start.elapsed().as_millis() as u64);
+        let telemetry_id = match harness.id() {
+            "claude-code" => Some("claude-code"),
+            "codex" => Some("codex"),
+            "opencode" => Some("opencode"),
+            "cursor" => Some("cursor"),
+            "antigravity" => Some("antigravity"),
+            _ => None,
+        };
+        if let Some(telemetry_id) = telemetry_id {
+            detect::record_probe_timing(telemetry_id, "total", start.elapsed().as_millis() as u64);
+        }
     }
     if timing {
         eprintln!(
@@ -650,6 +691,7 @@ async fn detect_one(harness: &dyn Harness, snapshot: bool) -> Option<HarnessInfo
             info.auth_state = HarnessAuthState::Ready;
         }
         info.options = harness.options();
+        info.supports_compaction = harness.supports_compaction();
         // The trait is the ceiling: a `detect` narrows it for an installation
         // whose run path can't steer. A steering harness whose `detect` forgets
         // to set it reports false and silently queues every send.
@@ -805,6 +847,95 @@ $ARGUMENTS
 mod tests {
     use super::options::{PlanActivation, REASONING_DEFAULT_ID};
     use super::*;
+
+    #[test]
+    fn compaction_support_is_explicit_for_builtins_and_disabled_for_acp() {
+        let supported: [&dyn Harness; 5] = [
+            &claude::ClaudeCode,
+            &codex::Codex,
+            &opencode::OpenCode,
+            &cursor::Cursor,
+            &antigravity::Antigravity,
+        ];
+        for harness in supported {
+            assert!(harness.supports_compaction(), "{}", harness.id());
+        }
+        for preset in crate::local::acp::presets() {
+            let harness = acp::Acp(preset.launch);
+            assert!(!harness.supports_compaction(), "{}", harness.id());
+        }
+        struct DefaultHarness;
+        #[async_trait]
+        impl Harness for DefaultHarness {
+            fn id(&self) -> &str {
+                "default-fixture"
+            }
+            fn name(&self) -> &str {
+                "Default fixture"
+            }
+        }
+        assert!(!DefaultHarness.supports_compaction());
+    }
+
+    #[tokio::test]
+    async fn title_uses_only_the_selected_opencode_model() {
+        struct TitleHarness {
+            id: &'static str,
+            calls: std::sync::Mutex<Vec<Option<String>>>,
+        }
+        #[async_trait]
+        impl Harness for TitleHarness {
+            fn id(&self) -> &str {
+                self.id
+            }
+            fn name(&self) -> &str {
+                self.id
+            }
+            async fn one_shot(&self, request: OneShot<'_>) -> Result<String> {
+                self.calls
+                    .lock()
+                    .unwrap()
+                    .push(request.model.map(str::to_owned));
+                Ok("A test title".into())
+            }
+        }
+        let harness = TitleHarness {
+            id: "opencode",
+            calls: Default::default(),
+        };
+        for model in [None, Some(""), Some(" \t")] {
+            assert!(harness.generate_title("hello", model).await.is_none());
+        }
+        assert!(harness.calls.lock().unwrap().is_empty());
+        for model in [
+            "orx-local-test/qwen",
+            "openrouter/anthropic/claude",
+            "custom/model",
+        ] {
+            assert_eq!(
+                harness
+                    .generate_title("hello", Some(model))
+                    .await
+                    .as_deref(),
+                Some("A test title")
+            );
+            assert_eq!(
+                harness.calls.lock().unwrap().last(),
+                Some(&Some(model.to_owned()))
+            );
+        }
+        for id in ["claude-code", "codex", "cursor"] {
+            let harness = TitleHarness {
+                id,
+                calls: Default::default(),
+            };
+            harness
+                .generate_title("hello", Some("selected/model"))
+                .await
+                .unwrap();
+            assert_eq!(*harness.calls.lock().unwrap(), vec![None]);
+        }
+    }
 
     #[test]
     fn one_line_flattens_and_caps_on_a_char_boundary() {

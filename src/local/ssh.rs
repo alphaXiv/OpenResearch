@@ -4,8 +4,6 @@
 //! server). The run row lives in the local store only; a detached
 //! `orx supervise` watches the remote process.
 
-use std::collections::HashMap;
-
 use crate::commands::exp::spawn_detached_supervise;
 use crate::compute::SourceSnapshot;
 use crate::error::{anyhow, Result};
@@ -58,7 +56,7 @@ pub async fn submit_local_ssh_with_source(
         .or_else(|| project.run_command.clone().filter(|c| !c.trim().is_empty()))
         .ok_or_else(|| anyhow!("{}", crate::invocation::no_run_command(&project.id)))?;
 
-    let target = launch.target.clone();
+    let target = launch.target.clone().for_run(&run_id);
     let container = launch
         .container
         .as_ref()
@@ -69,13 +67,18 @@ pub async fn submit_local_ssh_with_source(
         &source.path,
         &source.digest,
         container.as_ref(),
+        launch.remote_root.as_deref(),
     )
     .await?;
-    let script = crate::compute::staged_script(&run_command);
+    let script = format!(
+        "{} {}",
+        crate::compute::TENSORBOARD_LOGDIR_EXPORT,
+        crate::compute::staged_script(&run_command)
+    );
 
     // The remote env: everything the user synced (API keys), plus the tokens
     // the run script expects. Exported inside run.sh (written owner-only).
-    let mut env: HashMap<String, String> = crate::config::list_synced_env().into_iter().collect();
+    let mut env = crate::config::run_env(&run_id);
     if let Ok(hf_token) = crate::jobs::huggingface::resolve_token() {
         env.entry("HF_TOKEN".to_string()).or_insert(hf_token);
     }
@@ -84,6 +87,7 @@ pub async fn submit_local_ssh_with_source(
         ssh_container: container.clone(),
         monitoring_error: None,
         cancellation_accepted: false,
+        rental_lease: None,
         kind: "ssh_job".to_string(),
         namespace: Some(target.dest.clone()),
         job_id: Some(remote_dir.clone()),
@@ -102,6 +106,7 @@ pub async fn submit_local_ssh_with_source(
         source_digest: None,
         source_path: None,
         source_size: None,
+        remote_root: launch.remote_root.clone(),
     };
     source.apply_to_descriptor(&mut descriptor);
     if container.is_some() {
@@ -110,6 +115,7 @@ pub async fn submit_local_ssh_with_source(
     let submission = ssh::run_job(&ssh::SshJobSpec {
         target: target.clone(),
         run_id: run_id.clone(),
+        remote_root: launch.remote_root.clone(),
         script,
         env,
         container: container.clone(),
