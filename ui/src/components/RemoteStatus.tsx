@@ -12,6 +12,7 @@ import { m } from "../paraglide/messages.js";
 import { usePopover } from "./ModelPicker";
 import { RemoteIcon } from "./RemoteIcon";
 import { RemoteStopDialog } from "./RemoteStopDialog";
+import { BrandMark } from "./Wordmark";
 import { Button, IconButton, MenuItem, showAlert, Tooltip } from "./ui";
 
 export function RemoteStatus({
@@ -83,7 +84,7 @@ export function RemoteStatus({
               {disconnecting ? m.remote_closing() : m.remote_disconnect()}
             </MenuItem>
             <Tooltip content={m.remote_persistence_explanation()} className="me-2 shrink-0 text-subtext">
-              <Info size={15} />
+              <Info size={16} />
             </Tooltip>
           </div>
           <MenuItem
@@ -133,8 +134,9 @@ export function RemoteStatus({
             <span className="-my-0.5 max-w-full self-start truncate rounded-sm bg-accent-blue px-1.5 py-0.5 text-sm leading-tight text-white">
               {m.remote_ssh_host({ host: ltr(runtime.session.host) })}
             </span>
-            <span className="truncate text-xs leading-tight text-subtext">
-              OpenResearch {ltr(runtime.session.version ?? "…")}
+            <span className="flex min-w-0 items-center gap-1 text-xs leading-tight text-subtext">
+              <span className="size-3 shrink-0"><BrandMark /></span>
+              <span className="truncate">OpenResearch {ltr(runtime.session.version ?? "…")}</span>
             </span>
           </span>
         </div>

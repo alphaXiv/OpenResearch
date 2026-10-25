@@ -24,7 +24,7 @@ export function SkillMenu({
   }, [activeIndex, skills]);
 
   return (
-    <div className="skill-menu absolute bottom-[calc(100%_+_8px)] start-0 w-full max-h-[min(18rem,40vh)] overflow-y-auto overscroll-contain p-1.5 bg-background border border-border-variant rounded-2xl shadow-control-subtle z-50">
+    <div className="skill-menu absolute bottom-[calc(100%_+_8px)] start-0 w-full max-h-[min(18rem,40vh)] overflow-y-auto overscroll-contain p-1.5 bg-background border border-border-variant rounded-lg shadow-control-subtle z-50">
       {skills.map((s, i) => (
         <button
           key={s.name}
@@ -32,7 +32,7 @@ export function SkillMenu({
           type="button"
           disabled={s.disabled}
           title={s.disabled ? s.description : undefined}
-          className={`skill-item flex items-center gap-2 w-full text-start py-1 px-2 rounded-full text-sm font-normal text-text/80 disabled:opacity-50 disabled:cursor-not-allowed [&.active]:bg-hover-muted [&.active]:text-text ${i === activeIndex ? "active" : ""}`}
+          className={`skill-item flex items-center gap-2 w-full text-start py-1 px-2 rounded-sm text-sm font-normal text-text/80 disabled:opacity-50 disabled:cursor-not-allowed [&.active]:bg-hover-muted [&.active]:text-text ${i === activeIndex ? "active" : ""}`}
           // mousedown + preventDefault keeps the textarea focused.
           onMouseDown={(e) => {
             e.preventDefault();

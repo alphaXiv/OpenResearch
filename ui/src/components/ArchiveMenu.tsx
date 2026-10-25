@@ -4,7 +4,7 @@ import { Ellipsis } from "lucide-react";
 import { m } from "../paraglide/messages.js";
 import type { Experiment } from "../api";
 import { usePopover } from "./ModelPicker";
-import { IconButton, MenuItem } from "./ui";
+import { Button, IconButton, MenuItem } from "./ui";
 
 export type ArchiveActions = {
   archiveOnly: boolean;
@@ -108,19 +108,19 @@ export function ArchiveMenu({ id, name, actions, onArchive, onDelete, compact = 
           aria-expanded={menu.open}
           onClick={toggle}
         >
-          <Ellipsis size={15} aria-hidden="true" />
+          <Ellipsis size={16} aria-hidden="true" />
         </IconButton>
       ) : (
-        <button
+        <Button
           type="button"
-          className="btn inline-flex h-7 items-center justify-center rounded-sm border border-border bg-background px-2.5 text-sm text-text hover:bg-surface"
+          size="small"
           ref={triggerRef}
           aria-label={m.tree_archive_manage_experiment({ name })}
           aria-expanded={menu.open}
           onClick={toggle}
         >
           {m.tree_archive_manage()}
-        </button>
+        </Button>
       )}
       {menu.open && createPortal(
         <div ref={menu.ref} className="option-menu fixed z-70 min-w-44 rounded-lg border border-border bg-background p-1.5 shadow-menu" style={position}>

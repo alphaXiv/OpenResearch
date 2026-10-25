@@ -20,7 +20,7 @@ export function ProjectsEmptyState({
   return (
     <div className="home flex flex-1 min-h-0 flex-col items-center justify-center gap-3 bg-background p-6 text-center">
       <FolderOpen size={36} strokeWidth={1.5} className="shrink-0 text-muted" />
-      <p className="m-0 w-full max-w-105 text-lg leading-[1.55] text-subtext">
+      <p className="m-0 w-full max-w-105 text-lg leading-normal text-subtext">
         {m.projects_home_no_projects_yet_create_one_to_get_started()}
       </p>
       <Button variant="primary" className="mt-1" onClick={() => setDialogOpen(true)}>

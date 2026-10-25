@@ -185,7 +185,7 @@ export function ExperimentsTable({
                       if (logsRun) onOpenLogs(experiment.id, logsRun.id, intent);
                     }, { stopPropagation: true })}
                   >
-                    <Terminal size={15} />
+                    <Terminal size={16} />
                   </IconButton>
                 </Tooltip>
                 <Tooltip interactive content={m.experiments_table_code()}>
@@ -196,7 +196,7 @@ export function ExperimentsTable({
                       onOpenCode(experiment.id, intent),
                     { stopPropagation: true })}
                   >
-                    <FolderTree size={15} />
+                    <FolderTree size={16} />
                   </IconButton>
                 </Tooltip>
                 {liveRun && (
@@ -208,7 +208,7 @@ export function ExperimentsTable({
                       aria-label={cancelling ? m.common_stopping() : m.common_stop()}
                       onClick={() => void requestCancel(liveRun.id)}
                     >
-                      <CircleStop size={15} />
+                      <CircleStop size={16} />
                     </IconButton>
                   </Tooltip>
                 )}

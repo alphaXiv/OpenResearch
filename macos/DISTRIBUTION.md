@@ -168,6 +168,16 @@ logged. To see it, run the bundled binary from a terminal:
 /Applications/OpenResearch.app/Contents/MacOS/OpenResearch
 ```
 
+## Desktop page zoom
+
+The macOS View menu offers Zoom In (`Cmd =`), Zoom Out (`Cmd -`), and Actual Size
+(`Cmd 0`). Zoom ranges from 50% to 200% in 10-point steps. The app remembers your last
+zoom level in your local user preferences and restores it on launch (100% by
+default). A brief zoom popover shows the percentage, zoom buttons, and Reset.
+The titlebar preserves space for the native window controls.
+Windows and Linux use `Ctrl =` (or `Ctrl +`), `Ctrl -`, and `Ctrl 0` with the
+same range and window-local behavior.
+
 ## Coexisting with a CLI install
 
 The app and a `curl`-installed `orx` share one data dir and one config dir, so

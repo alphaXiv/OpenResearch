@@ -4,7 +4,6 @@
 
 :root[data-theme="dark"] .tinker-logo {
   filter: invert(1);
-  mix-blend-mode: screen;
 }
 
 :root:is([lang="fa"], [lang="ar"]) #root :where(p, h1, h2, h3, h4, h5, h6, button, label, li, th, td, dt, dd, [role="status"], [role="alert"]) {
@@ -149,11 +148,6 @@
   transition: color 140ms ease, text-decoration-color 140ms ease;
 }
 
-.tool-line,
-.tool-group-summary {
-  font-weight: 375;
-}
-
 .tool-group-rows .tool-line {
   font-size: var(--text-sm);
 }
@@ -243,7 +237,7 @@
 
 .md .file-chip:hover:not(:disabled) .file-chip-label,
 .md .file-chip:focus-visible .file-chip-label {
-  text-decoration-color: var(--primary);
+  text-decoration-color: var(--text);
 }
 
 .md .file-chip:disabled .file-chip-label {
@@ -291,15 +285,15 @@
 
 .tool-target:hover,
 .tool-target-more:hover {
-  color: var(--primary);
+  color: var(--text);
   text-decoration-color: var(--border-strong);
 }
 
 .tool-target:focus-visible,
 .tool-target-more:focus-visible {
-  color: var(--primary);
+  color: var(--text);
   text-decoration-color: var(--border-strong);
-  outline: 1px solid var(--border-strong);
+  outline: 1px solid var(--focus);
   outline-offset: 2px;
 }
 
@@ -393,11 +387,11 @@
 }
 
 .workspace-card-visible .workspace-tools {
-  top: 1.25rem;
+  top: 0.75rem;
 }
 
 .win-titlebar .workspace-card-visible .workspace-tools {
-  top: 2.5rem;
+  top: 2.75rem;
 }
 
 .code-source-text,

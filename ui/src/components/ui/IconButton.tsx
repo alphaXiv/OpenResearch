@@ -4,7 +4,7 @@ import { cn } from "./cn";
 const BASE = [
   "icon-btn relative inline-flex shrink-0 items-center justify-center",
   "transition-[background,color] duration-120 ease-standard",
-  "focus-visible:outline-2 focus-visible:outline-solid focus-visible:outline-text focus-visible:outline-offset-2",
+  "focus-visible:outline-2 focus-visible:outline-solid focus-visible:outline-focus focus-visible:outline-offset-2",
   "disabled:cursor-default disabled:opacity-45",
 ].join(" ");
 
@@ -12,7 +12,7 @@ type IconButtonSize = "default" | "small";
 type IconButtonVariant = "default" | "primary" | "stop";
 
 const VARIANTS: Record<IconButtonVariant, string> = {
-  default: "text-subtext [&:hover:not(:disabled)]:bg-surface [&:hover:not(:disabled)]:text-text [&:active:not(:disabled)]:bg-highlight [&.active]:bg-surface [&.active]:text-primary",
+  default: "text-subtext [&:hover:not(:disabled)]:bg-surface [&:hover:not(:disabled)]:text-text [&:active:not(:disabled)]:bg-highlight [&.active]:bg-surface [&.active]:text-text",
   primary: "bg-primary text-background [&:hover:not(:disabled)]:bg-primary-hover [&:active:not(:disabled)]:bg-primary-active",
   stop: "bg-surface text-text [&:hover:not(:disabled)]:bg-stop-hover [&:active:not(:disabled)]:bg-highlight",
 };

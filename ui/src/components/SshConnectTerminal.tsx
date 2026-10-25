@@ -134,9 +134,9 @@ export function SettingsCommandTerminal({ path, label, className = "mt-4 overflo
           {status === "running" ? (
             <><Spinner className="border-t-accent-amber" /> {m.settings_command_terminal_running()}</>
           ) : status === "done" ? (
-            <><Check size={13} strokeWidth={2.5} className="text-accent-green" /> {m.settings_command_terminal_done()}</>
+            <><Check size={14} strokeWidth={2.5} className="text-accent-green" /> {m.settings_command_terminal_done()}</>
           ) : status === "failed" ? (
-            <><X size={13} strokeWidth={2.5} className="text-accent-red" /> {m.settings_command_terminal_failed()}</>
+            <><X size={14} strokeWidth={2.5} className="text-accent-red" /> {m.settings_command_terminal_failed()}</>
           ) : (
             m.settings_command_terminal_closed()
           )}

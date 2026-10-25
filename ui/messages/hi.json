@@ -1432,5 +1432,7 @@
   "chat_experiment_running": "प्रयोग चल रहा है",
   "chat_experiment_starting": "प्रयोग शुरू हो रहा है",
   "chat_experiment_cancelling": "प्रयोग रद्द किया जा रहा है",
-  "chat_experiments_running": "{count} प्रयोग चल रहे हैं"
+  "chat_experiments_running": "{count} प्रयोग चल रहे हैं",
+  "desktop_zoom_controls": "ज़ूम नियंत्रण",
+  "desktop_zoom_reset": "रीसेट"
 }

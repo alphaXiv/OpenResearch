@@ -1,4 +1,4 @@
-import type { AnchorHTMLAttributes, ButtonHTMLAttributes } from "react";
+import type { AnchorHTMLAttributes, ComponentProps } from "react";
 import { cn } from "./cn";
 
 type ButtonVariant = "default" | "primary" | "ghost" | "danger" | "warning" | "purple" | "amber";
@@ -7,7 +7,7 @@ type ButtonSize = "default" | "small" | "large";
 const BASE = [
   "btn inline-flex shrink-0 items-center justify-center gap-1.5 whitespace-nowrap border font-medium",
   "transition-[background,border-color,color] duration-120 ease-standard",
-  "focus-visible:outline-2 focus-visible:outline-solid focus-visible:outline-text focus-visible:outline-offset-2",
+  "focus-visible:outline-2 focus-visible:outline-solid focus-visible:outline-focus focus-visible:outline-offset-2",
   "disabled:cursor-default disabled:opacity-45",
 ].join(" ");
 
@@ -24,14 +24,14 @@ const VARIANTS: Record<ButtonVariant, string> = {
 const SIZES: Record<ButtonSize, string> = {
   default: "h-8 rounded-md px-3.5 text-sm",
   small: "h-7 rounded-sm px-2.5 text-sm",
-  large: "h-14 rounded-lg px-7 text-xl",
+  large: "h-11 rounded-lg px-6 text-base",
 };
 
 function classes(variant: ButtonVariant, size: ButtonSize, active: boolean, className?: string) {
   return cn(BASE, VARIANTS[variant], SIZES[size], active && "active", className);
 }
 
-export type ButtonProps = ButtonHTMLAttributes<HTMLButtonElement> & {
+export type ButtonProps = ComponentProps<"button"> & {
   active?: boolean;
   variant?: ButtonVariant;
   size?: ButtonSize;

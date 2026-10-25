@@ -123,7 +123,7 @@ function CopyableCommand({ command }: { command: string }) {
         aria-label={m.file_viewer_copy_install_command()}
         onClick={() => void copy()}
       >
-        {state === "copied" ? <Check size={13} /> : <Copy size={13} />}
+        {state === "copied" ? <Check size={14} /> : <Copy size={14} />}
       </IconButton>
     </div>
   );
@@ -615,7 +615,7 @@ export function FileViewer({
         </span>
         {branchLabel && (
           <span className="file-view-branch inline-flex items-center gap-1 min-w-0 text-xs text-muted border border-border-variant rounded-sm py-px px-1.5 max-w-65 overflow-hidden text-ellipsis whitespace-nowrap [&_svg]:flex-none" title={m.a11y_branch({ branch: ltr(branchLabel) })}>
-            <GitBranch size={11} />
+            <GitBranch size={12} />
             {branchLabel}
           </span>
         )}
@@ -652,9 +652,9 @@ export function FileViewer({
             onClick={() => latex.setShowPdf(!latex.showPdf)}
           >
             {latex.showPdf ? (
-              <Code size={13} />
+              <Code size={14} />
             ) : (
-              <FileText size={13} className={latex.stale ? "text-accent-amber" : undefined} />
+              <FileText size={14} className={latex.stale ? "text-accent-amber" : undefined} />
             )}
           </IconButton>
         )}
@@ -671,7 +671,7 @@ export function FileViewer({
             href={compiledPdfUrl}
             download={compiledPdfName}
           >
-            <Download size={13} className={latex.stale ? "text-accent-amber" : undefined} />
+            <Download size={14} className={latex.stale ? "text-accent-amber" : undefined} />
           </IconButtonLink>
         )}
         {liveTex && <OverleafButton overleaf={overleaf} />}
@@ -684,7 +684,7 @@ export function FileViewer({
             disabled={latex.compiling || !latex.engine}
             onClick={() => void compileFromDisk()}
           >
-            {latex.compiling ? <Spinner /> : <FileOutput size={13} />}
+            {latex.compiling ? <Spinner /> : <FileOutput size={14} />}
           </IconButton>
         )}
         {rendersByDefault && (
@@ -696,7 +696,7 @@ export function FileViewer({
             aria-label={showSource ? m.common_rendered_view() : m.common_view_source()}
             onClick={() => onShowSourceChange?.(!showSource)}
           >
-            <Code size={13} />
+            <Code size={14} />
           </IconButton>
         )}
         {canCopyContents && (
@@ -707,7 +707,7 @@ export function FileViewer({
             aria-label={copiedContents ? m.common_copied() : m.file_viewer_copy_contents()}
             onClick={() => void copyContents()}
           >
-            {copiedContents ? <Check size={13} /> : <Copy size={13} />}
+            {copiedContents ? <Check size={14} /> : <Copy size={14} />}
           </IconButton>
         )}
         {data != null && (
@@ -721,7 +721,7 @@ export function FileViewer({
               disabled={openEditor.busy || osActionBlocker != null}
               onClick={() => void openEditor.trigger()}
             >
-              {openEditor.busy ? <Spinner /> : <ExternalLink size={13} />}
+              {openEditor.busy ? <Spinner /> : <ExternalLink size={14} />}
             </IconButton>
             <IconButton
               size="small"
@@ -732,7 +732,7 @@ export function FileViewer({
               disabled={revealManager.busy || osActionBlocker != null}
               onClick={() => void revealManager.trigger()}
             >
-              {revealManager.busy ? <Spinner /> : <FolderOpen size={13} />}
+              {revealManager.busy ? <Spinner /> : <FolderOpen size={14} />}
             </IconButton>
           </>
         )}
@@ -796,7 +796,7 @@ export function FileViewer({
               aria-label={m.file_viewer_dismiss_compile_message()}
               onClick={latex.dismiss}
             >
-              <X size={13} />
+              <X size={14} />
             </IconButton>
           </div>
           {latex.log && (

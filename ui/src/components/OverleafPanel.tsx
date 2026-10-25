@@ -71,7 +71,7 @@ export function OverleafButton({ overleaf }: { overleaf: OverleafSync }) {
         aria-controls={open ? id : undefined}
         onClick={() => setOpen(!open)}
       >
-        {overleaf.syncing ? <Spinner /> : <CloudUpload size={13} className={failed || conflicts ? "text-accent-red" : overleaf.hasToken && overleaf.link ? "text-accent-green" : undefined} />}
+        {overleaf.syncing ? <Spinner /> : <CloudUpload size={14} className={failed || conflicts ? "text-accent-red" : overleaf.hasToken && overleaf.link ? "text-accent-green" : undefined} />}
       </IconButton>
       {open && createPortal(
         <div ref={ref} id={id} role="dialog" aria-label={m.settings_page_overleaf()} tabIndex={-1}
@@ -82,7 +82,7 @@ export function OverleafButton({ overleaf }: { overleaf: OverleafSync }) {
           }}
         >
           <div className="absolute end-3 top-3">
-            <IconButton size="small" aria-label={m.file_viewer_dismiss_overleaf_message()} onClick={() => { setOpen(false); triggerRef.current?.focus(); }}><X size={13} /></IconButton>
+            <IconButton size="small" aria-label={m.file_viewer_dismiss_overleaf_message()} onClick={() => { setOpen(false); triggerRef.current?.focus(); }}><X size={14} /></IconButton>
           </div>
           <OverleafPanel overleaf={overleaf} />
         </div>, document.body,
@@ -321,7 +321,7 @@ export function OverleafPanel({ overleaf }: { overleaf: OverleafSync }) {
           <div role="alert" className="text-sm text-accent-red whitespace-pre-wrap break-words">{formError}</div>
         )}
         <details className="border-t border-border pt-3">
-          <summary className="cursor-pointer text-sm font-semibold text-text focus-visible:outline-2 focus-visible:outline-text"><span className="ms-2">{m.settings_page_settings()}</span></summary>
+          <summary className="cursor-pointer text-sm font-semibold text-text focus-visible:outline-2 focus-visible:outline-focus"><span className="ms-2">{m.settings_page_settings()}</span></summary>
           <div className="mt-2 flex flex-col items-start gap-1">
             <Button variant="ghost" className="font-normal" type="button" onClick={replaceToken}>
               {m.overleaf_panel_replace_the_overleaf_token()}
