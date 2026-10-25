@@ -4902,7 +4902,7 @@ export function ChatPanel({
   const selectedModel = activeHarness?.models.find((model) => model.id === composerSelection?.model);
   // OpenCode reports a text-only model's image Read as both success and error, so refuse up front.
   const noImageInputError = selectedModel?.imageInput === false
-    ? m.chat_model_no_image_input({ model: ltr(harnessModelLabel(selectedModel)) })
+    ? m.chat_model_no_image_input({ model: ltr(harnessModelLabel(selectedModel, activeHarness?.id)) })
     : null;
   const imageInputBlocked =
     !!noImageInputError && attachments.some((a) => a.mediaType.startsWith("image/"));

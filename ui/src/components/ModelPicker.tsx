@@ -194,7 +194,7 @@ export function ModelPicker({
       lockHarness && value ? harnesses.filter((h) => h.id === value.harness) : harnesses;
     return shown.map((h) => {
       let models = h.models;
-      if (q) models = models.filter((m) => `${m.id} ${harnessModelLabel(m)}`.toLowerCase().includes(q));
+      if (q) models = models.filter((m) => `${m.id} ${harnessModelLabel(m, h.id)}`.toLowerCase().includes(q));
       // Large catalogs stay behind the filter box.
       else if (h.id === "opencode" || h.id === "cursor" || h.id === "antigravity" || h.id.startsWith("acp:")) models = models.slice(0, 5);
       return { harness: h, models, hidden: q ? 0 : h.models.length - models.length };
@@ -242,7 +242,7 @@ export function ModelPicker({
   const label = value
     ? value.model
       ? selected
-        ? harnessModelLabel(selected)
+        ? harnessModelLabel(selected, value?.harness)
         : value.harness.startsWith("acp:") && value.model === "default"
           ? m.model_picker_default_model()
           : `${modelLabel(value.model)} · ${m.model_picker_unverified()}`
@@ -467,7 +467,7 @@ export function ModelPicker({
                             title={m.id}
                             onClick={() => pick(harness, m.id)}
                           >
-                            <span>{harnessModelLabel(m)}</span>
+                            <span>{harnessModelLabel(m, harness.id)}</span>
                             {value?.harness === harness.id && value?.model === m.id && (
                               <Check size={14} />
                             )}

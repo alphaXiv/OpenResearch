@@ -28,12 +28,14 @@ function load(file, mocks) {
 }
 
 const i18n = load("i18n.ts", { "./paraglide/runtime.js": runtime });
+const providerLabel = load("providerLabel.ts", {});
 const api = load("api.ts", {
   "./queries/client": {},
   "./queries/invalidation": {},
   "./paraglide/messages.js": messages,
   "./paraglide/runtime.js": runtime,
   "./i18n": i18n,
+  "./providerLabel.ts": providerLabel,
 });
 const {
   buildHistoryNodes,

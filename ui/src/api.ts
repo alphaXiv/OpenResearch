@@ -7,6 +7,7 @@ import type { GlobalWorkspace, ProjectWorkspace } from "./workspaceState";
 import { m } from "./paraglide/messages.js";
 import { getLocale } from "./paraglide/runtime.js";
 import { fmtNumber } from "./i18n";
+import { withProviderSuffix } from "./providerLabel.ts";
 
 export { fmtNumber } from "./i18n";
 
@@ -1604,10 +1605,13 @@ export interface HarnessModel {
 }
 
 /** Display label for a harness model: the catalog's own name when it has one,
- * else prettified from the id. */
-export function harnessModelLabel(model: HarnessModel): string {
+ * else prettified from the id. OpenCode's label also names the provider the
+ * model comes from — see {@link withProviderSuffix}. */
+export function harnessModelLabel(model: HarnessModel, harness?: string | null): string {
   if (model.id === "default" && !model.displayName) return m.model_picker_default_model();
-  if (!model.id.startsWith("orx-local-")) return model.displayName ?? modelLabel(model.id);
+  if (!model.id.startsWith("orx-local-")) {
+    return withProviderSuffix(model.displayName ?? modelLabel(model.id), model.id, harness);
+  }
   const provider = model.displayName?.split(" · ").slice(1).join(" · ").replace(/ \(local\)$/, "");
   const endpoint = provider === "OpenAI-compatible server" || provider === "Custom endpoint" || provider === "Custom Endpoint"
     ? m.local_models_custom_endpoint()
