@@ -866,7 +866,7 @@ pub fn tick(plan: &SleepPlan, state: &mut SleepState, obs: &Observation) -> Vec<
     }
     state.idle_since = None;
     state.last_nudge_at = Some(obs.now);
-    actions.push(Action::Nudge(nudge_text(kind, plan, state, obs)));
+    actions.push(Action::Nudge(nudge_text(kind, state, obs)));
     actions
 }
 
@@ -883,22 +883,25 @@ fn stall_key(plan: &SleepPlan, progress: Option<&Progress>) -> Option<String> {
     })
 }
 
-fn nudge_text(kind: NudgeKind, plan: &SleepPlan, state: &SleepState, obs: &Observation) -> String {
-    let status = status_lines(plan, state, obs.budget, obs.progress.as_ref());
+/// The nudge itself. The live status rides every sleep turn in its
+/// `<orx-sleep>` block (see [`turn_context`]), so it is not repeated here.
+fn nudge_text(kind: NudgeKind, state: &SleepState, obs: &Observation) -> String {
     match kind {
-        NudgeKind::Kickoff => format!(
+        NudgeKind::Kickoff => {
             "[orx] Sleep mode is on: the user is away and you drive the research until the plan \
-             finishes.\n{status}\nStart with the feasibility analysis the sleep-mode rules ask \
+             finishes.\nStart with the feasibility analysis the sleep-mode rules ask \
              for, record it with `orx sleep assess`, then plan and launch the first runs."
-        ),
-        NudgeKind::Continue => format!(
-            "[orx] Sleep mode check-in: this chat has been idle with nothing waking it.\n{status}\n\
+                .to_string()
+        }
+        NudgeKind::Continue => {
+            "[orx] Sleep mode check-in: this chat has been idle with nothing waking it.\n\
              Continue the research: inspect finished runs (`orx runs`), import their metrics, and \
              launch the next experiments. If you are waiting on runs, register `orx exp wake` \
              for each and end your turn."
-        ),
+                .to_string()
+        }
         NudgeKind::Research => format!(
-            "[orx] Sleep mode: the last {} finished runs did not beat the best result.\n{status}\n\
+            "[orx] Sleep mode: the last {} finished runs did not beat the best result.\n\
              Stop iterating on the same idea. Run a research round now, as the sleep-mode rules \
              describe: fan out cheap subagents across sources, synthesize what they find into \
              new hypotheses, reassess feasibility with `orx sleep assess`, then launch the most \
@@ -906,7 +909,7 @@ fn nudge_text(kind: NudgeKind, plan: &SleepPlan, state: &SleepState, obs: &Obser
             obs.progress.as_ref().map_or(0, |p| p.runs_since_best)
         ),
         NudgeKind::Retrospective => format!(
-            "[orx] Sleep mode: a self-improvement retrospective is due. {}\n{status}\n\
+            "[orx] Sleep mode: a self-improvement retrospective is due. {}\n\
              Review how you have been working, as the retrospective rules in your strategy \
              describe (`orx strategy stats --runs`, `orx strategy show`). Then either propose a \
              revised strategy with `orx strategy propose --rationale \"…\" --file -`, which orx \
@@ -917,7 +920,7 @@ fn nudge_text(kind: NudgeKind, plan: &SleepPlan, state: &SleepState, obs: &Obser
                 .map_or("", |due| due.summary.as_str())
         ),
         NudgeKind::Finished => format!(
-            "[orx] Sleep mode finished: {}.\n{status}\nDo not start new paid runs. Let runs in \
+            "[orx] Sleep mode finished: {}.\nDo not start new paid runs. Let runs in \
              flight finish, import their metrics, and write the morning report the sleep-mode \
              rules describe.",
             state
@@ -1008,28 +1011,9 @@ pub fn format_time(ms: i64) -> String {
     )
 }
 
-/// The sleep-mode rules, sent with every turn while a plan exists. They
-/// replace the autonomy level: the user is not there to ask.
-pub fn turn_context(store: &Store, session_id: &str) -> Option<String> {
-    let sleep = store.get_sleep(session_id).ok()??;
-    let now = crate::store::now_ms();
-    let budget = store
-        .sleep_charges(session_id)
-        .ok()
-        .map(|charges| Budget::of(&sleep.plan, &charges, now));
-    let progress = progress_from_store(store, &sleep).ok().flatten();
-    let status = status_lines(&sleep.plan, &sleep.state, budget, progress.as_ref());
-    // The strategy is how the agent works; a broken one must not cost the turn
-    // its hard rules.
-    let strategy = crate::local::strategy::turn_context(store, &sleep)
-        .map_err(|err| eprintln!("orx: strategy: {err}"))
-        .ok();
-    Some(format!(
-        "<orx-sleep>\n\
-Sleep mode is on. The user is away (often asleep) and cannot answer, approve, or unblock anything. \
-You own the research decisions; orx enforces the limits below.\n\
-{status}\n\n\
-Rules:\n\
+/// The sleep-mode rules. Static, so a native session that already holds them
+/// gets a one-line reference instead (see [`crate::local::turn_context`]).
+const RULES: &str = "\
 - Never ask the user a question or wait for approval: decide, write down why in the experiment \
 description, and continue. Avoid actions that would need a permission prompt.\n\
 - The GPU budget is a hard limit. orx refuses launches that do not fit and cancels paid runs \
@@ -1054,8 +1038,38 @@ as your strategy describes.\n\
 - When sleep mode finishes, write a morning report in the artifacts directory: what was tried, \
 the best result against the baseline with run ids, spend, the feasibility verdict, surprising \
 findings, the strategy changes and trial results (`orx strategy log`), and recommended next \
-steps.\n\
+steps.";
+
+/// The sleep-mode block, sent with every turn while a plan exists. It replaces
+/// the autonomy level: the user is not there to ask. The status is live and
+/// always sent; the rules and the strategy text go out in full only when the
+/// native session does not already hold them.
+pub fn turn_context(
+    store: &Store,
+    session_id: &str,
+    delivered: &crate::local::turn_context::Delivered,
+) -> Option<String> {
+    let sleep = store.get_sleep(session_id).ok()??;
+    let now = crate::store::now_ms();
+    let budget = store
+        .sleep_charges(session_id)
+        .ok()
+        .map(|charges| Budget::of(&sleep.plan, &charges, now));
+    let progress = progress_from_store(store, &sleep).ok().flatten();
+    let status = status_lines(&sleep.plan, &sleep.state, budget, progress.as_ref());
+    // The strategy is how the agent works; a broken one must not cost the turn
+    // its hard rules.
+    let strategy = crate::local::strategy::turn_context(store, &sleep, delivered)
+        .map_err(|err| eprintln!("orx: strategy: {err}"))
+        .ok();
+    Some(format!(
+        "<orx-sleep>\n\
+Sleep mode is on. The user is away (often asleep) and cannot answer, approve, or unblock anything. \
+You own the research decisions; orx enforces the limits below.\n\
+{status}\n\n\
+{}\n\
 </orx-sleep>{}",
+        delivered.once("sleep-mode rules", RULES),
         strategy
             .map(|block| format!("\n{block}"))
             .unwrap_or_default()
@@ -1168,6 +1182,45 @@ mod tests {
             baseline_value: None,
             baseline_run: None,
         }
+    }
+
+    /// An overnight session in one native session: the rules and the
+    /// strategy go out in full on the first turn and every
+    /// `REFRESH_TURNS + 1` turns, the live status on every one.
+    #[test]
+    fn sleep_turns_repeat_only_the_live_status() {
+        use crate::local::turn_context::{Delivered, REFRESH_TURNS};
+        let root = std::env::temp_dir().join(format!("orx-sleep-ctx-{}", uuid::Uuid::new_v4()));
+        {
+            let store = Store::open_at(root.clone()).unwrap();
+            let plan = SleepPlan {
+                objective: Some(objective(15.0)),
+                ..SleepPlan::default()
+            };
+            store.put_sleep("chat", "p", &plan).unwrap();
+            let turns = 40;
+            let mut sent: Vec<String> = Vec::new();
+            let (mut before, mut after) = (0, 0);
+            for _ in 0..turns {
+                let full = turn_context(&store, "chat", &Delivered::none()).unwrap();
+                let recent = sent.iter().rev().take(REFRESH_TURNS).cloned().collect();
+                let once = turn_context(&store, "chat", &Delivered::from_inputs(recent)).unwrap();
+                assert!(once.contains("Sleep mode is on") && once.contains("- GPU budget"));
+                before += full.len();
+                after += once.len();
+                sent.push(once);
+            }
+            assert!(sent[0].contains("Never ask the user a question"));
+            assert!(!sent[1].contains("Never ask the user a question"));
+            assert!(sent[REFRESH_TURNS + 1].contains("Never ask the user a question"));
+            println!(
+                "sleep context over {turns} turns: {before} bytes before, {after} after (~{} -> ~{} tokens)",
+                before / 4,
+                after / 4
+            );
+            assert!(after * 3 < before);
+        }
+        let _ = std::fs::remove_dir_all(root);
     }
 
     #[test]

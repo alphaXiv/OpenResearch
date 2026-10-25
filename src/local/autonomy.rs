@@ -34,22 +34,31 @@ impl Autonomy {
     }
 
     /// Agentic is the playbook's native behavior, so it adds nothing to the turn.
-    pub fn turn_context(self) -> Option<&'static str> {
+    pub fn turn_context(self) -> Option<String> {
+        self.turn_context_once(&crate::local::turn_context::Delivered::none())
+    }
+
+    /// [`Self::turn_context`], referring back to the instructions instead of
+    /// repeating them while the native session already holds them.
+    pub fn turn_context_once(
+        self,
+        delivered: &crate::local::turn_context::Delivered,
+    ) -> Option<String> {
         match self {
-            Self::Copilot => Some(
-                "<orx-autonomy level=\"copilot\">\n\
-                You are the user's research copilot; they make the decisions. Before acting, \
-                explain what you plan to do and why, then wait for their approval. Ask before \
-                every `orx exp run` and before changing direction. When results arrive, explain \
-                what they show and propose next steps instead of taking them. On a failed run, \
-                explain the likely cause and ask how to proceed. This overrides any skill \
-                guidance to continue on your own.\n\
-                </orx-autonomy>",
-            ),
+            Self::Copilot => Some(format!(
+                "<orx-autonomy level=\"copilot\">\n{}\n</orx-autonomy>",
+                delivered.once("copilot", COPILOT)
+            )),
             Self::Agentic => None,
         }
     }
 }
+
+const COPILOT: &str = "You are the user's research copilot; they make the decisions. Before \
+    acting, explain what you plan to do and why, then wait for their approval. Ask before every \
+    `orx exp run` and before changing direction. When results arrive, explain what they show and \
+    propose next steps instead of taking them. On a failed run, explain the likely cause and ask \
+    how to proceed. This overrides any skill guidance to continue on your own.";
 
 #[cfg(test)]
 mod tests {

@@ -25,6 +25,7 @@ use crate::local::autonomy::Autonomy;
 use crate::local::harness::ResumeAction;
 use crate::local::model::LocalProject;
 use crate::local::opencode::AgentHost;
+use crate::local::turn_context::Delivered;
 use crate::store::{
     now_ms, ChatTurnAdmission, Store, StoredChatMessage, StoredChatSession, StoredChatTurn,
     StoredQueuedChatMessage,
@@ -1292,7 +1293,33 @@ fn is_initial_chat_message(transcript_text: Option<&str>, has_messages: bool) ->
     transcript_text.is_none() && !has_messages
 }
 
+#[cfg(test)]
 fn with_turn_context(
+    native_session_id: Option<&str>,
+    bootstrap_context: Option<&str>,
+    goal: Option<&str>,
+    autonomy: Option<&str>,
+    demo_evidence_context: Option<&str>,
+    shell_context: Option<&str>,
+    text: String,
+) -> String {
+    with_turn_context_once(
+        &Delivered::none(),
+        native_session_id,
+        bootstrap_context,
+        goal,
+        autonomy,
+        demo_evidence_context,
+        shell_context,
+        text,
+    )
+}
+
+/// The turn's text behind its context blocks. Blocks the native session
+/// already holds (per `delivered`) shrink to a reference.
+#[allow(clippy::too_many_arguments)]
+fn with_turn_context_once(
+    delivered: &Delivered,
     native_session_id: Option<&str>,
     bootstrap_context: Option<&str>,
     goal: Option<&str>,
@@ -1308,9 +1335,13 @@ fn with_turn_context(
         }
     }
     // The goal rides every turn: the agent has to be told it again each time,
-    // and it outlives compaction and a lost native session.
+    // and it outlives compaction and a lost native session. Its text is
+    // repeated only when the native session no longer holds it.
     let goal = goal.map(|goal| {
-        format!("<orx-goal>\nKeep working toward this goal until it is met, across every turn:\n\n{goal}\n</orx-goal>")
+        format!(
+            "<orx-goal>\nKeep working toward this goal until it is met, across every turn.\n{}\n</orx-goal>",
+            delivered.once("goal", goal)
+        )
     });
     if let Some(goal) = goal.as_deref() {
         contexts.push(goal);
@@ -2202,7 +2233,7 @@ mod initial_message_tests {
             Some("native"),
             None,
             Some("ship the sweep"),
-            Autonomy::Copilot.turn_context(),
+            Autonomy::Copilot.turn_context().as_deref(),
             None,
             None,
             "continue".into(),
@@ -5692,18 +5723,21 @@ impl ChatHost {
             }
         }
         // Sleep mode replaces the autonomy level: nobody is there to ask.
-        let sleep_context = super::sleep::turn_context(&store, &session.id);
+        let delivered = Delivered::load(&store, &session);
+        let sleep_context =
+            super::sleep::turn_context(&store, &session.id, &delivered).or_else(|| {
+                Autonomy::from_stored(session.autonomy.as_deref()).turn_context_once(&delivered)
+            });
         let mut turn_text = prepared_input.unwrap_or_else(|| {
             let expanded = contextualize_messages(messages, |text| {
                 expand_slash_skills(&project, text, Some(&session.harness), Some(&session.id))
             });
-            with_turn_context(
+            with_turn_context_once(
+                &delivered,
                 session.native_session_id.as_deref(),
                 session.bootstrap_context.as_deref(),
                 session.goal.as_deref(),
-                sleep_context
-                    .as_deref()
-                    .or(Autonomy::from_stored(session.autonomy.as_deref()).turn_context()),
+                sleep_context.as_deref(),
                 super::demo::turn_context(&project.id),
                 shell_context.as_deref(),
                 expanded,
