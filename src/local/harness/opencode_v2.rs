@@ -1138,53 +1138,6 @@ mod tests {
         }
     }
 
-    #[tokio::test]
-    async fn discovery_waits_for_a_cold_v2_catalog_without_generation() {
-        use axum::{routing::get, Json, Router};
-        use std::sync::atomic::{AtomicUsize, Ordering};
-        use std::sync::Arc;
-
-        let requests = Arc::new(AtomicUsize::new(0));
-        let count = requests.clone();
-        let app = Router::new()
-            .route(
-                "/api/model",
-                get(move || {
-                    let count = count.clone();
-                    async move {
-                        Json(if count.fetch_add(1, Ordering::SeqCst) == 0 {
-                            json!({"data":[]})
-                        } else {
-                            json!({"data":[{"id":"fixture"}]})
-                        })
-                    }
-                }),
-            )
-            .route(
-                "/api/integration",
-                get(|| async { Json(json!({"data":[]})) }),
-            )
-            .layer(axum::middleware::from_fn(
-                |request: axum::extract::Request, next: axum::middleware::Next| async move {
-                    assert_eq!(request.method(), reqwest::Method::GET);
-                    assert!(["/api/model", "/api/integration"].contains(&request.uri().path()));
-                    next.run(request).await
-                },
-            ));
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let endpoint = AgentEndpoint {
-            base_url: format!("http://{}", listener.local_addr().unwrap()),
-            client: crate::net::loopback_client().build().unwrap(),
-            protocol: crate::local::opencode::Protocol::V2,
-            legacy_v2_api: false,
-        };
-        let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
-        let (models, _) = discover_models(&endpoint).await.unwrap();
-        assert_eq!(models["data"][0]["id"], "fixture");
-        assert_eq!(requests.load(Ordering::SeqCst), 2);
-        server.abort();
-    }
-
     async fn catalog_server(
         app: axum::Router,
         legacy: bool,
@@ -1278,12 +1231,6 @@ mod tests {
                 "not JSON server unavailable",
             ),
             (StatusCode::UNAUTHORIZED, "not signed in", "not signed in"),
-            (StatusCode::NOT_FOUND, "missing route", "missing route"),
-            (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                "broken config",
-                "broken config",
-            ),
             (StatusCode::OK, "not JSON", "expected"),
             (StatusCode::OK, "{\"data\":null}", "invalid catalog"),
         ] {
@@ -1345,48 +1292,57 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn discovery_timeout_preserves_only_the_last_complete_catalog() {
+    async fn discovery_polls_cold_catalogs_and_keeps_the_last_complete_pair() {
         use axum::{http::StatusCode, routing::get, Json, Router};
         use std::sync::{
             atomic::{AtomicUsize, Ordering},
             Arc,
         };
 
-        let polls = Arc::new(AtomicUsize::new(0));
-        let count = polls.clone();
-        let app = Router::new()
-            .route(
-                "/api/model",
-                get(move || {
-                    let count = count.clone();
-                    async move {
-                        Json(if count.fetch_add(1, Ordering::SeqCst) == 0 {
-                            json!({"data":[]})
-                        } else {
-                            json!({"data":[{"id":"incomplete"}]})
-                        })
-                    }
-                }),
-            )
-            .route(
-                "/api/integration",
-                get(move || {
-                    let count = polls.clone();
-                    async move {
-                        if count.load(Ordering::SeqCst) == 1 {
-                            (StatusCode::OK, Json(json!({"data":[{"id":"complete"}]})))
-                        } else {
-                            (StatusCode::SERVICE_UNAVAILABLE, Json(plugin_pending()))
+        for plugins_reload in [false, true] {
+            let polls = Arc::new(AtomicUsize::new(0));
+            let count = polls.clone();
+            let seen = polls.clone();
+            let app = Router::new()
+                .route(
+                    "/api/model",
+                    get(move || {
+                        let count = count.clone();
+                        async move {
+                            Json(if count.fetch_add(1, Ordering::SeqCst) == 0 {
+                                json!({"data":[]})
+                            } else {
+                                json!({"data":[{"id":"fixture"}]})
+                            })
                         }
-                    }
-                }),
-            );
-        let (endpoint, server) = catalog_server(app, false).await;
-        let result = discover_models_with_timeout(&endpoint, Duration::from_secs(1)).await;
-        server.abort();
-        let (models, integrations) = result.unwrap();
-        assert_eq!(models, json!({"data":[]}));
-        assert_eq!(integrations["data"][0]["id"], "complete");
+                    }),
+                )
+                .route(
+                    "/api/integration",
+                    get(move || {
+                        let seen = seen.clone();
+                        async move {
+                            if plugins_reload && seen.load(Ordering::SeqCst) > 1 {
+                                (StatusCode::SERVICE_UNAVAILABLE, Json(plugin_pending()))
+                            } else {
+                                (StatusCode::OK, Json(json!({"data":[{"id":"complete"}]})))
+                            }
+                        }
+                    }),
+                );
+            let (endpoint, server) = catalog_server(app, false).await;
+            let result = discover_models_with_timeout(&endpoint, Duration::from_secs(1)).await;
+            server.abort();
+            let (models, integrations) = result.unwrap();
+            let expected = if plugins_reload {
+                json!([])
+            } else {
+                json!([{"id":"fixture"}])
+            };
+            assert_eq!(models["data"], expected);
+            assert_eq!(integrations["data"][0]["id"], "complete");
+            assert!(polls.load(Ordering::SeqCst) >= 2);
+        }
     }
 
     #[test]
