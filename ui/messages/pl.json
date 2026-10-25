@@ -1435,5 +1435,7 @@
   "chat_experiments_running": "Trwające eksperymenty: {count}",
   "skills_detection_details": "Szczegóły wykrywania umiejętności",
   "skills_detection_copy": "Kopiuj szczegóły wykrywania",
-  "skills_detection_accepted": "Zaakceptowano: {count}"
+  "skills_detection_accepted": "Zaakceptowano: {count}",
+  "desktop_zoom_controls": "Sterowanie powiększeniem",
+  "desktop_zoom_reset": "Resetuj"
 }

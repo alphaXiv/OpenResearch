@@ -1435,5 +1435,7 @@
   "chat_experiments_running": "{count} experiments running",
   "skills_detection_details": "Skill detection details",
   "skills_detection_copy": "Copy detection details",
-  "skills_detection_accepted": "{count} accepted"
+  "skills_detection_accepted": "{count} accepted",
+  "desktop_zoom_controls": "Zoom controls",
+  "desktop_zoom_reset": "Reset"
 }

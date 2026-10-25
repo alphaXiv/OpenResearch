@@ -1435,5 +1435,7 @@
   "chat_experiments_running": "실험 {count}개 실행 중",
   "skills_detection_details": "스킬 감지 세부 정보",
   "skills_detection_copy": "감지 세부 정보 복사",
-  "skills_detection_accepted": "{count}개 수락됨"
+  "skills_detection_accepted": "{count}개 수락됨",
+  "desktop_zoom_controls": "확대/축소 컨트롤",
+  "desktop_zoom_reset": "초기화"
 }

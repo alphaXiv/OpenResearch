@@ -1435,5 +1435,7 @@
   "chat_experiments_running": "{count} 个实验运行中",
   "skills_detection_details": "技能检测详情",
   "skills_detection_copy": "复制检测详情",
-  "skills_detection_accepted": "已接受 {count} 项"
+  "skills_detection_accepted": "已接受 {count} 项",
+  "desktop_zoom_controls": "缩放控件",
+  "desktop_zoom_reset": "重置"
 }

@@ -156,7 +156,7 @@ function TerminalView({
 
   return (
     <div className="term-view absolute inset-0 flex flex-col bg-background z-20">
-      <div className="term-bar flex items-center gap-2 h-10 py-0 px-2.5 border-b border-b-border shrink-0 [&_.error]:text-sm [&_.error]:text-accent-red [&_.btn]:inline-flex [&_.btn]:items-center [&_.btn]:gap-[5px]">
+      <div className="term-bar flex items-center gap-2 h-10 py-0 px-2.5 border-b border-b-border shrink-0 [&_.error]:text-sm [&_.error]:text-accent-red [&_.btn]:inline-flex [&_.btn]:items-center [&_.btn]:gap-1">
         <div className="term-title min-w-0 text-sm font-semibold text-text overflow-hidden text-ellipsis whitespace-nowrap" title={experiment.title || experiment.slug}>
           {experiment.title || experiment.slug}
         </div>
@@ -178,7 +178,7 @@ function TerminalView({
                 target="_blank"
                 rel="noopener noreferrer"
               >
-                <ExternalLink size={13} />
+                <ExternalLink size={14} />
               </ButtonLink>
             )}
             <Button
@@ -186,7 +186,7 @@ function TerminalView({
               variant="ghost"
               {...tabOpenGestureHandlers<HTMLButtonElement>((intent) => onOpenView("terminal", selectedRun?.id, intent))}
             >
-              <ScrollText size={13} />
+              <ScrollText size={14} />
               {m.experiment_overview_logs()}
             </Button>
           </>
@@ -197,13 +197,13 @@ function TerminalView({
             title={m.a11y_trackio_charts()}
             {...tabOpenGestureHandlers<HTMLButtonElement>((intent) => onOpenView("trackio", selectedRun?.id, intent))}
           >
-            <ChartLine size={13} />
+            <ChartLine size={14} />
             {m.experiment_overview_visualize()}
           </Button>
         )}
         {live && (
           <Button size="small" variant="ghost" disabled={cancelling} onClick={() => void stop()}>
-            <CircleStop size={13} />
+            <CircleStop size={14} />
             {cancelling ? m.common_cancelling() : m.common_stop()}
           </Button>
         )}
@@ -221,7 +221,7 @@ function TerminalView({
               <ChevronDown size={14} className="run-picker-chev text-muted shrink-0" />
             </Button>
             {historyOpen && (
-              <div className="history-menu absolute top-[calc(100%_+_6px)] end-0 min-w-57.5 max-h-80 overflow-y-auto bg-background border border-border rounded-lg shadow-menu p-[5px] z-50">
+              <div className="history-menu absolute top-[calc(100%_+_6px)] end-0 min-w-57.5 max-h-80 overflow-y-auto bg-background border border-border rounded-lg shadow-menu p-1 z-50">
                 {expRuns.map((r) => (
                   <MenuItem
                     key={r.id}

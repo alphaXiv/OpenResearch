@@ -1435,5 +1435,7 @@
   "chat_experiments_running": "{count} 件の実験を実行中",
   "skills_detection_details": "スキル検出の詳細",
   "skills_detection_copy": "検出の詳細をコピー",
-  "skills_detection_accepted": "{count} 件を検出"
+  "skills_detection_accepted": "{count} 件を検出",
+  "desktop_zoom_controls": "ズーム操作",
+  "desktop_zoom_reset": "リセット"
 }

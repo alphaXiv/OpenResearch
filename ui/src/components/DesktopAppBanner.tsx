@@ -53,7 +53,7 @@ export function DesktopAppBanner() {
   const file = asset();
   return (
     <div className="desktop-app-banner flex items-center gap-2 shrink-0 py-1.5 px-3.5 text-sm text-text bg-accent-blue-subtle border-b border-b-accent-blue-border">
-      <Monitor size={13} className="shrink-0 text-accent-blue-strong" />
+      <Monitor size={14} className="shrink-0 text-accent-blue-strong" />
       <span className="min-w-0">{m.desktop_app_banner_text()}</span>
       <ButtonLink
         size="small"
@@ -64,7 +64,7 @@ export function DesktopAppBanner() {
         {m.desktop_app_banner_download()}
       </ButtonLink>
       <IconButton type="button" size="small" className="ms-auto" aria-label={m.desktop_app_banner_dismiss()} onClick={dismiss}>
-        <X size={13} />
+        <X size={14} />
       </IconButton>
     </div>
   );

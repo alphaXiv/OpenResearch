@@ -71,8 +71,8 @@ function DropZone({
         busy ? "cursor-default" : "cursor-pointer"
         } ${
         dragging
-          ? "border-primary bg-surface text-text"
-          : "border-border-variant bg-surface [&:hover]:border-primary"
+          ? "border-text bg-surface text-text"
+          : "border-border-variant bg-surface [&:hover]:border-border-hover-strong"
         }`}
       onDragOver={(e) => {
         e.preventDefault();
@@ -168,7 +168,7 @@ function SkillRow({
             });
         }}
       >
-        <Trash2 size={13} />
+        <Trash2 size={14} />
       </IconButton>
     </div>
   );
@@ -211,7 +211,7 @@ function LatexTemplateRow({
             });
         }}
       >
-        <Trash2 size={13} />
+        <Trash2 size={14} />
       </IconButton>
     </div>
   );

@@ -63,19 +63,19 @@ export function ProjectInfoCard({ project, chatCount, collapsed, busy, onToggleC
 
   return <>
     <button type="button" aria-expanded={!collapsed} onClick={onToggleCollapsed}
-      className="flex h-7 min-w-0 flex-1 cursor-pointer items-center gap-[7px] rounded-sm py-1 text-start text-sm font-normal text-text focus-visible:outline-2 focus-visible:outline-solid focus-visible:outline-text focus-visible:outline-offset-2">
-      {collapsed ? <Folder size={15} className="shrink-0" /> : <FolderOpen size={15} className="shrink-0" />}<span className="truncate">{project.name}</span>
-      {busy && <span aria-hidden className="size-[7px] shrink-0 rounded-full bg-primary animate-[or-pulse_1.2s_infinite]" />}
+      className="flex h-7 min-w-0 flex-1 cursor-pointer items-center gap-2 rounded-sm py-1 text-start text-sm font-normal text-text focus-visible:outline-2 focus-visible:outline-solid focus-visible:outline-focus focus-visible:outline-offset-2">
+      {collapsed ? <Folder size={16} className="shrink-0" /> : <FolderOpen size={16} className="shrink-0" />}<span className="truncate">{project.name}</span>
+      {busy && <span aria-hidden className="size-[7px] shrink-0 rounded-full bg-accent-teal animate-[or-pulse_1.2s_infinite]" />}
     </button>
     <IconButton ref={triggerRef} size="small" className={`text-text group-hover:opacity-100 group-focus-within:opacity-100 ${menuOpen ? "bg-surface opacity-100" : "opacity-0"}`}
       aria-label={m.sidebar_project_details({ name: project.name })} aria-controls={menuId} aria-haspopup="menu" aria-expanded={menuOpen} onClick={() => {
           if (menuRef.current?.matches(":popover-open")) menuRef.current.hidePopover();
         else { show(menuRef.current, triggerRef.current); menuRef.current?.querySelector<HTMLButtonElement>("button")?.focus(); }
-      }}><MoreHorizontal size={15} /></IconButton>
+      }}><MoreHorizontal size={16} /></IconButton>
     <Tooltip interactive content={m.chat_panel_new_chat()} className="rounded-sm">
       <IconButton size="small" className="text-text opacity-0 group-hover:opacity-100 group-focus-within:opacity-100"
         aria-label={`${m.chat_panel_new_chat()} · ${project.name}`}
-        onClick={onNewChat}><Plus size={15} /></IconButton>
+        onClick={onNewChat}><Plus size={16} /></IconButton>
     </Tooltip>
     <div ref={menuRef} id={menuId} popover="auto" role="menu" aria-label={project.name}
       onToggle={(event) => setMenuOpen(event.newState === "open")}
@@ -89,7 +89,7 @@ export function ProjectInfoCard({ project, chatCount, collapsed, busy, onToggleC
       className="fixed inset-auto m-0 w-72 max-w-[calc(100vw-1rem)] rounded-xl border border-border bg-background p-2 text-text shadow-modal">
       <div role="presentation" className="mb-1 border-b border-border px-2 pb-2 pt-1 text-sm">
         <div className="truncate font-medium">{project.name}</div>
-        <div className="mt-1 flex items-center gap-1.5 text-subtext"><MessageCircle size={13} />{chatCount === undefined ? "…" : m.sidebar_project_chats({ count: chatCount })}</div>
+        <div className="mt-1 flex items-center gap-1.5 text-subtext"><MessageCircle size={14} />{chatCount === undefined ? "…" : m.sidebar_project_chats({ count: chatCount })}</div>
         <div className="mt-2 break-all text-xs text-subtext">{project.repoPath}</div>
       </div>
       <MenuItem role="menuitem" onClick={() => { onPin(); menuRef.current?.hidePopover(); }}><span className="flex items-center gap-2"><Pin size={16} />{pinned ? m.sidebar_unpin_project() : m.sidebar_pin_project()}</span></MenuItem>
