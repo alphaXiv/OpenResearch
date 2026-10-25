@@ -1305,6 +1305,7 @@ fn with_turn_context(
 ) -> String {
     with_turn_context_once(
         &Delivered::none(),
+        None,
         native_session_id,
         bootstrap_context,
         goal,
@@ -1320,6 +1321,7 @@ fn with_turn_context(
 #[allow(clippy::too_many_arguments)]
 fn with_turn_context_once(
     delivered: &Delivered,
+    reply_language: Option<&str>,
     native_session_id: Option<&str>,
     bootstrap_context: Option<&str>,
     goal: Option<&str>,
@@ -1345,6 +1347,11 @@ fn with_turn_context_once(
     });
     if let Some(goal) = goal.as_deref() {
         contexts.push(goal);
+    }
+    let language =
+        reply_language.map(|language| super::turn_context::language_block(delivered, language));
+    if let Some(language) = language.as_deref() {
+        contexts.push(language);
     }
     if let Some(autonomy) = autonomy {
         contexts.push(autonomy);
@@ -5734,6 +5741,7 @@ impl ChatHost {
             });
             with_turn_context_once(
                 &delivered,
+                super::turn_context::reply_language(),
                 session.native_session_id.as_deref(),
                 session.bootstrap_context.as_deref(),
                 session.goal.as_deref(),
