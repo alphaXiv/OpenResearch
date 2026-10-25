@@ -399,14 +399,18 @@ pub trait Harness: Send + Sync {
 
     /// The agent's config home (`~/.claude`, `~/.codex`, `~/.config/opencode`,
     /// `~/.cursor`). Presence of this dir is how we tell the agent is set up.
-    /// `None` if this harness has no installable skill.
     fn config_home(&self) -> Option<PathBuf> {
         None
     }
 
-    /// Where the skill shim file lands. `None` if not installable.
+    /// Install the shim in the first native search root. Harnesses may override it.
     fn skill_target(&self) -> Option<PathBuf> {
-        None
+        Some(
+            self.native_skill_roots()
+                .first()?
+                .join("orx")
+                .join("SKILL.md"),
+        )
     }
 
     /// The shim file contents to write at `skill_target`. `None` if not

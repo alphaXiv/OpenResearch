@@ -458,15 +458,6 @@ impl Harness for OpenCode {
             .unwrap_or_default()
     }
 
-    fn skill_target(&self) -> Option<PathBuf> {
-        Some(
-            self.config_home()?
-                .join("skills")
-                .join("orx")
-                .join("SKILL.md"),
-        )
-    }
-
     fn skill_shim(&self) -> Option<&'static str> {
         // OpenCode reads the same SKILL.md format as Claude Code.
         Some(super::CLAUDE_SKILL)

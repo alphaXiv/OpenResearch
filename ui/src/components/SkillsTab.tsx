@@ -232,6 +232,8 @@ function SkillDetectionDetails({ reports }: { reports: SkillDiscovery[] }) {
   </details>;
 }
 
+/** Everything the agent can invoke with `/name`: skills uploaded here, and the
+ * ones already installed in the user's coding agents, mirrored automatically. */
 function SkillsCard() {
   const uploadUserSkillMutation = useMutation({ mutationFn: uploadUserSkill });
 

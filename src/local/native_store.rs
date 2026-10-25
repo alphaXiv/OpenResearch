@@ -757,30 +757,22 @@ pub fn prepare_codex(store: NativeStore) -> Result<PathBuf> {
 
 pub fn prepare_cursor(store: NativeStore) -> Result<PathBuf> {
     let root = cursor_home(store);
-    prepare_cursor_in(
-        &root,
-        &cursor_home(NativeStore::Legacy),
-        &cursor_skills_dir(),
-    )?;
-    Ok(root)
-}
-
-fn prepare_cursor_in(root: &Path, legacy: &Path, skills: &Path) -> Result<()> {
-    // Legacy sessions must keep the user's existing skill links.
-    if root == legacy {
-        std::fs::create_dir_all(root)?;
-        return Ok(());
+    let legacy = cursor_home(NativeStore::Legacy);
+    if store == NativeStore::Legacy || root == legacy {
+        std::fs::create_dir_all(&root)?;
+        return Ok(root);
     }
     prepare_links(
-        root,
-        legacy,
+        &root,
+        &legacy,
         &[
             legacy.join("cli-config.json"),
+            cursor_skills_dir(),
             legacy.join("skills-cursor"),
             legacy.join("plugins"),
-            skills.to_path_buf(),
         ],
-    )
+    )?;
+    Ok(root)
 }
 
 fn prepare_links(root: &Path, lock_root: &Path, sources: &[PathBuf]) -> Result<()> {
@@ -821,7 +813,8 @@ fn reconcile_link(source: &Path, destination: &Path) -> Result<()> {
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
             if std::fs::symlink_metadata(destination)
                 .is_ok_and(|metadata| metadata.file_type().is_symlink())
-                && std::fs::read_link(destination).is_ok_and(|target| target == source)
+                && (marker.is_file()
+                    || std::fs::read_link(destination).is_ok_and(|target| target == source))
             {
                 remove_link(destination)?;
             }
@@ -1009,69 +1002,27 @@ mod hard_link_tests {
     use super::*;
 
     #[test]
-    fn cursor_preserves_existing_legacy_skills_when_resuming() {
-        for linked in [false, true] {
-            let temp =
-                std::env::temp_dir().join(format!("orx-cursor-legacy-{}", uuid::Uuid::new_v4()));
-            let legacy = temp.join("legacy");
-            let source = if linked {
-                temp.join("custom")
-            } else {
-                legacy.join("skills")
-            };
-            let native = temp.join("native/skills");
-            std::fs::create_dir_all(&legacy).unwrap();
-            std::fs::create_dir_all(&source).unwrap();
-            std::fs::create_dir_all(&native).unwrap();
-            std::fs::write(source.join("keep.txt"), "user-owned").unwrap();
-            if linked {
-                create_symlink(&source, &legacy.join("skills")).unwrap();
-            }
-            prepare_cursor_in(&legacy, &legacy, &native).unwrap();
-            assert!(same_file::is_same_file(legacy.join("skills"), &source).unwrap());
-            assert_eq!(
-                std::fs::read_to_string(source.join("keep.txt")).unwrap(),
-                "user-owned"
-            );
-            std::fs::remove_dir_all(temp).unwrap();
-        }
-    }
-
-    #[test]
-    fn cursor_skill_roots_and_launch_links_are_independent_of_state() {
-        let temp = std::env::temp_dir().join(format!("orx-cursor-skills-{}", uuid::Uuid::new_v4()));
-        let home = temp.join("home");
-        let skills = cursor_skills_dir_in(&home, None);
-        assert_eq!(skills, home.join(".cursor/skills"));
-        let configured = temp.join("configured");
+    fn cursor_roots_and_retired_managed_links() {
+        let root = std::env::temp_dir().join(format!("orx-cursor-skills-{}", uuid::Uuid::new_v4()));
+        let native = cursor_skills_dir_in(&root, None);
+        assert_eq!(native, root.join(".cursor/skills"));
         assert_eq!(
-            cursor_skills_dir_in(&home, Some(configured.clone())),
-            configured.join("skills")
+            cursor_skills_dir_in(&root, Some(root.join("custom"))),
+            root.join("custom/skills")
         );
-        std::fs::create_dir_all(skills.join("probe")).unwrap();
-        std::fs::write(skills.join("probe/SKILL.md"), "native skill").unwrap();
-        let legacy = temp.join("xdg/cursor");
-        let isolated = temp.join("isolated");
-        std::fs::create_dir_all(&legacy).unwrap();
-        std::fs::write(legacy.join("cli-config.json"), "{}").unwrap();
-        prepare_cursor_in(&isolated, &legacy, &skills).unwrap();
-        assert_eq!(
-            std::fs::read_to_string(isolated.join("skills/probe/SKILL.md")).unwrap(),
-            "native skill"
-        );
-        assert!(same_file::is_same_file(isolated.join("skills"), &skills).unwrap());
-        prepare_cursor_in(&legacy, &legacy, &skills).unwrap();
-        assert!(!legacy.join("skills").exists());
-        assert_eq!(
-            std::fs::read_to_string(isolated.join("cli-config.json")).unwrap(),
-            "{}"
-        );
-        prepare_cursor_in(&home.join(".cursor"), &home.join(".cursor"), &skills).unwrap();
-        assert_eq!(
-            std::fs::read_to_string(skills.join("probe/SKILL.md")).unwrap(),
-            "native skill"
-        );
-        std::fs::remove_dir_all(temp).unwrap();
+        let old = root.join("xdg/cursor/skills");
+        let isolated = root.join("isolated");
+        std::fs::create_dir_all(&old).unwrap();
+        prepare_links(&isolated, &root, std::slice::from_ref(&old)).unwrap();
+        let link = isolated.join("skills");
+        assert!(same_file::is_same_file(&link, &old).unwrap());
+        reconcile_link(&native, &link).unwrap();
+        assert!(std::fs::symlink_metadata(&link).is_err());
+        assert!(old.is_dir());
+        create_symlink(&old, &link).unwrap();
+        reconcile_link(&native, &link).unwrap();
+        assert!(same_file::is_same_file(&link, &old).unwrap());
+        std::fs::remove_dir_all(root).unwrap();
     }
 
     #[test]

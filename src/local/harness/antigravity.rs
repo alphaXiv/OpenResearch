@@ -253,15 +253,6 @@ impl Harness for Antigravity {
             .unwrap_or_default()
     }
 
-    fn skill_target(&self) -> Option<PathBuf> {
-        Some(
-            self.config_home()?
-                .join("skills")
-                .join("orx")
-                .join("SKILL.md"),
-        )
-    }
-
     fn skill_shim(&self) -> Option<&'static str> {
         Some(super::CLAUDE_SKILL)
     }

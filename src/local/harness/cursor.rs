@@ -234,10 +234,6 @@ impl Harness for Cursor {
         vec![native_store::cursor_skills_dir()]
     }
 
-    fn skill_target(&self) -> Option<PathBuf> {
-        Some(native_store::cursor_skills_dir().join("orx/SKILL.md"))
-    }
-
     fn skill_shim(&self) -> Option<&'static str> {
         Some(super::CLAUDE_SKILL)
     }

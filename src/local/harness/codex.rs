@@ -1219,14 +1219,13 @@ impl Harness for Codex {
     }
 
     fn native_skill_roots(&self) -> Vec<PathBuf> {
-        let mut roots = Vec::new();
-        if let Some(home) = dirs::home_dir() {
-            roots.push(home.join(".agents/skills"));
-        }
-        if let Some(home) = self.config_home() {
-            roots.push(home.join("skills"));
-        }
-        roots
+        [
+            dirs::home_dir().map(|home| home.join(".agents/skills")),
+            self.config_home().map(|home| home.join("skills")),
+        ]
+        .into_iter()
+        .flatten()
+        .collect()
     }
 
     fn skill_target(&self) -> Option<PathBuf> {

@@ -1874,7 +1874,6 @@ export interface UserSkill {
 
 export interface SkillDiscovery {
   agent: string;
-  harness: string;
   origin: string;
   path: string;
   status: "scanned" | "missing" | "unreadable";

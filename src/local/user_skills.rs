@@ -458,16 +458,10 @@ struct Mirrored {
     /// The harness that can resolve this native skill.
     harness: String,
     plugin: bool,
+    report: usize,
     dir: PathBuf,
     name: String,
     description: String,
-}
-
-/// Every mirrorable skill across the harnesses on this machine: each one's own
-/// global skills dir, plus the skills that come with its installed plugins.
-/// Sorted by name (then origin) so the first of a duplicated name always wins.
-fn mirrored() -> Vec<Mirrored> {
-    available_mirrored(&root(), discover_mirrored().0, None)
 }
 
 fn available_mirrored(root: &Path, skills: Vec<Mirrored>, harness: Option<&str>) -> Vec<Mirrored> {
@@ -478,50 +472,42 @@ fn available_mirrored(root: &Path, skills: Vec<Mirrored>, harness: Option<&str>)
         .collect()
 }
 
-#[derive(Debug, Serialize)]
-#[serde(rename_all = "camelCase")]
+#[derive(Serialize)]
 pub struct SkillDiscovery {
-    pub agent: String,
-    pub harness: String,
-    pub origin: String,
-    #[serde(serialize_with = "serialize_diagnostic_path")]
-    pub path: PathBuf,
-    pub status: SkillRootStatus,
-    pub accepted: usize,
-    pub skipped: Vec<SkippedSkill>,
+    agent: String,
+    origin: String,
+    path: String,
+    status: SkillRootStatus,
+    accepted: usize,
+    skipped: Vec<SkippedSkill>,
 }
 
 #[derive(Debug, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "kebab-case")]
-pub enum SkillRootStatus {
+enum SkillRootStatus {
     Scanned,
     Missing,
     Unreadable,
 }
 
-#[derive(Debug, Serialize)]
-pub struct SkippedSkill {
-    #[serde(serialize_with = "serialize_diagnostic_path")]
-    pub path: PathBuf,
-    pub reason: String,
-}
-
-fn serialize_diagnostic_path<S: serde::Serializer>(
-    path: &Path,
-    serializer: S,
-) -> std::result::Result<S::Ok, S::Error> {
-    serializer.serialize_str(&path.to_string_lossy())
+#[derive(Serialize)]
+struct SkippedSkill {
+    path: String,
+    reason: String,
 }
 
 impl SkillDiscovery {
-    fn skip(&mut self, path: PathBuf, reason: impl Into<String>) {
+    fn skip(&mut self, path: &Path, reason: impl Into<String>) {
         self.skipped.push(SkippedSkill {
-            path,
+            path: path.to_string_lossy().into_owned(),
             reason: reason.into(),
         });
     }
 }
 
+/// Every mirrorable skill across the harnesses on this machine: each one's own
+/// global skills dir, plus the skills that come with its installed plugins.
+/// Sorted by name (then origin) so the first of a duplicated name always wins.
 fn discover_mirrored() -> (Vec<Mirrored>, Vec<SkillDiscovery>) {
     let mut out = Vec::new();
     let mut reports = Vec::new();
@@ -541,11 +527,13 @@ fn discover_mirrored() -> (Vec<Mirrored>, Vec<SkillDiscovery>) {
             );
         let mut seen = HashSet::new();
         for (origin, dir, plugin) in roots {
-            let identity = crate::paths::canonicalize(&dir).unwrap_or_else(|_| dir.clone());
-            if !seen.insert(identity) {
+            if !plugin
+                && !seen.insert(crate::paths::canonicalize(&dir).unwrap_or_else(|_| dir.clone()))
+            {
                 continue;
             }
-            let mut report = collect_mirrored(&dir, &origin, harness.id(), plugin, &mut out);
+            let mut report =
+                collect_mirrored(&dir, &origin, harness.id(), plugin, reports.len(), &mut out);
             report.agent = harness.name().to_string();
             reports.push(report);
         }
@@ -561,13 +549,13 @@ fn collect_mirrored(
     origin: &str,
     harness: &str,
     plugin: bool,
+    report_index: usize,
     out: &mut Vec<Mirrored>,
 ) -> SkillDiscovery {
     let mut report = SkillDiscovery {
         agent: origin.to_string(),
-        harness: harness.to_string(),
         origin: origin.to_string(),
-        path: dir.to_path_buf(),
+        path: dir.to_string_lossy().into_owned(),
         status: SkillRootStatus::Scanned,
         accepted: 0,
         skipped: Vec::new(),
@@ -587,10 +575,7 @@ fn collect_mirrored(
         let entry = match entry {
             Ok(entry) => entry,
             Err(error) => {
-                report.skip(
-                    dir.to_path_buf(),
-                    format!("unreadable entry ({:?})", error.kind()),
-                );
+                report.skip(dir, format!("unreadable entry ({:?})", error.kind()));
                 continue;
             }
         };
@@ -599,13 +584,13 @@ fn collect_mirrored(
             Ok(metadata) if !metadata.is_dir() => continue,
             Ok(_) => {}
             Err(error) => {
-                report.skip(path, format!("unreadable entry ({:?})", error.kind()));
+                report.skip(&path, format!("unreadable entry ({:?})", error.kind()));
                 continue;
             }
         }
         let dir_name = entry.file_name().to_string_lossy().into_owned();
         if dir_name == "orx" || dir_name.starts_with("orx-") {
-            report.skip(path, "reserved name");
+            report.skip(&path, "reserved name");
             continue;
         }
         let content = match fs::read_to_string(path.join("SKILL.md")) {
@@ -616,7 +601,7 @@ fn collect_mirrored(
                 } else {
                     format!("unreadable SKILL.md ({:?})", error.kind())
                 };
-                report.skip(path, reason);
+                report.skip(&path, reason);
                 continue;
             }
         };
@@ -624,23 +609,23 @@ fn collect_mirrored(
         let fm = match parse_frontmatter_with_name(&content, fallback) {
             Ok(fm) => fm,
             Err(error) => {
-                report.skip(path, format!("malformed metadata: {error}"));
+                report.skip(&path, format!("malformed metadata: {error}"));
                 continue;
             }
         };
         if !is_valid_slug(&fm.name) {
-            report.skip(path, "invalid name");
+            report.skip(&path, "invalid name");
             continue;
         }
         if is_reserved(&fm.name) {
-            report.skip(path, "reserved name");
+            report.skip(&path, "reserved name");
             continue;
         }
-        report.accepted += 1;
         out.push(Mirrored {
             origin: origin.to_string(),
             harness: harness.to_string(),
             plugin,
+            report: report_index,
             dir: path,
             name: fm.name,
             description: fm.description,
@@ -649,46 +634,10 @@ fn collect_mirrored(
     report
 }
 
+/// Uploads and native skills, one per name (uploads win), with discovery reports.
 pub fn list() -> (Vec<UserSkill>, Vec<SkillDiscovery>) {
     let (skills, reports) = discover_mirrored();
-    catalog_in(&root(), skills, reports)
-}
-
-fn catalog_in(
-    root: &Path,
-    skills: Vec<Mirrored>,
-    mut reports: Vec<SkillDiscovery>,
-) -> (Vec<UserSkill>, Vec<SkillDiscovery>) {
-    let mut names: HashSet<_> = list_uploaded_in(root)
-        .into_iter()
-        .map(|skill| skill.name)
-        .collect();
-    let mut visible = Vec::new();
-    for skill in skills {
-        let reason = if root.join("excluded").join(&skill.name).exists() {
-            Some("excluded")
-        } else if !names.insert(skill.name.clone()) {
-            Some("shadowed by another skill with the same name")
-        } else {
-            None
-        };
-        if let Some(reason) = reason {
-            if let Some(report) = reports.iter_mut().find(|report| {
-                report.harness == skill.harness
-                    && report.origin == skill.origin
-                    && skill.dir.parent() == Some(&report.path)
-            }) {
-                report.accepted -= 1;
-                report.skip(skill.dir, reason);
-            }
-        } else {
-            visible.push(skill);
-        }
-    }
-    for report in &mut reports {
-        report.skipped.sort_by(|a, b| a.path.cmp(&b.path));
-    }
-    (list_in(root, &visible), reports)
+    catalog_in(&root(), &skills, reports)
 }
 
 // --- list / find / delete -----------------------------------------------------
@@ -789,9 +738,34 @@ pub fn list_uploaded() -> Vec<UserSkill> {
 }
 
 fn list_in(root: &Path, mirrored: &[Mirrored]) -> Vec<UserSkill> {
+    catalog_in(root, mirrored, Vec::new()).0
+}
+
+fn catalog_in(
+    root: &Path,
+    mirrored: &[Mirrored],
+    mut reports: Vec<SkillDiscovery>,
+) -> (Vec<UserSkill>, Vec<SkillDiscovery>) {
     let mut out = list_uploaded_in(root);
     for m in mirrored {
-        if out.iter().any(|s| s.name == m.name) {
+        let reason = if root.join("excluded").join(&m.name).exists() {
+            Some("excluded".to_string())
+        } else {
+            out.iter().find(|s| s.name == m.name).map(|winner| {
+                format!(
+                    "shadowed in Customize by {} with the same name",
+                    winner.origin.as_deref().unwrap_or("an upload")
+                )
+            })
+        };
+        if let Some(report) = reports.get_mut(m.report) {
+            if let Some(reason) = &reason {
+                report.skip(&m.dir, reason);
+            } else {
+                report.accepted += 1;
+            }
+        }
+        if reason.is_some() {
             continue;
         }
         let tally = tally_all(&m.dir);
@@ -805,7 +779,10 @@ fn list_in(root: &Path, mirrored: &[Mirrored]) -> Vec<UserSkill> {
         });
     }
     out.sort_by(|a, b| a.name.cmp(&b.name));
-    out
+    for report in &mut reports {
+        report.skipped.sort_by(|a, b| a.path.cmp(&b.path));
+    }
+    (out, reports)
 }
 
 /// The folder each `/name` resolves to, uploads shadowing mirrored skills — the
@@ -885,7 +862,10 @@ pub fn delete(name: &str) -> Result<()> {
     if store_dir(&root).join(name).exists() {
         return delete_in(&root, name);
     }
-    if !mirrored().iter().any(|skill| skill.name == name) {
+    if !available_mirrored(&root, discover_mirrored().0, None)
+        .iter()
+        .any(|skill| skill.name == name)
+    {
         return Err(anyhow!("skill `{name}` not found"));
     }
     let excluded = root.join("excluded");
@@ -1310,6 +1290,7 @@ mod tests {
                 "codex".into()
             },
             plugin: session_skills_dir.is_none(),
+            report: 0,
             dir: dir.to_path_buf(),
             name: fm.name,
             description: fm.description,
@@ -1331,48 +1312,6 @@ mod tests {
         buf
     }
 
-    #[cfg(unix)]
-    #[test]
-    fn diagnostic_paths_with_non_utf8_names_serialize() {
-        use std::os::unix::ffi::OsStringExt;
-        let root = temp_root();
-        let unusual = root.join(std::ffi::OsString::from_vec(vec![b'x', 0xff]));
-        // APFS cannot create this filename, but Linux scans can return it.
-        let mut report = collect_mirrored(&unusual, "Cursor", "cursor", false, &mut Vec::new());
-        report.skip(unusual.clone(), "no SKILL.md");
-        let json = serde_json::to_value(&report).unwrap();
-        assert_eq!(
-            json["skipped"][0]["path"],
-            unusual.to_string_lossy().as_ref()
-        );
-        assert_eq!(json["path"], unusual.to_string_lossy().as_ref());
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn discovery_reports_permission_errors_without_losing_siblings() {
-        use std::os::unix::fs::PermissionsExt;
-        let root = temp_root();
-        fs::create_dir_all(root.join("blocked")).unwrap();
-        fs::create_dir_all(root.join("visible")).unwrap();
-        fs::write(root.join("blocked/SKILL.md"), skill_md("blocked")).unwrap();
-        fs::write(root.join("visible/SKILL.md"), skill_md("visible")).unwrap();
-        fs::set_permissions(
-            root.join("blocked/SKILL.md"),
-            fs::Permissions::from_mode(0o0),
-        )
-        .unwrap();
-        let mut skills = Vec::new();
-        let report = collect_mirrored(&root, "Cursor", "cursor", false, &mut skills);
-        assert_eq!(skills.len(), 1);
-        assert_eq!(report.accepted, 1);
-        assert!(report
-            .skipped
-            .iter()
-            .any(|skip| skip.reason.contains("PermissionDenied")));
-        fs::remove_dir_all(root).unwrap();
-    }
-
     #[test]
     fn discovery_reports_rejections_and_antigravity_name_fallback() {
         let root = temp_root();
@@ -1383,11 +1322,14 @@ mod tests {
                 "\u{feff}---\r\ndescription: Native research skill\r\n---\r\nbody".to_string(),
             ),
             ("invalid", skill_md("Bad_Name")),
+            ("blank-name", "---\nname: \ndescription: text\n---\n".into()),
             (
                 "bad-metadata",
                 "private skill body without frontmatter".to_string(),
             ),
             ("orx-git", skill_md("orx-git")),
+            ("shim", skill_md("plan")),
+            ("builtin", skill_md("lit-review")),
             (
                 "no-description",
                 "---\nname: no-description\n---\nbody".to_string(),
@@ -1398,20 +1340,21 @@ mod tests {
             fs::write(dir.join("SKILL.md"), content).unwrap();
         }
         fs::create_dir_all(root.join("empty")).unwrap();
+        fs::write(root.join("README.md"), "not a skill").unwrap();
         let mut native = Vec::new();
         let report = collect_mirrored(
             &root,
             "Google Antigravity",
             "antigravity",
             false,
+            0,
             &mut native,
         );
         let mut names: Vec<_> = native.iter().map(|skill| skill.name.as_str()).collect();
         names.sort();
         assert_eq!(names, ["unnamed", "valid"]);
-        assert_eq!(report.accepted, 2);
         assert_eq!(report.status, SkillRootStatus::Scanned);
-        assert_eq!(report.skipped.len(), 5);
+        assert_eq!(report.skipped.len(), 8);
         let json = serde_json::to_string(&report).unwrap();
         assert!(json.contains("malformed metadata"));
         assert!(json.contains("no SKILL.md"));
@@ -1419,15 +1362,41 @@ mod tests {
         assert!(json.contains("reserved name"));
         assert!(!json.contains("private skill body"));
         let mut cursor = Vec::new();
-        collect_mirrored(&root, "Cursor", "cursor", false, &mut cursor);
+        collect_mirrored(&root, "Cursor", "cursor", false, 0, &mut cursor);
         assert_eq!(cursor.len(), 1);
         let unnamed = fs::read_to_string(root.join("unnamed/SKILL.md")).unwrap();
-        assert!(save_skill_md_in(&temp_root(), unnamed.as_bytes()).is_err());
+        assert!(save_skill_md_in(&root.join("uploads"), unnamed.as_bytes()).is_err());
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            fs::create_dir_all(root.join("blocked")).unwrap();
+            fs::write(root.join("blocked/SKILL.md"), skill_md("blocked")).unwrap();
+            fs::set_permissions(
+                root.join("blocked/SKILL.md"),
+                fs::Permissions::from_mode(0o0),
+            )
+            .unwrap();
+            let mut readable = Vec::new();
+            let report = collect_mirrored(
+                &root,
+                "Google Antigravity",
+                "antigravity",
+                false,
+                0,
+                &mut readable,
+            );
+            assert_eq!(readable.len(), 2);
+            assert!(report
+                .skipped
+                .iter()
+                .any(|skip| skip.reason.contains("PermissionDenied")));
+        }
         let missing = collect_mirrored(
             &root.join("absent"),
             "Cursor",
             "cursor",
             false,
+            0,
             &mut Vec::new(),
         );
         assert_eq!(missing.status, SkillRootStatus::Missing);
@@ -1437,6 +1406,7 @@ mod tests {
             "Cursor",
             "cursor",
             false,
+            0,
             &mut Vec::new(),
         );
         assert_eq!(unreadable.status, SkillRootStatus::Unreadable);
@@ -1456,8 +1426,19 @@ mod tests {
             fs::write(dir.join("SKILL.md"), skill_md(name)).unwrap();
         }
         let mut native = Vec::new();
-        let report = collect_mirrored(&agent, "Cursor", "cursor", false, &mut native);
-        let (catalog, reports) = catalog_in(&root, native, vec![report]);
+        let report = collect_mirrored(&agent, "Cursor", "cursor", false, 0, &mut native);
+        let other = agent.join("other-agent");
+        fs::create_dir_all(other.join("visible")).unwrap();
+        fs::write(other.join("visible/SKILL.md"), skill_md("visible")).unwrap();
+        let shadowed = collect_mirrored(
+            &other,
+            "Google Antigravity",
+            "antigravity",
+            false,
+            1,
+            &mut native,
+        );
+        let (catalog, reports) = catalog_in(&root, &native, vec![report, shadowed]);
         assert_eq!(
             catalog
                 .into_iter()
@@ -1469,6 +1450,10 @@ mod tests {
             ]
         );
         assert_eq!(reports[0].accepted, 1);
+        assert_eq!(reports[1].accepted, 0);
+        assert!(reports[1].skipped[0]
+            .reason
+            .contains("shadowed in Customize by Cursor"));
         assert!(reports[0]
             .skipped
             .iter()
@@ -1479,21 +1464,6 @@ mod tests {
             .any(|skip| skip.reason.contains("shadowed")));
         fs::remove_dir_all(root).unwrap();
         fs::remove_dir_all(agent).unwrap();
-    }
-
-    #[test]
-    fn native_metadata_keeps_bom_and_windows_line_endings() {
-        let fm = parse_frontmatter(
-            "\u{feff}---\r\nname: valid\r\ndescription: Native research skill\r\n---\r\nbody",
-        )
-        .unwrap();
-        assert_eq!(fm.name, "valid");
-        assert_eq!(fm.description, "Native research skill");
-        assert!(parse_frontmatter_with_name(
-            "---\nname: \ndescription: text\n---\n",
-            Some("fallback")
-        )
-        .is_err());
     }
 
     #[test]
@@ -1518,6 +1488,7 @@ mod tests {
                 claude.name(),
                 claude.id(),
                 false,
+                0,
                 &mut skills,
             );
             collect_mirrored(
@@ -1525,6 +1496,7 @@ mod tests {
                 "analysis",
                 claude.id(),
                 true,
+                0,
                 &mut skills,
             );
             collect_mirrored(
@@ -1532,6 +1504,7 @@ mod tests {
                 codex.name(),
                 codex.id(),
                 false,
+                0,
                 &mut skills,
             );
             skills
@@ -1961,33 +1934,6 @@ mod tests {
         migrate_project_scoped(&root);
         assert!(!root.join("projects").exists());
         let _ = fs::remove_dir_all(&root);
-    }
-
-    #[test]
-    fn collect_mirrored_takes_only_usable_skill_folders() {
-        let agent_dir = temp_root();
-        for (dir, md) in [
-            ("good", skill_md("good")),
-            ("orx-git", skill_md("orx-git")),
-            ("shim", skill_md("plan")),
-            ("shouty", skill_md_desc("Bad_Name", "Nope. Use never.")),
-            ("builtin", skill_md("lit-review")),
-        ] {
-            let path = agent_dir.join(dir);
-            fs::create_dir_all(&path).unwrap();
-            fs::write(path.join("SKILL.md"), md).unwrap();
-        }
-        // A plain directory with no SKILL.md, and a stray file.
-        fs::create_dir_all(agent_dir.join("notes")).unwrap();
-        fs::write(agent_dir.join("README.md"), b"hi").unwrap();
-
-        let mut out = Vec::new();
-        collect_mirrored(&agent_dir, "Claude Code", "claude-code", false, &mut out);
-        assert_eq!(
-            out.iter().map(|m| m.name.as_str()).collect::<Vec<_>>(),
-            ["good"]
-        );
-        let _ = fs::remove_dir_all(&agent_dir);
     }
 
     #[test]
