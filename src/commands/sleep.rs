@@ -1,8 +1,9 @@
 //! `orx sleep`: run a chat unattended (overnight) under a hard GPU budget.
 //!
-//!   orx sleep start --budget 20 [--for 8h] [--metric acc --target 15]
+//!   orx sleep start --budget 20 [--for 8h] [--goal "…"] [--metric acc --target 15]
 //!   orx sleep status                  plan, spend, progress, verdict
 //!   orx sleep assess --verdict …      the agent's feasibility analysis
+//!   orx sleep done --evidence "…"     the agent reached the target; finish
 //!   orx sleep stop --reason "…"       finish early; paid launches stay blocked
 //!   orx sleep off                     remove the plan (the user only)
 //!
@@ -51,6 +52,15 @@ pub enum SleepCommand {
         #[arg(long)]
         session: Option<String>,
     },
+    /// Finish sleep mode because the target is reached. No paid run starts
+    /// afterwards.
+    Done {
+        /// What was reached, with run ids and numbers.
+        #[arg(long)]
+        evidence: String,
+        #[arg(long)]
+        session: Option<String>,
+    },
     /// Finish sleep mode early. No paid run starts afterwards.
     Stop {
         #[arg(long)]
@@ -73,6 +83,10 @@ pub struct StartArgs {
     /// Stop after this long: 90m, 8h, 1d.
     #[arg(long = "for")]
     pub duration: Option<String>,
+    /// What you want done, in your own words. The agent judges when it is
+    /// reached and then finishes sleep mode (`orx sleep done`).
+    #[arg(long)]
+    pub goal: Option<String>,
     /// The run metric the target is measured on (as imported with `orx exp metrics`).
     #[arg(long)]
     pub metric: Option<String>,
@@ -157,27 +171,25 @@ pub async fn run(args: SleepArgs) -> Result<()> {
             println!("\u{2713} Feasibility recorded: {}.", verdict.id());
             status(&store, &session, false)
         }
-        SleepCommand::Stop { reason, session } => {
-            let session = session_id(session)?;
-            let mut stored = store
-                .get_sleep(&session)?
-                .ok_or_else(|| anyhow!("Sleep mode is not on for this chat."))?;
-            if stored.state.finished.is_none() {
-                stored.state.finished = Some(Finish {
-                    reason: FinishReason::Agent,
-                    detail: format!("stopped: {}", reason.trim()),
-                    at: now_ms(),
-                });
-                // The caller is already writing the report.
-                stored.state.finish_notified = from_agent();
-                store.set_sleep_state(&session, &stored.state)?;
+        SleepCommand::Done { evidence, session } => {
+            if evidence.trim().is_empty() {
+                return Err(anyhow!(
+                    "Say in --evidence what was reached, with run ids and numbers."
+                ));
             }
-            println!(
-                "\u{2713} Sleep mode finished. No paid run starts until the user turns it off \
-                 (`orx sleep off`)."
-            );
-            Ok(())
+            finish(
+                &store,
+                &session_id(session)?,
+                FinishReason::GoalMet,
+                format!("target reached: {}", evidence.trim()),
+            )
         }
+        SleepCommand::Stop { reason, session } => finish(
+            &store,
+            &session_id(session)?,
+            FinishReason::Agent,
+            format!("stopped: {}", reason.trim()),
+        ),
         SleepCommand::Off { session } => {
             if from_agent() {
                 return Err(anyhow!(
@@ -194,6 +206,28 @@ pub async fn run(args: SleepArgs) -> Result<()> {
             Ok(())
         }
     }
+}
+
+/// Finishes the plan unless it already has; the first reason stays on record.
+fn finish(store: &Store, session: &str, reason: FinishReason, detail: String) -> Result<()> {
+    let mut stored = store
+        .get_sleep(session)?
+        .ok_or_else(|| anyhow!("Sleep mode is not on for this chat."))?;
+    if stored.state.finished.is_none() {
+        stored.state.finished = Some(Finish {
+            reason,
+            detail,
+            at: now_ms(),
+        });
+        // The caller is already writing the report.
+        stored.state.finish_notified = from_agent();
+        store.set_sleep_state(session, &stored.state)?;
+    }
+    println!(
+        "\u{2713} Sleep mode finished. No paid run starts until the user turns it off \
+         (`orx sleep off`)."
+    );
+    Ok(())
 }
 
 fn start(store: &Store, args: StartArgs) -> Result<()> {
@@ -223,6 +257,7 @@ fn start(store: &Store, args: StartArgs) -> Result<()> {
     let defaults = SleepPlan::default();
     let plan = SleepPlan {
         gpu_budget_usd: args.budget,
+        goal: args.goal,
         until: args
             .duration
             .as_deref()
@@ -297,6 +332,9 @@ fn status(store: &Store, session: &str, json: bool) -> Result<()> {
     if let Some(until) = stored.plan.until {
         println!("  until   {}", sleep::format_time(until));
     }
+    if let Some(goal) = &stored.plan.goal {
+        println!("  goal    {goal}");
+    }
     if let (Some(objective), Some(progress)) = (&stored.plan.objective, &progress) {
         println!(
             "  target  {} {}{}",
@@ -331,7 +369,7 @@ fn status(store: &Store, session: &str, json: bool) -> Result<()> {
         match (&lineup.candidate, crate::local::strategy::active(&stored)) {
             (Some(c), true) => line.push_str(&format!(", v{} on trial", c.version)),
             (_, false) if !stored.plan.self_improve => line.push_str(", self-improvement off"),
-            (_, false) => line.push_str(", self-improvement needs a target metric"),
+            (_, false) => line.push_str(", self-improvement needs a metric to judge runs by"),
             _ => {}
         }
         println!("{line}  (orx strategy show)");

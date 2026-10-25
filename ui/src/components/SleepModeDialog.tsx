@@ -50,6 +50,7 @@ export function SleepModeDialog({ sessionId, onClose }: { sessionId: string; onC
   const hoursLeft = plan?.until ? Math.max(0, (plan.until - Date.now()) / 3_600_000) : null;
   const [budget, setBudget] = useState(plan ? String(plan.gpuBudgetUsd) : "10");
   const [hours, setHours] = useState(hoursLeft != null ? hoursLeft.toFixed(1) : "8");
+  const [goal, setGoal] = useState(plan?.goal ?? "");
   const [metric, setMetric] = useState(objective?.metric ?? "");
   const [direction, setDirection] = useState<"max" | "min">(objective?.direction ?? "max");
   const [target, setTarget] = useState(objective?.improvePct != null ? String(objective.improvePct) : "");
@@ -95,6 +96,7 @@ export function SleepModeDialog({ sessionId, onClose }: { sessionId: string; onC
         startChatSleep(sessionId, {
           budgetUsd,
           hours: hoursValue,
+          goal: goal.trim() || null,
           metric: metric.trim() || null,
           direction,
           targetPct,
@@ -214,6 +216,18 @@ export function SleepModeDialog({ sessionId, onClose }: { sessionId: string; onC
           <label className="flex flex-col gap-1">
             {m.sleep_mode_hours()}
             <Input inputMode="decimal" value={hours} onChange={(e) => setHours(e.target.value)} />
+          </label>
+          <label className="col-span-2 flex flex-col gap-1">
+            {m.sleep_mode_goal()}
+            <textarea
+              className="min-h-16 w-full resize-y rounded-md border border-border bg-background px-2.5 py-1.5 font-sans text-sm text-text outline-none placeholder:text-muted focus:border-text"
+              rows={2}
+              maxLength={2000}
+              value={goal}
+              placeholder={m.sleep_mode_goal_placeholder()}
+              onChange={(e) => setGoal(e.target.value)}
+            />
+            <span className="text-muted">{m.sleep_mode_goal_hint()}</span>
           </label>
           <label className="col-span-2 flex flex-col gap-1">
             {m.sleep_mode_metric()}

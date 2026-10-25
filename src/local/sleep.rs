@@ -15,7 +15,9 @@
 //!   another account or harness even when failover is off in Settings.
 //! - **Stop conditions.** A deadline, and an optional target such as "beat the
 //!   baseline by 15% on `val_acc`", checked by orx against imported run
-//!   metrics rather than the agent's own claim.
+//!   metrics rather than the agent's own claim. A target written in plain
+//!   words is judged by the agent instead, which finishes the plan with
+//!   `orx sleep done` once the evidence shows it is reached.
 //! - **Escalation.** When finished runs stop improving the best result, the
 //!   agent is told to fan out cheap research subagents across sources before
 //!   trying again, and to reassess whether the target is still feasible.
@@ -40,6 +42,8 @@ pub const MAX_BACKOFF_SECS: u64 = 60 * 60;
 /// While runs are in flight the agent is woken by their results, so the
 /// watchdog only checks in this rarely.
 pub const ACTIVE_RUN_CHECK_SECS: u64 = 30 * 60;
+/// The longest target the user can write; it is sent with every turn.
+pub const MAX_GOAL_CHARS: usize = 2000;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
@@ -97,6 +101,10 @@ pub struct Objective {
 pub struct SleepPlan {
     /// Hard cap, in US dollars, on GPU spend for runs agents launch.
     pub gpu_budget_usd: f64,
+    /// What the user wants done, in their words. The agent judges when it is
+    /// reached and then finishes the plan itself.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub goal: Option<String>,
     /// Stop at this time (Unix ms).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub until: Option<i64>,
@@ -137,6 +145,7 @@ impl Default for SleepPlan {
     fn default() -> Self {
         Self {
             gpu_budget_usd: 0.0,
+            goal: None,
             until: None,
             objective: None,
             idle_secs: default_idle_secs(),
@@ -152,6 +161,20 @@ impl SleepPlan {
     pub fn validated(self) -> Result<Self> {
         if !self.gpu_budget_usd.is_finite() || self.gpu_budget_usd < 0.0 {
             return Err(anyhow!("The GPU budget must be zero or more US dollars."));
+        }
+        let goal = self
+            .goal
+            .as_deref()
+            .map(str::trim)
+            .filter(|goal| !goal.is_empty())
+            .map(str::to_string);
+        if goal
+            .as_ref()
+            .is_some_and(|goal| goal.chars().count() > MAX_GOAL_CHARS)
+        {
+            return Err(anyhow!(
+                "Keep the target under {MAX_GOAL_CHARS} characters."
+            ));
         }
         if let Some(objective) = &self.objective {
             if objective.metric.trim().is_empty() {
@@ -177,6 +200,7 @@ impl SleepPlan {
         }
         Ok(Self {
             stall_runs: self.stall_runs.max(1),
+            goal,
             ..self
         })
     }
@@ -186,6 +210,8 @@ impl SleepPlan {
 #[serde(rename_all = "camelCase")]
 pub enum FinishReason {
     TargetMet,
+    /// The agent judged, with evidence, that the user's written target is reached.
+    GoalMet,
     Deadline,
     /// The agent concluded, with evidence, that it should stop.
     Agent,
@@ -935,6 +961,9 @@ fn status_lines(
     progress: Option<&Progress>,
 ) -> String {
     let mut lines = Vec::new();
+    if let Some(goal) = &plan.goal {
+        lines.push(format!("- Target (the user's words): {goal}"));
+    }
     if let Some(budget) = budget {
         lines.push(format!(
             "- GPU budget: ${:.2} of ${:.2} used, ${:.2} left{}",
@@ -991,7 +1020,7 @@ fn status_lines(
             a.verdict.id(),
             a.note
         )),
-        None if plan.objective.is_some() => {
+        None if plan.objective.is_some() || plan.goal.is_some() => {
             lines.push("- Feasibility: not assessed yet".to_string())
         }
         None => {}
@@ -1049,6 +1078,10 @@ to the most ambitious target you judge reachable with `--revised-target <pct>` a
 Reassess after every research round.\n\
 - When finished runs stop improving the best result, run a research round before more compute, \
 as your strategy describes.\n\
+- If the plan has a target, check it against your evidence after every finished run. Once the \
+evidence shows it is reached, cancel runs that are no longer needed, run `orx sleep done \
+--evidence \"…\"` (what was reached, with run ids and numbers), write the morning report, and end \
+your turn without starting new work. Never claim the target before the evidence shows it.\n\
 - If you conclude with evidence that nothing more is worth spending on, stop with `orx sleep stop \
 --reason \"…\"`.\n\
 - When sleep mode finishes, write a morning report in the artifacts directory: what was tried, \
@@ -1465,5 +1498,30 @@ mod tests {
         .validated()
         .is_err());
         assert!(SleepPlan::default().validated().is_ok());
+    }
+
+    #[test]
+    fn written_targets_are_trimmed_bounded_and_shown_to_the_agent() {
+        let plan = |goal: &str| SleepPlan {
+            goal: Some(goal.to_string()),
+            ..SleepPlan::default()
+        };
+        assert_eq!(plan("   ").validated().unwrap().goal, None);
+        let plan = plan("  reproduce Table 2 within 1 point \n")
+            .validated()
+            .unwrap();
+        assert_eq!(
+            plan.goal.as_deref(),
+            Some("reproduce Table 2 within 1 point")
+        );
+        assert!(SleepPlan {
+            goal: Some("x".repeat(MAX_GOAL_CHARS + 1)),
+            ..SleepPlan::default()
+        }
+        .validated()
+        .is_err());
+        let lines = status_lines(&plan, &SleepState::default(), None, None);
+        assert!(lines.contains("Target (the user's words): reproduce Table 2 within 1 point"));
+        assert!(lines.contains("Feasibility: not assessed yet"));
     }
 }

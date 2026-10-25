@@ -29,6 +29,7 @@ pub(super) async fn get_sleep(Path(id): Path<String>) -> ApiResult {
 pub(super) struct SleepReq {
     budget_usd: f64,
     hours: Option<f64>,
+    goal: Option<String>,
     metric: Option<String>,
     direction: Option<String>,
     target_pct: Option<f64>,
@@ -65,6 +66,7 @@ pub(super) async fn put_sleep(Path(id): Path<String>, Json(req): Json<SleepReq>)
     let previous = store.get_sleep(&id)?.map(|s| s.plan).unwrap_or_default();
     let plan = SleepPlan {
         gpu_budget_usd: req.budget_usd,
+        goal: req.goal,
         until: req
             .hours
             .map(|h| crate::store::now_ms() + (h * 3_600_000.0) as i64),

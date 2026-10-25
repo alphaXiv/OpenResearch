@@ -9317,6 +9317,12 @@ async fn process_sleep_sessions(chat: &Arc<ChatHost>) -> Result<()> {
                 }
             }
         }
+        if let (None, Some(finish)) = (&stored.state.finished, &state.finished) {
+            eprintln!(
+                "orx up: sleep mode {session_id} finished: {}",
+                finish.detail
+            );
+        }
         if state != stored.state {
             let store = Store::open()?;
             // `orx sleep assess|stop|start` may have written meanwhile; theirs win.
