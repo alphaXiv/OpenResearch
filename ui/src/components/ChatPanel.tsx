@@ -34,6 +34,7 @@ import {
   type FileMentionMatch,
 } from "../fileMentions";
 import { m } from "../paraglide/messages.js";
+import { copyToClipboard } from "../clipboard";
 import { autoDir, ltr } from "../i18n";
 import { useLocale } from "../locale";
 import {
@@ -2935,16 +2936,6 @@ function attachmentPartView(p: ChatPart): { src: string; isPdf: boolean; name: s
   const isPdf =
     raw.startsWith("data:application/pdf") || /\.pdf$/i.test(name) || /\.pdf$/i.test(raw);
   return { src, isPdf, name };
-}
-
-async function copyToClipboard(text: string) {
-  try {
-    if (!navigator.clipboard) throw new Error(m.file_tree_clipboard_unavailable());
-    await navigator.clipboard.writeText(text);
-    showAlert(m.common_copied(), "success");
-  } catch (error) {
-    showAlert(error instanceof Error ? error.message : String(error), "error");
-  }
 }
 
 function downloadMarkdown(fileName: string, markdown: string) {

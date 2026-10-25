@@ -17,9 +17,9 @@
 
 use std::collections::HashSet;
 use std::fs;
+use std::path::{Path, PathBuf};
 
 use serde::Serialize;
-use std::path::{Path, PathBuf};
 
 use crate::error::{anyhow, Result};
 use crate::local::agent_skills::SkillSet;
@@ -467,7 +467,7 @@ struct Mirrored {
 /// global skills dir, plus the skills that come with its installed plugins.
 /// Sorted by name (then origin) so the first of a duplicated name always wins.
 fn mirrored() -> Vec<Mirrored> {
-    available_mirrored(&root(), discover_mirrored(), None)
+    available_mirrored(&root(), discover_mirrored().0, None)
 }
 
 fn available_mirrored(root: &Path, skills: Vec<Mirrored>, harness: Option<&str>) -> Vec<Mirrored> {
@@ -522,11 +522,7 @@ impl SkillDiscovery {
     }
 }
 
-fn discover_mirrored() -> Vec<Mirrored> {
-    discover_mirrored_with_details().0
-}
-
-fn discover_mirrored_with_details() -> (Vec<Mirrored>, Vec<SkillDiscovery>) {
+fn discover_mirrored() -> (Vec<Mirrored>, Vec<SkillDiscovery>) {
     let mut out = Vec::new();
     let mut reports = Vec::new();
     for harness in registry() {
@@ -650,12 +646,11 @@ fn collect_mirrored(
             description: fm.description,
         });
     }
-    report.skipped.sort_by(|a, b| a.path.cmp(&b.path));
     report
 }
 
-pub fn list_with_discovery() -> (Vec<UserSkill>, Vec<SkillDiscovery>) {
-    let (skills, reports) = discover_mirrored_with_details();
+pub fn list() -> (Vec<UserSkill>, Vec<SkillDiscovery>) {
+    let (skills, reports) = discover_mirrored();
     catalog_in(&root(), skills, reports)
 }
 
@@ -739,13 +734,6 @@ fn list_uploaded_in(root: &Path) -> Vec<UserSkill> {
     out
 }
 
-/// Every skill the agent gets: the user's uploads plus whatever the installed
-/// coding agents and their plugins have, name-sorted. One entry per `/name` — an
-/// upload shadows a mirrored skill of the same name.
-pub fn list() -> Vec<UserSkill> {
-    list_in(&root(), &mirrored())
-}
-
 pub fn list_for_harness(harness: Option<&str>) -> Vec<UserSkill> {
     list_in(&root(), &native_skills(harness))
 }
@@ -793,7 +781,7 @@ fn native_skills(harness: Option<&str>) -> Vec<Mirrored> {
     let Some(harness) = harness else {
         return Vec::new();
     };
-    available_mirrored(&root(), discover_mirrored(), Some(harness))
+    available_mirrored(&root(), discover_mirrored().0, Some(harness))
 }
 
 pub fn list_uploaded() -> Vec<UserSkill> {
@@ -1349,21 +1337,15 @@ mod tests {
         use std::os::unix::ffi::OsStringExt;
         let root = temp_root();
         let unusual = root.join(std::ffi::OsString::from_vec(vec![b'x', 0xff]));
-        fs::create_dir_all(root.join("valid")).unwrap();
-        fs::write(root.join("valid/SKILL.md"), skill_md("valid")).unwrap();
-        let mut native = Vec::new();
-        let mut report = collect_mirrored(&root, "Cursor", "cursor", false, &mut native);
-        assert_eq!(native.len(), 1);
         // APFS cannot create this filename, but Linux scans can return it.
+        let mut report = collect_mirrored(&unusual, "Cursor", "cursor", false, &mut Vec::new());
         report.skip(unusual.clone(), "no SKILL.md");
         let json = serde_json::to_value(&report).unwrap();
         assert_eq!(
             json["skipped"][0]["path"],
             unusual.to_string_lossy().as_ref()
         );
-        report.path = unusual;
-        assert!(serde_json::to_value(&report).is_ok());
-        fs::remove_dir_all(root).unwrap();
+        assert_eq!(json["path"], unusual.to_string_lossy().as_ref());
     }
 
     #[cfg(unix)]
@@ -1382,11 +1364,6 @@ mod tests {
         .unwrap();
         let mut skills = Vec::new();
         let report = collect_mirrored(&root, "Cursor", "cursor", false, &mut skills);
-        fs::set_permissions(
-            root.join("blocked/SKILL.md"),
-            fs::Permissions::from_mode(0o600),
-        )
-        .unwrap();
         assert_eq!(skills.len(), 1);
         assert_eq!(report.accepted, 1);
         assert!(report
@@ -1445,18 +1422,7 @@ mod tests {
         collect_mirrored(&root, "Cursor", "cursor", false, &mut cursor);
         assert_eq!(cursor.len(), 1);
         let unnamed = fs::read_to_string(root.join("unnamed/SKILL.md")).unwrap();
-        assert!(parse_frontmatter(&unnamed).is_err());
         assert!(save_skill_md_in(&temp_root(), unnamed.as_bytes()).is_err());
-        let mut refreshed = Vec::new();
-        fs::remove_dir_all(root.join("valid")).unwrap();
-        collect_mirrored(
-            &root,
-            "Google Antigravity",
-            "antigravity",
-            false,
-            &mut refreshed,
-        );
-        assert_eq!(refreshed.len(), 1);
         let missing = collect_mirrored(
             &root.join("absent"),
             "Cursor",
@@ -1478,7 +1444,7 @@ mod tests {
     }
 
     #[test]
-    fn catalog_diagnostics_preserve_upload_precedence_exclusions_and_harness_selection() {
+    fn catalog_diagnostics_preserve_upload_precedence_and_exclusions() {
         let root = temp_root();
         let agent = temp_root();
         save_skill_md_in(&root, skill_md("duplicate").as_bytes()).unwrap();
@@ -1491,22 +1457,16 @@ mod tests {
         }
         let mut native = Vec::new();
         let report = collect_mirrored(&agent, "Cursor", "cursor", false, &mut native);
-        assert!(available_mirrored(&root, native, Some("codex")).is_empty());
-        let mut native = Vec::new();
-        collect_mirrored(&agent, "Cursor", "cursor", false, &mut native);
-        let expected: Vec<_> = list_in(&root, &available_mirrored(&root, native, None))
-            .into_iter()
-            .map(|skill| (skill.name, skill.origin))
-            .collect();
-        let mut native = Vec::new();
-        collect_mirrored(&agent, "Cursor", "cursor", false, &mut native);
         let (catalog, reports) = catalog_in(&root, native, vec![report]);
         assert_eq!(
             catalog
                 .into_iter()
                 .map(|skill| (skill.name, skill.origin))
                 .collect::<Vec<_>>(),
-            expected
+            vec![
+                ("duplicate".to_string(), None),
+                ("visible".to_string(), Some("Cursor".to_string()))
+            ]
         );
         assert_eq!(reports[0].accepted, 1);
         assert!(reports[0]

@@ -1232,7 +1232,7 @@ fn user_skill_json(s: &crate::local::user_skills::UserSkill) -> Value {
 /// coding agents installed on this machine.
 async fn list_user_skills() -> ApiResult {
     tokio::task::spawn_blocking(|| {
-        let (skills, discovery) = crate::local::user_skills::list_with_discovery();
+        let (skills, discovery) = crate::local::user_skills::list();
         let skills: Vec<Value> = skills.iter().map(user_skill_json).collect();
         Json(json!({ "skills": skills, "discovery": discovery }))
     })

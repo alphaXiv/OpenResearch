@@ -17,7 +17,8 @@ import {
   type UserSkill,
   type SkillDiscovery,
 } from "../api";
-import { Badge, Button, IconButton, Spinner, showAlert } from "./ui";
+import { Badge, Button, IconButton, Spinner } from "./ui";
+import { copyToClipboard } from "../clipboard";
 
 const MAX_UPLOAD_BYTES = 20 * 1024 * 1024;
 
@@ -224,19 +225,9 @@ function SkillDetectionDetails({ reports }: { reports: SkillDiscovery[] }) {
     ...report.skipped.map((skip) => `  ${skip.path}: ${skip.reason}`),
   ].join("\n")).join("\n\n");
 
-  const copy = async () => {
-    try {
-      if (!navigator.clipboard) throw new Error(m.file_tree_clipboard_unavailable());
-      await navigator.clipboard.writeText(text);
-      showAlert(m.common_copied(), "success");
-    } catch (error) {
-      showAlert(error instanceof Error ? error.message : String(error), "error");
-    }
-  };
-
   return <details className="mt-3 border-t border-border pt-3">
-    <summary className="w-fit cursor-pointer rounded-sm text-sm text-subtext focus-visible:outline-2 focus-visible:outline-text">{m.skills_detection_details()}</summary>
-    <Button className="my-2" size="small" onClick={() => void copy()}>{m.skills_detection_copy()}</Button>
+    <summary className="w-fit cursor-pointer rounded-sm text-sm text-subtext focus-visible:outline-2 focus-visible:outline-focus">{m.skills_detection_details()}</summary>
+    <Button className="my-2" size="small" onClick={() => void copyToClipboard(text)}>{m.skills_detection_copy()}</Button>
     <pre className="max-h-80 overflow-auto whitespace-pre-wrap break-words text-sm text-text" tabIndex={0}>{text}</pre>
   </details>;
 }
