@@ -2600,6 +2600,27 @@ impl Store {
         )?)
     }
 
+    /// The prepared inputs of the turns that produced `assistant_ids`.
+    pub fn chat_turn_inputs_for_assistants(
+        &self,
+        session_id: &str,
+        assistant_ids: &[String],
+    ) -> Result<Vec<String>> {
+        if assistant_ids.is_empty() {
+            return Ok(Vec::new());
+        }
+        let placeholders = vec!["?"; assistant_ids.len()].join(", ");
+        let mut stmt = self.conn.prepare(&format!(
+            "SELECT prepared_input FROM chat_turns
+             WHERE session_id = ? AND assistant_message_id IN ({placeholders})"
+        ))?;
+        let params = std::iter::once(session_id).chain(assistant_ids.iter().map(String::as_str));
+        let inputs = stmt
+            .query_map(rusqlite::params_from_iter(params), |row| row.get(0))?
+            .collect::<std::result::Result<Vec<String>, _>>()?;
+        Ok(inputs)
+    }
+
     pub fn insert_queued_chat_message(&self, message: &StoredQueuedChatMessage) -> Result<()> {
         let changed = self.conn.execute(
             "INSERT INTO chat_queued_messages

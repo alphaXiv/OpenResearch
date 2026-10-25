@@ -899,7 +899,13 @@ pub fn advance(
 }
 
 /// The `<orx-strategy>` block for a sleep turn, advancing the alternation.
-pub fn turn_context(store: &Store, sleep: &StoredSleep) -> Result<String> {
+/// The notes are live; the version's own text goes out in full only when the
+/// native session does not already hold it.
+pub fn turn_context(
+    store: &Store,
+    sleep: &StoredSleep,
+    delivered: &crate::local::turn_context::Delivered,
+) -> Result<String> {
     let (strategy, on_trial) = next_turn(store, sleep)?;
     let mut notes = Vec::new();
     if on_trial {
@@ -957,9 +963,9 @@ pub fn turn_context(store: &Store, sleep: &StoredSleep) -> Result<String> {
         text.push_str(&format!("{note}\n"));
     }
     text.push('\n');
-    text.push_str(&strategy.strategy.render());
+    let mut body = strategy.strategy.render();
     if active(sleep) {
-        text.push_str(&format!(
+        body.push_str(&format!(
             "\n\nSelf-improvement (retrospectives):\n{}\nPropose a revision with `orx strategy \
              propose --rationale \"…\" --file -` (JSON with any of `approach`, `research`, \
              `retrospective`, `knobs`; omitted fields stay), or keep this one with `orx strategy \
@@ -968,6 +974,7 @@ pub fn turn_context(store: &Store, sleep: &StoredSleep) -> Result<String> {
             strategy.strategy.retrospective.trim()
         ));
     }
+    text.push_str(&delivered.once(&format!("strategy v{}", strategy.version), &body));
     text.push_str("\n</orx-strategy>");
     Ok(text)
 }
@@ -1076,6 +1083,7 @@ pub fn as_text(strategy: &Strategy) -> String {
 mod tests {
     use super::*;
     use crate::local::sleep::{Direction, SleepPlan};
+    use crate::local::turn_context::Delivered;
     use crate::store::run_metrics::RunMetrics;
     use crate::store::StoredRun;
     use std::collections::BTreeMap;
@@ -1263,7 +1271,7 @@ mod tests {
                 })
                 .collect();
             assert_eq!(arms, [(1, true), (0, false), (1, true), (0, false)]);
-            assert!(turn_context(&store, &sleep)
+            assert!(turn_context(&store, &sleep, &Delivered::none())
                 .unwrap()
                 .contains("candidate v1"));
             assert_eq!(current(&store, &sleep).unwrap().version, v1);
