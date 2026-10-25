@@ -179,6 +179,163 @@ fn sidecar(path: &Path, suffix: &str) -> PathBuf {
     PathBuf::from(name)
 }
 
+pub(super) fn delete_sessions(
+    paths: &[PathBuf],
+    ids: &BTreeSet<String>,
+    retained: &BTreeSet<String>,
+) -> Result<()> {
+    let mut leases = Vec::new();
+    for path in paths.iter().collect::<BTreeSet<_>>() {
+        let major = match inspect(path)? {
+            DatabaseState::Empty => continue,
+            DatabaseState::V1 => 1,
+            DatabaseState::V2Pending | DatabaseState::V2Ready => 2,
+        };
+        let lease = DatabaseLease::acquire(path, major)?;
+        if lease.requires_migration() {
+            return Err(anyhow!(
+                "Complete the OpenCode V2 upgrade before deleting chats in {}",
+                path.display()
+            ));
+        }
+        leases.push(lease);
+    }
+    for lease in &leases {
+        delete_session_rows(lease.path(), ids, retained).map_err(|error| {
+            anyhow!("Could not finish native cleanup in {}: {error}. Cleanup may be partial; retry deleting the chat or project to finish", lease.path().display())
+        })?;
+    }
+    Ok(())
+}
+
+fn delete_session_rows(
+    path: &Path,
+    ids: &BTreeSet<String>,
+    retained: &BTreeSet<String>,
+) -> Result<()> {
+    let mut connection = Connection::open_with_flags(path, OpenFlags::SQLITE_OPEN_READ_WRITE)?;
+    connection.busy_timeout(std::time::Duration::from_secs(5))?;
+    // Zero deleted content in place so chat text does not linger in free pages.
+    connection.execute_batch("PRAGMA foreign_keys = ON; PRAGMA secure_delete = ON;")?;
+    let transaction =
+        connection.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+    let mut deleting = ids.difference(retained).cloned().collect::<BTreeSet<_>>();
+    let mut children = Vec::new();
+    for table in ["session", "session_v2"] {
+        if !has_columns(&transaction, table, &["id", "parent_id"])? {
+            continue;
+        }
+        let mut query = transaction.prepare(&format!(
+            "SELECT id, parent_id FROM {table} WHERE parent_id IS NOT NULL"
+        ))?;
+        children.extend(
+            query
+                .query_map([], |row| {
+                    Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+                })?
+                .collect::<std::result::Result<Vec<_>, _>>()?,
+        );
+    }
+    loop {
+        let before = deleting.len();
+        for (child, parent) in &children {
+            if deleting.contains(parent) && !retained.contains(child) {
+                deleting.insert(child.clone());
+            }
+        }
+        if before == deleting.len() {
+            break;
+        }
+    }
+    for id in deleting {
+        // Explicit deletes also cover older stores without foreign-key cascades.
+        for (table, column) in [
+            ("event", "aggregate_id"),
+            ("event_sequence", "aggregate_id"),
+            ("part", "session_id"),
+            ("message", "session_id"),
+            ("session_message", "session_id"),
+            ("session_input", "session_id"),
+            ("session_context_epoch", "session_id"),
+            ("todo", "session_id"),
+            ("session_share", "session_id"),
+            ("session_v2", "id"),
+            ("session", "id"),
+        ] {
+            if has_columns(&transaction, table, &[column])? {
+                transaction.execute(&format!("DELETE FROM {table} WHERE {column} = ?1"), [&id])?;
+            }
+        }
+    }
+    transaction.commit()?;
+    // Older WAL frames still hold the deleted text; waiting out a live reader would stall
+    // OpenCode's writers, so the periodic `compact` of orx's own database retries it.
+    connection.busy_timeout(std::time::Duration::ZERO)?;
+    let _ = connection.query_row("PRAGMA wal_checkpoint(TRUNCATE)", [], |_| Ok(()));
+    Ok(())
+}
+
+/// Top-level sessions untouched for `settle`; children go with their parent.
+pub(super) fn stale_root_sessions(
+    path: &Path,
+    settle: std::time::Duration,
+) -> Result<BTreeSet<String>> {
+    let mut ids = BTreeSet::new();
+    if inspect(path)? == DatabaseState::Empty {
+        return Ok(ids);
+    }
+    let connection = open_readonly(path)?;
+    let cutoff = crate::store::now_ms() - i64::try_from(settle.as_millis())?;
+    for table in ["session", "session_v2"] {
+        if !has_columns(&connection, table, &["id", "parent_id", "time_updated"])? {
+            continue;
+        }
+        let mut query = connection.prepare(&format!(
+            "SELECT id FROM {table} WHERE parent_id IS NULL AND time_updated < ?1"
+        ))?;
+        for id in query.query_map([cutoff], |row| row.get::<_, String>(0))? {
+            ids.insert(id?);
+        }
+    }
+    Ok(ids)
+}
+
+/// Truncates the WAL without waiting on readers, then VACUUMs once free pages are a tenth of the file and no OpenCode holds it.
+pub(super) fn compact(path: &Path) -> Result<()> {
+    if inspect(path)? == DatabaseState::Empty {
+        return Ok(());
+    }
+    let path = normalize_path(path)?;
+    let connection = Connection::open_with_flags(&path, OpenFlags::SQLITE_OPEN_READ_WRITE)?;
+    connection.busy_timeout(std::time::Duration::ZERO)?;
+    let _ = connection.query_row("PRAGMA wal_checkpoint(TRUNCATE)", [], |_| Ok(()));
+    let (free, pages): (i64, i64) = connection.query_row(
+        "SELECT freelist_count, page_count FROM pragma_freelist_count(), pragma_page_count()",
+        [],
+        |row| Ok((row.get(0)?, row.get(1)?)),
+    )?;
+    if free == 0 || free * 10 < pages {
+        return Ok(());
+    }
+    // orx's OpenCode children hold a shared lease, so an exclusive one means none is running.
+    let lock = OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .read(true)
+        .write(true)
+        .open(sidecar(&path, ".orx-lock"))?;
+    // Windows' exclusive-open check would see this process's own connection as another user.
+    drop(connection);
+    if lock.try_lock().is_err() || ensure_no_external_users(&path).is_err() {
+        return Ok(());
+    }
+    let connection = Connection::open_with_flags(&path, OpenFlags::SQLITE_OPEN_READ_WRITE)?;
+    connection.busy_timeout(std::time::Duration::from_secs(5))?;
+    connection.execute_batch("VACUUM;")?;
+    let _ = connection.query_row("PRAGMA wal_checkpoint(TRUNCATE)", [], |_| Ok(()));
+    Ok(())
+}
+
 #[derive(Serialize, Deserialize)]
 struct MigrationJournal {
     source_state: DatabaseState,
@@ -642,6 +799,186 @@ mod tests {
         fn path(&self) -> PathBuf {
             self.0.path().join("opencode.db")
         }
+    }
+
+    #[test]
+    fn deleting_sessions_purges_content_and_children_but_preserves_other_chats() {
+        for schema in [V1.to_string(), V2.to_string(), format!("{V1}{V2}")] {
+            let fixture = Fixture::new();
+            let path = fixture.path();
+            let connection = Connection::open(&path).unwrap();
+            connection.execute_batch(&schema).unwrap();
+            if schema.contains("session_v2") && schema.contains("CREATE TABLE session (") {
+                connection
+                    .execute_batch(
+                        "INSERT INTO kv VALUES ('migration.v1-v2', '{\"phase\":\"completed\"}');",
+                    )
+                    .unwrap();
+            }
+            connection.execute_batch(
+                "CREATE TABLE event_sequence (aggregate_id TEXT PRIMARY KEY);
+                 CREATE TABLE event (aggregate_id TEXT REFERENCES event_sequence(aggregate_id), data TEXT);",
+            ).unwrap();
+            for table in ["session", "session_v2"] {
+                if !has_columns(&connection, table, &["id"]).unwrap() {
+                    continue;
+                }
+                connection
+                    .execute_batch(&format!(
+                        "ALTER TABLE {table} ADD COLUMN parent_id TEXT;
+                     INSERT OR REPLACE INTO {table} (id, directory, parent_id) VALUES
+                       ('history', '/deleted', NULL), ('child', '/deleted', 'history'),
+                       ('grandchild', '/deleted', 'child'),
+                       ('retained', '/kept', 'history'), ('other', '/other', NULL);"
+                    ))
+                    .unwrap();
+            }
+            for id in ["history", "child", "grandchild", "retained", "other"] {
+                for table in ["message", "part", "session_message"] {
+                    if has_columns(&connection, table, &["session_id"]).unwrap() {
+                        connection.execute(
+                            &format!("INSERT INTO {table} (id, session_id, data) VALUES (?1, ?1, 'private content')"),
+                            [id],
+                        ).unwrap();
+                    }
+                }
+                connection
+                    .execute("INSERT INTO event_sequence VALUES (?1)", [id])
+                    .unwrap();
+                connection
+                    .execute("INSERT INTO event VALUES (?1, 'private event')", [id])
+                    .unwrap();
+            }
+            let ids = BTreeSet::from(["history".into()]);
+            let retained = BTreeSet::from(["retained".into()]);
+            delete_sessions(std::slice::from_ref(&path), &ids, &retained).unwrap();
+            delete_sessions(std::slice::from_ref(&path), &ids, &retained).unwrap();
+            for (table, column) in [
+                ("session", "id"),
+                ("session_v2", "id"),
+                ("message", "session_id"),
+                ("part", "session_id"),
+                ("session_message", "session_id"),
+                ("event", "aggregate_id"),
+                ("event_sequence", "aggregate_id"),
+            ] {
+                if !has_columns(&connection, table, &[column]).unwrap() {
+                    continue;
+                }
+                let mut query = connection
+                    .prepare(&format!("SELECT {column} FROM {table} ORDER BY {column}"))
+                    .unwrap();
+                let remaining = query
+                    .query_map([], |row| row.get::<_, String>(0))
+                    .unwrap()
+                    .collect::<std::result::Result<Vec<_>, _>>()
+                    .unwrap();
+                assert_eq!(remaining, ["other", "retained"], "{table}");
+            }
+        }
+    }
+
+    #[test]
+    fn deleted_session_text_does_not_linger_in_the_file_or_wal() {
+        let fixture = Fixture::new();
+        let path = fixture.path();
+        let connection = Connection::open(&path).unwrap();
+        connection
+            .execute_batch(&format!(
+                "PRAGMA journal_mode=WAL; {V1}
+                 INSERT INTO message VALUES ('msg', 'history', 'deleted-secret-marker');"
+            ))
+            .unwrap();
+        delete_sessions(
+            std::slice::from_ref(&path),
+            &BTreeSet::from(["history".into()]),
+            &BTreeSet::new(),
+        )
+        .unwrap();
+        drop(connection);
+        for suffix in ["", "-wal"] {
+            let bytes = std::fs::read(sidecar(&path, suffix)).unwrap_or_default();
+            assert!(
+                !bytes
+                    .windows(b"deleted-secret-marker".len())
+                    .any(|window| window == b"deleted-secret-marker"),
+                "{suffix}"
+            );
+        }
+    }
+
+    #[test]
+    fn native_deletion_rolls_back_on_failure_and_does_not_create_missing_databases() {
+        let fixture = Fixture::new();
+        let path = fixture.path();
+        let ids = BTreeSet::from(["history".into()]);
+        delete_sessions(std::slice::from_ref(&path), &ids, &BTreeSet::new()).unwrap();
+        assert!(!path.exists());
+        let connection = Connection::open(&path).unwrap();
+        connection.execute_batch(V1).unwrap();
+        connection
+            .execute_batch(
+                "INSERT INTO message VALUES ('msg', 'history', 'private content');
+             INSERT INTO part VALUES ('part', 'msg', 'history', 'private content');
+             CREATE TRIGGER fail_delete BEFORE DELETE ON session
+             BEGIN SELECT RAISE(ABORT, 'cannot purge'); END;",
+            )
+            .unwrap();
+        assert!(delete_sessions(std::slice::from_ref(&path), &ids, &BTreeSet::new()).is_err());
+        for table in ["session", "message", "part"] {
+            let count: i64 = connection
+                .query_row(&format!("SELECT COUNT(*) FROM {table}"), [], |row| {
+                    row.get(0)
+                })
+                .unwrap();
+            assert_eq!(count, 1, "{table}");
+        }
+    }
+
+    #[test]
+    fn native_deletion_defers_to_active_and_interrupted_migrations() {
+        let fixture = Fixture::new();
+        let path = fixture.path();
+        let connection = Connection::open(&path).unwrap();
+        connection.execute_batch(V1).unwrap();
+        let ids = BTreeSet::from(["history".into()]);
+        let lease = DatabaseLease::acquire(&path, 2).unwrap();
+        lease.prepare_with_sessions(ids.clone()).unwrap();
+        assert!(delete_sessions(std::slice::from_ref(&path), &ids, &BTreeSet::new()).is_err());
+        drop(lease);
+        assert!(delete_sessions(std::slice::from_ref(&path), &ids, &BTreeSet::new()).is_err());
+        connection.execute_batch(V2).unwrap();
+        assert!(delete_sessions(std::slice::from_ref(&path), &ids, &BTreeSet::new()).is_err());
+        let lease = DatabaseLease::acquire(&path, 2).unwrap();
+        lease.prepare_with_sessions(ids).unwrap();
+        assert!(table_has_session(&connection, "session", "history").unwrap());
+    }
+
+    #[test]
+    fn native_deletion_preflights_stores_and_can_retry_partial_cleanup() {
+        let fixture = Fixture::new();
+        let paths = [fixture.0.path().join("a.db"), fixture.0.path().join("b.db")];
+        let first = Connection::open(&paths[0]).unwrap();
+        let second = Connection::open(&paths[1]).unwrap();
+        first.execute_batch(V1).unwrap();
+        second
+            .execute_batch("CREATE TABLE unsupported (id TEXT);")
+            .unwrap();
+        let ids = BTreeSet::from(["history".into()]);
+        assert!(delete_sessions(&paths, &ids, &BTreeSet::new()).is_err());
+        assert!(table_has_session(&first, "session", "history").unwrap());
+        second.execute_batch("DROP TABLE unsupported;").unwrap();
+        second.execute_batch(V1).unwrap();
+        second.execute_batch("CREATE TRIGGER fail_delete BEFORE DELETE ON session BEGIN SELECT RAISE(ABORT, 'cannot purge'); END;").unwrap();
+        let error = delete_sessions(&paths, &ids, &BTreeSet::new())
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("retry deleting"));
+        assert!(!table_has_session(&first, "session", "history").unwrap());
+        assert!(table_has_session(&second, "session", "history").unwrap());
+        second.execute_batch("DROP TRIGGER fail_delete;").unwrap();
+        delete_sessions(&paths, &ids, &BTreeSet::new()).unwrap();
+        assert!(!table_has_session(&second, "session", "history").unwrap());
     }
 
     #[test]

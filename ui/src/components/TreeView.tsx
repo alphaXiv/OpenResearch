@@ -38,8 +38,7 @@ import {
   ZoomOut,
   Workflow,
 } from "lucide-react";
-import { useQuery } from "@tanstack/react-query";
-import { getTrackioSettingsQuery } from "../queries/settings";
+import { useTrackioRuns } from "../queries/settings";
 import { createPortal } from "react-dom";
 import { BackendBadge, GitHubMark } from "./BackendLogos";
 import { memo, useCallback, useEffect, useMemo, useRef, useState, type Dispatch, type ReactNode, type SetStateAction } from "react";
@@ -101,6 +100,7 @@ type ExpNodeData = {
     intent: TabOpenIntent,
   ) => void;
   onArchive: (id: string, direction: "ancestors" | "descendants" | "only", archived: boolean) => void;
+  onDelete: (id: string) => void;
   actions: ArchiveActions;
   onCancel?: (runId: string) => Promise<void>;
   cancelling: boolean;
@@ -480,6 +480,7 @@ const ExpNode = memo(function ExpNode({ data }: NodeProps<ExpFlowNode>) {
     onOpenView,
     onOpenCode,
     onArchive,
+    onDelete,
     actions,
     onCancel,
     cancelling,
@@ -503,8 +504,8 @@ const ExpNode = memo(function ExpNode({ data }: NodeProps<ExpFlowNode>) {
   const live = status === "running" || status === "starting" || status === "cancelling";
   const kind = isBaseline ? m.tree_baseline() : live ? m.tree_running() : m.tree_experiment();
   const squares = runs.slice(-MAX_SQUARES);
-  const trackio = useQuery(getTrackioSettingsQuery()).data;
-  const trackioUrl = latestRun ? trackioRunUrl(trackio, latestRun) : null;
+  const trackio = useTrackioRuns(exp.projectId, live).data;
+  const hasTrackio = latestRun !== null && trackioRunUrl(trackio, latestRun.id) !== null;
 
   const rootRef = useRef<HTMLDivElement>(null);
   const hover = useHoverIntent(rootRef, data);
@@ -520,7 +521,7 @@ const ExpNode = memo(function ExpNode({ data }: NodeProps<ExpFlowNode>) {
             : live
               ? "border-accent-teal shadow-tree-live live"
               : "border-border shadow-tree hover:shadow-tree-hover"
-      } ${isDimmed ? "opacity-25 hover:opacity-100" : ""} ${exp.archived ? "opacity-80" : ""} [&_.node-overview-link]:block [&_.node-overview-link]:w-full [&_.node-overview-link]:p-0 [&_.node-overview-link]:border-0 [&_.node-overview-link]:bg-transparent [&_.node-overview-link]:text-inherit [&_.node-overview-link]:[font:inherit] [&_.node-overview-link]:text-start [&_.node-overview-link]:cursor-pointer [&_.node-overview-link:hover_.node-slug]:underline [&_.node-overview-link:hover_.node-slug]:underline-offset-[3px] [&_.node-overview-link:focus-visible]:outline-2 [&_.node-overview-link:focus-visible]:outline-solid [&_.node-overview-link:focus-visible]:outline-accent [&_.node-overview-link:focus-visible]:outline-offset-4 [&_.node-overview-link:focus-visible]:rounded-xs [&_.node-eyebrow]:flex [&_.node-eyebrow]:items-center [&_.node-eyebrow]:justify-between [&_.node-eyebrow]:gap-2 [&_.node-eyebrow]:mb-1.5 [&_.node-eyebrow]:text-xs [&_.node-eyebrow]:font-medium [&_.node-eyebrow]:text-muted [&_.node-head]:flex [&_.node-head]:items-center [&_.node-head]:gap-[7px] [&_.node-head]:min-w-0 [&_.node-status]:w-2 [&_.node-status]:h-2 [&_.node-status]:rounded-full [&_.node-status]:shrink-0 [&_.node-slug]:text-sm [&_.node-slug]:font-semibold [&_.node-slug]:text-text [&_.node-slug]:flex-1 [&_.node-slug]:min-w-0 [&_.node-slug]:overflow-hidden [&_.node-slug]:text-ellipsis [&_.node-slug]:whitespace-nowrap [&_.node-title]:mt-1 [&_.node-title]:text-text [&_.node-title]:text-sm [&_.node-title]:line-clamp-2 [&_.node-meta]:mt-2 [&_.node-meta]:flex [&_.node-meta]:items-center [&_.node-meta]:gap-2 [&_.node-meta]:text-xs [&_.node-meta]:text-muted [&_.node-actions]:mt-2 [&_.node-actions]:pt-1.5 [&_.node-actions]:border-t [&_.node-actions]:border-t-border-variant [&_.node-actions]:flex [&_.node-actions]:items-center [&_.node-actions]:gap-[3px] [&_.node-action]:inline-flex [&_.node-action]:items-center [&_.node-action]:gap-[5px] [&_.node-action]:py-[3px] [&_.node-action]:px-1.5 [&_.node-action]:text-xs [&_.node-action]:font-medium [&_.node-action]:text-text [&_.node-action]:rounded-sm [&_.node-action]:no-underline [&_.node-action:hover]:text-text [&_.node-action:hover]:bg-surface [&_.node-action-ext]:ms-auto [&_.node-action-ext]:py-[3px] [&_.node-action-ext]:px-[5px]`}
+      } ${isDimmed ? "opacity-25 hover:opacity-100" : ""} ${exp.archived ? "opacity-80" : ""} [&_.node-overview-link]:block [&_.node-overview-link]:w-full [&_.node-overview-link]:p-0 [&_.node-overview-link]:border-0 [&_.node-overview-link]:bg-transparent [&_.node-overview-link]:text-inherit [&_.node-overview-link]:[font:inherit] [&_.node-overview-link]:text-start [&_.node-overview-link]:cursor-pointer [&_.node-overview-link:hover_.node-slug]:underline [&_.node-overview-link:hover_.node-slug]:underline-offset-[3px] [&_.node-overview-link:focus-visible]:outline-2 [&_.node-overview-link:focus-visible]:outline-solid [&_.node-overview-link:focus-visible]:outline-focus [&_.node-overview-link:focus-visible]:outline-offset-4 [&_.node-overview-link:focus-visible]:rounded-xs [&_.node-eyebrow]:flex [&_.node-eyebrow]:items-center [&_.node-eyebrow]:justify-between [&_.node-eyebrow]:gap-2 [&_.node-eyebrow]:mb-1.5 [&_.node-eyebrow]:text-xs [&_.node-eyebrow]:font-medium [&_.node-eyebrow]:text-muted [&_.node-head]:flex [&_.node-head]:items-center [&_.node-head]:gap-[7px] [&_.node-head]:min-w-0 [&_.node-status]:w-2 [&_.node-status]:h-2 [&_.node-status]:rounded-full [&_.node-status]:shrink-0 [&_.node-slug]:text-sm [&_.node-slug]:font-semibold [&_.node-slug]:text-text [&_.node-slug]:flex-1 [&_.node-slug]:min-w-0 [&_.node-slug]:overflow-hidden [&_.node-slug]:text-ellipsis [&_.node-slug]:whitespace-nowrap [&_.node-title]:mt-1 [&_.node-title]:text-text [&_.node-title]:text-sm [&_.node-title]:line-clamp-2 [&_.node-meta]:mt-2 [&_.node-meta]:flex [&_.node-meta]:items-center [&_.node-meta]:gap-2 [&_.node-meta]:text-xs [&_.node-meta]:text-muted [&_.node-actions]:mt-2 [&_.node-actions]:pt-1.5 [&_.node-actions]:border-t [&_.node-actions]:border-t-border-variant [&_.node-actions]:flex [&_.node-actions]:items-center [&_.node-actions]:gap-[3px] [&_.node-action]:inline-flex [&_.node-action]:items-center [&_.node-action]:gap-[5px] [&_.node-action]:py-[3px] [&_.node-action]:px-1.5 [&_.node-action]:text-xs [&_.node-action]:font-medium [&_.node-action]:text-text [&_.node-action]:rounded-sm [&_.node-action]:no-underline [&_.node-action:hover]:text-text [&_.node-action:hover]:bg-surface [&_.node-action-ext]:ms-auto [&_.node-action-ext]:py-[3px] [&_.node-action-ext]:px-[5px]`}
       onClick={onSelect}
       onMouseEnter={hover.onMouseEnter}
       onMouseLeave={hover.onMouseLeave}
@@ -563,7 +564,7 @@ const ExpNode = memo(function ExpNode({ data }: NodeProps<ExpFlowNode>) {
         <div className="node-meta">
           <span>{m.tree_view_runs()}</span>
           {squares.length > 0 ? (
-            <span className="run-squares flex items-center gap-[3px]">
+            <span className="run-squares flex items-center gap-1">
               {squares.map((run) => (
                 <span
                   key={run.id}
@@ -582,7 +583,7 @@ const ExpNode = memo(function ExpNode({ data }: NodeProps<ExpFlowNode>) {
           {latestRun && <span>{timeAgo(latestRun.createdAt)}</span>}
         </div>
       </div>
-      {/* Direct view shortcuts — code always, logs once there's a run. */}
+      {/* Direct view shortcuts — code always, logs once there's a run, charts once it logs to Trackio. */}
       <div className="node-actions nodrag" onClick={(e) => e.stopPropagation()}>
         {runs.length > 0 && (
           <button
@@ -593,7 +594,7 @@ const ExpNode = memo(function ExpNode({ data }: NodeProps<ExpFlowNode>) {
               onOpenView(exp.id, "terminal", intent),
             )}
           >
-            <Terminal size={13} />
+            <Terminal size={14} />
             {m.tree_view_logs()}
           </button>
         )}
@@ -605,7 +606,7 @@ const ExpNode = memo(function ExpNode({ data }: NodeProps<ExpFlowNode>) {
             onOpenCode(exp.id, exp.branchName, "files", intent),
           )}
         >
-          <FolderTree size={13} />
+          <FolderTree size={14} />
           {m.tree_view_code()}
         </button>
         {liveRun && onCancel && (
@@ -633,20 +634,20 @@ const ExpNode = memo(function ExpNode({ data }: NodeProps<ExpFlowNode>) {
           rel="noopener noreferrer"
           onClick={(e) => e.stopPropagation()}
         >
-          <GitHubMark size={13} />
+          <GitHubMark size={14} />
         </a>}
-        {trackioUrl && <a
-          className="node-action"
-          title={m.a11y_open_in_trackio()}
-          aria-label={m.a11y_open_in_trackio()}
-          href={trackioUrl}
-          target="_blank"
-          rel="noopener noreferrer"
-          onClick={(e) => e.stopPropagation()}
+        {hasTrackio && <button
+          type="button"
+          className="node-action cursor-pointer"
+          title={m.a11y_trackio_charts()}
+          aria-label={m.a11y_trackio_charts()}
+          {...tabOpenGestureHandlers<HTMLButtonElement>((intent) =>
+            onOpenView(exp.id, "trackio", intent),
+          )}
         >
-          <ChartLine size={13} />
-        </a>}
-        <ArchiveMenu id={exp.id} name={exp.title || exp.slug} actions={actions} onArchive={onArchive} compact />
+          <ChartLine size={14} />
+        </button>}
+        <ArchiveMenu id={exp.id} name={exp.title || exp.slug} actions={actions} onArchive={onArchive} onDelete={onDelete} compact />
       </div>
       {/* A folded card reads as a stack: the hidden subtree sits behind it. */}
       {folded && (
@@ -723,12 +724,12 @@ const ArchivedNode = memo(function ArchivedNode({ data }: NodeProps<ArchivedFlow
       <button
         type="button"
         ref={triggerRef}
-        className="nodrag w-full h-full flex items-center justify-center gap-2 px-3 border border-border rounded-full bg-background text-text text-sm font-medium whitespace-nowrap transition-[background-color,border-color] duration-120 ease-standard hover:bg-surface hover:border-text cursor-pointer"
+        className="nodrag w-full h-full flex items-center justify-center gap-2 px-3 border border-border rounded-full bg-background text-text text-sm font-medium whitespace-nowrap transition-[background-color,border-color] duration-120 ease-standard hover:bg-surface hover:border-border-hover-strong cursor-pointer"
         aria-haspopup="menu"
         aria-expanded={menu.open}
         onClick={toggle}
       >
-        <Archive size={15} className="shrink-0 text-subtext" aria-hidden="true" />
+        <Archive size={16} className="shrink-0 text-subtext" aria-hidden="true" />
         <span>{m.tree_archived_count({ count: fmtNumber(count) })}</span>
       </button>
       <Handle type="source" position={Position.Bottom} />
@@ -751,7 +752,7 @@ const ElidedNode = memo(function ElidedNode({ data }: NodeProps<ElidedFlowNode>)
   const { count, onShowProjectScope } = data;
   return (
     <div
-      className="elided-node w-37 h-11 flex items-center gap-2 py-1.5 px-2.5 border border-dashed border-border rounded-md bg-hover-faint text-muted text-sm font-medium text-start transition-[border-color,color] duration-120 ease-standard cursor-grab active:cursor-grabbing [&:hover]:border-text [&:hover]:text-text [&_.elided-node-label]:flex [&_.elided-node-label]:flex-col [&_.elided-node-label]:leading-[1.3] [&_.elided-node-sub]:text-muted"
+      className="elided-node w-37 h-11 flex items-center gap-2 py-1.5 px-2.5 border border-dashed border-border rounded-md bg-hover-faint text-muted text-sm font-medium text-start transition-[border-color,color] duration-120 ease-standard cursor-grab active:cursor-grabbing [&:hover]:border-border-hover-strong [&:hover]:text-text [&_.elided-node-label]:flex [&_.elided-node-label]:flex-col [&_.elided-node-label]:leading-snug [&_.elided-node-sub]:text-muted"
       role="button"
       tabIndex={0}
       title={m.tree_view_switch_to_entire_project_to_see_all_experiments()}
@@ -1022,6 +1023,7 @@ export function TreeView({
   onOpenView,
   onOpenCode,
   onArchive,
+  onDelete,
   agentSessionId,
   onShowProjectScope,
   onRestoreRegion,
@@ -1048,6 +1050,7 @@ export function TreeView({
     intent: TabOpenIntent,
   ) => void;
   onArchive: (id: string, direction: "ancestors" | "descendants" | "only", archived: boolean) => void;
+  onDelete: (id: string) => void;
   /** Current task scope: show only this chat session's experiments, eliding the rest.
    * Null = Entire project scope (the whole forest). */
   agentSessionId: string | null;
@@ -1315,6 +1318,7 @@ export function TreeView({
             onOpenView,
             onOpenCode,
             onArchive,
+            onDelete,
             actions: archiveActions.get(node.exp.id)!,
             onCancel: handleCancel,
             cancelling,
@@ -1368,6 +1372,7 @@ export function TreeView({
     onOpenView,
     onOpenCode,
     onArchive,
+    onDelete,
     project.githubOwner,
     project.githubRepo,
     project.githubEnabled,

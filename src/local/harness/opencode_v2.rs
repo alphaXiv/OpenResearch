@@ -24,6 +24,49 @@ async fn post(endpoint: &AgentEndpoint, path: &str, body: &Value) -> Result<()> 
     Ok(())
 }
 
+async fn reply_permission(endpoint: &AgentEndpoint, path: &str, decision: &str) -> Result<()> {
+    let body = if endpoint.legacy_v2_api {
+        json!({"reply":decision})
+    } else {
+        json!({"decision":decision})
+    };
+    post(endpoint, path, &body).await
+}
+
+fn permission_card(request: &Value, id: &str) -> WirePrompt {
+    let mut input = request["metadata"]["input"]
+        .as_object()
+        .cloned()
+        .unwrap_or_default();
+    let resources = request["resources"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(Value::as_str)
+        .collect::<Vec<_>>()
+        .join("\n");
+    if !resources.is_empty()
+        && !["command", "cmd", "filePath", "file_path", "path"]
+            .iter()
+            .any(|key| input.get(*key).and_then(Value::as_str).is_some())
+    {
+        let key = if request["action"] == "shell" {
+            "command"
+        } else {
+            "path"
+        };
+        input.insert(key.into(), json!(resources));
+    }
+    WirePrompt {
+        kind: "permission".into(),
+        native_id: Some(id.into()),
+        tool: request["action"].as_str().map(str::to_owned),
+        tool_input: Some(Value::Object(input)),
+        header: request["message"].as_str().map(str::to_owned),
+        ..Default::default()
+    }
+}
+
 pub(super) async fn run_turn(
     ctx: &mut TurnCtx,
     store: NativeStore,
@@ -154,7 +197,7 @@ pub(super) async fn run_turn(
             let outcome = final_projection
                 .pointer("/data/info/outcome")
                 .and_then(Value::as_str);
-            if delivered && answered && outcome == Some("succeeded") {
+            if delivered && answered && matches!(outcome, Some("succeeded" | "interrupted")) {
                 ctx.persist_delivery(DeliveryState::Accepted)?;
                 ctx.mark_final_text_tail();
                 return Ok(());
@@ -203,7 +246,10 @@ async fn merge_projection(
                 .pointer("/time/completed")
                 .is_some_and(|value| !value.is_null())
         {
-            if let Some(error) = message.get("error").filter(|error| !error.is_null()) {
+            if let Some(error) = message
+                .get("error")
+                .filter(|error| !error.is_null() && !is_interrupted_step(error))
+            {
                 let message = error_text(error);
                 ctx.mark_native_retry_exhausted();
                 ctx.mark_terminal_failure("opencode_terminal", &message);
@@ -334,6 +380,10 @@ fn error_text(error: &Value) -> String {
         .unwrap_or_else(|| error.to_string())
 }
 
+fn is_interrupted_step(error: &Value) -> bool {
+    error["type"] == "aborted" && error["message"] == "Step interrupted"
+}
+
 fn wire_parts(message: &Value) -> Vec<WirePart> {
     projected_parts(message)
         .into_iter()
@@ -369,6 +419,14 @@ fn projected_parts(message: &Value) -> Vec<(WirePart, &Value)> {
                         .collect::<Vec<_>>()
                         .join("\n"));
                 }
+                if content["name"] == "question"
+                    && state["status"] == "error"
+                    && state["error"]["message"] == "The user dismissed this question"
+                {
+                    part["state"]["status"] = json!("completed");
+                    part["state"]["output"] = state["error"]["message"].clone();
+                    part["state"]["error"] = Value::Null;
+                }
             }
             to_wire_part(&part).map(|part| (part, content))
         })
@@ -390,27 +448,14 @@ async fn prompts(
             continue;
         }
         if opencode_auto_approve(ctx.permission_mode)
-            && post(
-                endpoint,
-                &format!("{path}/permission/{id}/reply"),
-                &json!({"reply":"always"}),
-            )
-            .await
-            .is_ok()
+            && reply_permission(endpoint, &format!("{path}/permission/{id}/reply"), "once")
+                .await
+                .is_ok()
         {
             surfaced.insert(id.to_owned());
             continue;
         }
-        surface_card(
-            ctx,
-            WirePrompt {
-                kind: "permission".into(),
-                native_id: Some(id.into()),
-                tool: request["action"].as_str().map(str::to_owned),
-                tool_input: Some(request["resources"].clone()),
-                ..Default::default()
-            },
-        );
+        surface_card(ctx, permission_card(request, id));
         surfaced.insert(id.to_owned());
     }
     let forms = get(endpoint, &format!("{path}/form")).await?;
@@ -545,16 +590,16 @@ pub(super) async fn reply(
         .ok_or_else(|| anyhow!("OpenCode prompt has no id"))?;
     let path = format!("/api/session/{session}");
     if prompt.kind == "permission" {
-        return post(
+        return reply_permission(
             endpoint,
             &format!("{path}/permission/{id}/reply"),
-            &json!({"reply":if answer.approve {"always"} else {"reject"}}),
+            if answer.approve { "once" } else { "reject" },
         )
         .await;
     }
     let (form_id, field_key): (String, String) = serde_json::from_str(id)?;
     let submitted = submitted_answers(&answer.answers, answer.note.as_ref());
-    if submitted.is_empty() {
+    if !answer.approve || submitted.is_empty() {
         if !endpoint.legacy_v2_api {
             endpoint
                 .client
@@ -836,18 +881,30 @@ pub(super) async fn generate(
     prompt: String,
     timeout: Duration,
 ) -> Result<String> {
+    let model = selected_generation_model(model.as_deref())?.to_owned();
+    let (provider, id) = model
+        .split_once('/')
+        .filter(|(provider, id)| !provider.trim().is_empty() && !id.trim().is_empty())
+        .ok_or_else(|| anyhow!("OpenCode V2 needs a model in provider/model form."))?;
+    let body = json!({"prompt":prompt,"model":{"providerID":provider,"id":id}});
     tokio::spawn(async move {
         let db = native_store::prepare_opencode(NativeStore::Isolated)?;
         let lease = crate::local::opencode::prepare_database(&binary, &db).await?;
         let mut cmd = tokio::process::Command::new(&binary.path);
-        crate::local::local_models::prepare_env(&mut cmd, model.as_deref())?;
+        crate::local::local_models::prepare_generation_env(
+            &mut cmd,
+            Some(&model),
+            binary.protocol,
+        )?;
         cmd.env("OPENCODE_DB", lease.path())
             .env("OPENCODE_CONFIG_PROJECT_DISABLE", "1")
             .current_dir(std::env::temp_dir());
         let (mut child, endpoint) = crate::local::opencode::start_server(&binary, cmd).await?;
-        let mut body = json!({"prompt":prompt});
-        if let Some((provider, model)) = model.as_deref().and_then(|model| model.split_once('/')) {
-            body["model"] = json!({"providerID":provider,"id":model});
+        if let Err(error) =
+            crate::local::opencode::verify_generation_models(&endpoint, &model).await
+        {
+            let _ = child.kill().await;
+            return Err(error);
         }
         let result = tokio::time::timeout(timeout, async {
             let response = endpoint
@@ -890,8 +947,147 @@ pub(super) async fn generate(
 mod tests {
     use super::*;
 
+    #[test]
+    fn cancelled_question_step_is_not_a_provider_failure() {
+        assert!(is_interrupted_step(&json!({
+            "type":"aborted", "message":"Step interrupted"
+        })));
+        assert!(!is_interrupted_step(&json!({
+            "type":"provider.error", "message":"Step interrupted"
+        })));
+        assert!(!is_interrupted_step(&json!({
+            "type":"aborted", "message":"Unexpected execution error"
+        })));
+    }
+
+    #[test]
+    fn v2_permission_card_shows_command() {
+        let request = json!({
+            "action":"shell",
+            "resources":["printf test-marker"],
+            "metadata":null
+        });
+        let card = permission_card(&request, "permission");
+        assert_eq!(card.tool.as_deref(), Some("shell"));
+        assert_eq!(card.tool_input.unwrap()["command"], "printf test-marker");
+
+        let request = json!({
+            "action":"shell",
+            "resources":["printf *"],
+            "metadata":{"input":{"command":"printf exact-command"}}
+        });
+        assert_eq!(
+            permission_card(&request, "permission").tool_input.unwrap()["command"],
+            "printf exact-command"
+        );
+    }
+
     #[tokio::test]
-    async fn discovery_waits_for_a_cold_v2_catalog() {
+    async fn v2_permission_replies_match_native_schema_and_scope() {
+        use axum::{http::StatusCode, routing, Json, Router};
+        use std::sync::{Arc, Mutex};
+
+        for legacy in [false, true] {
+            let bodies = Arc::new(Mutex::new(Vec::new()));
+            let captured = bodies.clone();
+            let app = Router::new().route(
+                "/api/session/session/permission/permission/reply",
+                routing::post(move |Json(body): Json<Value>| {
+                    captured.lock().unwrap().push(body);
+                    async { StatusCode::NO_CONTENT }
+                }),
+            );
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let endpoint = AgentEndpoint {
+                base_url: format!("http://{}", listener.local_addr().unwrap()),
+                client: crate::net::loopback_client().build().unwrap(),
+                protocol: crate::local::opencode::Protocol::V2,
+                legacy_v2_api: legacy,
+            };
+            let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+            let ctx = ResumeCtx {
+                host: TurnCtx::test_stub().host,
+                session_id: "session".into(),
+                native_session_id: Some("session".into()),
+            };
+            let prompt = WirePrompt {
+                kind: "permission".into(),
+                native_id: Some("permission".into()),
+                ..Default::default()
+            };
+            for approve in [true, false] {
+                let answer = PromptAnswer {
+                    session_id: "session".into(),
+                    prompt_id: "permission".into(),
+                    approve,
+                    resume_mode: None,
+                    answers: Vec::new(),
+                    note: None,
+                    annotations: Vec::new(),
+                };
+                reply(&ctx, &endpoint, &prompt, &answer).await.unwrap();
+            }
+            server.abort();
+            let key = if legacy { "reply" } else { "decision" };
+            assert_eq!(
+                *bodies.lock().unwrap(),
+                vec![json!({key:"once"}), json!({key:"reject"})]
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn skipped_form_cancels_despite_display_note() {
+        use axum::{http::StatusCode, routing, Router};
+
+        for legacy in [false, true] {
+            let form_path = "/api/session/session/form/form";
+            let app = if legacy {
+                Router::new().route(
+                    &format!("{form_path}/cancel"),
+                    routing::post(|| async { StatusCode::NO_CONTENT }),
+                )
+            } else {
+                Router::new().route(
+                    form_path,
+                    routing::delete(|| async { StatusCode::NO_CONTENT }),
+                )
+            };
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let endpoint = AgentEndpoint {
+                base_url: format!("http://{}", listener.local_addr().unwrap()),
+                client: crate::net::loopback_client().build().unwrap(),
+                protocol: crate::local::opencode::Protocol::V2,
+                legacy_v2_api: legacy,
+            };
+            let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+            let ctx = ResumeCtx {
+                host: TurnCtx::test_stub().host,
+                session_id: "session".into(),
+                native_session_id: Some("session".into()),
+            };
+            let prompt = WirePrompt {
+                kind: "question".into(),
+                native_id: Some(serde_json::to_string(&("form", "count")).unwrap()),
+                ..Default::default()
+            };
+            let answer = PromptAnswer {
+                session_id: "session".into(),
+                prompt_id: "question".into(),
+                approve: false,
+                resume_mode: None,
+                answers: Vec::new(),
+                note: Some("Skipped".into()),
+                annotations: Vec::new(),
+            };
+            let result = reply(&ctx, &endpoint, &prompt, &answer).await;
+            server.abort();
+            result.unwrap();
+        }
+    }
+
+    #[tokio::test]
+    async fn discovery_waits_for_a_cold_v2_catalog_without_generation() {
         use axum::{routing::get, Json, Router};
         use std::sync::atomic::{AtomicUsize, Ordering};
         use std::sync::Arc;
@@ -915,7 +1111,14 @@ mod tests {
             .route(
                 "/api/integration",
                 get(|| async { Json(json!({"data":[]})) }),
-            );
+            )
+            .layer(axum::middleware::from_fn(
+                |request: axum::extract::Request, next: axum::middleware::Next| async move {
+                    assert_eq!(request.method(), reqwest::Method::GET);
+                    assert!(["/api/model", "/api/integration"].contains(&request.uri().path()));
+                    next.run(request).await
+                },
+            ));
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let endpoint = AgentEndpoint {
             base_url: format!("http://{}", listener.local_addr().unwrap()),
@@ -1049,6 +1252,30 @@ mod tests {
         );
         assert!(field_answer(&json!({"type":"number"}), &["NaN".into()]).is_err());
     }
+    #[test]
+    fn dismissed_question_is_a_completed_interaction() {
+        for (tool, message, status) in [
+            ("question", "The user dismissed this question", "completed"),
+            ("question", "Unexpected question failure", "error"),
+            ("shell", "The user dismissed this question", "error"),
+        ] {
+            let parts = wire_parts(&json!({
+                "id":"message",
+                "content":[{"type":"tool","name":tool,"state":{
+                    "status":"error","error":{"message":message}
+                }}]
+            }));
+            let state = parts[0].state.as_ref().unwrap();
+            assert_eq!(state.status, status);
+            if status == "completed" {
+                assert_eq!(state.output.as_deref(), Some(message));
+                assert!(state.error.is_none());
+            } else {
+                assert_eq!(state.error.as_deref(), Some(message));
+            }
+        }
+    }
+
     #[test]
     fn projected_parts_and_form_values_preserve_native_shapes() {
         let parts = wire_parts(

@@ -22,6 +22,7 @@ on:
 
 # Write access only in `publish`: the build jobs run third-party packaging tools.
 permissions:
+  actions: read # resolve the upstream release source artifact
   contents: read
 
 concurrency:
@@ -35,29 +36,39 @@ jobs:
     outputs:
       ok: ${{ steps.gate.outputs.ok }}
       tag: ${{ steps.gate.outputs.tag }}
+      source-sha: ${{ steps.gate.outputs.sha }}
     env:
       GH_TOKEN: ${{ github.token }}
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
-          ref: ${{ github.event.workflow_run.head_sha || inputs.tag }}
+          fetch-depth: 0
       - id: gate
         env:
           INPUT_TAG: ${{ inputs.tag }}
+          RELEASE_RUN_ID: ${{ github.event.workflow_run.id }}
         run: |
           set -euo pipefail
           if [ -n "$INPUT_TAG" ]; then
             tag="$INPUT_TAG"
           else
-            version="$(grep -m1 '^version = ' Cargo.toml | sed -E 's/version = "(.*)"/\1/')"
-            tag="v${version}"
+            gh run download "$RELEASE_RUN_ID" --repo "$GITHUB_REPOSITORY" --name release-source --dir "$RUNNER_TEMP/release-source"
+            tag=$(jq -er .tag "$RUNNER_TEMP/release-source/release-source.json")
+            expected_sha=$(jq -er .sha "$RUNNER_TEMP/release-source/release-source.json")
           fi
           if ! gh release view "$tag" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
-            echo "::notice::No release $tag found (dry-run dispatch?) — nothing to attach."
+            echo "::notice::No release $tag found — nothing to attach."
             echo "ok=false" >> "$GITHUB_OUTPUT"; exit 0
           fi
+          git fetch origin "refs/tags/$tag:refs/tags/$tag"
+          sha=$(git rev-parse "refs/tags/$tag^{commit}")
+          git merge-base --is-ancestor "$sha" origin/main
+          if [ -n "${expected_sha:-}" ]; then test "$sha" = "$expected_sha"; fi
+          version=$(git show "$sha:Cargo.toml" | grep -m1 '^version = ' | sed -E 's/version = "(.*)"/\1/')
+          test "$tag" = "v$version"
           echo "ok=true" >> "$GITHUB_OUTPUT"
           echo "tag=$tag" >> "$GITHUB_OUTPUT"
+          echo "sha=$sha" >> "$GITHUB_OUTPUT"
 
   appimage:
     needs: check
@@ -74,7 +85,7 @@ jobs:
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
-          ref: ${{ github.event.workflow_run.head_sha || inputs.tag }}
+          ref: ${{ needs.check.outputs.source-sha }}
 
       - name: Install WebKitGTK and packaging tools
         run: |

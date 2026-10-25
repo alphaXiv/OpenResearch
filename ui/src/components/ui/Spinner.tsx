@@ -4,7 +4,7 @@ import { cn } from "./cn";
 export function Spinner({ className, ...props }: HTMLAttributes<HTMLSpanElement>) {
   return (
     <span
-      className={cn("spinner h-[13px] w-[13px] shrink-0 animate-[spin_0.8s_linear_infinite] rounded-full border-2 border-border border-t-primary", className)}
+      className={cn("spinner size-3.5 shrink-0 animate-[spin_0.8s_linear_infinite] rounded-full border-2 border-border border-t-subtext", className)}
       {...props}
     />
   );

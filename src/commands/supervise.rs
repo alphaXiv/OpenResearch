@@ -35,6 +35,10 @@ use colab_resume::resume_colab;
 use gcp_run::run_gcp;
 use memory_guard::MemoryGuard;
 
+fn should_report_monitoring_error(already_reported: bool, elapsed: Option<Duration>) -> bool {
+    already_reported || elapsed.is_some_and(|elapsed| elapsed >= MONITORING_GRACE)
+}
+
 fn open_supervisor_lock(path: &std::path::Path) -> Result<fd_lock::RwLock<std::fs::File>> {
     let file = std::fs::OpenOptions::new()
         .create(true)
@@ -51,6 +55,10 @@ fn supervisor_lock_path(run_id: &str) -> std::path::PathBuf {
 /// Whether a live `orx supervise` holds `run_id`'s lock.
 pub(crate) fn supervisor_running(run_id: &str) -> bool {
     lock_held(&supervisor_lock_path(run_id))
+}
+
+pub(crate) fn uses_shared_ssh(run_id: &str) -> bool {
+    lock_held(&log_path(run_id).with_extension("supervisor.shared-ssh.lock"))
 }
 
 fn lock_held(path: &std::path::Path) -> bool {
@@ -84,6 +92,7 @@ async fn log_pass<T>(
 struct RunLog {
     file: std::fs::File,
     replaying: bool,
+    write_failed: bool,
 }
 
 impl RunLog {
@@ -96,14 +105,15 @@ impl RunLog {
         Ok(Self {
             file,
             replaying: false,
+            write_failed: false,
         })
     }
 
     fn line(&mut self, line: &str) {
         if !std::mem::replace(&mut self.replaying, true) {
-            let _ = self.file.set_len(0);
+            self.write_failed |= self.file.set_len(0).is_err();
         }
-        let _ = writeln!(self.file, "{line}");
+        self.write_failed |= writeln!(self.file, "{line}").is_err();
     }
 }
 
@@ -117,6 +127,9 @@ pub async fn run(args: crate::SuperviseArgs) -> Result<()> {
         Err(err) if err.kind() == std::io::ErrorKind::WouldBlock => return Ok(()),
         Err(err) => return Err(err.into()),
     };
+    let mut protocol_lock =
+        open_supervisor_lock(&log_path(&run_id).with_extension("supervisor.shared-ssh.lock"))?;
+    let _protocol_guard = protocol_lock.try_write()?;
     let stored = store
         .get_run(&run_id)?
         .ok_or_else(|| anyhow!("Run {} not found in the local store.", run_id))?;
@@ -271,6 +284,13 @@ fn should_report_cancelled(store: &Store, run_id: &str, cancel_sent: bool) -> bo
 }
 
 fn run_status_for_stage(store: &Store, run_id: &str, cancel_sent: bool, stage: &str) -> RunStatus {
+    if stage == "LOST" {
+        return if cancel_sent {
+            RunStatus::Cancelled
+        } else {
+            RunStatus::Lost
+        };
+    }
     let status = stage_to_run_status(stage);
     if status != RunStatus::Done
         && is_terminal_stage(stage)
@@ -656,7 +676,7 @@ async fn run_ssh(
 ) -> Result<()> {
     let (host, dir) = descriptor.ssh_ref()?;
     eprintln!("supervise {run_id}: watching ssh job {host}:{dir}");
-    let target = ssh::SshTarget::alias(host);
+    let target = ssh::SshTarget::alias(host).for_run(&run_id);
     let dir = dir.to_string();
     watch_ssh_job(
         &store,
@@ -705,7 +725,15 @@ async fn watch_ssh_job(
 
     loop {
         if !cancel_sent && local_cancel_requested(store, run_id) {
-            cancel_ssh(&target, &dir, container.as_ref(), run_id, &mut cancel_sent).await;
+            cancel_ssh(
+                &target,
+                &dir,
+                container.as_ref(),
+                descriptor.rental_lease.is_some(),
+                run_id,
+                &mut cancel_sent,
+            )
+            .await;
         }
         let observed = ssh::inspect_job(&target, &dir, container.as_ref()).await;
         let polling_error = observed
@@ -738,8 +766,10 @@ async fn watch_ssh_job(
             .as_ref()
             .map(|_| failing_since.unwrap_or_else(std::time::Instant::now));
         let reported = error.clone().filter(|_| {
-            descriptor.monitoring_error.is_some()
-                || failing_since.is_some_and(|since| since.elapsed() >= MONITORING_GRACE)
+            should_report_monitoring_error(
+                descriptor.monitoring_error.is_some(),
+                failing_since.map(|since| since.elapsed()),
+            )
         });
         if reported != descriptor.monitoring_error
             || cancel_sent != descriptor.cancellation_accepted
@@ -756,7 +786,12 @@ async fn watch_ssh_job(
             Ok(job) => job,
             Err(_) => match sandbox {
                 Some((creds, id)) if openresearch::box_deleted(creds, id).await => ssh::JobState {
-                    stage: "ERROR".into(),
+                    stage: if descriptor.rental_lease.is_some() {
+                        "LOST"
+                    } else {
+                        "ERROR"
+                    }
+                    .into(),
                     message: Some(format!("box {id} was deleted while the run was active")),
                 },
                 _ => {
@@ -776,26 +811,73 @@ async fn watch_ssh_job(
         } else {
             missing_polls = 0;
         }
+        let mut job = job;
+        let mut exit_code = None;
+        if descriptor.rental_lease.is_some() && is_terminal_stage(&job.stage) {
+            exit_code = ssh::ssh_run(
+                &target,
+                &format!("cat {}/exit_code", ssh::shell_path(&dir)),
+                None,
+            )
+            .await
+            .ok()
+            .and_then(|value| value.trim().parse::<i64>().ok());
+            if let Some(code) = exit_code {
+                job.stage = if code == 0 { "COMPLETED" } else { "ERROR" }.into();
+                job.message = (code != 0).then(|| format!("exited with code {code}"));
+            } else if let Some((creds, id)) = sandbox {
+                if openresearch::box_deleted(creds, id).await {
+                    job.stage = "LOST".into();
+                } else {
+                    tokio::time::sleep(POLL_INTERVAL).await;
+                    continue;
+                }
+            }
+        }
         let stage = job.stage.as_str();
         let status = run_status_for_stage(store, run_id, cancel_sent, stage);
 
-        if is_terminal_stage(stage) {
+        if is_terminal_stage(stage) || stage == "LOST" {
             let _ = done_tx.send(true);
-            if tokio::time::timeout(Duration::from_secs(20), &mut log_task)
-                .await
-                .is_err()
-            {
+            let collected = matches!(
+                tokio::time::timeout(Duration::from_secs(20), &mut log_task).await,
+                Ok(Ok(true))
+            );
+            if !collected {
                 log_task.abort();
             }
-            let applied = store.update_status(run_id, status, Some(now_ms()), None)?;
-            if applied && status == RunStatus::Failed {
+            let applied = store.update_status(run_id, status, Some(now_ms()), exit_code)?;
+            if applied && matches!(status, RunStatus::Failed | RunStatus::Lost) {
                 if let Some(msg) = &job.message {
-                    if let Err(err) =
-                        store.set_result_markdown(run_id, &format!("Job failed: {msg}"))
-                    {
+                    if let Err(err) = store.set_result_markdown(
+                        run_id,
+                        &format!(
+                            "{}: {msg}",
+                            if status == RunStatus::Lost {
+                                "Outcome unavailable"
+                            } else {
+                                "Job failed"
+                            }
+                        ),
+                    ) {
                         eprintln!("supervise {run_id}: could not record failure reason: {err}");
                     }
                 }
+            }
+            if descriptor.rental_lease.is_some()
+                && stage != "LOST"
+                && collected
+                && exit_code.is_some()
+            {
+                let _ = ssh::ssh_run(
+                    &target,
+                    &format!("touch {}/final_collected", ssh::shell_path(&dir)),
+                    None,
+                )
+                .await;
+            }
+            if collected {
+                queue_remote_cleanup(store, run_id);
             }
             eprintln!("supervise {run_id}: finished ({status})");
             return Ok(status);
@@ -807,8 +889,9 @@ async fn watch_ssh_job(
                 job.message.as_deref().unwrap_or("Container running.")
             );
             let command = format!(
-                "printf '%s\\n' {} >> \"$HOME/{dir}/log\"",
-                ssh::sh_quote(&message)
+                "printf '%s\\n' {} >> {}/log",
+                ssh::sh_quote(&message),
+                ssh::shell_path(&dir)
             );
             match ssh::ssh_run(&target, &command, None).await {
                 Ok(_) => last_message = job.message,
@@ -823,10 +906,26 @@ async fn watch_ssh_job(
             eprintln!("supervise {run_id}: {last_status} -> {status} (stage {stage})");
             last_status = status;
             if cancel_requested && !cancel_sent {
-                cancel_ssh(&target, &dir, container.as_ref(), run_id, &mut cancel_sent).await;
+                cancel_ssh(
+                    &target,
+                    &dir,
+                    container.as_ref(),
+                    descriptor.rental_lease.is_some(),
+                    run_id,
+                    &mut cancel_sent,
+                )
+                .await;
             }
         } else if !cancel_sent && local_cancel_requested(store, run_id) {
-            cancel_ssh(&target, &dir, container.as_ref(), run_id, &mut cancel_sent).await;
+            cancel_ssh(
+                &target,
+                &dir,
+                container.as_ref(),
+                descriptor.rental_lease.is_some(),
+                run_id,
+                &mut cancel_sent,
+            )
+            .await;
         }
 
         tokio::time::sleep(POLL_INTERVAL).await;
@@ -842,45 +941,42 @@ async fn tail_logs_ssh(
     run_id: String,
     done: tokio::sync::watch::Receiver<bool>,
     errors: Option<tokio::sync::watch::Sender<Option<String>>>,
-) {
-    let mut log = match RunLog::open(&path) {
-        Ok(log) => log,
-        Err(err) => {
-            if let Some(errors) = &errors {
-                errors.send_replace(Some(format!("could not open local run log: {err}")));
-            }
-            eprintln!(
-                "supervise {run_id}: could not open {}: {err}",
-                path.display()
-            );
-            return;
-        }
-    };
-    let mut seen = 0u64;
+) -> bool {
+    let _ = path;
+    let target = target.for_run(&run_id);
     let mut last_error = None;
     loop {
         let draining = *done.borrow();
-        let mut sink = |line: &str| log.line(line);
-        match ssh::stream_logs(&target, &dir, seen, LOG_IDLE, draining, &mut sink).await {
-            Ok(s) => {
-                seen = s;
+        let result = ssh::service::request(
+            &target,
+            serde_json::json!({
+                "op":"collect", "run":run_id, "dir":dir,
+            }),
+        )
+        .await;
+        match result {
+            Ok(value) => {
                 last_error = None;
-            }
-            // Retries every 2s through an outage; log each distinct failure once.
-            Err(err) => {
-                let err = err.to_string();
-                if last_error.as_ref() != Some(&err) {
-                    eprintln!("supervise {run_id}: log stream error (will retry): {err}");
-                    last_error = Some(err);
+                if let Some(errors) = &errors {
+                    errors.send_replace(None);
                 }
+                if value["eof"] != true {
+                    continue;
+                }
+                if draining {
+                    return true;
+                }
+            }
+            Err(error) => {
+                let error = error.to_string();
+                if last_error.as_ref() != Some(&error) {
+                    eprintln!("supervise {run_id}: log collection unavailable: {error}");
+                }
+                last_error = Some(error);
             }
         }
         if let Some(errors) = &errors {
             errors.send_replace(last_error.clone());
-        }
-        let _ = log.file.flush();
-        if draining && last_error.is_none() {
-            return;
         }
         tokio::time::sleep(Duration::from_secs(2)).await;
     }
@@ -890,11 +986,17 @@ async fn cancel_ssh(
     target: &ssh::SshTarget,
     dir: &str,
     container: Option<&ssh::ContainerRun>,
+    leased: bool,
     run_id: &str,
     cancel_sent: &mut bool,
 ) {
     eprintln!("supervise {run_id}: cancel requested — killing remote process group");
-    match ssh::cancel_job(target, dir, container).await {
+    let result = if leased {
+        crate::jobs::rental::cancel(target, dir).await
+    } else {
+        ssh::cancel_job(target, dir, container).await
+    };
+    match result {
         Ok(()) => *cancel_sent = true,
         Err(err) => eprintln!("supervise {run_id}: ssh cancel failed (will retry): {err}"),
     }
@@ -937,6 +1039,10 @@ async fn run_openresearch(
         }
     };
 
+    let mut bootstrap_heartbeat = descriptor
+        .rental_lease
+        .as_ref()
+        .map(crate::jobs::rental::Rental::heartbeat);
     let dir = openresearch::run_dir(&run_id);
 
     // Provisioning: wait for the box unless a restarted supervisor already
@@ -989,13 +1095,42 @@ async fn run_openresearch(
         }
     };
 
+    let target = target.for_run(&run_id);
+
     // Launch, unless a previous supervisor already did (restart mid-run just
     // reattaches to the watch loop). An unreachable box reads as fresh here;
     // the launch retries below absorb that.
-    let already_launched = openresearch::launched(&target, &run_id)
-        .await
-        .unwrap_or(false);
+    let already_launched = loop {
+        match openresearch::launched(&target, &run_id).await {
+            Ok(launched) => break launched,
+            Err(_) if descriptor.rental_lease.is_some() => {
+                drop(bootstrap_heartbeat.take());
+                if local_cancel_requested(&store, &run_id) {
+                    teardown_box(&store, &lifecycle, &sandbox_id, &run_id).await;
+                    store.update_status(&run_id, RunStatus::Cancelled, Some(now_ms()), None)?;
+                    return Ok(());
+                }
+                if openresearch::box_deleted(&lifecycle, &sandbox_id).await {
+                    if store.update_status(&run_id, RunStatus::Lost, Some(now_ms()), None)? {
+                        store.set_result_markdown(
+                            &run_id,
+                            "Outcome unavailable: the rental was released before its final outcome was collected.",
+                        )?;
+                    }
+                    return Ok(());
+                }
+                tokio::time::sleep(POLL_INTERVAL).await;
+            }
+            Err(_) => break false,
+        }
+    };
     if !already_launched {
+        if bootstrap_heartbeat.is_none() {
+            bootstrap_heartbeat = descriptor
+                .rental_lease
+                .as_ref()
+                .map(crate::jobs::rental::Rental::heartbeat);
+        }
         let source = match crate::compute::SourceSnapshot::from_run(&stored, &descriptor) {
             Ok(source) => source,
             Err(error) => {
@@ -1030,21 +1165,27 @@ async fn run_openresearch(
                 return Ok(());
             }
             let staged =
-                ssh::stage_source(&target, &run_id, &source.path, &source.digest, None).await;
+                ssh::stage_source(&target, &run_id, &source.path, &source.digest, None, None).await;
             if let Err(err) = staged {
                 eprintln!("supervise {run_id}: source staging failed (will retry): {err}");
                 launch_err = Some(err);
                 continue;
             }
-            match ssh::run_job(&ssh::SshJobSpec {
-                container: None,
-                target: target.clone(),
-                run_id: run_id.clone(),
-                script: script.clone(),
-                env: env.clone(),
-            })
-            .await
-            {
+            let launch = if let Some(rental) = &descriptor.rental_lease {
+                crate::jobs::rental::launch(&target, &run_id, &script, &env, rental).await
+            } else {
+                ssh::run_job(&ssh::SshJobSpec {
+                    container: None,
+                    target: target.clone(),
+                    run_id: run_id.clone(),
+                    remote_root: None,
+                    script: script.clone(),
+                    env: env.clone(),
+                })
+                .await
+                .map(|_| ())
+            };
+            match launch {
                 Ok(_) => {
                     launch_err = None;
                     break;
@@ -1055,7 +1196,7 @@ async fn run_openresearch(
                 }
             }
         }
-        if let Some(err) = launch_err {
+        if let Some(err) = launch_err.filter(|_| descriptor.rental_lease.is_none()) {
             if store.update_status(&run_id, RunStatus::Failed, Some(now_ms()), None)? {
                 store.set_result_markdown(
                     &run_id,
@@ -1070,13 +1211,12 @@ async fn run_openresearch(
         }
     }
 
+    drop(bootstrap_heartbeat);
     eprintln!(
         "supervise {run_id}: watching openresearch box {sandbox_id} ({})",
         target.dest
     );
-    // The shared ssh loop owns status and logs; the box is deleted after
-    // it returns (logs are drained from the box BEFORE teardown), and even
-    // when it errors.
+    // Legacy rentals require local teardown; leased rentals release remotely.
     let watch = watch_ssh_job(
         &store,
         status_of(&stored)?,
@@ -1087,7 +1227,9 @@ async fn run_openresearch(
         Some((&lifecycle, &sandbox_id)),
     )
     .await;
-    teardown_box(&store, &lifecycle, &sandbox_id, &run_id).await;
+    if descriptor.rental_lease.is_none() {
+        teardown_box(&store, &lifecycle, &sandbox_id, &run_id).await;
+    }
     watch?;
     Ok(())
 }
@@ -1277,19 +1419,20 @@ async fn run_slurm(
     let (host, job_id) = descriptor.slurm_ref()?;
     let host = host.to_string();
     let job_id = job_id.to_string();
-    let dir = slurm::run_dir(&run_id);
+    let dir = slurm::run_dir(descriptor.remote_root.as_deref(), &run_id);
 
     eprintln!("supervise {run_id}: watching slurm job {job_id} on {host}");
 
     let path = log_path(&run_id);
     let (done_tx, done_rx) = tokio::sync::watch::channel(false);
+    let (log_error_tx, log_error_rx) = tokio::sync::watch::channel(None);
     let mut log_task = tokio::spawn(tail_logs_ssh(
-        ssh::SshTarget::alias(&host),
+        ssh::SshTarget::alias(&host).for_run(&run_id),
         dir.clone(),
         path.clone(),
         run_id.clone(),
         done_rx,
-        None,
+        Some(log_error_tx),
     ));
 
     let mut last_status = status_of(&stored)?;
@@ -1301,17 +1444,20 @@ async fn run_slurm(
         if !cancel_sent && local_cancel_requested(&store, &run_id) {
             cancel_slurm(&host, &job_id, &run_id, &mut cancel_sent).await;
         }
-        let mut observed = slurm::inspect_job(&host, &run_id, &job_id).await;
+        let mut observed = slurm::inspect_job(&host, &run_id, &dir, &job_id).await;
         if let Ok(job) = &mut observed {
             if cancel_sent && job.stage == "GONE" {
                 job.stage = "CANCELED".into();
             }
         }
-        let error = match &observed {
+        let status_error = match &observed {
             Err(err) => Some(format!("Monitoring unavailable: {err}. Reconnect with orx compute connect slurm --host {}. The job has not been declared stopped.", ssh::sh_quote(&host))),
             Ok(job) if matches!(job.stage.as_str(), "GONE" | "UNAVAILABLE") => Some("Monitoring unavailable: no exit status or scheduler record. Check cluster/accounting availability; the job has not been declared stopped.".into()),
             _ => None,
         };
+        let error = status_error
+            .clone()
+            .or_else(|| log_error_rx.borrow().clone());
         match (&error, &last_error) {
             (Some(message), last) if last.as_ref() != Some(message) => {
                 eprintln!("supervise {run_id}: {message}");
@@ -1325,8 +1471,10 @@ async fn run_slurm(
             .map(|_| failing_since.unwrap_or_else(std::time::Instant::now));
         // Brief outages recover on their own; a restarted supervisor keeps an existing report.
         let reported = error.clone().filter(|_| {
-            descriptor.monitoring_error.is_some()
-                || failing_since.is_some_and(|since| since.elapsed() >= MONITORING_GRACE)
+            should_report_monitoring_error(
+                descriptor.monitoring_error.is_some(),
+                failing_since.map(|since| since.elapsed()),
+            )
         });
         if reported != descriptor.monitoring_error
             || cancel_sent != descriptor.cancellation_accepted
@@ -1339,7 +1487,7 @@ async fn run_slurm(
                 Err(err) => eprintln!("supervise {run_id}: could not save monitoring state: {err}"),
             }
         }
-        if error.is_some() {
+        if status_error.is_some() {
             tokio::time::sleep(POLL_INTERVAL).await;
             continue;
         }
@@ -1349,10 +1497,11 @@ async fn run_slurm(
 
         if is_terminal_stage(stage) {
             let _ = done_tx.send(true);
-            if tokio::time::timeout(Duration::from_secs(20), &mut log_task)
-                .await
-                .is_err()
-            {
+            let collected = matches!(
+                tokio::time::timeout(Duration::from_secs(20), &mut log_task).await,
+                Ok(Ok(true))
+            );
+            if !collected {
                 log_task.abort();
             }
             let applied = store.update_status(&run_id, status, Some(now_ms()), None)?;
@@ -1364,6 +1513,9 @@ async fn run_slurm(
                         eprintln!("supervise {run_id}: could not record failure reason: {err}");
                     }
                 }
+            }
+            if collected {
+                queue_remote_cleanup(&store, &run_id);
             }
             eprintln!("supervise {run_id}: finished ({status})");
             return Ok(());
@@ -1378,9 +1530,17 @@ async fn run_slurm(
     }
 }
 
+/// Queues the remote run dir once logs are local; `orx up` removes it when it falls past its
+/// project's newest few, unless the target keeps results.
+fn queue_remote_cleanup(store: &Store, run_id: &str) {
+    if let Err(err) = store.queue_finished_remote_cleanup(run_id) {
+        eprintln!("supervise {run_id}: could not queue remote cleanup: {err}");
+    }
+}
+
 async fn cancel_slurm(host: &str, job_id: &str, run_id: &str, cancel_sent: &mut bool) {
     eprintln!("supervise {run_id}: cancel requested — scancel {job_id}");
-    match slurm::cancel_job(host, job_id).await {
+    match slurm::cancel_job(host, run_id, job_id).await {
         Ok(()) => *cancel_sent = true,
         Err(err) => eprintln!("supervise {run_id}: scancel failed (will retry): {err}"),
     }
@@ -1573,6 +1733,25 @@ mod tests {
     use crate::store::StoredRun;
 
     #[test]
+    fn monitoring_errors_wait_for_grace_but_preserve_existing_reports() {
+        assert!(!should_report_monitoring_error(false, None));
+        assert!(!should_report_monitoring_error(false, Some(Duration::ZERO)));
+        assert!(!should_report_monitoring_error(
+            false,
+            Some(MONITORING_GRACE - Duration::from_nanos(1)),
+        ));
+        assert!(should_report_monitoring_error(
+            false,
+            Some(MONITORING_GRACE)
+        ));
+        assert!(should_report_monitoring_error(
+            false,
+            Some(MONITORING_GRACE + Duration::from_nanos(1)),
+        ));
+        assert!(should_report_monitoring_error(true, Some(Duration::ZERO)));
+    }
+
+    #[test]
     fn recovered_cancel_intent_only_overrides_failed_terminal_state() {
         let dir = std::env::temp_dir().join(format!(
             "orx-supervise-cancel-test-{}",
@@ -1603,6 +1782,14 @@ mod tests {
             RunStatus::Failed
         );
         assert!(store.request_cancel(&run.id, "test").unwrap());
+        assert_eq!(
+            run_status_for_stage(&store, &run.id, false, "LOST"),
+            RunStatus::Lost
+        );
+        assert_eq!(
+            run_status_for_stage(&store, &run.id, true, "LOST"),
+            RunStatus::Cancelled
+        );
         assert_eq!(
             run_status_for_stage(&store, &run.id, false, "ERROR"),
             RunStatus::Cancelled

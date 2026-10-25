@@ -22,7 +22,7 @@ export function ProgressBar({
   return (
     <div className="progress mt-3 mx-0 mb-1" role="progressbar" aria-valuenow={pct} aria-valuemin={0} aria-valuemax={100}>
       <div className="progress-track h-2 rounded-full bg-panel border border-border overflow-hidden">
-        <div className="progress-fill h-full bg-accent rounded-full transition-[width] duration-200 ease-standard" style={{ width: `${pct}%`, background: fillColor }} />
+        <div className="progress-fill h-full bg-subtext rounded-full transition-[width] duration-200 ease-standard" style={{ width: `${pct}%`, background: fillColor }} />
       </div>
       {(label !== undefined || caption !== undefined) && (
         <div className="progress-caption flex justify-between mt-1.5 text-sm text-muted">

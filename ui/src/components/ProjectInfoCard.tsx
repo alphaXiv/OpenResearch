@@ -55,30 +55,27 @@ export function ProjectInfoCard({ project, chatCount, collapsed, busy, onToggleC
     menuRef.current?.hidePopover();
     setEditing(true);
   }
-  async function remove() {
+  function remove() {
     menuRef.current?.hidePopover();
-    if (deleting || !window.confirm(deleteExplanation(project))) return;
+    setEditing(false);
     setDeleting(true);
-    try { await deleteProject(project.id); onRemoved(); }
-    catch (err) { showAlert(err instanceof Error ? err.message : String(err), "error"); }
-    finally { setDeleting(false); }
   }
 
   return <>
     <button type="button" aria-expanded={!collapsed} onClick={onToggleCollapsed}
-      className="flex h-7 min-w-0 flex-1 cursor-pointer items-center gap-[7px] rounded-sm py-1 text-start text-sm font-normal text-text focus-visible:outline-2 focus-visible:outline-solid focus-visible:outline-text focus-visible:outline-offset-2">
-      {collapsed ? <Folder size={15} className="shrink-0" /> : <FolderOpen size={15} className="shrink-0" />}<span className="truncate">{project.name}</span>
-      {busy && <span aria-hidden className="size-[7px] shrink-0 rounded-full bg-primary animate-[or-pulse_1.2s_infinite]" />}
+      className="flex h-7 min-w-0 flex-1 cursor-pointer items-center gap-2 rounded-sm py-1 text-start text-sm font-normal text-text focus-visible:outline-2 focus-visible:outline-solid focus-visible:outline-focus focus-visible:outline-offset-2">
+      {collapsed ? <Folder size={16} className="shrink-0" /> : <FolderOpen size={16} className="shrink-0" />}<span className="truncate">{project.name}</span>
+      {busy && <span aria-hidden className="size-[7px] shrink-0 rounded-full bg-accent-teal animate-[or-pulse_1.2s_infinite]" />}
     </button>
     <IconButton ref={triggerRef} size="small" className={`text-text group-hover:opacity-100 group-focus-within:opacity-100 ${menuOpen ? "bg-surface opacity-100" : "opacity-0"}`}
       aria-label={m.sidebar_project_details({ name: project.name })} aria-controls={menuId} aria-haspopup="menu" aria-expanded={menuOpen} onClick={() => {
           if (menuRef.current?.matches(":popover-open")) menuRef.current.hidePopover();
         else { show(menuRef.current, triggerRef.current); menuRef.current?.querySelector<HTMLButtonElement>("button")?.focus(); }
-      }}><MoreHorizontal size={15} /></IconButton>
+      }}><MoreHorizontal size={16} /></IconButton>
     <Tooltip interactive content={m.chat_panel_new_chat()} className="rounded-sm">
       <IconButton size="small" className="text-text opacity-0 group-hover:opacity-100 group-focus-within:opacity-100"
         aria-label={`${m.chat_panel_new_chat()} · ${project.name}`}
-        onClick={onNewChat}><Plus size={15} /></IconButton>
+        onClick={onNewChat}><Plus size={16} /></IconButton>
     </Tooltip>
     <div ref={menuRef} id={menuId} popover="auto" role="menu" aria-label={project.name}
       onToggle={(event) => setMenuOpen(event.newState === "open")}
@@ -92,7 +89,7 @@ export function ProjectInfoCard({ project, chatCount, collapsed, busy, onToggleC
       className="fixed inset-auto m-0 w-72 max-w-[calc(100vw-1rem)] rounded-xl border border-border bg-background p-2 text-text shadow-modal">
       <div role="presentation" className="mb-1 border-b border-border px-2 pb-2 pt-1 text-sm">
         <div className="truncate font-medium">{project.name}</div>
-        <div className="mt-1 flex items-center gap-1.5 text-subtext"><MessageCircle size={13} />{chatCount === undefined ? "…" : m.sidebar_project_chats({ count: chatCount })}</div>
+        <div className="mt-1 flex items-center gap-1.5 text-subtext"><MessageCircle size={14} />{chatCount === undefined ? "…" : m.sidebar_project_chats({ count: chatCount })}</div>
         <div className="mt-2 break-all text-xs text-subtext">{project.repoPath}</div>
       </div>
       <MenuItem role="menuitem" onClick={() => { onPin(); menuRef.current?.hidePopover(); }}><span className="flex items-center gap-2"><Pin size={16} />{pinned ? m.sidebar_unpin_project() : m.sidebar_pin_project()}</span></MenuItem>
@@ -104,11 +101,49 @@ export function ProjectInfoCard({ project, chatCount, collapsed, busy, onToggleC
       <div className="my-1 border-t border-border" />
       <MenuItem role="menuitem" danger disabled={deleting} onClick={() => void remove()}><span className="flex items-center gap-2"><Trash2 size={16} />{m.projects_home_delete_project_action()}</span></MenuItem>
     </div>
-    {editing && createPortal(<EditProjectDialog project={project} onClose={() => setEditing(false)} onRemoved={onRemoved} />, document.body)}
+    {editing && createPortal(<EditProjectDialog project={project} onClose={() => setEditing(false)} onDelete={remove} />, document.body)}
+    {deleting && createPortal(<DeleteProjectDialog project={project} onClose={() => setDeleting(false)} onRemoved={onRemoved} />, document.body)}
   </>;
 }
 
-function EditProjectDialog({ project, onClose, onRemoved }: { project: Project; onClose: () => void; onRemoved: () => void }) {
+function DeleteProjectDialog({ project, onClose, onRemoved }: { project: Project; onClose: () => void; onRemoved: () => void }) {
+  const dialogRef = useRef<HTMLDivElement>(null);
+  const titleId = useId();
+  const [deleteArtifacts, setDeleteArtifacts] = useState(false);
+  const [pending, setPending] = useState(false);
+  const [error, setError] = useState("");
+  const close = () => { if (!pending) onClose(); };
+  useDialogFocus(dialogRef, close);
+
+  async function remove() {
+    if (pending) return;
+    setPending(true);
+    setError("");
+    try {
+      const artifactsError = await deleteProject(project.id, deleteArtifacts);
+      onClose();
+      onRemoved();
+      if (artifactsError) showAlert(artifactsError, "error");
+    }
+    catch (err) { setError(err instanceof Error ? err.message : String(err)); }
+    finally { setPending(false); }
+  }
+
+  return <div className="modal-backdrop fixed inset-0 z-100 flex items-center justify-center bg-modal-backdrop p-5" onClick={(event) => { if (event.target === event.currentTarget) close(); }}>
+    <div ref={dialogRef} role="dialog" aria-modal="true" aria-labelledby={titleId} tabIndex={-1}
+      className="modal w-120 max-w-full max-h-[calc(100vh-2.5rem)] overflow-y-auto rounded-xl border border-border bg-background p-6 text-text shadow-modal">
+      <h2 id={titleId} className="m-0 text-xl font-medium">{m.projects_home_delete_project_action()}</h2>
+      <p className="mt-4 whitespace-pre-line text-sm">{deleteExplanation(project)}</p>
+      <p className="mt-4 text-sm">{m.projects_delete_artifacts_kept()}</p>
+      <p className="mt-2 break-all text-xs text-subtext">{project.artifactsDir}</p>
+      <label className="mt-4 flex items-start gap-2 text-sm"><input type="checkbox" checked={deleteArtifacts} disabled={pending} onChange={(event) => setDeleteArtifacts(event.target.checked)} className="mt-1" />{m.projects_delete_artifacts_remove()}</label>
+      {error && <p role="alert" className="mt-3 text-sm text-accent-red">{error}</p>}
+      <div className="mt-6 flex justify-end gap-2"><Button type="button" variant="ghost" data-initial-focus disabled={pending} onClick={close}>{m.projects_home_cancel()}</Button><Button type="button" variant="danger" disabled={pending} onClick={() => void remove()}>{m.projects_home_delete_project_action()}</Button></div>
+    </div>
+  </div>;
+}
+
+function EditProjectDialog({ project, onClose, onDelete }: { project: Project; onClose: () => void; onDelete: () => void }) {
   const dialogRef = useRef<HTMLDivElement>(null);
   const titleId = useId();
   const nameId = useId();
@@ -127,15 +162,6 @@ function EditProjectDialog({ project, onClose, onRemoved }: { project: Project; 
     finally { setPending(false); }
   }
 
-  async function remove() {
-    if (pending || !window.confirm(deleteExplanation(project))) return;
-    setPending(true);
-    setError("");
-    try { await deleteProject(project.id); onClose(); onRemoved(); }
-    catch (err) { setError(err instanceof Error ? err.message : String(err)); }
-    finally { setPending(false); }
-  }
-
   return <div className="modal-backdrop fixed inset-0 z-100 flex items-center justify-center bg-modal-backdrop p-5" onClick={(event) => { if (event.target === event.currentTarget) close(); }}>
     <div ref={dialogRef} role="dialog" aria-modal="true" aria-labelledby={titleId} tabIndex={-1}
       className="modal w-120 max-w-full max-h-[calc(100vh-2.5rem)] overflow-y-auto rounded-xl border border-border bg-background p-6 text-text shadow-modal">
@@ -146,7 +172,7 @@ function EditProjectDialog({ project, onClose, onRemoved }: { project: Project; 
         <div className="mt-5 mb-2 text-sm font-medium">{m.sidebar_source_folder()}</div>
         <div className="flex items-start gap-2 rounded-lg border border-border p-3 text-sm"><FolderOpen size={16} className="mt-0.5 shrink-0 text-subtext" /><span className="min-w-0 break-all">{project.repoPath}</span></div>
         {error && <p role="alert" className="mt-3 text-sm text-accent-red">{error}</p>}
-        <div className="mt-6 flex items-center gap-2"><Button type="button" variant="danger" disabled={pending} onClick={() => void remove()}>{m.projects_home_delete_project_action()}</Button><div className="flex-1" /><Button type="button" variant="ghost" disabled={pending} onClick={close}>{m.projects_home_cancel()}</Button><Button type="submit" variant="primary" disabled={pending || !name.trim()}>{m.common_save()}</Button></div>
+        <div className="mt-6 flex items-center gap-2"><Button type="button" variant="danger" disabled={pending} onClick={onDelete}>{m.projects_home_delete_project_action()}</Button><div className="flex-1" /><Button type="button" variant="ghost" disabled={pending} onClick={close}>{m.projects_home_cancel()}</Button><Button type="submit" variant="primary" disabled={pending || !name.trim()}>{m.common_save()}</Button></div>
       </form>
     </div>
   </div>;

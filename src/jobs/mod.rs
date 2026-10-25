@@ -20,6 +20,7 @@ pub mod modal;
 pub mod openresearch;
 pub mod provider_prices;
 pub mod ray;
+pub mod rental;
 pub mod slurm;
 pub mod ssh;
 pub mod tinker;
@@ -65,6 +66,8 @@ pub struct BackendDescriptor {
     pub monitoring_error: Option<String>,
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub cancellation_accepted: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rental_lease: Option<rental::Rental>,
     pub kind: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub namespace: Option<String>,
@@ -111,6 +114,9 @@ pub struct BackendDescriptor {
     pub source_path: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub source_size: Option<u64>,
+    /// The host's storage root at submit; Slurm derives its run dir from it, SSH keeps it for source-cache cleanup.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub remote_root: Option<String>,
 }
 
 impl BackendDescriptor {
@@ -159,7 +165,7 @@ impl BackendDescriptor {
     }
 
     /// The Slurm (host, job id) handle; the login-node host rides on
-    /// `namespace`, and the run dir derives from the run id.
+    /// `namespace`, and the run dir derives from the run id and `remote_root`.
     pub fn slurm_ref(&self) -> Result<(&str, &str)> {
         if self.kind != "slurm_job" {
             return Err(anyhow!("Unsupported backend kind: {}", self.kind));
@@ -265,11 +271,13 @@ impl BackendDescriptor {
         // Stored as i64 (SQLite); a real SSH port fits u16. Bail rather than
         // panic if the row somehow holds an out-of-range value.
         let port = u16::try_from(self.ssh_port?).ok()?;
-        Some(ssh::SshTarget::host_port(
+        let mut target = ssh::SshTarget::host_port(
             format!("{user}@{host}"),
             port,
             ssh::HostKeyPolicy::Ephemeral,
-        ))
+        );
+        target.managed_generation = Some(self.job_id.clone()?);
+        Some(target)
     }
 }
 
@@ -310,6 +318,7 @@ mod tests {
             ssh_container: None,
             monitoring_error: None,
             cancellation_accepted: false,
+            rental_lease: None,
             kind: "openresearch_job".to_string(),
             namespace: Some("org_1".to_string()),
             job_id: Some("sb_1".to_string()),
@@ -328,6 +337,7 @@ mod tests {
             source_digest: None,
             source_path: None,
             source_size: None,
+            remote_root: None,
         }
     }
 

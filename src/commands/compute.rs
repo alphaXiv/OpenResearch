@@ -250,6 +250,13 @@ pub struct ConfigureArgs {
     host: Option<String>,
     #[arg(long)]
     container: Option<String>,
+    /// Absolute remote dir for runs and the source cache (SSH per host, or Slurm); default ~/.orx.
+    #[arg(long)]
+    remote_root: Option<String>,
+    /// true keeps every finished run's remote dir; false (the default) keeps each project's 3 newest
+    /// SSH/Slurm runs and removes older ones except tensorboard/.
+    #[arg(long)]
+    keep_remote_runs: Option<bool>,
     #[arg(long)]
     default_host: Option<String>,
     #[arg(long)]
@@ -374,7 +381,13 @@ impl ConfigureArgs {
     fn body(self) -> Result<Value> {
         let backend = self.backend.name();
         let allowed: &[&str] = match backend {
-            "ssh" => &["host", "container", "defaultHost"],
+            "ssh" => &[
+                "host",
+                "container",
+                "remoteRoot",
+                "keepRemoteRuns",
+                "defaultHost",
+            ],
             "slurm" => &[
                 "host",
                 "partition",
@@ -382,6 +395,8 @@ impl ConfigureArgs {
                 "timeLimit",
                 "cpusPerTask",
                 "mem",
+                "remoteRoot",
+                "keepRemoteRuns",
             ],
             "k8s" => &["context", "namespace"],
             "ray" => &["address"],
@@ -413,6 +428,7 @@ impl ConfigureArgs {
         for (key, value) in [
             ("host", self.host),
             ("container", self.container),
+            ("remoteRoot", self.remote_root),
             ("defaultHost", self.default_host),
             ("partition", self.partition),
             ("account", self.account),
@@ -445,6 +461,9 @@ impl ConfigureArgs {
         }
         if let Some(credit) = self.credit_usd {
             body.insert("creditUsd".into(), json!(credit));
+        }
+        if let Some(keep) = self.keep_remote_runs {
+            body.insert("keepRemoteRuns".into(), json!(keep));
         }
         if let Some(cpus) = self.cpus_per_task {
             body.insert("cpusPerTask".into(), json!(cpus));
@@ -487,6 +506,8 @@ impl ConfigureArgs {
                 "image-project" => "imageProject",
                 "billing-export-table" => "billingExportTable",
                 "credit" | "credit-usd" => "clearCredit",
+                "remote-root" => "remoteRoot",
+                "keep-remote-runs" => "keepRemoteRuns",
                 other => other,
             };
             if !allowed.contains(&key)
@@ -507,6 +528,8 @@ impl ConfigureArgs {
                     json!(true)
                 } else if key == "cpusPerTask" {
                     json!(0)
+                } else if key == "keepRemoteRuns" {
+                    json!(false)
                 } else {
                     json!("")
                 },
@@ -522,11 +545,16 @@ impl ConfigureArgs {
                 "Supply settings to change; use compute show {backend} to inspect."
             ));
         }
-        if backend == "ssh" && body.contains_key("host") && !body.contains_key("container") {
-            return Err(anyhow!("--host selects a container setting; supply --container or --clear container. Use --default-host to select a default."));
+        let host_setting = ["container", "remoteRoot", "keepRemoteRuns"]
+            .iter()
+            .any(|key| body.contains_key(*key));
+        if backend == "ssh" && body.contains_key("host") && !host_setting {
+            return Err(anyhow!("--host needs --container, --remote-root, --keep-remote-runs, or a matching --clear; use --default-host to pick a default."));
         }
-        if backend == "ssh" && body.contains_key("container") && !body.contains_key("host") {
-            return Err(anyhow!("A container change requires --host."));
+        if backend == "ssh" && host_setting && !body.contains_key("host") {
+            return Err(anyhow!(
+                "A container, remote root, or keep-remote-runs change requires --host."
+            ));
         }
         Ok(Value::Object(body))
     }
@@ -721,11 +749,53 @@ async fn connect(args: &CheckArgs, persist: Option<u64>) -> Result<()> {
             }
             .ok_or_else(|| anyhow!("Pass --host or configure a default host."))?;
             let target = crate::jobs::ssh::SshTarget::alias(&host);
-            let connection = crate::jobs::ssh::interactive_args(&target, persist).await?;
-            interactive_command("ssh", &connection.args).await?;
-            if let Some(warning) = crate::jobs::ssh::setup_connection_sharing(&target).await {
-                eprintln!("orx: warning: {warning}");
+            #[cfg(unix)]
+            if !crate::jobs::ssh::service::healthy(&target).await {
+                let connection = crate::jobs::ssh::interactive_args(&target, persist, None).await?;
+                interactive_command("ssh", &connection.args).await?;
+                if let Some(warning) = crate::jobs::ssh::setup_connection_sharing(&target).await {
+                    eprintln!("orx: warning: {warning}");
+                }
             }
+            #[cfg(windows)]
+            {
+                let _ = persist;
+                use crate::jobs::ssh::service;
+                let start = service::request(&target, json!({"op":"connect_start"})).await?;
+                let attempt = start["attempt"]
+                    .as_str()
+                    .ok_or_else(|| anyhow!("Missing SSH login attempt"))?;
+                let result = async {
+                    loop {
+                        let status = service::request(
+                            &target,
+                            json!({"op":"connect_status", "attempt":attempt}),
+                        )
+                        .await?;
+                        if status["done"] == true {
+                            if let Some(error) = status["error"].as_str() {
+                                return Err(anyhow!(error.to_owned()));
+                            }
+                            return Ok(());
+                        }
+                        if let Some(prompt) = status["prompt"].as_str() {
+                            let answer = secret_prompt(prompt).await?;
+                            service::request(
+                                &target,
+                                json!({"op":"connect_answer", "attempt":attempt, "answer":answer}),
+                            )
+                            .await?;
+                        }
+                        tokio::time::sleep(std::time::Duration::from_millis(150)).await;
+                    }
+                }
+                .await;
+                let _ =
+                    service::request(&target, json!({"op":"connect_cancel", "attempt":attempt}))
+                        .await;
+                result?;
+            }
+            crate::jobs::ssh::service::attach(&target).await?;
         }
         Backend::Hf => {
             interactive_command("hf", &["auth".into(), "login".into()]).await?;
@@ -810,6 +880,13 @@ async fn interactive_command(program: &str, args: &[String]) -> Result<()> {
     Ok(())
 }
 
+fn credential_line(value: &str) -> &str {
+    value
+        .strip_suffix("\r\n")
+        .or_else(|| value.strip_suffix('\n'))
+        .unwrap_or(value)
+}
+
 #[cfg(unix)]
 async fn secret_prompt(label: &str) -> Result<String> {
     use std::process::{Command, Stdio};
@@ -849,7 +926,7 @@ async fn secret_prompt(label: &str) -> Result<String> {
         value = tokio::task::spawn_blocking(|| -> Result<String> {
             let mut value = String::new();
             std::io::stdin().read_line(&mut value)?;
-            Ok(value.trim().to_owned())
+            Ok(credential_line(&value).to_owned())
         }) => value?,
         _ = tokio::signal::ctrl_c() => Err(anyhow!("Credential entry cancelled.")),
     }
@@ -863,13 +940,25 @@ async fn secret_prompt(label: &str) -> Result<String> {
             "Credential prompt failed; use --credentials-file instead."
         ));
     }
-    Ok(String::from_utf8(output.stdout)?.trim().to_owned())
+    Ok(credential_line(&String::from_utf8(output.stdout)?).to_owned())
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use clap::Parser;
+
+    #[test]
+    fn credential_entry_preserves_spaces_and_removes_only_the_submitted_newline() {
+        for newline in ["\n", "\r\n", ""] {
+            assert_eq!(
+                credential_line(&format!(" \tsecret \t{newline}")),
+                " \tsecret \t"
+            );
+        }
+        assert_eq!(credential_line("\n"), "");
+        assert_eq!(credential_line("secret\r"), "secret\r");
+    }
 
     #[test]
     fn configuration_rejects_unsupported_and_conflicting_fields() {
@@ -917,6 +1006,19 @@ mod tests {
             body(&["ssh", "--host", "lab", "--clear", "container"]).unwrap(),
             json!({"host":"lab", "container":null})
         );
+        assert_eq!(
+            body(&["ssh", "--host", "lab", "--remote-root", "/scratch/me/orx"]).unwrap(),
+            json!({"host":"lab", "remoteRoot":"/scratch/me/orx"})
+        );
+        assert_eq!(
+            body(&["slurm", "--clear", "remote-root"]).unwrap(),
+            json!({"remoteRoot":""})
+        );
+        assert_eq!(
+            body(&["ssh", "--host", "lab", "--keep-remote-runs", "true"]).unwrap(),
+            json!({"host":"lab", "keepRemoteRuns":true})
+        );
+        assert!(body(&["ssh", "--remote-root", "/scratch/me/orx"]).is_err());
         assert!(crate::Cli::try_parse_from(["orx", "compute", "status", "--json"]).is_ok());
     }
 }

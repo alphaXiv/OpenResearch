@@ -92,6 +92,8 @@ pub async fn submit_local_gcp_with_source(
     let name = gcp::instance_name(&run_id);
     let mut descriptor = BackendDescriptor {
         ssh_container: None,
+        remote_root: None,
+        rental_lease: None,
         monitoring_error: None,
         cancellation_accepted: false,
         kind: "gcp_job".to_string(),
