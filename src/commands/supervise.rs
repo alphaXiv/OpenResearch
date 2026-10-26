@@ -271,6 +271,10 @@ fn should_report_cancelled(store: &Store, run_id: &str, cancel_sent: bool) -> bo
     cancel_sent || local_cancel_requested(store, run_id)
 }
 
+fn host_declared_lost(unreachable_for: Option<Duration>) -> bool {
+    unreachable_for.is_some_and(|elapsed| elapsed >= UNREACHABLE_LIMIT)
+}
+
 fn run_status_for_stage(store: &Store, run_id: &str, cancel_sent: bool, stage: &str) -> RunStatus {
     if stage == "LOST" {
         return if cancel_sent {
@@ -786,9 +790,7 @@ async fn watch_ssh_job(
                     .into(),
                     message: Some(format!("box {id} was deleted while the run was active")),
                 },
-                _ if unreachable_since
-                    .is_some_and(|since| since.elapsed() >= UNREACHABLE_LIMIT) =>
-                {
+                _ if host_declared_lost(unreachable_since.map(|since| since.elapsed())) => {
                     ssh::JobState {
                         stage: "LOST".into(),
                         message: Some(format!(
@@ -1727,6 +1729,15 @@ mod tests {
             Some(MONITORING_GRACE + Duration::from_nanos(1)),
         ));
         assert!(should_report_monitoring_error(true, Some(Duration::ZERO)));
+    }
+
+    #[test]
+    fn unreachable_hosts_are_declared_lost_only_after_the_limit() {
+        assert!(!host_declared_lost(None));
+        assert!(!host_declared_lost(Some(
+            UNREACHABLE_LIMIT - Duration::from_nanos(1)
+        )));
+        assert!(host_declared_lost(Some(UNREACHABLE_LIMIT)));
     }
 
     #[test]
