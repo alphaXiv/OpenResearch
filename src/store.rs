@@ -4737,6 +4737,7 @@ mod tests {
         let held = supervisor.write().unwrap();
         refused(&store);
         drop(held);
+        drop(supervisor);
         store
             .delete_local_experiment("experiment", || Ok(()))
             .unwrap();
@@ -4760,6 +4761,7 @@ mod tests {
             .is_file());
         assert!(store.get_run(&sibling).unwrap().is_some());
         assert!(store.get_local_project("p").unwrap().is_some());
+        drop(store);
         std::fs::remove_dir_all(dir).unwrap();
     }
 
@@ -4833,6 +4835,7 @@ mod tests {
         store.defer_remote_cleanup("r2", false, "stale").unwrap();
         store.finish_remote_cleanup("r1", true).unwrap();
         assert_eq!(due(&store).len(), 4);
+        drop(store);
         std::fs::remove_dir_all(dir).unwrap();
     }
 
@@ -4860,6 +4863,7 @@ mod tests {
         );
         store.finish_source_sweep("lab", None).unwrap();
         assert_eq!(store.due_source_sweeps().unwrap().len(), 1);
+        drop(store);
         std::fs::remove_dir_all(dir).unwrap();
     }
 
