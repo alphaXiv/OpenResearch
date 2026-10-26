@@ -20,7 +20,7 @@ const code = ts.transpileModule(`${find("mergeFailedComposer")}\n${find("send")}
 
 class RejectedResponseError extends Error {}
 
-function setup({ side = false, sessionId = "s", busy = false, steering = false, history = async () => ({}), deferred = false } = {}) {
+function setup({ side = false, sessionId = "s", busy = false, steering = false, history = async () => ({}), submission = async () => ({ accepted: false }), deferred = false } = {}) {
   let rejectSend, resolveSend;
   let state = { draft: "original", attachments: [{ dataUrl: "data:,old", mediaType: "image/png", size: 1 }], annotations: [{ id: "a", text: "old selection" }], unconfirmedSend: null };
   const composerLiveRef = { current: state };
@@ -50,7 +50,7 @@ function setup({ side = false, sessionId = "s", busy = false, steering = false, 
     composerSelection: { harness: "codex" }, planModeOverrideRef: { current: null }, planMutationSeq: { current: 0 },
     RejectedResponseError, pendingClientTurn: { current: null }, pendingScope: { current: null }, crypto, busy, steering,
     queueSessionMutation: (fn) => fn(), setSessionOverride: () => {}, setRecoveryOverrides: () => {}, EMPTY_RECOVERY_OVERRIDES: {},
-    sendChatMessage: () => new Promise((resolve, reject) => { resolveSend = resolve; rejectSend = reject; }),
+    sendChatMessage: () => new Promise((resolve, reject) => { resolveSend = resolve; rejectSend = reject; }), getChatSubmission: submission,
     openNewSession: async () => ({ id: "created" }), getChatMessagesQuery: () => ({ queryKey: [] }),
     queryClient: { fetchQuery: history, getQueryState: () => undefined }, listChatSessionsQuery: () => ({}),
     dispatch: (action) => actions.push(action), pinTranscriptToBottom: () => {}, sessionFilter: "active",
@@ -358,6 +358,22 @@ for (const busy of [false, true]) {
     assert.equal(s.stashes.get(s.key).annotations.length, 1);
     assert.equal(s.stashes.get(s.key).unconfirmedSend, null);
     assert.match(s.actions.at(-1).text, /^failed:/);
+  });
+}
+
+for (const busy of [false, true]) {
+  test(`an accepted ${busy ? "queued" : "normal"} send with a lost response stays cleared`, async () => {
+    let lookup;
+    const s = setup({ busy, submission: async (sid, id) => { lookup = [sid, id]; return { accepted: true }; } });
+    const task = s.send();
+    await flush();
+    s.reject(new TypeError("network"));
+    await task;
+    assert.equal(lookup[0], "s");
+    assert.match(lookup[1], /^ct_/);
+    assert.equal(s.state.draft, "");
+    assert.equal(s.state.unconfirmedSend, null);
+    assert.equal(s.bindings.pendingClientTurn.current, null);
   });
 }
 

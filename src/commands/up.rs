@@ -787,6 +787,10 @@ fn router(state: AppState, remote_auth: Option<RemoteAuth>) -> Router {
         )
         .route("/api/chat/sessions/{id}/messages", get(chat_messages))
         .route(
+            "/api/chat/sessions/{id}/submissions/{client_id}",
+            get(chat_submission),
+        )
+        .route(
             "/api/chat/sessions/{id}/experiments",
             get(chat_session_experiments),
         )
@@ -8431,6 +8435,16 @@ async fn chat_messages(State(state): State<AppState>, Path(id): Path<String>) ->
         "queued": queued,
         "activeLeafId": session.active_leaf_id,
     })))
+}
+
+async fn chat_submission(Path((id, client_id)): Path<(String, String)>) -> ApiResult {
+    let store = Store::open()?;
+    if store.get_chat_session(&id)?.is_none() {
+        return Err(not_found("chat session"));
+    }
+    Ok(Json(
+        json!({ "accepted": store.has_chat_submission(&id, &client_id)? }),
+    ))
 }
 
 #[derive(Deserialize)]

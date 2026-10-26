@@ -498,8 +498,8 @@ export function ModelPicker({
                             <div className={MODEL_MORE_CLASS_NAME}>{renderNote(harness.agentNote)}</div>
                           )}
                           {models.map((model) => (
-                            <MenuItem
-                                key={model.id}
+                            <Tooltip key={model.id} interactive content={model.id} className="w-full rounded-sm">
+                              <MenuItem
                                 type="button"
                                 className="ps-6"
                                 aria-description={model.id}
@@ -510,7 +510,8 @@ export function ModelPicker({
                                 {value?.harness === harness.id && (value.model === model.id || (value.model === null && model.id === resolveHarnessDefaultModel(harness))) && (
                                   <Check size={14} />
                                 )}
-                            </MenuItem>
+                              </MenuItem>
+                            </Tooltip>
                           ))}
                           {legacy.length > 0 && (
                             <Menu.Root>

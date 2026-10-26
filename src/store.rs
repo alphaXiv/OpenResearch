@@ -3621,6 +3621,15 @@ impl Store {
             .optional()?)
     }
 
+    pub fn has_chat_submission(&self, session_id: &str, client_turn_id: &str) -> Result<bool> {
+        Ok(self.conn.query_row(
+            "SELECT EXISTS(SELECT 1 FROM chat_queued_messages WHERE session_id = ?1 AND client_turn_id = ?2)
+                 OR EXISTS(SELECT 1 FROM chat_turns WHERE session_id = ?1 AND client_turn_id = ?2)",
+            params![session_id, client_turn_id],
+            |row| row.get(0),
+        )?)
+    }
+
     pub fn chat_native_thread_has_named_model(
         &self,
         session_id: &str,
@@ -5952,6 +5961,36 @@ mod tests {
             "one"
         );
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn submission_lookup_uses_client_ids_for_queued_and_completed_turns() {
+        let dir =
+            std::env::temp_dir().join(format!("orx-store-submissions-{}", uuid::Uuid::new_v4()));
+        let store = Store::open_at(dir.clone()).unwrap();
+        store
+            .create_chat_session(&chat_session_fixture("chat_1"))
+            .unwrap();
+        store
+            .insert_queued_chat_message(&StoredQueuedChatMessage {
+                id: "q_queue-id".into(),
+                session_id: "chat_1".into(),
+                client_turn_id: "ct_queue-id".into(),
+                request_hash: "hash".into(),
+                payload_json: "{}".into(),
+                created_at: 1,
+            })
+            .unwrap();
+        assert!(store.has_chat_submission("chat_1", "ct_queue-id").unwrap());
+        assert!(!store.has_chat_submission("chat_1", "q_queue-id").unwrap());
+        assert!(!store.has_chat_submission("another", "ct_queue-id").unwrap());
+        let mut turn = chat_turn_fixture("finished", "ct_finished");
+        turn.state = "completed".into();
+        store.admit_chat_turn(None, &turn).unwrap();
+        assert!(store.has_chat_submission("chat_1", "ct_finished").unwrap());
+        store.delete_queued_chat_message("q_queue-id").unwrap();
+        assert!(!store.has_chat_submission("chat_1", "ct_queue-id").unwrap());
+        let _ = std::fs::remove_dir_all(dir);
     }
 
     #[test]

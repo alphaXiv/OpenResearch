@@ -2225,6 +2225,12 @@ export const sendChatMessage = (
   },
   );
 
+/** A positive result confirms admission; absence does not prove rejection. */
+export const getChatSubmission = (sessionId: string, clientTurnId: string) =>
+  get<{ accepted: boolean }>(
+    `/api/chat/sessions/${encodeURIComponent(sessionId)}/submissions/${encodeURIComponent(clientTurnId)}`,
+  );
+
 /** Compact a chat's context: natively where the agent can, else by summarizing. */
 export const compactChatSession = (sessionId: string) =>
   post<{ message: ChatMessage }>(`/api/chat/sessions/${sessionId}/compact`, {});

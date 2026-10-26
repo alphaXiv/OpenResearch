@@ -121,6 +121,7 @@ import {
   runShellCommand,
   fmtDuration,
   sendChatMessage,
+  getChatSubmission,
   RejectedResponseError,
   setChatSessionArchived,
   setChatSessionAutonomy,
@@ -6040,6 +6041,22 @@ export function ChatPanel({
     } : {});
     pendingClientTurn.current = { signature: turnSignature, id: clientTurnId, mode, options: turnOpts };
     failedTurn = pendingClientTurn.current;
+    const finishSentMessage = () => {
+      if (inSourceScope()) {
+        setRecoveryOverrides(EMPTY_RECOVERY_OVERRIDES);
+        if (retry) {
+          setUnconfirmedSend(null);
+          composerLiveRef.current = { ...composerLiveRef.current, unconfirmedSend: null };
+        }
+        if (goalRequested) setGoalScope(null);
+      }
+      if (pendingClientTurn.current?.id === clientTurnId) {
+        pendingClientTurn.current = null;
+        if (inSourceScope() && composerLiveRef.current.pendingClientTurn?.id === clientTurnId) {
+          composerLiveRef.current = { ...composerLiveRef.current, pendingClientTurn: null };
+        }
+      }
+    };
     const clearComposer = () => {
       const live = composerLiveRef.current;
       composerLiveRef.current = {
@@ -6089,24 +6106,21 @@ export function ChatPanel({
         };
         const response = await queueSessionMutation(sendBusy);
         if (response.turn?.existing) await reseedSession(sid);
-        if (inSourceScope()) {
-          setRecoveryOverrides(EMPTY_RECOVERY_OVERRIDES);
-          if (retry) {
-            setUnconfirmedSend(null);
-            composerLiveRef.current = { ...composerLiveRef.current, unconfirmedSend: null };
-          }
-          if (goalRequested) setGoalScope(null);
-        }
-        if (pendingClientTurn.current?.id === clientTurnId) {
-          pendingClientTurn.current = null;
-          if (inSourceScope() && composerLiveRef.current.pendingClientTurn?.id === clientTurnId) {
-            composerLiveRef.current = { ...composerLiveRef.current, pendingClientTurn: null };
-          }
-        }
+        finishSentMessage();
       } catch (err) {
-        clearFailedPlanCommand();
         const msg = err instanceof Error ? err.message : String(err);
         const unconfirmed = submitted && !(err instanceof RejectedResponseError);
+        if (unconfirmed) {
+          const accepted = await getChatSubmission(sid, clientTurnId).then((result) => result.accepted).catch(() => false);
+          if (!isCurrentScope(sessionsOptions.queryKey) || deletedSessionIds.has(sid)
+            || (sideParentSessionId && deletedSessionIds.has(sideParentSessionId))) return;
+          if (accepted) {
+            finishSentMessage();
+            await reseedSession(sid).catch(() => {});
+            return;
+          }
+        }
+        clearFailedPlanCommand();
         restoreComposer(unconfirmed ? msg : null);
         if (isCurrentScope(sessionsOptions.queryKey) && !deletedSessionIds.has(sid)
           && (!sideParentSessionId || !deletedSessionIds.has(sideParentSessionId)) && !unconfirmed) {
@@ -6199,20 +6213,7 @@ export function ChatPanel({
       };
       const response = await queueSessionMutation(sendTurn);
       if (response.turn?.existing) await reseedSession(targetSessionId);
-      if (inSourceScope()) {
-        setRecoveryOverrides(EMPTY_RECOVERY_OVERRIDES);
-        if (retry) {
-          setUnconfirmedSend(null);
-          composerLiveRef.current = { ...composerLiveRef.current, unconfirmedSend: null };
-        }
-        if (goalRequested) setGoalScope(null);
-      }
-      if (pendingClientTurn.current?.id === clientTurnId) {
-        pendingClientTurn.current = null;
-        if (inSourceScope() && composerLiveRef.current.pendingClientTurn?.id === clientTurnId) {
-          composerLiveRef.current = { ...composerLiveRef.current, pendingClientTurn: null };
-        }
-      }
+      finishSentMessage();
     } catch (err) {
       if (!isCurrentScope(sessionsOptions.queryKey)) return;
       if (!sid) {
@@ -6225,6 +6226,16 @@ export function ChatPanel({
       const msg = err instanceof Error ? err.message : String(err);
       if (!isCurrentScope(sessionsOptions.queryKey) || deletedSessionIds.has(sid)) return;
       const unconfirmed = submitted && !(err instanceof RejectedResponseError);
+      if (unconfirmed) {
+        const accepted = await getChatSubmission(sid, clientTurnId).then((result) => result.accepted).catch(() => false);
+        if (!isCurrentScope(sessionsOptions.queryKey) || deletedSessionIds.has(sid)
+          || (sideParentSessionId && deletedSessionIds.has(sideParentSessionId))) return;
+        if (accepted) {
+          finishSentMessage();
+          await reseedSession(sid).catch(() => {});
+          return;
+        }
+      }
       restoreComposer(unconfirmed ? msg : null);
       clearFailedPlanCommand();
       if (submitted) await reseedSession(sid).catch(() => {});
