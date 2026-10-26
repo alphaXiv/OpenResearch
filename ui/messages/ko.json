@@ -1210,6 +1210,7 @@
   "remote_open": "원격 열기",
   "remote_connected_as": "{user} 사용자로 {host}에 연결됨",
   "remote_disconnect": "연결 해제",
+  "remote_return_to_local": "로컬 워크스페이스로 돌아가기",
   "remote_persistence_explanation": "이 탭을 닫거나 연결을 끊어도 에이전트와 실험은 계속 실행됩니다. 승인 요청은 최대 55분 동안 대기합니다. 호스트 재시작이나 관리자 정책으로 OpenResearch가 중지될 수 있습니다.",
   "remote_gateway_unavailable": "로컬 OpenResearch를 다시 시작하고 이 SSH 호스트를 다시 선택하세요. 원격 호스트의 작업은 계속됩니다.",
   "remote_stop_host": "호스트의 OpenResearch 중지",

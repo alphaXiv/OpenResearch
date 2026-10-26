@@ -39,6 +39,7 @@ import { RemoteStopDialog } from "./components/RemoteStopDialog";
 import { CommandTerminal, SshConnectTerminal, isComplete } from "./components/SshConnectTerminal";
 import { resetGlobalWorkspace } from "./workspacePersistence";
 import { clearProjectWorkspaceCache } from "./useProjectWorkspace";
+import { getLocalDesktopOrigin, returnToLocalWorkspace } from "./remoteDesktop";
 
 const REMOTE_FAVICON =
   "data:image/svg+xml," +
@@ -88,6 +89,7 @@ function needsInteractiveSsh(error: string) {
 }
 
 function GatewayUnavailable({ host, overlay = false }: { host: string; overlay?: boolean }) {
+  const localOrigin = getLocalDesktopOrigin();
   return (
     <div className={overlay ? "w-full max-w-2xl" : "app flex h-full items-center justify-center bg-background p-6"}>
       <section className="w-full max-w-2xl rounded-xl border border-border bg-background p-7 shadow-modal">
@@ -96,6 +98,13 @@ function GatewayUnavailable({ host, overlay = false }: { host: string; overlay?:
         </h1>
         <p className="mt-2 mb-0 text-base text-text">{m.offline_banner_disconnected()}</p>
         <p className="mt-2 mb-0 text-sm text-subtext">{m.remote_gateway_unavailable()}</p>
+        {localOrigin && (
+          <div className="mt-6 flex justify-end border-t border-border-variant pt-5">
+            <Button onClick={() => returnToLocalWorkspace(localOrigin)}>
+              {m.remote_return_to_local()}
+            </Button>
+          </div>
+        )}
       </section>
     </div>
   );
@@ -113,6 +122,7 @@ function RemoteSetup({
   setRetriedInteractiveError: (error: string | null) => void;
 }) {
   const { session } = runtime;
+  const localOrigin = getLocalDesktopOrigin();
   const [paths, setPaths] = useState<RemoteInstallPaths | null>(session.installPaths);
   const [busy, setBusy] = useState(false);
   const [stopPreview, setStopPreview] = useState<RemoteStopPreview | null>(null);
@@ -332,7 +342,12 @@ function RemoteSetup({
                 </label>
               ))}
               {!session.error && (
-                <div className="flex justify-end pt-1">
+                <div className="flex justify-end gap-2 pt-1">
+                  {localOrigin && (
+                    <Button onClick={() => returnToLocalWorkspace(localOrigin)}>
+                      {m.remote_return_to_local()}
+                    </Button>
+                  )}
                   <Button variant="primary" disabled={installing} onClick={() => void install()}>
                     {installing ? <><Spinner /> {m.remote_installing()}</> : needsUpdate ? m.remote_update() : m.settings_page_install()}
                   </Button>
@@ -342,7 +357,12 @@ function RemoteSetup({
           )}
 
           {needsUpdate && paths && (
-            <div className="mt-6 flex justify-end">
+            <div className="mt-6 flex justify-end gap-2">
+              {localOrigin && (
+                <Button onClick={() => returnToLocalWorkspace(localOrigin)}>
+                  {m.remote_return_to_local()}
+                </Button>
+              )}
               {!session.error && (
                 <Button variant="primary" disabled={installing} onClick={() => void install()}>
                   {installing ? <><Spinner /> {m.remote_updating()}</> : m.remote_update()}
@@ -352,7 +372,12 @@ function RemoteSetup({
           )}
 
           {session.status === "disconnected" && (
-            <div className="mt-6 flex justify-end border-t border-border-variant pt-5">
+            <div className="mt-6 flex justify-end gap-2 border-t border-border-variant pt-5">
+              {localOrigin && (
+                <Button onClick={() => returnToLocalWorkspace(localOrigin)}>
+                  {m.remote_return_to_local()}
+                </Button>
+              )}
               {session.canStartNewHost ? (
                 <Button variant="primary" disabled={busy} onClick={() => void startNewHost()}>
                   {busy ? <Spinner /> : null}
@@ -367,7 +392,12 @@ function RemoteSetup({
             </div>
           )}
           {(session.status === "connecting" || session.status === "reconnecting") && (
-            <div className="mt-6 flex justify-end border-t border-border-variant pt-5">
+            <div className="mt-6 flex justify-end gap-2 border-t border-border-variant pt-5">
+              {localOrigin && (
+                <Button onClick={() => returnToLocalWorkspace(localOrigin)}>
+                  {m.remote_return_to_local()}
+                </Button>
+              )}
               <Button disabled={busy} onClick={() => void disconnect()}>
                 {m.remote_disconnect()}
               </Button>
@@ -375,6 +405,11 @@ function RemoteSetup({
           )}
           {needsUpdate && session.error && (
             <div className="mt-6 flex justify-end gap-2 border-t border-border-variant pt-5">
+              {localOrigin && (
+                <Button onClick={() => returnToLocalWorkspace(localOrigin)}>
+                  {m.remote_return_to_local()}
+                </Button>
+              )}
               <Button disabled={busy} onClick={() => void disconnect()}>
                 {m.remote_disconnect()}
               </Button>
@@ -394,7 +429,12 @@ function RemoteSetup({
             </div>
           )}
           {needsInstall && session.error && (
-            <div className="mt-6 flex justify-end">
+            <div className="mt-6 flex justify-end gap-2">
+              {localOrigin && (
+                <Button onClick={() => returnToLocalWorkspace(localOrigin)}>
+                  {m.remote_return_to_local()}
+                </Button>
+              )}
               <Button variant="primary" disabled={busy} onClick={() => void reconnect()}>
                 {busy ? <Spinner /> : null}
                 {m.remote_check_again()}

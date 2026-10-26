@@ -44,8 +44,11 @@ export function RemoteHostDialog({
         locale: getLocale(),
       }]);
       if (remoteWindow) remoteWindow.location.replace(session.gatewayUrl);
-      else if (inDesktopApp) window.location.href = session.gatewayUrl;
-      else window.open(session.gatewayUrl, "_blank");
+      else if (inDesktopApp) {
+        const targetUrl = new URL(session.gatewayUrl, window.location.origin);
+        targetUrl.searchParams.set("local_origin", window.location.origin);
+        window.location.href = targetUrl.toString();
+      } else window.open(session.gatewayUrl, "_blank");
       onClose();
     } catch (error) {
       remoteWindow?.close();

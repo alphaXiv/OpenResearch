@@ -1210,6 +1210,7 @@
   "remote_open": "रिमोट खोलें",
   "remote_connected_as": "{host} से {user} के रूप में कनेक्टेड",
   "remote_disconnect": "डिस्कनेक्ट करें",
+  "remote_return_to_local": "स्थानीय कार्यस्थान पर वापस लौटें",
   "remote_persistence_explanation": "यह टैब बंद करने या डिस्कनेक्ट करने पर भी एजेंट और प्रयोग चलते रहते हैं। स्वीकृति अनुरोध 55 मिनट तक लंबित रहते हैं। होस्ट रीस्टार्ट या एडमिन नीति OpenResearch को रोक सकती है।",
   "remote_gateway_unavailable": "लोकल OpenResearch फिर से शुरू करें और इस SSH होस्ट को फिर से चुनें। रिमोट होस्ट पर काम जारी रहता है।",
   "remote_stop_host": "होस्ट पर OpenResearch रोकें",

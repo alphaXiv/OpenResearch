@@ -1210,6 +1210,7 @@
   "remote_open": "Otwórz połączenie zdalne",
   "remote_connected_as": "Połączono z {host} jako {user}",
   "remote_disconnect": "Rozłącz",
+  "remote_return_to_local": "Wróć do lokalnego obszaru roboczego",
   "remote_persistence_explanation": "Zamknięcie tej karty lub rozłączenie nie zatrzyma agentów i eksperymentów. Żądania zatwierdzenia mogą oczekiwać do 55 minut. Restart hosta lub zasady administratora mogą zatrzymać OpenResearch.",
   "remote_gateway_unavailable": "Uruchom ponownie lokalny OpenResearch i jeszcze raz wybierz ten host SSH. Praca na zdalnym hoście będzie kontynuowana.",
   "remote_stop_host": "Zatrzymaj OpenResearch na hoście",

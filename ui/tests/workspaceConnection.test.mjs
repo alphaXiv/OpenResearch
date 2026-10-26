@@ -195,6 +195,7 @@ test("desktop app navigates in-place and supports custom user@host query", async
     window: {
       __ORX_DESKTOP__: true,
       location: {
+        origin: "http://127.0.0.1:4792",
         set href(url) { calls.push(["navigate-app", url]); },
       },
     },
@@ -214,7 +215,36 @@ test("desktop app navigates in-place and supports custom user@host query", async
   await new Promise(setImmediate);
   assert.deepEqual(calls, [
     ["connect", "user@remote-host", { theme: "dark", locale: "en" }],
-    ["navigate-app", "http://localhost:4910/"],
+    ["navigate-app", "http://localhost:4910/?local_origin=http%3A%2F%2F127.0.0.1%3A4792"],
     ["close-dialog"],
   ]);
+});
+
+test("remoteDesktop helper extracts origin and returns to local workspace", () => {
+  const store = new Map();
+  const navigated = [];
+  const fakeSessionStorage = {
+    getItem: (k) => store.get(k) ?? null,
+    setItem: (k, v) => store.set(k, v),
+  };
+
+  const { getLocalDesktopOrigin, returnToLocalWorkspace } = load("remoteDesktop.ts", {}, {
+    sessionStorage: fakeSessionStorage,
+    window: {
+      __ORX_DESKTOP__: true,
+      location: {
+        search: "?local_origin=http%3A%2F%2F127.0.0.1%3A4792",
+        port: "4793",
+        set href(val) { navigated.push(val); },
+      },
+    },
+  });
+
+  // Extracts from query and caches in sessionStorage
+  assert.equal(getLocalDesktopOrigin(), "http://127.0.0.1:4792");
+  assert.equal(store.get("orx:local_desktop_origin"), "http://127.0.0.1:4792");
+
+  // Navigates back
+  returnToLocalWorkspace();
+  assert.deepEqual(navigated, ["http://127.0.0.1:4792"]);
 });

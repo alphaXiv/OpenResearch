@@ -1210,6 +1210,7 @@
   "remote_open": "リモートを開く",
   "remote_connected_as": "{user} として {host} に接続済み",
   "remote_disconnect": "切断",
+  "remote_return_to_local": "ローカルワークスペースに戻る",
   "remote_persistence_explanation": "このタブを閉じたり切断したりしても、エージェントと実験は実行を続けます。承認リクエストは最大 55 分間待機します。ホストの再起動や管理者のポリシーにより OpenResearch が停止する場合があります。",
   "remote_gateway_unavailable": "ローカルの OpenResearch を再起動し、この SSH ホストを再度選択してください。リモートホスト上の作業は継続します。",
   "remote_stop_host": "ホスト上の OpenResearch を停止",

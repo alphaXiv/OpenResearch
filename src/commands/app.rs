@@ -156,6 +156,20 @@ pub(crate) fn read_companion_config_remote() -> Option<String> {
 }
 
 #[cfg_attr(not(desktop_app), allow(dead_code))]
+pub(crate) fn host_target_token(target: &str) -> String {
+    use sha2::{Digest, Sha256};
+    let clean_prefix: String = target
+        .chars()
+        .map(|c| if c.is_ascii_alphanumeric() { c } else { '_' })
+        .take(16)
+        .collect();
+    let mut hasher = Sha256::new();
+    hasher.update(target.as_bytes());
+    let hash = format!("{:x}", hasher.finalize());
+    format!("{clean_prefix}_{}", &hash[..16])
+}
+
+#[cfg_attr(not(desktop_app), allow(dead_code))]
 pub(crate) fn resolve_effective_remote_with<F1, F2, F3>(
     cli_remote: Option<String>,
     env_lookup: F1,
@@ -324,7 +338,6 @@ pub async fn run() {
                 .map(|a| a.port())
                 .unwrap_or(4791)
         });
-    #[cfg(target_os = "macos")]
     #[cfg(target_os = "macos")]
     imp::run_event_loop(port, false, effective_remote, app_args);
     #[cfg(not(target_os = "macos"))]
@@ -510,11 +523,8 @@ mod instance {
         // Bound before the calls, so no drop runs between CreateMutexW and GetLastError.
         let (event_name_str, mutex_name_str) = match remote {
             Some(r) => {
-                let clean: String = r
-                    .chars()
-                    .map(|c| if c.is_alphanumeric() { c } else { '_' })
-                    .collect();
-                (format!("{FOCUS_EVENT}_{clean}"), format!("{MUTEX}_{clean}"))
+                let token = super::host_target_token(r);
+                (format!("{FOCUS_EVENT}_{token}"), format!("{MUTEX}_{token}"))
             }
             None => (FOCUS_EVENT.to_string(), MUTEX.to_string()),
         };
@@ -570,17 +580,21 @@ mod instance {
 
     /// Where the lock and socket live, and their name. Private to the user: in a
     /// shared directory another user could hold the lock or create the socket first.
-    fn claim_paths() -> Option<(PathBuf, String)> {
+    fn claim_paths(remote: Option<&str>) -> Option<(PathBuf, String)> {
+        let base_name = match remote {
+            Some(target) => format!("openresearch-app-{}", super::host_target_token(target)),
+            None => "openresearch-app".to_string(),
+        };
         let runtime = std::env::var_os("XDG_RUNTIME_DIR")
             .map(PathBuf::from)
             .filter(|dir| dir.is_absolute() && is_private(dir));
         if let Some(dir) = runtime {
-            return Some((dir, "openresearch-app".to_string()));
+            return Some((dir, base_name));
         }
         // A home on NFS is shared across machines, and so would be a lock in it.
         let host = std::fs::read_to_string("/proc/sys/kernel/hostname").ok()?;
         let dir = dirs::cache_dir()?.join("openresearch");
-        Some((dir, format!("openresearch-app-{}", host.trim())))
+        Some((dir, format!("{base_name}-{}", host.trim())))
     }
 
     /// Owned by this user and writable by no one else, as the XDG spec requires
@@ -594,8 +608,8 @@ mod instance {
 
     /// Claims the app for this process. `None` means another instance has it
     /// and was asked to come forward.
-    pub(super) fn claim() -> Option<FocusRequests> {
-        let Some((dir, name)) = claim_paths() else {
+    pub(super) fn claim(remote: Option<&str>) -> Option<FocusRequests> {
+        let Some((dir, name)) = claim_paths(remote) else {
             eprintln!(
                 "openresearch app: found no private directory for the app lock; a second \
                  launch will open another window"
@@ -1791,8 +1805,8 @@ mod imp {
 #[cfg(test)]
 mod tests {
     use super::{
-        deep_link_path, desktop_entry, is_app_args, is_bundle_exe_launch, is_dashboard_url,
-        opens_in_browser, parse_app_args_from, read_companion_config_remote_from,
+        deep_link_path, desktop_entry, host_target_token, is_app_args, is_bundle_exe_launch,
+        is_dashboard_url, opens_in_browser, parse_app_args_from, read_companion_config_remote_from,
         resolve_effective_remote_with, AppArgs,
     };
     use std::ffi::OsStr;
@@ -1915,6 +1929,15 @@ mod tests {
         );
 
         let _ = std::fs::remove_dir_all(&temp);
+    }
+
+    #[test]
+    fn host_target_token_distinguishes_different_hosts_with_same_sanitized_name() {
+        let token_dash = host_target_token("gpu-1");
+        let token_underscore = host_target_token("gpu_1");
+        assert_ne!(token_dash, token_underscore);
+        assert!(token_dash.starts_with("gpu_1_"));
+        assert!(token_underscore.starts_with("gpu_1_"));
     }
 
     #[test]
