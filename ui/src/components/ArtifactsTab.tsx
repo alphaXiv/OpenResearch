@@ -55,8 +55,9 @@ function isExternalSrc(src: string): boolean {
 /** Resolve a Markdown target within the artifacts root. URL suffixes stay
  * outside the encoded filesystem path, and upward escapes are rejected. */
 function artifactTarget(projectId: string, folder: string, src: string) {
-  // Markdown keeps malformed escapes such as `50%off.txt` literal, so retry them as literal paths.
-  const target = resolveMarkdownTarget(folder, src) ?? resolveMarkdownTarget(folder, src.replace(/%/g, "%25"));
+  // Markdown keeps malformed escapes such as `50%off.txt` literal, so retry the path (not query or hash) literally.
+  const literalPath = src.replace(/^[^?#]*/, (path) => path.replace(/%/g, "%25"));
+  const target = resolveMarkdownTarget(folder, src) ?? resolveMarkdownTarget(folder, literalPath);
   if (!target) return null;
   const queryParams = new URLSearchParams(target.query);
   queryParams.delete("path");

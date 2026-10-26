@@ -31,6 +31,10 @@ test("artifact links to non-ASCII filenames are encoded once", () => {
     path: "50%off.txt",
     url: "/api/projects/p/files/file?path=50%25off.txt&raw=1",
   });
+  assert.equal(
+    artifactTarget("p", "", href("[section](50%off.html#%E6%95%B0)"))?.url,
+    "/api/projects/p/files/file?path=50%25off.html#%E6%95%B0",
+  );
   assert.equal(artifactTarget("p", "notes", "../../x.md"), null);
   assert.equal(artifactTarget("p", "notes", "../../50%off.md"), null);
 });
