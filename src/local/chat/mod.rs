@@ -8376,16 +8376,31 @@ fn run_monitoring_text(runs: &[crate::store::StoredRun]) -> String {
     format!(
         "[orx] orx can no longer monitor these live runs:\n{lines}\nRun `orx exp status <expId>` \
          for the reason and tell the user so they can fix it. orx wakes you once it can see a run \
-         finish; until then each run keeps its current status."
+         finish, or marks it lost if its host stays unreachable for 15 minutes."
     )
 }
 
-fn first_wakeup_per_session(wakeups: Vec<crate::store::RunWakeup>) -> Vec<crate::store::RunWakeup> {
-    let mut seen_sessions = HashSet::new();
-    wakeups
-        .into_iter()
-        .filter(|wakeup| seen_sessions.insert(wakeup.chat_session_id.clone()))
-        .collect()
+/// Groups each session's ready wake-ups so they arrive together in one turn. Sessions with a
+/// wake-up claimed elsewhere wait until that claim settles.
+fn pending_wakeups_by_session(
+    wakeups: Vec<crate::store::RunWakeup>,
+) -> Vec<Vec<crate::store::RunWakeup>> {
+    let mut claimed = HashSet::new();
+    let mut groups: Vec<Vec<crate::store::RunWakeup>> = Vec::new();
+    for wakeup in wakeups {
+        if wakeup.state != "pending" {
+            claimed.insert(wakeup.chat_session_id.clone());
+        } else if let Some(group) = groups
+            .iter_mut()
+            .find(|group| group[0].chat_session_id == wakeup.chat_session_id)
+        {
+            group.push(wakeup);
+        } else {
+            groups.push(vec![wakeup]);
+        }
+    }
+    groups.retain(|group| !claimed.contains(&group[0].chat_session_id));
+    groups
 }
 
 async fn process_run_wakeups(
@@ -8398,11 +8413,9 @@ async fn process_run_wakeups(
         return Ok(());
     }
     store.prune_run_wakeups()?;
-    for wakeup in first_wakeup_per_session(store.list_ready_run_wakeups()?) {
-        if wakeup.state != "pending" {
-            continue;
-        }
-        let Some(mut guard) = TurnGuard::claim_hidden(chat, &wakeup.chat_session_id).await else {
+    for wakeups in pending_wakeups_by_session(store.list_ready_run_wakeups()?) {
+        let session_id = wakeups[0].chat_session_id.clone();
+        let Some(mut guard) = TurnGuard::claim_hidden(chat, &session_id).await else {
             continue;
         };
         if data_dir_move_in_progress
@@ -8411,32 +8424,37 @@ async fn process_run_wakeups(
             guard.release().await;
             return Ok(());
         }
-        let Some(token) = store.claim_run_wakeup(&wakeup.run.id, &wakeup.chat_session_id)? else {
-            guard.release().await;
-            continue;
-        };
-        if !store.renew_run_wakeup_claim(&wakeup.run.id, &wakeup.chat_session_id, &token)? {
+        let mut claimed = Vec::new();
+        let mut texts = Vec::new();
+        for wakeup in wakeups {
+            let Some(token) = store.claim_run_wakeup(&wakeup.run.id, &session_id)? else {
+                continue;
+            };
+            if !store.renew_run_wakeup_claim(&wakeup.run.id, &session_id, &token)? {
+                continue;
+            }
+            let Some(text) = run_wakeup_text(&wakeup.run) else {
+                store.release_run_wakeup(&wakeup.run.id, &session_id, &token)?;
+                continue;
+            };
+            texts.push(text);
+            claimed.push((wakeup.run.id, token));
+        }
+        if claimed.is_empty() {
             guard.release().await;
             continue;
         }
-        let Some(text) = run_wakeup_text(&wakeup.run) else {
-            store.release_run_wakeup(&wakeup.run.id, &wakeup.chat_session_id, &token)?;
-            guard.release().await;
-            continue;
-        };
         match chat
-            .send_hidden_message(&wakeup.chat_session_id, text, guard)
+            .send_hidden_message(&session_id, texts.join("\n\n"), guard)
             .await
         {
             Ok(TurnSubmission::Started(_)) => {
-                if !store.mark_run_wakeup_delivered(
-                    &wakeup.run.id,
-                    &wakeup.chat_session_id,
-                    &token,
-                )? {
-                    return Err(anyhow!(
-                        "run wake-up claim expired before delivery was recorded"
-                    ));
+                for (run_id, token) in &claimed {
+                    if !store.mark_run_wakeup_delivered(run_id, &session_id, token)? {
+                        return Err(anyhow!(
+                            "run wake-up claim expired before delivery was recorded"
+                        ));
+                    }
                 }
             }
             Ok(
@@ -8445,11 +8463,15 @@ async fn process_run_wakeups(
                 | TurnSubmission::Existing(_)
                 | TurnSubmission::NotStarted,
             ) => {
-                store.release_run_wakeup(&wakeup.run.id, &wakeup.chat_session_id, &token)?;
+                for (run_id, token) in &claimed {
+                    store.release_run_wakeup(run_id, &session_id, token)?;
+                }
             }
             Err(err) => {
-                store.release_run_wakeup(&wakeup.run.id, &wakeup.chat_session_id, &token)?;
-                if !chat.is_busy(&wakeup.chat_session_id).await {
+                for (run_id, token) in &claimed {
+                    store.release_run_wakeup(run_id, &session_id, token)?;
+                }
+                if !chat.is_busy(&session_id).await {
                     eprintln!("orx up: run watcher: {err}");
                 }
             }
@@ -10597,28 +10619,30 @@ with other project runs using `orx runs p1` and inspect the file located by `orx
     }
 
     #[test]
-    fn only_earliest_wakeup_per_session_is_attempted_each_tick() {
-        let mut first = run("done");
-        first.id = "run_first".into();
-        let mut second = run("done");
-        second.id = "run_second".into();
-        let selected = first_wakeup_per_session(vec![
+    fn ready_wakeups_are_grouped_per_session_unless_one_is_claimed() {
+        let wakeup = |id: &str, session: &str, state: &str| {
+            let mut run = run("done");
+            run.id = id.into();
             crate::store::RunWakeup {
-                run: first,
-                chat_session_id: "owner".into(),
-                state: "pending".into(),
+                run,
+                chat_session_id: session.into(),
+                state: state.into(),
                 monitoring_alerted: false,
-            },
-            crate::store::RunWakeup {
-                run: second,
-                chat_session_id: "owner".into(),
-                state: "pending".into(),
-                monitoring_alerted: false,
-            },
+            }
+        };
+        let groups = pending_wakeups_by_session(vec![
+            wakeup("a1", "a", "pending"),
+            wakeup("b1", "b", "pending"),
+            wakeup("a2", "a", "pending"),
+            wakeup("c1", "c", "pending"),
+            wakeup("c2", "c", "claimed"),
         ]);
 
-        assert_eq!(selected.len(), 1);
-        assert_eq!(selected[0].run.id, "run_first");
+        let ids = groups
+            .iter()
+            .map(|group| group.iter().map(|w| w.run.id.as_str()).collect::<Vec<_>>())
+            .collect::<Vec<_>>();
+        assert_eq!(ids, vec![vec!["a1", "a2"], vec!["b1"]]);
     }
 
     #[test]
@@ -10809,7 +10833,7 @@ with other project runs using `orx runs p1` and inspect the file located by `orx
 - run `run_x` of experiment `exp_1` (still **starting**)\n\
 - run `run_y` of experiment `exp_1` (still **running**)\n\
 Run `orx exp status <expId>` for the reason and tell the user so they can fix it. orx wakes you \
-once it can see a run finish; until then each run keeps its current status."
+once it can see a run finish, or marks it lost if its host stays unreachable for 15 minutes."
         );
     }
 

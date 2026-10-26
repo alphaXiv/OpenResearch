@@ -26,6 +26,8 @@ const POLL_INTERVAL: Duration = Duration::from_secs(5);
 const LOG_IDLE: Duration = Duration::from_secs(30);
 /// How long monitoring must keep failing before it is reported on the run.
 const MONITORING_GRACE: Duration = Duration::from_secs(60);
+/// How long an SSH host may stay unreachable before its run is declared lost.
+const UNREACHABLE_LIMIT: Duration = Duration::from_secs(15 * 60);
 
 fn should_report_monitoring_error(already_reported: bool, elapsed: Option<Duration>) -> bool {
     already_reported || elapsed.is_some_and(|elapsed| elapsed >= MONITORING_GRACE)
@@ -706,6 +708,7 @@ async fn watch_ssh_job(
     let mut cancel_sent = descriptor.cancellation_accepted;
     let mut last_message = None;
     let mut failing_since = None;
+    let mut unreachable_since = None;
     let mut last_error = None;
     let mut missing_polls = 0;
 
@@ -768,6 +771,9 @@ async fn watch_ssh_job(
                 Err(err) => eprintln!("supervise {run_id}: could not save monitoring state: {err}"),
             }
         }
+        unreachable_since = observed
+            .is_err()
+            .then(|| unreachable_since.unwrap_or_else(std::time::Instant::now));
         let job = match observed {
             Ok(job) => job,
             Err(_) => match sandbox {
@@ -780,6 +786,18 @@ async fn watch_ssh_job(
                     .into(),
                     message: Some(format!("box {id} was deleted while the run was active")),
                 },
+                _ if unreachable_since
+                    .is_some_and(|since| since.elapsed() >= UNREACHABLE_LIMIT) =>
+                {
+                    ssh::JobState {
+                        stage: "LOST".into(),
+                        message: Some(format!(
+                            "{} was unreachable for {} minutes while the run was active",
+                            target.dest,
+                            UNREACHABLE_LIMIT.as_secs() / 60
+                        )),
+                    }
+                }
                 _ => {
                     missing_polls = 0;
                     tokio::time::sleep(POLL_INTERVAL).await;
