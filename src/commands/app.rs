@@ -186,9 +186,14 @@ pub async fn run() {
                 .unwrap_or(4791)
         });
     #[cfg(target_os = "macos")]
-    imp::run_event_loop(port);
+    imp::run_event_loop(port, false);
     #[cfg(not(target_os = "macos"))]
-    imp::run_event_loop(port, focus_requests);
+    imp::run_event_loop(port, false, focus_requests);
+}
+
+#[cfg(all(target_os = "macos", debug_assertions))]
+pub fn run_dev(port: u16) {
+    imp::run_event_loop(port, true);
 }
 
 /// Adopt the user's shell environment in place of the one launchd or the desktop
@@ -661,9 +666,17 @@ mod imp {
 
     pub(super) fn run_event_loop(
         port: u16,
+        external_server: bool,
         #[cfg(not(target_os = "macos"))] focus_requests: super::instance::FocusRequests,
     ) {
-        let origin = format!("http://127.0.0.1:{port}");
+        let origin = format!(
+            "http://{}:{port}",
+            if external_server {
+                "localhost"
+            } else {
+                "127.0.0.1"
+            }
+        );
         // Before GTK starts: the window class the dock matches to the desktop
         // entry's StartupWMClass.
         #[cfg(target_os = "linux")]
@@ -671,32 +684,41 @@ mod imp {
         let event_loop = EventLoopBuilder::<UserEvent>::with_user_event().build();
 
         // Dashboard server on background workers (we're inside main's runtime).
-        tokio::spawn(async move {
-            let args = crate::UpArgs {
-                port,
-                remote: None,
-                no_browser: true,
-                no_agent: false,
-                model: None,
-                remote_host: false,
-                desktop_app: true,
-            };
-            // The window is useless without its server, so the app goes with it.
-            match crate::commands::up::run(args).await {
-                Ok(()) => std::process::exit(0),
-                Err(err) => {
-                    eprintln!("openresearch app: dashboard server exited: {err}");
-                    crate::show_error_dialog(&format!("The dashboard server stopped: {err}"));
-                    std::process::exit(1);
+        if !external_server {
+            tokio::spawn(async move {
+                let args = crate::UpArgs {
+                    port,
+                    remote: None,
+                    no_browser: true,
+                    no_agent: false,
+                    model: None,
+                    remote_host: false,
+                    desktop_app: true,
+                };
+                // The window is useless without its server, so the app goes with it.
+                match crate::commands::up::run(args).await {
+                    Ok(()) => std::process::exit(0),
+                    Err(err) => {
+                        eprintln!("openresearch app: dashboard server exited: {err}");
+                        crate::show_error_dialog(&format!("The dashboard server stopped: {err}"));
+                        std::process::exit(1);
+                    }
                 }
-            }
-        });
+            });
+        }
 
         let ready = event_loop.create_proxy();
         tokio::spawn(async move {
-            while tokio::net::TcpStream::connect(("127.0.0.1", port))
-                .await
-                .is_err()
+            while tokio::net::TcpStream::connect((
+                if external_server {
+                    "localhost"
+                } else {
+                    "127.0.0.1"
+                },
+                port,
+            ))
+            .await
+            .is_err()
             {
                 tokio::time::sleep(Duration::from_millis(100)).await;
             }
@@ -960,6 +982,10 @@ mod imp {
                 // The server's own shutdown path stops the agents and then exits
                 // the process.
                 Quit::Flushing => {
+                    if external_server {
+                        *control_flow = ControlFlow::Exit;
+                        return;
+                    }
                     crate::commands::up::request_shutdown();
                     quit = Quit::ShuttingDown;
                     *control_flow = ControlFlow::WaitUntil(Instant::now() + Duration::from_secs(5));
