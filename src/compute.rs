@@ -153,7 +153,8 @@ fn prepare_snapshot_dir(path: &Path) -> Result<()> {
     {
         use std::os::unix::fs::MetadataExt;
 
-        let metadata = std::fs::symlink_metadata(path)?;
+        // Follow symlinks: a user-owned link to a user-owned directory is fine.
+        let metadata = std::fs::metadata(path)?;
         if !metadata.file_type().is_dir() || metadata.uid() != unsafe { libc::geteuid() } {
             return Err(anyhow!(
                 "Source snapshot directory {} is not owned by the current user.",
@@ -1080,6 +1081,18 @@ fn not_ready(detail: impl Into<String>) -> Preflight {
 #[cfg(test)]
 pub(crate) mod tests {
     use super::*;
+
+    #[cfg(unix)]
+    #[test]
+    fn snapshot_dir_accepts_a_user_owned_symlinked_directory() {
+        let root = std::env::temp_dir().join(format!("orx-snapshot-link-{}", uuid::Uuid::new_v4()));
+        let target = root.join("target");
+        let link = root.join("source-snapshots");
+        std::fs::create_dir_all(&target).unwrap();
+        std::os::unix::fs::symlink(&target, &link).unwrap();
+        prepare_snapshot_dir(&link).unwrap();
+        std::fs::remove_dir_all(&root).unwrap();
+    }
 
     #[test]
     fn run_reports_name_the_native_invoker_or_an_explicit_exception() {
