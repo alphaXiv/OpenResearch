@@ -775,9 +775,12 @@ async fn watch_ssh_job(
                 Err(err) => eprintln!("supervise {run_id}: could not save monitoring state: {err}"),
             }
         }
-        unreachable_since = observed
-            .is_err()
-            .then(|| unreachable_since.unwrap_or_else(std::time::Instant::now));
+        // Inspection can also fail on a reachable host (e.g. Docker errors); only polls where the
+        // host cannot run a trivial command count toward declaring it gone.
+        let host_unreachable =
+            observed.is_err() && ssh::ssh_run(&target, "true", None).await.is_err();
+        unreachable_since =
+            host_unreachable.then(|| unreachable_since.unwrap_or_else(std::time::Instant::now));
         let job = match observed {
             Ok(job) => job,
             Err(_) => match sandbox {
@@ -790,11 +793,7 @@ async fn watch_ssh_job(
                     .into(),
                     message: Some(format!("box {id} was deleted while the run was active")),
                 },
-                // Inspection can also fail on a reachable host (e.g. Docker errors); only a host
-                // that cannot run a trivial command is treated as gone.
-                _ if host_declared_lost(unreachable_since.map(|since| since.elapsed()))
-                    && ssh::ssh_run(&target, "true", None).await.is_err() =>
-                {
+                _ if host_declared_lost(unreachable_since.map(|since| since.elapsed())) => {
                     ssh::JobState {
                         stage: "LOST".into(),
                         message: Some(format!(
