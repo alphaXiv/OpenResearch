@@ -8375,8 +8375,8 @@ fn run_monitoring_text(runs: &[crate::store::StoredRun]) -> String {
         .join("\n");
     format!(
         "[orx] orx can no longer monitor these live runs:\n{lines}\nRun `orx exp status <expId>` \
-         for the reason and tell the user so they can fix it. orx wakes you once it can see a run \
-         finish, or marks it lost if its host stays unreachable for 15 minutes."
+         for the reason and tell the user so they can fix it. orx wakes you once a run \
+         reaches a final status."
     )
 }
 
@@ -10833,7 +10833,7 @@ with other project runs using `orx runs p1` and inspect the file located by `orx
 - run `run_x` of experiment `exp_1` (still **starting**)\n\
 - run `run_y` of experiment `exp_1` (still **running**)\n\
 Run `orx exp status <expId>` for the reason and tell the user so they can fix it. orx wakes you \
-once it can see a run finish, or marks it lost if its host stays unreachable for 15 minutes."
+once a run reaches a final status."
         );
     }
 

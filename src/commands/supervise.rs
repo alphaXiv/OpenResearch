@@ -790,7 +790,11 @@ async fn watch_ssh_job(
                     .into(),
                     message: Some(format!("box {id} was deleted while the run was active")),
                 },
-                _ if host_declared_lost(unreachable_since.map(|since| since.elapsed())) => {
+                // Inspection can also fail on a reachable host (e.g. Docker errors); only a host
+                // that cannot run a trivial command is treated as gone.
+                _ if host_declared_lost(unreachable_since.map(|since| since.elapsed()))
+                    && ssh::ssh_run(&target, "true", None).await.is_err() =>
+                {
                     ssh::JobState {
                         stage: "LOST".into(),
                         message: Some(format!(
