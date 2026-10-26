@@ -8375,8 +8375,8 @@ fn run_monitoring_text(runs: &[crate::store::StoredRun]) -> String {
         .join("\n");
     format!(
         "[orx] orx can no longer monitor these live runs:\n{lines}\nRun `orx exp status <expId>` \
-         for the reason and tell the user so they can fix it. orx wakes you once a run \
-         reaches a final status."
+         for the reason and tell the user so they can fix it. orx wakes you once it can see a run \
+         finish; until then each run keeps its current status."
     )
 }
 
@@ -8426,19 +8426,29 @@ async fn process_run_wakeups(
         }
         let mut claimed = Vec::new();
         let mut texts = Vec::new();
-        for wakeup in wakeups {
-            let Some(token) = store.claim_run_wakeup(&wakeup.run.id, &session_id)? else {
-                continue;
-            };
-            if !store.renew_run_wakeup_claim(&wakeup.run.id, &session_id, &token)? {
-                continue;
+        let collected = (|| -> Result<()> {
+            for wakeup in wakeups {
+                let Some(token) = store.claim_run_wakeup(&wakeup.run.id, &session_id)? else {
+                    continue;
+                };
+                if !store.renew_run_wakeup_claim(&wakeup.run.id, &session_id, &token)? {
+                    continue;
+                }
+                let Some(text) = run_wakeup_text(&wakeup.run) else {
+                    store.release_run_wakeup(&wakeup.run.id, &session_id, &token)?;
+                    continue;
+                };
+                texts.push(text);
+                claimed.push((wakeup.run.id, token));
             }
-            let Some(text) = run_wakeup_text(&wakeup.run) else {
-                store.release_run_wakeup(&wakeup.run.id, &session_id, &token)?;
-                continue;
-            };
-            texts.push(text);
-            claimed.push((wakeup.run.id, token));
+            Ok(())
+        })();
+        if let Err(err) = collected {
+            for (run_id, token) in &claimed {
+                let _ = store.release_run_wakeup(run_id, &session_id, token);
+            }
+            guard.release().await;
+            return Err(err);
         }
         if claimed.is_empty() {
             guard.release().await;
@@ -10833,7 +10843,7 @@ with other project runs using `orx runs p1` and inspect the file located by `orx
 - run `run_x` of experiment `exp_1` (still **starting**)\n\
 - run `run_y` of experiment `exp_1` (still **running**)\n\
 Run `orx exp status <expId>` for the reason and tell the user so they can fix it. orx wakes you \
-once a run reaches a final status."
+once it can see a run finish; until then each run keeps its current status."
         );
     }
 
