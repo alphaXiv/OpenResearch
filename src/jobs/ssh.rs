@@ -920,12 +920,13 @@ async fn inspect_host_job(target: &SshTarget, dir: &str) -> Result<JobState> {
 }
 
 /// The run dir exists before any supervisor polls it, so a missing one means the job is gone.
+/// A receipt that is not a number (e.g. empty after a full disk) falls through to the liveness check.
 fn host_job_script(dir: &str) -> String {
     format!(
         "{HOST_PROCESS_HELPERS}\n\
          d={}; \
          if [ ! -d \"$d\" ]; then echo MISSING; \
-         elif [ -f \"$d/exit_code\" ]; then echo \"EXIT $(cat \"$d/exit_code\")\"; \
+         elif grep -Eqx '[0-9]+' \"$d/exit_code\" 2>/dev/null; then echo \"EXIT $(cat \"$d/exit_code\")\"; \
          elif [ -f \"$d/pid\" ] && host_process_alive \"$(cat \"$d/pid\")\"; then echo RUNNING; \
          elif [ -f \"$d/pid\" ]; then echo DEAD; else echo PENDING; fi",
         shell_path(dir),
@@ -1171,6 +1172,9 @@ mod tests {
         let dir = home.path().join(".orx/runs/r1");
         std::fs::create_dir_all(&dir).unwrap();
         assert_eq!(inspect(), "PENDING");
+        std::fs::write(dir.join("exit_code"), "").unwrap();
+        std::fs::write(dir.join("pid"), "999999999\n").unwrap();
+        assert_eq!(inspect(), "DEAD");
         std::fs::write(dir.join("exit_code"), "0\n").unwrap();
         assert_eq!(inspect(), "EXIT 0");
     }
