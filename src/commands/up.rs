@@ -786,6 +786,10 @@ fn router(state: AppState, remote_auth: Option<RemoteAuth>) -> Router {
                 .patch(update_chat_session),
         )
         .route("/api/chat/sessions/{id}/messages", get(chat_messages))
+        .route(
+            "/api/chat/sessions/{id}/experiments",
+            get(chat_session_experiments),
+        )
         .route("/api/chat/sessions/{id}/subagent", get(chat_subagent))
         .route(
             "/api/chat/sessions/{id}/configuration",
@@ -8044,6 +8048,16 @@ async fn get_chat_session(State(state): State<AppState>, Path(id): Path<String>)
     ))
 }
 
+async fn chat_session_experiments(Path(id): Path<String>) -> ApiResult {
+    let store = Store::open()?;
+    store
+        .get_chat_session(&id)?
+        .ok_or_else(|| not_found("chat session"))?;
+    Ok(Json(
+        json!({ "experiments": store.list_experiments_by_chat_session(&id)? }),
+    ))
+}
+
 async fn create_chat_session(
     State(state): State<AppState>,
     Json(mut req): Json<CreateChatSessionReq>,
@@ -8563,7 +8577,8 @@ async fn send_chat_message(
                 if local::chat::is_client_turn_conflict(&error) {
                     ApiError(StatusCode::CONFLICT, error.to_string())
                 } else {
-                    bad_request(error)
+                    // A failure can occur after the message was admitted.
+                    ApiError::from(error)
                 }
             })?;
         match result {
@@ -8589,7 +8604,7 @@ async fn send_chat_message(
                 if local::chat::is_client_turn_conflict(&error) {
                     ApiError(StatusCode::CONFLICT, error.to_string())
                 } else {
-                    bad_request(error)
+                    ApiError::from(error)
                 }
             })?;
         let capture = !result.existing;
@@ -9131,7 +9146,14 @@ fn log_size(run_id: &str) -> u64 {
 /// ui/dist, embedded at release build time (debug builds read from disk).
 #[derive(rust_embed::RustEmbed)]
 #[folder = "ui/dist"]
+#[cfg_attr(debug_assertions, allow_missing = true)]
 struct UiDist;
+
+#[cfg(not(debug_assertions))]
+const _: () = assert!(
+    !include_str!("../../ui/dist/index.html").is_empty(),
+    "Run pnpm build in ui/ before a release build"
+);
 
 const NOT_BUILT_PAGE: &str = "<!doctype html><html><head><title>orx up</title></head>\
 <body style=\"font-family:system-ui;background:#111;color:#ddd;display:grid;place-items:center;height:100vh;margin:0\">\

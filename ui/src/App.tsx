@@ -33,7 +33,7 @@ import {
   type TaskWorkspace,
 } from "./workspaceState";
 import { getRememberedGlobalWorkspace, globalWorkspaceWriter } from "./workspacePersistence";
-import { PANEL_MIN_WIDTH, initialPanelWidth, panelMaxWidth, sideChatPanelWidth } from "./panelLayout";
+import { PANEL_MIN_WIDTH, initialPanelWidth, panelMaxWidth, sideChatPanelWidth, sidebarFitsWithPanel } from "./panelLayout";
 import {
   type ExpViewDef,
   sameExpTab,
@@ -83,6 +83,7 @@ import {
   MessagesSquare,
   Minimize2,
   Package,
+  PanelLeft,
   ScrollText,
   Terminal,
   Users,
@@ -475,9 +476,39 @@ export default function App({ runtime, projectId, pane }: { runtime: RuntimeInfo
   const [panelMax, setPanelMax] = useState(false);
   const [treeViewport, setTreeViewport] = useState<Viewport | null>(null);
   const [panelWidth, setPanelWidth] = useState(initialPanelWidth);
-  const [workspaceWide, setWorkspaceWide] = useState(() => window.innerWidth >= WORKSPACE_CARD_MIN_WIDTH);
+  const [windowWidth, setWindowWidth] = useState(() => window.innerWidth);
+  const workspaceWide = windowWidth >= WORKSPACE_CARD_MIN_WIDTH;
   const workspaceCardVisible = mainView === "chat" && !panelOpen && workspaceWide;
   const [railOpen, setRailOpen] = useState(true);
+  const [preferencesLoaded, setPreferencesLoaded] = useState(false);
+  const railTemporarilyHidden = mainView === "chat" && panelOpen && !sidebarFitsWithPanel(windowWidth);
+  const railVisible = railOpen && !railTemporarilyHidden;
+  const stackPanel = mainView === "chat" && panelOpen && windowWidth < PANEL_MIN_WIDTH * 2;
+  const visiblePanelWidth = Math.min(panelWidth, panelMaxWidth(windowWidth, railVisible));
+  const bodyRef = useRef<HTMLDivElement>(null);
+  const focusAfterRailChange = useRef<"rail" | "show" | Element | null>(null);
+  const lastFocused = useRef<Element | null>(null);
+  useEffect(() => {
+    const rememberFocus = (event: FocusEvent) => { lastFocused.current = event.target instanceof Element ? event.target : null; };
+    document.addEventListener("focusin", rememberFocus);
+    return () => document.removeEventListener("focusin", rememberFocus);
+  }, []);
+  useLayoutEffect(() => {
+    if (!railVisible && lastFocused.current?.closest(".session-rail") && !lastFocused.current.isConnected
+      && document.activeElement === document.body) focusAfterRailChange.current = "show";
+    const pendingFocus = focusAfterRailChange.current;
+    if (pendingFocus && pendingFocus !== "show" && railVisible) {
+      if (pendingFocus === "rail" || (document.activeElement === document.body && pendingFocus === lastFocused.current && !pendingFocus.isConnected)) {
+        bodyRef.current?.querySelector<HTMLElement>(".session-rail button, .session-rail a")?.focus();
+      }
+      focusAfterRailChange.current = null;
+    } else if (focusAfterRailChange.current === "show" && !railVisible) {
+      const buttons = bodyRef.current?.querySelectorAll<HTMLElement>("button[aria-label]");
+      [...(buttons ?? [])].find((button) => button.getAttribute("aria-label") === m.chat_panel_show_sidebar()
+        && button.getClientRects().length > 0 && getComputedStyle(button).visibility !== "hidden")?.focus();
+      focusAfterRailChange.current = null;
+    }
+  }, [railVisible]);
   const [newProjectOpen, setNewProjectOpen] = useState(false);
   const currentRightPaneStateRef = useRef<RightPaneSessionState>(initialRightPaneSessionState());
   const activeSessionIdRef = useRef<string | null>(activeSessionId);
@@ -753,10 +784,10 @@ export default function App({ runtime, projectId, pane }: { runtime: RuntimeInfo
   const lastGlobalLocation = useRef<string | null>(null);
   useEffect(() => {
     const savedLocation = safeLocation(location.href);
-    if (!uiState || !workspaceReady || !savedLocation) return;
+    if (!uiState || !workspaceReady || !preferencesLoaded || !savedLocation) return;
     globalWorkspaceWriter.queue({ lastLocation: savedLocation, railOpen, panelWidth, experimentsView: view }, lastGlobalLocation.current === savedLocation ? 250 : 0);
     lastGlobalLocation.current = savedLocation;
-  }, [location.href, uiState, workspaceReady, railOpen, panelWidth, view]);
+  }, [location.href, uiState, workspaceReady, preferencesLoaded, railOpen, panelWidth, view]);
   const onboarded = uiState?.onboardingCompleted ?? false;
   const [demoWelcomeOpen, setDemoWelcomeOpen] = useState(false);
   const [composerFocusNonce, setComposerFocusNonce] = useState(0);
@@ -822,18 +853,17 @@ export default function App({ runtime, projectId, pane }: { runtime: RuntimeInfo
     void uiStateQuery.refetch();
     void sessionsQuery.refetch();
   };
-  const preferencesLoaded = useRef(false);
   useEffect(() => {
-    if (!uiState || preferencesLoaded.current) return;
-    preferencesLoaded.current = true;
+    if (!uiState || preferencesLoaded) return;
     persistedPreferredAgent.current = uiState.preferredAgent;
     const prefs = getRememberedGlobalWorkspace() ?? uiState.workspace;
     if (prefs) {
       setRailOpen(prefs.railOpen);
-      setPanelWidth(Math.min(prefs.panelWidth, panelMaxWidth()));
+      setPanelWidth(prefs.panelWidth);
       setView(prefs.experimentsView === "tree" ? "tree" : "table");
     }
-  }, [uiState]);
+    setPreferencesLoaded(true);
+  }, [uiState, preferencesLoaded]);
   useEffect(() => {
     if (sessions && rememberedSessionRef.current && !sessions.includes(rememberedSessionRef.current)) rememberedSessionRef.current = null;
   }, [sessions]);
@@ -875,16 +905,20 @@ export default function App({ runtime, projectId, pane }: { runtime: RuntimeInfo
       });
   }, []);
 
-  // Shrinking the window can push a fixed-width panel past its usable max —
-  // reclamp so it never overflows the viewport.
   useEffect(() => {
     const onResize = () => {
-      setPanelWidth((w) => Math.min(w, panelMaxWidth()));
-      setWorkspaceWide(window.innerWidth >= WORKSPACE_CARD_MIN_WIDTH);
+      const focused = document.activeElement;
+      if (railOpen && railTemporarilyHidden && sidebarFitsWithPanel(window.innerWidth)
+        && focused?.closest(".chat-pane") && focused.getAttribute("aria-label") === m.chat_panel_show_sidebar()) {
+        focusAfterRailChange.current = focused;
+      } else if (focusAfterRailChange.current && typeof focusAfterRailChange.current !== "string") {
+        focusAfterRailChange.current = null;
+      }
+      setWindowWidth(window.innerWidth);
     };
     window.addEventListener("resize", onResize);
     return () => window.removeEventListener("resize", onResize);
-  }, []);
+  }, [railOpen, railTemporarilyHidden]);
 
   // Open an experiment view as a right-panel tab (creating it if needed) and
   // focus it.
@@ -1511,7 +1545,6 @@ export default function App({ runtime, projectId, pane }: { runtime: RuntimeInfo
     document.body.style.userSelect = "none";
     const startedMaximized = panelMax;
     const startX = e.clientX;
-    const startWidth = panelWidth;
     let restoredFromMax = false;
     function stop() {
       window.removeEventListener("pointermove", onMove);
@@ -1525,16 +1558,11 @@ export default function App({ runtime, projectId, pane }: { runtime: RuntimeInfo
         if (restoredFromMax || distance < FULLSCREEN_RESTORE_DRAG) return;
         restoredFromMax = true;
         setPanelMax(false);
-        const width = Math.min(
-          Math.max(startWidth, PANEL_MIN_WIDTH),
-          panelMaxWidth(),
-        );
-        setPanelWidth(width);
         window.removeEventListener("pointermove", onMove);
         return;
       }
       const w = Math.round(window.innerWidth - ev.clientX);
-      const max = panelMaxWidth();
+      const max = panelMaxWidth(window.innerWidth, railVisible);
       // Drag past the usable max by the slop threshold → snap to fullscreen.
       // Dragging back below it drops out of fullscreen to the clamped width.
       if (w > max + FULLSCREEN_SNAP_SLOP) {
@@ -1542,7 +1570,7 @@ export default function App({ runtime, projectId, pane }: { runtime: RuntimeInfo
         return;
       }
       setPanelMax(false);
-      const clamped = Math.min(Math.max(w, PANEL_MIN_WIDTH), max);
+      const clamped = Math.min(Math.max(w, Math.min(PANEL_MIN_WIDTH, max)), max);
       setPanelWidth(clamped);
     }
     window.addEventListener("pointermove", onMove);
@@ -1786,7 +1814,21 @@ export default function App({ runtime, projectId, pane }: { runtime: RuntimeInfo
       {runtime.kind === "local" && <UpdateBanner status={updateStatus} />}
       <DesktopAppBanner />
       {workspaceError && <div role="alert" className="flex items-center gap-2 px-4 mac-titlebar:ps-titlebar-controls win-titlebar:pe-win-controls py-2 text-subtext"><span>{workspaceError}</span><Button onClick={retryWorkspace}>{m.app_retry()}</Button></div>}
-      <div className={`app-body workspace-body relative flex flex-1 min-h-0 ${workspaceCardVisible ? "workspace-card-visible" : ""}`}>
+      <div ref={bodyRef} className={`app-body workspace-body relative flex flex-1 min-h-0 ${stackPanel ? "flex-col [&>.chat-pane]:overflow-y-auto [&_.chat-empty]:min-h-0 [&_.chat-empty]:overflow-y-auto [&_.chat-empty]:justify-start [&_.chat-empty]:p-0" : ""} ${workspaceCardVisible ? "workspace-card-visible" : ""}`}>
+        {projectId && <div className="absolute start-[calc(5.15rem/min(1,var(--desktop-page-zoom,1)))] top-[calc(-0.125rem/min(1,var(--desktop-page-zoom,1)))] z-10 hidden h-titlebar items-center mac-titlebar:flex">
+          <Tooltip interactive content={railVisible ? m.header_hide_sidebar() : m.chat_panel_show_sidebar()} className="rounded-md">
+            <IconButton aria-label={railVisible ? m.header_hide_sidebar() : m.chat_panel_show_sidebar()} aria-expanded={railVisible} onClick={() => {
+              if (railVisible) setRailOpen(false);
+              else {
+                focusAfterRailChange.current = "rail";
+                setRailOpen(true);
+                if (railTemporarilyHidden) closePanel();
+              }
+            }}>
+              <PanelLeft size={18} />
+            </IconButton>
+          </Tooltip>
+        </div>}
         {projectId && (
           <ChatPanel
             projectId={projectId}
@@ -1795,8 +1837,12 @@ export default function App({ runtime, projectId, pane }: { runtime: RuntimeInfo
             contentError={conversationError || null}
             onRetryContent={retryConversation}
             railHeader={railHeader}
-            railOpen={railOpen}
-            onShowRail={() => setRailOpen(true)}
+            railOpen={railVisible}
+            onShowRail={() => {
+              focusAfterRailChange.current = "rail";
+              setRailOpen(true);
+              if (railTemporarilyHidden) closePanel();
+            }}
             onNewProject={() => setNewProjectOpen(true)}
             mainView={mainView}
             onSelectMainView={selectMainView}
@@ -1839,7 +1885,7 @@ export default function App({ runtime, projectId, pane }: { runtime: RuntimeInfo
             experiments={experiments}
             runs={runs}
             onOpenExperiment={(id, runId) => openExperimentTab(id, "overview", "preview", runId)}
-            rightOffset={panelOpen ? panelWidth + 14 : undefined}
+            rightOffset={panelOpen && !stackPanel ? visiblePanelWidth + 14 : undefined}
             activeView={panelOpen && (rightTab === "files" || rightTab === "artifacts" || rightTab === "experiments" || rightTab === "terminal") ? rightTab : null}
             projectId={activeProject.id}
             onCompute={() => selectMainView("compute")}
@@ -1857,15 +1903,15 @@ export default function App({ runtime, projectId, pane }: { runtime: RuntimeInfo
         )}
         {mainView === "chat" && panelOpen && (
           <aside
-            className={`right-pane relative shrink-0 min-w-0 flex flex-col win-titlebar:pt-win-caption bg-background [&.max]:fixed [&.max]:inset-0 mac-titlebar:[&.max]:pt-titlebar [&.max]:z-60 [&.max]:border-s-0 border-s border-s-border overflow-hidden ${panelMax ? "max" : ""}`}
-            style={panelMax ? undefined : { width: panelWidth }}
+            className={`right-pane relative shrink-0 min-w-0 flex flex-col win-titlebar:pt-win-caption bg-background [&.max]:fixed [&.max]:inset-0 mac-titlebar:[&.max]:pt-titlebar [&.max]:z-60 [&.max]:border-s-0 overflow-hidden ${stackPanel ? "border-t border-t-border" : "border-s border-s-border"} ${panelMax ? "max" : ""}`}
+            style={panelMax ? undefined : stackPanel ? { width: "100%", height: "50%" } : { width: visiblePanelWidth }}
             data-onboarding="experiments"
           >
-            <div
+            {!stackPanel && <div
               className={`panel-resizer absolute start-0 top-0 bottom-0 w-1.5 z-30 [&:hover]:bg-resizer-hover [&:active]:bg-resizer-hover ${panelMax ? "cursor-e-resize" : "cursor-col-resize"}`}
               title={panelMax ? m.app_drag_to_restore_panel() : m.app_drag_to_resize_panel()}
               onPointerDown={resizePanel}
-            />
+            />}
             <div className="tabs flex items-end gap-0 pt-1 pe-1.5 pb-0 ps-2 h-10 mac-titlebar:h-titlebar border-b border-b-border bg-background shrink-0">
               <TabStrip activeKey={rightTabKey(rightTab)}>
                 {leadingFileTabs.map(renderFileTab)}
@@ -1908,23 +1954,25 @@ export default function App({ runtime, projectId, pane }: { runtime: RuntimeInfo
                 {orderedContentTabs.map(renderContentTab)}
               </TabStrip>
               <div className="panel-controls inline-flex items-center gap-0.5 self-center py-0 px-1.5 shrink-0">
-                <IconButton
-                  title={panelMax ? m.app_restore_panel() : m.app_expand_panel()}
-                  aria-label={panelMax ? m.app_restore_panel() : m.app_expand_panel()}
-                  onClick={() => setPanelMax((m) => !m)}
-                >
-                  {panelMax ? <Minimize2 size={14} /> : <Maximize2 size={14} />}
-                </IconButton>
-                <IconButton
-                  title={m.app_close_panel()}
-                  aria-label={m.app_close_panel()}
-                  onClick={() => {
-                    closePanel();
-                    setPanelMax(false);
-                  }}
-                >
-                  <X size={14} />
-                </IconButton>
+                <Tooltip interactive content={panelMax ? m.app_restore_panel() : m.app_expand_panel()}>
+                  <IconButton
+                    aria-label={panelMax ? m.app_restore_panel() : m.app_expand_panel()}
+                    onClick={() => setPanelMax((m) => !m)}
+                  >
+                    {panelMax ? <Minimize2 size={14} /> : <Maximize2 size={14} />}
+                  </IconButton>
+                </Tooltip>
+                <Tooltip interactive content={m.app_close_panel()}>
+                  <IconButton
+                    aria-label={m.app_close_panel()}
+                    onClick={() => {
+                      closePanel();
+                      setPanelMax(false);
+                    }}
+                  >
+                    <X size={14} />
+                  </IconButton>
+                </Tooltip>
               </div>
             </div>
             {/* The terminal body is the standalone TabBody after this chain. */}
@@ -1989,29 +2037,24 @@ export default function App({ runtime, projectId, pane }: { runtime: RuntimeInfo
                       </Tooltip>
                     )}
                     <div className="option-picker relative inline-flex" ref={scopeMenuRef}>
-                      <IconButton size="small"
-                        ref={scopeTriggerRef}
-                        className="experiment-scope-trigger"
-                        active={effectiveScope === "agent"}
-                        title={m.app_experiment_filter({ scope: effectiveScope === "agent" ? m.app_current_task() : m.app_entire_project() })}
-                        aria-label={m.app_filter_experiments()}
-                        aria-expanded={scopeMenuOpen}
-                        onClick={() => setScopeMenuOpen((open) => !open)}
-                      >
-                        <Filter size={16} strokeWidth={2.5} />
-                      </IconButton>
+                      <Tooltip interactive content={m.app_experiment_filter({ scope: effectiveScope === "agent" ? m.app_current_task() : m.app_entire_project() })}>
+                        <IconButton size="small"
+                          ref={scopeTriggerRef}
+                          className="experiment-scope-trigger"
+                          active={effectiveScope === "agent"}
+                          aria-label={m.app_filter_experiments()}
+                          aria-expanded={scopeMenuOpen}
+                          onClick={() => setScopeMenuOpen((open) => !open)}
+                        >
+                          <Filter size={16} strokeWidth={2.5} />
+                        </IconButton>
+                      </Tooltip>
                       {scopeMenuOpen && (
                         <div className="option-menu absolute bottom-[calc(100%_+_8px)] start-0 max-h-95 flex flex-col bg-background border border-border rounded-lg shadow-menu z-50 overflow-hidden min-w-47.5 p-1.5 [&.align-right]:start-auto [&.align-right]:end-0 [&.drop-down]:bottom-auto [&.drop-down]:top-[calc(100%_+_4px)] [&.session-menu]:start-auto [&.session-menu]:end-1.5 [&.session-menu]:top-[calc(100%_-_2px)] [&.session-menu]:min-w-35 drop-down experiment-scope-menu [&_.model-item]:whitespace-nowrap [&_.model-item:disabled]:text-muted [&_.model-item:disabled]:cursor-default [&_.model-item:disabled:hover]:bg-transparent">
                           <MenuItem
                             aria-pressed={effectiveScope === "agent"}
+                            aria-describedby={!activeSessionId || !allExperimentsAttributed ? "experiment-scope-unavailable" : undefined}
                             disabled={!activeSessionId || !allExperimentsAttributed}
-                            title={
-                              !activeSessionId
-                                ? m.app_open_task_to_filter()
-                                : !allExperimentsAttributed
-                                  ? m.app_filter_unavailable_unattributed()
-                                  : undefined
-                            }
                             onClick={() => {
                               setScope("agent");
                               setScopeMenuOpen(false);
@@ -2020,6 +2063,11 @@ export default function App({ runtime, projectId, pane }: { runtime: RuntimeInfo
                             <span>{m.app_current_task()}</span>
                             {effectiveScope === "agent" && <Check size={14} />}
                           </MenuItem>
+                          {(!activeSessionId || !allExperimentsAttributed) && (
+                            <p id="experiment-scope-unavailable" className="px-2 pb-1 text-xs text-muted">
+                              {!activeSessionId ? m.app_open_task_to_filter() : m.app_filter_unavailable_unattributed()}
+                            </p>
+                          )}
                           <MenuItem
                             aria-pressed={effectiveScope === "project"}
                             onClick={() => {
@@ -2302,6 +2350,7 @@ export default function App({ runtime, projectId, pane }: { runtime: RuntimeInfo
                         if (sessionId === null && deleted) forgetSideTab(sideTab);
                         else onActiveSessionChange(sessionId, options);
                       }}
+                      onStartHarnessDraft={() => onActiveSessionChange(null, { projectId })}
                       preferredAgent={sideTab.sessionId === null ? sideDraftAgent : uiState.preferredAgent}
                       onPreferredAgentChange={persistPreferredAgent}
                       preferredAutonomy={sideTab.sessionId === null ? sideParentSession?.autonomy ?? DEFAULT_AUTONOMY : uiState.preferredAutonomy ?? DEFAULT_AUTONOMY}

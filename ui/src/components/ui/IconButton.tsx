@@ -27,6 +27,7 @@ function classes(variant: IconButtonVariant, size: IconButtonSize, active: boole
 }
 
 export type IconButtonProps = ButtonHTMLAttributes<HTMLButtonElement> & {
+  title?: never;
   active?: boolean;
   shape?: "rounded" | "circle";
   size?: IconButtonSize;
@@ -37,10 +38,11 @@ export const IconButton = forwardRef<HTMLButtonElement, IconButtonProps>(functio
   { active = false, shape = "rounded", size = "default", variant = "default", className, ...props },
   ref,
 ) {
-  return <button ref={ref} className={classes(variant, size, active, shape, className)} {...props} />;
+  return <button ref={ref} className={classes(variant, size, active, shape, className)} {...props} title="" />;
 });
 
 export type IconButtonLinkProps = AnchorHTMLAttributes<HTMLAnchorElement> & {
+  title?: never;
   active?: boolean;
   shape?: "rounded" | "circle";
   size?: IconButtonSize;
@@ -48,5 +50,5 @@ export type IconButtonLinkProps = AnchorHTMLAttributes<HTMLAnchorElement> & {
 };
 
 export function IconButtonLink({ active = false, shape = "rounded", size = "default", variant = "default", className, ...props }: IconButtonLinkProps) {
-  return <a className={classes(variant, size, active, shape, className)} {...props} />;
+  return <a className={classes(variant, size, active, shape, className)} {...props} title="" />;
 }

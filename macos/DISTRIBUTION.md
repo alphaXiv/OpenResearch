@@ -27,7 +27,10 @@ The manual path checks out `inputs.tag` and runs the signing scripts under the
 `release-signing` environment, so the **required reviewer approving the run is
 the real gate on the certificate** — verify the tag points at trusted code (the
 `main`-only deployment-branch restriction covers the workflow file, not the
-checked-out tag).
+checked-out tag). The macOS and Linux app builds use the same UI as the CLI:
+the matching Release run's `release-ui` artifact, or the committed bundle for
+older releases. A Release run for an older source revision also uses its
+committed bundle. The artifact must still be available for manual re-attachments.
 
 ## The app updater's contract
 
@@ -80,8 +83,9 @@ dist does not generate this job's `needs: build-local-artifacts`, so
 `dist-workspace.toml` sets `allow-dirty = ["ci"]`, which makes `dist generate`
 skip `release.yml` entirely: dist config changes no longer reach CI on their own.
 To regenerate, remove `allow-dirty`, run the pinned `dist generate`, then restore
-the custom signing dependencies, release-only dispatch guard, immutable source SHA
-propagation, and required publication checks before restoring `allow-dirty`.
+the shared UI build, custom signing dependencies, release-only dispatch guard,
+immutable source SHA propagation, and required publication checks before restoring
+`allow-dirty`.
 Release recovery requires an explicit version tag; set `source-sha` to the original
 merged bump commit if `main` has advanced. Desktop attachment jobs resolve that
 published tag rather than rebuilding the current tip of `main`.
@@ -121,7 +125,10 @@ Never commit the `.p12`.
 
 ## Build / sign locally
 
+Use Node 22 and pnpm 10 for the UI build.
+
 ```bash
+pnpm -C ui install --frozen-lockfile && pnpm -C ui build
 rustup target add aarch64-apple-darwin x86_64-apple-darwin   # once, for universal
 ORX_APP_UNIVERSAL=1 bash scripts/build-macos-app.sh
 xcrun notarytool store-credentials orx-notary \

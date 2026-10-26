@@ -219,7 +219,7 @@ test("activating Goal removes its token without moving the caret behind newly ty
 test("ACP Plan configuration failure keeps the draft and prevents sending", async () => {
   let configure;
   function find(node) {
-    if (ts.isIfStatement(node) && node.expression.getText(file) === "planRequested && acpMode") configure = node;
+    if (ts.isIfStatement(node) && node.expression.getText(file) === "planRequested && acpMode && !retry") configure = node;
     ts.forEachChild(node, find);
   }
   find(file);
@@ -227,7 +227,7 @@ test("ACP Plan configuration failure keeps the draft and prevents sending", asyn
   for (const succeeds of [false, true]) {
     const calls = [];
     const bindings = {
-      planRequested: true, acpMode: {}, toggledPlanMode: true,
+      planRequested: true, acpMode: {}, retry: null, toggledPlanMode: true,
       setIndependentPlanMode: async () => { if (!succeeds) throw new Error("disconnected"); },
       inSourceScope: () => true,
       setSettingsError: error => calls.push(error),

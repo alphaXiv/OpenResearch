@@ -59,14 +59,14 @@ export function CodeBrowserHeader({
           href={githubHref}
           target="_blank"
           rel="noopener noreferrer"
-          title={githubTitle}
+          data-tip={githubTitle}
           aria-label={githubTitle}
         >
           <GitHubMark size={14} />
         </IconButtonLink>
       )}
       <span className="flex-1" />
-      <IconButton title={m.code_browser_header_refresh()} aria-label={m.code_browser_header_refresh()} onClick={onRefresh}>
+      <IconButton data-tip={m.code_browser_header_refresh()} aria-label={m.code_browser_header_refresh()} onClick={onRefresh}>
         {refreshing ? <Spinner /> : <RotateCw size={14} />}
       </IconButton>
     </div>

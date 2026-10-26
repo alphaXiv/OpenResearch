@@ -76,10 +76,9 @@ export function NewProjectDialog({
         return;
       }
       if (
-        event.key === "Enter" &&
         (event.metaKey || event.ctrlKey) &&
         !event.altKey &&
-        event.shiftKey
+        ((event.key.toLowerCase() === "n" && !event.shiftKey) || (event.key === "Enter" && event.shiftKey))
       ) {
         event.preventDefault();
         event.stopPropagation();

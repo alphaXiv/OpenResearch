@@ -1,4 +1,8 @@
 fn main() {
+    if std::path::Path::new("ui/dist").exists() {
+        println!("cargo:rerun-if-changed=ui/dist");
+    }
+
     println!("cargo:rerun-if-env-changed=ORX_OFFICIAL_RELEASE_BUILD");
     println!("cargo:rerun-if-env-changed=GITHUB_ACTIONS");
     println!("cargo:rerun-if-env-changed=GITHUB_REPOSITORY");

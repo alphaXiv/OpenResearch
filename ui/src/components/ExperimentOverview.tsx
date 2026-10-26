@@ -117,15 +117,17 @@ export function ExperimentOverview({
             </Button>
           )}
           {latestRun && hasTrackio && (
-            <Button
-              title={m.a11y_trackio_charts()}
-              {...tabOpenGestureHandlers<HTMLButtonElement>((intent) =>
-                onOpenTrackio(latestRun.id, intent),
-              )}
-            >
-              <ChartLine size={16} />
-              {m.experiment_overview_visualize()}
-            </Button>
+            <Tooltip interactive content={m.a11y_trackio_charts()} className="rounded-md">
+              <Button
+                aria-description={m.a11y_trackio_charts()}
+                {...tabOpenGestureHandlers<HTMLButtonElement>((intent) =>
+                  onOpenTrackio(latestRun.id, intent),
+                )}
+              >
+                <ChartLine size={16} />
+                {m.experiment_overview_visualize()}
+              </Button>
+            </Tooltip>
           )}
           <Button
             {...tabOpenGestureHandlers<HTMLButtonElement>(onOpenCode)}

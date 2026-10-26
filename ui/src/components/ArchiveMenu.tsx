@@ -1,9 +1,9 @@
-import { useRef, useState } from "react";
-import { createPortal } from "react-dom";
+import { useId, useState } from "react";
+import { DirectionProvider } from "@base-ui/react/direction-provider";
+import { Menu } from "@base-ui/react/menu";
 import { Ellipsis } from "lucide-react";
 import { m } from "../paraglide/messages.js";
 import type { Experiment } from "../api";
-import { usePopover } from "./ModelPicker";
 import { Button, IconButton, MenuItem } from "./ui";
 
 export type ArchiveActions = {
@@ -72,67 +72,40 @@ export function ArchiveMenu({ id, name, actions, onArchive, onDelete, compact = 
   onDelete: (id: string) => void;
   compact?: boolean;
 }) {
-  const triggerRef = useRef<HTMLButtonElement>(null);
-  const menu = usePopover(triggerRef);
-  const [position, setPosition] = useState({ top: 0, left: 0 });
-  const toggle = () => {
-    if (!menu.open && triggerRef.current) {
-      const rect = triggerRef.current.getBoundingClientRect();
-      const menuHeight = Object.values(actions).filter(Boolean).length * 32 + 12;
-      const below = window.innerHeight - rect.bottom >= menuHeight;
-      setPosition({
-        top: below ? rect.bottom + 4 : Math.max(4, rect.top - menuHeight),
-        left: Math.max(4, Math.min(rect.right - 176, window.innerWidth - 180)),
-      });
-    }
-    menu.setOpen((open) => !open);
-  };
-  const choose = (direction: "ancestors" | "descendants" | "only", archived: boolean) => {
-    menu.setOpen(false);
-    onArchive(id, direction, archived);
-  };
-  const remove = () => {
-    menu.setOpen(false);
-    if (window.confirm(m.tree_delete_experiment_confirm({ name }))) onDelete(id);
-  };
+  const [open, setOpen] = useState(false);
+  const triggerId = useId();
 
   return (
     <div className="nodrag ms-auto shrink-0">
-      {compact ? (
-        <IconButton
-          type="button"
-          ref={triggerRef}
-          size="small"
-          className="node-action"
-          aria-label={m.tree_archive_manage_experiment({ name })}
-          aria-expanded={menu.open}
-          onClick={toggle}
-        >
-          <Ellipsis size={16} aria-hidden="true" />
-        </IconButton>
-      ) : (
-        <Button
-          type="button"
-          size="small"
-          ref={triggerRef}
-          aria-label={m.tree_archive_manage_experiment({ name })}
-          aria-expanded={menu.open}
-          onClick={toggle}
-        >
-          {m.tree_archive_manage()}
-        </Button>
-      )}
-      {menu.open && createPortal(
-        <div ref={menu.ref} className="option-menu fixed z-70 min-w-44 rounded-lg border border-border bg-background p-1.5 shadow-menu" style={position}>
-          {actions.archiveAbove && <MenuItem onClick={() => choose("ancestors", true)}>{m.tree_archive_above()}</MenuItem>}
-          {actions.archiveOnly && <MenuItem onClick={() => choose("only", true)}>{m.tree_archive_only()}</MenuItem>}
-          {actions.archiveDown && <MenuItem onClick={() => choose("descendants", true)}>{m.tree_archive_down()}</MenuItem>}
-          {actions.restoreOnly && <MenuItem onClick={() => choose("only", false)}>{m.tree_restore_only()}</MenuItem>}
-          {actions.restoreAbove && <MenuItem onClick={() => choose("ancestors", false)}>{m.tree_restore_above()}</MenuItem>}
-          {actions.restoreDown && <MenuItem onClick={() => choose("descendants", false)}>{m.tree_restore_down()}</MenuItem>}
-          {actions.remove && <MenuItem danger onClick={remove}>{m.tree_delete_experiment()}</MenuItem>}
-        </div>, document.body,
-      )}
+      <DirectionProvider direction={typeof document !== "undefined" && document.documentElement.dir === "rtl" ? "rtl" : "ltr"}>
+        <Menu.Root open={open} onOpenChange={setOpen} triggerId={triggerId} modal={false}>
+          <Menu.Trigger
+            id={triggerId}
+            render={compact
+              ? <IconButton type="button" size="small" className="node-action" aria-label={m.tree_archive_manage_experiment({ name })} />
+              : <Button type="button" size="small" aria-label={m.tree_archive_manage_experiment({ name })} />
+            }
+            // XYFlow consumes mousedown before React's bubble handlers receive it.
+            onMouseDown={(event) => event.preventBaseUIHandler()}
+            onClick={(event) => { event.preventBaseUIHandler(); setOpen((value) => !value); }}
+          >
+            {compact ? <Ellipsis size={16} aria-hidden="true" /> : m.tree_archive_manage()}
+          </Menu.Trigger>
+          <Menu.Portal>
+            <Menu.Positioner className="z-70" positionMethod="fixed" align="end" sideOffset={4} collisionPadding={4}>
+              <Menu.Popup className="outline-none max-h-(--available-height) overflow-y-auto option-menu min-w-44 rounded-lg border border-border bg-background p-1.5 shadow-menu">
+                {actions.archiveAbove && <Menu.Item nativeButton render={<MenuItem className="data-highlighted:bg-surface" />} onClick={() => onArchive(id, "ancestors", true)}>{m.tree_archive_above()}</Menu.Item>}
+                {actions.archiveOnly && <Menu.Item nativeButton render={<MenuItem className="data-highlighted:bg-surface" />} onClick={() => onArchive(id, "only", true)}>{m.tree_archive_only()}</Menu.Item>}
+                {actions.archiveDown && <Menu.Item nativeButton render={<MenuItem className="data-highlighted:bg-surface" />} onClick={() => onArchive(id, "descendants", true)}>{m.tree_archive_down()}</Menu.Item>}
+                {actions.restoreOnly && <Menu.Item nativeButton render={<MenuItem className="data-highlighted:bg-surface" />} onClick={() => onArchive(id, "only", false)}>{m.tree_restore_only()}</Menu.Item>}
+                {actions.restoreAbove && <Menu.Item nativeButton render={<MenuItem className="data-highlighted:bg-surface" />} onClick={() => onArchive(id, "ancestors", false)}>{m.tree_restore_above()}</Menu.Item>}
+                {actions.restoreDown && <Menu.Item nativeButton render={<MenuItem className="data-highlighted:bg-surface" />} onClick={() => onArchive(id, "descendants", false)}>{m.tree_restore_down()}</Menu.Item>}
+                {actions.remove && <Menu.Item nativeButton render={<MenuItem danger className="data-highlighted:bg-surface" />} onClick={() => { if (window.confirm(m.tree_delete_experiment_confirm({ name }))) onDelete(id); }}>{m.tree_delete_experiment()}</Menu.Item>}
+              </Menu.Popup>
+            </Menu.Positioner>
+          </Menu.Portal>
+        </Menu.Root>
+      </DirectionProvider>
     </div>
   );
 }

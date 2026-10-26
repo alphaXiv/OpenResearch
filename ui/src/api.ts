@@ -89,6 +89,14 @@ export interface Experiment {
   archived: boolean;
 }
 
+/** An experiment a chat created, launched a run of, or asked to be woken for. */
+export interface SessionExperiment {
+  experiment: Experiment;
+  projectName: string;
+  /** Its newest live run, else its newest run: a forced relaunch can leave an older run live. Null until it has been run. */
+  currentRun: Pick<Run, "status" | "cancelRequested" | "createdAt" | "endedAt"> | null;
+}
+
 export type RunStatus = "starting" | "running" | "done" | "failed" | "cancelled" | "lost";
 export type RunDisplayStatus = RunStatus | "cancelling";
 
@@ -126,6 +134,8 @@ export function experimentMonitoringError(runs: Pick<Run, "status" | "backend" |
   return newestFirst.map(runMonitoringError).find((error) => error !== null) ?? null;
 }
 
+export class RejectedResponseError extends Error {}
+
 const writeScopes = new WeakMap<Response, ReturnType<typeof workspaceScope>>();
 
 async function json<T>(res: Response): Promise<T> {
@@ -154,7 +164,8 @@ async function json<T>(res: Response): Promise<T> {
       if (error instanceof FileChangedError) throw error;
       // non-JSON body — show it raw
     }
-    throw new Error(message || `HTTP ${res.status}`);
+    const ErrorType = res.status >= 400 && res.status < 500 ? RejectedResponseError : Error;
+    throw new ErrorType(message || `HTTP ${res.status}`);
   }
   const data: T = await res.json();
   const scope = writeScopes.get(res);
@@ -395,6 +406,10 @@ export const listExperiments = (projectId: string, signal?: AbortSignal) =>
   get<{ experiments: Experiment[] }>(`/api/projects/${projectId}/experiments`, signal).then(
     (r) => r.experiments,
   );
+
+export const getSessionExperiments = (sessionId: string, signal?: AbortSignal) =>
+  get<{ experiments: SessionExperiment[] }>(`/api/chat/sessions/${encodeURIComponent(sessionId)}/experiments`, signal)
+    .then((r) => r.experiments);
 
 export const deleteExperiment = (id: string) =>
   writeResponse(`/api/experiments/${id}`, { method: "DELETE" }).then((r) => json<{ ok: boolean; branchCommit: string | null }>(r));
