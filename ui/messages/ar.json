@@ -1763,6 +1763,9 @@
   "chat_experiment_starting": "جارٍ بدء التجربة",
   "chat_experiment_cancelling": "جارٍ إلغاء التجربة",
   "chat_experiments_running": "{count} تجارب قيد التشغيل",
+  "skills_detection_details": "تفاصيل اكتشاف المهارات",
+  "skills_detection_copy": "نسخ تفاصيل الاكتشاف",
+  "skills_detection_accepted": "تم قبول {count}",
   "desktop_zoom_controls": "عناصر التحكم في التكبير",
   "desktop_zoom_reset": "إعادة تعيين"
 }

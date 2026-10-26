@@ -257,7 +257,6 @@ export const listLatexTemplatesQuery = () => queryOptions({
 export const listUserSkillsQuery = () => queryOptions({
   queryKey: workspaceKey("listUserSkills"),
   queryFn: ({ signal }) => api.listUserSkills(signal),
-  select: (data) => data.skills,
   refetchInterval: 30_000,
   staleTime: 300_000,
 });
