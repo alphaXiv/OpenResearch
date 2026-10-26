@@ -132,6 +132,10 @@ pub(crate) struct Settings {
     /// separate compatibility file, but retaining this avoids dropping it.
     #[serde(default)]
     pub orx_binary_path: Option<String>,
+    /// Default remote server host for desktop app launches (e.g. `user@host` or alias).
+    /// When set, the standalone desktop app connects to this remote server by default.
+    #[serde(default)]
+    pub default_remote: Option<String>,
     /// Default compute target for local-mode launches (Settings → Compute).
     /// Absent = no default: local launches require an explicit `--backend`.
     #[serde(default)]
@@ -325,6 +329,15 @@ pub(crate) fn update_channel() -> crate::updates::ReleaseChannel {
 
 pub(crate) fn set_update_channel(channel: crate::updates::ReleaseChannel) -> std::io::Result<()> {
     mutate_settings(|settings| settings.update_channel = Some(channel))
+}
+
+pub(crate) fn default_remote() -> Option<String> {
+    load_settings().and_then(|settings| settings.default_remote)
+}
+
+#[allow(dead_code)]
+pub(crate) fn set_default_remote(host: Option<String>) -> std::io::Result<()> {
+    mutate_settings(|settings| settings.default_remote = host)
 }
 
 pub(crate) fn github_default_prompt_seen() -> bool {
@@ -1629,6 +1642,21 @@ mod tests {
         // Re-enabling all clears the set.
         set_disabled_lit_sources(vec![]).unwrap();
         assert!(disabled_lit_sources().is_empty());
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn default_remote_preserves_siblings_and_roundtrips() {
+        let _g = EnvGuard::new(OPT_VARS);
+        let dir = std::env::temp_dir().join(format!("orx-tel-remote-{}", uuid::Uuid::new_v4()));
+        std::env::set_var("XDG_CONFIG_HOME", &dir);
+
+        assert_eq!(default_remote(), None);
+        set_default_remote(Some("user@remote-host".into())).unwrap();
+        assert_eq!(default_remote().as_deref(), Some("user@remote-host"));
+        set_default_remote(None).unwrap();
+        assert_eq!(default_remote(), None);
 
         let _ = std::fs::remove_dir_all(&dir);
     }

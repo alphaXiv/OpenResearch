@@ -1674,42 +1674,51 @@ pub async fn run(host: &str, args: UpArgs) -> Result<()> {
             Some(args.port),
         )
         .await?;
-    let session = loop {
-        let current = manager
-            .get(&session.id)
-            .await
-            .ok_or_else(|| anyhow!("Remote session ended before it started."))?;
-        match current.status {
-            RemoteSessionStatus::Connected => break current,
-            RemoteSessionStatus::NeedsInstall => {
-                return Err(anyhow!(
-                    "OpenResearch is not installed for {} on {host}. Open the local dashboard to install it with configurable paths.",
-                    current.user.as_deref().unwrap_or("the selected user")
-                ));
+    if args.desktop_app {
+        // In desktop app mode, the presentation gateway is already listening on args.port.
+        // The GUI handles install, update, and reconnection flows.
+        crate::commands::up::shutdown_signal().await;
+    } else {
+        let session = loop {
+            let current = manager
+                .get(&session.id)
+                .await
+                .ok_or_else(|| anyhow!("Remote session ended before it started."))?;
+            match current.status {
+                RemoteSessionStatus::Connected => break current,
+                RemoteSessionStatus::NeedsInstall => {
+                    return Err(anyhow!(
+                        "OpenResearch is not installed for {} on {host}. Open the local dashboard to install it with configurable paths.",
+                        current.user.as_deref().unwrap_or("the selected user")
+                    ));
+                }
+                RemoteSessionStatus::NeedsUpdate => {
+                    return Err(anyhow!(
+                        "OpenResearch on {host} does not support dashboard protocol {DASHBOARD_PROTOCOL}. Update it from the local dashboard."
+                    ));
+                }
+                RemoteSessionStatus::Disconnected => {
+                    return Err(anyhow!(
+                        "Could not open {host}: {}",
+                        current
+                            .error
+                            .as_deref()
+                            .unwrap_or("remote connection failed")
+                    ));
+                }
+                _ => tokio::time::sleep(Duration::from_millis(200)).await,
             }
-            RemoteSessionStatus::NeedsUpdate => {
-                return Err(anyhow!(
-                    "OpenResearch on {host} does not support dashboard protocol {DASHBOARD_PROTOCOL}. Update it from the local dashboard."
-                ));
-            }
-            RemoteSessionStatus::Disconnected => {
-                return Err(anyhow!(
-                    "Could not open {host}: {}",
-                    current
-                        .error
-                        .as_deref()
-                        .unwrap_or("remote connection failed")
-                ));
-            }
-            _ => tokio::time::sleep(Duration::from_millis(200)).await,
+        };
+        eprintln!("orx up --remote: dashboard on {}", session.gateway_url);
+        if !args.no_browser {
+            browser::open_dashboard(&session.gateway_url, crate::telemetry::UpLaunchMode::Remote);
         }
-    };
-    eprintln!("orx up --remote: dashboard on {}", session.gateway_url);
-    if !args.no_browser {
-        browser::open_dashboard(&session.gateway_url, crate::telemetry::UpLaunchMode::Remote);
+        eprintln!("orx up --remote: press Ctrl-C to stop.");
+        tokio::select! {
+            _ = tokio::signal::ctrl_c() => {}
+            _ = crate::commands::up::shutdown_signal() => {}
+        }
     }
-    eprintln!("orx up --remote: press Ctrl-C to stop.");
-    let _ = tokio::signal::ctrl_c().await;
     manager.shutdown().await;
     Ok(())
 }

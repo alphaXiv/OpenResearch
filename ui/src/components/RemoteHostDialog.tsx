@@ -44,6 +44,7 @@ export function RemoteHostDialog({
         locale: getLocale(),
       }]);
       if (remoteWindow) remoteWindow.location.replace(session.gatewayUrl);
+      else if (inDesktopApp) window.location.href = session.gatewayUrl;
       else window.open(session.gatewayUrl, "_blank");
       onClose();
     } catch (error) {
@@ -54,9 +55,14 @@ export function RemoteHostDialog({
     }
   }
 
+  const trimmedQuery = query.trim();
   const filteredHosts = hosts?.filter((host) =>
-    host.host.toLocaleLowerCase().includes(query.trim().toLocaleLowerCase()),
+    host.host.toLocaleLowerCase().includes(trimmedQuery.toLocaleLowerCase()),
   );
+  const hasExactMatch = filteredHosts?.some(
+    (h) => h.host.toLocaleLowerCase() === trimmedQuery.toLocaleLowerCase(),
+  );
+  const showCustomOption = trimmedQuery.length > 0 && !hasExactMatch;
   const sessionByHost = new Map(sessions.map((session) => [session.host, session]));
 
   return <EscapeScope onEscape={onClose}>
@@ -89,28 +95,45 @@ export function RemoteHostDialog({
                 <p className="m-3 text-sm text-accent-red">{loadError}</p>
               ) : hosts === null ? (
                 <div className="flex items-center gap-2 p-3 text-sm text-subtext"><Spinner /> {m.settings_page_reading_ssh_config()}</div>
-              ) : filteredHosts?.length === 0 ? (
+              ) : filteredHosts?.length === 0 && !showCustomOption ? (
                 <p className="m-3 text-sm text-subtext">{m.remote_no_matching_hosts()}</p>
               ) : (
-                filteredHosts?.map((host) => {
-                  const session = sessionByHost.get(host.host);
-                  return (
+                <>
+                  {showCustomOption && (
                     <Button
-                      key={host.host}
                       variant="ghost"
-                      className="w-full justify-start text-base font-normal"
-                      disabled={openingHost === host.host}
-                      onClick={() => void openRemote(host.host)}
+                      className="w-full justify-start text-base font-normal text-accent-blue"
+                      disabled={openingHost === trimmedQuery}
+                      onClick={() => void openRemote(trimmedQuery)}
                     >
-                      <span className="min-w-0 flex-1 truncate text-start">{host.host}</span>
-                      {openingHost === host.host ? (
+                      <span className="min-w-0 flex-1 truncate text-start">{trimmedQuery}</span>
+                      {openingHost === trimmedQuery ? (
                         <Spinner />
-                      ) : session ? (
+                      ) : (
                         <span className="text-sm text-subtext">{m.remote_open()}</span>
-                      ) : null}
+                      )}
                     </Button>
-                  );
-                })
+                  )}
+                  {filteredHosts?.map((host) => {
+                    const session = sessionByHost.get(host.host);
+                    return (
+                      <Button
+                        key={host.host}
+                        variant="ghost"
+                        className="w-full justify-start text-base font-normal"
+                        disabled={openingHost === host.host}
+                        onClick={() => void openRemote(host.host)}
+                      >
+                        <span className="min-w-0 flex-1 truncate text-start">{host.host}</span>
+                        {openingHost === host.host ? (
+                          <Spinner />
+                        ) : session ? (
+                          <span className="text-sm text-subtext">{m.remote_open()}</span>
+                        ) : null}
+                      </Button>
+                    );
+                  })}
+                </>
               )}
             </div>
             <div className="shrink-0 border-t border-border-variant p-2">

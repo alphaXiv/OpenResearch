@@ -53,6 +53,26 @@ CLI release and updates itself the same way (below).
 
 The app uses port 4792, or a free port if something else holds it.
 
+#### Connecting to a remote server (three-connection scheme)
+
+The Windows standalone desktop app can connect directly to a remote server running `orx` (such as a local server or workstation that orchestrates compute nodes and experiment workloads), allowing the Windows laptop to act as a monitoring and interaction frontend.
+
+You can specify the remote host in any of the following ways:
+
+1. **In-App Connection**: Click the workspace connection indicator in the app header to open the Remote Host dialog, select a configured SSH host from `~/.ssh/config`, or type a custom destination (e.g. `user@remote-host` or `user@192.0.2.1`). The desktop app switches to the remote workspace directly within the app window.
+2. **Command Line / Desktop Shortcut**: Pass `--remote <host>` directly to `OpenResearch.exe`, for example:
+   ```cmd
+   OpenResearch.exe --remote user@remote-host
+   ```
+   You can create a Windows shortcut to `OpenResearch.exe` and append `--remote <host>` to the Target property.
+3. **Companion Configuration File**: Place an `OpenResearch.json` (or `openresearch.json`) file in the application directory beside `OpenResearch.exe` containing:
+   ```json
+   {
+     "remote": "user@remote-host"
+   }
+   ```
+4. **Environment Variable**: Set `ORX_REMOTE` or `ORX_APP_REMOTE` (e.g. `set ORX_REMOTE=user@remote-host`) before launching the app.
+
 ### The CLI
 
 From [Releases](https://github.com/alphaXiv/OpenResearch/releases), download

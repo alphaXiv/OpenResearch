@@ -166,3 +166,55 @@ for (const outcome of ["success", "failure", "popup-blocked"]) {
     }
   });
 }
+
+test("desktop app navigates in-place and supports custom user@host query", async () => {
+  const state = hooks();
+  const calls = [];
+  const { RemoteHostDialog } = load("components/RemoteHostDialog.tsx", {
+    react: state.react,
+    "react-dom": { createPortal: (tree) => tree },
+    "@tanstack/react-query": {
+      useQuery: ({ kind }) => ({ data: kind === "hosts" ? { hosts: [{ host: "research" }], defaultHost: null } : [] }),
+      useMutation: () => ({ mutateAsync: async (args) => {
+        calls.push(["connect", ...args]);
+        return { gatewayUrl: "http://localhost:4910/" };
+      } }),
+    },
+    "lucide-react": { SlidersHorizontal: "Icon", X: "Icon" },
+    "../api": {}, "../paraglide/messages.js": messages,
+    "../paraglide/runtime.js": { getLocale: () => "en" },
+    "../queries/settings": { getSshSettingsQuery: () => ({ kind: "hosts" }), listRemoteSessionsQuery: () => ({ kind: "sessions" }) },
+    "../theme": { getThemePreference: () => "dark" },
+    "./useDialogFocus": { useDialogFocus: () => {} },
+    "./ui": {
+      Button: "button", IconButton: "button", Input: "input", Spinner: "Spinner",
+      showAlert: (...args) => calls.push(["alert", ...args]),
+    },
+  }, {
+    document: { body: {} },
+    window: {
+      __ORX_DESKTOP__: true,
+      location: {
+        set href(url) { calls.push(["navigate-app", url]); },
+      },
+    },
+  });
+
+  // Type custom query user@remote-host
+  const render = () => { state.reset(); return RemoteHostDialog({ onClose: () => calls.push(["close-dialog"]), onConfigureSsh: () => {} }); };
+  let tree = render();
+  nodes(tree).find((node) => node.type === "input").props.onChange({ target: { value: "user@remote-host" } });
+  tree = render();
+
+  // Custom button appears
+  const customBtn = nodes(tree).find((node) => node.type === "button" && nodes(node).some((child) => child.props?.children === "user@remote-host"));
+  assert.ok(customBtn);
+  customBtn.props.onClick();
+
+  await new Promise(setImmediate);
+  assert.deepEqual(calls, [
+    ["connect", "user@remote-host", { theme: "dark", locale: "en" }],
+    ["navigate-app", "http://localhost:4910/"],
+    ["close-dialog"],
+  ]);
+});

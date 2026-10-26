@@ -44,19 +44,148 @@ pub fn launched_as_app_bundle() -> bool {
     is_bundle_exe_launch(&exe, std::env::args_os().next().as_deref())
 }
 
-/// The whole argument list the Windows launcher and the Linux AppImage's AppRun
-/// start `orx` with; `orx app` with anything after it is not the app.
-#[cfg(all(desktop_app, not(target_os = "macos")))]
+/// The argument the Windows launcher and the Linux AppImage's AppRun start `orx` with (`orx app`).
+#[cfg_attr(not(desktop_app), allow(dead_code))]
 pub const APP_ARG: &str = "app";
 
 /// Carries `--no-telemetry` into `orx app`, whose argument list must stay exactly [`APP_ARG`].
 #[cfg(all(desktop_app, not(target_os = "macos")))]
 pub const APP_NO_TELEMETRY_ENV: &str = "ORX_APP_NO_TELEMETRY";
 
+#[cfg_attr(not(desktop_app), allow(dead_code))]
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
+pub struct AppArgs {
+    pub remote: Option<String>,
+    pub port: Option<u16>,
+    pub model: Option<String>,
+    pub no_agent: bool,
+}
+
+#[cfg_attr(not(desktop_app), allow(dead_code))]
+pub(crate) fn is_app_args<I, T>(mut args: I) -> bool
+where
+    I: Iterator<Item = T>,
+    T: AsRef<std::ffi::OsStr>,
+{
+    args.next().is_some_and(|arg| arg.as_ref() == APP_ARG)
+}
+
 #[cfg(all(desktop_app, not(target_os = "macos")))]
 pub fn launched_with_app_arg() -> bool {
-    let mut args = std::env::args_os().skip(1);
-    args.next().is_some_and(|arg| arg == APP_ARG) && args.next().is_none()
+    is_app_args(std::env::args_os().skip(1))
+}
+
+#[cfg_attr(not(desktop_app), allow(dead_code))]
+pub(crate) fn parse_app_args_from<I, T>(args: I) -> AppArgs
+where
+    I: IntoIterator<Item = T>,
+    T: Into<std::ffi::OsString>,
+{
+    let mut remote = None;
+    let mut port = None;
+    let mut model = None;
+    let mut no_agent = false;
+
+    let strings: Vec<String> = args
+        .into_iter()
+        .map(|s| s.into().to_string_lossy().into_owned())
+        .collect();
+
+    let mut iter = strings.into_iter();
+    if let Some(first) = iter.next() {
+        let mut current = if first == APP_ARG {
+            iter.next()
+        } else {
+            Some(first)
+        };
+        while let Some(arg) = current {
+            if arg == "--remote" {
+                remote = iter.next();
+            } else if let Some(rest) = arg.strip_prefix("--remote=") {
+                remote = Some(rest.to_string());
+            } else if arg == "--port" {
+                port = iter.next().and_then(|p| p.parse().ok());
+            } else if let Some(rest) = arg.strip_prefix("--port=") {
+                port = rest.parse().ok();
+            } else if arg == "--model" {
+                model = iter.next();
+            } else if let Some(rest) = arg.strip_prefix("--model=") {
+                model = Some(rest.to_string());
+            } else if arg == "--no-agent" {
+                no_agent = true;
+            }
+            current = iter.next();
+        }
+    }
+    AppArgs {
+        remote: remote.filter(|r| !r.trim().is_empty()),
+        port,
+        model,
+        no_agent,
+    }
+}
+
+#[cfg(desktop_app)]
+pub(crate) fn parse_app_args() -> AppArgs {
+    parse_app_args_from(std::env::args_os().skip(1))
+}
+
+#[cfg_attr(not(desktop_app), allow(dead_code))]
+pub(crate) fn read_companion_config_remote_from(dir: &std::path::Path) -> Option<String> {
+    for name in ["OpenResearch.json", "openresearch.json"] {
+        let path = dir.join(name);
+        if let Ok(content) = std::fs::read_to_string(&path) {
+            if let Ok(json) = serde_json::from_str::<serde_json::Value>(&content) {
+                if let Some(remote) = json.get("remote").and_then(|v| v.as_str()) {
+                    let remote = remote.trim();
+                    if !remote.is_empty() {
+                        return Some(remote.to_string());
+                    }
+                }
+            }
+        }
+    }
+    None
+}
+
+#[cfg(desktop_app)]
+pub(crate) fn read_companion_config_remote() -> Option<String> {
+    let exe = std::env::current_exe().ok()?;
+    let dir = exe.parent()?;
+    read_companion_config_remote_from(dir)
+}
+
+#[cfg_attr(not(desktop_app), allow(dead_code))]
+pub(crate) fn resolve_effective_remote_with<F1, F2, F3>(
+    cli_remote: Option<String>,
+    env_lookup: F1,
+    companion_lookup: F2,
+    default_lookup: F3,
+) -> Option<String>
+where
+    F1: FnOnce() -> Option<String>,
+    F2: FnOnce() -> Option<String>,
+    F3: FnOnce() -> Option<String>,
+{
+    cli_remote
+        .or_else(env_lookup)
+        .or_else(companion_lookup)
+        .or_else(default_lookup)
+}
+
+#[cfg(desktop_app)]
+pub(crate) fn resolve_effective_remote(cli_remote: Option<String>) -> Option<String> {
+    resolve_effective_remote_with(
+        cli_remote,
+        || {
+            std::env::var("ORX_REMOTE")
+                .or_else(|_| std::env::var("ORX_APP_REMOTE"))
+                .ok()
+                .filter(|s| !s.trim().is_empty())
+        },
+        read_companion_config_remote,
+        crate::config::default_remote,
+    )
 }
 
 /// The dock and app grid name and icon a window only through a desktop entry.
@@ -129,12 +258,15 @@ const APP_PORT: u16 = 4792;
 /// setup fails; quitting exits the process.
 #[cfg(desktop_app)]
 pub async fn run() {
+    let app_args = parse_app_args();
+    let effective_remote = resolve_effective_remote(app_args.remote.clone());
+
     #[cfg(not(target_os = "macos"))]
     let focus_requests = {
         // A relaunched Windows app first waits out its predecessor, which holds
         // the claim (Linux relaunches by exec, which releases it).
         crate::updates::await_replaced_parent();
-        match instance::claim() {
+        match instance::claim(effective_remote.as_deref()) {
             Some(requests) => requests,
             None => return,
         }
@@ -148,10 +280,12 @@ pub async fn run() {
     // After the claim, so a launch that only brings the window forward isn't a
     // start. The durable outbox covers a quit before delivery.
     let _telemetry = crate::telemetry::TelemetrySession::start_app();
-    if let Err(error) = crate::local::storage::prepare().await {
-        eprintln!("OpenResearch storage: {error}");
-        crate::show_error_dialog(&error.to_string());
-        return;
+    if effective_remote.is_none() {
+        if let Err(error) = crate::local::storage::prepare().await {
+            eprintln!("OpenResearch storage: {error}");
+            crate::show_error_dialog(&error.to_string());
+            return;
+        }
     }
     // App mode returns before `dispatch`, which is where `orx up` takes this
     // same read lock. Without it `orx delete` from a CLI install sees no reader
@@ -174,10 +308,15 @@ pub async fn run() {
     // since the window's localStorage is keyed by origin, falling back to an
     // ephemeral one when a terminal `orx up` or another app holds it.
     let port_is_free = |port: &u16| std::net::TcpListener::bind(("127.0.0.1", *port)).is_ok();
-    let port = std::env::var(crate::updates::APP_RELAUNCH_PORT_ENV)
-        .ok()
-        .and_then(|port| port.parse::<u16>().ok())
+    let port = app_args
+        .port
         .filter(port_is_free)
+        .or_else(|| {
+            std::env::var(crate::updates::APP_RELAUNCH_PORT_ENV)
+                .ok()
+                .and_then(|port| port.parse::<u16>().ok())
+                .filter(port_is_free)
+        })
         .or_else(|| Some(APP_PORT).filter(port_is_free))
         .unwrap_or_else(|| {
             std::net::TcpListener::bind(("127.0.0.1", 0))
@@ -186,14 +325,15 @@ pub async fn run() {
                 .unwrap_or(4791)
         });
     #[cfg(target_os = "macos")]
-    imp::run_event_loop(port, false);
+    #[cfg(target_os = "macos")]
+    imp::run_event_loop(port, false, effective_remote, app_args);
     #[cfg(not(target_os = "macos"))]
-    imp::run_event_loop(port, false, focus_requests);
+    imp::run_event_loop(port, false, focus_requests, effective_remote, app_args);
 }
 
 #[cfg(all(target_os = "macos", debug_assertions))]
 pub fn run_dev(port: u16) {
-    imp::run_event_loop(port, true);
+    imp::run_event_loop(port, true, None, AppArgs::default());
 }
 
 /// Adopt the user's shell environment in place of the one launchd or the desktop
@@ -364,11 +504,21 @@ mod instance {
 
     /// Claims the app for this process. `None` means another instance has it
     /// and was asked to come forward.
-    pub(super) fn claim() -> Option<FocusRequests> {
+    pub(super) fn claim(remote: Option<&str>) -> Option<FocusRequests> {
         // SAFETY: plain syscalls on NUL-terminated names. The handles stay open
         // on purpose: the claim lasts until the process exits.
         // Bound before the calls, so no drop runs between CreateMutexW and GetLastError.
-        let (event_name, mutex_name) = (super::wide(FOCUS_EVENT), super::wide(MUTEX));
+        let (event_name_str, mutex_name_str) = match remote {
+            Some(r) => {
+                let clean: String = r
+                    .chars()
+                    .map(|c| if c.is_alphanumeric() { c } else { '_' })
+                    .collect();
+                (format!("{FOCUS_EVENT}_{clean}"), format!("{MUTEX}_{clean}"))
+            }
+            None => (FOCUS_EVENT.to_string(), MUTEX.to_string()),
+        };
+        let (event_name, mutex_name) = (super::wide(&event_name_str), super::wide(&mutex_name_str));
         unsafe {
             // The event first, so it exists by the time anyone sees the claim.
             // For a second launch this opens the running app's event.
@@ -686,6 +836,8 @@ mod imp {
         port: u16,
         external_server: bool,
         #[cfg(not(target_os = "macos"))] focus_requests: super::instance::FocusRequests,
+        effective_remote: Option<String>,
+        app_args: super::AppArgs,
     ) {
         let origin = format!(
             "http://{}:{port}",
@@ -701,24 +853,31 @@ mod imp {
         gtk::glib::set_prgname(Some("OpenResearch"));
         let event_loop = EventLoopBuilder::<UserEvent>::with_user_event().build();
 
-        // Dashboard server on background workers (we're inside main's runtime).
+        // Dashboard server / presentation gateway on background workers (we're inside main's runtime).
         if !external_server {
+            let remote_target = effective_remote.clone();
+            let app_model = app_args.model.clone();
+            let app_no_agent = app_args.no_agent;
             tokio::spawn(async move {
                 let args = crate::UpArgs {
                     port,
-                    remote: None,
+                    remote: remote_target.clone(),
                     no_browser: true,
-                    no_agent: false,
-                    model: None,
+                    no_agent: app_no_agent,
+                    model: app_model,
                     remote_host: false,
                     desktop_app: true,
                 };
                 // The window is useless without its server, so the app goes with it.
-                match crate::commands::up::run(args).await {
+                let result = match remote_target {
+                    Some(ref host) => crate::commands::up_remote::run(host, args).await,
+                    None => crate::commands::up::run(args).await,
+                };
+                match result {
                     Ok(()) => std::process::exit(0),
                     Err(err) => {
-                        eprintln!("openresearch app: dashboard server exited: {err}");
-                        crate::show_error_dialog(&format!("The dashboard server stopped: {err}"));
+                        eprintln!("openresearch app: server exited: {err}");
+                        crate::show_error_dialog(&format!("The server stopped: {err}"));
                         std::process::exit(1);
                     }
                 }
@@ -1632,10 +1791,131 @@ mod imp {
 #[cfg(test)]
 mod tests {
     use super::{
-        deep_link_path, desktop_entry, is_bundle_exe_launch, is_dashboard_url, opens_in_browser,
+        deep_link_path, desktop_entry, is_app_args, is_bundle_exe_launch, is_dashboard_url,
+        opens_in_browser, parse_app_args_from, read_companion_config_remote_from,
+        resolve_effective_remote_with, AppArgs,
     };
     use std::ffi::OsStr;
     use std::path::Path;
+
+    #[test]
+    fn app_launch_args_detection_and_parsing() {
+        assert!(is_app_args([OsStr::new("app")].into_iter()));
+        assert!(is_app_args(
+            [
+                OsStr::new("app"),
+                OsStr::new("--remote"),
+                OsStr::new("user@remote-host")
+            ]
+            .into_iter()
+        ));
+        assert!(!is_app_args([OsStr::new("up")].into_iter()));
+        assert!(!is_app_args(std::iter::empty::<&OsStr>()));
+
+        assert_eq!(
+            parse_app_args_from(["app"]),
+            AppArgs {
+                remote: None,
+                port: None,
+                model: None,
+                no_agent: false
+            }
+        );
+
+        assert_eq!(
+            parse_app_args_from(["app", "--remote", "user@remote-host"]),
+            AppArgs {
+                remote: Some("user@remote-host".into()),
+                port: None,
+                model: None,
+                no_agent: false
+            }
+        );
+
+        assert_eq!(
+            parse_app_args_from([
+                "app",
+                "--remote=user@remote-host",
+                "--port=4799",
+                "--model=claude-3-7-sonnet",
+                "--no-agent"
+            ]),
+            AppArgs {
+                remote: Some("user@remote-host".into()),
+                port: Some(4799),
+                model: Some("claude-3-7-sonnet".into()),
+                no_agent: true
+            }
+        );
+    }
+
+    #[test]
+    fn effective_remote_resolution_priority() {
+        // CLI arg wins over env, companion, and default
+        assert_eq!(
+            resolve_effective_remote_with(
+                Some("cli-host".into()),
+                || Some("env-host".into()),
+                || Some("companion-host".into()),
+                || Some("default-host".into()),
+            ),
+            Some("cli-host".into())
+        );
+
+        // Env wins over companion and default
+        assert_eq!(
+            resolve_effective_remote_with(
+                None,
+                || Some("env-host".into()),
+                || Some("companion-host".into()),
+                || Some("default-host".into()),
+            ),
+            Some("env-host".into())
+        );
+
+        // Companion wins over default
+        assert_eq!(
+            resolve_effective_remote_with(
+                None,
+                || None,
+                || Some("companion-host".into()),
+                || Some("default-host".into()),
+            ),
+            Some("companion-host".into())
+        );
+
+        // Default is used when nothing else specified
+        assert_eq!(
+            resolve_effective_remote_with(None, || None, || None, || Some("default-host".into()),),
+            Some("default-host".into())
+        );
+
+        // None if no remote configured anywhere
+        assert_eq!(
+            resolve_effective_remote_with(None, || None, || None, || None),
+            None
+        );
+    }
+
+    #[test]
+    fn companion_config_reading() {
+        let temp =
+            std::env::temp_dir().join(format!("orx-companion-test-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&temp).unwrap();
+        assert_eq!(read_companion_config_remote_from(&temp), None);
+
+        std::fs::write(
+            temp.join("OpenResearch.json"),
+            r#"{"remote": "user@remote-host"}"#,
+        )
+        .unwrap();
+        assert_eq!(
+            read_companion_config_remote_from(&temp),
+            Some("user@remote-host".into())
+        );
+
+        let _ = std::fs::remove_dir_all(&temp);
+    }
 
     #[test]
     fn the_desktop_entry_launches_the_appimage_wherever_it_is() {
