@@ -290,6 +290,7 @@ pub struct LogBatch {
 #[allow(clippy::double_must_use)]
 pub trait ComputeBackend: Send + Sync {
     fn capabilities(&self) -> Capabilities;
+    fn prepare_descriptor(&self, _descriptor: &mut BackendDescriptor) {}
     async fn preflight(&self, args: &crate::ExpRunArgs) -> Result<Preflight>;
     async fn stage_source(
         &self,
@@ -541,6 +542,19 @@ impl ComputeBackend for SshCompute {
         }
     }
 
+    fn prepare_descriptor(&self, descriptor: &mut BackendDescriptor) {
+        if let Some(launch) = self
+            .launch
+            .get()
+            .filter(|launch| launch.container.is_none())
+        {
+            descriptor.monitor_interval_secs = launch.monitor_interval_secs;
+            descriptor.monitoring = Some(crate::jobs::ssh::monitor::Monitoring::new(
+                launch.monitor_mode,
+            ));
+        }
+    }
+
     async fn preflight(&self, args: &crate::ExpRunArgs) -> Result<Preflight> {
         self.launch
             .get_or_try_init(|| crate::jobs::ssh::resolve_launch(args))
@@ -689,6 +703,26 @@ pub fn capabilities() -> Vec<Capabilities> {
 }
 
 pub fn validate_run_args(args: &crate::ExpRunArgs) -> Result<()> {
+    if let Some(interval) = args.monitor_interval {
+        if args.backend.as_deref() != Some("ssh") {
+            return Err(anyhow!(
+                "--monitor-interval only applies with --backend ssh."
+            ));
+        }
+        if interval == 0 {
+            return Err(anyhow!("--monitor-interval must be at least 1 second."));
+        }
+    }
+    if args.monitor_mode.is_some() && args.backend.as_deref() != Some("ssh") {
+        return Err(anyhow!("--monitor-mode only applies with --backend ssh."));
+    }
+    if args.monitor_mode == Some(crate::jobs::ssh::monitor::Mode::OnDemand)
+        && args.monitor_interval.is_some()
+    {
+        return Err(anyhow!(
+            "--monitor-interval only applies to automatic monitoring."
+        ));
+    }
     if let Some(timeout) = &args.timeout {
         match args.backend.as_deref().unwrap_or("local") {
             "local" | "ssh" => {
@@ -838,6 +872,8 @@ pub async fn submit(args: &crate::ExpRunArgs) -> Result<StoredRun> {
         ssh_port: None,
         ssh_user: None,
         timeout_secs: None,
+        monitor_interval_secs: args.monitor_interval,
+        monitoring: None,
         cpus_per_task: None,
         mem: None,
         source_digest: None,
@@ -845,6 +881,7 @@ pub async fn submit(args: &crate::ExpRunArgs) -> Result<StoredRun> {
         source_size: None,
         remote_root: None,
     };
+    backend.prepare_descriptor(&mut descriptor);
     source.0.apply_to_descriptor(&mut descriptor);
     let now = crate::store::now_ms();
     let pending = StoredRun {
@@ -1070,6 +1107,41 @@ pub fn recover_submission_handle(run_id: &str) -> Result<Option<BackendDescripto
     }
 }
 
+/// Recover only local submission metadata, without observing or starting a remote job.
+pub(crate) fn load_run_with_submission_handle(store: &Store, run_id: &str) -> Result<StoredRun> {
+    let run = store
+        .get_run(run_id)?
+        .ok_or_else(|| anyhow!("Run {run_id} not found in the local store."))?;
+    let descriptor = BackendDescriptor::parse(&run.backend_json)?;
+    if descriptor.job_id.is_some() {
+        return Ok(run);
+    }
+    let Some(recovered) = recover_submission_handle(run_id)? else {
+        return Ok(run);
+    };
+    if recovered.kind != descriptor.kind || recovered.job_id.is_none() {
+        return Err(anyhow!(
+            "Invalid submission recovery handle for run {run_id}."
+        ));
+    }
+    store.patch_backend(run_id, |current| {
+        // Another caller may already have recovered it. Keep its newer metadata.
+        if current.job_id.is_none() && current.kind == recovered.kind {
+            let mut restored = recovered.clone();
+            restored.monitoring = current.monitoring.clone().or(restored.monitoring);
+            restored.monitoring_error = current
+                .monitoring_error
+                .clone()
+                .or(restored.monitoring_error);
+            restored.cancellation_accepted |= current.cancellation_accepted;
+            *current = restored;
+        }
+    })?;
+    store
+        .get_run(run_id)?
+        .ok_or_else(|| anyhow!("Run {run_id} not found in the local store."))
+}
+
 fn not_ready(detail: impl Into<String>) -> Preflight {
     Preflight {
         ready: false,
@@ -1158,6 +1230,8 @@ pub(crate) mod tests {
             flavor: None,
             org: None,
             host: None,
+            monitor_interval: None,
+            monitor_mode: None,
             container: None,
             no_container: false,
             manifest: None,
@@ -1190,6 +1264,7 @@ pub(crate) mod tests {
                 ),
                 ("direct".into(), SshHostSettings::default()),
             ]),
+            ..Default::default()
         };
         let mut args = tinker_args();
         args.backend = Some("ssh".into());
@@ -1299,6 +1374,107 @@ pub(crate) mod tests {
         args.mem = None;
         args.cpus = Some(0);
         assert!(validate_run_args(&args).is_err());
+    }
+
+    #[test]
+    fn ssh_monitor_interval_is_validated_before_submission() {
+        let mut args = tinker_args();
+        args.monitor_interval = Some(30);
+        for backend in crate::local::BACKENDS {
+            args.backend = Some(backend.to_string());
+            assert_eq!(validate_run_args(&args).is_ok(), *backend == "ssh");
+        }
+        args.backend = Some("ssh".into());
+        args.monitor_interval = Some(0);
+        assert_eq!(
+            validate_run_args(&args).unwrap_err().to_string(),
+            "--monitor-interval must be at least 1 second."
+        );
+    }
+
+    #[test]
+    fn ssh_monitoring_scope_rejects_explicit_options_for_container_targets() {
+        use crate::config::{SshHostSettings, SshSettings};
+        use crate::jobs::ssh::monitor::Mode;
+        let settings = SshSettings {
+            default_host: Some("lab".into()),
+            monitor_mode: Mode::OnDemand,
+            monitor_interval_secs: Some(600),
+            hosts: std::collections::BTreeMap::from([(
+                "lab".into(),
+                SshHostSettings {
+                    container: Some("saved-container".into()),
+                    ..Default::default()
+                },
+            )]),
+        };
+        let mut args = tinker_args();
+        args.backend = Some("ssh".into());
+        // Saved direct-SSH defaults alone must not change container selection.
+        assert!(crate::jobs::ssh::resolve_options(&args, &settings)
+            .unwrap()
+            .1
+            .container
+            .is_some());
+        for container in [None, Some("explicit-container")] {
+            args.container = container.map(str::to_owned);
+            for (mode, interval) in [
+                (Some(Mode::Auto), None),
+                (Some(Mode::OnDemand), None),
+                (None, Some(60)),
+                (Some(Mode::Auto), Some(60)),
+            ] {
+                args.monitor_mode = mode;
+                args.monitor_interval = interval;
+                let error = crate::jobs::ssh::resolve_options(&args, &settings).unwrap_err();
+                assert!(error.to_string().contains("direct SSH"));
+                args.container = None;
+                args.no_container = true;
+                assert!(crate::jobs::ssh::resolve_options(&args, &settings)
+                    .unwrap()
+                    .1
+                    .container
+                    .is_none());
+                args.no_container = false;
+                args.container = container.map(str::to_owned);
+            }
+        }
+    }
+
+    #[test]
+    fn resolved_ssh_policy_is_saved_before_remote_submission() {
+        let backend = super::SshCompute::default();
+        backend
+            .launch
+            .set(crate::jobs::ssh::ResolvedLaunch {
+                target: crate::jobs::ssh::SshTarget::alias("lab"),
+                container: None,
+                remote_root: None,
+                monitor_mode: crate::jobs::ssh::monitor::Mode::OnDemand,
+                monitor_interval_secs: None,
+            })
+            .unwrap();
+        let mut descriptor =
+            crate::jobs::BackendDescriptor::parse(r#"{"kind":"ssh_job"}"#).unwrap();
+        super::ComputeBackend::prepare_descriptor(&backend, &mut descriptor);
+        assert!(crate::jobs::ssh::monitor::on_demand(&descriptor));
+        assert!(descriptor.job_id.is_none());
+    }
+
+    #[test]
+    fn on_demand_options_are_rejected_before_submission_for_other_backends() {
+        let mut args = tinker_args();
+        args.monitor_mode = Some(crate::jobs::ssh::monitor::Mode::OnDemand);
+        for backend in crate::local::BACKENDS {
+            args.backend = Some(backend.to_string());
+            assert_eq!(validate_run_args(&args).is_ok(), *backend == "ssh");
+        }
+        args.backend = Some("ssh".into());
+        args.monitor_interval = Some(30);
+        assert!(validate_run_args(&args)
+            .unwrap_err()
+            .to_string()
+            .contains("automatic"));
     }
 
     #[test]

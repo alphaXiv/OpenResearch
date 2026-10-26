@@ -603,6 +603,100 @@ fn ssh_config_conflict_and_execution_target_checks() {
 
 #[cfg(unix)]
 #[test]
+fn ssh_monitoring_scope_rejects_container_options_before_any_ssh_command() {
+    use std::os::unix::fs::PermissionsExt;
+    let sandbox = Sandbox::new();
+    sandbox.json(&["projects", "--json"]);
+    let repo = sandbox.0.join("repo");
+    init_checkout_repo(&repo);
+    let db = rusqlite::Connection::open(sandbox.0.join("data/orx.db")).unwrap();
+    db.execute(
+        "INSERT INTO local_projects (id, name, slug, github_owner, github_repo, github_sync_enabled, baseline_branch, repo_path, created_at, updated_at) VALUES ('project','Research','research','','',0,'main',?1,0,0)",
+        [repo.to_str().unwrap()],
+    ).unwrap();
+    db.execute("INSERT INTO local_experiments (id,project_id,slug,branch_name,run_command,created_at,updated_at) VALUES ('exp','project','exp','main','true',0,0)", []).unwrap();
+    std::fs::write(
+        sandbox.0.join(".ssh/config"),
+        "Host lab\n  HostName localhost\n",
+    )
+    .unwrap();
+    sandbox.json(&[
+        "compute",
+        "configure",
+        "ssh",
+        "--host",
+        "lab",
+        "--container",
+        "research",
+        "--json",
+    ]);
+    let bin = sandbox.0.join("bin");
+    std::fs::create_dir(&bin).unwrap();
+    let ssh = bin.join("ssh");
+    std::fs::write(&ssh, "#!/bin/sh\necho called >> \"$HOME/ssh-calls\"\nprintf 'fake SSH refused\\n' >&2\nexit 255\n").unwrap();
+    std::fs::set_permissions(&ssh, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let path = format!("{}:/usr/bin:/bin", bin.display());
+    for explicit_container in [false, true] {
+        for flags in [
+            vec!["--monitor-mode", "auto"],
+            vec!["--monitor-mode", "on-demand"],
+            vec!["--monitor-interval", "600"],
+        ] {
+            let mut args = vec!["exp", "run", "exp", "--backend", "ssh", "--host", "lab"];
+            if explicit_container {
+                args.extend(["--container", "research"]);
+            }
+            args.extend(flags);
+            let result = sandbox
+                .command()
+                .env("PATH", &path)
+                .args(args)
+                .output()
+                .unwrap();
+            assert!(!result.status.success());
+            assert!(
+                String::from_utf8_lossy(&result.stderr).contains("require a direct SSH run"),
+                "{}",
+                String::from_utf8_lossy(&result.stderr)
+            );
+            assert!(
+                !sandbox.0.join("ssh-calls").exists(),
+                "validation must precede remote preflight"
+            );
+        }
+    }
+    // Opting out of the saved container still accepts a direct automatic interval.
+    // The fake refuses the subsequent probe, so no real job can be submitted.
+    let result = sandbox
+        .command()
+        .env("PATH", path)
+        .args([
+            "exp",
+            "run",
+            "exp",
+            "--backend",
+            "ssh",
+            "--host",
+            "lab",
+            "--no-container",
+            "--monitor-mode",
+            "auto",
+            "--monitor-interval",
+            "600",
+        ])
+        .output()
+        .unwrap();
+    assert!(!result.status.success());
+    assert!(!String::from_utf8_lossy(&result.stderr).contains("require a direct SSH run"));
+    assert!(sandbox.0.join("ssh-calls").exists());
+    let runs: i64 = db
+        .query_row("SELECT COUNT(*) FROM runs", [], |r| r.get(0))
+        .unwrap();
+    assert_eq!(runs, 0);
+}
+
+#[cfg(unix)]
+#[test]
 fn slurm_supervisor_survives_connection_and_accounting_loss() {
     supervisor_recovers_monitoring_and_logs(false);
 }
@@ -614,6 +708,152 @@ fn ssh_supervisor_survives_proxy_output_without_skipping_logs() {
 }
 
 #[cfg(unix)]
+#[test]
+fn ssh_monitor_interval_keeps_remote_checks_quiet_and_cancellation_responsive() {
+    use std::os::unix::fs::PermissionsExt;
+    use std::time::{Duration, Instant};
+
+    let sandbox = Sandbox::new();
+    sandbox.json(&["projects", "--json"]);
+    let db = rusqlite::Connection::open(sandbox.0.join("data/orx.db")).unwrap();
+    db.execute("INSERT INTO local_experiments (id, project_id, slug, branch_name, run_command, created_at, updated_at) VALUES ('exp','project','exp','main','true',0,0)", []).unwrap();
+    let run_id = "00000000-0000-4000-8000-000000000002";
+    let backend = json!({"kind":"ssh_job", "namespace":"lab",
+        "jobId":format!(".orx/runs/{run_id}"), "monitorIntervalSecs":30});
+    db.execute("INSERT INTO runs (id, experiment_id, project_id, status, backend_json, created_at, updated_at) VALUES (?1,'exp','project','running',?2,0,0)", [run_id, &backend.to_string()]).unwrap();
+
+    let bin = sandbox.0.join("bin");
+    std::fs::create_dir(&bin).unwrap();
+    let ssh = bin.join("ssh");
+    std::fs::write(
+        &ssh,
+        r#"#!/bin/sh
+if [ "$1" = -G ]; then exec /usr/bin/ssh -F /dev/null "$@"; fi
+for cmd do :; done
+exec python3 "$HOME/ssh-monitor-fixture.py" "$cmd"
+"#,
+    )
+    .unwrap();
+    std::fs::set_permissions(&ssh, std::fs::Permissions::from_mode(0o755)).unwrap();
+    std::fs::write(
+        sandbox.0.join("ssh-monitor-fixture.py"),
+        include_str!("../ssh-monitor-fixture.py"),
+    )
+    .unwrap();
+    let phase = sandbox.0.join("phase");
+    std::fs::write(&phase, "running").unwrap();
+    let supervisor_log = sandbox.0.join("supervisor.log");
+    struct ChildGuard(std::process::Child);
+    impl Drop for ChildGuard {
+        fn drop(&mut self) {
+            let _ = self.0.kill();
+            let _ = self.0.wait();
+        }
+    }
+    let mut child = ChildGuard(
+        sandbox
+            .command()
+            .env("PATH", format!("{}:/usr/bin:/bin", bin.display()))
+            .args(["supervise", run_id])
+            .stdout(std::process::Stdio::null())
+            .stderr(std::fs::File::create(&supervisor_log).unwrap())
+            .spawn()
+            .unwrap(),
+    );
+    let events = || -> Vec<Value> {
+        std::fs::read_to_string(sandbox.0.join("monitor-events.jsonl"))
+            .unwrap_or_default()
+            .lines()
+            .filter_map(|line| serde_json::from_str(line).ok())
+            .collect()
+    };
+    let deadline = Instant::now() + Duration::from_secs(15);
+    loop {
+        let sampled = events();
+        if sampled.iter().any(|event| event["op"] == "log")
+            && sampled.iter().any(|event| event["lane"] == "status")
+        {
+            break;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "{}",
+            std::fs::read_to_string(&supervisor_log).unwrap()
+        );
+        std::thread::sleep(Duration::from_millis(50));
+    }
+
+    // Cross the former five-second status and ten-second helper heartbeat deadlines.
+    std::thread::sleep(Duration::from_secs(11));
+    let sampled = events();
+    assert_eq!(
+        sampled.iter().filter(|event| event["op"] == "log").count(),
+        1
+    );
+    assert_eq!(
+        sampled
+            .iter()
+            .filter(|event| event["lane"] == "status")
+            .count(),
+        1
+    );
+    assert!(!sampled.iter().any(|event| event["op"] == "ping"));
+
+    // Cancellation wakes the local wait and terminal observation wakes final log collection.
+    std::fs::write(&phase, "done").unwrap();
+    let started = Instant::now();
+    let output = sandbox.run(&["exp", "cancel", "exp"]);
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    while child.0.try_wait().unwrap().is_none() {
+        assert!(
+            started.elapsed() < Duration::from_secs(5),
+            "{}",
+            std::fs::read_to_string(&supervisor_log).unwrap()
+        );
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    let sampled = events();
+    assert_eq!(
+        sampled
+            .iter()
+            .filter(|event| event["lane"] == "control")
+            .count(),
+        1
+    );
+    assert_eq!(
+        sampled.iter().filter(|event| event["op"] == "log").count(),
+        2
+    );
+    // The independent cancel worker may confirm termination before the supervisor does.
+    let status_checks = sampled
+        .iter()
+        .filter(|event| event["lane"] == "status")
+        .count();
+    assert!((2..=3).contains(&status_checks));
+    assert!(!sampled.iter().any(|event| event["op"] == "ping"));
+    let helpers: std::collections::HashSet<_> = sampled
+        .iter()
+        .map(|event| event["pid"].as_u64().unwrap())
+        .collect();
+    assert_eq!(helpers.len(), 1, "monitoring must reuse the same helper");
+    let raw: String = db
+        .query_row(
+            "SELECT backend_json FROM runs WHERE id=?1",
+            [run_id],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(
+        serde_json::from_str::<Value>(&raw).unwrap()["monitorIntervalSecs"],
+        30
+    );
+}
+
+#[cfg(unix)]
 fn supervisor_recovers_monitoring_and_logs(ssh_backend: bool) {
     use std::os::unix::fs::PermissionsExt;
     use std::time::{Duration, Instant};
@@ -622,7 +862,7 @@ fn supervisor_recovers_monitoring_and_logs(ssh_backend: bool) {
     let db = rusqlite::Connection::open(sandbox.0.join("data/orx.db")).unwrap();
     db.execute("INSERT INTO local_experiments (id, project_id, slug, branch_name, run_command, created_at, updated_at) VALUES ('exp','project','exp','main','true',0,0)", []).unwrap();
     let backend = if ssh_backend {
-        json!({"kind":"ssh_job", "namespace":"lab", "jobId":".orx/runs/00000000-0000-4000-8000-000000000001"})
+        json!({"kind":"ssh_job", "namespace":"lab", "jobId":".orx/runs/00000000-0000-4000-8000-000000000001", "monitorIntervalSecs":2})
     } else {
         json!({"kind":"slurm_job", "namespace":"lab", "jobId":"42", "timeoutSecs":86400})
     };
@@ -1113,4 +1353,577 @@ fn custom_instructions_survive_reinstall_and_harness_switches_across_projects() 
         sandbox.json(&["compute", "instructions", "show", "--json"]),
         saved
     );
+}
+
+#[cfg(unix)]
+struct SshObservationFixture {
+    sandbox: Sandbox,
+    run_id: &'static str,
+}
+
+#[cfg(unix)]
+struct SshFixtureChild(std::process::Child);
+
+#[cfg(unix)]
+impl Drop for SshFixtureChild {
+    fn drop(&mut self) {
+        let _ = self.0.kill();
+        let _ = self.0.wait();
+    }
+}
+
+#[cfg(unix)]
+impl SshObservationFixture {
+    fn new(on_demand: bool) -> Self {
+        use std::os::unix::fs::PermissionsExt;
+        let sandbox = Sandbox::new();
+        sandbox.json(&["projects", "--json"]);
+        let run_id = "00000000-0000-4000-8000-000000000003";
+        let db = rusqlite::Connection::open(sandbox.0.join("data/orx.db")).unwrap();
+        db.execute("INSERT INTO local_experiments (id, project_id, slug, branch_name, run_command, created_at, updated_at) VALUES ('exp','project','exp','main','true',0,0)", []).unwrap();
+        let mut backend =
+            json!({"kind":"ssh_job", "namespace":"lab", "jobId":format!(".orx/runs/{run_id}")});
+        if on_demand {
+            backend["monitoring"] = json!({"mode":"on-demand"});
+        }
+        db.execute("INSERT INTO runs (id, experiment_id, project_id, status, backend_json, created_at, updated_at) VALUES (?1,'exp','project','running',?2,0,0)", [run_id, &backend.to_string()]).unwrap();
+        let bin = sandbox.0.join("bin");
+        std::fs::create_dir(&bin).unwrap();
+        let ssh = bin.join("ssh");
+        std::fs::write(&ssh, "#!/bin/sh\nif [ \"$1\" = -G ]; then exec /usr/bin/ssh -F /dev/null \"$@\"; fi\nfor cmd do :; done\nexec python3 \"$HOME/ssh-monitor-fixture.py\" \"$cmd\"\n").unwrap();
+        std::fs::set_permissions(ssh, std::fs::Permissions::from_mode(0o755)).unwrap();
+        std::fs::write(
+            sandbox.0.join("ssh-monitor-fixture.py"),
+            include_str!("../ssh-monitor-fixture.py"),
+        )
+        .unwrap();
+        std::fs::write(sandbox.0.join("phase"), "running").unwrap();
+        Self { sandbox, run_id }
+    }
+    fn command(&self) -> Command {
+        let mut cmd = self.sandbox.command();
+        cmd.env(
+            "PATH",
+            format!("{}:/usr/bin:/bin", self.sandbox.0.join("bin").display()),
+        );
+        cmd
+    }
+    fn run(&self, args: &[&str]) -> Value {
+        let output = self.command().args(args).output().unwrap();
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        serde_json::from_slice(&output.stdout).unwrap()
+    }
+    fn db(&self) -> rusqlite::Connection {
+        rusqlite::Connection::open(self.sandbox.0.join("data/orx.db")).unwrap()
+    }
+    fn metadata(&self) -> Value {
+        let raw: String = self
+            .db()
+            .query_row(
+                "SELECT backend_json FROM runs WHERE id=?1",
+                [self.run_id],
+                |r| r.get(0),
+            )
+            .unwrap();
+        serde_json::from_str(&raw).unwrap()
+    }
+    fn events(&self) -> Vec<Value> {
+        std::fs::read_to_string(self.sandbox.0.join("monitor-events.jsonl"))
+            .unwrap_or_default()
+            .lines()
+            .map(|l| serde_json::from_str(l).unwrap())
+            .collect()
+    }
+    fn phase(&self, phase: &str) {
+        std::fs::write(self.sandbox.0.join("phase"), phase).unwrap();
+    }
+    fn status(&self) -> String {
+        self.db()
+            .query_row("SELECT status FROM runs WHERE id=?1", [self.run_id], |r| {
+                r.get(0)
+            })
+            .unwrap()
+    }
+    fn wait(&self, condition: impl Fn() -> bool) {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        while !condition() {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "SSH fixture timed out"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(25));
+        }
+    }
+    fn file_only_handle(&self, cancel_requested: bool) {
+        let saved = self.metadata();
+        let directory = self.sandbox.0.join("data/submission-handles");
+        std::fs::create_dir_all(&directory).unwrap();
+        std::fs::write(
+            directory.join(format!("{}.json", self.run_id)),
+            saved.to_string(),
+        )
+        .unwrap();
+        let mut pending = saved;
+        pending.as_object_mut().unwrap().remove("jobId");
+        pending["monitoring"]["lastError"] = json!("saved observation error");
+        self.db().execute(
+            "UPDATE runs SET status='starting', backend_json=?1, cancel_requested=?2 WHERE id=?3",
+            rusqlite::params![pending.to_string(), cancel_requested, self.run_id],
+        ).unwrap();
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn ssh_recovery_keeps_cancelled_when_status_precedes_ack() {
+    let f = SshObservationFixture::new(true);
+    f.phase("slow-status");
+    std::fs::write(f.sandbox.0.join("hold-control"), "1").unwrap();
+    let mut read = SshFixtureChild(
+        f.command()
+            .args(["refresh", f.run_id, "--json"])
+            .stdout(std::process::Stdio::null())
+            .spawn()
+            .unwrap(),
+    );
+    f.wait(|| f.events().iter().any(|e| e["lane"] == "status"));
+    assert!(f
+        .command()
+        .args(["exp", "cancel", "exp"])
+        .status()
+        .unwrap()
+        .success());
+    f.wait(|| std::fs::read_to_string(f.sandbox.0.join("phase")).unwrap() == "cancelled");
+    assert_ne!(f.metadata()["cancellationAccepted"], true);
+    std::fs::write(f.sandbox.0.join("release-status"), "1").unwrap();
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    let observed = loop {
+        if let Some(status) = read.0.try_wait().unwrap() {
+            break status;
+        }
+        assert!(std::time::Instant::now() < deadline);
+        std::thread::sleep(std::time::Duration::from_millis(25));
+    };
+    // Release the worker even if an assertion fails, so fixture teardown stays bounded.
+    let status_before_ack = f.status();
+    let accepted_before_ack = f.metadata()["cancellationAccepted"].clone();
+    std::fs::write(f.sandbox.0.join("release-control"), "1").unwrap();
+    f.wait(|| f.metadata()["cancellationAccepted"] == true);
+    assert!(observed.success());
+    assert_eq!(status_before_ack, "cancelled");
+    assert_ne!(accepted_before_ack, true);
+    let value = f.run(&["refresh", f.run_id, "--json"]);
+    assert_eq!(value["run"]["status"], "cancelled");
+    assert_eq!(value["run"]["exitCode"], 143);
+    assert!(!f.events().iter().any(|e| e["op"] == "log"));
+}
+
+#[cfg(unix)]
+#[test]
+fn ssh_recovery_restores_file_only_on_demand_handles() {
+    for entry in ["supervise", "refresh", "cancel", "cancel-once"] {
+        let f = SshObservationFixture::new(true);
+        f.file_only_handle(entry == "cancel-once");
+        match entry {
+            "supervise" => {
+                assert!(f
+                    .command()
+                    .args(["supervise", f.run_id])
+                    .status()
+                    .unwrap()
+                    .success());
+                assert!(f.events().is_empty(), "local recovery must not access SSH");
+                assert_eq!(f.status(), "starting");
+                assert_eq!(
+                    f.metadata()["monitoring"]["lastError"],
+                    "saved observation error"
+                );
+            }
+            "refresh" => {
+                let value = f.run(&["refresh", f.run_id, "--json"]);
+                assert_eq!(value["run"]["status"], "running");
+                assert_eq!(f.events().len(), 1);
+            }
+            "cancel" => {
+                assert!(f
+                    .command()
+                    .args(["exp", "cancel", "exp"])
+                    .status()
+                    .unwrap()
+                    .success());
+                f.wait(|| f.status() == "cancelled");
+            }
+            "cancel-once" => {
+                assert!(f
+                    .command()
+                    .args(["supervise", f.run_id, "--cancel-once"])
+                    .status()
+                    .unwrap()
+                    .success());
+                assert_eq!(f.status(), "cancelled");
+            }
+            _ => unreachable!(),
+        }
+        assert_eq!(f.metadata()["jobId"], format!(".orx/runs/{}", f.run_id));
+        assert_eq!(f.metadata()["monitoring"]["mode"], "on-demand");
+        assert!(!f.events().iter().any(|e| e["op"] == "log"));
+        if entry.starts_with("cancel") {
+            let requested: bool = f
+                .db()
+                .query_row(
+                    "SELECT cancel_requested FROM runs WHERE id=?1",
+                    [f.run_id],
+                    |r| r.get(0),
+                )
+                .unwrap();
+            assert!(requested);
+            assert_eq!(f.metadata()["cancellationAccepted"], true);
+        }
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn ssh_recovery_automatic_cancel_collects_final_logs() {
+    let f = SshObservationFixture::new(false);
+    std::fs::write(f.sandbox.0.join("large-log"), "1").unwrap();
+    // There is deliberately no supervisor: cancellation must restore the automatic owner.
+    assert!(f
+        .command()
+        .args(["exp", "cancel", "exp"])
+        .status()
+        .unwrap()
+        .success());
+    f.wait(|| f.metadata()["monitoring"]["logsComplete"] == true);
+    assert_eq!(f.status(), "cancelled");
+    let cursor: Value = serde_json::from_slice(
+        &std::fs::read(
+            f.sandbox
+                .0
+                .join(format!("data/run-logs/{}.cursor.json", f.run_id)),
+        )
+        .unwrap(),
+    )
+    .unwrap();
+    let log = f.sandbox.0.join(format!(
+        "data/run-logs/{}.{}.log",
+        f.run_id,
+        cursor["generation"].as_str().unwrap()
+    ));
+    assert_eq!(std::fs::read(log).unwrap(), vec![b'x'; 1536 * 1024]);
+    f.wait(|| {
+        f.db()
+            .query_row(
+                "SELECT COUNT(*) FROM remote_cleanups WHERE run_id=?1",
+                [f.run_id],
+                |r| r.get::<_, i64>(0),
+            )
+            .unwrap()
+            == 1
+    });
+    let queued: i64 = f
+        .db()
+        .query_row(
+            "SELECT COUNT(*) FROM remote_cleanups WHERE run_id=?1",
+            [f.run_id],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(queued, 1);
+    assert!(f.events().iter().any(|e| e["lane"] == "control"));
+    assert!(!f.events().iter().any(|e| e["op"] == "ping"));
+}
+
+#[cfg(unix)]
+#[test]
+fn ssh_on_demand_is_quiet_refreshes_bounded_logs_and_retains_uncollected_results() {
+    let f = SshObservationFixture::new(true);
+    // The same entry point used for restart recovery must never start monitoring this policy.
+    for _ in 0..2 {
+        assert!(f
+            .command()
+            .args(["supervise", f.run_id])
+            .status()
+            .unwrap()
+            .success());
+    }
+    assert!(f.events().is_empty());
+    let value = f.run(&["refresh", f.run_id, "--json"]);
+    assert_eq!(value["run"]["status"], "running");
+    assert_eq!(f.events().len(), 1);
+    assert_eq!(f.events()[0]["lane"], "status");
+    let observed = f.metadata()["monitoring"]["lastObservedAt"].clone();
+    // A live shared helper must remain quiet across the old heartbeat and polling deadlines.
+    std::thread::sleep(std::time::Duration::from_secs(11));
+    assert_eq!(f.events().len(), 1);
+    f.phase("outage");
+    let output = f.command().args(["refresh", f.run_id]).output().unwrap();
+    assert!(!output.status.success());
+    assert_eq!(f.metadata()["monitoring"]["lastObservedAt"], observed);
+    assert!(f.metadata()["monitoring"]["lastError"]
+        .as_str()
+        .unwrap()
+        .contains("unavailable"));
+    f.phase("done");
+    std::fs::write(f.sandbox.0.join("large-log"), "1").unwrap();
+    let value = f.run(&["refresh", f.run_id, "--json"]);
+    assert_eq!(value["run"]["status"], "done");
+    assert_eq!(value["run"]["exitCode"], 0);
+    assert!(!f.events().iter().any(|e| e["op"] == "log"));
+    let queued = || {
+        f.db()
+            .query_row("SELECT COUNT(*) FROM remote_cleanups", [], |r| {
+                r.get::<_, i64>(0)
+            })
+            .unwrap()
+    };
+    assert_eq!(queued(), 0);
+    let value = f.run(&["refresh", f.run_id, "--collect-logs", "--json"]);
+    assert_eq!(value["run"]["backend"]["monitoring"]["logsComplete"], false);
+    assert_eq!(f.events().iter().filter(|e| e["op"] == "log").count(), 4);
+    assert_eq!(queued(), 0);
+    let cursor_path = f
+        .sandbox
+        .0
+        .join(format!("data/run-logs/{}.cursor.json", f.run_id));
+    let cursor: Value = serde_json::from_slice(&std::fs::read(&cursor_path).unwrap()).unwrap();
+    assert_eq!(cursor["bytes"], 1024 * 1024);
+    let value = f.run(&["refresh", f.run_id, "--collect-logs", "--json"]);
+    assert_eq!(value["run"]["backend"]["monitoring"]["logsComplete"], true);
+    assert_eq!(f.events().iter().filter(|e| e["op"] == "log").count(), 6);
+    assert_eq!(queued(), 1);
+    let before = std::fs::metadata(&cursor_path).unwrap().modified().unwrap();
+    f.run(&["refresh", f.run_id, "--collect-logs", "--json"]);
+    assert_eq!(
+        std::fs::metadata(&cursor_path).unwrap().modified().unwrap(),
+        before
+    );
+    assert_eq!(
+        f.events().iter().filter(|e| e["op"] == "log").count(),
+        6,
+        "complete terminal evidence needs no more remote collection"
+    );
+    assert!(!f.events().iter().any(|e| e["op"] == "ping"));
+    let helpers: std::collections::HashSet<_> = f
+        .events()
+        .iter()
+        .map(|e| e["pid"].as_u64().unwrap())
+        .collect();
+    assert_eq!(helpers.len(), 1);
+}
+
+#[cfg(unix)]
+#[test]
+fn ssh_cancel_bypasses_a_blocked_observation_and_pending_intent_survives_failure() {
+    use std::time::{Duration, Instant};
+    let f = SshObservationFixture::new(true);
+    f.phase("outage");
+    let failed = f.command().args(["exp", "cancel", "exp"]).output().unwrap();
+    assert!(failed.status.success());
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while !f.metadata()["monitoring"]["lastError"].is_string() {
+        assert!(Instant::now() < deadline);
+        std::thread::sleep(Duration::from_millis(25));
+    }
+    assert!(!f.metadata()["cancellationAccepted"]
+        .as_bool()
+        .unwrap_or(false));
+    let requested: bool = f
+        .db()
+        .query_row(
+            "SELECT cancel_requested FROM runs WHERE id=?1",
+            [f.run_id],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert!(requested);
+    // Startup recovery uses this bounded worker for saved on-demand cancel intent.
+    f.phase("running");
+    assert!(f
+        .command()
+        .args(["supervise", f.run_id, "--cancel-once"])
+        .status()
+        .unwrap()
+        .success());
+    let recovered: String = f
+        .db()
+        .query_row("SELECT status FROM runs WHERE id=?1", [f.run_id], |r| {
+            r.get(0)
+        })
+        .unwrap();
+    assert_eq!(recovered, "cancelled");
+    let f = SshObservationFixture::new(true);
+    f.phase("slow-status");
+    let mut read = f
+        .command()
+        .args(["refresh", f.run_id, "--json"])
+        .stdout(std::process::Stdio::null())
+        .spawn()
+        .unwrap();
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while !f.events().iter().any(|e| e["lane"] == "status") {
+        assert!(Instant::now() < deadline);
+        std::thread::sleep(Duration::from_millis(25));
+    }
+    let started = Instant::now();
+    assert!(f
+        .command()
+        .args(["exp", "cancel", "exp"])
+        .status()
+        .unwrap()
+        .success());
+    while !f.metadata()["cancellationAccepted"]
+        .as_bool()
+        .unwrap_or(false)
+    {
+        assert!(started.elapsed() < Duration::from_secs(5));
+        std::thread::sleep(Duration::from_millis(25));
+    }
+    assert!(
+        read.try_wait().unwrap().is_none(),
+        "status must still be blocked"
+    );
+    std::fs::write(f.sandbox.0.join("release-status"), "1").unwrap();
+    while read.try_wait().unwrap().is_none() {
+        assert!(started.elapsed() < Duration::from_secs(10));
+        std::thread::sleep(Duration::from_millis(25));
+    }
+    let status: String = f
+        .db()
+        .query_row("SELECT status FROM runs WHERE id=?1", [f.run_id], |r| {
+            r.get(0)
+        })
+        .unwrap();
+    assert_eq!(status, "cancelled");
+    assert!(!f.events().iter().any(|e| e["op"] == "log"));
+}
+
+#[cfg(unix)]
+#[test]
+fn ssh_legacy_automatic_defaults_keep_two_second_logs_and_five_second_status() {
+    use std::time::{Duration, Instant};
+    let f = SshObservationFixture::new(false);
+    struct Guard(std::process::Child);
+    impl Drop for Guard {
+        fn drop(&mut self) {
+            let _ = self.0.kill();
+            let _ = self.0.wait();
+        }
+    }
+    let mut supervisor = Guard(
+        f.command()
+            .args(["supervise", f.run_id])
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn()
+            .unwrap(),
+    );
+    let deadline = Instant::now() + Duration::from_secs(25);
+    while f.events().iter().filter(|e| e["lane"] == "status").count() < 3 {
+        assert!(
+            Instant::now() < deadline,
+            "expected three automatic status rounds"
+        );
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    let events = f.events();
+    let status: Vec<_> = events
+        .iter()
+        .filter(|e| e["lane"] == "status")
+        .map(|e| e["at"].as_f64().unwrap())
+        .collect();
+    let logs: Vec<_> = events
+        .iter()
+        .filter(|e| e["op"] == "log")
+        .map(|e| e["at"].as_f64().unwrap())
+        .collect();
+    assert!(status.windows(2).all(|pair| pair[1] - pair[0] >= 4.8));
+    assert!(logs.len() >= 5);
+    assert!(logs.windows(2).all(|pair| pair[1] - pair[0] >= 1.8));
+    assert!(!events.iter().any(|e| e["op"] == "ping"));
+    f.phase("done");
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while supervisor.0.try_wait().unwrap().is_none() {
+        assert!(Instant::now() < deadline);
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    assert_eq!(f.metadata()["monitoring"]["logsComplete"], true);
+}
+
+#[cfg(unix)]
+#[test]
+fn ssh_on_demand_missing_directory_confirmation_survives_separate_refresh_processes() {
+    let f = SshObservationFixture::new(true);
+    f.phase("dir-missing");
+    for expected in 1..=3 {
+        let value = f.run(&["refresh", f.run_id, "--json"]);
+        assert_eq!(
+            value["run"]["backend"]["monitoring"]["missingChecks"],
+            expected
+        );
+        if expected < 3 {
+            assert_eq!(value["run"]["status"], "running");
+            assert!(value["run"]["backend"]["monitoring"]["lastObservedAt"].is_null());
+            assert!(value["run"]["backend"]["monitoring"]["lastError"].is_string());
+        } else {
+            assert_eq!(value["run"]["status"], "failed");
+        }
+    }
+    assert_eq!(f.events().len(), 3);
+}
+
+#[cfg(unix)]
+#[test]
+fn ssh_explicit_automatic_interval_bounds_backlog_without_delaying_final_collection() {
+    use std::time::{Duration, Instant};
+    let f = SshObservationFixture::new(false);
+    let mut backend = f.metadata();
+    backend["monitorIntervalSecs"] = json!(600);
+    f.db()
+        .execute(
+            "UPDATE runs SET backend_json=?1 WHERE id=?2",
+            [&backend.to_string(), f.run_id],
+        )
+        .unwrap();
+    std::fs::write(f.sandbox.0.join("large-log"), "1").unwrap();
+    struct Guard(std::process::Child);
+    impl Drop for Guard {
+        fn drop(&mut self) {
+            let _ = self.0.kill();
+            let _ = self.0.wait();
+        }
+    }
+    let mut child = Guard(
+        f.command()
+            .args(["supervise", f.run_id])
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn()
+            .unwrap(),
+    );
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while f.events().iter().filter(|e| e["op"] == "log").count() < 4 {
+        assert!(Instant::now() < deadline);
+        std::thread::sleep(Duration::from_millis(25));
+    }
+    std::thread::sleep(Duration::from_millis(500));
+    assert_eq!(f.events().iter().filter(|e| e["op"] == "log").count(), 4);
+    f.phase("done");
+    assert!(f
+        .command()
+        .args(["exp", "cancel", "exp"])
+        .status()
+        .unwrap()
+        .success());
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while child.0.try_wait().unwrap().is_none() {
+        assert!(Instant::now() < deadline);
+        std::thread::sleep(Duration::from_millis(25));
+    }
+    assert_eq!(f.metadata()["monitoring"]["logsComplete"], true);
+    assert_eq!(f.events().iter().filter(|e| e["op"] == "log").count(), 6);
 }

@@ -23,7 +23,11 @@ pub async fn launch_local_ssh(args: &crate::ExpRunArgs) -> Result<()> {
     println!("  run  {}", run.id);
     println!(
         "{}",
-        crate::invocation::follow_up(&run.experiment_id, &run.id)
+        if ssh::monitor::on_demand(&backend) {
+            crate::invocation::on_demand_follow_up(&run.id)
+        } else {
+            crate::invocation::follow_up(&run.experiment_id, &run.id)
+        }
     );
     Ok(())
 }
@@ -101,6 +105,10 @@ pub async fn submit_local_ssh_with_source(
         ssh_port: None,
         ssh_user: None,
         timeout_secs: None,
+        monitor_interval_secs: launch.monitor_interval_secs,
+        monitoring: container
+            .is_none()
+            .then(|| ssh::monitor::Monitoring::new(launch.monitor_mode)),
         cpus_per_task: None,
         mem: None,
         source_digest: None,

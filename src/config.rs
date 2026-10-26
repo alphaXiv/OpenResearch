@@ -536,13 +536,23 @@ pub struct SshHostSettings {
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SshSettings {
+    #[serde(default)]
+    pub monitor_mode: crate::jobs::ssh::monitor::Mode,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub monitor_interval_secs: Option<u64>,
     pub default_host: Option<String>,
     #[serde(default)]
     pub hosts: std::collections::BTreeMap<String, SshHostSettings>,
 }
 
 pub fn ssh_settings() -> Result<SshSettings> {
-    crate::telemetry::ssh_settings()
+    let settings = crate::telemetry::ssh_settings()?;
+    if settings.monitor_interval_secs == Some(0) {
+        return Err(crate::error::anyhow!(
+            "SSH monitoring interval must be at least 1 second."
+        ));
+    }
+    Ok(settings)
 }
 
 pub fn set_ssh_host(host: String, options: SshHostSettings) -> Result<()> {

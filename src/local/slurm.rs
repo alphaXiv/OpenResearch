@@ -181,6 +181,8 @@ pub async fn submit_local_slurm_with_source(
         ssh_port: None,
         ssh_user: None,
         timeout_secs: time_limit_secs,
+        monitor_interval_secs: None,
+        monitoring: None,
         cpus_per_task,
         mem,
         source_digest: None,

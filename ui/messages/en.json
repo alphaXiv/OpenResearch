@@ -1437,5 +1437,19 @@
   "skills_detection_copy": "Copy detection details",
   "skills_detection_accepted": "{count} accepted",
   "desktop_zoom_controls": "Zoom controls",
-  "desktop_zoom_reset": "Reset"
+  "desktop_zoom_reset": "Reset",
+  "ssh_monitor_label": "SSH monitoring",
+  "ssh_monitor_auto": "Automatic",
+  "ssh_monitor_on_demand": "On demand",
+  "ssh_monitor_interval": "Interval (seconds)",
+  "ssh_monitor_interval_invalid": "Enter a positive whole number of seconds.",
+  "ssh_monitor_save": "Save",
+  "ssh_monitor_defaults_hint": "Applies to new direct SSH runs. Existing runs keep their saved mode. A blank interval keeps status checks at 5 seconds and logs at 2 seconds.",
+  "ssh_monitor_observed": "Last observed: {time}",
+  "ssh_monitor_unobserved": "Not checked since submission",
+  "ssh_monitor_refresh": "Refresh status",
+  "ssh_monitor_sync_logs": "Sync logs",
+  "ssh_monitor_cached_hint": "Showing the last observation and collected logs. Refresh to check the remote task.",
+  "ssh_monitor_cancel_pending": "Cancellation requested; remote termination is not yet confirmed.",
+  "ssh_monitor_logs_pending": "Final logs have not been fully collected. Sync again to continue."
 }

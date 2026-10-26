@@ -1437,5 +1437,19 @@
   "skills_detection_copy": "复制检测详情",
   "skills_detection_accepted": "已接受 {count} 项",
   "desktop_zoom_controls": "缩放控件",
-  "desktop_zoom_reset": "重置"
+  "desktop_zoom_reset": "重置",
+  "ssh_monitor_label": "SSH 监控",
+  "ssh_monitor_auto": "自动监控",
+  "ssh_monitor_on_demand": "按需刷新",
+  "ssh_monitor_interval": "间隔（秒）",
+  "ssh_monitor_interval_invalid": "请输入正整数秒数。",
+  "ssh_monitor_save": "保存",
+  "ssh_monitor_defaults_hint": "仅用于新提交的直接 SSH 任务，已有任务保持原模式。间隔留空时，状态每 5 秒检查、日志每 2 秒收集。",
+  "ssh_monitor_observed": "上次成功观察：{time}",
+  "ssh_monitor_unobserved": "提交后尚未检查",
+  "ssh_monitor_refresh": "刷新状态",
+  "ssh_monitor_sync_logs": "同步日志",
+  "ssh_monitor_cached_hint": "显示上次观察的状态和已收集日志。点击刷新可检查远端任务。",
+  "ssh_monitor_cancel_pending": "已请求取消，尚未确认远端任务停止。",
+  "ssh_monitor_logs_pending": "最终日志尚未收集完整，可再次同步继续收集。"
 }

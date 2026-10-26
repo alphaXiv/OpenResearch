@@ -56,6 +56,7 @@ import {
 } from "lucide-react";
 import { useEffect, useLayoutEffect, useRef, useState } from "react";
 import {
+  saveSshMonitoring,
   deleteEnvVar,
   listAcpHarnesses,
   removeAcpHarness,
@@ -843,6 +844,42 @@ function HostTestCell({ test, connecting, masterRunning, containerFailed = false
   );
 }
 
+function SshMonitoringSettings({ settings }: { settings: import("../api").SshSettings }) {
+  const [mode, setMode] = useState<"auto" | "on-demand">(settings.monitorMode ?? "auto");
+  const [interval, setInterval] = useState(settings.monitorIntervalSecs?.toString() ?? "");
+  const [error, setError] = useState<string | null>(null);
+  const [saving, setSaving] = useState(false);
+  useEffect(() => {
+    setMode(settings.monitorMode ?? "auto");
+    setInterval(settings.monitorIntervalSecs?.toString() ?? "");
+  }, [settings.monitorMode, settings.monitorIntervalSecs]);
+  async function save() {
+    const seconds = mode === "auto" && interval.trim() ? Number(interval) : null;
+    if (seconds !== null && (!Number.isSafeInteger(seconds) || seconds < 1)) {
+      setError(m.ssh_monitor_interval_invalid()); return;
+    }
+    setSaving(true); setError(null);
+    try {
+      await saveSshMonitoring(mode, seconds);
+      await queryClient.invalidateQueries({ queryKey: getSshSettingsQuery().queryKey });
+    } catch (err) { setError(err instanceof Error ? err.message : String(err)); }
+    finally { setSaving(false); }
+  }
+  return <div className="mb-4 flex flex-col gap-2">
+    <label className="flex flex-wrap items-center gap-2 text-sm text-subtext">
+      {m.ssh_monitor_label()}
+      <select className="rounded-sm border border-border bg-background px-2 py-1 text-text" value={mode} onChange={(e) => setMode(e.target.value as "auto" | "on-demand")}>
+        <option value="auto">{m.ssh_monitor_auto()}</option>
+        <option value="on-demand">{m.ssh_monitor_on_demand()}</option>
+      </select>
+      {mode === "auto" && <input className="w-28 rounded-sm border border-border bg-background px-2 py-1 text-text" aria-label={m.ssh_monitor_interval()} placeholder={m.ssh_monitor_interval()} type="number" min={1} step={1} value={interval} onChange={(e) => setInterval(e.target.value)} />}
+      <Button size="small" disabled={saving} onClick={() => void save()}>{m.ssh_monitor_save()}</Button>
+    </label>
+    <p className="text-xs text-muted">{m.ssh_monitor_defaults_hint()}</p>
+    {error && <p role="alert" className="text-sm text-accent-red">{error}</p>}
+  </div>;
+}
+
 function SshSection() {
   const hostsOptions = getSshSettingsQuery();
   const hostsQuery = useQuery(hostsOptions);
@@ -893,6 +930,7 @@ function SshSection() {
           <Settings size={14} /> {m.ssh_configure_hosts()}
         </Button>
       </div>
+      {hostsQuery.data && <SshMonitoringSettings settings={hostsQuery.data} />}
       {hosts === null ? (
         <LoadingRow>
           <Spinner /> {m.settings_page_reading_ssh_config()}

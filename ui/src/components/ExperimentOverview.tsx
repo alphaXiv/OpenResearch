@@ -22,6 +22,7 @@ import {
 } from "../api";
 import { useTrackioRuns } from "../queries/settings";
 import { tabOpenGestureHandlers, type TabOpenIntent } from "../tabPreview";
+import { RunMonitoring } from "./RunMonitoring";
 import { BackendBadge } from "./BackendLogos";
 import { BranchPill } from "./BranchPill";
 import { Md } from "./Md";
@@ -104,6 +105,8 @@ export function ExperimentOverview({
           </div>
           <StatusBadge status={latestRun ? runDisplayStatus(latestRun) : "idle"} />
         </header>
+
+        {latestRun && <RunMonitoring key={latestRun.id} run={latestRun} />}
 
         <div className="experiment-overview-actions flex gap-2 mt-4.5 [@media((max-width:_720px))]:flex-wrap">
           {latestRun && (

@@ -557,6 +557,7 @@ fn router(state: AppState, remote_auth: Option<RemoteAuth>) -> Router {
         .route("/api/runs/{id}", get(get_run))
         .route("/api/instances", get(list_instances))
         .route("/api/runs/{id}/cancel", post(cancel_run))
+        .route("/api/runs/{id}/refresh", post(refresh_run))
         .route("/api/runs/{id}/log", get(run_log))
         .route("/api/runs/{id}/logs", get(run_logs))
         .route("/api/runs/{id}/diff", get(run_diff))
@@ -691,6 +692,7 @@ fn router(state: AppState, remote_auth: Option<RemoteAuth>) -> Router {
             get(ssh_settings).post(save_ssh_settings),
         )
         .route("/api/settings/ssh/default", post(save_ssh_default))
+        .route("/api/settings/ssh/monitoring", post(save_ssh_monitoring))
         .route("/api/settings/ssh/master", get(ssh_master_status))
         .route("/api/settings/ssh/preflight", post(ssh_preflight))
         .route("/api/settings/ssh/connect", get(ssh_connect))
@@ -901,10 +903,11 @@ fn remote_route_forbidden(path: &str) -> bool {
 fn is_remote_callback_route(method: &Method, path: &str) -> bool {
     if method == Method::GET {
         // `orx agent spawn`'s install preflight (read-only).
-        return path
-            .strip_prefix("/api/harnesses/")
-            .and_then(|path| path.strip_suffix("/snapshot"))
-            .is_some_and(|id| !id.is_empty() && !id.contains('/'));
+        return path == "/api/health"
+            || path
+                .strip_prefix("/api/harnesses/")
+                .and_then(|path| path.strip_suffix("/snapshot"))
+                .is_some_and(|id| !id.is_empty() && !id.contains('/'));
     }
     if method != Method::POST {
         return false;
@@ -912,7 +915,10 @@ fn is_remote_callback_route(method: &Method, path: &str) -> bool {
     path == "/api/runs"
         || path
             .strip_prefix("/api/runs/")
-            .and_then(|path| path.strip_suffix("/cancel"))
+            .and_then(|path| {
+                path.strip_suffix("/cancel")
+                    .or_else(|| path.strip_suffix("/refresh"))
+            })
             .is_some_and(|id| !id.is_empty() && !id.contains('/'))
 }
 
@@ -991,6 +997,10 @@ impl From<&StoredRun> for ApiRun {
     }
 }
 
+pub(crate) fn run_response(run: &StoredRun) -> Value {
+    json!({"run":ApiRun::from(run)})
+}
+
 // --- basic routes ---------------------------------------------------------
 
 async fn health(State(state): State<AppState>) -> Json<Value> {
@@ -998,6 +1008,7 @@ async fn health(State(state): State<AppState>) -> Json<Value> {
         "ok": true,
         "version": env!("CARGO_PKG_VERSION"),
         "dashboardProtocol": crate::commands::up_remote::DASHBOARD_PROTOCOL,
+        "sshMonitoring": 1,
         "instanceId": state.remote_instance_id,
     }))
 }
@@ -2235,6 +2246,8 @@ struct CreateRunReq {
     mem: Option<String>,
     flavor: Option<String>,
     host: Option<String>,
+    monitor_interval: Option<u64>,
+    monitor_mode: Option<crate::jobs::ssh::monitor::Mode>,
     container: Option<String>,
     #[serde(default)]
     no_container: bool,
@@ -2267,6 +2280,8 @@ impl CreateRunReq {
             mem: args.mem.clone(),
             flavor: args.flavor.clone(),
             host: args.host.clone(),
+            monitor_interval: args.monitor_interval,
+            monitor_mode: args.monitor_mode,
             container: args.container.clone(),
             no_container: args.no_container,
             manifest: args.manifest.clone(),
@@ -2296,6 +2311,8 @@ impl CreateRunReq {
             flavor,
             org: self.org,
             host: self.host,
+            monitor_interval: self.monitor_interval,
+            monitor_mode: self.monitor_mode,
             container: self.container,
             no_container: self.no_container,
             manifest: self.manifest,
@@ -2321,6 +2338,7 @@ pub(crate) struct RunLaunchSummary {
     pub experiment_id: String,
     pub job_id: Option<String>,
     pub slurm_resources: Option<String>,
+    pub on_demand: bool,
 }
 
 async fn decode_local_response<T: serde::de::DeserializeOwned>(
@@ -2372,10 +2390,26 @@ fn authenticate_up_request(builder: reqwest::RequestBuilder) -> reqwest::Request
     }
 }
 
+pub(crate) async fn require_ssh_monitoring_support(port: u16) -> Result<()> {
+    let response =
+        authenticate_up_request(local_client()?.get(format!("http://127.0.0.1:{port}/api/health")))
+            .timeout(Duration::from_secs(5))
+            .send()
+            .await?;
+    let health: Value = decode_local_response(response, "check monitoring support").await?;
+    if health["sshMonitoring"] != 1 {
+        return Err(anyhow!("This orx up does not support SSH monitoring options. Upgrade and restart it before submitting this run."));
+    }
+    Ok(())
+}
+
 pub(crate) async fn submit_run_via_up(
     port: u16,
     args: &crate::ExpRunArgs,
 ) -> Result<RunLaunchSummary> {
+    if args.monitor_mode.is_some() || args.monitor_interval.is_some() {
+        require_ssh_monitoring_support(port).await?;
+    }
     let request = CreateRunReq::from_run_args(args)?;
     let response =
         authenticate_up_request(local_client()?.post(format!("http://127.0.0.1:{port}/api/runs")))
@@ -2391,6 +2425,14 @@ pub(crate) async fn submit_run_via_up(
         .and_then(|backend| backend.get("jobId"))
         .and_then(Value::as_str)
         .map(str::to_string);
+    let on_demand = response
+        .run
+        .backend
+        .as_ref()
+        .and_then(|backend| {
+            serde_json::from_value::<crate::jobs::BackendDescriptor>(backend.clone()).ok()
+        })
+        .is_some_and(|d| crate::jobs::ssh::monitor::on_demand(&d));
     let slurm_resources = response
         .run
         .backend
@@ -2401,6 +2443,7 @@ pub(crate) async fn submit_run_via_up(
         experiment_id: args.exp_id.clone(),
         job_id,
         slurm_resources,
+        on_demand,
     })
 }
 
@@ -2486,7 +2529,7 @@ async fn create_run(State(state): State<AppState>, Json(req): Json<CreateRunReq>
     let args = req.into_run_args();
     crate::compute::validate_run_args(&args).map_err(bad_request)?;
     let run = crate::compute::submit(&args).await.map_err(bad_request)?;
-    Ok(Json(json!({ "run": ApiRun::from(&run) })))
+    Ok(Json(run_response(&run)))
 }
 
 fn backend_for_run(
@@ -2511,7 +2554,7 @@ async fn get_run(Path(id): Path<String>) -> ApiResult {
     if is_terminal(&run.status) {
         backend.cleanup(&run).await.map_err(bad_request)?;
     }
-    Ok(Json(json!({ "run": ApiRun::from(&run) })))
+    Ok(Json(run_response(&run)))
 }
 
 /// Newest-first cap for the cross-project instances list. Generous: the store
@@ -2569,6 +2612,26 @@ async fn cancel_run(
     let backend = backend_for_run(&run)?;
     backend.cancel(&run, &reason).await.map_err(bad_request)?;
     Ok(Json(json!({ "ok": true })))
+}
+
+#[derive(Default, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct RefreshRunReq {
+    #[serde(default)]
+    collect_logs: bool,
+}
+
+async fn refresh_run(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+    req: Option<Json<RefreshRunReq>>,
+) -> ApiResult {
+    reject_if_moving(&state)?;
+    let collect = req.map(|Json(req)| req.collect_logs).unwrap_or(false);
+    let run = crate::jobs::ssh::monitor::refresh(&id, collect)
+        .await
+        .map_err(bad_request)?;
+    Ok(Json(json!({"run":ApiRun::from(&run)})))
 }
 
 #[derive(Deserialize)]
@@ -4821,19 +4884,34 @@ async fn reclaim_remote_run_dirs(moving: Arc<AtomicBool>, gate: Arc<tokio::sync:
 /// Spawns the missing supervisors and returns the runs whose spawn failed.
 fn adopt_orphaned_runs_once() -> Result<Vec<(String, crate::error::Error)>> {
     let store = Store::open()?;
+    adopt_orphaned_runs_in(
+        &store,
+        crate::commands::supervise::supervisor_running,
+        crate::commands::exp::spawn_detached_supervise,
+    )
+}
+
+fn adopt_orphaned_runs_in(
+    store: &Store,
+    is_running: impl Fn(&str) -> bool,
+    mut spawn: impl FnMut(&str) -> Result<()>,
+) -> Result<Vec<(String, crate::error::Error)>> {
     let mut failures = Vec::new();
     for run in store.list_active_runs()? {
         // Without a job handle the launch may still be submitting, and a supervisor would fail it.
         let submitted = crate::jobs::BackendDescriptor::parse(&run.backend_json)
             .is_ok_and(|descriptor| descriptor.job_id.is_some());
-        if !submitted
+        let on_demand = crate::jobs::BackendDescriptor::parse(&run.backend_json)
+            .is_ok_and(|d| crate::jobs::ssh::monitor::on_demand(&d));
+        if on_demand
+            || !submitted
             || now_ms() - run.updated_at < ORPHANED_RUN_SETTLE_MS
             || store.get_local_experiment(&run.experiment_id)?.is_none()
-            || crate::commands::supervise::supervisor_running(&run.id)
+            || is_running(&run.id)
         {
             continue;
         }
-        if let Err(err) = crate::commands::exp::spawn_detached_supervise(&run.id) {
+        if let Err(err) = spawn(&run.id) {
             failures.push((run.id, err));
         }
     }
@@ -9532,11 +9610,20 @@ mod tests {
     }
 
     #[test]
-    fn remote_callback_token_is_limited_to_runs_and_the_spawn_preflight() {
+    fn remote_callback_token_is_limited_to_runs_and_readonly_preflights() {
         assert!(is_remote_callback_route(&Method::POST, "/api/runs"));
         assert!(is_remote_callback_route(
             &Method::POST,
             "/api/runs/run-1/cancel"
+        ));
+        assert!(is_remote_callback_route(&Method::GET, "/api/health"));
+        assert!(is_remote_callback_route(
+            &Method::POST,
+            "/api/runs/run-1/refresh"
+        ));
+        assert!(!is_remote_callback_route(
+            &Method::POST,
+            "/api/runs/run-1/extra/refresh"
         ));
         assert!(!is_remote_callback_route(&Method::GET, "/api/runs"));
         assert!(!is_remote_callback_route(
@@ -9881,6 +9968,147 @@ mod tests {
     }
 
     #[test]
+    fn orphan_recovery_only_adopts_automatic_ssh_runs() {
+        let temp = crate::local::git::TemporaryDirectory::new("orx-adoption-policy").unwrap();
+        let store = Store::open_at(temp.path().to_path_buf()).unwrap();
+        let db = rusqlite::Connection::open(temp.path().join("orx.db")).unwrap();
+        db.execute("INSERT INTO local_experiments (id, project_id, slug, branch_name, run_command, created_at, updated_at) VALUES ('exp','project','exp','main','true',0,0)", []).unwrap();
+        for (id, mode) in [("automatic", "auto"), ("manual", "on-demand")] {
+            let backend = json!({"kind":"ssh_job", "namespace":"lab", "jobId":".orx/runs/test", "monitoring":{"mode":mode}});
+            db.execute("INSERT INTO runs (id, experiment_id, project_id, status, backend_json, created_at, updated_at) VALUES (?1,'exp','project','running',?2,0,0)", [id,&backend.to_string()]).unwrap();
+        }
+        let probed = std::cell::RefCell::new(Vec::new());
+        let mut spawned = Vec::new();
+        adopt_orphaned_runs_in(
+            &store,
+            |id| {
+                probed.borrow_mut().push(id.to_owned());
+                false
+            },
+            |id| {
+                spawned.push(id.to_owned());
+                Ok(())
+            },
+        )
+        .unwrap();
+        assert_eq!(spawned, ["automatic"]);
+        assert_eq!(*probed.borrow(), ["automatic"]);
+    }
+
+    #[tokio::test]
+    async fn remote_agent_can_refresh_with_callback_auth_but_anonymous_callers_cannot() {
+        let router = axum::Router::new()
+            .route(
+                "/api/health",
+                get(|| async { Json(json!({"sshMonitoring":1})) }),
+            )
+            .route(
+                "/api/runs/{id}/refresh",
+                post(|| async { Json(json!({"ok":true})) }),
+            )
+            .layer(middleware::from_fn_with_state(
+                RemoteAuth::new("test-callback"),
+                require_remote_auth,
+            ));
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            axum::serve(listener, router).await.unwrap();
+        });
+        let client = crate::net::loopback_client().build().unwrap();
+        for (method, path) in [
+            (reqwest::Method::GET, "/api/health"),
+            (reqwest::Method::POST, "/api/runs/run-1/refresh"),
+        ] {
+            let url = format!("http://{address}{path}");
+            assert_eq!(
+                client
+                    .request(method.clone(), &url)
+                    .send()
+                    .await
+                    .unwrap()
+                    .status(),
+                reqwest::StatusCode::UNAUTHORIZED
+            );
+            assert!(client
+                .request(method, &url)
+                .bearer_auth("test-callback")
+                .send()
+                .await
+                .unwrap()
+                .status()
+                .is_success());
+        }
+        assert_eq!(
+            client
+                .post(format!("http://{address}/api/chat/sessions/s1/message"))
+                .bearer_auth("test-callback")
+                .send()
+                .await
+                .unwrap()
+                .status(),
+            reqwest::StatusCode::UNAUTHORIZED
+        );
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn old_daemon_rejects_new_monitoring_options_before_any_submission() {
+        let router =
+            axum::Router::new().route("/api/health", get(|| async { Json(json!({"ok":true})) }));
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let server = tokio::spawn(async move {
+            axum::serve(listener, router).await.unwrap();
+        });
+        let mut args = crate::compute::tests::tinker_args();
+        args.backend = Some("ssh".into());
+        args.monitor_mode = Some(crate::jobs::ssh::monitor::Mode::OnDemand);
+        let result = submit_run_via_up(port, &args).await;
+        assert!(result
+            .err()
+            .unwrap()
+            .to_string()
+            .contains("Upgrade and restart"));
+        server.abort();
+    }
+
+    #[test]
+    fn ssh_monitoring_scope_uses_only_the_canonical_api_interval() {
+        let old: CreateRunReq = serde_json::from_value(json!({
+            "experimentId":"exp", "backend":"ssh", "logPollInterval":30
+        }))
+        .unwrap();
+        assert_eq!(old.monitor_interval, None);
+        let request: CreateRunReq = serde_json::from_value(json!({
+            "experimentId":"exp", "backend":"ssh", "monitorMode":"auto",
+            "monitorInterval":60, "logPollInterval":30
+        }))
+        .unwrap();
+        let serialized = serde_json::to_value(&request).unwrap();
+        assert!(serialized.get("logPollInterval").is_none());
+        assert_eq!(request.into_run_args().monitor_interval, Some(60));
+    }
+
+    #[test]
+    fn create_run_request_preserves_ssh_monitor_interval() {
+        let args = crate::ExpRunArgs {
+            backend: Some("ssh".into()),
+            monitor_interval: Some(30),
+            monitor_mode: Some(crate::jobs::ssh::monitor::Mode::Auto),
+            ..crate::compute::tests::tinker_args()
+        };
+        let request = CreateRunReq::from_run_args(&args).unwrap();
+        let value = serde_json::to_value(request).unwrap();
+        assert_eq!(value["monitorInterval"], 30);
+        assert_eq!(value["monitorMode"], "auto");
+        let forwarded = serde_json::from_value::<CreateRunReq>(value)
+            .unwrap()
+            .into_run_args();
+        assert_eq!(forwarded.monitor_interval, Some(30));
+    }
+
+    #[test]
     fn create_run_request_preserves_forwarded_slurm_resources_and_attribution() {
         let args = crate::ExpRunArgs {
             invocation_context: None,
@@ -9893,6 +10121,8 @@ mod tests {
             flavor: None,
             org: None,
             host: None,
+            monitor_interval: None,
+            monitor_mode: None,
             container: None,
             no_container: false,
             manifest: None,

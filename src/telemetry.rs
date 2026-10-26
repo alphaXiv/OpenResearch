@@ -367,6 +367,16 @@ pub(crate) fn set_ssh_default(host: Option<String>) -> std::io::Result<()> {
     mutate_settings(|settings| settings.ssh.default_host = host)
 }
 
+pub(crate) fn set_ssh_monitoring(
+    mode: crate::jobs::ssh::monitor::Mode,
+    interval: Option<u64>,
+) -> std::io::Result<()> {
+    mutate_settings(|settings| {
+        settings.ssh.monitor_mode = mode;
+        settings.ssh.monitor_interval_secs = interval;
+    })
+}
+
 fn outbox_dir() -> PathBuf {
     crate::config::config_dir().join("telemetry-outbox")
 }

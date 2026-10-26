@@ -18,10 +18,11 @@ use crate::jobs::openresearch;
 use crate::jobs::ray;
 use crate::jobs::slurm;
 use crate::jobs::ssh;
-use crate::jobs::{is_terminal_stage, stage_to_run_status, BackendDescriptor};
+use crate::jobs::{is_terminal_stage, observed_run_status, BackendDescriptor};
 use crate::store::{log_path, now_ms, RunStatus, Store};
 
 const POLL_INTERVAL: Duration = Duration::from_secs(5);
+const DEFAULT_SSH_LOG_POLL_INTERVAL: Duration = Duration::from_secs(2);
 /// How long a silent log stream is held before re-checking job state.
 const LOG_IDLE: Duration = Duration::from_secs(30);
 /// How long monitoring must keep failing before it is reported on the run.
@@ -111,6 +112,26 @@ impl RunLog {
 
 pub async fn run(args: crate::SuperviseArgs) -> Result<()> {
     let run_id = args.run_id;
+    if args.cancel_once {
+        let store = Store::open()?;
+        let run = crate::compute::load_run_with_submission_handle(&store, &run_id)?;
+        let descriptor = BackendDescriptor::parse(&run.backend_json)?;
+        let on_demand = ssh::monitor::on_demand(&descriptor);
+        // Automatic runs retain their supervisor as the owner of terminal logs and status.
+        // Still attempt control if restoring that supervisor fails.
+        let recovery = if on_demand {
+            Ok(())
+        } else {
+            crate::commands::exp::spawn_detached_supervise(&run_id)
+        };
+        let cancelled = ssh::monitor::deliver_cancel(&run_id).await;
+        recovery?;
+        cancelled?;
+        if on_demand {
+            ssh::monitor::refresh(&run_id, false).await?;
+        }
+        return Ok(());
+    }
 
     let store = Store::open()?;
     let mut supervisor_lock = open_supervisor_lock(&supervisor_lock_path(&run_id))?;
@@ -122,9 +143,7 @@ pub async fn run(args: crate::SuperviseArgs) -> Result<()> {
     let mut protocol_lock =
         open_supervisor_lock(&log_path(&run_id).with_extension("supervisor.shared-ssh.lock"))?;
     let _protocol_guard = protocol_lock.try_write()?;
-    let stored = store
-        .get_run(&run_id)?
-        .ok_or_else(|| anyhow!("Run {} not found in the local store.", run_id))?;
+    let stored = crate::compute::load_run_with_submission_handle(&store, &run_id)?;
     if status_of(&stored)?.is_terminal() {
         return Ok(());
     }
@@ -133,12 +152,9 @@ pub async fn run(args: crate::SuperviseArgs) -> Result<()> {
             "Run {run_id} does not belong to a local orx experiment."
         ));
     }
-    let mut descriptor = BackendDescriptor::parse(&stored.backend_json)?;
-    if descriptor.job_id.is_none() {
-        if let Some(recovered) = crate::compute::recover_submission_handle(&run_id)? {
-            store.set_backend_json(&run_id, &recovered.to_json())?;
-            descriptor = recovered;
-        }
+    let descriptor = BackendDescriptor::parse(&stored.backend_json)?;
+    if ssh::monitor::on_demand(&descriptor) {
+        return Ok(());
     }
     if descriptor.job_id.is_none() {
         if store.update_status(&run_id, RunStatus::Failed, Some(now_ms()), None)? {
@@ -265,27 +281,8 @@ fn local_cancel_requested(store: &Store, run_id: &str) -> bool {
         .unwrap_or(false)
 }
 
-fn should_report_cancelled(store: &Store, run_id: &str, cancel_sent: bool) -> bool {
-    cancel_sent || local_cancel_requested(store, run_id)
-}
-
 fn run_status_for_stage(store: &Store, run_id: &str, cancel_sent: bool, stage: &str) -> RunStatus {
-    if stage == "LOST" {
-        return if cancel_sent {
-            RunStatus::Cancelled
-        } else {
-            RunStatus::Lost
-        };
-    }
-    let status = stage_to_run_status(stage);
-    if status != RunStatus::Done
-        && is_terminal_stage(stage)
-        && should_report_cancelled(store, run_id, cancel_sent)
-    {
-        RunStatus::Cancelled
-    } else {
-        status
-    }
+    observed_run_status(stage, local_cancel_requested(store, run_id), cancel_sent)
 }
 
 fn status_of(stored: &crate::store::StoredRun) -> Result<RunStatus> {
@@ -689,15 +686,16 @@ async fn watch_ssh_job(
     descriptor: &mut BackendDescriptor,
     sandbox: Option<(&Credentials, &str)>,
 ) -> Result<RunStatus> {
+    let (poll_interval, log_poll_interval) = ssh::monitor::automatic_intervals(descriptor);
     let container = descriptor.ssh_container.clone();
-    let path = log_path(run_id);
     let (done_tx, done_rx) = tokio::sync::watch::channel(false);
     let (log_error_tx, log_error_rx) = tokio::sync::watch::channel(None);
     let mut log_task = tokio::spawn(tail_logs_ssh(
         target.clone(),
         dir.clone(),
-        path.clone(),
         run_id.to_string(),
+        log_poll_interval,
+        ssh::monitor::direct(descriptor) && descriptor.monitor_interval_secs.is_some(),
         done_rx,
         Some(log_error_tx),
     ));
@@ -710,16 +708,25 @@ async fn watch_ssh_job(
     let mut missing_polls = 0;
 
     loop {
-        if !cancel_sent && local_cancel_requested(store, run_id) {
-            cancel_ssh(
-                &target,
-                &dir,
-                container.as_ref(),
-                descriptor.rental_lease.is_some(),
-                run_id,
-                &mut cancel_sent,
-            )
-            .await;
+        let cancel_requested = local_cancel_requested(store, run_id);
+        if !cancel_sent && cancel_requested {
+            if ssh::monitor::direct(descriptor) {
+                let _ = ssh::monitor::deliver_cancel(run_id).await;
+                if let Some(run) = store.get_run(run_id)? {
+                    *descriptor = BackendDescriptor::parse(&run.backend_json)?;
+                    cancel_sent = descriptor.cancellation_accepted;
+                }
+            } else {
+                cancel_ssh(
+                    &target,
+                    &dir,
+                    container.as_ref(),
+                    descriptor.rental_lease.is_some(),
+                    run_id,
+                    &mut cancel_sent,
+                )
+                .await;
+            }
         }
         let observed = ssh::inspect_job(&target, &dir, container.as_ref()).await;
         let polling_error = observed
@@ -763,7 +770,10 @@ async fn watch_ssh_job(
             let mut updated = descriptor.clone();
             updated.monitoring_error = reported;
             updated.cancellation_accepted = cancel_sent;
-            match store.set_backend_json(run_id, &updated.to_json()) {
+            match store.patch_backend(run_id, |d| {
+                d.monitoring_error = updated.monitoring_error.clone();
+                d.cancellation_accepted |= updated.cancellation_accepted;
+            }) {
                 Ok(()) => *descriptor = updated,
                 Err(err) => eprintln!("supervise {run_id}: could not save monitoring state: {err}"),
             }
@@ -782,7 +792,13 @@ async fn watch_ssh_job(
                 },
                 _ => {
                     missing_polls = 0;
-                    tokio::time::sleep(POLL_INTERVAL).await;
+                    wait_for_ssh_status_poll(
+                        store,
+                        run_id,
+                        poll_interval,
+                        !cancel_requested && !cancel_sent,
+                    )
+                    .await;
                     continue;
                 }
             },
@@ -791,7 +807,13 @@ async fn watch_ssh_job(
         if job.message.as_deref() == Some(ssh::RUN_DIR_MISSING) {
             missing_polls += 1;
             if missing_polls < 3 {
-                tokio::time::sleep(POLL_INTERVAL).await;
+                wait_for_ssh_status_poll(
+                    store,
+                    run_id,
+                    poll_interval,
+                    !cancel_requested && !cancel_sent,
+                )
+                .await;
                 continue;
             }
         } else {
@@ -815,10 +837,26 @@ async fn watch_ssh_job(
                 if openresearch::box_deleted(creds, id).await {
                     job.stage = "LOST".into();
                 } else {
-                    tokio::time::sleep(POLL_INTERVAL).await;
+                    wait_for_ssh_status_poll(
+                        store,
+                        run_id,
+                        poll_interval,
+                        !cancel_requested && !cancel_sent,
+                    )
+                    .await;
                     continue;
                 }
             }
+        }
+        if ssh::monitor::direct(descriptor) {
+            store.patch_backend(run_id, |d| {
+                let m = d
+                    .monitoring
+                    .get_or_insert_with(ssh::monitor::Monitoring::default);
+                m.last_observed_at = Some(now_ms());
+                m.last_checked_at = m.last_observed_at;
+                m.last_error = error.clone();
+            })?;
         }
         let stage = job.stage.as_str();
         let status = run_status_for_stage(store, run_id, cancel_sent, stage);
@@ -862,6 +900,17 @@ async fn watch_ssh_job(
                 )
                 .await;
             }
+            if ssh::monitor::direct(descriptor) {
+                store.patch_backend(run_id, |d| {
+                    let m = d
+                        .monitoring
+                        .get_or_insert_with(ssh::monitor::Monitoring::default);
+                    m.logs_complete = collected;
+                    if collected {
+                        m.last_log_sync_at = Some(now_ms());
+                    }
+                })?;
+            }
             if collected {
                 queue_remote_cleanup(store, run_id);
             }
@@ -888,49 +937,56 @@ async fn watch_ssh_job(
         }
 
         if status != last_status && store.update_status(run_id, status, None, None)? {
-            let cancel_requested = local_cancel_requested(store, run_id);
             eprintln!("supervise {run_id}: {last_status} -> {status} (stage {stage})");
             last_status = status;
-            if cancel_requested && !cancel_sent {
-                cancel_ssh(
-                    &target,
-                    &dir,
-                    container.as_ref(),
-                    descriptor.rental_lease.is_some(),
-                    run_id,
-                    &mut cancel_sent,
-                )
-                .await;
-            }
-        } else if !cancel_sent && local_cancel_requested(store, run_id) {
-            cancel_ssh(
-                &target,
-                &dir,
-                container.as_ref(),
-                descriptor.rental_lease.is_some(),
-                run_id,
-                &mut cancel_sent,
-            )
-            .await;
         }
 
-        tokio::time::sleep(POLL_INTERVAL).await;
+        wait_for_ssh_status_poll(
+            store,
+            run_id,
+            poll_interval,
+            !cancel_requested && !cancel_sent,
+        )
+        .await;
     }
 }
 
-/// SSH twin of `tail_logs` — each pass reads the remote log past the lines
-/// already consumed, so the same replay-and-dedup contract applies.
+async fn wait_for_ssh_status_poll(
+    store: &Store,
+    run_id: &str,
+    poll_interval: Duration,
+    wake_for_cancel: bool,
+) {
+    let timer = tokio::time::sleep(poll_interval);
+    tokio::pin!(timer);
+    if !wake_for_cancel {
+        timer.await;
+        return;
+    }
+    loop {
+        if local_cancel_requested(store, run_id) {
+            return;
+        }
+        tokio::select! {
+            _ = &mut timer => return,
+            _ = tokio::time::sleep(Duration::from_secs(1)) => {}
+        }
+    }
+}
+
+/// Collect SSH logs; explicit interval overrides bound each pass, while legacy callers catch up immediately.
 async fn tail_logs_ssh(
     target: ssh::SshTarget,
     dir: String,
-    path: std::path::PathBuf,
     run_id: String,
-    done: tokio::sync::watch::Receiver<bool>,
+    poll_interval: Duration,
+    bounded: bool,
+    mut done: tokio::sync::watch::Receiver<bool>,
     errors: Option<tokio::sync::watch::Sender<Option<String>>>,
 ) -> bool {
-    let _ = path;
     let target = target.for_run(&run_id);
     let mut last_error = None;
+    let mut chunks = 0;
     loop {
         let draining = *done.borrow();
         let result = ssh::service::request(
@@ -946,10 +1002,13 @@ async fn tail_logs_ssh(
                 if let Some(errors) = &errors {
                     errors.send_replace(None);
                 }
-                if value["eof"] != true {
+                chunks += 1;
+                if value["eof"] != true
+                    && (draining || !bounded || chunks < ssh::monitor::LOG_CHUNKS)
+                {
                     continue;
                 }
-                if draining {
+                if draining && value["eof"] == true {
                     return true;
                 }
             }
@@ -964,8 +1023,27 @@ async fn tail_logs_ssh(
         if let Some(errors) = &errors {
             errors.send_replace(last_error.clone());
         }
-        tokio::time::sleep(Duration::from_secs(2)).await;
+        chunks = 0;
+        wait_for_ssh_log_poll(&mut done, draining, poll_interval).await;
     }
+}
+
+async fn wait_for_ssh_log_poll(
+    done: &mut tokio::sync::watch::Receiver<bool>,
+    draining: bool,
+    poll_interval: Duration,
+) {
+    // Final collection must wake immediately and retry within its 20-second bound.
+    let delay = if draining {
+        poll_interval.min(DEFAULT_SSH_LOG_POLL_INTERVAL)
+    } else {
+        poll_interval
+    };
+    let _ = log_pass(done, draining, async {
+        tokio::time::sleep(delay).await;
+        Ok(())
+    })
+    .await;
 }
 
 async fn cancel_ssh(
@@ -1383,14 +1461,14 @@ async fn run_slurm(
 
     eprintln!("supervise {run_id}: watching slurm job {job_id} on {host}");
 
-    let path = log_path(&run_id);
     let (done_tx, done_rx) = tokio::sync::watch::channel(false);
     let (log_error_tx, log_error_rx) = tokio::sync::watch::channel(None);
     let mut log_task = tokio::spawn(tail_logs_ssh(
         ssh::SshTarget::alias(&host).for_run(&run_id),
         dir.clone(),
-        path.clone(),
         run_id.clone(),
+        DEFAULT_SSH_LOG_POLL_INTERVAL,
+        false,
         done_rx,
         Some(log_error_tx),
     ));
@@ -1794,6 +1872,32 @@ mod tests {
             std::fs::read_to_string(&path).unwrap(),
             "a\n{\"big\": 1}\nlast\n"
         );
+    }
+
+    #[tokio::test]
+    async fn ssh_log_poll_wait_obeys_interval_and_wakes_for_final_collection() {
+        let (tx, mut rx) = tokio::sync::watch::channel(false);
+        tokio::time::timeout(
+            Duration::from_secs(1),
+            wait_for_ssh_log_poll(&mut rx, false, Duration::from_millis(1)),
+        )
+        .await
+        .unwrap();
+
+        let mut waiting = Box::pin(wait_for_ssh_log_poll(
+            &mut rx,
+            false,
+            Duration::from_secs(300),
+        ));
+        assert!(
+            tokio::time::timeout(Duration::from_millis(20), &mut waiting)
+                .await
+                .is_err()
+        );
+        tx.send(true).unwrap();
+        tokio::time::timeout(Duration::from_secs(1), waiting)
+            .await
+            .unwrap();
     }
 
     #[tokio::test]

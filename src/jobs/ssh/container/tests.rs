@@ -486,7 +486,7 @@ async fn supervisor_restart(target: &SshTarget, reference: &str, port: u16) {
         .unwrap();
     let (dir, container) = launch(target, Some(reference), "echo ONCE; sleep 8; echo AFTER").await;
     let id = dir.rsplit('/').next().unwrap();
-    let descriptor = serde_json::json!({"kind":"ssh_job","namespace":"fixture","jobId":dir,"sshContainer":container});
+    let descriptor = serde_json::json!({"kind":"ssh_job","namespace":"fixture","jobId":dir,"sshContainer":container,"monitorIntervalSecs":1});
     store
         .upsert_run(&StoredRun {
             id: id.into(),

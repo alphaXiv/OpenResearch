@@ -1437,5 +1437,19 @@
   "skills_detection_copy": "検出の詳細をコピー",
   "skills_detection_accepted": "{count} 件を採用",
   "desktop_zoom_controls": "ズーム操作",
-  "desktop_zoom_reset": "リセット"
+  "desktop_zoom_reset": "リセット",
+  "ssh_monitor_label": "SSH 監視",
+  "ssh_monitor_auto": "自動",
+  "ssh_monitor_on_demand": "オンデマンド",
+  "ssh_monitor_interval": "間隔（秒）",
+  "ssh_monitor_interval_invalid": "秒数を正の整数で入力してください。",
+  "ssh_monitor_save": "保存",
+  "ssh_monitor_defaults_hint": "新しい直接 SSH 実行に適用されます。既存の実行は保存済みのモードを維持します。間隔が空欄の場合、状態は 5 秒ごと、ログは 2 秒ごとに確認します。",
+  "ssh_monitor_observed": "最終確認：{time}",
+  "ssh_monitor_unobserved": "送信後は未確認",
+  "ssh_monitor_refresh": "状態を更新",
+  "ssh_monitor_sync_logs": "ログを同期",
+  "ssh_monitor_cached_hint": "最後に確認した状態と収集済みログを表示しています。リモートのタスクを確認するには更新してください。",
+  "ssh_monitor_cancel_pending": "キャンセルを要求しました。リモートでの停止はまだ確認されていません。",
+  "ssh_monitor_logs_pending": "最終ログの収集が完了していません。再同期すると続行できます。"
 }

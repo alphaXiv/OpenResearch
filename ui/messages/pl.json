@@ -1437,5 +1437,19 @@
   "skills_detection_copy": "Kopiuj szczegóły wykrywania",
   "skills_detection_accepted": "Zaakceptowano: {count}",
   "desktop_zoom_controls": "Sterowanie powiększeniem",
-  "desktop_zoom_reset": "Resetuj"
+  "desktop_zoom_reset": "Resetuj",
+  "ssh_monitor_label": "Monitorowanie SSH",
+  "ssh_monitor_auto": "Automatyczne",
+  "ssh_monitor_on_demand": "Na żądanie",
+  "ssh_monitor_interval": "Interwał (sekundy)",
+  "ssh_monitor_interval_invalid": "Wpisz dodatnią całkowitą liczbę sekund.",
+  "ssh_monitor_save": "Zapisz",
+  "ssh_monitor_defaults_hint": "Dotyczy nowych uruchomień przez bezpośrednie SSH. Istniejące zachowują zapisany tryb. Pusty interwał oznacza sprawdzanie stanu co 5 sekund, a logów co 2 sekundy.",
+  "ssh_monitor_observed": "Ostatnia obserwacja: {time}",
+  "ssh_monitor_unobserved": "Nie sprawdzono od wysłania",
+  "ssh_monitor_refresh": "Odśwież stan",
+  "ssh_monitor_sync_logs": "Synchronizuj logi",
+  "ssh_monitor_cached_hint": "Wyświetlana jest ostatnia obserwacja i zebrane logi. Odśwież, aby sprawdzić zdalne zadanie.",
+  "ssh_monitor_cancel_pending": "Zażądano anulowania; zakończenie zadania zdalnego nie jest jeszcze potwierdzone.",
+  "ssh_monitor_logs_pending": "Końcowe logi nie zostały w całości zebrane. Ponów synchronizację, aby kontynuować."
 }

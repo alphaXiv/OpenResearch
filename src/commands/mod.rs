@@ -39,6 +39,7 @@ pub mod paper;
 pub mod plan_gate;
 pub mod project;
 pub mod projects;
+pub mod refresh;
 pub mod remote_host;
 pub mod runs;
 pub mod serve;

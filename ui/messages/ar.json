@@ -1437,5 +1437,19 @@
   "skills_detection_copy": "نسخ تفاصيل الاكتشاف",
   "skills_detection_accepted": "تم قبول {count}",
   "desktop_zoom_controls": "عناصر التحكم في التكبير",
-  "desktop_zoom_reset": "إعادة تعيين"
+  "desktop_zoom_reset": "إعادة تعيين",
+  "ssh_monitor_label": "مراقبة SSH",
+  "ssh_monitor_auto": "تلقائية",
+  "ssh_monitor_on_demand": "عند الطلب",
+  "ssh_monitor_interval": "الفاصل (بالثواني)",
+  "ssh_monitor_interval_invalid": "أدخل عددًا صحيحًا موجبًا من الثواني.",
+  "ssh_monitor_save": "حفظ",
+  "ssh_monitor_defaults_hint": "ينطبق على عمليات SSH المباشرة الجديدة. تحتفظ العمليات الحالية بوضعها المحفوظ. عند ترك الفاصل فارغًا، تُفحص الحالة كل 5 ثوانٍ وتُجمع السجلات كل ثانيتين.",
+  "ssh_monitor_observed": "آخر تحقق: {time}",
+  "ssh_monitor_unobserved": "لم يُفحص منذ الإرسال",
+  "ssh_monitor_refresh": "تحديث الحالة",
+  "ssh_monitor_sync_logs": "مزامنة السجلات",
+  "ssh_monitor_cached_hint": "تُعرض آخر حالة مرصودة والسجلات المجمّعة. حدّث للتحقق من المهمة البعيدة.",
+  "ssh_monitor_cancel_pending": "طُلب الإلغاء؛ لم يُؤكَّد توقف المهمة البعيدة بعد.",
+  "ssh_monitor_logs_pending": "لم تُجمع السجلات النهائية بالكامل. أعد المزامنة للمتابعة."
 }
