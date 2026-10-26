@@ -61,6 +61,11 @@ change the configured backend or authorize bypassing the launch contract.
 - `--force` permits a deliberate concurrent run on the same experiment.
   Without it, `orx` rejects a launch while that node already has a run in
   flight.
+- Direct SSH runs default to automatic monitoring (status every 5 seconds,
+  logs every 2 seconds). `--monitor-interval <seconds>` overrides both waits.
+  `--monitor-mode on-demand` disables periodic observation; schedule explicit
+  `orx refresh <runId> --json` calls using the agent's scheduler or wait tools.
+  Add `--collect-logs` only when logs are needed. Read the SSH guide below.
 - Every run gets `ORX_RUN_ID`, `ORX_EXPERIMENT`, `ORX_EXPERIMENT_TITLE`,
   `ORX_PARENT_EXPERIMENT` (when it has a parent), `ORX_COMMIT` and
   `TRACKIO_PROJECT`. Saved environment variables reach every backend except

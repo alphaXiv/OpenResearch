@@ -414,6 +414,9 @@ export interface Instance extends Run {
 export const listInstances = () =>
   get<{ instances: Instance[] }>("/api/instances").then((r) => r.instances);
 
+export const refreshRun = (runId: string, collectLogs = false) =>
+  post<{ run: Run }>(`/api/runs/${runId}/refresh`, { collectLogs });
+
 export const cancelRun = (runId: string) =>
   post<{ ok: boolean }>(`/api/runs/${runId}/cancel`).then(() => undefined);
 
@@ -1008,7 +1011,14 @@ export interface SshHost {
   lastTest?: SshPreflight;
 }
 
-export interface SshSettings { hosts: SshHost[]; defaultHost: string | null }
+export interface SshSettings {
+  hosts: SshHost[];
+  defaultHost: string | null;
+  monitorMode?: "auto" | "on-demand";
+  monitorIntervalSecs?: number | null;
+}
+export const saveSshMonitoring = (mode: "auto" | "on-demand", intervalSecs: number | null) =>
+  post<{ ok: boolean }>("/api/settings/ssh/monitoring", { mode, intervalSecs });
 export const getSshSettings = (signal?: AbortSignal) => get<SshSettings>("/api/settings/ssh", signal);
 export const saveSshHost = (body: { host: string; container: string | null }) =>
   post<{ ok: boolean }>("/api/settings/ssh", body);

@@ -1737,6 +1737,23 @@ impl Store {
         Ok(())
     }
 
+    /// Merge observation/control metadata without overwriting another caller's fields.
+    pub fn patch_backend(
+        &self,
+        run_id: &str,
+        update: impl FnOnce(&mut crate::jobs::BackendDescriptor),
+    ) -> Result<()> {
+        let tx = self.begin_immediate()?;
+        let run = self
+            .get_run(run_id)?
+            .ok_or_else(|| anyhow!("Run {run_id} not found."))?;
+        let mut descriptor = crate::jobs::BackendDescriptor::parse(&run.backend_json)?;
+        update(&mut descriptor);
+        self.set_backend_json(run_id, &descriptor.to_json())?;
+        tx.commit()?;
+        Ok(())
+    }
+
     // --- local projects (orx up) ---
 
     /// Atomically install a fully-materialized demo project. The project id is

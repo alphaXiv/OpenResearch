@@ -1437,5 +1437,19 @@
   "skills_detection_copy": "Copiar detalles de detección",
   "skills_detection_accepted": "{count} aceptadas",
   "desktop_zoom_controls": "Controles de zoom",
-  "desktop_zoom_reset": "Restablecer"
+  "desktop_zoom_reset": "Restablecer",
+  "ssh_monitor_label": "Supervisión SSH",
+  "ssh_monitor_auto": "Automática",
+  "ssh_monitor_on_demand": "Bajo demanda",
+  "ssh_monitor_interval": "Intervalo (segundos)",
+  "ssh_monitor_interval_invalid": "Introduce un número entero positivo de segundos.",
+  "ssh_monitor_save": "Guardar",
+  "ssh_monitor_defaults_hint": "Se aplica a nuevas ejecuciones SSH directas. Las existentes conservan su modo. Un intervalo vacío mantiene las comprobaciones de estado cada 5 segundos y los registros cada 2 segundos.",
+  "ssh_monitor_observed": "Última observación: {time}",
+  "ssh_monitor_unobserved": "Sin comprobar desde el envío",
+  "ssh_monitor_refresh": "Actualizar estado",
+  "ssh_monitor_sync_logs": "Sincronizar registros",
+  "ssh_monitor_cached_hint": "Se muestran la última observación y los registros recopilados. Actualiza para comprobar la tarea remota.",
+  "ssh_monitor_cancel_pending": "Cancelación solicitada; aún no se ha confirmado la finalización remota.",
+  "ssh_monitor_logs_pending": "Los registros finales están incompletos. Vuelve a sincronizar para continuar."
 }

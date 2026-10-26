@@ -82,6 +82,7 @@ group below has a module (`orx skill <name>`) with the full flags and rules.
 ### Run evidence (run-scoped) — module `orx-logs`
 | Command | What it does |
 |---|---|
+| `orx refresh <runId> [--collect-logs] [--json]` | Explicitly refresh a direct SSH run; on-demand runs otherwise retain cached state. |
 | `orx logs <runId>` | Show the local log path, size, and short preview; inspect the file for full evidence. |
 
 ### Create and run experiments (write) — modules `orx-create`, `orx-compute`, `orx-git`

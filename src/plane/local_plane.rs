@@ -289,7 +289,8 @@ impl LocalPlane {
                 println!("  run  {}", summary.run_id);
                 println!(
                     "{}",
-                    crate::invocation::follow_up(&summary.experiment_id, &summary.run_id)
+                    if summary.on_demand { crate::invocation::on_demand_follow_up(&summary.run_id) }
+                    else { crate::invocation::follow_up(&summary.experiment_id, &summary.run_id) }
                 );
                 Ok(())
             }

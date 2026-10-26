@@ -92,6 +92,11 @@ pub struct BackendDescriptor {
     /// Requested execution limit for OpenResearch and Slurm jobs.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub timeout_secs: Option<u64>,
+    /// Override direct SSH status/log waits; absent preserves status 5s/logs 2s.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub monitor_interval_secs: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub monitoring: Option<ssh::monitor::Monitoring>,
     /// Requested `#SBATCH --cpus-per-task` (slurm_job only).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cpus_per_task: Option<u32>,
@@ -258,6 +263,31 @@ pub fn stage_to_run_status(stage: &str) -> crate::store::RunStatus {
     }
 }
 
+/// Preserve a successful outcome; attribute a failed terminal observation to saved cancel intent.
+pub fn observed_run_status(
+    stage: &str,
+    cancel_requested: bool,
+    cancel_accepted: bool,
+) -> crate::store::RunStatus {
+    use crate::store::RunStatus;
+    if stage == "LOST" {
+        return if cancel_accepted {
+            RunStatus::Cancelled
+        } else {
+            RunStatus::Lost
+        };
+    }
+    let status = stage_to_run_status(stage);
+    if status != RunStatus::Done
+        && is_terminal_stage(stage)
+        && (cancel_requested || cancel_accepted)
+    {
+        RunStatus::Cancelled
+    } else {
+        status
+    }
+}
+
 pub fn is_terminal_stage(stage: &str) -> bool {
     matches!(stage, "COMPLETED" | "CANCELED" | "ERROR" | "DELETED")
 }
@@ -295,6 +325,8 @@ mod tests {
             ssh_port: None,
             ssh_user: None,
             timeout_secs: Some(14_400),
+            monitor_interval_secs: None,
+            monitoring: None,
             cpus_per_task: None,
             mem: None,
             source_digest: None,
@@ -356,6 +388,7 @@ mod tests {
         assert_eq!(d.ssh_ref().unwrap(), ("mybox", ".orx/runs/r1"));
         assert_eq!(d.ssh_host, None);
         assert_eq!(d.timeout_secs, None);
+        assert_eq!(d.monitor_interval_secs, None);
         assert_eq!(d.cpus_per_task, None);
         // A Slurm run from before cpus/mem were recorded may still have requested them.
         let slurm =
@@ -367,6 +400,13 @@ mod tests {
         );
         assert_eq!(d.ssh_container, None);
         let mut d = d;
+        d.monitor_interval_secs = Some(30);
+        assert_eq!(
+            BackendDescriptor::parse(&d.to_json())
+                .unwrap()
+                .monitor_interval_secs,
+            Some(30)
+        );
         d.ssh_container = Some(ssh::ContainerRun {
             reference: "research".into(),
             id: "immutable-id".into(),
@@ -379,6 +419,21 @@ mod tests {
             BackendDescriptor::parse(&json).unwrap().ssh_container,
             d.ssh_container
         );
+    }
+
+    #[test]
+    fn ssh_monitoring_scope_uses_only_the_canonical_descriptor_interval() {
+        let old =
+            BackendDescriptor::parse(r#"{"kind":"ssh_job","logPollIntervalSecs":30}"#).unwrap();
+        assert_eq!(old.monitor_interval_secs, None);
+        let canonical = BackendDescriptor::parse(
+            r#"{"kind":"ssh_job","monitorIntervalSecs":60,"logPollIntervalSecs":30}"#,
+        )
+        .unwrap();
+        assert_eq!(canonical.monitor_interval_secs, Some(60));
+        let serialized: serde_json::Value = serde_json::from_str(&canonical.to_json()).unwrap();
+        assert_eq!(serialized["monitorIntervalSecs"], 60);
+        assert!(serialized.get("logPollIntervalSecs").is_none());
     }
 
     #[test]

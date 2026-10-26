@@ -1,3 +1,4 @@
+import { RunMonitoring } from "./RunMonitoring";
 import { m } from "../paraglide/messages.js";
 import { ChartLine, ChevronDown, CircleStop, ExternalLink, ScrollText } from "lucide-react";
 import { useEffect, useRef, useState } from "react";
@@ -260,6 +261,7 @@ function TerminalView({
         </div>
       )}
 
+      {selectedRun && <RunMonitoring key={selectedRun.id} run={selectedRun} />}
       {monitoringError && (
         <p role="status" className="m-0 shrink-0 border-b border-border-variant px-3 py-2 text-sm text-accent-amber wrap-anywhere">
           {monitoringError}

@@ -31,6 +31,12 @@ pub fn follow_up(experiment_id: &str, run_id: &str) -> String {
     format!("  Follow it with `{orx} exp wait {experiment_id}` or `{orx} logs {run_id}`.")
 }
 
+/// On-demand runs need an external schedule; a cached exp wait cannot discover completion.
+pub fn on_demand_follow_up(run_id: &str) -> String {
+    let orx = orx();
+    format!("  Monitoring: on-demand; no background checks. Schedule `{orx} refresh {run_id} --json` at your chosen interval. Add `--collect-logs` when logs are needed.")
+}
+
 /// The error every backend raises when neither the experiment nor its project
 /// has a run command.
 pub fn no_run_command(project_id: &str) -> String {
@@ -57,6 +63,14 @@ fn quote_for_shell(path: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn on_demand_hint_schedules_the_exact_run_instead_of_waiting_on_cached_state() {
+        let hint = on_demand_follow_up("run-1");
+        assert!(hint.contains("refresh run-1 --json"));
+        assert!(hint.contains("Schedule"));
+        assert!(!hint.contains("exp wait"));
+    }
 
     #[test]
     fn an_ordinary_path_is_left_alone() {

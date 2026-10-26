@@ -232,6 +232,24 @@ const SUPERVISOR_LOG_MAX_BYTES: u64 = 1024 * 1024;
 /// Spawn `orx supervise <runId>` fully detached (own process group, stderr to a log),
 /// so it outlives this command and any SSH session that launched it.
 pub(crate) fn spawn_detached_supervise(run_id: &str) -> Result<()> {
+    let store = Store::open()?;
+    let run = crate::compute::load_run_with_submission_handle(&store, run_id)?;
+    let descriptor = crate::jobs::BackendDescriptor::parse(&run.backend_json)?;
+    if crate::jobs::ssh::monitor::on_demand(&descriptor) {
+        return if run.cancel_requested {
+            spawn_ssh_cancel_once(run_id)
+        } else {
+            Ok(())
+        };
+    }
+    spawn_supervisor(run_id, false)
+}
+
+pub(crate) fn spawn_ssh_cancel_once(run_id: &str) -> Result<()> {
+    spawn_supervisor(run_id, true)
+}
+
+fn spawn_supervisor(run_id: &str, cancel_once: bool) -> Result<()> {
     let exe = crate::paths::spawnable_exe().map_err(|e| {
         anyhow!(
             "Could not locate the orx binary to spawn the supervisor: {}",
@@ -244,13 +262,13 @@ pub(crate) fn spawn_detached_supervise(run_id: &str) -> Result<()> {
         // Rename rather than truncate: a still-running supervisor keeps writing to its handle.
         let _ = std::fs::rename(&path, path.with_extension("log.1"));
     }
-    let mut child = match supervise_command(&exe, run_id, &path).spawn() {
+    let mut child = match supervise_command(&exe, run_id, &path, cancel_once).spawn() {
         // `/proc/self/exe` can name a path this process cannot exec (OR-334); the `orx` on PATH still runs.
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
             match crate::local::shell_env::find_on_path("orx").filter(|orx| *orx != exe) {
                 Some(orx) => {
                     let tried = format!("`{}`{}: {error}", exe.display(), current_exe_note(&exe));
-                    let child = supervise_command(&orx, run_id, &path)
+                    let child = supervise_command(&orx, run_id, &path, cancel_once)
                         .spawn()
                         .map_err(|e| {
                             anyhow!(
@@ -285,6 +303,7 @@ fn supervise_command(
     exe: &std::path::Path,
     run_id: &str,
     log_path: &std::path::Path,
+    cancel_once: bool,
 ) -> std::process::Command {
     let stderr = std::fs::OpenOptions::new()
         .create(true)
@@ -298,6 +317,9 @@ fn supervise_command(
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::null())
         .stderr(stderr);
+    if cancel_once {
+        cmd.arg("--cancel-once");
+    }
     // The supervisor re-resolves its directories from its own environment, so
     // without this a run launched from the macOS app is tracked in a different
     // store than the app is reading.
@@ -365,6 +387,19 @@ pub(crate) fn exp_cancel_reason(chat_session_id: Option<&str>) -> String {
 
 /// Persist cancel intent and ensure an orphaned run gets a fresh supervisor.
 pub(crate) fn request_local_run_cancel(store: &Store, run_id: &str, reason: &str) -> Result<()> {
+    let run = crate::compute::load_run_with_submission_handle(store, run_id)?;
+    let descriptor = crate::jobs::BackendDescriptor::parse(&run.backend_json)?;
+    if descriptor.kind == "ssh_job" && descriptor.job_id.is_none() {
+        store.request_cancel(run_id, reason)?;
+        return Ok(());
+    }
+    if crate::jobs::ssh::monitor::direct(&descriptor) {
+        store.request_cancel(run_id, reason)?;
+        if !crate::local::is_terminal(&run.status) {
+            spawn_ssh_cancel_once(run_id)?;
+        }
+        return Ok(());
+    }
     let lock_path = crate::store::log_path(run_id).with_extension("cancel.lock");
     request_local_run_cancel_with(
         store,

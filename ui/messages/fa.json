@@ -1437,5 +1437,19 @@
   "skills_detection_copy": "کپی جزئیات شناسایی",
   "skills_detection_accepted": "{count} پذیرفته‌شده",
   "desktop_zoom_controls": "کنترل‌های بزرگ‌نمایی",
-  "desktop_zoom_reset": "بازنشانی"
+  "desktop_zoom_reset": "بازنشانی",
+  "ssh_monitor_label": "پایش SSH",
+  "ssh_monitor_auto": "خودکار",
+  "ssh_monitor_on_demand": "در صورت درخواست",
+  "ssh_monitor_interval": "فاصله (ثانیه)",
+  "ssh_monitor_interval_invalid": "تعداد ثانیه‌ها را به صورت عدد صحیح مثبت وارد کنید.",
+  "ssh_monitor_save": "ذخیره",
+  "ssh_monitor_defaults_hint": "برای اجراهای جدید مستقیم SSH اعمال می‌شود. اجراهای موجود حالت ذخیره‌شده را حفظ می‌کنند. فاصلهٔ خالی یعنی بررسی وضعیت هر ۵ ثانیه و جمع‌آوری گزارش‌ها هر ۲ ثانیه.",
+  "ssh_monitor_observed": "آخرین بررسی: {time}",
+  "ssh_monitor_unobserved": "پس از ارسال بررسی نشده است",
+  "ssh_monitor_refresh": "تازه‌سازی وضعیت",
+  "ssh_monitor_sync_logs": "همگام‌سازی گزارش‌ها",
+  "ssh_monitor_cached_hint": "آخرین وضعیت مشاهده‌شده و گزارش‌های جمع‌آوری‌شده نمایش داده می‌شوند. برای بررسی کار راه‌دور تازه‌سازی کنید.",
+  "ssh_monitor_cancel_pending": "درخواست لغو ثبت شد؛ توقف کار راه‌دور هنوز تأیید نشده است.",
+  "ssh_monitor_logs_pending": "گزارش‌های نهایی کامل جمع‌آوری نشده‌اند. برای ادامه دوباره همگام‌سازی کنید."
 }

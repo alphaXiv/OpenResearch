@@ -85,6 +85,9 @@ enum Command {
     /// Show a run's compact log summary (path, size, and preview) by default.
     Logs(LogsArgs),
 
+    /// Refresh one direct SSH run from its remote host.
+    Refresh(RefreshArgs),
+
     /// Print the command that opens a run's TensorBoard logs.
     Tensorboard(TensorboardArgs),
 
@@ -254,6 +257,17 @@ pub struct RunsArgs {
     /// Filter to one experiment.
     #[arg(long)]
     pub experiment: Option<String>,
+}
+
+#[derive(Args, Debug)]
+pub struct RefreshArgs {
+    /// The run id returned by submission.
+    pub run_id: String,
+    /// Collect at most 1 MiB of new log bytes as well as status.
+    #[arg(long)]
+    pub collect_logs: bool,
+    #[arg(long)]
+    pub json: bool,
 }
 
 #[derive(Args, Debug)]
@@ -573,6 +587,12 @@ pub struct ExpRunArgs {
     /// settings' host).
     #[arg(long)]
     pub host: Option<String>,
+    /// Direct SSH monitoring: auto (default) or on-demand, refreshed explicitly.
+    #[arg(long, value_enum)]
+    pub monitor_mode: Option<jobs::ssh::monitor::Mode>,
+    /// Seconds between automatic direct SSH checks (defaults: status 5, logs 2).
+    #[arg(long, value_name = "SECONDS", value_parser = clap::value_parser!(u64).range(1..))]
+    pub monitor_interval: Option<u64>,
     /// Existing running Docker container on the SSH host (name or ID).
     #[arg(long, conflicts_with = "no_container")]
     pub container: Option<String>,
@@ -692,6 +712,8 @@ pub struct ServeArgs {
 
 #[derive(Args, Debug)]
 pub struct SuperviseArgs {
+    #[arg(long, hide = true)]
+    pub cancel_once: bool,
     /// The run to supervise (must exist in the local store).
     pub run_id: String,
 }
@@ -1318,6 +1340,7 @@ fn command_name(command: &Command) -> &'static str {
         Command::Agent(_) => "agent",
         Command::Runs(_) => "runs",
         Command::Logs(_) => "logs",
+        Command::Refresh(_) => "refresh",
         Command::Tensorboard(_) => "tensorboard",
         Command::Metrics(_) => "metrics",
         Command::CreateExperiment(_) => "create-experiment",
@@ -1370,6 +1393,7 @@ async fn dispatch(command: Command) -> error::Result<()> {
         Command::Agent(args) => commands::agent::run(args).await,
         Command::Runs(args) => commands::runs::run(args).await,
         Command::Logs(args) => commands::logs::run(args).await,
+        Command::Refresh(args) => commands::refresh::run(args).await,
         Command::Tensorboard(args) => commands::tensorboard::run(args).await,
         Command::Metrics(args) => commands::metrics::run(args).await,
         Command::CreateExperiment(args) => commands::create_experiment::run(args).await,
@@ -1435,6 +1459,44 @@ mod cli_tests {
     use super::*;
 
     #[test]
+    fn ssh_monitor_interval_accepts_positive_seconds() {
+        {
+            let flag = "--monitor-interval";
+            let cli = Cli::try_parse_from([
+                "orx",
+                "exp",
+                "run",
+                "experiment",
+                "--backend",
+                "ssh",
+                flag,
+                "30",
+            ])
+            .unwrap();
+            let Some(Command::Exp(ExpArgs {
+                command: ExpCommand::Run(args),
+            })) = cli.command
+            else {
+                panic!("expected exp run command");
+            };
+            assert_eq!(args.monitor_interval, Some(30));
+        }
+        for interval in ["0", "-1", "bad"] {
+            assert!(Cli::try_parse_from([
+                "orx",
+                "exp",
+                "run",
+                "experiment",
+                "--backend",
+                "ssh",
+                "--monitor-interval",
+                interval,
+            ])
+            .is_err());
+        }
+    }
+
+    #[test]
     fn library_add_commands_are_distinct_from_reading_skill_docs() {
         for name in ["skills", "templates"] {
             let cli = Cli::try_parse_from(["orx", name, "add", "./package.zip"]).unwrap();
@@ -1452,6 +1514,7 @@ mod cli_tests {
     fn internal_commands_do_not_emit_command_telemetry() {
         assert!(!should_capture_command(&Command::Supervise(
             SuperviseArgs {
+                cancel_once: false,
                 run_id: "run-1".into(),
             }
         )));

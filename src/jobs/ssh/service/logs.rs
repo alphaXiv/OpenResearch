@@ -142,6 +142,17 @@ fn persist(
         .truncate(false)
         .write(true)
         .open(&path)?;
+    if !reset
+        && pending.is_none()
+        && bytes.is_empty()
+        && cursor.identity == chunk["identity"].as_str().unwrap_or("")
+        && cursor.boundary == chunk["boundary"].as_str().unwrap_or("")
+        && file.metadata()?.len() == cursor.bytes
+    {
+        return Ok(
+            json!({"eof":chunk["eof"] == true, "generation":cursor.generation, "bytes":cursor.bytes}),
+        );
+    }
     // Discard bytes written before a crash whose cursor was never committed.
     file.set_len(cursor.bytes)?;
     file.seek(SeekFrom::Start(cursor.bytes))?;
@@ -161,7 +172,10 @@ fn persist(
     if replacing && cursor.replay_until.is_none() {
         cursor.replay_until = chunk["size"].as_u64();
     }
-    let publish = eof || cursor.replay_until.is_some_and(|end| cursor.bytes >= end);
+    // With no existing visible log, publish a growing prefix immediately. Replacements
+    // still retain the old generation until the replacement boundary is collected.
+    let first_log = published.is_none() && !paths.base.exists();
+    let publish = first_log || eof || cursor.replay_until.is_some_and(|end| cursor.bytes >= end);
     if replacing && !publish {
         save(&paths.pending(), &cursor)?;
     } else {
@@ -261,6 +275,38 @@ mod tests {
     fn chunk(offset: u64, data: &[u8], reset: bool, eof: bool) -> Value {
         json!({"offset":offset, "data":base64::engine::general_purpose::STANDARD.encode(data),
             "reset":reset, "eof":eof, "identity":"remote-file", "boundary":"boundary"})
+    }
+
+    #[test]
+    fn first_log_publishes_a_bounded_prefix_and_idle_polls_do_not_rewrite_it() {
+        let temp = crate::local::git::TemporaryDirectory::new("orx-idle-log").unwrap();
+        let paths = Paths {
+            base: temp.path().join("run.log"),
+        };
+        let mut first = chunk(0, b"first", true, false);
+        first["size"] = json!(1000);
+        persist(&paths, None, None, first).unwrap();
+        assert_eq!(read_at(&paths, 0, 100, None).unwrap().bytes, b"first");
+        let cursor = load(&paths.cursor()).unwrap().unwrap();
+        let log = paths.version(&cursor.generation).unwrap();
+        let log_time = std::fs::metadata(&log).unwrap().modified().unwrap();
+        let cursor_time = std::fs::metadata(paths.cursor())
+            .unwrap()
+            .modified()
+            .unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(20));
+        persist(&paths, Some(cursor), None, chunk(5, b"", false, true)).unwrap();
+        assert_eq!(
+            std::fs::metadata(log).unwrap().modified().unwrap(),
+            log_time
+        );
+        assert_eq!(
+            std::fs::metadata(paths.cursor())
+                .unwrap()
+                .modified()
+                .unwrap(),
+            cursor_time
+        );
     }
 
     #[test]

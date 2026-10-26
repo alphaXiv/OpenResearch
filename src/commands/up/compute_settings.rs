@@ -612,11 +612,31 @@ pub(super) async fn ssh_settings() -> ApiResult {
             h["lastTest"] = json!(t);
         }
         Ok(Json(
-            json!({ "hosts": hosts, "defaultHost": settings.default_host }),
+            json!({ "hosts": hosts, "defaultHost": settings.default_host, "monitorMode": settings.monitor_mode, "monitorIntervalSecs":settings.monitor_interval_secs }),
         ))
     })
     .await
     .map_err(|e| ApiError::from(anyhow!("ssh task failed: {e}")))?
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub(super) struct SaveSshMonitoringReq {
+    mode: crate::jobs::ssh::monitor::Mode,
+    interval_secs: Option<u64>,
+}
+
+pub(super) async fn save_ssh_monitoring(Json(req): Json<SaveSshMonitoringReq>) -> ApiResult {
+    if req.interval_secs == Some(0)
+        || (req.mode == crate::jobs::ssh::monitor::Mode::OnDemand && req.interval_secs.is_some())
+    {
+        return Err(bad_request(
+            "Use a positive interval for automatic monitoring only.",
+        ));
+    }
+    crate::telemetry::set_ssh_monitoring(req.mode, req.interval_secs)
+        .map_err(crate::error::Error::from)?;
+    Ok(Json(json!({"ok":true})))
 }
 
 #[derive(Deserialize)]

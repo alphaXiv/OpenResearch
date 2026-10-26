@@ -29,7 +29,6 @@ pub(super) struct Session {
     pending: Pending,
     sequence: AtomicU64,
     alive: watch::Sender<bool>,
-    since: Instant,
     finished: watch::Receiver<bool>,
     lanes: [Semaphore; 5],
 }
@@ -52,10 +51,6 @@ impl Session {
         })
         .await??;
         Ok(())
-    }
-
-    pub fn stable(&self) -> bool {
-        self.alive() && self.since.elapsed() >= Duration::from_secs(60)
     }
 
     pub async fn request(&self, mut request: Value) -> Result<Value> {
@@ -255,7 +250,6 @@ pub(super) async fn connect(
         pending: pending.clone(),
         sequence: AtomicU64::new(1),
         alive: alive.clone(),
-        since: Instant::now(),
         finished,
         lanes: [
             Semaphore::new(2),
@@ -281,6 +275,7 @@ pub(super) async fn connect(
     });
     let reader_alive = alive.clone();
     let mut reader_death = alive.subscribe();
+    let (activity_tx, mut activity_rx) = mpsc::channel::<()>(1);
     tokio::spawn(async move {
         loop {
             let response: Result<Value> = tokio::select! {
@@ -291,6 +286,7 @@ pub(super) async fn connect(
             let Some(id) = response["id"].as_u64() else {
                 break;
             };
+            let _ = activity_tx.try_send(());
             if let Some(reply) = pending.lock().await.remove(&id) {
                 let result = if let Some(error) = response["error"].as_str() {
                     Err(anyhow!("Remote helper operation failed: {error}"))
@@ -304,16 +300,20 @@ pub(super) async fn connect(
         pending.lock().await.clear();
     });
     let key = resolved.key.clone();
-    let heartbeat_session = Arc::downgrade(&session);
     tokio::spawn(async move {
+        // Local activity notifications replace network probes. Failure is always the final write.
+        let mut last_healthy = Instant::now();
         loop {
             tokio::select! {
+                biased;
                 _ = death.changed() => break,
                 _ = child.wait() => break,
-                _ = tokio::time::sleep(Duration::from_secs(10)) => {
-                    let Some(session) = heartbeat_session.upgrade() else {break};
-                    if !tokio::time::timeout(Duration::from_secs(10), session.request(json!({"op":"ping"}))).await.is_ok_and(|result| result.is_ok_and(|value| value["version"] == 1)) {break;}
-                    if session.stable() { let _ = state::healthy(&key); }
+                activity = activity_rx.recv() => {
+                    if activity.is_none() { break; }
+                    if last_healthy.elapsed() >= Duration::from_secs(60) {
+                        let _ = state::healthy(&key);
+                        last_healthy = Instant::now();
+                    }
                 }
             }
         }
@@ -342,7 +342,6 @@ mod tests {
             pending: Arc::new(Mutex::new(HashMap::new())),
             sequence: AtomicU64::new(1),
             alive: alive.clone(),
-            since: Instant::now(),
             finished,
             lanes: std::array::from_fn(|_| Semaphore::new(1)),
         });

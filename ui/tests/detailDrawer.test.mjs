@@ -19,6 +19,7 @@ const mocks = {
   "../tabPreview": { tabOpenGestureHandlers: () => ({}) },
   "../theme": { useResolvedTheme: () => "light" },
   "./ExperimentOverview": { ExperimentOverview: () => null },
+  "./RunMonitoring": { RunMonitoring: () => null },
   "./LogTerminal": { LogTerminal: ({ runId }) => `LOG:${runId}` },
   "./StatusBadge": { StatusBadge: () => null },
   "./ui": {

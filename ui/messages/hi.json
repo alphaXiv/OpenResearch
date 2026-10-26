@@ -1437,5 +1437,19 @@
   "skills_detection_copy": "पहचान का विवरण कॉपी करें",
   "skills_detection_accepted": "{count} स्वीकृत",
   "desktop_zoom_controls": "ज़ूम नियंत्रण",
-  "desktop_zoom_reset": "रीसेट"
+  "desktop_zoom_reset": "रीसेट",
+  "ssh_monitor_label": "SSH निगरानी",
+  "ssh_monitor_auto": "स्वचालित",
+  "ssh_monitor_on_demand": "माँग पर",
+  "ssh_monitor_interval": "अंतराल (सेकंड)",
+  "ssh_monitor_interval_invalid": "सेकंड में एक धनात्मक पूर्णांक दर्ज करें।",
+  "ssh_monitor_save": "सहेजें",
+  "ssh_monitor_defaults_hint": "नए सीधे SSH रन पर लागू होता है। मौजूदा रन अपना सहेजा हुआ मोड रखते हैं। अंतराल खाली होने पर स्थिति हर 5 सेकंड और लॉग हर 2 सेकंड में जाँचे जाते हैं।",
+  "ssh_monitor_observed": "अंतिम जाँच: {time}",
+  "ssh_monitor_unobserved": "सबमिट करने के बाद जाँच नहीं हुई",
+  "ssh_monitor_refresh": "स्थिति रीफ़्रेश करें",
+  "ssh_monitor_sync_logs": "लॉग सिंक करें",
+  "ssh_monitor_cached_hint": "अंतिम जाँची गई स्थिति और एकत्रित लॉग दिखाए जा रहे हैं। रिमोट कार्य जाँचने के लिए रीफ़्रेश करें।",
+  "ssh_monitor_cancel_pending": "रद्द करने का अनुरोध किया गया है; रिमोट कार्य के रुकने की अभी पुष्टि नहीं हुई है।",
+  "ssh_monitor_logs_pending": "अंतिम लॉग पूरी तरह एकत्रित नहीं हुए हैं। जारी रखने के लिए फिर सिंक करें।"
 }

@@ -16,6 +16,7 @@
 
 pub(crate) mod cleanup;
 mod container;
+pub(crate) mod monitor;
 #[cfg(unix)]
 mod prepared;
 pub(crate) mod service;
@@ -97,6 +98,8 @@ fn prepare_control_dir() -> Result<()> {
 
 #[derive(Debug, Clone)]
 pub struct ResolvedLaunch {
+    pub monitor_mode: monitor::Mode,
+    pub monitor_interval_secs: Option<u64>,
     pub target: SshTarget,
     pub container: Option<ContainerRun>,
     pub remote_root: Option<String>,
@@ -185,12 +188,34 @@ pub fn resolve_options(
     };
     let options = crate::config::SshHostSettings { container, ..saved };
     validate_host_options(&options)?;
+    if options.container.is_some()
+        && (args.monitor_mode.is_some() || args.monitor_interval.is_some())
+    {
+        return Err(anyhow!(
+            "--monitor-mode and --monitor-interval require a direct SSH run; use --no-container."
+        ));
+    }
     Ok((host, options))
 }
 
 pub async fn resolve_launch(args: &crate::ExpRunArgs) -> Result<ResolvedLaunch> {
     let settings = crate::config::ssh_settings()?;
     let (host, options) = resolve_options(args, &settings)?;
+    let (mode, interval) = if options.container.is_some() {
+        (monitor::Mode::Auto, None)
+    } else {
+        let mode = args.monitor_mode.unwrap_or(settings.monitor_mode);
+        if mode == monitor::Mode::OnDemand && args.monitor_interval.is_some() {
+            return Err(anyhow!(
+                "--monitor-interval only applies to automatic monitoring."
+            ));
+        }
+        let interval = match mode {
+            monitor::Mode::Auto => args.monitor_interval.or(settings.monitor_interval_secs),
+            monitor::Mode::OnDemand => None,
+        };
+        (mode, interval)
+    };
     let target = SshTarget::alias(&host);
     let host_check = preflight(&target).await;
     if !host_check.reachable || !host_check.tools_found {
@@ -206,6 +231,8 @@ pub async fn resolve_launch(args: &crate::ExpRunArgs) -> Result<ResolvedLaunch> 
         None => None,
     };
     Ok(ResolvedLaunch {
+        monitor_mode: mode,
+        monitor_interval_secs: interval,
         target,
         container,
         remote_root: options.remote_root,
@@ -914,9 +941,21 @@ pub async fn inspect_job(
 }
 
 async fn inspect_host_job(target: &SshTarget, dir: &str) -> Result<JobState> {
+    Ok(inspect_direct_job(target, dir).await?.0)
+}
+
+pub(crate) async fn inspect_direct_job(
+    target: &SshTarget,
+    dir: &str,
+) -> Result<(JobState, Option<i64>)> {
     let script = host_job_script(dir);
     let out = ssh_status(target, &format!("bash -c {}", sh_quote(&script)), None).await?;
-    parse_job_state(out.trim())
+    let out = out.trim();
+    let state = parse_job_state(out)?;
+    let exit_code = out
+        .strip_prefix("EXIT ")
+        .and_then(|value| value.trim().parse().ok());
+    Ok((state, exit_code))
 }
 
 /// The run dir exists before any supervisor polls it, so a missing one means the job is gone.

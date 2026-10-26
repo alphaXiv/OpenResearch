@@ -127,6 +127,8 @@ pub async fn submit_local_modal_with_source(
         ssh_port: None,
         ssh_user: None,
         timeout_secs: None,
+        monitor_interval_secs: None,
+        monitoring: None,
         cpus_per_task: None,
         mem: None,
         source_digest: None,
