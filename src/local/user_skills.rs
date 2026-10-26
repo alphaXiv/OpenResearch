@@ -1117,6 +1117,15 @@ fn instructions_selected_in(
                     selected.display()
                 ));
             }
+            // Cursor's skill loader can ignore CURSOR_CONFIG_DIR even when its config respects it.
+            if mirrored.iter().any(|skill| {
+                skill.dir == dir && skill.harness == "cursor" && !skill.plugin
+            }) {
+                return Some(format!(
+                    "Use the `{name}` skill at `{}`. Read that SKILL.md and follow it.",
+                    dir.join("SKILL.md").display()
+                ));
+            }
             let native_name = mirrored
                 .iter()
                 .find(|skill| skill.dir == dir && skill.plugin)
@@ -1802,6 +1811,41 @@ mod tests {
         let _ = fs::remove_dir_all(&root);
         let _ = fs::remove_dir_all(&agent_dir);
         let _ = fs::remove_dir_all(&wt);
+    }
+
+    #[test]
+    fn cursor_native_invocation_pins_the_selected_file_and_keeps_collisions() {
+        let root = temp_root();
+        let dir = root.join("configured/skills/probe");
+        let mut skill = mirrored_from(
+            "Cursor",
+            Some(".cursor/skills"),
+            &dir,
+            &skill_md("probe"),
+            &[],
+        );
+        skill.harness = "cursor".into();
+        assert_eq!(
+            instructions_in(&root, std::slice::from_ref(&skill), "probe", None, None),
+            Some(format!(
+                "Use the `probe` skill at `{}`. Read that SKILL.md and follow it.",
+                dir.join("SKILL.md").display()
+            ))
+        );
+        skill.harness = "codex".into();
+        assert_eq!(
+            instructions_in(&root, std::slice::from_ref(&skill), "probe", None, None).as_deref(),
+            Some("Use the `probe` skill.")
+        );
+        skill.harness = "cursor".into();
+        let project = root.join("project.md");
+        fs::write(&project, "project skill").unwrap();
+        assert!(
+            instructions_in(&root, &[skill], "probe", None, Some(&project))
+                .unwrap()
+                .starts_with("Source collision")
+        );
+        fs::remove_dir_all(root).unwrap();
     }
 
     #[test]
