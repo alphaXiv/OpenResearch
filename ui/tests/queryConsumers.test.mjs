@@ -34,35 +34,39 @@ function sendPreparation() {
   return prefix;
 }
 
+function settingsRenderer(name, returns, bindings) {
+  const file = source("SettingsPage.tsx");
+  const component = file.statements.find((node) => ts.isFunctionDeclaration(node) && node.name.text === name);
+  const statements = component.body.statements;
+  const prefix = statements.slice(0, statements.findIndex(ts.isReturnStatement)).map((node) => node.getText(file)).join("\n");
+  const state = [];
+  let cursor, effects, changed;
+  const hook = (init) => { const index = cursor++; if (!(index in state)) state[index] = init(); return index; };
+  const hooks = {
+    useState: (initial) => { const i = hook(() => initial); return [state[i], (next) => { const value = typeof next === "function" ? next(state[i]) : next; changed ||= !Object.is(value, state[i]); state[i] = value; }]; },
+    useRef: (initial) => state[hook(() => ({ current: initial }))],
+    useEffect: (effect, deps) => { const i = hook(() => undefined); if (!state[i] || deps.some((value, index) => !Object.is(value, state[i][index]))) { state[i] = deps; effects.push(effect); } },
+  };
+  return () => {
+    for (let attempt = 0; attempt < 5; attempt++) {
+      cursor = 0; effects = []; changed = false;
+      const result = evaluate(`${prefix}\nreturn ${returns};`, { ...hooks, ...bindings });
+      effects.forEach((effect) => effect());
+      if (!changed) return result;
+    }
+    assert.fail(`${name} effects did not settle`);
+  };
+}
+
 for (const [name, fields] of [["K8s", ["context", "namespace"]], ["Slurm", ["host", "partition", "account", "timeLimit"]], ["Ray", ["address"]]]) {
   test(`${name} settings refresh clean fields while preserving edits`, () => {
-    const file = source("SettingsPage.tsx");
-    const component = file.statements.find((node) => ts.isFunctionDeclaration(node) && node.name.text === `${name}Section`);
-    const statements = component.body.statements;
-    const prefix = statements.slice(0, statements.findIndex(ts.isReturnStatement)).map((node) => node.getText(file)).join("\n");
-    const state = [];
-    let cursor, effects, changed;
     let snapshot = Object.fromEntries(fields.map((field) => [field, "original"]));
-    const hook = (init) => { const index = cursor++; if (!(index in state)) state[index] = init(); return index; };
-    const bindings = {
-      useState: (initial) => { const i = hook(() => initial); return [state[i], (next) => { const value = typeof next === "function" ? next(state[i]) : next; changed ||= !Object.is(value, state[i]); state[i] = value; }]; },
-      useRef: (initial) => state[hook(() => ({ current: initial }))],
-      useEffect: (effect, deps) => { const i = hook(() => undefined); if (!state[i] || deps.some((value, index) => !Object.is(value, state[i][index]))) { state[i] = deps; effects.push(effect); } },
+    const render = settingsRenderer(`${name}Section`, `{ values: {${fields}}, setters: {${fields.map((field) => `${field}: set${field[0].toUpperCase()}${field.slice(1)}`).join(",")}} }`, {
       useMutation: () => ({}), useQuery: () => ({ data: snapshot }),
       useSshMasterStatuses: () => [{}, () => {}],
       [`get${name}SettingsQuery`]: () => ({ queryKey: [] }), [`save${name}Settings`]: () => {},
       remote: false, onEditState: undefined,
-    };
-    const code = `${prefix}\nreturn { values: {${fields}}, setters: {${fields.map((field) => `${field}: set${field[0].toUpperCase()}${field.slice(1)}`).join(",")}} };`;
-    function render() {
-      for (let attempt = 0; attempt < 5; attempt++) {
-        cursor = 0; effects = []; changed = false;
-        const result = evaluate(code, bindings);
-        effects.forEach((effect) => effect());
-        if (!changed) return result;
-      }
-      assert.fail("settings effects did not settle");
-    }
+    });
     assert.deepEqual(render().values, snapshot);
     snapshot = Object.fromEntries(fields.map((field) => [field, "refreshed"]));
     assert.deepEqual(render().values, snapshot);
@@ -72,6 +76,23 @@ for (const [name, fields] of [["K8s", ["context", "namespace"]], ["Slurm", ["hos
     assert.deepEqual(render().values, edited);
   });
 }
+
+test("harness settings keep the settled selection when readiness changes", () => {
+  let snapshot = [];
+  const render = settingsRenderer("HarnessesTab", "{ h }", {
+    useQuery: (options) => ({ data: options.harnesses ? snapshot : [] }),
+    getHarnessesQuery: () => ({ harnesses: true }),
+    getHarnessSetupCommandsQuery: () => ({}),
+    useCommandRun: () => ({}), workspaceKey: () => [], listAcpHarnesses: () => {},
+  });
+  assert.equal(render().h, undefined);
+  snapshot = [{ id: "claude-code", catalogPending: true }, { id: "opencode", catalogPending: true }];
+  assert.equal(render().h.id, "claude-code");
+  snapshot = [{ id: "claude-code", agentReady: false }, { id: "opencode", agentReady: true }];
+  assert.equal(render().h.id, "opencode");
+  snapshot = [{ id: "claude-code", agentReady: true }, { id: "opencode", agentReady: false }];
+  assert.equal(render().h.id, "opencode");
+});
 
 test("queued chat writes stop when their captured workspace retires", async () => {
   const file = source("ChatPanel.tsx");

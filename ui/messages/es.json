@@ -1433,6 +1433,9 @@
   "chat_experiment_starting": "Iniciando experimento",
   "chat_experiment_cancelling": "Cancelando experimento",
   "chat_experiments_running": "{count} experimentos en ejecución",
+  "skills_detection_details": "Detalles de detección de habilidades",
+  "skills_detection_copy": "Copiar detalles de detección",
+  "skills_detection_accepted": "{count} aceptadas",
   "desktop_zoom_controls": "Controles de zoom",
   "desktop_zoom_reset": "Restablecer"
 }

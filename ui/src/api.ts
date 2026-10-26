@@ -1872,8 +1872,17 @@ export interface UserSkill {
   updatedAt: number;
 }
 
+export interface SkillDiscovery {
+  agent: string;
+  origin: string;
+  path: string;
+  status: "scanned" | "missing" | "unreadable";
+  accepted: number;
+  skipped: { path: string; reason: string }[];
+}
+
 export const listUserSkills = (signal?: AbortSignal) =>
-  get<{ skills: UserSkill[] }>("/api/user-skills", signal);
+  get<{ skills: UserSkill[]; discovery?: SkillDiscovery[] }>("/api/user-skills", signal);
 
 /** Upload a SKILL.md file or a .zip of a skill folder. `contentBase64` is the
  * raw file bytes; `filename`'s extension selects single-file vs archive. */
