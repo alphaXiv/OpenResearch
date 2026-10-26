@@ -85,6 +85,17 @@ pub fn cursor_home(store: NativeStore) -> PathBuf {
     }
 }
 
+pub fn cursor_skills_dir() -> PathBuf {
+    cursor_skills_dir_in(&home_dir(), user_env_path("CURSOR_CONFIG_DIR"))
+}
+
+fn cursor_skills_dir_in(home: &Path, config: Option<PathBuf>) -> PathBuf {
+    // XDG redirects Cursor state, but is not a native skill search location.
+    config
+        .unwrap_or_else(|| home.join(".cursor"))
+        .join("skills")
+}
+
 pub fn opencode_session(native_id: &str) -> Result<Option<NativeSessionLocation>> {
     let isolated = opencode_db(NativeStore::Isolated);
     let legacy = opencode_db(NativeStore::Legacy);
@@ -901,7 +912,7 @@ pub fn prepare_cursor(store: NativeStore) -> Result<PathBuf> {
         &legacy,
         &[
             legacy.join("cli-config.json"),
-            legacy.join("skills"),
+            cursor_skills_dir(),
             legacy.join("skills-cursor"),
             legacy.join("plugins"),
         ],
@@ -947,7 +958,8 @@ fn reconcile_link(source: &Path, destination: &Path) -> Result<()> {
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
             if std::fs::symlink_metadata(destination)
                 .is_ok_and(|metadata| metadata.file_type().is_symlink())
-                && std::fs::read_link(destination).is_ok_and(|target| target == source)
+                && (marker.is_file()
+                    || std::fs::read_link(destination).is_ok_and(|target| target == source))
             {
                 remove_link(destination)?;
             }
@@ -1133,6 +1145,30 @@ fn create_junction(source: &Path, destination: &Path) -> std::io::Result<()> {
 #[cfg(test)]
 mod hard_link_tests {
     use super::*;
+
+    #[test]
+    fn cursor_roots_and_retired_managed_links() {
+        let root = std::env::temp_dir().join(format!("orx-cursor-skills-{}", uuid::Uuid::new_v4()));
+        let native = cursor_skills_dir_in(&root, None);
+        assert_eq!(native, root.join(".cursor/skills"));
+        assert_eq!(
+            cursor_skills_dir_in(&root, Some(root.join("custom"))),
+            root.join("custom/skills")
+        );
+        let old = root.join("xdg/cursor/skills");
+        let isolated = root.join("isolated");
+        std::fs::create_dir_all(&old).unwrap();
+        prepare_links(&isolated, &root, std::slice::from_ref(&old)).unwrap();
+        let link = isolated.join("skills");
+        assert!(same_file::is_same_file(&link, &old).unwrap());
+        reconcile_link(&native, &link).unwrap();
+        assert!(std::fs::symlink_metadata(&link).is_err());
+        assert!(old.is_dir());
+        create_symlink(&old, &link).unwrap();
+        reconcile_link(&native, &link).unwrap();
+        assert!(same_file::is_same_file(&link, &old).unwrap());
+        std::fs::remove_dir_all(root).unwrap();
+    }
 
     #[test]
     fn a_hard_linked_destination_survives_an_edit_through_the_source() {

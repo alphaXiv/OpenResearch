@@ -1764,5 +1764,8 @@
   "side_chat_untitled": "Chat phụ chưa đặt tên",
   "status_lost": "Không rõ kết quả",
   "tree_delete_experiment": "Xóa vĩnh viễn…",
-  "tree_delete_experiment_confirm": "Xóa vĩnh viễn “{name}”?\n\nCác lượt chạy, log, tệp và nhánh của nó sẽ bị xóa. Không thể hoàn tác."
+  "tree_delete_experiment_confirm": "Xóa vĩnh viễn “{name}”?\n\nCác lượt chạy, log, tệp và nhánh của nó sẽ bị xóa. Không thể hoàn tác.",
+  "skills_detection_details": "Chi tiết phát hiện kỹ năng",
+  "skills_detection_copy": "Sao chép chi tiết phát hiện",
+  "skills_detection_accepted": "Đã chấp nhận {count}"
 }

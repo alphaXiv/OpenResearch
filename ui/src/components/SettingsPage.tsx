@@ -429,7 +429,11 @@ function HarnessesTab({ remote }: { remote: boolean }) {
     (a, b) => Number(b.agentReady) - Number(a.agentReady),
   );
   const h = orderedHarnesses.find((x) => x.id === active) ?? orderedHarnesses[0];
-  const recommended = h?.models.find((model) => model.id === h.recommendedModel);
+  const recommended = h?.models?.find((model) => model.id === h.recommendedModel);
+  useEffect(() => {
+    // Pin the settled default so a failed refresh cannot switch harnesses.
+    if (h && active !== h.id && !orderedHarnesses.some((x) => x.catalogPending)) setActive(h.id);
+  }, [h, active, orderedHarnesses]);
   const acp = definitions.data?.find((definition) => definition.id === h?.id);
 
   return (
