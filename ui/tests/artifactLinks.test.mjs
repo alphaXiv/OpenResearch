@@ -27,5 +27,10 @@ test("artifact links to non-ASCII filenames are encoded once", () => {
     url: "/api/projects/p/files/file?path=notes%2F%E6%95%B0%E6%8D%AE.md#top",
   });
   assert.equal(artifactTarget("p", "", href("[ascii](a.md?path=x&raw=1)"))?.url, "/api/projects/p/files/file?path=a.md&raw=1");
+  assert.deepEqual(artifactTarget("p", "", href("[sale](50%off.txt?raw=1)")), {
+    path: "50%off.txt",
+    url: "/api/projects/p/files/file?path=50%25off.txt&raw=1",
+  });
   assert.equal(artifactTarget("p", "notes", "../../x.md"), null);
+  assert.equal(artifactTarget("p", "notes", "../../50%off.md"), null);
 });
