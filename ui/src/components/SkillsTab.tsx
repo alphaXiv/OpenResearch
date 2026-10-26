@@ -15,8 +15,10 @@ import {
   uploadUserSkill,
   type LatexTemplate,
   type UserSkill,
+  type SkillDiscovery,
 } from "../api";
 import { Badge, Button, IconButton, Spinner } from "./ui";
+import { copyToClipboard } from "../clipboard";
 
 const MAX_UPLOAD_BYTES = 20 * 1024 * 1024;
 
@@ -216,13 +218,27 @@ function LatexTemplateRow({
   );
 }
 
+function SkillDetectionDetails({ reports }: { reports: SkillDiscovery[] }) {
+  const text = reports.map((report) => [
+    `${report.agent}${report.origin === report.agent ? "" : ` (${report.origin})`} · ${report.path}`,
+    `${report.status} · ${m.skills_detection_accepted({ count: fmtNumber(report.accepted) })}`,
+    ...report.skipped.map((skip) => `  ${skip.path}: ${skip.reason}`),
+  ].join("\n")).join("\n\n");
+
+  return <details className="mt-3 border-t border-border pt-3">
+    <summary className="w-fit cursor-pointer rounded-sm text-sm text-subtext focus-visible:outline-2 focus-visible:outline-focus">{m.skills_detection_details()}</summary>
+    <Button className="my-2" size="small" onClick={() => void copyToClipboard(text)}>{m.skills_detection_copy()}</Button>
+    <pre className="max-h-80 overflow-auto whitespace-pre-wrap break-words text-sm text-text" tabIndex={0}>{text}</pre>
+  </details>;
+}
+
 /** Everything the agent can invoke with `/name`: skills uploaded here, and the
  * ones already installed in the user's coding agents, mirrored automatically. */
 function SkillsCard() {
   const uploadUserSkillMutation = useMutation({ mutationFn: uploadUserSkill });
 
   const skillsQuery = useQuery(listUserSkillsQuery());
-  const skills = skillsQuery.data;
+  const skills = skillsQuery.data?.skills;
   const listRef = useRef<HTMLDivElement>(null);
   const [hasMoreAbove, setHasMoreAbove] = useState(false);
   const [hasMoreBelow, setHasMoreBelow] = useState(false);
@@ -330,6 +346,7 @@ function SkillsCard() {
           )}
         </div>
       )}
+      {skillsQuery.data?.discovery && <SkillDetectionDetails reports={skillsQuery.data.discovery} />}
     </section>
   );
 }

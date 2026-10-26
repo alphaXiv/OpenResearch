@@ -1433,6 +1433,9 @@
   "chat_experiment_starting": "प्रयोग शुरू हो रहा है",
   "chat_experiment_cancelling": "प्रयोग रद्द किया जा रहा है",
   "chat_experiments_running": "{count} प्रयोग चल रहे हैं",
+  "skills_detection_details": "कौशल पहचान का विवरण",
+  "skills_detection_copy": "पहचान का विवरण कॉपी करें",
+  "skills_detection_accepted": "{count} स्वीकृत",
   "desktop_zoom_controls": "ज़ूम नियंत्रण",
   "desktop_zoom_reset": "रीसेट"
 }
