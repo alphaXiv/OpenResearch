@@ -98,8 +98,9 @@ class LogReadRaceTest(unittest.TestCase):
                 return real_listdir(path)
 
             with patch.object(helper, "open", side_effect=cached_miss), \
-                    patch.object(helper.os, "listdir", side_effect=revalidate):
+                    patch.object(helper.os, "listdir", side_effect=revalidate) as listdir:
                 chunk = helper.log_chunk({"dir": folder})
+            listdir.assert_called_once_with(os.path.join(os.path.expanduser("~"), folder))
             self.assertEqual(base64.b64decode(chunk["data"]), b"Traceback\n")
 
     def test_rewrite_during_collection_is_retried_but_append_is_allowed(self):
