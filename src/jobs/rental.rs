@@ -242,16 +242,19 @@ pub async fn launch(
     Ok(())
 }
 
+pub const SUPERVISOR_EXITED: &str = "remote supervisor exited before starting the run:";
+
 /// Fails with the supervisor's output when it exits before claiming the launch.
 fn supervisor_started_script(directory: &str) -> String {
     format!(
         "d={}; i=0; while [ $i -lt 40 ]; do [ -e \"$d/launch_started\" ] && exit 0; \
          if ! kill -0 \"$(cat \"$d/supervisor.pid\")\" 2>/dev/null; then \
          [ -s \"$d/supervisor.log\" ] || exit 0; \
-         echo 'remote supervisor exited before starting the run:' >&2; \
+         echo {} >&2; \
          tail -c 2000 \"$d/supervisor.log\" >&2; exit 1; fi; \
          i=$((i+1)); sleep 0.25; done",
-        super::ssh::sh_quote(directory)
+        super::ssh::sh_quote(directory),
+        super::ssh::sh_quote(SUPERVISOR_EXITED)
     )
 }
 
@@ -305,7 +308,11 @@ mod tests {
         .unwrap();
         let died = check();
         assert!(!died.status.success());
-        assert!(String::from_utf8_lossy(&died.stderr).contains("Permission denied (os error 13)"));
+        let stderr = String::from_utf8_lossy(&died.stderr);
+        assert!(
+            stderr.contains(SUPERVISOR_EXITED)
+                && stderr.contains("Permission denied (os error 13)")
+        );
         std::fs::write(dir.join("launch_started"), "").unwrap();
         assert!(check().status.success());
     }

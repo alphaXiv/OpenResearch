@@ -1216,7 +1216,12 @@ async fn run_openresearch(
     if descriptor.rental_lease.is_none() {
         teardown_box(&store, &lifecycle, &sandbox_id, &run_id).await;
     }
-    if let (Ok(RunStatus::Lost), Some(err)) = (&watch, launch_err) {
+    // Only a supervisor seen dying before its claim proves the run never started.
+    let never_started = launch_err.filter(|err| {
+        err.to_string()
+            .contains(crate::jobs::rental::SUPERVISOR_EXITED)
+    });
+    if let (Ok(RunStatus::Lost), Some(err)) = (&watch, never_started) {
         store.set_result_markdown(
             &run_id,
             &format!("Outcome unavailable: the run never started on box {sandbox_id}: {err}"),
