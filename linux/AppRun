@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # The AppImage's entry point: start the bundled orx as the desktop app (see
-# src/commands/app.rs). Arguments are ignored; the CLI is `orx`, not this.
+# src/commands/app.rs). Only an openresearch: link (the desktop entry's %u) is
+# passed on; the CLI is `orx`, not this.
 set -e
 
 export APPDIR="${APPDIR:-"$(dirname "$(realpath "$0")")"}"
@@ -32,4 +33,13 @@ unset GIO_EXTRA_MODULES
 # scripts/build-linux-appimage.sh rewrote libwebkit2gtk's /usr paths to ././,
 # so WebKit finds its bundled helper processes relative to this directory.
 cd "$APPDIR/usr"
-exec "$APPDIR/usr/bin/orx" app
+link=()
+# Any position: AppImage integrators keep the bundled entry's `app` before %u.
+shopt -s nocasematch
+for arg in "$@"; do
+  case "$arg" in
+    openresearch:*) link=("$arg"); break ;;
+  esac
+done
+shopt -u nocasematch
+exec "$APPDIR/usr/bin/orx" app "${link[@]}"
