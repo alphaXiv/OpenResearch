@@ -648,6 +648,9 @@ mod imp {
         Menu(MenuId),
         #[cfg(not(target_os = "macos"))]
         Focus,
+        /// The dashboard page finished loading and can take `orx:open-path`.
+        #[cfg(target_os = "macos")]
+        PageReady,
         #[cfg(windows)]
         Close,
         #[cfg(windows)]
@@ -846,6 +849,8 @@ mod imp {
         );
 
         let shown = Rc::new(Cell::new(false));
+        #[cfg(target_os = "macos")]
+        let page_ready = Rc::new(Cell::new(false));
         let replaced = Rc::new(RefCell::new(HashMap::new()));
         let builder = WebViewBuilder::new()
             .with_accept_first_mouse(true)
@@ -880,13 +885,24 @@ mod imp {
                 let window = window.clone();
                 let origin = origin.clone();
                 let shown = shown.clone();
+                #[cfg(target_os = "macos")]
+                let page_ready = page_ready.clone();
                 let proxy = event_loop.create_proxy();
                 move |event, url| {
+                    #[cfg(target_os = "macos")]
+                    if matches!(event, PageLoadEvent::Started) {
+                        page_ready.set(false);
+                    }
                     if !matches!(event, PageLoadEvent::Finished) {
                         return;
                     }
                     if super::is_dashboard_url(&url, &origin) {
                         let _ = proxy.send_event(UserEvent::SyncZoom);
+                        #[cfg(target_os = "macos")]
+                        {
+                            page_ready.set(true);
+                            let _ = proxy.send_event(UserEvent::PageReady);
+                        }
                     }
                     #[cfg(windows)]
                     let _ = proxy.send_event(UserEvent::SyncMaximized);
@@ -1094,6 +1110,12 @@ mod imp {
                 window.set_focus();
             }
             #[cfg(target_os = "macos")]
+            Event::UserEvent(UserEvent::PageReady) if matches!(quit, Quit::No) => {
+                if let Some(path) = pending_link.take() {
+                    open_in_page(&webview, &path);
+                }
+            }
+            #[cfg(target_os = "macos")]
             Event::Opened { urls } if matches!(quit, Quit::No) => {
                 let Some(path) = urls
                     .iter()
@@ -1101,22 +1123,18 @@ mod imp {
                 else {
                     return;
                 };
-                if !server_ready {
-                    pending_link = Some(path);
-                    return;
-                }
-                // A timed-out or failed first load leaves no listener for the event.
-                let on_dashboard = webview
-                    .url()
-                    .is_ok_and(|url| super::is_dashboard_url(&url, &origin));
-                if shown.get() && on_dashboard {
-                    // In-page navigation keeps the page's unsaved-work guards; a reload would skip them.
-                    let _ = webview.evaluate_script(&format!(
-                        "window.dispatchEvent(new CustomEvent('orx:open-path', {{ detail: {} }}));",
-                        serde_json::Value::from(path)
-                    ));
-                } else {
+                if page_ready.get() {
+                    open_in_page(&webview, &path);
+                } else if server_ready
+                    && !webview
+                        .url()
+                        .is_ok_and(|url| super::is_dashboard_url(&url, &origin))
+                {
+                    // A timed-out or failed first load has nothing coming to deliver it.
                     let _ = webview.load_url(&format!("{origin}{path}"));
+                } else {
+                    // ServerReady loads it, or PageReady hands it to the loading page.
+                    pending_link = Some(path);
                 }
                 // Before the first page shows, the page-load handler reveals the window.
                 if shown.get() {
@@ -1127,6 +1145,15 @@ mod imp {
             }
             _ => {}
         })
+    }
+
+    /// In-page navigation keeps the page's unsaved-work guards; a reload would skip them.
+    #[cfg(target_os = "macos")]
+    fn open_in_page(webview: &WebView, path: &str) {
+        let _ = webview.evaluate_script(&format!(
+            "window.dispatchEvent(new CustomEvent('orx:open-path', {{ detail: {} }}));",
+            serde_json::Value::from(path)
+        ));
     }
 
     fn begin_quit(

@@ -102,6 +102,8 @@ export function NewProjectForm({
   const [advancedOpen, setAdvancedOpen] = useState(false);
   const [githubSyncEnabled, setGithubSyncEnabled] = useState(false);
   const [paperQuery, setPaperQuery] = useState(initialPaperId ?? "");
+  // A paper an openresearch:// link filled in isn't the user's pick until they create it.
+  const [paperFromLink, setPaperFromLink] = useState(Boolean(initialPaperId));
   const [paper, setPaper] = useState<ResolvedPaper | null>(null);
   const [choosingPaper, setChoosingPaper] = useState(false);
   const seq = useRef(0);
@@ -182,6 +184,7 @@ export function NewProjectForm({
   }
 
   function changePaper() {
+    setPaperFromLink(false);
     seq.current += 1;
     folderPickSeq.current += 1;
     setPaper(null);
@@ -277,7 +280,7 @@ export function NewProjectForm({
   // Debounced pre-warm; only cases whose brief will match the created project.
   // A blank project gets pre-written prompts, so there is nothing to warm.
   const prewarmName = name.trim();
-  const prewarmPaperId = mode === "paper" && paper && !paper.repoUrl ? paper.paperId : null;
+  const prewarmPaperId = mode === "paper" && paper && !paper.repoUrl && !paperFromLink ? paper.paperId : null;
   const prewarmPath =
     mode === "folder" && pathStatus?.gitState === "ready" ? (pathStatus.resolvedPath ?? null) : null;
   const prewarmReady = prewarmName !== "" && (prewarmPaperId !== null || prewarmPath !== null);
