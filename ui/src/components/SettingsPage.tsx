@@ -1,4 +1,5 @@
 import { cn } from "./ui/cn";
+import { Dialog } from "@base-ui/react/dialog";
 import { formatAcpCommand } from "../acp";
 import { TARGET_LABELS } from "../computeTargets";
 import { AcpAuthDialog } from "./AcpAuthDialog";
@@ -117,6 +118,7 @@ import {
   applyUpdate,
   installCli,
   setAutoUpdate as setAutoUpdateApi,
+  setReleaseChannel,
   type InstallChannel,
   type InstalledCli,
 } from "../api";
@@ -2782,8 +2784,10 @@ function UpdatesTab() {
   const { status, error: loadError, apply } = useUpdateStatus();
   // Per-action only so the right button reads "Working…"; any write disables
   // all of them, since they mutate overlapping state.
-  const [busy, setBusy] = useState<"auto" | "apply" | "cli" | null>(null);
+  const [busy, setBusy] = useState<"auto" | "apply" | "cli" | "channel" | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [confirmCanary, setConfirmCanary] = useState(false);
+  const channelGroupRef = useRef<HTMLDivElement>(null);
   const restart = useRestartApp(status);
   const locked = busy !== null || restart.restarting;
 
@@ -2806,7 +2810,7 @@ function UpdatesTab() {
 
   // Every mutating call returns the authoritative status; adopting it is what
   // keeps the switch honest when a write fails or another client changes it.
-  const run = async (which: "auto" | "apply" | "cli", action: () => Promise<unknown>) => {
+  const run = async (which: "auto" | "apply" | "cli" | "channel", action: () => Promise<unknown>) => {
     setBusy(which);
     setError(null);
     try {
@@ -2816,6 +2820,23 @@ function UpdatesTab() {
     } finally {
       setBusy(null);
     }
+  };
+
+  const applyChannel = (channel: "stable" | "canary") => {
+    void run("channel", async () => {
+      const next = await setReleaseChannel(channel);
+      apply(next);
+      requestAnimationFrame(() => {
+        const group = channelGroupRef.current;
+        if (group?.contains(document.activeElement)) group.querySelector<HTMLButtonElement>(`[data-channel="${next.releaseChannel}"]`)?.focus();
+      });
+    });
+  };
+
+  const changeChannel = (channel: "stable" | "canary") => {
+    if (locked || status.releaseChannel === channel) return;
+    if (channel === "canary") setConfirmCanary(true);
+    else applyChannel(channel);
   };
 
   return (
@@ -2858,6 +2879,31 @@ function UpdatesTab() {
 
         {status.selfUpdates ? (
           <>
+            {status.releaseChannelsAvailable && (
+              <div className={PROJECT_DEFAULT_ROW_CLASS_NAME}>
+                <div>
+                  <div className="project-default-title text-base font-medium">{m.settings_update_channel()}</div>
+                  <p>{status.releaseChannel === "stable" ? m.settings_update_stable_description() : m.settings_update_canary_description()}</p>
+                </div>
+                <div ref={channelGroupRef} className={SEGMENTED_CLASS_NAME} role="radiogroup" aria-label={m.settings_update_channel()}
+                  aria-disabled={locked}
+                  onKeyDown={(event) => {
+                    if (locked || !["ArrowLeft", "ArrowRight", "ArrowUp", "ArrowDown"].includes(event.key)) return;
+                    event.preventDefault();
+                    const next = status.releaseChannel === "stable" ? "canary" : "stable";
+                    changeChannel(next);
+                  }}>
+                  {(["stable", "canary"] as const).map((channel) => (
+                    <button key={channel} type="button" role="radio" data-channel={channel}
+                      aria-checked={status.releaseChannel === channel} tabIndex={status.releaseChannel === channel ? 0 : -1}
+                      className={status.releaseChannel === channel ? "active" : ""}
+                      onClick={() => changeChannel(channel)}>
+                      {channel === "stable" ? m.settings_update_channel_stable() : m.settings_update_channel_canary()}
+                    </button>
+                  ))}
+                </div>
+              </div>
+            )}
             <div className={PROJECT_DEFAULT_ROW_CLASS_NAME}>
               <div>
                 <div className="project-default-title text-base font-medium">
@@ -2882,10 +2928,14 @@ function UpdatesTab() {
             <div className={PROJECT_DEFAULT_ROW_CLASS_NAME}>
               <div>
                 <div className="project-default-title text-base font-medium">
-                  {status.updateAvailable ? m.settings_update_to_version({ version: ltr(status.latest ?? "—") }) : m.settings_check_for_updates()}
+                  {status.waitingForStable ? m.settings_waiting_for_stable() : status.waitingForCanary ? m.settings_waiting_for_canary() : status.updateAvailable ? m.settings_update_to_version({ version: ltr(status.latest ?? "—") }) : m.settings_check_for_updates()}
                 </div>
                 <p>
-                  {status.updateAvailable
+                  {status.waitingForStable
+                    ? m.settings_stable_catches_up()
+                    : status.waitingForCanary
+                    ? m.settings_canary_catches_up()
+                    : status.updateAvailable
                     ? m.settings_install_release_now()
                     : m.settings_checks_automatically()}
                   {status.updateAvailable && status.latestTag && (
@@ -2926,6 +2976,26 @@ function UpdatesTab() {
         )}
         {error && <div className="error">{error}</div>}
       </div>
+      <Dialog.Root open={confirmCanary} onOpenChange={setConfirmCanary}>
+        <Dialog.Portal>
+          <Dialog.Backdrop className="fixed inset-0 z-200 bg-modal-backdrop" />
+          <Dialog.Viewport className="fixed inset-0 z-200 flex items-center justify-center p-5">
+            <Dialog.Popup className="w-120 max-w-full rounded-xl border border-border bg-background p-6 shadow-modal"
+              aria-labelledby="canary-confirm-title" aria-describedby="canary-confirm-description"
+              finalFocus={() => channelGroupRef.current?.querySelector<HTMLElement>('[aria-checked="true"]')}>
+              <h2 id="canary-confirm-title" className="m-0 text-xl font-medium text-text">{m.settings_canary_confirm_title()}</h2>
+              <p id="canary-confirm-description" className="mt-4 text-sm text-text">{m.settings_canary_confirm_description()}</p>
+              <div className="mt-6 flex justify-end gap-2.5">
+                <Button onClick={() => setConfirmCanary(false)}>{m.settings_page_cancel()}</Button>
+                <Button variant="primary" onClick={() => {
+                  setConfirmCanary(false);
+                  if (!locked && status.releaseChannel !== "canary") applyChannel("canary");
+                }}>{m.settings_canary_confirm_action()}</Button>
+              </div>
+            </Dialog.Popup>
+          </Dialog.Viewport>
+        </Dialog.Portal>
+      </Dialog.Root>
     </>
   );
 }
@@ -2997,7 +3067,7 @@ function InstallCliRow({
   disabled,
   run,
 }: {
-  busy: "auto" | "apply" | "cli" | null;
+  busy: "auto" | "apply" | "cli" | "channel" | null;
   disabled: boolean;
   run: (which: "cli", action: () => Promise<unknown>) => Promise<void>;
 }) {

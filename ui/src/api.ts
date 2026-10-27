@@ -869,14 +869,18 @@ export const saveTinkerKey = (key: string) => post<TinkerSettings>("/api/setting
 
 /** How orx was installed. `installer`, `app-bundle`, `appimage` and `portable` update themselves. */
 export type InstallChannel = "installer" | "app-bundle" | "appimage" | "portable" | "cargo" | "homebrew" | "nix" | "unknown";
+export type ReleaseChannel = "stable" | "canary";
 
 export interface UpdateStatus {
   current: string;
-  /** Latest release this install can actually move to — the macOS app and the
-   *  CLI read different manifests, and the app's can lag. */
+  /** Latest published release on the selected channel. */
   latest: string | null;
   latestTag: string | null;
   channel: InstallChannel;
+  releaseChannel: ReleaseChannel;
+  releaseChannelsAvailable: boolean;
+  waitingForStable: boolean;
+  waitingForCanary: boolean;
   /** Whether this install is one orx can replace at all. */
   selfUpdates: boolean;
   autoUpdate: boolean;
@@ -914,6 +918,9 @@ export const restartApp = () =>
 
 export const setAutoUpdate = (enabled: boolean) =>
   post<UpdateStatus>("/api/update/auto", { enabled });
+
+export const setReleaseChannel = (channel: ReleaseChannel) =>
+  post<UpdateStatus>("/api/update/channel", { channel });
 
 export const installCli = (force = false) =>
   post<InstalledCli>("/api/update/install-cli", { force });

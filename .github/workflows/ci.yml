@@ -53,7 +53,7 @@ jobs:
         with:
           node-version: 22
       - name: CI selection and release safety tests
-        run: node --test scripts/ci-changes.test.mjs scripts/ci-workflows.test.mjs
+        run: node --test scripts/ci-changes.test.mjs scripts/ci-workflows.test.mjs scripts/canary-tag.test.mjs
       - name: Select checks for changed files
         id: changes
         env:

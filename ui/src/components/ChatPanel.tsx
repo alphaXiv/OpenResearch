@@ -6723,22 +6723,27 @@ export function ChatPanel({
         </button>
         <button
           className={`rail-nav-item flex items-center gap-2.5 py-2 px-2.5 text-base text-text rounded-md text-start [&:hover:not(.active)]:bg-surface [&.active]:bg-panel [&.active]:font-medium ${mainView === "skills" ? "active" : ""}`}
+          aria-current={mainView === "skills" ? "page" : undefined}
           onClick={() => onSelectMainView("skills")}
         >
           <Blocks size={16} />
           {m.chat_panel_customize()}
         </button>
-        {SETTINGS_NAV.map((item) => (
-          <button
-            key={item.id}
-            className={`rail-nav-item flex items-center gap-2.5 py-2 px-2.5 text-base text-text rounded-md text-start [&:hover:not(.active)]:bg-surface [&.active]:bg-panel [&.active]:font-medium ${mainView !== "chat" && mainView !== "skills" && item.activeTabs.includes(mainView) ? "active" : ""}`}
-            data-onboarding={item.id === "compute" ? "nav-compute" : undefined}
-            onClick={() => onSelectMainView(item.id)}
-          >
-            {item.icon}
-            {item.label()}
-          </button>
-        ))}
+        {SETTINGS_NAV.map((item) => {
+          const active = mainView !== "chat" && mainView !== "skills" && item.activeTabs.includes(mainView);
+          return (
+            <button
+              key={item.id}
+              className={`rail-nav-item flex items-center gap-2.5 py-2 px-2.5 text-base text-text rounded-md text-start [&:hover:not(.active)]:bg-surface [&.active]:bg-panel [&.active]:font-medium ${active ? "active" : ""}`}
+              aria-current={active ? "page" : undefined}
+              data-onboarding={item.id === "compute" ? "nav-compute" : undefined}
+              onClick={() => onSelectMainView(item.id)}
+            >
+              {item.icon}
+              {item.label()}
+            </button>
+          );
+        })}
       </nav>
       <div className="rail-section-head flex items-center justify-between shrink-0 pt-3.5 pe-2.5 pb-0 ps-4.5">
         <div className="rail-section-label p-0 text-sm font-medium text-subtext">
@@ -6914,7 +6919,7 @@ export function ChatPanel({
       <>
         {railOpen && rail}
         <section className="chat-pane flex-1 min-w-0 flex flex-col bg-background min-h-0 win-titlebar:pt-win-caption">
-          {!railOpen && <div className="flex h-12 mac-titlebar:h-titlebar shrink-0 items-center">{railReopen}</div>}
+          {!railOpen && <div className="mac-titlebar-spacer flex h-12 mac-titlebar:h-titlebar shrink-0 items-center">{railReopen}</div>}
           {/* Keyed per view so no tab inherits the chat thread's or another tab's scroll offset. */}
           <div key={mainView} className="settings-view-scroll flex-1 min-h-0 overflow-y-auto [scrollbar-gutter:stable_both-edges]">
             {contentError ? <div role="alert" className="p-6 text-subtext">{contentError}<Button onClick={onRetryContent}>{m.app_retry()}</Button></div>

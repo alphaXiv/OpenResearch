@@ -1,12 +1,44 @@
 import unittest
 import subprocess
 import os
+import tempfile
 from unittest.mock import patch
 
-from release_notes import compose, fixed_issues, refresh_downloads, DESKTOP_ASSETS, main, remote_install
+from release_notes import compose, fixed_issues, refresh_downloads, DESKTOP_ASSETS, main, previous_stable_release, remote_install
 
 
 class ReleaseNotesTest(unittest.TestCase):
+    def test_generated_notes_start_at_the_previous_stable_release(self):
+        releases = [[{"tag_name": "v0.2.21", "draft": False, "prerelease": False}]]
+        with tempfile.TemporaryDirectory() as directory, \
+                patch.dict(os.environ, {"GITHUB_REPOSITORY": "alphaXiv/OpenResearch"}), \
+                patch("sys.argv", ["release_notes.py", "v0.2.22", "new-commit", os.path.join(directory, "notes")]), \
+                patch("release_notes.gh", side_effect=[releases, {"status": "ahead"}, {"body": "Changes."}]) as api:
+            main()
+        self.assertEqual(api.call_args_list[0].args, ("repos/alphaXiv/OpenResearch/releases?per_page=100", "--paginate", "--slurp"))
+        self.assertEqual(api.call_args_list[1].args, ("repos/alphaXiv/OpenResearch/compare/v0.2.21...new-commit",))
+        self.assertIn("previous_tag_name=v0.2.21", api.call_args_list[2].args)
+
+    def test_recovered_release_uses_an_earlier_stable_ancestor(self):
+        def release(tag, *, draft=False, prerelease=False):
+            return {"tag_name": tag, "draft": draft, "prerelease": prerelease}
+
+        releases = [
+            [release("v0.2.23"), release("canary-20261027.1", prerelease=True), release("v0.2.20")],
+            [release("v0.2.19"), release("v0.2.21", draft=True), release("v0.2.9")],
+        ]
+        with patch("release_notes.gh", side_effect=[releases, {"status": "diverged"}, {"status": "ahead"}]) as api:
+            previous = previous_stable_release("alphaXiv/OpenResearch", "v0.2.21", "old-commit")
+        self.assertEqual(previous, "v0.2.19")
+        self.assertEqual(api.call_args_list[1].args, ("repos/alphaXiv/OpenResearch/compare/v0.2.20...old-commit",))
+        self.assertEqual(api.call_args_list[2].args, ("repos/alphaXiv/OpenResearch/compare/v0.2.19...old-commit",))
+
+    def test_release_without_a_stable_ancestor_fails_closed(self):
+        releases = [[{"tag_name": "v0.2.20", "draft": False, "prerelease": False}]]
+        with patch("release_notes.gh", side_effect=[releases, {"status": "behind"}]):
+            with self.assertRaisesRegex(ValueError, "No earlier stable release"):
+                previous_stable_release("alphaXiv/OpenResearch", "v0.2.21", "old-commit")
+
     def test_linked_issues_and_order(self):
         notes = (
             "## What's Changed\n"

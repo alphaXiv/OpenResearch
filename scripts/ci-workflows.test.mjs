@@ -1,7 +1,8 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
-import { readFileSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
+import { readFileSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
 import { execFileSync } from 'node:child_process'
+import { createHash } from 'node:crypto'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { runInNewContext } from 'node:vm'
@@ -9,6 +10,117 @@ import { runInNewContext } from 'node:vm'
 const workflow = name => readFileSync(new URL(`../.github/workflows/${name}.yml`, import.meta.url), 'utf8')
 const release = workflow('release')
 const ci = workflow('ci')
+const canary = workflow('release-canary')
+
+test('canary identity handles paginated releases and keeps a running build', () => {
+  assert.match(canary, /group: canary-desktop\n\s+cancel-in-progress: false\n\s+queue: max/)
+  assert.match(canary, /if: github.ref == 'refs\/heads\/main'/)
+  for (const job of ['macos', 'windows']) {
+    const section = canary.split(`\n  ${job}:`)[1].split(/\n  [a-z]/)[0]
+    assert.match(section, /environment: release-signing/)
+  }
+  const section = canary.split('      - id: identity')[1].split('\n  ci:')[0]
+  const shell = section.split('        run: |\n')[1].split('\n').map(line => line.replace(/^          /, '')).join('\n')
+  const root = mkdtempSync(join(tmpdir(), 'orx-canary-identity-'))
+  try {
+    const bin = join(root, 'bin')
+    const scripts = join(root, 'scripts')
+    mkdirSync(bin)
+    mkdirSync(scripts)
+    writeFileSync(join(bin, 'gh'), '#!/bin/sh\ncase "$*" in *--slurp*--jq*) exit 2;; esac\nprintf \'[[{"tag_name":"canary-20261027.2"}],[{"tag_name":"canary-20261027.4"}]]\'\n', { mode: 0o755 })
+    writeFileSync(join(bin, 'date'), '#!/bin/sh\nprintf 20261027\n', { mode: 0o755 })
+    writeFileSync(join(scripts, 'canary-tag.mjs'), readFileSync(new URL('../scripts/canary-tag.mjs', import.meta.url)))
+    writeFileSync(join(root, 'Cargo.toml'), '[package]\nversion = "0.2.21"\n')
+    const output = join(root, 'output')
+    execFileSync('bash', ['-c', shell], { cwd: root, env: { ...process.env, PATH: `${bin}:${process.env.PATH}`, GITHUB_REPOSITORY: 'test/repo', GITHUB_OUTPUT: output } })
+    assert.match(readFileSync(output, 'utf8'), /^tag=canary-20261027\.5\nversion=0\.2\.21\n$/)
+  } finally {
+    rmSync(root, { recursive: true, force: true })
+  }
+})
+
+test('canary recovery preserves published bytes and cannot move the pointer backward', () => {
+  const section = canary.split('      - name: Publish canary')[1].split('      - name: Retain seven canary builds')[0]
+  const shell = section.split('        run: |\n')[1].split('\n').map(line => line.replace(/^          /, '')).join('\n')
+  const root = mkdtempSync(join(tmpdir(), 'orx-canary-publish-'))
+  try {
+    const bin = join(root, 'bin')
+    for (const name of ['bin', 'scripts', 'artifacts', 'remote', 'runner']) mkdirSync(join(root, name))
+    writeFileSync(join(root, 'scripts/canary-manifest.mjs'), readFileSync(new URL('../scripts/canary-manifest.mjs', import.meta.url)))
+    writeFileSync(join(root, 'artifacts/OpenResearch.dmg'), 'rebuilt bytes')
+    writeFileSync(join(root, 'remote/OpenResearch.dmg'), 'original published bytes')
+    writeFileSync(join(bin, 'gh'), `#!/usr/bin/env node
+const fs = require('fs'), path = require('path');
+const args = process.argv.slice(2), [kind, action, tag] = args;
+if (kind === 'api') { console.log(process.env.SOURCE_SHA); process.exit(0); }
+if (kind !== 'release') process.exit(2);
+if (action === 'view') { if (tag !== 'canary' && process.env.FIXTURE_EXISTING === 'no') process.exit(1); if (args.includes('--json')) console.log(tag === 'canary' ? 'desktop-canary.json' : 'OpenResearch.dmg'); process.exit(0); }
+if (action === 'create' && tag !== 'canary') { fs.copyFileSync('artifacts/OpenResearch.dmg', path.join(process.env.FIXTURE_ROOT, 'remote/OpenResearch.dmg')); process.exit(0); }
+if (action === 'download') {
+  const dir = args[args.indexOf('--dir') + 1];
+  if (tag === 'canary') fs.writeFileSync(path.join(dir, 'desktop-canary.json'), JSON.stringify({commit:process.env.PREVIOUS_SHA}));
+  else fs.copyFileSync(path.join(process.env.FIXTURE_ROOT, 'remote/OpenResearch.dmg'), path.join(dir, 'OpenResearch.dmg'));
+  process.exit(0);
+}
+if (action === 'upload' && tag === 'canary') { fs.copyFileSync(args[3], path.join(process.env.FIXTURE_ROOT, 'pointer.json')); process.exit(0); }
+process.exit(2);
+`, { mode: 0o755 })
+    writeFileSync(join(bin, 'git'), `#!/usr/bin/env node
+if (process.argv[2] === 'merge-base') process.exit(process.env.FIXTURE_ANCESTOR === 'yes' ? 0 : 1);
+if (process.argv[2] === 'rev-list') { console.log(process.env.SOURCE_SHA + '\\n' + process.env.PREVIOUS_SHA); process.exit(0); }
+process.exit(2);
+`, { mode: 0o755 })
+    const env = { ...process.env, PATH: `${bin}:${process.env.PATH}`, FIXTURE_ROOT: root,
+      RUNNER_TEMP: join(root, 'runner'), GITHUB_REPOSITORY: 'test/repo', TAG: 'canary-20261027.4',
+      VERSION: '0.2.21', SOURCE_SHA: 'b'.repeat(40), PREVIOUS_SHA: 'a'.repeat(40) }
+    execFileSync('bash', ['-c', shell], { cwd: root, env: { ...env, FIXTURE_ANCESTOR: 'no' } })
+    assert.throws(() => readFileSync(join(root, 'pointer.json')))
+    rmSync(join(root, 'runner'), { recursive: true, force: true })
+    mkdirSync(join(root, 'runner'))
+    execFileSync('bash', ['-c', shell], { cwd: root, env: { ...env, FIXTURE_ANCESTOR: 'yes' } })
+    const manifest = JSON.parse(readFileSync(join(root, 'pointer.json'), 'utf8'))
+    assert.equal(manifest.commit, env.SOURCE_SHA)
+    assert.equal(manifest.assets.macos.sha256, createHash('sha256').update('original published bytes').digest('hex'))
+    rmSync(join(root, 'runner'), { recursive: true, force: true })
+    mkdirSync(join(root, 'runner'))
+    execFileSync('bash', ['-c', shell], { cwd: root, env: { ...env, FIXTURE_ANCESTOR: 'yes', FIXTURE_EXISTING: 'no' } })
+    const fresh = JSON.parse(readFileSync(join(root, 'pointer.json'), 'utf8'))
+    assert.equal(fresh.assets.macos.sha256, createHash('sha256').update('rebuilt bytes').digest('hex'))
+  } finally {
+    rmSync(root, { recursive: true, force: true })
+  }
+})
+
+test('canary retention keeps the published pointer and the six newest other builds', () => {
+  const section = canary.split('      - name: Retain seven canary builds')[1]
+  const shell = section.split('        run: |\n')[1].split('\n').map(line => line.replace(/^          /, '')).join('\n')
+  const root = mkdtempSync(join(tmpdir(), 'orx-canary-retention-'))
+  try {
+    const bin = join(root, 'bin')
+    mkdirSync(bin)
+    mkdirSync(join(root, 'runner'))
+    writeFileSync(join(bin, 'gh'), `#!/usr/bin/env node
+const fs = require('fs'), path = require('path');
+const args = process.argv.slice(2);
+if (args[0] === 'api') {
+  const releases = Array.from({length: 10}, (_, i) => ({tag_name: 'canary-20261027.' + (i + 1), draft: false, prerelease: true, published_at: String(i).padStart(2, '0'), id: i + 1}));
+  releases.push({tag_name: 'canary', draft: false, prerelease: true, published_at: '99', id: 99}, {tag_name: 'v1.0.0', draft: false, prerelease: false, published_at: '99', id: 100});
+  console.log(JSON.stringify([releases.slice(0, 5), releases.slice(5)])); process.exit(0);
+}
+if (args[0] === 'release' && args[1] === 'download') { fs.writeFileSync(path.join(args[args.indexOf('--dir') + 1], 'desktop-canary.json'), JSON.stringify({tag: process.env.LATEST})); process.exit(0); }
+if (args[0] === 'release' && args[1] === 'delete' && args.includes('--cleanup-tag') && args.includes('--yes')) { fs.appendFileSync(process.env.DELETED, args[2] + '\\n'); process.exit(0); }
+process.exit(2);
+`, { mode: 0o755 })
+    const env = { ...process.env, PATH: `${bin}:${process.env.PATH}`, RUNNER_TEMP: join(root, 'runner'), GITHUB_REPOSITORY: 'test/repo', DELETED: join(root, 'deleted') }
+    execFileSync('bash', ['-c', shell], { cwd: root, env: { ...env, LATEST: 'canary-20261027.1' } })
+    assert.equal(readFileSync(env.DELETED, 'utf8'), 'canary-20261027.4\ncanary-20261027.3\ncanary-20261027.2\n')
+    rmSync(env.DELETED)
+    execFileSync('bash', ['-c', shell], { cwd: root, env: { ...env, LATEST: 'canary-20261027.99' } })
+    assert.equal(readFileSync(env.DELETED, 'utf8'), 'canary-20261027.3\ncanary-20261027.2\ncanary-20261027.1\n')
+  } finally {
+    rmSync(root, { recursive: true, force: true })
+  }
+})
 
 test('releases have no PR trigger or dry-run packaging path', () => {
   const triggers = release.slice(release.indexOf('\non:\n'), release.indexOf('\njobs:\n'))
@@ -25,6 +137,9 @@ test('ordinary CI cannot package, and optimized checks require release context',
 test('publication and source checks use the resolved release SHA', () => {
   assert.match(release, /RELEASE_COMMIT: "\$\{\{ needs.plan.outputs.source-sha \}\}"/)
   assert.match(release, /--target "\$RELEASE_COMMIT"/)
+  const host = release.split('\n  host:')[1].split('\n  announce:')[0]
+  assert.match(host, /fetch-depth: 0/)
+  assert.match(host, /git rev-list "\$RELEASE_COMMIT".*artifacts\/desktop-ancestry\.json/)
   for (const job of ['custom-ci', 'custom-telemetry-contract']) {
     const section = release.split(`\n  ${job}:`)[1].split(/\n  [a-z]/)[0]
     assert.match(section, /source-sha: \$\{\{ needs.plan.outputs.source-sha \}\}/)

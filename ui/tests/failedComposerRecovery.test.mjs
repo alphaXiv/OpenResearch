@@ -377,6 +377,48 @@ for (const busy of [false, true]) {
   });
 }
 
+test("an acceptance lookup cannot refresh a deleted session", async () => {
+  let finishLookup, refreshed = false;
+  const s = setup({ submission: () => new Promise((resolve) => { finishLookup = resolve; }) });
+  s.bindings.reseedSession = async () => { refreshed = true; };
+  const send = new Function(...Object.keys(s.bindings), code)(...Object.values(s.bindings));
+  const task = send();
+  await flush();
+  s.reject(new TypeError("network"));
+  await flush();
+  s.deleted.add("s");
+  finishLookup({ accepted: true });
+  await task;
+  assert.equal(refreshed, false);
+  assert.equal(s.stashes.has(s.key), false);
+});
+
+test("a confirmed send after unmount clears its saved retry", async () => {
+  const s = setup({ submission: async () => ({ accepted: true }) });
+  s.stashes.set(s.key, s.state);
+  const cleanup = mountComposer(s);
+  s.render();
+  const task = s.send();
+  await flush();
+  s.render();
+  cleanup();
+  s.unmount();
+  s.reject(new TypeError("network"));
+  await task;
+  assert.equal(s.stashes.get(s.key)?.draft ?? "", "");
+  assert.equal(s.stashes.get(s.key)?.pendingClientTurn ?? null, null);
+});
+
+test("a confirmed rejection does not query submission status", async () => {
+  let lookedUp = false;
+  const s = setup({ submission: async () => { lookedUp = true; return { accepted: true }; } });
+  const task = s.send();
+  await flush();
+  s.reject(new RejectedResponseError("rejected"));
+  await task;
+  assert.equal(lookedUp, false);
+});
+
 for (const busy of [false, true]) {
   test(`unconfirmed ${busy ? "steering or queued" : "normal"} sends retain content and warn`, async () => {
     const s = setup({ busy, steering: busy });

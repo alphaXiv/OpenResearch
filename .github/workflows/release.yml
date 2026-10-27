@@ -368,6 +368,7 @@ jobs:
           persist-credentials: false
           submodules: recursive
           ref: ${{ needs.plan.outputs.source-sha }}
+          fetch-depth: 0
       - name: Install cached dist
         uses: actions/download-artifact@v8
         with:
@@ -412,6 +413,7 @@ jobs:
           RELEASE_COMMIT: "${{ needs.plan.outputs.source-sha }}"
         run: |
           python3 scripts/release_notes.py "${{ needs.plan.outputs.tag }}" "$RELEASE_COMMIT" "$RUNNER_TEMP/notes.txt"
+          git rev-list "$RELEASE_COMMIT" | jq -R -s 'split("\n")[:-1]' > artifacts/desktop-ancestry.json
           gh release create "${{ needs.plan.outputs.tag }}" --target "$RELEASE_COMMIT" $PRERELEASE_FLAG --title "$ANNOUNCEMENT_TITLE" --notes-file "$RUNNER_TEMP/notes.txt" artifacts/*
 
   announce:

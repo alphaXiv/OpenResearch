@@ -23,9 +23,9 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use semver::Version;
-use serde::Deserialize;
 use sha2::{Digest, Sha256};
 
+use super::SingleAssetManifest;
 use crate::error::{anyhow, Result};
 
 /// Release asset describing the published app build. Written by
@@ -48,19 +48,35 @@ fn signing_requirement() -> String {
     )
 }
 
-#[derive(Debug, Deserialize)]
-pub struct AppManifest {
-    pub version: String,
-    /// Release tag the asset is pinned to, so the download can't drift to a
-    /// different release between the manifest fetch and the download.
-    pub tag: String,
-    pub asset: String,
-    pub sha256: String,
-}
-
 /// Fetches the published app manifest; `Ok(None)` until the DMG is attached.
-pub async fn fetch_manifest(timeout: Duration) -> Result<Option<AppManifest>> {
-    super::fetch_app_manifest(MANIFEST_ASSET, timeout).await
+pub async fn fetch_manifest(timeout: Duration) -> Result<Option<SingleAssetManifest>> {
+    if crate::telemetry::update_channel() == super::ReleaseChannel::Canary {
+        return Ok(super::fetch_canary_manifest(timeout)
+            .await?
+            .and_then(|mut manifest| {
+                manifest
+                    .assets
+                    .remove("macos")
+                    .map(|asset| SingleAssetManifest {
+                        version: manifest.version,
+                        tag: manifest.tag,
+                        asset: asset.asset,
+                        sha256: asset.sha256,
+                        ancestors: manifest.ancestors,
+                    })
+            }));
+    }
+    let manifest: Option<SingleAssetManifest> =
+        super::fetch_app_manifest(MANIFEST_ASSET, timeout).await?;
+    if manifest
+        .as_ref()
+        .is_some_and(|manifest| !super::valid_desktop_tag(&manifest.tag))
+    {
+        return Err(anyhow!(
+            "The app update belongs to a different release channel."
+        ));
+    }
+    Ok(manifest)
 }
 
 /// Update the installed bundle at `root` in place.
@@ -82,12 +98,30 @@ pub async fn update(root: &Path, current: &Version, dry_run: bool, background: b
     // Keep the cache honest even when this install can't apply the update: it is
     // what the dashboard and the outdated warning read.
     if let (Some(manifest), Some(latest)) = (&published, &latest) {
-        super::write_check_cache(&latest.to_string(), &manifest.tag);
+        let compatible = super::release_is_compatible(
+            &manifest.tag,
+            &manifest.ancestors,
+            Duration::from_secs(10),
+        )
+        .await?;
+        super::record_checked_release(&super::LatestRelease {
+            version: latest.clone(),
+            tag: manifest.tag.clone(),
+            compatible,
+            #[cfg(windows)]
+            canary_asset: None,
+        });
+        if !compatible {
+            if !background {
+                println!("{}", super::compatibility_wait_message(&manifest.tag));
+            }
+            return Ok(());
+        }
     }
 
     let Some((manifest, latest)) = published
         .zip(latest)
-        .filter(|(_, latest)| super::is_outdated(current, latest))
+        .filter(|(manifest, latest)| super::release_available(current, latest, &manifest.tag))
     else {
         if !background {
             println!("OpenResearch {} is up to date.", current);
@@ -204,7 +238,7 @@ async fn team_id(root: &Path) -> Option<String> {
 
 /// Download the DMG, verify it, and copy the app out into `staging`. Returns the
 /// staged bundle's path.
-async fn stage_verified_app(manifest: &AppManifest, staging: &Path) -> Result<PathBuf> {
+async fn stage_verified_app(manifest: &SingleAssetManifest, staging: &Path) -> Result<PathBuf> {
     let dmg_bytes = super::fetch_release_asset(
         &manifest.tag,
         &manifest.asset,

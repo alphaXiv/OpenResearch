@@ -78,7 +78,7 @@ pub async fn run(args: UpArgs) -> Result<()> {
         .ok()
         .flatten();
     // An install that finished while this process waited replaced the image it was started from.
-    if backend_lock.is_some() && updates::newer_exe_on_disk().await {
+    if backend_lock.is_some() && updates::updated_exe_on_disk().await {
         drop(backend_lock);
         let err = updates::relaunch(port);
         return Err(anyhow!("orx up: could not restart: {err}"));
@@ -286,7 +286,7 @@ pub async fn run(args: UpArgs) -> Result<()> {
     state.dashboard_lock.lock().unwrap().take();
     if restarting {
         drop(backend_lock);
-        if !updates::newer_exe_on_disk().await {
+        if !updates::updated_exe_on_disk().await {
             eprintln!("orx up: installing the update before restarting");
             let failures = updates::failure_count();
             if let Err(err) = updates::apply_now().await {
@@ -294,7 +294,7 @@ pub async fn run(args: UpArgs) -> Result<()> {
             }
             // Unless the updater counted it or still will, back off (deferred again, or it
             // never started), or the relaunch restarts straight back into this.
-            if !updates::newer_exe_on_disk().await
+            if !updates::updated_exe_on_disk().await
                 && updates::failure_count() == failures
                 && !updates::updater_running()
             {
@@ -680,6 +680,7 @@ fn router(state: AppState, remote_auth: Option<RemoteAuth>) -> Router {
         .route("/api/update/apply", post(apply_update))
         .route("/api/update/restart", post(restart_after_update))
         .route("/api/update/auto", post(set_auto_update))
+        .route("/api/update/channel", post(set_update_channel))
         .route("/api/update/install-cli", post(install_cli))
         .route("/api/settings/ui-state", get(ui_state).post(set_ui_state))
         .route(
@@ -894,6 +895,7 @@ fn remote_route_forbidden(path: &str) -> bool {
             | "/api/update/apply"
             | "/api/update/restart"
             | "/api/update/auto"
+            | "/api/update/channel"
             | "/api/update/install-cli"
             | "/api/settings/data-dir"
             | "/api/settings/data-dir/move"
@@ -4858,7 +4860,7 @@ fn spawn_restart_when_idle(state: AppState) {
             // The cache can claim an install the exec target doesn't have; never restart in a loop.
             if !(status.auto_update
                 && status.restart_required
-                && (updates::deferred_update_due() || updates::newer_exe_on_disk().await))
+                && (updates::deferred_update_due() || updates::updated_exe_on_disk().await))
             {
                 continue;
             }
@@ -5703,6 +5705,54 @@ async fn set_auto_update(Json(req): Json<SetAutoUpdateReq>) -> ApiResult {
     })
     .await
     .map_err(|e| ApiError::from(anyhow!("auto-update task failed: {e}")))?
+}
+
+#[derive(Deserialize)]
+struct SetUpdateChannelReq {
+    channel: updates::ReleaseChannel,
+}
+
+async fn set_update_channel(Json(req): Json<SetUpdateChannelReq>) -> ApiResult {
+    if !updates::current_channel().is_ok_and(|channel| channel.has_release_channels()) {
+        return Err(bad_request(
+            "Update channels are available for desktop apps.",
+        ));
+    }
+    tokio::task::spawn_blocking(move || {
+        let path = updates::updater_lock_path();
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent).map_err(|e| ApiError::from(anyhow!(e)))?;
+        }
+        let file = std::fs::OpenOptions::new()
+            .create(true)
+            .truncate(false)
+            .write(true)
+            .open(path)
+            .map_err(|e| ApiError::from(anyhow!(e)))?;
+        let mut lock = fd_lock::RwLock::new(file);
+        let _guard = lock.try_write().map_err(|_| {
+            ApiError(
+                StatusCode::CONFLICT,
+                "An update is in progress. Try again when it finishes.".into(),
+            )
+        })?;
+        if req.channel != crate::telemetry::update_channel() {
+            if updates::channel_change_blocked_by_installed() {
+                return Err(ApiError(
+                    StatusCode::CONFLICT,
+                    "An update is already installed. Restart OpenResearch before changing channels."
+                        .into(),
+                ));
+            }
+            updates::clear_deferred_update();
+        }
+        crate::telemetry::set_update_channel(req.channel)
+            .map_err(|e| ApiError::from(anyhow!("could not save update channel: {e}")))
+    })
+    .await
+    .map_err(|e| ApiError::from(anyhow!("update channel task failed: {e}")))??;
+    tokio::spawn(updates::periodic_update_pass());
+    Ok(Json(json!(updates::status())))
 }
 
 /// Apply an update now, for the user who doesn't want to wait for the next

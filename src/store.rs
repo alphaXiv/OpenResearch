@@ -3624,7 +3624,8 @@ impl Store {
     pub fn has_chat_submission(&self, session_id: &str, client_turn_id: &str) -> Result<bool> {
         Ok(self.conn.query_row(
             "SELECT EXISTS(SELECT 1 FROM chat_queued_messages WHERE session_id = ?1 AND client_turn_id = ?2)
-                 OR EXISTS(SELECT 1 FROM chat_turns WHERE session_id = ?1 AND client_turn_id = ?2)",
+                 OR EXISTS(SELECT 1 FROM chat_turns WHERE session_id = ?1 AND client_turn_id = ?2)
+                 OR EXISTS(SELECT 1 FROM chat_steer_receipts WHERE session_id = ?1 AND client_turn_id = ?2 AND delivered = 1)",
             params![session_id, client_turn_id],
             |row| row.get(0),
         )?)
@@ -5988,6 +5989,11 @@ mod tests {
         turn.state = "completed".into();
         store.admit_chat_turn(None, &turn).unwrap();
         assert!(store.has_chat_submission("chat_1", "ct_finished").unwrap());
+        assert!(store.claim_steer("chat_1", "ct_steer", "hash").unwrap());
+        assert!(!store.has_chat_submission("chat_1", "ct_steer").unwrap());
+        store.finish_steer("chat_1", "ct_steer").unwrap();
+        assert!(store.has_chat_submission("chat_1", "ct_steer").unwrap());
+        assert!(!store.has_chat_submission("another", "ct_steer").unwrap());
         store.delete_queued_chat_message("q_queue-id").unwrap();
         assert!(!store.has_chat_submission("chat_1", "ct_queue-id").unwrap());
         let _ = std::fs::remove_dir_all(dir);

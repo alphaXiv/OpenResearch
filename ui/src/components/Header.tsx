@@ -9,7 +9,7 @@ export function RailHeader({
   onCollapse?: () => void;
 }) {
   return (
-    <div className="rail-brand flex h-12 items-center px-3 border-b border-border shrink-0 mac-titlebar:ps-titlebar-controls mac-titlebar:pe-2 mac-titlebar:h-titlebar mac-titlebar:border-b-0">
+    <div className="rail-brand mac-titlebar-spacer flex h-12 items-center px-3 border-b border-border shrink-0 mac-titlebar:ps-titlebar-controls mac-titlebar:pe-2 mac-titlebar:h-titlebar mac-titlebar:border-b-0">
       <div className="flex w-full items-center gap-2 px-1">
         <span className="w-5 h-5 mac-titlebar:hidden"><BrandMark /></span>
         <span className="flex-1 text-base font-medium mac-titlebar:invisible">OpenResearch</span>

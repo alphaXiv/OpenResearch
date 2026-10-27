@@ -920,6 +920,9 @@ impl DiscoveryPriority {
 
 #[derive(Args, Debug)]
 pub struct VersionArgs {
+    /// Print the desktop build identity.
+    #[arg(long, hide = true, conflicts_with_all = ["check", "json", "build_channel", "dashboard_protocol"])]
+    pub build_id: bool,
     /// Print the embedded telemetry build channel.
     #[arg(long, hide = true, conflicts_with_all = ["check", "json"])]
     pub build_channel: bool,

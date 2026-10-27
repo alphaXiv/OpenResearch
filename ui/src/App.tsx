@@ -499,11 +499,13 @@ export default function App({ runtime, projectId, pane }: { runtime: RuntimeInfo
     const pendingFocus = focusAfterRailChange.current;
     if (pendingFocus && pendingFocus !== "show" && railVisible) {
       if (pendingFocus === "rail" || (document.activeElement === document.body && pendingFocus === lastFocused.current && !pendingFocus.isConnected)) {
-        bodyRef.current?.querySelector<HTMLElement>(".session-rail button, .session-rail a")?.focus();
+        const buttons = bodyRef.current?.querySelectorAll<HTMLElement>(".session-rail button, .session-rail a");
+        [...(buttons ?? [])].find((button) => button.getClientRects().length > 0
+          && getComputedStyle(button).visibility !== "hidden")?.focus();
       }
       focusAfterRailChange.current = null;
     } else if (focusAfterRailChange.current === "show" && !railVisible) {
-      const buttons = bodyRef.current?.querySelectorAll<HTMLElement>("button[aria-label]");
+      const buttons = bodyRef.current?.parentElement?.querySelectorAll<HTMLElement>("button[aria-label]");
       [...(buttons ?? [])].find((button) => button.getAttribute("aria-label") === m.chat_panel_show_sidebar()
         && button.getClientRects().length > 0 && getComputedStyle(button).visibility !== "hidden")?.focus();
       focusAfterRailChange.current = null;
@@ -1804,31 +1806,34 @@ export default function App({ runtime, projectId, pane }: { runtime: RuntimeInfo
 
   const railHeader = (
     <RailHeader
-      onCollapse={() => setRailOpen(false)}
+      onCollapse={() => {
+        focusAfterRailChange.current = "show";
+        setRailOpen(false);
+      }}
     />
   );
 
   return (
-    <div className="app flex flex-col h-full">
-      {runtime.kind === "local" && <OfflineBanner />}
-      {runtime.kind === "local" && <UpdateBanner status={updateStatus} />}
+    <div className="app relative flex flex-col h-full">
+      {projectId && <div className="absolute start-[calc(5.15rem/min(1,var(--desktop-page-zoom,1)))] top-[calc(-0.125rem/min(1,var(--desktop-page-zoom,1)))] z-10 hidden h-titlebar items-center mac-titlebar:flex">
+        <Tooltip interactive content={railVisible ? m.header_hide_sidebar() : m.chat_panel_show_sidebar()} className="rounded-md">
+          <IconButton aria-label={railVisible ? m.header_hide_sidebar() : m.chat_panel_show_sidebar()} aria-expanded={railVisible} onClick={() => {
+            if (railVisible) setRailOpen(false);
+            else {
+              focusAfterRailChange.current = "rail";
+              setRailOpen(true);
+              if (railTemporarilyHidden) closePanel();
+            }
+          }}>
+            <PanelLeft size={18} />
+          </IconButton>
+        </Tooltip>
+      </div>}
+      {runtime.kind === "local" && <OfflineBanner hasSidebar={Boolean(projectId)} />}
+      {runtime.kind === "local" && <UpdateBanner status={updateStatus} hasSidebar={Boolean(projectId)} />}
       <DesktopAppBanner />
-      {workspaceError && <div role="alert" className="flex items-center gap-2 px-4 mac-titlebar:ps-titlebar-controls win-titlebar:pe-win-controls py-2 text-subtext"><span>{workspaceError}</span><Button onClick={retryWorkspace}>{m.app_retry()}</Button></div>}
+      {workspaceError && <div role="alert" className="flex items-center gap-2 px-4 mac-titlebar:ps-titlebar-sidebar-controls mac-titlebar:min-h-titlebar win-titlebar:pe-win-controls py-2 text-subtext"><span>{workspaceError}</span><Button onClick={retryWorkspace}>{m.app_retry()}</Button></div>}
       <div ref={bodyRef} className={`app-body workspace-body relative flex flex-1 min-h-0 ${stackPanel ? "flex-col [&>.chat-pane]:overflow-y-auto [&_.chat-empty]:min-h-0 [&_.chat-empty]:overflow-y-auto [&_.chat-empty]:justify-start [&_.chat-empty]:p-0" : ""} ${workspaceCardVisible ? "workspace-card-visible" : ""}`}>
-        {projectId && <div className="absolute start-[calc(5.15rem/min(1,var(--desktop-page-zoom,1)))] top-[calc(-0.125rem/min(1,var(--desktop-page-zoom,1)))] z-10 hidden h-titlebar items-center mac-titlebar:flex">
-          <Tooltip interactive content={railVisible ? m.header_hide_sidebar() : m.chat_panel_show_sidebar()} className="rounded-md">
-            <IconButton aria-label={railVisible ? m.header_hide_sidebar() : m.chat_panel_show_sidebar()} aria-expanded={railVisible} onClick={() => {
-              if (railVisible) setRailOpen(false);
-              else {
-                focusAfterRailChange.current = "rail";
-                setRailOpen(true);
-                if (railTemporarilyHidden) closePanel();
-              }
-            }}>
-              <PanelLeft size={18} />
-            </IconButton>
-          </Tooltip>
-        </div>}
         {projectId && (
           <ChatPanel
             projectId={projectId}

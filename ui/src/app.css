@@ -2,6 +2,10 @@
   clip-path: inset(34% 9%);
 }
 
+.mac-titlebar .app > :is(.update-banner, .offline-banner, [role="alert"]) ~ .app-body .mac-titlebar-spacer {
+  display: none;
+}
+
 :root[data-theme="dark"] .tinker-logo {
   filter: invert(1);
 }
