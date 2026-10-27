@@ -169,7 +169,9 @@ import {
   retryStatusLabel,
 } from "../chatRecovery";
 import {
+  composerSeed,
   composerStashContent,
+  forgetComposerSeed,
   EMPTY_COMPOSER_STASH,
   type ComposerAnnotation,
   type ComposerAttachment,
@@ -4527,7 +4529,7 @@ export function ChatPanel({
     enabled: !embedded && sidebarGrouping === "list",
   });
   const sessionsOptions = useMemo(() => listChatSessionsQuery(projectId), [projectId]);
-  const { data: sessions = EMPTY_SESSIONS } = useQuery(sessionsOptions);
+  const { data: sessions = EMPTY_SESSIONS, isSuccess: sessionsLoaded } = useQuery(sessionsOptions);
   const setSessions = useCallback((value: React.SetStateAction<ChatSession[]>) => {
     setScopedQueryData(sessionsOptions.queryKey, (current) => {
       if (!current) return undefined;
@@ -4572,18 +4574,25 @@ export function ChatPanel({
   // On offer until the user has sent anything in the demo: a send either adds
   // a session or moves a recorded session's leaf off its seeded message. The
   // nudge anchors to the first scope that had it — seeding it in every scope
-  // would read as the draft bleeding across chats.
+  // would read as the draft bleeding across chats. A new project's seeded
+  // prompt (an openresearch:// reproduce link) is offered the same way until it has a chat.
+  const seededPrompt = !embedded && sessionsLoaded && sessions.length === 0 ? composerSeed(projectId) : null;
   const composerPrefillOffer =
     projectId === DEMO_PROJECT_ID && !embedded &&
       sessions.length > 0 &&
       sessions.every((session) => session.sideParentSessionId || DEMO_SEEDED_LEAF_IDS[session.id] === session.activeLeafId)
       ? DEMO_RUN_EXPERIMENT_PROMPT
-      : null;
-  const prefillScopeRef = useRef<string | null>(null);
-  if (composerPrefillOffer !== null && prefillScopeRef.current === null && activeId !== null) {
-    prefillScopeRef.current = stashKey;
+      : seededPrompt;
+  // Per project, so a seeded project's anchor can't block the demo's.
+  const prefillScopesRef = useRef(new Map<string, string>());
+  const canAnchorPrefill = activeId !== null || seededPrompt !== null;
+  if (composerPrefillOffer !== null && !prefillScopesRef.current.has(projectId) && canAnchorPrefill) {
+    prefillScopesRef.current.set(projectId, stashKey);
   }
-  const composerPrefill = stashKey === prefillScopeRef.current ? composerPrefillOffer : null;
+  useEffect(() => {
+    if (sessions.length > 0) forgetComposerSeed(projectId);
+  }, [projectId, sessions.length]);
+  const composerPrefill = stashKey === prefillScopesRef.current.get(projectId) ? composerPrefillOffer : null;
   // Layout effect: the restore must land before paint or the outgoing chat's
   // draft flashes for a frame inside the incoming one.
   useLayoutEffect(() => {
@@ -6227,7 +6236,7 @@ export function ChatPanel({
   function forgetSession(sessionId: string) {
     removeCachedSession(sessionId);
     composerStashRef.current.delete(sessionId);
-    if (prefillScopeRef.current === sessionId) prefillScopeRef.current = null;
+    if (prefillScopesRef.current.get(projectId) === sessionId) prefillScopesRef.current.delete(projectId);
     if (composerScopeRef.current.projectId === projectId
       && composerScopeRef.current.activeId === sessionId
       && composerScopeRef.current.mainView === "chat") {

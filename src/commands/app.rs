@@ -326,6 +326,19 @@ fn opens_in_browser(url: &str) -> bool {
         .any(|scheme| url.starts_with(scheme))
 }
 
+/// The dashboard path an `openresearch://reproduce?…` link opens. The query
+/// passes through untouched; the page validates it.
+#[cfg_attr(not(all(desktop_app, target_os = "macos")), allow(dead_code))]
+fn deep_link_path(scheme: &str, host: Option<&str>, query: Option<&str>) -> Option<String> {
+    if scheme != "openresearch" || host != Some("reproduce") {
+        return None;
+    }
+    Some(match query {
+        Some(query) if !query.is_empty() => format!("/reproduce?{query}"),
+        _ => "/reproduce".to_string(),
+    })
+}
+
 #[cfg(windows)]
 fn wide(text: &str) -> Vec<u16> {
     text.encode_utf16().chain(Some(0)).collect()
@@ -968,6 +981,9 @@ mod imp {
             eprintln!("openresearch app: could not restore page zoom: {error}");
         }
         let mut quit = Quit::No;
+        // A link that opens the app arrives before its server answers.
+        #[cfg(target_os = "macos")]
+        let (mut server_ready, mut pending_link) = (false, None::<String>);
         // What the loaded page was last told; a new page starts unmaximized.
         #[cfg(windows)]
         let mut page_maximized = false;
@@ -993,7 +1009,14 @@ mod imp {
                 Quit::ShuttingDown => *control_flow = ControlFlow::Exit,
             },
             Event::UserEvent(UserEvent::ServerReady) if matches!(quit, Quit::No) => {
-                let _ = webview.load_url(&format!("{origin}/"));
+                #[cfg(target_os = "macos")]
+                let path = {
+                    server_ready = true;
+                    pending_link.take().unwrap_or_else(|| "/".to_string())
+                };
+                #[cfg(not(target_os = "macos"))]
+                let path = "/";
+                let _ = webview.load_url(&format!("{origin}{path}"));
             }
             // A window that never appears is worse than a blank one.
             Event::UserEvent(UserEvent::LoadTimedOut)
@@ -1069,6 +1092,38 @@ mod imp {
                 shown.set(true);
                 window.set_visible(true);
                 window.set_focus();
+            }
+            #[cfg(target_os = "macos")]
+            Event::Opened { urls } if matches!(quit, Quit::No) => {
+                let Some(path) = urls
+                    .iter()
+                    .find_map(|url| super::deep_link_path(url.scheme(), url.host_str(), url.query()))
+                else {
+                    return;
+                };
+                if !server_ready {
+                    pending_link = Some(path);
+                    return;
+                }
+                // A timed-out or failed first load leaves no listener for the event.
+                let on_dashboard = webview
+                    .url()
+                    .is_ok_and(|url| super::is_dashboard_url(&url, &origin));
+                if shown.get() && on_dashboard {
+                    // In-page navigation keeps the page's unsaved-work guards; a reload would skip them.
+                    let _ = webview.evaluate_script(&format!(
+                        "window.dispatchEvent(new CustomEvent('orx:open-path', {{ detail: {} }}));",
+                        serde_json::Value::from(path)
+                    ));
+                } else {
+                    let _ = webview.load_url(&format!("{origin}{path}"));
+                }
+                // Before the first page shows, the page-load handler reveals the window.
+                if shown.get() {
+                    window.set_minimized(false);
+                    window.set_visible(true);
+                    window.set_focus();
+                }
             }
             _ => {}
         })
@@ -1428,7 +1483,9 @@ mod imp {
 
 #[cfg(test)]
 mod tests {
-    use super::{desktop_entry, is_bundle_exe_launch, is_dashboard_url, opens_in_browser};
+    use super::{
+        deep_link_path, desktop_entry, is_bundle_exe_launch, is_dashboard_url, opens_in_browser,
+    };
     use std::ffi::OsStr;
     use std::path::Path;
 
@@ -1445,6 +1502,24 @@ mod tests {
         ));
         assert!(entry.contains("\nStartupWMClass=OpenResearch\n"));
         assert!(!entry.contains("orx app"));
+    }
+
+    #[test]
+    fn reproduce_links_open_the_reproduce_page_with_their_query() {
+        assert_eq!(
+            deep_link_path(
+                "openresearch",
+                Some("reproduce"),
+                Some("arxiv=arXiv%3A1706.03762")
+            ),
+            Some("/reproduce?arxiv=arXiv%3A1706.03762".to_string())
+        );
+        assert_eq!(
+            deep_link_path("openresearch", Some("reproduce"), None),
+            Some("/reproduce".to_string())
+        );
+        assert_eq!(deep_link_path("openresearch", Some("settings"), None), None);
+        assert_eq!(deep_link_path("https", Some("reproduce"), None), None);
     }
 
     const EXE: &str = "/Applications/OpenResearch.app/Contents/MacOS/OpenResearch";

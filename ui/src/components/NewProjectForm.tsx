@@ -78,18 +78,20 @@ export function NewProjectForm({
   onCancel,
   remote = false,
   preferredAgent,
+  initialPaperId,
 }: {
   onCreated: (project: Project, githubPublicationError: string | null) => void;
   onCancel?: () => void;
   remote?: boolean;
   preferredAgent: AgentSelection | null;
+  initialPaperId?: string;
 }) {
   const { data: harnesses = [] } = useQuery(getHarnessesQuery());
   const starterSelection = preferredAgent ?? defaultSelection(harnesses);
   const starterHarness = starterSelection?.harness;
   const starterModel = starterSelection?.model ?? null;
   const starterAgent = starterHarness ? { harness: starterHarness, model: starterModel } : undefined;
-  const [mode, setMode] = useState<Mode>("blank");
+  const [mode, setMode] = useState<Mode>(initialPaperId ? "paper" : "blank");
   const [name, setName] = useState("");
   const [nameTouched, setNameTouched] = useState(false);
   const [path, setPath] = useState("");
@@ -99,7 +101,7 @@ export function NewProjectForm({
   const [error, setError] = useState<string | null>(null);
   const [advancedOpen, setAdvancedOpen] = useState(false);
   const [githubSyncEnabled, setGithubSyncEnabled] = useState(false);
-  const [paperQuery, setPaperQuery] = useState("");
+  const [paperQuery, setPaperQuery] = useState(initialPaperId ?? "");
   const [paper, setPaper] = useState<ResolvedPaper | null>(null);
   const [choosingPaper, setChoosingPaper] = useState(false);
   const seq = useRef(0);

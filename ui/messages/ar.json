@@ -1437,5 +1437,6 @@
   "skills_detection_copy": "نسخ تفاصيل الاكتشاف",
   "skills_detection_accepted": "تم قبول {count}",
   "desktop_zoom_controls": "عناصر التحكم في التكبير",
-  "desktop_zoom_reset": "إعادة تعيين"
+  "desktop_zoom_reset": "إعادة تعيين",
+  "reproduce_paper_prompt": "أعد إنتاج نتائج الورقة البحثية «{title}» (arXiv:{arxiv})."
 }

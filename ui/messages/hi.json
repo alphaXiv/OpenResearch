@@ -1437,5 +1437,6 @@
   "skills_detection_copy": "पहचान का विवरण कॉपी करें",
   "skills_detection_accepted": "{count} स्वीकृत",
   "desktop_zoom_controls": "ज़ूम नियंत्रण",
-  "desktop_zoom_reset": "रीसेट"
+  "desktop_zoom_reset": "रीसेट",
+  "reproduce_paper_prompt": "शोध-पत्र “{title}” (arXiv:{arxiv}) को पुनरुत्पादित करें।"
 }

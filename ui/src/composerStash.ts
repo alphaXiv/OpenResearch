@@ -41,3 +41,18 @@ export function composerStashContent(
     annotations: live.annotations.map(({ range: _range, ...annotation }) => annotation),
   };
 }
+
+const composerSeeds = new Map<string, string>();
+
+/** A prompt for a new project's first chat, offered until the project has a chat. */
+export function seedComposer(projectId: string, prompt: string): void {
+  composerSeeds.set(projectId, prompt);
+}
+
+export function composerSeed(projectId: string): string | null {
+  return composerSeeds.get(projectId) ?? null;
+}
+
+export function forgetComposerSeed(projectId: string): void {
+  composerSeeds.delete(projectId);
+}

@@ -34,6 +34,7 @@ function loadModule(filename, api = {}, remembered = null) {
       if (id === "../App") return { default: () => null };
       if (id === "../RemoteRuntime") return { RuntimeRoot: () => null, useRuntime: () => ({ kind: "local" }) };
       if (id === "../routePages") return { ResumeGlobal: () => null, ResumeProject: () => null, ProjectsPage: () => null };
+      if (id === "../components/ReproducePage") return { ReproducePage: () => null };
       if (id.startsWith("./routes/")) return load(new URL(`${id}.tsx`, url));
       throw new Error(`Unexpected dependency: ${id}`);
     }, exports);
@@ -67,6 +68,22 @@ test("real file routes distinguish task/new, task IDs, project index, and settin
   for (const path of ["/projects/p/settings/git", "/projects/p/settings/unknown", "/projects/p/tasks/%00"]) {
     const invalid = await match(path);
     assert(invalid.state.matches.some((route) => route.status === "notFound"), path);
+  }
+});
+
+test("reproduce links yield exact arXiv ids and nothing else", async () => {
+  const { linkedArxivId } = loadModule("routes/reproduce.tsx");
+  for (const [query, id] of [
+    ["arxiv=arXiv%3A2401.10000", "2401.10000"],
+    ["arxiv=arXiv:1706.03762v2", "1706.03762v2"],
+    ["arxiv=2401.10000", null],
+    ["arxiv=arXiv%3Ahep-th%2F9901001", null],
+    ["", null],
+  ]) {
+    const router = await match(`/reproduce?${query}`);
+    const leaf = router.state.matches.at(-1);
+    assert.equal(leaf.routeId, "/reproduce", query);
+    assert.equal(linkedArxivId(leaf.search.arxiv), id, query);
   }
 });
 
