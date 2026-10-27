@@ -1437,5 +1437,6 @@
   "skills_detection_copy": "کپی جزئیات شناسایی",
   "skills_detection_accepted": "{count} پذیرفته‌شده",
   "desktop_zoom_controls": "کنترل‌های بزرگ‌نمایی",
-  "desktop_zoom_reset": "بازنشانی"
+  "desktop_zoom_reset": "بازنشانی",
+  "reproduce_paper_prompt": "مقاله «{title}» ({source}) را بازتولید کن."
 }

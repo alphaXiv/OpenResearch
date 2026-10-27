@@ -78,18 +78,20 @@ export function NewProjectForm({
   onCancel,
   remote = false,
   preferredAgent,
+  initialPaperId,
 }: {
   onCreated: (project: Project, githubPublicationError: string | null) => void;
   onCancel?: () => void;
   remote?: boolean;
   preferredAgent: AgentSelection | null;
+  initialPaperId?: string;
 }) {
   const { data: harnesses = [] } = useQuery(getHarnessesQuery());
   const starterSelection = preferredAgent ?? defaultSelection(harnesses);
   const starterHarness = starterSelection?.harness;
   const starterModel = starterSelection?.model ?? null;
   const starterAgent = starterHarness ? { harness: starterHarness, model: starterModel } : undefined;
-  const [mode, setMode] = useState<Mode>("blank");
+  const [mode, setMode] = useState<Mode>(initialPaperId ? "paper" : "blank");
   const [name, setName] = useState("");
   const [nameTouched, setNameTouched] = useState(false);
   const [path, setPath] = useState("");
@@ -100,6 +102,8 @@ export function NewProjectForm({
   const [advancedOpen, setAdvancedOpen] = useState(false);
   const [githubSyncEnabled, setGithubSyncEnabled] = useState(false);
   const [paperQuery, setPaperQuery] = useState("");
+  // A paper an openresearch:// link filled in isn't the user's pick until they create it.
+  const [paperFromLink, setPaperFromLink] = useState(Boolean(initialPaperId));
   const [paper, setPaper] = useState<ResolvedPaper | null>(null);
   const [choosingPaper, setChoosingPaper] = useState(false);
   const seq = useRef(0);
@@ -179,7 +183,14 @@ export function NewProjectForm({
     }
   }
 
+  // Resolve a linked id directly: the search box only recognizes arXiv ids, not alphaXiv-exclusive ones.
+  // Mount only; the dialog is keyed by the linked id.
+  useEffect(() => {
+    if (initialPaperId) void choosePaper(initialPaperId);
+  }, []);
+
   function changePaper() {
+    setPaperFromLink(false);
     seq.current += 1;
     folderPickSeq.current += 1;
     setPaper(null);
@@ -275,7 +286,7 @@ export function NewProjectForm({
   // Debounced pre-warm; only cases whose brief will match the created project.
   // A blank project gets pre-written prompts, so there is nothing to warm.
   const prewarmName = name.trim();
-  const prewarmPaperId = mode === "paper" && paper && !paper.repoUrl ? paper.paperId : null;
+  const prewarmPaperId = mode === "paper" && paper && !paper.repoUrl && !paperFromLink ? paper.paperId : null;
   const prewarmPath =
     mode === "folder" && pathStatus?.gitState === "ready" ? (pathStatus.resolvedPath ?? null) : null;
   const prewarmReady = prewarmName !== "" && (prewarmPaperId !== null || prewarmPath !== null);

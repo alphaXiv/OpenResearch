@@ -19,7 +19,7 @@ const SCRIPT_PATH = fileURLToPath(import.meta.url)
 
 function usage() {
   return `Usage:
-  scripts/dev-slot.mjs start --db empty|copy [--worktree PATH] [--open]
+  scripts/dev-slot.mjs start --db empty|copy [--worktree PATH] [--open|--desktop]
   scripts/dev-slot.mjs status [--worktree PATH]
   scripts/dev-slot.mjs stop [--worktree PATH]
   scripts/dev-slot.mjs cleanup [--worktree PATH]
@@ -35,7 +35,7 @@ export function parseArgs(argv) {
     throw new Error(usage())
   }
 
-  const options = { command, worktree: process.cwd(), db: null, open: false }
+  const options = { command, worktree: process.cwd(), db: null, open: false, desktop: false }
   for (let index = 0; index < rest.length; index += 1) {
     const arg = rest[index]
     if (arg === '--worktree') {
@@ -50,6 +50,8 @@ export function parseArgs(argv) {
       index += 1
     } else if (arg === '--open') {
       options.open = true
+    } else if (arg === '--desktop') {
+      options.desktop = true
     } else if (arg === '--help' || arg === '-h') {
       throw new Error(usage())
     } else {
@@ -60,9 +62,11 @@ export function parseArgs(argv) {
   if (command === 'start' && options.db === null) {
     throw new Error('start requires --db empty or --db copy')
   }
-  if (command !== 'start' && (options.db !== null || options.open)) {
-    throw new Error(`--db and --open are only valid with start`)
+  if (command !== 'start' && (options.db !== null || options.open || options.desktop)) {
+    throw new Error(`--db, --open and --desktop are only valid with start`)
   }
+  if (options.open && options.desktop) throw new Error('--open and --desktop cannot be combined')
+  if (options.desktop && process.platform !== 'darwin') throw new Error('--desktop requires macOS')
   return options
 }
 
@@ -74,6 +78,17 @@ function worktreeInfo(worktreeInput) {
   const worktreePath = realpathSync(worktreeInput)
   const manifestPath = path.join(worktreePath, 'Cargo.toml')
   if (!existsSync(manifestPath)) throw new Error(`Not an openresearch-cli worktree: ${worktreePath}`)
+
+  if (existsSync(path.join(worktreePath, '.jj'))) {
+    const root = realpathSync(run('jj', ['--ignore-working-copy', '--repository', worktreePath, 'root']))
+    return {
+      worktreePath: root, manifestPath: path.join(root, 'Cargo.toml'),
+      worktreeKey: createHash('sha256').update(root).digest('hex').slice(0, 16),
+      label: path.basename(root).replaceAll(/[^a-zA-Z0-9._-]/g, '-'),
+      mainCheckout: root,
+      jj: true,
+    }
+  }
 
   const records = run('git', ['-C', worktreePath, 'worktree', 'list', '--porcelain'])
     .split(/\n\n+/)
@@ -98,7 +113,7 @@ function pathsFor(info, slot = null) {
   const base = {
     allocatorRoot,
     cargoTargetDir: path.join(allocatorRoot, 'cargo-target'),
-    launchRegistry: path.join(info.mainCheckout, '.claude', 'launch.json'),
+    launchRegistry: info.jj ? path.join(allocatorRoot, 'jj-launch.json') : path.join(info.mainCheckout, '.claude', 'launch.json'),
     lockDir: path.join(allocatorRoot, 'slot-allocator.lock'),
     lifecycleLockDir: path.join(allocatorRoot, 'lifecycle-locks', info.worktreeKey),
   }
@@ -586,14 +601,14 @@ async function waitForUi(state) {
 
 function ensureUiDependencies(info) {
   if (existsSync(path.join(info.worktreePath, 'ui', 'node_modules'))) return
-  execFileSync('pnpm', ['-C', path.join(info.worktreePath, 'ui'), 'install', '--frozen-lockfile'], { stdio: 'inherit' })
+  execFileSync('pnpm', ['-C', path.join(info.worktreePath, 'ui'), 'install', '--frozen-lockfile', '--config.strictDepBuilds=false'], { stdio: 'inherit' })
 }
 
 function saveState(slotPaths, state) {
   atomicWriteJson(slotPaths.statePath, state)
 }
 
-async function startUnlocked(info, dbMode, openBrowser) {
+async function startUnlocked(info, dbMode, openBrowser, desktop) {
   const reservation = await reserveSlot(info, dbMode)
   const { slotPaths } = reservation
   const state = reservation.state
@@ -642,7 +657,7 @@ async function startUnlocked(info, dbMode, openBrowser) {
       'dev', '--port', String(slotPaths.uiPort), '--strictPort',
     ], {
       cwd: info.worktreePath,
-      env: { ...process.env, ORX_BACKEND: `http://127.0.0.1:${slotPaths.backendPort}` },
+      env: { ...process.env, npm_config_strict_dep_builds: 'false', ORX_BACKEND: `http://127.0.0.1:${slotPaths.backendPort}` },
     }, state.uiLog)
     saveState(slotPaths, state)
   }
@@ -652,6 +667,22 @@ async function startUnlocked(info, dbMode, openBrowser) {
   }
   state.phase = 'running'
   saveState(slotPaths, state)
+
+  if (desktop) {
+    execFileSync('cargo', ['build', '--manifest-path', info.manifestPath], {
+      cwd: info.worktreePath, env: { ...process.env, ...slotEnvironment(slotPaths) }, stdio: 'inherit',
+    })
+    const contents = path.join(slotPaths.cacheDir, 'OpenResearch Dev.app', 'Contents')
+    mkdirSync(path.join(contents, 'MacOS'), { recursive: true })
+    const executable = path.join(contents, 'MacOS', 'OpenResearch Dev')
+    cpSync(path.join(slotPaths.cargoTargetDir, 'debug', 'orx'), executable)
+    writeFileSync(path.join(contents, 'Info.plist'), `<?xml version="1.0" encoding="UTF-8"?>\n<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">\n<plist version="1.0"><dict><key>CFBundleExecutable</key><string>OpenResearch Dev</string><key>CFBundleIdentifier</key><string>org.alphaxiv.openresearch.dev.slot${slotPaths.slot}</string><key>CFBundleName</key><string>OpenResearch Dev</string><key>CFBundlePackageType</key><string>APPL</string></dict></plist>\n`)
+    const child = spawn(executable, ['--dev-desktop', String(slotPaths.uiPort)], {
+      detached: true, stdio: 'ignore', env: { ...process.env, ...slotEnvironment(slotPaths) },
+    })
+    child.on('error', (error) => console.error(`Could not open the desktop app: ${error.message}`))
+    child.unref()
+  }
 
   if (openBrowser) {
     const url = `http://localhost:${slotPaths.uiPort}/`
@@ -673,10 +704,10 @@ async function startUnlocked(info, dbMode, openBrowser) {
   console.log(`  State:    ${slotPaths.statePath}`)
 }
 
-async function start(info, dbMode, openBrowser) {
+async function start(info, dbMode, openBrowser, desktop) {
   const release = await acquireLifecycleLock(info)
   try {
-    await startUnlocked(info, dbMode, openBrowser)
+    await startUnlocked(info, dbMode, openBrowser, desktop)
   } finally {
     await release()
   }
@@ -850,7 +881,7 @@ async function main() {
   }
   const options = parseArgs(process.argv.slice(2))
   const info = worktreeInfo(options.worktree)
-  if (options.command === 'start') await start(info, options.db, options.open)
+  if (options.command === 'start') await start(info, options.db, options.open, options.desktop)
   if (options.command === 'status') printStatus(info)
   if (options.command === 'stop') await stopOwnedProcesses(info)
   if (options.command === 'cleanup') await cleanup(info)

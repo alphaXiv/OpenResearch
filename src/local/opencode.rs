@@ -200,9 +200,14 @@ fn playbook_md(project: &LocalProject, state: &ProjectState) -> String {
         .to_string_lossy()
         .into_owned();
     let paper_line = project.paper_id.as_deref().map_or(String::new(), |p| {
+        let source = if crate::client::is_arxiv_id(crate::client::versionless_id(p)) {
+            format!("arXiv {p} (https://arxiv.org/abs/{p})")
+        } else {
+            format!("{p} ({})", crate::commands::paper::alphaxiv_paper_url(p))
+        };
         format!(
-            "- Paper: arXiv {p} (https://arxiv.org/abs/{p}) — the paper this project starts \
-             from; `orx paper {p}` fetches its report\n"
+            "- Paper: {source} — the paper this project starts from; `orx paper {p}` fetches \
+             its report\n"
         )
     });
     // The default compute target is read fresh on every

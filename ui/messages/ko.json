@@ -1437,5 +1437,6 @@
   "skills_detection_copy": "감지 세부 정보 복사",
   "skills_detection_accepted": "{count}개 수락됨",
   "desktop_zoom_controls": "확대/축소 컨트롤",
-  "desktop_zoom_reset": "초기화"
+  "desktop_zoom_reset": "초기화",
+  "reproduce_paper_prompt": "논문 “{title}”({source})의 결과를 재현해 주세요."
 }

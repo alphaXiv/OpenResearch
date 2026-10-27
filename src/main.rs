@@ -1005,6 +1005,19 @@ fn explain_removed_spawn_flags(mut error: clap::Error) -> clap::Error {
 // on worker threads. A `current_thread` flavor would deadlock. See commands::app.
 #[tokio::main]
 async fn main() {
+    #[cfg(all(target_os = "macos", debug_assertions))]
+    if std::env::args().nth(1).as_deref() == Some("--dev-desktop") {
+        let port = std::env::args()
+            .nth(2)
+            .and_then(|arg| arg.parse::<u16>().ok());
+        if let Some(port) = port.filter(|port| (5201..=5209).contains(port)) {
+            commands::app::run_dev(port);
+        } else {
+            eprintln!("--dev-desktop requires a dev slot UI port (5201–5209)");
+            std::process::exit(1);
+        }
+        return;
+    }
     if std::env::var_os("ORX_SSH_ASKPASS_ENDPOINT").is_some() {
         if jobs::ssh::service::askpass().await.is_err() {
             std::process::exit(1);
