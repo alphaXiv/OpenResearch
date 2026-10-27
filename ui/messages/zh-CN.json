@@ -1438,5 +1438,5 @@
   "skills_detection_accepted": "已接受 {count} 项",
   "desktop_zoom_controls": "缩放控件",
   "desktop_zoom_reset": "重置",
-  "reproduce_paper_prompt": "复现论文《{title}》(arXiv:{arxiv})。"
+  "reproduce_paper_prompt": "复现论文《{title}》({source})。"
 }

@@ -1438,5 +1438,5 @@
   "skills_detection_accepted": "{count} aceptadas",
   "desktop_zoom_controls": "Controles de zoom",
   "desktop_zoom_reset": "Restablecer",
-  "reproduce_paper_prompt": "Reproduce el artículo «{title}» (arXiv:{arxiv})."
+  "reproduce_paper_prompt": "Reproduce el artículo «{title}» ({source})."
 }

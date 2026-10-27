@@ -1438,5 +1438,5 @@
   "skills_detection_accepted": "Zaakceptowano: {count}",
   "desktop_zoom_controls": "Sterowanie powiększeniem",
   "desktop_zoom_reset": "Resetuj",
-  "reproduce_paper_prompt": "Odtwórz wyniki artykułu „{title}” (arXiv:{arxiv})."
+  "reproduce_paper_prompt": "Odtwórz wyniki artykułu „{title}” ({source})."
 }

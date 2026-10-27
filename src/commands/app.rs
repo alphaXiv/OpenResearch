@@ -326,17 +326,13 @@ fn opens_in_browser(url: &str) -> bool {
         .any(|scheme| url.starts_with(scheme))
 }
 
-/// The dashboard path an `openresearch://reproduce?…` link opens. The query
-/// passes through untouched; the page validates it.
+/// The dashboard path an `openresearch://reproduce/<paper id>` link opens; the page validates the id.
 #[cfg_attr(not(all(desktop_app, target_os = "macos")), allow(dead_code))]
-fn deep_link_path(scheme: &str, host: Option<&str>, query: Option<&str>) -> Option<String> {
-    if scheme != "openresearch" || host != Some("reproduce") {
+fn deep_link_path(scheme: &str, host: Option<&str>, path: &str) -> Option<String> {
+    if scheme != "openresearch" || host != Some("reproduce") || path.len() < 2 {
         return None;
     }
-    Some(match query {
-        Some(query) if !query.is_empty() => format!("/reproduce?{query}"),
-        _ => "/reproduce".to_string(),
-    })
+    Some(format!("/reproduce{path}"))
 }
 
 #[cfg(windows)]
@@ -1119,7 +1115,7 @@ mod imp {
             Event::Opened { urls } if matches!(quit, Quit::No) => {
                 let Some(path) = urls
                     .iter()
-                    .find_map(|url| super::deep_link_path(url.scheme(), url.host_str(), url.query()))
+                    .find_map(|url| super::deep_link_path(url.scheme(), url.host_str(), url.path()))
                 else {
                     return;
                 };
@@ -1532,21 +1528,19 @@ mod tests {
     }
 
     #[test]
-    fn reproduce_links_open_the_reproduce_page_with_their_query() {
+    fn reproduce_links_open_the_reproduce_page_for_their_paper() {
         assert_eq!(
-            deep_link_path(
-                "openresearch",
-                Some("reproduce"),
-                Some("arxiv=arXiv%3A1706.03762")
-            ),
-            Some("/reproduce?arxiv=arXiv%3A1706.03762".to_string())
+            deep_link_path("openresearch", Some("reproduce"), "/1706.03762"),
+            Some("/reproduce/1706.03762".to_string())
         );
         assert_eq!(
-            deep_link_path("openresearch", Some("reproduce"), None),
-            Some("/reproduce".to_string())
+            deep_link_path("openresearch", Some("reproduce"), "/hep-th/9901001"),
+            Some("/reproduce/hep-th/9901001".to_string())
         );
-        assert_eq!(deep_link_path("openresearch", Some("settings"), None), None);
-        assert_eq!(deep_link_path("https", Some("reproduce"), None), None);
+        assert_eq!(deep_link_path("openresearch", Some("reproduce"), "/"), None);
+        assert_eq!(deep_link_path("openresearch", Some("reproduce"), ""), None);
+        assert_eq!(deep_link_path("openresearch", Some("settings"), "/x"), None);
+        assert_eq!(deep_link_path("https", Some("reproduce"), "/x"), None);
     }
 
     const EXE: &str = "/Applications/OpenResearch.app/Contents/MacOS/OpenResearch";

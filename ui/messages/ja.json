@@ -1438,5 +1438,5 @@
   "skills_detection_accepted": "{count} 件を採用",
   "desktop_zoom_controls": "ズーム操作",
   "desktop_zoom_reset": "リセット",
-  "reproduce_paper_prompt": "論文「{title}」(arXiv:{arxiv}) を再現してください。"
+  "reproduce_paper_prompt": "論文「{title}」({source}) を再現してください。"
 }

@@ -26,7 +26,7 @@
   <!-- Regular Dock app (not an agent/menubar-only app). -->
   <key>LSUIElement</key>
   <false/>
-  <!-- openresearch://reproduce?arxiv=… opens a paper from openresearch.sh. -->
+  <!-- openresearch://reproduce/<paper id> opens a paper from openresearch.sh. -->
   <key>CFBundleURLTypes</key>
   <array>
     <dict>
