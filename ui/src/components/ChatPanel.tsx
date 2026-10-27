@@ -6708,7 +6708,7 @@ export function ChatPanel({
   }, [sidebarGrouping, railOpen, embedded, lastVisibleIndex, sidebarRows.length, flatSessions.hasNextPage, flatSessions.isFetching, flatSessions.isError, flatSessions.fetchNextPage]);
 
   const rail = (
-    <aside className="session-rail w-75 shrink-0 flex flex-col win-titlebar:pt-win-caption bg-background min-h-0 [&_.rail-body]:flex-1 [&_.rail-body]:min-h-0 [&_.rail-body]:pt-0 [&_.rail-body]:pb-0 [&_.rail-body]:ps-2 [&_.rail-body]:pe-1 border-e border-e-border overflow-visible">
+    <aside className="session-rail w-75 shrink-0 flex flex-col bg-background min-h-0 [&_.rail-body]:flex-1 [&_.rail-body]:min-h-0 [&_.rail-body]:pt-0 [&_.rail-body]:pb-0 [&_.rail-body]:ps-2 [&_.rail-body]:pe-1 border-e border-e-border overflow-visible">
       {railHeader}
       <nav className="rail-nav flex flex-col gap-0.5 p-2 shrink-0">
         <button
@@ -6918,7 +6918,7 @@ export function ChatPanel({
     return (
       <>
         {railOpen && rail}
-        <section className="chat-pane flex-1 min-w-0 flex flex-col bg-background min-h-0 win-titlebar:pt-win-caption">
+        <section className="chat-pane flex-1 min-w-0 flex flex-col bg-background min-h-0">
           {!railOpen && <div className="mac-titlebar-spacer flex h-12 mac-titlebar:h-titlebar shrink-0 items-center">{railReopen}</div>}
           {/* Keyed per view so no tab inherits the chat thread's or another tab's scroll offset. */}
           <div key={mainView} className="settings-view-scroll flex-1 min-h-0 overflow-y-auto [scrollbar-gutter:stable_both-edges]">
@@ -6933,7 +6933,7 @@ export function ChatPanel({
   return (
     <>
       {railOpen && rail}
-      <section data-side-chat={embedded || undefined} className={`chat-pane flex-1 min-w-0 flex flex-col bg-background min-h-0 ${embedded ? "" : "win-titlebar:pt-win-caption"}`}>
+      <section data-side-chat={embedded || undefined} className="chat-pane flex-1 min-w-0 flex flex-col bg-background min-h-0">
         {/* Header — session title on the left, end-pane view switchers on the
           right, fading into the chat below (sessions live in the rail). */}
         <div className={railOpen || embedded ? "contents" : "grid shrink-0 grid-cols-[2rem_minmax(0,1fr)_2rem] mac-titlebar:grid-cols-titlebar-chat items-center"}>

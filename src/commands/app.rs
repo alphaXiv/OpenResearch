@@ -992,6 +992,8 @@ mod imp {
         if let Err(error) = sync_page_zoom(&webview, zoom_percent, false) {
             eprintln!("openresearch app: could not restore page zoom: {error}");
         }
+        #[cfg(target_os = "macos")]
+        align_traffic_lights(&window, zoom_percent);
         let mut quit = Quit::No;
         // A link that opens the app arrives before its server answers.
         #[cfg(target_os = "macos")]
@@ -1069,6 +1071,8 @@ mod imp {
                     Ok(()) => {
                         if next != zoom_percent {
                             zoom_percent = next;
+                            #[cfg(target_os = "macos")]
+                            align_traffic_lights(&window, zoom_percent);
                             if let Err(error) = crate::config::set_desktop_zoom_percent(next) {
                                 eprintln!("openresearch app: could not save page zoom: {error}");
                             }
@@ -1248,6 +1252,17 @@ mod imp {
             "document.documentElement.style.setProperty('--desktop-page-zoom', '{factor}');
              if ({show_controls}) window.dispatchEvent(new CustomEvent('orx:page-zoom', {{ detail: {percent} }}));"
         ))
+    }
+
+    #[cfg(target_os = "macos")]
+    fn align_traffic_lights(window: &Window, percent: i32) {
+        use tao::dpi::LogicalPosition;
+        use tao::platform::macos::WindowExtMacOS;
+
+        let zoom = (f64::from(percent) / 100.0).max(1.0);
+        window.set_traffic_light_inset(LogicalPosition::new(16.0, 22.0 + 20.0 * (zoom - 1.0)));
+        // Tao reapplies the inset on a title change, not on request_redraw.
+        window.set_title(&window.title());
     }
 
     #[cfg(target_os = "macos")]

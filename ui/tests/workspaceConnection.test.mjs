@@ -55,6 +55,7 @@ for (const corner of [true, false]) {
       "./RemoteIcon": { RemoteIcon: "RemoteIcon" },
       "./SshConfigDialog": { SshConfigDialog: "ConfigDialog" },
       "./Wordmark": { BrandMark: "BrandMark" },
+      "./UpdateBanner": { useUpdateStatus: () => ({ status: null }) },
       "./ui": { Button: "button", IconButton: "button" },
     });
     const runtime = { kind: "local", version: "test" };
