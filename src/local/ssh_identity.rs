@@ -75,33 +75,8 @@ pub async fn local_keys() -> Vec<LocalKey> {
     let mut seen = HashSet::new();
     let mut keys = Vec::new();
 
-    // A wedged SSH_AUTH_SOCK makes `ssh-add -L` hang; the on-disk keys below
-    // are enough to advise with.
-    let agent = tokio::time::timeout(
-        Duration::from_secs(5),
-        Command::new("ssh-add")
-            .arg("-L")
-            .stdin(Stdio::null())
-            .kill_on_drop(true)
-            .output(),
-    )
-    .await;
-    if let Ok(Ok(out)) = agent {
-        if out.status.success() {
-            for line in String::from_utf8_lossy(&out.stdout).lines() {
-                if let Some(fp) = fingerprint(line.trim()) {
-                    if seen.insert(fp.clone()) {
-                        keys.push(LocalKey {
-                            fingerprint: fp,
-                            line: line.trim().to_string(),
-                            path: None,
-                        });
-                    }
-                }
-            }
-        }
-    }
-
+    // On-disk keys first, so a key the agent also holds keeps the `.pub` path
+    // `preferred_local` needs.
     if let Some(dir) = dirs::home_dir().map(|h| h.join(".ssh")) {
         if let Ok(mut entries) = tokio::fs::read_dir(&dir).await {
             while let Ok(Some(entry)) = entries.next_entry().await {
@@ -121,6 +96,33 @@ pub async fn local_keys() -> Vec<LocalKey> {
                             fingerprint: fp,
                             line: line.trim().to_string(),
                             path: Some(path.clone()),
+                        });
+                    }
+                }
+            }
+        }
+    }
+
+    // A wedged SSH_AUTH_SOCK makes `ssh-add -L` hang; the on-disk keys above
+    // are enough to advise with.
+    let agent = tokio::time::timeout(
+        Duration::from_secs(5),
+        Command::new("ssh-add")
+            .arg("-L")
+            .stdin(Stdio::null())
+            .kill_on_drop(true)
+            .output(),
+    )
+    .await;
+    if let Ok(Ok(out)) = agent {
+        if out.status.success() {
+            for line in String::from_utf8_lossy(&out.stdout).lines() {
+                if let Some(fp) = fingerprint(line.trim()) {
+                    if seen.insert(fp.clone()) {
+                        keys.push(LocalKey {
+                            fingerprint: fp,
+                            line: line.trim().to_string(),
+                            path: None,
                         });
                     }
                 }

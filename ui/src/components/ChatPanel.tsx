@@ -210,6 +210,7 @@ import { FileMentionMenu } from "./FileMentionMenu";
 import { ComposerSkillChips, MessageWithChips, skillMarginSpaces } from "./SkillChips";
 import { WorkspaceConnection } from "./WorkspaceConnection";
 import { SidebarToggle } from "./Header";
+import { AccountChip } from "./AccountChip";
 import {
   defaultSelection,
   harnessLabel,
@@ -6943,7 +6944,7 @@ export function ChatPanel({
         <div aria-hidden="true" className="pointer-events-none absolute inset-x-0 bottom-0 z-5 h-3 bg-linear-to-t from-background to-transparent" />
       </>}
       </div>
-      <WorkspaceConnection runtime={runtime} />
+      <div className="flex shrink-0 items-center gap-1 border-t border-border px-1 py-1"><AccountChip onDetails={() => onSelectMainView("openresearch")} /><WorkspaceConnection runtime={runtime} compact /></div>
     </aside>
   );
 

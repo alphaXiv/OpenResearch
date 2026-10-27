@@ -64,6 +64,33 @@ export const getOpenResearchSettingsQuery = () => queryOptions({
   staleTime: 30_000,
 });
 
+export const useOpenResearchAccount = () => useQuery({
+  queryKey: workspaceKey("getOpenResearchAccount"),
+  queryFn: ({ signal }) => api.getOpenResearchAccount(signal),
+  staleTime: 30_000,
+  retry: false,
+});
+
+/** Fails with `AlphaXivNotConnectedError` while the account has no alphaXiv connection. */
+export const useAlphaXivFolders = () => {
+  const account = useOpenResearchAccount();
+  return useQuery({
+    queryKey: workspaceKey("alphaXivFolders"),
+    queryFn: ({ signal }) => api.getAlphaXivFolders(signal),
+    enabled: !!account.data?.loggedIn,
+    retry: false,
+  });
+};
+
+export async function signOutOpenResearch() {
+  const key = workspaceKey("getOpenResearchAccount");
+  await api.logoutOpenResearch();
+  queryClient.removeQueries({ queryKey: workspaceKey("alphaXivFolders") });
+  queryClient.removeQueries({ queryKey: workspaceKey("alphaXivPapers") });
+  await queryClient.cancelQueries({ queryKey: key });
+  if (isCurrentScope(key)) queryClient.setQueryData(key, { loggedIn: false, apiUrl: null, user: null });
+}
+
 export const getEnvVarsQuery = () => queryOptions({
   queryKey: workspaceKey("getEnvVars"),
   queryFn: ({ signal }) => api.getEnvVars(signal),

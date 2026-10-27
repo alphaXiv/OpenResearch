@@ -1281,6 +1281,8 @@ export interface ComputeTargetSummary {
    * state is decidable locally.
    */
   unverified?: boolean;
+  /** OpenResearch only: the machine serving this workspace is signed in. */
+  signedIn?: boolean;
   summary: string;
   enabled: boolean;
   disabledReason?: string | null;
@@ -1327,10 +1329,42 @@ export interface LocalMachine {
 
 export const getLocalMachine = (signal?: AbortSignal) => get<LocalMachine>("/api/settings/local", signal);
 
+export interface OpenResearchAccount {
+  loggedIn: boolean;
+  apiUrl: string | null;
+  user: { id: string; email: string; firstName: string | null; lastName: string | null; alphaxivUrl: string | null } | null;
+}
+
+export class OpenResearchAccountError extends Error {
+  constructor(public kind: "offline" | "server", public apiUrl: string, public status: number | null) { super(kind); }
+}
+
+export const getOpenResearchAccount = async (signal?: AbortSignal) => {
+  const result = await get<OpenResearchAccount | { failure: { kind: "offline" | "server"; apiUrl: string; status: number | null } }>("/api/account/openresearch", signal);
+  if ("failure" in result) throw new OpenResearchAccountError(result.failure.kind, result.failure.apiUrl, result.failure.status);
+  return result;
+};
+
+export class AlphaXivNotConnectedError extends Error {}
+export interface AlphaXivFolder { id: string; name: string; parentId: string | null; paperCount: number }
+export interface AlphaXivPaper { paperGroupId: string; title: string; authors: string[]; authorCount: number; publishedAt: string; url: string }
+export interface AlphaXivPage { papers: AlphaXivPaper[]; nextCursor: string | null }
+async function alphaXivGet<T>(url: string, signal?: AbortSignal): Promise<T> {
+  const response = await fetch(url, { signal });
+  if (response.status === 401) throw new AlphaXivNotConnectedError();
+  return json<T>(response);
+}
+export const getAlphaXivFolders = (signal?: AbortSignal) => alphaXivGet<AlphaXivFolder[]>("/api/alphaxiv/folders", signal);
+export const getAlphaXivPapers = (folder: string, cursor: string | null, signal?: AbortSignal) => {
+  const params = new URLSearchParams({ folder });
+  if (cursor) params.set("cursor", cursor);
+  return alphaXivGet<AlphaXivPage>(`/api/alphaxiv/papers?${params}`, signal);
+};
+
 export interface OpenResearchSettings {
   loggedIn: boolean;
   apiUrl: string | null;
-  orgs: string[];
+  organizations?: { id: string; name: string; createdBy: string }[] | null;
   /**
    * Whether a registered key's private half is on THIS machine — `matched` is
    * the only state that can actually reach a box. Optional: an older `orx`
@@ -1344,6 +1378,7 @@ export interface OpenResearchSettings {
 
 export const getOpenResearchSettings = (signal?: AbortSignal) =>
   get<OpenResearchSettings>("/api/settings/openresearch", signal);
+export const logoutOpenResearch = () => post<{ ok: boolean }>("/api/settings/openresearch/logout");
 
 /** One node of the artifacts tree: a file, or a directory with children. */
 export interface ArtifactEntry {

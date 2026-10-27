@@ -1,9 +1,12 @@
+import { confirmOpenResearchSignOut } from "./confirmOpenResearchSignOut";
 import { cn } from "./ui/cn";
 import { showConfirmDialog, showCustomDialog, type DialogContentProps } from "../dialog";
 import { DialogContent, DialogTitle } from "./ui";
 import { formatAcpCommand } from "../acp";
 import { TARGET_LABELS } from "../computeTargets";
 import { AcpAuthDialog } from "./AcpAuthDialog";
+import { accountErrorMessage, OpenResearchAccount } from "./OpenResearchAccount";
+import { LibraryView } from "./LibraryView";
 import { HarnessSetupDialog } from "./HarnessSetupDialog";
 import { AcpHarnessDialog } from "./AcpHarnessDialog";
 import { AddHarnessDialog, canConfigureHarness, sortHarnesses } from "./AddHarnessDialog";
@@ -27,6 +30,9 @@ import {
   getSlurmSettingsQuery,
   getRaySettingsQuery,
   getOpenResearchSettingsQuery,
+  useOpenResearchAccount,
+  useAlphaXivFolders,
+  signOutOpenResearch,
   getLocalMachineQuery,
   getComputeSettingsQuery,
   getTinkerSettingsQuery,
@@ -41,6 +47,7 @@ import {
 import { getOverleafSettingsQuery } from "../queries/files";
 import { githubAccountQuery, githubOrganizationsQuery, listProjectsQuery, listRunsQuery, repoAccessQuery } from "../queries/projects";
 import {
+  BookOpen,
   ArrowLeft,
   ArrowRight,
   ChevronDown,
@@ -124,6 +131,7 @@ import {
   setReleaseChannel,
   type InstallChannel,
   type InstalledCli,
+  AlphaXivNotConnectedError,
 } from "../api";
 import { onDataDirMove } from "../events";
 import { releaseNotesUrl, useRestartApp, useUpdateStatus } from "./UpdateBanner";
@@ -1530,13 +1538,24 @@ function localMachineSummary(hw: LocalMachine) {
 
 function OpenResearchSection({ remote }: { remote: boolean }) {
   const settingsQuery = useQuery(getOpenResearchSettingsQuery());
+  const accountQuery = useOpenResearchAccount();
+  const account = accountQuery.data;
+  const folders = useAlphaXivFolders();
+  const alphaXivStatus = folders.isSuccess ? m.library_connected() : folders.error instanceof AlphaXivNotConnectedError ? m.library_not_connected() : null;
+  const [editProfileBefore, editProfileAfter] = m.settings_openresearch_edit_profile({ settings: "\0" }).split("\0");
+  const accountError = accountErrorMessage(accountQuery.error);
   const s = settingsQuery.data;
+  const signedOut = !remote && account && !account.loggedIn;
+  const expired = signedOut && s?.loggedIn;
   const loadError = settingsQuery.error?.message;
   const busy = settingsQuery.isFetching;
   const [loginAttempt, setLoginAttempt] = useState(0);
-  const [terminalLogin, setTerminalLogin] = useState(true);
   const [signingIn, setSigningIn] = useState(false);
-  const refresh = () => settingsQuery.refetch();
+  const refresh = () => { void accountQuery.refetch(); return settingsQuery.refetch(); };
+  const logout = useMutation({
+    mutationFn: signOutOpenResearch,
+    onSuccess: () => { void refresh(); },
+  });
 
   return (
     <>
@@ -1549,7 +1568,9 @@ function OpenResearchSection({ remote }: { remote: boolean }) {
             <span className="v">
               {(!s && busy) || signingIn ? (
                 <Badge className="gap-1.5" role="status"><Spinner />{signingIn ? m.settings_openresearch_setting_up() : m.common_checking()}</Badge>
-              ) : loadError ? (
+              ) : signedOut ? (
+                <Badge variant="warning">{m.settings_page_not_signed_in()}</Badge>
+              ) : loadError || s?.error || accountQuery.isError ? (
                 <Badge variant="warning">{m.settings_page_unable_to_verify()}</Badge>
               ) : !s ? null : !s.loggedIn ? (
                 <Badge variant="warning">{m.settings_page_not_signed_in()}</Badge>
@@ -1561,11 +1582,27 @@ function OpenResearchSection({ remote }: { remote: boolean }) {
                 <Badge variant="warning">{m.settings_page_not_configured()}</Badge>
               )}
             </span>
-            <span className="k">{m.settings_page_orgs()}</span>
-            <span className="v">{s?.loggedIn && s.orgs.length > 0 ? s.orgs.join(", ") : "—"}</span>
+            {s?.loggedIn && !signedOut && <>
+              {!accountQuery.isError && <>
+              <span className="k self-start">{account?.user?.alphaxivUrl ? m.settings_openresearch_alphaxiv_account() : m.settings_page_account()}</span>
+              <span className="v">
+                {accountQuery.isLoading ? m.common_checking() : <><OpenResearchAccount user={account?.user ?? null} />{alphaXivStatus && <span className="basis-full text-sm text-subtext">{alphaXivStatus}</span>}{account?.user?.alphaxivUrl && <span className="basis-full text-sm text-subtext">{editProfileBefore}<a className="text-text underline" href={`${account.user.alphaxivUrl}/settings`} target="_blank" rel="noreferrer">{m.settings_openresearch_alphaxiv_settings()}</a>{editProfileAfter}</span>}</>}
+              </span>
+              </>}
+              <span className="k self-start">{m.settings_openresearch_organizations()}</span>
+              <div className="v">
+                {s.organizations == null ? "—" : s.organizations.length === 0 ? m.settings_openresearch_no_orgs() : <ul className="m-0 list-none p-0 space-y-2">
+                  {s.organizations.map((org) => <li key={org.id} className="min-w-0">
+                    <div dir="auto">{org.name}{account?.user?.id === org.createdBy && <span className="text-sm text-subtext"> · {m.settings_openresearch_owner()}</span>}</div>
+                    {s.organizations && s.organizations.length > 1 && <code className="text-sm text-subtext break-all">{org.id}</code>}
+                  </li>)}
+                </ul>}
+                {s.organizations && s.organizations.length > 0 && <p className="basis-full m-0 text-sm text-subtext">{s.organizations.length === 1 ? m.settings_openresearch_one_org() : m.settings_openresearch_choose_org()}</p>}
+              </div>
+            </>}
             <span className="k">{m.settings_page_ssh_key()}</span>
             <span className="v">
-              {!s?.loggedIn ? "—" : s.sshKeyStatus === "matched" ? (
+              {!s?.loggedIn || signedOut ? "—" : s.sshKeyStatus === "matched" ? (
                 <Badge variant="success">{m.settings_page_on_this_computer()}</Badge>
               ) : s.sshKeyStatus === "no_local_match" ? (
                 <Badge variant="warning">{m.settings_page_not_on_this_computer()}</Badge>
@@ -1584,7 +1621,6 @@ function OpenResearchSection({ remote }: { remote: boolean }) {
           {!remote && loginAttempt > 0 && (
             <OpenResearchSetupTerminal
               key={loginAttempt}
-              login={terminalLogin}
               onComplete={() => {
                 setSigningIn(false);
                 setLoginAttempt(0);
@@ -1620,20 +1656,31 @@ function OpenResearchSection({ remote }: { remote: boolean }) {
                 <code>ssh-keygen -t ed25519</code>.
               </p>
             ))}
-          {!busy && (loadError || s?.error) && <p dir="auto" className="mt-4 mb-0 text-sm text-accent-red whitespace-pre-wrap break-words">{loadError || s?.error}</p>}
+          {!busy && (expired || accountError || loadError || s?.error) && <p role="status" dir="auto" className="mt-4 mb-0 text-sm text-accent-red whitespace-pre-wrap break-words">{expired ? m.account_sign_in_expired() : accountError || loadError || s?.error}</p>}
         </>
       )}
-      <div className="mt-4 flex justify-end gap-2">
+      <div className="mt-4 flex flex-wrap justify-end gap-2">
+        {(account?.apiUrl || s?.apiUrl) && <ButtonLink href={`${(account?.apiUrl || s?.apiUrl || "").replace(/\/$/, "")}/auth/login`} target="_blank" rel="noreferrer">{m.settings_openresearch_dashboard()} <ExternalLink size={14} /></ButtonLink>}
+        {!remote && !signedOut && (account?.loggedIn || s?.loggedIn) && <Button disabled={busy || signingIn || logout.isPending} onClick={() => confirmOpenResearchSignOut(() => logout.mutateAsync().then(() => {}))}>{m.settings_openresearch_sign_out()}</Button>}
+        {signingIn && (
+          <Button onClick={() => {
+            setLoginAttempt(0);
+            setSigningIn(false);
+            void refresh();
+          }}>
+            {m.settings_page_cancel()}
+          </Button>
+        )}
         <Button onClick={() => void refresh()} disabled={busy || signingIn}>
           <RefreshCw size={14} /> {busy ? m.common_checking() : m.settings_check_again()}
         </Button>
-        {!remote && s && (!s.loggedIn || s.sshKeyStatus !== "matched") && (
+        {!remote && s && account && (!account.loggedIn || s.sshKeyStatus !== "matched") && (
           <Button variant="primary" disabled={busy || signingIn} onClick={() => {
-            setTerminalLogin(!s.loggedIn);
+            if (!account?.loggedIn) { window.dispatchEvent(new Event("openresearch-sign-in")); return; }
             setSigningIn(true);
             setLoginAttempt((attempt) => attempt + 1);
           }}>
-            {signingIn ? <Spinner /> : <SquareTerminal size={14} />} {s.loggedIn ? m.settings_setup_ssh_key() : m.settings_sign_in()}
+            {signingIn ? <Spinner /> : <SquareTerminal size={14} />} {account?.loggedIn ? m.settings_setup_ssh_key() : m.account_sign_in_alphaxiv()}
           </Button>
         )}
       </div>
@@ -1900,7 +1947,7 @@ function TargetTile({
   const summaryId = `compute-${target.id}-summary`;
   const setupLabel = target.unverified
     ? m.settings_check_setup()
-    : target.id === "openresearch"
+    : target.id === "openresearch" && !target.signedIn
       ? m.settings_sign_in()
       : target.id === "ray"
         ? m.settings_connect()
@@ -3983,11 +4030,12 @@ const SETTINGS_SECTIONS: Tab[] = ["projects", "harnesses", "storage"];
 
 /** Primary rail entries. Configuration sections share the Settings entry. */
 export const SETTINGS_NAV: SettingsNavItem[] = [
+  { id: "library", label: m.library_title, icon: <BookOpen size={16} />, activeTabs: ["library"] },
   {
     id: "compute",
     label: m.settings_page_compute,
     icon: <Cpu size={16} />,
-    activeTabs: ["compute", "instances"],
+    activeTabs: ["compute", "openresearch", "instances"],
   },
   { id: "environment", label: m.settings_page_environment, icon: <SquareTerminal size={16} />, activeTabs: ["environment"] },
   {
@@ -4073,6 +4121,7 @@ export function SettingsView({
           </div>
         </>
       )}
+      {tab === "library" && <LibraryView />}
       {tab === "compute" && (
         <ComputeTab
           project={project}
@@ -4080,6 +4129,13 @@ export function SettingsView({
           onOpenEnvironment={() => onSelectTab("environment")}
           remote={remote}
         />
+      )}
+      {tab === "openresearch" && (
+        <>
+          <button type="button" className="settings-back mb-6 inline-flex items-center gap-2 text-sm font-medium text-subtext hover:text-text" onClick={() => onSelectTab("compute")}><ArrowLeft size={16} /> {m.settings_page_back_to_compute()}</button>
+          <h1>OpenResearch</h1>
+          <div className="mt-6 font-sans text-base text-text"><OpenResearchSection remote={remote} /></div>
+        </>
       )}
       {tab === "instances" && (
         <InstanceHistory projectId={project?.id} onBack={() => onSelectTab("compute")} />

@@ -705,7 +705,12 @@ async fn connect(args: &CheckArgs, persist: Option<u64>) -> Result<()> {
             .await?;
         }
         Backend::Openresearch => {
-            super::login::run(crate::LoginArgs { api_url: None }).await?;
+            super::login::run(crate::LoginArgs {
+                alphaxiv: false,
+                api_url: None,
+                non_interactive: false,
+            })
+            .await?;
             super::ssh_key::add(None).await?;
         }
         Backend::Local | Backend::Ray | Backend::K8s => {}

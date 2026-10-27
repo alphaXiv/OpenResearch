@@ -19,9 +19,11 @@ import { Button, MenuItem, showAlert, Tooltip } from "./ui";
 export function RemoteStatus({
   runtime,
   corner = false,
+  compact = false,
 }: {
   runtime: Extract<RuntimeInfo, { kind: "ssh" }>;
   corner?: boolean;
+  compact?: boolean;
 }) {
   const [disconnecting, setDisconnecting] = useState(false);
   const [loadingStopPreview, setLoadingStopPreview] = useState(false);
@@ -37,7 +39,7 @@ export function RemoteStatus({
             className={
               corner
                 ? "fixed bottom-0 start-0 z-50"
-                : "relative shrink-0 rounded-b-lg border-t border-border bg-background"
+                : compact ? "relative shrink-0" : "relative shrink-0 rounded-b-lg border-t border-border bg-background"
             }
           >
             <Menu.Portal>
@@ -120,6 +122,10 @@ export function RemoteStatus({
                   {m.remote_ssh_host({ host: ltr(runtime.session.host) })}
                 </span>
               </Menu.Trigger>
+            ) : compact ? (
+              <Tooltip interactive content={m.account_local_to_app()}><Menu.Trigger className="relative flex size-9 shrink-0 items-center justify-center rounded-md text-subtext hover:bg-surface focus-visible:outline-2 focus-visible:outline-focus" aria-label={`${m.remote_ssh_host({ host: ltr(runtime.session.host) })} · ${m.account_local_to_app()}`}>
+                <RemoteIcon size={16} /><span aria-hidden="true" className="absolute end-1 bottom-1 size-2 rounded-full bg-accent-blue" />
+              </Menu.Trigger></Tooltip>
             ) : (
               <Menu.Trigger
                 className="flex w-full items-center gap-1.5 rounded-b-lg py-2 ps-1 pe-2.5 hover:bg-surface active:bg-highlight focus-visible:outline-2 focus-visible:outline-solid focus-visible:outline-focus focus-visible:-outline-offset-2"

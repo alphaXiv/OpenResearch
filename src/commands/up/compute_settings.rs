@@ -1257,6 +1257,7 @@ pub(super) fn compute_settings_json(ssh: SshReadiness) -> Value {
             // them has to be on this machine too.
             "configured": or_logged_in && ssh == SshReadiness::Ready,
             "unverified": or_logged_in && matches!(ssh, SshReadiness::Unverified { .. }),
+            "signedIn": or_logged_in,
             "summary": openresearch_summary(or_logged_in, &ssh),
         },
     ]);
@@ -1352,16 +1353,17 @@ pub(super) async fn openresearch_settings() -> ApiResult {
             "loggedIn": false,
             "apiUrl": null,
             "orgs": [],
+            "organizations": null,
             "sshKeyStatus": "unknown",
             "error": null,
         })));
     };
     let mut error: Option<String> = None;
     let orgs = match crate::client::list_orgs(&creds).await {
-        Ok(o) => o.orgs.into_iter().map(|o| o.name).collect::<Vec<_>>(),
+        Ok(o) => Some(o.orgs),
         Err(e) => {
             error = Some(e.to_string());
-            Vec::new()
+            None
         }
     };
     // "Registered" alone is a misleading green: a key registered from another
@@ -1394,11 +1396,51 @@ pub(super) async fn openresearch_settings() -> ApiResult {
     Ok(Json(json!({
         "loggedIn": true,
         "apiUrl": creds.api_url,
-        "orgs": orgs,
+        "orgs": orgs.as_ref().map(|orgs| orgs.iter().map(|org| &org.name).collect::<Vec<_>>()).unwrap_or_default(),
+        "organizations": orgs,
         "sshKeyStatus": ssh_key_status,
         "sshKeyPath": ssh_key_path,
         "error": error,
     })))
+}
+
+pub(crate) async fn openresearch_account() -> ApiResult {
+    account_response(crate::config::load_credentials().await?).await
+}
+
+async fn account_response(creds: Option<crate::config::Credentials>) -> ApiResult {
+    let Some(creds) = creds else {
+        return Ok(Json(
+            json!({ "loggedIn": false, "apiUrl": null, "user": null }),
+        ));
+    };
+    match crate::client::current_user(&creds).await {
+        Ok(response) => Ok(Json(
+            json!({ "loggedIn": true, "apiUrl": creds.api_url, "user": response.user }),
+        )),
+        Err(error) if error.is::<crate::client::Unauthorized>() => Ok(Json(
+            json!({ "loggedIn": false, "apiUrl": null, "user": null }),
+        )),
+        Err(error) => {
+            let kind = if error.is::<crate::client::ApiTransportError>() {
+                "offline"
+            } else {
+                "server"
+            };
+            let status = error
+                .downcast_ref::<crate::client::ApiResponseError>()
+                .map(|e| e.0);
+            Ok(Json(
+                json!({ "failure": { "kind": kind, "apiUrl": creds.api_url, "status": status } }),
+            ))
+        }
+    }
+}
+
+pub(crate) async fn openresearch_logout() -> ApiResult {
+    crate::alphaxiv::sign_out().await?;
+    crate::config::clear_credentials().await?;
+    Ok(Json(json!({ "ok": true })))
 }
 
 fn cli_result(result: ApiResult) -> Result<Value> {
@@ -1892,5 +1934,47 @@ Host b
         assert_eq!(hosts.len(), SSH_INCLUDE_MAX_DEPTH - 1);
         assert_eq!(hosts[0]["host"], "depth-0");
         assert_eq!(hosts.last().unwrap()["host"], "depth-14");
+    }
+}
+
+#[cfg(test)]
+mod account_tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn account_route_distinguishes_identity_rejection_and_outage() {
+        assert_eq!(account_response(None).await.unwrap().0["loggedIn"], false);
+        let upstream = Router::new().route("/users/me", get(|headers: HeaderMap| async move {
+            match headers.get(header::AUTHORIZATION).and_then(|h| h.to_str().ok()) {
+                Some("Bearer valid") => (StatusCode::OK, Json(json!({"user": {
+                    "id": "u", "email": "a@example.org", "firstName": "A", "lastName": null, "alphaxivUrl": null
+                }}))),
+                Some("Bearer error") => (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({}))),
+                _ => (StatusCode::UNAUTHORIZED, Json(json!({}))),
+            }
+        }));
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let api_url = format!("http://{}", listener.local_addr().unwrap());
+        let server = tokio::spawn(async move { axum::serve(listener, upstream).await.unwrap() });
+        let creds = |token: &str| crate::config::Credentials {
+            api_url: api_url.clone(),
+            token: token.into(),
+        };
+        let linked = account_response(Some(creds("valid"))).await.unwrap().0;
+        assert_eq!(linked["user"]["email"], "a@example.org");
+        assert!(linked["user"]["alphaxivUrl"].is_null());
+        assert_eq!(
+            account_response(Some(creds("invalid"))).await.unwrap().0["loggedIn"],
+            false
+        );
+        let failure = account_response(Some(creds("error"))).await.unwrap().0;
+        assert_eq!(failure["failure"]["kind"], "server");
+        assert_eq!(failure["failure"]["status"], 500);
+        server.abort();
+        let _ = server.await;
+        assert_eq!(
+            account_response(Some(creds("valid"))).await.unwrap().0["failure"]["kind"],
+            "offline"
+        );
     }
 }

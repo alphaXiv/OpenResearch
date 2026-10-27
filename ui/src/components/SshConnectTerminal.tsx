@@ -90,14 +90,13 @@ export function SshConnectTerminal({
   />;
 }
 
-export function OpenResearchSetupTerminal({ login, onComplete, onError }: {
-  login: boolean;
+export function OpenResearchSetupTerminal({ onComplete, onError }: {
   onComplete: () => void;
   onError: (error: string) => void;
 }) {
   return <CommandTerminal
-    path={login ? "/api/settings/openresearch/login" : "/api/settings/openresearch/ssh-key"}
-    label={login ? "orx login" : "orx ssh-key add"}
+    path="/api/settings/openresearch/ssh-key"
+    label="orx ssh-key add"
     heightClass="h-96"
     onError={onError}
     onComplete={(value) => {

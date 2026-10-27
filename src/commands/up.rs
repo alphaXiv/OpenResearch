@@ -730,7 +730,15 @@ fn router(state: AppState, remote_auth: Option<RemoteAuth>) -> Router {
         .route("/api/settings/compute/default", post(set_compute_default))
         .route("/api/settings/local", get(local_machine_settings))
         .route("/api/settings/openresearch", get(openresearch_settings))
+        .route("/api/account/openresearch", get(openresearch_account))
+        .route(
+            "/api/settings/openresearch/logout",
+            post(openresearch_logout),
+        )
         .route("/api/settings/openresearch/login", get(openresearch_login))
+        .route("/api/settings/alphaxiv/login", get(alphaxiv_login))
+        .route("/api/alphaxiv/folders", get(alphaxiv_folders))
+        .route("/api/alphaxiv/papers", get(alphaxiv_papers))
         .route("/api/settings/commands/run", get(run_settings_command))
         .route(
             "/api/settings/openresearch/ssh-key",
@@ -906,6 +914,10 @@ fn remote_route_forbidden(path: &str) -> bool {
             | "/api/settings/data-dir/move"
             | "/api/settings/openresearch/ssh-key"
             | "/api/settings/openresearch/login"
+            | "/api/settings/openresearch/logout"
+            | "/api/settings/alphaxiv/login"
+            | "/api/alphaxiv/folders"
+            | "/api/alphaxiv/papers"
             | "/api/settings/commands/run"
             | "/api/harnesses/setup"
     ) || path.starts_with("/api/remote/")
@@ -936,7 +948,8 @@ fn is_remote_callback_route(method: &Method, path: &str) -> bool {
 // --- error plumbing -------------------------------------------------------
 
 /// JSON error responses: `{"error": "..."}` with an explicit status.
-struct ApiError(StatusCode, String);
+#[derive(Debug)]
+pub(crate) struct ApiError(StatusCode, String);
 
 impl IntoResponse for ApiError {
     fn into_response(self) -> Response {
@@ -6780,8 +6793,48 @@ fn session_checkout_root(
     }
 }
 
-async fn openresearch_login(headers: HeaderMap, ws: WebSocketUpgrade) -> Response {
-    openresearch_terminal(headers, ws, vec!["login".into()]).await
+pub(crate) async fn openresearch_login(headers: HeaderMap, ws: WebSocketUpgrade) -> Response {
+    openresearch_terminal(
+        headers,
+        ws,
+        vec!["login".into(), "--non-interactive".into()],
+    )
+    .await
+}
+
+pub(crate) async fn alphaxiv_login(headers: HeaderMap, ws: WebSocketUpgrade) -> Response {
+    openresearch_terminal(headers, ws, vec!["login".into(), "--alphaxiv".into()]).await
+}
+
+fn alphaxiv_error(error: crate::error::Error) -> ApiError {
+    let status = if error.is::<crate::alphaxiv::NotConnected>() {
+        StatusCode::UNAUTHORIZED
+    } else if let Some(failure) = error.downcast_ref::<crate::alphaxiv::HttpFailure>() {
+        failure.status
+    } else {
+        StatusCode::BAD_GATEWAY
+    };
+    ApiError(status, error.to_string())
+}
+
+pub(crate) async fn alphaxiv_folders() -> ApiResult {
+    crate::alphaxiv::folders()
+        .await
+        .map(Json)
+        .map_err(alphaxiv_error)
+}
+
+#[derive(Deserialize)]
+pub(crate) struct AlphaXivPapersQuery {
+    folder: String,
+    cursor: Option<String>,
+}
+
+pub(crate) async fn alphaxiv_papers(Query(query): Query<AlphaXivPapersQuery>) -> ApiResult {
+    crate::alphaxiv::papers(&query.folder, query.cursor.as_deref())
+        .await
+        .map(Json)
+        .map_err(alphaxiv_error)
 }
 
 async fn openresearch_ssh_key(headers: HeaderMap, ws: WebSocketUpgrade) -> Response {
@@ -6963,19 +7016,14 @@ async fn command_terminal(
         let Some(status) = relay_pty(&mut socket, session, None, &mut size, None).await else {
             return;
         };
-        let result = async {
-            let status = status.map_err(|error| anyhow!(error))?;
-            anyhow::ensure!(
-                status.success(),
-                "Command exited with code {}",
-                status.exit_code()
-            );
-            Ok::<_, anyhow::Error>(())
-        }
-        .await;
-        let message = match result {
-            Ok(()) => json!({ "type": "complete" }),
-            Err(error) => json!({ "type": "error", "error": error.to_string() }),
+        let message = match status {
+            Ok(status) if status.success() => json!({ "type": "complete" }),
+            Ok(status) => json!({
+                "type": "error",
+                "error": format!("Command exited with code {}", status.exit_code()),
+                "exitCode": status.exit_code(),
+            }),
+            Err(error) => json!({ "type": "error", "error": error }),
         };
         if socket
             .send(Message::Text(message.to_string().into()))
@@ -9680,6 +9728,7 @@ mod tests {
             "/api/settings/data-dir",
             "/api/settings/data-dir/move",
             "/api/settings/openresearch/login",
+            "/api/settings/openresearch/logout",
             "/api/settings/openresearch/ssh-key",
             "/api/settings/commands/run",
             "/api/remote/sessions",

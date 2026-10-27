@@ -92,6 +92,21 @@ pub struct ListCpuCatalog {
     pub offers: Vec<CpuOffer>,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CurrentUser {
+    pub id: String,
+    pub email: String,
+    pub first_name: Option<String>,
+    pub last_name: Option<String>,
+    pub alphaxiv_url: Option<String>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct CurrentUserResponse {
+    pub user: CurrentUser,
+}
+
 // Thin envelope DTOs for the list endpoints.
 
 #[derive(Debug, Clone, Deserialize)]
@@ -239,7 +254,7 @@ pub struct SshKeyEnvelope {
 /// part — `invalid peer certificate: UnknownIssuer`, a DNS failure, a refused
 /// connection — only appears in the chain. Flatten it into the message so the
 /// user sees it without a debug build.
-fn transport_error(base: &str, err: reqwest::Error) -> crate::error::Error {
+pub(crate) fn transport_error(base: &str, err: reqwest::Error) -> crate::error::Error {
     let mut detail = err.to_string();
     let mut source: Option<&(dyn std::error::Error + 'static)> = std::error::Error::source(&err);
     while let Some(cause) = source {
@@ -253,10 +268,56 @@ fn transport_error(base: &str, err: reqwest::Error) -> crate::error::Error {
     anyhow!("Could not reach alphaXiv at {}: {}", base, detail)
 }
 
-fn http() -> &'static Client {
+pub(crate) fn http() -> &'static Client {
     static CLIENT: OnceLock<Client> = OnceLock::new();
     CLIENT.get_or_init(|| crate::net::remote_client().build().expect("http client"))
 }
+
+#[derive(Debug)]
+pub struct Unauthorized;
+
+#[derive(Debug)]
+pub struct ApiTransportError(pub String);
+
+impl std::fmt::Display for ApiTransportError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
+impl std::error::Error for ApiTransportError {}
+
+#[derive(Debug)]
+pub struct ApiResponseError(pub u16, pub String);
+
+impl std::fmt::Display for ApiResponseError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.1)
+    }
+}
+
+impl std::error::Error for ApiResponseError {}
+
+impl std::fmt::Display for Unauthorized {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("Unauthorized — your token is invalid or revoked. Run `orx login` again.")
+    }
+}
+
+impl std::error::Error for Unauthorized {}
+
+/// OpenResearch answered 503 to an alphaXiv sign-in: it couldn't fetch
+/// alphaXiv's signing keys, so a retry in a moment may pass.
+#[derive(Debug)]
+pub struct AlphaXivUnavailable;
+
+impl std::fmt::Display for AlphaXivUnavailable {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("OpenResearch couldn't reach alphaXiv. Try again in a moment.")
+    }
+}
+
+impl std::error::Error for AlphaXivUnavailable {}
 
 /// Sends a request and returns the response after applying the shared error
 /// semantics (network failure, 401, other non-2xx). Body decoding is left to
@@ -279,19 +340,17 @@ async fn send_request(
     let res = match req.send().await {
         Ok(res) => res,
         Err(err) => {
-            return Err(anyhow!(
+            return Err(ApiTransportError(format!(
                 "Could not reach the API at {}: {}",
-                creds.api_url,
-                err
-            ));
+                creds.api_url, err
+            ))
+            .into());
         }
     };
 
     let status = res.status();
     if status.as_u16() == 401 {
-        return Err(anyhow!(
-            "Unauthorized — your token is invalid or revoked. Run `orx login` again."
-        ));
+        return Err(Unauthorized.into());
     }
     if !status.is_success() {
         let reason = status.canonical_reason().unwrap_or("");
@@ -301,13 +360,17 @@ async fn send_request(
         } else {
             format!(": {}", detail)
         };
-        return Err(anyhow!(
-            "Request to {} failed ({} {}){}",
-            path,
+        return Err(ApiResponseError(
             status.as_u16(),
-            reason,
-            suffix
-        ));
+            format!(
+                "Request to {} failed ({} {}){}",
+                path,
+                status.as_u16(),
+                reason,
+                suffix
+            ),
+        )
+        .into());
     }
 
     Ok(res)
@@ -373,6 +436,54 @@ async fn api_post<T: DeserializeOwned>(creds: &Credentials, path: &str, body: Va
 // ---------------------------------------------------------------------------
 // Endpoint fns (one per TS export, same path/method/shape)
 // ---------------------------------------------------------------------------
+
+pub async fn current_user(creds: &Credentials) -> Result<CurrentUserResponse> {
+    api_get(creds, "/users/me").await
+}
+
+/// A personal access token for the account behind an alphaXiv id_token issued
+/// to the desktop app — `POST /auth/alphaxiv/desktop`.
+pub async fn alphaxiv_desktop_token(api_url: &str, id_token: &str) -> Result<String> {
+    #[derive(Deserialize)]
+    struct Issued {
+        token: String,
+    }
+
+    let response = http()
+        .post(format!("{api_url}/auth/alphaxiv/desktop"))
+        .json(&serde_json::json!({ "idToken": id_token }))
+        .send()
+        .await
+        .map_err(|err| ApiTransportError(format!("Could not reach the API at {api_url}: {err}")))?;
+    match response.status().as_u16() {
+        200 => Ok(response.json::<Issued>().await?.token),
+        401 => Err(anyhow!(
+            "OpenResearch couldn't verify the alphaXiv sign-in. Try again."
+        )),
+        409 => Err(anyhow!(
+            "OpenResearch couldn't sign in with this alphaXiv account."
+        )),
+        503 => Err(AlphaXivUnavailable.into()),
+        status => Err(anyhow!(
+            "Request to /auth/alphaxiv/desktop failed ({status})."
+        )),
+    }
+}
+
+/// Links the alphaXiv account behind an id_token issued to the desktop app to
+/// the signed-in account — `POST /auth/alphaxiv/link`.
+pub async fn link_alphaxiv(creds: &Credentials, id_token: &str) -> Result<()> {
+    let body = serde_json::json!({ "idToken": id_token });
+    request_no_content(creds, Method::POST, "/auth/alphaxiv/link", Some(body))
+        .await
+        .map_err(|error| match error.downcast_ref::<ApiResponseError>() {
+            Some(ApiResponseError(409, _)) => anyhow!(
+                "This alphaXiv account or your OpenResearch account is already linked to another account."
+            ),
+            Some(ApiResponseError(503, _)) => AlphaXivUnavailable.into(),
+            _ => error,
+        })
+}
 
 pub async fn list_orgs(creds: &Credentials) -> Result<ListOrgs> {
     api_get(creds, "/orgs").await
@@ -1713,6 +1824,17 @@ mod tests {
         PubmedDiscoveryOptions,
     };
     use serde_json::json;
+
+    #[test]
+    fn current_user_decodes_linked_and_legacy_accounts() {
+        for alphaxiv_url in [Some("https://www.alphaxiv.org"), None] {
+            let response: super::CurrentUserResponse = serde_json::from_value(json!({
+                "user": { "id": "user-1", "email": "person@example.org", "firstName": "A", "lastName": null, "alphaxivUrl": alphaxiv_url }
+            })).unwrap();
+            assert_eq!(response.user.email, "person@example.org");
+            assert_eq!(response.user.alphaxiv_url.as_deref(), alphaxiv_url);
+        }
+    }
 
     #[test]
     fn pubmed_discovery_url_fills_the_open_date_bound_and_widens_date_priorities() {

@@ -252,16 +252,18 @@ pub async fn list() -> Result<()> {
 
 /// Post-login check: tell the user now, while they're at the keyboard, if the
 /// boxes they provision won't accept this computer. Consent-gated and
-/// best-effort, mirroring `install_skills::offer_install_after_login`.
-pub async fn verify_after_login(creds: &Credentials) {
+/// best-effort, mirroring `install_skills::offer_install_after_login`; without
+/// `ask` (the app's sign-in, which can't prompt) it takes the default yes.
+pub async fn verify_after_login(creds: &Credentials, ask: bool) {
     use std::io::IsTerminal;
 
     // Before any network work: a piped login must not block on a hung api. All
     // three streams, since the prompt reads stdin, writes stdout, and reports
     // failures on stderr — redirecting any of them means nobody sees this.
-    if !std::io::stdin().is_terminal()
-        || !std::io::stdout().is_terminal()
-        || !std::io::stderr().is_terminal()
+    if ask
+        && (!std::io::stdin().is_terminal()
+            || !std::io::stdout().is_terminal()
+            || !std::io::stderr().is_terminal())
     {
         return;
     }
@@ -278,18 +280,20 @@ pub async fn verify_after_login(creds: &Credentials) {
 
     println!("\n{}", ssh_identity::diagnosis(&registered));
 
-    println!("Registering this computer's public SSH key lets it connect to OpenResearch");
-    println!("compute instances in your organizations, including ones already running.");
-    println!("We'll use {DEFAULT_KEY}, creating a key pair if needed.");
-    print!("Register this computer's public key with your OpenResearch account? [Y/n] ");
-    let _ = std::io::Write::flush(&mut std::io::stdout());
-    let mut answer = String::new();
-    if std::io::stdin().read_line(&mut answer).unwrap_or(0) == 0 {
-        return;
-    }
-    if !matches!(answer.trim().to_lowercase().as_str(), "" | "y" | "yes") {
-        println!("Skipped. You can set it up any time with:\n  orx ssh-key add");
-        return;
+    if ask {
+        println!("Registering this computer's public SSH key lets it connect to OpenResearch");
+        println!("compute instances in your organizations, including ones already running.");
+        println!("We'll use {DEFAULT_KEY}, creating a key pair if needed.");
+        print!("Register this computer's public key with your OpenResearch account? [Y/n] ");
+        let _ = std::io::Write::flush(&mut std::io::stdout());
+        let mut answer = String::new();
+        if std::io::stdin().read_line(&mut answer).unwrap_or(0) == 0 {
+            return;
+        }
+        if !matches!(answer.trim().to_lowercase().as_str(), "" | "y" | "yes") {
+            println!("Skipped. You can set it up any time with:\n  orx ssh-key add");
+            return;
+        }
     }
     if let Err(err) = ensure_default_registered(creds).await {
         eprintln!("Couldn't set up SSH access: {err}\nRetry with: orx ssh-key add");
@@ -299,6 +303,74 @@ pub async fn verify_after_login(creds: &Credentials) {
 #[cfg(test)]
 mod setup_tests {
     use super::*;
+    use axum::{routing::get, Json, Router};
+    use serde_json::{json, Value};
+    use std::sync::{Arc, Mutex};
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn app_sign_in_registers_this_computer_once() {
+        // `~/.ssh` and the agent are per-process, so the body runs in a child
+        // with an empty home and no agent.
+        if std::env::var("ORX_SSH_KEY_TEST_CHILD").is_err() {
+            let home = std::env::temp_dir().join(format!("orx-ssh-key-{}", uuid::Uuid::new_v4()));
+            std::fs::create_dir(&home).unwrap();
+            let status = tokio::process::Command::new(std::env::current_exe().unwrap())
+                .args([
+                    "--exact",
+                    "commands::ssh_key::setup_tests::app_sign_in_registers_this_computer_once",
+                    "--nocapture",
+                ])
+                .env("ORX_SSH_KEY_TEST_CHILD", "1")
+                .env("HOME", &home)
+                .env_remove("SSH_AUTH_SOCK")
+                .status()
+                .await
+                .unwrap();
+            let _ = std::fs::remove_dir_all(home);
+            assert!(status.success());
+            return;
+        }
+
+        let registered = Arc::new(Mutex::new(Vec::<Value>::new()));
+        let list = registered.clone();
+        let add = registered.clone();
+        let app = Router::new().route(
+            "/ssh-keys",
+            get(move || {
+                let keys = list.lock().unwrap().clone();
+                async move { Json(json!({ "sshKeys": keys })) }
+            })
+            .post(move |Json(body): Json<Value>| {
+                let key =
+                    json!({ "id": "key-1", "name": body["name"], "publicKey": body["publicKey"] });
+                add.lock().unwrap().push(key.clone());
+                async move { Json(json!({ "sshKey": key })) }
+            }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let creds = Credentials {
+            api_url: format!("http://{}", listener.local_addr().unwrap()),
+            token: "pat".into(),
+        };
+        tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+
+        verify_after_login(&creds, false).await;
+        verify_after_login(&creds, false).await;
+
+        let ssh = dirs::home_dir().unwrap().join(".ssh");
+        assert!(ssh.join("id_ed25519").is_file());
+        let public = std::fs::read_to_string(ssh.join("id_ed25519.pub")).unwrap();
+        let keys = registered.lock().unwrap().clone();
+        assert_eq!(keys.len(), 1);
+        assert_eq!(
+            fingerprint(keys[0]["publicKey"].as_str().unwrap()),
+            fingerprint(public.trim())
+        );
+        assert!(matches!(
+            ssh_identity::check(&creds).await,
+            KeyStatus::Matched
+        ));
+    }
 
     #[tokio::test]
     async fn default_key_setup_preserves_existing_keys() {
