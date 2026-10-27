@@ -122,7 +122,7 @@ export function RemoteHostDialog({
         </div>
         <div className="shrink-0 border-t border-border-variant p-2">
           <Button variant="ghost" className="w-full justify-start text-base font-normal" onClick={onConfigureSsh}>
-            <SlidersHorizontal size={15} />
+            <SlidersHorizontal size={16} />
             {m.ssh_configure_hosts()}
           </Button>
         </div>

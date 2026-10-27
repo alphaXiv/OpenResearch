@@ -25,7 +25,7 @@ test("virtual history retains interacted rows outside the viewport and drops abs
   const retainedRows = { current: new Set(["a", "deleted"]) };
   const extract = evaluate(`return ${expression.getText(file)}`, {
     useCallback: callback => callback,
-    visibleMessages: ["a", "b", "c", "d", "e"].map(id => ({ id })),
+    visibleMessages: ["a", "b", "c", "d", "e"].map(id => [{ id }]),
     retainedRows,
     fullHistory: false,
     defaultRangeExtractor,
@@ -55,7 +55,7 @@ test("accessible full history includes every message", () => {
   const expression = find(node => ts.isVariableDeclaration(node) && node.name.getText(file) === "rangeExtractor").initializer;
   const extract = evaluate(`return ${expression.getText(file)}`, {
     useCallback: callback => callback,
-    visibleMessages: ["a", "b", "c"].map(id => ({ id })),
+    visibleMessages: ["a", "b", "c"].map(id => [{ id }]),
     retainedRows: { current: new Set() }, fullHistory: true, defaultRangeExtractor,
   });
   assert.deepEqual(extract({ startIndex: 2, endIndex: 2, overscan: 0, count: 3 }), [0, 1, 2]);

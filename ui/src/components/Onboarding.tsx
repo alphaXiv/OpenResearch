@@ -11,7 +11,7 @@ import { getProjectPathStatusQuery, searchPapersQuery, resolvePaperQuery } from 
 
 import { m } from "../paraglide/messages.js";
 import { ltr } from "../i18n";
-import { AlertCircle, ArrowLeft, ArrowRight, RefreshCw, Terminal, X } from "lucide-react";
+import { AlertCircle, ArrowLeft, ArrowRight, Plus, RefreshCw, Terminal, X } from "lucide-react";
 import { Wordmark } from "./Wordmark";
 import { useEffect, useRef, useState } from "react";
 import {
@@ -31,6 +31,8 @@ import {
 import { renderNote } from "./agentNote";
 import { claudeProviderLabel } from "./claudeProvider";
 import { HarnessLogo } from "./HarnessLogo";
+import { AcpAuthDialog } from "./AcpAuthDialog";
+import { AcpHarnessDialog } from "./AcpHarnessDialog";
 import { HarnessSetupDialog } from "./HarnessSetupDialog";
 
 import { Hyperspace } from "./Hyperspace";
@@ -46,7 +48,7 @@ const ONB_CARD_META_CLASS_NAME = [
   "onb-card-meta text-sm text-subtext [&_code]:font-mono",
   "[&_code]:text-xs [&_code]:bg-surface",
   "[&_code]:border [&_code]:border-border-variant [&_code]:rounded-xs",
-  "[&_code]:py-px [&_code]:px-[5px] [&_code]:whitespace-nowrap",
+  "[&_code]:py-px [&_code]:px-1 [&_code]:whitespace-nowrap",
 ].join(" ");
 
 const GIT_RETRY_HINT_CLASS_NAME = [
@@ -55,7 +57,7 @@ const GIT_RETRY_HINT_CLASS_NAME = [
 ].join(" ");
 
 const ONB_CARD_CLASS_NAME = [
-  "onb-card flex flex-col gap-[5px] bg-background",
+  "onb-card flex flex-col gap-1 bg-background",
   "border border-border rounded-lg py-4.5 px-5",
 ].join(" ");
 
@@ -101,6 +103,9 @@ export function Onboarding({
   const pathQuery = useQuery(getProjectPathStatusQuery());
   const setupCommands = useQuery(getHarnessSetupCommandsQuery());
   const [setupHarness, setSetupHarness] = useState<Harness | null>(null);
+  const [authHarness, setAuthHarness] = useState<Harness | null>(null);
+  const [acpDialogOpen, setAcpDialogOpen] = useState(false);
+  const addedAcpHarness = useRef<HarnessId | null>(null);
   const [automaticSetup, setAutomaticSetup] = useState(false);
   const installSocket = useRef<WebSocket | null>(null);
   const installOutput = useRef("");
@@ -172,6 +177,12 @@ export function Onboarding({
   useEffect(() => {
     if (harnesses === null) return;
     const ready = harnesses.filter((h) => h.agentReady && !h.catalogPending);
+    const added = ready.find((h) => h.id === addedAcpHarness.current);
+    if (added) {
+      addedAcpHarness.current = null;
+      setPreferredHarness(added.id);
+      return;
+    }
     setPreferredHarness((current) => {
       if (current && ready.some((h) => h.id === current)) return current;
       const saved = preferredAgent && ready.find((h) => h.id === preferredAgent.harness);
@@ -350,6 +361,14 @@ export function Onboarding({
           : "[&_.home-inner]:max-w-140 [&_.home-inner]:pt-24"
         }`}
     >
+      {acpDialogOpen && <AcpHarnessDialog
+        onClose={() => setAcpDialogOpen(false)}
+        onSaved={(definition) => {
+          addedAcpHarness.current = definition.id;
+          load(true, true);
+        }}
+      />}
+      {authHarness && <AcpAuthDialog remote={remote} harness={authHarness} onClose={() => setAuthHarness(null)} onReady={(ready) => setPreferredHarness(ready.id)} />}
       {!remote && setupHarness && setupCommands.data && (
         <HarnessSetupDialog
           harness={setupHarness}
@@ -370,10 +389,10 @@ export function Onboarding({
         {step === 0 ? (
           <div className="onb-intro flex min-h-dvh flex-col items-center justify-center gap-6 text-center">
             <Hyperspace className="pointer-events-none fixed inset-0 size-full" />
-            <div className="onb-intro-brand relative text-6xl font-semibold leading-none tracking-[-0.035em] animate-[onb-warp-in_700ms_cubic-bezier(0.16,1,0.3,1)_1250ms_both] motion-reduce:animate-none">
+            <div className="onb-intro-brand relative text-6xl font-semibold leading-none tracking-tight animate-[onb-warp-in_700ms_cubic-bezier(0.16,1,0.3,1)_1250ms_both] motion-reduce:animate-none">
               <Wordmark />
             </div>
-            <h2 className="onb-title relative m-0 text-2xl font-medium text-muted tracking-[-0.02em] animate-[onb-welcome-in_700ms_ease-out_1700ms_both] motion-reduce:animate-none">
+            <h2 className="onb-title relative m-0 text-2xl font-medium text-muted tracking-tight animate-[onb-welcome-in_700ms_ease-out_1700ms_both] motion-reduce:animate-none">
               {m.onboarding_the_local_first_workspace_for_research_agents()}
             </h2>
             <div className="relative mt-6 animate-[onb-welcome-in_600ms_ease-out_2300ms_both] motion-reduce:animate-none">
@@ -391,8 +410,8 @@ export function Onboarding({
               <Wordmark />
               <span>{m.onboarding_step_1_of_2()}</span>
             </div>
-            <h2 className="onb-title mt-0 mx-0 mb-1.5 text-3xl tracking-[-0.01em]">{m.onboarding_choose_a_coding_agent()}</h2>
-            <p className="onb-sub text-text text-base leading-[1.55] mt-0 mx-0 mb-5.5 max-w-120">{m.onboarding_open_research_uses_a_coding_agent_already_installed()}</p>
+            <h2 className="onb-title mt-0 mx-0 mb-1.5 text-3xl tracking-tight">{m.onboarding_choose_a_coding_agent()}</h2>
+            <p className="onb-sub text-text text-base leading-normal mt-0 mx-0 mb-5.5 max-w-120">{m.onboarding_open_research_uses_a_coding_agent_already_installed()}</p>
             {harnesses !== null && !anyAgentReady && !anyPending && (
               <p className={ONB_GATE_HINT_CLASS_NAME}>
                 {m.onboarding_sign_in_to_at_least_one_agent_to()}
@@ -419,15 +438,16 @@ export function Onboarding({
             )}
             <div className="onb-cards flex flex-col gap-3.5">
               {harnesses !== null ? (
-                harnesses.map((h) => (
+                harnesses.filter((h) => !h.id.startsWith("acp:") || h.installed).map((h) => (
                   <AgentCard
                     key={h.id}
                     h={h}
                     remote={remote}
                     selected={preferredHarness === h.id}
-                    onSelect={() => setPreferredHarness(h.id)}
+                    onSelect={() => { addedAcpHarness.current = null; setPreferredHarness(h.id); }}
                     commands={setupCommands.data?.[h.id]}
                     onSetup={() => setSetupHarness(h)}
+                    onAuth={() => setAuthHarness(h)}
                   />
                 ))
               ) : harnessError ? (
@@ -438,6 +458,7 @@ export function Onboarding({
                   <Spinner /> {m.onboarding_detecting_claude_code_codex_open_code()}
                 </LoadingRow>
               )}
+              <Button variant="ghost" className="self-start" onClick={() => setAcpDialogOpen(true)} aria-haspopup="dialog"><Plus size={14} />{m.acp_add()}</Button>
             </div>
             {setupCommands.isError && <p className={ONB_CARD_META_CLASS_NAME}>
               {m.harness_setup_load_failed()} <Button variant="ghost" onClick={() => void setupCommands.refetch()}>{m.app_retry()}</Button>
@@ -469,7 +490,7 @@ export function Onboarding({
                               : undefined
                 }
               >
-                {m.onboarding_continue()} <ArrowRight size={13} />
+                {m.onboarding_continue()} <ArrowRight size={14} />
               </Button>
             </div>
           </>
@@ -479,15 +500,15 @@ export function Onboarding({
               <Wordmark />
               {!automaticSetup && <span>{m.onboarding_step_2_of_2()}</span>}
             </div>
-            <h2 className="onb-title mt-0 mx-0 mb-1.5 text-3xl tracking-[-0.01em] onb-profile-title mb-5.5">{m.onboarding_tell_us_about_your_research()}</h2>
+            <h2 className="onb-title mt-0 mx-0 mb-1.5 text-3xl tracking-tight onb-profile-title mb-5.5">{m.onboarding_tell_us_about_your_research()}</h2>
             <div className="onb-cards flex flex-col gap-2.5">
               <div className={ONB_CARD_CLASS_NAME}>
                 <fieldset className="onb-fieldset border-0 mt-0 mx-0 mb-4.5 p-0 [&_legend]:text-base [&_legend]:font-medium [&_legend]:mb-1.5">
                   <legend>{m.onboarding_what_areas_are_you_interested_in()}</legend>
-                  <p className="onb-field-hint text-muted text-sm leading-[1.4] mt-0 mx-0 mb-2">{m.onboarding_choose_one_or_more()}</p>
+                  <p className="onb-field-hint text-muted text-sm leading-snug mt-0 mx-0 mb-2">{m.onboarding_choose_one_or_more()}</p>
                   <div className="onb-area-options grid grid-cols-[repeat(2,_minmax(0,_1fr))] gap-2">
                     {RESEARCH_AREAS.map((area) => (
-                      <label key={area.id} className="onb-area-option flex items-center gap-2 border border-border rounded-md cursor-pointer py-[9px] px-2.5 [&:has(input:checked)]:border-accent [&:has(input:checked)]:bg-primary-subtle [&_input]:m-0">
+                      <label key={area.id} className="onb-area-option flex items-center gap-2 border border-border rounded-md cursor-pointer py-2 px-2.5 [&:has(input:checked)]:border-text [&:has(input:checked)]:bg-surface [&_input]:m-0">
                         <input
                           type="checkbox"
                           checked={researchAreas.includes(area.id)}
@@ -524,7 +545,7 @@ export function Onboarding({
                 <label className="onb-field-label text-base font-medium mb-1.5" htmlFor="onb-paper-search">
                   {m.onboarding_representative_papers()}
                 </label>
-                <p className="onb-field-hint text-muted text-sm leading-[1.4] mt-0 mx-0 mb-2">
+                <p className="onb-field-hint text-muted text-sm leading-snug mt-0 mx-0 mb-2">
                   {m.onboarding_add_papers_that_represent_your_research_interests_including()}
                 </p>
                 <div className="onb-paper-search flex flex-col gap-1.5 mt-3 [&_input]:w-full">
@@ -608,7 +629,7 @@ export function Onboarding({
                   </>
                 ) : (
                   <>
-                    {m.onboarding_get_started()} <ArrowRight size={13} />
+                    {m.onboarding_get_started()} <ArrowRight size={14} />
                   </>
                 )}
               </Button>
@@ -658,8 +679,11 @@ function cleanPaperTitle(title: string): string {
 function agentBadge(h: Harness): { tone: StatusTone; label: string } {
   // A snapshot answer still being filled in — "checking" rather than a badge
   // the background pass may revoke.
+  if (h.adapterMissing) return { tone: "warning", label: m.acp_adapter_required() };
   if (h.catalogPending) return { tone: "warning", label: m.onboarding_checking() };
+  if (h.id.startsWith("acp:") && h.authState === "needsLogin") return { tone: "warning", label: m.acp_auth_setup_needed() };
   if (h.authCheckFailed) return { tone: "warning", label: m.onboarding_unable_to_verify() };
+  if (h.id.startsWith("acp:") && h.authState === "ready") return { tone: "success", label: m.acp_credentials_configured() };
   if (h.agentReady) return { tone: "success", label: h.authMethod === "thirdParty" || claudeProviderLabel(h) ? m.settings_page_ready_to_use() : h.authMethod === "local" || !h.authenticated ? m.onboarding_ready() : m.onboarding_signed_in() };
   if (!h.installed) return { tone: "neutral", label: m.onboarding_not_detected() };
   if (h.installBroken) return { tone: "warning", label: m.onboarding_install_broken() };
@@ -682,8 +706,8 @@ function selectionFor(harness: Harness, model: string | null): AgentSelection {
   };
 }
 
-function AgentLogo({ harness }: { harness: HarnessId }) {
-  return <HarnessLogo harness={harness} size={26} />;
+function AgentLogo({ harness, logo }: { harness: HarnessId; logo?: string }) {
+  return <HarnessLogo harness={harness} logo={logo} size={26} />;
 }
 
 function AgentCard({
@@ -693,6 +717,7 @@ function AgentCard({
   onSelect,
   commands,
   onSetup,
+  onAuth,
 }: {
   h: Harness;
   remote: boolean;
@@ -700,15 +725,16 @@ function AgentCard({
   onSelect: () => void;
   commands?: HarnessSetupCommands;
   onSetup: () => void;
+  onAuth: () => void;
 }) {
   // needsConfigRepair means no install/update/login command can fix this state
   // (an environment credential overriding the saved login, a database the CLI
   // will not open). Offering one sends the user through a command that
   // provably cannot help; the agentNote below carries the actual repair.
   const canLogin = h.id === "claude-code" ? Boolean(h.loginEligible) : h.authMethod !== "local" && h.authMethod !== "apiKey" && (h.authState === "needsLogin" || h.authState === "unknown");
-  const canSetup = !remote && !h.needsConfigRepair && !h.catalogPending && (!h.installed || h.installBroken || h.authState === "unsupported" || canLogin);
+  const canSetup = (!h.id.startsWith("acp:") || h.adapterMissing) && !remote && !h.needsConfigRepair && !h.catalogPending && (!h.installed || h.installBroken || h.authState === "unsupported" || canLogin);
   const showSetupAction = !h.agentReady && canSetup;
-  const showStatusDot = canSetup && (!h.installed || (!h.agentReady && h.authState === "needsLogin"));
+  const showStatusDot = h.adapterMissing || (canSetup && (!h.installed || (!h.agentReady && h.authState === "needsLogin")));
   const badge = agentBadge(h);
   const visibleBadge: { tone: StatusTone; label: string } = selected && !h.authCheckFailed
     ? { tone: "success", label: m.onboarding_selected() }
@@ -723,21 +749,26 @@ function AgentCard({
   const head = (
     <div className="onb-card-head flex flex-wrap items-center justify-between gap-3">
       <span className="onb-card-identity flex items-center gap-3 min-w-0">
-        <AgentLogo harness={h.id} />
+        <AgentLogo harness={h.id} logo={h.logo} />
         <span className="flex flex-col gap-1">
-          <span className="onb-card-name flex flex-wrap items-center gap-2 text-base font-semibold tracking-[-0.01em]">
+          <span className="onb-card-name flex flex-wrap items-center gap-2 text-base font-semibold tracking-tight">
             {h.name}
+            {h.id.startsWith("acp:") && !h.adapterMissing && <span className="text-sm font-normal text-subtext">{m.acp_via()}</span>}
             {showStatusDot && (
               <StatusIndicator tone={badge.tone} className="font-normal">{badge.label}</StatusIndicator>
             )}
           </span>
-          {showSetupAction && !showStatusDot && <StatusIndicator tone={visibleBadge.tone}>{visibleBadge.label}</StatusIndicator>}
+          {!showStatusDot && !h.id.startsWith("acp:") && showSetupAction && <StatusIndicator tone={visibleBadge.tone}>{visibleBadge.label}</StatusIndicator>}
         </span>
       </span>
       {showSetupAction ? (
         <Button size="small" onClick={onSetup} disabled={!commands} aria-haspopup="dialog" title={m.harness_setup_opens_terminal()}>
           <Terminal size={14} />
-          {!h.installed || h.installBroken ? m.harness_setup_install() : h.authState === "unsupported" ? m.harness_setup_update() : m.harness_setup_login()}
+          {h.adapterMissing ? m.acp_install_adapter() : !h.installed || h.installBroken ? m.harness_setup_install() : h.authState === "unsupported" ? m.harness_setup_update() : m.harness_setup_login()}
+        </Button>
+      ) : h.id.startsWith("acp:") && !h.agentReady && !h.catalogPending ? (
+        <Button variant="ghost" size="small" onClick={onAuth} aria-haspopup="dialog">
+          <StatusIndicator tone={visibleBadge.tone}>{visibleBadge.label}</StatusIndicator>
         </Button>
       ) : (
         <StatusIndicator tone={visibleBadge.tone}>{visibleBadge.label}</StatusIndicator>
@@ -748,26 +779,27 @@ function AgentCard({
   // disabled button, so the copy button on its `agentNote` command stays live.
   if (!h.agentReady) {
     return (
-      <div className="onb-card flex flex-col gap-2.5 bg-background border border-border rounded-lg py-4 px-4 onb-agent-choice w-full text-inherit [font:inherit] text-start transition-[border-color,box-shadow] duration-120 ease-standard [button&]:cursor-pointer [button&:hover]:border-muted [&.selected]:border-accent [&.selected]:shadow-selected">
+      <div className="onb-card flex flex-col gap-2.5 bg-background border border-border rounded-lg py-4 px-4 onb-agent-choice w-full text-inherit [font:inherit] text-start transition-[border-color,box-shadow] duration-120 ease-standard [button&]:cursor-pointer [button&:hover]:border-muted [&.selected]:border-text [&.selected]:shadow-selected">
         {head}
         {h.authState === "unsupported" && version && (
           <div className={ONB_CARD_META_CLASS_NAME}>{version}</div>
         )}
-        {!showSetupAction && h.agentNote && (
+        {!h.id.startsWith("acp:") && !showSetupAction && h.agentNote && (
           <div className={`${ONB_CARD_META_CLASS_NAME} [&_code]:whitespace-pre-wrap break-words`}>{renderNote(h.agentNote)}</div>
         )}
+        {!h.installed && h.needsConnectionAdapter && <p className={ONB_CARD_META_CLASS_NAME}>{m.acp_adapter_help({ name: h.name })}</p>}
       </div>
     );
   }
   return (
     <button
       type="button"
-      className={`onb-card flex flex-col gap-2.5 bg-background border border-border rounded-lg py-4 px-4 onb-agent-choice w-full text-inherit [font:inherit] text-start transition-[border-color,box-shadow] duration-120 ease-standard [button&]:cursor-pointer [button&:hover]:border-muted [&.selected]:border-accent [&.selected]:shadow-selected${selected ? " selected" : ""}`}
+      className={`onb-card flex flex-col gap-2.5 bg-background border border-border rounded-lg py-4 px-4 onb-agent-choice w-full text-inherit [font:inherit] text-start transition-[border-color,box-shadow] duration-120 ease-standard [button&]:cursor-pointer [button&:hover]:border-muted [&.selected]:border-text [&.selected]:shadow-selected${selected ? " selected" : ""}`}
       aria-pressed={selected}
       onClick={onSelect}
     >
       {head}
-      {h.id !== "opencode" && (
+      {h.id !== "opencode" && !h.id.startsWith("acp:") && (
         <div className="onb-card-detail flex items-center gap-1.5 text-sm">
           {h.accountLoading ? <><Spinner /> {m.onboarding_loading_account()}</> : <>
             {claudeProviderLabel(h) ?? h.account ?? (h.authMethod === "apiKey" ? m.onboarding_api_key() : null)}

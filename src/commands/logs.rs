@@ -2,7 +2,7 @@ use std::io::{Read as _, SeekFrom, Write};
 
 use crate::error::Result;
 use crate::plane::resolve_run;
-use crate::store::{log_path, Store};
+use crate::store::Store;
 
 const PREVIEW_CHARS: usize = 500;
 const PREVIEW_SUFFIX_BYTES: usize = 2048;
@@ -71,16 +71,19 @@ pub async fn run(args: crate::LogsArgs) -> Result<()> {
     crate::local::chat::record_chat_target("runs", &args.run_id);
     resolve_run(Store::open()?, &args.run_id)?;
 
-    let path = log_path(&args.run_id);
-    let mut file = match std::fs::File::open(&path) {
-        Ok(file) => file,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+    let (mut file, path, total) = match crate::jobs::ssh::service::logs::open_current(&args.run_id)
+    {
+        Ok(current) => current,
+        Err(error)
+            if error
+                .downcast_ref::<std::io::Error>()
+                .is_some_and(|error| error.kind() == std::io::ErrorKind::NotFound) =>
+        {
             eprintln!("[local file] no log captured yet for this run.");
             return Ok(());
         }
-        Err(error) => return Err(error.into()),
+        Err(error) => return Err(error),
     };
-    let total = file.metadata()?.len();
     let bytes = read_preview_suffix(&mut file, total)?;
     let preview = trailing_char_preview(&bytes);
     print_compact_summary(&path, total, &preview)

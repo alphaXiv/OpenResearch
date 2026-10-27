@@ -48,7 +48,7 @@ test("renders real lineage, explicit archive context, accessible levels and stat
   assert.equal((html.match(/tabindex="0"/g) ?? []).length, 1);
   assert.match(html, /Archived ancestor/);
   assert.match(html, /长名称 — a very long bilingual experiment title/);
-  assert.match(html, /data-tone="caution" data-live="true"[^>]*>status_cancelling/);
+  assert.match(html, /data-tone="caution" data-live="true"[^>]*><span[^>]*>status_cancelling<\/span>/);
   assert.doesNotMatch(html, /status_done/);
 });
 
@@ -81,17 +81,63 @@ test("a deleted persisted selection does not select an unrelated route", () => {
   finally { delete globalThis.localStorage; }
 });
 
-test("right toolbar exposes Routes with the shared active and accessible button treatment", () => {
-  const { WorkspaceTools } = compile("../src/components/WorkspaceTools.tsx", {
+const { WorkspaceTools } = compile("../src/components/WorkspaceTools.tsx", {
     "../paraglide/messages.js": messages,
     "../api": {}, "../workspaceRuns": { activeWorkspaceRuns: () => [] },
     "../queries/settings": { getComputeSettingsQuery: () => ({}) },
     "../queries/files": {}, "../computeTargets": {}, "./GitDiff": {},
     "./StatusBadge": {}, "./BackendLogos": {},
     "@tanstack/react-query": { useQuery: () => ({}) },
-    "./ModelPicker": { usePopover: () => ({ open: false }) },
+    "./ModelPicker": { OptionPicker: () => null },
     "./ui": { IconButton: ({ active, children, ...props }) => React.createElement("button", { ...props, "data-active": active }, children) },
   });
-  const html = renderToStaticMarkup(React.createElement(WorkspaceTools, { expanded: false, experiments: [], runs: [], activeView: "routes" }));
+
+test("right toolbar exposes Routes with the shared active and accessible button treatment", () => {
+  const html = renderToStaticMarkup(React.createElement(WorkspaceTools, { expanded: false, experiments: [], runs: [], sessions: [], activeView: "routes" }));
   assert.match(html, /aria-label="Routes" aria-pressed="true" data-active="true"/);
+});
+
+// Evaluate the conditions around the real App controls, not a copied predicate.
+test("table-only controls stay hidden while Routes is selected", () => {
+  const source = readFileSync(new URL("../src/App.tsx", import.meta.url), "utf8");
+  const ast = ts.createSourceFile("App.tsx", source, ts.ScriptTarget.Latest, true, ts.ScriptKind.TSX);
+  const conditions = [];
+  const visit = (node) => {
+    if (ts.isJsxExpression(node) && node.expression && ts.isBinaryExpression(node.expression)
+      && node.expression.operatorToken.kind === ts.SyntaxKind.AmpersandAmpersandToken) {
+      const body = node.expression.right.getText(ast);
+      if (/^\(\s*<Tooltip interactive content=\{m\.history_(order|show_lineage)\(\)\}/.test(body)) {
+        conditions.push(node.expression.left.getText(ast));
+      }
+    }
+    ts.forEachChild(node, visit);
+  };
+  visit(ast);
+  assert.equal(conditions.length, 2, "find both table-only controls in App");
+  for (const condition of conditions) {
+    const visible = new Function("routesView", "view", `return ${condition};`);
+    assert.equal(visible(false, "table"), true);
+    assert.equal(visible(true, "table"), false);
+    assert.equal(visible(false, "tree"), false);
+    assert.equal(visible(true, "tree"), false);
+  }
+});
+
+test("both toolbar layouts dispatch Routes without invoking another tool", () => {
+  for (const expanded of [false, true]) {
+    const calls = [];
+    const tree = WorkspaceTools({ expanded, experiments: [], runs: [], sessions: [],
+      onRoutes: () => calls.push("routes"), onExperiments: () => calls.push("experiments"),
+      onTerminal: () => calls.push("terminal"), activeView: "routes" });
+    let button;
+    const visit = (node) => {
+      if (!React.isValidElement(node)) return;
+      if (node.key === "routes") button = node;
+      React.Children.forEach(node.props.children, visit);
+    };
+    visit(tree);
+    assert.ok(button, `Routes exists in expanded=${expanded}`);
+    button.props.onClick();
+    assert.deepEqual(calls, ["routes"]);
+  }
 });

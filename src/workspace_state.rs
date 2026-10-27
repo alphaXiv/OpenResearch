@@ -98,7 +98,7 @@ pub enum Pane {
         spawn_part_id: String,
     },
     Side {
-        session_id: String,
+        session_id: Option<String>,
     },
 }
 
@@ -116,6 +116,7 @@ pub enum HomeView {
 pub enum ExperimentView {
     Overview,
     Terminal,
+    Trackio,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
@@ -144,6 +145,7 @@ pub enum Scope {
 #[serde(rename_all = "camelCase")]
 pub enum ExperimentsView {
     Tree,
+    #[serde(alias = "history")]
     Table,
 }
 
@@ -184,7 +186,7 @@ impl Pane {
                 session_id,
                 spawn_part_id,
             } => nonempty(session_id) && nonempty(spawn_part_id),
-            Self::Side { session_id } => nonempty(session_id),
+            Self::Side { session_id } => session_id.as_ref().is_none_or(nonempty),
         }
     }
 }
@@ -304,6 +306,24 @@ fn valid_location(location: &str) -> bool {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn side_chat_drafts_and_saved_chats_have_valid_workspace_locations() {
+        for session_id in [json!(null), json!("chat_saved")] {
+            let value = json!({"kind":"side","sessionId":session_id});
+            let pane: Pane = serde_json::from_value(value.clone()).unwrap();
+            assert!(pane.valid());
+            assert_eq!(serde_json::to_value(pane).unwrap(), value);
+            assert!(valid_location(&format!(
+                "/projects/demo/tasks/parent?pane={}",
+                urlencoding::encode(&value.to_string())
+            )));
+        }
+        assert!(!Pane::Side {
+            session_id: Some(String::new()),
+        }
+        .valid());
+    }
 
     #[test]
     fn tree_viewport_is_optional_and_validated() {

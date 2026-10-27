@@ -98,12 +98,12 @@ export function DemoWelcomeModal({
             <BrandMark />
           </span>
           <div>
-            <div className="mb-0.5 text-xs font-medium tracking-[0.08em] text-primary uppercase">
+            <div className="mb-0.5 text-xs font-medium tracking-wider text-subtext uppercase">
               {m.tour_demo_project()}
             </div>
             <h2
               id="demo-welcome-title"
-              className="m-0 text-2xl leading-tight tracking-[-0.02em]"
+              className="m-0 text-2xl leading-tight tracking-tight"
             >
               {m.tour_welcome_to_open_research()}
             </h2>
@@ -117,7 +117,7 @@ export function DemoWelcomeModal({
               href="https://github.com/karpathy/nanochat"
               target="_blank"
               rel="noreferrer"
-              className="font-medium text-primary underline decoration-border-strong underline-offset-3 hover:decoration-primary"
+              className="font-medium text-accent-blue-strong underline decoration-border-strong underline-offset-3 hover:decoration-current"
             >
               {m.tour_nanochat()}
             </a>{m.tour_a_repo_for_training_a_mini_gpt_from()}

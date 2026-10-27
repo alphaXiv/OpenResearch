@@ -7,6 +7,7 @@
 //! Experiment and run identifiers resolve only when their records belong to a
 //! project registered in the local store.
 
+pub mod acp;
 pub mod agent_lifecycle;
 pub mod agent_skills;
 pub mod autonomy;
@@ -39,6 +40,7 @@ pub mod overleaf_live;
 pub mod portable_git;
 pub mod projects;
 pub mod ray;
+pub mod remote_cleanup;
 pub mod resolve;
 pub mod shell_env;
 pub mod skills;

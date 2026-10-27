@@ -186,9 +186,14 @@ pub async fn run() {
                 .unwrap_or(4791)
         });
     #[cfg(target_os = "macos")]
-    imp::run_event_loop(port);
+    imp::run_event_loop(port, false);
     #[cfg(not(target_os = "macos"))]
-    imp::run_event_loop(port, focus_requests);
+    imp::run_event_loop(port, false, focus_requests);
+}
+
+#[cfg(all(target_os = "macos", debug_assertions))]
+pub fn run_dev(port: u16) {
+    imp::run_event_loop(port, true);
 }
 
 /// Adopt the user's shell environment in place of the one launchd or the desktop
@@ -624,6 +629,8 @@ mod imp {
     enum UserEvent {
         ServerReady,
         LoadTimedOut,
+        SyncZoom,
+        Zoom(ZoomAction),
         #[cfg(target_os = "macos")]
         Menu(MenuId),
         #[cfg(not(target_os = "macos"))]
@@ -634,6 +641,23 @@ mod imp {
         SyncMaximized,
     }
 
+    #[derive(Clone, Copy)]
+    enum ZoomAction {
+        In,
+        Out,
+        Reset,
+    }
+
+    impl ZoomAction {
+        fn next(self, percent: i32) -> i32 {
+            match self {
+                Self::In => (percent + 10).min(200),
+                Self::Out => (percent - 10).max(50),
+                Self::Reset => 100,
+            }
+        }
+    }
+
     enum Quit {
         No,
         Flushing,
@@ -642,9 +666,17 @@ mod imp {
 
     pub(super) fn run_event_loop(
         port: u16,
+        external_server: bool,
         #[cfg(not(target_os = "macos"))] focus_requests: super::instance::FocusRequests,
     ) {
-        let origin = format!("http://127.0.0.1:{port}");
+        let origin = format!(
+            "http://{}:{port}",
+            if external_server {
+                "localhost"
+            } else {
+                "127.0.0.1"
+            }
+        );
         // Before GTK starts: the window class the dock matches to the desktop
         // entry's StartupWMClass.
         #[cfg(target_os = "linux")]
@@ -652,32 +684,41 @@ mod imp {
         let event_loop = EventLoopBuilder::<UserEvent>::with_user_event().build();
 
         // Dashboard server on background workers (we're inside main's runtime).
-        tokio::spawn(async move {
-            let args = crate::UpArgs {
-                port,
-                remote: None,
-                no_browser: true,
-                no_agent: false,
-                model: None,
-                remote_host: false,
-                desktop_app: true,
-            };
-            // The window is useless without its server, so the app goes with it.
-            match crate::commands::up::run(args).await {
-                Ok(()) => std::process::exit(0),
-                Err(err) => {
-                    eprintln!("openresearch app: dashboard server exited: {err}");
-                    crate::show_error_dialog(&format!("The dashboard server stopped: {err}"));
-                    std::process::exit(1);
+        if !external_server {
+            tokio::spawn(async move {
+                let args = crate::UpArgs {
+                    port,
+                    remote: None,
+                    no_browser: true,
+                    no_agent: false,
+                    model: None,
+                    remote_host: false,
+                    desktop_app: true,
+                };
+                // The window is useless without its server, so the app goes with it.
+                match crate::commands::up::run(args).await {
+                    Ok(()) => std::process::exit(0),
+                    Err(err) => {
+                        eprintln!("openresearch app: dashboard server exited: {err}");
+                        crate::show_error_dialog(&format!("The dashboard server stopped: {err}"));
+                        std::process::exit(1);
+                    }
                 }
-            }
-        });
+            });
+        }
 
         let ready = event_loop.create_proxy();
         tokio::spawn(async move {
-            while tokio::net::TcpStream::connect(("127.0.0.1", port))
-                .await
-                .is_err()
+            while tokio::net::TcpStream::connect((
+                if external_server {
+                    "localhost"
+                } else {
+                    "127.0.0.1"
+                },
+                port,
+            ))
+            .await
+            .is_err()
             {
                 tokio::time::sleep(Duration::from_millis(100)).await;
             }
@@ -700,7 +741,17 @@ mod imp {
         let (menu, quit_item, reload_item) = {
             let menu_proxy = event_loop.create_proxy();
             MenuEvent::set_event_handler(Some(move |event: MenuEvent| {
-                let _ = menu_proxy.send_event(UserEvent::Menu(event.id));
+                let action = match event.id.as_ref() {
+                    "zoom-in" => Some(ZoomAction::In),
+                    "zoom-out" => Some(ZoomAction::Out),
+                    "zoom-reset" => Some(ZoomAction::Reset),
+                    _ => None,
+                };
+                let event = match action {
+                    Some(action) => UserEvent::Zoom(action),
+                    None => UserEvent::Menu(event.id),
+                };
+                let _ = menu_proxy.send_event(event);
             }));
             let quit = MenuItem::new(
                 "Quit OpenResearch",
@@ -712,7 +763,20 @@ mod imp {
                 true,
                 Some(Accelerator::new(Modifiers::META, Code::KeyR)),
             );
-            match build_menu(&quit, &reload) {
+            let zoom_items = [
+                ("zoom-in", "Zoom In", Code::Equal),
+                ("zoom-out", "Zoom Out", Code::Minus),
+                ("zoom-reset", "Actual Size", Code::Digit0),
+            ]
+            .map(|(id, title, key)| {
+                MenuItem::with_id(
+                    id,
+                    title,
+                    true,
+                    Some(Accelerator::new(Modifiers::META, key)),
+                )
+            });
+            match build_menu(&quit, &reload, &zoom_items) {
                 Ok(menu) => (menu, quit, reload),
                 Err(err) => {
                     crate::show_error_dialog(&format!("Could not build the menu bar: {err}"));
@@ -735,6 +799,8 @@ mod imp {
                 .with_titlebar_transparent(true)
                 .with_title_hidden(true)
                 .with_fullsize_content_view(true)
+                // Centers the lights in the dashboard's 44px top bar (`mac-titlebar:h-11`).
+                .with_traffic_light_inset(tao::dpi::LogicalPosition::new(16.0, 22.0))
         };
         #[cfg(windows)]
         let window = {
@@ -772,6 +838,11 @@ mod imp {
             .with_accept_first_mouse(true)
             // Lets the dashboard tell it is in the app, where pop-ups open in the browser.
             .with_initialization_script("window.__ORX_DESKTOP__ = true;")
+            .with_initialization_script_for_main_only(
+                include_str!("desktop_zoom.js")
+                    .replace("__ORX_ZOOM_PLATFORM__", std::env::consts::OS),
+                false,
+            )
             // Pop-ups go to the browser, dashboard pages included: a window wry
             // opens itself has none of this window's handlers.
             .with_new_window_req_handler(|url, _features| {
@@ -796,11 +867,13 @@ mod imp {
                 let window = window.clone();
                 let origin = origin.clone();
                 let shown = shown.clone();
-                #[cfg(windows)]
                 let proxy = event_loop.create_proxy();
                 move |event, url| {
                     if !matches!(event, PageLoadEvent::Finished) {
                         return;
+                    }
+                    if super::is_dashboard_url(&url, &origin) {
+                        let _ = proxy.send_event(UserEvent::SyncZoom);
                     }
                     #[cfg(windows)]
                     let _ = proxy.send_event(UserEvent::SyncMaximized);
@@ -810,17 +883,30 @@ mod imp {
                     }
                 }
             });
-        #[cfg(not(target_os = "linux"))]
         let builder = builder.with_ipc_handler({
+            #[cfg(not(target_os = "linux"))]
             let window = window.clone();
-            #[cfg(windows)]
             let proxy = event_loop.create_proxy();
             move |request| {
                 let message = request.body().as_str();
                 match message {
+                    "page-zoom:sync" => {
+                        let _ = proxy.send_event(UserEvent::SyncZoom);
+                    }
+                    "page-zoom:in" => {
+                        let _ = proxy.send_event(UserEvent::Zoom(ZoomAction::In));
+                    }
+                    "page-zoom:out" => {
+                        let _ = proxy.send_event(UserEvent::Zoom(ZoomAction::Out));
+                    }
+                    "page-zoom:reset" => {
+                        let _ = proxy.send_event(UserEvent::Zoom(ZoomAction::Reset));
+                    }
+                    #[cfg(not(target_os = "linux"))]
                     "titlebar:drag" => {
                         let _ = window.drag_window();
                     }
+                    #[cfg(not(target_os = "linux"))]
                     "titlebar:zoom" => window.set_maximized(!window.is_maximized()),
                     #[cfg(windows)]
                     "titlebar:minimize" => window.set_minimized(true),
@@ -837,6 +923,8 @@ mod imp {
                             let _ = window.drag_resize_window(direction);
                         }
                     }
+                    #[cfg(target_os = "linux")]
+                    _ => {}
                     #[cfg(target_os = "macos")]
                     _ => {
                         if let Some((appearance, color)) = parse_titlebar_message(message) {
@@ -875,6 +963,10 @@ mod imp {
         #[cfg(target_os = "macos")]
         add_confirm_panel(&webview);
 
+        let mut zoom_percent = crate::config::desktop_zoom_percent();
+        if let Err(error) = sync_page_zoom(&webview, zoom_percent, false) {
+            eprintln!("openresearch app: could not restore page zoom: {error}");
+        }
         let mut quit = Quit::No;
         // What the loaded page was last told; a new page starts unmaximized.
         #[cfg(windows)]
@@ -890,6 +982,10 @@ mod imp {
                 // The server's own shutdown path stops the agents and then exits
                 // the process.
                 Quit::Flushing => {
+                    if external_server {
+                        *control_flow = ControlFlow::Exit;
+                        return;
+                    }
                     crate::commands::up::request_shutdown();
                     quit = Quit::ShuttingDown;
                     *control_flow = ControlFlow::WaitUntil(Instant::now() + Duration::from_secs(5));
@@ -931,6 +1027,23 @@ mod imp {
             #[cfg(target_os = "macos")]
             Event::UserEvent(UserEvent::Menu(id)) if id == reload_item.id() => {
                 let _ = webview.reload();
+            }
+            Event::UserEvent(UserEvent::Zoom(action)) if matches!(quit, Quit::No) => {
+                let next = action.next(zoom_percent);
+                match sync_page_zoom(&webview, next, true) {
+                    Ok(()) => {
+                        if next != zoom_percent {
+                            zoom_percent = next;
+                            if let Err(error) = crate::config::set_desktop_zoom_percent(next) {
+                                eprintln!("openresearch app: could not save page zoom: {error}");
+                            }
+                        }
+                    }
+                    Err(error) => eprintln!("openresearch app: could not apply page zoom: {error}"),
+                }
+            }
+            Event::UserEvent(UserEvent::SyncZoom) if matches!(quit, Quit::No) => {
+                let _ = sync_page_zoom(&webview, zoom_percent, false);
             }
             // Even before the page loads: a launch that brings nothing up looks
             // like a broken app. While quitting it must stay hidden.
@@ -1049,8 +1162,22 @@ mod imp {
         let _ = webview.evaluate_script(&script);
     }
 
+    fn sync_page_zoom(webview: &WebView, percent: i32, show_controls: bool) -> wry::Result<()> {
+        let factor = f64::from(percent) / 100.0;
+        webview.zoom(factor)?;
+        // The native traffic lights and drag strip keep their unscaled size.
+        webview.evaluate_script(&format!(
+            "document.documentElement.style.setProperty('--desktop-page-zoom', '{factor}');
+             if ({show_controls}) window.dispatchEvent(new CustomEvent('orx:page-zoom', {{ detail: {percent} }}));"
+        ))
+    }
+
     #[cfg(target_os = "macos")]
-    fn build_menu(quit: &MenuItem, reload: &MenuItem) -> muda::Result<Menu> {
+    fn build_menu(
+        quit: &MenuItem,
+        reload: &MenuItem,
+        zoom_items: &[MenuItem; 3],
+    ) -> muda::Result<Menu> {
         let about = AboutMetadata {
             name: Some("OpenResearch".into()),
             version: Some(env!("CARGO_PKG_VERSION").into()),
@@ -1090,6 +1217,10 @@ mod imp {
                 true,
                 &[
                     reload,
+                    &PredefinedMenuItem::separator(),
+                    &zoom_items[0],
+                    &zoom_items[1],
+                    &zoom_items[2],
                     &PredefinedMenuItem::separator(),
                     &PredefinedMenuItem::fullscreen(None),
                 ],
@@ -1252,11 +1383,25 @@ mod imp {
         handler.call((Bool::new(confirmed),));
     }
 
-    #[cfg(all(test, target_os = "macos"))]
+    #[cfg(test)]
     mod tests {
+        #[cfg(target_os = "macos")]
         use super::parse_titlebar_message;
+        use super::ZoomAction;
+        #[cfg(target_os = "macos")]
         use tao::window::Theme;
 
+        #[test]
+        fn zoom_steps_clamp_and_reset() {
+            assert_eq!(ZoomAction::In.next(100), 110);
+            assert_eq!(ZoomAction::In.next(200), 200);
+            assert_eq!(ZoomAction::Out.next(100), 90);
+            assert_eq!(ZoomAction::Out.next(50), 50);
+            assert_eq!(ZoomAction::Reset.next(50), 100);
+            assert_eq!(ZoomAction::Reset.next(200), 100);
+        }
+
+        #[cfg(target_os = "macos")]
         #[test]
         fn titlebar_messages_carry_a_preference_and_an_opaque_color() {
             assert_eq!(

@@ -174,10 +174,10 @@ export interface SubagentViewDef {
   label?: string;
 }
 
-/** A temporary side chat branched off the task's chat, live beside it. */
+/** A side-chat tab; a null session ID is an unsaved draft. */
 export interface SideChatViewDef {
   kind: "side";
-  sessionId: string;
+  sessionId: string | null;
 }
 
 /** One committed code-browser tab per experiment branch. Source, selected
@@ -212,7 +212,7 @@ export function rightTabKey(tab: RightTab): string {
   if ("code" in tab) return `code:${tab.branch}`;
   if ("kind" in tab) {
     if (tab.kind === "plan") return `plan:${tab.promptId}`;
-    return tab.kind === "side" ? `side:${tab.sessionId}` : `subagent:${tab.spawnPartId}`;
+    return tab.kind === "side" ? `side:${tab.sessionId ?? "draft"}` : `subagent:${tab.spawnPartId}`;
   }
   if ("path" in tab) return `file:${fileTabKey(tab)}`;
   return `experiment:${tab.id}:${tab.view}`;

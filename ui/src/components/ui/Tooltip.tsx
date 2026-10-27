@@ -46,7 +46,7 @@ export function Tooltip({
     <span
       ref={triggerRef}
       className={cn(
-        "group relative inline-flex cursor-help rounded-full outline-none focus-visible:outline-2 focus-visible:outline-text focus-visible:outline-offset-2",
+        "group relative inline-flex cursor-help rounded-full outline-none focus-visible:outline-2 focus-visible:outline-solid focus-visible:outline-focus focus-visible:outline-offset-2",
         className,
       )}
       tabIndex={interactive ? undefined : 0}

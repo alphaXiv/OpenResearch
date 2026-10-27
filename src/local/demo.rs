@@ -42,7 +42,7 @@ fn probe_uv() -> String {
         "curl -LsSf https://astral.sh/uv/install.sh | sh"
     };
     format!(
-        "export NANOCHAT_BASE_DIR=\"$PWD/.cache/nanochat\" UV_CACHE_DIR=\"$PWD/.cache/uv\" \
+        "export NANOCHAT_BASE_DIR=\"$PWD/.cache/nanochat\" UV_CACHE_DIR=\"${{ORX_CACHE_DIR:-$HOME/.cache/openresearch}}/uv\" \
          && mkdir -p \"$NANOCHAT_BASE_DIR\" \"$UV_CACHE_DIR\" \
          && {{ command -v uv >/dev/null || {{ {install_uv} && export PATH=\"$HOME/.local/bin:$PATH\"; }}; }}"
     )
@@ -567,6 +567,7 @@ fn seed_at(
         autonomy: None,
         active_leaf_id: Some(ASSISTANT_MESSAGE_ID.into()),
         side_parent_session_id: None,
+        side_parent_leaf_id: None,
         created_at: ago(seeded_at, 240, 0),
         // Sessions list by updated_at DESC, the order validate_snapshot asserts.
         updated_at: ago(seeded_at, 9, 30),
@@ -613,6 +614,7 @@ fn seed_at(
         autonomy: None,
         active_leaf_id: Some(FIGURE_ASSISTANT_MESSAGE_ID.into()),
         side_parent_session_id: None,
+        side_parent_leaf_id: None,
         created_at: ago(seeded_at, 70, 0),
         updated_at: ago(seeded_at, 69, 40),
     };
@@ -661,6 +663,7 @@ fn seed_at(
         autonomy: None,
         active_leaf_id: Some(LITERATURE_ASSISTANT_MESSAGE_ID.into()),
         side_parent_session_id: None,
+        side_parent_leaf_id: None,
         created_at: ago(seeded_at, 95, 0),
         updated_at: ago(seeded_at, 94, 40),
     };
@@ -1728,6 +1731,41 @@ fn set_executable(path: PathBuf) -> Result<()> {
 mod tests {
     use super::*;
 
+    fn prepare_origin(bare: &Path) {
+        // Bundle copies keep each test's refs and objects independent without rebuilding history.
+        static BUNDLE: std::sync::OnceLock<Vec<u8>> = std::sync::OnceLock::new();
+        let bundle = BUNDLE.get_or_init(|| {
+            let root = super::super::git::TemporaryDirectory::new("orx-demo-fixture").unwrap();
+            let repo = root.path().join("repo");
+            std::fs::create_dir_all(&repo).unwrap();
+            build_worktree(&repo).unwrap();
+            ensure_follow_up_branches(&repo).unwrap();
+            let path = root.path().join("repo.bundle");
+            git(
+                &repo,
+                &["bundle", "create", &path.to_string_lossy(), "--all"],
+            )
+            .unwrap();
+            std::fs::read(path).unwrap()
+        });
+        let parent = bare.parent().unwrap();
+        std::fs::create_dir_all(parent).unwrap();
+        let path = bare.with_extension("bundle");
+        std::fs::write(&path, bundle).unwrap();
+        git(
+            parent,
+            &[
+                "clone",
+                "--bare",
+                &path.to_string_lossy(),
+                &bare.to_string_lossy(),
+            ],
+        )
+        .unwrap();
+        git(bare, &["remote", "remove", "origin"]).unwrap();
+        std::fs::remove_file(path).unwrap();
+    }
+
     #[test]
     fn transcript_variants_are_one_turn_and_use_native_tool_names() {
         for (harness, expected) in [
@@ -1830,7 +1868,9 @@ mod tests {
     fn every_demo_session_recovers_from_the_experiment_commit() {
         let root = std::env::temp_dir().join(format!("orx-demo-test-{}", uuid::Uuid::new_v4()));
         let repo = root.join("repo");
-        install_repository(&repo, &root.join("origin.git")).unwrap();
+        let bare = root.join("origin.git");
+        prepare_origin(&bare);
+        install_repository(&repo, &bare).unwrap();
         for session_id in [SESSION_ID, FIGURE_SESSION_ID, LITERATURE_SESSION_ID] {
             assert_eq!(
                 session_start_ref(&repo, OWNER, REPO, session_id),
@@ -1910,7 +1950,8 @@ mod tests {
 
     #[test]
     fn prewarmed_onboarding_seeds_full_demo() {
-        for prewarmed in [false, true] {
+        let acp_id = crate::local::acp::presets()[0].launch.id.clone();
+        for (prewarmed, harness) in [(false, "codex"), (true, "codex"), (false, acp_id.as_str())] {
             let root = super::super::git::TemporaryDirectory::new("orx-demo-onboarding").unwrap();
             let data = root.path().join("data");
             let repo = data.join("repos").join(OWNER).join(REPO);
@@ -1920,6 +1961,8 @@ mod tests {
                 prewarm_repository(&repo, &bare).unwrap();
                 assert!(!repo.exists());
                 assert!(bare.join("HEAD").is_file());
+            } else if harness.starts_with("acp:") {
+                prepare_origin(&bare);
             }
             let started = std::time::Instant::now();
             let completion = seed_at(
@@ -1927,7 +1970,7 @@ mod tests {
                 &data,
                 &repo,
                 DemoSelection {
-                    harness: "codex".into(),
+                    harness: harness.into(),
                     model: None,
                     permission_mode: None,
                     reasoning_level: None,
@@ -1940,6 +1983,14 @@ mod tests {
                 started.elapsed().as_millis()
             );
             assert_eq!(completion.project.id, PROJECT_ID);
+            if harness.starts_with("acp:") {
+                for id in [SESSION_ID, FIGURE_SESSION_ID, LITERATURE_SESSION_ID] {
+                    assert_eq!(
+                        store.acp_session_state(id).unwrap().unwrap().launch.id,
+                        harness
+                    );
+                }
+            }
             assert_eq!(
                 store.list_experiments_by_project(PROJECT_ID).unwrap().len(),
                 3
@@ -1959,6 +2010,7 @@ mod tests {
         let root = std::env::temp_dir().join(format!("orx-demo-test-{}", uuid::Uuid::new_v4()));
         let data = root.join("data");
         let repo = root.join("cache/repos").join(OWNER).join(REPO);
+        prepare_origin(&demo_bare_path_in(&data));
         let store = Store::open_at(data.clone()).unwrap();
         let selection = DemoSelection {
             harness: "codex".into(),
@@ -2185,6 +2237,7 @@ mod tests {
         let root = std::env::temp_dir().join(format!("orx-demo-test-{}", uuid::Uuid::new_v4()));
         let data = root.join("data");
         let repo = root.join("cache/repos").join(OWNER).join(REPO);
+        prepare_origin(&demo_bare_path_in(&data));
         let store = Store::open_at(data.clone()).unwrap();
         store
             .create_local_project(&LocalProject {
@@ -2242,6 +2295,10 @@ mod tests {
         assert!(setup.contains(". .venv/bin/activate"), "{setup}");
         assert!(setup.contains(". .venv/Scripts/activate"), "{setup}");
         assert!(!setup.contains('\n'), "{setup}");
+        assert!(
+            setup.contains("UV_CACHE_DIR=\"${ORX_CACHE_DIR:-$HOME/.cache/openresearch}/uv\""),
+            "{setup}"
+        );
         assert!(!setup.contains("  "), "double space: {setup}");
     }
 
@@ -2266,6 +2323,7 @@ mod tests {
         let data = root.join("data");
         let moved = root.join("moved-data");
         let repo = root.join("cache/repos").join(OWNER).join(REPO);
+        prepare_origin(&demo_bare_path_in(&data));
         let store = Store::open_at(data.clone()).unwrap();
         seed_at(
             &store,
@@ -2299,6 +2357,7 @@ mod tests {
         let root = std::env::temp_dir().join(format!("orx-demo-test-{}", uuid::Uuid::new_v4()));
         let data = root.join("data");
         let repo = root.join("cache/repos").join(OWNER).join(REPO);
+        prepare_origin(&demo_bare_path_in(&data));
         let worktrees = data.join("worktrees").join(PROJECT_ID);
         let store = Store::open_at(data.clone()).unwrap();
         seed_at(
@@ -2369,6 +2428,7 @@ mod tests {
         let tmp = super::super::git::TemporaryDirectory::new("orx-demo-adopt").unwrap();
         let data = tmp.path().join("data");
         let repo = data.join("repos").join(OWNER).join(REPO);
+        prepare_origin(&demo_bare_path_in(&data));
         let selection = DemoSelection {
             harness: "codex".into(),
             model: None,

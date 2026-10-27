@@ -38,6 +38,7 @@ const WHOLE_VERB_READS: &[&str] = &[
     "runs",
     "logs",
     "tensorboard",
+    "metrics",
     "discover",
     "paper",
     "skill",

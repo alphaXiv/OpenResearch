@@ -20,7 +20,7 @@ function CommandPill({ cmd, onRun }: { cmd: string; onRun?: () => void }) {
           aria-label={m.a11y_run_command({ value: ltr(cmd) })}
           title={m.a11y_run_command({ value: ltr(cmd) })}
         >
-          <Play size={11} />
+          <Play size={12} />
         </button>
       )}
       <button
@@ -38,7 +38,7 @@ function CommandPill({ cmd, onRun }: { cmd: string; onRun?: () => void }) {
         aria-label={copied ? m.common_copied() : m.a11y_copy_value({ value: ltr(cmd) })}
         title={copied ? m.common_copied() : m.md_copy()}
       >
-        {copied ? <Check size={11} strokeWidth={3} /> : <Copy size={11} />}
+        {copied ? <Check size={12} strokeWidth={2.5} /> : <Copy size={12} />}
       </button>
     </span>
   );

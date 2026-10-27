@@ -39,13 +39,15 @@ permissions:
 # If there's a prerelease-style suffix to the version, then the release(s)
 # will be marked as a prerelease.
 on:
-  pull_request:
   workflow_dispatch:
     inputs:
       tag:
         description: Release Tag
         required: true
-        default: dry-run
+        type: string
+      source-sha:
+        description: Merged main commit to release (defaults to this workflow revision)
+        required: false
         type: string
 
 jobs:
@@ -54,9 +56,10 @@ jobs:
     runs-on: "ubuntu-22.04"
     outputs:
       val: ${{ steps.plan.outputs.manifest }}
-      tag: ${{ (inputs.tag != 'dry-run' && inputs.tag) || '' }}
-      tag-flag: ${{ inputs.tag && inputs.tag != 'dry-run' && format('--tag={0}', inputs.tag) || '' }}
-      publishing: ${{ inputs.tag && inputs.tag != 'dry-run' }}
+      source-sha: ${{ steps.source.outputs.sha }}
+      tag: ${{ inputs.tag }}
+      tag-flag: ${{ format('--tag={0}', inputs.tag) }}
+      publishing: "true"
     env:
       GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
     steps:
@@ -64,6 +67,27 @@ jobs:
         with:
           persist-credentials: false
           submodules: recursive
+          fetch-depth: 0
+          ref: ${{ inputs.source-sha || github.sha }}
+      - name: Validate the release source
+        id: source
+        env:
+          RELEASE_TAG: ${{ inputs.tag }}
+          WORKFLOW_REF: ${{ github.ref }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$WORKFLOW_REF" = refs/heads/main
+          sha=$(git rev-parse HEAD)
+          git merge-base --is-ancestor "$sha" origin/main
+          version=$(grep -m1 '^version = ' Cargo.toml | sed -E 's/version = "(.*)"/\1/')
+          test "$RELEASE_TAG" = "v$version"
+          echo "sha=$sha" >> "$GITHUB_OUTPUT"
+          jq -n --arg tag "$RELEASE_TAG" --arg sha "$sha" '{tag: $tag, sha: $sha}' > release-source.json
+      - uses: actions/upload-artifact@v7
+        with:
+          name: release-source
+          path: release-source.json
       - name: Install dist
         # we specify bash to get pipefail; it guards against the `curl` command
         # failing. otherwise `sh` won't catch that `curl` returned non-0
@@ -74,14 +98,11 @@ jobs:
         with:
           name: cargo-dist-cache
           path: ~/.cargo/bin/dist
-      # sure would be cool if github gave us proper conditionals...
-      # so here's a doubly-nested ternary-via-truthiness to try to provide the best possible
-      # functionality based on whether this is a pull_request, and whether it's from a fork.
-      # (PRs run on the *source* but secrets are usually on the *target* -- that's *good*
-      # but also really annoying to build CI around when it needs secrets to work right.)
       - id: plan
+        env:
+          RELEASE_TAG: ${{ inputs.tag }}
         run: |
-          dist ${{ (inputs.tag && inputs.tag != 'dry-run' && format('host --steps=create --tag={0}', inputs.tag)) || 'plan' }} --output-format=json > plan-dist-manifest.json
+          dist host --steps=create --tag="$RELEASE_TAG" --output-format=json > plan-dist-manifest.json
           echo "dist ran successfully"
           cat plan-dist-manifest.json
           echo "manifest=$(jq -c "." plan-dist-manifest.json)" >> "$GITHUB_OUTPUT"
@@ -97,7 +118,7 @@ jobs:
     # Let the initial task tell us to not run (currently very blunt)
     needs:
       - plan
-    if: ${{ fromJson(needs.plan.outputs.val).ci.github.artifacts_matrix.include != null && (needs.plan.outputs.publishing == 'true' || fromJson(needs.plan.outputs.val).ci.github.pr_run_mode == 'upload') || inputs.tag == 'dry-run' }}
+    if: ${{ fromJson(needs.plan.outputs.val).ci.github.artifacts_matrix.include != null }}
     strategy:
       fail-fast: false
       # Target platforms/runners are computed by dist in create-release.
@@ -124,6 +145,7 @@ jobs:
         with:
           persist-credentials: false
           submodules: recursive
+          ref: ${{ needs.plan.outputs.source-sha }}
       - name: Install Rust non-interactively if not already installed
         if: ${{ matrix.container }}
         run: |
@@ -177,7 +199,6 @@ jobs:
     needs:
       - plan
       - build-local-artifacts
-    if: ${{ needs.plan.outputs.publishing == 'true' || fromJson(needs.plan.outputs.val).ci.github.pr_run_mode == 'upload' || inputs.tag == 'dry-run' }}
     uses: ./.github/workflows/sign-macos-cli.yml
     with:
       plan: ${{ needs.plan.outputs.val }}
@@ -187,7 +208,6 @@ jobs:
     needs:
       - plan
       - build-local-artifacts
-    if: ${{ needs.plan.outputs.publishing == 'true' || fromJson(needs.plan.outputs.val).ci.github.pr_run_mode == 'upload' || inputs.tag == 'dry-run' }}
     permissions:
       contents: read
       id-token: write
@@ -211,6 +231,7 @@ jobs:
         with:
           persist-credentials: false
           submodules: recursive
+          ref: ${{ needs.plan.outputs.source-sha }}
       - name: Install cached dist
         uses: actions/download-artifact@v8
         with:
@@ -264,6 +285,7 @@ jobs:
     uses: ./.github/workflows/telemetry-contract.yml
     with:
       plan: ${{ needs.plan.outputs.val }}
+      source-sha: ${{ needs.plan.outputs.source-sha }}
     secrets: inherit
 
   custom-ci:
@@ -275,6 +297,8 @@ jobs:
     uses: ./.github/workflows/ci.yml
     with:
       plan: ${{ needs.plan.outputs.val }}
+      source-sha: ${{ needs.plan.outputs.source-sha }}
+      release: true
     secrets: inherit
   # Determines if we should publish/announce
   host:
@@ -292,7 +316,7 @@ jobs:
       issues: read
       pull-requests: read
     # Only run if we're "publishing", and only if plan, local and global didn't fail (skipped is fine)
-    if: ${{ always() && needs.plan.result == 'success' && needs.plan.outputs.publishing == 'true' && (needs.build-global-artifacts.result == 'skipped' || needs.build-global-artifacts.result == 'success') && (needs.custom-verify-build-channel.result == 'skipped' || needs.custom-verify-build-channel.result == 'success') && (needs.custom-telemetry-contract.result == 'skipped' || needs.custom-telemetry-contract.result == 'success') && (needs.custom-ci.result == 'skipped' || needs.custom-ci.result == 'success') && (needs.build-local-artifacts.result == 'skipped' || needs.build-local-artifacts.result == 'success') && (needs.custom-sign-macos-cli.result == 'skipped' || needs.custom-sign-macos-cli.result == 'success') && (needs.custom-sign-windows-cli.result == 'skipped' || needs.custom-sign-windows-cli.result == 'success') }}
+    if: ${{ always() && needs.plan.result == 'success' && needs.plan.outputs.publishing == 'true' && (needs.build-global-artifacts.result == 'skipped' || needs.build-global-artifacts.result == 'success') && needs.custom-verify-build-channel.result == 'success' && needs.custom-telemetry-contract.result == 'success' && needs.custom-ci.result == 'success' && (needs.build-local-artifacts.result == 'skipped' || needs.build-local-artifacts.result == 'success') && (needs.custom-sign-macos-cli.result == 'skipped' || needs.custom-sign-macos-cli.result == 'success') && (needs.custom-sign-windows-cli.result == 'skipped' || needs.custom-sign-windows-cli.result == 'success') }}
     env:
       GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
     runs-on: "ubuntu-22.04"
@@ -303,6 +327,7 @@ jobs:
         with:
           persist-credentials: false
           submodules: recursive
+          ref: ${{ needs.plan.outputs.source-sha }}
       - name: Install cached dist
         uses: actions/download-artifact@v8
         with:
@@ -344,7 +369,7 @@ jobs:
         env:
           PRERELEASE_FLAG: "${{ fromJson(steps.host.outputs.manifest).announcement_is_prerelease && '--prerelease' || '' }}"
           ANNOUNCEMENT_TITLE: "${{ fromJson(steps.host.outputs.manifest).announcement_title }}"
-          RELEASE_COMMIT: "${{ github.sha }}"
+          RELEASE_COMMIT: "${{ needs.plan.outputs.source-sha }}"
         run: |
           python3 scripts/release_notes.py "${{ needs.plan.outputs.tag }}" "$RELEASE_COMMIT" "$RUNNER_TEMP/notes.txt"
           gh release create "${{ needs.plan.outputs.tag }}" --target "$RELEASE_COMMIT" $PRERELEASE_FLAG --title "$ANNOUNCEMENT_TITLE" --notes-file "$RUNNER_TEMP/notes.txt" artifacts/*
@@ -365,3 +390,4 @@ jobs:
         with:
           persist-credentials: false
           submodules: recursive
+          ref: ${{ needs.plan.outputs.source-sha }}

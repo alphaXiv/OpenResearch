@@ -4,7 +4,7 @@ import { Ellipsis } from "lucide-react";
 import { m } from "../paraglide/messages.js";
 import type { Experiment } from "../api";
 import { usePopover } from "./ModelPicker";
-import { IconButton, MenuItem } from "./ui";
+import { Button, IconButton, MenuItem } from "./ui";
 
 export type ArchiveActions = {
   archiveOnly: boolean;
@@ -13,6 +13,7 @@ export type ArchiveActions = {
   restoreOnly: boolean;
   restoreAbove: boolean;
   restoreDown: boolean;
+  remove: boolean;
 };
 
 export function archiveActionsByExperiment(experiments: Experiment[]): Map<string, ArchiveActions> {
@@ -57,16 +58,18 @@ export function archiveActionsByExperiment(experiments: Experiment[]): Map<strin
       restoreOnly: experiment.archived,
       restoreAbove: !experiment.archived && archivedAbove,
       restoreDown: hasArchivedBelow(experiment.id),
+      remove: !children.has(experiment.id),
     });
   }
   return actions;
 }
 
-export function ArchiveMenu({ id, name, actions, onArchive, compact = false }: {
+export function ArchiveMenu({ id, name, actions, onArchive, onDelete, compact = false }: {
   id: string;
   name: string;
   actions: ArchiveActions;
   onArchive: (id: string, direction: "ancestors" | "descendants" | "only", archived: boolean) => void;
+  onDelete: (id: string) => void;
   compact?: boolean;
 }) {
   const triggerRef = useRef<HTMLButtonElement>(null);
@@ -88,6 +91,10 @@ export function ArchiveMenu({ id, name, actions, onArchive, compact = false }: {
     menu.setOpen(false);
     onArchive(id, direction, archived);
   };
+  const remove = () => {
+    menu.setOpen(false);
+    if (window.confirm(m.tree_delete_experiment_confirm({ name }))) onDelete(id);
+  };
 
   return (
     <div className="nodrag ms-auto shrink-0">
@@ -101,19 +108,19 @@ export function ArchiveMenu({ id, name, actions, onArchive, compact = false }: {
           aria-expanded={menu.open}
           onClick={toggle}
         >
-          <Ellipsis size={15} aria-hidden="true" />
+          <Ellipsis size={16} aria-hidden="true" />
         </IconButton>
       ) : (
-        <button
+        <Button
           type="button"
-          className="btn inline-flex h-7 items-center justify-center rounded-sm border border-border bg-background px-2.5 text-sm text-text hover:bg-surface"
+          size="small"
           ref={triggerRef}
           aria-label={m.tree_archive_manage_experiment({ name })}
           aria-expanded={menu.open}
           onClick={toggle}
         >
           {m.tree_archive_manage()}
-        </button>
+        </Button>
       )}
       {menu.open && createPortal(
         <div ref={menu.ref} className="option-menu fixed z-70 min-w-44 rounded-lg border border-border bg-background p-1.5 shadow-menu" style={position}>
@@ -123,6 +130,7 @@ export function ArchiveMenu({ id, name, actions, onArchive, compact = false }: {
           {actions.restoreOnly && <MenuItem onClick={() => choose("only", false)}>{m.tree_restore_only()}</MenuItem>}
           {actions.restoreAbove && <MenuItem onClick={() => choose("ancestors", false)}>{m.tree_restore_above()}</MenuItem>}
           {actions.restoreDown && <MenuItem onClick={() => choose("descendants", false)}>{m.tree_restore_down()}</MenuItem>}
+          {actions.remove && <MenuItem danger onClick={remove}>{m.tree_delete_experiment()}</MenuItem>}
         </div>, document.body,
       )}
     </div>

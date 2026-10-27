@@ -2,6 +2,7 @@ import assert from 'node:assert/strict'
 import { execFileSync } from 'node:child_process'
 import { existsSync, mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import os from 'node:os'
+import net from 'node:net'
 import path from 'node:path'
 import test from 'node:test'
 
@@ -12,6 +13,7 @@ import {
   parseArgs,
   resolveLiveDataDir,
   slotEnvironment,
+  stopSshServices,
   sqliteBackupCommand,
   supervisorCommandMatches,
 } from './dev-slot.mjs'
@@ -20,6 +22,17 @@ test('requires an explicit database mode when starting', () => {
   assert.throws(() => parseArgs(['start']), /requires --db empty or --db copy/)
   assert.equal(parseArgs(['start', '--db', 'empty']).db, 'empty')
   assert.equal(parseArgs(['start', '--db', 'copy', '--open']).open, true)
+})
+
+test('desktop launch is optional and exclusive to start', () => {
+  assert.equal(parseArgs(['start', '--db', 'empty']).desktop, false)
+  assert.throws(() => parseArgs(['status', '--desktop']), /only valid with start/)
+  assert.throws(() => parseArgs(['start', '--db', 'empty', '--open', '--desktop']), /cannot be combined/)
+  if (process.platform === 'darwin') {
+    assert.equal(parseArgs(['start', '--db', 'empty', '--desktop']).desktop, true)
+  } else {
+    assert.throws(() => parseArgs(['start', '--db', 'empty', '--desktop']), /requires macOS/)
+  }
 })
 
 test('empty mode creates no database', () => {
@@ -131,4 +144,36 @@ test('supervisor identity includes its unguessable launch token', () => {
   assert.equal(supervisorCommandMatches(command, 'token-a', helper), true)
   assert.equal(supervisorCommandMatches(command, 'token-b', helper), false)
   assert.equal(supervisorCommandMatches(command, 'token-a', '/tmp/other-helper.mjs'), false)
+})
+
+test('stopping a dashboard leaves busy SSH monitoring alive', async () => {
+  const dataDir = mkdtempSync(path.join(os.tmpdir(), 'orx-busy-service-'))
+  const root = path.join(dataDir, `ssh-service-${'a'.repeat(64)}`)
+  mkdirSync(root)
+  const server = net.createServer((socket) => {
+    let received = Buffer.alloc(0)
+    socket.on('data', (chunk) => {
+      received = Buffer.concat([received, chunk])
+      if (received.length < 4 || received.length < 4 + received.readUInt32BE()) return
+      const request = JSON.parse(received.subarray(4).toString())
+      assert.ok(['shutdown_if_idle', 'shutdown'].includes(request.operation.op))
+      const response = Buffer.from(JSON.stringify(request.operation.op === 'shutdown'
+        ? { value: null, error: 'SSH monitoring is busy' }
+        : { value: { busy: true }, error: null }))
+      const header = Buffer.alloc(4)
+      header.writeUInt32BE(response.length)
+      socket.end(Buffer.concat([header, response]))
+    })
+  })
+  await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve))
+  try {
+    writeFileSync(path.join(root, 'endpoint.json'), JSON.stringify({ port: server.address().port, token: 'fixture', version: 1 }))
+    await stopSshServices({ dataDir })
+    assert.equal(server.listening, true)
+    await assert.rejects(stopSshServices({ dataDir }, true), /SSH monitoring is busy/)
+    assert.equal(server.listening, true)
+  } finally {
+    await new Promise((resolve) => server.close(resolve))
+    rmSync(dataDir, { recursive: true, force: true })
+  }
 })
