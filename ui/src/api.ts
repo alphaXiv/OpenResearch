@@ -66,7 +66,7 @@ export interface Project {
   /** Compatibility alias returned by older/newer mixed local clients. */
   filesDir?: string;
   runCommand?: string | null;
-  /** arXiv id the project starts from (versionless). */
+  /** arXiv or alphaXiv paper id the project starts from (versionless). */
   paperId?: string | null;
   createdAt: number;
   updatedAt: number;
@@ -334,7 +334,7 @@ export const repoAccess = (owner: string, repo: string, signal?: AbortSignal) =>
     signal,
   );
 
-/** Resolve an arXiv id / URL to title + linked GitHub repo. May take a few
+/** Resolve an arXiv or alphaXiv paper id / URL to title + linked GitHub repo. May take a few
  * seconds for papers alphaXiv hasn't indexed yet (it scrapes arXiv on a miss). */
 export const resolvePaper = (id: string, signal?: AbortSignal) =>
   get<{ paper: ResolvedPaper }>(`/api/papers/resolve?id=${encodeURIComponent(id)}`, signal).then(

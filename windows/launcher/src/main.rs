@@ -79,7 +79,7 @@ mod tests {
 
     #[test]
     fn only_an_openresearch_link_is_passed_on() {
-        let url = "openresearch://reproduce?arxiv=arXiv:1706.03762";
+        let url = "openresearch://reproduce/1706.03762";
         assert_eq!(link(&[url]), Some(url.into()));
         assert_eq!(link(&["OPENRESEARCH://x"]), Some("OPENRESEARCH://x".into()));
         assert_eq!(link(&[]), None);

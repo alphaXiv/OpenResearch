@@ -486,7 +486,7 @@ fn brief_parts(
         push(&mut out, "Run command", command);
     }
     if let Some(paper_id) = paper_id {
-        push(&mut out, "Starting paper (arXiv id)", paper_id);
+        push(&mut out, "Starting paper (arXiv or alphaXiv id)", paper_id);
     }
     if files.iter().any(|f| f == PAPER_PDF) {
         push(

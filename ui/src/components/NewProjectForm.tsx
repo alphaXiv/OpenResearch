@@ -101,7 +101,7 @@ export function NewProjectForm({
   const [error, setError] = useState<string | null>(null);
   const [advancedOpen, setAdvancedOpen] = useState(false);
   const [githubSyncEnabled, setGithubSyncEnabled] = useState(false);
-  const [paperQuery, setPaperQuery] = useState(initialPaperId ?? "");
+  const [paperQuery, setPaperQuery] = useState("");
   // A paper an openresearch:// link filled in isn't the user's pick until they create it.
   const [paperFromLink, setPaperFromLink] = useState(Boolean(initialPaperId));
   const [paper, setPaper] = useState<ResolvedPaper | null>(null);
@@ -182,6 +182,12 @@ export function NewProjectForm({
       if (request === seq.current) setChoosingPaper(false);
     }
   }
+
+  // Resolve a linked id directly: the search box only recognizes arXiv ids, not alphaXiv-exclusive ones.
+  // Mount only; the dialog is keyed by the linked id.
+  useEffect(() => {
+    if (initialPaperId) void choosePaper(initialPaperId);
+  }, []);
 
   function changePaper() {
     setPaperFromLink(false);

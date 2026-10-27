@@ -12,9 +12,9 @@ import { Route as rootRouteImport } from './routes/__root'
 import { Route as IndexRouteImport } from './routes/index'
 import { Route as ProjectsRouteImport } from './routes/projects'
 import { Route as RemoteLaunchRouteImport } from './routes/remote-launch'
-import { Route as ReproduceRouteImport } from './routes/reproduce'
 import { Route as ProjectsIndexRouteImport } from './routes/projects.index'
 import { Route as ProjectsProjectIdRouteImport } from './routes/projects.$projectId'
+import { Route as ReproduceSplatRouteImport } from './routes/reproduce.$'
 import { Route as ProjectsProjectIdIndexRouteImport } from './routes/projects.$projectId.index'
 import { Route as ProjectsProjectIdSkillsRouteImport } from './routes/projects.$projectId.skills'
 import { Route as ProjectsProjectIdSettingsTabRouteImport } from './routes/projects.$projectId.settings.$tab'
@@ -36,11 +36,6 @@ const RemoteLaunchRoute = RemoteLaunchRouteImport.update({
   path: '/remote-launch',
   getParentRoute: () => rootRouteImport,
 } as any)
-const ReproduceRoute = ReproduceRouteImport.update({
-  id: '/reproduce',
-  path: '/reproduce',
-  getParentRoute: () => rootRouteImport,
-} as any)
 const ProjectsIndexRoute = ProjectsIndexRouteImport.update({
   id: '/',
   path: '/',
@@ -50,6 +45,11 @@ const ProjectsProjectIdRoute = ProjectsProjectIdRouteImport.update({
   id: '/$projectId',
   path: '/$projectId',
   getParentRoute: () => ProjectsRoute,
+} as any)
+const ReproduceSplatRoute = ReproduceSplatRouteImport.update({
+  id: '/reproduce/$',
+  path: '/reproduce/$',
+  getParentRoute: () => rootRouteImport,
 } as any)
 const ProjectsProjectIdIndexRoute = ProjectsProjectIdIndexRouteImport.update({
   id: '/',
@@ -84,8 +84,8 @@ export interface FileRoutesByFullPath {
   '/': typeof IndexRoute
   '/projects': typeof ProjectsRouteWithChildren
   '/remote-launch': typeof RemoteLaunchRoute
-  '/reproduce': typeof ReproduceRoute
   '/projects/$projectId': typeof ProjectsProjectIdRouteWithChildren
+  '/reproduce/$': typeof ReproduceSplatRoute
   '/projects/': typeof ProjectsIndexRoute
   '/projects/$projectId/skills': typeof ProjectsProjectIdSkillsRoute
   '/projects/$projectId/': typeof ProjectsProjectIdIndexRoute
@@ -96,7 +96,7 @@ export interface FileRoutesByFullPath {
 export interface FileRoutesByTo {
   '/': typeof IndexRoute
   '/remote-launch': typeof RemoteLaunchRoute
-  '/reproduce': typeof ReproduceRoute
+  '/reproduce/$': typeof ReproduceSplatRoute
   '/projects': typeof ProjectsIndexRoute
   '/projects/$projectId/skills': typeof ProjectsProjectIdSkillsRoute
   '/projects/$projectId': typeof ProjectsProjectIdIndexRoute
@@ -109,8 +109,8 @@ export interface FileRoutesById {
   '/': typeof IndexRoute
   '/projects': typeof ProjectsRouteWithChildren
   '/remote-launch': typeof RemoteLaunchRoute
-  '/reproduce': typeof ReproduceRoute
   '/projects/$projectId': typeof ProjectsProjectIdRouteWithChildren
+  '/reproduce/$': typeof ReproduceSplatRoute
   '/projects/': typeof ProjectsIndexRoute
   '/projects/$projectId/skills': typeof ProjectsProjectIdSkillsRoute
   '/projects/$projectId/': typeof ProjectsProjectIdIndexRoute
@@ -124,8 +124,8 @@ export interface FileRouteTypes {
     | '/'
     | '/projects'
     | '/remote-launch'
-    | '/reproduce'
     | '/projects/$projectId'
+    | '/reproduce/$'
     | '/projects/'
     | '/projects/$projectId/skills'
     | '/projects/$projectId/'
@@ -136,7 +136,7 @@ export interface FileRouteTypes {
   to:
     | '/'
     | '/remote-launch'
-    | '/reproduce'
+    | '/reproduce/$'
     | '/projects'
     | '/projects/$projectId/skills'
     | '/projects/$projectId'
@@ -148,8 +148,8 @@ export interface FileRouteTypes {
     | '/'
     | '/projects'
     | '/remote-launch'
-    | '/reproduce'
     | '/projects/$projectId'
+    | '/reproduce/$'
     | '/projects/'
     | '/projects/$projectId/skills'
     | '/projects/$projectId/'
@@ -162,7 +162,7 @@ export interface RootRouteChildren {
   IndexRoute: typeof IndexRoute
   ProjectsRoute: typeof ProjectsRouteWithChildren
   RemoteLaunchRoute: typeof RemoteLaunchRoute
-  ReproduceRoute: typeof ReproduceRoute
+  ReproduceSplatRoute: typeof ReproduceSplatRoute
 }
 
 declare module '@tanstack/react-router' {
@@ -188,13 +188,6 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof RemoteLaunchRouteImport
       parentRoute: typeof rootRouteImport
     }
-    '/reproduce': {
-      id: '/reproduce'
-      path: '/reproduce'
-      fullPath: '/reproduce'
-      preLoaderRoute: typeof ReproduceRouteImport
-      parentRoute: typeof rootRouteImport
-    }
     '/projects/': {
       id: '/projects/'
       path: '/'
@@ -208,6 +201,13 @@ declare module '@tanstack/react-router' {
       fullPath: '/projects/$projectId'
       preLoaderRoute: typeof ProjectsProjectIdRouteImport
       parentRoute: typeof ProjectsRoute
+    }
+    '/reproduce/$': {
+      id: '/reproduce/$'
+      path: '/reproduce/$'
+      fullPath: '/reproduce/$'
+      preLoaderRoute: typeof ReproduceSplatRouteImport
+      parentRoute: typeof rootRouteImport
     }
     '/projects/$projectId/': {
       id: '/projects/$projectId/'
@@ -284,7 +284,7 @@ const rootRouteChildren: RootRouteChildren = {
   IndexRoute: IndexRoute,
   ProjectsRoute: ProjectsRouteWithChildren,
   RemoteLaunchRoute: RemoteLaunchRoute,
-  ReproduceRoute: ReproduceRoute,
+  ReproduceSplatRoute: ReproduceSplatRoute,
 }
 export const routeTree = rootRouteImport
   ._addFileChildren(rootRouteChildren)

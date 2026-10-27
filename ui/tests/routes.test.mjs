@@ -71,19 +71,20 @@ test("real file routes distinguish task/new, task IDs, project index, and settin
   }
 });
 
-test("reproduce links yield exact arXiv ids and nothing else", async () => {
-  const { linkedArxivId } = loadModule("routes/reproduce.tsx");
-  for (const [query, id] of [
-    ["arxiv=arXiv%3A2401.10000", "2401.10000"],
-    ["arxiv=arXiv:1706.03762v2", "1706.03762v2"],
-    ["arxiv=2401.10000", null],
-    ["arxiv=arXiv%3Ahep-th%2F9901001", null],
-    ["", null],
+test("reproduce links carry arXiv and alphaXiv-exclusive ids through the path exactly", async () => {
+  const { linkedPaperId } = loadModule("routes/reproduce.$.tsx");
+  for (const [path, id] of [
+    ["/reproduce/2401.10000", "2401.10000"],
+    ["/reproduce/1706.03762v2", "1706.03762v2"],
+    ["/reproduce/hep-th/9901001", "hep-th/9901001"],
+    ["/reproduce/2610.learning-spectrum-matched-shellsort", "2610.learning-spectrum-matched-shellsort"],
+    ["/reproduce/a/b/c", null],
+    ["/reproduce/a%20b", null],
   ]) {
-    const router = await match(`/reproduce?${query}`);
+    const router = await match(path);
     const leaf = router.state.matches.at(-1);
-    assert.equal(leaf.routeId, "/reproduce", query);
-    assert.equal(linkedArxivId(leaf.search.arxiv), id, query);
+    assert.equal(leaf.routeId, "/reproduce/$", path);
+    assert.equal(linkedPaperId(leaf.params._splat), id, path);
   }
 });
 

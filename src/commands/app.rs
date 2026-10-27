@@ -389,17 +389,14 @@ fn opens_in_browser(url: &str) -> bool {
         .any(|scheme| url.starts_with(scheme))
 }
 
-/// The dashboard path an `openresearch://reproduce?…` link opens. The query
-/// passes through untouched; the page validates it.
+/// The dashboard path an `openresearch://reproduce/<paper id>` link opens; the page validates the id.
 #[cfg_attr(not(desktop_app), allow(dead_code))]
 fn deep_link_path(url: &url::Url) -> Option<String> {
-    if url.scheme() != "openresearch" || url.host_str() != Some("reproduce") {
+    let path = url.path();
+    if url.scheme() != "openresearch" || url.host_str() != Some("reproduce") || path.len() < 2 {
         return None;
     }
-    Some(match url.query() {
-        Some(query) if !query.is_empty() => format!("/reproduce?{query}"),
-        _ => "/reproduce".to_string(),
-    })
+    Some(format!("/reproduce{path}"))
 }
 
 /// [`deep_link_path`] for a link that arrived as text, on the command line or from a second launch.
@@ -441,12 +438,9 @@ mod link_file {
         fn the_running_app_takes_the_link_a_second_launch_left_once() {
             let dir = std::env::temp_dir().join(format!("orx-link-{}", uuid::Uuid::new_v4()));
             assert_eq!(take(&dir), None);
-            leave(&dir, "openresearch://reproduce?arxiv=arXiv:1").unwrap();
-            leave(&dir, "openresearch://reproduce?arxiv=arXiv:2").unwrap();
-            assert_eq!(
-                take(&dir).as_deref(),
-                Some("openresearch://reproduce?arxiv=arXiv:2")
-            );
+            leave(&dir, "openresearch://reproduce/1").unwrap();
+            leave(&dir, "openresearch://reproduce/2").unwrap();
+            assert_eq!(take(&dir).as_deref(), Some("openresearch://reproduce/2"));
             assert_eq!(take(&dir), None);
             leave(&dir, "https://example.com").unwrap();
             assert_eq!(take(&dir), None);
@@ -746,7 +740,7 @@ mod instance {
             claim_at(&dir, "app", Duration::ZERO, None)
                 .expect("the first launch is the app")
                 .listen(move |link| sent.send(link).unwrap());
-            let link = "openresearch://reproduce?arxiv=arXiv:1706.03762";
+            let link = "openresearch://reproduce/1706.03762";
             assert!(claim_at(&dir, "app", Duration::from_secs(1), Some(link)).is_none());
             assert!(claim_at(&dir, "app", Duration::from_secs(1), None).is_none());
             assert!(claim_at(&dir, "app", Duration::from_secs(1), Some("https://x.y")).is_none());
@@ -1731,17 +1725,19 @@ mod tests {
     }
 
     #[test]
-    fn reproduce_links_open_the_reproduce_page_with_their_query() {
+    fn reproduce_links_open_the_reproduce_page_for_their_paper() {
         assert_eq!(
-            link_path("openresearch://reproduce?arxiv=arXiv%3A1706.03762").as_deref(),
-            Some("/reproduce?arxiv=arXiv%3A1706.03762")
+            link_path("openresearch://reproduce/1706.03762").as_deref(),
+            Some("/reproduce/1706.03762")
         );
         assert_eq!(
-            link_path("openresearch://reproduce").as_deref(),
-            Some("/reproduce")
+            link_path("openresearch://reproduce/hep-th/9901001").as_deref(),
+            Some("/reproduce/hep-th/9901001")
         );
-        assert_eq!(link_path("openresearch://settings"), None);
-        assert_eq!(link_path("https://reproduce?arxiv=arXiv:1"), None);
+        assert_eq!(link_path("openresearch://reproduce/"), None);
+        assert_eq!(link_path("openresearch://reproduce"), None);
+        assert_eq!(link_path("openresearch://settings/x"), None);
+        assert_eq!(link_path("https://reproduce/x"), None);
         assert_eq!(link_path("not a link"), None);
     }
 
@@ -1751,12 +1747,12 @@ mod tests {
 
     #[test]
     fn the_app_takes_only_an_openresearch_link_after_app() {
-        let link = "openresearch://reproduce?arxiv=arXiv:1706.03762";
+        let link = "openresearch://reproduce/1706.03762";
         assert_eq!(app_args(&["app"]), Some(None));
         assert_eq!(app_args(&["app", link]), Some(Some(link.to_string())));
         assert_eq!(
-            app_args(&["app", "OpenResearch://reproduce"]),
-            Some(Some("OpenResearch://reproduce".to_string()))
+            app_args(&["app", "OpenResearch://reproduce/x"]),
+            Some(Some("OpenResearch://reproduce/x".to_string()))
         );
         assert_eq!(app_args(&[]), None);
         assert_eq!(app_args(&["up"]), None);
