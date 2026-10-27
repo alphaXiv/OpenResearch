@@ -77,6 +77,31 @@ class LogReadRaceTest(unittest.TestCase):
             self.assertEqual(collected, data)
             self.assertLessEqual(sum(read_bytes), len(data) * 2)
 
+    def test_stale_missing_log_is_revalidated_by_listing_the_run_directory(self):
+        spec = importlib.util.spec_from_file_location("ssh_helper", HELPER)
+        helper = importlib.util.module_from_spec(spec)
+        with patch.object(sys, "dont_write_bytecode", True):
+            spec.loader.exec_module(helper)
+        with tempfile.TemporaryDirectory() as folder:
+            self.assertTrue(helper.log_chunk({"dir": folder})["missing"])
+            (Path(folder) / "log").write_bytes(b"Traceback\n")
+            real_open, real_listdir = open, os.listdir
+            stale = [True]
+
+            def cached_miss(*args, **kwargs):
+                if stale[0]:
+                    raise FileNotFoundError(args[0])
+                return real_open(*args, **kwargs)
+
+            def revalidate(path):
+                stale[0] = False
+                return real_listdir(path)
+
+            with patch.object(helper, "open", side_effect=cached_miss), \
+                    patch.object(helper.os, "listdir", side_effect=revalidate):
+                chunk = helper.log_chunk({"dir": folder})
+            self.assertEqual(base64.b64decode(chunk["data"]), b"Traceback\n")
+
     def test_rewrite_during_collection_is_retried_but_append_is_allowed(self):
         spec = importlib.util.spec_from_file_location("ssh_helper", HELPER)
         helper = importlib.util.module_from_spec(spec)
