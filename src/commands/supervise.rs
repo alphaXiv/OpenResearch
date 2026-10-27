@@ -1110,6 +1110,7 @@ async fn run_openresearch(
             Err(_) => break false,
         }
     };
+    let mut launch_err = None;
     if !already_launched {
         if bootstrap_heartbeat.is_none() {
             bootstrap_heartbeat = descriptor
@@ -1139,7 +1140,6 @@ async fn run_openresearch(
         }
         // sshd and the org key sync can lag a freshly-online box, so the
         // launch retries for ~2 minutes before giving up.
-        let mut launch_err = None;
         for backoff_secs in [0u64, 5, 10, 20, 30, 45] {
             if backoff_secs > 0 {
                 tokio::time::sleep(Duration::from_secs(backoff_secs)).await;
@@ -1182,7 +1182,7 @@ async fn run_openresearch(
                 }
             }
         }
-        if let Some(err) = launch_err.filter(|_| descriptor.rental_lease.is_none()) {
+        if let Some(err) = launch_err.take_if(|_| descriptor.rental_lease.is_none()) {
             if store.update_status(&run_id, RunStatus::Failed, Some(now_ms()), None)? {
                 store.set_result_markdown(
                     &run_id,
@@ -1215,6 +1215,12 @@ async fn run_openresearch(
     .await;
     if descriptor.rental_lease.is_none() {
         teardown_box(&store, &lifecycle, &sandbox_id, &run_id).await;
+    }
+    if let (Ok(RunStatus::Lost), Some(err)) = (&watch, launch_err) {
+        store.set_result_markdown(
+            &run_id,
+            &format!("Outcome unavailable: the run never started on box {sandbox_id}: {err}"),
+        )?;
     }
     watch?;
     Ok(())

@@ -34,7 +34,7 @@ impl Run {
         if self.status == "cancelled" {
             return self.cancel_reason.as_ref().map(|r| format!("reason: {r}"));
         }
-        if self.status != "failed" {
+        if !matches!(self.status.as_str(), "failed" | "lost") {
             return None;
         }
         match self.result_markdown.as_deref().map(str::trim) {
@@ -163,6 +163,16 @@ mod tests {
         assert_eq!(
             run.failure_detail().as_deref(),
             Some("reason: — (no message recorded — see `orx logs r1`)")
+        );
+    }
+
+    #[test]
+    fn lost_run_reports_its_recorded_reason() {
+        let mut run = Run::from(&stored_run("lost", None));
+        run.result_markdown = Some("Outcome unavailable: box b1 was deleted".into());
+        assert_eq!(
+            run.failure_detail().as_deref(),
+            Some("reason: Outcome unavailable: box b1 was deleted")
         );
     }
 
