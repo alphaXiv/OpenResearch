@@ -4,7 +4,7 @@ import { statusLabel } from "./StatusBadge";
 import { getComputeSettingsQuery } from "../queries/settings";
 import { TARGET_LABELS } from "../computeTargets";
 import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
-import { FlaskConical, FolderOpen, Package, GitBranch, Cpu, MessagesSquare, Plus, Terminal } from "lucide-react";
+import { FlaskConical, FolderOpen, Package, GitBranch, GitFork, Cpu, MessagesSquare, Plus, Terminal } from "lucide-react";
 import { useQuery } from "@tanstack/react-query";
 import { getSessionWorktreeQuery } from "../queries/files";
 import { countChanges, parseDiffFiles } from "./GitDiff";
@@ -13,13 +13,13 @@ import { BackendLogo } from "./BackendLogos";
 import { IconButton, MenuItem, StatusIndicator, Spinner, Tooltip } from "./ui";
 import { usePopover } from "./ModelPicker";
 
-export function WorkspaceTools({ expanded, experiments, runs, onOpenExperiment, rightOffset, activeView, projectId, onCompute, sessionId, busy, onChanges, onFiles, onTerminal, onArtifacts, onExperiments, onSideChat, sessions, onSelectSideChat }: {
+export function WorkspaceTools({ expanded, experiments, runs, onOpenExperiment, rightOffset, activeView, projectId, onCompute, sessionId, busy, onChanges, onFiles, onTerminal, onArtifacts, onExperiments, onRoutes, onSideChat, sessions, onSelectSideChat }: {
   expanded: boolean;
   experiments: Experiment[];
   runs: Run[];
   onOpenExperiment: (id: string, runId: string) => void;
   rightOffset?: number;
-  activeView: "files" | "artifacts" | "experiments" | "terminal" | null;
+  activeView: "files" | "artifacts" | "experiments" | "routes" | "terminal" | null;
   projectId: string;
   onCompute: () => void;
   sessionId: string | null;
@@ -29,6 +29,7 @@ export function WorkspaceTools({ expanded, experiments, runs, onOpenExperiment, 
   onTerminal: () => void;
   onArtifacts: () => void;
   onExperiments: () => void;
+  onRoutes: () => void;
   /** Absent until there is a chat to branch from. */
   onSideChat?: () => void;
   sessions: ChatSession[];
@@ -42,6 +43,7 @@ export function WorkspaceTools({ expanded, experiments, runs, onOpenExperiment, 
     { id: "files", label: m.app_files(), Icon: FolderOpen, onClick: onFiles },
     { id: "artifacts", label: m.app_artifacts(), Icon: Package, onClick: onArtifacts },
     { id: "experiments", label: m.app_experiments(), Icon: FlaskConical, onClick: onExperiments },
+    { id: "routes", label: m.app_routes(), Icon: GitFork, onClick: onRoutes },
     { id: "terminal", label: m.workspace_terminal(), Icon: Terminal, onClick: onTerminal },
   ];
   return (

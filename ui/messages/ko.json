@@ -1456,5 +1456,10 @@
   "skills_detection_accepted": "{count}개 수락됨",
   "desktop_zoom_controls": "확대/축소 컨트롤",
   "desktop_zoom_reset": "초기화",
-  "reproduce_paper_prompt": "논문 “{title}”({source})의 결과를 재현해 주세요."
+  "reproduce_paper_prompt": "논문 “{title}”({source})의 결과를 재현해 주세요.",
+  "app_routes": "경로",
+  "routes_archived_ancestor": "보관된 상위 실험",
+  "routes_other_task": "다른 작업에서 생성됨",
+  "routes_missing_parent": "상위 실험을 찾을 수 없음",
+  "routes_invalid_lineage": "잘못된 실험 관계"
 }

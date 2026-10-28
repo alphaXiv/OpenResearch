@@ -1456,5 +1456,10 @@
   "skills_detection_accepted": "Zaakceptowano: {count}",
   "desktop_zoom_controls": "Sterowanie powiększeniem",
   "desktop_zoom_reset": "Resetuj",
-  "reproduce_paper_prompt": "Odtwórz wyniki artykułu „{title}” ({source})."
+  "reproduce_paper_prompt": "Odtwórz wyniki artykułu „{title}” ({source}).",
+  "app_routes": "Ścieżki",
+  "routes_archived_ancestor": "Zarchiwizowany eksperyment nadrzędny",
+  "routes_other_task": "Z innego zadania",
+  "routes_missing_parent": "Eksperyment nadrzędny niedostępny",
+  "routes_invalid_lineage": "Nieprawidłowe powiązania"
 }

@@ -1456,5 +1456,10 @@
   "skills_detection_accepted": "تم قبول {count}",
   "desktop_zoom_controls": "عناصر التحكم في التكبير",
   "desktop_zoom_reset": "إعادة تعيين",
-  "reproduce_paper_prompt": "أعد إنتاج نتائج الورقة البحثية «{title}» ({source})."
+  "reproduce_paper_prompt": "أعد إنتاج نتائج الورقة البحثية «{title}» ({source}).",
+  "app_routes": "المسارات",
+  "routes_archived_ancestor": "تجربة سابقة مؤرشفة",
+  "routes_other_task": "من مهمة أخرى",
+  "routes_missing_parent": "التجربة الأصلية غير متاحة",
+  "routes_invalid_lineage": "علاقة تجارب غير صالحة"
 }

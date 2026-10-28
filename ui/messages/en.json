@@ -1456,5 +1456,10 @@
   "skills_detection_accepted": "{count} accepted",
   "desktop_zoom_controls": "Zoom controls",
   "desktop_zoom_reset": "Reset",
-  "reproduce_paper_prompt": "Reproduce the paper “{title}” ({source})."
+  "reproduce_paper_prompt": "Reproduce the paper “{title}” ({source}).",
+  "app_routes": "Routes",
+  "routes_archived_ancestor": "Archived ancestor",
+  "routes_other_task": "From another task",
+  "routes_missing_parent": "Parent unavailable",
+  "routes_invalid_lineage": "Invalid lineage"
 }

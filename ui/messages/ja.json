@@ -1456,5 +1456,10 @@
   "skills_detection_accepted": "{count} 件を採用",
   "desktop_zoom_controls": "ズーム操作",
   "desktop_zoom_reset": "リセット",
-  "reproduce_paper_prompt": "論文「{title}」({source}) を再現してください。"
+  "reproduce_paper_prompt": "論文「{title}」({source}) を再現してください。",
+  "app_routes": "ルート",
+  "routes_archived_ancestor": "アーカイブ済みの祖先",
+  "routes_other_task": "別のタスクから",
+  "routes_missing_parent": "親実験が見つかりません",
+  "routes_invalid_lineage": "無効な実験関係"
 }

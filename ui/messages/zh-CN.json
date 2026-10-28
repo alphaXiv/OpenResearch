@@ -1456,5 +1456,10 @@
   "skills_detection_accepted": "已接受 {count} 项",
   "desktop_zoom_controls": "缩放控件",
   "desktop_zoom_reset": "重置",
-  "reproduce_paper_prompt": "复现论文《{title}》({source})。"
+  "reproduce_paper_prompt": "复现论文《{title}》({source})。",
+  "app_routes": "路线",
+  "routes_archived_ancestor": "已归档的祖先",
+  "routes_other_task": "来自其他任务",
+  "routes_missing_parent": "父实验不可用",
+  "routes_invalid_lineage": "实验关系异常"
 }

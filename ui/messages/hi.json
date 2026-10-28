@@ -1456,5 +1456,10 @@
   "skills_detection_accepted": "{count} स्वीकृत",
   "desktop_zoom_controls": "ज़ूम नियंत्रण",
   "desktop_zoom_reset": "रीसेट",
-  "reproduce_paper_prompt": "शोध-पत्र “{title}” ({source}) को पुनरुत्पादित करें।"
+  "reproduce_paper_prompt": "शोध-पत्र “{title}” ({source}) को पुनरुत्पादित करें।",
+  "app_routes": "मार्ग",
+  "routes_archived_ancestor": "संग्रहीत पूर्वज",
+  "routes_other_task": "दूसरे कार्य से",
+  "routes_missing_parent": "मूल प्रयोग उपलब्ध नहीं",
+  "routes_invalid_lineage": "अमान्य प्रयोग संबंध"
 }
