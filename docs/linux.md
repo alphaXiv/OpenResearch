@@ -59,10 +59,11 @@ also builds, smoke-tests, and uploads both AppImages
 (`openresearch-linux-<arch>-appimage`). The smoke test runs after WebKitGTK is
 removed from the runner, so it fails if the image falls back to a host copy.
 
-To build one locally on Ubuntu 22.04 or newer:
+To build one locally on Ubuntu 22.04 or newer with Node 22 and pnpm 10:
 
 ```sh
 sudo apt-get install libwebkit2gtk-4.1-dev libgtk-3-dev librsvg2-dev file patchelf
+pnpm -C ui install --frozen-lockfile && pnpm -C ui build
 cargo build --release --features desktop
 scripts/build-linux-appimage.sh target/release/orx dist
 ```

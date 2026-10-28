@@ -170,6 +170,8 @@ pub(crate) struct Settings {
     /// place; only the silent apply stops.
     #[serde(default)]
     pub auto_update: Option<bool>,
+    #[serde(default)]
+    pub update_channel: Option<crate::updates::ReleaseChannel>,
     /// Surfaces whose `first_action` event has already been sent, so a restart
     /// cannot re-report a later action as the user's first one.
     #[serde(default)]
@@ -313,6 +315,16 @@ pub(crate) fn auto_update_enabled() -> bool {
 
 pub(crate) fn set_auto_update_enabled(enabled: bool) -> std::io::Result<()> {
     mutate_settings(|settings| settings.auto_update = Some(enabled))
+}
+
+pub(crate) fn update_channel() -> crate::updates::ReleaseChannel {
+    load_settings()
+        .and_then(|settings| settings.update_channel)
+        .unwrap_or_else(crate::updates::current_release_channel)
+}
+
+pub(crate) fn set_update_channel(channel: crate::updates::ReleaseChannel) -> std::io::Result<()> {
+    mutate_settings(|settings| settings.update_channel = Some(channel))
 }
 
 pub(crate) fn github_default_prompt_seen() -> bool {

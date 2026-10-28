@@ -3,12 +3,11 @@ import { setScopedQueryData, isCurrentScope } from "../queries/client";
 import { getSshConfigQuery } from "../queries/settings";
 import { X } from "lucide-react";
 import { useEffect, useRef, useState } from "react";
-import { createPortal } from "react-dom";
+import { Dialog } from "@base-ui/react/dialog";
 import { saveSshConfig, type SshConfigFile } from "../api";
 import { m } from "../paraglide/messages.js";
 import { CodeEditor } from "./CodeEditor";
 import { Button, IconButton, showAlert, Spinner } from "./ui";
-import { useDialogFocus } from "./useDialogFocus";
 
 export function SshConfigDialog({
   onClose,
@@ -25,13 +24,11 @@ export function SshConfigDialog({
   const saveMutation = useMutation({ mutationFn: ({ content, previous }: { content: string; previous: string }) => saveSshConfig(content, previous) });
   const [saving, setSaving] = useState(false);
   const dialogRef = useRef<HTMLDivElement>(null);
-  const onCloseRef = useRef(onClose);
   const dirty = file !== null && draft !== file.content;
   const dirtyRef = useRef(dirty);
   const savingRef = useRef(saving);
   dirtyRef.current = dirty;
   savingRef.current = saving;
-  onCloseRef.current = onClose;
 
   useEffect(() => {
     if (!fileQuery.data || dirtyRef.current || savingRef.current) return;
@@ -40,12 +37,11 @@ export function SshConfigDialog({
   }, [fileQuery.data]);
 
   const close = () => {
-    if (savingRef.current) return;
-    if (dirtyRef.current && !window.confirm(m.ssh_config_discard_changes())) return;
-    onCloseRef.current();
+    if (savingRef.current) return false;
+    if (dirtyRef.current && !window.confirm(m.ssh_config_discard_changes())) return false;
+    onClose();
+    return true;
   };
-
-  useDialogFocus(dialogRef, close, "textarea");
 
   async function save() {
     if (!file || !dirty || saving) return;
@@ -64,59 +60,63 @@ export function SshConfigDialog({
     }
   }
 
-  return createPortal(
-    <div
-      className="fixed inset-0 z-200 flex items-center justify-center bg-modal-backdrop p-5"
-      onClick={(event) => {
-        if (event.target === event.currentTarget) close();
-      }}
-    >
-      <div
-        ref={dialogRef}
-        className="relative flex h-[min(48rem,calc(100vh-2.5rem))] w-200 max-w-full flex-col overflow-hidden rounded-xl border border-border bg-background shadow-modal"
-        role="dialog"
-        aria-modal="true"
-        aria-labelledby="ssh-config-dialog-title"
-        tabIndex={-1}
-      >
-        <div className="shrink-0 px-6 pt-5 pb-4 pe-14">
-          <h2 id="ssh-config-dialog-title" className="m-0 text-xl font-medium">
-            {m.ssh_config_title()}
-          </h2>
-          <code className="mt-1 block font-mono text-sm text-subtext">~/.ssh/config</code>
-        </div>
-        <IconButton
-          className="absolute end-3.5 top-3.5"
-          aria-label={m.ssh_config_close()}
-          onClick={close}
-          disabled={saving}
-        >
-          <X size={16} />
-        </IconButton>
-        <div className="file-view min-h-0 flex-1 border-y border-border-variant bg-background">
-          {loadError ? (
-            <p className="m-5 text-sm text-accent-red">{loadError}</p>
-          ) : file === null ? (
-            <div className="flex items-center gap-2 p-5 text-sm text-subtext">
-              <Spinner /> {m.ssh_config_loading()}
+  return (
+    <Dialog.Root open onOpenChange={(open, details) => {
+      if (!open && !close()) {
+        details.event.preventDefault();
+        details.cancel();
+      }
+    }}>
+      <Dialog.Portal>
+        <Dialog.Backdrop className="fixed inset-0 z-200 bg-modal-backdrop" />
+        <Dialog.Viewport className="fixed inset-0 z-200 flex items-center justify-center p-5">
+          <Dialog.Popup
+            // Base UI leaves Escape to the IME while composition is active.
+            onKeyDown={(event) => { if (event.key === "Escape") event.stopPropagation(); }}
+            ref={dialogRef}
+            initialFocus={() => dialogRef.current?.querySelector("textarea") ?? true}
+            className="relative flex h-[min(48rem,calc(100vh-2.5rem))] w-200 max-w-full flex-col overflow-hidden rounded-xl border border-border bg-background shadow-modal"
+            aria-labelledby="ssh-config-dialog-title"
+          >
+            <div className="shrink-0 px-6 pt-5 pb-4 pe-14">
+              <h2 id="ssh-config-dialog-title" className="m-0 text-xl font-medium">
+                {m.ssh_config_title()}
+              </h2>
+              <code className="mt-1 block font-mono text-sm text-subtext">~/.ssh/config</code>
             </div>
-          ) : (
-            <CodeEditor
-              value={draft}
-              onChange={setDraft}
-              onSave={() => void save()}
-              path={file.path}
-            />
-          )}
-        </div>
-        <div className="flex shrink-0 justify-end gap-2.5 p-4">
-          <Button onClick={close} disabled={saving}>{m.settings_page_cancel()}</Button>
-          <Button variant="primary" onClick={() => void save()} disabled={!dirty || saving}>
-            {saving ? m.common_saving() : m.common_save()}
-          </Button>
-        </div>
-      </div>
-    </div>,
-    document.body,
+            <IconButton
+              className="absolute end-3.5 top-3.5"
+              aria-label={m.ssh_config_close()}
+              onClick={close}
+              disabled={saving}
+            >
+              <X size={16} />
+            </IconButton>
+            <div className="file-view min-h-0 flex-1 border-y border-border-variant bg-background">
+              {loadError ? (
+                <p className="m-5 text-sm text-accent-red">{loadError}</p>
+              ) : file === null ? (
+                <div className="flex items-center gap-2 p-5 text-sm text-subtext">
+                  <Spinner /> {m.ssh_config_loading()}
+                </div>
+              ) : (
+                <CodeEditor
+                  value={draft}
+                  onChange={setDraft}
+                  onSave={() => void save()}
+                  path={file.path}
+                />
+              )}
+            </div>
+            <div className="flex shrink-0 justify-end gap-2.5 p-4">
+              <Button onClick={close} disabled={saving}>{m.settings_page_cancel()}</Button>
+              <Button variant="primary" onClick={() => void save()} disabled={!dirty || saving}>
+                {saving ? m.common_saving() : m.common_save()}
+              </Button>
+            </div>
+          </Dialog.Popup>
+        </Dialog.Viewport>
+      </Dialog.Portal>
+    </Dialog.Root>
   );
 }

@@ -2453,6 +2453,7 @@ pub struct ChatHost {
     /// Serializes terminal recovery per session so double-clicks converge on
     /// the first durable action before either request re-reads the failed turn.
     recovery_locks: Mutex<HashMap<String, Arc<Mutex<()>>>>,
+    submission_locks: Mutex<HashMap<String, Arc<Mutex<()>>>>,
     /// Per-session bridge token and immutable spawn-time Plan policy, minted
     /// once per bridged child spawn (the
     /// resident bridge carries it for the child's whole life — re-minting
@@ -2751,6 +2752,7 @@ impl TurnSettings {
 pub struct SteerMessage {
     pub display: String,
     pub text: String,
+    pub client_turn_id: Option<String>,
 }
 
 #[derive(Clone)]
@@ -2991,18 +2993,16 @@ fn selected_slash_skills(
                     instructions,
                 });
             }
-        } else {
-            if let Some(instructions) = crate::local::user_skills::instructions(
-                &name,
-                harness,
-                session_id
-                    .map(|id| crate::local::git::existing_session_worktree_path(project, id))
-                    .as_deref(),
-                Some(std::path::Path::new(&project.repo_path)),
-            ) {
-                seen.insert(name);
-                selected.push(SelectedSlashSkill::User { instructions });
-            }
+        } else if let Some(instructions) = crate::local::user_skills::instructions(
+            &name,
+            harness,
+            session_id
+                .map(|id| crate::local::git::existing_session_worktree_path(project, id))
+                .as_deref(),
+            Some(std::path::Path::new(&project.repo_path)),
+        ) {
+            seen.insert(name);
+            selected.push(SelectedSlashSkill::User { instructions });
         }
     }
     (selected, has_request)
@@ -3434,6 +3434,7 @@ impl ChatHost {
             pending_permissions: std::sync::Mutex::new(HashMap::new()),
             permission_review_locks: Mutex::new(HashMap::new()),
             recovery_locks: Mutex::new(HashMap::new()),
+            submission_locks: Mutex::new(HashMap::new()),
             gate_tokens: std::sync::Mutex::new(HashMap::new()),
             plan_changes: std::sync::Mutex::new(HashMap::new()),
             permission_changes: std::sync::Mutex::new(HashMap::new()),
@@ -4094,6 +4095,7 @@ impl ChatHost {
         }
         let id = new_queued_id();
         let client_turn_id = format!("ct_{}", uuid::Uuid::new_v4());
+        let steer_client_turn_id = message.client_turn_id.clone();
         let messages = vec![AnnotatedText {
             text: message.display.clone(),
             annotations: Vec::new(),
@@ -4135,6 +4137,9 @@ impl ChatHost {
             .or_default()
             .push_back(queued);
         self.emit_queued(session_id);
+        if let Some(id) = steer_client_turn_id.as_deref() {
+            store.finish_steer(session_id, id)?;
+        }
         Ok(())
     }
 
@@ -4608,6 +4613,46 @@ impl ChatHost {
         annotations: Vec<TextAnnotation>,
         client_turn_id: Option<String>,
     ) -> Result<Option<SendMessageResult>> {
+        let lock = self
+            .submission_locks
+            .lock()
+            .await
+            .entry(session_id.to_string())
+            .or_default()
+            .clone();
+        let _submission = lock.lock().await;
+        let store = Store::open()?;
+        let id = client_turn_id.as_deref().filter(|id| !id.trim().is_empty());
+        let request_hash = message_request_hash(&text, &overrides, &images, &annotations)?;
+        if let Some(id) = id {
+            if let Some((hash, delivered)) = store.steer_receipt(session_id, id)? {
+                if hash != request_hash {
+                    return Err(client_turn_conflict());
+                }
+                if delivered {
+                    return Ok(None);
+                }
+                return Err(anyhow!("Steering delivery could not be confirmed"));
+            }
+            let existing_turn = store.get_chat_turn_by_client_id(session_id, id)?.is_some();
+            let existing_queue = store
+                .list_queued_chat_messages_for_session(session_id)?
+                .iter()
+                .any(|item| item.client_turn_id == id);
+            if existing_turn || existing_queue {
+                return self
+                    .send_message_locked(
+                        session_id,
+                        text,
+                        overrides,
+                        images,
+                        annotations,
+                        client_turn_id,
+                    )
+                    .await
+                    .map(Some);
+            }
+        }
         if !text.trim().is_empty() && images.is_empty() && annotations.is_empty() {
             let sink = {
                 let steering = self.steering.lock().unwrap();
@@ -4617,7 +4662,6 @@ impl ChatHost {
                     .map(|sink| sink.tx.clone())
             };
             if let Some(sink) = sink {
-                let store = Store::open()?;
                 let session = store
                     .get_chat_session(session_id)?
                     .ok_or_else(|| anyhow!("chat session not found"))?;
@@ -4637,13 +4681,14 @@ impl ChatHost {
                         })
                         .unwrap_or_else(|| text.clone()),
                     display: text.clone(),
+                    client_turn_id: id.map(str::to_string),
                 };
-                if sink.send(message).is_ok() {
+                if send_live_steer(&store, session_id, id, &request_hash, &sink, message)? {
                     return Ok(None);
                 }
             }
         }
-        self.send_message(
+        self.send_message_locked(
             session_id,
             text,
             overrides,
@@ -4665,24 +4710,52 @@ impl ChatHost {
         annotations: Vec<TextAnnotation>,
         client_turn_id: Option<String>,
     ) -> Result<SendMessageResult> {
-        let transcript_text = (!annotations.is_empty()).then(|| {
-            if text.trim().is_empty() {
-                "Asked about selected text".to_string()
-            } else {
-                text.clone()
+        let lock = self
+            .submission_locks
+            .lock()
+            .await
+            .entry(session_id.to_string())
+            .or_default()
+            .clone();
+        let _submission = lock.lock().await;
+        self.send_message_locked(
+            session_id,
+            text,
+            overrides,
+            images,
+            annotations,
+            client_turn_id,
+        )
+        .await
+    }
+
+    async fn send_message_locked(
+        self: &Arc<Self>,
+        session_id: &str,
+        text: String,
+        overrides: TurnOverrides,
+        images: Vec<ImageAttachment>,
+        annotations: Vec<TextAnnotation>,
+        client_turn_id: Option<String>,
+    ) -> Result<SendMessageResult> {
+        if let Some(id) = client_turn_id.as_deref().filter(|id| !id.trim().is_empty()) {
+            if let Some((hash, _)) = Store::open()?.steer_receipt(session_id, id)? {
+                if hash != message_request_hash(&text, &overrides, &images, &annotations)? {
+                    return Err(client_turn_conflict());
+                }
+                return Err(anyhow!(
+                    "This message was submitted as steering; delivery could not be confirmed"
+                ));
             }
-        });
+        }
+        let transcript = message_transcript(&text, &annotations);
         self.send_message_showing(
             session_id,
             SendTurnRequest {
                 messages: vec![AnnotatedText { text, annotations }],
                 prepared_input: None,
                 replace_settings: false,
-                transcript: TranscriptDisplay {
-                    text: transcript_text,
-                    annotations: None,
-                    record_user_message: true,
-                },
+                transcript,
                 overrides,
                 images: TurnAttachments::Uploaded(images),
                 admission: TurnAdmission::QueueIfBusy,
@@ -6719,6 +6792,7 @@ impl ChatHost {
         self.acp.stop(session_id).await;
         self.respond_locks.lock().await.remove(session_id);
         self.recovery_locks.lock().await.remove(session_id);
+        self.submission_locks.lock().await.remove(session_id);
         self.queue_dispatch_cancelled
             .lock()
             .unwrap()
@@ -7119,6 +7193,69 @@ impl RecoveryOverrides {
             settings.reasoning_level = reasoning_level;
         }
     }
+}
+
+fn send_live_steer(
+    store: &Store,
+    session_id: &str,
+    client_turn_id: Option<&str>,
+    request_hash: &str,
+    sink: &mpsc::UnboundedSender<SteerMessage>,
+    message: SteerMessage,
+) -> Result<bool> {
+    // The claim stays uncertain until the harness confirms or the message is parked.
+    if let Some(id) = client_turn_id {
+        if !store.claim_steer(session_id, id, request_hash)? {
+            let Some((hash, delivered)) = store.steer_receipt(session_id, id)? else {
+                return Ok(false);
+            };
+            if hash != request_hash {
+                return Err(client_turn_conflict());
+            }
+            if delivered {
+                return Ok(true);
+            }
+            return Err(anyhow!("Steering delivery could not be confirmed"));
+        }
+    }
+    if sink.send(message).is_ok() {
+        return Ok(true);
+    }
+    if let Some(id) = client_turn_id {
+        store.discard_steer(session_id, id)?;
+    }
+    Ok(false)
+}
+
+fn message_transcript(text: &str, annotations: &[TextAnnotation]) -> TranscriptDisplay {
+    TranscriptDisplay {
+        text: (!annotations.is_empty()).then(|| {
+            if text.trim().is_empty() {
+                "Asked about selected text".to_string()
+            } else {
+                text.to_string()
+            }
+        }),
+        annotations: None,
+        record_user_message: true,
+    }
+}
+
+fn message_request_hash(
+    text: &str,
+    overrides: &TurnOverrides,
+    images: &[ImageAttachment],
+    annotations: &[TextAnnotation],
+) -> Result<String> {
+    turn_request_hash(
+        &[AnnotatedText {
+            text: text.to_string(),
+            annotations: annotations.to_vec(),
+        }],
+        &message_transcript(text, annotations),
+        overrides,
+        &TurnAttachments::Uploaded(images.to_vec()),
+    )
 }
 
 fn turn_request_hash(
@@ -7877,15 +8014,17 @@ impl TurnCtx {
         self.upsert_part_raw(part);
     }
 
-    /// Record a steer the harness just delivered, inline where the running turn
-    /// received it. Flushed straight away: the user is waiting to see that the
-    /// message landed, so this can't sit out the flush interval.
-    pub fn record_steer(&mut self, display: &str) {
+    /// Record a steer inline without waiting for the flush interval.
+    pub fn record_steer(&mut self, steer: &SteerMessage, confirmed: bool) {
         self.upsert_part(WirePart::steer(
             format!("steer-{}", uuid::Uuid::new_v4()),
-            display,
+            &steer.display,
         ));
-        let _ = self.flush();
+        if self.flush().is_ok() && confirmed {
+            if let Some(id) = steer.client_turn_id.as_deref() {
+                let _ = Store::open().and_then(|store| store.finish_steer(&self.session_id, id));
+            }
+        }
     }
 
     /// Like `upsert_part`, but carries forward an existing part's `children` when
@@ -11157,6 +11296,11 @@ mod steering_tests {
     fn test_store(tag: &str) -> (Store, PathBuf) {
         let dir = std::env::temp_dir().join(format!("orx-steer-{tag}-{}", uuid::Uuid::new_v4()));
         let store = Store::open_at(dir.clone()).unwrap();
+        add_test_session(&store);
+        (store, dir)
+    }
+
+    fn add_test_session(store: &Store) {
         store
             .create_chat_session(&StoredChatSession {
                 id: "owner".into(),
@@ -11183,7 +11327,6 @@ mod steering_tests {
                 updated_at: 1,
             })
             .unwrap();
-        (store, dir)
     }
 
     fn running_settings() -> TurnSettings {
@@ -11200,7 +11343,153 @@ mod steering_tests {
         SteerMessage {
             display: text.into(),
             text: text.into(),
+            client_turn_id: None,
         }
+    }
+
+    #[tokio::test]
+    async fn live_steering_retries_share_the_original_admission() {
+        const TEST_ENV: &str = "ORX_STEER_RECEIPT_TEST";
+        if let Some(dir) = std::env::var_os(TEST_ENV) {
+            let store = Store::open().unwrap();
+            add_test_session(&store);
+            let host = test_host();
+            let (tx, mut rx) = mpsc::unbounded_channel();
+            let route = host.register_steering("owner", tx, TurnSettings::default());
+            let send = || {
+                host.steer_message(
+                    "owner",
+                    "hello".into(),
+                    TurnOverrides::default(),
+                    vec![],
+                    vec![],
+                    Some("ct1".into()),
+                )
+            };
+            assert!(send().await.unwrap().is_none());
+            let steer = rx.try_recv().unwrap();
+            assert_eq!(steer.client_turn_id.as_deref(), Some("ct1"));
+            assert!(send().await.is_err());
+            assert!(rx.try_recv().is_err());
+            store.finish_steer("owner", "ct1").unwrap();
+            drop(route);
+            assert!(send().await.unwrap().is_none());
+            assert!(host
+                .steer_message(
+                    "owner",
+                    "changed".into(),
+                    TurnOverrides::default(),
+                    vec![],
+                    vec![],
+                    Some("ct1".into())
+                )
+                .await
+                .is_err());
+            assert!(rx.try_recv().is_err());
+            drop(store);
+            let _ = dir;
+            return;
+        }
+        let dir = std::env::temp_dir().join(format!("orx-live-steer-{}", uuid::Uuid::new_v4()));
+        let output = std::process::Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "local::chat::steering_tests::live_steering_retries_share_the_original_admission",
+                "--nocapture",
+            ])
+            .env(TEST_ENV, &dir)
+            .env("ORX_DATA_DIR", &dir)
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn steering_retry_is_deduplicated_and_uncertain_claims_do_not_redeliver() {
+        let (store, dir) = test_store("idempotency");
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let request_hash =
+            message_request_hash("hello", &TurnOverrides::default(), &[], &[]).unwrap();
+        assert!(send_live_steer(
+            &store,
+            "owner",
+            Some("ct1"),
+            &request_hash,
+            &tx,
+            steer("hello")
+        )
+        .unwrap());
+        assert_eq!(rx.try_recv().unwrap().display, "hello");
+        assert!(send_live_steer(
+            &store,
+            "owner",
+            Some("ct1"),
+            &request_hash,
+            &tx,
+            steer("hello")
+        )
+        .is_err());
+        store.finish_steer("owner", "ct1").unwrap();
+        drop(store);
+        let store = Store::open_at(dir.clone()).unwrap();
+        assert!(send_live_steer(
+            &store,
+            "owner",
+            Some("ct1"),
+            &request_hash,
+            &tx,
+            steer("hello")
+        )
+        .unwrap());
+        assert!(rx.try_recv().is_err());
+        assert!(is_client_turn_conflict(
+            &send_live_steer(
+                &store,
+                "owner",
+                Some("ct1"),
+                "different",
+                &tx,
+                steer("other")
+            )
+            .unwrap_err()
+        ));
+        assert!(store
+            .claim_steer("owner", "uncertain", &request_hash)
+            .unwrap());
+        drop(store);
+        let store = Store::open_at(dir.clone()).unwrap();
+        assert!(send_live_steer(
+            &store,
+            "owner",
+            Some("uncertain"),
+            &request_hash,
+            &tx,
+            steer("hello")
+        )
+        .is_err());
+        assert!(rx.try_recv().is_err());
+        store.delete_chat_session("owner").unwrap();
+        assert!(store.steer_receipt("owner", "ct1").unwrap().is_none());
+        drop(store);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn dead_steering_channel_releases_claim_for_queue_fallback() {
+        let (store, dir) = test_store("dead-receipt");
+        let (tx, rx) = mpsc::unbounded_channel();
+        drop(rx);
+        assert!(
+            !send_live_steer(&store, "owner", Some("ct1"), "hash", &tx, steer("hello")).unwrap()
+        );
+        assert!(store.steer_receipt("owner", "ct1").unwrap().is_none());
+        drop(store);
+        let _ = std::fs::remove_dir_all(dir);
     }
 
     #[test]
@@ -11260,8 +11549,15 @@ mod steering_tests {
         let host = test_host();
         let (store, dir) = test_store("queued");
 
-        host.park_steer_with_store("owner", steer("/plan the migration"), &store)
+        assert!(store.claim_steer("owner", "ct-parked", "hash").unwrap());
+        let mut message = steer("/plan the migration");
+        message.client_turn_id = Some("ct-parked".into());
+        host.park_steer_with_store("owner", message, &store)
             .unwrap();
+        assert_eq!(
+            store.steer_receipt("owner", "ct-parked").unwrap(),
+            Some(("hash".into(), true))
+        );
 
         let queued = host.queued_items("owner");
         assert_eq!(queued.len(), 1);

@@ -326,6 +326,15 @@ fn opens_in_browser(url: &str) -> bool {
         .any(|scheme| url.starts_with(scheme))
 }
 
+/// The dashboard path an `openresearch://reproduce/<paper id>` link opens; the page validates the id.
+#[cfg_attr(not(all(desktop_app, target_os = "macos")), allow(dead_code))]
+fn deep_link_path(scheme: &str, host: Option<&str>, path: &str) -> Option<String> {
+    if scheme != "openresearch" || host != Some("reproduce") || path.len() < 2 {
+        return None;
+    }
+    Some(format!("/reproduce{path}"))
+}
+
 #[cfg(windows)]
 fn wide(text: &str) -> Vec<u16> {
     text.encode_utf16().chain(Some(0)).collect()
@@ -635,6 +644,9 @@ mod imp {
         Menu(MenuId),
         #[cfg(not(target_os = "macos"))]
         Focus,
+        /// The dashboard page finished loading and can take `orx:open-path`.
+        #[cfg(target_os = "macos")]
+        PageReady,
         #[cfg(windows)]
         Close,
         #[cfg(windows)]
@@ -833,6 +845,8 @@ mod imp {
         );
 
         let shown = Rc::new(Cell::new(false));
+        #[cfg(target_os = "macos")]
+        let page_ready = Rc::new(Cell::new(false));
         let replaced = Rc::new(RefCell::new(HashMap::new()));
         let builder = WebViewBuilder::new()
             .with_accept_first_mouse(true)
@@ -867,13 +881,24 @@ mod imp {
                 let window = window.clone();
                 let origin = origin.clone();
                 let shown = shown.clone();
+                #[cfg(target_os = "macos")]
+                let page_ready = page_ready.clone();
                 let proxy = event_loop.create_proxy();
                 move |event, url| {
+                    #[cfg(target_os = "macos")]
+                    if matches!(event, PageLoadEvent::Started) {
+                        page_ready.set(false);
+                    }
                     if !matches!(event, PageLoadEvent::Finished) {
                         return;
                     }
                     if super::is_dashboard_url(&url, &origin) {
                         let _ = proxy.send_event(UserEvent::SyncZoom);
+                        #[cfg(target_os = "macos")]
+                        {
+                            page_ready.set(true);
+                            let _ = proxy.send_event(UserEvent::PageReady);
+                        }
                     }
                     #[cfg(windows)]
                     let _ = proxy.send_event(UserEvent::SyncMaximized);
@@ -967,7 +992,12 @@ mod imp {
         if let Err(error) = sync_page_zoom(&webview, zoom_percent, false) {
             eprintln!("openresearch app: could not restore page zoom: {error}");
         }
+        #[cfg(target_os = "macos")]
+        align_traffic_lights(&window, zoom_percent);
         let mut quit = Quit::No;
+        // A link that opens the app arrives before its server answers.
+        #[cfg(target_os = "macos")]
+        let (mut server_ready, mut pending_link) = (false, None::<String>);
         // What the loaded page was last told; a new page starts unmaximized.
         #[cfg(windows)]
         let mut page_maximized = false;
@@ -993,7 +1023,14 @@ mod imp {
                 Quit::ShuttingDown => *control_flow = ControlFlow::Exit,
             },
             Event::UserEvent(UserEvent::ServerReady) if matches!(quit, Quit::No) => {
-                let _ = webview.load_url(&format!("{origin}/"));
+                #[cfg(target_os = "macos")]
+                let path = {
+                    server_ready = true;
+                    pending_link.take().unwrap_or_else(|| "/".to_string())
+                };
+                #[cfg(not(target_os = "macos"))]
+                let path = "/";
+                let _ = webview.load_url(&format!("{origin}{path}"));
             }
             // A window that never appears is worse than a blank one.
             Event::UserEvent(UserEvent::LoadTimedOut)
@@ -1034,6 +1071,8 @@ mod imp {
                     Ok(()) => {
                         if next != zoom_percent {
                             zoom_percent = next;
+                            #[cfg(target_os = "macos")]
+                            align_traffic_lights(&window, zoom_percent);
                             if let Err(error) = crate::config::set_desktop_zoom_percent(next) {
                                 eprintln!("openresearch app: could not save page zoom: {error}");
                             }
@@ -1070,8 +1109,51 @@ mod imp {
                 window.set_visible(true);
                 window.set_focus();
             }
+            #[cfg(target_os = "macos")]
+            Event::UserEvent(UserEvent::PageReady) if matches!(quit, Quit::No) => {
+                if let Some(path) = pending_link.take() {
+                    open_in_page(&webview, &path);
+                }
+            }
+            #[cfg(target_os = "macos")]
+            Event::Opened { urls } if matches!(quit, Quit::No) => {
+                let Some(path) = urls
+                    .iter()
+                    .find_map(|url| super::deep_link_path(url.scheme(), url.host_str(), url.path()))
+                else {
+                    return;
+                };
+                if page_ready.get() {
+                    open_in_page(&webview, &path);
+                } else if server_ready
+                    && !webview
+                        .url()
+                        .is_ok_and(|url| super::is_dashboard_url(&url, &origin))
+                {
+                    // A timed-out or failed first load has nothing coming to deliver it.
+                    let _ = webview.load_url(&format!("{origin}{path}"));
+                } else {
+                    // ServerReady loads it, or PageReady hands it to the loading page.
+                    pending_link = Some(path);
+                }
+                // Before the first page shows, the page-load handler reveals the window.
+                if shown.get() {
+                    window.set_minimized(false);
+                    window.set_visible(true);
+                    window.set_focus();
+                }
+            }
             _ => {}
         })
+    }
+
+    /// In-page navigation keeps the page's unsaved-work guards; a reload would skip them.
+    #[cfg(target_os = "macos")]
+    fn open_in_page(webview: &WebView, path: &str) {
+        let _ = webview.evaluate_script(&format!(
+            "window.dispatchEvent(new CustomEvent('orx:open-path', {{ detail: {} }}));",
+            serde_json::Value::from(path)
+        ));
     }
 
     fn begin_quit(
@@ -1170,6 +1252,17 @@ mod imp {
             "document.documentElement.style.setProperty('--desktop-page-zoom', '{factor}');
              if ({show_controls}) window.dispatchEvent(new CustomEvent('orx:page-zoom', {{ detail: {percent} }}));"
         ))
+    }
+
+    #[cfg(target_os = "macos")]
+    fn align_traffic_lights(window: &Window, percent: i32) {
+        use tao::dpi::LogicalPosition;
+        use tao::platform::macos::WindowExtMacOS;
+
+        let zoom = (f64::from(percent) / 100.0).max(1.0);
+        window.set_traffic_light_inset(LogicalPosition::new(16.0, 22.0 + 20.0 * (zoom - 1.0)));
+        // Tao reapplies the inset on a title change, not on request_redraw.
+        window.set_title(&window.title());
     }
 
     #[cfg(target_os = "macos")]
@@ -1428,7 +1521,9 @@ mod imp {
 
 #[cfg(test)]
 mod tests {
-    use super::{desktop_entry, is_bundle_exe_launch, is_dashboard_url, opens_in_browser};
+    use super::{
+        deep_link_path, desktop_entry, is_bundle_exe_launch, is_dashboard_url, opens_in_browser,
+    };
     use std::ffi::OsStr;
     use std::path::Path;
 
@@ -1445,6 +1540,22 @@ mod tests {
         ));
         assert!(entry.contains("\nStartupWMClass=OpenResearch\n"));
         assert!(!entry.contains("orx app"));
+    }
+
+    #[test]
+    fn reproduce_links_open_the_reproduce_page_for_their_paper() {
+        assert_eq!(
+            deep_link_path("openresearch", Some("reproduce"), "/1706.03762"),
+            Some("/reproduce/1706.03762".to_string())
+        );
+        assert_eq!(
+            deep_link_path("openresearch", Some("reproduce"), "/hep-th/9901001"),
+            Some("/reproduce/hep-th/9901001".to_string())
+        );
+        assert_eq!(deep_link_path("openresearch", Some("reproduce"), "/"), None);
+        assert_eq!(deep_link_path("openresearch", Some("reproduce"), ""), None);
+        assert_eq!(deep_link_path("openresearch", Some("settings"), "/x"), None);
+        assert_eq!(deep_link_path("https", Some("reproduce"), "/x"), None);
     }
 
     const EXE: &str = "/Applications/OpenResearch.app/Contents/MacOS/OpenResearch";

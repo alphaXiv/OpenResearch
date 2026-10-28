@@ -2,6 +2,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import ts from "typescript";
+import { resolveHarnessDefaultModel } from "../src/modelSelection.ts";
 
 const source = (path) => ts.createSourceFile(path, readFileSync(new URL(`../src/${path}`, import.meta.url), "utf8"), ts.ScriptTarget.Latest, true, ts.ScriptKind.TSX);
 function evaluate(code, bindings) {
@@ -28,6 +29,7 @@ const prewarmEffect = statements.find((node) => ts.isExpressionStatement(node) &
 const picker = source("components/ModelPicker.tsx");
 const fallback = find(picker, (node) => ts.isFunctionDeclaration(node) && node.name?.text === "defaultSelection")[0];
 const defaultSelection = evaluate(`return ${fallback.getText(picker).replace("export ", "")}`, {
+  resolveHarnessDefaultModel,
   reconcileServiceTier: () => null,
   reasoningFor: () => ({ defaultId: null }),
 });

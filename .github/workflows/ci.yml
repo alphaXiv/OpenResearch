@@ -53,7 +53,7 @@ jobs:
         with:
           node-version: 22
       - name: CI selection and release safety tests
-        run: node --test scripts/ci-changes.test.mjs scripts/ci-workflows.test.mjs
+        run: node --test scripts/ci-changes.test.mjs scripts/ci-workflows.test.mjs scripts/canary-tag.test.mjs
       - name: Select checks for changed files
         id: changes
         env:
@@ -84,16 +84,9 @@ jobs:
       - name: Install UI dependencies
         working-directory: ui
         run: pnpm install --frozen-lockfile
-      - name: Committed UI bundle matches source
+      - name: Build UI
         working-directory: ui
-        run: |
-          pnpm exec vite build
-          stale=$(git status --porcelain -- dist)
-          if [ -n "$stale" ]; then
-            echo "$stale"
-            echo "::error::ui/dist is stale; run pnpm build in ui/ and commit the result."
-            exit 1
-          fi
+        run: pnpm exec vite build
       - name: UI typecheck
         working-directory: ui
         run: pnpm typecheck
@@ -166,6 +159,16 @@ jobs:
       - name: Source builds disable production telemetry
         shell: bash
         run: test "$(target/debug/orx --no-telemetry version --build-channel)" = "development"
+      - name: Remove checked-in UI
+        if: inputs.release && github.event_name != 'pull_request'
+        shell: bash
+        run: rm -rf ui/dist
+      - name: Download release UI
+        if: inputs.release && github.event_name != 'pull_request'
+        uses: actions/download-artifact@v8
+        with:
+          name: release-ui
+          path: ui/dist
       - name: Optimized source builds disable production telemetry
         if: inputs.release && github.event_name != 'pull_request'
         shell: bash

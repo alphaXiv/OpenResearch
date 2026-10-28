@@ -12,6 +12,11 @@ import { WINDOWS_TITLEBAR } from "./desktopTitlebar";
 import { getLocale } from "./paraglide/runtime.js";
 import "./tailwind.css";
 
+// openresearch:// links opened in the desktop app; see the Opened handler in src/commands/app.rs.
+window.addEventListener("orx:open-path", (event) => {
+  if (event instanceof CustomEvent && typeof event.detail === "string") void router.navigate({ href: event.detail });
+});
+
 const locale = getLocale();
 document.documentElement.lang = locale;
 document.documentElement.dir = "ltr";

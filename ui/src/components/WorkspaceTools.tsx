@@ -3,15 +3,15 @@ import { activeWorkspaceRuns } from "../workspaceRuns";
 import { statusLabel } from "./StatusBadge";
 import { getComputeSettingsQuery } from "../queries/settings";
 import { TARGET_LABELS } from "../computeTargets";
-import { useEffect, useMemo, useRef } from "react";
-import { FlaskConical, FolderOpen, Package, GitBranch, GitFork, Cpu, MessagesSquare, Terminal } from "lucide-react";
+import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
+import { FlaskConical, FolderOpen, Package, GitBranch, GitFork, Cpu, MessagesSquare, Plus, Terminal } from "lucide-react";
 import { useQuery } from "@tanstack/react-query";
 import { getSessionWorktreeQuery } from "../queries/files";
 import { countChanges, parseDiffFiles } from "./GitDiff";
 import { m } from "../paraglide/messages.js";
 import { BackendLogo } from "./BackendLogos";
-import { IconButton, MenuItem, StatusIndicator, Spinner } from "./ui";
-import { OptionPicker } from "./ModelPicker";
+import { IconButton, MenuItem, StatusIndicator, Spinner, Tooltip } from "./ui";
+import { usePopover } from "./ModelPicker";
 
 export function WorkspaceTools({ expanded, experiments, runs, onOpenExperiment, rightOffset, activeView, projectId, onCompute, sessionId, busy, onChanges, onFiles, onTerminal, onArtifacts, onExperiments, onRoutes, onSideChat, sessions, onSelectSideChat }: {
   expanded: boolean;
@@ -47,11 +47,11 @@ export function WorkspaceTools({ expanded, experiments, runs, onOpenExperiment, 
     { id: "terminal", label: m.workspace_terminal(), Icon: Terminal, onClick: onTerminal },
   ];
   return (
-    <div className="workspace-tools absolute end-3.5 top-2 mac-titlebar:top-1.5 z-30 win-titlebar:top-win-titlebar" style={{ insetInlineEnd: rightOffset }}>
+    <div className="workspace-tools absolute end-3.5 top-2 mac-titlebar:top-1.5 z-30" style={{ insetInlineEnd: rightOffset }}>
       {!expanded ? (
         <nav aria-label={m.workspace_tools_heading()} className="flex items-center justify-end gap-1">
           {items.map(({ id, label, Icon, onClick }) => (
-            <IconButton key={id} active={activeView === id} className="text-text" data-tip={label} data-tip-align={id === "experiments" ? "end" : undefined} aria-label={label} aria-pressed={activeView === id} onClick={onClick}>
+            <IconButton key={id} active={activeView === id} className="text-text" data-tip={label} data-tip-align={id === "terminal" ? "end" : undefined} aria-label={label} aria-pressed={activeView === id} onClick={onClick}>
               <Icon size={16} />
             </IconButton>
           ))}
@@ -117,29 +117,140 @@ function SideChatPicker({ parentId, sessions, onSelect, onCreate, expanded = fal
 }) {
   const children = sessions.filter((session) => session.sideParentSessionId === parentId)
     .sort((a, b) => b.updatedAt - a.updatedAt || a.id.localeCompare(b.id));
-  return <OptionPicker
-    triggerIcon={<MessagesSquare size={16} />}
-    triggerLabel={expanded ? m.side_chat_open() : undefined}
-    title={m.side_chat_new()}
-    onTriggerClick={onCreate}
-    header={m.side_chat_list({ count: children.length })}
-    openOnHover
-    className="text-text"
-    choices={children.map((session) => ({
-      id: session.id,
-      label: session.title?.trim() || m.side_chat_untitled(),
-      description: timeAgo(session.updatedAt),
-    }))}
-    value=""
-    dropDown
-    align="right"
-    searchPlaceholder={children.length > 0 ? m.side_chat_search() : undefined}
-    menuAction={{ label: m.side_chat_new(), onSelect: onCreate }}
-    renderLabel={(choice) => <span className="block max-w-60 truncate">{choice.label}</span>}
-    renderIcon={(choice) => children.find((session) => session.id === choice.id)?.busy
-      ? <Spinner /> : <MessagesSquare size={14} />}
-    onSelect={onSelect}
-  />;
+  const triggerRef = useRef<HTMLButtonElement>(null);
+  const panelRef = useRef<HTMLDivElement>(null);
+  const closeTimer = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
+  const openedByHover = useRef(false);
+  const { open, setOpen, ref } = usePopover(triggerRef);
+  const [filter, setFilter] = useState("");
+  const visible = children.filter((session) => (session.title?.trim() || m.side_chat_untitled()).toLowerCase().includes(filter.trim().toLowerCase()));
+
+  useEffect(() => () => clearTimeout(closeTimer.current), []);
+  useLayoutEffect(() => {
+    if (!open) return;
+    const position = () => {
+      if (panelRef.current) panelRef.current.style.maxHeight = `${Math.max(0, Math.min(384, window.innerHeight - panelRef.current.getBoundingClientRect().top - 8))}px`;
+    };
+    position();
+    window.addEventListener("resize", position);
+    window.addEventListener("scroll", position, true);
+    return () => {
+      window.removeEventListener("resize", position);
+      window.removeEventListener("scroll", position, true);
+    };
+  }, [open]);
+
+  const openPicker = () => {
+    clearTimeout(closeTimer.current);
+    openedByHover.current = false;
+    setFilter("");
+    setOpen(true);
+    requestAnimationFrame(() => (panelRef.current?.querySelector<HTMLElement>("input") ?? panelRef.current?.querySelector<HTMLElement>("button"))?.focus());
+  };
+  const closePicker = () => {
+    setOpen(false);
+    triggerRef.current?.focus();
+  };
+  const triggerProps = {
+    ref: triggerRef,
+    type: "button" as const,
+    "aria-label": m.side_chat_open(),
+    "aria-haspopup": "dialog" as const,
+    "aria-expanded": open,
+    onClick: () => open && !openedByHover.current ? closePicker() : openPicker(),
+    onKeyDown: (event: React.KeyboardEvent<HTMLButtonElement>) => {
+      if (event.key === "ArrowDown") {
+        event.preventDefault();
+        openPicker();
+      }
+    },
+  };
+
+  return (
+    <div ref={ref} className={`relative inline-flex${expanded ? " w-full" : ""}`}
+      onPointerEnter={(event) => {
+        if (event.pointerType !== "mouse") return;
+        clearTimeout(closeTimer.current);
+        if (!open) {
+          openedByHover.current = true;
+          setFilter("");
+          setOpen(true);
+        }
+      }}
+      onPointerLeave={() => {
+        closeTimer.current = setTimeout(() => {
+          if (!panelRef.current?.contains(document.activeElement)) setOpen(false);
+        }, 150);
+      }}
+      onBlur={(event) => {
+        if (!event.currentTarget.contains(event.relatedTarget)) setOpen(false);
+      }}>
+      {expanded ? (
+        <MenuItem {...triggerProps} active={open} className="min-h-7 py-1 text-text">
+          <span className="flex items-center gap-4"><MessagesSquare size={16} />{m.side_chat_open()}</span>
+        </MenuItem>
+      ) : (
+        <IconButton {...triggerProps} size="small" active={open} className="text-text">
+          <MessagesSquare size={16} />
+        </IconButton>
+      )}
+      {open && (
+        <div ref={panelRef} role="dialog" aria-label={m.side_chat_list({ count: children.length })}
+          className="absolute end-0 top-[calc(100%_+_4px)] z-50 flex w-80 max-w-[calc(100vw-1rem)] flex-col overflow-hidden rounded-lg border border-border bg-background p-1.5 shadow-menu">
+          <div className="flex shrink-0 items-center justify-between gap-2 px-2">
+            <span className="text-sm font-medium text-text">{m.side_chat_list({ count: children.length })}</span>
+            {children.length > 0 && (
+              <Tooltip interactive content={m.side_chat_new()} className="shrink-0 cursor-default">
+                <IconButton type="button" size="small" aria-label={m.side_chat_new()} onClick={() => { closePicker(); onCreate(); }}>
+                  <Plus size={16} />
+                </IconButton>
+              </Tooltip>
+            )}
+          </div>
+          {children.length > 0 ? (
+            <>
+              <input aria-label={m.side_chat_search()} placeholder={m.side_chat_search()} value={filter} onChange={(event) => setFilter(event.target.value)} onKeyDown={(event) => {
+                  if (event.key === "ArrowDown") {
+                    event.preventDefault();
+                    panelRef.current?.querySelector<HTMLElement>("[data-side-chat-result]")?.focus();
+                  }
+                }}
+                className="mb-1 w-full shrink-0 border-b border-border bg-background px-2 py-1.5 text-sm text-text outline-none focus-visible:outline-2 focus-visible:outline-focus" />
+              <div className="min-h-0 overflow-y-auto" onKeyDown={(event) => {
+                if (event.key !== "ArrowDown" && event.key !== "ArrowUp") return;
+                const buttons = Array.from(event.currentTarget.querySelectorAll<HTMLButtonElement>("[data-side-chat-result]"));
+                const index = buttons.findIndex((button) => button === document.activeElement);
+                if (index < 0) return;
+                event.preventDefault();
+                if (event.key === "ArrowUp" && index === 0) panelRef.current?.querySelector("input")?.focus();
+                else buttons[Math.max(0, Math.min(buttons.length - 1, index + (event.key === "ArrowDown" ? 1 : -1)))]?.focus();
+              }}>
+                {visible.length === 0 && <div className="px-2 py-2 text-sm text-subtext" role="status">{m.onboarding_not_found()}</div>}
+                {visible.map((session) => {
+                  const title = session.title?.trim() || m.side_chat_untitled();
+                  return (
+                    <Tooltip key={session.id} interactive content={title} className="w-full cursor-default">
+                      <MenuItem type="button" data-side-chat-result onClick={() => { closePicker(); onSelect(session.id); }}>
+                        <span className="flex min-w-0 items-center gap-2">
+                          {session.busy ? <Spinner /> : <MessagesSquare size={14} className="shrink-0" />}
+                          <span className="truncate">{title}</span>
+                        </span>
+                        <span className="shrink-0 text-xs text-muted">{timeAgo(session.updatedAt)}</span>
+                      </MenuItem>
+                    </Tooltip>
+                  );
+                })}
+              </div>
+            </>
+          ) : (
+            <MenuItem type="button" onClick={() => { closePicker(); onCreate(); }}>
+              <span className="flex items-center gap-2"><Plus size={14} />{m.side_chat_new()}</span>
+            </MenuItem>
+          )}
+        </div>
+      )}
+    </div>
+  );
 }
 
 function ChatBranch({ sessionId, busy, onChanges }: { sessionId: string; busy: boolean; onChanges: () => void }) {
@@ -161,20 +272,23 @@ function ChatBranch({ sessionId, busy, onChanges }: { sessionId: string; busy: b
     }), { additions: 0, deletions: 0 });
   }, [wt?.diff]);
   if (!wt?.exists) return null;
+  const branch = wt.branch ?? m.settings_detached();
   return (
-    <MenuItem className="min-h-7 py-1" onClick={onChanges} title={wt.branch ?? m.settings_detached()}>
-      <span className="flex min-w-0 items-center gap-4">
-        <GitBranch size={16} className="shrink-0" />
-        <span>{m.code_browser_header_changes()}</span>
-      </span>
-      {counts ? (
-        <span className="flex shrink-0 gap-1 text-xs tabular-nums">
-          <span className="text-accent-green">+{fmtNumber(counts.additions)}</span>
-          <span className="text-accent-red">−{fmtNumber(counts.deletions)}</span>
+    <Tooltip interactive content={branch} className="flex w-full cursor-default">
+      <MenuItem className="min-h-7 py-1" onClick={onChanges} aria-description={branch}>
+        <span className="flex min-w-0 items-center gap-4">
+          <GitBranch size={16} className="shrink-0" />
+          <span>{m.code_browser_header_changes()}</span>
         </span>
-      ) : (
-        <span className="shrink-0 text-xs text-subtext">{wt.files?.length === 1 ? m.git_diff_one_changed_file() : m.git_diff_changed_file_count({ count: fmtNumber(wt.files?.length ?? 0) })}</span>
-      )}
-    </MenuItem>
+        {counts ? (
+          <span className="flex shrink-0 gap-1 text-xs tabular-nums">
+            <span className="text-accent-green">+{fmtNumber(counts.additions)}</span>
+            <span className="text-accent-red">−{fmtNumber(counts.deletions)}</span>
+          </span>
+        ) : (
+          <span className="shrink-0 text-xs text-subtext">{wt.files?.length === 1 ? m.git_diff_one_changed_file() : m.git_diff_changed_file_count({ count: fmtNumber(wt.files?.length ?? 0) })}</span>
+        )}
+      </MenuItem>
+    </Tooltip>
   );
 }

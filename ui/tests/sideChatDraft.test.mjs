@@ -57,7 +57,7 @@ test("unsaved side-chat autonomy stays local while root drafts update defaults",
     const local = [];
     const defaults = [];
     const setAutonomy = loadFunction("ChatPanel.tsx", "setAutonomy", {
-      openSession: null, sideParentSessionId,
+      openSession: null, sideParentSessionId, preferredAutonomy: "agentic", invalidatePendingRetry: () => {},
       setSideDraftAutonomy: (value) => local.push(value),
       onPreferredAutonomyChange: (value) => defaults.push(value),
     });

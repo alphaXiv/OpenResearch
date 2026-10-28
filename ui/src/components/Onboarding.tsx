@@ -36,7 +36,7 @@ import { AcpHarnessDialog } from "./AcpHarnessDialog";
 import { HarnessSetupDialog } from "./HarnessSetupDialog";
 
 import { Hyperspace } from "./Hyperspace";
-import { Button, LoadingRow, Spinner, StatusIndicator, type StatusTone } from "./ui";
+import { Button, LoadingRow, Spinner, StatusIndicator, Tooltip, type StatusTone } from "./ui";
 import { PaperTitle } from "./PaperTitle";
 
 const ONB_GATE_HINT_CLASS_NAME = [
@@ -353,6 +353,20 @@ export function Onboarding({
     }
   };
 
+  const continueHint = checking || (!anyAgentReady && anyPending)
+    ? m.onboarding_waiting_tool_checks()
+    : !anyAgentReady
+      ? m.onboarding_sign_in_agent_to_continue()
+      : preferredHarness === null
+        ? m.onboarding_choose_preferred_agent()
+        : gitError
+          ? m.onboarding_recheck_git_to_continue()
+          : gitVersion === undefined
+            ? m.onboarding_waiting_git_check()
+            : gitVersion === null
+              ? m.onboarding_install_git_to_continue()
+              : undefined;
+
   return (
     <div
       className={`home flex-1 min-h-0 overflow-y-auto [scrollbar-gutter:stable_both-edges] bg-background onboarding ${
@@ -474,25 +488,12 @@ export function Onboarding({
               <Button variant="primary"
                 onClick={() => setStep(2)}
                 disabled={checking || !anyAgentReady || preferredHarness === null || !gitReady}
-                title={
-                  checking || (!anyAgentReady && anyPending)
-                    ? m.onboarding_waiting_tool_checks()
-                    : !anyAgentReady
-                      ? m.onboarding_sign_in_agent_to_continue()
-                      : preferredHarness === null
-                        ? m.onboarding_choose_preferred_agent()
-                        : gitError
-                          ? m.onboarding_recheck_git_to_continue()
-                          : gitVersion === undefined
-                            ? m.onboarding_waiting_git_check()
-                            : gitVersion === null
-                              ? m.onboarding_install_git_to_continue()
-                              : undefined
-                }
+                aria-describedby={continueHint ? "onboarding-continue-hint" : undefined}
               >
                 {m.onboarding_continue()} <ArrowRight size={14} />
               </Button>
             </div>
+            {continueHint && <p id="onboarding-continue-hint" className="text-sm text-subtext">{continueHint}</p>}
           </>
         ) : (
           <>
@@ -762,10 +763,12 @@ function AgentCard({
         </span>
       </span>
       {showSetupAction ? (
-        <Button size="small" onClick={onSetup} disabled={!commands} aria-haspopup="dialog" title={m.harness_setup_opens_terminal()}>
-          <Terminal size={14} />
-          {h.adapterMissing ? m.acp_install_adapter() : !h.installed || h.installBroken ? m.harness_setup_install() : h.authState === "unsupported" ? m.harness_setup_update() : m.harness_setup_login()}
-        </Button>
+        <Tooltip interactive content={m.harness_setup_opens_terminal()} className="rounded-sm">
+          <Button size="small" onClick={onSetup} disabled={!commands} aria-haspopup="dialog" aria-description={m.harness_setup_opens_terminal()}>
+            <Terminal size={14} />
+            {h.adapterMissing ? m.acp_install_adapter() : !h.installed || h.installBroken ? m.harness_setup_install() : h.authState === "unsupported" ? m.harness_setup_update() : m.harness_setup_login()}
+          </Button>
+        </Tooltip>
       ) : h.id.startsWith("acp:") && !h.agentReady && !h.catalogPending ? (
         <Button variant="ghost" size="small" onClick={onAuth} aria-haspopup="dialog">
           <StatusIndicator tone={visibleBadge.tone}>{visibleBadge.label}</StatusIndicator>

@@ -46,11 +46,13 @@ export function NewProjectDialog({
   onCreated,
   remote = false,
   preferredAgent,
+  initialPaperId,
 }: {
   onClose: () => void;
   onCreated: (project: Project, githubPublicationError: string | null) => void;
   remote?: boolean;
   preferredAgent: AgentSelection | null;
+  initialPaperId?: string;
 }) {
   const dialogRef = useRef<HTMLDivElement>(null);
   const onCloseRef = useRef(onClose);
@@ -74,10 +76,9 @@ export function NewProjectDialog({
         return;
       }
       if (
-        event.key === "Enter" &&
         (event.metaKey || event.ctrlKey) &&
         !event.altKey &&
-        event.shiftKey
+        ((event.key.toLowerCase() === "n" && !event.shiftKey) || (event.key === "Enter" && event.shiftKey))
       ) {
         event.preventDefault();
         event.stopPropagation();
@@ -124,7 +125,13 @@ export function NewProjectDialog({
         tabIndex={-1}
       >
         <h2 id="new-project-dialog-title">{m.projects_home_new_project()}</h2>
-        <NewProjectForm onCancel={onClose} onCreated={onCreated} remote={remote} preferredAgent={preferredAgent} />
+        <NewProjectForm
+          onCancel={onClose}
+          onCreated={onCreated}
+          remote={remote}
+          preferredAgent={preferredAgent}
+          initialPaperId={initialPaperId}
+        />
       </div>
     </div>
   );

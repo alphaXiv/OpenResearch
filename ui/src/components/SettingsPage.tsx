@@ -1,4 +1,5 @@
 import { cn } from "./ui/cn";
+import { Dialog } from "@base-ui/react/dialog";
 import { formatAcpCommand } from "../acp";
 import { TARGET_LABELS } from "../computeTargets";
 import { AcpAuthDialog } from "./AcpAuthDialog";
@@ -117,6 +118,7 @@ import {
   applyUpdate,
   installCli,
   setAutoUpdate as setAutoUpdateApi,
+  setReleaseChannel,
   type InstallChannel,
   type InstalledCli,
 } from "../api";
@@ -132,7 +134,9 @@ import { renderNote } from "./agentNote";
 import { claudeProviderLabel } from "./claudeProvider";
 import { BackendBadge, BackendLogo } from "./BackendLogos";
 import { ProgressBar } from "./ProgressBar";
-import { OptionPicker, usePopover } from "./ModelPicker";
+import { OptionPicker } from "./ModelPicker";
+import { Popover } from "@base-ui/react/popover";
+import { DirectionProvider } from "@base-ui/react/direction-provider";
 import { HarnessLogo } from "./HarnessLogo";
 import { LocalModelSetup } from "./LocalModelSetup";
 import { StatusBadge } from "./StatusBadge";
@@ -168,7 +172,7 @@ const SETTINGS_CARD_CLASS_NAME = [
 const KV_CLASS_NAME = [
   "kv grid grid-cols-[auto_1fr] items-baseline gap-y-1 gap-x-3.5 text-base",
   "[&_.k]:text-sm [&_.k]:text-subtext [&_.v]:text-base [&_.v]:text-text",
-  "[&_.v]:break-all",
+  "[&_.v]:wrap-anywhere",
 ].join(" ");
 
 const COMPUTE_DETAILS_CLASS_NAME = [
@@ -1198,7 +1202,7 @@ function SlurmSection() {
                 />
               </label>
             </div>
-            <div className="actions">
+            <div className="actions flex-wrap items-center">
               <Button
                 type="button"
                 onClick={() => {
@@ -1210,7 +1214,7 @@ function SlurmSection() {
                   }
                 }}
                 disabled={!host}
-                title={host ? undefined : m.settings_pick_login_node()}
+                aria-describedby={!host ? "slurm-login-node-hint" : undefined}
               >
                 {connecting
                   ? connectionFailed
@@ -1220,6 +1224,7 @@ function SlurmSection() {
                     ? m.settings_reconnect()
                     : m.settings_connect()}
               </Button>
+              {!host && <span id="slurm-login-node-hint" className="text-sm text-subtext">{m.settings_pick_login_node()}</span>}
               <span role="status">
                 <SlurmTestBadge
                   test={test}
@@ -1982,9 +1987,11 @@ function QuickSetupDialog({ target, remote, onClose }: { target: ComputeTargetSu
             {TARGET_LABELS[target.id]()}
           </h2>
         </div>
-        <IconButton title={m.app_close_panel()} aria-label={m.app_close_panel()} onClick={close} disabled={editState.saving}>
-          <X size={14} />
-        </IconButton>
+        <Tooltip interactive content={m.app_close_panel()}>
+          <IconButton aria-label={m.app_close_panel()} onClick={close} disabled={editState.saving}>
+            <X size={14} />
+          </IconButton>
+        </Tooltip>
       </div>
       {target.id === "tinker" && <TinkerSection target={target} />}
       {target.id === "hf" && <HfSection remote={remote} />}
@@ -2439,15 +2446,16 @@ function EnvRow({
         </td>
         <td>
           {entry && !(plain && dirty && value.trim()) ? (
-            <IconButton
-              className="[&:hover:not(:disabled)]:text-accent-red"
-              title={m.a11y_delete_item({ name: ltr(name) })}
-              aria-label={m.a11y_delete_item({ name: ltr(name) })}
-              onClick={() => void remove()}
-              disabled={saving}
-            >
-              <Trash2 size={14} />
-            </IconButton>
+            <Tooltip interactive content={m.a11y_delete_item({ name: ltr(name) })}>
+              <IconButton
+                className="[&:hover:not(:disabled)]:text-accent-red"
+                aria-label={m.a11y_delete_item({ name: ltr(name) })}
+                onClick={() => void remove()}
+                disabled={saving}
+              >
+                <Trash2 size={14} />
+              </IconButton>
+            </Tooltip>
           ) : (
             value.trim() && (
               <Button size="small" onClick={() => void save()} disabled={saving}>
@@ -2537,14 +2545,16 @@ function AddVarRow({
           >
             {saving ? m.common_saving() : m.common_save()}
           </Button>
-          <IconButton
-            title={m.settings_page_cancel()}
-            aria-label={m.settings_page_cancel_new_variable()}
-            onClick={onDone}
-            disabled={saving}
-          >
-            <X size={14} />
-          </IconButton>
+          <Tooltip interactive content={m.settings_page_cancel()}>
+            <IconButton
+              aria-description={m.settings_page_cancel()}
+              aria-label={m.settings_page_cancel_new_variable()}
+              onClick={onDone}
+              disabled={saving}
+            >
+              <X size={14} />
+            </IconButton>
+          </Tooltip>
         </td>
       </tr>
       {key.trim() !== "HF_TOKEN" && HF_TOKEN_RE.test(value.trim()) && <HfHintRow />}
@@ -2705,7 +2715,7 @@ function AppearanceTab() {
     <>
       <h2>{m.settings_appearance_heading()}</h2>
       <div className={`${SETTINGS_CARD_CLASS_NAME} mt-3`}>
-        <div className={PROJECT_DEFAULT_ROW_CLASS_NAME}>
+        <div className={`${PROJECT_DEFAULT_ROW_CLASS_NAME} flex-wrap gap-y-2`}>
           <div className="project-default-title text-base font-medium">{m.settings_theme_heading()}</div>
           <div
             className={`${SEGMENTED_CLASS_NAME} theme-segmented flex-none`}
@@ -2774,8 +2784,10 @@ function UpdatesTab() {
   const { status, error: loadError, apply } = useUpdateStatus();
   // Per-action only so the right button reads "Working…"; any write disables
   // all of them, since they mutate overlapping state.
-  const [busy, setBusy] = useState<"auto" | "apply" | "cli" | null>(null);
+  const [busy, setBusy] = useState<"auto" | "apply" | "cli" | "channel" | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [confirmCanary, setConfirmCanary] = useState(false);
+  const channelGroupRef = useRef<HTMLDivElement>(null);
   const restart = useRestartApp(status);
   const locked = busy !== null || restart.restarting;
 
@@ -2798,7 +2810,7 @@ function UpdatesTab() {
 
   // Every mutating call returns the authoritative status; adopting it is what
   // keeps the switch honest when a write fails or another client changes it.
-  const run = async (which: "auto" | "apply" | "cli", action: () => Promise<unknown>) => {
+  const run = async (which: "auto" | "apply" | "cli" | "channel", action: () => Promise<unknown>) => {
     setBusy(which);
     setError(null);
     try {
@@ -2808,6 +2820,23 @@ function UpdatesTab() {
     } finally {
       setBusy(null);
     }
+  };
+
+  const applyChannel = (channel: "stable" | "canary") => {
+    void run("channel", async () => {
+      const next = await setReleaseChannel(channel);
+      apply(next);
+      requestAnimationFrame(() => {
+        const group = channelGroupRef.current;
+        if (group?.contains(document.activeElement)) group.querySelector<HTMLButtonElement>(`[data-channel="${next.releaseChannel}"]`)?.focus();
+      });
+    });
+  };
+
+  const changeChannel = (channel: "stable" | "canary") => {
+    if (locked || status.releaseChannel === channel) return;
+    if (channel === "canary") setConfirmCanary(true);
+    else applyChannel(channel);
   };
 
   return (
@@ -2850,6 +2879,31 @@ function UpdatesTab() {
 
         {status.selfUpdates ? (
           <>
+            {status.releaseChannelsAvailable && (
+              <div className={PROJECT_DEFAULT_ROW_CLASS_NAME}>
+                <div>
+                  <div className="project-default-title text-base font-medium">{m.settings_update_channel()}</div>
+                  <p>{status.releaseChannel === "stable" ? m.settings_update_stable_description() : m.settings_update_canary_description()}</p>
+                </div>
+                <div ref={channelGroupRef} className={SEGMENTED_CLASS_NAME} role="radiogroup" aria-label={m.settings_update_channel()}
+                  aria-disabled={locked}
+                  onKeyDown={(event) => {
+                    if (locked || !["ArrowLeft", "ArrowRight", "ArrowUp", "ArrowDown"].includes(event.key)) return;
+                    event.preventDefault();
+                    const next = status.releaseChannel === "stable" ? "canary" : "stable";
+                    changeChannel(next);
+                  }}>
+                  {(["stable", "canary"] as const).map((channel) => (
+                    <button key={channel} type="button" role="radio" data-channel={channel}
+                      aria-checked={status.releaseChannel === channel} tabIndex={status.releaseChannel === channel ? 0 : -1}
+                      className={status.releaseChannel === channel ? "active" : ""}
+                      onClick={() => changeChannel(channel)}>
+                      {channel === "stable" ? m.settings_update_channel_stable() : m.settings_update_channel_canary()}
+                    </button>
+                  ))}
+                </div>
+              </div>
+            )}
             <div className={PROJECT_DEFAULT_ROW_CLASS_NAME}>
               <div>
                 <div className="project-default-title text-base font-medium">
@@ -2874,10 +2928,14 @@ function UpdatesTab() {
             <div className={PROJECT_DEFAULT_ROW_CLASS_NAME}>
               <div>
                 <div className="project-default-title text-base font-medium">
-                  {status.updateAvailable ? m.settings_update_to_version({ version: ltr(status.latest ?? "—") }) : m.settings_check_for_updates()}
+                  {status.waitingForStable ? m.settings_waiting_for_stable() : status.waitingForCanary ? m.settings_waiting_for_canary() : status.updateAvailable ? m.settings_update_to_version({ version: ltr(status.latest ?? "—") }) : m.settings_check_for_updates()}
                 </div>
                 <p>
-                  {status.updateAvailable
+                  {status.waitingForStable
+                    ? m.settings_stable_catches_up()
+                    : status.waitingForCanary
+                    ? m.settings_canary_catches_up()
+                    : status.updateAvailable
                     ? m.settings_install_release_now()
                     : m.settings_checks_automatically()}
                   {status.updateAvailable && status.latestTag && (
@@ -2918,6 +2976,26 @@ function UpdatesTab() {
         )}
         {error && <div className="error">{error}</div>}
       </div>
+      <Dialog.Root open={confirmCanary} onOpenChange={setConfirmCanary}>
+        <Dialog.Portal>
+          <Dialog.Backdrop className="fixed inset-0 z-200 bg-modal-backdrop" />
+          <Dialog.Viewport className="fixed inset-0 z-200 flex items-center justify-center p-5">
+            <Dialog.Popup className="w-120 max-w-full rounded-xl border border-border bg-background p-6 shadow-modal"
+              aria-labelledby="canary-confirm-title" aria-describedby="canary-confirm-description"
+              finalFocus={() => channelGroupRef.current?.querySelector<HTMLElement>('[aria-checked="true"]')}>
+              <h2 id="canary-confirm-title" className="m-0 text-xl font-medium text-text">{m.settings_canary_confirm_title()}</h2>
+              <p id="canary-confirm-description" className="mt-4 text-sm text-text">{m.settings_canary_confirm_description()}</p>
+              <div className="mt-6 flex justify-end gap-2.5">
+                <Button onClick={() => setConfirmCanary(false)}>{m.settings_page_cancel()}</Button>
+                <Button variant="primary" onClick={() => {
+                  setConfirmCanary(false);
+                  if (!locked && status.releaseChannel !== "canary") applyChannel("canary");
+                }}>{m.settings_canary_confirm_action()}</Button>
+              </div>
+            </Dialog.Popup>
+          </Dialog.Viewport>
+        </Dialog.Portal>
+      </Dialog.Root>
     </>
   );
 }
@@ -2989,7 +3067,7 @@ function InstallCliRow({
   disabled,
   run,
 }: {
-  busy: "auto" | "apply" | "cli" | null;
+  busy: "auto" | "apply" | "cli" | "channel" | null;
   disabled: boolean;
   run: (which: "cli", action: () => Promise<unknown>) => Promise<void>;
 }) {
@@ -3329,10 +3407,9 @@ export function GitTab({
   });
   const checkingAccess = hasGithubRepository && !accessQuery.data && !accessQuery.error;
   const canResumeRepository = hasGithubRepository && Boolean(accessQuery.data?.canPush);
-  const triggerRef = useRef<HTMLButtonElement>(null);
-  const ownerMenu = usePopover(triggerRef);
-  const accountQuery = useQuery({ ...githubAccountQuery(), enabled: ownerMenu.open });
-  const organizationsQuery = useQuery({ ...githubOrganizationsQuery(), enabled: ownerMenu.open });
+  const [ownerMenuOpen, setOwnerMenuOpen] = useState(false);
+  const accountQuery = useQuery({ ...githubAccountQuery(), enabled: ownerMenuOpen });
+  const organizationsQuery = useQuery({ ...githubOrganizationsQuery(), enabled: ownerMenuOpen });
   const githubLogin = accountQuery.data?.login ?? null;
   const owners = [
     ...(githubLogin ? [githubLogin] : []),
@@ -3358,7 +3435,7 @@ export function GitTab({
   };
 
   const enableSync = (owner?: string) => {
-    ownerMenu.setOpen(false);
+    setOwnerMenuOpen(false);
     if (!project) return;
     setSaving(true);
     setError(null);
@@ -3398,34 +3475,40 @@ export function GitTab({
             {status.github.authenticated && !status.github.enabled && (
               <div className="flex flex-wrap gap-2 mt-3.5">
                 {hasGithubRepository && status.github.url && <ButtonLink href={status.github.url} target="_blank" rel="noreferrer">{m.settings_page_open_on_git_hub()} <ExternalLink size={12} /></ButtonLink>}
-                <div ref={ownerMenu.ref} className="relative">
-                  <Button variant="primary" disabled={saving || checkingAccess || Boolean(accessQuery.error)} aria-expanded={ownerMenu.open} aria-haspopup={canResumeRepository ? undefined : "menu"} onClick={(event) => {
-                    triggerRef.current = event.currentTarget;
-                    if (canResumeRepository) enableSync();
-                    else ownerMenu.setOpen(!ownerMenu.open);
-                  }}>{saving ? m.repository_enabling() : checkingAccess ? m.common_checking() : m.repository_enable_syncing()} {!canResumeRepository && !checkingAccess && <ChevronDown size={14} />}</Button>
-                  {ownerMenu.open && (
-                    <div role="menu" aria-label={m.settings_github_new_repository_destination()} className="absolute start-0 top-full z-50 mt-2 w-72 max-w-[calc(100vw-2rem)] max-h-64 overflow-y-auto rounded-lg border border-border bg-background p-2 shadow-modal">
-                      <div className="px-2 py-1 text-sm font-medium text-subtext">{m.settings_github_enable_under()}</div>
-                      {hasGithubRepository && <p className="px-2 py-1 m-0 text-sm text-text">{m.settings_create_private_github_repository()}</p>}
-                      {owners.map((owner) => <MenuItem key={owner} role="menuitem" onClick={() => enableSync(owner)}>{owner}</MenuItem>)}
-                      {!owners.length && (accountQuery.isFetching || organizationsQuery.isFetching) && (
-                        <div role="status" aria-label={m.settings_page_loading()} aria-busy="true" className="px-2 py-2">
-                          <div aria-hidden="true" className="space-y-3 motion-safe:animate-pulse">
-                            <div className="h-4 w-28 rounded-xs bg-surface" />
-                            <div className="h-4 w-36 rounded-xs bg-surface" />
-                          </div>
-                        </div>
+                <DirectionProvider direction={typeof document !== "undefined" && document.documentElement.dir === "rtl" ? "rtl" : "ltr"}>
+                  <Popover.Root open={ownerMenuOpen} onOpenChange={setOwnerMenuOpen}>
+                    <div className="relative">
+                      {canResumeRepository ? (
+                        <Button variant="primary" disabled={saving || checkingAccess || Boolean(accessQuery.error)} onClick={() => enableSync()}>{saving ? m.repository_enabling() : checkingAccess ? m.common_checking() : m.repository_enable_syncing()}</Button>
+                      ) : (
+                        <Popover.Trigger render={<Button variant="primary" />} disabled={saving || checkingAccess || Boolean(accessQuery.error)}>{saving ? m.repository_enabling() : checkingAccess ? m.common_checking() : m.repository_enable_syncing()} {!checkingAccess && <ChevronDown size={14} />}</Popover.Trigger>
                       )}
-                      {(accountQuery.error || organizationsQuery.error || !githubLogin && !accountQuery.isFetching) && (
-                        <div className="px-2 py-1 text-sm text-text">
-                          <p className="m-0">{accountQuery.error?.message ?? organizationsQuery.error?.message ?? m.settings_github_account_unavailable()}</p>
-                          <Button size="small" className="mt-2" onClick={() => { void accountQuery.refetch(); void organizationsQuery.refetch(); }}>{m.app_retry()}</Button>
-                        </div>
-                      )}
+                      <Popover.Portal>
+                        <Popover.Positioner positionMethod="fixed" side="bottom" align="start" sideOffset={8} collisionPadding={16} className="z-50">
+                          <Popover.Popup aria-label={m.settings_github_new_repository_destination()} className="outline-none w-72 max-w-[calc(100vw-2rem)] max-h-64 overflow-y-auto rounded-lg border border-border bg-background p-2 shadow-modal">
+                            <div className="px-2 py-1 text-sm font-medium text-subtext">{m.settings_github_enable_under()}</div>
+                            {hasGithubRepository && <p className="px-2 py-1 m-0 text-sm text-text">{m.settings_create_private_github_repository()}</p>}
+                            {owners.map((owner) => <MenuItem key={owner} onClick={() => enableSync(owner)}>{owner}</MenuItem>)}
+                            {!owners.length && (accountQuery.isFetching || organizationsQuery.isFetching) && (
+                              <div role="status" aria-label={m.settings_page_loading()} aria-busy="true" className="px-2 py-2">
+                                <div aria-hidden="true" className="space-y-3 motion-safe:animate-pulse">
+                                  <div className="h-4 w-28 rounded-xs bg-surface" />
+                                  <div className="h-4 w-36 rounded-xs bg-surface" />
+                                </div>
+                              </div>
+                            )}
+                            {(accountQuery.error || organizationsQuery.error || !githubLogin && !accountQuery.isFetching) && (
+                              <div className="px-2 py-1 text-sm text-text">
+                                <p className="m-0">{accountQuery.error?.message ?? organizationsQuery.error?.message ?? m.settings_github_account_unavailable()}</p>
+                                <Button size="small" className="mt-2" onClick={() => { void accountQuery.refetch(); void organizationsQuery.refetch(); }}>{m.app_retry()}</Button>
+                              </div>
+                            )}
+                          </Popover.Popup>
+                        </Popover.Positioner>
+                      </Popover.Portal>
                     </div>
-                  )}
-                </div>
+                  </Popover.Root>
+                </DirectionProvider>
                 {accessQuery.error && (
                   <div className="basis-full text-sm text-text">
                     <p className="mt-2 mb-0">{accessQuery.error.message}</p>
@@ -3704,21 +3787,22 @@ function InstancesTable({ instances, emptyLabel }: { instances: Run[]; emptyLabe
                   <span className="backend-cell inline-flex items-center gap-0.5">
                     <BackendBadge backend={inst.backend} />
                     {url && (
-                      <IconButtonLink size="small"
-                        href={url}
-                        target="_blank"
-                        rel="noreferrer"
-                        title={m.settings_page_open_job_page()}
-                        aria-label={m.settings_page_open_job_page()}
-                        onClick={(e) => e.stopPropagation()}
-                      >
-                        <ExternalLink size={12} />
-                      </IconButtonLink>
+                      <Tooltip interactive content={m.settings_page_open_job_page()}>
+                        <IconButtonLink size="small"
+                          href={url}
+                          target="_blank"
+                          rel="noreferrer"
+                          aria-label={m.settings_page_open_job_page()}
+                          onClick={(e) => e.stopPropagation()}
+                        >
+                          <ExternalLink size={12} />
+                        </IconButtonLink>
+                      </Tooltip>
                     )}
                   </span>
                 </td>
                 <td>
-                  <StatusBadge status={runDisplayStatus(inst)} />
+                  <StatusBadge status={runDisplayStatus(inst)} className="flex" />
                 </td>
                 <td>{timeAgo(inst.createdAt)}</td>
                 <td>{runtimeLabel(inst)}</td>
@@ -3753,7 +3837,7 @@ function ComputeActivity({ projectId, onViewHistory }: { projectId?: string; onV
 
   return (
     <section className="compute-activity [&_.count-badge]:inline-flex [&_.count-badge]:items-center [&_.count-badge]:justify-center [&_.count-badge]:min-w-4.5 [&_.count-badge]:h-4.5 [&_.count-badge]:py-0 [&_.count-badge]:px-1 [&_.count-badge]:rounded-md [&_.count-badge]:bg-surface [&_.count-badge]:border [&_.count-badge]:border-border [&_.count-badge]:text-xs [&_.count-badge]:font-medium [&_.count-badge]:text-text mt-5.5 mx-0 mb-8">
-      <div className="compute-activity-head flex items-start justify-between gap-5 mb-3.5 [&_h2]:flex [&_h2]:items-center [&_h2]:gap-2 [&_h2]:m-0 [&_h2]:text-lg [@media((max-width:_640px))]:items-stretch [@media((max-width:_640px))]:flex-col">
+      <div className="compute-activity-head flex flex-wrap items-start justify-between gap-x-5 gap-y-2 mb-3.5 [&_h2]:flex [&_h2]:items-center [&_h2]:gap-2 [&_h2]:m-0 [&_h2]:text-lg [@media((max-width:_640px))]:items-stretch [@media((max-width:_640px))]:flex-col">
         <div>
           <h2>
             {m.settings_page_running_instances()}

@@ -31,7 +31,7 @@ function sendPreparation() {
   const statements = turn.tryBlock.statements;
   const optimisticIndex = statements.findIndex((node) => node.getText(file).includes('type: "optimisticUser"'));
   const prefix = statements.slice(0, optimisticIndex + 1).map((node) => node.getText(file)).join("\n");
-  return prefix;
+  return `const retry = null, mode = null;\nconst composerLiveRef = { current: { draft, attachments: pending, annotations: pendingAnnotations } };\nconst clearComposer = ${declaration(file, "clearComposer")};\n${prefix}`;
 }
 
 function settingsRenderer(name, returns, bindings) {
@@ -178,7 +178,7 @@ test("first send waits for cold history so an accepted reply replaces its optimi
   const read = client.fetchQuery(options);
   const prefix = sendPreparation();
   const sending = evaluate(`return (async () => { let sid = "s"; ${prefix} })()`, {
-    sessionsOptions: { queryKey: [] }, isCurrentScope: () => true,
+    sessionsOptions: { queryKey: [] }, isCurrentScope: () => true, deletedSessionIds: new Set(), sideParentSessionId: null,
     preparingSend: { current: false }, inSourceScope: () => false,
     queryClient: client, getChatMessagesQuery: load("chat").getChatMessagesQuery,
     dispatch: (action) => load("chatStore").dispatchChat("p", action),
@@ -210,7 +210,7 @@ test("history preparation clears the composer up front but never sends early", a
   const preparingSend = { current: false };
   const cleared = new Set();
   const sending = evaluate(`return (async () => { let sid = "s"; ${sendPreparation()} })()`, {
-    sessionsOptions: { queryKey: [] }, isCurrentScope: () => true, preparingSend,
+    sessionsOptions: { queryKey: [] }, isCurrentScope: () => true, deletedSessionIds: new Set(), sideParentSessionId: null, preparingSend,
     queryClient: client, getChatMessagesQuery: load("chat").getChatMessagesQuery,
     inSourceScope: () => true, draft: "unsent", pending: [], pendingAnnotations: [],
     setDraft: () => cleared.add("draft"), setAttachments: () => cleared.add("attachments"),
@@ -244,7 +244,7 @@ test("send joins a cold repair despite its intermediate cached history", async (
   assert.equal(client.getQueryState(options.queryKey).fetchStatus, "fetching");
   let dispatched = false;
   const sending = evaluate(`return (async () => { let sid = "s"; ${sendPreparation()} })()`, {
-    sessionsOptions: { queryKey: [] }, isCurrentScope: () => true,
+    sessionsOptions: { queryKey: [] }, isCurrentScope: () => true, deletedSessionIds: new Set(), sideParentSessionId: null,
     preparingSend: { current: false }, inSourceScope: () => false,
     queryClient: client, getChatMessagesQuery: load("chat").getChatMessagesQuery,
     dispatch: () => { dispatched = true; }, text: "new", draft: "new", pending: [], pendingAnnotations: [],
@@ -262,7 +262,7 @@ test("send joins a cold repair despite its intermediate cached history", async (
 test("the pre-await draft clear keeps an edit queued since render", async () => {
   let updater;
   const sending = evaluate(`return (async () => { let sid = "s"; ${sendPreparation()} })()`, {
-    sessionsOptions: { queryKey: [] }, isCurrentScope: () => true,
+    sessionsOptions: { queryKey: [] }, isCurrentScope: () => true, deletedSessionIds: new Set(), sideParentSessionId: null,
     preparingSend: { current: false }, inSourceScope: () => true,
     queryClient: { fetchQuery: async () => ({}), getQueryState: () => undefined },
     getChatMessagesQuery: () => ({ queryKey: [] }),

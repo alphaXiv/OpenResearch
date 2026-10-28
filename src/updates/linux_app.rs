@@ -30,6 +30,8 @@ pub struct AppManifest {
     /// Release tag the assets are pinned to, so the download can't drift to a
     /// different release between the manifest fetch and the download.
     pub tag: String,
+    #[serde(default)]
+    pub ancestors: Vec<String>,
     /// Keyed by `std::env::consts::ARCH` (`x86_64`, `aarch64`).
     pub assets: HashMap<String, AppAsset>,
 }
@@ -42,7 +44,43 @@ pub struct AppAsset {
 
 /// Fetches the published app manifest; `Ok(None)` until the AppImages are attached.
 pub async fn fetch_manifest(timeout: Duration) -> Result<Option<AppManifest>> {
-    super::fetch_app_manifest(MANIFEST_ASSET, timeout).await
+    if crate::telemetry::update_channel() == super::ReleaseChannel::Canary {
+        return Ok(super::fetch_canary_manifest(timeout)
+            .await?
+            .and_then(|manifest| {
+                let assets: HashMap<_, _> = manifest
+                    .assets
+                    .into_iter()
+                    .filter_map(|(key, asset)| {
+                        key.strip_prefix("linux-").map(|arch| {
+                            (
+                                arch.to_string(),
+                                AppAsset {
+                                    asset: asset.asset,
+                                    sha256: asset.sha256,
+                                },
+                            )
+                        })
+                    })
+                    .collect();
+                (!assets.is_empty()).then_some(AppManifest {
+                    version: manifest.version,
+                    tag: manifest.tag,
+                    ancestors: manifest.ancestors,
+                    assets,
+                })
+            }));
+    }
+    let manifest: Option<AppManifest> = super::fetch_app_manifest(MANIFEST_ASSET, timeout).await?;
+    if manifest
+        .as_ref()
+        .is_some_and(|manifest| !super::valid_desktop_tag(&manifest.tag))
+    {
+        return Err(anyhow!(
+            "The app update belongs to a different release channel."
+        ));
+    }
+    Ok(manifest)
 }
 
 /// Replace the `.AppImage` at `appimage` with the latest release.
@@ -69,12 +107,28 @@ pub async fn update(
     // Keep the cache honest even when this install can't apply the update: it is
     // what the dashboard and the outdated warning read.
     if let (Some(manifest), Some(latest)) = (&published, &latest) {
-        super::write_check_cache(&latest.to_string(), &manifest.tag);
+        let compatible = super::release_is_compatible(
+            &manifest.tag,
+            &manifest.ancestors,
+            Duration::from_secs(10),
+        )
+        .await?;
+        super::record_checked_release(&super::LatestRelease {
+            version: latest.clone(),
+            tag: manifest.tag.clone(),
+            compatible,
+        });
+        if !compatible {
+            if !background {
+                println!("{}", super::compatibility_wait_message(&manifest.tag));
+            }
+            return Ok(());
+        }
     }
 
     let Some((manifest, latest)) = published
         .zip(latest)
-        .filter(|(_, latest)| super::is_outdated(current, latest))
+        .filter(|(manifest, latest)| super::release_available(current, latest, &manifest.tag))
     else {
         if !background {
             println!("OpenResearch {} is up to date.", current);

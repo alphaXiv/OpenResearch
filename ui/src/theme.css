@@ -91,6 +91,7 @@
   --spacing-titlebar: calc(2.75rem / min(1, var(--desktop-page-zoom, 1)));
   --spacing-titlebar-inset: calc(4.75rem / min(1, var(--desktop-page-zoom, 1)));
   --spacing-titlebar-controls: calc(5rem / min(1, var(--desktop-page-zoom, 1)));
+  --spacing-titlebar-sidebar-controls: calc(7.5rem / min(1, var(--desktop-page-zoom, 1)));
 
   --shadow-segment: 0 1px 3px rgb(0 0 0 / 14%);
   --shadow-menu: 0 12px 32px rgb(0 0 0 / 18%);

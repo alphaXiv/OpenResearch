@@ -37,6 +37,7 @@ jobs:
       ok: ${{ steps.gate.outputs.ok }}
       tag: ${{ steps.gate.outputs.tag }}
       source-sha: ${{ steps.gate.outputs.sha }}
+      release-run-id: ${{ steps.gate.outputs.release-run-id }}
     env:
       GH_TOKEN: ${{ github.token }}
     steps:
@@ -66,9 +67,13 @@ jobs:
           if [ -n "${expected_sha:-}" ]; then test "$sha" = "$expected_sha"; fi
           version=$(git show "$sha:Cargo.toml" | grep -m1 '^version = ' | sed -E 's/version = "(.*)"/\1/')
           test "$tag" = "v$version"
+          if [ -z "$RELEASE_RUN_ID" ] && ! git cat-file -e "$sha:ui/dist/index.html" 2>/dev/null; then
+            RELEASE_RUN_ID=$(bash scripts/find-release-run.sh "$tag" "$sha")
+          fi
           echo "ok=true" >> "$GITHUB_OUTPUT"
           echo "tag=$tag" >> "$GITHUB_OUTPUT"
           echo "sha=$sha" >> "$GITHUB_OUTPUT"
+          echo "release-run-id=$RELEASE_RUN_ID" >> "$GITHUB_OUTPUT"
 
   appimage:
     needs: check
@@ -86,6 +91,18 @@ jobs:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           ref: ${{ needs.check.outputs.source-sha }}
+
+      - name: Remove checked-in UI
+        if: needs.check.outputs.release-run-id != ''
+        run: rm -rf ui/dist
+      - name: Download release UI
+        if: needs.check.outputs.release-run-id != ''
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+        with:
+          name: release-ui
+          path: ui/dist
+          run-id: ${{ needs.check.outputs.release-run-id }}
+          github-token: ${{ github.token }}
 
       - name: Install WebKitGTK and packaging tools
         run: |

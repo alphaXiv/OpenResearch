@@ -1,20 +1,24 @@
 import { ComposerProjectPicker } from "./ComposerProjectPicker";
 import { ProjectInfoCard } from "./ProjectInfoCard";
+import { SessionHoverCard } from "./SessionHoverCard";
+import { taskLocation } from "../workspaceState";
 import { fitSidebarRows, sidebarRowHeight, type SidebarRow } from "../sidebarLayout";
 import { useVirtualizer, defaultRangeExtractor, measureElement as measureVirtualElement, type Range as VirtualRange } from "@tanstack/react-virtual";
 import { markLiveUpdate } from "../queries/live";
 import { removeSession as removeCachedSession } from "../queries/invalidation";
 import { nativeOptions, sessionAcpHarness } from "../acp";
+import { resolveHarnessDefaultModel } from "../modelSelection";
 import { setChatConfiguration } from "../api";
 import {
   isCurrentScope,
   setScopedQueryData,
   deletedSessionIds,
   queryClient,
+  subscribeWorkspace,
   workspaceKey,
 } from "../queries/client";
-import { LOCAL_PREFIX, SHELL_TOOL } from "../queries/chatState";
-import { useInfiniteQuery, useMutation, useQueries, useQuery } from "@tanstack/react-query";
+import { LOCAL_ERROR_PART_ID, LOCAL_PREFIX, SHELL_TOOL } from "../queries/chatState";
+import { CancelledError, useInfiniteQuery, useMutation, useQueries, useQuery } from "@tanstack/react-query";
 import { useNavigate } from "@tanstack/react-router";
 import { useChatState } from "../queries/chatStore";
 
@@ -117,6 +121,8 @@ import {
   runShellCommand,
   fmtDuration,
   sendChatMessage,
+  getChatSubmission,
+  RejectedResponseError,
   setChatSessionArchived,
   setChatSessionAutonomy,
   setChatSessionPermissionMode,
@@ -169,7 +175,9 @@ import {
   retryStatusLabel,
 } from "../chatRecovery";
 import {
+  composerSeed,
   composerStashContent,
+  forgetComposerSeed,
   EMPTY_COMPOSER_STASH,
   type ComposerAnnotation,
   type ComposerAttachment,
@@ -652,16 +660,17 @@ function AnnotationEntries({
         <AnnotationPreview annotation={annotation} />
       </div>
       {onRemove && (
-        <IconButton
-          type="button"
-          size="small"
-          data-annotation-remove
-          title={m.chat_panel_remove_annotation()}
-          aria-label={m.a11y_remove_annotation({ number: fmtNumber(index + 1) })}
-          onClick={() => onRemove(annotation.id)}
-        >
-          <X size={14} />
-        </IconButton>
+        <Tooltip interactive content={m.chat_panel_remove_annotation()}>
+          <IconButton
+            type="button"
+            size="small"
+            data-annotation-remove
+            aria-label={m.a11y_remove_annotation({ number: fmtNumber(index + 1) })}
+            onClick={() => onRemove(annotation.id)}
+          >
+            <X size={14} />
+          </IconButton>
+        </Tooltip>
       )}
     </div>
   ));
@@ -2377,6 +2386,14 @@ function ToolRow({
   const hasDetail = failed && Boolean(errorMessage);
   const [detailOpen, setDetailOpen] = useState(false);
   const detailId = `tool-error-${part.id.replace(/[^A-Za-z0-9_-]/g, "-")}`;
+  if (part.id === LOCAL_ERROR_PART_ID) {
+    return (
+      <div className="local-error mt-4 flex items-start gap-2 text-base text-subtext">
+        <TriangleAlert size={18} className="mt-0.5 shrink-0 text-accent-red" aria-hidden="true" />
+        <span className="wrap-anywhere">{errorMessage}</span>
+      </div>
+    );
+  }
   if (part.tool === "error") {
     return <TurnStatusRow part={part} busy={false} recovering={false} usageLimited={isUsageLimitPart(part)} />;
   }
@@ -2986,25 +3003,27 @@ function ForkControls({
     >
       {many && (
         <>
-          <IconButton size="small"
-            title={m.chat_panel_previous_version()}
-            aria-label={m.chat_panel_previous_version()}
-            disabled={pagerDisabled || !prevId}
-            onClick={() => prevId && onSelect(prevId)}
-          >
-            <ChevronLeft size={14} />
-          </IconButton>
+          <Tooltip interactive content={m.chat_panel_previous_version()}>
+            <IconButton size="small"
+              aria-label={m.chat_panel_previous_version()}
+              disabled={pagerDisabled || !prevId}
+              onClick={() => prevId && onSelect(prevId)}
+            >
+              <ChevronLeft size={14} />
+            </IconButton>
+          </Tooltip>
           <span className="fork-count text-xs text-subtext tabular-nums select-none">
             {index + 1}/{count}
           </span>
-          <IconButton size="small"
-            title={m.chat_panel_next_version()}
-            aria-label={m.chat_panel_next_version()}
-            disabled={pagerDisabled || !nextId}
-            onClick={() => nextId && onSelect(nextId)}
-          >
-            <ChevronRight size={14} />
-          </IconButton>
+          <Tooltip interactive content={m.chat_panel_next_version()}>
+            <IconButton size="small"
+              aria-label={m.chat_panel_next_version()}
+              disabled={pagerDisabled || !nextId}
+              onClick={() => nextId && onSelect(nextId)}
+            >
+              <ChevronRight size={14} />
+            </IconButton>
+          </Tooltip>
         </>
       )}
       <div className="flex items-center gap-0.5 opacity-0 group-hover/turn:opacity-100 group-focus-within/turn:opacity-100 transition-opacity duration-80 ease-standard">
@@ -3015,14 +3034,15 @@ function ForkControls({
           <Copy size={14} />
         </IconButton>
       </div>
-      <IconButton size="small"
-        title={m.chat_panel_edit_and_re_send()}
-        aria-label={m.chat_panel_edit_and_re_send()}
-        disabled={editDisabled}
-        onClick={onEdit}
-      >
-        <Pencil size={14} />
-      </IconButton>
+      <Tooltip interactive content={m.chat_panel_edit_and_re_send()}>
+        <IconButton size="small"
+          aria-label={m.chat_panel_edit_and_re_send()}
+          disabled={editDisabled}
+          onClick={onEdit}
+        >
+          <Pencil size={14} />
+        </IconButton>
+      </Tooltip>
     </div>
   );
 }
@@ -3212,14 +3232,16 @@ export const Message = memo(function Message({
       </div>
     );
   }
-  const responseTurns = (responseMessages ?? [message]).map(splitResponseTurn);
+  const responses = responseMessages ?? [message];
+  const localErrors = responses.filter((turn) => turn.id.startsWith(`${LOCAL_PREFIX}senderr-`));
+  const responseTurns = responses.filter((turn) => !turn.id.startsWith(`${LOCAL_PREFIX}senderr-`)).map(splitResponseTurn);
   const turns = responseTurns.map((turn) => turn.message);
   const response = splitResponseParts(turns, predictTextTail, replies);
   const predictingAnswer = predictTextTail && response.answerMessageId === message.id;
   const copyText = predictingAnswer && !message.completedAt ? "" : responseText({ ...message, parts: response.answer });
   return (
     <div className="msg-assistant group/turn text-base leading-relaxed text-text min-w-0">
-      <AssistantTurn messages={turns} response={response} options={{
+      {turns.length > 0 && <AssistantTurn messages={turns} response={response} options={{
         replies,
         activePermissionId,
         pendingTailToolId,
@@ -3233,7 +3255,7 @@ export const Message = memo(function Message({
         onOpenPlan,
         onOpenSubagent,
         predictTextTail,
-      }} />
+      }} />}
       {responseTurns.map(({ message: turn, turnStatus, usageLimit, temporaryApiError }) => turnStatus && (
         <TurnStatusRow
           key={turn.id}
@@ -3245,16 +3267,22 @@ export const Message = memo(function Message({
           onRecover={onRecover}
         />
       ))}
+      {localErrors.map((turn) => (
+        <div key={turn.id} role="alert" className="mt-4 whitespace-pre-wrap text-base text-accent-red">
+          {cleanToolError(turn.parts[0]?.state?.error ?? "")}
+        </div>
+      ))}
       {copyText && (
         <div className="mt-2 flex justify-end opacity-0 transition-opacity duration-80 ease-standard group-hover/turn:opacity-100 group-focus-within/turn:opacity-100">
-          <IconButton
-            size="small"
-            title={m.chat_copy_response()}
-            aria-label={m.chat_copy_response()}
-            onClick={() => void copyToClipboard(copyText)}
-          >
-            <Copy size={14} />
-          </IconButton>
+          <Tooltip interactive content={m.chat_copy_response()}>
+            <IconButton
+              size="small"
+              aria-label={m.chat_copy_response()}
+              onClick={() => void copyToClipboard(copyText)}
+            >
+              <Copy size={14} />
+            </IconButton>
+          </Tooltip>
         </div>
       )}
     </div>
@@ -4049,15 +4077,16 @@ function SessionFilterMenu({
   const { open, setOpen, ref } = usePopover();
   return (
     <div className="rail-filter relative inline-flex" ref={ref}>
-      <IconButton size="small"
-        className="rail-filter-btn text-subtext"
-        active={value !== "active"}
-        title={m.chat_panel_filter_sessions()}
-        aria-label={m.chat_panel_filter_sessions()}
-        onClick={() => setOpen((v) => !v)}
-      >
-        <SlidersHorizontal size={16} className="text-subtext" />
-      </IconButton>
+      <Tooltip interactive content={m.chat_panel_filter_sessions()}>
+        <IconButton size="small"
+          className="rail-filter-btn text-subtext"
+          active={value !== "active"}
+          aria-label={m.chat_panel_filter_sessions()}
+          onClick={() => setOpen((v) => !v)}
+        >
+          <SlidersHorizontal size={16} className="text-subtext" />
+        </IconButton>
+      </Tooltip>
       {open && (
         <div className="option-menu absolute bottom-[calc(100%_+_8px)] start-0 max-h-95 flex flex-col bg-background border border-border rounded-lg shadow-menu z-50 overflow-hidden min-w-40 p-1 [&.align-right]:start-auto [&.align-right]:end-0 [&.drop-down]:bottom-auto [&.drop-down]:top-[calc(100%_+_4px)] [&.session-menu]:start-auto [&.session-menu]:end-1.5 [&.session-menu]:top-[calc(100%_-_2px)] [&.session-menu]:min-w-35 drop-down align-right">
           <div className="px-2 py-0.5 text-sm text-subtext">{m.sidebar_group_by()}</div>
@@ -4148,6 +4177,11 @@ function SessionRow({
   onRename,
   onSetArchived,
   onDelete,
+  onOpenExperiment,
+  modelName,
+  projectName,
+  harnessLogo,
+  cardWarmUntil,
 }: {
   session: ChatSession;
   active: boolean;
@@ -4164,15 +4198,79 @@ function SessionRow({
   onRename: (title: string) => void;
   onSetArchived: (archived: boolean) => void;
   onDelete: () => void;
+  onOpenExperiment: (projectId: string, experimentId: string) => void;
+  modelName: string | null;
+  projectName?: string;
+  harnessLogo?: string;
+  cardWarmUntil: React.RefObject<number>;
 }) {
   const { open, setOpen, ref } = usePopover();
-  const title = session.title?.trim() || "Untitled";
+  const title = session.title?.trim() || m.chat_untitled();
+  const sessionDescription = `${title} · ${harnessLabel(session.harness, session.harnessName)}${modelName ? ` · ${modelName}` : ""}`;
   const [editing, setEditing] = useState(false);
   // Seeded by startEditing() before the input mounts; "" is just a placeholder.
   const [draft, setDraft] = useState("");
   const inputRef = useRef<HTMLInputElement>(null);
+  const cardRef = useRef<HTMLDivElement>(null);
+  const cardId = useId();
+  const [anchor, setAnchor] = useState<DOMRect | null>(null);
+  const openTimer = useRef<number | undefined>(undefined);
+  const closeTimer = useRef<number | undefined>(undefined);
+  const pointerInside = useRef(false);
+  const dismissed = useRef(false);
+
+  function closeCard() {
+    window.clearTimeout(openTimer.current);
+    window.clearTimeout(closeTimer.current);
+    setAnchor(null);
+  }
+  function showCard() {
+    if (!editing && !open && !dismissed.current) setAnchor(ref.current?.getBoundingClientRect() ?? null);
+  }
+  function scheduleClose() {
+    window.clearTimeout(openTimer.current);
+    window.clearTimeout(closeTimer.current);
+    closeTimer.current = window.setTimeout(() => {
+      const focused = document.activeElement;
+      if (!pointerInside.current && focused !== ref.current && !cardRef.current?.contains(focused)) setAnchor(null);
+    }, 150);
+  }
+  useEffect(() => () => {
+    window.clearTimeout(openTimer.current);
+    window.clearTimeout(closeTimer.current);
+  }, []);
+  useEffect(() => {
+    if (!anchor) return;
+    const update = (event: Event) => {
+      if (event.target instanceof Node && cardRef.current?.contains(event.target)) return;
+      const row = ref.current;
+      const bounds = row?.getBoundingClientRect();
+      const scrollContainer = row?.closest(".rail-body")?.getBoundingClientRect();
+      if (!bounds || (scrollContainer && (bounds.bottom <= scrollContainer.top || bounds.top >= scrollContainer.bottom))) {
+        if (cardRef.current?.contains(document.activeElement)) row?.focus();
+        setAnchor(null);
+      } else setAnchor(bounds);
+    };
+    const onEscape = (event: KeyboardEvent) => {
+      if (event.key !== "Escape") return;
+      event.preventDefault();
+      event.stopPropagation();
+      dismissed.current = true;
+      if (cardRef.current?.contains(document.activeElement)) ref.current?.focus();
+      closeCard();
+    };
+    window.addEventListener("resize", update);
+    document.addEventListener("scroll", update, true);
+    document.addEventListener("keydown", onEscape, true);
+    return () => {
+      window.removeEventListener("resize", update);
+      document.removeEventListener("scroll", update, true);
+      document.removeEventListener("keydown", onEscape, true);
+    };
+  }, [anchor, ref]);
 
   function startEditing() {
+    closeCard();
     setDraft(session.title?.trim() || "");
     setEditing(true);
   }
@@ -4197,25 +4295,55 @@ function SessionRow({
       ref={ref}
       role="button"
       tabIndex={0}
-      className={`session-row relative flex items-center gap-2 w-full h-8.5 text-start ps-2.5 pe-1.5 rounded-md text-sm text-text cursor-pointer select-none [&:hover:not(.active)]:bg-surface [&.active]:bg-panel [&.active]:font-medium [&_.session-dot:empty]:hidden [&_.session-dot]:w-4 [&_.session-dot]:inline-flex [&_.session-dot]:items-center [&_.session-dot]:justify-center [&_.session-dot]:shrink-0 [&_.session-title]:flex-1 [&_.session-title]:min-w-0 [&_.session-title]:overflow-hidden [&_.session-title]:[mask-image:linear-gradient(to_right,black_calc(100%_-_16px),transparent)] [&_.session-title]:whitespace-nowrap [&_.session-menu-btn]:hidden [&_.session-menu-btn]:items-center [&_.session-menu-btn]:justify-center [&_.session-menu-btn]:w-4 [&_.session-menu-btn]:h-4 [&_.session-menu-btn]:-my-0.5 [&_.session-menu-btn]:mx-0 [&_.session-menu-btn]:rounded-sm [&_.session-menu-btn]:text-muted [&_.session-menu-btn]:shrink-0 [&_.session-menu-btn:hover]:text-text [&_.session-menu-btn:hover]:bg-panel [&:hover_.session-menu-btn]:inline-flex [&:focus-visible_.session-menu-btn]:inline-flex [&_.session-menu-btn:focus-visible]:inline-flex [&.menu-open_.session-menu-btn]:inline-flex [&:hover_.session-dot]:hidden [&:focus-visible_.session-dot]:hidden [&:has(.session-menu-btn:focus-visible)_.session-dot]:hidden [&.menu-open_.session-dot]:hidden [&_.busy-dot]:w-[7px] [&_.busy-dot]:h-[7px] [&_.busy-dot]:rounded-full [&_.busy-dot]:bg-accent-teal [&_.busy-dot]:animate-[or-pulse_1.2s_infinite] [&_.busy-dot]:shrink-0 [&_.unread-dot]:w-[7px] [&_.unread-dot]:h-[7px] [&_.unread-dot]:rounded-full [&_.unread-dot]:bg-accent-blue [&_.unread-dot]:shrink-0 [&_.busy-dot.waiting]:animate-none [&_.session-title-input]:flex-1 [&_.session-title-input]:min-w-0 [&_.session-title-input]:py-px [&_.session-title-input]:px-1 [&_.session-title-input]:-my-0.5 [&_.session-title-input]:mx-0 [&_.session-title-input]:[font:inherit] [&_.session-title-input]:text-text [&_.session-title-input]:bg-background [&_.session-title-input]:border [&_.session-title-input]:border-focus-border [&_.session-title-input]:rounded-sm [&_.session-title-input]:outline-none [&.editing]:bg-surface [&.editing]:cursor-default [&.editing_.session-menu-btn]:hidden [&.editing_.session-dot]:hidden ${active ? "active" : ""}  ${unread ? "unread" : ""}  ${open ? "menu-open" : ""}  ${
+      aria-label={sessionDescription}
+      aria-describedby={anchor ? cardId : undefined}
+      onMouseEnter={() => {
+        pointerInside.current = true;
+        dismissed.current = false;
+        window.clearTimeout(closeTimer.current);
+        if (!editing && !open) {
+          if (Date.now() < cardWarmUntil.current) showCard();
+          else openTimer.current = window.setTimeout(showCard, 350);
+        }
+      }}
+      onMouseLeave={(event) => {
+        if (anchor) cardWarmUntil.current = Date.now() + 500;
+        pointerInside.current = false;
+        dismissed.current = false;
+        if (event.relatedTarget instanceof Element && event.relatedTarget.closest(".session-row")) closeCard();
+        else scheduleClose();
+      }}
+      onFocus={(event) => {
+        if (event.target === event.currentTarget && !editing && !open) {
+          showCard();
+        }
+      }}
+      onBlur={(event) => {
+        if (!ref.current?.contains(event.relatedTarget) && !cardRef.current?.contains(event.relatedTarget)) dismissed.current = false;
+        scheduleClose();
+      }}
+      className={`session-row relative flex items-center gap-2 w-full h-8.5 text-start ps-2.5 pe-1.5 rounded-md text-sm text-text cursor-pointer select-none [&:hover:not(.active)]:bg-surface [&.active]:bg-panel [&.active]:font-medium [&_.session-dot:empty]:hidden [&_.session-dot]:w-4 [&_.session-dot]:inline-flex [&_.session-dot]:items-center [&_.session-dot]:justify-center [&_.session-dot]:shrink-0 [&_.session-title]:flex-1 [&_.session-title]:min-w-0 [&_.session-title]:overflow-hidden [&_.session-title]:[mask-image:linear-gradient(to_right,black_calc(100%_-_16px),transparent)] [&_.session-title]:whitespace-nowrap [&_.session-menu-btn]:hidden [&_.session-menu-btn]:items-center [&_.session-menu-btn]:justify-center [&_.session-menu-btn]:w-4 [&_.session-menu-btn]:h-4 [&_.session-menu-btn]:-my-0.5 [&_.session-menu-btn]:mx-0 [&_.session-menu-btn]:rounded-sm [&_.session-menu-btn]:text-muted [&_.session-menu-btn]:shrink-0 [&_.session-menu-btn:hover]:text-text [&_.session-menu-btn:hover]:bg-panel [&:hover_.session-menu-btn]:inline-flex [&:focus-visible_.session-menu-btn]:inline-flex [&_.session-menu-btn:focus-within]:inline-flex [&.menu-open_.session-menu-btn]:inline-flex [&.card-open_.session-menu-btn]:inline-flex [&:hover_.session-dot]:hidden [&:focus-visible_.session-dot]:hidden [&:has(.session-menu-btn:focus-within)_.session-dot]:hidden [&.menu-open_.session-dot]:hidden [&_.busy-dot]:w-[7px] [&_.busy-dot]:h-[7px] [&_.busy-dot]:rounded-full [&_.busy-dot]:bg-accent-teal [&_.busy-dot]:animate-[or-pulse_1.2s_infinite] [&_.busy-dot]:shrink-0 [&_.unread-dot]:w-[7px] [&_.unread-dot]:h-[7px] [&_.unread-dot]:rounded-full [&_.unread-dot]:bg-accent-blue [&_.unread-dot]:shrink-0 [&_.busy-dot.waiting]:animate-none [&_.session-title-input]:flex-1 [&_.session-title-input]:min-w-0 [&_.session-title-input]:py-px [&_.session-title-input]:px-1 [&_.session-title-input]:-my-0.5 [&_.session-title-input]:mx-0 [&_.session-title-input]:[font:inherit] [&_.session-title-input]:text-text [&_.session-title-input]:bg-background [&_.session-title-input]:border [&_.session-title-input]:border-focus-border [&_.session-title-input]:rounded-sm [&_.session-title-input]:outline-none [&.editing]:bg-surface [&.editing]:cursor-default [&.editing_.session-menu-btn]:hidden [&.editing_.session-dot]:hidden ${active ? "active" : ""}  ${unread ? "unread" : ""}  ${open ? "menu-open" : ""} ${anchor ? "card-open" : ""}  ${
         editing ? "editing" : ""
         }`}
-      title={`${harnessLabel(session.harness, session.harnessName)}${session.model ? ` · ${session.model}` : ""}`}
       onClick={() => {
         // While editing, a body click is a no-op; blur/Enter/Esc drive it.
         if (editing) return;
         // With the menu open, a body click just dismisses it — switching
         // sessions underneath an open menu would leave it orphaned.
         if (open) setOpen(false);
-        else onOpen();
+        else { closeCard(); onOpen(); }
       }}
       onKeyDown={(e) => {
         // Only keys aimed at the row itself: the kebab, menu items, and the
         // rename input are descendants, and preventDefault here would cancel
         // their activation.
         if (e.target !== e.currentTarget) return;
-        if (e.key === "Enter" || e.key === " ") {
+        if (e.key === "Tab" && !e.shiftKey && anchor && cardRef.current) {
           e.preventDefault();
+          cardRef.current.focus();
+        } else if (e.key === "Enter" || e.key === " ") {
+          e.preventDefault();
+          closeCard();
           // Mirror the click branch: dismiss an open menu instead of
           // navigating underneath it.
           if (open) setOpen(false);
@@ -4269,17 +4397,35 @@ function SessionRow({
           unread && !waiting && <span className="unread-dot" />
         )}
       </span>
-      <button
-        className="session-menu-btn"
-        title={m.chat_panel_session_options()}
-        aria-label={m.chat_panel_session_options()}
-        onClick={(e) => {
-          e.stopPropagation();
-          setOpen((v) => !v);
-        }}
-      >
-        <MoreHorizontal size={14} />
-      </button>
+      <Tooltip interactive content={m.chat_panel_session_options()} className="session-menu-btn">
+        <button
+          className="flex w-full h-full items-center justify-center"
+          aria-label={m.chat_panel_session_options()}
+          onClick={(e) => {
+            e.stopPropagation();
+            closeCard();
+            setOpen((v) => !v);
+          }}
+        >
+          <MoreHorizontal size={14} />
+        </button>
+      </Tooltip>
+      {anchor && !open && !editing && (
+        <SessionHoverCard
+          session={session}
+          modelName={modelName}
+          projectName={projectName}
+          harnessLogo={harnessLogo}
+          anchor={anchor}
+          cardId={cardId}
+          cardRef={cardRef}
+          onEnter={() => { pointerInside.current = true; window.clearTimeout(closeTimer.current); }}
+          onLeave={() => { cardWarmUntil.current = Date.now() + 500; pointerInside.current = false; scheduleClose(); }}
+          onOpenExperiment={(projectId, experimentId) => { closeCard(); onOpenExperiment(projectId, experimentId); }}
+          onReturnToRow={() => ref.current?.focus()}
+          onContinue={() => { closeCard(); ref.current?.querySelector<HTMLButtonElement>(".session-menu-btn button")?.focus(); }}
+        />
+      )}
       {open && (
         <div className="option-menu absolute bottom-[calc(100%_+_8px)] start-0 max-h-95 flex flex-col bg-background border border-border rounded-lg shadow-menu z-50 overflow-hidden min-w-47.5 p-1.5 [&.align-right]:start-auto [&.align-right]:end-0 [&.drop-down]:bottom-auto [&.drop-down]:top-[calc(100%_+_4px)] [&.session-menu]:start-auto [&.session-menu]:end-1.5 [&.session-menu]:top-[calc(100%_-_2px)] [&.session-menu]:min-w-35 drop-down session-menu">
           <MenuItem
@@ -4335,6 +4481,26 @@ const STARTER_TONES = [
 ];
 const STARTER_GRID_CLASS =
   "mt-7 grid w-full max-w-readable grid-cols-1 gap-3 sm:grid-cols-2";
+const composerStashes = new Map<string, ComposerStash>();
+const mountedComposers = new Map<string, (failed: ComposerStash) => void>();
+subscribeWorkspace(() => { composerStashes.clear(); });
+
+function mergeFailedComposer(current: ComposerStash, failed: ComposerStash): ComposerStash {
+  const annotations = [...current.annotations];
+  for (const annotation of failed.annotations) {
+    if (annotations.some((item) => item.id === annotation.id && item.text === annotation.text)) continue;
+    let id = annotation.id;
+    while (annotations.some((item) => item.id === id)) id += ":recovered";
+    annotations.unshift(id === annotation.id ? annotation : { ...annotation, id });
+  }
+  return {
+    draft: [failed.draft, current.draft].filter(Boolean).join("\n\n"),
+    attachments: [...failed.attachments.filter((item) => !current.attachments.includes(item)), ...current.attachments],
+    annotations,
+    unconfirmedSend: current.unconfirmedSend ?? failed.unconfirmedSend,
+    pendingClientTurn: current.pendingClientTurn ?? failed.pendingClientTurn,
+  };
+}
 
 /** Reconcile the settings attached to a selected model without treating the
  * catalog as an allowlist. The picker deliberately accepts free-form ids, so
@@ -4346,12 +4512,17 @@ export function deriveComposerSelection(
   activeHarness: Harness | undefined,
 ): ModelSelection | null {
   if (!rawSelection) return null;
-  const model = rawSelection.model ?? null;
+  const model = (rawSelection.harness === "codex" || rawSelection.harness === "claude-code") && (rawSelection.model == null || rawSelection.model === "default")
+    ? resolveHarnessDefaultModel(activeHarness) ?? rawSelection.model ?? null
+    : rawSelection.model ?? null;
+  const readyHarness = activeHarness?.catalogPending || (activeHarness?.id === "codex" && !activeHarness.models.length)
+    ? undefined
+    : activeHarness;
   return {
     ...rawSelection,
     model,
-    serviceTier: reconcileServiceTier(activeHarness, model, rawSelection.serviceTier),
-    reasoningLevel: reconcileReasoning(activeHarness, model, rawSelection.reasoningLevel),
+    serviceTier: reconcileServiceTier(readyHarness, model, rawSelection.serviceTier),
+    reasoningLevel: reconcileReasoning(readyHarness, model, rawSelection.reasoningLevel),
   };
 }
 
@@ -4378,6 +4549,7 @@ export function ChatPanel({
   composerFocusNonce = 0,
   activeSessionId,
   onActiveSessionChange,
+  onStartHarnessDraft,
   preferredAgent,
   onPreferredAgentChange,
   preferredAutonomy,
@@ -4448,6 +4620,7 @@ export function ChatPanel({
   onActiveSessionChange: (sessionId: string | null, options?: { replace?: boolean; projectId?: string }) => void;
   /** Database-backed selection used to seed new chat sessions. */
   preferredAgent: ModelSelection | null;
+  onStartHarnessDraft?: () => void;
   onPreferredAgentChange: (selection: ModelSelection) => Promise<void>;
   preferredAutonomy: Autonomy;
   onPreferredAutonomyChange: (autonomy: Autonomy) => void;
@@ -4491,11 +4664,13 @@ export function ChatPanel({
     } catch { return []; }
   });
   const [sessionFilter, setSessionFilter] = useState<SessionFilter>("active");
-  const [sidebarExpanded, setSidebarExpanded] = useState(false);
+  const [sidebarExpandedAll, setSidebarExpandedAll] = useState(false);
   const railBodyRef = useRef<HTMLDivElement>(null);
+  const cardWarmUntil = useRef(0);
   const [railHeight, setRailHeight] = useState(0);
   const [focusedSidebarRow, setFocusedSidebarRow] = useState<string | null>(null);
   const [chatLimits, setChatLimits] = useState<Record<string, number>>({});
+  const sidebarExpanded = sidebarExpandedAll || Object.keys(chatLimits).length > 0;
   useLayoutEffect(() => {
     const body = railBodyRef.current;
     if (!body || embedded) return;
@@ -4527,7 +4702,7 @@ export function ChatPanel({
     enabled: !embedded && sidebarGrouping === "list",
   });
   const sessionsOptions = useMemo(() => listChatSessionsQuery(projectId), [projectId]);
-  const { data: sessions = EMPTY_SESSIONS } = useQuery(sessionsOptions);
+  const { data: sessions = EMPTY_SESSIONS, isSuccess: sessionsLoaded } = useQuery(sessionsOptions);
   const setSessions = useCallback((value: React.SetStateAction<ChatSession[]>) => {
     setScopedQueryData(sessionsOptions.queryKey, (current) => {
       if (!current) return undefined;
@@ -4550,8 +4725,13 @@ export function ChatPanel({
   const [draft, setDraft] = useState("");
   const [demoHintDismissed, setDemoHintDismissed] = useState(false);
   const [annotations, setAnnotations] = useState<ComposerAnnotation[]>([]);
-  const annotationId = useRef(0);
+  const [unconfirmedSend, setUnconfirmedSend] = useState<string | null>(null);
   const composerScopeRef = useRef({ projectId, activeId, mainView });
+  const composerMountedRef = useRef(false);
+  useLayoutEffect(() => {
+    composerMountedRef.current = true;
+    return () => { composerMountedRef.current = false; };
+  }, []);
   if (composerScopeRef.current.projectId !== projectId
     || composerScopeRef.current.activeId !== activeId
     || composerScopeRef.current.mainView !== mainView) {
@@ -4565,40 +4745,66 @@ export function ChatPanel({
   const [imageRefusedFor, setImageRefusedFor] = useState<string | null>(null);
   // Unsent composer content belongs to the scope it was typed in — stash on
   // the way out, restore on return, so a draft can't bleed into another chat.
-  const stashKey = activeId ?? `${projectId}:new`;
-  const composerStashRef = useRef(new Map<string, ComposerStash>());
+  const stashScope = `${sessionsOptions.queryKey[1]}:`;
+  const stashKey = stashScope + (embedded
+    ? activeId ? `side:${activeId}` : `${projectId}:side:${sideParentSessionId ?? "new"}`
+    : activeId ?? `${projectId}:new`);
+  const pendingClientTurn = useRef<ComposerStash["pendingClientTurn"]>(null);
+  const pendingScope = useRef<string | null>(null);
   const composerLiveRef = useRef(EMPTY_COMPOSER_STASH);
-  composerLiveRef.current = { draft, attachments, annotations };
+  composerLiveRef.current = { draft, attachments, annotations, unconfirmedSend, pendingClientTurn: pendingClientTurn.current };
   // On offer until the user has sent anything in the demo: a send either adds
   // a session or moves a recorded session's leaf off its seeded message. The
   // nudge anchors to the first scope that had it — seeding it in every scope
-  // would read as the draft bleeding across chats.
+  // would read as the draft bleeding across chats. A new project's seeded
+  // prompt (an openresearch:// reproduce link) is offered the same way until it has a chat.
+  const seededPrompt = !embedded && sessionsLoaded && sessions.length === 0 ? composerSeed(projectId) : null;
   const composerPrefillOffer =
     projectId === DEMO_PROJECT_ID && !embedded &&
       sessions.length > 0 &&
       sessions.every((session) => session.sideParentSessionId || DEMO_SEEDED_LEAF_IDS[session.id] === session.activeLeafId)
       ? DEMO_RUN_EXPERIMENT_PROMPT
-      : null;
-  const prefillScopeRef = useRef<string | null>(null);
-  if (composerPrefillOffer !== null && prefillScopeRef.current === null && activeId !== null) {
-    prefillScopeRef.current = stashKey;
+      : seededPrompt;
+  // Per project, so a seeded project's anchor can't block the demo's.
+  const prefillScopesRef = useRef(new Map<string, string>());
+  const canAnchorPrefill = activeId !== null || seededPrompt !== null;
+  if (composerPrefillOffer !== null && !prefillScopesRef.current.has(projectId) && canAnchorPrefill) {
+    prefillScopesRef.current.set(projectId, stashKey);
   }
-  const composerPrefill = stashKey === prefillScopeRef.current ? composerPrefillOffer : null;
+  useEffect(() => {
+    if (sessions.length > 0) forgetComposerSeed(projectId);
+  }, [projectId, sessions.length]);
+  const composerPrefill = stashKey === prefillScopesRef.current.get(projectId) ? composerPrefillOffer : null;
   // Layout effect: the restore must land before paint or the outgoing chat's
   // draft flashes for a frame inside the incoming one.
   useLayoutEffect(() => {
-    const restored = composerStashRef.current.get(stashKey) ?? EMPTY_COMPOSER_STASH;
+    const restored = composerStashes.get(stashKey) ?? EMPTY_COMPOSER_STASH;
     // StrictMode double-invokes: the cleanup must see the restored value, not
     // the pre-restore render's.
     composerLiveRef.current = restored;
+    pendingClientTurn.current = restored.pendingClientTurn;
+    pendingScope.current = stashKey;
     setDraft(restored.draft);
     setAttachments(restored.attachments);
     setAnnotations(restored.annotations);
+    setUnconfirmedSend(restored.unconfirmedSend);
     setImageRefusedFor(null);
+    const restoreFailed = (failed: ComposerStash) => {
+      composerLiveRef.current = mergeFailedComposer(composerLiveRef.current, failed);
+      pendingClientTurn.current = composerLiveRef.current.pendingClientTurn;
+      setDraft((current) => mergeFailedComposer({ ...EMPTY_COMPOSER_STASH, draft: current }, failed).draft);
+      setAttachments((current) => mergeFailedComposer({ ...EMPTY_COMPOSER_STASH, attachments: current }, failed).attachments);
+      setAnnotations((current) => mergeFailedComposer({ ...EMPTY_COMPOSER_STASH, annotations: current }, failed).annotations);
+      if (failed.unconfirmedSend !== null) setUnconfirmedSend((current) => current ?? failed.unconfirmedSend);
+    };
+    mountedComposers.set(stashKey, restoreFailed);
     return () => {
+      if (mountedComposers.get(stashKey) === restoreFailed) mountedComposers.delete(stashKey);
+      if (!isCurrentScope(sessionsOptions.queryKey) || (activeId && deletedSessionIds.has(activeId))
+        || (sideParentSessionId && deletedSessionIds.has(sideParentSessionId))) return;
       const stashed = composerStashContent(composerLiveRef.current, composerPrefill);
-      if (stashed) composerStashRef.current.set(stashKey, stashed);
-      else composerStashRef.current.delete(stashKey);
+      if (stashed) composerStashes.set(stashKey, stashed);
+      else composerStashes.delete(stashKey);
     };
   }, [stashKey, composerPrefill]);
   const [settingsError, setSettingsError] = useState<string | null>(null);
@@ -4630,7 +4836,6 @@ export function ChatPanel({
   const activeLeafRef = useRef<string | null>(null);
   const [retryingQueuedId, setRetryingQueuedId] = useState<string | null>(null);
   const preparingSend = useRef(false);
-  const pendingClientTurn = useRef<{ signature: string; id: string } | null>(null);
   // Sessions whose title was just replaced by a harness-generated one, mapped
   // to a nonce that bumps per reveal so a second retitle remounts the spans and
   // replays the animation instead of sitting on a finished one.
@@ -4653,10 +4858,9 @@ export function ChatPanel({
   const [resumeOpen, setResumeOpen] = useState(false);
   const dataSources = usePopover();
   const addTranscriptSelection = useCallback((selection: Pick<SelectionAction, "text" | "range">) => {
-    annotationId.current += 1;
     setAnnotations((current) => [
       ...current,
-      { id: `annotation-${annotationId.current}`, ...selection },
+      { id: `annotation-${crypto.randomUUID()}`, ...selection },
     ]);
     composerRef.current?.focus();
   }, []);
@@ -4764,6 +4968,7 @@ export function ChatPanel({
       const attachmentStashKey = stashKey;
       const reader = new FileReader();
       reader.onload = () => {
+        if (!isCurrentScope(sessionsOptions.queryKey)) return;
         const attachment = {
           dataUrl: reader.result as string,
           mediaType: file.type,
@@ -4772,12 +4977,12 @@ export function ChatPanel({
         };
         // The decode is async — if the composer moved on, the file belongs to
         // the scope it was pasted into, not whatever chat is now showing.
-        if (composerScopeRef.current.projectId === scope.projectId && composerScopeRef.current.activeId === scope.activeId) {
+        if (composerMountedRef.current && composerScopeRef.current.projectId === scope.projectId && composerScopeRef.current.activeId === scope.activeId) {
           setAttachments((cur) => [...cur, attachment]);
           return;
         }
-        const stash = composerStashRef.current.get(attachmentStashKey) ?? EMPTY_COMPOSER_STASH;
-        composerStashRef.current.set(attachmentStashKey, {
+        const stash = composerStashes.get(attachmentStashKey) ?? EMPTY_COMPOSER_STASH;
+        composerStashes.set(attachmentStashKey, {
           ...stash,
           attachments: [...stash.attachments, attachment],
         });
@@ -4810,16 +5015,20 @@ export function ChatPanel({
   //    picker tweaks layered on. The harness is the session's, not the global.
   //  * with no session — the sticky global preference (seeds a new session).
   const savedSelection = selection ?? defaultSelection(harnesses);
+  const retryOptions = (pendingScope.current === stashKey
+    ? pendingClientTurn.current
+    : composerStashes.get(stashKey)?.pendingClientTurn)?.options;
   const rawSelection: ModelSelection | null = openSession
     ? {
       harness: openSession.harness,
-      model: sessionOverride.model !== undefined ? sessionOverride.model : openSession.model,
-      serviceTier:
-        sessionOverride.serviceTier !== undefined
-          ? sessionOverride.serviceTier
-          : openSession.serviceTier,
-      permissionMode: sessionOverride.permissionMode ?? openSession.permissionMode,
-      reasoningLevel: sessionOverride.reasoningLevel ?? openSession.reasoningLevel,
+      model: sessionOverride.model !== undefined ? sessionOverride.model
+        : retryOptions?.model !== undefined ? retryOptions.model : openSession.model,
+      serviceTier: sessionOverride.serviceTier !== undefined ? sessionOverride.serviceTier
+        : retryOptions?.serviceTier !== undefined ? retryOptions.serviceTier : openSession.serviceTier,
+      permissionMode: sessionOverride.permissionMode ?? (retryOptions?.permissionMode !== undefined
+        ? retryOptions.permissionMode : openSession.permissionMode),
+      reasoningLevel: sessionOverride.reasoningLevel ?? (retryOptions?.reasoningLevel !== undefined
+        ? retryOptions.reasoningLevel : openSession.reasoningLevel),
     }
     : savedSelection
       ? { ...savedSelection, ...sessionOverride }
@@ -4913,8 +5122,14 @@ export function ChatPanel({
   // let a change on one axis pin a reconciled value on another — picking a
   // permission mode would write a reasoning level the user never chose, and the
   // next send would persist it over their real setting.
+  const invalidatePendingRetry = () => {
+    if (pendingClientTurn.current) pendingClientTurn.current.invalidated = true;
+    pendingClientTurn.current = null;
+    composerLiveRef.current = { ...composerLiveRef.current, pendingClientTurn: null };
+  };
   const selectModel = (next: Partial<ModelSelection>) => {
     if (openSession?.harness.startsWith("acp:") && acpModel && next.model) {
+      if (next.model !== acpModel.currentValue) invalidatePendingRetry();
       void setChatConfiguration(openSession.id, acpModel.id, next.model).catch((error: unknown) => showAlert(error instanceof Error ? error.message : String(error), "error"));
       return;
     }
@@ -4937,6 +5152,7 @@ export function ChatPanel({
       next.reasoningLevel !== composerSelection.reasoningLevel
     )
       changed.reasoningLevel = next.reasoningLevel;
+    if (Object.keys(changed).length) invalidatePendingRetry();
     setRecoveryOverrides((current) => ({ ...current, ...changed }));
     setSelection(merged);
     void onPreferredAgentChange(merged).catch(() => {});
@@ -4946,6 +5162,20 @@ export function ChatPanel({
       setSessionOverride({});
     }
   };
+  function startHarness(harness: Harness) {
+    const model = resolveHarnessDefaultModel(harness);
+    const next: ModelSelection = {
+      harness: harness.id,
+      model,
+      serviceTier: reconcileServiceTier(harness.catalogPending ? undefined : harness, model, null),
+      permissionMode: harness.options?.defaultPermissionMode ?? null,
+      reasoningLevel: reconcileReasoning(harness.catalogPending ? undefined : harness, model, null),
+    };
+    setSelection(next);
+    void onPreferredAgentChange(next).catch(() => {});
+    if (onStartHarnessDraft) onStartHarnessDraft();
+    else onActiveSessionChangeRef.current(null, { projectId });
+  }
   const queueSessionMutation = useCallback(<T,>(mutation: () => Promise<T>): Promise<T> => {
     const result = settingsMutationTail.current.catch(() => {}).then(() => {
       if (!isCurrentScope(sessionsOptions.queryKey)) throw new DOMException("Workspace changed", "AbortError");
@@ -4961,6 +5191,7 @@ export function ChatPanel({
     // Plan is session-scoped. Claude exposes it in the permission dropdown,
     // but it must not become the saved default for future sessions.
     if (id === "plan" && activeHarness?.id === "claude-code") {
+      if (composerSelection?.permissionMode !== id) invalidatePendingRetry();
       setRecoveryOverrides((current) => ({ ...current, permissionMode: id }));
       setSessionOverride((current) => ({ ...current, permissionMode: id }));
     } else {
@@ -5000,6 +5231,7 @@ export function ChatPanel({
   };
   const setReasoningLevel = (id: string) => selectModel({ reasoningLevel: id });
   const setAutonomy = (autonomy: Autonomy) => {
+    if (autonomy !== (openSession?.autonomy ?? preferredAutonomy)) invalidatePendingRetry();
     if (!openSession) {
       if (sideParentSessionId) setSideDraftAutonomy(autonomy);
       else onPreferredAutonomyChange(autonomy);
@@ -5030,7 +5262,7 @@ export function ChatPanel({
   const planActive = acpMode ? acpMode.currentValue === "plan" : composerSelection?.harness === "claude-code"
     ? composerSelection.permissionMode === "plan"
     : planActivation === "command"
-      ? planModeOverride ?? openSession?.planMode ?? false
+      ? planModeOverride ?? retryOptions?.planMode ?? openSession?.planMode ?? false
       : false;
   useEffect(() => {
     if (planModeOverride === null || openSession?.planMode !== planModeOverride) return;
@@ -5039,6 +5271,7 @@ export function ChatPanel({
   }, [openSession?.planMode, planModeOverride]);
 
   async function setIndependentPlanMode(planMode: boolean) {
+    if (planMode !== planActive) invalidatePendingRetry();
     if (acpMode && openSession) {
       const next = planMode ? "plan" : acpMode.choices.find((choice) => choice.id !== "plan")?.id;
       if (!next) throw new Error(m.chat_toggle_plan_failed());
@@ -5312,10 +5545,8 @@ export function ChatPanel({
     };
   }, [projectId, syncSessionList]);
 
-  // Load message history when a session becomes active.
   useEffect(() => {
     setRecoveryOverrides(EMPTY_RECOVERY_OVERRIDES);
-    pendingClientTurn.current = null;
   }, [activeId]);
 
   useEffect(() => {
@@ -5615,6 +5846,7 @@ export function ChatPanel({
     return () => window.cancelAnimationFrame(frame);
   }, [composerFocusNonce, contentLoading, contentError, historyLoading]);
   const demoHintId = useId();
+  const unconfirmedSendId = useId();
   const demoHintVisible =
     projectId === DEMO_PROJECT_ID && draft === DEMO_RUN_EXPERIMENT_PROMPT && !demoHintDismissed;
   const updateTranscriptBottom = useCallback((el: HTMLDivElement) => {
@@ -5701,23 +5933,52 @@ export function ChatPanel({
     const wireAnnotations = pendingAnnotations.map((annotation) => ({
       text: annotation.text,
     }));
+    const turnSignature = JSON.stringify({
+      text,
+      goal: goalRequested ? text : undefined,
+      plan: planRequested,
+      images: pending.map((attachment) => ({
+        mediaType: attachment.mediaType,
+        name: attachment.name,
+        dataUrl: attachment.dataUrl,
+      })),
+      annotations: wireAnnotations,
+    });
+    const retry = pendingClientTurn.current?.signature === turnSignature ? pendingClientTurn.current : null;
     const sourceProjectId = projectId;
     const sourceView = mainView;
     let sourceSessionId = activeId;
+    let sourceStashKey = stashKey;
     const inSourceScope = () => {
       const current = composerScopeRef.current;
-      return isCurrentScope(sessionsOptions.queryKey) && current.projectId === sourceProjectId
+      return composerMountedRef.current && isCurrentScope(sessionsOptions.queryKey) && current.projectId === sourceProjectId
         && current.activeId === sourceSessionId
         && current.mainView === sourceView;
     };
-    const restoreComposer = () => {
-      if (!inSourceScope()) return;
-      setDraft((current) => current || originalText);
-      if (goalRequested) setGoalScope(composerScopeRef.current);
-      setAttachments((current) => (current.length ? current : pending));
-      setAnnotations((current) => (current.length ? current : pendingAnnotations));
+    let failedTurn: ComposerStash["pendingClientTurn"] = null;
+    const restoreComposer = (unconfirmedSend: string | null = null) => {
+      if (!isCurrentScope(sessionsOptions.queryKey)
+        || (sourceSessionId && deletedSessionIds.has(sourceSessionId))
+        || (sideParentSessionId && deletedSessionIds.has(sideParentSessionId))) return;
+      const restore = mountedComposers.get(sourceStashKey);
+      const failed = {
+        draft: goalArmed && !goalCommand && (!restore || !inSourceScope()) ? `/goal ${starter ?? draft}` : starter ?? draft,
+        attachments: pending,
+        annotations: pendingAnnotations.map(({ range: _range, ...annotation }) => annotation),
+        unconfirmedSend,
+        pendingClientTurn: unconfirmedSend === null || failedTurn?.invalidated ? null : failedTurn,
+      };
+      if (restore) {
+        restore(failed);
+        if (goalRequested && inSourceScope()) setGoalScope(composerScopeRef.current);
+      } else {
+        const merged = mergeFailedComposer(composerStashes.get(sourceStashKey) ?? EMPTY_COMPOSER_STASH, failed);
+        const stashed = composerStashContent(merged, null);
+        if (stashed) composerStashes.set(sourceStashKey, stashed);
+      }
     };
     if (planRequested && !text && pending.length === 0 && pendingAnnotations.length === 0) {
+      composerLiveRef.current = { ...composerLiveRef.current, draft: "" };
       setDraft("");
       setSkillMenuDismissed(false);
       try {
@@ -5734,7 +5995,7 @@ export function ChatPanel({
       }
       return;
     }
-    if (planRequested && acpMode) {
+    if (planRequested && acpMode && !retry) {
       try {
         await setIndependentPlanMode(toggledPlanMode);
       } catch {
@@ -5748,10 +6009,10 @@ export function ChatPanel({
         ...(planPermissionMode ? { permissionMode: planPermissionMode } : {}),
       }
       : null;
-    if (planPermissionMode) setPermissionMode(planPermissionMode);
+    if (planPermissionMode && !retry) setPermissionMode(planPermissionMode);
     let planCommandMutation: number | null = null;
     const previousPlanModeOverride = planModeOverrideRef.current;
-    if (planRequested && !acpMode && planActivation === "command") {
+    if (planRequested && !acpMode && planActivation === "command" && !retry) {
       planCommandMutation = ++planMutationSeq.current;
       planModeOverrideRef.current = toggledPlanMode;
       setPlanModeOverride(toggledPlanMode);
@@ -5768,29 +6029,48 @@ export function ChatPanel({
       const session = await setChatSessionGoalMutation.mutateAsync([sessionId, text]);
       setSessions((current) => current.map((candidate) => candidate.id === session.id ? session : candidate));
     };
-    const turnSignature = JSON.stringify({
-      text,
-      goal: goalRequested ? text : undefined,
-      images: pending.map((attachment) => ({
-        mediaType: attachment.mediaType,
-        name: attachment.name,
-        dataUrl: attachment.dataUrl,
-      })),
-      annotations: wireAnnotations,
-      settings: effective
-        ? {
-          model: effective.model,
-          serviceTier: effective.serviceTier,
-          permissionMode: effective.permissionMode,
-          planMode: independentPlanMode,
-          reasoningLevel: effective.reasoningLevel,
+    const clientTurnId = retry?.id ?? `ct_${crypto.randomUUID()}`;
+    const mode = retry ? retry.mode : busy && steering && !queue && !planRequested && !goalRequested ? "steer" : null;
+    const turnOpts = retry?.options ?? (effective ? {
+      model: effective.model,
+      serviceTier: effective.serviceTier,
+      permissionMode: effective.permissionMode,
+      // A persisted plan toggle must reach the running turn's settings check.
+      planMode: busy && planActivation === "command" ? (independentPlanMode ?? openSession?.planMode) : independentPlanMode,
+      reasoningLevel: effective.reasoningLevel,
+    } : {});
+    pendingClientTurn.current = { signature: turnSignature, id: clientTurnId, mode, options: turnOpts };
+    failedTurn = pendingClientTurn.current;
+    const finishSentMessage = () => {
+      if (inSourceScope()) {
+        setRecoveryOverrides(EMPTY_RECOVERY_OVERRIDES);
+        if (retry) {
+          setUnconfirmedSend(null);
+          composerLiveRef.current = { ...composerLiveRef.current, unconfirmedSend: null };
         }
-        : null,
-    });
-    const clientTurnId = pendingClientTurn.current?.signature === turnSignature
-      ? pendingClientTurn.current.id
-      : `ct_${crypto.randomUUID()}`;
-    pendingClientTurn.current = { signature: turnSignature, id: clientTurnId };
+        if (goalRequested) setGoalScope(null);
+      }
+      if (pendingClientTurn.current?.id === clientTurnId) {
+        pendingClientTurn.current = null;
+        if (inSourceScope() && composerLiveRef.current.pendingClientTurn?.id === clientTurnId) {
+          composerLiveRef.current = { ...composerLiveRef.current, pendingClientTurn: null };
+        }
+      }
+    };
+    const clearComposer = () => {
+      const live = composerLiveRef.current;
+      composerLiveRef.current = {
+        ...live,
+        draft: live.draft === draft ? "" : live.draft,
+        attachments: live.attachments === pending ? [] : live.attachments,
+        annotations: live.annotations === pendingAnnotations ? [] : live.annotations,
+      };
+      setDraft((current) => current === draft ? "" : current);
+      setAttachments((current) => current === pending ? [] : current);
+      setAnnotations((current) => current === pendingAnnotations ? [] : current);
+      setAttachError(null);
+      setImageRefusedFor(null);
+    };
     if (busy) {
       // A turn is already running. Steering hands the message to it now, and
       // the delivered text comes back inline on the assistant message. Parking
@@ -5802,39 +6082,18 @@ export function ChatPanel({
         return;
       }
       const sid = activeId;
-      setDraft("");
-      setAttachments([]);
-      setAnnotations([]);
-      setAttachError(null);
-      setImageRefusedFor(null);
-      // Always send the composer's settings, steer or not: a permission or
-      // plan change persists itself before this message, so the server's
-      // comparison against the *running* turn is the only thing that catches
-      // it — and a mismatch parks the message, which also persists the change.
-      const turnOpts = effective
-        ? {
-          model: effective.model,
-          serviceTier: effective.serviceTier,
-          permissionMode: effective.permissionMode,
-          // The composer's plan state, not just an unpersisted toggle: a
-          // toggle that already persisted would otherwise reach the server
-          // as "no change" and steer into a turn still running without it.
-          planMode:
-            planActivation === "command"
-              ? (independentPlanMode ?? openSession?.planMode)
-              : independentPlanMode,
-          reasoningLevel: effective.reasoningLevel,
-        }
-        : {};
+      clearComposer();
       if (inSourceScope()) setSessionOverride({});
       const images: ChatImageAttachment[] = pending.map((a) => ({
         mediaType: a.mediaType,
         dataBase64: a.dataUrl.slice(a.dataUrl.indexOf(",") + 1),
         name: a.name,
       }));
+      let submitted = false;
       try {
         const sendBusy = async () => {
           await persistMessageGoal(sid);
+          submitted = true;
           return sendChatMessage(
             sid,
             text,
@@ -5842,20 +6101,31 @@ export function ChatPanel({
             images.length ? images : undefined,
             wireAnnotations,
             clientTurnId,
-            steering && !queue && !planRequested && !goalRequested ? "steer" : undefined,
+            mode ?? undefined,
           );
         };
         const response = await queueSessionMutation(sendBusy);
         if (response.turn?.existing) await reseedSession(sid);
-        if (inSourceScope()) {
-          setRecoveryOverrides(EMPTY_RECOVERY_OVERRIDES);
-          if (goalRequested) setGoalScope(null);
+        finishSentMessage();
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : String(err);
+        const unconfirmed = submitted && !(err instanceof RejectedResponseError);
+        if (unconfirmed) {
+          const accepted = await getChatSubmission(sid, clientTurnId).then((result) => result.accepted).catch(() => false);
+          if (!isCurrentScope(sessionsOptions.queryKey) || deletedSessionIds.has(sid)
+            || (sideParentSessionId && deletedSessionIds.has(sideParentSessionId))) return;
+          if (accepted) {
+            finishSentMessage();
+            await reseedSession(sid).catch(() => {});
+            return;
+          }
         }
-        if (pendingClientTurn.current?.id === clientTurnId) pendingClientTurn.current = null;
-      } catch {
-        // Never reached the turn — restore the composer so a retry is one keypress.
         clearFailedPlanCommand();
-        restoreComposer();
+        restoreComposer(unconfirmed ? msg : null);
+        if (isCurrentScope(sessionsOptions.queryKey) && !deletedSessionIds.has(sid)
+          && (!sideParentSessionId || !deletedSessionIds.has(sideParentSessionId)) && !unconfirmed) {
+          dispatch({ type: "localError", sessionId: sid, text: m.chat_message_not_sent({ error: ltr(msg) }) });
+        }
       }
       return;
     }
@@ -5870,41 +6140,48 @@ export function ChatPanel({
       return;
     }
     let sid = activeId;
+    let submitted = false;
     try {
       // Clear before the first await — once the scope can move, a stash
       // cleanup must never see the sent text still in the composer. Failure
       // paths below restore it via restoreComposer().
-      setDraft((current) => current === draft ? "" : current);
-      setAttachments((current) => current === pending ? [] : current);
-      setAnnotations((current) => (current === pendingAnnotations ? [] : current));
-      setAttachError(null);
-      setImageRefusedFor(null);
+      clearComposer();
       preparingSend.current = true;
       try {
         if (!sid) {
           const session = await openNewSession(effective, independentPlanMode);
           sid = session.id;
           sourceSessionId = session.id;
+          sourceStashKey = `${stashScope}${embedded ? `side:${session.id}` : session.id}`;
         }
         if (!isCurrentScope(sessionsOptions.queryKey)) return;
-        const history = getChatMessagesQuery(sid);
-        // Join pending repair even when it has published an intermediate snapshot.
-        await queryClient.fetchQuery({
+        const historySid = sid;
+        const history = getChatMessagesQuery(historySid);
+        // Join pending repair even when it has published an intermediate snapshot. A live invalidation
+        // (e.g. SSE reconnect) can cancel the joined read; retrying joins its replacement or reads the cache.
+        const awaitHistory = (): Promise<unknown> => queryClient.fetchQuery({
           ...history,
           ...(queryClient.getQueryState(history.queryKey)?.fetchStatus === "fetching" ? { staleTime: 0 } : {}),
+        }).catch((cause: unknown) => {
+          if (cause instanceof CancelledError && isCurrentScope(sessionsOptions.queryKey) && !deletedSessionIds.has(historySid)) return awaitHistory();
+          throw cause;
         });
+        await awaitHistory();
       } finally {
         preparingSend.current = false;
       }
-      if (!isCurrentScope(sessionsOptions.queryKey)) return;
-      dispatch({
-        type: "optimisticUser",
-        sessionId: sid,
-        text: text || m.chat_asked_about_selection(),
-        attachments: pending.map((a) => ({ url: a.dataUrl, mediaType: a.mediaType, name: a.name })),
-        annotations: pendingAnnotations,
-      });
-      dispatch({ type: "busy", sessionId: sid, busy: true });
+      if (!isCurrentScope(sessionsOptions.queryKey) || deletedSessionIds.has(sid)
+        || (sideParentSessionId && deletedSessionIds.has(sideParentSessionId))) return;
+      if (!(retry && mode === "steer")) {
+        dispatch({
+          type: "optimisticUser",
+          sessionId: sid,
+          text: text || m.chat_asked_about_selection(),
+          attachments: pending.map((a) => ({ url: a.dataUrl, mediaType: a.mediaType, name: a.name })),
+          annotations: pendingAnnotations,
+        });
+        dispatch({ type: "busy", sessionId: sid, busy: true });
+      }
       if (inSourceScope()) pinTranscriptToBottom();
       // The session being sent to is never archived after this turn (new ones
       // start active; existing ones are unarchived server-side by activity) —
@@ -5913,15 +6190,6 @@ export function ChatPanel({
       // `effective.harness` is always the target session's harness (locked once
       // it exists), so these overrides are always valid — the backend persists
       // them as the session's sticky settings. Clear the unsent tweak now.
-      const turnOpts = effective
-        ? {
-          model: effective.model,
-          serviceTier: effective.serviceTier,
-          permissionMode: effective.permissionMode,
-          planMode: independentPlanMode,
-          reasoningLevel: effective.reasoningLevel,
-        }
-        : {};
       if (inSourceScope()) setSessionOverride({});
       const images: ChatImageAttachment[] = pending.map((a) => ({
         mediaType: a.mediaType,
@@ -5932,6 +6200,7 @@ export function ChatPanel({
       if (!targetSessionId) throw new Error(m.chat_session_not_created());
       const sendTurn = async () => {
         await persistMessageGoal(targetSessionId);
+        submitted = true;
         return sendChatMessage(
           targetSessionId,
           text,
@@ -5939,45 +6208,41 @@ export function ChatPanel({
           images.length ? images : undefined,
           wireAnnotations,
           clientTurnId,
+          mode ?? undefined,
         );
       };
       const response = await queueSessionMutation(sendTurn);
       if (response.turn?.existing) await reseedSession(targetSessionId);
-      if (inSourceScope()) {
-        setRecoveryOverrides(EMPTY_RECOVERY_OVERRIDES);
-        if (goalRequested) setGoalScope(null);
-      }
-      if (pendingClientTurn.current?.id === clientTurnId) pendingClientTurn.current = null;
+      finishSentMessage();
     } catch (err) {
       if (!isCurrentScope(sessionsOptions.queryKey)) return;
-      // The message never reached a turn — put it back in the composer so a
-      // retry is one keypress, whichever branch below applies.
-      restoreComposer();
-      clearFailedPlanCommand();
-      if (!sid) return; // session creation failed; no transcript to annotate
+      if (!sid) {
+        restoreComposer();
+        clearFailedPlanCommand();
+        const msg = err instanceof Error ? err.message : String(err);
+        showAlert(m.chat_message_not_sent({ error: ltr(msg) }), "error");
+        return;
+      }
       const msg = err instanceof Error ? err.message : String(err);
-      // A *network* failure does not prove no turn started — the backend
-      // claims the turn (and emits busy) before its response, so a lost
-      // response can reject on a live, streaming turn; ask the server before
-      // declaring failure. An explicit busy rejection is different: the slot
-      // belongs to someone else's turn (run watcher, second tab) and ours was
-      // never accepted — always surface that.
-      if (!/session is busy/i.test(msg)) {
-        const busyNow = await queryClient.fetchQuery({ ...listChatSessionsQuery(projectId), staleTime: 0 })
-          .then((list) => !!list.find((s) => s.id === sid)?.busy)
-          .catch(() => false);
-        if (busyNow) {
-          // The turn is real and streaming — undo the restore, nothing failed.
-          if (inSourceScope()) {
-            setDraft((cur) => (cur === text ? "" : cur));
-            setAttachments((cur) => (cur === pending ? [] : cur));
-            setAnnotations((cur) => (cur === pendingAnnotations ? [] : cur));
-          }
+      if (!isCurrentScope(sessionsOptions.queryKey) || deletedSessionIds.has(sid)) return;
+      const unconfirmed = submitted && !(err instanceof RejectedResponseError);
+      if (unconfirmed) {
+        const accepted = await getChatSubmission(sid, clientTurnId).then((result) => result.accepted).catch(() => false);
+        if (!isCurrentScope(sessionsOptions.queryKey) || deletedSessionIds.has(sid)
+          || (sideParentSessionId && deletedSessionIds.has(sideParentSessionId))) return;
+        if (accepted) {
+          finishSentMessage();
+          await reseedSession(sid).catch(() => {});
           return;
         }
       }
-      dispatch({ type: "busy", sessionId: sid, busy: false });
-      dispatch({ type: "localError", sessionId: sid, text: m.chat_message_not_sent({ error: ltr(msg) }) });
+      restoreComposer(unconfirmed ? msg : null);
+      clearFailedPlanCommand();
+      if (submitted) await reseedSession(sid).catch(() => {});
+      else dispatch({ type: "busy", sessionId: sid, busy: false });
+      if (!isCurrentScope(sessionsOptions.queryKey) || deletedSessionIds.has(sid)
+        || (sideParentSessionId && deletedSessionIds.has(sideParentSessionId))) return;
+      if (!unconfirmed) dispatch({ type: "localError", sessionId: sid, text: m.chat_message_not_sent({ error: ltr(msg) }) });
     }
   }
 
@@ -6226,8 +6491,9 @@ export function ChatPanel({
    * and the cached transcript. Used on delete (ours or another dashboard's). */
   function forgetSession(sessionId: string) {
     removeCachedSession(sessionId);
-    composerStashRef.current.delete(sessionId);
-    if (prefillScopeRef.current === sessionId) prefillScopeRef.current = null;
+    composerStashes.delete(`${stashScope}${sessionId}`);
+    composerStashes.delete(`${stashScope}side:${sessionId}`);
+    if (prefillScopesRef.current.get(projectId) === `${stashScope}${sessionId}`) prefillScopesRef.current.delete(projectId);
     if (composerScopeRef.current.projectId === projectId
       && composerScopeRef.current.activeId === sessionId
       && composerScopeRef.current.mainView === "chat") {
@@ -6322,7 +6588,7 @@ export function ChatPanel({
   );
 
   const isApple = /Mac|iPhone|iPad/.test(navigator.platform);
-  const newTaskShortcut = isApple ? "⌘ ⇧ ↵" : "Ctrl + Shift + ↵";
+  const newTaskShortcut = isApple ? "⌘ N" : "Ctrl + N";
   const queueChord = isApple ? "⌘ Enter" : "Ctrl + Enter";
   const startProjectTask = useCallback(() => {
     setSessionFilter("active");
@@ -6362,10 +6628,9 @@ export function ChatPanel({
     const onKeyDown = (event: KeyboardEvent) => {
       if (
         event.repeat ||
-        event.key !== "Enter" ||
         (!event.metaKey && !event.ctrlKey) ||
         event.altKey ||
-        !event.shiftKey ||
+        !((event.key.toLowerCase() === "n" && !event.shiftKey) || (event.key === "Enter" && event.shiftKey)) ||
         inSideChat(event.target)
       )
         return;
@@ -6394,7 +6659,7 @@ export function ChatPanel({
     sidebarRows.push({ kind: "project", project, collapsed, busy: collapsed && matching.some((session) => sessionBusy(project, session) && !sessionWaiting(session)) });
     if (collapsed) return;
     visible.forEach((session) => sidebarRows.push({ kind: "chat", project, session }));
-    if (matching.length > chatLimit) sidebarRows.push({ kind: "more", project });
+    if (matching.length > 6) sidebarRows.push({ kind: "more", project });
     if (!visible.length && (sidebarGrouping === "projects" || query.isPending || query.error)) sidebarRows.push({ kind: "status", project, pending: query.isPending, error: Boolean(query.error), retry: () => { void query.refetch(); } });
   });
   if (sidebarGrouping === "list") {
@@ -6443,14 +6708,14 @@ export function ChatPanel({
   }, [sidebarGrouping, railOpen, embedded, lastVisibleIndex, sidebarRows.length, flatSessions.hasNextPage, flatSessions.isFetching, flatSessions.isError, flatSessions.fetchNextPage]);
 
   const rail = (
-    <aside className="session-rail w-75 shrink-0 flex flex-col win-titlebar:pt-win-caption bg-background min-h-0 [&_.rail-body]:flex-1 [&_.rail-body]:min-h-0 [&_.rail-body]:pt-0 [&_.rail-body]:pb-0 [&_.rail-body]:ps-2 [&_.rail-body]:pe-1 border-e border-e-border overflow-visible">
+    <aside className="session-rail w-75 shrink-0 flex flex-col bg-background min-h-0 [&_.rail-body]:flex-1 [&_.rail-body]:min-h-0 [&_.rail-body]:pt-0 [&_.rail-body]:pb-0 [&_.rail-body]:ps-2 [&_.rail-body]:pe-1 border-e border-e-border overflow-visible">
       {railHeader}
       <nav className="rail-nav flex flex-col gap-0.5 p-2 shrink-0">
         <button
           className="rail-nav-item flex items-center gap-2.5 py-2 px-2.5 text-base text-text rounded-md text-start hover:bg-surface [&[data-tip]::after]:top-auto [&[data-tip]::after]:bottom-[calc(100%_+_6px)]"
           data-onboarding="new-session"
           data-tip={newTaskShortcut}
-          aria-keyshortcuts="Meta+Shift+Enter Control+Shift+Enter"
+          aria-keyshortcuts="Meta+N Control+N Meta+Shift+Enter Control+Shift+Enter"
           onClick={startNewTask}
         >
           <Plus size={16} />
@@ -6458,22 +6723,27 @@ export function ChatPanel({
         </button>
         <button
           className={`rail-nav-item flex items-center gap-2.5 py-2 px-2.5 text-base text-text rounded-md text-start [&:hover:not(.active)]:bg-surface [&.active]:bg-panel [&.active]:font-medium ${mainView === "skills" ? "active" : ""}`}
+          aria-current={mainView === "skills" ? "page" : undefined}
           onClick={() => onSelectMainView("skills")}
         >
           <Blocks size={16} />
           {m.chat_panel_customize()}
         </button>
-        {SETTINGS_NAV.map((item) => (
-          <button
-            key={item.id}
-            className={`rail-nav-item flex items-center gap-2.5 py-2 px-2.5 text-base text-text rounded-md text-start [&:hover:not(.active)]:bg-surface [&.active]:bg-panel [&.active]:font-medium ${mainView !== "chat" && mainView !== "skills" && item.activeTabs.includes(mainView) ? "active" : ""}`}
-            data-onboarding={item.id === "compute" ? "nav-compute" : undefined}
-            onClick={() => onSelectMainView(item.id)}
-          >
-            {item.icon}
-            {item.label()}
-          </button>
-        ))}
+        {SETTINGS_NAV.map((item) => {
+          const active = mainView !== "chat" && mainView !== "skills" && item.activeTabs.includes(mainView);
+          return (
+            <button
+              key={item.id}
+              className={`rail-nav-item flex items-center gap-2.5 py-2 px-2.5 text-base text-text rounded-md text-start [&:hover:not(.active)]:bg-surface [&.active]:bg-panel [&.active]:font-medium ${active ? "active" : ""}`}
+              aria-current={active ? "page" : undefined}
+              data-onboarding={item.id === "compute" ? "nav-compute" : undefined}
+              onClick={() => onSelectMainView(item.id)}
+            >
+              {item.icon}
+              {item.label()}
+            </button>
+          );
+        })}
       </nav>
       <div className="rail-section-head flex items-center justify-between shrink-0 pt-3.5 pe-2.5 pb-0 ps-4.5">
         <div className="rail-section-label p-0 text-sm font-medium text-subtext">
@@ -6488,7 +6758,7 @@ export function ChatPanel({
           <SessionFilterMenu value={sessionFilter} onChange={setSessionFilter} grouping={sidebarGrouping} onGroupingChange={(grouping) => {
             setSidebarGrouping(grouping);
             try { localStorage.setItem("sidebar-grouping", grouping); } catch {}
-            setSidebarExpanded(false);
+            setSidebarExpandedAll(false);
             setChatLimits({});
             if (railBodyRef.current) railBodyRef.current.scrollTop = 0;
           }} />
@@ -6496,20 +6766,22 @@ export function ChatPanel({
       </div>
       <div className="relative flex-1 min-h-0">
       <div ref={railBodyRef} tabIndex={-1} className={`rail-body h-full overflow-x-hidden ${sidebarScrollable ? "overflow-y-auto" : "overflow-y-hidden"}`}>
-        <div className="relative" style={{ height: (sidebarScrollable ? sidebarVirtualizer.getTotalSize() : defaultRowsHeight) + (showProjectMore ? 38 : 0) + (sidebarExpanded ? 46 : 0) }}>
+        <div className="relative" style={{ height: (sidebarScrollable ? sidebarVirtualizer.getTotalSize() : defaultRowsHeight) + (showProjectMore ? 38 : 0) + (sidebarExpandedAll ? 46 : 0) }}>
           {(sidebarScrollable
             ? sidebarVirtualItems.map((item) => ({ row: sidebarRows[item.index], top: item.start, index: item.index }))
             : defaultRows.map((row, index) => ({ row, top: 0, index }))
           ).map(({ row, top, index }) => {
             const project = row.project;
             const s = row.kind === "chat" ? row.session : null;
+            const sessionHarness = s ? sessionAcpHarness(s, harnesses.find((h) => h.id === s.harness)) : undefined;
+            const sessionModel = sessionHarness?.models.find((model) => model.id === s?.model);
             return (
               <div
                 key={sidebarRowKey(row)}
                 data-index={index}
                 onFocusCapture={() => setFocusedSidebarRow(sidebarRowKey(row))}
                 onBlurCapture={(event) => {
-                  if (!event.currentTarget.contains(event.relatedTarget)) setFocusedSidebarRow(null);
+                  if (!event.currentTarget.contains(event.relatedTarget) && !(event.relatedTarget instanceof Element && event.relatedTarget.closest(`[data-session-hover-card="${sidebarRowKey(row)}"]`))) setFocusedSidebarRow(null);
                 }}
                 className={sidebarScrollable ? "absolute top-0 start-0 w-full" : "relative"}
                 style={{ height: sidebarRowHeight(row), top: sidebarScrollable ? top : undefined }}
@@ -6544,12 +6816,19 @@ export function ChatPanel({
                     <SessionRow
                       key={s.id}
                       session={s}
+                      cardWarmUntil={cardWarmUntil}
+                      projectName={sidebarGrouping === "list" ? project.name : undefined}
+                      harnessLogo={sessionHarness?.logo}
+                      modelName={sessionModel ? harnessModelLabel(sessionModel) : s.model}
                       active={s.id === activeId && mainView === "chat"}
                       unread={unreadSessionIds.has(s.id)}
                       busy={sessionBusy(project, s)}
                       waiting={sessionWaiting(s)}
                       experimentRunning={activeRuns.some((item) => item.sessionId === s.id)}
                       revealTitle={titleReveals.get(s.id)}
+                      onOpenExperiment={(targetProjectId, experimentId) => {
+                        void navigate({ href: taskLocation(targetProjectId, targetProjectId === s.projectId ? s.id : null, { kind: "experiment", experimentId, view: "overview" }) });
+                      }}
                       onOpen={() => {
                         if (project.id === projectId) onActiveSessionChange(s.id);
                         else void navigate({ to: "/projects/$projectId/tasks/$sessionId", params: { projectId: project.id, sessionId: s.id } });
@@ -6576,11 +6855,15 @@ export function ChatPanel({
                     />
                   </div>
                 ) : row.kind === "more" ? (
-                  <Button variant="ghost" size="small" className="ms-5.5 font-normal text-subtext" onClick={() => {
-                    setSidebarExpanded(true);
-                    setChatLimits((current) => ({ ...current, [project.id]: (current[project.id] ?? 6) + 6 }));
+                  <Button variant="ghost" size="small" className="ms-5.5 font-normal text-subtext" aria-expanded={project.id in chatLimits} onClick={() => {
+                    setChatLimits((current) => {
+                      const next = { ...current };
+                      if (project.id in next) delete next[project.id];
+                      else next[project.id] = Infinity;
+                      return next;
+                    });
                   }}>
-                    {m.common_show_more()}
+                    {project.id in chatLimits ? m.common_show_less() : m.common_show_more()}
                   </Button>
                 ) : row.kind === "status" && (
                   <div className={`flex h-full items-center px-2.5 text-sm text-subtext ${sidebarGrouping === "projects" ? "ms-5.5" : ""}`}>
@@ -6592,26 +6875,19 @@ export function ChatPanel({
               </div>
             );
           })}
-          {showProjectMore && (
+          {(showProjectMore || sidebarExpandedAll) && (
             <div className="absolute start-0 flex h-9.5 w-full items-center pt-1" style={{ top: sidebarScrollable ? sidebarVirtualizer.getTotalSize() : defaultRowsHeight }}>
-              <Button variant="ghost" size="small" className="text-subtext" onClick={() => {
-                setSidebarExpanded(true);
-              }}>{m.common_show_more()}</Button>
-            </div>
-          )}
-          {sidebarExpanded && (
-            <div className="absolute start-0 w-full pt-1" style={{ top: sidebarVirtualizer.getTotalSize() + (showProjectMore ? 38 : 0) }}>
-              <Button variant="ghost" size="small" className="text-subtext" onClick={() => {
-                setSidebarExpanded(false);
-                setChatLimits({});
-                setFocusedSidebarRow(null);
-                if (railBodyRef.current) {
-                  railBodyRef.current.scrollTop = 0;
-                  railBodyRef.current.focus();
+              <Button variant="ghost" size="small" className="text-subtext" aria-expanded={sidebarExpandedAll} onClick={() => {
+                if (sidebarExpandedAll) {
+                  setChatLimits({});
+                  setFocusedSidebarRow(null);
+                  if (railBodyRef.current) {
+                    railBodyRef.current.scrollTop = 0;
+                    railBodyRef.current.focus();
+                  }
                 }
-              }}>
-                {m.common_show_less()}
-              </Button>
+                setSidebarExpandedAll(!sidebarExpandedAll);
+              }}>{sidebarExpandedAll ? m.common_show_less() : m.common_show_more()}</Button>
             </div>
           )}
         </div>
@@ -6627,22 +6903,23 @@ export function ChatPanel({
 
   const headerClass = `chat-header flex items-center gap-2 py-0 px-4 bg-background shrink-0 h-12 mac-titlebar:h-titlebar relative z-4 w-full max-w-readable my-0 mx-auto [&::after]:content-[''] [&::after]:absolute [&::after]:top-full [&::after]:start-0 [&::after]:end-0 [&::after]:h-6 [&::after]:bg-[linear-gradient(to_bottom,_var(--base),_transparent)] [&::after]:pointer-events-none`;
   const railReopen = !railOpen && !embedded && (
-    <IconButton
-      title={m.chat_panel_show_sidebar()}
-      aria-label={m.chat_panel_show_sidebar()}
-      onClick={onShowRail}
-      className="mac-titlebar:ms-titlebar-inset"
-    >
-      <PanelLeft size={20} />
-    </IconButton>
+    <Tooltip interactive content={m.chat_panel_show_sidebar()} className="rounded-md mac-titlebar:invisible">
+      <IconButton
+        aria-label={m.chat_panel_show_sidebar()}
+        onClick={onShowRail}
+        className="mac-titlebar:ms-titlebar-inset"
+      >
+        <PanelLeft size={20} />
+      </IconButton>
+    </Tooltip>
   );
 
   if (mainView !== "chat") {
     return (
       <>
         {railOpen && rail}
-        <section className="chat-pane flex-1 min-w-0 flex flex-col bg-background min-h-0 win-titlebar:pt-win-caption">
-          {!railOpen && <div className="flex h-12 mac-titlebar:h-titlebar shrink-0 items-center">{railReopen}</div>}
+        <section className="chat-pane flex-1 min-w-0 flex flex-col bg-background min-h-0">
+          {!railOpen && <div className="mac-titlebar-spacer flex h-12 mac-titlebar:h-titlebar shrink-0 items-center">{railReopen}</div>}
           {/* Keyed per view so no tab inherits the chat thread's or another tab's scroll offset. */}
           <div key={mainView} className="settings-view-scroll flex-1 min-h-0 overflow-y-auto [scrollbar-gutter:stable_both-edges]">
             {contentError ? <div role="alert" className="p-6 text-subtext">{contentError}<Button onClick={onRetryContent}>{m.app_retry()}</Button></div>
@@ -6656,7 +6933,7 @@ export function ChatPanel({
   return (
     <>
       {railOpen && rail}
-      <section data-side-chat={embedded || undefined} className={`chat-pane flex-1 min-w-0 flex flex-col bg-background min-h-0 ${embedded ? "" : "win-titlebar:pt-win-caption"}`}>
+      <section data-side-chat={embedded || undefined} className="chat-pane flex-1 min-w-0 flex flex-col bg-background min-h-0">
         {/* Header — session title on the left, end-pane view switchers on the
           right, fading into the chat below (sessions live in the rail). */}
         <div className={railOpen || embedded ? "contents" : "grid shrink-0 grid-cols-[2rem_minmax(0,1fr)_2rem] mac-titlebar:grid-cols-titlebar-chat items-center"}>
@@ -6776,15 +7053,16 @@ export function ChatPanel({
                         </span>
                         <span className="w-full truncate text-sm text-subtext">{item.prompt}</span>
                       </button>
-                      <IconButton
-                        size="small"
-                        className="absolute end-2.5 top-2.5 [&:hover:not(:disabled)]:bg-surface-bright"
-                        aria-label={m.chat_panel_starter_edit({ title: item.title })}
-                        title={m.chat_panel_starter_edit({ title: item.title })}
-                        onClick={() => pickStarter(true)}
-                      >
-                        <Pencil size={14} />
-                      </IconButton>
+                      <Tooltip interactive content={m.chat_panel_starter_edit({ title: item.title })} className="absolute end-2.5 top-2.5">
+                        <IconButton
+                          size="small"
+                          className="[&:hover:not(:disabled)]:bg-surface-bright"
+                          aria-label={m.chat_panel_starter_edit({ title: item.title })}
+                          onClick={() => pickStarter(true)}
+                        >
+                          <Pencil size={14} />
+                        </IconButton>
+                      </Tooltip>
                     </div>
                   );
                 })}
@@ -6871,19 +7149,20 @@ export function ChatPanel({
           scroll away. Actions mirror the (now compact) inline card's wire. */}
         <div inert={contentLoading || Boolean(contentError) || historyLoading} className="composer px-3 pb-5 shrink-0 relative z-4 bg-background w-full max-w-readable my-0 mx-auto [&_textarea]:border-0 [&_textarea]:bg-none [&_textarea]:bg-transparent [&_textarea]:resize-none [&_textarea]:pt-2.5 [&_textarea]:px-3 [&_textarea]:pb-1 [&_textarea]:text-base [&_textarea]:field-sizing-content [&_textarea]:min-h-18 [&_textarea]:max-h-45">
           {threadMounted && (
-            <IconButton
-              className={`absolute bottom-full left-1/2 z-5 mb-6 h-9 w-9 -translate-x-1/2 rounded-full border border-border bg-background shadow-control transition-opacity duration-150 ease-standard ${transcriptAtBottom ? "opacity-0" : "opacity-100"}`}
-              title={m.chat_scroll_to_bottom()}
-              aria-label={m.chat_scroll_to_bottom()}
-              inert={transcriptAtBottom}
-              onClick={scrollToTranscriptBottom}
-            >
-              {busy && !awaitingInput ? (
-                <MoreHorizontal size={18} className="tool-running-shimmer-icon" />
-              ) : (
-                <ArrowDown size={16} />
-              )}
-            </IconButton>
+            <Tooltip interactive content={m.chat_scroll_to_bottom()} className={`absolute bottom-full left-1/2 z-5 mb-6 -translate-x-1/2 transition-opacity duration-150 ease-standard ${transcriptAtBottom ? "pointer-events-none opacity-0" : "opacity-100"}`}>
+              <IconButton
+                className="h-9 w-9 rounded-full border border-border bg-background shadow-control"
+                aria-label={m.chat_scroll_to_bottom()}
+                inert={transcriptAtBottom}
+                onClick={scrollToTranscriptBottom}
+              >
+                {busy && !awaitingInput ? (
+                  <MoreHorizontal size={18} className="tool-running-shimmer-icon" />
+                ) : (
+                  <ArrowDown size={16} />
+                )}
+              </IconButton>
+            </Tooltip>
           )}
           <ExperimentRunBanner
             key={activeId}
@@ -6993,17 +7272,18 @@ export function ChatPanel({
                 <FlaskConical size={16} className="inline-block align-text-bottom me-2 text-subtext" />
                 {m.chat_panel_demo_hint_body()}
               </span>
-              <IconButton
-                size="small"
-                aria-label={m.chat_panel_dismiss_demo_hint()}
-                title={m.chat_panel_dismiss_demo_hint()}
-                onClick={() => {
-                  setDemoHintDismissed(true);
-                  composerRef.current?.focus();
-                }}
-              >
-                <X size={14} />
-              </IconButton>
+              <Tooltip interactive content={m.chat_panel_dismiss_demo_hint()}>
+                <IconButton
+                  size="small"
+                  aria-label={m.chat_panel_dismiss_demo_hint()}
+                  onClick={() => {
+                    setDemoHintDismissed(true);
+                    composerRef.current?.focus();
+                  }}
+                >
+                  <X size={14} />
+                </IconButton>
+              </Tooltip>
             </div>
           )}
           {!embedded && !activeId && onNewProject && (
@@ -7019,6 +7299,18 @@ export function ChatPanel({
             />
           )}
           <div className={`composer-box relative flex flex-col border ${bashMode ? "border-accent-amber" : "border-border"} rounded-lg bg-background shadow-control-subtle`} data-onboarding="composer">
+            {unconfirmedSend !== null && (
+              <div id={unconfirmedSendId} role="alert" className="flex items-start gap-2 pt-2 px-3 text-sm text-text">
+                <span className="flex-1" dir="auto">{m.chat_send_unconfirmed({ error: ltr(unconfirmedSend) })}</span>
+                <button type="button" className="underline cursor-pointer" onClick={() => {
+                  composerLiveRef.current = { ...composerLiveRef.current, unconfirmedSend: null };
+                  setUnconfirmedSend(null);
+                  composerRef.current?.focus();
+                }}>
+                  {m.chat_panel_dismiss_demo_hint()}
+                </button>
+              </div>
+            )}
             {activeHarness && !activeHarness.agentReady && (
               <div className="composer-harness-warning py-2 px-3 text-subtext text-sm leading-normal border-b border-b-border-variant [&_strong]:text-accent-amber [&_strong]:font-medium [&_code]:font-mono [&_code]:text-text">
                 {activeHarness.catalogPending ? (
@@ -7125,7 +7417,7 @@ export function ChatPanel({
                 dir="auto"
                 {...{ writingsuggestions: "false" }}
                 ref={composerRef}
-                aria-describedby={demoHintVisible ? demoHintId : undefined}
+                aria-describedby={[demoHintVisible && demoHintId, unconfirmedSend !== null && unconfirmedSendId].filter(Boolean).join(" ") || undefined}
                 // Native prose stays visible; the aligned mirror paints only skill tokens.
                 className="relative z-1 min-w-0 overflow-x-hidden bg-transparent"
                 value={draft}
@@ -7262,17 +7554,18 @@ export function ChatPanel({
             </div>
             <div className="composer-actions flex min-w-0 justify-end items-center gap-2 pt-1.5 px-2 pb-2">
               <div className="option-picker relative inline-flex shrink-0" ref={dataSources.ref}>
-                <IconButton
-                  type="button"
-                  className="composer-bare"
-                  title={m.chat_panel_data_sources()}
-                  aria-label={m.chat_panel_data_sources()}
-                  aria-haspopup="dialog"
-                  aria-expanded={dataSources.open}
-                  onClick={() => dataSources.setOpen((open) => !open)}
-                >
-                  <ToggleRight size={16} />
-                </IconButton>
+                <Tooltip interactive content={m.chat_panel_data_sources()}>
+                  <IconButton
+                    type="button"
+                    className="composer-bare"
+                    aria-label={m.chat_panel_data_sources()}
+                    aria-haspopup="dialog"
+                    aria-expanded={dataSources.open}
+                    onClick={() => dataSources.setOpen((open) => !open)}
+                  >
+                    <ToggleRight size={16} />
+                  </IconButton>
+                </Tooltip>
                 {dataSources.open && (
                   <div className="composer-sources-menu absolute bottom-[calc(100%_+_8px)] start-0 z-50 flex min-w-55 flex-col gap-1 rounded-lg border border-border bg-background p-2 shadow-dropdown">
                     <span className="px-1 text-sm font-medium text-muted">{m.chat_panel_data_sources()}</span>
@@ -7291,68 +7584,72 @@ export function ChatPanel({
                   e.target.value = ""; // let the same file be re-picked
                 }}
               />
-              <IconButton
-                type="button"
-                className="composer-attach"
-                title={m.chat_panel_attach_a_pdf_or_image()}
-                aria-label={m.chat_panel_attach_a_pdf_or_image()}
-                onClick={() => fileInputRef.current?.click()}
-              >
-                <Paperclip size={16} />
-              </IconButton>
-              {(sessionGoal || goalArmed) && (
-                <Button
+              <Tooltip interactive content={m.chat_panel_attach_a_pdf_or_image()}>
+                <IconButton
                   type="button"
-                  variant="purple"
-                  active
-                  className="group max-w-60"
-                  title={goalArmed ? m.goal_command_description() : m.chat_panel_clear_goal({ goal: autoDir(sessionGoal) })}
-                  aria-label={goalArmed ? m.chat_panel_goal() : m.chat_panel_clear_goal({ goal: autoDir(sessionGoal) })}
-                  onClick={() => {
-                    setGoalScope(null);
-                    if (sessionGoal) void setGoal("clear");
-                  }}
+                  className="composer-attach"
+                  aria-label={m.chat_panel_attach_a_pdf_or_image()}
+                  onClick={() => fileInputRef.current?.click()}
                 >
-                  <span className="relative size-4" aria-hidden="true">
-                    <Goal className="absolute inset-0 transition-opacity group-hover:opacity-0 group-focus-visible:opacity-0" size={16} strokeWidth={1.5} />
-                    <X className="absolute inset-0 opacity-0 transition-opacity group-hover:opacity-100 group-focus-visible:opacity-100" size={16} strokeWidth={1.5} />
-                  </span>
-                  <span className="truncate">{m.chat_panel_goal()}</span>
-                </Button>
+                  <Paperclip size={16} />
+                </IconButton>
+              </Tooltip>
+              {(sessionGoal || goalArmed) && (
+                <Tooltip interactive content={goalArmed ? m.goal_command_description() : m.chat_panel_clear_goal({ goal: autoDir(sessionGoal) })}>
+                  <Button
+                    type="button"
+                    variant="purple"
+                    active
+                    className="group max-w-60"
+                    aria-label={goalArmed ? m.chat_panel_goal() : m.chat_panel_clear_goal({ goal: autoDir(sessionGoal) })}
+                    onClick={() => {
+                      setGoalScope(null);
+                      if (sessionGoal) void setGoal("clear");
+                    }}
+                  >
+                    <span className="relative size-4" aria-hidden="true">
+                      <Goal className="absolute inset-0 transition-opacity group-hover:opacity-0 group-focus-visible:opacity-0" size={16} strokeWidth={1.5} />
+                      <X className="absolute inset-0 opacity-0 transition-opacity group-hover:opacity-100 group-focus-visible:opacity-100" size={16} strokeWidth={1.5} />
+                    </span>
+                    <span className="truncate">{m.chat_panel_goal()}</span>
+                  </Button>
+                </Tooltip>
               )}
               {planActive && (
-                <Button
-                  type="button"
-                  variant="amber"
-                  active
-                  className="group"
-                  title={m.chat_panel_exit_plan_mode()}
-                  aria-label={m.chat_panel_exit_plan_mode()}
-                  onClick={() => void exitPlanMode()}
-                >
-                  <span className="relative size-4" aria-hidden="true">
-                    <Lightbulb className="absolute inset-0 transition-opacity group-hover:opacity-0 group-focus-visible:opacity-0" size={16} strokeWidth={1.5} />
-                    <X className="absolute inset-0 opacity-0 transition-opacity group-hover:opacity-100 group-focus-visible:opacity-100" size={16} strokeWidth={1.5} />
-                  </span>
-                  <span>{m.chat_panel_plan()}</span>
-                </Button>
+                <Tooltip interactive content={m.chat_panel_exit_plan_mode()}>
+                  <Button
+                    type="button"
+                    variant="amber"
+                    active
+                    className="group"
+                    aria-label={m.chat_panel_exit_plan_mode()}
+                    onClick={() => void exitPlanMode()}
+                  >
+                    <span className="relative size-4" aria-hidden="true">
+                      <Lightbulb className="absolute inset-0 transition-opacity group-hover:opacity-0 group-focus-visible:opacity-0" size={16} strokeWidth={1.5} />
+                      <X className="absolute inset-0 opacity-0 transition-opacity group-hover:opacity-100 group-focus-visible:opacity-100" size={16} strokeWidth={1.5} />
+                    </span>
+                    <span>{m.chat_panel_plan()}</span>
+                  </Button>
+                </Tooltip>
               )}
               {bashMode && (
-                <Button
-                  type="button"
-                  variant="ghost"
-                  active
-                  className="group"
-                  title={m.chat_panel_exit_bash_mode()}
-                  aria-label={m.chat_panel_exit_bash_mode()}
-                  onClick={exitBashMode}
-                >
-                  <span className="relative size-4" aria-hidden="true">
-                    <SquareTerminal className="absolute inset-0 transition-opacity group-hover:opacity-0 group-focus-visible:opacity-0" size={16} strokeWidth={1.5} />
-                    <X className="absolute inset-0 opacity-0 transition-opacity group-hover:opacity-100 group-focus-visible:opacity-100" size={16} strokeWidth={1.5} />
-                  </span>
-                  <span>{m.chat_panel_bash()}</span>
-                </Button>
+                <Tooltip interactive content={m.chat_panel_exit_bash_mode()}>
+                  <Button
+                    type="button"
+                    variant="ghost"
+                    active
+                    className="group"
+                    aria-label={m.chat_panel_exit_bash_mode()}
+                    onClick={exitBashMode}
+                  >
+                    <span className="relative size-4" aria-hidden="true">
+                      <SquareTerminal className="absolute inset-0 transition-opacity group-hover:opacity-0 group-focus-visible:opacity-0" size={16} strokeWidth={1.5} />
+                      <X className="absolute inset-0 opacity-0 transition-opacity group-hover:opacity-100 group-focus-visible:opacity-100" size={16} strokeWidth={1.5} />
+                    </span>
+                    <span>{m.chat_panel_bash()}</span>
+                  </Button>
+                </Tooltip>
               )}
               <div className="min-w-0 flex-1" />
               {/* The model picker reflects the open session (harness locked once it
@@ -7363,6 +7660,7 @@ export function ChatPanel({
                   sessionHarness={openSession?.harness.startsWith("acp:") ? activeHarness : undefined}
                   value={composerSelection}
                   onSelect={selectModel}
+                  onStartHarness={startHarness}
                   onOpenSettings={() => onSelectMainView("harnesses")}
                   permissionChoices={activeHarness?.agentReady ? (opts?.permissionModes ?? []) : []}
                   defaultPermissionId={opts?.defaultPermissionMode ?? null}
@@ -7383,25 +7681,28 @@ export function ChatPanel({
                 <ContextMeter usage={openSession?.contextUsage} />
               </div>
               {busy ? (
-                <IconButton className="send-btn" variant="stop" title={m.chat_panel_stop()} aria-label={m.chat_panel_stop()} onClick={stop}>
-                  <X size={16} />
-                </IconButton>
+                <Tooltip interactive content={m.chat_panel_stop()}>
+                  <IconButton className="send-btn" variant="stop" aria-label={m.chat_panel_stop()} onClick={stop}>
+                    <X size={16} />
+                  </IconButton>
+                </Tooltip>
               ) : (
-                <IconButton
-                  className={`send-btn ${demoHintVisible && activeHarness?.agentReady ? "ring-2 ring-primary ring-offset-2 ring-offset-background" : ""}`}
-                  variant="primary"
-                  title={bashMode ? m.chat_panel_run() : m.chat_panel_send()}
-                  aria-label={bashMode ? m.chat_panel_run() : m.chat_panel_send()}
-                  onClick={() => void (bashMode ? runShell() : send())}
-                  disabled={
-                    bashMode
-                      ? !shellCommand || (!activeId && !activeHarness?.agentReady)
-                      : !activeHarness?.agentReady ||
-                      (!draft.trim() && attachments.length === 0 && annotations.length === 0)
-                  }
-                >
-                  <CornerDownLeft size={16} />
-                </IconButton>
+                <Tooltip interactive content={bashMode ? m.chat_panel_run() : m.chat_panel_send()}>
+                  <IconButton
+                    className={`send-btn ${demoHintVisible && activeHarness?.agentReady ? "ring-2 ring-primary ring-offset-2 ring-offset-background" : ""}`}
+                    variant="primary"
+                    aria-label={bashMode ? m.chat_panel_run() : m.chat_panel_send()}
+                    onClick={() => void (bashMode ? runShell() : send())}
+                    disabled={
+                      bashMode
+                        ? !shellCommand || (!activeId && !activeHarness?.agentReady)
+                        : !activeHarness?.agentReady ||
+                        (!draft.trim() && attachments.length === 0 && annotations.length === 0)
+                    }
+                  >
+                    <CornerDownLeft size={16} />
+                  </IconButton>
+                </Tooltip>
               )}
             </div>
           </div>
