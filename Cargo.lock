@@ -2673,6 +2673,7 @@ dependencies = [
  "pbkdf2",
  "png",
  "portable-pty",
+ "raw-window-handle",
  "reqwest",
  "rfd",
  "roxmltree",

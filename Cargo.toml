@@ -81,6 +81,7 @@ roxmltree = "0.21"
 libc = "0.2"
 
 [target.'cfg(windows)'.dependencies]
+raw-window-handle = "0.6"
 # Win32 calls std lacks: run liveness, console ownership, the error dialog, PE
 # version-resource reads (GetFileVersionInfoW / VerQueryValueW — the spawn-free
 # `--version` fast path in harness detection), total RAM for the agent idle
