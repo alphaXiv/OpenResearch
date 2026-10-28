@@ -1815,7 +1815,7 @@ export default function App({ runtime, projectId, pane }: { runtime: RuntimeInfo
 
   return (
     <div className="app relative flex flex-col h-full">
-      {projectId && <div className="absolute start-[calc(5.15rem/min(1,var(--desktop-page-zoom,1)))] top-[calc(-0.125rem/min(1,var(--desktop-page-zoom,1)))] z-10 hidden h-titlebar items-center mac-titlebar:flex">
+      {projectId && <div className="absolute start-[calc(5.15rem/min(1,var(--desktop-page-zoom,1)))] top-[calc(-2px/min(1,var(--desktop-page-zoom,1)))] z-10 hidden h-[calc(44px/min(1,var(--desktop-page-zoom,1)))] items-center mac-titlebar:flex">
         <Tooltip interactive content={railVisible ? m.header_hide_sidebar() : m.chat_panel_show_sidebar()} className="rounded-md">
           <IconButton aria-label={railVisible ? m.header_hide_sidebar() : m.chat_panel_show_sidebar()} aria-expanded={railVisible} onClick={() => {
             if (railVisible) setRailOpen(false);

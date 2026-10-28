@@ -1058,6 +1058,11 @@ mod imp {
                 sync_maximized(&webview, page_maximized);
             }
             #[cfg(target_os = "macos")]
+            Event::WindowEvent {
+                event: WindowEvent::Resized(_),
+                ..
+            } => align_traffic_lights(&window, zoom_percent),
+            #[cfg(target_os = "macos")]
             Event::UserEvent(UserEvent::Menu(id)) if id == quit_item.id() => {
                 begin_quit(&mut quit, &window, &webview, control_flow);
             }
@@ -1256,11 +1261,34 @@ mod imp {
 
     #[cfg(target_os = "macos")]
     fn align_traffic_lights(window: &Window, percent: i32) {
+        use objc2_app_kit::{NSWindow, NSWindowButton};
+        use objc2_foundation::NSPoint;
         use tao::dpi::LogicalPosition;
         use tao::platform::macos::WindowExtMacOS;
 
         let zoom = (f64::from(percent) / 100.0).max(1.0);
-        window.set_traffic_light_inset(LogicalPosition::new(16.0, 22.0 + 20.0 * (zoom - 1.0)));
+        // Tao owns this window for the duration of the main-thread event.
+        let native_window = unsafe { &*window.ns_window().cast::<NSWindow>() };
+        let inset = native_window
+            .standardWindowButton(NSWindowButton::CloseButton)
+            .and_then(|button| {
+                let container = unsafe { button.superview()?.superview()? };
+                let bounds = button.bounds();
+                let center = button.convertPoint_toView(
+                    NSPoint::new(
+                        bounds.origin.x + bounds.size.width / 2.0,
+                        bounds.origin.y + bounds.size.height / 2.0,
+                    ),
+                    None,
+                );
+                let current = native_window.frame().size.height - center.y;
+                Some(
+                    container.frame().size.height - button.frame().size.height + 20.0 * zoom
+                        - current,
+                )
+            })
+            .unwrap_or(22.0 + 20.0 * (zoom - 1.0));
+        window.set_traffic_light_inset(LogicalPosition::new(16.0, inset));
         // Tao reapplies the inset on a title change, not on request_redraw.
         window.set_title(&window.title());
     }
