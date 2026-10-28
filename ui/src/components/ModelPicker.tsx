@@ -5,7 +5,7 @@ import { DirectionProvider } from "@base-ui/react/direction-provider";
 import { getHarnessesQuery } from "../queries/settings";
 import { m } from "../paraglide/messages.js";
 import { ltr } from "../i18n";
-import { Check, ChevronDown, ChevronRight, Lock, Plus, Settings, Zap } from "lucide-react";
+import { CircleAlert, Check, ChevronDown, ChevronRight, Plus, Settings, Zap } from "lucide-react";
 import { useEffect, useLayoutEffect, useMemo, useRef, useState, type ButtonHTMLAttributes, type ReactNode, type RefObject } from "react";
 import {
   fmtNumber,
@@ -453,35 +453,42 @@ export function ModelPicker({
                     <Settings size={16} aria-hidden="true" />
                   </IconButton>
                 </div>
-                <div className="model-menu-list min-h-0 overflow-y-auto p-1.5">
+                <div className="model-menu-list min-h-0 overflow-x-hidden overflow-y-auto p-1.5 [&_button]:min-w-0 [&_button]:[overflow-wrap:anywhere] [&_button>span]:min-w-0">
                   {groups.map(({ harness, models, legacy, hidden }) => (
                     <div key={harness.id}>
-                      <div className={MODEL_GROUP_CLASS_NAME}>
-                        <span className="inline-flex items-center gap-1.5">
-                          <HarnessLogo harness={harness.id} logo={harness.logo} size={14} />
-                          {harness.name}
-                        </span>
-                        {!harness.agentReady && (
-                          <span className="inline-flex items-center gap-1 text-accent-amber font-normal">
-                            {harness.catalogPending ? (
-                              m.onboarding_checking()
-                            ) : (
-                              <>
-                                <Lock size={10} /> {m.model_picker_unavailable()}
-                              </>
-                            )}
+                      {harness.agentReady ? (
+                        <div className={MODEL_GROUP_CLASS_NAME}>
+                          <span className="inline-flex items-center gap-1.5">
+                            <HarnessLogo harness={harness.id} logo={harness.logo} size={14} />
+                            {harness.name}
                           </span>
-                        )}
-                      </div>
-                      {!harness.agentReady ? (
-                        <div className={MODEL_MORE_CLASS_NAME}>
-                          {harness.catalogPending
-                            ? m.onboarding_checking()
-                            : harness.agentNote
-                              ? renderNote(harness.agentNote)
-                              : m.model_picker_not_available()}
+                        </div>
+                      ) : harness.catalogPending ? (
+                        <div className={MODEL_GROUP_CLASS_NAME}>
+                          <span className="inline-flex items-center gap-1.5">
+                            <HarnessLogo harness={harness.id} logo={harness.logo} size={14} />
+                            {harness.name}
+                          </span>
+                          <span className="font-normal text-muted">{m.onboarding_checking()}</span>
                         </div>
                       ) : (
+                        <MenuItem type="button" className="font-medium" onClick={() => { close(); onOpenSettings(); }}>
+                          <span className="inline-flex min-w-0 items-center gap-1.5">
+                            <HarnessLogo harness={harness.id} logo={harness.logo} size={14} />
+                            {harness.name}
+                          </span>
+                          <span className="inline-flex items-center gap-1 font-normal text-accent-amber">
+                            <CircleAlert size={14} aria-hidden="true" className="shrink-0" />
+                            {!harness.installed ? m.settings_page_not_installed()
+                              : harness.installBroken ? m.settings_page_install_broken()
+                              : harness.needsConfigRepair || harness.authCheckFailed ? m.settings_page_unable_to_verify()
+                              : harness.authState === "needsLogin" ? m.model_picker_needs_login()
+                              : harness.authState === "unsupported" ? m.settings_page_update_required()
+                              : m.settings_page_unable_to_verify()}
+                          </span>
+                        </MenuItem>
+                      )}
+                      {harness.agentReady && (
                         <>
                           {!filter.trim() && harness.id !== "codex" && !(harness.id === "claude-code" && harness.models.length > 0) && !harness.id.startsWith("acp:") && (
                             <MenuItem
@@ -549,7 +556,7 @@ export function ModelPicker({
                             )}
                         </>
                       )}
-                      {harness.id === "opencode" && (
+                      {harness.agentReady && harness.id === "opencode" && (
                         <MenuItem
                           type="button"
                           className="font-medium"

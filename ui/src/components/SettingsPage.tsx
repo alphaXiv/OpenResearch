@@ -5,6 +5,7 @@ import { TARGET_LABELS } from "../computeTargets";
 import { AcpAuthDialog } from "./AcpAuthDialog";
 import { HarnessSetupDialog } from "./HarnessSetupDialog";
 import { AcpHarnessDialog } from "./AcpHarnessDialog";
+import { AddHarnessDialog } from "./AddHarnessDialog";
 import {
   setScopedQueryData,
   workspaceScope,
@@ -59,6 +60,7 @@ import { useEffect, useLayoutEffect, useRef, useState } from "react";
 import {
   deleteEnvVar,
   listAcpHarnesses,
+  listAcpPresets,
   removeAcpHarness,
   type AcpDefinition,
   deleteOverleafSession,
@@ -393,14 +395,17 @@ export function harnessSetupPath(h: Harness, setup: HarnessSetupCommands | undef
 
 function HarnessesTab({ remote }: { remote: boolean }) {
   const harnessesOptions = getHarnessesQuery();
-  const { data: harnesses = null } = useQuery(harnessesOptions);
+  const { data: harnesses = null, isError: harnessesError } = useQuery(harnessesOptions);
   const [active, setActive] = useState<HarnessId | null>(null);
+  const [adding, setAdding] = useState(false);
+  const [candidate, setCandidate] = useState<HarnessId | null>(null);
   const [refreshing, setRefreshing] = useState(false);
   const setupRun = useCommandRun();
   const [setupHarness, setSetupHarness] = useState<Harness | null>(null);
   const [authHarness, setAuthHarness] = useState<Harness | null>(null);
   const setupCommands = useQuery(getHarnessSetupCommandsQuery());
   const definitions = useQuery({ queryKey: workspaceKey("getAcpHarnesses"), queryFn: listAcpHarnesses });
+  const presets = useQuery({ queryKey: workspaceKey("getAcpPresets"), queryFn: listAcpPresets });
   const [acpDialog, setAcpDialog] = useState<AcpDefinition | "new" | null>(null);
   const reloadAcp = () => { void definitions.refetch(); load(true); };
   const removeAcp = async (id: string) => {
@@ -415,135 +420,212 @@ function HarnessesTab({ remote }: { remote: boolean }) {
       .finally(() => setRefreshing(false));
   };
 
-  const orderedHarnesses = [...(harnesses ?? [])].sort(
-    (a, b) => Number(b.agentReady) - Number(a.agentReady),
-  );
-  const h = orderedHarnesses.find((x) => x.id === active) ?? orderedHarnesses[0];
-  useEffect(() => {
-    // Pin the settled default so a failed refresh cannot switch harnesses.
-    if (h && active !== h.id && !orderedHarnesses.some((x) => x.catalogPending)) setActive(h.id);
-  }, [h, active, orderedHarnesses]);
-  const acp = definitions.data?.find((definition) => definition.id === h?.id);
+  const orderedHarnesses = [...(harnesses ?? [])].sort((a, b) => {
+    const rank = (id: HarnessId) => id === "claude-code" ? 0 : id === "codex" ? 1 : id === "opencode" ? 2 : 3;
+    return rank(a.id) - rank(b.id);
+  });
+  const added = orderedHarnesses.filter((h) => h.installed || h.installBroken || definitions.data?.some((definition) => definition.id === h.id));
+  const ready = added.filter((h) => h.agentReady);
+  const suggestions = orderedHarnesses
+    .filter((h) => !h.agentReady && !h.catalogPending && (["claude-code", "codex", "opencode"].includes(h.id) || h.installed || (!h.setupUrl && definitions.data?.some((definition) => definition.id === h.id))))
+    .filter((h, index, all) => !h.setupUrl || all.findIndex((other) => other.setupUrl === h.setupUrl) === index);
+  const candidateHarness = orderedHarnesses.find((h) => h.id === candidate);
+
+  const chooseHarness = (id: HarnessId | null) => {
+    if (!id) { setCandidate(null); return; }
+    const harness = orderedHarnesses.find((item) => item.id === id);
+    if (!harness) return;
+    const acpLogin = harness.id.startsWith("acp:") && harness.installed && !harness.adapterMissing;
+    const needsZCode = harness.logo === "zcode-acp-server" && !harness.installed && !harness.adapterMissing;
+    const nativeSetup = !needsZCode && !remote && setupCommands.data?.[harness.id] && (!harness.installed || harness.installBroken || harness.adapterMissing || harness.authState === "unsupported" || (harness.authState === "needsLogin" && (harness.id !== "claude-code" || harness.loginEligible)));
+    if (!harness.needsConfigRepair && (acpLogin || nativeSetup)) {
+      setAdding(false);
+      setCandidate(null);
+      if (acpLogin) setAuthHarness(harness);
+      else setSetupHarness(harness);
+    } else {
+      setAdding(true);
+      setCandidate(id);
+    }
+  };
 
   return (
     <>
       <h2>{m.settings_page_harnesses()}</h2>
-      {acpDialog && <AcpHarnessDialog definition={acpDialog === "new" ? undefined : acpDialog} onClose={() => setAcpDialog(null)} onSaved={reloadAcp} />}
+      {acpDialog && <AcpHarnessDialog customOnly={acpDialog === "new"} definition={acpDialog === "new" ? undefined : acpDialog} onClose={() => setAcpDialog(null)} onSaved={reloadAcp} />}
       {authHarness && <AcpAuthDialog remote={remote} harness={authHarness} onClose={() => setAuthHarness(null)} />}
       {!remote && setupHarness && setupCommands.data && (
         <HarnessSetupDialog
           harness={setupHarness}
           commands={setupCommands.data[setupHarness.id]}
+          onAuth={(harness) => { setSetupHarness(null); setAuthHarness(harness); }}
+          onBack={() => { setSetupHarness(null); setAdding(true); }}
           onClose={() => setSetupHarness(null)}
         />
       )}
-      <div className="mt-3 mb-3.5 flex w-full flex-wrap items-center justify-between gap-3 [&_.option-menu]:w-max">
-        <div className="w-96 max-w-full">
-          <OptionPicker
-            variant="field"
-            dropDown
-            title={m.settings_page_harnesses()}
-            choices={orderedHarnesses.map((harness) => ({ id: harness.id, label: harness.name }))}
-            value={h?.id ?? null}
-            onSelect={(id) => {
-              const selected = orderedHarnesses.find((harness) => harness.id === id);
-              if (selected) setActive(selected.id);
-            }}
-            renderIcon={(choice) => {
-              const harness = orderedHarnesses.find((harness) => harness.id === choice.id);
-              return harness && <HarnessLogo harness={harness.id} logo={harness.logo} />;
-            }}
-            renderLabel={(choice) => {
-              const harness = orderedHarnesses.find((harness) => harness.id === choice.id);
-              const status = harness && harnessStatus(harness);
-              return (
-                <span className="inline-flex items-center gap-2 whitespace-nowrap">
-                  {choice.label}
-                  {status && (
-                    <>
-                      <span aria-hidden="true" className={`size-1.5 shrink-0 rounded-full bg-muted [&.ok]:bg-accent-green [&.err]:bg-accent-red [&.warn]:bg-accent-amber ${status.cls}`} />
-                      <span className="sr-only">{status.label}</span>
-                    </>
-                  )}
-                </span>
-              );
-            }}
-          />
-        </div>
-        <Button className="ms-auto shrink-0" onClick={() => setAcpDialog("new")} aria-haspopup="dialog"><Plus size={14} />{m.acp_add()}</Button>
+      {adding && (
+        <AddHarnessDialog
+          harnesses={orderedHarnesses}
+          added={added}
+          candidate={candidateHarness}
+          remote={remote}
+          refreshing={refreshing}
+          acpAvailable={definitions.data !== undefined && !definitions.isError}
+          acpError={definitions.isError}
+          onRetryAcp={() => void definitions.refetch()}
+          onSelect={chooseHarness}
+          onRefresh={() => load(true, true)}
+          onClose={() => { setAdding(false); setCandidate(null); }}
+          onCustom={() => { setAdding(false); setCandidate(null); setAcpDialog("new"); }}
+          onEdit={(harness) => {
+            const definition = definitions.data?.find((item) => item.id === harness.id);
+            if (definition) { setAdding(false); setCandidate(null); setAcpDialog(definition); }
+          }}
+          onSetup={(harness) => {
+            setAdding(false);
+            setCandidate(null);
+            if (harness.id.startsWith("acp:") && harness.installed && !harness.adapterMissing) setAuthHarness(harness);
+            else setSetupHarness(harness);
+          }}
+          canSetup={(harness) => Boolean(setupCommands.data?.[harness.id])}
+        />
+      )}
+      <div className="my-3 flex flex-wrap items-center gap-2">
+        <Button onClick={() => setAdding(true)} disabled={!harnesses} aria-haspopup="dialog"><Plus size={14} />{m.harness_add()}</Button>
+        <Button onClick={() => load(true, true)} disabled={refreshing}>
+          <RefreshCw size={12} className={refreshing ? "animate-[spin_0.9s_linear_infinite]" : ""} /> {m.settings_page_refresh()}
+        </Button>
       </div>
-      {!harnesses ? (
-        <LoadingRow>
-          <Spinner /> {m.settings_page_detecting_harnesses()}
-        </LoadingRow>
-      ) : !h ? null : (
-        <div className={SETTINGS_CARD_CLASS_NAME}>
-          <div className="settings-card-head flex items-center gap-2.5 mb-3">
-            {h.id.startsWith("acp:") && <span className="text-sm text-subtext">{m.acp_via()}</span>}
-            <Badge variant={harnessStatus(h).variant}>{h.adapterMissing ? m.acp_adapter_required() : harnessStatus(h).label}</Badge>
-            <div className="spacer flex-1" />
-            {!remote && h.adapterMissing && <Button size="small" onClick={() => setSetupHarness(h)} disabled={!setupCommands.data?.[h.id]} aria-haspopup="dialog"><SquareTerminal size={14} />{m.acp_install_adapter()}</Button>}
-            {h.id.startsWith("acp:") && !h.adapterMissing && !h.agentReady && !h.catalogPending && <Button size="small" onClick={() => setAuthHarness(h)} aria-haspopup="dialog">{harnessStatus(h).label}</Button>}
-            {acp && <><Button size="small" onClick={() => setAcpDialog(acp)}>{m.activity_edit()}</Button><Button size="small" onClick={() => void removeAcp(acp.id)}>{m.chat_panel_remove()}</Button></>}
-            {!h.id.startsWith("acp:") && !remote && !h.catalogPending && h.installed && !h.installBroken && !h.authenticated && !h.needsConfigRepair && (h.id === "claude-code" ? h.loginEligible : h.authMethod !== "local" && h.authMethod !== "apiKey" && h.authState !== "unsupported") && (
-              <Button size="small" onClick={() => setSetupHarness(h)} disabled={!setupCommands.data} aria-haspopup="dialog">
-                <SquareTerminal size={14} /> {m.harness_setup_login()}
-              </Button>
-            )}
-            <Button size="small" onClick={() => load(true, true)} disabled={refreshing}>
-              <RefreshCw size={12} className={refreshing ? "animate-[spin_0.9s_linear_infinite]" : ""} /> {m.settings_page_refresh()}
-            </Button>
-          </div>
-          <div className={cn(KV_CLASS_NAME, "[&_.v]:text-sm")}>
-            <span className="k">{acp ? m.acp_executable() : m.settings_page_binary()}</span>
-            <span className="v">{acp ? formatAcpCommand(acp.executable, acp.arguments) : h.binPath ?? m.settings_not_found_on_path()}</span>
-            <span className="k">{m.settings_page_version()}</span>
-            <span className="v">{h.version ?? "—"}</span>
-            {(h.authMethod === "apiKey" || h.authMethod === "thirdParty" || h.authMethod === "local" || claudeProviderLabel(h)) && (
-              <>
-                <span className="k">{m.settings_page_auth()}</span>
-                <span className="v"><AuthLabel h={h} /></span>
-              </>
-            )}
-            {h.account && (
-              <>
-                <span className="k">{h.id === "opencode" ? m.settings_providers() : m.settings_page_account()}</span>
-                <span className="v">{h.account}</span>
-              </>
-            )}
-            {h.org && (
-              <>
-                <span className="k">{m.settings_page_org()}</span>
-                <span className="v">{h.org}</span>
-              </>
-            )}
-            <span className="k">{m.settings_page_agent_models()}</span>
-            <span className="v">
-              {h.catalogPending
-                ? m.onboarding_checking()
-                : h.models.length > 0
-                ? m.settings_models_available({ count: fmtNumber(h.models.length) })
-                : h.agentReady ? m.model_picker_default_model() : m.settings_none()}
-            </span>
-          </div>
-          {acp ? (h.agentNote || !h.agentReady ? <p className={cn(SETTINGS_NOTE_CLASS_NAME, "text-sm")}>{h.agentNote ?? m.acp_setup_help()}</p> : null) : <RunnableNote
-            note={h.agentNote}
-            className={cn(SETTINGS_NOTE_CLASS_NAME, "text-sm")}
-            disabled={remote}
-            resolve={(command) => harnessSetupPath(h, setupCommands.data?.[h.id], command) ?? settingsCommandPath(command)}
-            onRun={(command, path) => setupRun.start(command, path, h.id)}
-          />}
-          {!h.installed && h.needsConnectionAdapter && <p className={cn(SETTINGS_NOTE_CLASS_NAME, "text-sm")}>{m.acp_adapter_help({ name: h.name })}</p>}
-          {setupRun.run && (
-            // Hidden, not unmounted, while another harness tab is showing: a
-            // switch mid-OAuth must not kill the sign-in.
-            <div hidden={setupRun.run.owner !== h.id}>
-              <CommandRunTerminal run={setupRun.run} onComplete={() => load(true, true)} onClose={setupRun.clear} />
+      {definitions.isError && <p role="alert" className="text-sm text-accent-red">{m.acp_definitions_load_failed()} <Button variant="ghost" onClick={() => void definitions.refetch()}>{m.app_retry()}</Button></p>}
+      {!harnesses && harnessesError ? (
+        <p role="alert" className="text-sm text-accent-red">{m.harness_setup_load_failed()} <Button variant="ghost" onClick={() => load(true, true)}>{m.app_retry()}</Button></p>
+      ) : !harnesses ? (
+        <LoadingRow><Spinner /> {m.settings_page_detecting_harnesses()}</LoadingRow>
+      ) : ready.length === 0 && suggestions.length === 0 && definitions.data && !definitions.isError ? (
+        <p className="text-sm text-subtext">{m.harness_none_added()}</p>
+      ) : ready.map((h) => {
+        const acp = definitions.data?.find((definition) => definition.id === h.id);
+        const expanded = active === h.id;
+        const optionalLogin = h.id === "opencode" && !h.authenticated && !remote && !h.catalogPending && !h.needsConfigRepair;
+        const status = harnessStatus(h);
+        const detail = h.authCheckFailed
+          ? status.label
+          : [h.accountName, h.id === "opencode" ? h.account : undefined, h.plan].filter(Boolean).join(" · ") ||
+            (h.accountLoading
+              ? m.onboarding_loading_account()
+              : h.id === "opencode" && !h.authenticated && !h.authMethod
+                ? m.settings_free_models_no_sign_in()
+                : claudeProviderLabel(h) ||
+                  (h.authMethod === "apiKey" ? m.onboarding_api_key() : h.authMethod === "local" ? m.projects_local() : status.label));
+        return (
+          <div key={h.id} className={cn(SETTINGS_CARD_CLASS_NAME, "mb-3 p-0")}>
+            <div className="relative">
+              <button
+                type="button"
+                onClick={() => setActive(expanded ? null : h.id)}
+                aria-expanded={expanded}
+                aria-controls={`harness-details-${h.id}`}
+                className="flex min-h-14 w-full items-center gap-3 rounded-lg px-4.5 py-2 text-start text-text hover:bg-surface focus-visible:outline-2 focus-visible:outline-solid focus-visible:outline-focus focus-visible:outline-offset-[-2px]"
+              >
+                <HarnessLogo harness={h.id} logo={h.logo} size={22} />
+                <span className={cn("flex min-w-0 flex-1 flex-col", optionalLogin && "me-24")}>
+                  <span className="font-medium">{h.name}</span>
+                  <span dir="auto" className={cn("wrap-anywhere text-sm", h.authCheckFailed ? "text-accent-amber" : "text-subtext")}>{detail}</span>
+                </span>
+                <ChevronDown size={16} aria-hidden="true" className={cn("shrink-0 text-muted", expanded && "rotate-180")} />
+              </button>
+              {optionalLogin && (
+                <Button size="small" className="absolute end-9 top-1/2 -translate-y-1/2" onClick={() => setSetupHarness(h)} disabled={!setupCommands.data?.[h.id]} aria-haspopup="dialog">
+                  <SquareTerminal size={14} />
+                  {m.harness_setup_login()}
+                </Button>
+              )}
             </div>
-          )}
-          {h.id === "opencode" && <LocalModelSetup installed={h.installed} />}
+            <div id={`harness-details-${h.id}`} hidden={!expanded} className="px-4.5 pb-4 pt-2">
+              {expanded && (
+                <>
+                  <div className="settings-card-head flex items-center gap-2.5 mb-3">
+                    {h.id.startsWith("acp:") && <span className="text-sm text-subtext">{m.acp_via()}</span>}
+                    {!remote && h.adapterMissing && <Button size="small" onClick={() => setSetupHarness(h)} disabled={!setupCommands.data?.[h.id]} aria-haspopup="dialog"><SquareTerminal size={14} />{m.acp_install_adapter()}</Button>}
+                    {h.id.startsWith("acp:") && !h.adapterMissing && !h.agentReady && !h.catalogPending && <Button size="small" onClick={() => setAuthHarness(h)} aria-haspopup="dialog">{harnessStatus(h).label}</Button>}
+                    {acp && <><Button size="small" onClick={() => setAcpDialog(acp)}>{m.activity_edit()}</Button><Button size="small" onClick={() => void removeAcp(acp.id)}>{m.chat_panel_remove()}</Button></>}
+                    {!h.id.startsWith("acp:") && !remote && !h.catalogPending && !h.needsConfigRepair && (h.installBroken || h.authState === "unsupported") && (
+                      <Button size="small" onClick={() => setSetupHarness(h)} disabled={!setupCommands.data?.[h.id]} aria-haspopup="dialog">
+                        <SquareTerminal size={14} />
+                        {h.installBroken ? m.harness_setup_install() : m.harness_setup_update()}
+                      </Button>
+                    )}
+                    {h.id !== "opencode" && !h.id.startsWith("acp:") && !remote && !h.catalogPending && h.installed && !h.installBroken && !h.authenticated && !h.needsConfigRepair && (h.id === "claude-code" ? h.loginEligible : h.authMethod !== "local" && h.authMethod !== "apiKey" && h.authState !== "unsupported") && (
+                      <Button size="small" onClick={() => setSetupHarness(h)} disabled={!setupCommands.data} aria-haspopup="dialog">
+                        <SquareTerminal size={14} /> {m.harness_setup_login()}
+                      </Button>
+                    )}
+                  </div>
+                  <div className={cn(KV_CLASS_NAME, "[&_.v]:text-sm")}>
+                    <span className="k">{acp ? m.acp_executable() : m.settings_page_binary()}</span>
+                    <span className="v">{acp ? formatAcpCommand(acp.executable, acp.arguments) : h.binPath ?? m.settings_not_found_on_path()}</span>
+                    <span className="k">{m.settings_page_version()}</span>
+                    <span className="v">{h.version ?? "—"}</span>
+                    {(h.authMethod === "apiKey" || h.authMethod === "thirdParty" || h.authMethod === "local" || claudeProviderLabel(h)) && (
+                      <>
+                        <span className="k">{m.settings_page_auth()}</span>
+                        <span className="v"><AuthLabel h={h} /></span>
+                      </>
+                    )}
+                    {h.account && (
+                      <>
+                        <span className="k">{h.id === "opencode" ? m.settings_providers() : m.settings_page_account()}</span>
+                        <span className="v">{h.account}</span>
+                      </>
+                    )}
+                    {h.org && (
+                      <>
+                        <span className="k">{m.settings_page_org()}</span>
+                        <span className="v">{h.org}</span>
+                      </>
+                    )}
+                    <span className="k">{m.settings_page_agent_models()}</span>
+                    <span className="v">
+                      {h.catalogPending
+                        ? m.onboarding_checking()
+                        : h.models.length > 0
+                        ? m.settings_models_available({ count: fmtNumber(h.models.length) })
+                        : h.agentReady ? m.model_picker_default_model() : m.settings_none()}
+                    </span>
+                  </div>
+                  {acp ? (h.agentNote || !h.agentReady ? <p className={cn(SETTINGS_NOTE_CLASS_NAME, "text-sm")}>{h.agentNote ?? m.acp_setup_help()}</p> : null) : <RunnableNote
+                    note={h.agentNote}
+                    className={cn(SETTINGS_NOTE_CLASS_NAME, "text-sm")}
+                    disabled={remote}
+                    resolve={(command) => harnessSetupPath(h, setupCommands.data?.[h.id], command) ?? settingsCommandPath(command)}
+                    onRun={(command, path) => setupRun.start(command, path, h.id)}
+                  />}
+                  {!h.installed && h.needsConnectionAdapter && <p className={cn(SETTINGS_NOTE_CLASS_NAME, "text-sm")}>{m.acp_adapter_help({ name: h.name })}</p>}
+                  {h.id === "opencode" && <LocalModelSetup installed={h.installed} />}
+                </>
+              )}
+            </div>
+          </div>
+        );
+      })}
+      {suggestions.length > 0 && (
+        <div className="mt-4">
+          <h3 className="mb-2 text-sm font-medium text-subtext">{m.harness_suggested()}</h3>
+          <div className="flex flex-wrap gap-2">
+            {suggestions.map((h) => {
+              const name = presets.data?.find((preset) => preset.setupUrl === h.setupUrl)?.name ?? h.name;
+              return (
+                <Button key={h.id} onClick={() => chooseHarness(h.id)} aria-haspopup="dialog" aria-label={`${m.harness_add()}: ${name}`}>
+                  <HarnessLogo harness={h.id} logo={h.logo} size={16} />
+                  {name}
+                  <Plus size={14} aria-hidden="true" />
+                </Button>
+              );
+            })}
+          </div>
         </div>
       )}
+      {setupRun.run && <CommandRunTerminal run={setupRun.run} onComplete={() => load(true, true)} onClose={setupRun.clear} />}
     </>
   );
 }

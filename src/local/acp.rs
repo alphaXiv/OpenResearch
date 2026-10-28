@@ -152,23 +152,29 @@ pub fn presets() -> Vec<Preset> {
 }
 
 pub fn registered_definitions() -> Vec<Definition> {
-    let mut definitions = definitions();
+    register_definitions(definitions())
+}
+
+fn register_definitions(mut definitions: Vec<Definition>) -> Vec<Definition> {
     for preset in presets() {
         let mut launch = preset.launch;
         if let Some(path) = executable_path(&launch.executable) {
             launch.executable = path.to_string_lossy().into_owned();
         }
-        if !definitions.iter().any(|saved| {
-            executable_path(&saved.executable)
-                .map(|path| path.to_string_lossy().into_owned())
-                .unwrap_or_else(|| saved.executable.clone())
-                == launch.executable
-                && saved.arguments == launch.arguments
-        }) {
+        if !definitions.iter().any(|saved| same_launch(saved, &launch)) {
             definitions.push(launch);
         }
     }
     definitions
+}
+
+pub fn same_launch(a: &Definition, b: &Definition) -> bool {
+    let executable = |definition: &Definition| {
+        executable_path(&definition.executable)
+            .map(|path| path.to_string_lossy().into_owned())
+            .unwrap_or_else(|| definition.executable.clone())
+    };
+    executable(a) == executable(b) && a.arguments == b.arguments
 }
 
 pub fn executable_path(executable: &str) -> Option<std::path::PathBuf> {
@@ -182,6 +188,7 @@ pub fn executable_path(executable: &str) -> Option<std::path::PathBuf> {
             ".local/bin",
             ".grok/bin",
             ".devin/bin",
+            ".minimax-code/bin",
             ".zcode/runtime/bin",
         ]
         .iter()
@@ -401,6 +408,45 @@ for line in sys.stdin:
         let file = std::env::current_exe().unwrap();
         assert_eq!(executable_path(file.to_str().unwrap()), Some(file));
         assert!(executable_path("missing-popular-agent-28e8c11").is_none());
+    }
+
+    #[test]
+    fn saved_launch_suppresses_preset_without_losing_customization() {
+        let preset = presets().remove(0).launch;
+        let mut saved = preset.clone();
+        saved.id = format!("acp:{}", uuid::Uuid::new_v4());
+        saved.name = "My DeepSeek".into();
+        if let Some(path) = executable_path(&saved.executable) {
+            saved.executable = path.to_string_lossy().into_owned();
+        }
+
+        let registered = register_definitions(vec![saved.clone()]);
+        let matched = registered
+            .iter()
+            .find(|item| same_launch(item, &preset))
+            .unwrap();
+        assert_eq!(matched, &saved);
+        assert!(!registered.iter().any(|item| item.id == preset.id));
+
+        saved.arguments.push("--other".into());
+        let refreshed = register_definitions(vec![saved.clone()]);
+        assert!(refreshed.contains(&saved));
+        assert_eq!(
+            refreshed
+                .iter()
+                .find(|item| same_launch(item, &preset))
+                .unwrap()
+                .id,
+            preset.id
+        );
+        assert_eq!(
+            register_definitions(vec![])
+                .iter()
+                .find(|item| same_launch(item, &preset))
+                .unwrap()
+                .id,
+            preset.id
+        );
     }
 
     #[tokio::test]

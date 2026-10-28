@@ -30,13 +30,14 @@ export function AcpAuthDialog({ harness, remote = false, onReady, onClose }: {
     : harness.logo === "mcode" ? ["mcode login --region global"]
     : harness.logo === "devin" ? ["devin auth login"]
     : harness.logo === "grok" ? ["grok login"]
-    : harness.logo === "pi-acp" ? ["pi"] : [];
+    : harness.logo === "pi-acp" ? ["pi-acp --terminal-login"] : [];
 
   useEffect(() => {
     cancelled.current = false;
     const dialog = dialogRef.current;
     dialog?.showModal();
     dialog?.querySelector<HTMLInputElement>('input[type="password"]')?.focus();
+    if (!harness.authEnvKey && commands.length === 1) setCommand(commands[0]);
     return () => { cancelled.current = true; dialog?.close(); };
   }, []);
 
@@ -81,9 +82,9 @@ export function AcpAuthDialog({ harness, remote = false, onReady, onClose }: {
         <Button type="submit" variant="primary" disabled={busy || !value.trim() || entry?.inProcessEnv}>{busy && <Spinner />}{m.acp_save_recheck()}</Button>
       </div>
     </form> : <>
-      <p className="m-0 mb-3 text-sm">{remote ? m.acp_setup_help() : harness.logo === "pi-acp" ? m.acp_pi_login_help() : m.acp_sign_in_help({ name: harness.name })}</p>
+      <p className="m-0 mb-3 text-sm">{remote ? m.acp_setup_help() : m.acp_sign_in_help({ name: harness.name })}</p>
       <div className="flex flex-wrap gap-2">
-        {commands.map((item) => <Button key={item} onClick={() => { setError(null); setCommand(item); setAttempt((attempt) => attempt + 1); }} disabled={busy}>
+        {commands.length > 1 && commands.map((item) => <Button key={item} onClick={() => { setError(null); setCommand(item); setAttempt((attempt) => attempt + 1); }} disabled={busy}>
           <Terminal size={14} />{item === "zcode login zai" ? m.acp_sign_in_zai() : item === "zcode login bigmodel" ? m.acp_sign_in_bigmodel() : m.harness_setup_login()}
         </Button>)}
         {harness.logo === "zcode-acp-server" && <a href="https://zcode.z.ai/en/docs/configuration" target="_blank" rel="noreferrer" className="self-center text-sm text-accent-blue-strong underline">{m.acp_other_provider_help()}</a>}

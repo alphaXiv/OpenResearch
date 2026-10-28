@@ -4,14 +4,16 @@ import { m } from "../paraglide/messages.js";
 import { readHarnesses, refreshHarnesses } from "../queries/settings";
 import { HarnessLogo } from "./HarnessLogo";
 import { CommandTerminal } from "./SshConnectTerminal";
-import { initialPhase, recheckedAction, setupAction, terminalMounted, type SetupAction, type SetupPhase } from "./harnessSetupState";
+import { initialPhase, recheckedAction, setupAction, type SetupAction, type SetupPhase } from "./harnessSetupState";
 import { renderNote } from "./agentNote";
 import { Button, Spinner } from "./ui";
 
-export function HarnessSetupDialog({ harness, commands, onReady, onClose }: {
+export function HarnessSetupDialog({ harness, commands, onReady, onAuth, onBack, onClose }: {
   harness: Harness;
   commands: HarnessSetupCommands;
   onReady?: (harness: Harness) => void;
+  onAuth?: (harness: Harness) => void;
+  onBack?: () => void;
   onClose: () => void;
 }) {
   const dialogRef = useRef<HTMLDialogElement>(null);
@@ -19,7 +21,6 @@ export function HarnessSetupDialog({ harness, commands, onReady, onClose }: {
   const [action, setAction] = useState<SetupAction>(() => setupAction(harness));
   const [attempt, setAttempt] = useState(0);
   const [phase, setPhase] = useState<SetupPhase>(() => initialPhase(harness, setupAction(harness)));
-  // A command was approved and its terminal may connect; see `terminalMounted`.
   const [started, setStarted] = useState(phase === "running");
   // Tracked, not the mount-time prop: a re-check that clears the repair must
   // bring Retry back without reopening the dialog.
@@ -51,9 +52,12 @@ export function HarnessSetupDialog({ harness, commands, onReady, onClose }: {
       setNeedsRepair(current?.needsConfigRepair ?? false);
       if (current?.agentReady && (action !== "login" || current.authenticated)) {
         onReady?.(current);
-        setPhase("success");
-        if (harness.id === "antigravity" && action === "login") onClose();
-      } else if (action !== "login" && current?.installed && !current.installBroken && !current.needsConfigRepair && current.authState === "needsLogin") {
+        onClose();
+      } else if (action !== "login" && current?.installed && !current.installBroken && !current.needsConfigRepair && (current.authState === "needsLogin" || (current.id.startsWith("acp:") && !current.adapterMissing))) {
+        if (current.id.startsWith("acp:") && onAuth) {
+          onAuth(current);
+          return;
+        }
         setAction("login");
         setStarted(true);
         setPhase("running");
@@ -97,10 +101,19 @@ export function HarnessSetupDialog({ harness, commands, onReady, onClose }: {
         </h2>
       </div>
       {phase === "preview" ? (
-        <p className="my-4 text-sm text-subtext">
-          {action === "install" ? m.harness_setup_install_preview({ agent: harness.name }) : m.harness_setup_update_preview({ agent: harness.name })}
-        </p>
-      ) : command && terminalMounted(phase, started) ? (
+        <div className="my-4">
+          <p className="mb-2 text-sm text-subtext">
+            {action === "install" ? m.harness_setup_install_question({ agent: harness.name }) : m.harness_setup_update_preview({ agent: harness.name })}
+          </p>
+          <pre
+            tabIndex={0}
+            dir="ltr"
+            className="max-h-48 overflow-auto rounded-md border border-border bg-surface p-3 text-start font-mono text-xs text-text whitespace-pre-wrap wrap-anywhere"
+          >
+            <code>{commands[action]}</code>
+          </pre>
+        </div>
+      ) : command && started ? (
         <p className="my-4 text-sm text-subtext [&_.cmd-inline]:mx-2 [&_.cmd-inline]:gap-2">
           {renderNote(m.harness_setup_started_command({ command }))}
         </p>
@@ -108,17 +121,13 @@ export function HarnessSetupDialog({ harness, commands, onReady, onClose }: {
       {phase !== "running" && phase !== "preview" && (
         <p className="my-4 flex items-center gap-2 text-sm" role="status">
           {phase === "checking" && <Spinner />}
-          {phase === "success"
-            ? m.harness_setup_connected({ agent: harness.name })
-            : phase === "error"
-              ? m.harness_setup_failed()
-              : m.harness_setup_checking()}
+          {phase === "error" ? m.harness_setup_failed() : m.harness_setup_checking()}
         </p>
       )}
       {action === "install" && commands.requiresNpm && (
         <p className="text-sm text-subtext">{m.harness_setup_requires_npm()}</p>
       )}
-      {terminalMounted(phase, started) && <CommandTerminal
+      {started && <CommandTerminal
         key={`${action}-${attempt}`}
         path={`/api/harnesses/setup?${new URLSearchParams({ harness: harness.id, action })}`}
         label={harness.adapterMissing ? m.acp_install_adapter() : m.harness_setup_title({ agent: harness.name })}
@@ -131,8 +140,8 @@ export function HarnessSetupDialog({ harness, commands, onReady, onClose }: {
           void verify(false);
           return true;
         }}
-        onError={(message) => {
-          setError(message);
+        onError={() => {
+          setError(null);
           setPhase("error");
         }}
       />}
@@ -145,8 +154,8 @@ export function HarnessSetupDialog({ harness, commands, onReady, onClose }: {
           setPhase("running");
           setAttempt((current) => current + 1);
         }}>{m.app_retry()}</Button>}
-        <Button variant={phase === "success" ? "primary" : "default"} onClick={onClose}>
-          {phase === "success" ? m.status_done() : busy ? m.harness_setup_cancel() : m.app_close_panel()}
+        <Button variant="default" onClick={phase === "preview" ? (onBack ?? onClose) : onClose}>
+          {phase === "preview" ? m.settings_page_cancel() : busy ? m.harness_setup_cancel() : m.app_close_panel()}
         </Button>
         {phase === "preview" && (
           <Button variant="primary" onClick={() => { setStarted(true); setPhase("running"); }}>

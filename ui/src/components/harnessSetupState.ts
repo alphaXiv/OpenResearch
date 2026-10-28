@@ -1,7 +1,7 @@
 import type { Harness } from "../api";
 
 export type SetupAction = "install" | "update" | "login";
-export type SetupPhase = "preview" | "running" | "checking" | "success" | "error";
+export type SetupPhase = "preview" | "running" | "checking" | "error";
 
 /** `unsupported` also covers states no update repairs; those set needsConfigRepair. */
 export function setupAction(h: Pick<Harness, "installed" | "installBroken" | "authState" | "needsConfigRepair" | "adapterMissing">): SetupAction {
@@ -12,12 +12,6 @@ export function setupAction(h: Pick<Harness, "installed" | "installBroken" | "au
 /** No command fixes needsConfigRepair, so none may auto-start: open on the note. */
 export function initialPhase(h: Pick<Harness, "needsConfigRepair">, action: SetupAction): SetupPhase {
   return h.needsConfigRepair ? "error" : action === "login" ? "running" : "preview";
-}
-
-/** Unmounting is the only gate on an unapproved start; `started` is the approval
- * and keeps a finished run's output. `preview` mounts to echo the command. */
-export function terminalMounted(phase: SetupPhase, started: boolean): boolean {
-  return started || phase === "preview";
 }
 
 /** Retry's action, re-derived after a re-check since `action` is fixed at mount.

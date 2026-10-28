@@ -7,14 +7,15 @@ import { m } from "../paraglide/messages.js";
 import { OptionPicker } from "./ModelPicker";
 import { Button, Input } from "./ui";
 
-export function AcpHarnessDialog({ definition, onClose, onSaved }: {
+export function AcpHarnessDialog({ definition, customOnly = false, onClose, onSaved }: {
+  customOnly?: boolean;
   definition?: AcpDefinition;
   onClose: () => void;
-  onSaved: (definition: AcpDefinition) => void;
+  onSaved: (id: AcpDefinition["id"]) => void;
 }) {
   const dialogRef = useRef<HTMLDialogElement>(null);
-  const presets = useQuery({ queryKey: workspaceKey("getAcpPresets"), queryFn: listAcpPresets });
-  const [preset, setPreset] = useState<string | null>(definition ? "custom" : null);
+  const presets = useQuery({ queryKey: workspaceKey("getAcpPresets"), queryFn: listAcpPresets, enabled: !customOnly });
+  const [preset, setPreset] = useState<string | null>(definition || customOnly ? "custom" : null);
   const [name, setName] = useState(definition?.name ?? "");
   const [command, setCommand] = useState(definition ? formatAcpCommand(definition.executable, definition.arguments) : "");
   const [commandTouched, setCommandTouched] = useState(false);
@@ -53,9 +54,15 @@ export function AcpHarnessDialog({ definition, onClose, onSaved }: {
         const result = await testAcpHarness(launch);
         setConnected(result.agentInfo?.version ?? "");
       } else {
-        if (preset !== "custom") await testAcpHarness(launch);
-        const saved = await saveAcpHarness(launch, definition?.id);
-        onSaved(saved);
+        if (preset !== "custom") {
+          const result = await testAcpHarness(launch);
+          const selected = presets.data?.find((option) => option.id === preset);
+          if (!selected) return;
+          const unchanged = selected.name === launch.name && selected.executable === launch.executable && selected.arguments.length === launch.arguments.length && selected.arguments.every((argument, index) => argument === launch.arguments[index]);
+          onSaved(unchanged ? result.harnessId ?? selected.id : (await saveAcpHarness(launch)).id);
+        } else {
+          onSaved((await saveAcpHarness(launch, definition?.id)).id);
+        }
         onClose();
       }
     } catch (error) {
@@ -69,10 +76,10 @@ export function AcpHarnessDialog({ definition, onClose, onSaved }: {
       <h2 id="acp-dialog-title" className="mb-4 text-lg font-medium">{definition ? m.acp_edit() : m.acp_add()}</h2>
       <form className="flex flex-col gap-3" onSubmit={(event) => { event.preventDefault(); void run(false); }}>
         <div className="text-sm leading-snug text-subtext">{m.acp_description()}</div>
-        <label className="flex flex-col gap-1 text-sm text-subtext">{m.acp_preset()}
+        {!customOnly && <label className="flex flex-col gap-1 text-sm text-subtext">{m.acp_preset()}
           <OptionPicker variant="field" floating dropDown disabled={busy} choices={[...(presets.data ?? []).map((option) => ({ id: option.id, label: option.name })), { id: "custom", label: m.acp_custom() }]} value={preset} onSelect={changePreset} />
-        </label>
-        {presets.isError && <div role="alert" className="text-sm text-accent-red">{m.harness_setup_load_failed()} <Button type="button" variant="ghost" onClick={() => void presets.refetch()}>{m.app_retry()}</Button></div>}
+        </label>}
+        {!customOnly && presets.isError && <div role="alert" className="text-sm text-accent-red">{m.harness_setup_load_failed()} <Button type="button" variant="ghost" onClick={() => void presets.refetch()}>{m.app_retry()}</Button></div>}
         {preset !== null && <details open={preset === "custom"} key={preset} className="text-sm">
         <summary className={preset === "custom" ? "hidden" : "cursor-pointer text-subtext"}>{m.acp_advanced()}</summary>
         <div className={`flex flex-col gap-3${preset === "custom" ? "" : " mt-3"}`}>
