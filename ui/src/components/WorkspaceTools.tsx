@@ -45,6 +45,16 @@ export function WorkspaceTools({ expanded, experiments, runs, onOpenExperiment, 
     { id: "terminal", label: m.workspace_terminal(), Icon: Terminal, onClick: onTerminal },
   ];
   return (
+    <>
+    <nav aria-label={m.workspace_tools_heading()} className="workspace-mobile-nav hidden">
+      {items.map(({ id, label, Icon, onClick }) => (
+        <button key={id} type="button" aria-pressed={activeView === id} onClick={onClick}>
+          <Icon size={20} aria-hidden="true" />
+          <span>{label}</span>
+        </button>
+      ))}
+      {onSideChat && sessionId && <SideChatPicker parentId={sessionId} sessions={sessions} onSelect={onSelectSideChat} onCreate={onSideChat} mobile />}
+    </nav>
     <div className="workspace-tools absolute end-3.5 top-2 mac-titlebar:top-1.5 z-30" style={{ insetInlineEnd: rightOffset }}>
       {!expanded ? (
         <nav aria-label={m.workspace_tools_heading()} className="flex items-center justify-end gap-1">
@@ -103,11 +113,13 @@ export function WorkspaceTools({ expanded, experiments, runs, onOpenExperiment, 
         </nav>
       )}
     </div>
+    </>
   );
 }
 
-function SideChatPicker({ parentId, sessions, onSelect, onCreate, expanded = false }: {
+function SideChatPicker({ parentId, sessions, onSelect, onCreate, expanded = false, mobile = false }: {
   expanded?: boolean;
+  mobile?: boolean;
   parentId: string;
   sessions: ChatSession[];
   onSelect: (sessionId: string) => void;
@@ -127,7 +139,11 @@ function SideChatPicker({ parentId, sessions, onSelect, onCreate, expanded = fal
   useLayoutEffect(() => {
     if (!open) return;
     const position = () => {
-      if (panelRef.current) panelRef.current.style.maxHeight = `${Math.max(0, Math.min(384, window.innerHeight - panelRef.current.getBoundingClientRect().top - 8))}px`;
+      if (!panelRef.current) return;
+      const available = mobile
+        ? (triggerRef.current?.getBoundingClientRect().top ?? 0) - 12
+        : window.innerHeight - panelRef.current.getBoundingClientRect().top - 8;
+      panelRef.current.style.maxHeight = `${Math.max(0, Math.min(384, available))}px`;
     };
     position();
     window.addEventListener("resize", position);
@@ -136,7 +152,7 @@ function SideChatPicker({ parentId, sessions, onSelect, onCreate, expanded = fal
       window.removeEventListener("resize", position);
       window.removeEventListener("scroll", position, true);
     };
-  }, [open]);
+  }, [open, mobile]);
 
   const openPicker = () => {
     clearTimeout(closeTimer.current);
@@ -183,7 +199,12 @@ function SideChatPicker({ parentId, sessions, onSelect, onCreate, expanded = fal
       onBlur={(event) => {
         if (!event.currentTarget.contains(event.relatedTarget)) setOpen(false);
       }}>
-      {expanded ? (
+      {mobile ? (
+        <button {...triggerProps} className="w-full">
+          <MessagesSquare size={20} aria-hidden="true" />
+          <span>{m.side_chat_open()}</span>
+        </button>
+      ) : expanded ? (
         <MenuItem {...triggerProps} active={open} className="min-h-7 py-1 text-text">
           <span className="flex items-center gap-4"><MessagesSquare size={16} />{m.side_chat_open()}</span>
         </MenuItem>
@@ -194,7 +215,7 @@ function SideChatPicker({ parentId, sessions, onSelect, onCreate, expanded = fal
       )}
       {open && (
         <div ref={panelRef} role="dialog" aria-label={m.side_chat_list({ count: children.length })}
-          className="absolute end-0 top-[calc(100%_+_4px)] z-50 flex w-80 max-w-[calc(100vw-1rem)] flex-col overflow-hidden rounded-lg border border-border bg-background p-1.5 shadow-menu">
+          className={`absolute end-0 ${mobile ? "bottom-[calc(100%_+_4px)]" : "top-[calc(100%_+_4px)]"} z-50 flex w-80 max-w-[calc(100vw-1rem)] flex-col overflow-hidden rounded-lg border border-border bg-background p-1.5 shadow-menu`}>
           <div className="flex shrink-0 items-center justify-between gap-2 px-2">
             <span className="text-sm font-medium text-text">{m.side_chat_list({ count: children.length })}</span>
             {children.length > 0 && (
