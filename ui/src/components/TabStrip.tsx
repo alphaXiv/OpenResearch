@@ -79,7 +79,7 @@ export function TabStrip({ activeKey, children }: { activeKey: string; children:
 
   return (
     <div
-      className="relative flex-1 min-w-0"
+      className="relative z-1 flex-1 min-w-0"
       onPointerEnter={() => {
         hovered.current = true;
         window.clearTimeout(hideTimer.current);

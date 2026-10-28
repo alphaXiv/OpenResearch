@@ -1103,8 +1103,12 @@ mod imp {
                 ..
             } => {
                 #[cfg(target_os = "macos")]
-                // AppKit switches Spaces when hiding the app, unlike ordering out its window.
-                NSApplication::sharedApplication(MainThreadMarker::new().unwrap()).hide(None);
+                if external_server {
+                    begin_quit(&mut quit, &window, &webview, control_flow);
+                } else {
+                    // AppKit switches Spaces when hiding the app, unlike ordering out its window.
+                    NSApplication::sharedApplication(MainThreadMarker::new().unwrap()).hide(None);
+                }
                 #[cfg(not(target_os = "macos"))]
                 begin_quit(&mut quit, &window, &webview, control_flow);
             }

@@ -379,7 +379,7 @@
 
 /* Reserve room for the workspace toolbar. */
 .workspace-body > .chat-pane .chat-header {
-  padding-inline-end: 11rem;
+  padding-inline-end: 12rem;
 }
 
 .workspace-card-visible > .chat-pane {
@@ -403,7 +403,7 @@
 }
 
 .win-titlebar .app:not(:has(> :is(.update-banner, .offline-banner, [role="alert"]))) .workspace-body:not(.workspace-card-visible):is(:not(:has(> .right-pane)), .flex-col) > .chat-pane .chat-header {
-  padding-inline-end: calc(11rem + var(--spacing-win-controls));
+  padding-inline-end: calc(12rem + var(--spacing-win-controls));
 }
 
 .win-titlebar .app:not(:has(> :is(.update-banner, .offline-banner, [role="alert"]))) .settings-view-scroll:first-child {

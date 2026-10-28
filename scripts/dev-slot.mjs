@@ -608,7 +608,7 @@ function saveState(slotPaths, state) {
   atomicWriteJson(slotPaths.statePath, state)
 }
 
-async function startUnlocked(info, dbMode, openBrowser, desktop) {
+async function startUnlocked(info, dbMode, openBrowser) {
   const reservation = await reserveSlot(info, dbMode)
   const { slotPaths } = reservation
   const state = reservation.state
@@ -668,22 +668,6 @@ async function startUnlocked(info, dbMode, openBrowser, desktop) {
   state.phase = 'running'
   saveState(slotPaths, state)
 
-  if (desktop) {
-    execFileSync('cargo', ['build', '--manifest-path', info.manifestPath], {
-      cwd: info.worktreePath, env: { ...process.env, ...slotEnvironment(slotPaths) }, stdio: 'inherit',
-    })
-    const contents = path.join(slotPaths.cacheDir, 'OpenResearch Dev.app', 'Contents')
-    mkdirSync(path.join(contents, 'MacOS'), { recursive: true })
-    const executable = path.join(contents, 'MacOS', 'OpenResearch Dev')
-    cpSync(path.join(slotPaths.cargoTargetDir, 'debug', 'orx'), executable)
-    writeFileSync(path.join(contents, 'Info.plist'), `<?xml version="1.0" encoding="UTF-8"?>\n<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">\n<plist version="1.0"><dict><key>CFBundleExecutable</key><string>OpenResearch Dev</string><key>CFBundleIdentifier</key><string>org.alphaxiv.openresearch.dev.slot${slotPaths.slot}</string><key>CFBundleName</key><string>OpenResearch Dev</string><key>CFBundlePackageType</key><string>APPL</string></dict></plist>\n`)
-    const child = spawn(executable, ['--dev-desktop', String(slotPaths.uiPort)], {
-      detached: true, stdio: 'ignore', env: { ...process.env, ...slotEnvironment(slotPaths) },
-    })
-    child.on('error', (error) => console.error(`Could not open the desktop app: ${error.message}`))
-    child.unref()
-  }
-
   if (openBrowser) {
     const url = `http://localhost:${slotPaths.uiPort}/`
     const opener = process.platform === 'darwin'
@@ -704,12 +688,98 @@ async function startUnlocked(info, dbMode, openBrowser, desktop) {
   console.log(`  State:    ${slotPaths.statePath}`)
 }
 
-async function start(info, dbMode, openBrowser, desktop) {
+async function start(info, dbMode, openBrowser) {
   const release = await acquireLifecycleLock(info)
   try {
-    await startUnlocked(info, dbMode, openBrowser, desktop)
+    await startUnlocked(info, dbMode, openBrowser)
   } finally {
     await release()
+  }
+}
+
+export async function desktop(worktree = process.cwd(), requestedMode = null) {
+  if (process.platform !== 'darwin') throw new Error('The development desktop app requires macOS')
+  const info = worktreeInfo(worktree)
+  let child = null
+  let exit = null
+  let result = null
+  let record = null
+  let started = false
+  let interrupted = false
+  const interrupt = () => {
+    interrupted = true
+    if (child?.pid && processGroupExists(child.pid)) {
+      try { process.kill(-child.pid, 'SIGTERM') } catch (error) { if (error.code !== 'ESRCH') throw error }
+    }
+  }
+  process.on('SIGINT', interrupt)
+  process.on('SIGTERM', interrupt)
+  try {
+    const release = await acquireLifecycleLock(info)
+    try {
+      const previous = reservationFor(info)
+      if (previous?.state?.desktopProcess && processGroupExists(previous.state.desktopProcess.pid)) {
+        if (!supervisorMatches(previous.state.desktopProcess)) throw new Error('The previous desktop process no longer matches its recorded identity')
+        process.kill(-previous.state.desktopProcess.pid, 'SIGTERM')
+        await waitFor('the previous desktop app to close', 10_000, () => !processGroupExists(previous.state.desktopProcess.pid))
+      }
+      await stopOwnedProcessesUnlocked(info)
+      if (interrupted) return
+      const mode = requestedMode ?? previous?.state?.dbMode ?? 'empty'
+      started = true
+      await startUnlocked(info, mode, false)
+      if (interrupted) return
+      const { slotPaths, state } = reservationFor(info)
+      execFileSync('cargo', ['build', '--manifest-path', info.manifestPath], {
+        cwd: info.worktreePath, env: { ...process.env, ...slotEnvironment(slotPaths) }, stdio: 'inherit',
+      })
+      if (interrupted) return
+      const contents = path.join(slotPaths.cacheDir, 'OpenResearch Dev.app', 'Contents')
+      mkdirSync(path.join(contents, 'MacOS'), { recursive: true })
+      const executable = path.join(contents, 'MacOS', 'OpenResearch Dev')
+      cpSync(path.join(slotPaths.cargoTargetDir, 'debug', 'orx'), executable)
+      writeFileSync(path.join(contents, 'Info.plist'), `<?xml version="1.0" encoding="UTF-8"?>\n<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">\n<plist version="1.0"><dict><key>CFBundleExecutable</key><string>OpenResearch Dev</string><key>CFBundleIdentifier</key><string>org.alphaxiv.openresearch.dev.slot${slotPaths.slot}</string><key>CFBundleName</key><string>OpenResearch Dev</string><key>CFBundlePackageType</key><string>APPL</string></dict></plist>\n`)
+      const token = randomUUID()
+      child = spawn(process.execPath, [SCRIPT_PATH, '_supervise', token, executable, '--dev-desktop', String(slotPaths.uiPort)], {
+        detached: true, stdio: 'inherit', env: { ...process.env, ...slotEnvironment(slotPaths) },
+      })
+      if (!child.pid) throw new Error('Could not launch the desktop app')
+      exit = new Promise((resolve, reject) => {
+        child.once('error', reject)
+        child.once('exit', (code, signal) => resolve({ code, signal }))
+      })
+      record = { pid: child.pid, token, scriptPath: SCRIPT_PATH }
+      state.desktopProcess = record
+      saveState(slotPaths, state)
+      console.log('Close the desktop window to stop the development servers.')
+    } finally {
+      try {
+        if (started && !record) await stopOwnedProcessesUnlocked(info)
+      } finally {
+        await release()
+      }
+    }
+    if (exit) {
+      result = await exit
+    }
+  } finally {
+    process.removeListener('SIGINT', interrupt)
+    process.removeListener('SIGTERM', interrupt)
+    const release = await acquireLifecycleLock(info)
+    try {
+      const current = reservationFor(info)
+      if (current && record && current.state?.desktopProcess?.token === record.token) {
+        if (!interrupted && result && (result.signal || result.code !== 0)) process.exitCode = 1
+        await stopOwnedProcessesUnlocked(info)
+        const state = readJson(current.slotPaths.statePath)
+        if (state) {
+          state.desktopProcess = null
+          saveState(current.slotPaths, state)
+        }
+      }
+    } finally {
+      await release()
+    }
   }
 }
 
@@ -881,7 +951,8 @@ async function main() {
   }
   const options = parseArgs(process.argv.slice(2))
   const info = worktreeInfo(options.worktree)
-  if (options.command === 'start') await start(info, options.db, options.open, options.desktop)
+  if (options.command === 'start' && options.desktop) await desktop(options.worktree, options.db)
+  else if (options.command === 'start') await start(info, options.db, options.open)
   if (options.command === 'status') printStatus(info)
   if (options.command === 'stop') await stopOwnedProcesses(info)
   if (options.command === 'cleanup') await cleanup(info)

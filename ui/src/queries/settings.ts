@@ -4,6 +4,12 @@ import { useEffect, useRef } from "react";
 import * as api from "../api";
 import { queryClient, isCurrentScope, workspaceKey } from "./client";
 
+export const getFileManagerQuery = (locale: string) => queryOptions({
+    queryKey: workspaceKey("getFileManager", locale),
+    queryFn: ({ signal }) => api.getFileManager(locale, signal),
+    staleTime: 300_000,
+});
+
 export const getHfSettingsQuery = () => queryOptions({
   queryKey: workspaceKey("getHfSettings"),
   queryFn: ({ signal }) => api.getHfSettings(signal),

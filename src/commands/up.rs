@@ -512,6 +512,7 @@ impl ProjectLifecycle {
 fn router(state: AppState, remote_auth: Option<RemoteAuth>) -> Router {
     let app = Router::new()
         .route("/api/health", get(health))
+        .route("/api/file-manager", get(file_manager))
         .route("/api/onboarding/complete", post(complete_onboarding))
         .route("/api/project-path/status", get(project_path_status))
         .route("/api/project-path/pick", post(pick_project_folder))
@@ -1010,6 +1011,17 @@ async fn health(State(state): State<AppState>) -> Json<Value> {
         "dashboardProtocol": crate::commands::up_remote::DASHBOARD_PROTOCOL,
         "instanceId": state.remote_instance_id,
     }))
+}
+
+async fn file_manager(
+    Query(query): Query<std::collections::HashMap<String, String>>,
+) -> Json<Value> {
+    let locale = query.get("locale").cloned().unwrap_or_default();
+    let name = tokio::task::spawn_blocking(move || crate::editors::file_manager_name(&locale))
+        .await
+        .ok()
+        .flatten();
+    Json(json!({ "os": std::env::consts::OS, "name": name }))
 }
 
 #[derive(Deserialize)]

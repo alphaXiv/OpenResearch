@@ -55,6 +55,7 @@ export function Tooltip({
       tabIndex={interactive ? undefined : 0}
       role={interactive ? undefined : "img"}
       aria-label={interactive ? undefined : content}
+      onPointerDown={() => tooltipRef.current?.hidePopover()}
       onMouseEnter={show}
       onMouseLeave={hide}
       onFocus={(event) => {

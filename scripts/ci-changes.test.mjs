@@ -23,6 +23,7 @@ test('platform files select corresponding checks', () => {
   assert.deepEqual(enabled(['macos/Info.plist']), ['rust', 'macos'])
 })
 test('helper tests are independent and combine with other changes', () => {
+  assert.deepEqual(enabled(['scripts/desktop.js']), ['dev_slot'])
   assert.deepEqual(enabled(['scripts/dev-slot.mjs', 'scripts/test_orx_chart.py', 'scripts/release_notes.py', 'ui/package.json']), ['frontend', 'dev_slot', 'chart', 'release_notes'])
 })
 test('docs skip builds, workflow changes and unknown files select all', () => {

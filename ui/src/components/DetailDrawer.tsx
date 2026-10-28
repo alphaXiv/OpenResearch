@@ -210,7 +210,7 @@ function TerminalView({
         {expRuns.length > 0 && selectedRun && (
           <div className="run-history relative shrink-0" ref={historyRef}>
             <Button
-              data-tip={m.detail_drawer_switch_run()} aria-description={m.detail_drawer_switch_run()}
+              data-tip={historyOpen ? undefined : m.detail_drawer_switch_run()} aria-description={m.detail_drawer_switch_run()}
               aria-expanded={historyOpen}
               onClick={() => setHistoryOpen((v) => !v)}
             >

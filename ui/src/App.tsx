@@ -1908,7 +1908,7 @@ export default function App({ runtime, projectId, pane }: { runtime: RuntimeInfo
         )}
         {mainView === "chat" && panelOpen && (
           <aside
-            className={`right-pane relative shrink-0 min-w-0 flex flex-col bg-background [&.max]:fixed [&.max]:inset-0 mac-titlebar:[&.max]:pt-titlebar [&.max]:z-60 [&.max]:border-s-0 overflow-hidden ${stackPanel ? "border-t border-t-border" : "border-s border-s-border"} ${panelMax ? "max" : ""}`}
+            className={`right-pane relative shrink-0 min-w-0 flex flex-col bg-background [&.max]:fixed [&.max]:inset-0 [&.max]:z-60 [&.max]:border-s-0 overflow-hidden ${stackPanel ? "border-t border-t-border" : "border-s border-s-border"} ${panelMax ? "max" : ""}`}
             style={panelMax ? undefined : stackPanel ? { width: "100%", height: "50%" } : { width: visiblePanelWidth }}
             data-onboarding="experiments"
           >
@@ -1917,7 +1917,7 @@ export default function App({ runtime, projectId, pane }: { runtime: RuntimeInfo
               title={panelMax ? m.app_drag_to_restore_panel() : m.app_drag_to_resize_panel()}
               onPointerDown={resizePanel}
             />}
-            <div className="tabs flex items-end gap-0 pt-1 pe-1.5 pb-0 ps-2 h-10 mac-titlebar:h-titlebar border-b border-b-border bg-background shrink-0">
+            <div className={`tabs relative flex items-end gap-0 pt-1 pe-1.5 pb-0 ps-2 h-10 mac-titlebar:h-titlebar bg-background shrink-0 after:absolute after:inset-x-0 after:bottom-0 after:h-px after:bg-border ${panelMax ? "mac-titlebar:ps-titlebar-controls" : ""}`}>
               <TabStrip activeKey={rightTabKey(rightTab)}>
                 {leadingFileTabs.map(renderFileTab)}
                 {filesTabOpen && (

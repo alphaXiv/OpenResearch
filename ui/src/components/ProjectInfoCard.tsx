@@ -1,3 +1,4 @@
+import { useFileManagerLabel } from "./useFileManagerLabel";
 import { createPortal } from "react-dom";
 import { useId, useRef, useState } from "react";
 import { Menu } from "@base-ui/react/menu";
@@ -24,6 +25,7 @@ export function ProjectInfoCard({ project, chatCount, collapsed, busy, onToggleC
   pinned: boolean;
   onPin: () => void;
 }) {
+  const revealLabel = useFileManagerLabel();
   const [menuOpen, setMenuOpen] = useState(false);
   const [dialog, setDialog] = useState<"edit" | "delete" | null>(null);
   const triggerRef = useRef<HTMLButtonElement>(null);
@@ -61,7 +63,7 @@ export function ProjectInfoCard({ project, chatCount, collapsed, busy, onToggleC
               <Menu.Item nativeButton render={<MenuItem className="data-highlighted:bg-surface" />} onClick={() => { setMenuOpen(false); setDialog("edit"); }}><span className="flex items-center gap-2"><Settings size={16} />{m.activity_edit()}</span></Menu.Item>
               <Menu.Item nativeButton render={<MenuItem className="data-highlighted:bg-surface" />} onClick={() => {
                 void revealFileInManager(project.id, ".").catch((err: unknown) => showAlert(err instanceof Error ? err.message : String(err), "error"));
-              }}><span className="flex items-center gap-2"><FolderOpen size={16} />{m.sidebar_reveal_project()}</span></Menu.Item>
+              }}><span className="flex items-center gap-2"><FolderOpen size={16} />{revealLabel}</span></Menu.Item>
               <Menu.Separator className="my-1 border-t border-border" />
               <Menu.Item nativeButton render={<MenuItem danger className="data-highlighted:bg-surface" />} disabled={dialog === "delete"} onClick={remove}><span className="flex items-center gap-2"><Trash2 size={16} />{m.projects_home_delete_project_action()}</span></Menu.Item>
             </Menu.Popup>

@@ -3,6 +3,7 @@ import {
   queryClient,
 } from "../queries/client";
 import { useQuery } from "@tanstack/react-query";
+import { useFileManagerLabel } from "./useFileManagerLabel";
 import { resolvedFileQuery, refreshFile, type LoadedFile } from "../queries/files";
 
 import { m } from "../paraglide/messages.js";
@@ -506,6 +507,7 @@ export function FileViewer({
   const openEditor = useOsFileAction(() =>
     openFileInEditor(projectId, filePath, { sessionId }),
   );
+  const revealLabel = useFileManagerLabel();
   const revealManager = useOsFileAction(() =>
     revealFileInManager(projectId, filePath, { sessionId }),
   );
@@ -725,9 +727,9 @@ export function FileViewer({
             </IconButton>
             <IconButton
               size="small"
-              data-tip={osActionBlocker ?? revealManager.error ?? m.file_viewer_reveal_in_file_manager()}
+              data-tip={osActionBlocker ?? revealManager.error ?? revealLabel}
               data-tip-align="end"
-              aria-label={m.file_viewer_reveal_in_file_manager()}
+              aria-label={revealLabel}
               aria-description={osActionBlocker ?? undefined}
               disabled={revealManager.busy || osActionBlocker != null}
               onClick={() => void revealManager.trigger()}

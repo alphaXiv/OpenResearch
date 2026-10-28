@@ -563,6 +563,9 @@ export const openFileInEditor = (
     sessionId: opts.sessionId,
   });
 
+export const getFileManager = (locale: string, signal?: AbortSignal) =>
+  get<{ os: string; name: string | null }>(`/api/file-manager?locale=${encodeURIComponent(locale)}`, signal);
+
 /** Reveal a checkout file in the OS file manager on the machine running `orx up`. */
 export const revealFileInManager = (
   projectId: string,
