@@ -78,7 +78,7 @@ pub async fn run(args: crate::VersionArgs) -> Result<()> {
             if latest.tag.starts_with("canary-") { latest.tag.clone() } else { latest.version.to_string() },
             crate::invocation::orx(),
             updates::REPO_URL,
-            latest.tag,
+            if latest.tag.starts_with("canary-") { "canary" } else { &latest.tag },
         ),
         Some(latest) if !latest.compatible => {
             println!("{}", updates::compatibility_wait_message(&latest.tag));

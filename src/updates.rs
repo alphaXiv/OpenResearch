@@ -167,13 +167,21 @@ pub(crate) struct ReleaseAsset {
 }
 
 async fn fetch_canary_manifest(timeout: Duration) -> Result<Option<CanaryManifest>> {
-    let url = format!("{REPO_URL}/releases/download/canary/desktop-canary.json");
-    let response = http()
-        .get(url)
+    let base = format!("{REPO_URL}/releases/download/canary");
+    let mut response = http()
+        .get(format!("{base}/desktop-canary-v2.json"))
         .header("user-agent", UA)
         .timeout(timeout)
         .send()
         .await?;
+    if response.status() == reqwest::StatusCode::NOT_FOUND {
+        response = http()
+            .get(format!("{base}/desktop-canary.json"))
+            .header("user-agent", UA)
+            .timeout(timeout)
+            .send()
+            .await?;
+    }
     if response.status() == reqwest::StatusCode::NOT_FOUND {
         return Ok(None);
     }
@@ -257,7 +265,7 @@ pub async fn fetch_latest(timeout: Duration) -> Result<LatestRelease> {
 
 /// Downloads a release asset pinned to `tag` and returns its bytes.
 pub async fn fetch_release_asset(tag: &str, asset: &str, timeout: Duration) -> Result<Vec<u8>> {
-    let url = format!("{}/releases/download/{}/{}", REPO_URL, tag, asset);
+    let url = release_asset_url(tag, asset);
     let res = http()
         .get(&url)
         .header("user-agent", UA)
@@ -276,6 +284,19 @@ pub async fn fetch_release_asset(tag: &str, asset: &str, timeout: Duration) -> R
         ));
     }
     Ok(res.bytes().await?.to_vec())
+}
+
+fn release_asset_url(tag: &str, asset: &str) -> String {
+    let release = if tag.starts_with("canary-")
+        && asset
+            .strip_prefix(tag)
+            .is_some_and(|suffix| suffix.starts_with("--"))
+    {
+        "canary"
+    } else {
+        tag
+    };
+    format!("{REPO_URL}/releases/download/{release}/{asset}")
 }
 
 // ---------------------------------------------------------------------------
@@ -2040,14 +2061,31 @@ mod tests {
     use super::{
         app_bundle_root, attempt_backoff, attempt_due, bold, claim_install, detect_channel,
         exe_matches_prefix, now_unix, package_manager_owns, parse_manifest, portable_dir,
-        portable_outside_prefix, precedence, relaunch_args, render, restart_target, retired_path,
-        target_lock_path, warning_for, BackendLock, CheckCache, InstallChannel, UpdateTarget,
-        ATTEMPT_BACKOFF_MAX, ATTEMPT_BACKOFF_MIN,
+        portable_outside_prefix, precedence, relaunch_args, release_asset_url, render,
+        restart_target, retired_path, target_lock_path, warning_for, BackendLock, CheckCache,
+        InstallChannel, UpdateTarget, ATTEMPT_BACKOFF_MAX, ATTEMPT_BACKOFF_MIN,
     };
     use semver::Version;
     use std::ffi::OsString;
     use std::path::Path;
     use std::path::PathBuf;
+
+    #[test]
+    fn canary_assets_are_pinned_in_their_publishing_release() {
+        let base = "https://github.com/alphaXiv/OpenResearch/releases/download";
+        assert_eq!(
+            release_asset_url("canary-20261027.2", "OpenResearch.dmg"),
+            format!("{base}/canary-20261027.2/OpenResearch.dmg")
+        );
+        assert_eq!(
+            release_asset_url("canary-20261027.3", "canary-20261027.3--OpenResearch.dmg"),
+            format!("{base}/canary/canary-20261027.3--OpenResearch.dmg")
+        );
+        assert_eq!(
+            release_asset_url("v0.2.22", "OpenResearch.dmg"),
+            format!("{base}/v0.2.22/OpenResearch.dmg")
+        );
+    }
 
     #[test]
     fn render_sets_off_the_warning_in_its_own_block() {

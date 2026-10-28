@@ -35,14 +35,17 @@ committed bundle. The artifact must still be available for manual re-attachments
 
 The desktop app offers stable and canary update channels. A push to `main` runs
 `.github/workflows/release-canary.yml`: after CI succeeds, it builds the macOS
-app, Windows installer and Linux AppImages, creates an immutable prerelease named
-`canary-YYYYMMDD.N`, and publishes one `desktop-canary.json` manifest on the
-`canary` prerelease. The manifest points to assets on the immutable release and
-records the source commit and its ancestry. Builds run sequentially, with up to
-100 pending runs queued. An older rerun cannot replace
-the canary pointer, and publication retries retain already-published assets. The
-latest build and six other recent builds are retained; older releases and tags
-are deleted after publication.
+app, Windows installer and Linux AppImages, and publishes versioned assets and
+`desktop-canary-v2.json` on the `canary` prerelease. The manifest records the
+build identity, source commit, and ancestry. Builds run sequentially, with up
+to 100 pending runs queued. An older rerun cannot replace the canary pointer,
+and publication retries retain already-published assets. The latest build and
+six other recent builds are retained.
+
+The first build after this change also publishes a compatibility release and
+`desktop-canary.json` for already-installed clients that download from a
+version-specific release. That release and pointer remain available so those
+clients can update to the shared-release format.
 
 Stable releases continue to start with a reviewed version bump on `main`. Their
 `desktop-ancestry.json` contains the release commit's ancestry. A canary can

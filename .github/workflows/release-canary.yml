@@ -31,7 +31,14 @@ jobs:
         run: |
           set -euo pipefail
           gh api --paginate --slurp "repos/$GITHUB_REPOSITORY/releases?per_page=100" | jq '[.[][] | .tag_name]' > releases.json
-          tag=$(node scripts/canary-tag.mjs "$(date -u +%Y%m%d)" < releases.json)
+          if jq -e 'index("canary") != null' releases.json > /dev/null; then
+            release_id=$(gh api "repos/$GITHUB_REPOSITORY/releases/tags/canary" --jq .id)
+            gh api --paginate --slurp "repos/$GITHUB_REPOSITORY/releases/$release_id/assets?per_page=100" | jq '[.[][].name]' > assets.json
+          else
+            printf '[]\n' > assets.json
+          fi
+          jq -s '.[0] + .[1]' releases.json assets.json > identities.json
+          tag=$(node scripts/canary-tag.mjs "$(date -u +%Y%m%d)" < identities.json)
           version=$(grep -m1 '^version = ' Cargo.toml | sed -E 's/version = "(.*)"/\1/')
           echo "tag=$tag" >> "$GITHUB_OUTPUT"
           echo "version=$version" >> "$GITHUB_OUTPUT"
@@ -223,7 +230,7 @@ jobs:
 
   publish:
     needs: [identity, ci, ui, macos, linux, windows]
-    if: '!cancelled() && needs.identity.result == ''success'' && needs.ci.result == ''success'' && needs.ui.result == ''success'' && (needs.macos.result == ''success'' || needs.linux.result == ''success'' || needs.windows.result == ''success'')'
+    if: '!cancelled() && needs.identity.result == ''success'' && needs.ci.result == ''success'' && needs.ui.result == ''success'' && (needs.macos.result == ''success'' || needs.macos.result == ''skipped'') && (needs.linux.result == ''success'' || needs.linux.result == ''skipped'') && (needs.windows.result == ''success'' || needs.windows.result == ''skipped'') && (needs.macos.result == ''success'' || needs.linux.result == ''success'' || needs.windows.result == ''success'')'
     runs-on: ubuntu-24.04
     permissions:
       contents: write
@@ -259,51 +266,103 @@ jobs:
       - name: Publish canary
         run: |
           set -euo pipefail
-          asset_dir=artifacts
-          if gh release view "$TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
-            test "$(gh api "repos/$GITHUB_REPOSITORY/commits/$TAG" --jq .sha)" = "$SOURCE_SHA"
-            existing=$(gh release view "$TAG" --repo "$GITHUB_REPOSITORY" --json assets --jq '.assets[].name')
-            for asset in artifacts/OpenResearch*; do
-              if ! grep -Fxq "${asset##*/}" <<< "$existing"; then
-                gh release upload "$TAG" "$asset" --repo "$GITHUB_REPOSITORY"
-              fi
-            done
-            asset_dir="$RUNNER_TEMP/published-canary"
-            mkdir -p "$asset_dir"
-            gh release download "$TAG" --repo "$GITHUB_REPOSITORY" --pattern 'OpenResearch*' --dir "$asset_dir"
-          else
-            gh release create "$TAG" artifacts/OpenResearch* --repo "$GITHUB_REPOSITORY" --target "$SOURCE_SHA" --prerelease --latest=false --title "$TAG" --notes "Commit: $SOURCE_SHA"
-          fi
-          test "$(gh api "repos/$GITHUB_REPOSITORY/commits/$TAG" --jq .sha)" = "$SOURCE_SHA"
           if ! gh release view canary --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
-            gh release create canary --repo "$GITHUB_REPOSITORY" --target "$SOURCE_SHA" --prerelease --latest=false --title Canary --notes 'Latest desktop canary manifests.'
+            gh release create canary --repo "$GITHUB_REPOSITORY" --target "$SOURCE_SHA" --prerelease --latest=false --title Canary --notes 'Latest desktop canary builds.'
           fi
-          pointer_assets=$(gh release view canary --repo "$GITHUB_REPOSITORY" --json assets --jq '.assets[].name')
-          if grep -Fxq desktop-canary.json <<< "$pointer_assets"; then
+          release_id=$(gh api "repos/$GITHUB_REPOSITORY/releases/tags/canary" --jq .id)
+          existing=$(gh api --paginate --slurp "repos/$GITHUB_REPOSITORY/releases/$release_id/assets?per_page=100" | jq -r '.[][].name')
+          pointer=desktop-canary-v2.json
+          if ! grep -Fxq "$pointer" <<< "$existing"; then
+            pointer=desktop-canary.json
+          fi
+          if grep -Fxq "$pointer" <<< "$existing"; then
             mkdir -p "$RUNNER_TEMP/previous-canary"
-            gh release download canary --repo "$GITHUB_REPOSITORY" --pattern desktop-canary.json --dir "$RUNNER_TEMP/previous-canary"
-            previous=$(jq -er '.commit | select(type == "string" and test("^[0-9a-f]{40}$"))' "$RUNNER_TEMP/previous-canary/desktop-canary.json")
-            if ! git merge-base --is-ancestor "$previous" "$SOURCE_SHA"; then
-              echo "Keeping the newer canary from $previous."
-              exit 0
+            gh release download canary --repo "$GITHUB_REPOSITORY" --pattern "$pointer" --dir "$RUNNER_TEMP/previous-canary"
+            previous=$(jq -er '.commit | select(type == "string" and test("^[0-9a-f]{40}$"))' "$RUNNER_TEMP/previous-canary/$pointer")
+            if git merge-base --is-ancestor "$previous" "$SOURCE_SHA"; then
+              :
+            else
+              result=$?
+              if [ "$result" -eq 1 ]; then
+                echo "Keeping the newer canary from $previous."
+                exit 0
+              fi
+              exit "$result"
             fi
           fi
+          canary_commit=$(gh api "repos/$GITHUB_REPOSITORY/commits/canary" --jq .sha)
+          git merge-base --is-ancestor "$canary_commit" "$SOURCE_SHA"
           git rev-list "$SOURCE_SHA" > "$RUNNER_TEMP/canary-ancestry.txt"
-          node scripts/canary-manifest.mjs "$asset_dir" "$VERSION" "$TAG" "$SOURCE_SHA" "$RUNNER_TEMP/canary-ancestry.txt" > artifacts/desktop-canary.json
-          gh release upload canary artifacts/desktop-canary.json --repo "$GITHUB_REPOSITORY" --clobber
+
+          # Existing clients use the version tag as the asset release. Leave one
+          # compatibility release and pointer until those clients have updated.
+          if ! grep -Fxq desktop-canary-v2.json <<< "$existing"; then
+            for asset in OpenResearch.dmg OpenResearch-Canary-orx.exe OpenResearch-x86_64.AppImage OpenResearch-aarch64.AppImage; do
+              if [ ! -f "artifacts/$asset" ]; then
+                echo "::error::The compatibility build needs every desktop platform; missing $asset."
+                exit 1
+              fi
+            done
+            if gh release view "$TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+              test "$(gh api "repos/$GITHUB_REPOSITORY/commits/$TAG" --jq .sha)" = "$SOURCE_SHA"
+              legacy_assets=$(gh release view "$TAG" --repo "$GITHUB_REPOSITORY" --json assets --jq '.assets[].name')
+              for asset in artifacts/OpenResearch*; do
+                if ! grep -Fxq "${asset##*/}" <<< "$legacy_assets"; then
+                  gh release upload "$TAG" "$asset" --repo "$GITHUB_REPOSITORY"
+                fi
+              done
+            else
+              gh release create "$TAG" artifacts/OpenResearch* --repo "$GITHUB_REPOSITORY" --target "$SOURCE_SHA" --prerelease --latest=false --title "$TAG" --notes "Compatibility build: $SOURCE_SHA"
+            fi
+            test "$(gh api "repos/$GITHUB_REPOSITORY/commits/$TAG" --jq .sha)" = "$SOURCE_SHA"
+            mkdir -p "$RUNNER_TEMP/legacy-canary"
+            gh release download "$TAG" --repo "$GITHUB_REPOSITORY" --pattern 'OpenResearch*' --dir "$RUNNER_TEMP/legacy-canary"
+            node scripts/canary-manifest.mjs "$RUNNER_TEMP/legacy-canary" "$VERSION" "$TAG" "$SOURCE_SHA" "$RUNNER_TEMP/canary-ancestry.txt" > artifacts/desktop-canary.json
+            gh release upload canary artifacts/desktop-canary.json --repo "$GITHUB_REPOSITORY" --clobber
+          fi
+
+          mkdir -p "$RUNNER_TEMP/shared-canary" "$RUNNER_TEMP/published-canary"
+          for asset in artifacts/OpenResearch*; do
+            name="$TAG--${asset##*/}"
+            if ! grep -Fxq "$name" <<< "$existing"; then
+              cp "$asset" "$RUNNER_TEMP/shared-canary/$name"
+              gh release upload canary "$RUNNER_TEMP/shared-canary/$name" --repo "$GITHUB_REPOSITORY"
+            fi
+          done
+          gh release download canary --repo "$GITHUB_REPOSITORY" --pattern "$TAG--OpenResearch*" --dir "$RUNNER_TEMP/published-canary"
+          node scripts/canary-manifest.mjs "$RUNNER_TEMP/published-canary" "$VERSION" "$TAG" "$SOURCE_SHA" "$RUNNER_TEMP/canary-ancestry.txt" shared > artifacts/desktop-canary-v2.json
+          gh release upload canary artifacts/desktop-canary-v2.json --repo "$GITHUB_REPOSITORY" --clobber
+          printf 'Latest build: %s\nCommit: %s\n' "$TAG" "$SOURCE_SHA" > "$RUNNER_TEMP/canary-notes.txt"
+          gh release edit canary --repo "$GITHUB_REPOSITORY" --title Canary --notes-file "$RUNNER_TEMP/canary-notes.txt"
+          if ! gh api -X PATCH "repos/$GITHUB_REPOSITORY/git/refs/tags/canary" -f sha="$SOURCE_SHA" -F force=false > /dev/null; then
+            echo '::warning::Could not move the Canary tag; the manifest and release notes identify the latest build.'
+          fi
       - name: Retain seven canary builds
         run: |
           set -euo pipefail
           mkdir -p "$RUNNER_TEMP/canary-retention"
-          gh release download canary --repo "$GITHUB_REPOSITORY" --pattern desktop-canary.json --dir "$RUNNER_TEMP/canary-retention"
-          latest=$(jq -er '.tag | select(type == "string" and test("^canary-[0-9]{8}\\.[0-9]+$"))' "$RUNNER_TEMP/canary-retention/desktop-canary.json")
-          gh api --paginate --slurp "repos/$GITHUB_REPOSITORY/releases?per_page=100" > "$RUNNER_TEMP/canary-retention/releases.json"
+          gh release download canary --repo "$GITHUB_REPOSITORY" --pattern 'desktop-canary*.json' --dir "$RUNNER_TEMP/canary-retention"
+          legacy=$(jq -er '.tag' "$RUNNER_TEMP/canary-retention/desktop-canary.json")
+          latest=$(jq -er '.tag' "$RUNNER_TEMP/canary-retention/desktop-canary-v2.json")
+          release_id=$(gh api "repos/$GITHUB_REPOSITORY/releases/tags/canary" --jq .id)
+          gh api --paginate --slurp "repos/$GITHUB_REPOSITORY/releases/$release_id/assets?per_page=100" | jq '{assets: [.[][]]}' > "$RUNNER_TEMP/canary-retention/assets.json"
           jq -r --arg latest "$latest" '
-            [.[][] | select(.draft == false and .prerelease == true and (.tag_name | test("^canary-[0-9]{8}\\.[0-9]+$")))]
-            | sort_by(.published_at, .id) | reverse | map(.tag_name)
-            | if index($latest) != null then map(select(. != $latest)) | .[6:] else .[7:] end
-            | .[]
-          ' "$RUNNER_TEMP/canary-retention/releases.json" > "$RUNNER_TEMP/canary-retention/obsolete.txt"
-          while IFS= read -r tag; do
-            gh release delete "$tag" --repo "$GITHUB_REPOSITORY" --yes --cleanup-tag
-          done < "$RUNNER_TEMP/canary-retention/obsolete.txt"
+            [.assets[] | select(.name | test("^canary-[0-9]{8}\\.[0-9]+--OpenResearch"))
+             | {id, tag: (.name | capture("^(?<tag>canary-[0-9]{8}\\.[0-9]+)--").tag)}]
+            | group_by(.tag)
+            | sort_by(.[0].tag | capture("^canary-(?<date>[0-9]{8})\\.(?<sequence>[0-9]+)$") | [.date, (.sequence | tonumber)])
+            | reverse | if any(.[]; .[0].tag == $latest) then map(select(.[0].tag != $latest)) | .[6:] else .[7:] end
+            | .[] | .[].id
+          ' "$RUNNER_TEMP/canary-retention/assets.json" > "$RUNNER_TEMP/canary-retention/obsolete-assets.txt"
+          while IFS= read -r id; do
+            gh api -X DELETE "repos/$GITHUB_REPOSITORY/releases/assets/$id" > /dev/null
+          done < "$RUNNER_TEMP/canary-retention/obsolete-assets.txt"
+          builds=$(jq '[.assets[].name | select(test("^canary-[0-9]{8}\\.[0-9]+--OpenResearch")) | capture("^(?<tag>canary-[0-9]{8}\\.[0-9]+)--").tag] | unique | length' "$RUNNER_TEMP/canary-retention/assets.json")
+          if [ "$builds" -ge 7 ]; then
+            gh api --paginate --slurp "repos/$GITHUB_REPOSITORY/releases?per_page=100" | jq -r --arg legacy "$legacy" '
+              .[][] | select(.draft == false and .prerelease == true and .tag_name != $legacy and (.tag_name | test("^canary-[0-9]{8}\\.[0-9]+$"))) | .tag_name
+            ' > "$RUNNER_TEMP/canary-retention/obsolete-releases.txt"
+            while IFS= read -r tag; do
+              gh release delete "$tag" --repo "$GITHUB_REPOSITORY" --yes --cleanup-tag
+            done < "$RUNNER_TEMP/canary-retention/obsolete-releases.txt"
+          fi

@@ -42,7 +42,7 @@ export interface RestartState {
 }
 
 export const releaseNotesUrl = (tag: string) =>
-  `https://github.com/alphaXiv/OpenResearch/releases/tag/${tag.split("/").map(encodeURIComponent).join("/")}`;
+  `https://github.com/alphaXiv/OpenResearch/releases/tag/${tag.startsWith("canary-") ? "canary" : tag.split("/").map(encodeURIComponent).join("/")}`;
 
 /** Ask the server to relaunch, then reload once a different server process
  *  answers — the page itself is the old build until it reloads. The old server answers the POST and then drops every connection,

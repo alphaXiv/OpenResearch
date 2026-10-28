@@ -16,6 +16,7 @@ test('numbers published canaries independently each UTC day', () => {
   assert.equal(tag('20261026', []), 'canary-20261026.1')
   assert.equal(tag('20261026', ['canary-20261026.2', 'canary-20261026.10', 'canary-20261025.99', 'v0.2.21']), 'canary-20261026.11')
   assert.equal(tag('20261027', ['canary-20261026.10']), 'canary-20261027.1')
+  assert.equal(tag('20261027', ['canary-20261027.3--OpenResearch.dmg', 'canary-20261027.2']), 'canary-20261027.4')
 })
 
 test('the published manifest pins each desktop asset to its bytes and commit', () => {
@@ -39,6 +40,10 @@ test('the published manifest pins each desktop asset to its bytes and commit', (
     writeFileSync(join(dir, 'partial', 'OpenResearch.dmg'), 'mac')
     const partial = execFileSync(process.execPath, ['scripts/canary-manifest.mjs', join(dir, 'partial'), '0.2.21', 'canary-20261027.2', 'a'.repeat(40), ancestry], { encoding: 'utf8' })
     assert.deepEqual(Object.keys(JSON.parse(partial).assets), ['macos'])
+    const sharedName = 'canary-20261027.2--OpenResearch.dmg'
+    writeFileSync(join(dir, 'partial', sharedName), 'shared')
+    const shared = execFileSync(process.execPath, ['scripts/canary-manifest.mjs', join(dir, 'partial'), '0.2.21', 'canary-20261027.2', 'a'.repeat(40), ancestry, 'shared'], { encoding: 'utf8' })
+    assert.deepEqual(JSON.parse(shared).assets.macos, { asset: sharedName, sha256: createHash('sha256').update('shared').digest('hex') })
   } finally {
     rmSync(dir, { recursive: true, force: true })
   }
