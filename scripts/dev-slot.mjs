@@ -12,7 +12,9 @@ import { fileURLToPath } from 'node:url'
 
 const SLOT_VERSION = 1
 const FIRST_SLOT = 1
-const LAST_SLOT = 9
+const BACKEND_PORT_BASE = 4900
+const UI_PORT_BASE = 5200
+const LAST_SLOT = UI_PORT_BASE - BACKEND_PORT_BASE - 1
 const BACKEND_TIMEOUT_MS = 5 * 60 * 1000
 const UI_TIMEOUT_MS = 60 * 1000
 const SCRIPT_PATH = fileURLToPath(import.meta.url)
@@ -123,8 +125,8 @@ function pathsFor(info, slot = null) {
     ...base,
     slot,
     slotKey,
-    backendPort: 4900 + slot,
-    uiPort: 5200 + slot,
+    backendPort: BACKEND_PORT_BASE + slot,
+    uiPort: UI_PORT_BASE + slot,
     dataDir: path.join(allocatorRoot, slotKey),
     cacheDir: path.join(allocatorRoot, slotKey, 'cache'),
     configDir: path.join(allocatorRoot, `${slotKey}-config`),
@@ -282,8 +284,8 @@ function loadRegistry(info) {
 }
 
 function slotFromPort(port) {
-  if (Number.isInteger(port) && port >= 4901 && port <= 4909) return port - 4900
-  if (Number.isInteger(port) && port >= 5201 && port <= 5209) return port - 5200
+  if (Number.isInteger(port) && port >= BACKEND_PORT_BASE + FIRST_SLOT && port <= BACKEND_PORT_BASE + LAST_SLOT) return port - BACKEND_PORT_BASE
+  if (Number.isInteger(port) && port >= UI_PORT_BASE + FIRST_SLOT && port <= UI_PORT_BASE + LAST_SLOT) return port - UI_PORT_BASE
   return null
 }
 
@@ -334,10 +336,10 @@ async function reclaimStaleReservations(info, registry) {
   for (let slot = FIRST_SLOT; slot <= LAST_SLOT; slot += 1) {
     const owned = configurations.filter((configuration) => configurationOwnsSlot(configuration, slot))
     if (owned.length === 0) continue
-    const backend = owned.find((configuration) => configuration.port === 4900 + slot)
+    const backend = owned.find((configuration) => configuration.port === BACKEND_PORT_BASE + slot)
     const manifest = backend ? manifestFromConfiguration(backend, info.mainCheckout) : null
     if (!manifest || existsSync(path.dirname(manifest))) continue
-    if (listenerPids(4900 + slot).length > 0 || listenerPids(5200 + slot).length > 0) continue
+    if (listenerPids(BACKEND_PORT_BASE + slot).length > 0 || listenerPids(UI_PORT_BASE + slot).length > 0) continue
     const slotPaths = pathsFor(info, slot)
     const state = readJson(slotPaths.statePath)
     const owner = { worktreePath: path.dirname(manifest), manifestPath: manifest }
@@ -402,11 +404,11 @@ async function reserveSlot(info, dbMode) {
     const registry = loadRegistry(info)
     await reclaimStaleReservations(info, registry)
     const existing = registry.configurations.find((configuration) =>
-      configuration.port >= 4901
-      && configuration.port <= 4909
+      configuration.port >= BACKEND_PORT_BASE + FIRST_SLOT
+      && configuration.port <= BACKEND_PORT_BASE + LAST_SLOT
       && manifestFromConfiguration(configuration, info.mainCheckout) === info.manifestPath)
     if (existing) {
-      const slotPaths = pathsFor(info, existing.port - 4900)
+      const slotPaths = pathsFor(info, existing.port - BACKEND_PORT_BASE)
       const state = readJson(slotPaths.statePath)
       if (!managedStateMatches(state, info, slotPaths)) {
         throw new Error(`Existing ${slotPaths.slotKey} is legacy or unmanaged; stop it and run cleanup before using the helper`)
@@ -421,7 +423,7 @@ async function reserveSlot(info, dbMode) {
     let slot = null
     for (let candidate = FIRST_SLOT; candidate <= LAST_SLOT; candidate += 1) {
       const reserved = registry.configurations.some((configuration) => configurationOwnsSlot(configuration, candidate))
-      const listening = listenerPids(4900 + candidate).length > 0 || listenerPids(5200 + candidate).length > 0
+      const listening = listenerPids(BACKEND_PORT_BASE + candidate).length > 0 || listenerPids(UI_PORT_BASE + candidate).length > 0
       if (reserved || listening) continue
       const candidatePaths = pathsFor(info, candidate)
       const hasDirectories = existsSync(candidatePaths.dataDir)
@@ -785,11 +787,11 @@ export async function desktop(worktree = process.cwd(), requestedMode = null) {
 function reservationFor(info) {
   const registry = loadRegistry(info)
   const backend = registry.configurations.find((configuration) =>
-    configuration.port >= 4901
-    && configuration.port <= 4909
+    configuration.port >= BACKEND_PORT_BASE + FIRST_SLOT
+    && configuration.port <= BACKEND_PORT_BASE + LAST_SLOT
     && manifestFromConfiguration(configuration, info.mainCheckout) === info.manifestPath)
   if (!backend) return null
-  const slotPaths = pathsFor(info, backend.port - 4900)
+  const slotPaths = pathsFor(info, backend.port - BACKEND_PORT_BASE)
   return { registry, backend, slotPaths, state: readJson(slotPaths.statePath) }
 }
 
