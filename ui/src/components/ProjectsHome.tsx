@@ -1,5 +1,7 @@
+import { EscapeScope } from "./EscapeScope";
 import { m } from "../paraglide/messages.js";
-import { useEffect, useRef, useState } from "react";
+import { useDialogFocus } from "./useDialogFocus";
+import { useRef, useState } from "react";
 import { FolderOpen, Plus } from "lucide-react";
 import { type AgentSelection, type Project } from "../api";
 
@@ -55,61 +57,9 @@ export function NewProjectDialog({
   initialPaperId?: string;
 }) {
   const dialogRef = useRef<HTMLDivElement>(null);
-  const onCloseRef = useRef(onClose);
-  onCloseRef.current = onClose;
+  useDialogFocus(dialogRef);
 
-  useEffect(() => {
-    const dialog = dialogRef.current;
-    if (!dialog) return;
-    const previousFocus = document.activeElement instanceof HTMLElement ? document.activeElement : null;
-    const focusable = () =>
-      [...dialog.querySelectorAll<HTMLElement>(
-        'button:not([disabled]), input:not([disabled]), select:not([disabled]), textarea:not([disabled]), a[href], [tabindex]:not([tabindex="-1"])',
-      )];
-    (dialog.querySelector<HTMLElement>("[data-initial-focus]") ?? focusable()[0] ?? dialog).focus();
-
-    const handleKeyDown = (event: KeyboardEvent) => {
-      if (event.key === "Escape") {
-        event.preventDefault();
-        event.stopPropagation();
-        onCloseRef.current();
-        return;
-      }
-      if (
-        (event.metaKey || event.ctrlKey) &&
-        !event.altKey &&
-        ((event.key.toLowerCase() === "n" && !event.shiftKey) || (event.key === "Enter" && event.shiftKey))
-      ) {
-        event.preventDefault();
-        event.stopPropagation();
-        return;
-      }
-      if (event.key !== "Tab") return;
-      const controls = focusable();
-      if (controls.length === 0) {
-        event.preventDefault();
-        dialog.focus();
-        return;
-      }
-      const first = controls[0];
-      const last = controls[controls.length - 1];
-      if (event.shiftKey && document.activeElement === first) {
-        event.preventDefault();
-        last.focus();
-      } else if (!event.shiftKey && document.activeElement === last) {
-        event.preventDefault();
-        first.focus();
-      }
-    };
-
-    document.addEventListener("keydown", handleKeyDown, true);
-    return () => {
-      document.removeEventListener("keydown", handleKeyDown, true);
-      previousFocus?.focus();
-    };
-  }, []);
-
-  return (
+  return <EscapeScope onEscape={onClose}>
     <div
       className="modal-backdrop fixed inset-0 bg-modal-backdrop flex items-start justify-center p-5 [--new-project-modal-top:clamp(4rem,20vh,24rem)] pt-[var(--new-project-modal-top)] overflow-y-auto z-100"
       onClick={(event) => {
@@ -134,6 +84,6 @@ export function NewProjectDialog({
         />
       </div>
     </div>
-  );
+  </EscapeScope>;
 }
 

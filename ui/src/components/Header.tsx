@@ -1,3 +1,5 @@
+import { formatForDisplay } from "@tanstack/react-hotkeys";
+import { appHotkeys } from "../hotkeys";
 import { m } from "../paraglide/messages.js";
 import { PanelLeft } from "lucide-react";
 import { BrandMark } from "./Wordmark";
@@ -14,7 +16,7 @@ export function RailHeader({
         <span className="w-5 h-5 mac-titlebar:hidden"><BrandMark /></span>
         <span className="flex-1 text-base font-medium mac-titlebar:invisible">OpenResearch</span>
         {onCollapse && (
-          <IconButton size="small" className="mac-titlebar:hidden" data-tip={m.header_hide_sidebar()} aria-label={m.header_hide_sidebar()} onClick={onCollapse}>
+          <IconButton size="small" className="mac-titlebar:hidden" data-tip={`${m.header_hide_sidebar()} (${formatForDisplay(appHotkeys["sidebar.toggle"].hotkey ?? [])})`} aria-label={m.header_hide_sidebar()} onClick={onCollapse}>
             <PanelLeft size={18} />
           </IconButton>
         )}

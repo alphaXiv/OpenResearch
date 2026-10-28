@@ -1,4 +1,5 @@
 import { useFileManagerLabel } from "./useFileManagerLabel";
+import { EscapeScope } from "./EscapeScope";
 import { createPortal } from "react-dom";
 import { useId, useRef, useState } from "react";
 import { Menu } from "@base-ui/react/menu";
@@ -41,7 +42,7 @@ export function ProjectInfoCard({ project, chatCount, collapsed, busy, onToggleC
   }
 
   return <>
-    <button type="button" aria-expanded={!collapsed} onClick={onToggleCollapsed}
+    <button type="button" data-sidebar-keyboard-row aria-expanded={!collapsed} onClick={onToggleCollapsed}
       className="flex h-7 min-w-0 flex-1 cursor-pointer items-center gap-2 rounded-sm py-1 text-start text-sm font-normal text-text focus-visible:outline-2 focus-visible:outline-solid focus-visible:outline-focus focus-visible:outline-offset-2">
       {collapsed ? <Folder size={16} className="shrink-0" /> : <FolderOpen size={16} className="shrink-0" />}<span className="truncate">{project.name}</span>
       {busy && <span aria-hidden className="size-[7px] shrink-0 rounded-full bg-accent-teal animate-[or-pulse_1.2s_infinite]" />}
@@ -88,7 +89,7 @@ function DeleteProjectDialog({ project, onClose, onRemoved }: { project: Project
   const [pending, setPending] = useState(false);
   const [error, setError] = useState("");
   const close = () => { if (!pending) onClose(); };
-  useDialogFocus(dialogRef, close);
+  useDialogFocus(dialogRef);
 
   async function remove() {
     if (pending) return;
@@ -104,7 +105,7 @@ function DeleteProjectDialog({ project, onClose, onRemoved }: { project: Project
     finally { setPending(false); }
   }
 
-  return <div className="modal-backdrop fixed inset-0 z-100 flex items-center justify-center bg-modal-backdrop p-5" onClick={(event) => { if (event.target === event.currentTarget) close(); }}>
+  return <EscapeScope onEscape={close}><div className="modal-backdrop fixed inset-0 z-100 flex items-center justify-center bg-modal-backdrop p-5" onClick={(event) => { if (event.target === event.currentTarget) close(); }}>
     <div ref={dialogRef} role="dialog" aria-modal="true" aria-labelledby={titleId} tabIndex={-1}
       className="modal w-120 max-w-full max-h-[calc(100vh-2.5rem)] overflow-y-auto rounded-xl border border-border bg-background p-6 text-text shadow-modal">
       <h2 id={titleId} className="m-0 text-xl font-medium">{m.projects_home_delete_project_action()}</h2>
@@ -115,7 +116,7 @@ function DeleteProjectDialog({ project, onClose, onRemoved }: { project: Project
       {error && <p role="alert" className="mt-3 text-sm text-accent-red">{error}</p>}
       <div className="mt-6 flex justify-end gap-2"><Button type="button" variant="ghost" data-initial-focus disabled={pending} onClick={close}>{m.projects_home_cancel()}</Button><Button type="button" variant="danger" disabled={pending} onClick={() => void remove()}>{m.projects_home_delete_project_action()}</Button></div>
     </div>
-  </div>;
+  </div></EscapeScope>;
 }
 
 function EditProjectDialog({ project, onClose, onDelete }: { project: Project; onClose: () => void; onDelete: () => void }) {
@@ -126,7 +127,7 @@ function EditProjectDialog({ project, onClose, onDelete }: { project: Project; o
   const [pending, setPending] = useState(false);
   const [error, setError] = useState("");
   const close = () => { if (!pending) onClose(); };
-  useDialogFocus(dialogRef, close);
+  useDialogFocus(dialogRef);
 
   async function save() {
     if (pending || !name.trim()) return;
@@ -137,7 +138,7 @@ function EditProjectDialog({ project, onClose, onDelete }: { project: Project; o
     finally { setPending(false); }
   }
 
-  return <div className="modal-backdrop fixed inset-0 z-100 flex items-center justify-center bg-modal-backdrop p-5" onClick={(event) => { if (event.target === event.currentTarget) close(); }}>
+  return <EscapeScope onEscape={close}><div className="modal-backdrop fixed inset-0 z-100 flex items-center justify-center bg-modal-backdrop p-5" onClick={(event) => { if (event.target === event.currentTarget) close(); }}>
     <div ref={dialogRef} role="dialog" aria-modal="true" aria-labelledby={titleId} tabIndex={-1}
       className="modal w-120 max-w-full max-h-[calc(100vh-2.5rem)] overflow-y-auto rounded-xl border border-border bg-background p-6 text-text shadow-modal">
       <div className="mb-5 flex items-center justify-between"><h2 id={titleId} className="m-0 text-xl font-medium">{m.sidebar_edit_project()}</h2><IconButton aria-label={m.tour_close()} onClick={close} disabled={pending}><X size={16} /></IconButton></div>
@@ -150,5 +151,5 @@ function EditProjectDialog({ project, onClose, onDelete }: { project: Project; o
         <div className="mt-6 flex items-center gap-2"><Button type="button" variant="danger" disabled={pending} onClick={onDelete}>{m.projects_home_delete_project_action()}</Button><div className="flex-1" /><Button type="button" variant="ghost" disabled={pending} onClick={close}>{m.projects_home_cancel()}</Button><Button type="submit" variant="primary" disabled={pending || !name.trim()}>{m.common_save()}</Button></div>
       </form>
     </div>
-  </div>;
+  </div></EscapeScope>;
 }

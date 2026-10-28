@@ -38,6 +38,7 @@ function updates(initialChannel = "stable", fail = false) {
     m: new Proxy({}, { get: (_, key) => () => key }), ltr: String,
     CHANNEL_LABELS: { "app-bundle": () => "macOS app" }, MANUAL_UPDATE_HINT: {},
     SETTINGS_CARD_CLASS_NAME: "card", KV_CLASS_NAME: "kv", PROJECT_DEFAULT_ROW_CLASS_NAME: "row", SEGMENTED_CLASS_NAME: "segmented",
+    EscapeScope: "escape-scope",
     Button: "button", Switch: "switch", InstallCliRow: "install", LoadingRow: "loading", Spinner: "spinner",
     Dialog: { Root: "dialog-root", Portal: "dialog-portal", Backdrop: "dialog-backdrop", Viewport: "dialog-viewport", Popup: "dialog-popup" },
   };

@@ -38,6 +38,7 @@ test("side-chat trigger opens the list on touch and a draft on mouse click", () 
     useLayoutEffect: () => {},
     usePopover: () => ({ open: false, setOpen: (value) => opened.push(typeof value === "function" ? value(false) : value), ref: { current: null } }),
     IconButton: "button",
+    EscapeScope: "escape-scope",
     REASONING_DEFAULT_ID: "default",
   });
   const tree = OptionPicker({ triggerIcon: "chat", onTriggerClick: () => created++, openOnHover: true, choices: [{ id: "saved", label: "Saved chat" }] });

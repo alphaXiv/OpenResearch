@@ -25,6 +25,7 @@ new Function("require", "exports", compiled)((name) => {
   } };
   if (name === "../paraglide/messages.js") return { m: new Proxy({}, { get: (_, key) => () => key }) };
   if (name === "./useFileManagerLabel") return { useFileManagerLabel: () => "Reveal" };
+  if (name === "./EscapeScope") return { EscapeScope: "escape-scope" };
   if (name === "./useDialogFocus") return { useDialogFocus: () => {} };
   if (name === "./ui") return { Button: "button", showAlert: (...args) => { alerts.push(args); } };
   return require(name);

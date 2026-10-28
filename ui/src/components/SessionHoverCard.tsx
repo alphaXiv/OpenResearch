@@ -131,7 +131,6 @@ export function SessionHoverCard({ session, modelName, projectName, harnessLogo,
       onMouseLeave={onLeave}
       onClick={(event) => event.stopPropagation()}
       onKeyDown={(event) => {
-        event.stopPropagation();
         const rows = Array.from(event.currentTarget.querySelectorAll<HTMLButtonElement>("[data-experiment-row]"));
         const index = rows.findIndex((row) => row === event.target);
         const onCard = event.target === event.currentTarget;

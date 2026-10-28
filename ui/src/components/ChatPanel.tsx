@@ -1,4 +1,6 @@
 import { Dialog } from "@base-ui/react/dialog";
+import { EscapeScope } from "./EscapeScope";
+import { commandRegion } from "../keyboardRegion";
 import { ComposerProjectPicker } from "./ComposerProjectPicker";
 import { ProjectInfoCard } from "./ProjectInfoCard";
 import { SessionHoverCard } from "./SessionHoverCard";
@@ -39,8 +41,11 @@ import {
   type FileMentionMatch,
 } from "../fileMentions";
 import { m } from "../paraglide/messages.js";
+import { formatForDisplay, matchesKeyboardEvent, useAppHotkeys, useHotkey } from "@tanstack/react-hotkeys";
+import { appHotkeys } from "../hotkeys";
 import { copyToClipboard } from "../clipboard";
 import { autoDir, ltr } from "../i18n";
+import { navigateKeyboardList } from "../keyboardNavigation";
 import { useLocale } from "../locale";
 import {
   ArrowDown,
@@ -766,6 +771,7 @@ function AnnotationsPopover({
           <AnnotationEntries annotations={annotations} onRemove={onRemove ? removeAnnotation : undefined} />
         </div>
       )}
+      <EscapeScope enabled={popover.open} onEscape={() => { popover.setOpen(false); triggerRef.current?.focus(); }} />
     </div>
   );
 }
@@ -3163,6 +3169,7 @@ export const Message = memo(function Message({
                   return;
                 }
                 if (e.key === "Escape") {
+                  e.stopPropagation();
                   e.preventDefault();
                   setEditDraft(null);
                 } else if (e.key === "Enter" && !e.shiftKey) {
@@ -4051,11 +4058,6 @@ type SessionFilter = "active" | "archived" | "all";
 const matchesFilter = (filter: SessionFilter, archived: boolean) =>
   filter === "all" ? true : filter === "archived" ? archived : !archived;
 
-/** Whether an event target sits inside the side-chat pane. */
-function inSideChat(target: EventTarget | null): boolean {
-  return target instanceof Element && target.closest("[data-side-chat]") !== null;
-}
-
 /** Menu label + rail section heading per filter — "Recents" for the default view. */
 const SESSION_FILTERS: { id: SessionFilter; label: () => string; railLabel: () => string }[] = [
   { id: "archived", label: m.chat_panel_archived, railLabel: m.chat_panel_archived },
@@ -4115,6 +4117,7 @@ function SessionFilterMenu({
           ))}
         </div>
       )}
+      <EscapeScope enabled={open} onEscape={() => setOpen(false)} />
     </div>
   );
 }
@@ -4252,21 +4255,11 @@ function SessionRow({
         setAnchor(null);
       } else setAnchor(bounds);
     };
-    const onEscape = (event: KeyboardEvent) => {
-      if (event.key !== "Escape") return;
-      event.preventDefault();
-      event.stopPropagation();
-      dismissed.current = true;
-      if (cardRef.current?.contains(document.activeElement)) ref.current?.focus();
-      closeCard();
-    };
     window.addEventListener("resize", update);
     document.addEventListener("scroll", update, true);
-    document.addEventListener("keydown", onEscape, true);
     return () => {
       window.removeEventListener("resize", update);
       document.removeEventListener("scroll", update, true);
-      document.removeEventListener("keydown", onEscape, true);
     };
   }, [anchor, ref]);
 
@@ -4296,6 +4289,7 @@ function SessionRow({
       ref={ref}
       role="button"
       tabIndex={0}
+      data-sidebar-keyboard-row
       aria-label={sessionDescription}
       aria-describedby={anchor ? cardId : undefined}
       onMouseEnter={() => {
@@ -4367,6 +4361,7 @@ function SessionRow({
               e.preventDefault();
               commit();
             } else if (e.key === "Escape") {
+              e.stopPropagation();
               e.preventDefault();
               setEditing(false);
             }
@@ -4459,6 +4454,8 @@ function SessionRow({
           </MenuItem>
         </div>
       )}
+      <EscapeScope enabled={open} onEscape={() => setOpen(false)} />
+      <EscapeScope enabled={!!anchor && !editing && !open} exclusive={false} onEscape={() => { dismissed.current = true; if (cardRef.current?.contains(document.activeElement)) ref.current?.focus(); closeCard(); }} />
     </div>
   );
 }
@@ -5835,12 +5832,14 @@ export function ChatPanel({
     setSkillMenuDismissed(false);
     setComposerCursor(composerPrefill.length);
   }, [composerPrefill]);
+  const [newChatFocusProject, setNewChatFocusProject] = useState<string | null>(null);
   const focusedComposerNonce = useRef(0);
   useEffect(() => {
     // The composer is inert while its chat is loading. Keep the
     // request pending until it can take focus, and consume it only once.
-    if (composerFocusNonce === 0 || composerFocusNonce === focusedComposerNonce.current
-      || contentLoading || contentError || historyLoading) return;
+    const newChatPending = newChatFocusProject === projectId && activeId === null;
+    const composerPending = composerFocusNonce !== 0 && composerFocusNonce !== focusedComposerNonce.current;
+    if ((!newChatPending && !composerPending) || mainView !== "chat" || contentLoading || contentError || historyLoading) return;
     // The welcome dialog restores its previous focus on unmount; run after that.
     const frame = window.requestAnimationFrame(() => {
       const el = composerRef.current;
@@ -5848,11 +5847,12 @@ export function ChatPanel({
       el.focus();
       if (document.activeElement !== el) return;
       focusedComposerNonce.current = composerFocusNonce;
+      if (newChatPending) setNewChatFocusProject(null);
       el.setSelectionRange(el.value.length, el.value.length);
       el.scrollIntoView({ block: "nearest" });
     });
     return () => window.cancelAnimationFrame(frame);
-  }, [composerFocusNonce, contentLoading, contentError, historyLoading]);
+  }, [composerFocusNonce, newChatFocusProject, projectId, activeId, mainView, contentLoading, contentError, historyLoading]);
   const demoHintId = useId();
   const unconfirmedSendId = useId();
   const demoHintVisible =
@@ -6460,40 +6460,11 @@ export function ChatPanel({
     }
   }
 
-  const lastPointerInSide = useRef(false);
-  useEffect(() => {
-    const onDown = (e: PointerEvent) => { lastPointerInSide.current = inSideChat(e.target); };
-    document.addEventListener("pointerdown", onDown, true);
-    return () => document.removeEventListener("pointerdown", onDown, true);
-  }, []);
-
-  // Escape stops the streaming turn and drops focus back into the composer,
-  // mirroring the Claude Code desktop app. Harness-agnostic — `stop()` →
-  // `interruptChat` interrupts whichever harness (Claude, Codex, OpenCode, …)
-  // is running the active session. Only armed while chat is visible.
-  //
-  // An overlay that should swallow Escape (rather than let it stop the turn)
-  // must own the key ahead of this document-level bubble listener, by one of
-  // two means already in use — a new overlay has to pick one or it will
-  // interrupt the turn on Escape:
-  //   - the slash and @file menus preventDefault in the composer's onKeyDown (bubble),
-  //     so the `defaultPrevented` guard below defers to it;
-  //   - the composer pickers (usePopover) stopPropagation in the capture phase,
-  //     so their Escape never reaches this listener at all.
-  useEffect(() => {
-    if (!busy || mainView !== "chat") return;
-    function onKey(e: KeyboardEvent) {
-      if (e.key !== "Escape" || e.defaultPrevented) return;
-      // Clicking a transcript leaves focus on body; the click says which pane it was.
-      const side = e.target === document.body ? lastPointerInSide.current : inSideChat(e.target);
-      if (side !== embedded) return;
-      e.preventDefault();
-      stop();
-      composerRef.current?.focus();
-    }
-    document.addEventListener("keydown", onKey);
-    return () => document.removeEventListener("keydown", onKey);
-  }, [busy, activeId, mainView, embedded]);
+  useHotkey("Escape", () => {
+    if (commandRegion() !== (embedded ? "right" : "left")) return;
+    stop();
+    composerRef.current?.focus();
+  }, { enabled: busy && mainView === "chat", preventDefault: true, stopPropagation: false, conflictBehavior: "allow" });
 
   /** Drop every trace of a session — the local row, the open-thread selection,
    * and the cached transcript. Used on delete (ours or another dashboard's). */
@@ -6595,20 +6566,23 @@ export function ChatPanel({
     [activeId, projectId, queueSessionMutation, sessionsOptions],
   );
 
-  const isApple = /Mac|iPhone|iPad/.test(navigator.platform);
-  const newTaskShortcut = isApple ? "⌘ N" : "Ctrl + N";
-  const queueChord = isApple ? "⌘ Enter" : "Ctrl + Enter";
+  const newTaskHotkey = useAppHotkeys()["task.new"].hotkey;
+  const newTaskShortcut = newTaskHotkey ? formatForDisplay(newTaskHotkey) : undefined;
+  const queueChord = formatForDisplay("Mod+Enter");
   const startProjectTask = useCallback(() => {
     setSessionFilter("active");
+    setNewChatFocusProject(projectId);
     onActiveSessionChange(null);
-  }, [onActiveSessionChange]);
+  }, [onActiveSessionChange, projectId]);
   const startNewTask = useCallback(async () => {
     try {
       const activity = await queryClient.fetchQuery({ ...listProjectActivityQuery(), staleTime: 0 });
       const latest = activity.reduce<(typeof activity)[number] | undefined>((current, item) =>
         !current || item.lastActivityAt > current.lastActivityAt ? item : current, undefined);
       setSessionFilter("active");
-      onActiveSessionChange(null, { projectId: latest?.projectId ?? projectId });
+      const targetProject = latest?.projectId ?? projectId;
+      setNewChatFocusProject(targetProject);
+      onActiveSessionChange(null, { projectId: targetProject });
     } catch (error) {
       showAlert(error instanceof Error ? error.message : String(error), "error");
     }
@@ -6631,23 +6605,12 @@ export function ChatPanel({
     [onActiveSessionChange],
   );
 
-  useEffect(() => {
-    if (embedded) return;
-    const onKeyDown = (event: KeyboardEvent) => {
-      if (
-        event.repeat ||
-        (!event.metaKey && !event.ctrlKey) ||
-        event.altKey ||
-        !((event.key.toLowerCase() === "n" && !event.shiftKey) || (event.key === "Enter" && event.shiftKey)) ||
-        inSideChat(event.target)
-      )
-        return;
-      event.preventDefault();
-      startNewTask();
-    };
-    document.addEventListener("keydown", onKeyDown);
-    return () => document.removeEventListener("keydown", onKeyDown);
-  }, [startNewTask, embedded]);
+  const newTask = () => {
+    if (commandRegion() === "right" && document.querySelector(".right-pane [data-side-chat]")) return;
+    startNewTask();
+  };
+  useHotkey(appHotkeys["task.new"], newTask, { enabled: !embedded, requireReset: true });
+  useHotkey("Mod+Shift+Enter", newTask, { enabled: !embedded, requireReset: true });
 
   const sessionWaiting = (session: ChatSession) => state.messagesBySession[session.id]
     ? waitingSessions.has(session.id) : session.awaitingInput === true;
@@ -6707,6 +6670,15 @@ export function ChatPanel({
   });
 
   const sidebarVirtualItems = sidebarVirtualizer.getVirtualItems();
+  const pendingSidebarFocus = useRef<number | null>(null);
+  useLayoutEffect(() => {
+    if (pendingSidebarFocus.current === null) return;
+    const row = railBodyRef.current?.querySelector<HTMLElement>(`[data-index="${pendingSidebarFocus.current}"] [data-sidebar-keyboard-row]`);
+    if (row) {
+      pendingSidebarFocus.current = null;
+      row.focus();
+    }
+  });
   const lastVisibleIndex = sidebarVirtualItems.at(-1)?.index ?? -1;
   useEffect(() => {
     if (sidebarGrouping === "list" && railOpen && !embedded && lastVisibleIndex >= sidebarRows.length - 6
@@ -6718,11 +6690,13 @@ export function ChatPanel({
   const rail = (
     <aside className="session-rail w-75 shrink-0 flex flex-col bg-background min-h-0 [&_.rail-body]:flex-1 [&_.rail-body]:min-h-0 [&_.rail-body]:pt-0 [&_.rail-body]:pb-0 [&_.rail-body]:ps-2 [&_.rail-body]:pe-1 border-e border-e-border overflow-visible">
       {railHeader}
-      <nav className="rail-nav flex flex-col gap-0.5 p-2 shrink-0">
+      <nav data-keyboard-list onKeyDown={navigateKeyboardList} className="rail-nav flex flex-col gap-0.5 p-2 shrink-0 [&_[data-tip]::after]:left-[calc(100%_+_6px)] [&_[data-tip]::after]:top-1/2 [&_[data-tip]::after]:translate-x-0 [&_[data-tip]::after]:-translate-y-1/2">
         <button
-          className="rail-nav-item flex items-center gap-2.5 py-2 px-2.5 text-base text-text rounded-md text-start hover:bg-surface [&[data-tip]::after]:top-auto [&[data-tip]::after]:bottom-[calc(100%_+_6px)]"
+          className="rail-nav-item flex items-center gap-2.5 py-2 px-2.5 text-base text-text rounded-md text-start hover:bg-surface"
           data-onboarding="new-session"
+          data-keyboard-item
           data-tip={newTaskShortcut}
+          aria-label={m.chat_panel_new_chat()}
           aria-keyshortcuts="Meta+N Control+N Meta+Shift+Enter Control+Shift+Enter"
           onClick={startNewTask}
         >
@@ -6730,6 +6704,7 @@ export function ChatPanel({
           {m.chat_panel_new_chat()}
         </button>
         <button
+          data-keyboard-item
           className={`rail-nav-item flex items-center gap-2.5 py-2 px-2.5 text-base text-text rounded-md text-start [&:hover:not(.active)]:bg-surface [&.active]:bg-panel [&.active]:font-medium ${mainView === "skills" ? "active" : ""}`}
           aria-current={mainView === "skills" ? "page" : undefined}
           onClick={() => onSelectMainView("skills")}
@@ -6739,12 +6714,17 @@ export function ChatPanel({
         </button>
         {SETTINGS_NAV.map((item) => {
           const active = mainView !== "chat" && mainView !== "skills" && item.activeTabs.includes(mainView);
+          const shortcut = item.id === "settings" ? appHotkeys["settings.open"].hotkey : item.id === "compute" ? appHotkeys["compute.open"].hotkey : null;
           return (
             <button
               key={item.id}
+              data-keyboard-item
               className={`rail-nav-item flex items-center gap-2.5 py-2 px-2.5 text-base text-text rounded-md text-start [&:hover:not(.active)]:bg-surface [&.active]:bg-panel [&.active]:font-medium ${active ? "active" : ""}`}
               aria-current={active ? "page" : undefined}
               data-onboarding={item.id === "compute" ? "nav-compute" : undefined}
+              data-tip={shortcut ? formatForDisplay(shortcut) : undefined}
+              aria-label={item.label()}
+              aria-keyshortcuts={item.id === "settings" ? "Meta+, Control+," : item.id === "compute" ? "Meta+Alt+C Control+Alt+C" : undefined}
               onClick={() => onSelectMainView(item.id)}
             >
               {item.icon}
@@ -6773,7 +6753,37 @@ export function ChatPanel({
         </div>
       </div>
       <div className="relative flex-1 min-h-0">
-      <div ref={setRailBody} tabIndex={-1} className={`rail-body h-full overflow-x-hidden ${sidebarScrollable ? "overflow-y-auto" : "overflow-y-hidden"}`}>
+      <div ref={setRailBody} tabIndex={-1} className={`rail-body h-full overflow-x-hidden ${sidebarScrollable ? "overflow-y-auto" : "overflow-y-hidden"}`}
+        onKeyDown={(event) => {
+          if (event.defaultPrevented || event.nativeEvent.isComposing || event.altKey || event.ctrlKey || event.metaKey || event.shiftKey) return;
+          const target = event.target;
+          if (!(target instanceof HTMLElement) || (target !== event.currentTarget && !target.hasAttribute("data-sidebar-keyboard-row"))) return;
+          const rows = sidebarScrollable ? sidebarRows : defaultRows;
+          const indexes = rows.flatMap((row, index) => row.kind === "project" || row.kind === "chat" ? [index] : []);
+          if (indexes.length === 0) return;
+          const rowIndex = Number(target.closest("[data-index]")?.getAttribute("data-index") ?? -1);
+          const position = indexes.indexOf(rowIndex);
+          let next: number;
+          if (event.key === "ArrowDown") next = position < 0 ? 0 : Math.min(position + 1, indexes.length - 1);
+          else if (event.key === "ArrowUp") next = position < 0 ? indexes.length - 1 : Math.max(position - 1, 0);
+          else if (event.key === "Home") next = 0;
+          else if (event.key === "End") next = indexes.length - 1;
+          else if (target instanceof HTMLButtonElement && event.key === "ArrowRight" && target.getAttribute("aria-expanded") === "false") {
+            event.preventDefault();
+            target.click();
+            return;
+          } else if (target instanceof HTMLButtonElement && event.key === "ArrowLeft" && target.getAttribute("aria-expanded") === "true") {
+            event.preventDefault();
+            target.click();
+            return;
+          } else return;
+          event.preventDefault();
+          const index = indexes[next];
+          if (index === rowIndex) return;
+          pendingSidebarFocus.current = index;
+          setFocusedSidebarRow(sidebarRowKey(rows[index]));
+          if (sidebarScrollable) sidebarVirtualizer.scrollToIndex(index, { align: "auto" });
+        }}>
         <div className="relative" style={{ height: (sidebarScrollable ? sidebarVirtualizer.getTotalSize() : defaultRowsHeight) + (showProjectMore ? 38 : 0) + (sidebarExpandedAll ? 46 : 0) }}>
           {(sidebarScrollable
             ? sidebarVirtualItems.map((item) => ({ row: sidebarRows[item.index], top: item.start, index: item.index }))
@@ -6919,7 +6929,7 @@ export function ChatPanel({
     </Dialog.Root>
   ) : railOpen ? rail : null;
   const railReopen = (!railOpen || mobileRail) && !embedded && (
-    <Tooltip interactive content={m.chat_panel_show_sidebar()} className="rounded-md mac-titlebar:invisible">
+    <Tooltip interactive content={`${m.chat_panel_show_sidebar()} (${formatForDisplay(appHotkeys["sidebar.toggle"].hotkey ?? [])})`} className="rounded-md mac-titlebar:invisible">
       <IconButton
         aria-label={m.chat_panel_show_sidebar()}
         aria-expanded={railOpen}
@@ -7513,6 +7523,7 @@ export function ChatPanel({
                       return;
                     }
                     if (e.key === "Escape") {
+                      e.stopPropagation();
                       e.preventDefault();
                       setSkillMenuDismissed(true);
                       return;
@@ -7530,21 +7541,20 @@ export function ChatPanel({
                     // A bare trailing `@` still sends on Enter; `@` is common in prose.
                     if (
                       e.key === "Tab"
-                      || (e.key === "Enter" && mentionQuery !== "" && !e.shiftKey && !e.metaKey && !e.ctrlKey)
+                      || (mentionQuery !== "" && matchesKeyboardEvent(e.nativeEvent, "Enter"))
                     ) {
                       e.preventDefault();
                       pickFileMention(mentionMatches[activeMentionIdx]);
                       return;
                     }
                     if (e.key === "Escape") {
+                      e.stopPropagation();
                       e.preventDefault();
                       setSkillMenuDismissed(true);
                       return;
                     }
                   }
                   // Backspace just behind a chip deletes the whole command.
-                  // (Escape deliberately doesn't touch it — that's the
-                  // stop-the-turn gesture, see the document listener above.)
                   if (e.key === "Backspace" && deleteCommandBehindCaret(e.currentTarget)) {
                     e.preventDefault();
                     return;
@@ -7555,7 +7565,7 @@ export function ChatPanel({
                       void runShell();
                       return;
                     }
-                    void send({ queue: e.metaKey || e.ctrlKey });
+                    void send({ queue: matchesKeyboardEvent(e.nativeEvent, "Mod+Enter") });
                   }
                 }}
               />
@@ -7726,6 +7736,8 @@ export function ChatPanel({
           </div>
         </div>
       </section>
+      <EscapeScope enabled={dataSources.open} onEscape={() => dataSources.setOpen(false)} />
+      <EscapeScope enabled={skillMenuOpen || mentionMenuOpen} onEscape={() => setSkillMenuDismissed(true)} />
     </>
   );
 }

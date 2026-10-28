@@ -8,6 +8,7 @@ const script = readFileSync(new URL('../../src/commands/desktop_zoom.js', import
 function harness({ mac = false, frame = false } = {}) {
   const messages = [];
   const forwarded = [];
+  const commands = [];
   const listeners = new Map();
   let ready;
   const window = {
@@ -15,18 +16,20 @@ function harness({ mac = false, frame = false } = {}) {
       if (type === 'keydown') assert.equal(capture, true);
       listeners.set(type, handler);
     },
+    dispatchEvent: (event) => commands.push([event.type, event.detail]),
     ipc: { postMessage: (message) => messages.push(message) },
   };
   window.top = frame ? { postMessage: (...args) => forwarded.push(args) } : window;
   runInNewContext(script.replace('__ORX_ZOOM_PLATFORM__', mac ? 'macos' : 'windows'), {
     window,
+    CustomEvent: class { constructor(type, { detail }) { Object.assign(this, { type, detail }); } },
     document: { addEventListener(type, handler, options) {
       assert.equal(type, 'DOMContentLoaded');
       assert.equal(options.once, true);
       ready = handler;
     } },
   });
-  return { messages, forwarded, listeners, ready };
+  return { messages, forwarded, listeners, ready, commands };
 }
 
 function press(key, options = {}, environment = {}) {
@@ -40,11 +43,10 @@ function press(key, options = {}, environment = {}) {
   return { messages: context.messages, forwarded: context.forwarded, prevented, stopped };
 }
 
-test('Ctrl zoom shortcuts consume the key and forward exactly one native command', () => {
-  for (const [key, action] of [['=', 'in'], ['+', 'in'], ['-', 'out'], ['0', 'reset']]) {
-    assert.deepEqual(press(key), { messages: [`page-zoom:${action}`], forwarded: [], prevented: true, stopped: true });
+test('main-frame zoom keys are left to TanStack Hotkeys', () => {
+  for (const key of ['=', '+', '-', '0']) {
+    assert.deepEqual(press(key), { messages: [], forwarded: [], prevented: false, stopped: false });
   }
-  assert.deepEqual(press('+', { shiftKey: true }).messages, ['page-zoom:in']);
 });
 
 test('unrelated input and macOS menu accelerators are left alone', () => {
@@ -79,4 +81,17 @@ test('a reloaded document requests the current host zoom instead of replaying a 
   assert.deepEqual(messages, []);
   ready();
   assert.deepEqual(messages, ['page-zoom:sync']);
+});
+
+test('Close Tab reaches the page registry from a sandboxed preview', () => {
+  const main = harness();
+  const close = press('w', {}, { frame: true });
+  assert.deepEqual(close.forwarded, [['orx:command:tab.close', '*']]);
+  assert.equal(close.prevented, true);
+  assert.equal(close.stopped, true);
+  main.listeners.get('message')({ data: close.forwarded[0][0] });
+  assert.deepEqual(main.commands, [['orx:command', 'tab.close']]);
+  assert.deepEqual(main.messages, []);
+  assert.equal(press('w', { shiftKey: true }, { frame: true }).prevented, false);
+  assert.equal(press('w', {}, { frame: true, mac: true }).prevented, false);
 });

@@ -1,3 +1,4 @@
+import { EscapeScope } from "./EscapeScope";
 import { useQuery } from "@tanstack/react-query";
 import { useLayoutEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { Dialog } from "@base-ui/react/dialog";
@@ -87,14 +88,12 @@ export function ResumeDialog({
   const pick = (entry: ResumeEntry) =>
     entry.kind === "native" ? onImport(entry.chat) : onResume(entry.session);
 
-  return (
+  return <EscapeScope onEscape={onClose}>
     <Dialog.Root open onOpenChange={(open) => { if (!open) onClose(); }}>
       <Dialog.Portal>
         <Dialog.Backdrop className="fixed inset-0 z-200 bg-modal-backdrop" />
         <Dialog.Viewport className="fixed inset-0 z-200 flex items-start justify-center p-5 pt-[var(--modal-top)]">
           <Dialog.Popup
-            // Base UI leaves Escape to the IME while composition is active.
-            onKeyDown={(event) => { if (event.key === "Escape") event.stopPropagation(); }}
             initialFocus={searchRef}
             className="flex max-h-[calc(100vh_-_var(--modal-top)_-_1.25rem)] w-140 max-w-full flex-col rounded-xl border border-border bg-background shadow-modal"
             aria-label={m.resume_dialog_title()}
@@ -187,5 +186,5 @@ export function ResumeDialog({
         </Dialog.Viewport>
       </Dialog.Portal>
     </Dialog.Root>
-  );
+  </EscapeScope>;
 }

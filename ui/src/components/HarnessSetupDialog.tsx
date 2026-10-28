@@ -1,3 +1,4 @@
+import { EscapeScope } from "./EscapeScope";
 import { useEffect, useRef, useState } from "react";
 import type { Harness, HarnessSetupCommands } from "../api";
 import { m } from "../paraglide/messages.js";
@@ -77,14 +78,11 @@ export function HarnessSetupDialog({ harness, commands, onReady, onClose }: {
     }
   };
 
-  return (
+  return <EscapeScope onEscape={() => { if (!busy) onClose(); }}>
     <dialog
       ref={dialogRef}
       className="m-auto w-180 max-w-[calc(100vw_-_40px)] max-h-[calc(100vh_-_40px)] overflow-y-auto rounded-xl border border-border bg-background p-5 text-text shadow-modal backdrop:bg-modal-backdrop-light"
       aria-labelledby="harness-setup-title"
-      onKeyDown={(event) => {
-        if (event.key === "Escape" && busy) event.preventDefault();
-      }}
       onCancel={(event) => {
         event.preventDefault();
         if (!busy) onClose();
@@ -155,5 +153,5 @@ export function HarnessSetupDialog({ harness, commands, onReady, onClose }: {
         )}
       </div>
     </dialog>
-  );
+  </EscapeScope>;
 }

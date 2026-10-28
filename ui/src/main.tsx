@@ -1,9 +1,12 @@
+import { AppMenuBridge } from "./components/AppMenuBridge";
 import { ReactQueryDevtools } from "@tanstack/react-query-devtools";
 import { QueryClientProvider } from "@tanstack/react-query";
 import { queryClient } from "./queries/client";
 import { StrictMode } from "react";
 import { createRoot } from "react-dom/client";
 import { RouterProvider } from "@tanstack/react-router";
+import { HotkeysProvider } from "@tanstack/react-hotkeys";
+import { appHotkeys } from "./hotkeys";
 import { router } from "./router";
 import { Toaster } from "./components/ui";
 import { DesktopZoomControls } from "./components/DesktopZoomControls";
@@ -24,11 +27,14 @@ document.documentElement.dir = "ltr";
 createRoot(document.getElementById("root")!).render(
   <StrictMode>
     <QueryClientProvider client={queryClient}>
-      <RouterProvider router={router} />
+      <HotkeysProvider appHotkeys={appHotkeys}>
+        {"__ORX_DESKTOP__" in window && <AppMenuBridge />}
+        <RouterProvider router={router} />
+        {WINDOWS_TITLEBAR && <WindowControls />}
+      </HotkeysProvider>
       {import.meta.env.DEV && <ReactQueryDevtools initialIsOpen buttonPosition="bottom-right" />}
     </QueryClientProvider>
     <Toaster />
     {"__ORX_DESKTOP__" in window && <DesktopZoomControls />}
-    {WINDOWS_TITLEBAR && <WindowControls />}
   </StrictMode>,
 );

@@ -1,3 +1,4 @@
+import { EscapeScope } from "./EscapeScope";
 import { useRef, useState, type ReactNode } from "react";
 import { createPortal } from "react-dom";
 import { useDialogFocus } from "./useDialogFocus";
@@ -213,8 +214,8 @@ function LocalModelDialog({ busy, onClose, footer, children }: {
 }) {
   const dialogRef = useRef<HTMLDivElement>(null);
   const close = () => { if (!busy) onClose(); };
-  useDialogFocus(dialogRef, close, "input");
-  return createPortal(
+  useDialogFocus(dialogRef, "input");
+  return <EscapeScope onEscape={close}>{createPortal(
     <div className="fixed inset-0 z-200 flex items-center justify-center bg-modal-backdrop p-5" onClick={(event) => { if (event.target === event.currentTarget) close(); }}>
       <div ref={dialogRef} role="dialog" aria-modal="true" aria-labelledby="local-model-dialog-title" tabIndex={-1} className="relative flex max-h-full w-140 max-w-full flex-col rounded-xl border border-border bg-background shadow-modal">
         <div className="shrink-0 px-6 pt-5 pb-4 pe-14">
@@ -229,5 +230,5 @@ function LocalModelDialog({ busy, onClose, footer, children }: {
       </div>
     </div>,
     document.body,
-  );
+  )}</EscapeScope>;
 }

@@ -11,6 +11,7 @@ import {
   type Edge,
   type Node,
   type NodeProps,
+  type ReactFlowInstance,
   type Viewport,
 } from "@xyflow/react";
 import { Archive, ChartLine, Ellipsis, FolderTree, Terminal } from "lucide-react";
@@ -249,6 +250,7 @@ const ExpNode = memo(function ExpNode({ data }: NodeProps<ExpFlowNode>) {
       <div
         role="button"
         tabIndex={0}
+        data-keyboard-item
         className="node-overview-link nodrag"
         {...tabOpenGestureHandlers<HTMLDivElement>((intent) =>
           onOpenView(exp.id, "overview", intent),
@@ -367,6 +369,7 @@ const ArchivedNode = memo(function ArchivedNode({ data }: NodeProps<ArchivedFlow
         <Menu.Root open={open} onOpenChange={setOpen} triggerId={triggerId} modal={false}>
           <Menu.Trigger
             id={triggerId}
+            data-keyboard-item
             // XYFlow consumes mousedown before React's bubble handlers receive it.
             onMouseDown={(event) => event.preventBaseUIHandler()}
             onClick={(event) => { event.preventBaseUIHandler(); setOpen((value) => !value); }}
@@ -402,6 +405,7 @@ const ElidedNode = memo(function ElidedNode({ data }: NodeProps<ElidedFlowNode>)
       className="elided-node w-37 h-11 flex items-center gap-2 py-1.5 px-2.5 border border-dashed border-border rounded-md bg-hover-faint text-muted text-sm font-medium text-start transition-[border-color,color] duration-120 ease-standard [&:hover]:border-border-hover-strong [&:hover]:text-text [&_.elided-node-label]:flex [&_.elided-node-label]:flex-col [&_.elided-node-label]:leading-snug [&_.elided-node-sub]:text-muted"
       role="button"
       tabIndex={0}
+      data-keyboard-item
       title={m.tree_view_switch_to_entire_project_to_see_all_experiments()}
       onClick={onShowProjectScope}
       onKeyDown={(e) => {
@@ -475,6 +479,7 @@ export function TreeView({
   viewport: Viewport | null;
   onViewportChange: (viewport: Viewport) => void;
 }) {
+  const flowRef = useRef<ReactFlowInstance<ExpFlowNode | ArchivedFlowNode | ElidedFlowNode> | null>(null);
   const { nodes, edges } = useMemo(() => {
     const runsByExp = new Map<string, Run[]>();
     for (const run of runs) {
@@ -596,6 +601,7 @@ export function TreeView({
 
   return (
     <ReactFlow
+      data-keyboard-list
       className="[&_.react-flow\_\_node.react-flow\_\_node-exp.selectable]:cursor-default [&_.react-flow\_\_node.react-flow\_\_node-archived.selectable]:cursor-pointer [&_.react-flow\_\_node.react-flow\_\_node-elided.selectable]:cursor-pointer [&_.react-flow\_\_handle]:opacity-0 [&_.react-flow\_\_handle]:pointer-events-none [&_.react-flow\_\_attribution]:hidden!"
       // Saved viewports initialize on mount; a new scope needs its own canvas.
       key={agentSessionId ?? "project"}
@@ -606,6 +612,20 @@ export function TreeView({
       nodesDraggable={false}
       nodesConnectable={false}
       nodesFocusable={false}
+      onInit={(flow) => { flowRef.current = flow; }}
+      onFocusCapture={(event) => {
+        const target = event.target;
+        if (!(target instanceof HTMLElement) || !target.hasAttribute("data-keyboard-item") || !target.matches(":focus-visible")) return;
+        const nodeElement = target.closest<HTMLElement>(".react-flow__node");
+        const node = nodeElement?.dataset.id ? flowRef.current?.getNode(nodeElement.dataset.id) : undefined;
+        if (!node || !nodeElement || !flowRef.current) return;
+        const bounds = nodeElement.getBoundingClientRect();
+        const viewport = event.currentTarget.getBoundingClientRect();
+        if (bounds.left >= viewport.left && bounds.right <= viewport.right && bounds.top >= viewport.top && bounds.bottom <= viewport.bottom) return;
+        const width = node.measured?.width ?? node.width ?? 0;
+        const height = node.measured?.height ?? node.height ?? 0;
+        void flowRef.current.setCenter(node.position.x + width / 2, node.position.y + height / 2, { zoom: flowRef.current.getZoom() });
+      }}
       onMoveStart={dismissTreeHoverCards}
       onMoveEnd={(event, nextViewport) => { if (event) onViewportChange(nextViewport); }}
       minZoom={0.15}

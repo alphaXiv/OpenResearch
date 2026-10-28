@@ -1,3 +1,4 @@
+import { EscapeScope } from "./EscapeScope";
 import { Dialog } from "@base-ui/react/dialog";
 import type { RemoteStopPreview } from "../api";
 import { fmtNumber, ltr } from "../i18n";
@@ -48,7 +49,7 @@ export function RemoteStopDialog({
       : m.remote_stop_experiments({ count: fmtNumber(preview.activeRunCount) }));
   }
 
-  return (
+  return <EscapeScope onEscape={() => { if (!stopping) onClose(); }}>
     <Dialog.Root open disablePointerDismissal={stopping} onOpenChange={(open, details) => {
       if (open) return;
       if (stopping) {
@@ -85,5 +86,5 @@ export function RemoteStopDialog({
         </Dialog.Viewport>
       </Dialog.Portal>
     </Dialog.Root>
-  );
+  </EscapeScope>;
 }

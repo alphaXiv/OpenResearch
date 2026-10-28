@@ -30,6 +30,7 @@ function load(name, mocks = {}) {
     useEffect() {},
   };
   new Function("require", "exports", compiled)((id) => {
+    if (id === "./EscapeScope") return { EscapeScope: "escape-scope" };
     if (id in mocks) return mocks[id];
     if (id === "react") return react;
     if (id === "../paraglide/messages.js") return { m: new Proxy({}, { get: (_, key) => () => key }) };
@@ -40,7 +41,8 @@ function load(name, mocks = {}) {
   return {
     render(props) {
       cursor = 0;
-      return exports[name](props);
+      const tree = exports[name](props);
+      return tree.type === "escape-scope" ? tree.props.children : tree;
     },
   };
 }

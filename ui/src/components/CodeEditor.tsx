@@ -7,6 +7,7 @@
 // opportunity the textarea doesn't have, which desyncs the two layers.
 // Token colors apply under a `.file-view` ancestor (see CodeView).
 import { useLayoutEffect, useMemo, useRef } from "react";
+import { useHotkey } from "@tanstack/react-hotkeys";
 import {
   CODE_GUTTER_CLASS_NAME,
   CODE_TEXT_CLASS_NAME,
@@ -95,13 +96,10 @@ export function CodeEditor({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [path, scrollRequest]);
 
+  useHotkey("Mod+S", onSave, { target: taRef, enabled: !readOnly });
+
   const onKeyDown = (e: React.KeyboardEvent<HTMLTextAreaElement>) => {
     if (readOnly) return;
-    if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === "s") {
-      e.preventDefault();
-      onSave();
-      return;
-    }
     if (e.key === "Tab") {
       e.preventDefault();
       const ta = e.currentTarget;

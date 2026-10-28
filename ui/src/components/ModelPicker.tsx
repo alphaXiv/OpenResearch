@@ -1,3 +1,4 @@
+import { EscapeScope } from "./EscapeScope";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { Menu } from "@base-ui/react/menu";
 import { Popover } from "@base-ui/react/popover";
@@ -84,25 +85,9 @@ export function usePopover(triggerRef?: RefObject<HTMLButtonElement | null>) {
     const onDown = (e: MouseEvent) => {
       if (e.target instanceof Node && !ref.current?.contains(e.target) && !triggerRef?.current?.contains(e.target)) setOpen(false);
     };
-    const onKey = (e: KeyboardEvent) => {
-      // Escape closes the picker and must NOT bubble to other document-level
-      // Escape handlers (e.g. ChatPanel's stop-streaming listener) — closing an
-      // open picker shouldn't also interrupt an in-flight turn. Capture phase +
-      // stopPropagation makes this order-independent: relying on registration
-      // order and defaultPrevented among bubble-phase document listeners is
-      // fragile, since whichever registered first runs first.
-      if (e.key === "Escape") {
-        e.preventDefault();
-        e.stopPropagation();
-        setOpen(false);
-        triggerRef?.current?.focus();
-      }
-    };
     document.addEventListener("mousedown", onDown, true);
-    document.addEventListener("keydown", onKey, true);
     return () => {
       document.removeEventListener("mousedown", onDown, true);
-      document.removeEventListener("keydown", onKey, true);
     };
   }, [open, triggerRef]);
   return { open, setOpen, ref };
@@ -126,8 +111,10 @@ function SettingsSubmenu({
   defaultId?: string | null;
   onSelect: (id: string) => void;
 }) {
+  const [open, setOpen] = useState(false);
+
   return (
-    <Menu.SubmenuRoot>
+    <Menu.SubmenuRoot open={open} onOpenChange={setOpen}>
       <Menu.SubmenuTrigger delay={0} label={label} className={SETTINGS_ROW}>
         <span>{label}</span>
         <span className="ms-auto max-w-36 truncate text-muted">{detail}</span>
@@ -179,6 +166,7 @@ function SettingsSubmenu({
           </Menu.Popup>
         </Menu.Positioner>
       </Menu.Portal>
+      <EscapeScope enabled={open} onEscape={() => setOpen(false)} />
     </Menu.SubmenuRoot>
   );
 }
@@ -232,6 +220,7 @@ export function ModelPicker({
   const queryClient = useQueryClient();
   const [addingLocalModel, setAddingLocalModel] = useState(false);
   const [menu, setMenu] = useState<"model" | "settings" | null>(null);
+  const [legacyMenu, setLegacyMenu] = useState<string | null>(null);
   const [filter, setFilter] = useState("");
   const modelTriggerRef = useRef<HTMLButtonElement>(null);
   const searchRef = useRef<HTMLInputElement>(null);
@@ -352,18 +341,8 @@ export function ModelPicker({
     !!onSelectAutonomy;
 
   useEffect(() => {
-    if (!menu) return;
-    if (menu === "settings" && !hasSettings) {
-      setMenu(null);
-      return;
-    }
-
-    const onKey = (event: KeyboardEvent) => {
-      // ChatPanel's interrupt listener can precede Base UI's document listener.
-      if (event.key === "Escape") event.preventDefault();
-    };
-    window.addEventListener("keydown", onKey, true);
-    return () => window.removeEventListener("keydown", onKey, true);
+    if (menu === "settings" && !hasSettings) setMenu(null);
+    if (menu !== "model") setLegacyMenu(null);
   }, [menu, hasSettings]);
 
   return (
@@ -514,14 +493,14 @@ export function ModelPicker({
                             </Tooltip>
                           ))}
                           {legacy.length > 0 && (
-                            <Menu.Root>
+                            <Menu.Root open={legacyMenu === harness.id} onOpenChange={(open) => setLegacyMenu(open ? harness.id : null)}>
                               <Menu.Trigger openOnHover delay={200} closeDelay={300} className={cn(SETTINGS_ROW, "ps-6")}>
                                 <span>{m.model_picker_legacy()}</span>
                                 <ChevronRight size={14} aria-hidden="true" className="text-muted rtl:rotate-180" />
                               </Menu.Trigger>
                               <Menu.Portal>
                                 <Menu.Positioner side="right" align="start" sideOffset={4} collisionPadding={8} className="z-50">
-                                  <Menu.Popup onKeyDown={(event) => event.stopPropagation()} aria-label={m.model_picker_legacy()} className="max-h-80 overflow-y-auto rounded-lg border border-border bg-background p-1.5 shadow-dropdown outline-none">
+                                  <Menu.Popup onKeyDown={(event) => { if (event.key !== "Escape") event.stopPropagation(); }} aria-label={m.model_picker_legacy()} className="max-h-80 overflow-y-auto rounded-lg border border-border bg-background p-1.5 shadow-dropdown outline-none">
                                     {legacy.map((model) => (
                                       <Menu.Item key={model.id} className={SETTINGS_ROW} onClick={() => pick(harness, model.id)}>
                                         <span>{displayModel(harness, model)}</span>
@@ -745,6 +724,8 @@ export function ModelPicker({
           />
         )}
       </div>
+      <EscapeScope enabled={menu !== null} onEscape={() => setMenu(null)} />
+      <EscapeScope enabled={menu === "model" && legacyMenu !== null} onEscape={() => setLegacyMenu(null)} />
     </DirectionProvider>
   );
 }
@@ -1007,6 +988,7 @@ export function OptionPicker({
           </div>
         </div>
       )}
+      <EscapeScope enabled={open} onEscape={() => { setOpen(false); buttonRef.current?.focus(); }} />
     </div>
   );
 }

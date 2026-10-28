@@ -1,3 +1,4 @@
+import { EscapeScope } from "./EscapeScope";
 import { useEffect, useRef, useState } from "react";
 import { useQuery } from "@tanstack/react-query";
 import { Terminal } from "lucide-react";
@@ -59,7 +60,7 @@ export function AcpAuthDialog({ harness, remote = false, onReady, onClose }: {
     } finally { if (!cancelled.current) setBusy(false); }
   }
 
-  return <dialog ref={dialogRef} aria-labelledby="acp-auth-title"
+  return <EscapeScope onEscape={onClose}><dialog ref={dialogRef} aria-labelledby="acp-auth-title"
     className="m-auto w-140 max-w-[calc(100vw_-_40px)] max-h-[calc(100vh_-_40px)] overflow-y-auto rounded-xl border border-border bg-background p-5 text-text shadow-modal backdrop:bg-modal-backdrop-light"
     onCancel={(event) => { event.preventDefault(); onClose(); }}>
     <div className="flex items-center gap-3 mb-4">
@@ -98,5 +99,5 @@ export function AcpAuthDialog({ harness, remote = false, onReady, onClose }: {
       </div>
     </>}
     {error && <p className="mt-3 mb-0 text-sm text-accent-red" role="alert">{error}</p>}
-  </dialog>;
+  </dialog></EscapeScope>;
 }

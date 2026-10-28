@@ -1,5 +1,7 @@
+import { useDialogFocus } from "./useDialogFocus";
+import { EscapeScope } from "./EscapeScope";
 import { m } from "../paraglide/messages.js";
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 import { X } from "lucide-react";
 import { BrandMark } from "./Wordmark";
@@ -28,54 +30,9 @@ export function DemoWelcomeModal({
     [saving],
   );
 
-  useEffect(() => {
-    const onKeyDown = (event: KeyboardEvent) => {
-      if (event.key !== "Escape") return;
-      event.preventDefault();
-      event.stopPropagation();
-      run(() => onClose("dismiss"));
-    };
-    document.addEventListener("keydown", onKeyDown, true);
-    return () => document.removeEventListener("keydown", onKeyDown, true);
-  }, [onClose, run]);
+  useDialogFocus(dialogRef);
 
-  useEffect(() => {
-    const dialog = dialogRef.current;
-    if (!dialog) return;
-    const previousFocus = document.activeElement instanceof HTMLElement ? document.activeElement : null;
-    const focusable = () =>
-      [...dialog.querySelectorAll<HTMLElement>(
-        'button:not([disabled]), input:not([disabled]), select:not([disabled]), textarea:not([disabled]), a[href], [tabindex]:not([tabindex="-1"])',
-      )];
-    (focusable()[0] ?? dialog).focus();
-
-    const trapFocus = (event: KeyboardEvent) => {
-      if (event.key !== "Tab") return;
-      const controls = focusable();
-      if (controls.length === 0) {
-        event.preventDefault();
-        dialog.focus();
-        return;
-      }
-      const first = controls[0];
-      const last = controls[controls.length - 1];
-      if (event.shiftKey && document.activeElement === first) {
-        event.preventDefault();
-        last.focus();
-      } else if (!event.shiftKey && document.activeElement === last) {
-        event.preventDefault();
-        first.focus();
-      }
-    };
-
-    document.addEventListener("keydown", trapFocus, true);
-    return () => {
-      document.removeEventListener("keydown", trapFocus, true);
-      previousFocus?.focus();
-    };
-  }, []);
-
-  return createPortal(
+  return <EscapeScope onEscape={() => run(() => onClose("dismiss"))}>{createPortal(
     <div className="fixed inset-0 z-200 flex items-center justify-center bg-modal-backdrop p-5">
       <div
         ref={dialogRef}
@@ -144,5 +101,5 @@ export function DemoWelcomeModal({
       </div>
     </div>,
     document.body,
-  );
+  )}</EscapeScope>;
 }

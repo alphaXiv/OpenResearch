@@ -1,3 +1,4 @@
+import { EscapeScope } from "./EscapeScope";
 import { m } from "../paraglide/messages.js";
 import { ltr } from "../i18n";
 import { useLocale } from "../locale";
@@ -88,7 +89,7 @@ function ImageModal({ src, alt, name, onClose }: { src: string; alt: string; nam
   const fit = size.width && bounds.width
     ? Math.min(1, bounds.width * 0.9 / size.width, bounds.height * 0.9 / size.height)
     : 1;
-  return createPortal(
+  return <EscapeScope onEscape={onClose}>{createPortal(
     <dialog ref={ref} tabIndex={-1} aria-label={alt || m.chat_pasted_image()}
       onCancel={(event) => { event.preventDefault(); onClose(); }}
       className="fixed inset-0 m-0 max-w-none max-h-none w-full h-dvh border-0 outline-none bg-transparent p-0 text-text backdrop:bg-image-backdrop"
@@ -128,7 +129,7 @@ function ImageModal({ src, alt, name, onClose }: { src: string; alt: string; nam
         </div>
       </div>
     </dialog>, document.body,
-  );
+  )}</EscapeScope>;
 }
 
 function MarkdownImage({ sources, downloadName, alt = "", ...props }: ImgHTMLAttributes<HTMLImageElement> & { sources: string[]; downloadName?: string }) {

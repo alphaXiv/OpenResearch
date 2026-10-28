@@ -1,3 +1,4 @@
+import { EscapeScope } from "./EscapeScope";
 import { useMutation, useQuery } from "@tanstack/react-query";
 import { Dialog } from "@base-ui/react/dialog";
 import { SlidersHorizontal, X } from "lucide-react";
@@ -58,14 +59,12 @@ export function RemoteHostDialog({
   );
   const sessionByHost = new Map(sessions.map((session) => [session.host, session]));
 
-  return (
+  return <EscapeScope onEscape={onClose}>
     <Dialog.Root open onOpenChange={(open) => { if (!open) onClose(); }}>
       <Dialog.Portal>
         <Dialog.Backdrop className="fixed inset-0 z-200 bg-modal-backdrop" />
         <Dialog.Viewport className="fixed inset-0 z-200 flex items-center justify-center p-5">
           <Dialog.Popup
-            // Base UI leaves Escape to the IME while composition is active.
-            onKeyDown={(event) => { if (event.key === "Escape") event.stopPropagation(); }}
             initialFocus={searchRef}
             className="relative flex h-[min(42rem,calc(100vh-2.5rem))] w-160 max-w-full flex-col overflow-hidden rounded-xl border border-border bg-background shadow-modal"
             aria-labelledby="remote-host-dialog-title"
@@ -124,5 +123,5 @@ export function RemoteHostDialog({
         </Dialog.Viewport>
       </Dialog.Portal>
     </Dialog.Root>
-  );
+  </EscapeScope>;
 }

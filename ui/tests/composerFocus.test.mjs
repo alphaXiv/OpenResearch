@@ -80,6 +80,8 @@ function composer() {
   };
   const bindings = {
     composerFocusNonce: 0, contentLoading: false, contentError: null, historyLoading: false,
+    newChatFocusProject: null, projectId: "p", activeId: null, mainView: "chat",
+    setNewChatFocusProject(value) { bindings.newChatFocusProject = value; },
     focusedComposerNonce, composerRef: { current: input }, document,
     window: {
       requestAnimationFrame(callback) { frames.set(++nextFrame, callback); return nextFrame; },
@@ -161,6 +163,19 @@ test("unsuccessful focus leaves the request pending", () => {
   chat.input.focus = focus;
   chat.render({ historyLoading: true });
   chat.render({ historyLoading: false });
+  chat.flush();
+  assert.equal(chat.document.activeElement, chat.input);
+});
+
+test("new-chat focus waits for the requested project and new-chat route", () => {
+  const chat = composer();
+  chat.render({ newChatFocusProject: "other", activeId: "existing" });
+  chat.flush();
+  assert.deepEqual(chat.calls, []);
+  chat.render({ projectId: "other", activeId: null, mainView: "settings" });
+  chat.flush();
+  assert.deepEqual(chat.calls, []);
+  chat.render({ mainView: "chat" });
   chat.flush();
   assert.equal(chat.document.activeElement, chat.input);
 });

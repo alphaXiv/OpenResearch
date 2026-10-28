@@ -1,3 +1,4 @@
+import { EscapeScope } from "./EscapeScope";
 import { useEffect, useRef, useState } from "react";
 import { useQuery } from "@tanstack/react-query";
 import { saveAcpHarness, testAcpHarness, listAcpPresets, type AcpDefinition } from "../api";
@@ -63,7 +64,7 @@ export function AcpHarnessDialog({ definition, onClose, onSaved }: {
       setError(preset !== "custom" && message.includes("Executable not found") ? `${name}: ${m.onboarding_not_detected()}` : message);
     } finally { setBusy(false); }
   };
-  return (
+  return <EscapeScope onEscape={onClose}>
     <dialog ref={dialogRef} onCancel={(event) => { event.preventDefault(); onClose(); }} aria-labelledby="acp-dialog-title"
       className="m-auto w-120 max-w-[calc(100vw_-_40px)] max-h-[calc(100vh_-_40px)] overflow-y-auto rounded-xl border border-border bg-background p-5 text-text shadow-modal backdrop:bg-modal-backdrop-light">
       <h2 id="acp-dialog-title" className="mb-4 text-lg font-medium">{definition ? m.acp_edit() : m.acp_add()}</h2>
@@ -95,5 +96,5 @@ export function AcpHarnessDialog({ definition, onClose, onSaved }: {
         </div>
       </form>
     </dialog>
-  );
+  </EscapeScope>;
 }

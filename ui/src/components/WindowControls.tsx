@@ -1,3 +1,4 @@
+import { WindowMenu } from "./WindowMenu";
 import { useSyncExternalStore, type MouseEvent } from "react";
 import { m } from "../paraglide/messages.js";
 
@@ -46,6 +47,7 @@ export function WindowControls() {
   );
   return (
     <div className="native-window-controls fixed inset-x-0 top-0 z-300 h-0 pointer-events-none [&_button]:pointer-events-auto [&_.fixed]:pointer-events-auto">
+      <WindowMenu />
       {!maximized && (
         <>
           <div className="fixed inset-x-0 top-0 z-300 h-1 cursor-ns-resize" onMouseDown={resizeFrom("n")} />

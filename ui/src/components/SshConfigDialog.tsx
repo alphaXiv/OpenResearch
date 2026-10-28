@@ -1,3 +1,4 @@
+import { EscapeScope } from "./EscapeScope";
 import { useQuery, useMutation } from "@tanstack/react-query";
 import { setScopedQueryData, isCurrentScope } from "../queries/client";
 import { getSshConfigQuery } from "../queries/settings";
@@ -60,7 +61,7 @@ export function SshConfigDialog({
     }
   }
 
-  return (
+  return <EscapeScope onEscape={close}>
     <Dialog.Root open onOpenChange={(open, details) => {
       if (!open && !close()) {
         details.event.preventDefault();
@@ -71,8 +72,6 @@ export function SshConfigDialog({
         <Dialog.Backdrop className="fixed inset-0 z-200 bg-modal-backdrop" />
         <Dialog.Viewport className="fixed inset-0 z-200 flex items-center justify-center p-5">
           <Dialog.Popup
-            // Base UI leaves Escape to the IME while composition is active.
-            onKeyDown={(event) => { if (event.key === "Escape") event.stopPropagation(); }}
             ref={dialogRef}
             initialFocus={() => dialogRef.current?.querySelector("textarea") ?? true}
             className="relative flex h-[min(48rem,calc(100vh-2.5rem))] w-200 max-w-full flex-col overflow-hidden rounded-xl border border-border bg-background shadow-modal"
@@ -118,5 +117,5 @@ export function SshConfigDialog({
         </Dialog.Viewport>
       </Dialog.Portal>
     </Dialog.Root>
-  );
+  </EscapeScope>;
 }

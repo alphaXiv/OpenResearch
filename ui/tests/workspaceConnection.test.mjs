@@ -15,7 +15,7 @@ function load(file, mocks, globals = {}) {
   }).outputText;
   const exports = {};
   new Function("require", "exports", ...Object.keys(globals), code)(
-    (name) => mocks[name] ?? require(name), exports, ...Object.values(globals),
+    (name) => name === "./EscapeScope" ? { EscapeScope: "escape-scope" } : mocks[name] ?? require(name), exports, ...Object.values(globals),
   );
   return exports;
 }

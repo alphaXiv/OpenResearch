@@ -605,8 +605,8 @@ mod imp {
 
     #[cfg(target_os = "macos")]
     use muda::{
-        accelerator::{Accelerator, Code, Modifiers},
-        AboutMetadata, Menu, MenuEvent, MenuId, MenuItem, PredefinedMenuItem, Submenu,
+        accelerator::Accelerator, AboutMetadata, CheckMenuItem, Menu, MenuEvent, MenuId, MenuItem,
+        MenuItemKind, PredefinedMenuItem, Submenu,
     };
     #[cfg(target_os = "macos")]
     use objc2::runtime::{AnyClass, AnyObject, Bool, Sel};
@@ -642,6 +642,10 @@ mod imp {
         Zoom(ZoomAction),
         #[cfg(target_os = "macos")]
         Menu(MenuId),
+        #[cfg(target_os = "macos")]
+        MenuSpec(Vec<PageMenu>),
+        #[cfg(target_os = "macos")]
+        MenuState(HashMap<String, PageMenuState>),
         #[cfg(not(target_os = "macos"))]
         Focus,
         /// The dashboard page finished loading and can take `orx:open-path`.
@@ -750,8 +754,10 @@ mod imp {
         set_taskbar_identity();
 
         #[cfg(target_os = "macos")]
-        let (menu, quit_item, reload_item) = {
-            let menu_proxy = event_loop.create_proxy();
+        let mut menu = Menu::new();
+        #[cfg(target_os = "macos")]
+        {
+            let proxy = event_loop.create_proxy();
             MenuEvent::set_event_handler(Some(move |event: MenuEvent| {
                 let action = match event.id.as_ref() {
                     "zoom-in" => Some(ZoomAction::In),
@@ -763,39 +769,9 @@ mod imp {
                     Some(action) => UserEvent::Zoom(action),
                     None => UserEvent::Menu(event.id),
                 };
-                let _ = menu_proxy.send_event(event);
+                let _ = proxy.send_event(event);
             }));
-            let quit = MenuItem::new(
-                "Quit OpenResearch",
-                true,
-                Some(Accelerator::new(Modifiers::META, Code::KeyQ)),
-            );
-            let reload = MenuItem::new(
-                "Reload",
-                true,
-                Some(Accelerator::new(Modifiers::META, Code::KeyR)),
-            );
-            let zoom_items = [
-                ("zoom-in", "Zoom In", Code::Equal),
-                ("zoom-out", "Zoom Out", Code::Minus),
-                ("zoom-reset", "Actual Size", Code::Digit0),
-            ]
-            .map(|(id, title, key)| {
-                MenuItem::with_id(
-                    id,
-                    title,
-                    true,
-                    Some(Accelerator::new(Modifiers::META, key)),
-                )
-            });
-            match build_menu(&quit, &reload, &zoom_items) {
-                Ok(menu) => (menu, quit, reload),
-                Err(err) => {
-                    crate::show_error_dialog(&format!("Could not build the menu bar: {err}"));
-                    return;
-                }
-            }
-        };
+        }
 
         let window = WindowBuilder::new()
             .with_title("OpenResearch")
@@ -908,6 +884,11 @@ mod imp {
                     }
                 }
             });
+        #[cfg(windows)]
+        let builder = {
+            use wry::WebViewBuilderExtWindows;
+            builder.with_browser_accelerator_keys(false)
+        };
         let builder = builder.with_ipc_handler({
             #[cfg(not(target_os = "linux"))]
             let window = window.clone();
@@ -952,7 +933,25 @@ mod imp {
                     _ => {}
                     #[cfg(target_os = "macos")]
                     _ => {
-                        if let Some((appearance, color)) = parse_titlebar_message(message) {
+                        if let Some(spec) = message.strip_prefix("menu:spec:") {
+                            match serde_json::from_str(spec) {
+                                Ok(spec) => {
+                                    let _ = proxy.send_event(UserEvent::MenuSpec(spec));
+                                }
+                                Err(error) => {
+                                    eprintln!("openresearch app: invalid menu spec: {error}")
+                                }
+                            }
+                        } else if let Some(state) = message.strip_prefix("menu:state:") {
+                            match serde_json::from_str(state) {
+                                Ok(state) => {
+                                    let _ = proxy.send_event(UserEvent::MenuState(state));
+                                }
+                                Err(error) => {
+                                    eprintln!("openresearch app: invalid menu state: {error}")
+                                }
+                            }
+                        } else if let Some((appearance, color)) = parse_titlebar_message(message) {
                             set_titlebar_color(&window, appearance, color);
                         }
                     }
@@ -1063,12 +1062,45 @@ mod imp {
                 ..
             } => align_traffic_lights(&window, zoom_percent),
             #[cfg(target_os = "macos")]
-            Event::UserEvent(UserEvent::Menu(id)) if id == quit_item.id() => {
+            Event::UserEvent(UserEvent::Menu(id)) if id.as_ref() == "app.quit" => {
                 begin_quit(&mut quit, &window, &webview, control_flow);
             }
             #[cfg(target_os = "macos")]
-            Event::UserEvent(UserEvent::Menu(id)) if id == reload_item.id() => {
-                let _ = webview.reload();
+            Event::UserEvent(UserEvent::Menu(id)) if id.as_ref() == "window.close" => {
+                NSApplication::sharedApplication(MainThreadMarker::new().unwrap()).hide(None);
+            }
+            #[cfg(target_os = "macos")]
+            Event::UserEvent(UserEvent::MenuSpec(spec)) => match build_menu(&spec) {
+                Ok(next) => {
+                    next.init_for_nsapp();
+                    menu = next;
+                }
+                Err(error) => eprintln!("openresearch app: could not build menu: {error}"),
+            },
+            #[cfg(target_os = "macos")]
+            Event::UserEvent(UserEvent::MenuState(states)) => {
+                for submenu in menu.items().iter().filter_map(MenuItemKind::as_submenu) {
+                    for item in submenu.items() {
+                        let Some(state) = states.get(item.id().as_ref()) else { continue; };
+                        match item {
+                            MenuItemKind::MenuItem(item) => {
+                                if let Some(enabled) = state.enabled { item.set_enabled(enabled); }
+                            }
+                            MenuItemKind::Check(item) => {
+                                if let Some(enabled) = state.enabled { item.set_enabled(enabled); }
+                                if let Some(checked) = state.checked { item.set_checked(checked); }
+                            }
+                            _ => {}
+                        }
+                    }
+                }
+            }
+            #[cfg(target_os = "macos")]
+            Event::UserEvent(UserEvent::Menu(id)) => {
+                let _ = webview.evaluate_script(&format!(
+                    "window.dispatchEvent(new CustomEvent('orx:command', {{ detail: {} }}));",
+                    serde_json::Value::from(id.as_ref())
+                ));
             }
             Event::UserEvent(UserEvent::Zoom(action)) if matches!(quit, Quit::No) => {
                 let next = action.next(zoom_percent);
@@ -1298,69 +1330,102 @@ mod imp {
     }
 
     #[cfg(target_os = "macos")]
-    fn build_menu(
-        quit: &MenuItem,
-        reload: &MenuItem,
-        zoom_items: &[MenuItem; 3],
-    ) -> muda::Result<Menu> {
-        let about = AboutMetadata {
-            name: Some("OpenResearch".into()),
-            version: Some(env!("CARGO_PKG_VERSION").into()),
-            ..Default::default()
-        };
-        Menu::with_items(&[
-            &Submenu::with_items(
-                "OpenResearch",
-                true,
-                &[
-                    &PredefinedMenuItem::about(None, Some(about)),
-                    &PredefinedMenuItem::separator(),
-                    &PredefinedMenuItem::services(None),
-                    &PredefinedMenuItem::separator(),
-                    &PredefinedMenuItem::hide(None),
-                    &PredefinedMenuItem::hide_others(None),
-                    &PredefinedMenuItem::show_all(None),
-                    &PredefinedMenuItem::separator(),
-                    quit,
-                ],
-            )?,
-            &Submenu::with_items(
-                "Edit",
-                true,
-                &[
-                    &PredefinedMenuItem::undo(None),
-                    &PredefinedMenuItem::redo(None),
-                    &PredefinedMenuItem::separator(),
-                    &PredefinedMenuItem::cut(None),
-                    &PredefinedMenuItem::copy(None),
-                    &PredefinedMenuItem::paste(None),
-                    &PredefinedMenuItem::select_all(None),
-                ],
-            )?,
-            &Submenu::with_items(
-                "View",
-                true,
-                &[
-                    reload,
-                    &PredefinedMenuItem::separator(),
-                    &zoom_items[0],
-                    &zoom_items[1],
-                    &zoom_items[2],
-                    &PredefinedMenuItem::separator(),
-                    &PredefinedMenuItem::fullscreen(None),
-                ],
-            )?,
-            &Submenu::with_items(
-                "Window",
-                true,
-                &[
-                    &PredefinedMenuItem::minimize(None),
-                    &PredefinedMenuItem::maximize(None),
-                    &PredefinedMenuItem::separator(),
-                    &PredefinedMenuItem::close_window(None),
-                ],
-            )?,
-        ])
+    #[derive(serde::Deserialize)]
+    struct PageMenu {
+        id: String,
+        label: String,
+        items: Vec<PageMenuEntry>,
+    }
+
+    #[cfg(target_os = "macos")]
+    #[derive(serde::Deserialize)]
+    #[serde(tag = "kind", rename_all = "lowercase")]
+    enum PageMenuEntry {
+        Command {
+            id: String,
+            label: String,
+            hotkey: Option<serde_json::Value>,
+            checked: Option<bool>,
+        },
+        Native {
+            name: String,
+        },
+        Separator,
+    }
+
+    #[cfg(target_os = "macos")]
+    #[derive(serde::Deserialize)]
+    struct PageMenuState {
+        enabled: Option<bool>,
+        checked: Option<bool>,
+    }
+
+    #[cfg(target_os = "macos")]
+    fn build_menu(spec: &[PageMenu]) -> anyhow::Result<Menu> {
+        let menu = Menu::new();
+        for section in spec {
+            let submenu = Submenu::with_id(&section.id, &section.label, true);
+            for entry in &section.items {
+                match entry {
+                    PageMenuEntry::Command {
+                        id,
+                        label,
+                        hotkey,
+                        checked,
+                    } => {
+                        let accelerator = hotkey
+                            .as_ref()
+                            .and_then(serde_json::Value::as_str)
+                            .map(|hotkey| hotkey.replace("Mod", "CmdOrCtrl").parse::<Accelerator>())
+                            .transpose()?;
+                        if let Some(checked) = checked {
+                            submenu.append(&CheckMenuItem::with_id(
+                                id,
+                                label,
+                                true,
+                                *checked,
+                                accelerator,
+                            ))?;
+                        } else {
+                            submenu.append(&MenuItem::with_id(id, label, true, accelerator))?;
+                        }
+                    }
+                    PageMenuEntry::Separator => submenu.append(&PredefinedMenuItem::separator())?,
+                    PageMenuEntry::Native { name } => {
+                        let item = match name.as_str() {
+                            "about" => PredefinedMenuItem::about(
+                                None,
+                                Some(AboutMetadata {
+                                    name: Some("OpenResearch".into()),
+                                    version: Some(env!("CARGO_PKG_VERSION").into()),
+                                    ..Default::default()
+                                }),
+                            ),
+                            "services" => PredefinedMenuItem::services(None),
+                            "hide" => PredefinedMenuItem::hide(None),
+                            "hide_others" => PredefinedMenuItem::hide_others(None),
+                            "show_all" => PredefinedMenuItem::show_all(None),
+                            "undo" => PredefinedMenuItem::undo(None),
+                            "redo" => PredefinedMenuItem::redo(None),
+                            "cut" => PredefinedMenuItem::cut(None),
+                            "copy" => PredefinedMenuItem::copy(None),
+                            "paste" => PredefinedMenuItem::paste(None),
+                            "select_all" => PredefinedMenuItem::select_all(None),
+                            "fullscreen" => PredefinedMenuItem::fullscreen(None),
+                            "minimize" => PredefinedMenuItem::minimize(None),
+                            "maximize" => PredefinedMenuItem::maximize(None),
+                            _ => anyhow::bail!("unknown native menu item: {name}"),
+                        };
+                        submenu.append(&item)?;
+                    }
+                }
+            }
+            if section.id == "window" {
+                submenu.set_as_windows_menu_for_nsapp();
+            }
+            menu.append(&submenu)?;
+        }
+        Ok(menu)
     }
 
     /// Without a handler WKWebView drops downloads and WebView2 saves them

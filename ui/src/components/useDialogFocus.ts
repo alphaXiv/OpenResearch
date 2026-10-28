@@ -1,57 +1,50 @@
-import { useEffect, useRef, type RefObject } from "react";
+import { useEffect, type RefObject } from "react";
 
-// `tabindex="-1"` opts an element out of Tab, so the trap must skip it too —
-// otherwise its last "focusable" is one Tab never reaches and focus escapes.
+// Negative tabindex controls cannot be endpoints of the Tab cycle.
 const FOCUSABLE = [
   "button:not([disabled])",
   "input:not([disabled])",
   "textarea:not([disabled])",
+  "select:not([disabled])",
+  "a[href]",
   "[tabindex]",
 ].map((selector) => `${selector}:not([tabindex="-1"])`).join(", ");
 
 export function useDialogFocus(
   dialogRef: RefObject<HTMLElement | null>,
-  onClose: () => void,
   initialSelector = "[data-initial-focus]",
 ) {
-  const onCloseRef = useRef(onClose);
-  onCloseRef.current = onClose;
-
   useEffect(() => {
     const dialog = dialogRef.current;
     if (!dialog) return;
     const previousFocus =
       document.activeElement instanceof HTMLElement ? document.activeElement : null;
-    const focusable = () => [...dialog.querySelectorAll<HTMLElement>(FOCUSABLE)];
-    (dialog.querySelector<HTMLElement>(initialSelector) ?? focusable()[0] ?? dialog).focus();
+    const focusable = () => [...dialog.querySelectorAll<HTMLElement>(FOCUSABLE)]
+      .filter((control) => control.tabIndex >= 0 && !control.matches(":disabled") && !control.closest("[inert]")
+        && control.getClientRects().length > 0 && getComputedStyle(control).visibility !== "hidden");
+    const controls = focusable();
+    (controls.find((control) => control.matches(initialSelector)) ?? controls[0] ?? dialog).focus();
 
     const onKeyDown = (event: KeyboardEvent) => {
-      if (event.key === "Escape") {
-        if (dialog.querySelector(":popover-open")) return;
-        event.preventDefault();
-        event.stopPropagation();
-        onCloseRef.current();
-        return;
-      }
-      if (event.key !== "Tab") return;
+      if (event.defaultPrevented || event.key !== "Tab") return;
       const controls = focusable();
       const first = controls[0];
       const last = controls.at(-1);
       if (!first || !last) {
         event.preventDefault();
         dialog.focus();
-      } else if (event.shiftKey && document.activeElement === first) {
+      } else if (event.shiftKey && (document.activeElement === first || !dialog.contains(document.activeElement))) {
         event.preventDefault();
         last.focus();
-      } else if (!event.shiftKey && document.activeElement === last) {
+      } else if (!event.shiftKey && (document.activeElement === last || !dialog.contains(document.activeElement))) {
         event.preventDefault();
         first.focus();
       }
     };
 
-    document.addEventListener("keydown", onKeyDown, true);
+    dialog.addEventListener("keydown", onKeyDown);
     return () => {
-      document.removeEventListener("keydown", onKeyDown, true);
+      dialog.removeEventListener("keydown", onKeyDown);
       previousFocus?.focus();
     };
   }, [dialogRef, initialSelector]);

@@ -11,12 +11,13 @@ import {
   PDFViewer,
 } from "pdfjs-dist/legacy/web/pdf_viewer.mjs";
 import { ChevronDown, ChevronUp, Minus, MoveHorizontal, Plus, Search } from "lucide-react";
-import { useContext, useEffect, useRef, useState, type KeyboardEvent } from "react";
+import { useContext, useEffect, useRef, useState } from "react";
+import { formatForDisplay, useHotkey } from "@tanstack/react-hotkeys";
 import { createPortal } from "react-dom";
 import { fmtNumber } from "../i18n";
 import { m } from "../paraglide/messages.js";
 import { MediaDownloadButton, MediaToolbarSlot } from "./mediaToolbar";
-import { IconButton, Input } from "./ui";
+import { IconButton, Input, Tooltip } from "./ui";
 
 // WebKit's streams aren't async-iterable, and PDF.js iterates one to extract page
 // text; without this, find silently matches nothing in WKWebView and WebKitGTK.
@@ -62,6 +63,7 @@ export default function PdfPreview({
   onError: () => void;
 }) {
   const paneRef = useRef<HTMLDivElement>(null);
+  const rootRef = useRef<HTMLDivElement>(null);
   const containerRef = useRef<HTMLDivElement>(null);
   const findInputRef = useRef<HTMLInputElement>(null);
   const viewerRef = useRef<PDFViewer | null>(null);
@@ -166,15 +168,16 @@ export default function PdfPreview({
     });
   }
 
-  function onKeyDown(event: KeyboardEvent<HTMLDivElement>) {
-    // The page text is split across positioned spans, which the webview's own
-    // find doesn't search as one document.
-    if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === "f") {
-      event.preventDefault();
+  // The page text is split across positioned spans, which the webview's own
+  // find doesn't search as one document.
+  useHotkey(
+    "Mod+F",
+    () => {
       findInputRef.current?.focus();
       findInputRef.current?.select();
-    }
-  }
+    },
+    { target: rootRef },
+  );
 
   const controls = (
     <>
@@ -213,27 +216,28 @@ export default function PdfPreview({
       </IconButton>
       <div className="flex h-7 w-36 min-w-20 shrink items-center overflow-hidden gap-0.5 rounded-md border border-border bg-background ps-2 pe-0.5 focus-within:border-focus-border focus-within:ring-3 focus-within:ring-focus-ring">
         <Search size={14} className="shrink-0 text-muted" />
-        <Input
-          ref={findInputRef}
-          variant="inline"
-          className="h-full min-w-0 flex-1 border-b-0 ps-1 text-xs [&::-webkit-search-cancel-button]:hidden"
-          type="search"
-          aria-label={m.pdf_preview_find()}
-          data-tip={m.pdf_preview_find()}
-          data-tip-align="end"
-          value={query}
-          onChange={(event) => {
-            setQuery(event.target.value);
-            // The new count arrives only once the whole document is scanned.
-            setMatches(null);
-            find(event.target.value, false);
-          }}
-          onKeyDown={(event) => {
-            if (event.key === "Enter" && !event.nativeEvent.isComposing) {
-              find(query, true, event.shiftKey);
-            }
-          }}
-        />
+        <Tooltip interactive content={`${m.pdf_preview_find()} (${formatForDisplay("Mod+F")})`} className="h-full min-w-0 flex-1 rounded-none">
+          <Input
+            ref={findInputRef}
+            variant="inline"
+            className="h-full w-full min-w-0 border-b-0 ps-1 text-xs [&::-webkit-search-cancel-button]:hidden"
+            type="search"
+            aria-label={m.pdf_preview_find()}
+            aria-keyshortcuts="Meta+F Control+F"
+            value={query}
+            onChange={(event) => {
+              setQuery(event.target.value);
+              // The new count arrives only once the whole document is scanned.
+              setMatches(null);
+              find(event.target.value, false);
+            }}
+            onKeyDown={(event) => {
+              if (event.key === "Enter" && !event.nativeEvent.isComposing) {
+                find(query, true, event.shiftKey);
+              }
+            }}
+          />
+        </Tooltip>
         <span className="text-xs text-muted tabular-nums whitespace-nowrap" aria-live="polite">
           {query && matches
             ? matches.total
@@ -269,7 +273,7 @@ export default function PdfPreview({
   );
 
   return (
-    <div className="flex min-h-0 flex-1 flex-col" onKeyDown={onKeyDown}>
+    <div ref={rootRef} className="flex min-h-0 flex-1 flex-col">
       {toolbarSlot &&
         createPortal(<div className="flex min-w-0 shrink items-center gap-1">{controls}</div>, toolbarSlot)}
       {/* PDFViewer requires an absolutely positioned scroll container. */}
