@@ -177,18 +177,67 @@ pub fn executable_path(executable: &str) -> Option<std::path::PathBuf> {
         return path.is_file().then(|| path.to_path_buf());
     }
     crate::local::shell_env::find_on_path(executable).or_else(|| {
-        let home = dirs::home_dir()?;
-        [
-            ".local/bin",
-            ".grok/bin",
-            ".devin/bin",
-            ".zcode/runtime/bin",
-        ]
-        .iter()
-        .find_map(|directory| {
-            crate::local::shell_env::find_in_dir(&home.join(directory), executable)
-        })
+        install_bin_dirs()
+            .into_iter()
+            .find_map(|directory| crate::local::shell_env::find_in_dir(&directory, executable))
     })
+}
+
+/// Directories an install drops a CLI into without it ever reaching `PATH`.
+///
+/// `npx -y <pkg>` installs nothing globally: it unpacks into
+/// `~/.npm/_npx/<hash>/node_modules/.bin` and runs from there. A harness the
+/// user can run with `npx` therefore has no executable on `PATH`, and detection
+/// reported "Not installed" for an agent that already works — the fix for that
+/// is to look where the installer actually put it. `npm i -g` outside the
+/// prefix already on `PATH` has the same effect, which is what `.npm-global`
+/// and the Windows `%APPDATA%\npm` cover.
+fn install_bin_dirs() -> Vec<std::path::PathBuf> {
+    let Some(home) = dirs::home_dir() else {
+        return Vec::new();
+    };
+    let mut directories = vec![
+        home.join(".local/bin"),
+        home.join(".grok/bin"),
+        home.join(".devin/bin"),
+        home.join(".zcode/runtime/bin"),
+        home.join(".npm-global/bin"),
+    ];
+    #[cfg(windows)]
+    if let Some(roaming) = dirs::config_dir() {
+        directories.push(roaming.join("npm"));
+    }
+    let mut roots = vec![home.join(".npm/_npx")];
+    if let Some(cache) = dirs::cache_dir() {
+        // npm's Windows cache default; absent on the other platforms.
+        roots.push(cache.join("npm-cache/_npx"));
+    }
+    directories.extend(npx_cache_bins(&roots));
+    directories
+}
+
+/// The `node_modules/.bin` of every `npx` run, newest first: the cache keeps a
+/// directory per invocation, so the most recently used entry is the version the
+/// user would get by typing `npx <pkg>` again.
+fn npx_cache_bins(roots: &[std::path::PathBuf]) -> Vec<std::path::PathBuf> {
+    let mut entries = Vec::new();
+    for root in roots {
+        let Ok(read) = std::fs::read_dir(root) else {
+            continue;
+        };
+        for entry in read.flatten() {
+            let bin = entry.path().join("node_modules").join(".bin");
+            if !bin.is_dir() {
+                continue;
+            }
+            let modified = std::fs::metadata(entry.path())
+                .and_then(|metadata| metadata.modified())
+                .unwrap_or(std::time::UNIX_EPOCH);
+            entries.push((modified, bin));
+        }
+    }
+    entries.sort_by_key(|(modified, _)| std::cmp::Reverse(*modified));
+    entries.into_iter().map(|(_, bin)| bin).collect()
 }
 
 pub fn save(definition: Definition, create: bool) -> Result<()> {
@@ -326,6 +375,28 @@ pub async fn discover_models(definition: &Definition) -> Result<serde_json::Valu
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn an_npx_only_install_is_found_newest_first() {
+        let root = crate::local::git::TemporaryDirectory::new("orx-acp-npx").unwrap();
+        let cache = root.path().join("_npx");
+        let older = cache.join("older").join("node_modules").join(".bin");
+        std::fs::create_dir_all(&older).unwrap();
+        // `npx` keeps one directory per invocation; the most recent one is what
+        // `npx <pkg>` would run today, so it must win even when an older version
+        // is still cached beside it.
+        std::thread::sleep(std::time::Duration::from_millis(30));
+        let newer = cache.join("newer").join("node_modules").join(".bin");
+        std::fs::create_dir_all(&newer).unwrap();
+        // A half-written cache entry with no binaries is not a candidate.
+        std::fs::create_dir_all(cache.join("empty")).unwrap();
+
+        let bins = npx_cache_bins(std::slice::from_ref(&cache));
+
+        assert_eq!(bins.first(), Some(&newer));
+        assert!(bins.contains(&older));
+        assert!(!bins.iter().any(|bin| bin.starts_with(cache.join("empty"))));
+    }
 
     #[tokio::test]
     async fn model_discovery_creates_session_without_prompting_or_delegated_tools() {
