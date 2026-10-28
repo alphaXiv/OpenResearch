@@ -1,17 +1,58 @@
 import { m } from "../paraglide/messages.js";
-import { useEffect, useRef } from "react";
-import { type Project } from "../api";
+import { useEffect, useRef, useState } from "react";
+import { FolderOpen, Plus } from "lucide-react";
+import { type AgentSelection, type Project } from "../api";
 
 import { NewProjectForm } from "./NewProjectForm";
+import { Button } from "./ui";
+
+/** The projects home once every project is gone; onboarding must not replay here. */
+export function ProjectsEmptyState({
+  remote = false,
+  preferredAgent,
+  onCreated,
+}: {
+  remote?: boolean;
+  preferredAgent: AgentSelection | null;
+  onCreated: (project: Project, githubPublicationError: string | null) => void;
+}) {
+  const [dialogOpen, setDialogOpen] = useState(false);
+  return (
+    <div className="home flex flex-1 min-h-0 flex-col items-center justify-center gap-3 bg-background p-6 text-center">
+      <FolderOpen size={36} strokeWidth={1.5} className="shrink-0 text-muted" />
+      <p className="m-0 w-full max-w-105 text-lg leading-normal text-subtext">
+        {m.projects_home_no_projects_yet_create_one_to_get_started()}
+      </p>
+      <Button variant="primary" className="mt-1" onClick={() => setDialogOpen(true)}>
+        <Plus size={14} /> {m.projects_home_new_project()}
+      </Button>
+      {dialogOpen && (
+        <NewProjectDialog
+          remote={remote}
+          preferredAgent={preferredAgent}
+          onClose={() => setDialogOpen(false)}
+          onCreated={(project, publicationError) => {
+            setDialogOpen(false);
+            onCreated(project, publicationError);
+          }}
+        />
+      )}
+    </div>
+  );
+}
 
 export function NewProjectDialog({
   onClose,
   onCreated,
   remote = false,
+  preferredAgent,
+  initialPaperId,
 }: {
   onClose: () => void;
   onCreated: (project: Project, githubPublicationError: string | null) => void;
   remote?: boolean;
+  preferredAgent: AgentSelection | null;
+  initialPaperId?: string;
 }) {
   const dialogRef = useRef<HTMLDivElement>(null);
   const onCloseRef = useRef(onClose);
@@ -35,10 +76,9 @@ export function NewProjectDialog({
         return;
       }
       if (
-        event.key === "Enter" &&
         (event.metaKey || event.ctrlKey) &&
         !event.altKey &&
-        event.shiftKey
+        ((event.key.toLowerCase() === "n" && !event.shiftKey) || (event.key === "Enter" && event.shiftKey))
       ) {
         event.preventDefault();
         event.stopPropagation();
@@ -85,7 +125,13 @@ export function NewProjectDialog({
         tabIndex={-1}
       >
         <h2 id="new-project-dialog-title">{m.projects_home_new_project()}</h2>
-        <NewProjectForm onCancel={onClose} onCreated={onCreated} remote={remote} />
+        <NewProjectForm
+          onCancel={onClose}
+          onCreated={onCreated}
+          remote={remote}
+          preferredAgent={preferredAgent}
+          initialPaperId={initialPaperId}
+        />
       </div>
     </div>
   );

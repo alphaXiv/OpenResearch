@@ -31,38 +31,42 @@ function sendPreparation() {
   const statements = turn.tryBlock.statements;
   const optimisticIndex = statements.findIndex((node) => node.getText(file).includes('type: "optimisticUser"'));
   const prefix = statements.slice(0, optimisticIndex + 1).map((node) => node.getText(file)).join("\n");
-  return prefix;
+  return `const retry = null, mode = null;\nconst composerLiveRef = { current: { draft, attachments: pending, annotations: pendingAnnotations } };\nconst clearComposer = ${declaration(file, "clearComposer")};\n${prefix}`;
+}
+
+function settingsRenderer(name, returns, bindings) {
+  const file = source("SettingsPage.tsx");
+  const component = file.statements.find((node) => ts.isFunctionDeclaration(node) && node.name.text === name);
+  const statements = component.body.statements;
+  const prefix = statements.slice(0, statements.findIndex(ts.isReturnStatement)).map((node) => node.getText(file)).join("\n");
+  const state = [];
+  let cursor, effects, changed;
+  const hook = (init) => { const index = cursor++; if (!(index in state)) state[index] = init(); return index; };
+  const hooks = {
+    useState: (initial) => { const i = hook(() => initial); return [state[i], (next) => { const value = typeof next === "function" ? next(state[i]) : next; changed ||= !Object.is(value, state[i]); state[i] = value; }]; },
+    useRef: (initial) => state[hook(() => ({ current: initial }))],
+    useEffect: (effect, deps) => { const i = hook(() => undefined); if (!state[i] || deps.some((value, index) => !Object.is(value, state[i][index]))) { state[i] = deps; effects.push(effect); } },
+  };
+  return () => {
+    for (let attempt = 0; attempt < 5; attempt++) {
+      cursor = 0; effects = []; changed = false;
+      const result = evaluate(`${prefix}\nreturn ${returns};`, { ...hooks, ...bindings });
+      effects.forEach((effect) => effect());
+      if (!changed) return result;
+    }
+    assert.fail(`${name} effects did not settle`);
+  };
 }
 
 for (const [name, fields] of [["K8s", ["context", "namespace"]], ["Slurm", ["host", "partition", "account", "timeLimit"]], ["Ray", ["address"]]]) {
   test(`${name} settings refresh clean fields while preserving edits`, () => {
-    const file = source("SettingsPage.tsx");
-    const component = file.statements.find((node) => ts.isFunctionDeclaration(node) && node.name.text === `${name}Section`);
-    const statements = component.body.statements;
-    const prefix = statements.slice(0, statements.findIndex(ts.isReturnStatement)).map((node) => node.getText(file)).join("\n");
-    const state = [];
-    let cursor, effects, changed;
     let snapshot = Object.fromEntries(fields.map((field) => [field, "original"]));
-    const hook = (init) => { const index = cursor++; if (!(index in state)) state[index] = init(); return index; };
-    const bindings = {
-      useState: (initial) => { const i = hook(() => initial); return [state[i], (next) => { const value = typeof next === "function" ? next(state[i]) : next; changed ||= !Object.is(value, state[i]); state[i] = value; }]; },
-      useRef: (initial) => state[hook(() => ({ current: initial }))],
-      useEffect: (effect, deps) => { const i = hook(() => undefined); if (!state[i] || deps.some((value, index) => !Object.is(value, state[i][index]))) { state[i] = deps; effects.push(effect); } },
+    const render = settingsRenderer(`${name}Section`, `{ values: {${fields}}, setters: {${fields.map((field) => `${field}: set${field[0].toUpperCase()}${field.slice(1)}`).join(",")}} }`, {
       useMutation: () => ({}), useQuery: () => ({ data: snapshot }),
       useSshMasterStatuses: () => [{}, () => {}],
       [`get${name}SettingsQuery`]: () => ({ queryKey: [] }), [`save${name}Settings`]: () => {},
       remote: false, onEditState: undefined,
-    };
-    const code = `${prefix}\nreturn { values: {${fields}}, setters: {${fields.map((field) => `${field}: set${field[0].toUpperCase()}${field.slice(1)}`).join(",")}} };`;
-    function render() {
-      for (let attempt = 0; attempt < 5; attempt++) {
-        cursor = 0; effects = []; changed = false;
-        const result = evaluate(code, bindings);
-        effects.forEach((effect) => effect());
-        if (!changed) return result;
-      }
-      assert.fail("settings effects did not settle");
-    }
+    });
     assert.deepEqual(render().values, snapshot);
     snapshot = Object.fromEntries(fields.map((field) => [field, "refreshed"]));
     assert.deepEqual(render().values, snapshot);
@@ -72,6 +76,23 @@ for (const [name, fields] of [["K8s", ["context", "namespace"]], ["Slurm", ["hos
     assert.deepEqual(render().values, edited);
   });
 }
+
+test("harness settings keep the settled selection when readiness changes", () => {
+  let snapshot = [];
+  const render = settingsRenderer("HarnessesTab", "{ h }", {
+    useQuery: (options) => ({ data: options.harnesses ? snapshot : [] }),
+    getHarnessesQuery: () => ({ harnesses: true }),
+    getHarnessSetupCommandsQuery: () => ({}),
+    useCommandRun: () => ({}), workspaceKey: () => [], listAcpHarnesses: () => {},
+  });
+  assert.equal(render().h, undefined);
+  snapshot = [{ id: "claude-code", catalogPending: true }, { id: "opencode", catalogPending: true }];
+  assert.equal(render().h.id, "claude-code");
+  snapshot = [{ id: "claude-code", agentReady: false }, { id: "opencode", agentReady: true }];
+  assert.equal(render().h.id, "opencode");
+  snapshot = [{ id: "claude-code", agentReady: true }, { id: "opencode", agentReady: false }];
+  assert.equal(render().h.id, "opencode");
+});
 
 test("queued chat writes stop when their captured workspace retires", async () => {
   const file = source("ChatPanel.tsx");
@@ -121,7 +142,7 @@ for (const [card, family, field, upload] of [
     const { QueryObserver } = await import("@tanstack/react-query");
     const { queryModules } = await import("./queryModules.mjs");
     let fail = false, calls = 0;
-    const { client, load } = queryModules({ [family]: async () => { calls++; if (fail) throw new Error("offline"); return family === "listUserSkills" ? { skills: [{ name: "cached" }], importing: false } : [{ name: "cached" }]; } }, { nativeClient: true });
+    const { client, load } = queryModules({ [family]: async () => { calls++; if (fail) throw new Error("offline"); return family === "listUserSkills" ? { skills: [{ name: "cached" }] } : [{ name: "cached" }]; } }, { nativeClient: true });
     const options = load("settings")[`${family}Query`]();
     await client.fetchQuery(options);
     const observer = new QueryObserver(client, options);
@@ -157,12 +178,12 @@ test("first send waits for cold history so an accepted reply replaces its optimi
   const read = client.fetchQuery(options);
   const prefix = sendPreparation();
   const sending = evaluate(`return (async () => { let sid = "s"; ${prefix} })()`, {
-    sessionsOptions: { queryKey: [] }, isCurrentScope: () => true,
+    sessionsOptions: { queryKey: [] }, isCurrentScope: () => true, deletedSessionIds: new Set(), sideParentSessionId: null,
     preparingSend: { current: false }, inSourceScope: () => false,
     queryClient: client, getChatMessagesQuery: load("chat").getChatMessagesQuery,
     dispatch: (action) => load("chatStore").dispatchChat("p", action),
     text: "new turn", draft: "new turn", pending: [], pendingAnnotations: [],
-    setDraft: () => {}, setAttachments: () => {}, setAnnotations: () => {}, setAttachError: () => {},
+    setDraft: () => {}, setAttachments: () => {}, setAnnotations: () => {}, setAttachError: () => {}, setImageRefusedFor: () => {},
   });
   assert.equal(client.getQueryData(options.queryKey), undefined);
   snapshot = { messages: [{ id: "history", role: "user", parts: [], createdAt: 1 }], queued: [], activeLeafId: "history" };
@@ -189,11 +210,11 @@ test("history preparation clears the composer up front but never sends early", a
   const preparingSend = { current: false };
   const cleared = new Set();
   const sending = evaluate(`return (async () => { let sid = "s"; ${sendPreparation()} })()`, {
-    sessionsOptions: { queryKey: [] }, isCurrentScope: () => true, preparingSend,
+    sessionsOptions: { queryKey: [] }, isCurrentScope: () => true, deletedSessionIds: new Set(), sideParentSessionId: null, preparingSend,
     queryClient: client, getChatMessagesQuery: load("chat").getChatMessagesQuery,
     inSourceScope: () => true, draft: "unsent", pending: [], pendingAnnotations: [],
     setDraft: () => cleared.add("draft"), setAttachments: () => cleared.add("attachments"),
-    setAnnotations: () => cleared.add("annotations"), setAttachError: () => cleared.add("attachError"),
+    setAnnotations: () => cleared.add("annotations"), setAttachError: () => cleared.add("attachError"), setImageRefusedFor: () => cleared.add("imageRefused"),
     dispatch: () => assert.fail("must not send before history"),
   });
   const rejected = assert.rejects(sending);
@@ -201,7 +222,7 @@ test("history preparation clears the composer up front but never sends early", a
   await rejected;
   // The composer clears before the first await so a scope change mid-send can
   // never stash sent text; the caller's catch restores it via restoreComposer().
-  assert.deepEqual([...cleared].sort(), ["annotations", "attachError", "attachments", "draft"]);
+  assert.deepEqual([...cleared].sort(), ["annotations", "attachError", "attachments", "draft", "imageRefused"]);
   assert.equal(preparingSend.current, false);
 });
 
@@ -223,11 +244,11 @@ test("send joins a cold repair despite its intermediate cached history", async (
   assert.equal(client.getQueryState(options.queryKey).fetchStatus, "fetching");
   let dispatched = false;
   const sending = evaluate(`return (async () => { let sid = "s"; ${sendPreparation()} })()`, {
-    sessionsOptions: { queryKey: [] }, isCurrentScope: () => true,
+    sessionsOptions: { queryKey: [] }, isCurrentScope: () => true, deletedSessionIds: new Set(), sideParentSessionId: null,
     preparingSend: { current: false }, inSourceScope: () => false,
     queryClient: client, getChatMessagesQuery: load("chat").getChatMessagesQuery,
     dispatch: () => { dispatched = true; }, text: "new", draft: "new", pending: [], pendingAnnotations: [],
-    setDraft: () => {}, setAttachments: () => {}, setAnnotations: () => {}, setAttachError: () => {},
+    setDraft: () => {}, setAttachments: () => {}, setAnnotations: () => {}, setAttachError: () => {}, setImageRefusedFor: () => {},
   });
   for (let i = 0; i < 20; i++) await Promise.resolve();
   assert.equal(dispatched, false);
@@ -241,13 +262,13 @@ test("send joins a cold repair despite its intermediate cached history", async (
 test("the pre-await draft clear keeps an edit queued since render", async () => {
   let updater;
   const sending = evaluate(`return (async () => { let sid = "s"; ${sendPreparation()} })()`, {
-    sessionsOptions: { queryKey: [] }, isCurrentScope: () => true,
+    sessionsOptions: { queryKey: [] }, isCurrentScope: () => true, deletedSessionIds: new Set(), sideParentSessionId: null,
     preparingSend: { current: false }, inSourceScope: () => true,
     queryClient: { fetchQuery: async () => ({}), getQueryState: () => undefined },
     getChatMessagesQuery: () => ({ queryKey: [] }),
     draft: "rendered", text: "rendered", pending: [], pendingAnnotations: [],
     setDraft: (update) => { updater = update; },
-    setAttachments: () => {}, setAnnotations: () => {}, setAttachError: () => {}, dispatch: () => {},
+    setAttachments: () => {}, setAnnotations: () => {}, setAttachError: () => {}, setImageRefusedFor: () => {}, dispatch: () => {},
   });
   await sending;
   assert.equal(updater("rendered"), "");

@@ -502,6 +502,18 @@ fn has_api_credential() -> bool {
         .any(|key| super::detect::api_key(key).is_some())
 }
 
+/// Turn Claude's private billing enum into a stable user-facing label. Unknown
+/// values are deliberately hidden: exposing a new server-side enum verbatim is
+/// both confusing and makes the dashboard depend on an undocumented contract.
+fn billing_label(value: Option<&str>) -> Option<String> {
+    match value {
+        Some("stripe_subscription" | "stripe_subscription_contracted") => {
+            Some("Subscription".to_string())
+        }
+        _ => None,
+    }
+}
+
 /// One headless request on a throwaway `claude -p` child, mirroring how
 /// Claude Code titles its own conversations with a cheap background model.
 /// Deliberately *not* the session's resident child — a request there would
@@ -669,11 +681,7 @@ impl ClaudeCode {
                     {
                         info.account = nonempty_str(&acct, "emailAddress");
                         info.org = nonempty_str(&acct, "organizationName");
-                        info.plan = match nonempty_str(&acct, "billingType").as_deref() {
-                            Some("stripe_subscription") => Some("Subscription".to_string()),
-                            Some(other) => Some(other.to_string()),
-                            None => None,
-                        };
+                        info.plan = billing_label(nonempty_str(&acct, "billingType").as_deref());
                     }
                 }
             }
@@ -743,25 +751,49 @@ impl Harness for ClaudeCode {
         true
     }
 
-    /// Claude compacts in place through its own `/compact`, keeping the session
-    /// id. Without a live child there is nothing to compact against, so the
-    /// shared fallback runs instead.
+    fn supports_compaction(&self) -> bool {
+        true
+    }
+
     async fn compact(&self, ctx: &CompactCtx) -> Result<CompactOutcome> {
-        if ctx
-            .host
+        let Some(native_id) = ctx.native_session_id.clone() else {
+            return Ok(CompactOutcome::Fallback);
+        };
+        let lookup_id = native_id.clone();
+        let native_session =
+            tokio::task::spawn_blocking(move || native_store::claude_session(&lookup_id))
+                .await
+                .map_err(|error| anyhow!("Claude session lookup failed: {error}"))??
+                .ok_or_else(|| {
+                    anyhow!("Claude Code's saved conversation is unavailable for compaction")
+                })?;
+        let project = ctx.project.clone();
+        let session_id = ctx.session_id.clone();
+        let skills_dir = self.session_skills_dir();
+        let (repo, playbook) =
+            tokio::task::spawn_blocking(move || ensure_playbook(&project, &session_id, skills_dir))
+                .await
+                .map_err(|error| anyhow!("playbook task failed: {error}"))??;
+        let spec = SpawnSpec {
+            chat: ctx.host.clone(),
+            session_id: ctx.session_id.clone(),
+            repo,
+            playbook,
+            resume: Some(native_id),
+            config: SpawnConfig {
+                permission_mode: ctx.permission_mode,
+                effort: claude_effort(ctx.reasoning_level.as_deref()).map(str::to_string),
+                model: ctx.model.clone(),
+                native_store: native_session.store,
+                bridge_active: uses_permission_bridge(ctx.permission_mode)
+                    && ctx.host.up_port().is_some(),
+            },
+        };
+        ctx.host
             .claude
-            .compact_session(&ctx.session_id, CLAUDE_COMPACT_TIMEOUT)
-            .await?
-        {
-            return Ok(CompactOutcome::Native);
-        }
-        if ctx.native_session_id.is_some() {
-            // The session is still resumable; summarizing would throw it away.
-            return Err(anyhow!(
-                "Claude Code is not running for this chat — send a message first, then compact"
-            ));
-        }
-        Ok(CompactOutcome::Fallback)
+            .compact_session(spec, CLAUDE_COMPACT_TIMEOUT)
+            .await?;
+        Ok(CompactOutcome::Native)
     }
 
     /// The resident child holds stdin open, so a second stream-json user
@@ -906,25 +938,12 @@ impl Harness for ClaudeCode {
                         plan_mode: None,
                     })
                 }
-                // Mid-turn question (a bridge-held AskUserQuestion): the held
-                // tool call is denied with the user's answer as the message —
-                // the model reads the answer from the denial and continues the
-                // same turn. (Allowing the tool instead would run it headless,
-                // which returns no answer — the model would guess and move on
-                // rather than block; that's the bug this arm exists to avoid.)
                 ("question", _) => {
-                    let (text, _) = synthesize_resume("question", answer);
-                    if text.trim().is_empty() {
-                        return Err(anyhow!("select an option (or add a note) to answer"));
-                    }
+                    let input = question_answer_input(prompt, answer)?;
                     ctx.host.settle_permission(
                         native_id,
-                        crate::local::chat::PermissionDecision::Deny {
-                            message: format!(
-                                "The user answered: {text}. Treat this as their answer and \
-                                 continue — do not ask this question again. (Only the first \
-                                 question of the call was shown; ask any others separately.)"
-                            ),
+                        crate::local::chat::PermissionDecision::Allow {
+                            updated_input: Some(input),
                         },
                     )?;
                     Ok(ResumeAction::Handled { plan_mode: None })
@@ -965,13 +984,10 @@ impl Harness for ClaudeCode {
         Some(native_store::claude_home(NativeStore::Legacy))
     }
 
-    fn skill_target(&self) -> Option<PathBuf> {
-        Some(
-            self.config_home()?
-                .join("skills")
-                .join("orx")
-                .join("SKILL.md"),
-        )
+    fn native_skill_roots(&self) -> Vec<PathBuf> {
+        self.config_home()
+            .map(|home| vec![home.join("skills")])
+            .unwrap_or_default()
     }
 
     fn skill_shim(&self) -> Option<&'static str> {
@@ -1047,8 +1063,12 @@ pub(crate) fn claude_permission_mode(mode: Option<PermissionMode>) -> &'static s
 
 pub(crate) fn uses_permission_bridge(mode: Option<PermissionMode>) -> bool {
     matches!(
-        mode,
-        Some(PermissionMode::Ask | PermissionMode::AcceptEdits | PermissionMode::Plan)
+        mode.unwrap_or(PermissionMode::Auto),
+        PermissionMode::Ask
+            | PermissionMode::AcceptEdits
+            | PermissionMode::Plan
+            | PermissionMode::Auto
+            | PermissionMode::Bypass
     )
 }
 
@@ -1148,9 +1168,7 @@ fn claude_effort(level: Option<&str>) -> Option<&str> {
 /// resume strategy: a prompt ends the turn and the answer becomes a *new user
 /// message* that continues via `--resume`. `ChatHost` validates `resume_mode`
 /// against Claude's advertised choices before this helper parses it; an absent
-/// id falls through to the per-kind default. The question arm is
-/// also reused as a plain text builder by the bridge's mid-turn question
-/// resume (the denial message that carries the answer).
+/// id falls through to the per-kind default.
 pub(crate) fn synthesize_resume(
     kind: &str,
     req: &PromptAnswer,
@@ -1190,6 +1208,7 @@ pub(crate) fn synthesize_resume(
             let text = "The user approved that action. Continue.".to_string();
             (text, chosen.or(Some(PermissionMode::Bypass)))
         }
+        "question" if !req.approve => (SKIPPED_QUESTION_MESSAGE.to_string(), None),
         // question (or anything else): feed the selection back as the user's reply.
         _ => (req.contextualized_answer(req.plain_answer_text()), None),
     }
@@ -1228,9 +1247,34 @@ fn plan_prompt(name: &str, input: Option<&Value>) -> Option<WirePrompt> {
     })
 }
 
+pub(crate) const SKIPPED_QUESTION_MESSAGE: &str =
+    "The user skipped this question. Do not retry it or treat it as answered.";
+
+fn question_answer_input(prompt: &WirePrompt, answer: &PromptAnswer) -> Result<Value> {
+    let mut input = prompt
+        .tool_input
+        .clone()
+        .ok_or_else(|| anyhow!("question input is missing"))?;
+    if !answer.approve {
+        // The batch continues; an entirely skipped call is denied by the host.
+        input["answers"] = serde_json::json!({});
+        return Ok(input);
+    }
+    let text = answer.contextualized_answer(answer.plain_answer_text());
+    if text.trim().is_empty() {
+        return Err(anyhow!("select an option (or add a note) to answer"));
+    }
+    let question = prompt
+        .question
+        .as_deref()
+        .ok_or_else(|| anyhow!("question text is missing"))?;
+    input["answers"] = serde_json::json!({ question: text });
+    Ok(input)
+}
+
 /// AskUserQuestion → a `question` prompt. Claude's schema is
 /// `{questions: [{question, header, options: [{label, description}], multiSelect}]}`;
-/// we surface the first question (the composer answers one at a time). Also
+/// The bridge presents each question separately and collects the whole batch. Also
 /// used by the plan-mode bridge (`ChatHost::request_permission`, via the
 /// harness re-export) to build the held mid-turn question card.
 pub(crate) fn question_prompt(name: &str, input: Option<&Value>) -> Option<WirePrompt> {
@@ -1326,7 +1370,7 @@ fn replays_user_message(event: &Value, text: &str) -> bool {
 /// including a stale `result` that would end the turn instantly. The echo
 /// itself is consumed (returns `false`); everything after it belongs to the
 /// turn.
-fn belongs_to_current_turn(event: &Value, text: &str, saw_user_echo: &mut bool) -> bool {
+pub(crate) fn belongs_to_current_turn(event: &Value, text: &str, saw_user_echo: &mut bool) -> bool {
     if *saw_user_echo {
         return true;
     }
@@ -1385,19 +1429,24 @@ struct TurnState {
     /// per message id (subagent events namespaced by `parent_tool_use_id`) —
     /// see the `assistant` arm for why this offset exists.
     assistant_blocks_seen: HashMap<String, usize>,
-    /// Background (`local_agent`) tasks spawned this turn that haven't reached
-    /// their terminal `task_notification` yet, task_id → spawning tool_use_id.
+    /// Background sub-agents (and, in a spawned helper, background shell
+    /// commands) started this turn that haven't reached their terminal
+    /// `task_notification` yet, keyed by task_id.
     /// A `result` while entries remain is a segment boundary, not the end of
     /// the turn — the CLI auto-resumes with the task's report once it
     /// finishes, and ending the turn there would silently drop that whole
-    /// continuation. The tool_use_id side keeps the spawn part `running` (the
+    /// continuation. The tool_use_id keeps the spawning part `running` (the
     /// async launch acknowledgement would otherwise complete it at launch and
-    /// kill every running indicator while the agent works).
-    pending_tasks: HashMap<String, Option<String>>,
+    /// kill every running indicator while the task works).
+    pending_tasks: HashMap<String, PendingTask>,
     /// Whether any background task ran this turn (stays true after completion)
     /// — gates the post-result grace wait for the auto-resume segment, which
     /// can trail the result even when every task already finished.
     saw_background_task: bool,
+}
+
+struct PendingTask {
+    tool_use_id: Option<String>,
 }
 
 /// The spawning `Task` tool_use id for a sub-agent event (`parent_tool_use_id`),
@@ -1594,18 +1643,16 @@ fn apply_event(ctx: &mut TurnCtx, state: &mut TurnState, event: &Value) -> bool 
                     state.native_session_id = Some(sid.to_string());
                 }
             }
-            // Track background sub-agents so the `result` arm knows a turn
-            // isn't over while one still runs (see `pending_tasks`).
             Some("task_started") => {
                 if event.get("task_type").and_then(Value::as_str) == Some("local_agent") {
                     if let Some(id) = event.get("task_id").and_then(Value::as_str) {
-                        // No tool_use_id → no spawn-part association; the
-                        // task still gates the turn's end.
-                        let tool_id = event
+                        let tool_use_id = event
                             .get("tool_use_id")
                             .and_then(Value::as_str)
                             .map(str::to_string);
-                        state.pending_tasks.insert(id.to_string(), tool_id);
+                        state
+                            .pending_tasks
+                            .insert(id.to_string(), PendingTask { tool_use_id });
                         state.saw_background_task = true;
                     }
                 }
@@ -1614,15 +1661,15 @@ fn apply_event(ctx: &mut TurnCtx, state: &mut TurnState, event: &Value) -> bool 
             // — the async-launch tool_result deliberately left it `running`.
             Some("task_notification") => {
                 if let Some(id) = event.get("task_id").and_then(Value::as_str) {
-                    let tool_id = state.pending_tasks.remove(id).flatten();
-                    if let Some(part) = tool_id
-                        .as_deref()
-                        .and_then(|tid| find_part_mut(&mut ctx.assistant.parts, tid))
+                    let task = state.pending_tasks.remove(id);
+                    if let Some(part) = task
+                        .and_then(|task| task.tool_use_id)
+                        .and_then(|tid| find_part_mut(&mut ctx.assistant.parts, &tid))
                     {
                         if let Some(part_state) = part.state.as_mut() {
                             if part_state.status == "running" {
-                                let ok = event.get("status").and_then(Value::as_str)
-                                    == Some("completed");
+                                let status = event.get("status").and_then(Value::as_str);
+                                let ok = status == Some("completed");
                                 part_state.status = if ok { "completed" } else { "error" }.into();
                                 if !ok {
                                     // Give the failure a real message — the
@@ -1852,7 +1899,7 @@ fn apply_event(ctx: &mut TurnCtx, state: &mut TurnState, event: &Value) -> bool 
                     && state
                         .pending_tasks
                         .values()
-                        .any(|tid| tid.as_deref() == Some(part_id.as_str()));
+                        .any(|task| task.tool_use_id.as_deref() == Some(part_id.as_str()));
                 if launch_ack {
                     continue;
                 }
@@ -1908,14 +1955,31 @@ fn apply_event(ctx: &mut TurnCtx, state: &mut TurnState, event: &Value) -> bool 
                         .and_then(Value::as_str)
                         .unwrap_or(subtype)
                         .to_string();
-                    ctx.push_error(format!("claude: {detail}"));
+                    if is_transient_api_error(event, &detail) {
+                        let detail = detail.trim();
+                        ctx.assistant.parts.retain(|part| {
+                            part.kind != "text"
+                                || part
+                                    .text
+                                    .as_deref()
+                                    .is_none_or(|text| text.trim() != detail)
+                        });
+                        let mut part = WirePart::tool(
+                            format!("api-error-{}", ctx.assistant.parts.len()),
+                            "api_error",
+                            "error",
+                            Some(detail.to_string()),
+                        );
+                        if let Some(state) = part.state.as_mut() {
+                            state.title = Some("Temporary API error".into());
+                        }
+                        ctx.assistant.parts.push(part);
+                    } else {
+                        ctx.push_error(format!("claude: {detail}"));
+                    }
                 }
             }
             state.had_activity |= report_result_usage(ctx, event).is_some_and(|used| used > 0);
-            // A result while background sub-agents still run is only a segment
-            // boundary: the model ended ITS reply, but the CLI auto-resumes
-            // with the agents' reports when they finish. Keep listening — the
-            // continuation's own result (no tasks pending) ends the turn.
             if !state.pending_tasks.is_empty() {
                 return false;
             }
@@ -1927,6 +1991,24 @@ fn apply_event(ctx: &mut TurnCtx, state: &mut TurnState, event: &Value) -> bool 
         _ => {}
     }
     false
+}
+
+fn is_transient_api_error(event: &Value, detail: &str) -> bool {
+    let api_failure = event.get("terminal_reason").and_then(Value::as_str) == Some("api_error")
+        || detail.trim_start().starts_with("API Error:");
+    let detail = detail.to_ascii_lowercase();
+    api_failure
+        && [
+            "connection to the api was lost",
+            "connection dropped",
+            "enotfound",
+            "eai_again",
+            "econnreset",
+            "etimedout",
+            "socket hang up",
+        ]
+        .iter()
+        .any(|marker| detail.contains(marker))
 }
 
 fn mark_stream_final(ctx: &mut TurnCtx, state: &TurnState) {
@@ -2081,11 +2163,7 @@ fn spawn_config(ctx: &TurnCtx, native_store: NativeStore) -> SpawnConfig {
         effort: claude_effort(ctx.reasoning_level.as_deref()).map(str::to_string),
         model: ctx.model.clone(),
         native_store,
-        // The turn WANTS the bridge iff it's plan mode under a bound `orx up`
-        // port; whether the bridge was actually achieved is recorded on the
-        // spawned child's config (a failed write leaves it false and the next
-        // plan turn respawns). Keeping the wanted value here means a plan turn
-        // reconciles against a child that already has the bridge and reuses it.
+        // A failed bridge setup must respawn next turn rather than reuse a child without input.
         bridge_active: uses_permission_bridge(ctx.permission_mode) && ctx.host.up_port().is_some(),
     }
 }
@@ -2181,7 +2259,7 @@ async fn run_attempt(ctx: &mut TurnCtx, spec: SpawnSpec) -> Result<(TurnState, u
                 // A failed write means the child is gone and this turn is about
                 // to error out — park the text so it survives into the next one.
                 match client.send_user_message(&steer.text).await {
-                    Ok(()) => ctx.record_steer(&steer.display),
+                    Ok(()) => ctx.record_steer(&steer, true),
                     Err(_) => {
                         if let Err(error) = ctx.host.park_steer(&ctx.session_id, steer) {
                             ctx.push_error(format!("Could not preserve steering message: {error}"));
@@ -2263,8 +2341,8 @@ async fn run_attempt(ctx: &mut TurnCtx, spec: SpawnSpec) -> Result<(TurnState, u
                     // report as a fresh segment: init + messages + another
                     // result). Give that continuation a short window to show up
                     // before ending the turn; a quiet window means the report
-                    // was already delivered in this segment.
-                    if !state.saw_background_task {
+                    // was already delivered in this segment. A failed turn has nothing to resume.
+                    if !state.saw_background_task || state.turn_errored {
                         break;
                     }
                     match tokio::time::timeout(BACKGROUND_RESUME_GRACE, rx.recv()).await {
@@ -2324,7 +2402,7 @@ async fn run_turn(ctx: &mut TurnCtx) -> Result<()> {
     // unresolved: they can never be answered again, and once this turn makes the
     // session busy one could capture the composer's typed-text routing. End-turn
     // cards are deliberately left alone — they resume via --resume.
-    let _ = ctx.host.resolve_stale_prompts(&ctx.session_id, true).await;
+    let _ = ctx.host.resolve_stale_prompts(&ctx.session_id, true);
 
     let native_session = match ctx.native_session_id.clone() {
         Some(id) => tokio::task::spawn_blocking(move || native_store::claude_session(&id))
@@ -2522,6 +2600,20 @@ mod tests {
         let _ = std::fs::remove_dir_all(&home);
     }
 
+    #[test]
+    fn billing_labels_hide_private_enums() {
+        assert_eq!(
+            billing_label(Some("stripe_subscription")),
+            Some("Subscription".to_string())
+        );
+        assert_eq!(
+            billing_label(Some("stripe_subscription_contracted")),
+            Some("Subscription".to_string())
+        );
+        assert_eq!(billing_label(Some("future_internal_value")), None);
+        assert_eq!(billing_label(None), None);
+    }
+
     /// A `list_models` response in the live 2.1.212 shape (fields we don't
     /// read trimmed). Covers the four things the parser decides: the `default`
     /// entry is skipped, `value` (the alias the CLI's own picker submits) is
@@ -2533,7 +2625,7 @@ mod tests {
             "models": [
                 {
                     "value": "default",
-                    "resolvedModel": "claude-opus-4-8[1m]",
+                    "resolvedModel": "claude-fable-5",
                     "displayName": "Default (recommended)",
                     "supportsEffort": true,
                     "supportedEffortLevels": ["low", "medium", "high", "xhigh", "max"],
@@ -2682,6 +2774,30 @@ mod tests {
     }
 
     #[test]
+    fn question_answers_preserve_native_input_and_return_structured_values() {
+        let input = serde_json::json!({"questions":[{"question":"Which colors?","header":"Colors","multiSelect":true,"options":[{"label":"Red","description":"First"},{"label":"Green","description":"Second"}]}]});
+        let mut prompt = question_prompt("AskUserQuestion", Some(&input)).unwrap();
+        prompt.tool_input = Some(input.clone());
+        let returned =
+            question_answer_input(&prompt, &answer(true, None, &["Red", "Green"], None)).unwrap();
+        assert_eq!(returned["questions"], input["questions"]);
+        assert_eq!(
+            returned["answers"],
+            serde_json::json!({"Which colors?":"Red, Green"})
+        );
+        let custom =
+            question_answer_input(&prompt, &answer(true, None, &[], Some("Blue"))).unwrap();
+        assert_eq!(
+            custom["answers"],
+            serde_json::json!({"Which colors?":"Blue"})
+        );
+        assert!(question_answer_input(&prompt, &answer(true, None, &[], None)).is_err());
+        let skipped = question_answer_input(&prompt, &answer(false, None, &[], None)).unwrap();
+        assert_eq!(skipped["questions"], input["questions"]);
+        assert_eq!(skipped["answers"], serde_json::json!({}));
+    }
+
+    #[test]
     fn permission_mode_maps_to_claude_cli_strings() {
         assert_eq!(claude_permission_mode(Some(PermissionMode::Ask)), "manual");
         assert_eq!(
@@ -2703,8 +2819,9 @@ mod tests {
         assert!(uses_permission_bridge(Some(PermissionMode::Ask)));
         assert!(uses_permission_bridge(Some(PermissionMode::AcceptEdits)));
         assert!(uses_permission_bridge(Some(PermissionMode::Plan)));
-        assert!(!uses_permission_bridge(Some(PermissionMode::Auto)));
-        assert!(!uses_permission_bridge(Some(PermissionMode::Bypass)));
+        assert!(uses_permission_bridge(Some(PermissionMode::Auto)));
+        assert!(uses_permission_bridge(None));
+        assert!(uses_permission_bridge(Some(PermissionMode::Bypass)));
     }
 
     #[test]
@@ -2753,6 +2870,16 @@ mod tests {
     fn question_feeds_selections_back_with_no_mode_change() {
         let (text, mode) = synthesize_resume("question", &answer(true, None, &["A", "B"], None));
         assert_eq!(text, "A, B");
+        assert_eq!(mode, None);
+    }
+
+    #[test]
+    fn skipped_question_resumes_without_an_answer_or_mode_change() {
+        let (text, mode) = synthesize_resume("question", &answer(false, None, &[], None));
+        assert_eq!(
+            text,
+            "The user skipped this question. Do not retry it or treat it as answered."
+        );
         assert_eq!(mode, None);
     }
 
@@ -2914,6 +3041,67 @@ mod tests {
             err.state.as_ref().unwrap().error.as_deref(),
             Some("claude: boom")
         );
+    }
+
+    #[test]
+    fn transient_api_result_replaces_duplicate_text_with_retryable_status() {
+        for detail in [
+            "API Error: Connection to the API was lost (ENOTFOUND). This is usually temporary — try again.",
+            "API Error: Connection dropped (ECONNRESET)",
+            "API Error: Connection dropped",
+            "API Error: EAI_AGAIN",
+            "API Error: ETIMEDOUT",
+            "API Error: socket hang up",
+        ] {
+            let assistant = serde_json::json!({
+                "type": "assistant",
+                "message": {
+                    "id": "msg_api",
+                    "content": [{"type": "text", "text": "Earlier useful output"}, {"type": "text", "text": detail}]
+                }
+            });
+            let result = serde_json::json!({
+                "type": "result",
+                "subtype": "error_during_execution",
+                "is_error": true,
+                "terminal_reason": "api_error",
+                "session_id": "sess-retry",
+                "result": detail
+            });
+            let mut ctx = TurnCtx::test_stub();
+            let mut state = TurnState::default();
+            assert!(!apply_event(&mut ctx, &mut state, &assistant));
+            assert!(apply_event(&mut ctx, &mut state, &result));
+            assert!(state.saw_result && state.turn_errored && !state.auth_failed);
+            assert_eq!(state.native_session_id.as_deref(), Some("sess-retry"));
+            assert_eq!(ctx.assistant.parts.len(), 2);
+            assert_eq!(ctx.assistant.parts[0].text.as_deref(), Some("Earlier useful output"));
+            let part = &ctx.assistant.parts[1];
+            assert_eq!(part.tool.as_deref(), Some("api_error"));
+            assert_eq!(part.state.as_ref().unwrap().error.as_deref(), Some(detail));
+        }
+    }
+
+    #[test]
+    fn transient_api_classification_keeps_other_failures_generic() {
+        for detail in [
+            "API Error: Invalid API key",
+            "API Error: Invalid model",
+            "Bash failed: ENOTFOUND",
+        ] {
+            let event = serde_json::json!({"type": "result", "is_error": true, "result": detail});
+            let mut ctx = TurnCtx::test_stub();
+            assert!(apply_event(&mut ctx, &mut TurnState::default(), &event));
+            assert_eq!(ctx.assistant.parts[0].tool.as_deref(), Some("error"));
+        }
+        assert!(is_transient_api_error(
+            &serde_json::json!({"terminal_reason": "api_error"}),
+            "ECONNRESET"
+        ));
+        assert!(!is_transient_api_error(
+            &serde_json::json!({"terminal_reason": "api_error"}),
+            "Not logged in"
+        ));
     }
 
     #[test]
@@ -3459,6 +3647,30 @@ mod tests {
             apply_event(&mut ctx, &mut state, &result),
             "the post-continuation result ends the turn"
         );
+    }
+
+    /// Claude Code 2.1.284's stream for a background Bash: the model replies
+    /// with progress, the CLI emits a result, then resumes once the command ends.
+    const BACKGROUND_BASH_STREAM: &[&str] = &[
+        r#"{"type":"assistant","message":{"id":"m1","content":[{"type":"tool_use","id":"toolu_b","name":"Bash","input":{"command":"sleep 8; echo FINISHED-42","run_in_background":true}}]}}"#,
+        r#"{"type":"system","subtype":"task_started","task_id":"b1","tool_use_id":"toolu_b","task_type":"local_bash","is_backgrounded":true}"#,
+        r#"{"type":"user","message":{"content":[{"type":"tool_result","tool_use_id":"toolu_b","content":"Command running in background with ID: b1."}]}}"#,
+        r#"{"type":"assistant","message":{"id":"m2","content":[{"type":"text","text":"The command is running in the background."}]}}"#,
+        r#"{"type":"result","subtype":"success","is_error":false,"result":"The command is running in the background."}"#,
+        r#"{"type":"system","subtype":"task_notification","task_id":"b1","tool_use_id":"toolu_b","status":"completed"}"#,
+        r#"{"type":"system","subtype":"init","session_id":"s"}"#,
+        r#"{"type":"assistant","message":{"id":"m3","content":[{"type":"text","text":"FINISHED-42"}]}}"#,
+        r#"{"type":"result","subtype":"success","is_error":false,"result":"FINISHED-42"}"#,
+    ];
+
+    #[test]
+    fn ordinary_chat_ends_at_reply_over_background_shell() {
+        let mut ctx = TurnCtx::test_stub();
+        let mut state = TurnState::default();
+        let end = BACKGROUND_BASH_STREAM.iter().position(|line| {
+            apply_event(&mut ctx, &mut state, &serde_json::from_str(line).unwrap())
+        });
+        assert_eq!(end, Some(4));
     }
 
     #[test]

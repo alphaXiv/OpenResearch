@@ -29,9 +29,8 @@
 # or never dispatches, re-run it (Actions -> this workflow -> the failed run ->
 # Re-run): a re-run replays the original event, `github.event.before` included,
 # so the guard below still sees the bump. Prefer that over dispatching
-# release.yml by hand, whose `tag` input defaults to `dry-run` (which publishes
-# nothing but reports success) and which builds from main's current tip rather
-# than the bump commit.
+# release.yml by hand; recovery dispatches require an explicit version tag and
+# may set source-sha to the original bump commit.
 
 name: Release on version bump
 
@@ -127,11 +126,11 @@ jobs:
           fi
 
           echo "Dispatching release.yml with tag=${tag} (version is unreleased)."
-          if [ -n "$DISPATCH_PAT" ] && GH_TOKEN="$DISPATCH_PAT" gh workflow run release.yml --ref main -f tag="${tag}"; then
+          if [ -n "$DISPATCH_PAT" ] && GH_TOKEN="$DISPATCH_PAT" gh workflow run release.yml --ref main -f tag="${tag}" -f source-sha="$GITHUB_SHA"; then
             echo "Dispatched with RELEASE_DISPATCH_TOKEN — the macOS DMG will attach automatically."
           else
             [ -n "$DISPATCH_PAT" ] && echo "::warning::RELEASE_DISPATCH_TOKEN failed; used GITHUB_TOKEN. Release ships but the DMG won't auto-attach — run release-macos-app.yml manually for ${tag}."
-            GH_TOKEN="$FALLBACK_TOKEN" gh workflow run release.yml --ref main -f tag="${tag}"
+            GH_TOKEN="$FALLBACK_TOKEN" gh workflow run release.yml --ref main -f tag="${tag}" -f source-sha="$GITHUB_SHA"
           fi
           echo "The release will appear at:"
           echo "  https://github.com/${GITHUB_REPOSITORY}/actions/workflows/release.yml"

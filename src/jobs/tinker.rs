@@ -30,7 +30,7 @@ pub async fn validate_api_key(key: &str) -> Result<KeyStatus> {
     let mut header = reqwest::header::HeaderValue::from_str(key)
         .map_err(|_| anyhow!("Invalid Tinker API key."))?;
     header.set_sensitive(true);
-    let client = reqwest::Client::builder()
+    let client = crate::net::remote_client()
         .timeout(std::time::Duration::from_secs(15))
         .redirect(reqwest::redirect::Policy::none())
         .build()?;

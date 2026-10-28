@@ -12,7 +12,7 @@ When changing authentication, organization, sandbox, or managed-compute APIs, in
 
 - Rust code lives in `src/`; the dashboard lives in `ui/src/`. Keep local-only behavior local and use the production API client only for capabilities owned by `openresearch.sh`.
 - Run local app instances through `scripts/dev-slot.mjs` so development data, ports, and processes stay isolated.
-- `ui/dist` is committed and embedded in release builds. After UI changes, run `pnpm build` in `ui/` and include the regenerated assets.
+- `ui/dist` is generated and embedded in release builds. With Node 22 and pnpm 10, run `pnpm install --frozen-lockfile && pnpm build` in `ui/` before a local release build.
 - Prefer canonical Tailwind utilities (`flex flex-col h-full min-h-0`) and project theme aliases (`bg-background`, `text-subtext`, `border-border`). Use arbitrary values only when no project utility exists, and preserve semantic marker classes when selectors or runtime behavior depend on them.
 - Before shipping, follow the checks in `.github/workflows/ci.yml`.
 
@@ -21,4 +21,5 @@ When changing authentication, organization, sandbox, or managed-compute APIs, in
 - GitHub protection for `main` must require the `fmt, clippy, test`, `version sanity`, and `linked issue` checks from GitHub Actions, including for administrators. Do not require a merge queue or require branches to be up to date. These settings are managed in GitHub, not by this file.
 - `linked issue` fails PRs from forks unless the description links an issue in this repository (e.g. `Closes #N`). PRs from branches in this repository are exempt, since only people with write access can push them. It runs on `pull_request_target`, so it must never check out or run PR code.
 - PR CI must test GitHub's simulated merge (`refs/pull/<number>/merge`), which `actions/checkout` selects by default for `pull_request` events, rather than checking out the PR head alone. Each run tests its merge candidate; subsequent changes to `main` do not automatically rerun open PRs.
+- PR checks select relevant jobs by changed files; the required `fmt, clippy, test` aggregate rejects failures and unexpected skips. Optimized builds and packaging run only in the post-merge release pipeline, never on PRs.
 - CI also runs on `main`. Releases call the same CI workflow on the commit being packaged; publishing requires that run to succeed. Keep `./ci` in cargo-dist's `global-artifacts-jobs` when regenerating the release workflow; `allow-dirty` makes `dist generate` skip it, so follow the steps in `macos/DISTRIBUTION.md` ("CLI binaries").

@@ -1,0 +1,6 @@
+disallowed-methods = [
+  { path = "reqwest::Client::new", reason = "use crate::net::loopback_client() or remote_client()" },
+  { path = "reqwest::Client::builder", reason = "use crate::net::loopback_client() or remote_client()" },
+  { path = "reqwest::ClientBuilder::new", reason = "use crate::net::loopback_client() or remote_client()" },
+  { path = "reqwest::get", reason = "use crate::net::loopback_client() or remote_client()" },
+]

@@ -1,3 +1,4 @@
+import { DirectionProvider } from "@base-ui/react/direction-provider";
 import { m } from "../paraglide/messages.js";
 import { ltr } from "../i18n";
 import { useLocale } from "../locale";
@@ -12,14 +13,16 @@ import {
   type NodeProps,
   type Viewport,
 } from "@xyflow/react";
-import { Archive, Ellipsis, FolderTree, Terminal } from "lucide-react";
-import { createPortal } from "react-dom";
+import { Archive, ChartLine, Ellipsis, FolderTree, Terminal } from "lucide-react";
+import { useTrackioRuns } from "../queries/settings";
+import { Menu } from "@base-ui/react/menu";
 import { GitHubMark } from "./BackendLogos";
-import { memo, useMemo, useRef, useState } from "react";
+import { memo, useId, useMemo, useRef, useState } from "react";
 import {
   githubBranchUrl,
   fmtNumber,
   runDisplayStatus,
+  trackioRunUrl,
   timeAgo,
   type Experiment,
   type Project,
@@ -29,7 +32,6 @@ import type { ExperimentView } from "./DetailDrawer";
 import type { CodeView } from "./CodeTab";
 import { ExpHoverCard, dismissTreeHoverCards, useHoverIntent } from "./ExpHoverCard";
 import { ArchiveMenu, type ArchiveActions } from "./ArchiveMenu";
-import { usePopover } from "./ModelPicker";
 import { MenuItem } from "./ui";
 import { statusLabel, StatusBadge } from "./StatusBadge";
 import { tabOpenGestureHandlers, type TabOpenIntent } from "../tabPreview";
@@ -43,7 +45,7 @@ const EMPTY_STATE_CLASS_NAME = [
   "[&_p.empty-state-hint]:text-subtext empty-state-cta gap-1.5",
 ].join(" ");
 
-const NODE_W = 264;
+const NODE_W = 336;
 const NODE_H = 132;
 const GAP_X = 44;
 const GAP_Y = 72;
@@ -70,6 +72,7 @@ type ExpNodeData = {
     intent: TabOpenIntent,
   ) => void;
   onArchive: (id: string, direction: "ancestors" | "descendants" | "only", archived: boolean) => void;
+  onDelete: (id: string) => void;
   actions: ArchiveActions;
 };
 type ExpFlowNode = Node<ExpNodeData, "exp">;
@@ -220,11 +223,13 @@ function runSquareClass(status: string): string {
 
 const ExpNode = memo(function ExpNode({ data }: NodeProps<ExpFlowNode>) {
   useLocale();
-  const { exp, latestRun, runs, isBaseline, parentSlug, githubOwner, githubRepo, onOpenView, onOpenCode, onArchive, actions } = data;
+  const { exp, latestRun, runs, isBaseline, parentSlug, githubOwner, githubRepo, onOpenView, onOpenCode, onArchive, onDelete, actions } = data;
   const status = latestRun ? runDisplayStatus(latestRun) : undefined;
   const live = status === "running" || status === "starting" || status === "cancelling";
   const kind = isBaseline ? m.tree_baseline() : live ? m.tree_running() : m.tree_experiment();
   const squares = runs.slice(-MAX_SQUARES);
+  const trackio = useTrackioRuns(exp.projectId, live).data;
+  const hasTrackio = latestRun !== null && trackioRunUrl(trackio, latestRun.id) !== null;
 
   // `data` is rebuilt on every experiments/runs change (a superset of the
   // re-layouts that matter), so it doubles as the hover card's re-measure
@@ -236,7 +241,7 @@ const ExpNode = memo(function ExpNode({ data }: NodeProps<ExpFlowNode>) {
   return (
     <div
       ref={rootRef}
-      className={`exp-node w-66 border border-border rounded-md bg-background py-2.5 px-3 shadow-tree text-sm transition-[box-shadow] duration-120 ease-standard [&:hover]:shadow-tree-hover [&.live]:border-accent-teal [&.live]:shadow-tree-live [&_.node-overview-link]:block [&_.node-overview-link]:w-full [&_.node-overview-link]:p-0 [&_.node-overview-link]:border-0 [&_.node-overview-link]:bg-transparent [&_.node-overview-link]:text-inherit [&_.node-overview-link]:[font:inherit] [&_.node-overview-link]:text-start [&_.node-overview-link]:cursor-pointer [&_.node-overview-link:hover_.node-slug]:underline [&_.node-overview-link:hover_.node-slug]:underline-offset-[3px] [&_.node-overview-link:focus-visible]:outline-2 [&_.node-overview-link:focus-visible]:outline-solid [&_.node-overview-link:focus-visible]:outline-accent [&_.node-overview-link:focus-visible]:outline-offset-4 [&_.node-overview-link:focus-visible]:rounded-xs [&_.node-eyebrow]:flex [&_.node-eyebrow]:items-center [&_.node-eyebrow]:justify-between [&_.node-eyebrow]:gap-2 [&_.node-eyebrow]:mb-1.5 [&_.node-eyebrow]:text-xs [&_.node-eyebrow]:font-medium [&_.node-eyebrow]:text-muted [&_.node-head]:flex [&_.node-head]:items-center [&_.node-head]:gap-[7px] [&_.node-head]:min-w-0 [&_.node-status]:w-2 [&_.node-status]:h-2 [&_.node-status]:rounded-full [&_.node-status]:shrink-0 [&_.node-slug]:text-sm [&_.node-slug]:font-semibold [&_.node-slug]:text-text [&_.node-slug]:flex-1 [&_.node-slug]:min-w-0 [&_.node-slug]:overflow-hidden [&_.node-slug]:text-ellipsis [&_.node-slug]:whitespace-nowrap [&_.node-title]:mt-1 [&_.node-title]:text-text [&_.node-title]:text-sm [&_.node-title]:line-clamp-2 [&_.node-meta]:mt-2 [&_.node-meta]:flex [&_.node-meta]:items-center [&_.node-meta]:gap-2 [&_.node-meta]:text-xs [&_.node-meta]:text-muted [&_.node-actions]:mt-2 [&_.node-actions]:pt-1.5 [&_.node-actions]:border-t [&_.node-actions]:border-t-border-variant [&_.node-actions]:flex [&_.node-actions]:items-center [&_.node-actions]:gap-[3px] [&_.node-action]:inline-flex [&_.node-action]:items-center [&_.node-action]:gap-[5px] [&_.node-action]:py-[3px] [&_.node-action]:px-1.5 [&_.node-action]:text-sm [&_.node-action]:font-medium [&_.node-action]:text-text [&_.node-action]:rounded-sm [&_.node-action]:no-underline [&_.node-action:hover]:text-text [&_.node-action:hover]:bg-surface [&_.node-action-ext]:ms-auto [&_.node-action-ext]:py-[3px] [&_.node-action-ext]:px-[5px] ${live ? "live" : ""} ${exp.archived ? "opacity-80" : ""}`}
+      className={`exp-node w-84 border border-border rounded-md bg-background py-2.5 px-3 shadow-hairline text-sm transition-[box-shadow] duration-120 ease-standard [&:hover]:shadow-tree-hover [&.live]:border-accent-teal [&.live]:shadow-tree-live [&_.node-overview-link]:block [&_.node-overview-link]:w-full [&_.node-overview-link]:p-0 [&_.node-overview-link]:border-0 [&_.node-overview-link]:bg-transparent [&_.node-overview-link]:text-inherit [&_.node-overview-link]:[font:inherit] [&_.node-overview-link]:text-start [&_.node-overview-link]:cursor-pointer [&_.node-overview-link:hover_.node-slug]:underline [&_.node-overview-link:hover_.node-slug]:underline-offset-[3px] [&_.node-overview-link:focus-visible]:outline-2 [&_.node-overview-link:focus-visible]:outline-solid [&_.node-overview-link:focus-visible]:outline-focus [&_.node-overview-link:focus-visible]:outline-offset-4 [&_.node-overview-link:focus-visible]:rounded-xs [&_.node-eyebrow]:flex [&_.node-eyebrow]:items-center [&_.node-eyebrow]:justify-between [&_.node-eyebrow]:gap-2 [&_.node-eyebrow]:mb-1.5 [&_.node-eyebrow]:text-xs [&_.node-eyebrow]:font-medium [&_.node-eyebrow]:text-muted [&_.node-head]:flex [&_.node-head]:items-center [&_.node-head]:gap-2 [&_.node-head]:min-w-0 [&_.node-status]:w-2 [&_.node-status]:h-2 [&_.node-status]:rounded-full [&_.node-status]:shrink-0 [&_.node-slug]:text-sm [&_.node-slug]:font-semibold [&_.node-slug]:text-text [&_.node-slug]:flex-1 [&_.node-slug]:min-w-0 [&_.node-slug]:overflow-hidden [&_.node-slug]:text-ellipsis [&_.node-slug]:whitespace-nowrap [&_.node-title]:mt-1 [&_.node-title]:text-text [&_.node-title]:text-sm [&_.node-title]:line-clamp-2 [&_.node-meta]:mt-2 [&_.node-meta]:flex [&_.node-meta]:items-center [&_.node-meta]:gap-2 [&_.node-meta]:text-xs [&_.node-meta]:text-muted [&_.node-actions]:mt-2 [&_.node-actions]:pt-1.5 [&_.node-actions]:border-t [&_.node-actions]:border-t-border-variant [&_.node-actions]:flex [&_.node-actions]:items-center [&_.node-actions]:gap-1 [&_.node-action]:inline-flex [&_.node-action]:items-center [&_.node-action]:gap-1 [&_.node-action]:py-1 [&_.node-action]:px-1.5 [&_.node-action]:text-sm [&_.node-action]:font-medium [&_.node-action]:text-text [&_.node-action]:rounded-sm [&_.node-action]:no-underline [&_.node-action:hover]:text-text [&_.node-action:hover]:bg-surface [&_.node-action-ext]:ms-auto [&_.node-action-ext]:p-1 ${live ? "live" : ""} ${exp.archived ? "opacity-80" : ""}`}
       onMouseEnter={hover.onMouseEnter}
       onMouseLeave={hover.onMouseLeave}
     >
@@ -262,7 +267,7 @@ const ExpNode = memo(function ExpNode({ data }: NodeProps<ExpFlowNode>) {
         <div className="node-meta">
           <span>{m.tree_view_runs()}</span>
           {squares.length > 0 ? (
-            <span className="run-squares flex items-center gap-[3px]">
+            <span className="run-squares flex items-center gap-1">
               {squares.map((run) => (
                 <span
                   key={run.id}
@@ -278,7 +283,7 @@ const ExpNode = memo(function ExpNode({ data }: NodeProps<ExpFlowNode>) {
           {latestRun && <span>{timeAgo(latestRun.createdAt)}</span>}
         </div>
       </div>
-      {/* Direct view shortcuts — code always, logs once there's a run. */}
+      {/* Direct view shortcuts — code always, logs once there's a run, charts once it logs to Trackio. */}
       <div className="node-actions" onClick={(e) => e.stopPropagation()}>
         {runs.length > 0 && (
           <button
@@ -288,7 +293,7 @@ const ExpNode = memo(function ExpNode({ data }: NodeProps<ExpFlowNode>) {
               onOpenView(exp.id, "terminal", intent),
             )}
           >
-            <Terminal size={13} />
+            <Terminal size={14} />
             {m.tree_view_logs()}
           </button>
         )}
@@ -299,9 +304,21 @@ const ExpNode = memo(function ExpNode({ data }: NodeProps<ExpFlowNode>) {
             onOpenCode(exp.id, exp.branchName, "files", intent),
           )}
         >
-          <FolderTree size={13} />
+          <FolderTree size={14} />
           {m.tree_view_code()}
         </button>
+        {hasTrackio && (
+          <button
+            className="node-action"
+            title={m.a11y_trackio_charts()}
+            {...tabOpenGestureHandlers<HTMLButtonElement>((intent) =>
+              onOpenView(exp.id, "trackio", intent),
+            )}
+          >
+            <ChartLine size={14} />
+            {m.experiment_overview_visualize()}
+          </button>
+        )}
         {/* Icon-only: labeled actions + the link overflow the card's fixed width. */}
         {githubOwner && githubRepo && <a
           className="node-action"
@@ -312,9 +329,9 @@ const ExpNode = memo(function ExpNode({ data }: NodeProps<ExpFlowNode>) {
           rel="noopener noreferrer"
           onClick={(e) => e.stopPropagation()}
         >
-          <GitHubMark size={13} />
+          <GitHubMark size={14} />
         </a>}
-        <ArchiveMenu id={exp.id} name={exp.slug} actions={actions} onArchive={onArchive} compact />
+        <ArchiveMenu id={exp.id} name={exp.slug} actions={actions} onArchive={onArchive} onDelete={onDelete} compact />
       </div>
       <Handle type="source" position={Position.Bottom} />
       {/* Node and card share one leave handler — React's enter/leave pairing
@@ -341,45 +358,34 @@ const ExpNode = memo(function ExpNode({ data }: NodeProps<ExpFlowNode>) {
 const ArchivedNode = memo(function ArchivedNode({ data }: NodeProps<ArchivedFlowNode>) {
   useLocale();
   const { rootId, count, onRestoreRegion } = data;
-  const triggerRef = useRef<HTMLButtonElement>(null);
-  const menu = usePopover(triggerRef);
-  const [position, setPosition] = useState({ top: 0, left: 0 });
-  const toggle = () => {
-    if (!menu.open && triggerRef.current) {
-      const rect = triggerRef.current.getBoundingClientRect();
-      const below = window.innerHeight - rect.bottom >= 44;
-      setPosition({
-        top: below ? rect.bottom + 4 : Math.max(4, rect.top - 44),
-        left: Math.max(4, Math.min(rect.left, window.innerWidth - 232)),
-      });
-    }
-    menu.setOpen((open) => !open);
-  };
+  const [open, setOpen] = useState(false);
+  const triggerId = useId();
   return (
     <div className="archived-node w-40 h-11">
       <Handle type="target" position={Position.Top} />
-      <button
-        type="button"
-        ref={triggerRef}
-        className="nodrag w-full h-full flex items-center justify-center gap-2 px-3 border border-border rounded-full bg-background text-text text-sm font-medium whitespace-nowrap transition-[background-color,border-color] duration-120 ease-standard hover:bg-surface hover:border-text"
-        aria-haspopup="menu"
-        aria-expanded={menu.open}
-        onClick={toggle}
-      >
-        <Archive size={15} className="shrink-0 text-subtext" aria-hidden="true" />
-        <span>{m.tree_archived_count({ count: fmtNumber(count) })}</span>
-      </button>
+      <DirectionProvider direction={typeof document !== "undefined" && document.documentElement.dir === "rtl" ? "rtl" : "ltr"}>
+        <Menu.Root open={open} onOpenChange={setOpen} triggerId={triggerId} modal={false}>
+          <Menu.Trigger
+            id={triggerId}
+            // XYFlow consumes mousedown before React's bubble handlers receive it.
+            onMouseDown={(event) => event.preventBaseUIHandler()}
+            onClick={(event) => { event.preventBaseUIHandler(); setOpen((value) => !value); }}
+            className="nodrag w-full h-full flex items-center justify-center gap-2 px-3 border border-border rounded-full bg-background text-text text-sm font-medium whitespace-nowrap transition-[background-color,border-color] duration-120 ease-standard hover:bg-surface hover:border-border-hover-strong">
+            <Archive size={16} className="shrink-0 text-subtext" aria-hidden="true" />
+            <span>{m.tree_archived_count({ count: fmtNumber(count) })}</span>
+          </Menu.Trigger>
+          <Menu.Portal>
+            <Menu.Positioner positionMethod="fixed" side="bottom" align="start" sideOffset={4} collisionPadding={4} className="z-70">
+              <Menu.Popup className="outline-none max-h-(--available-height) overflow-y-auto option-menu min-w-56 rounded-lg border border-border bg-background p-1.5 shadow-menu">
+                <Menu.Item nativeButton render={<MenuItem className="data-highlighted:bg-surface" />} onClick={() => onRestoreRegion(rootId)}>
+                  {count === 1 ? m.tree_restore_only() : m.tree_restore_archived_count({ count: fmtNumber(count) })}
+                </Menu.Item>
+              </Menu.Popup>
+            </Menu.Positioner>
+          </Menu.Portal>
+        </Menu.Root>
+      </DirectionProvider>
       <Handle type="source" position={Position.Bottom} />
-      {menu.open && createPortal(
-        <div ref={menu.ref} className="option-menu fixed z-70 min-w-56 rounded-lg border border-border bg-background p-1.5 shadow-menu" style={position}>
-          <MenuItem onClick={() => {
-            menu.setOpen(false);
-            onRestoreRegion(rootId);
-          }}>
-            {count === 1 ? m.tree_restore_only() : m.tree_restore_archived_count({ count: fmtNumber(count) })}
-          </MenuItem>
-        </div>, document.body,
-      )}
     </div>
   );
 });
@@ -393,7 +399,7 @@ const ElidedNode = memo(function ElidedNode({ data }: NodeProps<ElidedFlowNode>)
   // body is a single action.
   return (
     <div
-      className="elided-node w-37 h-11 flex items-center gap-2 py-1.5 px-2.5 border border-dashed border-border rounded-md bg-hover-faint text-muted text-sm font-medium text-start transition-[border-color,color] duration-120 ease-standard [&:hover]:border-text [&:hover]:text-text [&_.elided-node-label]:flex [&_.elided-node-label]:flex-col [&_.elided-node-label]:leading-[1.3] [&_.elided-node-sub]:text-muted"
+      className="elided-node w-37 h-11 flex items-center gap-2 py-1.5 px-2.5 border border-dashed border-border rounded-md bg-hover-faint text-muted text-sm font-medium text-start transition-[border-color,color] duration-120 ease-standard [&:hover]:border-border-hover-strong [&:hover]:text-text [&_.elided-node-label]:flex [&_.elided-node-label]:flex-col [&_.elided-node-label]:leading-snug [&_.elided-node-sub]:text-muted"
       role="button"
       tabIndex={0}
       title={m.tree_view_switch_to_entire_project_to_see_all_experiments()}
@@ -435,6 +441,7 @@ export function TreeView({
   onOpenView,
   onOpenCode,
   onArchive,
+  onDelete,
   agentSessionId,
   onShowProjectScope,
   onRestoreRegion,
@@ -457,6 +464,7 @@ export function TreeView({
     intent: TabOpenIntent,
   ) => void;
   onArchive: (id: string, direction: "ancestors" | "descendants" | "only", archived: boolean) => void;
+  onDelete: (id: string) => void;
   /** Current task scope: show only this chat session's experiments, eliding the rest.
    * Null = Entire project scope (the whole forest). */
   agentSessionId: string | null;
@@ -505,6 +513,7 @@ export function TreeView({
             onOpenView,
             onOpenCode,
             onArchive,
+            onDelete,
             actions: archiveActions.get(node.exp.id)!,
           },
         });
@@ -557,6 +566,7 @@ export function TreeView({
     onOpenView,
     onOpenCode,
     onArchive,
+    onDelete,
     project.githubOwner,
     project.githubRepo,
     project.githubEnabled,

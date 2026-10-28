@@ -241,7 +241,7 @@ async fn unpack(archive: &Path, staging: &Path) -> Result<()> {
 
 #[cfg(windows)]
 fn client() -> Result<reqwest::Client> {
-    reqwest::Client::builder()
+    crate::net::remote_client()
         .user_agent(super::github::UA)
         .connect_timeout(std::time::Duration::from_secs(20))
         // Per read, not total: a slow link must still finish the 60 MB download.

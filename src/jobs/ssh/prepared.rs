@@ -1,12 +1,12 @@
 use std::collections::{BTreeMap, BTreeSet};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::{LazyLock, RwLock};
 
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use tokio::process::Command;
 
-use super::{control_dir, sh_quote, sharing::config_quote, SshTarget};
+use super::{control_dir, route_configuration, sh_quote, sharing::config_quote, SshTarget};
 use crate::error::{anyhow, Result};
 
 #[derive(Clone, Serialize, Deserialize)]
@@ -30,7 +30,7 @@ pub(super) struct Prepared {
     pub path: PathBuf,
 }
 
-type Key = (PathBuf, String);
+type Key = (PathBuf, String, Option<String>);
 static CONNECTIONS: LazyLock<RwLock<BTreeMap<Key, Prepared>>> =
     LazyLock::new(|| RwLock::new(BTreeMap::new()));
 static PREPARATION: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
@@ -39,7 +39,11 @@ pub(super) fn cached(target: &SshTarget) -> Option<Prepared> {
     CONNECTIONS
         .read()
         .unwrap_or_else(std::sync::PoisonError::into_inner)
-        .get(&(control_dir(), target.dest.clone()))
+        .get(&(
+            control_dir(),
+            target.dest.clone(),
+            target.auth_agent.clone(),
+        ))
         .cloned()
 }
 
@@ -51,6 +55,53 @@ fn value<'a>(output: &'a str, key: &str) -> Result<&'a str> {
                 .and_then(|rest| rest.strip_prefix(' '))
         })
         .ok_or_else(|| anyhow!("OpenSSH did not resolve {key}"))
+}
+
+fn unresolved_message(key: &str, ssh: Option<&Path>, version: Option<&str>) -> String {
+    let mut message = format!(
+        "OpenSSH did not resolve {key} (ssh: {}, version: {})",
+        ssh.map_or("not found on PATH".into(), |path| path
+            .display()
+            .to_string()),
+        version.unwrap_or("unknown")
+    );
+    if !version.is_some_and(|version| version.starts_with("OpenSSH_")) {
+        message.push_str("; a non-OpenSSH `ssh` earlier on PATH is the likely cause");
+    }
+    message
+}
+
+async fn unresolved(key: &str) -> crate::error::Error {
+    let version = ssh_version("ssh").await;
+    anyhow!(unresolved_message(
+        key,
+        crate::local::shell_env::find_on_process_path("ssh").as_deref(),
+        version.as_deref()
+    ))
+}
+
+async fn ssh_version(program: &str) -> Option<String> {
+    let version = Command::new(program)
+        .arg("-V")
+        .stdin(std::process::Stdio::null())
+        .kill_on_drop(true)
+        .output();
+    tokio::time::timeout(std::time::Duration::from_secs(10), version)
+        .await
+        .ok()
+        .and_then(Result::ok)
+        .and_then(|output| {
+            // OpenSSH prints its version to stderr; a wrapper may use stdout instead.
+            [output.stderr, output.stdout]
+                .into_iter()
+                .find_map(|stream| {
+                    String::from_utf8_lossy(&stream)
+                        .lines()
+                        .map(str::trim)
+                        .find(|line| !line.is_empty())
+                        .map(str::to_owned)
+                })
+        })
 }
 
 pub(super) fn probe_args() -> Vec<String> {
@@ -65,26 +116,12 @@ pub(super) fn probe_args() -> Vec<String> {
     .collect()
 }
 
-pub(super) const ROUTE_FIELDS: &str = "hostname|user|port|controlpath|proxyjump|proxycommand";
-
 fn host(query: &Query) -> Result<&str> {
     query
         .args
         .last()
         .and_then(|dest| dest.rsplit('@').next())
         .ok_or_else(|| anyhow!("Missing SSH destination"))
-}
-
-pub(super) fn route_configuration(output: &str) -> String {
-    // Match final can repeat unrelated list settings such as SendEnv.
-    output
-        .lines()
-        .filter(|line| {
-            line.split_once(' ')
-                .is_some_and(|(key, _)| ROUTE_FIELDS.split('|').any(|field| field == key))
-        })
-        .collect::<Vec<_>>()
-        .join("\n")
 }
 
 async fn configuration(args: &[String], verbose: bool) -> Result<std::process::Output> {
@@ -135,6 +172,7 @@ fn snapshot_contents(
     queries: &[Query],
     proxies: &[Option<String>],
     config: &std::path::Path,
+    system_include: bool,
 ) -> Result<String> {
     let mut contents = String::new();
     for (query, proxy) in queries.iter().zip(proxies) {
@@ -145,6 +183,37 @@ fn snapshot_contents(
                 config_quote(value(&query.output, key)?)
             ));
         }
+        for line in query.output.lines() {
+            if let Some((key, value)) = line.split_once(' ') {
+                // ssh -G loses filename-list quoting; let the included config preserve it.
+                if !matches!(
+                    key,
+                    "hostname"
+                        | "user"
+                        | "port"
+                        | "controlpath"
+                        | "proxyjump"
+                        | "proxycommand"
+                        | "userknownhostsfile"
+                        | "globalknownhostsfile"
+                ) {
+                    let value = if matches!(
+                        key,
+                        "identityfile"
+                            | "certificatefile"
+                            | "identityagent"
+                            | "hostkeyalias"
+                            | "bindaddress"
+                            | "bindinterface"
+                    ) {
+                        config_quote(value)
+                    } else {
+                        value.to_owned()
+                    };
+                    contents.push_str(&format!("  {key} {value}\n"));
+                }
+            }
+        }
         let jump = value(&query.output, "proxyjump").unwrap_or("none");
         if let Some(command) = proxy {
             contents.push_str(&format!("  ProxyCommand {}\n", persistent_proxy(command)));
@@ -154,8 +223,16 @@ fn snapshot_contents(
             contents.push_str("  ProxyCommand none\n");
         }
     }
+    // The system config is re-included so `-F <snapshot>` keeps its settings,
+    // but only when it was readable during resolution: inside a UID-mapped
+    // user namespace its files look nobody-owned and OpenSSH rejects them.
+    let system = if system_include {
+        " /etc/ssh/ssh_config"
+    } else {
+        ""
+    };
     contents.push_str(&format!(
-        "Host *\nInclude {} /etc/ssh/ssh_config\n",
+        "Host *\nInclude {}{system}\n",
         config_quote(&config.to_string_lossy())
     ));
     Ok(contents)
@@ -189,22 +266,99 @@ pub(super) async fn prepare(target: &SshTarget, refresh: bool) -> Result<Prepare
             return Ok(connection);
         }
     }
-    let connection = resolve(&target.dest, None).await?;
+    let connection =
+        resolve_with_agent(&target.dest, None, query, target.auth_agent.as_deref()).await?;
     CONNECTIONS
         .write()
         .unwrap_or_else(std::sync::PoisonError::into_inner)
-        .insert((control_dir(), target.dest.clone()), connection.clone());
+        .insert(
+            (
+                control_dir(),
+                target.dest.clone(),
+                target.auth_agent.clone(),
+            ),
+            connection.clone(),
+        );
     Ok(connection)
 }
 
-async fn resolve(dest: &str, config: Option<&std::path::Path>) -> Result<Prepared> {
+// OpenSSH requires the `-F` file to exist, so when the user has no config
+// the retry falls back to an empty one under the owner-checked control dir.
+fn user_or_empty_config(home: &std::path::Path) -> Result<PathBuf> {
+    let config = home.join(".ssh/config");
+    if config.exists() {
+        return Ok(config);
+    }
     super::prepare_control_dir()?;
-    let prefix: Vec<String> = config
+    let empty = control_dir().join("user.config");
+    if !empty.exists() {
+        crate::local::git::atomic_write_with_mode(&empty, b"", Some(0o600))?;
+    }
+    Ok(empty)
+}
+
+#[cfg(test)]
+async fn resolve(dest: &str, config: Option<&std::path::Path>) -> Result<Prepared> {
+    resolve_with(dest, config, query).await
+}
+
+#[cfg(test)]
+async fn resolve_with<F, Fut>(
+    dest: &str,
+    config: Option<&std::path::Path>,
+    query: F,
+) -> Result<Prepared>
+where
+    F: Fn(Vec<String>) -> Fut,
+    Fut: std::future::Future<Output = Result<Query>>,
+{
+    let agent = crate::local::shell_env::var("SSH_AUTH_SOCK")
+        .map(|value| value.to_string_lossy().into_owned());
+    resolve_with_agent(dest, config, query, agent.as_deref()).await
+}
+
+async fn resolve_with_agent<F, Fut>(
+    dest: &str,
+    config: Option<&std::path::Path>,
+    query: F,
+    agent: Option<&str>,
+) -> Result<Prepared>
+where
+    F: Fn(Vec<String>) -> Fut,
+    Fut: std::future::Future<Output = Result<Query>>,
+{
+    super::prepare_control_dir()?;
+    let mut prefix: Vec<String> = config
         .map(|path| vec!["-F".into(), path.to_string_lossy().into_owned()])
         .unwrap_or_default();
     let mut args = prefix.clone();
     args.extend(["--".into(), dest.into()]);
-    let first = query(args).await?;
+    let mut snapshot_config = None;
+    // When the default chain fails OpenSSH's owner check — a user namespace
+    // (bwrap, managed agent sandboxes) shows root-owned /etc/ssh files as
+    // nobody — retry against the user config alone, skipping the system
+    // include chain; the same workaround as `ssh -F ~/.ssh/config`.
+    let (first, skip_system_include) = match query(args).await {
+        Ok(first) => (first, false),
+        Err(error)
+            if prefix.is_empty() && error.to_string().contains("Bad owner or permissions") =>
+        {
+            let home =
+                dirs::home_dir().ok_or_else(|| anyhow!("Could not locate your home directory"))?;
+            let fallback = user_or_empty_config(&home)?;
+            prefix = vec!["-F".into(), fallback.to_string_lossy().into_owned()];
+            let mut retry = prefix.clone();
+            retry.extend(["--".into(), dest.into()]);
+            match query(retry).await {
+                Ok(first) => {
+                    snapshot_config = Some(fallback);
+                    (first, true)
+                }
+                Err(_) => return Err(error),
+            }
+        }
+        Err(error) => return Err(error),
+    };
     let host = host(&first)?.to_owned();
     if host.is_empty()
         || host.chars().any(|character| {
@@ -215,13 +369,14 @@ async fn resolve(dest: &str, config: Option<&std::path::Path>) -> Result<Prepare
             "Cannot safely prepare SSH alias {host}; use a plain host alias"
         ));
     }
-    let native_id = value(&first.output, "controlpath")?
+    let Ok(native_id) = value(&first.output, "controlpath") else {
+        return Err(unresolved("controlpath").await);
+    };
+    let native_id = native_id
         .strip_prefix("/tmp/orx-ssh-probe-")
         .filter(|name| name.len() == 40 && name.bytes().all(|byte| byte.is_ascii_hexdigit()))
         .ok_or_else(|| anyhow!("OpenSSH did not expand the connection identifier for {host}"))?
         .to_owned();
-    let routed = value(&first.output, "proxyjump").unwrap_or("none") != "none"
-        || value(&first.output, "proxycommand").unwrap_or("none") != "none";
     let mut queries = vec![first];
     let mut seen = BTreeSet::new();
     let mut index = 0;
@@ -240,18 +395,26 @@ async fn resolve(dest: &str, config: Option<&std::path::Path>) -> Result<Prepare
         }
         index += 1;
     }
-    let encoded = serde_json::to_vec(&queries)?;
-    let digest = format!("{:x}", Sha256::digest(&encoded));
-    let socket_name = if routed {
-        digest[..40].to_owned()
-    } else {
-        "%C".into()
+    let encoded = serde_json::to_vec(
+        &queries
+            .iter()
+            .map(|query| &query.output)
+            .collect::<Vec<_>>(),
+    )?;
+    let mut digest = Sha256::new();
+    digest.update(&encoded);
+    digest.update(serde_json::to_vec(&agent)?);
+    let digest = format!("{:x}", digest.finalize());
+    let socket_name = digest[..40].to_owned();
+    let file_digest = format!("{:x}", Sha256::digest(serde_json::to_vec(&queries)?));
+    let snapshot = control_dir().join(format!("{file_digest}.config"));
+    let config = match (config, snapshot_config) {
+        (Some(path), _) => path.to_path_buf(),
+        (None, Some(fallback)) => fallback,
+        (None, None) => dirs::home_dir()
+            .ok_or_else(|| anyhow!("Could not locate your home directory"))?
+            .join(".ssh/config"),
     };
-    let snapshot = control_dir().join(format!("{digest}.config"));
-    let home = dirs::home_dir().ok_or_else(|| anyhow!("Could not locate your home directory"))?;
-    let config = config
-        .map(std::path::Path::to_path_buf)
-        .unwrap_or_else(|| home.join(".ssh/config"));
     let mut proxies: Vec<Option<String>> = queries
         .iter()
         .map(|query| {
@@ -261,7 +424,7 @@ async fn resolve(dest: &str, config: Option<&std::path::Path>) -> Result<Prepare
                 .map(str::to_owned)
         })
         .collect();
-    let contents = snapshot_contents(&queries, &proxies, &config)?;
+    let contents = snapshot_contents(&queries, &proxies, &config, !skip_system_include)?;
     crate::local::git::atomic_write_with_mode(&snapshot, contents.as_bytes(), Some(0o600))?;
     for (index, query) in queries.iter().enumerate() {
         if value(&query.output, "proxyjump").unwrap_or("none") == "none" {
@@ -291,9 +454,9 @@ async fn resolve(dest: &str, config: Option<&std::path::Path>) -> Result<Prepare
             })?;
         proxies[index] = Some(command.to_owned());
     }
-    let contents = snapshot_contents(&queries, &proxies, &config)?;
+    let contents = snapshot_contents(&queries, &proxies, &config, !skip_system_include)?;
     crate::local::git::atomic_write_with_mode(&snapshot, contents.as_bytes(), Some(0o600))?;
-    let path = control_dir().join(if routed { &socket_name } else { &native_id });
+    let path = control_dir().join(&socket_name);
     let connection = Prepared {
         publication: Publication {
             host,
@@ -310,6 +473,228 @@ async fn resolve(dest: &str, config: Option<&std::path::Path>) -> Result<Prepare
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn ssh_version_prefers_stderr_and_falls_back_to_stdout() {
+        use std::os::unix::fs::PermissionsExt;
+        let temp = crate::local::git::TemporaryDirectory::new("orx-ssh-version").unwrap();
+        let stub = |name: &str, body: &str| {
+            let path = temp.path().join(name);
+            std::fs::write(&path, format!("#!/bin/sh\n{body}\n")).unwrap();
+            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+            path.to_string_lossy().into_owned()
+        };
+        let both = stub("both", "echo usage; echo; echo 'OpenSSH_9.6p1' >&2");
+        let stdout_only = stub("stdout", "echo; echo 'ssh-wrapper 1.0'; exit 2");
+        let silent = stub("silent", "exit 1");
+        assert_eq!(ssh_version(&both).await.as_deref(), Some("OpenSSH_9.6p1"));
+        assert_eq!(
+            ssh_version(&stdout_only).await.as_deref(),
+            Some("ssh-wrapper 1.0")
+        );
+        assert_eq!(ssh_version(&silent).await, None);
+        assert_eq!(ssh_version("/nonexistent/orx-test-ssh").await, None);
+    }
+
+    #[test]
+    fn snapshot_drops_system_include_when_it_failed_the_owner_check() {
+        let query = Query {
+            args: vec!["--".into(), "lab".into()],
+            output:
+                "hostname lab.invalid\nuser alice\nport 22\nproxyjump none\nproxycommand none\n"
+                    .into(),
+        };
+        let proxies = vec![None];
+        let config = Path::new("/home/me/.ssh/config");
+        let with_system =
+            snapshot_contents(std::slice::from_ref(&query), &proxies, config, true).unwrap();
+        assert!(with_system.contains("Include \"/home/me/.ssh/config\" /etc/ssh/ssh_config"));
+        let without_system =
+            snapshot_contents(std::slice::from_ref(&query), &proxies, config, false).unwrap();
+        assert!(without_system.ends_with("Include \"/home/me/.ssh/config\"\n"));
+        assert!(!without_system.contains("/etc/ssh/ssh_config"));
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn known_hosts_lists_keep_quoted_filenames() {
+        let temp = crate::local::git::TemporaryDirectory::new("orx-known-hosts").unwrap();
+        let config = temp.path().join("config");
+        std::fs::write(
+            &config,
+            "Host lab\n HostName example.invalid\n IdentityFile none\n IdentityAgent none\n UserKnownHostsFile \"~/research keys/known_hosts\" \"~/second keyfile\"\n GlobalKnownHostsFile \"/tmp/global hostkeys\" /tmp/other\n StrictHostKeyChecking yes\n",
+        ).unwrap();
+        let prepared = resolve("lab", Some(&config)).await.unwrap();
+        let output = Command::new("ssh")
+            .args(["-vvv", "-F"])
+            .arg(&prepared.snapshot)
+            .args(["-oProxyCommand=false", "-oBatchMode=yes", "lab", "true"])
+            .output()
+            .await
+            .unwrap();
+        let debug = String::from_utf8_lossy(&output.stderr);
+        for path in ["~/research keys/known_hosts", "~/second keyfile"] {
+            assert!(
+                debug.contains(&format!("expanded UserKnownHostsFile '{path}' ->")),
+                "{debug}"
+            );
+        }
+        let snapshot = std::fs::read_to_string(&prepared.snapshot).unwrap();
+        assert!(!snapshot.contains("  userknownhostsfile "));
+        assert!(!snapshot.contains("  globalknownhostsfile "));
+    }
+
+    fn owner_check_error() -> crate::error::Error {
+        anyhow!("Could not resolve SSH configuration: Bad owner or permissions on /etc/ssh/ssh_config.d/50-drop.conf")
+    }
+
+    fn canned_output() -> String {
+        format!(
+            "hostname lab.invalid\nuser alice\nport 22\ncontrolpath /tmp/orx-ssh-probe-{}\nproxyjump none\nproxycommand none\n",
+            "a".repeat(40)
+        )
+    }
+
+    fn scripted_query<'a>(
+        calls: &'a std::sync::Mutex<Vec<Vec<String>>>,
+        outcomes: &'a std::sync::Mutex<std::collections::VecDeque<Result<String>>>,
+    ) -> impl Fn(Vec<String>) -> std::future::Ready<Result<Query>> + 'a {
+        move |args| {
+            calls.lock().unwrap().push(args.clone());
+            let outcome = outcomes.lock().unwrap().pop_front().unwrap();
+            let output = outcome.map(|output| Query { args, output });
+            std::future::ready(output)
+        }
+    }
+
+    #[tokio::test]
+    async fn owner_check_retries_with_the_user_config_and_drops_the_system_include() {
+        let calls = std::sync::Mutex::new(Vec::new());
+        let outcomes = std::sync::Mutex::new(
+            [Err(owner_check_error()), Ok(canned_output())]
+                .into_iter()
+                .collect(),
+        );
+        let prepared = resolve_with("lab", None, scripted_query(&calls, &outcomes))
+            .await
+            .unwrap();
+        let calls = calls.into_inner().unwrap();
+        assert_eq!(calls.len(), 2);
+        assert_eq!(calls[0], vec!["--", "lab"]);
+        let home = dirs::home_dir().unwrap();
+        let fallback = user_or_empty_config(&home).unwrap();
+        assert_eq!(
+            calls[1],
+            vec![
+                "-F".to_owned(),
+                fallback.to_string_lossy().into_owned(),
+                "--".to_owned(),
+                "lab".to_owned()
+            ]
+        );
+        let snapshot = std::fs::read_to_string(&prepared.snapshot).unwrap();
+        assert!(!snapshot.contains("/etc/ssh/ssh_config"));
+        assert!(snapshot.contains(&format!(
+            "Include {}",
+            config_quote(&fallback.to_string_lossy())
+        )));
+    }
+
+    #[tokio::test]
+    async fn other_errors_do_not_retry() {
+        let calls = std::sync::Mutex::new(Vec::new());
+        let outcomes = std::sync::Mutex::new(
+            [Err(anyhow!(
+                "Could not resolve SSH configuration: ssh: Could not resolve hostname lab"
+            ))]
+            .into_iter()
+            .collect(),
+        );
+        let error = resolve_with("lab", None, scripted_query(&calls, &outcomes))
+            .await
+            .err()
+            .unwrap();
+        assert!(error.to_string().contains("Could not resolve hostname"));
+        assert_eq!(calls.lock().unwrap().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn a_failed_retry_returns_the_original_error() {
+        let calls = std::sync::Mutex::new(Vec::new());
+        let outcomes = std::sync::Mutex::new(
+            [
+                Err(owner_check_error()),
+                Err(anyhow!("Could not resolve SSH configuration: retry broke")),
+            ]
+            .into_iter()
+            .collect(),
+        );
+        let error = resolve_with("lab", None, scripted_query(&calls, &outcomes))
+            .await
+            .err()
+            .unwrap();
+        assert!(error.to_string().contains("Bad owner or permissions"));
+        assert_eq!(calls.lock().unwrap().len(), 2);
+    }
+
+    #[tokio::test]
+    async fn an_explicit_config_does_not_retry() {
+        let calls = std::sync::Mutex::new(Vec::new());
+        let outcomes = std::sync::Mutex::new([Err(owner_check_error())].into_iter().collect());
+        let config = Path::new("/tmp/orx-test-explicit-config");
+        let error = resolve_with("lab", Some(config), scripted_query(&calls, &outcomes))
+            .await
+            .err()
+            .unwrap();
+        assert!(error.to_string().contains("Bad owner or permissions"));
+        let calls = calls.into_inner().unwrap();
+        assert_eq!(
+            calls,
+            vec![vec![
+                "-F".to_owned(),
+                "/tmp/orx-test-explicit-config".to_owned(),
+                "--".to_owned(),
+                "lab".to_owned()
+            ]]
+        );
+    }
+
+    #[test]
+    fn user_or_empty_config_substitutes_an_empty_file_for_a_missing_user_config() {
+        let temp = crate::local::git::TemporaryDirectory::new("orx-fallback-config").unwrap();
+        let fallback = user_or_empty_config(temp.path()).unwrap();
+        assert_eq!(fallback, control_dir().join("user.config"));
+        assert_eq!(std::fs::read_to_string(&fallback).unwrap(), "");
+        std::fs::create_dir_all(temp.path().join(".ssh")).unwrap();
+        let config = temp.path().join(".ssh/config");
+        std::fs::write(&config, "Host somewhere\n").unwrap();
+        assert_eq!(user_or_empty_config(temp.path()).unwrap(), config);
+    }
+
+    #[test]
+    fn unresolved_key_names_the_ssh_binary_and_version() {
+        assert_eq!(
+            unresolved_message(
+                "controlpath",
+                Some(Path::new("/home/me/bin/ssh")),
+                Some("ssh-wrapper 1.0")
+            ),
+            "OpenSSH did not resolve controlpath (ssh: /home/me/bin/ssh, version: ssh-wrapper 1.0); a non-OpenSSH `ssh` earlier on PATH is the likely cause"
+        );
+        assert_eq!(
+            unresolved_message("controlpath", None, None),
+            "OpenSSH did not resolve controlpath (ssh: not found on PATH, version: unknown); a non-OpenSSH `ssh` earlier on PATH is the likely cause"
+        );
+        assert_eq!(
+            unresolved_message(
+                "controlpath",
+                Some(Path::new("/usr/bin/ssh")),
+                Some("OpenSSH_9.6p1 Ubuntu-3ubuntu13")
+            ),
+            "OpenSSH did not resolve controlpath (ssh: /usr/bin/ssh, version: OpenSSH_9.6p1 Ubuntu-3ubuntu13)"
+        );
+    }
 
     #[tokio::test]
     async fn configured_routes_have_distinct_identities_and_remain_pinned_after_edits() {
@@ -357,7 +742,11 @@ mod tests {
             resolve("command-a", Some(&config)).await.unwrap().path
         );
         let target = SshTarget::alias("command-a");
-        let key = (control_dir(), target.dest.clone());
+        let key = (
+            control_dir(),
+            target.dest.clone(),
+            target.auth_agent.clone(),
+        );
         let refreshed = resolve(&target.dest, Some(&config)).await.unwrap();
         CONNECTIONS.write().unwrap().insert(key.clone(), refreshed);
         let mut args = super::super::ssh_opts_prepared(&target, true, &command_a);

@@ -42,7 +42,7 @@ use crate::local::chat::ChatHost;
 use crate::local::is_terminal;
 use crate::local::opencode::AgentHost;
 use crate::store::{
-    log_path, now_ms, SshHostTest, Store, StoredAgentSelection, StoredChatSession, StoredRun,
+    now_ms, SshHostTest, Store, StoredAgentSelection, StoredChatSession, StoredRun,
 };
 use crate::updates;
 use crate::workspace_state::{GlobalWorkspaceState, WorkspaceState};
@@ -53,6 +53,7 @@ mod harness_setup;
 use compute_settings::*;
 
 pub async fn run(args: UpArgs) -> Result<()> {
+    updates::note_startup_image();
     let port = args.port;
     let persistent_host = args.remote_host;
     let remote_auth = if persistent_host {
@@ -72,6 +73,16 @@ pub async fn run(args: UpArgs) -> Result<()> {
     )?;
     // Blocks only for a relaunched server, whose predecessor still holds the port.
     updates::await_replaced_parent();
+    let backend_lock = tokio::task::spawn_blocking(updates::BackendLock::acquire)
+        .await
+        .ok()
+        .flatten();
+    // An install that finished while this process waited replaced the image it was started from.
+    if backend_lock.is_some() && updates::updated_exe_on_disk().await {
+        drop(backend_lock);
+        let err = updates::relaunch(port);
+        return Err(anyhow!("orx up: could not restart: {err}"));
+    }
     let listener = tokio::net::TcpListener::bind(("127.0.0.1", port))
         .await
         .map_err(|error| anyhow!("Could not bind 127.0.0.1:{}: {}", port, error))?;
@@ -115,6 +126,7 @@ pub async fn run(args: UpArgs) -> Result<()> {
         stopping: stopping.clone(),
         dashboard_lock: Arc::new(std::sync::Mutex::new(Some(dashboard_lock))),
         restart: Arc::new(tokio::sync::Notify::new()),
+        trackio: Arc::default(),
     };
     // Plan-mode turns hand this port to the `orx mcp-gate` permission bridge.
     state.chat.set_up_port(actual_port);
@@ -153,17 +165,21 @@ pub async fn run(args: UpArgs) -> Result<()> {
         let gate = state.data_dir_gate.clone();
         tokio::task::spawn_blocking(move || local::demo::prewarm(move_in_progress, gate));
     }
-    if !persistent_host {
-        let chat = state.chat.clone();
-        tokio::spawn(async move {
-            if let Err(err) = local::chat::delete_side_chats(&chat).await {
-                eprintln!("orx up: side chat cleanup: {err}");
-            }
-        });
-    }
     // Deliver explicitly registered run wake-ups once their chat becomes idle.
     tokio::spawn(local::chat::watch_runs(
         state.chat.clone(),
+        state.data_dir_move_in_progress.clone(),
+        state.data_dir_gate.clone(),
+    ));
+    tokio::spawn(adopt_orphaned_runs(
+        state.data_dir_move_in_progress.clone(),
+        state.data_dir_gate.clone(),
+    ));
+    tokio::spawn(reclaim_orphaned_run_artifacts(
+        state.data_dir_move_in_progress.clone(),
+        state.data_dir_gate.clone(),
+    ));
+    tokio::spawn(reclaim_remote_run_dirs(
         state.data_dir_move_in_progress.clone(),
         state.data_dir_gate.clone(),
     ));
@@ -263,12 +279,29 @@ pub async fn run(args: UpArgs) -> Result<()> {
     agent.shutdown().await;
     codex.shutdown().await;
     claude.shutdown().await;
+    state.chat.acp.shutdown().await;
     if let Some(server) = control_server {
         server.shutdown().await;
     }
     state.dashboard_lock.lock().unwrap().take();
     if restarting {
-        eprintln!("orx up: restarting into the updated orx");
+        drop(backend_lock);
+        if !updates::updated_exe_on_disk().await {
+            eprintln!("orx up: installing the update before restarting");
+            let failures = updates::failure_count();
+            if let Err(err) = updates::apply_now().await {
+                eprintln!("orx up: {err} Restarting on this version.");
+            }
+            // Unless the updater counted it or still will, back off (deferred again, or it
+            // never started), or the relaunch restarts straight back into this.
+            if !updates::updated_exe_on_disk().await
+                && updates::failure_count() == failures
+                && !updates::updater_running()
+            {
+                updates::record_attempt(false);
+            }
+        }
+        eprintln!("orx up: restarting");
         let err = updates::relaunch(actual_port);
         return Err(anyhow!("orx up: could not restart: {err}"));
     }
@@ -374,6 +407,7 @@ struct AppState {
     dashboard_lock: Arc<std::sync::Mutex<Option<DashboardLock>>>,
     /// Fired by `POST /api/update/restart`; the serve loop relaunches on it.
     restart: Arc<tokio::sync::Notify>,
+    trackio: Arc<crate::local::trackio::LocalServer>,
 }
 
 async fn project_publication_lock(
@@ -432,7 +466,9 @@ impl Drop for ProjectDeletionLease {
 impl ProjectLifecycle {
     fn admit(&self, project_id: &str) -> Option<ProjectAdmissionLease> {
         let mut state = self.inner.lock().unwrap();
-        if state.deleting.contains(project_id) {
+        if state.deleting.contains(project_id)
+            || (project_id == "__project_create__" && !state.deleting.is_empty())
+        {
             return None;
         }
         *state.admissions.entry(project_id.to_string()).or_default() += 1;
@@ -476,6 +512,7 @@ impl ProjectLifecycle {
 fn router(state: AppState, remote_auth: Option<RemoteAuth>) -> Router {
     let app = Router::new()
         .route("/api/health", get(health))
+        .route("/api/file-manager", get(file_manager))
         .route("/api/onboarding/complete", post(complete_onboarding))
         .route("/api/project-path/status", get(project_path_status))
         .route("/api/project-path/pick", post(pick_project_folder))
@@ -506,6 +543,7 @@ fn router(state: AppState, remote_auth: Option<RemoteAuth>) -> Router {
         )
         .route("/api/projects/{id}/github/push", post(push_project_github))
         .route("/api/github/account", get(github_account))
+        .route("/api/github/organizations", get(github_organizations))
         .route(
             "/api/github/project-repo-preview",
             get(github_project_repo_preview),
@@ -524,6 +562,10 @@ fn router(state: AppState, remote_auth: Option<RemoteAuth>) -> Router {
         .route("/api/runs/{id}/logs", get(run_logs))
         .route("/api/runs/{id}/diff", get(run_diff))
         .route("/api/experiments/{id}/diff", get(experiment_diff))
+        .route(
+            "/api/experiments/{id}",
+            axum::routing::delete(delete_experiment),
+        )
         .route(
             "/api/experiments/{id}/archive",
             axum::routing::patch(set_experiment_archive),
@@ -639,6 +681,7 @@ fn router(state: AppState, remote_auth: Option<RemoteAuth>) -> Router {
         .route("/api/update/apply", post(apply_update))
         .route("/api/update/restart", post(restart_after_update))
         .route("/api/update/auto", post(set_auto_update))
+        .route("/api/update/channel", post(set_update_channel))
         .route("/api/update/install-cli", post(install_cli))
         .route("/api/settings/ui-state", get(ui_state).post(set_ui_state))
         .route(
@@ -677,6 +720,8 @@ fn router(state: AppState, remote_auth: Option<RemoteAuth>) -> Router {
             get(ray_settings).post(set_ray_settings),
         )
         .route("/api/settings/ray/preflight", post(ray_preflight))
+        .route("/api/trackio/projects/{id}/runs", get(trackio_project_runs))
+        .route("/api/settings/trackio/preflight", post(trackio_preflight))
         .route("/api/settings/compute", get(compute_settings))
         .route("/api/settings/compute/default", post(set_compute_default))
         .route("/api/settings/local", get(local_machine_settings))
@@ -692,6 +737,16 @@ fn router(state: AppState, remote_auth: Option<RemoteAuth>) -> Router {
             get(lit_sources_settings).post(set_lit_sources_settings),
         )
         .route("/api/harnesses", get(list_harnesses))
+        .route(
+            "/api/harnesses/acp",
+            get(list_acp_harnesses).post(create_acp_harness),
+        )
+        .route("/api/harnesses/acp/test", post(test_acp_harness))
+        .route("/api/harnesses/acp/presets", get(list_acp_presets))
+        .route(
+            "/api/harnesses/acp/{id}",
+            axum::routing::put(update_acp_harness).delete(delete_acp_harness),
+        )
         .route("/api/harnesses/{id}/snapshot", get(harness_snapshot))
         .route(
             "/api/harnesses/setup/commands",
@@ -728,9 +783,24 @@ fn router(state: AppState, remote_auth: Option<RemoteAuth>) -> Router {
         )
         .route(
             "/api/chat/sessions/{id}",
-            axum::routing::delete(delete_chat_session).patch(update_chat_session),
+            get(get_chat_session)
+                .delete(delete_chat_session)
+                .patch(update_chat_session),
         )
         .route("/api/chat/sessions/{id}/messages", get(chat_messages))
+        .route(
+            "/api/chat/sessions/{id}/submissions/{client_id}",
+            get(chat_submission),
+        )
+        .route(
+            "/api/chat/sessions/{id}/experiments",
+            get(chat_session_experiments),
+        )
+        .route("/api/chat/sessions/{id}/subagent", get(chat_subagent))
+        .route(
+            "/api/chat/sessions/{id}/configuration",
+            post(set_chat_configuration),
+        )
         .route("/api/chat/sessions/{id}/worktree", get(session_worktree))
         .route("/api/chat/sessions/{id}/message", post(send_chat_message))
         .route("/api/chat/sessions/{id}/shell", post(run_shell_command))
@@ -738,6 +808,7 @@ fn router(state: AppState, remote_auth: Option<RemoteAuth>) -> Router {
             "/api/chat/sessions/{id}/compact",
             post(compact_chat_session),
         )
+        .route("/api/chat/active-runs", get(chat_active_runs))
         .route("/api/chat/native-sessions", get(list_native_chats))
         .route("/api/chat/native-sessions/import", post(import_native_chat))
         .route(
@@ -825,6 +896,7 @@ fn remote_route_forbidden(path: &str) -> bool {
             | "/api/update/apply"
             | "/api/update/restart"
             | "/api/update/auto"
+            | "/api/update/channel"
             | "/api/update/install-cli"
             | "/api/settings/data-dir"
             | "/api/settings/data-dir/move"
@@ -917,7 +989,7 @@ impl From<&StoredRun> for ApiRun {
             experiment_id: run.experiment_id.clone(),
             project_id: run.project_id.clone(),
             status: run.status.clone(),
-            backend: serde_json::from_str(&run.backend_json).ok(),
+            backend: crate::store::public_backend(&run.backend_json),
             command: Some(run.command.clone()).filter(|c| !c.is_empty()),
             commit_sha: run.commit_sha.clone(),
             result_markdown: run.result_markdown.clone(),
@@ -939,6 +1011,17 @@ async fn health(State(state): State<AppState>) -> Json<Value> {
         "dashboardProtocol": crate::commands::up_remote::DASHBOARD_PROTOCOL,
         "instanceId": state.remote_instance_id,
     }))
+}
+
+async fn file_manager(
+    Query(query): Query<std::collections::HashMap<String, String>>,
+) -> Json<Value> {
+    let locale = query.get("locale").cloned().unwrap_or_default();
+    let name = tokio::task::spawn_blocking(move || crate::editors::file_manager_name(&locale))
+        .await
+        .ok()
+        .flatten();
+    Json(json!({ "os": std::env::consts::OS, "name": name }))
 }
 
 #[derive(Deserialize)]
@@ -1076,7 +1159,6 @@ struct SkillsQ {
 /// built-in catalog, personal skills, and skills in the open project.
 async fn list_skills(Query(q): Query<SkillsQ>) -> ApiResult {
     tokio::task::spawn_blocking(move || {
-        let importing = crate::local::user_skills::refresh_imports();
         let project = q.project.as_deref().and_then(|id| {
             Store::open().ok()?.get_local_project(id).ok().flatten()
         });
@@ -1117,7 +1199,7 @@ async fn list_skills(Query(q): Query<SkillsQ>) -> ApiResult {
                 "harness": q.harness,
             }));
         }
-        Json(json!({ "skills": skills, "importing": importing }))
+        Json(json!({ "skills": skills }))
     })
     .await
     .map_err(|e| ApiError::from(anyhow!(e)))
@@ -1172,12 +1254,9 @@ fn user_skill_json(s: &crate::local::user_skills::UserSkill) -> Value {
 /// coding agents installed on this machine.
 async fn list_user_skills() -> ApiResult {
     tokio::task::spawn_blocking(|| {
-        let importing = crate::local::user_skills::refresh_imports();
-        let skills: Vec<Value> = crate::local::user_skills::list()
-            .iter()
-            .map(user_skill_json)
-            .collect();
-        Json(json!({ "skills": skills, "importing": importing }))
+        let (skills, discovery) = crate::local::user_skills::list();
+        let skills: Vec<Value> = skills.iter().map(user_skill_json).collect();
+        Json(json!({ "skills": skills, "discovery": discovery }))
     })
     .await
     .map_err(|e| ApiError::from(anyhow!(e)))
@@ -1446,6 +1525,7 @@ struct CreateProjectReq {
     github_sync_enabled: Option<bool>,
     /// UI locale, for the starter prompts warmed up in the background.
     locale: Option<String>,
+    starter_agent: Option<local::starter::Agent>,
 }
 
 async fn create_project(
@@ -1491,8 +1571,9 @@ async fn create_project(
     };
     let shallow_clone = local::github::should_shallow_clone(repo_size_kb);
     let run_command = req.run_command;
-    let creation_guard = state.project_creation_lock.lock().await;
-    let result = tokio::task::spawn_blocking(move || -> Result<local::model::LocalProject> {
+    let creation_guard = state.project_creation_lock.clone().lock_owned().await;
+    let result = tokio::task::spawn_blocking(move || -> Result<_> {
+        let _creation_guard = creation_guard;
         let store = Store::open()?;
         let project = local::projects::create_project(
             &store,
@@ -1509,22 +1590,21 @@ async fn create_project(
                 paper_pdf,
             },
         )?;
-        Ok(project)
+        Ok((project, create_admission))
     })
     .await
     .map_err(|e| anyhow!("project task failed: {e}"))?;
-    let project = result.map_err(bad_request)?;
+    let (project, create_admission) = result.map_err(bad_request)?;
     // Starter prompts take a model call; start it now so the empty chat that
     // opens next usually finds them cached.
-    local::starter::warm(project.clone(), locale);
-    drop(creation_guard);
+    local::starter::warm(project.clone(), locale, req.starter_agent);
     let _project_admission = state
         .project_lifecycle
         .admit(&project.id)
         .ok_or_else(|| bad_request("project deletion is in progress"))?;
     drop(create_admission);
     let (project, github_publication_error) = if github_sync_enabled {
-        match push_project_for_sync(project.clone(), &state.chat).await {
+        match push_project_for_sync(project.clone(), &state.chat, None).await {
             Ok((project, _)) => (project, None),
             Err(error) => {
                 let project = Store::open()?
@@ -1682,6 +1762,7 @@ fn github_push_was_rejected(error: &str) -> bool {
 async fn create_independent_project_repository(
     mut project: local::model::LocalProject,
     chat: &ChatHost,
+    organization: Option<&str>,
 ) -> Result<local::model::LocalProject> {
     let store = Store::open()?;
     let legacy = store
@@ -1704,7 +1785,7 @@ async fn create_independent_project_repository(
     let reroot_shallow = local::git::prepare_shallow_repository_for_publication(
         std::path::Path::new(&project.repo_path),
     )?;
-    let (owner, repo) = local::github::create_project_repo(&project.slug).await?;
+    let (owner, repo) = local::github::create_project_repo(&project.slug, organization).await?;
     if reroot_shallow {
         local::git::reroot_shallow_repository(
             std::path::Path::new(&project.repo_path),
@@ -1722,6 +1803,7 @@ async fn create_independent_project_repository(
 async fn push_project_for_sync(
     mut project: local::model::LocalProject,
     chat: &ChatHost,
+    organization: Option<&str>,
 ) -> Result<(local::model::LocalProject, local::github::Status)> {
     let github_status = local::github::status().await;
     if !github_status.installed {
@@ -1739,11 +1821,11 @@ async fn push_project_for_sync(
             .await?
             .is_some_and(|meta| meta.can_push && !meta.archived);
         if !can_push {
-            project = create_independent_project_repository(project, chat).await?;
+            project = create_independent_project_repository(project, chat, organization).await?;
             using_existing_repository = false;
         }
     } else {
-        project = create_independent_project_repository(project, chat).await?;
+        project = create_independent_project_repository(project, chat, organization).await?;
         using_existing_repository = false;
     }
 
@@ -1759,7 +1841,7 @@ async fn push_project_for_sync(
         if !using_existing_repository || !github_push_was_rejected(&error.to_string()) {
             return Err(error);
         }
-        project = create_independent_project_repository(project, chat).await?;
+        project = create_independent_project_repository(project, chat, organization).await?;
         push_once(&project)
             .await
             .map_err(|error| anyhow!("Git push task failed: {error}"))??;
@@ -1770,7 +1852,17 @@ async fn push_project_for_sync(
     Ok((project, github_status))
 }
 
-async fn enable_project_github(State(state): State<AppState>, Path(id): Path<String>) -> ApiResult {
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct EnableProjectGithubReq {
+    organization: Option<String>,
+}
+
+async fn enable_project_github(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+    Json(req): Json<EnableProjectGithubReq>,
+) -> ApiResult {
     reject_if_moving(&state)?;
     let _admission = state
         .project_lifecycle
@@ -1782,7 +1874,12 @@ async fn enable_project_github(State(state): State<AppState>, Path(id): Path<Str
     let project = store
         .get_local_project(&id)?
         .ok_or_else(|| not_found("project"))?;
-    let (project, github_status) = push_project_for_sync(project, &state.chat)
+    let organization = req
+        .organization
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty());
+    let (project, github_status) = push_project_for_sync(project, &state.chat, organization)
         .await
         .map_err(bad_request)?;
     let git_status = project_git_json(&project, github_status);
@@ -1844,6 +1941,13 @@ async fn github_account() -> ApiResult {
     Ok(Json(
         json!({ "login": local::github::viewer_login().await.ok() }),
     ))
+}
+
+async fn github_organizations() -> ApiResult {
+    let organizations = local::github::viewer_organizations()
+        .await
+        .map_err(bad_request)?;
+    Ok(Json(json!({ "organizations": organizations })))
 }
 
 #[derive(Deserialize)]
@@ -1944,11 +2048,29 @@ async fn update_project(
     Ok(Json(json!({ "project": project_json(&project) })))
 }
 
+#[derive(Default, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct DeleteProjectQuery {
+    #[serde(default)]
+    delete_artifacts: bool,
+}
+
 /// Delete a project and everything hanging off it. Refuses while runs are in
 /// flight (deleting their rows would strand the supervisor mid-job) — but
 /// requests their cancellation, so a retry shortly after goes through. The
 /// registered repository folder is left untouched.
-async fn delete_project(State(state): State<AppState>, Path(id): Path<String>) -> ApiResult {
+async fn delete_project(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+    Query(query): Query<DeleteProjectQuery>,
+) -> ApiResult {
+    // Finish destructive cleanup even if the HTTP request is canceled.
+    tokio::spawn(delete_project_inner(state, id, query))
+        .await
+        .map_err(|error| ApiError::from(anyhow!("project deletion task failed: {error}")))?
+}
+
+async fn delete_project_inner(state: AppState, id: String, query: DeleteProjectQuery) -> ApiResult {
     reject_if_moving(&state)?;
     let _deleting_project = state
         .project_lifecycle
@@ -1967,7 +2089,11 @@ async fn delete_project(State(state): State<AppState>, Path(id): Path<String>) -
     if !in_flight.is_empty() {
         let mut failures = Vec::new();
         for run in &in_flight {
-            if let Err(err) = crate::commands::exp::request_local_run_cancel(&store, &run.id) {
+            if let Err(err) = crate::commands::exp::request_local_run_cancel(
+                &store,
+                &run.id,
+                "Cancel requested because the project is being deleted.",
+            ) {
                 failures.push(format!("{}: {err}", run.id));
             }
         }
@@ -2000,14 +2126,44 @@ async fn delete_project(State(state): State<AppState>, Path(id): Path<String>) -
         let _ = state.chat.interrupt(&session.id).await;
         state.chat.opencode.kill_session(&session.id).await;
         state.chat.codex.kill_session(&session.id).await;
-        state.chat.claude.forget_session(&session.id).await;
+        state.chat.claude.kill_session(&session.id).await;
+        state.chat.acp.stop(&session.id).await;
     }
-    store.delete_local_project(&id)?;
+    let projects = store.list_local_projects()?;
+    // Refuse before anything is deleted; remove only once the rows are gone.
+    let artifacts =
+        local::files::plan_project_artifact_cleanup(&project, query.delete_artifacts, &projects)?;
+    let session_ids = sessions
+        .iter()
+        .map(|session| session.id.clone())
+        .collect::<Vec<_>>();
+    let project_id = id.clone();
+    // Row deletion can wait up to RUN_ARTIFACTS_WAIT for the run-artifacts lock, so keep it off the async workers.
+    tokio::task::spawn_blocking(move || {
+        let native_purge = (!session_ids.is_empty()).then_some(|| {
+            local::chat::ChatHost::purge_native_history_blocking(&store, &session_ids)
+        });
+        store.delete_local_project_with(&project_id, native_purge)
+    })
+    .await
+    .map_err(|error| anyhow!("project row deletion task failed: {error}"))??;
     for session in &sessions {
+        state.chat.claude.forget_session(&session.id).await;
         local::chat::cleanup_session_transcript_artifacts(&session.id);
         local::chat::cleanup_session_worktree(&project, &session.id);
     }
-    Ok(Json(json!({ "ok": true })))
+    let _ = std::fs::remove_dir(local::git::worktrees_root(&id));
+    // The rows are gone, so a failure here is reported without failing the deletion.
+    let artifacts_error = match tokio::task::spawn_blocking(move || artifacts.apply()).await {
+        Ok(Ok(())) => None,
+        Ok(Err(error)) => Some(format!("The project was deleted. {error}")),
+        Err(error) => Some(format!(
+            "The project was deleted. Artifact cleanup failed: {error}"
+        )),
+    };
+    Ok(Json(
+        json!({ "ok": true, "artifactsError": artifacts_error }),
+    ))
 }
 
 async fn list_experiments(Path(id): Path<String>) -> ApiResult {
@@ -2050,6 +2206,26 @@ async fn set_experiment_archive(
     Ok(Json(json!({ "ids": ids })))
 }
 
+async fn delete_experiment(State(state): State<AppState>, Path(id): Path<String>) -> ApiResult {
+    reject_if_moving(&state)?;
+    // Deletion can wait up to RUN_ARTIFACTS_WAIT for the run-artifacts lock.
+    blocking_api(move || {
+        let store = Store::open()?;
+        let experiment = store
+            .get_local_experiment(&id)?
+            .ok_or_else(|| not_found("experiment"))?;
+        let _admission = state
+            .project_lifecycle
+            .admit(&experiment.project_id)
+            .ok_or_else(|| bad_request("project deletion is in progress"))?;
+        let deleted = local::experiments::delete_experiment(&store, &id).map_err(bad_request)?;
+        Ok(Json(
+            json!({ "ok": true, "branchCommit": deleted.branch_commit }),
+        ))
+    })
+    .await
+}
+
 async fn list_project_runs(Path(id): Path<String>) -> ApiResult {
     let store = Store::open()?;
     store
@@ -2077,6 +2253,8 @@ struct CreateRunReq {
     telemetry_suppressed: bool,
     experiment_id: String,
     backend: Option<String>,
+    cpus: Option<u32>,
+    mem: Option<String>,
     flavor: Option<String>,
     host: Option<String>,
     container: Option<String>,
@@ -2092,6 +2270,67 @@ struct CreateRunReq {
     force: bool,
     chat_session_id: Option<String>,
     agent_origin: Option<String>,
+    /// Absent from dashboard callers; checked against orx up's own config dir.
+    caller_config_dir: Option<std::path::PathBuf>,
+}
+
+impl CreateRunReq {
+    fn from_run_args(args: &crate::ExpRunArgs) -> Result<Self> {
+        Ok(Self {
+            telemetry_suppressed: args.telemetry_suppressed
+                || !crate::telemetry::accounting_reports_enabled(),
+            invocation_context: args
+                .invocation_identity()?
+                .map(|identity| serde_json::to_string(&identity))
+                .transpose()?,
+            experiment_id: args.exp_id.clone(),
+            backend: args.backend.clone(),
+            cpus: args.cpus,
+            mem: args.mem.clone(),
+            flavor: args.flavor.clone(),
+            host: args.host.clone(),
+            container: args.container.clone(),
+            no_container: args.no_container,
+            manifest: args.manifest.clone(),
+            image: args.image.clone(),
+            timeout: args.timeout.clone(),
+            org: args.org.clone(),
+            provider: args.provider.clone(),
+            disk: args.disk,
+            force: args.force,
+            chat_session_id: args.launching_chat_session(),
+            agent_origin: args.agent_origin.clone(),
+            caller_config_dir: Some(absolute_config_dir()),
+        })
+    }
+
+    fn into_run_args(self) -> crate::ExpRunArgs {
+        let mut backend = self.backend;
+        let mut flavor = self.flavor;
+        local::apply_compute_default(&mut backend, &mut flavor);
+        crate::ExpRunArgs {
+            invocation_context: self.invocation_context,
+            telemetry_suppressed: self.telemetry_suppressed,
+            exp_id: self.experiment_id,
+            disk: self.disk,
+            provider: self.provider,
+            backend: Some(backend.unwrap_or_else(|| "local".to_string())),
+            flavor,
+            org: self.org,
+            host: self.host,
+            container: self.container,
+            no_container: self.no_container,
+            manifest: self.manifest,
+            image: self.image,
+            timeout: self.timeout,
+            cpus: self.cpus,
+            mem: self.mem,
+            force: self.force,
+            chat_session_id: self.chat_session_id,
+            agent_origin: self.agent_origin,
+            forwarded: true,
+        }
+    }
 }
 
 #[derive(Deserialize)]
@@ -2103,6 +2342,7 @@ pub(crate) struct RunLaunchSummary {
     pub run_id: String,
     pub experiment_id: String,
     pub job_id: Option<String>,
+    pub slurm_resources: Option<String>,
 }
 
 async fn decode_local_response<T: serde::de::DeserializeOwned>(
@@ -2121,9 +2361,12 @@ async fn decode_local_response<T: serde::de::DeserializeOwned>(
                 value
                     .get("error")
                     .and_then(Value::as_str)
-                    .map(str::to_string)
+                    .map(|error| error.trim().to_string())
             })
             .unwrap_or_else(|| String::from_utf8_lossy(&body).trim().to_string());
+        if detail.is_empty() {
+            return Err(anyhow!("orx up could not {action}: HTTP {status}"));
+        }
         if status.is_client_error() {
             return Err(anyhow!("{detail}"));
         }
@@ -2134,7 +2377,7 @@ async fn decode_local_response<T: serde::de::DeserializeOwned>(
 }
 
 fn local_client() -> Result<reqwest::Client> {
-    reqwest::Client::builder()
+    crate::net::loopback_client()
         .connect_timeout(Duration::from_secs(3))
         .build()
         .map_err(|error| anyhow!("Could not create the orx up client: {error}"))
@@ -2155,29 +2398,7 @@ pub(crate) async fn submit_run_via_up(
     port: u16,
     args: &crate::ExpRunArgs,
 ) -> Result<RunLaunchSummary> {
-    let request = CreateRunReq {
-        telemetry_suppressed: args.telemetry_suppressed
-            || !crate::telemetry::accounting_reports_enabled(),
-        invocation_context: args
-            .invocation_identity()?
-            .map(|identity| serde_json::to_string(&identity))
-            .transpose()?,
-        experiment_id: args.exp_id.clone(),
-        backend: args.backend.clone(),
-        flavor: args.flavor.clone(),
-        host: args.host.clone(),
-        container: args.container.clone(),
-        no_container: args.no_container,
-        manifest: args.manifest.clone(),
-        image: args.image.clone(),
-        timeout: args.timeout.clone(),
-        org: args.org.clone(),
-        provider: args.provider.clone(),
-        disk: args.disk,
-        force: args.force,
-        chat_session_id: args.launching_chat_session(),
-        agent_origin: args.agent_origin.clone(),
-    };
+    let request = CreateRunReq::from_run_args(args)?;
     let response =
         authenticate_up_request(local_client()?.post(format!("http://127.0.0.1:{port}/api/runs")))
             .json(&request)
@@ -2192,34 +2413,42 @@ pub(crate) async fn submit_run_via_up(
         .and_then(|backend| backend.get("jobId"))
         .and_then(Value::as_str)
         .map(str::to_string);
+    let slurm_resources = response
+        .run
+        .backend
+        .and_then(|backend| serde_json::from_value(backend).ok())
+        .and_then(|backend| local::slurm::requested_resources(&backend));
     Ok(RunLaunchSummary {
         run_id: response.run.id,
         experiment_id: args.exp_id.clone(),
         job_id,
+        slurm_resources,
     })
 }
 
-#[derive(Debug, Deserialize)]
-pub(crate) struct HarnessInstall {
-    pub name: String,
-    pub installed: bool,
-}
-
-/// `orx up`'s install evidence for `harness`, from its own PATH rather than the caller's.
-pub(crate) async fn harness_install_via_up(port: u16, harness: &str) -> Result<HarnessInstall> {
-    let response = authenticate_up_request(local_client()?.get(format!(
-        "http://127.0.0.1:{port}/api/harnesses/{harness}/snapshot"
-    )))
-    .timeout(Duration::from_secs(10))
+pub(crate) async fn chat_request_via_up(
+    port: u16,
+    method: reqwest::Method,
+    path: &str,
+    body: &Value,
+) -> Result<Value> {
+    let response = authenticate_up_request(
+        local_client()?.request(method, format!("http://127.0.0.1:{port}{path}")),
+    )
+    .json(body)
     .send()
     .await
-    .map_err(|error| anyhow!("Could not reach the trusted orx up process: {error}"))?;
-    decode_local_response(response, "check the harness").await
+    .map_err(|error| anyhow!("Could not reach the trusted OpenResearch server: {error}"))?;
+    decode_local_response(response, "submit the chat request").await
 }
 
 pub(crate) async fn cancel_run_via_up(port: u16, run_id: &str) -> Result<()> {
     let response = authenticate_up_request(
-        local_client()?.post(format!("http://127.0.0.1:{port}/api/runs/{run_id}/cancel")),
+        local_client()?
+            .post(format!("http://127.0.0.1:{port}/api/runs/{run_id}/cancel"))
+            .json(&CancelRunReq {
+                chat_session_id: local::chat::launching_chat_session(),
+            }),
     )
     .send()
     .await
@@ -2228,9 +2457,45 @@ pub(crate) async fn cancel_run_via_up(port: u16, run_id: &str) -> Result<()> {
     Ok(())
 }
 
+/// Launching with orx up's settings after the caller checked its own would
+/// submit to a different cluster or namespace than the one the caller tested.
+/// A relative `XDG_CONFIG_HOME` names a different dir in each process's working directory.
+fn absolute_config_dir() -> std::path::PathBuf {
+    let dir = crate::config::config_dir();
+    std::path::absolute(&dir).unwrap_or(dir)
+}
+
+fn require_caller_config_dir(
+    caller: Option<&std::path::Path>,
+    own: &std::path::Path,
+) -> Result<()> {
+    let Some(caller) = caller else {
+        return Ok(());
+    };
+    let same = caller == own
+        || crate::paths::canonicalize(caller)
+            .ok()
+            .zip(crate::paths::canonicalize(own).ok())
+            .is_some_and(|(a, b)| a == b);
+    if same {
+        return Ok(());
+    }
+    let base = own.parent().unwrap_or(own);
+    Err(anyhow!(
+        "This command uses the compute settings in {}, but orx up launches runs with \
+         the settings in {}. Set XDG_CONFIG_HOME to {} and re-run, or restart orx up \
+         from this environment.",
+        caller.display(),
+        own.display(),
+        base.display()
+    ))
+}
+
 async fn create_run(State(state): State<AppState>, Json(req): Json<CreateRunReq>) -> ApiResult {
     reject_if_stopping(&state)?;
     reject_if_moving(&state)?;
+    require_caller_config_dir(req.caller_config_dir.as_deref(), &absolute_config_dir())
+        .map_err(bad_request)?;
     let store = Store::open()?;
     let experiment = store
         .get_local_experiment(&req.experiment_id)?
@@ -2239,30 +2504,8 @@ async fn create_run(State(state): State<AppState>, Json(req): Json<CreateRunReq>
         .project_lifecycle
         .admit(&experiment.project_id)
         .ok_or_else(|| bad_request("project deletion is in progress"))?;
-    let mut backend = req.backend;
-    let mut flavor = req.flavor;
-    // Dashboard callers may omit these; forwarded CLI requests arrive resolved.
-    local::apply_compute_default(&mut backend, &mut flavor);
-    let args = crate::ExpRunArgs {
-        invocation_context: req.invocation_context,
-        telemetry_suppressed: req.telemetry_suppressed,
-        exp_id: req.experiment_id,
-        disk: req.disk,
-        provider: req.provider,
-        backend: Some(backend.unwrap_or_else(|| "local".to_string())),
-        flavor,
-        org: req.org,
-        host: req.host,
-        container: req.container,
-        no_container: req.no_container,
-        manifest: req.manifest,
-        image: req.image,
-        timeout: req.timeout,
-        force: req.force,
-        chat_session_id: req.chat_session_id,
-        agent_origin: req.agent_origin,
-        forwarded: true,
-    };
+    // Dashboard callers may omit compute options; forwarded CLI requests arrive resolved.
+    let args = req.into_run_args();
     crate::compute::validate_run_args(&args).map_err(bad_request)?;
     let run = crate::compute::submit(&args).await.map_err(bad_request)?;
     Ok(Json(json!({ "run": ApiRun::from(&run) })))
@@ -2322,7 +2565,18 @@ async fn list_instances() -> ApiResult {
     Ok(Json(json!({ "instances": instances })))
 }
 
-async fn cancel_run(State(state): State<AppState>, Path(id): Path<String>) -> ApiResult {
+/// Sent by `orx exp cancel`; the dashboard and older CLIs post no body.
+#[derive(Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct CancelRunReq {
+    chat_session_id: Option<String>,
+}
+
+async fn cancel_run(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+    req: Option<Json<CancelRunReq>>,
+) -> ApiResult {
     reject_if_moving(&state)?;
     let store = Store::open()?;
     let run = local::local_run(&store, &id)?.ok_or_else(|| not_found("run"))?;
@@ -2330,14 +2584,19 @@ async fn cancel_run(State(state): State<AppState>, Path(id): Path<String>) -> Ap
     if is_terminal(&run.status) {
         return Ok(Json(json!({ "ok": true, "alreadyTerminal": true })));
     }
+    let reason = match req {
+        Some(Json(req)) => crate::commands::exp::exp_cancel_reason(req.chat_session_id.as_deref()),
+        None => "Cancel requested through orx up (dashboard or an older orx CLI).".into(),
+    };
     let backend = backend_for_run(&run)?;
-    backend.cancel(&run).await.map_err(bad_request)?;
+    backend.cancel(&run, &reason).await.map_err(bad_request)?;
     Ok(Json(json!({ "ok": true })))
 }
 
 #[derive(Deserialize)]
 struct LogsQuery {
     cursor: Option<u64>,
+    generation: Option<String>,
 }
 
 async fn run_logs(Path(id): Path<String>, Query(q): Query<LogsQuery>) -> ApiResult {
@@ -2345,7 +2604,10 @@ async fn run_logs(Path(id): Path<String>, Query(q): Query<LogsQuery>) -> ApiResu
         .get_run(&id)?
         .ok_or_else(|| not_found("run"))?;
     let batch = backend_for_run(&run)?
-        .logs(&run, crate::compute::LogCursor(q.cursor.unwrap_or(0)))
+        .logs(
+            &run,
+            crate::compute::LogCursor(q.cursor.unwrap_or(0), q.generation),
+        )
         .await
         .map_err(bad_request)?;
     Ok(Json(json!(batch)))
@@ -2354,18 +2616,23 @@ async fn run_logs(Path(id): Path<String>, Query(q): Query<LogsQuery>) -> ApiResu
 #[derive(Deserialize)]
 struct LogQuery {
     offset: Option<u64>,
+    generation: Option<String>,
 }
 
 async fn run_log(Path(id): Path<String>, Query(q): Query<LogQuery>) -> ApiResult {
     let store = Store::open()?;
     store.get_run(&id)?.ok_or_else(|| not_found("run"))?;
     let offset = q.offset.unwrap_or(0);
-    let chunk = read_log_from(&id, offset, 4_000_000);
-    let next_offset = offset + chunk.len() as u64;
+    let snapshot =
+        crate::jobs::ssh::service::logs::read(&id, offset, 4_000_000, q.generation.as_deref())?;
+    let chunk = snapshot.bytes;
+    let next_offset = snapshot.offset + chunk.len() as u64;
     Ok(Json(json!({
         "dataBase64": base64::engine::general_purpose::STANDARD.encode(&chunk),
         "nextOffset": next_offset,
-        "eof": next_offset >= log_size(&id),
+        "eof": next_offset >= snapshot.size,
+        "offset": snapshot.offset,
+        "generation": snapshot.generation,
     })))
 }
 
@@ -2519,6 +2786,7 @@ struct PrewarmStarterPromptsReq {
     /// An existing folder the project will be created from.
     path: Option<String>,
     locale: Option<String>,
+    starter_agent: Option<local::starter::Agent>,
 }
 
 /// Start generating starter prompts for a project the user is still naming in
@@ -2542,6 +2810,7 @@ async fn prewarm_starter_prompts(Json(req): Json<PrewarmStarterPromptsReq>) -> A
         paper_id,
         path,
         req.locale.unwrap_or_else(|| "en".to_string()),
+        req.starter_agent,
     );
     Ok(Json(json!({ "ok": true })))
 }
@@ -2560,7 +2829,8 @@ struct StarterPromptsQuery {
 /// Four starter prompts for the empty chat, written by a model that has read
 /// the project (paper, README, code). Slow on a cache miss — one headless
 /// model call — so the UI shows a placeholder while it waits. A blank project
-/// is flagged instead so the UI shows its pre-written prompts.
+/// with no profile to tailor to, or whose tailored prompts fail, is flagged so
+/// the UI shows its pre-written prompts.
 async fn project_starter_prompts(
     Path(id): Path<String>,
     Query(q): Query<StarterPromptsQuery>,
@@ -4210,8 +4480,12 @@ async fn absolute_raw_file(
 
 /// Listing of the project's artifacts dir — the filesystem is the source of
 /// truth; this scans it fresh on every call (and creates it if missing).
-async fn list_artifacts(Path(id): Path<String>) -> ApiResult {
+async fn list_artifacts(State(state): State<AppState>, Path(id): Path<String>) -> ApiResult {
     blocking_api(move || {
+        let _admission = state
+            .project_lifecycle
+            .admit(&id)
+            .ok_or_else(|| bad_request("project deletion is in progress"))?;
         let store = Store::open()?;
         let project = store
             .get_local_project(&id)?
@@ -4229,6 +4503,10 @@ async fn manage_artifact_file(
 ) -> ApiResult {
     reject_if_moving(&state)?;
     blocking_api(move || {
+        let _admission = state
+            .project_lifecycle
+            .admit(&id)
+            .ok_or_else(|| bad_request("project deletion is in progress"))?;
         let store = Store::open()?;
         let project = store
             .get_local_project(&id)?
@@ -4253,6 +4531,10 @@ async fn delete_artifact(
 ) -> ApiResult {
     reject_if_moving(&state)?;
     blocking_api(move || {
+        let _admission = state
+            .project_lifecycle
+            .admit(&id)
+            .ok_or_else(|| bad_request("project deletion is in progress"))?;
         let store = Store::open()?;
         let project = store
             .get_local_project(&id)?
@@ -4390,6 +4672,196 @@ impl axum::body::HttpBody for ActiveBody {
     }
 }
 
+const ORPHANED_RUN_SCAN_INTERVAL: Duration = Duration::from_secs(60);
+const REMOTE_CLEANUP_INTERVAL: Duration = Duration::from_secs(60);
+/// SSH container launches record their handle before the job starts; leave them this long to finish.
+const ORPHANED_RUN_SETTLE_MS: i64 = 5 * 60 * 1000;
+
+/// Give a supervisor to every submitted local run that has none, so a launch
+/// whose supervisor spawn failed (OR-334) is tracked instead of stuck `starting`.
+async fn adopt_orphaned_runs(moving: Arc<AtomicBool>, gate: Arc<tokio::sync::Mutex<()>>) {
+    // Runs whose spawn failure is already logged, so a stuck run logs once.
+    let mut reported = HashSet::new();
+    loop {
+        tokio::time::sleep(ORPHANED_RUN_SCAN_INTERVAL).await;
+        if moving.load(Ordering::SeqCst) {
+            continue;
+        }
+        let _gate = gate.lock().await;
+        if moving.load(Ordering::SeqCst) {
+            continue;
+        }
+        match tokio::task::spawn_blocking(adopt_orphaned_runs_once).await {
+            Ok(Ok(failures)) => {
+                for (run_id, err) in failures {
+                    if reported.insert(run_id.clone()) {
+                        eprintln!("orx up: could not recover supervisor for run {run_id}: {err}");
+                    }
+                }
+            }
+            Ok(Err(err)) => {
+                eprintln!("orx up: could not check runs for missing supervisors: {err}")
+            }
+            Err(_) => {}
+        }
+    }
+}
+
+/// Background task so a large first reclaim never delays startup; it releases the gate between passes.
+async fn reclaim_orphaned_run_artifacts(
+    moving: Arc<AtomicBool>,
+    gate: Arc<tokio::sync::Mutex<()>>,
+) {
+    // Demo prewarm skips itself when the gate is contended at startup.
+    tokio::time::sleep(Duration::from_secs(5)).await;
+    // Orphans and sweep failures already logged, so a stuck one logs once.
+    let mut reported = HashSet::new();
+    loop {
+        let mut more = false;
+        if !moving.load(Ordering::SeqCst) {
+            let _gate = gate.lock().await;
+            if !moving.load(Ordering::SeqCst) {
+                match tokio::task::spawn_blocking(|| {
+                    Store::open()?.cleanup_orphaned_run_artifacts()
+                })
+                .await
+                {
+                    Ok(Ok(pass)) => {
+                        more = pass.more;
+                        for (run_id, error) in pass.kept {
+                            if reported.insert(run_id.clone()) {
+                                eprintln!("orx up: keeping run artifacts for {run_id}: {error}");
+                            }
+                        }
+                    }
+                    Ok(Err(error)) => {
+                        eprintln!("orx up: could not clean orphaned run artifacts: {error}")
+                    }
+                    Err(error) => {
+                        eprintln!("orx up: orphaned run artifact cleanup failed: {error}")
+                    }
+                }
+                let sweeps = [
+                    (
+                        "chat attachments",
+                        Store::cleanup_orphaned_chat_attachments as fn(&Store) -> Result<bool>,
+                    ),
+                    (
+                        "native chat history",
+                        Store::cleanup_orphaned_native_sessions,
+                    ),
+                ];
+                for (label, sweep) in sweeps {
+                    match tokio::task::spawn_blocking(move || sweep(&Store::open()?)).await {
+                        Ok(Ok(left)) => more |= left,
+                        Ok(Err(error)) => {
+                            if reported.insert(format!("{label}: {error}")) {
+                                eprintln!("orx up: could not clean orphaned {label}: {error}");
+                            }
+                        }
+                        Err(error) => eprintln!("orx up: orphaned {label} cleanup failed: {error}"),
+                    }
+                }
+            }
+        }
+        let pause = if more {
+            Duration::from_secs(1)
+        } else {
+            ORPHANED_RUN_SCAN_INTERVAL
+        };
+        tokio::time::sleep(pause).await;
+    }
+}
+
+/// Runs `f` on a fresh store under the data-dir gate; `None` while the data dir is moving.
+async fn with_gated_store<T: Send + 'static>(
+    moving: &AtomicBool,
+    gate: &tokio::sync::Mutex<()>,
+    f: impl FnOnce(&Store) -> Result<T> + Send + 'static,
+) -> Option<Result<T>> {
+    if moving.load(Ordering::SeqCst) {
+        return None;
+    }
+    let _gate = gate.lock().await;
+    if moving.load(Ordering::SeqCst) {
+        return None;
+    }
+    Some(
+        tokio::task::spawn_blocking(move || f(&Store::open()?))
+            .await
+            .unwrap_or_else(|error| Err(anyhow!("store task failed: {error}"))),
+    )
+}
+
+/// Removes queued remote run dirs; the gate is held only around store access, never over SSH.
+async fn reclaim_remote_run_dirs(moving: Arc<AtomicBool>, gate: Arc<tokio::sync::Mutex<()>>) {
+    // Startup's own SSH traffic (supervisor adoption, settings checks) goes first.
+    tokio::time::sleep(Duration::from_secs(30)).await;
+    let mut reported = HashSet::new();
+    let mut plan_error = None;
+    let mut report = |failures: Vec<(String, String)>| {
+        for (run_id, error) in failures {
+            if reported.insert(run_id.clone()) {
+                eprintln!("orx up: remote cleanup for run {run_id}: {error}");
+            }
+        }
+    };
+    loop {
+        match with_gated_store(&moving, &gate, local::remote_cleanup::plan).await {
+            Some(Ok((batches, rejected))) => {
+                plan_error = None;
+                report(rejected);
+                if !batches.is_empty() {
+                    let results = local::remote_cleanup::clean(batches).await;
+                    match with_gated_store(&moving, &gate, move |store| {
+                        local::remote_cleanup::record(store, results)
+                    })
+                    .await
+                    {
+                        Some(Ok(failures)) => report(failures),
+                        Some(Err(error)) => {
+                            eprintln!("orx up: could not record remote cleanup: {error}")
+                        }
+                        // Unrecorded entries stay due and removal is idempotent.
+                        None => {}
+                    }
+                }
+            }
+            Some(Err(error)) => {
+                let error = error.to_string();
+                if plan_error.as_ref() != Some(&error) {
+                    eprintln!("orx up: could not plan remote cleanup: {error}");
+                    plan_error = Some(error);
+                }
+            }
+            None => {}
+        }
+        tokio::time::sleep(REMOTE_CLEANUP_INTERVAL).await;
+    }
+}
+
+/// Spawns the missing supervisors and returns the runs whose spawn failed.
+fn adopt_orphaned_runs_once() -> Result<Vec<(String, crate::error::Error)>> {
+    let store = Store::open()?;
+    let mut failures = Vec::new();
+    for run in store.list_active_runs()? {
+        // Without a job handle the launch may still be submitting, and a supervisor would fail it.
+        let submitted = crate::jobs::BackendDescriptor::parse(&run.backend_json)
+            .is_ok_and(|descriptor| descriptor.job_id.is_some());
+        if !submitted
+            || now_ms() - run.updated_at < ORPHANED_RUN_SETTLE_MS
+            || store.get_local_experiment(&run.experiment_id)?.is_none()
+            || crate::commands::supervise::supervisor_running(&run.id)
+        {
+            continue;
+        }
+        if let Err(err) = crate::commands::exp::spawn_detached_supervise(&run.id) {
+            failures.push((run.id, err));
+        }
+    }
+    Ok(failures)
+}
+
 /// Relaunch into an update installed underneath this server once that interrupts nothing,
 /// so a long-lived `orx up` stops launching runs and building sandboxes with old code.
 fn spawn_restart_when_idle(state: AppState) {
@@ -4400,29 +4872,46 @@ fn spawn_restart_when_idle(state: AppState) {
             // The cache can claim an install the exec target doesn't have; never restart in a loop.
             if !(status.auto_update
                 && status.restart_required
-                && updates::newer_exe_on_disk().await)
+                && (updates::deferred_update_due() || updates::updated_exe_on_disk().await))
             {
                 continue;
             }
-            DRAINING.store(true, Ordering::SeqCst);
-            if ACTIVE.load(Ordering::SeqCst) == 0
-                && !state.data_dir_move_in_progress.load(Ordering::SeqCst)
-                && state.remote_sessions.list().await.iter().all(|session| {
-                    matches!(
-                        session.status,
-                        RemoteSessionStatus::Disconnected
-                            | RemoteSessionStatus::NeedsInstall
-                            | RemoteSessionStatus::NeedsUpdate
-                    )
-                })
-                && state.chat.stop_admitting_if_idle().await
-            {
+            if begin_restart(&state, 0).await {
                 state.restart.notify_one();
                 return;
             }
-            DRAINING.store(false, Ordering::SeqCst);
         }
     });
+}
+
+/// Serializes restart attempts; true once one committed, after which nothing reopens admission.
+static RESTART_COMMITTED: tokio::sync::Mutex<bool> = tokio::sync::Mutex::const_new(false);
+
+/// Stop admitting work and commit to a restart if nothing is in flight beyond
+/// `own_requests` (the caller's). Returns false, and admits again, otherwise.
+async fn begin_restart(state: &AppState, own_requests: usize) -> bool {
+    let mut committed = RESTART_COMMITTED.lock().await;
+    if *committed {
+        return true;
+    }
+    DRAINING.store(true, Ordering::SeqCst);
+    if ACTIVE.load(Ordering::SeqCst) <= own_requests
+        && !state.data_dir_move_in_progress.load(Ordering::SeqCst)
+        && state.remote_sessions.list().await.iter().all(|session| {
+            matches!(
+                session.status,
+                RemoteSessionStatus::Disconnected
+                    | RemoteSessionStatus::NeedsInstall
+                    | RemoteSessionStatus::NeedsUpdate
+            )
+        })
+        && state.chat.stop_admitting_if_idle().await
+    {
+        *committed = true;
+        return true;
+    }
+    DRAINING.store(false, Ordering::SeqCst);
+    false
 }
 
 /// Startup summary of detected coding agents. Never blocks. It goes through
@@ -4549,9 +5038,11 @@ fn env_settings_json() -> Value {
     let vars: Vec<Value> = crate::config::list_synced_env()
         .iter()
         .map(|(key, value)| {
+            let plain = crate::local::trackio::plain_value(key, value);
             json!({
                 "key": key,
-                "maskedValue": mask_token(value),
+                "maskedValue": mask_token(plain.as_deref().unwrap_or(value)),
+                "value": plain,
                 "inProcessEnv": std::env::var_os(key).is_some(),
             })
         })
@@ -4785,6 +5276,10 @@ async fn move_data_dir(State(state): State<AppState>, Json(req): Json<DataDirReq
     let data_dir_guard = state.data_dir_gate.clone().lock_owned().await;
     let source_data_dir = crate::store::data_dir();
     let move_token = uuid::Uuid::new_v4().to_string();
+    if let Err(error) = crate::jobs::ssh::service::shutdown_idle().await {
+        release(&state);
+        return ApiError(StatusCode::CONFLICT, error.to_string()).into_response();
+    }
     let (move_store, move_lock) = match Store::open().and_then(|store| {
         let lock = store.acquire_data_dir_move_lock()?;
         Ok((store, lock))
@@ -4794,7 +5289,8 @@ async fn move_data_dir(State(state): State<AppState>, Json(req): Json<DataDirReq
             release(&state);
             return ApiError(
                 StatusCode::CONFLICT,
-                "Another dashboard is moving the data directory.".into(),
+                "Another dashboard is moving or cleaning up the data directory; retry shortly."
+                    .into(),
             )
             .into_response();
         }
@@ -5192,6 +5688,7 @@ async fn set_dashboard_locale(Json(SetLocaleReq { locale }): Json<SetLocaleReq>)
     tokio::task::spawn_blocking(move || {
         crate::telemetry::set_dashboard_locale(&locale)
             .map_err(|e| ApiError::from(anyhow!("could not save the dashboard locale: {e}")))?;
+        crate::telemetry::capture("dashboard_locale", json!({}));
         Ok(Json(json!({ "locale": locale })))
     })
     .await
@@ -5222,6 +5719,54 @@ async fn set_auto_update(Json(req): Json<SetAutoUpdateReq>) -> ApiResult {
     .map_err(|e| ApiError::from(anyhow!("auto-update task failed: {e}")))?
 }
 
+#[derive(Deserialize)]
+struct SetUpdateChannelReq {
+    channel: updates::ReleaseChannel,
+}
+
+async fn set_update_channel(Json(req): Json<SetUpdateChannelReq>) -> ApiResult {
+    if !updates::current_channel().is_ok_and(|channel| channel.has_release_channels()) {
+        return Err(bad_request(
+            "Update channels are available for desktop apps.",
+        ));
+    }
+    tokio::task::spawn_blocking(move || {
+        let path = updates::updater_lock_path();
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent).map_err(|e| ApiError::from(anyhow!(e)))?;
+        }
+        let file = std::fs::OpenOptions::new()
+            .create(true)
+            .truncate(false)
+            .write(true)
+            .open(path)
+            .map_err(|e| ApiError::from(anyhow!(e)))?;
+        let mut lock = fd_lock::RwLock::new(file);
+        let _guard = lock.try_write().map_err(|_| {
+            ApiError(
+                StatusCode::CONFLICT,
+                "An update is in progress. Try again when it finishes.".into(),
+            )
+        })?;
+        if req.channel != crate::telemetry::update_channel() {
+            if updates::channel_change_blocked_by_installed() {
+                return Err(ApiError(
+                    StatusCode::CONFLICT,
+                    "An update is already installed. Restart OpenResearch before changing channels."
+                        .into(),
+                ));
+            }
+            updates::clear_deferred_update();
+        }
+        crate::telemetry::set_update_channel(req.channel)
+            .map_err(|e| ApiError::from(anyhow!("could not save update channel: {e}")))
+    })
+    .await
+    .map_err(|e| ApiError::from(anyhow!("update channel task failed: {e}")))??;
+    tokio::spawn(updates::periodic_update_pass());
+    Ok(Json(json!(updates::status())))
+}
+
 /// Apply an update now, for the user who doesn't want to wait for the next
 /// periodic pass. Runs the same detached updater, so it can't race one already
 /// in flight — the updater's file lock settles that.
@@ -5243,6 +5788,23 @@ async fn restart_after_update(State(state): State<AppState>) -> ApiResult {
             "no newer orx is installed to restart into".into(),
         ));
     };
+    // A dashboard poll landing alongside the click is not work worth refusing over.
+    let mut began = false;
+    for _ in 0..10 {
+        began = begin_restart(&state, 1).await;
+        if began {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    if !began {
+        return Err(ApiError(
+            StatusCode::CONFLICT,
+            "OpenResearch is busy: a chat turn, queued message, approval, open terminal, \
+             remote session, or request is still in progress. Try again once it finishes."
+                .into(),
+        ));
+    }
     let restart = state.restart.clone();
     tokio::spawn(async move {
         tokio::time::sleep(Duration::from_millis(250)).await;
@@ -5576,6 +6138,7 @@ async fn send_ssh_connect_error(
                 .into(),
         ))
         .await;
+    close_socket(socket).await;
 }
 
 pub(crate) async fn ssh_connect(
@@ -5605,6 +6168,28 @@ pub(crate) async fn ssh_connect_to_target(
     ws.on_upgrade(move |socket| async move {
         let _active = active;
         ssh_connect_socket(socket, host, req.backend, target).await
+    })
+}
+
+/// Open a terminal that SSHes to `target` and runs a fixed `command`. Used by
+/// the remote gateway's repair flow: the command is server-derived, so unlike
+/// [`ssh_connect_to_target`] the client never supplies it, and no preflight
+/// runs afterwards.
+pub(crate) async fn ssh_run_to_target(
+    headers: HeaderMap,
+    ws: WebSocketUpgrade,
+    host: String,
+    target: crate::jobs::ssh::SshTarget,
+    command: String,
+) -> Response {
+    if !same_origin(&headers) {
+        return ApiError(StatusCode::FORBIDDEN, "SSH terminal origin rejected".into())
+            .into_response();
+    }
+    let active = Active::new();
+    ws.on_upgrade(move |socket| async move {
+        let _active = active;
+        ssh_run_socket(socket, host, target, command).await
     })
 }
 
@@ -5733,65 +6318,76 @@ async fn ssh_connect_socket(
     backend: SshConnectBackend,
     target: crate::jobs::ssh::SshTarget,
 ) {
-    let connection = match crate::jobs::ssh::interactive_args(&target, None).await {
-        Ok(connection) => connection,
-        Err(error) => {
-            send_ssh_connect_error(&mut socket, &host, backend, error.to_string()).await;
-            return;
-        }
-    };
-    let args = connection.args.clone();
-    let session = match tokio::task::spawn_blocking(move || start_pty("ssh", args)).await {
-        Ok(Ok(session)) => session,
-        Ok(Err(error)) => {
-            send_ssh_connect_error(&mut socket, &host, backend, error.to_string()).await;
-            return;
-        }
-        Err(error) => {
-            send_ssh_connect_error(
-                &mut socket,
-                &host,
-                backend,
-                format!("SSH terminal task failed: {error}"),
-            )
-            .await;
-            return;
-        }
-    };
-    let mut size = DEFAULT_PTY_SIZE;
-    let Some(status) = relay_pty(&mut socket, session, None, &mut size, None).await else {
+    #[cfg(windows)]
+    if !ssh_service_connect(&mut socket, &target).await {
         return;
-    };
+    }
+    #[cfg(unix)]
+    if !crate::jobs::ssh::service::healthy(&target).await {
+        let connection = match crate::jobs::ssh::interactive_args(&target, None, None).await {
+            Ok(connection) => connection,
+            Err(error) => {
+                send_ssh_connect_error(&mut socket, &host, backend, error.to_string()).await;
+                return;
+            }
+        };
+        let args = connection.args.clone();
+        let session = match tokio::task::spawn_blocking(move || start_pty("ssh", args)).await {
+            Ok(Ok(session)) => session,
+            Ok(Err(error)) => {
+                send_ssh_connect_error(&mut socket, &host, backend, error.to_string()).await;
+                return;
+            }
+            Err(error) => {
+                send_ssh_connect_error(
+                    &mut socket,
+                    &host,
+                    backend,
+                    format!("SSH terminal task failed: {error}"),
+                )
+                .await;
+                return;
+            }
+        };
+        let mut size = DEFAULT_PTY_SIZE;
+        let Some(status) = relay_pty(&mut socket, session, None, &mut size, None).await else {
+            return;
+        };
 
-    match status {
-        Ok(status) if status.success() => {
-            if let Some(warning) = crate::jobs::ssh::setup_connection_sharing(&target).await {
-                let _ = socket
-                    .send(Message::Binary(
-                        format!("\r\norx: warning: {warning}\r\n")
-                            .into_bytes()
-                            .into(),
-                    ))
-                    .await;
+        match status {
+            Ok(status) if status.success() => {
+                if let Some(warning) = crate::jobs::ssh::setup_connection_sharing(&target).await {
+                    let _ = socket
+                        .send(Message::Binary(
+                            format!("\r\norx: warning: {warning}\r\n")
+                                .into_bytes()
+                                .into(),
+                        ))
+                        .await;
+                }
+            }
+            Ok(status) => {
+                send_ssh_connect_error(
+                    &mut socket,
+                    &host,
+                    backend,
+                    format!("ssh {host} exited with code {}", status.exit_code()),
+                )
+                .await;
+                return;
+            }
+            Err(error) => {
+                send_ssh_connect_error(&mut socket, &host, backend, error).await;
+                return;
             }
         }
-        Ok(status) => {
-            send_ssh_connect_error(
-                &mut socket,
-                &host,
-                backend,
-                format!("ssh {host} exited with code {}", status.exit_code()),
-            )
-            .await;
-            return;
-        }
-        Err(error) => {
-            send_ssh_connect_error(&mut socket, &host, backend, error).await;
-            return;
-        }
-    }
 
-    drop(connection);
+        drop(connection);
+    }
+    if let Err(error) = crate::jobs::ssh::service::attach(&target).await {
+        send_ssh_connect_error(&mut socket, &host, backend, error.to_string()).await;
+        return;
+    }
     let (backend_name, result, ssh_test) = match backend {
         SshConnectBackend::Ssh => {
             let test = probe_ssh_host_preflight(host.clone()).await;
@@ -5814,6 +6410,161 @@ async fn ssh_connect_socket(
     {
         if let Some(test) = ssh_test {
             record_ssh_host_test(&test).await;
+        }
+        close_socket(&mut socket).await;
+    }
+}
+
+#[cfg(windows)]
+async fn ssh_service_connect(socket: &mut WebSocket, target: &crate::jobs::ssh::SshTarget) -> bool {
+    use crate::jobs::ssh::service;
+    let start = match service::request(target, json!({"op":"connect_start"})).await {
+        Ok(start) => start,
+        Err(error) => {
+            send_ws_error(socket, error.to_string()).await;
+            return false;
+        }
+    };
+    let Some(attempt) = start["attempt"].as_str() else {
+        return false;
+    };
+    let mut prompt = None;
+    let mut answer = String::new();
+    let success = loop {
+        let status =
+            match service::request(target, json!({"op":"connect_status", "attempt":attempt})).await
+            {
+                Ok(status) => status,
+                Err(error) => {
+                    send_ws_error(socket, error.to_string()).await;
+                    break false;
+                }
+            };
+        if status["done"] == true {
+            if let Some(error) = status["error"].as_str() {
+                send_ws_error(socket, error.to_owned()).await;
+                break false;
+            }
+            break true;
+        }
+        if let Some(text) = status["prompt"].as_str() {
+            if prompt.as_deref() != Some(text) {
+                prompt = Some(text.to_owned());
+                answer.clear();
+                let clean: String = text
+                    .chars()
+                    .filter(|character| !character.is_control())
+                    .collect();
+                if socket
+                    .send(Message::Binary(format!("\r\n{clean} ").into_bytes().into()))
+                    .await
+                    .is_err()
+                {
+                    break false;
+                }
+            }
+        }
+        tokio::select! {
+            message = socket.recv() => {
+                match message {
+                    Some(Ok(Message::Binary(bytes))) if prompt.is_some() => {
+                        let mut submit = false;
+                        for character in String::from_utf8_lossy(&bytes).chars() {
+                            match character {
+                                '\r' | '\n' => {submit = true; break;},
+                                '\u{8}' | '\u{7f}' => {answer.pop();},
+                                character if !character.is_control() && answer.len() < 16384 => answer.push(character),
+                                _ => {},
+                            }
+                        }
+                        if submit {
+                            let result = service::request(target, json!({"op":"connect_answer", "attempt":attempt, "answer":answer})).await;
+                            answer.clear(); prompt = None;
+                            if let Err(error) = result {send_ws_error(socket, error.to_string()).await; break false;}
+                        }
+                    }
+                    None | Some(Err(_)) | Some(Ok(Message::Close(_))) => break false,
+                    _ => {},
+                }
+            }
+            _ = tokio::time::sleep(Duration::from_millis(150)) => {},
+        }
+    };
+    let _ = service::request(target, json!({"op":"connect_cancel", "attempt":attempt})).await;
+    success
+}
+
+async fn send_ws_error(socket: &mut WebSocket, error: String) {
+    let _ = socket
+        .send(Message::Text(
+            json!({ "type": "error", "error": error })
+                .to_string()
+                .into(),
+        ))
+        .await;
+    close_socket(socket).await;
+}
+
+async fn ssh_run_socket(
+    mut socket: WebSocket,
+    host: String,
+    target: crate::jobs::ssh::SshTarget,
+    command: String,
+) {
+    let connection = match crate::jobs::ssh::interactive_args(&target, None, Some(command)).await {
+        Ok(connection) => connection,
+        Err(error) => {
+            send_ws_error(&mut socket, error.to_string()).await;
+            return;
+        }
+    };
+    let args = connection.args.clone();
+    let session = match tokio::task::spawn_blocking(move || start_pty("ssh", args)).await {
+        Ok(Ok(session)) => session,
+        Ok(Err(error)) => {
+            send_ws_error(&mut socket, error.to_string()).await;
+            return;
+        }
+        Err(error) => {
+            send_ws_error(&mut socket, format!("SSH terminal task failed: {error}")).await;
+            return;
+        }
+    };
+    let mut size = DEFAULT_PTY_SIZE;
+    let Some(status) = relay_pty(&mut socket, session, None, &mut size, None).await else {
+        return;
+    };
+
+    match status {
+        Ok(status) if status.success() => {
+            if let Some(warning) = crate::jobs::ssh::setup_connection_sharing(&target).await {
+                let _ = socket
+                    .send(Message::Binary(
+                        format!("\r\norx: warning: {warning}\r\n")
+                            .into_bytes()
+                            .into(),
+                    ))
+                    .await;
+            }
+            if socket
+                .send(Message::Text(
+                    json!({ "type": "complete" }).to_string().into(),
+                ))
+                .await
+                .is_ok()
+            {
+                close_socket(&mut socket).await;
+            }
+        }
+        Ok(status) => {
+            send_ws_error(
+                &mut socket,
+                format!("ssh {host} exited with code {}", status.exit_code()),
+            )
+            .await;
+        }
+        Err(error) => {
+            send_ws_error(&mut socket, error).await;
         }
     }
 }
@@ -5949,6 +6700,7 @@ async fn project_terminal(
             Ok(status) => {
                 let message = json!({ "type": "exit", "code": status.exit_code() });
                 let _ = socket.send(Message::Text(message.to_string().into())).await;
+                close_socket(&mut socket).await;
             }
             Err(error) => send_terminal_error(&mut socket, anyhow!(error)).await,
         }
@@ -6007,7 +6759,7 @@ async fn openresearch_terminal(
     let program = crate::paths::spawnable_exe()
         .map(|exe| exe.to_string_lossy().into_owned())
         .map_err(anyhow::Error::from);
-    command_terminal(&headers, ws, program, args, false).await
+    command_terminal(&headers, ws, program, args, Vec::new(), false).await
 }
 
 /// Commands the settings page may run, keyed by the exact note text. The
@@ -6017,6 +6769,16 @@ const SETTINGS_COMMANDS: &[(&str, &[&str])] = &[
     ("gh auth login", &["gh", "auth", "login"]),
     ("hf auth login", &["hf", "auth", "login"]),
     ("claude auth status", &["claude", "auth", "status"]),
+    ("kimi login", &["kimi", "login"]),
+    (
+        "mcode login --region global",
+        &["mcode", "login", "--region", "global"],
+    ),
+    ("devin auth login", &["devin", "auth", "login"]),
+    ("grok login", &["grok", "login"]),
+    ("pi", &["pi"]),
+    ("zcode login zai", &["zcode", "login", "zai"]),
+    ("zcode login bigmodel", &["zcode", "login", "bigmodel"]),
 ];
 
 fn settings_command(command: &str) -> Option<&'static [&'static str]> {
@@ -6043,11 +6805,75 @@ async fn run_settings_command(
     let Some(argv) = settings_command(req.command.trim()) else {
         return bad_request("command is not runnable from settings").into_response();
     };
-    let program = local::shell_env::find_on_path(argv[0])
-        .map(|path| path.to_string_lossy().into_owned())
-        .ok_or_else(|| anyhow!("{} is not installed", argv[0]));
-    let args = argv[1..].iter().map(|arg| arg.to_string()).collect();
-    command_terminal(&headers, ws, program, args, true).await
+    let mut args: Vec<String> = argv[1..].iter().map(|arg| arg.to_string()).collect();
+    let mut env = Vec::new();
+    let program = if argv[0] == "zcode" && local::acp::executable_path("zcode").is_none() {
+        let mut candidates = Vec::new();
+        if let Some(home) = dirs::home_dir() {
+            candidates.push(home.join("Applications/ZCode.app/Contents/Resources/glm/zcode.cjs"));
+        }
+        candidates.push(std::path::PathBuf::from(
+            "/Applications/ZCode.app/Contents/Resources/glm/zcode.cjs",
+        ));
+        if let Some(data) = dirs::data_local_dir() {
+            candidates.push(data.join("Programs/ZCode/resources/glm/zcode.cjs"));
+        }
+        match (
+            local::acp::executable_path("node"),
+            candidates.into_iter().find(|path| path.is_file()),
+        ) {
+            (Some(node), Some(cli)) => {
+                let home = local::shell_env::var("ZCODE_HOME")
+                    .or_else(|| {
+                        crate::config::synced_env_var("ZCODE_HOME").map(std::ffi::OsString::from)
+                    })
+                    .filter(|home| !home.is_empty())
+                    .map(std::path::PathBuf::from)
+                    .unwrap_or_else(|| dirs::home_dir().unwrap_or_default().join(".zcode"));
+                env = zcode_provider_env(&cli, &home);
+                env.push(("ZCODE_HOME", home.into_os_string()));
+                args.insert(0, cli.to_string_lossy().into_owned());
+                Ok(node.to_string_lossy().into_owned())
+            }
+            _ => Err(anyhow!(
+                "ZCode CLI not found. Install ZCode and Node.js, then retry."
+            )),
+        }
+    } else {
+        local::acp::executable_path(argv[0])
+            .map(|path| path.to_string_lossy().into_owned())
+            .ok_or_else(|| anyhow!("{} is not installed", argv[0]))
+    };
+    command_terminal(&headers, ws, program, args, env, true).await
+}
+
+fn zcode_provider_env(
+    cli: &std::path::Path,
+    home: &std::path::Path,
+) -> Vec<(&'static str, std::ffi::OsString)> {
+    let Some(directory) = cli.parent() else {
+        return Vec::new();
+    };
+    let provider = [
+        directory.join("provider/zcode-builtin.json"),
+        directory.join("../config/provider/zcode-builtin.json"),
+    ]
+    .into_iter()
+    .find(|path| path.is_file());
+    let Some(provider) = provider else {
+        return Vec::new();
+    };
+    // ZCode uses the bundled table verbatim only when both paths are explicit.
+    vec![
+        (
+            "ZCODE_BUILTIN_PROVIDER_CONFIG_FILE",
+            provider.into_os_string(),
+        ),
+        (
+            "ZCODE_PERSONAL_PROVIDER_CONFIG_FILE",
+            home.join("v2/provider_config.json").into_os_string(),
+        ),
+    ]
 }
 
 /// The user's interactive login shell, so follow-up commands see the PATH a
@@ -6075,6 +6901,7 @@ async fn command_terminal(
     ws: WebSocketUpgrade,
     program: Result<String>,
     args: Vec<String>,
+    env: Vec<(&'static str, std::ffi::OsString)>,
     shell_after: bool,
 ) -> Response {
     if let Some(rejected) = reject_cross_origin(headers) {
@@ -6085,7 +6912,7 @@ async fn command_terminal(
         let _active = active;
         let mut size = DEFAULT_PTY_SIZE;
         let started = match program {
-            Ok(program) => spawn_pty(program, args, Vec::new(), size).await,
+            Ok(program) => spawn_pty(program, args, env, size).await,
             Err(error) => Err(error),
         };
         let session = match started {
@@ -6116,12 +6943,31 @@ async fn command_terminal(
             .send(Message::Text(message.to_string().into()))
             .await
             .is_err()
-            || !shell_after
         {
             return;
         }
-        continue_in_shell(&mut socket, &mut size, Vec::new()).await;
+        if shell_after {
+            continue_in_shell(&mut socket, &mut size, Vec::new()).await;
+        } else {
+            close_socket(&mut socket).await;
+        }
     })
+}
+
+/// WebKit drops the final frame of a socket closed without a close handshake,
+/// so send Close and wait for the client's before dropping it.
+async fn close_socket(socket: &mut WebSocket) {
+    if socket.send(Message::Close(None)).await.is_err() {
+        return;
+    }
+    let _ = tokio::time::timeout(Duration::from_secs(5), async {
+        while let Some(Ok(message)) = socket.recv().await {
+            if matches!(message, Message::Close(_)) {
+                break;
+            }
+        }
+    })
+    .await;
 }
 
 /// Hand the terminal to the user's interactive shell, with any env the command
@@ -6135,7 +6981,9 @@ async fn continue_in_shell(
     let (shell, args) = interactive_shell();
     match spawn_pty(shell, args, env, *size).await {
         Ok(session) => {
-            relay_pty(socket, session, None, size, None).await;
+            if relay_pty(socket, session, None, size, None).await.is_some() {
+                close_socket(socket).await;
+            }
         }
         Err(error) => send_terminal_error(socket, error).await,
     }
@@ -6159,6 +7007,7 @@ async fn send_terminal_error(socket: &mut WebSocket, error: anyhow::Error) {
                 .into(),
         ))
         .await;
+    close_socket(socket).await;
 }
 
 async fn remote_sessions(State(state): State<AppState>) -> Json<Value> {
@@ -6181,7 +7030,7 @@ async fn create_remote_session(
     if host.is_empty() {
         return Err(bad_request("host is required"));
     }
-    require_configured_ssh_host(&host)?;
+    require_configured_ssh_host(&host).await?;
     let (created, session) = state
         .remote_sessions
         .create(host, req.ui_preferences, None)
@@ -6277,6 +7126,8 @@ const FILL_RETRY_FLOOR: Duration = Duration::from_secs(5);
 struct HarnessQuery {
     refresh: Option<u8>,
     retry: Option<u8>,
+    /// With `refresh=1`, re-detect only this harness instead of every one.
+    harness: Option<String>,
 }
 
 fn overlay_claude_auth(payload: &mut Value, snapshot: &local::claude::AuthSnapshot) {
@@ -6539,6 +7390,70 @@ async fn list_harnesses(
     Json(harnesses_payload(&state, &q).await)
 }
 
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct AcpHarnessInput {
+    name: String,
+    executable: String,
+    #[serde(default)]
+    arguments: Vec<String>,
+}
+
+impl AcpHarnessInput {
+    fn definition(self, id: String) -> local::acp::Definition {
+        local::acp::Definition {
+            id,
+            name: self.name,
+            executable: self.executable,
+            arguments: self.arguments,
+        }
+    }
+}
+
+async fn list_acp_harnesses() -> Json<Value> {
+    Json(json!(local::acp::definitions()))
+}
+
+async fn list_acp_presets() -> Json<Value> {
+    Json(json!(local::acp::presets()))
+}
+
+async fn create_acp_harness(
+    State(state): State<AppState>,
+    Json(input): Json<AcpHarnessInput>,
+) -> ApiResult {
+    let definition = input.definition(format!("acp:{}", uuid::Uuid::new_v4()));
+    local::acp::save(definition.clone(), true).map_err(bad_request)?;
+    *state.harnesses.lock().await = None;
+    Ok(Json(json!(definition)))
+}
+
+async fn update_acp_harness(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+    Json(input): Json<AcpHarnessInput>,
+) -> ApiResult {
+    let definition = input.definition(id);
+    local::acp::save(definition.clone(), false).map_err(bad_request)?;
+    *state.harnesses.lock().await = None;
+    Ok(Json(json!(definition)))
+}
+
+async fn delete_acp_harness(State(state): State<AppState>, Path(id): Path<String>) -> ApiResult {
+    local::acp::remove(&id).map_err(bad_request)?;
+    *state.harnesses.lock().await = None;
+    Ok(Json(json!({"ok": true})))
+}
+
+async fn test_acp_harness(Json(input): Json<AcpHarnessInput>) -> ApiResult {
+    let definition = input.definition(format!("acp:{}", uuid::Uuid::new_v4()));
+    Ok(Json(
+        local::acp::test_connection(&definition)
+            .await
+            .map_err(bad_request)?,
+    ))
+}
+
 /// The shared detection path behind `GET /api/harnesses` and the startup
 /// preflight: the snapshot pass runs under the cache lock, so whoever arrives
 /// first does the probing and everyone else in the TTL window reads the same
@@ -6550,11 +7465,24 @@ async fn list_harnesses(
 /// a background fill replaces the entry with the full catalog, then tells the
 /// dashboard to re-read it. `refresh=1` still runs the full probe inline: an
 /// explicit re-check wants the real answer, and the UI shows its own spinner.
+/// With `harness=<id>` it probes only that harness (unless a fill is running)
+/// and serves the cache with it patched in.
 async fn harnesses_payload(state: &AppState, q: &HarnessQuery) -> Value {
     // `retry` only escalates to a full detect when it actually cleared a
     // runtime rejection — a bare retry is an ordinary cached read.
     let retried = q.retry == Some(1) && state.claude.clear_runtime_rejection();
-    if q.refresh == Some(1) || retried {
+    if let (Some(1), Some(id)) = (q.refresh, q.harness.as_deref()) {
+        // Publishing re-stamps the cache, voiding an in-flight fill's other harnesses;
+        // the fill commits this one itself and the auth monitor re-checks after it.
+        if !state
+            .harness_fill_in_flight
+            .load(std::sync::atomic::Ordering::Acquire)
+        {
+            if let Some(info) = local::harness::detect_harness(id).await {
+                publish_harness(state, &info).await;
+            }
+        }
+    } else if q.refresh == Some(1) || retried {
         // An explicit re-check detects outside the cache lock: a full sweep
         // takes seconds and must not stall every ordinary read queued behind
         // it. Last writer wins — concurrent refreshes may duplicate a sweep.
@@ -6596,6 +7524,51 @@ async fn harnesses_payload(state: &AppState, q: &HarnessQuery) -> Value {
         return out;
     }
     seed_harnesses_locked(state, &mut cache).await
+}
+
+/// Commit one harness's full detection after setup or a sign-in changed it, so
+/// the dashboard need not wait on every sibling's probes to see the result.
+async fn publish_harness(state: &AppState, info: &local::harness::HarnessInfo) {
+    if info.id == "claude-code" {
+        if let Some(probe) = info.auth_observation.as_ref() {
+            state.claude.observe_auth_probe(probe);
+        }
+    }
+    let catalog = claude_catalog_request(std::slice::from_ref(info));
+    let mut cache = state.harnesses.lock().await;
+    // Bumping `at` voids a fill that probed before setup ran (and any cursor
+    // lookup keyed to it); a fresh seed's fill probes after, so it keeps its `at`.
+    let claim = cache.is_some();
+    if !claim {
+        seed_harnesses_locked(state, &mut cache).await;
+    }
+    let Some((at, payload)) = cache.as_mut() else {
+        return;
+    };
+    let Some(slot) = payload["harnesses"].as_array_mut().and_then(|all| {
+        all.iter_mut()
+            .find(|h| h["id"].as_str() == Some(info.id.as_str()))
+    }) else {
+        return;
+    };
+    *slot = json!(info);
+    if claim {
+        *at = std::time::Instant::now();
+    }
+    let cached_at = *at;
+    let lookup_voided = claim
+        && payload["harnesses"].as_array().is_some_and(|all| {
+            all.iter()
+                .any(|h| h["id"] == "cursor" && h["accountLoading"] == true)
+        });
+    if lookup_voided || info.id == "cursor" {
+        spawn_cursor_account_details(state, payload, cached_at);
+    }
+    drop(cache);
+    if let Some(catalog) = catalog {
+        enqueue_claude_catalog(state.clone(), cached_at, catalog);
+    }
+    state.chat.emit_event("harness.catalog", json!({}));
 }
 
 /// The spawn-free snapshot → provisional cache → background fill sequence,
@@ -6645,7 +7618,7 @@ async fn seed_harnesses_locked(
 /// live Claude auth observations and first-install telemetry.
 /// The returned `Option` is a claimed auth announcement: the caller emits it
 /// only after committing the payload, so a discarded pass never sends the
-/// dashboard on a `refresh=1` sweep for results nobody will see.
+/// dashboard to re-probe Claude for results nobody will see.
 async fn finish_harnesses_payload(
     state: &AppState,
     harnesses: Vec<local::harness::HarnessInfo>,
@@ -6671,8 +7644,8 @@ async fn finish_harnesses_payload(
         snapshot = state.claude.auth_snapshot();
     }
     // A provisional pass must not announce: `harness.auth` makes the dashboard
-    // call `refreshHarnesses(true)`, an inline full sweep — the stall this
-    // whole design exists to remove — fired by the snapshot's own adoption.
+    // re-probe Claude inline — the stall this whole design exists to remove —
+    // fired by the snapshot's own adoption.
     // A real pass hands its auth snapshot back unclaimed; the caller claims at
     // emit time, after the payload commits, so a pass that loses the cache
     // race never burns a generation it can't announce.
@@ -6809,7 +7782,8 @@ fn spawn_catalog_fill(state: AppState, snapshot_at: std::time::Instant, fill_id:
                         if *at == snapshot_at {
                             if let Some(slot) =
                                 payload["harnesses"].as_array_mut().and_then(|all| {
-                                    all.iter_mut().find(|h| h["id"].as_str() == Some(info.id))
+                                    all.iter_mut()
+                                        .find(|h| h["id"].as_str() == Some(info.id.as_str()))
                                 })
                             {
                                 *slot = json!(info);
@@ -6942,6 +7916,46 @@ struct SessionsQuery {
     before_id: Option<String>,
 }
 
+fn sidebar_session_json(store: &Store, session: &StoredChatSession, busy: bool) -> Result<Value> {
+    let mut value = local::chat::session_json(session, busy);
+    value["awaitingInput"] = json!(store.chat_session_awaiting_input(&session.id, busy)?);
+    Ok(value)
+}
+
+fn chat_active_runs_json(store: &Store) -> Result<Value> {
+    let mut associations: Vec<_> = store
+        .list_active_run_wakeups()?
+        .into_iter()
+        .map(|wakeup| (wakeup.chat_session_id, wakeup.run))
+        .collect();
+    for run in store.list_active_runs()? {
+        if let Some(session_id) = run.chat_session_id.clone() {
+            associations.push((session_id, run));
+        }
+    }
+    let mut seen = HashSet::new();
+    let mut rows = Vec::new();
+    for (session_id, run) in associations {
+        if !seen.insert((session_id.clone(), run.id.clone())) {
+            continue;
+        }
+        let experiment_name = store
+            .get_local_experiment(&run.experiment_id)?
+            .map(|experiment| experiment.display_name().to_string());
+        rows.push(json!({
+            "sessionId": session_id,
+            "run": ApiRun::from(&run),
+            "experimentName": experiment_name,
+        }));
+    }
+    rows.sort_by_key(|row| (row["sessionId"].to_string(), row["run"]["id"].to_string()));
+    Ok(json!(rows))
+}
+
+async fn chat_active_runs() -> ApiResult {
+    Ok(Json(chat_active_runs_json(&Store::open()?)?))
+}
+
 async fn list_chat_sessions(
     State(state): State<AppState>,
     Query(q): Query<SessionsQuery>,
@@ -6963,8 +7977,8 @@ async fn list_chat_sessions(
         let busy = state.chat.busy_sessions().await;
         let sessions: Vec<Value> = sessions
             .iter()
-            .map(|session| local::chat::session_json(session, busy.contains(&session.id)))
-            .collect();
+            .map(|session| sidebar_session_json(&store, session, busy.contains(&session.id)))
+            .collect::<Result<_>>()?;
         return Ok(Json(json!({ "sessions": sessions, "next": next })));
     }
     let sessions = match (q.project_id.as_deref(), q.scope.as_deref()) {
@@ -6975,8 +7989,8 @@ async fn list_chat_sessions(
     let busy = state.chat.busy_sessions().await;
     let sessions: Vec<Value> = sessions
         .iter()
-        .map(|s| local::chat::session_json(s, busy.contains(&s.id)))
-        .collect();
+        .map(|s| sidebar_session_json(&store, s, busy.contains(&s.id)))
+        .collect::<Result<_>>()?;
     Ok(Json(json!({ "sessions": sessions })))
 }
 
@@ -6984,7 +7998,7 @@ async fn list_chat_sessions(
 #[serde(rename_all = "camelCase")]
 struct CreateChatSessionReq {
     project_id: String,
-    harness: String,
+    harness: Option<String>,
     model: Option<String>,
     service_tier: Option<String>,
     permission_mode: Option<String>,
@@ -6994,14 +8008,127 @@ struct CreateChatSessionReq {
     autonomy: Option<Autonomy>,
 }
 
+fn new_chat_settings(
+    project_id: String,
+    preferences: crate::store::StoredUiState,
+    catalog: &Value,
+) -> Result<CreateChatSessionReq> {
+    let harnesses = catalog
+        .get("harnesses")
+        .and_then(Value::as_array)
+        .ok_or_else(|| anyhow!("OpenResearch could not load New Chat settings."))?;
+    let saved = preferences.preferred_agent;
+    let selected = match saved.as_ref() {
+        Some(saved) => harnesses
+            .iter()
+            .find(|h| h.get("id").and_then(Value::as_str) == Some(&saved.harness)),
+        None => harnesses
+            .iter()
+            .find(|h| h.get("agentReady").and_then(Value::as_bool) == Some(true)),
+    }
+    .ok_or_else(|| {
+        anyhow!("Your New Chat agent is unavailable. Select an available agent in New Chat.")
+    })?;
+    if selected.get("agentReady").and_then(Value::as_bool) != Some(true) {
+        return Err(anyhow!("Your New Chat agent is unavailable. Check its installation and sign-in in OpenResearch."));
+    }
+    let string = |value: Option<&Value>| value.and_then(Value::as_str).map(str::to_string);
+    let harness = string(selected.get("id"));
+    let models = selected.get("models").and_then(Value::as_array);
+    let model = saved.as_ref().and_then(|s| s.model.clone()).or_else(|| {
+        if saved.is_none() {
+            string(models.and_then(|m| m.first()).and_then(|m| m.get("id")))
+        } else {
+            None
+        }
+    });
+    let metadata = models.and_then(|models| {
+        models
+            .iter()
+            .find(|m| m.get("id").and_then(Value::as_str) == model.as_deref())
+    });
+    let options = selected.get("options");
+    let choices = metadata
+        .and_then(|m| m.get("reasoningLevels"))
+        .or_else(|| options.and_then(|o| o.get("reasoningLevels")))
+        .and_then(Value::as_array);
+    let has = |choices: Option<&Vec<Value>>, id: &str| {
+        choices.is_some_and(|choices| {
+            choices
+                .iter()
+                .any(|c| c.get("id").and_then(Value::as_str) == Some(id))
+        })
+    };
+    let model_default = string(metadata.and_then(|m| m.get("defaultReasoningLevel")));
+    let default_reasoning = model_default
+        .filter(|id| has(choices, id))
+        .or_else(|| has(choices, "default").then(|| "default".to_string()))
+        .or_else(|| string(options.and_then(|o| o.get("defaultReasoningLevel"))))
+        .or_else(|| string(choices.and_then(|c| c.first()).and_then(|c| c.get("id"))));
+    let reasoning_level = if choices.is_none_or(Vec::is_empty) {
+        Some("default".to_string())
+    } else {
+        saved
+            .as_ref()
+            .and_then(|s| s.reasoning_level.clone())
+            .filter(|id| has(choices, id))
+            .or(default_reasoning)
+    };
+    let tiers = metadata
+        .and_then(|m| m.get("serviceTiers"))
+        .and_then(Value::as_array);
+    let service_tier = if harness.as_deref() == Some("codex") && tiers.is_some() {
+        Some(
+            saved
+                .as_ref()
+                .and_then(|s| s.service_tier.clone())
+                .filter(|id| id == "default" || has(tiers, id))
+                .unwrap_or_else(|| "default".to_string()),
+        )
+    } else {
+        None
+    };
+    let permission_mode = match saved.as_ref() {
+        Some(saved) => saved.permission_mode.clone(),
+        None => string(options.and_then(|o| o.get("defaultPermissionMode"))),
+    };
+    Ok(CreateChatSessionReq {
+        project_id,
+        harness,
+        model,
+        service_tier,
+        permission_mode,
+        plan_mode: false,
+        reasoning_level,
+        autonomy: Some(preferences.preferred_autonomy.unwrap_or(Autonomy::Agentic)),
+    })
+}
+
+async fn get_chat_session(State(state): State<AppState>, Path(id): Path<String>) -> ApiResult {
+    let session = Store::open()?
+        .get_chat_session(&id)?
+        .ok_or_else(|| not_found("chat session"))?;
+    let busy = state.chat.is_busy(&id).await;
+    Ok(Json(
+        json!({ "session": local::chat::session_json(&session, busy) }),
+    ))
+}
+
+async fn chat_session_experiments(Path(id): Path<String>) -> ApiResult {
+    let store = Store::open()?;
+    store
+        .get_chat_session(&id)?
+        .ok_or_else(|| not_found("chat session"))?;
+    Ok(Json(
+        json!({ "experiments": store.list_experiments_by_chat_session(&id)? }),
+    ))
+}
+
 async fn create_chat_session(
     State(state): State<AppState>,
-    Json(req): Json<CreateChatSessionReq>,
+    Json(mut req): Json<CreateChatSessionReq>,
 ) -> ApiResult {
     reject_if_moving(&state)?;
-    if !local::harness::is_chat_harness(&req.harness) {
-        return Err(bad_request(format!("unknown harness: {}", req.harness)));
-    }
     let _admission = state
         .project_lifecycle
         .admit(&req.project_id)
@@ -7010,22 +8137,41 @@ async fn create_chat_session(
     store
         .get_local_project(&req.project_id)?
         .ok_or_else(|| not_found("project"))?;
+    if req.harness.is_none() {
+        let preferences = store.ui_state()?;
+        let catalog = harnesses_payload(
+            &state,
+            &HarnessQuery {
+                refresh: None,
+                retry: None,
+                harness: None,
+            },
+        )
+        .await;
+        req = new_chat_settings(req.project_id, preferences, &catalog).map_err(bad_request)?;
+    }
+    let harness = req
+        .harness
+        .ok_or_else(|| bad_request("no agent selected"))?;
+    if !local::harness::is_chat_harness(&harness) {
+        return Err(bad_request(format!("unknown harness: {harness}")));
+    }
     let nonempty = |s: Option<String>| s.filter(|v| !v.trim().is_empty());
     let permission_mode = nonempty(req.permission_mode);
     let service_tier = nonempty(req.service_tier);
     if permission_mode
         .as_deref()
-        .is_some_and(|mode| local::harness::permission_mode_for(&req.harness, mode).is_none())
+        .is_some_and(|mode| local::harness::permission_mode_for(&harness, mode).is_none())
     {
         return Err(bad_request("invalid permission mode for selected harness"));
     }
     if service_tier
         .as_deref()
-        .is_some_and(|tier| local::harness::service_tier_for(&req.harness, tier).is_none())
+        .is_some_and(|tier| local::harness::service_tier_for(&harness, tier).is_none())
     {
         return Err(bad_request("invalid speed for selected harness"));
     }
-    if req.plan_mode && !local::harness::supports_command_plan(&req.harness) {
+    if req.plan_mode && !local::harness::supports_command_plan(&harness) {
         return Err(bad_request(
             "this harness activates Plan through permissions",
         ));
@@ -7033,7 +8179,7 @@ async fn create_chat_session(
     let session = StoredChatSession {
         id: format!("chat_{}", uuid::Uuid::new_v4()),
         project_id: req.project_id,
-        harness: req.harness,
+        harness,
         native_session_id: None,
         title: None,
         title_source: None,
@@ -7049,12 +8195,13 @@ async fn create_chat_session(
         goal: None,
         autonomy: req.autonomy.map(|autonomy| autonomy.id().to_string()),
         active_leaf_id: None,
-        parent_session_id: None,
         side_parent_session_id: None,
+        side_parent_leaf_id: None,
         created_at: now_ms(),
         updated_at: now_ms(),
     };
     store.create_chat_session(&session)?;
+    state.chat.emit_session(Some(session.clone())).await;
     Ok(Json(
         json!({ "session": local::chat::session_json(&session, false) }),
     ))
@@ -7153,7 +8300,11 @@ async fn open_side_chat(State(state): State<AppState>, Path(id): Path<String>) -
 
 async fn delete_chat_session(State(state): State<AppState>, Path(id): Path<String>) -> ApiResult {
     reject_if_moving(&state)?;
-    state.chat.delete_session(&id).await?;
+    // Detached so a canceled request cannot stop between the native purge and the row delete.
+    let chat = state.chat.clone();
+    tokio::spawn(async move { chat.delete_session(&id).await })
+        .await
+        .map_err(|error| anyhow!("chat deletion task failed: {error}"))??;
     Ok(Json(json!({ "ok": true })))
 }
 
@@ -7168,6 +8319,88 @@ struct UpdateChatSessionReq {
     #[serde(default, deserialize_with = "present_nullable_string")]
     goal: Option<Option<String>>,
     autonomy: Option<Autonomy>,
+}
+
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct NativeConfigurationInput {
+    option_id: String,
+    value: String,
+}
+
+async fn set_chat_configuration(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+    Json(input): Json<NativeConfigurationInput>,
+) -> ApiResult {
+    reject_if_moving(&state)?;
+    let store = Store::open()?;
+    let session = store
+        .get_chat_session(&id)?
+        .ok_or_else(|| not_found("chat session"))?;
+    let saved = store
+        .acp_session_state(&id)?
+        .ok_or_else(|| bad_request("This chat is not an ACP session"))?;
+    let _reservation;
+    let client = match state.chat.acp.connected(&id).await {
+        Ok(client) => {
+            _reservation = None;
+            client
+        }
+        Err(_) => {
+            _reservation = Some(
+                local::chat::TurnGuard::claim(&state.chat, &id, None)
+                    .await
+                    .ok_or_else(|| {
+                        bad_request(
+                            "Chat is busy; try changing the option again after the turn finishes",
+                        )
+                    })?,
+            );
+            let native_id = session.native_session_id.as_deref().ok_or_else(|| {
+                bad_request("Start the conversation before changing agent options")
+            })?;
+            let project = store
+                .get_local_project(&session.project_id)?
+                .ok_or_else(|| not_found("project"))?;
+            let session_id = id.clone();
+            let (cwd, _) = tokio::task::spawn_blocking(move || {
+                local::opencode::ensure_playbook(&project, &session_id, None)
+            })
+            .await
+            .map_err(bad_request)?
+            .map_err(bad_request)?;
+            let client = state
+                .chat
+                .acp
+                .get(&id, &saved.launch, &cwd)
+                .await
+                .map_err(bad_request)?;
+            match client.restore(native_id, &cwd).await {
+                Ok(configuration) => store.set_acp_configuration(&id, &configuration)?,
+                Err(error) => {
+                    state.chat.acp.stop(&id).await;
+                    return Err(bad_request(error));
+                }
+            }
+            client.end_turn();
+            client
+        }
+    };
+    client
+        .configure(&id, &input.option_id, &input.value)
+        .await
+        .map_err(bad_request)?;
+    let session = Store::open()?.get_chat_session(&id)?;
+    let session = state
+        .chat
+        .emit_session(session)
+        .await
+        .ok_or_else(|| bad_request("Chat session no longer exists"))?;
+    Ok(Json(local::chat::session_json(
+        &session,
+        state.chat.is_busy(&id).await,
+    )))
 }
 
 async fn update_chat_session(
@@ -7228,6 +8461,26 @@ async fn update_chat_session(
     ))
 }
 
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct SubagentQuery {
+    part_id: String,
+}
+
+async fn chat_subagent(Path(id): Path<String>, Query(query): Query<SubagentQuery>) -> ApiResult {
+    let session = Store::open()?
+        .get_chat_session(&id)?
+        .ok_or_else(|| not_found("chat session"))?;
+    let mut messages = local::chat::list_messages(&id)?;
+    let spawn = messages
+        .iter_mut()
+        .find_map(|message| local::chat::find_part_mut(&mut message.parts, &query.part_id))
+        .ok_or_else(|| not_found("subagent"))?;
+    Ok(Json(json!(local::chat::subagent::snapshot(
+        &session, spawn
+    )?)))
+}
+
 async fn chat_messages(State(state): State<AppState>, Path(id): Path<String>) -> ApiResult {
     // Messages first: these are two connections, so a turn writing between them
     // can only leave the leaf *ahead* of the list, which the client falls back on
@@ -7244,6 +8497,16 @@ async fn chat_messages(State(state): State<AppState>, Path(id): Path<String>) ->
         "queued": queued,
         "activeLeafId": session.active_leaf_id,
     })))
+}
+
+async fn chat_submission(Path((id, client_id)): Path<(String, String)>) -> ApiResult {
+    let store = Store::open()?;
+    if store.get_chat_session(&id)?.is_none() {
+        return Err(not_found("chat session"));
+    }
+    Ok(Json(
+        json!({ "accepted": store.has_chat_submission(&id, &client_id)? }),
+    ))
 }
 
 #[derive(Deserialize)]
@@ -7390,7 +8653,8 @@ async fn send_chat_message(
                 if local::chat::is_client_turn_conflict(&error) {
                     ApiError(StatusCode::CONFLICT, error.to_string())
                 } else {
-                    bad_request(error)
+                    // A failure can occur after the message was admitted.
+                    ApiError::from(error)
                 }
             })?;
         match result {
@@ -7416,7 +8680,7 @@ async fn send_chat_message(
                 if local::chat::is_client_turn_conflict(&error) {
                     ApiError(StatusCode::CONFLICT, error.to_string())
                 } else {
-                    bad_request(error)
+                    ApiError::from(error)
                 }
             })?;
         let capture = !result.existing;
@@ -7764,6 +9028,8 @@ struct EventCursor {
     files: HashMap<String, u64>,
     runs: HashMap<String, (String, i64)>,
     log_offsets: HashMap<String, u64>,
+    log_generations: HashMap<String, String>,
+    chat_active_runs: Option<Value>,
     /// Last update status sent. Unlike the rest of the cursor this isn't store
     /// state — the updater is a separate process, so its progress reaches the UI
     /// through the same diff the store changes do.
@@ -7886,6 +9152,11 @@ fn collect_events(cursor: &mut EventCursor, first: bool) -> Result<Vec<Event>> {
         // Terminal runs were seeded at EOF above, so this is a no-op for them.
         push_log_delta(&run, cursor, &mut out, &mut log_budget);
     }
+    let active_runs = chat_active_runs_json(&store)?;
+    if cursor.chat_active_runs.as_ref() != Some(&active_runs) {
+        out.push(json_event("chat.runs", &json!({})));
+        cursor.chat_active_runs = Some(active_runs);
+    }
     // Committed only now that the batch is certain to be returned.
     if let Some(update) = sampled_update {
         cursor.update = Some(update);
@@ -7918,43 +9189,32 @@ fn push_log_delta(
     budget: &mut u64,
 ) {
     let offset = *cursor.log_offsets.entry(run.id.clone()).or_insert(0);
-    let size = log_size(&run.id);
-    if size <= offset || *budget == 0 {
+    let expected = cursor.log_generations.get(&run.id).map(String::as_str);
+    let Ok(snapshot) = crate::jobs::ssh::service::logs::read(&run.id, offset, *budget, expected)
+    else {
+        return;
+    };
+    let reset = expected.is_some_and(|generation| generation != snapshot.generation)
+        || snapshot.offset != offset;
+    if snapshot.bytes.is_empty() && !reset {
         return;
     }
-    let chunk = read_log_from(&run.id, offset, *budget);
-    *budget -= chunk.len() as u64;
+    *budget -= snapshot.bytes.len() as u64;
+    cursor.log_offsets.insert(
+        run.id.clone(),
+        snapshot.offset + snapshot.bytes.len() as u64,
+    );
     cursor
-        .log_offsets
-        .insert(run.id.clone(), offset + chunk.len() as u64);
-    // base64: chunk boundaries are arbitrary byte positions, and exact byte
-    // lengths are what lets the client dedup replays.
-    out.push(json_event(
-        "run.log",
-        &json!({
-            "runId": run.id,
-            "dataBase64": base64::engine::general_purpose::STANDARD.encode(&chunk),
-            "offset": offset,
-        }),
-    ));
+        .log_generations
+        .insert(run.id.clone(), snapshot.generation.clone());
+    out.push(json_event("run.log", &json!({
+        "runId":run.id, "dataBase64":base64::engine::general_purpose::STANDARD.encode(&snapshot.bytes),
+        "offset":snapshot.offset, "generation":snapshot.generation,
+    })));
 }
 
 fn log_size(run_id: &str) -> u64 {
-    std::fs::metadata(log_path(run_id))
-        .map(|m| m.len())
-        .unwrap_or(0)
-}
-
-fn read_log_from(run_id: &str, offset: u64, max: u64) -> Vec<u8> {
-    use std::io::{Read, Seek, SeekFrom};
-    let Ok(mut f) = std::fs::File::open(log_path(run_id)) else {
-        return Vec::new();
-    };
-    let mut out = Vec::new();
-    if f.seek(SeekFrom::Start(offset)).is_ok() {
-        let _ = f.take(max).read_to_end(&mut out);
-    }
-    out
+    crate::jobs::ssh::service::logs::read(run_id, 0, 0, None).map_or(0, |snapshot| snapshot.size)
 }
 
 // --- embedded SPA ----------------------------------------------------------
@@ -7962,7 +9222,14 @@ fn read_log_from(run_id: &str, offset: u64, max: u64) -> Vec<u8> {
 /// ui/dist, embedded at release build time (debug builds read from disk).
 #[derive(rust_embed::RustEmbed)]
 #[folder = "ui/dist"]
+#[cfg_attr(debug_assertions, allow_missing = true)]
 struct UiDist;
+
+#[cfg(not(debug_assertions))]
+const _: () = assert!(
+    !include_str!("../../ui/dist/index.html").is_empty(),
+    "Run pnpm build in ui/ before a release build"
+);
 
 const NOT_BUILT_PAGE: &str = "<!doctype html><html><head><title>orx up</title></head>\
 <body style=\"font-family:system-ui;background:#111;color:#ddd;display:grid;place-items:center;height:100vh;margin:0\">\
@@ -8023,6 +9290,133 @@ pub(crate) async fn spa(uri: Uri) -> Response {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn chat_active_runs_tracks_owners_and_watchers_until_terminal() {
+        let dir = std::env::temp_dir().join(format!("orx-chat-runs-{}", uuid::Uuid::new_v4()));
+        let store = Store::open_at(dir.clone()).unwrap();
+        let mut run = StoredRun {
+            id: "run-1".into(),
+            experiment_id: "experiment-1".into(),
+            project_id: "project-1".into(),
+            status: "running".into(),
+            backend_json: "{}".into(),
+            command: String::new(),
+            created_at: 1,
+            updated_at: 2,
+            ended_at: None,
+            exit_code: None,
+            commit_sha: None,
+            result_markdown: None,
+            cancel_requested: false,
+            cancel_reason: None,
+            chat_session_id: Some("owner".into()),
+        };
+        store.upsert_run(&run).unwrap();
+        store.register_run_wakeup(&run.id, "owner").unwrap();
+        store.register_run_wakeup(&run.id, "watcher").unwrap();
+        let rows = chat_active_runs_json(&store).unwrap();
+        assert_eq!(rows.as_array().unwrap().len(), 2);
+        assert_eq!(rows[0]["sessionId"], "owner");
+        assert_eq!(rows[1]["sessionId"], "watcher");
+        run.status = "done".into();
+        store.upsert_run(&run).unwrap();
+        assert_eq!(chat_active_runs_json(&store).unwrap(), json!([]));
+        drop(store);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn new_chat_uses_saved_preferences_and_normalizes_model_settings() {
+        let preferences = crate::store::StoredUiState {
+            onboarding_completed: true,
+            tour_completed: true,
+            workspace: None,
+            preferred_autonomy: Some(Autonomy::Copilot),
+            preferred_agent: Some(StoredAgentSelection {
+                harness: "codex".into(),
+                model: Some("custom-model".into()),
+                reasoning_level: Some("ultra".into()),
+                permission_mode: Some("full-access".into()),
+                service_tier: Some("priority".into()),
+            }),
+        };
+        let catalog = json!({"harnesses": [{
+            "id": "codex", "agentReady": true,
+            "models": [], "options": {"reasoningLevels": [{"id": "default"}, {"id": "high"}]}
+        }]});
+        let req = new_chat_settings("project".into(), preferences, &catalog).unwrap();
+        assert_eq!(req.harness.as_deref(), Some("codex"));
+        assert_eq!(req.model.as_deref(), Some("custom-model"));
+        assert_eq!(req.reasoning_level.as_deref(), Some("default"));
+        assert!(req.service_tier.is_none());
+        assert_eq!(req.permission_mode.as_deref(), Some("full-access"));
+        assert_eq!(req.autonomy, Some(Autonomy::Copilot));
+        assert!(!req.plan_mode);
+    }
+
+    #[test]
+    fn new_chat_falls_back_only_when_no_preference_exists() {
+        let mut preferences = crate::store::StoredUiState {
+            onboarding_completed: false,
+            tour_completed: false,
+            workspace: None,
+            preferred_autonomy: None,
+            preferred_agent: None,
+        };
+        let catalog = json!({"harnesses": [{"id":"claude-code", "agentReady":true,
+            "models":[{"id":"opus"}], "options":{"defaultPermissionMode":"plan", "reasoningLevels":[{"id":"default"}]}}]});
+        let req = new_chat_settings("project".into(), preferences.clone(), &catalog).unwrap();
+        assert_eq!(req.harness.as_deref(), Some("claude-code"));
+        assert_eq!(req.model.as_deref(), Some("opus"));
+        assert_eq!(req.permission_mode.as_deref(), Some("plan"));
+        assert_eq!(req.autonomy, Some(Autonomy::Agentic));
+        preferences.preferred_agent = Some(StoredAgentSelection {
+            harness: "claude-code".into(),
+            model: Some("custom-claude-model".into()),
+            service_tier: None,
+            permission_mode: Some("plan".into()),
+            reasoning_level: Some("default".into()),
+        });
+        let req = new_chat_settings("project".into(), preferences.clone(), &catalog).unwrap();
+        assert_eq!(req.harness.as_deref(), Some("claude-code"));
+        assert_eq!(req.model.as_deref(), Some("custom-claude-model"));
+        let unavailable = json!({"harnesses": [{"id":"claude-code", "agentReady":false}, {"id":"codex", "agentReady":true}]});
+        assert!(new_chat_settings("project".into(), preferences.clone(), &unavailable).is_err());
+        preferences.preferred_agent = Some(StoredAgentSelection {
+            harness: "codex".into(),
+            model: Some("gpt-6-sol".into()),
+            service_tier: None,
+            permission_mode: None,
+            reasoning_level: None,
+        });
+        assert!(new_chat_settings("project".into(), preferences, &catalog).is_err());
+    }
+
+    #[tokio::test]
+    async fn empty_local_error_reports_the_http_status() {
+        for (status, body, expected) in [
+            (StatusCode::BAD_GATEWAY, "", "HTTP 502 Bad Gateway"),
+            (StatusCode::NOT_FOUND, "", "HTTP 404 Not Found"),
+            (
+                StatusCode::BAD_REQUEST,
+                r#"{"error":""}"#,
+                "HTTP 400 Bad Request",
+            ),
+        ] {
+            let response = axum::http::Response::builder()
+                .status(status)
+                .body(body.to_string())
+                .unwrap();
+            let error = decode_local_response::<Value>(response.into(), "start the run")
+                .await
+                .unwrap_err();
+            assert_eq!(
+                error.to_string(),
+                format!("orx up could not start the run: {expected}")
+            );
+        }
+    }
 
     #[test]
     fn successful_recheck_clears_stale_claude_warning() {
@@ -8130,7 +9524,13 @@ mod tests {
         let url = format!("http://{}/file", listener.local_addr().unwrap());
         tokio::spawn(async move { axum::serve(listener, app).await });
 
-        let response = reqwest::get(url).await.unwrap();
+        let response = crate::net::loopback_client()
+            .build()
+            .unwrap()
+            .get(url)
+            .send()
+            .await
+            .unwrap();
         assert_eq!(ACTIVE.load(Ordering::SeqCst), 1);
         release.notify_one();
         assert_eq!(response.text().await.unwrap(), "done");
@@ -8283,14 +9683,14 @@ mod tests {
 
     #[cfg(windows)]
     #[tokio::test]
-    async fn windows_ssh_master_status_is_not_a_disconnection() {
+    async fn windows_ssh_status_reports_missing_persistent_connection() {
         let response = ssh_master_status(Query(SshPreflightReq {
             host: "unused-host".into(),
             container: None,
         }))
         .await
         .unwrap_or_else(|error| panic!("{}", error.1));
-        assert!(response.0["running"].is_null());
+        assert_eq!(response.0["running"], false);
     }
 
     #[test]
@@ -8375,6 +9775,32 @@ mod tests {
     }
 
     #[test]
+    fn bundled_zcode_login_has_both_provider_paths() {
+        let root = std::env::temp_dir().join(format!("orx-zcode-login-{}", uuid::Uuid::new_v4()));
+        let cli = root.join("Resources/glm/zcode.cjs");
+        let provider = root.join("Resources/config/provider/zcode-builtin.json");
+        std::fs::create_dir_all(cli.parent().unwrap()).unwrap();
+        std::fs::create_dir_all(provider.parent().unwrap()).unwrap();
+        std::fs::write(&provider, "{}").unwrap();
+        let home = root.join("test-home");
+        let env = zcode_provider_env(&cli, &home);
+        assert_eq!(env.len(), 2);
+        assert_eq!(
+            std::fs::canonicalize(&env[0].1).unwrap(),
+            std::fs::canonicalize(provider).unwrap()
+        );
+        assert_eq!(
+            env[1],
+            (
+                "ZCODE_PERSONAL_PROVIDER_CONFIG_FILE",
+                home.join("v2/provider_config.json").into_os_string()
+            )
+        );
+        assert!(zcode_provider_env(&root.join("missing/zcode.cjs"), &home).is_empty());
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
     fn settings_commands_are_an_exact_allowlist() {
         assert_eq!(
             settings_command("gh auth login"),
@@ -8382,6 +9808,11 @@ mod tests {
         );
         assert_eq!(settings_command("gh auth login; rm -rf ~"), None);
         assert_eq!(settings_command("gh"), None);
+        assert_eq!(
+            settings_command("zcode login zai"),
+            Some(&["zcode", "login", "zai"][..])
+        );
+        assert_eq!(settings_command("zcode login zai; echo token"), None);
     }
 
     #[tokio::test]
@@ -8499,12 +9930,19 @@ mod tests {
 
     #[test]
     fn api_run_exposes_cancel_intent() {
+        let mut backend =
+            crate::jobs::BackendDescriptor::parse(r#"{"kind":"openresearch_job"}"#).unwrap();
+        backend.rental_lease = Some(crate::jobs::rental::Rental {
+            api_url: "https://example.invalid".into(),
+            sandbox_id: "synthetic-only".into(),
+            token: "private-rental-token".into(),
+        });
         let run = StoredRun {
             id: "run-1".into(),
             experiment_id: "experiment-1".into(),
             project_id: "project-1".into(),
             status: "running".into(),
-            backend_json: "{}".into(),
+            backend_json: backend.to_json(),
             command: String::new(),
             created_at: 1,
             updated_at: 2,
@@ -8513,11 +9951,17 @@ mod tests {
             commit_sha: None,
             result_markdown: None,
             cancel_requested: true,
+            cancel_reason: None,
             chat_session_id: None,
         };
 
         let value = serde_json::to_value(ApiRun::from(&run)).unwrap();
         assert_eq!(value["cancelRequested"], true);
+        assert_eq!(value["backend"]["kind"], "openresearch_job");
+        assert!(!value.to_string().contains("private-rental-token"));
+        let legacy = serde_json::to_value(&run).unwrap();
+        assert!(!legacy.to_string().contains("private-rental-token"));
+        assert!(run.backend_json.contains("private-rental-token"));
     }
 
     #[test]
@@ -8535,35 +9979,66 @@ mod tests {
     }
 
     #[test]
-    fn create_run_request_round_trips_agent_attribution_and_force() {
-        let request = CreateRunReq {
+    fn create_run_request_preserves_forwarded_slurm_resources_and_attribution() {
+        let args = crate::ExpRunArgs {
             invocation_context: None,
             telemetry_suppressed: true,
-            experiment_id: "experiment-1".into(),
-            backend: Some("local".into()),
+            forwarded: false,
+            exp_id: "experiment-1".into(),
+            disk: None,
+            provider: None,
+            backend: Some("slurm".into()),
             flavor: None,
+            org: None,
             host: None,
             container: None,
             no_container: false,
             manifest: None,
             image: None,
             timeout: None,
-            org: None,
-            provider: None,
-            disk: None,
+            cpus: Some(8),
+            mem: Some("64G".into()),
             force: true,
             chat_session_id: Some("session-1".into()),
             agent_origin: None,
         };
+        let request = CreateRunReq::from_run_args(&args).unwrap();
 
         let value = serde_json::to_value(&request).unwrap();
+        assert_eq!(value["callerConfigDir"], json!(absolute_config_dir()));
         assert_eq!(value["experimentId"], "experiment-1");
+        assert_eq!(value["cpus"], 8);
+        assert_eq!(value["mem"], "64G");
         assert_eq!(value["chatSessionId"], "session-1");
         assert_eq!(value["force"], true);
-        assert_eq!(
-            serde_json::from_value::<CreateRunReq>(value).unwrap(),
-            request
-        );
+        let forwarded = serde_json::from_value::<CreateRunReq>(value)
+            .unwrap()
+            .into_run_args();
+        assert_eq!(forwarded.cpus, Some(8));
+        assert_eq!(forwarded.mem.as_deref(), Some("64G"));
+        assert_eq!(forwarded.chat_session_id.as_deref(), Some("session-1"));
+        assert!(forwarded.force);
+    }
+
+    #[test]
+    fn require_caller_config_dir_rejects_a_different_dir() {
+        let root = std::env::temp_dir().join(format!("orx-caller-config-{}", uuid::Uuid::new_v4()));
+        let own = root.join("up/openresearch");
+        let caller = root.join("agent/openresearch");
+        std::fs::create_dir_all(&own).unwrap();
+        std::fs::create_dir_all(&caller).unwrap();
+
+        assert!(require_caller_config_dir(None, &own).is_ok());
+        assert!(require_caller_config_dir(Some(&own), &own).is_ok());
+        let fresh = root.join("fresh/openresearch");
+        assert!(require_caller_config_dir(Some(&fresh), &fresh).is_ok());
+        assert!(require_caller_config_dir(Some(&own.join("../openresearch")), &own).is_ok());
+        let error = require_caller_config_dir(Some(&caller), &own)
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains(&caller.display().to_string()));
+        assert!(error.contains(&own.display().to_string()));
+        std::fs::remove_dir_all(root).unwrap();
     }
 
     #[test]
@@ -8591,6 +10066,118 @@ mod tests {
             .as_str()
             .unwrap()
             .ends_with("files/demo"));
+    }
+
+    #[test]
+    fn project_deletion_preserves_artifacts_unless_explicitly_requested() {
+        for (uri, delete_artifacts) in [
+            ("/api/projects/p1", false),
+            ("/api/projects/p1?deleteArtifacts=true", true),
+        ] {
+            let Query(query) =
+                Query::<DeleteProjectQuery>::try_from_uri(&uri.parse().unwrap()).unwrap();
+            assert_eq!(query.delete_artifacts, delete_artifacts);
+        }
+    }
+
+    #[test]
+    fn project_deletion_excludes_artifact_requests_and_project_creation() {
+        let lifecycle = ProjectLifecycle::default();
+        let artifact_request = lifecycle.admit("p1").unwrap();
+        assert!(lifecycle.begin_delete("p1").is_none());
+        drop(artifact_request);
+
+        let deletion = lifecycle.begin_delete("p1").unwrap();
+        assert!(lifecycle.admit("p1").is_none());
+        assert!(lifecycle.admit("__project_create__").is_none());
+        drop(deletion);
+
+        let creation = lifecycle.admit("__project_create__").unwrap();
+        assert!(lifecycle.begin_delete("p1").is_none());
+        drop(creation);
+        assert!(lifecycle.begin_delete("p1").is_some());
+    }
+
+    #[tokio::test]
+    async fn artifact_delete_rejects_during_project_cleanup() {
+        let agent = Arc::new(AgentHost::new(None));
+        let codex = Arc::new(local::codex::CodexHost::new());
+        let claude = Arc::new(local::claude::ClaudeHost::new());
+        let lifecycle = Arc::new(ProjectLifecycle::default());
+        let _deletion = lifecycle.begin_delete("p1").unwrap();
+        let state = AppState {
+            agent: agent.clone(),
+            chat: Arc::new(ChatHost::new(agent, codex, claude.clone())),
+            claude,
+            harnesses: Default::default(),
+            project_lifecycle: lifecycle,
+            project_creation_lock: Default::default(),
+            publication_locks: Default::default(),
+            harness_fill_in_flight: Default::default(),
+            claude_catalog_queue: Default::default(),
+            data_dir_move_in_progress: Default::default(),
+            data_dir_gate: Default::default(),
+            remote_sessions: crate::commands::up_remote::RemoteSessionManager::new(),
+            remote_instance_id: None,
+            stopping: Default::default(),
+            dashboard_lock: Default::default(),
+            restart: Default::default(),
+            trackio: Default::default(),
+        };
+        let error = delete_artifact(
+            State(state),
+            Path("p1".into()),
+            Query(ArtifactPathQuery {
+                path: "report.md".into(),
+            }),
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(error.0, StatusCode::BAD_REQUEST);
+        assert_eq!(error.1, "project deletion is in progress");
+    }
+
+    #[tokio::test]
+    async fn project_cleanup_leases_survive_canceled_request_waiters() {
+        let lifecycle = ProjectLifecycle::default();
+        let deletion = lifecycle.begin_delete("p1").unwrap();
+        let (release, blocked) = std::sync::mpsc::channel();
+        let (finished, completion) = tokio::sync::oneshot::channel();
+        let cleanup = tokio::spawn(async move {
+            let _deletion = deletion;
+            tokio::task::spawn_blocking(move || blocked.recv().unwrap())
+                .await
+                .unwrap();
+            drop(_deletion);
+            finished.send(()).unwrap();
+        });
+        let request = tokio::spawn(async move { cleanup.await.unwrap() });
+        request.abort();
+        assert!(request.await.err().unwrap().is_cancelled());
+        assert!(lifecycle.admit("p1").is_none());
+        assert!(lifecycle.admit("__project_create__").is_none());
+        release.send(()).unwrap();
+        completion.await.unwrap();
+
+        let creation = lifecycle.admit("__project_create__").unwrap();
+        let (release, blocked) = std::sync::mpsc::channel();
+        let worker = tokio::task::spawn_blocking(move || {
+            blocked.recv().unwrap();
+            creation
+        });
+        let request = tokio::spawn(async move { worker.await.unwrap() });
+        request.abort();
+        assert!(request.await.err().unwrap().is_cancelled());
+        assert!(lifecycle.begin_delete("p1").is_none());
+        release.send(()).unwrap();
+        tokio::time::timeout(Duration::from_secs(2), async {
+            while lifecycle.operation_count() != 0 {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+        assert!(lifecycle.begin_delete("p1").is_some());
     }
 
     #[test]

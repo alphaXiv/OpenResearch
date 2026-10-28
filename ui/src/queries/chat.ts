@@ -16,6 +16,12 @@ export const listChatSessionsQuery = (projectId: string) => queryOptions({
   staleTime: 30_000,
 });
 
+export const getSessionExperimentsQuery = (sessionId: string) => queryOptions({
+  queryKey: workspaceKey("getSessionExperiments", sessionId),
+  queryFn: ({ signal }) => api.getSessionExperiments(sessionId, signal),
+  staleTime: 0,
+});
+
 /** Scans the agents' own stores, so it is read once per picker open. */
 export const listNativeChatsQuery = () => queryOptions({
   queryKey: workspaceKey("listNativeChats"),
@@ -76,3 +82,9 @@ export async function readSidebarChatPage(filter: "active" | "archived" | "all",
     return { ...page, sessions: page.sessions.map((session) => ({ ...session, ...indicators.get(session.id) })) };
   } finally { off(); }
 }
+
+export const listChatActiveRunsQuery = () => queryOptions({
+  queryKey: workspaceKey("listChatActiveRuns"),
+  queryFn: ({ signal }) => api.listChatActiveRuns(signal),
+  staleTime: Infinity,
+});

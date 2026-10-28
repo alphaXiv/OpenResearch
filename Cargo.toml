@@ -1,6 +1,6 @@
 [package]
 name = "openresearch-cli"
-version = "0.2.16"
+version = "0.2.22"
 edition = "2021"
 description = "OpenResearch CLI (orx) — Rust port"
 repository = "https://github.com/alphaXiv/OpenResearch"
@@ -18,7 +18,8 @@ desktop = ["dep:tao", "dep:wry", "dep:gtk", "dep:png"]
 
 [dependencies]
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "io-util", "io-std", "time", "fs", "process", "sync", "signal"] }
-tokio-util = { version = "0.7", features = ["io"] }
+tokio-util = { version = "0.7", features = ["io", "compat"] }
+agent-client-protocol = "2.2"
 # rustls instead of the default native-tls: avoids an OpenSSL dependency so the
 # static musl Linux builds link cleanly (native-tls/openssl won't build for musl).
 # Both root sets are enabled: webpki-roots keeps the bundled Mozilla list (so a
@@ -32,6 +33,7 @@ serde_json = "1"
 toml = "0.8"
 anyhow = "1"
 dirs = "5"
+glob = "0.3"
 # bundled: compiles SQLite from source so the static musl builds link cleanly
 # (same reasoning as rustls above — no system library dependency).
 rusqlite = { version = "0.32", features = ["bundled", "backup"] }
@@ -79,6 +81,7 @@ roxmltree = "0.21"
 libc = "0.2"
 
 [target.'cfg(windows)'.dependencies]
+raw-window-handle = "0.6"
 # Win32 calls std lacks: run liveness, console ownership, the error dialog, PE
 # version-resource reads (GetFileVersionInfoW / VerQueryValueW — the spawn-free
 # `--version` fast path in harness detection), total RAM for the agent idle
@@ -106,7 +109,7 @@ png = { version = "0.18", optional = true }
 [target.'cfg(target_os = "macos")'.dependencies]
 # muda builds the menu bar, and objc2-app-kit's NSAlert backs `window.confirm`.
 objc2 = "0.6"
-objc2-app-kit = { version = "0.3", default-features = false, features = ["std", "NSAlert", "NSApplication", "NSButton", "NSControl", "NSResponder", "NSView"] }
+objc2-app-kit = { version = "0.3", default-features = false, features = ["std", "NSAlert", "NSApplication", "NSButton", "NSControl", "NSResponder", "NSView", "NSWindow"] }
 objc2-foundation = { version = "0.3", default-features = false, features = ["std", "NSString"] }
 muda = "0.20"
 # `window.confirm` panel added to wry's WKUIDelegate (src/commands/app.rs).

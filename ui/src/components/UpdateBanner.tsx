@@ -30,8 +30,9 @@ export function useUpdateStatus(enabled = true): UpdateState {
   };
 }
 
-/** How long to wait for the relaunched server before giving up on the reload. */
-const RESTART_TIMEOUT_MS = 60_000;
+/** How long to wait for the relaunched server before giving up on the reload. It may
+ *  download and install a held-back update first, which the server bounds at 5 minutes. */
+const RESTART_TIMEOUT_MS = 360_000;
 const RESTART_POLL_MS = 500;
 
 export interface RestartState {
@@ -41,7 +42,7 @@ export interface RestartState {
 }
 
 export const releaseNotesUrl = (tag: string) =>
-  `https://github.com/alphaXiv/OpenResearch/releases/tag/${tag.split("/").map(encodeURIComponent).join("/")}`;
+  `https://github.com/alphaXiv/OpenResearch/releases/tag/${tag.startsWith("canary-") ? "canary" : tag.split("/").map(encodeURIComponent).join("/")}`;
 
 /** Ask the server to relaunch, then reload once a different server process
  *  answers — the page itself is the old build until it reloads. The old server answers the POST and then drops every connection,
@@ -90,12 +91,12 @@ export function useRestartApp(status: UpdateStatus | null): RestartState {
   return { restarting, error, restart };
 }
 
-/** Shown once the updater has already installed a newer version: the app the
- *  user is looking at is the old one until it restarts.
+/** Shown once a newer version is installed, or held back until this server
+ *  restarts: the app the user is looking at is the old one until it restarts.
  *
  *  Deliberately not shown for a merely *available* update — that is the
  *  updater's job, and a banner for something already in hand is noise. */
-export function UpdateBanner({ status }: { status: UpdateStatus | null }) {
+export function UpdateBanner({ status, hasSidebar = false }: { status: UpdateStatus | null; hasSidebar?: boolean }) {
   const [dismissed, setDismissed] = useState<string | null>(null);
 
   // `installedVersion`, not `latest`: a release can land between the install and
@@ -106,14 +107,16 @@ export function UpdateBanner({ status }: { status: UpdateStatus | null }) {
 
   return (
     <div
-      className="update-banner flex items-center gap-2 shrink-0 py-1.5 px-3.5 mac-titlebar:ps-20 win-titlebar:pe-36 text-sm text-text bg-surface border-b border-b-border"
+      className={`update-banner flex items-center gap-2 shrink-0 min-h-11 py-1.5 px-3.5 ${hasSidebar ? "mac-titlebar:ps-titlebar-sidebar-controls" : "mac-titlebar:ps-titlebar-controls"} mac-titlebar:min-h-titlebar mac-titlebar:pt-1 mac-titlebar:pb-2 win-titlebar:pe-win-controls text-sm text-text bg-accent-blue-subtle border-b border-b-accent-blue-border`}
       role="status"
     >
-      <RefreshCw size={13} className={`shrink-0 text-subtext${restarting ? " animate-spin" : ""}`} />
-      <span className="min-w-0">
+      <RefreshCw size={14} className={`shrink-0 text-accent-blue-strong${restarting ? " animate-spin" : ""}`} />
+      <span className="min-w-0 truncate" title={error ? m.update_banner_restart_failed({ error }) : undefined}>
         {error
           ? m.update_banner_restart_failed({ error })
-          : m.update_banner_complete({ version: ltr(version) })}
+          : status?.installedTag?.startsWith("canary-")
+          ? m.update_banner_canary_ready()
+          : m.update_banner_complete({ version: ltr(version.startsWith("v") ? version : `v${version}`) })}
       </span>
       {status?.installedTag && (
         <a href={releaseNotesUrl(status.installedTag)} target="_blank" rel="noreferrer" className="text-sm text-subtext underline shrink-0">
@@ -133,7 +136,7 @@ export function UpdateBanner({ status }: { status: UpdateStatus | null }) {
         disabled={restarting}
         onClick={() => setDismissed(version)}
       >
-        <X size={13} />
+        <X size={14} />
       </IconButton>
     </div>
   );

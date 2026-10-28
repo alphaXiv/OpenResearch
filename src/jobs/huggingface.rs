@@ -10,7 +10,7 @@
 //! plain `Bearer` header on every call including the log stream.
 
 use std::collections::HashMap;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::process::Stdio;
 use std::sync::OnceLock;
 use std::time::Duration;
@@ -19,6 +19,7 @@ use reqwest::Client;
 use serde::Deserialize;
 use serde_json::json;
 
+use super::managed_env::ManagedEnv;
 use crate::error::{anyhow, Result};
 
 const SOURCE_LAUNCHER: &str = r#"
@@ -50,151 +51,14 @@ with contextlib.redirect_stdout(sys.stderr):
 print(json.dumps({"id": job.id}))
 "#;
 
-fn managed_python() -> PathBuf {
-    let env = crate::config::config_dir().join("envs").join("huggingface");
-    if cfg!(windows) {
-        env.join("Scripts").join("python.exe")
-    } else {
-        env.join("bin").join("python")
-    }
-}
-
 /// `huggingface_hub` gained `sync_job_volume` in 1.22, which requires Python 3.10.
-const MIN_PYTHON: (u32, u32) = (3, 10);
-const HUB_REQUIREMENT: &str = "huggingface_hub>=1.22.0";
-
-fn parse_python_version(text: &str) -> Option<(u32, u32)> {
-    let (major, minor) = text.trim().split_once('.')?;
-    Some((major.parse().ok()?, minor.parse().ok()?))
-}
-
-/// Versioned names catch a newer Python hidden behind an old `python3` (Xcode CLT ships 3.9).
-async fn base_python() -> Result<&'static str> {
-    let mut too_old = None;
-    for candidate in [
-        "python3",
-        "python",
-        "python3.14",
-        "python3.13",
-        "python3.12",
-        "python3.11",
-        "python3.10",
-    ] {
-        let Some(version) = tokio::process::Command::new(candidate)
-            .args([
-                "-c",
-                "import sys, venv; print('%d.%d' % sys.version_info[:2])",
-            ])
-            .stdin(Stdio::null())
-            .stderr(Stdio::null())
-            .output()
-            .await
-            .ok()
-            .filter(|output| output.status.success())
-            .and_then(|output| parse_python_version(&String::from_utf8_lossy(&output.stdout)))
-        else {
-            continue;
-        };
-        if version >= MIN_PYTHON {
-            return Ok(candidate);
-        }
-        too_old.get_or_insert((candidate, version));
-    }
-    let (min_major, min_minor) = MIN_PYTHON;
-    Err(match too_old {
-        Some((candidate, (major, minor))) => anyhow!(
-            "Hugging Face Jobs needs Python {min_major}.{min_minor} or newer to stage source, but \
-             `{candidate}` is Python {major}.{minor}. Install a newer Python and retry."
-        ),
-        None => anyhow!(
-            "Python {min_major}.{min_minor} or newer is required to stage source for Hugging Face Jobs."
-        ),
-    })
-}
-
-async fn client_env_ready(python: &Path) -> bool {
-    tokio::process::Command::new(python)
-        .args([
-            "-c",
-            "from huggingface_hub import HfApi; assert hasattr(HfApi, 'sync_job_volume')",
-        ])
-        .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .status()
-        .await
-        .map(|status| status.success())
-        .unwrap_or(false)
-}
-
-/// Serializes installs across orx processes so one can't delete another's in-progress env.
-/// Best-effort, like the settings lock: a filesystem without locks shouldn't block launches.
-async fn lock_client_env(env_dir: &Path) -> Option<std::fs::File> {
-    let lock_path = env_dir.with_extension("lock");
-    std::fs::create_dir_all(lock_path.parent()?).ok()?;
-    let lock_file = std::fs::OpenOptions::new()
-        .create(true)
-        .truncate(false)
-        .write(true)
-        .open(&lock_path)
-        .ok()?;
-    tokio::task::spawn_blocking(move || lock_file.lock().map(|()| lock_file).ok())
-        .await
-        .ok()?
-}
-
-async fn ensure_client_env() -> Result<PathBuf> {
-    static INSTALL_LOCK: OnceLock<tokio::sync::Mutex<()>> = OnceLock::new();
-    let _install = INSTALL_LOCK
-        .get_or_init(|| tokio::sync::Mutex::new(()))
-        .lock()
-        .await;
-    let python = managed_python();
-    let env_dir = python
-        .parent()
-        .and_then(Path::parent)
-        .ok_or_else(|| anyhow!("Invalid managed Hugging Face environment path."))?;
-    let _env_lock = lock_client_env(env_dir).await;
-    if python.exists() && client_env_ready(&python).await {
-        return Ok(python);
-    }
-    let base = base_python().await?;
-    // An unusable env may be pinned to an interpreter too old to upgrade, so rebuild it.
-    if env_dir.exists() {
-        std::fs::remove_dir_all(env_dir)?;
-    }
-    if let Some(parent) = env_dir.parent() {
-        std::fs::create_dir_all(parent)?;
-    }
-    let status = tokio::process::Command::new(base)
-        .args(["-m", "venv"])
-        .arg(env_dir)
-        .status()
-        .await?;
-    if !status.success() {
-        return Err(anyhow!(
-            "Could not create the Hugging Face client environment."
-        ));
-    }
-    eprintln!("orx: installing the Hugging Face source-transfer client (one time)…");
-    let status = tokio::process::Command::new(&python)
-        .args([
-            "-m",
-            "pip",
-            "install",
-            "--quiet",
-            "--disable-pip-version-check",
-            HUB_REQUIREMENT,
-        ])
-        .status()
-        .await?;
-    if !status.success() || !client_env_ready(&python).await {
-        return Err(anyhow!(
-            "Could not install the Hugging Face source-transfer client ({HUB_REQUIREMENT})."
-        ));
-    }
-    Ok(python)
-}
+const CLIENT_ENV: ManagedEnv = ManagedEnv {
+    name: "huggingface",
+    label: "Hugging Face Jobs",
+    min_python: (3, 10),
+    requirement: "huggingface_hub>=1.22.0",
+    ready_check: "from huggingface_hub import HfApi; assert hasattr(HfApi, 'sync_job_volume')",
+};
 
 pub fn endpoint() -> String {
     std::env::var("HF_ENDPOINT").unwrap_or_else(|_| "https://huggingface.co".to_string())
@@ -247,7 +111,7 @@ pub fn resolve_token_with_source() -> Result<(String, TokenSource)> {
 fn http() -> &'static Client {
     static CLIENT: OnceLock<Client> = OnceLock::new();
     CLIENT.get_or_init(|| {
-        Client::builder()
+        crate::net::remote_client()
             .connect_timeout(Duration::from_secs(15))
             .build()
             .expect("reqwest client")
@@ -378,7 +242,7 @@ pub async fn run_job_with_source(
     archive: &Path,
     digest: &str,
 ) -> Result<JobInfo> {
-    let python = ensure_client_env().await?;
+    let python = CLIENT_ENV.ensure().await?;
     let source_dir = archive
         .parent()
         .unwrap_or_else(|| Path::new("."))
@@ -499,8 +363,8 @@ pub async fn stream_logs(
     let mut buf: Vec<u8> = Vec::new();
     loop {
         let chunk = match tokio::time::timeout(idle_timeout, res.chunk()).await {
-            Err(_) => break,       // idle — likely end of buffered history
-            Ok(Err(_)) => break,   // stream error — caller reconnects if live
+            Err(_) => break, // idle — likely end of buffered history
+            Ok(Err(e)) => return Err(anyhow!("Hugging Face log stream failed: {}", e)),
             Ok(Ok(None)) => break, // server closed
             Ok(Ok(Some(c))) => c,
         };
@@ -578,19 +442,14 @@ mod settings_tests {
         }
     }
 
-    #[test]
-    fn parses_python_versions() {
-        assert_eq!(parse_python_version("3.9\n"), Some((3, 9)));
-        assert_eq!(parse_python_version("3.14"), Some((3, 14)));
-        assert_eq!(parse_python_version("garbage"), None);
-    }
-
     #[tokio::test]
     async fn source_launcher_keeps_library_output_off_stdout() {
-        let Ok(python) = base_python().await else {
+        let Ok(python) =
+            crate::jobs::managed_env::base_python(CLIENT_ENV.min_python, CLIENT_ENV.label).await
+        else {
             eprintln!(
                 "skipped: no Python {}.{}+ on PATH",
-                MIN_PYTHON.0, MIN_PYTHON.1
+                CLIENT_ENV.min_python.0, CLIENT_ENV.min_python.1
             );
             return;
         };

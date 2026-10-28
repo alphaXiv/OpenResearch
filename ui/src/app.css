@@ -2,9 +2,12 @@
   clip-path: inset(34% 9%);
 }
 
+.mac-titlebar .app > :is(.update-banner, .offline-banner, [role="alert"]) ~ .app-body .mac-titlebar-spacer {
+  display: none;
+}
+
 :root[data-theme="dark"] .tinker-logo {
   filter: invert(1);
-  mix-blend-mode: screen;
 }
 
 :root:is([lang="fa"], [lang="ar"]) #root :where(p, h1, h2, h3, h4, h5, h6, button, label, li, th, td, dt, dd, [role="status"], [role="alert"]) {
@@ -23,6 +26,15 @@
 
 .xterm {
   color-scheme: dark;
+}
+
+@keyframes or-experiment-pulse {
+  0%, 100% {
+    opacity: 1;
+  }
+  50% {
+    opacity: 0.55;
+  }
 }
 
 @keyframes or-pulse {
@@ -80,8 +92,13 @@
 }
 
 .tool-running-shimmer::selection {
-  color: var(--text);
-  -webkit-text-fill-color: var(--text);
+  color: var(--selection-text);
+  -webkit-text-fill-color: var(--selection-text);
+}
+
+.openresearch-diff ::selection {
+  color: var(--selection-text);
+  background: var(--code-selection);
 }
 
 .tool-running-shimmer-icon {
@@ -135,11 +152,6 @@
   transition: color 140ms ease, text-decoration-color 140ms ease;
 }
 
-.tool-line,
-.tool-group-summary {
-  font-weight: 375;
-}
-
 .tool-group-rows .tool-line {
   font-size: var(--text-sm);
 }
@@ -160,10 +172,56 @@
   margin-inline: auto;
 }
 
+.msg-assistant .md figure:has(.inline-html-figure) {
+  width: 100%;
+}
+
 /* Inline flex otherwise inherits paragraph leading and outgrows code chips. */
 .md .file-chip {
   line-height: 1.3;
   padding-block: 0.5px;
+}
+
+.md .file-chip:not(.run-chip),
+.md .file-link,
+.md a {
+  font: inherit;
+  color: var(--accent-blue-strong);
+  background: transparent;
+  border: 0;
+  padding-inline: 0;
+  opacity: 1;
+}
+
+.md .file-chip:not(.run-chip) svg {
+  opacity: 1;
+}
+
+.md .file-chip:not(.run-chip) .file-chip-label,
+.md .file-link,
+.md a {
+  text-decoration-line: underline;
+  text-decoration-color: var(--link-underline);
+  text-decoration-thickness: 1px;
+  text-underline-offset: 2px;
+}
+
+.md .file-chip:not(.run-chip):hover:not(:disabled) .file-chip-label,
+.md .file-chip:not(.run-chip):focus-visible .file-chip-label,
+.md .file-link:hover:not(:disabled),
+.md .file-link:focus-visible,
+.md a:hover,
+.md a:focus-visible {
+  text-decoration-color: currentColor;
+}
+
+.md .file-link code,
+.md a code {
+  font: inherit;
+  color: inherit;
+  background: transparent;
+  border: 0;
+  padding: 0;
 }
 
 /* Unlayered so `.run-chip svg` on the `.md` wrapper cannot tint the trailing
@@ -183,7 +241,7 @@
 
 .md .file-chip:hover:not(:disabled) .file-chip-label,
 .md .file-chip:focus-visible .file-chip-label {
-  text-decoration-color: var(--primary);
+  text-decoration-color: var(--text);
 }
 
 .md .file-chip:disabled .file-chip-label {
@@ -231,16 +289,21 @@
 
 .tool-target:hover,
 .tool-target-more:hover {
-  color: var(--primary);
+  color: var(--text);
   text-decoration-color: var(--border-strong);
 }
 
 .tool-target:focus-visible,
 .tool-target-more:focus-visible {
-  color: var(--primary);
+  color: var(--text);
   text-decoration-color: var(--border-strong);
-  outline: 1px solid var(--border-strong);
+  outline: 1px solid var(--focus);
   outline-offset: 2px;
+}
+
+.experiment-run-link:is(:hover, :focus-visible) {
+  color: inherit;
+  text-decoration-color: currentColor;
 }
 
 @media (prefers-reduced-motion: reduce) {
@@ -292,6 +355,20 @@
     transform: rotate(360deg);
   }
 }
+@keyframes onb-welcome-in {
+  from {
+    opacity: 0;
+    filter: blur(8px);
+    transform: translateY(0.3em);
+  }
+}
+@keyframes onb-warp-in {
+  from {
+    opacity: 0;
+    filter: blur(12px);
+    transform: scale(0.4);
+  }
+}
 @keyframes title-char-in {
   from {
     opacity: 0;
@@ -300,7 +377,7 @@
   }
 }
 
-/* Reserve room for the four workspace buttons and their gaps. */
+/* Reserve room for the workspace toolbar. */
 .workspace-body > .chat-pane .chat-header {
   padding-inline-end: 12rem;
 }
@@ -314,11 +391,28 @@
 }
 
 .workspace-card-visible .workspace-tools {
-  top: 1.25rem;
+  top: 0.75rem;
 }
 
 .win-titlebar .workspace-card-visible .workspace-tools {
-  top: 2.5rem;
+  top: 2.75rem;
+}
+
+.win-titlebar .app:not(:has(> :is(.update-banner, .offline-banner, [role="alert"]))) .workspace-body:not(.workspace-card-visible):is(:not(:has(> .right-pane)), .flex-col) > .workspace-tools {
+  inset-inline-end: var(--spacing-win-controls);
+}
+
+.win-titlebar .app:not(:has(> :is(.update-banner, .offline-banner, [role="alert"]))) .workspace-body:not(.workspace-card-visible):is(:not(:has(> .right-pane)), .flex-col) > .chat-pane .chat-header {
+  padding-inline-end: calc(12rem + var(--spacing-win-controls));
+}
+
+.win-titlebar .app:not(:has(> :is(.update-banner, .offline-banner, [role="alert"]))) .settings-view-scroll:first-child {
+  margin-block-start: var(--spacing-win-caption);
+}
+
+.win-titlebar .app:not(:has(> :is(.update-banner, .offline-banner, [role="alert"]))) .workspace-body:not(.flex-col) > .right-pane > .tabs,
+.win-titlebar .right-pane.max > .tabs {
+  padding-inline-end: var(--spacing-win-controls);
 }
 
 .code-source-text,
@@ -329,4 +423,29 @@
 .code-source-wrap,
 .openresearch-diff .diff-code {
   @apply whitespace-pre-wrap break-normal break-words;
+}
+
+@layer components {
+.term-provenance {
+  display: flex;
+  align-items: center;
+  gap: 6px 14px;
+  min-height: 32px;
+  padding: 6px 10px;
+  overflow-x: auto;
+  scrollbar-width: none;
+  border-bottom: 1px solid var(--border);
+  background: var(--surface);
+  color: var(--subtext);
+  font-size: 11px;
+  white-space: nowrap;
+  flex-shrink: 0;
+}
+.term-provenance::-webkit-scrollbar {
+  display: none;
+}
+.term-provenance code {
+  color: var(--text);
+  font-size: inherit;
+}
 }

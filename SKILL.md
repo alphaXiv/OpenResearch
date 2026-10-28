@@ -79,7 +79,7 @@ group below has a module (`orx skill <name>`) with the full flags and rules.
 | `orx project view <projectId>` | Show a local project's details and experiment tree. **Experiment ids come from here.** |
 | `orx runs <projectId> [--experiment <id>]` | List runs as a table, newest first. **Run ids come from here.** |
 
-### Run evidence (run-scoped) — module `orx-evidence`
+### Run evidence (run-scoped) — module `orx-logs`
 | Command | What it does |
 |---|---|
 | `orx logs <runId>` | Show the local log path, size, and short preview; inspect the file for full evidence. |
@@ -96,6 +96,7 @@ group below has a module (`orx skill <name>`) with the full flags and rules.
 | `orx compute [--gpu <id>] [--count <n>] [--provider <name>]` / `orx compute --cpu` | List the GPU/CPU compute catalog. |
 | `orx instance create <orgId> (--gpu <id> … \| --cpu <flavor> …)` | Spin up a standalone instance in an org; see `orx-instances`. |
 | `orx exp status/run/cancel/wait/wake <localExpId>` | Inspect, run, cancel, wait on, or register a wake-up for a local experiment node. |
+| `orx exp move/archive/unarchive/delete <localExpId>` | Re-parent, hide, restore, or permanently delete experiment nodes; see `orx-experiment-tree`. |
 | `orx exp desc <expId> [--set "<text>" \| --stdin]` | Read or overwrite the experiment's description. |
 | `orx agent spawn "<task>" [--title "<t>"] [--stdin] [--no-wake]` | Delegate an independent task to a helper session; see `orx-agent-delegation`. |
 
@@ -136,7 +137,8 @@ list, with one-line descriptions, is printed at the end of `orx skill` output):
 - **orx-instances** — create persistent standalone machines for manual work.
 - **orx-git** — read, edit, and diff a node's code with plain git.
 - **orx-agent-delegation** — delegate independent work to helper sessions safely.
-- **orx-evidence** — capture and inspect experiment results through run logs.
+- **orx-logs** — retrieve persisted run output for progress, debugging, or measurements.
+- **orx-results** — interpret, compare, and summarize measured experiment outcomes.
 - **orx-reports** — write durable research outputs into the project's artifacts directory.
 - **orx-figures** — publication-quality figures in matplotlib or TikZ. Load it **before** writing any plotting code, then read the one reference for that figure type.
 - **orx-customize** — add reusable skills and LaTeX templates across projects.

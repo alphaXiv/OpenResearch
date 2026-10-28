@@ -887,6 +887,29 @@ impl Codex {
 /// Compaction re-reads a whole thread; a long one is not quick.
 const COMPACT_TURN_TIMEOUT: Duration = Duration::from_secs(300);
 
+/// Load the persisted thread without creating a new one or adding user input.
+async fn resume_for_compaction(
+    client: &CodexClient,
+    thread_id: &str,
+    path: &Path,
+    mut setup: Value,
+) -> Result<()> {
+    if client.resumed_thread().as_deref() == Some(thread_id) {
+        return Ok(());
+    }
+    setup["threadId"] = Value::String(thread_id.to_string());
+    setup["path"] = Value::String(path.to_string_lossy().into_owned());
+    let resumed = client.request("thread/resume", setup).await?;
+    if resumed.pointer("/thread/id").and_then(Value::as_str) != Some(thread_id) {
+        return Err(anyhow!(
+            "Codex resumed a different thread — cannot compact this chat"
+        ));
+    }
+    client.set_thread_model(resumed.get("model").and_then(Value::as_str));
+    client.set_resumed_thread(thread_id);
+    Ok(())
+}
+
 #[async_trait]
 impl Harness for Codex {
     fn id(&self) -> &'static str {
@@ -901,9 +924,13 @@ impl Harness for Codex {
         true
     }
 
+    fn supports_compaction(&self) -> bool {
+        true
+    }
+
     /// The app server compacts a thread in place. The legacy `codex exec` path
-    /// spawns a fresh child per turn with no session-scoped RPC, so it — and a
-    /// session whose app-server child is gone — take the shared fallback.
+    /// spawns a fresh child per turn with no session-scoped RPC and takes the
+    /// shared fallback. An idle app-server is restored without sending a turn.
     async fn compact(&self, ctx: &CompactCtx) -> Result<CompactOutcome> {
         let Some(thread_id) = ctx.native_session_id.as_deref() else {
             return Ok(CompactOutcome::Fallback);
@@ -911,18 +938,38 @@ impl Harness for Codex {
         if !runs_app_server().await {
             return Ok(CompactOutcome::Fallback);
         }
-        let Some(client) = ctx.host.codex.client_for(&ctx.session_id).await else {
-            // The thread is still resumable; summarizing would throw it away.
-            return Err(anyhow!(
-                "Codex is not running for this chat — send a message first, then compact"
-            ));
+        let live = ctx.host.codex.client_for(&ctx.session_id).await;
+        let client = match live {
+            Some(client) if client.resumed_thread().as_deref() == Some(thread_id) => client,
+            _ => {
+                let session = codex_native_session(thread_id).await?.ok_or_else(|| {
+                    anyhow!("Codex's saved thread is missing — cannot compact this chat")
+                })?;
+                let (repo, playbook_md) = codex_playbook(&ctx.project, &ctx.session_id).await?;
+                let client = ctx
+                    .host
+                    .codex
+                    .ensure(&ctx.session_id, session.store)
+                    .await?;
+                let config = if ctx.permission_mode == Some(PermissionMode::Bypass) {
+                    Value::Null
+                } else {
+                    codex_turn_config(&client, &repo).await?
+                };
+                let auto_review_supported = config_supports_auto_review(&config)
+                    && super::detect::api_key("OPENAI_BASE_URL").is_none();
+                let setup = codex_thread_setup(
+                    &repo,
+                    &playbook_md,
+                    ctx.permission_mode,
+                    auto_review_supported,
+                    ctx.model.as_deref(),
+                    ctx.service_tier.as_deref(),
+                );
+                resume_for_compaction(&client, thread_id, &session.path, setup).await?;
+                client
+            }
         };
-        // A fresh child must `thread/resume` a thread before it can act on it.
-        if client.resumed_thread().as_deref() != Some(thread_id) {
-            return Err(anyhow!(
-                "Codex is not running this chat's thread — send a message first, then compact"
-            ));
-        }
         // `thread/compact/start` only starts a turn: codex compacts in the
         // background and reports through the same stream a prompt would, so the
         // request returning is not the compaction being done.
@@ -1073,14 +1120,14 @@ impl Harness for Codex {
             .with_reasoning_levels(&CODEX_REASONING_LEVELS)
     }
 
-    /// Three prompt kinds resume differently:
+    /// Prompt kinds resume differently:
     ///
     /// * `permission` (native, held mid-turn): the answer is the JSON-RPC
     ///   `{decision}` reply, delivered inline over the live app-server child —
     ///   the still-running turn keeps streaming once codex unblocks
     ///   ([`ResumeAction::Handled`], never the new-message path).
-    /// * `question` (native, held mid-turn): a `request_user_input` reply,
-    ///   delivered inline the same way (`user_input_reply`).
+    /// * `question`: held requests receive `user_input_reply`; asynchronous
+    ///   questions receive a user message through the steering path.
     /// * `plan` (end-turn card, no `native_id`): resumes by a NEW user message
     ///   ([`ResumeAction::SendMessage`]) — approve sends the implementation
     ///   prompt with Plan cleared while preserving the selected permission;
@@ -1128,12 +1175,25 @@ impl Harness for Codex {
                     plan_mode: Some(plan_mode),
                 })
             }
-            // Native held cards (permission / question): reply inline over the
-            // live child. A reply only lands if the turn is still paused on it —
-            // after an interrupt/error the request was already settled and a
-            // late reply would be a stale answer into the void. Mirror Claude's
-            // zombie collapse so a card left by a crashed turn stops swallowing
-            // answers.
+            // Async questions are answered by steering, not a held JSON-RPC reply.
+            "question" if prompt.native_id.is_none() => {
+                if !answer.approve {
+                    return Ok(ResumeAction::Handled { plan_mode: None });
+                }
+                let text = async_question_answer(prompt, answer)?;
+                ctx.host
+                    .steer_message(
+                        &ctx.session_id,
+                        text,
+                        Default::default(),
+                        Vec::new(),
+                        Vec::new(),
+                        None,
+                    )
+                    .await?;
+                Ok(ResumeAction::Handled { plan_mode: None })
+            }
+            // Held requests cannot receive answers after their turn ends.
             "permission" | "question" => {
                 if !ctx.is_busy().await {
                     ctx.host
@@ -1174,6 +1234,16 @@ impl Harness for Codex {
 
     fn config_home(&self) -> Option<PathBuf> {
         Some(native_store::codex_home(NativeStore::Legacy))
+    }
+
+    fn native_skill_roots(&self) -> Vec<PathBuf> {
+        [
+            dirs::home_dir().map(|home| home.join(".agents/skills")),
+            self.config_home().map(|home| home.join("skills")),
+        ]
+        .into_iter()
+        .flatten()
+        .collect()
     }
 
     fn skill_target(&self) -> Option<PathBuf> {
@@ -1719,26 +1789,26 @@ fn tool_status(completed: bool, failed: bool) -> &'static str {
 }
 
 /// A ThreadItem (from `item/started` / `item/completed`) → WirePart, applied to
-/// the parent transcript. Thin wrapper over the pure [`item_to_part`]: it owns
+/// the parent transcript. Thin wrapper over the pure [`item_parts`]: it owns
 /// the streaming-merge guards that need `ctx` (never wipe a streamed part with
-/// an empty final text), then upserts. The sub-agent path calls `item_to_part`
+/// an empty final text), then upserts. The sub-agent path calls `item_parts`
 /// directly against its own bucket (see the turn loop's routing).
 fn apply_item(ctx: &mut TurnCtx, item: &Value, completed: bool) {
-    let Some(part) = item_to_part(item, completed, &ctx.assistant.parts) else {
-        return;
-    };
-    // agentMessage / reasoning / plan stream via deltas before the completed
-    // item lands; a completed item with empty text must not wipe what the
-    // deltas built. `item_to_part` produces the part with its final id (plan
-    // uses `plan_part_id`), so the guard keys off that id.
-    if completed
-        && streamed_text_kind(item)
-        && part_text_is_empty(&part)
-        && part_exists(ctx, &part.id)
-    {
-        return;
+    for part in item_parts(item, completed, &ctx.assistant.parts) {
+        // agentMessage / reasoning / plan stream via deltas before the completed
+        // item lands; a completed item with empty text must not wipe what the
+        // deltas built. `item_to_part` produces the part with its final id (plan
+        // uses `plan_part_id`), so the guard keys off that id.
+        if completed
+            && part.kind != "prompt"
+            && streamed_text_kind(item)
+            && part_text_is_empty(&part)
+            && part_exists(ctx, &part.id)
+        {
+            continue;
+        }
+        upsert_preserving_children(&mut ctx.assistant.parts, part);
     }
-    upsert_preserving_children(&mut ctx.assistant.parts, part);
 }
 
 async fn reconcile_turn_items(
@@ -1783,36 +1853,57 @@ fn reconcile_items(parts: &mut Vec<WirePart>, items: &[Value]) {
     let mut claimed: Vec<String> = Vec::new();
     for item in items {
         let completed = item.get("status").and_then(Value::as_str) != Some("inProgress");
-        let Some(part) = item_to_part(item, completed, parts) else {
-            continue;
-        };
-        let id_exists = parts.iter().any(|prior| prior.id == part.id);
-        if completed && streamed_text_kind(item) && part_text_is_empty(&part) && id_exists {
-            continue;
-        }
-        // `thread/read` re-mints ids (`item-N`) for content the live stream
-        // keyed by its Responses id (`msg_…`/`rs_…`), so an unknown id whose
-        // text continues a non-empty same-kind part is that part's item
-        // renamed, not new content (OR-181) — adopt the authoritative text in
-        // place. An empty part carries no evidence of which item it is.
-        if !id_exists && renamable_text_kind(item) {
-            let incoming = part.text.as_deref().unwrap_or("");
-            let renamed = parts.iter().position(|prior| {
-                let prior_text = prior.text.as_deref().unwrap_or("");
-                !claimed.contains(&prior.id)
-                    && !prior.id.starts_with("plan-item-")
-                    && prior.kind == part.kind
-                    && !prior_text.is_empty()
-                    && incoming.starts_with(prior_text)
-            });
-            if let Some(i) = renamed {
-                claimed.push(parts[i].id.clone());
-                parts[i].text = part.text;
-                parts[i].phase = part.phase.or(parts[i].phase);
+        for part in item_parts(item, completed, parts) {
+            let id_exists = parts.iter().any(|prior| prior.id == part.id);
+            if completed
+                && part.kind != "prompt"
+                && streamed_text_kind(item)
+                && part_text_is_empty(&part)
+                && id_exists
+            {
                 continue;
             }
+            // `thread/read` re-mints ids (`item-N`) for content the live stream
+            // keyed by its Responses id (`msg_…`/`rs_…`), so an unknown id whose
+            // text continues a non-empty same-kind part is that part's item
+            // renamed, not new content (OR-181) — adopt the authoritative text in
+            // place. An empty part carries no evidence of which item it is.
+            if !id_exists && renamable_text_kind(item) {
+                if let Some(question) = part.prompt.as_ref() {
+                    if let Some(previous) = parts.iter().find(|prior| {
+                        !claimed.contains(&prior.id)
+                            && prior.prompt.as_ref().is_some_and(|prompt| {
+                                prompt.native_id.is_none()
+                                    && prompt.question == question.question
+                                    && prompt
+                                        .options
+                                        .iter()
+                                        .map(|option| &option.label)
+                                        .eq(question.options.iter().map(|option| &option.label))
+                            })
+                    }) {
+                        claimed.push(previous.id.clone());
+                        continue;
+                    }
+                }
+                let incoming = part.text.as_deref().unwrap_or("");
+                let renamed = parts.iter().position(|prior| {
+                    let prior_text = prior.text.as_deref().unwrap_or("");
+                    !claimed.contains(&prior.id)
+                        && !prior.id.starts_with("plan-item-")
+                        && prior.kind == part.kind
+                        && !prior_text.is_empty()
+                        && incoming.starts_with(prior_text)
+                });
+                if let Some(i) = renamed {
+                    claimed.push(parts[i].id.clone());
+                    parts[i].text = part.text;
+                    parts[i].phase = part.phase.or(parts[i].phase);
+                    continue;
+                }
+            }
+            upsert_preserving_children(parts, part);
         }
-        upsert_preserving_children(parts, part);
     }
 }
 
@@ -1851,6 +1942,65 @@ fn streamed_text_kind(item: &Value) -> bool {
 /// Whether a built part carries no display text (its `text` is absent/empty).
 fn part_text_is_empty(part: &WirePart) -> bool {
     part.text.as_deref().unwrap_or("").is_empty()
+}
+
+fn async_question_answer(prompt: &WirePrompt, answer: &PromptAnswer) -> Result<String> {
+    let text = answer.contextualized_answer(answer.plain_answer_text());
+    if text.trim().is_empty() {
+        return Err(anyhow!("choose an option or enter an answer"));
+    }
+    Ok(match prompt.question.as_deref() {
+        Some(question) => format!("In response to: {question}\n\n{text}"),
+        None => text,
+    })
+}
+
+fn item_parts(item: &Value, completed: bool, prior: &[WirePart]) -> Vec<WirePart> {
+    let questions = item.get("questions").and_then(Value::as_array);
+    if item.get("type").and_then(Value::as_str) == Some("agentMessage") {
+        if let (Some(id), Some(questions)) = (item.get("id").and_then(Value::as_str), questions) {
+            let parts: Vec<_> = questions
+                .iter()
+                .enumerate()
+                .filter_map(|(index, question)| {
+                    let title = question.get("title").and_then(Value::as_str)?;
+                    let part_id = if index == 0 {
+                        id.to_string()
+                    } else {
+                        format!("{id}-question-{index}")
+                    };
+                    let mut prompt = WirePrompt {
+                        kind: "question".into(),
+                        question: Some(title.to_string()),
+                        options: question
+                            .get("options")
+                            .and_then(Value::as_array)
+                            .into_iter()
+                            .flatten()
+                            .filter_map(Value::as_str)
+                            .map(|label| WireQuestionOption {
+                                label: label.to_string(),
+                                description: None,
+                            })
+                            .collect(),
+                        ..Default::default()
+                    };
+                    if let Some(previous) = prior
+                        .iter()
+                        .find(|part| part.id == part_id)
+                        .and_then(|part| part.prompt.as_ref())
+                    {
+                        prompt = previous.clone();
+                    }
+                    Some(WirePart::prompt(part_id, prompt))
+                })
+                .collect();
+            if !parts.is_empty() {
+                return parts;
+            }
+        }
+    }
+    item_to_part(item, completed, prior).into_iter().collect()
 }
 
 fn agent_text_part(id: String, item: &Value) -> WirePart {
@@ -2096,7 +2246,7 @@ fn subagent_thread_ids(item: &Value) -> Vec<String> {
 /// Build the "subagent" spawn part for a collab/sub-activity item. The UI reads
 /// `state.input` to label the row ("Spawned agent", "Sub-agent started", …); the
 /// sub-agent's streamed transcript is hung under `children` by the turn loop,
-/// and the UI locates it via this part's id, not any thread id in the payload.
+/// and thread identity links other events to the same transcript.
 fn subagent_spawn_part(id: &str, item: &Value, completed: bool) -> WirePart {
     // collabAgentToolCall carries a `status` (inProgress|completed|failed);
     // subAgentActivity has no status — treat it as a completed marker row.
@@ -2111,11 +2261,12 @@ fn subagent_spawn_part(id: &str, item: &Value, completed: bool) -> WirePart {
     } else {
         "completed"
     };
-    // Surface only what the UI labels the row from (`toolLine`'s subagent arm
-    // reads `tool` / `prompt` / `kind` / `nickname`) — the transcript is
-    // located via the spawn part id + `children`, not via any thread id in the
-    // payload.
+    // Keep thread identity so every event can open the same agent transcript.
     let mut input = serde_json::Map::new();
+    input.insert(
+        "agentThreadIds".into(),
+        serde_json::json!(subagent_thread_ids(item)),
+    );
     for key in ["tool", "prompt", "kind"] {
         if let Some(v) = item.get(key) {
             input.insert(key.into(), v.clone());
@@ -2268,7 +2419,7 @@ fn apply_sub_notification(
                 if let Some(id) = item.get("id").and_then(Value::as_str) {
                     scoped_item["id"] = Value::String(namespaced_part_id(tid, id));
                 }
-                if let Some(part) = item_to_part(&scoped_item, completed, bucket) {
+                for part in item_parts(&scoped_item, completed, bucket) {
                     // A grandchild spawn: register its threads under this part.
                     if part.tool.as_deref() == Some("subagent") {
                         for gtid in subagent_thread_ids(item) {
@@ -2279,8 +2430,10 @@ fn apply_sub_notification(
                             });
                         }
                     }
-                    let completed_streamed =
-                        completed && streamed_text_kind(item) && part_text_is_empty(&part);
+                    let completed_streamed = completed
+                        && part.kind != "prompt"
+                        && streamed_text_kind(item)
+                        && part_text_is_empty(&part);
                     if completed_streamed && bucket.iter().any(|p| p.id == part.id) {
                         // Don't wipe streamed deltas with an empty final.
                     } else {
@@ -2641,6 +2794,48 @@ async fn ensure_codex_pre_accept(
     }
 }
 
+async fn codex_playbook(
+    project: &crate::local::model::LocalProject,
+    session_id: &str,
+) -> Result<(PathBuf, String)> {
+    let project = project.clone();
+    let session_id = session_id.to_string();
+    let (repo, playbook) = tokio::task::spawn_blocking(move || {
+        ensure_playbook(&project, &session_id, Codex.session_skills_dir())
+    })
+    .await
+    .map_err(|e| anyhow!("playbook task failed: {e}"))??;
+    let playbook_md = std::fs::read_to_string(&playbook).unwrap_or_default();
+    Ok((repo, playbook_md))
+}
+
+/// Both a normal turn and idle compaction restore the same thread settings.
+fn codex_thread_setup(
+    repo: &Path,
+    playbook_md: &str,
+    permission_mode: Option<PermissionMode>,
+    auto_review_supported: bool,
+    model: Option<&str>,
+    service_tier: Option<&str>,
+) -> Value {
+    let (sandbox_mode, approval_policy, approvals_reviewer) =
+        codex_policies(permission_mode, auto_review_supported);
+    let mut setup = serde_json::json!({
+        "cwd": repo.to_string_lossy(),
+        "sandbox": sandbox_mode,
+        "approvalPolicy": approval_policy,
+        "approvalsReviewer": approvals_reviewer,
+        "developerInstructions": playbook_md,
+    });
+    if let Some(service_tier) = service_tier {
+        setup["serviceTier"] = Value::String(service_tier.to_string());
+    }
+    if let Some(model) = model {
+        setup["model"] = Value::String(model.to_string());
+    }
+    setup
+}
+
 async fn run_turn_app_server(ctx: &mut TurnCtx) -> Result<()> {
     // Entry sweep: any HELD (native_id) card still unresolved from an earlier
     // turn is a zombie — its JSON-RPC request died with its turn (or child), and
@@ -2651,19 +2846,8 @@ async fn run_turn_app_server(ctx: &mut TurnCtx) -> Result<()> {
     // resume by message — the next user message replaces them, exactly like
     // Claude's precedent. Behavior-preserving for the pre-plan-mode cards (all
     // of which were native).
-    ctx.host
-        .resolve_stale_prompts(&ctx.session_id, true)
-        .await?;
-    let project = ctx.project.clone();
-    let session_id = ctx.session_id.clone();
-    // The modular orx skills land in the harness's session-skills dir, fresh,
-    // for this session's agent to auto-load — source of truth is the trait.
-    let skills_dir = Codex.session_skills_dir();
-    let (repo, playbook) =
-        tokio::task::spawn_blocking(move || ensure_playbook(&project, &session_id, skills_dir))
-            .await
-            .map_err(|e| anyhow!("playbook task failed: {e}"))??;
-    let playbook_md = std::fs::read_to_string(&playbook).unwrap_or_default();
+    ctx.host.resolve_stale_prompts(&ctx.session_id, true)?;
+    let (repo, playbook_md) = codex_playbook(&ctx.project, &ctx.session_id).await?;
 
     let native_session = match ctx.native_session_id.as_deref() {
         Some(id) => codex_native_session(id).await?,
@@ -2682,7 +2866,7 @@ async fn run_turn_app_server(ctx: &mut TurnCtx) -> Result<()> {
     };
     let auto_review_supported =
         config_supports_auto_review(&config) && super::detect::api_key("OPENAI_BASE_URL").is_none();
-    let (sandbox_mode, approval_policy, approvals_reviewer) =
+    let (_, approval_policy, approvals_reviewer) =
         codex_policies(ctx.permission_mode, auto_review_supported);
 
     // Thread bring-up: reuse the thread this child already carries, resume a
@@ -2691,19 +2875,14 @@ async fn run_turn_app_server(ctx: &mut TurnCtx) -> Result<()> {
     // both start and resume, so a long-lived session picks up playbook
     // improvements on the next restart rather than keeping its first version
     // forever.
-    let mut thread_setup = serde_json::json!({
-        "cwd": repo.to_string_lossy(),
-        "sandbox": sandbox_mode,
-        "approvalPolicy": approval_policy,
-        "approvalsReviewer": approvals_reviewer,
-        "developerInstructions": playbook_md,
-    });
-    if let Some(service_tier) = &ctx.service_tier {
-        thread_setup["serviceTier"] = Value::String(service_tier.clone());
-    }
-    if let Some(model) = &ctx.model {
-        thread_setup["model"] = Value::String(model.clone());
-    }
+    let mut thread_setup = codex_thread_setup(
+        &repo,
+        &playbook_md,
+        ctx.permission_mode,
+        auto_review_supported,
+        ctx.model.as_deref(),
+        ctx.service_tier.as_deref(),
+    );
     if ctx.reset_codex_model {
         // Codex keeps the old thread model when a turn omits its model override.
         append_native_recovery_context(ctx, &mut thread_setup);
@@ -3301,6 +3480,9 @@ fn user_input_card(turn: Option<&str>, id: &Value, params: &Value) -> Option<(St
 /// contextualized annotation answer; every other stashed id gets an empty
 /// `{"answers": []}`. `Err` when none were provided leaves the card actionable.
 fn user_input_reply(prompt: &WirePrompt, answer: &PromptAnswer) -> Result<Value> {
+    if !answer.approve {
+        return Ok(serde_json::json!({ "answers": {} }));
+    }
     let note = answer.note.as_deref().filter(|s| !s.trim().is_empty());
     let mut selected: Vec<String> = if !answer.answers.is_empty() {
         answer.answers.clone()
@@ -3587,7 +3769,7 @@ async fn steer_turn(
         )
         .await;
     match answered {
-        Ok(Ok(_)) => ctx.record_steer(&steer.display),
+        Ok(Ok(_)) => ctx.record_steer(&steer, true),
         Ok(Err(_)) => {
             if let Err(error) = ctx.host.park_steer(&ctx.session_id, steer) {
                 ctx.push_error(format!("Could not preserve steering message: {error}"));
@@ -3596,10 +3778,8 @@ async fn steer_turn(
         Err(e) => {
             // Record it anyway: the composer is already cleared, so this is
             // the only copy of what the user typed.
-            ctx.record_steer(&steer.display);
-            ctx.push_error(format!(
-                "codex did not confirm the steering message ({e}) — send it again if the turn ignores it"
-            ));
+            ctx.record_steer(&steer, false);
+            ctx.push_error(format!("codex did not confirm the steering message ({e})"));
         }
     }
 }
@@ -4170,6 +4350,122 @@ fn handle_item(ctx: &mut TurnCtx, item: &Value, next_id: &mut impl FnMut(&str) -
 
 #[cfg(test)]
 mod tests {
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn compaction_restores_the_saved_thread_once_without_a_user_turn() {
+        let client = crate::local::codex::tests::rpc_test_client(
+            r#"
+                IFS= read -r request
+                for expected in '"method":"thread/resume"' '"threadId":"saved-thread"' '"path":"/saved/rollout.jsonl"' '"developerInstructions":"project instructions"' '"approvalPolicy":"on-request"' '"serviceTier":"priority"'; do
+                    case "$request" in *"$expected"*) ;; *) exit 1 ;; esac
+                done
+                printf '%s\n' '{"id":1,"result":{"thread":{"id":"saved-thread"},"model":"saved-model"}}'
+                sleep 600
+            "#,
+        );
+        let setup = codex_thread_setup(
+            Path::new("/workspace"),
+            "project instructions",
+            Some(PermissionMode::Auto),
+            false,
+            Some("saved-model"),
+            Some("priority"),
+        );
+        let restored = tokio::time::timeout(
+            Duration::from_secs(2),
+            resume_for_compaction(
+                &client,
+                "saved-thread",
+                Path::new("/saved/rollout.jsonl"),
+                setup.clone(),
+            ),
+        )
+        .await;
+        let warm = tokio::time::timeout(
+            Duration::from_millis(100),
+            resume_for_compaction(
+                &client,
+                "saved-thread",
+                Path::new("/saved/rollout.jsonl"),
+                setup,
+            ),
+        )
+        .await;
+        crate::local::codex::tests::stop_test_client(&client).await;
+        restored.unwrap().unwrap();
+        warm.unwrap().unwrap();
+        assert_eq!(client.resumed_thread().as_deref(), Some("saved-thread"));
+        assert_eq!(client.thread_model().as_deref(), Some("saved-model"));
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn compaction_refuses_a_different_resumed_thread() {
+        let client = crate::local::codex::tests::rpc_test_client(
+            r#"IFS= read -r request; printf '%s\n' '{"id":1,"result":{"thread":{"id":"different-thread"},"model":"wrong-model"}}'; sleep 600"#,
+        );
+        let outcome = tokio::time::timeout(
+            Duration::from_secs(2),
+            resume_for_compaction(
+                &client,
+                "saved-thread",
+                Path::new("/saved/rollout.jsonl"),
+                serde_json::json!({}),
+            ),
+        )
+        .await;
+        crate::local::codex::tests::stop_test_client(&client).await;
+        assert!(outcome
+            .unwrap()
+            .unwrap_err()
+            .to_string()
+            .contains("different thread"));
+        assert!(client.resumed_thread().is_none());
+        assert!(client.thread_model().is_none());
+    }
+
+    #[test]
+    fn compaction_and_normal_turn_setup_preserve_permission_settings() {
+        for (mode, automatic_review, sandbox, approval, reviewer) in [
+            (
+                PermissionMode::Auto,
+                true,
+                "workspace-write",
+                "on-request",
+                "auto_review",
+            ),
+            (
+                PermissionMode::Auto,
+                false,
+                "workspace-write",
+                "on-request",
+                "user",
+            ),
+            (
+                PermissionMode::Bypass,
+                false,
+                "danger-full-access",
+                "never",
+                "user",
+            ),
+        ] {
+            let setup = codex_thread_setup(
+                Path::new("/workspace"),
+                "playbook",
+                Some(mode),
+                automatic_review,
+                None,
+                None,
+            );
+            assert_eq!(setup["sandbox"], sandbox);
+            assert_eq!(setup["approvalPolicy"], approval);
+            assert_eq!(setup["approvalsReviewer"], reviewer);
+            assert_eq!(setup["developerInstructions"], "playbook");
+            assert!(setup.get("model").is_none());
+            assert!(setup.get("serviceTier").is_none());
+        }
+    }
+
     #[test]
     fn native_camel_case_usage_keeps_cache_and_reasoning_as_breakdowns() {
         let events: Vec<serde_json::Value> =
@@ -4427,6 +4723,63 @@ requires_openai_auth = false
         assert!(!config_supports_auto_review(&serde_json::json!({
             "config": {"model_provider": 42, "openai_base_url": null}
         })));
+    }
+
+    #[test]
+    fn async_questions_replace_plain_text_and_preserve_answers_on_reconcile() {
+        let mut ctx = TurnCtx::test_stub();
+        apply_item(
+            &mut ctx,
+            &json!({"id":"ask", "type":"agentMessage", "text":""}),
+            false,
+        );
+        ctx.append_part_text("ask", "Choose a formatter:\n- Flash\n- Original");
+        let item = json!({"id":"ask", "type":"agentMessage", "text":"Choose a formatter:\n- Flash\n- Original", "questions":[
+            {"title":"Which formatter?", "options":["Flash", "Original"]},
+            {"title":"Any additional guidance?", "options":null}
+        ]});
+        apply_item(&mut ctx, &item, true);
+        assert_eq!(ctx.assistant.parts.len(), 2);
+        let prompt = ctx.assistant.parts[0].prompt.as_mut().unwrap();
+        assert_eq!(prompt.question.as_deref(), Some("Which formatter?"));
+        assert_eq!(prompt.options[0].label, "Flash");
+        assert!(prompt.native_id.is_none());
+        prompt.resolved = true;
+        prompt.answers = vec!["Flash".into()];
+        apply_item(&mut ctx, &item, true);
+        let mut renamed = item.clone();
+        renamed["id"] = json!("item-3");
+        reconcile_items(&mut ctx.assistant.parts, &[renamed]);
+        assert_eq!(ctx.assistant.parts.len(), 2);
+        let prompt = ctx.assistant.parts[0].prompt.as_ref().unwrap();
+        assert!(prompt.resolved);
+        assert_eq!(prompt.answers, ["Flash"]);
+        assert!(ctx.assistant.parts[1]
+            .prompt
+            .as_ref()
+            .unwrap()
+            .options
+            .is_empty());
+        assert!(!ctx.assistant.parts.iter().any(|part| part.kind == "text"));
+    }
+
+    #[test]
+    fn async_question_answer_includes_question_and_validates_input() {
+        let prompt = WirePrompt {
+            kind: "question".into(),
+            question: Some("Which formatter?".into()),
+            ..Default::default()
+        };
+        assert_eq!(
+            async_question_answer(&prompt, &answer(true, None, &["Flash"], None)).unwrap(),
+            "In response to: Which formatter?\n\nFlash"
+        );
+        assert_eq!(
+            async_question_answer(&prompt, &answer(true, None, &[], Some("Use our proxy")))
+                .unwrap(),
+            "In response to: Which formatter?\n\nUse our proxy"
+        );
+        assert!(async_question_answer(&prompt, &answer(true, None, &[], None)).is_err());
     }
 
     #[test]
@@ -4993,6 +5346,20 @@ requires_openai_auth = false
                 .status,
             "completed"
         );
+    }
+
+    #[test]
+    fn subagent_events_preserve_target_thread_identity() {
+        for item in [
+            json!({"receiverThreadIds": ["child"], "tool": "spawnAgent", "status": "inProgress"}),
+            json!({"agentThreadId": "child", "kind": "interacted"}),
+        ] {
+            let part = subagent_spawn_part("event", &item, false);
+            assert_eq!(
+                part.state.unwrap().input.unwrap()["agentThreadIds"],
+                json!(["child"])
+            );
+        }
     }
 
     /// A later collab item (`sendInput`) on an already-spawned thread re-points
@@ -6025,6 +6392,10 @@ requires_openai_auth = false
 
         // Neither selection nor note → Err (card stays actionable).
         assert!(user_input_reply(&prompt, &answer(true, None, &[], None)).is_err());
+        assert_eq!(
+            user_input_reply(&prompt, &answer(false, None, &[], None)).unwrap(),
+            serde_json::json!({ "answers": {} })
+        );
     }
 
     /// Numeric question ids stringify to their JSON text as map keys.
@@ -6064,6 +6435,20 @@ requires_openai_auth = false
             session_id: "s".into(),
             native_session_id: None,
         }
+    }
+
+    #[tokio::test]
+    async fn skipped_async_question_closes_without_sending_a_message() {
+        let prompt = WirePrompt {
+            kind: "question".into(),
+            question: Some("Which color?".into()),
+            ..Default::default()
+        };
+        let action = Codex
+            .resume_from_prompt(&test_resume_ctx(), &prompt, &answer(false, None, &[], None))
+            .await
+            .unwrap();
+        assert!(matches!(action, ResumeAction::Handled { plan_mode: None }));
     }
 
     /// The codex plan card resume arms: approve → "Implement the plan." with

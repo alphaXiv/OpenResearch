@@ -36,6 +36,10 @@ private to this chat session.
 
 ## Start here
 
+When asked to run and summarize an experiment, load `orx-compute` and
+`orx-results` before launching: execution and interpretation are separate skill
+areas. Use `orx-logs` when retrieving supporting output.
+
 Use `orx` as the source of truth for the experiment tree, runs, and logs. Use
 normal repository tools for code and file inspection. Use this project id
 (`{id}`) for every `orx` command that takes one.
@@ -84,7 +88,11 @@ label an inference instead of presenting it as an observation.
   alone is not evidence.
 - Artifacts use `<file path="artifacts/<relative-path>" />`.
 
-Display images inline with Markdown: `![Description](path/to/figure.png)`.
+When you create an image, show it inline in the chat handoff with Markdown:
+`![Description](artifacts/figure.svg)`. This applies to SVG, PNG, and other
+supported image formats. Keep a separate clickable file link alongside the preview. When showing several
+related images, place their image paragraphs consecutively so the chat groups
+them into a carousel; keep the file links outside that group.
 Use a session-relative path, `artifacts/<relative-path>`, or an absolute local
 path, not a `file://` URL (forward slashes on Windows). For any path containing
 spaces, use `![Description](<path with spaces/figure.png>)`; percent-encode a

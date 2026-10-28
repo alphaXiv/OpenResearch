@@ -2,12 +2,14 @@ import type { InfiniteData } from "@tanstack/react-query";
 import type { ChatSession, SidebarChatPage } from "../api";
 import { markLiveUpdate } from "./live";
 import {
+  refreshHarness,
   refreshHarnesses,
   getHarnessesQuery,
   getUpdateStatusQuery,
 } from "./settings";
 import { dispatchChat } from "./chatStore";
-import { useEffect } from "react";
+import { inputSummaryChanged } from "./chatState";
+import { useEffect, useMemo } from "react";
 import {
   emitEntity,
   onDataDirMove,
@@ -33,9 +35,23 @@ function upsert<T extends { id: string; updatedAt: number }>(rows: T[] | undefin
 
 export function QueryEvents() {
   const scope = workspaceScope();
+  const sessionExperiments = useMemo(() => {
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    return {
+      invalidate() {
+        timer ??= setTimeout(() => {
+          timer = undefined;
+          invalidateFamilies(["getSessionExperiments"], scope);
+        }, 200);
+      },
+      dispose() { clearTimeout(timer); timer = undefined; },
+    };
+  }, [scope[1]]);
+  useEffect(() => () => sessionExperiments.dispose(), [sessionExperiments]);
   useOrxEventStream({
     onRun(run) {
       if (!isCurrentScope(scope)) return;
+      sessionExperiments.invalidate();
       const old = queryClient.getQueryData(listRunsQuery(run.projectId).queryKey)?.find((row) => row.id === run.id);
       markLiveUpdate(queryClient, listRunsQuery(run.projectId).queryKey, run.id);
       queryClient.setQueryData(listRunsQuery(run.projectId).queryKey, (rows) => upsert(rows, run));
@@ -47,6 +63,7 @@ export function QueryEvents() {
     },
     onExperiment(experiment) {
       if (!isCurrentScope(scope)) return;
+      sessionExperiments.invalidate();
       markLiveUpdate(queryClient, listExperimentsQuery(experiment.projectId).queryKey, experiment.id);
       queryClient.setQueryData(listExperimentsQuery(experiment.projectId).queryKey, (rows) => upsert(rows, experiment));
       invalidateFamilies(["getProjectStarterPrompts"], scope, (query) => query.queryKey[3] === experiment.projectId);
@@ -66,16 +83,18 @@ export function QueryEvents() {
     onReconnect() {
       if (!isCurrentScope(scope)) return;
       invalidateFamilies(liveFamilies, scope);
+      invalidateFamilies(["getSessionExperiments"], scope);
       emitEntity.onReconnect();
     },
   });
   useEffect(() => {
     let activityTimer: ReturnType<typeof setTimeout> | undefined;
     let sidebarTimer: ReturnType<typeof setTimeout> | undefined;
+    const promptStates = new Map<string, string>();
     const refreshSidebar = () => {
       sidebarTimer ??= setTimeout(() => {
         sidebarTimer = undefined;
-        invalidateFamilies(["listSidebarChatSessions"], scope);
+        invalidateFamilies(["listSidebarChatSessions", "listChatSessions"], scope);
       }, 100);
     };
     const refreshActivity = () => {
@@ -88,7 +107,7 @@ export function QueryEvents() {
     const offMove = onDataDirMove((event) => { if (event.type === "done") invalidateFamilies(["getDataDir"], scope); });
     const offChat = onChatEvent((event) => {
       if (!isCurrentScope(scope)) return;
-      if (event.type === "session" || event.type === "sessionDeleted") refreshSidebar();
+      if (inputSummaryChanged(event, promptStates)) refreshSidebar();
       if (event.type === "session") markLiveUpdate(queryClient, listChatSessionsQuery(event.session.projectId).queryKey, event.session.id);
       else if (event.type === "busy" || event.type === "usage") markLiveUpdate(queryClient, [...scope, "listChatSessions"], event.sessionId);
       if (event.type === "message" || event.type === "queued" || event.type === "branch") {
@@ -114,7 +133,11 @@ export function QueryEvents() {
         });
       }
     });
-    const offAuth = onHarnessAuth(() => { if (isCurrentScope(scope)) void refreshHarnesses(true).catch(() => {}); });
+    const offAuth = onHarnessAuth(({ harness }) => {
+      if (!isCurrentScope(scope)) return;
+      // Re-probe only the harness whose sign-in changed; a full sweep waits on the slowest CLI.
+      void (harness === "*" ? refreshHarnesses(true) : refreshHarness(harness)).catch(() => {});
+    });
     // The catalog fill already ran server-side; a plain read serves the
     // updated cache — forcing a refresh here would spawn a second sweep. The
     // query's 5-minute staleTime would swallow a bare fetchQuery, so bypass it.

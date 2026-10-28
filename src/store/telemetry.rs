@@ -1071,6 +1071,7 @@ mod tests {
             commit_sha: None,
             result_markdown: None,
             cancel_requested: false,
+            cancel_reason: None,
             chat_session_id: None,
         };
         let identity = InvocationIdentity {

@@ -159,7 +159,9 @@ export function mountTerminal(
       scrollback.dispose();
       wrap.removeEventListener("wheel", scrollPanel, { capture: true });
       wrap.style.overflowY = previousOverflowY;
-      terminal.dispose();
+      terminal.element?.remove();
+      // xterm 5.5 schedules an uncancelled viewport initialization timer in open().
+      setTimeout(() => terminal.dispose(), 0);
     },
   };
 }

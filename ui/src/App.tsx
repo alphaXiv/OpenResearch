@@ -1,5 +1,8 @@
 import {
   setScopedQueryData,
+  deletedSessionIds,
+  isCurrentScope,
+  workspaceScope,
   queryClient,
 } from "./queries/client";
 import { useMutation, useQuery } from "@tanstack/react-query";
@@ -17,8 +20,9 @@ import {
 
 import { listChatSessionsQuery, getChatMessagesQuery } from "./queries/chat";
 import { listProjectsQuery, getUiStateQuery, listRunsQuery, listExperimentsQuery } from "./queries/projects";
-import { deleteChatSession, openSideChat, sendChatMessage, setExperimentArchived } from "./api";
+import { deleteExperiment, openSideChat, sendChatMessage, setExperimentArchived } from "./api";
 import { getArtifactsQuery } from "./queries/files";
+import { readHarnesses } from "./queries/settings";
 import { useBlocker, useRouter, useRouterState } from "@tanstack/react-router";
 import {
   getTaskWorkspace,
@@ -29,7 +33,7 @@ import {
   type TaskWorkspace,
 } from "./workspaceState";
 import { getRememberedGlobalWorkspace, globalWorkspaceWriter } from "./workspacePersistence";
-import { PANEL_MIN_WIDTH, initialPanelWidth, panelMaxWidth, sideChatPanelWidth } from "./panelLayout";
+import { PANEL_MIN_WIDTH, initialPanelWidth, panelMaxWidth, sideChatPanelWidth, sidebarFitsWithPanel } from "./panelLayout";
 import {
   type ExpViewDef,
   sameExpTab,
@@ -65,17 +69,21 @@ import { m } from "./paraglide/messages.js";
 import { useLocale } from "./locale";
 import { autoDir, ltr } from "./i18n";
 import {
+  ChartLine,
   ChartSpline,
+  ArrowDownWideNarrow,
   Check,
   FileCode,
   Filter,
   FlaskConical,
   FolderGit2,
   FolderOpen,
+  GitBranch,
   Maximize2,
   MessagesSquare,
   Minimize2,
   Package,
+  PanelLeft,
   ScrollText,
   Terminal,
   Users,
@@ -89,7 +97,6 @@ import {
   captureUiEvent,
   isDemoProjectId,
   type FirstAction,
-  openProject,
   updateUiState,
   type AgentSelection,
   type Autonomy,
@@ -102,15 +109,17 @@ import {
 } from "./api";
 import { WorkspaceTools } from "./components/WorkspaceTools";
 import { ProjectTerminal } from "./components/ProjectTerminal";
+import { SettingsCommandTerminal } from "./components/SshConnectTerminal";
 import { isWindowsDrivePath } from "./markdownTarget";
 import { ChatPanel, findPartById, spawnRowTitle } from "./components/ChatPanel";
-import { usePopover } from "./components/ModelPicker";
+import { OptionPicker, usePopover } from "./components/ModelPicker";
 import { SubagentTab } from "./components/SubagentTab";
 import { CodeTab, type CodeView } from "./components/CodeTab";
 import { WorktreeTab, type WorktreeView } from "./components/WorktreeTab";
 import { ArtifactsTab, findArtifactEntry } from "./components/ArtifactsTab";
 import { SkillsTab } from "./components/SkillsTab";
 import { ClosableTab } from "./components/ClosableTab";
+import { TabStrip } from "./components/TabStrip";
 import { DetailDrawer, type ExperimentView } from "./components/DetailDrawer";
 import { FileViewer, type FileScrollPosition } from "./components/FileViewer";
 import { confirmFileDiscard, FileBufferSession } from "./fileSync";
@@ -121,13 +130,14 @@ import { OfflineBanner } from "./components/OfflineBanner";
 import { NewProjectDialog } from "./components/ProjectsHome";
 import { ExperimentsTable } from "./components/ExperimentsTable";
 import { archiveActionsByExperiment } from "./components/ArchiveMenu";
+import { type HistoryOrder } from "./components/ExperimentLineage";
 import { Md } from "./components/Md";
 import { SettingsView, type SettingsTab } from "./components/SettingsPage";
 import { DemoWelcomeModal } from "./components/Tour";
 import { TreeView } from "./components/TreeView";
 import { onChatEvent, useOrxEvents } from "./events";
 import { closeTab, openTab, type TabOpenIntent } from "./tabPreview";
-import { Button, IconButton, MenuItem, showAlert, Spinner } from "./components/ui";
+import { Button, IconButton, MenuItem, SEGMENTED_CLASS_NAME, showAlert, Spinner, Tooltip } from "./components/ui";
 import { CodeTabBody, TabBody } from "./components/layout/TabBody";
 import { RemoteStatus } from "./components/RemoteStatus";
 
@@ -230,8 +240,7 @@ function fileBranchLabel(tab: FileViewDef, baselineBranch?: string): string | un
 
 type ExperimentsView = "tree" | "table";
 
-const PANEL_MARGIN = 10;
-const WORKSPACE_CARD_MIN_WIDTH = 1448; // 1420px content plus the body’s 14px gutters.
+const WORKSPACE_CARD_MIN_WIDTH = 1420;
 // Once a drag pushes the panel past its usable max by this much, it snaps to
 // fullscreen — a bit of resistance you have to overcome deliberately.
 const FULLSCREEN_SNAP_SLOP = 80;
@@ -363,6 +372,8 @@ export default function App({ runtime, projectId, pane }: { runtime: RuntimeInfo
   const observedRunsProjectRef = useRef<string | null>(null);
   const runsBaselineReadyRef = useRef(false);
   const baselineRunsRef = useRef(new Map<string, Run>());
+  const streamingRunsRef = useRef(new Set<string>());
+  const autoOpenRunsRef = useRef(new Map<string, Run>());
   const pendingFirstRunningRunsRef = useRef(new Map<string, Run>());
   const runsVisitRef = useRef(0);
   const experimentsRef = useRef(experiments);
@@ -371,6 +382,8 @@ export default function App({ runtime, projectId, pane }: { runtime: RuntimeInfo
   const artifacts = artifactsQuery.data ?? null;
 
   const [view, setView] = useState<ExperimentsView>("table");
+  const [showTableLineage, setShowTableLineage] = useState(false);
+  const [tableOrder, setTableOrder] = useState<HistoryOrder>("lineage");
   const [showArchivedExperiments, setShowArchivedExperiments] = useState(false);
   // Experiments pane scope: "agent" narrows to the open chat session's work.
   // Falls back to "project" whenever there is no usable experiment attribution.
@@ -398,6 +411,17 @@ export default function App({ runtime, projectId, pane }: { runtime: RuntimeInfo
       showAlert(error instanceof Error ? error.message : String(error), "error");
     }
   }, [projectId]);
+  const deleteExperimentNode = useCallback(async (id: string) => {
+    try {
+      await deleteExperiment(id);
+      await Promise.all([
+        queryClient.invalidateQueries({ queryKey: listExperimentsQuery(projectId).queryKey }),
+        queryClient.invalidateQueries({ queryKey: listRunsQuery(projectId).queryKey }),
+      ]);
+    } catch (error) {
+      showAlert(error instanceof Error ? error.message : String(error), "error");
+    }
+  }, [projectId]);
   const restoreArchivedRegion = useCallback((id: string) => {
     void archiveExperiment(id, effectiveScope === "agent" ? "taskRegion" : "region", false);
   }, [archiveExperiment, effectiveScope]);
@@ -417,6 +441,8 @@ export default function App({ runtime, projectId, pane }: { runtime: RuntimeInfo
   const [terminalTabOpen, setTerminalTabOpen] = useState(false);
   // Which checkout has a live shell; a restored-but-unselected tab spawns nothing until selected.
   const [terminalStartedFor, setTerminalStartedFor] = useState<string | null>(null);
+  // A setup command (e.g. an agent login) from a composer note; shown over the project shell until closed.
+  const [setupRun, setSetupRun] = useState<{ command: string; path: string; attempt: number } | null>(null);
   const [expTabs, setExpTabs] = useState<ExpViewDef[]>([]);
   const [fileTabs, setFileTabs] = useState<FileViewDef[]>([]);
   const fileScrollPositionsRef = useRef(new Map<string, FileScrollPosition>());
@@ -431,21 +457,60 @@ export default function App({ runtime, projectId, pane }: { runtime: RuntimeInfo
   };
   const [planTabs, setPlanTabs] = useState<PlanViewDef[]>([]);
   const [subagentTabs, setSubagentTabs] = useState<SubagentViewDef[]>([]);
+  const subagentExpansions = useRef(new Map<string, Map<string, boolean>>());
+  const getSubagentExpansionState = (tab: SubagentViewDef) => {
+    const key = `${tab.sessionId}:${tab.spawnPartId}`;
+    let state = subagentExpansions.current.get(key);
+    if (!state) {
+      state = new Map();
+      subagentExpansions.current.set(key, state);
+    }
+    return state;
+  };
   const [sideTabs, setSideTabs] = useState<SideChatViewDef[]>([]);
   const [codeTabs, setCodeTabs] = useState<CodeTabDef[]>([]);
   const [contentTabOrder, setContentTabOrderState] = useState<string[]>([]);
   const [previewTab, setPreviewTabState] = useState<RightTab | null>(null);
   const [filesView, setFilesView] = useState<WorktreeView>("files");
   const [filesToggled, setFilesToggled] = useState<ReadonlySet<string>>(new Set());
-  // The right pane is a floating panel: closable, edge-resizable, expandable
-  // to (nearly) full screen. Width persists across sessions.
   const [panelMax, setPanelMax] = useState(false);
   const [treeViewport, setTreeViewport] = useState<Viewport | null>(null);
   const [panelWidth, setPanelWidth] = useState(initialPanelWidth);
-  const [workspaceWide, setWorkspaceWide] = useState(() => window.innerWidth >= WORKSPACE_CARD_MIN_WIDTH);
+  const [windowWidth, setWindowWidth] = useState(() => window.innerWidth);
+  const workspaceWide = windowWidth >= WORKSPACE_CARD_MIN_WIDTH;
   const workspaceCardVisible = mainView === "chat" && !panelOpen && workspaceWide;
-  // The agents rail is a floating panel too: fixed-width, collapsible.
   const [railOpen, setRailOpen] = useState(true);
+  const [preferencesLoaded, setPreferencesLoaded] = useState(false);
+  const railTemporarilyHidden = mainView === "chat" && panelOpen && !sidebarFitsWithPanel(windowWidth);
+  const railVisible = railOpen && !railTemporarilyHidden;
+  const stackPanel = mainView === "chat" && panelOpen && windowWidth < PANEL_MIN_WIDTH * 2;
+  const visiblePanelWidth = Math.min(panelWidth, panelMaxWidth(windowWidth, railVisible));
+  const bodyRef = useRef<HTMLDivElement>(null);
+  const focusAfterRailChange = useRef<"rail" | "show" | Element | null>(null);
+  const lastFocused = useRef<Element | null>(null);
+  useEffect(() => {
+    const rememberFocus = (event: FocusEvent) => { lastFocused.current = event.target instanceof Element ? event.target : null; };
+    document.addEventListener("focusin", rememberFocus);
+    return () => document.removeEventListener("focusin", rememberFocus);
+  }, []);
+  useLayoutEffect(() => {
+    if (!railVisible && lastFocused.current?.closest(".session-rail") && !lastFocused.current.isConnected
+      && document.activeElement === document.body) focusAfterRailChange.current = "show";
+    const pendingFocus = focusAfterRailChange.current;
+    if (pendingFocus && pendingFocus !== "show" && railVisible) {
+      if (pendingFocus === "rail" || (document.activeElement === document.body && pendingFocus === lastFocused.current && !pendingFocus.isConnected)) {
+        const buttons = bodyRef.current?.querySelectorAll<HTMLElement>(".session-rail button, .session-rail a");
+        [...(buttons ?? [])].find((button) => button.getClientRects().length > 0
+          && getComputedStyle(button).visibility !== "hidden")?.focus();
+      }
+      focusAfterRailChange.current = null;
+    } else if (focusAfterRailChange.current === "show" && !railVisible) {
+      const buttons = bodyRef.current?.parentElement?.querySelectorAll<HTMLElement>("button[aria-label]");
+      [...(buttons ?? [])].find((button) => button.getAttribute("aria-label") === m.chat_panel_show_sidebar()
+        && button.getClientRects().length > 0 && getComputedStyle(button).visibility !== "hidden")?.focus();
+      focusAfterRailChange.current = null;
+    }
+  }, [railVisible]);
   const [newProjectOpen, setNewProjectOpen] = useState(false);
   const currentRightPaneStateRef = useRef<RightPaneSessionState>(initialRightPaneSessionState());
   const activeSessionIdRef = useRef<string | null>(activeSessionId);
@@ -471,6 +536,7 @@ export default function App({ runtime, projectId, pane }: { runtime: RuntimeInfo
   // the slot order because the replacement must land at this exact position.
   const retireRightTab = useCallback((tab: ContentTab) => {
     const key = rightTabKey(tab);
+    if (typeof tab === "object" && "spawnPartId" in tab) subagentExpansions.current.delete(`${tab.sessionId}:${tab.spawnPartId}`);
     setExpTabs((prev) => withoutTab(prev, key));
     setFileTabs((prev) => withoutTab(prev, key));
     setPlanTabs((prev) => withoutTab(prev, key));
@@ -585,6 +651,7 @@ export default function App({ runtime, projectId, pane }: { runtime: RuntimeInfo
 
   const forgetRightTab = useCallback((tab: RightTab, selectFallback: boolean) => {
     const key = rightTabKey(tab);
+    if (typeof tab === "object" && "spawnPartId" in tab) subagentExpansions.current.delete(`${tab.sessionId}:${tab.spawnPartId}`);
     const preview = previewTabRef.current;
     if (preview && rightTabKey(preview) === key) setPreviewTab(null);
     const contentState = closeTab(
@@ -719,13 +786,12 @@ export default function App({ runtime, projectId, pane }: { runtime: RuntimeInfo
   const lastGlobalLocation = useRef<string | null>(null);
   useEffect(() => {
     const savedLocation = safeLocation(location.href);
-    if (!uiState || !workspaceReady || !savedLocation) return;
+    if (!uiState || !workspaceReady || !preferencesLoaded || !savedLocation) return;
     globalWorkspaceWriter.queue({ lastLocation: savedLocation, railOpen, panelWidth, experimentsView: view }, lastGlobalLocation.current === savedLocation ? 250 : 0);
     lastGlobalLocation.current = savedLocation;
-  }, [location.href, uiState, workspaceReady, railOpen, panelWidth, view]);
+  }, [location.href, uiState, workspaceReady, preferencesLoaded, railOpen, panelWidth, view]);
   const onboarded = uiState?.onboardingCompleted ?? false;
   const [demoWelcomeOpen, setDemoWelcomeOpen] = useState(false);
-  const [demoRunningRunId, setDemoRunningRunId] = useState<string | null>(null);
   const [composerFocusNonce, setComposerFocusNonce] = useState(0);
   const openDemoWelcome = useCallback(() => setDemoWelcomeOpen(true), []);
   const closeDemoWelcome = useCallback(async (choice: "explore_demo" | "create_project" | "dismiss") => {
@@ -789,18 +855,17 @@ export default function App({ runtime, projectId, pane }: { runtime: RuntimeInfo
     void uiStateQuery.refetch();
     void sessionsQuery.refetch();
   };
-  const preferencesLoaded = useRef(false);
   useEffect(() => {
-    if (!uiState || preferencesLoaded.current) return;
-    preferencesLoaded.current = true;
+    if (!uiState || preferencesLoaded) return;
     persistedPreferredAgent.current = uiState.preferredAgent;
     const prefs = getRememberedGlobalWorkspace() ?? uiState.workspace;
     if (prefs) {
       setRailOpen(prefs.railOpen);
-      setPanelWidth(Math.min(prefs.panelWidth, panelMaxWidth()));
-      setView(prefs.experimentsView);
+      setPanelWidth(prefs.panelWidth);
+      setView(prefs.experimentsView === "tree" ? "tree" : "table");
     }
-  }, [uiState]);
+    setPreferencesLoaded(true);
+  }, [uiState, preferencesLoaded]);
   useEffect(() => {
     if (sessions && rememberedSessionRef.current && !sessions.includes(rememberedSessionRef.current)) rememberedSessionRef.current = null;
   }, [sessions]);
@@ -842,16 +907,44 @@ export default function App({ runtime, projectId, pane }: { runtime: RuntimeInfo
       });
   }, []);
 
-  // Shrinking the window can push a fixed-width panel past its usable max —
-  // reclamp so it never overflows the viewport.
   useEffect(() => {
     const onResize = () => {
-      setPanelWidth((w) => Math.min(w, panelMaxWidth()));
-      setWorkspaceWide(window.innerWidth >= WORKSPACE_CARD_MIN_WIDTH);
+      const focused = document.activeElement;
+      if (railOpen && railTemporarilyHidden && sidebarFitsWithPanel(window.innerWidth)
+        && focused?.closest(".chat-pane") && focused.getAttribute("aria-label") === m.chat_panel_show_sidebar()) {
+        focusAfterRailChange.current = focused;
+      } else if (focusAfterRailChange.current && typeof focusAfterRailChange.current !== "string") {
+        focusAfterRailChange.current = null;
+      }
+      setWindowWidth(window.innerWidth);
     };
     window.addEventListener("resize", onResize);
     return () => window.removeEventListener("resize", onResize);
-  }, []);
+  }, [railOpen, railTemporarilyHidden]);
+
+  // Open an experiment view as a right-panel tab (creating it if needed) and
+  // focus it.
+  const openExperimentTab = useCallback((
+    id: string,
+    view: ExperimentView = "overview",
+    intent: TabOpenIntent = "preview",
+    runId?: string,
+  ) => {
+    reportFirstAction("open_experiment");
+    const tab = { id, view };
+    setExpTabs((prev) => (prev.some((t) => sameExpTab(t, tab)) ? prev : [...prev, tab]));
+    if (view !== "overview" && isDemoProjectId(projectIdRef.current)) {
+      setPanelWidth((width) => Math.max(width, sideChatPanelWidth()));
+    }
+    openRightTab(tab, intent, runId);
+  }, [openRightTab]);
+
+  const openStreamingRun = useCallback((run: Run) => {
+    const navigation = navigationRef.current;
+    if (!navigation.isTask || (navigation.pane &&
+      !(navigation.pane.kind === "home" && navigation.pane.view === "experiments"))) return;
+    openExperimentTab(run.experimentId, "terminal", "preview", run.id);
+  }, [openExperimentTab]);
 
   const loadRunsBaseline = useCallback((baselineProjectId: string) => {
     runsBaselineReadyRef.current = false;
@@ -866,7 +959,7 @@ export default function App({ runtime, projectId, pane }: { runtime: RuntimeInfo
           runsVisitRef.current !== runsVisit
         ) return;
         baselineRunsRef.current = new Map(loadedRuns.map((run) => [run.id, run]));
-        const shouldAutoOpen = [...pendingFirstRunningRunsRef.current.values()].some(
+        const autoOpenRuns = [...pendingFirstRunningRunsRef.current.values()].filter(
           (liveRun) => {
             const baselineRun = baselineRunsRef.current.get(liveRun.id);
             return (
@@ -884,14 +977,10 @@ export default function App({ runtime, projectId, pane }: { runtime: RuntimeInfo
         }
         runsBaselineReadyRef.current = true;
         setRunDataReady(true);
-        if (isDemoProjectId(baselineProjectId)) {
-          setDemoRunningRunId((current) =>
-            loadedRuns.some((run) => run.id === current && run.status === "running")
-              ? current
-              : loadedRuns.find((run) => run.status === "running")?.id ?? null,
-          );
+        for (const run of autoOpenRuns) {
+          if (streamingRunsRef.current.has(run.id)) openStreamingRun(run);
+          else autoOpenRunsRef.current.set(run.id, run);
         }
-        if (shouldAutoOpen) openExperimentsTab(true);
       })
       .catch(() => {
         if (runsVisitRef.current === runsVisit) {
@@ -899,7 +988,7 @@ export default function App({ runtime, projectId, pane }: { runtime: RuntimeInfo
           setRunDataReady(true);
         }
       });
-  }, [openExperimentsTab]);
+  }, [openStreamingRun]);
 
   // Per-project data. Harness agents spawn lazily on the first chat message.
   useEffect(() => {
@@ -907,7 +996,8 @@ export default function App({ runtime, projectId, pane }: { runtime: RuntimeInfo
     observedRunsProjectRef.current = projectId;
     observedRunsRef.current.clear();
     liveRunIdsRef.current.clear();
-    openProject(projectId).catch(() => {});
+    streamingRunsRef.current.clear();
+    autoOpenRunsRef.current.clear();
     loadRunsBaseline(projectId);
     return () => { runsVisitRef.current++; };
   }, [loadRunsBaseline, projectId]);
@@ -921,7 +1011,16 @@ export default function App({ runtime, projectId, pane }: { runtime: RuntimeInfo
     setTerminalTabOpen(true);
     selectRightTab("terminal");
   }, [selectRightTab]);
+  const runSetup = useCallback((command: string, path: string) => {
+    setSetupRun((current) => ({ command, path, attempt: (current?.attempt ?? 0) + 1 }));
+    openTerminalTab();
+  }, [openTerminalTab]);
   const terminalKey = activeSessionId ?? (projectId ? `project:${projectId}` : null);
+  // The run's socket closes whenever its tab body unmounts; remounting would start the command again.
+  const setupMountable = panelOpen && mainView === "chat" && terminalTabOpen;
+  useEffect(() => {
+    if (!setupMountable) setSetupRun(null);
+  }, [setupMountable]);
   useEffect(() => {
     if (!panelOpen) setTerminalStartedFor(null);
     else if (rightTab === "terminal") setTerminalStartedFor(terminalKey);
@@ -930,12 +1029,22 @@ export default function App({ runtime, projectId, pane }: { runtime: RuntimeInfo
 
   // Live store updates.
   useOrxEvents({
+    onRunLog: (event) => {
+      if (!event.dataBase64 || streamingRunsRef.current.has(event.runId)) return;
+      streamingRunsRef.current.add(event.runId);
+      const run = autoOpenRunsRef.current.get(event.runId);
+      if (!run) return;
+      autoOpenRunsRef.current.delete(event.runId);
+      openStreamingRun(run);
+    },
     onReconnect: () => {
       const id = projectIdRef.current;
       if (!id) return;
       observedRunsProjectRef.current = id;
       observedRunsRef.current.clear();
       liveRunIdsRef.current.clear();
+      streamingRunsRef.current.clear();
+      autoOpenRunsRef.current.clear();
       loadRunsBaseline(id);
     },
     onRun: (run) => {
@@ -948,43 +1057,22 @@ export default function App({ runtime, projectId, pane }: { runtime: RuntimeInfo
       if (previous && previous.updatedAt > run.updatedAt) return;
       observedRunsRef.current.set(run.id, run);
       liveRunIdsRef.current.add(run.id);
-      if (isDemoProjectId(run.projectId)) {
-        setDemoRunningRunId((current) => {
-          if (run.status === "running") return current ?? run.id;
-          return current === run.id ? null : current;
-        });
-      }
       if (run.status !== "running" || previous?.status === "running") return;
       const baselineRun = baselineRunsRef.current.get(run.id);
       const newSinceBaseline =
         runsBaselineReadyRef.current &&
         (!baselineRun ||
           (baselineRun.status !== "running" && baselineRun.updatedAt <= run.updatedAt));
-      if ((previouslyLive && previous) || newSinceBaseline) openExperimentsTab(true);
-      else if (!runsBaselineReadyRef.current) pendingFirstRunningRunsRef.current.set(run.id, run);
+      if ((previouslyLive && previous) || newSinceBaseline) {
+        if (streamingRunsRef.current.has(run.id)) openStreamingRun(run);
+        else autoOpenRunsRef.current.set(run.id, run);
+      } else if (!runsBaselineReadyRef.current) pendingFirstRunningRunsRef.current.set(run.id, run);
     },
   });
 
   // Stable identity: in TreeView's layout-memo deps, so an inline arrow would
   // recompute the graph on every render.
   const showProjectScope = useCallback(() => setScope("project"), []);
-
-  // Open an experiment view as a right-panel tab (creating it if needed) and
-  // focus it.
-  const openExperimentTab = useCallback((
-    id: string,
-    view: ExperimentView = "overview",
-    intent: TabOpenIntent = "preview",
-    runId?: string,
-  ) => {
-    reportFirstAction("open_experiment");
-    const tab = { id, view };
-    setExpTabs((prev) => (prev.some((t) => sameExpTab(t, tab)) ? prev : [...prev, tab]));
-    if (view === "terminal" && isDemoProjectId(projectIdRef.current)) {
-      setPanelWidth((width) => Math.max(width, sideChatPanelWidth()));
-    }
-    openRightTab(tab, intent, runId);
-  }, [openRightTab]);
 
   // A `<run>` evidence chip in chat opens that run's logs — the only evidence
   // channel for a metric. Run ids are globally unique, so resolve the run to its
@@ -1236,7 +1324,7 @@ export default function App({ runtime, projectId, pane }: { runtime: RuntimeInfo
   ) => {
     const tab: SubagentViewDef = { kind: "subagent", sessionId, spawnPartId, label };
     setSubagentTabs((prev) =>
-      prev.some((t) => t.spawnPartId === spawnPartId) ? prev : [...prev, tab],
+      prev.some((t) => t.spawnPartId === tab.spawnPartId) ? prev : [...prev, tab],
     );
     openRightTab(tab, intent);
   }, [openRightTab]);
@@ -1251,12 +1339,18 @@ export default function App({ runtime, projectId, pane }: { runtime: RuntimeInfo
     [forgetRightTab, rightTab, subagentTabs],
   );
 
-  const openSideTab = useCallback((sessionId: string) => {
+  const openSideTab = useCallback((sessionId: string | null) => {
     const tab: SideChatViewDef = { kind: "side", sessionId };
     setSideTabs((prev) => prev.some((t) => t.sessionId === sessionId) ? prev : [...prev, tab]);
     setPanelWidth((width) => Math.max(width, sideChatPanelWidth()));
     openRightTab(tab, "keepOpen");
   }, [openRightTab]);
+
+  const [sideComposerFocusNonce, setSideComposerFocusNonce] = useState(0);
+  const focusSideTab = useCallback((sessionId: string | null) => {
+    setSideComposerFocusNonce((nonce) => nonce + 1);
+    openSideTab(sessionId);
+  }, [openSideTab]);
 
   const forgetSideTab = useCallback(
     (tab: SideChatViewDef) => {
@@ -1267,14 +1361,19 @@ export default function App({ runtime, projectId, pane }: { runtime: RuntimeInfo
     [forgetRightTab, rightTab, sideTabs],
   );
 
-  // Side chats are deleted when orx restarts; drop saved tabs whose chat is gone.
+  // Drop saved tabs only when their persisted session has been deleted.
   useEffect(() => {
     const live = sessionsQuery.data;
     if (!live) return;
-    for (const tab of sideTabs) if (!live.some((session) => session.id === tab.sessionId)) forgetSideTab(tab);
+    for (const tab of sideTabs) if (tab.sessionId !== null && !live.some((session) => session.id === tab.sessionId)) forgetSideTab(tab);
   }, [sessionsQuery.data, sideTabs, forgetSideTab]);
 
   const startSideChat = useCallback(async (parentSessionId: string, question: string) => {
+    if (!question.trim()) {
+      focusSideTab(null);
+      return;
+    }
+    const scope = workspaceScope();
     let session;
     try {
       session = await openSideChat(parentSessionId);
@@ -1282,16 +1381,10 @@ export default function App({ runtime, projectId, pane }: { runtime: RuntimeInfo
       showAlert(m.side_chat_open_failed({ error: errorText(error) }), "error");
       return;
     }
-    // The user moved to another task while it opened; its tab belongs nowhere now.
-    if (navigationRef.current.activeSessionId !== parentSessionId) {
-      void deleteChatSession(session.id).catch((error) => {
-        showAlert(m.side_chat_close_failed({ error: errorText(error) }), "error");
-      });
-      return;
-    }
+    if (!isCurrentScope(scope) || deletedSessionIds.has(session.id) || deletedSessionIds.has(parentSessionId)) return;
     setScopedQueryData(listChatSessionsQuery(session.projectId).queryKey, (current) =>
       current && [session, ...current.filter((row) => row.id !== session.id)]);
-    openSideTab(session.id);
+    if (navigationRef.current.activeSessionId === parentSessionId) focusSideTab(session.id);
     if (!question) return;
     try {
       // Seed the transcript first so the live stream has a cache to land the question in.
@@ -1300,18 +1393,9 @@ export default function App({ runtime, projectId, pane }: { runtime: RuntimeInfo
     } catch (error) {
       showAlert(errorText(error), "error");
     }
-  }, [openSideTab]);
+  }, [focusSideTab]);
 
-  // Side chats are temporary: closing the tab is what deletes one.
-  const closeSideTab = useCallback(
-    (tab: SideChatViewDef) => {
-      forgetSideTab(tab);
-      void deleteChatSession(tab.sessionId).catch((error) => {
-        showAlert(m.side_chat_close_failed({ error: errorText(error) }), "error");
-      });
-    },
-    [forgetSideTab],
-  );
+  const closeSideTab = forgetSideTab;
 
   // Live title + running state for open sub-agent tabs, straight off the spawn
   // parts' message stream — so a tab is named for its task and shimmers while
@@ -1444,6 +1528,7 @@ export default function App({ runtime, projectId, pane }: { runtime: RuntimeInfo
       else if (tab === "terminal") {
         setTerminalTabOpen(false);
         setTerminalStartedFor(null);
+        setSetupRun(null);
       }
       else setArtifactsTabOpen(false);
       forgetRightTab(tab, rightTab === tab);
@@ -1462,7 +1547,6 @@ export default function App({ runtime, projectId, pane }: { runtime: RuntimeInfo
     document.body.style.userSelect = "none";
     const startedMaximized = panelMax;
     const startX = e.clientX;
-    const startWidth = panelWidth;
     let restoredFromMax = false;
     function stop() {
       window.removeEventListener("pointermove", onMove);
@@ -1476,16 +1560,11 @@ export default function App({ runtime, projectId, pane }: { runtime: RuntimeInfo
         if (restoredFromMax || distance < FULLSCREEN_RESTORE_DRAG) return;
         restoredFromMax = true;
         setPanelMax(false);
-        const width = Math.min(
-          Math.max(startWidth, PANEL_MIN_WIDTH),
-          panelMaxWidth(),
-        );
-        setPanelWidth(width);
         window.removeEventListener("pointermove", onMove);
         return;
       }
-      const w = Math.round(window.innerWidth - ev.clientX - PANEL_MARGIN);
-      const max = panelMaxWidth();
+      const w = Math.round(window.innerWidth - ev.clientX);
+      const max = panelMaxWidth(window.innerWidth, railVisible);
       // Drag past the usable max by the slop threshold → snap to fullscreen.
       // Dragging back below it drops out of fullscreen to the clamped width.
       if (w > max + FULLSCREEN_SNAP_SLOP) {
@@ -1493,7 +1572,7 @@ export default function App({ runtime, projectId, pane }: { runtime: RuntimeInfo
         return;
       }
       setPanelMax(false);
-      const clamped = Math.min(Math.max(w, PANEL_MIN_WIDTH), max);
+      const clamped = Math.min(Math.max(w, Math.min(PANEL_MIN_WIDTH, max)), max);
       setPanelWidth(clamped);
     }
     window.addEventListener("pointermove", onMove);
@@ -1503,7 +1582,7 @@ export default function App({ runtime, projectId, pane }: { runtime: RuntimeInfo
 
   const onProjectCreated = (project: Project, publicationError: string | null) => {
     setProjects((cur) => (cur ? upsert(cur, project) : [project]));
-    void router.navigate({ href: `/projects/${encodeURIComponent(project.id)}${publicationError ? "/settings/git" : ""}` });
+    void router.navigate({ href: `/projects/${encodeURIComponent(project.id)}${publicationError ? "/settings/projects" : ""}` });
     if (publicationError) {
       showAlert(publicationError, "error");
     }
@@ -1557,6 +1636,16 @@ export default function App({ runtime, projectId, pane }: { runtime: RuntimeInfo
       ? rightTab
       : null;
   const sideSession = sideTab ? sessionsQuery.data?.find((session) => session.id === sideTab.sessionId) : undefined;
+  const sideParentSession = sessionsQuery.data?.find((session) => session.id === activeSessionId);
+  const sideDraftAgent = useMemo(() => sideParentSession ? {
+    harness: sideParentSession.harness,
+    model: sideParentSession.model,
+    serviceTier: sideParentSession.serviceTier,
+    permissionMode: sideParentSession.permissionMode === "plan" ? null : sideParentSession.permissionMode,
+    reasoningLevel: sideParentSession.reasoningLevel,
+  } : null, [sideParentSession?.harness, sideParentSession?.model,
+    sideParentSession?.serviceTier, sideParentSession?.permissionMode,
+    sideParentSession?.reasoningLevel]);
   const requestedCodeTab =
     typeof rightTab === "object" && "code" in rightTab ? rightTab : null;
   const codeTab = requestedCodeTab
@@ -1603,6 +1692,8 @@ export default function App({ runtime, projectId, pane }: { runtime: RuntimeInfo
           icon={
             tab.view === "overview" ? (
               <ChartSpline size={12} className="shrink-0" />
+            ) : tab.view === "trackio" ? (
+              <ChartLine size={12} className="shrink-0" />
             ) : (
               <Terminal size={12} className="shrink-0" />
             )
@@ -1715,17 +1806,34 @@ export default function App({ runtime, projectId, pane }: { runtime: RuntimeInfo
 
   const railHeader = (
     <RailHeader
-      onCollapse={() => setRailOpen(false)}
+      onCollapse={() => {
+        focusAfterRailChange.current = "show";
+        setRailOpen(false);
+      }}
     />
   );
 
   return (
-    <div className="app flex flex-col h-full">
-      {runtime.kind === "local" && <OfflineBanner />}
-      {runtime.kind === "local" && <UpdateBanner status={updateStatus} />}
+    <div className="app relative flex flex-col h-full">
+      {projectId && <div className="absolute start-[calc(5.15rem/min(1,var(--desktop-page-zoom,1)))] top-[calc(-2px/min(1,var(--desktop-page-zoom,1)))] z-10 hidden h-[calc(44px/min(1,var(--desktop-page-zoom,1)))] items-center mac-titlebar:flex">
+        <Tooltip interactive content={railVisible ? m.header_hide_sidebar() : m.chat_panel_show_sidebar()} className="rounded-md">
+          <IconButton aria-label={railVisible ? m.header_hide_sidebar() : m.chat_panel_show_sidebar()} aria-expanded={railVisible} onClick={() => {
+            if (railVisible) setRailOpen(false);
+            else {
+              focusAfterRailChange.current = "rail";
+              setRailOpen(true);
+              if (railTemporarilyHidden) closePanel();
+            }
+          }}>
+            <PanelLeft size={18} />
+          </IconButton>
+        </Tooltip>
+      </div>}
+      {runtime.kind === "local" && <OfflineBanner hasSidebar={Boolean(projectId)} />}
+      {runtime.kind === "local" && <UpdateBanner status={updateStatus} hasSidebar={Boolean(projectId)} />}
       <DesktopAppBanner />
-      {workspaceError && <div role="alert" className="flex items-center gap-2 px-4 mac-titlebar:ps-20 win-titlebar:pe-36 py-2 text-subtext"><span>{workspaceError}</span><Button onClick={retryWorkspace}>{m.app_retry()}</Button></div>}
-      <div className={`app-body workspace-body relative flex flex-1 min-h-0 py-0 px-3.5 ${workspaceCardVisible ? "workspace-card-visible" : ""}`}>
+      {workspaceError && <div role="alert" className="flex items-center gap-2 px-4 mac-titlebar:ps-titlebar-sidebar-controls mac-titlebar:min-h-titlebar win-titlebar:pe-win-controls py-2 text-subtext"><span>{workspaceError}</span><Button onClick={retryWorkspace}>{m.app_retry()}</Button></div>}
+      <div ref={bodyRef} className={`app-body workspace-body relative flex flex-1 min-h-0 ${stackPanel ? "flex-col [&>.chat-pane]:overflow-y-auto [&_.chat-empty]:min-h-0 [&_.chat-empty]:overflow-y-auto [&_.chat-empty]:justify-start [&_.chat-empty]:p-0" : ""} ${workspaceCardVisible ? "workspace-card-visible" : ""}`}>
         {projectId && (
           <ChatPanel
             projectId={projectId}
@@ -1734,8 +1842,12 @@ export default function App({ runtime, projectId, pane }: { runtime: RuntimeInfo
             contentError={conversationError || null}
             onRetryContent={retryConversation}
             railHeader={railHeader}
-            railOpen={railOpen}
-            onShowRail={() => setRailOpen(true)}
+            railOpen={railVisible}
+            onShowRail={() => {
+              focusAfterRailChange.current = "rail";
+              setRailOpen(true);
+              if (railTemporarilyHidden) closePanel();
+            }}
             onNewProject={() => setNewProjectOpen(true)}
             mainView={mainView}
             onSelectMainView={selectMainView}
@@ -1747,12 +1859,9 @@ export default function App({ runtime, projectId, pane }: { runtime: RuntimeInfo
             onOpenPlan={openPlanTab}
             onOpenSubagent={openSubagentTab}
             onOpenSideChat={(parentSessionId, question) => void startSideChat(parentSessionId, question)}
+            onRunSetup={runtime.kind === "ssh" ? undefined : runSetup}
             composerFocusNonce={composerFocusNonce}
-            demoRunningRunId={isDemoProjectId(activeProject.id) && activeSessionId === DEMO_MAIN_SESSION_ID ? demoRunningRunId : null}
             runtime={runtime}
-            onOpenDemoWelcome={
-              activeProject && isDemoProjectId(activeProject.id) ? openDemoWelcome : undefined
-            }
             activeSessionId={activeSessionId}
             onActiveSessionChange={onActiveSessionChange}
             preferredAgent={uiState.preferredAgent}
@@ -1781,7 +1890,7 @@ export default function App({ runtime, projectId, pane }: { runtime: RuntimeInfo
             experiments={experiments}
             runs={runs}
             onOpenExperiment={(id, runId) => openExperimentTab(id, "overview", "preview", runId)}
-            rightOffset={panelOpen ? panelWidth + 28 : undefined}
+            rightOffset={panelOpen && !stackPanel ? visiblePanelWidth + 14 : undefined}
             activeView={panelOpen && (rightTab === "files" || rightTab === "artifacts" || rightTab === "experiments" || rightTab === "terminal") ? rightTab : null}
             projectId={activeProject.id}
             onCompute={() => selectMainView("compute")}
@@ -1793,21 +1902,23 @@ export default function App({ runtime, projectId, pane }: { runtime: RuntimeInfo
             onArtifacts={openArtifactsTab}
             onExperiments={() => openExperimentsTab()}
             onSideChat={activeSessionId ? () => void startSideChat(activeSessionId, "") : undefined}
+            sessions={sessionsQuery.data ?? []}
+            onSelectSideChat={focusSideTab}
           />
         )}
         {mainView === "chat" && panelOpen && (
           <aside
-            className={`right-pane relative shrink-0 min-w-0 flex flex-col mt-5 win-titlebar:mt-10 me-0 mb-5 ms-3.5 bg-canvas [&.max]:fixed [&.max]:inset-2.5 mac-titlebar:[&.max]:top-8 win-titlebar:[&.max]:top-10 [&.max]:m-0 [&.max]:z-60 [&.max]:shadow-panel-max border border-border rounded-lg overflow-hidden shadow-elevated ${panelMax ? "max" : ""}`}
-            style={panelMax ? undefined : { width: panelWidth }}
+            className={`right-pane relative shrink-0 min-w-0 flex flex-col bg-background [&.max]:fixed [&.max]:inset-0 [&.max]:z-60 [&.max]:border-s-0 overflow-hidden ${stackPanel ? "border-t border-t-border" : "border-s border-s-border"} ${panelMax ? "max" : ""}`}
+            style={panelMax ? undefined : stackPanel ? { width: "100%", height: "50%" } : { width: visiblePanelWidth }}
             data-onboarding="experiments"
           >
-            <div
+            {!stackPanel && <div
               className={`panel-resizer absolute start-0 top-0 bottom-0 w-1.5 z-30 [&:hover]:bg-resizer-hover [&:active]:bg-resizer-hover ${panelMax ? "cursor-e-resize" : "cursor-col-resize"}`}
               title={panelMax ? m.app_drag_to_restore_panel() : m.app_drag_to_resize_panel()}
               onPointerDown={resizePanel}
-            />
-            <div className="tabs flex items-end gap-0 pt-1 pe-1.5 pb-0 ps-2 h-10 border-b border-b-border bg-background shrink-0">
-              <div className="tab-strip flex items-end gap-0.5 flex-1 min-w-0 overflow-x-auto [scrollbar-width:none] [&::-webkit-scrollbar]:hidden">
+            />}
+            <div className={`tabs relative flex items-end gap-0 pt-1 pe-1.5 pb-0 ps-2 h-10 mac-titlebar:h-titlebar bg-background shrink-0 after:absolute after:inset-x-0 after:bottom-0 after:h-px after:bg-border ${panelMax ? "mac-titlebar:ps-titlebar-controls" : ""}`}>
+              <TabStrip activeKey={rightTabKey(rightTab)}>
                 {leadingFileTabs.map(renderFileTab)}
                 {filesTabOpen && (
                   <ClosableTab
@@ -1846,25 +1957,27 @@ export default function App({ runtime, projectId, pane }: { runtime: RuntimeInfo
                   />
                 )}
                 {orderedContentTabs.map(renderContentTab)}
-              </div>
+              </TabStrip>
               <div className="panel-controls inline-flex items-center gap-0.5 self-center py-0 px-1.5 shrink-0">
-                <IconButton
-                  title={panelMax ? m.app_restore_panel() : m.app_expand_panel()}
-                  aria-label={panelMax ? m.app_restore_panel() : m.app_expand_panel()}
-                  onClick={() => setPanelMax((m) => !m)}
-                >
-                  {panelMax ? <Minimize2 size={14} /> : <Maximize2 size={14} />}
-                </IconButton>
-                <IconButton
-                  title={m.app_close_panel()}
-                  aria-label={m.app_close_panel()}
-                  onClick={() => {
-                    closePanel();
-                    setPanelMax(false);
-                  }}
-                >
-                  <X size={14} />
-                </IconButton>
+                <Tooltip interactive content={panelMax ? m.app_restore_panel() : m.app_expand_panel()}>
+                  <IconButton
+                    aria-label={panelMax ? m.app_restore_panel() : m.app_expand_panel()}
+                    onClick={() => setPanelMax((m) => !m)}
+                  >
+                    {panelMax ? <Minimize2 size={14} /> : <Maximize2 size={14} />}
+                  </IconButton>
+                </Tooltip>
+                <Tooltip interactive content={m.app_close_panel()}>
+                  <IconButton
+                    aria-label={m.app_close_panel()}
+                    onClick={() => {
+                      closePanel();
+                      setPanelMax(false);
+                    }}
+                  >
+                    <X size={14} />
+                  </IconButton>
+                </Tooltip>
               </div>
             </div>
             {/* The terminal body is the standalone TabBody after this chain. */}
@@ -1891,40 +2004,75 @@ export default function App({ runtime, projectId, pane }: { runtime: RuntimeInfo
             ) : rightTab === "experiments" ? (
               <TabBody>
                 <div className="pane-toolbar flex shrink-0 flex-wrap items-center gap-2 bg-background px-3 pt-2.5 pb-2">
-                  <span className="flex-1" />
-                  <div className="experiments-toolbar-controls inline-flex items-center gap-[5px]">
+                  <div className="experiments-toolbar-controls flex w-full items-center gap-1">
+                    {view === "table" && (
+                      <Tooltip interactive content={m.history_order()}>
+                      <OptionPicker
+                        triggerIcon={<ArrowDownWideNarrow size={16} />}
+                        choices={[
+                          { id: "lineage", label: m.history_lineage() },
+                          { id: "oldest", label: m.history_order_oldest() },
+                          { id: "newest", label: m.history_order_newest() },
+                        ]}
+                        value={tableOrder}
+                        header={m.history_order()}
+                        title={m.history_order()}
+                        variant="bare"
+                        dropDown
+                        align="left"
+                        onSelect={(id) => {
+                          if (id === "lineage" || id === "oldest" || id === "newest") setTableOrder(id);
+                        }}
+                      />
+                      </Tooltip>
+                    )}
+                    {view === "table" && (
+                      <Tooltip interactive content={m.history_show_lineage()}>
+                        <IconButton
+                          size="small"
+                          active={showTableLineage && tableOrder === "lineage"}
+                          className="[&.active]:text-text"
+                          disabled={tableOrder !== "lineage"}
+                          aria-label={m.history_show_lineage()}
+                          aria-pressed={showTableLineage && tableOrder === "lineage"}
+                          onClick={() => setShowTableLineage((show) => !show)}
+                        >
+                          <GitBranch size={16} />
+                        </IconButton>
+                      </Tooltip>
+                    )}
                     <div className="option-picker relative inline-flex" ref={scopeMenuRef}>
-                      <IconButton size="small"
-                        ref={scopeTriggerRef}
-                        className="experiment-scope-trigger"
-                        active={effectiveScope === "agent"}
-                        title={m.app_experiment_filter({ scope: effectiveScope === "agent" ? m.app_current_task() : m.app_entire_project() })}
-                        aria-label={m.app_filter_experiments()}
-                        aria-expanded={scopeMenuOpen}
-                        onClick={() => setScopeMenuOpen((open) => !open)}
-                      >
-                        <Filter size={16} strokeWidth={2.5} />
-                      </IconButton>
+                      <Tooltip interactive content={m.app_experiment_filter({ scope: effectiveScope === "agent" ? m.app_current_task() : m.app_entire_project() })}>
+                        <IconButton size="small"
+                          ref={scopeTriggerRef}
+                          className="experiment-scope-trigger"
+                          active={effectiveScope === "agent"}
+                          aria-label={m.app_filter_experiments()}
+                          aria-expanded={scopeMenuOpen}
+                          onClick={() => setScopeMenuOpen((open) => !open)}
+                        >
+                          <Filter size={16} strokeWidth={2.5} />
+                        </IconButton>
+                      </Tooltip>
                       {scopeMenuOpen && (
-                        <div className="option-menu absolute bottom-[calc(100%_+_8px)] start-0 max-h-95 flex flex-col bg-background border border-border rounded-lg shadow-menu z-50 overflow-hidden min-w-47.5 p-1.5 [&.align-right]:start-auto [&.align-right]:end-0 [&.drop-down]:bottom-auto [&.drop-down]:top-[calc(100%_+_4px)] [&.session-menu]:start-auto [&.session-menu]:end-1.5 [&.session-menu]:top-[calc(100%_-_2px)] [&.session-menu]:min-w-35 drop-down align-right experiment-scope-menu [&_.model-item]:whitespace-nowrap [&_.model-item:disabled]:text-muted [&_.model-item:disabled]:cursor-default [&_.model-item:disabled:hover]:bg-transparent">
+                        <div className="option-menu absolute bottom-[calc(100%_+_8px)] start-0 max-h-95 flex flex-col bg-background border border-border rounded-lg shadow-menu z-50 overflow-hidden min-w-47.5 p-1.5 [&.align-right]:start-auto [&.align-right]:end-0 [&.drop-down]:bottom-auto [&.drop-down]:top-[calc(100%_+_4px)] [&.session-menu]:start-auto [&.session-menu]:end-1.5 [&.session-menu]:top-[calc(100%_-_2px)] [&.session-menu]:min-w-35 drop-down experiment-scope-menu [&_.model-item]:whitespace-nowrap [&_.model-item:disabled]:text-muted [&_.model-item:disabled]:cursor-default [&_.model-item:disabled:hover]:bg-transparent">
                           <MenuItem
                             aria-pressed={effectiveScope === "agent"}
+                            aria-describedby={!activeSessionId || !allExperimentsAttributed ? "experiment-scope-unavailable" : undefined}
                             disabled={!activeSessionId || !allExperimentsAttributed}
-                            title={
-                              !activeSessionId
-                                ? m.app_open_task_to_filter()
-                                : !allExperimentsAttributed
-                                  ? m.app_filter_unavailable_unattributed()
-                                  : undefined
-                            }
                             onClick={() => {
                               setScope("agent");
                               setScopeMenuOpen(false);
                             }}
                           >
                             <span>{m.app_current_task()}</span>
-                            {effectiveScope === "agent" && <Check size={13} />}
+                            {effectiveScope === "agent" && <Check size={14} />}
                           </MenuItem>
+                          {(!activeSessionId || !allExperimentsAttributed) && (
+                            <p id="experiment-scope-unavailable" className="px-2 pb-1 text-xs text-muted">
+                              {!activeSessionId ? m.app_open_task_to_filter() : m.app_filter_unavailable_unattributed()}
+                            </p>
+                          )}
                           <MenuItem
                             aria-pressed={effectiveScope === "project"}
                             onClick={() => {
@@ -1933,7 +2081,7 @@ export default function App({ runtime, projectId, pane }: { runtime: RuntimeInfo
                             }}
                           >
                             <span>{m.app_entire_project()}</span>
-                            {effectiveScope === "project" && <Check size={13} />}
+                            {effectiveScope === "project" && <Check size={14} />}
                           </MenuItem>
                           <div className="my-1 border-t border-border-variant" />
                           <MenuItem
@@ -1944,13 +2092,14 @@ export default function App({ runtime, projectId, pane }: { runtime: RuntimeInfo
                             }}
                           >
                             <span>{m.app_show_archived_experiments()}</span>
-                            {showArchivedExperiments && <Check size={13} />}
+                            {showArchivedExperiments && <Check size={14} />}
                           </MenuItem>
                         </div>
                       )}
                     </div>
+                    <span className="flex-1" />
                     <div
-                      className="seg inline-flex items-center gap-0.5 rounded-md bg-hover-subtle [&_button]:font-medium [&_button]:text-text [&_button]:rounded-sm [&_button:not(:disabled):hover]:text-text [&_button.active]:bg-background [&_button.active]:shadow-segment [&_button:disabled]:text-muted [&_button:disabled]:cursor-default experiments-view-toggle p-0.5 [&_button]:py-0.5 [&_button]:px-2 [&_button]:text-sm"
+                      className={`${SEGMENTED_CLASS_NAME} experiments-view-toggle`}
                       role="group"
                       aria-label={m.app_experiment_view()}
                     >
@@ -1983,6 +2132,7 @@ export default function App({ runtime, projectId, pane }: { runtime: RuntimeInfo
                         onOpenView={openExperimentTab}
                         onOpenCode={openCodeTabForExperiment}
                         onArchive={archiveExperiment}
+                        onDelete={deleteExperimentNode}
                         agentSessionId={effectiveScope === "agent" ? activeSessionId : null}
                         onShowProjectScope={showProjectScope}
                         onRestoreRegion={restoreArchivedRegion}
@@ -1990,8 +2140,10 @@ export default function App({ runtime, projectId, pane }: { runtime: RuntimeInfo
                         onViewportChange={setTreeViewport}
                       />
                     )
-                  ) : (
+                  ) : view === "table" ? (
                     <ExperimentsTable
+                      showLineage={showTableLineage && tableOrder === "lineage"}
+                      order={tableOrder}
                       archiveActions={archiveActions}
                       runs={scopedRuns}
                       emptyHint={
@@ -2019,9 +2171,10 @@ export default function App({ runtime, projectId, pane }: { runtime: RuntimeInfo
                           );
                       }}
                       onArchive={archiveExperiment}
+                      onDelete={deleteExperimentNode}
                       onCancel={cancelRun}
                     />
-                  )}
+                  ) : null}
                 </div>
               </TabBody>
             ) : rightTab === "files" ? (
@@ -2151,11 +2304,11 @@ export default function App({ runtime, projectId, pane }: { runtime: RuntimeInfo
               </TabBody>
             ) : sideTab && projectId ? (
               <TabBody>
-                {sideSession ? (
+                {sideSession || sideTab.sessionId === null ? (
                   <div className="flex min-h-0 flex-1">
                     <ChatPanel
-                      key={sideTab.sessionId}
                       embedded
+                      composerFocusNonce={sideComposerFocusNonce}
                       projectId={projectId}
                       projectName={activeProject?.name ?? ""}
                       railOpen={false}
@@ -2179,17 +2332,33 @@ export default function App({ runtime, projectId, pane }: { runtime: RuntimeInfo
                       }
                       runtime={runtime}
                       activeSessionId={sideTab.sessionId}
+                      sideParentSessionId={sideTab.sessionId === null ? activeSessionId ?? undefined : undefined}
                       onOpenSideChat={(parentSessionId, question) => void startSideChat(parentSessionId, question)}
                       onActiveSessionChange={(sessionId, options) => {
+                        if (sideTab.sessionId === null && sessionId !== null) {
+                          const session = queryClient.getQueryData(listChatSessionsQuery(projectId).queryKey)
+                            ?.find((row) => row.id === sessionId);
+                          if (session?.sideParentSessionId !== activeSessionId) {
+                            onActiveSessionChange(sessionId, options);
+                            return;
+                          }
+                          const navigation = navigationRef.current;
+                          if (navigation.activeSessionId !== activeSessionId || navigation.pane?.kind !== "side" || navigation.pane.sessionId !== null) return;
+                          setSideTabs((current) => current.filter((tab) => tab.sessionId !== null));
+                          forgetRightTab(sideTab, false);
+                          openSideTab(sessionId);
+                          return;
+                        }
                         // Null after a delete drops the tab; anything else (`/resume`) is the main chat's.
                         const deleted = !queryClient.getQueryData(listChatSessionsQuery(projectId).queryKey)
                           ?.some((session) => session.id === sideTab.sessionId);
                         if (sessionId === null && deleted) forgetSideTab(sideTab);
                         else onActiveSessionChange(sessionId, options);
                       }}
-                      preferredAgent={uiState.preferredAgent}
+                      onStartHarnessDraft={() => onActiveSessionChange(null, { projectId })}
+                      preferredAgent={sideTab.sessionId === null ? sideDraftAgent : uiState.preferredAgent}
                       onPreferredAgentChange={persistPreferredAgent}
-                      preferredAutonomy={uiState.preferredAutonomy ?? DEFAULT_AUTONOMY}
+                      preferredAutonomy={sideTab.sessionId === null ? sideParentSession?.autonomy ?? DEFAULT_AUTONOMY : uiState.preferredAutonomy ?? DEFAULT_AUTONOMY}
                       onPreferredAutonomyChange={persistPreferredAutonomy}
                     />
                   </div>
@@ -2206,6 +2375,7 @@ export default function App({ runtime, projectId, pane }: { runtime: RuntimeInfo
                 key={subagentTab.spawnPartId}
                 sessionId={subagentTab.sessionId}
                 spawnPartId={subagentTab.spawnPartId}
+                expansionState={getSubagentExpansionState(subagentTab)}
                 onOpenFile={(path, line, exp, ref, intent) =>
                   openFromRightTab(subagentTab, () =>
                     openChatFile(path, subagentTab.sessionId, line, exp, ref, intent),
@@ -2259,6 +2429,10 @@ export default function App({ runtime, projectId, pane }: { runtime: RuntimeInfo
                   <DetailDrawer
                     key={`${expTab.id}:${expTab.view}`}
                     experiment={tabExperiment}
+                    experiments={experiments}
+                    onOpenExperiment={(id, intent) =>
+                      openFromRightTab(expTab, () => openExperimentTab(id, "overview", intent))
+                    }
                     project={activeProject}
                     view={expTab.view}
                     runs={runs}
@@ -2288,14 +2462,28 @@ export default function App({ runtime, projectId, pane }: { runtime: RuntimeInfo
                 )}
               </TabBody>
             )}
+            {terminalTabOpen && setupRun && (
+              <TabBody className={rightTab === "terminal" ? undefined : "hidden"}>
+                <SettingsCommandTerminal
+                  key={setupRun.attempt}
+                  path={setupRun.path}
+                  label={setupRun.command}
+                  className="flex min-h-0 flex-1 flex-col"
+                  heightClass="min-h-0 flex-1"
+                  onComplete={() => void readHarnesses().catch(() => {})}
+                  onError={(error) => showAlert(error, "error")}
+                  onClose={() => setSetupRun(null)}
+                />
+              </TabBody>
+            )}
             {/* Hidden rather than unmounted so the shell survives tab switches within the panel. */}
             {terminalTabOpen && terminalStartedFor !== null && terminalStartedFor === terminalKey && activeProject && (
-              <TabBody className={rightTab === "terminal" ? undefined : "hidden"}>
+              <TabBody className={rightTab === "terminal" && !setupRun ? undefined : "hidden"}>
                 <ProjectTerminal
                   key={terminalKey}
                   projectId={activeProject.id}
                   sessionId={activeSessionId}
-                  active={rightTab === "terminal"}
+                  active={rightTab === "terminal" && !setupRun}
                 />
               </TabBody>
             )}
@@ -2304,6 +2492,7 @@ export default function App({ runtime, projectId, pane }: { runtime: RuntimeInfo
       </div>
       {newProjectOpen && (
         <NewProjectDialog
+          preferredAgent={uiState.preferredAgent}
           remote={runtime.kind === "ssh"}
           onClose={() => setNewProjectOpen(false)}
           onCreated={(project, publicationError) => {

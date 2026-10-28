@@ -45,7 +45,7 @@ export function WindowControls() {
     document.documentElement.hasAttribute("data-maximized"),
   );
   return (
-    <>
+    <div className="native-window-controls fixed inset-x-0 top-0 z-300 h-0 pointer-events-none [&_button]:pointer-events-auto [&_.fixed]:pointer-events-auto">
       {!maximized && (
         <>
           <div className="fixed inset-x-0 top-0 z-300 h-1 cursor-ns-resize" onMouseDown={resizeFrom("n")} />
@@ -64,6 +64,6 @@ export function WindowControls() {
         />
         <CaptionButton label={m.window_close()} glyph={GLYPH.close} message="close" className="hover:bg-accent-red hover:text-white" />
       </div>
-    </>
+    </div>
   );
 }

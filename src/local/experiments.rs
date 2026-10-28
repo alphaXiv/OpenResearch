@@ -170,12 +170,172 @@ fn archive_ids(
     }
 }
 
+pub struct DeletedExperiment {
+    pub experiment: LocalExperiment,
+    pub runs: usize,
+    /// The deleted branch's last commit, for recovery.
+    pub branch_commit: Option<String>,
+}
+
+/// Permanently delete a childless experiment with no active runs: its `orx/` branch, its runs
+/// and their local artifacts; their remote dirs are queued for removal. Safe to retry.
+pub fn delete_experiment(store: &Store, id: &str) -> Result<DeletedExperiment> {
+    let experiment = store
+        .get_local_experiment(id)?
+        .ok_or_else(|| anyhow!("Experiment {id} not found."))?;
+    let project = store
+        .get_local_project(&experiment.project_id)?
+        .ok_or_else(|| anyhow!("Project {} not found.", experiment.project_id))?;
+    // Legacy roots ride the project's base branch, which is never an experiment's to delete.
+    let owns_branch = experiment.branch_name.starts_with("orx/")
+        && experiment.branch_name != project.baseline_branch
+        && !store
+            .list_experiments_by_project(&project.id)?
+            .iter()
+            .any(|other| other.id != experiment.id && other.branch_name == experiment.branch_name);
+    let runs = store.list_runs_by_experiment(id)?.len();
+    let branch = &experiment.branch_name;
+    let mut branch_commit = None;
+    let deleted = store.delete_local_experiment(id, || {
+        if owns_branch {
+            branch_commit = git::delete_branch(Path::new(&project.repo_path), branch)
+                .map_err(|error| anyhow!("Could not delete branch {branch}: {error}"))?;
+        }
+        Ok(())
+    });
+    if let Err(error) = deleted {
+        // The branch and its reflog are gone, so a retry could not report its commit.
+        return Err(match &branch_commit {
+            Some(sha) => anyhow!(
+                "{error} Branch {branch} was already deleted; restore it with `git branch {branch} {sha}`."
+            ),
+            None => error,
+        });
+    }
+    Ok(DeletedExperiment {
+        experiment,
+        runs,
+        branch_commit,
+    })
+}
+
+/// Re-parent an experiment under `parent`, or make it a root when `None`.
+/// Returns the pre-move row.
+pub fn move_experiment(store: &Store, id: &str, parent: Option<&str>) -> Result<LocalExperiment> {
+    // Deletes hold this lock exclusively, so a node can't gain a child mid-delete.
+    store.with_run_artifacts_shared(|| move_experiment_locked(store, id, parent))
+}
+
+fn move_experiment_locked(
+    store: &Store,
+    id: &str,
+    parent: Option<&str>,
+) -> Result<LocalExperiment> {
+    // Concurrent moves must not both pass the cycle check against the same tree.
+    let tx = store.begin_immediate()?;
+    let selected = store
+        .get_local_experiment(id)?
+        .ok_or_else(|| anyhow!("Experiment {id} not found."))?;
+    let project = store
+        .get_local_project(&selected.project_id)?
+        .ok_or_else(|| anyhow!("Project {} not found.", selected.project_id))?;
+    let experiments = store.list_experiments_by_project(&project.id)?;
+    check_move(&experiments, &project, &selected, parent)?;
+    store.set_experiment_parent(&selected.id, parent)?;
+    tx.commit()?;
+    Ok(selected)
+}
+
+fn check_move(
+    experiments: &[LocalExperiment],
+    project: &LocalProject,
+    selected: &LocalExperiment,
+    parent: Option<&str>,
+) -> Result<()> {
+    if selected.parent_experiment_id.as_deref() == parent {
+        return Err(match parent {
+            Some(parent) => anyhow!("Experiment {} is already under {parent}.", selected.id),
+            None => anyhow!("Experiment {} is already a root.", selected.id),
+        });
+    }
+    let Some(parent) = parent else {
+        return Ok(());
+    };
+    // A child on the base branch would lose the legacy-root warning and invert its diff.
+    if selected.branch_name == project.baseline_branch {
+        return Err(anyhow!(
+            "Experiment {} rides the project's base branch '{}', so it must stay a root.",
+            selected.id,
+            project.baseline_branch
+        ));
+    }
+    if !experiments.iter().any(|e| e.id == parent) {
+        return Err(anyhow!(
+            "Parent experiment {parent} not found in this experiment's project. \
+             Choose an experiment id from `orx project view {}`.",
+            project.id
+        ));
+    }
+    let descendants = archive_ids(experiments, selected, ArchiveDirection::Descendants);
+    if parent == selected.id || descendants.iter().any(|id| id == parent) {
+        return Err(anyhow!(
+            "Cannot move experiment {} under itself or one of its descendants.",
+            selected.id
+        ));
+    }
+    Ok(())
+}
+
+/// The command a launch would run: the experiment's own, else the project default.
+pub fn effective_run_command<'a>(
+    experiment: &'a LocalExperiment,
+    project_command: Option<&'a str>,
+) -> Option<&'a str> {
+    Some(experiment.run_command.as_str())
+        .filter(|c| !c.trim().is_empty())
+        .or_else(|| project_command.filter(|c| !c.trim().is_empty()))
+}
+
 /// Create a local experiment. Every node gets its own `orx/<slug>` branch:
 /// a child forks off its parent's tip, a baseline/root off
 /// the project's base branch. The base branch itself is never an experiment
 /// node — it stays mutable (README, notebooks, publication surface) while
 /// `orx/*` branches hold the experiment nodes' recorded code.
 pub fn create_experiment(
+    store: &Store,
+    project: &LocalProject,
+    parent: Option<&LocalExperiment>,
+    slug: Option<&str>,
+    title: Option<String>,
+    description: Option<String>,
+    run_command: Option<String>,
+) -> Result<LocalExperiment> {
+    // Deletes hold this lock exclusively, so neither the project nor the parent can be deleted before insert.
+    store.with_run_artifacts_shared(|| {
+        let project = store
+            .get_local_project(&project.id)?
+            .ok_or_else(|| anyhow!("Project {} no longer exists.", project.id))?;
+        let parent = match parent {
+            Some(p) => Some(
+                store
+                    .get_local_experiment(&p.id)?
+                    .ok_or_else(|| anyhow!("Parent experiment {} no longer exists.", p.id))?,
+            ),
+            None => None,
+        };
+        create_experiment_locked(
+            store,
+            &project,
+            parent.as_ref(),
+            slug,
+            title,
+            description,
+            run_command,
+        )
+    })
+}
+
+fn create_experiment_locked(
     store: &Store,
     project: &LocalProject,
     parent: Option<&LocalExperiment>,
@@ -288,6 +448,19 @@ mod tests {
     }
 
     #[test]
+    fn unset_experiment_command_follows_the_project_default() {
+        let mut e = experiment(None, "orx/baseline");
+        assert_eq!(effective_run_command(&e, None), None);
+        assert_eq!(effective_run_command(&e, Some(" ")), None);
+        let train = Some("python train.py");
+        assert_eq!(effective_run_command(&e, train), train);
+        e.run_command = "  ".into();
+        assert_eq!(effective_run_command(&e, train), train);
+        e.run_command = "python eval.py".into();
+        assert_eq!(effective_run_command(&e, train), Some("python eval.py"));
+    }
+
+    #[test]
     fn project_is_available_as_an_experiment_slug() {
         let root =
             std::env::temp_dir().join(format!("orx-experiment-slug-test-{}", uuid::Uuid::new_v4()));
@@ -384,6 +557,199 @@ mod tests {
         assert_eq!(ids.len(), 2);
         assert!(ids.contains(&"selected".to_string()));
         assert!(ids.contains(&"mine".to_string()));
+    }
+
+    #[test]
+    fn move_rejects_cycles_unknown_parents_no_ops_and_legacy_roots() {
+        let mut root = experiment(None, "root");
+        root.id = "root".into();
+        let mut selected = experiment(Some("root"), "selected");
+        selected.id = "selected".into();
+        let mut child = experiment(Some("selected"), "child");
+        child.id = "child".into();
+        let mut other = experiment(None, "other");
+        other.id = "other".into();
+        let all = [root, selected.clone(), child, other];
+        let p = project("main");
+        assert!(check_move(&all, &p, &selected, Some("other")).is_ok());
+        assert!(check_move(&all, &p, &selected, None).is_ok());
+        for parent in [
+            Some("root"),
+            Some("selected"),
+            Some("child"),
+            Some("missing"),
+        ] {
+            assert!(
+                check_move(&all, &p, &selected, parent).is_err(),
+                "{parent:?}"
+            );
+        }
+        assert!(check_move(&all, &p, &all[0], None).is_err());
+        let legacy = experiment(None, "main");
+        assert!(check_move(&all, &p, &legacy, Some("other")).is_err());
+    }
+
+    #[test]
+    fn move_updates_only_the_parent_link() {
+        let dir = std::env::temp_dir().join(format!("orx-move-{}", uuid::Uuid::new_v4()));
+        let store = Store::open_at(dir.clone()).unwrap();
+        store.create_local_project(&project("main")).unwrap();
+        let mut root = experiment(None, "orx/root");
+        root.id = "root".into();
+        let mut selected = experiment(Some("root"), "orx/selected");
+        selected.id = "selected".into();
+        selected.slug = "selected".into();
+        store.create_local_experiment(&root).unwrap();
+        store.create_local_experiment(&selected).unwrap();
+        let before = move_experiment(&store, "selected", None).unwrap();
+        assert_eq!(before.parent_experiment_id.as_deref(), Some("root"));
+        let after = store.get_local_experiment("selected").unwrap().unwrap();
+        assert_eq!(after.parent_experiment_id, None);
+        assert_eq!(after.branch_name, "orx/selected");
+        move_experiment(&store, "selected", Some("root")).unwrap();
+        let back = store.get_local_experiment("selected").unwrap().unwrap();
+        assert_eq!(back.parent_experiment_id.as_deref(), Some("root"));
+        drop(store);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn delete_removes_a_leaf_with_its_runs_and_branch_but_refuses_shared_state() {
+        let dir = std::env::temp_dir().join(format!("orx-exp-delete-{}", uuid::Uuid::new_v4()));
+        let store = Store::open_at(dir.clone()).unwrap();
+        let repo = dir.join("repo");
+        std::fs::create_dir_all(&repo).unwrap();
+        let git = |args: &[&str]| {
+            let out = std::process::Command::new("git")
+                .current_dir(&repo)
+                .args(["-c", "user.name=t", "-c", "user.email=t@t"])
+                .args(args)
+                .output()
+                .unwrap();
+            assert!(out.status.success(), "{args:?}: {out:?}");
+        };
+        git(&["init", "-b", "main"]);
+        git(&["commit", "--allow-empty", "-m", "base"]);
+        git(&["branch", "orx/root"]);
+        git(&["branch", "orx/leaf"]);
+        let mut project = project("main");
+        project.repo_path = repo.to_string_lossy().into_owned();
+        store.create_local_project(&project).unwrap();
+        let mut root = experiment(None, "orx/root");
+        root.id = "root".into();
+        let mut leaf = experiment(Some("root"), "orx/leaf");
+        leaf.id = "leaf".into();
+        leaf.slug = "leaf".into();
+        let mut legacy = experiment(None, "main");
+        legacy.id = "legacy".into();
+        legacy.slug = "legacy".into();
+        for e in [&root, &leaf, &legacy] {
+            store.create_local_experiment(e).unwrap();
+        }
+        let run_id = uuid::Uuid::new_v4().to_string();
+        store
+            .upsert_run(&crate::store::StoredRun {
+                id: run_id.clone(),
+                experiment_id: "leaf".into(),
+                project_id: "p1".into(),
+                status: "done".into(),
+                backend_json: r#"{"kind":"slurm_job","namespace":"login"}"#.into(),
+                command: "true".into(),
+                created_at: 1,
+                updated_at: 1,
+                ended_at: Some(1),
+                exit_code: Some(0),
+                commit_sha: None,
+                result_markdown: None,
+                cancel_requested: false,
+                cancel_reason: None,
+                chat_session_id: None,
+            })
+            .unwrap();
+
+        assert!(delete_experiment(&store, "root")
+            .err()
+            .unwrap()
+            .to_string()
+            .contains("child experiment"));
+        assert!(store.get_local_experiment("root").unwrap().is_some());
+        assert!(git::resolve_branch_commit(&repo, "orx/root")
+            .unwrap()
+            .is_some());
+        let worktree = dir.join("worktree");
+        git(&["worktree", "add", worktree.to_str().unwrap(), "orx/leaf"]);
+        assert!(delete_experiment(&store, "leaf").is_err());
+        assert!(store.get_local_experiment("leaf").unwrap().is_some());
+        assert!(git::resolve_branch_commit(&repo, "orx/leaf")
+            .unwrap()
+            .is_some());
+        assert!(store.get_run(&run_id).unwrap().is_some());
+        assert!(store.due_remote_cleanups(10).unwrap().is_empty());
+        git(&["worktree", "remove", worktree.to_str().unwrap()]);
+
+        let deleted = delete_experiment(&store, "leaf").unwrap();
+        assert_eq!(deleted.runs, 1);
+        assert!(deleted.branch_commit.is_some());
+        assert!(store.get_local_experiment("leaf").unwrap().is_none());
+        assert!(store.get_run(&run_id).unwrap().is_none());
+        assert!(git::resolve_branch_commit(&repo, "orx/leaf")
+            .unwrap()
+            .is_none());
+        let queued = store.due_remote_cleanups(10).unwrap();
+        assert_eq!(queued.len(), 1);
+        assert_eq!(queued[0].run_id, run_id);
+        assert!(queued[0].deleted);
+        assert!(delete_experiment(&store, "leaf").is_err());
+
+        // The root is now a leaf; the legacy root keeps the project's base branch.
+        delete_experiment(&store, "root").unwrap();
+        let deleted = delete_experiment(&store, "legacy").unwrap();
+        assert!(deleted.branch_commit.is_none());
+        assert!(git::resolve_branch_commit(&repo, "main").unwrap().is_some());
+        drop(store);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn tree_edits_wait_out_deletes_and_recheck_what_they_build_on() {
+        let dir = std::env::temp_dir().join(format!("orx-tree-edits-{}", uuid::Uuid::new_v4()));
+        let store = Store::open_at(dir.clone()).unwrap();
+        store.create_local_project(&project("main")).unwrap();
+        let mut root = experiment(None, "orx/root");
+        root.id = "root".into();
+        store.create_local_experiment(&root).unwrap();
+        let in_progress = |error: crate::error::Error| error.to_string().contains("in progress");
+        let mut lock = store.run_artifacts_lock().unwrap();
+        let deleting = lock.write().unwrap();
+        assert!(in_progress(
+            move_experiment(&store, "root", None).unwrap_err()
+        ));
+        assert!(in_progress(
+            create_experiment(&store, &project("main"), None, None, None, None, None).unwrap_err()
+        ));
+        drop(deleting);
+        let mut gone = experiment(None, "orx/gone");
+        gone.id = "gone".into();
+        let missing = |error: crate::error::Error| error.to_string().contains("no longer exists");
+        assert!(missing(
+            create_experiment(
+                &store,
+                &project("main"),
+                Some(&gone),
+                None,
+                None,
+                None,
+                None
+            )
+            .unwrap_err()
+        ));
+        let mut deleted = project("main");
+        deleted.id = "deleted".into();
+        assert!(missing(
+            create_experiment(&store, &deleted, None, None, None, None, None).unwrap_err()
+        ));
+        drop(store);
+        let _ = std::fs::remove_dir_all(dir);
     }
 
     #[test]

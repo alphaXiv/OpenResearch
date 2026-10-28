@@ -32,9 +32,9 @@ function mount({ platform = "MacIntel", stored = {}, desktop = false } = {}) {
   };
   const mocks = {
     react,
-    "lucide-react": { Download: "Download", X: "X" },
+    "lucide-react": { Monitor: "Monitor", X: "X" },
     "../paraglide/messages.js": { m: new Proxy({}, { get: (_, name) => () => String(name) }) },
-    "./ui": { IconButton: "IconButton" },
+    "./ui": { ButtonLink: "a", IconButton: "IconButton" },
   };
   const localStorage = storage(stored);
   const window = desktop ? { __ORX_DESKTOP__: true, addEventListener() {}, removeEventListener() {} } : {};

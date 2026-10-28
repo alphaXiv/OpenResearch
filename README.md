@@ -13,7 +13,7 @@ The local-first harness & workspace for research agents.
 
 <p><a href="README.md">English</a> · <a href="README.es.md">Español</a> · <a href="README.ko.md">한국어</a> · <a href="README.zh.md">简体中文</a> · <a href="README.ja.md">日本語</a></p>
 
-<p><img src=".github/readme-assets/openresearch-screenshot.png" alt="OpenResearch desktop app showing a research agent conversation and experiment logs" width="680" /></p>
+<p><img src=".github/readme-assets/openresearch-demo.gif" alt="OpenResearch desktop app: an agent searches alphaXiv to diagnose a training run, then opens its Trackio charts and result figures" width="680" /></p>
 
 <hr />
 
@@ -99,8 +99,12 @@ control.
 
 ## Usage analytics
 
-Official release builds send opt-out, coarse usage events tied to a random
-installation ID. They do not include code, prompts, file contents or paths,
-repository names, tokens, emails, or project and experiment identifiers.
+Official release builds send opt-out, coarse product analytics events and detailed agent feedback in the background tied to a random
+installation ID. Your code, prompts, file contents or paths,
+repository names, tokens, emails, or project and experiment identifiers are not collected. Anonymized token/message counts are used to identify
+which models are being used across OpenResearch and can be seen at https://openresearch.sh/rankings. Feedback reports from the agent are sent for
+bug reports, feature requests, and general frustrations about OpenResearch. Agents are
+instructed to sanitize reports to exclude any sensitive information about your research or code. 
 
-You can turn usage analytics off in the desktop app's Settings or with `orx telemetry off`.
+You can turn off all usage analytics and agent feedback in the desktop app's
+Settings or with `orx telemetry off`.

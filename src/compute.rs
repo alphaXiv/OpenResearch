@@ -19,7 +19,7 @@ use sha2::{Digest as _, Sha256};
 use crate::error::{anyhow, Result};
 use crate::jobs::BackendDescriptor;
 use crate::local::model::{LocalExperiment, LocalProject};
-use crate::store::{log_path, RunStatus, Store, StoredRun};
+use crate::store::{RunStatus, Store, StoredRun};
 
 #[derive(Debug, Clone)]
 pub struct SourceSnapshot {
@@ -143,7 +143,7 @@ fn archive(repo: &Path, revision: &str, format: &str, destination: &Path) -> Res
     Err(anyhow!(
         "git archive failed for {}: {}",
         revision,
-        String::from_utf8_lossy(&output.stderr).trim()
+        crate::local::git::failure_detail(&output)
     ))
 }
 
@@ -230,6 +230,11 @@ pub fn snapshot_script(archive_path: &str, command: &str) -> String {
     )
 }
 
+pub const TENSORBOARD_LOGDIR: &str = "TENSORBOARD_LOGDIR";
+
+/// Run before `cd repo`, so `$PWD` is the run's own directory (inside the container for container runs).
+pub const TENSORBOARD_LOGDIR_EXPORT: &str = "export TENSORBOARD_LOGDIR=\"$PWD/tensorboard\";";
+
 pub fn staged_script(command: &str) -> String {
     format!("set -eo pipefail; cd repo; {command}")
 }
@@ -267,12 +272,14 @@ pub struct Preflight {
 #[derive(Debug, Clone)]
 pub struct StagedSource(pub SourceSnapshot);
 
-#[derive(Debug, Clone, Copy, Default)]
-pub struct LogCursor(pub u64);
+#[derive(Debug, Clone, Default)]
+pub struct LogCursor(pub u64, pub Option<String>);
 
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct LogBatch {
+    pub generation: String,
+    pub offset: u64,
     pub data_base64: String,
     pub next_cursor: u64,
     pub eof: bool,
@@ -304,34 +311,25 @@ pub trait ComputeBackend: Send + Sync {
 
     async fn logs(&self, handle: &StoredRun, cursor: LogCursor) -> Result<LogBatch> {
         use base64::Engine as _;
-        use std::io::{Read as _, Seek as _};
-        let path = log_path(&handle.id);
-        let mut file = match std::fs::File::open(&path) {
-            Ok(file) => file,
-            Err(_) => {
-                return Ok(LogBatch {
-                    data_base64: String::new(),
-                    next_cursor: cursor.0,
-                    eof: crate::local::is_terminal(&handle.status),
-                })
-            }
-        };
-        let len = file.metadata()?.len();
-        let start = cursor.0.min(len);
-        file.seek(std::io::SeekFrom::Start(start))?;
-        let mut data = Vec::new();
-        file.take(256 * 1024).read_to_end(&mut data)?;
-        let next = start + data.len() as u64;
+        let snapshot = crate::jobs::ssh::service::logs::read(
+            &handle.id,
+            cursor.0,
+            256 * 1024,
+            cursor.1.as_deref(),
+        )?;
+        let next = snapshot.offset + snapshot.bytes.len() as u64;
         Ok(LogBatch {
-            data_base64: base64::engine::general_purpose::STANDARD.encode(data),
+            generation: snapshot.generation,
+            offset: snapshot.offset,
+            data_base64: base64::engine::general_purpose::STANDARD.encode(snapshot.bytes),
             next_cursor: next,
-            eof: crate::local::is_terminal(&handle.status) && next >= len,
+            eof: crate::local::is_terminal(&handle.status) && next >= snapshot.size,
         })
     }
 
-    async fn cancel(&self, handle: &StoredRun) -> Result<()> {
+    async fn cancel(&self, handle: &StoredRun, reason: &str) -> Result<()> {
         // Agent-session callers route through orx up before reaching this trusted path.
-        crate::commands::exp::request_local_run_cancel(&Store::open()?, &handle.id)
+        crate::commands::exp::request_local_run_cancel(&Store::open()?, &handle.id, reason)
     }
 
     async fn cleanup(&self, handle: &StoredRun) -> Result<()> {
@@ -630,11 +628,33 @@ backend_adapter!(
     "SSH tar stream",
     false,
     preflight | args | {
-        if args.flavor.is_none() {
+        let Some(flavor) = args.flavor.as_deref() else {
             return Ok(not_ready("OpenResearch requires --flavor."));
-        }
-        if crate::config::load_credentials().await?.is_none() {
+        };
+        let Some(creds) = crate::config::load_credentials().await? else {
             return Ok(not_ready("OpenResearch requires `orx login`."));
+        };
+        // An unknown GPU id would only 400 after the run is recorded as failed.
+        if let crate::client::SandboxTarget::New { gpu, .. } =
+            crate::jobs::openresearch::parse_flavor(flavor, 0, None)?
+        {
+            if let Ok(Ok(catalog)) = tokio::time::timeout(
+                std::time::Duration::from_secs(10),
+                crate::client::list_catalog(&creds),
+            )
+            .await
+            {
+                let mut ids: Vec<_> = catalog.offers.into_iter().map(|o| o.gpu).collect();
+                ids.sort();
+                ids.dedup();
+                if !ids.is_empty() && !ids.contains(&gpu) {
+                    return Ok(not_ready(format!(
+                        "No OpenResearch offers for GPU '{gpu}'. Available now: {}. \
+                         See `orx compute`.",
+                        ids.join(", ")
+                    )));
+                }
+            }
         }
         ready()
     },
@@ -703,6 +723,17 @@ pub fn validate_run_args(args: &crate::ExpRunArgs) -> Result<()> {
     if args.host.is_some() && !matches!(args.backend.as_deref(), Some("ssh") | Some("slurm")) {
         return Err(anyhow!("--host only applies with --backend ssh or slurm."));
     }
+    if (args.cpus.is_some() || args.mem.is_some()) && args.backend.as_deref() != Some("slurm") {
+        return Err(anyhow!(
+            "--cpus/--mem only apply with --backend slurm. Size other backends with --flavor."
+        ));
+    }
+    if args.cpus == Some(0) {
+        return Err(anyhow!("--cpus must be at least 1."));
+    }
+    if let Some(mem) = &args.mem {
+        crate::jobs::slurm::parse_mem(mem)?;
+    }
     if args.org.is_some() && args.backend.as_deref() != Some("openresearch") {
         return Err(anyhow!("--org only applies with --backend openresearch."));
     }
@@ -745,21 +776,39 @@ pub async fn submit(args: &crate::ExpRunArgs) -> Result<StoredRun> {
     let backend_id = args.backend.as_deref().unwrap_or("local");
     let backend = backend(backend_id)?;
     let store = Store::open()?;
-    let experiment = store
-        .get_local_experiment(&args.exp_id)?
-        .ok_or_else(|| anyhow!("Local experiment {} not found.", args.exp_id))?;
-    let project = store
-        .get_local_project(&experiment.project_id)?
-        .ok_or_else(|| anyhow!("Local project {} not found.", experiment.project_id))?;
     let preflight = backend.preflight(args).await?;
     if !preflight.ready {
         return Err(anyhow!(
             "{}",
             preflight
                 .detail
+                .filter(|detail| !detail.trim().is_empty())
                 .unwrap_or_else(|| "Compute backend is not ready.".to_string())
         ));
     }
+    let artifacts_lock = store.run_artifacts_lock()?;
+    let deadline = std::time::Instant::now() + crate::store::RUN_ARTIFACTS_WAIT;
+    let _artifacts_guard = loop {
+        match artifacts_lock.try_read() {
+            Ok(guard) => break guard,
+            Err(error)
+                if error.kind() == std::io::ErrorKind::WouldBlock
+                    && std::time::Instant::now() < deadline =>
+            {
+                tokio::time::sleep(crate::store::RUN_ARTIFACTS_POLL).await;
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                return Err(anyhow!("Run artifacts are busy; retry the run submission."))
+            }
+            Err(error) => return Err(error.into()),
+        }
+    };
+    let experiment = store
+        .get_local_experiment(&args.exp_id)?
+        .ok_or_else(|| anyhow!("Local experiment {} not found.", args.exp_id))?;
+    let project = store
+        .get_local_project(&experiment.project_id)?
+        .ok_or_else(|| anyhow!("Local project {} not found.", experiment.project_id))?;
     let source = backend.stage_source(&project, &experiment).await?;
     let run_id = uuid::Uuid::new_v4().to_string();
     let command = Some(experiment.run_command.clone())
@@ -775,6 +824,7 @@ pub async fn submit(args: &crate::ExpRunArgs) -> Result<StoredRun> {
         ssh_container: None,
         monitoring_error: None,
         cancellation_accepted: false,
+        rental_lease: None,
         kind: format!("{}_job", backend_id),
         namespace: None,
         job_id: None,
@@ -788,9 +838,12 @@ pub async fn submit(args: &crate::ExpRunArgs) -> Result<StoredRun> {
         ssh_port: None,
         ssh_user: None,
         timeout_secs: None,
+        cpus_per_task: None,
+        mem: None,
         source_digest: None,
         source_path: None,
         source_size: None,
+        remote_root: None,
     };
     source.0.apply_to_descriptor(&mut descriptor);
     let now = crate::store::now_ms();
@@ -808,6 +861,7 @@ pub async fn submit(args: &crate::ExpRunArgs) -> Result<StoredRun> {
         commit_sha: Some(source.0.revision.clone()),
         result_markdown: None,
         cancel_requested: false,
+        cancel_reason: None,
         chat_session_id: args.launching_chat_session(),
     };
     let chat_harness = match &pending.chat_session_id {
@@ -815,7 +869,7 @@ pub async fn submit(args: &crate::ExpRunArgs) -> Result<StoredRun> {
         None => None,
     };
     let identity = args.invocation_identity()?;
-    let report = (!args.telemetry_suppressed)
+    let report = (!args.telemetry_suppressed && backend_id != "openresearch")
         .then(|| {
             crate::telemetry::pending_event_payload(
                 "experiment_finished",
@@ -947,11 +1001,12 @@ fn reserve_run(
             .find(|run| !crate::local::is_terminal(&run.status))
         {
             return Err(anyhow!(
-                "Run {} is already in flight for this experiment ({}). Cancel it with \
-                 `orx exp cancel {}` or pass --force to launch anyway.",
+                "Run {} is already in flight for this experiment ({}). Wait for it with \
+                 `orx exp wait {exp}`; cancel it with `orx exp cancel {exp}` only if it \
+                 should stop, or pass --force to launch anyway.",
                 run.id,
                 run.status,
-                pending.experiment_id
+                exp = pending.experiment_id
             ));
         }
     }
@@ -967,7 +1022,7 @@ pub fn record_submission_handle(run_id: &str, descriptor: &BackendDescriptor) ->
         .and_then(|store| store.set_backend_json(run_id, &descriptor.to_json()))
         .err();
     let dir = crate::store::data_dir().join("submission-handles");
-    if let Err(error) = std::fs::create_dir_all(&dir) {
+    if let Err(error) = prepare_snapshot_dir(&dir) {
         return match database_error {
             None => {
                 eprintln!("warning: could not create submission recovery directory: {error}");
@@ -980,9 +1035,18 @@ pub fn record_submission_handle(run_id: &str, descriptor: &BackendDescriptor) ->
     }
     let destination = dir.join(format!("{run_id}.json"));
     let temporary = dir.join(format!(".{run_id}.{}.tmp", uuid::Uuid::new_v4()));
-    let file_error = std::fs::write(&temporary, descriptor.to_json())
-        .and_then(|()| std::fs::rename(&temporary, destination))
-        .err();
+    let file_error = (|| -> std::io::Result<()> {
+        use std::io::Write;
+        let mut options = std::fs::OpenOptions::new();
+        options.write(true).create_new(true);
+        #[cfg(unix)]
+        options.mode(0o600);
+        options
+            .open(&temporary)?
+            .write_all(descriptor.to_json().as_bytes())
+    })()
+    .and_then(|()| std::fs::rename(&temporary, destination))
+    .err();
     if let Some(error) = file_error {
         let _ = std::fs::remove_file(temporary);
         if let Some(database_error) = database_error {
@@ -1099,6 +1163,8 @@ pub(crate) mod tests {
             manifest: None,
             image: None,
             timeout: None,
+            cpus: None,
+            mem: None,
             force: false,
             chat_session_id: None,
             invocation_context: None,
@@ -1118,9 +1184,11 @@ pub(crate) mod tests {
                     "lab".into(),
                     SshHostSettings {
                         container: Some("research".into()),
+                        remote_root: Some("/scratch/lab/orx".into()),
+                        keep_remote_runs: false,
                     },
                 ),
-                ("direct".into(), SshHostSettings { container: None }),
+                ("direct".into(), SshHostSettings::default()),
             ]),
         };
         let mut args = tinker_args();
@@ -1147,6 +1215,11 @@ pub(crate) mod tests {
             let (host, options) = crate::jobs::ssh::resolve_options(&args, &settings).unwrap();
             assert_eq!(host, expected_host);
             assert_eq!(options.container.as_deref(), expected_container);
+            assert_eq!(
+                options.remote_root.is_some(),
+                host == "lab",
+                "the saved root follows the host, not the container"
+            );
         }
         args.host = None;
         assert!(crate::jobs::ssh::resolve_options(&args, &SshSettings::default()).is_err());
@@ -1196,6 +1269,35 @@ pub(crate) mod tests {
         assert!(validate_run_args(&args).is_err());
         args.image = None;
         args.timeout = Some("1h".into());
+        assert!(validate_run_args(&args).is_err());
+    }
+
+    #[test]
+    fn slurm_resources_are_rejected_on_every_other_backend() {
+        let mut args = tinker_args();
+        for backend in crate::local::BACKENDS
+            .iter()
+            .filter(|backend| **backend != "slurm")
+        {
+            args.backend = Some(backend.to_string());
+            for (cpus, mem) in [(Some(8), None), (None, Some("64G"))] {
+                args.cpus = cpus;
+                args.mem = mem.map(str::to_string);
+                assert_eq!(
+                    validate_run_args(&args).unwrap_err().to_string(),
+                    "--cpus/--mem only apply with --backend slurm. Size other backends with --flavor.",
+                    "{backend}"
+                );
+            }
+        }
+        args.backend = Some("slurm".into());
+        args.cpus = Some(8);
+        args.mem = Some("64G".into());
+        assert!(validate_run_args(&args).is_ok());
+        args.mem = Some("64GB".into());
+        assert!(validate_run_args(&args).is_err());
+        args.mem = None;
+        args.cpus = Some(0);
         assert!(validate_run_args(&args).is_err());
     }
 

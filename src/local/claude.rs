@@ -34,7 +34,7 @@ use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::process::Stdio;
 use std::sync::atomic::{AtomicBool, AtomicI64, AtomicU64, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, Weak};
 use std::time::{Duration, Instant};
 
 use serde_json::{json, Value};
@@ -135,9 +135,7 @@ pub struct SpawnConfig {
     pub effort: Option<String>,
     pub model: Option<String>,
     pub native_store: NativeStore,
-    /// Whether the mcp-gate permission bridge was actually wired at spawn (plan
-    /// mode + a bound `orx up` port + a successful config write). A plan turn
-    /// that wanted the bridge but got `false` respawns next turn to try again.
+    /// Whether the child has its input bridge; failed setup is retried on the next turn.
     pub bridge_active: bool,
 }
 
@@ -221,6 +219,7 @@ pub fn classify_line(line: &str) -> ClaudeLine {
 
 /// A live connection to one session's resident `claude` child.
 pub struct ClaudeClient {
+    chat: Weak<crate::local::chat::ChatHost>,
     session_id: String,
     child: Mutex<Child>,
     #[cfg(unix)]
@@ -302,18 +301,50 @@ impl ClaudeClient {
     /// the native command rather than reseeding a new session.
     pub(crate) async fn compact(
         self: &Arc<Self>,
-        reaper_notify: Arc<Notify>,
-        spawning: tokio::sync::MutexGuard<'_, ()>,
+        mut rx: mpsc::UnboundedReceiver<TurnEvent>,
         timeout: Duration,
     ) -> Result<()> {
-        let (tx, mut rx) = mpsc::unbounded_channel();
-        let _route = self.register_turn(tx, reaper_notify);
-        drop(spawning);
         self.send_user_message("/compact").await?;
         let settle = async {
+            let mut saw_user_echo = false;
+            let mut saw_compacting = false;
+            let mut compact_outcome: Option<Result<(), String>> = None;
             while let Some(event) = rx.recv().await {
                 match event {
                     TurnEvent::Line(line) => {
+                        let system = line.get("type").and_then(Value::as_str) == Some("system");
+                        let subtype = line.get("subtype").and_then(Value::as_str);
+                        // Native /compact emits status events instead of a user-message echo.
+                        if system
+                            && subtype == Some("status")
+                            && line.get("status").and_then(Value::as_str) == Some("compacting")
+                        {
+                            saw_compacting = true;
+                        }
+                        if !saw_compacting
+                            && !crate::local::harness::claude::belongs_to_current_turn(
+                                &line,
+                                "/compact",
+                                &mut saw_user_echo,
+                            )
+                        {
+                            continue;
+                        }
+                        if system && subtype == Some("status") {
+                            match line.get("compact_result").and_then(Value::as_str) {
+                                Some("success") => compact_outcome = Some(Ok(())),
+                                Some("failed") => {
+                                    compact_outcome = Some(Err(line
+                                        .get("compact_error")
+                                        .and_then(Value::as_str)
+                                        .unwrap_or("compaction failed")
+                                        .to_string()))
+                                }
+                                _ => {}
+                            }
+                        } else if system && subtype == Some("compact_boundary") {
+                            compact_outcome.get_or_insert(Ok(()));
+                        }
                         if line.get("type").and_then(Value::as_str) != Some("result") {
                             continue;
                         }
@@ -331,7 +362,16 @@ impl ClaudeClient {
                                 subtype.unwrap_or("no result status")
                             ))
                         } else {
-                            Ok(())
+                            // Local commands can return result.success even when compact_result failed.
+                            compact_outcome
+                                .unwrap_or_else(|| {
+                                    if saw_user_echo {
+                                        Ok(())
+                                    } else {
+                                        Err("Claude did not confirm compaction".to_string())
+                                    }
+                                })
+                                .map_err(|error| anyhow!("claude /compact failed: {error}"))
                         };
                     }
                     TurnEvent::Closed => return Err(anyhow!("claude closed during /compact")),
@@ -435,6 +475,23 @@ impl Drop for TurnRoute {
     }
 }
 
+fn reported_permission_mode(event: &Value) -> Option<PermissionMode> {
+    if event.get("type").and_then(Value::as_str) != Some("system") {
+        return None;
+    }
+    match event.get("subtype").and_then(Value::as_str) {
+        Some("init" | "status") => match event.get("permissionMode").and_then(Value::as_str)? {
+            "default" | "manual" => Some(PermissionMode::Ask),
+            "auto" => Some(PermissionMode::Auto),
+            "acceptEdits" => Some(PermissionMode::AcceptEdits),
+            "plan" => Some(PermissionMode::Plan),
+            "bypassPermissions" => Some(PermissionMode::Bypass),
+            _ => None,
+        },
+        _ => None,
+    }
+}
+
 /// Reader task: pump child stdout, route each line. On EOF every pending control
 /// request fails and the live turn (if any) gets [`TurnEvent::Closed`].
 async fn read_loop(client: Arc<ClaudeClient>, stdout: tokio::process::ChildStdout) {
@@ -447,11 +504,44 @@ async fn read_loop(client: Arc<ClaudeClient>, stdout: tokio::process::ChildStdou
                 }
             }
             ClaudeLine::Event(value) => {
+                if let Some(mode) = reported_permission_mode(&value) {
+                    let previous = {
+                        let mut config = client.config.lock().unwrap();
+                        let previous = config.permission_mode.unwrap_or(PermissionMode::Auto);
+                        config.permission_mode = Some(mode);
+                        previous
+                    };
+                    if previous != mode && !client.terminated.load(Ordering::Acquire) {
+                        if let Some(chat) = client.chat.upgrade() {
+                            if let Err(error) = chat
+                                .sync_claude_permission_mode(&client.session_id, previous, mode)
+                                .await
+                            {
+                                eprintln!(
+                                    "orx up: could not synchronize Claude permission mode: {error}"
+                                );
+                            }
+                        }
+                    }
+                }
                 // Route to the live turn; dropped if none is listening (a
-                // between-turns line, or an aborted turn's tail).
+                // between-turns line, or an aborted turn's tail) once its tool identities are recorded.
                 let turn = client.turn.lock().unwrap();
                 if let Some(tx) = turn.sender.as_ref() {
                     let _ = tx.send(TurnEvent::Line(value));
+                } else if value.get("type").and_then(Value::as_str) == Some("assistant") {
+                    drop(turn);
+                    if let Some(message) = value.get("message").cloned() {
+                        let session_id = client.session_id.clone();
+                        // Off the reader so a busy store never stalls Claude's stdout.
+                        tokio::task::spawn_blocking(move || {
+                            crate::local::chat::record_native_invocations(
+                                "claude-code",
+                                &session_id,
+                                &message,
+                            )
+                        });
+                    }
                 }
             }
             ClaudeLine::Junk => {}
@@ -558,11 +648,7 @@ async fn spawn_client(spec: &SpawnSpec, auth_generation: u64) -> Result<Arc<Clau
         cmd.args(["--resume", native_id]);
     }
 
-    // Plan-mode extras, iff the child was spawned in Plan. `bridge_active` on the
-    // config records what we ACHIEVED, not what we wanted: forced false here, set
-    // true only on a successful bridge write. A failed write thus leaves it false
-    // — the next plan turn's wanted-true mismatch respawns to retry, degrading to
-    // today's no-bridge plan gating, never worse.
+    // Record successful bridge setup so reconciliation retries failures next turn.
     let mut config = spec.config.clone();
     config.bridge_active = false;
     let settings = write_settings(
@@ -644,6 +730,7 @@ async fn spawn_client(spec: &SpawnSpec, auth_generation: u64) -> Result<Arc<Clau
 
     let started_at = Instant::now();
     let client = Arc::new(ClaudeClient {
+        chat: Arc::downgrade(&spec.chat),
         session_id: spec.session_id.clone(),
         child: Mutex::new(child),
         #[cfg(unix)]
@@ -1199,50 +1286,28 @@ impl ClaudeHost {
         }
     }
 
-    /// Compact a session through Claude's own `/compact` on the child that is
-    /// already running for it. `false` when none is — nothing to compact.
+    /// Resume or reuse the session's child before invoking its native compaction.
     pub(crate) async fn compact_session(
-        &self,
-        session_id: &str,
+        self: &Arc<Self>,
+        spec: SpawnSpec,
         timeout: Duration,
-    ) -> Result<bool> {
-        // Held until the compact turn registers, so the reaper cannot release the child first.
-        let session_lock = {
-            let mut locks = self.spawn_locks.lock().await;
-            locks
-                .entry(session_id.to_string())
-                .or_insert_with(|| Arc::new(Mutex::new(())))
-                .clone()
-        };
-        let spawning = session_lock.lock().await;
-        let Some(client) = self.client_for(session_id).await else {
-            return Ok(false);
-        };
-        if let Err(error) = client
-            .compact(self.reaper_notify.clone(), spawning, timeout)
-            .await
-        {
+    ) -> Result<()> {
+        let session_id = spec.session_id.clone();
+        let (tx, rx) = mpsc::unbounded_channel();
+        let result = tokio::time::timeout(timeout, async {
+            let route = self.acquire_turn(spec, tx).await?;
+            route.client().compact(rx, timeout).await
+        })
+        .await
+        .map_err(|_| anyhow!("Claude Code compaction exceeded {}s", timeout.as_secs()))
+        .and_then(|result| result);
+        if let Err(error) = result {
             // The child is still mid-`/compact`; its trailing `result` would
             // otherwise land in whatever turn registers next.
-            self.kill_session(session_id).await;
+            self.kill_session(&session_id).await;
             return Err(error);
         }
-        Ok(true)
-    }
-
-    /// The live child for a session, if one is running. `/compact` uses it to
-    /// reach Claude's own compaction without spawning a second child.
-    async fn client_for(&self, session_id: &str) -> Option<Arc<ClaudeClient>> {
-        let mut guard = self.inner.lock().await;
-        let client = guard.get(session_id)?;
-        if !client.terminated.load(Ordering::Acquire)
-            && matches!(client.child.lock().await.try_wait(), Ok(None))
-        {
-            Some(client.clone())
-        } else {
-            guard.remove(session_id);
-            None
-        }
+        Ok(())
     }
 
     /// Permanently remove one deleted session's child and reconciliation state.
@@ -1304,6 +1369,7 @@ mod tests {
         let process_group_id = child.id().unwrap();
         let stdin = child.stdin.take().unwrap();
         Arc::new(ClaudeClient {
+            chat: Weak::new(),
             session_id: session_id.to_string(),
             child: Mutex::new(child),
             process_group_id,
@@ -1346,6 +1412,187 @@ mod tests {
             native_store: NativeStore::Isolated,
             bridge_active: bridge,
         }
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn compaction_waits_for_its_echo_before_accepting_a_result() {
+        for failed in [false, true] {
+            let now = Instant::now();
+            let client = test_client("compact", now, now, "sleep 600").await;
+            let (tx, rx) = mpsc::unbounded_channel();
+            for line in [
+                json!({"type": "result", "subtype": "success"}),
+                json!({"type": "user", "message": {"content": "previous message"}}),
+                json!({"type": "result", "subtype": "error_during_execution", "is_error": true}),
+                json!({"type": "user", "message": {"content": "/compact"}}),
+                json!({"type": "result", "subtype": "success", "is_error": failed}),
+            ] {
+                tx.send(TurnEvent::Line(line)).unwrap();
+            }
+            let result = client.compact(rx, Duration::from_secs(1)).await;
+            terminate_client(&client).await;
+            assert_eq!(result.is_err(), failed);
+        }
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn compaction_uses_native_status_outcome_without_a_user_echo() {
+        for outcome in ["success", "failed"] {
+            let now = Instant::now();
+            let client = test_client("compact", now, now, "sleep 600").await;
+            let (tx, rx) = mpsc::unbounded_channel();
+            for line in [
+                json!({"type": "system", "subtype": "compact_boundary"}),
+                json!({"type": "result", "subtype": "success", "is_error": false}),
+                json!({"type": "system", "subtype": "status", "status": "compacting"}),
+                json!({"type": "system", "subtype": "status", "status": null,
+                    "compact_result": outcome, "compact_error": "Not enough messages to compact."}),
+                json!({"type": "system", "subtype": "init"}),
+                json!({"type": "result", "subtype": "success", "is_error": false, "local_command": "compact"}),
+            ] {
+                tx.send(TurnEvent::Line(line)).unwrap();
+            }
+            let result = client.compact(rx, Duration::from_secs(1)).await;
+            terminate_client(&client).await;
+            if outcome == "failed" {
+                assert_eq!(
+                    result.unwrap_err().to_string(),
+                    "claude /compact failed: Not enough messages to compact."
+                );
+            } else {
+                assert!(result.is_ok());
+            }
+        }
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn compaction_requires_confirmation_after_its_live_status() {
+        for boundary in [false, true] {
+            let now = Instant::now();
+            let client = test_client("compact", now, now, "sleep 600").await;
+            let (tx, rx) = mpsc::unbounded_channel();
+            tx.send(TurnEvent::Line(
+                json!({"type": "system", "subtype": "status", "status": "compacting"}),
+            ))
+            .unwrap();
+            if boundary {
+                tx.send(TurnEvent::Line(
+                    json!({"type": "system", "subtype": "compact_boundary"}),
+                ))
+                .unwrap();
+            }
+            tx.send(TurnEvent::Line(
+                json!({"type": "result", "subtype": "success", "is_error": false}),
+            ))
+            .unwrap();
+            let result = client.compact(rx, Duration::from_secs(1)).await;
+            terminate_client(&client).await;
+            assert_eq!(result.is_ok(), boundary);
+        }
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn compaction_does_not_succeed_from_replayed_results_without_its_echo() {
+        let now = Instant::now();
+        let client = test_client("compact", now, now, "sleep 600").await;
+        let (tx, rx) = mpsc::unbounded_channel();
+        tx.send(TurnEvent::Line(
+            json!({"type": "result", "subtype": "success"}),
+        ))
+        .unwrap();
+        let result = client.compact(rx, Duration::from_millis(10)).await;
+        terminate_client(&client).await;
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("did not finish /compact"));
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn compaction_reports_a_closed_child_after_its_echo() {
+        let now = Instant::now();
+        let client = test_client("compact", now, now, "sleep 600").await;
+        let (tx, rx) = mpsc::unbounded_channel();
+        tx.send(TurnEvent::Line(
+            json!({"type": "user", "message": {"content": [{"type": "text", "text": "/compact"}]}}),
+        ))
+        .unwrap();
+        tx.send(TurnEvent::Closed).unwrap();
+        let result = client.compact(rx, Duration::from_secs(1)).await;
+        terminate_client(&client).await;
+        assert_eq!(
+            result.unwrap_err().to_string(),
+            "claude closed during /compact"
+        );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn compaction_timeout_reaps_the_acquired_worker_and_releases_its_route() {
+        let now = Instant::now();
+        let host = Arc::new(ClaudeHost::new());
+        host.auth.write().unwrap().state = HarnessAuthState::Ready;
+        let client = test_client("compact", now, now, "sleep 600").await;
+        install_test_client(&host, client.clone()).await;
+        let chat = Arc::new(crate::local::chat::ChatHost::new(
+            Arc::new(crate::local::opencode::AgentHost::new(None)),
+            Arc::new(crate::local::codex::CodexHost::new()),
+            host.clone(),
+        ));
+        let result = host
+            .compact_session(
+                SpawnSpec {
+                    chat,
+                    session_id: "compact".into(),
+                    repo: PathBuf::new(),
+                    playbook: PathBuf::new(),
+                    resume: Some("saved-native-id".into()),
+                    config: client.config(),
+                },
+                Duration::from_millis(10),
+            )
+            .await;
+        assert!(result.is_err());
+        assert!(client.terminated.load(Ordering::Acquire));
+        assert!(!host.inner.lock().await.contains_key("compact"));
+        assert!(client.turn.lock().unwrap().sender.is_none());
+    }
+
+    #[test]
+    fn native_permission_status_reports_fallback_and_ignores_unrelated_events() {
+        assert_eq!(
+            reported_permission_mode(
+                &json!({"type":"system","subtype":"status","permissionMode":"default"})
+            ),
+            Some(PermissionMode::Ask)
+        );
+        assert_eq!(
+            reported_permission_mode(
+                &json!({"type":"system","subtype":"init","permissionMode":"auto"})
+            ),
+            Some(PermissionMode::Auto)
+        );
+        assert_eq!(
+            reported_permission_mode(
+                &json!({"type":"system","subtype":"status","status":"compacting"})
+            ),
+            None
+        );
+        assert_eq!(
+            reported_permission_mode(&json!({"type":"assistant","permissionMode":"default"})),
+            None
+        );
+        assert_eq!(
+            reported_permission_mode(
+                &json!({"type":"system","subtype":"status","permissionMode":"unknown"})
+            ),
+            None
+        );
     }
 
     #[test]

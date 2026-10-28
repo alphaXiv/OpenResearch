@@ -10,11 +10,18 @@ orx compute show ssh --json
 orx compute configure ssh --default-host lab
 orx compute configure ssh --host lab --container research
 orx compute configure ssh --host lab --clear container
+orx compute configure ssh --host lab --remote-root /data/me/orx  # runs + source cache; default ~/.orx
+orx compute configure ssh --host lab --clear remote-root
+orx compute configure ssh --host lab --keep-remote-runs true   # keep every finished run dir on the host
 orx compute test ssh --host lab                     # tests saved container too
 orx compute test ssh --host lab --no-container      # explicitly tests host
 orx compute connect ssh --host lab                 # interactive login/MFA
 orx compute configure slurm --host cluster --partition gpu --account lab --time-limit 24h
+orx compute configure slurm --cpus-per-task 8 --mem 64G   # defaults; exp run --cpus/--mem override
+orx compute configure slurm --clear cpus-per-task --clear mem
 orx compute configure slurm --clear time-limit     # cluster chooses
+orx compute configure slurm --remote-root /scratch/me/orx   # shared FS; --clear remote-root for ~/.orx
+orx compute configure slurm --keep-remote-runs true          # keep every finished run dir on the cluster
 orx compute connect slurm --host cluster
 orx compute configure k8s --context research --namespace experiments
 orx compute configure ray --address http://127.0.0.1:8265
@@ -30,20 +37,24 @@ exits nonzero when prerequisites fail. Its checks do not launch training jobs.
 Modal checks the local SDK and credential presence; it does not verify token
 validity with Modal.
 
-HF, Tinker and Modal credentials can come from `configure <backend>
---credentials-file -` (stdin), or a private JSON file. Shapes: HF `{"token":"…"}`,
+HF, Tinker and Modal credentials can come from
+`orx compute configure modal --credentials-file -` (stdin; likewise `hf` and
+`tinker`), or a private JSON file. Shapes: HF `{"token":"…"}`,
 Tinker `{"key":"…"}`, Modal `{"tokenId":"…","tokenSecret":"…"}`. Never put
 credentials in command arguments, custom instructions, or committed files.
-`connect hf` uses `hf auth login`; `connect modal` and `connect tinker` prompt
-without echoing credentials. `connect openresearch` reuses login and SSH-key
-registration. Interactive login requires a terminal and does not support JSON.
-`configure <backend> --clear credentials` removes ORX-saved credentials; process
-environment and provider-owned credential stores can still take precedence.
+`orx compute connect hf` uses `hf auth login`; `orx compute connect modal` and
+`orx compute connect tinker` prompt without echoing credentials.
+`orx compute connect openresearch` reuses login and SSH-key registration.
+Interactive login requires a terminal and does not support JSON.
+`orx compute configure modal --clear credentials` (likewise hf and tinker) removes
+ORX-saved credentials; process environment and provider-owned credential stores
+can still take precedence.
 
-To change SSH aliases, read `ssh-config show --json` and retain its exact content
-in a private file. Write the modified config using `ssh-config set --file
-<new-file> --previous-file <original-file>`. A stale original is rejected; reread
-and reconcile instead of overwriting someone else's edit.
+To change SSH aliases, read `orx compute ssh-config show --json` and retain its
+exact content in a private file. Write the modified config using
+`orx compute ssh-config set --file <new-file> --previous-file <original-file>`.
+A stale original is rejected; reread and reconcile instead of overwriting
+someone else's edit.
 
 ## Maintain the custom recipe
 

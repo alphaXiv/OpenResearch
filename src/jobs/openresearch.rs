@@ -27,7 +27,7 @@ pub fn run_dir(run_id: &str) -> String {
 
 /// Parse `--flavor` into a `POST /sandboxes` target: `<gpu_id>[:count]`
 /// (e.g. `h100_sxm:2`) or a CPU flavor `cpu…[:vcpus]` (e.g. `cpu5c:8`).
-/// Ids are validated server-side against the live catalog (400 on unknown),
+/// Case-insensitive: the API's GPU ids are uppercase and its CPU flavors lowercase.
 /// See `orx compute` for the provider catalog.
 pub fn parse_flavor(flavor: &str, disk_gb: i64, provider: Option<String>) -> Result<SandboxTarget> {
     let flavor = flavor.trim();
@@ -49,14 +49,14 @@ pub fn parse_flavor(flavor: &str, disk_gb: i64, provider: Option<String>) -> Res
              like cpu5c[:vcpus] — see `orx compute`."
         ));
     }
-    if base.starts_with("cpu") {
+    if base.to_ascii_lowercase().starts_with("cpu") {
         Ok(SandboxTarget::NewCpu {
-            cpu_flavor: base.to_string(),
+            cpu_flavor: base.to_ascii_lowercase(),
             vcpu_count: count.unwrap_or(8),
         })
     } else {
         Ok(SandboxTarget::New {
-            gpu: base.to_string(),
+            gpu: base.to_ascii_uppercase(),
             gpu_count: count.unwrap_or(1),
             disk_gb,
             provider,
@@ -184,12 +184,18 @@ pub async fn launched(target: &super::ssh::SshTarget, run_id: &str) -> Result<bo
         target,
         &format!(
             "d=\"$HOME/{dir}\"; \
-             if [ -e \"$d/pid\" ] || [ -e \"$d/exit_code\" ]; then echo STARTED; else echo FRESH; fi"
+             if [ -e \"$d/pid\" ] || [ -e \"$d/exit_code\" ] || [ -e \"$d/launch_started\" ]; then echo STARTED; else echo FRESH; fi"
         ),
         None,
     )
     .await?;
     Ok(out.contains("STARTED"))
+}
+
+/// Whether the API positively reports the box as deleted; an unreachable API is not proof.
+pub async fn box_deleted(creds: &Credentials, sandbox_id: &str) -> bool {
+    let lookup = tokio::time::timeout(Duration::from_secs(15), get_sandbox(creds, sandbox_id));
+    matches!(lookup.await, Ok(Err(err)) if is_not_found_error(&err.to_string()))
 }
 
 /// Delete the box, retrying transient failures. A 404 is success — the box is
@@ -223,13 +229,24 @@ mod tests {
                 disk_gb,
                 provider,
             } => {
-                assert_eq!(gpu, "h100_sxm");
+                assert_eq!(gpu, "H100_SXM");
                 assert_eq!(gpu_count, 1);
                 assert_eq!(disk_gb, 100);
                 assert!(provider.is_none());
             }
             other => panic!("wrong target: {other:?}"),
         }
+    }
+
+    #[test]
+    fn parse_flavor_sends_uppercase_gpu_id() {
+        let body = crate::client::CreateSandboxBody {
+            organization_id: "org".into(),
+            rental_lease: None,
+            target: parse_flavor("rtx_3090", 100, None).unwrap(),
+        };
+        let body = serde_json::to_value(&body).unwrap();
+        assert_eq!(body["target"]["gpu"], "RTX_3090");
     }
 
     #[test]
@@ -241,7 +258,7 @@ mod tests {
                 disk_gb,
                 provider,
             } => {
-                assert_eq!(gpu, "h100_sxm");
+                assert_eq!(gpu, "H100_SXM");
                 assert_eq!(gpu_count, 2);
                 assert_eq!(disk_gb, 250);
                 assert_eq!(provider.as_deref(), Some("runpod"));
@@ -304,6 +321,34 @@ mod tests {
     #[test]
     fn provisioning_deadline_is_five_minutes() {
         assert_eq!(PROVISION_DEADLINE, Duration::from_secs(300));
+    }
+
+    #[tokio::test]
+    async fn only_a_404_reports_the_box_deleted() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let creds = Credentials {
+            api_url: format!("http://{}", listener.local_addr().unwrap()),
+            token: "token".into(),
+        };
+        let server = tokio::spawn(async move {
+            for status in ["404 Not Found", "503 Service Unavailable", "403 Forbidden"] {
+                let (mut stream, _) = listener.accept().await.unwrap();
+                let _ = stream.read(&mut [0u8; 4096]).await.unwrap();
+                let response =
+                    format!("HTTP/1.1 {status}\r\nContent-Length: 0\r\nConnection: close\r\n\r\n");
+                stream.write_all(response.as_bytes()).await.unwrap();
+            }
+        });
+        assert!(box_deleted(&creds, "sb").await);
+        assert!(!box_deleted(&creds, "sb").await);
+        assert!(!box_deleted(&creds, "sb").await);
+        server.await.unwrap();
+        let unreachable = Credentials {
+            api_url: "http://127.0.0.1:1".into(),
+            token: "token".into(),
+        };
+        assert!(!box_deleted(&unreachable, "sb").await);
     }
 
     #[test]

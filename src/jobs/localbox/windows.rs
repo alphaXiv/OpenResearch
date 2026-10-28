@@ -17,7 +17,7 @@ use windows_sys::Win32::System::JobObjects::{
 };
 use windows_sys::Win32::System::SystemServices::{JOB_OBJECT_QUERY, JOB_OBJECT_TERMINATE};
 use windows_sys::Win32::System::Threading::{
-    OpenThread, ResumeThread, CREATE_SUSPENDED, THREAD_SUSPEND_RESUME,
+    OpenThread, ResumeThread, CREATE_NO_WINDOW, CREATE_SUSPENDED, THREAD_SUSPEND_RESUME,
 };
 
 use crate::error::{anyhow, Result};
@@ -40,7 +40,9 @@ pub(super) fn spawn(command: &mut Command, dir: &Path) -> Result<Child> {
     };
     // SAFETY: both inputs remain live; the launcher inherits the handle to retain the name.
     let job = own(unsafe { CreateJobObjectW(&attributes, wide.as_ptr()) })?;
-    let mut child = command.creation_flags(CREATE_SUSPENDED).spawn()?;
+    let mut child = command
+        .creation_flags(CREATE_SUSPENDED | CREATE_NO_WINDOW)
+        .spawn()?;
     let setup = (|| -> Result<()> {
         // SAFETY: both handles are live; the suspended child cannot spawn outside the job.
         if unsafe { AssignProcessToJobObject(job.as_raw_handle(), child.as_raw_handle()) } == 0 {

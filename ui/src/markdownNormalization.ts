@@ -232,17 +232,23 @@ export function normalizeCurrencyDollars(
 
 function normalizeProse(text: string, options: NormalizationOptions): string {
   let normalizedMath = text
+    .replace(/\uE200cite\uE202([^\uE200\uE201]*)\uE201/g, (_, sources: string) =>
+      sources.split("\uE202")
+        .filter((source) => /^https?:\/\/[^\s<>]+$/i.test(source))
+        .map((source) => `<${source}>`)
+        .join(" "))
     .replace(/\\\[([\s\S]+?)\\\]/g, (_, inner: string) => `$$${inner}$$`)
     .replace(/\\\(([\s\S]+?)\\\)/g, (_, inner: string) => `$$${inner}$$`);
   if (options.predictMath) {
     normalizedMath = normalizedMath
+      .replace(/\uE200(?:c(?:i(?:t(?:e(?:\uE202[^\uE200\uE201]*)?)?)?)?)?$/, "")
       .replace(/\\\[([\s\S]*)$/, (_, inner: string) => `$$${inner}`)
       .replace(/\\\(([\s\S]*)$/, (_, inner: string) => `$$${inner}`);
   }
   return normalizeCurrencyDollars(normalizedMath, options);
 }
 
-/** Normalize math and legacy currency while leaving code and mention tags opaque. */
+/** Normalize citations, math, and legacy currency while leaving code and mention tags opaque. */
 export function normalizeMarkdownForRendering(
   text: string,
   options: NormalizationOptions = {},

@@ -14,6 +14,7 @@ export const STATUS_STYLES: Record<string, StatusStyle> = {
   starting: { tone: "warning", live: true },
   cancelling: { tone: "caution", live: true },
   cancelled: { tone: "caution", live: false },
+  lost: { tone: "neutral", live: false },
   editing: { tone: "accent", live: true },
   idle: { tone: "neutral", live: false },
 };
@@ -29,6 +30,7 @@ const STATUS_LABELS: Record<string, () => string> = {
   starting: m.status_starting,
   cancelling: m.status_cancelling,
   cancelled: m.status_cancelled,
+  lost: m.status_lost,
   editing: m.status_editing,
   idle: m.status_idle,
 };
@@ -41,9 +43,10 @@ export function statusLabel(s: string): string {
 
 export function StatusBadge({ status, label, className }: { status: string; label?: string; className?: string }) {
   const style = statusStyle(status);
+  const text = label ?? statusLabel(status);
   return (
     <StatusIndicator tone={style.tone} live={style.live} className={className}>
-      {label ?? statusLabel(status)}
+      <span className="truncate" title={text}>{text}</span>
     </StatusIndicator>
   );
 }

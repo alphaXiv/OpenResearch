@@ -1,6 +1,6 @@
 import { useQuery } from "@tanstack/react-query";
 
-import { getRuntimeQuery } from "./queries/settings";
+import { getRuntimeQuery, reportLocaleQuery } from "./queries/settings";
 import {
   activateWorkspace,
   workspaceScope,
@@ -30,13 +30,13 @@ import {
   type RuntimeInfo,
 } from "./api";
 import { ltr } from "./i18n";
-import { setLocale } from "./locale";
+import { setLocale, useLocale } from "./locale";
 import { m } from "./paraglide/messages.js";
 import { isLocale } from "./paraglide/runtime.js";
 import { setThemePreference } from "./theme";
 import { Button, Input, showAlert, Spinner } from "./components/ui";
 import { RemoteStopDialog } from "./components/RemoteStopDialog";
-import { SshConnectTerminal } from "./components/SshConnectTerminal";
+import { CommandTerminal, SshConnectTerminal, isComplete } from "./components/SshConnectTerminal";
 import { resetGlobalWorkspace } from "./workspacePersistence";
 import { clearProjectWorkspaceCache } from "./useProjectWorkspace";
 
@@ -116,6 +116,8 @@ function RemoteSetup({
   const [paths, setPaths] = useState<RemoteInstallPaths | null>(session.installPaths);
   const [busy, setBusy] = useState(false);
   const [stopPreview, setStopPreview] = useState<RemoteStopPreview | null>(null);
+  const [repairTerminalOpen, setRepairTerminalOpen] = useState(false);
+  const [copied, setCopied] = useState(false);
 
   useEffect(() => setPaths(session.installPaths), [
     session.installPaths?.binary,
@@ -204,6 +206,7 @@ function RemoteSetup({
     needsInteractiveSsh(session.error) &&
     retriedInteractiveError !== session.error &&
     !session.canStartNewHost;
+  const showRepair = session.status === "disconnected" && session.repairCommand !== null;
   const title = needsInstall
     ? m.remote_install_title()
     : needsUpdate
@@ -247,6 +250,58 @@ function RemoteSetup({
                 {title}
               </h1>
               {!showSshTerminal && <p className="mt-2 mb-0 text-base text-text">{description}</p>}
+
+              {showRepair && (
+                <div className="mt-4">
+                  <code className="block break-all rounded-md border border-border bg-surface px-3 py-2 font-mono text-xs text-text" dir="ltr">
+                    {session.repairCommand}
+                  </code>
+                  <div className="mt-2 flex items-center gap-2">
+                    <Button
+                      variant="primary"
+                      size="small"
+                      onClick={() => setRepairTerminalOpen(true)}
+                    >
+                      {m.remote_repair_run()}
+                    </Button>
+                    <Button
+                      variant="ghost"
+                      size="small"
+                      onClick={async () => {
+                        try {
+                          await navigator.clipboard.writeText(session.repairCommand ?? "");
+                          setCopied(true);
+                          window.setTimeout(() => setCopied(false), 1500);
+                        } catch {
+                          setCopied(false);
+                          showAlert(m.file_tree_clipboard_unavailable(), "error");
+                        }
+                      }}
+                    >
+                      {copied ? m.remote_repair_copied() : m.remote_repair_copy()}
+                    </Button>
+                  </div>
+                  {repairTerminalOpen && (
+                    <CommandTerminal
+                      path="/_orx/ssh/repair"
+                      label={m.remote_repair_terminal()}
+                      command={session.repairCommand ?? undefined}
+                      frame="bare"
+                      palette="app"
+                      onComplete={(value) => {
+                        if (!isComplete(value)) return false;
+                        setRepairTerminalOpen(false);
+                        void reconnect(true);
+                        return true;
+                      }}
+                      onError={(error) => {
+                        setRepairTerminalOpen(false);
+                        showAlert(error, "error");
+                      }}
+                    />
+                  )}
+                </div>
+              )}
             </div>
           </div>
 
@@ -384,6 +439,7 @@ function RemoteOverlay({ children }: { children: ReactNode }) {
 }
 
 export function RuntimeRoot() {
+  const locale = useLocale();
   useSyncExternalStore(subscribeWorkspace, getWorkspaceGeneration);
   useEffect(() => subscribeWorkspace(() => {
     resetGlobalWorkspace();
@@ -403,6 +459,11 @@ export function RuntimeRoot() {
     enabled: !launchPlaceholder,
     refetchInterval: (query) => query.state.status === "error" || query.state.data?.kind === "ssh" ? 2_000 : false,
     refetchIntervalInBackground: true,
+  });
+  useQuery({
+    ...reportLocaleQuery(locale),
+    enabled: !launchPlaceholder && (runtime?.kind === "local" ||
+      (runtime?.kind === "ssh" && runtime.session.status === "connected")),
   });
   useEffect(() => {
     if (launchPlaceholder) return;

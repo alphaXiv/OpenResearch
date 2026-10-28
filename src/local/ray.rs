@@ -93,7 +93,7 @@ pub async fn submit_local_ray_with_source(
     // The job env: everything the user synced (API keys), plus the tokens the
     // run step expects. Ray renders runtime_env in its dashboard, but anyone
     // with dashboard access can submit jobs anyway — same trust boundary.
-    let mut env: HashMap<String, String> = crate::config::list_synced_env().into_iter().collect();
+    let mut env = crate::config::run_env(&run_id);
     if let Ok(hf_token) = huggingface::resolve_token() {
         env.entry("HF_TOKEN".to_string()).or_insert(hf_token);
     }
@@ -126,6 +126,7 @@ pub async fn submit_local_ray_with_source(
         ssh_container: None,
         monitoring_error: None,
         cancellation_accepted: false,
+        rental_lease: None,
         kind: "ray_job".to_string(),
         namespace: Some(address.clone()),
         job_id: Some(submission_id.clone()),
@@ -139,9 +140,12 @@ pub async fn submit_local_ray_with_source(
         ssh_port: None,
         ssh_user: None,
         timeout_secs: None,
+        cpus_per_task: None,
+        mem: None,
         source_digest: None,
         source_path: None,
         source_size: None,
+        remote_root: None,
     };
     source.apply_to_descriptor(&mut descriptor);
     if let Err(error) = crate::compute::record_submission_handle(&run_id, &descriptor) {
@@ -164,6 +168,7 @@ pub async fn submit_local_ray_with_source(
         cancel_requested: store
             .get_run(&run_id)?
             .is_some_and(|run| run.cancel_requested),
+        cancel_reason: None,
         chat_session_id: args.launching_chat_session(),
     };
     store.upsert_run(&run)?;

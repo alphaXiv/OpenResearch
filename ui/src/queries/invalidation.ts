@@ -27,7 +27,7 @@ export function invalidateFamilies(families: readonly string[], scope = workspac
 
 const fileBodies = ["resolvedFile", "getProjectFile", "getArtifactFileText", "getArtifactFileMetadata"];
 export const artifactFamilies = ["getArtifacts", "getArtifactFileText", "getArtifactFileMetadata"];
-export const liveFamilies = ["listProjects", "listProjectActivity", "listSidebarChatSessions", "listExperiments", "listRuns", "listChatSessions", "getChatMessages", "getHarnesses", "getUpdateStatus", ...artifactFamilies, ...fileBodies, "getAbsoluteFile", "fileVersion", "getCodeTree", "getSessionWorktree", "getRunDiff", "getExperimentDiff"];
+export const liveFamilies = ["getSubagentTranscript", "listChatActiveRuns", "listProjects", "listProjectActivity", "listSidebarChatSessions", "listExperiments", "listRuns", "listChatSessions", "getChatMessages", "getHarnesses", "getUpdateStatus", ...artifactFamilies, ...fileBodies, "getAbsoluteFile", "fileVersion", "getCodeTree", "getSessionWorktree", "getRunDiff", "getExperimentDiff"];
 
 export function invalidateProjectFiles(projectId: string, scope = workspaceScope(), cancelReads = false) {
   const sessions = queryClient.getQueryData<ChatSession[]>([...scope, "listChatSessions", projectId]) ?? [];
@@ -48,7 +48,7 @@ export function removeSession(sessionId: string) {
   deletedSessionIds.add(sessionId);
   markLiveUpdate(queryClient, [...scope, "listChatSessions"], sessionId);
   queryClient.setQueriesData<ChatSession[]>({ queryKey: [...scope, "listChatSessions"] }, (rows) => rows?.filter((row) => row.id !== sessionId));
-  for (const family of ["getChatMessages", "getSessionWorktree"]) void cancelAndRemove({ queryKey: [...scope, family, sessionId] });
+  for (const family of ["getChatMessages", "getSessionWorktree", "getSessionExperiments"]) void cancelAndRemove({ queryKey: [...scope, family, sessionId] });
 }
 
 export function removeProject(projectId: string) {
@@ -59,13 +59,13 @@ export function removeProject(projectId: string) {
 }
 
 const settingsFamilies: Record<string, readonly string[]> = {
-  hf: ["getHfSettings", "getComputeSettings", "getEnvVars"],
+  hf: ["getHfSettings", "getComputeSettings", "getEnvVars", "getTrackioRuns"],
   tinker: ["getTinkerSettings", "getComputeSettings", "getEnvVars"],
   k8s: ["getK8sSettings", "getComputeSettings"],
   modal: ["getModalSettings", "getComputeSettings", "getEnvVars"],
   slurm: ["getSlurmSettings", "getComputeSettings"],
   ray: ["getRaySettings", "getComputeSettings"],
-  env: ["getEnvVars", "getHfSettings", "getTinkerSettings", "getModalSettings", "getSlurmSettings", "getRaySettings", "getK8sSettings", "getOpenResearchSettings", "getComputeSettings", "getHarnesses"],
+  env: ["getEnvVars", "getHfSettings", "getTinkerSettings", "getModalSettings", "getSlurmSettings", "getRaySettings", "getK8sSettings", "getOpenResearchSettings", "getComputeSettings", "getHarnesses", "getTrackioRuns"],
   "data-dir": ["getDataDir"],
   ssh: ["getSshSettings", "getSshConfig", "getSshMasterStatus", "getComputeSettings"],
   compute: ["getComputeSettings"],
@@ -80,6 +80,7 @@ export function invalidateWrite(url: string, scope: ReturnType<typeof workspaceS
   if (!isCurrentScope(scope)) return;
   const invalidate = (families: readonly string[], target = scope, predicate?: QueryFilters["predicate"]) => invalidateFamilies(families, target, predicate, true);
   const path = url.split("?")[0];
+  if (/^\/api\/(experiments|runs)\//.test(path) || /^\/api\/projects\/[^/]+$/.test(path)) invalidate(["getSessionExperiments"], scope);
   if (/\/(ui-state|open|reveal|prewarm|validate|preflight)$/.test(path)) return;
   const setting = /^\/api\/settings\/([^/]+)/.exec(path)?.[1];
   if (setting) { invalidate(settingsFamilies[setting] ?? [], scope); return; }

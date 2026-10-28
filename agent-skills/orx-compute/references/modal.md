@@ -19,7 +19,8 @@ orx exp run <expId> --backend modal --flavor cpu --image python:3.12
   include `t4`, `l4`, `a10g`, `a100`, `a100-80gb`, `l40s`, `h100`, and `h200`;
   append `:N` for multiple GPUs. CPU values are `cpu` and `cpu-large`.
 - Timeout defaults to 4 hours and covers the whole Sandbox.
-- `--image` overrides the default CUDA PyTorch or CPU Python image.
+- `--image` overrides the default CUDA PyTorch or CPU Python image. `orx`
+  adds `uv` to every image's PATH; an image's own `uv` on its PATH takes precedence.
 - `orx` copies the committed snapshot into the Sandbox; Modal never needs
   repository access.
 - A detached `orx supervise` process records provider status and logs; do not

@@ -137,6 +137,27 @@ pub enum SandboxTarget {
 pub struct CreateSandboxBody {
     pub organization_id: String,
     pub target: SandboxTarget,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub rental_lease: Option<CreateRentalLease>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CreateRentalLease {
+    pub version: u8,
+    pub max_active_seconds: u64,
+}
+#[derive(Clone, Deserialize)]
+pub struct RentalLeaseCapability {
+    pub version: u8,
+    pub token: String,
+}
+impl std::fmt::Debug for RentalLeaseCapability {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("RentalLeaseCapability")
+            .field("version", &self.version)
+            .finish_non_exhaustive()
+    }
 }
 
 /// A sandbox as returned by `POST /sandboxes`. Mirrors the API's `zSandbox`;
@@ -172,6 +193,8 @@ pub struct Sandbox {
 #[derive(Debug, Clone, Deserialize)]
 pub struct SandboxEnvelope {
     pub sandbox: Sandbox,
+    #[serde(default, rename = "rentalLease")]
+    pub rental_lease: Option<RentalLeaseCapability>,
 }
 
 /// `GET /sandboxes` — each row is a `Sandbox` (the extra `connections` the
@@ -232,7 +255,7 @@ fn transport_error(base: &str, err: reqwest::Error) -> crate::error::Error {
 
 fn http() -> &'static Client {
     static CLIENT: OnceLock<Client> = OnceLock::new();
-    CLIENT.get_or_init(Client::new)
+    CLIENT.get_or_init(|| crate::net::remote_client().build().expect("http client"))
 }
 
 /// Sends a request and returns the response after applying the shared error
@@ -592,10 +615,11 @@ pub async fn discover_papers_by_embedding(
 }
 
 /// `2401.12345v2` → `2401.12345`; alphaXiv lookups want the versionless id.
+/// Like alphaXiv, a `v` after a dash is part of the name: `2610.deepseek-v4` stays.
 pub(crate) fn versionless_id(paper_id: &str) -> &str {
     paper_id
         .rfind('v')
-        .filter(|&i| i > 0 && !paper_id[i + 1..].is_empty())
+        .filter(|&i| i > 0 && paper_id.as_bytes()[i - 1] != b'-' && !paper_id[i + 1..].is_empty())
         .filter(|&i| paper_id[i + 1..].chars().all(|c| c.is_ascii_digit()))
         .map_or(paper_id, |i| &paper_id[..i])
 }
@@ -649,7 +673,7 @@ pub struct ResolvedPaper {
     pub repo_stars: Option<i64>,
 }
 
-/// Resolve an arXiv id to title + linked GitHub repo. `/papers/v3/{id}` scrapes
+/// Resolve an arXiv or alphaXiv paper id to title + linked GitHub repo. `/papers/v3/{id}` scrapes
 /// arXiv on a miss, so brand-new papers resolve too (their repo links may lag).
 /// A missing or unparseable implementations answer just means no repo; a rate limit or
 /// unreachable host fails the resolve rather than silently starting a blank project.
@@ -749,13 +773,41 @@ const MAX_PAPER_PDF_BYTES: u64 = 64 * 1024 * 1024;
 
 /// `export.arxiv.org` is the host arXiv asks automated clients to use. Old-style
 /// ids (`hep-th/9901001`) carry a slash, so each segment is encoded separately.
+/// alphaXiv-exclusive papers (`2610.some-slug`) have no arXiv copy; alphaXiv serves their PDF.
 fn paper_pdf_url(paper_id: &str) -> String {
-    let path = versionless_id(paper_id)
+    let id = versionless_id(paper_id);
+    let path = id
         .split('/')
         .map(|segment| urlencoding::encode(segment).into_owned())
         .collect::<Vec<_>>()
         .join("/");
-    format!("https://export.arxiv.org/pdf/{path}")
+    if is_arxiv_id(id) {
+        format!("https://export.arxiv.org/pdf/{path}")
+    } else {
+        format!("https://www.alphaxiv.org/abs/{path}.pdf")
+    }
+}
+
+/// `2401.12345` or old-style `hep-th/9901001`; anything else is an alphaXiv id.
+pub(crate) fn is_arxiv_id(id: &str) -> bool {
+    let digits = |s: &str| s.bytes().all(|b| b.is_ascii_digit());
+    id.contains('/')
+        || id.split_once('.').is_some_and(|(month, number)| {
+            month.len() == 4 && digits(month) && (4..=5).contains(&number.len()) && digits(number)
+        })
+}
+
+/// PDFs run to tens of MB, so the deadline is per read, not for the whole
+/// download: a slow link must still finish the paper (OR-468).
+fn paper_pdf_http() -> &'static Client {
+    static CLIENT: OnceLock<Client> = OnceLock::new();
+    CLIENT.get_or_init(|| {
+        crate::net::remote_client()
+            .connect_timeout(std::time::Duration::from_secs(20))
+            .read_timeout(std::time::Duration::from_secs(30))
+            .build()
+            .expect("http client")
+    })
 }
 
 /// Download a paper's PDF, for paper projects that start blank because the
@@ -767,20 +819,26 @@ pub async fn fetch_paper_pdf(paper_id: &str) -> Result<Vec<u8>> {
         .split('/')
         .any(|segment| segment == "." || segment == "..")
     {
-        return Err(anyhow!("{} is not an arXiv id", paper_id));
+        return Err(anyhow!("{} is not a paper id", paper_id));
     }
     let url = paper_pdf_url(paper_id);
+    let host = if is_arxiv_id(versionless_id(paper_id)) {
+        "arXiv"
+    } else {
+        "alphaXiv"
+    };
     let res = public_get(
-        || http().get(&url).timeout(std::time::Duration::from_secs(30)),
-        "arXiv",
-        |e| anyhow!("Could not reach arXiv at {}: {}", url, e),
+        || paper_pdf_http().get(&url),
+        host,
+        |e| anyhow!("Could not reach {} at {}: {}", host, url, e),
     )
     .await?;
     let status = res.status();
     if !status.is_success() {
         let reason = status.canonical_reason().unwrap_or("");
         return Err(anyhow!(
-            "arXiv PDF download failed ({} {})",
+            "{} PDF download failed ({} {})",
+            host,
             status.as_u16(),
             reason
         ));
@@ -800,7 +858,26 @@ pub async fn fetch_paper_pdf(paper_id: &str) -> Result<Vec<u8>> {
     {
         return Err(anyhow!("{} is too large to download", url));
     }
-    Ok(res.bytes().await?.to_vec())
+    capped_body(res, MAX_PAPER_PDF_BYTES, &url).await
+}
+
+/// Reads the body while enforcing `max` live: a response that never declares
+/// its length can't grow past the cap unchecked. A bare "error decoding
+/// response body" says nothing about which download died; the error names the
+/// URL so the failure is actionable.
+async fn capped_body(res: reqwest::Response, max: u64, url: &str) -> Result<Vec<u8>> {
+    use futures::StreamExt;
+    let mut body = Vec::new();
+    let mut stream = res.bytes_stream();
+    while let Some(chunk) = stream.next().await {
+        let chunk =
+            chunk.map_err(|e| anyhow!("PDF download from {} was interrupted: {}", url, e))?;
+        body.extend_from_slice(&chunk);
+        if body.len() as u64 > max {
+            return Err(anyhow!("{} is too large to download", url));
+        }
+    }
+    Ok(body)
 }
 
 /// Look up a paper's linked GitHub repository (the most-starred repo associated
@@ -1811,6 +1888,22 @@ mod tests {
     }
 
     #[test]
+    fn alphaxiv_exclusive_pdfs_come_from_alphaxiv() {
+        assert_eq!(
+            super::paper_pdf_url("2610.learning-spectrum-matched-shellsort"),
+            "https://www.alphaxiv.org/abs/2610.learning-spectrum-matched-shellsort.pdf"
+        );
+        assert_eq!(
+            super::paper_pdf_url("2610.learning-spectrum-matched-shellsortv1"),
+            "https://www.alphaxiv.org/abs/2610.learning-spectrum-matched-shellsort.pdf"
+        );
+        assert_eq!(
+            super::paper_pdf_url("2610.deepseek-v4"),
+            "https://www.alphaxiv.org/abs/2610.deepseek-v4.pdf"
+        );
+    }
+
+    #[test]
     fn paper_discovery_url_encodes_strategy_and_controls() {
         let url = paper_discovery_url(
             "https://api.alphaxiv.org",
@@ -2058,6 +2151,7 @@ mod tests {
     fn serializes_create_sandbox_body_without_project() {
         let body = CreateSandboxBody {
             organization_id: "org_123".into(),
+            rental_lease: None,
             target: SandboxTarget::NewCpu {
                 cpu_flavor: "cpu5c".into(),
                 vcpu_count: 2,
@@ -2363,7 +2457,7 @@ mod tests {
     }
 
     async fn loopback_public_get(url: &str) -> anyhow::Result<reqwest::Response> {
-        let client = reqwest::Client::builder().no_proxy().build().unwrap();
+        let client = crate::net::loopback_client().build().unwrap();
         public_get(|| client.get(url), "Test", |e| anyhow::anyhow!("{e}")).await
     }
 
@@ -2406,8 +2500,7 @@ mod tests {
 
     #[tokio::test]
     async fn transport_error_includes_the_source_chain() {
-        let err = reqwest::Client::builder()
-            .no_proxy()
+        let err = crate::net::loopback_client()
             .build()
             .expect("build loopback client")
             .get("http://127.0.0.1:1/unreachable")
@@ -2432,5 +2525,111 @@ mod tests {
             rendered.contains(&deepest_cause),
             "deepest cause {deepest_cause:?} missing: {rendered}"
         );
+    }
+
+    /// Trickles `body` out in `parts` writes at `pace`; `Content-Length` is
+    /// declared only when asked, so tests can cover undeclared lengths too.
+    async fn serve_paced_body(
+        body: &'static [u8],
+        parts: usize,
+        pace: std::time::Duration,
+        declare_length: bool,
+    ) -> (String, tokio::task::JoinHandle<()>) {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("http://{}/", listener.local_addr().unwrap());
+        let server = tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.unwrap();
+            let mut buf = [0u8; 4096];
+            let _ = stream.read(&mut buf).await.unwrap();
+            let length = if declare_length {
+                format!("Content-Length: {}\r\n", body.len())
+            } else {
+                String::new()
+            };
+            stream
+                .write_all(
+                    format!(
+                        "HTTP/1.1 200 OK\r\nContent-Type: application/pdf\r\n{length}Connection: close\r\n\r\n"
+                    )
+                    .as_bytes(),
+                )
+                .await
+                .unwrap();
+            for part in body.chunks((body.len() / parts).max(1)) {
+                tokio::time::sleep(pace).await;
+                stream.write_all(part).await.unwrap();
+            }
+        });
+        (url, server)
+    }
+
+    /// Sends the response head then holds the body open forever.
+    async fn serve_stalled_body() -> (String, tokio::task::JoinHandle<()>) {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("http://{}/", listener.local_addr().unwrap());
+        let server = tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.unwrap();
+            let mut buf = [0u8; 4096];
+            let _ = stream.read(&mut buf).await.unwrap();
+            stream
+                .write_all(
+                    b"HTTP/1.1 200 OK\r\nContent-Type: application/pdf\r\nContent-Length: 10\r\n\r\n",
+                )
+                .await
+                .unwrap();
+            std::future::pending::<()>().await;
+        });
+        (url, server)
+    }
+
+    /// The PDF client's contract, shrunk to test scale: a read may take no
+    /// longer than 500ms, however long the whole download runs.
+    fn short_read_client() -> reqwest::Client {
+        crate::net::loopback_client()
+            .read_timeout(std::time::Duration::from_millis(500))
+            .build()
+            .unwrap()
+    }
+
+    #[tokio::test]
+    async fn paper_pdf_download_finishes_a_slow_but_progressing_body() {
+        static BODY: &[u8] = &[b'%'; 8];
+        // The whole body takes ~1.2s — past a 500ms whole-request deadline —
+        // but every part lands inside the per-read timeout (OR-468).
+        let (url, server) =
+            serve_paced_body(BODY, 4, std::time::Duration::from_millis(300), true).await;
+        let res = short_read_client().get(&url).send().await.unwrap();
+        let body = super::capped_body(res, 64, &url).await.unwrap();
+        assert_eq!(body, BODY);
+        server.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn paper_pdf_download_times_out_a_stalled_read() {
+        let (url, server) = serve_stalled_body().await;
+        let res = short_read_client().get(&url).send().await.unwrap();
+        let err = super::capped_body(res, 64, &url)
+            .await
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("was interrupted"), "{err}");
+        assert!(err.contains(&url), "{err}");
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn paper_pdf_download_stops_past_the_size_cap() {
+        static BODY: &[u8] = &[b'x'; 100];
+        // No declared length: the cap has to bite mid-stream.
+        let (url, server) = serve_paced_body(BODY, 1, std::time::Duration::ZERO, false).await;
+        let res = short_read_client().get(&url).send().await.unwrap();
+        let err = super::capped_body(res, 10, &url)
+            .await
+            .unwrap_err()
+            .to_string();
+        assert_eq!(err, format!("{url} is too large to download"));
+        server.await.unwrap();
     }
 }

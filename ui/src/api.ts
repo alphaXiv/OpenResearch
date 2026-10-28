@@ -31,7 +31,7 @@ export const DEMO_SEEDED_LEAF_IDS: Record<string, string> = {
   [DEMO_LITERATURE_SESSION_ID]: "msg_demo_nanochat_literature_assistant_v1",
 };
 export const DEMO_RUN_EXPERIMENT_PROMPT =
-  "Run the Muon matrix LR 2× probe experiment. When it finishes, compare its step-100 and step-200 val_bpb against the baseline and tell me whether doubling the matrix learning rate helps early training.";
+  "Run the proposed learning-rate probe experiment. Summarize its results using the recorded validation metric and comparison described by the experiment. If it produces an interactive HTML loss chart, show it inline using image syntax.";
 
 export class FileChangedError extends Error {
   readonly currentVersion: string | null;
@@ -66,7 +66,7 @@ export interface Project {
   /** Compatibility alias returned by older/newer mixed local clients. */
   filesDir?: string;
   runCommand?: string | null;
-  /** arXiv id the project starts from (versionless). */
+  /** arXiv or alphaXiv paper id the project starts from (versionless). */
   paperId?: string | null;
   createdAt: number;
   updatedAt: number;
@@ -89,7 +89,15 @@ export interface Experiment {
   archived: boolean;
 }
 
-export type RunStatus = "starting" | "running" | "done" | "failed" | "cancelled";
+/** An experiment a chat created, launched a run of, or asked to be woken for. */
+export interface SessionExperiment {
+  experiment: Experiment;
+  projectName: string;
+  /** Its newest live run, else its newest run: a forced relaunch can leave an older run live. Null until it has been run. */
+  currentRun: Pick<Run, "status" | "cancelRequested" | "createdAt" | "endedAt"> | null;
+}
+
+export type RunStatus = "starting" | "running" | "done" | "failed" | "cancelled" | "lost";
 export type RunDisplayStatus = RunStatus | "cancelling";
 
 export interface Run {
@@ -126,6 +134,8 @@ export function experimentMonitoringError(runs: Pick<Run, "status" | "backend" |
   return newestFirst.map(runMonitoringError).find((error) => error !== null) ?? null;
 }
 
+export class RejectedResponseError extends Error {}
+
 const writeScopes = new WeakMap<Response, ReturnType<typeof workspaceScope>>();
 
 async function json<T>(res: Response): Promise<T> {
@@ -154,7 +164,8 @@ async function json<T>(res: Response): Promise<T> {
       if (error instanceof FileChangedError) throw error;
       // non-JSON body — show it raw
     }
-    throw new Error(message || `HTTP ${res.status}`);
+    const ErrorType = res.status >= 400 && res.status < 500 ? RejectedResponseError : Error;
+    throw new ErrorType(message || `HTTP ${res.status}`);
   }
   const data: T = await res.json();
   const scope = writeScopes.get(res);
@@ -290,6 +301,7 @@ export interface NewProject {
   githubSyncEnabled?: boolean;
   /** UI locale for the starter prompts the server warms up on creation. */
   locale?: string;
+  starterAgent?: Pick<AgentSelection, "harness" | "model">;
 }
 
 export interface CreateProjectResult {
@@ -321,6 +333,7 @@ export const searchPapers = (q: string, signal?: AbortSignal) =>
 /** The signed-in GitHub login, for naming the account a new repo lands on.
  * `login` is null when there's no usable token. */
 export const githubAccount = (signal?: AbortSignal) => get<{ login: string | null }>("/api/github/account", signal);
+export const githubOrganizations = (signal?: AbortSignal) => get<{ organizations: string[] }>("/api/github/organizations", signal);
 
 export const githubProjectRepoPreview = (name: string, signal?: AbortSignal) =>
   get<{ repo: string }>(`/api/github/project-repo-preview?name=${encodeURIComponent(name)}`, signal);
@@ -332,7 +345,7 @@ export const repoAccess = (owner: string, repo: string, signal?: AbortSignal) =>
     signal,
   );
 
-/** Resolve an arXiv id / URL to title + linked GitHub repo. May take a few
+/** Resolve an arXiv or alphaXiv paper id / URL to title + linked GitHub repo. May take a few
  * seconds for papers alphaXiv hasn't indexed yet (it scrapes arXiv on a miss). */
 export const resolvePaper = (id: string, signal?: AbortSignal) =>
   get<{ paper: ResolvedPaper }>(`/api/papers/resolve?id=${encodeURIComponent(id)}`, signal).then(
@@ -353,8 +366,8 @@ export interface ProjectStarterPrompts {
   /** Empty when the project already has experiments or is blank; null when
    *  the harness could not answer. */
   prompts: StarterPrompt[] | null;
-  /** The project has nothing to read yet, so the UI offers its pre-written
-   *  prompts instead of model-generated ones. */
+  /** Use pre-written prompts when there is no project brief or no selected
+   *  OpenCode model for generation. */
   blank: boolean;
 }
 
@@ -365,6 +378,7 @@ export const prewarmStarterPrompts = (body: {
   paperId?: string;
   path?: string;
   locale: string;
+  starterAgent?: Pick<AgentSelection, "harness" | "model">;
 }) => post<{ ok: boolean }>("/api/projects/starter-prompts/prewarm", body);
 
 /** Slow on a cache miss (one headless model call over a brief of the project). */
@@ -380,17 +394,12 @@ export const getProjectStarterPrompts = (
     signal,
   );
 
-/** Record a visit so the backend can persist project-level UI recency. */
-export const openProject = (projectId: string) =>
-  post<{ project: Project }>(`/api/projects/${projectId}/open`).then((r) => r.project);
-
-export const deleteProject = (projectId: string) =>
-  writeResponse(`/api/projects/${projectId}`, { method: "DELETE" }).then(async (r) => {
-    if (!r.ok) {
-      const body = await r.json().catch(() => null);
-      throw new Error(body?.error ?? `delete failed (${r.status})`);
-    }
+export const deleteProject = (projectId: string, deleteArtifacts = false) =>
+  writeResponse(`/api/projects/${projectId}?deleteArtifacts=${deleteArtifacts}`, { method: "DELETE" }).then(async (r) => {
+    const body = await r.json().catch(() => null);
+    if (!r.ok) throw new Error(body?.error ?? `delete failed (${r.status})`);
     removeProject(projectId);
+    return typeof body?.artifactsError === "string" ? body.artifactsError : undefined;
   });
 
 export const listExperiments = (projectId: string, signal?: AbortSignal) =>
@@ -398,6 +407,12 @@ export const listExperiments = (projectId: string, signal?: AbortSignal) =>
     (r) => r.experiments,
   );
 
+export const getSessionExperiments = (sessionId: string, signal?: AbortSignal) =>
+  get<{ experiments: SessionExperiment[] }>(`/api/chat/sessions/${encodeURIComponent(sessionId)}/experiments`, signal)
+    .then((r) => r.experiments);
+
+export const deleteExperiment = (id: string) =>
+  writeResponse(`/api/experiments/${id}`, { method: "DELETE" }).then((r) => json<{ ok: boolean; branchCommit: string | null }>(r));
 export const setExperimentArchived = (id: string, direction: "ancestors" | "descendants" | "only" | "region" | "taskRegion", archived: boolean) =>
   patch<{ ids: string[] }>(`/api/experiments/${id}/archive`, { direction, archived });
 
@@ -418,13 +433,15 @@ export const cancelRun = (runId: string) =>
   post<{ ok: boolean }>(`/api/runs/${runId}/cancel`).then(() => undefined);
 
 export interface LogChunk {
+  generation: string;
+  offset: number;
   dataBase64: string;
   nextOffset: number;
   eof: boolean;
 }
 
-export const fetchLog = (runId: string, offset: number) =>
-  get<LogChunk>(`/api/runs/${runId}/log?offset=${offset}`);
+export const fetchLog = (runId: string, offset: number, generation?: string) =>
+  get<LogChunk>(`/api/runs/${runId}/log?offset=${offset}${generation ? `&generation=${encodeURIComponent(generation)}` : ""}`);
 
 export interface DiffPayload {
   diff: string;
@@ -545,6 +562,9 @@ export const openFileInEditor = (
     path,
     sessionId: opts.sessionId,
   });
+
+export const getFileManager = (locale: string, signal?: AbortSignal) =>
+  get<{ os: string; name: string | null }>(`/api/file-manager?locale=${encodeURIComponent(locale)}`, signal);
 
 /** Reveal a checkout file in the OS file manager on the machine running `orx up`. */
 export const revealFileInManager = (
@@ -852,14 +872,18 @@ export const saveTinkerKey = (key: string) => post<TinkerSettings>("/api/setting
 
 /** How orx was installed. `installer`, `app-bundle`, `appimage` and `portable` update themselves. */
 export type InstallChannel = "installer" | "app-bundle" | "appimage" | "portable" | "cargo" | "homebrew" | "nix" | "unknown";
+export type ReleaseChannel = "stable" | "canary";
 
 export interface UpdateStatus {
   current: string;
-  /** Latest release this install can actually move to — the macOS app and the
-   *  CLI read different manifests, and the app's can lag. */
+  /** Latest published release on the selected channel. */
   latest: string | null;
   latestTag: string | null;
   channel: InstallChannel;
+  releaseChannel: ReleaseChannel;
+  releaseChannelsAvailable: boolean;
+  waitingForStable: boolean;
+  waitingForCanary: boolean;
   /** Whether this install is one orx can replace at all. */
   selfUpdates: boolean;
   autoUpdate: boolean;
@@ -897,6 +921,9 @@ export const restartApp = () =>
 
 export const setAutoUpdate = (enabled: boolean) =>
   post<UpdateStatus>("/api/update/auto", { enabled });
+
+export const setReleaseChannel = (channel: ReleaseChannel) =>
+  post<UpdateStatus>("/api/update/channel", { channel });
 
 export const installCli = (force = false) =>
   post<InstalledCli>("/api/update/install-cli", { force });
@@ -945,6 +972,8 @@ export const saveModalToken = (tokenId: string, tokenSecret: string) =>
 export interface EnvVar {
   key: string;
   maskedValue: string;
+  /** Set only for non-secret keys, which are shown and edited in the clear. */
+  value?: string | null;
   inProcessEnv: boolean;
 }
 
@@ -1052,6 +1081,9 @@ export interface RemoteSessionInfo {
   dashboardProtocol: number | null;
   gatewayUrl: string;
   error: string | null;
+  /** Server-derived repair command for a permission rejection, shown inline so
+   * the user can copy it or run it in the terminal. */
+  repairCommand: string | null;
   installPaths: RemoteInstallPaths | null;
   uiPreferences: { theme: string | null; locale: string | null };
   canStartNewHost: boolean;
@@ -1127,6 +1159,10 @@ export interface SlurmSettings {
   partition: string | null;
   account: string | null;
   timeLimit: string | null;
+  /** `--cpus-per-task` default; null = the partition decides (often one core). */
+  cpusPerTask: number | null;
+  /** `--mem` default in Slurm syntax ("64G"); null = the partition decides. */
+  mem: string | null;
   /** Login-node candidates, from ~/.ssh/config (same source as SSH). */
   hosts: SshHost[];
 }
@@ -1139,6 +1175,9 @@ export const saveSlurmSettings = (body: {
   partition?: string;
   account?: string;
   timeLimit?: string;
+  /** 0 clears it back to the partition default. */
+  cpusPerTask?: number;
+  mem?: string;
 }) => post<SlurmSettings>("/api/settings/slurm", body);
 
 export interface SlurmPreflight {
@@ -1176,6 +1215,43 @@ export interface RayPreflight {
 /** Live-test a Ray Jobs / Dashboard endpoint. */
 export const rayPreflight = (address?: string) =>
   post<RayPreflight>("/api/settings/ray/preflight", { address: address ?? null });
+
+export interface TrackioRuns {
+  /** Null until something has logged to the local store. */
+  dashboardUrl: string | null;
+  project: string;
+  /** Run ids and names that have logged to the project. */
+  runs: string[];
+  /** A private Space's read-only `__sign`; without it the browser gets a 404. */
+  dashboardSign: string | null;
+}
+
+export const getTrackioRuns = (projectId: string, signal?: AbortSignal) =>
+  get<TrackioRuns>(`/api/trackio/projects/${encodeURIComponent(projectId)}/runs`, signal);
+
+export interface TrackioPreflight {
+  reachable: boolean;
+  version: string | null;
+  writeAccess: boolean | null;
+  error: string | null;
+  /** The Space's runtime stage, e.g. SLEEPING; null for a self-hosted server. */
+  spaceStage: string | null;
+}
+
+export const trackioPreflight = () => post<TrackioPreflight>("/api/settings/trackio/preflight", {});
+
+/** The run on its Trackio dashboard, only once it has logged there. `embed` hides the dashboard chrome. */
+export function trackioRunUrl(trackio: TrackioRuns | undefined, runId: string, embed?: { theme: string }) {
+  if (!trackio?.dashboardUrl || !trackio.runs.includes(runId)) return null;
+  const query = new URLSearchParams({ project: trackio.project, runs: runId });
+  if (trackio.dashboardSign) query.set("__sign", trackio.dashboardSign);
+  if (embed) {
+    query.set("sidebar", "hidden");
+    query.set("navbar", "hidden");
+    query.set("__theme", embed.theme);
+  }
+  return `${trackio.dashboardUrl}/?${query}`;
+}
 
 // --- settings: compute targets (unified list + default) ------------------------
 
@@ -1465,8 +1541,10 @@ export const getProjectGitStatus = (projectId: string, signal?: AbortSignal) =>
 export const initializeProjectGit = (projectId: string) =>
   post<ProjectGitStatus>(`/api/projects/${projectId}/git/init`);
 
-export const enableProjectGithub = (projectId: string) =>
-  post<{ project: Project; git: ProjectGitStatus }>(`/api/projects/${projectId}/github`);
+export const enableProjectGithub = (projectId: string, organization?: string) =>
+  post<{ project: Project; git: ProjectGitStatus }>(`/api/projects/${projectId}/github`, {
+    ...(organization ? { organization } : {}),
+  });
 
 export const disableProjectGithub = (projectId: string) =>
   post<{ project: Project; git: ProjectGitStatus }>(`/api/projects/${projectId}/github/disable`);
@@ -1514,12 +1592,15 @@ export const captureUiEvent = (event: UiEvent): void => {
   void post<{ ok: boolean }>("/api/telemetry/event", event).catch(() => {});
 };
 
-/** Tells orx which language the dashboard displays, for usage analytics. Fire-and-forget. */
-export const reportLocale = (locale: string): void => {
-  void post<{ locale: string }>("/api/telemetry/locale", { locale }).catch(() => {});
-};
+export const reportLocale = (locale: string, signal?: AbortSignal) =>
+  writeResponse("/api/telemetry/locale", {
+    method: "POST",
+    signal,
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ locale }),
+  }).then((r) => json<{ locale: string }>(r));
 
-export type HarnessId = "claude-code" | "codex" | "opencode" | "cursor" | "antigravity";
+export type HarnessId = "claude-code" | "codex" | "opencode" | "cursor" | "antigravity" | `acp:${string}`;
 
 export interface HarnessModel {
   id: string;
@@ -1543,11 +1624,14 @@ export interface HarnessModel {
   defaultReasoningLevel?: string;
   /** Additional processing tiers this model advertises (Codex Fast mode). */
   serviceTiers?: OptionChoice[];
+  /** Whether the model accepts images; absent when the catalog doesn't say. */
+  imageInput?: boolean;
 }
 
 /** Display label for a harness model: the catalog's own name when it has one,
  * else prettified from the id. */
 export function harnessModelLabel(model: HarnessModel): string {
+  if (model.id === "default" && !model.displayName) return m.model_picker_default_model();
   if (!model.id.startsWith("orx-local-")) return model.displayName ?? modelLabel(model.id);
   const provider = model.displayName?.split(" · ").slice(1).join(" · ").replace(/ \(local\)$/, "");
   const endpoint = provider === "OpenAI-compatible server" || provider === "Custom endpoint" || provider === "Custom Endpoint"
@@ -1695,6 +1779,11 @@ export interface Harness {
   plan?: string;
   agentReady: boolean;
   agentNote?: string;
+  setupUrl?: string;
+  authEnvKey?: string;
+  needsConnectionAdapter?: boolean;
+  adapterMissing?: boolean;
+  logo?: string;
   /** Setup is blocked by something no install/update/login command repairs —
    * an environment credential overriding the saved login, a database the CLI
    * will not open. `agentNote` carries the repair; offer no setup button. */
@@ -1702,6 +1791,7 @@ export interface Harness {
   /** A running turn takes further input, so the composer steers instead of
    * queueing. Narrowed per installation (codex's legacy exec path can't). */
   supportsSteering: boolean;
+  supportsCompaction: boolean;
   /** A snapshot answer whose model catalog is still filling in the
    * background — `models` stays empty until `harness.catalog`
    * arrives and a plain re-read swaps in the real list. */
@@ -1723,17 +1813,36 @@ export interface HarnessSetupCommands {
 export const getHarnessSetupCommands = (signal?: AbortSignal) =>
   get<Record<HarnessId, HarnessSetupCommands>>("/api/harnesses/setup/commands", signal);
 
-export const getHarnesses = (refresh = false, retryRejected = false, signal?: AbortSignal) => {
+export const getHarnesses = (refresh = false, retryRejected = false, signal?: AbortSignal, harness?: HarnessId) => {
   const params = new URLSearchParams();
   if (refresh) params.set("refresh", "1");
   if (retryRejected) params.set("retry", "1");
+  if (harness) params.set("harness", harness);
   const query = params.size > 0 ? `?${params.toString()}` : "";
   return get<{ harnesses: Harness[] }>(`/api/harnesses${query}`, signal).then((r) => r.harnesses);
 };
 
+export interface AcpDefinition {
+  id: `acp:${string}`;
+  name: string;
+  executable: string;
+  arguments: string[];
+}
+
+export const listAcpHarnesses = () => get<AcpDefinition[]>("/api/harnesses/acp");
+export interface AcpPreset extends AcpDefinition { setupUrl: string; needsConnectionAdapter: boolean }
+export const listAcpPresets = () => get<AcpPreset[]>("/api/harnesses/acp/presets");
+export const saveAcpHarness = (definition: Omit<AcpDefinition, "id">, id?: string) => id
+  ? put<AcpDefinition>(`/api/harnesses/acp/${encodeURIComponent(id)}`, definition)
+  : post<AcpDefinition>("/api/harnesses/acp", definition);
+export const removeAcpHarness = (id: string) => writeResponse(`/api/harnesses/acp/${encodeURIComponent(id)}`, { method: "DELETE" }).then((response) => json<{ ok: boolean }>(response));
+export const testAcpHarness = (definition: Omit<AcpDefinition, "id">) => post<{ status: string; agentInfo?: { version?: string } }>("/api/harnesses/acp/test", definition);
+export const setChatConfiguration = (sessionId: string, optionId: string, value: string) => post<ChatSession>(`/api/chat/sessions/${sessionId}/configuration`, { optionId, value });
+
 /** Slash-skill offered in the composer's `/` dropdown; expanded server-side. */
 export interface SkillInfo {
   name: string;
+  disabled?: boolean;
   plugin?: string | null;
   harness?: string | null;
   description: string;
@@ -1743,7 +1852,7 @@ export interface SkillInfo {
 
 export const getSkills = (signal?: AbortSignal, harness?: string, projectId?: string) => {
   const query = new URLSearchParams({ ...(harness ? { harness } : {}), ...(projectId ? { project: projectId } : {}) });
-  return get<{ skills: SkillInfo[]; importing: boolean }>(`/api/skills${query.size ? `?${query}` : ""}`, signal);
+  return get<{ skills: SkillInfo[] }>(`/api/skills${query.size ? `?${query}` : ""}`, signal);
 };
 
 export const getSkillContent = (name: string, projectId?: string, signal?: AbortSignal, harness?: string | null) =>
@@ -1788,8 +1897,17 @@ export interface UserSkill {
   updatedAt: number;
 }
 
+export interface SkillDiscovery {
+  agent: string;
+  origin: string;
+  path: string;
+  status: "scanned" | "missing" | "unreadable";
+  accepted: number;
+  skipped: { path: string; reason: string }[];
+}
+
 export const listUserSkills = (signal?: AbortSignal) =>
-  get<{ skills: UserSkill[]; importing: boolean }>("/api/user-skills", signal);
+  get<{ skills: UserSkill[]; discovery?: SkillDiscovery[] }>("/api/user-skills", signal);
 
 /** Upload a SKILL.md file or a .zip of a skill folder. `contentBase64` is the
  * raw file bytes; `filename`'s extension selects single-file vs archive. */
@@ -1848,6 +1966,7 @@ export interface ChatQuestionOption {
 
 /** An interactive request the user acts on before the harness continues. */
 export interface ChatPrompt {
+  nativeChoices?: { id: string; label: string; kind: string }[];
   kind: "plan" | "permission" | "question";
   resolved: boolean;
   plan?: string;
@@ -1905,9 +2024,12 @@ export interface ContextUsage {
 }
 
 export interface ChatSession {
+  awaitingInput?: boolean;
   id: string;
   projectId: string;
   harness: HarnessId;
+  harnessName?: string | null;
+  nativeConfiguration?: unknown;
   title: string | null;
   /** Who wrote `title`: `"fallback"` (first-line placeholder), `"generated"`
    * (harness auto-title), `"user"` (explicitly chosen — a rename, or an agent's
@@ -1924,11 +2046,8 @@ export interface ChatSession {
   reasoningLevel: string | null;
   /** Hidden from the default Recents list, but fully intact and resumable. */
   archived: boolean;
-  /** Session whose agent spawned this one with `orx agent spawn`; null for
-   * sessions the user started themselves. */
-  parentSessionId?: string | null;
   /** Chat this side chat branched from. Side chats share its worktree and
-   * stay out of history; closing the tab deletes one. */
+   * stay out of top-level history; deleting the parent deletes its side chats. */
   sideParentSessionId?: string | null;
   createdAt: number;
   updatedAt: number;
@@ -1995,6 +2114,9 @@ export const createChatSession = (
     (r) => r.session,
   );
 
+export const getChatSession = (sessionId: string) =>
+  get<{ session: ChatSession }>(`/api/chat/sessions/${sessionId}`).then((r) => r.session);
+
 export const deleteChatSession = (sessionId: string) =>
   writeResponse(`/api/chat/sessions/${sessionId}`, { method: "DELETE" }).then((r) =>
     json<{ ok: boolean }>(r).then((result) => { removeSession(sessionId); return result; }),
@@ -2018,7 +2140,7 @@ export const setChatSessionPlanMode = (sessionId: string, planMode: boolean) =>
     (r) => r.session,
   );
 
-/** Branch a temporary side chat off a snapshot of `sessionId`'s transcript. */
+/** Branch a persistent side chat off a snapshot of `sessionId`'s transcript. */
 export const openSideChat = (sessionId: string) =>
   post<{ session: ChatSession }>(`/api/chat/sessions/${sessionId}/side`, {}).then(
     (r) => r.session,
@@ -2113,6 +2235,12 @@ export const sendChatMessage = (
   },
   );
 
+/** A positive result confirms admission; absence does not prove rejection. */
+export const getChatSubmission = (sessionId: string, clientTurnId: string) =>
+  get<{ accepted: boolean }>(
+    `/api/chat/sessions/${encodeURIComponent(sessionId)}/submissions/${encodeURIComponent(clientTurnId)}`,
+  );
+
 /** Compact a chat's context: natively where the agent can, else by summarizing. */
 export const compactChatSession = (sessionId: string) =>
   post<{ message: ChatMessage }>(`/api/chat/sessions/${sessionId}/compact`, {});
@@ -2167,23 +2295,6 @@ export const respondChat = (sessionId: string, answer: PromptAnswer) =>
   post<{ ok: boolean }>(`/api/chat/sessions/${sessionId}/respond`, answer);
 
 // --- helpers shared across views --------------------------------------------
-
-export function statusColor(status: string): string {
-  switch (status) {
-    case "done":
-      return "var(--green)";
-    case "running":
-      return "var(--teal)";
-    case "starting":
-      return "var(--amber)";
-    case "failed":
-      return "var(--red)";
-    case "cancelled":
-      return "var(--muted)";
-    default:
-      return "var(--muted)";
-  }
-}
 
 export function timeAgo(ms: number): string {
   const s = Math.max(0, Math.floor((Date.now() - ms) / 1000));
@@ -2271,3 +2382,15 @@ export const discoverLocalModels = (request: { baseUrl: string; apiKey: string }
 export const connectLocalModel = (request: { name: string; baseUrl: string; apiKey: string; model: string; contextWindow: number }) => post<{ model: string }>("/api/local-models", request);
 export const checkLocalModel = (id: string) => post<{ models: string[] }>(`/api/local-models/${encodeURIComponent(id)}/check`, {});
 export const removeLocalModel = (id: string) => writeResponse(`/api/local-models/${encodeURIComponent(id)}`, { method: "DELETE" }).then((r) => json<{ ok: boolean }>(r));
+
+export interface ChatActiveRun {
+  sessionId: string;
+  run: Run;
+  experimentName: string | null;
+}
+
+export const listChatActiveRuns = (signal?: AbortSignal) =>
+  get<ChatActiveRun[]>("/api/chat/active-runs", signal);
+
+export const getSubagentTranscript = (sessionId: string, partId: string, signal?: AbortSignal) =>
+  get<ChatPart | null>(`/api/chat/sessions/${sessionId}/subagent?partId=${encodeURIComponent(partId)}`, signal);

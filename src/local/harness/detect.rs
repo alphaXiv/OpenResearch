@@ -158,6 +158,9 @@ pub struct ModelInfo {
     /// Additional processing tiers this model advertises (Codex Fast mode).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub service_tiers: Option<Vec<super::options::OptionChoice>>,
+    /// Whether the model accepts image input, when the catalog says (OpenCode).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub image_input: Option<bool>,
 }
 
 impl ModelInfo {
@@ -171,6 +174,7 @@ impl ModelInfo {
             description: None,
             default_reasoning_level: None,
             service_tiers: None,
+            image_input: None,
         }
     }
 
@@ -207,6 +211,11 @@ impl ModelInfo {
         self
     }
 
+    pub(super) fn with_image_input(mut self, image_input: Option<bool>) -> Self {
+        self.image_input = image_input;
+        self
+    }
+
     pub(super) fn with_service_tiers(mut self, tiers: Vec<super::options::OptionChoice>) -> Self {
         self.service_tiers = Some(tiers);
         self
@@ -216,8 +225,8 @@ impl ModelInfo {
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct HarnessInfo {
-    pub id: &'static str,
-    pub name: &'static str,
+    pub id: String,
+    pub name: String,
     pub installed: bool,
     /// On PATH, but the binary can't run: `--version` failed conclusively.
     /// Never `agent_ready` — spawning it just dumps its own crash into the chat.
@@ -252,6 +261,16 @@ pub struct HarnessInfo {
     pub agent_ready: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub agent_note: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub setup_url: Option<&'static str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub auth_env_key: Option<&'static str>,
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub needs_connection_adapter: bool,
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub adapter_missing: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub logo: Option<String>,
     /// Setup is blocked by something the harness's own install/login commands
     /// cannot repair — an environment credential that overrides the saved
     /// login, a database the CLI will not open. Signing in again or updating
@@ -262,6 +281,7 @@ pub struct HarnessInfo {
     /// Whether a running turn accepts further user input, which is what lets
     /// the composer steer instead of parking the message until the turn ends.
     pub supports_steering: bool,
+    pub supports_compaction: bool,
     /// Set when a snapshot detection answered from file/discovery evidence
     /// and deferred the expensive probes — model catalog, live auth,
     /// capability checks — to a background full pass that replaces the
@@ -274,10 +294,10 @@ pub struct HarnessInfo {
 }
 
 impl HarnessInfo {
-    pub(super) fn new(id: &'static str, name: &'static str) -> Self {
+    pub(super) fn new(id: impl Into<String>, name: impl Into<String>) -> Self {
         Self {
-            id,
-            name,
+            id: id.into(),
+            name: name.into(),
             installed: false,
             install_broken: false,
             bin_path: None,
@@ -295,8 +315,14 @@ impl HarnessInfo {
             plan: None,
             agent_ready: false,
             agent_note: None,
+            setup_url: None,
+            auth_env_key: None,
+            needs_connection_adapter: false,
+            adapter_missing: false,
+            logo: None,
             needs_config_repair: false,
             supports_steering: false,
+            supports_compaction: false,
             catalog_pending: false,
             models: Vec::new(),
             options: super::HarnessOptions::none(),

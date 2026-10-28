@@ -202,7 +202,7 @@ fn parse_memory(value: &str) -> Result<u64> {
 fn http() -> &'static Client {
     static CLIENT: OnceLock<Client> = OnceLock::new();
     CLIENT.get_or_init(|| {
-        Client::builder()
+        crate::net::remote_client()
             .connect_timeout(Duration::from_secs(10))
             .timeout(Duration::from_secs(120))
             .build()

@@ -8,9 +8,11 @@
 pub mod huggingface;
 pub mod kubernetes;
 pub mod localbox;
+mod managed_env;
 pub mod modal;
 pub mod openresearch;
 pub mod ray;
+pub mod rental;
 pub mod slurm;
 pub mod ssh;
 pub mod tinker;
@@ -56,6 +58,8 @@ pub struct BackendDescriptor {
     pub monitoring_error: Option<String>,
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub cancellation_accepted: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rental_lease: Option<rental::Rental>,
     pub kind: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub namespace: Option<String>,
@@ -88,6 +92,12 @@ pub struct BackendDescriptor {
     /// Requested execution limit for OpenResearch and Slurm jobs.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub timeout_secs: Option<u64>,
+    /// Requested `#SBATCH --cpus-per-task` (slurm_job only).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cpus_per_task: Option<u32>,
+    /// Requested `#SBATCH --mem` (slurm_job only).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mem: Option<String>,
     /// Immutable local source archive used for this run. These fields make a
     /// delayed or restarted supervisor independent of the working tree.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -96,6 +106,9 @@ pub struct BackendDescriptor {
     pub source_path: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub source_size: Option<u64>,
+    /// The host's storage root at submit; Slurm derives its run dir from it, SSH keeps it for source-cache cleanup.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub remote_root: Option<String>,
 }
 
 impl BackendDescriptor {
@@ -144,7 +157,7 @@ impl BackendDescriptor {
     }
 
     /// The Slurm (host, job id) handle; the login-node host rides on
-    /// `namespace`, and the run dir derives from the run id.
+    /// `namespace`, and the run dir derives from the run id and `remote_root`.
     pub fn slurm_ref(&self) -> Result<(&str, &str)> {
         if self.kind != "slurm_job" {
             return Err(anyhow!("Unsupported backend kind: {}", self.kind));
@@ -221,11 +234,13 @@ impl BackendDescriptor {
         // Stored as i64 (SQLite); a real SSH port fits u16. Bail rather than
         // panic if the row somehow holds an out-of-range value.
         let port = u16::try_from(self.ssh_port?).ok()?;
-        Some(ssh::SshTarget::host_port(
+        let mut target = ssh::SshTarget::host_port(
             format!("{user}@{host}"),
             port,
             ssh::HostKeyPolicy::Ephemeral,
-        ))
+        );
+        target.managed_generation = Some(self.job_id.clone()?);
+        Some(target)
     }
 }
 
@@ -247,6 +262,16 @@ pub fn is_terminal_stage(stage: &str) -> bool {
     matches!(stage, "COMPLETED" | "CANCELED" | "ERROR" | "DELETED")
 }
 
+/// A run log's lines. An unterminated last line may still be mid-flush, so it
+/// only counts once the writer has exited (`drain`).
+pub fn log_lines(text: &str, drain: bool) -> impl Iterator<Item = &str> {
+    text.split_inclusive('\n')
+        .filter_map(move |line| match line.strip_suffix('\n') {
+            Some(line) => Some(line.strip_suffix('\r').unwrap_or(line)),
+            None => drain.then_some(line),
+        })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -256,6 +281,7 @@ mod tests {
             ssh_container: None,
             monitoring_error: None,
             cancellation_accepted: false,
+            rental_lease: None,
             kind: "openresearch_job".to_string(),
             namespace: Some("org_1".to_string()),
             job_id: Some("sb_1".to_string()),
@@ -269,9 +295,12 @@ mod tests {
             ssh_port: None,
             ssh_user: None,
             timeout_secs: Some(14_400),
+            cpus_per_task: None,
+            mem: None,
             source_digest: None,
             source_path: None,
             source_size: None,
+            remote_root: None,
         }
     }
 
@@ -290,11 +319,30 @@ mod tests {
         d.ssh_host = Some("203.0.113.7".to_string());
         d.ssh_port = Some(22022);
         d.ssh_user = Some("root".to_string());
+        d.cpus_per_task = Some(8);
+        d.mem = Some("64G".to_string());
         let json = d.to_json();
         assert!(json.contains("\"sshHost\":\"203.0.113.7\""), "{json}");
+        assert!(json.contains("\"cpusPerTask\":8"), "{json}");
 
         let back = BackendDescriptor::parse(&json).unwrap();
         assert_eq!(back.ssh_port, Some(22022));
+        assert_eq!(back.mem.as_deref(), Some("64G"));
+        assert_eq!(
+            crate::local::slurm::requested_resources(&back).as_deref(),
+            Some("cpus 8  mem 64G")
+        );
+        assert_eq!(
+            crate::local::slurm::status_resources(&back),
+            "requested cpus 8  mem 64G"
+        );
+        d.cpus_per_task = None;
+        assert_eq!(
+            crate::local::slurm::requested_resources(&d).as_deref(),
+            Some("cpus partition default  mem 64G")
+        );
+        d.mem = None;
+        assert_eq!(crate::local::slurm::requested_resources(&d), None);
         assert_eq!(back.openresearch_ref().unwrap(), ("org_1", "sb_1"));
     }
 
@@ -308,6 +356,15 @@ mod tests {
         assert_eq!(d.ssh_ref().unwrap(), ("mybox", ".orx/runs/r1"));
         assert_eq!(d.ssh_host, None);
         assert_eq!(d.timeout_secs, None);
+        assert_eq!(d.cpus_per_task, None);
+        // A Slurm run from before cpus/mem were recorded may still have requested them.
+        let slurm =
+            BackendDescriptor::parse(r#"{"kind":"slurm_job","namespace":"login","jobId":"123"}"#)
+                .unwrap();
+        assert_eq!(
+            crate::local::slurm::status_resources(&slurm),
+            "requested cpus/mem: unknown (older run or partition default)"
+        );
         assert_eq!(d.ssh_container, None);
         let mut d = d;
         d.ssh_container = Some(ssh::ContainerRun {
@@ -379,5 +436,16 @@ mod tests {
             got.get(PYTHONIOENCODING).map(String::as_str),
             Some("cp1252")
         );
+    }
+
+    #[test]
+    fn log_lines_hold_back_a_partial_last_line_until_drained() {
+        let text = "a\r\nb\n{\"partial\": ";
+        assert_eq!(log_lines(text, false).collect::<Vec<_>>(), ["a", "b"]);
+        assert_eq!(
+            log_lines(text, true).collect::<Vec<_>>(),
+            ["a", "b", "{\"partial\": "]
+        );
+        assert_eq!(log_lines("", true).count(), 0);
     }
 }

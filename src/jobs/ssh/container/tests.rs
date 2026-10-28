@@ -30,12 +30,13 @@ async fn prepare(
         .status()
         .unwrap()
         .success());
-    let dir = ssh::stage_source(target, &id, &archive, &id, container.as_ref())
+    let dir = ssh::stage_source(target, &id, &archive, &id, container.as_ref(), None)
         .await
         .unwrap();
     let spec = SshJobSpec {
         target: target.clone(),
         run_id: id,
+        remote_root: None,
         script: crate::compute::staged_script("bash run.sh"),
         env: HashMap::from([(
             "ORX_TEST_SECRET".into(),
@@ -59,7 +60,10 @@ async fn launch(
 async fn terminal(target: &SshTarget, dir: &str, container: Option<&ContainerRun>) -> JobState {
     tokio::time::timeout(Duration::from_secs(45), async {
         loop {
-            let state = ssh::inspect_job(target, dir, container).await.unwrap();
+            let Ok(state) = ssh::inspect_job(target, dir, container).await else {
+                tokio::time::sleep(Duration::from_millis(250)).await;
+                continue;
+            };
             if crate::jobs::is_terminal_stage(&state.stage) {
                 return state;
             }
@@ -72,7 +76,7 @@ async fn terminal(target: &SshTarget, dir: &str, container: Option<&ContainerRun
 
 async fn logs(target: &SshTarget, dir: &str) -> String {
     let mut output = String::new();
-    ssh::stream_logs(target, dir, 0, Duration::ZERO, &mut |line| {
+    ssh::stream_logs(target, dir, 0, Duration::ZERO, true, &mut |line| {
         output.push_str(line);
         output.push('\n');
     })
@@ -104,6 +108,13 @@ async fn ssh_container_lifecycle() {
         "-i".into(),
         std::env::var("ORX_SSH_TEST_KEY").expect("fixture key"),
     ]);
+    let connection = ssh::interactive_args(&target, None, None).await.unwrap();
+    assert!(tokio::process::Command::new("ssh")
+        .args(&connection.args)
+        .status()
+        .await
+        .unwrap()
+        .success());
     let base = resolve(&target, &reference).await.unwrap();
     ssh_run(
         &target,
@@ -491,6 +502,7 @@ async fn supervisor_restart(target: &SshTarget, reference: &str, port: u16) {
             commit_sha: None,
             result_markdown: None,
             cancel_requested: false,
+            cancel_reason: None,
             chat_session_id: None,
         })
         .unwrap();
@@ -536,6 +548,41 @@ async fn supervisor_restart(target: &SshTarget, reference: &str, port: u16) {
             .kill_on_drop(true);
         command.spawn().unwrap()
     };
+    let mut connect = tokio::process::Command::new("script");
+    #[cfg(target_os = "macos")]
+    connect.args(["-q", "/dev/null"]).arg(&executable).args([
+        "--no-telemetry",
+        "compute",
+        "connect",
+        "ssh",
+        "--host",
+        "fixture",
+    ]);
+    #[cfg(not(target_os = "macos"))]
+    connect.args([
+        "-qec",
+        &format!(
+            "{} --no-telemetry compute connect ssh --host fixture",
+            sh_quote(&executable.to_string_lossy())
+        ),
+        "/dev/null",
+    ]);
+    let connected = connect
+        .env("HOME", root)
+        .env("ORX_DATA_DIR", root.join("data"))
+        .env("XDG_CONFIG_HOME", root.join("config"))
+        .env(
+            "PATH",
+            format!("{}:{}", bin.display(), std::env::var("PATH").unwrap()),
+        )
+        .output()
+        .await
+        .unwrap();
+    assert!(
+        connected.status.success(),
+        "{}",
+        String::from_utf8_lossy(&connected.stdout)
+    );
     let mut first = spawn();
     tokio::time::sleep(Duration::from_secs(1)).await;
     assert!(
@@ -561,4 +608,13 @@ async fn supervisor_restart(target: &SshTarget, reference: &str, port: u16) {
     let output = logs(target, &dir).await;
     assert_eq!(output.matches("ONCE").count(), 1);
     assert!(output.contains("AFTER"));
+    assert!(tokio::process::Command::new(&executable)
+        .args(["ssh-service", "stop"])
+        .env("HOME", root)
+        .env("ORX_DATA_DIR", root.join("data"))
+        .env("XDG_CONFIG_HOME", root.join("config"))
+        .status()
+        .await
+        .unwrap()
+        .success());
 }

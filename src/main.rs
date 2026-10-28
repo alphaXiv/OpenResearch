@@ -24,6 +24,7 @@ mod jobs;
 // Local mode (`orx up`): builds out across stages; not all of it is wired yet.
 #[allow(dead_code)]
 mod local;
+mod net;
 mod output;
 mod paths;
 mod plane;
@@ -75,7 +76,7 @@ enum Command {
     /// Operate on one local project.
     Project(ProjectArgs),
 
-    /// Delegate a task to a second agent session.
+    /// Create independent project chats.
     Agent(AgentArgs),
 
     /// List a project's runs.
@@ -83,6 +84,12 @@ enum Command {
 
     /// Show a run's compact log summary (path, size, and preview) by default.
     Logs(LogsArgs),
+
+    /// Print the command that opens a run's TensorBoard logs.
+    Tensorboard(TensorboardArgs),
+
+    /// Summarize the metrics runs logged to Trackio: local, a Hugging Face Space, or a server.
+    Metrics(MetricsArgs),
 
     /// Add an experiment node to a local `orx up` project.
     #[command(name = "create-experiment")]
@@ -140,6 +147,9 @@ enum Command {
     /// Supervise one local run: tail backend logs, persist status, and honor
     /// local cancel intent. Spawned detached by `exp run`.
     Supervise(SuperviseArgs),
+
+    #[command(hide = true)]
+    RentalSupervise { config: std::path::PathBuf },
 
     /// Start the local autoresearch dashboard on 127.0.0.1: embedded UI,
     /// JSON/SSE API over the local store, and the opencode agent proxy.
@@ -249,6 +259,27 @@ pub struct RunsArgs {
 #[derive(Args, Debug)]
 pub struct LogsArgs {
     pub run_id: String,
+}
+
+#[derive(Args, Debug)]
+pub struct TensorboardArgs {
+    pub run_id: String,
+}
+
+#[derive(Args, Debug)]
+pub struct MetricsArgs {
+    /// One or more run ids; several print one after another for comparison.
+    #[arg(required = true)]
+    pub run_ids: Vec<String>,
+    /// Only metrics whose name contains this text (case-insensitive). Repeatable.
+    #[arg(long = "metric")]
+    pub metrics: Vec<String>,
+    /// Sampled points per metric, first and last included.
+    #[arg(long, default_value_t = 20)]
+    pub points: usize,
+    /// Print JSON instead of the text summary.
+    #[arg(long)]
+    pub json: bool,
 }
 
 #[derive(Args, Debug)]
@@ -373,10 +404,12 @@ pub struct AgentArgs {
 
 #[derive(Subcommand, Debug)]
 pub enum AgentCommand {
-    /// Hand a task to a helper agent running in its own top-level session.
+    /// Create an independent chat using your saved New Chat settings.
+    #[command(
+        after_help = "New chats use your saved New Chat settings. --harness, --model, and --no-wake are no longer supported; created chats never wake the creator."
+    )]
     Spawn {
-        /// What the helper agent should do. Write it as a self-contained brief:
-        /// the helper starts with an empty transcript and cannot see this chat.
+        /// Opening message for the new chat; it starts with an empty transcript.
         task: Option<String>,
         /// Read the task from stdin instead, for long multi-paragraph briefs.
         #[arg(long)]
@@ -384,15 +417,9 @@ pub enum AgentCommand {
         /// Name the session in the sidebar. Defaults to an auto-generated title.
         #[arg(long)]
         title: Option<String>,
-        /// Harness for the helper (defaults to this session's).
+        /// Project ID (defaults to the current OpenResearch chat's project).
         #[arg(long)]
-        harness: Option<String>,
-        /// Model for the helper (defaults to this session's).
-        #[arg(long)]
-        model: Option<String>,
-        /// Do not resume this chat when the helper finishes.
-        #[arg(long)]
-        no_wake: bool,
+        project: Option<String>,
     },
 }
 
@@ -433,6 +460,22 @@ pub enum ExpCommand {
         /// Restore descendants, excluding the selected experiment.
         #[arg(long, group = "unarchive_scope")]
         descendants: bool,
+    },
+
+    /// Permanently delete an experiment with no child experiments or active runs, its runs, and
+    /// its orx/ branch (refused while any worktree has it checked out).
+    Delete { exp_id: String },
+
+    /// Re-parent an experiment and its subtree. Only the tree changes; git branches stay put.
+    #[command(group(clap::ArgGroup::new("move_target").required(true)))]
+    Move {
+        exp_id: String,
+        /// New parent experiment in the same project.
+        #[arg(long, group = "move_target")]
+        parent: Option<String>,
+        /// Make the experiment a new root (baseline).
+        #[arg(long, group = "move_target")]
+        baseline: bool,
     },
 
     /// Show the experiment's status, run command, and latest run.
@@ -557,6 +600,18 @@ pub struct ExpRunArgs {
     /// Not supported with `--backend ray` (Ray Jobs have no time limit).
     #[arg(long)]
     pub timeout: Option<String>,
+    /// Cores for the job (with `--backend slurm`): `#SBATCH --cpus-per-task=`.
+    /// Omitted falls back to the slurm settings, then the partition default —
+    /// which on many clusters is a single core, whatever the GPU request.
+    #[arg(long)]
+    pub cpus: Option<u32>,
+    /// Host memory for the job (with `--backend slurm`): `#SBATCH --mem=`, in
+    /// Slurm's own syntax (64G, 4000M, or a bare number for megabytes).
+    /// Omitted falls back to the slurm settings, then the partition default,
+    /// which is usually `DefMemPerCPU` × the core count — so raising `--cpus`
+    /// raises memory with it.
+    #[arg(long)]
+    pub mem: Option<String>,
     /// Launch even when another run is already in flight for this experiment.
     #[arg(long)]
     pub force: bool,
@@ -865,6 +920,9 @@ impl DiscoveryPriority {
 
 #[derive(Args, Debug)]
 pub struct VersionArgs {
+    /// Print the desktop build identity.
+    #[arg(long, hide = true, conflicts_with_all = ["check", "json", "build_channel", "dashboard_protocol"])]
+    pub build_id: bool,
     /// Print the embedded telemetry build channel.
     #[arg(long, hide = true, conflicts_with_all = ["check", "json"])]
     pub build_channel: bool,
@@ -932,11 +990,56 @@ pub struct PaperArgs {
     pub full: bool,
 }
 
+fn explain_removed_spawn_flags(mut error: clap::Error) -> clap::Error {
+    use clap::error::{ContextKind, ContextValue, ErrorKind};
+    if error.kind() == ErrorKind::UnknownArgument
+        && error.to_string().contains(" agent spawn")
+        && matches!(error.get(ContextKind::InvalidArg), Some(ContextValue::String(flag)) if ["--harness", "--model", "--no-wake"].contains(&flag.split('=').next().unwrap_or(flag)))
+    {
+        error.insert(ContextKind::Suggested, ContextValue::StyledStrs(vec![
+            "New chats use your saved New Chat settings and never wake the creator. Configure the agent and model in OpenResearch.".into()
+        ]));
+    }
+    error
+}
+
 // The default multi-thread runtime is load-bearing for desktop app mode: it
 // blocks the main thread in the window's run loop while the dashboard server runs
 // on worker threads. A `current_thread` flavor would deadlock. See commands::app.
 #[tokio::main]
 async fn main() {
+    #[cfg(all(target_os = "macos", debug_assertions))]
+    if std::env::args().nth(1).as_deref() == Some("--dev-desktop") {
+        let port = std::env::args()
+            .nth(2)
+            .and_then(|arg| arg.parse::<u16>().ok());
+        if let Some(port) = port.filter(|port| (5201..=5209).contains(port)) {
+            commands::app::run_dev(port);
+        } else {
+            eprintln!("--dev-desktop requires a dev slot UI port (5201–5209)");
+            std::process::exit(1);
+        }
+        return;
+    }
+    if std::env::var_os("ORX_SSH_ASKPASS_ENDPOINT").is_some() {
+        if jobs::ssh::service::askpass().await.is_err() {
+            std::process::exit(1);
+        }
+        return;
+    }
+    if std::env::args().nth(1).as_deref() == Some("ssh-service") {
+        let result = if std::env::args().nth(2).as_deref() == Some("stop") {
+            jobs::ssh::service::shutdown_idle().await
+        } else {
+            jobs::ssh::service::run().await
+        };
+        if let Err(error) = result {
+            eprintln!("{error}");
+            std::process::exit(1);
+        }
+        return;
+    }
+
     #[cfg(windows)]
     {
         install_panic_reporter();
@@ -963,7 +1066,7 @@ async fn main() {
         return;
     }
 
-    let cli = Cli::parse();
+    let cli = Cli::try_parse().unwrap_or_else(|error| explain_removed_spawn_flags(error).exit());
     // Double-clicked from Explorer: open the desktop app instead of a console session.
     #[cfg(windows)]
     if cli.command.is_none() && owns_its_console() {
@@ -986,12 +1089,9 @@ async fn main() {
     // plan mode): it must stay fast and touch neither stdout nor the network, so
     // skip the update check and telemetry and run it directly.
     if matches!(command, Command::InvocationGate) {
+        // Fail open: a missing model only loses attribution, a deny blocks every Bash call.
         if let Err(error) = commands::invocation_gate::run().await {
             eprintln!("orx invocation-gate: {error}");
-            println!(
-                "{}",
-                serde_json::json!({"hookSpecificOutput":{"hookEventName":"PreToolUse","permissionDecision":"deny","permissionDecisionReason":"OpenResearch could not capture this tool invocation's model"}})
-            );
         }
         return;
     }
@@ -1047,7 +1147,8 @@ async fn main() {
         command,
         Command::Version(_) | Command::Update(_) | Command::Delete(_) | Command::Feedback(_)
     ))
-    .then(updates::UpdateWarning::start);
+    // `orx up` updates from its own periodic pass, once it holds the backend lock that defers it.
+    .then(|| updates::UpdateWarning::start(!matches!(command, Command::Up(_))));
 
     // Anonymous usage analytics. Record the flag process-globally so command
     // modules can fire events without threading it through, then fire the
@@ -1200,6 +1301,7 @@ fn should_capture_command(command: &Command) -> bool {
     !matches!(
         command,
         Command::Supervise(_)
+            | Command::RentalSupervise { .. }
             | Command::Update(UpdateArgs {
                 background: true,
                 ..
@@ -1219,6 +1321,8 @@ fn command_name(command: &Command) -> &'static str {
         Command::Agent(_) => "agent",
         Command::Runs(_) => "runs",
         Command::Logs(_) => "logs",
+        Command::Tensorboard(_) => "tensorboard",
+        Command::Metrics(_) => "metrics",
         Command::CreateExperiment(_) => "create-experiment",
         Command::Compute(_) => "compute",
         Command::Instance(_) => "instance",
@@ -1236,6 +1340,7 @@ fn command_name(command: &Command) -> &'static str {
         Command::Delete(_) => "delete",
         Command::Serve(_) => "serve",
         Command::Supervise(_) => "supervise",
+        Command::RentalSupervise { .. } => "rental-supervise",
         Command::Up(_) => "up",
         Command::Telemetry(_) => "telemetry",
         Command::Feedback(_) => "feedback",
@@ -1268,6 +1373,8 @@ async fn dispatch(command: Command) -> error::Result<()> {
         Command::Agent(args) => commands::agent::run(args).await,
         Command::Runs(args) => commands::runs::run(args).await,
         Command::Logs(args) => commands::logs::run(args).await,
+        Command::Tensorboard(args) => commands::tensorboard::run(args).await,
+        Command::Metrics(args) => commands::metrics::run(args).await,
         Command::CreateExperiment(args) => commands::create_experiment::run(args).await,
         Command::Compute(args) => commands::compute::run(args).await,
         Command::Instance(args) => commands::instance::run(args).await,
@@ -1288,6 +1395,7 @@ async fn dispatch(command: Command) -> error::Result<()> {
         Command::Delete(args) => commands::delete::run(args).await,
         Command::Serve(args) => commands::serve::run(args).await,
         Command::Supervise(args) => commands::supervise::run(args).await,
+        Command::RentalSupervise { config } => jobs::rental::supervise(&config).await,
         Command::Up(args) => match args.remote.clone() {
             Some(host) => commands::up_remote::run(&host, args).await,
             None => commands::up::run(args).await,
@@ -1413,6 +1521,21 @@ mod cli_tests {
             };
             assert_eq!(actual, expected);
         }
+    }
+
+    #[test]
+    fn agent_spawn_rejects_removed_settings_flags() {
+        for program in ["orx", "orx.exe"] {
+            for flag in ["--harness", "--model", "--model=legacy", "--no-wake"] {
+                let error = Cli::try_parse_from([program, "agent", "spawn", "task", flag])
+                    .expect_err("removed flag");
+                assert_eq!(error.kind(), clap::error::ErrorKind::UnknownArgument);
+                assert!(explain_removed_spawn_flags(error)
+                    .to_string()
+                    .contains("saved New Chat settings"));
+            }
+        }
+        assert!(Cli::try_parse_from(["orx", "agent", "spawn", "task", "--project", "p1"]).is_ok());
     }
 
     #[test]

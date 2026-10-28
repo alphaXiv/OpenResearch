@@ -216,6 +216,36 @@ test("a pending local turn survives reconciliation regardless of server clock sk
   assert.equal(result.activeLeafId, localId);
 });
 
+test("compaction's initial response cannot overwrite a newer streamed result", (t) => {
+  const { client, load } = setup(t, {});
+  const store = load("chatStore");
+  for (const status of ["completed", "error"]) {
+    const options = load("chat").getChatMessagesQuery(status);
+    const running = {
+      id: "compact", role: "assistant", createdAt: 1, parentId: "previous",
+      parts: [{ id: "compacted", type: "tool", tool: "compacted", state: { status: "running" } }],
+    };
+    const finished = {
+      ...running, completedAt: 2,
+      parts: [{ ...running.parts[0], state: { status, ...(status === "error" ? { error: "Could not compact" } : {}) } }],
+    };
+    const dispatch = (message, onlyIfMissing = false) => store.dispatchChat("p", {
+      type: "upsertMessage", sessionId: status, message, onlyIfMissing,
+    });
+    dispatch(running, true);
+    assert.deepEqual(client.getQueryData(options.queryKey).messages, [running]);
+    dispatch(finished);
+    store.dispatchChat("p", { type: "activeLeaf", sessionId: status, leafId: "another-branch" });
+    dispatch(running, true);
+    const result = client.getQueryData(options.queryKey);
+    assert.deepEqual(result.messages, [finished]);
+    assert.equal(result.activeLeafId, "another-branch");
+    // Live updates can still reopen a message when a turn is retried.
+    dispatch(running);
+    assert.deepEqual(client.getQueryData(options.queryKey).messages, [running]);
+  }
+});
+
 test("write invalidation stays scoped and excludes immutable commit bodies", async (t) => {
   const { client, load } = setup(t, {});
   const scope = load("client").workspaceScope();
@@ -327,4 +357,15 @@ test("sidebar pages preserve indicators arriving during cold and subsequent page
   await assert.rejects(pending, /offline/);
   assert.equal(listeners.size, 0);
   client.clear();
+});
+
+test("cached idle chats keep pending questions available when another chat is selected", (t) => {
+  const { client, load } = setup(t, {});
+  const chat = load("chat");
+  client.setQueryData(chat.listChatSessionsQuery("p").queryKey, [{ id: "pending", busy: false }, { id: "active", busy: false }]);
+  const snapshot = { messages: [{ id: "m", parts: [{ type: "prompt", prompt: { kind: "question", resolved: false } }] }], queued: [], activeLeafId: "m" };
+  client.setQueryData(chat.getChatMessagesQuery("pending").queryKey, snapshot);
+  const state = load("chatStore").readChatState("p", "active");
+  assert.equal(state.messagesBySession.pending, snapshot.messages);
+  assert.equal(state.busySessions.has("pending"), false);
 });
