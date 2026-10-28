@@ -59,7 +59,7 @@ also builds, smoke-tests, and uploads both AppImages
 (`openresearch-linux-<arch>-appimage`). The smoke test runs after WebKitGTK is
 removed from the runner, so it fails if the image falls back to a host copy.
 
-To build one locally on Ubuntu 22.04 or newer with Node 22 and pnpm 10:
+To build one locally on Ubuntu 22.04 or newer with Node 22 and the pnpm version pinned in `ui/package.json`:
 
 ```sh
 sudo apt-get install libwebkit2gtk-4.1-dev libgtk-3-dev librsvg2-dev file patchelf

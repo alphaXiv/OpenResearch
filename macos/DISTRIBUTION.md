@@ -150,7 +150,7 @@ Never commit the `.p12`.
 
 ## Build / sign locally
 
-Use Node 22 and pnpm 10 for the UI build.
+Use Node 22 and the pnpm version pinned in `ui/package.json` for the UI build.
 
 ```bash
 pnpm -C ui install --frozen-lockfile && pnpm -C ui build

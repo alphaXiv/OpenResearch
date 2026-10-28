@@ -125,9 +125,10 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: 22
-      - uses: pnpm/action-setup@v4
+      - uses: pnpm/setup@v1
         with:
-          version: 10
+          package-json-file: ui/package.json
+          install: false
       - name: Prepare release UI
         working-directory: ui
         run: |

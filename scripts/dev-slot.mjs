@@ -601,7 +601,7 @@ async function waitForUi(state) {
 
 function ensureUiDependencies(info) {
   if (existsSync(path.join(info.worktreePath, 'ui', 'node_modules'))) return
-  execFileSync('pnpm', ['-C', path.join(info.worktreePath, 'ui'), 'install', '--frozen-lockfile', '--config.strictDepBuilds=false'], { stdio: 'inherit' })
+  execFileSync('pnpm', ['-C', path.join(info.worktreePath, 'ui'), 'install', '--frozen-lockfile'], { stdio: 'inherit' })
 }
 
 function saveState(slotPaths, state) {
@@ -652,12 +652,11 @@ async function startUnlocked(info, dbMode, openBrowser) {
   uiListeners = listenerPids(slotPaths.uiPort)
   if (uiListeners.length === 0 && !supervisorMatches(state.uiProcess)) {
     console.log(`Starting ${slotPaths.slotKey} UI; log: ${state.uiLog}`)
-    state.uiProcess = spawnSupervised('pnpm', [
-      '-C', path.join(info.worktreePath, 'ui'),
-      'dev', '--port', String(slotPaths.uiPort), '--strictPort',
+    state.uiProcess = spawnSupervised(path.join(info.worktreePath, 'ui', 'node_modules', '.bin', 'vite'), [
+      '--port', String(slotPaths.uiPort), '--strictPort',
     ], {
-      cwd: info.worktreePath,
-      env: { ...process.env, npm_config_strict_dep_builds: 'false', ORX_BACKEND: `http://127.0.0.1:${slotPaths.backendPort}` },
+      cwd: path.join(info.worktreePath, 'ui'),
+      env: { ...process.env, ORX_BACKEND: `http://127.0.0.1:${slotPaths.backendPort}` },
     }, state.uiLog)
     saveState(slotPaths, state)
   }
