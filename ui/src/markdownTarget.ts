@@ -72,7 +72,7 @@ export function citedFilePath(path: string, resolveFilePath?: (path: string) => 
   if (native || /^file:/i.test(path)) return native;
   if (resolveFilePath) return resolveFilePath(path);
   try {
-    const decoded = decodeURI(path);
+    const decoded = decodeURIComponent(path);
     return decoded.includes("\0") ? null : decoded;
   } catch {
     return null;
