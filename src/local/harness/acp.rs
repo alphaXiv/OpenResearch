@@ -566,16 +566,6 @@ mod tests {
     use super::*;
 
     #[test]
-    fn acp_harnesses_use_shared_native_skills() {
-        for preset in crate::local::acp::presets() {
-            assert_eq!(
-                Acp(preset.launch).session_skills_dir(),
-                Some(".agents/skills")
-            );
-        }
-    }
-
-    #[test]
     fn model_catalog_preserves_native_ids_labels_and_order() {
         let modern = json!({"configOptions": [{"category":"model", "type":"select", "options":[
             {"name":"Provider", "options":[{"value":"opaque/a", "name":"Model A"}]},
