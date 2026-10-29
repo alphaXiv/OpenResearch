@@ -37,14 +37,15 @@ def peer():
             print(json.dumps({"jsonrpc": "2.0", "method": "session/update", "params": {
                 "sessionId": "skill-test", "update": {"sessionUpdate": "agent_message_chunk",
                 "content": {"type": "text", "text": "NATIVE_SKILLS_OK"}}}}), flush=True)
-            result = {"stopReason": "end_turn"}
+            # A pending prompt makes turn completion wait for disconnect cleanup.
+            break
         elif method == "session/set_config_option":
             options[0]["currentValue"] = request["params"]["value"]
             result = {"configOptions": options}
         else:
             raise AssertionError(method)
         print(json.dumps({"jsonrpc": "2.0", "id": request["id"], "result": result}), flush=True)
-        if method in ("session/prompt", "session/set_config_option"):
+        if method == "session/set_config_option":
             break
 
 
