@@ -8370,7 +8370,11 @@ async fn set_chat_configuration(
                 .ok_or_else(|| not_found("project"))?;
             let session_id = id.clone();
             let (cwd, _) = tokio::task::spawn_blocking(move || {
-                local::opencode::ensure_playbook(&project, &session_id, None)
+                local::opencode::ensure_playbook(
+                    &project,
+                    &session_id,
+                    Some(local::harness::acp::SESSION_SKILLS_DIR),
+                )
             })
             .await
             .map_err(bad_request)?

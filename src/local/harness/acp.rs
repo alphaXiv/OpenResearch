@@ -20,6 +20,8 @@ use crate::store::Store;
 
 mod auth;
 
+pub(crate) const SESSION_SKILLS_DIR: &str = ".agents/skills";
+
 static DISCOVERY_SLOTS: tokio::sync::Semaphore = tokio::sync::Semaphore::const_new(2);
 
 pub struct Acp(pub Definition);
@@ -69,6 +71,10 @@ impl Harness for Acp {
     }
     fn supports_chat(&self) -> bool {
         true
+    }
+
+    fn session_skills_dir(&self) -> Option<&'static str> {
+        Some(SESSION_SKILLS_DIR)
     }
 
     async fn detect_snapshot(&self) -> Option<HarnessInfo> {
@@ -197,7 +203,7 @@ async fn run_turn(ctx: &mut TurnCtx, definition: &Definition) -> Result<()> {
     let project = ctx.project.clone();
     let session_id = ctx.session_id.clone();
     let (cwd, _) = tokio::task::spawn_blocking(move || {
-        crate::local::opencode::ensure_playbook(&project, &session_id, None)
+        crate::local::opencode::ensure_playbook(&project, &session_id, Some(SESSION_SKILLS_DIR))
     })
     .await??;
     let host = ctx.host.acp.clone();
@@ -558,6 +564,16 @@ fn tool_output(tool: &Value, terminals: &HashMap<String, String>) -> Option<Stri
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn acp_harnesses_use_shared_native_skills() {
+        for preset in crate::local::acp::presets() {
+            assert_eq!(
+                Acp(preset.launch).session_skills_dir(),
+                Some(".agents/skills")
+            );
+        }
+    }
 
     #[test]
     fn model_catalog_preserves_native_ids_labels_and_order() {
