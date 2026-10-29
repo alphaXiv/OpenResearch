@@ -377,8 +377,10 @@ export function Onboarding({
     >
       {acpDialogOpen && <AcpHarnessDialog
         onClose={() => setAcpDialogOpen(false)}
-        onSaved={(definition) => {
-          addedAcpHarness.current = definition.id;
+        onSaved={(id) => {
+          const ready = harnesses?.find((h) => h.id === id && h.agentReady && !h.catalogPending);
+          addedAcpHarness.current = ready ? null : id;
+          if (ready) setPreferredHarness(ready.id);
           load(true, true);
         }}
       />}
@@ -390,6 +392,7 @@ export function Onboarding({
           onReady={(ready) => {
             setPreferredHarness(ready.id);
           }}
+          onAuth={(harness) => { setSetupHarness(null); setAuthHarness(harness); }}
           onClose={() => {
             setSetupHarness(null);
           }}

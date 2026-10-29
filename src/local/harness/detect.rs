@@ -254,6 +254,8 @@ pub struct HarnessInfo {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub account: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    pub account_name: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub org: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub plan: Option<String>,
@@ -311,6 +313,7 @@ impl HarnessInfo {
             auth_observation: None,
             claude_ultracode: false,
             account: None,
+            account_name: None,
             org: None,
             plan: None,
             agent_ready: false,

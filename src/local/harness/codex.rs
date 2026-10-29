@@ -728,6 +728,15 @@ fn exec_line_agent_message(line: &str) -> Option<String> {
     }
 }
 
+fn codex_plan_label(plan: &str) -> String {
+    match plan {
+        "prolite" => "Pro 100".into(),
+        "pro" => "Pro 200".into(),
+        "promax" => "Pro 500".into(),
+        _ => title_case(plan),
+    }
+}
+
 impl Codex {
     /// `snapshot` skips the `model/list` handshake and leaves the catalog empty;
     /// a
@@ -769,8 +778,9 @@ impl Codex {
                 info.authenticated = true;
                 info.auth_method = Some("oauth");
                 info.account = nonempty_str(&claims, "email");
+                info.account_name = nonempty_str(&claims, "name");
                 if let Some(oa) = claims.get("https://api.openai.com/auth") {
-                    info.plan = nonempty_str(oa, "chatgpt_plan_type").map(|p| title_case(&p));
+                    info.plan = nonempty_str(oa, "chatgpt_plan_type").map(|p| codex_plan_label(&p));
                 }
             }
         }
@@ -4350,6 +4360,14 @@ fn handle_item(ctx: &mut TurnCtx, item: &Value, next_id: &mut impl FnMut(&str) -
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn chatgpt_plan_labels_distinguish_pro_tiers() {
+        assert_eq!(super::codex_plan_label("plus"), "Plus");
+        assert_eq!(super::codex_plan_label("prolite"), "Pro 100");
+        assert_eq!(super::codex_plan_label("pro"), "Pro 200");
+        assert_eq!(super::codex_plan_label("promax"), "Pro 500");
+    }
+
     #[cfg(unix)]
     #[tokio::test]
     async fn compaction_restores_the_saved_thread_once_without_a_user_turn() {
