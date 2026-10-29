@@ -689,6 +689,15 @@ fn probe_writable(dir: &Path) -> std::io::Result<()> {
     Ok(())
 }
 
+/// How an `orx update` run ended, for the attempt bookkeeping in `commands::update`.
+pub(crate) enum Outcome {
+    Done,
+    /// Another updater holds the lock.
+    Contended,
+    /// A running backend installs it on restart instead.
+    Deferred,
+}
+
 /// What `preflight` resolved this install to. The installer variant is checked
 /// here; the bundle's checks live in `macos_app::ensure_replaceable`, which runs
 /// after the version comparison so `--dry-run` needs no signed, writable app.
@@ -1002,6 +1011,34 @@ pub fn record_deferred(version: &str, tag: &str) {
         cache.deferred_version = version.to_string();
         cache.deferred_tag = tag.to_string();
     });
+}
+
+/// Names the release a stage directory holds. Written before the stage's final
+/// rename, so the payload and its identity are published together.
+const STAGED_RELEASE: &str = "release";
+
+pub(crate) fn write_staged_release(stage: &Path, version: &Version, tag: &str) -> Result<()> {
+    let path = stage.join(STAGED_RELEASE);
+    std::fs::write(&path, format!("{version}\n{tag}"))
+        .map_err(|e| anyhow!("Could not write {}: {}", path.display(), e))
+}
+
+/// The release staged at `stage` for a restart to install, if this build may still
+/// move to it.
+pub(crate) fn staged_release(stage: &Path, current: &Version) -> Option<(Version, String)> {
+    staged_release_in(stage, &read_cache().unwrap_or_default(), current)
+}
+
+fn staged_release_in(
+    stage: &Path,
+    cache: &CheckCache,
+    current: &Version,
+) -> Option<(Version, String)> {
+    let raw = std::fs::read_to_string(stage.join(STAGED_RELEASE)).ok()?;
+    let (version, tag) = raw.split_once('\n')?;
+    let version = Version::parse(version).ok()?;
+    (release_available(current, &version, tag) && compatible_with_current(cache, tag))
+        .then(|| (version, tag.to_string()))
 }
 
 fn desktop_install_pending(
@@ -2059,11 +2096,12 @@ impl UpdateWarning {
 #[cfg(test)]
 mod tests {
     use super::{
-        app_bundle_root, attempt_backoff, attempt_due, bold, claim_install, detect_channel,
-        exe_matches_prefix, now_unix, package_manager_owns, parse_manifest, portable_dir,
-        portable_outside_prefix, precedence, relaunch_args, release_asset_url, render,
-        restart_target, retired_path, target_lock_path, warning_for, BackendLock, CheckCache,
-        InstallChannel, UpdateTarget, ATTEMPT_BACKOFF_MAX, ATTEMPT_BACKOFF_MIN,
+        app_bundle_root, attempt_backoff, attempt_due, bold, claim_install, current_version,
+        detect_channel, exe_matches_prefix, now_unix, package_manager_owns, parse_manifest,
+        portable_dir, portable_outside_prefix, precedence, relaunch_args, release_asset_url,
+        render, restart_target, retired_path, staged_release_in, target_lock_path, warning_for,
+        write_staged_release, BackendLock, CheckCache, InstallChannel, UpdateTarget,
+        ATTEMPT_BACKOFF_MAX, ATTEMPT_BACKOFF_MIN,
     };
     use semver::Version;
     use std::ffi::OsString;
@@ -2429,6 +2467,51 @@ mod tests {
         cache.deferred_tag = "v0.2.19".into();
         assert_eq!(restart_target(&cache, &v("0.2.16")).unwrap().0, v("0.2.18"));
         assert_eq!(restart_target(&cache, &v("0.2.18")).unwrap().0, v("0.2.19"));
+    }
+
+    #[test]
+    fn a_stage_names_its_own_release_and_needs_a_proof_for_this_build() {
+        let v = |s: &str| Version::parse(s).unwrap();
+        let stage = std::env::temp_dir().join(format!("orx-stage-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&stage).unwrap();
+        let proof = option_env!("ORX_DESKTOP_CANARY_SHA")
+            .map_or_else(|| format!("v{}", current_version()), str::to_string);
+        // The cache still names an earlier stage, as after a restage killed before
+        // `record_deferred`.
+        let mut cache = CheckCache {
+            deferred_version: "0.2.17".into(),
+            deferred_tag: "v0.2.17".into(),
+            ..Default::default()
+        };
+        for tag in ["v0.2.17", "v0.2.18"] {
+            cache.compatible_releases.insert(tag.into(), proof.clone());
+        }
+
+        assert_eq!(staged_release_in(&stage, &cache, &v("0.2.16")), None);
+
+        write_staged_release(&stage, &v("0.2.18"), "v0.2.18").unwrap();
+        assert_eq!(
+            staged_release_in(&stage, &cache, &v("0.2.16")),
+            Some((v("0.2.18"), "v0.2.18".into()))
+        );
+        assert_eq!(staged_release_in(&stage, &cache, &v("0.2.18")), None);
+
+        // A canary staged by another build, e.g. before a newer stable was installed
+        // by hand, is not this build's to install.
+        write_staged_release(&stage, &v("0.2.19"), "canary-20261027.1").unwrap();
+        cache
+            .compatible_releases
+            .insert("canary-20261027.1".into(), "v0.0.0-another-build".into());
+        assert_eq!(staged_release_in(&stage, &cache, &v("0.2.16")), None);
+        cache
+            .compatible_releases
+            .insert("canary-20261027.1".into(), proof);
+        assert_eq!(
+            staged_release_in(&stage, &cache, &v("0.2.16")),
+            Some((v("0.2.19"), "canary-20261027.1".into()))
+        );
+
+        std::fs::remove_dir_all(&stage).unwrap();
     }
 
     #[test]

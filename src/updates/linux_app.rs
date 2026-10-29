@@ -18,6 +18,7 @@ use semver::Version;
 use serde::Deserialize;
 use sha2::{Digest, Sha256};
 
+use super::Outcome;
 use crate::error::{anyhow, Result};
 
 /// Release asset describing the published AppImages. Written by
@@ -83,13 +84,38 @@ pub async fn fetch_manifest(timeout: Duration) -> Result<Option<AppManifest>> {
     Ok(manifest)
 }
 
+/// Where a downloaded, verified AppImage waits beside the installed one for the
+/// restart that renames it into place. Deliberately not `sweep_leftovers`'
+/// `.OpenResearch-update-`: this one outlives the run that made it.
+const STAGED_DIR: &str = ".OpenResearch-staged";
+const STAGED_APPIMAGE: &str = "OpenResearch.AppImage";
+
 /// Replace the `.AppImage` at `appimage` with the latest release.
+///
+/// While a backend runs from it, the release is only downloaded and verified into
+/// [`STAGED_DIR`]; the restart that follows just renames it into place.
 pub async fn update(
     appimage: &Path,
     current: &Version,
     dry_run: bool,
     background: bool,
-) -> Result<()> {
+    backend_running: bool,
+) -> Result<Outcome> {
+    let parent = appimage
+        .parent()
+        .ok_or_else(|| anyhow!("{} has no parent directory", appimage.display()))?;
+    let staged = parent.join(STAGED_DIR);
+
+    // The restart installs what an earlier pass staged without asking the network
+    // again: offline, or in the minutes before a new release's manifest is
+    // published, it would find nothing to install.
+    if !backend_running && !dry_run {
+        if let Some((version, tag)) = super::staged_release(&staged, current) {
+            ensure_replaceable(appimage, parent)?;
+            return install(appimage, &staged, current, &version, &tag, background);
+        }
+    }
+
     let published = fetch_manifest(Duration::from_secs(10)).await?;
     let latest = published
         .as_ref()
@@ -122,7 +148,7 @@ pub async fn update(
             if !background {
                 println!("{}", super::compatibility_wait_message(&manifest.tag));
             }
-            return Ok(());
+            return Ok(Outcome::Done);
         }
     }
 
@@ -133,7 +159,7 @@ pub async fn update(
         if !background {
             println!("OpenResearch {} is up to date.", current);
         }
-        return Ok(());
+        return Ok(Outcome::Done);
     };
 
     if dry_run {
@@ -141,65 +167,70 @@ pub async fn update(
             "OpenResearch {} → {} is available. Re-run without --dry-run to update.",
             current, latest
         );
-        return Ok(());
+        return Ok(Outcome::Done);
     }
 
-    let parent = ensure_replaceable(appimage)?;
-    let arch = std::env::consts::ARCH;
-    let asset = manifest.assets.get(arch).ok_or_else(|| {
-        anyhow!(
-            "{} has no AppImage for {arch}. Download OpenResearch from {}/releases/latest.",
-            manifest.tag,
-            super::REPO_URL
+    ensure_replaceable(appimage, parent)?;
+    let staged_already =
+        super::staged_release(&staged, current).is_some_and(|(_, tag)| tag == manifest.tag);
+    if !staged_already {
+        let arch = std::env::consts::ARCH;
+        let asset = manifest.assets.get(arch).ok_or_else(|| {
+            anyhow!(
+                "{} has no AppImage for {arch}. Download OpenResearch from {}/releases/latest.",
+                manifest.tag,
+                super::REPO_URL
+            )
+        })?;
+        if !background {
+            eprintln!("Updating OpenResearch {} → {} ...", current, latest);
+        }
+
+        let bytes = super::fetch_release_asset(
+            &manifest.tag,
+            &asset.asset,
+            // The AppImage carries WebKitGTK, so it is a large download.
+            Duration::from_secs(600),
         )
-    })?;
-    if !background {
-        eprintln!("Updating OpenResearch {} → {} ...", current, latest);
+        .await?;
+        let digest = format!("{:x}", Sha256::digest(&bytes));
+        if !digest.eq_ignore_ascii_case(asset.sha256.trim()) {
+            return Err(anyhow!(
+                "The downloaded {} does not match the checksum published for {} \
+                 (expected {}, got {}). Nothing was installed.",
+                asset.asset,
+                manifest.tag,
+                asset.sha256.trim(),
+                digest
+            ));
+        }
+        stage(parent, appimage, &staged, &bytes, &latest, &manifest.tag)?;
     }
 
-    let bytes = super::fetch_release_asset(
+    if backend_running {
+        super::record_deferred(&latest.to_string(), &manifest.tag);
+        if !background {
+            println!(
+                "OpenResearch {} is ready. The running app installs it when it restarts.",
+                latest
+            );
+        }
+        return Ok(Outcome::Deferred);
+    }
+
+    install(
+        appimage,
+        &staged,
+        current,
+        &latest,
         &manifest.tag,
-        &asset.asset,
-        // The AppImage carries WebKitGTK, so it is a large download.
-        Duration::from_secs(600),
+        background,
     )
-    .await?;
-    let digest = format!("{:x}", Sha256::digest(&bytes));
-    if !digest.eq_ignore_ascii_case(asset.sha256.trim()) {
-        return Err(anyhow!(
-            "The downloaded {} does not match the checksum published for {} \
-             (expected {}, got {}). Nothing was installed.",
-            asset.asset,
-            manifest.tag,
-            asset.sha256.trim(),
-            digest
-        ));
-    }
-
-    // Beside the target, so the final move is a same-filesystem rename. A killed
-    // update leaves its full-size staged copy, so clear older ones first.
-    super::macos_app::sweep_leftovers(parent, appimage);
-    let staged = parent.join(format!(
-        ".OpenResearch-update-{}.AppImage",
-        uuid::Uuid::new_v4()
-    ));
-    let installed = install_staged(&staged, &bytes, appimage);
-    if installed.is_err() {
-        let _ = std::fs::remove_file(&staged);
-    }
-    installed?;
-
-    super::record_installed(&latest.to_string(), &manifest.tag);
-    if !background {
-        println!("✓ Updated OpenResearch {} → {}.", current, latest);
-        println!("Restart the app to run the new version.");
-    }
-    Ok(())
 }
 
 /// Refuse the installs where replacing the file is wrong or impossible, each
-/// with the action that fixes it. Returns the directory the AppImage is in.
-fn ensure_replaceable(appimage: &Path) -> Result<&Path> {
+/// with the action that fixes it.
+fn ensure_replaceable(appimage: &Path, parent: &Path) -> Result<()> {
     if crate::telemetry::build_channel() != "production" {
         return Err(anyhow!(
             "This OpenResearch AppImage isn't an official build, so it won't update itself.\n\
@@ -207,9 +238,6 @@ fn ensure_replaceable(appimage: &Path) -> Result<&Path> {
             super::REPO_URL
         ));
     }
-    let parent = appimage
-        .parent()
-        .ok_or_else(|| anyhow!("{} has no parent directory", appimage.display()))?;
     super::probe_writable(parent).map_err(|e| {
         anyhow!(
             "Can't write to {} ({e}), so OpenResearch can't update itself.\nMove {} somewhere \
@@ -217,17 +245,106 @@ fn ensure_replaceable(appimage: &Path) -> Result<&Path> {
             parent.display(),
             appimage.display()
         )
-    })?;
-    Ok(parent)
+    })
 }
 
-fn install_staged(staged: &Path, bytes: &[u8], appimage: &Path) -> Result<()> {
+/// Write the AppImage and its release label into a scratch directory and rename it
+/// to `staged` last, so `staged` only ever holds a complete, labelled AppImage.
+fn stage(
+    parent: &Path,
+    appimage: &Path,
+    staged: &Path,
+    bytes: &[u8],
+    version: &Version,
+    tag: &str,
+) -> Result<()> {
     use std::os::unix::fs::PermissionsExt;
 
-    std::fs::write(staged, bytes)
-        .map_err(|e| anyhow!("Could not write {}: {}", staged.display(), e))?;
-    std::fs::set_permissions(staged, std::fs::Permissions::from_mode(0o755))
-        .map_err(|e| anyhow!("Could not make {} executable: {}", staged.display(), e))?;
-    std::fs::rename(staged, appimage)
-        .map_err(|e| anyhow!("Could not replace {}: {}", appimage.display(), e))
+    // Beside the target, so the final move is a same-filesystem rename. A killed
+    // update leaves its full-size scratch copy, so clear older ones first.
+    super::macos_app::sweep_leftovers(parent, appimage);
+    let scratch = parent.join(format!(".OpenResearch-update-{}", uuid::Uuid::new_v4()));
+    let payload = scratch.join(STAGED_APPIMAGE);
+
+    let written = (|| {
+        std::fs::create_dir_all(&scratch)
+            .map_err(|e| anyhow!("Could not create {}: {}", scratch.display(), e))?;
+        std::fs::write(&payload, bytes)
+            .map_err(|e| anyhow!("Could not write {}: {}", payload.display(), e))?;
+        std::fs::set_permissions(&payload, std::fs::Permissions::from_mode(0o755))
+            .map_err(|e| anyhow!("Could not make {} executable: {}", payload.display(), e))?;
+        super::write_staged_release(&scratch, version, tag)?;
+
+        let _ = std::fs::remove_dir_all(staged);
+        std::fs::rename(&scratch, staged)
+            .map_err(|e| anyhow!("Could not stage {}: {}", staged.display(), e))
+    })();
+    if written.is_err() {
+        let _ = std::fs::remove_dir_all(&scratch);
+    }
+    written
+}
+
+/// Rename the AppImage staged in `staged` over `appimage`.
+fn install(
+    appimage: &Path,
+    staged: &Path,
+    current: &Version,
+    version: &Version,
+    tag: &str,
+    background: bool,
+) -> Result<Outcome> {
+    std::fs::rename(staged.join(STAGED_APPIMAGE), appimage)
+        .map_err(|e| anyhow!("Could not replace {}: {}", appimage.display(), e))?;
+    let _ = std::fs::remove_dir_all(staged);
+
+    super::record_installed(&version.to_string(), tag);
+    if !background {
+        println!("✓ Updated OpenResearch {} → {}.", current, version);
+        println!("Restart the app to run the new version.");
+    }
+    Ok(Outcome::Done)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_restage_replaces_the_payload_and_its_release_together() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let v = |s: &str| Version::parse(s).unwrap();
+        let parent = std::env::temp_dir().join(format!("orx-appimage-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&parent).unwrap();
+        let appimage = parent.join("OpenResearch.AppImage");
+        let staged = parent.join(STAGED_DIR);
+        let cache = super::super::CheckCache::default();
+
+        for (bytes, version) in [(&b"first"[..], "0.2.17"), (b"second", "0.2.18")] {
+            let tag = format!("v{version}");
+            stage(&parent, &appimage, &staged, bytes, &v(version), &tag).unwrap();
+        }
+
+        let payload = staged.join(STAGED_APPIMAGE);
+        assert_eq!(std::fs::read(&payload).unwrap(), b"second");
+        assert_eq!(
+            std::fs::metadata(&payload).unwrap().permissions().mode() & 0o777,
+            0o755
+        );
+        if option_env!("ORX_DESKTOP_CANARY_TAG").is_none() {
+            assert_eq!(
+                super::super::staged_release_in(&staged, &cache, &v("0.2.16")),
+                Some((v("0.2.18"), "v0.2.18".into()))
+            );
+        }
+        // Only the stage is left beside the AppImage: no scratch directories.
+        let entries: Vec<_> = std::fs::read_dir(&parent)
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name())
+            .collect();
+        assert_eq!(entries, [STAGED_DIR]);
+
+        std::fs::remove_dir_all(&parent).unwrap();
+    }
 }
