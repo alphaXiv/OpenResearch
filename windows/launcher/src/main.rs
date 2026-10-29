@@ -12,11 +12,13 @@ fn main() {
     use windows_sys::Win32::UI::WindowsAndMessaging::AllowSetForegroundWindow;
 
     let started = std::env::current_exe().and_then(|exe| {
-        std::process::Command::new(exe.with_file_name("orx.exe"))
-            // APP_ARG in src/commands/app.rs.
-            .arg("app")
-            .creation_flags(CREATE_NO_WINDOW)
-            .spawn()
+        let mut cmd = std::process::Command::new(exe.with_file_name("orx.exe"));
+        // APP_ARG in src/commands/app.rs.
+        cmd.arg("app");
+        // Forward any arguments (e.g. `--remote <host>`) to orx.exe.
+        cmd.args(std::env::args_os().skip(1));
+        cmd.creation_flags(CREATE_NO_WINDOW);
+        cmd.spawn()
     });
     match started {
         // Explorer lets the program it started take the foreground; pass that on,

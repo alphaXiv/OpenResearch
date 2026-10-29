@@ -1474,11 +1474,13 @@ pub fn relaunch(port: u16) -> std::io::Error {
     if crate::commands::app::launched_with_app_arg() {
         // The update replaced the `.AppImage` file, not this mount of it, and its
         // AppRun adds `app`, which the exec below's `--no-browser` would undo.
+        let trailing_args: Vec<std::ffi::OsString> = std::env::args_os().skip(2).collect();
         let mut app = match running_appimage() {
             Some(appimage) => {
                 let mut app = std::process::Command::new(appimage);
                 // Or the new AppRun would save this image's GTK settings as the session's.
                 crate::local::shell_env::restore_host_gui_env(&mut app);
+                app.args(trailing_args);
                 app
             }
             None => {
@@ -1486,7 +1488,12 @@ pub fn relaunch(port: u16) -> std::io::Error {
                     return std::io::Error::other("could not resolve the running executable");
                 };
                 let mut app = std::process::Command::new(exe);
-                app.arg(crate::commands::app::APP_ARG);
+                let app_args: Vec<std::ffi::OsString> = std::env::args_os().skip(1).collect();
+                if app_args.is_empty() {
+                    app.arg(crate::commands::app::APP_ARG);
+                } else {
+                    app.args(app_args);
+                }
                 app
             }
         };
@@ -1512,10 +1519,11 @@ pub fn relaunch(port: u16) -> std::io::Error {
 #[cfg(windows)]
 pub fn relaunch(port: u16) -> std::io::Error {
     if crate::commands::app::launched_with_app_arg() {
-        return windows::relaunch(
-            vec![crate::commands::app::APP_ARG.into()],
-            &[(APP_RELAUNCH_PORT_ENV, port.to_string())],
-        );
+        let mut args: Vec<std::ffi::OsString> = std::env::args_os().skip(1).collect();
+        if args.is_empty() {
+            args.push(crate::commands::app::APP_ARG.into());
+        }
+        return windows::relaunch(args, &[(APP_RELAUNCH_PORT_ENV, port.to_string())]);
     }
     windows::relaunch(relaunch_args(std::env::args_os().skip(1)), &[])
 }

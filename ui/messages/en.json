@@ -1210,6 +1210,7 @@
   "remote_open": "Open remote",
   "remote_connected_as": "Connected to {host} as {user}",
   "remote_disconnect": "Disconnect",
+  "remote_return_to_local": "Return to local workspace",
   "remote_persistence_explanation": "Closing this tab or disconnecting leaves agents and experiments running. Approval requests remain pending for up to 55 minutes. A host restart or administrator policy may stop OpenResearch.",
   "remote_gateway_unavailable": "Restart local OpenResearch and select this SSH host again. Work on the remote host continues.",
   "remote_stop_host": "Stop OpenResearch on host",

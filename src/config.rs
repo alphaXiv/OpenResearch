@@ -318,6 +318,17 @@ pub fn set_auto_update_enabled(enabled: bool) -> Result<()> {
     Ok(())
 }
 
+#[cfg_attr(not(desktop_app), allow(dead_code))]
+pub fn default_remote() -> Option<String> {
+    crate::telemetry::default_remote()
+}
+
+#[allow(dead_code)]
+pub fn set_default_remote(host: Option<String>) -> Result<()> {
+    crate::telemetry::set_default_remote(host)?;
+    Ok(())
+}
+
 pub fn github_default_prompt_seen() -> bool {
     crate::telemetry::github_default_prompt_seen()
 }

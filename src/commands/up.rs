@@ -321,7 +321,7 @@ pub(crate) fn request_shutdown() {
 /// SIGTERM and SIGHUP (SIGHUP is what an SSH tunnel delivers on disconnect, so
 /// a `--remote`-launched server exits with its tunnel instead of leaking); and
 /// [`request_shutdown`].
-async fn shutdown_signal() {
+pub(crate) async fn shutdown_signal() {
     tokio::select! {
         _ = SHUTDOWN_REQUESTED.notified() => {}
         _ = os_shutdown_signal() => {}
@@ -7022,6 +7022,13 @@ struct CreateRemoteSessionReq {
     ui_preferences: crate::commands::up_remote::RemoteUiPreferences,
 }
 
+fn validate_remote_session_host(host: &str) -> Result<(), ApiError> {
+    if host.is_empty() || host.chars().any(|c| c.is_whitespace() || c.is_control()) {
+        return Err(bad_request("Invalid host name"));
+    }
+    Ok(())
+}
+
 async fn create_remote_session(
     State(state): State<AppState>,
     Json(req): Json<CreateRemoteSessionReq>,
@@ -7030,7 +7037,7 @@ async fn create_remote_session(
     if host.is_empty() {
         return Err(bad_request("host is required"));
     }
-    require_configured_ssh_host(&host).await?;
+    validate_remote_session_host(&host)?;
     let (created, session) = state
         .remote_sessions
         .create(host, req.ui_preferences, None)

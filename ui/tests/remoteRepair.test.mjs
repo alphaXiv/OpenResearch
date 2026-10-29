@@ -26,6 +26,8 @@ function mount(writeText) {
     m: new Proxy({}, { get: (_, name) => () => String(name) }),
     ltr: (value) => value,
     needsInteractiveSsh: () => false,
+    getLocalDesktopOrigin: () => null,
+    returnToLocalWorkspace: () => {},
     Button: "Button",
     Input: "Input",
     Spinner: "Spinner",

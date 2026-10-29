@@ -1209,6 +1209,7 @@
   "remote_open": "فتح مساحة العمل البعيدة",
   "remote_connected_as": "متصل بـ {host} باسم {user}",
   "remote_disconnect": "قطع الاتصال",
+  "remote_return_to_local": "العودة إلى مساحة العمل المحلية",
   "remote_persistence_explanation": "إغلاق هذا التبويب أو قطع الاتصال يُبقي الوكلاء والتجارب قيد التشغيل. تبقى طلبات الموافقة معلّقة لمدة تصل إلى 55 دقيقة. قد تتسبب إعادة تشغيل المضيف أو سياسة المسؤول في إيقاف OpenResearch.",
   "remote_gateway_unavailable": "أعد تشغيل OpenResearch المحلي واختر مضيف SSH هذا مجددًا. يستمر العمل على المضيف البعيد.",
   "remote_stop_host": "إيقاف OpenResearch على المضيف",

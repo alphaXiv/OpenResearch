@@ -1210,6 +1210,7 @@
   "remote_open": "Abrir remoto",
   "remote_connected_as": "Conectado a {host} como {user}",
   "remote_disconnect": "Desconectar",
+  "remote_return_to_local": "Volver al espacio de trabajo local",
   "remote_persistence_explanation": "Si cierras esta pestaña o te desconectas, los agentes y experimentos siguen en ejecución. Las solicitudes de aprobación quedan pendientes hasta 55 minutos. Un reinicio del host o una política del administrador pueden detener OpenResearch.",
   "remote_gateway_unavailable": "Reinicia OpenResearch en local y vuelve a seleccionar este host SSH. El trabajo en el host remoto continúa.",
   "remote_stop_host": "Detener OpenResearch en el host",

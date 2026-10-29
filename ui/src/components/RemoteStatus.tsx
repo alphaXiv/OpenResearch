@@ -11,6 +11,7 @@ import {
 import { ltr } from "../i18n";
 import { m } from "../paraglide/messages.js";
 import { Menu } from "@base-ui/react/menu";
+import { getLocalDesktopOrigin, returnToLocalWorkspace } from "../remoteDesktop";
 import { RemoteIcon } from "./RemoteIcon";
 import { RemoteStopDialog } from "./RemoteStopDialog";
 import { BrandMark } from "./Wordmark";
@@ -28,6 +29,7 @@ export function RemoteStatus({
   const [stopping, setStopping] = useState(false);
   const [stopPreview, setStopPreview] = useState<RemoteStopPreview | null>(null);
   const [open, setOpen] = useState(false);
+  const localOrigin = getLocalDesktopOrigin();
 
   async function confirmStopHost() {
     if (!stopPreview) return;
@@ -94,6 +96,19 @@ export function RemoteStatus({
                       <Info size={16} />
                     </Tooltip>
                   </div>
+                  {localOrigin && (
+                    <Menu.Item
+                      nativeButton
+                      render={<MenuItem className="hover:bg-transparent data-highlighted:bg-surface data-disabled:opacity-45 data-disabled:cursor-default" />}
+                      closeOnClick={false}
+                      onClick={() => {
+                        setOpen(false);
+                        returnToLocalWorkspace(localOrigin);
+                      }}
+                    >
+                      {m.remote_return_to_local()}
+                    </Menu.Item>
+                  )}
                   <Menu.Item
                     nativeButton
                     render={<MenuItem danger className="data-highlighted:bg-surface data-disabled:opacity-45 data-disabled:cursor-default" />}

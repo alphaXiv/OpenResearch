@@ -1204,6 +1204,7 @@
   "remote_open": "打开远程工作区",
   "remote_connected_as": "已以 {user} 身份连接到 {host}",
   "remote_disconnect": "断开连接",
+  "remote_return_to_local": "返回本地工作区",
   "remote_persistence_explanation": "关闭此标签页或断开连接后，代理和实验仍会继续运行。审批请求最多保持待处理 55 分钟。主机重启或管理员策略可能会停止 OpenResearch。",
   "remote_gateway_unavailable": "请重新启动本地 OpenResearch 并再次选择此 SSH 主机。远程主机上的工作仍在继续。",
   "remote_stop_host": "停止主机上的 OpenResearch",
