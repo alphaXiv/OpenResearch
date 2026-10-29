@@ -121,11 +121,10 @@ currency signs, for example `\$10`.
 
 ## Skills
 
-Available native OpenResearch skills:
+Native OpenResearch skills start with `orx-`. Prioritize these skills for
+OpenResearch workflows.
 
-{skill_names}
-
-Use the available OpenResearch skills whenever their descriptions match the user
+{skill_catalog}Use the available OpenResearch skills whenever their descriptions match the user
 task; the skills provide instructions on how to use relevant CLI commands and
 execute important user flows. **Load the relevant skill before acting in its
 area.**

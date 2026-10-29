@@ -188,7 +188,11 @@ fn project_state_md(project: &LocalProject, state: &ProjectState) -> String {
     )
 }
 
-fn playbook_md(project: &LocalProject, state: &ProjectState) -> String {
+fn playbook_md(
+    project: &LocalProject,
+    state: &ProjectState,
+    session_skills_dir: Option<&str>,
+) -> String {
     let id = &project.id;
     let name = &project.name;
     let publication_line = if project.github_enabled() {
@@ -237,11 +241,16 @@ fn playbook_md(project: &LocalProject, state: &ProjectState) -> String {
          {compute_default_source}; load **`orx-compute`** and read `orx compute instructions show` before configuring or launching"
     );
     let project_state = project_state_md(project, state);
-    let skill_names = super::agent_skills::skills(super::agent_skills::SkillSet::Local)
-        .iter()
-        .map(|skill| format!("- `{}`: {}", skill.name, skill.description))
-        .collect::<Vec<_>>()
-        .join("\n");
+    let skill_catalog = if session_skills_dir.is_some() {
+        String::new()
+    } else {
+        let skills = super::agent_skills::skills(super::agent_skills::SkillSet::Local)
+            .iter()
+            .map(|skill| format!("- `{}`: {}", skill.name, skill.description))
+            .collect::<Vec<_>>()
+            .join("\n");
+        format!("Available OpenResearch skills:\n\n{skills}\n\n")
+    };
     let template = SYSTEM_PROMPT
         .split_once("-->\n\n")
         .map(|(_, rest)| rest)
@@ -254,7 +263,7 @@ fn playbook_md(project: &LocalProject, state: &ProjectState) -> String {
         .replace("{compute_bullet}", &compute_bullet)
         .replace("{artifacts}", &artifacts)
         .replace("{project_state}", &project_state)
-        .replace("{skill_names}", &skill_names)
+        .replace("{skill_catalog}", &skill_catalog)
 }
 
 /// Keep the files we drop into the checkout out of `git status` / accidental
@@ -323,8 +332,11 @@ pub fn ensure_playbook(
             .map_err(|e| anyhow!("Could not create {}: {}", parent.display(), e))?;
     }
     let project_state = ProjectState::load(&project.id)?;
-    std::fs::write(&playbook, playbook_md(project, &project_state))
-        .map_err(|e| anyhow!("Could not write {}: {}", playbook.display(), e))?;
+    std::fs::write(
+        &playbook,
+        playbook_md(project, &project_state, session_skills_dir),
+    )
+    .map_err(|e| anyhow!("Could not write {}: {}", playbook.display(), e))?;
     // Modular skills, written fresh beside the playbook (same freshness
     // semantics) so this session's agent discovers them natively.
     if let Some(dir) = session_skills_dir {
@@ -1363,7 +1375,26 @@ mod tests {
     }
 
     fn sample_playbook() -> String {
-        playbook_md(&sample_project(), &ProjectState::default())
+        playbook_md(&sample_project(), &ProjectState::default(), None)
+    }
+
+    #[test]
+    fn native_skill_discovery_omits_duplicate_catalog() {
+        for dir in [
+            ".agents/skills",
+            ".claude/skills",
+            ".opencode/skills",
+            ".cursor/skills",
+        ] {
+            let md = playbook_md(&sample_project(), &ProjectState::default(), Some(dir));
+            assert!(md.contains("Native OpenResearch skills start with `orx-`"));
+            assert!(md.contains("Load the relevant skill before acting"));
+            assert!(!md.contains("{skill_catalog}"));
+            assert!(!md.contains("Available OpenResearch skills:"));
+            for skill in agent_skills::skills(SkillSet::Local) {
+                assert!(!md.contains(&format!("- `{}`:", skill.name)));
+            }
+        }
     }
 
     /// The playbook's runtime placeholders must all resolve.
@@ -1413,7 +1444,7 @@ mod tests {
         assert!(md.contains("Use the available OpenResearch skills"));
         assert!(md.contains("execute important user flows"));
         assert!(!md.contains("orx skill <name>"));
-        // Native catalogs may abbreviate descriptions; preserve routing context here.
+        // Harnesses without native discovery still need the catalog.
         for skill in agent_skills::skills(SkillSet::Local) {
             assert!(md.contains(&format!("- `{}`: {}", skill.name, skill.description)));
         }
@@ -1431,7 +1462,7 @@ mod tests {
         let mut project = sample_project();
         project.github_owner.clear();
         project.github_repo.clear();
-        let md = playbook_md(&project, &ProjectState::default());
+        let md = playbook_md(&project, &ProjectState::default(), None);
         assert!(md.contains("default target"));
         assert!(md.contains("orx-compute"));
         assert!(md.contains("orx-instances"));
@@ -1459,7 +1490,7 @@ mod tests {
 
         let mut project = sample_project();
         project.run_command = Some("python train.py".into());
-        let configured = playbook_md(&project, &ProjectState::default());
+        let configured = playbook_md(&project, &ProjectState::default(), None);
         assert!(
             configured.contains("experiment tree is empty and the fixed run command is configured")
         );
@@ -1474,7 +1505,7 @@ mod tests {
             runs: 18,
             active_runs: 1,
         };
-        let md = playbook_md(&project, &state);
+        let md = playbook_md(&project, &state, None);
         assert!(md.contains("**12 experiments**"));
         assert!(md.contains("**18 runs** (1 run active)"));
         assert!(md.contains("fixed run command is configured"));
@@ -1539,7 +1570,7 @@ mod tests {
 
         for md in [
             sample_playbook(),
-            playbook_md(&local_only, &ProjectState::default()),
+            playbook_md(&local_only, &ProjectState::default(), None),
         ] {
             crate::local::assert_agent_guidance_is_ui_agnostic("playbook", &md);
         }
