@@ -1493,5 +1493,9 @@
   "harness_already_added": "Ya has añadido este agente",
   "harness_custom_acp": "Agente ACP personalizado",
   "acp_definitions_load_failed": "No se pudieron cargar los agentes ACP guardados. La lista puede estar incompleta; vuelve a intentarlo para añadir agentes ACP.",
-  "acp_definitions_loading": "Cargando agentes ACP guardados…"
+  "acp_definitions_loading": "Cargando agentes ACP guardados…",
+  "common_cancel": "Cancelar",
+  "common_confirm": "Confirmar",
+  "common_ok": "Aceptar",
+  "common_submit": "Enviar"
 }

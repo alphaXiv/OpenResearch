@@ -1,3 +1,4 @@
+import { showConfirmDialog } from "../dialog";
 import { useMutation, useQuery } from "@tanstack/react-query";
 
 import { listUserSkillsQuery, listLatexTemplatesQuery } from "../queries/settings";
@@ -140,10 +141,8 @@ function RowMeta({ bytes, updatedAt }: { bytes: number; updatedAt: number }) {
 /** Uploaded and discovered skills can both be removed from ORX. */
 function SkillRow({
   skill,
-  onError,
 }: {
   skill: UserSkill;
-  onError: (message: string) => void;
 }) {
   const deleteUserSkillMutation = useMutation({ mutationFn: deleteUserSkill });
 
@@ -162,11 +161,14 @@ function SkillRow({
         aria-label={skill.origin ? m.skills_remove_imported_label({ name: ltr(skill.name) }) : m.skills_delete_skill_label({ name: ltr(skill.name) })}
         disabled={busy}
         onClick={() => {
-          if (!window.confirm(skill.origin ? m.skills_remove_imported_confirm({ name: ltr(skill.name) }) : m.skills_delete_skill_confirm({ name: ltr(skill.name) }))) return;
-          deleteUserSkillMutation.mutateAsync(skill.name)
-            .catch((e) => {
-              onError(e instanceof Error ? e.message : String(e));
-            });
+          showConfirmDialog({
+            title: skill.origin ? m.skills_remove_imported() : m.skills_tab_delete_skill(),
+            description: skill.origin ? m.skills_remove_imported_confirm({ name: ltr(skill.name) }) : m.skills_delete_skill_confirm({ name: ltr(skill.name) }),
+            destructive: true,
+            confirmLabel: skill.origin ? m.chat_panel_remove() : m.chat_panel_delete(),
+            onConfirm: async () => { await deleteUserSkillMutation.mutateAsync(skill.name); },
+            onCancel: "close",
+          });
         }}
       >
         <Trash2 size={14} />
@@ -177,10 +179,8 @@ function SkillRow({
 
 function LatexTemplateRow({
   template,
-  onError,
 }: {
   template: LatexTemplate;
-  onError: (message: string) => void;
 }) {
   const deleteLatexTemplateMutation = useMutation({ mutationFn: deleteLatexTemplate });
 
@@ -205,11 +205,14 @@ function LatexTemplateRow({
         aria-label={m.skills_delete_template_label({ name: ltr(template.name) })}
         disabled={busy}
         onClick={() => {
-          if (!window.confirm(m.skills_delete_template_confirm({ name: ltr(template.name) }))) return;
-          deleteLatexTemplateMutation.mutateAsync(template.name)
-            .catch((e) => {
-              onError(e instanceof Error ? e.message : String(e));
-            });
+          showConfirmDialog({
+            title: m.skills_tab_delete_template(),
+            description: m.skills_delete_template_confirm({ name: ltr(template.name) }),
+            destructive: true,
+            confirmLabel: m.chat_panel_delete(),
+            onConfirm: async () => { await deleteLatexTemplateMutation.mutateAsync(template.name); },
+            onCancel: "close",
+          });
         }}
       >
         <Trash2 size={14} />
@@ -335,7 +338,7 @@ function SkillsCard() {
         <div className="relative mt-1">
           <div ref={listRef} onScroll={updateScrollFade} className="flex flex-col max-h-120 overflow-y-auto overscroll-contain">
             {skills.map((s) => (
-              <SkillRow key={s.name} skill={s} onError={setError} />
+              <SkillRow key={s.name} skill={s} />
             ))}
           </div>
           {hasMoreAbove && (
@@ -425,7 +428,7 @@ function LatexTemplatesCard() {
       ) : (
         <div className="flex flex-col mt-1">
           {templates.map((t) => (
-            <LatexTemplateRow key={t.name} template={t} onError={setError} />
+            <LatexTemplateRow key={t.name} template={t} />
           ))}
         </div>
       )}

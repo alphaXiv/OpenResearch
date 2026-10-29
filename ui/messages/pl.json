@@ -1493,5 +1493,9 @@
   "harness_already_added": "Ten agent został już dodany",
   "harness_custom_acp": "Własny agent ACP",
   "acp_definitions_load_failed": "Nie udało się wczytać zapisanych agentów ACP. Lista może być niepełna; ponów próbę, aby dodać agentów ACP.",
-  "acp_definitions_loading": "Wczytywanie zapisanych agentów ACP…"
+  "acp_definitions_loading": "Wczytywanie zapisanych agentów ACP…",
+  "common_cancel": "Anuluj",
+  "common_confirm": "Potwierdź",
+  "common_ok": "OK",
+  "common_submit": "Zatwierdź"
 }

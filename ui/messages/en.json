@@ -1493,5 +1493,9 @@
   "harness_already_added": "You already added this one",
   "harness_custom_acp": "Custom ACP agent",
   "acp_definitions_load_failed": "Could not load saved ACP agents. The list may be incomplete; retry to add ACP agents.",
-  "acp_definitions_loading": "Loading saved ACP agents…"
+  "acp_definitions_loading": "Loading saved ACP agents…",
+  "common_cancel": "Cancel",
+  "common_confirm": "Confirm",
+  "common_ok": "OK",
+  "common_submit": "Submit"
 }

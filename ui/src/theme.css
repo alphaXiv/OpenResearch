@@ -112,6 +112,7 @@
   --font-sans: var(--sans);
   --font-mono: var(--mono);
   --ease-standard: ease;
+  --animate-dialog-shake: dialog-shake 300ms ease;
   --container-readable: var(--readable-col);
 
   --radius-xs: 4px;

@@ -1,12 +1,12 @@
-import { EscapeScope } from "./EscapeScope";
 import { cn } from "./ui/cn";
-import { Dialog } from "@base-ui/react/dialog";
+import { showConfirmDialog, showCustomDialog, type DialogContentProps } from "../dialog";
+import { DialogContent, DialogTitle } from "./ui";
 import { formatAcpCommand } from "../acp";
 import { TARGET_LABELS } from "../computeTargets";
 import { AcpAuthDialog } from "./AcpAuthDialog";
 import { HarnessSetupDialog } from "./HarnessSetupDialog";
 import { AcpHarnessDialog } from "./AcpHarnessDialog";
-import { AddHarnessDialog } from "./AddHarnessDialog";
+import { AddHarnessDialog, canConfigureHarness, sortHarnesses } from "./AddHarnessDialog";
 import {
   setScopedQueryData,
   workspaceScope,
@@ -57,7 +57,7 @@ import {
   Trash2,
   X,
 } from "lucide-react";
-import { useEffect, useLayoutEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
 import {
   deleteEnvVar,
   listAcpHarnesses,
@@ -145,7 +145,7 @@ import { LocalModelSetup } from "./LocalModelSetup";
 import { StatusBadge } from "./StatusBadge";
 import { OpenResearchSetupTerminal, SettingsCommandTerminal, SshConnectTerminal, SshTerminalTranscript } from "./SshConnectTerminal";
 import { SshExecutionSettings, SshDefaultHost } from "./SshExecutionSettings";
-import { SshConfigDialog } from "./SshConfigDialog";
+import { showSshConfigDialog } from "./SshConfigDialog";
 import {
   Badge,
   Button,
@@ -398,16 +398,11 @@ function HarnessesTab({ remote }: { remote: boolean }) {
   const harnessesOptions = getHarnessesQuery();
   const { data: harnesses = null, isError: harnessesError } = useQuery(harnessesOptions);
   const [active, setActive] = useState<HarnessId | null>(null);
-  const [adding, setAdding] = useState(false);
-  const [candidate, setCandidate] = useState<HarnessId | null>(null);
   const [refreshing, setRefreshing] = useState(false);
   const setupRun = useCommandRun();
-  const [setupHarness, setSetupHarness] = useState<Harness | null>(null);
-  const [authHarness, setAuthHarness] = useState<Harness | null>(null);
   const setupCommands = useQuery(getHarnessSetupCommandsQuery());
   const definitions = useQuery({ queryKey: workspaceKey("getAcpHarnesses"), queryFn: listAcpHarnesses });
   const presets = useQuery({ queryKey: workspaceKey("getAcpPresets"), queryFn: listAcpPresets });
-  const [acpDialog, setAcpDialog] = useState<AcpDefinition | "new" | null>(null);
   const reloadAcp = () => { void definitions.refetch(); load(true); };
   const removeAcp = async (id: string) => {
     try { await removeAcpHarness(id); reloadAcp(); }
@@ -421,78 +416,63 @@ function HarnessesTab({ remote }: { remote: boolean }) {
       .finally(() => setRefreshing(false));
   };
 
-  const orderedHarnesses = [...(harnesses ?? [])].sort((a, b) => {
-    const rank = (id: HarnessId) => id === "claude-code" ? 0 : id === "codex" ? 1 : id === "opencode" ? 2 : 3;
-    return rank(a.id) - rank(b.id);
-  });
+  const orderedHarnesses = sortHarnesses(harnesses ?? []);
   const added = orderedHarnesses.filter((h) => h.installed || h.installBroken || definitions.data?.some((definition) => definition.id === h.id));
   const ready = added.filter((h) => h.agentReady);
   const suggestions = orderedHarnesses
     .filter((h) => !h.agentReady && !h.catalogPending && (["claude-code", "codex", "opencode"].includes(h.id) || h.installed || (!h.setupUrl && definitions.data?.some((definition) => definition.id === h.id))))
     .filter((h, index, all) => !h.setupUrl || all.findIndex((other) => other.setupUrl === h.setupUrl) === index);
-  const candidateHarness = orderedHarnesses.find((h) => h.id === candidate);
 
-  const chooseHarness = (id: HarnessId | null) => {
-    if (!id) { setCandidate(null); return; }
+  const openAcp = (definition?: AcpDefinition) => showCustomDialog({
+    component: AcpHarnessDialog,
+    props: { customOnly: !definition, definition, onSaved: reloadAcp },
+    onConfirm: (save) => save(),
+    onCancel: "close",
+  });
+  const openAuth = (harness: Harness) => showCustomDialog({
+    component: AcpAuthDialog,
+    props: { remote, harness },
+    onConfirm: () => {},
+    onCancel: "close",
+  });
+  const openSetup = (harness: Harness, commands = queryClient.getQueryData(getHarnessSetupCommandsQuery().queryKey)?.[harness.id]) => {
+    if (remote || !commands) return;
+    showCustomDialog({
+      component: HarnessSetupDialog,
+      props: { harness, commands, onAuth: openAuth, onBack: () => openAdd() },
+      onConfirm: () => {},
+      onCancel: "close",
+    });
+  };
+  const openAdd = (initialCandidate?: HarnessId) => showCustomDialog({
+    component: AddHarnessDialog,
+    props: {
+      initialCandidate,
+      remote,
+      onCustom: () => openAcp(),
+      onEdit: openAcp,
+      onSetup: (harness, commands) => {
+        if (harness.id.startsWith("acp:") && harness.installed && !harness.adapterMissing) openAuth(harness);
+        else openSetup(harness, commands);
+      },
+    },
+    onConfirm: () => {},
+    onCancel: "close",
+  });
+  const chooseHarness = (id: HarnessId) => {
     const harness = orderedHarnesses.find((item) => item.id === id);
     if (!harness) return;
-    const acpLogin = harness.id.startsWith("acp:") && harness.installed && !harness.adapterMissing;
-    const needsZCode = harness.logo === "zcode-acp-server" && !harness.installed && !harness.adapterMissing;
-    const nativeSetup = !needsZCode && !remote && setupCommands.data?.[harness.id] && (!harness.installed || harness.installBroken || harness.adapterMissing || harness.authState === "unsupported" || (harness.authState === "needsLogin" && (harness.id !== "claude-code" || harness.loginEligible)));
-    if (!harness.needsConfigRepair && (acpLogin || nativeSetup)) {
-      setAdding(false);
-      setCandidate(null);
-      if (acpLogin) setAuthHarness(harness);
-      else setSetupHarness(harness);
-    } else {
-      setAdding(true);
-      setCandidate(id);
-    }
+    if (canConfigureHarness(harness, remote, setupCommands.data?.[harness.id])) {
+      if (harness.id.startsWith("acp:") && harness.installed && !harness.adapterMissing) openAuth(harness);
+      else openSetup(harness);
+    } else openAdd(id);
   };
 
   return (
     <>
       <h2>{m.settings_page_harnesses()}</h2>
-      {acpDialog && <AcpHarnessDialog customOnly={acpDialog === "new"} definition={acpDialog === "new" ? undefined : acpDialog} onClose={() => setAcpDialog(null)} onSaved={reloadAcp} />}
-      {authHarness && <AcpAuthDialog remote={remote} harness={authHarness} onClose={() => setAuthHarness(null)} />}
-      {!remote && setupHarness && setupCommands.data && (
-        <HarnessSetupDialog
-          harness={setupHarness}
-          commands={setupCommands.data[setupHarness.id]}
-          onAuth={(harness) => { setSetupHarness(null); setAuthHarness(harness); }}
-          onBack={() => { setSetupHarness(null); setAdding(true); }}
-          onClose={() => setSetupHarness(null)}
-        />
-      )}
-      {adding && (
-        <AddHarnessDialog
-          harnesses={orderedHarnesses}
-          added={added}
-          candidate={candidateHarness}
-          remote={remote}
-          refreshing={refreshing}
-          acpAvailable={definitions.data !== undefined && !definitions.isError}
-          acpError={definitions.isError}
-          onRetryAcp={() => void definitions.refetch()}
-          onSelect={chooseHarness}
-          onRefresh={() => load(true, true)}
-          onClose={() => { setAdding(false); setCandidate(null); }}
-          onCustom={() => { setAdding(false); setCandidate(null); setAcpDialog("new"); }}
-          onEdit={(harness) => {
-            const definition = definitions.data?.find((item) => item.id === harness.id);
-            if (definition) { setAdding(false); setCandidate(null); setAcpDialog(definition); }
-          }}
-          onSetup={(harness) => {
-            setAdding(false);
-            setCandidate(null);
-            if (harness.id.startsWith("acp:") && harness.installed && !harness.adapterMissing) setAuthHarness(harness);
-            else setSetupHarness(harness);
-          }}
-          canSetup={(harness) => Boolean(setupCommands.data?.[harness.id])}
-        />
-      )}
       <div className="my-3 flex flex-wrap items-center gap-2">
-        <Button onClick={() => setAdding(true)} disabled={!harnesses} aria-haspopup="dialog"><Plus size={14} />{m.harness_add()}</Button>
+        <Button onClick={() => openAdd()} disabled={!harnesses} aria-haspopup="dialog"><Plus size={14} />{m.harness_add()}</Button>
         <Button onClick={() => load(true, true)} disabled={refreshing}>
           <RefreshCw size={12} className={refreshing ? "animate-[spin_0.9s_linear_infinite]" : ""} /> {m.settings_page_refresh()}
         </Button>
@@ -536,7 +516,7 @@ function HarnessesTab({ remote }: { remote: boolean }) {
                 <ChevronDown size={16} aria-hidden="true" className={cn("shrink-0 text-muted", expanded && "rotate-180")} />
               </button>
               {optionalLogin && (
-                <Button size="small" className="absolute end-9 top-1/2 -translate-y-1/2" onClick={() => setSetupHarness(h)} disabled={!setupCommands.data?.[h.id]} aria-haspopup="dialog">
+                <Button size="small" className="absolute end-9 top-1/2 -translate-y-1/2" onClick={() => openSetup(h)} disabled={!setupCommands.data?.[h.id]} aria-haspopup="dialog">
                   <SquareTerminal size={14} />
                   {m.harness_setup_login()}
                 </Button>
@@ -547,17 +527,17 @@ function HarnessesTab({ remote }: { remote: boolean }) {
                 <>
                   <div className="settings-card-head flex items-center gap-2.5 mb-3">
                     {h.id.startsWith("acp:") && <span className="text-sm text-subtext">{m.acp_via()}</span>}
-                    {!remote && h.adapterMissing && <Button size="small" onClick={() => setSetupHarness(h)} disabled={!setupCommands.data?.[h.id]} aria-haspopup="dialog"><SquareTerminal size={14} />{m.acp_install_adapter()}</Button>}
-                    {h.id.startsWith("acp:") && !h.adapterMissing && !h.agentReady && !h.catalogPending && <Button size="small" onClick={() => setAuthHarness(h)} aria-haspopup="dialog">{harnessStatus(h).label}</Button>}
-                    {acp && <><Button size="small" onClick={() => setAcpDialog(acp)}>{m.activity_edit()}</Button><Button size="small" onClick={() => void removeAcp(acp.id)}>{m.chat_panel_remove()}</Button></>}
+                    {!remote && h.adapterMissing && <Button size="small" onClick={() => openSetup(h)} disabled={!setupCommands.data?.[h.id]} aria-haspopup="dialog"><SquareTerminal size={14} />{m.acp_install_adapter()}</Button>}
+                    {h.id.startsWith("acp:") && !h.adapterMissing && !h.agentReady && !h.catalogPending && <Button size="small" onClick={() => openAuth(h)} aria-haspopup="dialog">{harnessStatus(h).label}</Button>}
+                    {acp && <><Button size="small" onClick={() => openAcp(acp)}>{m.activity_edit()}</Button><Button size="small" onClick={() => void removeAcp(acp.id)}>{m.chat_panel_remove()}</Button></>}
                     {!h.id.startsWith("acp:") && !remote && !h.catalogPending && !h.needsConfigRepair && (h.installBroken || h.authState === "unsupported") && (
-                      <Button size="small" onClick={() => setSetupHarness(h)} disabled={!setupCommands.data?.[h.id]} aria-haspopup="dialog">
+                      <Button size="small" onClick={() => openSetup(h)} disabled={!setupCommands.data?.[h.id]} aria-haspopup="dialog">
                         <SquareTerminal size={14} />
                         {h.installBroken ? m.harness_setup_install() : m.harness_setup_update()}
                       </Button>
                     )}
                     {h.id !== "opencode" && !h.id.startsWith("acp:") && !remote && !h.catalogPending && h.installed && !h.installBroken && !h.authenticated && !h.needsConfigRepair && (h.id === "claude-code" ? h.loginEligible : h.authMethod !== "local" && h.authMethod !== "apiKey" && h.authState !== "unsupported") && (
-                      <Button size="small" onClick={() => setSetupHarness(h)} disabled={!setupCommands.data} aria-haspopup="dialog">
+                      <Button size="small" onClick={() => openSetup(h)} disabled={!setupCommands.data} aria-haspopup="dialog">
                         <SquareTerminal size={14} /> {m.harness_setup_login()}
                       </Button>
                     )}
@@ -602,7 +582,7 @@ function HarnessesTab({ remote }: { remote: boolean }) {
                     onRun={(command, path) => setupRun.start(command, path, h.id)}
                   />}
                   {!h.installed && h.needsConnectionAdapter && <p className={cn(SETTINGS_NOTE_CLASS_NAME, "text-sm")}>{m.acp_adapter_help({ name: h.name })}</p>}
-                  {h.id === "opencode" && <LocalModelSetup installed={h.installed} />}
+                  {h.id === "opencode" && <LocalModelSetup />}
                 </>
               )}
             </div>
@@ -934,7 +914,6 @@ function SshSection() {
   const hostsOptions = getSshSettingsQuery();
   const hostsQuery = useQuery(hostsOptions);
   const hosts = hostsQuery.data?.hosts ?? (hostsQuery.isError ? [] : null);
-  const [configOpen, setConfigOpen] = useState(false);
   const [tests, setTests] = useState<Record<string, SshExecutionPreflight>>({});
   const [drafts, setDrafts] = useState<Record<string, string | null>>({});
   const activeAttempt = useRef(0);
@@ -976,7 +955,7 @@ function SshSection() {
       {hostsQuery.error && <p className="text-sm text-accent-red">{hostsQuery.error.message}</p>}
       <div className="mb-3 flex flex-wrap items-center justify-between gap-3">
         {hostsQuery.data && <SshDefaultHost settings={hostsQuery.data} />}
-        <Button variant="ghost" className="ms-auto" onClick={() => setConfigOpen(true)}>
+        <Button variant="ghost" className="ms-auto" onClick={() => showSshConfigDialog()}>
           <Settings size={14} /> {m.ssh_configure_hosts()}
         </Button>
       </div>
@@ -1131,11 +1110,6 @@ function SshSection() {
             );
           })}
         </div>
-      )}
-      {configOpen && (
-        <SshConfigDialog
-          onClose={() => setConfigOpen(false)}
-        />
       )}
     </>
   );
@@ -2030,52 +2004,41 @@ function BackendDetailPage({
   );
 }
 
-function QuickSetupDialog({ target, remote, onClose }: { target: ComputeTargetSummary; remote: boolean; onClose: () => void }) {
-  const dialogRef = useRef<HTMLDialogElement>(null);
+function QuickSetupDialog({ targetId, projectId, remote, cancel, isDisabled, onEditState }: DialogContentProps<void> & {
+  targetId: ComputeTargetId;
+  projectId: string | undefined;
+  remote: boolean;
+  onEditState: (state: { dirty: boolean; saving: boolean }) => void;
+}) {
+  const { data: settings } = useQuery(getComputeSettingsQuery(projectId));
+  const target = settings?.targets.find((item) => item.id === targetId);
   const [editState, setEditState] = useState({ dirty: false, saving: false });
 
-  useEffect(() => {
-    const dialog = dialogRef.current;
-    dialog?.showModal();
-    return () => dialog?.close();
-  }, []);
+  const updateEditState = useCallback((state: { dirty: boolean; saving: boolean }) => {
+    setEditState(state);
+    onEditState(state);
+  }, [onEditState]);
 
-  const close = () => {
-    if (editState.saving) return;
-    if (editState.dirty && !window.confirm(m.settings_k8s_discard_changes())) return;
-    onClose();
-  };
-
-  return <EscapeScope onEscape={close}>
-    <dialog
-      ref={dialogRef}
-      className="m-auto w-140 max-w-[calc(100vw_-_40px)] max-h-[calc(100vh_-_40px)] overflow-y-auto rounded-xl border border-border bg-background p-5 text-text shadow-modal backdrop:bg-modal-backdrop-light"
-      aria-labelledby="compute-quick-setup-title"
-      onCancel={(event) => {
-        event.preventDefault();
-        close();
-      }}
-    >
+  return <DialogContent className="w-140 max-h-[calc(100vh_-_40px)] overflow-y-auto p-5">
       <div className="mb-5 flex items-center justify-between gap-4">
         <div className="flex min-w-0 items-center gap-3">
-          <BackendLogo kind={TARGET_KIND[target.id]} size={32} />
-          <h2 id="compute-quick-setup-title" className="m-0 text-xl font-medium text-text">
-            {TARGET_LABELS[target.id]()}
-          </h2>
+          <BackendLogo kind={TARGET_KIND[targetId]} size={32} />
+          <DialogTitle>
+            {TARGET_LABELS[targetId]()}
+          </DialogTitle>
         </div>
         <Tooltip interactive content={m.app_close_panel()}>
-          <IconButton aria-label={m.app_close_panel()} onClick={close} disabled={editState.saving}>
+          <IconButton aria-label={m.app_close_panel()} onClick={cancel} disabled={isDisabled || editState.saving}>
             <X size={14} />
           </IconButton>
         </Tooltip>
       </div>
-      {target.id === "tinker" && <TinkerSection target={target} />}
-      {target.id === "hf" && <HfSection remote={remote} />}
-      {target.id === "modal" && <ModalSection />}
-      {target.id === "ray" && <RaySection />}
-      {target.id === "k8s" && <K8sSection onEditState={setEditState} />}
-    </dialog>
-  </EscapeScope>;
+      {targetId === "tinker" && target && <TinkerSection target={target} />}
+      {targetId === "hf" && <HfSection remote={remote} />}
+      {targetId === "modal" && <ModalSection />}
+      {targetId === "ray" && <RaySection />}
+      {targetId === "k8s" && <K8sSection onEditState={updateEditState} />}
+    </DialogContent>;
 }
 
 function ComputeTab({
@@ -2125,7 +2088,34 @@ function ComputeTab({
       target={target}
       isDefault={defaultBackend === target.id}
       summary={target.id === "local" ? localMachine ? localMachineSummary(localMachine) : localMachineError ?? m.settings_page_detecting_hardware() : undefined}
-      onOpen={target.id === "local" ? undefined : () => setSelectedTarget(target.id)}
+      onOpen={target.id === "local" ? undefined : () => {
+        if (!QUICK_SETUP_TARGETS.includes(target.id)) {
+          setSelectedTarget(target.id);
+          return;
+        }
+        let editState = { dirty: false, saving: false };
+        showCustomDialog({
+          component: QuickSetupDialog,
+          props: {
+            targetId: target.id,
+            projectId: project?.id,
+            remote,
+            onEditState: (state) => { editState = state; },
+          },
+          onConfirm: () => {},
+          onCancel: () => {
+            if (editState.saving) return Promise.reject();
+            if (!editState.dirty) return;
+            return new Promise<void>((resolve, reject) => showConfirmDialog({
+              title: TARGET_LABELS[target.id](),
+              description: m.settings_k8s_discard_changes(),
+              destructive: true,
+              onConfirm: resolve,
+              onCancel: reject,
+            }));
+          },
+        });
+      }}
       onOpenEnvironment={onOpenEnvironment}
     />
   );
@@ -2179,7 +2169,6 @@ function ComputeTab({
               </div>
             </section>
           )}
-          {selected && <QuickSetupDialog target={selected} remote={remote} onClose={() => setSelectedTarget(null)} />}
         </>
       )}
     </>
@@ -2862,7 +2851,6 @@ function UpdatesTab() {
   // all of them, since they mutate overlapping state.
   const [busy, setBusy] = useState<"auto" | "apply" | "cli" | "channel" | null>(null);
   const [error, setError] = useState<string | null>(null);
-  const [confirmCanary, setConfirmCanary] = useState(false);
   const channelGroupRef = useRef<HTMLDivElement>(null);
   const restart = useRestartApp(status);
   const locked = busy !== null || restart.restarting;
@@ -2911,7 +2899,21 @@ function UpdatesTab() {
 
   const changeChannel = (channel: "stable" | "canary") => {
     if (locked || status.releaseChannel === channel) return;
-    if (channel === "canary") setConfirmCanary(true);
+    if (channel === "canary") showConfirmDialog({
+      title: m.settings_canary_confirm_title(),
+      description: m.settings_canary_confirm_description(),
+      confirmLabel: m.settings_canary_confirm_action(),
+      onCancel: "close",
+      onConfirm: async () => {
+        setBusy("channel");
+        setError(null);
+        try {
+          apply(await setReleaseChannel("canary"));
+        } finally {
+          setBusy(null);
+        }
+      },
+    });
     else applyChannel(channel);
   };
 
@@ -3052,28 +3054,8 @@ function UpdatesTab() {
         )}
         {error && <div className="error">{error}</div>}
       </div>
-      <Dialog.Root open={confirmCanary} onOpenChange={setConfirmCanary}>
-        <Dialog.Portal>
-          <Dialog.Backdrop className="fixed inset-0 z-200 bg-modal-backdrop" />
-          <Dialog.Viewport className="fixed inset-0 z-200 flex items-center justify-center p-5">
-            <Dialog.Popup className="w-120 max-w-full rounded-xl border border-border bg-background p-6 shadow-modal"
-              aria-labelledby="canary-confirm-title" aria-describedby="canary-confirm-description"
-              finalFocus={() => channelGroupRef.current?.querySelector<HTMLElement>('[aria-checked="true"]')}>
-              <h2 id="canary-confirm-title" className="m-0 text-xl font-medium text-text">{m.settings_canary_confirm_title()}</h2>
-              <p id="canary-confirm-description" className="mt-4 text-sm text-text">{m.settings_canary_confirm_description()}</p>
-              <div className="mt-6 flex justify-end gap-2.5">
-                <Button onClick={() => setConfirmCanary(false)}>{m.settings_page_cancel()}</Button>
-                <Button variant="primary" onClick={() => {
-                  setConfirmCanary(false);
-                  if (!locked && status.releaseChannel !== "canary") applyChannel("canary");
-                }}>{m.settings_canary_confirm_action()}</Button>
-              </div>
-            </Dialog.Popup>
-          </Dialog.Viewport>
-        </Dialog.Portal>
-      </Dialog.Root>
     </>
-  )}<EscapeScope enabled={confirmCanary} onEscape={() => setConfirmCanary(false)} /></>;
+  )}</>;
 }
 
 function TelemetryTab() {
@@ -3698,21 +3680,21 @@ function StorageTab() {
     e.preventDefault();
     if (move.kind === "moving" || !trimmed || unchanged) return;
     setError(null);
-    // Confirm — this relocates all projects' data. Same-disk moves are atomic;
-    // cross-disk moves copy and leave the old folder for you to remove.
-    if (
-      !window.confirm(m.storage_move_confirm({ path: ltr(trimmed) }))
-    )
-      return;
-    setMove({ kind: "moving", phase: "preparing", copied: 0, total: validation?.treeBytes ?? 0 });
-    try {
-      await moveDataDir(trimmed);
-      // 202 accepted — progress/done arrive over SSE. Nothing else to do here.
-    } catch (err) {
-      // 409 in-flight guard or a validation error surfaces here.
-      setMove({ kind: "idle" });
-      setError(err instanceof Error ? err.message : String(err));
-    }
+    showConfirmDialog({
+      title: m.storage_move_here(),
+      description: m.storage_move_confirm({ path: ltr(trimmed) }),
+      confirmLabel: m.storage_move_here(),
+      onCancel: "close",
+      onConfirm: async () => {
+        setMove({ kind: "moving", phase: "preparing", copied: 0, total: validation?.treeBytes ?? 0 });
+        try {
+          await moveDataDir(trimmed);
+        } catch (err) {
+          setMove({ kind: "idle" });
+          throw err;
+        }
+      },
+    });
   }
 
   return (

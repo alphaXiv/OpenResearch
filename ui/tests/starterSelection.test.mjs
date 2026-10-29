@@ -83,10 +83,16 @@ test("project creation and debounced prewarm use the current selection, includin
 test("project entry points pass their current preference through to the form", () => {
   const current = { harness: "opencode", model: "my-provider/current" };
   const stale = { harness: "codex", model: "saved-model" };
+  const app = source("App.tsx");
+  const dialog = find(app, (node) => ts.isCallExpression(node) && node.expression.getText(app) === "showCustomDialog"
+    && node.arguments[0]?.properties?.some((prop) => prop.name?.getText(app) === "component" && prop.initializer?.getText(app) === "NewProjectDialog"))[0];
+  assert.ok(dialog, "App opens the project form through the manager");
+  const props = dialog.arguments[0].properties.find((prop) => prop.name?.getText(app) === "props").initializer;
+  const preference = props.properties.find((prop) => prop.name?.getText(app) === "preferredAgent").initializer;
+  assert.equal(evaluate(`return ${preference.getText(app)}`, { uiState: { preferredAgent: current } }), current);
   for (const [path, tag, bindings] of [
-    ["App.tsx", "NewProjectDialog", { uiState: { preferredAgent: current }, persistedPreferredAgent: { current: stale } }],
     ["routePages.tsx", "ProjectsEmptyState", { state: { preferredAgent: current } }],
-    ["components/ProjectsHome.tsx", "NewProjectForm", { preferredAgent: current }],
+    ["components/ProjectsHome.tsx", "NewProjectForm", { uiState: { preferredAgent: current }, preferredAgent: stale }],
   ]) {
     const file = source(path);
     const elements = find(file, (node) => (ts.isJsxSelfClosingElement(node) || ts.isJsxOpeningElement(node)) && node.tagName.getText(file) === tag);

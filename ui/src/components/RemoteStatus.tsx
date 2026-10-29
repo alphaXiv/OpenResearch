@@ -5,13 +5,13 @@ import {
   disconnectCurrentRemote,
   getRemoteStopPreview,
   stopCurrentRemoteHost,
-  type RemoteStopPreview,
   type RuntimeInfo,
 } from "../api";
 import { ltr } from "../i18n";
 import { m } from "../paraglide/messages.js";
 import { Menu } from "@base-ui/react/menu";
 import { RemoteIcon } from "./RemoteIcon";
+import { showCustomDialog } from "../dialog";
 import { RemoteStopDialog } from "./RemoteStopDialog";
 import { BrandMark } from "./Wordmark";
 import { Button, MenuItem, showAlert, Tooltip } from "./ui";
@@ -25,23 +25,7 @@ export function RemoteStatus({
 }) {
   const [disconnecting, setDisconnecting] = useState(false);
   const [loadingStopPreview, setLoadingStopPreview] = useState(false);
-  const [stopping, setStopping] = useState(false);
-  const [stopPreview, setStopPreview] = useState<RemoteStopPreview | null>(null);
   const [open, setOpen] = useState(false);
-
-  async function confirmStopHost() {
-    if (!stopPreview) return;
-    setStopping(true);
-    try {
-      await stopCurrentRemoteHost(stopPreview);
-      setStopPreview(null);
-    } catch (error) {
-      setStopPreview(null);
-      showAlert(error instanceof Error ? error.message : String(error), "error");
-    } finally {
-      setStopping(false);
-    }
-  }
 
   return (
     <>
@@ -102,7 +86,17 @@ export function RemoteStatus({
                     onClick={async () => {
                       setLoadingStopPreview(true);
                       try {
-                        setStopPreview(await getRemoteStopPreview());
+                        const preview = await getRemoteStopPreview();
+                        showCustomDialog({
+                          component: RemoteStopDialog,
+                          props: {
+                            host: runtime.session.host,
+                            preview,
+                            currentClientAttached: runtime.session.status === "connected",
+                          },
+                          onConfirm: async () => { await stopCurrentRemoteHost(preview); },
+                          onCancel: "close",
+                        });
                         setOpen(false);
                       } catch (error) {
                         showAlert(error instanceof Error ? error.message : String(error), "error");
@@ -150,16 +144,6 @@ export function RemoteStatus({
           </div>
         </Menu.Root>
       </DirectionProvider>
-      {stopPreview && (
-        <RemoteStopDialog
-          host={runtime.session.host}
-          preview={stopPreview}
-          currentClientAttached={runtime.session.status === "connected"}
-          stopping={stopping}
-          onClose={() => setStopPreview(null)}
-          onConfirm={() => void confirmStopHost()}
-        />
-      )}
     </>
   );
 }

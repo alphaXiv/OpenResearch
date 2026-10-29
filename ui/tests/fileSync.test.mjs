@@ -1,15 +1,37 @@
 import assert from "node:assert/strict";
 import test from "node:test";
+import { registerHooks } from "node:module";
 
-import {
+let dialogOptions;
+let dialogError;
+globalThis.__fileSyncShowConfirm = (options) => {
+  if (dialogError) throw dialogError;
+  dialogOptions = options;
+};
+const hooks = registerHooks({
+  resolve(specifier, context, nextResolve) {
+    if (context.parentURL?.endsWith("/src/fileSync.ts")) {
+      if (specifier === "./dialog") {
+        return { url: "data:text/javascript,export const showConfirmDialog = (...args) => globalThis.__fileSyncShowConfirm(...args)", shortCircuit: true };
+      }
+      if (specifier === "./paraglide/messages.js") {
+        return { url: 'data:text/javascript,export const m = { common_confirm: () => "Confirm" }', shortCircuit: true };
+      }
+    }
+    return nextResolve(specifier, context);
+  },
+});
+
+const fileSync = await import("../src/fileSync.ts");
+const {
   conflictAfterRefresh,
   confirmFileDiscard,
-  confirmingFileDiscard,
   createFileBuffer,
   fileBufferContent,
   FileBufferSession,
   updateFileDraft,
-} from "../src/fileSync.ts";
+} = fileSync;
+hooks.deregister();
 
 test("file buffers preserve line endings and only conflict after a dirty disk change", () => {
   const clean = createFileBuffer("notes.txt", "one\r\ntwo\r\n", "v1");
@@ -28,26 +50,22 @@ test("file buffers preserve line endings and only conflict after a dirty disk ch
   });
 });
 
-test("discard confirmation suppresses synchronous blur-save and always releases the guard", () => {
-  const previous = globalThis.window;
-  try {
-    for (const answer of [false, true]) {
-      let saved = false;
-      globalThis.window = { confirm: () => {
-        if (!confirmingFileDiscard) saved = true;
-        return answer;
-      } };
-      assert.equal(confirmFileDiscard("Discard?"), answer);
-      assert.equal(saved, false);
-      assert.equal(confirmingFileDiscard, false);
-    }
-    globalThis.window = { confirm: () => { throw new Error("dialog unavailable"); } };
-    assert.throws(() => confirmFileDiscard("Discard?"));
-    assert.equal(confirmingFileDiscard, false);
-  } finally {
-    if (previous === undefined) delete globalThis.window;
-    else globalThis.window = previous;
+test("discard confirmation protects blur-save until confirmed or canceled", async () => {
+  for (const answer of [false, true]) {
+    const pending = confirmFileDiscard("Discard?");
+    assert.equal(fileSync.confirmingFileDiscard, true);
+    assert.equal(dialogOptions.description, "Discard?");
+    assert.equal(dialogOptions.destructive, true);
+    if (answer) dialogOptions.onConfirm();
+    else dialogOptions.onCancel();
+    assert.equal(await pending, answer);
+    assert.equal(fileSync.confirmingFileDiscard, false);
   }
+
+  dialogError = new Error("dialog unavailable");
+  await assert.rejects(confirmFileDiscard("Discard?"), dialogError);
+  assert.equal(fileSync.confirmingFileDiscard, false);
+  dialogError = null;
 });
 
 test("undoing to the baseline clears the conflict without changing the saved version", () => {

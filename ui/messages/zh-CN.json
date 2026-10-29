@@ -1493,5 +1493,9 @@
   "harness_already_added": "你已添加此代理",
   "harness_custom_acp": "自定义 ACP 代理",
   "acp_definitions_load_failed": "无法加载已保存的 ACP 代理。列表可能不完整；请重试以添加 ACP 代理。",
-  "acp_definitions_loading": "正在加载已保存的 ACP 代理…"
+  "acp_definitions_loading": "正在加载已保存的 ACP 代理…",
+  "common_cancel": "取消",
+  "common_confirm": "确认",
+  "common_ok": "确定",
+  "common_submit": "提交"
 }

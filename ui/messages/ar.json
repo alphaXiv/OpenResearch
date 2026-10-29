@@ -1493,5 +1493,9 @@
   "harness_already_added": "لقد أضفت هذا بالفعل",
   "harness_custom_acp": "وكيل ACP مخصص",
   "acp_definitions_load_failed": "تعذّر تحميل وكلاء ACP المحفوظين. قد تكون القائمة غير مكتملة؛ أعد المحاولة لإضافة وكلاء ACP.",
-  "acp_definitions_loading": "جارٍ تحميل وكلاء ACP المحفوظين…"
+  "acp_definitions_loading": "جارٍ تحميل وكلاء ACP المحفوظين…",
+  "common_cancel": "إلغاء",
+  "common_confirm": "تأكيد",
+  "common_ok": "حسنًا",
+  "common_submit": "إرسال"
 }

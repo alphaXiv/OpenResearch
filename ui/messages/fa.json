@@ -1493,5 +1493,9 @@
   "harness_already_added": "این مورد را قبلاً اضافه کرده‌اید",
   "harness_custom_acp": "عامل ACP سفارشی",
   "acp_definitions_load_failed": "بارگیری عامل‌های ACP ذخیره‌شده ناموفق بود. ممکن است فهرست ناقص باشد؛ برای افزودن عامل ACP دوباره تلاش کنید.",
-  "acp_definitions_loading": "در حال بارگیری عامل‌های ACP ذخیره‌شده…"
+  "acp_definitions_loading": "در حال بارگیری عامل‌های ACP ذخیره‌شده…",
+  "common_cancel": "لغو",
+  "common_confirm": "تأیید",
+  "common_ok": "باشه",
+  "common_submit": "ارسال"
 }

@@ -1493,5 +1493,9 @@
   "harness_already_added": "आप इसे पहले ही जोड़ चुके हैं",
   "harness_custom_acp": "कस्टम ACP एजेंट",
   "acp_definitions_load_failed": "सहेजे गए ACP एजेंट लोड नहीं हुए। सूची अधूरी हो सकती है; ACP एजेंट जोड़ने के लिए पुनः प्रयास करें।",
-  "acp_definitions_loading": "सहेजे गए ACP एजेंट लोड हो रहे हैं…"
+  "acp_definitions_loading": "सहेजे गए ACP एजेंट लोड हो रहे हैं…",
+  "common_cancel": "रद्द करें",
+  "common_confirm": "पुष्टि करें",
+  "common_ok": "ठीक है",
+  "common_submit": "सबमिट करें"
 }

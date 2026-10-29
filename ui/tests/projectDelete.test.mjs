@@ -4,13 +4,14 @@ import { createRequire } from "node:module";
 import test from "node:test";
 import React from "react";
 import ts from "typescript";
+import { dialogHarness } from "./dialogHarness.mjs";
 
 const require = createRequire(import.meta.url);
 const source = readFileSync(new URL("../src/components/ProjectInfoCard.tsx", import.meta.url), "utf8");
-const compiled = ts.transpileModule(`${source}\nexport { DeleteProjectDialog };`, {
+const compiled = ts.transpileModule(source, {
   compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022, jsx: ts.JsxEmit.ReactJSX },
 }).outputText;
-let state, index, calls, closed, removed, failure, artifactsError, alerts;
+let state, index, calls, removed, failure, artifactsError, alerts, dialogs, options;
 const exports = {};
 new Function("require", "exports", compiled)((name) => {
   if (name === "react") return { ...React, useState: (initial) => {
@@ -25,15 +26,22 @@ new Function("require", "exports", compiled)((name) => {
   } };
   if (name === "../paraglide/messages.js") return { m: new Proxy({}, { get: (_, key) => () => key }) };
   if (name === "./useFileManagerLabel") return { useFileManagerLabel: () => "Reveal" };
-  if (name === "./EscapeScope") return { EscapeScope: "escape-scope" };
-  if (name === "./useDialogFocus") return { useDialogFocus: () => {} };
-  if (name === "./ui") return { Button: "button", showAlert: (...args) => { alerts.push(args); } };
+  if (name === "../dialog") return { showCustomDialog: (args) => { options = args; dialogs.showCustomDialog(args); } };
+  if (name === "./ui") return { Button: "button", DialogContent: "content", DialogTitle: "title", showAlert: (...args) => { alerts.push(args); } };
   return require(name);
 }, exports);
 
 function render() {
   index = 0;
-  return exports.DeleteProjectDialog({ project: { id: "p1", name: "Project", artifactsDir: "/files/project" }, onClose: () => { closed++; }, onRemoved: () => { removed++; } });
+  const root = dialogs.render().at(-1);
+  const content = root.props.children;
+  return content.type(content.props);
+}
+function open() {
+  index = 0;
+  const tree = exports.ProjectInfoCard({ project: { id: "p1", name: "Project", artifactsDir: "/files/project" }, onRemoved: () => { removed++; } });
+  elements(tree).find((node) => node.props.onClick && elements(node).some((child) => React.Children.toArray(child.props.children).includes("projects_home_delete_project_action"))).props.onClick();
+  state = [];
 }
 function elements(node) {
   if (!React.isValidElement(node)) return [];
@@ -42,24 +50,28 @@ function elements(node) {
 function reset() {
   state = [];
   calls = [];
-  closed = removed = 0;
+  removed = 0;
   failure = artifactsError = null;
   alerts = [];
+  dialogs = dialogHarness();
+  open();
 }
 async function confirm(tree) {
-  elements(tree).find((node) => node.props.children === "projects_home_delete_project_action" && node.type === "button").props.onClick();
-  await Promise.resolve();
-  await Promise.resolve();
+  elements(tree).find((node) => elements(node).some((child) => React.Children.toArray(child.props.children).includes("projects_home_delete_project_action")) && node.type === "button").props.onClick();
+  await new Promise(setImmediate);
 }
 
 test("project deletion keeps artifacts by default and cancellation deletes nothing", async () => {
   reset();
   const tree = render();
   assert.equal(elements(tree).find((node) => node.type === "input").props.checked, false);
-  elements(tree).find((node) => node.props["data-initial-focus"]).props.onClick();
-  assert.equal(closed, 1);
+  assert.equal(options.onCancel, "close");
+  elements(tree).find((node) => node.props.children === "projects_home_cancel").props.onClick();
+  await new Promise(setImmediate);
+  assert.equal(dialogs.render()[0].props.open, false);
   assert.deepEqual(calls, []);
-  await confirm(tree);
+  open();
+  await confirm(render());
   assert.deepEqual(calls, [["p1", false]]);
   assert.equal(removed, 1);
 });
@@ -70,7 +82,7 @@ test("artifact deletion requires checkbox opt-in and errors leave the dialog ope
   failure = "Keep artifacts to preserve the source folder.";
   await confirm(render());
   assert.deepEqual(calls, [["p1", true]]);
-  assert.equal(closed, 0);
+  assert.equal(dialogs.render()[0].props.open, true);
   assert.equal(removed, 0);
   assert.equal(elements(render()).find((node) => node.props.role === "alert").props.children, failure);
 });
@@ -79,7 +91,7 @@ test("a failed artifact removal after deletion still closes the dialog and repor
   reset();
   artifactsError = "The project was deleted. Could not delete artifacts at /files/project: denied";
   await confirm(render());
-  assert.equal(closed, 1);
+  assert.equal(dialogs.render()[0].props.open, false);
   assert.equal(removed, 1);
   assert.deepEqual(alerts, [[artifactsError, "error"]]);
 });

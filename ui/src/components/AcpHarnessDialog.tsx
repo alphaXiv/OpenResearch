@@ -1,4 +1,4 @@
-import { EscapeScope } from "./EscapeScope";
+import type { DialogContentProps } from "../dialog";
 import { useEffect, useRef, useState } from "react";
 import { useQuery } from "@tanstack/react-query";
 import { saveAcpHarness, testAcpHarness, listAcpPresets, type AcpDefinition } from "../api";
@@ -6,15 +6,21 @@ import { workspaceKey } from "../queries/client";
 import { formatAcpCommand, parseAcpCommand, validAcpLaunch } from "../acp";
 import { m } from "../paraglide/messages.js";
 import { OptionPicker } from "./ModelPicker";
-import { Button, Input } from "./ui";
+import { Button, DialogContent, DialogTitle, Input } from "./ui";
 
-export function AcpHarnessDialog({ definition, customOnly = false, onClose, onSaved }: {
+export function AcpHarnessDialog({ definition, customOnly = false, cancel, confirm, isDisabled, isPending, errorMessage, onSaved }: DialogContentProps<() => Promise<void>> & {
   customOnly?: boolean;
   definition?: AcpDefinition;
-  onClose: () => void;
   onSaved: (id: AcpDefinition["id"]) => void;
 }) {
-  const dialogRef = useRef<HTMLDialogElement>(null);
+  const cancelled = useRef(false);
+  if (isDisabled && !isPending) cancelled.current = true;
+
+  useEffect(() => {
+    cancelled.current = false;
+    return () => { cancelled.current = true; };
+  }, []);
+
   const presets = useQuery({ queryKey: workspaceKey("getAcpPresets"), queryFn: listAcpPresets, enabled: !customOnly });
   const [preset, setPreset] = useState<string | null>(definition || customOnly ? "custom" : null);
   const [name, setName] = useState(definition?.name ?? "");
@@ -23,11 +29,6 @@ export function AcpHarnessDialog({ definition, customOnly = false, onClose, onSa
   const [busy, setBusy] = useState(false);
   const [connected, setConnected] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
-  useEffect(() => {
-    const dialog = dialogRef.current;
-    dialog?.showModal();
-    return () => dialog?.close();
-  }, []);
   const parsed = parseAcpCommand(command);
   const valid = parsed !== null && validAcpLaunch(name, parsed.executable, parsed.arguments);
   const invalidCommand = commandTouched && command.trim().length > 0 && !parsed;
@@ -47,13 +48,13 @@ export function AcpHarnessDialog({ definition, customOnly = false, onClose, onSa
   }, [preset, presets.data]);
   const run = async (test: boolean) => {
     if (busy || !valid || !launch) return;
-    setBusy(true);
+    if (test) setBusy(true);
     setConnected(null);
     setError(null);
     try {
       if (test) {
         const result = await testAcpHarness(launch);
-        setConnected(result.agentInfo?.version ?? "");
+        if (!cancelled.current) setConnected(result.agentInfo?.version ?? "");
       } else {
         if (preset !== "custom") {
           const result = await testAcpHarness(launch);
@@ -64,21 +65,20 @@ export function AcpHarnessDialog({ definition, customOnly = false, onClose, onSa
         } else {
           onSaved((await saveAcpHarness(launch, definition?.id)).id);
         }
-        onClose();
       }
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
-      setError(preset !== "custom" && message.includes("Executable not found") ? `${name}: ${m.onboarding_not_detected()}` : message);
-    } finally { setBusy(false); }
+      const detail = preset !== "custom" && message.includes("Executable not found") ? `${name}: ${m.onboarding_not_detected()}` : message;
+      if (!test) throw new Error(detail);
+      if (!cancelled.current) setError(detail);
+    } finally { if (test && !cancelled.current) setBusy(false); }
   };
-  return <EscapeScope onEscape={onClose}>
-    <dialog ref={dialogRef} onCancel={(event) => { event.preventDefault(); onClose(); }} aria-labelledby="acp-dialog-title"
-      className="m-auto w-120 max-w-[calc(100vw_-_40px)] max-h-[calc(100vh_-_40px)] overflow-y-auto rounded-xl border border-border bg-background p-5 text-text shadow-modal backdrop:bg-modal-backdrop-light">
-      <h2 id="acp-dialog-title" className="mb-4 text-lg font-medium">{definition ? m.acp_edit() : m.acp_add()}</h2>
-      <form className="flex flex-col gap-3" onSubmit={(event) => { event.preventDefault(); void run(false); }}>
+  return <DialogContent className="w-120 max-h-[calc(100vh_-_40px)] overflow-y-auto p-5 text-text">
+      <DialogTitle className="mb-4 text-lg font-medium">{definition ? m.acp_edit() : m.acp_add()}</DialogTitle>
+      <form className="flex flex-col gap-3" onSubmit={(event) => { event.preventDefault(); if (!busy && valid && !isDisabled) confirm(() => run(false)); }}>
         <div className="text-sm leading-snug text-subtext">{m.acp_description()}</div>
         {!customOnly && <label className="flex flex-col gap-1 text-sm text-subtext">{m.acp_preset()}
-          <OptionPicker variant="field" floating dropDown disabled={busy} choices={[...(presets.data ?? []).map((option) => ({ id: option.id, label: option.name })), { id: "custom", label: m.acp_custom() }]} value={preset} onSelect={changePreset} />
+          <OptionPicker variant="field" floating dropDown disabled={busy || isDisabled} choices={[...(presets.data ?? []).map((option) => ({ id: option.id, label: option.name })), { id: "custom", label: m.acp_custom() }]} value={preset} onSelect={changePreset} />
         </label>}
         {!customOnly && presets.isError && <div role="alert" className="text-sm text-accent-red">{m.harness_setup_load_failed()} <Button type="button" variant="ghost" onClick={() => void presets.refetch()}>{m.app_retry()}</Button></div>}
         {preset !== null && <details open={preset === "custom"} key={preset} className="text-sm">
@@ -94,14 +94,13 @@ export function AcpHarnessDialog({ definition, customOnly = false, onClose, onSa
         </details>}
         <div className="text-sm"><a href={presets.data?.find((option) => option.id === preset)?.setupUrl ?? "https://agentclientprotocol.com/overview/agents"} target="_blank" rel="noreferrer" className="text-accent-blue-strong underline">{m.acp_setup_docs()}</a></div>
         {definition && <div className="text-sm text-subtext">{m.acp_edit_help()}</div>}
-        {error && <div role="alert" className="text-sm text-accent-red">{error}</div>}
+        {(errorMessage ?? error) && <div role="alert" className="text-sm text-accent-red">{errorMessage ?? error}</div>}
         {connected !== null && <div role="status" className="text-sm text-accent-green">{m.settings_page_connected()}{connected ? ` · ${connected}` : ""}</div>}
         <div className="mt-2 flex flex-wrap justify-end gap-2">
-          {preset === "custom" && <Button type="button" disabled={busy || !valid} onClick={() => void run(true)}>{m.acp_test()}</Button>}
-          <Button type="button" onClick={onClose}>{m.settings_page_cancel()}</Button>
-          <Button variant="primary" type="submit" disabled={busy || !valid}>{busy ? m.settings_connecting() : definition || preset === "custom" ? m.common_save() : m.settings_connect()}</Button>
+          {preset === "custom" && <Button type="button" disabled={busy || isDisabled || !valid} onClick={() => void run(true)}>{m.acp_test()}</Button>}
+          <Button type="button" onClick={cancel} disabled={isDisabled}>{m.settings_page_cancel()}</Button>
+          <Button variant="primary" type="submit" disabled={busy || isDisabled || !valid}>{busy || isPending ? m.settings_connecting() : definition || preset === "custom" ? m.common_save() : m.settings_connect()}</Button>
         </div>
       </form>
-    </dialog>
-  </EscapeScope>;
+    </DialogContent>;
 }

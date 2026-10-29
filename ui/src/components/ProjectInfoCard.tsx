@@ -1,14 +1,12 @@
+import { showCustomDialog, type DialogContentProps } from "../dialog";
 import { useFileManagerLabel } from "./useFileManagerLabel";
-import { EscapeScope } from "./EscapeScope";
-import { createPortal } from "react-dom";
-import { useId, useRef, useState } from "react";
+import { useId, useRef, useState, type RefObject } from "react";
 import { Menu } from "@base-ui/react/menu";
 import { DirectionProvider } from "@base-ui/react/direction-provider";
 import { Folder, FolderOpen, MessageCircle, MoreHorizontal, Pin, Plus, Settings, Trash2, X } from "lucide-react";
 import { deleteProject, revealFileInManager, updateProject, type Project } from "../api";
 import { m } from "../paraglide/messages.js";
-import { Button, IconButton, Input, MenuItem, Tooltip, showAlert } from "./ui";
-import { useDialogFocus } from "./useDialogFocus";
+import { Button, DialogContent, DialogTitle, Spinner, IconButton, Input, MenuItem, Tooltip, showAlert } from "./ui";
 
 function deleteExplanation(project: Project) {
   const synced = project.githubEnabled && (project.githubUrl || (project.githubOwner && project.githubRepo));
@@ -28,17 +26,20 @@ export function ProjectInfoCard({ project, chatCount, collapsed, busy, onToggleC
 }) {
   const revealLabel = useFileManagerLabel();
   const [menuOpen, setMenuOpen] = useState(false);
-  const [dialog, setDialog] = useState<"edit" | "delete" | null>(null);
   const triggerRef = useRef<HTMLButtonElement>(null);
 
   function remove() {
     setMenuOpen(false);
-    setDialog("delete");
-  }
-
-  function closeDialog() {
-    setDialog(null);
-    triggerRef.current?.focus();
+    showCustomDialog({
+      component: DeleteProjectDialog,
+      props: { project, returnFocus: triggerRef },
+      onCancel: "close",
+      onConfirm: async (deleteArtifacts) => {
+        const artifactsError = await deleteProject(project.id, deleteArtifacts);
+        onRemoved();
+        if (artifactsError) showAlert(artifactsError, "error");
+      },
+    });
   }
 
   return <>
@@ -61,12 +62,20 @@ export function ProjectInfoCard({ project, chatCount, collapsed, busy, onToggleC
                 <div className="mt-2 break-all text-xs text-subtext">{project.repoPath}</div>
               </div>
               <Menu.Item nativeButton render={<MenuItem className="data-highlighted:bg-surface" />} onClick={onPin}><span className="flex items-center gap-2"><Pin size={16} />{pinned ? m.sidebar_unpin_project() : m.sidebar_pin_project()}</span></Menu.Item>
-              <Menu.Item nativeButton render={<MenuItem className="data-highlighted:bg-surface" />} onClick={() => { setMenuOpen(false); setDialog("edit"); }}><span className="flex items-center gap-2"><Settings size={16} />{m.activity_edit()}</span></Menu.Item>
+              <Menu.Item nativeButton render={<MenuItem className="data-highlighted:bg-surface" />} onClick={() => {
+                setMenuOpen(false);
+                showCustomDialog({
+                  component: EditProjectDialog,
+                  props: { project, onDelete: remove, returnFocus: triggerRef },
+                  onCancel: "close",
+                  onConfirm: async (name) => { await updateProject(project.id, { name }); },
+                });
+              }}><span className="flex items-center gap-2"><Settings size={16} />{m.activity_edit()}</span></Menu.Item>
               <Menu.Item nativeButton render={<MenuItem className="data-highlighted:bg-surface" />} onClick={() => {
                 void revealFileInManager(project.id, ".").catch((err: unknown) => showAlert(err instanceof Error ? err.message : String(err), "error"));
               }}><span className="flex items-center gap-2"><FolderOpen size={16} />{revealLabel}</span></Menu.Item>
               <Menu.Separator className="my-1 border-t border-border" />
-              <Menu.Item nativeButton render={<MenuItem danger className="data-highlighted:bg-surface" />} disabled={dialog === "delete"} onClick={remove}><span className="flex items-center gap-2"><Trash2 size={16} />{m.projects_home_delete_project_action()}</span></Menu.Item>
+              <Menu.Item nativeButton render={<MenuItem danger className="data-highlighted:bg-surface" />} onClick={remove}><span className="flex items-center gap-2"><Trash2 size={16} />{m.projects_home_delete_project_action()}</span></Menu.Item>
             </Menu.Popup>
           </Menu.Positioner>
         </Menu.Portal>
@@ -77,79 +86,37 @@ export function ProjectInfoCard({ project, chatCount, collapsed, busy, onToggleC
         aria-label={`${m.chat_panel_new_chat()} · ${project.name}`}
         onClick={onNewChat}><Plus size={16} /></IconButton>
     </Tooltip>
-    {dialog === "edit" && createPortal(<EditProjectDialog project={project} onClose={closeDialog} onDelete={remove} />, document.body)}
-    {dialog === "delete" && createPortal(<DeleteProjectDialog project={project} onClose={closeDialog} onRemoved={onRemoved} />, document.body)}
   </>;
 }
 
-function DeleteProjectDialog({ project, onClose, onRemoved }: { project: Project; onClose: () => void; onRemoved: () => void }) {
-  const dialogRef = useRef<HTMLDivElement>(null);
-  const titleId = useId();
+function DeleteProjectDialog({ project, returnFocus, cancel, confirm, isDisabled: pending, isPending, errorMessage: error }: DialogContentProps<boolean> & { project: Project; returnFocus: RefObject<HTMLButtonElement | null> }) {
   const [deleteArtifacts, setDeleteArtifacts] = useState(false);
-  const [pending, setPending] = useState(false);
-  const [error, setError] = useState("");
-  const close = () => { if (!pending) onClose(); };
-  useDialogFocus(dialogRef);
+  const cancelRef = useRef<HTMLButtonElement>(null);
 
-  async function remove() {
-    if (pending) return;
-    setPending(true);
-    setError("");
-    try {
-      const artifactsError = await deleteProject(project.id, deleteArtifacts);
-      onClose();
-      onRemoved();
-      if (artifactsError) showAlert(artifactsError, "error");
-    }
-    catch (err) { setError(err instanceof Error ? err.message : String(err)); }
-    finally { setPending(false); }
-  }
-
-  return <EscapeScope onEscape={close}><div className="modal-backdrop fixed inset-0 z-100 flex items-center justify-center bg-modal-backdrop p-5" onClick={(event) => { if (event.target === event.currentTarget) close(); }}>
-    <div ref={dialogRef} role="dialog" aria-modal="true" aria-labelledby={titleId} tabIndex={-1}
-      className="modal w-120 max-w-full max-h-[calc(100vh-2.5rem)] overflow-y-auto rounded-xl border border-border bg-background p-6 text-text shadow-modal">
-      <h2 id={titleId} className="m-0 text-xl font-medium">{m.projects_home_delete_project_action()}</h2>
-      <p className="mt-4 whitespace-pre-line text-sm">{deleteExplanation(project)}</p>
-      <p className="mt-4 text-sm">{m.projects_delete_artifacts_kept()}</p>
-      <p className="mt-2 break-all text-xs text-subtext">{project.artifactsDir}</p>
-      <label className="mt-4 flex items-start gap-2 text-sm"><input type="checkbox" checked={deleteArtifacts} disabled={pending} onChange={(event) => setDeleteArtifacts(event.target.checked)} className="mt-1" />{m.projects_delete_artifacts_remove()}</label>
-      {error && <p role="alert" className="mt-3 text-sm text-accent-red">{error}</p>}
-      <div className="mt-6 flex justify-end gap-2"><Button type="button" variant="ghost" data-initial-focus disabled={pending} onClick={close}>{m.projects_home_cancel()}</Button><Button type="button" variant="danger" disabled={pending} onClick={() => void remove()}>{m.projects_home_delete_project_action()}</Button></div>
-    </div>
-  </div></EscapeScope>;
+  return <DialogContent finalFocus={returnFocus} initialFocus={cancelRef} className="max-h-[calc(100vh-2.5rem)] overflow-y-auto text-text">
+    <DialogTitle>{m.projects_home_delete_project_action()}</DialogTitle>
+    <p className="mt-4 whitespace-pre-line text-sm">{deleteExplanation(project)}</p>
+    <p className="mt-4 text-sm">{m.projects_delete_artifacts_kept()}</p>
+    <p className="mt-2 break-all text-xs text-subtext">{project.artifactsDir}</p>
+    <label className="mt-4 flex items-start gap-2 text-sm"><input type="checkbox" checked={deleteArtifacts} disabled={pending} onChange={(event) => setDeleteArtifacts(event.target.checked)} className="mt-1" />{m.projects_delete_artifacts_remove()}</label>
+    {error && <p role="alert" className="mt-3 text-sm text-accent-red">{error}</p>}
+    <div className="mt-6 flex justify-end gap-2"><Button type="button" variant="ghost" ref={cancelRef} disabled={pending} onClick={cancel}>{m.projects_home_cancel()}</Button><Button type="button" variant="danger" disabled={pending} onClick={() => confirm(deleteArtifacts)}>{isPending && <Spinner />}{m.projects_home_delete_project_action()}</Button></div>
+  </DialogContent>;
 }
 
-function EditProjectDialog({ project, onClose, onDelete }: { project: Project; onClose: () => void; onDelete: () => void }) {
-  const dialogRef = useRef<HTMLDivElement>(null);
-  const titleId = useId();
+function EditProjectDialog({ project, returnFocus, cancel, confirm, isDisabled: pending, isPending, errorMessage: error, onDelete }: DialogContentProps<string> & { project: Project; onDelete: () => void; returnFocus: RefObject<HTMLButtonElement | null> }) {
   const nameId = useId();
+  const nameRef = useRef<HTMLInputElement>(null);
   const [name, setName] = useState(project.name);
-  const [pending, setPending] = useState(false);
-  const [error, setError] = useState("");
-  const close = () => { if (!pending) onClose(); };
-  useDialogFocus(dialogRef);
 
-  async function save() {
-    if (pending || !name.trim()) return;
-    setPending(true);
-    setError("");
-    try { await updateProject(project.id, { name: name.trim() }); onClose(); }
-    catch (err) { setError(err instanceof Error ? err.message : String(err)); }
-    finally { setPending(false); }
-  }
-
-  return <EscapeScope onEscape={close}><div className="modal-backdrop fixed inset-0 z-100 flex items-center justify-center bg-modal-backdrop p-5" onClick={(event) => { if (event.target === event.currentTarget) close(); }}>
-    <div ref={dialogRef} role="dialog" aria-modal="true" aria-labelledby={titleId} tabIndex={-1}
-      className="modal w-120 max-w-full max-h-[calc(100vh-2.5rem)] overflow-y-auto rounded-xl border border-border bg-background p-6 text-text shadow-modal">
-      <div className="mb-5 flex items-center justify-between"><h2 id={titleId} className="m-0 text-xl font-medium">{m.sidebar_edit_project()}</h2><IconButton aria-label={m.tour_close()} onClick={close} disabled={pending}><X size={16} /></IconButton></div>
-      <form onSubmit={(event) => { event.preventDefault(); void save(); }}>
-        <label htmlFor={nameId} className="sr-only">{m.new_project_form_project_name()}</label>
-        <div className="relative"><FolderOpen size={16} className="pointer-events-none absolute start-3 top-3 text-subtext" /><Input id={nameId} data-initial-focus value={name} onChange={(event) => setName(event.target.value)} disabled={pending} required className="h-10 ps-10" /></div>
-        <div className="mt-5 mb-2 text-sm font-medium">{m.sidebar_source_folder()}</div>
-        <div className="flex items-start gap-2 rounded-lg border border-border p-3 text-sm"><FolderOpen size={16} className="mt-0.5 shrink-0 text-subtext" /><span className="min-w-0 break-all">{project.repoPath}</span></div>
-        {error && <p role="alert" className="mt-3 text-sm text-accent-red">{error}</p>}
-        <div className="mt-6 flex items-center gap-2"><Button type="button" variant="danger" disabled={pending} onClick={onDelete}>{m.projects_home_delete_project_action()}</Button><div className="flex-1" /><Button type="button" variant="ghost" disabled={pending} onClick={close}>{m.projects_home_cancel()}</Button><Button type="submit" variant="primary" disabled={pending || !name.trim()}>{m.common_save()}</Button></div>
-      </form>
-    </div>
-  </div></EscapeScope>;
+  return <DialogContent finalFocus={returnFocus} initialFocus={nameRef} className="max-h-[calc(100vh-2.5rem)] overflow-y-auto text-text"
+    render={<form onSubmit={(event) => { event.preventDefault(); if (name.trim() && !pending) confirm(name.trim()); }} />}>
+    <div className="mb-5 flex items-center justify-between"><DialogTitle>{m.sidebar_edit_project()}</DialogTitle><IconButton type="button" aria-label={m.tour_close()} onClick={cancel} disabled={pending}><X size={16} /></IconButton></div>
+    <label htmlFor={nameId} className="sr-only">{m.new_project_form_project_name()}</label>
+    <div className="relative"><FolderOpen size={16} className="pointer-events-none absolute start-3 top-3 text-subtext" /><Input id={nameId} ref={nameRef} value={name} onChange={(event) => setName(event.target.value)} disabled={pending} required className="h-10 ps-10" /></div>
+    <div className="mt-5 mb-2 text-sm font-medium">{m.sidebar_source_folder()}</div>
+    <div className="flex items-start gap-2 rounded-lg border border-border p-3 text-sm"><FolderOpen size={16} className="mt-0.5 shrink-0 text-subtext" /><span className="min-w-0 break-all">{project.repoPath}</span></div>
+    {error && <p role="alert" className="mt-3 text-sm text-accent-red">{error}</p>}
+    <div className="mt-6 flex items-center gap-2"><Button type="button" variant="danger" disabled={pending} onClick={() => { cancel(); onDelete(); }}>{m.projects_home_delete_project_action()}</Button><div className="flex-1" /><Button type="button" variant="ghost" disabled={pending} onClick={cancel}>{m.projects_home_cancel()}</Button><Button type="submit" variant="primary" disabled={pending || !name.trim()}>{isPending && <Spinner />}{m.common_save()}</Button></div>
+  </DialogContent>;
 }

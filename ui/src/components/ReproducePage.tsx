@@ -1,7 +1,8 @@
 import { useQuery } from "@tanstack/react-query";
 import { useNavigate, useRouteContext } from "@tanstack/react-router";
-import { useEffect } from "react";
+import { useEffect, useRef } from "react";
 
+import { showCustomDialog } from "../dialog";
 import { seedComposer } from "../composerStash";
 import { m } from "../paraglide/messages.js";
 import { getUiStateQuery, listProjectsQuery, resolvePaperQuery } from "../queries/projects";
@@ -23,7 +24,8 @@ export function ReproducePage({ paperId }: { paperId: string | null }) {
   const projectsOptions = listProjectsQuery();
   const projectsQuery = useQuery(projectsOptions);
   const stateQuery = useQuery(getUiStateQuery());
-  const paperQuery = useQuery({ ...resolvePaperQuery(paperId ?? ""), enabled: Boolean(paperId) });
+  useQuery({ ...resolvePaperQuery(paperId ?? ""), enabled: Boolean(paperId) });
+  const shownPaper = useRef<string | null>(null);
   const projects = projectsQuery.data;
   const state = stateQuery.data;
   // A first launch walks through onboarding instead; the link can be opened again after.
@@ -33,20 +35,19 @@ export function ReproducePage({ paperId }: { paperId: string | null }) {
   }, [paperId, onboarding, navigate]);
   const error = projectsQuery.error ?? stateQuery.error;
   const retry = () => { void projectsQuery.refetch(); void stateQuery.refetch(); };
-  if (error) return <RouteFailure error={error} reset={retry} />;
-  if (!paperId || !projects || !state || onboarding) return <RoutePending />;
-  return (
-    <div className="app flex flex-col h-full bg-background">
-      <NewProjectDialog
-        key={paperId}
-        remote={runtime.kind === "ssh"}
-        preferredAgent={state.preferredAgent}
-        initialPaperId={paperId}
-        onClose={() => void navigate({ to: "/", replace: true })}
-        onCreated={(project, publicationError) => {
+  useEffect(() => {
+    if (!paperId || !projects || !state || onboarding || error || shownPaper.current === paperId) return;
+    shownPaper.current = paperId;
+    showCustomDialog({
+      component: NewProjectDialog,
+      props: {
+        remote: runtime.kind === "ssh",
+        preferredAgent: state.preferredAgent,
+        initialPaperId: paperId,
+        onCreated: (project, publicationError) => {
           // The dialog lets the user switch papers or modes; only the linked paper gets the prompt.
           if (project.paperId === paperId.replace(VERSION_SUFFIX, "$1")) {
-            const title = paperQuery.data?.title?.trim() || project.name;
+            const title = queryClient.getQueryData(resolvePaperQuery(paperId).queryKey)?.title?.trim() || project.name;
             const source = ARXIV_ID.test(paperId) ? `arXiv:${paperId}` : `alphaxiv.org/abs/${paperId}`;
             seedComposer(project.id, m.reproduce_paper_prompt({ title, source }));
           }
@@ -56,8 +57,13 @@ export function ReproducePage({ paperId }: { paperId: string | null }) {
             replace: true,
           });
           if (publicationError) showAlert(publicationError, "error");
-        }}
-      />
-    </div>
-  );
+        },
+      },
+      onConfirm: () => {},
+      onCancel: () => { void navigate({ to: "/", replace: true }); },
+    });
+  }, [paperId, projects, state, onboarding, error, runtime.kind, navigate, queryClient, projectsOptions.queryKey]);
+  if (error) return <RouteFailure error={error} reset={retry} />;
+  if (!paperId || !projects || !state || onboarding) return <RoutePending />;
+  return <div className="app flex flex-col h-full bg-background" />;
 }

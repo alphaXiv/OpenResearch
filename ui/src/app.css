@@ -37,6 +37,15 @@
   }
 }
 
+@keyframes dialog-shake {
+  20%, 60% {
+    translate: -6px 0;
+  }
+  40%, 80% {
+    translate: 6px 0;
+  }
+}
+
 @keyframes or-pulse {
   50% {
     opacity: 0.35;

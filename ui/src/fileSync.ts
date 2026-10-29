@@ -1,18 +1,25 @@
+import { showConfirmDialog } from "./dialog";
+import { m } from "./paraglide/messages.js";
+
 export interface FileConflict {
   currentVersion: string | null;
   exists: boolean;
 }
 
-// Native dialogs can blur the editor before the user chooses whether to discard.
+// Dialog focus must not trigger an editor save while discard is pending.
 export let confirmingFileDiscard = false;
 
-export function confirmFileDiscard(message: string): boolean {
+export function confirmFileDiscard(message: string): Promise<boolean> {
   confirmingFileDiscard = true;
-  try {
-    return window.confirm(message);
-  } finally {
-    confirmingFileDiscard = false;
-  }
+  return new Promise<boolean>((resolve) => {
+    showConfirmDialog({
+      title: m.common_confirm(),
+      description: message,
+      destructive: true,
+      onConfirm: () => resolve(true),
+      onCancel: () => resolve(false),
+    });
+  }).finally(() => { confirmingFileDiscard = false; });
 }
 
 export interface FileBufferState {

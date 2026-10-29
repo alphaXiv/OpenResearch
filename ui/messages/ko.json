@@ -1493,5 +1493,9 @@
   "harness_already_added": "이미 추가한 항목입니다",
   "harness_custom_acp": "사용자 지정 ACP 에이전트",
   "acp_definitions_load_failed": "저장된 ACP 에이전트를 불러오지 못했습니다. 목록이 불완전할 수 있습니다. 다시 시도하세요.",
-  "acp_definitions_loading": "저장된 ACP 에이전트를 불러오는 중…"
+  "acp_definitions_loading": "저장된 ACP 에이전트를 불러오는 중…",
+  "common_cancel": "취소",
+  "common_confirm": "확인",
+  "common_ok": "확인",
+  "common_submit": "제출"
 }

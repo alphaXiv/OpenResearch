@@ -1,43 +1,62 @@
-import { useEffect, useRef } from "react";
+import { useEffect, useRef, useState } from "react";
 import { useQuery } from "@tanstack/react-query";
 import { ArrowLeft, Plus, RefreshCw, SquareTerminal } from "lucide-react";
-import { listAcpPresets, type Harness, type HarnessId } from "../api";
+import { listAcpHarnesses, listAcpPresets, type AcpDefinition, type Harness, type HarnessId, type HarnessSetupCommands } from "../api";
+import type { DialogContentProps } from "../dialog";
+import { getHarnessesQuery, getHarnessSetupCommandsQuery, refreshHarnesses } from "../queries/settings";
 import { workspaceKey } from "../queries/client";
 import { m } from "../paraglide/messages.js";
 import { HarnessLogo } from "./HarnessLogo";
 import { renderNote } from "./agentNote";
-import { Button, Tooltip } from "./ui";
+import { Button, DialogContent, DialogTitle, Tooltip } from "./ui";
 
-export function AddHarnessDialog({ harnesses, added, candidate, remote, refreshing, acpAvailable, acpError, onRetryAcp, onSelect, onRefresh, onClose, onCustom, onEdit, onSetup, canSetup }: {
-  harnesses: Harness[];
-  added: Harness[];
-  candidate?: Harness;
+export function sortHarnesses(harnesses: Harness[]) {
+  return [...harnesses].sort((a, b) => {
+    const rank = (id: HarnessId) => id === "claude-code" ? 0 : id === "codex" ? 1 : id === "opencode" ? 2 : 3;
+    return rank(a.id) - rank(b.id);
+  });
+}
+
+export function canConfigureHarness(harness: Harness, remote: boolean, commands?: HarnessSetupCommands) {
+  if (harness.needsConfigRepair) return false;
+  if (harness.id.startsWith("acp:") && harness.installed && !harness.adapterMissing) return true;
+  if (remote || !commands || (harness.logo === "zcode-acp-server" && !harness.installed && !harness.adapterMissing)) return false;
+  return !harness.installed || harness.installBroken || harness.adapterMissing || harness.authState === "unsupported" || (harness.authState === "needsLogin" && (harness.id !== "claude-code" || harness.loginEligible));
+}
+
+export function AddHarnessDialog({ initialCandidate, remote, cancel, onCustom, onEdit, onSetup }: DialogContentProps<void> & {
+  initialCandidate?: HarnessId;
   remote: boolean;
-  refreshing: boolean;
-  acpAvailable: boolean;
-  acpError: boolean;
-  onRetryAcp: () => void;
-  onSelect: (id: HarnessId | null) => void;
-  onRefresh: () => void;
-  onClose: () => void;
   onCustom: () => void;
-  onEdit: (harness: Harness) => void;
-  onSetup: (harness: Harness) => void;
-  canSetup: (harness: Harness) => boolean;
+  onEdit: (definition: AcpDefinition) => void;
+  onSetup: (harness: Harness, commands?: HarnessSetupCommands) => void;
 }) {
-  const dialogRef = useRef<HTMLDialogElement>(null);
+  const harnessQuery = useQuery(getHarnessesQuery());
+  const definitions = useQuery({ queryKey: workspaceKey("getAcpHarnesses"), queryFn: listAcpHarnesses });
+  const setupCommands = useQuery(getHarnessSetupCommandsQuery());
+  const [candidateId, setCandidateId] = useState(initialCandidate);
+  const [refreshing, setRefreshing] = useState(false);
+  const harnesses = sortHarnesses(harnessQuery.data ?? []);
+  const added = harnesses.filter((h) => h.installed || h.installBroken || definitions.data?.some((definition) => definition.id === h.id));
+  const candidate = harnesses.find((h) => h.id === candidateId);
+  const acpAvailable = definitions.data !== undefined && !definitions.isError;
+  const acpError = definitions.isError;
+  const openSetup = (harness: Harness) => {
+    cancel();
+    onSetup(harness, setupCommands.data?.[harness.id]);
+  };
+  const onSelect = (id: HarnessId | null) => {
+    const harness = harnesses.find((h) => h.id === id);
+    if (!harness) { setCandidateId(undefined); return; }
+    if (canConfigureHarness(harness, remote, setupCommands.data?.[harness.id])) openSetup(harness);
+    else setCandidateId(id ?? undefined);
+  };
+  const onRefresh = () => {
+    setRefreshing(true);
+    void refreshHarnesses(true, true).catch(() => {}).finally(() => setRefreshing(false));
+  };
   const headingRef = useRef<HTMLHeadingElement>(null);
   const presets = useQuery({ queryKey: workspaceKey("getAcpPresets"), queryFn: listAcpPresets });
-
-  useEffect(() => {
-    const dialog = dialogRef.current;
-    const previous = document.activeElement instanceof HTMLElement ? document.activeElement : null;
-    dialog?.showModal();
-    return () => {
-      dialog?.close();
-      previous?.focus();
-    };
-  }, []);
 
   useEffect(() => {
     headingRef.current?.focus();
@@ -54,15 +73,7 @@ export function AddHarnessDialog({ harnesses, added, candidate, remote, refreshi
   ];
 
   return (
-    <dialog
-      ref={dialogRef}
-      onCancel={(event) => {
-        event.preventDefault();
-        onClose();
-      }}
-      aria-labelledby="add-harness-title"
-      className="m-auto w-180 max-w-[calc(100vw_-_40px)] max-h-[calc(100vh_-_40px)] overflow-y-auto rounded-xl border border-border bg-background p-5 text-text shadow-modal backdrop:bg-modal-backdrop-light"
-    >
+    <DialogContent initialFocus={headingRef} className="w-180 max-h-[calc(100vh_-_40px)] overflow-y-auto p-5 text-text">
       {candidate ? (
         <>
           <Button variant="ghost" size="small" onClick={() => onSelect(null)}>
@@ -71,28 +82,19 @@ export function AddHarnessDialog({ harnesses, added, candidate, remote, refreshi
           </Button>
           <div className="mt-4 flex items-center gap-3">
             <HarnessLogo harness={candidate.id} logo={candidate.logo} size={28} />
-            <h2 ref={headingRef} tabIndex={-1} id="add-harness-title" className="m-0 text-xl font-medium">{candidateName}</h2>
+            <DialogTitle ref={headingRef} tabIndex={-1} className="m-0 text-xl font-medium">{candidateName}</DialogTitle>
           </div>
           <p className="my-4 text-sm text-subtext" role="status">
             {needsZCode ? m.harness_zcode_required() : renderNote(candidate.agentNote) ?? m.harness_install_help({ name: candidateName ?? candidate.name })}
           </p>
           <div className="mt-5 flex flex-wrap items-center justify-end gap-2">
-            <Button onClick={onClose}>{m.settings_page_cancel()}</Button>
+            <Button onClick={cancel}>{m.settings_page_cancel()}</Button>
             <Button onClick={onRefresh} disabled={refreshing}>
               <RefreshCw size={14} />
               {m.settings_page_refresh()}
             </Button>
-            {!needsZCode &&
-              !candidate.needsConfigRepair &&
-              ((candidate.id.startsWith("acp:") && candidate.installed && !candidate.adapterMissing) ||
-                (!remote &&
-                  canSetup(candidate) &&
-                  (!candidate.installed ||
-                    candidate.installBroken ||
-                    candidate.adapterMissing ||
-                    candidate.authState === "unsupported" ||
-                    (candidate.authState === "needsLogin" && (candidate.id !== "claude-code" || candidate.loginEligible))))) && (
-              <Button variant="primary" onClick={() => onSetup(candidate)}>
+            {canConfigureHarness(candidate, remote, setupCommands.data?.[candidate.id]) && (
+              <Button variant="primary" onClick={() => openSetup(candidate)}>
                 <SquareTerminal size={14} />
                 {candidate.adapterMissing
                   ? m.acp_install_adapter()
@@ -114,13 +116,16 @@ export function AddHarnessDialog({ harnesses, added, candidate, remote, refreshi
               </a>
             )}
             {candidate.id.startsWith("acp:") && !candidate.setupUrl && (
-              <Button onClick={() => onEdit(candidate)}>{m.activity_edit()}</Button>
+              <Button onClick={() => {
+                const definition = definitions.data?.find((item) => item.id === candidate.id);
+                if (definition) { cancel(); onEdit(definition); }
+              }}>{m.activity_edit()}</Button>
             )}
           </div>
         </>
       ) : (
         <>
-          <h2 ref={headingRef} tabIndex={-1} id="add-harness-title" className="m-0 text-xl font-medium">{m.harness_add()}</h2>
+          <DialogTitle ref={headingRef} tabIndex={-1} className="m-0 text-xl font-medium">{m.harness_add()}</DialogTitle>
           <p className="mt-2 mb-4 text-sm text-subtext">{m.harness_add_description()}</p>
           {(!acpAvailable || !presets.data) && (
             <p role={acpError || presets.isError ? "alert" : "status"} className="mb-4 text-sm text-subtext">
@@ -128,7 +133,7 @@ export function AddHarnessDialog({ harnesses, added, candidate, remote, refreshi
                 <Button
                   variant="ghost"
                   onClick={() => {
-                    onRetryAcp();
+                    void definitions.refetch();
                     void presets.refetch();
                   }}
                 >
@@ -167,7 +172,7 @@ export function AddHarnessDialog({ harnesses, added, candidate, remote, refreshi
               type="button"
               aria-disabled={!acpAvailable || undefined}
               onClick={() => {
-                if (acpAvailable) onCustom();
+                if (acpAvailable) { cancel(); onCustom(); }
               }}
               className="flex min-h-12 items-center gap-3 rounded-lg border border-border bg-background px-3 py-2 text-left text-sm font-medium outline-none hover:bg-surface focus-visible:outline-2 focus-visible:outline-focus focus-visible:outline-offset-2 aria-disabled:cursor-not-allowed aria-disabled:opacity-50 lg:col-span-2"
             >
@@ -179,9 +184,9 @@ export function AddHarnessDialog({ harnesses, added, candidate, remote, refreshi
       )}
       {!candidate && (
         <div className="mt-5 flex justify-end">
-          <Button onClick={onClose}>{m.settings_page_cancel()}</Button>
+          <Button onClick={cancel}>{m.settings_page_cancel()}</Button>
         </div>
       )}
-    </dialog>
+    </DialogContent>
   );
 }

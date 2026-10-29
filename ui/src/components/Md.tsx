@@ -1,4 +1,3 @@
-import { EscapeScope } from "./EscapeScope";
 import { m } from "../paraglide/messages.js";
 import { ltr } from "../i18n";
 import { useLocale } from "../locale";
@@ -9,8 +8,7 @@ import { useLocale } from "../locale";
 // logs — so the agent can cite the code and the run behind a claim.
 
 import { Check, Copy, FileCode, ScrollText, X, Download, Minus, Plus } from "lucide-react";
-import { createContext, memo, useContext, useEffect, useMemo, useRef, useState, type ImgHTMLAttributes, type ReactNode } from "react";
-import { createPortal } from "react-dom";
+import { createContext, memo, useContext, useEffect, useMemo, useState, type ImgHTMLAttributes, type ReactNode } from "react";
 import { Markdown as StreamingMarkdown } from "@clo/react-markdown";
 import rehypeKatex from "rehype-katex";
 import remarkGfm from "remark-gfm";
@@ -23,7 +21,7 @@ import { highlight } from "../syntaxHighlight";
 import { remarkFigures } from "../remarkFigures";
 import { normalizeMarkdownForRendering } from "../markdownNormalization";
 import { tabOpenGestureHandlers, type TabOpenIntent } from "../tabPreview";
-import { Button, IconButton, IconButtonLink, Tooltip } from "./ui";
+import { Button, Dialog, DialogContent, IconButton, IconButtonLink, Tooltip } from "./ui";
 import { absoluteFileUrl, artifactUrl, projectFileUrl } from "../api";
 import { InlineHtmlFigure } from "./InlineHtmlFigure";
 import { ImageCarousel, ImageCarouselContext } from "./ImageCarousel";
@@ -56,8 +54,7 @@ export function ChatImageScope({ projectId, sessionId, children }: {
 }
 
 function ImageModal({ src, alt, name, onClose }: { src: string; alt: string; name?: string; onClose: () => void }) {
-  const ref = useRef<HTMLDialogElement>(null);
-  const viewport = useRef<HTMLDivElement>(null);
+  const [viewport, setViewport] = useState<HTMLDivElement | null>(null);
   const [localZoom, setLocalZoom] = useState(1);
   const carousel = useContext(ImageCarouselContext);
   const zoom = carousel?.zoom ?? localZoom;
@@ -65,36 +62,30 @@ function ImageModal({ src, alt, name, onClose }: { src: string; alt: string; nam
   const [bounds, setBounds] = useState({ width: 0, height: 0 });
   const [size, setSize] = useState({ width: 0, height: 0 });
   useEffect(() => {
-    const dialog = ref.current;
-    dialog?.showModal();
-    dialog?.focus();
-    const area = viewport.current;
+    const area = viewport;
+    if (!area) return;
     const observer = new ResizeObserver(([entry]) => {
       setBounds({ width: entry.contentRect.width, height: entry.contentRect.height });
     });
     const onWheel = (event: WheelEvent) => {
       event.preventDefault();
-      setZoom((value) => imageWheelZoom(value, event.deltaY, event.deltaMode, area?.clientHeight ?? 0));
+      setZoom((value) => imageWheelZoom(value, event.deltaY, event.deltaMode, area.clientHeight));
     };
-    if (area) {
-      observer.observe(area);
-      area.addEventListener("wheel", onWheel, { passive: false });
-    }
+    observer.observe(area);
+    area.addEventListener("wheel", onWheel, { passive: false });
     return () => {
-      area?.removeEventListener("wheel", onWheel);
+      area.removeEventListener("wheel", onWheel);
       observer.disconnect();
-      dialog?.close();
     };
-  }, []);
+  }, [viewport, setZoom]);
   const fit = size.width && bounds.width
     ? Math.min(1, bounds.width * 0.9 / size.width, bounds.height * 0.9 / size.height)
     : 1;
-  return <EscapeScope onEscape={onClose}>{createPortal(
-    <dialog ref={ref} tabIndex={-1} aria-label={alt || m.chat_pasted_image()}
-      onCancel={(event) => { event.preventDefault(); onClose(); }}
-      className="fixed inset-0 m-0 max-w-none max-h-none w-full h-dvh border-0 outline-none bg-transparent p-0 text-text backdrop:bg-image-backdrop"
+  return <Dialog open onOpenChange={(open) => { if (!open) onClose(); }}>
+    <DialogContent aria-label={alt || m.chat_pasted_image()}
+      className="fixed inset-0 h-dvh w-screen max-w-none rounded-none border-0 bg-transparent p-0 text-text shadow-none"
       onClick={(event) => { event.stopPropagation(); if (event.target === event.currentTarget) onClose(); }}>
-      <div ref={viewport} className="absolute inset-x-4 sm:inset-x-12 top-16 bottom-32 overflow-auto overscroll-contain"
+      <div ref={setViewport} className="absolute inset-x-4 sm:inset-x-12 top-16 bottom-32 overflow-auto overscroll-contain"
         onClick={(event) => { if (event.target === event.currentTarget) onClose(); }}>
         <div className="flex min-h-full min-w-full w-max pointer-events-none">
           <img src={src} alt={alt} onLoad={(event) => setSize({ width: event.currentTarget.naturalWidth, height: event.currentTarget.naturalHeight })}
@@ -128,8 +119,8 @@ function ImageModal({ src, alt, name, onClose }: { src: string; alt: string; nam
           </Tooltip>
         </div>
       </div>
-    </dialog>, document.body,
-  )}</EscapeScope>;
+    </DialogContent>
+  </Dialog>;
 }
 
 function MarkdownImage({ sources, downloadName, alt = "", ...props }: ImgHTMLAttributes<HTMLImageElement> & { sources: string[]; downloadName?: string }) {

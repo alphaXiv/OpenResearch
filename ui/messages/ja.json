@@ -1493,5 +1493,9 @@
   "harness_already_added": "これは追加済みです",
   "harness_custom_acp": "カスタム ACP エージェント",
   "acp_definitions_load_failed": "保存済みの ACP エージェントを読み込めませんでした。一覧が不完全な可能性があります。追加するには再試行してください。",
-  "acp_definitions_loading": "保存済みの ACP エージェントを読み込み中…"
+  "acp_definitions_loading": "保存済みの ACP エージェントを読み込み中…",
+  "common_cancel": "キャンセル",
+  "common_confirm": "確認",
+  "common_ok": "OK",
+  "common_submit": "送信"
 }
