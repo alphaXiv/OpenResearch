@@ -1,5 +1,3 @@
-#[path = "cli/acp_skills.rs"]
-mod acp_skills;
 #[path = "cli/compute_cli.rs"]
 mod compute_cli;
 #[path = "cli/invocation_gate_cli.rs"]
