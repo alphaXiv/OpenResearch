@@ -227,8 +227,9 @@ test('Windows PR lanes execute the full test suite alongside lint; full validati
     }
     assert.equal(commands.filter(command => command === 'cargo clippy --all-targets --locked -- -D warnings').length, 1)
     assert.equal(commands.filter(command => command === 'cargo fmt --manifest-path windows/launcher/Cargo.toml --check').length, 1)
-    assert.equal(commands.filter(command => command === 'cargo clippy --manifest-path windows/launcher/Cargo.toml --locked -- -D warnings').length, 1)
+    assert.equal(commands.filter(command => command === 'cargo clippy --manifest-path windows/launcher/Cargo.toml --all-targets --locked -- -D warnings').length, 1)
     assert.equal(commands.filter(command => command === 'cargo build --manifest-path windows/launcher/Cargo.toml --locked').length, 1)
+    assert.equal(commands.filter(command => command === 'cargo test --manifest-path windows/launcher/Cargo.toml --locked').length, 1)
     assert.equal(commands.includes('cargo build --locked'), false)
     assert.equal(commands.filter(command => command === 'cargo test --locked').length, 1)
   }
