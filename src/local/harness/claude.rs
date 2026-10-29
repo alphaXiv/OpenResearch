@@ -496,6 +496,9 @@ fn parse_claude_model_list(result: &Value, ultracode: bool) -> Vec<ModelInfo> {
 
 pub struct ClaudeCode;
 
+/// Override inherited launch metadata so children identify OpenResearch.
+pub(crate) const CLAUDE_ENTRYPOINT: &str = "openresearch";
+
 /// Either credential Claude Code accepts. `ANTHROPIC_AUTH_TOKEN` is the one a
 /// custom `ANTHROPIC_BASE_URL` gateway uses, so detecting only the api key
 /// reports those working setups as signed out.
@@ -573,6 +576,7 @@ async fn claude_one_shot(bin: &Path, request: OneShot<'_>) -> Result<String> {
     // cwd's CLAUDE.md / settings into a request that carries its own context.
     .current_dir(std::env::temp_dir());
     prepare_env(&mut cmd);
+    cmd.env("CLAUDE_CODE_ENTRYPOINT", CLAUDE_ENTRYPOINT);
     cmd.env(
         "CLAUDE_CONFIG_DIR",
         native_store::prepare_claude(NativeStore::Isolated)?,
