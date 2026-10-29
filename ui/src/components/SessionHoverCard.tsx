@@ -70,7 +70,7 @@ function ExperimentRow({ row, sessionProjectId, tabbable, onFocus, onOpen }: {
   );
 }
 
-export function SessionHoverCard({ session, modelName, projectName, harnessLogo, anchor, cardId, cardRef, onEnter, onLeave, onOpenExperiment, onReturnToRow, onContinue }: {
+export function SessionHoverCard({ session, modelName, projectName, harnessLogo, anchor, cardId, cardRef, container, onEnter, onLeave, onOpenExperiment, onReturnToRow, onContinue }: {
   session: ChatSession;
   modelName: string | null;
   projectName?: string;
@@ -78,6 +78,7 @@ export function SessionHoverCard({ session, modelName, projectName, harnessLogo,
   anchor: DOMRect;
   cardId: string;
   cardRef: React.RefObject<HTMLDivElement | null>;
+  container: Element;
   onEnter: () => void;
   onLeave: () => void;
   onOpenExperiment: (projectId: string, experimentId: string) => void;
@@ -190,6 +191,6 @@ export function SessionHoverCard({ session, modelName, projectName, harnessLogo,
         </div>
       </div>}
     </div>,
-    document.body,
+    container,
   );
 }

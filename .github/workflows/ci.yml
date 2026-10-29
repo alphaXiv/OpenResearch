@@ -78,9 +78,10 @@ jobs:
         run: node ui/scripts/check-i18n.mjs
       - name: Style tokens
         run: node ui/scripts/check-styles.mjs
-      - uses: pnpm/action-setup@v4
+      - uses: pnpm/setup@v1
         with:
-          version: 10
+          package-json-file: ui/package.json
+          install: false
       - name: Install UI dependencies
         working-directory: ui
         run: pnpm install --frozen-lockfile

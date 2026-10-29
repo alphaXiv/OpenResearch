@@ -1,3 +1,4 @@
+import { Dialog } from "@base-ui/react/dialog";
 import { ComposerProjectPicker } from "./ComposerProjectPicker";
 import { ProjectInfoCard } from "./ProjectInfoCard";
 import { SessionHoverCard } from "./SessionHoverCard";
@@ -4419,6 +4420,7 @@ function SessionRow({
           anchor={anchor}
           cardId={cardId}
           cardRef={cardRef}
+          container={ref.current?.closest(".mobile-rail-dialog") ?? document.body}
           onEnter={() => { pointerInside.current = true; window.clearTimeout(closeTimer.current); }}
           onLeave={() => { cardWarmUntil.current = Date.now() + 500; pointerInside.current = false; scheduleClose(); }}
           onOpenExperiment={(projectId, experimentId) => { closeCard(); onOpenExperiment(projectId, experimentId); }}
@@ -4534,6 +4536,9 @@ export function ChatPanel({
   onRetryContent,
   railHeader,
   railOpen,
+  mobileRail = false,
+  onCloseMobileRail,
+  contentInert = false,
   onShowRail,
   onNewProject,
   mainView,
@@ -4569,6 +4574,9 @@ export function ChatPanel({
   railHeader?: React.ReactNode;
   /** Whether the agents rail is showing (collapsed via its own header icon). */
   railOpen: boolean;
+  mobileRail?: boolean;
+  onCloseMobileRail?: () => void;
+  contentInert?: boolean;
   /** Reopen the rail (from the chat header's sidebar icon). */
   onShowRail: () => void;
   onNewProject?: () => void;
@@ -4671,15 +4679,15 @@ export function ChatPanel({
   const [focusedSidebarRow, setFocusedSidebarRow] = useState<string | null>(null);
   const [chatLimits, setChatLimits] = useState<Record<string, number>>({});
   const sidebarExpanded = sidebarExpandedAll || Object.keys(chatLimits).length > 0;
-  useLayoutEffect(() => {
-    const body = railBodyRef.current;
+  const setRailBody = useCallback((body: HTMLDivElement | null) => {
+    railBodyRef.current = body;
     if (!body || embedded) return;
     const resize = () => setRailHeight(body.clientHeight);
     const observer = new ResizeObserver(resize);
     observer.observe(body);
     resize();
-    return () => observer.disconnect();
-  }, [railOpen, embedded, mainView]);
+    return () => { observer.disconnect(); railBodyRef.current = null; };
+  }, [embedded]);
   const recentActivity = new Map(projectActivity.map((activity) => [activity.projectId, activity.lastActivityAt]));
   const sortedProjects = [...sidebarProjects].sort((a, b) => Number(pinnedProjects.includes(b.id)) - Number(pinnedProjects.includes(a.id)) || Math.max(recentActivity.get(b.id) ?? 0, b.updatedAt) - Math.max(recentActivity.get(a.id) ?? 0, a.updatedAt));
   const candidateLimit = sidebarGrouping === "list" || sidebarExpanded ? sortedProjects.length : Math.max(1, Math.ceil(railHeight / 36));
@@ -6765,7 +6773,7 @@ export function ChatPanel({
         </div>
       </div>
       <div className="relative flex-1 min-h-0">
-      <div ref={railBodyRef} tabIndex={-1} className={`rail-body h-full overflow-x-hidden ${sidebarScrollable ? "overflow-y-auto" : "overflow-y-hidden"}`}>
+      <div ref={setRailBody} tabIndex={-1} className={`rail-body h-full overflow-x-hidden ${sidebarScrollable ? "overflow-y-auto" : "overflow-y-hidden"}`}>
         <div className="relative" style={{ height: (sidebarScrollable ? sidebarVirtualizer.getTotalSize() : defaultRowsHeight) + (showProjectMore ? 38 : 0) + (sidebarExpandedAll ? 46 : 0) }}>
           {(sidebarScrollable
             ? sidebarVirtualItems.map((item) => ({ row: sidebarRows[item.index], top: item.start, index: item.index }))
@@ -6902,10 +6910,19 @@ export function ChatPanel({
   );
 
   const headerClass = `chat-header flex items-center gap-2 py-0 px-4 bg-background shrink-0 h-12 mac-titlebar:h-titlebar relative z-4 w-full max-w-readable my-0 mx-auto [&::after]:content-[''] [&::after]:absolute [&::after]:top-full [&::after]:start-0 [&::after]:end-0 [&::after]:h-6 [&::after]:bg-[linear-gradient(to_bottom,_var(--base),_transparent)] [&::after]:pointer-events-none`;
-  const railReopen = !railOpen && !embedded && (
+  const displayedRail = mobileRail ? (
+    <Dialog.Root open={railOpen} onOpenChange={(open) => { if (!open) onCloseMobileRail?.(); }}>
+      <Dialog.Portal>
+        <Dialog.Backdrop className="fixed inset-0 z-70 bg-modal-backdrop" />
+        <Dialog.Popup aria-modal="true" aria-label={m.chat_panel_show_sidebar()} className="mobile-rail-dialog fixed inset-y-0 start-0 z-80 outline-none">{rail}</Dialog.Popup>
+      </Dialog.Portal>
+    </Dialog.Root>
+  ) : railOpen ? rail : null;
+  const railReopen = (!railOpen || mobileRail) && !embedded && (
     <Tooltip interactive content={m.chat_panel_show_sidebar()} className="rounded-md mac-titlebar:invisible">
       <IconButton
         aria-label={m.chat_panel_show_sidebar()}
+        aria-expanded={railOpen}
         onClick={onShowRail}
         className="mac-titlebar:ms-titlebar-inset"
       >
@@ -6917,9 +6934,9 @@ export function ChatPanel({
   if (mainView !== "chat") {
     return (
       <>
-        {railOpen && rail}
-        <section className="chat-pane flex-1 min-w-0 flex flex-col bg-background min-h-0">
-          {!railOpen && <div className="mac-titlebar-spacer flex h-12 mac-titlebar:h-titlebar shrink-0 items-center">{railReopen}</div>}
+        {displayedRail}
+        <section inert={contentInert} className="chat-pane flex-1 min-w-0 flex flex-col bg-background min-h-0">
+          {(!railOpen || mobileRail) && <div className="mac-titlebar-spacer flex h-12 mac-titlebar:h-titlebar shrink-0 items-center">{railReopen}</div>}
           {/* Keyed per view so no tab inherits the chat thread's or another tab's scroll offset. */}
           <div key={mainView} className="settings-view-scroll flex-1 min-h-0 overflow-y-auto [scrollbar-gutter:stable_both-edges]">
             {contentError ? <div role="alert" className="p-6 text-subtext">{contentError}<Button onClick={onRetryContent}>{m.app_retry()}</Button></div>
@@ -6932,11 +6949,11 @@ export function ChatPanel({
 
   return (
     <>
-      {railOpen && rail}
-      <section data-side-chat={embedded || undefined} className="chat-pane flex-1 min-w-0 flex flex-col bg-background min-h-0">
+      {displayedRail}
+      <section inert={contentInert} data-side-chat={embedded || undefined} className="chat-pane flex-1 min-w-0 flex flex-col bg-background min-h-0">
         {/* Header — session title on the left, end-pane view switchers on the
           right, fading into the chat below (sessions live in the rail). */}
-        <div className={railOpen || embedded ? "contents" : "grid shrink-0 grid-cols-[2rem_minmax(0,1fr)_2rem] mac-titlebar:grid-cols-titlebar-chat items-center"}>
+        <div className={railOpen && !mobileRail || embedded ? "contents" : "chat-heading-row grid shrink-0 grid-cols-[2rem_minmax(0,1fr)_2rem] mac-titlebar:grid-cols-titlebar-chat items-center"}>
           {railReopen}
           <div className={headerClass}>
           <div className="flex min-w-0 flex-1 items-center gap-2">

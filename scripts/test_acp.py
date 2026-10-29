@@ -7,12 +7,19 @@ import sys
 import tempfile
 import time
 import urllib.error
+import urllib.parse
 import urllib.request
 
 
 def main():
     base = sys.argv[1].rstrip("/")
-    assert base.startswith(("http://127.0.0.1:49", "http://localhost:49")), "Use an isolated dev slot"
+    parsed = urllib.parse.urlsplit(base)
+    assert (
+        parsed.scheme == "http"
+        and parsed.hostname in ("127.0.0.1", "localhost")
+        and parsed.port is not None
+        and 4901 <= parsed.port <= 5199
+    ), "Use an isolated dev slot"
 
     def api(method, path, body=None):
         data = json.dumps(body).encode() if body is not None else None

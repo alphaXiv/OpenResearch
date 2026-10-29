@@ -609,15 +609,17 @@ mod imp {
         AboutMetadata, Menu, MenuEvent, MenuId, MenuItem, PredefinedMenuItem, Submenu,
     };
     #[cfg(target_os = "macos")]
-    use objc2::runtime::{AnyClass, AnyObject, Bool, Sel};
+    use objc2::runtime::{AnyClass, AnyObject, Bool, NSObjectProtocol, Sel};
     #[cfg(target_os = "macos")]
     use objc2::MainThreadMarker;
     #[cfg(target_os = "macos")]
-    use objc2_app_kit::{NSAlert, NSAlertFirstButtonReturn, NSApplication};
+    use objc2_app_kit::{NSAlert, NSAlertFirstButtonReturn, NSApplication, NSWritingToolsBehavior};
     #[cfg(target_os = "macos")]
     use objc2_foundation::NSString;
     #[cfg(target_os = "macos")]
-    use wry::WebViewExtMacOS;
+    use objc2_web_kit::WKWebViewConfiguration;
+    #[cfg(target_os = "macos")]
+    use wry::{WebViewBuilderExtMacos, WebViewExtMacOS};
 
     #[cfg(target_os = "macos")]
     const MACOS_ESCAPE_SCRIPT: &str = r#"
@@ -964,6 +966,17 @@ mod imp {
         let builder = builder
             .with_initialization_script("window.__ORX_MAC_TITLEBAR__ = true;")
             .with_initialization_script_for_main_only(MACOS_ESCAPE_SCRIPT, false);
+        #[cfg(target_os = "macos")]
+        let builder = {
+            let mtm = MainThreadMarker::new().expect("desktop app runs on the main thread");
+            let configuration = unsafe { WKWebViewConfiguration::new(mtm) };
+            if configuration.respondsToSelector(objc2::sel!(setWritingToolsBehavior:)) {
+                unsafe {
+                    let _: () = objc2::msg_send![&*configuration, setWritingToolsBehavior: NSWritingToolsBehavior::None];
+                }
+            }
+            builder.with_webview_configuration(configuration)
+        };
         #[cfg(windows)]
         let builder = builder.with_initialization_script("window.__ORX_WIN_TITLEBAR__ = true;");
         #[cfg(not(target_os = "linux"))]

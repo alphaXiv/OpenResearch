@@ -109,8 +109,9 @@ png = { version = "0.18", optional = true }
 [target.'cfg(target_os = "macos")'.dependencies]
 # muda builds the menu bar, and objc2-app-kit's NSAlert backs `window.confirm`.
 objc2 = "0.6"
-objc2-app-kit = { version = "0.3", default-features = false, features = ["std", "NSAlert", "NSApplication", "NSButton", "NSControl", "NSResponder", "NSView", "NSWindow"] }
+objc2-app-kit = { version = "0.3", default-features = false, features = ["std", "NSAlert", "NSApplication", "NSButton", "NSControl", "NSResponder", "NSTextCheckingClient", "NSView", "NSWindow"] }
 objc2-foundation = { version = "0.3", default-features = false, features = ["std", "NSString"] }
+objc2-web-kit = { version = "0.3", default-features = false, features = ["WKWebViewConfiguration"] }
 muda = "0.20"
 # `window.confirm` panel added to wry's WKUIDelegate (src/commands/app.rs).
 block2 = "0.6"

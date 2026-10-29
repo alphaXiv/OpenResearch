@@ -449,3 +449,58 @@
   font-size: inherit;
 }
 }
+
+@media (max-width: 767px) {
+  html, body, #root { height: 100dvh; }
+  .app { padding-top: env(safe-area-inset-top); }
+  .workspace-body.has-workspace-tools { padding-bottom: calc(64px + env(safe-area-inset-bottom)); }
+  .workspace-body > .chat-pane .chat-header { padding-inline: 8px; }
+  .chat-heading-row { grid-template-columns: 44px minmax(0, 1fr) 0; }
+  .chat-heading-row > span > .icon-btn, .mac-titlebar-spacer > span > .icon-btn { width: 44px; height: 44px; }
+  .workspace-tools { display: none; }
+  .workspace-mobile-nav {
+    display: flex;
+    position: fixed;
+    inset-inline: 0;
+    bottom: 0;
+    z-index: 65;
+    min-height: 64px;
+    padding: 4px 8px calc(4px + env(safe-area-inset-bottom));
+    border-top: 1px solid var(--border);
+    background: var(--base);
+  }
+  .workspace-mobile-nav > * { flex: 1 1 0; min-width: 0; }
+  .workspace-mobile-nav > button, .workspace-mobile-nav > div > button {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    gap: 4px;
+    min-height: 56px;
+    border-radius: var(--radius-md);
+    color: var(--subtext);
+    font-size: 11px;
+    white-space: nowrap;
+  }
+  .workspace-mobile-nav button span { max-width: 100%; overflow: hidden; text-overflow: ellipsis; }
+  .workspace-mobile-nav button:focus-visible { outline: 2px solid var(--focus); outline-offset: -2px; }
+  .workspace-mobile-nav button[aria-pressed="true"] { background: var(--surface); color: var(--text); }
+  .mobile-rail-dialog { width: min(320px, calc(100vw - 40px)); padding-top: env(safe-area-inset-top); padding-bottom: env(safe-area-inset-bottom); background: var(--base); }
+  .mobile-rail-dialog .session-rail { width: 100%; height: 100%; }
+  .session-rail .rail-nav-item { min-height: 44px; }
+  .workspace-body .right-pane, .workspace-body .right-pane.max {
+    position: fixed;
+    inset: env(safe-area-inset-top) 0 calc(64px + env(safe-area-inset-bottom));
+    width: 100%;
+    border: 0;
+    z-index: 60;
+  }
+  .right-pane .panel-resizer, .right-pane .panel-controls > :first-child { display: none; }
+  .right-pane > .tabs { min-height: 52px; }
+  .right-pane .panel-controls > span > button { width: 44px; height: 44px; }
+  .chat-empty { padding: 20px 16px; overflow-y: auto; }
+  .chat-empty h2 { font-size: 28px; line-height: 1.2; }
+  .chat-thread, .settings-view-scroll, .home { scrollbar-gutter: auto; }
+  .composer-actions { flex-wrap: wrap; }
+  input, textarea, select { font-size: 16px; }
+}

@@ -1013,10 +1013,10 @@ async fn main() {
         let port = std::env::args()
             .nth(2)
             .and_then(|arg| arg.parse::<u16>().ok());
-        if let Some(port) = port.filter(|port| (5201..=5209).contains(port)) {
+        if let Some(port) = port.filter(|port| *port != 0) {
             commands::app::run_dev(port);
         } else {
-            eprintln!("--dev-desktop requires a dev slot UI port (5201–5209)");
+            eprintln!("--dev-desktop requires a valid UI port");
             std::process::exit(1);
         }
         return;
