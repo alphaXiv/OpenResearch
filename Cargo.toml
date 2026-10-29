@@ -38,6 +38,8 @@ glob = "0.3"
 # (same reasoning as rustls above — no system library dependency).
 rusqlite = { version = "0.32", features = ["bundled", "backup"] }
 urlencoding = "2"
+# Parses openresearch: links (src/commands/app.rs); already in the tree via reqwest.
+url = "2"
 httpdate = "1"
 uuid = { version = "1", features = ["v4"] }
 semver = "1"

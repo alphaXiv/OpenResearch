@@ -17,6 +17,8 @@ OpenResearch to your applications, so the dock and app grid show its name and
 icon: `~/.local/share/applications/openresearch.desktop`, pointing at wherever the
 AppImage now is, and its icon under `~/.local/share/icons`. The entry hides
 itself once the AppImage is deleted; remove those two files to drop it entirely.
+The entry also opens `openresearch://` links (such as Open in OpenResearch on
+openresearch.sh), registered in `~/.config/mimeapps.list`.
 Keep the AppImage somewhere you can write to, such as `~/Applications`: it
 updates itself by replacing that file, and Restart in the dashboard relaunches
 the new version.

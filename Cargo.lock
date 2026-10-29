@@ -2691,6 +2691,7 @@ dependencies = [
  "tokio-tungstenite",
  "tokio-util",
  "toml 0.8.2",
+ "url",
  "urlencoding",
  "uuid",
  "windows-sys 0.61.2",

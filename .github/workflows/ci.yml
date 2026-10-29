@@ -245,10 +245,13 @@ jobs:
         run: cargo fmt --manifest-path windows/launcher/Cargo.toml --check
       - name: Clippy (app launcher)
         if: matrix.mode != 'test'
-        run: cargo clippy --manifest-path windows/launcher/Cargo.toml --locked -- -D warnings
+        run: cargo clippy --manifest-path windows/launcher/Cargo.toml --all-targets --locked -- -D warnings
       - name: Build app launcher
         if: matrix.mode != 'lint'
         run: cargo build --manifest-path windows/launcher/Cargo.toml --locked
+      - name: Test app launcher
+        if: matrix.mode != 'lint'
+        run: cargo test --manifest-path windows/launcher/Cargo.toml --locked
       - name: Test
         if: matrix.mode != 'lint'
         run: cargo test --locked
