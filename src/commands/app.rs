@@ -1307,6 +1307,9 @@ mod imp {
             }
             Event::UserEvent(UserEvent::SyncZoom) if matches!(quit, Quit::No) => {
                 let _ = sync_page_zoom(&webview, zoom_percent, false);
+                // The startup alignment measures a window that is still hidden and unlaid-out.
+                #[cfg(target_os = "macos")]
+                align_traffic_lights(&window, zoom_percent);
             }
             // Even before the page loads: a launch that brings nothing up looks
             // like a broken app. While quitting it must stay hidden.
