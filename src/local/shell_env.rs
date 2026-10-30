@@ -15,8 +15,7 @@
 //! programs the session's GTK settings ([`host_gui_env`]).
 //!
 //! Scope is orx's own resolution, the children it spawns (including `git`), and
-//! the dashboard's PTY terminals. `kubectl` and `ssh` still inherit the process
-//! environment.
+//! the dashboard's PTY terminals. `ssh` still inherits the process environment.
 
 use std::collections::HashMap;
 use std::ffi::{OsStr, OsString};

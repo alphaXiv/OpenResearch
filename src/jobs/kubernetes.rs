@@ -110,10 +110,23 @@ pub fn save_settings(settings: &K8sSettings) -> Result<()> {
 
 // --- kubectl plumbing ---------------------------------------------------------
 
+/// `kubectl` resolved on, and run with, the user's shell PATH: a Finder-launched
+/// app's launchd PATH misses Homebrew, and kubeconfig exec plugins need it too.
+fn kubectl_command() -> Command {
+    let mut cmd = match crate::local::shell_env::find_on_path("kubectl") {
+        Some(path) => Command::new(path),
+        None => Command::new("kubectl"),
+    };
+    if let Some(paths) = crate::local::shell_env::search_path() {
+        cmd.env("PATH", paths);
+    }
+    cmd
+}
+
 /// Run kubectl with the given args (plus `--context` when set), feeding
 /// `stdin` if provided. Non-zero exit → Err carrying stderr.
 async fn kubectl(context: Option<&str>, args: &[&str], stdin: Option<&str>) -> Result<String> {
-    let mut cmd = Command::new("kubectl");
+    let mut cmd = kubectl_command();
     if let Some(ctx) = context {
         cmd.arg("--context").arg(ctx);
     }
@@ -185,7 +198,7 @@ pub async fn preflight(context: Option<&str>, namespace: &str) -> Preflight {
     // `auth can-i` answers reachability and permission in one round trip:
     // "yes"/"no" on stdout both mean the API server responded (it exits 1 on
     // "no", so run it raw rather than through the exit-code-checking runner).
-    let mut cmd = Command::new("kubectl");
+    let mut cmd = kubectl_command();
     if let Some(ctx) = context {
         cmd.arg("--context").arg(ctx);
     }
@@ -951,7 +964,7 @@ pub async fn stream_logs(
         None => return Ok(()),
     };
 
-    let mut cmd = Command::new("kubectl");
+    let mut cmd = kubectl_command();
     if let Some(ctx) = context {
         cmd.arg("--context").arg(ctx);
     }
