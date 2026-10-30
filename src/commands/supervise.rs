@@ -1295,6 +1295,7 @@ async fn run_local(
                     }
                 }
             }
+            localbox::slim_run_dir(&dir);
             eprintln!("supervise {run_id}: finished ({status})");
             return Ok(());
         }

@@ -235,6 +235,47 @@ fn exit_code_state(dir: &Path) -> Option<JobState> {
     })
 }
 
+/// Slims every finished run under `root`, so runs that ended before slimming existed are reclaimed too.
+pub fn slim_finished_run_dirs(root: &Path) {
+    let Ok(entries) = std::fs::read_dir(root) else {
+        return;
+    };
+    for dir in entries.flatten().map(|entry| entry.path()) {
+        if inspect_job(&dir).stage != "RUNNING" {
+            slim_run_dir(&dir);
+        }
+    }
+}
+
+/// Reclaims a finished run's rebuildable environment, package cache and dataset; logs,
+/// exit_code and outputs (artifacts, checkpoints, tensorboard) stay.
+pub fn slim_run_dir(dir: &Path) {
+    let linked = |p: &Path| std::fs::symlink_metadata(p).is_ok_and(|m| m.is_symlink());
+    // nanochat's re-downloadable dataset shards (old and current dir names); checkpoints stay.
+    for sub in [
+        "repo/.venv",
+        "repo/.cache/uv",
+        "repo/.cache/nanochat/base_data",
+        "repo/.cache/nanochat/base_data_climbmix",
+    ] {
+        let path = dir.join(sub);
+        // A linked parent (e.g. `.cache` -> a shared cache) would delete outside the run.
+        if path
+            .ancestors()
+            .skip(1)
+            .take_while(|a| *a != dir)
+            .any(linked)
+        {
+            continue;
+        }
+        if let Err(err) = std::fs::remove_dir_all(&path) {
+            if err.kind() != std::io::ErrorKind::NotFound {
+                eprintln!("could not reclaim {}: {err}", path.display());
+            }
+        }
+    }
+}
+
 /// Job state in the shared stage vocabulary (see `jobs::stage_to_run_status`).
 /// exit_code present -> finished; pid alive -> running; pid dead & no
 /// exit_code -> killed/crashed.
@@ -607,6 +648,80 @@ mod tests {
         assert_eq!(odd.len(), 1, "GPU kept even without a memory field");
         assert_eq!(odd[0].name, "Tesla T4");
         assert_eq!(odd[0].mem_mib, None);
+    }
+
+    #[test]
+    fn slim_run_dir_keeps_logs_and_outputs() {
+        let dir = std::env::temp_dir().join(format!("orx-slim-test-{}", uuid::Uuid::new_v4()));
+        for sub in [
+            "repo/.venv/lib",
+            "repo/.cache/uv/wheels",
+            "repo/.cache/nanochat/base_data_climbmix",
+            "repo/.cache/nanochat/base_checkpoints",
+            "repo/artifacts",
+        ] {
+            std::fs::create_dir_all(dir.join(sub)).unwrap();
+        }
+        for file in [
+            "log",
+            "exit_code",
+            "repo/artifacts/results.json",
+            "repo/.venv/lib/x.py",
+        ] {
+            std::fs::write(dir.join(file), "x").unwrap();
+        }
+        slim_run_dir(&dir);
+        slim_run_dir(&dir);
+        assert!(!dir.join("repo/.venv").exists());
+        assert!(!dir.join("repo/.cache/uv").exists());
+        assert!(!dir.join("repo/.cache/nanochat/base_data_climbmix").exists());
+        for kept in [
+            "log",
+            "exit_code",
+            "repo/artifacts/results.json",
+            "repo/.cache/nanochat/base_checkpoints",
+        ] {
+            assert!(dir.join(kept).exists(), "{kept} must survive");
+        }
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn slim_finished_run_dirs_skips_live_runs() {
+        let root = std::env::temp_dir().join(format!("orx-slim-all-{}", uuid::Uuid::new_v4()));
+        for run in ["done", "dead", "live"] {
+            std::fs::create_dir_all(root.join(run).join("repo/.venv")).unwrap();
+        }
+        std::fs::write(root.join("done/exit_code"), "0").unwrap();
+        let pid = root.join("dead/pid");
+        std::fs::write(&pid, "2147483646").unwrap();
+        std::fs::File::options()
+            .write(true)
+            .open(&pid)
+            .unwrap()
+            .set_modified(std::time::SystemTime::now() - std::time::Duration::from_secs(60))
+            .unwrap();
+        slim_finished_run_dirs(&root);
+        assert!(!root.join("done/repo/.venv").exists());
+        assert!(!root.join("dead/repo/.venv").exists());
+        assert!(root.join("live/repo/.venv").exists());
+        std::fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn slim_run_dir_skips_linked_cache() {
+        let base = std::env::temp_dir().join(format!("orx-slim-link-{}", uuid::Uuid::new_v4()));
+        let shared = base.join("shared");
+        std::fs::create_dir_all(shared.join("uv")).unwrap();
+        std::fs::create_dir_all(base.join("run/repo")).unwrap();
+        std::os::unix::fs::symlink(&shared, base.join("run/repo/.cache")).unwrap();
+        slim_run_dir(&base.join("run"));
+        assert!(
+            shared.join("uv").exists(),
+            "a shared cache outside the run must survive"
+        );
+        std::fs::remove_dir_all(&base).unwrap();
     }
 
     fn wait_terminal(dir: &Path) -> JobState {
