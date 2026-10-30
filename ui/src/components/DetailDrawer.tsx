@@ -18,7 +18,7 @@ import { StatusBadge } from "./StatusBadge";
 import { tabOpenGestureHandlers, type TabOpenIntent } from "../tabPreview";
 import { useResolvedTheme } from "../theme";
 import { Button, ButtonLink, MenuItem } from "./ui";
-import { buildHistoryNodes, historyBackendLabel, historyJobId } from "./experimentLineageModel";
+import { buildHistoryNodes } from "./experimentLineageModel";
 import { useTrackioRuns } from "../queries/settings";
 
 export type ExperimentView = "overview" | "terminal" | "trackio";
@@ -242,23 +242,6 @@ function TerminalView({
           </div>
         )}
       </div>
-
-      {selectedRun && (
-        <div className="term-provenance" aria-label={m.detail_drawer_run_provenance()}>
-          <span>
-            {m.detail_drawer_provenance_run()} <code>{selectedRun.id}</code>
-          </span>
-          <span>
-            {m.detail_drawer_provenance_commit()} <code>{selectedRun.commitSha || m.history_commit_unavailable()}</code>
-          </span>
-          <span>
-            {m.detail_drawer_provenance_backend()} <code>{historyBackendLabel(selectedRun)}</code>
-          </span>
-          <span>
-            {m.detail_drawer_provenance_scheduler()} <code>{historyJobId(selectedRun)}</code>
-          </span>
-        </div>
-      )}
 
       {monitoringError && (
         <p role="status" className="m-0 shrink-0 border-b border-border-variant px-3 py-2 text-sm text-accent-amber wrap-anywhere">
