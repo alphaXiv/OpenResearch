@@ -288,6 +288,15 @@ fn run_status_for_stage(store: &Store, run_id: &str, cancel_sent: bool, stage: &
     }
 }
 
+/// A Job orx did not cancel can vanish only through TTL cleanup or an
+/// external delete, so its outcome is unknown rather than cancelled.
+fn k8s_run_status(store: &Store, run_id: &str, cancel_sent: bool, stage: &str) -> RunStatus {
+    if stage == "DELETED" && !should_report_cancelled(store, run_id, cancel_sent) {
+        return RunStatus::Lost;
+    }
+    run_status_for_stage(store, run_id, cancel_sent, stage)
+}
+
 fn status_of(stored: &crate::store::StoredRun) -> Result<RunStatus> {
     RunStatus::parse(&stored.status)
         .ok_or_else(|| anyhow!("Run {} has unknown status: {}", stored.id, stored.status))
@@ -404,7 +413,7 @@ async fn run_k8s(
             }
         };
         let stage = job.stage.as_str();
-        let status = run_status_for_stage(&store, &run_id, cancel_sent, stage);
+        let status = k8s_run_status(&store, &run_id, cancel_sent, stage);
 
         if is_terminal_stage(stage) {
             let _ = done_tx.send(true);
@@ -415,13 +424,23 @@ async fn run_k8s(
                 log_task.abort();
             }
             let applied = store.update_status(&run_id, status, Some(now_ms()), None)?;
-            if applied && status == RunStatus::Failed {
-                if let Some(msg) = &job.message {
-                    if let Err(err) =
-                        store.set_result_markdown(&run_id, &format!("Job failed: {msg}"))
-                    {
-                        eprintln!("supervise {run_id}: could not record failure reason: {err}");
-                    }
+            let reason = match status {
+                RunStatus::Failed => job.message.as_ref().map(|msg| format!("Job failed: {msg}")),
+                RunStatus::Lost => Some(
+                    "Outcome unavailable: the Job was deleted before orx saw it finish".to_string(),
+                ),
+                _ => None,
+            };
+            if let Some(reason) = reason.filter(|_| applied) {
+                if let Err(err) = store.set_result_markdown(&run_id, &reason) {
+                    eprintln!("supervise {run_id}: could not record failure reason: {err}");
+                }
+            }
+            if matches!(stage, "COMPLETED" | "ERROR") {
+                if let Err(err) =
+                    k8s::expire_finished_job(context.as_deref(), &namespace, &job_name).await
+                {
+                    eprintln!("supervise {run_id}: could not shorten the Job's TTL: {err}");
                 }
             }
             eprintln!("supervise {run_id}: finished ({status})");
@@ -1741,7 +1760,19 @@ mod tests {
             run_status_for_stage(&store, &run.id, false, "ERROR"),
             RunStatus::Failed
         );
+        assert_eq!(
+            k8s_run_status(&store, &run.id, false, "DELETED"),
+            RunStatus::Lost
+        );
+        assert_eq!(
+            k8s_run_status(&store, &run.id, true, "DELETED"),
+            RunStatus::Cancelled
+        );
         assert!(store.request_cancel(&run.id, "test").unwrap());
+        assert_eq!(
+            k8s_run_status(&store, &run.id, false, "DELETED"),
+            RunStatus::Cancelled
+        );
         assert_eq!(
             run_status_for_stage(&store, &run.id, false, "LOST"),
             RunStatus::Lost
