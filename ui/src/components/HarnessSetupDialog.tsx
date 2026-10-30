@@ -1,4 +1,4 @@
-import { EscapeScope } from "./EscapeScope";
+import type { DialogContentProps } from "../dialog";
 import { useEffect, useRef, useState } from "react";
 import type { Harness, HarnessSetupCommands } from "../api";
 import { m } from "../paraglide/messages.js";
@@ -7,18 +7,17 @@ import { HarnessLogo } from "./HarnessLogo";
 import { CommandTerminal } from "./SshConnectTerminal";
 import { initialPhase, recheckedAction, setupAction, type SetupAction, type SetupPhase } from "./harnessSetupState";
 import { renderNote } from "./agentNote";
-import { Button, Spinner } from "./ui";
+import { Button, DialogContent, DialogTitle, Spinner } from "./ui";
 
-export function HarnessSetupDialog({ harness, commands, onReady, onAuth, onBack, onClose }: {
+export function HarnessSetupDialog({ harness, commands, onReady, onAuth, onBack, cancel, isDisabled }: DialogContentProps<void> & {
   harness: Harness;
   commands: HarnessSetupCommands;
   onReady?: (harness: Harness) => void;
   onAuth?: (harness: Harness) => void;
   onBack?: () => void;
-  onClose: () => void;
 }) {
-  const dialogRef = useRef<HTMLDialogElement>(null);
   const cancelled = useRef(false);
+  if (isDisabled) cancelled.current = true;
   const [action, setAction] = useState<SetupAction>(() => setupAction(harness));
   const [attempt, setAttempt] = useState(0);
   const [phase, setPhase] = useState<SetupPhase>(() => initialPhase(harness, setupAction(harness)));
@@ -32,17 +31,15 @@ export function HarnessSetupDialog({ harness, commands, onReady, onAuth, onBack,
 
   useEffect(() => {
     cancelled.current = false;
-    const dialog = dialogRef.current;
-    dialog?.showModal();
     return () => {
       cancelled.current = true;
-      dialog?.close();
     };
   }, []);
 
   // `full` re-probes every agent. After `complete` the server has published this
   // one, so a plain read suffices unless an older sweep or auth check overtook it.
   const verify = async (full = true): Promise<void> => {
+    if (cancelled.current) return;
     setPhase("checking");
     // Drop the previous attempt's message; this re-check replaces it.
     setError(null);
@@ -53,9 +50,10 @@ export function HarnessSetupDialog({ harness, commands, onReady, onAuth, onBack,
       setNeedsRepair(current?.needsConfigRepair ?? false);
       if (current?.agentReady && (action !== "login" || current.authenticated)) {
         onReady?.(current);
-        onClose();
+        cancel();
       } else if (action !== "login" && current?.installed && !current.installBroken && !current.needsConfigRepair && (current.authState === "needsLogin" || (current.id.startsWith("acp:") && !current.adapterMissing))) {
         if (current.id.startsWith("acp:") && onAuth) {
+          cancel();
           onAuth(current);
           return;
         }
@@ -82,21 +80,12 @@ export function HarnessSetupDialog({ harness, commands, onReady, onAuth, onBack,
     }
   };
 
-  return <EscapeScope onEscape={() => { if (!busy) onClose(); }}>
-    <dialog
-      ref={dialogRef}
-      className="m-auto w-180 max-w-[calc(100vw_-_40px)] max-h-[calc(100vh_-_40px)] overflow-y-auto rounded-xl border border-border bg-background p-5 text-text shadow-modal backdrop:bg-modal-backdrop-light"
-      aria-labelledby="harness-setup-title"
-      onCancel={(event) => {
-        event.preventDefault();
-        if (!busy) onClose();
-      }}
-    >
+  return <DialogContent className="w-180 max-h-[calc(100vh_-_40px)] overflow-y-auto p-5 text-text">
       <div className="flex items-center gap-3">
         <HarnessLogo harness={harness.id} logo={harness.logo} size={26} />
-        <h2 id="harness-setup-title" className="m-0 text-xl font-medium">
+        <DialogTitle className="m-0 text-xl font-medium">
           {harness.adapterMissing ? m.acp_install_adapter() : m.harness_setup_title({ agent: harness.name })}
-        </h2>
+        </DialogTitle>
       </div>
       {phase === "preview" ? (
         <div className="my-4">
@@ -152,7 +141,7 @@ export function HarnessSetupDialog({ harness, commands, onReady, onAuth, onBack,
           setPhase("running");
           setAttempt((current) => current + 1);
         }}>{m.app_retry()}</Button>}
-        <Button variant="default" onClick={phase === "preview" ? (onBack ?? onClose) : onClose}>
+        <Button variant="default" onClick={() => { cancelled.current = true; cancel(); if (phase === "preview") onBack?.(); }}>
           {phase === "preview" ? m.settings_page_cancel() : busy ? m.harness_setup_cancel() : m.app_close_panel()}
         </Button>
         {phase === "preview" && (
@@ -161,6 +150,5 @@ export function HarnessSetupDialog({ harness, commands, onReady, onAuth, onBack,
           </Button>
         )}
       </div>
-    </dialog>
-  </EscapeScope>;
+    </DialogContent>;
 }

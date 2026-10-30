@@ -215,6 +215,7 @@
   "lit_sources_picker_loading": "लोड हो रहा है…",
   "md_copy": "कॉपी करें",
   "md_copy_code": "कोड कॉपी करें",
+  "md_pick_file": "{path} के लिए फ़ाइल चुनें",
   "media_preview_images": "चित्र",
   "media_preview_previous_image": "पिछला चित्र",
   "media_preview_next_image": "अगला चित्र",
@@ -324,6 +325,8 @@
   "projects_home_projects": "प्रोजेक्ट",
   "projects_home_repository": "रिपॉज़िटरी",
   "settings_appearance_heading": "रूप-रंग",
+  "settings_colored_markdown_heading": "रंगीन मार्कडाउन",
+  "settings_colored_markdown_description": "चैट में बोल्ड और इटैलिक टेक्स्ट को रंग दें ताकि ज़ोर साफ़ दिखे। बोल्ड इटैलिक लाल हाइलाइट में दिखता है।",
   "settings_language_description": "इस डिवाइस पर इंटरफ़ेस की भाषा चुनें।",
   "settings_language_heading": "भाषा",
   "settings_page_account": "खाता",
@@ -1493,5 +1496,9 @@
   "harness_already_added": "आप इसे पहले ही जोड़ चुके हैं",
   "harness_custom_acp": "कस्टम ACP एजेंट",
   "acp_definitions_load_failed": "सहेजे गए ACP एजेंट लोड नहीं हुए। सूची अधूरी हो सकती है; ACP एजेंट जोड़ने के लिए पुनः प्रयास करें।",
-  "acp_definitions_loading": "सहेजे गए ACP एजेंट लोड हो रहे हैं…"
+  "acp_definitions_loading": "सहेजे गए ACP एजेंट लोड हो रहे हैं…",
+  "common_cancel": "रद्द करें",
+  "common_confirm": "पुष्टि करें",
+  "common_ok": "ठीक है",
+  "common_submit": "सबमिट करें"
 }

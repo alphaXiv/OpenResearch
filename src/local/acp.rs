@@ -120,6 +120,13 @@ pub fn presets() -> Vec<Preset> {
             "https://github.com/svkozak/pi-acp#install",
         ),
         (
+            "3d392186-692e-4b90-93b4-bb398f40007a",
+            "oh-my-pi",
+            "omp",
+            &["acp"][..],
+            "https://github.com/can1357/oh-my-pi#install",
+        ),
+        (
             "565e351e-62c7-488f-a58a-914d30cc5776",
             "Devin CLI",
             "devin",
@@ -401,6 +408,7 @@ for line in sys.stdin:
                 ("MiniMax Code", "mcode", vec!["acp"]),
                 ("ZCode", "zcode-acp-server", vec![]),
                 ("Pi", "pi-acp", vec![]),
+                ("oh-my-pi", "omp", vec!["acp"]),
                 ("Devin CLI", "devin", vec!["acp"]),
                 ("Grok Build", "grok", vec!["agent", "stdio"]),
             ]

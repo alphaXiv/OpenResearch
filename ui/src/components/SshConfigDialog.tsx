@@ -1,20 +1,35 @@
-import { EscapeScope } from "./EscapeScope";
 import { useQuery, useMutation } from "@tanstack/react-query";
 import { setScopedQueryData, isCurrentScope } from "../queries/client";
 import { getSshConfigQuery } from "../queries/settings";
 import { X } from "lucide-react";
 import { useEffect, useRef, useState } from "react";
-import { Dialog } from "@base-ui/react/dialog";
+import { showConfirmDialog, showCustomDialog, type DialogContentProps } from "../dialog";
 import { saveSshConfig, type SshConfigFile } from "../api";
 import { m } from "../paraglide/messages.js";
 import { CodeEditor } from "./CodeEditor";
-import { Button, IconButton, showAlert, Spinner } from "./ui";
+import { Button, DialogContent, DialogTitle, IconButton, showAlert, Spinner } from "./ui";
+
+export function showSshConfigDialog(onClose?: () => void) {
+  const beforeCancel = { current: () => Promise.resolve() };
+
+  showCustomDialog({
+    component: SshConfigDialog,
+    props: { beforeCancel },
+    onConfirm: () => {},
+    onCancel: async () => {
+      await beforeCancel.current();
+      onClose?.();
+    },
+  });
+}
 
 export function SshConfigDialog({
-  onClose,
+  cancel,
+  isDisabled,
+  beforeCancel,
   onSaved,
-}: {
-  onClose: () => void;
+}: DialogContentProps<void> & {
+  beforeCancel: { current: () => Promise<void> };
   onSaved?: () => void;
 }) {
   const options = getSshConfigQuery();
@@ -37,15 +52,23 @@ export function SshConfigDialog({
     setDraft(fileQuery.data.content);
   }, [fileQuery.data]);
 
-  const close = () => {
-    if (savingRef.current) return false;
-    if (dirtyRef.current && !window.confirm(m.ssh_config_discard_changes())) return false;
-    onClose();
-    return true;
+  beforeCancel.current = () => {
+    if (savingRef.current) return Promise.reject();
+    if (!dirtyRef.current) return Promise.resolve();
+
+    return new Promise<void>((resolve, reject) => {
+      showConfirmDialog({
+        title: m.ssh_config_title(),
+        description: m.ssh_config_discard_changes(),
+        destructive: true,
+        onConfirm: resolve,
+        onCancel: () => { reject(); },
+      });
+    });
   };
 
   async function save() {
-    if (!file || !dirty || saving) return;
+    if (!file || !dirty || saving || isDisabled) return;
     setSaving(true);
     try {
       await saveMutation.mutateAsync({ content: draft, previous: file.content });
@@ -61,61 +84,48 @@ export function SshConfigDialog({
     }
   }
 
-  return <EscapeScope onEscape={close}>
-    <Dialog.Root open onOpenChange={(open, details) => {
-      if (!open && !close()) {
-        details.event.preventDefault();
-        details.cancel();
-      }
-    }}>
-      <Dialog.Portal>
-        <Dialog.Backdrop className="fixed inset-0 z-200 bg-modal-backdrop" />
-        <Dialog.Viewport className="fixed inset-0 z-200 flex items-center justify-center p-5">
-          <Dialog.Popup
-            ref={dialogRef}
-            initialFocus={() => dialogRef.current?.querySelector("textarea") ?? true}
-            className="relative flex h-[min(48rem,calc(100vh-2.5rem))] w-200 max-w-full flex-col overflow-hidden rounded-xl border border-border bg-background shadow-modal"
-            aria-labelledby="ssh-config-dialog-title"
-          >
-            <div className="shrink-0 px-6 pt-5 pb-4 pe-14">
-              <h2 id="ssh-config-dialog-title" className="m-0 text-xl font-medium">
-                {m.ssh_config_title()}
-              </h2>
-              <code className="mt-1 block font-mono text-sm text-subtext">~/.ssh/config</code>
-            </div>
-            <IconButton
-              className="absolute end-3.5 top-3.5"
-              aria-label={m.ssh_config_close()}
-              onClick={close}
-              disabled={saving}
-            >
-              <X size={16} />
-            </IconButton>
-            <div className="file-view min-h-0 flex-1 border-y border-border-variant bg-background">
-              {loadError ? (
-                <p className="m-5 text-sm text-accent-red">{loadError}</p>
-              ) : file === null ? (
-                <div className="flex items-center gap-2 p-5 text-sm text-subtext">
-                  <Spinner /> {m.ssh_config_loading()}
-                </div>
-              ) : (
-                <CodeEditor
-                  value={draft}
-                  onChange={setDraft}
-                  onSave={() => void save()}
-                  path={file.path}
-                />
-              )}
-            </div>
-            <div className="flex shrink-0 justify-end gap-2.5 p-4">
-              <Button onClick={close} disabled={saving}>{m.settings_page_cancel()}</Button>
-              <Button variant="primary" onClick={() => void save()} disabled={!dirty || saving}>
-                {saving ? m.common_saving() : m.common_save()}
-              </Button>
-            </div>
-          </Dialog.Popup>
-        </Dialog.Viewport>
-      </Dialog.Portal>
-    </Dialog.Root>
-  </EscapeScope>;
+  return <DialogContent
+      ref={dialogRef}
+      initialFocus={() => dialogRef.current?.querySelector("textarea") ?? true}
+      className="relative flex h-[min(48rem,calc(100vh-2.5rem))] w-200 max-w-full flex-col overflow-hidden p-0"
+      aria-labelledby="ssh-config-dialog-title"
+    >
+      <div className="shrink-0 px-6 pt-5 pb-4 pe-14">
+        <DialogTitle id="ssh-config-dialog-title">
+          {m.ssh_config_title()}
+        </DialogTitle>
+        <code className="mt-1 block font-mono text-sm text-subtext">~/.ssh/config</code>
+      </div>
+      <IconButton
+        className="absolute end-3.5 top-3.5"
+        aria-label={m.ssh_config_close()}
+        onClick={cancel}
+        disabled={saving || isDisabled}
+      >
+        <X size={16} />
+      </IconButton>
+      <div className="file-view min-h-0 flex-1 border-y border-border-variant bg-background">
+        {loadError ? (
+          <p className="m-5 text-sm text-accent-red">{loadError}</p>
+        ) : file === null ? (
+          <div className="flex items-center gap-2 p-5 text-sm text-subtext">
+            <Spinner /> {m.ssh_config_loading()}
+          </div>
+        ) : (
+          <CodeEditor
+            value={draft}
+            onChange={setDraft}
+            onSave={() => void save()}
+            readOnly={isDisabled}
+            path={file.path}
+          />
+        )}
+      </div>
+      <div className="flex shrink-0 justify-end gap-2.5 p-4">
+        <Button onClick={cancel} disabled={saving || isDisabled}>{m.settings_page_cancel()}</Button>
+        <Button variant="primary" onClick={() => void save()} disabled={!dirty || saving || isDisabled}>
+          {saving ? m.common_saving() : m.common_save()}
+        </Button>
+      </div>
+    </DialogContent>;
 }

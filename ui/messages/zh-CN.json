@@ -215,6 +215,7 @@
   "lit_sources_picker_loading": "正在加载…",
   "md_copy": "复制",
   "md_copy_code": "复制代码",
+  "md_pick_file": "为 {path} 选择文件",
   "media_preview_images": "图片",
   "media_preview_previous_image": "上一张图片",
   "media_preview_next_image": "下一张图片",
@@ -324,6 +325,8 @@
   "projects_home_projects": "项目",
   "projects_home_repository": "仓库",
   "settings_appearance_heading": "外观",
+  "settings_colored_markdown_heading": "彩色 Markdown",
+  "settings_colored_markdown_description": "为聊天中的粗体和斜体着色，让强调更醒目。粗斜体显示为红色高亮。",
   "settings_language_description": "选择此设备上的界面语言。",
   "settings_language_heading": "语言",
   "settings_page_account": "账户",
@@ -1493,5 +1496,9 @@
   "harness_already_added": "你已添加此代理",
   "harness_custom_acp": "自定义 ACP 代理",
   "acp_definitions_load_failed": "无法加载已保存的 ACP 代理。列表可能不完整；请重试以添加 ACP 代理。",
-  "acp_definitions_loading": "正在加载已保存的 ACP 代理…"
+  "acp_definitions_loading": "正在加载已保存的 ACP 代理…",
+  "common_cancel": "取消",
+  "common_confirm": "确认",
+  "common_ok": "确定",
+  "common_submit": "提交"
 }

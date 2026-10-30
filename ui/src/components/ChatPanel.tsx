@@ -1,3 +1,4 @@
+import { showConfirmDialog, showCustomDialog } from "../dialog";
 import { Dialog } from "@base-ui/react/dialog";
 import { EscapeScope } from "./EscapeScope";
 import { commandRegion } from "../keyboardRegion";
@@ -12,6 +13,7 @@ import { removeSession as removeCachedSession } from "../queries/invalidation";
 import { nativeOptions, sessionAcpHarness } from "../acp";
 import { resolveHarnessDefaultModel } from "../modelSelection";
 import { setChatConfiguration } from "../api";
+import { RemoteConnectionStrip, useRemoteConnection } from "../RemoteRuntime";
 import {
   isCurrentScope,
   setScopedQueryData,
@@ -4860,7 +4862,8 @@ export function ChatPanel({
   const stickToBottom = useRef(true);
   const [transcriptAtBottom, setTranscriptAtBottom] = useState(true);
   const composerRef = useRef<HTMLTextAreaElement>(null);
-  const [resumeOpen, setResumeOpen] = useState(false);
+  const connection = useRemoteConnection();
+  const resumeCancelRef = useRef<(() => void) | null>(null);
   const dataSources = usePopover();
   const addTranscriptSelection = useCallback((selection: Pick<SelectionAction, "text" | "range">) => {
     setAnnotations((current) => [
@@ -4873,8 +4876,9 @@ export function ChatPanel({
   useAnnotationHighlights(annotations, embedded ? SIDE_CHAT_ANNOTATION_HIGHLIGHT_NAME : CHAT_ANNOTATION_HIGHLIGHT_NAME);
 
   useEffect(() => {
-    setResumeOpen(false);
+    resumeCancelRef.current?.();
     transcriptSelection.dismiss();
+    return () => resumeCancelRef.current?.();
   }, [activeId, projectId, transcriptSelection.dismiss]);
 
   // Slash-skills: menu state is derived from the draft — open while the token
@@ -5351,7 +5355,20 @@ export function ChatPanel({
         } else startNewTask();
         return false;
       case "resume":
-        setResumeOpen(true);
+        showCustomDialog({
+          component: ResumeDialog,
+          props: {
+            activeSessionId: activeId,
+            cancelRef: resumeCancelRef,
+            onResume: (session) => {
+              setSessionFilter("all");
+              onActiveSessionChange(session.id, { projectId: session.projectId });
+            },
+            onImport: (chat) => { void importChat(chat); },
+          },
+          onConfirm: () => {},
+          onCancel: "close",
+        });
         return true;
       case "model":
         setModelPickerRequest((request) => request + 1);
@@ -6522,16 +6539,19 @@ export function ChatPanel({
     });
   }
 
-  async function removeSession(session: ChatSession) {
+  function removeSession(session: ChatSession) {
     const title = session.title?.trim() || m.chat_untitled();
-    if (!window.confirm(m.chat_delete_session_confirm({ title: autoDir(title) }))) return;
-    try {
-      await deleteChatSessionMutation.mutateAsync(session.id);
-    } catch (err) {
-      showAlert(m.chat_delete_session_failed({ title: autoDir(title), error: ltr(err instanceof Error ? err.message : String(err)) }), "error");
-      return;
-    }
-    forgetSession(session.id);
+    showConfirmDialog({
+      title: m.chat_panel_delete(),
+      description: m.chat_delete_session_confirm({ title: autoDir(title) }),
+      confirmLabel: m.chat_panel_delete(),
+      destructive: true,
+      onCancel: "close",
+      onConfirm: async () => {
+        await deleteChatSessionMutation.mutateAsync(session.id);
+        forgetSession(session.id);
+      },
+    });
   }
 
   /** Deliver a card answer; resolves `false` when delivery failed (so a
@@ -7051,7 +7071,7 @@ export function ChatPanel({
               </>
             )}
             {starterPrompts && starterPrompts.length > 0 && (
-              <div className={STARTER_GRID_CLASS} role="group" aria-label={m.chat_panel_starter_prompts()}>
+              <div className={STARTER_GRID_CLASS} role="group" aria-label={m.chat_panel_starter_prompts()} inert={connection !== null}>
                 {starterPrompts.map((item, index) => {
                   const Icon = STARTER_ICONS[index];
                   const tone = STARTER_TONES[index];
@@ -7167,7 +7187,7 @@ export function ChatPanel({
         )}
 
         {pendingQuestions.length > 0 && (
-          <div inert={contentLoading || Boolean(contentError) || historyLoading} className="mx-auto mb-2 flex max-h-96 w-full max-w-readable shrink-0 flex-col gap-2 overflow-y-auto px-3">
+          <div inert={contentLoading || Boolean(contentError) || historyLoading || connection !== null} className="mx-auto mb-2 flex max-h-96 w-full max-w-readable shrink-0 flex-col gap-2 overflow-y-auto px-3">
             {pendingQuestions.map((part) => <PromptCard key={`${activeId}-${part.id}`} part={part} onRespond={respond} />)}
           </div>
         )}
@@ -7326,7 +7346,8 @@ export function ChatPanel({
               }}
             />
           )}
-          <div className={`composer-box relative flex flex-col border ${bashMode ? "border-accent-amber" : "border-border"} rounded-lg bg-background shadow-control-subtle`} data-onboarding="composer">
+          <RemoteConnectionStrip />
+          <div inert={connection !== null} className={`composer-box relative flex flex-col border ${bashMode ? "border-accent-amber" : "border-border"} rounded-lg bg-background shadow-control-subtle${connection ? " opacity-60" : ""}`} data-onboarding="composer">
             {unconfirmedSend !== null && (
               <div id={unconfirmedSendId} role="alert" className="flex items-start gap-2 pt-2 px-3 text-sm text-text">
                 <span className="flex-1" dir="auto">{m.chat_send_unconfirmed({ error: ltr(unconfirmedSend) })}</span>
@@ -7373,21 +7394,6 @@ export function ChatPanel({
                 activeIndex={activeMentionIdx}
                 onPick={pickFileMention}
                 onHover={setMentionIdx}
-              />
-            )}
-            {resumeOpen && (
-              <ResumeDialog
-                activeSessionId={activeId}
-                onClose={() => setResumeOpen(false)}
-                onResume={(session) => {
-                  setResumeOpen(false);
-                  setSessionFilter("all");
-                  onActiveSessionChange(session.id, { projectId: session.projectId });
-                }}
-                onImport={(chat) => {
-                  setResumeOpen(false);
-                  void importChat(chat);
-                }}
               />
             )}
             {annotations.length > 0 && (

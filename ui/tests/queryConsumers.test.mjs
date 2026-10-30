@@ -15,6 +15,8 @@ function declaration(file, name) {
     ts.forEachChild(node, visit);
   }
   visit(file);
+  const fn = file.statements.find((node) => ts.isFunctionDeclaration(node) && node.name?.text === name);
+  if (fn) return fn.getText(file).replace(/^export /, "");
   assert.ok(found, name);
   return found.initializer.getText(file);
 }
@@ -85,6 +87,7 @@ test("harness settings list detected installs and saved custom agents", () => {
     useQuery: (options) => ({ data: options.harnesses ? snapshot : options.queryFn === listAcpHarnesses ? definitions : {} }),
     getHarnessesQuery: () => ({ harnesses: true }),
     getHarnessSetupCommandsQuery: () => ({}),
+    sortHarnesses: evaluate(`return ${declaration(source("AddHarnessDialog.tsx"), "sortHarnesses")}`, {}),
     useCommandRun: () => ({}), workspaceKey: () => [], listAcpHarnesses, listAcpPresets: () => {},
   });
   snapshot = [{ id: "opencode", installed: true }, { id: "codex", installed: false }, { id: "claude-code", installed: true }, { id: "acp:custom", installed: false }, { id: "acp:preset", installed: false }];

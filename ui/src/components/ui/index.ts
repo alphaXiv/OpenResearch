@@ -1,6 +1,7 @@
 export { Badge } from "./Badge";
 export type { BadgeVariant } from "./Badge";
 export { Button, ButtonLink } from "./Button";
+export { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from "./Dialog";
 export { IconButton, IconButtonLink } from "./IconButton";
 export { Input, Textarea } from "./Input";
 export type { InputProps } from "./Input";

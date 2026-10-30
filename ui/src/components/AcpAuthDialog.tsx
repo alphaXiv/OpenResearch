@@ -1,4 +1,4 @@
-import { EscapeScope } from "./EscapeScope";
+import type { DialogContentProps } from "../dialog";
 import { useEffect, useRef, useState } from "react";
 import { useQuery } from "@tanstack/react-query";
 import { Terminal } from "lucide-react";
@@ -8,16 +8,15 @@ import { queryClient } from "../queries/client";
 import { m } from "../paraglide/messages.js";
 import { HarnessLogo } from "./HarnessLogo";
 import { CommandTerminal } from "./SshConnectTerminal";
-import { Button, Input, Spinner } from "./ui";
+import { Button, DialogContent, DialogTitle, Input, Spinner } from "./ui";
 
-export function AcpAuthDialog({ harness, remote = false, onReady, onClose }: {
+export function AcpAuthDialog({ harness, remote = false, onReady, cancel, isDisabled }: DialogContentProps<void> & {
   harness: Harness;
   remote?: boolean;
   onReady?: (harness: Harness) => void;
-  onClose: () => void;
 }) {
-  const dialogRef = useRef<HTMLDialogElement>(null);
   const cancelled = useRef(false);
+  if (isDisabled) cancelled.current = true;
   const [value, setValue] = useState("");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -35,15 +34,12 @@ export function AcpAuthDialog({ harness, remote = false, onReady, onClose }: {
 
   useEffect(() => {
     cancelled.current = false;
-    const dialog = dialogRef.current;
-    dialog?.showModal();
-    dialog?.querySelector<HTMLInputElement>('input[type="password"]')?.focus();
     if (!harness.authEnvKey && commands.length === 1) setCommand(commands[0]);
-    return () => { cancelled.current = true; dialog?.close(); };
+    return () => { cancelled.current = true; };
   }, []);
 
   async function verify(save = false) {
-    if (busy || save && (!value.trim() || entry?.inProcessEnv)) return;
+    if (cancelled.current || busy || save && (!value.trim() || entry?.inProcessEnv)) return;
     setBusy(true);
     setError(null);
     try {
@@ -54,19 +50,17 @@ export function AcpAuthDialog({ harness, remote = false, onReady, onClose }: {
       }
       const current = (await refreshHarnesses(true, true)).find((item) => item.id === harness.id);
       if (cancelled.current) return;
-      if (current?.agentReady && !current.authCheckFailed) { onReady?.(current); onClose(); }
+      if (current?.agentReady && !current.authCheckFailed) { onReady?.(current); cancel(); }
       else setError(current?.agentNote ?? m.harness_setup_not_ready());
     } catch (cause) {
       if (!cancelled.current) setError(cause instanceof Error ? cause.message : String(cause));
     } finally { if (!cancelled.current) setBusy(false); }
   }
 
-  return <EscapeScope onEscape={onClose}><dialog ref={dialogRef} aria-labelledby="acp-auth-title"
-    className="m-auto w-140 max-w-[calc(100vw_-_40px)] max-h-[calc(100vh_-_40px)] overflow-y-auto rounded-xl border border-border bg-background p-5 text-text shadow-modal backdrop:bg-modal-backdrop-light"
-    onCancel={(event) => { event.preventDefault(); onClose(); }}>
+  return <DialogContent className="w-140 max-h-[calc(100vh_-_40px)] overflow-y-auto p-5 text-text">
     <div className="flex items-center gap-3 mb-4">
       <HarnessLogo harness={harness.id} logo={harness.logo} size={26} />
-      <h2 id="acp-auth-title" className="m-0 text-xl font-medium">{harness.name}</h2>
+      <DialogTitle className="m-0 text-xl font-medium">{harness.name}</DialogTitle>
     </div>
     {harness.authEnvKey ? <form onSubmit={(event) => { event.preventDefault(); void verify(true); }} className="flex flex-col gap-3">
       <p className="m-0 text-sm">{m.acp_key_environment_help()}</p>
@@ -79,7 +73,7 @@ export function AcpAuthDialog({ harness, remote = false, onReady, onClose }: {
       </label>
       {entry?.inProcessEnv && <p className="m-0 text-sm text-subtext">{m.settings_page_overridden_by_env()}</p>}
       <div className="flex justify-end gap-2">
-        <Button type="button" onClick={onClose}>{m.settings_page_cancel()}</Button>
+        <Button type="button" onClick={() => { cancelled.current = true; cancel(); }}>{m.settings_page_cancel()}</Button>
         <Button type="submit" variant="primary" disabled={busy || !value.trim() || entry?.inProcessEnv}>{busy && <Spinner />}{m.acp_save_recheck()}</Button>
       </div>
     </form> : <>
@@ -95,10 +89,10 @@ export function AcpAuthDialog({ harness, remote = false, onReady, onClose }: {
         onComplete={(message) => { if (typeof message === "object" && message !== null && "type" in message && message.type === "complete") { void verify(); return true; } return false; }}
         onError={(message) => setError(message)} />}
       <div className="flex justify-end gap-2 mt-4">
-        <Button onClick={onClose}>{m.window_close()}</Button>
+        <Button onClick={() => { cancelled.current = true; cancel(); }}>{m.window_close()}</Button>
         <Button onClick={() => void verify()} disabled={busy}>{busy && <Spinner />}{m.onboarding_re_check()}</Button>
       </div>
     </>}
     {error && <p className="mt-3 mb-0 text-sm text-accent-red" role="alert">{error}</p>}
-  </dialog></EscapeScope>;
+  </DialogContent>;
 }

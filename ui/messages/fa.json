@@ -215,6 +215,7 @@
   "lit_sources_picker_loading": "در حال بارگیری…",
   "md_copy": "کپی",
   "md_copy_code": "کپی کد",
+  "md_pick_file": "یک فایل برای {path} انتخاب کنید",
   "media_preview_images": "تصاویر",
   "media_preview_previous_image": "تصویر قبلی",
   "media_preview_next_image": "تصویر بعدی",
@@ -324,6 +325,8 @@
   "projects_home_projects": "پروژه‌ها",
   "projects_home_repository": "مخزن",
   "settings_appearance_heading": "ظاهر",
+  "settings_colored_markdown_heading": "مارک‌داون رنگی",
+  "settings_colored_markdown_description": "متن پررنگ و مورب در گفتگو رنگی نمایش داده می‌شود تا تأکید بهتر دیده شود. متن پررنگ و مورب با هایلایت قرمز نشان داده می‌شود.",
   "settings_language_description": "زبان رابط کاربری را در این دستگاه انتخاب کنید.",
   "settings_language_heading": "زبان",
   "settings_page_account": "حساب",
@@ -1493,5 +1496,9 @@
   "harness_already_added": "این مورد را قبلاً اضافه کرده‌اید",
   "harness_custom_acp": "عامل ACP سفارشی",
   "acp_definitions_load_failed": "بارگیری عامل‌های ACP ذخیره‌شده ناموفق بود. ممکن است فهرست ناقص باشد؛ برای افزودن عامل ACP دوباره تلاش کنید.",
-  "acp_definitions_loading": "در حال بارگیری عامل‌های ACP ذخیره‌شده…"
+  "acp_definitions_loading": "در حال بارگیری عامل‌های ACP ذخیره‌شده…",
+  "common_cancel": "لغو",
+  "common_confirm": "تأیید",
+  "common_ok": "باشه",
+  "common_submit": "ارسال"
 }

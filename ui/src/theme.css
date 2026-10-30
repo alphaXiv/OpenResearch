@@ -112,6 +112,7 @@
   --font-sans: var(--sans);
   --font-mono: var(--mono);
   --ease-standard: ease;
+  --animate-dialog-shake: dialog-shake 300ms ease;
   --container-readable: var(--readable-col);
 
   --radius-xs: 4px;
@@ -217,6 +218,11 @@
   --red: var(--accent-red);
   --amber: var(--accent-amber);
 
+  /* Links are blue and the brand is red, so emphasis avoids both; bold-italic is the one deliberate red. */
+  --md-emphasis: #d6681f;
+  --md-strong-em: #db0218;
+  --md-strong-em-bg: color-mix(in srgb, var(--accent-red) 12%, var(--base));
+
   --syntax-comment: #a0a1a7;
   --syntax-text: #383a42;
   --syntax-red: #e45649;
@@ -274,6 +280,10 @@
   --term-app-bg: #1c1c1c;
   --term-app-foreground: #dcdcdc;
   --term-app-selection: #23364d;
+
+  --md-emphasis: #e27c23;
+  --md-strong-em: #ff8d97;
+  --md-strong-em-bg: color-mix(in srgb, var(--accent-red) 20%, var(--base));
 
   --syntax-comment: #7f848e;
   --syntax-text: #abb2bf;

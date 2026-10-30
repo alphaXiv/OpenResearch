@@ -37,6 +37,15 @@
   }
 }
 
+@keyframes dialog-shake {
+  20%, 60% {
+    translate: -6px 0;
+  }
+  40%, 80% {
+    translate: 6px 0;
+  }
+}
+
 @keyframes or-pulse {
   50% {
     opacity: 0.35;
@@ -174,6 +183,21 @@
 
 .msg-assistant .md figure:has(.inline-html-figure) {
   width: 100%;
+}
+
+:root[data-colored-markdown="on"] .md :is(strong, em) {
+  color: var(--md-emphasis);
+}
+
+/* Opaque, with block padding that bridges the leading, so wrapped lines read as one block. */
+:root[data-colored-markdown="on"] .md :is(strong > em, em > strong) {
+  color: var(--md-strong-em);
+  background: var(--md-strong-em-bg);
+  padding-block: 0.25em;
+  padding-inline: 0.15em;
+  border-radius: 0.2em;
+  box-decoration-break: clone;
+  -webkit-box-decoration-break: clone;
 }
 
 /* Inline flex otherwise inherits paragraph leading and outgrows code chips. */

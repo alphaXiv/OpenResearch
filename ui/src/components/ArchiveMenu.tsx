@@ -1,3 +1,4 @@
+import { showConfirmDialog } from "../dialog";
 import { useId, useState } from "react";
 import { DirectionProvider } from "@base-ui/react/direction-provider";
 import { Menu } from "@base-ui/react/menu";
@@ -69,7 +70,7 @@ export function ArchiveMenu({ id, name, actions, onArchive, onDelete, compact = 
   name: string;
   actions: ArchiveActions;
   onArchive: (id: string, direction: "ancestors" | "descendants" | "only", archived: boolean) => void;
-  onDelete: (id: string) => void;
+  onDelete: (id: string) => void | Promise<void>;
   compact?: boolean;
 }) {
   const [open, setOpen] = useState(false);
@@ -100,7 +101,16 @@ export function ArchiveMenu({ id, name, actions, onArchive, onDelete, compact = 
                 {actions.restoreOnly && <Menu.Item nativeButton render={<MenuItem className="data-highlighted:bg-surface" />} onClick={() => onArchive(id, "only", false)}>{m.tree_restore_only()}</Menu.Item>}
                 {actions.restoreAbove && <Menu.Item nativeButton render={<MenuItem className="data-highlighted:bg-surface" />} onClick={() => onArchive(id, "ancestors", false)}>{m.tree_restore_above()}</Menu.Item>}
                 {actions.restoreDown && <Menu.Item nativeButton render={<MenuItem className="data-highlighted:bg-surface" />} onClick={() => onArchive(id, "descendants", false)}>{m.tree_restore_down()}</Menu.Item>}
-                {actions.remove && <Menu.Item nativeButton render={<MenuItem danger className="data-highlighted:bg-surface" />} onClick={() => { if (window.confirm(m.tree_delete_experiment_confirm({ name }))) onDelete(id); }}>{m.tree_delete_experiment()}</Menu.Item>}
+                {actions.remove && <Menu.Item nativeButton render={<MenuItem danger className="data-highlighted:bg-surface" />} onClick={() => {
+                  showConfirmDialog({
+                    title: m.tree_delete_experiment(),
+                    description: m.tree_delete_experiment_confirm({ name }),
+                    destructive: true,
+                    confirmLabel: m.chat_panel_delete(),
+                    onConfirm: () => onDelete(id),
+                    onCancel: "close",
+                  });
+                }}>{m.tree_delete_experiment()}</Menu.Item>}
               </Menu.Popup>
             </Menu.Positioner>
           </Menu.Portal>

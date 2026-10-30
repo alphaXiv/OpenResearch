@@ -1,3 +1,4 @@
+import { showCustomDialog } from "../dialog";
 import { useMutation, useQuery } from "@tanstack/react-query";
 import { Terminal as Xterm } from "@xterm/xterm";
 import {
@@ -102,9 +103,6 @@ export function Onboarding({
   const harnessQuery = useQuery(getHarnessesQuery());
   const pathQuery = useQuery(getProjectPathStatusQuery());
   const setupCommands = useQuery(getHarnessSetupCommandsQuery());
-  const [setupHarness, setSetupHarness] = useState<Harness | null>(null);
-  const [authHarness, setAuthHarness] = useState<Harness | null>(null);
-  const [acpDialogOpen, setAcpDialogOpen] = useState(false);
   const addedAcpHarness = useRef<HarnessId | null>(null);
   const [automaticSetup, setAutomaticSetup] = useState(false);
   const installSocket = useRef<WebSocket | null>(null);
@@ -353,6 +351,36 @@ export function Onboarding({
     }
   };
 
+  const openAuth = (harness: Harness) => showCustomDialog({
+    component: AcpAuthDialog,
+    props: { remote, harness, onReady: (ready) => setPreferredHarness(ready.id) },
+    onConfirm: () => {},
+    onCancel: "close",
+  });
+  const openSetup = (harness: Harness) => {
+    const commands = setupCommands.data?.[harness.id];
+    if (remote || !commands) return;
+    showCustomDialog({
+      component: HarnessSetupDialog,
+      props: { harness, commands, onReady: (ready) => setPreferredHarness(ready.id), onAuth: openAuth },
+      onConfirm: () => {},
+      onCancel: "close",
+    });
+  };
+  const openAcp = () => showCustomDialog({
+    component: AcpHarnessDialog,
+    props: {
+      onSaved: (id) => {
+        const ready = queryClient.getQueryData(getHarnessesQuery().queryKey)?.find((h) => h.id === id && h.agentReady && !h.catalogPending);
+        addedAcpHarness.current = ready ? null : id;
+        if (ready) setPreferredHarness(ready.id);
+        load(true, true);
+      },
+    },
+    onConfirm: (save) => save(),
+    onCancel: "close",
+  });
+
   const continueHint = checking || (!anyAgentReady && anyPending)
     ? m.onboarding_waiting_tool_checks()
     : !anyAgentReady
@@ -375,29 +403,6 @@ export function Onboarding({
           : "[&_.home-inner]:max-w-140 [&_.home-inner]:pt-24"
         }`}
     >
-      {acpDialogOpen && <AcpHarnessDialog
-        onClose={() => setAcpDialogOpen(false)}
-        onSaved={(id) => {
-          const ready = harnesses?.find((h) => h.id === id && h.agentReady && !h.catalogPending);
-          addedAcpHarness.current = ready ? null : id;
-          if (ready) setPreferredHarness(ready.id);
-          load(true, true);
-        }}
-      />}
-      {authHarness && <AcpAuthDialog remote={remote} harness={authHarness} onClose={() => setAuthHarness(null)} onReady={(ready) => setPreferredHarness(ready.id)} />}
-      {!remote && setupHarness && setupCommands.data && (
-        <HarnessSetupDialog
-          harness={setupHarness}
-          commands={setupCommands.data[setupHarness.id]}
-          onReady={(ready) => {
-            setPreferredHarness(ready.id);
-          }}
-          onAuth={(harness) => { setSetupHarness(null); setAuthHarness(harness); }}
-          onClose={() => {
-            setSetupHarness(null);
-          }}
-        />
-      )}
       <div
         className={`home-inner max-w-155 my-0 mx-auto ${
           step === 0 ? "px-8 sm:px-12" : "pt-12 px-6 pb-16"
@@ -463,8 +468,8 @@ export function Onboarding({
                     selected={preferredHarness === h.id}
                     onSelect={() => { addedAcpHarness.current = null; setPreferredHarness(h.id); }}
                     commands={setupCommands.data?.[h.id]}
-                    onSetup={() => setSetupHarness(h)}
-                    onAuth={() => setAuthHarness(h)}
+                    onSetup={() => openSetup(h)}
+                    onAuth={() => openAuth(h)}
                   />
                 ))
               ) : harnessError ? (
@@ -475,7 +480,7 @@ export function Onboarding({
                   <Spinner /> {m.onboarding_detecting_claude_code_codex_open_code()}
                 </LoadingRow>
               )}
-              <Button variant="ghost" className="self-start" onClick={() => setAcpDialogOpen(true)} aria-haspopup="dialog"><Plus size={14} />{m.acp_add()}</Button>
+              <Button variant="ghost" className="self-start" onClick={() => openAcp()} aria-haspopup="dialog"><Plus size={14} />{m.acp_add()}</Button>
             </div>
             {setupCommands.isError && <p className={ONB_CARD_META_CLASS_NAME}>
               {m.harness_setup_load_failed()} <Button variant="ghost" onClick={() => void setupCommands.refetch()}>{m.app_retry()}</Button>

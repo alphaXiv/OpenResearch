@@ -1,3 +1,4 @@
+import { showConfirmDialog } from "../dialog";
 import { matchesKeyboardEvent } from "@tanstack/react-hotkeys";
 import { WorkspaceEmptyState } from "./WorkspaceEmptyState";
 import { useQuery } from "@tanstack/react-query";
@@ -249,7 +250,7 @@ function PreviewPane({
 }: {
   projectId: string;
   entry: ArtifactEntry;
-  onDelete: (path: string) => void;
+  onDelete: (path: string) => Promise<void>;
   artifactEntries: ArtifactEntry[];
 }) {
   const kind = previewKind(entry);
@@ -346,8 +347,14 @@ function PreviewPane({
           data-tip-align="end"
           aria-label={m.artifacts_tab_delete_artifact()}
           onClick={() => {
-            if (window.confirm(m.artifact_delete_confirm({ path: ltr(entry.path) })))
-              onDelete(entry.path);
+            showConfirmDialog({
+              title: m.artifacts_tab_delete_artifact(),
+              description: m.artifact_delete_confirm({ path: ltr(entry.path) }),
+              destructive: true,
+              confirmLabel: m.chat_panel_delete(),
+              onConfirm: () => onDelete(entry.path),
+              onCancel: "close",
+            });
           }}
         >
           <Trash2 size={14} />
@@ -386,7 +393,7 @@ function TreeRows({
   onToggle: (path: string) => void;
   onSelect: (path: string) => void;
   onOpenFile: (path: string) => void;
-  onDelete: (path: string) => void;
+  onDelete: (path: string) => Promise<void>;
   renamingPath: string | null;
   onContextMenu: (event: FileContextMenuEvent, path: string) => void;
   onRename: (path: string, name: string) => void;
@@ -422,8 +429,14 @@ function TreeRows({
                   aria-label={m.artifact_delete_folder_label({ name: ltr(e.name) })}
                   onClick={(ev) => {
                     ev.stopPropagation();
-                    if (window.confirm(m.artifact_delete_confirm({ path: ltr(e.path) })))
-                      onDelete(e.path);
+                    showConfirmDialog({
+                      title: m.artifacts_tab_delete_folder(),
+                      description: m.artifact_delete_confirm({ path: ltr(e.path) }),
+                      destructive: true,
+                      confirmLabel: m.chat_panel_delete(),
+                      onConfirm: () => onDelete(e.path),
+                      onCancel: "close",
+                    });
                   }}
                 >
                   <Trash2 size={12} />
@@ -597,10 +610,9 @@ export function ArtifactsTab({
       return next;
     });
 
-  const remove = (path: string) => {
+  const remove = async (path: string) => {
+    await deleteArtifact(project.id, path);
     if (selected === path || selected?.startsWith(path + "/")) setSelected(null);
-    void deleteArtifact(project.id, path)
-      .catch(() => {});
   };
 
   const manage = async (
@@ -697,8 +709,14 @@ export function ArtifactsTab({
           onDuplicate={() => void manage(contextMenu.path, { action: "duplicate" })}
           onCopyPath={() => copyPath(contextMenu.path)}
           onDelete={() => {
-            if (window.confirm(m.artifact_delete_confirm({ path: ltr(contextMenu.path) })))
-              remove(contextMenu.path);
+            showConfirmDialog({
+              title: m.artifacts_tab_delete_artifact(),
+              description: m.artifact_delete_confirm({ path: ltr(contextMenu.path) }),
+              destructive: true,
+              confirmLabel: m.chat_panel_delete(),
+              onConfirm: () => remove(contextMenu.path),
+              onCancel: "close",
+            });
           }}
           onClose={() => setContextMenu(null)}
         />

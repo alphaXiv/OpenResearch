@@ -215,6 +215,7 @@
   "lit_sources_picker_loading": "Loading…",
   "md_copy": "Copy",
   "md_copy_code": "Copy code",
+  "md_pick_file": "Choose a file for {path}",
   "media_preview_images": "Images",
   "media_preview_previous_image": "Previous image",
   "media_preview_next_image": "Next image",
@@ -324,6 +325,8 @@
   "projects_home_projects": "Projects",
   "projects_home_repository": "Repository",
   "settings_appearance_heading": "Appearance",
+  "settings_colored_markdown_heading": "Colored markdown",
+  "settings_colored_markdown_description": "Color bold and italic text in chat so emphasis stands out. Bold italic shows as a red highlight.",
   "settings_language_description": "Choose the language for the interface on this device.",
   "settings_language_heading": "Language",
   "settings_page_account": "Account",
@@ -1493,5 +1496,9 @@
   "harness_already_added": "You already added this one",
   "harness_custom_acp": "Custom ACP agent",
   "acp_definitions_load_failed": "Could not load saved ACP agents. The list may be incomplete; retry to add ACP agents.",
-  "acp_definitions_loading": "Loading saved ACP agents…"
+  "acp_definitions_loading": "Loading saved ACP agents…",
+  "common_cancel": "Cancel",
+  "common_confirm": "Confirm",
+  "common_ok": "OK",
+  "common_submit": "Submit"
 }

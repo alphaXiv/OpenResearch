@@ -8,6 +8,7 @@ import { RouterProvider } from "@tanstack/react-router";
 import { HotkeysProvider } from "@tanstack/react-hotkeys";
 import { appHotkeys } from "./hotkeys";
 import { router } from "./router";
+import { DialogManager } from "./dialog";
 import { Toaster } from "./components/ui";
 import { DesktopZoomControls } from "./components/DesktopZoomControls";
 import { WindowControls } from "./components/WindowControls";
@@ -30,6 +31,7 @@ createRoot(document.getElementById("root")!).render(
       <HotkeysProvider appHotkeys={appHotkeys}>
         {"__ORX_DESKTOP__" in window && <AppMenuBridge />}
         <RouterProvider router={router} />
+        <DialogManager />
         {WINDOWS_TITLEBAR && <WindowControls />}
       </HotkeysProvider>
       {import.meta.env.DEV && <ReactQueryDevtools initialIsOpen buttonPosition="bottom-right" />}

@@ -46,27 +46,31 @@ function nodes(tree) {
 for (const corner of [true, false]) {
   test(`local ${corner ? "home" : "sidebar"} control opens hosts and returns from SSH config`, () => {
     const state = hooks();
+    const dialogs = [];
+    const configurations = [];
     const { WorkspaceConnection } = load("components/WorkspaceConnection.tsx", {
       react: state.react,
+      "../dialog": { showCustomDialog: (options) => dialogs.push(options) },
       "../i18n": { ltr: (text) => text },
       "../paraglide/messages.js": messages,
       "./RemoteHostDialog": { RemoteHostDialog: "HostDialog" },
       "./RemoteStatus": { RemoteStatus: "RemoteStatus" },
       "./RemoteIcon": { RemoteIcon: "RemoteIcon" },
-      "./SshConfigDialog": { SshConfigDialog: "ConfigDialog" },
+      "./SshConfigDialog": { showSshConfigDialog: (onClose) => configurations.push(onClose) },
       "./Wordmark": { BrandMark: "BrandMark" },
       "./UpdateBanner": { useUpdateStatus: () => ({ status: null }) },
       "./ui": { Button: "button", IconButton: "button" },
     });
     const runtime = { kind: "local", version: "test" };
     const render = () => { state.reset(); return nodes(WorkspaceConnection({ runtime, corner })); };
-    assert.equal(render().some((node) => node.type === "HostDialog"), false);
+    assert.equal(dialogs.length, 0);
     render().find((node) => node.type === "button" && node.props["aria-haspopup"] === "dialog").props.onClick();
-    render().find((node) => node.type === "HostDialog").props.onConfigureSsh();
-    assert.equal(render().some((node) => node.type === "HostDialog"), false);
-    render().find((node) => node.type === "ConfigDialog").props.onClose();
-    render().find((node) => node.type === "HostDialog").props.onClose();
-    assert.equal(render().some((node) => node.type === "HostDialog" || node.type === "ConfigDialog"), false);
+    assert.equal(dialogs[0].component, "HostDialog");
+    assert.equal(dialogs[0].onCancel, "close");
+    dialogs[0].props.onConfigureSsh();
+    assert.equal(configurations.length, 1);
+    configurations[0]();
+    assert.equal(dialogs[1].component, "HostDialog");
 
     state.reset();
     const remote = { kind: "ssh", session: { host: "research" } };
@@ -137,7 +141,6 @@ for (const outcome of ["success", "failure", "popup-blocked"]) {
       "../paraglide/runtime.js": { getLocale: () => "en" },
       "../queries/settings": { getSshSettingsQuery: () => ({ kind: "hosts" }), listRemoteSessionsQuery: () => ({ kind: "sessions" }) },
       "../theme": { getThemePreference: () => "dark" },
-      "./useDialogFocus": { useDialogFocus: () => {} },
       "./ui": {
         Button: "button", IconButton: "button", Input: "input", Spinner: "Spinner",
         showAlert: (...args) => calls.push(["alert", ...args]),
@@ -152,7 +155,15 @@ for (const outcome of ["success", "failure", "popup-blocked"]) {
         };
       } },
     });
-    const tree = RemoteHostDialog({ onClose: () => calls.push(["close-dialog"]), onConfigureSsh: () => {} });
+    const tree = RemoteHostDialog({
+      cancel: () => calls.push(["close-dialog"]),
+      confirm: (openRemote) => Promise.resolve(openRemote()).then(
+        () => calls.push(["close-dialog"]),
+        (error) => calls.push(["error", error.message]),
+      ),
+      isDisabled: false,
+      onConfigureSsh: () => {},
+    });
     nodes(tree).find((node) => node.type === "button" && nodes(node).some((child) => child.props.children === "research")).props.onClick();
     await new Promise(setImmediate);
     assert.deepEqual(calls[0], ["open", "/remote-launch", "_blank"]);
@@ -162,7 +173,7 @@ for (const outcome of ["success", "failure", "popup-blocked"]) {
       assert.deepEqual(calls[1], ["connect", "research", { theme: "dark", locale: "en" }]);
       assert.deepEqual(calls.slice(2), outcome === "success"
         ? [["navigate", "http://localhost:4910/"], ["close-dialog"]]
-        : [["close-tab"], ["alert", "connection failed", "error"]]);
+        : [["close-tab"], ["error", "connection failed"]]);
     }
   });
 }
