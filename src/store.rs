@@ -1961,7 +1961,13 @@ impl Store {
             .chain(["source-snapshots"])
         {
             let path = self.data_dir.join(name);
-            match std::fs::symlink_metadata(&path) {
+            // Launch accepts user-owned links for these roots (compute::prepare_snapshot_dir).
+            let metadata = if matches!(name, "source-snapshots" | "submission-handles") {
+                std::fs::metadata(&path)
+            } else {
+                std::fs::symlink_metadata(&path)
+            };
+            match metadata {
                 Ok(metadata) if !metadata.file_type().is_dir() => {
                     return Err(anyhow!(
                         "Refusing artifact cleanup through {}",
@@ -5196,6 +5202,23 @@ mod tests {
         assert!(!dir.join("local-runs/run").exists());
         drop(store);
         std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn artifact_cleanup_follows_symlinked_snapshot_roots_only() {
+        let dir = std::env::temp_dir().join(format!("orx-linked-roots-{}", uuid::Uuid::new_v4()));
+        let store = Store::open_at(dir.clone()).unwrap();
+        for name in ["source-snapshots", "submission-handles"] {
+            std::fs::create_dir_all(dir.join(format!("outside-{name}"))).unwrap();
+            std::os::unix::fs::symlink(dir.join(format!("outside-{name}")), dir.join(name))
+                .unwrap();
+        }
+        store.validate_run_artifact_roots().unwrap();
+        std::fs::create_dir_all(dir.join("outside-local-runs")).unwrap();
+        std::os::unix::fs::symlink(dir.join("outside-local-runs"), dir.join("local-runs")).unwrap();
+        assert!(store.validate_run_artifact_roots().is_err());
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 
     #[test]
