@@ -279,6 +279,7 @@ pub async fn run(args: UpArgs) -> Result<()> {
     agent.shutdown().await;
     codex.shutdown().await;
     claude.shutdown().await;
+    let _ = tokio::task::spawn_blocking(crate::local::harness::antigravity::shutdown).await;
     state.chat.acp.shutdown().await;
     if let Some(server) = control_server {
         server.shutdown().await;

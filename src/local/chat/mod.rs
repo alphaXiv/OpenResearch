@@ -7799,6 +7799,14 @@ impl TurnCtx {
         upsert_preserving_children(&mut self.assistant.parts, part);
     }
 
+    /// The `(kind, message)` a harness marked with [`Self::mark_terminal_failure`].
+    #[cfg(test)]
+    pub fn terminal_failure(&self) -> Option<(&str, &str)> {
+        self.terminal_error
+            .as_ref()
+            .map(|(kind, message)| (kind.as_str(), message.as_str()))
+    }
+
     /// Bare in-memory ctx for harness unit tests: parts accumulate on
     /// `assistant`, nothing is flushed or persisted (don't call `flush` /
     /// `set_native_session_id` on it — those touch the store).

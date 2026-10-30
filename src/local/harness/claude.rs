@@ -37,7 +37,7 @@ use super::options::{
 };
 use super::{
     CompactCtx, CompactOutcome, Harness, OneShot, OneShotQuality, ResumeAction, TurnFailure,
-    TurnOutcome, TurnResult, Waited, ORX_MAX_ATTEMPTS,
+    TurnOutcome, TurnResult, Waited, FIRST_EVENT_TIMEOUT, ORX_MAX_ATTEMPTS,
 };
 use crate::error::{anyhow, Result};
 use crate::local::chat::{
@@ -2211,15 +2211,6 @@ fn spawn_config(ctx: &TurnCtx, native_store: NativeStore) -> SpawnConfig {
         bridge_active: uses_permission_bridge(ctx.permission_mode) && ctx.host.up_port().is_some(),
     }
 }
-
-/// Deadline for a turn's first sign of life — any stdout line at all, echo or
-/// pre-echo. A healthy child (resident or freshly spawned, `--resume`
-/// rehydration included) emits its per-turn `system`/`init` within seconds of
-/// a message; TOTAL silence this long means a wedged child (seen live: a
-/// resident child stuck in an expired-OAuth refresh). From the first line on,
-/// waits get the shared [`super::TURN_WATCHDOG`] instead (a long-running tool
-/// or an API backoff burst emits nothing for minutes, legitimately).
-const FIRST_EVENT_TIMEOUT: Duration = Duration::from_secs(120);
 
 /// How long after a `result` to wait for the CLI's background-task auto-resume
 /// segment before declaring the turn over. The continuation is queued locally
