@@ -185,8 +185,14 @@ def cancel(name):
         box.stop()
 
 def finish(name):
-    sandbox, _ = _sdk()
-    box = sandbox.get_sandbox(name=name)
+    sandbox, types = _sdk()
+    try:
+        box = sandbox.get_sandbox(name=name)
+    except types.SandboxApiError as error:
+        # Already destroyed (an earlier attempt got this far): nothing to do.
+        if getattr(error, "status_code", None) == 404:
+            return
+        raise
     if _status(box) in ("pending", "running"):
         box.stop()
     box.destroy(delete_orphan_snapshots=True)
@@ -261,17 +267,42 @@ pub async fn ensure_env() -> Result<()> {
     Ok(())
 }
 
-/// A credential's value and where it came from: the process env wins, then the
-/// synced env file (`orx up` Settings → Environment).
+/// A credential's value and where it came from: a non-empty process env value
+/// wins, then the synced env file (`orx up` Settings → Environment). The one
+/// resolver behind both readiness and the launcher's env, so they agree.
+fn resolve_credential(
+    key: &str,
+    process: impl Fn(&str) -> Option<String>,
+    synced: impl Fn(&str) -> Option<String>,
+) -> Option<(String, &'static str)> {
+    let present = |v: &String| !v.trim().is_empty();
+    process(key)
+        .filter(present)
+        .map(|v| (v, "env"))
+        .or_else(|| synced(key).filter(present).map(|v| (v, "syncedEnv")))
+}
+
 fn credential(key: &str) -> Option<(String, &'static str)> {
-    if let Ok(v) = std::env::var(key) {
-        if !v.trim().is_empty() {
-            return Some((v, "env"));
-        }
-    }
-    crate::config::synced_env_var(key)
-        .filter(|v| !v.trim().is_empty())
-        .map(|v| (v, "syncedEnv"))
+    resolve_credential(
+        key,
+        |k| std::env::var(k).ok(),
+        crate::config::synced_env_var,
+    )
+}
+
+/// The synced credentials the launcher must set explicitly — those the
+/// inherited process env lacks or holds empty.
+fn auth_overrides(
+    process: impl Fn(&str) -> Option<String>,
+    synced: impl Fn(&str) -> Option<String>,
+) -> Vec<(String, String)> {
+    std::iter::once(OIDC_TOKEN)
+        .chain(ACCESS_TOKEN_KEYS)
+        .filter_map(|key| match resolve_credential(key, &process, &synced) {
+            Some((value, "syncedEnv")) => Some((key.to_string(), value)),
+            _ => None,
+        })
+        .collect()
 }
 
 /// Where usable Vercel credentials come from, if anywhere: `"env"` when the
@@ -292,14 +323,9 @@ pub fn token_source() -> Option<&'static str> {
     }
 }
 
-/// Credentials to inject into the launcher subprocess: synced values the
-/// inherited process env doesn't already carry.
+/// Credentials to inject into the launcher subprocess.
 fn auth_env() -> Vec<(String, String)> {
-    std::iter::once(OIDC_TOKEN)
-        .chain(ACCESS_TOKEN_KEYS)
-        .filter(|key| std::env::var_os(key).is_none())
-        .filter_map(|key| crate::config::synced_env_var(key).map(|v| (key.to_string(), v)))
-        .collect()
+    auth_overrides(|k| std::env::var(k).ok(), crate::config::synced_env_var)
 }
 
 /// Drop the Vercel credentials from a job's env: the job has no business
@@ -629,6 +655,36 @@ mod tests {
     fn session_limit_adds_grace_and_caps() {
         assert_eq!(session_limit(3600), 3600 + 300);
         assert_eq!(session_limit(MAX_TIMEOUT_SECS), MAX_TIMEOUT_SECS);
+    }
+
+    #[test]
+    fn launcher_env_falls_back_to_saved_credentials_for_empty_process_values() {
+        let process = |k: &str| match k {
+            "VERCEL_TOKEN" => Some(String::new()),
+            "VERCEL_TEAM_ID" => Some("team_env".to_string()),
+            _ => None,
+        };
+        let synced = |k: &str| match k {
+            "VERCEL_TOKEN" => Some("saved-token".to_string()),
+            "VERCEL_TEAM_ID" => Some("team_saved".to_string()),
+            "VERCEL_PROJECT_ID" => Some("prj_saved".to_string()),
+            _ => None,
+        };
+        assert_eq!(
+            auth_overrides(process, synced),
+            [
+                ("VERCEL_TOKEN".to_string(), "saved-token".to_string()),
+                ("VERCEL_PROJECT_ID".to_string(), "prj_saved".to_string()),
+            ]
+        );
+        assert_eq!(
+            resolve_credential("VERCEL_TOKEN", process, synced),
+            Some(("saved-token".to_string(), "syncedEnv"))
+        );
+        assert_eq!(
+            resolve_credential("VERCEL_OIDC_TOKEN", process, synced),
+            None
+        );
     }
 
     #[test]

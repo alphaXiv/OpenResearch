@@ -695,12 +695,7 @@ async fn run_vercel(
 
         if is_terminal_stage(stage) {
             let _ = done_tx.send(true);
-            if tokio::time::timeout(Duration::from_secs(20), &mut log_task)
-                .await
-                .is_err()
-            {
-                log_task.abort();
-            }
+            drain_vercel_logs(&mut log_task, &path, &run_id).await;
             let applied = store.update_status(&run_id, status, Some(now_ms()), None)?;
             if applied && status == RunStatus::Failed {
                 if let Some(msg) = &job.message {
@@ -711,12 +706,7 @@ async fn run_vercel(
                     }
                 }
             }
-            if let Err(err) = vercel::finish_job(&name).await {
-                eprintln!(
-                    "supervise {run_id}: could not stop vercel sandbox {name} \
-                     (it stops at its session limit): {err}"
-                );
-            }
+            finish_vercel(&name, &run_id).await;
             eprintln!("supervise {run_id}: finished ({status})");
             return Ok(());
         }
@@ -733,6 +723,69 @@ async fn run_vercel(
         }
 
         tokio::time::sleep(POLL_INTERVAL).await;
+    }
+}
+
+/// How long the final log replay may go without writing anything before it is
+/// abandoned. Longer than one stream pass's idle window, so a live replay that
+/// reconnects is never mistaken for a stalled one.
+const VERCEL_DRAIN_STALL: Duration = Duration::from_secs(45);
+
+/// Attempts at stopping and destroying a finished run's sandbox.
+const VERCEL_FINISH_ATTEMPTS: u32 = 5;
+
+/// Wait for the final log replay before the sandbox is destroyed, which loses
+/// anything unread. A replay after a restart can outlast any fixed timeout, so
+/// keep waiting while the run log keeps changing (a fresh replay truncates it
+/// first) and give up only once it stalls.
+async fn drain_vercel_logs(
+    log_task: &mut tokio::task::JoinHandle<()>,
+    path: &std::path::Path,
+    run_id: &str,
+) {
+    let size = || std::fs::metadata(path).map(|m| m.len()).ok();
+    let mut last = size();
+    loop {
+        if tokio::time::timeout(VERCEL_DRAIN_STALL, &mut *log_task)
+            .await
+            .is_ok()
+        {
+            return;
+        }
+        let now = size();
+        if now == last {
+            eprintln!(
+                "supervise {run_id}: final log replay stalled for {}s; cleaning up without it",
+                VERCEL_DRAIN_STALL.as_secs()
+            );
+            log_task.abort();
+            return;
+        }
+        last = now;
+    }
+}
+
+/// Stop and destroy a finished run's sandbox, retrying transient failures: once
+/// the run is terminal no supervisor comes back for it, so a sandbox left here
+/// keeps billing until its session limit.
+async fn finish_vercel(name: &str, run_id: &str) {
+    let mut delay = Duration::from_secs(2);
+    for attempt in 1..=VERCEL_FINISH_ATTEMPTS {
+        match vercel::finish_job(name).await {
+            Ok(()) => return,
+            Err(err) if attempt == VERCEL_FINISH_ATTEMPTS => eprintln!(
+                "supervise {run_id}: could not stop vercel sandbox {name} after {attempt} \
+                 attempts (it stops at its session limit): {err}"
+            ),
+            Err(err) => {
+                eprintln!(
+                    "supervise {run_id}: stopping vercel sandbox {name} failed (attempt \
+                     {attempt}, will retry): {err}"
+                );
+                tokio::time::sleep(delay).await;
+                delay *= 2;
+            }
+        }
     }
 }
 
