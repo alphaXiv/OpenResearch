@@ -2354,8 +2354,9 @@ async fn finish_completed_turn(
 
 /// How long a quiet post-parent drain waits before settling the turn. The
 /// parent's turn is already complete, so only actively-streaming agents
-/// justify waiting; settling early degrades gracefully because codex delivers
-/// a finished agent's report on the next turn either way.
+/// justify waiting. shortcut: a sub-agent that is silent this long and finishes
+/// after the settle never wakes the parent (only `record_unowned` sees it); a
+/// turn-outliving listener would cover it if long silent sub-agents matter.
 const DRAIN_QUIET_SETTLE: Duration = Duration::from_secs(180);
 
 /// How long a turn may stay quiet before the loop acts on it. Held absolute by
@@ -2378,6 +2379,8 @@ struct SubThread {
     /// the NEXT turn), so the parent's `turn/completed` doesn't end our turn
     /// while any of these are live — see the drain in `run_turn_app_server`.
     live: bool,
+    /// The thread's latest completed agent message — its report once it retires.
+    last_message: Option<String>,
 }
 
 /// Where an incoming notification/request should be routed.
@@ -2565,12 +2568,15 @@ fn register_sub_thread(
     spawn_part_id: String,
     arms: bool,
 ) {
-    let live = arms || sub_threads.get(&thread_id).is_some_and(|s| s.live);
+    let existing = sub_threads.get(&thread_id);
+    let live = arms || existing.is_some_and(|s| s.live);
+    let last_message = existing.and_then(|s| s.last_message.clone());
     sub_threads.insert(
         thread_id,
         SubThread {
             spawn_part_id,
             live,
+            last_message,
         },
     );
 }
@@ -2630,6 +2636,15 @@ fn route_sub_event(
         }
         return;
     }
+    if method == "item/completed" {
+        let item = params.get("item");
+        if item.and_then(|i| i.get("type")).and_then(Value::as_str) == Some("agentMessage") {
+            let text = item.and_then(|i| i.get("text")).and_then(Value::as_str);
+            if let (Some(sub), Some(text)) = (sub_threads.get_mut(tid), text) {
+                sub.last_message = Some(text.to_string());
+            }
+        }
+    }
     let live = sub_threads.get(tid).is_some_and(|s| s.live);
     let Some(spawn_part) = find_part_mut(&mut ctx.assistant.parts, &spawn_part_id) else {
         return;
@@ -2660,6 +2675,32 @@ fn route_sub_event(
             found.arms,
         );
     }
+}
+
+/// The hidden message that resumes the parent with the reports of the sub-agents
+/// it yielded on (`awaited`), once all of them have retired.
+fn subagent_wakeup_text(
+    awaited: &[String],
+    sub_threads: &HashMap<String, SubThread>,
+) -> Option<String> {
+    if awaited.is_empty() || sub_threads.values().any(|s| s.live) {
+        return None;
+    }
+    let reports = awaited
+        .iter()
+        .map(|tid| {
+            let report = sub_threads.get(tid).and_then(|s| s.last_message.as_deref());
+            format!(
+                "<sub-agent-report thread=\"{tid}\">\n{}\n</sub-agent-report>",
+                report.unwrap_or("(no final message)")
+            )
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+    Some(format!(
+        "[orx] Sub-agents you spawned finished after your turn ended. Continue the task using \
+         their reports:\n{reports}"
+    ))
 }
 
 /// Stamp any still-`running` `subagent` spawn parts (at any depth) to
@@ -3058,6 +3099,9 @@ async fn run_turn_app_server(ctx: &mut TurnCtx) -> Result<()> {
     // still live — we're draining their tails before ending the turn (bounded
     // by DRAIN_QUIET_SETTLE, see the deadline below).
     let mut parent_done = false;
+    // Threads still live when the parent yielded: codex queues their reports
+    // without starting a parent turn, so orx wakes the parent once they retire.
+    let mut awaited: Vec<String> = Vec::new();
 
     loop {
         // Watchdog (see TURN_WATCHDOG for the false-positive trade-off).
@@ -3159,6 +3203,7 @@ async fn run_turn_app_server(ctx: &mut TurnCtx) -> Result<()> {
                                 &mut open_requests,
                             )
                             .await;
+                            ctx.wake_after_turn = subagent_wakeup_text(&awaited, &sub_threads);
                             return Ok(());
                         }
                         continue;
@@ -3194,6 +3239,11 @@ async fn run_turn_app_server(ctx: &mut TurnCtx) -> Result<()> {
                         // thread that never does. An interrupt ends everything.
                         if !interrupted && sub_threads.values().any(|s| s.live) {
                             parent_done = true;
+                            awaited = sub_threads
+                                .iter()
+                                .filter(|(_, s)| s.live)
+                                .map(|(tid, _)| tid.clone())
+                                .collect();
                             deadline = tokio::time::Instant::now() + turn_phase_quiet(parent_done);
                             let _ = ctx.flush();
                             continue;
@@ -5194,6 +5244,7 @@ requires_openai_auth = false
             SubThread {
                 spawn_part_id: "spawn1".into(),
                 live: true,
+                last_message: None,
             },
         );
         // Same turn as parent → Parent.
@@ -5464,6 +5515,53 @@ requires_openai_auth = false
             !subs.contains_key("parent-thread"),
             "handoff item must not re-register the parent"
         );
+    }
+
+    #[test]
+    fn wakeup_waits_for_every_awaited_sub_agent_and_carries_reports() {
+        let mut ctx = TurnCtx::test_stub();
+        let mut subs: HashMap<String, SubThread> = HashMap::new();
+        let spawn = json!({"item":{"type":"collabAgentToolCall","id":"spawn1",
+            "tool":"spawnAgent","status":"inProgress","receiverThreadIds":["a","b"]},
+            "threadId":"parent-thread","turnId":"turn1"});
+        register_sub_threads_from("parent-thread", "item/started", &spawn, &mut subs);
+        apply_notification(&mut ctx, "item/started", &spawn);
+        // Nothing awaited (children finished inside the parent turn): no wake-up.
+        assert!(subagent_wakeup_text(&[], &subs).is_none());
+        let awaited = vec!["a".to_string(), "b".to_string()];
+        let report = json!({"item":{"type":"agentMessage","id":"m1","text":"SUBAGENT_RESULT=42"}});
+        let done = json!({"turn":{"status":"completed"}});
+        route_sub_event(
+            &mut ctx,
+            &mut subs,
+            "parent-thread",
+            "a",
+            "item/completed",
+            &report,
+        );
+        route_sub_event(
+            &mut ctx,
+            &mut subs,
+            "parent-thread",
+            "a",
+            "turn/completed",
+            &done,
+        );
+        assert!(
+            subagent_wakeup_text(&awaited, &subs).is_none(),
+            "b is still live"
+        );
+        route_sub_event(
+            &mut ctx,
+            &mut subs,
+            "parent-thread",
+            "b",
+            "turn/completed",
+            &done,
+        );
+        let text = subagent_wakeup_text(&awaited, &subs).unwrap();
+        assert!(text.contains("<sub-agent-report thread=\"a\">\nSUBAGENT_RESULT=42\n"));
+        assert!(text.contains("<sub-agent-report thread=\"b\">\n(no final message)\n"));
     }
 
     #[test]
