@@ -98,6 +98,9 @@ pub struct BackendDescriptor {
     /// Requested `#SBATCH --mem` (slurm_job only).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub mem: Option<String>,
+    /// Requested `#SBATCH --partition` (slurm_job only).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub partition: Option<String>,
     /// Immutable local source archive used for this run. These fields make a
     /// delayed or restarted supervisor independent of the working tree.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -297,6 +300,7 @@ mod tests {
             timeout_secs: Some(14_400),
             cpus_per_task: None,
             mem: None,
+            partition: None,
             source_digest: None,
             source_path: None,
             source_size: None,
@@ -321,7 +325,13 @@ mod tests {
         d.ssh_user = Some("root".to_string());
         d.cpus_per_task = Some(8);
         d.mem = Some("64G".to_string());
+        d.partition = Some("gpu_p".to_string());
         let json = d.to_json();
+        assert!(json.contains("\"partition\":\"gpu_p\""), "{json}");
+        assert_eq!(
+            crate::local::slurm::requested_partition(&d).as_deref(),
+            Some("partition gpu_p")
+        );
         assert!(json.contains("\"sshHost\":\"203.0.113.7\""), "{json}");
         assert!(json.contains("\"cpusPerTask\":8"), "{json}");
 
@@ -357,6 +367,8 @@ mod tests {
         assert_eq!(d.ssh_host, None);
         assert_eq!(d.timeout_secs, None);
         assert_eq!(d.cpus_per_task, None);
+        assert_eq!(d.partition, None);
+        assert_eq!(crate::local::slurm::requested_partition(&d), None);
         // A Slurm run from before cpus/mem were recorded may still have requested them.
         let slurm =
             BackendDescriptor::parse(r#"{"kind":"slurm_job","namespace":"login","jobId":"123"}"#)
