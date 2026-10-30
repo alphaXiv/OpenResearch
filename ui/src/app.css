@@ -531,9 +531,13 @@
 
 /* The macOS app's window material (src/commands/app.rs) shows through the sidebar. */
 .mac-titlebar:has(.app-body > .session-rail),
-.mac-titlebar:has(.app-body > .session-rail) body,
-.mac-titlebar .app-body > .session-rail {
+.mac-titlebar:has(.app-body > .session-rail) body {
   background: transparent;
+}
+
+/* A veil toward white (light) or black (dark) over the material. */
+.mac-titlebar .app-body > .session-rail {
+  background: var(--material-veil);
 }
 
 /* Hover and selection fills tint the material like a native sidebar's. */

@@ -1708,8 +1708,6 @@ mod imp {
         path.with_file_name(name)
     }
 
-    /// wry's WKUIDelegate has no confirm panel, and without one WebKit answers
-    /// every `window.confirm` with false, so add it to the delegate's class.
     /// The sidebar's blur: the page leaves the sidebar transparent over this view.
     #[cfg(target_os = "macos")]
     fn add_window_material(webview: &WebView) {
@@ -1735,6 +1733,8 @@ mod imp {
         parent.addSubview_positioned_relativeTo(&material, NSWindowOrderingMode::Below, Some(&wk));
     }
 
+    /// wry's WKUIDelegate has no confirm panel, and without one WebKit answers
+    /// every `window.confirm` with false, so add it to the delegate's class.
     #[cfg(target_os = "macos")]
     fn add_confirm_panel(webview: &WebView) {
         type ConfirmPanel = unsafe extern "C-unwind" fn(
