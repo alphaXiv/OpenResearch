@@ -117,7 +117,7 @@ $acl.SetAccessRuleProtection($true, $false)
 foreach ($rule in @($acl.Access)) { [void]$acl.RemoveAccessRuleAll($rule) }
 $rule = [Security.AccessControl.FileSystemAccessRule]::new($identity.User, 'FullControl', 'ContainerInherit,ObjectInherit', 'None', 'Allow')
 $acl.SetAccessRule($rule)
-Set-Acl -LiteralPath $env:ORX_PRIVATE_DIRECTORY -AclObject $acl
+[IO.Directory]::SetAccessControl($env:ORX_PRIVATE_DIRECTORY, $acl)
 "#;
         let status = std::process::Command::new("powershell.exe")
             .args(["-NoProfile", "-NonInteractive", "-Command", script])
@@ -849,6 +849,44 @@ pub(crate) async fn askpass() -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(windows)]
+    #[test]
+    fn private_directory_remains_private_across_processes() {
+        const CHILD_DIR: &str = "ORX_TEST_PRIVATE_DIRECTORY";
+        if let Some(path) = std::env::var_os(CHILD_DIR) {
+            let path = std::path::PathBuf::from(path);
+            private_directory(&path).unwrap();
+            let script = r#"$ErrorActionPreference = 'Stop'
+$identity = [Security.Principal.WindowsIdentity]::GetCurrent()
+$acl = Get-Acl -LiteralPath $env:ORX_TEST_PRIVATE_DIRECTORY
+$rules = @($acl.GetAccessRules($true, $true, [Security.Principal.SecurityIdentifier]))
+if (!$acl.AreAccessRulesProtected -or $rules.Count -ne 1 -or $rules[0].IdentityReference.Value -ne $identity.User.Value -or $rules[0].AccessControlType -ne 'Allow' -or $rules[0].FileSystemRights -ne 'FullControl' -or $rules[0].IsInherited) { throw 'unexpected private directory ACL' }
+"#;
+            let output = std::process::Command::new("powershell.exe")
+                .args(["-NoProfile", "-NonInteractive", "-Command", script])
+                .env(CHILD_DIR, &path)
+                .output()
+                .unwrap();
+            assert!(output.status.success(), "{output:?}");
+            return;
+        }
+
+        let dir = crate::local::git::TemporaryDirectory::new("orx-private-directory").unwrap();
+        let path = dir.path().join("ssh service");
+        for _ in 0..2 {
+            let output = std::process::Command::new(std::env::current_exe().unwrap())
+                .args([
+                    "--exact",
+                    "jobs::ssh::service::tests::private_directory_remains_private_across_processes",
+                    "--nocapture",
+                ])
+                .env(CHILD_DIR, &path)
+                .output()
+                .unwrap();
+            assert!(output.status.success(), "{output:?}");
+        }
+    }
 
     #[tokio::test]
     async fn large_command_input_crosses_bounded_frames_without_losing_bytes() {
