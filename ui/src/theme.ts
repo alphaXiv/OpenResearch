@@ -70,6 +70,39 @@ function subscribeResolved(listener: () => void): () => void {
   return () => observer.disconnect();
 }
 
+const COLORED_MARKDOWN_KEY = "orx:colored-markdown";
+
+function readColoredMarkdown(): boolean {
+  try {
+    return localStorage.getItem(COLORED_MARKDOWN_KEY) === "on";
+  } catch {
+    return false;
+  }
+}
+
+let coloredMarkdown = readColoredMarkdown();
+document.documentElement.dataset.coloredMarkdown = coloredMarkdown ? "on" : "off";
+
+/** Whether chat markdown colors bold, italic, and bold-italic; off until turned on. */
+export function useColoredMarkdown(): [boolean, (next: boolean) => void] {
+  const value = useSyncExternalStore(
+    subscribe,
+    () => coloredMarkdown,
+    () => false,
+  );
+  const set = (next: boolean) => {
+    coloredMarkdown = next;
+    try {
+      localStorage.setItem(COLORED_MARKDOWN_KEY, next ? "on" : "off");
+    } catch {
+      // Non-fatal: the in-memory preference still applies for this session.
+    }
+    document.documentElement.dataset.coloredMarkdown = next ? "on" : "off";
+    for (const listener of listeners) listener();
+  };
+  return [value, set];
+}
+
 /** The theme actually showing, including "system" resolved against the OS. */
 export function useResolvedTheme(): "light" | "dark" {
   return useSyncExternalStore(

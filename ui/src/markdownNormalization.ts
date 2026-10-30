@@ -230,14 +230,23 @@ export function normalizeCurrencyDollars(
   return normalized;
 }
 
-function normalizeProse(text: string, options: NormalizationOptions): string {
-  let normalizedMath = text
+/** The prose between opaque regions `source[start, end)`, normalized. */
+function normalizeProse(source: string, start: number, end: number, options: NormalizationOptions): string {
+  const startsLine = start === 0 || source[start - 1] === "\n";
+  const endsLine = end === source.length || source[end] === "\n";
+  let normalizedMath = source.slice(start, end)
     .replace(/\uE200cite\uE202([^\uE200\uE201]*)\uE201/g, (_, sources: string) =>
       sources.split("\uE202")
         .filter((source) => /^https?:\/\/[^\s<>]+$/i.test(source))
         .map((source) => `<${source}>`)
         .join(" "))
     .replace(/\\\[([\s\S]+?)\\\]/g, (_, inner: string) => `$$${inner}$$`)
+    // `$$x$$` alone on its line is display math; remark-math only treats `$$` on its own lines as a block.
+    // A match touching either end of the fragment shares its line with an opaque region, so it is not alone.
+    .replace(/^([ \t]*)\$\$([^\n$]+?)\$\$[ \t]*$/gm, (match, indent: string, inner: string, offset: number) =>
+      (offset === 0 && !startsLine) || (offset + match.length === end - start && !endsLine)
+        ? match
+        : `${indent}$$\n${indent}${inner}\n${indent}$$`)
     .replace(/\\\(([\s\S]+?)\\\)/g, (_, inner: string) => `$$${inner}$$`);
   if (options.predictMath) {
     normalizedMath = normalizedMath
@@ -272,12 +281,12 @@ export function normalizeMarkdownForRendering(
       continue;
     }
 
-    normalized += normalizeProse(text.slice(proseStart, index), options);
+    normalized += normalizeProse(text, proseStart, index, options);
     normalized += text.slice(index, opaqueEnd);
     index = opaqueEnd;
     proseStart = opaqueEnd;
   }
 
-  normalized += normalizeProse(text.slice(proseStart), options);
+  normalized += normalizeProse(text, proseStart, text.length, options);
   return normalized;
 }

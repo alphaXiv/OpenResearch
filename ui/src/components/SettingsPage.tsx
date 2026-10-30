@@ -127,7 +127,7 @@ import {
 } from "../api";
 import { onDataDirMove } from "../events";
 import { releaseNotesUrl, useRestartApp, useUpdateStatus } from "./UpdateBanner";
-import { useThemePreference, type ThemePreference } from "../theme";
+import { useColoredMarkdown, useThemePreference, type ThemePreference } from "../theme";
 import { m } from "../paraglide/messages.js";
 import { ltr } from "../i18n";
 import { setLocale, useLocale } from "../locale";
@@ -2753,6 +2753,7 @@ const LOCALE_CHOICES: { id: Locale; label: string }[] = [
 function AppearanceTab() {
   const locale = useLocale();
   const [preference, setPreference] = useThemePreference();
+  const [coloredMarkdown, setColoredMarkdown] = useColoredMarkdown();
 
   // Arrow keys move selection relative to the focused radio, with focus
   // following the new choice (WAI-ARIA radio pattern).
@@ -2803,6 +2804,18 @@ function AppearanceTab() {
               </button>
             ))}
           </div>
+        </div>
+        <div className={PROJECT_DEFAULT_ROW_CLASS_NAME}>
+          <div>
+            <div className="project-default-title text-base font-medium">{m.settings_colored_markdown_heading()}</div>
+            <p>{m.settings_colored_markdown_description()}</p>
+          </div>
+          <Switch
+            type="button"
+            checked={coloredMarkdown}
+            aria-label={m.settings_colored_markdown_heading()}
+            onClick={() => setColoredMarkdown(!coloredMarkdown)}
+          />
         </div>
         <div className={PROJECT_DEFAULT_ROW_CLASS_NAME}>
           <div className="project-default-title text-base font-medium">{m.settings_language_heading()}</div>
