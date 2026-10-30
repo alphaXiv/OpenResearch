@@ -539,7 +539,8 @@ pub struct ExpRunArgs {
     pub provider: Option<String>,
     /// orx-supervised executor: `hf` (Hugging Face Jobs,
     /// billed to your HF account), `modal` (a Modal Sandbox on your own Modal
-    /// account, billed per second), `k8s` (a Job on your own Kubernetes
+    /// account, billed per second), `vercel` (a CPU-only Vercel Sandbox microVM on
+    /// your own Vercel project), `k8s` (a Job on your own Kubernetes
     /// cluster), `ssh` (a detached process on one of your own boxes), `slurm`
     /// (a batch job on your Slurm cluster, submitted via its login node),
     /// `ray` (a job on your Ray cluster, via the Ray Jobs API), `openresearch`
@@ -555,7 +556,8 @@ pub struct ExpRunArgs {
     /// Hardware flavor. With `--backend hf`: t4-small, a10g-small, a100-large,
     /// h200, … With `--backend modal`: a Modal GPU (t4, l4, a10g, a100,
     /// a100-80gb, l40s, h100, h200, or e.g. h100:2) or cpu/cpu-large. With
-    /// `--backend slurm`: a GPU request as a GRES spec (h100:2 → --gres=gpu:h100:2;
+    /// `--backend vercel`: optional vCPUs (cpu = 2, cpu-<n> or <n>: 1 or an even
+    /// number up to 32; 2 GB memory each). With `--backend slurm`: a GPU request as a GRES spec (h100:2 → --gres=gpu:h100:2;
     /// plain `gpu` → one GPU; omit for CPU-only). With `--backend ray`: optional
     /// entrypoint resources (`cpu:2`, `gpu:1`, `gpu:1,mem:8GiB`; omit to reserve
     /// nothing). With `--backend openresearch`: a GPU id from `orx compute`
@@ -587,11 +589,14 @@ pub struct ExpRunArgs {
     pub manifest: Option<String>,
     /// Docker image for the job (with `--backend hf/modal`). Defaults to
     /// python:3.12 on CPU flavors, a CUDA pytorch image otherwise. With
+    /// `--backend vercel`, a Vercel Container Registry image (default
+    /// vercel/sandbox/python:3.14). With
     /// `--backend k8s`, set the image in the manifest instead.
     #[arg(long)]
     pub image: Option<String>,
-    /// Job timeout (with `--backend hf/modal/k8s/slurm/openresearch`): 90s,
-    /// 30m, 4h, 1d. Default 4h (HF's own default is only 30 minutes). With
+    /// Job timeout (with `--backend hf/modal/vercel/k8s/slurm/openresearch`): 90s,
+    /// 30m, 4h, 1d. Default 4h (HF's own default is only 30 minutes; Vercel caps
+    /// a session at 24h). With
     /// `--backend k8s` it becomes activeDeadlineSeconds unless the manifest
     /// sets its own. With `--backend slurm` it becomes `#SBATCH --time=` and
     /// has no 4h default — unset falls back to the slurm settings, then the

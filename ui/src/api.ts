@@ -1260,6 +1260,7 @@ export type ComputeTargetId =
   | "tinker"
   | "hf"
   | "modal"
+  | "vercel"
   | "k8s"
   | "ssh"
   | "slurm"

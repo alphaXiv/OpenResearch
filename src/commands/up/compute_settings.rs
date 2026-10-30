@@ -163,6 +163,31 @@ pub(super) async fn set_hf_token(Json(req): Json<SetHfTokenReq>) -> ApiResult {
     Ok(Json(json!(hf_token_status().await)))
 }
 
+// --- vercel settings ----------------------------------------------------------
+
+/// Vercel Sandbox has no saved configuration of its own: credentials are the
+/// SDK's env vars, read from the process env or the Environment tab.
+pub(super) fn vercel_settings_json() -> Value {
+    let source = crate::jobs::vercel::token_source();
+    let process_env = [
+        "VERCEL_OIDC_TOKEN",
+        "VERCEL_TOKEN",
+        "VERCEL_TEAM_ID",
+        "VERCEL_PROJECT_ID",
+    ]
+    .iter()
+    .any(|key| std::env::var_os(key).is_some());
+    let region = std::env::var("ORX_VERCEL_REGION")
+        .ok()
+        .filter(|r| !r.trim().is_empty());
+    json!({
+        "tokenConfigured": source.is_some(),
+        "tokenSource": source,
+        "processEnv": process_env,
+        "region": region,
+    })
+}
+
 // --- modal settings -----------------------------------------------------------
 
 use crate::jobs::modal;
@@ -1149,6 +1174,7 @@ pub(super) fn compute_settings_json(ssh: SshReadiness) -> Value {
     let hf = crate::jobs::huggingface::resolve_token_with_source().ok();
     let tinker = crate::jobs::tinker::resolve_api_key_with_source().ok();
     let modal_source = crate::jobs::modal::token_source();
+    let vercel_source = crate::jobs::vercel::token_source();
     let k8s_settings = k8s::load_settings().ok().flatten();
     let ssh_hosts = list_ssh_hosts().len();
     let slurm_settings = crate::jobs::slurm::load_settings().ok().flatten();
@@ -1215,6 +1241,16 @@ pub(super) fn compute_settings_json(ssh: SshReadiness) -> Value {
                 Some("env") => "MODAL_TOKEN_ID + MODAL_TOKEN_SECRET env vars",
                 Some("syncedEnv") => "Token from Environment tab",
                 Some("modalToml") => "Token from ~/.modal.toml",
+                _ => "No token",
+            },
+        },
+        {
+            "id": "vercel",
+            "configured": vercel_source.is_some(),
+            "fromEnvironmentTab": vercel_source == Some("syncedEnv"),
+            "summary": match vercel_source {
+                Some("env") => "VERCEL_* env vars",
+                Some("syncedEnv") => "Token from Environment tab",
                 _ => "No token",
             },
         },
@@ -1419,6 +1455,7 @@ pub(crate) async fn show(backend: &str) -> Result<Value> {
         "ray" => ray_settings().await,
         "hf" => Ok(hf_settings().await),
         "modal" => modal_settings().await,
+        "vercel" => Ok(Json(vercel_settings_json())),
         "tinker" => tinker_settings().await,
         "k8s" => k8s_settings().await,
         "openresearch" => openresearch_settings().await,
@@ -1558,6 +1595,10 @@ pub(crate) async fn check(
             Ok(()) => json!({"ready": true}),
             Err(error) => json!({"ready": false, "error": error.to_string()}),
         },
+        "vercel" => match crate::jobs::vercel::preflight().await {
+            Ok(()) => json!({"ready": true}),
+            Err(error) => json!({"ready": false, "error": error.to_string()}),
+        },
         _ => show(backend)
             .await
             .unwrap_or_else(|error| json!({"error": error.to_string()})),
@@ -1583,7 +1624,7 @@ pub(crate) async fn check(
                 && value["sshKeyStatus"] == "matched"
                 && value["error"].is_null()
         }
-        "modal" => value["ready"] == true,
+        "modal" | "vercel" => value["ready"] == true,
         _ => false,
     };
     value["ready"] = json!(ready);

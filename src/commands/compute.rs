@@ -152,6 +152,7 @@ pub enum Backend {
     Ray,
     Hf,
     Modal,
+    Vercel,
     Tinker,
     K8s,
     Openresearch,
@@ -165,6 +166,7 @@ impl Backend {
             Self::Ray => "ray",
             Self::Hf => "hf",
             Self::Modal => "modal",
+            Self::Vercel => "vercel",
             Self::Tinker => "tinker",
             Self::K8s => "k8s",
             Self::Openresearch => "openresearch",
@@ -707,6 +709,13 @@ async fn connect(args: &CheckArgs, persist: Option<u64>) -> Result<()> {
         Backend::Openresearch => {
             super::login::run(crate::LoginArgs { api_url: None }).await?;
             super::ssh_key::add(None).await?;
+        }
+        Backend::Vercel => {
+            eprintln!(
+                "Vercel Sandbox reads VERCEL_TOKEN, VERCEL_TEAM_ID and VERCEL_PROJECT_ID (or a \
+                 VERCEL_OIDC_TOKEN from `vercel env pull`) from the environment or Settings → \
+                 Environment. Check them with `orx compute test vercel`."
+            );
         }
         Backend::Local | Backend::Ray | Backend::K8s => {}
     }

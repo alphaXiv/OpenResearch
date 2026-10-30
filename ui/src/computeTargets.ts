@@ -6,6 +6,7 @@ export const TARGET_LABELS: Record<ComputeTargetId, () => string> = {
   tinker: m.compute_target_tinker,
   hf: m.compute_target_hf,
   modal: m.compute_target_modal,
+  vercel: m.compute_target_vercel,
   k8s: m.compute_target_k8s,
   ssh: m.compute_target_ssh,
   slurm: m.compute_target_slurm,

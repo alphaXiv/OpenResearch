@@ -1649,6 +1649,7 @@ const TARGET_CARD_DESCRIPTIONS: Record<ComputeTargetId, () => string> = {
   tinker: m.compute_description_tinker,
   hf: m.compute_description_hf,
   modal: m.compute_description_modal,
+  vercel: m.compute_description_vercel,
   k8s: m.compute_description_k8s,
   slurm: m.compute_description_slurm,
   ray: m.compute_description_ray,
@@ -1661,6 +1662,7 @@ const TARGET_KIND: Record<ComputeTargetId, string> = {
   tinker: "tinker_job",
   hf: "hf_job",
   modal: "modal_job",
+  vercel: "vercel_job",
   k8s: "k8s_job",
   ssh: "ssh_job",
   slurm: "slurm_job",
@@ -1669,13 +1671,21 @@ const TARGET_KIND: Record<ComputeTargetId, string> = {
 };
 
 /** Backends whose launches take --flavor; mirrors the server's validation. */
-const FLAVORED_TARGETS: ComputeTargetId[] = ["hf", "modal", "slurm", "ray", "openresearch"];
+const FLAVORED_TARGETS: ComputeTargetId[] = [
+  "hf",
+  "modal",
+  "vercel",
+  "slurm",
+  "ray",
+  "openresearch",
+];
 /** Of those, the ones where a launch *requires* a flavor. */
 const FLAVOR_REQUIRED: ComputeTargetId[] = ["hf", "modal", "openresearch"];
 
 const FLAVOR_SUGGESTIONS: Partial<Record<ComputeTargetId, string[]>> = {
   hf: ["cpu-basic", "t4-small", "a10g-small", "a10g-large", "a100-large", "h100", "h200"],
   modal: ["cpu", "t4", "l4", "a10g", "a100", "a100-80gb", "l40s", "h100", "h100:2"],
+  vercel: ["cpu", "cpu-1", "cpu-4", "cpu-8", "cpu-16", "cpu-32"],
   slurm: ["gpu", "h100:1", "h100:2", "a100:4"],
   ray: ["cpu", "cpu:2", "gpu", "gpu:1", "gpu:1,cpu:4", "gpu:1,mem:8GiB"],
   openresearch: ["h100_sxm", "h100_sxm:2", "cpu5c", "cpu5g", "cpu5m"],

@@ -1,6 +1,6 @@
 ---
 name: orx-compute
-description: "Launch and monitor experiment runs and route guidance for hf, modal, k8s/Kubernetes, ssh, slurm, ray, OpenResearch, Tinker, and local backends. Covers the fixed run contract, sizing, cancellation, and wait versus wake. Use before any launch or relaunch, when authoring a k8s manifest, choosing or switching compute, or handling an OOM, stall, or timeout; then read one backend reference."
+description: "Launch and monitor experiment runs and route guidance for hf, modal, vercel, k8s/Kubernetes, ssh, slurm, ray, OpenResearch, Tinker, and local backends. Covers the fixed run contract, sizing, cancellation, and wait versus wake. Use before any launch or relaunch, when authoring a k8s manifest, choosing or switching compute, or handling an OOM, stall, or timeout; then read one backend reference."
 ---
 
 Each run uses an immutable snapshot of the experiment branch's recorded commit.
@@ -98,6 +98,7 @@ this `SKILL.md`:
 |---|---|
 | Hugging Face Jobs (`hf`) | [references/hf.md](references/hf.md) |
 | Modal (`modal`) | [references/modal.md](references/modal.md) |
+| Vercel Sandbox (`vercel`) | [references/vercel.md](references/vercel.md) |
 | Kubernetes (`k8s`) | [references/k8s.md](references/k8s.md) |
 | SSH (`ssh`) | [references/ssh.md](references/ssh.md) |
 | Slurm (`slurm`) | [references/slurm.md](references/slurm.md) |

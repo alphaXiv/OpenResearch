@@ -498,6 +498,27 @@ backend_adapter!(
 );
 
 backend_adapter!(
+    VercelCompute,
+    "vercel",
+    "Vercel Sandbox",
+    true,
+    true,
+    false,
+    "sandbox filesystem",
+    false,
+    preflight | args | {
+        if let Err(error) = crate::jobs::vercel::resolve_flavor(args.flavor.as_deref()) {
+            return Ok(not_ready(error.to_string()));
+        }
+        crate::jobs::vercel::preflight().await?;
+        ready()
+    },
+    submit | args,
+    source,
+    run_id | crate::local::vercel::submit_local_vercel_with_source(args, source, run_id).await
+);
+
+backend_adapter!(
     KubernetesCompute,
     "k8s",
     "Kubernetes",
@@ -671,6 +692,7 @@ pub fn backend(id: &str) -> Result<Box<dyn ComputeBackend>> {
         "tinker" => Ok(Box::new(TinkerCompute)),
         "hf" => Ok(Box::new(HuggingFaceCompute)),
         "modal" => Ok(Box::new(ModalCompute)),
+        "vercel" => Ok(Box::new(VercelCompute)),
         "k8s" => Ok(Box::new(KubernetesCompute)),
         "ssh" => Ok(Box::new(SshCompute::default())),
         "slurm" => Ok(Box::new(SlurmCompute)),
