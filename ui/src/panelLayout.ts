@@ -1,13 +1,20 @@
 export const PANEL_MIN_WIDTH = 360;
-const RAIL_WIDTH = 300;
+export const RAIL_DEFAULT_WIDTH = 300;
+const RAIL_MIN_WIDTH = 220;
+const RAIL_MAX_WIDTH = 480;
 const CHAT_MIN_SPACE = 380;
 
-export function sidebarFitsWithPanel(width: number): boolean {
-  return width >= RAIL_WIDTH + CHAT_MIN_SPACE + PANEL_MIN_WIDTH;
+export const clampRailWidth = (width: number) => Math.round(Math.min(Math.max(width, RAIL_MIN_WIDTH), RAIL_MAX_WIDTH));
+
+export function sidebarFitsWithPanel(width: number, railWidth: number): boolean {
+  return width >= railWidth + CHAT_MIN_SPACE + PANEL_MIN_WIDTH;
 }
 
-export function panelMaxWidth(width: number, sidebarVisible: boolean): number {
-  const available = width - (sidebarVisible ? RAIL_WIDTH : 0);
+/** The widest the sidebar can grow before an open panel would hide it. */
+export const railWidthBesidePanel = (width: number) => width - CHAT_MIN_SPACE - PANEL_MIN_WIDTH;
+
+export function panelMaxWidth(width: number, sidebarWidth: number): number {
+  const available = width - sidebarWidth;
   return Math.max(Math.min(PANEL_MIN_WIDTH, Math.floor(available / 2)), available - CHAT_MIN_SPACE);
 }
 

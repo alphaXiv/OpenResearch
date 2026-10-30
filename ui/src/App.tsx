@@ -37,7 +37,7 @@ import {
   type TaskWorkspace,
 } from "./workspaceState";
 import { getRememberedGlobalWorkspace, globalWorkspaceWriter } from "./workspacePersistence";
-import { PANEL_MIN_WIDTH, initialPanelWidth, panelMaxWidth, sideChatPanelWidth, sidebarFitsWithPanel } from "./panelLayout";
+import { PANEL_MIN_WIDTH, RAIL_DEFAULT_WIDTH, clampRailWidth, initialPanelWidth, panelMaxWidth, railWidthBesidePanel, sideChatPanelWidth, sidebarFitsWithPanel } from "./panelLayout";
 import {
   type ExpViewDef,
   sameExpTab,
@@ -479,6 +479,7 @@ export default function App({ runtime, projectId, pane }: { runtime: RuntimeInfo
   const [panelMax, setPanelMax] = useState(false);
   const [treeViewport, setTreeViewport] = useState<Viewport | null>(null);
   const [panelWidth, setPanelWidth] = useState(initialPanelWidth);
+  const [railWidth, setRailWidth] = useState(RAIL_DEFAULT_WIDTH);
   const [windowWidth, setWindowWidth] = useState(() => window.innerWidth);
   const workspaceWide = windowWidth >= WORKSPACE_CARD_MIN_WIDTH;
   const workspaceCardVisible = mainView === "chat" && !panelOpen && workspaceWide;
@@ -487,10 +488,10 @@ export default function App({ runtime, projectId, pane }: { runtime: RuntimeInfo
   const mobile = windowWidth < 768;
   useEffect(() => { setMobileRailOpen(false); }, [mobile, location.href]);
   const [preferencesLoaded, setPreferencesLoaded] = useState(false);
-  const railTemporarilyHidden = mainView === "chat" && panelOpen && !sidebarFitsWithPanel(windowWidth);
+  const railTemporarilyHidden = mainView === "chat" && panelOpen && !sidebarFitsWithPanel(windowWidth, railWidth);
   const railVisible = mobile ? mobileRailOpen : railOpen && !railTemporarilyHidden;
   const stackPanel = !mobile && mainView === "chat" && panelOpen && windowWidth < PANEL_MIN_WIDTH * 2;
-  const visiblePanelWidth = Math.min(panelWidth, panelMaxWidth(windowWidth, railVisible));
+  const visiblePanelWidth = Math.min(panelWidth, panelMaxWidth(windowWidth, railVisible ? railWidth : 0));
   const bodyRef = useRef<HTMLDivElement>(null);
   const pendingTabFocus = useRef<string | null>(null);
   const pendingViewFocus = useRef<"settings" | "compute" | null>(null);
@@ -780,9 +781,9 @@ export default function App({ runtime, projectId, pane }: { runtime: RuntimeInfo
   useEffect(() => {
     const savedLocation = safeLocation(location.href);
     if (!uiState || !workspaceReady || !preferencesLoaded || !savedLocation) return;
-    globalWorkspaceWriter.queue({ lastLocation: savedLocation, railOpen, panelWidth, experimentsView: view }, lastGlobalLocation.current === savedLocation ? 250 : 0);
+    globalWorkspaceWriter.queue({ lastLocation: savedLocation, railOpen, panelWidth, railWidth, experimentsView: view }, lastGlobalLocation.current === savedLocation ? 250 : 0);
     lastGlobalLocation.current = savedLocation;
-  }, [location.href, uiState, workspaceReady, preferencesLoaded, railOpen, panelWidth, view]);
+  }, [location.href, uiState, workspaceReady, preferencesLoaded, railOpen, panelWidth, railWidth, view]);
   const onboarded = uiState?.onboardingCompleted ?? false;
   const [composerFocusNonce, setComposerFocusNonce] = useState(0);
   const closeDemoWelcome = useCallback(async (choice: "explore_demo" | "create_project" | "dismiss") => {
@@ -874,6 +875,7 @@ export default function App({ runtime, projectId, pane }: { runtime: RuntimeInfo
     if (prefs) {
       setRailOpen(prefs.railOpen);
       setPanelWidth(prefs.panelWidth);
+      if (prefs.railWidth) setRailWidth(clampRailWidth(prefs.railWidth));
       setView(prefs.experimentsView === "tree" ? "tree" : "table");
     }
     setPreferencesLoaded(true);
@@ -922,7 +924,7 @@ export default function App({ runtime, projectId, pane }: { runtime: RuntimeInfo
   useEffect(() => {
     const onResize = () => {
       const focused = document.activeElement;
-      if (railOpen && railTemporarilyHidden && sidebarFitsWithPanel(window.innerWidth)
+      if (railOpen && railTemporarilyHidden && sidebarFitsWithPanel(window.innerWidth, railWidth)
         && focused?.closest(".chat-pane") && focused.getAttribute("aria-label") === m.chat_panel_show_sidebar()) {
         focusAfterRailChange.current = focused;
       } else if (focusAfterRailChange.current && typeof focusAfterRailChange.current !== "string") {
@@ -932,7 +934,7 @@ export default function App({ runtime, projectId, pane }: { runtime: RuntimeInfo
     };
     window.addEventListener("resize", onResize);
     return () => window.removeEventListener("resize", onResize);
-  }, [railOpen, railTemporarilyHidden]);
+  }, [railOpen, railTemporarilyHidden, railWidth]);
 
   // Open an experiment view as a right-panel tab (creating it if needed) and
   // focus it.
@@ -1641,7 +1643,7 @@ export default function App({ runtime, projectId, pane }: { runtime: RuntimeInfo
         return;
       }
       const w = Math.round(window.innerWidth - ev.clientX);
-      const max = panelMaxWidth(window.innerWidth, railVisible);
+      const max = panelMaxWidth(window.innerWidth, railVisible ? railWidth : 0);
       // Drag past the usable max by the slop threshold → snap to fullscreen.
       // Dragging back below it drops out of fullscreen to the clamped width.
       if (w > max + FULLSCREEN_SNAP_SLOP) {
@@ -1651,6 +1653,31 @@ export default function App({ runtime, projectId, pane }: { runtime: RuntimeInfo
       setPanelMax(false);
       const clamped = Math.min(Math.max(w, Math.min(PANEL_MIN_WIDTH, max)), max);
       setPanelWidth(clamped);
+    }
+    window.addEventListener("pointermove", onMove);
+    window.addEventListener("pointerup", stop);
+    window.addEventListener("pointercancel", stop);
+  };
+
+  const resizeRail = (e: React.PointerEvent) => {
+    e.preventDefault();
+    const handle = e.currentTarget;
+    handle.setPointerCapture(e.pointerId);
+    const prevUserSelect = document.body.style.userSelect;
+    document.body.style.userSelect = "none";
+    const direction = getComputedStyle(handle).direction === "rtl" ? -1 : 1;
+    const startX = e.clientX;
+    const startWidth = railWidth;
+    const panelBesideRail = mainView === "chat" && panelOpen;
+    function stop() {
+      window.removeEventListener("pointermove", onMove);
+      window.removeEventListener("pointerup", stop);
+      window.removeEventListener("pointercancel", stop);
+      document.body.style.userSelect = prevUserSelect;
+    }
+    function onMove(ev: PointerEvent) {
+      const width = clampRailWidth(startWidth + direction * (ev.clientX - startX));
+      setRailWidth(panelBesideRail ? Math.min(width, railWidthBesidePanel(window.innerWidth)) : width);
     }
     window.addEventListener("pointermove", onMove);
     window.addEventListener("pointerup", stop);
@@ -1934,7 +1961,7 @@ export default function App({ runtime, projectId, pane }: { runtime: RuntimeInfo
 
   return (
     <div className="app relative flex flex-col h-full">
-      {projectId && <div className="absolute start-[calc(5.15rem/min(1,var(--desktop-page-zoom,1)))] top-[calc(-2px/min(1,var(--desktop-page-zoom,1)))] z-10 hidden h-[calc(44px/min(1,var(--desktop-page-zoom,1)))] items-center mac-titlebar:flex">
+      {projectId && <div className="titlebar-sidebar-toggle absolute start-[calc(5.15rem/min(1,var(--desktop-page-zoom,1)))] top-[calc(-2px/min(1,var(--desktop-page-zoom,1)))] z-10 hidden h-[calc(44px/min(1,var(--desktop-page-zoom,1)))] items-center mac-titlebar:flex">
         <Tooltip interactive content={`${railVisible ? m.header_hide_sidebar() : m.chat_panel_show_sidebar()} (${formatForDisplay(appHotkeys["sidebar.toggle"].hotkey ?? [])})`} className="rounded-md">
           <IconButton aria-label={railVisible ? m.header_hide_sidebar() : m.chat_panel_show_sidebar()} aria-expanded={railVisible} onClick={toggleSidebar}>
             <PanelLeft size={18} />
@@ -1955,6 +1982,8 @@ export default function App({ runtime, projectId, pane }: { runtime: RuntimeInfo
             onRetryContent={retryConversation}
             railHeader={railHeader}
             railOpen={railVisible}
+            railWidth={railWidth}
+            onResizeRail={resizeRail}
             mobileRail={mobile}
             onCloseMobileRail={() => setMobileRailOpen(false)}
             contentInert={mobile && panelOpen && mainView === "chat"}
