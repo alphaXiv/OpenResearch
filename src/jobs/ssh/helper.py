@@ -94,7 +94,13 @@ def log_chunk(request):
     try:
         file = open(path, "rb", buffering=0)
     except FileNotFoundError:
-        return {"missing": True}
+        # NFS can cache the miss for a log the compute node already wrote;
+        # listing the run directory revalidates that lookup.
+        try:
+            os.listdir(os.path.dirname(path))
+            file = open(path, "rb", buffering=0)
+        except FileNotFoundError:
+            return {"missing": True}
     with file:
         stat = os.fstat(file.fileno())
         identity = "%s:%s" % (stat.st_dev, stat.st_ino)
