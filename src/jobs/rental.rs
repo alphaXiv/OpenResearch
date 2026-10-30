@@ -163,7 +163,7 @@ fn remote_supervisor_command(binary: &str, directory: &str) -> String {
     use super::ssh::sh_quote;
     // An asynchronous `cd && nohup` list keeps the SSH output pipes open.
     format!(
-        "cd {} || exit; nohup {} rental-supervise {} </dev/null > supervisor.log 2>&1 &",
+        "cd {} || exit; nohup {} rental-supervise {} </dev/null > supervisor.log 2>&1 & echo $! > supervisor.pid",
         sh_quote(directory),
         sh_quote(binary),
         sh_quote(&format!("{directory}/rental.json"))
@@ -238,7 +238,24 @@ pub async fn launch(
     .await?;
     let command = remote_supervisor_command(binary, &path);
     ssh_run(target, &command, None).await?;
+    ssh_run(target, &supervisor_started_script(&path), None).await?;
     Ok(())
+}
+
+pub const SUPERVISOR_EXITED: &str = "remote supervisor exited before starting the run:";
+
+/// Fails with the supervisor's output when it exits before claiming the launch.
+fn supervisor_started_script(directory: &str) -> String {
+    format!(
+        "d={}; i=0; while [ $i -lt 40 ]; do [ -e \"$d/launch_started\" ] && exit 0; \
+         if ! kill -0 \"$(cat \"$d/supervisor.pid\")\" 2>/dev/null; then \
+         [ -s \"$d/supervisor.log\" ] || exit 0; \
+         echo {} >&2; \
+         tail -c 2000 \"$d/supervisor.log\" >&2; exit 1; fi; \
+         i=$((i+1)); sleep 0.25; done",
+        super::ssh::sh_quote(directory),
+        super::ssh::sh_quote(SUPERVISOR_EXITED)
+    )
 }
 
 #[cfg(test)]
@@ -272,6 +289,34 @@ mod tests {
         .await
         .unwrap();
     }
+    #[cfg(unix)]
+    #[test]
+    fn startup_check_reports_a_supervisor_that_died_before_launch() {
+        let temp = crate::local::git::TemporaryDirectory::new("orx-rental-startup").unwrap();
+        let dir = temp.path();
+        let check = || {
+            std::process::Command::new("/bin/sh")
+                .args(["-c", &supervisor_started_script(dir.to_str().unwrap())])
+                .output()
+                .unwrap()
+        };
+        std::fs::write(dir.join("supervisor.pid"), "999999999").unwrap();
+        std::fs::write(
+            dir.join("supervisor.log"),
+            "Permission denied (os error 13)\n",
+        )
+        .unwrap();
+        let died = check();
+        assert!(!died.status.success());
+        let stderr = String::from_utf8_lossy(&died.stderr);
+        assert!(
+            stderr.contains(SUPERVISOR_EXITED)
+                && stderr.contains("Permission denied (os error 13)")
+        );
+        std::fs::write(dir.join("launch_started"), "").unwrap();
+        assert!(check().status.success());
+    }
+
     #[cfg(unix)]
     #[test]
     fn cancellation_waits_for_a_pid_or_terminal_acknowledgment() {
