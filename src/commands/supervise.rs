@@ -26,6 +26,8 @@ const POLL_INTERVAL: Duration = Duration::from_secs(5);
 const LOG_IDLE: Duration = Duration::from_secs(30);
 /// How long monitoring must keep failing before it is reported on the run.
 const MONITORING_GRACE: Duration = Duration::from_secs(60);
+/// How long an SSH host may stay unreachable before its run is declared lost.
+const UNREACHABLE_LIMIT: Duration = Duration::from_secs(15 * 60);
 
 fn should_report_monitoring_error(already_reported: bool, elapsed: Option<Duration>) -> bool {
     already_reported || elapsed.is_some_and(|elapsed| elapsed >= MONITORING_GRACE)
@@ -267,6 +269,10 @@ fn local_cancel_requested(store: &Store, run_id: &str) -> bool {
 
 fn should_report_cancelled(store: &Store, run_id: &str, cancel_sent: bool) -> bool {
     cancel_sent || local_cancel_requested(store, run_id)
+}
+
+fn host_declared_lost(unreachable_for: Option<Duration>) -> bool {
+    unreachable_for.is_some_and(|elapsed| elapsed >= UNREACHABLE_LIMIT)
 }
 
 fn run_status_for_stage(store: &Store, run_id: &str, cancel_sent: bool, stage: &str) -> RunStatus {
@@ -706,6 +712,7 @@ async fn watch_ssh_job(
     let mut cancel_sent = descriptor.cancellation_accepted;
     let mut last_message = None;
     let mut failing_since = None;
+    let mut unreachable_since = None;
     let mut last_error = None;
     let mut missing_polls = 0;
 
@@ -768,6 +775,12 @@ async fn watch_ssh_job(
                 Err(err) => eprintln!("supervise {run_id}: could not save monitoring state: {err}"),
             }
         }
+        // Inspection can also fail on a reachable host (e.g. Docker errors); only polls where the
+        // host cannot run a trivial command count toward declaring it gone.
+        let host_unreachable =
+            observed.is_err() && ssh::ssh_run(&target, "true", None).await.is_err();
+        unreachable_since =
+            host_unreachable.then(|| unreachable_since.unwrap_or_else(std::time::Instant::now));
         let job = match observed {
             Ok(job) => job,
             Err(_) => match sandbox {
@@ -780,6 +793,16 @@ async fn watch_ssh_job(
                     .into(),
                     message: Some(format!("box {id} was deleted while the run was active")),
                 },
+                _ if host_declared_lost(unreachable_since.map(|since| since.elapsed())) => {
+                    ssh::JobState {
+                        stage: "LOST".into(),
+                        message: Some(format!(
+                            "{} was unreachable for {} minutes while the run was active",
+                            target.dest,
+                            UNREACHABLE_LIMIT.as_secs() / 60
+                        )),
+                    }
+                }
                 _ => {
                     missing_polls = 0;
                     tokio::time::sleep(POLL_INTERVAL).await;
@@ -1709,6 +1732,15 @@ mod tests {
             Some(MONITORING_GRACE + Duration::from_nanos(1)),
         ));
         assert!(should_report_monitoring_error(true, Some(Duration::ZERO)));
+    }
+
+    #[test]
+    fn unreachable_hosts_are_declared_lost_only_after_the_limit() {
+        assert!(!host_declared_lost(None));
+        assert!(!host_declared_lost(Some(
+            UNREACHABLE_LIMIT - Duration::from_nanos(1)
+        )));
+        assert!(host_declared_lost(Some(UNREACHABLE_LIMIT)));
     }
 
     #[test]
