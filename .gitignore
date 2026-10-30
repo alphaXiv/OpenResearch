@@ -23,3 +23,6 @@ Claude.local.md
 
 # This repo uses pnpm; ignore an accidental npm lockfile
 ui/package-lock.json
+
+# Per-worktree dev data, binaries, and states (dev.ts).
+/.dev/

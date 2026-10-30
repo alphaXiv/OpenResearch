@@ -216,6 +216,8 @@
   "header_configure_repository": "रिपॉज़िटरी कॉन्फ़िगर करें",
   "header_create_a_new_project": "नया प्रोजेक्ट बनाएं",
   "header_hide_sidebar": "साइडबार छिपाएं",
+  "header_dev_badge": "डेव",
+  "header_query_devtools": "Query डेवलपर टूल",
   "header_project": "प्रोजेक्ट",
   "lit_sources_picker_loading": "लोड हो रहा है…",
   "md_copy": "कॉपी करें",
