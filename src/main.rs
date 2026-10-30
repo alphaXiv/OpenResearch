@@ -871,7 +871,8 @@ pub enum DiscoverCommand {
     Keyword(DiscoverySearchArgs),
     /// alphaXiv semantic title/abstract retrieval with similarity/popularity reranking.
     Embedding(DiscoverySearchArgs),
-    /// OpenAlex scholarly-graph search across disciplines.
+    /// OpenAlex scholarly-graph search across disciplines. Set OPENALEX_API_KEY
+    /// (free at openalex.org/settings/api) for a larger daily budget.
     Openalex(DiscoverySearchArgs),
     /// bioRxiv preprint search through OpenAlex's bioRxiv source index.
     Biorxiv(DiscoverySearchArgs),
