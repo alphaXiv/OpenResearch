@@ -22,10 +22,11 @@ assert.ok(anchor && isFile);
 const compiled = ts.transpileModule(`${isFile}\nconst render = ${anchor};`, {
   compilerOptions: { target: ts.ScriptTarget.ES2022, jsx: ts.JsxEmit.React, jsxFactory: "createElement" },
 }).outputText;
-const FileChip = () => null;
-const renderer = new Function("targets", "createElement", "FileChip", "onOpenFile", "resolveFilePath", `const { nativeMarkdownPath, splitLineSuffix, citedFilePath, chatImageTarget, encodeMarkdownPath } = targets; ${compiled}\nreturn render;`);
+const FileReference = () => null;
+const InsideLinkContext = () => null;
+const renderer = new Function("targets", "createElement", "FileReference", "InsideLinkContext", "onOpenFile", "resolveFilePath", `const { nativeMarkdownPath, splitLineSuffix, citedFilePath, chatImageTarget, encodeMarkdownPath } = targets; ${compiled}\nreturn render;`);
 const processor = unified().use(remarkParse).use(remarkRehype).use(targets.rehypeSafeUrls);
-const link = (target, { onOpenFile, resolveFilePath } = {}) => renderer(targets, createElement, FileChip, onOpenFile, resolveFilePath)({
+const link = (target, { onOpenFile, resolveFilePath } = {}) => renderer(targets, createElement, FileReference, InsideLinkContext, onOpenFile, resolveFilePath)({
   ...processor.runSync(processor.parse(`[label](${target})`)).children[0].children[0].properties,
   children: "label",
 });
@@ -33,14 +34,14 @@ const link = (target, { onOpenFile, resolveFilePath } = {}) => renderer(targets,
 test("local links dispatch native paths for PDF and other file types", () => {
   for (const target of ["C:/report.pdf", "file:///C:/notes.txt", "file:///tmp/data.csv", "file:///tmp/plot.png"]) {
     const element = link(target, { onOpenFile() {}, resolveFilePath: (path) => `docs/${path}` });
-    assert.equal(element.type, FileChip);
+    assert.equal(element.type, FileReference);
     assert.equal(element.props.path, targets.nativeMarkdownPath(target));
   }
 });
 
 test("relative links keep document context and source-line citations", () => {
   const element = link("src/main.rs:42", { onOpenFile() {}, resolveFilePath: (path) => `docs/${path}` });
-  assert.equal(element.type, FileChip);
+  assert.equal(element.type, FileReference);
   assert.equal(element.props.path, "docs/src/main.rs");
   assert.equal(element.props.line, 42);
   const windows = link("C:/src/main.rs:42", { onOpenFile() {} });
