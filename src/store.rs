@@ -5593,7 +5593,7 @@ mod tests {
         let preferences = store.ui_state().unwrap();
         let global: GlobalWorkspaceState = serde_json::from_value(serde_json::json!({
             "lastLocation":"/projects/first/settings/storage", "railOpen":false,
-            "panelWidth":620, "experimentsView":"table"
+            "panelWidth":620, "railWidth":280, "experimentsView":"table"
         }))
         .unwrap();
         store.set_global_workspace_state(&global).unwrap();

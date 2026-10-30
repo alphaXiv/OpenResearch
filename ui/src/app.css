@@ -513,3 +513,16 @@
   .composer-actions { flex-wrap: wrap; }
   input, textarea, select { font-size: 16px; }
 }
+
+/* The macOS app's window material (src/commands/app.rs) shows through the sidebar. */
+.mac-titlebar:has(.app-body > .session-rail),
+.mac-titlebar:has(.app-body > .session-rail) body,
+.mac-titlebar .app-body > .session-rail {
+  background: transparent;
+}
+
+/* Hover and selection fills tint the material like a native sidebar's. */
+.mac-titlebar :is(.app-body > .session-rail, .titlebar-sidebar-toggle) {
+  --surface: var(--material-hover);
+  --panel: var(--material-selected);
+}

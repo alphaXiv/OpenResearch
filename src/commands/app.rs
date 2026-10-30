@@ -993,22 +993,14 @@ mod imp {
                 return;
             }
         };
-        // The dashboard's --base until the page reports what it shows under the titlebar.
-        #[cfg(target_os = "macos")]
-        set_titlebar_color(
-            &window,
-            None,
-            match window.theme() {
-                Theme::Dark => [0x0e, 0x0c, 0x0c],
-                _ => [0xff, 0xff, 0xff],
-            },
-        );
 
         let shown = Rc::new(Cell::new(false));
         let page_ready = Rc::new(Cell::new(false));
         let replaced = Rc::new(RefCell::new(HashMap::new()));
         let builder = WebViewBuilder::new()
             .with_accept_first_mouse(true)
+            // Shows the window material (`add_window_material`) where the page is transparent.
+            .with_transparent(cfg!(target_os = "macos"))
             // Lets the dashboard tell it is in the app, where pop-ups open in the browser.
             .with_initialization_script("window.__ORX_DESKTOP__ = true;")
             .with_initialization_script_for_main_only(
@@ -1092,6 +1084,13 @@ mod imp {
                     }
                     #[cfg(not(target_os = "linux"))]
                     "titlebar:zoom" => window.set_maximized(!window.is_maximized()),
+                    // The window material and traffic lights follow the page's theme preference.
+                    #[cfg(target_os = "macos")]
+                    "appearance:system" => window.set_theme(None),
+                    #[cfg(target_os = "macos")]
+                    "appearance:light" => window.set_theme(Some(Theme::Light)),
+                    #[cfg(target_os = "macos")]
+                    "appearance:dark" => window.set_theme(Some(Theme::Dark)),
                     #[cfg(windows)]
                     "titlebar:minimize" => window.set_minimized(true),
                     #[cfg(windows)]
@@ -1129,8 +1128,6 @@ mod imp {
                                     eprintln!("openresearch app: invalid menu state: {error}")
                                 }
                             }
-                        } else if let Some((appearance, color)) = parse_titlebar_message(message) {
-                            set_titlebar_color(&window, appearance, color);
                         }
                     }
                 }
@@ -1175,6 +1172,8 @@ mod imp {
         };
         #[cfg(target_os = "macos")]
         add_confirm_panel(&webview);
+        #[cfg(target_os = "macos")]
+        add_window_material(&webview);
 
         let mut zoom_percent = crate::config::desktop_zoom_percent();
         if let Err(error) = sync_page_zoom(&webview, zoom_percent, false) {
@@ -1448,30 +1447,6 @@ mod imp {
         unsafe { SetCurrentProcessExplicitAppUserModelID(id.as_ptr()) };
     }
 
-    /// Reads desktopTitlebar.ts's `titlebar:<preference>:<rrggbb>` message. A "system"
-    /// preference leaves the appearance unforced so the page still sees OS changes.
-    #[cfg(target_os = "macos")]
-    fn parse_titlebar_message(message: &str) -> Option<(Option<Theme>, [u8; 3])> {
-        let (preference, hex) = message.strip_prefix("titlebar:")?.split_once(':')?;
-        let appearance = match preference {
-            "system" => None,
-            "light" => Some(Theme::Light),
-            "dark" => Some(Theme::Dark),
-            _ => return None,
-        };
-        if hex.len() != 6 {
-            return None;
-        }
-        let channel = |i: usize| u8::from_str_radix(hex.get(i..i + 2)?, 16).ok();
-        Some((appearance, [channel(0)?, channel(2)?, channel(4)?]))
-    }
-
-    #[cfg(target_os = "macos")]
-    fn set_titlebar_color(window: &Window, appearance: Option<Theme>, [r, g, b]: [u8; 3]) {
-        window.set_theme(appearance);
-        window.set_background_color(Some((r, g, b, 0xff)));
-    }
-
     /// The top edge only: the shadow frame tao keeps around an undecorated window
     /// resizes the others, but the webview covers the top.
     #[cfg(windows)]
@@ -1732,6 +1707,31 @@ mod imp {
 
     /// wry's WKUIDelegate has no confirm panel, and without one WebKit answers
     /// every `window.confirm` with false, so add it to the delegate's class.
+    /// The sidebar's blur: the page leaves the sidebar transparent over this view.
+    #[cfg(target_os = "macos")]
+    fn add_window_material(webview: &WebView) {
+        use objc2_app_kit::{
+            NSAutoresizingMaskOptions, NSVisualEffectBlendingMode, NSVisualEffectMaterial,
+            NSVisualEffectState, NSVisualEffectView, NSWindowOrderingMode,
+        };
+
+        let mtm = MainThreadMarker::new().expect("desktop app runs on the main thread");
+        let wk = webview.webview();
+        let Some(parent) = (unsafe { wk.superview() }) else {
+            return;
+        };
+        let material = NSVisualEffectView::new(mtm);
+        material.setFrame(parent.bounds());
+        material.setAutoresizingMask(
+            NSAutoresizingMaskOptions::ViewWidthSizable
+                | NSAutoresizingMaskOptions::ViewHeightSizable,
+        );
+        material.setMaterial(NSVisualEffectMaterial::Sidebar);
+        material.setBlendingMode(NSVisualEffectBlendingMode::BehindWindow);
+        material.setState(NSVisualEffectState::FollowsWindowActiveState);
+        parent.addSubview_positioned_relativeTo(&material, NSWindowOrderingMode::Below, Some(&wk));
+    }
+
     #[cfg(target_os = "macos")]
     fn add_confirm_panel(webview: &WebView) {
         type ConfirmPanel = unsafe extern "C-unwind" fn(
@@ -1783,11 +1783,7 @@ mod imp {
 
     #[cfg(test)]
     mod tests {
-        #[cfg(target_os = "macos")]
-        use super::parse_titlebar_message;
         use super::ZoomAction;
-        #[cfg(target_os = "macos")]
-        use tao::window::Theme;
 
         #[test]
         fn zoom_steps_clamp_and_reset() {
@@ -1797,29 +1793,6 @@ mod imp {
             assert_eq!(ZoomAction::Out.next(50), 50);
             assert_eq!(ZoomAction::Reset.next(50), 100);
             assert_eq!(ZoomAction::Reset.next(200), 100);
-        }
-
-        #[cfg(target_os = "macos")]
-        #[test]
-        fn titlebar_messages_carry_a_preference_and_an_opaque_color() {
-            assert_eq!(
-                parse_titlebar_message("titlebar:system:0e0c0c"),
-                Some((None, [0x0e, 0x0c, 0x0c]))
-            );
-            assert_eq!(
-                parse_titlebar_message("titlebar:dark:FfFfFf"),
-                Some((Some(Theme::Dark), [0xff, 0xff, 0xff]))
-            );
-            for message in [
-                "titlebar:drag",
-                "titlebar:dark:fff",
-                "titlebar:sepia:ffffff",
-                "titlebar:dark:zzzzzz",
-                "titlebar:dark:ffffé",
-                "theme:dark:ffffff",
-            ] {
-                assert_eq!(parse_titlebar_message(message), None, "{message}");
-            }
         }
     }
 }

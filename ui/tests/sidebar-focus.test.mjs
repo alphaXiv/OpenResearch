@@ -37,8 +37,8 @@ function scenario({ focusedInChat = true, railOpen = true } = {}) {
   let onResize;
   const window = { innerWidth: 1040, addEventListener: (_, callback) => { onResize = callback; }, removeEventListener() {} };
   const resize = ts.transpile(resizeEffect.getText(file));
-  new Function("useEffect", "window", "document", "railOpen", "railTemporarilyHidden", "sidebarFitsWithPanel", "focusAfterRailChange", "setWindowWidth", "m", resize)(
-    (effect) => effect(), window, document, railOpen, true, (width) => width >= 1040, focusAfterRailChange, () => {}, m,
+  new Function("useEffect", "window", "document", "railOpen", "railTemporarilyHidden", "railWidth", "sidebarFitsWithPanel", "focusAfterRailChange", "setWindowWidth", "m", resize)(
+    (effect) => effect(), window, document, railOpen, true, 300, (width, railWidth) => width >= railWidth + 740, focusAfterRailChange, () => {}, m,
   );
   const focus = ts.transpile(focusEffect.getText(file));
   const restore = (railVisible = true) => new Function("useLayoutEffect", "railVisible", "lastFocused", "document", "focusAfterRailChange", "bodyRef", "getComputedStyle", "m", focus)(
