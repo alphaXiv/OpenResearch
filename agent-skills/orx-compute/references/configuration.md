@@ -36,6 +36,8 @@ configuration summary, not proof of connectivity. `test` returns `ready` and
 exits nonzero when prerequisites fail. Its checks do not launch training jobs.
 Modal checks the local SDK and credential presence; it does not verify token
 validity with Modal.
+Vercel Sandbox likewise checks the local SDK and that `VERCEL_OIDC_TOKEN`, or
+all of `VERCEL_TOKEN`, `VERCEL_TEAM_ID` and `VERCEL_PROJECT_ID`, are present.
 
 HF, Tinker and Modal credentials can come from
 `orx compute configure modal --credentials-file -` (stdin; likewise `hf` and

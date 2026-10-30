@@ -648,6 +648,7 @@ fn router(state: AppState, remote_auth: Option<RemoteAuth>) -> Router {
             "/api/settings/modal",
             get(modal_settings).post(set_modal_token),
         )
+        .route("/api/settings/vercel", get(vercel_settings))
         .route("/api/settings/env", get(env_settings).post(set_env_var))
         .route(
             "/api/settings/env/{key}",
@@ -10000,6 +10001,15 @@ mod tests {
         assert!(tinker["configured"].is_boolean());
         assert!(tinker.get("key").is_none());
         assert!(tinker.get("apiKey").is_none());
+        let ids: Vec<_> = settings["targets"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|target| target["id"].as_str().unwrap())
+            .collect();
+        let vercel = ids.iter().position(|id| *id == "vercel").unwrap();
+        assert_eq!(ids[vercel + 1], "openresearch");
+        assert!(ids.iter().position(|id| *id == "ray").unwrap() < vercel);
     }
 
     #[test]

@@ -300,6 +300,7 @@ impl LocalPlane {
                 Some("ssh") => crate::local::ssh::launch_local_ssh(&args).await,
                 Some("slurm") => crate::local::slurm::launch_local_slurm(&args).await,
                 Some("ray") => crate::local::ray::launch_local_ray(&args).await,
+                Some("vercel") => crate::local::vercel::launch_local_vercel(&args).await,
                 Some("openresearch") => {
                     crate::local::openresearch::launch_local_openresearch(&args).await
                 }
@@ -308,6 +309,7 @@ impl LocalPlane {
                     "Unknown --backend '{}'. Local experiments support: hf (Hugging Face Jobs), \
                      modal (Modal serverless GPUs), k8s (your Kubernetes cluster), ssh (your own box), \
                      slurm (your Slurm cluster), ray (a Ray Jobs cluster), \
+                     vercel (Vercel Sandbox microVMs), \
                      openresearch (an ephemeral OpenResearch box), tinker (local controller with remote model compute), \
                      local (this machine).",
                     other
@@ -323,6 +325,7 @@ impl LocalPlane {
                      `--backend ssh --host <alias>` (an ~/.ssh/config alias), \
                      `--backend slurm [--host <alias>] [--flavor h100:2]` (your Slurm cluster), \
                      `--backend ray [--flavor gpu:1]` (a Ray Jobs cluster), \
+                     `--backend vercel [--flavor cpu-4]` (a Vercel Sandbox microVM, CPU-only), \
                      `--backend openresearch --flavor <shape>` (an ephemeral OpenResearch box, \
                      e.g. --flavor h100_sxm or cpu5c; needs `orx login`), \
                      `--backend tinker` (a local controller using remote Tinker model compute), \

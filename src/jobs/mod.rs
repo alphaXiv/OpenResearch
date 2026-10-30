@@ -1,6 +1,6 @@
 //! Job backends — external compute that orx launches and supervises itself.
 //!
-//! Orx submits natively (HF Jobs, Modal, Kubernetes, SSH, Slurm, an OpenResearch
+//! Orx submits natively (HF Jobs, Modal, Vercel Sandbox, Kubernetes, SSH, Slurm, an OpenResearch
 //! box, Tinker through a local controller, or this machine) and a detached
 //! `orx supervise` watches the job beside it. The run's `backend_json` descriptor
 //! is the serialized handle a later supervisor uses to reattach.
@@ -16,6 +16,7 @@ pub mod rental;
 pub mod slurm;
 pub mod ssh;
 pub mod tinker;
+pub mod vercel;
 
 use std::collections::HashMap;
 
@@ -154,6 +155,20 @@ impl BackendDescriptor {
         self.job_id.as_deref().ok_or_else(|| {
             anyhow!("Backend descriptor is missing the Modal sandbox id — was the job submitted?")
         })
+    }
+
+    /// The Vercel (sandbox name, process id) handle; the name rides on
+    /// `namespace`.
+    pub fn vercel_ref(&self) -> Result<(&str, &str)> {
+        if self.kind != "vercel_job" {
+            return Err(anyhow!("Unsupported backend kind: {}", self.kind));
+        }
+        match (self.namespace.as_deref(), self.job_id.as_deref()) {
+            (Some(name), Some(pid)) => Ok((name, pid)),
+            _ => Err(anyhow!(
+                "Backend descriptor is missing the Vercel sandbox name/process id — was the job submitted?"
+            )),
+        }
     }
 
     /// The Slurm (host, job id) handle; the login-node host rides on

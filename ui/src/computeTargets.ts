@@ -10,5 +10,6 @@ export const TARGET_LABELS: Record<ComputeTargetId, () => string> = {
   ssh: m.compute_target_ssh,
   slurm: m.compute_target_slurm,
   ray: m.compute_target_ray,
+  vercel: m.compute_target_vercel,
   openresearch: m.compute_target_openresearch,
 };

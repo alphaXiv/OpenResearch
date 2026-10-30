@@ -18,6 +18,7 @@ use crate::jobs::openresearch;
 use crate::jobs::ray;
 use crate::jobs::slurm;
 use crate::jobs::ssh;
+use crate::jobs::vercel;
 use crate::jobs::{is_terminal_stage, stage_to_run_status, BackendDescriptor};
 use crate::store::{log_path, now_ms, RunStatus, Store};
 
@@ -158,6 +159,9 @@ pub async fn run(args: crate::SuperviseArgs) -> Result<()> {
     }
     if descriptor.kind == "modal_job" {
         return run_modal(store, stored, descriptor, run_id).await;
+    }
+    if descriptor.kind == "vercel_job" {
+        return run_vercel(store, stored, descriptor, run_id).await;
     }
     if descriptor.kind == "ssh_job" {
         return run_ssh(store, stored, descriptor, run_id).await;
@@ -644,6 +648,193 @@ async fn cancel_modal(sandbox_id: &str, run_id: &str, cancel_sent: &mut bool) {
     match modal::cancel_job(sandbox_id).await {
         Ok(()) => *cancel_sent = true,
         Err(err) => eprintln!("supervise {run_id}: modal cancel failed (will retry): {err}"),
+    }
+}
+
+// --- vercel -------------------------------------------------------------------
+//
+// Modal's two-half shape, plus cleanup: a Vercel sandbox outlives its command
+// until the session limit, so once the run is terminal and its log drained the
+// supervisor stops and destroys it. Cancel stops the sandbox, which reads back
+// as ERROR and is reported as `cancelled`.
+
+async fn run_vercel(
+    store: Store,
+    stored: crate::store::StoredRun,
+    descriptor: BackendDescriptor,
+    run_id: String,
+) -> Result<()> {
+    let (name, process_id) = descriptor.vercel_ref()?;
+    let (name, process_id) = (name.to_string(), process_id.to_string());
+
+    eprintln!("supervise {run_id}: watching vercel sandbox {name} (process {process_id})");
+
+    let path = log_path(&run_id);
+    let (done_tx, done_rx) = tokio::sync::watch::channel(false);
+    let mut log_task = tokio::spawn(tail_logs_vercel(
+        name.clone(),
+        path.clone(),
+        run_id.clone(),
+        done_rx,
+    ));
+
+    let mut last_status = status_of(&stored)?;
+    let mut cancel_sent = false;
+
+    loop {
+        let job = match vercel::inspect_job(&name, &process_id).await {
+            Ok(j) => j,
+            Err(err) => {
+                eprintln!("supervise {run_id}: inspect failed (will retry): {err}");
+                tokio::time::sleep(POLL_INTERVAL).await;
+                continue;
+            }
+        };
+        let stage = job.stage.as_str();
+        let status = run_status_for_stage(&store, &run_id, cancel_sent, stage);
+
+        if is_terminal_stage(stage) {
+            let _ = done_tx.send(true);
+            drain_vercel_logs(&mut log_task, &path, &run_id).await;
+            let applied = store.update_status(&run_id, status, Some(now_ms()), None)?;
+            if applied && status == RunStatus::Failed {
+                if let Some(msg) = &job.message {
+                    if let Err(err) =
+                        store.set_result_markdown(&run_id, &format!("Job failed: {msg}"))
+                    {
+                        eprintln!("supervise {run_id}: could not record failure reason: {err}");
+                    }
+                }
+            }
+            finish_vercel(&name, &run_id).await;
+            eprintln!("supervise {run_id}: finished ({status})");
+            return Ok(());
+        }
+
+        if status != last_status && store.update_status(&run_id, status, None, None)? {
+            let cancel_requested = local_cancel_requested(&store, &run_id);
+            eprintln!("supervise {run_id}: {last_status} -> {status} (stage {stage})");
+            last_status = status;
+            if cancel_requested && !cancel_sent {
+                cancel_vercel(&name, &run_id, &mut cancel_sent).await;
+            }
+        } else if !cancel_sent && local_cancel_requested(&store, &run_id) {
+            cancel_vercel(&name, &run_id, &mut cancel_sent).await;
+        }
+
+        tokio::time::sleep(POLL_INTERVAL).await;
+    }
+}
+
+/// How long the final log replay may go without writing anything before it is
+/// abandoned. Longer than one stream pass's idle window, so a live replay that
+/// reconnects is never mistaken for a stalled one.
+const VERCEL_DRAIN_STALL: Duration = Duration::from_secs(45);
+
+/// Attempts at stopping and destroying a finished run's sandbox.
+const VERCEL_FINISH_ATTEMPTS: u32 = 5;
+
+/// Wait for the final log replay before the sandbox is destroyed, which loses
+/// anything unread. A replay after a restart can outlast any fixed timeout, so
+/// keep waiting while the run log keeps changing (a fresh replay truncates it
+/// first) and give up only once it stalls.
+async fn drain_vercel_logs(
+    log_task: &mut tokio::task::JoinHandle<()>,
+    path: &std::path::Path,
+    run_id: &str,
+) {
+    let size = || std::fs::metadata(path).map(|m| m.len()).ok();
+    let mut last = size();
+    loop {
+        if tokio::time::timeout(VERCEL_DRAIN_STALL, &mut *log_task)
+            .await
+            .is_ok()
+        {
+            return;
+        }
+        let now = size();
+        if now == last {
+            eprintln!(
+                "supervise {run_id}: final log replay stalled for {}s; cleaning up without it",
+                VERCEL_DRAIN_STALL.as_secs()
+            );
+            log_task.abort();
+            return;
+        }
+        last = now;
+    }
+}
+
+/// Stop and destroy a finished run's sandbox, retrying transient failures: once
+/// the run is terminal no supervisor comes back for it, so a sandbox left here
+/// keeps billing until its session limit.
+async fn finish_vercel(name: &str, run_id: &str) {
+    let mut delay = Duration::from_secs(2);
+    for attempt in 1..=VERCEL_FINISH_ATTEMPTS {
+        match vercel::finish_job(name).await {
+            Ok(()) => return,
+            Err(err) if attempt == VERCEL_FINISH_ATTEMPTS => eprintln!(
+                "supervise {run_id}: could not stop vercel sandbox {name} after {attempt} \
+                 attempts (it stops at its session limit): {err}"
+            ),
+            Err(err) => {
+                eprintln!(
+                    "supervise {run_id}: stopping vercel sandbox {name} failed (attempt \
+                     {attempt}, will retry): {err}"
+                );
+                tokio::time::sleep(delay).await;
+                delay *= 2;
+            }
+        }
+    }
+}
+
+/// Vercel twin of `tail_logs_modal` — each connect replays the in-sandbox log
+/// file from line 1, so the same replay-and-dedup contract applies.
+async fn tail_logs_vercel(
+    name: String,
+    path: std::path::PathBuf,
+    run_id: String,
+    mut done: tokio::sync::watch::Receiver<bool>,
+) {
+    let mut log = match RunLog::open(&path) {
+        Ok(log) => log,
+        Err(err) => {
+            eprintln!(
+                "supervise {run_id}: could not open {}: {err}",
+                path.display()
+            );
+            return;
+        }
+    };
+    let mut seen = 0u64;
+    loop {
+        let draining = *done.borrow();
+        let skip = seen;
+        let mut sink = |line: &str| {
+            seen += 1;
+            log.line(line);
+        };
+        let pass = vercel::stream_logs(&name, skip, LOG_IDLE, &mut sink);
+        let Some(result) = log_pass(&mut done, draining, pass).await else {
+            continue;
+        };
+        if let Err(err) = &result {
+            eprintln!("supervise {run_id}: log stream error (will retry): {err}");
+        }
+        let _ = log.file.flush();
+        if draining && result.is_ok() {
+            return;
+        }
+        tokio::time::sleep(Duration::from_secs(2)).await;
+    }
+}
+
+async fn cancel_vercel(name: &str, run_id: &str, cancel_sent: &mut bool) {
+    eprintln!("supervise {run_id}: cancel requested — stopping vercel sandbox");
+    match vercel::cancel_job(name).await {
+        Ok(()) => *cancel_sent = true,
+        Err(err) => eprintln!("supervise {run_id}: vercel cancel failed (will retry): {err}"),
     }
 }
 

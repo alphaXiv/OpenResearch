@@ -967,6 +967,27 @@ export const getModalSettings = (signal?: AbortSignal) => get<ModalSettings>("/a
 export const saveModalToken = (tokenId: string, tokenSecret: string) =>
   post<ModalSettings>("/api/settings/modal", { tokenId, tokenSecret });
 
+// --- settings: vercel ---------------------------------------------------------
+
+export type VercelCredentialSource = "env" | "syncedEnv";
+
+export interface VercelCredential {
+  key: string;
+  source: VercelCredentialSource | null;
+}
+
+export interface VercelSettings {
+  tokenConfigured: boolean;
+  tokenSource: VercelCredentialSource | null;
+  credentials: VercelCredential[];
+  region: string | null;
+  defaultRegion: string;
+  sdkReady: boolean;
+  sdkSource: "managed" | "override";
+}
+
+export const getVercelSettings = (signal?: AbortSignal) => get<VercelSettings>("/api/settings/vercel", signal);
+
 // --- settings: env vars / git / harnesses ------------------------------------
 
 export interface EnvVar {
@@ -1264,6 +1285,7 @@ export type ComputeTargetId =
   | "ssh"
   | "slurm"
   | "ray"
+  | "vercel"
   | "openresearch";
 
 /** Cheap fs/env probe only — "worth trying", not "healthy". Deep health lives
