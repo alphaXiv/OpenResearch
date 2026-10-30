@@ -692,11 +692,11 @@ pub fn backend(id: &str) -> Result<Box<dyn ComputeBackend>> {
         "tinker" => Ok(Box::new(TinkerCompute)),
         "hf" => Ok(Box::new(HuggingFaceCompute)),
         "modal" => Ok(Box::new(ModalCompute)),
-        "vercel" => Ok(Box::new(VercelCompute)),
         "k8s" => Ok(Box::new(KubernetesCompute)),
         "ssh" => Ok(Box::new(SshCompute::default())),
         "slurm" => Ok(Box::new(SlurmCompute)),
         "ray" => Ok(Box::new(RayCompute)),
+        "vercel" => Ok(Box::new(VercelCompute)),
         "openresearch" => Ok(Box::new(OpenResearchCompute)),
         _ => Err(anyhow!("Unknown compute backend '{id}'.")),
     }
@@ -784,6 +784,7 @@ pub fn validate_run_args(args: &crate::ExpRunArgs) -> Result<()> {
                 "Unknown --backend '{}'. Local experiments support: hf (Hugging Face Jobs), \
                  modal (Modal serverless GPUs), k8s (your Kubernetes cluster), ssh (your own box), \
                  slurm (your Slurm cluster), ray (a Ray Jobs cluster), \
+                 vercel (Vercel Sandbox microVMs), \
                  openresearch (an ephemeral OpenResearch box), tinker (local controller with remote model compute), \
                  local (this machine).",
                 backend

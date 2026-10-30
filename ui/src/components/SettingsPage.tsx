@@ -22,6 +22,7 @@ import {
   refreshHarnesses,
   getK8sSettingsQuery,
   getModalSettingsQuery,
+  getVercelSettingsQuery,
   getSshMasterStatusQuery,
   getSshSettingsQuery,
   getSlurmSettingsQuery,
@@ -109,6 +110,8 @@ import {
   type K8sSettings,
   type LocalMachine,
   type ModalSettings,
+  type VercelCredentialSource,
+  type VercelSettings,
   type RayPreflight,
   type TrackioPreflight,
   type RaySettings,
@@ -858,6 +861,107 @@ function ModalSection() {
           </Button>
         </div>
       </form>
+    </>
+  );
+}
+
+// --- compute (vercel) ------------------------------------------------------------
+
+function vercelCredentialSource(source: VercelCredentialSource | null, onOpenEnvironment: () => void) {
+  if (source === "env") return <span>{m.settings_vercel_from_process_env()}</span>;
+  if (source === "syncedEnv") {
+    return (
+      <button
+        type="button"
+        className="text-accent-blue-strong underline-offset-2 hover:underline"
+        onClick={onOpenEnvironment}
+      >
+        {m.settings_environment_tab()}
+      </button>
+    );
+  }
+  return <span>{m.settings_vercel_not_set()}</span>;
+}
+
+function VercelSection({ onOpenEnvironment }: { onOpenEnvironment: () => void }) {
+  const sOptions = getVercelSettingsQuery();
+  const sQuery = useQuery(sOptions);
+  const s: VercelSettings | null = sQuery.data ?? null;
+  const [actionError, setError] = useState<string | null>(null);
+  const error = actionError ?? sQuery.error?.message ?? null;
+  const [refreshing, setRefreshing] = useState(false);
+  const loading = sQuery.isPending || refreshing;
+
+  async function refresh() {
+    if (loading) return;
+    setRefreshing(true);
+    setError(null);
+    try {
+      await queryClient.fetchQuery({ ...getVercelSettingsQuery(), staleTime: 0 });
+    } catch (err) {
+      setError(err instanceof Error ? err.message : String(err));
+    } finally {
+      setRefreshing(false);
+    }
+  }
+
+  return (
+    <>
+      {!s && loading ? (
+        <LoadingRow>
+          <Spinner /> {m.settings_page_checking_vercel()}
+        </LoadingRow>
+      ) : s && (
+        <dl className="m-0 flex flex-col gap-3 text-sm">
+          <div className="flex items-center justify-between gap-4">
+            <dt className="font-medium text-subtext">{m.settings_page_status()}</dt>
+            <dd className="m-0">
+              <Badge variant={s.tokenConfigured ? "success" : "warning"}>
+                {s.tokenConfigured ? m.settings_page_ready_to_use() : m.settings_page_not_configured()}
+              </Badge>
+            </dd>
+          </div>
+          {s.credentials.map((credential) => (
+            <div key={credential.key} className="flex items-center justify-between gap-4">
+              <dt className="font-medium text-subtext"><code>{credential.key}</code></dt>
+              <dd className="m-0 text-text">{vercelCredentialSource(credential.source, onOpenEnvironment)}</dd>
+            </div>
+          ))}
+          <div className="flex items-center justify-between gap-4">
+            <dt className="font-medium text-subtext">{m.settings_vercel_region()}</dt>
+            <dd className="m-0 text-end text-text">
+              {s.region ? (
+                <>
+                  <span>{s.region}</span>
+                  <span className="ms-2 text-subtext">{m.settings_vercel_region_from_env({ variable: "ORX_VERCEL_REGION" })}</span>
+                </>
+              ) : (
+                m.settings_vercel_region_default({ region: s.defaultRegion })
+              )}
+            </dd>
+          </div>
+          <div className="flex items-center justify-between gap-4">
+            <dt className="font-medium text-subtext">{m.settings_vercel_sdk()}</dt>
+            <dd className="m-0">
+              {s.sdkSource === "override" ? (
+                <Badge variant="success">{m.settings_vercel_sdk_override()}</Badge>
+              ) : (
+                <Badge variant={s.sdkReady ? "success" : "warning"}>
+                  {s.sdkReady ? m.settings_page_ready() : m.settings_vercel_sdk_missing()}
+                </Badge>
+              )}
+            </dd>
+          </div>
+        </dl>
+      )}
+      <p className="mt-2 mb-0 text-sm text-subtext">{m.settings_vercel_credentials_help()}</p>
+      <p className="mt-2 mb-0 text-sm text-subtext">{m.settings_vercel_sdk_help()}</p>
+      {error && <p className="mt-2 mb-0 text-sm text-accent-red">{error}</p>}
+      <div className="mt-5 flex justify-end">
+        <Button type="button" disabled={loading} onClick={() => void refresh()}>
+          <RefreshCw size={14} /> {m.settings_page_refresh()}
+        </Button>
+      </div>
     </>
   );
 }
@@ -1649,10 +1753,10 @@ const TARGET_CARD_DESCRIPTIONS: Record<ComputeTargetId, () => string> = {
   tinker: m.compute_description_tinker,
   hf: m.compute_description_hf,
   modal: m.compute_description_modal,
-  vercel: m.compute_description_vercel,
   k8s: m.compute_description_k8s,
   slurm: m.compute_description_slurm,
   ray: m.compute_description_ray,
+  vercel: m.compute_description_vercel,
   openresearch: m.compute_description_openresearch,
 };
 
@@ -1662,11 +1766,11 @@ const TARGET_KIND: Record<ComputeTargetId, string> = {
   tinker: "tinker_job",
   hf: "hf_job",
   modal: "modal_job",
-  vercel: "vercel_job",
   k8s: "k8s_job",
   ssh: "ssh_job",
   slurm: "slurm_job",
   ray: "ray_job",
+  vercel: "vercel_job",
   openresearch: "openresearch_job",
 };
 
@@ -1674,9 +1778,9 @@ const TARGET_KIND: Record<ComputeTargetId, string> = {
 const FLAVORED_TARGETS: ComputeTargetId[] = [
   "hf",
   "modal",
-  "vercel",
   "slurm",
   "ray",
+  "vercel",
   "openresearch",
 ];
 /** Of those, the ones where a launch *requires* a flavor. */
@@ -1685,9 +1789,9 @@ const FLAVOR_REQUIRED: ComputeTargetId[] = ["hf", "modal", "openresearch"];
 const FLAVOR_SUGGESTIONS: Partial<Record<ComputeTargetId, string[]>> = {
   hf: ["cpu-basic", "t4-small", "a10g-small", "a10g-large", "a100-large", "h100", "h200"],
   modal: ["cpu", "t4", "l4", "a10g", "a100", "a100-80gb", "l40s", "h100", "h100:2"],
-  vercel: ["cpu", "cpu-1", "cpu-4", "cpu-8", "cpu-16", "cpu-32"],
   slurm: ["gpu", "h100:1", "h100:2", "a100:4"],
   ray: ["cpu", "cpu:2", "gpu", "gpu:1", "gpu:1,cpu:4", "gpu:1,mem:8GiB"],
+  vercel: ["cpu", "cpu-1", "cpu-4", "cpu-8", "cpu-16", "cpu-32"],
   openresearch: ["h100_sxm", "h100_sxm:2", "cpu5c", "cpu5g", "cpu5m"],
 };
 
@@ -1977,11 +2081,13 @@ function BackendDetailPage({
   isDefault,
   onBack,
   remote,
+  onOpenEnvironment,
 }: {
   target: ComputeTargetSummary;
   isDefault: boolean;
   onBack: () => void;
   remote: boolean;
+  onOpenEnvironment: () => void;
 }) {
   return (
     <>
@@ -2008,6 +2114,7 @@ function BackendDetailPage({
       <div className="mt-6 font-sans text-base text-text [&_.settings-card]:mb-0 [&_.settings-form]:mt-6 [&_.settings-form]:border-t-0 [&_.settings-form]:pt-0 [&>.settings-form:first-child]:mt-0 [&>div:first-child]:border-t-0">
         {target.id === "ssh" && <SshSection />}
         {target.id === "slurm" && <SlurmSection />}
+        {target.id === "vercel" && <VercelSection onOpenEnvironment={onOpenEnvironment} />}
         {target.id === "openresearch" && <OpenResearchSection remote={remote} />}
       </div>
     </>
@@ -2140,6 +2247,7 @@ function ComputeTab({
         isDefault={defaultBackend === selected.id}
         onBack={() => setSelectedTarget(null)}
         remote={remote}
+        onOpenEnvironment={onOpenEnvironment}
       />
     );
   }

@@ -96,11 +96,11 @@ pub const BACKENDS: &[&str] = &[
     "tinker",
     "hf",
     "modal",
-    "vercel",
     "k8s",
     "ssh",
     "slurm",
     "ray",
+    "vercel",
     "openresearch",
 ];
 
@@ -109,7 +109,7 @@ pub const BACKENDS: &[&str] = &[
 /// ray's is optional resource hints).
 /// k8s (manifest), ssh (host), and local (this machine's hardware) have no
 /// flavor axis.
-pub const FLAVORED_BACKENDS: &[&str] = &["hf", "modal", "vercel", "slurm", "ray", "openresearch"];
+pub const FLAVORED_BACKENDS: &[&str] = &["hf", "modal", "slurm", "ray", "vercel", "openresearch"];
 
 /// The subset whose launches FAIL without a `--flavor` — the playbook warns
 /// about these when they're the default with no saved flavor.

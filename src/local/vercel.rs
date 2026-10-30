@@ -44,15 +44,15 @@ pub async fn submit_local_vercel_with_source(
 ) -> Result<StoredRun> {
     let vcpus = vercel::resolve_flavor(args.flavor.as_deref())?;
     vercel::preflight().await?;
+    // One team lookup when a token and team id are available. OIDC-only and a
+    // failed lookup keep the wide limits; sandbox create then reports a plan cap.
+    let limits = vercel::launch_limits().await;
     let timeout_seconds = match &args.timeout {
         Some(t) => hf::parse_timeout(t)?,
-        None => 4 * 3600,
+        None => limits.default_timeout(),
     };
-    if timeout_seconds > vercel::MAX_TIMEOUT_SECS {
-        return Err(anyhow!(
-            "Vercel Sandbox sessions run for at most 24 hours; lower --timeout."
-        ));
-    }
+    vercel::check_timeout(timeout_seconds, &limits)?;
+    vercel::check_vcpus(vcpus, &limits)?;
 
     let store = Store::open()?;
     let exp = store
@@ -93,6 +93,7 @@ pub async fn submit_local_vercel_with_source(
         vcpus,
         env,
         timeout_seconds,
+        session_cap: limits.session_cap(),
         region: std::env::var(REGION_ENV)
             .ok()
             .filter(|r| !r.trim().is_empty()),

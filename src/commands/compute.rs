@@ -152,9 +152,9 @@ pub enum Backend {
     Ray,
     Hf,
     Modal,
-    Vercel,
     Tinker,
     K8s,
+    Vercel,
     Openresearch,
 }
 impl Backend {
@@ -166,9 +166,9 @@ impl Backend {
             Self::Ray => "ray",
             Self::Hf => "hf",
             Self::Modal => "modal",
-            Self::Vercel => "vercel",
             Self::Tinker => "tinker",
             Self::K8s => "k8s",
+            Self::Vercel => "vercel",
             Self::Openresearch => "openresearch",
         }
     }

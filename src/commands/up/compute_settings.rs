@@ -169,23 +169,27 @@ pub(super) async fn set_hf_token(Json(req): Json<SetHfTokenReq>) -> ApiResult {
 /// SDK's env vars, read from the process env or the Environment tab.
 pub(super) fn vercel_settings_json() -> Value {
     let source = crate::jobs::vercel::token_source();
-    let process_env = [
-        "VERCEL_OIDC_TOKEN",
-        "VERCEL_TOKEN",
-        "VERCEL_TEAM_ID",
-        "VERCEL_PROJECT_ID",
-    ]
-    .iter()
-    .any(|key| std::env::var_os(key).is_some());
+    let credentials: Vec<Value> = crate::jobs::vercel::credential_sources()
+        .into_iter()
+        .map(|(key, source)| json!({"key": key, "source": source}))
+        .collect();
     let region = std::env::var("ORX_VERCEL_REGION")
         .ok()
         .filter(|r| !r.trim().is_empty());
+    let (sdk_source, sdk_ready) = crate::jobs::vercel::sdk_env_status();
     json!({
         "tokenConfigured": source.is_some(),
         "tokenSource": source,
-        "processEnv": process_env,
+        "credentials": credentials,
         "region": region,
+        "defaultRegion": "iad1",
+        "sdkReady": sdk_ready,
+        "sdkSource": sdk_source,
     })
+}
+
+pub(super) async fn vercel_settings() -> ApiResult {
+    Ok(Json(vercel_settings_json()))
 }
 
 // --- modal settings -----------------------------------------------------------
@@ -1245,16 +1249,6 @@ pub(super) fn compute_settings_json(ssh: SshReadiness) -> Value {
             },
         },
         {
-            "id": "vercel",
-            "configured": vercel_source.is_some(),
-            "fromEnvironmentTab": vercel_source == Some("syncedEnv"),
-            "summary": match vercel_source {
-                Some("env") => "VERCEL_* env vars",
-                Some("syncedEnv") => "Token from Environment tab",
-                _ => "No token",
-            },
-        },
-        {
             "id": "k8s",
             "configured": k8s_settings.is_some(),
             "summary": k8s_settings.as_ref().map_or_else(
@@ -1284,6 +1278,16 @@ pub(super) fn compute_settings_json(ssh: SshReadiness) -> Value {
                 format!("{ray_source_label} ({ray_resolved})")
             } else {
                 ray_source_label.to_string()
+            },
+        },
+        {
+            "id": "vercel",
+            "configured": vercel_source.is_some(),
+            "fromEnvironmentTab": vercel_source == Some("syncedEnv"),
+            "summary": match vercel_source {
+                Some("env") => "VERCEL_* env vars",
+                Some("syncedEnv") => "Token from Environment tab",
+                _ => "No token",
             },
         },
         {
