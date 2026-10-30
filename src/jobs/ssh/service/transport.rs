@@ -113,6 +113,10 @@ pub(super) async fn connect(
     interactive: Option<(&Endpoint, &str)>,
 ) -> Result<Arc<Session>> {
     state::validate_configuration(resolved).await?;
+    #[cfg(unix)]
+    if resolved.target.managed_generation.is_none() {
+        reopen_master(resolved).await;
+    }
     #[cfg(windows)]
     let mut _bridge = None;
     let mut command = tokio::process::Command::new("ssh");
@@ -328,9 +332,49 @@ pub(super) async fn connect(
     Ok(session)
 }
 
+/// A dropped master otherwise waits for a manual Connect. This reopens it on the
+/// pinned route without prompting, so key- or agent-authenticated hosts recover.
+#[cfg(unix)]
+async fn reopen_master(resolved: &state::Resolved) {
+    let mut command = tokio::process::Command::new("ssh");
+    command.env("ORX_SSH_PROBE", "1");
+    if let Some(agent) = &resolved.target.auth_agent {
+        command.env("SSH_AUTH_SOCK", agent);
+    } else {
+        command.env_remove("SSH_AUTH_SOCK");
+    }
+    command
+        .args(reopen_args(&resolved.options, &resolved.target.dest))
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .kill_on_drop(true);
+    let _ = tokio::time::timeout(Duration::from_secs(30), command.status()).await;
+}
+
+#[cfg(unix)]
+fn reopen_args(options: &[String], dest: &str) -> Vec<String> {
+    let mut args: Vec<String> = ["-oBatchMode=yes", "-oClearAllForwardings=yes", "-T"]
+        .map(String::from)
+        .into();
+    args.extend(options.iter().cloned());
+    args.extend(["--".into(), dest.into(), "true".into()]);
+    args
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(unix)]
+    #[test]
+    fn reopen_never_prompts_and_uses_the_pinned_route() {
+        let options = ["-o", "ControlPath=/pinned", "-F", "/snapshot"].map(String::from);
+        let args = reopen_args(&options, "lab");
+        assert_eq!(args[0], "-oBatchMode=yes");
+        assert_eq!(args[3..7], options);
+        assert_eq!(args[7..], ["--", "lab", "true"]);
+    }
 
     #[tokio::test]
     async fn dead_session_cannot_be_replaced_before_teardown_finishes() {
