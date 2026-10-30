@@ -22,7 +22,7 @@ export function classifyChanges(paths) {
     else if (path.startsWith('windows/')) checks.windows = true
     else if (path.startsWith('linux/') || /scripts\/(build|smoke-test)-linux/.test(path)) checks.linux = true
     else if (path.startsWith('macos/') || /scripts\/(build|package)-macos/.test(path)) Object.assign(checks, { rust: true, macos: true })
-    else if (/^scripts\/dev-slot(\.test)?\.mjs$/.test(path)) checks.dev_slot = true
+    else if (/^scripts\/(?:dev-slot(?:\.test)?\.mjs|desktop\.js)$/.test(path)) checks.dev_slot = true
     else if (/^scripts\/(test_orx_chart|orx_chart)\.py$/.test(path)) checks.chart = true
     else if (/^scripts\/(test_release_notes|release_notes)\.py$/.test(path)) checks.release_notes = true
     else return all()

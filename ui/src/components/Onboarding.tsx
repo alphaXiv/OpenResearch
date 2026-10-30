@@ -1,3 +1,4 @@
+import { showCustomDialog } from "../dialog";
 import { useMutation, useQuery } from "@tanstack/react-query";
 import { Terminal as Xterm } from "@xterm/xterm";
 import {
@@ -36,7 +37,7 @@ import { AcpHarnessDialog } from "./AcpHarnessDialog";
 import { HarnessSetupDialog } from "./HarnessSetupDialog";
 
 import { Hyperspace } from "./Hyperspace";
-import { Button, LoadingRow, Spinner, StatusIndicator, type StatusTone } from "./ui";
+import { Button, LoadingRow, Spinner, StatusIndicator, Tooltip, type StatusTone } from "./ui";
 import { PaperTitle } from "./PaperTitle";
 
 const ONB_GATE_HINT_CLASS_NAME = [
@@ -102,9 +103,6 @@ export function Onboarding({
   const harnessQuery = useQuery(getHarnessesQuery());
   const pathQuery = useQuery(getProjectPathStatusQuery());
   const setupCommands = useQuery(getHarnessSetupCommandsQuery());
-  const [setupHarness, setSetupHarness] = useState<Harness | null>(null);
-  const [authHarness, setAuthHarness] = useState<Harness | null>(null);
-  const [acpDialogOpen, setAcpDialogOpen] = useState(false);
   const addedAcpHarness = useRef<HarnessId | null>(null);
   const [automaticSetup, setAutomaticSetup] = useState(false);
   const installSocket = useRef<WebSocket | null>(null);
@@ -353,6 +351,50 @@ export function Onboarding({
     }
   };
 
+  const openAuth = (harness: Harness) => showCustomDialog({
+    component: AcpAuthDialog,
+    props: { remote, harness, onReady: (ready) => setPreferredHarness(ready.id) },
+    onConfirm: () => {},
+    onCancel: "close",
+  });
+  const openSetup = (harness: Harness) => {
+    const commands = setupCommands.data?.[harness.id];
+    if (remote || !commands) return;
+    showCustomDialog({
+      component: HarnessSetupDialog,
+      props: { harness, commands, onReady: (ready) => setPreferredHarness(ready.id), onAuth: openAuth },
+      onConfirm: () => {},
+      onCancel: "close",
+    });
+  };
+  const openAcp = () => showCustomDialog({
+    component: AcpHarnessDialog,
+    props: {
+      onSaved: (id) => {
+        const ready = queryClient.getQueryData(getHarnessesQuery().queryKey)?.find((h) => h.id === id && h.agentReady && !h.catalogPending);
+        addedAcpHarness.current = ready ? null : id;
+        if (ready) setPreferredHarness(ready.id);
+        load(true, true);
+      },
+    },
+    onConfirm: (save) => save(),
+    onCancel: "close",
+  });
+
+  const continueHint = checking || (!anyAgentReady && anyPending)
+    ? m.onboarding_waiting_tool_checks()
+    : !anyAgentReady
+      ? m.onboarding_sign_in_agent_to_continue()
+      : preferredHarness === null
+        ? m.onboarding_choose_preferred_agent()
+        : gitError
+          ? m.onboarding_recheck_git_to_continue()
+          : gitVersion === undefined
+            ? m.onboarding_waiting_git_check()
+            : gitVersion === null
+              ? m.onboarding_install_git_to_continue()
+              : undefined;
+
   return (
     <div
       className={`home flex-1 min-h-0 overflow-y-auto [scrollbar-gutter:stable_both-edges] bg-background onboarding ${
@@ -361,26 +403,6 @@ export function Onboarding({
           : "[&_.home-inner]:max-w-140 [&_.home-inner]:pt-24"
         }`}
     >
-      {acpDialogOpen && <AcpHarnessDialog
-        onClose={() => setAcpDialogOpen(false)}
-        onSaved={(definition) => {
-          addedAcpHarness.current = definition.id;
-          load(true, true);
-        }}
-      />}
-      {authHarness && <AcpAuthDialog remote={remote} harness={authHarness} onClose={() => setAuthHarness(null)} onReady={(ready) => setPreferredHarness(ready.id)} />}
-      {!remote && setupHarness && setupCommands.data && (
-        <HarnessSetupDialog
-          harness={setupHarness}
-          commands={setupCommands.data[setupHarness.id]}
-          onReady={(ready) => {
-            setPreferredHarness(ready.id);
-          }}
-          onClose={() => {
-            setSetupHarness(null);
-          }}
-        />
-      )}
       <div
         className={`home-inner max-w-155 my-0 mx-auto ${
           step === 0 ? "px-8 sm:px-12" : "pt-12 px-6 pb-16"
@@ -446,8 +468,8 @@ export function Onboarding({
                     selected={preferredHarness === h.id}
                     onSelect={() => { addedAcpHarness.current = null; setPreferredHarness(h.id); }}
                     commands={setupCommands.data?.[h.id]}
-                    onSetup={() => setSetupHarness(h)}
-                    onAuth={() => setAuthHarness(h)}
+                    onSetup={() => openSetup(h)}
+                    onAuth={() => openAuth(h)}
                   />
                 ))
               ) : harnessError ? (
@@ -458,7 +480,7 @@ export function Onboarding({
                   <Spinner /> {m.onboarding_detecting_claude_code_codex_open_code()}
                 </LoadingRow>
               )}
-              <Button variant="ghost" className="self-start" onClick={() => setAcpDialogOpen(true)} aria-haspopup="dialog"><Plus size={14} />{m.acp_add()}</Button>
+              <Button variant="ghost" className="self-start" onClick={() => openAcp()} aria-haspopup="dialog"><Plus size={14} />{m.acp_add()}</Button>
             </div>
             {setupCommands.isError && <p className={ONB_CARD_META_CLASS_NAME}>
               {m.harness_setup_load_failed()} <Button variant="ghost" onClick={() => void setupCommands.refetch()}>{m.app_retry()}</Button>
@@ -474,25 +496,12 @@ export function Onboarding({
               <Button variant="primary"
                 onClick={() => setStep(2)}
                 disabled={checking || !anyAgentReady || preferredHarness === null || !gitReady}
-                title={
-                  checking || (!anyAgentReady && anyPending)
-                    ? m.onboarding_waiting_tool_checks()
-                    : !anyAgentReady
-                      ? m.onboarding_sign_in_agent_to_continue()
-                      : preferredHarness === null
-                        ? m.onboarding_choose_preferred_agent()
-                        : gitError
-                          ? m.onboarding_recheck_git_to_continue()
-                          : gitVersion === undefined
-                            ? m.onboarding_waiting_git_check()
-                            : gitVersion === null
-                              ? m.onboarding_install_git_to_continue()
-                              : undefined
-                }
+                aria-describedby={continueHint ? "onboarding-continue-hint" : undefined}
               >
                 {m.onboarding_continue()} <ArrowRight size={14} />
               </Button>
             </div>
+            {continueHint && <p id="onboarding-continue-hint" className="text-sm text-subtext">{continueHint}</p>}
           </>
         ) : (
           <>
@@ -762,10 +771,12 @@ function AgentCard({
         </span>
       </span>
       {showSetupAction ? (
-        <Button size="small" onClick={onSetup} disabled={!commands} aria-haspopup="dialog" title={m.harness_setup_opens_terminal()}>
-          <Terminal size={14} />
-          {h.adapterMissing ? m.acp_install_adapter() : !h.installed || h.installBroken ? m.harness_setup_install() : h.authState === "unsupported" ? m.harness_setup_update() : m.harness_setup_login()}
-        </Button>
+        <Tooltip interactive content={m.harness_setup_opens_terminal()} className="rounded-sm">
+          <Button size="small" onClick={onSetup} disabled={!commands} aria-haspopup="dialog" aria-description={m.harness_setup_opens_terminal()}>
+            <Terminal size={14} />
+            {h.adapterMissing ? m.acp_install_adapter() : !h.installed || h.installBroken ? m.harness_setup_install() : h.authState === "unsupported" ? m.harness_setup_update() : m.harness_setup_login()}
+          </Button>
+        </Tooltip>
       ) : h.id.startsWith("acp:") && !h.agentReady && !h.catalogPending ? (
         <Button variant="ghost" size="small" onClick={onAuth} aria-haspopup="dialog">
           <StatusIndicator tone={visibleBadge.tone}>{visibleBadge.label}</StatusIndicator>

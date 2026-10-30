@@ -23,8 +23,10 @@ export function Tooltip({
     const anchor = trigger.getBoundingClientRect();
     const bounds = tooltip.getBoundingClientRect();
     const left = Math.max(8, Math.min(anchor.left + anchor.width / 2 - bounds.width / 2, window.innerWidth - bounds.width - 8));
+    const above = anchor.top - bounds.height - 6;
+    const top = above >= 8 ? above : anchor.bottom + 6;
     tooltip.style.left = `${left}px`;
-    tooltip.style.top = `${Math.max(8, anchor.top - bounds.height - 6)}px`;
+    tooltip.style.top = `${Math.max(8, Math.min(top, window.innerHeight - bounds.height - 8))}px`;
   }
 
   function hide() {
@@ -46,12 +48,14 @@ export function Tooltip({
     <span
       ref={triggerRef}
       className={cn(
-        "group relative inline-flex cursor-help rounded-full outline-none focus-visible:outline-2 focus-visible:outline-solid focus-visible:outline-focus focus-visible:outline-offset-2",
+        "group relative inline-flex rounded-full outline-none focus-visible:outline-2 focus-visible:outline-solid focus-visible:outline-focus focus-visible:outline-offset-2",
+        !interactive && "cursor-help",
         className,
       )}
       tabIndex={interactive ? undefined : 0}
       role={interactive ? undefined : "img"}
       aria-label={interactive ? undefined : content}
+      onPointerDown={() => tooltipRef.current?.hidePopover()}
       onMouseEnter={show}
       onMouseLeave={hide}
       onFocus={(event) => {

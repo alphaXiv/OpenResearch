@@ -1,0 +1,369 @@
+name: Canary desktop release
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: canary-desktop
+  cancel-in-progress: false
+  queue: max
+
+jobs:
+  identity:
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-24.04
+    outputs:
+      tag: ${{ steps.identity.outputs.tag }}
+      version: ${{ steps.identity.outputs.version }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - id: identity
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          gh api --paginate --slurp "repos/$GITHUB_REPOSITORY/releases?per_page=100" | jq '[.[][] | .tag_name]' > releases.json
+          if jq -e 'index("canary") != null' releases.json > /dev/null; then
+            release_id=$(gh api "repos/$GITHUB_REPOSITORY/releases/tags/canary" --jq .id)
+            gh api --paginate --slurp "repos/$GITHUB_REPOSITORY/releases/$release_id/assets?per_page=100" | jq '[.[][].name]' > assets.json
+          else
+            printf '[]\n' > assets.json
+          fi
+          jq -s '.[0] + .[1]' releases.json assets.json > identities.json
+          tag=$(node scripts/canary-tag.mjs "$(date -u +%Y%m%d)" < identities.json)
+          version=$(grep -m1 '^version = ' Cargo.toml | sed -E 's/version = "(.*)"/\1/')
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+
+  ci:
+    needs: [identity, ui]
+    uses: ./.github/workflows/ci.yml
+    with:
+      plan: '{}'
+      source-sha: ${{ github.sha }}
+      release: true
+
+  ui:
+    needs: identity
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - uses: pnpm/setup@v1
+        with:
+          package-json-file: ui/package.json
+          install: false
+      - run: pnpm install --frozen-lockfile && pnpm build
+        working-directory: ui
+      - uses: actions/upload-artifact@v4
+        with:
+          name: release-ui
+          path: ui/dist
+          if-no-files-found: error
+
+  macos:
+    needs: [identity, ci, ui]
+    if: vars.MACOS_SIGNING_ENABLED == 'true'
+    runs-on: macos-14
+    timeout-minutes: 45
+    environment: release-signing
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c
+        with:
+          name: release-ui
+          path: ui/dist
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
+        with:
+          node-version: '22'
+      - run: rustup target add aarch64-apple-darwin x86_64-apple-darwin
+      - uses: ./.github/actions/macos-signing
+        with:
+          cert-p12-base64: ${{ secrets.MACOS_CERT_P12_BASE64 }}
+          cert-password: ${{ secrets.MACOS_CERT_PASSWORD }}
+          notary-apple-id: ${{ secrets.MACOS_NOTARY_APPLE_ID }}
+          notary-team-id: ${{ secrets.MACOS_NOTARY_TEAM_ID }}
+          notary-password: ${{ secrets.MACOS_NOTARY_PASSWORD }}
+      - name: Build and sign app
+        env:
+          ORX_OFFICIAL_RELEASE_BUILD: '1'
+          ORX_APP_UNIVERSAL: '1'
+          ORX_DESKTOP_CANARY_TAG: ${{ needs.identity.outputs.tag }}
+          ORX_DESKTOP_CANARY_SHA: ${{ github.sha }}
+          MACOS_SIGN_IDENTITY: ${{ secrets.MACOS_SIGN_IDENTITY }}
+          MACOS_NOTARY_PROFILE: orx-notary
+        run: |
+          bash scripts/build-macos-app.sh
+          test "$(dist/OpenResearch.app/Contents/MacOS/OpenResearch --no-telemetry version --build-channel)" = production
+          test "$(dist/OpenResearch.app/Contents/MacOS/OpenResearch --no-telemetry version --build-id)" = "$ORX_DESKTOP_CANARY_TAG"
+          bash scripts/package-macos-app.sh
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: canary-macos
+          path: dist/OpenResearch.dmg
+          if-no-files-found: error
+
+  linux:
+    needs: [identity, ci, ui]
+    if: vars.LINUX_APP_ENABLED == 'true'
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: x86_64
+            runner: ubuntu-22.04
+          - arch: aarch64
+            runner: ubuntu-22.04-arm
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - uses: actions/download-artifact@v4
+        with:
+          name: release-ui
+          path: ui/dist
+      - run: |
+          sudo apt-get update
+          sudo apt-get install -y libwebkit2gtk-4.1-dev libgtk-3-dev librsvg2-dev file patchelf xvfb xdotool
+      - name: Build app
+        env:
+          ORX_OFFICIAL_RELEASE_BUILD: '1'
+          ORX_DESKTOP_CANARY_TAG: ${{ needs.identity.outputs.tag }}
+          ORX_DESKTOP_CANARY_SHA: ${{ github.sha }}
+        run: |
+          cargo build --release --locked --features desktop
+          test "$(target/release/orx --no-telemetry version --build-channel)" = production
+          test "$(target/release/orx --no-telemetry version --build-id)" = "$ORX_DESKTOP_CANARY_TAG"
+          scripts/build-linux-appimage.sh target/release/orx app-dist
+          sudo apt-get remove -y libwebkit2gtk-4.1-0 libjavascriptcoregtk-4.1-0
+          scripts/smoke-test-linux-appimage.sh app-dist/OpenResearch-${{ matrix.arch }}.AppImage
+      - uses: actions/upload-artifact@v4
+        with:
+          name: canary-linux-${{ matrix.arch }}
+          path: app-dist/OpenResearch-${{ matrix.arch }}.AppImage
+          if-no-files-found: error
+
+  windows:
+    needs: [identity, ci, ui]
+    if: vars.WINDOWS_APP_ENABLED == 'true'
+    runs-on: windows-latest
+    timeout-minutes: 45
+    environment: release-signing
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c
+        with:
+          name: release-ui
+          path: ui/dist
+      - name: Build app
+        env:
+          ORX_OFFICIAL_RELEASE_BUILD: '1'
+          ORX_DESKTOP_CANARY_TAG: ${{ needs.identity.outputs.tag }}
+          ORX_DESKTOP_CANARY_SHA: ${{ github.sha }}
+        run: |
+          cargo build --release --locked
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
+          cargo build --release --locked --manifest-path windows/launcher/Cargo.toml
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
+          New-Item -ItemType Directory -Force app-staging, app-dist | Out-Null
+          Copy-Item target/release/orx.exe app-staging/orx.exe
+          Copy-Item windows/launcher/target/release/OpenResearch.exe app-staging/OpenResearch.exe
+          if ((& app-staging/orx.exe --no-telemetry version --build-channel) -ne 'production') { throw 'Not a production build' }
+          if ((& app-staging/orx.exe --no-telemetry version --build-id) -ne $env:ORX_DESKTOP_CANARY_TAG) { throw 'Incorrect canary build identity' }
+      - uses: Azure/login@a641126d1b8aa4d1fa005f4f92df94a3a4c4c906
+        with:
+          client-id: ${{ vars.WINDOWS_SIGNING_CLIENT_ID }}
+          tenant-id: ${{ vars.WINDOWS_SIGNING_TENANT_ID }}
+          subscription-id: ${{ vars.WINDOWS_SIGNING_SUBSCRIPTION_ID }}
+      - name: Sign the app
+        uses: ./.github/actions/windows-signing
+        with:
+          files: |
+            ${{ github.workspace }}\app-staging\OpenResearch.exe
+            ${{ github.workspace }}\app-staging\orx.exe
+          endpoint: ${{ vars.WINDOWS_SIGNING_ENDPOINT }}
+          account: ${{ vars.WINDOWS_SIGNING_ACCOUNT }}
+          profile: ${{ vars.WINDOWS_SIGNING_PROFILE }}
+      - name: Package the installer
+        env:
+          VERSION: ${{ needs.identity.outputs.version }}
+        run: |
+          Copy-Item app-staging/orx.exe app-dist/OpenResearch-Canary-orx.exe
+          & "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe" "/DAppVersion=$env:VERSION" "/DSourceDir=$PWD\app-staging" "/DOutputDir=$PWD\app-dist" windows\OpenResearch.iss
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
+      - name: Sign the installer
+        uses: ./.github/actions/windows-signing
+        with:
+          files: ${{ github.workspace }}\app-dist\OpenResearch-Setup.exe
+          endpoint: ${{ vars.WINDOWS_SIGNING_ENDPOINT }}
+          account: ${{ vars.WINDOWS_SIGNING_ACCOUNT }}
+          profile: ${{ vars.WINDOWS_SIGNING_PROFILE }}
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: canary-windows
+          path: app-dist/OpenResearch-*.exe
+          if-no-files-found: error
+
+  publish:
+    needs: [identity, ci, ui, macos, linux, windows]
+    if: '!cancelled() && needs.identity.result == ''success'' && needs.ci.result == ''success'' && needs.ui.result == ''success'' && (needs.macos.result == ''success'' || needs.macos.result == ''skipped'') && (needs.linux.result == ''success'' || needs.linux.result == ''skipped'') && (needs.windows.result == ''success'' || needs.windows.result == ''skipped'') && (needs.macos.result == ''success'' || needs.linux.result == ''success'' || needs.windows.result == ''success'')'
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    env:
+      GH_TOKEN: ${{ github.token }}
+      TAG: ${{ needs.identity.outputs.tag }}
+      VERSION: ${{ needs.identity.outputs.version }}
+      SOURCE_SHA: ${{ github.sha }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+          fetch-depth: 0
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: canary-macos
+          path: artifacts
+          merge-multiple: true
+        if: needs.macos.result == 'success'
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: canary-linux-*
+          path: artifacts
+          merge-multiple: true
+        if: needs.linux.result == 'success'
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: canary-windows
+          path: artifacts
+          merge-multiple: true
+        if: needs.windows.result == 'success'
+      - name: Publish canary
+        run: |
+          set -euo pipefail
+          if ! gh release view canary --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            gh release create canary --repo "$GITHUB_REPOSITORY" --target "$SOURCE_SHA" --prerelease --latest=false --title Canary --notes 'Latest desktop canary builds.'
+          fi
+          release_id=$(gh api "repos/$GITHUB_REPOSITORY/releases/tags/canary" --jq .id)
+          existing=$(gh api --paginate --slurp "repos/$GITHUB_REPOSITORY/releases/$release_id/assets?per_page=100" | jq -r '.[][].name')
+          pointer=desktop-canary-v2.json
+          if ! grep -Fxq "$pointer" <<< "$existing"; then
+            pointer=desktop-canary.json
+          fi
+          if grep -Fxq "$pointer" <<< "$existing"; then
+            mkdir -p "$RUNNER_TEMP/previous-canary"
+            gh release download canary --repo "$GITHUB_REPOSITORY" --pattern "$pointer" --dir "$RUNNER_TEMP/previous-canary"
+            previous=$(jq -er '.commit | select(type == "string" and test("^[0-9a-f]{40}$"))' "$RUNNER_TEMP/previous-canary/$pointer")
+            if git merge-base --is-ancestor "$previous" "$SOURCE_SHA"; then
+              :
+            else
+              result=$?
+              if [ "$result" -eq 1 ]; then
+                echo "Keeping the newer canary from $previous."
+                exit 0
+              fi
+              exit "$result"
+            fi
+          fi
+          canary_commit=$(gh api "repos/$GITHUB_REPOSITORY/commits/canary" --jq .sha)
+          git merge-base --is-ancestor "$canary_commit" "$SOURCE_SHA"
+          git rev-list "$SOURCE_SHA" > "$RUNNER_TEMP/canary-ancestry.txt"
+
+          # Existing clients use the version tag as the asset release. Leave one
+          # compatibility release and pointer until those clients have updated.
+          if ! grep -Fxq desktop-canary-v2.json <<< "$existing"; then
+            for asset in OpenResearch.dmg OpenResearch-Canary-orx.exe OpenResearch-x86_64.AppImage OpenResearch-aarch64.AppImage; do
+              if [ ! -f "artifacts/$asset" ]; then
+                echo "::error::The compatibility build needs every desktop platform; missing $asset."
+                exit 1
+              fi
+            done
+            if gh release view "$TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+              test "$(gh api "repos/$GITHUB_REPOSITORY/commits/$TAG" --jq .sha)" = "$SOURCE_SHA"
+              legacy_assets=$(gh release view "$TAG" --repo "$GITHUB_REPOSITORY" --json assets --jq '.assets[].name')
+              for asset in artifacts/OpenResearch*; do
+                if ! grep -Fxq "${asset##*/}" <<< "$legacy_assets"; then
+                  gh release upload "$TAG" "$asset" --repo "$GITHUB_REPOSITORY"
+                fi
+              done
+            else
+              gh release create "$TAG" artifacts/OpenResearch* --repo "$GITHUB_REPOSITORY" --target "$SOURCE_SHA" --prerelease --latest=false --title "$TAG" --notes "Compatibility build: $SOURCE_SHA"
+            fi
+            test "$(gh api "repos/$GITHUB_REPOSITORY/commits/$TAG" --jq .sha)" = "$SOURCE_SHA"
+            mkdir -p "$RUNNER_TEMP/legacy-canary"
+            gh release download "$TAG" --repo "$GITHUB_REPOSITORY" --pattern 'OpenResearch*' --dir "$RUNNER_TEMP/legacy-canary"
+            node scripts/canary-manifest.mjs "$RUNNER_TEMP/legacy-canary" "$VERSION" "$TAG" "$SOURCE_SHA" "$RUNNER_TEMP/canary-ancestry.txt" > artifacts/desktop-canary.json
+            gh release upload canary artifacts/desktop-canary.json --repo "$GITHUB_REPOSITORY" --clobber
+          fi
+
+          mkdir -p "$RUNNER_TEMP/shared-canary" "$RUNNER_TEMP/published-canary"
+          for asset in artifacts/OpenResearch*; do
+            name="$TAG--${asset##*/}"
+            if ! grep -Fxq "$name" <<< "$existing"; then
+              cp "$asset" "$RUNNER_TEMP/shared-canary/$name"
+              gh release upload canary "$RUNNER_TEMP/shared-canary/$name" --repo "$GITHUB_REPOSITORY"
+            fi
+          done
+          gh release download canary --repo "$GITHUB_REPOSITORY" --pattern "$TAG--OpenResearch*" --dir "$RUNNER_TEMP/published-canary"
+          node scripts/canary-manifest.mjs "$RUNNER_TEMP/published-canary" "$VERSION" "$TAG" "$SOURCE_SHA" "$RUNNER_TEMP/canary-ancestry.txt" shared > artifacts/desktop-canary-v2.json
+          gh release upload canary artifacts/desktop-canary-v2.json --repo "$GITHUB_REPOSITORY" --clobber
+          printf 'Latest build: %s\nCommit: %s\n' "$TAG" "$SOURCE_SHA" > "$RUNNER_TEMP/canary-notes.txt"
+          gh release edit canary --repo "$GITHUB_REPOSITORY" --title Canary --notes-file "$RUNNER_TEMP/canary-notes.txt"
+          if ! gh api -X PATCH "repos/$GITHUB_REPOSITORY/git/refs/tags/canary" -f sha="$SOURCE_SHA" -F force=false > /dev/null; then
+            echo '::warning::Could not move the Canary tag; the manifest and release notes identify the latest build.'
+          fi
+      - name: Retain seven canary builds
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/canary-retention"
+          gh release download canary --repo "$GITHUB_REPOSITORY" --pattern 'desktop-canary*.json' --dir "$RUNNER_TEMP/canary-retention"
+          legacy=$(jq -er '.tag' "$RUNNER_TEMP/canary-retention/desktop-canary.json")
+          latest=$(jq -er '.tag' "$RUNNER_TEMP/canary-retention/desktop-canary-v2.json")
+          release_id=$(gh api "repos/$GITHUB_REPOSITORY/releases/tags/canary" --jq .id)
+          gh api --paginate --slurp "repos/$GITHUB_REPOSITORY/releases/$release_id/assets?per_page=100" | jq '{assets: [.[][]]}' > "$RUNNER_TEMP/canary-retention/assets.json"
+          jq -r --arg latest "$latest" '
+            [.assets[] | select(.name | test("^canary-[0-9]{8}\\.[0-9]+--OpenResearch"))
+             | {id, tag: (.name | capture("^(?<tag>canary-[0-9]{8}\\.[0-9]+)--").tag)}]
+            | group_by(.tag)
+            | sort_by(.[0].tag | capture("^canary-(?<date>[0-9]{8})\\.(?<sequence>[0-9]+)$") | [.date, (.sequence | tonumber)])
+            | reverse | if any(.[]; .[0].tag == $latest) then map(select(.[0].tag != $latest)) | .[6:] else .[7:] end
+            | .[] | .[].id
+          ' "$RUNNER_TEMP/canary-retention/assets.json" > "$RUNNER_TEMP/canary-retention/obsolete-assets.txt"
+          while IFS= read -r id; do
+            gh api -X DELETE "repos/$GITHUB_REPOSITORY/releases/assets/$id" > /dev/null
+          done < "$RUNNER_TEMP/canary-retention/obsolete-assets.txt"
+          builds=$(jq '[.assets[].name | select(test("^canary-[0-9]{8}\\.[0-9]+--OpenResearch")) | capture("^(?<tag>canary-[0-9]{8}\\.[0-9]+)--").tag] | unique | length' "$RUNNER_TEMP/canary-retention/assets.json")
+          if [ "$builds" -ge 7 ]; then
+            gh api --paginate --slurp "repos/$GITHUB_REPOSITORY/releases?per_page=100" | jq -r --arg legacy "$legacy" '
+              .[][] | select(.draft == false and .prerelease == true and .tag_name != $legacy and (.tag_name | test("^canary-[0-9]{8}\\.[0-9]+$"))) | .tag_name
+            ' > "$RUNNER_TEMP/canary-retention/obsolete-releases.txt"
+            while IFS= read -r tag; do
+              gh release delete "$tag" --repo "$GITHUB_REPOSITORY" --yes --cleanup-tag
+            done < "$RUNNER_TEMP/canary-retention/obsolete-releases.txt"
+          fi

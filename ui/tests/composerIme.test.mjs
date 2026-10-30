@@ -1,3 +1,4 @@
+import { matchesKeyboardEvent } from "@tanstack/react-hotkeys";
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import test from "node:test";
@@ -25,11 +26,12 @@ function textareaCallback(editor, name) {
   return callback.getText(source);
 }
 
-function composer(editor, overrides = {}) {
+function composer(editor, overrides = {}, platform = "mac") {
   const calls = [];
   let stopped = false;
   const record = name => (...args) => calls.push([name, ...args]);
   const bindings = {
+    matchesKeyboardEvent: (event, hotkey) => matchesKeyboardEvent(event, hotkey, platform),
     composingRef: { current: false }, skillMenuOpen: false, mentionMenuOpen: false, bashMode: false,
     activeSkillIdx: 0, selectableSkillIndices: [0], skillMatches: ["skill"], activeMentionIdx: 0, mentionMatches: ["file"], mentionQuery: "file",
     setSkillIdx: record("skillIndex"), pickSkill: record("skill"), setMentionIdx: record("mentionIndex"),
@@ -47,7 +49,7 @@ function composer(editor, overrides = {}) {
       stopped = false;
       keydown({ key, shiftKey: false, metaKey: false, ctrlKey: false, ...modifiers,
         stopPropagation: () => { stopped = true; },
-        nativeEvent: { isComposing: false, keyCode: 13, ...nativeEvent }, preventDefault: record("preventDefault") });
+        nativeEvent: { key, shiftKey: false, metaKey: false, ctrlKey: false, altKey: false, ...modifiers, isComposing: false, keyCode: 13, ...nativeEvent }, preventDefault: record("preventDefault") });
     },
   };
 }
@@ -107,7 +109,7 @@ for (const menu of ["skillMenuOpen", "mentionMenuOpen"]) {
 
 for (const modifier of ["metaKey", "ctrlKey"]) {
   test(`${modifier}+Enter still queues outside composition`, () => {
-    const input = composer(false);
+    const input = composer(false, {}, modifier === "metaKey" ? "mac" : "windows");
     input.press("Enter", {}, { [modifier]: true });
     assert.deepEqual(input.calls, [["preventDefault"], ["send", { queue: true }]]);
   });
@@ -166,6 +168,7 @@ test("Enter on typed unsupported compact and its alias silently does nothing", a
   for (const draft of ["/compact", "/summarize"]) {
     const calls = [];
     const bindings = {
+    matchesKeyboardEvent: (event, hotkey) => matchesKeyboardEvent(event, hotkey, platform),
       draft, planActivation: null, goalArmed: false, parseComposerCommand, takesArgument,
       setDraft: () => {}, setSkillMenuDismissed: () => {},
       activeId: "saved-chat", activeHarness: { supportsCompaction: false },
@@ -199,6 +202,7 @@ test("activating Goal removes its token without moving the caret behind newly ty
   const textarea = { value: "/goal", focus: () => calls.push("focus"),
     setSelectionRange: (...range) => calls.push(range) };
   const bindings = {
+    matchesKeyboardEvent: (event, hotkey) => matchesKeyboardEvent(event, hotkey, platform),
     removeSlashCommand, composerRef: { current: textarea },
     setDraft: (text) => { textarea.value = text; },
     setSkillMenuDismissed: () => {},
@@ -219,7 +223,7 @@ test("activating Goal removes its token without moving the caret behind newly ty
 test("ACP Plan configuration failure keeps the draft and prevents sending", async () => {
   let configure;
   function find(node) {
-    if (ts.isIfStatement(node) && node.expression.getText(file) === "planRequested && acpMode") configure = node;
+    if (ts.isIfStatement(node) && node.expression.getText(file) === "planRequested && acpMode && !retry") configure = node;
     ts.forEachChild(node, find);
   }
   find(file);
@@ -227,7 +231,8 @@ test("ACP Plan configuration failure keeps the draft and prevents sending", asyn
   for (const succeeds of [false, true]) {
     const calls = [];
     const bindings = {
-      planRequested: true, acpMode: {}, toggledPlanMode: true,
+    matchesKeyboardEvent: (event, hotkey) => matchesKeyboardEvent(event, hotkey, platform),
+      planRequested: true, acpMode: {}, retry: null, toggledPlanMode: true,
       setIndependentPlanMode: async () => { if (!succeeds) throw new Error("disconnected"); },
       inSourceScope: () => true,
       setSettingsError: error => calls.push(error),
@@ -253,6 +258,7 @@ test("unsupported compaction silently skips the agent turn", async () => {
   for (const [supportsCompaction, activeId] of [[false, null], [false, "saved-chat"], [true, "saved-chat"]]) {
     const calls = [];
     const bindings = {
+    matchesKeyboardEvent: (event, hotkey) => matchesKeyboardEvent(event, hotkey, platform),
       activeId, activeHarness: { supportsCompaction }, busy: false,
       m: { chat_nothing_to_compact: () => "nothing to compact" },
       showAlert: (message) => calls.push(message),

@@ -560,8 +560,24 @@ fn parse_custom_provider(raw: &str) -> Option<CustomProvider> {
 /// resolved — codex needs to find its `codex-code-mode-host` helper next to the
 /// real binary.
 fn codex_candidates() -> Vec<PathBuf> {
-    let drops = dirs::home_dir()
-        .map(|home| home.join(".local").join("bin"))
+    let drops = codex_install_dirs(dirs::home_dir().as_deref())
+        .into_iter()
+        .filter_map(|dir| crate::local::shell_env::find_in_dir(&dir, "codex"));
+    find_on_path("codex")
+        .into_iter()
+        .chain(drops)
+        .map(resolve_symlinks)
+        .collect()
+}
+
+/// Installer locations off PATH. ChatGPT.app bundles the Codex CLI without
+/// putting it on PATH, sometimes as the only install.
+fn codex_install_dirs(home: Option<&Path>) -> Vec<PathBuf> {
+    let chatgpt_apps = [
+        Some(PathBuf::from("/Applications")),
+        home.map(|home| home.join("Applications")),
+    ];
+    home.map(|home| home.join(".local").join("bin"))
         .into_iter()
         .chain(
             cfg!(windows)
@@ -569,11 +585,13 @@ fn codex_candidates() -> Vec<PathBuf> {
                 .flatten()
                 .map(|dir| dir.join("Programs/OpenAI/Codex/bin")),
         )
-        .filter_map(|dir| crate::local::shell_env::find_in_dir(&dir, "codex"));
-    find_on_path("codex")
-        .into_iter()
-        .chain(drops)
-        .map(resolve_symlinks)
+        .chain(
+            chatgpt_apps
+                .into_iter()
+                .flatten()
+                .filter(|_| cfg!(target_os = "macos"))
+                .map(|apps| apps.join("ChatGPT.app/Contents/Resources/codex-cli/bin")),
+        )
         .collect()
 }
 
@@ -710,6 +728,15 @@ fn exec_line_agent_message(line: &str) -> Option<String> {
     }
 }
 
+fn codex_plan_label(plan: &str) -> String {
+    match plan {
+        "prolite" => "Pro 100".into(),
+        "pro" => "Pro 200".into(),
+        "promax" => "Pro 500".into(),
+        _ => title_case(plan),
+    }
+}
+
 impl Codex {
     /// `snapshot` skips the `model/list` handshake and leaves the catalog empty;
     /// a
@@ -751,8 +778,9 @@ impl Codex {
                 info.authenticated = true;
                 info.auth_method = Some("oauth");
                 info.account = nonempty_str(&claims, "email");
+                info.account_name = nonempty_str(&claims, "name");
                 if let Some(oa) = claims.get("https://api.openai.com/auth") {
-                    info.plan = nonempty_str(oa, "chatgpt_plan_type").map(|p| title_case(&p));
+                    info.plan = nonempty_str(oa, "chatgpt_plan_type").map(|p| codex_plan_label(&p));
                 }
             }
         }
@@ -1216,6 +1244,16 @@ impl Harness for Codex {
 
     fn config_home(&self) -> Option<PathBuf> {
         Some(native_store::codex_home(NativeStore::Legacy))
+    }
+
+    fn native_skill_roots(&self) -> Vec<PathBuf> {
+        [
+            dirs::home_dir().map(|home| home.join(".agents/skills")),
+            self.config_home().map(|home| home.join("skills")),
+        ]
+        .into_iter()
+        .flatten()
+        .collect()
     }
 
     fn skill_target(&self) -> Option<PathBuf> {
@@ -3741,7 +3779,7 @@ async fn steer_turn(
         )
         .await;
     match answered {
-        Ok(Ok(_)) => ctx.record_steer(&steer.display),
+        Ok(Ok(_)) => ctx.record_steer(&steer, true),
         Ok(Err(_)) => {
             if let Err(error) = ctx.host.park_steer(&ctx.session_id, steer) {
                 ctx.push_error(format!("Could not preserve steering message: {error}"));
@@ -3750,10 +3788,8 @@ async fn steer_turn(
         Err(e) => {
             // Record it anyway: the composer is already cleared, so this is
             // the only copy of what the user typed.
-            ctx.record_steer(&steer.display);
-            ctx.push_error(format!(
-                "codex did not confirm the steering message ({e}) — send it again if the turn ignores it"
-            ));
+            ctx.record_steer(&steer, false);
+            ctx.push_error(format!("codex did not confirm the steering message ({e})"));
         }
     }
 }
@@ -4324,6 +4360,14 @@ fn handle_item(ctx: &mut TurnCtx, item: &Value, next_id: &mut impl FnMut(&str) -
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn chatgpt_plan_labels_distinguish_pro_tiers() {
+        assert_eq!(super::codex_plan_label("plus"), "Plus");
+        assert_eq!(super::codex_plan_label("prolite"), "Pro 100");
+        assert_eq!(super::codex_plan_label("pro"), "Pro 200");
+        assert_eq!(super::codex_plan_label("promax"), "Pro 500");
+    }
+
     #[cfg(unix)]
     #[tokio::test]
     async fn compaction_restores_the_saved_thread_once_without_a_user_turn() {
@@ -4458,6 +4502,26 @@ mod tests {
     use super::super::options::REASONING_DEFAULT_ID;
     use super::*;
     use serde_json::json;
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn chatgpt_app_bundled_codex_is_an_install_candidate() {
+        let home = std::env::temp_dir().join(format!("orx-chatgpt-test-{}", uuid::Uuid::new_v4()));
+        let bin = home.join("Applications/ChatGPT.app/Contents/Resources/codex-cli/bin");
+        std::fs::create_dir_all(&bin).unwrap();
+        std::fs::write(bin.join("codex"), "").unwrap();
+
+        let dirs = codex_install_dirs(Some(&home));
+        assert!(dirs.contains(&PathBuf::from(
+            "/Applications/ChatGPT.app/Contents/Resources/codex-cli/bin"
+        )));
+        let found: Vec<_> = dirs
+            .iter()
+            .filter_map(|dir| crate::local::shell_env::find_in_dir(dir, "codex"))
+            .collect();
+        assert!(found.contains(&bin.join("codex")));
+        std::fs::remove_dir_all(&home).unwrap();
+    }
 
     #[test]
     fn plugin_skills_follow_enabled_installs_and_manifest_paths() {

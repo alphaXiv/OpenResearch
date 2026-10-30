@@ -1,3 +1,5 @@
+import { formatForDisplay, type Hotkey } from "@tanstack/react-hotkeys";
+import { appHotkeys } from "../hotkeys";
 import { m } from "../paraglide/messages.js";
 import { X } from "lucide-react";
 
@@ -14,6 +16,7 @@ export function ClosableTab({
   shimmer = false,
   preview = false,
   onSelect,
+  shortcut,
   onPromote,
   onClose,
 }: {
@@ -26,16 +29,29 @@ export function ClosableTab({
   /** Temporarily opened content: italic, and the next preview replaces it. */
   preview?: boolean;
   onSelect: () => void;
+  shortcut?: Hotkey | null;
   /** Keep the preview open so the next preview opens beside it. */
   onPromote?: () => void;
   onClose: () => void;
 }) {
+  const title = preview ? m.tab_preview_title({ label, shortcut: formatForDisplay(appHotkeys["tab.keepOpen"].hotkey ?? []) }) : label;
+
   return (
     <button
-      className={`tab [&.closable]:max-w-60 [&.closable]:pe-1.5 [&_.tab-label]:grid [&_.tab-label]:grid-cols-[minmax(0,_1fr)] [&_.tab-label]:min-w-0 [&_.tab-label]:overflow-hidden [&_.tab-label_>_span]:[grid-area:1_/_1] [&_.tab-label_>_span]:overflow-hidden [&_.tab-label_>_span]:text-ellipsis [&_.tab-label_>_span]:whitespace-nowrap [&_.tab-label::after]:[grid-area:1_/_1] [&_.tab-label::after]:overflow-hidden [&_.tab-label::after]:text-ellipsis [&_.tab-label::after]:whitespace-nowrap [&_.tab-label::after]:content-[attr(data-label)] [&_.tab-label::after]:invisible [&_.tab-label::after]:font-medium [&_.tab-close]:inline-flex [&_.tab-close]:items-center [&_.tab-close]:justify-center [&_.tab-close]:size-5 [&_.tab-close]:rounded-sm [&_.tab-close]:text-muted [&_.tab-close]:shrink-0 [&_.tab-close:hover]:bg-hover-strong [&_.tab-close:hover]:text-text relative inline-flex items-center gap-1 h-8 py-0 px-2 border border-transparent border-b-0 rounded-[var(--radius-md)_var(--radius-md)_0_0] text-sm font-normal text-subtext whitespace-nowrap select-none min-w-0 [&:hover]:bg-surface [&:hover]:text-text [&:not(.active)_+_.tab:not(.active)::before]:content-[''] [&:not(.active)_+_.tab:not(.active)::before]:absolute [&:not(.active)_+_.tab:not(.active)::before]:top-2.5 [&:not(.active)_+_.tab:not(.active)::before]:bottom-2.5 [&:not(.active)_+_.tab:not(.active)::before]:-start-px [&:not(.active)_+_.tab:not(.active)::before]:w-px [&:not(.active)_+_.tab:not(.active)::before]:bg-border [&.active]:border-border [&.active]:bg-background [&.active]:text-text [&.active]:font-medium [&.active::after]:content-[''] [&.active::after]:absolute [&.active::after]:end-0 [&.active::after]:-bottom-px [&.active::after]:start-0 [&.active::after]:h-px [&.active::after]:bg-background closable ${active ? "active" : ""} ${preview ? PREVIEW_CLASS_NAME : ""}`}
+      id={active ? "active-workspace-tab" : undefined}
+      data-keyboard-horizontal-item
+      className={`tab [&.closable]:max-w-60 [&.closable]:pe-1.5 [&_.tab-label]:grid [&_.tab-label]:grid-cols-[minmax(0,_1fr)] [&_.tab-label]:min-w-0 [&_.tab-label]:overflow-hidden [&_.tab-label_>_span]:[grid-area:1_/_1] [&_.tab-label_>_span]:overflow-hidden [&_.tab-label_>_span]:text-ellipsis [&_.tab-label_>_span]:whitespace-nowrap [&_.tab-label::after]:[grid-area:1_/_1] [&_.tab-label::after]:overflow-hidden [&_.tab-label::after]:text-ellipsis [&_.tab-label::after]:whitespace-nowrap [&_.tab-label::after]:content-[attr(data-label)] [&_.tab-label::after]:invisible [&_.tab-label::after]:font-medium [&_.tab-close]:inline-flex [&_.tab-close]:items-center [&_.tab-close]:justify-center [&_.tab-close]:size-5 [&_.tab-close]:rounded-sm [&_.tab-close]:text-muted [&_.tab-close]:shrink-0 [&_.tab-close:hover]:bg-hover-strong [&_.tab-close:hover]:text-text relative inline-flex items-center gap-1 h-8 py-0 px-2 border border-transparent border-b-border rounded-[var(--radius-md)_var(--radius-md)_0_0] text-sm font-normal text-subtext whitespace-nowrap select-none min-w-0 [&:hover]:bg-surface [&:hover]:text-text [&:not(.active)_+_.tab:not(.active)::before]:content-[''] [&:not(.active)_+_.tab:not(.active)::before]:absolute [&:not(.active)_+_.tab:not(.active)::before]:top-2.5 [&:not(.active)_+_.tab:not(.active)::before]:bottom-2.5 [&:not(.active)_+_.tab:not(.active)::before]:-start-px [&:not(.active)_+_.tab:not(.active)::before]:w-px [&:not(.active)_+_.tab:not(.active)::before]:bg-border [&.active]:border-border [&.active]:border-b-0 [&.active]:bg-background [&.active]:text-text [&.active]:font-medium [&.active::after]:content-[''] [&.active::after]:absolute [&.active::after]:end-0 [&.active::after]:-bottom-px [&.active::after]:start-0 [&.active::after]:h-px [&.active::after]:bg-background closable ${active ? "active" : ""} ${preview ? PREVIEW_CLASS_NAME : ""}`}
       onClick={onSelect}
       onDoubleClick={onPromote}
-      title={preview ? m.tab_preview_title({ label }) : label}
+      onMouseDown={(event) => {
+        if (event.button === 1) event.preventDefault();
+      }}
+      onAuxClick={(event) => {
+        if (event.button !== 1) return;
+        event.preventDefault();
+        onClose();
+      }}
+      title={shortcut ? `${title} (${formatForDisplay(shortcut)})` : title}
       aria-label={
         preview
           ? m.tab_preview_aria({ label })
@@ -49,7 +65,7 @@ export function ClosableTab({
       <span
         role="button"
         className="tab-close"
-        title={m.closable_tab_close_tab()}
+        title={`${m.closable_tab_close_tab()} (${formatForDisplay(appHotkeys["tab.close"].hotkey ?? [])})`}
         // Keep the editor focused until the close handler can confirm dirty drafts.
         onPointerDown={(event) => event.preventDefault()}
         onClick={(e) => {

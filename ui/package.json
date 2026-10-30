@@ -2,6 +2,7 @@
   "name": "orx-ui",
   "private": true,
   "version": "0.1.0",
+  "packageManager": "pnpm@12.16.1",
   "type": "module",
   "scripts": {
     "dev": "vite",
@@ -14,8 +15,10 @@
     "preview": "vite preview"
   },
   "dependencies": {
+    "@base-ui/react": "^1.9.0",
     "@clo/react-markdown": "jsr:1.1.1",
     "@inlang/paraglide-js": "^2.25.0",
+    "@tanstack/react-hotkeys": "0.17.0",
     "@tanstack/react-query": "^5.102.8",
     "@tanstack/react-router": "^1.170.32",
     "@tanstack/react-virtual": "^3.14.11",
@@ -26,6 +29,7 @@
     "katex": "^0.16.22",
     "lucide-react": "^1.23.0",
     "pdfjs-dist": "6.3.289",
+    "picomatch": "^4.0.5",
     "react": "^19.1.0",
     "react-diff-view": "^3.3.3",
     "react-dom": "^19.1.0",
@@ -45,6 +49,7 @@
     "@tanstack/react-query-devtools": "^5.102.0",
     "@tanstack/router-cli": "^1.167.33",
     "@tanstack/router-plugin": "^1.168.35",
+    "@types/picomatch": "^4.0.3",
     "@types/react": "^19.1.0",
     "@types/react-dom": "^19.1.0",
     "@vitejs/plugin-react": "^4.5.0",

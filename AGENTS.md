@@ -12,7 +12,7 @@ When changing authentication, organization, sandbox, or managed-compute APIs, in
 
 - Rust code lives in `src/`; the dashboard lives in `ui/src/`. Keep local-only behavior local and use the production API client only for capabilities owned by `openresearch.sh`.
 - Run local app instances through `scripts/dev-slot.mjs` so development data, ports, and processes stay isolated.
-- `ui/dist` is committed and embedded in release builds. After UI changes, run `pnpm build` in `ui/` and include the regenerated assets.
+- `ui/dist` is generated and embedded in release builds. With Node 22 and the pnpm version pinned in `ui/package.json`, run `pnpm install --frozen-lockfile && pnpm build` in `ui/` before a local release build.
 - Prefer canonical Tailwind utilities (`flex flex-col h-full min-h-0`) and project theme aliases (`bg-background`, `text-subtext`, `border-border`). Use arbitrary values only when no project utility exists, and preserve semantic marker classes when selectors or runtime behavior depend on them.
 - Before shipping, follow the checks in `.github/workflows/ci.yml`.
 

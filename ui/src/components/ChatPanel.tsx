@@ -1,20 +1,29 @@
+import { showConfirmDialog, showCustomDialog } from "../dialog";
+import { Dialog } from "@base-ui/react/dialog";
+import { EscapeScope } from "./EscapeScope";
+import { commandRegion } from "../keyboardRegion";
 import { ComposerProjectPicker } from "./ComposerProjectPicker";
 import { ProjectInfoCard } from "./ProjectInfoCard";
+import { SessionHoverCard } from "./SessionHoverCard";
+import { taskLocation } from "../workspaceState";
 import { fitSidebarRows, sidebarRowHeight, type SidebarRow } from "../sidebarLayout";
 import { useVirtualizer, defaultRangeExtractor, measureElement as measureVirtualElement, type Range as VirtualRange } from "@tanstack/react-virtual";
 import { markLiveUpdate } from "../queries/live";
 import { removeSession as removeCachedSession } from "../queries/invalidation";
 import { nativeOptions, sessionAcpHarness } from "../acp";
+import { resolveHarnessDefaultModel } from "../modelSelection";
 import { setChatConfiguration } from "../api";
+import { RemoteConnectionStrip, useRemoteConnection } from "../RemoteRuntime";
 import {
   isCurrentScope,
   setScopedQueryData,
   deletedSessionIds,
   queryClient,
+  subscribeWorkspace,
   workspaceKey,
 } from "../queries/client";
-import { LOCAL_PREFIX, SHELL_TOOL } from "../queries/chatState";
-import { useInfiniteQuery, useMutation, useQueries, useQuery } from "@tanstack/react-query";
+import { LOCAL_ERROR_PART_ID, LOCAL_PREFIX, SHELL_TOOL } from "../queries/chatState";
+import { CancelledError, useInfiniteQuery, useMutation, useQueries, useQuery } from "@tanstack/react-query";
 import { useNavigate } from "@tanstack/react-router";
 import { useChatState } from "../queries/chatStore";
 
@@ -34,7 +43,11 @@ import {
   type FileMentionMatch,
 } from "../fileMentions";
 import { m } from "../paraglide/messages.js";
+import { formatForDisplay, matchesKeyboardEvent, useAppHotkeys, useHotkey } from "@tanstack/react-hotkeys";
+import { appHotkeys } from "../hotkeys";
+import { copyToClipboard } from "../clipboard";
 import { autoDir, ltr } from "../i18n";
+import { navigateKeyboardList } from "../keyboardNavigation";
 import { useLocale } from "../locale";
 import {
   ArrowDown,
@@ -116,6 +129,8 @@ import {
   runShellCommand,
   fmtDuration,
   sendChatMessage,
+  getChatSubmission,
+  RejectedResponseError,
   setChatSessionArchived,
   setChatSessionAutonomy,
   setChatSessionPermissionMode,
@@ -168,7 +183,9 @@ import {
   retryStatusLabel,
 } from "../chatRecovery";
 import {
+  composerSeed,
   composerStashContent,
+  forgetComposerSeed,
   EMPTY_COMPOSER_STASH,
   type ComposerAnnotation,
   type ComposerAttachment,
@@ -651,16 +668,17 @@ function AnnotationEntries({
         <AnnotationPreview annotation={annotation} />
       </div>
       {onRemove && (
-        <IconButton
-          type="button"
-          size="small"
-          data-annotation-remove
-          title={m.chat_panel_remove_annotation()}
-          aria-label={m.a11y_remove_annotation({ number: fmtNumber(index + 1) })}
-          onClick={() => onRemove(annotation.id)}
-        >
-          <X size={14} />
-        </IconButton>
+        <Tooltip interactive content={m.chat_panel_remove_annotation()}>
+          <IconButton
+            type="button"
+            size="small"
+            data-annotation-remove
+            aria-label={m.a11y_remove_annotation({ number: fmtNumber(index + 1) })}
+            onClick={() => onRemove(annotation.id)}
+          >
+            <X size={14} />
+          </IconButton>
+        </Tooltip>
       )}
     </div>
   ));
@@ -755,6 +773,7 @@ function AnnotationsPopover({
           <AnnotationEntries annotations={annotations} onRemove={onRemove ? removeAnnotation : undefined} />
         </div>
       )}
+      <EscapeScope enabled={popover.open} onEscape={() => { popover.setOpen(false); triggerRef.current?.focus(); }} />
     </div>
   );
 }
@@ -2376,6 +2395,14 @@ function ToolRow({
   const hasDetail = failed && Boolean(errorMessage);
   const [detailOpen, setDetailOpen] = useState(false);
   const detailId = `tool-error-${part.id.replace(/[^A-Za-z0-9_-]/g, "-")}`;
+  if (part.id === LOCAL_ERROR_PART_ID) {
+    return (
+      <div className="local-error mt-4 flex items-start gap-2 text-base text-subtext">
+        <TriangleAlert size={18} className="mt-0.5 shrink-0 text-accent-red" aria-hidden="true" />
+        <span className="wrap-anywhere">{errorMessage}</span>
+      </div>
+    );
+  }
   if (part.tool === "error") {
     return <TurnStatusRow part={part} busy={false} recovering={false} usageLimited={isUsageLimitPart(part)} />;
   }
@@ -2937,16 +2964,6 @@ function attachmentPartView(p: ChatPart): { src: string; isPdf: boolean; name: s
   return { src, isPdf, name };
 }
 
-async function copyToClipboard(text: string) {
-  try {
-    if (!navigator.clipboard) throw new Error(m.file_tree_clipboard_unavailable());
-    await navigator.clipboard.writeText(text);
-    showAlert(m.common_copied(), "success");
-  } catch (error) {
-    showAlert(error instanceof Error ? error.message : String(error), "error");
-  }
-}
-
 function downloadMarkdown(fileName: string, markdown: string) {
   const url = URL.createObjectURL(new Blob([markdown], { type: "text/markdown;charset=utf-8" }));
   const link = document.createElement("a");
@@ -2995,25 +3012,27 @@ function ForkControls({
     >
       {many && (
         <>
-          <IconButton size="small"
-            title={m.chat_panel_previous_version()}
-            aria-label={m.chat_panel_previous_version()}
-            disabled={pagerDisabled || !prevId}
-            onClick={() => prevId && onSelect(prevId)}
-          >
-            <ChevronLeft size={14} />
-          </IconButton>
+          <Tooltip interactive content={m.chat_panel_previous_version()}>
+            <IconButton size="small"
+              aria-label={m.chat_panel_previous_version()}
+              disabled={pagerDisabled || !prevId}
+              onClick={() => prevId && onSelect(prevId)}
+            >
+              <ChevronLeft size={14} />
+            </IconButton>
+          </Tooltip>
           <span className="fork-count text-xs text-subtext tabular-nums select-none">
             {index + 1}/{count}
           </span>
-          <IconButton size="small"
-            title={m.chat_panel_next_version()}
-            aria-label={m.chat_panel_next_version()}
-            disabled={pagerDisabled || !nextId}
-            onClick={() => nextId && onSelect(nextId)}
-          >
-            <ChevronRight size={14} />
-          </IconButton>
+          <Tooltip interactive content={m.chat_panel_next_version()}>
+            <IconButton size="small"
+              aria-label={m.chat_panel_next_version()}
+              disabled={pagerDisabled || !nextId}
+              onClick={() => nextId && onSelect(nextId)}
+            >
+              <ChevronRight size={14} />
+            </IconButton>
+          </Tooltip>
         </>
       )}
       <div className="flex items-center gap-0.5 opacity-0 group-hover/turn:opacity-100 group-focus-within/turn:opacity-100 transition-opacity duration-80 ease-standard">
@@ -3024,14 +3043,15 @@ function ForkControls({
           <Copy size={14} />
         </IconButton>
       </div>
-      <IconButton size="small"
-        title={m.chat_panel_edit_and_re_send()}
-        aria-label={m.chat_panel_edit_and_re_send()}
-        disabled={editDisabled}
-        onClick={onEdit}
-      >
-        <Pencil size={14} />
-      </IconButton>
+      <Tooltip interactive content={m.chat_panel_edit_and_re_send()}>
+        <IconButton size="small"
+          aria-label={m.chat_panel_edit_and_re_send()}
+          disabled={editDisabled}
+          onClick={onEdit}
+        >
+          <Pencil size={14} />
+        </IconButton>
+      </Tooltip>
     </div>
   );
 }
@@ -3151,6 +3171,7 @@ export const Message = memo(function Message({
                   return;
                 }
                 if (e.key === "Escape") {
+                  e.stopPropagation();
                   e.preventDefault();
                   setEditDraft(null);
                 } else if (e.key === "Enter" && !e.shiftKey) {
@@ -3221,14 +3242,16 @@ export const Message = memo(function Message({
       </div>
     );
   }
-  const responseTurns = (responseMessages ?? [message]).map(splitResponseTurn);
+  const responses = responseMessages ?? [message];
+  const localErrors = responses.filter((turn) => turn.id.startsWith(`${LOCAL_PREFIX}senderr-`));
+  const responseTurns = responses.filter((turn) => !turn.id.startsWith(`${LOCAL_PREFIX}senderr-`)).map(splitResponseTurn);
   const turns = responseTurns.map((turn) => turn.message);
   const response = splitResponseParts(turns, predictTextTail, replies);
   const predictingAnswer = predictTextTail && response.answerMessageId === message.id;
   const copyText = predictingAnswer && !message.completedAt ? "" : responseText({ ...message, parts: response.answer });
   return (
     <div className="msg-assistant group/turn text-base leading-relaxed text-text min-w-0">
-      <AssistantTurn messages={turns} response={response} options={{
+      {turns.length > 0 && <AssistantTurn messages={turns} response={response} options={{
         replies,
         activePermissionId,
         pendingTailToolId,
@@ -3242,7 +3265,7 @@ export const Message = memo(function Message({
         onOpenPlan,
         onOpenSubagent,
         predictTextTail,
-      }} />
+      }} />}
       {responseTurns.map(({ message: turn, turnStatus, usageLimit, temporaryApiError }) => turnStatus && (
         <TurnStatusRow
           key={turn.id}
@@ -3254,16 +3277,22 @@ export const Message = memo(function Message({
           onRecover={onRecover}
         />
       ))}
+      {localErrors.map((turn) => (
+        <div key={turn.id} role="alert" className="mt-4 whitespace-pre-wrap text-base text-accent-red">
+          {cleanToolError(turn.parts[0]?.state?.error ?? "")}
+        </div>
+      ))}
       {copyText && (
         <div className="mt-2 flex justify-end opacity-0 transition-opacity duration-80 ease-standard group-hover/turn:opacity-100 group-focus-within/turn:opacity-100">
-          <IconButton
-            size="small"
-            title={m.chat_copy_response()}
-            aria-label={m.chat_copy_response()}
-            onClick={() => void copyToClipboard(copyText)}
-          >
-            <Copy size={14} />
-          </IconButton>
+          <Tooltip interactive content={m.chat_copy_response()}>
+            <IconButton
+              size="small"
+              aria-label={m.chat_copy_response()}
+              onClick={() => void copyToClipboard(copyText)}
+            >
+              <Copy size={14} />
+            </IconButton>
+          </Tooltip>
         </div>
       )}
     </div>
@@ -4031,11 +4060,6 @@ type SessionFilter = "active" | "archived" | "all";
 const matchesFilter = (filter: SessionFilter, archived: boolean) =>
   filter === "all" ? true : filter === "archived" ? archived : !archived;
 
-/** Whether an event target sits inside the side-chat pane. */
-function inSideChat(target: EventTarget | null): boolean {
-  return target instanceof Element && target.closest("[data-side-chat]") !== null;
-}
-
 /** Menu label + rail section heading per filter — "Recents" for the default view. */
 const SESSION_FILTERS: { id: SessionFilter; label: () => string; railLabel: () => string }[] = [
   { id: "archived", label: m.chat_panel_archived, railLabel: m.chat_panel_archived },
@@ -4058,15 +4082,16 @@ function SessionFilterMenu({
   const { open, setOpen, ref } = usePopover();
   return (
     <div className="rail-filter relative inline-flex" ref={ref}>
-      <IconButton size="small"
-        className="rail-filter-btn text-subtext"
-        active={value !== "active"}
-        title={m.chat_panel_filter_sessions()}
-        aria-label={m.chat_panel_filter_sessions()}
-        onClick={() => setOpen((v) => !v)}
-      >
-        <SlidersHorizontal size={16} className="text-subtext" />
-      </IconButton>
+      <Tooltip interactive content={m.chat_panel_filter_sessions()}>
+        <IconButton size="small"
+          className="rail-filter-btn text-subtext"
+          active={value !== "active"}
+          aria-label={m.chat_panel_filter_sessions()}
+          onClick={() => setOpen((v) => !v)}
+        >
+          <SlidersHorizontal size={16} className="text-subtext" />
+        </IconButton>
+      </Tooltip>
       {open && (
         <div className="option-menu absolute bottom-[calc(100%_+_8px)] start-0 max-h-95 flex flex-col bg-background border border-border rounded-lg shadow-menu z-50 overflow-hidden min-w-40 p-1 [&.align-right]:start-auto [&.align-right]:end-0 [&.drop-down]:bottom-auto [&.drop-down]:top-[calc(100%_+_4px)] [&.session-menu]:start-auto [&.session-menu]:end-1.5 [&.session-menu]:top-[calc(100%_-_2px)] [&.session-menu]:min-w-35 drop-down align-right">
           <div className="px-2 py-0.5 text-sm text-subtext">{m.sidebar_group_by()}</div>
@@ -4094,6 +4119,7 @@ function SessionFilterMenu({
           ))}
         </div>
       )}
+      <EscapeScope enabled={open} onEscape={() => setOpen(false)} />
     </div>
   );
 }
@@ -4157,6 +4183,11 @@ function SessionRow({
   onRename,
   onSetArchived,
   onDelete,
+  onOpenExperiment,
+  modelName,
+  projectName,
+  harnessLogo,
+  cardWarmUntil,
 }: {
   session: ChatSession;
   active: boolean;
@@ -4173,15 +4204,69 @@ function SessionRow({
   onRename: (title: string) => void;
   onSetArchived: (archived: boolean) => void;
   onDelete: () => void;
+  onOpenExperiment: (projectId: string, experimentId: string) => void;
+  modelName: string | null;
+  projectName?: string;
+  harnessLogo?: string;
+  cardWarmUntil: React.RefObject<number>;
 }) {
   const { open, setOpen, ref } = usePopover();
-  const title = session.title?.trim() || "Untitled";
+  const title = session.title?.trim() || m.chat_untitled();
+  const sessionDescription = `${title} · ${harnessLabel(session.harness, session.harnessName)}${modelName ? ` · ${modelName}` : ""}`;
   const [editing, setEditing] = useState(false);
   // Seeded by startEditing() before the input mounts; "" is just a placeholder.
   const [draft, setDraft] = useState("");
   const inputRef = useRef<HTMLInputElement>(null);
+  const cardRef = useRef<HTMLDivElement>(null);
+  const cardId = useId();
+  const [anchor, setAnchor] = useState<DOMRect | null>(null);
+  const openTimer = useRef<number | undefined>(undefined);
+  const closeTimer = useRef<number | undefined>(undefined);
+  const pointerInside = useRef(false);
+  const dismissed = useRef(false);
+
+  function closeCard() {
+    window.clearTimeout(openTimer.current);
+    window.clearTimeout(closeTimer.current);
+    setAnchor(null);
+  }
+  function showCard() {
+    if (!editing && !open && !dismissed.current) setAnchor(ref.current?.getBoundingClientRect() ?? null);
+  }
+  function scheduleClose() {
+    window.clearTimeout(openTimer.current);
+    window.clearTimeout(closeTimer.current);
+    closeTimer.current = window.setTimeout(() => {
+      const focused = document.activeElement;
+      if (!pointerInside.current && focused !== ref.current && !cardRef.current?.contains(focused)) setAnchor(null);
+    }, 150);
+  }
+  useEffect(() => () => {
+    window.clearTimeout(openTimer.current);
+    window.clearTimeout(closeTimer.current);
+  }, []);
+  useEffect(() => {
+    if (!anchor) return;
+    const update = (event: Event) => {
+      if (event.target instanceof Node && cardRef.current?.contains(event.target)) return;
+      const row = ref.current;
+      const bounds = row?.getBoundingClientRect();
+      const scrollContainer = row?.closest(".rail-body")?.getBoundingClientRect();
+      if (!bounds || (scrollContainer && (bounds.bottom <= scrollContainer.top || bounds.top >= scrollContainer.bottom))) {
+        if (cardRef.current?.contains(document.activeElement)) row?.focus();
+        setAnchor(null);
+      } else setAnchor(bounds);
+    };
+    window.addEventListener("resize", update);
+    document.addEventListener("scroll", update, true);
+    return () => {
+      window.removeEventListener("resize", update);
+      document.removeEventListener("scroll", update, true);
+    };
+  }, [anchor, ref]);
 
   function startEditing() {
+    closeCard();
     setDraft(session.title?.trim() || "");
     setEditing(true);
   }
@@ -4206,25 +4291,56 @@ function SessionRow({
       ref={ref}
       role="button"
       tabIndex={0}
-      className={`session-row relative flex items-center gap-2 w-full h-8.5 text-start ps-2.5 pe-1.5 rounded-md text-sm text-text cursor-pointer select-none [&:hover:not(.active)]:bg-surface [&.active]:bg-panel [&.active]:font-medium [&_.session-dot:empty]:hidden [&_.session-dot]:w-4 [&_.session-dot]:inline-flex [&_.session-dot]:items-center [&_.session-dot]:justify-center [&_.session-dot]:shrink-0 [&_.session-title]:flex-1 [&_.session-title]:min-w-0 [&_.session-title]:overflow-hidden [&_.session-title]:[mask-image:linear-gradient(to_right,black_calc(100%_-_16px),transparent)] [&_.session-title]:whitespace-nowrap [&_.session-menu-btn]:hidden [&_.session-menu-btn]:items-center [&_.session-menu-btn]:justify-center [&_.session-menu-btn]:w-4 [&_.session-menu-btn]:h-4 [&_.session-menu-btn]:-my-0.5 [&_.session-menu-btn]:mx-0 [&_.session-menu-btn]:rounded-sm [&_.session-menu-btn]:text-muted [&_.session-menu-btn]:shrink-0 [&_.session-menu-btn:hover]:text-text [&_.session-menu-btn:hover]:bg-panel [&:hover_.session-menu-btn]:inline-flex [&:focus-visible_.session-menu-btn]:inline-flex [&_.session-menu-btn:focus-visible]:inline-flex [&.menu-open_.session-menu-btn]:inline-flex [&:hover_.session-dot]:hidden [&:focus-visible_.session-dot]:hidden [&:has(.session-menu-btn:focus-visible)_.session-dot]:hidden [&.menu-open_.session-dot]:hidden [&_.busy-dot]:w-[7px] [&_.busy-dot]:h-[7px] [&_.busy-dot]:rounded-full [&_.busy-dot]:bg-accent-teal [&_.busy-dot]:animate-[or-pulse_1.2s_infinite] [&_.busy-dot]:shrink-0 [&_.unread-dot]:w-[7px] [&_.unread-dot]:h-[7px] [&_.unread-dot]:rounded-full [&_.unread-dot]:bg-accent-blue [&_.unread-dot]:shrink-0 [&_.busy-dot.waiting]:animate-none [&_.session-title-input]:flex-1 [&_.session-title-input]:min-w-0 [&_.session-title-input]:py-px [&_.session-title-input]:px-1 [&_.session-title-input]:-my-0.5 [&_.session-title-input]:mx-0 [&_.session-title-input]:[font:inherit] [&_.session-title-input]:text-text [&_.session-title-input]:bg-background [&_.session-title-input]:border [&_.session-title-input]:border-focus-border [&_.session-title-input]:rounded-sm [&_.session-title-input]:outline-none [&.editing]:bg-surface [&.editing]:cursor-default [&.editing_.session-menu-btn]:hidden [&.editing_.session-dot]:hidden ${active ? "active" : ""}  ${unread ? "unread" : ""}  ${open ? "menu-open" : ""}  ${
+      data-sidebar-keyboard-row
+      aria-label={sessionDescription}
+      aria-describedby={anchor ? cardId : undefined}
+      onMouseEnter={() => {
+        pointerInside.current = true;
+        dismissed.current = false;
+        window.clearTimeout(closeTimer.current);
+        if (!editing && !open) {
+          if (Date.now() < cardWarmUntil.current) showCard();
+          else openTimer.current = window.setTimeout(showCard, 350);
+        }
+      }}
+      onMouseLeave={(event) => {
+        if (anchor) cardWarmUntil.current = Date.now() + 500;
+        pointerInside.current = false;
+        dismissed.current = false;
+        if (event.relatedTarget instanceof Element && event.relatedTarget.closest(".session-row")) closeCard();
+        else scheduleClose();
+      }}
+      onFocus={(event) => {
+        if (event.target === event.currentTarget && !editing && !open) {
+          showCard();
+        }
+      }}
+      onBlur={(event) => {
+        if (!ref.current?.contains(event.relatedTarget) && !cardRef.current?.contains(event.relatedTarget)) dismissed.current = false;
+        scheduleClose();
+      }}
+      className={`session-row relative flex items-center gap-2 w-full h-8.5 text-start ps-2.5 pe-1.5 rounded-md text-sm text-text cursor-pointer select-none [&:hover:not(.active)]:bg-surface [&.active]:bg-panel [&.active]:font-medium [&_.session-dot:empty]:hidden [&_.session-dot]:w-4 [&_.session-dot]:inline-flex [&_.session-dot]:items-center [&_.session-dot]:justify-center [&_.session-dot]:shrink-0 [&_.session-title]:flex-1 [&_.session-title]:min-w-0 [&_.session-title]:overflow-hidden [&_.session-title]:[mask-image:linear-gradient(to_right,black_calc(100%_-_16px),transparent)] [&_.session-title]:whitespace-nowrap [&_.session-menu-btn]:hidden [&_.session-menu-btn]:items-center [&_.session-menu-btn]:justify-center [&_.session-menu-btn]:size-6 [&_.session-menu-btn]:-mx-1 [&_.session-menu-btn]:rounded-sm [&_.session-menu-btn]:text-muted [&_.session-menu-btn]:shrink-0 [&_.session-menu-btn:hover]:text-text [&_.session-menu-btn:hover]:bg-panel [&:hover_.session-menu-btn]:inline-flex [&:focus-visible_.session-menu-btn]:inline-flex [&_.session-menu-btn:focus-within]:inline-flex [&.menu-open_.session-menu-btn]:inline-flex [&.card-open_.session-menu-btn]:inline-flex [&:hover_.session-dot]:hidden [&:focus-visible_.session-dot]:hidden [&:has(.session-menu-btn:focus-within)_.session-dot]:hidden [&.menu-open_.session-dot]:hidden [&_.busy-dot]:w-[7px] [&_.busy-dot]:h-[7px] [&_.busy-dot]:rounded-full [&_.busy-dot]:bg-accent-teal [&_.busy-dot]:animate-[or-pulse_1.2s_infinite] [&_.busy-dot]:shrink-0 [&_.unread-dot]:w-[7px] [&_.unread-dot]:h-[7px] [&_.unread-dot]:rounded-full [&_.unread-dot]:bg-accent-blue [&_.unread-dot]:shrink-0 [&_.busy-dot.waiting]:animate-none [&_.session-title-input]:absolute [&_.session-title-input]:inset-0 [&_.session-title-input]:size-full [&_.session-title-input]:py-0 [&_.session-title-input]:ps-0 [&_.session-title-input]:pe-[9px] [&_.session-title-input]:indent-[9px] [&_.session-title-input]:[font:inherit] [&_.session-title-input]:text-text [&_.session-title-input]:bg-background [&_.session-title-input]:border [&_.session-title-input]:border-focus-border [&_.session-title-input]:rounded-md [&_.session-title-input]:outline-none [&.editing]:bg-surface [&.editing]:cursor-default [&.editing_.session-menu-btn]:hidden [&.editing_.session-dot]:hidden ${active ? "active" : ""}  ${unread ? "unread" : ""}  ${open ? "menu-open" : ""} ${anchor ? "card-open" : ""}  ${
         editing ? "editing" : ""
         }`}
-      title={`${harnessLabel(session.harness, session.harnessName)}${session.model ? ` · ${session.model}` : ""}`}
       onClick={() => {
         // While editing, a body click is a no-op; blur/Enter/Esc drive it.
         if (editing) return;
         // With the menu open, a body click just dismisses it — switching
         // sessions underneath an open menu would leave it orphaned.
         if (open) setOpen(false);
-        else onOpen();
+        else { closeCard(); onOpen(); }
       }}
       onKeyDown={(e) => {
         // Only keys aimed at the row itself: the kebab, menu items, and the
         // rename input are descendants, and preventDefault here would cancel
         // their activation.
         if (e.target !== e.currentTarget) return;
-        if (e.key === "Enter" || e.key === " ") {
+        if (e.key === "Tab" && !e.shiftKey && anchor && cardRef.current) {
           e.preventDefault();
+          cardRef.current.focus();
+        } else if (e.key === "Enter" || e.key === " ") {
+          e.preventDefault();
+          closeCard();
           // Mirror the click branch: dismiss an open menu instead of
           // navigating underneath it.
           if (open) setOpen(false);
@@ -4247,6 +4363,7 @@ function SessionRow({
               e.preventDefault();
               commit();
             } else if (e.key === "Escape") {
+              e.stopPropagation();
               e.preventDefault();
               setEditing(false);
             }
@@ -4278,17 +4395,36 @@ function SessionRow({
           unread && !waiting && <span className="unread-dot" />
         )}
       </span>
-      <button
-        className="session-menu-btn"
-        title={m.chat_panel_session_options()}
-        aria-label={m.chat_panel_session_options()}
-        onClick={(e) => {
-          e.stopPropagation();
-          setOpen((v) => !v);
-        }}
-      >
-        <MoreHorizontal size={14} />
-      </button>
+      <Tooltip interactive content={m.chat_panel_session_options()} className="session-menu-btn">
+        <button
+          className="flex w-full h-full items-center justify-center"
+          aria-label={m.chat_panel_session_options()}
+          onClick={(e) => {
+            e.stopPropagation();
+            closeCard();
+            setOpen((v) => !v);
+          }}
+        >
+          <MoreHorizontal size={14} />
+        </button>
+      </Tooltip>
+      {anchor && !open && !editing && (
+        <SessionHoverCard
+          session={session}
+          modelName={modelName}
+          projectName={projectName}
+          harnessLogo={harnessLogo}
+          anchor={anchor}
+          cardId={cardId}
+          cardRef={cardRef}
+          container={ref.current?.closest(".mobile-rail-dialog") ?? document.body}
+          onEnter={() => { pointerInside.current = true; window.clearTimeout(closeTimer.current); }}
+          onLeave={() => { cardWarmUntil.current = Date.now() + 500; pointerInside.current = false; scheduleClose(); }}
+          onOpenExperiment={(projectId, experimentId) => { closeCard(); onOpenExperiment(projectId, experimentId); }}
+          onReturnToRow={() => ref.current?.focus()}
+          onContinue={() => { closeCard(); ref.current?.querySelector<HTMLButtonElement>(".session-menu-btn button")?.focus(); }}
+        />
+      )}
       {open && (
         <div className="option-menu absolute bottom-[calc(100%_+_8px)] start-0 max-h-95 flex flex-col bg-background border border-border rounded-lg shadow-menu z-50 overflow-hidden min-w-47.5 p-1.5 [&.align-right]:start-auto [&.align-right]:end-0 [&.drop-down]:bottom-auto [&.drop-down]:top-[calc(100%_+_4px)] [&.session-menu]:start-auto [&.session-menu]:end-1.5 [&.session-menu]:top-[calc(100%_-_2px)] [&.session-menu]:min-w-35 drop-down session-menu">
           <MenuItem
@@ -4320,6 +4456,8 @@ function SessionRow({
           </MenuItem>
         </div>
       )}
+      <EscapeScope enabled={open} onEscape={() => setOpen(false)} />
+      <EscapeScope enabled={!!anchor && !editing && !open} exclusive={false} onEscape={() => { dismissed.current = true; if (cardRef.current?.contains(document.activeElement)) ref.current?.focus(); closeCard(); }} />
     </div>
   );
 }
@@ -4344,6 +4482,26 @@ const STARTER_TONES = [
 ];
 const STARTER_GRID_CLASS =
   "mt-7 grid w-full max-w-readable grid-cols-1 gap-3 sm:grid-cols-2";
+const composerStashes = new Map<string, ComposerStash>();
+const mountedComposers = new Map<string, (failed: ComposerStash) => void>();
+subscribeWorkspace(() => { composerStashes.clear(); });
+
+function mergeFailedComposer(current: ComposerStash, failed: ComposerStash): ComposerStash {
+  const annotations = [...current.annotations];
+  for (const annotation of failed.annotations) {
+    if (annotations.some((item) => item.id === annotation.id && item.text === annotation.text)) continue;
+    let id = annotation.id;
+    while (annotations.some((item) => item.id === id)) id += ":recovered";
+    annotations.unshift(id === annotation.id ? annotation : { ...annotation, id });
+  }
+  return {
+    draft: [failed.draft, current.draft].filter(Boolean).join("\n\n"),
+    attachments: [...failed.attachments.filter((item) => !current.attachments.includes(item)), ...current.attachments],
+    annotations,
+    unconfirmedSend: current.unconfirmedSend ?? failed.unconfirmedSend,
+    pendingClientTurn: current.pendingClientTurn ?? failed.pendingClientTurn,
+  };
+}
 
 /** Reconcile the settings attached to a selected model without treating the
  * catalog as an allowlist. The picker deliberately accepts free-form ids, so
@@ -4355,12 +4513,17 @@ export function deriveComposerSelection(
   activeHarness: Harness | undefined,
 ): ModelSelection | null {
   if (!rawSelection) return null;
-  const model = rawSelection.model ?? null;
+  const model = (rawSelection.harness === "codex" || rawSelection.harness === "claude-code") && (rawSelection.model == null || rawSelection.model === "default")
+    ? resolveHarnessDefaultModel(activeHarness) ?? rawSelection.model ?? null
+    : rawSelection.model ?? null;
+  const readyHarness = activeHarness?.catalogPending || (activeHarness?.id === "codex" && !activeHarness.models.length)
+    ? undefined
+    : activeHarness;
   return {
     ...rawSelection,
     model,
-    serviceTier: reconcileServiceTier(activeHarness, model, rawSelection.serviceTier),
-    reasoningLevel: reconcileReasoning(activeHarness, model, rawSelection.reasoningLevel),
+    serviceTier: reconcileServiceTier(readyHarness, model, rawSelection.serviceTier),
+    reasoningLevel: reconcileReasoning(readyHarness, model, rawSelection.reasoningLevel),
   };
 }
 
@@ -4371,7 +4534,12 @@ export function ChatPanel({
   contentError = null,
   onRetryContent,
   railHeader,
+  railWidth,
+  onResizeRail,
   railOpen,
+  mobileRail = false,
+  onCloseMobileRail,
+  contentInert = false,
   onShowRail,
   onNewProject,
   mainView,
@@ -4387,6 +4555,7 @@ export function ChatPanel({
   composerFocusNonce = 0,
   activeSessionId,
   onActiveSessionChange,
+  onStartHarnessDraft,
   preferredAgent,
   onPreferredAgentChange,
   preferredAutonomy,
@@ -4404,8 +4573,13 @@ export function ChatPanel({
   onRetryContent?: () => void;
   /** Brand and project creation controls at the top of the rail. */
   railHeader?: React.ReactNode;
+  railWidth?: number;
+  onResizeRail?: (event: React.PointerEvent) => void;
   /** Whether the agents rail is showing (collapsed via its own header icon). */
   railOpen: boolean;
+  mobileRail?: boolean;
+  onCloseMobileRail?: () => void;
+  contentInert?: boolean;
   /** Reopen the rail (from the chat header's sidebar icon). */
   onShowRail: () => void;
   onNewProject?: () => void;
@@ -4457,6 +4631,7 @@ export function ChatPanel({
   onActiveSessionChange: (sessionId: string | null, options?: { replace?: boolean; projectId?: string }) => void;
   /** Database-backed selection used to seed new chat sessions. */
   preferredAgent: ModelSelection | null;
+  onStartHarnessDraft?: () => void;
   onPreferredAgentChange: (selection: ModelSelection) => Promise<void>;
   preferredAutonomy: Autonomy;
   onPreferredAutonomyChange: (autonomy: Autonomy) => void;
@@ -4500,20 +4675,22 @@ export function ChatPanel({
     } catch { return []; }
   });
   const [sessionFilter, setSessionFilter] = useState<SessionFilter>("active");
-  const [sidebarExpanded, setSidebarExpanded] = useState(false);
+  const [sidebarExpandedAll, setSidebarExpandedAll] = useState(false);
   const railBodyRef = useRef<HTMLDivElement>(null);
+  const cardWarmUntil = useRef(0);
   const [railHeight, setRailHeight] = useState(0);
   const [focusedSidebarRow, setFocusedSidebarRow] = useState<string | null>(null);
   const [chatLimits, setChatLimits] = useState<Record<string, number>>({});
-  useLayoutEffect(() => {
-    const body = railBodyRef.current;
+  const sidebarExpanded = sidebarExpandedAll || Object.keys(chatLimits).length > 0;
+  const setRailBody = useCallback((body: HTMLDivElement | null) => {
+    railBodyRef.current = body;
     if (!body || embedded) return;
     const resize = () => setRailHeight(body.clientHeight);
     const observer = new ResizeObserver(resize);
     observer.observe(body);
     resize();
-    return () => observer.disconnect();
-  }, [railOpen, embedded, mainView]);
+    return () => { observer.disconnect(); railBodyRef.current = null; };
+  }, [embedded]);
   const recentActivity = new Map(projectActivity.map((activity) => [activity.projectId, activity.lastActivityAt]));
   const sortedProjects = [...sidebarProjects].sort((a, b) => Number(pinnedProjects.includes(b.id)) - Number(pinnedProjects.includes(a.id)) || Math.max(recentActivity.get(b.id) ?? 0, b.updatedAt) - Math.max(recentActivity.get(a.id) ?? 0, a.updatedAt));
   const candidateLimit = sidebarGrouping === "list" || sidebarExpanded ? sortedProjects.length : Math.max(1, Math.ceil(railHeight / 36));
@@ -4536,7 +4713,7 @@ export function ChatPanel({
     enabled: !embedded && sidebarGrouping === "list",
   });
   const sessionsOptions = useMemo(() => listChatSessionsQuery(projectId), [projectId]);
-  const { data: sessions = EMPTY_SESSIONS } = useQuery(sessionsOptions);
+  const { data: sessions = EMPTY_SESSIONS, isSuccess: sessionsLoaded } = useQuery(sessionsOptions);
   const setSessions = useCallback((value: React.SetStateAction<ChatSession[]>) => {
     setScopedQueryData(sessionsOptions.queryKey, (current) => {
       if (!current) return undefined;
@@ -4559,8 +4736,13 @@ export function ChatPanel({
   const [draft, setDraft] = useState("");
   const [demoHintDismissed, setDemoHintDismissed] = useState(false);
   const [annotations, setAnnotations] = useState<ComposerAnnotation[]>([]);
-  const annotationId = useRef(0);
+  const [unconfirmedSend, setUnconfirmedSend] = useState<string | null>(null);
   const composerScopeRef = useRef({ projectId, activeId, mainView });
+  const composerMountedRef = useRef(false);
+  useLayoutEffect(() => {
+    composerMountedRef.current = true;
+    return () => { composerMountedRef.current = false; };
+  }, []);
   if (composerScopeRef.current.projectId !== projectId
     || composerScopeRef.current.activeId !== activeId
     || composerScopeRef.current.mainView !== mainView) {
@@ -4574,40 +4756,66 @@ export function ChatPanel({
   const [imageRefusedFor, setImageRefusedFor] = useState<string | null>(null);
   // Unsent composer content belongs to the scope it was typed in — stash on
   // the way out, restore on return, so a draft can't bleed into another chat.
-  const stashKey = activeId ?? `${projectId}:new`;
-  const composerStashRef = useRef(new Map<string, ComposerStash>());
+  const stashScope = `${sessionsOptions.queryKey[1]}:`;
+  const stashKey = stashScope + (embedded
+    ? activeId ? `side:${activeId}` : `${projectId}:side:${sideParentSessionId ?? "new"}`
+    : activeId ?? `${projectId}:new`);
+  const pendingClientTurn = useRef<ComposerStash["pendingClientTurn"]>(null);
+  const pendingScope = useRef<string | null>(null);
   const composerLiveRef = useRef(EMPTY_COMPOSER_STASH);
-  composerLiveRef.current = { draft, attachments, annotations };
+  composerLiveRef.current = { draft, attachments, annotations, unconfirmedSend, pendingClientTurn: pendingClientTurn.current };
   // On offer until the user has sent anything in the demo: a send either adds
   // a session or moves a recorded session's leaf off its seeded message. The
   // nudge anchors to the first scope that had it — seeding it in every scope
-  // would read as the draft bleeding across chats.
+  // would read as the draft bleeding across chats. A new project's seeded
+  // prompt (an openresearch:// reproduce link) is offered the same way until it has a chat.
+  const seededPrompt = !embedded && sessionsLoaded && sessions.length === 0 ? composerSeed(projectId) : null;
   const composerPrefillOffer =
     projectId === DEMO_PROJECT_ID && !embedded &&
       sessions.length > 0 &&
       sessions.every((session) => session.sideParentSessionId || DEMO_SEEDED_LEAF_IDS[session.id] === session.activeLeafId)
       ? DEMO_RUN_EXPERIMENT_PROMPT
-      : null;
-  const prefillScopeRef = useRef<string | null>(null);
-  if (composerPrefillOffer !== null && prefillScopeRef.current === null && activeId !== null) {
-    prefillScopeRef.current = stashKey;
+      : seededPrompt;
+  // Per project, so a seeded project's anchor can't block the demo's.
+  const prefillScopesRef = useRef(new Map<string, string>());
+  const canAnchorPrefill = activeId !== null || seededPrompt !== null;
+  if (composerPrefillOffer !== null && !prefillScopesRef.current.has(projectId) && canAnchorPrefill) {
+    prefillScopesRef.current.set(projectId, stashKey);
   }
-  const composerPrefill = stashKey === prefillScopeRef.current ? composerPrefillOffer : null;
+  useEffect(() => {
+    if (sessions.length > 0) forgetComposerSeed(projectId);
+  }, [projectId, sessions.length]);
+  const composerPrefill = stashKey === prefillScopesRef.current.get(projectId) ? composerPrefillOffer : null;
   // Layout effect: the restore must land before paint or the outgoing chat's
   // draft flashes for a frame inside the incoming one.
   useLayoutEffect(() => {
-    const restored = composerStashRef.current.get(stashKey) ?? EMPTY_COMPOSER_STASH;
+    const restored = composerStashes.get(stashKey) ?? EMPTY_COMPOSER_STASH;
     // StrictMode double-invokes: the cleanup must see the restored value, not
     // the pre-restore render's.
     composerLiveRef.current = restored;
+    pendingClientTurn.current = restored.pendingClientTurn;
+    pendingScope.current = stashKey;
     setDraft(restored.draft);
     setAttachments(restored.attachments);
     setAnnotations(restored.annotations);
+    setUnconfirmedSend(restored.unconfirmedSend);
     setImageRefusedFor(null);
+    const restoreFailed = (failed: ComposerStash) => {
+      composerLiveRef.current = mergeFailedComposer(composerLiveRef.current, failed);
+      pendingClientTurn.current = composerLiveRef.current.pendingClientTurn;
+      setDraft((current) => mergeFailedComposer({ ...EMPTY_COMPOSER_STASH, draft: current }, failed).draft);
+      setAttachments((current) => mergeFailedComposer({ ...EMPTY_COMPOSER_STASH, attachments: current }, failed).attachments);
+      setAnnotations((current) => mergeFailedComposer({ ...EMPTY_COMPOSER_STASH, annotations: current }, failed).annotations);
+      if (failed.unconfirmedSend !== null) setUnconfirmedSend((current) => current ?? failed.unconfirmedSend);
+    };
+    mountedComposers.set(stashKey, restoreFailed);
     return () => {
+      if (mountedComposers.get(stashKey) === restoreFailed) mountedComposers.delete(stashKey);
+      if (!isCurrentScope(sessionsOptions.queryKey) || (activeId && deletedSessionIds.has(activeId))
+        || (sideParentSessionId && deletedSessionIds.has(sideParentSessionId))) return;
       const stashed = composerStashContent(composerLiveRef.current, composerPrefill);
-      if (stashed) composerStashRef.current.set(stashKey, stashed);
-      else composerStashRef.current.delete(stashKey);
+      if (stashed) composerStashes.set(stashKey, stashed);
+      else composerStashes.delete(stashKey);
     };
   }, [stashKey, composerPrefill]);
   const [settingsError, setSettingsError] = useState<string | null>(null);
@@ -4639,7 +4847,6 @@ export function ChatPanel({
   const activeLeafRef = useRef<string | null>(null);
   const [retryingQueuedId, setRetryingQueuedId] = useState<string | null>(null);
   const preparingSend = useRef(false);
-  const pendingClientTurn = useRef<{ signature: string; id: string } | null>(null);
   // Sessions whose title was just replaced by a harness-generated one, mapped
   // to a nonce that bumps per reveal so a second retitle remounts the spans and
   // replays the animation instead of sitting on a finished one.
@@ -4659,13 +4866,13 @@ export function ChatPanel({
   const stickToBottom = useRef(true);
   const [transcriptAtBottom, setTranscriptAtBottom] = useState(true);
   const composerRef = useRef<HTMLTextAreaElement>(null);
-  const [resumeOpen, setResumeOpen] = useState(false);
+  const connection = useRemoteConnection();
+  const resumeCancelRef = useRef<(() => void) | null>(null);
   const dataSources = usePopover();
   const addTranscriptSelection = useCallback((selection: Pick<SelectionAction, "text" | "range">) => {
-    annotationId.current += 1;
     setAnnotations((current) => [
       ...current,
-      { id: `annotation-${annotationId.current}`, ...selection },
+      { id: `annotation-${crypto.randomUUID()}`, ...selection },
     ]);
     composerRef.current?.focus();
   }, []);
@@ -4673,8 +4880,9 @@ export function ChatPanel({
   useAnnotationHighlights(annotations, embedded ? SIDE_CHAT_ANNOTATION_HIGHLIGHT_NAME : CHAT_ANNOTATION_HIGHLIGHT_NAME);
 
   useEffect(() => {
-    setResumeOpen(false);
+    resumeCancelRef.current?.();
     transcriptSelection.dismiss();
+    return () => resumeCancelRef.current?.();
   }, [activeId, projectId, transcriptSelection.dismiss]);
 
   // Slash-skills: menu state is derived from the draft — open while the token
@@ -4773,6 +4981,7 @@ export function ChatPanel({
       const attachmentStashKey = stashKey;
       const reader = new FileReader();
       reader.onload = () => {
+        if (!isCurrentScope(sessionsOptions.queryKey)) return;
         const attachment = {
           dataUrl: reader.result as string,
           mediaType: file.type,
@@ -4781,12 +4990,12 @@ export function ChatPanel({
         };
         // The decode is async — if the composer moved on, the file belongs to
         // the scope it was pasted into, not whatever chat is now showing.
-        if (composerScopeRef.current.projectId === scope.projectId && composerScopeRef.current.activeId === scope.activeId) {
+        if (composerMountedRef.current && composerScopeRef.current.projectId === scope.projectId && composerScopeRef.current.activeId === scope.activeId) {
           setAttachments((cur) => [...cur, attachment]);
           return;
         }
-        const stash = composerStashRef.current.get(attachmentStashKey) ?? EMPTY_COMPOSER_STASH;
-        composerStashRef.current.set(attachmentStashKey, {
+        const stash = composerStashes.get(attachmentStashKey) ?? EMPTY_COMPOSER_STASH;
+        composerStashes.set(attachmentStashKey, {
           ...stash,
           attachments: [...stash.attachments, attachment],
         });
@@ -4819,16 +5028,20 @@ export function ChatPanel({
   //    picker tweaks layered on. The harness is the session's, not the global.
   //  * with no session — the sticky global preference (seeds a new session).
   const savedSelection = selection ?? defaultSelection(harnesses);
+  const retryOptions = (pendingScope.current === stashKey
+    ? pendingClientTurn.current
+    : composerStashes.get(stashKey)?.pendingClientTurn)?.options;
   const rawSelection: ModelSelection | null = openSession
     ? {
       harness: openSession.harness,
-      model: sessionOverride.model !== undefined ? sessionOverride.model : openSession.model,
-      serviceTier:
-        sessionOverride.serviceTier !== undefined
-          ? sessionOverride.serviceTier
-          : openSession.serviceTier,
-      permissionMode: sessionOverride.permissionMode ?? openSession.permissionMode,
-      reasoningLevel: sessionOverride.reasoningLevel ?? openSession.reasoningLevel,
+      model: sessionOverride.model !== undefined ? sessionOverride.model
+        : retryOptions?.model !== undefined ? retryOptions.model : openSession.model,
+      serviceTier: sessionOverride.serviceTier !== undefined ? sessionOverride.serviceTier
+        : retryOptions?.serviceTier !== undefined ? retryOptions.serviceTier : openSession.serviceTier,
+      permissionMode: sessionOverride.permissionMode ?? (retryOptions?.permissionMode !== undefined
+        ? retryOptions.permissionMode : openSession.permissionMode),
+      reasoningLevel: sessionOverride.reasoningLevel ?? (retryOptions?.reasoningLevel !== undefined
+        ? retryOptions.reasoningLevel : openSession.reasoningLevel),
     }
     : savedSelection
       ? { ...savedSelection, ...sessionOverride }
@@ -4922,8 +5135,14 @@ export function ChatPanel({
   // let a change on one axis pin a reconciled value on another — picking a
   // permission mode would write a reasoning level the user never chose, and the
   // next send would persist it over their real setting.
+  const invalidatePendingRetry = () => {
+    if (pendingClientTurn.current) pendingClientTurn.current.invalidated = true;
+    pendingClientTurn.current = null;
+    composerLiveRef.current = { ...composerLiveRef.current, pendingClientTurn: null };
+  };
   const selectModel = (next: Partial<ModelSelection>) => {
     if (openSession?.harness.startsWith("acp:") && acpModel && next.model) {
+      if (next.model !== acpModel.currentValue) invalidatePendingRetry();
       void setChatConfiguration(openSession.id, acpModel.id, next.model).catch((error: unknown) => showAlert(error instanceof Error ? error.message : String(error), "error"));
       return;
     }
@@ -4946,6 +5165,7 @@ export function ChatPanel({
       next.reasoningLevel !== composerSelection.reasoningLevel
     )
       changed.reasoningLevel = next.reasoningLevel;
+    if (Object.keys(changed).length) invalidatePendingRetry();
     setRecoveryOverrides((current) => ({ ...current, ...changed }));
     setSelection(merged);
     void onPreferredAgentChange(merged).catch(() => {});
@@ -4955,6 +5175,20 @@ export function ChatPanel({
       setSessionOverride({});
     }
   };
+  function startHarness(harness: Harness) {
+    const model = resolveHarnessDefaultModel(harness);
+    const next: ModelSelection = {
+      harness: harness.id,
+      model,
+      serviceTier: reconcileServiceTier(harness.catalogPending ? undefined : harness, model, null),
+      permissionMode: harness.options?.defaultPermissionMode ?? null,
+      reasoningLevel: reconcileReasoning(harness.catalogPending ? undefined : harness, model, null),
+    };
+    setSelection(next);
+    void onPreferredAgentChange(next).catch(() => {});
+    if (onStartHarnessDraft) onStartHarnessDraft();
+    else onActiveSessionChangeRef.current(null, { projectId });
+  }
   const queueSessionMutation = useCallback(<T,>(mutation: () => Promise<T>): Promise<T> => {
     const result = settingsMutationTail.current.catch(() => {}).then(() => {
       if (!isCurrentScope(sessionsOptions.queryKey)) throw new DOMException("Workspace changed", "AbortError");
@@ -4970,6 +5204,7 @@ export function ChatPanel({
     // Plan is session-scoped. Claude exposes it in the permission dropdown,
     // but it must not become the saved default for future sessions.
     if (id === "plan" && activeHarness?.id === "claude-code") {
+      if (composerSelection?.permissionMode !== id) invalidatePendingRetry();
       setRecoveryOverrides((current) => ({ ...current, permissionMode: id }));
       setSessionOverride((current) => ({ ...current, permissionMode: id }));
     } else {
@@ -5009,6 +5244,7 @@ export function ChatPanel({
   };
   const setReasoningLevel = (id: string) => selectModel({ reasoningLevel: id });
   const setAutonomy = (autonomy: Autonomy) => {
+    if (autonomy !== (openSession?.autonomy ?? preferredAutonomy)) invalidatePendingRetry();
     if (!openSession) {
       if (sideParentSessionId) setSideDraftAutonomy(autonomy);
       else onPreferredAutonomyChange(autonomy);
@@ -5039,7 +5275,7 @@ export function ChatPanel({
   const planActive = acpMode ? acpMode.currentValue === "plan" : composerSelection?.harness === "claude-code"
     ? composerSelection.permissionMode === "plan"
     : planActivation === "command"
-      ? planModeOverride ?? openSession?.planMode ?? false
+      ? planModeOverride ?? retryOptions?.planMode ?? openSession?.planMode ?? false
       : false;
   useEffect(() => {
     if (planModeOverride === null || openSession?.planMode !== planModeOverride) return;
@@ -5048,6 +5284,7 @@ export function ChatPanel({
   }, [openSession?.planMode, planModeOverride]);
 
   async function setIndependentPlanMode(planMode: boolean) {
+    if (planMode !== planActive) invalidatePendingRetry();
     if (acpMode && openSession) {
       const next = planMode ? "plan" : acpMode.choices.find((choice) => choice.id !== "plan")?.id;
       if (!next) throw new Error(m.chat_toggle_plan_failed());
@@ -5122,7 +5359,20 @@ export function ChatPanel({
         } else startNewTask();
         return false;
       case "resume":
-        setResumeOpen(true);
+        showCustomDialog({
+          component: ResumeDialog,
+          props: {
+            activeSessionId: activeId,
+            cancelRef: resumeCancelRef,
+            onResume: (session) => {
+              setSessionFilter("all");
+              onActiveSessionChange(session.id, { projectId: session.projectId });
+            },
+            onImport: (chat) => { void importChat(chat); },
+          },
+          onConfirm: () => {},
+          onCancel: "close",
+        });
         return true;
       case "model":
         setModelPickerRequest((request) => request + 1);
@@ -5321,10 +5571,8 @@ export function ChatPanel({
     };
   }, [projectId, syncSessionList]);
 
-  // Load message history when a session becomes active.
   useEffect(() => {
     setRecoveryOverrides(EMPTY_RECOVERY_OVERRIDES);
-    pendingClientTurn.current = null;
   }, [activeId]);
 
   useEffect(() => {
@@ -5605,12 +5853,14 @@ export function ChatPanel({
     setSkillMenuDismissed(false);
     setComposerCursor(composerPrefill.length);
   }, [composerPrefill]);
+  const [newChatFocusProject, setNewChatFocusProject] = useState<string | null>(null);
   const focusedComposerNonce = useRef(0);
   useEffect(() => {
     // The composer is inert while its chat is loading. Keep the
     // request pending until it can take focus, and consume it only once.
-    if (composerFocusNonce === 0 || composerFocusNonce === focusedComposerNonce.current
-      || contentLoading || contentError || historyLoading) return;
+    const newChatPending = newChatFocusProject === projectId && activeId === null;
+    const composerPending = composerFocusNonce !== 0 && composerFocusNonce !== focusedComposerNonce.current;
+    if ((!newChatPending && !composerPending) || mainView !== "chat" || contentLoading || contentError || historyLoading) return;
     // The welcome dialog restores its previous focus on unmount; run after that.
     const frame = window.requestAnimationFrame(() => {
       const el = composerRef.current;
@@ -5618,12 +5868,14 @@ export function ChatPanel({
       el.focus();
       if (document.activeElement !== el) return;
       focusedComposerNonce.current = composerFocusNonce;
+      if (newChatPending) setNewChatFocusProject(null);
       el.setSelectionRange(el.value.length, el.value.length);
       el.scrollIntoView({ block: "nearest" });
     });
     return () => window.cancelAnimationFrame(frame);
-  }, [composerFocusNonce, contentLoading, contentError, historyLoading]);
+  }, [composerFocusNonce, newChatFocusProject, projectId, activeId, mainView, contentLoading, contentError, historyLoading]);
   const demoHintId = useId();
+  const unconfirmedSendId = useId();
   const demoHintVisible =
     projectId === DEMO_PROJECT_ID && draft === DEMO_RUN_EXPERIMENT_PROMPT && !demoHintDismissed;
   const updateTranscriptBottom = useCallback((el: HTMLDivElement) => {
@@ -5710,23 +5962,52 @@ export function ChatPanel({
     const wireAnnotations = pendingAnnotations.map((annotation) => ({
       text: annotation.text,
     }));
+    const turnSignature = JSON.stringify({
+      text,
+      goal: goalRequested ? text : undefined,
+      plan: planRequested,
+      images: pending.map((attachment) => ({
+        mediaType: attachment.mediaType,
+        name: attachment.name,
+        dataUrl: attachment.dataUrl,
+      })),
+      annotations: wireAnnotations,
+    });
+    const retry = pendingClientTurn.current?.signature === turnSignature ? pendingClientTurn.current : null;
     const sourceProjectId = projectId;
     const sourceView = mainView;
     let sourceSessionId = activeId;
+    let sourceStashKey = stashKey;
     const inSourceScope = () => {
       const current = composerScopeRef.current;
-      return isCurrentScope(sessionsOptions.queryKey) && current.projectId === sourceProjectId
+      return composerMountedRef.current && isCurrentScope(sessionsOptions.queryKey) && current.projectId === sourceProjectId
         && current.activeId === sourceSessionId
         && current.mainView === sourceView;
     };
-    const restoreComposer = () => {
-      if (!inSourceScope()) return;
-      setDraft((current) => current || originalText);
-      if (goalRequested) setGoalScope(composerScopeRef.current);
-      setAttachments((current) => (current.length ? current : pending));
-      setAnnotations((current) => (current.length ? current : pendingAnnotations));
+    let failedTurn: ComposerStash["pendingClientTurn"] = null;
+    const restoreComposer = (unconfirmedSend: string | null = null) => {
+      if (!isCurrentScope(sessionsOptions.queryKey)
+        || (sourceSessionId && deletedSessionIds.has(sourceSessionId))
+        || (sideParentSessionId && deletedSessionIds.has(sideParentSessionId))) return;
+      const restore = mountedComposers.get(sourceStashKey);
+      const failed = {
+        draft: goalArmed && !goalCommand && (!restore || !inSourceScope()) ? `/goal ${starter ?? draft}` : starter ?? draft,
+        attachments: pending,
+        annotations: pendingAnnotations.map(({ range: _range, ...annotation }) => annotation),
+        unconfirmedSend,
+        pendingClientTurn: unconfirmedSend === null || failedTurn?.invalidated ? null : failedTurn,
+      };
+      if (restore) {
+        restore(failed);
+        if (goalRequested && inSourceScope()) setGoalScope(composerScopeRef.current);
+      } else {
+        const merged = mergeFailedComposer(composerStashes.get(sourceStashKey) ?? EMPTY_COMPOSER_STASH, failed);
+        const stashed = composerStashContent(merged, null);
+        if (stashed) composerStashes.set(sourceStashKey, stashed);
+      }
     };
     if (planRequested && !text && pending.length === 0 && pendingAnnotations.length === 0) {
+      composerLiveRef.current = { ...composerLiveRef.current, draft: "" };
       setDraft("");
       setSkillMenuDismissed(false);
       try {
@@ -5743,7 +6024,7 @@ export function ChatPanel({
       }
       return;
     }
-    if (planRequested && acpMode) {
+    if (planRequested && acpMode && !retry) {
       try {
         await setIndependentPlanMode(toggledPlanMode);
       } catch {
@@ -5757,10 +6038,10 @@ export function ChatPanel({
         ...(planPermissionMode ? { permissionMode: planPermissionMode } : {}),
       }
       : null;
-    if (planPermissionMode) setPermissionMode(planPermissionMode);
+    if (planPermissionMode && !retry) setPermissionMode(planPermissionMode);
     let planCommandMutation: number | null = null;
     const previousPlanModeOverride = planModeOverrideRef.current;
-    if (planRequested && !acpMode && planActivation === "command") {
+    if (planRequested && !acpMode && planActivation === "command" && !retry) {
       planCommandMutation = ++planMutationSeq.current;
       planModeOverrideRef.current = toggledPlanMode;
       setPlanModeOverride(toggledPlanMode);
@@ -5777,29 +6058,48 @@ export function ChatPanel({
       const session = await setChatSessionGoalMutation.mutateAsync([sessionId, text]);
       setSessions((current) => current.map((candidate) => candidate.id === session.id ? session : candidate));
     };
-    const turnSignature = JSON.stringify({
-      text,
-      goal: goalRequested ? text : undefined,
-      images: pending.map((attachment) => ({
-        mediaType: attachment.mediaType,
-        name: attachment.name,
-        dataUrl: attachment.dataUrl,
-      })),
-      annotations: wireAnnotations,
-      settings: effective
-        ? {
-          model: effective.model,
-          serviceTier: effective.serviceTier,
-          permissionMode: effective.permissionMode,
-          planMode: independentPlanMode,
-          reasoningLevel: effective.reasoningLevel,
+    const clientTurnId = retry?.id ?? `ct_${crypto.randomUUID()}`;
+    const mode = retry ? retry.mode : busy && steering && !queue && !planRequested && !goalRequested ? "steer" : null;
+    const turnOpts = retry?.options ?? (effective ? {
+      model: effective.model,
+      serviceTier: effective.serviceTier,
+      permissionMode: effective.permissionMode,
+      // A persisted plan toggle must reach the running turn's settings check.
+      planMode: busy && planActivation === "command" ? (independentPlanMode ?? openSession?.planMode) : independentPlanMode,
+      reasoningLevel: effective.reasoningLevel,
+    } : {});
+    pendingClientTurn.current = { signature: turnSignature, id: clientTurnId, mode, options: turnOpts };
+    failedTurn = pendingClientTurn.current;
+    const finishSentMessage = () => {
+      if (inSourceScope()) {
+        setRecoveryOverrides(EMPTY_RECOVERY_OVERRIDES);
+        if (retry) {
+          setUnconfirmedSend(null);
+          composerLiveRef.current = { ...composerLiveRef.current, unconfirmedSend: null };
         }
-        : null,
-    });
-    const clientTurnId = pendingClientTurn.current?.signature === turnSignature
-      ? pendingClientTurn.current.id
-      : `ct_${crypto.randomUUID()}`;
-    pendingClientTurn.current = { signature: turnSignature, id: clientTurnId };
+        if (goalRequested) setGoalScope(null);
+      }
+      if (pendingClientTurn.current?.id === clientTurnId) {
+        pendingClientTurn.current = null;
+        if (inSourceScope() && composerLiveRef.current.pendingClientTurn?.id === clientTurnId) {
+          composerLiveRef.current = { ...composerLiveRef.current, pendingClientTurn: null };
+        }
+      }
+    };
+    const clearComposer = () => {
+      const live = composerLiveRef.current;
+      composerLiveRef.current = {
+        ...live,
+        draft: live.draft === draft ? "" : live.draft,
+        attachments: live.attachments === pending ? [] : live.attachments,
+        annotations: live.annotations === pendingAnnotations ? [] : live.annotations,
+      };
+      setDraft((current) => current === draft ? "" : current);
+      setAttachments((current) => current === pending ? [] : current);
+      setAnnotations((current) => current === pendingAnnotations ? [] : current);
+      setAttachError(null);
+      setImageRefusedFor(null);
+    };
     if (busy) {
       // A turn is already running. Steering hands the message to it now, and
       // the delivered text comes back inline on the assistant message. Parking
@@ -5811,39 +6111,18 @@ export function ChatPanel({
         return;
       }
       const sid = activeId;
-      setDraft("");
-      setAttachments([]);
-      setAnnotations([]);
-      setAttachError(null);
-      setImageRefusedFor(null);
-      // Always send the composer's settings, steer or not: a permission or
-      // plan change persists itself before this message, so the server's
-      // comparison against the *running* turn is the only thing that catches
-      // it — and a mismatch parks the message, which also persists the change.
-      const turnOpts = effective
-        ? {
-          model: effective.model,
-          serviceTier: effective.serviceTier,
-          permissionMode: effective.permissionMode,
-          // The composer's plan state, not just an unpersisted toggle: a
-          // toggle that already persisted would otherwise reach the server
-          // as "no change" and steer into a turn still running without it.
-          planMode:
-            planActivation === "command"
-              ? (independentPlanMode ?? openSession?.planMode)
-              : independentPlanMode,
-          reasoningLevel: effective.reasoningLevel,
-        }
-        : {};
+      clearComposer();
       if (inSourceScope()) setSessionOverride({});
       const images: ChatImageAttachment[] = pending.map((a) => ({
         mediaType: a.mediaType,
         dataBase64: a.dataUrl.slice(a.dataUrl.indexOf(",") + 1),
         name: a.name,
       }));
+      let submitted = false;
       try {
         const sendBusy = async () => {
           await persistMessageGoal(sid);
+          submitted = true;
           return sendChatMessage(
             sid,
             text,
@@ -5851,20 +6130,31 @@ export function ChatPanel({
             images.length ? images : undefined,
             wireAnnotations,
             clientTurnId,
-            steering && !queue && !planRequested && !goalRequested ? "steer" : undefined,
+            mode ?? undefined,
           );
         };
         const response = await queueSessionMutation(sendBusy);
         if (response.turn?.existing) await reseedSession(sid);
-        if (inSourceScope()) {
-          setRecoveryOverrides(EMPTY_RECOVERY_OVERRIDES);
-          if (goalRequested) setGoalScope(null);
+        finishSentMessage();
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : String(err);
+        const unconfirmed = submitted && !(err instanceof RejectedResponseError);
+        if (unconfirmed) {
+          const accepted = await getChatSubmission(sid, clientTurnId).then((result) => result.accepted).catch(() => false);
+          if (!isCurrentScope(sessionsOptions.queryKey) || deletedSessionIds.has(sid)
+            || (sideParentSessionId && deletedSessionIds.has(sideParentSessionId))) return;
+          if (accepted) {
+            finishSentMessage();
+            await reseedSession(sid).catch(() => {});
+            return;
+          }
         }
-        if (pendingClientTurn.current?.id === clientTurnId) pendingClientTurn.current = null;
-      } catch {
-        // Never reached the turn — restore the composer so a retry is one keypress.
         clearFailedPlanCommand();
-        restoreComposer();
+        restoreComposer(unconfirmed ? msg : null);
+        if (isCurrentScope(sessionsOptions.queryKey) && !deletedSessionIds.has(sid)
+          && (!sideParentSessionId || !deletedSessionIds.has(sideParentSessionId)) && !unconfirmed) {
+          dispatch({ type: "localError", sessionId: sid, text: m.chat_message_not_sent({ error: ltr(msg) }) });
+        }
       }
       return;
     }
@@ -5879,41 +6169,48 @@ export function ChatPanel({
       return;
     }
     let sid = activeId;
+    let submitted = false;
     try {
       // Clear before the first await — once the scope can move, a stash
       // cleanup must never see the sent text still in the composer. Failure
       // paths below restore it via restoreComposer().
-      setDraft((current) => current === draft ? "" : current);
-      setAttachments((current) => current === pending ? [] : current);
-      setAnnotations((current) => (current === pendingAnnotations ? [] : current));
-      setAttachError(null);
-      setImageRefusedFor(null);
+      clearComposer();
       preparingSend.current = true;
       try {
         if (!sid) {
           const session = await openNewSession(effective, independentPlanMode);
           sid = session.id;
           sourceSessionId = session.id;
+          sourceStashKey = `${stashScope}${embedded ? `side:${session.id}` : session.id}`;
         }
         if (!isCurrentScope(sessionsOptions.queryKey)) return;
-        const history = getChatMessagesQuery(sid);
-        // Join pending repair even when it has published an intermediate snapshot.
-        await queryClient.fetchQuery({
+        const historySid = sid;
+        const history = getChatMessagesQuery(historySid);
+        // Join pending repair even when it has published an intermediate snapshot. A live invalidation
+        // (e.g. SSE reconnect) can cancel the joined read; retrying joins its replacement or reads the cache.
+        const awaitHistory = (): Promise<unknown> => queryClient.fetchQuery({
           ...history,
           ...(queryClient.getQueryState(history.queryKey)?.fetchStatus === "fetching" ? { staleTime: 0 } : {}),
+        }).catch((cause: unknown) => {
+          if (cause instanceof CancelledError && isCurrentScope(sessionsOptions.queryKey) && !deletedSessionIds.has(historySid)) return awaitHistory();
+          throw cause;
         });
+        await awaitHistory();
       } finally {
         preparingSend.current = false;
       }
-      if (!isCurrentScope(sessionsOptions.queryKey)) return;
-      dispatch({
-        type: "optimisticUser",
-        sessionId: sid,
-        text: text || m.chat_asked_about_selection(),
-        attachments: pending.map((a) => ({ url: a.dataUrl, mediaType: a.mediaType, name: a.name })),
-        annotations: pendingAnnotations,
-      });
-      dispatch({ type: "busy", sessionId: sid, busy: true });
+      if (!isCurrentScope(sessionsOptions.queryKey) || deletedSessionIds.has(sid)
+        || (sideParentSessionId && deletedSessionIds.has(sideParentSessionId))) return;
+      if (!(retry && mode === "steer")) {
+        dispatch({
+          type: "optimisticUser",
+          sessionId: sid,
+          text: text || m.chat_asked_about_selection(),
+          attachments: pending.map((a) => ({ url: a.dataUrl, mediaType: a.mediaType, name: a.name })),
+          annotations: pendingAnnotations,
+        });
+        dispatch({ type: "busy", sessionId: sid, busy: true });
+      }
       if (inSourceScope()) pinTranscriptToBottom();
       // The session being sent to is never archived after this turn (new ones
       // start active; existing ones are unarchived server-side by activity) —
@@ -5922,15 +6219,6 @@ export function ChatPanel({
       // `effective.harness` is always the target session's harness (locked once
       // it exists), so these overrides are always valid — the backend persists
       // them as the session's sticky settings. Clear the unsent tweak now.
-      const turnOpts = effective
-        ? {
-          model: effective.model,
-          serviceTier: effective.serviceTier,
-          permissionMode: effective.permissionMode,
-          planMode: independentPlanMode,
-          reasoningLevel: effective.reasoningLevel,
-        }
-        : {};
       if (inSourceScope()) setSessionOverride({});
       const images: ChatImageAttachment[] = pending.map((a) => ({
         mediaType: a.mediaType,
@@ -5941,6 +6229,7 @@ export function ChatPanel({
       if (!targetSessionId) throw new Error(m.chat_session_not_created());
       const sendTurn = async () => {
         await persistMessageGoal(targetSessionId);
+        submitted = true;
         return sendChatMessage(
           targetSessionId,
           text,
@@ -5948,45 +6237,41 @@ export function ChatPanel({
           images.length ? images : undefined,
           wireAnnotations,
           clientTurnId,
+          mode ?? undefined,
         );
       };
       const response = await queueSessionMutation(sendTurn);
       if (response.turn?.existing) await reseedSession(targetSessionId);
-      if (inSourceScope()) {
-        setRecoveryOverrides(EMPTY_RECOVERY_OVERRIDES);
-        if (goalRequested) setGoalScope(null);
-      }
-      if (pendingClientTurn.current?.id === clientTurnId) pendingClientTurn.current = null;
+      finishSentMessage();
     } catch (err) {
       if (!isCurrentScope(sessionsOptions.queryKey)) return;
-      // The message never reached a turn — put it back in the composer so a
-      // retry is one keypress, whichever branch below applies.
-      restoreComposer();
-      clearFailedPlanCommand();
-      if (!sid) return; // session creation failed; no transcript to annotate
+      if (!sid) {
+        restoreComposer();
+        clearFailedPlanCommand();
+        const msg = err instanceof Error ? err.message : String(err);
+        showAlert(m.chat_message_not_sent({ error: ltr(msg) }), "error");
+        return;
+      }
       const msg = err instanceof Error ? err.message : String(err);
-      // A *network* failure does not prove no turn started — the backend
-      // claims the turn (and emits busy) before its response, so a lost
-      // response can reject on a live, streaming turn; ask the server before
-      // declaring failure. An explicit busy rejection is different: the slot
-      // belongs to someone else's turn (run watcher, second tab) and ours was
-      // never accepted — always surface that.
-      if (!/session is busy/i.test(msg)) {
-        const busyNow = await queryClient.fetchQuery({ ...listChatSessionsQuery(projectId), staleTime: 0 })
-          .then((list) => !!list.find((s) => s.id === sid)?.busy)
-          .catch(() => false);
-        if (busyNow) {
-          // The turn is real and streaming — undo the restore, nothing failed.
-          if (inSourceScope()) {
-            setDraft((cur) => (cur === text ? "" : cur));
-            setAttachments((cur) => (cur === pending ? [] : cur));
-            setAnnotations((cur) => (cur === pendingAnnotations ? [] : cur));
-          }
+      if (!isCurrentScope(sessionsOptions.queryKey) || deletedSessionIds.has(sid)) return;
+      const unconfirmed = submitted && !(err instanceof RejectedResponseError);
+      if (unconfirmed) {
+        const accepted = await getChatSubmission(sid, clientTurnId).then((result) => result.accepted).catch(() => false);
+        if (!isCurrentScope(sessionsOptions.queryKey) || deletedSessionIds.has(sid)
+          || (sideParentSessionId && deletedSessionIds.has(sideParentSessionId))) return;
+        if (accepted) {
+          finishSentMessage();
+          await reseedSession(sid).catch(() => {});
           return;
         }
       }
-      dispatch({ type: "busy", sessionId: sid, busy: false });
-      dispatch({ type: "localError", sessionId: sid, text: m.chat_message_not_sent({ error: ltr(msg) }) });
+      restoreComposer(unconfirmed ? msg : null);
+      clearFailedPlanCommand();
+      if (submitted) await reseedSession(sid).catch(() => {});
+      else dispatch({ type: "busy", sessionId: sid, busy: false });
+      if (!isCurrentScope(sessionsOptions.queryKey) || deletedSessionIds.has(sid)
+        || (sideParentSessionId && deletedSessionIds.has(sideParentSessionId))) return;
+      if (!unconfirmed) dispatch({ type: "localError", sessionId: sid, text: m.chat_message_not_sent({ error: ltr(msg) }) });
     }
   }
 
@@ -6196,47 +6481,19 @@ export function ChatPanel({
     }
   }
 
-  const lastPointerInSide = useRef(false);
-  useEffect(() => {
-    const onDown = (e: PointerEvent) => { lastPointerInSide.current = inSideChat(e.target); };
-    document.addEventListener("pointerdown", onDown, true);
-    return () => document.removeEventListener("pointerdown", onDown, true);
-  }, []);
-
-  // Escape stops the streaming turn and drops focus back into the composer,
-  // mirroring the Claude Code desktop app. Harness-agnostic — `stop()` →
-  // `interruptChat` interrupts whichever harness (Claude, Codex, OpenCode, …)
-  // is running the active session. Only armed while chat is visible.
-  //
-  // An overlay that should swallow Escape (rather than let it stop the turn)
-  // must own the key ahead of this document-level bubble listener, by one of
-  // two means already in use — a new overlay has to pick one or it will
-  // interrupt the turn on Escape:
-  //   - the slash and @file menus preventDefault in the composer's onKeyDown (bubble),
-  //     so the `defaultPrevented` guard below defers to it;
-  //   - the composer pickers (usePopover) stopPropagation in the capture phase,
-  //     so their Escape never reaches this listener at all.
-  useEffect(() => {
-    if (!busy || mainView !== "chat") return;
-    function onKey(e: KeyboardEvent) {
-      if (e.key !== "Escape" || e.defaultPrevented) return;
-      // Clicking a transcript leaves focus on body; the click says which pane it was.
-      const side = e.target === document.body ? lastPointerInSide.current : inSideChat(e.target);
-      if (side !== embedded) return;
-      e.preventDefault();
-      stop();
-      composerRef.current?.focus();
-    }
-    document.addEventListener("keydown", onKey);
-    return () => document.removeEventListener("keydown", onKey);
-  }, [busy, activeId, mainView, embedded]);
+  useHotkey("Escape", () => {
+    if (commandRegion() !== (embedded ? "right" : "left")) return;
+    stop();
+    composerRef.current?.focus();
+  }, { enabled: busy && mainView === "chat", preventDefault: true, stopPropagation: false, conflictBehavior: "allow" });
 
   /** Drop every trace of a session — the local row, the open-thread selection,
    * and the cached transcript. Used on delete (ours or another dashboard's). */
   function forgetSession(sessionId: string) {
     removeCachedSession(sessionId);
-    composerStashRef.current.delete(sessionId);
-    if (prefillScopeRef.current === sessionId) prefillScopeRef.current = null;
+    composerStashes.delete(`${stashScope}${sessionId}`);
+    composerStashes.delete(`${stashScope}side:${sessionId}`);
+    if (prefillScopesRef.current.get(projectId) === `${stashScope}${sessionId}`) prefillScopesRef.current.delete(projectId);
     if (composerScopeRef.current.projectId === projectId
       && composerScopeRef.current.activeId === sessionId
       && composerScopeRef.current.mainView === "chat") {
@@ -6286,16 +6543,19 @@ export function ChatPanel({
     });
   }
 
-  async function removeSession(session: ChatSession) {
+  function removeSession(session: ChatSession) {
     const title = session.title?.trim() || m.chat_untitled();
-    if (!window.confirm(m.chat_delete_session_confirm({ title: autoDir(title) }))) return;
-    try {
-      await deleteChatSessionMutation.mutateAsync(session.id);
-    } catch (err) {
-      showAlert(m.chat_delete_session_failed({ title: autoDir(title), error: ltr(err instanceof Error ? err.message : String(err)) }), "error");
-      return;
-    }
-    forgetSession(session.id);
+    showConfirmDialog({
+      title: m.chat_panel_delete(),
+      description: m.chat_delete_session_confirm({ title: autoDir(title) }),
+      confirmLabel: m.chat_panel_delete(),
+      destructive: true,
+      onCancel: "close",
+      onConfirm: async () => {
+        await deleteChatSessionMutation.mutateAsync(session.id);
+        forgetSession(session.id);
+      },
+    });
   }
 
   /** Deliver a card answer; resolves `false` when delivery failed (so a
@@ -6330,20 +6590,23 @@ export function ChatPanel({
     [activeId, projectId, queueSessionMutation, sessionsOptions],
   );
 
-  const isApple = /Mac|iPhone|iPad/.test(navigator.platform);
-  const newTaskShortcut = isApple ? "⌘ ⇧ ↵" : "Ctrl + Shift + ↵";
-  const queueChord = isApple ? "⌘ Enter" : "Ctrl + Enter";
+  const newTaskHotkey = useAppHotkeys()["task.new"].hotkey;
+  const newTaskShortcut = newTaskHotkey ? formatForDisplay(newTaskHotkey) : undefined;
+  const queueChord = formatForDisplay("Mod+Enter");
   const startProjectTask = useCallback(() => {
     setSessionFilter("active");
+    setNewChatFocusProject(projectId);
     onActiveSessionChange(null);
-  }, [onActiveSessionChange]);
+  }, [onActiveSessionChange, projectId]);
   const startNewTask = useCallback(async () => {
     try {
       const activity = await queryClient.fetchQuery({ ...listProjectActivityQuery(), staleTime: 0 });
       const latest = activity.reduce<(typeof activity)[number] | undefined>((current, item) =>
         !current || item.lastActivityAt > current.lastActivityAt ? item : current, undefined);
       setSessionFilter("active");
-      onActiveSessionChange(null, { projectId: latest?.projectId ?? projectId });
+      const targetProject = latest?.projectId ?? projectId;
+      setNewChatFocusProject(targetProject);
+      onActiveSessionChange(null, { projectId: targetProject });
     } catch (error) {
       showAlert(error instanceof Error ? error.message : String(error), "error");
     }
@@ -6366,24 +6629,12 @@ export function ChatPanel({
     [onActiveSessionChange],
   );
 
-  useEffect(() => {
-    if (embedded) return;
-    const onKeyDown = (event: KeyboardEvent) => {
-      if (
-        event.repeat ||
-        event.key !== "Enter" ||
-        (!event.metaKey && !event.ctrlKey) ||
-        event.altKey ||
-        !event.shiftKey ||
-        inSideChat(event.target)
-      )
-        return;
-      event.preventDefault();
-      startNewTask();
-    };
-    document.addEventListener("keydown", onKeyDown);
-    return () => document.removeEventListener("keydown", onKeyDown);
-  }, [startNewTask, embedded]);
+  const newTask = () => {
+    if (commandRegion() === "right" && document.querySelector(".right-pane [data-side-chat]")) return;
+    startNewTask();
+  };
+  useHotkey(appHotkeys["task.new"], newTask, { enabled: !embedded, requireReset: true });
+  useHotkey("Mod+Shift+Enter", newTask, { enabled: !embedded, requireReset: true });
 
   const sessionWaiting = (session: ChatSession) => state.messagesBySession[session.id]
     ? waitingSessions.has(session.id) : session.awaitingInput === true;
@@ -6403,7 +6654,7 @@ export function ChatPanel({
     sidebarRows.push({ kind: "project", project, collapsed, busy: collapsed && matching.some((session) => sessionBusy(project, session) && !sessionWaiting(session)) });
     if (collapsed) return;
     visible.forEach((session) => sidebarRows.push({ kind: "chat", project, session }));
-    if (matching.length > chatLimit) sidebarRows.push({ kind: "more", project });
+    if (matching.length > 6) sidebarRows.push({ kind: "more", project });
     if (!visible.length && (sidebarGrouping === "projects" || query.isPending || query.error)) sidebarRows.push({ kind: "status", project, pending: query.isPending, error: Boolean(query.error), retry: () => { void query.refetch(); } });
   });
   if (sidebarGrouping === "list") {
@@ -6443,6 +6694,15 @@ export function ChatPanel({
   });
 
   const sidebarVirtualItems = sidebarVirtualizer.getVirtualItems();
+  const pendingSidebarFocus = useRef<number | null>(null);
+  useLayoutEffect(() => {
+    if (pendingSidebarFocus.current === null) return;
+    const row = railBodyRef.current?.querySelector<HTMLElement>(`[data-index="${pendingSidebarFocus.current}"] [data-sidebar-keyboard-row]`);
+    if (row) {
+      pendingSidebarFocus.current = null;
+      row.focus();
+    }
+  });
   const lastVisibleIndex = sidebarVirtualItems.at(-1)?.index ?? -1;
   useEffect(() => {
     if (sidebarGrouping === "list" && railOpen && !embedded && lastVisibleIndex >= sidebarRows.length - 6
@@ -6452,43 +6712,60 @@ export function ChatPanel({
   }, [sidebarGrouping, railOpen, embedded, lastVisibleIndex, sidebarRows.length, flatSessions.hasNextPage, flatSessions.isFetching, flatSessions.isError, flatSessions.fetchNextPage]);
 
   const rail = (
-    <aside className="session-rail w-75 shrink-0 flex flex-col win-titlebar:pt-win-caption bg-background min-h-0 [&_.rail-body]:flex-1 [&_.rail-body]:min-h-0 [&_.rail-body]:pt-0 [&_.rail-body]:pb-0 [&_.rail-body]:ps-2 [&_.rail-body]:pe-1 border-e border-e-border overflow-visible">
+    <aside style={mobileRail ? undefined : { width: railWidth }} className="session-rail relative shrink-0 flex flex-col bg-background min-h-0 [&_.rail-body]:flex-1 [&_.rail-body]:min-h-0 [&_.rail-body]:pt-0 [&_.rail-body]:pb-0 [&_.rail-body]:ps-2 [&_.rail-body]:pe-1 border-e border-e-border overflow-visible">
+      {!mobileRail && <div
+        className="rail-resizer absolute -end-1 top-0 bottom-0 w-1.5 z-30 cursor-col-resize [&:hover]:bg-resizer-hover [&:active]:bg-resizer-hover"
+        onPointerDown={onResizeRail}
+      />}
       {railHeader}
-      <nav className="rail-nav flex flex-col gap-0.5 p-2 shrink-0">
+      <nav data-keyboard-list onKeyDown={navigateKeyboardList} className="rail-nav flex flex-col gap-0.5 p-2 shrink-0 [&_[data-tip]::after]:left-[calc(100%_+_6px)] [&_[data-tip]::after]:top-1/2 [&_[data-tip]::after]:translate-x-0 [&_[data-tip]::after]:-translate-y-1/2">
         <button
-          className="rail-nav-item flex items-center gap-2.5 py-2 px-2.5 text-base text-text rounded-md text-start hover:bg-surface [&[data-tip]::after]:top-auto [&[data-tip]::after]:bottom-[calc(100%_+_6px)]"
+          className="rail-nav-item flex items-center gap-2.5 py-2 px-2.5 text-base text-text rounded-md text-start hover:bg-surface"
           data-onboarding="new-session"
+          data-keyboard-item
           data-tip={newTaskShortcut}
-          aria-keyshortcuts="Meta+Shift+Enter Control+Shift+Enter"
+          aria-label={m.chat_panel_new_chat()}
+          aria-keyshortcuts="Meta+N Control+N Meta+Shift+Enter Control+Shift+Enter"
           onClick={startNewTask}
         >
           <Plus size={16} />
           {m.chat_panel_new_chat()}
         </button>
         <button
+          data-keyboard-item
           className={`rail-nav-item flex items-center gap-2.5 py-2 px-2.5 text-base text-text rounded-md text-start [&:hover:not(.active)]:bg-surface [&.active]:bg-panel [&.active]:font-medium ${mainView === "skills" ? "active" : ""}`}
+          aria-current={mainView === "skills" ? "page" : undefined}
           onClick={() => onSelectMainView("skills")}
         >
           <Blocks size={16} />
           {m.chat_panel_customize()}
         </button>
-        {SETTINGS_NAV.map((item) => (
-          <button
-            key={item.id}
-            className={`rail-nav-item flex items-center gap-2.5 py-2 px-2.5 text-base text-text rounded-md text-start [&:hover:not(.active)]:bg-surface [&.active]:bg-panel [&.active]:font-medium ${mainView !== "chat" && mainView !== "skills" && item.activeTabs.includes(mainView) ? "active" : ""}`}
-            data-onboarding={item.id === "compute" ? "nav-compute" : undefined}
-            onClick={() => onSelectMainView(item.id)}
-          >
-            {item.icon}
-            {item.label()}
-          </button>
-        ))}
+        {SETTINGS_NAV.map((item) => {
+          const active = mainView !== "chat" && mainView !== "skills" && item.activeTabs.includes(mainView);
+          const shortcut = item.id === "settings" ? appHotkeys["settings.open"].hotkey : item.id === "compute" ? appHotkeys["compute.open"].hotkey : null;
+          return (
+            <button
+              key={item.id}
+              data-keyboard-item
+              className={`rail-nav-item flex items-center gap-2.5 py-2 px-2.5 text-base text-text rounded-md text-start [&:hover:not(.active)]:bg-surface [&.active]:bg-panel [&.active]:font-medium ${active ? "active" : ""}`}
+              aria-current={active ? "page" : undefined}
+              data-onboarding={item.id === "compute" ? "nav-compute" : undefined}
+              data-tip={shortcut ? formatForDisplay(shortcut) : undefined}
+              aria-label={item.label()}
+              aria-keyshortcuts={item.id === "settings" ? "Meta+, Control+," : item.id === "compute" ? "Meta+Alt+C Control+Alt+C" : undefined}
+              onClick={() => onSelectMainView(item.id)}
+            >
+              {item.icon}
+              {item.label()}
+            </button>
+          );
+        })}
       </nav>
-      <div className="rail-section-head flex items-center justify-between shrink-0 pt-3.5 pe-2.5 pb-0 ps-4.5">
+      <div className="rail-section-head flex items-center justify-between shrink-0 pt-3.5 pe-3.5 pb-0 ps-4.5">
         <div className="rail-section-label p-0 text-sm font-medium text-subtext">
           {sidebarGrouping === "projects" ? m.projects_home_projects() : m.chat_all_sessions()}
         </div>
-        <div className="rail-section-actions flex items-center gap-0.5">
+        <div className="rail-section-actions flex items-center gap-1">
           {onNewProject && <Tooltip interactive content={m.projects_home_new_project()} className="rounded-sm">
             <IconButton size="small" className="text-subtext" aria-label={m.projects_home_new_project()} onClick={onNewProject}>
               <FolderPlus size={16} className="text-subtext" />
@@ -6497,28 +6774,60 @@ export function ChatPanel({
           <SessionFilterMenu value={sessionFilter} onChange={setSessionFilter} grouping={sidebarGrouping} onGroupingChange={(grouping) => {
             setSidebarGrouping(grouping);
             try { localStorage.setItem("sidebar-grouping", grouping); } catch {}
-            setSidebarExpanded(false);
+            setSidebarExpandedAll(false);
             setChatLimits({});
             if (railBodyRef.current) railBodyRef.current.scrollTop = 0;
           }} />
         </div>
       </div>
       <div className="relative flex-1 min-h-0">
-      <div ref={railBodyRef} tabIndex={-1} className={`rail-body h-full overflow-x-hidden ${sidebarScrollable ? "overflow-y-auto" : "overflow-y-hidden"}`}>
-        <div className="relative" style={{ height: (sidebarScrollable ? sidebarVirtualizer.getTotalSize() : defaultRowsHeight) + (showProjectMore ? 38 : 0) + (sidebarExpanded ? 46 : 0) }}>
+      <div ref={setRailBody} tabIndex={-1} className={`rail-body h-full overflow-x-hidden ${sidebarScrollable ? "overflow-y-auto" : "overflow-y-hidden"}`}
+        onKeyDown={(event) => {
+          if (event.defaultPrevented || event.nativeEvent.isComposing || event.altKey || event.ctrlKey || event.metaKey || event.shiftKey) return;
+          const target = event.target;
+          if (!(target instanceof HTMLElement) || (target !== event.currentTarget && !target.hasAttribute("data-sidebar-keyboard-row"))) return;
+          const rows = sidebarScrollable ? sidebarRows : defaultRows;
+          const indexes = rows.flatMap((row, index) => row.kind === "project" || row.kind === "chat" ? [index] : []);
+          if (indexes.length === 0) return;
+          const rowIndex = Number(target.closest("[data-index]")?.getAttribute("data-index") ?? -1);
+          const position = indexes.indexOf(rowIndex);
+          let next: number;
+          if (event.key === "ArrowDown") next = position < 0 ? 0 : Math.min(position + 1, indexes.length - 1);
+          else if (event.key === "ArrowUp") next = position < 0 ? indexes.length - 1 : Math.max(position - 1, 0);
+          else if (event.key === "Home") next = 0;
+          else if (event.key === "End") next = indexes.length - 1;
+          else if (target instanceof HTMLButtonElement && event.key === "ArrowRight" && target.getAttribute("aria-expanded") === "false") {
+            event.preventDefault();
+            target.click();
+            return;
+          } else if (target instanceof HTMLButtonElement && event.key === "ArrowLeft" && target.getAttribute("aria-expanded") === "true") {
+            event.preventDefault();
+            target.click();
+            return;
+          } else return;
+          event.preventDefault();
+          const index = indexes[next];
+          if (index === rowIndex) return;
+          pendingSidebarFocus.current = index;
+          setFocusedSidebarRow(sidebarRowKey(rows[index]));
+          if (sidebarScrollable) sidebarVirtualizer.scrollToIndex(index, { align: "auto" });
+        }}>
+        <div className="relative" style={{ height: (sidebarScrollable ? sidebarVirtualizer.getTotalSize() : defaultRowsHeight) + (showProjectMore ? 38 : 0) + (sidebarExpandedAll ? 46 : 0) }}>
           {(sidebarScrollable
             ? sidebarVirtualItems.map((item) => ({ row: sidebarRows[item.index], top: item.start, index: item.index }))
             : defaultRows.map((row, index) => ({ row, top: 0, index }))
           ).map(({ row, top, index }) => {
             const project = row.project;
             const s = row.kind === "chat" ? row.session : null;
+            const sessionHarness = s ? sessionAcpHarness(s, harnesses.find((h) => h.id === s.harness)) : undefined;
+            const sessionModel = sessionHarness?.models.find((model) => model.id === s?.model);
             return (
               <div
                 key={sidebarRowKey(row)}
                 data-index={index}
                 onFocusCapture={() => setFocusedSidebarRow(sidebarRowKey(row))}
                 onBlurCapture={(event) => {
-                  if (!event.currentTarget.contains(event.relatedTarget)) setFocusedSidebarRow(null);
+                  if (!event.currentTarget.contains(event.relatedTarget) && !(event.relatedTarget instanceof Element && event.relatedTarget.closest(`[data-session-hover-card="${sidebarRowKey(row)}"]`))) setFocusedSidebarRow(null);
                 }}
                 className={sidebarScrollable ? "absolute top-0 start-0 w-full" : "relative"}
                 style={{ height: sidebarRowHeight(row), top: sidebarScrollable ? top : undefined }}
@@ -6553,12 +6862,19 @@ export function ChatPanel({
                     <SessionRow
                       key={s.id}
                       session={s}
+                      cardWarmUntil={cardWarmUntil}
+                      projectName={sidebarGrouping === "list" ? project.name : undefined}
+                      harnessLogo={sessionHarness?.logo}
+                      modelName={sessionModel ? harnessModelLabel(sessionModel) : s.model}
                       active={s.id === activeId && mainView === "chat"}
                       unread={unreadSessionIds.has(s.id)}
                       busy={sessionBusy(project, s)}
                       waiting={sessionWaiting(s)}
                       experimentRunning={activeRuns.some((item) => item.sessionId === s.id)}
                       revealTitle={titleReveals.get(s.id)}
+                      onOpenExperiment={(targetProjectId, experimentId) => {
+                        void navigate({ href: taskLocation(targetProjectId, targetProjectId === s.projectId ? s.id : null, { kind: "experiment", experimentId, view: "overview" }) });
+                      }}
                       onOpen={() => {
                         if (project.id === projectId) onActiveSessionChange(s.id);
                         else void navigate({ to: "/projects/$projectId/tasks/$sessionId", params: { projectId: project.id, sessionId: s.id } });
@@ -6585,11 +6901,15 @@ export function ChatPanel({
                     />
                   </div>
                 ) : row.kind === "more" ? (
-                  <Button variant="ghost" size="small" className="ms-5.5 font-normal text-subtext" onClick={() => {
-                    setSidebarExpanded(true);
-                    setChatLimits((current) => ({ ...current, [project.id]: (current[project.id] ?? 6) + 6 }));
+                  <Button variant="ghost" size="small" className="ms-5.5 font-normal text-subtext" aria-expanded={project.id in chatLimits} onClick={() => {
+                    setChatLimits((current) => {
+                      const next = { ...current };
+                      if (project.id in next) delete next[project.id];
+                      else next[project.id] = Infinity;
+                      return next;
+                    });
                   }}>
-                    {m.common_show_more()}
+                    {project.id in chatLimits ? m.common_show_less() : m.common_show_more()}
                   </Button>
                 ) : row.kind === "status" && (
                   <div className={`flex h-full items-center px-2.5 text-sm text-subtext ${sidebarGrouping === "projects" ? "ms-5.5" : ""}`}>
@@ -6601,26 +6921,19 @@ export function ChatPanel({
               </div>
             );
           })}
-          {showProjectMore && (
+          {(showProjectMore || sidebarExpandedAll) && (
             <div className="absolute start-0 flex h-9.5 w-full items-center pt-1" style={{ top: sidebarScrollable ? sidebarVirtualizer.getTotalSize() : defaultRowsHeight }}>
-              <Button variant="ghost" size="small" className="text-subtext" onClick={() => {
-                setSidebarExpanded(true);
-              }}>{m.common_show_more()}</Button>
-            </div>
-          )}
-          {sidebarExpanded && (
-            <div className="absolute start-0 w-full pt-1" style={{ top: sidebarVirtualizer.getTotalSize() + (showProjectMore ? 38 : 0) }}>
-              <Button variant="ghost" size="small" className="text-subtext" onClick={() => {
-                setSidebarExpanded(false);
-                setChatLimits({});
-                setFocusedSidebarRow(null);
-                if (railBodyRef.current) {
-                  railBodyRef.current.scrollTop = 0;
-                  railBodyRef.current.focus();
+              <Button variant="ghost" size="small" className="text-subtext" aria-expanded={sidebarExpandedAll} onClick={() => {
+                if (sidebarExpandedAll) {
+                  setChatLimits({});
+                  setFocusedSidebarRow(null);
+                  if (railBodyRef.current) {
+                    railBodyRef.current.scrollTop = 0;
+                    railBodyRef.current.focus();
+                  }
                 }
-              }}>
-                {m.common_show_less()}
-              </Button>
+                setSidebarExpandedAll(!sidebarExpandedAll);
+              }}>{sidebarExpandedAll ? m.common_show_less() : m.common_show_more()}</Button>
             </div>
           )}
         </div>
@@ -6635,23 +6948,33 @@ export function ChatPanel({
   );
 
   const headerClass = `chat-header flex items-center gap-2 py-0 px-4 bg-background shrink-0 h-12 mac-titlebar:h-titlebar relative z-4 w-full max-w-readable my-0 mx-auto [&::after]:content-[''] [&::after]:absolute [&::after]:top-full [&::after]:start-0 [&::after]:end-0 [&::after]:h-6 [&::after]:bg-[linear-gradient(to_bottom,_var(--base),_transparent)] [&::after]:pointer-events-none`;
-  const railReopen = !railOpen && !embedded && (
-    <IconButton
-      title={m.chat_panel_show_sidebar()}
-      aria-label={m.chat_panel_show_sidebar()}
-      onClick={onShowRail}
-      className="mac-titlebar:ms-titlebar-inset"
-    >
-      <PanelLeft size={20} />
-    </IconButton>
+  const displayedRail = mobileRail ? (
+    <Dialog.Root open={railOpen} onOpenChange={(open) => { if (!open) onCloseMobileRail?.(); }}>
+      <Dialog.Portal>
+        <Dialog.Backdrop className="fixed inset-0 z-70 bg-modal-backdrop" />
+        <Dialog.Popup aria-modal="true" aria-label={m.chat_panel_show_sidebar()} className="mobile-rail-dialog fixed inset-y-0 start-0 z-80 outline-none">{rail}</Dialog.Popup>
+      </Dialog.Portal>
+    </Dialog.Root>
+  ) : railOpen ? rail : null;
+  const railReopen = (!railOpen || mobileRail) && !embedded && (
+    <Tooltip interactive content={`${m.chat_panel_show_sidebar()} (${formatForDisplay(appHotkeys["sidebar.toggle"].hotkey ?? [])})`} className="rounded-md mac-titlebar:invisible">
+      <IconButton
+        aria-label={m.chat_panel_show_sidebar()}
+        aria-expanded={railOpen}
+        onClick={onShowRail}
+        className="mac-titlebar:ms-titlebar-inset"
+      >
+        <PanelLeft size={20} />
+      </IconButton>
+    </Tooltip>
   );
 
   if (mainView !== "chat") {
     return (
       <>
-        {railOpen && rail}
-        <section className="chat-pane flex-1 min-w-0 flex flex-col bg-background min-h-0 win-titlebar:pt-win-caption">
-          {!railOpen && <div className="flex h-12 mac-titlebar:h-titlebar shrink-0 items-center">{railReopen}</div>}
+        {displayedRail}
+        <section inert={contentInert} className="chat-pane flex-1 min-w-0 flex flex-col bg-background min-h-0">
+          {(!railOpen || mobileRail) && <div className="mac-titlebar-spacer flex h-12 mac-titlebar:h-titlebar shrink-0 items-center">{railReopen}</div>}
           {/* Keyed per view so no tab inherits the chat thread's or another tab's scroll offset. */}
           <div key={mainView} className="settings-view-scroll flex-1 min-h-0 overflow-y-auto [scrollbar-gutter:stable_both-edges]">
             {contentError ? <div role="alert" className="p-6 text-subtext">{contentError}<Button onClick={onRetryContent}>{m.app_retry()}</Button></div>
@@ -6664,11 +6987,11 @@ export function ChatPanel({
 
   return (
     <>
-      {railOpen && rail}
-      <section data-side-chat={embedded || undefined} className={`chat-pane flex-1 min-w-0 flex flex-col bg-background min-h-0 ${embedded ? "" : "win-titlebar:pt-win-caption"}`}>
+      {displayedRail}
+      <section inert={contentInert} data-side-chat={embedded || undefined} className="chat-pane flex-1 min-w-0 flex flex-col bg-background min-h-0">
         {/* Header — session title on the left, end-pane view switchers on the
           right, fading into the chat below (sessions live in the rail). */}
-        <div className={railOpen || embedded ? "contents" : "grid shrink-0 grid-cols-[2rem_minmax(0,1fr)_2rem] mac-titlebar:grid-cols-titlebar-chat items-center"}>
+        <div className={railOpen && !mobileRail || embedded ? "contents" : "chat-heading-row grid shrink-0 grid-cols-[2rem_minmax(0,1fr)_2rem] mac-titlebar:grid-cols-titlebar-chat items-center"}>
           {railReopen}
           <div className={headerClass}>
           <div className="flex min-w-0 flex-1 items-center gap-2">
@@ -6756,7 +7079,7 @@ export function ChatPanel({
               </>
             )}
             {starterPrompts && starterPrompts.length > 0 && (
-              <div className={STARTER_GRID_CLASS} role="group" aria-label={m.chat_panel_starter_prompts()}>
+              <div className={STARTER_GRID_CLASS} role="group" aria-label={m.chat_panel_starter_prompts()} inert={connection !== null}>
                 {starterPrompts.map((item, index) => {
                   const Icon = STARTER_ICONS[index];
                   const tone = STARTER_TONES[index];
@@ -6785,15 +7108,16 @@ export function ChatPanel({
                         </span>
                         <span className="w-full truncate text-sm text-subtext">{item.prompt}</span>
                       </button>
-                      <IconButton
-                        size="small"
-                        className="absolute end-2.5 top-2.5 [&:hover:not(:disabled)]:bg-surface-bright"
-                        aria-label={m.chat_panel_starter_edit({ title: item.title })}
-                        title={m.chat_panel_starter_edit({ title: item.title })}
-                        onClick={() => pickStarter(true)}
-                      >
-                        <Pencil size={14} />
-                      </IconButton>
+                      <Tooltip interactive content={m.chat_panel_starter_edit({ title: item.title })} className="absolute end-2.5 top-2.5">
+                        <IconButton
+                          size="small"
+                          className="[&:hover:not(:disabled)]:bg-surface-bright"
+                          aria-label={m.chat_panel_starter_edit({ title: item.title })}
+                          onClick={() => pickStarter(true)}
+                        >
+                          <Pencil size={14} />
+                        </IconButton>
+                      </Tooltip>
                     </div>
                   );
                 })}
@@ -6871,33 +7195,35 @@ export function ChatPanel({
         )}
 
         {pendingQuestions.length > 0 && (
-          <div inert={contentLoading || Boolean(contentError) || historyLoading} className="mx-auto mb-2 flex max-h-96 w-full max-w-readable shrink-0 flex-col gap-2 overflow-y-auto px-3">
+          <div inert={contentLoading || Boolean(contentError) || historyLoading || connection !== null} className="mx-auto mb-2 flex max-h-96 w-full max-w-readable shrink-0 flex-col gap-2 overflow-y-auto px-3">
             {pendingQuestions.map((part) => <PromptCard key={`${activeId}-${part.id}`} part={part} onRespond={respond} />)}
           </div>
         )}
 
         {/* Docked while a plan awaits a decision, so the approval controls never
           scroll away. Actions mirror the (now compact) inline card's wire. */}
-        <div inert={contentLoading || Boolean(contentError) || historyLoading} className="composer px-3 pb-5 shrink-0 relative z-4 bg-background w-full max-w-readable my-0 mx-auto [&_textarea]:border-0 [&_textarea]:bg-none [&_textarea]:bg-transparent [&_textarea]:resize-none [&_textarea]:pt-2.5 [&_textarea]:px-3 [&_textarea]:pb-1 [&_textarea]:text-base [&_textarea]:field-sizing-content [&_textarea]:min-h-18 [&_textarea]:max-h-45">
+        <div inert={contentLoading || Boolean(contentError) || historyLoading} className="composer px-3 pb-3 shrink-0 relative z-4 bg-background w-full max-w-readable my-0 mx-auto [&_textarea]:border-0 [&_textarea]:bg-none [&_textarea]:bg-transparent [&_textarea]:resize-none [&_textarea]:pt-2.5 [&_textarea]:px-3 [&_textarea]:pb-1 [&_textarea]:text-base [&_textarea]:field-sizing-content [&_textarea]:min-h-18 [&_textarea]:max-h-45">
           {threadMounted && (
-            <IconButton
-              className={`absolute bottom-full left-1/2 z-5 mb-6 h-9 w-9 -translate-x-1/2 rounded-full border border-border bg-background shadow-control transition-opacity duration-150 ease-standard ${transcriptAtBottom ? "opacity-0" : "opacity-100"}`}
-              title={m.chat_scroll_to_bottom()}
-              aria-label={m.chat_scroll_to_bottom()}
-              inert={transcriptAtBottom}
-              onClick={scrollToTranscriptBottom}
-            >
-              {busy && !awaitingInput ? (
-                <MoreHorizontal size={18} className="tool-running-shimmer-icon" />
-              ) : (
-                <ArrowDown size={16} />
-              )}
-            </IconButton>
+            <Tooltip interactive content={m.chat_scroll_to_bottom()} className={`absolute bottom-full left-1/2 z-5 mb-6 -translate-x-1/2 transition-opacity duration-150 ease-standard ${transcriptAtBottom ? "pointer-events-none opacity-0" : "opacity-100"}`}>
+              <IconButton
+                className="h-9 w-9 rounded-full border border-border bg-background shadow-control"
+                aria-label={m.chat_scroll_to_bottom()}
+                inert={transcriptAtBottom}
+                onClick={scrollToTranscriptBottom}
+              >
+                {busy && !awaitingInput ? (
+                  <MoreHorizontal size={18} className="tool-running-shimmer-icon" />
+                ) : (
+                  <ArrowDown size={16} />
+                )}
+              </IconButton>
+            </Tooltip>
           )}
           <ExperimentRunBanner
             key={activeId}
             runs={activeRuns.filter((item) => item.sessionId === activeId)}
             onOpenRun={onOpenRun}
+            onOpenExperiment={onOpenExperiment}
           />
           {/* Inside the composer so the composer's popovers (mode/model pickers,
             z 50 within this stacking context) layer above the strip — as a
@@ -7002,17 +7328,18 @@ export function ChatPanel({
                 <FlaskConical size={16} className="inline-block align-text-bottom me-2 text-subtext" />
                 {m.chat_panel_demo_hint_body()}
               </span>
-              <IconButton
-                size="small"
-                aria-label={m.chat_panel_dismiss_demo_hint()}
-                title={m.chat_panel_dismiss_demo_hint()}
-                onClick={() => {
-                  setDemoHintDismissed(true);
-                  composerRef.current?.focus();
-                }}
-              >
-                <X size={14} />
-              </IconButton>
+              <Tooltip interactive content={m.chat_panel_dismiss_demo_hint()}>
+                <IconButton
+                  size="small"
+                  aria-label={m.chat_panel_dismiss_demo_hint()}
+                  onClick={() => {
+                    setDemoHintDismissed(true);
+                    composerRef.current?.focus();
+                  }}
+                >
+                  <X size={14} />
+                </IconButton>
+              </Tooltip>
             </div>
           )}
           {!embedded && !activeId && onNewProject && (
@@ -7027,7 +7354,20 @@ export function ChatPanel({
               }}
             />
           )}
-          <div className={`composer-box relative flex flex-col border ${bashMode ? "border-accent-amber" : "border-border"} rounded-lg bg-background shadow-control-subtle`} data-onboarding="composer">
+          <RemoteConnectionStrip />
+          <div inert={connection !== null} className={`composer-box relative flex flex-col border ${bashMode ? "border-accent-amber" : "border-border"} rounded-lg bg-background shadow-control-subtle${connection ? " opacity-60" : ""}`} data-onboarding="composer">
+            {unconfirmedSend !== null && (
+              <div id={unconfirmedSendId} role="alert" className="flex items-start gap-2 pt-2 px-3 text-sm text-text">
+                <span className="flex-1" dir="auto">{m.chat_send_unconfirmed({ error: ltr(unconfirmedSend) })}</span>
+                <button type="button" className="underline cursor-pointer" onClick={() => {
+                  composerLiveRef.current = { ...composerLiveRef.current, unconfirmedSend: null };
+                  setUnconfirmedSend(null);
+                  composerRef.current?.focus();
+                }}>
+                  {m.chat_panel_dismiss_demo_hint()}
+                </button>
+              </div>
+            )}
             {activeHarness && !activeHarness.agentReady && (
               <div className="composer-harness-warning py-2 px-3 text-subtext text-sm leading-normal border-b border-b-border-variant [&_strong]:text-accent-amber [&_strong]:font-medium [&_code]:font-mono [&_code]:text-text">
                 {activeHarness.catalogPending ? (
@@ -7062,21 +7402,6 @@ export function ChatPanel({
                 activeIndex={activeMentionIdx}
                 onPick={pickFileMention}
                 onHover={setMentionIdx}
-              />
-            )}
-            {resumeOpen && (
-              <ResumeDialog
-                activeSessionId={activeId}
-                onClose={() => setResumeOpen(false)}
-                onResume={(session) => {
-                  setResumeOpen(false);
-                  setSessionFilter("all");
-                  onActiveSessionChange(session.id, { projectId: session.projectId });
-                }}
-                onImport={(chat) => {
-                  setResumeOpen(false);
-                  void importChat(chat);
-                }}
               />
             )}
             {annotations.length > 0 && (
@@ -7134,7 +7459,7 @@ export function ChatPanel({
                 dir="auto"
                 {...{ writingsuggestions: "false" }}
                 ref={composerRef}
-                aria-describedby={demoHintVisible ? demoHintId : undefined}
+                aria-describedby={[demoHintVisible && demoHintId, unconfirmedSend !== null && unconfirmedSendId].filter(Boolean).join(" ") || undefined}
                 // Native prose stays visible; the aligned mirror paints only skill tokens.
                 className="relative z-1 min-w-0 overflow-x-hidden bg-transparent"
                 value={draft}
@@ -7212,6 +7537,7 @@ export function ChatPanel({
                       return;
                     }
                     if (e.key === "Escape") {
+                      e.stopPropagation();
                       e.preventDefault();
                       setSkillMenuDismissed(true);
                       return;
@@ -7229,21 +7555,20 @@ export function ChatPanel({
                     // A bare trailing `@` still sends on Enter; `@` is common in prose.
                     if (
                       e.key === "Tab"
-                      || (e.key === "Enter" && mentionQuery !== "" && !e.shiftKey && !e.metaKey && !e.ctrlKey)
+                      || (mentionQuery !== "" && matchesKeyboardEvent(e.nativeEvent, "Enter"))
                     ) {
                       e.preventDefault();
                       pickFileMention(mentionMatches[activeMentionIdx]);
                       return;
                     }
                     if (e.key === "Escape") {
+                      e.stopPropagation();
                       e.preventDefault();
                       setSkillMenuDismissed(true);
                       return;
                     }
                   }
                   // Backspace just behind a chip deletes the whole command.
-                  // (Escape deliberately doesn't touch it — that's the
-                  // stop-the-turn gesture, see the document listener above.)
                   if (e.key === "Backspace" && deleteCommandBehindCaret(e.currentTarget)) {
                     e.preventDefault();
                     return;
@@ -7254,7 +7579,7 @@ export function ChatPanel({
                       void runShell();
                       return;
                     }
-                    void send({ queue: e.metaKey || e.ctrlKey });
+                    void send({ queue: matchesKeyboardEvent(e.nativeEvent, "Mod+Enter") });
                   }
                 }}
               />
@@ -7271,17 +7596,18 @@ export function ChatPanel({
             </div>
             <div className="composer-actions flex min-w-0 justify-end items-center gap-2 pt-1.5 px-2 pb-2">
               <div className="option-picker relative inline-flex shrink-0" ref={dataSources.ref}>
-                <IconButton
-                  type="button"
-                  className="composer-bare"
-                  title={m.chat_panel_data_sources()}
-                  aria-label={m.chat_panel_data_sources()}
-                  aria-haspopup="dialog"
-                  aria-expanded={dataSources.open}
-                  onClick={() => dataSources.setOpen((open) => !open)}
-                >
-                  <ToggleRight size={16} />
-                </IconButton>
+                <Tooltip interactive content={m.chat_panel_data_sources()}>
+                  <IconButton
+                    type="button"
+                    className="composer-bare"
+                    aria-label={m.chat_panel_data_sources()}
+                    aria-haspopup="dialog"
+                    aria-expanded={dataSources.open}
+                    onClick={() => dataSources.setOpen((open) => !open)}
+                  >
+                    <ToggleRight size={16} />
+                  </IconButton>
+                </Tooltip>
                 {dataSources.open && (
                   <div className="composer-sources-menu absolute bottom-[calc(100%_+_8px)] start-0 z-50 flex min-w-55 flex-col gap-1 rounded-lg border border-border bg-background p-2 shadow-dropdown">
                     <span className="px-1 text-sm font-medium text-muted">{m.chat_panel_data_sources()}</span>
@@ -7300,68 +7626,72 @@ export function ChatPanel({
                   e.target.value = ""; // let the same file be re-picked
                 }}
               />
-              <IconButton
-                type="button"
-                className="composer-attach"
-                title={m.chat_panel_attach_a_pdf_or_image()}
-                aria-label={m.chat_panel_attach_a_pdf_or_image()}
-                onClick={() => fileInputRef.current?.click()}
-              >
-                <Paperclip size={16} />
-              </IconButton>
-              {(sessionGoal || goalArmed) && (
-                <Button
+              <Tooltip interactive content={m.chat_panel_attach_a_pdf_or_image()}>
+                <IconButton
                   type="button"
-                  variant="purple"
-                  active
-                  className="group max-w-60"
-                  title={goalArmed ? m.goal_command_description() : m.chat_panel_clear_goal({ goal: autoDir(sessionGoal) })}
-                  aria-label={goalArmed ? m.chat_panel_goal() : m.chat_panel_clear_goal({ goal: autoDir(sessionGoal) })}
-                  onClick={() => {
-                    setGoalScope(null);
-                    if (sessionGoal) void setGoal("clear");
-                  }}
+                  className="composer-attach"
+                  aria-label={m.chat_panel_attach_a_pdf_or_image()}
+                  onClick={() => fileInputRef.current?.click()}
                 >
-                  <span className="relative size-4" aria-hidden="true">
-                    <Goal className="absolute inset-0 transition-opacity group-hover:opacity-0 group-focus-visible:opacity-0" size={16} strokeWidth={1.5} />
-                    <X className="absolute inset-0 opacity-0 transition-opacity group-hover:opacity-100 group-focus-visible:opacity-100" size={16} strokeWidth={1.5} />
-                  </span>
-                  <span className="truncate">{m.chat_panel_goal()}</span>
-                </Button>
+                  <Paperclip size={16} />
+                </IconButton>
+              </Tooltip>
+              {(sessionGoal || goalArmed) && (
+                <Tooltip interactive content={goalArmed ? m.goal_command_description() : m.chat_panel_clear_goal({ goal: autoDir(sessionGoal) })}>
+                  <Button
+                    type="button"
+                    variant="purple"
+                    active
+                    className="group max-w-60"
+                    aria-label={goalArmed ? m.chat_panel_goal() : m.chat_panel_clear_goal({ goal: autoDir(sessionGoal) })}
+                    onClick={() => {
+                      setGoalScope(null);
+                      if (sessionGoal) void setGoal("clear");
+                    }}
+                  >
+                    <span className="relative size-4" aria-hidden="true">
+                      <Goal className="absolute inset-0 transition-opacity group-hover:opacity-0 group-focus-visible:opacity-0" size={16} strokeWidth={1.5} />
+                      <X className="absolute inset-0 opacity-0 transition-opacity group-hover:opacity-100 group-focus-visible:opacity-100" size={16} strokeWidth={1.5} />
+                    </span>
+                    <span className="truncate">{m.chat_panel_goal()}</span>
+                  </Button>
+                </Tooltip>
               )}
               {planActive && (
-                <Button
-                  type="button"
-                  variant="amber"
-                  active
-                  className="group"
-                  title={m.chat_panel_exit_plan_mode()}
-                  aria-label={m.chat_panel_exit_plan_mode()}
-                  onClick={() => void exitPlanMode()}
-                >
-                  <span className="relative size-4" aria-hidden="true">
-                    <Lightbulb className="absolute inset-0 transition-opacity group-hover:opacity-0 group-focus-visible:opacity-0" size={16} strokeWidth={1.5} />
-                    <X className="absolute inset-0 opacity-0 transition-opacity group-hover:opacity-100 group-focus-visible:opacity-100" size={16} strokeWidth={1.5} />
-                  </span>
-                  <span>{m.chat_panel_plan()}</span>
-                </Button>
+                <Tooltip interactive content={m.chat_panel_exit_plan_mode()}>
+                  <Button
+                    type="button"
+                    variant="amber"
+                    active
+                    className="group"
+                    aria-label={m.chat_panel_exit_plan_mode()}
+                    onClick={() => void exitPlanMode()}
+                  >
+                    <span className="relative size-4" aria-hidden="true">
+                      <Lightbulb className="absolute inset-0 transition-opacity group-hover:opacity-0 group-focus-visible:opacity-0" size={16} strokeWidth={1.5} />
+                      <X className="absolute inset-0 opacity-0 transition-opacity group-hover:opacity-100 group-focus-visible:opacity-100" size={16} strokeWidth={1.5} />
+                    </span>
+                    <span>{m.chat_panel_plan()}</span>
+                  </Button>
+                </Tooltip>
               )}
               {bashMode && (
-                <Button
-                  type="button"
-                  variant="ghost"
-                  active
-                  className="group"
-                  title={m.chat_panel_exit_bash_mode()}
-                  aria-label={m.chat_panel_exit_bash_mode()}
-                  onClick={exitBashMode}
-                >
-                  <span className="relative size-4" aria-hidden="true">
-                    <SquareTerminal className="absolute inset-0 transition-opacity group-hover:opacity-0 group-focus-visible:opacity-0" size={16} strokeWidth={1.5} />
-                    <X className="absolute inset-0 opacity-0 transition-opacity group-hover:opacity-100 group-focus-visible:opacity-100" size={16} strokeWidth={1.5} />
-                  </span>
-                  <span>{m.chat_panel_bash()}</span>
-                </Button>
+                <Tooltip interactive content={m.chat_panel_exit_bash_mode()}>
+                  <Button
+                    type="button"
+                    variant="ghost"
+                    active
+                    className="group"
+                    aria-label={m.chat_panel_exit_bash_mode()}
+                    onClick={exitBashMode}
+                  >
+                    <span className="relative size-4" aria-hidden="true">
+                      <SquareTerminal className="absolute inset-0 transition-opacity group-hover:opacity-0 group-focus-visible:opacity-0" size={16} strokeWidth={1.5} />
+                      <X className="absolute inset-0 opacity-0 transition-opacity group-hover:opacity-100 group-focus-visible:opacity-100" size={16} strokeWidth={1.5} />
+                    </span>
+                    <span>{m.chat_panel_bash()}</span>
+                  </Button>
+                </Tooltip>
               )}
               <div className="min-w-0 flex-1" />
               {/* The model picker reflects the open session (harness locked once it
@@ -7372,6 +7702,7 @@ export function ChatPanel({
                   sessionHarness={openSession?.harness.startsWith("acp:") ? activeHarness : undefined}
                   value={composerSelection}
                   onSelect={selectModel}
+                  onStartHarness={startHarness}
                   onOpenSettings={() => onSelectMainView("harnesses")}
                   permissionChoices={activeHarness?.agentReady ? (opts?.permissionModes ?? []) : []}
                   defaultPermissionId={opts?.defaultPermissionMode ?? null}
@@ -7392,30 +7723,35 @@ export function ChatPanel({
                 <ContextMeter usage={openSession?.contextUsage} />
               </div>
               {busy ? (
-                <IconButton className="send-btn" variant="stop" title={m.chat_panel_stop()} aria-label={m.chat_panel_stop()} onClick={stop}>
-                  <X size={16} />
-                </IconButton>
+                <Tooltip interactive content={m.chat_panel_stop()}>
+                  <IconButton className="send-btn" variant="stop" aria-label={m.chat_panel_stop()} onClick={stop}>
+                    <X size={16} />
+                  </IconButton>
+                </Tooltip>
               ) : (
-                <IconButton
-                  className={`send-btn ${demoHintVisible && activeHarness?.agentReady ? "ring-2 ring-primary ring-offset-2 ring-offset-background" : ""}`}
-                  variant="primary"
-                  title={bashMode ? m.chat_panel_run() : m.chat_panel_send()}
-                  aria-label={bashMode ? m.chat_panel_run() : m.chat_panel_send()}
-                  onClick={() => void (bashMode ? runShell() : send())}
-                  disabled={
-                    bashMode
-                      ? !shellCommand || (!activeId && !activeHarness?.agentReady)
-                      : !activeHarness?.agentReady ||
-                      (!draft.trim() && attachments.length === 0 && annotations.length === 0)
-                  }
-                >
-                  <CornerDownLeft size={16} />
-                </IconButton>
+                <Tooltip interactive content={bashMode ? m.chat_panel_run() : m.chat_panel_send()}>
+                  <IconButton
+                    className={`send-btn ${demoHintVisible && activeHarness?.agentReady ? "ring-2 ring-primary ring-offset-2 ring-offset-background" : ""}`}
+                    variant="primary"
+                    aria-label={bashMode ? m.chat_panel_run() : m.chat_panel_send()}
+                    onClick={() => void (bashMode ? runShell() : send())}
+                    disabled={
+                      bashMode
+                        ? !shellCommand || (!activeId && !activeHarness?.agentReady)
+                        : !activeHarness?.agentReady ||
+                        (!draft.trim() && attachments.length === 0 && annotations.length === 0)
+                    }
+                  >
+                    <CornerDownLeft size={16} />
+                  </IconButton>
+                </Tooltip>
               )}
             </div>
           </div>
         </div>
       </section>
+      <EscapeScope enabled={dataSources.open} onEscape={() => dataSources.setOpen(false)} />
+      <EscapeScope enabled={skillMenuOpen || mentionMenuOpen} onEscape={() => setSkillMenuDismissed(true)} />
     </>
   );
 }

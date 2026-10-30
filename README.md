@@ -13,7 +13,7 @@ The local-first harness & workspace for research agents.
 
 <p><a href="README.md">English</a> · <a href="README.es.md">Español</a> · <a href="README.ko.md">한국어</a> · <a href="README.zh.md">简体中文</a> · <a href="README.ja.md">日本語</a></p>
 
-<p><img src=".github/readme-assets/openresearch-screenshot.png" alt="OpenResearch desktop app showing a research agent conversation and experiment logs" width="680" /></p>
+<p><img src=".github/readme-assets/openresearch-demo.gif" alt="OpenResearch desktop app: an agent searches alphaXiv to diagnose a training run, then opens its Trackio charts and result figures" width="680" /></p>
 
 <hr />
 

@@ -9,8 +9,8 @@ import { changedChecks, classifyChanges } from './ci-changes.mjs'
 import { checkResults } from './ci-check-result.mjs'
 
 const enabled = paths => Object.entries(classifyChanges(paths)).filter(([, value]) => value).map(([name]) => name)
-test('frontend changes do not select Rust, including generated bundles', () => {
-  assert.deepEqual(enabled(['ui/src/App.tsx', 'ui/dist/index.html', 'ui/pnpm-lock.yaml']), ['frontend'])
+test('frontend changes do not select Rust', () => {
+  assert.deepEqual(enabled(['ui/src/App.tsx', 'ui/pnpm-lock.yaml']), ['frontend'])
 })
 test('Rust and embedded resources select all existing Rust platforms', () => {
   for (const path of ['src/main.rs', 'tests/compute_cli.rs', 'Cargo.lock', 'build.rs', 'agent-skills/orx-compute/SKILL.md', 'demo/nanochat/base/file.txt', 'SYSTEM_PROMPT.md', 'SKILL.md']) {
@@ -23,6 +23,7 @@ test('platform files select corresponding checks', () => {
   assert.deepEqual(enabled(['macos/Info.plist']), ['rust', 'macos'])
 })
 test('helper tests are independent and combine with other changes', () => {
+  assert.deepEqual(enabled(['scripts/desktop.js']), ['dev_slot'])
   assert.deepEqual(enabled(['scripts/dev-slot.mjs', 'scripts/test_orx_chart.py', 'scripts/release_notes.py', 'ui/package.json']), ['frontend', 'dev_slot', 'chart', 'release_notes'])
 })
 test('docs skip builds, workflow changes and unknown files select all', () => {

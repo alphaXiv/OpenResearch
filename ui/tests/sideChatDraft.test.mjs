@@ -38,6 +38,7 @@ test("side-chat trigger opens the list on touch and a draft on mouse click", () 
     useLayoutEffect: () => {},
     usePopover: () => ({ open: false, setOpen: (value) => opened.push(typeof value === "function" ? value(false) : value), ref: { current: null } }),
     IconButton: "button",
+    EscapeScope: "escape-scope",
     REASONING_DEFAULT_ID: "default",
   });
   const tree = OptionPicker({ triggerIcon: "chat", onTriggerClick: () => created++, openOnHover: true, choices: [{ id: "saved", label: "Saved chat" }] });
@@ -57,7 +58,7 @@ test("unsaved side-chat autonomy stays local while root drafts update defaults",
     const local = [];
     const defaults = [];
     const setAutonomy = loadFunction("ChatPanel.tsx", "setAutonomy", {
-      openSession: null, sideParentSessionId,
+      openSession: null, sideParentSessionId, preferredAutonomy: "agentic", invalidatePendingRetry: () => {},
       setSideDraftAutonomy: (value) => local.push(value),
       onPreferredAutonomyChange: (value) => defaults.push(value),
     });

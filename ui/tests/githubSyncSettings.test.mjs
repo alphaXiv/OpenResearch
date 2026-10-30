@@ -16,12 +16,38 @@ const compiled = ts.transpileModule(source, {
 let queries = {};
 let clicks = new Map();
 let menuOpen = false;
+let state = [];
+let stateIndex = 0;
+let rerender;
+const PopoverContext = React.createContext(null);
 let enableCalls = [];
 const text = (children) => React.Children.toArray(children).filter((child) => typeof child === "string").join("").trim();
 // Every other app module is a stub: its exports render nothing and return nothing.
 const stub = new Proxy({}, { get: (_, name) => (name === "__esModule" ? false : () => null) });
 const queryFactories = new Proxy({}, { get: (_, name) => (...args) => ({ queryKey: [name, ...args] }) });
 const mocks = {
+  react: { ...React, useState: (initial) => {
+    const index = stateIndex++;
+    if (!(index in state)) state[index] = initial;
+    return [state[index], (value) => {
+      state[index] = typeof value === "function" ? value(state[index]) : value;
+      rerender();
+    }];
+  } },
+  "@base-ui/react/popover": { Popover: {
+    Root: ({ open, onOpenChange, children }) => {
+      menuOpen = open;
+      return React.createElement(PopoverContext.Provider, { value: { open, onOpenChange } }, children);
+    },
+    Trigger: ({ render, children, ...props }) => {
+      const { open, onOpenChange } = React.useContext(PopoverContext);
+      return React.cloneElement(render, { ...props, "aria-haspopup": "dialog", "aria-expanded": open, onClick: () => onOpenChange(!open) }, children);
+    },
+    Portal: ({ children }) => children,
+    Positioner: ({ children }) => children,
+    Popup: ({ children, ...props }) => React.useContext(PopoverContext).open
+      ? React.createElement("div", { ...props, role: "dialog" }, children) : null,
+  } },
   "@tanstack/react-query": {
     useQuery: (options) => queries[options?.queryKey?.[0]] ?? { data: undefined },
     useMutation: () => ({}),
@@ -33,9 +59,6 @@ const mocks = {
   "../paraglide/messages.js": { m: new Proxy({}, { get: (_, name) => () => String(name) }) },
   "../paraglide/runtime.js": { getLocale: () => "en", isLocale: () => true },
   "../i18n": { ltr: String },
-  "./ModelPicker": {
-    usePopover: () => ({ open: menuOpen, setOpen: (value) => { menuOpen = value; }, ref: { current: null } }),
-  },
   "../api": new Proxy({}, { get: (_, name) => name === "enableProjectGithub" ? async (...args) => {
     enableCalls.push(args);
     return { project: { id: "project-1" }, git: signedIn };
@@ -76,7 +99,7 @@ const signedOut = gitStatus({ authenticated: false });
 
 function renderGitTab({ status, statusError = null, account = { data: { login: "example-user" }, isFetching: false }, organizations = { data: { organizations: ["research-org"] }, isFetching: false }, access = { data: { canPush: true } }, open = false }) {
   const refetches = [];
-  menuOpen = open;
+  state = [];
   enableCalls = [];
   queries = {
     getProjectGitStatusQuery: { data: status, error: statusError },
@@ -85,10 +108,16 @@ function renderGitTab({ status, statusError = null, account = { data: { login: "
     githubOrganizationsQuery: { ...organizations, refetch: async () => { refetches.push("organizations"); } },
   };
   clicks = new Map();
-  const html = renderToStaticMarkup(React.createElement(exports.GitTab, {
-    project: { id: "project-1", name: "Project" },
-    onProjectUpdate: () => {},
-  }));
+  let html;
+  rerender = () => {
+    stateIndex = 0;
+    html = renderToStaticMarkup(exports.GitTab({
+      project: { id: "project-1", name: "Project" },
+      onProjectUpdate: () => {},
+    }));
+  };
+  rerender();
+  if (open) clicks.get("repository_enable_syncing")();
   return { html, refetches };
 }
 
@@ -100,9 +129,9 @@ test("signed-out projects cannot enable GitHub syncing", () => {
   assert.deepEqual(buttonLabels(renderGitTab({ status: signedOut }).html), []);
 });
 
-test("a local-only project opens an owner menu without creating a repository", () => {
+test("a local-only project opens a destination picker without creating a repository", () => {
   const { html } = renderGitTab({ status: signedIn });
-  assert.equal(html.includes('role="menu"'), false);
+  assert.equal(html.includes('role="dialog"'), false);
   assert.equal(html.includes("settings_github_new_repository_destination"), false);
   clicks.get("repository_enable_syncing")({ currentTarget: null });
   assert.equal(menuOpen, true);
@@ -111,7 +140,7 @@ test("a local-only project opens an owner menu without creating a repository", (
 
 test("choosing an organization enables only the selected project under that owner", async () => {
   const { html } = renderGitTab({ status: signedIn, open: true });
-  assert.equal(html.includes('role="menu"'), true);
+  assert.equal(html.includes('role="dialog"'), true);
   assert.deepEqual(buttonLabels(html), ["repository_enable_syncing", "example-user", "research-org"]);
   clicks.get("research-org")();
   await settle();
@@ -126,7 +155,7 @@ test("choosing the personal account uses the authenticated viewer", async () => 
   assert.deepEqual(enableCalls, [["project-1", undefined]]);
 });
 
-test("an existing repository resumes syncing without a destination menu", async () => {
+test("an existing repository resumes syncing without a destination picker", async () => {
   renderGitTab({ status: gitStatus({ authenticated: true, owner: "existing-org", repo: "paper" }) });
   clicks.get("repository_enable_syncing")({ currentTarget: null });
   await settle();

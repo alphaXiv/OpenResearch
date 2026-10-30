@@ -2645,7 +2645,7 @@ checksum = "384b8ab6d37215f3c5301a95a4accb5d64aa607f1fcb26a11b5303878451b4fe"
 
 [[package]]
 name = "openresearch-cli"
-version = "0.2.21"
+version = "0.2.22"
 dependencies = [
  "aes",
  "agent-client-protocol",
@@ -2670,9 +2670,11 @@ dependencies = [
  "objc2",
  "objc2-app-kit",
  "objc2-foundation",
+ "objc2-web-kit",
  "pbkdf2",
  "png",
  "portable-pty",
+ "raw-window-handle",
  "reqwest",
  "rfd",
  "roxmltree",
@@ -2689,6 +2691,7 @@ dependencies = [
  "tokio-tungstenite",
  "tokio-util",
  "toml 0.8.2",
+ "url",
  "urlencoding",
  "uuid",
  "windows-sys 0.61.2",

@@ -66,7 +66,7 @@ export interface Project {
   /** Compatibility alias returned by older/newer mixed local clients. */
   filesDir?: string;
   runCommand?: string | null;
-  /** arXiv id the project starts from (versionless). */
+  /** arXiv or alphaXiv paper id the project starts from (versionless). */
   paperId?: string | null;
   createdAt: number;
   updatedAt: number;
@@ -87,6 +87,14 @@ export interface Experiment {
   /** Chat session that created this experiment; null for dashboard/legacy rows. */
   chatSessionId?: string | null;
   archived: boolean;
+}
+
+/** An experiment a chat created, launched a run of, or asked to be woken for. */
+export interface SessionExperiment {
+  experiment: Experiment;
+  projectName: string;
+  /** Its newest live run, else its newest run: a forced relaunch can leave an older run live. Null until it has been run. */
+  currentRun: Pick<Run, "status" | "cancelRequested" | "createdAt" | "endedAt"> | null;
 }
 
 export type RunStatus = "starting" | "running" | "done" | "failed" | "cancelled" | "lost";
@@ -126,6 +134,8 @@ export function experimentMonitoringError(runs: Pick<Run, "status" | "backend" |
   return newestFirst.map(runMonitoringError).find((error) => error !== null) ?? null;
 }
 
+export class RejectedResponseError extends Error {}
+
 const writeScopes = new WeakMap<Response, ReturnType<typeof workspaceScope>>();
 
 async function json<T>(res: Response): Promise<T> {
@@ -154,7 +164,8 @@ async function json<T>(res: Response): Promise<T> {
       if (error instanceof FileChangedError) throw error;
       // non-JSON body — show it raw
     }
-    throw new Error(message || `HTTP ${res.status}`);
+    const ErrorType = res.status >= 400 && res.status < 500 ? RejectedResponseError : Error;
+    throw new ErrorType(message || `HTTP ${res.status}`);
   }
   const data: T = await res.json();
   const scope = writeScopes.get(res);
@@ -334,7 +345,7 @@ export const repoAccess = (owner: string, repo: string, signal?: AbortSignal) =>
     signal,
   );
 
-/** Resolve an arXiv id / URL to title + linked GitHub repo. May take a few
+/** Resolve an arXiv or alphaXiv paper id / URL to title + linked GitHub repo. May take a few
  * seconds for papers alphaXiv hasn't indexed yet (it scrapes arXiv on a miss). */
 export const resolvePaper = (id: string, signal?: AbortSignal) =>
   get<{ paper: ResolvedPaper }>(`/api/papers/resolve?id=${encodeURIComponent(id)}`, signal).then(
@@ -395,6 +406,10 @@ export const listExperiments = (projectId: string, signal?: AbortSignal) =>
   get<{ experiments: Experiment[] }>(`/api/projects/${projectId}/experiments`, signal).then(
     (r) => r.experiments,
   );
+
+export const getSessionExperiments = (sessionId: string, signal?: AbortSignal) =>
+  get<{ experiments: SessionExperiment[] }>(`/api/chat/sessions/${encodeURIComponent(sessionId)}/experiments`, signal)
+    .then((r) => r.experiments);
 
 export const deleteExperiment = (id: string) =>
   writeResponse(`/api/experiments/${id}`, { method: "DELETE" }).then((r) => json<{ ok: boolean; branchCommit: string | null }>(r));
@@ -547,6 +562,9 @@ export const openFileInEditor = (
     path,
     sessionId: opts.sessionId,
   });
+
+export const getFileManager = (locale: string, signal?: AbortSignal) =>
+  get<{ os: string; name: string | null }>(`/api/file-manager?locale=${encodeURIComponent(locale)}`, signal);
 
 /** Reveal a checkout file in the OS file manager on the machine running `orx up`. */
 export const revealFileInManager = (
@@ -854,14 +872,18 @@ export const saveTinkerKey = (key: string) => post<TinkerSettings>("/api/setting
 
 /** How orx was installed. `installer`, `app-bundle`, `appimage` and `portable` update themselves. */
 export type InstallChannel = "installer" | "app-bundle" | "appimage" | "portable" | "cargo" | "homebrew" | "nix" | "unknown";
+export type ReleaseChannel = "stable" | "canary";
 
 export interface UpdateStatus {
   current: string;
-  /** Latest release this install can actually move to — the macOS app and the
-   *  CLI read different manifests, and the app's can lag. */
+  /** Latest published release on the selected channel. */
   latest: string | null;
   latestTag: string | null;
   channel: InstallChannel;
+  releaseChannel: ReleaseChannel;
+  releaseChannelsAvailable: boolean;
+  waitingForStable: boolean;
+  waitingForCanary: boolean;
   /** Whether this install is one orx can replace at all. */
   selfUpdates: boolean;
   autoUpdate: boolean;
@@ -899,6 +921,9 @@ export const restartApp = () =>
 
 export const setAutoUpdate = (enabled: boolean) =>
   post<UpdateStatus>("/api/update/auto", { enabled });
+
+export const setReleaseChannel = (channel: ReleaseChannel) =>
+  post<UpdateStatus>("/api/update/channel", { channel });
 
 export const installCli = (force = false) =>
   post<InstalledCli>("/api/update/install-cli", { force });
@@ -1750,6 +1775,7 @@ export interface Harness {
   authCheckFailed?: boolean;
   accountLoading?: boolean;
   account?: string;
+  accountName?: string;
   org?: string;
   plan?: string;
   agentReady: boolean;
@@ -1811,7 +1837,7 @@ export const saveAcpHarness = (definition: Omit<AcpDefinition, "id">, id?: strin
   ? put<AcpDefinition>(`/api/harnesses/acp/${encodeURIComponent(id)}`, definition)
   : post<AcpDefinition>("/api/harnesses/acp", definition);
 export const removeAcpHarness = (id: string) => writeResponse(`/api/harnesses/acp/${encodeURIComponent(id)}`, { method: "DELETE" }).then((response) => json<{ ok: boolean }>(response));
-export const testAcpHarness = (definition: Omit<AcpDefinition, "id">) => post<{ status: string; agentInfo?: { version?: string } }>("/api/harnesses/acp/test", definition);
+export const testAcpHarness = (definition: Omit<AcpDefinition, "id">) => post<{ status: string; agentInfo?: { version?: string }; harnessId: AcpDefinition["id"] | null }>("/api/harnesses/acp/test", definition);
 export const setChatConfiguration = (sessionId: string, optionId: string, value: string) => post<ChatSession>(`/api/chat/sessions/${sessionId}/configuration`, { optionId, value });
 
 /** Slash-skill offered in the composer's `/` dropdown; expanded server-side. */
@@ -1872,8 +1898,17 @@ export interface UserSkill {
   updatedAt: number;
 }
 
+export interface SkillDiscovery {
+  agent: string;
+  origin: string;
+  path: string;
+  status: "scanned" | "missing" | "unreadable";
+  accepted: number;
+  skipped: { path: string; reason: string }[];
+}
+
 export const listUserSkills = (signal?: AbortSignal) =>
-  get<{ skills: UserSkill[] }>("/api/user-skills", signal);
+  get<{ skills: UserSkill[]; discovery?: SkillDiscovery[] }>("/api/user-skills", signal);
 
 /** Upload a SKILL.md file or a .zip of a skill folder. `contentBase64` is the
  * raw file bytes; `filename`'s extension selects single-file vs archive. */
@@ -2199,6 +2234,12 @@ export const sendChatMessage = (
     annotations,
     mode,
   },
+  );
+
+/** A positive result confirms admission; absence does not prove rejection. */
+export const getChatSubmission = (sessionId: string, clientTurnId: string) =>
+  get<{ accepted: boolean }>(
+    `/api/chat/sessions/${encodeURIComponent(sessionId)}/submissions/${encodeURIComponent(clientTurnId)}`,
   );
 
 /** Compact a chat's context: natively where the agent can, else by summarizing. */

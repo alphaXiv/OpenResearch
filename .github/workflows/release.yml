@@ -112,12 +112,44 @@ jobs:
           name: artifacts-plan-dist-manifest
           path: plan-dist-manifest.json
 
+  build-ui:
+    needs: plan
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          ref: ${{ needs.plan.outputs.source-sha }}
+          persist-credentials: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - uses: pnpm/setup@v1
+        with:
+          package-json-file: ui/package.json
+          install: false
+      - name: Prepare release UI
+        working-directory: ui
+        run: |
+          if [ ! -f dist/index.html ]; then
+            pnpm install --frozen-lockfile
+            pnpm build
+          fi
+          test -s dist/index.html
+      - uses: actions/upload-artifact@v7
+        with:
+          name: release-ui
+          path: ui/dist/
+          if-no-files-found: error
+
   # Build and packages all the platform-specific things
   build-local-artifacts:
     name: build-local-artifacts (${{ join(matrix.targets, ', ') }})
     # Let the initial task tell us to not run (currently very blunt)
     needs:
       - plan
+      - build-ui
     if: ${{ fromJson(needs.plan.outputs.val).ci.github.artifacts_matrix.include != null }}
     strategy:
       fail-fast: false
@@ -169,6 +201,14 @@ jobs:
       - name: Install dependencies
         run: |
           ${{ matrix.packages_install }}
+      - name: Remove checked-in UI
+        shell: bash
+        run: rm -rf ui/dist
+      - name: Download release UI
+        uses: actions/download-artifact@v8
+        with:
+          name: release-ui
+          path: ui/dist
       - name: Build artifacts
         run: |
           # Actually do builds and make zips and whatnot
@@ -304,6 +344,7 @@ jobs:
   host:
     needs:
       - plan
+      - build-ui
       - build-local-artifacts
       - custom-sign-macos-cli
       - custom-sign-windows-cli
@@ -316,7 +357,7 @@ jobs:
       issues: read
       pull-requests: read
     # Only run if we're "publishing", and only if plan, local and global didn't fail (skipped is fine)
-    if: ${{ always() && needs.plan.result == 'success' && needs.plan.outputs.publishing == 'true' && (needs.build-global-artifacts.result == 'skipped' || needs.build-global-artifacts.result == 'success') && needs.custom-verify-build-channel.result == 'success' && needs.custom-telemetry-contract.result == 'success' && needs.custom-ci.result == 'success' && (needs.build-local-artifacts.result == 'skipped' || needs.build-local-artifacts.result == 'success') && (needs.custom-sign-macos-cli.result == 'skipped' || needs.custom-sign-macos-cli.result == 'success') && (needs.custom-sign-windows-cli.result == 'skipped' || needs.custom-sign-windows-cli.result == 'success') }}
+    if: ${{ always() && needs.plan.result == 'success' && needs.plan.outputs.publishing == 'true' && needs.build-ui.result == 'success' && (needs.build-global-artifacts.result == 'skipped' || needs.build-global-artifacts.result == 'success') && needs.custom-verify-build-channel.result == 'success' && needs.custom-telemetry-contract.result == 'success' && needs.custom-ci.result == 'success' && (needs.build-local-artifacts.result == 'skipped' || needs.build-local-artifacts.result == 'success') && (needs.custom-sign-macos-cli.result == 'skipped' || needs.custom-sign-macos-cli.result == 'success') && (needs.custom-sign-windows-cli.result == 'skipped' || needs.custom-sign-windows-cli.result == 'success') }}
     env:
       GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
     runs-on: "ubuntu-22.04"
@@ -328,6 +369,7 @@ jobs:
           persist-credentials: false
           submodules: recursive
           ref: ${{ needs.plan.outputs.source-sha }}
+          fetch-depth: 0
       - name: Install cached dist
         uses: actions/download-artifact@v8
         with:
@@ -372,6 +414,7 @@ jobs:
           RELEASE_COMMIT: "${{ needs.plan.outputs.source-sha }}"
         run: |
           python3 scripts/release_notes.py "${{ needs.plan.outputs.tag }}" "$RELEASE_COMMIT" "$RUNNER_TEMP/notes.txt"
+          git rev-list "$RELEASE_COMMIT" | jq -R -s 'split("\n")[:-1]' > artifacts/desktop-ancestry.json
           gh release create "${{ needs.plan.outputs.tag }}" --target "$RELEASE_COMMIT" $PRERELEASE_FLAG --title "$ANNOUNCEMENT_TITLE" --notes-file "$RUNNER_TEMP/notes.txt" artifacts/*
 
   announce:

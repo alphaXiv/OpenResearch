@@ -920,6 +920,9 @@ impl DiscoveryPriority {
 
 #[derive(Args, Debug)]
 pub struct VersionArgs {
+    /// Print the desktop build identity.
+    #[arg(long, hide = true, conflicts_with_all = ["check", "json", "build_channel", "dashboard_protocol"])]
+    pub build_id: bool,
     /// Print the embedded telemetry build channel.
     #[arg(long, hide = true, conflicts_with_all = ["check", "json"])]
     pub build_channel: bool,
@@ -1005,6 +1008,19 @@ fn explain_removed_spawn_flags(mut error: clap::Error) -> clap::Error {
 // on worker threads. A `current_thread` flavor would deadlock. See commands::app.
 #[tokio::main]
 async fn main() {
+    #[cfg(all(target_os = "macos", debug_assertions))]
+    if std::env::args().nth(1).as_deref() == Some("--dev-desktop") {
+        let port = std::env::args()
+            .nth(2)
+            .and_then(|arg| arg.parse::<u16>().ok());
+        if let Some(port) = port.filter(|port| *port != 0) {
+            commands::app::run_dev(port);
+        } else {
+            eprintln!("--dev-desktop requires a valid UI port");
+            std::process::exit(1);
+        }
+        return;
+    }
     if std::env::var_os("ORX_SSH_ASKPASS_ENDPOINT").is_some() {
         if jobs::ssh::service::askpass().await.is_err() {
             std::process::exit(1);

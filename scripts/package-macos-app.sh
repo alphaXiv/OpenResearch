@@ -112,12 +112,18 @@ tell application "Finder"
     open
     update without registering applications
     delay 2
+    close
   end tell
 end tell
 APPLESCRIPT
 [[ "$STYLED" == 1 ]] || echo "==> WARNING: Finder styling step failed — shipping a functional but unstyled DMG."
 sync
-hdiutil detach "$DEV" >/dev/null || { sleep 2; hdiutil detach "$DEV" -force >/dev/null; }
+detached=0
+for attempt in 1 2 3; do
+  if hdiutil detach "$DEV" >/dev/null; then detached=1; break; fi
+  sleep 2
+done
+if [[ "$detached" == 0 ]]; then hdiutil detach "$DEV" -force >/dev/null; fi
 hdiutil convert "$RW" -format UDZO -imagekey zlib-level=9 -o "$DMG" >/dev/null
 [[ -n "${MACOS_SIGN_IDENTITY:-}" ]] && codesign --force --timestamp --sign "$MACOS_SIGN_IDENTITY" "$DMG"
 

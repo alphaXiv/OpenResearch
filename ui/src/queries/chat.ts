@@ -16,6 +16,12 @@ export const listChatSessionsQuery = (projectId: string) => queryOptions({
   staleTime: 30_000,
 });
 
+export const getSessionExperimentsQuery = (sessionId: string) => queryOptions({
+  queryKey: workspaceKey("getSessionExperiments", sessionId),
+  queryFn: ({ signal }) => api.getSessionExperiments(sessionId, signal),
+  staleTime: 0,
+});
+
 /** Scans the agents' own stores, so it is read once per picker open. */
 export const listNativeChatsQuery = () => queryOptions({
   queryKey: workspaceKey("listNativeChats"),

@@ -24,6 +24,17 @@ test('requires an explicit database mode when starting', () => {
   assert.equal(parseArgs(['start', '--db', 'copy', '--open']).open, true)
 })
 
+test('desktop launch is optional and exclusive to start', () => {
+  assert.equal(parseArgs(['start', '--db', 'empty']).desktop, false)
+  assert.throws(() => parseArgs(['status', '--desktop']), /only valid with start/)
+  assert.throws(() => parseArgs(['start', '--db', 'empty', '--open', '--desktop']), /cannot be combined/)
+  if (process.platform === 'darwin') {
+    assert.equal(parseArgs(['start', '--db', 'empty', '--desktop']).desktop, true)
+  } else {
+    assert.throws(() => parseArgs(['start', '--db', 'empty', '--desktop']), /requires macOS/)
+  }
+})
+
 test('empty mode creates no database', () => {
   const root = mkdtempSync(path.join(os.tmpdir(), 'orx-dev-slot-empty-'))
   try {
@@ -94,6 +105,10 @@ test('serializes lifecycle transitions for the same worktree', async () => {
   const root = mkdtempSync(path.join(os.tmpdir(), 'orx-dev-slot-lock-'))
   try {
     const lock = path.join(root, 'lifecycle-lock')
+    if (process.platform === 'win32') {
+      await assert.rejects(acquireAdvisoryLock(lock), /requires macOS or Linux/)
+      return
+    }
     const releaseFirst = await acquireAdvisoryLock(lock)
     let secondAcquired = false
     const second = acquireAdvisoryLock(lock).then(async (release) => {

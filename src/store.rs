@@ -23,6 +23,28 @@ use crate::local::autonomy::Autonomy;
 use crate::local::model::{LocalExperiment, LocalProject};
 use crate::workspace_state::{GlobalWorkspaceState, WorkspaceState};
 
+/// An experiment a chat created, launched a run of, or asked to be woken for.
+/// Listed live first, then unarchived before archived, each newest activity first.
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SessionExperiment {
+    pub experiment: LocalExperiment,
+    pub project_name: String,
+    /// Its newest live run, else its newest run; `None` until it has been run.
+    /// A forced relaunch can leave an older run live, so the newest run alone
+    /// could hide work still in flight.
+    pub current_run: Option<SessionExperimentRun>,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SessionExperimentRun {
+    pub status: String,
+    pub cancel_requested: bool,
+    pub created_at: i64,
+    pub ended_at: Option<i64>,
+}
+
 pub fn data_dir() -> PathBuf {
     // Resolution order (most to least authoritative):
     //   1. $ORX_DATA_DIR — explicit imperative override (launch.json, tests,
@@ -800,6 +822,13 @@ impl Store {
             );
             CREATE INDEX IF NOT EXISTS idx_chat_turns_session
                 ON chat_turns(session_id, created_at);
+            CREATE TABLE IF NOT EXISTS chat_steer_receipts (
+                session_id TEXT NOT NULL,
+                client_turn_id TEXT NOT NULL,
+                request_hash TEXT NOT NULL,
+                delivered INTEGER NOT NULL DEFAULT 0,
+                PRIMARY KEY (session_id, client_turn_id)
+            );
             CREATE TABLE IF NOT EXISTS chat_queued_messages (
                 id             TEXT PRIMARY KEY,
                 session_id     TEXT NOT NULL,
@@ -936,6 +965,7 @@ impl Store {
             "CREATE INDEX IF NOT EXISTS idx_chat_messages_native_ids
              ON chat_messages(base_native_session_id, result_native_session_id, session_id);",
         )?;
+        conn.execute_batch("CREATE TRIGGER IF NOT EXISTS delete_chat_steer_receipts AFTER DELETE ON chat_sessions BEGIN DELETE FROM chat_steer_receipts WHERE session_id = OLD.id; END;")?;
         conn.execute_batch("CREATE TRIGGER IF NOT EXISTS delete_chat_invocation_identities AFTER DELETE ON chat_sessions BEGIN DELETE FROM native_invocation_identities WHERE session_id = OLD.id; END;")?;
         conn.execute_batch("CREATE TRIGGER IF NOT EXISTS delete_acp_session AFTER DELETE ON chat_sessions BEGIN DELETE FROM acp_sessions WHERE session_id = OLD.id; END;")?;
         conn.execute(
@@ -2566,6 +2596,57 @@ impl Store {
         Ok(rows.collect::<std::result::Result<Vec<_>, _>>()?)
     }
 
+    pub fn list_experiments_by_chat_session(
+        &self,
+        session_id: &str,
+    ) -> Result<Vec<SessionExperiment>> {
+        let mut stmt = self.conn.prepare(&format!(
+            "WITH related AS (
+                 SELECT id AS related_id FROM local_experiments WHERE chat_session_id = ?1
+                 UNION SELECT experiment_id FROM runs WHERE chat_session_id = ?1
+                 UNION SELECT runs.experiment_id FROM chat_run_wakeups w
+                       JOIN runs ON runs.id = w.run_id WHERE w.chat_session_id = ?1
+             ), headline AS (
+                 SELECT experiment_id AS current_experiment_id, status AS current_status,
+                        cancel_requested AS current_cancel_requested,
+                        created_at AS current_created_at, ended_at AS current_ended_at,
+                        ROW_NUMBER() OVER (
+                            PARTITION BY experiment_id
+                            ORDER BY status IN ('starting', 'running') DESC, created_at DESC, id DESC
+                        ) AS current_rank
+                 FROM runs WHERE experiment_id IN (SELECT related_id FROM related)
+             )
+             SELECT {EXPERIMENT_COLS}, project_name, current_status,
+                    current_cancel_requested, current_created_at, current_ended_at
+             FROM local_experiments e
+             JOIN related ON related_id = e.id
+             JOIN (SELECT id AS owner_id, name AS project_name FROM local_projects)
+                  ON owner_id = e.project_id
+             LEFT JOIN headline ON current_experiment_id = e.id AND current_rank = 1
+             ORDER BY COALESCE(current_status IN ('starting', 'running'), 0) DESC,
+                      e.archived ASC,
+                      COALESCE(current_ended_at, current_created_at, e.created_at) DESC,
+                      e.id ASC"
+        ))?;
+        let rows = stmt.query_map(params![session_id], |row| {
+            let current_run = match row.get::<_, Option<String>>(14)? {
+                Some(status) => Some(SessionExperimentRun {
+                    status,
+                    cancel_requested: row.get(15)?,
+                    created_at: row.get(16)?,
+                    ended_at: row.get(17)?,
+                }),
+                None => None,
+            };
+            Ok(SessionExperiment {
+                experiment: LocalExperiment::from_row(row)?,
+                project_name: row.get(13)?,
+                current_run,
+            })
+        })?;
+        Ok(rows.collect::<std::result::Result<Vec<_>, _>>()?)
+    }
+
     /// Full-row update by id (title / description / run_command / agent_status).
     ///
     /// `chat_session_id` is deliberately omitted: session ownership is stamped
@@ -3407,6 +3488,15 @@ impl Store {
                 ChatTurnAdmission::Conflict
             });
         }
+        let steer_exists: bool = tx.query_row(
+            "SELECT EXISTS (SELECT 1 FROM chat_steer_receipts WHERE session_id = ?1 AND client_turn_id = ?2)",
+            params![turn.session_id, turn.client_turn_id],
+            |row| row.get(0),
+        )?;
+        if steer_exists {
+            tx.commit()?;
+            return Ok(ChatTurnAdmission::Conflict);
+        }
         if let Some(message) = user_message {
             tx.execute(
                 "INSERT INTO chat_messages
@@ -3476,6 +3566,43 @@ impl Store {
             .optional()?)
     }
 
+    pub(crate) fn steer_receipt(
+        &self,
+        session_id: &str,
+        client_turn_id: &str,
+    ) -> Result<Option<(String, bool)>> {
+        Ok(self.conn.query_row(
+            "SELECT request_hash, delivered FROM chat_steer_receipts WHERE session_id = ?1 AND client_turn_id = ?2",
+            params![session_id, client_turn_id],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        ).optional()?)
+    }
+
+    pub(crate) fn claim_steer(
+        &self,
+        session_id: &str,
+        client_turn_id: &str,
+        request_hash: &str,
+    ) -> Result<bool> {
+        Ok(self.conn.execute(
+            "INSERT OR IGNORE INTO chat_steer_receipts (session_id, client_turn_id, request_hash)
+             SELECT ?1, ?2, ?3 WHERE EXISTS (SELECT 1 FROM chat_sessions WHERE id = ?1)
+             AND NOT EXISTS (SELECT 1 FROM chat_turns WHERE session_id = ?1 AND client_turn_id = ?2)
+             AND NOT EXISTS (SELECT 1 FROM chat_queued_messages WHERE session_id = ?1 AND client_turn_id = ?2)",
+            params![session_id, client_turn_id, request_hash],
+        )? == 1)
+    }
+
+    pub(crate) fn finish_steer(&self, session_id: &str, client_turn_id: &str) -> Result<()> {
+        self.conn.execute("UPDATE chat_steer_receipts SET delivered = 1 WHERE session_id = ?1 AND client_turn_id = ?2", params![session_id, client_turn_id])?;
+        Ok(())
+    }
+
+    pub(crate) fn discard_steer(&self, session_id: &str, client_turn_id: &str) -> Result<()> {
+        self.conn.execute("DELETE FROM chat_steer_receipts WHERE session_id = ?1 AND client_turn_id = ?2 AND delivered = 0", params![session_id, client_turn_id])?;
+        Ok(())
+    }
+
     pub fn get_chat_turn_by_client_id(
         &self,
         session_id: &str,
@@ -3492,6 +3619,16 @@ impl Store {
                 row_to_chat_turn,
             )
             .optional()?)
+    }
+
+    pub fn has_chat_submission(&self, session_id: &str, client_turn_id: &str) -> Result<bool> {
+        Ok(self.conn.query_row(
+            "SELECT EXISTS(SELECT 1 FROM chat_queued_messages WHERE session_id = ?1 AND client_turn_id = ?2)
+                 OR EXISTS(SELECT 1 FROM chat_turns WHERE session_id = ?1 AND client_turn_id = ?2)
+                 OR EXISTS(SELECT 1 FROM chat_steer_receipts WHERE session_id = ?1 AND client_turn_id = ?2 AND delivered = 1)",
+            params![session_id, client_turn_id],
+            |row| row.get(0),
+        )?)
     }
 
     pub fn chat_native_thread_has_named_model(
@@ -3516,7 +3653,8 @@ impl Store {
             "INSERT INTO chat_queued_messages
              (id, session_id, client_turn_id, request_hash, payload_json, created_at)
              SELECT ?1, ?2, ?3, ?4, ?5, ?6
-             WHERE EXISTS (SELECT 1 FROM chat_sessions WHERE id = ?2)",
+             WHERE EXISTS (SELECT 1 FROM chat_sessions WHERE id = ?2)
+             AND NOT EXISTS (SELECT 1 FROM chat_steer_receipts WHERE session_id = ?2 AND client_turn_id = ?3)",
             params![
                 message.id,
                 message.session_id,
@@ -3527,7 +3665,9 @@ impl Store {
             ],
         )?;
         if changed == 0 {
-            return Err(anyhow!("chat session not found"));
+            return Err(anyhow!(
+                "chat session not found or message already admitted as steering"
+            ));
         }
         Ok(())
     }
@@ -4737,6 +4877,7 @@ mod tests {
         let held = supervisor.write().unwrap();
         refused(&store);
         drop(held);
+        drop(supervisor);
         store
             .delete_local_experiment("experiment", || Ok(()))
             .unwrap();
@@ -4760,6 +4901,7 @@ mod tests {
             .is_file());
         assert!(store.get_run(&sibling).unwrap().is_some());
         assert!(store.get_local_project("p").unwrap().is_some());
+        drop(store);
         std::fs::remove_dir_all(dir).unwrap();
     }
 
@@ -4833,6 +4975,7 @@ mod tests {
         store.defer_remote_cleanup("r2", false, "stale").unwrap();
         store.finish_remote_cleanup("r1", true).unwrap();
         assert_eq!(due(&store).len(), 4);
+        drop(store);
         std::fs::remove_dir_all(dir).unwrap();
     }
 
@@ -4860,6 +5003,7 @@ mod tests {
         );
         store.finish_source_sweep("lab", None).unwrap();
         assert_eq!(store.due_source_sweeps().unwrap().len(), 1);
+        drop(store);
         std::fs::remove_dir_all(dir).unwrap();
     }
 
@@ -5449,7 +5593,7 @@ mod tests {
         let preferences = store.ui_state().unwrap();
         let global: GlobalWorkspaceState = serde_json::from_value(serde_json::json!({
             "lastLocation":"/projects/first/settings/storage", "railOpen":false,
-            "panelWidth":620, "experimentsView":"table"
+            "panelWidth":620, "railWidth":280, "experimentsView":"table"
         }))
         .unwrap();
         store.set_global_workspace_state(&global).unwrap();
@@ -5818,6 +5962,41 @@ mod tests {
             "one"
         );
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn submission_lookup_uses_client_ids_for_queued_and_completed_turns() {
+        let dir =
+            std::env::temp_dir().join(format!("orx-store-submissions-{}", uuid::Uuid::new_v4()));
+        let store = Store::open_at(dir.clone()).unwrap();
+        store
+            .create_chat_session(&chat_session_fixture("chat_1"))
+            .unwrap();
+        store
+            .insert_queued_chat_message(&StoredQueuedChatMessage {
+                id: "q_queue-id".into(),
+                session_id: "chat_1".into(),
+                client_turn_id: "ct_queue-id".into(),
+                request_hash: "hash".into(),
+                payload_json: "{}".into(),
+                created_at: 1,
+            })
+            .unwrap();
+        assert!(store.has_chat_submission("chat_1", "ct_queue-id").unwrap());
+        assert!(!store.has_chat_submission("chat_1", "q_queue-id").unwrap());
+        assert!(!store.has_chat_submission("another", "ct_queue-id").unwrap());
+        let mut turn = chat_turn_fixture("finished", "ct_finished");
+        turn.state = "completed".into();
+        store.admit_chat_turn(None, &turn).unwrap();
+        assert!(store.has_chat_submission("chat_1", "ct_finished").unwrap());
+        assert!(store.claim_steer("chat_1", "ct_steer", "hash").unwrap());
+        assert!(!store.has_chat_submission("chat_1", "ct_steer").unwrap());
+        store.finish_steer("chat_1", "ct_steer").unwrap();
+        assert!(store.has_chat_submission("chat_1", "ct_steer").unwrap());
+        assert!(!store.has_chat_submission("another", "ct_steer").unwrap());
+        store.delete_queued_chat_message("q_queue-id").unwrap();
+        assert!(!store.has_chat_submission("chat_1", "ct_queue-id").unwrap());
+        let _ = std::fs::remove_dir_all(dir);
     }
 
     #[test]
@@ -6237,6 +6416,83 @@ mod tests {
         assert!(recovered.plan_mode);
         assert_eq!(recovered.reasoning_level.as_deref(), Some("low"));
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn steer_and_turn_admission_cannot_claim_the_same_client_id() {
+        let dir = std::env::temp_dir().join(format!("orx-steer-claim-{}", uuid::Uuid::new_v4()));
+        let store = Store::open_at(dir.clone()).unwrap();
+        store
+            .create_chat_session(&chat_session_fixture("chat_1"))
+            .unwrap();
+        assert!(store.claim_steer("chat_1", "ct1", "hash").unwrap());
+        let turn = chat_turn_fixture("turn1", "ct1");
+        assert!(matches!(
+            store.admit_chat_turn(None, &turn).unwrap(),
+            ChatTurnAdmission::Conflict
+        ));
+        let queued = StoredQueuedChatMessage {
+            id: "q1".into(),
+            session_id: "chat_1".into(),
+            client_turn_id: "ct1".into(),
+            request_hash: "hash".into(),
+            payload_json: "{}".into(),
+            created_at: 1,
+        };
+        assert!(store.insert_queued_chat_message(&queued).is_err());
+        let other = chat_turn_fixture("turn2", "ct2");
+        assert!(matches!(
+            store.admit_chat_turn(None, &other).unwrap(),
+            ChatTurnAdmission::Inserted
+        ));
+        assert!(!store.claim_steer("chat_1", "ct2", "hash").unwrap());
+        let queued_first = StoredQueuedChatMessage {
+            id: "q3".into(),
+            session_id: "chat_1".into(),
+            client_turn_id: "ct3".into(),
+            request_hash: "hash".into(),
+            payload_json: "{}".into(),
+            created_at: 1,
+        };
+        store.insert_queued_chat_message(&queued_first).unwrap();
+        assert!(!store.claim_steer("chat_1", "ct3", "hash").unwrap());
+        drop(store);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn concurrent_steer_and_turn_admission_have_one_winner() {
+        let dir = std::env::temp_dir().join(format!("orx-steer-race-{}", uuid::Uuid::new_v4()));
+        let store = Store::open_at(dir.clone()).unwrap();
+        store
+            .create_chat_session(&chat_session_fixture("chat_1"))
+            .unwrap();
+        for i in 0..10 {
+            let barrier = std::sync::Arc::new(std::sync::Barrier::new(2));
+            let steer_dir = dir.clone();
+            let turn_dir = dir.clone();
+            let steer_barrier = barrier.clone();
+            let id = format!("client-{i}");
+            let steer_id = id.clone();
+            let turn_id = id.clone();
+            let steer = std::thread::spawn(move || {
+                let store = Store::open_at(steer_dir).unwrap();
+                steer_barrier.wait();
+                store.claim_steer("chat_1", &steer_id, "hash").unwrap()
+            });
+            let turn = std::thread::spawn(move || {
+                let store = Store::open_at(turn_dir).unwrap();
+                let turn = chat_turn_fixture(&format!("turn-{i}"), &turn_id);
+                barrier.wait();
+                matches!(
+                    store.admit_chat_turn(None, &turn).unwrap(),
+                    ChatTurnAdmission::Inserted
+                )
+            });
+            assert_ne!(steer.join().unwrap(), turn.join().unwrap());
+        }
+        drop(store);
+        let _ = std::fs::remove_dir_all(dir);
     }
 
     #[test]
@@ -7670,6 +7926,122 @@ mod tests {
             chat_session_id: chat_session_id.map(str::to_string),
             archived: false,
         }
+    }
+
+    #[test]
+    fn session_experiments_include_creation_runs_and_wakeups_across_projects() {
+        let dir =
+            std::env::temp_dir().join(format!("orx-session-experiments-{}", uuid::Uuid::new_v4()));
+        let store = Store::open_at(dir.clone()).unwrap();
+        for id in ["proj_1", "proj_2"] {
+            store
+                .create_local_project(&LocalProject {
+                    id: id.into(),
+                    name: format!("name of {id}"),
+                    slug: id.into(),
+                    github_owner: String::new(),
+                    github_repo: String::new(),
+                    github_sync_enabled: false,
+                    baseline_branch: "main".into(),
+                    repo_path: dir.join(id).to_string_lossy().into_owned(),
+                    run_command: None,
+                    paper_id: None,
+                    created_at: 1,
+                    updated_at: 1,
+                })
+                .unwrap();
+        }
+        for (id, owner, project) in [
+            ("created", Some("chat_a"), "proj_1"),
+            ("created_no_runs", Some("chat_a"), "proj_1"),
+            ("run", Some("chat_b"), "proj_2"),
+            ("both", Some("chat_a"), "proj_1"),
+            ("watched", Some("chat_b"), "proj_1"),
+            ("concurrent", Some("chat_a"), "proj_1"),
+            ("archived", Some("chat_a"), "proj_1"),
+            ("unrelated", Some("chat_b"), "proj_1"),
+            ("missing_project", Some("chat_a"), "missing"),
+            ("deleted", Some("chat_a"), "proj_1"),
+        ] {
+            let mut experiment = experiment_fixture(id, owner);
+            experiment.project_id = project.into();
+            experiment.archived = id == "archived";
+            store.create_local_experiment(&experiment).unwrap();
+        }
+        for (id, experiment, session, status, created_at, ended_at) in [
+            ("run_1", "run", "chat_a", "failed", 5, Some(6)),
+            ("run_2", "run", "chat_a", "done", 7, Some(9)),
+            ("run_3", "both", "chat_a", "done", 1, Some(2)),
+            ("run_4", "created", "chat_b", "done", 10, Some(20)),
+            ("run_5", "created", "chat_b", "running", 30, None),
+            ("run_6", "watched", "chat_b", "starting", 3, None),
+            ("run_7", "unrelated", "chat_b", "done", 4, Some(5)),
+            ("run_8", "missing_experiment", "chat_a", "done", 1, Some(2)),
+            ("run_9", "deleted", "chat_a", "done", 1, Some(2)),
+            ("run_10", "archived", "chat_a", "done", 50, Some(100)),
+            ("run_11", "concurrent", "chat_a", "running", 5, None),
+            ("run_12", "concurrent", "chat_a", "failed", 9, Some(10)),
+        ] {
+            let mut run = run_fixture(id, status, Some(session));
+            run.experiment_id = experiment.into();
+            run.created_at = created_at;
+            run.ended_at = ended_at;
+            store.upsert_run(&run).unwrap();
+        }
+        store.register_run_wakeup("run_6", "chat_a").unwrap();
+        store
+            .conn
+            .execute("DELETE FROM local_experiments WHERE id = 'deleted'", [])
+            .unwrap();
+        let rows = store.list_experiments_by_chat_session("chat_a").unwrap();
+        let summary: Vec<_> = rows
+            .iter()
+            .map(|row| {
+                (
+                    row.experiment.id.as_str(),
+                    row.current_run.as_ref().map(|run| run.status.as_str()),
+                )
+            })
+            .collect();
+        assert_eq!(
+            summary,
+            [
+                ("created", Some("running")),
+                ("concurrent", Some("running")),
+                ("watched", Some("starting")),
+                ("run", Some("done")),
+                ("both", Some("done")),
+                ("created_no_runs", None),
+                ("archived", Some("done")),
+            ]
+        );
+        assert_eq!(rows[3].experiment.project_id, "proj_2");
+        assert_eq!(rows[3].project_name, "name of proj_2");
+        // An older run still in flight outranks the newer run that already failed.
+        assert_eq!(rows[1].current_run.as_ref().unwrap().created_at, 5);
+        let response = serde_json::json!({ "experiments": rows });
+        assert_eq!(
+            response["experiments"][0]["currentRun"]["status"],
+            "running"
+        );
+        assert_eq!(response["experiments"][0]["currentRun"]["createdAt"], 30);
+        assert_eq!(
+            response["experiments"][0]["currentRun"]["endedAt"],
+            serde_json::Value::Null
+        );
+        assert_eq!(
+            response["experiments"][0]["experiment"]["chatSessionId"],
+            "chat_a"
+        );
+        assert_eq!(
+            response["experiments"][5]["currentRun"],
+            serde_json::Value::Null
+        );
+        assert!(store
+            .list_experiments_by_chat_session("unrelated")
+            .unwrap()
+            .is_empty());
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

@@ -1,3 +1,4 @@
+import { EscapeScope } from "./EscapeScope";
 import { m } from "../paraglide/messages.js";
 // The shape follows what Overleaf allows: syncing needs a Git authentication
 // token and a project that already exists (its bridge cannot create one), and
@@ -87,6 +88,7 @@ export function OverleafButton({ overleaf }: { overleaf: OverleafSync }) {
           <OverleafPanel overleaf={overleaf} />
         </div>, document.body,
       )}
+      <EscapeScope enabled={open} onEscape={() => { setOpen(false); triggerRef.current?.focus(); }} />
     </>
   );
 }

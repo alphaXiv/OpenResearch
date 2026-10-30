@@ -172,7 +172,7 @@ function TerminalView({
               <ButtonLink
                 size="small"
                 variant="ghost"
-                title={m.a11y_open_in_trackio()}
+                data-tip={m.a11y_open_in_trackio()}
                 aria-label={m.a11y_open_in_trackio()}
                 href={trackioUrl}
                 target="_blank"
@@ -194,7 +194,7 @@ function TerminalView({
           <Button
             size="small"
             variant="ghost"
-            title={m.a11y_trackio_charts()}
+            data-tip={m.a11y_trackio_charts()} aria-description={m.a11y_trackio_charts()}
             {...tabOpenGestureHandlers<HTMLButtonElement>((intent) => onOpenView("trackio", selectedRun?.id, intent))}
           >
             <ChartLine size={14} />
@@ -210,7 +210,7 @@ function TerminalView({
         {expRuns.length > 0 && selectedRun && (
           <div className="run-history relative shrink-0" ref={historyRef}>
             <Button
-              title={m.detail_drawer_switch_run()}
+              data-tip={historyOpen ? undefined : m.detail_drawer_switch_run()} aria-description={m.detail_drawer_switch_run()}
               aria-expanded={historyOpen}
               onClick={() => setHistoryOpen((v) => !v)}
             >

@@ -1,23 +1,27 @@
-// End-pane sizing: keep both the panel and the chat column usable.
 export const PANEL_MIN_WIDTH = 360;
-const RAIL_WIDTH = 300;
+export const RAIL_DEFAULT_WIDTH = 300;
+const RAIL_MIN_WIDTH = 220;
+const RAIL_MAX_WIDTH = 480;
 const CHAT_MIN_SPACE = 380;
 
-/** The widest the end pane can be while leaving the rail + chat usable. */
-export function panelMaxWidth(): number {
-  return Math.max(PANEL_MIN_WIDTH, window.innerWidth - RAIL_WIDTH - CHAT_MIN_SPACE);
+export const clampRailWidth = (width: number) => Math.round(Math.min(Math.max(width, RAIL_MIN_WIDTH), RAIL_MAX_WIDTH));
+
+export function sidebarFitsWithPanel(width: number, railWidth: number): boolean {
+  return width >= railWidth + CHAT_MIN_SPACE + PANEL_MIN_WIDTH;
 }
 
-const SIDE_CHAT_MIN_WIDTH = 500;
-const SIDE_CHAT_WIDTH_RATIO = 0.33;
+/** The widest the sidebar can grow before an open panel would hide it. */
+export const railWidthBesidePanel = (width: number) => width - CHAT_MIN_SPACE - PANEL_MIN_WIDTH;
 
-/** A side chat needs room for a full transcript and composer. */
+export function panelMaxWidth(width: number, sidebarWidth: number): number {
+  const available = width - sidebarWidth;
+  return Math.max(Math.min(PANEL_MIN_WIDTH, Math.floor(available / 2)), available - CHAT_MIN_SPACE);
+}
+
 export function sideChatPanelWidth(): number {
-  return Math.min(panelMaxWidth(), Math.max(SIDE_CHAT_MIN_WIDTH, Math.round(window.innerWidth * SIDE_CHAT_WIDTH_RATIO)));
+  return Math.max(500, Math.round(window.innerWidth * 0.33));
 }
 
-/** Default when no layout is saved. */
 export function initialPanelWidth(): number {
-  const max = panelMaxWidth();
-  return Math.max(PANEL_MIN_WIDTH, Math.min(480, max, Math.round(window.innerWidth * 0.25)));
+  return Math.max(PANEL_MIN_WIDTH, Math.min(480, Math.round(window.innerWidth * 0.25)));
 }

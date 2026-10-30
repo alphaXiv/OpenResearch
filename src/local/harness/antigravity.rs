@@ -247,13 +247,10 @@ impl Harness for Antigravity {
         Some(dirs::home_dir()?.join(".gemini").join("antigravity-cli"))
     }
 
-    fn skill_target(&self) -> Option<PathBuf> {
-        Some(
-            self.config_home()?
-                .join("skills")
-                .join("orx")
-                .join("SKILL.md"),
-        )
+    fn native_skill_roots(&self) -> Vec<PathBuf> {
+        self.config_home()
+            .map(|home| vec![home.join("skills")])
+            .unwrap_or_default()
     }
 
     fn skill_shim(&self) -> Option<&'static str> {

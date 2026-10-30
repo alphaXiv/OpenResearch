@@ -17,6 +17,25 @@ use std::process::Command;
 
 use crate::error::{anyhow, Result};
 
+pub(crate) async fn fetch_manifest(
+    timeout: std::time::Duration,
+) -> Result<Option<super::SingleAssetManifest>> {
+    Ok(super::fetch_canary_manifest(timeout)
+        .await?
+        .and_then(|mut manifest| {
+            manifest
+                .assets
+                .remove("windows")
+                .map(|asset| super::SingleAssetManifest {
+                    version: manifest.version,
+                    tag: manifest.tag,
+                    asset: asset.asset,
+                    sha256: asset.sha256,
+                    ancestors: manifest.ancestors,
+                })
+        }))
+}
+
 /// Environment a relaunched `orx up` or app reads to wait for the process it replaces.
 const RELAUNCH_WAIT_PID_ENV: &str = "ORX_RELAUNCH_WAIT_PID";
 
@@ -110,6 +129,34 @@ pub(crate) fn install(installed: &Path, script: &[u8], quiet: bool) -> Result<()
     outcome
 }
 
+pub(crate) fn install_binary(installed: &Path, bytes: &[u8]) -> Result<()> {
+    if crate::telemetry::build_channel() != "production" {
+        return Err(anyhow!("This OpenResearch app is not an official build."));
+    }
+    let dir = installed
+        .parent()
+        .ok_or_else(|| anyhow!("{} has no parent directory", installed.display()))?;
+    sweep_stale_stages(dir);
+    let stage = dir.join(format!("{STAGE_PREFIX}{}", uuid::Uuid::new_v4().simple()));
+    std::fs::create_dir_all(&stage)?;
+    let outcome = (|| -> Result<()> {
+        let staged = stage.join("orx.exe");
+        std::fs::write(&staged, bytes)?;
+        let status = Command::new(powershell())
+            .args(["-NoProfile", "-NonInteractive", "-Command", "$s = Get-AuthenticodeSignature -LiteralPath $env:ORX_UPDATE_FILE; if ($s.Status -ne 'Valid' -or $s.SignerCertificate.GetNameInfo('SimpleName', $false) -ne 'alphaXiv Inc.' -or -not $s.TimeStamperCertificate) { exit 1 }"])
+            .env("ORX_UPDATE_FILE", &staged)
+            .status()?;
+        if !status.success() {
+            return Err(anyhow!(
+                "The downloaded app is not signed by the expected publisher."
+            ));
+        }
+        swap_staged(installed, &staged)
+    })();
+    let _ = std::fs::remove_dir_all(&stage);
+    outcome
+}
+
 fn stage_and_swap(installed: &Path, script: &[u8], quiet: bool, stage: &Path) -> Result<()> {
     let script_path = stage.join("installer.ps1");
     std::fs::write(&script_path, script)?;
@@ -150,6 +197,10 @@ fn stage_and_swap(installed: &Path, script: &[u8], quiet: bool, stage: &Path) ->
         ));
     }
 
+    swap_staged(installed, &staged)
+}
+
+fn swap_staged(installed: &Path, staged: &Path) -> Result<()> {
     let retired = super::retired_path(installed);
     let moved_aside = match std::fs::rename(installed, &retired) {
         Ok(()) => true,
@@ -162,7 +213,7 @@ fn stage_and_swap(installed: &Path, script: &[u8], quiet: bool, stage: &Path) ->
             ))
         }
     };
-    if let Err(err) = std::fs::rename(&staged, installed) {
+    if let Err(err) = std::fs::rename(staged, installed) {
         if moved_aside {
             let _ = std::fs::rename(&retired, installed);
         }

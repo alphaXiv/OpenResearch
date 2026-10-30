@@ -34,6 +34,7 @@ function loadModule(filename, api = {}, remembered = null) {
       if (id === "../App") return { default: () => null };
       if (id === "../RemoteRuntime") return { RuntimeRoot: () => null, useRuntime: () => ({ kind: "local" }) };
       if (id === "../routePages") return { ResumeGlobal: () => null, ResumeProject: () => null, ProjectsPage: () => null };
+      if (id === "../components/ReproducePage") return { ReproducePage: () => null };
       if (id.startsWith("./routes/")) return load(new URL(`${id}.tsx`, url));
       throw new Error(`Unexpected dependency: ${id}`);
     }, exports);
@@ -67,6 +68,23 @@ test("real file routes distinguish task/new, task IDs, project index, and settin
   for (const path of ["/projects/p/settings/git", "/projects/p/settings/unknown", "/projects/p/tasks/%00"]) {
     const invalid = await match(path);
     assert(invalid.state.matches.some((route) => route.status === "notFound"), path);
+  }
+});
+
+test("reproduce links carry arXiv and alphaXiv-exclusive ids through the path exactly", async () => {
+  const { linkedPaperId } = loadModule("routes/reproduce.$.tsx");
+  for (const [path, id] of [
+    ["/reproduce/2401.10000", "2401.10000"],
+    ["/reproduce/1706.03762v2", "1706.03762v2"],
+    ["/reproduce/hep-th/9901001", "hep-th/9901001"],
+    ["/reproduce/2610.learning-spectrum-matched-shellsort", "2610.learning-spectrum-matched-shellsort"],
+    ["/reproduce/a/b/c", null],
+    ["/reproduce/a%20b", null],
+  ]) {
+    const router = await match(path);
+    const leaf = router.state.matches.at(-1);
+    assert.equal(leaf.routeId, "/reproduce/$", path);
+    assert.equal(linkedPaperId(leaf.params._splat), id, path);
   }
 });
 

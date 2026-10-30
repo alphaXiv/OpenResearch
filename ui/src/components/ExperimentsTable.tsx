@@ -111,7 +111,7 @@ export function ExperimentsTable({
           {m.experiments_table_stop_failed()} {cancelError}
         </div>
       )}
-      <div ref={listRef} className="experiments-table relative w-full text-sm bg-background" role="list" aria-label={m.experiments_table_experiments()}>
+      <div ref={listRef} data-keyboard-list className="experiments-table relative w-full text-sm bg-background" role="list" aria-label={m.experiments_table_experiments()}>
         {showLineage && <Rail placed={placed} height={lastPlaced ? lastPlaced.top + lastPlaced.height : 0} path={NO_HIGHLIGHT} selectedId={null} />}
         {rows.map((row) => {
           if (row.kind !== "experiment") return null;
@@ -150,6 +150,7 @@ export function ExperimentsTable({
               <div className="experiment-table-name [grid-area:name] min-w-0">
                 <button
                   type="button"
+                  data-keyboard-item
                   className="experiment-table-title line-clamp-2 w-full overflow-hidden text-text font-medium text-start"
                   {...tabOpenGestureHandlers<HTMLButtonElement>((intent) =>
                     onOpen(experiment, intent),

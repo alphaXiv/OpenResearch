@@ -108,7 +108,7 @@ export function CodeTab({
             ) : tree.dirs.size === 0 && tree.files.length === 0 ? (
               <CodeTabNote>{m.code_tab_no_files()}</CodeTabNote>
             ) : (
-              <div className="file-tree py-1.5 px-0 text-sm">
+              <div data-keyboard-list className="file-tree py-1.5 px-0 text-sm">
                 <TreeLevel
                   node={tree}
                   parentPath=""

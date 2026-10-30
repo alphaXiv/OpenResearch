@@ -24,12 +24,40 @@ gh workflow run release-macos-app.yml -f tag=v0.1.99
 ```
 
 The manual path checks out `inputs.tag` and runs the signing scripts under the
-`release-signing` environment, so the **required reviewer approving the run is
-the real gate on the certificate** — verify the tag points at trusted code (the
-`main`-only deployment-branch restriction covers the workflow file, not the
-checked-out tag).
+`release-signing` environment. Verify the tag points at trusted code: the
+deployment-branch restriction covers the workflow file, not the checked-out
+tag. The macOS and Linux app builds use the same UI as the CLI:
+the matching Release run's `release-ui` artifact, or the committed bundle for
+older releases. A Release run for an older source revision also uses its
+committed bundle. The artifact must still be available for manual re-attachments.
 
 ## The app updater's contract
+
+The desktop app offers stable and canary update channels. A push to `main` runs
+`.github/workflows/release-canary.yml`: after CI succeeds, it builds the macOS
+app, Windows installer and Linux AppImages, and publishes versioned assets and
+`desktop-canary-v2.json` on the `canary` prerelease. The manifest records the
+build identity, source commit, and ancestry. Builds run sequentially, with up
+to 100 pending runs queued. An older rerun cannot replace the canary pointer,
+and publication retries retain already-published assets. The latest build and
+six other recent builds are retained.
+
+The first build after this change also publishes a compatibility release and
+`desktop-canary.json` for already-installed clients that download from a
+version-specific release. That release and pointer remain available so those
+clients can update to the shared-release format.
+
+Stable releases continue to start with a reviewed version bump on `main`. Their
+`desktop-ancestry.json` contains the release commit's ancestry. A canary can
+switch back to stable only when that file contains its own source commit; until
+then, the chosen stable channel waits for a compatible release. Older stable
+releases without this file cannot establish compatibility. Switching from stable
+to canary likewise waits until the canary includes the stable release's commit.
+
+Automatic macOS and Windows canaries use the same `release-signing` environment,
+credentials, and Windows Azure identity as stable releases. The environment
+currently permits protected branches and has no required reviewers; adding an
+approval gate will also pause automatic canary builds.
 
 Installed apps update themselves from `macos-app.json`, uploaded to the release
 by the same step that uploads the DMG:
@@ -71,17 +99,18 @@ notarized by `.github/workflows/sign-macos-cli.yml`, which dist runs between its
 local and global builds. It re-uploads each darwin archive under the same
 artifact name with a rewritten `.sha256` and per-target manifest checksum, so the
 installers and `sha256.sum` built afterwards match the signed archives. It uses
-the same `release-signing` environment, so a release waits on one approval for
-it, then another for the DMG. Unlike the DMG, it ignores `MACOS_SIGNING_ENABLED`:
-every published release needs those secrets and that approval. PRs do not run
-release builds or signing; publication starts after a version bump merges.
+the same `release-signing` environment as the DMG. Unlike the DMG, it ignores
+`MACOS_SIGNING_ENABLED`: every published release needs those secrets. PRs do not
+run release builds or signing; publication starts after a version bump merges.
 
 dist does not generate this job's `needs: build-local-artifacts`, so
 `dist-workspace.toml` sets `allow-dirty = ["ci"]`, which makes `dist generate`
 skip `release.yml` entirely: dist config changes no longer reach CI on their own.
 To regenerate, remove `allow-dirty`, run the pinned `dist generate`, then restore
-the custom signing dependencies, release-only dispatch guard, immutable source SHA
-propagation, and required publication checks before restoring `allow-dirty`.
+the shared UI build, custom signing dependencies, release-only dispatch guard,
+immutable source SHA propagation, the full-history checkout and
+`desktop-ancestry.json` generation, and required publication checks before
+restoring `allow-dirty`.
 Release recovery requires an explicit version tag; set `source-sha` to the original
 merged bump commit if `main` has advanced. Desktop attachment jobs resolve that
 published tag rather than rebuilding the current tip of `main`.
@@ -92,9 +121,9 @@ Needs an Apple Developer Program account with a **Developer ID Application**
 certificate (see Apple's [notarizing docs](https://developer.apple.com/documentation/security/notarizing-macos-software-before-distribution)).
 From it you produce the six values below.
 
-1. Create the **`release-signing` environment** (Settings → Environments): add
-   **required reviewers** and set **Deployment branches → `main`**. Add these as
-   **environment** secrets (not repo-wide):
+1. Configure the **`release-signing` environment** (Settings → Environments)
+   for protected branches. Automatic canaries require it to have no required
+   reviewers. Add these as **environment** secrets (not repo-wide):
 
    | Secret | Value |
    | --- | --- |
@@ -121,7 +150,10 @@ Never commit the `.p12`.
 
 ## Build / sign locally
 
+Use Node 22 and the pnpm version pinned in `ui/package.json` for the UI build.
+
 ```bash
+pnpm -C ui install --frozen-lockfile && pnpm -C ui build
 rustup target add aarch64-apple-darwin x86_64-apple-darwin   # once, for universal
 ORX_APP_UNIVERSAL=1 bash scripts/build-macos-app.sh
 xcrun notarytool store-credentials orx-notary \

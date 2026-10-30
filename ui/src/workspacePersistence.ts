@@ -40,7 +40,7 @@ export const globalWorkspaceWriter = {
   queue(value: GlobalWorkspace, delay = 0) {
     const old = rememberedGlobalWorkspace;
     // Avoid writing the acknowledged snapshot back to the server.
-    if (old && old.lastLocation === value.lastLocation && old.railOpen === value.railOpen && old.panelWidth === value.panelWidth && old.experimentsView === value.experimentsView) return;
+    if (old && old.lastLocation === value.lastLocation && old.railOpen === value.railOpen && old.panelWidth === value.panelWidth && old.railWidth === value.railWidth && old.experimentsView === value.experimentsView) return;
     rememberedGlobalWorkspace = value;
     writer.queue(value, delay);
   },

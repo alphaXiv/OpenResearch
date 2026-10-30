@@ -2,6 +2,10 @@
   clip-path: inset(34% 9%);
 }
 
+.mac-titlebar .app > :is(.update-banner, .offline-banner, [role="alert"]) ~ .app-body .mac-titlebar-spacer {
+  display: none;
+}
+
 :root[data-theme="dark"] .tinker-logo {
   filter: invert(1);
 }
@@ -30,6 +34,15 @@
   }
   50% {
     opacity: 0.55;
+  }
+}
+
+@keyframes dialog-shake {
+  20%, 60% {
+    translate: -6px 0;
+  }
+  40%, 80% {
+    translate: 6px 0;
   }
 }
 
@@ -170,6 +183,21 @@
 
 .msg-assistant .md figure:has(.inline-html-figure) {
   width: 100%;
+}
+
+:root[data-colored-markdown="on"] .md :is(strong, em) {
+  color: var(--md-emphasis);
+}
+
+/* Opaque, with block padding that bridges the leading, so wrapped lines read as one block. */
+:root[data-colored-markdown="on"] .md :is(strong > em, em > strong) {
+  color: var(--md-strong-em);
+  background: var(--md-strong-em-bg);
+  padding-block: 0.25em;
+  padding-inline: 0.15em;
+  border-radius: 0.2em;
+  box-decoration-break: clone;
+  -webkit-box-decoration-break: clone;
 }
 
 /* Inline flex otherwise inherits paragraph leading and outgrows code chips. */
@@ -375,7 +403,7 @@
 
 /* Reserve room for the workspace toolbar. */
 .workspace-body > .chat-pane .chat-header {
-  padding-inline-end: 11rem;
+  padding-inline-end: 12rem;
 }
 
 .workspace-card-visible > .chat-pane {
@@ -392,6 +420,23 @@
 
 .win-titlebar .workspace-card-visible .workspace-tools {
   top: 2.75rem;
+}
+
+.win-titlebar .app:not(:has(> :is(.update-banner, .offline-banner, [role="alert"]))) .workspace-body:not(.workspace-card-visible):is(:not(:has(> .right-pane)), .flex-col) > .workspace-tools {
+  inset-inline-end: var(--spacing-win-controls);
+}
+
+.win-titlebar .app:not(:has(> :is(.update-banner, .offline-banner, [role="alert"]))) .workspace-body:not(.workspace-card-visible):is(:not(:has(> .right-pane)), .flex-col) > .chat-pane .chat-header {
+  padding-inline-end: calc(12rem + var(--spacing-win-controls));
+}
+
+.win-titlebar .app:not(:has(> :is(.update-banner, .offline-banner, [role="alert"]))) .settings-view-scroll:first-child {
+  margin-block-start: var(--spacing-win-caption);
+}
+
+.win-titlebar .app:not(:has(> :is(.update-banner, .offline-banner, [role="alert"]))) .workspace-body:not(.flex-col) > .right-pane > .tabs,
+.win-titlebar .right-pane.max > .tabs {
+  padding-inline-end: var(--spacing-win-controls);
 }
 
 .code-source-text,
@@ -427,4 +472,72 @@
   color: var(--text);
   font-size: inherit;
 }
+}
+
+@media (max-width: 767px) {
+  html, body, #root { height: 100dvh; }
+  .app { padding-top: env(safe-area-inset-top); }
+  .workspace-body.has-workspace-tools { padding-bottom: calc(64px + env(safe-area-inset-bottom)); }
+  .workspace-body > .chat-pane .chat-header { padding-inline: 8px; }
+  .chat-heading-row { grid-template-columns: 44px minmax(0, 1fr) 0; }
+  .chat-heading-row > span > .icon-btn, .mac-titlebar-spacer > span > .icon-btn { width: 44px; height: 44px; }
+  .workspace-tools { display: none; }
+  .workspace-mobile-nav {
+    display: flex;
+    position: fixed;
+    inset-inline: 0;
+    bottom: 0;
+    z-index: 65;
+    min-height: 64px;
+    padding: 4px 8px calc(4px + env(safe-area-inset-bottom));
+    border-top: 1px solid var(--border);
+    background: var(--base);
+  }
+  .workspace-mobile-nav > * { flex: 1 1 0; min-width: 0; }
+  .workspace-mobile-nav > button, .workspace-mobile-nav > div > button {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    gap: 4px;
+    min-height: 56px;
+    border-radius: var(--radius-md);
+    color: var(--subtext);
+    font-size: 11px;
+    white-space: nowrap;
+  }
+  .workspace-mobile-nav button span { max-width: 100%; overflow: hidden; text-overflow: ellipsis; }
+  .workspace-mobile-nav button:focus-visible { outline: 2px solid var(--focus); outline-offset: -2px; }
+  .workspace-mobile-nav button[aria-pressed="true"] { background: var(--surface); color: var(--text); }
+  .mobile-rail-dialog { width: min(320px, calc(100vw - 40px)); padding-top: env(safe-area-inset-top); padding-bottom: env(safe-area-inset-bottom); background: var(--base); }
+  .mobile-rail-dialog .session-rail { width: 100%; height: 100%; }
+  .session-rail .rail-nav-item { min-height: 44px; }
+  .workspace-body .right-pane, .workspace-body .right-pane.max {
+    position: fixed;
+    inset: env(safe-area-inset-top) 0 calc(64px + env(safe-area-inset-bottom));
+    width: 100%;
+    border: 0;
+    z-index: 60;
+  }
+  .right-pane .panel-resizer, .right-pane .panel-controls > :first-child { display: none; }
+  .right-pane > .tabs { min-height: 52px; }
+  .right-pane .panel-controls > span > button { width: 44px; height: 44px; }
+  .chat-empty { padding: 20px 16px; overflow-y: auto; }
+  .chat-empty h2 { font-size: 28px; line-height: 1.2; }
+  .chat-thread, .settings-view-scroll, .home { scrollbar-gutter: auto; }
+  .composer-actions { flex-wrap: wrap; }
+  input, textarea, select { font-size: 16px; }
+}
+
+/* The macOS app's window material (src/commands/app.rs) shows through the sidebar. */
+.mac-titlebar:has(.app-body > .session-rail),
+.mac-titlebar:has(.app-body > .session-rail) body,
+.mac-titlebar .app-body > .session-rail {
+  background: transparent;
+}
+
+/* Hover and selection fills tint the material like a native sidebar's. */
+.mac-titlebar :is(.app-body > .session-rail, .titlebar-sidebar-toggle) {
+  --surface: var(--material-hover);
+  --panel: var(--material-selected);
 }

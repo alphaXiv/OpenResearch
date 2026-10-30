@@ -7,11 +7,9 @@ import { useLocale } from "../locale";
 // right-pane tab, and `<run id="..."/>` tags render as chips that open a run's
 // logs — so the agent can cite the code and the run behind a claim.
 
-import { Check, Copy, FileCode, ScrollText, X, Download, Minus, Plus } from "lucide-react";
-import { createContext, memo, useContext, useEffect, useMemo, useRef, useState, type ImgHTMLAttributes, type ReactNode } from "react";
-import { createPortal } from "react-dom";
+import { Check, Copy, ScrollText, X, Download, Minus, Plus } from "lucide-react";
+import { createContext, memo, useContext, useEffect, useMemo, useState, type ImgHTMLAttributes, type ReactNode } from "react";
 import { Markdown as StreamingMarkdown } from "@clo/react-markdown";
-import rehypeKatex from "rehype-katex";
 import remarkGfm from "remark-gfm";
 import remarkMath from "remark-math";
 import remarkParse from "remark-parse";
@@ -20,12 +18,15 @@ import { unified } from "unified";
 import { resolveSyntaxLanguage } from "../syntaxLanguage";
 import { highlight } from "../syntaxHighlight";
 import { remarkFigures } from "../remarkFigures";
+import { healKatexSource, rehypeKatexHealing, renderKatex } from "../katexHealing";
+import { looksLikeFilePath } from "../fileReferences";
 import { normalizeMarkdownForRendering } from "../markdownNormalization";
 import { tabOpenGestureHandlers, type TabOpenIntent } from "../tabPreview";
-import { Button, IconButton, IconButtonLink } from "./ui";
+import { Button, Dialog, DialogContent, IconButton, IconButtonLink, Tooltip } from "./ui";
 import { absoluteFileUrl, artifactUrl, projectFileUrl } from "../api";
 import { InlineHtmlFigure } from "./InlineHtmlFigure";
 import { ImageCarousel, ImageCarouselContext } from "./ImageCarousel";
+import { FileChip, FileReference, FileScopeContext, type OpenFile } from "./FileReference";
 import { imageWheelZoom } from "../imageZoom";
 import { chatImageTarget, chatImageTargets, citedFilePath, documentAssetTarget, encodeMarkdownPath, firstCitedLine, nativeMarkdownPath, rehypeSafeUrls, splitLineSuffix, type ImageCandidate } from "../markdownTarget";
 
@@ -51,12 +52,12 @@ export function ChatImageScope({ projectId, sessionId, children }: {
         },
       }));
   }, [projectId, sessionId]);
-  return <ImageResolverContext value={resolver}>{children}</ImageResolverContext>;
+  const files = useMemo(() => ({ projectId, sessionId }), [projectId, sessionId]);
+  return <ImageResolverContext value={resolver}><FileScopeContext value={files}>{children}</FileScopeContext></ImageResolverContext>;
 }
 
 function ImageModal({ src, alt, name, onClose }: { src: string; alt: string; name?: string; onClose: () => void }) {
-  const ref = useRef<HTMLDialogElement>(null);
-  const viewport = useRef<HTMLDivElement>(null);
+  const [viewport, setViewport] = useState<HTMLDivElement | null>(null);
   const [localZoom, setLocalZoom] = useState(1);
   const carousel = useContext(ImageCarouselContext);
   const zoom = carousel?.zoom ?? localZoom;
@@ -64,36 +65,30 @@ function ImageModal({ src, alt, name, onClose }: { src: string; alt: string; nam
   const [bounds, setBounds] = useState({ width: 0, height: 0 });
   const [size, setSize] = useState({ width: 0, height: 0 });
   useEffect(() => {
-    const dialog = ref.current;
-    dialog?.showModal();
-    dialog?.focus();
-    const area = viewport.current;
+    const area = viewport;
+    if (!area) return;
     const observer = new ResizeObserver(([entry]) => {
       setBounds({ width: entry.contentRect.width, height: entry.contentRect.height });
     });
     const onWheel = (event: WheelEvent) => {
       event.preventDefault();
-      setZoom((value) => imageWheelZoom(value, event.deltaY, event.deltaMode, area?.clientHeight ?? 0));
+      setZoom((value) => imageWheelZoom(value, event.deltaY, event.deltaMode, area.clientHeight));
     };
-    if (area) {
-      observer.observe(area);
-      area.addEventListener("wheel", onWheel, { passive: false });
-    }
+    observer.observe(area);
+    area.addEventListener("wheel", onWheel, { passive: false });
     return () => {
-      area?.removeEventListener("wheel", onWheel);
+      area.removeEventListener("wheel", onWheel);
       observer.disconnect();
-      dialog?.close();
     };
-  }, []);
+  }, [viewport, setZoom]);
   const fit = size.width && bounds.width
     ? Math.min(1, bounds.width * 0.9 / size.width, bounds.height * 0.9 / size.height)
     : 1;
-  return createPortal(
-    <dialog ref={ref} tabIndex={-1} aria-label={alt || m.chat_pasted_image()}
-      onCancel={(event) => { event.preventDefault(); onClose(); }}
-      className="fixed inset-0 m-0 max-w-none max-h-none w-full h-dvh border-0 outline-none bg-transparent p-0 text-text backdrop:bg-image-backdrop"
+  return <Dialog open onOpenChange={(open) => { if (!open) onClose(); }}>
+    <DialogContent aria-label={alt || m.chat_pasted_image()}
+      className="fixed inset-0 h-dvh w-screen max-w-none rounded-none border-0 bg-transparent p-0 text-text shadow-none"
       onClick={(event) => { event.stopPropagation(); if (event.target === event.currentTarget) onClose(); }}>
-      <div ref={viewport} className="absolute inset-x-4 sm:inset-x-12 top-16 bottom-32 overflow-auto overscroll-contain"
+      <div ref={setViewport} className="absolute inset-x-4 sm:inset-x-12 top-16 bottom-32 overflow-auto overscroll-contain"
         onClick={(event) => { if (event.target === event.currentTarget) onClose(); }}>
         <div className="flex min-h-full min-w-full w-max pointer-events-none">
           <img src={src} alt={alt} onLoad={(event) => setSize({ width: event.currentTarget.naturalWidth, height: event.currentTarget.naturalHeight })}
@@ -102,23 +97,33 @@ function ImageModal({ src, alt, name, onClose }: { src: string; alt: string; nam
         </div>
       </div>
       <div className="absolute top-5 right-5 flex gap-2">
-        <IconButtonLink shape="circle" href={src} download={name || true} aria-label={m.media_preview_download()} title={m.media_preview_download()}
-          className="bg-background shadow-popover"><Download size={16} /></IconButtonLink>
-        <IconButton shape="circle" onClick={onClose} aria-label={m.tour_close()} title={m.tour_close()}
-          className="bg-background shadow-popover"><X size={16} /></IconButton>
+        <Tooltip interactive content={m.media_preview_download()}>
+          <IconButtonLink shape="circle" href={src} download={name || true} aria-label={m.media_preview_download()}
+            className="bg-background shadow-popover"><Download size={16} /></IconButtonLink>
+        </Tooltip>
+        <Tooltip interactive content={m.tour_close()}>
+          <IconButton shape="circle" onClick={onClose} aria-label={m.tour_close()}
+            className="bg-background shadow-popover"><X size={16} /></IconButton>
+        </Tooltip>
       </div>
       <div className="absolute bottom-6 inset-x-6 flex flex-col items-center gap-3 pointer-events-none">
         {alt && <div className="max-w-xl line-clamp-2 rounded-xl bg-background px-4 py-2 text-center text-sm leading-snug shadow-popover">{alt}</div>}
         <div className="pointer-events-auto flex items-center gap-1 rounded-full bg-background p-1.5 shadow-popover">
-          <IconButton shape="circle" disabled={zoom <= 0.25} onClick={() => setZoom((value) => Math.max(0.25, value - 0.25))}
-            aria-label={m.image_zoom_out()} title={m.image_zoom_out()}><Minus size={16} /></IconButton>
-          <Button variant="ghost" className="min-w-16 tabular-nums" onClick={() => setZoom(1)} title={m.image_zoom_reset()} aria-label={m.image_zoom_reset()}>{Math.round(zoom * 100)}%</Button>
-          <IconButton shape="circle" disabled={zoom >= 4} onClick={() => setZoom((value) => Math.min(4, value + 0.25))}
-            aria-label={m.image_zoom_in()} title={m.image_zoom_in()}><Plus size={16} /></IconButton>
+          <Tooltip interactive content={m.image_zoom_out()}>
+            <IconButton shape="circle" disabled={zoom <= 0.25} onClick={() => setZoom((value) => Math.max(0.25, value - 0.25))}
+              aria-label={m.image_zoom_out()}><Minus size={16} /></IconButton>
+          </Tooltip>
+          <Tooltip interactive content={m.image_zoom_reset()}>
+            <Button variant="ghost" className="min-w-16 tabular-nums" onClick={() => setZoom(1)} aria-label={m.image_zoom_reset()}>{Math.round(zoom * 100)}%</Button>
+          </Tooltip>
+          <Tooltip interactive content={m.image_zoom_in()}>
+            <IconButton shape="circle" disabled={zoom >= 4} onClick={() => setZoom((value) => Math.min(4, value + 0.25))}
+              aria-label={m.image_zoom_in()}><Plus size={16} /></IconButton>
+          </Tooltip>
         </div>
       </div>
-    </dialog>, document.body,
-  );
+    </DialogContent>
+  </Dialog>;
 }
 
 function MarkdownImage({ sources, downloadName, alt = "", ...props }: ImgHTMLAttributes<HTMLImageElement> & { sources: string[]; downloadName?: string }) {
@@ -154,9 +159,11 @@ function CodeBlock({ code, lang }: { code: string; lang: string | null }) {
   };
   return (
     <div className="md-code relative my-2.5 mx-0 [&_pre]:m-0 [&:hover_.md-code-copy]:opacity-100">
-      <IconButton size="small" className="md-code-copy absolute top-1.5 end-1.5 bg-background opacity-0" title={m.md_copy()} aria-label={m.md_copy_code()} onClick={copy}>
-        {copied ? <Check size={14} /> : <Copy size={14} />}
-      </IconButton>
+      <Tooltip interactive content={m.md_copy()} className="md-code-copy absolute top-1.5 end-1.5 opacity-0 focus-within:opacity-100">
+        <IconButton size="small" className="bg-background" aria-description={m.md_copy()} aria-label={m.md_copy_code()} onClick={copy}>
+          {copied ? <Check size={14} /> : <Copy size={14} />}
+        </IconButton>
+      </Tooltip>
       <pre>
         <code>{highlight(code, lang, HIGHLIGHT_MAX_BYTES)}</code>
       </pre>
@@ -291,41 +298,6 @@ function remarkMentions() {
   return (tree: MdastNode) => replaceMentions(tree);
 }
 
-function FileChip({
-  path,
-  line,
-  exp,
-  onOpenFile,
-}: {
-  path: string;
-  line?: number;
-  /** Experiment id this file was cited from, if any (`<file exp=…>`). */
-  exp?: string;
-  onOpenFile?: (
-    path: string,
-    line: number | undefined,
-    exp: string | undefined,
-    ref: string | undefined,
-    intent: TabOpenIntent,
-  ) => void;
-}) {
-  const name = path.split("/").pop() || path;
-  const label = line != null ? `${name}:${line}` : name;
-  return (
-    <button
-      className="file-chip"
-      title={onOpenFile ? m.a11y_open_file_in_panel({ path: ltr(path) }) : path}
-      {...tabOpenGestureHandlers<HTMLButtonElement>((intent) =>
-        onOpenFile?.(path, line, exp, undefined, intent),
-      )}
-      disabled={!onOpenFile}
-    >
-      <FileCode size={12} />
-      <span className="file-chip-label">{label}</span>
-    </button>
-  );
-}
-
 /** A `<run id="..."/>` evidence mention: a chip that opens the run's logs (the
  * only evidence channel for a metric). `label` overrides the default text so a
  * claim can read "…, not significant [+3.65pp]" rather than a bare run id. */
@@ -361,7 +333,30 @@ const markdownProcessor = unified()
   .use(remarkMentions)
   .use(remarkRehype)
   .use(rehypeSafeUrls)
-  .use(rehypeKatex);
+  .use(rehypeKatexHealing);
+
+const StreamingContext = createContext(false);
+const InsideLinkContext = createContext(false);
+
+/** Code that looks like a repo path becomes a file reference once it is verified; inside a link it stays code. */
+function InlinePathCode({ text, fallback, onOpenFile }: { text: string; fallback: ReactNode; onOpenFile: OpenFile }) {
+  const insideLink = useContext(InsideLinkContext);
+  return insideLink ? fallback : <FileReference path={text} optimistic={false} fallback={fallback} onOpenFile={onOpenFile} />;
+}
+
+/** Math healed to what KaTeX accepts: a streaming tail is trimmed, a finished error stays as literal text. */
+function KatexMath({ code = "", displayMode }: { code?: string; displayMode?: string }) {
+  const streaming = useContext(StreamingContext);
+  const display = displayMode === "true";
+  const html = useMemo(() => {
+    const healed = healKatexSource(code, display, streaming ? "trim" : "escape", streaming);
+    return healed ? renderKatex(healed, display) : null;
+  }, [code, display, streaming]);
+  if (html == null) return null;
+  return display
+    ? <div dangerouslySetInnerHTML={{ __html: html }} />
+    : <span dangerouslySetInnerHTML={{ __html: html }} />;
+}
 
 /** A link target that is a file path rather than a web URL. */
 function isFileHref(href: string): boolean {
@@ -418,13 +413,7 @@ export const Md = memo(function Md({
   predict = false,
 }: {
   text: string;
-  onOpenFile?: (
-    path: string,
-    line: number | undefined,
-    exp: string | undefined,
-    ref: string | undefined,
-    intent: TabOpenIntent,
-  ) => void;
+  onOpenFile?: OpenFile;
   onOpenRun?: (runId: string, intent: TabOpenIntent) => void;
   resolveFilePath?: (path: string) => string | null;
   resolveImageSrc?: (src: string) => ImageCandidate[];
@@ -455,10 +444,13 @@ export const Md = memo(function Md({
   }, [imageSrc]);
   const components: Record<string, (props: any) => ReactNode> = useMemo(() => ({
     "image-carousel": ({ children }) => <ImageCarousel>{children}</ImageCarousel>,
+    "katex-math": KatexMath,
     "file-mention": (props) => {
       const cited = splitLineSuffix(props.path);
       const line = (props.lines && firstCitedLine(props.lines)) || cited.line;
-      return <FileChip path={cited.path} line={line} exp={props.exp} onOpenFile={onOpenFile} />;
+      return onOpenFile
+        ? <FileReference path={cited.path} line={line} exp={props.exp} optimistic fallback={<code>{cited.path}</code>} onOpenFile={onOpenFile} />
+        : <FileChip path={cited.path} line={line} exp={props.exp} />;
     },
     "run-mention": (props) => (
       <RunChip id={props.id} label={props.label} onOpenRun={onOpenRun} />
@@ -479,28 +471,39 @@ export const Md = memo(function Md({
       const cited = target ? splitLineSuffix(target) : null;
       if (cited && isFileHref(cited.path)) {
         const path = citedFilePath(cited.path, resolveFilePath);
-        return path && onOpenFile ? <FileChip path={path} line={cited.line} onOpenFile={onOpenFile} /> : <span>{children}</span>;
+        return path && onOpenFile
+          ? <FileReference path={path} line={cited.line} optimistic fallback={<span>{children}</span>} onOpenFile={onOpenFile} />
+          : <span>{children}</span>;
       }
       if (!href) return <span>{children}</span>;
       return (
         <a href={href} target="_blank" rel="noopener noreferrer" {...rest}>
-          {children}
+          <InsideLinkContext value>{children}</InsideLinkContext>
         </a>
       );
     },
     ...stableComponents,
     img,
     ...mdCodeComponents,
+    code: (props) => {
+      const code = mdCodeComponents.code!(props);
+      const text = String(props.children ?? "");
+      return onOpenFile && !props.className && looksLikeFilePath(text)
+        ? <InlinePathCode text={text} fallback={code} onOpenFile={onOpenFile} />
+        : code;
+    },
   }), [onOpenFile, onOpenRun, resolveFilePath, img]);
 
   return (
     <div dir="auto" data-streaming={predict || undefined} className="md min-w-0 wrap-anywhere text-text leading-relaxed [&_>_*:first-child]:mt-0 [&_>_*:last-child]:mb-0 [&_p]:my-2.5 [&_p]:mx-0 [&_strong]:text-text [&_strong]:font-semibold [&_pre]:bg-surface [&_pre]:border [&_pre]:border-border-muted [&_pre]:rounded-md [&_pre]:py-2 [&_pre]:px-3 [&_pre]:overflow-x-auto [&_pre]:text-sm [&_pre]:text-text [&_code]:font-mono [&_code]:text-sm [&_code]:font-normal [&_code]:text-text [&_code]:bg-surface [&_code]:border [&_code]:border-border-variant [&_code]:rounded-xs [&_code]:py-px [&_code]:px-1 [&_.katex]:text-prose-emphasis [&_.katex-display]:my-3 [&_.katex-display]:mx-0 [&_.katex-display]:overflow-x-auto [&_.katex-display]:overflow-y-hidden [&_.katex-display]:py-0.5 [&_.katex-display]:px-0 [&_.file-chip]:inline-flex [&_.file-chip]:items-center [&_.file-chip]:gap-1 [&_.file-chip]:max-w-full [&_.file-chip]:my-0 [&_.file-chip]:mx-px [&_.file-chip]:py-0 [&_.file-chip]:px-1.5 [&_.file-chip]:align-baseline [&_.file-chip]:font-mono [&_.file-chip]:text-sm [&_.file-chip]:font-medium [&_.file-chip]:text-text [&_.file-chip]:bg-panel [&_.file-chip]:border [&_.file-chip]:border-border-variant [&_.file-chip]:rounded-xs [&_.file-chip]:cursor-pointer [&_.file-chip:hover:not(:disabled)]:bg-surface [&_.file-chip_svg]:flex-none [&_.file-chip_svg]:opacity-60 [&_.file-chip-label]:min-w-0 [&_.file-chip-label]:overflow-hidden [&_.file-chip-label]:text-ellipsis [&_.file-chip-label]:whitespace-nowrap [&_.run-chip_svg]:opacity-100 [&_.run-chip_svg]:text-subtext [&_pre_code]:bg-none [&_pre_code]:bg-transparent [&_pre_code]:border-0 [&_pre_code]:text-inherit [&_pre_code]:p-0 [&_pre_code]:font-normal [&_h1]:text-text [&_h1]:text-prose-emphasis [&_h1]:font-semibold [&_h1]:mt-3 [&_h1]:mx-0 [&_h1]:mb-1.5 [&_h2]:text-text [&_h2]:text-prose-emphasis [&_h2]:font-semibold [&_h2]:mt-3 [&_h2]:mx-0 [&_h2]:mb-1.5 [&_h3]:text-text [&_h3]:text-prose-emphasis [&_h3]:font-semibold [&_h3]:mt-3 [&_h3]:mx-0 [&_h3]:mb-1.5 [&_h4]:text-text [&_h4]:text-prose-emphasis [&_h4]:font-semibold [&_h4]:mt-3 [&_h4]:mx-0 [&_h4]:mb-1.5 [&_ul]:my-1.5 [&_ul]:mx-0 [&_ul]:ps-5.5 [&_ol]:my-1.5 [&_ol]:mx-0 [&_ol]:ps-5.5 [&_li::marker]:text-text [&_table]:border-collapse [&_table]:block [&_table]:w-max [&_table]:max-w-full [&_table]:text-sm [&_table]:my-2.5 [&_table]:mx-0 [&_table]:border [&_table]:border-border [&_table]:rounded-md [&_table]:overflow-x-auto [&_th]:border-b [&_th]:border-b-border-variant [&_th]:py-2 [&_th]:px-3.5 [&_th]:text-start [&_th]:text-text [&_th]:break-normal [&_th]:break-words [&_td]:border-b [&_td]:border-b-border-variant [&_td]:py-2 [&_td]:px-3.5 [&_td]:text-start [&_td]:text-text [&_td]:break-normal [&_td]:break-words [&_tr:last-child_td]:border-b-0 [&_thead_th]:bg-surface [&_thead_th]:font-medium [&_thead_th]:text-text [&_thead_th]:border-b [&_thead_th]:border-b-border [&_tbody_tr:hover_td]:bg-surface [&_blockquote]:my-1.5 [&_blockquote]:mx-0 [&_blockquote]:pt-0.5 [&_blockquote]:pe-0 [&_blockquote]:pb-0.5 [&_blockquote]:ps-2.5 [&_blockquote]:border-s-[3px] [&_blockquote]:border-s-border [&_blockquote]:text-subtext [:is(&,_.openresearch-diff,_.file-view)_.token.comment]:italic [:is(&,_.openresearch-diff,_.file-view)_.token.prolog]:italic [:is(&,_.openresearch-diff,_.file-view)_.token.cdata]:italic [:is(&,_.openresearch-diff,_.file-view)_.token.operator]:text-syntax-cyan [:is(&,_.openresearch-diff,_.file-view)_.token.entity]:text-syntax-cyan [:is(&,_.openresearch-diff,_.file-view)_.token.url]:text-syntax-cyan [:is(&,_.openresearch-diff,_.file-view)_.token.comment]:text-syntax-comment [:is(&,_.openresearch-diff,_.file-view)_.token.prolog]:text-syntax-comment [:is(&,_.openresearch-diff,_.file-view)_.token.cdata]:text-syntax-comment [:is(&,_.openresearch-diff,_.file-view)_.token.punctuation]:text-syntax-text [:is(&,_.openresearch-diff,_.file-view)_.token.property]:text-syntax-red [:is(&,_.openresearch-diff,_.file-view)_.token.tag]:text-syntax-red [:is(&,_.openresearch-diff,_.file-view)_.token.deleted]:text-syntax-red [:is(&,_.openresearch-diff,_.file-view)_.token.constant]:text-syntax-orange [:is(&,_.openresearch-diff,_.file-view)_.token.symbol]:text-syntax-orange [:is(&,_.openresearch-diff,_.file-view)_.token.boolean]:text-syntax-orange [:is(&,_.openresearch-diff,_.file-view)_.token.number]:text-syntax-orange [:is(&,_.openresearch-diff,_.file-view)_.token.selector]:text-syntax-green [:is(&,_.openresearch-diff,_.file-view)_.token.attr-name]:text-syntax-green [:is(&,_.openresearch-diff,_.file-view)_.token.char]:text-syntax-green [:is(&,_.openresearch-diff,_.file-view)_.token.inserted]:text-syntax-green [:is(&,_.openresearch-diff,_.file-view)_.token.string]:text-syntax-green [:is(&,_.openresearch-diff,_.file-view)_.token.builtin]:text-syntax-yellow [:is(&,_.openresearch-diff,_.file-view)_.token.atrule]:text-syntax-orange [:is(&,_.openresearch-diff,_.file-view)_.token.attr-value]:text-syntax-orange [:is(&,_.openresearch-diff,_.file-view)_.token.keyword]:text-syntax-purple [:is(&,_.openresearch-diff,_.file-view)_.token.function]:text-syntax-blue [:is(&,_.openresearch-diff,_.file-view)_.token.decorator]:text-syntax-blue [:is(&,_.openresearch-diff,_.file-view)_.token.def]:text-syntax-blue [:is(&,_.openresearch-diff,_.file-view)_.token.class-name]:text-syntax-yellow [:is(&,_.openresearch-diff,_.file-view)_.token.namespace]:text-syntax-yellow [:is(&,_.openresearch-diff,_.file-view)_.token.regex]:text-syntax-green [:is(&,_.openresearch-diff,_.file-view)_.token.important]:text-syntax-red [:is(&,_.openresearch-diff,_.file-view)_.token.variable]:text-syntax-red [:is(&,_.openresearch-diff,_.file-view)_.token.parameter]:text-syntax-text">
-      <StreamingMarkdown
-        content={normalizeMarkdownForRendering(text, { predictMath: predict })}
-        processor={markdownProcessor}
-        components={components}
-        predict={predict}
-     />
+      <StreamingContext value={predict}>
+        <StreamingMarkdown
+          content={normalizeMarkdownForRendering(text, { predictMath: predict })}
+          processor={markdownProcessor}
+          components={components}
+          predict={predict}
+        />
+      </StreamingContext>
     </div>
   );
 });

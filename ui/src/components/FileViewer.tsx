@@ -3,6 +3,7 @@ import {
   queryClient,
 } from "../queries/client";
 import { useQuery } from "@tanstack/react-query";
+import { useFileManagerLabel } from "./useFileManagerLabel";
 import { resolvedFileQuery, refreshFile, type LoadedFile } from "../queries/files";
 
 import { m } from "../paraglide/messages.js";
@@ -27,6 +28,7 @@ import {
   X,
 } from "lucide-react";
 import { useCallback, useEffect, useLayoutEffect, useRef, useState, useSyncExternalStore } from "react";
+import { formatForDisplay, useHotkey } from "@tanstack/react-hotkeys";
 import {
   absoluteFileUrl,
   artifactUrl,
@@ -117,7 +119,7 @@ function CopyableCommand({ command }: { command: string }) {
           state === "copied"
             ? m.common_copied()
             : state === "select"
-              ? m.file_viewer_selected_copy_shortcut()
+              ? m.file_viewer_selected_copy_shortcut({ shortcut: formatForDisplay("Mod+C") })
               : m.file_viewer_copy_command()
         }
         aria-label={m.file_viewer_copy_install_command()}
@@ -247,6 +249,7 @@ export function FileViewer({
   const setSaveError = bufferSession.setSaveError;
   const bodyRef = useRef<HTMLDivElement>(null);
   const selectableContentRef = useRef<HTMLDivElement>(null);
+  const rootRef = useRef<HTMLDivElement>(null);
   const [copiedContents, setCopiedContents] = useState(false);
   const [mediaToolbarSlot, setMediaToolbarSlot] = useState<HTMLDivElement | null>(null);
   const scrollPositionRef = useRef(scrollPosition);
@@ -460,18 +463,19 @@ export function FileViewer({
     }
   };
 
-  const selectViewerContents = (event: React.KeyboardEvent<HTMLDivElement>) => {
-    if ((!event.metaKey && !event.ctrlKey) || event.altKey || event.shiftKey || event.key.toLowerCase() !== "a") return;
-    if (!(event.target instanceof Node) || !event.currentTarget.contains(event.target)) return;
-    const content = selectableContentRef.current;
-    if (!content) return;
-    event.preventDefault();
-    const range = document.createRange();
-    range.selectNodeContents(content);
-    const selection = window.getSelection();
-    selection?.removeAllRanges();
-    selection?.addRange(range);
-  };
+  useHotkey(
+    "Mod+A",
+    () => {
+      const content = selectableContentRef.current;
+      if (!content) return;
+      const range = document.createRange();
+      range.selectNodeContents(content);
+      const selection = window.getSelection();
+      selection?.removeAllRanges();
+      selection?.addRange(range);
+    },
+    { target: rootRef },
+  );
 
   // `#toolbar=0` asks the browser's PDF viewer to drop its own chrome, so the
   // pane shows the document and this view's header owns the controls.
@@ -506,6 +510,7 @@ export function FileViewer({
   const openEditor = useOsFileAction(() =>
     openFileInEditor(projectId, filePath, { sessionId }),
   );
+  const revealLabel = useFileManagerLabel();
   const revealManager = useOsFileAction(() =>
     revealFileInManager(projectId, filePath, { sessionId }),
   );
@@ -607,7 +612,7 @@ export function FileViewer({
   };
 
   return (
-    <div className="file-view flex flex-col h-full min-h-0 min-w-0" onKeyDown={selectViewerContents}>
+    <div ref={rootRef} className="file-view flex flex-col h-full min-h-0 min-w-0">
       <div className="file-view-header @container flex w-full min-w-0 min-h-9 items-center gap-1 px-4 py-1 bg-background text-text shrink-0">
         <FileTypeIcon name={filePath} />
         <span className="file-view-path flex-1 min-w-0 truncate text-sm text-subtext" data-tip={ltr(filePath)}>
@@ -622,7 +627,7 @@ export function FileViewer({
         {showingEditor && (saving || dirty || saveError) && (
           <span
             className={`file-view-save-status inline-flex items-center gap-1 text-sm shrink-0 ${saveError ? "text-accent-red" : "text-muted"}`}
-            title={saveError ?? (saving ? m.common_saving() : m.file_viewer_unsaved_tip())}
+            title={saveError ?? (saving ? m.common_saving() : m.file_viewer_unsaved_tip({ shortcut: formatForDisplay("Mod+S") }))}
           >
             {saving ? (
               <>
@@ -725,9 +730,9 @@ export function FileViewer({
             </IconButton>
             <IconButton
               size="small"
-              data-tip={osActionBlocker ?? revealManager.error ?? m.file_viewer_reveal_in_file_manager()}
+              data-tip={osActionBlocker ?? revealManager.error ?? revealLabel}
               data-tip-align="end"
-              aria-label={m.file_viewer_reveal_in_file_manager()}
+              aria-label={revealLabel}
               aria-description={osActionBlocker ?? undefined}
               disabled={revealManager.busy || osActionBlocker != null}
               onClick={() => void revealManager.trigger()}
