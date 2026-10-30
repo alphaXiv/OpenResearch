@@ -210,13 +210,14 @@ function TerminalView({
         {expRuns.length > 0 && selectedRun && (
           <div className="run-history relative shrink-0" ref={historyRef}>
             <Button
-              size="small"
+              className="h-6 px-2 font-normal"
               data-tip={historyOpen ? undefined : m.detail_drawer_switch_run()} aria-description={m.detail_drawer_switch_run()}
               aria-expanded={historyOpen}
               onClick={() => setHistoryOpen((v) => !v)}
             >
               <span>{m.detail_drawer_run()} {runNumber(selectedRun.id)}</span>
               <StatusBadge
+                className="text-sm font-normal"
                 status={cancelling ? "cancelling" : runDisplayStatus(selectedRun)}
              />
               <ChevronDown size={14} className="run-picker-chev text-muted shrink-0" />
@@ -250,7 +251,7 @@ function TerminalView({
         </p>
       )}
 
-      <div className={`term-fill flex-1 min-h-0 ${view === "trackio" ? "bg-background" : "bg-terminal p-3"}`}>
+      <div className={`term-fill flex-1 min-h-0 ${view === "trackio" ? "bg-background" : "bg-terminal py-3 px-4"}`}>
         {trackioEmbedUrl ? (
           <iframe
             key={trackioEmbedUrl}
