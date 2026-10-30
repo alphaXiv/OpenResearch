@@ -27,7 +27,7 @@ use super::options::{
 };
 use super::{
     CompactCtx, CompactOutcome, Harness, ResumeAction, TurnFailure, TurnOutcome, TurnResult,
-    TURN_WATCHDOG,
+    FIRST_EVENT_TIMEOUT, TURN_WATCHDOG,
 };
 use crate::error::{anyhow, Result};
 use crate::local::chat::{
@@ -400,7 +400,9 @@ async fn run_turn(ctx: &mut TurnCtx) -> Result<()> {
     if ctx.plan_mode {
         cmd.arg("--mode=plan");
     }
-    cmd.args(["--print-timeout", "60m"]);
+    // No `--print-timeout`: a turn runs until it finishes, and the watchdogs
+    // below catch a wedged child. A wall-clock cap cut long research turns off
+    // mid-work.
 
     if let Some(native_id) = &resume {
         cmd.args(["--conversation", native_id]);
@@ -444,7 +446,7 @@ async fn run_turn(ctx: &mut TurnCtx) -> Result<()> {
             return Err(anyhow!("Could not spawn {}: {}", bin.display(), error));
         }
     };
-    let mut cancellation = TurnProcesses(child.id());
+    let mut cancellation = TurnProcesses::new(child.id());
     let mut stdin = child.stdin.take().ok_or_else(|| anyhow!("no stdin"))?;
     let message =
         serde_json::json!({"event":"user","message":{"content":prompt}}).to_string() + "\n";
@@ -455,10 +457,18 @@ async fn run_turn(ctx: &mut TurnCtx) -> Result<()> {
     let stdout = child.stdout.take().ok_or_else(|| anyhow!("no stdout"))?;
     let mut lines = BufReader::new(stdout).lines();
     let mut state = TurnState::default();
+    let log_path = crate::store::data_dir().join(format!("agent-{log_name}.log"));
+    let mut saw_event = false;
 
     loop {
-        match tokio::time::timeout(TURN_WATCHDOG, lines.next_line()).await {
+        let wait = if saw_event {
+            TURN_WATCHDOG
+        } else {
+            FIRST_EVENT_TIMEOUT
+        };
+        match tokio::time::timeout(wait, lines.next_line()).await {
             Ok(Ok(Some(line))) => {
+                saw_event = true;
                 let Ok(event) = serde_json::from_str::<Value>(&line) else {
                     continue;
                 };
@@ -482,10 +492,24 @@ async fn run_turn(ctx: &mut TurnCtx) -> Result<()> {
                 return Err(anyhow!("antigravity stdout: {error}"));
             }
             Err(_) if ctx.host.has_pending_permission(&ctx.session_id) => continue,
+            // Returning drops `cancellation`, which kills the child and its tools.
             Err(_) => {
+                let _ = ctx.flush();
+                let (what, hint) = if saw_event {
+                    (
+                        format!("went quiet for {} minutes", TURN_WATCHDOG.as_secs() / 60),
+                        "",
+                    )
+                } else {
+                    (
+                        format!("produced no output for {}s", FIRST_EVENT_TIMEOUT.as_secs()),
+                        " (check Antigravity authentication in Harnesses)",
+                    )
+                };
                 return Err(anyhow!(
-                    "Antigravity went silent for {} minutes and was interrupted.",
-                    TURN_WATCHDOG.as_secs() / 60
+                    "Antigravity {what} — killed the wedged child{hint}. Sending another \
+                     message resumes the conversation; see {}",
+                    log_path.display()
                 ));
             }
         }
@@ -494,16 +518,9 @@ async fn run_turn(ctx: &mut TurnCtx) -> Result<()> {
     let status = tokio::time::timeout(TURN_WATCHDOG, child.wait())
         .await
         .map_err(|_| anyhow!("Antigravity did not exit after its response"))??;
-    cancellation.0 = None;
-    let log_path = crate::store::data_dir().join(format!("agent-{log_name}.log"));
-    if !state.saw_result {
-        return Err(anyhow!(
-            "Antigravity ended without a result ({status}); see {}",
-            log_path.display()
-        ));
-    }
-    if !status.success() && !state.turn_errored {
-        return Err(anyhow!("Antigravity ended with error ({status})"));
+    cancellation.disarm();
+    if let Some(error) = exit_failure(&state, status, &log_path) {
+        return Err(error);
     }
     if ctx.plan_mode && !state.turn_errored {
         if let Some(card) = plan_card(&ctx.assistant.parts, &ctx.assistant.id) {
@@ -516,30 +533,58 @@ async fn run_turn(ctx: &mut TurnCtx) -> Result<()> {
     Ok(())
 }
 
+/// The child's exit only fails a turn its stream left unsettled: like the
+/// result status, agy's exit code can reflect the conversation's sticky error
+/// after this turn finished.
+fn exit_failure(
+    state: &TurnState,
+    status: std::process::ExitStatus,
+    log_path: &Path,
+) -> Option<crate::error::Error> {
+    if !state.saw_result {
+        return Some(anyhow!(
+            "Antigravity ended without a result ({status}); see {}",
+            log_path.display()
+        ));
+    }
+    (!status.success() && !state.turn_errored && !state.last_step.finished)
+        .then(|| anyhow!("Antigravity ended with error ({status})"))
+}
+
 async fn compact_native(mut cmd: Command, timeout: Duration) -> Result<()> {
     cmd.stdin(Stdio::null())
         .stdout(Stdio::piped())
         .kill_on_drop(true);
     let mut child = cmd.spawn()?;
-    let mut cancellation = TurnProcesses(child.id());
+    let mut cancellation = TurnProcesses::new(child.id());
     let stdout = child.stdout.take().ok_or_else(|| anyhow!("no stdout"))?;
     tokio::time::timeout(timeout, async {
         let mut lines = BufReader::new(stdout).lines();
         let mut saw_result = false;
+        let mut last_step = LastStep::default();
         while let Some(line) = lines.next_line().await? {
             let Ok(event) = serde_json::from_str::<Value>(&line) else {
                 continue;
             };
-            if event.get("event").and_then(Value::as_str) == Some("result") {
-                if let Some((_, error)) = result_failure(&event["result"]) {
-                    return Err(anyhow!("Antigravity compaction failed: {error}"));
+            match event.get("event").and_then(Value::as_str) {
+                Some("step_update") => last_step.observe(&event["step_update"]),
+                Some("result") => {
+                    if let Some(failure) = result_failure(&event["result"], last_step.finished) {
+                        return Err(anyhow!(
+                            "Antigravity compaction failed: {}",
+                            failure.message
+                        ));
+                    }
+                    saw_result = true;
                 }
-                saw_result = true;
+                _ => {}
             }
         }
         let status = child.wait().await?;
-        cancellation.0 = None;
-        if !status.success() {
+        cancellation.disarm();
+        // Print mode exits non-zero whenever the conversation's sticky status is
+        // ERROR, even after a checkpoint this run completed.
+        if !status.success() && !last_step.finished {
             return Err(anyhow!("Antigravity compaction exited with {status}"));
         }
         if !saw_result {
@@ -556,11 +601,86 @@ async fn compact_native(mut cmd: Command, timeout: Duration) -> Result<()> {
     })?
 }
 
+/// The `agy` children still running, so [`shutdown`] can stop them: the app
+/// exits the process without dropping in-flight turn tasks, which would
+/// otherwise leave each child running on its own.
+struct LiveProcesses(std::sync::Mutex<Live>);
+
+struct Live {
+    pids: std::collections::BTreeSet<u32>,
+    /// Shutdown began: a child launched from now on is stopped on arrival.
+    closed: bool,
+}
+
+impl LiveProcesses {
+    const fn new() -> Self {
+        Self(std::sync::Mutex::new(Live {
+            pids: std::collections::BTreeSet::new(),
+            closed: false,
+        }))
+    }
+
+    /// Track a new child, or stop it at once when it was launched after
+    /// shutdown began (a turn already past admission when the server quit).
+    fn adopt(&self, pid: Option<u32>) -> Option<u32> {
+        let pid = pid?;
+        let admitted = {
+            let mut live = self.0.lock().unwrap();
+            if !live.closed {
+                live.pids.insert(pid);
+            }
+            !live.closed
+        };
+        if !admitted {
+            stop_turn_process(pid);
+        }
+        admitted.then_some(pid)
+    }
+
+    fn remove(&self, pid: u32) -> bool {
+        self.0.lock().unwrap().pids.remove(&pid)
+    }
+
+    fn stop_all(&self) {
+        let pids = {
+            let mut live = self.0.lock().unwrap();
+            live.closed = true;
+            std::mem::take(&mut live.pids)
+        };
+        for pid in pids {
+            stop_turn_process(pid);
+        }
+    }
+}
+
+static LIVE_PROCESSES: LiveProcesses = LiveProcesses::new();
+
+/// Stop every running Antigravity child and its tool descendants (detached
+/// experiment supervisors survive), and any child launched afterwards. Only
+/// for a server about to exit: no Antigravity turn can run after this.
+pub(crate) fn shutdown() {
+    LIVE_PROCESSES.stop_all();
+}
+
 struct TurnProcesses(Option<u32>);
+
+impl TurnProcesses {
+    fn new(pid: Option<u32>) -> Self {
+        Self(LIVE_PROCESSES.adopt(pid))
+    }
+
+    /// The child exited on its own; there is nothing left to stop.
+    fn disarm(&mut self) {
+        if let Some(pid) = self.0.take() {
+            LIVE_PROCESSES.remove(pid);
+        }
+    }
+}
 
 impl Drop for TurnProcesses {
     fn drop(&mut self) {
-        if let Some(pid) = self.0 {
+        // A pid `shutdown` already stopped is not signalled again.
+        if let Some(pid) = self.0.take().filter(|pid| LIVE_PROCESSES.remove(*pid)) {
             stop_turn_process(pid);
         }
     }
@@ -772,16 +892,99 @@ fn denied_actions_error(result: &Value) -> Option<String> {
     })
 }
 
-fn result_failure(result: &Value) -> Option<(&'static str, String)> {
+const AUTH_NEEDS_ATTENTION: &str = "Antigravity authentication needs attention. Sign in by \
+     running `agy` in your terminal, then retry this message.";
+
+/// A dropped or unreachable connection that agy already retried with backoff
+/// before giving up.
+fn is_transient_api_error(error: &str) -> bool {
+    let error = error.to_ascii_lowercase();
+    let network = error.contains("request failed:")
+        && [
+            "unexpected eof",
+            "operation timed out",
+            "i/o timeout",
+            "connection reset",
+            "broken pipe",
+            "no route to host",
+            "network is unreachable",
+            "no such host",
+            "tls handshake timeout",
+        ]
+        .iter()
+        .any(|marker| error.contains(marker));
+    network
+        || error.contains("there was a network issue connecting to the server")
+        || error.contains("the stream was interrupted")
+}
+
+fn is_auth_error(error: &str) -> bool {
+    let error = error.to_ascii_lowercase();
+    error.contains("unauthenticated")
+        || error.contains("(code 401)")
+        || error.contains("not logged into antigravity")
+}
+
+struct ResultFailure {
+    kind: &'static str,
+    message: String,
+    transient: bool,
+}
+
+/// agy's result status is conversation-wide: once any attempt errors, every
+/// later result in that conversation reports ERROR with that error, even when
+/// agy's own retry recovered and the turn finished. `finished` (this turn's
+/// last step completed) is what tells a finished turn from a failed one.
+fn result_failure(result: &Value, finished: bool) -> Option<ResultFailure> {
     let status = result
         .get("status")
         .and_then(Value::as_str)
         .unwrap_or("INVALID");
-    if status != "SUCCESS" {
-        let error = result.get("error").and_then(error_text).unwrap_or(status);
-        Some(("antigravity_terminal", format!("Antigravity: {error}")))
+    if status == "SUCCESS" || finished {
+        return denied_actions_error(result).map(|message| ResultFailure {
+            kind: "antigravity_permission_denied",
+            message,
+            transient: false,
+        });
+    }
+    let error = result.get("error").and_then(error_text).unwrap_or(status);
+    Some(if is_auth_error(error) {
+        ResultFailure {
+            kind: "antigravity_auth",
+            message: AUTH_NEEDS_ATTENTION.into(),
+            transient: false,
+        }
     } else {
-        denied_actions_error(result).map(|error| ("antigravity_permission_denied", error))
+        ResultFailure {
+            kind: "antigravity_terminal",
+            message: format!("Antigravity: {error}"),
+            transient: is_transient_api_error(error),
+        }
+    })
+}
+
+/// The latest step of the turn's own conversation. Ordered by index, so a late
+/// update to an earlier step cannot reopen a turn that already answered.
+#[derive(Default)]
+struct LastStep {
+    index: Option<i64>,
+    /// The last step is a completed answer, or a completed compaction checkpoint.
+    finished: bool,
+}
+
+impl LastStep {
+    fn observe(&mut self, step: &Value) {
+        let index = step.get("step_index").and_then(Value::as_i64);
+        if index
+            .zip(self.index)
+            .is_some_and(|(index, last)| index < last)
+        {
+            return;
+        }
+        self.index = index.or(self.index);
+        let step_type = step.get("step_type").and_then(Value::as_str);
+        self.finished = step.get("state").and_then(Value::as_str) == Some("DONE")
+            && matches!(step_type, Some("agent_response" | "checkpoint"));
     }
 }
 
@@ -792,6 +995,7 @@ struct TurnState {
     text_seq: usize,
     saw_result: bool,
     turn_errored: bool,
+    last_step: LastStep,
 }
 
 pub(crate) fn invocation_sample_id(conversation: &str, step: i64) -> String {
@@ -851,6 +1055,7 @@ fn apply_event(ctx: &mut TurnCtx, state: &mut TurnState, event: &Value) -> bool 
                 if own.is_some() && own != state.conversation_id.as_deref() {
                     return false;
                 }
+                state.last_step.observe(step);
                 if step_type == "subagent" {
                     let index = step["step_index"].as_i64().unwrap_or(0);
                     if let Some(agents) = step
@@ -983,9 +1188,33 @@ fn apply_event(ctx: &mut TurnCtx, state: &mut TurnState, event: &Value) -> bool 
             if res.get("status").and_then(Value::as_str) == Some("SUCCESS") {
                 ctx.mark_delivery(DeliveryState::Accepted);
             }
-            if let Some((kind, error)) = result_failure(res) {
+            if let Some(failure) = result_failure(res, state.last_step.finished) {
                 state.turn_errored = true;
-                ctx.mark_terminal_failure(kind, error);
+                if failure.transient {
+                    // The UI shows a connection notice; the next message
+                    // resumes the conversation.
+                    let mut part = WirePart::tool(
+                        format!("api-error-{}", ctx.assistant.parts.len()),
+                        "api_error",
+                        "error",
+                        Some(failure.message.clone()),
+                    );
+                    if let Some(tool) = part.state.as_mut() {
+                        tool.title = Some("Temporary API error".into());
+                    }
+                    ctx.upsert_part(part);
+                }
+                if failure.kind == "antigravity_auth" {
+                    // Re-probes the harness, so the picker asks for a sign-in.
+                    ctx.host.emit_event(
+                        "harness.auth",
+                        serde_json::json!({
+                            "harness": "antigravity",
+                            "authState": HarnessAuthState::NeedsLogin,
+                        }),
+                    );
+                }
+                ctx.mark_terminal_failure(failure.kind, failure.message);
             } else {
                 ctx.mark_final_text_tail();
             }
@@ -1036,35 +1265,60 @@ mod tests {
     #[cfg(unix)]
     #[tokio::test]
     async fn compaction_requires_a_successful_result_and_exit() {
+        let stale = json!({"event":"result","result":{"status":"ERROR","error":"API error (attempt 3): request failed: unexpected EOF"}});
+        let step = |index: i64, step_type: &str| json!({"event":"step_update","step_update":{"step_index":index,"state":"DONE","step_type":step_type}});
         for (output, code, expected) in [
             (
-                json!({"event":"result","result":{"status":"SUCCESS"}}),
+                vec![json!({"event":"result","result":{"status":"SUCCESS"}})],
                 "0",
                 None,
             ),
             (
-                json!({"event":"result","result":{"status":"ERROR","error":"quota exhausted"}}),
+                vec![
+                    json!({"event":"result","result":{"status":"ERROR","error":"quota exhausted"}}),
+                ],
                 "0",
                 Some("quota exhausted"),
             ),
             (
-                json!({"event":"result","result":{"status":"SUCCESS"}}),
+                vec![json!({"event":"result","result":{"status":"SUCCESS"}})],
                 "7",
                 Some("exited with"),
             ),
             (
-                json!({"event":"init","conversation_id":"saved"}),
+                vec![json!({"event":"init","conversation_id":"saved"})],
                 "0",
                 Some("without a result"),
             ),
-            (json!({"event":"result","result":{}}), "0", Some("INVALID")),
+            (
+                vec![json!({"event":"result","result":{}})],
+                "0",
+                Some("INVALID"),
+            ),
+            // agy reports an earlier attempt's error and exits 3 after a checkpoint it completed.
+            (
+                vec![
+                    step(12, "user_input"),
+                    step(13, "system_message"),
+                    step(14, "checkpoint"),
+                    stale.clone(),
+                ],
+                "3",
+                None,
+            ),
+            (
+                vec![step(12, "user_input"), step(13, "error_message"), stale],
+                "3",
+                Some("unexpected EOF"),
+            ),
         ] {
+            let output = output.iter().map(Value::to_string).collect::<Vec<_>>();
             let mut cmd = Command::new("sh");
             cmd.args([
                 "-c",
                 "printf '%s\\n' \"$ORX_TEST_EVENT\"; exit \"$ORX_TEST_EXIT\"",
             ])
-            .env("ORX_TEST_EVENT", output.to_string())
+            .env("ORX_TEST_EVENT", output.join("\n"))
             .env("ORX_TEST_EXIT", code);
             let result = compact_native(cmd, Duration::from_secs(5)).await;
             match expected {
@@ -1273,6 +1527,217 @@ mod tests {
         }
     }
 
+    const STALE_ERROR: &str = "API error (attempt 3): request failed: Post \"https://daily-cloudcode-pa.googleapis.com/v1internal:streamGenerateContent?alt=sse\": unexpected EOF";
+
+    fn step(index: i64, step_type: &str, state: &str, delta: Option<&str>) -> Value {
+        let mut step =
+            json!({"conversation_id":"c1","step_index":index,"state":state,"step_type":step_type});
+        if let Some(delta) = delta {
+            step["text_delta"] = json!(delta);
+        }
+        json!({"event":"step_update","step_update":step})
+    }
+
+    fn error_result(error: &str) -> Value {
+        json!({"event":"result","result":{"conversation_id":"c1","status":"ERROR","response":"","error":error,"finished_reason":"error"}})
+    }
+
+    #[test]
+    fn recovered_turns_finish_despite_a_sticky_error_status() {
+        // Streams recorded from agy 1.4.11: a dropped connection agy's retry rode
+        // out, then a later turn of the same conversation.
+        let recovered = vec![
+            json!({"event":"init","conversation_id":"c1"}),
+            step(0, "user_input", "DONE", None),
+            step(1, "agent_response", "ACTIVE", Some("For")),
+            step(1, "agent_response", "DONE", Some("\n")),
+            step(2, "error_message", "DONE", None),
+            step(3, "error_message", "DONE", None),
+            step(4, "error_message", "DONE", None),
+            step(
+                5,
+                "agent_response",
+                "ACTIVE",
+                Some("Lighthouses guided ships."),
+            ),
+            step(5, "agent_response", "DONE", Some("\n")),
+            error_result(STALE_ERROR),
+        ];
+        let resumed = vec![
+            json!({"event":"init","conversation_id":"c1"}),
+            step(9, "user_input", "DONE", None),
+            step(10, "system_message", "DONE", None),
+            step(11, "agent_response", "DONE", Some("ok\n")),
+            error_result(STALE_ERROR),
+        ];
+        for events in [recovered, resumed] {
+            let (ctx, state) = fold(&events);
+            assert!(state.saw_result);
+            assert!(!state.turn_errored);
+            assert!(ctx.terminal_failure().is_none());
+            assert!(ctx.assistant.parts.iter().all(|part| part.kind == "text"));
+        }
+    }
+
+    #[test]
+    fn only_the_latest_own_step_decides_whether_the_turn_finished() {
+        let late_update = fold(&[
+            json!({"event":"init","conversation_id":"c1"}),
+            step(2, "tool", "ACTIVE", None),
+            step(3, "agent_response", "DONE", Some("Done.")),
+            step(2, "tool", "DONE", None),
+            json!({"event":"step_update","step_update":{"conversation_id":"child","step_index":7,"state":"ACTIVE","step_type":"agent_response"}}),
+            error_result(STALE_ERROR),
+        ]);
+        assert!(!late_update.1.turn_errored);
+
+        let cut_off = fold(&[
+            json!({"event":"init","conversation_id":"c1"}),
+            step(1, "agent_response", "DONE", Some("Running it now.")),
+            step(2, "tool", "ACTIVE", None),
+            error_result(STALE_ERROR),
+        ]);
+        assert!(cut_off.1.turn_errored);
+    }
+
+    #[test]
+    fn exhausted_network_retries_are_a_temporary_api_error() {
+        for error in [
+            "There was a network issue connecting to the server, please try again.",
+            "API error (attempt 1): request failed: Post \"https://daily-cloudcode-pa.googleapis.com/v1internal:streamGenerateContent?alt=sse\": read tcp 10.104.188.3:64142->172.217.116.4:443: read: operation timed out",
+            "API error (attempt 1): request failed: Post \"https://daily-cloudcode-pa.googleapis.com/v1internal:streamGenerateContent?alt=sse\": read tcp [2a02:8440::1]:60636->[2001:4860:4840:400::]:443: read: no route to host",
+            "agent executor error: pre-invocation hook: context summarization: request failed: Post \"https://daily-cloudcode-pa.googleapis.com/v1internal:streamGenerateContent?alt=sse\": dial tcp: lookup daily-cloudcode-pa.googleapis.com: no such host",
+            "The stream was interrupted. Please continue the task you were working on.",
+            STALE_ERROR,
+        ] {
+            let (ctx, state) = fold(&[
+                json!({"event":"init","conversation_id":"c1"}),
+                step(0, "user_input", "DONE", None),
+                step(1, "agent_response", "DONE", Some("For")),
+                step(2, "error_message", "DONE", None),
+                error_result(error),
+            ]);
+            let message = format!("Antigravity: {error}");
+            assert!(state.turn_errored);
+            assert_eq!(
+                ctx.terminal_failure(),
+                Some(("antigravity_terminal", message.as_str()))
+            );
+            let part = ctx.assistant.parts.last().unwrap();
+            let tool = part.state.as_ref().unwrap();
+            assert_eq!(part.tool.as_deref(), Some("api_error"));
+            assert_eq!(tool.title.as_deref(), Some("Temporary API error"));
+            assert_eq!(tool.error.as_deref(), Some(message.as_str()));
+        }
+    }
+
+    #[test]
+    fn other_failures_stay_terminal_errors() {
+        for error in [
+            "invalid model selection (--model \"gemini-4-argon-high\" --effort \"\"): model gemini-4-argon-high is not recognized as a known model or custom model in settings",
+            "Quota limit exceeded",
+            "Bash failed: no such host",
+        ] {
+            let (ctx, state) = fold(&[error_result(error)]);
+            let message = format!("Antigravity: {error}");
+            assert!(state.turn_errored);
+            assert_eq!(
+                ctx.terminal_failure(),
+                Some(("antigravity_terminal", message.as_str()))
+            );
+            assert!(ctx.assistant.parts.is_empty());
+        }
+    }
+
+    #[test]
+    fn authentication_failures_ask_for_a_sign_in() {
+        for error in [
+            "UNAUTHENTICATED (code 401): Request had invalid authentication credentials. Expected OAuth 2 access token, login cookie or other valid authentication credential. See https://developers.google.com/identity/sign-in/web/devconsole-project.",
+            "error getting token source: You are not logged into Antigravity.",
+        ] {
+            let (ctx, state) = fold(&[
+                json!({"event":"init","conversation_id":"c1"}),
+                step(0, "user_input", "DONE", None),
+                step(1, "error_message", "DONE", None),
+                error_result(error),
+            ]);
+            assert!(state.turn_errored);
+            assert_eq!(
+                ctx.terminal_failure(),
+                Some(("antigravity_auth", AUTH_NEEDS_ATTENTION))
+            );
+            assert!(ctx.assistant.parts.is_empty());
+        }
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn stopping_live_processes_kills_running_and_later_children() {
+        let live = LiveProcesses::new();
+        let mut running = Command::new("sleep").arg("60").spawn().unwrap();
+        let pid = running.id().unwrap();
+        assert_eq!(live.adopt(Some(pid)), Some(pid));
+        live.stop_all();
+        // A turn already past admission launches its child after shutdown began.
+        let mut late = Command::new("sleep").arg("60").spawn().unwrap();
+        assert_eq!(live.adopt(late.id()), None);
+        for child in [&mut running, &mut late] {
+            let status = tokio::time::timeout(Duration::from_secs(5), child.wait())
+                .await
+                .expect("child survived shutdown")
+                .unwrap();
+            assert!(!status.success());
+        }
+        assert!(!live.remove(pid));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn only_an_unsettled_turn_fails_on_its_exit_code() {
+        use std::os::unix::process::ExitStatusExt as _;
+        let exit = |code: i32| std::process::ExitStatus::from_raw(code << 8);
+        let log = Path::new("agent-antigravity-test.log");
+        let failure = |state: &TurnState, code| {
+            exit_failure(state, exit(code), log).map(|error| error.to_string())
+        };
+        let (_, finished) = fold(&[
+            json!({"event":"init","conversation_id":"c1"}),
+            step(0, "user_input", "DONE", None),
+            step(1, "agent_response", "DONE", Some("ok\n")),
+            error_result(STALE_ERROR),
+        ]);
+        assert_eq!(failure(&finished, 0), None);
+        assert_eq!(failure(&finished, 3), None);
+        let (_, failed) = fold(&[
+            step(1, "error_message", "DONE", None),
+            error_result(STALE_ERROR),
+        ]);
+        assert_eq!(failure(&failed, 3), None, "the stream already failed it");
+        let (_, unsettled) = fold(&[json!({"event":"result","result":{"status":"SUCCESS"}})]);
+        assert_eq!(failure(&unsettled, 0), None);
+        assert!(failure(&unsettled, 7).unwrap().contains("ended with error"));
+        let (_, silent) = fold(&[json!({"event":"init","conversation_id":"c1"})]);
+        assert!(failure(&silent, 0).unwrap().contains("without a result"));
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_child_already_stopped_at_shutdown_is_not_signalled_again() {
+        let mut child = Command::new("sleep").arg("60").spawn().unwrap();
+        let pid = child.id().unwrap();
+        let processes = TurnProcesses::new(Some(pid));
+        // What `shutdown` does before stopping the pid.
+        assert!(LIVE_PROCESSES.remove(pid));
+        drop(processes);
+        assert!(
+            tokio::time::timeout(Duration::from_millis(300), child.wait())
+                .await
+                .is_err(),
+            "a stale pid was signalled"
+        );
+        child.kill().await.unwrap();
+    }
+
     #[test]
     fn tool_updates_preserve_inputs_and_surface_object_errors() {
         let (ctx, _) = fold(&[
@@ -1351,7 +1816,7 @@ mod tests {
             .kill_on_drop(true)
             .spawn()
             .unwrap();
-        let cancellation = TurnProcesses(child.id());
+        let cancellation = TurnProcesses::new(child.id());
         let mut lines = BufReader::new(child.stdout.take().unwrap()).lines();
         let pid: libc::pid_t = lines.next_line().await.unwrap().unwrap().parse().unwrap();
         drop(cancellation);

@@ -60,8 +60,19 @@ pub use plan_gate::decide as plan_gate_decide;
 /// legitimately silent this long (a quiet build, a training step with
 /// buffered output) is indistinguishable from a hang — hence the generous
 /// bound; the interruption is a clear, recoverable error either way. Shared
-/// by the codex and claude adapters (each applies it to its own event wait).
+/// by the codex, claude, and antigravity adapters (each applies it to its own
+/// event wait).
 pub(crate) const TURN_WATCHDOG: Duration = Duration::from_secs(30 * 60);
+
+/// Deadline for a turn's first sign of life — any stdout line at all, echo or
+/// pre-echo. A healthy child (resident or freshly spawned, resumed sessions
+/// included) emits its per-turn init within seconds of a message; TOTAL
+/// silence this long means a wedged child (seen live: a resident child stuck
+/// in an expired-OAuth refresh). From the first line on, waits get
+/// [`TURN_WATCHDOG`] instead (a long-running tool or an API backoff burst
+/// emits nothing for minutes, legitimately). Shared by the claude and
+/// antigravity adapters.
+pub(crate) const FIRST_EVENT_TIMEOUT: Duration = Duration::from_secs(120);
 
 pub(crate) const ORX_MAX_RETRIES: u32 = 3;
 pub(crate) const ORX_MAX_ATTEMPTS: u32 = ORX_MAX_RETRIES + 1;

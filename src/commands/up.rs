@@ -272,6 +272,9 @@ pub async fn run(args: UpArgs) -> Result<()> {
     if persistent_host {
         stopping.store(true, std::sync::atomic::Ordering::SeqCst);
     }
+    // Before any harness stops its children: a turn they end must not start the
+    // next queued message, whose child the exit would leave running.
+    state.chat.stop_admitting();
     if explicit_stop {
         state.chat.interrupt_all().await;
     }
@@ -279,6 +282,7 @@ pub async fn run(args: UpArgs) -> Result<()> {
     agent.shutdown().await;
     codex.shutdown().await;
     claude.shutdown().await;
+    let _ = tokio::task::spawn_blocking(crate::local::harness::antigravity::shutdown).await;
     state.chat.acp.shutdown().await;
     if let Some(server) = control_server {
         server.shutdown().await;
