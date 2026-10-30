@@ -519,14 +519,8 @@ async fn run_turn(ctx: &mut TurnCtx) -> Result<()> {
         .await
         .map_err(|_| anyhow!("Antigravity did not exit after its response"))??;
     cancellation.disarm();
-    if !state.saw_result {
-        return Err(anyhow!(
-            "Antigravity ended without a result ({status}); see {}",
-            log_path.display()
-        ));
-    }
-    if !status.success() && !state.turn_errored {
-        return Err(anyhow!("Antigravity ended with error ({status})"));
+    if let Some(error) = exit_failure(&state, status, &log_path) {
+        return Err(error);
     }
     if ctx.plan_mode && !state.turn_errored {
         if let Some(card) = plan_card(&ctx.assistant.parts, &ctx.assistant.id) {
@@ -537,6 +531,24 @@ async fn run_turn(ctx: &mut TurnCtx) -> Result<()> {
         let _ = std::fs::remove_file(log_path);
     }
     Ok(())
+}
+
+/// The child's exit only fails a turn its stream left unsettled: like the
+/// result status, agy's exit code can reflect the conversation's sticky error
+/// after this turn finished.
+fn exit_failure(
+    state: &TurnState,
+    status: std::process::ExitStatus,
+    log_path: &Path,
+) -> Option<crate::error::Error> {
+    if !state.saw_result {
+        return Some(anyhow!(
+            "Antigravity ended without a result ({status}); see {}",
+            log_path.display()
+        ));
+    }
+    (!status.success() && !state.turn_errored && !state.last_step.finished)
+        .then(|| anyhow!("Antigravity ended with error ({status})"))
 }
 
 async fn compact_native(mut cmd: Command, timeout: Duration) -> Result<()> {
@@ -592,23 +604,49 @@ async fn compact_native(mut cmd: Command, timeout: Duration) -> Result<()> {
 /// The `agy` children still running, so [`shutdown`] can stop them: the app
 /// exits the process without dropping in-flight turn tasks, which would
 /// otherwise leave each child running on its own.
-struct LiveProcesses(std::sync::Mutex<std::collections::BTreeSet<u32>>);
+struct LiveProcesses(std::sync::Mutex<Live>);
+
+struct Live {
+    pids: std::collections::BTreeSet<u32>,
+    /// Shutdown began: a child launched from now on is stopped on arrival.
+    closed: bool,
+}
 
 impl LiveProcesses {
     const fn new() -> Self {
-        Self(std::sync::Mutex::new(std::collections::BTreeSet::new()))
+        Self(std::sync::Mutex::new(Live {
+            pids: std::collections::BTreeSet::new(),
+            closed: false,
+        }))
     }
 
-    fn insert(&self, pid: u32) {
-        self.0.lock().unwrap().insert(pid);
+    /// Track a new child, or stop it at once when it was launched after
+    /// shutdown began (a turn already past admission when the server quit).
+    fn adopt(&self, pid: Option<u32>) -> Option<u32> {
+        let pid = pid?;
+        let admitted = {
+            let mut live = self.0.lock().unwrap();
+            if !live.closed {
+                live.pids.insert(pid);
+            }
+            !live.closed
+        };
+        if !admitted {
+            stop_turn_process(pid);
+        }
+        admitted.then_some(pid)
     }
 
     fn remove(&self, pid: u32) -> bool {
-        self.0.lock().unwrap().remove(&pid)
+        self.0.lock().unwrap().pids.remove(&pid)
     }
 
     fn stop_all(&self) {
-        let pids = std::mem::take(&mut *self.0.lock().unwrap());
+        let pids = {
+            let mut live = self.0.lock().unwrap();
+            live.closed = true;
+            std::mem::take(&mut live.pids)
+        };
         for pid in pids {
             stop_turn_process(pid);
         }
@@ -618,7 +656,8 @@ impl LiveProcesses {
 static LIVE_PROCESSES: LiveProcesses = LiveProcesses::new();
 
 /// Stop every running Antigravity child and its tool descendants (detached
-/// experiment supervisors survive).
+/// experiment supervisors survive), and any child launched afterwards. Only
+/// for a server about to exit: no Antigravity turn can run after this.
 pub(crate) fn shutdown() {
     LIVE_PROCESSES.stop_all();
 }
@@ -627,10 +666,7 @@ struct TurnProcesses(Option<u32>);
 
 impl TurnProcesses {
     fn new(pid: Option<u32>) -> Self {
-        if let Some(pid) = pid {
-            LIVE_PROCESSES.insert(pid);
-        }
-        Self(pid)
+        Self(LIVE_PROCESSES.adopt(pid))
     }
 
     /// The child exited on its own; there is nothing left to stop.
@@ -1636,18 +1672,52 @@ mod tests {
 
     #[cfg(unix)]
     #[tokio::test]
-    async fn stopping_live_processes_kills_running_children() {
+    async fn stopping_live_processes_kills_running_and_later_children() {
         let live = LiveProcesses::new();
-        let mut child = Command::new("sleep").arg("60").spawn().unwrap();
-        let pid = child.id().unwrap();
-        live.insert(pid);
+        let mut running = Command::new("sleep").arg("60").spawn().unwrap();
+        let pid = running.id().unwrap();
+        assert_eq!(live.adopt(Some(pid)), Some(pid));
         live.stop_all();
-        let status = tokio::time::timeout(Duration::from_secs(5), child.wait())
-            .await
-            .expect("child survived shutdown")
-            .unwrap();
-        assert!(!status.success());
+        // A turn already past admission launches its child after shutdown began.
+        let mut late = Command::new("sleep").arg("60").spawn().unwrap();
+        assert_eq!(live.adopt(late.id()), None);
+        for child in [&mut running, &mut late] {
+            let status = tokio::time::timeout(Duration::from_secs(5), child.wait())
+                .await
+                .expect("child survived shutdown")
+                .unwrap();
+            assert!(!status.success());
+        }
         assert!(!live.remove(pid));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn only_an_unsettled_turn_fails_on_its_exit_code() {
+        use std::os::unix::process::ExitStatusExt as _;
+        let exit = |code: i32| std::process::ExitStatus::from_raw(code << 8);
+        let log = Path::new("agent-antigravity-test.log");
+        let failure = |state: &TurnState, code| {
+            exit_failure(state, exit(code), log).map(|error| error.to_string())
+        };
+        let (_, finished) = fold(&[
+            json!({"event":"init","conversation_id":"c1"}),
+            step(0, "user_input", "DONE", None),
+            step(1, "agent_response", "DONE", Some("ok\n")),
+            error_result(STALE_ERROR),
+        ]);
+        assert_eq!(failure(&finished, 0), None);
+        assert_eq!(failure(&finished, 3), None);
+        let (_, failed) = fold(&[
+            step(1, "error_message", "DONE", None),
+            error_result(STALE_ERROR),
+        ]);
+        assert_eq!(failure(&failed, 3), None, "the stream already failed it");
+        let (_, unsettled) = fold(&[json!({"event":"result","result":{"status":"SUCCESS"}})]);
+        assert_eq!(failure(&unsettled, 0), None);
+        assert!(failure(&unsettled, 7).unwrap().contains("ended with error"));
+        let (_, silent) = fold(&[json!({"event":"init","conversation_id":"c1"})]);
+        assert!(failure(&silent, 0).unwrap().contains("without a result"));
     }
 
     #[cfg(unix)]

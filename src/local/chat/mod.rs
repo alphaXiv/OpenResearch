@@ -2422,7 +2422,8 @@ pub struct ChatHost {
     turns: Mutex<HashMap<String, TurnState>>,
     /// Cross-process ownership tokens for locally active turn slots.
     durable_turns: std::sync::Mutex<HashMap<String, String>>,
-    /// Set once `orx up` commits to restarting into an update; no turn starts after.
+    /// Set once `orx up` commits to restarting into an update or begins shutting
+    /// down; no turn starts after.
     restarting: std::sync::atomic::AtomicBool,
     deleting_sessions: Arc<std::sync::Mutex<HashSet<String>>>,
     /// Per-session serialization for `respond`. Answering a prompt reads the
@@ -3839,6 +3840,14 @@ impl ChatHost {
                 .store(true, std::sync::atomic::Ordering::SeqCst);
         }
         idle
+    }
+
+    /// Stop admitting turns for good, busy or not: the server is shutting down.
+    /// A turn that ends from here on leaves its queued messages persisted for
+    /// the next launch instead of starting the next one.
+    pub fn stop_admitting(&self) {
+        self.restarting
+            .store(true, std::sync::atomic::Ordering::SeqCst);
     }
 
     fn claim_durable_turn(&self, session_id: &str) -> bool {
@@ -6075,6 +6084,29 @@ impl ChatHost {
         Ok(TurnSubmission::Started(turn_id))
     }
 
+    /// Whether a finished turn hands its slot straight to the session's next
+    /// queued message. Never while shutting down: the queue persists for the
+    /// next launch instead.
+    fn queue_takes_over(&self, session_id: &str) -> bool {
+        !self.restarting.load(std::sync::atomic::Ordering::SeqCst)
+            && !self
+                .queue_dispatch_cancelled
+                .lock()
+                .unwrap()
+                .contains(session_id)
+            && !self
+                .queue_dispatch_suppressed
+                .lock()
+                .unwrap()
+                .contains(session_id)
+            && self
+                .queued
+                .lock()
+                .unwrap()
+                .get(session_id)
+                .is_some_and(|queue| !queue.is_empty())
+    }
+
     /// Turn cleanup: drop the handle, bump the session, broadcast idle.
     async fn finish_turn(&self, session_id: &str, message_id: Option<&str>) {
         let should_finish = {
@@ -6112,24 +6144,8 @@ impl ChatHost {
             if !matches {
                 return;
             }
-            let reserved_queue = message_id.is_some()
-                && refreshed
-                && !self
-                    .queue_dispatch_cancelled
-                    .lock()
-                    .unwrap()
-                    .contains(session_id)
-                && !self
-                    .queue_dispatch_suppressed
-                    .lock()
-                    .unwrap()
-                    .contains(session_id)
-                && self
-                    .queued
-                    .lock()
-                    .unwrap()
-                    .get(session_id)
-                    .is_some_and(|queue| !queue.is_empty());
+            let reserved_queue =
+                message_id.is_some() && refreshed && self.queue_takes_over(session_id);
             if reserved_queue {
                 turns.insert(session_id.to_string(), TurnState::Draining);
             } else {
@@ -10825,6 +10841,39 @@ with other project runs using `orx runs p1` and inspect the file located by `orx
         );
 
         assert!(TurnGuard::claim_hidden(&host, "owner").await.is_none());
+    }
+
+    #[tokio::test]
+    async fn shutdown_leaves_queued_messages_for_the_next_launch() {
+        let host = Arc::new(ChatHost::new(
+            Arc::new(crate::local::opencode::AgentHost::new(None)),
+            Arc::new(crate::local::codex::CodexHost::new()),
+            Arc::new(crate::local::claude::ClaudeHost::new()),
+        ));
+        host.queued.lock().unwrap().insert(
+            "owner".into(),
+            VecDeque::from([QueuedMessage {
+                id: "q_1".into(),
+                client_turn_id: "ct_1".into(),
+                request_hash: "hash".into(),
+                text: "after the running turn".into(),
+                transcript_text: None,
+                overrides: TurnOverrides::default(),
+                images: Vec::new(),
+                annotations: Vec::new(),
+                dispatch_attempts: 0,
+                dispatch_error: None,
+                next_retry_at: None,
+            }]),
+        );
+        assert!(host.queue_takes_over("owner"));
+
+        host.stop_admitting();
+
+        assert!(!host.queue_takes_over("owner"));
+        assert!(!host.claim_durable_turn("owner"));
+        assert!(TurnGuard::claim(&host, "owner", None).await.is_none());
+        assert_eq!(host.queued.lock().unwrap()["owner"].len(), 1);
     }
 
     #[test]

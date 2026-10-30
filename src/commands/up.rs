@@ -272,6 +272,9 @@ pub async fn run(args: UpArgs) -> Result<()> {
     if persistent_host {
         stopping.store(true, std::sync::atomic::Ordering::SeqCst);
     }
+    // Before any harness stops its children: a turn they end must not start the
+    // next queued message, whose child the exit would leave running.
+    state.chat.stop_admitting();
     if explicit_stop {
         state.chat.interrupt_all().await;
     }
