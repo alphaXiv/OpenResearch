@@ -192,9 +192,6 @@ impl LocalPlane {
                         if backend.job_id.is_some() {
                             println!("  {}", crate::local::slurm::status_resources(&backend));
                         }
-                        if let Some(error) = backend.monitoring_error.as_deref() {
-                            println!("  {error}");
-                        }
                         if scheduler {
                             match backend.slurm_ref() {
                                 Ok((host, job_id)) => match tokio::time::timeout(
@@ -209,6 +206,11 @@ impl LocalPlane {
                                 },
                                 Err(_) => println!("  scheduler: unknown (job not submitted)"),
                             }
+                        }
+                    }
+                    if let Some(error) = backend.monitoring_error.as_deref() {
+                        if matches!(r.status.as_str(), "starting" | "running") {
+                            println!("  {error}");
                         }
                     }
                 }

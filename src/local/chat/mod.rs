@@ -8513,7 +8513,7 @@ fn run_monitoring_text(runs: &[crate::store::StoredRun]) -> String {
         .collect::<Vec<_>>()
         .join("\n");
     format!(
-        "[orx] orx can no longer monitor these live runs:\n{lines}\nRun `orx exp status <expId>` \
+        "[orx] these live runs need attention:\n{lines}\nRun `orx exp status <expId>` \
          for the reason and tell the user so they can fix it. orx wakes you once it can see a run \
          finish; until then each run keeps its current status."
     )
@@ -10944,7 +10944,7 @@ with other project runs using `orx runs p1` and inspect the file located by `orx
         assert!(!text.contains("REMOTE_SENTINEL"));
         assert_eq!(
             text,
-            "[orx] orx can no longer monitor these live runs:\n\
+            "[orx] these live runs need attention:\n\
 - run `run_x` of experiment `exp_1` (still **starting**)\n\
 - run `run_y` of experiment `exp_1` (still **running**)\n\
 Run `orx exp status <expId>` for the reason and tell the user so they can fix it. orx wakes you \
