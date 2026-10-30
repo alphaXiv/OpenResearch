@@ -173,6 +173,253 @@ pub(super) fn has_session(path: &Path, id: &str) -> Result<bool> {
     }
 }
 
+/// The tables that carry the user's OpenCode sign-ins, in foreign-key order
+/// (`account_state` points at `account`).
+const CREDENTIAL_TABLES: [&str; 4] = ["credential", "account", "account_state", "control_account"];
+
+/// Copy the user's OpenCode sign-ins into orx's isolated database.
+///
+/// WHY THIS EXISTS. orx runs OpenCode against its own database and passes it as
+/// `OPENCODE_DB`, but OpenCode does not honour that variable for credentials:
+/// `opencode auth list` prints the same accounts with and without it, because
+/// they live in the `credential` table of the user's own database
+/// (`~/.local/share/opencode/opencode.db`). So the isolated database starts with
+/// none, the server orx spawns reports no connected integration, the harness
+/// reads as signed out while the user is plainly signed in, and its catalog
+/// collapses to the anonymous free models. `source` must therefore be that
+/// default database — not the `OPENCODE_DB` override, which OpenCode ignores for
+/// credentials even though it honours it for sessions. Signing in from the harness cannot
+/// repair it either, because that login writes back to the user's own database
+/// and the isolated one stays empty.
+///
+/// One-way and additive. The user's database is opened read-only and never
+/// written. A row already present in the isolated store is updated in place,
+/// never deleted and re-inserted: a replacement that half-succeeds would drop a
+/// working sign-in. What "present" means is the table's own primary key
+/// (`control_account` is keyed by `(email, url)`, not by `id`), read from the
+/// schema rather than assumed.
+///
+/// Update policy is per table, because the tables do not agree on what "newer"
+/// means:
+///
+/// * with a `time_updated` column (`credential`, `account`,
+///   `control_account`), the user's copy wins only when it is strictly newer, so
+///   a token the isolated server refreshed during a turn is not reverted by the
+///   next startup while a deliberate re-login still lands;
+/// * without one (`account_state`, the singleton pointer to the active account),
+///   the user's database is mirrored — switching accounts must not leave the
+///   isolated store pointing at the old one.
+///
+/// Repeated calls on every startup and detection sweep are therefore cheap and
+/// idempotent.
+///
+/// Only an isolated database that already exists is touched. OpenCode creates the
+/// schema itself on first boot, so a fresh install is seeded by the detection
+/// sweep that follows the one which created it — never by pre-creating tables
+/// in a database OpenCode is about to migrate, which would collide with its own
+/// migrations.
+///
+/// Schema drift is tolerated rather than assumed away: only the columns both
+/// sides have are copied, and a table whose key the two schemas disagree on is
+/// skipped. A database written by another OpenCode version must not be able to
+/// fail startup here.
+pub fn inherit_credentials(database: &Path, source: &Path) -> Result<()> {
+    if database == source || !source.is_file() || !database.is_file() {
+        return Ok(());
+    }
+    let reader = open_readonly(source)?;
+    // One snapshot across every table. Reading them independently lets a
+    // concurrent sign-in commit `account` between the two reads, so
+    // `account_state` could name an account this copy never saw and the isolated
+    // store would point at a missing row.
+    let snapshot = reader.unchecked_transaction()?;
+    let mut writer = Connection::open(database)?;
+    writer.busy_timeout(std::time::Duration::from_secs(5))?;
+    let transaction = writer.transaction()?;
+    for table in CREDENTIAL_TABLES {
+        let columns = shared_columns(&transaction, &snapshot, table)?;
+        if columns.is_empty() {
+            continue;
+        }
+        // Without an agreed key every row would look new on every start, and the
+        // isolated store would silently accumulate duplicates.
+        let keys = key_columns(&transaction, &reader, table, &columns)?;
+        if keys.is_empty() {
+            continue;
+        }
+        let updated = columns.iter().position(|column| column == "time_updated");
+        let insert = format!(
+            "INSERT OR IGNORE INTO {table} ({}) VALUES ({})",
+            columns
+                .iter()
+                .map(|column| quote_identifier(column))
+                .collect::<Vec<_>>()
+                .join(", "),
+            (1..=columns.len())
+                .map(|index| format!("?{index}"))
+                .collect::<Vec<_>>()
+                .join(", ")
+        );
+        let settable: Vec<(usize, &String)> = columns
+            .iter()
+            .enumerate()
+            .filter(|(index, _)| !keys.contains(index))
+            .collect();
+        let update = (!settable.is_empty()).then(|| {
+            format!(
+                "UPDATE {table} SET {} WHERE {}",
+                settable
+                    .iter()
+                    .enumerate()
+                    .map(|(position, (_, column))| format!(
+                        "{} = ?{}",
+                        quote_identifier(column),
+                        position + 1
+                    ))
+                    .collect::<Vec<_>>()
+                    .join(", "),
+                keys.iter()
+                    .enumerate()
+                    .map(|(position, index)| {
+                        format!(
+                            "{} = ?{}",
+                            quote_identifier(&columns[*index]),
+                            settable.len() + position + 1
+                        )
+                    })
+                    .collect::<Vec<_>>()
+                    .join(" AND ")
+            )
+        });
+        let lookup = format!(
+            "SELECT {} FROM {table} WHERE {}",
+            updated
+                .map(|index| quote_identifier(&columns[index]))
+                .unwrap_or_else(|| "1".to_string()),
+            keys.iter()
+                .enumerate()
+                .map(|(position, index)| {
+                    format!("{} = ?{}", quote_identifier(&columns[*index]), position + 1)
+                })
+                .collect::<Vec<_>>()
+                .join(" AND ")
+        );
+        for row in read_rows(&snapshot, table, &columns)? {
+            let current: Option<Option<i64>> = transaction
+                .query_row(
+                    &lookup,
+                    rusqlite::params_from_iter(keys.iter().map(|index| &row[*index])),
+                    |row| row.get(0),
+                )
+                .optional()?;
+            let Some(current) = current else {
+                // Absent: nothing to lose, and a row the target schema rejects is
+                // left out rather than failing the whole copy.
+                transaction.execute(&insert, rusqlite::params_from_iter(row))?;
+                continue;
+            };
+            let is_newer = updated.is_none_or(|index| match &row[index] {
+                // A malformed timestamp must not outrank a real one; treat it as
+                // the oldest possible copy.
+                rusqlite::types::Value::Integer(value) => *value > current.unwrap_or_default(),
+                _ => false,
+            });
+            if !is_newer {
+                continue;
+            }
+            let Some(update) = &update else { continue };
+            let mut values: Vec<&rusqlite::types::Value> =
+                settable.iter().map(|(index, _)| &row[*index]).collect();
+            values.extend(keys.iter().map(|index| &row[*index]));
+            transaction.execute(update, rusqlite::params_from_iter(values))?;
+        }
+    }
+    transaction.commit()?;
+    // The snapshot is read-only; committing it just releases the read lock.
+    snapshot.commit()?;
+    Ok(())
+}
+
+/// The indexes into `columns` of this table's primary key — the columns both
+/// schemas declare as key, in key order. Empty when they disagree or declare
+/// none, which skips the table instead of guessing a key that could duplicate or
+/// overwrite the wrong row.
+fn key_columns(
+    target: &Connection,
+    source: &Connection,
+    table: &str,
+    columns: &[String],
+) -> Result<Vec<usize>> {
+    let source_key = primary_key(source, table)?;
+    if source_key.is_empty() || source_key != primary_key(target, table)? {
+        return Ok(Vec::new());
+    }
+    Ok(source_key
+        .iter()
+        .filter_map(|name| columns.iter().position(|column| column == name))
+        .collect())
+}
+
+fn primary_key(connection: &Connection, table: &str) -> Result<Vec<String>> {
+    let mut statement =
+        connection.prepare("SELECT name FROM pragma_table_info(?1) WHERE pk > 0 ORDER BY pk")?;
+    let key = statement
+        .query_map([table], |row| row.get::<_, String>(0))?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    Ok(key)
+}
+
+fn quote_identifier(name: &str) -> String {
+    format!("\"{}\"", name.replace('"', "\"\""))
+}
+
+fn table_columns(connection: &Connection, table: &str) -> Result<Vec<String>> {
+    let mut statement =
+        connection.prepare("SELECT name FROM pragma_table_info(?1) ORDER BY cid")?;
+    let columns = statement
+        .query_map([table], |row| row.get::<_, String>(0))?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    Ok(columns)
+}
+
+/// Columns both sides have, in the source's order. Empty when either side lacks
+/// the table, which is how a table that only one OpenCode version writes is
+/// skipped instead of failing the copy.
+fn shared_columns(target: &Connection, source: &Connection, table: &str) -> Result<Vec<String>> {
+    let source_columns = table_columns(source, table)?;
+    if source_columns.is_empty() {
+        return Ok(Vec::new());
+    }
+    let target_columns = table_columns(target, table)?;
+    Ok(source_columns
+        .into_iter()
+        .filter(|column| target_columns.contains(column))
+        .collect())
+}
+
+fn read_rows(
+    connection: &Connection,
+    table: &str,
+    columns: &[String],
+) -> Result<Vec<Vec<rusqlite::types::Value>>> {
+    let mut statement = connection.prepare(&format!(
+        "SELECT {} FROM {table}",
+        columns
+            .iter()
+            .map(|column| quote_identifier(column))
+            .collect::<Vec<_>>()
+            .join(", ")
+    ))?;
+    let rows = statement
+        .query_map([], |row| {
+            (0..columns.len())
+                .map(|index| row.get::<_, rusqlite::types::Value>(index))
+                .collect::<rusqlite::Result<Vec<_>>>()
+        })?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    Ok(rows)
+}
+
 fn sidecar(path: &Path, suffix: &str) -> PathBuf {
     let mut name = path.as_os_str().to_os_string();
     name.push(suffix);
@@ -1220,6 +1467,320 @@ mod tests {
         );
         assert!(
             table_has_session(&open_readonly(&refreshed).unwrap(), "session", "history").unwrap()
+        );
+    }
+
+    const CREDENTIALS: &str = "CREATE TABLE credential (
+            id TEXT PRIMARY KEY,
+            integration_id TEXT,
+            label TEXT NOT NULL,
+            value TEXT NOT NULL,
+            method_id TEXT,
+            active INTEGER,
+            time_created INTEGER NOT NULL,
+            time_updated INTEGER NOT NULL
+        );
+        CREATE TABLE account (id TEXT PRIMARY KEY, email TEXT NOT NULL, url TEXT NOT NULL,
+            access_token TEXT NOT NULL, refresh_token TEXT NOT NULL, token_expiry INTEGER,
+            time_created INTEGER NOT NULL, time_updated INTEGER NOT NULL);
+        CREATE TABLE account_state (id INTEGER PRIMARY KEY NOT NULL, active_account_id TEXT);
+        CREATE TABLE control_account (email TEXT NOT NULL, url TEXT NOT NULL,
+            access_token TEXT NOT NULL, refresh_token TEXT NOT NULL, token_expiry INTEGER,
+            active INTEGER NOT NULL, time_created INTEGER NOT NULL, time_updated INTEGER NOT NULL,
+            CONSTRAINT control_account_pk PRIMARY KEY(email, url));";
+
+    fn sign_in(path: &Path, id: &str, value: &str, updated: i64) {
+        Connection::open(path)
+            .unwrap()
+            .execute(
+                "INSERT OR REPLACE INTO credential
+                   (id, integration_id, label, value, method_id, active, time_created, time_updated)
+                 VALUES (?1, 'anthropic', 'OAuth', ?2, NULL, NULL, ?3, ?3)",
+                rusqlite::params![id, value, updated],
+            )
+            .unwrap();
+    }
+
+    fn credential_value(path: &Path, id: &str) -> Option<String> {
+        open_readonly(path)
+            .unwrap()
+            .query_row("SELECT value FROM credential WHERE id = ?1", [id], |row| {
+                row.get(0)
+            })
+            .optional()
+            .unwrap()
+    }
+
+    #[test]
+    fn sign_ins_are_copied_into_the_isolated_database_once() {
+        let fixture = Fixture::new();
+        let legacy = fixture.0.path().join("legacy.db");
+        let isolated = fixture.path();
+        Connection::open(&legacy)
+            .unwrap()
+            .execute_batch(CREDENTIALS)
+            .unwrap();
+        Connection::open(&isolated)
+            .unwrap()
+            .execute_batch(CREDENTIALS)
+            .unwrap();
+        sign_in(&legacy, "anthropic", "access-1", 100);
+        sign_in(&legacy, "opencode-go", "access-2", 100);
+
+        inherit_credentials(&isolated, &legacy).unwrap();
+        inherit_credentials(&isolated, &legacy).unwrap();
+
+        assert_eq!(
+            credential_value(&isolated, "anthropic").as_deref(),
+            Some("access-1")
+        );
+        assert_eq!(
+            credential_value(&isolated, "opencode-go").as_deref(),
+            Some("access-2")
+        );
+        let count: i64 = open_readonly(&isolated)
+            .unwrap()
+            .query_row("SELECT COUNT(*) FROM credential", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(count, 2);
+    }
+
+    #[test]
+    fn a_retried_copy_does_not_revert_a_token_the_isolated_store_refreshed() {
+        let fixture = Fixture::new();
+        let legacy = fixture.0.path().join("legacy.db");
+        let isolated = fixture.path();
+        Connection::open(&legacy)
+            .unwrap()
+            .execute_batch(CREDENTIALS)
+            .unwrap();
+        Connection::open(&isolated)
+            .unwrap()
+            .execute_batch(CREDENTIALS)
+            .unwrap();
+        sign_in(&legacy, "anthropic", "stale", 100);
+        inherit_credentials(&isolated, &legacy).unwrap();
+        // The isolated server refreshed the credential during a turn.
+        sign_in(&isolated, "anthropic", "refreshed", 200);
+
+        inherit_credentials(&isolated, &legacy).unwrap();
+
+        assert_eq!(
+            credential_value(&isolated, "anthropic").as_deref(),
+            Some("refreshed")
+        );
+    }
+
+    #[test]
+    fn a_deliberate_relogin_replaces_the_credential_it_shares_an_id_with() {
+        let fixture = Fixture::new();
+        let legacy = fixture.0.path().join("legacy.db");
+        let isolated = fixture.path();
+        Connection::open(&legacy)
+            .unwrap()
+            .execute_batch(CREDENTIALS)
+            .unwrap();
+        Connection::open(&isolated)
+            .unwrap()
+            .execute_batch(CREDENTIALS)
+            .unwrap();
+        sign_in(&legacy, "anthropic", "old", 100);
+        inherit_credentials(&isolated, &legacy).unwrap();
+
+        sign_in(&legacy, "anthropic", "new", 300);
+        inherit_credentials(&isolated, &legacy).unwrap();
+
+        assert_eq!(
+            credential_value(&isolated, "anthropic").as_deref(),
+            Some("new")
+        );
+    }
+
+    #[test]
+    fn a_source_without_credential_tables_is_skipped() {
+        let fixture = Fixture::new();
+        let legacy = fixture.0.path().join("legacy.db");
+        let isolated = fixture.path();
+        // A V1 database has no credential table at all; the copy must not turn
+        // that into a startup failure.
+        Connection::open(&legacy)
+            .unwrap()
+            .execute_batch(V1)
+            .unwrap();
+        Connection::open(&isolated)
+            .unwrap()
+            .execute_batch(CREDENTIALS)
+            .unwrap();
+
+        inherit_credentials(&isolated, &legacy).unwrap();
+
+        let count: i64 = open_readonly(&isolated)
+            .unwrap()
+            .query_row("SELECT COUNT(*) FROM credential", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(count, 0);
+    }
+
+    #[test]
+    fn a_missing_user_database_is_not_an_error() {
+        let fixture = Fixture::new();
+        let isolated = fixture.path();
+        Connection::open(&isolated)
+            .unwrap()
+            .execute_batch(CREDENTIALS)
+            .unwrap();
+
+        inherit_credentials(&isolated, &fixture.0.path().join("absent.db")).unwrap();
+        inherit_credentials(&isolated, &isolated).unwrap();
+    }
+
+    #[test]
+    fn the_active_account_pointer_is_mirrored_because_it_carries_no_timestamp() {
+        let fixture = Fixture::new();
+        let legacy = fixture.0.path().join("legacy.db");
+        let isolated = fixture.path();
+        for path in [&legacy, &isolated] {
+            Connection::open(path)
+                .unwrap()
+                .execute_batch(CREDENTIALS)
+                .unwrap();
+        }
+        Connection::open(&legacy)
+            .unwrap()
+            .execute_batch(
+                "INSERT INTO account_state VALUES (1, 'new-account');
+                 INSERT INTO account VALUES ('new-account', 'a@b', 'https://console', 'a', 'r', 0, 1, 1);",
+            )
+            .unwrap();
+        Connection::open(&isolated)
+            .unwrap()
+            .execute_batch("INSERT INTO account_state VALUES (1, 'old-account');")
+            .unwrap();
+
+        inherit_credentials(&isolated, &legacy).unwrap();
+
+        let active: Option<String> = open_readonly(&isolated)
+            .unwrap()
+            .query_row("SELECT active_account_id FROM account_state", [], |row| {
+                row.get(0)
+            })
+            .unwrap();
+        assert_eq!(active.as_deref(), Some("new-account"));
+    }
+
+    #[test]
+    fn a_console_relogin_updates_the_row_it_shares_its_composite_key_with() {
+        let fixture = Fixture::new();
+        let legacy = fixture.0.path().join("legacy.db");
+        let isolated = fixture.path();
+        for path in [&legacy, &isolated] {
+            Connection::open(path)
+                .unwrap()
+                .execute_batch(CREDENTIALS)
+                .unwrap();
+        }
+        let control = |path: &Path, token: &str, updated: i64| {
+            Connection::open(path)
+                .unwrap()
+                .execute(
+                    "INSERT OR REPLACE INTO control_account VALUES
+                       ('a@b', 'https://console', ?1, 'refresh', 0, 1, 1, ?2)",
+                    rusqlite::params![token, updated],
+                )
+                .unwrap();
+        };
+        control(&legacy, "old", 100);
+        inherit_credentials(&isolated, &legacy).unwrap();
+        control(&legacy, "new", 300);
+
+        inherit_credentials(&isolated, &legacy).unwrap();
+
+        let token: String = open_readonly(&isolated)
+            .unwrap()
+            .query_row(
+                "SELECT access_token FROM control_account WHERE email = 'a@b'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(token, "new");
+    }
+
+    #[test]
+    fn updating_a_row_keeps_columns_the_source_does_not_have() {
+        let fixture = Fixture::new();
+        let legacy = fixture.0.path().join("legacy.db");
+        let isolated = fixture.path();
+        // The isolated schema gained a required column the user's older database
+        // does not have. Copying by delete-then-insert would drop the row when the
+        // insert is refused; the update path must keep it and its extra value.
+        Connection::open(&isolated)
+            .unwrap()
+            .execute_batch(
+                "CREATE TABLE credential (id TEXT PRIMARY KEY, integration_id TEXT,
+                   label TEXT NOT NULL, value TEXT NOT NULL, time_created INTEGER NOT NULL,
+                   time_updated INTEGER NOT NULL, sealed TEXT NOT NULL);",
+            )
+            .unwrap();
+        Connection::open(&legacy)
+            .unwrap()
+            .execute_batch(CREDENTIALS)
+            .unwrap();
+        Connection::open(&isolated)
+            .unwrap()
+            .execute(
+                "INSERT INTO credential VALUES ('anthropic', 'anthropic', 'OAuth', 'old', 1, 100, 'keep')",
+                [],
+            )
+            .unwrap();
+        sign_in(&legacy, "anthropic", "new", 300);
+
+        inherit_credentials(&isolated, &legacy).unwrap();
+
+        let (value, sealed): (String, String) = open_readonly(&isolated)
+            .unwrap()
+            .query_row(
+                "SELECT value, sealed FROM credential WHERE id = 'anthropic'",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(value, "new");
+        assert_eq!(sealed, "keep");
+    }
+
+    #[test]
+    fn columns_only_one_side_has_are_not_copied() {
+        let fixture = Fixture::new();
+        let legacy = fixture.0.path().join("legacy.db");
+        let isolated = fixture.path();
+        // An older schema without `method_id`/`active` must still contribute the
+        // columns it does share instead of failing the whole copy.
+        Connection::open(&legacy)
+            .unwrap()
+            .execute_batch(
+                "CREATE TABLE credential (id TEXT PRIMARY KEY, integration_id TEXT,
+                   label TEXT NOT NULL, value TEXT NOT NULL,
+                   time_created INTEGER NOT NULL, time_updated INTEGER NOT NULL);",
+            )
+            .unwrap();
+        Connection::open(&isolated)
+            .unwrap()
+            .execute_batch(CREDENTIALS)
+            .unwrap();
+        Connection::open(&legacy)
+            .unwrap()
+            .execute(
+                "INSERT INTO credential VALUES ('google', 'google', 'API key', 'key-1', 10, 20)",
+                [],
+            )
+            .unwrap();
+
+        inherit_credentials(&isolated, &legacy).unwrap();
+
+        assert_eq!(
+            credential_value(&isolated, "google").as_deref(),
+            Some("key-1")
         );
     }
 }
