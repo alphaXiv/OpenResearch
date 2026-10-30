@@ -228,7 +228,7 @@ fn failed(message: String) -> JobState {
 
 async fn host_state(target: &SshTarget, dir: &str) -> Result<String> {
     let dir = shell_path(dir);
-    ssh_run(target, &format!(r#"d={dir}; if [ -f "$d/exit_code" ]; then echo "EXIT $(cat "$d/exit_code")"; elif [ -f "$d/pid" ] && kill -0 "$(cat "$d/pid")" 2>/dev/null; then echo RUNNING; else echo DEAD; fi; if [ -f "$d/launch_time" ]; then echo "$(( $(date +%s) - $(cat "$d/launch_time") ))"; else echo 0; fi"#), None).await
+    ssh_run(target, &format!(r#"d={dir}; if grep -Eqx '[0-9]+' "$d/exit_code" 2>/dev/null; then echo "EXIT $(cat "$d/exit_code")"; elif [ -f "$d/pid" ] && kill -0 "$(cat "$d/pid")" 2>/dev/null; then echo RUNNING; else echo DEAD; fi; if [ -f "$d/launch_time" ]; then echo "$(( $(date +%s) - $(cat "$d/launch_time") ))"; else echo 0; fi"#), None).await
 }
 
 pub(super) async fn inspect(
