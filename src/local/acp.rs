@@ -140,6 +140,13 @@ pub fn presets() -> Vec<Preset> {
             &["agent", "stdio"][..],
             "https://github.com/xai-org/grok-build",
         ),
+        (
+            "c33b22bc-6d2e-44c6-a5d6-117dd6722f7f",
+            "fx",
+            "fx",
+            &["acp"][..],
+            "https://fx.sh/docs/using-fx/acp",
+        ),
     ]
     .into_iter()
     .map(|(id, name, executable, arguments, setup_url)| Preset {
@@ -411,6 +418,7 @@ for line in sys.stdin:
                 ("oh-my-pi", "omp", vec!["acp"]),
                 ("Devin CLI", "devin", vec!["acp"]),
                 ("Grok Build", "grok", vec!["agent", "stdio"]),
+                ("fx", "fx", vec!["acp"]),
             ]
         );
         let file = std::env::current_exe().unwrap();
