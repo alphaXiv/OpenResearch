@@ -27,7 +27,7 @@ use axum::{Json, RequestExt as _, Router};
 use futures::TryStreamExt as _;
 use serde::{Deserialize, Serialize};
 use tokio::process::Command;
-use tokio::sync::{watch, Mutex, RwLock};
+use tokio::sync::{watch, Mutex, Notify, RwLock};
 
 use crate::commands::remote_host::{
     ControlResponse, HostDescriptor, ATTACHED_MARKER, CONTROL_PROTOCOL, HOST_MARKER,
@@ -114,6 +114,7 @@ struct RemoteSession {
     client: reqwest::Client,
     info: RwLock<RemoteSessionInfo>,
     route: RwLock<Option<UpstreamRoute>>,
+    route_invalidated: Notify,
     operation: Mutex<()>,
     connection: Mutex<Option<ConnectionControl>>,
     gateway_task: Mutex<Option<tokio::task::JoinHandle<()>>>,
@@ -221,6 +222,7 @@ impl RemoteSessionManager {
             client,
             info: RwLock::new(info.clone()),
             route: RwLock::new(None),
+            route_invalidated: Notify::new(),
             operation: Mutex::new(()),
             connection: Mutex::new(None),
             gateway_task: Mutex::new(None),
@@ -1037,6 +1039,11 @@ async fn connect_once(
                     eprintln!("orx: warning: {warning}");
                 }
             }
+            _ = session.route_invalidated.notified() => {
+                let _ = child.start_kill();
+                let _ = child.wait().await;
+                return ConnectionEnd::Retryable("Remote session authentication expired.".into());
+            }
             status = child.wait() => {
                 return ConnectionEnd::Retryable(match status {
                     Ok(status) => format!("SSH connection ended ({status})."),
@@ -1044,6 +1051,11 @@ async fn connect_once(
                 });
             }
             _ = heartbeat.tick() => {
+                if session.route.read().await.is_none() {
+                    let _ = child.start_kill();
+                    let _ = child.wait().await;
+                    return ConnectionEnd::Retryable("Remote session authentication expired.".into());
+                }
                 if tokio::io::AsyncWriteExt::write_all(&mut stdin, b"ping\n").await.is_err()
                     || tokio::io::AsyncWriteExt::flush(&mut stdin).await.is_err()
                 {
@@ -1421,13 +1433,25 @@ async fn gateway_fallback(State(session): State<Arc<RemoteSession>>, request: Re
                 "The remote OpenResearch connection is unavailable.".into(),
             );
         };
-        return proxy_request(
+        let response = proxy_request(
             &session.client,
             request,
             &format!("http://127.0.0.1:{}", route.port),
             Some(&route.token),
         )
         .await;
+        if response.status() == StatusCode::UNAUTHORIZED {
+            let mut current = session.route.write().await;
+            if current.as_ref().is_some_and(|r| r.token == route.token) {
+                *current = None;
+                session.route_invalidated.notify_waiters();
+            }
+            return gateway_error(
+                StatusCode::SERVICE_UNAVAILABLE,
+                "The remote OpenResearch session is reconnecting.".into(),
+            );
+        }
+        return response;
     }
     if let Some(origin) = &session.dev_origin {
         return proxy_request(&session.client, request, origin, None).await;
@@ -2533,6 +2557,7 @@ mod tests {
                 can_start_new_host: false,
             }),
             route: RwLock::new(None),
+            route_invalidated: Notify::new(),
             operation: Mutex::new(()),
             connection: Mutex::new(None),
             gateway_task: Mutex::new(None),
@@ -3254,5 +3279,49 @@ mod tests {
         }
         // A malformed one-sided bracket must NOT parse as an IP.
         assert!(!host_is_ip_literal("[1.2.3.4"));
+    }
+
+    #[tokio::test]
+    async fn gateway_invalidates_route_and_returns_service_unavailable_on_unauthorized() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let upstream = Router::new().route(
+            "/api/test",
+            get(|| async {
+                (
+                    StatusCode::UNAUTHORIZED,
+                    Json(serde_json::json!({
+                        "error": "Remote session authentication required."
+                    })),
+                )
+            }),
+        );
+        tokio::spawn(async move {
+            axum::serve(listener, upstream).await.unwrap();
+        });
+
+        let session = Arc::new(sample_session());
+        *session.route.write().await = Some(UpstreamRoute {
+            port,
+            token: "test-token".into(),
+        });
+
+        let notified = session.route_invalidated.notified();
+        tokio::pin!(notified);
+
+        // Pre-arm the notification listener
+        notified.as_mut().enable();
+
+        let request = Request::builder()
+            .uri("/api/test")
+            .body(Body::empty())
+            .unwrap();
+
+        let response = gateway_fallback(State(session.clone()), request).await;
+        assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+        assert!(session.route.read().await.is_none());
+        assert!(tokio::time::timeout(Duration::from_millis(100), notified)
+            .await
+            .is_ok());
     }
 }
