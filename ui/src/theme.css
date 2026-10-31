@@ -138,6 +138,10 @@
   --panel: #ededed;
   --surface: #f5f5f5;
   --surface-bright: #ffffff;
+  /* Fills over the macOS sidebar material (app.css). Literal rgb, not color-mix: macOS 11 WebKit. */
+  --material-veil: rgb(255 255 255 / 40%);
+  --material-hover: color-mix(in srgb, var(--text) 6%, transparent);
+  --material-selected: color-mix(in srgb, var(--text) 11%, transparent);
   --highlight: #e5e5e5;
   --chat-annotation-highlight: #b8d4ff;
   --selection-background: #e3e3e3;
@@ -218,6 +222,11 @@
   --red: var(--accent-red);
   --amber: var(--accent-amber);
 
+  /* Links are blue and the brand is red, so emphasis avoids both; bold-italic is the one deliberate red. */
+  --md-emphasis: #d6681f;
+  --md-strong-em: #db0218;
+  --md-strong-em-bg: color-mix(in srgb, var(--accent-red) 12%, var(--base));
+
   --syntax-comment: #a0a1a7;
   --syntax-text: #383a42;
   --syntax-red: #e45649;
@@ -235,6 +244,7 @@
 }
 
 :root[data-theme="dark"] {
+  --material-veil: rgb(24 24 24 / 40%);
   --base: #181818;
   --canvas: #1c1c1c;
   --panel: #2b2b2b;
@@ -275,6 +285,10 @@
   --term-app-bg: #1c1c1c;
   --term-app-foreground: #dcdcdc;
   --term-app-selection: #23364d;
+
+  --md-emphasis: #e27c23;
+  --md-strong-em: #ff8d97;
+  --md-strong-em-bg: color-mix(in srgb, var(--accent-red) 20%, var(--base));
 
   --syntax-comment: #7f848e;
   --syntax-text: #abb2bf;

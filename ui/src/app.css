@@ -185,6 +185,21 @@
   width: 100%;
 }
 
+:root[data-colored-markdown="on"] .md :is(strong, em) {
+  color: var(--md-emphasis);
+}
+
+/* Opaque, with block padding that bridges the leading, so wrapped lines read as one block. */
+:root[data-colored-markdown="on"] .md :is(strong > em, em > strong) {
+  color: var(--md-strong-em);
+  background: var(--md-strong-em-bg);
+  padding-block: 0.25em;
+  padding-inline: 0.15em;
+  border-radius: 0.2em;
+  box-decoration-break: clone;
+  -webkit-box-decoration-break: clone;
+}
+
 /* Inline flex otherwise inherits paragraph leading and outgrows code chips. */
 .md .file-chip {
   line-height: 1.3;
@@ -434,31 +449,6 @@
   @apply whitespace-pre-wrap break-normal break-words;
 }
 
-@layer components {
-.term-provenance {
-  display: flex;
-  align-items: center;
-  gap: 6px 14px;
-  min-height: 32px;
-  padding: 6px 10px;
-  overflow-x: auto;
-  scrollbar-width: none;
-  border-bottom: 1px solid var(--border);
-  background: var(--surface);
-  color: var(--subtext);
-  font-size: 11px;
-  white-space: nowrap;
-  flex-shrink: 0;
-}
-.term-provenance::-webkit-scrollbar {
-  display: none;
-}
-.term-provenance code {
-  color: var(--text);
-  font-size: inherit;
-}
-}
-
 @media (max-width: 767px) {
   html, body, #root { height: 100dvh; }
   .app { padding-top: env(safe-area-inset-top); }
@@ -512,4 +502,21 @@
   .chat-thread, .settings-view-scroll, .home { scrollbar-gutter: auto; }
   .composer-actions { flex-wrap: wrap; }
   input, textarea, select { font-size: 16px; }
+}
+
+/* The macOS app's window material (src/commands/app.rs) shows through the sidebar. */
+.mac-titlebar:has(.app-body > .session-rail),
+.mac-titlebar:has(.app-body > .session-rail) body {
+  background: transparent;
+}
+
+/* A veil toward white (light) or black (dark) over the material. */
+.mac-titlebar .app-body > .session-rail {
+  background: var(--material-veil);
+}
+
+/* Hover and selection fills tint the material like a native sidebar's. */
+.mac-titlebar :is(.app-body > .session-rail, .titlebar-sidebar-toggle) {
+  --surface: var(--material-hover);
+  --panel: var(--material-selected);
 }

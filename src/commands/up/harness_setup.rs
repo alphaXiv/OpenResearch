@@ -25,6 +25,7 @@ fn unix_bootstrap(harness: &str) -> Option<(&'static str, &'static str)> {
             "mcode" => Some(("https://filecdn.minimax.chat/public/install.sh", "bash")),
             "devin" => Some(("https://cli.devin.ai/install.sh", "bash")),
             "grok" => Some(("https://x.ai/cli/install.sh", "bash")),
+            "omp" => Some(("https://omp.sh/install", "sh")),
             _ => None,
         },
     }
@@ -43,6 +44,7 @@ fn windows_install_command(harness: &str) -> Option<&'static str> {
             "mcode" => Some("irm https://filecdn.minimax.chat/public/install.ps1 | iex"),
             "devin" => Some("irm https://static.devin.ai/cli/setup.ps1 | iex"),
             "grok" => Some("irm https://x.ai/cli/install.ps1 | iex"),
+            "omp" => Some("irm https://omp.sh/install.ps1 | iex"),
             _ => None,
         },
     }
