@@ -41,16 +41,23 @@ impl SourceSnapshot {
         let dir = crate::store::data_dir().join("source-snapshots");
         prepare_snapshot_dir(&dir)?;
 
+        let session_worktree = experiment
+            .chat_session_id
+            .as_deref()
+            .map(|id| crate::local::git::existing_session_worktree_path(project, id))
+            .filter(|path| path.is_dir());
+        let worktree = resolve_matching_worktree(repo, session_worktree.as_deref(), &revision);
+
         let nonce = uuid::Uuid::new_v4();
         let tar_tmp = dir.join(format!(".{nonce}.tar"));
-        archive(repo, &revision, "tar", &tar_tmp)?;
+        archive(repo, worktree, &revision, "tar", &tar_tmp)?;
         let (digest, size) = digest_file(&tar_tmp)?;
         let path = dir.join(format!("{digest}.tar"));
         install_content_addressed(&tar_tmp, &path, &digest, size)?;
 
         let ray_package = if include_ray_package {
             let zip_tmp = dir.join(format!(".{nonce}.zip"));
-            archive(repo, &revision, "zip", &zip_tmp)?;
+            archive(repo, worktree, &revision, "zip", &zip_tmp)?;
             let (zip_digest, zip_size) = digest_file(&zip_tmp)?;
             let zip_path = dir.join(format!("{zip_digest}.zip"));
             install_content_addressed(&zip_tmp, &zip_path, &zip_digest, zip_size)?;
@@ -123,20 +130,68 @@ impl SourceSnapshot {
     }
 }
 
-fn archive(repo: &Path, revision: &str, format: &str, destination: &Path) -> Result<()> {
+fn resolve_matching_worktree<'a>(
+    repo: &'a Path,
+    session_worktree: Option<&'a Path>,
+    revision: &str,
+) -> Option<&'a Path> {
+    if let Some(worktree) = session_worktree {
+        if checkout_matches_revision(worktree, revision) {
+            return Some(worktree);
+        }
+    }
+    if checkout_matches_revision(repo, revision) {
+        return Some(repo);
+    }
+    None
+}
+
+fn checkout_matches_revision(dir: &Path, revision: &str) -> bool {
+    let head_sha = match crate::local::git::git_command()
+        .current_dir(dir)
+        .args(["rev-parse", "--verify", "HEAD"])
+        .output()
+    {
+        Ok(out) if out.status.success() => String::from_utf8_lossy(&out.stdout).trim().to_string(),
+        _ => return false,
+    };
+
+    let rev_sha = match crate::local::git::git_command()
+        .current_dir(dir)
+        .args(["rev-parse", "--verify", &format!("{revision}^{{commit}}")])
+        .output()
+    {
+        Ok(out) if out.status.success() => String::from_utf8_lossy(&out.stdout).trim().to_string(),
+        _ => return false,
+    };
+
+    !head_sha.is_empty() && head_sha == rev_sha
+}
+
+fn archive(
+    repo: &Path,
+    worktree: Option<&Path>,
+    revision: &str,
+    format: &str,
+    destination: &Path,
+) -> Result<()> {
     let mut options = std::fs::OpenOptions::new();
     options.write(true).create_new(true);
     #[cfg(unix)]
     options.mode(0o600);
     let file = options.open(destination)?;
-    let output = crate::local::git::git_command()
-        .current_dir(repo)
-        .args([
-            "archive",
-            "--worktree-attributes",
-            &format!("--format={format}"),
-            revision,
-        ])
+
+    let active_worktree = worktree.filter(|wt| checkout_matches_revision(wt, revision));
+
+    let mut cmd = crate::local::git::git_command();
+    cmd.current_dir(active_worktree.unwrap_or(repo));
+    cmd.arg("archive");
+    if active_worktree.is_some() {
+        cmd.arg("--worktree-attributes");
+    }
+    cmd.args([&format!("--format={format}"), revision]);
+
+    let output = cmd
         .stdout(Stdio::from(file))
         .stderr(Stdio::piped())
         .output()
@@ -1363,7 +1418,151 @@ pub(crate) mod tests {
         std::fs::write(repo.join(".gitattributes"), "ignored.mp4 export-ignore\n").unwrap();
 
         let archive_tar = temp_dir.join("snapshot.tar");
-        archive(&repo, "HEAD", "tar", &archive_tar).unwrap();
+        archive(&repo, Some(&repo), "HEAD", "tar", &archive_tar).unwrap();
+
+        let tar_output = std::process::Command::new("tar")
+            .args(["-tf", archive_tar.to_str().unwrap()])
+            .output()
+            .unwrap();
+        let listing = String::from_utf8_lossy(&tar_output.stdout);
+        assert!(listing.contains("keep.txt"));
+        assert!(!listing.contains("ignored.mp4"));
+
+        let _ = std::fs::remove_dir_all(&temp_dir);
+    }
+
+    #[test]
+    fn archive_ignores_worktree_attributes_from_unrelated_checked_out_branch() {
+        let temp_dir =
+            std::env::temp_dir().join(format!("orx-archive-test-{}", uuid::Uuid::new_v4()));
+        let repo = temp_dir.join("repo");
+        std::fs::create_dir_all(&repo).unwrap();
+
+        let run = |args: &[&str]| {
+            let output = std::process::Command::new("git")
+                .current_dir(&repo)
+                .args(args)
+                .output()
+                .unwrap();
+            assert!(
+                output.status.success(),
+                "git {:?} failed: {}",
+                args,
+                String::from_utf8_lossy(&output.stderr)
+            );
+        };
+
+        run(&["init"]);
+        run(&["config", "user.email", "test@example.com"]);
+        run(&["config", "user.name", "Test User"]);
+        run(&["config", "commit.gpgsign", "false"]);
+
+        std::fs::write(repo.join("base.txt"), "base").unwrap();
+        run(&["add", "base.txt"]);
+        run(&["commit", "-m", "base"]);
+
+        run(&["checkout", "-b", "experiment"]);
+        std::fs::write(repo.join("experiment_needed.txt"), "needed").unwrap();
+        run(&["add", "experiment_needed.txt"]);
+        run(&["commit", "-m", "experiment commit"]);
+
+        let exp_sha_output = std::process::Command::new("git")
+            .current_dir(&repo)
+            .args(["rev-parse", "HEAD"])
+            .output()
+            .unwrap();
+        let exp_sha = String::from_utf8_lossy(&exp_sha_output.stdout)
+            .trim()
+            .to_string();
+
+        run(&["checkout", "master"]);
+        std::fs::write(
+            repo.join(".gitattributes"),
+            "experiment_needed.txt export-ignore\n",
+        )
+        .unwrap();
+
+        let archive_tar = temp_dir.join("snapshot.tar");
+        archive(&repo, Some(&repo), &exp_sha, "tar", &archive_tar).unwrap();
+
+        let tar_output = std::process::Command::new("tar")
+            .args(["-tf", archive_tar.to_str().unwrap()])
+            .output()
+            .unwrap();
+        let listing = String::from_utf8_lossy(&tar_output.stdout);
+        assert!(listing.contains("experiment_needed.txt"));
+
+        let _ = std::fs::remove_dir_all(&temp_dir);
+    }
+
+    #[test]
+    fn archive_uses_attributes_from_matching_experiment_worktree() {
+        let temp_dir =
+            std::env::temp_dir().join(format!("orx-archive-test-{}", uuid::Uuid::new_v4()));
+        let repo = temp_dir.join("repo");
+        let worktree = temp_dir.join("session_worktree");
+        std::fs::create_dir_all(&repo).unwrap();
+
+        let run = |dir: &std::path::Path, args: &[&str]| {
+            let output = std::process::Command::new("git")
+                .current_dir(dir)
+                .args(args)
+                .output()
+                .unwrap();
+            assert!(
+                output.status.success(),
+                "git {:?} in {} failed: {}",
+                args,
+                dir.display(),
+                String::from_utf8_lossy(&output.stderr)
+            );
+        };
+
+        run(&repo, &["init"]);
+        run(&repo, &["config", "user.email", "test@example.com"]);
+        run(&repo, &["config", "user.name", "Test User"]);
+        run(&repo, &["config", "commit.gpgsign", "false"]);
+
+        std::fs::write(repo.join("base.txt"), "base").unwrap();
+        run(&repo, &["add", "base.txt"]);
+        run(&repo, &["commit", "-m", "base"]);
+
+        run(&repo, &["checkout", "-b", "experiment"]);
+        std::fs::write(repo.join("keep.txt"), "keep").unwrap();
+        std::fs::write(repo.join("ignored.mp4"), "large video").unwrap();
+        run(&repo, &["add", "keep.txt", "ignored.mp4"]);
+        run(&repo, &["commit", "-m", "exp"]);
+
+        let exp_sha_output = std::process::Command::new("git")
+            .current_dir(&repo)
+            .args(["rev-parse", "HEAD"])
+            .output()
+            .unwrap();
+        let exp_sha = String::from_utf8_lossy(&exp_sha_output.stdout)
+            .trim()
+            .to_string();
+
+        run(
+            &repo,
+            &[
+                "worktree",
+                "add",
+                "--detach",
+                worktree.to_str().unwrap(),
+                &exp_sha,
+            ],
+        );
+
+        std::fs::write(
+            worktree.join(".gitattributes"),
+            "ignored.mp4 export-ignore\n",
+        )
+        .unwrap();
+
+        run(&repo, &["checkout", "master"]);
+
+        let archive_tar = temp_dir.join("snapshot.tar");
+        archive(&repo, Some(&worktree), &exp_sha, "tar", &archive_tar).unwrap();
 
         let tar_output = std::process::Command::new("tar")
             .args(["-tf", archive_tar.to_str().unwrap()])
