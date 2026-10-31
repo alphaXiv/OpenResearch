@@ -34,7 +34,7 @@ pub(crate) const ATTACHED_MARKER: &str = "ORX_REMOTE_ATTACHED=1";
 
 const CONTROL_TIMEOUT: Duration = Duration::from_secs(5);
 const START_TIMEOUT: Duration = Duration::from_secs(60);
-const ATTACHMENT_TIMEOUT: Duration = Duration::from_secs(20);
+const ATTACHMENT_TIMEOUT: Duration = Duration::from_secs(120);
 const MAX_CONTROL_LINE: usize = 64 * 1024;
 
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]

@@ -131,7 +131,12 @@ fn archive(repo: &Path, revision: &str, format: &str, destination: &Path) -> Res
     let file = options.open(destination)?;
     let output = crate::local::git::git_command()
         .current_dir(repo)
-        .args(["archive", &format!("--format={format}"), revision])
+        .args([
+            "archive",
+            "--worktree-attributes",
+            &format!("--format={format}"),
+            revision,
+        ])
         .stdout(Stdio::from(file))
         .stderr(Stdio::piped())
         .output()
@@ -1322,5 +1327,52 @@ pub(crate) mod tests {
         }
         args.timeout = Some("1h".into());
         assert!(validate_run_args(&args).is_ok());
+    }
+
+    #[test]
+    fn archive_respects_worktree_attributes() {
+        let temp_dir =
+            std::env::temp_dir().join(format!("orx-archive-test-{}", uuid::Uuid::new_v4()));
+        let repo = temp_dir.join("repo");
+        std::fs::create_dir_all(&repo).unwrap();
+
+        let run = |args: &[&str]| {
+            let output = std::process::Command::new("git")
+                .current_dir(&repo)
+                .args(args)
+                .output()
+                .unwrap();
+            assert!(
+                output.status.success(),
+                "git {:?} failed: {}",
+                args,
+                String::from_utf8_lossy(&output.stderr)
+            );
+        };
+
+        run(&["init"]);
+        run(&["config", "user.email", "test@example.com"]);
+        run(&["config", "user.name", "Test User"]);
+        run(&["config", "commit.gpgsign", "false"]);
+
+        std::fs::write(repo.join("keep.txt"), "keep").unwrap();
+        std::fs::write(repo.join("ignored.mp4"), "large video").unwrap();
+        run(&["add", "keep.txt", "ignored.mp4"]);
+        run(&["commit", "-m", "initial"]);
+
+        std::fs::write(repo.join(".gitattributes"), "ignored.mp4 export-ignore\n").unwrap();
+
+        let archive_tar = temp_dir.join("snapshot.tar");
+        archive(&repo, "HEAD", "tar", &archive_tar).unwrap();
+
+        let tar_output = std::process::Command::new("tar")
+            .args(["-tf", archive_tar.to_str().unwrap()])
+            .output()
+            .unwrap();
+        let listing = String::from_utf8_lossy(&tar_output.stdout);
+        assert!(listing.contains("keep.txt"));
+        assert!(!listing.contains("ignored.mp4"));
+
+        let _ = std::fs::remove_dir_all(&temp_dir);
     }
 }
