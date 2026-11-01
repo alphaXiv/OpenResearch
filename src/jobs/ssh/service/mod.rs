@@ -117,15 +117,26 @@ $acl.SetAccessRuleProtection($true, $false)
 foreach ($rule in @($acl.Access)) { [void]$acl.RemoveAccessRuleAll($rule) }
 $rule = [Security.AccessControl.FileSystemAccessRule]::new($identity.User, 'FullControl', 'ContainerInherit,ObjectInherit', 'None', 'Allow')
 $acl.SetAccessRule($rule)
+# Set-Acl can request SeSecurityPrivilege on an already-protected directory,
+# causing a subsequent process to fail even though it owns the directory.
 [IO.Directory]::SetAccessControl($env:ORX_PRIVATE_DIRECTORY, $acl)
 "#;
-        let status = std::process::Command::new("powershell.exe")
+        let mut command = std::process::Command::new("powershell.exe");
+        command
             .args(["-NoProfile", "-NonInteractive", "-Command", script])
             .env("ORX_PRIVATE_DIRECTORY", path)
             .stdin(Stdio::null())
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .status()?;
+            .stdout(Stdio::null());
+        #[cfg(not(test))]
+        let status = command.stderr(Stdio::null()).status()?;
+        #[cfg(test)]
+        let status = {
+            let output = command.output()?;
+            if !output.status.success() {
+                eprintln!("ACL setup failed: {}", String::from_utf8_lossy(&output.stderr));
+            }
+            output.status
+        };
         if !status.success() {
             return Err(anyhow!(
                 "Could not verify and protect the private SSH service directory."
