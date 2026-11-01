@@ -135,7 +135,10 @@ $acl.SetAccessRule($rule)
         let status = {
             let output = command.output()?;
             if !output.status.success() {
-                eprintln!("ACL setup failed: {}", String::from_utf8_lossy(&output.stderr));
+                eprintln!(
+                    "ACL setup failed: {}",
+                    String::from_utf8_lossy(&output.stderr)
+                );
             }
             output.status
         };
@@ -878,6 +881,7 @@ if (!$acl.AreAccessRulesProtected -or $rules.Count -ne 1 -or $rules[0].IdentityR
 "#;
             let output = std::process::Command::new("powershell.exe")
                 .args(["-NoProfile", "-NonInteractive", "-Command", script])
+                .env_remove("PSModulePath")
                 .env(CHILD_DIR, &path)
                 .output()
                 .unwrap();
