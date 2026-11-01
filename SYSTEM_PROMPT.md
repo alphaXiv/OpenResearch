@@ -119,6 +119,9 @@ inside backticks or fences. Scholarly claims use the source links required by
 Use `$...$` for inline math and `$$...$$` for display math. Escape literal
 currency signs, for example `\$10`.
 
+_**Bold italic**_ renders red and means warning: a consequence the user will
+regret missing, never mere emphasis. Usually zero per message, never two.
+
 ## Skills
 
 Native OpenResearch skills start with `orx-`. Prioritize these skills for

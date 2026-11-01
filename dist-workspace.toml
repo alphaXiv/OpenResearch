@@ -32,3 +32,7 @@ install-updater = false
 # GitHub's "GITHUB_TOKEN events don't trigger workflows" rule; tag pushes are
 # not). No PAT or extra secret required.
 dispatch-releases = true
+
+# dist defaults arm64 macOS to macos-14, which GitHub is retiring.
+[dist.github-custom-runners]
+aarch64-apple-darwin = "macos-latest"

@@ -1,5 +1,5 @@
 import { useSyncExternalStore } from "react";
-import { syncDesktopTitlebar } from "./desktopTitlebar";
+import { syncDesktopAppearance } from "./desktopTitlebar";
 
 export type ThemePreference = "system" | "light" | "dark";
 
@@ -29,7 +29,7 @@ function resolveTheme(pref: ThemePreference): "light" | "dark" {
 
 function applyResolvedTheme(): void {
   document.documentElement.dataset.theme = resolveTheme(preference);
-  syncDesktopTitlebar(preference);
+  syncDesktopAppearance(preference);
 }
 
 export function setThemePreference(next: ThemePreference): void {
@@ -68,6 +68,39 @@ function subscribeResolved(listener: () => void): () => void {
   const observer = new MutationObserver(listener);
   observer.observe(document.documentElement, { attributes: true, attributeFilter: ["data-theme"] });
   return () => observer.disconnect();
+}
+
+const COLORED_MARKDOWN_KEY = "orx:colored-markdown";
+
+function readColoredMarkdown(): boolean {
+  try {
+    return localStorage.getItem(COLORED_MARKDOWN_KEY) === "on";
+  } catch {
+    return false;
+  }
+}
+
+let coloredMarkdown = readColoredMarkdown();
+document.documentElement.dataset.coloredMarkdown = coloredMarkdown ? "on" : "off";
+
+/** Whether chat markdown colors bold, italic, and bold-italic; off until turned on. */
+export function useColoredMarkdown(): [boolean, (next: boolean) => void] {
+  const value = useSyncExternalStore(
+    subscribe,
+    () => coloredMarkdown,
+    () => false,
+  );
+  const set = (next: boolean) => {
+    coloredMarkdown = next;
+    try {
+      localStorage.setItem(COLORED_MARKDOWN_KEY, next ? "on" : "off");
+    } catch {
+      // Non-fatal: the in-memory preference still applies for this session.
+    }
+    document.documentElement.dataset.coloredMarkdown = next ? "on" : "off";
+    for (const listener of listeners) listener();
+  };
+  return [value, set];
 }
 
 /** The theme actually showing, including "system" resolved against the OS. */
