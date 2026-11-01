@@ -121,6 +121,8 @@ Set-Acl -LiteralPath $env:ORX_PRIVATE_DIRECTORY -AclObject $acl
 "#;
         let status = std::process::Command::new("powershell.exe")
             .args(["-NoProfile", "-NonInteractive", "-Command", script])
+            // Windows PowerShell must not load PowerShell 7's incompatible modules.
+            .env_remove("PSModulePath")
             .env("ORX_PRIVATE_DIRECTORY", path)
             .stdin(Stdio::null())
             .stdout(Stdio::null())
@@ -915,5 +917,50 @@ mod tests {
         .await;
         assert_eq!(result.unwrap(), "accepted");
         server.await.unwrap();
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn private_directory_ignores_inherited_powershell_module_path() {
+        const CHILD_DIR: &str = "ORX_TEST_PRIVATE_DIRECTORY_MODULE_PATH";
+        if let Some(path) = std::env::var_os(CHILD_DIR) {
+            private_directory(Path::new(&path)).unwrap();
+            return;
+        }
+
+        let dir = crate::local::git::TemporaryDirectory::new("orx-private-module-path").unwrap();
+        let modules = dir.path().join("modules with spaces");
+        let security = modules.join("Microsoft.PowerShell.Security");
+        std::fs::create_dir_all(&security).unwrap();
+        // Model an incompatible module earlier on PowerShell 7's inherited search path.
+        std::fs::write(
+            security.join("Microsoft.PowerShell.Security.psd1"),
+            r#"@{
+RootModule = 'Microsoft.PowerShell.Security.psm1'
+ModuleVersion = '99.0'
+FunctionsToExport = @('Get-Acl', 'Set-Acl')
+}"#,
+        )
+        .unwrap();
+        std::fs::write(
+            security.join("Microsoft.PowerShell.Security.psm1"),
+            "throw 'incompatible module'\nfunction Get-Acl {}\nfunction Set-Acl {}\n",
+        )
+        .unwrap();
+        // Including the built-in path last preserves the inherited ordering on startup.
+        let system_modules = std::path::PathBuf::from(std::env::var_os("SystemRoot").unwrap())
+            .join(r"System32\WindowsPowerShell\v1.0\Modules");
+        let module_path = std::env::join_paths([modules, system_modules]).unwrap();
+        let output = std::process::Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "jobs::ssh::service::tests::private_directory_ignores_inherited_powershell_module_path",
+                "--nocapture",
+            ])
+            .env(CHILD_DIR, dir.path().join("ssh service"))
+            .env("PSModulePath", module_path)
+            .output()
+            .unwrap();
+        assert!(output.status.success(), "{output:?}");
     }
 }

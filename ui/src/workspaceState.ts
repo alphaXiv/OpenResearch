@@ -37,6 +37,7 @@ export interface GlobalWorkspace {
   lastLocation: string | null;
   railOpen: boolean;
   panelWidth: number;
+  railWidth?: number;
   experimentsView: "tree" | "table";
 }
 

@@ -78,7 +78,13 @@ tiffutil -cathidpicheck "$BUILD/bg.png" "$BUILD/bg@2x.png" -out "$STAGE/.backgro
 
 # Lay the window out on a writable image, then convert to the compressed final.
 RW="$BUILD/rw.dmg"
-hdiutil create -volname "$VOLNAME" -srcfolder "$STAGE" -fs HFS+ -format UDRW -ov "$RW" >/dev/null
+# GitHub's macOS runners intermittently fail this with "Resource busy" while
+# background scanners hold the staged files.
+for attempt in 1 2 3 4 5; do
+  hdiutil create -volname "$VOLNAME" -srcfolder "$STAGE" -fs HFS+ -format UDRW -ov "$RW" >/dev/null && break
+  [[ "$attempt" == 5 ]] && exit 1
+  sleep $((attempt * 3))
+done
 ATTACH="$(hdiutil attach "$RW" -readwrite -noverify -noautoopen)"
 DEV="$(echo "$ATTACH" | grep -Eo '^/dev/disk[0-9]+' | head -1)"
 MNT="$(echo "$ATTACH" | grep -Eo '/Volumes/.*$' | head -1)"

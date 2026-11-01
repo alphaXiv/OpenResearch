@@ -31,3 +31,20 @@ test("leaves citation syntax in code and mention tags untouched", () => {
   const markdown = `\`${citation}\`\n\n\`\`\`\n${citation}\n\`\`\`\n\n<file path="${citation}">`;
   assert.equal(normalizeMarkdownForRendering(markdown), markdown);
 });
+
+test("double-dollar math alone on a line becomes a display block", () => {
+  assert.equal(normalizeMarkdownForRendering("Loss:\n\n$$x^2$$\n\nDone"), "Loss:\n\n$$\nx^2\n$$\n\nDone");
+  assert.equal(normalizeMarkdownForRendering("\\[ E=mc^2 \\]"), "$$\n E=mc^2 \n$$");
+  assert.equal(normalizeMarkdownForRendering("- item\n  $$y$$"), "- item\n  $$\n  y\n  $$");
+});
+
+test("math inside a sentence stays inline", () => {
+  assert.equal(normalizeMarkdownForRendering("so $$x$$ holds"), "so $$x$$ holds");
+  assert.equal(normalizeMarkdownForRendering("\\(x+y\\)"), "$$x+y$$");
+});
+
+test("math sharing a line with inline code or a tag stays inline", () => {
+  assert.equal(normalizeMarkdownForRendering("$$x$$ `code`"), "$$x$$ `code`");
+  assert.equal(normalizeMarkdownForRendering("`code` $$x$$"), "`code` $$x$$");
+  assert.equal(normalizeMarkdownForRendering("`a`$$x$$\n$$y$$\n`b`"), "`a`$$x$$\n$$\ny\n$$\n`b`");
+});
