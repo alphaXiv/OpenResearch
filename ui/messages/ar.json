@@ -577,6 +577,7 @@
   "skills_edit_skill": "تعديل المهارة",
   "skills_edit_skill_label": "تعديل المهارة {name}",
   "skills_edit_skill_description": "عدّل ملف SKILL.md الخاص بـ «{name}». تبقى ملفاته الأخرى دون تغيير.",
+  "skills_edit_discard_changes": "تجاهل تغييرات المهارة غير المحفوظة؟",
   "skills_delete_template_label": "حذف القالب {name}",
   "skills_delete_template_confirm": "حذف قالب «{name}»؟",
   "skills_upload_template_error": "ارفع ملف ‎.tex‎ أو ملف ‎.zip‎ لمجلد قالب.",

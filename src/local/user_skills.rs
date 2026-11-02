@@ -879,12 +879,24 @@ fn update_markdown_in(root: &Path, name: &str, content: &str) -> Result<UserSkil
     if !is_valid_slug(name) {
         return Err(anyhow!("invalid skill name"));
     }
-    if content.len() as u64 > MAX_TOTAL_BYTES {
-        return Err(anyhow!("SKILL.md is larger than a skill folder may be"));
-    }
     let dir = store_dir(root).join(name);
     if !dir.is_dir() {
         return Err(anyhow!("skill `{name}` not found"));
+    }
+    let md_path = dir.join("SKILL.md");
+    let previous = fs::metadata(&md_path).map(|meta| meta.len()).unwrap_or(0);
+    let tally = tally_all(&dir);
+    if tally.files > MAX_FILES as u64 {
+        return Err(anyhow!("the skill folder has too many files"));
+    }
+    let next_bytes = tally
+        .bytes
+        .saturating_sub(previous)
+        .saturating_add(content.len() as u64);
+    if next_bytes > MAX_TOTAL_BYTES {
+        return Err(anyhow!(
+            "the edited SKILL.md would make the skill folder larger than a skill folder may be"
+        ));
     }
     let fm = parse_frontmatter(content)?;
     if fm.name != name {
@@ -892,8 +904,8 @@ fn update_markdown_in(root: &Path, name: &str, content: &str) -> Result<UserSkil
             "the `name:` in SKILL.md must stay `{name}`; duplicate the skill to rename it"
         ));
     }
-    fs::write(dir.join("SKILL.md"), content)
-        .map_err(|e| anyhow!("could not write {}: {e}", dir.join("SKILL.md").display()))?;
+    // Replace the file atomically so a failed write leaves the saved version intact.
+    super::git::atomic_write(&md_path, content.as_bytes())?;
     read_uploaded_at(&dir)
 }
 
@@ -1756,6 +1768,30 @@ mod tests {
 
         // Missing skills are reported as absent rather than created.
         assert!(read_markdown_in(&root, "missing").unwrap().is_none());
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn markdown_edit_rejects_folder_growth_past_the_budget() {
+        let root = temp_root();
+        save_skill_md_in(&root, skill_md("budget").as_bytes()).unwrap();
+        let dir = store_dir(&root).join("budget");
+        fs::File::create(dir.join("corpus.bin"))
+            .unwrap()
+            .set_len(MAX_TOTAL_BYTES - 1024)
+            .unwrap();
+
+        let original = read_markdown_in(&root, "budget").unwrap().unwrap();
+        let oversized = format!("{original}{}", "x".repeat(2048));
+        assert!(update_markdown_in(&root, "budget", &oversized).is_err());
+        // A rejected save must leave the previous SKILL.md intact.
+        assert_eq!(
+            read_markdown_in(&root, "budget").unwrap().unwrap(),
+            original
+        );
+
+        let fitting = format!("{original}{}", "x".repeat(128));
+        assert!(update_markdown_in(&root, "budget", &fitting).is_ok());
         let _ = fs::remove_dir_all(&root);
     }
 

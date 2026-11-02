@@ -578,6 +578,7 @@
   "skills_edit_skill": "Редактировать навык",
   "skills_edit_skill_label": "Редактировать навык {name}",
   "skills_edit_skill_description": "Отредактируйте SKILL.md навыка «{name}». Остальные его файлы останутся без изменений.",
+  "skills_edit_discard_changes": "Отменить несохранённые изменения навыка?",
   "skills_delete_template_label": "Удалить шаблон {name}",
   "skills_delete_template_confirm": "Удалить шаблон «{name}»?",
   "skills_upload_template_error": "Загрузите файл .tex или архив .zip с папкой шаблона.",

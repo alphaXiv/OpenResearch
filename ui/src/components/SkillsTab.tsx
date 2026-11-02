@@ -143,15 +143,37 @@ function RowMeta({ bytes, updatedAt }: { bytes: number; updatedAt: number }) {
 function EditSkillDialog({
   name,
   content,
+  beforeCancel,
   cancel,
   confirm,
   isDisabled: pending,
   isPending,
   errorMessage: error,
-}: DialogContentProps<string> & { name: string; content: string }) {
+}: DialogContentProps<string> & {
+  name: string;
+  content: string;
+  beforeCancel: { current: () => Promise<void> };
+}) {
   const [value, setValue] = useState(content);
   const editorId = useId();
   const editorRef = useRef<HTMLTextAreaElement>(null);
+  const dirtyRef = useRef(false);
+  dirtyRef.current = value !== content;
+  const pendingRef = useRef(pending);
+  pendingRef.current = pending;
+  beforeCancel.current = () => {
+    if (pendingRef.current) return Promise.reject();
+    if (!dirtyRef.current) return Promise.resolve();
+    return new Promise<void>((resolve, reject) => {
+      showConfirmDialog({
+        title: m.skills_edit_skill(),
+        description: m.skills_edit_discard_changes(),
+        destructive: true,
+        onConfirm: resolve,
+        onCancel: reject,
+      });
+    });
+  };
 
   return (
     <DialogContent
@@ -208,10 +230,11 @@ function SkillRow({
     setLoading(true);
     try {
       const content = await getUserSkillContent(skill.name);
+      const beforeCancel = { current: () => Promise.resolve() };
       showCustomDialog({
         component: EditSkillDialog,
-        props: { name: skill.name, content },
-        onCancel: "close",
+        props: { name: skill.name, content, beforeCancel },
+        onCancel: async () => { await beforeCancel.current(); },
         onConfirm: async (next) => {
           await updateUserSkill(skill.name, next);
           await queryClient.invalidateQueries({ queryKey: listUserSkillsQuery().queryKey });

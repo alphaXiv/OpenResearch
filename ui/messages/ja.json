@@ -578,6 +578,7 @@
   "skills_edit_skill": "スキルを編集",
   "skills_edit_skill_label": "スキル {name} を編集",
   "skills_edit_skill_description": "「{name}」の SKILL.md を編集します。他のファイルは変更されません。",
+  "skills_edit_discard_changes": "未保存のスキル変更を破棄しますか？",
   "skills_delete_template_label": "テンプレート {name} を削除",
   "skills_delete_template_confirm": "テンプレート「{name}」を削除しますか？",
   "skills_upload_template_error": ".tex ファイル、またはテンプレートフォルダーの .zip をアップロードしてください。",

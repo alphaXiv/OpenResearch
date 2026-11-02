@@ -574,6 +574,7 @@
   "skills_edit_skill": "ویرایش مهارت",
   "skills_edit_skill_label": "ویرایش مهارت {name}",
   "skills_edit_skill_description": "SKILL.md مربوط به «{name}» را ویرایش کنید. سایر فایل‌های آن بدون تغییر می‌مانند.",
+  "skills_edit_discard_changes": "تغییرات ذخیره‌نشدهٔ مهارت کنار گذاشته شود؟",
   "skills_delete_template_label": "حذف قالب {name}",
   "skills_delete_template_confirm": "قالب «{name}» حذف شود؟",
   "skills_upload_template_error": "یک فایل .tex یا فایل .zip از پوشهٔ قالب بارگذاری کنید.",
