@@ -20,14 +20,13 @@
 //!     channels orx doesn't own (cargo/Homebrew/Nix), the receipt mismatches
 //!     that mean another copy is in play, and unwritable bin dirs.
 //!
-//! Inside the macOS `.app`, preflight resolves to the bundle instead and the
-//! whole thing routes to `updates::macos_app` — same command, same guards,
-//! different payload.
+//! Desktop app installs stage the release while a backend runs, so the restart
+//! only has the swap left.
 
 use std::time::Duration;
 
 use crate::error::{anyhow, Result};
-use crate::updates::{self, UpdateTarget};
+use crate::updates::{self, Outcome, UpdateTarget};
 
 /// Outcomes are recorded so a repeatedly failing update backs off instead of
 /// respawning on every command. A foreground run records too — a user who fixes
@@ -67,14 +66,6 @@ pub async fn run(args: crate::UpdateArgs) -> Result<()> {
     }
 }
 
-enum Outcome {
-    Done,
-    /// Another updater holds the lock.
-    Contended,
-    /// A running backend installs it on restart instead.
-    Deferred,
-}
-
 async fn apply(args: crate::UpdateArgs) -> Result<Outcome> {
     // One updater per channel at a time: the app and a script-installed CLI
     // replace different things, so serializing them against each other would
@@ -101,20 +92,29 @@ async fn apply(args: crate::UpdateArgs) -> Result<Outcome> {
 
     // Held until this function returns, so no backend starts mid-install.
     let claim = (!args.dry_run).then(|| updates::claim_install(&target));
-    if matches!(claim, Some(None)) {
-        return defer(&current, args.background).await;
-    }
+    let backend_running = matches!(claim, Some(None));
 
+    // The desktop apps stage while a backend runs, so its restart only has the swap left.
     if let UpdateTarget::AppBundle(root) = &target {
-        return updates::macos_app::update(root, &current, args.dry_run, args.background)
-            .await
-            .map(|_| Outcome::Done);
+        return updates::macos_app::update(
+            root,
+            &current,
+            args.dry_run,
+            args.background,
+            backend_running,
+        )
+        .await;
     }
     #[cfg(target_os = "linux")]
     if let UpdateTarget::AppImage(appimage) = &target {
-        return updates::linux_app::update(appimage, &current, args.dry_run, args.background)
-            .await
-            .map(|_| Outcome::Done);
+        return updates::linux_app::update(
+            appimage,
+            &current,
+            args.dry_run,
+            args.background,
+            backend_running,
+        )
+        .await;
     }
 
     #[cfg(windows)]
@@ -122,6 +122,25 @@ async fn apply(args: crate::UpdateArgs) -> Result<Outcome> {
         && updates::current_channel().is_ok_and(|channel| channel.has_release_channels());
     #[cfg(not(windows))]
     let desktop = false;
+
+    // The Windows desktop app stages like the other apps: the release is unpacked
+    // and run once while the backend works, and the restart only renames it into
+    // place. A CLI install is a specific running version rather than a managed app,
+    // so while its backend runs the release is only recorded.
+    #[cfg(windows)]
+    let installed = installed_exe(&target)?;
+    #[cfg(windows)]
+    if desktop && !backend_running && !args.dry_run {
+        let staged = updates::windows::staged_dir(&installed);
+        if let Some((version, tag)) = updates::staged_release(&staged, &current) {
+            updates::windows::install_staged(&installed)?;
+            return finish(&target, &current, &version, &tag, args.background);
+        }
+    }
+    if backend_running && !desktop {
+        return defer(&current, args.background).await;
+    }
+
     let latest = if desktop {
         let Some(latest) = updates::fetch_latest_for_channel(Duration::from_secs(10)).await? else {
             if !args.background {
@@ -164,61 +183,93 @@ async fn apply(args: crate::UpdateArgs) -> Result<Outcome> {
     }
 
     #[cfg(windows)]
-    if desktop && crate::telemetry::update_channel() == updates::ReleaseChannel::Canary {
-        use sha2::{Digest, Sha256};
-        let asset = latest
-            .canary_asset
-            .as_ref()
-            .ok_or_else(|| anyhow!("No desktop update is available yet."))?;
-        let bytes =
-            updates::fetch_release_asset(&latest.tag, &asset.asset, Duration::from_secs(600))
-                .await?;
-        if !format!("{:x}", Sha256::digest(&bytes)).eq_ignore_ascii_case(asset.sha256.trim()) {
-            return Err(anyhow!(
-                "The downloaded app does not match its published checksum."
-            ));
+    {
+        if desktop {
+            let staged = updates::windows::staged_dir(&installed);
+            let staged_already = updates::staged_release(&staged, &current)
+                .is_some_and(|(_, tag)| tag == latest.tag);
+            if !staged_already {
+                stage_windows(&installed, &latest, args.background).await?;
+            }
+            if backend_running {
+                return Ok(deferred(&latest.version, &latest.tag, args.background));
+            }
+            updates::windows::install_staged(&installed)?;
+        } else {
+            let installer = updates::fetch_release_asset(
+                &latest.tag,
+                &format!("{}-installer.{}", updates::APP_NAME, INSTALLER_EXT),
+                Duration::from_secs(60),
+            )
+            .await?;
+            updates::windows::install(&installed, &installer, args.background)?;
         }
-        let UpdateTarget::Portable(dir) = &target else {
-            unreachable!()
-        };
-        updates::windows::install_binary(&dir.join("orx.exe"), &bytes)?;
-        updates::record_installed(&latest.version.to_string(), &latest.tag);
-        return Ok(Outcome::Done);
+    }
+    #[cfg(not(windows))]
+    {
+        // Pin the installer to the same release the manifest described, so the
+        // version we report is exactly the version that gets installed.
+        let installer = updates::fetch_release_asset(
+            &latest.tag,
+            &format!("{}-installer.{}", updates::APP_NAME, INSTALLER_EXT),
+            Duration::from_secs(60),
+        )
+        .await?;
+        run_installer(&target, &installer, args.background)?;
     }
 
-    // Pin the installer to the same release the manifest described, so the
-    // version we report is exactly the version that gets installed.
-    let installer = updates::fetch_release_asset(
+    finish(
+        &target,
+        &current,
+        &latest.version,
         &latest.tag,
-        &format!("{}-installer.{}", updates::APP_NAME, INSTALLER_EXT),
-        Duration::from_secs(60),
+        args.background,
     )
-    .await?;
-    run_installer(&target, &installer, args.background)?;
+}
 
-    // Keep the update-check cache in sync so the warning doesn't fire on a stale
-    // answer, and so a running `orx up` learns a restart would pick this up.
-    updates::record_installed(&latest.version.to_string(), &latest.tag);
+/// Record an installed release. Keeps the update-check cache in sync so the warning
+/// doesn't fire on a stale answer, and so a running `orx up` learns a restart would
+/// pick this up.
+fn finish(
+    #[cfg_attr(not(windows), allow(unused_variables))] target: &UpdateTarget,
+    current: &semver::Version,
+    version: &semver::Version,
+    tag: &str,
+    background: bool,
+) -> Result<Outcome> {
+    updates::record_installed(&version.to_string(), tag);
     // The shell installer rewrites the receipt itself; orx did the Windows swap,
     // so it fills in the version. The binary is already new: a warning, not a failure.
     #[cfg(windows)]
-    if let UpdateTarget::Installer(_) = &target {
-        if let Err(e) = updates::record_receipt_version(&latest.version.to_string()) {
+    if let UpdateTarget::Installer(_) = target {
+        if let Err(e) = updates::record_receipt_version(&version.to_string()) {
             eprintln!(
                 "warning: orx was updated, but its install receipt at {} was not: {e}",
                 updates::receipt_path().display()
             );
         }
     }
-    if !args.background {
-        println!("✓ Updated orx {} → {}.", current, latest.version);
+    if !background {
+        println!("✓ Updated orx {} → {}.", current, version);
     }
     Ok(Outcome::Done)
 }
 
-/// Record the release for the running `orx up` to install when it restarts. Not
+/// Hold the release back for the running `orx up` to install when it restarts. Not
 /// even `--force` swaps the binary under it: its agents would run a different
 /// `orx` than the backend that set up their sandbox.
+fn deferred(version: &semver::Version, tag: &str, background: bool) -> Outcome {
+    updates::record_deferred(&version.to_string(), tag);
+    if !background {
+        println!(
+            "orx {} is ready. The running OpenResearch dashboard installs it when it restarts \
+             (automatically once idle, or with Restart in the dashboard).",
+            version
+        );
+    }
+    Outcome::Deferred
+}
+
 async fn defer(current: &semver::Version, background: bool) -> Result<Outcome> {
     let latest = updates::fetch_latest_for_channel(Duration::from_secs(10)).await?;
     if let Some(latest) = &latest {
@@ -238,15 +289,7 @@ async fn defer(current: &semver::Version, background: bool) -> Result<Outcome> {
         }
         return Ok(Outcome::Done);
     };
-    updates::record_deferred(&latest.version.to_string(), &latest.tag);
-    if !background {
-        println!(
-            "orx {} is ready. The running OpenResearch dashboard installs it when it restarts \
-             (automatically once idle, or with Restart in the dashboard).",
-            latest.version
-        );
-    }
-    Ok(Outcome::Deferred)
+    Ok(deferred(&latest.version, &latest.tag, background))
 }
 
 /// cargo-dist ships a shell installer and a PowerShell one.
@@ -287,17 +330,53 @@ fn run_installer(target: &UpdateTarget, installer: &[u8], quiet: bool) -> Result
     Ok(())
 }
 
-/// Resolve where `orx.exe` lives for this target and hand it to `updates::windows`.
+/// Where `orx.exe` lives for this target.
 #[cfg(windows)]
-fn run_installer(target: &UpdateTarget, installer: &[u8], quiet: bool) -> Result<()> {
-    let installed = match target {
-        UpdateTarget::Installer(receipt) => std::path::Path::new(&receipt.install_prefix)
+fn installed_exe(target: &UpdateTarget) -> Result<std::path::PathBuf> {
+    match target {
+        UpdateTarget::Installer(receipt) => Ok(std::path::Path::new(&receipt.install_prefix)
             .join("bin")
-            .join("orx.exe"),
-        UpdateTarget::Portable(dir) => dir.join("orx.exe"),
+            .join("orx.exe")),
+        UpdateTarget::Portable(dir) => Ok(dir.join("orx.exe")),
         UpdateTarget::AppBundle(_) | UpdateTarget::AppImage(_) => {
-            return Err(anyhow!("This install is not managed by the installer."))
+            Err(anyhow!("This install is not managed by the installer."))
         }
-    };
-    updates::windows::install(&installed, installer, quiet)
+    }
+}
+
+/// Download `latest` and stage it for `installed`: the signed desktop binary on the
+/// canary channel, otherwise whatever the PowerShell installer unpacks.
+#[cfg(windows)]
+async fn stage_windows(
+    installed: &std::path::Path,
+    latest: &updates::LatestRelease,
+    background: bool,
+) -> Result<()> {
+    use sha2::{Digest, Sha256};
+
+    if crate::telemetry::update_channel() == updates::ReleaseChannel::Canary {
+        let asset = latest
+            .canary_asset
+            .as_ref()
+            .ok_or_else(|| anyhow!("No desktop update is available yet."))?;
+        let bytes =
+            updates::fetch_release_asset(&latest.tag, &asset.asset, Duration::from_secs(600))
+                .await?;
+        if !format!("{:x}", Sha256::digest(&bytes)).eq_ignore_ascii_case(asset.sha256.trim()) {
+            return Err(anyhow!(
+                "The downloaded app does not match its published checksum."
+            ));
+        }
+        return updates::windows::stage_binary(installed, latest, &bytes);
+    }
+
+    // Pin the installer to the same release the manifest described, so the
+    // version we report is exactly the version that gets installed.
+    let installer = updates::fetch_release_asset(
+        &latest.tag,
+        &format!("{}-installer.{}", updates::APP_NAME, INSTALLER_EXT),
+        Duration::from_secs(60),
+    )
+    .await?;
+    updates::windows::stage_installer(installed, latest, &installer, background)
 }
