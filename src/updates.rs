@@ -89,8 +89,8 @@ fn canary_id(id: &str) -> Option<(u32, u64)> {
     Some((date.parse().ok()?, sequence.parse().ok()?))
 }
 
-fn valid_desktop_tag(tag: &str) -> bool {
-    match crate::telemetry::update_channel() {
+fn valid_desktop_tag(channel: ReleaseChannel, tag: &str) -> bool {
+    match channel {
         ReleaseChannel::Stable => tag
             .strip_prefix('v')
             .is_some_and(|version| Version::parse(version).is_ok()),
@@ -186,7 +186,7 @@ async fn fetch_canary_manifest(timeout: Duration) -> Result<Option<CanaryManifes
         return Ok(None);
     }
     let manifest: CanaryManifest = response.error_for_status()?.json().await?;
-    if !valid_desktop_tag(&manifest.tag) {
+    if !valid_desktop_tag(crate::telemetry::update_channel(), &manifest.tag) {
         return Err(anyhow!(
             "The app update belongs to a different release channel."
         ));
@@ -1024,21 +1024,29 @@ pub(crate) fn write_staged_release(stage: &Path, version: &Version, tag: &str) -
 }
 
 /// The release staged at `stage` for a restart to install, if this build may still
-/// move to it.
+/// move to it on the selected channel.
 pub(crate) fn staged_release(stage: &Path, current: &Version) -> Option<(Version, String)> {
-    staged_release_in(stage, &read_cache().unwrap_or_default(), current)
+    staged_release_in(
+        stage,
+        &read_cache().unwrap_or_default(),
+        current,
+        crate::telemetry::update_channel(),
+    )
 }
 
 fn staged_release_in(
     stage: &Path,
     cache: &CheckCache,
     current: &Version,
+    channel: ReleaseChannel,
 ) -> Option<(Version, String)> {
     let raw = std::fs::read_to_string(stage.join(STAGED_RELEASE)).ok()?;
     let (version, tag) = raw.split_once('\n')?;
     let version = Version::parse(version).ok()?;
-    (release_available(current, &version, tag) && compatible_with_current(cache, tag))
-        .then(|| (version, tag.to_string()))
+    (valid_desktop_tag(channel, tag)
+        && release_available(current, &version, tag)
+        && compatible_with_current(cache, tag))
+    .then(|| (version, tag.to_string()))
 }
 
 fn desktop_install_pending(
@@ -2100,8 +2108,8 @@ mod tests {
         detect_channel, exe_matches_prefix, now_unix, package_manager_owns, parse_manifest,
         portable_dir, portable_outside_prefix, precedence, relaunch_args, release_asset_url,
         render, restart_target, retired_path, staged_release_in, target_lock_path, warning_for,
-        write_staged_release, BackendLock, CheckCache, InstallChannel, UpdateTarget,
-        ATTEMPT_BACKOFF_MAX, ATTEMPT_BACKOFF_MIN,
+        write_staged_release, BackendLock, CheckCache, InstallChannel, ReleaseChannel,
+        UpdateTarget, ATTEMPT_BACKOFF_MAX, ATTEMPT_BACKOFF_MIN,
     };
     use semver::Version;
     use std::ffi::OsString;
@@ -2487,14 +2495,18 @@ mod tests {
             cache.compatible_releases.insert(tag.into(), proof.clone());
         }
 
-        assert_eq!(staged_release_in(&stage, &cache, &v("0.2.16")), None);
+        let stable =
+            |current: &str| staged_release_in(&stage, &cache, &v(current), ReleaseChannel::Stable);
+        assert_eq!(stable("0.2.16"), None);
 
         write_staged_release(&stage, &v("0.2.18"), "v0.2.18").unwrap();
+        assert_eq!(stable("0.2.16"), Some((v("0.2.18"), "v0.2.18".into())));
+        assert_eq!(stable("0.2.18"), None);
+        // A stable stage left behind by a switch to the canary channel.
         assert_eq!(
-            staged_release_in(&stage, &cache, &v("0.2.16")),
-            Some((v("0.2.18"), "v0.2.18".into()))
+            staged_release_in(&stage, &cache, &v("0.2.16"), ReleaseChannel::Canary),
+            None
         );
-        assert_eq!(staged_release_in(&stage, &cache, &v("0.2.18")), None);
 
         // A canary staged by another build, e.g. before a newer stable was installed
         // by hand, is not this build's to install.
@@ -2502,13 +2514,20 @@ mod tests {
         cache
             .compatible_releases
             .insert("canary-20261027.1".into(), "v0.0.0-another-build".into());
-        assert_eq!(staged_release_in(&stage, &cache, &v("0.2.16")), None);
+        let canary = |cache: &CheckCache| {
+            staged_release_in(&stage, cache, &v("0.2.16"), ReleaseChannel::Canary)
+        };
+        assert_eq!(canary(&cache), None);
         cache
             .compatible_releases
             .insert("canary-20261027.1".into(), proof);
         assert_eq!(
-            staged_release_in(&stage, &cache, &v("0.2.16")),
+            canary(&cache),
             Some((v("0.2.19"), "canary-20261027.1".into()))
+        );
+        assert_eq!(
+            staged_release_in(&stage, &cache, &v("0.2.16"), ReleaseChannel::Stable),
+            None
         );
 
         std::fs::remove_dir_all(&stage).unwrap();

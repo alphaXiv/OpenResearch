@@ -61,7 +61,8 @@ fn signing_requirement() -> String {
 
 /// Fetches the published app manifest; `Ok(None)` until the DMG is attached.
 pub async fn fetch_manifest(timeout: Duration) -> Result<Option<SingleAssetManifest>> {
-    if crate::telemetry::update_channel() == super::ReleaseChannel::Canary {
+    let channel = crate::telemetry::update_channel();
+    if channel == super::ReleaseChannel::Canary {
         return Ok(super::fetch_canary_manifest(timeout)
             .await?
             .and_then(|mut manifest| {
@@ -81,7 +82,7 @@ pub async fn fetch_manifest(timeout: Duration) -> Result<Option<SingleAssetManif
         super::fetch_app_manifest(MANIFEST_ASSET, timeout).await?;
     if manifest
         .as_ref()
-        .is_some_and(|manifest| !super::valid_desktop_tag(&manifest.tag))
+        .is_some_and(|manifest| !super::valid_desktop_tag(channel, &manifest.tag))
     {
         return Err(anyhow!(
             "The app update belongs to a different release channel."

@@ -45,7 +45,8 @@ pub struct AppAsset {
 
 /// Fetches the published app manifest; `Ok(None)` until the AppImages are attached.
 pub async fn fetch_manifest(timeout: Duration) -> Result<Option<AppManifest>> {
-    if crate::telemetry::update_channel() == super::ReleaseChannel::Canary {
+    let channel = crate::telemetry::update_channel();
+    if channel == super::ReleaseChannel::Canary {
         return Ok(super::fetch_canary_manifest(timeout)
             .await?
             .and_then(|manifest| {
@@ -75,7 +76,7 @@ pub async fn fetch_manifest(timeout: Duration) -> Result<Option<AppManifest>> {
     let manifest: Option<AppManifest> = super::fetch_app_manifest(MANIFEST_ASSET, timeout).await?;
     if manifest
         .as_ref()
-        .is_some_and(|manifest| !super::valid_desktop_tag(&manifest.tag))
+        .is_some_and(|manifest| !super::valid_desktop_tag(channel, &manifest.tag))
     {
         return Err(anyhow!(
             "The app update belongs to a different release channel."
@@ -334,7 +335,12 @@ mod tests {
         );
         if option_env!("ORX_DESKTOP_CANARY_TAG").is_none() {
             assert_eq!(
-                super::super::staged_release_in(&staged, &cache, &v("0.2.16")),
+                super::super::staged_release_in(
+                    &staged,
+                    &cache,
+                    &v("0.2.16"),
+                    super::super::ReleaseChannel::Stable
+                ),
                 Some((v("0.2.18"), "v0.2.18".into()))
             );
         }
