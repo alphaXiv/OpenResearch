@@ -772,6 +772,10 @@ fn router(state: AppState, remote_auth: Option<RemoteAuth>) -> Router {
                 .delete(delete_user_skill),
         )
         .route(
+            "/api/user-skills/{name}",
+            get(get_user_skill).put(update_user_skill),
+        )
+        .route(
             "/api/latex-templates",
             get(list_latex_templates)
                 .post(upload_latex_template)
@@ -1293,6 +1297,32 @@ async fn delete_user_skill(Query(q): Query<DeleteByNameQ>) -> ApiResult {
         .map_err(|e| ApiError::from(anyhow!(e)))?
         .map_err(bad_request)?;
     Ok(Json(json!({ "ok": true })))
+}
+
+async fn get_user_skill(Path(name): Path<String>) -> ApiResult {
+    let lookup = name.clone();
+    let content =
+        tokio::task::spawn_blocking(move || crate::local::user_skills::read_markdown(&lookup))
+            .await
+            .map_err(|e| ApiError::from(anyhow!(e)))?
+            .map_err(bad_request)?
+            .ok_or_else(|| not_found("skill"))?;
+    Ok(Json(json!({ "name": name, "content": content })))
+}
+
+#[derive(Deserialize)]
+struct UpdateSkillReq {
+    content: String,
+}
+
+async fn update_user_skill(Path(name): Path<String>, Json(req): Json<UpdateSkillReq>) -> ApiResult {
+    let saved = tokio::task::spawn_blocking(move || {
+        crate::local::user_skills::update_markdown(&name, &req.content)
+    })
+    .await
+    .map_err(|e| ApiError::from(anyhow!(e)))?
+    .map_err(bad_request)?;
+    Ok(Json(json!({ "skill": user_skill_json(&saved) })))
 }
 
 fn latex_template_json(t: &crate::local::latex_templates::LatexTemplate) -> Value {
