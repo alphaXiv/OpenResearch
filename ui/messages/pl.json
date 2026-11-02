@@ -216,6 +216,8 @@
   "header_configure_repository": "Skonfiguruj repozytorium",
   "header_create_a_new_project": "Utwórz nowy projekt",
   "header_hide_sidebar": "Ukryj panel boczny",
+  "header_dev_badge": "Dev",
+  "header_query_devtools": "Narzędzia deweloperskie Query",
   "header_project": "Projekt",
   "lit_sources_picker_loading": "Wczytywanie…",
   "md_copy": "Kopiuj",

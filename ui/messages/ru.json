@@ -216,6 +216,8 @@
   "header_configure_repository": "Настроить репозиторий",
   "header_create_a_new_project": "Создать новый проект",
   "header_hide_sidebar": "Скрыть боковую панель",
+  "header_dev_badge": "Dev",
+  "header_query_devtools": "Инструменты разработчика Query",
   "header_project": "Проект",
   "lit_sources_picker_loading": "Загрузка…",
   "md_copy": "Копировать",

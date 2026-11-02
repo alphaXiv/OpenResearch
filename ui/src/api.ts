@@ -1089,9 +1089,12 @@ export interface RemoteSessionInfo {
   canStartNewHost: boolean;
 }
 
+/** `production` only for an official release built by the project's CI. */
+export type BuildChannel = "production" | "development";
+
 export type RuntimeInfo =
-  | { kind: "local"; version: string }
-  | { kind: "ssh"; version: string; dashboardProtocol: number; session: RemoteSessionInfo };
+  | { kind: "local"; version: string; buildChannel: BuildChannel }
+  | { kind: "ssh"; version: string; buildChannel: BuildChannel; dashboardProtocol: number; session: RemoteSessionInfo };
 
 export const getRuntime = (signal?: AbortSignal) => get<RuntimeInfo>("/_orx/runtime", signal);
 

@@ -1,13 +1,14 @@
 #!/usr/bin/env python3
-"""Run ORX chat API compatibility through its dev-slot helper using isolated auth.
+"""Run ORX chat API compatibility against this worktree's backend using isolated auth.
 
-Requires a reserved empty dev slot for this worktree and downloaded V1/V2 binaries.
+Requires downloaded V1/V2 binaries.
 """
 import argparse
 import json
 import os
 from pathlib import Path
 import runpy
+import socket
 import subprocess
 import sqlite3
 import tempfile
@@ -23,7 +24,6 @@ def main():
     parser.add_argument('--v1', required=True)
     parser.add_argument('--v2', required=True)
     parser.add_argument('--v2-only', action='store_true', help='Test fresh V2 and admitted provider failure only')
-    parser.add_argument('--reset-native-fixture', action='store_true', help='Archive the task slot native database before running')
     args = parser.parse_args()
     worktree = Path(__file__).resolve().parent.parent
     root = Path(tempfile.mkdtemp(prefix='orx-host-compat-', dir='/tmp'))
@@ -38,51 +38,50 @@ def main():
     Provider.read_file.write_text('retained tool output fixture')
     opencode = fixture_bin / 'opencode'
     opencode.symlink_to(Path(args.v1).resolve())
-    # The helper retains its registry HOME; only its backend gets the fixture HOME.
-    cargo = fixture_bin / 'cargo'
-    cargo.write_text('#!/bin/sh\nexport HOME=' + str(root / 'home') + '\nexec ' + str(Path.home() / '.cargo/bin/cargo') + ' "$@"\n')
-    cargo.chmod(0o755)
-    env = {'PATH': str(fixture_bin) + ':' + os.environ['PATH'], 'HOME': str(Path.home()),
-           'CARGO_INCREMENTAL': '0', 'CARGO_PROFILE_DEV_DEBUG': '0', 'CARGO_PROFILE_TEST_DEBUG': '0',
-           'CARGO_HOME': str(Path.home() / '.cargo'), 'RUSTUP_HOME': str(Path.home() / '.rustup'),
+    data = root / 'orx-data'
+    config_home = root / 'orx-config'
+    env = {'PATH': str(fixture_bin) + ':' + os.environ['PATH'], 'HOME': str(root / 'home'),
+           'ORX_DATA_DIR': str(data), 'ORX_CACHE_DIR': str(root / 'orx-cache'), 'XDG_CONFIG_HOME': str(config_home),
            'XDG_DATA_HOME': str(root / 'data'), 'XDG_STATE_HOME': str(root / 'state'), 'XDG_CACHE_HOME': str(root / 'cache'),
            'OPENCODE_CONFIG_CONTENT': json.dumps({'permission': {'question': 'allow'}, 'tools': {'question': True}, 'agent': {'build': {'tools': {'question': True}, 'permission': {'question': 'allow'}}}}),
            'OPENCODE_DB': str(root / 'native.db'), 'ANTHROPIC_API_KEY': 'fixture-key',
            'OPENCODE_DISABLE_AUTOUPDATE': '1', 'OPENCODE_DISABLE_MODELS_FETCH': '1',
            'OPENCODE_DISABLE_DEFAULT_PLUGINS': '1', 'OPENCODE_ENABLE_QUESTION_TOOL': '1', 'ORX_NO_UPDATE_CHECK': '1', 'DO_NOT_TRACK': '1'}
-    helper = ['node', str(worktree / 'scripts/dev-slot.mjs')]
-    def control(action):
-        cmd = helper + [action, '--worktree', str(worktree)]
-        if action == 'start':
-            cmd += ['--db', 'empty']
-        result = subprocess.run(cmd, cwd=worktree, env=env, text=True, capture_output=True, timeout=360)
-        if result.returncode:
-            raise AssertionError(result.stdout + result.stderr)
-        return result.stdout
+    subprocess.run(['cargo', 'build'], cwd=worktree, check=True)
+    orx = Path(os.environ.get('CARGO_TARGET_DIR', worktree / 'target')) / 'debug' / 'orx'
+    with socket.socket() as probe:
+        probe.bind(('127.0.0.1', 0))
+        port = probe.getsockname()[1]
+    url = f'http://127.0.0.1:{port}'
+    log = root / 'backend.log'
+    backend = None
+    def stop():
+        nonlocal backend
+        if backend:
+            backend.terminate()
+            backend.wait(timeout=30)
+            backend = None
     def start(binary):
-        control('stop')
+        nonlocal backend
+        stop()
         opencode.unlink()
         opencode.symlink_to(Path(binary).resolve())
-        output = control('start')
-        print(output, flush=True)
+        with log.open('a') as output:
+            backend = subprocess.Popen([str(orx), 'up', '--no-browser', '--port', str(port)], env=env, stdout=output, stderr=subprocess.STDOUT)
+        deadline = time.monotonic() + 60
+        while True:
+            try:
+                request(url + '/api/projects')
+                return
+            except OSError:
+                if backend.poll() is not None or time.monotonic() > deadline:
+                    raise AssertionError(f'backend did not start; log: {log}')
+                time.sleep(.1)
     try:
-        status = control('status')
-        data = Path(next(line.split('Data:', 1)[1].strip() for line in status.splitlines() if 'Data:' in line))
         native_db=data/'agents/opencode/opencode.db'
-        if native_db.exists():
-            if not args.reset_native_fixture:
-                raise AssertionError('Existing native fixture: pass --reset-native-fixture to archive it first')
-            control('stop')
-            prior=root/'prior-native'
-            prior.mkdir()
-            for file in native_db.parent.iterdir():
-                if file.name.startswith(native_db.name):
-                    file.rename(prior/file.name)
-        config = Path(str(data) + '-config') / 'opencode'
-        config.mkdir(parents=True, exist_ok=True)
+        config = config_home / 'opencode'
+        config.mkdir(parents=True)
         (config / 'opencode.json').write_text(json.dumps({'model':'anthropic/claude-sonnet-4-5','small_model':'anthropic/claude-sonnet-4-5','provider':{'anthropic':{'models':{'claude-sonnet-4-5':{'name':'Fixture Sonnet','limit':{'context':200000,'output':4096}}},'options':{'baseURL':f'http://127.0.0.1:{fake.server_port}/v1','apiKey':'fixture-key'}}},'snapshot':False}))
-        port = int(next(line.rsplit(' ',1)[1] for line in status.splitlines() if 'Backend:' in line))
-        url = f'http://127.0.0.1:{port}'
         start(args.v2 if args.v2_only else args.v1)
         project = request(url + '/api/projects','POST',{'name':'compat fixture','path':str(root/'project'),'githubSyncEnabled':False,'initializeGit':True})['project']['id']
         def v2_ready():
@@ -197,7 +196,7 @@ def main():
         turn(session,'downgrade fixture prompt',expect_error=True)
         assert native_state()==saved_state
         print('PASS host downgrade guard',flush=True)
-        control('stop')
+        stop()
         archive=root/'migrated-native'
         archive.mkdir()
         for file in native_db.parent.iterdir():
@@ -208,7 +207,7 @@ def main():
         turn(create(),'fresh V2-only fixture prompt')
         print('PASS host fresh V2-only database',flush=True)
     finally:
-        control('stop')
+        stop()
         fake.shutdown()
         fake.server_close()
 
