@@ -6776,6 +6776,7 @@ const SETTINGS_COMMANDS: &[(&str, &[&str])] = &[
     ),
     ("devin auth login", &["devin", "auth", "login"]),
     ("grok login", &["grok", "login"]),
+    ("fx login", &["fx", "login"]),
     ("pi-acp --terminal-login", &["pi-acp", "--terminal-login"]),
     ("zcode login zai", &["zcode", "login", "zai"]),
     ("zcode login bigmodel", &["zcode", "login", "bigmodel"]),
