@@ -41,6 +41,13 @@ test("question replies stay visible and only represented question tool echoes di
   assert.ok(splitResponseParts([message(tool)], false).answer.includes(tool));
 });
 
+test("a held card an agent answered leaves its answer to that chat's steered card", () => {
+  const card = { id: "card", type: "prompt", prompt: { kind: "question", question: "Which?", resolved: true, nativeId: "q1", answers: ["A"], answeredBy: "chat_parent" } };
+  const steer = { id: "steer", type: "steer", text: "A", orx: { kind: "message", from: "chat_parent" } };
+  assert.ok(questionReplies([message(card, steer)]).prompts.has("card"));
+  assert.ok(!questionReplies([message(card)]).prompts.has("card"), "without a steer the card shows the answer");
+});
+
 test("a recovery error replaces the identical terminal error without hiding other errors", () => {
   const duplicate = { id: "err-0", type: "tool", tool: "error", state: { error: "Invalid model" } };
   const other = { id: "err-1", type: "tool", tool: "error", state: { error: "Other failure" } };

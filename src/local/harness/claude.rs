@@ -478,6 +478,10 @@ fn parse_claude_model_list(result: &Value, ultracode: bool) -> Vec<ModelInfo> {
             let mut info = ModelInfo::new(value)
                 .with_reasoning(&efforts)
                 .with_label(name, blurb);
+            info.resolved_model = m
+                .get("resolvedModel")
+                .and_then(Value::as_str)
+                .map(str::to_string);
             // Claude reports no default *tier* because its unset default isn't
             // one: with adaptive thinking, the CLI scales effort per request.
             // Name the sentinel row for what actually runs — preselecting a
@@ -1122,9 +1126,10 @@ pub(crate) fn uses_permission_bridge(mode: Option<PermissionMode>) -> bool {
 /// is already git-excluded.
 const PLAN_SETTINGS_REL: &str = ".openresearch/agent/claude-plan-settings.json";
 
-/// Path (relative to the worktree) of the plan-mode MCP config wiring the
-/// `orx mcp-gate` permission bridge. Same git-excluded agent dir.
-const MCP_CONFIG_REL: &str = ".openresearch/agent/claude-mcp.json";
+/// Directory (relative to the worktree) of the MCP configs wiring the
+/// `orx mcp-gate` bridge, one per chat: chats sharing a worktree spawn at once,
+/// and each config names its own chat. Same git-excluded agent dir.
+const MCP_CONFIG_DIR_REL: &str = ".openresearch/agent";
 
 // Attribution updates input without granting permission; plan decisions stay separate.
 pub(crate) fn write_settings(repo: &std::path::Path, plan: bool) -> Result<PathBuf> {
@@ -1174,9 +1179,15 @@ pub(crate) fn write_settings(repo: &std::path::Path, plan: bool) -> Result<PathB
     Ok(path)
 }
 
+/// Write the chat's `--mcp-config` file and return its path: alphaXiv always,
+/// and with `gate` the `orx mcp-gate` bridge (this same binary), whose env
+/// block carries the `orx up` port, the session id, and a fresh per-child
+/// token minted at spawn — everything the resident bridge needs to relay
+/// requests back to the running server for the child's whole life.
 pub(crate) fn write_mcp_config(
     repo: &std::path::Path,
-    gate: Option<(u16, &str, &str)>,
+    session_id: &str,
+    gate: Option<(u16, &str)>,
 ) -> Result<PathBuf> {
     let orx = crate::paths::spawnable_exe()
         .map_err(|e| anyhow!("cannot resolve orx binary path for the mcp bridge: {e}"))?;
@@ -1184,19 +1195,25 @@ pub(crate) fn write_mcp_config(
     let mut config = serde_json::json!({"mcpServers": {
         "alphaxiv": {"type":"stdio", "command":orx, "args":["alphaxiv-mcp"]}
     }});
-    if let Some((up_port, session_id, token)) = gate {
+    if let Some((up_port, token)) = gate {
         config["mcpServers"]["orx"] = serde_json::json!({
-                "type": "stdio",
-                "command": orx,
-                "args": ["mcp-gate"],
-                "env": {
-                    "ORX_UP_PORT": up_port.to_string(),
-                    "ORX_SESSION_ID": session_id,
-                    "ORX_GATE_TOKEN": token,
-                },
+            "type": "stdio",
+            "command": orx,
+            "args": ["mcp-gate"],
+            // Orchestration tools are few and needed unprompted, so they
+            // skip tool search.
+            "alwaysLoad": true,
+            "env": {
+                "ORX_UP_PORT": up_port.to_string(),
+                "ORX_SESSION_ID": session_id,
+                "ORX_GATE_TOKEN": token,
+                "ORX_AGENT_TOKEN": crate::local::chat::delegation::agent_token(session_id),
+            },
         });
     }
-    let path = repo.join(MCP_CONFIG_REL);
+    let path = repo
+        .join(MCP_CONFIG_DIR_REL)
+        .join(format!("claude-mcp-{session_id}.json"));
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)
             .map_err(|e| anyhow!("cannot create {}: {e}", parent.display()))?;
@@ -1575,6 +1592,7 @@ fn apply_subagent_blocks(
                         prompt: None,
                         phase: None,
                         children: Vec::new(),
+                        orx: None,
                     },
                 );
             }
@@ -1895,6 +1913,7 @@ fn apply_event(ctx: &mut TurnCtx, state: &mut TurnState, event: &Value) -> bool 
                                 prompt: None,
                                 phase: None,
                                 children: Vec::new(),
+                                orx: None,
                             });
                         }
                     }
@@ -2603,7 +2622,7 @@ mod tests {
     #[test]
     fn local_mcp_config_contains_only_string_environment_values() {
         let repo = std::env::temp_dir().join(format!("orx-mcp-test-{}", uuid::Uuid::new_v4()));
-        let path = write_mcp_config(&repo, Some((4791, "session", "gate"))).unwrap();
+        let path = write_mcp_config(&repo, "session", Some((4791, "gate"))).unwrap();
         let config: serde_json::Value =
             serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
         let env = config["mcpServers"]["orx"]["env"].as_object().unwrap();
@@ -2755,6 +2774,10 @@ mod tests {
             "Adaptive"
         );
         assert_eq!(with[0].default_reasoning_level, None);
+        assert_eq!(
+            with[1].resolved_model.as_deref(),
+            Some("claude-haiku-4-5-20251001")
+        );
         // No description → the plain displayName stands.
         assert_eq!(with[1].display_name.as_deref(), Some("Haiku"));
         assert_eq!(with[1].description, None);
@@ -2855,6 +2878,7 @@ mod tests {
             answers: answers.iter().map(|s| s.to_string()).collect(),
             note: note.map(str::to_string),
             annotations: Vec::new(),
+            from: None,
         }
     }
 

@@ -44,9 +44,10 @@ and a terminal `orx` on the same machine would open different databases.
 
 A SQLite database in WAL mode is orx's truth for everything that is not code:
 projects, the experiment records, runs and their backend descriptors, chat
-sessions, messages and turn leases, wake-up registrations, UI and workspace
-state. Many short-lived processes open it concurrently, each with a busy
-timeout; WAL lets readers proceed while one writer commits.
+sessions, messages and turn leases, wake-up registrations, chat delegations
+and subscriptions, UI and workspace state. Many short-lived processes open it
+concurrently, each with a busy timeout; WAL lets readers proceed while one
+writer commits.
 
 **The schema only grows.** Every open of the store applies the whole schema:
 tables are created if missing, and each added column is an `ALTER TABLE ADD

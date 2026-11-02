@@ -672,10 +672,8 @@ async fn spawn_client(spec: &SpawnSpec, auth_generation: u64) -> Result<Arc<Clau
     };
     // Record successful bridge setup so reconciliation retries failures next turn.
     config.bridge_active = false;
-    let gate_config = gate
-        .as_ref()
-        .map(|(port, token)| (*port, spec.session_id.as_str(), token.as_str()));
-    match write_mcp_config(&spec.repo, gate_config) {
+    let gate_config = gate.as_ref().map(|(port, token)| (*port, token.as_str()));
+    match write_mcp_config(&spec.repo, &spec.session_id, gate_config) {
         Ok(path) => {
             cmd.arg("--mcp-config").arg(path);
             config.bridge_active = gate.is_some();
@@ -695,9 +693,22 @@ async fn spawn_client(spec: &SpawnSpec, auth_generation: u64) -> Result<Arc<Clau
     );
     if config.bridge_active {
         cmd.args(["--permission-prompt-tool", "mcp__orx__approve"]);
+        // Sub-agents go through orx's `delegate`, which can reach any model
+        // and wakes this chat with the answer.
+        cmd.args(["--disallowedTools", "Agent,Task,Workflow"]);
+        cmd.args(["--allowedTools", "mcp__orx"]);
     }
     crate::local::chat::prepare_env(&mut cmd);
     cmd.env("CLAUDE_CODE_ENTRYPOINT", CLAUDE_ENTRYPOINT);
+    let delegated = crate::store::Store::open()
+        .and_then(|store| store.delegation(&spec.session_id))
+        .is_ok_and(|delegation| delegation.parent.is_some());
+    if let Some(ttl) = delegated
+        .then(crate::local::chat::delegation::delegate_prompt_cache_ttl)
+        .flatten()
+    {
+        cmd.env("CLAUDE_CODE_PROMPT_CACHE_TTL", ttl);
+    }
     let native_store = spec.config.native_store;
     let config_home = tokio::task::spawn_blocking(move || {
         crate::local::native_store::prepare_claude(native_store)

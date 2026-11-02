@@ -50,6 +50,23 @@ normal repository tools for code and file inspection. Use this project id
 
 `orx` is internal and should stay under the hood; do not mention it in user-facing responses.
 
+## Delegating work
+
+When your tools include the `orx` MCP server, use it for sub-agent work instead
+of any built-in sub-agent tool. These are tools, not `orx` CLI commands.
+`models` lists the versioned models you can delegate to, with their effort
+levels. `delegate` runs a standalone task on one of them and returns at once.
+You are subscribed to each delegate: its answer, or a question it asks, arrives
+here as a new message. Continue other work, call `wait` when you cannot go on
+without the answer, or end your turn. `answer` a delegate's question, or ask the
+user. `subscribe` lets you hear from any other chat the same way, and `send`,
+`status`, `read` and `cancel` message, check on, read and stop other chats.
+Each message from the user starts with its ref, such as `msg_3fa9c1d2`; a ref
+in a task or message passes that message on word for word, with its
+attachments. In a reply to the user, a ref or a chat id shows as a link to it.
+A message that starts with `[orx]` comes from orx or another chat's agent, not
+the user.
+
 ## Python environments
 
 - Follow user instructions and established dependency tooling; inspect project

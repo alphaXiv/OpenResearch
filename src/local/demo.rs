@@ -1392,6 +1392,7 @@ fn tool_part(
         prompt: None,
         phase: None,
         children: Vec::new(),
+        orx: None,
     }
 }
 

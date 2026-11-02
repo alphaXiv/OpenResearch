@@ -47,7 +47,7 @@ import {
 } from "../queries/settings";
 
 import { getOverleafSettingsQuery } from "../queries/files";
-import { githubAccountQuery, githubOrganizationsQuery, listProjectsQuery, listRunsQuery, repoAccessQuery } from "../queries/projects";
+import { getUiStateQuery, githubAccountQuery, githubOrganizationsQuery, listProjectsQuery, listRunsQuery, repoAccessQuery } from "../queries/projects";
 import {
   ArrowLeft,
   ArrowRight,
@@ -136,6 +136,7 @@ import {
   type InstallChannel,
   type InstalledCli,
   AlphaXivNotConnectedError,
+  updateUiState,
 } from "../api";
 import { onDataDirMove } from "../events";
 import { releaseNotesUrl, useRestartApp, useUpdateStatus } from "./UpdateBanner";
@@ -620,7 +621,34 @@ function HarnessesTab({ remote }: { remote: boolean }) {
         </div>
       )}
       {setupRun.run && <CommandRunTerminal run={setupRun.run} onComplete={() => load(true, true)} onClose={setupRun.clear} />}
+      <NestedDelegationRow />
     </>
+  );
+}
+
+function NestedDelegationRow() {
+  const uiStateOptions = getUiStateQuery();
+  const { data: uiState } = useQuery(uiStateOptions);
+  const save = useMutation({
+    mutationFn: (nestedDelegation: boolean) => updateUiState({ nestedDelegation }),
+    onSuccess: (saved) => setScopedQueryData(uiStateOptions.queryKey, saved),
+    onError: (error) => showAlert(error instanceof Error ? error.message : String(error), "error"),
+  });
+  if (!uiState) return null;
+  return (
+    <div className={cn(PROJECT_DEFAULT_ROW_CLASS_NAME, "mt-4")}>
+      <div>
+        <div className="project-default-title text-base font-medium">{m.settings_nested_subagents()}</div>
+        <p>{m.settings_nested_subagents_description()}</p>
+      </div>
+      <Switch
+        type="button"
+        checked={uiState.nestedDelegation}
+        aria-label={m.settings_nested_subagents()}
+        disabled={save.isPending}
+        onClick={() => save.mutate(!uiState.nestedDelegation)}
+      />
+    </div>
   );
 }
 

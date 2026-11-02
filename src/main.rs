@@ -80,9 +80,6 @@ enum Command {
     /// Operate on one local project.
     Project(ProjectArgs),
 
-    /// Create independent project chats.
-    Agent(AgentArgs),
-
     /// List a project's runs.
     Runs(RunsArgs),
 
@@ -422,33 +419,6 @@ pub struct InstanceListArgs {
 pub struct InstanceDeleteArgs {
     /// The instance (sandbox) id to terminate.
     pub sandbox_id: String,
-}
-
-#[derive(Args, Debug)]
-pub struct AgentArgs {
-    #[command(subcommand)]
-    pub command: AgentCommand,
-}
-
-#[derive(Subcommand, Debug)]
-pub enum AgentCommand {
-    /// Create an independent chat using your saved New Chat settings.
-    #[command(
-        after_help = "New chats use your saved New Chat settings. --harness, --model, and --no-wake are no longer supported; created chats never wake the creator."
-    )]
-    Spawn {
-        /// Opening message for the new chat; it starts with an empty transcript.
-        task: Option<String>,
-        /// Read the task from stdin instead, for long multi-paragraph briefs.
-        #[arg(long)]
-        stdin: bool,
-        /// Name the session in the sidebar. Defaults to an auto-generated title.
-        #[arg(long)]
-        title: Option<String>,
-        /// Project ID (defaults to the current OpenResearch chat's project).
-        #[arg(long)]
-        project: Option<String>,
-    },
 }
 
 #[derive(Args, Debug)]
@@ -1025,19 +995,6 @@ pub struct PaperArgs {
     pub full: bool,
 }
 
-fn explain_removed_spawn_flags(mut error: clap::Error) -> clap::Error {
-    use clap::error::{ContextKind, ContextValue, ErrorKind};
-    if error.kind() == ErrorKind::UnknownArgument
-        && error.to_string().contains(" agent spawn")
-        && matches!(error.get(ContextKind::InvalidArg), Some(ContextValue::String(flag)) if ["--harness", "--model", "--no-wake"].contains(&flag.split('=').next().unwrap_or(flag)))
-    {
-        error.insert(ContextKind::Suggested, ContextValue::StyledStrs(vec![
-            "New chats use your saved New Chat settings and never wake the creator. Configure the agent and model in OpenResearch.".into()
-        ]));
-    }
-    error
-}
-
 // The default multi-thread runtime is load-bearing for desktop app mode: it
 // blocks the main thread in the window's run loop while the dashboard server runs
 // on worker threads. A `current_thread` flavor would deadlock. See commands::app.
@@ -1101,7 +1058,7 @@ async fn main() {
         return;
     }
 
-    let cli = Cli::try_parse().unwrap_or_else(|error| explain_removed_spawn_flags(error).exit());
+    let cli = Cli::parse();
     // Double-clicked from Explorer: open the desktop app instead of a console session.
     #[cfg(windows)]
     if cli.command.is_none() && owns_its_console() {
@@ -1367,7 +1324,6 @@ fn command_name(command: &Command) -> &'static str {
         Command::Projects(_) => "projects",
         Command::Orgs(_) => "orgs",
         Command::Project(_) => "project",
-        Command::Agent(_) => "agent",
         Command::Runs(_) => "runs",
         Command::Logs(_) => "logs",
         Command::Tensorboard(_) => "tensorboard",
@@ -1423,7 +1379,6 @@ async fn dispatch(command: Command) -> error::Result<()> {
         Command::Projects(args) => commands::projects::run(args).await,
         Command::Orgs(args) => commands::orgs::run(args).await,
         Command::Project(args) => commands::project::run(args).await,
-        Command::Agent(args) => commands::agent::run(args).await,
         Command::Runs(args) => commands::runs::run(args).await,
         Command::Logs(args) => commands::logs::run(args).await,
         Command::Tensorboard(args) => commands::tensorboard::run(args).await,
@@ -1577,21 +1532,6 @@ mod cli_tests {
             };
             assert_eq!(actual, expected);
         }
-    }
-
-    #[test]
-    fn agent_spawn_rejects_removed_settings_flags() {
-        for program in ["orx", "orx.exe"] {
-            for flag in ["--harness", "--model", "--model=legacy", "--no-wake"] {
-                let error = Cli::try_parse_from([program, "agent", "spawn", "task", flag])
-                    .expect_err("removed flag");
-                assert_eq!(error.kind(), clap::error::ErrorKind::UnknownArgument);
-                assert!(explain_removed_spawn_flags(error)
-                    .to_string()
-                    .contains("saved New Chat settings"));
-            }
-        }
-        assert!(Cli::try_parse_from(["orx", "agent", "spawn", "task", "--project", "p1"]).is_ok());
     }
 
     #[test]

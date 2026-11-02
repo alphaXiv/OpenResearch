@@ -2,7 +2,8 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use agent_client_protocol::schema::v1::{
-    ContentBlock, NewSessionRequest, PromptRequest, TextContent,
+    ContentBlock, EnvVariable, McpServer, McpServerStdio, NewSessionRequest, PromptRequest,
+    TextContent,
 };
 use async_trait::async_trait;
 use serde_json::{json, Value};
@@ -197,6 +198,32 @@ impl Drop for ActiveTurn {
     }
 }
 
+/// orx's MCP server for this chat. Stdio is the one transport every ACP agent
+/// must accept.
+pub(crate) fn orx_mcp_servers(
+    session_id: &str,
+    up_port: Option<u16>,
+) -> crate::error::Result<Vec<McpServer>> {
+    let mut servers = crate::local::acp::alphaxiv_mcp_servers()?;
+    let Some(server) =
+        up_port.and_then(|port| crate::local::chat::delegation::mcp_server(session_id, port).ok())
+    else {
+        return Ok(servers);
+    };
+    let env = server
+        .env
+        .iter()
+        .map(|(name, value)| EnvVariable::new(*name, value.clone()))
+        .collect();
+    let args = server.args.iter().map(|arg| arg.to_string()).collect();
+    servers.push(McpServer::Stdio(
+        McpServerStdio::new("orx", server.command)
+            .args(args)
+            .env(env),
+    ));
+    Ok(servers)
+}
+
 async fn run_turn(ctx: &mut TurnCtx, definition: &Definition) -> Result<()> {
     let first_session = ctx.native_session_id.is_none();
     ctx.host.resolve_stale_prompts(&ctx.session_id, true)?;
@@ -230,7 +257,14 @@ async fn run_turn(ctx: &mut TurnCtx, definition: &Definition) -> Result<()> {
             };
             client.set_native_id(&native_id);
             if method.is_some() {
-                match client.restore(&native_id, &cwd).await {
+                match client
+                    .restore(
+                        &native_id,
+                        &cwd,
+                        orx_mcp_servers(&ctx.session_id, ctx.host.up_port())?,
+                    )
+                    .await
+                {
                     Ok(response) => configuration = Some(response),
                     Err(error)
                         if error
@@ -257,7 +291,7 @@ async fn run_turn(ctx: &mut TurnCtx, definition: &Definition) -> Result<()> {
                 .request(
                     "session/new",
                     NewSessionRequest::new(&cwd)
-                        .mcp_servers(crate::local::acp::alphaxiv_mcp_servers()?),
+                        .mcp_servers(orx_mcp_servers(&ctx.session_id, ctx.host.up_port())?),
                 )
                 .await?;
             let native_id = response["sessionId"]

@@ -6,6 +6,9 @@ import { ComposerProjectPicker } from "./ComposerProjectPicker";
 import { LibraryPicker } from "./LibraryPicker";
 import { ProjectInfoCard } from "./ProjectInfoCard";
 import { SessionHoverCard } from "./SessionHoverCard";
+import { AgentMessageCard } from "./AgentMessageCard";
+import { DelegateCard } from "./DelegateCard";
+import { delegateStatus, delegatesOf, type DelegateStatus } from "../delegates";
 import { taskLocation } from "../workspaceState";
 import { fitSidebarRows, sidebarRowHeight, type SidebarRow } from "../sidebarLayout";
 import { useVirtualizer, defaultRangeExtractor, measureElement as measureVirtualElement, type Range as VirtualRange } from "@tanstack/react-virtual";
@@ -55,6 +58,7 @@ import { useLocale } from "../locale";
 import {
   ArrowDown,
   ArrowUpRight,
+  Bell,
   Blocks,
   BookOpen,
   Check,
@@ -134,6 +138,7 @@ import {
   getChatSubmission,
   RejectedResponseError,
   setChatSessionArchived,
+  releaseDelegate,
   setChatSessionAutonomy,
   setChatSessionPermissionMode,
   importNativeChat,
@@ -144,6 +149,7 @@ import {
   type ChatMessage,
   type AlphaXivFolder,
   type ChatPart,
+  type OrxSource,
   type Autonomy,
   type ChatSession,
   type Harness,
@@ -206,6 +212,7 @@ import {
 import { LitSourceLogo, parseOrxLit, paperUrl } from "./LitSourceLogo";
 import { LitSourcesList } from "./LitSourcesPicker";
 import { ChatImageScope, Md } from "./Md";
+import { ChatLinksContext, type ChatLinks } from "./ChatLinks";
 import { PlanStrip } from "./PlanStrip";
 import { ExperimentRunBanner } from "./ExperimentRunBanner";
 import { SETTINGS_NAV, harnessSetupPath, type SettingsTab } from "./SettingsPage";
@@ -808,6 +815,8 @@ const PROMPT_ACTIONS_CLASS_NAME = "prompt-actions flex flex-wrap gap-2";
 
 const NO_MESSAGES: ChatMessage[] = [];
 const EMPTY_SESSIONS: ChatSession[] = [];
+type DelegateRow = { session: ChatSession; status: DelegateStatus };
+const EMPTY_DELEGATES: DelegateRow[] = [];
 const EMPTY_RECOVERY_OVERRIDES = {};
 
 // --- rendering ---------------------------------------------------------------
@@ -2918,12 +2927,14 @@ function PromptCard({
     return (
       <div className="flex flex-col gap-3 py-1">
         {questionText && <div className="text-base text-text leading-normal whitespace-pre-line wrap-anywhere">{questionText}</div>}
-        {!answerInTranscript && (
+        {!answerInTranscript && (p.answeredBy ? (
+          <AgentMessageCard part={{ id: part.id, type: "text", text: chosen, orx: { kind: "message", from: p.answeredBy } }} onOpenFile={onOpenFile} />
+        ) : (
           <div className="ms-auto max-w-[88%] rounded-2xl bg-panel px-4 py-3 text-base text-text whitespace-pre-wrap wrap-anywhere">
             {questionText && <div className="mb-1 truncate text-subtext">{questionText}</div>}
             {chosen}
           </div>
-        )}
+        ))}
         {annotations.length > 0 && <AnnotationsPopover annotations={annotations} variant="sent" />}
       </div>
     );
@@ -3312,6 +3323,22 @@ export const Message = memo(function Message({
   const shell = shellExchangePart(message);
   if (shell) return <ShellExchangeCard part={shell} />;
   if (message.role === "user") {
+    const sent = message.parts.filter((part): part is ChatPart & { orx: OrxSource } => Boolean(part.orx));
+    if (sent.length > 0) {
+      return (
+        <div className="msg-agent-group flex flex-col items-start gap-2">
+          {sent.map((part) => (
+            <AgentMessageCard
+              key={part.id}
+              part={part}
+              runExperimentName={runExperimentName}
+              onOpenFile={onOpenFile}
+              onOpenRun={onOpenRun}
+            />
+          ))}
+        </div>
+      );
+    }
     const text = replies?.textById.get(message.id) ?? message.parts
       .filter((p) => p.type === "text")
       .map((p) => p.text ?? "")
@@ -3677,10 +3704,20 @@ function renderParts(
           predict={predictTextTail && part.id === visibleTail?.id}
         />,
       );
-    else if (part.type === "steer")
-      // A message the user sent into this turn while it ran — the same bubble a
-      // user message gets, sitting where the agent received it.
-      rendered.push(
+    else if (part.type === "steer") {
+      const { orx } = part;
+      rendered.push(orx ? (
+        <div key={part.id} className="my-2">
+          <AgentMessageCard
+            part={{ ...part, orx }}
+            runExperimentName={runExperimentName}
+            onOpenFile={onOpenFile}
+            onOpenRun={onOpenRun}
+          />
+        </div>
+      ) : (
+        // A message the user sent into this turn while it ran — the same bubble a
+        // user message gets, sitting where the agent received it.
         <div
           key={part.id}
           dir="auto"
@@ -3690,8 +3727,9 @@ function renderParts(
         >
           {replies?.questionById.has(part.id) && <div className="mb-1 truncate text-subtext">{replies.questionById.get(part.id)}</div>}
           {replies?.textById.get(part.id) ?? part.text}
-        </div>,
-      );
+        </div>
+      ));
+    }
     else if (part.type === "prompt" && part.prompt?.kind === "question" && !part.prompt.resolved)
       continue;
     else if (part.type === "prompt" && part.prompt)
@@ -4020,6 +4058,13 @@ function useTranscriptAnnouncement(messages: ChatMessage[]): TranscriptAnnouncem
 const transcriptRowSizes = new Map<string, { size: number; width: number }>();
 const TRANSCRIPT_ROW_SIZES_LIMIT = 5_000;
 
+/** A message an agent cited, to scroll to once its chat is open. `nonce` tells one click from the next. */
+export type FocusedMessage = { sessionId: string; messageId: string; nonce: number };
+
+// A cited message scrolls into view once it has loaded, once per click: a
+// transcript remounts per chat, so revisiting one must not scroll back to it.
+let focusedNonce: number | undefined;
+
 const Transcript = memo(function Transcript({
   messages,
   scrollRef,
@@ -4043,6 +4088,10 @@ const Transcript = memo(function Transcript({
   recoveringTurnId,
   onRecover,
   skills,
+  delegates,
+  onOpenDelegate,
+  focusedMessageId,
+  focusNonce,
 }: {
   /** The branch on screen, oldest first. */
   messages: ChatMessage[];
@@ -4069,6 +4118,11 @@ const Transcript = memo(function Transcript({
   recoveringTurnId?: string | null;
   onRecover?: (turnId: string, action: "retry" | "continue") => void;
   skills?: SkillInfo[];
+  /** Chats this one delegated to, oldest first. */
+  delegates: DelegateRow[];
+  onOpenDelegate?: (sessionId: string) => void;
+  focusedMessageId?: string | null;
+  focusNonce?: number;
 }) {
   useLocale();
   const replies = useMemo(() => questionReplies(messages), [messages]);
@@ -4082,6 +4136,19 @@ const Transcript = memo(function Transcript({
     },
     [messages, activePermissionId],
   );
+  // Each delegate sits under the turn that started it: the last row begun before it was.
+  const delegatesByRow = useMemo(() => {
+    const rows = new Map<number, DelegateRow[]>();
+    for (const delegate of delegates) {
+      const { session } = delegate;
+      let index = -1;
+      visibleMessages.forEach((group, row) => {
+        if (group[0].createdAt <= session.createdAt) index = row;
+      });
+      if (index >= 0) rows.set(index, [...(rows.get(index) ?? []), delegate]);
+    }
+    return rows;
+  }, [visibleMessages, delegates]);
   // forkPositions indexes only non-local ids, so a local bearer would page as 0/1.
   const positions = useMemo(() => {
     const bearers = visibleMessages.filter(
@@ -4165,6 +4232,29 @@ const Transcript = memo(function Transcript({
     document.addEventListener("selectionchange", retainSelection);
     return () => document.removeEventListener("selectionchange", retainSelection);
   }, [scrollRef]);
+  const [markedRowId, setMarkedRowId] = useState<string | null>(null);
+  useEffect(() => {
+    if (!focusedMessageId || focusedNonce === focusNonce) return;
+    const row = visibleMessages.find((group) => group.some((message) => message.id === focusedMessageId));
+    if (!row) return;
+    const nonce = focusNonce;
+    focusedNonce = nonce;
+    setMarkedRowId(row[0].id);
+    // A freshly opened transcript pins itself to the bottom first; scroll once that settles.
+    window.requestAnimationFrame(() => window.requestAnimationFrame(() => {
+      const { count, getItemKey } = virtualizer.options;
+      const index = Array.from({ length: count }, (_, i) => i).find((i) => getItemKey(i) === row[0].id);
+      if (focusedNonce !== nonce || index === undefined) return;
+      stickToBottom.current = false;
+      virtualizer.setOptions({ ...virtualizer.options, anchorTo: "start" });
+      virtualizer.scrollToIndex(index, { align: "center" });
+    }));
+  }, [focusedMessageId, focusNonce, visibleMessages, virtualizer, stickToBottom]);
+  useEffect(() => {
+    if (!markedRowId) return;
+    const timer = window.setTimeout(() => setMarkedRowId(null), 1600);
+    return () => window.clearTimeout(timer);
+  }, [markedRowId]);
   const activeMessage = messages.at(-1);
   const transcriptAnnouncement = useTranscriptAnnouncement(messages);
   const pendingTailTool = busy ? streamTailTool(messages) : null;
@@ -4191,7 +4281,7 @@ const Transcript = memo(function Transcript({
             data-index={item.index}
             data-message-id={rowId}
             ref={virtualizer.measureElement}
-            className="absolute left-0 w-full pb-4"
+            className={`absolute left-0 w-full pb-4 isolate before:-z-10 before:pointer-events-none before:absolute before:-inset-x-2 before:-top-2 before:bottom-2 before:rounded-lg before:bg-highlight before:transition-opacity before:duration-700 motion-reduce:before:transition-none ${rowId === markedRowId ? "before:opacity-60" : "before:opacity-0"}`}
             style={{ top: item.start }}
             onClickCapture={(event) => {
               if (!(event.target instanceof Element) || !event.target.closest("[data-work-toggle]")) return;
@@ -4230,6 +4320,13 @@ const Transcript = memo(function Transcript({
             skills={skills}
             predictTextTail={busy && m === activeMessage && m.role === "assistant"}
           />
+          {onOpenDelegate && delegatesByRow.has(item.index) && (
+            <div className="mt-3 flex flex-col gap-2">
+              {delegatesByRow.get(item.index)?.map(({ session, status }) => (
+                <DelegateCard key={session.id} session={session} status={status} onOpen={onOpenDelegate} />
+              ))}
+            </div>
+          )}
           </div>
         );
       })}
@@ -4733,6 +4830,9 @@ export function ChatPanel({
   onOpenFile,
   onOpenRun,
   runExperimentName,
+  chatInfo,
+  onOpenMessage,
+  focusedMessage,
   onOpenExperiment,
   experimentName,
   onOpenPlan,
@@ -4749,6 +4849,7 @@ export function ChatPanel({
   embedded = false,
   sideParentSessionId,
   onOpenSideChat,
+  onOpenDelegate,
   onRunSetup,
   children,
 }: {
@@ -4790,6 +4891,12 @@ export function ChatPanel({
   onOpenRun?: OpenTranscriptTarget;
   /** Resolve a run to the experiment name shown on tool activity links. */
   runExperimentName?: (runId: string) => string;
+  /** A chat in this project, or undefined for one elsewhere. */
+  chatInfo?: ChatLinks["chat"];
+  /** Open the chat a message an agent cited lives in, at that message. */
+  onOpenMessage?: (cited: string) => void;
+  /** A message to scroll to and mark once its chat is on screen. */
+  focusedMessage?: FocusedMessage | null;
   /** Open an experiment overview, where its notes are displayed. */
   onOpenExperiment?: OpenTranscriptTarget;
   /** Resolve an experiment id to the name shown on tool activity links. */
@@ -4827,6 +4934,8 @@ export function ChatPanel({
   sideParentSessionId?: string;
   /** Branch a side chat off `parentSessionId`; a question, if given, is its first message. */
   onOpenSideChat?: (parentSessionId: string, question: string) => void;
+  /** Open a chat this one delegated to. */
+  onOpenDelegate?: (sessionId: string) => void;
   /** Middle-pane content when a settings section is active. */
   children?: React.ReactNode;
 }) {
@@ -4838,6 +4947,7 @@ export function ChatPanel({
   const openSideChatMutation = useMutation({ mutationFn: openSideChat });
   const createChatSessionMutation = useMutation({ mutationFn: (args: Parameters<typeof createChatSession>) => createChatSession(...args) });
   const setChatSessionArchivedMutation = useMutation({ mutationFn: (args: Parameters<typeof setChatSessionArchived>) => setChatSessionArchived(...args) });
+  const releaseDelegateMutation = useMutation({ mutationFn: releaseDelegate });
   const renameChatSessionMutation = useMutation({ mutationFn: (args: Parameters<typeof renameChatSession>) => renameChatSession(...args) });
   const deleteChatSessionMutation = useMutation({ mutationFn: deleteChatSession });
 
@@ -4914,6 +5024,23 @@ export function ChatPanel({
     });
   }, [sessionsOptions]);
   const activeId = activeSessionId;
+  // Session rows keep their identity across unrelated updates, so the memoized
+  // transcript only re-renders when one of its delegates or their status changes.
+  const delegatesRef = useRef<DelegateRow[]>(EMPTY_DELEGATES);
+  const chatLinks = useMemo<ChatLinks | null>(
+    () => (chatInfo && onOpenDelegate && onOpenMessage ? { chat: chatInfo, onOpenChat: onOpenDelegate, onOpenMessage } : null),
+    [chatInfo, onOpenDelegate, onOpenMessage],
+  );
+  const delegates = useMemo(() => {
+    const next = activeId
+      ? delegatesOf(sessions, activeId).map((session) => ({ session, status: delegateStatus(session, sessions) }))
+      : EMPTY_DELEGATES;
+    const previous = delegatesRef.current;
+    const changed = next.length !== previous.length
+      || next.some((row, index) => row.session !== previous[index].session || row.status !== previous[index].status);
+    if (changed) delegatesRef.current = next;
+    return delegatesRef.current;
+  }, [sessions, activeId]);
   const onActiveSessionChangeRef = useRef(onActiveSessionChange);
   onActiveSessionChangeRef.current = onActiveSessionChange;
   const projectVisitRef = useRef({ projectId });
@@ -5908,6 +6035,10 @@ export function ChatPanel({
     part.type === "prompt" && part.prompt?.kind === "question" && !part.prompt.resolved && (!part.prompt.nativeId || busy),
   )), [messages, busy]);
   const activeSession = openSession;
+  // Once the user writes in a delegate, whether it still reports to its parent is theirs to decide.
+  const steeringDelegate = Boolean(activeSession?.delegate?.notifies) && (draft.trim() !== ""
+    || messages.some((message) => message.parts.some((part) =>
+      (part.type === "steer" || (message.role === "user" && part.type === "text")) && Boolean(part.text) && !part.orx)));
   // Nonce while the open session's title is mid-reveal; undefined = static.
   const activeTitleReveal = activeSession ? titleReveals.get(activeSession.id) : undefined;
 
@@ -6667,6 +6798,22 @@ export function ChatPanel({
     [activeId, busy, queueSessionMutation],
   );
 
+  // A cited message on another fork: show that fork, once per click, and the
+  // transcript scrolls to the message once it is on screen.
+  const forkedForNonce = useRef<number | undefined>(undefined);
+  useEffect(() => {
+    if (!focusedMessage || focusedMessage.sessionId !== activeId || busy) return;
+    if (forkedForNonce.current === focusedMessage.nonce) return;
+    const { messageId } = focusedMessage;
+    if (messages.some((message) => message.id === messageId)) {
+      forkedForNonce.current = focusedMessage.nonce;
+      return;
+    }
+    if (!allMessages.some((message) => message.id === messageId)) return;
+    forkedForNonce.current = focusedMessage.nonce;
+    selectBranch(messageId);
+  }, [focusedMessage, activeId, busy, messages, allMessages, selectBranch]);
+
   // Durable cancellation wins before the chip disappears. If persistence
   // fails, leave it visible so a restart cannot surprise the user by sending it.
   function cancelQueued(itemId: string) {
@@ -6743,6 +6890,15 @@ export function ChatPanel({
     updateSidebarSession(session, { archived });
     void setChatSessionArchivedMutation.mutateAsync([session.id, archived]).catch(() => {
       updateSidebarSession(session, { archived: prev });
+    });
+  }
+
+  function stopNotifyingParent(session: ChatSession) {
+    const prev = session.delegate;
+    updateSidebarSession(session, { delegate: null });
+    void releaseDelegateMutation.mutateAsync(session.id).catch((error) => {
+      updateSidebarSession(session, { delegate: prev });
+      showAlert(error instanceof Error ? error.message : String(error), "error");
     });
   }
 
@@ -7343,6 +7499,7 @@ export function ChatPanel({
           >
             <div className="chat-thread-inner max-w-readable my-0 mx-auto pt-4 px-4 pb-8 flex flex-col gap-4" ref={threadInnerRef}>
               <ChatImageScope projectId={projectId} sessionId={activeId}>
+                <ChatLinksContext value={chatLinks}>
                 <Transcript
                   key={activeId}
                   scrollRef={threadRef}
@@ -7367,7 +7524,12 @@ export function ChatPanel({
                   recoveringTurnId={recoveringTurnId}
                   onRecover={recoverFailedTurn}
                   skills={transcriptSkills}
+                  delegates={delegates}
+                  onOpenDelegate={onOpenDelegate}
+                  focusedMessageId={focusedMessage?.sessionId === activeId ? focusedMessage.messageId : null}
+                  focusNonce={focusedMessage?.nonce}
                 />
+                </ChatLinksContext>
               </ChatImageScope>
               {busy && awaitingInput && (
                 <div className="flex items-center gap-2 text-subtext text-sm pt-0.5 px-0 pb-2 italic">{m.chat_panel_waiting_for_your_input()}</div>
@@ -7852,6 +8014,19 @@ export function ChatPanel({
                   setComposerCursor(next.length);
                 });
               }} />
+              {steeringDelegate && activeSession && (
+                <Tooltip interactive content={m.chat_notify_parent()}>
+                  <IconButton
+                    type="button"
+                    aria-label={m.chat_notify_parent()}
+                    aria-pressed
+                    active
+                    onClick={() => stopNotifyingParent(activeSession)}
+                  >
+                    <Bell size={16} />
+                  </IconButton>
+                </Tooltip>
+              )}
               {(sessionGoal || goalArmed) && (
                 <Tooltip interactive content={goalArmed ? m.goal_command_description() : m.chat_panel_clear_goal({ goal: autoDir(sessionGoal) })}>
                   <Button

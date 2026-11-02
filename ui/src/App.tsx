@@ -24,7 +24,7 @@ import {
 
 import { listChatSessionsQuery, getChatMessagesQuery } from "./queries/chat";
 import { listProjectsQuery, getUiStateQuery, listRunsQuery, listExperimentsQuery } from "./queries/projects";
-import { deleteExperiment, openSideChat, sendChatMessage, setExperimentArchived } from "./api";
+import { citedMessage, deleteExperiment, openSideChat, sendChatMessage, setExperimentArchived } from "./api";
 import { getArtifactsQuery } from "./queries/files";
 import { readHarnesses } from "./queries/settings";
 import { useBlocker, useRouter, useRouterState } from "@tanstack/react-router";
@@ -114,7 +114,7 @@ import { WorkspaceTools } from "./components/WorkspaceTools";
 import { ProjectTerminal } from "./components/ProjectTerminal";
 import { SettingsCommandTerminal } from "./components/SshConnectTerminal";
 import { isWindowsDrivePath } from "./markdownTarget";
-import { ChatPanel, findPartById, spawnRowTitle } from "./components/ChatPanel";
+import { ChatPanel, findPartById, spawnRowTitle, type FocusedMessage } from "./components/ChatPanel";
 import { OptionPicker, usePopover } from "./components/ModelPicker";
 import { SubagentTab } from "./components/SubagentTab";
 import { CodeTab, type CodeView } from "./components/CodeTab";
@@ -146,6 +146,7 @@ import { appHotkeys, tabJumpHotkeys } from "./hotkeys";
 import { Button, IconButton, MenuItem, SEGMENTED_CLASS_NAME, showAlert, Spinner, Tooltip } from "./components/ui";
 import { CodeTabBody, TabBody } from "./components/layout/TabBody";
 import { RemoteStatus } from "./components/RemoteStatus";
+import { delegateModelLabel } from "./delegates";
 
 const EMPTY_STATE_CLASS_NAME = [
   "empty-state absolute inset-0 flex flex-col items-center",
@@ -1122,6 +1123,21 @@ export default function App({ runtime, projectId, pane }: { runtime: RuntimeInfo
     return matches.length === 1 ? matches[0][1] : "";
   }, [runExperimentNames]);
 
+  // Rebuilt only when a title or harness changes, so transcripts do not re-render on every session update.
+  const chatSessionsRef = useRef(sessionsQuery.data);
+  chatSessionsRef.current = sessionsQuery.data;
+  const chatInfoKey = (sessionsQuery.data ?? [])
+    .map((session) => `${session.id}\u0000${session.title ?? ""}\u0000${session.model ?? ""}\u0000${session.harness}`)
+    .join("\u0001");
+  const chatInfo = useMemo(() => {
+    void chatInfoKey;
+    const chats = new Map((chatSessionsRef.current ?? []).map((session) => [
+      session.id,
+      { title: session.title?.trim() || delegateModelLabel(session), harness: session.harness },
+    ]));
+    return (sessionId: string) => chats.get(sessionId);
+  }, [chatInfoKey]);
+
   const experimentName = useCallback((experimentId: string) => {
     const exact = experimentNames.get(experimentId);
     if (exact) return exact;
@@ -1365,6 +1381,23 @@ export default function App({ runtime, projectId, pane }: { runtime: RuntimeInfo
     setSideComposerFocusNonce((nonce) => nonce + 1);
     openSideTab(sessionId);
   }, [openSideTab]);
+
+  // A delegate with its own worktree is a chat of its own, not a side chat.
+  const openDelegate = useCallback((sessionId: string) => {
+    const session = sessionsQuery.data?.find((row) => row.id === sessionId);
+    if (session && !session.sideParentSessionId) onActiveSessionChange(sessionId);
+    else focusSideTab(sessionId);
+  }, [sessionsQuery.data, onActiveSessionChange, focusSideTab]);
+
+  const [focusedMessage, setFocusedMessage] = useState<FocusedMessage | null>(null);
+  const openMessage = useCallback((cited: string) => {
+    const missing = () => showAlert(m.chat_cited_message_missing(), "error");
+    void citedMessage(cited).then(({ sessionId, messageId }) => {
+      if (!sessionsQuery.data?.some((session) => session.id === sessionId)) return missing();
+      openDelegate(sessionId);
+      setFocusedMessage({ sessionId, messageId, nonce: Date.now() });
+    }, missing);
+  }, [sessionsQuery.data, openDelegate]);
 
   const forgetSideTab = useCallback(
     (tab: SideChatViewDef) => {
@@ -1997,11 +2030,15 @@ export default function App({ runtime, projectId, pane }: { runtime: RuntimeInfo
             onOpenFile={openChatFile}
             onOpenRun={openRunLogs}
             runExperimentName={runExperimentName}
+            chatInfo={chatInfo}
+            onOpenMessage={openMessage}
+            focusedMessage={focusedMessage}
             onOpenExperiment={openExperimentNotes}
             experimentName={experimentName}
             onOpenPlan={openPlanTab}
             onOpenSubagent={openSubagentTab}
             onOpenSideChat={(parentSessionId, question) => void startSideChat(parentSessionId, question)}
+            onOpenDelegate={openDelegate}
             onRunSetup={runtime.kind === "ssh" ? undefined : runSetup}
             composerFocusNonce={composerFocusNonce}
             runtime={runtime}
@@ -2047,6 +2084,7 @@ export default function App({ runtime, projectId, pane }: { runtime: RuntimeInfo
             onSideChat={activeSessionId ? () => void startSideChat(activeSessionId, "") : undefined}
             sessions={sessionsQuery.data ?? []}
             onSelectSideChat={focusSideTab}
+            onOpenDelegate={openDelegate}
           />
         )}
         {mainView === "chat" && panelOpen && (
@@ -2437,6 +2475,9 @@ export default function App({ runtime, projectId, pane }: { runtime: RuntimeInfo
                       }
                       onOpenRun={(runId, intent) => openFromRightTab(sideTab, () => openRunLogs(runId, intent))}
                       runExperimentName={runExperimentName}
+                      chatInfo={chatInfo}
+                      onOpenMessage={openMessage}
+                      focusedMessage={focusedMessage}
                       onOpenExperiment={(experimentId, intent) =>
                         openFromRightTab(sideTab, () => openExperimentNotes(experimentId, intent))
                       }
@@ -2451,6 +2492,7 @@ export default function App({ runtime, projectId, pane }: { runtime: RuntimeInfo
                       activeSessionId={sideTab.sessionId}
                       sideParentSessionId={sideTab.sessionId === null ? activeSessionId ?? undefined : undefined}
                       onOpenSideChat={(parentSessionId, question) => void startSideChat(parentSessionId, question)}
+                      onOpenDelegate={openDelegate}
                       onActiveSessionChange={(sessionId, options) => {
                         if (sideTab.sessionId === null && sessionId !== null) {
                           const session = queryClient.getQueryData(listChatSessionsQuery(projectId).queryKey)
