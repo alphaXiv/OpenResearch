@@ -2498,6 +2498,16 @@ mod tests {
         let stable =
             |current: &str| staged_release_in(&stage, &cache, &v(current), ReleaseChannel::Stable);
         assert_eq!(stable("0.2.16"), None);
+        // A restage killed after removing the old stage leaves none: the download path runs.
+        assert_eq!(
+            staged_release_in(
+                &stage.join("gone"),
+                &cache,
+                &v("0.2.16"),
+                ReleaseChannel::Stable
+            ),
+            None
+        );
 
         write_staged_release(&stage, &v("0.2.18"), "v0.2.18").unwrap();
         assert_eq!(stable("0.2.16"), Some((v("0.2.18"), "v0.2.18".into())));

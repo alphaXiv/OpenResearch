@@ -657,6 +657,33 @@ mod tests {
     }
 
     #[test]
+    fn a_restart_swaps_the_staged_app_in_and_leaves_no_backup() {
+        let apps = std::env::temp_dir().join(format!("orx-apps-{}", uuid::Uuid::new_v4()));
+        let root = apps.join(BUNDLE);
+        let staged = apps.join(STAGED_DIR).join(BUNDLE);
+        for (app, version) in [(&root, "old"), (&staged, "new")] {
+            std::fs::create_dir_all(app.join("Contents")).unwrap();
+            std::fs::write(app.join("Contents/version"), version).unwrap();
+        }
+
+        swap_bundle(&root, &staged).unwrap();
+
+        assert_eq!(
+            std::fs::read_to_string(root.join("Contents/version")).unwrap(),
+            "new"
+        );
+        assert!(!staged.exists());
+        let mut entries: Vec<_> = std::fs::read_dir(&apps)
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name())
+            .collect();
+        entries.sort();
+        assert_eq!(entries, [STAGED_DIR, BUNDLE]);
+
+        std::fs::remove_dir_all(&apps).unwrap();
+    }
+
+    #[test]
     fn the_signing_requirement_pins_our_team_and_a_developer_id_chain() {
         let req = signing_requirement();
         // Anyone can get an Apple-issued certificate; without the team and the

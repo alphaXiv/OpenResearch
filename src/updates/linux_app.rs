@@ -353,4 +353,47 @@ mod tests {
 
         std::fs::remove_dir_all(&parent).unwrap();
     }
+
+    #[test]
+    fn a_restage_that_fails_early_leaves_the_previous_stage_whole() {
+        let v = |s: &str| Version::parse(s).unwrap();
+        let parent = std::env::temp_dir().join(format!("orx-appimage-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&parent).unwrap();
+        let appimage = parent.join("OpenResearch.AppImage");
+        let staged = parent.join(STAGED_DIR);
+        stage(
+            &parent,
+            &appimage,
+            &staged,
+            b"first",
+            &v("0.2.17"),
+            "v0.2.17",
+        )
+        .unwrap();
+
+        // A scratch directory that cannot be created, so the failure comes before the
+        // replacement removes anything.
+        let blocked = parent.join("a-file");
+        std::fs::write(&blocked, b"").unwrap();
+        let failed = stage(
+            &blocked,
+            &appimage,
+            &staged,
+            b"second",
+            &v("0.2.18"),
+            "v0.2.18",
+        );
+
+        assert!(failed.is_err());
+        assert_eq!(
+            std::fs::read(staged.join(STAGED_APPIMAGE)).unwrap(),
+            b"first"
+        );
+        assert_eq!(
+            std::fs::read_to_string(staged.join("release")).unwrap(),
+            "0.2.17\nv0.2.17"
+        );
+
+        std::fs::remove_dir_all(&parent).unwrap();
+    }
 }

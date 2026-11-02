@@ -326,3 +326,38 @@ fn powershell() -> PathBuf {
         None => "powershell.exe".into(),
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_restart_swaps_the_staged_exe_in_and_clears_the_stage() {
+        let dir = std::env::temp_dir().join(format!("orx-windows-{}", uuid::Uuid::new_v4()));
+        let installed = dir.join("orx.exe");
+        let staged = staged_dir(&installed);
+        std::fs::create_dir_all(&staged).unwrap();
+        std::fs::write(&installed, "old").unwrap();
+        std::fs::write(staged.join("orx.exe"), "new").unwrap();
+        super::super::write_staged_release(
+            &staged,
+            &semver::Version::parse("0.2.18").unwrap(),
+            "v0.2.18",
+        )
+        .unwrap();
+
+        install_staged(&installed).unwrap();
+
+        assert_eq!(std::fs::read_to_string(&installed).unwrap(), "new");
+        assert!(!staged.exists());
+        let retired: Vec<_> = std::fs::read_dir(&dir)
+            .unwrap()
+            .map(|entry| entry.unwrap().path())
+            .filter(|path| *path != installed)
+            .collect();
+        assert_eq!(retired.len(), 1);
+        assert_eq!(std::fs::read_to_string(&retired[0]).unwrap(), "old");
+
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+}
