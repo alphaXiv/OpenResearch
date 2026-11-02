@@ -2114,6 +2114,7 @@ export default function App({ runtime, projectId, pane }: { runtime: RuntimeInfo
                     project={activeProject}
                     artifacts={artifacts}
                     onOpenFile={openArtifactFileTab}
+                    remote={runtime.kind === "ssh"}
                     canRenameFile={(path) => !fileBuffersRef.current.get(
                       fileScrollKey(activeProject.id, activeSessionId, { path, source: "artifacts" }),
                     )?.needsProtection}
@@ -2307,6 +2308,7 @@ export default function App({ runtime, projectId, pane }: { runtime: RuntimeInfo
                     toggled={filesToggled}
                     onViewChange={setFilesView}
                     onToggledChange={setFilesToggled}
+                    remote={runtime.kind === "ssh"}
                     canRenameFile={(path) => !fileBuffersRef.current.get(
                       fileScrollKey(activeProject.id, activeSessionId, {
                         path,
