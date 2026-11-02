@@ -216,6 +216,8 @@
   "header_configure_repository": "저장소 설정",
   "header_create_a_new_project": "새 프로젝트 만들기",
   "header_hide_sidebar": "사이드바 숨기기",
+  "header_dev_badge": "개발",
+  "header_query_devtools": "Query 개발자 도구",
   "header_project": "프로젝트",
   "lit_sources_picker_loading": "불러오는 중…",
   "md_copy": "복사",

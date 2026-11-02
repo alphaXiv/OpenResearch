@@ -216,6 +216,8 @@
   "header_configure_repository": "配置仓库",
   "header_create_a_new_project": "新建项目",
   "header_hide_sidebar": "隐藏侧边栏",
+  "header_dev_badge": "开发版",
+  "header_query_devtools": "Query 开发者工具",
   "header_project": "项目",
   "lit_sources_picker_loading": "正在加载…",
   "md_copy": "复制",

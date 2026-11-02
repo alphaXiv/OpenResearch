@@ -7070,7 +7070,11 @@ async fn disconnect_remote_session(
 }
 
 async fn local_runtime() -> Json<Value> {
-    Json(json!({ "kind": "local", "version": env!("CARGO_PKG_VERSION") }))
+    Json(json!({
+        "kind": "local",
+        "version": env!("CARGO_PKG_VERSION"),
+        "buildChannel": crate::telemetry::build_channel(),
+    }))
 }
 
 async fn list_local_models() -> ApiResult {
