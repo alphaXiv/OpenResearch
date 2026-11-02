@@ -1,5 +1,5 @@
 import { useSyncExternalStore } from "react";
-import { syncDesktopTitlebar } from "./desktopTitlebar";
+import { syncDesktopAppearance } from "./desktopTitlebar";
 
 export type ThemePreference = "system" | "light" | "dark";
 
@@ -29,7 +29,7 @@ function resolveTheme(pref: ThemePreference): "light" | "dark" {
 
 function applyResolvedTheme(): void {
   document.documentElement.dataset.theme = resolveTheme(preference);
-  syncDesktopTitlebar(preference);
+  syncDesktopAppearance(preference);
 }
 
 export function setThemePreference(next: ThemePreference): void {

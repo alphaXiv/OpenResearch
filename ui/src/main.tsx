@@ -34,7 +34,7 @@ createRoot(document.getElementById("root")!).render(
         <DialogManager />
         {WINDOWS_TITLEBAR && <WindowControls />}
       </HotkeysProvider>
-      {import.meta.env.DEV && <ReactQueryDevtools initialIsOpen buttonPosition="bottom-right" />}
+      {import.meta.env.DEV && <ReactQueryDevtools buttonPosition="bottom-right" />}
     </QueryClientProvider>
     <Toaster />
     {"__ORX_DESKTOP__" in window && <DesktopZoomControls />}

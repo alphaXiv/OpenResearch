@@ -76,12 +76,31 @@ pub fn missing_toolchain() -> Option<&'static str> {
     None
 }
 
-/// `<git>\cmd\git.exe` is what the installer puts on PATH, so the install root
-/// is two levels up.
 #[cfg(windows)]
 fn git_root() -> Option<PathBuf> {
-    crate::local::shell_env::find_on_path("git")
-        .and_then(|git| Some(git.parent()?.parent()?.to_path_buf()))
+    install_root(&crate::local::shell_env::find_on_path("git")?)
+}
+
+/// `<git>\cmd\git.exe` is what the installer puts on PATH, so the install root
+/// is two levels up. A shim (Scoop's, say) lives elsewhere, so ask git itself.
+#[cfg(windows)]
+fn install_root(git: &Path) -> Option<PathBuf> {
+    use std::os::windows::process::CommandExt;
+    let root = git.parent()?.parent()?;
+    if root.join("usr").is_dir() {
+        return Some(root.to_path_buf());
+    }
+    // `<root>/mingw64/libexec/git-core`
+    let out = std::process::Command::new(git)
+        .arg("--exec-path")
+        .stdin(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .creation_flags(windows_sys::Win32::System::Threading::CREATE_NO_WINDOW)
+        .output()
+        .ok()
+        .filter(|out| out.status.success())?;
+    let exec_path = PathBuf::from(String::from_utf8(out.stdout).ok()?.trim());
+    Some(exec_path.ancestors().nth(3)?.to_path_buf())
 }
 
 /// The bash shipped alongside `git`.
@@ -153,6 +172,31 @@ fn is_wsl_launcher(bash: &Path) -> bool {
 #[cfg(all(test, windows))]
 mod tests {
     use super::*;
+
+    #[test]
+    fn install_root_sees_through_a_git_shim() {
+        let base = std::env::temp_dir().join(format!("orx-git-root-{}", uuid::Uuid::new_v4()));
+        let installed = base.join("Git");
+        std::fs::create_dir_all(installed.join("cmd")).unwrap();
+        std::fs::create_dir_all(installed.join("usr")).unwrap();
+        assert_eq!(
+            install_root(&installed.join(r"cmd\git.exe")),
+            Some(installed.clone())
+        );
+        let shims = base.join(r"scoop\shims");
+        std::fs::create_dir_all(&shims).unwrap();
+        let shim = shims.join("git.cmd");
+        std::fs::write(
+            &shim,
+            format!(
+                "@echo {}/mingw64/libexec/git-core\r\n",
+                installed.to_string_lossy().replace('\\', "/")
+            ),
+        )
+        .unwrap();
+        assert_eq!(install_root(&shim), Some(installed));
+        std::fs::remove_dir_all(base).unwrap();
+    }
 
     #[test]
     fn only_direct_cmd_commands_skip_msys_argument_conversion() {

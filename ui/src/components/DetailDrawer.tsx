@@ -18,7 +18,7 @@ import { StatusBadge } from "./StatusBadge";
 import { tabOpenGestureHandlers, type TabOpenIntent } from "../tabPreview";
 import { useResolvedTheme } from "../theme";
 import { Button, ButtonLink, MenuItem } from "./ui";
-import { buildHistoryNodes, historyBackendLabel, historyJobId } from "./experimentLineageModel";
+import { buildHistoryNodes } from "./experimentLineageModel";
 import { useTrackioRuns } from "../queries/settings";
 
 export type ExperimentView = "overview" | "terminal" | "trackio";
@@ -210,12 +210,14 @@ function TerminalView({
         {expRuns.length > 0 && selectedRun && (
           <div className="run-history relative shrink-0" ref={historyRef}>
             <Button
+              className="h-6 px-2 font-normal"
               data-tip={historyOpen ? undefined : m.detail_drawer_switch_run()} aria-description={m.detail_drawer_switch_run()}
               aria-expanded={historyOpen}
               onClick={() => setHistoryOpen((v) => !v)}
             >
               <span>{m.detail_drawer_run()} {runNumber(selectedRun.id)}</span>
               <StatusBadge
+                className="text-sm font-normal"
                 status={cancelling ? "cancelling" : runDisplayStatus(selectedRun)}
              />
               <ChevronDown size={14} className="run-picker-chev text-muted shrink-0" />
@@ -243,30 +245,13 @@ function TerminalView({
         )}
       </div>
 
-      {selectedRun && (
-        <div className="term-provenance" aria-label={m.detail_drawer_run_provenance()}>
-          <span>
-            {m.detail_drawer_provenance_run()} <code>{selectedRun.id}</code>
-          </span>
-          <span>
-            {m.detail_drawer_provenance_commit()} <code>{selectedRun.commitSha || m.history_commit_unavailable()}</code>
-          </span>
-          <span>
-            {m.detail_drawer_provenance_backend()} <code>{historyBackendLabel(selectedRun)}</code>
-          </span>
-          <span>
-            {m.detail_drawer_provenance_scheduler()} <code>{historyJobId(selectedRun)}</code>
-          </span>
-        </div>
-      )}
-
       {monitoringError && (
         <p role="status" className="m-0 shrink-0 border-b border-border-variant px-3 py-2 text-sm text-accent-amber wrap-anywhere">
           {monitoringError}
         </p>
       )}
 
-      <div className={`term-fill flex-1 min-h-0 ${view === "trackio" ? "bg-background" : "bg-terminal pt-1 pe-0 pb-1 ps-1.5"}`}>
+      <div className={`term-fill flex-1 min-h-0 ${view === "trackio" ? "bg-background" : "bg-terminal py-3 px-4"}`}>
         {trackioEmbedUrl ? (
           <iframe
             key={trackioEmbedUrl}

@@ -77,7 +77,7 @@ jobs:
   macos:
     needs: [identity, ci, ui]
     if: vars.MACOS_SIGNING_ENABLED == 'true'
-    runs-on: macos-14
+    runs-on: macos-latest
     timeout-minutes: 45
     environment: release-signing
     steps:

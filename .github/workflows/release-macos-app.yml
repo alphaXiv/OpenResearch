@@ -93,7 +93,7 @@ jobs:
   macos-app:
     needs: check
     if: ${{ needs.check.outputs.ok == 'true' }}
-    runs-on: macos-14 # Apple Silicon runner
+    runs-on: macos-latest
     timeout-minutes: 45 # bound the 10x-billed runner (build + notarize + Finder styling)
     # The cert-using job. Secrets come from this environment; add required
     # reviewers to it (Settings → Environments) so the Developer ID certificate

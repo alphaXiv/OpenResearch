@@ -63,7 +63,8 @@ import { CodeView } from "./CodeView";
 import { CodeEditor } from "./CodeEditor";
 import { ArtifactMarkdown } from "./ArtifactsTab";
 import type { TabOpenIntent } from "../tabPreview";
-import { FileTypeIcon, isHtmlFile, isLatexFile, isMarkdownFile } from "./FileTypeIcon";
+import { CsvTable } from "./CsvTable";
+import { FileTypeIcon, isCsvFile, isHtmlFile, isLatexFile, isMarkdownFile } from "./FileTypeIcon";
 import { HtmlPreview } from "./HtmlPreview";
 import { OverleafButton } from "./OverleafPanel";
 import { MediaPreview, mediaPreviewKind } from "./MediaPreview";
@@ -230,7 +231,9 @@ export function FileViewer({
   const isLatex = isLatexFile(path);
   // .html likewise, and its scripts run — see HtmlPreview.
   const isHtml = isHtmlFile(path);
-  const rendersByDefault = isMarkdown || isHtml;
+  // .csv/.tsv render as a sortable table, source behind the same toggle.
+  const isCsv = isCsvFile(path);
+  const rendersByDefault = isMarkdown || isHtml || isCsv;
   const [activated, setActivated] = useState(false);
   const autoRun = !restored || activated;
   const activate = () => {
@@ -441,7 +444,7 @@ export function FileViewer({
     !(rendersByDefault && !showSource) &&
     !showingPdf;
   const canCopyContents = data !== null && !data.notFound && !data.binary && !mediaKind && !showingPdf;
-  const canSelectContents = canCopyContents && !showingEditor && (!isHtml || showSource);
+  const canSelectContents = canCopyContents && !showingEditor && (!(isHtml || isCsv) || showSource);
 
   const copyContents = async () => {
     if (!data) return;
@@ -947,6 +950,17 @@ export function FileViewer({
             url={rawUrl}
             name={filePath}
             resolveSrc={resolveAssetSrc}
+          />
+        ) : isCsv && !showSource ? (
+          <CsvTable
+            text={data.content}
+            path={path}
+            truncated={data.truncated}
+            scrollPosition={scrollPositionRef.current}
+            onScrollPositionChange={(position) => {
+              scrollPositionRef.current = position;
+              onScrollPositionChange?.(position);
+            }}
           />
         ) : (
           <>
