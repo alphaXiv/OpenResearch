@@ -37,7 +37,7 @@ jobs:
     if: ${{ !fromJson(inputs.plan).announcement_tag_is_implicit }}
     strategy:
       matrix: ${{ fromJson(needs.targets.outputs.matrix) }}
-    runs-on: macos-14
+    runs-on: macos-latest
     timeout-minutes: 40
     environment: release-signing
     steps:

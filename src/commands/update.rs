@@ -50,7 +50,12 @@ pub async fn run(args: crate::UpdateArgs) -> Result<()> {
         // recording either way here would skew the backoff they are building.
         // Nothing was installed or failed; this only damps the respawns.
         Ok(Outcome::Contended | Outcome::Deferred) => updates::record_contended(),
-        Ok(Outcome::Done) => updates::record_attempt(true),
+        Ok(Outcome::Done) => {
+            let status = updates::status();
+            if !status.waiting_for_stable && !status.waiting_for_canary {
+                updates::record_attempt(true);
+            }
+        }
         Err(_) => updates::record_attempt(false),
     }
     match result {
@@ -112,14 +117,36 @@ async fn apply(args: crate::UpdateArgs) -> Result<Outcome> {
             .map(|_| Outcome::Done);
     }
 
-    let latest = updates::fetch_latest(Duration::from_secs(10)).await?;
+    #[cfg(windows)]
+    let desktop = matches!(target, UpdateTarget::Portable(_))
+        && updates::current_channel().is_ok_and(|channel| channel.has_release_channels());
+    #[cfg(not(windows))]
+    let desktop = false;
+    let latest = if desktop {
+        let Some(latest) = updates::fetch_latest_for_channel(Duration::from_secs(10)).await? else {
+            if !args.background {
+                println!("orx {} is up to date.", current);
+            }
+            return Ok(Outcome::Done);
+        };
+        latest
+    } else {
+        updates::fetch_latest(Duration::from_secs(10)).await?
+    };
     // Record what the release actually is before acting on it, so a cache that
     // was wrong about being behind corrects itself on the next run instead of
     // warning off a stale answer until the check TTL lapses.
-    updates::write_check_cache(&latest.version.to_string(), &latest.tag);
-    if !updates::is_outdated(&current, &latest.version) {
+    updates::record_checked_release(&latest);
+    if !updates::release_available(&current, &latest.version, &latest.tag) {
         if !args.background {
             println!("orx {} is up to date.", current);
+        }
+        return Ok(Outcome::Done);
+    }
+
+    if !latest.compatible {
+        if !args.background {
+            println!("{}", updates::compatibility_wait_message(&latest.tag));
         }
         return Ok(Outcome::Done);
     }
@@ -134,6 +161,29 @@ async fn apply(args: crate::UpdateArgs) -> Result<Outcome> {
 
     if !args.background {
         eprintln!("Updating orx {} → {} ...", current, latest.version);
+    }
+
+    #[cfg(windows)]
+    if desktop && crate::telemetry::update_channel() == updates::ReleaseChannel::Canary {
+        use sha2::{Digest, Sha256};
+        let asset = latest
+            .canary_asset
+            .as_ref()
+            .ok_or_else(|| anyhow!("No desktop update is available yet."))?;
+        let bytes =
+            updates::fetch_release_asset(&latest.tag, &asset.asset, Duration::from_secs(600))
+                .await?;
+        if !format!("{:x}", Sha256::digest(&bytes)).eq_ignore_ascii_case(asset.sha256.trim()) {
+            return Err(anyhow!(
+                "The downloaded app does not match its published checksum."
+            ));
+        }
+        let UpdateTarget::Portable(dir) = &target else {
+            unreachable!()
+        };
+        updates::windows::install_binary(&dir.join("orx.exe"), &bytes)?;
+        updates::record_installed(&latest.version.to_string(), &latest.tag);
+        return Ok(Outcome::Done);
     }
 
     // Pin the installer to the same release the manifest described, so the
@@ -171,7 +221,17 @@ async fn apply(args: crate::UpdateArgs) -> Result<Outcome> {
 /// `orx` than the backend that set up their sandbox.
 async fn defer(current: &semver::Version, background: bool) -> Result<Outcome> {
     let latest = updates::fetch_latest_for_channel(Duration::from_secs(10)).await?;
-    let Some(latest) = latest.filter(|latest| updates::is_outdated(current, &latest.version))
+    if let Some(latest) = &latest {
+        updates::record_checked_release(latest);
+        if !latest.compatible {
+            if !background {
+                println!("{}", updates::compatibility_wait_message(&latest.tag));
+            }
+            return Ok(Outcome::Done);
+        }
+    }
+    let Some(latest) =
+        latest.filter(|latest| updates::release_available(current, &latest.version, &latest.tag))
     else {
         if !background {
             println!("orx {} is up to date.", current);

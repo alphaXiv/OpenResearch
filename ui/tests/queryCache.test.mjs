@@ -216,6 +216,36 @@ test("a pending local turn survives reconciliation regardless of server clock sk
   assert.equal(result.activeLeafId, localId);
 });
 
+test("compaction's initial response cannot overwrite a newer streamed result", (t) => {
+  const { client, load } = setup(t, {});
+  const store = load("chatStore");
+  for (const status of ["completed", "error"]) {
+    const options = load("chat").getChatMessagesQuery(status);
+    const running = {
+      id: "compact", role: "assistant", createdAt: 1, parentId: "previous",
+      parts: [{ id: "compacted", type: "tool", tool: "compacted", state: { status: "running" } }],
+    };
+    const finished = {
+      ...running, completedAt: 2,
+      parts: [{ ...running.parts[0], state: { status, ...(status === "error" ? { error: "Could not compact" } : {}) } }],
+    };
+    const dispatch = (message, onlyIfMissing = false) => store.dispatchChat("p", {
+      type: "upsertMessage", sessionId: status, message, onlyIfMissing,
+    });
+    dispatch(running, true);
+    assert.deepEqual(client.getQueryData(options.queryKey).messages, [running]);
+    dispatch(finished);
+    store.dispatchChat("p", { type: "activeLeaf", sessionId: status, leafId: "another-branch" });
+    dispatch(running, true);
+    const result = client.getQueryData(options.queryKey);
+    assert.deepEqual(result.messages, [finished]);
+    assert.equal(result.activeLeafId, "another-branch");
+    // Live updates can still reopen a message when a turn is retried.
+    dispatch(running);
+    assert.deepEqual(client.getQueryData(options.queryKey).messages, [running]);
+  }
+});
+
 test("write invalidation stays scoped and excludes immutable commit bodies", async (t) => {
   const { client, load } = setup(t, {});
   const scope = load("client").workspaceScope();

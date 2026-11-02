@@ -266,7 +266,7 @@ function ComposerSkillToken({
               ...position,
               maxHeight: "min(28rem, calc(100vh - 2rem))",
             }}
-            className="fixed z-100 overflow-y-auto rounded-lg border border-border bg-background shadow-floating"
+            className="fixed z-100 overflow-y-auto rounded-lg border border-border bg-background shadow-dropdown"
             onMouseEnter={clearClose}
             onMouseLeave={scheduleClose}
             onFocus={clearClose}
@@ -275,7 +275,7 @@ function ComposerSkillToken({
           >
             <div className="sticky top-0 z-1 flex items-center gap-2 border-b border-border-variant bg-background px-4 py-3">
               <span className="text-sm font-medium text-muted">{commandDisplayName(name)}</span>
-              <Badge className="h-5 border-border-variant bg-surface px-1.5 tracking-[0.05em]">
+              <Badge className="h-5 border-border-variant bg-surface px-1.5 tracking-wider">
                 {m.skill_chips_badge()}
               </Badge>
             </div>

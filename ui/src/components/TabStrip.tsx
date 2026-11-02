@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from "react";
+import { navigateKeyboardRow } from "../keyboardNavigation";
 
 /** Horizontally scrolling tab row with an overlay scroll thumb on the tab bar's bottom border. */
 export function TabStrip({ activeKey, children }: { activeKey: string; children: React.ReactNode }) {
@@ -79,7 +80,8 @@ export function TabStrip({ activeKey, children }: { activeKey: string; children:
 
   return (
     <div
-      className="relative flex-1 min-w-0"
+      className="relative z-1 flex-1 min-w-0"
+      onKeyDown={navigateKeyboardRow}
       onPointerEnter={() => {
         hovered.current = true;
         window.clearTimeout(hideTimer.current);

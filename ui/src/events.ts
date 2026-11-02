@@ -18,6 +18,7 @@ import type {
 } from "./api";
 
 export interface RunLogEvent {
+  generation?: string;
   runId: string;
   dataBase64: string;
   offset: number;

@@ -1,12 +1,12 @@
 import {
   useEffect,
-  useLayoutEffect,
   useRef,
   useState,
   type KeyboardEvent as ReactKeyboardEvent,
   type MouseEvent as ReactMouseEvent,
 } from "react";
-import { createPortal } from "react-dom";
+import { Menu } from "@base-ui/react/menu";
+import { DirectionProvider } from "@base-ui/react/direction-provider";
 import { m } from "../paraglide/messages.js";
 import { ltr } from "../i18n";
 import { Input, MenuItem, showAlert } from "./ui";
@@ -117,87 +117,49 @@ export function FileContextMenu({
   const menuRef = useRef<HTMLDivElement>(null);
   const onCloseRef = useRef(onClose);
   onCloseRef.current = onClose;
-  const [position, setPosition] = useState({ x: target.x, y: target.y });
-
-  useLayoutEffect(() => {
-    const menu = menuRef.current;
-    if (!menu) return;
-    const previousFocus = document.activeElement instanceof HTMLElement
-      ? document.activeElement
-      : null;
-    setPosition({
-      x: Math.max(8, Math.min(target.x, window.innerWidth - menu.offsetWidth - 8)),
-      y: Math.max(8, Math.min(target.y, window.innerHeight - menu.offsetHeight - 8)),
-    });
-    menu.querySelector<HTMLButtonElement>("button")?.focus();
-    return () => {
-      if (menu.contains(document.activeElement)) previousFocus?.focus();
-    };
-  }, [target]);
-
   useEffect(() => {
     const close = () => onCloseRef.current();
-    const dismiss = (event: Event) => {
-      if (!menuRef.current?.contains(event.target instanceof Node ? event.target : null)) onCloseRef.current();
+    const dismissOnScroll = (event: Event) => {
+      if (event.target instanceof Node && menuRef.current?.contains(event.target)) return;
+      close();
     };
-    const keydown = (event: globalThis.KeyboardEvent) => {
-      if (event.key === "Tab") {
-        event.preventDefault();
-        onCloseRef.current();
-        return;
-      }
-      if (event.key !== "Escape") return;
-      event.preventDefault();
-      event.stopPropagation();
-      onCloseRef.current();
-    };
-    document.addEventListener("pointerdown", dismiss);
     window.addEventListener("blur", close);
     window.addEventListener("resize", close);
-    window.addEventListener("scroll", close, true);
-    document.addEventListener("keydown", keydown, true);
+    window.addEventListener("scroll", dismissOnScroll, true);
     return () => {
-      document.removeEventListener("pointerdown", dismiss);
       window.removeEventListener("blur", close);
       window.removeEventListener("resize", close);
-      window.removeEventListener("scroll", close, true);
-      document.removeEventListener("keydown", keydown, true);
+      window.removeEventListener("scroll", dismissOnScroll, true);
     };
   }, []);
 
-  const run = (action: () => void) => {
-    onCloseRef.current();
-    action();
-  };
-  const item = (label: string, action: () => void, danger = false) => (
-    <MenuItem size="compact" role="menuitem" danger={danger} onClick={() => run(action)}>
-      <span>{label}</span>
-    </MenuItem>
-  );
-
-  return createPortal(
-    <div
-      ref={menuRef}
-      role="menu"
-      aria-label={m.file_tree_file_actions({ path: ltr(target.path) })}
-      className="option-menu fixed z-100 min-w-44 overflow-hidden rounded-md border border-border bg-background p-1 shadow-menu"
-      style={{ left: position.x, top: position.y }}
-      onContextMenu={(event) => event.preventDefault()}
-      onKeyDown={(event) => {
-        if (event.key !== "ArrowDown" && event.key !== "ArrowUp") return;
-        event.preventDefault();
-        const items = [...(menuRef.current?.querySelectorAll<HTMLButtonElement>("button") ?? [])];
-        const current = items.indexOf(document.activeElement instanceof HTMLButtonElement ? document.activeElement : items[0]);
-        const step = event.key === "ArrowDown" ? 1 : -1;
-        items[(current + step + items.length) % items.length]?.focus();
-      }}
-    >
-      {item(m.file_tree_open(), onOpen)}
-      {onRename && item(m.chat_panel_rename(), onRename)}
-      {onDuplicate && item(m.file_tree_duplicate(), onDuplicate)}
-      {item(m.artifacts_copy_path(), onCopyPath)}
-      {onDelete && item(m.chat_panel_delete(), onDelete, true)}
-    </div>,
-    document.body,
+  return (
+    <DirectionProvider direction={typeof document !== "undefined" && document.documentElement.dir === "rtl" ? "rtl" : "ltr"}>
+      <Menu.Root open modal={false} onOpenChange={(open) => { if (!open) onClose(); }}>
+        <Menu.Portal>
+          <Menu.Positioner
+            positionMethod="fixed"
+            anchor={{ getBoundingClientRect: () => new DOMRect(target.x, target.y, 0, 0) }}
+            side="bottom"
+            align="start"
+            collisionPadding={8}
+            className="z-100"
+          >
+            <Menu.Popup
+              ref={menuRef}
+              aria-label={m.file_tree_file_actions({ path: ltr(target.path) })}
+              className="outline-none option-menu min-w-44 max-h-(--available-height) overflow-y-auto rounded-md border border-border bg-background p-1 shadow-menu"
+              onContextMenu={(event) => event.preventDefault()}
+            >
+              <Menu.Item nativeButton render={<MenuItem size="compact" className="data-highlighted:bg-surface" />} onClick={onOpen}>{m.file_tree_open()}</Menu.Item>
+              {onRename && <Menu.Item nativeButton render={<MenuItem size="compact" className="data-highlighted:bg-surface" />} onClick={onRename}>{m.chat_panel_rename()}</Menu.Item>}
+              {onDuplicate && <Menu.Item nativeButton render={<MenuItem size="compact" className="data-highlighted:bg-surface" />} onClick={onDuplicate}>{m.file_tree_duplicate()}</Menu.Item>}
+              <Menu.Item nativeButton render={<MenuItem size="compact" className="data-highlighted:bg-surface" />} onClick={onCopyPath}>{m.artifacts_copy_path()}</Menu.Item>
+              {onDelete && <Menu.Item nativeButton render={<MenuItem size="compact" danger className="data-highlighted:bg-surface" />} onClick={onDelete}>{m.chat_panel_delete()}</Menu.Item>}
+            </Menu.Popup>
+          </Menu.Positioner>
+        </Menu.Portal>
+      </Menu.Root>
+    </DirectionProvider>
   );
 }

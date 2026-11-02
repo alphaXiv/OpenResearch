@@ -40,7 +40,7 @@ export function LitSourcesList() {
             disabled={saving}
             onClick={() => toggle(key)}
           >
-            <span className="inline-flex items-center gap-[9px]">
+            <span className="inline-flex items-center gap-2">
               <LitSourceLogo source={key} size={16} decorative />
               {LIT_SOURCE_NAME[key]}
             </span>

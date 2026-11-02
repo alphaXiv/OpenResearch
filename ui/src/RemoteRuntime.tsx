@@ -18,6 +18,7 @@ import {
   type ReactNode,
 } from "react";
 import { Outlet, useLocation } from "@tanstack/react-router";
+import { WifiOff } from "lucide-react";
 import {
   disconnectCurrentRemote,
   getRemoteStopPreview,
@@ -26,7 +27,7 @@ import {
   startCurrentRemoteHost,
   stopCurrentRemoteHost,
   type RemoteInstallPaths,
-  type RemoteStopPreview,
+  type RemoteSessionInfo,
   type RuntimeInfo,
 } from "./api";
 import { ltr } from "./i18n";
@@ -35,6 +36,7 @@ import { m } from "./paraglide/messages.js";
 import { isLocale } from "./paraglide/runtime.js";
 import { setThemePreference } from "./theme";
 import { Button, Input, showAlert, Spinner } from "./components/ui";
+import { showCustomDialog } from "./dialog";
 import { RemoteStopDialog } from "./components/RemoteStopDialog";
 import { CommandTerminal, SshConnectTerminal, isComplete } from "./components/SshConnectTerminal";
 import { resetGlobalWorkspace } from "./workspacePersistence";
@@ -48,6 +50,63 @@ const RuntimeContext = createContext<RuntimeInfo | null>(null);
 
 function workspaceKey(runtime: RuntimeInfo): string {
   return runtime.kind === "local" ? "local" : `${runtime.session.id}:${runtime.session.installPaths?.database ?? ""}`;
+}
+
+interface RemoteConnection {
+  phase: "reconnecting" | "lost";
+  title: string;
+  detail: string | null;
+  retry: () => Promise<void>;
+}
+
+const RemoteConnectionContext = createContext<RemoteConnection | null>(null);
+
+/** Non-null while the remote link is down but the workspace stays usable; the composer disables itself. */
+export const useRemoteConnection = () => useContext(RemoteConnectionContext);
+
+/** A tab tucked behind the top edge of the composer box. */
+export function RemoteConnectionStrip() {
+  const connection = useRemoteConnection();
+  const [busy, setBusy] = useState(false);
+  if (!connection) return null;
+
+  async function retry() {
+    setBusy(true);
+    try {
+      await connection!.retry();
+    } catch (error) {
+      showAlert(error instanceof Error ? error.message : String(error), "error");
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  const label = (
+    <>
+      <WifiOff size={14} className="shrink-0" aria-hidden="true" />
+      <span className="shrink-0 font-medium">{connection.title}</span>
+      {connection.detail && <span className="min-w-0 flex-1 truncate text-subtext">{connection.detail}</span>}
+    </>
+  );
+  const tab = "-mb-2 flex w-full items-center gap-2 rounded-t-lg border border-b-0 px-3 pt-1.5 pb-3.5 text-start text-sm";
+
+  if (connection.phase === "reconnecting") {
+    return <div role="status" className={`${tab} border-border bg-surface text-text`}>{label}</div>;
+  }
+  return (
+    <button
+      type="button"
+      disabled={busy}
+      onClick={() => void retry()}
+      className={`${tab} cursor-pointer border-accent-amber bg-accent-amber-subtle text-text disabled:cursor-default`}
+    >
+      {label}
+      <span className="ms-auto flex shrink-0 items-center gap-1.5 font-medium">
+        {busy && <Spinner />}
+        {m.app_retry()}
+      </span>
+    </button>
+  );
 }
 
 export function useRuntime(): RuntimeInfo {
@@ -87,9 +146,17 @@ function needsInteractiveSsh(error: string) {
   return error.includes("ssh ") && error.includes("failed");
 }
 
-function GatewayUnavailable({ host, overlay = false }: { host: string; overlay?: boolean }) {
+function connectionPhase(session: RemoteSessionInfo, gatewayError: string | null): RemoteConnection["phase"] | null {
+  if (gatewayError !== null) return "lost";
+  if (session.status === "connecting" || session.status === "reconnecting") return "reconnecting";
+  const needsUser = session.repairCommand !== null ||
+    (session.error !== null && needsInteractiveSsh(session.error) && !session.canStartNewHost);
+  return session.status === "disconnected" && !needsUser ? "lost" : null;
+}
+
+function GatewayUnavailable({ host }: { host: string }) {
   return (
-    <div className={overlay ? "w-full max-w-2xl" : "app flex h-full items-center justify-center bg-background p-6"}>
+    <div className="app flex h-full items-center justify-center bg-background p-6">
       <section className="w-full max-w-2xl rounded-xl border border-border bg-background p-7 shadow-modal">
         <h1 id="remote-setup-title" className="m-0 text-2xl font-semibold text-text">
           {m.remote_disconnected_title({ host: ltr(host) })}
@@ -115,7 +182,6 @@ function RemoteSetup({
   const { session } = runtime;
   const [paths, setPaths] = useState<RemoteInstallPaths | null>(session.installPaths);
   const [busy, setBusy] = useState(false);
-  const [stopPreview, setStopPreview] = useState<RemoteStopPreview | null>(null);
   const [repairTerminalOpen, setRepairTerminalOpen] = useState(false);
   const [copied, setCopied] = useState(false);
 
@@ -163,22 +229,14 @@ function RemoteSetup({
   async function prepareStopHost() {
     setBusy(true);
     try {
-      setStopPreview(await getRemoteStopPreview());
+      const preview = await getRemoteStopPreview();
+      showCustomDialog({
+        component: RemoteStopDialog,
+        props: { host: session.host, preview, currentClientAttached: false },
+        onConfirm: async () => { await stopCurrentRemoteHost(preview); },
+        onCancel: "close",
+      });
     } catch (error) {
-      showAlert(error instanceof Error ? error.message : String(error), "error");
-    } finally {
-      setBusy(false);
-    }
-  }
-
-  async function stopHost() {
-    if (!stopPreview) return;
-    setBusy(true);
-    try {
-      await stopCurrentRemoteHost(stopPreview);
-      setStopPreview(null);
-    } catch (error) {
-      setStopPreview(null);
       showAlert(error instanceof Error ? error.message : String(error), "error");
     } finally {
       setBusy(false);
@@ -403,18 +461,6 @@ function RemoteSetup({
           )}
         </section>
       </main>
-      {stopPreview && (
-        <RemoteStopDialog
-          host={session.host}
-          preview={stopPreview}
-          currentClientAttached={false}
-          stopping={busy}
-          onClose={() => {
-            if (!busy) setStopPreview(null);
-          }}
-          onConfirm={() => void stopHost()}
-        />
-      )}
     </>
   );
 }
@@ -533,24 +579,36 @@ export function RuntimeRoot() {
         setRetriedInteractiveError={setRetriedInteractiveError}
       />;
   }
-  const showOverlay = runtime.session.status !== "connected" || error !== null;
+  const { session } = runtime;
+  const phase = connectionPhase(session, error);
+  const showOverlay = phase === null && session.status !== "connected";
+  const connection: RemoteConnection | null = phase && {
+    phase,
+    title: phase === "lost"
+      ? m.remote_disconnected_title({ host: ltr(session.host) })
+      : m.remote_reconnecting_title({ host: ltr(session.host) }),
+    detail: phase === "lost" ? error ?? session.error : null,
+    retry: async () => {
+      if (error !== null) await runtimeQuery.refetch();
+      else if (session.canStartNewHost) await startCurrentRemoteHost();
+      else await reconnectCurrentRemote();
+    },
+  };
   return (
     <div className="relative h-full">
       <div className="h-full" inert={showOverlay}>
-        <RuntimeContext key={workspaceScope()[1]} value={runtime}><QueryEvents /><Outlet /></RuntimeContext>
+        <RuntimeContext key={workspaceScope()[1]} value={runtime}>
+          <RemoteConnectionContext value={connection}><QueryEvents /><Outlet /></RemoteConnectionContext>
+        </RuntimeContext>
       </div>
       {showOverlay && (
         <RemoteOverlay>
-          {error ? (
-            <GatewayUnavailable host={runtime.session.host} overlay />
-          ) : (
-            <RemoteSetup
-              runtime={runtime}
-              overlay
-              retriedInteractiveError={retriedInteractiveError}
-              setRetriedInteractiveError={setRetriedInteractiveError}
-            />
-          )}
+          <RemoteSetup
+            runtime={runtime}
+            overlay
+            retriedInteractiveError={retriedInteractiveError}
+            setRetriedInteractiveError={setRetriedInteractiveError}
+          />
         </RemoteOverlay>
       )}
     </div>

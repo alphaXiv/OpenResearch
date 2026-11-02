@@ -99,7 +99,7 @@ export function SubagentTab({
     return (
       <TabBody>
         <div className={PANE_CONTENT_CLASS_NAME}>
-          <div className="subagent-empty py-[3px] px-1 text-sm text-muted">{m.subagent_tab_loading()}</div>
+          <div className="subagent-empty p-1 text-sm text-muted">{m.subagent_tab_loading()}</div>
         </div>
       </TabBody>
     );
@@ -132,7 +132,7 @@ export function SubagentTab({
               />
             </ChatImageScope>
           ) : (
-            <div className="subagent-empty py-[3px] px-1 text-sm text-muted">{m.subagent_tab_this_sub_agent_is_no_longer_available()}</div>
+            <div className="subagent-empty p-1 text-sm text-muted">{m.subagent_tab_this_sub_agent_is_no_longer_available()}</div>
           )}
         </div>
       </div>

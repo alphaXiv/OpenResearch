@@ -24,6 +24,7 @@ export function ExperimentsTable({
   onOpenLogs,
   onOpenCode,
   onArchive,
+  onDelete,
   onCancel,
 }: {
   runs: Run[];
@@ -36,6 +37,7 @@ export function ExperimentsTable({
   onOpenLogs: (experimentId: string, runId: string, intent: TabOpenIntent) => void;
   onOpenCode: (experimentId: string, intent: TabOpenIntent) => void;
   onArchive: (id: string, direction: "ancestors" | "descendants" | "only", archived: boolean) => void;
+  onDelete: (id: string) => void;
   onCancel: (runId: string) => Promise<void>;
 }) {
   const [pendingCancellation, setPendingCancellation] = useState<ReadonlySet<string>>(new Set());
@@ -109,7 +111,7 @@ export function ExperimentsTable({
           {m.experiments_table_stop_failed()} {cancelError}
         </div>
       )}
-      <div ref={listRef} className="experiments-table relative w-full text-sm bg-background" role="list" aria-label={m.experiments_table_experiments()}>
+      <div ref={listRef} data-keyboard-list className="experiments-table relative w-full text-sm bg-background" role="list" aria-label={m.experiments_table_experiments()}>
         {showLineage && <Rail placed={placed} height={lastPlaced ? lastPlaced.top + lastPlaced.height : 0} path={NO_HIGHLIGHT} selectedId={null} />}
         {rows.map((row) => {
           if (row.kind !== "experiment") return null;
@@ -148,6 +150,7 @@ export function ExperimentsTable({
               <div className="experiment-table-name [grid-area:name] min-w-0">
                 <button
                   type="button"
+                  data-keyboard-item
                   className="experiment-table-title line-clamp-2 w-full overflow-hidden text-text font-medium text-start"
                   {...tabOpenGestureHandlers<HTMLButtonElement>((intent) =>
                     onOpen(experiment, intent),
@@ -183,7 +186,7 @@ export function ExperimentsTable({
                       if (logsRun) onOpenLogs(experiment.id, logsRun.id, intent);
                     }, { stopPropagation: true })}
                   >
-                    <Terminal size={15} />
+                    <Terminal size={16} />
                   </IconButton>
                 </Tooltip>
                 <Tooltip interactive content={m.experiments_table_code()}>
@@ -194,7 +197,7 @@ export function ExperimentsTable({
                       onOpenCode(experiment.id, intent),
                     { stopPropagation: true })}
                   >
-                    <FolderTree size={15} />
+                    <FolderTree size={16} />
                   </IconButton>
                 </Tooltip>
                 {liveRun && (
@@ -206,7 +209,7 @@ export function ExperimentsTable({
                       aria-label={cancelling ? m.common_stopping() : m.common_stop()}
                       onClick={() => void requestCancel(liveRun.id)}
                     >
-                      <CircleStop size={15} />
+                      <CircleStop size={16} />
                     </IconButton>
                   </Tooltip>
                 )}
@@ -217,6 +220,7 @@ export function ExperimentsTable({
                     name={experiment.title || experiment.slug}
                     actions={archiveActions.get(experiment.id)!}
                     onArchive={onArchive}
+                    onDelete={onDelete}
                   />
                 </Tooltip>
               </div>

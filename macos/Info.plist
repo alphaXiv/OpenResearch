@@ -26,5 +26,17 @@
   <!-- Regular Dock app (not an agent/menubar-only app). -->
   <key>LSUIElement</key>
   <false/>
+  <!-- openresearch://reproduce/<paper id> opens a paper from openresearch.sh. -->
+  <key>CFBundleURLTypes</key>
+  <array>
+    <dict>
+      <key>CFBundleURLName</key>
+      <string>org.alphaxiv.openresearch</string>
+      <key>CFBundleURLSchemes</key>
+      <array>
+        <string>openresearch</string>
+      </array>
+    </dict>
+  </array>
 </dict>
 </plist>

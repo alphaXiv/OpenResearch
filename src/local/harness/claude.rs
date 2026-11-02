@@ -73,6 +73,7 @@ pub(crate) struct AuthProbe {
     pub state: HarnessAuthState,
     pub method: Option<&'static str>,
     pub provider: Option<String>,
+    subscription_type: Option<String>,
     pub sequence: u64,
     pub failed_check: bool,
     reported_method_present: bool,
@@ -97,6 +98,7 @@ impl AuthProbe {
             state: HarnessAuthState::Unknown,
             method: None,
             provider: None,
+            subscription_type: None,
             sequence,
             failed_check: true,
             reported_method_present: false,
@@ -162,6 +164,9 @@ pub(crate) fn parse_auth_status(exit_code: Option<i32>, stdout: &[u8], sequence:
                         .all(|byte| byte.is_ascii_alphanumeric() || byte == b'_' || byte == b'-')
             })
             .map(str::to_string),
+        subscription_type: value
+            .as_ref()
+            .and_then(|value| nonempty_str(value, "subscriptionType")),
         sequence,
         failed_check: state == HarnessAuthState::Unknown,
         reported_method_present: reported_method.is_some(),
@@ -491,6 +496,9 @@ fn parse_claude_model_list(result: &Value, ultracode: bool) -> Vec<ModelInfo> {
 
 pub struct ClaudeCode;
 
+/// Override inherited launch metadata so children identify OpenResearch.
+pub(crate) const CLAUDE_ENTRYPOINT: &str = "openresearch";
+
 /// Either credential Claude Code accepts. `ANTHROPIC_AUTH_TOKEN` is the one a
 /// custom `ANTHROPIC_BASE_URL` gateway uses, so detecting only the api key
 /// reports those working setups as signed out.
@@ -505,9 +513,17 @@ fn has_api_credential() -> bool {
 /// Turn Claude's private billing enum into a stable user-facing label. Unknown
 /// values are deliberately hidden: exposing a new server-side enum verbatim is
 /// both confusing and makes the dashboard depend on an undocumented contract.
-fn billing_label(value: Option<&str>) -> Option<String> {
-    match value {
-        Some("stripe_subscription" | "stripe_subscription_contracted") => {
+fn billing_label(
+    subscription: Option<&str>,
+    tier: Option<&str>,
+    value: Option<&str>,
+) -> Option<String> {
+    match (subscription, tier, value) {
+        (Some("max") | None, Some("default_claude_max_5x"), _) => Some("Max 5x".into()),
+        (Some("max") | None, Some("default_claude_max_20x"), _) => Some("Max 20x".into()),
+        (Some("max"), _, _) => Some("Max".into()),
+        (Some("pro"), _, _) => Some("Pro".into()),
+        (_, _, Some("stripe_subscription" | "stripe_subscription_contracted")) => {
             Some("Subscription".to_string())
         }
         _ => None,
@@ -560,6 +576,7 @@ async fn claude_one_shot(bin: &Path, request: OneShot<'_>) -> Result<String> {
     // cwd's CLAUDE.md / settings into a request that carries its own context.
     .current_dir(std::env::temp_dir());
     prepare_env(&mut cmd);
+    cmd.env("CLAUDE_CODE_ENTRYPOINT", CLAUDE_ENTRYPOINT);
     cmd.env(
         "CLAUDE_CONFIG_DIR",
         native_store::prepare_claude(NativeStore::Isolated)?,
@@ -675,13 +692,40 @@ impl ClaudeCode {
             if info.auth_state == HarnessAuthState::Ready {
                 info.authenticated = true;
                 if probe.method == Some("oauth") {
+                    let credential_tier = if cfg!(target_os = "macos") {
+                        None
+                    } else {
+                        read_json(
+                            native_store::claude_home(NativeStore::Legacy)
+                                .join(".credentials.json"),
+                        )
+                        .and_then(|credentials| {
+                            credentials
+                                .get("claudeAiOauth")
+                                .and_then(|oauth| nonempty_str(oauth, "rateLimitTier"))
+                        })
+                    };
+                    info.plan = billing_label(
+                        probe.subscription_type.as_deref(),
+                        credential_tier.as_deref(),
+                        None,
+                    );
                     if let Some(acct) = dirs::home_dir()
                         .and_then(|h| read_json(h.join(".claude.json")))
                         .and_then(|cfg| cfg.get("oauthAccount").cloned())
                     {
                         info.account = nonempty_str(&acct, "emailAddress");
+                        info.account_name = nonempty_str(&acct, "displayName")
+                            .or_else(|| nonempty_str(&acct, "fullName"));
                         info.org = nonempty_str(&acct, "organizationName");
-                        info.plan = billing_label(nonempty_str(&acct, "billingType").as_deref());
+                        info.plan = billing_label(
+                            probe.subscription_type.as_deref(),
+                            credential_tier.as_deref().or_else(|| {
+                                acct.get("organizationRateLimitTier")
+                                    .and_then(Value::as_str)
+                            }),
+                            nonempty_str(&acct, "billingType").as_deref(),
+                        );
                     }
                 }
             }
@@ -751,25 +795,49 @@ impl Harness for ClaudeCode {
         true
     }
 
-    /// Claude compacts in place through its own `/compact`, keeping the session
-    /// id. Without a live child there is nothing to compact against, so the
-    /// shared fallback runs instead.
+    fn supports_compaction(&self) -> bool {
+        true
+    }
+
     async fn compact(&self, ctx: &CompactCtx) -> Result<CompactOutcome> {
-        if ctx
-            .host
+        let Some(native_id) = ctx.native_session_id.clone() else {
+            return Ok(CompactOutcome::Fallback);
+        };
+        let lookup_id = native_id.clone();
+        let native_session =
+            tokio::task::spawn_blocking(move || native_store::claude_session(&lookup_id))
+                .await
+                .map_err(|error| anyhow!("Claude session lookup failed: {error}"))??
+                .ok_or_else(|| {
+                    anyhow!("Claude Code's saved conversation is unavailable for compaction")
+                })?;
+        let project = ctx.project.clone();
+        let session_id = ctx.session_id.clone();
+        let skills_dir = self.session_skills_dir();
+        let (repo, playbook) =
+            tokio::task::spawn_blocking(move || ensure_playbook(&project, &session_id, skills_dir))
+                .await
+                .map_err(|error| anyhow!("playbook task failed: {error}"))??;
+        let spec = SpawnSpec {
+            chat: ctx.host.clone(),
+            session_id: ctx.session_id.clone(),
+            repo,
+            playbook,
+            resume: Some(native_id),
+            config: SpawnConfig {
+                permission_mode: ctx.permission_mode,
+                effort: claude_effort(ctx.reasoning_level.as_deref()).map(str::to_string),
+                model: ctx.model.clone(),
+                native_store: native_session.store,
+                bridge_active: uses_permission_bridge(ctx.permission_mode)
+                    && ctx.host.up_port().is_some(),
+            },
+        };
+        ctx.host
             .claude
-            .compact_session(&ctx.session_id, CLAUDE_COMPACT_TIMEOUT)
-            .await?
-        {
-            return Ok(CompactOutcome::Native);
-        }
-        if ctx.native_session_id.is_some() {
-            // The session is still resumable; summarizing would throw it away.
-            return Err(anyhow!(
-                "Claude Code is not running for this chat — send a message first, then compact"
-            ));
-        }
-        Ok(CompactOutcome::Fallback)
+            .compact_session(spec, CLAUDE_COMPACT_TIMEOUT)
+            .await?;
+        Ok(CompactOutcome::Native)
     }
 
     /// The resident child holds stdin open, so a second stream-json user
@@ -914,25 +982,12 @@ impl Harness for ClaudeCode {
                         plan_mode: None,
                     })
                 }
-                // Mid-turn question (a bridge-held AskUserQuestion): the held
-                // tool call is denied with the user's answer as the message —
-                // the model reads the answer from the denial and continues the
-                // same turn. (Allowing the tool instead would run it headless,
-                // which returns no answer — the model would guess and move on
-                // rather than block; that's the bug this arm exists to avoid.)
                 ("question", _) => {
-                    let (text, _) = synthesize_resume("question", answer);
-                    if text.trim().is_empty() {
-                        return Err(anyhow!("select an option (or add a note) to answer"));
-                    }
+                    let input = question_answer_input(prompt, answer)?;
                     ctx.host.settle_permission(
                         native_id,
-                        crate::local::chat::PermissionDecision::Deny {
-                            message: format!(
-                                "The user answered: {text}. Treat this as their answer and \
-                                 continue — do not ask this question again. (Only the first \
-                                 question of the call was shown; ask any others separately.)"
-                            ),
+                        crate::local::chat::PermissionDecision::Allow {
+                            updated_input: Some(input),
                         },
                     )?;
                     Ok(ResumeAction::Handled { plan_mode: None })
@@ -973,13 +1028,10 @@ impl Harness for ClaudeCode {
         Some(native_store::claude_home(NativeStore::Legacy))
     }
 
-    fn skill_target(&self) -> Option<PathBuf> {
-        Some(
-            self.config_home()?
-                .join("skills")
-                .join("orx")
-                .join("SKILL.md"),
-        )
+    fn native_skill_roots(&self) -> Vec<PathBuf> {
+        self.config_home()
+            .map(|home| vec![home.join("skills")])
+            .unwrap_or_default()
     }
 
     fn skill_shim(&self) -> Option<&'static str> {
@@ -1055,8 +1107,12 @@ pub(crate) fn claude_permission_mode(mode: Option<PermissionMode>) -> &'static s
 
 pub(crate) fn uses_permission_bridge(mode: Option<PermissionMode>) -> bool {
     matches!(
-        mode,
-        Some(PermissionMode::Ask | PermissionMode::AcceptEdits | PermissionMode::Plan)
+        mode.unwrap_or(PermissionMode::Auto),
+        PermissionMode::Ask
+            | PermissionMode::AcceptEdits
+            | PermissionMode::Plan
+            | PermissionMode::Auto
+            | PermissionMode::Bypass
     )
 }
 
@@ -1156,9 +1212,7 @@ fn claude_effort(level: Option<&str>) -> Option<&str> {
 /// resume strategy: a prompt ends the turn and the answer becomes a *new user
 /// message* that continues via `--resume`. `ChatHost` validates `resume_mode`
 /// against Claude's advertised choices before this helper parses it; an absent
-/// id falls through to the per-kind default. The question arm is
-/// also reused as a plain text builder by the bridge's mid-turn question
-/// resume (the denial message that carries the answer).
+/// id falls through to the per-kind default.
 pub(crate) fn synthesize_resume(
     kind: &str,
     req: &PromptAnswer,
@@ -1198,6 +1252,7 @@ pub(crate) fn synthesize_resume(
             let text = "The user approved that action. Continue.".to_string();
             (text, chosen.or(Some(PermissionMode::Bypass)))
         }
+        "question" if !req.approve => (SKIPPED_QUESTION_MESSAGE.to_string(), None),
         // question (or anything else): feed the selection back as the user's reply.
         _ => (req.contextualized_answer(req.plain_answer_text()), None),
     }
@@ -1236,9 +1291,34 @@ fn plan_prompt(name: &str, input: Option<&Value>) -> Option<WirePrompt> {
     })
 }
 
+pub(crate) const SKIPPED_QUESTION_MESSAGE: &str =
+    "The user skipped this question. Do not retry it or treat it as answered.";
+
+fn question_answer_input(prompt: &WirePrompt, answer: &PromptAnswer) -> Result<Value> {
+    let mut input = prompt
+        .tool_input
+        .clone()
+        .ok_or_else(|| anyhow!("question input is missing"))?;
+    if !answer.approve {
+        // The batch continues; an entirely skipped call is denied by the host.
+        input["answers"] = serde_json::json!({});
+        return Ok(input);
+    }
+    let text = answer.contextualized_answer(answer.plain_answer_text());
+    if text.trim().is_empty() {
+        return Err(anyhow!("select an option (or add a note) to answer"));
+    }
+    let question = prompt
+        .question
+        .as_deref()
+        .ok_or_else(|| anyhow!("question text is missing"))?;
+    input["answers"] = serde_json::json!({ question: text });
+    Ok(input)
+}
+
 /// AskUserQuestion → a `question` prompt. Claude's schema is
 /// `{questions: [{question, header, options: [{label, description}], multiSelect}]}`;
-/// we surface the first question (the composer answers one at a time). Also
+/// The bridge presents each question separately and collects the whole batch. Also
 /// used by the plan-mode bridge (`ChatHost::request_permission`, via the
 /// harness re-export) to build the held mid-turn question card.
 pub(crate) fn question_prompt(name: &str, input: Option<&Value>) -> Option<WirePrompt> {
@@ -1334,7 +1414,7 @@ fn replays_user_message(event: &Value, text: &str) -> bool {
 /// including a stale `result` that would end the turn instantly. The echo
 /// itself is consumed (returns `false`); everything after it belongs to the
 /// turn.
-fn belongs_to_current_turn(event: &Value, text: &str, saw_user_echo: &mut bool) -> bool {
+pub(crate) fn belongs_to_current_turn(event: &Value, text: &str, saw_user_echo: &mut bool) -> bool {
     if *saw_user_echo {
         return true;
     }
@@ -2127,11 +2207,7 @@ fn spawn_config(ctx: &TurnCtx, native_store: NativeStore) -> SpawnConfig {
         effort: claude_effort(ctx.reasoning_level.as_deref()).map(str::to_string),
         model: ctx.model.clone(),
         native_store,
-        // The turn WANTS the bridge iff it's plan mode under a bound `orx up`
-        // port; whether the bridge was actually achieved is recorded on the
-        // spawned child's config (a failed write leaves it false and the next
-        // plan turn respawns). Keeping the wanted value here means a plan turn
-        // reconciles against a child that already has the bridge and reuses it.
+        // A failed bridge setup must respawn next turn rather than reuse a child without input.
         bridge_active: uses_permission_bridge(ctx.permission_mode) && ctx.host.up_port().is_some(),
     }
 }
@@ -2227,7 +2303,7 @@ async fn run_attempt(ctx: &mut TurnCtx, spec: SpawnSpec) -> Result<(TurnState, u
                 // A failed write means the child is gone and this turn is about
                 // to error out — park the text so it survives into the next one.
                 match client.send_user_message(&steer.text).await {
-                    Ok(()) => ctx.record_steer(&steer.display),
+                    Ok(()) => ctx.record_steer(&steer, true),
                     Err(_) => {
                         if let Err(error) = ctx.host.park_steer(&ctx.session_id, steer) {
                             ctx.push_error(format!("Could not preserve steering message: {error}"));
@@ -2570,16 +2646,41 @@ mod tests {
 
     #[test]
     fn billing_labels_hide_private_enums() {
+        let probe = parse_auth_status(
+            Some(0),
+            br#"{"loggedIn":true,"authMethod":"claude.ai","subscriptionType":"pro"}"#,
+            1,
+        );
+        assert_eq!(probe.subscription_type.as_deref(), Some("pro"));
         assert_eq!(
-            billing_label(Some("stripe_subscription")),
+            billing_label(None, None, Some("stripe_subscription")),
             Some("Subscription".to_string())
         );
         assert_eq!(
-            billing_label(Some("stripe_subscription_contracted")),
+            billing_label(None, None, Some("stripe_subscription_contracted")),
             Some("Subscription".to_string())
         );
-        assert_eq!(billing_label(Some("future_internal_value")), None);
-        assert_eq!(billing_label(None), None);
+        assert_eq!(
+            billing_label(Some("pro"), None, None).as_deref(),
+            Some("Pro")
+        );
+        assert_eq!(
+            billing_label(Some("max"), Some("default_claude_max_5x"), None).as_deref(),
+            Some("Max 5x")
+        );
+        assert_eq!(
+            billing_label(Some("max"), Some("default_claude_max_20x"), None).as_deref(),
+            Some("Max 20x")
+        );
+        assert_eq!(
+            billing_label(Some("pro"), Some("default_claude_max_20x"), None).as_deref(),
+            Some("Pro")
+        );
+        assert_eq!(
+            billing_label(None, None, Some("future_internal_value")),
+            None
+        );
+        assert_eq!(billing_label(None, None, None), None);
     }
 
     /// A `list_models` response in the live 2.1.212 shape (fields we don't
@@ -2593,7 +2694,7 @@ mod tests {
             "models": [
                 {
                     "value": "default",
-                    "resolvedModel": "claude-opus-4-8[1m]",
+                    "resolvedModel": "claude-fable-5",
                     "displayName": "Default (recommended)",
                     "supportsEffort": true,
                     "supportedEffortLevels": ["low", "medium", "high", "xhigh", "max"],
@@ -2742,6 +2843,30 @@ mod tests {
     }
 
     #[test]
+    fn question_answers_preserve_native_input_and_return_structured_values() {
+        let input = serde_json::json!({"questions":[{"question":"Which colors?","header":"Colors","multiSelect":true,"options":[{"label":"Red","description":"First"},{"label":"Green","description":"Second"}]}]});
+        let mut prompt = question_prompt("AskUserQuestion", Some(&input)).unwrap();
+        prompt.tool_input = Some(input.clone());
+        let returned =
+            question_answer_input(&prompt, &answer(true, None, &["Red", "Green"], None)).unwrap();
+        assert_eq!(returned["questions"], input["questions"]);
+        assert_eq!(
+            returned["answers"],
+            serde_json::json!({"Which colors?":"Red, Green"})
+        );
+        let custom =
+            question_answer_input(&prompt, &answer(true, None, &[], Some("Blue"))).unwrap();
+        assert_eq!(
+            custom["answers"],
+            serde_json::json!({"Which colors?":"Blue"})
+        );
+        assert!(question_answer_input(&prompt, &answer(true, None, &[], None)).is_err());
+        let skipped = question_answer_input(&prompt, &answer(false, None, &[], None)).unwrap();
+        assert_eq!(skipped["questions"], input["questions"]);
+        assert_eq!(skipped["answers"], serde_json::json!({}));
+    }
+
+    #[test]
     fn permission_mode_maps_to_claude_cli_strings() {
         assert_eq!(claude_permission_mode(Some(PermissionMode::Ask)), "manual");
         assert_eq!(
@@ -2763,8 +2888,9 @@ mod tests {
         assert!(uses_permission_bridge(Some(PermissionMode::Ask)));
         assert!(uses_permission_bridge(Some(PermissionMode::AcceptEdits)));
         assert!(uses_permission_bridge(Some(PermissionMode::Plan)));
-        assert!(!uses_permission_bridge(Some(PermissionMode::Auto)));
-        assert!(!uses_permission_bridge(Some(PermissionMode::Bypass)));
+        assert!(uses_permission_bridge(Some(PermissionMode::Auto)));
+        assert!(uses_permission_bridge(None));
+        assert!(uses_permission_bridge(Some(PermissionMode::Bypass)));
     }
 
     #[test]
@@ -2813,6 +2939,16 @@ mod tests {
     fn question_feeds_selections_back_with_no_mode_change() {
         let (text, mode) = synthesize_resume("question", &answer(true, None, &["A", "B"], None));
         assert_eq!(text, "A, B");
+        assert_eq!(mode, None);
+    }
+
+    #[test]
+    fn skipped_question_resumes_without_an_answer_or_mode_change() {
+        let (text, mode) = synthesize_resume("question", &answer(false, None, &[], None));
+        assert_eq!(
+            text,
+            "The user skipped this question. Do not retry it or treat it as answered."
+        );
         assert_eq!(mode, None);
     }
 

@@ -156,6 +156,10 @@ impl Harness for Cursor {
         true
     }
 
+    fn supports_compaction(&self) -> bool {
+        true
+    }
+
     async fn detect(&self) -> Option<HarnessInfo> {
         self.detect_at(false).await
     }
@@ -226,13 +230,8 @@ impl Harness for Cursor {
         Some(native_store::cursor_home(NativeStore::Legacy))
     }
 
-    fn skill_target(&self) -> Option<PathBuf> {
-        Some(
-            self.config_home()?
-                .join("skills")
-                .join("orx")
-                .join("SKILL.md"),
-        )
+    fn native_skill_roots(&self) -> Vec<PathBuf> {
+        vec![native_store::cursor_skills_dir()]
     }
 
     fn skill_shim(&self) -> Option<&'static str> {

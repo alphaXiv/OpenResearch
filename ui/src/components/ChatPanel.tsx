@@ -1,20 +1,29 @@
+import { showConfirmDialog, showCustomDialog } from "../dialog";
+import { Dialog } from "@base-ui/react/dialog";
+import { EscapeScope } from "./EscapeScope";
+import { commandRegion } from "../keyboardRegion";
 import { ComposerProjectPicker } from "./ComposerProjectPicker";
 import { ProjectInfoCard } from "./ProjectInfoCard";
+import { SessionHoverCard } from "./SessionHoverCard";
+import { taskLocation } from "../workspaceState";
 import { fitSidebarRows, sidebarRowHeight, type SidebarRow } from "../sidebarLayout";
-import { useVirtualizer, defaultRangeExtractor, type Range as VirtualRange } from "@tanstack/react-virtual";
+import { useVirtualizer, defaultRangeExtractor, measureElement as measureVirtualElement, type Range as VirtualRange } from "@tanstack/react-virtual";
 import { markLiveUpdate } from "../queries/live";
 import { removeSession as removeCachedSession } from "../queries/invalidation";
 import { nativeOptions, sessionAcpHarness } from "../acp";
+import { resolveHarnessDefaultModel } from "../modelSelection";
 import { setChatConfiguration } from "../api";
+import { RemoteConnectionStrip, useRemoteConnection } from "../RemoteRuntime";
 import {
   isCurrentScope,
   setScopedQueryData,
   deletedSessionIds,
   queryClient,
+  subscribeWorkspace,
   workspaceKey,
 } from "../queries/client";
-import { LOCAL_PREFIX, SHELL_TOOL } from "../queries/chatState";
-import { useInfiniteQuery, useMutation, useQueries, useQuery } from "@tanstack/react-query";
+import { LOCAL_ERROR_PART_ID, LOCAL_PREFIX, SHELL_TOOL } from "../queries/chatState";
+import { CancelledError, useInfiniteQuery, useMutation, useQueries, useQuery } from "@tanstack/react-query";
 import { useNavigate } from "@tanstack/react-router";
 import { useChatState } from "../queries/chatStore";
 
@@ -34,7 +43,11 @@ import {
   type FileMentionMatch,
 } from "../fileMentions";
 import { m } from "../paraglide/messages.js";
+import { formatForDisplay, matchesKeyboardEvent, useAppHotkeys, useHotkey } from "@tanstack/react-hotkeys";
+import { appHotkeys } from "../hotkeys";
+import { copyToClipboard } from "../clipboard";
 import { autoDir, ltr } from "../i18n";
+import { navigateKeyboardList } from "../keyboardNavigation";
 import { useLocale } from "../locale";
 import {
   ArrowDown,
@@ -116,6 +129,8 @@ import {
   runShellCommand,
   fmtDuration,
   sendChatMessage,
+  getChatSubmission,
+  RejectedResponseError,
   setChatSessionArchived,
   setChatSessionAutonomy,
   setChatSessionPermissionMode,
@@ -126,7 +141,6 @@ import {
   type ChatImageAttachment,
   type ChatMessage,
   type ChatPart,
-  type ChatPrompt,
   type Autonomy,
   type ChatSession,
   type Harness,
@@ -150,7 +164,8 @@ import {
   isTurnStatusPart,
   splitResponseTurn,
   partIsVisible,
-  pendingQuestionId,
+  questionReplies,
+  type QuestionReplies,
   hasPendingInput,
   partsTailToolId,
   streamTailIsText,
@@ -168,7 +183,9 @@ import {
   retryStatusLabel,
 } from "../chatRecovery";
 import {
+  composerSeed,
   composerStashContent,
+  forgetComposerSeed,
   EMPTY_COMPOSER_STASH,
   type ComposerAnnotation,
   type ComposerAttachment,
@@ -232,7 +249,7 @@ import {
   shouldRecoverLegacyMath,
   tableMarkdown,
 } from "./annotationMarkdown";
-import { Button, IconButton, LoadingRow, MenuItem, showAlert, Spinner, Tooltip } from "./ui";
+import { Button, IconButton, LoadingRow, MenuItem, showAlert, Spinner, Textarea, Tooltip } from "./ui";
 import { PaperTitle } from "./PaperTitle";
 
 const TOOL_LINE_CLASS_NAME = "tool-line flex-1 min-w-0 line-clamp-2 break-words text-base leading-6";
@@ -651,16 +668,17 @@ function AnnotationEntries({
         <AnnotationPreview annotation={annotation} />
       </div>
       {onRemove && (
-        <IconButton
-          type="button"
-          size="small"
-          data-annotation-remove
-          title={m.chat_panel_remove_annotation()}
-          aria-label={m.a11y_remove_annotation({ number: fmtNumber(index + 1) })}
-          onClick={() => onRemove(annotation.id)}
-        >
-          <X size={13} />
-        </IconButton>
+        <Tooltip interactive content={m.chat_panel_remove_annotation()}>
+          <IconButton
+            type="button"
+            size="small"
+            data-annotation-remove
+            aria-label={m.a11y_remove_annotation({ number: fmtNumber(index + 1) })}
+            onClick={() => onRemove(annotation.id)}
+          >
+            <X size={14} />
+          </IconButton>
+        </Tooltip>
       )}
     </div>
   ));
@@ -739,7 +757,7 @@ function AnnotationsPopover({
             aria-label={m.chat_panel_clear_annotations()}
             onClick={onClear}
           >
-            <X size={13} />
+            <X size={14} />
           </button>
         )}
       </div>
@@ -755,6 +773,7 @@ function AnnotationsPopover({
           <AnnotationEntries annotations={annotations} onRemove={onRemove ? removeAnnotation : undefined} />
         </div>
       )}
+      <EscapeScope enabled={popover.open} onEscape={() => { popover.setOpen(false); triggerRef.current?.focus(); }} />
     </div>
   );
 }
@@ -762,14 +781,6 @@ function AnnotationsPopover({
 function ComposerAnnotations(props: Omit<React.ComponentProps<typeof AnnotationsPopover>, "variant">) {
   return <AnnotationsPopover {...props} variant="composer" />;
 }
-
-const PROMPT_COLLAPSED_CLASS_NAME = [
-  "prompt-collapsed text-muted text-base font-[375] my-3.5 mx-0 [&_summary]:flex",
-  "[&_summary]:items-center [&_summary]:gap-2 [&_summary]:cursor-pointer",
-  "[&_summary]:list-none [&_summary]:select-none [&_summary::-webkit-details-marker]:hidden",
-  "[&_summary::after]:content-['›'] [&_summary::after]:text-muted",
-  "[&_summary::after]:transition-transform [&_summary::after]:duration-80 [&_summary::after]:ease-standard [&[open]_summary::after]:rotate-90",
-].join(" ");
 
 const PROMPT_COLLAPSED_BODY_CLASS_NAME = [
   "prompt-collapsed-body mt-1.5 ps-3 border-s-2 border-s-border",
@@ -779,16 +790,11 @@ const PROMPT_COLLAPSED_BODY_CLASS_NAME = [
 const PLAN_RESOLVED_CLASS_NAME = [
   "prompt-collapsed plan-resolved text-subtext my-3.5 mx-0",
   "[&_summary]:flex [&_summary]:items-center [&_summary]:gap-2 [&_summary]:w-fit [&_summary]:max-w-full",
-  "[&_summary]:py-[3px] [&_summary]:px-1 [&_summary]:cursor-pointer [&_summary]:rounded-sm",
+  "[&_summary]:py-1 [&_summary]:px-1 [&_summary]:cursor-pointer [&_summary]:rounded-sm",
   "[&_summary]:list-none [&_summary]:select-none [&_summary:hover]:bg-surface",
   "[&_summary::-webkit-details-marker]:hidden",
   "[&_summary_.plan-chevron]:transition-transform [&_summary_.plan-chevron]:duration-120",
   "[&_summary_.plan-chevron]:ease-standard [&[open]_summary_.plan-chevron]:rotate-90",
-].join(" ");
-
-const PROMPT_HEAD_CLASS_NAME = [
-  "prompt-head text-sm font-medium text-text",
-  "[&_code]:font-mono [&_code]:text-sm [&_code]:text-text",
 ].join(" ");
 
 const PROMPT_ACTIONS_CLASS_NAME = "prompt-actions flex flex-wrap gap-2";
@@ -2002,7 +2008,7 @@ function ToolActivityLabel({
         rel="noopener noreferrer"
       >
         {activity.label}
-        <ArrowUpRight className="inline ms-1 opacity-50" size={13} aria-hidden="true" />
+        <ArrowUpRight className="inline ms-1 opacity-50" size={14} aria-hidden="true" />
       </a>
     );
   }
@@ -2337,7 +2343,7 @@ function TurnStatusRow({
   const errorMessage = cleanToolError(part.state?.error || m.chat_turn_incomplete());
   return (
     <details className="turn-usage-limit group/limit mt-4 text-base text-subtext">
-      <summary className="flex w-fit max-w-full items-center gap-2 cursor-pointer list-none rounded-sm focus-visible:outline-2 focus-visible:outline-text [&::-webkit-details-marker]:hidden">
+      <summary className="flex w-fit max-w-full items-center gap-2 cursor-pointer list-none rounded-sm focus-visible:outline-2 focus-visible:outline-focus [&::-webkit-details-marker]:hidden">
         <Icon size={18} className={temporaryApiError ? "shrink-0 text-subtext" : "shrink-0 text-accent-red"} aria-hidden="true" />
         <span>{label}</span>
         <ChevronRight size={16} className="shrink-0 text-text transition-transform duration-120 ease-standard group-open/limit:rotate-90 motion-reduce:transition-none" aria-hidden="true" />
@@ -2389,6 +2395,14 @@ function ToolRow({
   const hasDetail = failed && Boolean(errorMessage);
   const [detailOpen, setDetailOpen] = useState(false);
   const detailId = `tool-error-${part.id.replace(/[^A-Za-z0-9_-]/g, "-")}`;
+  if (part.id === LOCAL_ERROR_PART_ID) {
+    return (
+      <div className="local-error mt-4 flex items-start gap-2 text-base text-subtext">
+        <TriangleAlert size={18} className="mt-0.5 shrink-0 text-accent-red" aria-hidden="true" />
+        <span className="wrap-anywhere">{errorMessage}</span>
+      </div>
+    );
+  }
   if (part.tool === "error") {
     return <TurnStatusRow part={part} busy={false} recovering={false} usageLimited={isUsageLimitPart(part)} />;
   }
@@ -2397,7 +2411,7 @@ function ToolRow({
       {failed && <span className="sr-only">{m.chat_panel_failed()} </span>}
       {failed ? (
         <span className="flex h-6 shrink-0 items-center text-accent-red">
-          <CircleX size={16} strokeWidth={1.75} className="tool-kind-icon" aria-hidden="true" />
+          <CircleX size={16} strokeWidth={1.5} className="tool-kind-icon" aria-hidden="true" />
         </span>
       ) : (
         <ToolActivityIcon activity={activity} className="text-muted" />
@@ -2422,12 +2436,12 @@ function ToolRow({
   );
 
   if (!hasDetail) {
-    return <div className="tool-row flex items-start gap-2 min-w-0 py-[3px] px-1">{line}</div>;
+    return <div className="tool-row flex items-start gap-2 min-w-0 py-1 px-1">{line}</div>;
   }
 
   return (
     <div className="tool-row tool-row-error flex flex-col min-w-0">
-      <div className="flex items-start gap-2 w-fit max-w-full py-[3px] px-1 min-w-0 rounded-sm">
+      <div className="flex items-start gap-2 w-fit max-w-full py-1 px-1 min-w-0 rounded-sm">
         {line}
         <button
           type="button"
@@ -2521,7 +2535,7 @@ function ToolGroup({
     if (pendingActivity) {
       return (
         <div className="tool-group my-3.5 mx-0">
-          <div className="tool-row flex items-start gap-2 min-w-0 py-[3px] px-1 text-base leading-6 text-subtext">
+          <div className="tool-row flex items-start gap-2 min-w-0 py-1 px-1 text-base leading-6 text-subtext">
             <ToolActivityIcon activity={pendingActivity} className={shimmering ? "tool-running-shimmer-icon" : "text-muted"} />
             <span
               className={`${shimmering ? "tool-running-shimmer" : ""} min-w-0 line-clamp-2 break-words`}
@@ -2559,7 +2573,7 @@ function ToolGroup({
 
   return (
     <div className="tool-group my-3.5 mx-0">
-      <div className="tool-group-summary flex items-start gap-2 w-fit max-w-full py-[3px] px-1 text-base leading-6 text-subtext text-start">
+      <div className="tool-group-summary flex items-start gap-2 w-fit max-w-full py-1 px-1 text-base leading-6 text-subtext text-start">
         <ToolActivityIcon activity={iconActivity} className={shimmering ? "tool-running-shimmer-icon" : "text-muted"} />
         {pendingActivity ? (
           <span
@@ -2638,22 +2652,39 @@ function ToolGroup({
  * chosen answer — all inline at the card's chronological position. */
 function PromptCard({
   part,
+  questionText = part.prompt?.question,
+  answerInTranscript = false,
   onRespond,
   onOpenFile,
   onOpenPlan,
 }: {
   part: ChatPart;
-  onRespond?: (answer: PromptAnswer) => void;
+  questionText?: string;
+  answerInTranscript?: boolean;
+  onRespond?: (answer: PromptAnswer) => Promise<boolean>;
   onOpenFile?: OpenTranscriptFile;
   onOpenPlan?: (plan: string, promptId: string, intent: TabOpenIntent) => void;
 }) {
-  const p = part.prompt as ChatPrompt;
+  const p = part.prompt;
   const [picked, setPicked] = useState<string[]>([]);
+  const [answerText, setAnswerText] = useState("");
+  const [submitting, setSubmitting] = useState(false);
+  if (!p) return null;
   // Read-only host (no onRespond): actions disabled or hidden, card visible.
-  const done = !onRespond;
+  const done = !onRespond || submitting;
 
-  const respond = (answer: Omit<PromptAnswer, "promptId">) =>
-    onRespond?.({ promptId: part.id, ...answer });
+  const respond = async (answer: Omit<PromptAnswer, "promptId">) => {
+    if (!onRespond || submitting) return;
+    setSubmitting(true);
+    try {
+      if (await onRespond({ promptId: part.id, ...answer })) {
+        setAnswerText("");
+        setPicked([]);
+      }
+    } finally {
+      setSubmitting(false);
+    }
+  };
 
   // Resolved rendering, keyed off `resolved` alone (`done` also covers
   // read-only hosts, where an *unresolved* card must stay visible).
@@ -2671,11 +2702,11 @@ function PromptCard({
       return (
         <details className={PLAN_RESOLVED_CLASS_NAME}>
           <summary>
-            <span className="plan-resolved-label text-base font-[375] wrap-anywhere">
+            <span className="plan-resolved-label text-base font-normal wrap-anywhere">
               {p.synthesized ? m.chat_plan() : m.chat_proposed_plan()}
             </span>
-            <OutcomeIcon size={17} strokeWidth={1.8} className={`shrink-0 ${outcome.iconClass}`} />
-            <span className="plan-resolved-label prompt-outcome text-base font-[375] wrap-anywhere">{outcome.label}</span>
+            <OutcomeIcon size={16} strokeWidth={1.5} className={`shrink-0 ${outcome.iconClass}`} />
+            <span className="plan-resolved-label prompt-outcome text-base font-normal wrap-anywhere">{outcome.label}</span>
             <ChevronRight size={12} className="plan-chevron shrink-0 text-muted" />
           </summary>
           <div className={`${PROMPT_COLLAPSED_BODY_CLASS_NAME} ms-6`}>
@@ -2685,38 +2716,33 @@ function PromptCard({
         </details>
       );
     }
-    // question — one line: header/question + what was chosen (or the typed
-    // custom answer). No echo at all (stale-resolved): neutral "Resolved",
-    // matching the plan row.
-    const chosen = (p.answers ?? []).join(", ") || p.note || "";
+    const chosen = [(p.answers ?? []).join(", "), p.note].filter(Boolean).join("\n\n");
+    if (p.approved === false && !chosen) {
+      return (
+        <details className="group/question py-1 text-base text-subtext">
+          <summary className="flex w-fit max-w-full items-center gap-2 cursor-pointer list-none rounded-sm focus-visible:outline-2 focus-visible:outline-focus [&::-webkit-details-marker]:hidden">
+            <span>{m.chat_question()} — {m.chat_question_skipped()}</span>
+            <ChevronRight size={16} className="shrink-0 text-text transition-transform duration-120 ease-standard group-open/question:rotate-90 motion-reduce:transition-none" aria-hidden="true" />
+          </summary>
+          <div className="mt-1 leading-normal text-subtext whitespace-pre-line wrap-anywhere">{questionText}</div>
+        </details>
+      );
+    }
     const annotations: ComposerAnnotation[] = (p.annotations ?? []).map((annotation, index) => ({
       id: `${part.id}-annotation-${index}`,
       text: annotation.text,
     }));
+    if (!chosen) return annotations.length > 0 ? <AnnotationsPopover annotations={annotations} variant="sent" /> : null;
     return (
-      <div className="flex flex-col items-end gap-1.5">
-        {annotations.length > 0 && <AnnotationsPopover annotations={annotations} variant="sent" />}
-        <details className={PROMPT_COLLAPSED_CLASS_NAME}>
-          <summary>
-            <span className="prompt-collapsed-title font-[375] wrap-anywhere">{p.header || p.question || m.chat_question()}</span>
-            <span className={`prompt-outcome font-[375] text-subtext wrap-anywhere [&.approved]:text-accent-green [&.chosen]:text-accent-green [&.approved::before]:content-['✓_'] [&.chosen::before]:content-['✓_'] [&.revised]:text-accent-amber [&.rejected]:text-accent-amber ${chosen ? "chosen" : ""}`}>{chosen || m.chat_resolved()}</span>
-          </summary>
-          <div className={PROMPT_COLLAPSED_BODY_CLASS_NAME}>
-            {/* The summary title already shows the question when there's no header. */}
-            {p.header && p.question && <div className="prompt-q text-base font-semibold leading-normal text-text">{p.question}</div>}
-            {(p.options ?? []).length > 0 && (
-              <ul className="prompt-collapsed-options mt-1.5 mx-0 mb-0 ps-4.5 [&_.sel]:text-text [&_.sel]:font-medium">
-                {(p.options ?? []).map((o) => (
-                  <li key={o.label} className={p.answers?.includes(o.label) ? "sel" : ""}>
-                    {o.label}
-                  </li>
-                ))}
-              </ul>
-            )}
-            {/* A note-only answer is already the summary outcome — don't echo it twice. */}
-            {p.note && p.note !== chosen && <div className="prompt-collapsed-note mt-1.5 italic">{p.note}</div>}
+      <div className="flex flex-col gap-3 py-1">
+        {questionText && <div className="text-base text-text leading-normal whitespace-pre-line wrap-anywhere">{questionText}</div>}
+        {!answerInTranscript && (
+          <div className="ms-auto max-w-[88%] rounded-2xl bg-panel px-4 py-3 text-base text-text whitespace-pre-wrap wrap-anywhere">
+            {questionText && <div className="mb-1 truncate text-subtext">{questionText}</div>}
+            {chosen}
           </div>
-        </details>
+        )}
+        {annotations.length > 0 && <AnnotationsPopover annotations={annotations} variant="sent" />}
       </div>
     );
   }
@@ -2729,11 +2755,11 @@ function PromptCard({
     // harness-agnostic permission-mode wire ids).
     const docked = !!onOpenPlan;
     return (
-      <div className={`prompt-card my-2 mx-0 py-3 px-3.5 border border-border border-s-[3px] border-s-border rounded-sm bg-accent-blue-subtle flex flex-col gap-[9px] [&.plan]:border-s-accent-blue [&.permission]:border-s-accent-amber [&.question]:border-s-accent-purple [&.readonly]:opacity-60 plan ${done ? "readonly" : ""}`}>
+      <div className={`prompt-card my-2 mx-0 py-3 px-3.5 border border-accent-blue-border rounded-lg bg-accent-blue-subtle flex flex-col gap-2 [&.readonly]:opacity-60 plan ${done ? "readonly" : ""}`}>
         <div className="prompt-head text-base font-semibold text-text">
           {p.synthesized ? m.chat_plan_ready() : m.chat_proposed_plan()}
         </div>
-        <div className={`prompt-plan text-base leading-[1.6] text-text max-h-85 overflow-y-auto [&.clamped]:max-h-[9.5em] [&.clamped]:overflow-hidden [&.clamped]:relative [&.clamped::after]:content-[''] [&.clamped::after]:absolute [&.clamped::after]:inset-x-0 [&.clamped::after]:bottom-0 [&.clamped::after]:top-auto [&.clamped::after]:h-8.5 [&.clamped::after]:bg-[linear-gradient(to_bottom,_transparent,_var(--accent-blue-subtle))] [&.clamped::after]:pointer-events-none ${docked ? "clamped" : ""}`}>
+        <div className={`prompt-plan text-base leading-relaxed text-text max-h-85 overflow-y-auto [&.clamped]:max-h-[9.5em] [&.clamped]:overflow-hidden [&.clamped]:relative [&.clamped::after]:content-[''] [&.clamped::after]:absolute [&.clamped::after]:inset-x-0 [&.clamped::after]:bottom-0 [&.clamped::after]:top-auto [&.clamped::after]:h-8.5 [&.clamped::after]:bg-[linear-gradient(to_bottom,_transparent,_var(--accent-blue-subtle))] [&.clamped::after]:pointer-events-none ${docked ? "clamped" : ""}`}>
           <Md text={p.plan ?? ""} onOpenFile={onOpenFile} />
         </div>
         {docked && (
@@ -2775,22 +2801,22 @@ function PromptCard({
     const reason =
       (typeof p.toolInput?.reason === "string" && p.toolInput.reason) || "";
     const description = inputString(toolInput, "description") || "";
-    const explanation = p.header || reason || description || permissionActivityLabel(p.tool, toolInput);
+    const explanation = p.header || reason || description || (summary ? "" : permissionActivityLabel(p.tool, toolInput));
     const headingId = `permission-heading-${part.id}`;
     return (
       <div
-        className={`prompt-card permission my-3 w-full max-w-2xl overflow-hidden rounded-md border border-border bg-background shadow-hairline [&.readonly]:opacity-60 ${done ? "readonly" : ""}`}
+        className={`prompt-card permission my-3 w-full max-w-2xl overflow-hidden rounded-lg border border-border bg-background [&.readonly]:opacity-60 ${done ? "readonly" : ""}`}
         role="group"
         aria-labelledby={headingId}
       >
         <div className="flex items-center gap-2.5 px-3.5 pt-3 pb-0">
           <span className="flex size-7 shrink-0 items-center justify-center rounded-md bg-accent-amber-subtle text-accent-amber">
-            <TriangleAlert size={15} strokeWidth={1.8} aria-hidden="true" />
+            <TriangleAlert size={16} strokeWidth={1.5} aria-hidden="true" />
           </span>
           <span id={headingId} className="text-base font-semibold text-text">{m.chat_panel_approval_required()}</span>
         </div>
         <div className="flex flex-col gap-3 px-3.5 py-3">
-          <div className="prompt-sub text-base font-normal leading-normal text-text wrap-anywhere">{explanation}</div>
+          {explanation && <div className="prompt-sub text-base font-normal leading-normal text-text wrap-anywhere">{explanation}</div>}
           {summary && (
             <code className="prompt-command block max-h-36 overflow-auto whitespace-pre-wrap wrap-anywhere rounded-md border border-border-variant bg-surface px-3 py-2 font-mono text-sm leading-relaxed text-text">
               {summary}
@@ -2831,46 +2857,74 @@ function PromptCard({
     );
   }
 
-  // question
-  const toggle = (label: string) =>
-    setPicked((cur) =>
-      p.multiSelect
-        ? cur.includes(label)
-          ? cur.filter((l) => l !== label)
-          : [...cur, label]
-        : [label],
-    );
+  const toggle = (label: string) => {
+    setAnswerText("");
+    setPicked((cur) => p.multiSelect
+      ? cur.includes(label) ? cur.filter((item) => item !== label) : [...cur, label]
+      : [label]);
+  };
+  const submit = () => {
+    if (!done && (answerText.trim() || picked.length > 0)) {
+      void respond({ answers: picked, note: answerText.trim() || undefined });
+    }
+  };
+  const skip = () => void respond({ approve: false });
   return (
-    <div className={`prompt-card my-2 mx-0 py-3 px-3.5 border border-border border-s-[3px] border-s-border rounded-sm bg-accent-purple-subtle flex flex-col gap-[9px] [&.plan]:border-s-accent-blue [&.permission]:border-s-accent-amber [&.question]:border-s-accent-purple [&.readonly]:opacity-60 question ${done ? "readonly" : ""}`}>
-      {p.header && <div className={PROMPT_HEAD_CLASS_NAME}>{p.header}</div>}
-      {p.question && <div className="prompt-q text-base font-semibold leading-normal text-text">{p.question}</div>}
-      <div className="prompt-options flex flex-col gap-1.5">
-        {(p.options ?? []).map((o) => {
-          const sel = picked.includes(o.label);
-          return (
-            <button
-              key={o.label}
-              className={`prompt-option flex flex-col items-start gap-0.5 w-full py-2 px-[11px] text-start border border-border rounded-sm bg-background text-text cursor-pointer transition-[border-color,background] duration-80 ease-standard [&:hover:not(:disabled)]:border-border-strong [&:hover:not(:disabled)]:bg-surface [&.sel]:border-primary [&.sel]:bg-primary-subtle [&:disabled]:cursor-default ${sel ? "sel" : ""}`}
-              disabled={done}
-              onClick={() => (done ? undefined : p.multiSelect ? toggle(o.label) : respond({ answers: [o.label] }))}
-            >
-              <span className="prompt-option-label block text-sm font-medium">{o.label}</span>
-              {o.description && <span className="prompt-option-desc block text-sm font-normal leading-[1.45] text-subtext">{o.description}</span>}
-            </button>
-          );
-        })}
+    <div className="prompt-card question flex flex-col gap-2 rounded-lg border border-border bg-surface p-3" role="group" aria-labelledby={`question-${part.id}`}>
+      <div className="flex items-center gap-2 text-subtext">
+        <HelpCircle size={18} aria-hidden="true" />
+        <span className="flex-1 text-sm">{p.header || m.chat_question()}</span>
+        {onRespond && <IconButton aria-label={m.chat_question_skip()} disabled={done} onClick={skip}><X size={16} /></IconButton>}
       </div>
-      {p.multiSelect && !done && (
-        <div className={PROMPT_ACTIONS_CLASS_NAME}>
-          <Button
-            size="small"
-            variant="primary"
-            disabled={picked.length === 0}
-            onClick={() => respond({ answers: picked })}
-          >
-            {m.chat_panel_submit()}
-          </Button>
+      <div id={`question-${part.id}`} className="text-base font-medium leading-snug text-text whitespace-pre-line wrap-anywhere">{p.question?.replace(/\n\s*\n/g, "\n")}</div>
+      {(p.options?.length ?? 0) > 0 && (
+        <div className="prompt-options flex flex-col">
+          {p.options?.map((option, index) => {
+            const selected = picked.includes(option.label);
+            return (
+              <button
+                type="button"
+                key={option.label}
+                aria-pressed={selected}
+                className={`prompt-option flex w-full items-start gap-2 rounded-lg px-2 py-1.5 text-start text-text cursor-pointer transition-colors duration-120 ease-standard enabled:hover:bg-highlight focus-visible:bg-highlight focus-visible:outline-2 focus-visible:outline-focus disabled:cursor-default ${selected ? "bg-panel" : ""}`}
+                disabled={done}
+                onClick={() => toggle(option.label)}
+              >
+                <span className={`flex size-6 shrink-0 items-center justify-center rounded-md border text-sm ${selected ? "border-text bg-surface text-text" : "border-border bg-background text-subtext"}`}>{selected ? <Check size={14} /> : index + 1}</span>
+                <span className="min-w-0 text-base">
+                  <span>{option.label}</span>
+                  {option.description && <span className="ms-2 text-sm text-subtext">{option.description}</span>}
+                </span>
+              </button>
+            );
+          })}
         </div>
+      )}
+      {onRespond && (
+        <form className="flex flex-wrap items-end gap-2" onSubmit={(event) => { event.preventDefault(); submit(); }}>
+          <div className="flex min-w-0 basis-48 grow items-start gap-2">
+            <Pencil size={18} className="mt-2 shrink-0 text-subtext" aria-hidden="true" />
+            <Textarea
+              variant="inline"
+              aria-label={m.chat_question_your_answer()}
+              placeholder={m.chat_question_custom_response()}
+              value={answerText}
+              onChange={(event) => { setAnswerText(event.target.value); setPicked([]); }}
+              onKeyDown={(event) => {
+                if (event.key === "Enter" && !event.shiftKey && !event.nativeEvent.isComposing && event.nativeEvent.keyCode !== 229) {
+                  event.preventDefault();
+                  submit();
+                }
+              }}
+              disabled={done}
+              rows={1}
+            />
+          </div>
+          <div className="ms-auto flex items-center gap-2">
+            <Button type="button" disabled={done} onClick={skip}>{m.chat_question_skip()}</Button>
+            <Button type="submit" variant="primary" disabled={done || (!answerText.trim() && picked.length === 0)}>{m.chat_panel_send()}</Button>
+          </div>
+        </form>
       )}
     </div>
   );
@@ -2908,16 +2962,6 @@ function attachmentPartView(p: ChatPart): { src: string; isPdf: boolean; name: s
   const isPdf =
     raw.startsWith("data:application/pdf") || /\.pdf$/i.test(name) || /\.pdf$/i.test(raw);
   return { src, isPdf, name };
-}
-
-async function copyToClipboard(text: string) {
-  try {
-    if (!navigator.clipboard) throw new Error(m.file_tree_clipboard_unavailable());
-    await navigator.clipboard.writeText(text);
-    showAlert(m.common_copied(), "success");
-  } catch (error) {
-    showAlert(error instanceof Error ? error.message : String(error), "error");
-  }
 }
 
 function downloadMarkdown(fileName: string, markdown: string) {
@@ -2968,25 +3012,27 @@ function ForkControls({
     >
       {many && (
         <>
-          <IconButton size="small"
-            title={m.chat_panel_previous_version()}
-            aria-label={m.chat_panel_previous_version()}
-            disabled={pagerDisabled || !prevId}
-            onClick={() => prevId && onSelect(prevId)}
-          >
-            <ChevronLeft size={14} />
-          </IconButton>
+          <Tooltip interactive content={m.chat_panel_previous_version()}>
+            <IconButton size="small"
+              aria-label={m.chat_panel_previous_version()}
+              disabled={pagerDisabled || !prevId}
+              onClick={() => prevId && onSelect(prevId)}
+            >
+              <ChevronLeft size={14} />
+            </IconButton>
+          </Tooltip>
           <span className="fork-count text-xs text-subtext tabular-nums select-none">
             {index + 1}/{count}
           </span>
-          <IconButton size="small"
-            title={m.chat_panel_next_version()}
-            aria-label={m.chat_panel_next_version()}
-            disabled={pagerDisabled || !nextId}
-            onClick={() => nextId && onSelect(nextId)}
-          >
-            <ChevronRight size={14} />
-          </IconButton>
+          <Tooltip interactive content={m.chat_panel_next_version()}>
+            <IconButton size="small"
+              aria-label={m.chat_panel_next_version()}
+              disabled={pagerDisabled || !nextId}
+              onClick={() => nextId && onSelect(nextId)}
+            >
+              <ChevronRight size={14} />
+            </IconButton>
+          </Tooltip>
         </>
       )}
       <div className="flex items-center gap-0.5 opacity-0 group-hover/turn:opacity-100 group-focus-within/turn:opacity-100 transition-opacity duration-80 ease-standard">
@@ -2994,17 +3040,18 @@ function ForkControls({
           {sentAt.toLocaleTimeString(getLocale(), { hour: "numeric", minute: "2-digit" })}
         </time>
         <IconButton size="small" aria-label={m.md_copy()} disabled={!text} onClick={copy}>
-          <Copy size={13} />
+          <Copy size={14} />
         </IconButton>
       </div>
-      <IconButton size="small"
-        title={m.chat_panel_edit_and_re_send()}
-        aria-label={m.chat_panel_edit_and_re_send()}
-        disabled={editDisabled}
-        onClick={onEdit}
-      >
-        <Pencil size={13} />
-      </IconButton>
+      <Tooltip interactive content={m.chat_panel_edit_and_re_send()}>
+        <IconButton size="small"
+          aria-label={m.chat_panel_edit_and_re_send()}
+          disabled={editDisabled}
+          onClick={onEdit}
+        >
+          <Pencil size={14} />
+        </IconButton>
+      </Tooltip>
     </div>
   );
 }
@@ -3012,6 +3059,7 @@ function ForkControls({
 export const Message = memo(function Message({
   message,
   responseMessages,
+  replies,
   activePermissionId,
   pendingTailToolId,
   onOpenFile,
@@ -3039,6 +3087,7 @@ export const Message = memo(function Message({
 }: {
   message: ChatMessage;
   responseMessages?: ChatMessage[];
+  replies?: QuestionReplies;
   activePermissionId: string | null;
   pendingTailToolId?: string | null;
   onOpenFile?: OpenTranscriptFile;
@@ -3047,7 +3096,7 @@ export const Message = memo(function Message({
   runExperimentName?: (runId: string) => string;
   onOpenExperiment?: OpenTranscriptTarget;
   experimentName?: (experimentId: string) => string;
-  onRespond?: (answer: PromptAnswer) => void;
+  onRespond?: (answer: PromptAnswer) => Promise<boolean>;
   /** Open a plan's full markdown in the right pane (plan cards/strip). */
   onOpenPlan?: (plan: string, promptId: string, intent: TabOpenIntent) => void;
   /** Open a sub-agent's transcript in the right pane (spawn-row "view"). */
@@ -3077,7 +3126,7 @@ export const Message = memo(function Message({
   const shell = shellExchangePart(message);
   if (shell) return <ShellExchangeCard part={shell} />;
   if (message.role === "user") {
-    const text = message.parts
+    const text = replies?.textById.get(message.id) ?? message.parts
       .filter((p) => p.type === "text")
       .map((p) => p.text ?? "")
       .join("\n");
@@ -3107,11 +3156,11 @@ export const Message = memo(function Message({
       };
       return (
         <div className="msg-user-group ms-auto self-end flex w-full max-w-[88%] flex-col items-end gap-1.5">
-          <div className="msg-user-edit w-full bg-panel rounded-[16px] py-2.5 px-[15px] flex flex-col gap-2">
+          <div className="msg-user-edit w-full flex flex-col rounded-lg border border-border bg-background shadow-control-subtle focus-within:border-focus-border">
             <textarea
               dir="auto"
               {...{ writingsuggestions: "false" }}
-              className="w-full bg-transparent text-base text-text resize-none outline-none field-sizing-content min-h-16"
+              className="w-full border-0 rounded-none bg-transparent pt-2.5 px-3 pb-1 text-base text-text resize-none outline-none field-sizing-content min-h-16 max-h-60"
               aria-label={m.chat_panel_edit_message()}
               value={editDraft}
               autoFocus
@@ -3122,6 +3171,7 @@ export const Message = memo(function Message({
                   return;
                 }
                 if (e.key === "Escape") {
+                  e.stopPropagation();
                   e.preventDefault();
                   setEditDraft(null);
                 } else if (e.key === "Enter" && !e.shiftKey) {
@@ -3130,8 +3180,8 @@ export const Message = memo(function Message({
                 }
               }}
             />
-            <div className={`${PROMPT_ACTIONS_CLASS_NAME} justify-end`}>
-              <Button size="small" onClick={() => setEditDraft(null)}>
+            <div className={`${PROMPT_ACTIONS_CLASS_NAME} justify-end pt-1.5 px-2 pb-2`}>
+              <Button size="small" variant="ghost" onClick={() => setEditDraft(null)}>
                 {m.chat_panel_cancel()}
               </Button>
               <Button
@@ -3152,7 +3202,8 @@ export const Message = memo(function Message({
         {annotations.length > 0 && (
           <AnnotationsPopover annotations={annotations} variant="sent" />
         )}
-        <div dir="auto" className="msg-user max-w-full bg-panel rounded-[16px] py-2.5 px-[15px] text-base whitespace-pre-wrap wrap-anywhere [&_.skill-chip]:align-baseline">
+        <div dir="auto" className="msg-user max-w-full bg-panel rounded-2xl py-2.5 px-4 text-base whitespace-pre-wrap wrap-anywhere [&_.skill-chip]:align-baseline">
+          {replies?.questionById.has(message.id) && <div className="mb-1 truncate text-subtext">{replies.questionById.get(message.id)}</div>}
           <MessageWithChips text={text} isCommand={isCommand} />
           {images.length > 0 && (
             <div className="msg-images flex flex-wrap gap-1.5 mt-2 [&_img]:max-w-55 [&_img]:max-h-40 [&_img]:border [&_img]:border-border-variant [&_img]:rounded-xs [&_img]:block">
@@ -3166,8 +3217,8 @@ export const Message = memo(function Message({
           {files.length > 0 && (
             <div className="msg-files flex flex-wrap gap-1.5 mt-2">
               {files.map((a, i) => (
-                <a key={i} className="msg-file inline-flex items-center gap-1.5 max-w-60 py-1.5 px-2.5 border border-border-variant rounded-sm text-text no-underline [&:hover]:border-text [&_span]:overflow-hidden [&_span]:text-ellipsis [&_span]:whitespace-nowrap" href={a.src} target="_blank" rel="noreferrer">
-                  <FileText size={15} />
+                <a key={i} className="msg-file inline-flex items-center gap-1.5 max-w-60 py-1.5 px-2.5 border border-border-variant rounded-sm text-text no-underline [&:hover]:border-border-hover-strong [&_span]:overflow-hidden [&_span]:text-ellipsis [&_span]:whitespace-nowrap" href={a.src} target="_blank" rel="noreferrer">
+                  <FileText size={16} />
                   <span>{a.name}</span>
                 </a>
               ))}
@@ -3191,14 +3242,17 @@ export const Message = memo(function Message({
       </div>
     );
   }
-  const responseTurns = (responseMessages ?? [message]).map(splitResponseTurn);
+  const responses = responseMessages ?? [message];
+  const localErrors = responses.filter((turn) => turn.id.startsWith(`${LOCAL_PREFIX}senderr-`));
+  const responseTurns = responses.filter((turn) => !turn.id.startsWith(`${LOCAL_PREFIX}senderr-`)).map(splitResponseTurn);
   const turns = responseTurns.map((turn) => turn.message);
-  const response = splitResponseParts(turns, predictTextTail);
+  const response = splitResponseParts(turns, predictTextTail, replies);
   const predictingAnswer = predictTextTail && response.answerMessageId === message.id;
   const copyText = predictingAnswer && !message.completedAt ? "" : responseText({ ...message, parts: response.answer });
   return (
-    <div className="msg-assistant group/turn text-base leading-[1.62] text-text min-w-0">
-      <AssistantTurn messages={turns} response={response} options={{
+    <div className="msg-assistant group/turn text-base leading-relaxed text-text min-w-0">
+      {turns.length > 0 && <AssistantTurn messages={turns} response={response} options={{
+        replies,
         activePermissionId,
         pendingTailToolId,
         onOpenFile,
@@ -3211,7 +3265,7 @@ export const Message = memo(function Message({
         onOpenPlan,
         onOpenSubagent,
         predictTextTail,
-      }} />
+      }} />}
       {responseTurns.map(({ message: turn, turnStatus, usageLimit, temporaryApiError }) => turnStatus && (
         <TurnStatusRow
           key={turn.id}
@@ -3223,16 +3277,22 @@ export const Message = memo(function Message({
           onRecover={onRecover}
         />
       ))}
+      {localErrors.map((turn) => (
+        <div key={turn.id} role="alert" className="mt-4 whitespace-pre-wrap text-base text-accent-red">
+          {cleanToolError(turn.parts[0]?.state?.error ?? "")}
+        </div>
+      ))}
       {copyText && (
         <div className="mt-2 flex justify-end opacity-0 transition-opacity duration-80 ease-standard group-hover/turn:opacity-100 group-focus-within/turn:opacity-100">
-          <IconButton
-            size="small"
-            title={m.chat_copy_response()}
-            aria-label={m.chat_copy_response()}
-            onClick={() => void copyToClipboard(copyText)}
-          >
-            <Copy size={13} />
-          </IconButton>
+          <Tooltip interactive content={m.chat_copy_response()}>
+            <IconButton
+              size="small"
+              aria-label={m.chat_copy_response()}
+              onClick={() => void copyToClipboard(copyText)}
+            >
+              <Copy size={14} />
+            </IconButton>
+          </Tooltip>
         </div>
       )}
     </div>
@@ -3268,7 +3328,7 @@ function AssistantTurn({ messages, response, options }: {
       <div className="turn-work mb-4">
         <button
           type="button"
-          className="flex w-full items-center gap-1.5 border-b border-border/50 pb-2 text-start text-base text-subtext cursor-pointer hover:text-text focus-visible:outline-2 focus-visible:outline-primary"
+          className="flex w-full items-center gap-1.5 border-b border-border/50 pb-2 text-start text-base text-subtext cursor-pointer hover:text-text focus-visible:outline-2 focus-visible:outline-focus"
           aria-expanded={expanded}
           data-work-toggle
           onClick={() => setExpanded((value) => !value)}
@@ -3312,12 +3372,12 @@ function ShellExchangeCard({ part }: { part: ChatPart }) {
       : null;
   return (
     <div className="msg-shell ms-auto self-end flex w-full max-w-[88%] flex-col items-stretch gap-1.5">
-      <div dir="ltr" className="max-w-full bg-panel rounded-[16px] py-2.5 px-[15px] text-base">
+      <div dir="ltr" className="max-w-full bg-panel rounded-2xl py-2.5 px-4 text-base">
         <div className="flex items-start gap-2 font-mono text-sm text-text whitespace-pre-wrap wrap-anywhere">
           <span className="sr-only">{m.chat_panel_bash()} </span>
           <SquareTerminal
             size={16}
-            strokeWidth={1.6}
+            strokeWidth={1.5}
             className={`mt-0.5 shrink-0 ${failed ? "text-accent-red" : "text-muted"}`}
             aria-hidden="true"
           />
@@ -3343,6 +3403,7 @@ function ShellExchangeCard({ part }: { part: ChatPart }) {
 function renderParts(
   parts: ChatPart[],
   opts: {
+    replies?: QuestionReplies;
     expansionState?: Map<string, boolean>;
     activePermissionId?: string | null;
     pendingTailToolId?: string | null;
@@ -3352,13 +3413,14 @@ function renderParts(
     runExperimentName?: (runId: string) => string;
     onOpenExperiment?: OpenTranscriptTarget;
     experimentName?: (experimentId: string) => string;
-    onRespond?: (answer: PromptAnswer) => void;
+    onRespond?: (answer: PromptAnswer) => Promise<boolean>;
     onOpenPlan?: (plan: string, promptId: string, intent: TabOpenIntent) => void;
     onOpenSubagent?: OpenSubagent;
     predictTextTail?: boolean;
   },
 ): React.ReactNode[] {
   const {
+    replies,
     expansionState,
     activePermissionId,
     pendingTailToolId,
@@ -3438,16 +3500,21 @@ function renderParts(
           dir="auto"
           role="note"
           aria-label={m.chat_panel_you_mid_task()}
-          className="msg-steer my-2 ms-auto w-fit max-w-[88%] bg-panel rounded-[16px] py-2.5 px-[15px] text-base whitespace-pre-wrap wrap-anywhere"
+          className="msg-steer my-2 ms-auto w-fit max-w-[88%] bg-panel rounded-2xl py-2.5 px-4 text-base whitespace-pre-wrap wrap-anywhere"
         >
-          {part.text}
+          {replies?.questionById.has(part.id) && <div className="mb-1 truncate text-subtext">{replies.questionById.get(part.id)}</div>}
+          {replies?.textById.get(part.id) ?? part.text}
         </div>,
       );
+    else if (part.type === "prompt" && part.prompt?.kind === "question" && !part.prompt.resolved)
+      continue;
     else if (part.type === "prompt" && part.prompt)
       rendered.push(
         <PromptCard
           key={part.id}
           part={part}
+          questionText={replies?.questionById.get(part.id)}
+          answerInTranscript={replies?.prompts.has(part.id)}
           onRespond={onRespond}
           onOpenFile={onOpenFile}
           onOpenPlan={onOpenPlan}
@@ -3544,7 +3611,7 @@ export function SubagentTranscript({
   const hasProseChild = parts.some((p) => p.type === "text" && !!p.text);
   const finalReport = hasProseChild ? "" : spawnFinalReport(spawn);
   return (
-    <div className="msg-assistant text-base leading-[1.62] text-text min-w-0">
+    <div className="msg-assistant text-base leading-relaxed text-text min-w-0">
       {errored && <span className="sr-only">{m.chat_panel_failed()} </span>}
       {errorMessage && (
         <div className={TOOL_OUTPUT_CLASS_NAME}>
@@ -3552,7 +3619,7 @@ export function SubagentTranscript({
         </div>
       )}
       {rendered.length === 0 && !finalReport && !errorMessage ? (
-        <div className="subagent-empty py-[3px] px-1 text-sm text-muted">{running ? m.chat_working() : m.chat_no_activity()}</div>
+        <div className="subagent-empty py-1 px-1 text-sm text-muted">{running ? m.chat_working() : m.chat_no_activity()}</div>
       ) : (
         <>
           {rendered}
@@ -3566,10 +3633,10 @@ export function SubagentTranscript({
 function AgentUpdateRow({ part }: { part: ChatPart }) {
   const text = parentUpdateText(part);
   const label = <><ToolActivityIcon activity={{ kind: "agent", label: m.activity_sent_update_to_parent() }} className="text-muted" /><span className={`${TOOL_LINE_CLASS_NAME} text-subtext`}>{m.activity_sent_update_to_parent()}</span></>;
-  if (!text) return <div className="tool-row flex items-start gap-2 min-w-0 py-[3px] px-1">{label}</div>;
+  if (!text) return <div className="tool-row flex items-start gap-2 min-w-0 py-1 px-1">{label}</div>;
   return (
     <details className="min-w-0 [&[open]_.update-chevron]:rotate-90">
-      <summary className="tool-row flex cursor-pointer list-none items-center gap-2 min-w-0 py-[3px] px-1 rounded-sm focus-visible:outline-2 focus-visible:outline-text [&::-webkit-details-marker]:hidden">
+      <summary className="tool-row flex cursor-pointer list-none items-center gap-2 min-w-0 py-1 px-1 rounded-sm focus-visible:outline-2 focus-visible:outline-focus [&::-webkit-details-marker]:hidden">
         {label}<ChevronRight size={12} className="update-chevron text-muted" aria-hidden="true" />
       </summary>
       <div className="ps-7 py-2 text-sm"><Md text={text} /></div>
@@ -3599,7 +3666,7 @@ function SubagentBlock({
       {errored && <span className="sr-only">{m.chat_panel_failed()} </span>}
       {errored ? (
         <span className="flex h-6 shrink-0 items-center text-accent-red">
-          <CircleX size={16} strokeWidth={1.75} className="subagent-icon" aria-hidden="true" />
+          <CircleX size={16} strokeWidth={1.5} className="subagent-icon" aria-hidden="true" />
         </span>
       ) : (
         <ToolActivityIcon activity={activity} className={`subagent-icon ${shimmering ? "tool-running-shimmer-icon" : "text-muted"}`} />
@@ -3611,7 +3678,7 @@ function SubagentBlock({
   );
   return (
     <button
-      className="subagent-row flex items-start gap-2 w-full py-[3px] px-1 cursor-pointer text-text text-base text-start rounded-sm [&:hover:not(:disabled)]:bg-surface [&:disabled]:cursor-default"
+      className="subagent-row flex items-start gap-2 w-full py-1 px-1 cursor-pointer text-text text-base text-start rounded-sm [&:hover:not(:disabled)]:bg-surface [&:disabled]:cursor-default"
       title={errored && errorMessage ? errorMessage : m.chat_open_subagent_transcript()}
       {...tabOpenGestureHandlers<HTMLButtonElement>((intent) =>
         onOpenSubagent?.(part.id, activity.label, intent),
@@ -3763,6 +3830,10 @@ function useTranscriptAnnouncement(messages: ChatMessage[]): TranscriptAnnouncem
   return announcement;
 }
 
+// Measured heights outlive the per-chat remount so switching back paints at the real layout.
+const transcriptRowSizes = new Map<string, { size: number; width: number }>();
+const TRANSCRIPT_ROW_SIZES_LIMIT = 5_000;
+
 const Transcript = memo(function Transcript({
   messages,
   scrollRef,
@@ -3806,7 +3877,7 @@ const Transcript = memo(function Transcript({
   runExperimentName?: (runId: string) => string;
   onOpenExperiment?: OpenTranscriptTarget;
   experimentName?: (experimentId: string) => string;
-  onRespond?: (answer: PromptAnswer) => void;
+  onRespond?: (answer: PromptAnswer) => Promise<boolean>;
   onOpenPlan?: (plan: string, promptId: string, intent: TabOpenIntent) => void;
   onOpenSubagent?: OpenSubagent;
   recoveringTurnId?: string | null;
@@ -3814,6 +3885,7 @@ const Transcript = memo(function Transcript({
   skills?: SkillInfo[];
 }) {
   useLocale();
+  const replies = useMemo(() => questionReplies(messages), [messages]);
   const activePermissionId = firstPendingPermission(messages)?.id ?? null;
   const responseGroups = useRef<ChatMessage[][]>([]);
   const visibleMessages = useMemo(
@@ -3843,15 +3915,34 @@ const Transcript = memo(function Transcript({
     });
     return [...indexes].sort((a, b) => a - b);
   }, [visibleMessages, fullHistory]);
+  // Seed via the measurement cache, not estimateSize, so remembered rows count as measured for anchoring.
+  const [initialMeasurementsCache] = useState(() => visibleMessages.flatMap((group, index) => {
+    const remembered = transcriptRowSizes.get(group[0].id);
+    if (!remembered || remembered.width !== scrollRef.current?.offsetWidth) return [];
+    const { size } = remembered;
+    return [{ key: group[0].id, index, start: 0, end: size, size, lane: 0 }];
+  }));
+  // Offscreen rows keep their old height through a resize, so each height carries its measuring width.
+  const measuredWidths = useRef(new Map<string, number>());
   const virtualizer = useVirtualizer({
     count: visibleMessages.length,
-    useFlushSync: false,
     getScrollElement: () => scrollRef.current,
     getItemKey,
     estimateSize: () => 400,
-    overscan: 1,
+    initialMeasurementsCache,
+    measureElement: (element, entry, instance) => {
+      const id = element.getAttribute("data-message-id");
+      // Entry-less calls may return the cached size unmeasured; width is read live since scrollRect lags row observers.
+      if (id && (entry || !instance.itemSizeCache.has(id))) measuredWidths.current.set(id, instance.scrollElement?.offsetWidth ?? 0);
+      return measureVirtualElement(element, entry, instance);
+    },
+    overscan: 4,
     initialRect: { width: scrollRef.current?.clientWidth ?? 0, height: scrollRef.current?.clientHeight ?? 0 },
-    initialOffset: () => Math.max(0, visibleMessages.length * 400 - (scrollRef.current?.clientHeight ?? 0)),
+    initialOffset: () => {
+      const remembered = initialMeasurementsCache.reduce((total, item) => total + item.size, 0);
+      const estimated = remembered + (visibleMessages.length - initialMeasurementsCache.length) * 400;
+      return Math.max(0, estimated - (scrollRef.current?.clientHeight ?? 0));
+    },
     anchorTo: stickToBottom.current ? "end" : "start",
     followOnAppend: true,
     scrollEndThreshold: 60,
@@ -3863,6 +3954,19 @@ const Transcript = memo(function Transcript({
     onPinToBottom();
     return () => { scrollToEndRef.current = null; };
   }, [virtualizer, scrollToEndRef, onPinToBottom]);
+  useLayoutEffect(() => () => {
+    for (const [key, size] of virtualizer.itemSizeCache) {
+      const id = String(key);
+      const width = measuredWidths.current.get(id) ?? transcriptRowSizes.get(id)?.width;
+      transcriptRowSizes.delete(id);
+      // Interacted rows remount with reset local state (e.g. collapsed work), so their height is stale.
+      if (!retainedRows.current.has(id) && width !== undefined) transcriptRowSizes.set(id, { size, width });
+    }
+    for (const id of transcriptRowSizes.keys()) {
+      if (transcriptRowSizes.size <= TRANSCRIPT_ROW_SIZES_LIMIT) break;
+      transcriptRowSizes.delete(id);
+    }
+  }, [virtualizer]);
   useEffect(() => {
     const retainSelection = () => {
       const selection = window.getSelection();
@@ -3914,6 +4018,7 @@ const Transcript = memo(function Transcript({
           <Message
             message={m}
             responseMessages={group}
+            replies={replies}
             forkCount={positions.get(m.id)?.count}
             forkIndex={positions.get(m.id)?.index}
             forkPrevId={positions.get(m.id)?.prevId}
@@ -3955,11 +4060,6 @@ type SessionFilter = "active" | "archived" | "all";
 const matchesFilter = (filter: SessionFilter, archived: boolean) =>
   filter === "all" ? true : filter === "archived" ? archived : !archived;
 
-/** Whether an event target sits inside the side-chat pane. */
-function inSideChat(target: EventTarget | null): boolean {
-  return target instanceof Element && target.closest("[data-side-chat]") !== null;
-}
-
 /** Menu label + rail section heading per filter — "Recents" for the default view. */
 const SESSION_FILTERS: { id: SessionFilter; label: () => string; railLabel: () => string }[] = [
   { id: "archived", label: m.chat_panel_archived, railLabel: m.chat_panel_archived },
@@ -3982,22 +4082,23 @@ function SessionFilterMenu({
   const { open, setOpen, ref } = usePopover();
   return (
     <div className="rail-filter relative inline-flex" ref={ref}>
-      <IconButton size="small"
-        className="rail-filter-btn text-subtext"
-        active={value !== "active"}
-        title={m.chat_panel_filter_sessions()}
-        aria-label={m.chat_panel_filter_sessions()}
-        onClick={() => setOpen((v) => !v)}
-      >
-        <SlidersHorizontal size={15} className="text-subtext" />
-      </IconButton>
+      <Tooltip interactive content={m.chat_panel_filter_sessions()}>
+        <IconButton size="small"
+          className="rail-filter-btn text-subtext"
+          active={value !== "active"}
+          aria-label={m.chat_panel_filter_sessions()}
+          onClick={() => setOpen((v) => !v)}
+        >
+          <SlidersHorizontal size={16} className="text-subtext" />
+        </IconButton>
+      </Tooltip>
       {open && (
         <div className="option-menu absolute bottom-[calc(100%_+_8px)] start-0 max-h-95 flex flex-col bg-background border border-border rounded-lg shadow-menu z-50 overflow-hidden min-w-40 p-1 [&.align-right]:start-auto [&.align-right]:end-0 [&.drop-down]:bottom-auto [&.drop-down]:top-[calc(100%_+_4px)] [&.session-menu]:start-auto [&.session-menu]:end-1.5 [&.session-menu]:top-[calc(100%_-_2px)] [&.session-menu]:min-w-35 drop-down align-right">
           <div className="px-2 py-0.5 text-sm text-subtext">{m.sidebar_group_by()}</div>
           {(["projects", "list"] as const).map((mode) => (
             <MenuItem size="compact" className="text-sm" key={mode} onClick={() => { onGroupingChange(mode); setOpen(false); }}>
               <span>{mode === "projects" ? m.projects_home_projects() : m.sidebar_one_list()}</span>
-              {grouping === mode && <Check size={13} />}
+              {grouping === mode && <Check size={14} />}
             </MenuItem>
           ))}
           <div className="my-1 border-t border-border" />
@@ -4013,11 +4114,12 @@ function SessionFilterMenu({
               }}
             >
               <span>{f.label()}</span>
-              {value === f.id && <Check size={13} />}
+              {value === f.id && <Check size={14} />}
             </MenuItem>
           ))}
         </div>
       )}
+      <EscapeScope enabled={open} onEscape={() => setOpen(false)} />
     </div>
   );
 }
@@ -4081,6 +4183,11 @@ function SessionRow({
   onRename,
   onSetArchived,
   onDelete,
+  onOpenExperiment,
+  modelName,
+  projectName,
+  harnessLogo,
+  cardWarmUntil,
 }: {
   session: ChatSession;
   active: boolean;
@@ -4097,15 +4204,69 @@ function SessionRow({
   onRename: (title: string) => void;
   onSetArchived: (archived: boolean) => void;
   onDelete: () => void;
+  onOpenExperiment: (projectId: string, experimentId: string) => void;
+  modelName: string | null;
+  projectName?: string;
+  harnessLogo?: string;
+  cardWarmUntil: React.RefObject<number>;
 }) {
   const { open, setOpen, ref } = usePopover();
-  const title = session.title?.trim() || "Untitled";
+  const title = session.title?.trim() || m.chat_untitled();
+  const sessionDescription = `${title} · ${harnessLabel(session.harness, session.harnessName)}${modelName ? ` · ${modelName}` : ""}`;
   const [editing, setEditing] = useState(false);
   // Seeded by startEditing() before the input mounts; "" is just a placeholder.
   const [draft, setDraft] = useState("");
   const inputRef = useRef<HTMLInputElement>(null);
+  const cardRef = useRef<HTMLDivElement>(null);
+  const cardId = useId();
+  const [anchor, setAnchor] = useState<DOMRect | null>(null);
+  const openTimer = useRef<number | undefined>(undefined);
+  const closeTimer = useRef<number | undefined>(undefined);
+  const pointerInside = useRef(false);
+  const dismissed = useRef(false);
+
+  function closeCard() {
+    window.clearTimeout(openTimer.current);
+    window.clearTimeout(closeTimer.current);
+    setAnchor(null);
+  }
+  function showCard() {
+    if (!editing && !open && !dismissed.current) setAnchor(ref.current?.getBoundingClientRect() ?? null);
+  }
+  function scheduleClose() {
+    window.clearTimeout(openTimer.current);
+    window.clearTimeout(closeTimer.current);
+    closeTimer.current = window.setTimeout(() => {
+      const focused = document.activeElement;
+      if (!pointerInside.current && focused !== ref.current && !cardRef.current?.contains(focused)) setAnchor(null);
+    }, 150);
+  }
+  useEffect(() => () => {
+    window.clearTimeout(openTimer.current);
+    window.clearTimeout(closeTimer.current);
+  }, []);
+  useEffect(() => {
+    if (!anchor) return;
+    const update = (event: Event) => {
+      if (event.target instanceof Node && cardRef.current?.contains(event.target)) return;
+      const row = ref.current;
+      const bounds = row?.getBoundingClientRect();
+      const scrollContainer = row?.closest(".rail-body")?.getBoundingClientRect();
+      if (!bounds || (scrollContainer && (bounds.bottom <= scrollContainer.top || bounds.top >= scrollContainer.bottom))) {
+        if (cardRef.current?.contains(document.activeElement)) row?.focus();
+        setAnchor(null);
+      } else setAnchor(bounds);
+    };
+    window.addEventListener("resize", update);
+    document.addEventListener("scroll", update, true);
+    return () => {
+      window.removeEventListener("resize", update);
+      document.removeEventListener("scroll", update, true);
+    };
+  }, [anchor, ref]);
 
   function startEditing() {
+    closeCard();
     setDraft(session.title?.trim() || "");
     setEditing(true);
   }
@@ -4130,25 +4291,56 @@ function SessionRow({
       ref={ref}
       role="button"
       tabIndex={0}
-      className={`session-row relative flex items-center gap-2 w-full text-start py-[7px] ps-2.5 pe-1.5 rounded-md text-sm text-text cursor-pointer select-none [&:hover:not(.active)]:bg-surface [&.active]:bg-panel [&.active]:font-medium [&_.session-dot:empty]:hidden [&_.session-dot]:w-4 [&_.session-dot]:inline-flex [&_.session-dot]:items-center [&_.session-dot]:justify-center [&_.session-dot]:shrink-0 [&_.session-title]:flex-1 [&_.session-title]:min-w-0 [&_.session-title]:overflow-hidden [&_.session-title]:[mask-image:linear-gradient(to_right,black_calc(100%_-_16px),transparent)] [&_.session-title]:whitespace-nowrap [&_.session-menu-btn]:hidden [&_.session-menu-btn]:items-center [&_.session-menu-btn]:justify-center [&_.session-menu-btn]:w-4 [&_.session-menu-btn]:h-4 [&_.session-menu-btn]:-my-0.5 [&_.session-menu-btn]:mx-0 [&_.session-menu-btn]:rounded-sm [&_.session-menu-btn]:text-muted [&_.session-menu-btn]:shrink-0 [&_.session-menu-btn:hover]:text-text [&_.session-menu-btn:hover]:bg-panel [&:hover_.session-menu-btn]:inline-flex [&:focus-visible_.session-menu-btn]:inline-flex [&_.session-menu-btn:focus-visible]:inline-flex [&.menu-open_.session-menu-btn]:inline-flex [&:hover_.session-dot]:hidden [&:focus-visible_.session-dot]:hidden [&:has(.session-menu-btn:focus-visible)_.session-dot]:hidden [&.menu-open_.session-dot]:hidden [&_.busy-dot]:w-[7px] [&_.busy-dot]:h-[7px] [&_.busy-dot]:rounded-full [&_.busy-dot]:bg-primary [&_.busy-dot]:animate-[or-pulse_1.2s_infinite] [&_.busy-dot]:shrink-0 [&_.unread-dot]:w-[7px] [&_.unread-dot]:h-[7px] [&_.unread-dot]:rounded-full [&_.unread-dot]:bg-primary [&_.unread-dot]:shrink-0 [&_.busy-dot.waiting]:animate-none [&_.session-title-input]:flex-1 [&_.session-title-input]:min-w-0 [&_.session-title-input]:py-px [&_.session-title-input]:px-[5px] [&_.session-title-input]:-my-0.5 [&_.session-title-input]:mx-0 [&_.session-title-input]:[font:inherit] [&_.session-title-input]:text-text [&_.session-title-input]:bg-background [&_.session-title-input]:border [&_.session-title-input]:border-primary [&_.session-title-input]:rounded-sm [&_.session-title-input]:outline-none [&.editing]:bg-surface [&.editing]:cursor-default [&.editing_.session-menu-btn]:hidden [&.editing_.session-dot]:hidden ${active ? "active" : ""}  ${unread ? "unread" : ""}  ${open ? "menu-open" : ""}  ${
+      data-sidebar-keyboard-row
+      aria-label={sessionDescription}
+      aria-describedby={anchor ? cardId : undefined}
+      onMouseEnter={() => {
+        pointerInside.current = true;
+        dismissed.current = false;
+        window.clearTimeout(closeTimer.current);
+        if (!editing && !open) {
+          if (Date.now() < cardWarmUntil.current) showCard();
+          else openTimer.current = window.setTimeout(showCard, 350);
+        }
+      }}
+      onMouseLeave={(event) => {
+        if (anchor) cardWarmUntil.current = Date.now() + 500;
+        pointerInside.current = false;
+        dismissed.current = false;
+        if (event.relatedTarget instanceof Element && event.relatedTarget.closest(".session-row")) closeCard();
+        else scheduleClose();
+      }}
+      onFocus={(event) => {
+        if (event.target === event.currentTarget && !editing && !open) {
+          showCard();
+        }
+      }}
+      onBlur={(event) => {
+        if (!ref.current?.contains(event.relatedTarget) && !cardRef.current?.contains(event.relatedTarget)) dismissed.current = false;
+        scheduleClose();
+      }}
+      className={`session-row relative flex items-center gap-2 w-full h-8.5 text-start ps-2.5 pe-1.5 rounded-md text-sm text-text cursor-pointer select-none [&:hover:not(.active)]:bg-surface [&.active]:bg-panel [&.active]:font-medium [&_.session-dot:empty]:hidden [&_.session-dot]:w-4 [&_.session-dot]:inline-flex [&_.session-dot]:items-center [&_.session-dot]:justify-center [&_.session-dot]:shrink-0 [&_.session-title]:flex-1 [&_.session-title]:min-w-0 [&_.session-title]:overflow-hidden [&_.session-title]:[mask-image:linear-gradient(to_right,black_calc(100%_-_16px),transparent)] [&_.session-title]:whitespace-nowrap [&_.session-menu-btn]:hidden [&_.session-menu-btn]:items-center [&_.session-menu-btn]:justify-center [&_.session-menu-btn]:size-6 [&_.session-menu-btn]:-mx-1 [&_.session-menu-btn]:rounded-sm [&_.session-menu-btn]:text-muted [&_.session-menu-btn]:shrink-0 [&_.session-menu-btn:hover]:text-text [&_.session-menu-btn:hover]:bg-panel [&:hover_.session-menu-btn]:inline-flex [&:focus-visible_.session-menu-btn]:inline-flex [&_.session-menu-btn:focus-within]:inline-flex [&.menu-open_.session-menu-btn]:inline-flex [&.card-open_.session-menu-btn]:inline-flex [&:hover_.session-dot]:hidden [&:focus-visible_.session-dot]:hidden [&:has(.session-menu-btn:focus-within)_.session-dot]:hidden [&.menu-open_.session-dot]:hidden [&_.busy-dot]:w-[7px] [&_.busy-dot]:h-[7px] [&_.busy-dot]:rounded-full [&_.busy-dot]:bg-accent-teal [&_.busy-dot]:animate-[or-pulse_1.2s_infinite] [&_.busy-dot]:shrink-0 [&_.unread-dot]:w-[7px] [&_.unread-dot]:h-[7px] [&_.unread-dot]:rounded-full [&_.unread-dot]:bg-accent-blue [&_.unread-dot]:shrink-0 [&_.busy-dot.waiting]:animate-none [&_.session-title-input]:absolute [&_.session-title-input]:inset-0 [&_.session-title-input]:size-full [&_.session-title-input]:py-0 [&_.session-title-input]:ps-0 [&_.session-title-input]:pe-[9px] [&_.session-title-input]:indent-[9px] [&_.session-title-input]:[font:inherit] [&_.session-title-input]:text-text [&_.session-title-input]:bg-background [&_.session-title-input]:border [&_.session-title-input]:border-focus-border [&_.session-title-input]:rounded-md [&_.session-title-input]:outline-none [&.editing]:bg-surface [&.editing]:cursor-default [&.editing_.session-menu-btn]:hidden [&.editing_.session-dot]:hidden ${active ? "active" : ""}  ${unread ? "unread" : ""}  ${open ? "menu-open" : ""} ${anchor ? "card-open" : ""}  ${
         editing ? "editing" : ""
         }`}
-      title={`${harnessLabel(session.harness, session.harnessName)}${session.model ? ` · ${session.model}` : ""}`}
       onClick={() => {
         // While editing, a body click is a no-op; blur/Enter/Esc drive it.
         if (editing) return;
         // With the menu open, a body click just dismisses it — switching
         // sessions underneath an open menu would leave it orphaned.
         if (open) setOpen(false);
-        else onOpen();
+        else { closeCard(); onOpen(); }
       }}
       onKeyDown={(e) => {
         // Only keys aimed at the row itself: the kebab, menu items, and the
         // rename input are descendants, and preventDefault here would cancel
         // their activation.
         if (e.target !== e.currentTarget) return;
-        if (e.key === "Enter" || e.key === " ") {
+        if (e.key === "Tab" && !e.shiftKey && anchor && cardRef.current) {
           e.preventDefault();
+          cardRef.current.focus();
+        } else if (e.key === "Enter" || e.key === " ") {
+          e.preventDefault();
+          closeCard();
           // Mirror the click branch: dismiss an open menu instead of
           // navigating underneath it.
           if (open) setOpen(false);
@@ -4171,6 +4363,7 @@ function SessionRow({
               e.preventDefault();
               commit();
             } else if (e.key === "Escape") {
+              e.stopPropagation();
               e.preventDefault();
               setEditing(false);
             }
@@ -4202,17 +4395,36 @@ function SessionRow({
           unread && !waiting && <span className="unread-dot" />
         )}
       </span>
-      <button
-        className="session-menu-btn"
-        title={m.chat_panel_session_options()}
-        aria-label={m.chat_panel_session_options()}
-        onClick={(e) => {
-          e.stopPropagation();
-          setOpen((v) => !v);
-        }}
-      >
-        <MoreHorizontal size={14} />
-      </button>
+      <Tooltip interactive content={m.chat_panel_session_options()} className="session-menu-btn">
+        <button
+          className="flex w-full h-full items-center justify-center"
+          aria-label={m.chat_panel_session_options()}
+          onClick={(e) => {
+            e.stopPropagation();
+            closeCard();
+            setOpen((v) => !v);
+          }}
+        >
+          <MoreHorizontal size={14} />
+        </button>
+      </Tooltip>
+      {anchor && !open && !editing && (
+        <SessionHoverCard
+          session={session}
+          modelName={modelName}
+          projectName={projectName}
+          harnessLogo={harnessLogo}
+          anchor={anchor}
+          cardId={cardId}
+          cardRef={cardRef}
+          container={ref.current?.closest(".mobile-rail-dialog") ?? document.body}
+          onEnter={() => { pointerInside.current = true; window.clearTimeout(closeTimer.current); }}
+          onLeave={() => { cardWarmUntil.current = Date.now() + 500; pointerInside.current = false; scheduleClose(); }}
+          onOpenExperiment={(projectId, experimentId) => { closeCard(); onOpenExperiment(projectId, experimentId); }}
+          onReturnToRow={() => ref.current?.focus()}
+          onContinue={() => { closeCard(); ref.current?.querySelector<HTMLButtonElement>(".session-menu-btn button")?.focus(); }}
+        />
+      )}
       {open && (
         <div className="option-menu absolute bottom-[calc(100%_+_8px)] start-0 max-h-95 flex flex-col bg-background border border-border rounded-lg shadow-menu z-50 overflow-hidden min-w-47.5 p-1.5 [&.align-right]:start-auto [&.align-right]:end-0 [&.drop-down]:bottom-auto [&.drop-down]:top-[calc(100%_+_4px)] [&.session-menu]:start-auto [&.session-menu]:end-1.5 [&.session-menu]:top-[calc(100%_-_2px)] [&.session-menu]:min-w-35 drop-down session-menu">
           <MenuItem
@@ -4244,6 +4456,8 @@ function SessionRow({
           </MenuItem>
         </div>
       )}
+      <EscapeScope enabled={open} onEscape={() => setOpen(false)} />
+      <EscapeScope enabled={!!anchor && !editing && !open} exclusive={false} onEscape={() => { dismissed.current = true; if (cardRef.current?.contains(document.activeElement)) ref.current?.focus(); closeCard(); }} />
     </div>
   );
 }
@@ -4264,10 +4478,30 @@ const STARTER_TONES = [
   { box: "border-accent-blue/45", icon: "text-accent-blue" },
   { box: "border-accent-green/45", icon: "text-accent-green" },
   { box: "border-accent-amber/45", icon: "text-accent-amber" },
-  { box: "border-primary/45", icon: "text-primary" },
+  { box: "border-accent-purple/45", icon: "text-accent-purple" },
 ];
 const STARTER_GRID_CLASS =
   "mt-7 grid w-full max-w-readable grid-cols-1 gap-3 sm:grid-cols-2";
+const composerStashes = new Map<string, ComposerStash>();
+const mountedComposers = new Map<string, (failed: ComposerStash) => void>();
+subscribeWorkspace(() => { composerStashes.clear(); });
+
+function mergeFailedComposer(current: ComposerStash, failed: ComposerStash): ComposerStash {
+  const annotations = [...current.annotations];
+  for (const annotation of failed.annotations) {
+    if (annotations.some((item) => item.id === annotation.id && item.text === annotation.text)) continue;
+    let id = annotation.id;
+    while (annotations.some((item) => item.id === id)) id += ":recovered";
+    annotations.unshift(id === annotation.id ? annotation : { ...annotation, id });
+  }
+  return {
+    draft: [failed.draft, current.draft].filter(Boolean).join("\n\n"),
+    attachments: [...failed.attachments.filter((item) => !current.attachments.includes(item)), ...current.attachments],
+    annotations,
+    unconfirmedSend: current.unconfirmedSend ?? failed.unconfirmedSend,
+    pendingClientTurn: current.pendingClientTurn ?? failed.pendingClientTurn,
+  };
+}
 
 /** Reconcile the settings attached to a selected model without treating the
  * catalog as an allowlist. The picker deliberately accepts free-form ids, so
@@ -4279,12 +4513,17 @@ export function deriveComposerSelection(
   activeHarness: Harness | undefined,
 ): ModelSelection | null {
   if (!rawSelection) return null;
-  const model = rawSelection.model ?? null;
+  const model = (rawSelection.harness === "codex" || rawSelection.harness === "claude-code") && (rawSelection.model == null || rawSelection.model === "default")
+    ? resolveHarnessDefaultModel(activeHarness) ?? rawSelection.model ?? null
+    : rawSelection.model ?? null;
+  const readyHarness = activeHarness?.catalogPending || (activeHarness?.id === "codex" && !activeHarness.models.length)
+    ? undefined
+    : activeHarness;
   return {
     ...rawSelection,
     model,
-    serviceTier: reconcileServiceTier(activeHarness, model, rawSelection.serviceTier),
-    reasoningLevel: reconcileReasoning(activeHarness, model, rawSelection.reasoningLevel),
+    serviceTier: reconcileServiceTier(readyHarness, model, rawSelection.serviceTier),
+    reasoningLevel: reconcileReasoning(readyHarness, model, rawSelection.reasoningLevel),
   };
 }
 
@@ -4295,7 +4534,12 @@ export function ChatPanel({
   contentError = null,
   onRetryContent,
   railHeader,
+  railWidth,
+  onResizeRail,
   railOpen,
+  mobileRail = false,
+  onCloseMobileRail,
+  contentInert = false,
   onShowRail,
   onNewProject,
   mainView,
@@ -4311,6 +4555,7 @@ export function ChatPanel({
   composerFocusNonce = 0,
   activeSessionId,
   onActiveSessionChange,
+  onStartHarnessDraft,
   preferredAgent,
   onPreferredAgentChange,
   preferredAutonomy,
@@ -4328,8 +4573,13 @@ export function ChatPanel({
   onRetryContent?: () => void;
   /** Brand and project creation controls at the top of the rail. */
   railHeader?: React.ReactNode;
+  railWidth?: number;
+  onResizeRail?: (event: React.PointerEvent) => void;
   /** Whether the agents rail is showing (collapsed via its own header icon). */
   railOpen: boolean;
+  mobileRail?: boolean;
+  onCloseMobileRail?: () => void;
+  contentInert?: boolean;
   /** Reopen the rail (from the chat header's sidebar icon). */
   onShowRail: () => void;
   onNewProject?: () => void;
@@ -4374,13 +4624,14 @@ export function ChatPanel({
     intent: TabOpenIntent,
   ) => void;
   runtime: RuntimeInfo;
-  /** Increments when the demo welcome hands focus to the composer. */
+  /** Requests composer focus on change; a nonzero value also focuses on mount. */
   composerFocusNonce?: number;
   /** Demo run currently executing, for the monitor-it hint above the composer. */
   activeSessionId: string | null;
   onActiveSessionChange: (sessionId: string | null, options?: { replace?: boolean; projectId?: string }) => void;
   /** Database-backed selection used to seed new chat sessions. */
   preferredAgent: ModelSelection | null;
+  onStartHarnessDraft?: () => void;
   onPreferredAgentChange: (selection: ModelSelection) => Promise<void>;
   preferredAutonomy: Autonomy;
   onPreferredAutonomyChange: (autonomy: Autonomy) => void;
@@ -4424,20 +4675,22 @@ export function ChatPanel({
     } catch { return []; }
   });
   const [sessionFilter, setSessionFilter] = useState<SessionFilter>("active");
-  const [sidebarExpanded, setSidebarExpanded] = useState(false);
+  const [sidebarExpandedAll, setSidebarExpandedAll] = useState(false);
   const railBodyRef = useRef<HTMLDivElement>(null);
+  const cardWarmUntil = useRef(0);
   const [railHeight, setRailHeight] = useState(0);
   const [focusedSidebarRow, setFocusedSidebarRow] = useState<string | null>(null);
   const [chatLimits, setChatLimits] = useState<Record<string, number>>({});
-  useLayoutEffect(() => {
-    const body = railBodyRef.current;
+  const sidebarExpanded = sidebarExpandedAll || Object.keys(chatLimits).length > 0;
+  const setRailBody = useCallback((body: HTMLDivElement | null) => {
+    railBodyRef.current = body;
     if (!body || embedded) return;
     const resize = () => setRailHeight(body.clientHeight);
     const observer = new ResizeObserver(resize);
     observer.observe(body);
     resize();
-    return () => observer.disconnect();
-  }, [railOpen, embedded, mainView]);
+    return () => { observer.disconnect(); railBodyRef.current = null; };
+  }, [embedded]);
   const recentActivity = new Map(projectActivity.map((activity) => [activity.projectId, activity.lastActivityAt]));
   const sortedProjects = [...sidebarProjects].sort((a, b) => Number(pinnedProjects.includes(b.id)) - Number(pinnedProjects.includes(a.id)) || Math.max(recentActivity.get(b.id) ?? 0, b.updatedAt) - Math.max(recentActivity.get(a.id) ?? 0, a.updatedAt));
   const candidateLimit = sidebarGrouping === "list" || sidebarExpanded ? sortedProjects.length : Math.max(1, Math.ceil(railHeight / 36));
@@ -4460,7 +4713,7 @@ export function ChatPanel({
     enabled: !embedded && sidebarGrouping === "list",
   });
   const sessionsOptions = useMemo(() => listChatSessionsQuery(projectId), [projectId]);
-  const { data: sessions = EMPTY_SESSIONS } = useQuery(sessionsOptions);
+  const { data: sessions = EMPTY_SESSIONS, isSuccess: sessionsLoaded } = useQuery(sessionsOptions);
   const setSessions = useCallback((value: React.SetStateAction<ChatSession[]>) => {
     setScopedQueryData(sessionsOptions.queryKey, (current) => {
       if (!current) return undefined;
@@ -4483,8 +4736,13 @@ export function ChatPanel({
   const [draft, setDraft] = useState("");
   const [demoHintDismissed, setDemoHintDismissed] = useState(false);
   const [annotations, setAnnotations] = useState<ComposerAnnotation[]>([]);
-  const annotationId = useRef(0);
+  const [unconfirmedSend, setUnconfirmedSend] = useState<string | null>(null);
   const composerScopeRef = useRef({ projectId, activeId, mainView });
+  const composerMountedRef = useRef(false);
+  useLayoutEffect(() => {
+    composerMountedRef.current = true;
+    return () => { composerMountedRef.current = false; };
+  }, []);
   if (composerScopeRef.current.projectId !== projectId
     || composerScopeRef.current.activeId !== activeId
     || composerScopeRef.current.mainView !== mainView) {
@@ -4498,40 +4756,66 @@ export function ChatPanel({
   const [imageRefusedFor, setImageRefusedFor] = useState<string | null>(null);
   // Unsent composer content belongs to the scope it was typed in — stash on
   // the way out, restore on return, so a draft can't bleed into another chat.
-  const stashKey = activeId ?? `${projectId}:new`;
-  const composerStashRef = useRef(new Map<string, ComposerStash>());
+  const stashScope = `${sessionsOptions.queryKey[1]}:`;
+  const stashKey = stashScope + (embedded
+    ? activeId ? `side:${activeId}` : `${projectId}:side:${sideParentSessionId ?? "new"}`
+    : activeId ?? `${projectId}:new`);
+  const pendingClientTurn = useRef<ComposerStash["pendingClientTurn"]>(null);
+  const pendingScope = useRef<string | null>(null);
   const composerLiveRef = useRef(EMPTY_COMPOSER_STASH);
-  composerLiveRef.current = { draft, attachments, annotations };
+  composerLiveRef.current = { draft, attachments, annotations, unconfirmedSend, pendingClientTurn: pendingClientTurn.current };
   // On offer until the user has sent anything in the demo: a send either adds
   // a session or moves a recorded session's leaf off its seeded message. The
   // nudge anchors to the first scope that had it — seeding it in every scope
-  // would read as the draft bleeding across chats.
+  // would read as the draft bleeding across chats. A new project's seeded
+  // prompt (an openresearch:// reproduce link) is offered the same way until it has a chat.
+  const seededPrompt = !embedded && sessionsLoaded && sessions.length === 0 ? composerSeed(projectId) : null;
   const composerPrefillOffer =
     projectId === DEMO_PROJECT_ID && !embedded &&
       sessions.length > 0 &&
       sessions.every((session) => session.sideParentSessionId || DEMO_SEEDED_LEAF_IDS[session.id] === session.activeLeafId)
       ? DEMO_RUN_EXPERIMENT_PROMPT
-      : null;
-  const prefillScopeRef = useRef<string | null>(null);
-  if (composerPrefillOffer !== null && prefillScopeRef.current === null && activeId !== null) {
-    prefillScopeRef.current = stashKey;
+      : seededPrompt;
+  // Per project, so a seeded project's anchor can't block the demo's.
+  const prefillScopesRef = useRef(new Map<string, string>());
+  const canAnchorPrefill = activeId !== null || seededPrompt !== null;
+  if (composerPrefillOffer !== null && !prefillScopesRef.current.has(projectId) && canAnchorPrefill) {
+    prefillScopesRef.current.set(projectId, stashKey);
   }
-  const composerPrefill = stashKey === prefillScopeRef.current ? composerPrefillOffer : null;
+  useEffect(() => {
+    if (sessions.length > 0) forgetComposerSeed(projectId);
+  }, [projectId, sessions.length]);
+  const composerPrefill = stashKey === prefillScopesRef.current.get(projectId) ? composerPrefillOffer : null;
   // Layout effect: the restore must land before paint or the outgoing chat's
   // draft flashes for a frame inside the incoming one.
   useLayoutEffect(() => {
-    const restored = composerStashRef.current.get(stashKey) ?? EMPTY_COMPOSER_STASH;
+    const restored = composerStashes.get(stashKey) ?? EMPTY_COMPOSER_STASH;
     // StrictMode double-invokes: the cleanup must see the restored value, not
     // the pre-restore render's.
     composerLiveRef.current = restored;
+    pendingClientTurn.current = restored.pendingClientTurn;
+    pendingScope.current = stashKey;
     setDraft(restored.draft);
     setAttachments(restored.attachments);
     setAnnotations(restored.annotations);
+    setUnconfirmedSend(restored.unconfirmedSend);
     setImageRefusedFor(null);
+    const restoreFailed = (failed: ComposerStash) => {
+      composerLiveRef.current = mergeFailedComposer(composerLiveRef.current, failed);
+      pendingClientTurn.current = composerLiveRef.current.pendingClientTurn;
+      setDraft((current) => mergeFailedComposer({ ...EMPTY_COMPOSER_STASH, draft: current }, failed).draft);
+      setAttachments((current) => mergeFailedComposer({ ...EMPTY_COMPOSER_STASH, attachments: current }, failed).attachments);
+      setAnnotations((current) => mergeFailedComposer({ ...EMPTY_COMPOSER_STASH, annotations: current }, failed).annotations);
+      if (failed.unconfirmedSend !== null) setUnconfirmedSend((current) => current ?? failed.unconfirmedSend);
+    };
+    mountedComposers.set(stashKey, restoreFailed);
     return () => {
+      if (mountedComposers.get(stashKey) === restoreFailed) mountedComposers.delete(stashKey);
+      if (!isCurrentScope(sessionsOptions.queryKey) || (activeId && deletedSessionIds.has(activeId))
+        || (sideParentSessionId && deletedSessionIds.has(sideParentSessionId))) return;
       const stashed = composerStashContent(composerLiveRef.current, composerPrefill);
-      if (stashed) composerStashRef.current.set(stashKey, stashed);
-      else composerStashRef.current.delete(stashKey);
+      if (stashed) composerStashes.set(stashKey, stashed);
+      else composerStashes.delete(stashKey);
     };
   }, [stashKey, composerPrefill]);
   const [settingsError, setSettingsError] = useState<string | null>(null);
@@ -4563,7 +4847,6 @@ export function ChatPanel({
   const activeLeafRef = useRef<string | null>(null);
   const [retryingQueuedId, setRetryingQueuedId] = useState<string | null>(null);
   const preparingSend = useRef(false);
-  const pendingClientTurn = useRef<{ signature: string; id: string } | null>(null);
   // Sessions whose title was just replaced by a harness-generated one, mapped
   // to a nonce that bumps per reveal so a second retitle remounts the spans and
   // replays the animation instead of sitting on a finished one.
@@ -4583,13 +4866,13 @@ export function ChatPanel({
   const stickToBottom = useRef(true);
   const [transcriptAtBottom, setTranscriptAtBottom] = useState(true);
   const composerRef = useRef<HTMLTextAreaElement>(null);
-  const [resumeOpen, setResumeOpen] = useState(false);
+  const connection = useRemoteConnection();
+  const resumeCancelRef = useRef<(() => void) | null>(null);
   const dataSources = usePopover();
   const addTranscriptSelection = useCallback((selection: Pick<SelectionAction, "text" | "range">) => {
-    annotationId.current += 1;
     setAnnotations((current) => [
       ...current,
-      { id: `annotation-${annotationId.current}`, ...selection },
+      { id: `annotation-${crypto.randomUUID()}`, ...selection },
     ]);
     composerRef.current?.focus();
   }, []);
@@ -4597,8 +4880,9 @@ export function ChatPanel({
   useAnnotationHighlights(annotations, embedded ? SIDE_CHAT_ANNOTATION_HIGHLIGHT_NAME : CHAT_ANNOTATION_HIGHLIGHT_NAME);
 
   useEffect(() => {
-    setResumeOpen(false);
+    resumeCancelRef.current?.();
     transcriptSelection.dismiss();
+    return () => resumeCancelRef.current?.();
   }, [activeId, projectId, transcriptSelection.dismiss]);
 
   // Slash-skills: menu state is derived from the draft — open while the token
@@ -4615,9 +4899,9 @@ export function ChatPanel({
 
   // Only reachable while the menu is open, which needs a live slash context.
   function pickSkill(skill: SkillInfo) {
-    if (!slashContext) return;
+    if (!slashContext || skill.disabled) return;
     if (
-      !pendingQuestion && skill.source === "command" && isComposerCommand(skill.name)
+      skill.source === "command" && isComposerCommand(skill.name)
     ) {
       activateComposerCommand(skill.name, draft, slashContext);
       return;
@@ -4697,6 +4981,7 @@ export function ChatPanel({
       const attachmentStashKey = stashKey;
       const reader = new FileReader();
       reader.onload = () => {
+        if (!isCurrentScope(sessionsOptions.queryKey)) return;
         const attachment = {
           dataUrl: reader.result as string,
           mediaType: file.type,
@@ -4705,12 +4990,12 @@ export function ChatPanel({
         };
         // The decode is async — if the composer moved on, the file belongs to
         // the scope it was pasted into, not whatever chat is now showing.
-        if (composerScopeRef.current.projectId === scope.projectId && composerScopeRef.current.activeId === scope.activeId) {
+        if (composerMountedRef.current && composerScopeRef.current.projectId === scope.projectId && composerScopeRef.current.activeId === scope.activeId) {
           setAttachments((cur) => [...cur, attachment]);
           return;
         }
-        const stash = composerStashRef.current.get(attachmentStashKey) ?? EMPTY_COMPOSER_STASH;
-        composerStashRef.current.set(attachmentStashKey, {
+        const stash = composerStashes.get(attachmentStashKey) ?? EMPTY_COMPOSER_STASH;
+        composerStashes.set(attachmentStashKey, {
           ...stash,
           attachments: [...stash.attachments, attachment],
         });
@@ -4743,16 +5028,20 @@ export function ChatPanel({
   //    picker tweaks layered on. The harness is the session's, not the global.
   //  * with no session — the sticky global preference (seeds a new session).
   const savedSelection = selection ?? defaultSelection(harnesses);
+  const retryOptions = (pendingScope.current === stashKey
+    ? pendingClientTurn.current
+    : composerStashes.get(stashKey)?.pendingClientTurn)?.options;
   const rawSelection: ModelSelection | null = openSession
     ? {
       harness: openSession.harness,
-      model: sessionOverride.model !== undefined ? sessionOverride.model : openSession.model,
-      serviceTier:
-        sessionOverride.serviceTier !== undefined
-          ? sessionOverride.serviceTier
-          : openSession.serviceTier,
-      permissionMode: sessionOverride.permissionMode ?? openSession.permissionMode,
-      reasoningLevel: sessionOverride.reasoningLevel ?? openSession.reasoningLevel,
+      model: sessionOverride.model !== undefined ? sessionOverride.model
+        : retryOptions?.model !== undefined ? retryOptions.model : openSession.model,
+      serviceTier: sessionOverride.serviceTier !== undefined ? sessionOverride.serviceTier
+        : retryOptions?.serviceTier !== undefined ? retryOptions.serviceTier : openSession.serviceTier,
+      permissionMode: sessionOverride.permissionMode ?? (retryOptions?.permissionMode !== undefined
+        ? retryOptions.permissionMode : openSession.permissionMode),
+      reasoningLevel: sessionOverride.reasoningLevel ?? (retryOptions?.reasoningLevel !== undefined
+        ? retryOptions.reasoningLevel : openSession.reasoningLevel),
     }
     : savedSelection
       ? { ...savedSelection, ...sessionOverride }
@@ -4776,8 +5065,8 @@ export function ChatPanel({
     return harnessSetupPath(activeHarness, setup, command);
   };
   const commands = useMemo(
-    () => commandsForHarness(skills, planActivation),
-    [skills, planActivation],
+    () => commandsForHarness(skills, planActivation, activeHarness?.supportsCompaction),
+    [skills, planActivation, activeHarness?.supportsCompaction],
   );
   // `!` at the start of the draft is a shell command, not a message (Claude
   // Code's bash mode); the slash menu stays shut over paths like `!ls /tmp`.
@@ -4797,7 +5086,8 @@ export function ChatPanel({
   const skillMatches =
     typingCommand && !skillMenuDismissed ? completions : [];
   const skillMenuOpen = skillMatches.length > 0;
-  const activeSkillIdx = Math.min(skillIdx, Math.max(0, skillMatches.length - 1));
+  const selectableSkillIndices = skillMatches.flatMap((skill, index) => skill.disabled ? [] : [index]);
+  const activeSkillIdx = selectableSkillIndices.includes(skillIdx) ? skillIdx : selectableSkillIndices[0] ?? -1;
   useEffect(() => setSkillIdx(0), [slashToken]);
   // `@path` mentions list the checkout the agent works in; the text is sent as typed.
   const mentionContext = bashMode ? null : fileMentionContext(draft, composerCursor);
@@ -4845,8 +5135,14 @@ export function ChatPanel({
   // let a change on one axis pin a reconciled value on another — picking a
   // permission mode would write a reasoning level the user never chose, and the
   // next send would persist it over their real setting.
+  const invalidatePendingRetry = () => {
+    if (pendingClientTurn.current) pendingClientTurn.current.invalidated = true;
+    pendingClientTurn.current = null;
+    composerLiveRef.current = { ...composerLiveRef.current, pendingClientTurn: null };
+  };
   const selectModel = (next: Partial<ModelSelection>) => {
     if (openSession?.harness.startsWith("acp:") && acpModel && next.model) {
+      if (next.model !== acpModel.currentValue) invalidatePendingRetry();
       void setChatConfiguration(openSession.id, acpModel.id, next.model).catch((error: unknown) => showAlert(error instanceof Error ? error.message : String(error), "error"));
       return;
     }
@@ -4869,6 +5165,7 @@ export function ChatPanel({
       next.reasoningLevel !== composerSelection.reasoningLevel
     )
       changed.reasoningLevel = next.reasoningLevel;
+    if (Object.keys(changed).length) invalidatePendingRetry();
     setRecoveryOverrides((current) => ({ ...current, ...changed }));
     setSelection(merged);
     void onPreferredAgentChange(merged).catch(() => {});
@@ -4878,6 +5175,20 @@ export function ChatPanel({
       setSessionOverride({});
     }
   };
+  function startHarness(harness: Harness) {
+    const model = resolveHarnessDefaultModel(harness);
+    const next: ModelSelection = {
+      harness: harness.id,
+      model,
+      serviceTier: reconcileServiceTier(harness.catalogPending ? undefined : harness, model, null),
+      permissionMode: harness.options?.defaultPermissionMode ?? null,
+      reasoningLevel: reconcileReasoning(harness.catalogPending ? undefined : harness, model, null),
+    };
+    setSelection(next);
+    void onPreferredAgentChange(next).catch(() => {});
+    if (onStartHarnessDraft) onStartHarnessDraft();
+    else onActiveSessionChangeRef.current(null, { projectId });
+  }
   const queueSessionMutation = useCallback(<T,>(mutation: () => Promise<T>): Promise<T> => {
     const result = settingsMutationTail.current.catch(() => {}).then(() => {
       if (!isCurrentScope(sessionsOptions.queryKey)) throw new DOMException("Workspace changed", "AbortError");
@@ -4893,6 +5204,7 @@ export function ChatPanel({
     // Plan is session-scoped. Claude exposes it in the permission dropdown,
     // but it must not become the saved default for future sessions.
     if (id === "plan" && activeHarness?.id === "claude-code") {
+      if (composerSelection?.permissionMode !== id) invalidatePendingRetry();
       setRecoveryOverrides((current) => ({ ...current, permissionMode: id }));
       setSessionOverride((current) => ({ ...current, permissionMode: id }));
     } else {
@@ -4932,6 +5244,7 @@ export function ChatPanel({
   };
   const setReasoningLevel = (id: string) => selectModel({ reasoningLevel: id });
   const setAutonomy = (autonomy: Autonomy) => {
+    if (autonomy !== (openSession?.autonomy ?? preferredAutonomy)) invalidatePendingRetry();
     if (!openSession) {
       if (sideParentSessionId) setSideDraftAutonomy(autonomy);
       else onPreferredAutonomyChange(autonomy);
@@ -4962,7 +5275,7 @@ export function ChatPanel({
   const planActive = acpMode ? acpMode.currentValue === "plan" : composerSelection?.harness === "claude-code"
     ? composerSelection.permissionMode === "plan"
     : planActivation === "command"
-      ? planModeOverride ?? openSession?.planMode ?? false
+      ? planModeOverride ?? retryOptions?.planMode ?? openSession?.planMode ?? false
       : false;
   useEffect(() => {
     if (planModeOverride === null || openSession?.planMode !== planModeOverride) return;
@@ -4971,6 +5284,7 @@ export function ChatPanel({
   }, [openSession?.planMode, planModeOverride]);
 
   async function setIndependentPlanMode(planMode: boolean) {
+    if (planMode !== planActive) invalidatePendingRetry();
     if (acpMode && openSession) {
       const next = planMode ? "plan" : acpMode.choices.find((choice) => choice.id !== "plan")?.id;
       if (!next) throw new Error(m.chat_toggle_plan_failed());
@@ -5045,7 +5359,20 @@ export function ChatPanel({
         } else startNewTask();
         return false;
       case "resume":
-        setResumeOpen(true);
+        showCustomDialog({
+          component: ResumeDialog,
+          props: {
+            activeSessionId: activeId,
+            cancelRef: resumeCancelRef,
+            onResume: (session) => {
+              setSessionFilter("all");
+              onActiveSessionChange(session.id, { projectId: session.projectId });
+            },
+            onImport: (chat) => { void importChat(chat); },
+          },
+          onConfirm: () => {},
+          onCancel: "close",
+        });
         return true;
       case "model":
         setModelPickerRequest((request) => request + 1);
@@ -5152,6 +5479,7 @@ export function ChatPanel({
   /** Compaction runs in the backend; its progress is the transcript row it
    * publishes over SSE, so only a failure needs a toast. */
   async function compactSession() {
+    if (!activeHarness?.supportsCompaction) return;
     const sessionId = activeId;
     if (!sessionId) {
       showAlert(m.chat_nothing_to_compact(), "info");
@@ -5166,10 +5494,9 @@ export function ChatPanel({
     if (sessionFilter === "archived") setSessionFilter("active");
     const sourceScope = composerScopeRef.current;
     try {
-      // The row lands over SSE too; upserting the response paints it without
-      // waiting for the broadcast, as the `!` shell path does.
+      // SSE may deliver the final result before this initial progress response.
       const { message } = await compactChatSession(sessionId);
-      dispatch({ type: "upsertMessage", sessionId, message });
+      dispatch({ type: "upsertMessage", sessionId, message, onlyIfMissing: true });
     } catch (err) {
       if (composerScopeRef.current.activeId !== sourceScope.activeId) return;
       setSettingsError(m.chat_compact_failed({ error: ltr(err instanceof Error ? err.message : String(err)) }));
@@ -5244,10 +5571,8 @@ export function ChatPanel({
     };
   }, [projectId, syncSessionList]);
 
-  // Load message history when a session becomes active.
   useEffect(() => {
     setRecoveryOverrides(EMPTY_RECOVERY_OVERRIDES);
-    pendingClientTurn.current = null;
   }, [activeId]);
 
   useEffect(() => {
@@ -5365,6 +5690,9 @@ export function ChatPanel({
   const awaitingInput = busy && messages.some((message) => message.parts.some(
     (part) => part.type === "prompt" && part.prompt && !part.prompt.resolved && part.prompt.nativeId,
   ));
+  const pendingQuestions = useMemo(() => messages.flatMap((message) => message.parts.filter((part) =>
+    part.type === "prompt" && part.prompt?.kind === "question" && !part.prompt.resolved && (!part.prompt.nativeId || busy),
+  )), [messages, busy]);
   const activeSession = openSession;
   // Nonce while the open session's title is mid-reveal; undefined = static.
   const activeTitleReveal = activeSession ? titleReveals.get(activeSession.id) : undefined;
@@ -5387,18 +5715,8 @@ export function ChatPanel({
     return null;
   }, [messages]);
 
-  // Native questions own the composer only while their turn is still running.
-  const pendingQuestion = useMemo(
-    () => activeId ? pendingQuestionId(messages, activeSession?.harness, state.busySessions.has(activeId)) : null,
-    [messages, activeSession?.harness, activeId, state.busySessions],
-  );
-  // A pending question card owns typed text, so `!` is just an answer there.
-  const bashActive = bashMode && !pendingQuestion;
-
-  // A pending question card owns the composer's text as a plain answer — no
-  // command in it is ever expanded, so none of it is chipped either.
   const knownCommand = (name: string) => {
-    if (pendingQuestion || bashMode) return false;
+    if (bashMode) return false;
     const resolved = resolveComposerCommand(name);
     const command = commands.find((candidate) => candidate.name === canonicalSkillName(resolved ?? name));
     if (!command || command.source !== "command") return !!command;
@@ -5432,14 +5750,13 @@ export function ChatPanel({
 
   const pendingPermission = useMemo(() => firstPendingPermission(messages), [messages]);
   // Enter hands the message to the running turn. Attachments still park (only
-  // a full turn builds their on-disk preamble), and a pending card owns typed
-  // text — there the card is the affordance, not a steer.
+  // a full turn builds their on-disk preamble). Held prompts must be answered first.
   const steering =
     busy &&
     !!activeHarness?.supportsSteering &&
     !!activeHarness?.agentReady &&
     !pendingPlan &&
-    !pendingQuestion &&
+    !awaitingInput &&
     !pendingPermission &&
     attachments.length === 0 &&
     annotations.length === 0;
@@ -5536,19 +5853,29 @@ export function ChatPanel({
     setSkillMenuDismissed(false);
     setComposerCursor(composerPrefill.length);
   }, [composerPrefill]);
+  const [newChatFocusProject, setNewChatFocusProject] = useState<string | null>(null);
+  const focusedComposerNonce = useRef(0);
   useEffect(() => {
-    if (composerFocusNonce === 0) return;
+    // The composer is inert while its chat is loading. Keep the
+    // request pending until it can take focus, and consume it only once.
+    const newChatPending = newChatFocusProject === projectId && activeId === null;
+    const composerPending = composerFocusNonce !== 0 && composerFocusNonce !== focusedComposerNonce.current;
+    if ((!newChatPending && !composerPending) || mainView !== "chat" || contentLoading || contentError || historyLoading) return;
     // The welcome dialog restores its previous focus on unmount; run after that.
     const frame = window.requestAnimationFrame(() => {
       const el = composerRef.current;
       if (!el) return;
       el.focus();
+      if (document.activeElement !== el) return;
+      focusedComposerNonce.current = composerFocusNonce;
+      if (newChatPending) setNewChatFocusProject(null);
       el.setSelectionRange(el.value.length, el.value.length);
       el.scrollIntoView({ block: "nearest" });
     });
     return () => window.cancelAnimationFrame(frame);
-  }, [composerFocusNonce]);
+  }, [composerFocusNonce, newChatFocusProject, projectId, activeId, mainView, contentLoading, contentError, historyLoading]);
   const demoHintId = useId();
+  const unconfirmedSendId = useId();
   const demoHintVisible =
     projectId === DEMO_PROJECT_ID && draft === DEMO_RUN_EXPERIMENT_PROMPT && !demoHintDismissed;
   const updateTranscriptBottom = useCallback((el: HTMLDivElement) => {
@@ -5586,7 +5913,7 @@ export function ChatPanel({
     // Slash tokens stay in the wire form: the server resolves every selected
     // skill and supplies this exact message as their shared request context.
     const originalText = (starter ?? draft).trim();
-    const composerCommand = !pendingQuestion && starter === undefined
+    const composerCommand = starter === undefined
       ? parseComposerCommand(originalText, planActivation)
       : null;
     const goalCommand = composerCommand?.name === "goal";
@@ -5596,7 +5923,7 @@ export function ChatPanel({
       setGoalScope(composerScopeRef.current);
       return;
     }
-    if (!pendingQuestion && (goalCommand || goalArmed)
+    if ((goalCommand || goalArmed)
       && /^(clear|none|off)$/i.test(goalCommand ? composerCommand.prompt : originalText)) {
       setDraft("");
       setGoalScope(null);
@@ -5619,7 +5946,7 @@ export function ChatPanel({
     }
     if (preparingSend.current) return;
     const planRequested = composerCommand?.name === "plan";
-    const goalRequested = !pendingQuestion && (goalCommand || goalArmed);
+    const goalRequested = (goalCommand || goalArmed);
     const toggledPlanMode = !planActive;
     const independentPlanMode = effectiveCommandPlanMode(
       acpMode ? undefined : planActivation,
@@ -5635,23 +5962,52 @@ export function ChatPanel({
     const wireAnnotations = pendingAnnotations.map((annotation) => ({
       text: annotation.text,
     }));
+    const turnSignature = JSON.stringify({
+      text,
+      goal: goalRequested ? text : undefined,
+      plan: planRequested,
+      images: pending.map((attachment) => ({
+        mediaType: attachment.mediaType,
+        name: attachment.name,
+        dataUrl: attachment.dataUrl,
+      })),
+      annotations: wireAnnotations,
+    });
+    const retry = pendingClientTurn.current?.signature === turnSignature ? pendingClientTurn.current : null;
     const sourceProjectId = projectId;
     const sourceView = mainView;
     let sourceSessionId = activeId;
+    let sourceStashKey = stashKey;
     const inSourceScope = () => {
       const current = composerScopeRef.current;
-      return isCurrentScope(sessionsOptions.queryKey) && current.projectId === sourceProjectId
+      return composerMountedRef.current && isCurrentScope(sessionsOptions.queryKey) && current.projectId === sourceProjectId
         && current.activeId === sourceSessionId
         && current.mainView === sourceView;
     };
-    const restoreComposer = () => {
-      if (!inSourceScope()) return;
-      setDraft((current) => current || originalText);
-      if (goalRequested) setGoalScope(composerScopeRef.current);
-      setAttachments((current) => (current.length ? current : pending));
-      setAnnotations((current) => (current.length ? current : pendingAnnotations));
+    let failedTurn: ComposerStash["pendingClientTurn"] = null;
+    const restoreComposer = (unconfirmedSend: string | null = null) => {
+      if (!isCurrentScope(sessionsOptions.queryKey)
+        || (sourceSessionId && deletedSessionIds.has(sourceSessionId))
+        || (sideParentSessionId && deletedSessionIds.has(sideParentSessionId))) return;
+      const restore = mountedComposers.get(sourceStashKey);
+      const failed = {
+        draft: goalArmed && !goalCommand && (!restore || !inSourceScope()) ? `/goal ${starter ?? draft}` : starter ?? draft,
+        attachments: pending,
+        annotations: pendingAnnotations.map(({ range: _range, ...annotation }) => annotation),
+        unconfirmedSend,
+        pendingClientTurn: unconfirmedSend === null || failedTurn?.invalidated ? null : failedTurn,
+      };
+      if (restore) {
+        restore(failed);
+        if (goalRequested && inSourceScope()) setGoalScope(composerScopeRef.current);
+      } else {
+        const merged = mergeFailedComposer(composerStashes.get(sourceStashKey) ?? EMPTY_COMPOSER_STASH, failed);
+        const stashed = composerStashContent(merged, null);
+        if (stashed) composerStashes.set(sourceStashKey, stashed);
+      }
     };
     if (planRequested && !text && pending.length === 0 && pendingAnnotations.length === 0) {
+      composerLiveRef.current = { ...composerLiveRef.current, draft: "" };
       setDraft("");
       setSkillMenuDismissed(false);
       try {
@@ -5668,7 +6024,7 @@ export function ChatPanel({
       }
       return;
     }
-    if (planRequested && acpMode) {
+    if (planRequested && acpMode && !retry) {
       try {
         await setIndependentPlanMode(toggledPlanMode);
       } catch {
@@ -5682,10 +6038,10 @@ export function ChatPanel({
         ...(planPermissionMode ? { permissionMode: planPermissionMode } : {}),
       }
       : null;
-    if (planPermissionMode) setPermissionMode(planPermissionMode);
+    if (planPermissionMode && !retry) setPermissionMode(planPermissionMode);
     let planCommandMutation: number | null = null;
     const previousPlanModeOverride = planModeOverrideRef.current;
-    if (planRequested && !acpMode && planActivation === "command") {
+    if (planRequested && !acpMode && planActivation === "command" && !retry) {
       planCommandMutation = ++planMutationSeq.current;
       planModeOverrideRef.current = toggledPlanMode;
       setPlanModeOverride(toggledPlanMode);
@@ -5702,48 +6058,48 @@ export function ChatPanel({
       const session = await setChatSessionGoalMutation.mutateAsync([sessionId, text]);
       setSessions((current) => current.map((candidate) => candidate.id === session.id ? session : candidate));
     };
-    // A pending question card owns plain typed text as a custom answer
-    // (Claude-desktop behavior). This also works while the turn is HELD on
-    // the card — where a new message would be rejected as busy and silently
-    // dropped. A failed answer restores the draft so the text isn't lost.
-    // (Nothing is chipped or expanded while a card is pending — a `/command`
-    // in the answer serializes into the note text exactly as it reads.)
-    if ((text || pendingAnnotations.length > 0) && pendingQuestion && pending.length === 0) {
-      setDraft("");
-      setAnnotations([]);
-      void respond({
-        promptId: pendingQuestion,
-        answers: [],
-        note: text || undefined,
-        annotations: wireAnnotations,
-      }).then((ok) => {
-        if (!ok) restoreComposer();
-      });
-      return;
-    }
-    const turnSignature = JSON.stringify({
-      text,
-      goal: goalRequested ? text : undefined,
-      images: pending.map((attachment) => ({
-        mediaType: attachment.mediaType,
-        name: attachment.name,
-        dataUrl: attachment.dataUrl,
-      })),
-      annotations: wireAnnotations,
-      settings: effective
-        ? {
-          model: effective.model,
-          serviceTier: effective.serviceTier,
-          permissionMode: effective.permissionMode,
-          planMode: independentPlanMode,
-          reasoningLevel: effective.reasoningLevel,
+    const clientTurnId = retry?.id ?? `ct_${crypto.randomUUID()}`;
+    const mode = retry ? retry.mode : busy && steering && !queue && !planRequested && !goalRequested ? "steer" : null;
+    const turnOpts = retry?.options ?? (effective ? {
+      model: effective.model,
+      serviceTier: effective.serviceTier,
+      permissionMode: effective.permissionMode,
+      // A persisted plan toggle must reach the running turn's settings check.
+      planMode: busy && planActivation === "command" ? (independentPlanMode ?? openSession?.planMode) : independentPlanMode,
+      reasoningLevel: effective.reasoningLevel,
+    } : {});
+    pendingClientTurn.current = { signature: turnSignature, id: clientTurnId, mode, options: turnOpts };
+    failedTurn = pendingClientTurn.current;
+    const finishSentMessage = () => {
+      if (inSourceScope()) {
+        setRecoveryOverrides(EMPTY_RECOVERY_OVERRIDES);
+        if (retry) {
+          setUnconfirmedSend(null);
+          composerLiveRef.current = { ...composerLiveRef.current, unconfirmedSend: null };
         }
-        : null,
-    });
-    const clientTurnId = pendingClientTurn.current?.signature === turnSignature
-      ? pendingClientTurn.current.id
-      : `ct_${crypto.randomUUID()}`;
-    pendingClientTurn.current = { signature: turnSignature, id: clientTurnId };
+        if (goalRequested) setGoalScope(null);
+      }
+      if (pendingClientTurn.current?.id === clientTurnId) {
+        pendingClientTurn.current = null;
+        if (inSourceScope() && composerLiveRef.current.pendingClientTurn?.id === clientTurnId) {
+          composerLiveRef.current = { ...composerLiveRef.current, pendingClientTurn: null };
+        }
+      }
+    };
+    const clearComposer = () => {
+      const live = composerLiveRef.current;
+      composerLiveRef.current = {
+        ...live,
+        draft: live.draft === draft ? "" : live.draft,
+        attachments: live.attachments === pending ? [] : live.attachments,
+        annotations: live.annotations === pendingAnnotations ? [] : live.annotations,
+      };
+      setDraft((current) => current === draft ? "" : current);
+      setAttachments((current) => current === pending ? [] : current);
+      setAnnotations((current) => current === pendingAnnotations ? [] : current);
+      setAttachError(null);
+      setImageRefusedFor(null);
+    };
     if (busy) {
       // A turn is already running. Steering hands the message to it now, and
       // the delivered text comes back inline on the assistant message. Parking
@@ -5755,39 +6111,18 @@ export function ChatPanel({
         return;
       }
       const sid = activeId;
-      setDraft("");
-      setAttachments([]);
-      setAnnotations([]);
-      setAttachError(null);
-      setImageRefusedFor(null);
-      // Always send the composer's settings, steer or not: a permission or
-      // plan change persists itself before this message, so the server's
-      // comparison against the *running* turn is the only thing that catches
-      // it — and a mismatch parks the message, which also persists the change.
-      const turnOpts = effective
-        ? {
-          model: effective.model,
-          serviceTier: effective.serviceTier,
-          permissionMode: effective.permissionMode,
-          // The composer's plan state, not just an unpersisted toggle: a
-          // toggle that already persisted would otherwise reach the server
-          // as "no change" and steer into a turn still running without it.
-          planMode:
-            planActivation === "command"
-              ? (independentPlanMode ?? openSession?.planMode)
-              : independentPlanMode,
-          reasoningLevel: effective.reasoningLevel,
-        }
-        : {};
+      clearComposer();
       if (inSourceScope()) setSessionOverride({});
       const images: ChatImageAttachment[] = pending.map((a) => ({
         mediaType: a.mediaType,
         dataBase64: a.dataUrl.slice(a.dataUrl.indexOf(",") + 1),
         name: a.name,
       }));
+      let submitted = false;
       try {
         const sendBusy = async () => {
           await persistMessageGoal(sid);
+          submitted = true;
           return sendChatMessage(
             sid,
             text,
@@ -5795,20 +6130,31 @@ export function ChatPanel({
             images.length ? images : undefined,
             wireAnnotations,
             clientTurnId,
-            steering && !queue && !planRequested && !goalRequested ? "steer" : undefined,
+            mode ?? undefined,
           );
         };
         const response = await queueSessionMutation(sendBusy);
         if (response.turn?.existing) await reseedSession(sid);
-        if (inSourceScope()) {
-          setRecoveryOverrides(EMPTY_RECOVERY_OVERRIDES);
-          if (goalRequested) setGoalScope(null);
+        finishSentMessage();
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : String(err);
+        const unconfirmed = submitted && !(err instanceof RejectedResponseError);
+        if (unconfirmed) {
+          const accepted = await getChatSubmission(sid, clientTurnId).then((result) => result.accepted).catch(() => false);
+          if (!isCurrentScope(sessionsOptions.queryKey) || deletedSessionIds.has(sid)
+            || (sideParentSessionId && deletedSessionIds.has(sideParentSessionId))) return;
+          if (accepted) {
+            finishSentMessage();
+            await reseedSession(sid).catch(() => {});
+            return;
+          }
         }
-        if (pendingClientTurn.current?.id === clientTurnId) pendingClientTurn.current = null;
-      } catch {
-        // Never reached the turn — restore the composer so a retry is one keypress.
         clearFailedPlanCommand();
-        restoreComposer();
+        restoreComposer(unconfirmed ? msg : null);
+        if (isCurrentScope(sessionsOptions.queryKey) && !deletedSessionIds.has(sid)
+          && (!sideParentSessionId || !deletedSessionIds.has(sideParentSessionId)) && !unconfirmed) {
+          dispatch({ type: "localError", sessionId: sid, text: m.chat_message_not_sent({ error: ltr(msg) }) });
+        }
       }
       return;
     }
@@ -5823,41 +6169,48 @@ export function ChatPanel({
       return;
     }
     let sid = activeId;
+    let submitted = false;
     try {
       // Clear before the first await — once the scope can move, a stash
       // cleanup must never see the sent text still in the composer. Failure
       // paths below restore it via restoreComposer().
-      setDraft((current) => current === draft ? "" : current);
-      setAttachments((current) => current === pending ? [] : current);
-      setAnnotations((current) => (current === pendingAnnotations ? [] : current));
-      setAttachError(null);
-      setImageRefusedFor(null);
+      clearComposer();
       preparingSend.current = true;
       try {
         if (!sid) {
           const session = await openNewSession(effective, independentPlanMode);
           sid = session.id;
           sourceSessionId = session.id;
+          sourceStashKey = `${stashScope}${embedded ? `side:${session.id}` : session.id}`;
         }
         if (!isCurrentScope(sessionsOptions.queryKey)) return;
-        const history = getChatMessagesQuery(sid);
-        // Join pending repair even when it has published an intermediate snapshot.
-        await queryClient.fetchQuery({
+        const historySid = sid;
+        const history = getChatMessagesQuery(historySid);
+        // Join pending repair even when it has published an intermediate snapshot. A live invalidation
+        // (e.g. SSE reconnect) can cancel the joined read; retrying joins its replacement or reads the cache.
+        const awaitHistory = (): Promise<unknown> => queryClient.fetchQuery({
           ...history,
           ...(queryClient.getQueryState(history.queryKey)?.fetchStatus === "fetching" ? { staleTime: 0 } : {}),
+        }).catch((cause: unknown) => {
+          if (cause instanceof CancelledError && isCurrentScope(sessionsOptions.queryKey) && !deletedSessionIds.has(historySid)) return awaitHistory();
+          throw cause;
         });
+        await awaitHistory();
       } finally {
         preparingSend.current = false;
       }
-      if (!isCurrentScope(sessionsOptions.queryKey)) return;
-      dispatch({
-        type: "optimisticUser",
-        sessionId: sid,
-        text: text || m.chat_asked_about_selection(),
-        attachments: pending.map((a) => ({ url: a.dataUrl, mediaType: a.mediaType, name: a.name })),
-        annotations: pendingAnnotations,
-      });
-      dispatch({ type: "busy", sessionId: sid, busy: true });
+      if (!isCurrentScope(sessionsOptions.queryKey) || deletedSessionIds.has(sid)
+        || (sideParentSessionId && deletedSessionIds.has(sideParentSessionId))) return;
+      if (!(retry && mode === "steer")) {
+        dispatch({
+          type: "optimisticUser",
+          sessionId: sid,
+          text: text || m.chat_asked_about_selection(),
+          attachments: pending.map((a) => ({ url: a.dataUrl, mediaType: a.mediaType, name: a.name })),
+          annotations: pendingAnnotations,
+        });
+        dispatch({ type: "busy", sessionId: sid, busy: true });
+      }
       if (inSourceScope()) pinTranscriptToBottom();
       // The session being sent to is never archived after this turn (new ones
       // start active; existing ones are unarchived server-side by activity) —
@@ -5866,15 +6219,6 @@ export function ChatPanel({
       // `effective.harness` is always the target session's harness (locked once
       // it exists), so these overrides are always valid — the backend persists
       // them as the session's sticky settings. Clear the unsent tweak now.
-      const turnOpts = effective
-        ? {
-          model: effective.model,
-          serviceTier: effective.serviceTier,
-          permissionMode: effective.permissionMode,
-          planMode: independentPlanMode,
-          reasoningLevel: effective.reasoningLevel,
-        }
-        : {};
       if (inSourceScope()) setSessionOverride({});
       const images: ChatImageAttachment[] = pending.map((a) => ({
         mediaType: a.mediaType,
@@ -5885,6 +6229,7 @@ export function ChatPanel({
       if (!targetSessionId) throw new Error(m.chat_session_not_created());
       const sendTurn = async () => {
         await persistMessageGoal(targetSessionId);
+        submitted = true;
         return sendChatMessage(
           targetSessionId,
           text,
@@ -5892,45 +6237,41 @@ export function ChatPanel({
           images.length ? images : undefined,
           wireAnnotations,
           clientTurnId,
+          mode ?? undefined,
         );
       };
       const response = await queueSessionMutation(sendTurn);
       if (response.turn?.existing) await reseedSession(targetSessionId);
-      if (inSourceScope()) {
-        setRecoveryOverrides(EMPTY_RECOVERY_OVERRIDES);
-        if (goalRequested) setGoalScope(null);
-      }
-      if (pendingClientTurn.current?.id === clientTurnId) pendingClientTurn.current = null;
+      finishSentMessage();
     } catch (err) {
       if (!isCurrentScope(sessionsOptions.queryKey)) return;
-      // The message never reached a turn — put it back in the composer so a
-      // retry is one keypress, whichever branch below applies.
-      restoreComposer();
-      clearFailedPlanCommand();
-      if (!sid) return; // session creation failed; no transcript to annotate
+      if (!sid) {
+        restoreComposer();
+        clearFailedPlanCommand();
+        const msg = err instanceof Error ? err.message : String(err);
+        showAlert(m.chat_message_not_sent({ error: ltr(msg) }), "error");
+        return;
+      }
       const msg = err instanceof Error ? err.message : String(err);
-      // A *network* failure does not prove no turn started — the backend
-      // claims the turn (and emits busy) before its response, so a lost
-      // response can reject on a live, streaming turn; ask the server before
-      // declaring failure. An explicit busy rejection is different: the slot
-      // belongs to someone else's turn (run watcher, second tab) and ours was
-      // never accepted — always surface that.
-      if (!/session is busy/i.test(msg)) {
-        const busyNow = await queryClient.fetchQuery({ ...listChatSessionsQuery(projectId), staleTime: 0 })
-          .then((list) => !!list.find((s) => s.id === sid)?.busy)
-          .catch(() => false);
-        if (busyNow) {
-          // The turn is real and streaming — undo the restore, nothing failed.
-          if (inSourceScope()) {
-            setDraft((cur) => (cur === text ? "" : cur));
-            setAttachments((cur) => (cur === pending ? [] : cur));
-            setAnnotations((cur) => (cur === pendingAnnotations ? [] : cur));
-          }
+      if (!isCurrentScope(sessionsOptions.queryKey) || deletedSessionIds.has(sid)) return;
+      const unconfirmed = submitted && !(err instanceof RejectedResponseError);
+      if (unconfirmed) {
+        const accepted = await getChatSubmission(sid, clientTurnId).then((result) => result.accepted).catch(() => false);
+        if (!isCurrentScope(sessionsOptions.queryKey) || deletedSessionIds.has(sid)
+          || (sideParentSessionId && deletedSessionIds.has(sideParentSessionId))) return;
+        if (accepted) {
+          finishSentMessage();
+          await reseedSession(sid).catch(() => {});
           return;
         }
       }
-      dispatch({ type: "busy", sessionId: sid, busy: false });
-      dispatch({ type: "localError", sessionId: sid, text: m.chat_message_not_sent({ error: ltr(msg) }) });
+      restoreComposer(unconfirmed ? msg : null);
+      clearFailedPlanCommand();
+      if (submitted) await reseedSession(sid).catch(() => {});
+      else dispatch({ type: "busy", sessionId: sid, busy: false });
+      if (!isCurrentScope(sessionsOptions.queryKey) || deletedSessionIds.has(sid)
+        || (sideParentSessionId && deletedSessionIds.has(sideParentSessionId))) return;
+      if (!unconfirmed) dispatch({ type: "localError", sessionId: sid, text: m.chat_message_not_sent({ error: ltr(msg) }) });
     }
   }
 
@@ -6140,47 +6481,19 @@ export function ChatPanel({
     }
   }
 
-  const lastPointerInSide = useRef(false);
-  useEffect(() => {
-    const onDown = (e: PointerEvent) => { lastPointerInSide.current = inSideChat(e.target); };
-    document.addEventListener("pointerdown", onDown, true);
-    return () => document.removeEventListener("pointerdown", onDown, true);
-  }, []);
-
-  // Escape stops the streaming turn and drops focus back into the composer,
-  // mirroring the Claude Code desktop app. Harness-agnostic — `stop()` →
-  // `interruptChat` interrupts whichever harness (Claude, Codex, OpenCode, …)
-  // is running the active session. Only armed while chat is visible.
-  //
-  // An overlay that should swallow Escape (rather than let it stop the turn)
-  // must own the key ahead of this document-level bubble listener, by one of
-  // two means already in use — a new overlay has to pick one or it will
-  // interrupt the turn on Escape:
-  //   - the slash and @file menus preventDefault in the composer's onKeyDown (bubble),
-  //     so the `defaultPrevented` guard below defers to it;
-  //   - the composer pickers (usePopover) stopPropagation in the capture phase,
-  //     so their Escape never reaches this listener at all.
-  useEffect(() => {
-    if (!busy || mainView !== "chat") return;
-    function onKey(e: KeyboardEvent) {
-      if (e.key !== "Escape" || e.defaultPrevented) return;
-      // Clicking a transcript leaves focus on body; the click says which pane it was.
-      const side = e.target === document.body ? lastPointerInSide.current : inSideChat(e.target);
-      if (side !== embedded) return;
-      e.preventDefault();
-      stop();
-      composerRef.current?.focus();
-    }
-    document.addEventListener("keydown", onKey);
-    return () => document.removeEventListener("keydown", onKey);
-  }, [busy, activeId, mainView, embedded]);
+  useHotkey("Escape", () => {
+    if (commandRegion() !== (embedded ? "right" : "left")) return;
+    stop();
+    composerRef.current?.focus();
+  }, { enabled: busy && mainView === "chat", preventDefault: true, stopPropagation: false, conflictBehavior: "allow" });
 
   /** Drop every trace of a session — the local row, the open-thread selection,
    * and the cached transcript. Used on delete (ours or another dashboard's). */
   function forgetSession(sessionId: string) {
     removeCachedSession(sessionId);
-    composerStashRef.current.delete(sessionId);
-    if (prefillScopeRef.current === sessionId) prefillScopeRef.current = null;
+    composerStashes.delete(`${stashScope}${sessionId}`);
+    composerStashes.delete(`${stashScope}side:${sessionId}`);
+    if (prefillScopesRef.current.get(projectId) === `${stashScope}${sessionId}`) prefillScopesRef.current.delete(projectId);
     if (composerScopeRef.current.projectId === projectId
       && composerScopeRef.current.activeId === sessionId
       && composerScopeRef.current.mainView === "chat") {
@@ -6230,16 +6543,19 @@ export function ChatPanel({
     });
   }
 
-  async function removeSession(session: ChatSession) {
+  function removeSession(session: ChatSession) {
     const title = session.title?.trim() || m.chat_untitled();
-    if (!window.confirm(m.chat_delete_session_confirm({ title: autoDir(title) }))) return;
-    try {
-      await deleteChatSessionMutation.mutateAsync(session.id);
-    } catch (err) {
-      showAlert(m.chat_delete_session_failed({ title: autoDir(title), error: ltr(err instanceof Error ? err.message : String(err)) }), "error");
-      return;
-    }
-    forgetSession(session.id);
+    showConfirmDialog({
+      title: m.chat_panel_delete(),
+      description: m.chat_delete_session_confirm({ title: autoDir(title) }),
+      confirmLabel: m.chat_panel_delete(),
+      destructive: true,
+      onCancel: "close",
+      onConfirm: async () => {
+        await deleteChatSessionMutation.mutateAsync(session.id);
+        forgetSession(session.id);
+      },
+    });
   }
 
   /** Deliver a card answer; resolves `false` when delivery failed (so a
@@ -6253,7 +6569,10 @@ export function ChatPanel({
       dispatch({ type: "busy", sessionId: sid, busy: true });
       return queueSessionMutation(() => respondChat(sid, answer))
         .then(() => true)
-        .catch(() => false)
+        .catch((error: unknown) => {
+          showAlert(error instanceof Error ? error.message : String(error), "error");
+          return false;
+        })
         .finally(() => {
           if (!isCurrentScope(sessionsOptions.queryKey)) return;
           // Reconcile with the store: if this tab's copy of the card was stale
@@ -6271,20 +6590,23 @@ export function ChatPanel({
     [activeId, projectId, queueSessionMutation, sessionsOptions],
   );
 
-  const isApple = /Mac|iPhone|iPad/.test(navigator.platform);
-  const newTaskShortcut = isApple ? "⌘ ⇧ ↵" : "Ctrl + Shift + ↵";
-  const queueChord = isApple ? "⌘ Enter" : "Ctrl + Enter";
+  const newTaskHotkey = useAppHotkeys()["task.new"].hotkey;
+  const newTaskShortcut = newTaskHotkey ? formatForDisplay(newTaskHotkey) : undefined;
+  const queueChord = formatForDisplay("Mod+Enter");
   const startProjectTask = useCallback(() => {
     setSessionFilter("active");
+    setNewChatFocusProject(projectId);
     onActiveSessionChange(null);
-  }, [onActiveSessionChange]);
+  }, [onActiveSessionChange, projectId]);
   const startNewTask = useCallback(async () => {
     try {
       const activity = await queryClient.fetchQuery({ ...listProjectActivityQuery(), staleTime: 0 });
       const latest = activity.reduce<(typeof activity)[number] | undefined>((current, item) =>
         !current || item.lastActivityAt > current.lastActivityAt ? item : current, undefined);
       setSessionFilter("active");
-      onActiveSessionChange(null, { projectId: latest?.projectId ?? projectId });
+      const targetProject = latest?.projectId ?? projectId;
+      setNewChatFocusProject(targetProject);
+      onActiveSessionChange(null, { projectId: targetProject });
     } catch (error) {
       showAlert(error instanceof Error ? error.message : String(error), "error");
     }
@@ -6307,24 +6629,12 @@ export function ChatPanel({
     [onActiveSessionChange],
   );
 
-  useEffect(() => {
-    if (embedded) return;
-    const onKeyDown = (event: KeyboardEvent) => {
-      if (
-        event.repeat ||
-        event.key !== "Enter" ||
-        (!event.metaKey && !event.ctrlKey) ||
-        event.altKey ||
-        !event.shiftKey ||
-        inSideChat(event.target)
-      )
-        return;
-      event.preventDefault();
-      startNewTask();
-    };
-    document.addEventListener("keydown", onKeyDown);
-    return () => document.removeEventListener("keydown", onKeyDown);
-  }, [startNewTask, embedded]);
+  const newTask = () => {
+    if (commandRegion() === "right" && document.querySelector(".right-pane [data-side-chat]")) return;
+    startNewTask();
+  };
+  useHotkey(appHotkeys["task.new"], newTask, { enabled: !embedded, requireReset: true });
+  useHotkey("Mod+Shift+Enter", newTask, { enabled: !embedded, requireReset: true });
 
   const sessionWaiting = (session: ChatSession) => state.messagesBySession[session.id]
     ? waitingSessions.has(session.id) : session.awaitingInput === true;
@@ -6344,7 +6654,7 @@ export function ChatPanel({
     sidebarRows.push({ kind: "project", project, collapsed, busy: collapsed && matching.some((session) => sessionBusy(project, session) && !sessionWaiting(session)) });
     if (collapsed) return;
     visible.forEach((session) => sidebarRows.push({ kind: "chat", project, session }));
-    if (matching.length > chatLimit) sidebarRows.push({ kind: "more", project });
+    if (matching.length > 6) sidebarRows.push({ kind: "more", project });
     if (!visible.length && (sidebarGrouping === "projects" || query.isPending || query.error)) sidebarRows.push({ kind: "status", project, pending: query.isPending, error: Boolean(query.error), retry: () => { void query.refetch(); } });
   });
   if (sidebarGrouping === "list") {
@@ -6384,6 +6694,15 @@ export function ChatPanel({
   });
 
   const sidebarVirtualItems = sidebarVirtualizer.getVirtualItems();
+  const pendingSidebarFocus = useRef<number | null>(null);
+  useLayoutEffect(() => {
+    if (pendingSidebarFocus.current === null) return;
+    const row = railBodyRef.current?.querySelector<HTMLElement>(`[data-index="${pendingSidebarFocus.current}"] [data-sidebar-keyboard-row]`);
+    if (row) {
+      pendingSidebarFocus.current = null;
+      row.focus();
+    }
+  });
   const lastVisibleIndex = sidebarVirtualItems.at(-1)?.index ?? -1;
   useEffect(() => {
     if (sidebarGrouping === "list" && railOpen && !embedded && lastVisibleIndex >= sidebarRows.length - 6
@@ -6393,76 +6712,125 @@ export function ChatPanel({
   }, [sidebarGrouping, railOpen, embedded, lastVisibleIndex, sidebarRows.length, flatSessions.hasNextPage, flatSessions.isFetching, flatSessions.isError, flatSessions.fetchNextPage]);
 
   const rail = (
-    <aside className="session-rail w-75 shrink-0 flex flex-col mt-5 mac-titlebar:mt-8 me-3.5 mb-5 ms-0 bg-background min-h-0 [&_.rail-body]:flex-1 [&_.rail-body]:min-h-0 [&_.rail-body]:pt-0 [&_.rail-body]:pb-0 [&_.rail-body]:ps-2 [&_.rail-body]:pe-1 border border-border rounded-lg overflow-visible shadow-elevated">
+    <aside style={mobileRail ? undefined : { width: railWidth }} className="session-rail relative shrink-0 flex flex-col bg-background min-h-0 [&_.rail-body]:flex-1 [&_.rail-body]:min-h-0 [&_.rail-body]:pt-0 [&_.rail-body]:pb-0 [&_.rail-body]:ps-2 [&_.rail-body]:pe-1 border-e border-e-border overflow-visible">
+      {!mobileRail && <div
+        className="rail-resizer absolute -end-1 top-0 bottom-0 w-1.5 z-30 cursor-col-resize [&:hover]:bg-resizer-hover [&:active]:bg-resizer-hover"
+        onPointerDown={onResizeRail}
+      />}
       {railHeader}
-      <nav className="rail-nav flex flex-col gap-0.5 p-2 shrink-0">
+      <nav data-keyboard-list onKeyDown={navigateKeyboardList} className="rail-nav flex flex-col gap-0.5 p-2 shrink-0 [&_[data-tip]::after]:left-[calc(100%_+_6px)] [&_[data-tip]::after]:top-1/2 [&_[data-tip]::after]:translate-x-0 [&_[data-tip]::after]:-translate-y-1/2">
         <button
-          className="rail-nav-item flex items-center gap-2.5 py-[7px] px-2.5 text-base text-text rounded-md text-start hover:bg-surface [&[data-tip]::after]:top-auto [&[data-tip]::after]:bottom-[calc(100%_+_6px)]"
+          className="rail-nav-item flex items-center gap-2.5 py-2 px-2.5 text-base text-text rounded-md text-start hover:bg-surface"
           data-onboarding="new-session"
+          data-keyboard-item
           data-tip={newTaskShortcut}
-          aria-keyshortcuts="Meta+Shift+Enter Control+Shift+Enter"
+          aria-label={m.chat_panel_new_chat()}
+          aria-keyshortcuts="Meta+N Control+N Meta+Shift+Enter Control+Shift+Enter"
           onClick={startNewTask}
         >
-          <Plus size={15} />
+          <Plus size={16} />
           {m.chat_panel_new_chat()}
         </button>
         <button
-          className={`rail-nav-item flex items-center gap-2.5 py-[7px] px-2.5 text-base text-text rounded-md text-start [&:hover:not(.active)]:bg-surface [&.active]:bg-panel [&.active]:font-medium ${mainView === "skills" ? "active" : ""}`}
+          data-keyboard-item
+          className={`rail-nav-item flex items-center gap-2.5 py-2 px-2.5 text-base text-text rounded-md text-start [&:hover:not(.active)]:bg-surface [&.active]:bg-panel [&.active]:font-medium ${mainView === "skills" ? "active" : ""}`}
+          aria-current={mainView === "skills" ? "page" : undefined}
           onClick={() => onSelectMainView("skills")}
         >
-          <Blocks size={15} />
+          <Blocks size={16} />
           {m.chat_panel_customize()}
         </button>
-        {SETTINGS_NAV.map((item) => (
-          <button
-            key={item.id}
-            className={`rail-nav-item flex items-center gap-2.5 py-[7px] px-2.5 text-base text-text rounded-md text-start [&:hover:not(.active)]:bg-surface [&.active]:bg-panel [&.active]:font-medium ${mainView !== "chat" && mainView !== "skills" && item.activeTabs.includes(mainView) ? "active" : ""}`}
-            data-onboarding={item.id === "compute" ? "nav-compute" : undefined}
-            onClick={() => onSelectMainView(item.id)}
-          >
-            {item.icon}
-            {item.label()}
-          </button>
-        ))}
+        {SETTINGS_NAV.map((item) => {
+          const active = mainView !== "chat" && mainView !== "skills" && item.activeTabs.includes(mainView);
+          const shortcut = item.id === "settings" ? appHotkeys["settings.open"].hotkey : item.id === "compute" ? appHotkeys["compute.open"].hotkey : null;
+          return (
+            <button
+              key={item.id}
+              data-keyboard-item
+              className={`rail-nav-item flex items-center gap-2.5 py-2 px-2.5 text-base text-text rounded-md text-start [&:hover:not(.active)]:bg-surface [&.active]:bg-panel [&.active]:font-medium ${active ? "active" : ""}`}
+              aria-current={active ? "page" : undefined}
+              data-onboarding={item.id === "compute" ? "nav-compute" : undefined}
+              data-tip={shortcut ? formatForDisplay(shortcut) : undefined}
+              aria-label={item.label()}
+              aria-keyshortcuts={item.id === "settings" ? "Meta+, Control+," : item.id === "compute" ? "Meta+Alt+C Control+Alt+C" : undefined}
+              onClick={() => onSelectMainView(item.id)}
+            >
+              {item.icon}
+              {item.label()}
+            </button>
+          );
+        })}
       </nav>
-      <div className="rail-section-head flex items-center justify-between shrink-0 pt-3.5 pe-2.5 pb-0 ps-4.5">
+      <div className="rail-section-head flex items-center justify-between shrink-0 pt-3.5 pe-3.5 pb-0 ps-4.5">
         <div className="rail-section-label p-0 text-sm font-medium text-subtext">
           {sidebarGrouping === "projects" ? m.projects_home_projects() : m.chat_all_sessions()}
         </div>
-        <div className="rail-section-actions flex items-center gap-0.5">
+        <div className="rail-section-actions flex items-center gap-1">
           {onNewProject && <Tooltip interactive content={m.projects_home_new_project()} className="rounded-sm">
             <IconButton size="small" className="text-subtext" aria-label={m.projects_home_new_project()} onClick={onNewProject}>
-              <FolderPlus size={15} className="text-subtext" />
+              <FolderPlus size={16} className="text-subtext" />
             </IconButton>
           </Tooltip>}
           <SessionFilterMenu value={sessionFilter} onChange={setSessionFilter} grouping={sidebarGrouping} onGroupingChange={(grouping) => {
             setSidebarGrouping(grouping);
             try { localStorage.setItem("sidebar-grouping", grouping); } catch {}
-            setSidebarExpanded(false);
+            setSidebarExpandedAll(false);
             setChatLimits({});
             if (railBodyRef.current) railBodyRef.current.scrollTop = 0;
           }} />
         </div>
       </div>
       <div className="relative flex-1 min-h-0">
-      <div ref={railBodyRef} tabIndex={-1} className={`rail-body h-full overflow-x-hidden ${sidebarScrollable ? "overflow-y-auto" : "overflow-y-hidden"}`}>
-        <div className="relative" style={{ height: (sidebarScrollable ? sidebarVirtualizer.getTotalSize() : defaultRowsHeight) + (showProjectMore ? 38 : 0) + (sidebarExpanded ? 46 : 0) }}>
+      <div ref={setRailBody} tabIndex={-1} className={`rail-body h-full overflow-x-hidden ${sidebarScrollable ? "overflow-y-auto" : "overflow-y-hidden"}`}
+        onKeyDown={(event) => {
+          if (event.defaultPrevented || event.nativeEvent.isComposing || event.altKey || event.ctrlKey || event.metaKey || event.shiftKey) return;
+          const target = event.target;
+          if (!(target instanceof HTMLElement) || (target !== event.currentTarget && !target.hasAttribute("data-sidebar-keyboard-row"))) return;
+          const rows = sidebarScrollable ? sidebarRows : defaultRows;
+          const indexes = rows.flatMap((row, index) => row.kind === "project" || row.kind === "chat" ? [index] : []);
+          if (indexes.length === 0) return;
+          const rowIndex = Number(target.closest("[data-index]")?.getAttribute("data-index") ?? -1);
+          const position = indexes.indexOf(rowIndex);
+          let next: number;
+          if (event.key === "ArrowDown") next = position < 0 ? 0 : Math.min(position + 1, indexes.length - 1);
+          else if (event.key === "ArrowUp") next = position < 0 ? indexes.length - 1 : Math.max(position - 1, 0);
+          else if (event.key === "Home") next = 0;
+          else if (event.key === "End") next = indexes.length - 1;
+          else if (target instanceof HTMLButtonElement && event.key === "ArrowRight" && target.getAttribute("aria-expanded") === "false") {
+            event.preventDefault();
+            target.click();
+            return;
+          } else if (target instanceof HTMLButtonElement && event.key === "ArrowLeft" && target.getAttribute("aria-expanded") === "true") {
+            event.preventDefault();
+            target.click();
+            return;
+          } else return;
+          event.preventDefault();
+          const index = indexes[next];
+          if (index === rowIndex) return;
+          pendingSidebarFocus.current = index;
+          setFocusedSidebarRow(sidebarRowKey(rows[index]));
+          if (sidebarScrollable) sidebarVirtualizer.scrollToIndex(index, { align: "auto" });
+        }}>
+        <div className="relative" style={{ height: (sidebarScrollable ? sidebarVirtualizer.getTotalSize() : defaultRowsHeight) + (showProjectMore ? 38 : 0) + (sidebarExpandedAll ? 46 : 0) }}>
           {(sidebarScrollable
             ? sidebarVirtualItems.map((item) => ({ row: sidebarRows[item.index], top: item.start, index: item.index }))
             : defaultRows.map((row, index) => ({ row, top: 0, index }))
           ).map(({ row, top, index }) => {
             const project = row.project;
             const s = row.kind === "chat" ? row.session : null;
+            const sessionHarness = s ? sessionAcpHarness(s, harnesses.find((h) => h.id === s.harness)) : undefined;
+            const sessionModel = sessionHarness?.models.find((model) => model.id === s?.model);
             return (
               <div
                 key={sidebarRowKey(row)}
                 data-index={index}
                 onFocusCapture={() => setFocusedSidebarRow(sidebarRowKey(row))}
                 onBlurCapture={(event) => {
-                  if (!event.currentTarget.contains(event.relatedTarget)) setFocusedSidebarRow(null);
+                  if (!event.currentTarget.contains(event.relatedTarget) && !(event.relatedTarget instanceof Element && event.relatedTarget.closest(`[data-session-hover-card="${sidebarRowKey(row)}"]`))) setFocusedSidebarRow(null);
                 }}
                 className={sidebarScrollable ? "absolute top-0 start-0 w-full" : "relative"}
-                style={{ height: sidebarRowHeight(row), transform: sidebarScrollable ? `translateY(${top}px)` : undefined }}
+                style={{ height: sidebarRowHeight(row), top: sidebarScrollable ? top : undefined }}
               >
                 {row.kind === "project" ? (
                   <div className="group h-9 flex items-end gap-1 rounded-md px-2.5 text-text">
@@ -6494,12 +6862,19 @@ export function ChatPanel({
                     <SessionRow
                       key={s.id}
                       session={s}
+                      cardWarmUntil={cardWarmUntil}
+                      projectName={sidebarGrouping === "list" ? project.name : undefined}
+                      harnessLogo={sessionHarness?.logo}
+                      modelName={sessionModel ? harnessModelLabel(sessionModel) : s.model}
                       active={s.id === activeId && mainView === "chat"}
                       unread={unreadSessionIds.has(s.id)}
                       busy={sessionBusy(project, s)}
                       waiting={sessionWaiting(s)}
                       experimentRunning={activeRuns.some((item) => item.sessionId === s.id)}
                       revealTitle={titleReveals.get(s.id)}
+                      onOpenExperiment={(targetProjectId, experimentId) => {
+                        void navigate({ href: taskLocation(targetProjectId, targetProjectId === s.projectId ? s.id : null, { kind: "experiment", experimentId, view: "overview" }) });
+                      }}
                       onOpen={() => {
                         if (project.id === projectId) onActiveSessionChange(s.id);
                         else void navigate({ to: "/projects/$projectId/tasks/$sessionId", params: { projectId: project.id, sessionId: s.id } });
@@ -6526,11 +6901,15 @@ export function ChatPanel({
                     />
                   </div>
                 ) : row.kind === "more" ? (
-                  <Button variant="ghost" size="small" className="ms-5.5 font-normal text-subtext" onClick={() => {
-                    setSidebarExpanded(true);
-                    setChatLimits((current) => ({ ...current, [project.id]: (current[project.id] ?? 6) + 6 }));
+                  <Button variant="ghost" size="small" className="ms-5.5 font-normal text-subtext" aria-expanded={project.id in chatLimits} onClick={() => {
+                    setChatLimits((current) => {
+                      const next = { ...current };
+                      if (project.id in next) delete next[project.id];
+                      else next[project.id] = Infinity;
+                      return next;
+                    });
                   }}>
-                    {m.common_show_more()}
+                    {project.id in chatLimits ? m.common_show_less() : m.common_show_more()}
                   </Button>
                 ) : row.kind === "status" && (
                   <div className={`flex h-full items-center px-2.5 text-sm text-subtext ${sidebarGrouping === "projects" ? "ms-5.5" : ""}`}>
@@ -6542,26 +6921,19 @@ export function ChatPanel({
               </div>
             );
           })}
-          {showProjectMore && (
+          {(showProjectMore || sidebarExpandedAll) && (
             <div className="absolute start-0 flex h-9.5 w-full items-center pt-1" style={{ top: sidebarScrollable ? sidebarVirtualizer.getTotalSize() : defaultRowsHeight }}>
-              <Button variant="ghost" size="small" className="text-subtext" onClick={() => {
-                setSidebarExpanded(true);
-              }}>{m.common_show_more()}</Button>
-            </div>
-          )}
-          {sidebarExpanded && (
-            <div className="absolute start-0 w-full pt-1" style={{ top: sidebarVirtualizer.getTotalSize() + (showProjectMore ? 38 : 0) }}>
-              <Button variant="ghost" size="small" className="text-subtext" onClick={() => {
-                setSidebarExpanded(false);
-                setChatLimits({});
-                setFocusedSidebarRow(null);
-                if (railBodyRef.current) {
-                  railBodyRef.current.scrollTop = 0;
-                  railBodyRef.current.focus();
+              <Button variant="ghost" size="small" className="text-subtext" aria-expanded={sidebarExpandedAll} onClick={() => {
+                if (sidebarExpandedAll) {
+                  setChatLimits({});
+                  setFocusedSidebarRow(null);
+                  if (railBodyRef.current) {
+                    railBodyRef.current.scrollTop = 0;
+                    railBodyRef.current.focus();
+                  }
                 }
-              }}>
-                {m.common_show_less()}
-              </Button>
+                setSidebarExpandedAll(!sidebarExpandedAll);
+              }}>{sidebarExpandedAll ? m.common_show_less() : m.common_show_more()}</Button>
             </div>
           )}
         </div>
@@ -6575,24 +6947,34 @@ export function ChatPanel({
     </aside>
   );
 
-  const headerClass = `chat-header flex items-center gap-2 py-0 px-4 bg-background shrink-0 h-12 relative z-4 w-full max-w-readable my-0 mx-auto [&::after]:content-[''] [&::after]:absolute [&::after]:top-full [&::after]:start-0 [&::after]:end-0 [&::after]:h-6 [&::after]:bg-[linear-gradient(to_bottom,_var(--base),_transparent)] [&::after]:pointer-events-none`;
-  const railReopen = !railOpen && !embedded && (
-    <IconButton
-      title={m.chat_panel_show_sidebar()}
-      aria-label={m.chat_panel_show_sidebar()}
-      onClick={onShowRail}
-      className="mac-titlebar:ms-16"
-    >
-      <PanelLeft size={20} />
-    </IconButton>
+  const headerClass = `chat-header flex items-center gap-2 py-0 px-4 bg-background shrink-0 h-12 mac-titlebar:h-titlebar relative z-4 w-full max-w-readable my-0 mx-auto [&::after]:content-[''] [&::after]:absolute [&::after]:top-full [&::after]:start-0 [&::after]:end-0 [&::after]:h-6 [&::after]:bg-[linear-gradient(to_bottom,_var(--base),_transparent)] [&::after]:pointer-events-none`;
+  const displayedRail = mobileRail ? (
+    <Dialog.Root open={railOpen} onOpenChange={(open) => { if (!open) onCloseMobileRail?.(); }}>
+      <Dialog.Portal>
+        <Dialog.Backdrop className="fixed inset-0 z-70 bg-modal-backdrop" />
+        <Dialog.Popup aria-modal="true" aria-label={m.chat_panel_show_sidebar()} className="mobile-rail-dialog fixed inset-y-0 start-0 z-80 outline-none">{rail}</Dialog.Popup>
+      </Dialog.Portal>
+    </Dialog.Root>
+  ) : railOpen ? rail : null;
+  const railReopen = (!railOpen || mobileRail) && !embedded && (
+    <Tooltip interactive content={`${m.chat_panel_show_sidebar()} (${formatForDisplay(appHotkeys["sidebar.toggle"].hotkey ?? [])})`} className="rounded-md mac-titlebar:invisible">
+      <IconButton
+        aria-label={m.chat_panel_show_sidebar()}
+        aria-expanded={railOpen}
+        onClick={onShowRail}
+        className="mac-titlebar:ms-titlebar-inset"
+      >
+        <PanelLeft size={20} />
+      </IconButton>
+    </Tooltip>
   );
 
   if (mainView !== "chat") {
     return (
       <>
-        {railOpen && rail}
-        <section className="chat-pane flex-1 min-w-0 flex flex-col bg-background min-h-0">
-          {!railOpen && <div className="flex h-12 shrink-0 items-center">{railReopen}</div>}
+        {displayedRail}
+        <section inert={contentInert} className="chat-pane flex-1 min-w-0 flex flex-col bg-background min-h-0">
+          {(!railOpen || mobileRail) && <div className="mac-titlebar-spacer flex h-12 mac-titlebar:h-titlebar shrink-0 items-center">{railReopen}</div>}
           {/* Keyed per view so no tab inherits the chat thread's or another tab's scroll offset. */}
           <div key={mainView} className="settings-view-scroll flex-1 min-h-0 overflow-y-auto [scrollbar-gutter:stable_both-edges]">
             {contentError ? <div role="alert" className="p-6 text-subtext">{contentError}<Button onClick={onRetryContent}>{m.app_retry()}</Button></div>
@@ -6605,11 +6987,11 @@ export function ChatPanel({
 
   return (
     <>
-      {railOpen && rail}
-      <section data-side-chat={embedded || undefined} className={`chat-pane flex-1 min-w-0 flex flex-col bg-background min-h-0 ${embedded ? "" : "mt-5"}`}>
+      {displayedRail}
+      <section inert={contentInert} data-side-chat={embedded || undefined} className="chat-pane flex-1 min-w-0 flex flex-col bg-background min-h-0">
         {/* Header — session title on the left, end-pane view switchers on the
           right, fading into the chat below (sessions live in the rail). */}
-        <div className={railOpen || embedded ? "contents" : "grid shrink-0 grid-cols-[2rem_minmax(0,1fr)_2rem] mac-titlebar:grid-cols-[6rem_minmax(0,1fr)_6rem] items-center"}>
+        <div className={railOpen && !mobileRail || embedded ? "contents" : "chat-heading-row grid shrink-0 grid-cols-[2rem_minmax(0,1fr)_2rem] mac-titlebar:grid-cols-titlebar-chat items-center"}>
           {railReopen}
           <div className={headerClass}>
           <div className="flex min-w-0 flex-1 items-center gap-2">
@@ -6630,7 +7012,7 @@ export function ChatPanel({
           </div>
           {embedded && activeSession && (
             <IconButton aria-label={m.side_chat_delete()} data-tip={m.side_chat_delete()} onClick={() => void removeSession(activeSession)}>
-              <Trash2 size={15} />
+              <Trash2 size={16} />
             </IconButton>
           )}
           </div>
@@ -6651,13 +7033,13 @@ export function ChatPanel({
               <div className="ms-auto h-14 w-3/5 shrink-0 rounded-lg bg-panel" />
               <div className="flex shrink-0 flex-col gap-3">
                 {["w-5/6", "w-full", "w-11/12", "w-2/3", "w-full", "w-3/4", "w-1/2"].map((width, index) => (
-                  <div key={index} className={`h-3 rounded bg-panel ${width}`} />
+                  <div key={index} className={`h-3 rounded-xs bg-panel ${width}`} />
                 ))}
               </div>
               <div className="ms-auto h-10 w-2/5 shrink-0 rounded-lg bg-panel" />
               <div className="flex shrink-0 flex-col gap-3">
                 {["w-full", "w-11/12", "w-3/4", "w-5/6", "w-1/2", "w-full", "w-5/6", "w-11/12", "w-2/3", "w-3/4", "w-1/3"].map((width, index) => (
-                  <div key={index} className={`h-3 rounded bg-panel ${width}`} />
+                  <div key={index} className={`h-3 rounded-xs bg-panel ${width}`} />
                 ))}
               </div>
               <div className="ms-auto h-16 w-1/2 shrink-0 rounded-lg bg-panel" />
@@ -6669,7 +7051,7 @@ export function ChatPanel({
             <p className="m-0 text-balance">{m.side_chat_empty()}</p>
           </div>
         ) : !threadMounted ? (
-          <div className="chat-empty flex-1 flex flex-col items-center justify-center text-text p-8 text-center [&_h2]:m-0 [&_h2]:text-5xl [&_h2]:font-medium [&_h2]:tracking-[-0.015em] [&_h2]:text-text">
+          <div className="chat-empty flex-1 flex flex-col items-center justify-center text-text p-8 text-center [&_h2]:m-0 [&_h2]:text-5xl [&_h2]:font-medium [&_h2]:tracking-tight [&_h2]:text-text">
             <div className="chat-empty-mark w-10.5 h-10.5 mb-5.5 [&_svg]:block [&_svg]:w-full [&_svg]:h-full">
               <BrandMark />
             </div>
@@ -6683,10 +7065,10 @@ export function ChatPanel({
                       className={`flex min-h-22 animate-pulse flex-col items-start justify-center gap-2.5 rounded-xl border bg-background px-5 py-4 ${STARTER_TONES[index].box}`}
                     >
                       <span className={`flex w-full items-center gap-2.5 ${STARTER_TONES[index].icon}`}>
-                        <Icon size={17} />
-                        <span className="h-3.5 w-2/5 rounded bg-panel" />
+                        <Icon size={16} />
+                        <span className="h-3.5 w-2/5 rounded-xs bg-panel" />
                       </span>
-                      <span className="h-3 w-4/5 rounded bg-panel" />
+                      <span className="h-3 w-4/5 rounded-xs bg-panel" />
                     </div>
                   ))}
                 </div>
@@ -6697,7 +7079,7 @@ export function ChatPanel({
               </>
             )}
             {starterPrompts && starterPrompts.length > 0 && (
-              <div className={STARTER_GRID_CLASS} role="group" aria-label={m.chat_panel_starter_prompts()}>
+              <div className={STARTER_GRID_CLASS} role="group" aria-label={m.chat_panel_starter_prompts()} inert={connection !== null}>
                 {starterPrompts.map((item, index) => {
                   const Icon = STARTER_ICONS[index];
                   const tone = STARTER_TONES[index];
@@ -6721,20 +7103,21 @@ export function ChatPanel({
                         onClick={() => pickStarter(false)}
                       >
                         <span className="flex items-center gap-2.5 text-base font-medium text-text">
-                          <Icon size={17} className={tone.icon} />
+                          <Icon size={16} className={tone.icon} />
                           {item.title}
                         </span>
                         <span className="w-full truncate text-sm text-subtext">{item.prompt}</span>
                       </button>
-                      <IconButton
-                        size="small"
-                        className="absolute end-2.5 top-2.5 [&:hover:not(:disabled)]:bg-surface-bright"
-                        aria-label={m.chat_panel_starter_edit({ title: item.title })}
-                        title={m.chat_panel_starter_edit({ title: item.title })}
-                        onClick={() => pickStarter(true)}
-                      >
-                        <Pencil size={13} />
-                      </IconButton>
+                      <Tooltip interactive content={m.chat_panel_starter_edit({ title: item.title })} className="absolute end-2.5 top-2.5">
+                        <IconButton
+                          size="small"
+                          className="[&:hover:not(:disabled)]:bg-surface-bright"
+                          aria-label={m.chat_panel_starter_edit({ title: item.title })}
+                          onClick={() => pickStarter(true)}
+                        >
+                          <Pencil size={14} />
+                        </IconButton>
+                      </Tooltip>
                     </div>
                   );
                 })}
@@ -6811,28 +7194,36 @@ export function ChatPanel({
           </Button>
         )}
 
+        {pendingQuestions.length > 0 && (
+          <div inert={contentLoading || Boolean(contentError) || historyLoading || connection !== null} className="mx-auto mb-2 flex max-h-96 w-full max-w-readable shrink-0 flex-col gap-2 overflow-y-auto px-3">
+            {pendingQuestions.map((part) => <PromptCard key={`${activeId}-${part.id}`} part={part} onRespond={respond} />)}
+          </div>
+        )}
+
         {/* Docked while a plan awaits a decision, so the approval controls never
           scroll away. Actions mirror the (now compact) inline card's wire. */}
-        <div inert={contentLoading || Boolean(contentError) || historyLoading} className="composer px-3 pb-5 shrink-0 relative z-4 bg-background w-full max-w-readable my-0 mx-auto [&_textarea]:border-0 [&_textarea]:bg-none [&_textarea]:bg-transparent [&_textarea]:resize-none [&_textarea]:pt-2.5 [&_textarea]:px-3 [&_textarea]:pb-1 [&_textarea]:text-base [&_textarea]:field-sizing-content [&_textarea]:min-h-18 [&_textarea]:max-h-45">
+        <div inert={contentLoading || Boolean(contentError) || historyLoading} className="composer px-3 pb-3 shrink-0 relative z-4 bg-background w-full max-w-readable my-0 mx-auto [&_textarea]:border-0 [&_textarea]:bg-none [&_textarea]:bg-transparent [&_textarea]:resize-none [&_textarea]:pt-2.5 [&_textarea]:px-3 [&_textarea]:pb-1 [&_textarea]:text-base [&_textarea]:field-sizing-content [&_textarea]:min-h-18 [&_textarea]:max-h-45">
           {threadMounted && (
-            <IconButton
-              className={`absolute bottom-full left-1/2 z-5 mb-6 h-9 w-9 -translate-x-1/2 rounded-full border border-border bg-background shadow-control transition-opacity duration-150 ease-standard ${transcriptAtBottom ? "opacity-0" : "opacity-100"}`}
-              title={m.chat_scroll_to_bottom()}
-              aria-label={m.chat_scroll_to_bottom()}
-              inert={transcriptAtBottom}
-              onClick={scrollToTranscriptBottom}
-            >
-              {busy && !awaitingInput ? (
-                <MoreHorizontal size={18} className="tool-running-shimmer-icon" />
-              ) : (
-                <ArrowDown size={16} />
-              )}
-            </IconButton>
+            <Tooltip interactive content={m.chat_scroll_to_bottom()} className={`absolute bottom-full left-1/2 z-5 mb-6 -translate-x-1/2 transition-opacity duration-150 ease-standard ${transcriptAtBottom ? "pointer-events-none opacity-0" : "opacity-100"}`}>
+              <IconButton
+                className="h-9 w-9 rounded-full border border-border bg-background shadow-control"
+                aria-label={m.chat_scroll_to_bottom()}
+                inert={transcriptAtBottom}
+                onClick={scrollToTranscriptBottom}
+              >
+                {busy && !awaitingInput ? (
+                  <MoreHorizontal size={18} className="tool-running-shimmer-icon" />
+                ) : (
+                  <ArrowDown size={16} />
+                )}
+              </IconButton>
+            </Tooltip>
           )}
           <ExperimentRunBanner
             key={activeId}
             runs={activeRuns.filter((item) => item.sessionId === activeId)}
             onOpenRun={onOpenRun}
+            onOpenExperiment={onOpenExperiment}
           />
           {/* Inside the composer so the composer's popovers (mode/model pickers,
             z 50 within this stacking context) layer above the strip — as a
@@ -6877,8 +7268,8 @@ export function ChatPanel({
                   title={q.error ? `${q.text}\n\n${q.error}` : q.text}
                 >
                   {q.dispatchState === "blocked"
-                    ? <TriangleAlert size={13} className="shrink-0 text-accent-amber" />
-                    : <Clock size={13} className="shrink-0 text-muted" />}
+                    ? <TriangleAlert size={14} className="shrink-0 text-accent-amber" />
+                    : <Clock size={14} className="shrink-0 text-muted" />}
                   <span className="flex-1 overflow-hidden text-ellipsis whitespace-nowrap text-text">
                     {q.text}
                   </span>
@@ -6895,7 +7286,7 @@ export function ChatPanel({
                         onClick={() => void retryQueued(q.id)}
                         aria-label={m.a11y_retry_queued_message({ text: q.text })}
                         disabled={retryingQueuedId !== null}
-                        className="shrink-0 px-1.5 py-0.5 border border-border rounded-sm text-sm text-text bg-background cursor-pointer disabled:opacity-50 disabled:cursor-default [&:hover:not(:disabled)]:border-text"
+                        className="shrink-0 px-1.5 py-0.5 border border-border rounded-sm text-sm text-text bg-background cursor-pointer disabled:opacity-50 disabled:cursor-default [&:hover:not(:disabled)]:border-border-hover-strong"
                       >
                         {retryingQueuedId === q.id ? m.retrying() : m.app_retry()}
                       </button>
@@ -6920,7 +7311,7 @@ export function ChatPanel({
                       onClick={() => cancelQueued(q.id)}
                       className="shrink-0 inline-flex items-center justify-center w-4 h-4 p-0 border-0 rounded-full text-muted cursor-pointer [&:hover]:bg-text [&:hover]:text-background"
                     >
-                      <X size={11} />
+                      <X size={12} />
                     </button>
                   )}
                 </div>
@@ -6934,20 +7325,21 @@ export function ChatPanel({
               className={`composer-demo-hint ${COMPOSER_HINT_CLASS}`}
             >
               <span className="flex-1" dir="auto">
-                <FlaskConical size={16} className="inline-block align-text-bottom me-2 text-primary" />
+                <FlaskConical size={16} className="inline-block align-text-bottom me-2 text-subtext" />
                 {m.chat_panel_demo_hint_body()}
               </span>
-              <IconButton
-                size="small"
-                aria-label={m.chat_panel_dismiss_demo_hint()}
-                title={m.chat_panel_dismiss_demo_hint()}
-                onClick={() => {
-                  setDemoHintDismissed(true);
-                  composerRef.current?.focus();
-                }}
-              >
-                <X size={14} />
-              </IconButton>
+              <Tooltip interactive content={m.chat_panel_dismiss_demo_hint()}>
+                <IconButton
+                  size="small"
+                  aria-label={m.chat_panel_dismiss_demo_hint()}
+                  onClick={() => {
+                    setDemoHintDismissed(true);
+                    composerRef.current?.focus();
+                  }}
+                >
+                  <X size={14} />
+                </IconButton>
+              </Tooltip>
             </div>
           )}
           {!embedded && !activeId && onNewProject && (
@@ -6962,7 +7354,20 @@ export function ChatPanel({
               }}
             />
           )}
-          <div className={`composer-box relative flex flex-col border ${bashActive ? "border-accent-amber" : "border-border"} rounded-lg bg-background shadow-elevated`} data-onboarding="composer">
+          <RemoteConnectionStrip />
+          <div inert={connection !== null} className={`composer-box relative flex flex-col border ${bashMode ? "border-accent-amber" : "border-border"} rounded-lg bg-background shadow-control-subtle${connection ? " opacity-60" : ""}`} data-onboarding="composer">
+            {unconfirmedSend !== null && (
+              <div id={unconfirmedSendId} role="alert" className="flex items-start gap-2 pt-2 px-3 text-sm text-text">
+                <span className="flex-1" dir="auto">{m.chat_send_unconfirmed({ error: ltr(unconfirmedSend) })}</span>
+                <button type="button" className="underline cursor-pointer" onClick={() => {
+                  composerLiveRef.current = { ...composerLiveRef.current, unconfirmedSend: null };
+                  setUnconfirmedSend(null);
+                  composerRef.current?.focus();
+                }}>
+                  {m.chat_panel_dismiss_demo_hint()}
+                </button>
+              </div>
+            )}
             {activeHarness && !activeHarness.agentReady && (
               <div className="composer-harness-warning py-2 px-3 text-subtext text-sm leading-normal border-b border-b-border-variant [&_strong]:text-accent-amber [&_strong]:font-medium [&_code]:font-mono [&_code]:text-text">
                 {activeHarness.catalogPending ? (
@@ -6999,21 +7404,6 @@ export function ChatPanel({
                 onHover={setMentionIdx}
               />
             )}
-            {resumeOpen && (
-              <ResumeDialog
-                activeSessionId={activeId}
-                onClose={() => setResumeOpen(false)}
-                onResume={(session) => {
-                  setResumeOpen(false);
-                  setSessionFilter("all");
-                  onActiveSessionChange(session.id, { projectId: session.projectId });
-                }}
-                onImport={(chat) => {
-                  setResumeOpen(false);
-                  void importChat(chat);
-                }}
-              />
-            )}
             {annotations.length > 0 && (
               <ComposerAnnotations
                 annotations={annotations}
@@ -7040,14 +7430,14 @@ export function ChatPanel({
                       <FileText size={22} />
                       <span className="attachment-file-name overflow-hidden text-ellipsis whitespace-nowrap text-sm">{a.name ?? "document.pdf"}</span>
                       <button title={m.chat_panel_remove_file()} aria-label={m.chat_panel_remove_file()} onClick={remove}>
-                        <X size={11} />
+                        <X size={12} />
                       </button>
                     </div>
                   ) : (
                     <div key={i} className="attachment-thumb relative [&_img]:w-13 [&_img]:h-13 [&_img]:object-cover [&_img]:border [&_img]:border-border [&_img]:rounded-sm [&_img]:block [&_button]:absolute [&_button]:-top-[5px] [&_button]:-right-[5px] [&_button]:inline-flex [&_button]:items-center [&_button]:justify-center [&_button]:w-4 [&_button]:h-4 [&_button]:p-0 [&_button]:border [&_button]:border-border [&_button]:rounded-full [&_button]:bg-surface [&_button]:text-text [&_button]:cursor-pointer [&_button:hover]:bg-text [&_button:hover]:text-background">
                       <img src={a.dataUrl} alt={m.chat_pasted_image()} />
                       <button title={m.chat_panel_remove_image()} aria-label={m.chat_panel_remove_image()} onClick={remove}>
-                        <X size={11} />
+                        <X size={12} />
                       </button>
                     </div>
                   );
@@ -7064,31 +7454,23 @@ export function ChatPanel({
                 {settingsError}
               </div>
             )}
-            <div className={`composer-input relative flex overflow-hidden [&_textarea]:flex-1 ${bashActive ? "[&_textarea]:font-mono [&_textarea]:text-sm" : ""}`}>
+            <div className={`composer-input relative flex overflow-hidden [&_textarea]:flex-1 ${bashMode ? "[&_textarea]:font-mono [&_textarea]:text-sm" : ""}`}>
               <textarea
                 dir="auto"
                 {...{ writingsuggestions: "false" }}
                 ref={composerRef}
-                aria-describedby={demoHintVisible ? demoHintId : undefined}
+                aria-describedby={[demoHintVisible && demoHintId, unconfirmedSend !== null && unconfirmedSendId].filter(Boolean).join(" ") || undefined}
                 // Native prose stays visible; the aligned mirror paints only skill tokens.
-                className="relative z-1 bg-transparent"
+                className="relative z-1 min-w-0 overflow-x-hidden bg-transparent"
                 value={draft}
                 placeholder={
-                  // A pending question card owns typed text (see send()); say so.
-                  // While a steerable turn runs, Enter goes to that turn, so name
-                  // the gesture and its queue chord — the send button is a Stop
-                  // button for the whole busy stretch.
-                  // Otherwise follow `composerSelection` so the name tracks the
-                  // picker for a new session and the open session once one exists.
-                  pendingQuestion
-                    ? m.chat_type_custom_answer()
-                    : steering && activeHarness
-                      ? m.chat_steer_placeholder({ harness: ltr(activeHarness.name), shortcut: ltr(queueChord) })
-                      : composerSelection
-                        ? activeHarness?.agentReady
-                          ? m.chat_message_harness({ harness: ltr(harnessLabel(composerSelection.harness, activeHarness?.name)) })
-                          : m.chat_harness_unavailable({ harness: ltr(harnessLabel(composerSelection.harness, activeHarness?.name)) })
-                        : m.chat_ask_agent_placeholder()
+                  steering && activeHarness
+                    ? m.chat_steer_placeholder({ harness: ltr(activeHarness.name), shortcut: ltr(queueChord) })
+                    : composerSelection
+                      ? activeHarness?.agentReady
+                        ? m.chat_message_harness({ harness: ltr(harnessLabel(composerSelection.harness, activeHarness?.name)) })
+                        : m.chat_harness_unavailable({ harness: ltr(harnessLabel(composerSelection.harness, activeHarness?.name)) })
+                      : m.chat_ask_agent_placeholder()
                 }
                 rows={2}
                 onPaste={onComposerPaste}
@@ -7105,11 +7487,10 @@ export function ChatPanel({
                   const cursor = e.target.selectionStart;
                   setComposerCursor(cursor);
                   // Composer commands run rather than send: each fires the moment
-                  // its space lands. Not while a question card is pending (its
-                  // answer is a note, never a command) and not mid-IME-composition,
+                  // its space lands, but not mid-IME-composition,
                   // where the text can transiently look complete.
                   const completedCommand =
-                    cursor > 0 && /\s/.test(v[cursor - 1]) && !pendingQuestion && !composingRef.current && bashCommand(v) === null
+                    cursor > 0 && /\s/.test(v[cursor - 1]) && !composingRef.current && bashCommand(v) === null
                       ? slashCommandContext(v, cursor - 1)
                       : null;
                   const completedName = completedCommand && resolveComposerCommand(completedCommand.query);
@@ -7144,17 +7525,19 @@ export function ChatPanel({
                     if (e.key === "ArrowDown" || e.key === "ArrowUp") {
                       e.preventDefault();
                       const delta = e.key === "ArrowDown" ? 1 : -1;
-                      setSkillIdx(
-                        (activeSkillIdx + delta + skillMatches.length) % skillMatches.length,
-                      );
+                      if (activeSkillIdx >= 0) {
+                        const index = selectableSkillIndices.indexOf(activeSkillIdx);
+                        setSkillIdx(selectableSkillIndices[(index + delta + selectableSkillIndices.length) % selectableSkillIndices.length]);
+                      }
                       return;
                     }
-                    if (e.key === "Tab" || e.key === "Enter") {
+                    if ((e.key === "Tab" || e.key === "Enter") && activeSkillIdx >= 0) {
                       e.preventDefault();
                       pickSkill(skillMatches[activeSkillIdx]);
                       return;
                     }
                     if (e.key === "Escape") {
+                      e.stopPropagation();
                       e.preventDefault();
                       setSkillMenuDismissed(true);
                       return;
@@ -7172,32 +7555,31 @@ export function ChatPanel({
                     // A bare trailing `@` still sends on Enter; `@` is common in prose.
                     if (
                       e.key === "Tab"
-                      || (e.key === "Enter" && mentionQuery !== "" && !e.shiftKey && !e.metaKey && !e.ctrlKey)
+                      || (mentionQuery !== "" && matchesKeyboardEvent(e.nativeEvent, "Enter"))
                     ) {
                       e.preventDefault();
                       pickFileMention(mentionMatches[activeMentionIdx]);
                       return;
                     }
                     if (e.key === "Escape") {
+                      e.stopPropagation();
                       e.preventDefault();
                       setSkillMenuDismissed(true);
                       return;
                     }
                   }
                   // Backspace just behind a chip deletes the whole command.
-                  // (Escape deliberately doesn't touch it — that's the
-                  // stop-the-turn gesture, see the document listener above.)
                   if (e.key === "Backspace" && deleteCommandBehindCaret(e.currentTarget)) {
                     e.preventDefault();
                     return;
                   }
                   if (e.key === "Enter" && !e.shiftKey) {
                     e.preventDefault();
-                    if (bashActive) {
+                    if (bashMode) {
                       void runShell();
                       return;
                     }
-                    void send({ queue: e.metaKey || e.ctrlKey });
+                    void send({ queue: matchesKeyboardEvent(e.nativeEvent, "Mod+Enter") });
                   }
                 }}
               />
@@ -7214,19 +7596,20 @@ export function ChatPanel({
             </div>
             <div className="composer-actions flex min-w-0 justify-end items-center gap-2 pt-1.5 px-2 pb-2">
               <div className="option-picker relative inline-flex shrink-0" ref={dataSources.ref}>
-                <IconButton
-                  type="button"
-                  className="composer-bare"
-                  title={m.chat_panel_data_sources()}
-                  aria-label={m.chat_panel_data_sources()}
-                  aria-haspopup="dialog"
-                  aria-expanded={dataSources.open}
-                  onClick={() => dataSources.setOpen((open) => !open)}
-                >
-                  <ToggleRight size={16} />
-                </IconButton>
+                <Tooltip interactive content={m.chat_panel_data_sources()}>
+                  <IconButton
+                    type="button"
+                    className="composer-bare"
+                    aria-label={m.chat_panel_data_sources()}
+                    aria-haspopup="dialog"
+                    aria-expanded={dataSources.open}
+                    onClick={() => dataSources.setOpen((open) => !open)}
+                  >
+                    <ToggleRight size={16} />
+                  </IconButton>
+                </Tooltip>
                 {dataSources.open && (
-                  <div className="composer-sources-menu absolute bottom-[calc(100%_+_8px)] start-0 z-50 flex min-w-55 flex-col gap-1 rounded-md border border-border bg-background p-2 shadow-dropdown">
+                  <div className="composer-sources-menu absolute bottom-[calc(100%_+_8px)] start-0 z-50 flex min-w-55 flex-col gap-1 rounded-lg border border-border bg-background p-2 shadow-dropdown">
                     <span className="px-1 text-sm font-medium text-muted">{m.chat_panel_data_sources()}</span>
                     <LitSourcesList />
                   </div>
@@ -7243,68 +7626,72 @@ export function ChatPanel({
                   e.target.value = ""; // let the same file be re-picked
                 }}
               />
-              <IconButton
-                type="button"
-                className="composer-attach"
-                title={m.chat_panel_attach_a_pdf_or_image()}
-                aria-label={m.chat_panel_attach_a_pdf_or_image()}
-                onClick={() => fileInputRef.current?.click()}
-              >
-                <Paperclip size={16} />
-              </IconButton>
-              {(sessionGoal || goalArmed) && (
-                <Button
+              <Tooltip interactive content={m.chat_panel_attach_a_pdf_or_image()}>
+                <IconButton
                   type="button"
-                  variant="purple"
-                  active
-                  className="group max-w-60"
-                  title={goalArmed ? m.goal_command_description() : m.chat_panel_clear_goal({ goal: autoDir(sessionGoal) })}
-                  aria-label={goalArmed ? m.chat_panel_goal() : m.chat_panel_clear_goal({ goal: autoDir(sessionGoal) })}
-                  onClick={() => {
-                    setGoalScope(null);
-                    if (sessionGoal) void setGoal("clear");
-                  }}
+                  className="composer-attach"
+                  aria-label={m.chat_panel_attach_a_pdf_or_image()}
+                  onClick={() => fileInputRef.current?.click()}
                 >
-                  <span className="relative size-4" aria-hidden="true">
-                    <Goal className="absolute inset-0 transition-opacity group-hover:opacity-0 group-focus-visible:opacity-0" size={16} strokeWidth={1.6} />
-                    <X className="absolute inset-0 opacity-0 transition-opacity group-hover:opacity-100 group-focus-visible:opacity-100" size={16} strokeWidth={1.8} />
-                  </span>
-                  <span className="truncate">{m.chat_panel_goal()}</span>
-                </Button>
+                  <Paperclip size={16} />
+                </IconButton>
+              </Tooltip>
+              {(sessionGoal || goalArmed) && (
+                <Tooltip interactive content={goalArmed ? m.goal_command_description() : m.chat_panel_clear_goal({ goal: autoDir(sessionGoal) })}>
+                  <Button
+                    type="button"
+                    variant="purple"
+                    active
+                    className="group max-w-60"
+                    aria-label={goalArmed ? m.chat_panel_goal() : m.chat_panel_clear_goal({ goal: autoDir(sessionGoal) })}
+                    onClick={() => {
+                      setGoalScope(null);
+                      if (sessionGoal) void setGoal("clear");
+                    }}
+                  >
+                    <span className="relative size-4" aria-hidden="true">
+                      <Goal className="absolute inset-0 transition-opacity group-hover:opacity-0 group-focus-visible:opacity-0" size={16} strokeWidth={1.5} />
+                      <X className="absolute inset-0 opacity-0 transition-opacity group-hover:opacity-100 group-focus-visible:opacity-100" size={16} strokeWidth={1.5} />
+                    </span>
+                    <span className="truncate">{m.chat_panel_goal()}</span>
+                  </Button>
+                </Tooltip>
               )}
               {planActive && (
-                <Button
-                  type="button"
-                  variant="amber"
-                  active
-                  className="group"
-                  title={m.chat_panel_exit_plan_mode()}
-                  aria-label={m.chat_panel_exit_plan_mode()}
-                  onClick={() => void exitPlanMode()}
-                >
-                  <span className="relative size-4" aria-hidden="true">
-                    <Lightbulb className="absolute inset-0 transition-opacity group-hover:opacity-0 group-focus-visible:opacity-0" size={16} strokeWidth={1.6} />
-                    <X className="absolute inset-0 opacity-0 transition-opacity group-hover:opacity-100 group-focus-visible:opacity-100" size={16} strokeWidth={1.8} />
-                  </span>
-                  <span>{m.chat_panel_plan()}</span>
-                </Button>
+                <Tooltip interactive content={m.chat_panel_exit_plan_mode()}>
+                  <Button
+                    type="button"
+                    variant="amber"
+                    active
+                    className="group"
+                    aria-label={m.chat_panel_exit_plan_mode()}
+                    onClick={() => void exitPlanMode()}
+                  >
+                    <span className="relative size-4" aria-hidden="true">
+                      <Lightbulb className="absolute inset-0 transition-opacity group-hover:opacity-0 group-focus-visible:opacity-0" size={16} strokeWidth={1.5} />
+                      <X className="absolute inset-0 opacity-0 transition-opacity group-hover:opacity-100 group-focus-visible:opacity-100" size={16} strokeWidth={1.5} />
+                    </span>
+                    <span>{m.chat_panel_plan()}</span>
+                  </Button>
+                </Tooltip>
               )}
-              {bashActive && (
-                <Button
-                  type="button"
-                  variant="ghost"
-                  active
-                  className="group"
-                  title={m.chat_panel_exit_bash_mode()}
-                  aria-label={m.chat_panel_exit_bash_mode()}
-                  onClick={exitBashMode}
-                >
-                  <span className="relative size-4" aria-hidden="true">
-                    <SquareTerminal className="absolute inset-0 transition-opacity group-hover:opacity-0 group-focus-visible:opacity-0" size={16} strokeWidth={1.6} />
-                    <X className="absolute inset-0 opacity-0 transition-opacity group-hover:opacity-100 group-focus-visible:opacity-100" size={16} strokeWidth={1.8} />
-                  </span>
-                  <span>{m.chat_panel_bash()}</span>
-                </Button>
+              {bashMode && (
+                <Tooltip interactive content={m.chat_panel_exit_bash_mode()}>
+                  <Button
+                    type="button"
+                    variant="ghost"
+                    active
+                    className="group"
+                    aria-label={m.chat_panel_exit_bash_mode()}
+                    onClick={exitBashMode}
+                  >
+                    <span className="relative size-4" aria-hidden="true">
+                      <SquareTerminal className="absolute inset-0 transition-opacity group-hover:opacity-0 group-focus-visible:opacity-0" size={16} strokeWidth={1.5} />
+                      <X className="absolute inset-0 opacity-0 transition-opacity group-hover:opacity-100 group-focus-visible:opacity-100" size={16} strokeWidth={1.5} />
+                    </span>
+                    <span>{m.chat_panel_bash()}</span>
+                  </Button>
+                </Tooltip>
               )}
               <div className="min-w-0 flex-1" />
               {/* The model picker reflects the open session (harness locked once it
@@ -7315,6 +7702,7 @@ export function ChatPanel({
                   sessionHarness={openSession?.harness.startsWith("acp:") ? activeHarness : undefined}
                   value={composerSelection}
                   onSelect={selectModel}
+                  onStartHarness={startHarness}
                   onOpenSettings={() => onSelectMainView("harnesses")}
                   permissionChoices={activeHarness?.agentReady ? (opts?.permissionModes ?? []) : []}
                   defaultPermissionId={opts?.defaultPermissionMode ?? null}
@@ -7334,36 +7722,36 @@ export function ChatPanel({
                 />
                 <ContextMeter usage={openSession?.contextUsage} />
               </div>
-              {busy && !pendingQuestion ? (
-                // Stop whenever the turn is busy and typed text has nowhere to
-                // go — actively streaming, or held on a plan/permission card
-                // (their cards are the affordance; send() can't service them).
-                // Send stays only when it actually works: idle, or a held
-                // QUESTION card that owns typed text.
-                <IconButton className="send-btn" variant="stop" title={m.chat_panel_stop()} aria-label={m.chat_panel_stop()} onClick={stop}>
-                  <X size={16} />
-                </IconButton>
+              {busy ? (
+                <Tooltip interactive content={m.chat_panel_stop()}>
+                  <IconButton className="send-btn" variant="stop" aria-label={m.chat_panel_stop()} onClick={stop}>
+                    <X size={16} />
+                  </IconButton>
+                </Tooltip>
               ) : (
-                <IconButton
-                  className={`send-btn ${demoHintVisible && activeHarness?.agentReady ? "ring-2 ring-primary ring-offset-2 ring-offset-background" : ""}`}
-                  variant="primary"
-                  title={bashActive ? m.chat_panel_run() : m.chat_panel_send()}
-                  aria-label={bashActive ? m.chat_panel_run() : m.chat_panel_send()}
-                  onClick={() => void (bashActive ? runShell() : send())}
-                  disabled={
-                    bashActive
-                      ? !shellCommand || (!activeId && !activeHarness?.agentReady)
-                      : !activeHarness?.agentReady ||
-                      (!draft.trim() && attachments.length === 0 && annotations.length === 0)
-                  }
-                >
-                  <CornerDownLeft size={16} />
-                </IconButton>
+                <Tooltip interactive content={bashMode ? m.chat_panel_run() : m.chat_panel_send()}>
+                  <IconButton
+                    className={`send-btn ${demoHintVisible && activeHarness?.agentReady ? "ring-2 ring-primary ring-offset-2 ring-offset-background" : ""}`}
+                    variant="primary"
+                    aria-label={bashMode ? m.chat_panel_run() : m.chat_panel_send()}
+                    onClick={() => void (bashMode ? runShell() : send())}
+                    disabled={
+                      bashMode
+                        ? !shellCommand || (!activeId && !activeHarness?.agentReady)
+                        : !activeHarness?.agentReady ||
+                        (!draft.trim() && attachments.length === 0 && annotations.length === 0)
+                    }
+                  >
+                    <CornerDownLeft size={16} />
+                  </IconButton>
+                </Tooltip>
               )}
             </div>
           </div>
         </div>
       </section>
+      <EscapeScope enabled={dataSources.open} onEscape={() => dataSources.setOpen(false)} />
+      <EscapeScope enabled={skillMenuOpen || mentionMenuOpen} onEscape={() => setSkillMenuDismissed(true)} />
     </>
   );
 }

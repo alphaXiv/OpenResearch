@@ -2,8 +2,9 @@
 Type=Application
 Name=OpenResearch
 Comment=Automated ML research with your coding agents
-Exec=orx app
+Exec=orx app %u
 Icon=OpenResearch
 Categories=Development;
 Terminal=false
 StartupWMClass=OpenResearch
+MimeType=x-scheme-handler/openresearch;

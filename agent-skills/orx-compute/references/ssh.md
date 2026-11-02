@@ -23,6 +23,11 @@ socket naming, reconnect once; existing masters are not terminated.
 Changing a configured route requires reconnecting before ordinary commands can
 reuse it. For command-line proxy overrides, use a separate configured alias or
 `-S none`; native SSH does not expose those overrides to the sharing predicate.
+Experiment monitors share one persistent SSH channel per resolved host and authentication
+context. Windows Connect keeps the authenticated SSH process alive after its dialog closes.
+Background monitoring never starts a fresh login on user hosts. Transport failures
+back off together (5 seconds up to 5 minutes); restarting OpenResearch or adding
+runs does not reset the retry schedule. Remote command errors do not reset the connection.
 Monitoring outages are reported after 60 seconds without declaring the remote
 job stopped. Reconnecting resumes status and log polling.
 
@@ -32,7 +37,10 @@ orx exp run <expId> --backend ssh --host lab --container research
 orx exp run <expId> --backend ssh --host lab --no-container
 ```
 
-Machine-local SSH settings can save a container name or ID for each host.
+Machine-local SSH settings can save a container name or ID for each host, and
+an absolute remote storage root (`--remote-root /data/alice/orx`) used instead
+of `~/.orx` for that host's runs and cached source archives. Each run keeps the
+root it was launched with.
 A saved default SSH host lets launches omit `--host`.
 These defaults apply only to SSH experiments; dashboards, terminals and coding
 agents still connect directly to the host.
@@ -40,13 +48,26 @@ agents still connect directly to the host.
 - Omitted container selection uses the host's saved target. `--container`
   overrides it; `--no-container` explicitly runs on the host. The flags conflict.
 
+Each project's three newest SSH and Slurm runs, counted together across hosts
+and including unfinished ones, stay whole. Once an older finished run's log is
+collected, the running OpenResearch app removes its host dir except
+`tensorboard/`, and the container's copy entirely (retried while the container
+is stopped), so anything written into `repo/` goes with it. While cleaning a host it also removes orx's cached source
+archives that no active run uses and that have been idle for an hour, and
+checks again an hour later.
+Unreachable hosts are retried later.
+`orx compute configure ssh --host lab --keep-remote-runs true` keeps all of
+that host's runs not yet cleaned up. Deleting a project removes its runs'
+remote dirs entirely, regardless of that setting.
+
 Keep environment preparation in the project's committed setup/run scripts and
 invoke them through the fixed run command, just as with other backends. For
 example, a committed `run.sh` can source Conda, activate the environment, and
 then run the experiment. Those paths must exist in the selected execution
 environment (host or container). There is no separate SSH setup command.
 
-The SSH host needs Bash and tar. Container execution also requires host Docker
+The SSH host needs Bash, tar, and Python 3.6 or newer (standard library only).
+OpenResearch does not install Python automatically. Container execution also requires host Docker
 access and an already running, unpaused Linux container with Bash, tar, working
 `setsid --wait`, and an absolute writable `$HOME`. Execution uses the container's
 configured user. There is no `sudo`, user override, Podman support, container
@@ -54,9 +75,10 @@ creation or lifecycle management. `--image` and `--flavor` are unsupported.
 
 The committed source archive is cached on the host, then streamed into the
 container's `$HOME/.orx/runs/<runId>/repo`. Host logs and exit status stay in the
-host's `~/.orx/runs/<runId>/`, so container removal does not erase them. A detached
-supervisor reattaches using the saved container ID and start time; later settings
-changes cannot redirect an existing run. Do not kill the supervisor.
+host's `<root>/runs/<runId>/` (`~/.orx` unless a remote root is saved), so
+container removal does not erase them before they are collected. A detached
+supervisor reattaches using the saved container ID and start time; later
+settings changes cannot redirect an existing run. Do not kill the supervisor.
 
 Cancellation targets only the experiment process group, waits five seconds for
 TERM, then uses KILL if needed. It leaves the container and unrelated processes

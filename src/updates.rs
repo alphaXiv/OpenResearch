@@ -16,6 +16,7 @@
 //! dist-workspace.toml sets `install-path = "CARGO_HOME"`), so `orx update`
 //! refuses to touch the binary unless the receipt matches it.
 
+use std::collections::HashMap;
 use std::io::{IsTerminal, Write};
 #[cfg(unix)]
 use std::os::unix::process::CommandExt as _;
@@ -40,6 +41,62 @@ pub const REPO_URL: &str = "https://github.com/alphaXiv/OpenResearch";
 /// The cargo-dist app name (the *package* name, not the `orx` bin name) — used
 /// in release asset names and the receipt path.
 pub const APP_NAME: &str = "openresearch-cli";
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum ReleaseChannel {
+    Stable,
+    Canary,
+}
+
+pub fn current_release_channel() -> ReleaseChannel {
+    if option_env!("ORX_DESKTOP_CANARY_TAG").is_some() {
+        ReleaseChannel::Canary
+    } else {
+        ReleaseChannel::Stable
+    }
+}
+
+pub(crate) fn current_build_id() -> &'static str {
+    option_env!("ORX_DESKTOP_CANARY_TAG").unwrap_or(env!("CARGO_PKG_VERSION"))
+}
+
+fn desktop_release_available(
+    current: &Version,
+    latest: &Version,
+    running: Option<&str>,
+    tag: &str,
+) -> bool {
+    match (running, tag.strip_prefix("canary-")) {
+        (Some(current_tag), Some(latest_id)) => {
+            let current_id = current_tag.strip_prefix("canary-").unwrap_or_default();
+            canary_id(latest_id) > canary_id(current_id)
+        }
+        (Some(_), None) => true,
+        (None, Some(latest_id)) => canary_id(latest_id).is_some(),
+        (None, None) => is_outdated(current, latest),
+    }
+}
+
+fn canary_id(id: &str) -> Option<(u32, u64)> {
+    let (date, sequence) = id.split_once('.')?;
+    if date.len() != 8 || !date.bytes().all(|byte| byte.is_ascii_digit()) {
+        return None;
+    }
+    if sequence.starts_with('0') {
+        return None;
+    }
+    Some((date.parse().ok()?, sequence.parse().ok()?))
+}
+
+fn valid_desktop_tag(tag: &str) -> bool {
+    match crate::telemetry::update_channel() {
+        ReleaseChannel::Stable => tag
+            .strip_prefix('v')
+            .is_some_and(|version| Version::parse(version).is_ok()),
+        ReleaseChannel::Canary => tag.strip_prefix("canary-").and_then(canary_id).is_some(),
+    }
+}
 
 /// How long a cached update check stays fresh.
 const CHECK_TTL: Duration = Duration::from_secs(24 * 60 * 60);
@@ -79,6 +136,70 @@ pub struct LatestRelease {
     /// The git tag (e.g. `v0.1.15`), used to pin asset downloads to the same
     /// release the manifest described.
     pub tag: String,
+    pub compatible: bool,
+    #[cfg(windows)]
+    pub(crate) canary_asset: Option<ReleaseAsset>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct SingleAssetManifest {
+    pub version: String,
+    pub tag: String,
+    pub asset: String,
+    pub sha256: String,
+    #[serde(default)]
+    pub ancestors: Vec<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct CanaryManifest {
+    version: String,
+    tag: String,
+    commit: String,
+    ancestors: Vec<String>,
+    assets: HashMap<String, ReleaseAsset>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub(crate) struct ReleaseAsset {
+    pub(crate) asset: String,
+    pub(crate) sha256: String,
+}
+
+async fn fetch_canary_manifest(timeout: Duration) -> Result<Option<CanaryManifest>> {
+    let base = format!("{REPO_URL}/releases/download/canary");
+    let mut response = http()
+        .get(format!("{base}/desktop-canary-v2.json"))
+        .header("user-agent", UA)
+        .timeout(timeout)
+        .send()
+        .await?;
+    if response.status() == reqwest::StatusCode::NOT_FOUND {
+        response = http()
+            .get(format!("{base}/desktop-canary.json"))
+            .header("user-agent", UA)
+            .timeout(timeout)
+            .send()
+            .await?;
+    }
+    if response.status() == reqwest::StatusCode::NOT_FOUND {
+        return Ok(None);
+    }
+    let manifest: CanaryManifest = response.error_for_status()?.json().await?;
+    if !valid_desktop_tag(&manifest.tag) {
+        return Err(anyhow!(
+            "The app update belongs to a different release channel."
+        ));
+    }
+    if manifest.ancestors.first() != Some(&manifest.commit)
+        || manifest
+            .ancestors
+            .iter()
+            .any(|sha| sha.len() != 40 || !sha.bytes().all(|byte| byte.is_ascii_hexdigit()))
+    {
+        return Err(anyhow!("The canary update has invalid source ancestry."));
+    }
+    Ok(Some(manifest))
 }
 
 #[derive(Deserialize)]
@@ -107,6 +228,9 @@ fn parse_manifest(body: &str) -> Result<LatestRelease> {
     Ok(LatestRelease {
         version,
         tag: manifest.announcement_tag,
+        compatible: true,
+        #[cfg(windows)]
+        canary_asset: None,
     })
 }
 
@@ -141,7 +265,7 @@ pub async fn fetch_latest(timeout: Duration) -> Result<LatestRelease> {
 
 /// Downloads a release asset pinned to `tag` and returns its bytes.
 pub async fn fetch_release_asset(tag: &str, asset: &str, timeout: Duration) -> Result<Vec<u8>> {
-    let url = format!("{}/releases/download/{}/{}", REPO_URL, tag, asset);
+    let url = release_asset_url(tag, asset);
     let res = http()
         .get(&url)
         .header("user-agent", UA)
@@ -160,6 +284,19 @@ pub async fn fetch_release_asset(tag: &str, asset: &str, timeout: Duration) -> R
         ));
     }
     Ok(res.bytes().await?.to_vec())
+}
+
+fn release_asset_url(tag: &str, asset: &str) -> String {
+    let release = if tag.starts_with("canary-")
+        && asset
+            .strip_prefix(tag)
+            .is_some_and(|suffix| suffix.starts_with("--"))
+    {
+        "canary"
+    } else {
+        tag
+    };
+    format!("{REPO_URL}/releases/download/{release}/{asset}")
 }
 
 // ---------------------------------------------------------------------------
@@ -289,6 +426,15 @@ impl InstallChannel {
                 | InstallChannel::Portable(_)
         )
     }
+
+    pub fn has_release_channels(&self) -> bool {
+        match self {
+            InstallChannel::AppBundle(_) | InstallChannel::AppImage(_) => true,
+            #[cfg(windows)]
+            InstallChannel::Portable(dir) => dir.join("OpenResearch.exe").is_file(),
+            _ => false,
+        }
+    }
 }
 
 /// The `.app` root for a bundle executable at `<root>.app/Contents/MacOS/<exe>`.
@@ -347,6 +493,10 @@ pub fn detect_channel(exe: &Path) -> Result<InstallChannel> {
     }
     if exe_str.starts_with("/opt/homebrew/") || exe_str.contains("/Cellar/") {
         return Ok(InstallChannel::Homebrew);
+    }
+    #[cfg(windows)]
+    if let Some(dir) = portable_dir(exe).filter(|dir| dir.join("OpenResearch.exe").is_file()) {
+        return Ok(InstallChannel::Portable(dir));
     }
     if let Some(receipt) = load_receipt()? {
         let prefix = PathBuf::from(&receipt.install_prefix);
@@ -674,18 +824,94 @@ struct CheckCache {
     deferred_version: String,
     #[serde(default)]
     deferred_tag: String,
+    #[serde(default)]
+    compatible_releases: HashMap<String, String>,
+}
+
+fn compatible_with_current(cache: &CheckCache, tag: &str) -> bool {
+    release_compatibility(
+        cache,
+        tag,
+        option_env!("ORX_DESKTOP_CANARY_TAG"),
+        option_env!("ORX_DESKTOP_CANARY_SHA"),
+        &format!("v{}", current_version()),
+    )
+}
+
+fn release_compatibility(
+    cache: &CheckCache,
+    tag: &str,
+    running_canary: Option<&str>,
+    commit: Option<&str>,
+    running_stable_tag: &str,
+) -> bool {
+    let proof = cache.compatible_releases.get(tag).map(String::as_str);
+    match (running_canary, tag.starts_with("canary-")) {
+        (None, true) => proof == Some(running_stable_tag),
+        (Some(_), _) => commit.is_some_and(|sha| proof == Some(sha)),
+        (None, false) => true,
+    }
+}
+
+fn cache_checked_release(cache: &mut CheckCache, latest: &LatestRelease, identity: Option<&str>) {
+    cache.checked_at = now_unix();
+    cache.latest = latest.version.to_string();
+    cache.latest_tag = latest.tag.clone();
+    cache
+        .compatible_releases
+        .retain(|_, proof| Some(proof.as_str()) == identity);
+    if latest.compatible {
+        if let Some(identity) = identity {
+            cache
+                .compatible_releases
+                .insert(latest.tag.clone(), identity.to_string());
+        }
+    } else if latest.tag != cache.installed_tag && latest.tag != cache.deferred_tag {
+        cache.compatible_releases.remove(&latest.tag);
+    }
+}
+
+pub(crate) fn record_checked_release(latest: &LatestRelease) {
+    record_checked_release_for(latest, crate::telemetry::update_channel());
+}
+
+fn record_checked_release_for(latest: &LatestRelease, channel: ReleaseChannel) {
+    let stable_tag = format!("v{}", current_version());
+    let identity = if option_env!("ORX_DESKTOP_CANARY_TAG").is_some() {
+        option_env!("ORX_DESKTOP_CANARY_SHA")
+    } else if latest.tag.starts_with("canary-") {
+        Some(stable_tag.as_str())
+    } else {
+        None
+    };
+    mutate_cache_for(channel, |cache| {
+        cache_checked_release(cache, latest, identity)
+    });
 }
 
 fn cache_path() -> PathBuf {
+    cache_path_for(crate::telemetry::update_channel())
+}
+
+fn cache_path_for(release_channel: ReleaseChannel) -> PathBuf {
     // Per channel. The macOS app and a script-installed CLI share a config dir
     // but track different release trains, so one file would have each install
     // reading the other's `latest` (suppressing a real update) and the other's
     // `installed_version` — which is a restart banner for a bundle that was
     // never touched, and the one symptom here that does not self-heal.
-    let channel = current_channel()
-        .map(InstallChannel::as_str)
-        .unwrap_or("unknown");
-    crate::config::config_dir().join(format!("update-check-{channel}.json"))
+    let install = current_channel().ok();
+    let desktop = install.is_some_and(InstallChannel::has_release_channels);
+    let channel = match install.map(InstallChannel::as_str) {
+        Some("portable") if desktop => "windows-app",
+        Some(channel) => channel,
+        None => "unknown",
+    };
+    let suffix = if desktop && release_channel == ReleaseChannel::Canary {
+        "-canary"
+    } else {
+        ""
+    };
+    crate::config::config_dir().join(format!("update-check-{channel}{suffix}.json"))
 }
 
 fn now_unix() -> u64 {
@@ -703,19 +929,14 @@ fn legacy_cache_path() -> PathBuf {
 }
 
 fn read_cache() -> Option<CheckCache> {
-    let raw = std::fs::read_to_string(cache_path())
-        .or_else(|_| std::fs::read_to_string(legacy_cache_path()))
-        .ok()?;
-    serde_json::from_str(&raw).ok()
+    read_cache_from(&cache_path(), &legacy_cache_path())
 }
 
-/// Record the latest known release.
-pub fn write_check_cache(latest: &str, tag: &str) {
-    mutate_cache(|cache| {
-        cache.checked_at = now_unix();
-        cache.latest = latest.to_string();
-        cache.latest_tag = tag.to_string();
-    });
+fn read_cache_from(path: &Path, legacy: &Path) -> Option<CheckCache> {
+    let raw = std::fs::read_to_string(path)
+        .or_else(|_| std::fs::read_to_string(legacy))
+        .ok()?;
+    serde_json::from_str(&raw).ok()
 }
 
 /// Record the outcome of an update attempt: success clears the backoff, failure
@@ -780,6 +1001,42 @@ pub fn record_deferred(version: &str, tag: &str) {
         cache.latest_tag = tag.to_string();
         cache.deferred_version = version.to_string();
         cache.deferred_tag = tag.to_string();
+    });
+}
+
+fn desktop_install_pending(
+    cache: &CheckCache,
+    current: &Version,
+    running: Option<&str>,
+    commit: Option<&str>,
+) -> bool {
+    Version::parse(&cache.installed_version).is_ok_and(|version| {
+        desktop_release_available(current, &version, running, &cache.installed_tag)
+            && release_compatibility(
+                cache,
+                &cache.installed_tag,
+                running,
+                commit,
+                &format!("v{current}"),
+            )
+    })
+}
+
+pub(crate) fn channel_change_blocked_by_installed() -> bool {
+    read_cache().is_some_and(|cache| {
+        desktop_install_pending(
+            &cache,
+            &current_version(),
+            option_env!("ORX_DESKTOP_CANARY_TAG"),
+            option_env!("ORX_DESKTOP_CANARY_SHA"),
+        )
+    })
+}
+
+pub(crate) fn clear_deferred_update() {
+    mutate_cache(|cache| {
+        cache.deferred_version.clear();
+        cache.deferred_tag.clear();
     });
 }
 
@@ -859,20 +1116,32 @@ fn updater_command() -> Result<tokio::process::Command> {
 /// version check and the attempt bookkeeping are written by different code
 /// paths, so a whole-object write from either would erase the other's.
 ///
-/// Errors are swallowed — the cache only throttles a best-effort check. The
-/// rename is what makes the *file* safe to read concurrently (never torn, always
-/// the old or a complete new one); the read-modify-write around it is unlocked,
-/// so two processes racing can still lose one side's fields. Both writers
-/// re-run often enough that a lost update costs at most one cycle, which is
-/// cheaper than holding a lock on every `orx` invocation.
 fn mutate_cache(f: impl FnOnce(&mut CheckCache)) {
-    let mut cache = read_cache().unwrap_or_default();
-    f(&mut cache);
-    let path = cache_path();
+    mutate_cache_for(crate::telemetry::update_channel(), f);
+}
+
+fn mutate_cache_for(channel: ReleaseChannel, f: impl FnOnce(&mut CheckCache)) {
+    mutate_cache_at(&cache_path_for(channel), &legacy_cache_path(), f);
+}
+
+fn mutate_cache_at(path: &Path, legacy: &Path, f: impl FnOnce(&mut CheckCache)) {
     let Some(parent) = path.parent() else {
         return;
     };
     let _ = std::fs::create_dir_all(parent);
+    let Ok(lock) = std::fs::OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .write(true)
+        .open(path.with_extension("lock"))
+    else {
+        return;
+    };
+    if lock.lock().is_err() {
+        return;
+    }
+    let mut cache = read_cache_from(path, legacy).unwrap_or_default();
+    f(&mut cache);
     let Ok(body) = serde_json::to_string(&cache) else {
         return;
     };
@@ -881,13 +1150,13 @@ fn mutate_cache(f: impl FnOnce(&mut CheckCache)) {
         let _ = std::fs::remove_file(&tmp);
         return;
     }
-    if std::fs::rename(&tmp, &path).is_err() {
+    if std::fs::rename(&tmp, path).is_err() {
         // Rename failed (e.g. cross-device, racing cleanup); don't leak the temp.
         let _ = std::fs::remove_file(&tmp);
         return;
     }
     // Migrated: this channel now has its own file.
-    let _ = std::fs::remove_file(legacy_cache_path());
+    let _ = std::fs::remove_file(legacy);
 }
 
 // ---------------------------------------------------------------------------
@@ -905,12 +1174,15 @@ pub const PERIODIC_CHECK_INTERVAL: Duration = Duration::from_secs(6 * 60 * 60);
 #[serde(rename_all = "camelCase")]
 pub struct UpdateStatus {
     pub current: String,
-    /// Latest release this install can actually move to. `None` before the first
-    /// check.
+    /// Latest published release on the selected channel, if checked.
     pub latest: Option<String>,
     pub latest_tag: Option<String>,
     /// How orx was installed — see [`InstallChannel::as_str`].
     pub channel: &'static str,
+    pub release_channel: ReleaseChannel,
+    pub release_channels_available: bool,
+    pub waiting_for_stable: bool,
+    pub waiting_for_canary: bool,
     /// Whether this install can update itself at all.
     pub self_updates: bool,
     /// Whether an update would be applied automatically — the setting *and* the
@@ -944,8 +1216,9 @@ fn restart_target<'a>(cache: &'a CheckCache, current: &Version) -> Option<(Versi
     ]
     .into_iter()
     .filter_map(|(version, tag)| Some((Version::parse(version).ok()?, tag.as_str())))
-    .filter(|(version, _)| is_outdated(current, version))
-    .max_by(|a, b| a.0.cmp(&b.0))
+    .find(|(version, tag)| {
+        release_available(current, version, tag) && compatible_with_current(cache, tag)
+    })
 }
 
 pub fn status() -> UpdateStatus {
@@ -954,32 +1227,74 @@ pub fn status() -> UpdateStatus {
     let channel = current_channel().ok();
     let latest = cache.as_ref().and_then(|c| Version::parse(&c.latest).ok());
     let restart_target = cache.as_ref().and_then(|c| restart_target(c, &current));
+    let desktop = channel.is_some_and(InstallChannel::has_release_channels);
     UpdateStatus {
-        update_available: latest
-            .as_ref()
-            .is_some_and(|latest| is_outdated(&current, latest)),
+        waiting_for_stable: desktop
+            && option_env!("ORX_DESKTOP_CANARY_TAG").is_some()
+            && crate::telemetry::update_channel() == ReleaseChannel::Stable
+            && !cache
+                .as_ref()
+                .is_some_and(|cache| compatible_with_current(cache, &cache.latest_tag)),
+        waiting_for_canary: desktop
+            && crate::telemetry::update_channel() == ReleaseChannel::Canary
+            && cache.as_ref().is_some_and(|cache| {
+                cache.latest_tag.starts_with("canary-")
+                    && Version::parse(&cache.latest).is_ok_and(|version| {
+                        release_available(&current, &version, &cache.latest_tag)
+                    })
+                    && !compatible_with_current(cache, &cache.latest_tag)
+            }),
+        update_available: latest.as_ref().is_some_and(|latest| {
+            cache
+                .as_ref()
+                .is_some_and(|cache| compatible_with_current(cache, &cache.latest_tag))
+                && release_available(
+                    &current,
+                    latest,
+                    cache.as_ref().map_or("", |c| &c.latest_tag),
+                )
+        }),
         restart_required: restart_target.is_some(),
         can_restart: true,
         instance: instance_id(),
         installed_tag: restart_target
             .as_ref()
             .and_then(|(_, tag)| (!tag.is_empty()).then(|| tag.to_string())),
-        installed_version: restart_target.map(|(version, _)| version.to_string()),
+        installed_version: restart_target.map(|(version, tag)| {
+            if tag.starts_with("canary-") {
+                tag.to_string()
+            } else {
+                version.to_string()
+            }
+        }),
         latest_tag: latest
             .as_ref()
             .and(cache.as_ref())
             .and_then(|c| (!c.latest_tag.is_empty()).then(|| c.latest_tag.clone())),
-        latest: latest.map(|v| v.to_string()),
+        latest: latest.map(|v| {
+            let tag = cache.as_ref().map_or("", |c| c.latest_tag.as_str());
+            if tag.starts_with("canary-") {
+                tag.to_string()
+            } else {
+                v.to_string()
+            }
+        }),
         channel: channel.map(InstallChannel::as_str).unwrap_or("unknown"),
+        release_channel: crate::telemetry::update_channel(),
+        release_channels_available: desktop,
         self_updates: channel.map(InstallChannel::self_updates).unwrap_or(false),
         auto_update: !opted_out() && crate::config::auto_update_enabled(),
         env_disabled: opted_out(),
-        current: current.to_string(),
+        current: if desktop {
+            current_build_id().to_string()
+        } else {
+            current.to_string()
+        },
     }
 }
 
-/// Whether the binary [`relaunch`] would exec reports a newer version than this process.
-pub async fn newer_exe_on_disk() -> bool {
+/// Whether [`relaunch`] would start a replacement desktop build or newer CLI.
+pub async fn updated_exe_on_disk() -> bool {
     // This process runs from the AppImage's mount, but the updater renames a new
     // `.AppImage` over the file, so ask whether that file was replaced instead.
     #[cfg(all(desktop_app, target_os = "linux"))]
@@ -993,6 +1308,19 @@ pub async fn newer_exe_on_disk() -> bool {
     let Ok(exe) = crate::paths::spawnable_exe() else {
         return false;
     };
+    if current_channel().is_ok_and(|channel| channel.has_release_channels()) {
+        let Ok(out) = tokio::process::Command::new(exe)
+            .args(["--no-telemetry", "version", "--build-id"])
+            .output()
+            .await
+        else {
+            return false;
+        };
+        let on_disk = String::from_utf8_lossy(&out.stdout);
+        return out.status.success()
+            && !on_disk.trim().is_empty()
+            && on_disk.trim() != current_build_id();
+    }
     let Ok(out) = tokio::process::Command::new(exe)
         .arg("--version")
         .output()
@@ -1029,8 +1357,10 @@ fn file_identity(path: &Path) -> Option<(u64, u64)> {
 pub fn deferred_update_due() -> bool {
     let current = current_version();
     read_cache().is_some_and(|cache| {
-        Version::parse(&cache.deferred_version).is_ok_and(|v| is_outdated(&current, &v))
-            && (cache.failures == 0 || attempt_due(Some(&cache)))
+        Version::parse(&cache.deferred_version).is_ok_and(|v| {
+            compatible_with_current(&cache, &cache.deferred_tag)
+                && release_available(&current, &v, &cache.deferred_tag)
+        }) && (cache.failures == 0 || attempt_due(Some(&cache)))
     }) && !updater_running()
 }
 
@@ -1221,7 +1551,7 @@ fn relaunch_app_bundle(root: &Path, port: u16) -> std::io::Error {
     }
 }
 
-/// The newest version *this* install can move to.
+/// The newest release published for this install and selected channel.
 ///
 /// The channel decides which manifest answers, and getting this wrong is
 /// user-visible: the macOS app installs from `macos-app.json`, which is attached
@@ -1230,27 +1560,97 @@ fn relaunch_app_bundle(root: &Path, port: u16) -> std::io::Error {
 /// install would advertise — and endlessly re-attempt — a build that does not
 /// exist for it. `Ok(None)` means "nothing newer published for this channel".
 pub async fn fetch_latest_for_channel(timeout: Duration) -> Result<Option<LatestRelease>> {
-    match current_channel() {
+    #[cfg(windows)]
+    let mut canary_asset = None;
+    let candidate = match current_channel() {
         Ok(InstallChannel::AppBundle(_)) => macos_app::fetch_manifest(timeout)
             .await?
-            .map(|m| {
-                Ok(LatestRelease {
-                    version: Version::parse(&m.version)?,
-                    tag: m.tag,
-                })
-            })
-            .transpose(),
+            .map(|m| (m.version, m.tag, m.ancestors)),
         #[cfg(target_os = "linux")]
         Ok(InstallChannel::AppImage(_)) => linux_app::fetch_manifest(timeout)
             .await?
-            .map(|m| {
-                Ok(LatestRelease {
-                    version: Version::parse(&m.version)?,
-                    tag: m.tag,
+            .map(|m| (m.version, m.tag, m.ancestors)),
+        #[cfg(windows)]
+        Ok(channel) if channel.has_release_channels() => {
+            if crate::telemetry::update_channel() == ReleaseChannel::Canary {
+                windows::fetch_manifest(timeout).await?.map(|m| {
+                    canary_asset = Some(ReleaseAsset {
+                        asset: m.asset,
+                        sha256: m.sha256,
+                    });
+                    (m.version, m.tag, m.ancestors)
                 })
-            })
-            .transpose(),
-        _ => Ok(Some(fetch_latest(timeout).await?)),
+            } else {
+                let latest = fetch_latest(timeout).await?;
+                Some((latest.version.to_string(), latest.tag, Vec::new()))
+            }
+        }
+        _ => return Ok(Some(fetch_latest(timeout).await?)),
+    };
+    let Some((version, tag, ancestors)) = candidate else {
+        return Ok(None);
+    };
+    Ok(Some(LatestRelease {
+        version: Version::parse(&version)?,
+        compatible: release_is_compatible(&tag, &ancestors, timeout).await?,
+        tag,
+        #[cfg(windows)]
+        canary_asset,
+    }))
+}
+
+async fn release_is_compatible(tag: &str, ancestors: &[String], timeout: Duration) -> Result<bool> {
+    let running_canary = option_env!("ORX_DESKTOP_CANARY_TAG");
+    if !tag.starts_with("canary-") && running_canary.is_none() {
+        return Ok(true);
+    }
+    if tag.starts_with("canary-") {
+        if running_canary.is_some() {
+            return Ok(option_env!("ORX_DESKTOP_CANARY_SHA")
+                .is_some_and(|sha| ancestors.iter().any(|ancestor| ancestor == sha)));
+        }
+        let stable_tag = format!("v{}", current_version());
+        let url = format!("{REPO_URL}/releases/download/{stable_tag}/desktop-ancestry.json");
+        let response = http()
+            .get(url)
+            .header("user-agent", UA)
+            .timeout(timeout)
+            .send()
+            .await?;
+        if response.status() == reqwest::StatusCode::NOT_FOUND {
+            return Ok(false);
+        }
+        let stable_ancestors: Vec<String> = response.error_for_status()?.json().await?;
+        return Ok(canary_includes_stable(ancestors, &stable_ancestors));
+    }
+    let Some(sha) = option_env!("ORX_DESKTOP_CANARY_SHA") else {
+        return Ok(false);
+    };
+    let url = format!("{REPO_URL}/releases/download/{tag}/desktop-ancestry.json");
+    let response = http()
+        .get(url)
+        .header("user-agent", UA)
+        .timeout(timeout)
+        .send()
+        .await?;
+    if response.status() == reqwest::StatusCode::NOT_FOUND {
+        return Ok(false);
+    }
+    let ancestors: Vec<String> = response.error_for_status()?.json().await?;
+    Ok(ancestors.iter().any(|ancestor| ancestor == sha))
+}
+
+fn canary_includes_stable(canary_ancestors: &[String], stable_ancestors: &[String]) -> bool {
+    stable_ancestors
+        .first()
+        .is_some_and(|stable_commit| canary_ancestors.contains(stable_commit))
+}
+
+pub(crate) fn compatibility_wait_message(tag: &str) -> &'static str {
+    if tag.starts_with("canary-") {
+        "Canary will be available after it includes this build."
+    } else {
+        "Stable will be available after it includes this canary build."
     }
 }
 
@@ -1337,8 +1737,15 @@ pub async fn periodic_update_pass() {
     if opted_out() {
         return;
     }
+    let selected = crate::telemetry::update_channel();
     if let Ok(Some(latest)) = fetch_latest_for_channel(Duration::from_secs(10)).await {
-        write_check_cache(&latest.version.to_string(), &latest.tag);
+        if selected != crate::telemetry::update_channel() {
+            return;
+        }
+        record_checked_release_for(&latest, selected);
+    }
+    if selected != crate::telemetry::update_channel() {
+        return;
     }
     if !auto_update_eligible() {
         return;
@@ -1347,7 +1754,16 @@ pub async fn periodic_update_pass() {
     let outdated = cache
         .as_ref()
         .and_then(|c| Version::parse(&c.latest).ok())
-        .is_some_and(|latest| is_outdated(&current_version(), &latest));
+        .is_some_and(|latest| {
+            cache
+                .as_ref()
+                .is_some_and(|cache| compatible_with_current(cache, &cache.latest_tag))
+                && release_available(
+                    &current_version(),
+                    &latest,
+                    cache.as_ref().map_or("", |c| &c.latest_tag),
+                )
+        });
     if outdated && attempt_due(cache.as_ref()) {
         spawn_background_update();
     }
@@ -1425,6 +1841,14 @@ fn precedence(v: &Version) -> (u64, u64, u64, &semver::Prerelease) {
 /// different build metadata).
 pub(crate) fn is_outdated(current: &Version, latest: &Version) -> bool {
     precedence(latest) > precedence(current)
+}
+
+pub(crate) fn release_available(current: &Version, latest: &Version, tag: &str) -> bool {
+    if current_channel().is_ok_and(|channel| channel.has_release_channels()) {
+        desktop_release_available(current, latest, option_env!("ORX_DESKTOP_CANARY_TAG"), tag)
+    } else {
+        is_outdated(current, latest)
+    }
 }
 
 /// Builds the outdated-version warning, or `None` when `current` is not behind.
@@ -1525,23 +1949,30 @@ impl UpdateWarning {
         let cached_latest = cache.as_ref().and_then(|c| Version::parse(&c.latest).ok());
         // Resolved once: it reads settings.json and canonicalizes the exe, and
         // both the message and the spawn decision below depend on it.
-        let automatic = cached_latest
-            .as_ref()
-            .is_some_and(|latest| is_outdated(&current, latest))
-            && auto_update_eligible();
+        let available = cached_latest.as_ref().is_some_and(|latest| {
+            cache.as_ref().is_some_and(|cache| {
+                compatible_with_current(cache, &cache.latest_tag)
+                    && release_available(&current, latest, &cache.latest_tag)
+            })
+        });
+        let automatic = available && auto_update_eligible();
 
-        if let Some(message) = cached_latest.as_ref().and_then(|latest| {
-            warning_for(
-                &current,
-                latest,
-                crate::invocation::orx(),
-                automatic,
-                cache
-                    .as_ref()
-                    .map(|c| c.latest_tag.as_str())
-                    .filter(|tag| !tag.is_empty()),
-            )
-        }) {
+        if let Some(message) = cached_latest
+            .as_ref()
+            .filter(|_| available)
+            .and_then(|latest| {
+                warning_for(
+                    &current,
+                    latest,
+                    crate::invocation::orx(),
+                    automatic,
+                    cache
+                        .as_ref()
+                        .map(|c| c.latest_tag.as_str())
+                        .filter(|tag| !tag.is_empty()),
+                )
+            })
+        {
             // Infallible: a closed/broken stderr (e.g. `2>&-`, or a reader that
             // already exited) must not panic the process before the command even
             // runs. `eprintln!` would; a swallowed `writeln!` won't.
@@ -1568,21 +1999,30 @@ impl UpdateWarning {
         }
 
         let prev_latest = cache.map(|c| (c.latest, c.latest_tag));
+        let selected = crate::telemetry::update_channel();
         let handle = tokio::spawn(async move {
             let latest = fetch_latest_for_channel(Duration::from_secs(3))
                 .await
                 .ok()
-                .flatten()
-                .map(|release| (release.version.to_string(), release.tag));
+                .flatten();
+            if selected != crate::telemetry::update_channel() {
+                return;
+            }
+            if let Some(latest) = latest {
+                record_checked_release_for(&latest, selected);
+                return;
+            }
             // On fetch failure, refresh checked_at with the old answer so errors
             // don't cause a retry on every invocation. Only fabricate `current`
             // as a last resort (no cache, no previous answer): a one-off failed
             // fetch then suppresses the warning until the TTL lapses, which is
             // the price of not re-fetching on every offline invocation.
-            let value = latest
-                .or(prev_latest)
-                .unwrap_or_else(|| (current.to_string(), String::new()));
-            write_check_cache(&value.0, &value.1);
+            let value = prev_latest.unwrap_or_else(|| (current.to_string(), String::new()));
+            mutate_cache_for(selected, |cache| {
+                cache.checked_at = now_unix();
+                cache.latest = value.0;
+                cache.latest_tag = value.1;
+            });
         });
 
         UpdateWarning {
@@ -1621,14 +2061,31 @@ mod tests {
     use super::{
         app_bundle_root, attempt_backoff, attempt_due, bold, claim_install, detect_channel,
         exe_matches_prefix, now_unix, package_manager_owns, parse_manifest, portable_dir,
-        portable_outside_prefix, precedence, relaunch_args, render, restart_target, retired_path,
-        target_lock_path, warning_for, BackendLock, CheckCache, InstallChannel, UpdateTarget,
-        ATTEMPT_BACKOFF_MAX, ATTEMPT_BACKOFF_MIN,
+        portable_outside_prefix, precedence, relaunch_args, release_asset_url, render,
+        restart_target, retired_path, target_lock_path, warning_for, BackendLock, CheckCache,
+        InstallChannel, UpdateTarget, ATTEMPT_BACKOFF_MAX, ATTEMPT_BACKOFF_MIN,
     };
     use semver::Version;
     use std::ffi::OsString;
     use std::path::Path;
     use std::path::PathBuf;
+
+    #[test]
+    fn canary_assets_are_pinned_in_their_publishing_release() {
+        let base = "https://github.com/alphaXiv/OpenResearch/releases/download";
+        assert_eq!(
+            release_asset_url("canary-20261027.2", "OpenResearch.dmg"),
+            format!("{base}/canary-20261027.2/OpenResearch.dmg")
+        );
+        assert_eq!(
+            release_asset_url("canary-20261027.3", "canary-20261027.3--OpenResearch.dmg"),
+            format!("{base}/canary/canary-20261027.3--OpenResearch.dmg")
+        );
+        assert_eq!(
+            release_asset_url("v0.2.22", "OpenResearch.dmg"),
+            format!("{base}/v0.2.22/OpenResearch.dmg")
+        );
+    }
 
     #[test]
     fn render_sets_off_the_warning_in_its_own_block() {
@@ -1673,6 +2130,192 @@ mod tests {
         assert!(precedence(&v("0.2.0-rc.2")) > precedence(&v("0.2.0-rc.1")));
         // Ordinary ordering on the numeric fields still holds.
         assert!(precedence(&v("0.2.0")) > precedence(&v("0.1.29")));
+    }
+
+    #[test]
+    fn desktop_channels_switch_in_both_directions_and_order_canaries() {
+        let current = Version::parse("0.2.21").unwrap();
+        let older_stable = Version::parse("0.2.20").unwrap();
+        let available =
+            |running, tag| super::desktop_release_available(&current, &older_stable, running, tag);
+        assert!(available(None, "canary-20261026.1"));
+        assert!(available(Some("canary-20261026.2"), "v0.2.20"));
+        assert!(available(Some("canary-20261026.2"), "canary-20261026.10"));
+        assert!(available(Some("canary-20261026.10"), "canary-20261027.1"));
+        assert!(!available(Some("canary-20261026.10"), "canary-20261026.2"));
+        assert!(!available(Some("canary-20261026.10"), "canary-20261026.10"));
+        assert!(!available(None, "canary-bogus"));
+        assert!(!available(None, "v0.2.20"));
+    }
+
+    #[test]
+    fn stable_switch_requires_proof_for_the_running_canary_and_target_release() {
+        let mut cache = CheckCache::default();
+        let allowed = |cache: &CheckCache, tag, sha| {
+            super::release_compatibility(cache, tag, Some("canary-20261026.1"), sha, "v0.2.21")
+        };
+        assert!(!allowed(&cache, "v0.2.21", Some("a")));
+        cache
+            .compatible_releases
+            .insert("v0.2.21".into(), "a".into());
+        assert!(allowed(&cache, "v0.2.21", Some("a")));
+        assert!(!allowed(&cache, "v0.2.22", Some("a")));
+        assert!(!allowed(&cache, "v0.2.21", Some("b")));
+        assert!(!allowed(&cache, "v0.2.21", None));
+        assert!(!allowed(&cache, "canary-20261027.1", Some("b")));
+        cache
+            .compatible_releases
+            .insert("canary-20261027.1".into(), "b".into());
+        assert!(allowed(&cache, "canary-20261027.1", Some("b")));
+    }
+
+    #[test]
+    fn canary_switch_requires_the_current_stable_commit_in_its_ancestry() {
+        let stable = vec!["stable".into(), "older".into()];
+        assert!(!super::canary_includes_stable(&["older".into()], &stable));
+        assert!(super::canary_includes_stable(
+            &["stable".into(), "older".into()],
+            &stable
+        ));
+        assert!(super::canary_includes_stable(
+            &["newer".into(), "stable".into()],
+            &stable
+        ));
+        assert!(!super::canary_includes_stable(&["stable".into()], &[]));
+
+        let mut cache = CheckCache::default();
+        let allowed = |cache: &CheckCache, tag, stable| {
+            super::release_compatibility(cache, tag, None, None, stable)
+        };
+        assert!(!allowed(&cache, "canary-20261027.1", "v0.2.21"));
+        cache
+            .compatible_releases
+            .insert("canary-20261027.1".into(), "v0.2.21".into());
+        assert!(allowed(&cache, "canary-20261027.1", "v0.2.21"));
+        assert!(!allowed(&cache, "canary-20261027.2", "v0.2.21"));
+        assert!(!allowed(&cache, "canary-20261027.1", "v0.2.22"));
+    }
+
+    #[test]
+    fn changing_channels_is_blocked_only_for_an_installed_pending_update() {
+        let current = Version::parse("0.2.21").unwrap();
+        let mut cache = CheckCache {
+            deferred_version: "0.2.21".into(),
+            deferred_tag: "canary-20261027.1".into(),
+            ..Default::default()
+        };
+        assert!(!super::desktop_install_pending(
+            &cache, &current, None, None
+        ));
+        cache.installed_version = "0.2.21".into();
+        cache.installed_tag = "canary-20261027.1".into();
+        cache
+            .compatible_releases
+            .insert(cache.installed_tag.clone(), "v0.2.21".into());
+        assert!(super::desktop_install_pending(&cache, &current, None, None));
+        assert!(!super::desktop_install_pending(
+            &cache,
+            &current,
+            Some("canary-20261027.1"),
+            Some("running")
+        ));
+        cache.installed_tag = "v0.2.21".into();
+        cache
+            .compatible_releases
+            .insert(cache.installed_tag.clone(), "previous".into());
+        assert!(!super::desktop_install_pending(
+            &cache,
+            &current,
+            Some("canary-20261027.1"),
+            Some("running")
+        ));
+        cache
+            .compatible_releases
+            .insert(cache.installed_tag.clone(), "running".into());
+        assert!(super::desktop_install_pending(
+            &cache,
+            &current,
+            Some("canary-20261027.1"),
+            Some("running")
+        ));
+    }
+
+    #[test]
+    fn checking_a_new_release_preserves_proof_for_an_inflight_or_pending_update() {
+        let version = Version::parse("0.2.21").unwrap();
+        for (first, second, identity) in [
+            ("canary-20261027.1", "canary-20261027.2", "v0.2.21"),
+            ("v0.2.22", "v0.2.23", "running-canary-sha"),
+        ] {
+            for pending in ["installing", "installed", "deferred"] {
+                let mut cache = CheckCache::default();
+                let release = |tag: &str| super::LatestRelease {
+                    version: version.clone(),
+                    tag: tag.into(),
+                    compatible: true,
+                    #[cfg(windows)]
+                    canary_asset: None,
+                };
+                super::cache_checked_release(&mut cache, &release(first), Some(identity));
+                if pending == "installed" {
+                    cache.installed_tag = first.into();
+                } else if pending == "deferred" {
+                    cache.deferred_tag = first.into();
+                }
+                super::cache_checked_release(&mut cache, &release(second), Some(identity));
+                assert_eq!(
+                    cache.compatible_releases.get(first).map(String::as_str),
+                    Some(identity)
+                );
+                assert_eq!(
+                    cache.compatible_releases.get(second).map(String::as_str),
+                    Some(identity)
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn concurrent_cache_writes_preserve_each_channel() {
+        let dir = std::env::temp_dir().join(format!("orx-update-cache-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let stable = dir.join("stable.json");
+        let canary = dir.join("canary.json");
+        let legacy = dir.join("legacy.json");
+        std::thread::scope(|scope| {
+            for index in 0..8 {
+                let path = if index % 2 == 0 { &stable } else { &canary };
+                let legacy = &legacy;
+                scope.spawn(move || {
+                    for _ in 0..25 {
+                        super::mutate_cache_at(path, legacy, |cache| cache.failures += 1);
+                    }
+                });
+            }
+        });
+        assert_eq!(
+            super::read_cache_from(&stable, &legacy).unwrap().failures,
+            100
+        );
+        assert_eq!(
+            super::read_cache_from(&canary, &legacy).unwrap().failures,
+            100
+        );
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn canary_manifest_describes_all_desktop_assets() {
+        let manifest: super::CanaryManifest = serde_json::from_str(
+            r#"{"version":"0.2.21","tag":"canary-20261027.2","commit":"abc","ancestors":["abc"],"assets":{"macos":{"asset":"OpenResearch.dmg","sha256":"1"},"windows":{"asset":"OpenResearch-Canary-orx.exe","sha256":"2"},"linux-x86_64":{"asset":"OpenResearch-x86_64.AppImage","sha256":"3"}}}"#,
+        ).unwrap();
+        assert_eq!(manifest.tag, "canary-20261027.2");
+        assert_eq!(manifest.assets["macos"].asset, "OpenResearch.dmg");
+        assert_eq!(manifest.assets["windows"].sha256, "2");
+        assert_eq!(
+            manifest.assets["linux-x86_64"].asset,
+            "OpenResearch-x86_64.AppImage"
+        );
     }
 
     // Every outdated case shows the same message; assert its stable markers
@@ -1770,14 +2413,22 @@ mod tests {
             deferred_tag: "v0.2.17".into(),
             ..Default::default()
         };
+        if let Some(sha) = option_env!("ORX_DESKTOP_CANARY_SHA") {
+            for tag in ["v0.2.17", "v0.2.18", "v0.2.19"] {
+                cache.compatible_releases.insert(tag.into(), sha.into());
+            }
+        }
         assert_eq!(
             restart_target(&cache, &v("0.2.16")),
             Some((v("0.2.17"), "v0.2.17"))
         );
-        // The newer of installed and deferred wins; neither counts once running.
+        // An installed version is what restart will run, even if another is deferred.
         cache.installed_version = "0.2.18".into();
+        cache.installed_tag = "v0.2.18".into();
+        cache.deferred_version = "0.2.19".into();
+        cache.deferred_tag = "v0.2.19".into();
         assert_eq!(restart_target(&cache, &v("0.2.16")).unwrap().0, v("0.2.18"));
-        assert_eq!(restart_target(&cache, &v("0.2.18")), None);
+        assert_eq!(restart_target(&cache, &v("0.2.18")).unwrap().0, v("0.2.19"));
     }
 
     #[test]
@@ -1872,6 +2523,18 @@ mod tests {
             assert_eq!(channel.as_str(), want, "{exe}");
             assert!(!channel.self_updates(), "{exe}");
         }
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_desktop_is_distinct_from_a_portable_cli() {
+        let dir = std::env::temp_dir().join(format!("orx-desktop-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let channel = InstallChannel::Portable(dir.clone());
+        assert!(!channel.has_release_channels());
+        std::fs::write(dir.join("OpenResearch.exe"), []).unwrap();
+        assert!(channel.has_release_channels());
+        std::fs::remove_dir_all(dir).unwrap();
     }
 
     #[test]

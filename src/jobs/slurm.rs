@@ -8,7 +8,7 @@
 //! the login node — the same trade SkyPilot makes.
 //!
 //! The remote layout extends the ssh backend's convention. A run owns
-//! `~/.orx/runs/<run_id>/` on the cluster's shared filesystem:
+//! `<root>/runs/<run_id>/` (root defaults to `~/.orx`) on the cluster's shared filesystem:
 //!   repo/       the experiment branch, cloned on the login node at submit
 //!               time (compute nodes often have no internet, so cloning
 //!               inside the job — the other backends' pattern — would break)
@@ -17,7 +17,7 @@
 //!   exit_code   written by job.sbatch's closing lines when the payload ends
 //!
 //! The reattach handle is (host, slurm job id); the run dir derives from the
-//! run id. Job state is read exit_code-first (scheduler-independent truth,
+//! run id and the root recorded at submit. Job state is read exit_code-first (scheduler-independent truth,
 //! like the ssh backend), then `squeue` for live jobs, then `sacct` for jobs
 //! that left the queue without writing an exit code (scancel/timeout/node
 //! failure). `sacct` may be disabled cluster-wide, so it's a best-effort
@@ -27,7 +27,7 @@ use std::collections::HashMap;
 
 use serde::{Deserialize, Serialize};
 
-use super::ssh::{sh_quote, ssh_run, SshTarget};
+use super::ssh::{sh_quote, shell_path, ssh_run, SshTarget};
 use crate::error::{anyhow, Result};
 
 // --- settings ---------------------------------------------------------------
@@ -58,6 +58,12 @@ pub struct SlurmSettings {
     /// default.
     #[serde(default)]
     pub mem: Option<String>,
+    /// Absolute shared-filesystem root for runs and the source cache; `None` is `~/.orx`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub remote_root: Option<String>,
+    /// Keep every finished run's remote dir, not just each project's newest few.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub keep_remote_runs: bool,
 }
 
 fn settings_path() -> std::path::PathBuf {
@@ -96,8 +102,10 @@ pub fn save_settings(settings: &SlurmSettings) -> Result<()> {
 pub struct SlurmJobSpec {
     /// ssh config host alias of the cluster's login node.
     pub host: String,
-    /// Names the remote run dir `~/.orx/runs/<run_id>`.
+    /// Names the remote run dir `<root>/runs/<run_id>`.
     pub run_id: String,
+    /// Configured storage root; `None` is `~/.orx`.
+    pub remote_root: Option<String>,
     /// Runs on the login node in the run dir at submit time, with `env`
     /// exported — the clone step. Piped to `bash -s`, never written to disk.
     pub setup_script: String,
@@ -263,28 +271,28 @@ fn parse_job_id(out: &str) -> Result<String> {
 
 // --- lifecycle ----------------------------------------------------------------
 
-/// The remote run dir for a run, relative to `$HOME` (shared convention with
-/// the ssh backend; derived, not stored in the descriptor).
-pub fn run_dir(run_id: &str) -> String {
-    format!(".orx/runs/{run_id}")
+/// The remote run dir for a run (shared convention with the ssh backend),
+/// derived from the root recorded in the descriptor at submit.
+pub fn run_dir(root: Option<&str>, run_id: &str) -> String {
+    super::ssh::remote_run_dir(root, run_id)
 }
 
 /// Submit the job: create the run dir, clone on the login node, write
 /// job.sbatch, `sbatch --parsable`. Returns the Slurm job id — the reattach
 /// handle (together with the host).
 pub async fn run_job(spec: &SlurmJobSpec) -> Result<String> {
-    let dir = run_dir(&spec.run_id);
+    let dir = shell_path(&run_dir(spec.remote_root.as_deref(), &spec.run_id));
 
     // Login-node setup (clone). Env + script travel via stdin so tokens never
     // land on an argv or in a file.
     let setup = format!(
-        "{exports}\ncd \"$HOME/{dir}\" || exit 97\n{script}\n",
+        "{exports}\ncd {dir} || exit 97\n{script}\n",
         exports = render_exports(&spec.env),
         script = spec.setup_script,
     );
     ssh_run(
-        &SshTarget::alias(&spec.host),
-        &format!("mkdir -p \"$HOME/{dir}\" && chmod 700 \"$HOME/{dir}\" && bash -s"),
+        &SshTarget::alias(&spec.host).for_run(&spec.run_id),
+        &format!("mkdir -p {dir} && chmod 700 {dir} && bash -s"),
         Some(&setup),
     )
     .await
@@ -292,14 +300,14 @@ pub async fn run_job(spec: &SlurmJobSpec) -> Result<String> {
 
     // Write the batch script (owner-only: it embeds tokens) and submit.
     ssh_run(
-        &SshTarget::alias(&spec.host),
-        &format!("umask 077 && cat > \"$HOME/{dir}/job.sbatch\""),
+        &SshTarget::alias(&spec.host).for_run(&spec.run_id),
+        &format!("umask 077 && cat > {dir}/job.sbatch"),
         Some(&render_sbatch(spec)),
     )
     .await?;
     let out = ssh_run(
-        &SshTarget::alias(&spec.host),
-        &format!("cd \"$HOME/{dir}\" && sbatch --parsable job.sbatch"),
+        &SshTarget::alias(&spec.host).for_run(&spec.run_id),
+        &format!("cd {dir} && sbatch --parsable job.sbatch"),
         None,
     )
     .await
@@ -335,21 +343,16 @@ fn queue_probe(job_id: &str) -> String {
 ///
 /// `GONE` means monitoring is unavailable, not that the job terminated.
 /// Accounting can be disabled or unavailable while a job still runs.
-pub async fn inspect_job(host: &str, run_id: &str, job_id: &str) -> Result<JobState> {
-    let dir = run_dir(run_id);
-    let queue = queue_probe(job_id);
-    let cmd = format!(
-        "d=\"$HOME/{dir}\"; \
-         if [ -f \"$d/exit_code\" ]; then echo \"EXIT $(cat \"$d/exit_code\")\"; \
-         else queue=$({queue}); \
-         case \"$queue\" in \
-         SQ*) echo \"$queue\";; \
-         *) if st=$(sacct -nPX -j {job_id} -o State 2>/dev/null) && [ -n \"$st\" ]; then echo \"SA $st\"; \
-         elif [ \"$queue\" = GONE ]; then echo GONE; else echo UNAVAILABLE; fi;; esac; fi",
-        job_id = sh_quote(job_id),
-    );
-    let out = ssh_run(&SshTarget::alias(host), &cmd, None).await?;
-    Ok(map_inspect_token(out.trim()))
+pub async fn inspect_job(host: &str, run_id: &str, dir: &str, job_id: &str) -> Result<JobState> {
+    let value = super::ssh::service::request(
+        &SshTarget::alias(host).for_run(run_id),
+        serde_json::json!({"op":"slurm", "run":run_id, "job":job_id, "dir":dir}),
+    )
+    .await?;
+    let token = value["token"]
+        .as_str()
+        .ok_or_else(|| anyhow!("Missing Slurm status response"))?;
+    Ok(map_inspect_token(token.trim()))
 }
 
 /// Pure token → stage mapping (unit-tested; Slurm state names are stable).
@@ -392,12 +395,9 @@ fn map_inspect_token(out: &str) -> JobState {
         "RUNNING" | "COMPLETING" | "SUSPENDED" | "STAGE_OUT" | "SIGNALING" => {
             state("RUNNING", None)
         }
-        // Terminal per the scheduler but no exit_code file yet (NFS lag):
-        // job.sbatch exits with the payload's code, so sacct's verdict mirrors
-        // the payload — trust it. From squeue it's transient; keep polling.
-        "COMPLETED" if source == "sacct" => state("COMPLETED", None),
-        "COMPLETED" => state("RUNNING", None),
-        // Also transient from squeue: default JobRequeue=1 (and
+        // The batch script exits with the payload code, so either scheduler verdict is authoritative.
+        "COMPLETED" => state("COMPLETED", None),
+        // Transient from squeue: default JobRequeue=1 (and
         // PreemptMode=REQUEUE) re-queues these under the same job id — a poll
         // landing in the window must not finalize a run that's about to
         // re-run. If the job is NOT requeued it leaves the queue and the
@@ -417,10 +417,10 @@ fn map_inspect_token(out: &str) -> JobState {
 }
 
 /// Cancellation succeeds when accepted or the controller confirms the job is absent.
-pub async fn cancel_job(host: &str, job_id: &str) -> Result<()> {
+pub async fn cancel_job(host: &str, run_id: &str, job_id: &str) -> Result<()> {
     let queue = queue_probe(job_id);
-    ssh_run(
-        &SshTarget::alias(host),
+    super::ssh::ssh_control(
+        &SshTarget::alias(host).for_run(run_id),
         &format!(
             "if error=$(scancel {} 2>&1); then exit 0; \
              elif [ \"$({queue})\" = GONE ]; then exit 0; \
@@ -519,6 +519,7 @@ mod tests {
         SlurmJobSpec {
             host: "cluster".into(),
             run_id: "0123456789abcdef".into(),
+            remote_root: None,
             setup_script: "git clone x repo".into(),
             command: "python train.py".into(),
             env: HashMap::new(),
@@ -648,6 +649,7 @@ mod tests {
         let mk = |run_id: &str, command: &str| SlurmJobSpec {
             host: host.clone(),
             run_id: run_id.into(),
+            remote_root: None,
             setup_script: "mkdir -p repo".into(),
             command: command.into(),
             env: HashMap::from([("ORX_E2E".into(), "1".into())]),
@@ -663,7 +665,9 @@ mod tests {
             let host = host.clone();
             async move {
                 for _ in 0..150 {
-                    let s = inspect_job(&host, &run_id, &job_id).await.unwrap();
+                    let s = inspect_job(&host, &run_id, &run_dir(None, &run_id), &job_id)
+                        .await
+                        .unwrap();
                     if until.contains(&s.stage.as_str()) {
                         return s;
                     }
@@ -678,9 +682,9 @@ mod tests {
         let run_a = format!("e2e-a-{}", uuid::Uuid::new_v4());
         let run_b = format!("e2e-b-{}", uuid::Uuid::new_v4());
         let cleanup = format!(
-            "rm -rf \"$HOME/{}\" \"$HOME/{}\"",
-            run_dir(&run_a),
-            run_dir(&run_b)
+            "rm -rf {} {}",
+            shell_path(&run_dir(None, &run_a)),
+            shell_path(&run_dir(None, &run_b))
         );
 
         // Happy path: runs, completes, logs arrive.
@@ -692,7 +696,7 @@ mod tests {
         let mut lines = Vec::new();
         crate::jobs::ssh::stream_logs(
             &SshTarget::alias(&host),
-            &run_dir(&run_a),
+            &run_dir(None, &run_a),
             0,
             std::time::Duration::from_secs(5),
             true,
@@ -706,7 +710,7 @@ mod tests {
         // Cancel path: scancel'd job leaves the queue without an exit code.
         let job_b = run_job(&mk(&run_b, "sleep 300")).await.unwrap();
         poll(run_b.clone(), job_b.clone(), &["RUNNING", "SCHEDULING"]).await;
-        cancel_job(&host, &job_b).await.unwrap();
+        cancel_job(&host, &run_b, &job_b).await.unwrap();
         let after = poll(run_b, job_b, &["CANCELED", "GONE", "ERROR"]).await;
         // Best-effort teardown before asserting — don't litter the cluster.
         let _ = ssh_run(&SshTarget::alias(&host), &cleanup, None).await;
@@ -735,9 +739,8 @@ mod tests {
         assert_eq!(map_inspect_token("SQ PENDING").stage, "SCHEDULING");
         assert_eq!(map_inspect_token("SQ RUNNING").stage, "RUNNING");
         assert_eq!(map_inspect_token("SQ COMPLETING").stage, "RUNNING");
-        // squeue COMPLETED without exit_code: transient, keep polling.
-        assert_eq!(map_inspect_token("SQ COMPLETED").stage, "RUNNING");
-        // sacct COMPLETED means the script (= payload) exited 0.
+        // Both scheduler sources confirm the script (= payload) exited successfully.
+        assert_eq!(map_inspect_token("SQ COMPLETED").stage, "COMPLETED");
         assert_eq!(map_inspect_token("SA COMPLETED").stage, "COMPLETED");
         assert_eq!(map_inspect_token("SA CANCELLED by 1234").stage, "CANCELED");
         // Fixed-width sacct truncates with a trailing '+'; -P avoids it, but

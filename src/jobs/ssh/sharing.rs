@@ -1,4 +1,5 @@
-use super::prepared::{probe_args, Publication, ROUTE_FIELDS};
+use super::prepared::{probe_args, Publication};
+use super::ROUTE_FIELDS;
 use sha2::{Digest, Sha256};
 use std::collections::BTreeMap;
 use std::path::Path;
@@ -243,7 +244,7 @@ pub(super) async fn setup(target: &SshTarget) -> Result<()> {
 
 #[cfg(test)]
 mod tests {
-    use super::super::prepared::route_configuration;
+    use super::super::route_configuration;
     use super::*;
     use std::path::PathBuf;
 

@@ -104,6 +104,7 @@ export function ProjectsPage() {
           ) : noProjects ? (
             <ProjectsEmptyState
               remote={runtime.kind === "ssh"}
+              preferredAgent={state.preferredAgent}
               onCreated={(project, publicationError) => {
                 queryClient.setQueryData(projectsOptions.queryKey, (cur) => [...(cur ?? []).filter((p) => p.id !== project.id), project]);
                 void navigate({

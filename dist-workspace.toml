@@ -7,11 +7,12 @@ members = ["cargo:."]
 cargo-dist-version = "0.32.0"
 # CI backends to support
 ci = "github"
+pr-run-mode = "skip"
 # Mark only publishing builds and verify every packaged binary before hosting.
 github-build-setup = "../build-setup.yml"
 # Sign platform archives before the global build checksums them.
 local-artifacts-jobs = ["./sign-macos-cli", "./sign-windows-cli"]
-# release.yml is hand-edited (custom-sign-macos-cli needs build-local-artifacts),
+# release.yml is hand-edited (source pinning, release-only triggers, signing dependencies),
 # so dist skips it; see macos/DISTRIBUTION.md before changing dist config.
 allow-dirty = ["ci"]
 # Verify packaged binaries and source CI before publishing.
@@ -31,3 +32,7 @@ install-updater = false
 # GitHub's "GITHUB_TOKEN events don't trigger workflows" rule; tag pushes are
 # not). No PAT or extra secret required.
 dispatch-releases = true
+
+# dist defaults arm64 macOS to macos-14, which GitHub is retiring.
+[dist.github-custom-runners]
+aarch64-apple-darwin = "macos-latest"

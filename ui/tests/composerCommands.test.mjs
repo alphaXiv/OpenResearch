@@ -41,6 +41,19 @@ test("Plan is only offered where the harness can plan", () => {
   );
 });
 
+test("unsupported compaction stays recognizable but disabled in the command menu", () => {
+  const unsupported = commandsForHarness([], null, false).find((item) => item.name === "compact");
+  const supported = commandsForHarness([], null, true).find((item) => item.name === "compact");
+  assert.equal(unsupported.disabled, true);
+  assert.equal(unsupported.description, "This agent does not support compaction.");
+  assert.equal(supported.disabled, false);
+  assert.equal(supported.description, "Shorten this chat's context");
+  assert.ok(commandMatchesQuery(unsupported, "summarize"));
+  for (const text of ["/compact", "/summarize"]) {
+    assert.deepEqual(parseComposerCommand(text, null), { name: "compact", prompt: "" });
+  }
+});
+
 test("built-in commands replace user-skill collisions, aliases included", () => {
   const skills = [
     { name: "PLAN", description: "Legacy collision", source: "user" },

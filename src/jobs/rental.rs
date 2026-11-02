@@ -77,6 +77,11 @@ pub struct RemoteConfig {
 
 #[cfg(unix)]
 pub async fn supervise(config: &Path) -> Result<()> {
+    supervise_with_collection_grace(config, COLLECTION_GRACE).await
+}
+
+#[cfg(unix)]
+async fn supervise_with_collection_grace(config: &Path, collection_grace: Duration) -> Result<()> {
     use std::fs::{File, OpenOptions};
     use std::os::unix::fs::OpenOptionsExt;
     let config: RemoteConfig = serde_json::from_slice(&std::fs::read(config)?)?;
@@ -127,7 +132,7 @@ pub async fn supervise(config: &Path) -> Result<()> {
     std::fs::write(directory.join("exit_code.tmp"), format!("{code}\n"))?;
     std::fs::rename(directory.join("exit_code.tmp"), directory.join("exit_code"))?;
     File::open(directory.join("log"))?.sync_all()?;
-    let deadline = tokio::time::Instant::now() + COLLECTION_GRACE;
+    let deadline = tokio::time::Instant::now() + collection_grace;
     while !directory.join("final_collected").exists() && tokio::time::Instant::now() < deadline {
         tokio::time::sleep(Duration::from_millis(200)).await;
     }
@@ -385,16 +390,17 @@ mod tests {
                 .unwrap(),
             )
             .unwrap();
+            let collection_grace = Duration::from_millis(200);
             let started = tokio::time::Instant::now();
             tokio::time::timeout(
-                COLLECTION_GRACE + Duration::from_secs(5),
-                supervise(&config),
+                Duration::from_secs(5),
+                supervise_with_collection_grace(&config, collection_grace),
             )
             .await
             .unwrap()
             .unwrap();
             if !acknowledge {
-                assert!(started.elapsed() >= COLLECTION_GRACE);
+                assert!(started.elapsed() >= collection_grace);
             }
             assert!(supervise(&config).await.is_err());
             assert_eq!(

@@ -41,6 +41,17 @@ export function mountTerminal(
   palette: TerminalPalette = "dark",
 ) {
   const rootStyles = getComputedStyle(document.documentElement);
+  const openLink = (_event: MouseEvent, uri: string) => {
+    let url: URL;
+    try {
+      url = new URL(uri);
+    } catch {
+      return;
+    }
+    if (url.protocol === "http:" || url.protocol === "https:") {
+      window.open(url, "_blank", "noopener,noreferrer");
+    }
+  };
   const terminal = new Terminal({
     convertEol: true,
     disableStdin,
@@ -53,6 +64,22 @@ export function mountTerminal(
       "ui-monospace, Menlo, Consolas, monospace",
     scrollback: 20000,
     theme: readTheme(disableStdin, palette),
+    linkHandler: enableWebLinks ? {
+      activate: openLink,
+      hover: (_event, uri, range) => {
+        terminal.element?.removeAttribute("title");
+        let visible = "";
+        for (let row = range.start.y; row <= range.end.y; row++) {
+          visible += terminal.buffer.active.getLine(row - 1)?.translateToString(
+            false,
+            row === range.start.y ? range.start.x - 1 : 0,
+            row === range.end.y ? range.end.x : terminal.cols,
+          ) ?? "";
+        }
+        if (visible !== uri) terminal.element?.setAttribute("title", uri);
+      },
+      leave: () => terminal.element?.removeAttribute("title"),
+    } : undefined,
   });
   // An app-themed terminal must follow a theme toggle while it is open.
   const themeObserver =
@@ -65,19 +92,7 @@ export function mountTerminal(
   const fit = new FitAddon();
   terminal.loadAddon(fit);
   if (enableWebLinks) {
-    terminal.loadAddon(
-      new WebLinksAddon((_event, uri) => {
-        let url: URL;
-        try {
-          url = new URL(uri);
-        } catch {
-          return;
-        }
-        if (url.protocol === "http:" || url.protocol === "https:") {
-          window.open(url, "_blank", "noopener,noreferrer");
-        }
-      }),
-    );
+    terminal.loadAddon(new WebLinksAddon(openLink));
   }
   const previousOverflowY = wrap.style.overflowY;
   wrap.style.overflowY = "auto";
@@ -159,7 +174,9 @@ export function mountTerminal(
       scrollback.dispose();
       wrap.removeEventListener("wheel", scrollPanel, { capture: true });
       wrap.style.overflowY = previousOverflowY;
-      terminal.dispose();
+      terminal.element?.remove();
+      // xterm 5.5 schedules an uncancelled viewport initialization timer in open().
+      setTimeout(() => terminal.dispose(), 0);
     },
   };
 }

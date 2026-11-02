@@ -11,7 +11,6 @@
 //! `~/.ssh/config` + agent/keys — orx never reads a key.
 
 use std::collections::HashMap;
-use std::path::Path;
 use std::process::Stdio;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
@@ -1340,7 +1339,7 @@ async fn gateway_stop_host(
     let result = async {
         let (_, _, remote_orx, paths) = remote_stop_context(&session).await?;
         let body = format!("{}\n", serde_json::to_string(&request)?);
-        let output = crate::jobs::ssh::ssh_run(
+        let output = crate::jobs::ssh::direct_run(
             &session.target,
             &remote_host_cmd(&remote_orx.path, &paths, "stop")?,
             Some(&body),
@@ -1944,11 +1943,27 @@ fn parse_remote_install_paths(output: &str) -> Option<RemoteInstallPaths> {
     })
 }
 
+fn is_posix_absolute(path: &str) -> bool {
+    path.starts_with('/') && !path.split('/').any(|part| part == "..")
+}
+
+fn posix_join(dir: &str, file: &str) -> String {
+    format!("{}/{}", dir.trim_end_matches('/'), file)
+}
+
+fn posix_path_parent(path: &str) -> Option<String> {
+    if !is_posix_absolute(path) || path == "/" {
+        return None;
+    }
+    path.rsplit_once('/')
+        .map(|(parent, _)| posix_parent(parent))
+}
+
 /// The parent directory of a path on the *remote* machine, checked as a string: the remote
 /// is POSIX, and Windows `Path` rules would reject it or rejoin it with backslashes.
 fn storage_root(path: &str, filename: &str, label: &str) -> Result<String> {
     // Only `..` is refused; an interior `.` (which a probe can report) was always allowed.
-    if !path.starts_with('/') || path.split('/').any(|part| part == "..") {
+    if !is_posix_absolute(path) {
         return Err(anyhow!("{label} must be an absolute path without . or .."));
     }
     let (parent, last) = path
@@ -1992,7 +2007,7 @@ async fn read_remote_settings(
     let command = remote_orx_cmd(&format!(
         "if [ -f {quoted} ]; then cat {quoted}; else printf '{{}}'; fi"
     ));
-    let raw = crate::jobs::ssh::ssh_run(target, &command, None)
+    let raw = crate::jobs::ssh::direct_run(target, &command, None)
         .await
         .map_err(|error| anyhow!("Could not read OpenResearch settings on '{host}': {error}"))?;
     let settings: serde_json::Value = serde_json::from_str(&raw)
@@ -2011,16 +2026,15 @@ async fn write_remote_json(
 ) -> Result<()> {
     let body = format!("{}\n", serde_json::to_string_pretty(value)?);
     let quoted_path = crate::jobs::ssh::sh_quote(path);
-    let parent = Path::new(path)
-        .parent()
+    let parent = posix_path_parent(path)
         .ok_or_else(|| anyhow!("Remote settings path has no parent directory"))?;
-    let parent = crate::jobs::ssh::sh_quote(&parent.to_string_lossy());
+    let parent = crate::jobs::ssh::sh_quote(&parent);
     let command = remote_orx_cmd(&format!(
         "mkdir -p {parent} && umask 077 && tmp={quoted_path}.tmp.$$ && \
          trap 'rm -f \"$tmp\"' EXIT && cat > \"$tmp\" && chmod 600 \"$tmp\" && \
          mv \"$tmp\" {quoted_path} && trap - EXIT"
     ));
-    crate::jobs::ssh::ssh_run(target, &command, Some(&body))
+    crate::jobs::ssh::direct_run(target, &command, Some(&body))
         .await
         .map_err(|error| anyhow!("Could not save OpenResearch settings on '{host}': {error}"))?;
     Ok(())
@@ -2061,37 +2075,38 @@ pub(crate) async fn remote_install_paths(
         REMOTE_CACHE_PATH_MARKER,
         REMOTE_SETTINGS_PATH_MARKER,
     ));
-    let output = crate::jobs::ssh::ssh_run(target, &probe, None)
+    let output = crate::jobs::ssh::direct_run(target, &probe, None)
         .await
         .map_err(|error| anyhow!("Can't resolve OpenResearch paths on '{host}': {error}"))?;
-    let mut paths = parse_remote_install_paths(&output)
+    let paths = parse_remote_install_paths(&output)
         .ok_or_else(|| anyhow!("Could not resolve OpenResearch paths on '{host}'."))?;
     let settings = read_remote_settings(target, host, &paths.settings).await?;
+    Ok(apply_remote_settings(paths, &settings))
+}
+
+fn apply_remote_settings(
+    mut paths: RemoteInstallPaths,
+    settings: &serde_json::Value,
+) -> RemoteInstallPaths {
     if let Some(binary) = settings
         .get("orxBinaryPath")
         .and_then(|value| value.as_str())
     {
-        if Path::new(binary).is_absolute() {
+        if is_posix_absolute(binary) {
             paths.binary = binary.to_string();
         }
     }
     if let Some(data) = settings.get("dataDir").and_then(|value| value.as_str()) {
-        if Path::new(data).is_absolute() {
-            paths.database = Path::new(data)
-                .join("orx.db")
-                .to_string_lossy()
-                .into_owned();
+        if is_posix_absolute(data) {
+            paths.database = posix_join(data, "orx.db");
         }
     }
     if let Some(cache) = settings.get("cacheDir").and_then(|value| value.as_str()) {
-        if Path::new(cache).is_absolute() {
-            paths.cache = Path::new(cache)
-                .join("repos")
-                .to_string_lossy()
-                .into_owned();
+        if is_posix_absolute(cache) {
+            paths.cache = posix_join(cache, "repos");
         }
     }
-    Ok(paths)
+    paths
 }
 
 /// Resolve the authenticated remote user's existing binary once, then launch
@@ -2101,7 +2116,7 @@ pub(crate) async fn find_remote_orx(target: &SshTarget, host: &str) -> Result<Op
         "p=$(command -v orx 2>/dev/null || true); \
          p=$(readlink -f \"$p\" 2>/dev/null || realpath \"$p\" 2>/dev/null || true);",
     ));
-    let output = crate::jobs::ssh::ssh_run(target, &probe, None)
+    let output = crate::jobs::ssh::direct_run(target, &probe, None)
         .await
         .map_err(|e| anyhow!("Can't reach '{host}' over SSH: {e}"))?;
     let discovery_rejection = match classify_probe_output(&output) {
@@ -2138,7 +2153,11 @@ fn remote_orx_probe(resolve_candidate: &str) -> String {
          {resolve_candidate} \
          if [ -n \"$p\" ] && [ -x \"$p\" ]; then \
          owner=$(find \"$p\" -prune \\( -user \"$(id -u)\" -o -user 0 \\) -print 2>/dev/null); \
+         if [ \"$(id -gn 2>/dev/null)\" = \"$(id -un)\" ]; then \
+         unsafe=$(find \"$p\" \"$(dirname \"$p\")\" -prune \\( -perm -002 -o \\( -perm -020 ! -group \"$(id -g)\" \\) \\) -print 2>/dev/null); \
+         else \
          unsafe=$(find \"$p\" \"$(dirname \"$p\")\" -prune \\( -perm -020 -o -perm -002 \\) -print 2>/dev/null); \
+         fi; \
          if [ -n \"$owner\" ] && [ -z \"$unsafe\" ]; then \
          v=$(\"$p\" --version 2>/dev/null || true); \
          printf '%s\\n' \"$p\" | orx_probe_emit '{}'; \
@@ -2180,7 +2199,7 @@ async fn probe_remote_orx_path(
     let probe = remote_login_orx_cmd(&remote_orx_probe(&format!(
         "p={path}; p=$(readlink -f \"$p\" 2>/dev/null || realpath \"$p\" 2>/dev/null || true);"
     )));
-    let output = crate::jobs::ssh::ssh_run(target, &probe, None)
+    let output = crate::jobs::ssh::direct_run(target, &probe, None)
         .await
         .map_err(|error| anyhow!("Can't check OpenResearch on '{host}': {error}"))?;
     Ok(classify_probe_output(&output))
@@ -2196,7 +2215,7 @@ pub(crate) async fn install_remote_orx(
     let version = env!("CARGO_PKG_VERSION");
     let installer = remote_installer(version);
     let command = remote_login_orx_cmd(&format!("export CARGO_HOME={cargo}; {installer}"));
-    crate::jobs::ssh::ssh_run(target, &command, None)
+    crate::jobs::ssh::direct_run(target, &command, None)
         .await
         .map_err(|error| anyhow!("Could not install OpenResearch on '{host}': {error}"))?;
     match probe_remote_orx_path(target, host, &paths.binary).await? {
@@ -2350,7 +2369,7 @@ async fn remote_host_control_status(
         "{} 2>/dev/null || true",
         remote_host_cmd(path, paths, "status")?
     );
-    let output = crate::jobs::ssh::ssh_run(target, &command, None).await?;
+    let output = crate::jobs::ssh::direct_run(target, &command, None).await?;
     Ok(
         parse_control_response(&output).and_then(|response| match response {
             ControlResponse::Status {
@@ -2378,7 +2397,8 @@ async fn ensure_remote_host(
         },
     );
     let output =
-        crate::jobs::ssh::ssh_run(target, &remote_host_cmd(path, paths, &operation)?, None).await?;
+        crate::jobs::ssh::direct_run(target, &remote_host_cmd(path, paths, &operation)?, None)
+            .await?;
     output
         .lines()
         .find_map(|line| line.strip_prefix(HOST_MARKER))
@@ -2402,7 +2422,7 @@ async fn remote_dashboard_protocol(
     let command = remote_orx_cmd(&format!(
         "{path} version --dashboard-protocol 2>/dev/null || true"
     ));
-    let output = crate::jobs::ssh::ssh_run(target, &command, None)
+    let output = crate::jobs::ssh::direct_run(target, &command, None)
         .await
         .map_err(|error| {
             anyhow!("Could not check OpenResearch compatibility on '{host}': {error}")
@@ -2848,6 +2868,92 @@ mod tests {
         std::fs::remove_dir_all(&base).ok();
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn probe_trusts_group_writable_only_for_a_private_primary_group() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = std::env::temp_dir().join(format!("orx-probe-group-{}", std::process::id()));
+        std::fs::create_dir(&dir).unwrap();
+        std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o775)).unwrap();
+        let binary = dir.join("orx");
+        std::fs::write(&binary, "#!/bin/sh\necho 'orx 9.9.9'\n").unwrap();
+        std::fs::set_permissions(&binary, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+        let probe = remote_orx_probe(&format!(
+            "p={};",
+            crate::jobs::ssh::sh_quote(binary.to_str().unwrap())
+        ));
+        let output = std::process::Command::new("sh")
+            .arg("-c")
+            .arg(&probe)
+            .output()
+            .unwrap();
+        assert!(output.status.success(), "{output:?}");
+        let output = String::from_utf8(output.stdout).unwrap();
+        let group = std::process::Command::new("id")
+            .arg("-gn")
+            .output()
+            .unwrap();
+        let user = std::process::Command::new("id")
+            .arg("-un")
+            .output()
+            .unwrap();
+        assert!(group.status.success() && user.status.success());
+        if group.stdout == user.stdout {
+            assert!(output.contains("ORX_REMOTE_VERSION="), "{output}");
+            assert!(!output.contains("ORX_REMOTE_REJECTED="), "{output}");
+        } else {
+            assert!(output.contains("ORX_REMOTE_REJECTED_WRITABLE="), "{output}");
+            assert!(!output.contains("ORX_REMOTE_VERSION="), "{output}");
+        }
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn posix_path_parent_resolves_parents_without_local_os_rules() {
+        assert_eq!(
+            posix_path_parent("/home/user/.config/openresearch/settings.json"),
+            Some("/home/user/.config/openresearch".into())
+        );
+        assert_eq!(posix_path_parent("/settings.json"), Some("/".into()));
+        assert_eq!(posix_path_parent("/"), None);
+        assert_eq!(posix_path_parent("relative/settings.json"), None);
+        assert_eq!(posix_path_parent("/home/../etc"), None);
+    }
+
+    #[test]
+    fn apply_remote_settings_honors_posix_paths_and_joins_cleanly() {
+        let initial = sample_paths();
+        let settings = serde_json::json!({
+            "orxBinaryPath": "/custom/bin/orx",
+            "dataDir": "/custom/data",
+            "cacheDir": "/custom/cache",
+        });
+        let applied = apply_remote_settings(initial.clone(), &settings);
+        assert_eq!(applied.binary, "/custom/bin/orx");
+        assert_eq!(applied.database, "/custom/data/orx.db");
+        assert_eq!(applied.cache, "/custom/cache/repos");
+
+        let settings_slashes = serde_json::json!({
+            "dataDir": "/custom/data/",
+            "cacheDir": "/custom/cache/",
+        });
+        let applied_slashes = apply_remote_settings(initial.clone(), &settings_slashes);
+        assert_eq!(applied_slashes.database, "/custom/data/orx.db");
+        assert_eq!(applied_slashes.cache, "/custom/cache/repos");
+
+        let invalid = serde_json::json!({
+            "orxBinaryPath": "C:\\Program Files\\orx.exe",
+            "dataDir": "relative/data",
+            "cacheDir": "/escape/../cache",
+        });
+        let unapplied = apply_remote_settings(initial.clone(), &invalid);
+        assert_eq!(unapplied.binary, initial.binary);
+        assert_eq!(unapplied.database, initial.database);
+        assert_eq!(unapplied.cache, initial.cache);
+    }
+
     #[test]
     fn install_paths_ignore_shell_noise_and_require_absolute_paths() {
         let paths = parse_remote_install_paths(
@@ -3040,6 +3146,9 @@ mod tests {
     fn extra_opts_land_before_the_separator() {
         let target = SshTarget {
             dest: "mybox".into(),
+            managed_generation: None,
+            auth_agent: None,
+            run_id: None,
             extra_opts: vec!["-p".into(), "2222".into()],
         };
         let args =

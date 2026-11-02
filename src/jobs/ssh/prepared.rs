@@ -6,7 +6,7 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use tokio::process::Command;
 
-use super::{control_dir, sh_quote, sharing::config_quote, SshTarget};
+use super::{control_dir, route_configuration, sh_quote, sharing::config_quote, SshTarget};
 use crate::error::{anyhow, Result};
 
 #[derive(Clone, Serialize, Deserialize)]
@@ -30,7 +30,7 @@ pub(super) struct Prepared {
     pub path: PathBuf,
 }
 
-type Key = (PathBuf, String);
+type Key = (PathBuf, String, Option<String>);
 static CONNECTIONS: LazyLock<RwLock<BTreeMap<Key, Prepared>>> =
     LazyLock::new(|| RwLock::new(BTreeMap::new()));
 static PREPARATION: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
@@ -39,7 +39,11 @@ pub(super) fn cached(target: &SshTarget) -> Option<Prepared> {
     CONNECTIONS
         .read()
         .unwrap_or_else(std::sync::PoisonError::into_inner)
-        .get(&(control_dir(), target.dest.clone()))
+        .get(&(
+            control_dir(),
+            target.dest.clone(),
+            target.auth_agent.clone(),
+        ))
         .cloned()
 }
 
@@ -112,26 +116,12 @@ pub(super) fn probe_args() -> Vec<String> {
     .collect()
 }
 
-pub(super) const ROUTE_FIELDS: &str = "hostname|user|port|controlpath|proxyjump|proxycommand";
-
 fn host(query: &Query) -> Result<&str> {
     query
         .args
         .last()
         .and_then(|dest| dest.rsplit('@').next())
         .ok_or_else(|| anyhow!("Missing SSH destination"))
-}
-
-pub(super) fn route_configuration(output: &str) -> String {
-    // Match final can repeat unrelated list settings such as SendEnv.
-    output
-        .lines()
-        .filter(|line| {
-            line.split_once(' ')
-                .is_some_and(|(key, _)| ROUTE_FIELDS.split('|').any(|field| field == key))
-        })
-        .collect::<Vec<_>>()
-        .join("\n")
 }
 
 async fn configuration(args: &[String], verbose: bool) -> Result<std::process::Output> {
@@ -193,6 +183,37 @@ fn snapshot_contents(
                 config_quote(value(&query.output, key)?)
             ));
         }
+        for line in query.output.lines() {
+            if let Some((key, value)) = line.split_once(' ') {
+                // ssh -G loses filename-list quoting; let the included config preserve it.
+                if !matches!(
+                    key,
+                    "hostname"
+                        | "user"
+                        | "port"
+                        | "controlpath"
+                        | "proxyjump"
+                        | "proxycommand"
+                        | "userknownhostsfile"
+                        | "globalknownhostsfile"
+                ) {
+                    let value = if matches!(
+                        key,
+                        "identityfile"
+                            | "certificatefile"
+                            | "identityagent"
+                            | "hostkeyalias"
+                            | "bindaddress"
+                            | "bindinterface"
+                    ) {
+                        config_quote(value)
+                    } else {
+                        value.to_owned()
+                    };
+                    contents.push_str(&format!("  {key} {value}\n"));
+                }
+            }
+        }
         let jump = value(&query.output, "proxyjump").unwrap_or("none");
         if let Some(command) = proxy {
             contents.push_str(&format!("  ProxyCommand {}\n", persistent_proxy(command)));
@@ -245,11 +266,19 @@ pub(super) async fn prepare(target: &SshTarget, refresh: bool) -> Result<Prepare
             return Ok(connection);
         }
     }
-    let connection = resolve(&target.dest, None).await?;
+    let connection =
+        resolve_with_agent(&target.dest, None, query, target.auth_agent.as_deref()).await?;
     CONNECTIONS
         .write()
         .unwrap_or_else(std::sync::PoisonError::into_inner)
-        .insert((control_dir(), target.dest.clone()), connection.clone());
+        .insert(
+            (
+                control_dir(),
+                target.dest.clone(),
+                target.auth_agent.clone(),
+            ),
+            connection.clone(),
+        );
     Ok(connection)
 }
 
@@ -268,14 +297,31 @@ fn user_or_empty_config(home: &std::path::Path) -> Result<PathBuf> {
     Ok(empty)
 }
 
+#[cfg(test)]
 async fn resolve(dest: &str, config: Option<&std::path::Path>) -> Result<Prepared> {
     resolve_with(dest, config, query).await
 }
 
+#[cfg(test)]
 async fn resolve_with<F, Fut>(
     dest: &str,
     config: Option<&std::path::Path>,
     query: F,
+) -> Result<Prepared>
+where
+    F: Fn(Vec<String>) -> Fut,
+    Fut: std::future::Future<Output = Result<Query>>,
+{
+    let agent = crate::local::shell_env::var("SSH_AUTH_SOCK")
+        .map(|value| value.to_string_lossy().into_owned());
+    resolve_with_agent(dest, config, query, agent.as_deref()).await
+}
+
+async fn resolve_with_agent<F, Fut>(
+    dest: &str,
+    config: Option<&std::path::Path>,
+    query: F,
+    agent: Option<&str>,
 ) -> Result<Prepared>
 where
     F: Fn(Vec<String>) -> Fut,
@@ -331,8 +377,6 @@ where
         .filter(|name| name.len() == 40 && name.bytes().all(|byte| byte.is_ascii_hexdigit()))
         .ok_or_else(|| anyhow!("OpenSSH did not expand the connection identifier for {host}"))?
         .to_owned();
-    let routed = value(&first.output, "proxyjump").unwrap_or("none") != "none"
-        || value(&first.output, "proxycommand").unwrap_or("none") != "none";
     let mut queries = vec![first];
     let mut seen = BTreeSet::new();
     let mut index = 0;
@@ -351,14 +395,19 @@ where
         }
         index += 1;
     }
-    let encoded = serde_json::to_vec(&queries)?;
-    let digest = format!("{:x}", Sha256::digest(&encoded));
-    let socket_name = if routed {
-        digest[..40].to_owned()
-    } else {
-        "%C".into()
-    };
-    let snapshot = control_dir().join(format!("{digest}.config"));
+    let encoded = serde_json::to_vec(
+        &queries
+            .iter()
+            .map(|query| &query.output)
+            .collect::<Vec<_>>(),
+    )?;
+    let mut digest = Sha256::new();
+    digest.update(&encoded);
+    digest.update(serde_json::to_vec(&agent)?);
+    let digest = format!("{:x}", digest.finalize());
+    let socket_name = digest[..40].to_owned();
+    let file_digest = format!("{:x}", Sha256::digest(serde_json::to_vec(&queries)?));
+    let snapshot = control_dir().join(format!("{file_digest}.config"));
     let config = match (config, snapshot_config) {
         (Some(path), _) => path.to_path_buf(),
         (None, Some(fallback)) => fallback,
@@ -407,7 +456,7 @@ where
     }
     let contents = snapshot_contents(&queries, &proxies, &config, !skip_system_include)?;
     crate::local::git::atomic_write_with_mode(&snapshot, contents.as_bytes(), Some(0o600))?;
-    let path = control_dir().join(if routed { &socket_name } else { &native_id });
+    let path = control_dir().join(&socket_name);
     let connection = Prepared {
         publication: Publication {
             host,
@@ -465,6 +514,35 @@ mod tests {
             snapshot_contents(std::slice::from_ref(&query), &proxies, config, false).unwrap();
         assert!(without_system.ends_with("Include \"/home/me/.ssh/config\"\n"));
         assert!(!without_system.contains("/etc/ssh/ssh_config"));
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn known_hosts_lists_keep_quoted_filenames() {
+        let temp = crate::local::git::TemporaryDirectory::new("orx-known-hosts").unwrap();
+        let config = temp.path().join("config");
+        std::fs::write(
+            &config,
+            "Host lab\n HostName example.invalid\n IdentityFile none\n IdentityAgent none\n UserKnownHostsFile \"~/research keys/known_hosts\" \"~/second keyfile\"\n GlobalKnownHostsFile \"/tmp/global hostkeys\" /tmp/other\n StrictHostKeyChecking yes\n",
+        ).unwrap();
+        let prepared = resolve("lab", Some(&config)).await.unwrap();
+        let output = Command::new("ssh")
+            .args(["-vvv", "-F"])
+            .arg(&prepared.snapshot)
+            .args(["-oProxyCommand=false", "-oBatchMode=yes", "lab", "true"])
+            .output()
+            .await
+            .unwrap();
+        let debug = String::from_utf8_lossy(&output.stderr);
+        for path in ["~/research keys/known_hosts", "~/second keyfile"] {
+            assert!(
+                debug.contains(&format!("expanded UserKnownHostsFile '{path}' ->")),
+                "{debug}"
+            );
+        }
+        let snapshot = std::fs::read_to_string(&prepared.snapshot).unwrap();
+        assert!(!snapshot.contains("  userknownhostsfile "));
+        assert!(!snapshot.contains("  globalknownhostsfile "));
     }
 
     fn owner_check_error() -> crate::error::Error {
@@ -664,7 +742,11 @@ mod tests {
             resolve("command-a", Some(&config)).await.unwrap().path
         );
         let target = SshTarget::alias("command-a");
-        let key = (control_dir(), target.dest.clone());
+        let key = (
+            control_dir(),
+            target.dest.clone(),
+            target.auth_agent.clone(),
+        );
         let refreshed = resolve(&target.dest, Some(&config)).await.unwrap();
         CONNECTIONS.write().unwrap().insert(key.clone(), refreshed);
         let mut args = super::super::ssh_opts_prepared(&target, true, &command_a);

@@ -560,8 +560,24 @@ fn parse_custom_provider(raw: &str) -> Option<CustomProvider> {
 /// resolved — codex needs to find its `codex-code-mode-host` helper next to the
 /// real binary.
 fn codex_candidates() -> Vec<PathBuf> {
-    let drops = dirs::home_dir()
-        .map(|home| home.join(".local").join("bin"))
+    let drops = codex_install_dirs(dirs::home_dir().as_deref())
+        .into_iter()
+        .filter_map(|dir| crate::local::shell_env::find_in_dir(&dir, "codex"));
+    find_on_path("codex")
+        .into_iter()
+        .chain(drops)
+        .map(resolve_symlinks)
+        .collect()
+}
+
+/// Installer locations off PATH. ChatGPT.app bundles the Codex CLI without
+/// putting it on PATH, sometimes as the only install.
+fn codex_install_dirs(home: Option<&Path>) -> Vec<PathBuf> {
+    let chatgpt_apps = [
+        Some(PathBuf::from("/Applications")),
+        home.map(|home| home.join("Applications")),
+    ];
+    home.map(|home| home.join(".local").join("bin"))
         .into_iter()
         .chain(
             cfg!(windows)
@@ -569,11 +585,13 @@ fn codex_candidates() -> Vec<PathBuf> {
                 .flatten()
                 .map(|dir| dir.join("Programs/OpenAI/Codex/bin")),
         )
-        .filter_map(|dir| crate::local::shell_env::find_in_dir(&dir, "codex"));
-    find_on_path("codex")
-        .into_iter()
-        .chain(drops)
-        .map(resolve_symlinks)
+        .chain(
+            chatgpt_apps
+                .into_iter()
+                .flatten()
+                .filter(|_| cfg!(target_os = "macos"))
+                .map(|apps| apps.join("ChatGPT.app/Contents/Resources/codex-cli/bin")),
+        )
         .collect()
 }
 
@@ -710,6 +728,15 @@ fn exec_line_agent_message(line: &str) -> Option<String> {
     }
 }
 
+fn codex_plan_label(plan: &str) -> String {
+    match plan {
+        "prolite" => "Pro 100".into(),
+        "pro" => "Pro 200".into(),
+        "promax" => "Pro 500".into(),
+        _ => title_case(plan),
+    }
+}
+
 impl Codex {
     /// `snapshot` skips the `model/list` handshake and leaves the catalog empty;
     /// a
@@ -751,8 +778,9 @@ impl Codex {
                 info.authenticated = true;
                 info.auth_method = Some("oauth");
                 info.account = nonempty_str(&claims, "email");
+                info.account_name = nonempty_str(&claims, "name");
                 if let Some(oa) = claims.get("https://api.openai.com/auth") {
-                    info.plan = nonempty_str(oa, "chatgpt_plan_type").map(|p| title_case(&p));
+                    info.plan = nonempty_str(oa, "chatgpt_plan_type").map(|p| codex_plan_label(&p));
                 }
             }
         }
@@ -869,6 +897,29 @@ impl Codex {
 /// Compaction re-reads a whole thread; a long one is not quick.
 const COMPACT_TURN_TIMEOUT: Duration = Duration::from_secs(300);
 
+/// Load the persisted thread without creating a new one or adding user input.
+async fn resume_for_compaction(
+    client: &CodexClient,
+    thread_id: &str,
+    path: &Path,
+    mut setup: Value,
+) -> Result<()> {
+    if client.resumed_thread().as_deref() == Some(thread_id) {
+        return Ok(());
+    }
+    setup["threadId"] = Value::String(thread_id.to_string());
+    setup["path"] = Value::String(path.to_string_lossy().into_owned());
+    let resumed = client.request("thread/resume", setup).await?;
+    if resumed.pointer("/thread/id").and_then(Value::as_str) != Some(thread_id) {
+        return Err(anyhow!(
+            "Codex resumed a different thread — cannot compact this chat"
+        ));
+    }
+    client.set_thread_model(resumed.get("model").and_then(Value::as_str));
+    client.set_resumed_thread(thread_id);
+    Ok(())
+}
+
 #[async_trait]
 impl Harness for Codex {
     fn id(&self) -> &'static str {
@@ -883,9 +934,13 @@ impl Harness for Codex {
         true
     }
 
+    fn supports_compaction(&self) -> bool {
+        true
+    }
+
     /// The app server compacts a thread in place. The legacy `codex exec` path
-    /// spawns a fresh child per turn with no session-scoped RPC, so it — and a
-    /// session whose app-server child is gone — take the shared fallback.
+    /// spawns a fresh child per turn with no session-scoped RPC and takes the
+    /// shared fallback. An idle app-server is restored without sending a turn.
     async fn compact(&self, ctx: &CompactCtx) -> Result<CompactOutcome> {
         let Some(thread_id) = ctx.native_session_id.as_deref() else {
             return Ok(CompactOutcome::Fallback);
@@ -893,18 +948,38 @@ impl Harness for Codex {
         if !runs_app_server().await {
             return Ok(CompactOutcome::Fallback);
         }
-        let Some(client) = ctx.host.codex.client_for(&ctx.session_id).await else {
-            // The thread is still resumable; summarizing would throw it away.
-            return Err(anyhow!(
-                "Codex is not running for this chat — send a message first, then compact"
-            ));
+        let live = ctx.host.codex.client_for(&ctx.session_id).await;
+        let client = match live {
+            Some(client) if client.resumed_thread().as_deref() == Some(thread_id) => client,
+            _ => {
+                let session = codex_native_session(thread_id).await?.ok_or_else(|| {
+                    anyhow!("Codex's saved thread is missing — cannot compact this chat")
+                })?;
+                let (repo, playbook_md) = codex_playbook(&ctx.project, &ctx.session_id).await?;
+                let client = ctx
+                    .host
+                    .codex
+                    .ensure(&ctx.session_id, session.store)
+                    .await?;
+                let config = if ctx.permission_mode == Some(PermissionMode::Bypass) {
+                    Value::Null
+                } else {
+                    codex_turn_config(&client, &repo).await?
+                };
+                let auto_review_supported = config_supports_auto_review(&config)
+                    && super::detect::api_key("OPENAI_BASE_URL").is_none();
+                let setup = codex_thread_setup(
+                    &repo,
+                    &playbook_md,
+                    ctx.permission_mode,
+                    auto_review_supported,
+                    ctx.model.as_deref(),
+                    ctx.service_tier.as_deref(),
+                );
+                resume_for_compaction(&client, thread_id, &session.path, setup).await?;
+                client
+            }
         };
-        // A fresh child must `thread/resume` a thread before it can act on it.
-        if client.resumed_thread().as_deref() != Some(thread_id) {
-            return Err(anyhow!(
-                "Codex is not running this chat's thread — send a message first, then compact"
-            ));
-        }
         // `thread/compact/start` only starts a turn: codex compacts in the
         // background and reports through the same stream a prompt would, so the
         // request returning is not the compaction being done.
@@ -1112,6 +1187,9 @@ impl Harness for Codex {
             }
             // Async questions are answered by steering, not a held JSON-RPC reply.
             "question" if prompt.native_id.is_none() => {
+                if !answer.approve {
+                    return Ok(ResumeAction::Handled { plan_mode: None });
+                }
                 let text = async_question_answer(prompt, answer)?;
                 ctx.host
                     .steer_message(
@@ -1166,6 +1244,16 @@ impl Harness for Codex {
 
     fn config_home(&self) -> Option<PathBuf> {
         Some(native_store::codex_home(NativeStore::Legacy))
+    }
+
+    fn native_skill_roots(&self) -> Vec<PathBuf> {
+        [
+            dirs::home_dir().map(|home| home.join(".agents/skills")),
+            self.config_home().map(|home| home.join("skills")),
+        ]
+        .into_iter()
+        .flatten()
+        .collect()
     }
 
     fn skill_target(&self) -> Option<PathBuf> {
@@ -2716,6 +2804,48 @@ async fn ensure_codex_pre_accept(
     }
 }
 
+async fn codex_playbook(
+    project: &crate::local::model::LocalProject,
+    session_id: &str,
+) -> Result<(PathBuf, String)> {
+    let project = project.clone();
+    let session_id = session_id.to_string();
+    let (repo, playbook) = tokio::task::spawn_blocking(move || {
+        ensure_playbook(&project, &session_id, Codex.session_skills_dir())
+    })
+    .await
+    .map_err(|e| anyhow!("playbook task failed: {e}"))??;
+    let playbook_md = std::fs::read_to_string(&playbook).unwrap_or_default();
+    Ok((repo, playbook_md))
+}
+
+/// Both a normal turn and idle compaction restore the same thread settings.
+fn codex_thread_setup(
+    repo: &Path,
+    playbook_md: &str,
+    permission_mode: Option<PermissionMode>,
+    auto_review_supported: bool,
+    model: Option<&str>,
+    service_tier: Option<&str>,
+) -> Value {
+    let (sandbox_mode, approval_policy, approvals_reviewer) =
+        codex_policies(permission_mode, auto_review_supported);
+    let mut setup = serde_json::json!({
+        "cwd": repo.to_string_lossy(),
+        "sandbox": sandbox_mode,
+        "approvalPolicy": approval_policy,
+        "approvalsReviewer": approvals_reviewer,
+        "developerInstructions": playbook_md,
+    });
+    if let Some(service_tier) = service_tier {
+        setup["serviceTier"] = Value::String(service_tier.to_string());
+    }
+    if let Some(model) = model {
+        setup["model"] = Value::String(model.to_string());
+    }
+    setup
+}
+
 async fn run_turn_app_server(ctx: &mut TurnCtx) -> Result<()> {
     // Entry sweep: any HELD (native_id) card still unresolved from an earlier
     // turn is a zombie — its JSON-RPC request died with its turn (or child), and
@@ -2727,16 +2857,7 @@ async fn run_turn_app_server(ctx: &mut TurnCtx) -> Result<()> {
     // Claude's precedent. Behavior-preserving for the pre-plan-mode cards (all
     // of which were native).
     ctx.host.resolve_stale_prompts(&ctx.session_id, true)?;
-    let project = ctx.project.clone();
-    let session_id = ctx.session_id.clone();
-    // The modular orx skills land in the harness's session-skills dir, fresh,
-    // for this session's agent to auto-load — source of truth is the trait.
-    let skills_dir = Codex.session_skills_dir();
-    let (repo, playbook) =
-        tokio::task::spawn_blocking(move || ensure_playbook(&project, &session_id, skills_dir))
-            .await
-            .map_err(|e| anyhow!("playbook task failed: {e}"))??;
-    let playbook_md = std::fs::read_to_string(&playbook).unwrap_or_default();
+    let (repo, playbook_md) = codex_playbook(&ctx.project, &ctx.session_id).await?;
 
     let native_session = match ctx.native_session_id.as_deref() {
         Some(id) => codex_native_session(id).await?,
@@ -2755,7 +2876,7 @@ async fn run_turn_app_server(ctx: &mut TurnCtx) -> Result<()> {
     };
     let auto_review_supported =
         config_supports_auto_review(&config) && super::detect::api_key("OPENAI_BASE_URL").is_none();
-    let (sandbox_mode, approval_policy, approvals_reviewer) =
+    let (_, approval_policy, approvals_reviewer) =
         codex_policies(ctx.permission_mode, auto_review_supported);
 
     // Thread bring-up: reuse the thread this child already carries, resume a
@@ -2764,19 +2885,14 @@ async fn run_turn_app_server(ctx: &mut TurnCtx) -> Result<()> {
     // both start and resume, so a long-lived session picks up playbook
     // improvements on the next restart rather than keeping its first version
     // forever.
-    let mut thread_setup = serde_json::json!({
-        "cwd": repo.to_string_lossy(),
-        "sandbox": sandbox_mode,
-        "approvalPolicy": approval_policy,
-        "approvalsReviewer": approvals_reviewer,
-        "developerInstructions": playbook_md,
-    });
-    if let Some(service_tier) = &ctx.service_tier {
-        thread_setup["serviceTier"] = Value::String(service_tier.clone());
-    }
-    if let Some(model) = &ctx.model {
-        thread_setup["model"] = Value::String(model.clone());
-    }
+    let mut thread_setup = codex_thread_setup(
+        &repo,
+        &playbook_md,
+        ctx.permission_mode,
+        auto_review_supported,
+        ctx.model.as_deref(),
+        ctx.service_tier.as_deref(),
+    );
     if ctx.reset_codex_model {
         // Codex keeps the old thread model when a turn omits its model override.
         append_native_recovery_context(ctx, &mut thread_setup);
@@ -3374,6 +3490,9 @@ fn user_input_card(turn: Option<&str>, id: &Value, params: &Value) -> Option<(St
 /// contextualized annotation answer; every other stashed id gets an empty
 /// `{"answers": []}`. `Err` when none were provided leaves the card actionable.
 fn user_input_reply(prompt: &WirePrompt, answer: &PromptAnswer) -> Result<Value> {
+    if !answer.approve {
+        return Ok(serde_json::json!({ "answers": {} }));
+    }
     let note = answer.note.as_deref().filter(|s| !s.trim().is_empty());
     let mut selected: Vec<String> = if !answer.answers.is_empty() {
         answer.answers.clone()
@@ -3660,7 +3779,7 @@ async fn steer_turn(
         )
         .await;
     match answered {
-        Ok(Ok(_)) => ctx.record_steer(&steer.display),
+        Ok(Ok(_)) => ctx.record_steer(&steer, true),
         Ok(Err(_)) => {
             if let Err(error) = ctx.host.park_steer(&ctx.session_id, steer) {
                 ctx.push_error(format!("Could not preserve steering message: {error}"));
@@ -3669,10 +3788,8 @@ async fn steer_turn(
         Err(e) => {
             // Record it anyway: the composer is already cleared, so this is
             // the only copy of what the user typed.
-            ctx.record_steer(&steer.display);
-            ctx.push_error(format!(
-                "codex did not confirm the steering message ({e}) — send it again if the turn ignores it"
-            ));
+            ctx.record_steer(&steer, false);
+            ctx.push_error(format!("codex did not confirm the steering message ({e})"));
         }
     }
 }
@@ -4244,6 +4361,130 @@ fn handle_item(ctx: &mut TurnCtx, item: &Value, next_id: &mut impl FnMut(&str) -
 #[cfg(test)]
 mod tests {
     #[test]
+    fn chatgpt_plan_labels_distinguish_pro_tiers() {
+        assert_eq!(super::codex_plan_label("plus"), "Plus");
+        assert_eq!(super::codex_plan_label("prolite"), "Pro 100");
+        assert_eq!(super::codex_plan_label("pro"), "Pro 200");
+        assert_eq!(super::codex_plan_label("promax"), "Pro 500");
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn compaction_restores_the_saved_thread_once_without_a_user_turn() {
+        let client = crate::local::codex::tests::rpc_test_client(
+            r#"
+                IFS= read -r request
+                for expected in '"method":"thread/resume"' '"threadId":"saved-thread"' '"path":"/saved/rollout.jsonl"' '"developerInstructions":"project instructions"' '"approvalPolicy":"on-request"' '"serviceTier":"priority"'; do
+                    case "$request" in *"$expected"*) ;; *) exit 1 ;; esac
+                done
+                printf '%s\n' '{"id":1,"result":{"thread":{"id":"saved-thread"},"model":"saved-model"}}'
+                sleep 600
+            "#,
+        );
+        let setup = codex_thread_setup(
+            Path::new("/workspace"),
+            "project instructions",
+            Some(PermissionMode::Auto),
+            false,
+            Some("saved-model"),
+            Some("priority"),
+        );
+        let restored = tokio::time::timeout(
+            Duration::from_secs(2),
+            resume_for_compaction(
+                &client,
+                "saved-thread",
+                Path::new("/saved/rollout.jsonl"),
+                setup.clone(),
+            ),
+        )
+        .await;
+        let warm = tokio::time::timeout(
+            Duration::from_millis(100),
+            resume_for_compaction(
+                &client,
+                "saved-thread",
+                Path::new("/saved/rollout.jsonl"),
+                setup,
+            ),
+        )
+        .await;
+        crate::local::codex::tests::stop_test_client(&client).await;
+        restored.unwrap().unwrap();
+        warm.unwrap().unwrap();
+        assert_eq!(client.resumed_thread().as_deref(), Some("saved-thread"));
+        assert_eq!(client.thread_model().as_deref(), Some("saved-model"));
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn compaction_refuses_a_different_resumed_thread() {
+        let client = crate::local::codex::tests::rpc_test_client(
+            r#"IFS= read -r request; printf '%s\n' '{"id":1,"result":{"thread":{"id":"different-thread"},"model":"wrong-model"}}'; sleep 600"#,
+        );
+        let outcome = tokio::time::timeout(
+            Duration::from_secs(2),
+            resume_for_compaction(
+                &client,
+                "saved-thread",
+                Path::new("/saved/rollout.jsonl"),
+                serde_json::json!({}),
+            ),
+        )
+        .await;
+        crate::local::codex::tests::stop_test_client(&client).await;
+        assert!(outcome
+            .unwrap()
+            .unwrap_err()
+            .to_string()
+            .contains("different thread"));
+        assert!(client.resumed_thread().is_none());
+        assert!(client.thread_model().is_none());
+    }
+
+    #[test]
+    fn compaction_and_normal_turn_setup_preserve_permission_settings() {
+        for (mode, automatic_review, sandbox, approval, reviewer) in [
+            (
+                PermissionMode::Auto,
+                true,
+                "workspace-write",
+                "on-request",
+                "auto_review",
+            ),
+            (
+                PermissionMode::Auto,
+                false,
+                "workspace-write",
+                "on-request",
+                "user",
+            ),
+            (
+                PermissionMode::Bypass,
+                false,
+                "danger-full-access",
+                "never",
+                "user",
+            ),
+        ] {
+            let setup = codex_thread_setup(
+                Path::new("/workspace"),
+                "playbook",
+                Some(mode),
+                automatic_review,
+                None,
+                None,
+            );
+            assert_eq!(setup["sandbox"], sandbox);
+            assert_eq!(setup["approvalPolicy"], approval);
+            assert_eq!(setup["approvalsReviewer"], reviewer);
+            assert_eq!(setup["developerInstructions"], "playbook");
+            assert!(setup.get("model").is_none());
+            assert!(setup.get("serviceTier").is_none());
+        }
+    }
+
+    #[test]
     fn native_camel_case_usage_keeps_cache_and_reasoning_as_breakdowns() {
         let events: Vec<serde_json::Value> =
             serde_json::from_str(include_str!("fixtures/codex-token-usage.json")).unwrap();
@@ -4261,6 +4502,26 @@ mod tests {
     use super::super::options::REASONING_DEFAULT_ID;
     use super::*;
     use serde_json::json;
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn chatgpt_app_bundled_codex_is_an_install_candidate() {
+        let home = std::env::temp_dir().join(format!("orx-chatgpt-test-{}", uuid::Uuid::new_v4()));
+        let bin = home.join("Applications/ChatGPT.app/Contents/Resources/codex-cli/bin");
+        std::fs::create_dir_all(&bin).unwrap();
+        std::fs::write(bin.join("codex"), "").unwrap();
+
+        let dirs = codex_install_dirs(Some(&home));
+        assert!(dirs.contains(&PathBuf::from(
+            "/Applications/ChatGPT.app/Contents/Resources/codex-cli/bin"
+        )));
+        let found: Vec<_> = dirs
+            .iter()
+            .filter_map(|dir| crate::local::shell_env::find_in_dir(dir, "codex"))
+            .collect();
+        assert!(found.contains(&bin.join("codex")));
+        std::fs::remove_dir_all(&home).unwrap();
+    }
 
     #[test]
     fn plugin_skills_follow_enabled_installs_and_manifest_paths() {
@@ -6149,6 +6410,10 @@ requires_openai_auth = false
 
         // Neither selection nor note → Err (card stays actionable).
         assert!(user_input_reply(&prompt, &answer(true, None, &[], None)).is_err());
+        assert_eq!(
+            user_input_reply(&prompt, &answer(false, None, &[], None)).unwrap(),
+            serde_json::json!({ "answers": {} })
+        );
     }
 
     /// Numeric question ids stringify to their JSON text as map keys.
@@ -6188,6 +6453,20 @@ requires_openai_auth = false
             session_id: "s".into(),
             native_session_id: None,
         }
+    }
+
+    #[tokio::test]
+    async fn skipped_async_question_closes_without_sending_a_message() {
+        let prompt = WirePrompt {
+            kind: "question".into(),
+            question: Some("Which color?".into()),
+            ..Default::default()
+        };
+        let action = Codex
+            .resume_from_prompt(&test_resume_ctx(), &prompt, &answer(false, None, &[], None))
+            .await
+            .unwrap();
+        assert!(matches!(action, ResumeAction::Handled { plan_mode: None }));
     }
 
     /// The codex plan card resume arms: approve → "Implement the plan." with

@@ -15,4 +15,6 @@ orx exp run <expId> --backend local
   executing the fixed command. Never train directly from the worktree.
 - Runs live under `<orx data dir>/local-runs/<runId>/`. Cancellation terminates
   the process group.
+- Finished runs older than each project's three newest local runs lose
+  `repo/.venv` and `repo/.cache/uv`; logs, TensorBoard files, and other outputs stay.
 - A detached `orx supervise` process watches the run; do not kill it.

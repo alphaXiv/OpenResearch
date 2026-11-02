@@ -9,7 +9,7 @@ import {
 } from "./settings";
 import { dispatchChat } from "./chatStore";
 import { inputSummaryChanged } from "./chatState";
-import { useEffect } from "react";
+import { useEffect, useMemo } from "react";
 import {
   emitEntity,
   onDataDirMove,
@@ -35,9 +35,23 @@ function upsert<T extends { id: string; updatedAt: number }>(rows: T[] | undefin
 
 export function QueryEvents() {
   const scope = workspaceScope();
+  const sessionExperiments = useMemo(() => {
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    return {
+      invalidate() {
+        timer ??= setTimeout(() => {
+          timer = undefined;
+          invalidateFamilies(["getSessionExperiments"], scope);
+        }, 200);
+      },
+      dispose() { clearTimeout(timer); timer = undefined; },
+    };
+  }, [scope[1]]);
+  useEffect(() => () => sessionExperiments.dispose(), [sessionExperiments]);
   useOrxEventStream({
     onRun(run) {
       if (!isCurrentScope(scope)) return;
+      sessionExperiments.invalidate();
       const old = queryClient.getQueryData(listRunsQuery(run.projectId).queryKey)?.find((row) => row.id === run.id);
       markLiveUpdate(queryClient, listRunsQuery(run.projectId).queryKey, run.id);
       queryClient.setQueryData(listRunsQuery(run.projectId).queryKey, (rows) => upsert(rows, run));
@@ -49,6 +63,7 @@ export function QueryEvents() {
     },
     onExperiment(experiment) {
       if (!isCurrentScope(scope)) return;
+      sessionExperiments.invalidate();
       markLiveUpdate(queryClient, listExperimentsQuery(experiment.projectId).queryKey, experiment.id);
       queryClient.setQueryData(listExperimentsQuery(experiment.projectId).queryKey, (rows) => upsert(rows, experiment));
       invalidateFamilies(["getProjectStarterPrompts"], scope, (query) => query.queryKey[3] === experiment.projectId);
@@ -68,6 +83,7 @@ export function QueryEvents() {
     onReconnect() {
       if (!isCurrentScope(scope)) return;
       invalidateFamilies(liveFamilies, scope);
+      invalidateFamilies(["getSessionExperiments"], scope);
       emitEntity.onReconnect();
     },
   });

@@ -43,7 +43,9 @@ use crate::local::chat::{
 };
 use crate::store::Store;
 
-pub(crate) use claude::{question_prompt, should_synthesize_plan, synthesize_resume};
+pub(crate) use claude::{
+    question_prompt, should_synthesize_plan, synthesize_resume, SKIPPED_QUESTION_MESSAGE,
+};
 pub(crate) use detect::{
     detect_spawn_output_timed, probe_timing_scope, spawn_retrying_busy, unique as unique_bins,
     ProbeTiming, ProbeTimingSink,
@@ -317,9 +319,12 @@ pub trait Harness: Send + Sync {
         false
     }
 
-    /// Compact this session's context in the harness's own store. Returning
-    /// `Fallback` asks the caller for the shared summarize-and-reseed path,
-    /// which every harness can take.
+    /// Whether native compaction or the shared summarize-and-reseed path is supported.
+    fn supports_compaction(&self) -> bool {
+        false
+    }
+
+    /// Compact the native context, or request the shared fallback with `Fallback`.
     async fn compact(&self, _ctx: &CompactCtx) -> Result<CompactOutcome> {
         Ok(CompactOutcome::Fallback)
     }
@@ -335,14 +340,17 @@ pub trait Harness: Send + Sync {
     /// `None` = failed; the caller keeps the first-line placeholder.
     ///
     /// Default: the shared title one-shot, sanitized; a harness without
-    /// `one_shot` gets none. OpenCode also still adopts a native `session.updated` title (minus its creation
-    /// seed) through `TurnCtx::set_title` if its server ever offers one, but
-    /// runs its own one-shot child since the server stopped titling parent
-    /// sessions.
+    /// `one_shot` gets none. OpenCode also adopts native session titles through
+    /// `TurnCtx::set_title` when its server provides them.
     async fn generate_title(&self, first_message: &str, model: Option<&str>) -> Option<String> {
+        let model = if self.id() == "opencode" {
+            Some(model.filter(|model| !model.trim().is_empty())?)
+        } else {
+            None
+        };
         let prompt = title::title_prompt(first_message);
         let request = OneShot {
-            model: model.filter(|model| self.id() == "opencode" && model.starts_with("orx-local-")),
+            model,
             ..title::title_request(&prompt)
         };
         let raw = self.one_shot(request).await.ok()?;
@@ -391,14 +399,18 @@ pub trait Harness: Send + Sync {
 
     /// The agent's config home (`~/.claude`, `~/.codex`, `~/.config/opencode`,
     /// `~/.cursor`). Presence of this dir is how we tell the agent is set up.
-    /// `None` if this harness has no installable skill.
     fn config_home(&self) -> Option<PathBuf> {
         None
     }
 
-    /// Where the skill shim file lands. `None` if not installable.
+    /// Install the shim in the first native search root. Harnesses may override it.
     fn skill_target(&self) -> Option<PathBuf> {
-        None
+        Some(
+            self.native_skill_roots()
+                .first()?
+                .join("orx")
+                .join("SKILL.md"),
+        )
     }
 
     /// The shim file contents to write at `skill_target`. `None` if not
@@ -421,18 +433,12 @@ pub trait Harness: Send + Sync {
         self.config_home().map(|h| h.exists()).unwrap_or(false)
     }
 
-    /// The agent's global native-skills dir (`~/.claude/skills`,
-    /// `~/.agents/skills`, `<xdg>/opencode/skills`) — where the user's own
-    /// installed skills live. Derived from the `skills/orx/SKILL.md` shim
-    /// target every installable harness shares. `None` if not installable.
-    fn global_skills_dir(&self) -> Option<PathBuf> {
-        Some(self.skill_target()?.parent()?.parent()?.to_path_buf())
+    /// Native skill search roots, in precedence order, independent of session state.
+    fn native_skill_roots(&self) -> Vec<PathBuf> {
+        Vec::new()
     }
 
-    /// Further skills dirs this agent loads from, each labeled by where it came
-    /// from — the plugins installed into this agent. Same shape as
-    /// [`global_skills_dir`](Self::global_skills_dir): one skill folder per
-    /// entry. Default: none.
+    /// Installed plugin skill roots, labeled with their invocation namespace.
     fn plugin_skills_dirs(&self) -> Vec<(String, PathBuf)> {
         Vec::new()
     }
@@ -595,6 +601,10 @@ pub struct CompactCtx {
     pub session_id: String,
     pub native_session_id: Option<String>,
     pub model: Option<String>,
+    pub project: crate::local::model::LocalProject,
+    pub permission_mode: Option<PermissionMode>,
+    pub service_tier: Option<String>,
+    pub reasoning_level: Option<String>,
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -679,6 +689,7 @@ async fn detect_one(harness: &dyn Harness, snapshot: bool) -> Option<HarnessInfo
             info.auth_state = HarnessAuthState::Ready;
         }
         info.options = harness.options();
+        info.supports_compaction = harness.supports_compaction();
         // The trait is the ceiling: a `detect` narrows it for an installation
         // whose run path can't steer. A steering harness whose `detect` forgets
         // to set it reports false and silently queues every send.
@@ -834,6 +845,111 @@ $ARGUMENTS
 mod tests {
     use super::options::{PlanActivation, REASONING_DEFAULT_ID};
     use super::*;
+
+    #[test]
+    fn skill_install_targets_are_declared_search_roots() {
+        for harness in registry() {
+            if let Some(target) = harness.skill_target() {
+                assert!(
+                    harness
+                        .native_skill_roots()
+                        .iter()
+                        .any(|root| target.starts_with(root)),
+                    "{} skill target is not discoverable",
+                    harness.id()
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn compaction_support_is_explicit_for_builtins_and_disabled_for_acp() {
+        let supported: [&dyn Harness; 5] = [
+            &claude::ClaudeCode,
+            &codex::Codex,
+            &opencode::OpenCode,
+            &cursor::Cursor,
+            &antigravity::Antigravity,
+        ];
+        for harness in supported {
+            assert!(harness.supports_compaction(), "{}", harness.id());
+        }
+        for preset in crate::local::acp::presets() {
+            let harness = acp::Acp(preset.launch);
+            assert!(!harness.supports_compaction(), "{}", harness.id());
+        }
+        struct DefaultHarness;
+        #[async_trait]
+        impl Harness for DefaultHarness {
+            fn id(&self) -> &str {
+                "default-fixture"
+            }
+            fn name(&self) -> &str {
+                "Default fixture"
+            }
+        }
+        assert!(!DefaultHarness.supports_compaction());
+    }
+
+    #[tokio::test]
+    async fn title_uses_only_the_selected_opencode_model() {
+        struct TitleHarness {
+            id: &'static str,
+            calls: std::sync::Mutex<Vec<Option<String>>>,
+        }
+        #[async_trait]
+        impl Harness for TitleHarness {
+            fn id(&self) -> &str {
+                self.id
+            }
+            fn name(&self) -> &str {
+                self.id
+            }
+            async fn one_shot(&self, request: OneShot<'_>) -> Result<String> {
+                self.calls
+                    .lock()
+                    .unwrap()
+                    .push(request.model.map(str::to_owned));
+                Ok("A test title".into())
+            }
+        }
+        let harness = TitleHarness {
+            id: "opencode",
+            calls: Default::default(),
+        };
+        for model in [None, Some(""), Some(" \t")] {
+            assert!(harness.generate_title("hello", model).await.is_none());
+        }
+        assert!(harness.calls.lock().unwrap().is_empty());
+        for model in [
+            "orx-local-test/qwen",
+            "openrouter/anthropic/claude",
+            "custom/model",
+        ] {
+            assert_eq!(
+                harness
+                    .generate_title("hello", Some(model))
+                    .await
+                    .as_deref(),
+                Some("A test title")
+            );
+            assert_eq!(
+                harness.calls.lock().unwrap().last(),
+                Some(&Some(model.to_owned()))
+            );
+        }
+        for id in ["claude-code", "codex", "cursor"] {
+            let harness = TitleHarness {
+                id,
+                calls: Default::default(),
+            };
+            harness
+                .generate_title("hello", Some("selected/model"))
+                .await
+                .unwrap();
+            assert_eq!(*harness.calls.lock().unwrap(), vec![None]);
+        }
+    }
 
     #[test]
     fn one_line_flattens_and_caps_on_a_char_boundary() {

@@ -56,6 +56,13 @@ Source: "{#SourceDir}\orx.exe"; DestDir: "{app}"; Flags: ignoreversion
 Name: "{autoprograms}\OpenResearch"; Filename: "{app}\OpenResearch.exe"; AppUserModelID: "{#AppUserModelID}"
 Name: "{autodesktop}\OpenResearch"; Filename: "{app}\OpenResearch.exe"; AppUserModelID: "{#AppUserModelID}"; Tasks: desktopicon
 
+[Registry]
+; openresearch:// links (src/commands/app.rs) open the app; the launcher passes them to orx.exe.
+Root: HKCU; Subkey: "Software\Classes\openresearch"; ValueType: string; ValueName: ""; ValueData: "URL:OpenResearch"; Flags: uninsdeletekey
+Root: HKCU; Subkey: "Software\Classes\openresearch"; ValueType: string; ValueName: "URL Protocol"; ValueData: ""
+Root: HKCU; Subkey: "Software\Classes\openresearch\DefaultIcon"; ValueType: string; ValueName: ""; ValueData: """{app}\OpenResearch.exe"",0"
+Root: HKCU; Subkey: "Software\Classes\openresearch\shell\open\command"; ValueType: string; ValueName: ""; ValueData: """{app}\OpenResearch.exe"" ""%1"""
+
 [Run]
 Filename: "{app}\OpenResearch.exe"; Description: "{cm:LaunchProgram,OpenResearch}"; Flags: nowait postinstall skipifsilent
 

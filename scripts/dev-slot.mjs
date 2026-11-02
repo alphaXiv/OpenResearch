@@ -2,8 +2,9 @@
 
 import { execFileSync, spawn } from 'node:child_process'
 import { createHash, randomUUID } from 'node:crypto'
-import { closeSync, cpSync, existsSync, mkdirSync, openSync, readFileSync, realpathSync, renameSync, rmSync, writeFileSync } from 'node:fs'
+import { closeSync, cpSync, existsSync, mkdirSync, openSync, readFileSync, readdirSync, realpathSync, renameSync, rmSync, writeFileSync } from 'node:fs'
 import http from 'node:http'
+import net from 'node:net'
 import os from 'node:os'
 import path from 'node:path'
 import process from 'node:process'
@@ -11,14 +12,16 @@ import { fileURLToPath } from 'node:url'
 
 const SLOT_VERSION = 1
 const FIRST_SLOT = 1
-const LAST_SLOT = 9
+const BACKEND_PORT_BASE = 4900
+const UI_PORT_BASE = 5200
+const LAST_SLOT = UI_PORT_BASE - BACKEND_PORT_BASE - 1
 const BACKEND_TIMEOUT_MS = 5 * 60 * 1000
 const UI_TIMEOUT_MS = 60 * 1000
 const SCRIPT_PATH = fileURLToPath(import.meta.url)
 
 function usage() {
   return `Usage:
-  scripts/dev-slot.mjs start --db empty|copy [--worktree PATH] [--open]
+  scripts/dev-slot.mjs start --db empty|copy [--worktree PATH] [--open|--desktop]
   scripts/dev-slot.mjs status [--worktree PATH]
   scripts/dev-slot.mjs stop [--worktree PATH]
   scripts/dev-slot.mjs cleanup [--worktree PATH]
@@ -34,7 +37,7 @@ export function parseArgs(argv) {
     throw new Error(usage())
   }
 
-  const options = { command, worktree: process.cwd(), db: null, open: false }
+  const options = { command, worktree: process.cwd(), db: null, open: false, desktop: false }
   for (let index = 0; index < rest.length; index += 1) {
     const arg = rest[index]
     if (arg === '--worktree') {
@@ -49,6 +52,8 @@ export function parseArgs(argv) {
       index += 1
     } else if (arg === '--open') {
       options.open = true
+    } else if (arg === '--desktop') {
+      options.desktop = true
     } else if (arg === '--help' || arg === '-h') {
       throw new Error(usage())
     } else {
@@ -59,9 +64,11 @@ export function parseArgs(argv) {
   if (command === 'start' && options.db === null) {
     throw new Error('start requires --db empty or --db copy')
   }
-  if (command !== 'start' && (options.db !== null || options.open)) {
-    throw new Error(`--db and --open are only valid with start`)
+  if (command !== 'start' && (options.db !== null || options.open || options.desktop)) {
+    throw new Error(`--db, --open and --desktop are only valid with start`)
   }
+  if (options.open && options.desktop) throw new Error('--open and --desktop cannot be combined')
+  if (options.desktop && process.platform !== 'darwin') throw new Error('--desktop requires macOS')
   return options
 }
 
@@ -73,6 +80,17 @@ function worktreeInfo(worktreeInput) {
   const worktreePath = realpathSync(worktreeInput)
   const manifestPath = path.join(worktreePath, 'Cargo.toml')
   if (!existsSync(manifestPath)) throw new Error(`Not an openresearch-cli worktree: ${worktreePath}`)
+
+  if (existsSync(path.join(worktreePath, '.jj'))) {
+    const root = realpathSync(run('jj', ['--ignore-working-copy', '--repository', worktreePath, 'root']))
+    return {
+      worktreePath: root, manifestPath: path.join(root, 'Cargo.toml'),
+      worktreeKey: createHash('sha256').update(root).digest('hex').slice(0, 16),
+      label: path.basename(root).replaceAll(/[^a-zA-Z0-9._-]/g, '-'),
+      mainCheckout: root,
+      jj: true,
+    }
+  }
 
   const records = run('git', ['-C', worktreePath, 'worktree', 'list', '--porcelain'])
     .split(/\n\n+/)
@@ -97,7 +115,7 @@ function pathsFor(info, slot = null) {
   const base = {
     allocatorRoot,
     cargoTargetDir: path.join(allocatorRoot, 'cargo-target'),
-    launchRegistry: path.join(info.mainCheckout, '.claude', 'launch.json'),
+    launchRegistry: info.jj ? path.join(allocatorRoot, 'jj-launch.json') : path.join(info.mainCheckout, '.claude', 'launch.json'),
     lockDir: path.join(allocatorRoot, 'slot-allocator.lock'),
     lifecycleLockDir: path.join(allocatorRoot, 'lifecycle-locks', info.worktreeKey),
   }
@@ -107,8 +125,8 @@ function pathsFor(info, slot = null) {
     ...base,
     slot,
     slotKey,
-    backendPort: 4900 + slot,
-    uiPort: 5200 + slot,
+    backendPort: BACKEND_PORT_BASE + slot,
+    uiPort: UI_PORT_BASE + slot,
     dataDir: path.join(allocatorRoot, slotKey),
     cacheDir: path.join(allocatorRoot, slotKey, 'cache'),
     configDir: path.join(allocatorRoot, `${slotKey}-config`),
@@ -266,8 +284,8 @@ function loadRegistry(info) {
 }
 
 function slotFromPort(port) {
-  if (Number.isInteger(port) && port >= 4901 && port <= 4909) return port - 4900
-  if (Number.isInteger(port) && port >= 5201 && port <= 5209) return port - 5200
+  if (Number.isInteger(port) && port >= BACKEND_PORT_BASE + FIRST_SLOT && port <= BACKEND_PORT_BASE + LAST_SLOT) return port - BACKEND_PORT_BASE
+  if (Number.isInteger(port) && port >= UI_PORT_BASE + FIRST_SLOT && port <= UI_PORT_BASE + LAST_SLOT) return port - UI_PORT_BASE
   return null
 }
 
@@ -312,21 +330,22 @@ function removeManagedDirectories(slotPaths, configuration, mainCheckout) {
   return true
 }
 
-function reclaimStaleReservations(info, registry) {
+async function reclaimStaleReservations(info, registry) {
   const configurations = [...registry.configurations]
   const removed = new Set()
   for (let slot = FIRST_SLOT; slot <= LAST_SLOT; slot += 1) {
     const owned = configurations.filter((configuration) => configurationOwnsSlot(configuration, slot))
     if (owned.length === 0) continue
-    const backend = owned.find((configuration) => configuration.port === 4900 + slot)
+    const backend = owned.find((configuration) => configuration.port === BACKEND_PORT_BASE + slot)
     const manifest = backend ? manifestFromConfiguration(backend, info.mainCheckout) : null
     if (!manifest || existsSync(path.dirname(manifest))) continue
-    if (listenerPids(4900 + slot).length > 0 || listenerPids(5200 + slot).length > 0) continue
+    if (listenerPids(BACKEND_PORT_BASE + slot).length > 0 || listenerPids(UI_PORT_BASE + slot).length > 0) continue
     const slotPaths = pathsFor(info, slot)
     const state = readJson(slotPaths.statePath)
     const owner = { worktreePath: path.dirname(manifest), manifestPath: manifest }
     if (!managedStateMatches(state, owner, slotPaths)) continue
     if (processGroupExists(state.backendProcess?.pid) || processGroupExists(state.uiProcess?.pid)) continue
+    try { await stopSshServices(slotPaths, true) } catch { continue }
     if (!removeManagedDirectories(slotPaths, backend, info.mainCheckout)) continue
     removed.add(slot)
   }
@@ -383,13 +402,13 @@ async function reserveSlot(info, dbMode) {
   const release = await acquireAllocatorLock(info)
   try {
     const registry = loadRegistry(info)
-    reclaimStaleReservations(info, registry)
+    await reclaimStaleReservations(info, registry)
     const existing = registry.configurations.find((configuration) =>
-      configuration.port >= 4901
-      && configuration.port <= 4909
+      configuration.port >= BACKEND_PORT_BASE + FIRST_SLOT
+      && configuration.port <= BACKEND_PORT_BASE + LAST_SLOT
       && manifestFromConfiguration(configuration, info.mainCheckout) === info.manifestPath)
     if (existing) {
-      const slotPaths = pathsFor(info, existing.port - 4900)
+      const slotPaths = pathsFor(info, existing.port - BACKEND_PORT_BASE)
       const state = readJson(slotPaths.statePath)
       if (!managedStateMatches(state, info, slotPaths)) {
         throw new Error(`Existing ${slotPaths.slotKey} is legacy or unmanaged; stop it and run cleanup before using the helper`)
@@ -404,7 +423,7 @@ async function reserveSlot(info, dbMode) {
     let slot = null
     for (let candidate = FIRST_SLOT; candidate <= LAST_SLOT; candidate += 1) {
       const reserved = registry.configurations.some((configuration) => configurationOwnsSlot(configuration, candidate))
-      const listening = listenerPids(4900 + candidate).length > 0 || listenerPids(5200 + candidate).length > 0
+      const listening = listenerPids(BACKEND_PORT_BASE + candidate).length > 0 || listenerPids(UI_PORT_BASE + candidate).length > 0
       if (reserved || listening) continue
       const candidatePaths = pathsFor(info, candidate)
       const hasDirectories = existsSync(candidatePaths.dataDir)
@@ -635,11 +654,10 @@ async function startUnlocked(info, dbMode, openBrowser) {
   uiListeners = listenerPids(slotPaths.uiPort)
   if (uiListeners.length === 0 && !supervisorMatches(state.uiProcess)) {
     console.log(`Starting ${slotPaths.slotKey} UI; log: ${state.uiLog}`)
-    state.uiProcess = spawnSupervised('pnpm', [
-      '-C', path.join(info.worktreePath, 'ui'),
-      'dev', '--port', String(slotPaths.uiPort), '--strictPort',
+    state.uiProcess = spawnSupervised(path.join(info.worktreePath, 'ui', 'node_modules', '.bin', 'vite'), [
+      '--port', String(slotPaths.uiPort), '--strictPort',
     ], {
-      cwd: info.worktreePath,
+      cwd: path.join(info.worktreePath, 'ui'),
       env: { ...process.env, ORX_BACKEND: `http://127.0.0.1:${slotPaths.backendPort}` },
     }, state.uiLog)
     saveState(slotPaths, state)
@@ -680,14 +698,100 @@ async function start(info, dbMode, openBrowser) {
   }
 }
 
+export async function desktop(worktree = process.cwd(), requestedMode = null) {
+  if (process.platform !== 'darwin') throw new Error('The development desktop app requires macOS')
+  const info = worktreeInfo(worktree)
+  let child = null
+  let exit = null
+  let result = null
+  let record = null
+  let started = false
+  let interrupted = false
+  const interrupt = () => {
+    interrupted = true
+    if (child?.pid && processGroupExists(child.pid)) {
+      try { process.kill(-child.pid, 'SIGTERM') } catch (error) { if (error.code !== 'ESRCH') throw error }
+    }
+  }
+  process.on('SIGINT', interrupt)
+  process.on('SIGTERM', interrupt)
+  try {
+    const release = await acquireLifecycleLock(info)
+    try {
+      const previous = reservationFor(info)
+      if (previous?.state?.desktopProcess && processGroupExists(previous.state.desktopProcess.pid)) {
+        if (!supervisorMatches(previous.state.desktopProcess)) throw new Error('The previous desktop process no longer matches its recorded identity')
+        process.kill(-previous.state.desktopProcess.pid, 'SIGTERM')
+        await waitFor('the previous desktop app to close', 10_000, () => !processGroupExists(previous.state.desktopProcess.pid))
+      }
+      await stopOwnedProcessesUnlocked(info)
+      if (interrupted) return
+      const mode = requestedMode ?? previous?.state?.dbMode ?? 'empty'
+      started = true
+      await startUnlocked(info, mode, false)
+      if (interrupted) return
+      const { slotPaths, state } = reservationFor(info)
+      execFileSync('cargo', ['build', '--manifest-path', info.manifestPath], {
+        cwd: info.worktreePath, env: { ...process.env, ...slotEnvironment(slotPaths) }, stdio: 'inherit',
+      })
+      if (interrupted) return
+      const contents = path.join(slotPaths.cacheDir, 'OpenResearch Dev.app', 'Contents')
+      mkdirSync(path.join(contents, 'MacOS'), { recursive: true })
+      const executable = path.join(contents, 'MacOS', 'OpenResearch Dev')
+      cpSync(path.join(slotPaths.cargoTargetDir, 'debug', 'orx'), executable)
+      writeFileSync(path.join(contents, 'Info.plist'), `<?xml version="1.0" encoding="UTF-8"?>\n<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">\n<plist version="1.0"><dict><key>CFBundleExecutable</key><string>OpenResearch Dev</string><key>CFBundleIdentifier</key><string>org.alphaxiv.openresearch.dev.slot${slotPaths.slot}</string><key>CFBundleName</key><string>OpenResearch Dev</string><key>CFBundlePackageType</key><string>APPL</string></dict></plist>\n`)
+      const token = randomUUID()
+      child = spawn(process.execPath, [SCRIPT_PATH, '_supervise', token, executable, '--dev-desktop', String(slotPaths.uiPort)], {
+        detached: true, stdio: 'inherit', env: { ...process.env, ...slotEnvironment(slotPaths) },
+      })
+      if (!child.pid) throw new Error('Could not launch the desktop app')
+      exit = new Promise((resolve, reject) => {
+        child.once('error', reject)
+        child.once('exit', (code, signal) => resolve({ code, signal }))
+      })
+      record = { pid: child.pid, token, scriptPath: SCRIPT_PATH }
+      state.desktopProcess = record
+      saveState(slotPaths, state)
+      console.log('Close the desktop window to stop the development servers.')
+    } finally {
+      try {
+        if (started && !record) await stopOwnedProcessesUnlocked(info)
+      } finally {
+        await release()
+      }
+    }
+    if (exit) {
+      result = await exit
+    }
+  } finally {
+    process.removeListener('SIGINT', interrupt)
+    process.removeListener('SIGTERM', interrupt)
+    const release = await acquireLifecycleLock(info)
+    try {
+      const current = reservationFor(info)
+      if (current && record && current.state?.desktopProcess?.token === record.token) {
+        if (!interrupted && result && (result.signal || result.code !== 0)) process.exitCode = 1
+        await stopOwnedProcessesUnlocked(info)
+        const state = readJson(current.slotPaths.statePath)
+        if (state) {
+          state.desktopProcess = null
+          saveState(current.slotPaths, state)
+        }
+      }
+    } finally {
+      await release()
+    }
+  }
+}
+
 function reservationFor(info) {
   const registry = loadRegistry(info)
   const backend = registry.configurations.find((configuration) =>
-    configuration.port >= 4901
-    && configuration.port <= 4909
+    configuration.port >= BACKEND_PORT_BASE + FIRST_SLOT
+    && configuration.port <= BACKEND_PORT_BASE + LAST_SLOT
     && manifestFromConfiguration(configuration, info.mainCheckout) === info.manifestPath)
   if (!backend) return null
-  const slotPaths = pathsFor(info, backend.port - 4900)
+  const slotPaths = pathsFor(info, backend.port - BACKEND_PORT_BASE)
   return { registry, backend, slotPaths, state: readJson(slotPaths.statePath) }
 }
 
@@ -704,6 +808,42 @@ function printStatus(info) {
   console.log(`  Data:    ${slotPaths.dataDir}`)
   console.log(`  Repos:   ${path.join(slotPaths.dataDir, 'repos')}`)
   console.log(`  State:   ${state ? slotPaths.statePath : 'legacy/unmanaged'}`)
+}
+
+export async function stopSshServices(slotPaths, requireIdle = false) {
+  if (!existsSync(slotPaths.dataDir)) return
+  for (const name of readdirSync(slotPaths.dataDir)) {
+    if (!/^ssh-service-[a-f0-9]{64}$/.test(name)) continue
+    const endpoint = readJson(path.join(slotPaths.dataDir, name, 'endpoint.json'))
+    if (!endpoint) continue
+    const stopped = await new Promise((resolve, reject) => {
+      const socket = net.createConnection({ host: '127.0.0.1', port: endpoint.port })
+      let received = Buffer.alloc(0)
+      socket.setTimeout(15_000, () => socket.destroy(new Error('SSH service shutdown timed out')))
+      socket.once('error', (error) => error.code === 'ECONNREFUSED' ? resolve(true) : reject(error))
+      socket.once('connect', () => {
+        const body = Buffer.from(JSON.stringify({ ...endpoint, port: undefined, target: null, operation: { op: requireIdle ? 'shutdown' : 'shutdown_if_idle' } }))
+        const header = Buffer.alloc(4)
+        header.writeUInt32BE(body.length)
+        socket.write(Buffer.concat([header, body]))
+      })
+      socket.on('data', (chunk) => {
+        received = Buffer.concat([received, chunk])
+        if (received.length < 4) return
+        const length = received.readUInt32BE()
+        if (length > 1024 * 1024) return socket.destroy(new Error('Invalid SSH service response'))
+        if (received.length < 4 + length) return
+        try {
+          const response = JSON.parse(received.subarray(4, 4 + length).toString())
+          socket.destroy()
+          if (response.error) reject(new Error(response.error))
+          else resolve(response.value?.busy !== true)
+        } catch (error) { socket.destroy(error) }
+      })
+      socket.once('end', () => { if (received.length === 0) reject(new Error('SSH service closed without acknowledging shutdown')) })
+    })
+    if (stopped) await waitFor('SSH service to stop', 10_000, () => listenerPids(endpoint.port).length === 0)
+  }
 }
 
 async function stopOwnedProcessesUnlocked(info) {
@@ -740,6 +880,7 @@ async function stopOwnedProcessesUnlocked(info) {
     && !processGroupExists(state.uiProcess?.pid)
     && listenerPids(slotPaths.backendPort).length === 0
     && listenerPids(slotPaths.uiPort).length === 0)
+  await stopSshServices(slotPaths)
   state.backendProcess = null
   state.uiProcess = null
   state.phase = 'stopped'
@@ -769,6 +910,7 @@ async function cleanupUnlocked(info) {
     reservation = reservationFor(info)
     if (!reservation) return
     const { slotPaths, state, backend } = reservation
+    await stopSshServices(slotPaths, true)
     if (listenerPids(slotPaths.backendPort).length > 0 || listenerPids(slotPaths.uiPort).length > 0) {
       throw new Error(`Refusing to clean ${slotPaths.slotKey} while its ports are listening`)
     }
@@ -810,7 +952,8 @@ async function main() {
   }
   const options = parseArgs(process.argv.slice(2))
   const info = worktreeInfo(options.worktree)
-  if (options.command === 'start') await start(info, options.db, options.open)
+  if (options.command === 'start' && options.desktop) await desktop(options.worktree, options.db)
+  else if (options.command === 'start') await start(info, options.db, options.open)
   if (options.command === 'status') printStatus(info)
   if (options.command === 'stop') await stopOwnedProcesses(info)
   if (options.command === 'cleanup') await cleanup(info)

@@ -88,6 +88,9 @@ enum Command {
     /// Print the command that opens a run's TensorBoard logs.
     Tensorboard(TensorboardArgs),
 
+    /// Summarize the metrics runs logged to Trackio: local, a Hugging Face Space, or a server.
+    Metrics(MetricsArgs),
+
     /// Add an experiment node to a local `orx up` project.
     #[command(name = "create-experiment")]
     CreateExperiment(CreateExperimentArgs),
@@ -261,6 +264,22 @@ pub struct LogsArgs {
 #[derive(Args, Debug)]
 pub struct TensorboardArgs {
     pub run_id: String,
+}
+
+#[derive(Args, Debug)]
+pub struct MetricsArgs {
+    /// One or more run ids; several print one after another for comparison.
+    #[arg(required = true)]
+    pub run_ids: Vec<String>,
+    /// Only metrics whose name contains this text (case-insensitive). Repeatable.
+    #[arg(long = "metric")]
+    pub metrics: Vec<String>,
+    /// Sampled points per metric, first and last included.
+    #[arg(long, default_value_t = 20)]
+    pub points: usize,
+    /// Print JSON instead of the text summary.
+    #[arg(long)]
+    pub json: bool,
 }
 
 #[derive(Args, Debug)]
@@ -442,6 +461,10 @@ pub enum ExpCommand {
         #[arg(long, group = "unarchive_scope")]
         descendants: bool,
     },
+
+    /// Permanently delete an experiment with no child experiments or active runs, its runs, and
+    /// its orx/ branch (refused while any worktree has it checked out).
+    Delete { exp_id: String },
 
     /// Re-parent an experiment and its subtree. Only the tree changes; git branches stay put.
     #[command(group(clap::ArgGroup::new("move_target").required(true)))]
@@ -897,6 +920,9 @@ impl DiscoveryPriority {
 
 #[derive(Args, Debug)]
 pub struct VersionArgs {
+    /// Print the desktop build identity.
+    #[arg(long, hide = true, conflicts_with_all = ["check", "json", "build_channel", "dashboard_protocol"])]
+    pub build_id: bool,
     /// Print the embedded telemetry build channel.
     #[arg(long, hide = true, conflicts_with_all = ["check", "json"])]
     pub build_channel: bool,
@@ -982,6 +1008,38 @@ fn explain_removed_spawn_flags(mut error: clap::Error) -> clap::Error {
 // on worker threads. A `current_thread` flavor would deadlock. See commands::app.
 #[tokio::main]
 async fn main() {
+    #[cfg(all(target_os = "macos", debug_assertions))]
+    if std::env::args().nth(1).as_deref() == Some("--dev-desktop") {
+        let port = std::env::args()
+            .nth(2)
+            .and_then(|arg| arg.parse::<u16>().ok());
+        if let Some(port) = port.filter(|port| *port != 0) {
+            commands::app::run_dev(port);
+        } else {
+            eprintln!("--dev-desktop requires a valid UI port");
+            std::process::exit(1);
+        }
+        return;
+    }
+    if std::env::var_os("ORX_SSH_ASKPASS_ENDPOINT").is_some() {
+        if jobs::ssh::service::askpass().await.is_err() {
+            std::process::exit(1);
+        }
+        return;
+    }
+    if std::env::args().nth(1).as_deref() == Some("ssh-service") {
+        let result = if std::env::args().nth(2).as_deref() == Some("stop") {
+            jobs::ssh::service::shutdown_idle().await
+        } else {
+            jobs::ssh::service::run().await
+        };
+        if let Err(error) = result {
+            eprintln!("{error}");
+            std::process::exit(1);
+        }
+        return;
+    }
+
     #[cfg(windows)]
     {
         install_panic_reporter();
@@ -1264,6 +1322,7 @@ fn command_name(command: &Command) -> &'static str {
         Command::Runs(_) => "runs",
         Command::Logs(_) => "logs",
         Command::Tensorboard(_) => "tensorboard",
+        Command::Metrics(_) => "metrics",
         Command::CreateExperiment(_) => "create-experiment",
         Command::Compute(_) => "compute",
         Command::Instance(_) => "instance",
@@ -1315,6 +1374,7 @@ async fn dispatch(command: Command) -> error::Result<()> {
         Command::Runs(args) => commands::runs::run(args).await,
         Command::Logs(args) => commands::logs::run(args).await,
         Command::Tensorboard(args) => commands::tensorboard::run(args).await,
+        Command::Metrics(args) => commands::metrics::run(args).await,
         Command::CreateExperiment(args) => commands::create_experiment::run(args).await,
         Command::Compute(args) => commands::compute::run(args).await,
         Command::Instance(args) => commands::instance::run(args).await,

@@ -107,6 +107,8 @@ fn flush_window() -> Duration {
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct Settings {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub desktop_zoom_percent: Option<i32>,
     #[serde(default)]
     pub acp_harnesses: Vec<crate::local::acp::Definition>,
     #[serde(default)]
@@ -168,6 +170,8 @@ pub(crate) struct Settings {
     /// place; only the silent apply stops.
     #[serde(default)]
     pub auto_update: Option<bool>,
+    #[serde(default)]
+    pub update_channel: Option<crate::updates::ReleaseChannel>,
     /// Surfaces whose `first_action` event has already been sent, so a restart
     /// cannot re-report a later action as the user's first one.
     #[serde(default)]
@@ -311,6 +315,16 @@ pub(crate) fn auto_update_enabled() -> bool {
 
 pub(crate) fn set_auto_update_enabled(enabled: bool) -> std::io::Result<()> {
     mutate_settings(|settings| settings.auto_update = Some(enabled))
+}
+
+pub(crate) fn update_channel() -> crate::updates::ReleaseChannel {
+    load_settings()
+        .and_then(|settings| settings.update_channel)
+        .unwrap_or_else(crate::updates::current_release_channel)
+}
+
+pub(crate) fn set_update_channel(channel: crate::updates::ReleaseChannel) -> std::io::Result<()> {
+    mutate_settings(|settings| settings.update_channel = Some(channel))
 }
 
 pub(crate) fn github_default_prompt_seen() -> bool {
@@ -1629,6 +1643,8 @@ mod tests {
         set_persisted_disabled(true).unwrap();
         let options = SshHostSettings {
             container: Some("research".into()),
+            remote_root: Some("/scratch/lab/orx".into()),
+            keep_remote_runs: true,
         };
         set_ssh_host("lab".into(), options.clone()).unwrap();
         set_ssh_default(Some("lab".into())).unwrap();
@@ -1652,6 +1668,35 @@ mod tests {
             std::fs::write(settings_path(), raw).unwrap();
             assert!(ssh_settings().is_err(), "{raw}");
         }
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[cfg(desktop_app)]
+    #[test]
+    fn desktop_zoom_roundtrip_preserves_other_preferences() {
+        let _guard = EnvGuard::new(OPT_VARS);
+        let dir = std::env::temp_dir().join(format!("orx-desktop-zoom-{}", uuid::Uuid::new_v4()));
+        std::env::set_var("XDG_CONFIG_HOME", &dir);
+
+        assert_eq!(crate::config::desktop_zoom_percent(), 100);
+        set_persisted_disabled(true).unwrap();
+        crate::config::set_desktop_zoom_percent(130).unwrap();
+        set_compute_default(Some("local".into()), None).unwrap();
+        assert_eq!(crate::config::desktop_zoom_percent(), 130);
+        let saved = load_settings().unwrap();
+        assert_eq!(saved.desktop_zoom_percent, Some(130));
+        assert_eq!(saved.telemetry_disabled, Some(true));
+        assert_eq!(saved.default_backend.as_deref(), Some("local"));
+
+        for invalid in [0, 250] {
+            mutate_settings(|settings| settings.desktop_zoom_percent = Some(invalid)).unwrap();
+            assert_eq!(crate::config::desktop_zoom_percent(), 100);
+        }
+        crate::config::set_desktop_zoom_percent(100).unwrap();
+        assert_eq!(load_settings().unwrap().desktop_zoom_percent, Some(100));
+        assert_eq!(load_settings().unwrap().telemetry_disabled, Some(true));
+        std::fs::write(settings_path(), r#"{"telemetryDisabled":true}"#).unwrap();
+        assert_eq!(crate::config::desktop_zoom_percent(), 100);
         std::fs::remove_dir_all(dir).unwrap();
     }
 

@@ -26,6 +26,7 @@ export function LogTerminal({ runId }: { runId: string }) {
 
     let disposed = false;
     let nextOffset = 0;
+    let generation: string | undefined;
     let syncing = false;
     let syncAgain = false;
 
@@ -37,8 +38,10 @@ export function LogTerminal({ runId }: { runId: string }) {
       syncing = true;
       try {
         for (;;) {
-          const chunk = await fetchLog(runId, nextOffset);
+          const chunk = await fetchLog(runId, nextOffset, generation);
           if (disposed) return;
+          if (chunk.offset !== nextOffset || (generation !== undefined && generation !== chunk.generation)) term.reset();
+          generation = chunk.generation;
           if (chunk.dataBase64) term.write(b64ToBytes(chunk.dataBase64));
           nextOffset = chunk.nextOffset;
           if (chunk.eof) break;
@@ -56,6 +59,10 @@ export function LogTerminal({ runId }: { runId: string }) {
 
     const unsubscribe = onRunLog(runId, (ev) => {
       if (disposed) return;
+      if (ev.generation !== undefined && ev.generation !== generation) {
+        void sync();
+        return;
+      }
       const bytes = b64ToBytes(ev.dataBase64);
       if (!syncing && ev.offset === nextOffset) {
         term.write(bytes);

@@ -1,3 +1,4 @@
+import { showConfirmDialog } from "../dialog";
 import { FolderOpen } from "lucide-react";
 import { WorkspaceEmptyState } from "./WorkspaceEmptyState";
 import { isImmutableQuery } from "../queries/invalidation";
@@ -195,7 +196,7 @@ export function WorktreeTab({
               description={m.files_empty_description()}
             />
           ) : (
-            <div className="file-tree py-1.5 px-0 text-sm">
+            <div data-keyboard-list className="file-tree py-1.5 px-0 text-sm">
               <TreeLevel
                 node={filesTree}
                 parentPath=""
@@ -230,8 +231,17 @@ export function WorktreeTab({
           onCopyPath={() => copyPath(contextMenu.path)}
           onDelete={canManageFiles
             ? () => {
-              if (window.confirm(m.file_tree_delete_confirm({ path: ltr(contextMenu.path) })))
-                void manage(contextMenu.path, { action: "delete" });
+              showConfirmDialog({
+                title: m.chat_panel_delete(),
+                description: m.file_tree_delete_confirm({ path: ltr(contextMenu.path) }),
+                destructive: true,
+                confirmLabel: m.chat_panel_delete(),
+                onConfirm: async () => {
+                  await manageProjectFile(projectId, contextMenu.path, { action: "delete" }, { sessionId });
+                  load();
+                },
+                onCancel: "close",
+              });
             }
             : undefined}
           onClose={() => setContextMenu(null)}

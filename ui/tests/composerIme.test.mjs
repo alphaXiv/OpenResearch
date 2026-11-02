@@ -1,3 +1,4 @@
+import { matchesKeyboardEvent } from "@tanstack/react-hotkeys";
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import test from "node:test";
@@ -25,13 +26,14 @@ function textareaCallback(editor, name) {
   return callback.getText(source);
 }
 
-function composer(editor, overrides = {}) {
+function composer(editor, overrides = {}, platform = "mac") {
   const calls = [];
   let stopped = false;
   const record = name => (...args) => calls.push([name, ...args]);
   const bindings = {
-    composingRef: { current: false }, skillMenuOpen: false, mentionMenuOpen: false, bashActive: false,
-    activeSkillIdx: 0, skillMatches: ["skill"], activeMentionIdx: 0, mentionMatches: ["file"], mentionQuery: "file",
+    matchesKeyboardEvent: (event, hotkey) => matchesKeyboardEvent(event, hotkey, platform),
+    composingRef: { current: false }, skillMenuOpen: false, mentionMenuOpen: false, bashMode: false,
+    activeSkillIdx: 0, selectableSkillIndices: [0], skillMatches: ["skill"], activeMentionIdx: 0, mentionMatches: ["file"], mentionQuery: "file",
     setSkillIdx: record("skillIndex"), pickSkill: record("skill"), setMentionIdx: record("mentionIndex"),
     pickFileMention: record("mention"), setSkillMenuDismissed: record("dismiss"),
     deleteCommandBehindCaret: record("deleteChip"), runShell: record("shell"), send: record("send"),
@@ -47,7 +49,7 @@ function composer(editor, overrides = {}) {
       stopped = false;
       keydown({ key, shiftKey: false, metaKey: false, ctrlKey: false, ...modifiers,
         stopPropagation: () => { stopped = true; },
-        nativeEvent: { isComposing: false, keyCode: 13, ...nativeEvent }, preventDefault: record("preventDefault") });
+        nativeEvent: { key, shiftKey: false, metaKey: false, ctrlKey: false, altKey: false, ...modifiers, isComposing: false, keyCode: 13, ...nativeEvent }, preventDefault: record("preventDefault") });
     },
   };
 }
@@ -107,19 +109,81 @@ for (const menu of ["skillMenuOpen", "mentionMenuOpen"]) {
 
 for (const modifier of ["metaKey", "ctrlKey"]) {
   test(`${modifier}+Enter still queues outside composition`, () => {
-    const input = composer(false);
+    const input = composer(false, {}, modifier === "metaKey" ? "mac" : "windows");
     input.press("Enter", {}, { [modifier]: true });
     assert.deepEqual(input.calls, [["preventDefault"], ["send", { queue: true }]]);
   });
 }
 
-for (const [mode, action] of [["bashActive", "shell"], ["skillMenuOpen", "skill"], ["mentionMenuOpen", "mention"]]) {
+for (const [mode, action] of [["bashMode", "shell"], ["skillMenuOpen", "skill"], ["mentionMenuOpen", "mention"]]) {
   test(`${mode} still handles normal Enter`, () => {
     const input = composer(false, { [mode]: true });
     input.press();
     assert.deepEqual(input.calls, [["preventDefault"], action === "shell" ? [action] : [action, action === "skill" ? "skill" : "file"]]);
   });
 }
+
+function skillSelection(skillMatches, skillIdx = 0) {
+  const names = ["selectableSkillIndices", "activeSkillIdx"];
+  const declarations = [];
+  function find(node) {
+    if (ts.isVariableDeclaration(node) && names.includes(node.name.getText(file))) declarations.push(`const ${node.getText(file)};`);
+    ts.forEachChild(node, find);
+  }
+  find(file);
+  return new Function("skillMatches", "skillIdx", `${declarations.join("\n")} return { selectableSkillIndices, activeSkillIdx };`)(skillMatches, skillIdx);
+}
+
+test("slash menu selection and arrow keys skip disabled commands", () => {
+  const skillMatches = [{ disabled: true }, { name: "copy" }, { disabled: true }, { name: "export" }];
+  assert.deepEqual(skillSelection(skillMatches), { selectableSkillIndices: [1, 3], activeSkillIdx: 1 });
+  assert.equal(skillSelection(skillMatches, 2).activeSkillIdx, 1);
+  for (const [index, key, expected] of [[1, "ArrowDown", 3], [3, "ArrowDown", 1], [1, "ArrowUp", 3], [3, "ArrowUp", 1]]) {
+    const input = composer(false, { skillMenuOpen: true, skillMatches, ...skillSelection(skillMatches, index) });
+    input.press(key);
+    assert.deepEqual(input.calls, [["preventDefault"], ["skillIndex", expected]]);
+  }
+});
+
+test("a menu containing only disabled commands leaves Tab available for focus navigation", () => {
+  const skillMatches = [{ name: "compact", disabled: true }];
+  const selection = skillSelection(skillMatches);
+  assert.deepEqual(selection, { selectableSkillIndices: [], activeSkillIdx: -1 });
+  const input = composer(false, { skillMenuOpen: true, skillMatches, ...selection });
+  input.press("Tab");
+  assert.deepEqual(input.calls, []);
+  input.press("ArrowDown");
+  assert.deepEqual(input.calls, [["preventDefault"]]);
+});
+
+test("Enter on typed unsupported compact and its alias silently does nothing", async () => {
+  const { parseComposerCommand, takesArgument } = await import("../src/composerCommands.ts");
+  const declarations = [];
+  function find(node) {
+    if (ts.isFunctionDeclaration(node) && ["send", "runComposerCommand", "compactSession"].includes(node.name?.text)) declarations.push(node.getText(file));
+    ts.forEachChild(node, find);
+  }
+  find(file);
+  const compiled = ts.transpileModule(declarations.join("\n"), { compilerOptions: { target: ts.ScriptTarget.ES2022 } }).outputText;
+  for (const draft of ["/compact", "/summarize"]) {
+    const calls = [];
+    const bindings = {
+    matchesKeyboardEvent: (event, hotkey) => matchesKeyboardEvent(event, hotkey, platform),
+      draft, planActivation: null, goalArmed: false, parseComposerCommand, takesArgument,
+      setDraft: () => {}, setSkillMenuDismissed: () => {},
+      activeId: "saved-chat", activeHarness: { supportsCompaction: false },
+      m: { chat_compact_unsupported: () => "unsupported" },
+      setSettingsError: (error) => calls.push(error),
+      compactChatSession: () => calls.push("compact request"), sendChatMessage: () => calls.push("message request"),
+    };
+    const send = new Function(...Object.keys(bindings), `${compiled}; return send;`)(...Object.values(bindings));
+    const skillMatches = [{ name: "compact", disabled: true }];
+    const input = composer(false, { skillMenuOpen: true, skillMatches, ...skillSelection(skillMatches), send });
+    input.press();
+    assert.deepEqual(input.calls, [["preventDefault"]]);
+    assert.deepEqual(calls, []);
+  }
+});
 
 test("activating Goal removes its token without moving the caret behind newly typed text", async () => {
   const { removeSlashCommand } = await import("../src/composerCommands.ts");
@@ -138,6 +202,7 @@ test("activating Goal removes its token without moving the caret behind newly ty
   const textarea = { value: "/goal", focus: () => calls.push("focus"),
     setSelectionRange: (...range) => calls.push(range) };
   const bindings = {
+    matchesKeyboardEvent: (event, hotkey) => matchesKeyboardEvent(event, hotkey, platform),
     removeSlashCommand, composerRef: { current: textarea },
     setDraft: (text) => { textarea.value = text; },
     setSkillMenuDismissed: () => {},
@@ -158,7 +223,7 @@ test("activating Goal removes its token without moving the caret behind newly ty
 test("ACP Plan configuration failure keeps the draft and prevents sending", async () => {
   let configure;
   function find(node) {
-    if (ts.isIfStatement(node) && node.expression.getText(file) === "planRequested && acpMode") configure = node;
+    if (ts.isIfStatement(node) && node.expression.getText(file) === "planRequested && acpMode && !retry") configure = node;
     ts.forEachChild(node, find);
   }
   find(file);
@@ -166,7 +231,8 @@ test("ACP Plan configuration failure keeps the draft and prevents sending", asyn
   for (const succeeds of [false, true]) {
     const calls = [];
     const bindings = {
-      planRequested: true, acpMode: {}, toggledPlanMode: true,
+    matchesKeyboardEvent: (event, hotkey) => matchesKeyboardEvent(event, hotkey, platform),
+      planRequested: true, acpMode: {}, retry: null, toggledPlanMode: true,
       setIndependentPlanMode: async () => { if (!succeeds) throw new Error("disconnected"); },
       inSourceScope: () => true,
       setSettingsError: error => calls.push(error),
@@ -178,5 +244,36 @@ test("ACP Plan configuration failure keeps the draft and prevents sending", asyn
     }).outputText;
     await new Function(...Object.keys(bindings), `${compiled}; return send();`)(...Object.values(bindings));
     assert.deepEqual(calls, succeeds ? ["send"] : ["plan failed"]);
+  }
+});
+
+test("unsupported compaction silently skips the agent turn", async () => {
+  let compact;
+  function find(node) {
+    if (ts.isFunctionDeclaration(node) && node.name?.text === "compactSession") compact = node;
+    ts.forEachChild(node, find);
+  }
+  find(file);
+  assert.ok(compact);
+  for (const [supportsCompaction, activeId] of [[false, null], [false, "saved-chat"], [true, "saved-chat"]]) {
+    const calls = [];
+    const bindings = {
+    matchesKeyboardEvent: (event, hotkey) => matchesKeyboardEvent(event, hotkey, platform),
+      activeId, activeHarness: { supportsCompaction }, busy: false,
+      m: { chat_nothing_to_compact: () => "nothing to compact" },
+      showAlert: (message) => calls.push(message),
+      setSettingsError: (error) => calls.push(error),
+      sessionFilter: "active", composerScopeRef: { current: { activeId: "saved-chat" } },
+      compactChatSession: async (id) => { calls.push(["compact", id]); return { message: { id: "marker" } }; },
+      dispatch: (action) => calls.push(action),
+    };
+    const compiled = ts.transpileModule(compact.getText(file), {
+      compilerOptions: { target: ts.ScriptTarget.ES2022 },
+    }).outputText;
+    await new Function(...Object.keys(bindings), `${compiled}; return compactSession();`)(...Object.values(bindings));
+    assert.deepEqual(calls, supportsCompaction ? [
+      null, ["compact", "saved-chat"],
+      { type: "upsertMessage", sessionId: "saved-chat", message: { id: "marker" }, onlyIfMissing: true },
+    ] : []);
   }
 });

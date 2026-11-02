@@ -46,7 +46,7 @@ export function SshExecutionSettings({ host, connecting, reference, onChange }: 
   }
 
   return <details className="pb-3">
-    <summary className="w-fit cursor-pointer rounded-sm text-sm text-subtext focus-visible:outline-2 focus-visible:outline-text">{m.new_project_advanced()}</summary>
+    <summary className="w-fit cursor-pointer rounded-sm text-sm text-subtext focus-visible:outline-2 focus-visible:outline-focus">{m.new_project_advanced()}</summary>
     <div className="mt-3 grid max-w-xl gap-3">
       <label className="text-sm text-subtext">
         {m.ssh_run_in()}

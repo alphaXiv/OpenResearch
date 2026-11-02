@@ -14,11 +14,9 @@
   --color-subtext: var(--subtext);
   --color-muted: var(--muted);
   --color-primary: var(--primary);
-  --color-primary-subtle: var(--primary-subtle);
   --color-border: var(--border);
   --color-border-variant: var(--border-variant);
   --color-border-strong: var(--border-strong);
-  --color-accent: var(--accent);
   --color-accent-orange: var(--accent-orange);
   --color-accent-red: var(--accent-red);
   --color-accent-teal: var(--accent-teal);
@@ -57,6 +55,9 @@
   --color-resizer-hover: color-mix(in oklab, var(--text) 12%, transparent);
   --color-hover-strong: color-mix(in oklab, var(--text) 15%, transparent);
   --color-border-muted: color-mix(in oklab, var(--border) 50%, transparent);
+  --color-focus: var(--focus);
+  --color-focus-border: var(--focus-border);
+  --color-focus-ring: var(--focus-ring);
   --color-border-hover-strong: color-mix(in oklab, var(--border) 55%, var(--text));
   --color-danger-outline: color-mix(in oklab, var(--accent-red) 55%, transparent);
   --color-danger-notice-border: color-mix(in srgb, var(--accent-red) 35%, var(--border-variant));
@@ -84,32 +85,34 @@
   --text-menu: 0.8125rem;
   --text-menu--line-height: 1.25rem;
 
-  --shadow-elevated: 0 6px 24px color-mix(in oklab, var(--text) 5%, transparent), 0 1px 4px color-mix(in oklab, var(--text) 4%, transparent);
-  --shadow-panel-max: 0 12px 40px color-mix(in oklab, var(--text) 22%, transparent);
-  --shadow-segment: 0 1px 3px color-mix(in oklab, var(--text) 25%, transparent);
+  --spacing-win-titlebar: calc(2.5rem / min(1, var(--desktop-page-zoom, 1)));
+  --spacing-win-caption: calc(2rem / min(1, var(--desktop-page-zoom, 1)));
+  --spacing-win-controls: calc(9rem / min(1, var(--desktop-page-zoom, 1)));
+  --spacing-titlebar: calc(2.75rem / min(1, var(--desktop-page-zoom, 1)));
+  --spacing-titlebar-inset: calc(4.75rem / min(1, var(--desktop-page-zoom, 1)));
+  --spacing-titlebar-controls: calc(5rem / min(1, var(--desktop-page-zoom, 1)));
+  --spacing-titlebar-sidebar-controls: calc(7.5rem / min(1, var(--desktop-page-zoom, 1)));
+
+  --shadow-segment: 0 1px 3px rgb(0 0 0 / 14%);
   --shadow-menu: 0 12px 32px rgb(0 0 0 / 18%);
   --shadow-modal: 0 24px 60px rgb(0 0 0 / 22%);
   --shadow-dropdown: 0 10px 26px rgb(0 0 0 / 16%);
   --shadow-popover: 0 4px 16px rgb(0 0 0 / 10%);
   --shadow-control: 0 2px 8px rgb(0 0 0 / 10%);
   --shadow-control-subtle: 0 2px 8px rgb(0 0 0 / 5%);
-  --shadow-floating: 0 8px 24px rgb(0 0 0 / 14%);
   --shadow-hairline: 0 1px 2px rgb(0 0 0 / 4%);
-  --shadow-card: 0 14px 36px color-mix(in oklab, var(--text) 6%, transparent);
-  --shadow-plan: 0 2px 10px rgb(0 0 0 / 6%);
-  --shadow-plan-menu: 0 6px 20px rgb(0 0 0 / 12%);
   --shadow-logo: 0 0 0 1px rgb(0 0 0 / 8%);
-  --shadow-tree: 0 1px 2px rgb(0 0 0 / 4%);
   --shadow-row-selected: inset 2px 0 0 var(--primary);
   --shadow-tree-hover: 0 2px 8px rgb(0 0 0 / 8%);
-  --shadow-tree-live: 0 2px 12px rgb(32 154 132 / 20%);
+  --shadow-tree-live: 0 2px 12px color-mix(in oklab, var(--accent-teal) 20%, transparent);
   --shadow-file-line: inset 2px 0 0 var(--accent-blue);
   --shadow-diff-active: inset 2px 0 0 var(--text);
-  --shadow-selected: 0 0 0 1px var(--accent);
+  --shadow-selected: 0 0 0 1px var(--text);
 
   --font-sans: var(--sans);
   --font-mono: var(--mono);
   --ease-standard: ease;
+  --animate-dialog-shake: dialog-shake 300ms ease;
   --container-readable: var(--readable-col);
 
   --radius-xs: 4px;
@@ -120,6 +123,14 @@
   --radius-full: 999px;
 }
 
+@utility native-window-controls {
+  zoom: calc(1 / var(--desktop-page-zoom, 1));
+}
+
+@utility grid-cols-titlebar-chat {
+  grid-template-columns: calc(7.5rem / min(1, var(--desktop-page-zoom, 1))) minmax(0, 1fr) calc(7.5rem / min(1, var(--desktop-page-zoom, 1)));
+}
+
 :root {
   /* Theme is resolved by theme.ts; do not add prefers-color-scheme overrides. */
   --base: #ffffff;
@@ -127,6 +138,10 @@
   --panel: #ededed;
   --surface: #f5f5f5;
   --surface-bright: #ffffff;
+  /* Fills over the macOS sidebar material (app.css). Literal rgb, not color-mix: macOS 11 WebKit. */
+  --material-veil: rgb(255 255 255 / 40%);
+  --material-hover: color-mix(in srgb, var(--text) 6%, transparent);
+  --material-selected: color-mix(in srgb, var(--text) 11%, transparent);
   --highlight: #e5e5e5;
   --chat-annotation-highlight: #b8d4ff;
   --selection-background: #e3e3e3;
@@ -136,7 +151,6 @@
   --subtext: #737373;
   --muted: #a1a1a1;
   --primary: #9a2036;
-  --primary-subtle: #f7e9ec;
   --border: #d4d4d4;
   --border-variant: #e5e5e5;
 
@@ -166,7 +180,7 @@
   --dots-strong: #bdbdbd;
 
   --mono: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", monospace;
-  --sans: -apple-system, BlinkMacSystemFont, "Segoe UI", Inter, Roboto, sans-serif;
+  --sans: -apple-system, BlinkMacSystemFont, "Segoe UI Variable Text", "Segoe UI", system-ui, Inter, Roboto, "Helvetica Neue", sans-serif;
   --modal-top: min(30vh, 260px);
   /* Keep synchronized with LogTerminal's xterm theme. */
   --term-bg: #1a1a1a;
@@ -200,11 +214,18 @@
   /* Shared reading width for chat, markdown, and plan surfaces. */
   --readable-col: 840px;
   --border-strong: var(--border);
-  --accent: var(--primary);
+  --focus: color-mix(in oklab, var(--text) 60%, var(--base));
+  --focus-border: color-mix(in oklab, var(--text) 40%, var(--border));
+  --focus-ring: color-mix(in oklab, var(--text) 8%, transparent);
   --teal: var(--accent-teal);
   --green: var(--accent-green);
   --red: var(--accent-red);
   --amber: var(--accent-amber);
+
+  /* Links are blue and the brand is red, so emphasis avoids both; bold-italic is the one deliberate red. */
+  --md-emphasis: #d6681f;
+  --md-strong-em: #db0218;
+  --md-strong-em-bg: color-mix(in srgb, var(--accent-red) 12%, var(--base));
 
   --syntax-comment: #a0a1a7;
   --syntax-text: #383a42;
@@ -223,25 +244,26 @@
 }
 
 :root[data-theme="dark"] {
-  --base: #101010;
-  --canvas: #141414;
-  --panel: #262626;
-  --surface: #1c1c1c;
-  --surface-bright: #181818;
-  --highlight: #333333;
+  --material-veil: rgb(24 24 24 / 40%);
+  --base: #181818;
+  --canvas: #1c1c1c;
+  --panel: #2b2b2b;
+  --surface: #202020;
+  --surface-bright: #1e1e1e;
+  --highlight: #353535;
   --chat-annotation-highlight: #244e7a;
-  --selection-background: #606060;
+  --selection-background: #505050;
   --selection-text: #ffffff;
   --code-selection: var(--selection-background);
-  --editor-selection: rgb(255 255 255 / 16%);
-  --text: #e5e5e5;
-  --subtext: #a3a3a3;
+  --editor-selection: rgb(255 255 255 / 14%);
+  --text: #dcdcdc;
+  --subtext: #9e9e9e;
   --muted: #737373;
   --primary: #ffb3ad;
   --lineage: #8eafd2;
-  --primary-subtle: #33191b;
-  --border: #525252;
-  --border-variant: #404040;
+  --border: #404040;
+  --border-variant: #303030;
+  --border-strong: #5a5a5a;
 
   --accent-amber: #e67e22;
 
@@ -257,12 +279,16 @@
   --skill-blue-slash: #527ca8;
   --accent-purple-subtle: #261c38;
 
-  --dots-muted: #262626;
+  --dots-muted: #2b2b2b;
   --dots-strong: #555555;
 
-  --term-app-bg: #141414;
-  --term-app-foreground: #e5e5e5;
+  --term-app-bg: #1c1c1c;
+  --term-app-foreground: #dcdcdc;
   --term-app-selection: #23364d;
+
+  --md-emphasis: #e27c23;
+  --md-strong-em: #ff8d97;
+  --md-strong-em-bg: color-mix(in srgb, var(--accent-red) 20%, var(--base));
 
   --syntax-comment: #7f848e;
   --syntax-text: #abb2bf;

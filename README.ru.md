@@ -13,7 +13,7 @@
 
 <p><a href="README.md">English</a> · <a href="README.es.md">Español</a> · <a href="README.ko.md">한국어</a> · <a href="README.zh.md">简体中文</a> · <a href="README.ja.md">日本語</a> · <a href="README.ru.md">Русский</a></p>
 
-<p><img src=".github/readme-assets/openresearch-screenshot.png" alt="Настольное приложение OpenResearch: разговор с исследовательским агентом и логи экспериментов" width="680" /></p>
+<p><img src=".github/readme-assets/openresearch-demo.gif" alt="Настольное приложение OpenResearch: агент ищет на alphaXiv причину проблемы с обучением, затем открывает графики Trackio и рисунки с результатами" width="680" /></p>
 
 <hr />
 

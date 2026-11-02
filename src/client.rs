@@ -615,10 +615,11 @@ pub async fn discover_papers_by_embedding(
 }
 
 /// `2401.12345v2` → `2401.12345`; alphaXiv lookups want the versionless id.
+/// Like alphaXiv, a `v` after a dash is part of the name: `2610.deepseek-v4` stays.
 pub(crate) fn versionless_id(paper_id: &str) -> &str {
     paper_id
         .rfind('v')
-        .filter(|&i| i > 0 && !paper_id[i + 1..].is_empty())
+        .filter(|&i| i > 0 && paper_id.as_bytes()[i - 1] != b'-' && !paper_id[i + 1..].is_empty())
         .filter(|&i| paper_id[i + 1..].chars().all(|c| c.is_ascii_digit()))
         .map_or(paper_id, |i| &paper_id[..i])
 }
@@ -672,7 +673,7 @@ pub struct ResolvedPaper {
     pub repo_stars: Option<i64>,
 }
 
-/// Resolve an arXiv id to title + linked GitHub repo. `/papers/v3/{id}` scrapes
+/// Resolve an arXiv or alphaXiv paper id to title + linked GitHub repo. `/papers/v3/{id}` scrapes
 /// arXiv on a miss, so brand-new papers resolve too (their repo links may lag).
 /// A missing or unparseable implementations answer just means no repo; a rate limit or
 /// unreachable host fails the resolve rather than silently starting a blank project.
@@ -772,13 +773,28 @@ const MAX_PAPER_PDF_BYTES: u64 = 64 * 1024 * 1024;
 
 /// `export.arxiv.org` is the host arXiv asks automated clients to use. Old-style
 /// ids (`hep-th/9901001`) carry a slash, so each segment is encoded separately.
+/// alphaXiv-exclusive papers (`2610.some-slug`) have no arXiv copy; alphaXiv serves their PDF.
 fn paper_pdf_url(paper_id: &str) -> String {
-    let path = versionless_id(paper_id)
+    let id = versionless_id(paper_id);
+    let path = id
         .split('/')
         .map(|segment| urlencoding::encode(segment).into_owned())
         .collect::<Vec<_>>()
         .join("/");
-    format!("https://export.arxiv.org/pdf/{path}")
+    if is_arxiv_id(id) {
+        format!("https://export.arxiv.org/pdf/{path}")
+    } else {
+        format!("https://www.alphaxiv.org/abs/{path}.pdf")
+    }
+}
+
+/// `2401.12345` or old-style `hep-th/9901001`; anything else is an alphaXiv id.
+pub(crate) fn is_arxiv_id(id: &str) -> bool {
+    let digits = |s: &str| s.bytes().all(|b| b.is_ascii_digit());
+    id.contains('/')
+        || id.split_once('.').is_some_and(|(month, number)| {
+            month.len() == 4 && digits(month) && (4..=5).contains(&number.len()) && digits(number)
+        })
 }
 
 /// PDFs run to tens of MB, so the deadline is per read, not for the whole
@@ -803,20 +819,26 @@ pub async fn fetch_paper_pdf(paper_id: &str) -> Result<Vec<u8>> {
         .split('/')
         .any(|segment| segment == "." || segment == "..")
     {
-        return Err(anyhow!("{} is not an arXiv id", paper_id));
+        return Err(anyhow!("{} is not a paper id", paper_id));
     }
     let url = paper_pdf_url(paper_id);
+    let host = if is_arxiv_id(versionless_id(paper_id)) {
+        "arXiv"
+    } else {
+        "alphaXiv"
+    };
     let res = public_get(
         || paper_pdf_http().get(&url),
-        "arXiv",
-        |e| anyhow!("Could not reach arXiv at {}: {}", url, e),
+        host,
+        |e| anyhow!("Could not reach {} at {}: {}", host, url, e),
     )
     .await?;
     let status = res.status();
     if !status.is_success() {
         let reason = status.canonical_reason().unwrap_or("");
         return Err(anyhow!(
-            "arXiv PDF download failed ({} {})",
+            "{} PDF download failed ({} {})",
+            host,
             status.as_u16(),
             reason
         ));
@@ -849,7 +871,7 @@ async fn capped_body(res: reqwest::Response, max: u64, url: &str) -> Result<Vec<
     let mut stream = res.bytes_stream();
     while let Some(chunk) = stream.next().await {
         let chunk =
-            chunk.map_err(|e| anyhow!("arXiv PDF download from {} was interrupted: {}", url, e))?;
+            chunk.map_err(|e| anyhow!("PDF download from {} was interrupted: {}", url, e))?;
         body.extend_from_slice(&chunk);
         if body.len() as u64 > max {
             return Err(anyhow!("{} is too large to download", url));
@@ -1862,6 +1884,22 @@ mod tests {
         assert_eq!(
             super::paper_pdf_url("hep-th/9901001"),
             "https://export.arxiv.org/pdf/hep-th/9901001"
+        );
+    }
+
+    #[test]
+    fn alphaxiv_exclusive_pdfs_come_from_alphaxiv() {
+        assert_eq!(
+            super::paper_pdf_url("2610.learning-spectrum-matched-shellsort"),
+            "https://www.alphaxiv.org/abs/2610.learning-spectrum-matched-shellsort.pdf"
+        );
+        assert_eq!(
+            super::paper_pdf_url("2610.learning-spectrum-matched-shellsortv1"),
+            "https://www.alphaxiv.org/abs/2610.learning-spectrum-matched-shellsort.pdf"
+        );
+        assert_eq!(
+            super::paper_pdf_url("2610.deepseek-v4"),
+            "https://www.alphaxiv.org/abs/2610.deepseek-v4.pdf"
         );
     }
 

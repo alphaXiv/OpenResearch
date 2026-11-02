@@ -1,7 +1,35 @@
 fn main() {
+    if std::path::Path::new("ui/dist").exists() {
+        println!("cargo:rerun-if-changed=ui/dist");
+    }
+
     println!("cargo:rerun-if-env-changed=ORX_OFFICIAL_RELEASE_BUILD");
+    println!("cargo:rerun-if-env-changed=ORX_DESKTOP_CANARY_TAG");
+    println!("cargo:rerun-if-env-changed=ORX_DESKTOP_CANARY_SHA");
     println!("cargo:rerun-if-env-changed=GITHUB_ACTIONS");
     println!("cargo:rerun-if-env-changed=GITHUB_REPOSITORY");
+    println!("cargo:rerun-if-env-changed=GITHUB_SHA");
+
+    let canary_tag = std::env::var("ORX_DESKTOP_CANARY_TAG").ok();
+    let canary_sha = std::env::var("ORX_DESKTOP_CANARY_SHA").ok();
+    assert_eq!(
+        canary_tag.is_some(),
+        canary_sha.is_some(),
+        "canary builds need both a tag and source SHA"
+    );
+    if let Some(sha) = &canary_sha {
+        assert!(
+            sha.len() == 40 && sha.bytes().all(|byte| byte.is_ascii_hexdigit()),
+            "invalid canary source SHA"
+        );
+        if std::env::var("ORX_OFFICIAL_RELEASE_BUILD").as_deref() == Ok("1") {
+            assert_eq!(
+                std::env::var("GITHUB_SHA").as_deref(),
+                Ok(sha.as_str()),
+                "canary source SHA must match the workflow commit"
+            );
+        }
+    }
 
     let channel = match std::env::var("ORX_OFFICIAL_RELEASE_BUILD") {
         Ok(value)

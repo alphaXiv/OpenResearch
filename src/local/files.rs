@@ -65,6 +65,83 @@ pub fn ensure_dir(project: &LocalProject) -> Result<PathBuf> {
     Ok(dir)
 }
 
+/// What project deletion does with the artifacts folder.
+#[must_use]
+pub enum ArtifactCleanup {
+    Keep,
+    PruneIfEmpty(PathBuf),
+    DeleteAll(PathBuf),
+}
+
+impl ArtifactCleanup {
+    pub fn apply(self) -> Result<()> {
+        match self {
+            Self::Keep => Ok(()),
+            Self::PruneIfEmpty(dir) => {
+                let _ = std::fs::remove_dir(dir);
+                Ok(())
+            }
+            Self::DeleteAll(dir) => std::fs::remove_dir_all(&dir).map_err(|error| {
+                anyhow!("Could not delete artifacts at {}: {error}", dir.display())
+            }),
+        }
+    }
+}
+
+pub fn plan_project_artifact_cleanup(
+    project: &LocalProject,
+    delete_artifacts: bool,
+    projects: &[LocalProject],
+) -> Result<ArtifactCleanup> {
+    plan_artifact_cleanup_at(
+        &files_dir(project),
+        delete_artifacts,
+        projects.iter().map(|project| Path::new(&project.repo_path)),
+    )
+}
+
+fn plan_artifact_cleanup_at<'a>(
+    dir: &Path,
+    delete_artifacts: bool,
+    repositories: impl Iterator<Item = &'a Path>,
+) -> Result<ArtifactCleanup> {
+    let metadata = match std::fs::symlink_metadata(dir) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            return Ok(ArtifactCleanup::Keep)
+        }
+        Err(error) => return Err(error.into()),
+    };
+    if metadata.file_type().is_symlink() {
+        if !delete_artifacts {
+            return Ok(ArtifactCleanup::Keep);
+        }
+        return Err(anyhow!(
+            "The artifacts folder is a symbolic link. Keep artifacts or remove it manually."
+        ));
+    }
+    let canonical_dir = crate::paths::canonicalize(dir)?;
+    for repository in repositories {
+        let repository = match crate::paths::canonicalize(repository) {
+            Ok(repository) => repository,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(_) if !delete_artifacts => continue,
+            Err(error) => return Err(error.into()),
+        };
+        if repository.starts_with(&canonical_dir) {
+            if !delete_artifacts {
+                return Ok(ArtifactCleanup::Keep);
+            }
+            return Err(anyhow!("The artifacts folder contains a project source folder. Keep artifacts to preserve it."));
+        }
+    }
+    Ok(if delete_artifacts {
+        ArtifactCleanup::DeleteAll(dir.to_path_buf())
+    } else {
+        ArtifactCleanup::PruneIfEmpty(dir.to_path_buf())
+    })
+}
+
 /// Relative, no `..`/`.` segments, no backslashes — a requested path can't
 /// escape the artifacts dir. Lexical only; symlink containment is enforced by
 /// `resolve_contained`.
@@ -470,6 +547,96 @@ fn hash_dir(base: &Path, dir: &Path, hasher: &mut DefaultHasher, seen: &mut usiz
             md.len().hash(hasher);
             mtime_ms(&md).hash(hasher);
         }
+    }
+}
+
+#[cfg(test)]
+mod project_cleanup_tests {
+    use super::*;
+
+    fn cleanup_artifacts_at<'a>(
+        dir: &Path,
+        delete_artifacts: bool,
+        repositories: impl Iterator<Item = &'a Path>,
+    ) -> Result<()> {
+        plan_artifact_cleanup_at(dir, delete_artifacts, repositories)?.apply()
+    }
+
+    #[test]
+    fn artifacts_require_opt_in_but_empty_folders_are_pruned() {
+        let root =
+            std::env::temp_dir().join(format!("orx-artifact-cleanup-{}", uuid::Uuid::new_v4()));
+        let dir = root.join("artifacts");
+        let repo = root.join("repository");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::create_dir_all(&repo).unwrap();
+        let repositories = || std::iter::once(repo.as_path());
+        std::fs::write(dir.join("report.md"), "keep my report").unwrap();
+
+        cleanup_artifacts_at(&dir, false, repositories()).unwrap();
+        assert_eq!(
+            std::fs::read_to_string(dir.join("report.md")).unwrap(),
+            "keep my report"
+        );
+        cleanup_artifacts_at(&dir, true, repositories()).unwrap();
+        assert!(!dir.exists());
+        assert!(repo.is_dir());
+        cleanup_artifacts_at(&dir, true, repositories()).unwrap();
+
+        std::fs::create_dir(&dir).unwrap();
+        cleanup_artifacts_at(&dir, false, repositories()).unwrap();
+        assert!(!dir.exists());
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn keeping_artifacts_does_not_require_unrelated_repositories_to_resolve() {
+        let root =
+            std::env::temp_dir().join(format!("orx-artifact-unresolved-{}", uuid::Uuid::new_v4()));
+        let dir = root.join("artifacts");
+        std::fs::create_dir_all(&dir).unwrap();
+        let repo = root.join("invalid\0repository");
+        std::fs::write(dir.join("report.md"), "keep").unwrap();
+        cleanup_artifacts_at(&dir, false, std::iter::once(repo.as_path())).unwrap();
+        assert!(dir.join("report.md").is_file());
+        assert!(cleanup_artifacts_at(&dir, true, std::iter::once(repo.as_path())).is_err());
+        assert!(dir.join("report.md").is_file());
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn artifacts_never_remove_a_registered_source_folder() {
+        let dir =
+            std::env::temp_dir().join(format!("orx-artifact-source-{}", uuid::Uuid::new_v4()));
+        let nested_repo = dir.join("another-project");
+        std::fs::create_dir_all(&nested_repo).unwrap();
+        for repo in [&dir, &nested_repo] {
+            cleanup_artifacts_at(&dir, false, std::iter::once(repo.as_path())).unwrap();
+            assert!(cleanup_artifacts_at(&dir, true, std::iter::once(repo.as_path())).is_err());
+            assert!(repo.is_dir());
+        }
+        std::fs::remove_dir(&nested_repo).unwrap();
+        cleanup_artifacts_at(&dir, false, std::iter::once(dir.as_path())).unwrap();
+        assert!(
+            dir.is_dir(),
+            "even an empty registered source folder must be kept"
+        );
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn artifact_cleanup_rejects_symlinks_and_keeps_their_targets() {
+        let root = std::env::temp_dir().join(format!("orx-artifact-link-{}", uuid::Uuid::new_v4()));
+        let target = root.join("target");
+        let link = root.join("artifacts");
+        std::fs::create_dir_all(&target).unwrap();
+        std::fs::write(target.join("report.md"), "safe").unwrap();
+        std::os::unix::fs::symlink(&target, &link).unwrap();
+        cleanup_artifacts_at(&link, false, std::iter::empty()).unwrap();
+        assert!(cleanup_artifacts_at(&link, true, std::iter::empty()).is_err());
+        assert!(target.join("report.md").exists());
+        std::fs::remove_dir_all(root).unwrap();
     }
 }
 

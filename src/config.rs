@@ -249,6 +249,20 @@ pub fn settings_data_dir() -> Option<PathBuf> {
     crate::telemetry::persisted_data_dir().map(PathBuf::from)
 }
 
+#[cfg(desktop_app)]
+pub fn desktop_zoom_percent() -> i32 {
+    crate::telemetry::load_settings()
+        .and_then(|settings| settings.desktop_zoom_percent)
+        .filter(|percent| (50..=200).contains(percent))
+        .unwrap_or(100)
+}
+
+#[cfg(desktop_app)]
+pub fn set_desktop_zoom_percent(percent: i32) -> Result<()> {
+    crate::telemetry::mutate_settings(|settings| settings.desktop_zoom_percent = Some(percent))?;
+    Ok(())
+}
+
 pub fn settings_cache_dir() -> Option<PathBuf> {
     crate::telemetry::persisted_cache_dir().map(PathBuf::from)
 }
@@ -370,12 +384,62 @@ pub fn list_synced_env() -> Vec<(String, String)> {
 /// Names the run inside its job, e.g. as a metric tracker's run name.
 pub const RUN_ID_ENV: &str = "ORX_RUN_ID";
 
-/// A run's environment: the synced env file plus its own run id.
+/// A run's environment: the synced env file plus what the run knows about itself.
 pub fn run_env(run_id: &str) -> std::collections::HashMap<String, String> {
     let mut env: std::collections::HashMap<String, String> =
         list_synced_env().into_iter().collect();
-    env.insert(RUN_ID_ENV.to_string(), run_id.to_string());
+    env.extend(run_context_env(run_id));
     env
+}
+
+const EXPERIMENT_ENV: &str = "ORX_EXPERIMENT";
+const EXPERIMENT_TITLE_ENV: &str = "ORX_EXPERIMENT_TITLE";
+const PARENT_EXPERIMENT_ENV: &str = "ORX_PARENT_EXPERIMENT";
+const COMMIT_ENV: &str = "ORX_COMMIT";
+
+/// The run's id, experiment, parent, commit and Trackio project, read from its reserved row.
+pub fn run_context_env(run_id: &str) -> Vec<(String, String)> {
+    let mut env = vec![(RUN_ID_ENV.to_string(), run_id.to_string())];
+    match stored_run_context(run_id) {
+        Ok(context) => env.extend(context),
+        Err(error) => {
+            eprintln!(
+                "warning: could not read run {run_id}'s experiment for its environment: {error}"
+            )
+        }
+    }
+    env
+}
+
+fn stored_run_context(run_id: &str) -> Result<Vec<(String, String)>> {
+    let store = crate::store::Store::open()?;
+    let Some(run) = store.get_run(run_id)? else {
+        return Ok(Vec::new());
+    };
+    let mut env = Vec::new();
+    if let Some(experiment) = store.get_local_experiment(&run.experiment_id)? {
+        let parent = match &experiment.parent_experiment_id {
+            Some(id) => store.get_local_experiment(id)?,
+            None => None,
+        };
+        if let Some(parent) = parent {
+            env.push((PARENT_EXPERIMENT_ENV.to_string(), parent.slug));
+        }
+        if let Some(title) = experiment.title.filter(|title| !title.trim().is_empty()) {
+            env.push((EXPERIMENT_TITLE_ENV.to_string(), title));
+        }
+        env.push((EXPERIMENT_ENV.to_string(), experiment.slug));
+    }
+    if let Some(commit) = run.commit_sha.filter(|sha| !sha.is_empty()) {
+        env.push((COMMIT_ENV.to_string(), commit));
+    }
+    if let Some(project) = store.get_local_project(&run.project_id)? {
+        env.push((
+            crate::local::trackio::PROJECT.to_string(),
+            crate::local::trackio::project_for(&project.slug),
+        ));
+    }
+    Ok(env)
 }
 
 /// Drop `key`'s line from the synced env file. Missing file/key is a no-op.
@@ -461,6 +525,12 @@ pub fn write_synced_env_vars(values: &[(&str, &str)]) -> Result<()> {
 #[serde(rename_all = "camelCase")]
 pub struct SshHostSettings {
     pub container: Option<String>,
+    /// Absolute storage root for runs and the source cache; `None` is `~/.orx`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub remote_root: Option<String>,
+    /// Keep every finished run's remote dir, not just each project's newest few.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub keep_remote_runs: bool,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]

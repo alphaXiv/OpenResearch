@@ -1,7 +1,14 @@
 import { readLiveSnapshot } from "./live";
-import { queryOptions } from "@tanstack/react-query";
+import { queryOptions, useQuery } from "@tanstack/react-query";
+import { useEffect, useRef } from "react";
 import * as api from "../api";
 import { queryClient, isCurrentScope, workspaceKey } from "./client";
+
+export const getFileManagerQuery = (locale: string) => queryOptions({
+    queryKey: workspaceKey("getFileManager", locale),
+    queryFn: ({ signal }) => api.getFileManager(locale, signal),
+    staleTime: 300_000,
+});
 
 export const getHfSettingsQuery = () => queryOptions({
   queryKey: workspaceKey("getHfSettings"),
@@ -63,11 +70,25 @@ export const getEnvVarsQuery = () => queryOptions({
   staleTime: 300_000,
 });
 
-export const getTrackioSettingsQuery = () => queryOptions({
-  queryKey: workspaceKey("getTrackioSettings"),
-  queryFn: ({ signal }) => api.getTrackioSettings(signal),
-  staleTime: 300_000,
+/** `live` polls while a run is in flight, so its Visualize button appears soon after it logs. */
+export const getTrackioRunsQuery = (projectId: string, live: boolean) => queryOptions({
+  queryKey: workspaceKey("getTrackioRuns", projectId),
+  queryFn: ({ signal }) => api.getTrackioRuns(projectId, signal),
+  staleTime: 15_000,
+  refetchInterval: live ? 15_000 : false,
 });
+
+/** Also refetches once a run ends: Trackio flushes on `finish()`, after the last poll. */
+export function useTrackioRuns(projectId: string, live: boolean) {
+  const query = useQuery(getTrackioRunsQuery(projectId, live));
+  const wasLive = useRef(live);
+  const { refetch } = query;
+  useEffect(() => {
+    if (wasLive.current && !live) void refetch({ cancelRefetch: false });
+    wasLive.current = live;
+  }, [live, refetch]);
+  return query;
+}
 
 export const getDataDirQuery = () => queryOptions({
   queryKey: workspaceKey("getDataDir"),
@@ -161,7 +182,7 @@ export const getSkillsQuery = (harness?: string, projectId?: string) => queryOpt
   queryKey: workspaceKey("getSkills", harness ?? null, projectId ?? null),
   queryFn: ({ signal }) => api.getSkills(signal, harness, projectId),
   select: (data) => data.skills,
-  refetchInterval: (query) => query.state.data?.importing ? 2_000 : 30_000,
+  refetchInterval: 30_000,
   staleTime: 300_000,
 });
 
@@ -181,8 +202,7 @@ export const listLatexTemplatesQuery = () => queryOptions({
 export const listUserSkillsQuery = () => queryOptions({
   queryKey: workspaceKey("listUserSkills"),
   queryFn: ({ signal }) => api.listUserSkills(signal),
-  select: (data) => data.skills,
-  refetchInterval: (query) => query.state.data?.importing ? 2_000 : 30_000,
+  refetchInterval: 30_000,
   staleTime: 300_000,
 });
 

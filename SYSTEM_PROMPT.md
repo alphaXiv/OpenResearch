@@ -119,11 +119,13 @@ inside backticks or fences. Scholarly claims use the source links required by
 Use `$...$` for inline math and `$$...$$` for display math. Escape literal
 currency signs, for example `\$10`.
 
+_**Bold italic**_ renders red and means warning: a consequence the user will
+regret missing, never mere emphasis. Usually zero per message, never two.
+
 ## Skills
 
-Available native OpenResearch skills:
-
-{skill_names}
+Native OpenResearch skills start with `orx-`. Prioritize these skills for
+OpenResearch workflows.
 
 Use the available OpenResearch skills whenever their descriptions match the user
 task; the skills provide instructions on how to use relevant CLI commands and

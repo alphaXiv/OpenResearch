@@ -175,7 +175,8 @@ intended flow — do **not** edit a frozen node or rewrite the run command:
 7. **Analyze each finish as it lands, then iterate.** Do the per-completion read
    *inside the loop above*, not deferred to the end — when a run finishes,
    **actually read its results** from the file reported by `orx logs <runId>`
-   (see `orx-logs`), then use `orx-results` to interpret the outcome. To see exactly what a finished node changed, diff its
+   (see `orx-logs`) and, when it logged to Trackio, its curves with
+   `orx metrics <runId> <parentRunId>`, then use `orx-results` to interpret the outcome. To see exactly what a finished node changed, diff its
    branch against its parent's
    branch (see `orx-git`). Don't infer from status alone. Each
    completion is a decision point with four moves:
@@ -232,6 +233,7 @@ orx exp move <expId> --parent <newParentId>   # re-parent the node and its subtr
 orx exp move <expId> --baseline               # make it a new root
 orx exp archive <expId> --only                # hide superseded nodes (also --ancestors/--descendants)
 orx exp unarchive <expId> --only              # restore them
+orx exp delete <expId>                        # permanently remove a leaf node, its runs and branch
 ```
 
 - `move` changes only the tree; runs and results stay attached to the node.
@@ -240,3 +242,7 @@ orx exp unarchive <expId> --only              # restore them
   for `--baseline`). Move only nodes whose code fits the new parent.
 - Don't recreate a node that has runs just to fix its place in the tree: move
   or archive it so its results keep their provenance.
+- `delete` cannot be undone except for the branch (it prints the commit to
+  restore it from). Use it only when the user asks to remove a node
+  permanently; archive otherwise. It refuses nodes with children or active
+  runs, and branches checked out in any worktree.

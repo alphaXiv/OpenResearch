@@ -6,6 +6,9 @@ on:
       plan:
         required: true
         type: string
+      source-sha:
+        required: true
+        type: string
 
 jobs:
   verify:
@@ -19,6 +22,7 @@ jobs:
         with:
           persist-credentials: false
           submodules: recursive
+          ref: ${{ inputs.source-sha }}
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
       - name: Verify production accepts this release payload
