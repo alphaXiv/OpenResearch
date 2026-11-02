@@ -10,6 +10,7 @@ import { DirectionProvider } from "@base-ui/react/direction-provider";
 import { m } from "../paraglide/messages.js";
 import { ltr } from "../i18n";
 import { Input, MenuItem, showAlert } from "./ui";
+import { useFileManagerLabel } from "./useFileManagerLabel";
 
 export function copyFilePath(root: string, path: string) {
   const clipboard = navigator.clipboard;
@@ -103,6 +104,7 @@ export function FileContextMenu({
   onRename,
   onDuplicate,
   onCopyPath,
+  onReveal,
   onDelete,
   onClose,
 }: {
@@ -111,9 +113,11 @@ export function FileContextMenu({
   onRename?: () => void;
   onDuplicate?: () => void;
   onCopyPath: () => void;
+  onReveal?: () => void;
   onDelete?: () => void;
   onClose: () => void;
 }) {
+  const revealLabel = useFileManagerLabel();
   const menuRef = useRef<HTMLDivElement>(null);
   const onCloseRef = useRef(onClose);
   onCloseRef.current = onClose;
@@ -152,6 +156,7 @@ export function FileContextMenu({
               onContextMenu={(event) => event.preventDefault()}
             >
               <Menu.Item nativeButton render={<MenuItem size="compact" className="data-highlighted:bg-surface" />} onClick={onOpen}>{m.file_tree_open()}</Menu.Item>
+              {onReveal && <Menu.Item nativeButton render={<MenuItem size="compact" className="data-highlighted:bg-surface" />} onClick={onReveal}>{revealLabel}</Menu.Item>}
               {onRename && <Menu.Item nativeButton render={<MenuItem size="compact" className="data-highlighted:bg-surface" />} onClick={onRename}>{m.chat_panel_rename()}</Menu.Item>}
               {onDuplicate && <Menu.Item nativeButton render={<MenuItem size="compact" className="data-highlighted:bg-surface" />} onClick={onDuplicate}>{m.file_tree_duplicate()}</Menu.Item>}
               <Menu.Item nativeButton render={<MenuItem size="compact" className="data-highlighted:bg-surface" />} onClick={onCopyPath}>{m.artifacts_copy_path()}</Menu.Item>
