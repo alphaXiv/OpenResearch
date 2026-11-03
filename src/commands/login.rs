@@ -26,7 +26,7 @@ pub async fn run(args: crate::LoginArgs) -> Result<()> {
     let login_url = format!("{api_url}/auth/cli/login?port={port}&state={nonce}");
     println!("Opening your browser to log in\u{2026}");
     println!("If it doesn't open, visit:\n  {login_url}\n");
-    open_browser(&login_url);
+    open_browser(&login_url, None);
 
     let token = tokio::time::timeout(LOGIN_TIMEOUT, accept_callback(&listener, &nonce))
         .await

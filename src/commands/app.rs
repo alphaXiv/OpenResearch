@@ -1014,11 +1014,36 @@ mod imp {
             )
             // Pop-ups go to the browser, dashboard pages included: a window wry
             // opens itself has none of this window's handlers.
-            .with_new_window_req_handler(|url, _features| {
-                if super::opens_in_browser(&url) {
-                    crate::browser::open_browser(&url);
+            .with_new_window_req_handler({
+                #[cfg(target_os = "linux")]
+                let window = window.clone();
+                move |url, _features| {
+                    if super::opens_in_browser(&url) {
+                        #[cfg(target_os = "linux")]
+                        let activation_token = {
+                            use gtk::{gio, prelude::*};
+                            use tao::platform::unix::WindowExtUnix;
+
+                            let context = window.gtk_window().display().app_launch_context();
+                            context.and_then(|context| {
+                                // Wayland needs the click's activation token to focus an existing browser.
+                                context.set_timestamp(gtk::current_event_time());
+                                gio::AppInfo::create_from_commandline(
+                                    "xdg-open",
+                                    None,
+                                    gio::AppInfoCreateFlags::NONE,
+                                )
+                                .ok()
+                                .and_then(|app| context.startup_notify_id(&app, &[]))
+                            })
+                        };
+                        #[cfg(not(target_os = "linux"))]
+                        let activation_token: Option<String> = None;
+
+                        crate::browser::open_browser(&url, activation_token.as_deref());
+                    }
+                    NewWindowResponse::Deny
                 }
-                NewWindowResponse::Deny
             })
             .with_download_started_handler({
                 let window = window.clone();
@@ -1174,6 +1199,16 @@ mod imp {
                 return;
             }
         };
+        #[cfg(target_os = "linux")]
+        {
+            use webkit2gtk::{SettingsExt, WebViewExt};
+            use wry::WebViewExtUnix;
+
+            if let Some(settings) = webview.webview().settings() {
+                // Remote workspace pop-ups follow an async request, after the click's user gesture expires.
+                settings.set_javascript_can_open_windows_automatically(true);
+            }
+        }
         #[cfg(target_os = "macos")]
         add_confirm_panel(&webview);
         #[cfg(target_os = "macos")]

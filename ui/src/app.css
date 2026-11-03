@@ -61,6 +61,12 @@
   }
 }
 
+@keyframes progress {
+  to {
+    transform: translateX(185%);
+  }
+}
+
 @keyframes tool-target-reveal {
   from {
     opacity: 0;
