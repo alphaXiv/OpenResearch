@@ -12,8 +12,9 @@ shared host is an open door to the account that runs it. Everything in this
 essay keeps the server on `127.0.0.1` and carries the user to it over SSH.
 
 This essay covers the dashboard on a remote machine. SSH as a place to run
-jobs belongs to [experiments](experiments.md); both share the SSH machinery
-described at the end.
+jobs belongs to [experiments](experiments.md); the host side of those jobs and
+the SSH transport they share are described at the end. Their on-disk and wire
+formats are frozen in [FROZEN.md](../crates/orx-host-proto/FROZEN.md).
 
 ## Inside an SSH session
 
@@ -77,8 +78,8 @@ orx remote-host attach ──ssh──►  control socket ─► register token,
 gateway ── forward + token ───►  host's loopback port
 ```
 
-- **One host per remote data directory.** A host holds the data directory's
-  dashboard lock exclusively, so a second dashboard on the same database
+- **One host per remote data directory.** Like every `orx up`, a host holds
+  the data directory's engine lock, so a second dashboard on the same database
   refuses to start, and a start lock serializes concurrent `ensure` calls.
 - **A private control channel.** The laptop never talks to the host over the
   network. It runs `orx remote-host` over SSH, which speaks to the host
@@ -120,28 +121,109 @@ Any change to the remote API or the control channel's shape is a protocol
 change: bump the number, and keep the laptop able to tell the user what to do
 with a mismatched peer.
 
-## The SSH service
+## orx-host
 
-Every orx process that talks to remote machines, each dashboard and every
-supervisor, goes through one detached SSH service per data directory instead
-of opening its own connections. It listens on loopback, accepts only callers
-that present the token in its owner-only state directory, and keeps one
-session per host, with a small helper on the remote end for monitoring and
-transfers. Repeated questions are batched: one Slurm queue poll per host
-answers every run on that host.
+Runs on an SSH host or a Slurm cluster are driven by `orx-host`, a small
+static binary (Linux 3.2 or newer on x86_64 and aarch64, and macOS) that needs
+only `/bin/sh`, Bash, tar and coreutils on the host. Releases embed it, and it
+is named by its SHA-256, so one root holds several versions and each is
+uploaded once, in the same SSH session that first needs it.
 
-- **The user's SSH, unmodified in behavior.** Transport is the system `ssh`
-  with the user's own config, agent and keys; orx never reads a key. On
-  OpenSSH versions that support it, orx shares connections with the user's
-  own `ssh` through a managed file their SSH config includes, adding that one
-  line and leaving the rest of the file byte for byte.
-- **Prompts reach the screen.** A passphrase, password or host-key question
-  from `ssh` is routed through an askpass bridge to the dashboard's connect
-  dialog and answered there. An unanswered prompt times out instead of
-  hanging the connection.
-- **It stops when the data moves.** A data-directory move asks the service to
-  shut down when idle, meaning no active runs and no connection in progress,
-  and refuses to move while it is busy.
+```text
+<root>   ~/.orx/engine, or <remote root>/engine; beside the 0.2.x run directories
+  bin/orx-host-<sha256>
+  sources/<sha256>         content-addressed source archives
+  runs/<run>/              launch.json  run.sh  repo/  log  notify
+                           wrapper.json  started  exit.json  cleanup.json
+
+orx-host serve   one per SSH session; dies with it
+orx-host wrap    one per run, in its own session; outlives SSH and `orx up`
+```
+
+There is no daemon to install, upgrade or restart: what persists is files and
+each run's wrapper.
+
+- **At most one start.** The wrapper takes its lock, publishes its identity
+  (node, boot ID, PID, start time), then creates `started` exclusively and
+  fsyncs it before spawning the payload. Its presence forbids another start,
+  even if a crash prevented the spawn, and a dead wrapper never authorizes a
+  rerun.
+- **Receipts are whole.** Every receipt is written to a temporary file,
+  fsynced and renamed, so a reader on NFS sees all of it or none. Failing to
+  read, parse or inspect is uncertainty, never absence or a verified stop.
+- **Identity bounds what a host can prove.** Process checks and signals run
+  only on the recorded node and boot. The same node with a new boot proves the
+  old execution ended; another node proves nothing about local PIDs.
+- **The kill set** is the wrapper's descendants (it is their subreaper on
+  Linux), every same-user process carrying the run's tag, and every process
+  already seen. A scan is complete only when no candidate was unreadable.
+- **Updates never touch a running wrapper.** It keeps its binary and code
+  until it exits; a newer `serve` reads its receipts unchanged.
+
+`serve` answers length-prefixed JSON frames on the SSH session's stdio, out of
+order. Observation is a long poll: the engine sends its last summary of each
+watched run and the host answers when any differs, so there is no journal on
+the host and nothing to replay.
+
+## Slurm authority
+
+On a cluster, `serve` runs on the login node and the payload on a compute
+node whose processes the login node cannot see, so the login node never judges
+liveness. The batch script execs `orx-host wrap`, and receipts cross the shared
+filesystem.
+
+```text
+1  exit.json on the shared filesystem              → the outcome
+2  squeue --states=all                             → starting, running, or terminal until MinJobAge
+3  sacct                                           → jobs squeue forgot
+4  scheduler terminal, no receipt after 120 s      → cancelled, failed or lost
+   scheduler silent or unanswered, no receipt      → unreconciled until Abandon
+```
+
+Jobs are submitted with `--no-requeue`, named by the run ID so a lost
+submission is found again. Cancel writes the request the wrapper acts on;
+`scancel` is used only before the wrapper has started, because it would kill
+the wrapper before it wrote its receipt.
+
+## Transport and the auth breaker
+
+The engine talks to each host root over one system `ssh` child, multiplexing
+every request on it, with the user's own config, agent and keys; orx never
+reads a key. Requests queue in lanes (control, feed, logs, upload), and cheaper
+lanes stop dispatching first, so bulk uploads and log pages can never take the
+slots a cancel needs.
+
+```text
+Idle ─► Connecting ─► Live ─(EOF, 35 s without a reply, clock jump)─► Backoff ─► Connecting
+            └─ auth failure, host key, changed route, dead master ─► NeedsAuth
+Backoff: 5 s, 15 s, 60 s, 5 min, 15 min cap, jittered, persisted per root
+```
+
+**After an authentication failure, no automatic login.** Repeated logins lock
+accounts and trip MFA, so the breaker is one per SSH alias, shared by all its
+roots, and only the user's Connect closes it.
+
+- **First contact is one batch-mode attempt.** Success classifies the alias as
+  a key host, which then connects with no click. A network failure before
+  authentication backs off like any key host. Anything that could have reached
+  authentication marks the host interactive with the breaker open.
+- **Interactive hosts use a master the user started.** Connect starts a
+  detached master through the askpass bridge, so passphrase, password and
+  host-key prompts reach the dashboard's dialog or the CLI. The engine attaches
+  to that socket with prompts disabled, so a dead master can never log in.
+- **The route is pinned.** `ssh -G` yields the hostname, user, port, proxy and
+  identity settings; a changed route opens the breaker until Connect approves
+  it.
+- Every engine `ssh` runs without a terminal and with askpass disabled, because
+  a jump host ignores the outer batch mode and would otherwise prompt.
+
+**Plain ssh shares an interactive master.** On OpenSSH 8.4 and later, a live
+master is published through a managed file the user's SSH config includes,
+adding that include once and leaving the rest byte for byte. A `Match … exec`
+check selects the socket only while its pinned route matches and the socket
+exists, so `ssh`, `scp` and `rsync` to that alias reuse the authenticated
+session; without a live master they authenticate as usual and never start an
+engine login.
 
 ## What must stay true
 
@@ -153,4 +235,8 @@ answers every run on that host.
 - orx never executes a remote binary that another user could have replaced,
   and never changes permissions on its own.
 - Keys and passphrases never pass through orx's storage.
+- After an authentication failure, nothing logs in to that alias until the
+  user connects.
+- A run's payload starts at most once, and only a receipt, a scheduler verdict
+  or a changed boot ends it.
 - A version mismatch is reported with a way forward, never papered over.

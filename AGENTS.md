@@ -11,7 +11,8 @@ catalogs; when you change an API it serves, keep both sides compatible.
 | --- | --- |
 | `src/commands/` | One module per `orx` command; `up` is the server and its API, `app` the window. |
 | `src/local/` | Projects and Git, chats (`chat/`), agent harnesses (`harness/`), skills, papers. |
-| `src/jobs/`, `src/compute.rs` | Compute backends and the run lifecycle `orx supervise` drives. |
+| `src/engine/`, `crates/orx-host*` | The run engine in `orx up` and the `orx-host` binary that runs jobs on hosts. |
+| `src/jobs/`, `src/compute.rs` | Backend clients, SSH config sharing, and the SSH service kept for 0.2.x runs. |
 | `src/store.rs` | The SQLite store and its schema. |
 | `src/client.rs`, `src/config.rs` | The openresearch.sh client, credentials, settings paths. |
 | `src/updates*` | Self-update for the CLI and the desktop apps. |
@@ -40,11 +41,11 @@ catalogs; when you change an API it serves, keep both sides compatible.
 
 A message reaches `orx up`, which starts or reuses the chat's agent in the
 chat's own worktree, with orx's playbook, skills and the `orx` CLI on its
-`PATH`. The agent commits and runs `orx exp run`: the dashboard archives the
-experiment's commit, submits it to a backend, and a detached `orx supervise`
-watches the job and tails its logs into the run. When it ends, the chat that
-asked is woken with the result. The page follows it all through one event
-stream.
+`PATH`. The agent commits and runs `orx exp run`: the dashboard's engine
+archives the experiment's commit and submits it to a backend, where a per-run
+wrapper owns the job. The engine watches it and keeps its log, and when it
+ends queues the result into the chat that asked. The page follows it all
+through one event stream.
 
 ## Architecture essays
 
@@ -53,8 +54,8 @@ one for the area you touch, and fix any statement your change makes false.
 
 - [Where state lives](arc/storage.md): directories, the store, locks, egress.
 - [Chats and agents](arc/agents.md): harnesses, isolation, permissions, recovery.
-- [Experiments and compute](arc/experiments.md): snapshots, backends, rentals.
-- [Remote machines](arc/remote.md): the persistent host and the SSH service.
+- [Experiments and compute](arc/experiments.md): snapshots, backends, the run engine.
+- [Remote machines](arc/remote.md): the persistent host, `orx-host` and SSH transport.
 - [The dashboard](arc/dashboard.md): the guard, live state, the React app.
 - [The desktop app and releases](arc/desktop.md): app mode, updates, shipping.
 

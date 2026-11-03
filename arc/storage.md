@@ -3,10 +3,10 @@
 orx keeps a researcher's work on their own machine. Projects, experiments,
 runs, chats and their transcripts never pass through a service, so the only
 copy is the one on disk, and every orx process on the machine reads and writes
-it at once: the dashboard, the desktop app, a terminal `orx`, an agent's `orx`,
-a detached supervisor watching a job. This essay covers where those bytes
-live, how the processes share them without corrupting each other, and the
-short list of things that leave the machine.
+it at once: the dashboard and its run engine, the desktop app, a terminal
+`orx`, an agent's `orx`, a supervisor an older orx left watching a job. This
+essay covers where those bytes live, how the processes share them without
+corrupting each other, and the short list of things that leave the machine.
 
 ## Three directories
 
@@ -43,11 +43,11 @@ and a terminal `orx` on the same machine would open different databases.
 ## The store
 
 A SQLite database in WAL mode is orx's truth for everything that is not code:
-projects, the experiment records, runs and their backend descriptors, chat
-sessions, messages and turn leases, wake-up registrations, chat delegations
-and subscriptions, UI and workspace state. Many short-lived processes open it
-concurrently, each with a busy timeout; WAL lets readers proceed while one
-writer commits.
+projects, the experiment records, runs with their handles and launch fences,
+chat sessions, messages and turn leases, run subscriptions and the notice
+outbox, log-collection obligations, each SSH host's backoff and auth breaker,
+chat delegations and subscriptions, UI and workspace state. Many short-lived processes open it concurrently,
+each with a busy timeout; WAL lets readers proceed while one writer commits.
 
 **The schema only grows.** Every open of the store applies the whole schema:
 tables are created if missing, and each added column is an `ALTER TABLE ADD
@@ -79,10 +79,12 @@ the folder.
 
 ## Run logs are files
 
-A run's output is an append-only file named by the run, not rows in the
-store. The supervisor appends as the job prints; the dashboard and `orx logs`
-tail the file. Neither ever contends for a database write lock, and a chatty
-job cannot bloat the database or slow every other writer.
+A run's output is an append-only file, never rows in the store. It is
+written on the machine that ran the job, paged from there while the run is
+live, and kept in the data directory's `run-logs/` once it ends
+([experiments](experiments.md)). Reading it never contends for a database
+write lock, and a chatty job cannot bloat the database or slow every other
+writer.
 
 ## Agent homes
 
@@ -99,9 +101,10 @@ the homes exist.
 
 ```text
 lifecycle lock (config)   shared: nearly every orx command, `orx up`, the app,
-                                  each detached supervisor
+                                  each 0.2.x supervisor
                           exclusive: `orx delete`, a one-time storage migration
-dashboard lock (data)     shared: each dashboard; exclusive: a persistent remote host
+engine lock (data)        exclusive: the one `orx up` that owns the data directory's runs
+supervisor locks (data)   per 0.2.x run: its supervisor, or the engine once it adopts the run
 move lock + move lease    exclusive: a data-directory move
 turn and claim leases     rows in the store, with heartbeats and a TTL
 ```
@@ -109,9 +112,9 @@ turn and claim leases     rows in the store, with heartbeats and a TTL
 **The lifecycle lock** is an advisory file lock in the config directory.
 Ordinary commands hold it shared for their whole life, so the operations that
 destroy or relocate shared state can take it exclusively and know nothing else
-is running. A supervisor holds it too, which keeps `orx delete` out until
-every watched job has finished or been detached. The lock sits in a directory
-of its own so a sandboxed agent can be granted write access to exactly that
+is running. A headless `orx up` stays up while any run is unfinished, so the
+lock is held for as long as orx watches a job. The lock sits in a directory of
+its own so a sandboxed agent can be granted write access to exactly that
 directory and nothing else in config. When the lock file's location changed,
 the old and new paths became hard links to one file, so old and new binaries
 contend on the same lock; orx refuses to run if the two paths stop being the
