@@ -96,6 +96,23 @@ async fn isolated(test: &str) -> Option<PathBuf> {
                 .into_response();
         }
         if uri.path().starts_with("/sandboxes/") {
+            if method == axum::http::Method::GET {
+                if root.join("box-released").exists() {
+                    return (axum::http::StatusCode::NOT_FOUND, Json(json!({}))).into_response();
+                }
+                if root.join("lookup-fails").exists() {
+                    return (axum::http::StatusCode::SERVICE_UNAVAILABLE, Json(json!({})))
+                        .into_response();
+                }
+                return (
+                    headers,
+                    Json(json!({"sandbox": {
+                        "id":"box", "organizationId":"org", "status":"online",
+                        "machineType":"cpu", "updatedAt":"now"
+                    }})),
+                )
+                    .into_response();
+            }
             if (method == axum::http::Method::DELETE || uri.path().ends_with("/lease/release"))
                 && root.join("delete-fails").exists()
             {
@@ -628,6 +645,246 @@ async fn openresearch_cancel_and_abandon_release_without_ssh_and_retry_api_failu
                     .lines()
                     .any(|line| line == released));
             }
+        }
+    }
+}
+
+#[tokio::test]
+async fn openresearch_rejected_key_auto_cancel_checks_rental_and_survives_restart() {
+    use super::openresearch::{LegacyTransport, OpenResearch};
+    use super::ssh::Ssh;
+    use crate::engine::transport::{Auth, Config, HostClass, HostConn, HostState, Status};
+    use crate::store::StoredRun;
+
+    let Some(root) =
+        isolated("openresearch_rejected_key_auto_cancel_checks_rental_and_survives_restart").await
+    else {
+        return;
+    };
+    crate::config::save_credentials(&crate::config::Credentials {
+        api_url: std::env::var("HF_ENDPOINT").unwrap(),
+        token: "fake".into(),
+    })
+    .await
+    .unwrap();
+    for case in [
+        "leased", "sandbox", "released", "restart", "retry", "lookup", "ssh",
+    ] {
+        let dir = root.join(case);
+        let mut initial = engine(&dir);
+        let clock = Arc::new(TestClock::new());
+        initial.clock = clock.clone();
+        let mut engine = Arc::new(initial);
+        let mut descriptor = BackendDescriptor::parse(
+            &json!({
+                "kind": if case == "ssh" { "ssh_job" } else { "openresearch_job" },
+                "namespace":"org", "jobId":"box", "sshHost":"unused", "sshPort":22, "sshUser":"root"
+            })
+            .to_string(),
+        )
+        .unwrap();
+        if case != "sandbox" && case != "ssh" {
+            descriptor.rental_lease = Some(crate::jobs::rental::Rental {
+                api_url: std::env::var("HF_ENDPOINT").unwrap(),
+                sandbox_id: "box".into(),
+                token: "fake".into(),
+            });
+        }
+        let watched = [WatchedRun {
+            id: case.into(),
+            handle: Handle::Legacy {
+                descriptor: Box::new(descriptor.clone()),
+            },
+        }];
+        engine
+            .store()
+            .upsert_run(&StoredRun {
+                id: case.into(),
+                experiment_id: "exp".into(),
+                project_id: "proj".into(),
+                status: "running".into(),
+                backend_json: descriptor.to_json(),
+                command: "true".into(),
+                created_at: clock.wall_ms(),
+                updated_at: clock.wall_ms(),
+                ended_at: None,
+                exit_code: None,
+                commit_sha: None,
+                result_markdown: None,
+                cancel_requested: false,
+                cancel_reason: None,
+                chat_session_id: Some("chat".into()),
+            })
+            .unwrap();
+        let live = clock.wall_ms();
+        clock.advance(Duration::from_secs(1));
+        engine
+            .store()
+            .seed_engine_host(
+                "box",
+                "/root",
+                Some(HostClass::Key),
+                &HostState {
+                    status: Status::NeedsAuth,
+                    since_ms: clock.wall_ms(),
+                    last_live_ms: Some(live),
+                    cause: Some("Permission denied (publickey)".into()),
+                    ..HostState::default()
+                },
+            )
+            .unwrap();
+        engine
+            .observe(
+                case,
+                Observation::NeedsAuth {
+                    cause: "Permission denied (publickey)".into(),
+                },
+            )
+            .unwrap();
+        let make_adapter = |engine: Arc<Engine>| {
+            let store = Store::open_at(dir.join("store")).unwrap();
+            let auth = Auth::new(&store, "box").unwrap();
+            let conn = HostConn::start_shared(
+                Config {
+                    alias: "box".into(),
+                    root: "/root".into(),
+                    ssh_config: Some(dir.join("never-connect")),
+                    control_dir: dir.join("cm"),
+                    sharing_home: None,
+                    binary_dir: None,
+                    askpass_executable: std::env::current_exe().unwrap(),
+                },
+                store,
+                clock.clone(),
+                auth,
+            )
+            .unwrap();
+            let transport = Arc::new(LegacyTransport::new(
+                Arc::new(Ssh::new("box".into(), "/root".into(), conn)),
+                dir.join("logs"),
+            ));
+            OpenResearch::new(engine, Arc::new(move |_| Ok(transport.clone())))
+        };
+        let mut adapter = make_adapter(engine.clone());
+        clock.advance(Duration::from_secs(7 * 60));
+        adapter.observe(&watched, Duration::ZERO).await;
+        assert!(engine.load(case).unwrap().1.cancel_accepted_at.is_none());
+        if case == "restart" {
+            drop(adapter);
+            tokio::time::timeout(Duration::from_secs(5), async {
+                while Arc::strong_count(&engine) != 1 {
+                    tokio::task::yield_now().await;
+                }
+            })
+            .await
+            .unwrap();
+            drop(engine);
+            engine = Arc::new(Engine::new(
+                Store::open_at(dir.join("store")).unwrap(),
+                clock.clone(),
+            ));
+            adapter = make_adapter(engine.clone());
+        }
+        clock.advance(Duration::from_secs(8 * 60 - 1));
+        adapter.observe(&watched, Duration::ZERO).await;
+        assert!(engine.load(case).unwrap().1.cancel_accepted_at.is_none());
+        if case == "released" {
+            std::fs::write(root.join("box-released"), "").unwrap();
+        }
+        if case == "retry" {
+            std::fs::write(root.join("delete-fails"), "").unwrap();
+        }
+        if case == "lookup" {
+            std::fs::write(root.join("lookup-fails"), "").unwrap();
+        }
+        std::fs::write(root.join("http.log"), "").unwrap();
+        clock.advance(Duration::from_secs(1));
+        adapter.observe(&watched, Duration::ZERO).await;
+        let (run, state) = engine.load(case).unwrap();
+        if case == "retry" || case == "lookup" {
+            assert_eq!(run.status, "running");
+            assert_eq!(state.cancel_accepted_at.is_some(), case == "retry");
+            let flag = if case == "retry" {
+                "delete-fails"
+            } else {
+                "lookup-fails"
+            };
+            std::fs::remove_file(root.join(flag)).unwrap();
+            engine
+                .observe_runs(&adapter, &watched, Duration::ZERO)
+                .await
+                .unwrap();
+        }
+        let (run, state) = engine.load(case).unwrap();
+        assert_eq!(
+            run.status,
+            match case {
+                "released" => "lost",
+                "ssh" => "running",
+                _ => "cancelled",
+            },
+            "{case}"
+        );
+        let accepted = state.cancel_accepted_at;
+        if case != "ssh" && case != "released" {
+            assert!(accepted.is_some());
+            assert_eq!(
+                run.cancel_reason.as_deref(),
+                Some(crate::plane::LABELS["run_notice_rental_key_cancelled"].as_str())
+            );
+        } else {
+            assert!(accepted.is_none());
+        }
+        drop(adapter);
+        drop(engine);
+        engine = Arc::new(Engine::new(
+            Store::open_at(dir.join("store")).unwrap(),
+            clock.clone(),
+        ));
+        adapter = make_adapter(engine.clone());
+        for _ in 0..2 {
+            engine
+                .observe_runs(&adapter, &watched, Duration::ZERO)
+                .await
+                .unwrap();
+        }
+        assert_eq!(engine.load(case).unwrap().1.cancel_accepted_at, accepted);
+        let requests = std::fs::read_to_string(root.join("http.log")).unwrap();
+        let releases = requests
+            .lines()
+            .filter(|line| line.ends_with("/lease/release") || line.starts_with("DELETE "))
+            .count();
+        assert_eq!(
+            releases,
+            match case {
+                "ssh" | "released" => 0,
+                "retry" => 2,
+                _ => 1,
+            },
+            "{case}: {requests}"
+        );
+        if case != "ssh" {
+            assert!(requests
+                .lines()
+                .next()
+                .unwrap()
+                .starts_with("GET /sandboxes/"));
+            let notices = engine.store().run_notice_batch("chat").unwrap();
+            let terminal: Vec<_> = notices
+                .iter()
+                .filter(|notice| notice.kind == crate::store::TERMINAL)
+                .collect();
+            assert_eq!(terminal.len(), 1, "{case}");
+            assert!(terminal[0].body.contains(if case == "released" {
+                &crate::plane::LABELS["run_notice_rental_outcome_unavailable"]
+            } else {
+                &crate::plane::LABELS["run_notice_rental_key_cancelled"]
+            }));
+        } else {
+            assert!(requests.is_empty());
+        }
+        if case == "released" {
+            std::fs::remove_file(root.join("box-released")).unwrap();
         }
     }
 }

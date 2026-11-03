@@ -1433,7 +1433,12 @@ pub(crate) async fn run_openresearch_loop(
                         return Ok(());
                     }
                     if openresearch::box_deleted(&lifecycle, &sandbox_id).await {
-                        store.finish(&run_id, RunStatus::Lost, None, Some("Outcome unavailable: the rental was released before its final outcome was collected."))?;
+                        store.finish(
+                            &run_id,
+                            RunStatus::Lost,
+                            None,
+                            Some(&crate::plane::LABELS["run_notice_rental_outcome_unavailable"]),
+                        )?;
                         return Ok(());
                     }
                     tokio::time::sleep(POLL_INTERVAL).await;

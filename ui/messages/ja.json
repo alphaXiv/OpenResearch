@@ -1660,6 +1660,8 @@
   "status_unconfirmed": "未確認",
   "status_abandoned": "放棄済み",
   "status_last_seen": "最終確認 {time}",
+  "run_notice_rental_key_cancelled": "自動停止しました。マシンが15分間SSHキーを拒否しました。",
+  "run_notice_rental_outcome_unavailable": "結果を取得できません。最終結果を収集する前にレンタルが解放されました。",
   "run_notice_rental_billing": "レンタル中のマシンへの課金が続いています。実行をキャンセルしてマシンを停止してください。",
   "run_stop_box": "マシンを停止",
   "run_notice_unreachable": "{time} から {host} に接続できません。",

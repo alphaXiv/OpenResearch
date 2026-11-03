@@ -1660,6 +1660,8 @@
   "status_unconfirmed": "تأییدنشده",
   "status_abandoned": "رهاشده",
   "status_last_seen": "آخرین بار در {time} دیده شد",
+  "run_notice_rental_key_cancelled": "خودکار متوقف شد: دستگاه به‌مدت ۱۵ دقیقه کلید SSH خود را رد کرد.",
+  "run_notice_rental_outcome_unavailable": "نتیجه در دسترس نیست: دستگاه اجاره‌ای پیش از دریافت نتیجهٔ نهایی آزاد شد.",
   "run_notice_rental_billing": "هزینهٔ دستگاه اجاره‌ای همچنان محاسبه می‌شود. برای توقف دستگاه، اجرا را لغو کنید.",
   "run_stop_box": "توقف دستگاه",
   "run_notice_unreachable": "از {time} به {host} دسترسی نیست.",

@@ -245,6 +245,7 @@ async fn rejected_first_key_opens_durable_breaker_and_never_retries() {
         },
         Some(HostClass::Interactive)
     );
+    assert!(conn.state().borrow().last_live_ms.is_none());
     assert!(ssh_pids(&server).is_empty());
     let attempts = auth_attempts(&server);
     assert_eq!(attempts.values().sum::<usize>(), 1, "{attempts:?}");
@@ -527,7 +528,8 @@ async fn restarted_key_host_retries_and_auth_failure_keeps_its_breaker_open() {
     fs::write(server.config_path(), config).unwrap();
     let clock = TestClock::new();
     let conn = start(&server, clock.clone());
-    status(&conn, Status::Live).await;
+    let live = status(&conn, Status::Live).await;
+    assert_eq!(live.last_live_ms, Some(live.since_ms));
     server
         .proxy()
         .set(Faults {
@@ -552,6 +554,8 @@ async fn restarted_key_host_retries_and_auth_failure_keeps_its_breaker_open() {
     clock.advance(delay.max(0) as u64 + 1);
     let failed = status(&restarted, Status::NeedsAuth).await;
     assert_eq!(alias_auth(&server).class, Some(HostClass::Key));
+    assert!(failed.last_live_ms >= live.last_live_ms);
+    assert!(failed.since_ms > backoff.since_ms);
     let after = auth_attempts(&server);
     assert_eq!(
         after.values().sum::<usize>() - attempts.values().sum::<usize>(),
@@ -564,6 +568,10 @@ async fn restarted_key_host_retries_and_auth_failure_keeps_its_breaker_open() {
     tokio::time::sleep(Duration::from_millis(250)).await;
     assert!(ssh_pids(&server).is_empty());
     assert_eq!(auth_attempts(&server), after);
+    assert!(restarted.retry().await.is_err());
+    let retried = status(&restarted, Status::NeedsAuth).await;
+    assert!(retried.since_ms >= failed.since_ms + 30 * 60 * 1000);
+    assert_eq!(retried.last_live_ms, failed.last_live_ms);
 }
 
 #[test]

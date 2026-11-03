@@ -1660,6 +1660,8 @@
   "status_unconfirmed": "Sin confirmar",
   "status_abandoned": "Abandonada",
   "status_last_seen": "Visto por última vez a las {time}",
+  "run_notice_rental_key_cancelled": "Detenido automáticamente: la máquina rechazó su clave SSH durante 15 minutos.",
+  "run_notice_rental_outcome_unavailable": "Resultado no disponible: se liberó la máquina alquilada antes de recopilar su resultado final.",
   "run_notice_rental_billing": "La máquina alquilada sigue generando cargos. Cancela la ejecución para detenerla.",
   "run_stop_box": "Detener máquina",
   "run_notice_unreachable": "No se puede acceder a {host} desde las {time}.",

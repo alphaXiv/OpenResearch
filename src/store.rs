@@ -5169,6 +5169,7 @@ impl Store {
         let json = serde_json::json!({
             "status": if blocked { &Status::Idle } else { &state.status },
             "since_ms": state.since_ms, "failures": state.failures,
+            "last_live_ms": state.last_live_ms,
             "next_retry_ms": state.next_retry_ms,
             "cause": if blocked { None } else { state.cause.as_ref() },
         });

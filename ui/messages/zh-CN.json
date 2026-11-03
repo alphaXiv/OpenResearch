@@ -1660,6 +1660,8 @@
   "status_unconfirmed": "未确认",
   "status_abandoned": "已放弃",
   "status_last_seen": "最后一次看到：{time}",
+  "run_notice_rental_key_cancelled": "已自动停止：机器连续 15 分钟拒绝其 SSH 密钥。",
+  "run_notice_rental_outcome_unavailable": "结果不可用：在收集最终结果之前，租用的机器已被释放。",
   "run_notice_rental_billing": "租用的机器仍在计费。取消运行以停止机器。",
   "run_stop_box": "停止机器",
   "run_notice_unreachable": "自 {time} 起无法连接 {host}。",

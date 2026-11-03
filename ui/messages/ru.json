@@ -1660,6 +1660,8 @@
   "status_unconfirmed": "Не подтверждён",
   "status_abandoned": "Оставлен",
   "status_last_seen": "Последний ответ в {time}",
+  "run_notice_rental_key_cancelled": "Остановлено автоматически: машина отклоняла свой SSH-ключ в течение 15 минут.",
+  "run_notice_rental_outcome_unavailable": "Результат недоступен: аренда была прекращена до получения окончательного результата.",
   "run_notice_rental_billing": "Плата за арендованную машину продолжает начисляться. Отмените запуск, чтобы остановить машину.",
   "run_stop_box": "Остановить машину",
   "run_notice_unreachable": "Хост {host} недоступен с {time}.",

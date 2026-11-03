@@ -324,10 +324,9 @@ impl Runtime {
     /// An OpenResearch box is reached through a generated `ssh -F` file that layers its
     /// endpoint over the user's own configuration.
     fn box_transport(&self, target: &SshTarget) -> Result<Arc<LegacyTransport>> {
-        let alias = format!(
-            "orx-box-{}",
-            &hex(&Sha256::digest(target.dest.as_bytes()))[..16]
-        );
+        let identity =
+            serde_json::to_vec(&(&target.dest, &target.extra_opts, &target.managed_generation))?;
+        let alias = format!("orx-box-{}", &hex(&Sha256::digest(identity))[..16]);
         if let Some(transport) = lock(&self.boxes).get(&alias) {
             return Ok(transport.clone());
         }
@@ -1878,6 +1877,56 @@ mod tests {
         drop(store);
         std::fs::remove_dir_all(dir).unwrap();
     }
+    #[tokio::test]
+    async fn rented_boxes_keep_separate_transports_for_ports_and_rental_generations() {
+        let directory =
+            std::env::temp_dir().join(format!("orx-rental-transports-{}", uuid::Uuid::new_v4()));
+        let clock = Arc::new(TestClock::new());
+        let engine = Arc::new(Engine::new(
+            Store::open_at(directory.clone()).unwrap(),
+            clock.clone(),
+        ));
+        let runtime = Runtime::new(
+            engine,
+            clock,
+            directory.clone(),
+            Some(directory.join("missing-config")),
+        );
+        let mut first = SshTarget::host_port(
+            "root@shared".into(),
+            2200,
+            crate::jobs::ssh::HostKeyPolicy::Ephemeral,
+        );
+        first.managed_generation = Some("first-rental".into());
+        let transport = runtime.box_transport(&first).unwrap();
+        assert!(Arc::ptr_eq(
+            &transport,
+            &runtime.box_transport(&first).unwrap()
+        ));
+
+        let mut other_port = SshTarget::host_port(
+            "root@shared".into(),
+            2201,
+            crate::jobs::ssh::HostKeyPolicy::Ephemeral,
+        );
+        other_port.managed_generation = first.managed_generation.clone();
+        assert!(!Arc::ptr_eq(
+            &transport,
+            &runtime.box_transport(&other_port).unwrap()
+        ));
+
+        let mut next_rental = first;
+        next_rental.managed_generation = Some("next-rental".into());
+        assert!(!Arc::ptr_eq(
+            &transport,
+            &runtime.box_transport(&next_rental).unwrap()
+        ));
+        assert_eq!(lock(&runtime.auth).len(), 3);
+        drop(transport);
+        drop(runtime);
+        std::fs::remove_dir_all(directory).unwrap();
+    }
+
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn concurrent_host_initialization_shares_one_cell_per_alias_and_root() {
         let directory =

@@ -55,6 +55,7 @@ pub struct HostState {
     pub failures: usize,
     pub next_retry_ms: Option<i64>,
     pub since_ms: i64,
+    pub last_live_ms: Option<i64>,
     pub cause: Option<String>,
 }
 
@@ -65,6 +66,7 @@ impl Default for HostState {
             failures: 0,
             next_retry_ms: None,
             since_ms: 0,
+            last_live_ms: None,
             cause: None,
         }
     }
@@ -351,7 +353,7 @@ impl Actor {
             if let Err(error) = self.auth.block(
                 &self.store,
                 &self.config.alias,
-                self.state.since_ms,
+                now,
                 self.state.cause.clone().unwrap(),
             ) {
                 eprintln!(
@@ -392,6 +394,14 @@ impl Actor {
                 self.failed(true, cause.clone());
                 bail!("{cause}");
             }
+        }
+        if approve_route {
+            let now = self.clock.wall_ms();
+            auth.update(&self.store, &self.config.alias, |state| {
+                state.blocked = None;
+            })?;
+            self.state.cause = None;
+            self.state.since_ms = now;
         }
         self.state.status = Status::Connecting;
         self.store
@@ -557,6 +567,7 @@ impl Actor {
                 self.state.next_retry_ms = None;
                 self.state.cause = None;
                 self.state.since_ms = self.clock.wall_ms();
+                self.state.last_live_ms = Some(self.state.since_ms);
                 self.save();
                 Ok(session)
             }
@@ -612,6 +623,7 @@ impl Actor {
                     match event {
                         Some(Ok(Message { id, body })) => {
                             last_reply = self.clock.monotonic();
+                            self.state.last_live_ms = Some(self.clock.wall_ms());
                             if let Some(call) = pending.remove(&id) {
                                 if let Reply::Call(reply) = call.reply { let _ = reply.send(Ok(body)); }
                             } else { disconnect = Some("Unexpected orx-host response id".into()); }

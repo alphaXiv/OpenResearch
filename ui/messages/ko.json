@@ -1660,6 +1660,8 @@
   "status_unconfirmed": "미확인",
   "status_abandoned": "포기됨",
   "status_last_seen": "마지막 확인 {time}",
+  "run_notice_rental_key_cancelled": "자동으로 중지됨: 머신이 15분 동안 SSH 키를 거부했습니다.",
+  "run_notice_rental_outcome_unavailable": "결과를 확인할 수 없습니다. 최종 결과를 수집하기 전에 대여가 해제되었습니다.",
   "run_notice_rental_billing": "대여한 머신에 계속 요금이 부과되고 있습니다. 실행을 취소하여 머신을 중지하세요.",
   "run_stop_box": "머신 중지",
   "run_notice_unreachable": "{time}부터 {host}에 연결할 수 없습니다.",

@@ -267,8 +267,12 @@ collect log + exit code ◄─ssh─ wait for "collected", 60 s max
 - **Cancel and Abandon release the rental** from the laptop as well, so
   stopping billing never waits on the box being reachable. A successful
   release is stop proof: Cancel ends Cancelled, Abandon ends Lost with no kill
-  pending. Losing contact alone never releases a rental; the notice says the
-  box is still billing and offers Stop box.
+  pending. After a box that was reachable during this run rejects its SSH
+  key continuously for 15 minutes, the engine checks the companion API and
+  issues Cancel if the rental is still active; Connect or Live contact resets
+  the clock, and network outages never qualify.
+  The timer requests cancellation, while release proof makes the run terminal;
+  an already released rental settles as Lost without another release.
 - The engine drives the box over its own SSH connection, so first contact,
   backoff and the auth breaker ([remote](remote.md)) apply to it.
 - **No research data crosses this protocol.** Logs, commands, source,

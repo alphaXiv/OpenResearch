@@ -310,6 +310,30 @@ pub struct OpenResearch {
     loops: tokio::sync::Mutex<HashMap<String, tokio::task::JoinHandle<()>>>,
 }
 
+const REJECTED_KEY_GRACE_MS: i64 = 15 * 60 * 1000;
+
+fn rejected_key_expired(
+    created_at: i64,
+    contact: &crate::store::Contact,
+    host: &crate::engine::transport::HostState,
+    now: i64,
+) -> bool {
+    let crate::store::Contact::NeedsAuth { since, .. } = contact else {
+        return false;
+    };
+    let cause = host
+        .cause
+        .as_deref()
+        .unwrap_or_default()
+        .to_ascii_lowercase();
+    host.status == crate::engine::transport::Status::NeedsAuth
+        && cause.contains("permission denied (publickey)")
+        && host
+            .last_live_ms
+            .is_some_and(|live| live >= created_at && live <= host.since_ms)
+        && now.saturating_sub(host.since_ms.max(*since)) >= REJECTED_KEY_GRACE_MS
+}
+
 impl OpenResearch {
     pub fn new(engine: Arc<Engine>, transport: TransportFactory) -> Self {
         Self {
@@ -317,6 +341,76 @@ impl OpenResearch {
             transport,
             loops: tokio::sync::Mutex::default(),
         }
+    }
+
+    async fn cancel_rejected_key(
+        &self,
+        run: &StoredRun,
+        contact: &crate::store::Contact,
+        descriptor: &BackendDescriptor,
+    ) -> Result<bool> {
+        let Some(target) = descriptor.openresearch_ssh_target() else {
+            return Ok(false);
+        };
+
+        let Ok(transport) = (self.transport)(&target) else {
+            return Ok(false);
+        };
+        let host = transport.ssh.conn.state().borrow().clone();
+        if !rejected_key_expired(run.created_at, contact, &host, self.engine.clock.wall_ms()) {
+            return Ok(false);
+        }
+
+        let Some(_gate) = self.engine.try_gate(&run.id) else {
+            return Ok(true);
+        };
+        let (_, sandbox) = descriptor.openresearch_ref()?;
+        let creds = crate::config::load_credentials()
+            .await?
+            .ok_or_else(|| anyhow!("Missing OpenResearch credentials"))?;
+        let released = match crate::client::get_sandbox(&creds, sandbox).await {
+            Ok(_) => false,
+            Err(error) if crate::jobs::openresearch::is_not_found_error(&error.to_string()) => true,
+            Err(error) => return Err(error),
+        };
+
+        let (current, state) = self.engine.load(&run.id)?;
+        let host = transport.ssh.conn.state().borrow().clone();
+        if current.cancel_requested
+            || state.cancel_accepted_at.is_some()
+            || phase_of(&current)?.is_terminal()
+            || !rejected_key_expired(
+                current.created_at,
+                &state.contact,
+                &host,
+                self.engine.clock.wall_ms(),
+            )
+        {
+            return Ok(true);
+        }
+
+        if released {
+            if let Some(task) = self.loops.lock().await.remove(&run.id) {
+                task.abort();
+                let _ = task.await;
+            }
+            self.engine.observe(
+                &run.id,
+                Observation::Gone {
+                    reason: crate::plane::LABELS["run_notice_rental_outcome_unavailable"].clone(),
+                },
+            )?;
+        } else {
+            self.engine
+                .cancel(
+                    self,
+                    &run.id,
+                    &crate::plane::LABELS["run_notice_rental_key_cancelled"],
+                )
+                .await?;
+        }
+
+        Ok(true)
     }
 }
 
@@ -412,11 +506,7 @@ impl Backend for OpenResearch {
         super::api::unknown("OpenResearch provisioning outcome has no recorded sandbox id")
     }
     async fn observe(&self, runs: &[WatchedRun], _budget: Duration) -> Vec<(String, Observation)> {
-        let mut tasks = self.loops.lock().await;
         for run in runs {
-            if tasks.get(&run.id).is_some_and(|task| !task.is_finished()) {
-                continue;
-            }
             if !matches!(self.engine.own(&run.id), Ok(true)) {
                 continue;
             }
@@ -436,6 +526,24 @@ impl Backend for OpenResearch {
                 continue;
             };
             let descriptor = *descriptor;
+            if descriptor.kind != "openresearch_job" {
+                continue;
+            }
+            match self
+                .cancel_rejected_key(&stored, &state.contact, &descriptor)
+                .await
+            {
+                Ok(true) => continue,
+                Ok(false) => {}
+                Err(error) => {
+                    eprintln!("Rental auto-cancel unavailable for {}: {error}", run.id);
+                    continue;
+                }
+            }
+            let mut tasks = self.loops.lock().await;
+            if tasks.get(&run.id).is_some_and(|task| !task.is_finished()) {
+                continue;
+            }
             let sink = EngineSink {
                 engine: self.engine.clone(),
             };
@@ -532,6 +640,147 @@ impl Backend for OpenResearch {
 #[cfg(all(test, unix))]
 mod tests {
     use super::*;
+
+    #[test]
+    fn rejected_key_grace_requires_continuous_auth_failure_and_live_contact_in_this_run() {
+        use crate::engine::transport::{HostState, Status};
+        use crate::store::Contact;
+
+        let created_at = 100;
+        let contact = Contact::NeedsAuth {
+            since: 200,
+            cause: "Permission denied (publickey)".into(),
+        };
+        let host = HostState {
+            status: Status::NeedsAuth,
+            since_ms: 200,
+            last_live_ms: Some(100),
+            cause: Some("Permission denied (publickey)".into()),
+            ..HostState::default()
+        };
+        assert!(!rejected_key_expired(
+            created_at,
+            &contact,
+            &host,
+            200 + 14 * 60_000
+        ));
+        assert!(rejected_key_expired(
+            created_at,
+            &contact,
+            &host,
+            200 + 15 * 60_000
+        ));
+        for (contact, host) in [
+            (
+                Contact::Live,
+                HostState {
+                    status: Status::Live,
+                    ..host.clone()
+                },
+            ),
+            (
+                Contact::Unreachable {
+                    since: 200,
+                    cause: "Connection timed out".into(),
+                },
+                HostState {
+                    status: Status::Backoff,
+                    ..host.clone()
+                },
+            ),
+            (
+                contact.clone(),
+                HostState {
+                    last_live_ms: None,
+                    ..host.clone()
+                },
+            ),
+            (
+                contact.clone(),
+                HostState {
+                    last_live_ms: Some(99),
+                    ..host.clone()
+                },
+            ),
+            (
+                contact.clone(),
+                HostState {
+                    last_live_ms: Some(201),
+                    ..host.clone()
+                },
+            ),
+            (
+                contact.clone(),
+                HostState {
+                    cause: Some("Host key verification failed".into()),
+                    ..host.clone()
+                },
+            ),
+            (
+                contact.clone(),
+                HostState {
+                    cause: Some("SSH master ended; press Connect".into()),
+                    ..host.clone()
+                },
+            ),
+            (
+                contact.clone(),
+                HostState {
+                    cause: Some("Permission denied (password)".into()),
+                    ..host.clone()
+                },
+            ),
+        ] {
+            assert!(!rejected_key_expired(
+                created_at,
+                &contact,
+                &host,
+                200 + 60 * 60_000
+            ));
+        }
+        let after_connect = HostState {
+            since_ms: 200 + 14 * 60_000,
+            ..host.clone()
+        };
+        assert!(!rejected_key_expired(
+            created_at,
+            &contact,
+            &after_connect,
+            200 + 15 * 60_000
+        ));
+        assert!(rejected_key_expired(
+            created_at,
+            &contact,
+            &after_connect,
+            after_connect.since_ms + 15 * 60_000
+        ));
+        let after_recovery = HostState {
+            last_live_ms: Some(200 + 13 * 60_000),
+            ..after_connect.clone()
+        };
+        assert!(!rejected_key_expired(
+            created_at,
+            &contact,
+            &after_recovery,
+            200 + 15 * 60_000
+        ));
+        assert!(rejected_key_expired(
+            created_at,
+            &contact,
+            &after_recovery,
+            after_recovery.since_ms + 15 * 60_000
+        ));
+        let recovered_at_fourteen = Contact::NeedsAuth {
+            since: 200 + 14 * 60_000,
+            cause: host.cause.clone().unwrap(),
+        };
+        assert!(!rejected_key_expired(
+            created_at,
+            &recovered_at_fourteen,
+            &host,
+            200 + 15 * 60_000
+        ));
+    }
 
     #[test]
     fn engine_sink_keeps_legacy_lease_and_terminal_reason_in_the_notice() {

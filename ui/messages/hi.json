@@ -1660,6 +1660,8 @@
   "status_unconfirmed": "अपुष्ट",
   "status_abandoned": "छोड़ा गया",
   "status_last_seen": "आख़िरी बार {time} पर देखा",
+  "run_notice_rental_key_cancelled": "अपने आप रोका गया: मशीन ने 15 मिनट तक अपनी SSH कुंजी अस्वीकार की।",
+  "run_notice_rental_outcome_unavailable": "परिणाम उपलब्ध नहीं है: अंतिम परिणाम एकत्र होने से पहले किराए की मशीन रिलीज़ हो गई।",
   "run_notice_rental_billing": "किराए की मशीन का शुल्क अभी भी लग रहा है। मशीन रोकने के लिए रन रद्द करें।",
   "run_stop_box": "मशीन रोकें",
   "run_notice_unreachable": "{time} से {host} तक नहीं पहुँच पा रहे।",

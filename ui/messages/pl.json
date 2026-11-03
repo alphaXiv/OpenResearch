@@ -1660,6 +1660,8 @@
   "status_unconfirmed": "Niepotwierdzone",
   "status_abandoned": "Porzucone",
   "status_last_seen": "Ostatnio widziane o {time}",
+  "run_notice_rental_key_cancelled": "Zatrzymano automatycznie: maszyna odrzucała swój klucz SSH przez 15 minut.",
+  "run_notice_rental_outcome_unavailable": "Wynik niedostępny: wynajęta maszyna została zwolniona przed zebraniem końcowego wyniku.",
   "run_notice_rental_billing": "Wynajęta maszyna nadal nalicza opłaty. Anuluj uruchomienie, aby ją zatrzymać.",
   "run_stop_box": "Zatrzymaj maszynę",
   "run_notice_unreachable": "Brak połączenia z {host} od {time}.",

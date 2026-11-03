@@ -1660,6 +1660,8 @@
   "status_unconfirmed": "غير مؤكد",
   "status_abandoned": "متروك",
   "status_last_seen": "آخر ظهور في {time}",
+  "run_notice_rental_key_cancelled": "أُوقف تلقائيًا: رفض الجهاز مفتاح SSH لمدة 15 دقيقة.",
+  "run_notice_rental_outcome_unavailable": "النتيجة غير متاحة: أُطلق الجهاز المستأجر قبل جمع نتيجته النهائية.",
   "run_notice_rental_billing": "لا تزال تكلفة الجهاز المستأجر تُحتسب. ألغِ التشغيل لإيقاف الجهاز.",
   "run_stop_box": "إيقاف الجهاز",
   "run_notice_unreachable": "تعذّر الوصول إلى {host} منذ {time}.",
