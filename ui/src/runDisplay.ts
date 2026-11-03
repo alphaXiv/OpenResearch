@@ -3,6 +3,7 @@ import type { Run, RunContact, RunStatus } from "./api";
 export type RunDisplayStatus =
   | RunStatus
   | "cancelling"
+  | "cancellation_pending"
   | "not_fully_stopped"
   | "cancelled_unconfirmed"
   | "unreachable"
@@ -26,7 +27,7 @@ export type RunNotice =
   | { kind: "needs_auth"; host: string | null; since: number; cause: string }
   | { kind: "unconfirmed_launch"; detail: string }
   | { kind: "cancel_pending"; host: string | null; since: number; contact: "unreachable" | "needs_auth" }
-  | { kind: "cancel_pending_launch"; detail: string }
+  | { kind: "cancel_pending_launch" }
   | { kind: "cancel_unconfirmed"; detail: string }
   | { kind: "abandoned"; host: string | null }
   | { kind: "cancelling" }
@@ -72,11 +73,12 @@ export function runDisplay(run: RunState): RunDisplay {
   if (!runActive(run.status)) {
     return { status: runAbandoned(run) ? "abandoned" : run.status, stale: contact !== null, since };
   }
-  if (contact === null) {
-    return { status: runCancelling(run) ? "cancelling" : run.status, stale: false, since };
+  if (runCancelling(run)) {
+    const pending = run.status === "submitting" || contact?.type === "unreachable" || contact?.type === "needs_auth";
+    return { status: pending ? "cancellation_pending" : "cancelling", stale: contact !== null, since };
   }
+  if (contact === null) return { status: run.status, stale: false, since };
 
-  if (runCancelling(run)) return { status: "cancelling", stale: true, since };
   if (contact.type === "needs_auth") return { status: "needs_auth", stale: true, since };
   const status = contact.type === "unreconciled" || contact.type === "stopping" ? "unconfirmed" : contact.type;
   return { status, stale: true, since };
@@ -99,7 +101,7 @@ export function runNotice(run: Pick<Run, "status" | "backend"> & Partial<Pick<Ru
       if (run.logCollection === "failed") return { kind: "log_failed", host, cause: run.logCollectionError ?? null };
       return run.noticeError ? { kind: "notice_failed", error: run.noticeError } : null;
     }
-    if (runCancelling(run)) return { kind: "cancelling" };
+    if (runCancelling(run)) return { kind: run.status === "submitting" ? "cancel_pending_launch" : "cancelling" };
     const error = run.backend?.monitoringError;
     return typeof error === "string" && error ? { kind: "monitoring", error } : null;
   }
@@ -114,7 +116,7 @@ export function runNotice(run: Pick<Run, "status" | "backend"> & Partial<Pick<Ru
   if (runCancelling(run)) {
     if (contact.type !== "unreconciled") return { kind: "cancel_pending", host, since: contact.since, contact: contact.type };
     return submitting
-      ? { kind: "cancel_pending_launch", detail: contact.detail }
+      ? { kind: "cancel_pending_launch" }
       : { kind: "cancel_unconfirmed", detail: contact.detail };
   }
   if (contact.type === "unreconciled") {

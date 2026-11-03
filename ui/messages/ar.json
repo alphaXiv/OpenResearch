@@ -1664,10 +1664,10 @@
   "run_notice_retry_at": "ستُعاد المحاولة في {time}.",
   "run_notice_needs_auth": "اتصل بـ {host} لمواصلة متابعة هذا التشغيل.",
   "run_notice_unconfirmed_launch": "تعذّر تأكيد الإطلاق. جارٍ التحقق مجددًا.",
-  "run_notice_cancel_pending": "الإلغاء معلّق: تعذّر الوصول إلى {host} منذ {time}.",
-  "run_notice_cancel_pending_auth": "الإلغاء معلّق: اتصل بـ {host} لإرساله.",
-  "run_notice_cancel_pending_later": "سيرسله orx عند عودة المضيف.",
-  "run_notice_cancel_pending_launch": "الإلغاء معلّق: لم يُؤكَّد الإطلاق بعد.",
+  "run_notice_cancel_pending": "يتعذر الوصول إلى {host} منذ {time}.",
+  "run_notice_cancel_pending_auth": "اتصل بـ {host} لإرسال طلب الإلغاء.",
+  "run_notice_cancel_pending_later": "سيُرسَل طلب الإلغاء عندما يصبح الجهاز متاحًا مجددًا.",
+  "run_notice_cancel_pending_launch": "سيُرسَل طلب الإلغاء بعد تأكيد بدء التشغيل.",
   "run_notice_stops_if_found": "إذا ظهرت المهمة، فسيوقفها orx.",
   "run_notice_unreconciled": "يحتاج إلى انتباه.",
   "run_notice_abandoned": "متروك. إذا ظهرت المهمة على {host}، فسيوقفها orx.",
@@ -1676,7 +1676,7 @@
   "run_stop_again": "إيقاف مرة أخرى",
   "run_abandon": "ترك…",
   "run_abandon_title": "ترك هذا التشغيل؟",
-  "run_abandon_body": "يتوقف orx عن انتظاره ويضع عليه علامة متروك. إذا ظهرت المهمة لاحقًا على {host}، فسيوقفها orx حينها.",
+  "run_abandon_body": "سيتوقف OpenResearch عن تتبّع هذا التشغيل. تأكد جيدًا من إيقاف موارد الحوسبة الفعلية.",
   "run_abandon_body_no_host": "يتوقف orx عن انتظاره ويضع عليه علامة متروك. إذا ظهرت المهمة لاحقًا، فسيوقفها orx حينها.",
   "run_abandon_confirm": "ترك التشغيل",
   "run_abandoning": "جارٍ الترك…",
@@ -1716,5 +1716,7 @@
   "status_stopping_two": "لم يتوقف بالكامل · عمليتان ({count}) لا تزالان تعملان على {host}",
   "status_stopping_few": "لم يتوقف بالكامل · {count} عمليات لا تزال تعمل على {host}",
   "status_stopping_many": "لم يتوقف بالكامل · {count} عملية لا تزال تعمل على {host}",
-  "status_stopping_other": "لم يتوقف بالكامل · {count} عملية لا تزال تعمل على {host}"
+  "status_stopping_other": "لم يتوقف بالكامل · {count} عملية لا تزال تعمل على {host}",
+  "status_cancellation_pending": "الإلغاء قيد الانتظار",
+  "run_abandon_unreachable": "يتعذر الوصول إلى الجهاز."
 }

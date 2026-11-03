@@ -1664,10 +1664,10 @@
   "run_notice_retry_at": "{time} に再試行します。",
   "run_notice_needs_auth": "この実行を引き続き追跡するには {host} に接続してください。",
   "run_notice_unconfirmed_launch": "起動を確認できませんでした。再確認しています。",
-  "run_notice_cancel_pending": "キャンセル保留中: {time} から {host} に接続できません。",
-  "run_notice_cancel_pending_auth": "キャンセル保留中: 送信するには {host} に接続してください。",
-  "run_notice_cancel_pending_later": "ホストが復帰すると orx が送信します。",
-  "run_notice_cancel_pending_launch": "キャンセル保留中: 起動はまだ確認されていません。",
+  "run_notice_cancel_pending": "{time} から {host} に接続できません。",
+  "run_notice_cancel_pending_auth": "キャンセルを送信するには {host} に接続してください。",
+  "run_notice_cancel_pending_later": "マシンに再び接続できるようになると、キャンセルが送信されます。",
+  "run_notice_cancel_pending_launch": "起動が確認されると、キャンセルが送信されます。",
   "run_notice_stops_if_found": "ジョブが見つかれば orx が停止します。",
   "run_notice_unreconciled": "確認が必要です。",
   "run_notice_abandoned": "放棄済み。{host} でジョブが見つかれば orx が停止します。",
@@ -1676,7 +1676,7 @@
   "run_stop_again": "もう一度停止",
   "run_abandon": "放棄…",
   "run_abandon_title": "この実行を放棄しますか？",
-  "run_abandon_body": "orx は待機をやめ、放棄済みとしてマークします。後で {host} にジョブが現れた場合は、その時点で orx が停止します。",
+  "run_abandon_body": "OpenResearch はこの実行の追跡を停止します。実際の計算リソースが停止していることを再確認してください。",
   "run_abandon_body_no_host": "orx は待機をやめ、放棄済みとしてマークします。後でジョブが現れた場合は、その時点で orx が停止します。",
   "run_abandon_confirm": "実行を放棄",
   "run_abandoning": "放棄しています…",
@@ -1716,5 +1716,7 @@
   "status_stopping_two": "完全には停止していません · {host} で {count} 個のプロセスがまだ実行中です",
   "status_stopping_few": "完全には停止していません · {host} で {count} 個のプロセスがまだ実行中です",
   "status_stopping_many": "完全には停止していません · {host} で {count} 個のプロセスがまだ実行中です",
-  "status_stopping_other": "完全には停止していません · {host} で {count} 個のプロセスがまだ実行中です"
+  "status_stopping_other": "完全には停止していません · {host} で {count} 個のプロセスがまだ実行中です",
+  "status_cancellation_pending": "キャンセル待ち",
+  "run_abandon_unreachable": "マシンに接続できません。"
 }

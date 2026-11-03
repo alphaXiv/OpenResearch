@@ -1664,10 +1664,10 @@
   "run_notice_retry_at": "将于 {time} 重试。",
   "run_notice_needs_auth": "连接到 {host} 以继续跟踪此运行。",
   "run_notice_unconfirmed_launch": "无法确认启动。正在重新检查。",
-  "run_notice_cancel_pending": "取消待处理：自 {time} 起无法连接 {host}。",
-  "run_notice_cancel_pending_auth": "取消待处理：连接到 {host} 以发送。",
-  "run_notice_cancel_pending_later": "主机恢复后 orx 会发送。",
-  "run_notice_cancel_pending_launch": "取消待处理：启动尚未确认。",
+  "run_notice_cancel_pending": "自 {time} 起无法连接到 {host}。",
+  "run_notice_cancel_pending_auth": "连接到 {host} 以发送取消请求。",
+  "run_notice_cancel_pending_later": "机器恢复连接后将发送取消请求。",
+  "run_notice_cancel_pending_launch": "确认启动后将发送取消请求。",
   "run_notice_stops_if_found": "如果作业出现，orx 会将其停止。",
   "run_notice_unreconciled": "需要处理。",
   "run_notice_abandoned": "已放弃。如果作业在 {host} 上出现，orx 会将其停止。",
@@ -1676,7 +1676,7 @@
   "run_stop_again": "再次停止",
   "run_abandon": "放弃…",
   "run_abandon_title": "放弃此运行？",
-  "run_abandon_body": "orx 将停止等待并将其标记为已放弃。如果作业稍后在 {host} 上出现，orx 会届时将其停止。",
+  "run_abandon_body": "OpenResearch 将停止跟踪此运行。请再次确认实际计算资源已关闭。",
   "run_abandon_body_no_host": "orx 将停止等待并将其标记为已放弃。如果作业稍后出现，orx 会届时将其停止。",
   "run_abandon_confirm": "放弃运行",
   "run_abandoning": "正在放弃…",
@@ -1716,5 +1716,7 @@
   "status_stopping_two": "未完全停止 · {host} 上仍有 {count} 个进程在运行",
   "status_stopping_few": "未完全停止 · {host} 上仍有 {count} 个进程在运行",
   "status_stopping_many": "未完全停止 · {host} 上仍有 {count} 个进程在运行",
-  "status_stopping_other": "未完全停止 · {host} 上仍有 {count} 个进程在运行"
+  "status_stopping_other": "未完全停止 · {host} 上仍有 {count} 个进程在运行",
+  "status_cancellation_pending": "取消待发送",
+  "run_abandon_unreachable": "无法连接到机器。"
 }

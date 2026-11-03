@@ -1664,10 +1664,10 @@
   "run_notice_retry_at": "Следующая попытка в {time}.",
   "run_notice_needs_auth": "Подключитесь к {host}, чтобы продолжить отслеживание запуска.",
   "run_notice_unconfirmed_launch": "Не удалось подтвердить запуск. Проверяем ещё раз.",
-  "run_notice_cancel_pending": "Ожидание отмены: хост {host} недоступен с {time}.",
-  "run_notice_cancel_pending_auth": "Ожидание отмены: подключитесь к {host}, чтобы отправить запрос.",
-  "run_notice_cancel_pending_later": "orx отправит запрос, когда хост снова станет доступен.",
-  "run_notice_cancel_pending_launch": "Ожидание отмены: запуск ещё не подтверждён.",
+  "run_notice_cancel_pending": "{host} недоступен с {time}.",
+  "run_notice_cancel_pending_auth": "Подключитесь к {host}, чтобы отправить запрос на отмену.",
+  "run_notice_cancel_pending_later": "Запрос на отмену будет отправлен, когда машина снова станет доступна.",
+  "run_notice_cancel_pending_launch": "Запрос на отмену будет отправлен после подтверждения запуска.",
   "run_notice_stops_if_found": "Если задание обнаружится, orx остановит его.",
   "run_notice_unreconciled": "Требует внимания.",
   "run_notice_abandoned": "Запуск оставлен. Если задание обнаружится на {host}, orx остановит его.",
@@ -1676,7 +1676,7 @@
   "run_stop_again": "Остановить снова",
   "run_abandon": "Оставить…",
   "run_abandon_title": "Оставить этот запуск?",
-  "run_abandon_body": "orx перестанет ждать завершения запуска и отметит его как оставленный. Если задание позже обнаружится на {host}, orx остановит его.",
+  "run_abandon_body": "OpenResearch перестанет отслеживать этот запуск. Убедитесь ещё раз, что вычислительные ресурсы действительно выключены.",
   "run_abandon_body_no_host": "orx перестанет ждать завершения запуска и отметит его как оставленный. Если задание позже обнаружится, orx остановит его.",
   "run_abandon_confirm": "Оставить запуск",
   "run_abandoning": "Оставляем запуск…",
@@ -1716,5 +1716,7 @@
   "status_stopping_two": "Остановлено не полностью · {count} процесса всё ещё работают на {host}",
   "status_stopping_few": "Остановлено не полностью · {count} процесса всё ещё работают на {host}",
   "status_stopping_many": "Остановлено не полностью · {count} процессов всё ещё работают на {host}",
-  "status_stopping_other": "Остановлено не полностью · {count} процесса всё ещё работают на {host}"
+  "status_stopping_other": "Остановлено не полностью · {count} процесса всё ещё работают на {host}",
+  "status_cancellation_pending": "Отмена ожидает отправки",
+  "run_abandon_unreachable": "Машина недоступна."
 }

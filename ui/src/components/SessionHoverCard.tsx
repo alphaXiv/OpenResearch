@@ -23,6 +23,7 @@ const ICON_TONES: Partial<Record<RunDisplayStatus, string>> = {
   starting: "text-accent-green",
   running: "text-accent-green",
   cancelling: "text-accent-amber",
+  cancellation_pending: "text-accent-amber",
   failed: "text-accent-red",
 };
 

@@ -5,7 +5,7 @@ import { FlaskConical, CircleStop, FolderTree, Terminal } from "lucide-react";
 import { useLayoutEffect, useMemo, useRef, useState } from "react";
 import { fmtNumber, timeAgo, type Experiment, type Run } from "../api";
 import { runActive, runDisplay } from "../runDisplay";
-import { StatusBadge } from "./StatusBadge";
+import { statusLabel, StatusBadge } from "./StatusBadge";
 import { tabOpenGestureHandlers, type TabOpenIntent } from "../tabPreview";
 import { IconButton, Tooltip } from "./ui";
 import { ArchiveMenu, type ArchiveActions } from "./ArchiveMenu";
@@ -196,12 +196,12 @@ export function ExperimentsTable({
                   </IconButton>
                 </Tooltip>
                 {liveRun && (
-                  <Tooltip interactive content={cancelling ? m.experiments_stop_requested() : m.experiments_stop_run()}>
+                  <Tooltip interactive content={cancelling ? statusLabel(display.status) : m.experiments_stop_run()}>
                     <IconButton
                       size="small"
                       variant="stop"
                       disabled={cancelling}
-                      aria-label={cancelling ? m.common_stopping() : m.common_stop()}
+                      aria-label={cancelling ? statusLabel(display.status) : m.common_stop()}
                       onClick={() => void requestCancel(liveRun.id)}
                     >
                       <CircleStop size={16} />

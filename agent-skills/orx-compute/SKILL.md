@@ -137,6 +137,12 @@ Attention messages also arrive in this chat when monitoring or cancellation
 needs action. Inspect `orx exp status <expId>` and tell the user what needs
 fixing. Cancel only a run that is broken or no longer wanted.
 
+**Cancellation pending** means the cancel has been accepted but has not reached
+the machine. It will be sent when the machine is reachable again or the launch
+is confirmed. **Cancelling…** means the machine is stopping the run. To stop
+tracking an unreachable run, use `orx exp abandon <runId>`; double-check
+that the actual compute is shut down. The cancel stays pending after Abandon.
+
 Use `orx exp wake <expId>` to subscribe this chat to a run launched elsewhere.
 `orx exp wait` remains available for humans; do not use it to keep an agent
 session waiting for results.

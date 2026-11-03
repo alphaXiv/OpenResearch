@@ -6,6 +6,7 @@ import test from "node:test";
 import React from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 import ts from "typescript";
+import { runLabelsHarness } from "./runLabelsHarness.mjs";
 
 const require = createRequire(import.meta.url);
 
@@ -32,7 +33,7 @@ const mocks = {
   "./ExperimentOverview": { ExperimentOverview: () => null },
   "./LogTerminal": { LogTerminal: ({ run }) => `LOG:${run.id}` },
   "./RunContactNotice": { RunContactNotice: ({ run }) => `NOTICE:${run.id}` },
-  "./StatusBadge": { StatusBadge: () => null },
+  "./StatusBadge": { ...runLabelsHarness().load("components/StatusBadge"), StatusBadge: () => null },
   "./ui": {
     Button: ({ children }) => React.createElement("button", null, children),
     ButtonLink: ({ children, href }) => React.createElement("a", { href }, children),
@@ -107,13 +108,19 @@ test("the contact notice follows the selected run", () => {
   assert.doesNotMatch(render("missing-run"), /NOTICE:/);
 });
 
-test("stop reads as pending while the host can't take the cancel", () => {
+test("stop distinguishes a pending cancel from a delivered one", () => {
   const live = { id: "run-live", experimentId: "experiment-a", createdAt: 4, status: "running", cancelling: false, contact: null };
   const renderLive = (run) => renderToStaticMarkup(React.createElement(exports.DetailDrawer, { ...props, runs: [run], selectedRunId: null }));
 
   assert.match(renderLive(live), />common_stop</);
-  assert.match(renderLive({ ...live, cancelling: true }), />status_cancelling</);
-  const unreachable = { type: "unreachable", since: 1, cause: "timed out" };
-  assert.match(renderLive({ ...live, cancelling: true, contact: unreachable }), />status_cancelling</);
-  assert.match(renderLive({ ...live, contact: unreachable }), />common_stop</);
+  for (const [contact, label] of [
+    [null, "Cancelling…"],
+    [{ type: "unreachable", since: 1, cause: "Offline" }, "Cancellation pending"],
+    [{ type: "needs_auth", since: 1, cause: "Connect" }, "Cancellation pending"],
+  ]) {
+    const html = renderLive({ ...live, cancelling: true, contact });
+    assert.ok(html.includes(label), html);
+    if (contact) assert.doesNotMatch(html, /Cancelling…/);
+    assert.match(renderLive({ ...live, contact }), />common_stop</);
+  }
 });

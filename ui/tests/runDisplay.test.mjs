@@ -16,6 +16,8 @@ describe("runDisplay", () => {
       assert.deepEqual(runDisplay(run(status)), { status, stale: false, since: null });
     }
     assert.equal(runDisplay(run("running", { cancelling: true })).status, "cancelling");
+    assert.equal(runDisplay(run("submitting", { cancelling: true })).status, "cancellation_pending");
+    assert.deepEqual(runNotice(run("submitting", { cancelling: true })), { kind: "cancel_pending_launch" });
   });
 
   test("lost contact replaces the phase with what the user must know", () => {
@@ -24,9 +26,9 @@ describe("runDisplay", () => {
       [run("starting", { contact: needsAuth }), "needs_auth", 200],
       [run("submitting", { contact: unreconciled("No sandbox id") }), "unconfirmed", 300],
       [run("running", { contact: unreconciled("Job not found") }), "unconfirmed", 300],
-      [run("running", { cancelling: true, contact: unreachable }), "cancelling", 100],
-      [run("running", { cancelling: true, contact: needsAuth }), "cancelling", 200],
-      [run("submitting", { cancelling: true, contact: unreconciled("No sandbox id") }), "cancelling", 300],
+      [run("running", { cancelling: true, contact: unreachable }), "cancellation_pending", 100],
+      [run("running", { cancelling: true, contact: needsAuth }), "cancellation_pending", 200],
+      [run("submitting", { cancelling: true, contact: unreconciled("No sandbox id") }), "cancellation_pending", 300],
       [run("running", { cancelling: true, contact: unreconciled("Cancel not verified: 2 survivors") }), "cancelling", 300],
     ];
     for (const [input, status, since] of cases) {
@@ -65,7 +67,7 @@ describe("runNotice", () => {
   test("a pending cancel says why it is pending", () => {
     assert.deepEqual(runNotice(run("running", { cancelling: true, contact: unreachable })), { kind: "cancel_pending", host: "gpu-box", since: 100, contact: "unreachable" });
     assert.deepEqual(runNotice(run("running", { cancelling: true, contact: needsAuth })), { kind: "cancel_pending", host: "gpu-box", since: 200, contact: "needs_auth" });
-    assert.deepEqual(runNotice(run("submitting", { cancelling: true, contact: unreconciled("No sandbox id") })), { kind: "cancel_pending_launch", detail: "No sandbox id" });
+    assert.deepEqual(runNotice(run("submitting", { cancelling: true, contact: unreconciled("No sandbox id") })), { kind: "cancel_pending_launch" });
     assert.deepEqual(runNotice(run("running", { cancelling: true, contact: unreconciled("2 survivors") })), { kind: "cancel_unconfirmed", detail: "2 survivors" });
   });
 

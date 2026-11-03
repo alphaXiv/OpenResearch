@@ -40,6 +40,11 @@ function surfaces(locale, value) {
 
 const states = [
   [run({ status: "running", cancelling: true }), "Cancelling…", true],
+  [run({ status: "running", cancelling: true, contact: { type: "unreachable", since: 1, cause: "Offline" } }), "Cancellation pending", true],
+  [run({ status: "running", cancelling: true, contact: { type: "needs_auth", since: 1, cause: "Connect" } }), "Cancellation pending", true],
+  [run({ status: "submitting", cancelling: true }), "Cancellation pending", true],
+  [run({ status: "submitting", cancelling: true, contact: { type: "unreconciled", since: 1, detail: "No handle" } }), "Cancellation pending", true],
+  [run({ status: "running", cancelling: true, contact: { type: "unreconciled", since: 1, detail: "Stop pending" } }), "Cancelling…", true],
   [run(), "Cancelled", false],
   [run({ contact: { type: "stopping", since: 1, count: 2 } }), "Not fully stopped · 2 processes still running on gpu-box", true],
   [run({ cancelUnconfirmed: [], resultMarkdown: "Container processes couldn't be checked." }), "Cancelled · couldn&#x27;t confirm", true],
@@ -58,6 +63,41 @@ test("each cancellation state agrees across the badge, notice, lineage and sessi
     }
     assert.equal(rendered.notice.includes("Stop now"), value.contact?.type === "stopping");
     if (value.cancelUnconfirmed) assert.match(rendered.notice, /In-container processes or processes outside the host scan couldn&#x27;t be checked/);
+  }
+});
+
+test("Japanese pending cancellation reaches every surface and offers Abandon", () => {
+  for (const contact of [
+    { type: "unreachable", since: 1, cause: "Offline" },
+    { type: "needs_auth", since: 1, cause: "Connect" },
+  ]) {
+    const rendered = surfaces("ja", run({ status: "running", cancelling: true, contact }));
+    for (const html of Object.values(rendered)) {
+      assert.ok(html.includes("キャンセル待ち"), html);
+      assert.doesNotMatch(html, /Cancellation pending|Cancelling/);
+    }
+    assert.ok(rendered.notice.includes("放棄"), rendered.notice);
+  }
+});
+
+test("chat run banners distinguish pending and delivered cancels in English and Japanese", () => {
+  for (const [locale, pending, delivered] of [["en", "Cancellation pending", "Cancelling…"], ["ja", "キャンセル待ち", "キャンセル中"]]) {
+    const { ExperimentRunBanner } = runLabelsHarness(locale).load("components/ExperimentRunBanner");
+    for (const [contact, label] of [
+      [null, delivered],
+      [{ type: "unreachable", since: 1, cause: "Offline" }, pending],
+      [{ type: "needs_auth", since: 1, cause: "Connect" }, pending],
+    ]) {
+      const html = renderToStaticMarkup(React.createElement(ExperimentRunBanner, {
+        runs: [{ run: run({ status: "running", cancelling: true, contact }), experimentName: "SSH sandwich" }],
+      }));
+      assert.ok(html.includes(label), html);
+      if (contact) assert.ok(!html.includes(delivered), html);
+    }
+    const submitting = renderToStaticMarkup(React.createElement(ExperimentRunBanner, {
+      runs: [{ run: run({ status: "submitting", cancelling: true }), experimentName: "SSH sandwich" }],
+    }));
+    assert.ok(submitting.includes(pending), submitting);
   }
 });
 

@@ -42,7 +42,7 @@ const mocks = {
   "../paraglide/messages.js": messages,
   "../queries/settings": { useEngineHosts: () => hosts, setEngineHost: () => {} },
   "../runDisplay": runDisplay,
-  "./AbandonRunDialog": { AbandonRunDialog: () => null },
+  "../dialog": { showConfirmDialog: () => {} },
   "./ui": { Button: ({ children, variant }) => React.createElement("button", { "data-variant": variant }, children) },
   "./StatusBadge": runLabelsHarness().load("components/StatusBadge"),
   "./ui/cn": { cn: (...values) => values.filter(Boolean).join(" ") },
@@ -98,9 +98,9 @@ test("needs auth offers Connect first", () => {
 });
 
 test("pending and unverified cancels say why", () => {
-  assert.match(render({ cancelling: true, contact: unreachable }), />Cancelling…<.*>Cancel pending: gpu-box unreachable since T100\. orx sends it when the host is back\.</);
+  assert.match(render({ cancelling: true, contact: unreachable }), />Cancellation pending<.*>gpu-box has been unreachable since T100\. The cancel will be sent when the machine is reachable again\.</);
   assert.deepEqual(buttons(render({ cancelling: true, contact: needsAuth })), ["Connect", "Abandon…"]);
-  assert.match(render({ status: "submitting", cancelling: true, contact: unreconciled("No sandbox id") }), />Cancelling…<.*>Cancel pending: the launch isn&#x27;t confirmed yet\. If the job turns up, orx stops it\.</);
+  assert.match(render({ status: "submitting", cancelling: true, contact: unreconciled("No sandbox id") }), />Cancellation pending<.*>The cancel will be sent once the launch is confirmed\.</);
 
   const unverified = render({ cancelling: true, contact: unreconciled("2 processes still running") });
   assert.match(unverified, />Cancelling…<.*>2 processes still running</);

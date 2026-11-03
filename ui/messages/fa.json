@@ -1664,10 +1664,10 @@
   "run_notice_retry_at": "در {time} دوباره تلاش می‌شود.",
   "run_notice_needs_auth": "برای ادامهٔ دنبال‌کردن این اجرا به {host} وصل شوید.",
   "run_notice_unconfirmed_launch": "تأیید راه‌اندازی ممکن نشد. دوباره بررسی می‌شود.",
-  "run_notice_cancel_pending": "لغو در انتظار: از {time} به {host} دسترسی نیست.",
-  "run_notice_cancel_pending_auth": "لغو در انتظار: برای ارسال آن به {host} وصل شوید.",
-  "run_notice_cancel_pending_later": "orx آن را وقتی میزبان برگردد ارسال می‌کند.",
-  "run_notice_cancel_pending_launch": "لغو در انتظار: راه‌اندازی هنوز تأیید نشده است.",
+  "run_notice_cancel_pending": "از {time} دسترسی به {host} ممکن نیست.",
+  "run_notice_cancel_pending_auth": "برای ارسال درخواست لغو به {host} متصل شوید.",
+  "run_notice_cancel_pending_later": "وقتی دستگاه دوباره در دسترس باشد، درخواست لغو ارسال می‌شود.",
+  "run_notice_cancel_pending_launch": "پس از تأیید شروع اجرا، درخواست لغو ارسال می‌شود.",
   "run_notice_stops_if_found": "اگر کار پیدا شود، orx آن را متوقف می‌کند.",
   "run_notice_unreconciled": "نیاز به توجه دارد.",
   "run_notice_abandoned": "رهاشده. اگر کار روی {host} پیدا شود، orx آن را متوقف می‌کند.",
@@ -1676,7 +1676,7 @@
   "run_stop_again": "توقف دوباره",
   "run_abandon": "رها کردن…",
   "run_abandon_title": "این اجرا رها شود؟",
-  "run_abandon_body": "orx دیگر منتظر آن نمی‌ماند و آن را رهاشده علامت می‌زند. اگر کار بعداً روی {host} پیدا شود، orx همان موقع آن را متوقف می‌کند.",
+  "run_abandon_body": "OpenResearch پیگیری این اجرا را متوقف می‌کند. دوباره بررسی کنید که منابع محاسباتی واقعاً خاموش شده باشند.",
   "run_abandon_body_no_host": "orx دیگر منتظر آن نمی‌ماند و آن را رهاشده علامت می‌زند. اگر کار بعداً پیدا شود، orx همان موقع آن را متوقف می‌کند.",
   "run_abandon_confirm": "رها کردن اجرا",
   "run_abandoning": "در حال رها کردن…",
@@ -1716,5 +1716,7 @@
   "status_stopping_two": "کاملاً متوقف نشده · {count} فرایند هنوز روی {host} در حال اجرا هستند",
   "status_stopping_few": "کاملاً متوقف نشده · {count} فرایند هنوز روی {host} در حال اجرا هستند",
   "status_stopping_many": "کاملاً متوقف نشده · {count} فرایند هنوز روی {host} در حال اجرا هستند",
-  "status_stopping_other": "کاملاً متوقف نشده · {count} فرایند هنوز روی {host} در حال اجرا هستند"
+  "status_stopping_other": "کاملاً متوقف نشده · {count} فرایند هنوز روی {host} در حال اجرا هستند",
+  "status_cancellation_pending": "لغو در انتظار است",
+  "run_abandon_unreachable": "دستگاه در دسترس نیست."
 }

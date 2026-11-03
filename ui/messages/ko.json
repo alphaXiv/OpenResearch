@@ -1664,10 +1664,10 @@
   "run_notice_retry_at": "{time}에 다시 시도합니다.",
   "run_notice_needs_auth": "이 실행을 계속 추적하려면 {host}에 연결하세요.",
   "run_notice_unconfirmed_launch": "실행 시작을 확인하지 못했습니다. 다시 확인하는 중입니다.",
-  "run_notice_cancel_pending": "취소 대기 중: {time}부터 {host}에 연결할 수 없습니다.",
-  "run_notice_cancel_pending_auth": "취소 대기 중: 보내려면 {host}에 연결하세요.",
-  "run_notice_cancel_pending_later": "호스트가 돌아오면 orx가 보냅니다.",
-  "run_notice_cancel_pending_launch": "취소 대기 중: 실행 시작이 아직 확인되지 않았습니다.",
+  "run_notice_cancel_pending": "{time}부터 {host}에 연결할 수 없습니다.",
+  "run_notice_cancel_pending_auth": "취소 요청을 보내려면 {host}에 연결하세요.",
+  "run_notice_cancel_pending_later": "머신에 다시 연결할 수 있게 되면 취소 요청이 전송됩니다.",
+  "run_notice_cancel_pending_launch": "실행 시작이 확인되면 취소 요청이 전송됩니다.",
   "run_notice_stops_if_found": "작업이 나타나면 orx가 중지합니다.",
   "run_notice_unreconciled": "확인이 필요합니다.",
   "run_notice_abandoned": "포기됨. {host}에 작업이 나타나면 orx가 중지합니다.",
@@ -1676,7 +1676,7 @@
   "run_stop_again": "다시 중지",
   "run_abandon": "포기…",
   "run_abandon_title": "이 실행을 포기할까요?",
-  "run_abandon_body": "orx가 기다리기를 멈추고 포기됨으로 표시합니다. 나중에 {host}에 작업이 나타나면 그때 orx가 중지합니다.",
+  "run_abandon_body": "OpenResearch가 이 실행의 추적을 중단합니다. 실제 컴퓨팅 리소스가 종료되었는지 다시 확인하세요.",
   "run_abandon_body_no_host": "orx가 기다리기를 멈추고 포기됨으로 표시합니다. 나중에 작업이 나타나면 그때 orx가 중지합니다.",
   "run_abandon_confirm": "실행 포기",
   "run_abandoning": "포기하는 중…",
@@ -1716,5 +1716,7 @@
   "status_stopping_two": "완전히 중지되지 않음 · {host}에서 프로세스 {count}개가 아직 실행 중",
   "status_stopping_few": "완전히 중지되지 않음 · {host}에서 프로세스 {count}개가 아직 실행 중",
   "status_stopping_many": "완전히 중지되지 않음 · {host}에서 프로세스 {count}개가 아직 실행 중",
-  "status_stopping_other": "완전히 중지되지 않음 · {host}에서 프로세스 {count}개가 아직 실행 중"
+  "status_stopping_other": "완전히 중지되지 않음 · {host}에서 프로세스 {count}개가 아직 실행 중",
+  "status_cancellation_pending": "취소 대기 중",
+  "run_abandon_unreachable": "머신에 연결할 수 없습니다."
 }

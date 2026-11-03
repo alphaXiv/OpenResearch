@@ -12,7 +12,7 @@ import { ExperimentOverview } from "./ExperimentOverview";
 import type { CodeView } from "./CodeTab";
 import { LogTerminal } from "./LogTerminal";
 import { RunContactNotice } from "./RunContactNotice";
-import { StatusBadge } from "./StatusBadge";
+import { statusLabel, StatusBadge } from "./StatusBadge";
 import { tabOpenGestureHandlers, type TabOpenIntent } from "../tabPreview";
 import { useResolvedTheme } from "../theme";
 import { Button, ButtonLink, MenuItem } from "./ui";
@@ -200,10 +200,10 @@ function TerminalView({
             {m.experiment_overview_visualize()}
           </Button>
         )}
-        {live && (
+        {live && display && (
           <Button size="small" variant="ghost" disabled={cancelling} onClick={() => void stop()}>
             <CircleStop size={14} />
-            {!cancelling ? m.common_stop() : m.status_cancelling()}
+            {!cancelling ? m.common_stop() : statusLabel(display.status, display.stopping)}
           </Button>
         )}
         {expRuns.length > 0 && selectedRun && display && (

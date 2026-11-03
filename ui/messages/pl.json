@@ -1664,10 +1664,10 @@
   "run_notice_retry_at": "Kolejna próba o {time}.",
   "run_notice_needs_auth": "Połącz się z {host}, aby dalej śledzić to uruchomienie.",
   "run_notice_unconfirmed_launch": "Nie udało się potwierdzić uruchomienia. Sprawdzanie ponownie.",
-  "run_notice_cancel_pending": "Anulowanie oczekuje: {host} nieosiągalny od {time}.",
-  "run_notice_cancel_pending_auth": "Anulowanie oczekuje: połącz się z {host}, aby je wysłać.",
-  "run_notice_cancel_pending_later": "orx wyśle je, gdy host wróci.",
-  "run_notice_cancel_pending_launch": "Anulowanie oczekuje: uruchomienie nie jest jeszcze potwierdzone.",
+  "run_notice_cancel_pending": "Host {host} jest nieosiągalny od {time}.",
+  "run_notice_cancel_pending_auth": "Połącz się z {host}, aby wysłać żądanie anulowania.",
+  "run_notice_cancel_pending_later": "Żądanie anulowania zostanie wysłane, gdy maszyna będzie znów osiągalna.",
+  "run_notice_cancel_pending_launch": "Żądanie anulowania zostanie wysłane po potwierdzeniu uruchomienia.",
   "run_notice_stops_if_found": "Jeśli zadanie się pojawi, orx je zatrzyma.",
   "run_notice_unreconciled": "Wymaga uwagi.",
   "run_notice_abandoned": "Porzucone. Jeśli zadanie pojawi się na {host}, orx je zatrzyma.",
@@ -1676,7 +1676,7 @@
   "run_stop_again": "Zatrzymaj ponownie",
   "run_abandon": "Porzuć…",
   "run_abandon_title": "Porzucić to uruchomienie?",
-  "run_abandon_body": "orx przestaje na nie czekać i oznacza je jako porzucone. Jeśli zadanie pojawi się później na {host}, orx je wtedy zatrzyma.",
+  "run_abandon_body": "OpenResearch przestanie śledzić to uruchomienie. Sprawdź ponownie, czy zasoby obliczeniowe zostały rzeczywiście wyłączone.",
   "run_abandon_body_no_host": "orx przestaje na nie czekać i oznacza je jako porzucone. Jeśli zadanie pojawi się później, orx je wtedy zatrzyma.",
   "run_abandon_confirm": "Porzuć uruchomienie",
   "run_abandoning": "Porzucanie…",
@@ -1716,5 +1716,7 @@
   "status_stopping_two": "Nie zatrzymano w pełni · {count} procesu nadal działa na {host}",
   "status_stopping_few": "Nie zatrzymano w pełni · {count} procesy nadal działają na {host}",
   "status_stopping_many": "Nie zatrzymano w pełni · {count} procesów nadal działa na {host}",
-  "status_stopping_other": "Nie zatrzymano w pełni · {count} procesu nadal działa na {host}"
+  "status_stopping_other": "Nie zatrzymano w pełni · {count} procesu nadal działa na {host}",
+  "status_cancellation_pending": "Anulowanie oczekuje",
+  "run_abandon_unreachable": "Maszyna jest nieosiągalna."
 }

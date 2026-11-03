@@ -21,11 +21,9 @@ function RunRow({ item, onOpenRun, onOpenExperiment }: { item: ChatActiveRun; on
   const [error, setError] = useState<string | null>(null);
   const display = runDisplay(pending ? { ...run, cancelling: true } : run);
   const cancelling = pending || run.cancelling;
-  const label = display.stale
+  const label = display.stale || cancelling
     ? statusLabel(display.status, display.stopping)
-    : cancelling
-      ? m.status_cancelling()
-      : run.status === "running" ? m.chat_experiment_running() : m.chat_experiment_starting();
+    : run.status === "running" ? m.chat_experiment_running() : m.chat_experiment_starting();
   const connectHost = runConnectHost(run);
 
   useEffect(() => {
@@ -61,7 +59,7 @@ function RunRow({ item, onOpenRun, onOpenExperiment }: { item: ChatActiveRun; on
           <Button size="small" variant="ghost" onClick={() => requestHostConnect(connectHost)}><Plug size={14} />{m.settings_connect()}</Button>
         ) : (
           <Button size="small" variant="ghost" disabled={cancelling} onClick={() => void stop()}>
-            <CircleStop size={14} />{!cancelling ? m.common_stop() : m.status_cancelling()}
+            <CircleStop size={14} />{!cancelling ? m.common_stop() : statusLabel(display.status, display.stopping)}
           </Button>
         )}
       </div>

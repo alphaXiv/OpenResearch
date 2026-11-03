@@ -1664,10 +1664,10 @@
   "run_notice_retry_at": "Trying again at {time}.",
   "run_notice_needs_auth": "Connect to {host} to keep following this run.",
   "run_notice_unconfirmed_launch": "Couldn't confirm the launch. Checking again.",
-  "run_notice_cancel_pending": "Cancel pending: {host} unreachable since {time}.",
-  "run_notice_cancel_pending_auth": "Cancel pending: connect to {host} to send it.",
-  "run_notice_cancel_pending_later": "orx sends it when the host is back.",
-  "run_notice_cancel_pending_launch": "Cancel pending: the launch isn't confirmed yet.",
+  "run_notice_cancel_pending": "{host} has been unreachable since {time}.",
+  "run_notice_cancel_pending_auth": "Connect to {host} to send the cancel.",
+  "run_notice_cancel_pending_later": "The cancel will be sent when the machine is reachable again.",
+  "run_notice_cancel_pending_launch": "The cancel will be sent once the launch is confirmed.",
   "run_notice_stops_if_found": "If the job turns up, orx stops it.",
   "run_notice_unreconciled": "Needs attention.",
   "run_notice_abandoned": "Abandoned. If the job turns up on {host}, orx stops it.",
@@ -1676,7 +1676,7 @@
   "run_stop_again": "Stop again",
   "run_abandon": "Abandon…",
   "run_abandon_title": "Abandon this run?",
-  "run_abandon_body": "orx stops waiting for it and marks it Abandoned. If the job turns up on {host} later, orx stops it then.",
+  "run_abandon_body": "OpenResearch will stop tracking this run. Double-check that the actual compute is shut down.",
   "run_abandon_body_no_host": "orx stops waiting for it and marks it Abandoned. If the job turns up later, orx stops it then.",
   "run_abandon_confirm": "Abandon run",
   "run_abandoning": "Abandoning…",
@@ -1716,5 +1716,7 @@
   "status_stopping_two": "Not fully stopped · {count} processes still running on {host}",
   "status_stopping_few": "Not fully stopped · {count} processes still running on {host}",
   "status_stopping_many": "Not fully stopped · {count} processes still running on {host}",
-  "status_stopping_other": "Not fully stopped · {count} processes still running on {host}"
+  "status_stopping_other": "Not fully stopped · {count} processes still running on {host}",
+  "status_cancellation_pending": "Cancellation pending",
+  "run_abandon_unreachable": "The machine is unreachable."
 }

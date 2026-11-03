@@ -7,7 +7,6 @@ import { fmtClock, ltr } from "../i18n";
 import { m } from "../paraglide/messages.js";
 import { runAbandonable, runActive, runConnectHost, runNotice, type RunNotice } from "../runDisplay";
 import { statusLabel } from "./StatusBadge";
-import { AbandonRunDialog } from "./AbandonRunDialog";
 import { Button } from "./ui";
 import { cn } from "./ui/cn";
 
@@ -35,12 +34,12 @@ function copy(notice: RunNotice, nextRetryMs: number | null): { lead: string; de
       return { lead: m.status_cancelling(), detail: null, tone: "caution" };
     case "cancel_pending":
       return notice.contact === "unreachable"
-        ? { lead: m.status_cancelling(), detail: `${m.run_notice_cancel_pending({ host: host(notice.host), time: fmtClock(notice.since) })} ${m.run_notice_cancel_pending_later()}`, tone: "warning" }
-        : { lead: m.status_cancelling(), detail: m.run_notice_cancel_pending_auth({ host: host(notice.host) }), tone: "warning" };
+        ? { lead: m.status_cancellation_pending(), detail: `${m.run_notice_cancel_pending({ host: host(notice.host), time: fmtClock(notice.since) })} ${m.run_notice_cancel_pending_later()}`, tone: "warning" }
+        : { lead: m.status_cancellation_pending(), detail: m.run_notice_cancel_pending_auth({ host: host(notice.host) }), tone: "warning" };
     case "unconfirmed_launch":
       return { lead: m.run_notice_unconfirmed_launch(), detail: notice.detail, tone: "caution" };
     case "cancel_pending_launch":
-      return { lead: m.status_cancelling(), detail: m.run_notice_cancel_pending_launch() + " " + m.run_notice_stops_if_found(), tone: "caution" };
+      return { lead: m.status_cancellation_pending(), detail: m.run_notice_cancel_pending_launch(), tone: "caution" };
     case "cancel_unconfirmed":
       return { lead: m.status_cancelling(), detail: notice.detail, tone: "caution" };
     case "not_fully_stopped":
@@ -70,12 +69,12 @@ function copy(notice: RunNotice, nextRetryMs: number | null): { lead: string; de
 
 /** What a run's status alone can't say: lost contact, a pending cancel, or an abandoned job's pending kill. */
 export function RunContactNotice({ run, className }: { run: NoticeRun; className?: string }) {
-  const { cancelRun, cleanupRun, retryEngineHost } = useWorkspace().api;
+  const { abandonRun, cancelRun, cleanupRun, retryEngineHost } = useWorkspace().api;
+  const { showConfirmDialog } = useWorkspace().dialogs;
   const { requestHostConnect } = useWorkspace().events;
   const { setEngineHost, useEngineHosts } = useWorkspace().queries;
 
   const hosts = useEngineHosts();
-  const [abandonOpen, setAbandonOpen] = useState(false);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const notice = runNotice(run);
@@ -136,13 +135,19 @@ export function RunContactNotice({ run, className }: { run: NoticeRun; className
             </Button>
           )}
           {abandonable && (
-            <Button size="small" variant="ghost" className="text-accent-red" onClick={() => setAbandonOpen(true)}>
+            <Button size="small" variant="ghost" className="text-accent-red" onClick={() => showConfirmDialog({
+              title: m.run_abandon_title(),
+              description: <>{run.contact?.type === "unreachable" && <>{m.run_abandon_unreachable()} </>}{m.run_abandon_body()}</>,
+              destructive: true,
+              confirmLabel: m.run_abandon_confirm(),
+              onCancel: "close",
+              onConfirm: async () => { await abandonRun(run.id); },
+            })}>
               {m.run_abandon()}
             </Button>
           )}
         </div>
       )}
-      {abandonOpen && <AbandonRunDialog run={run} onClose={() => setAbandonOpen(false)} />}
     </div>
   );
 }

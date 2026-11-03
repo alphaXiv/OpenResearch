@@ -97,7 +97,18 @@ impl Run {
             return LABELS["status_cancelled"].as_str().into();
         }
         if self.cancelling {
-            return LABELS["status_cancelling"].as_str().into();
+            let pending = self.status == "submitting"
+                || matches!(
+                    self.contact,
+                    crate::store::Contact::Unreachable { .. }
+                        | crate::store::Contact::NeedsAuth { .. }
+                );
+            let key = if pending {
+                "status_cancellation_pending"
+            } else {
+                "status_cancelling"
+            };
+            return LABELS[key].as_str().into();
         }
         self.status.as_str().into()
     }
@@ -364,6 +375,14 @@ mod cancel_tests {
         let run: Run = serde_json::from_value(value.clone()).unwrap();
         assert_eq!(run.status, "running");
         assert_eq!(run.display_status(), "Cancelling…");
+        for contact in [
+            serde_json::json!({"type":"unreachable", "since":1, "cause":"offline"}),
+            serde_json::json!({"type":"needs_auth", "since":1, "cause":"connect"}),
+        ] {
+            value["contact"] = contact;
+            let run: Run = serde_json::from_value(value.clone()).unwrap();
+            assert_eq!(run.display_status(), "Cancellation pending");
+        }
         value["status"] = serde_json::json!("cancelled");
         value["cancelling"] = serde_json::json!(false);
         value["contact"] = serde_json::json!({"type":"stopping", "since":1, "count":2});

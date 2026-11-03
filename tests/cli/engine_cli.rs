@@ -494,6 +494,38 @@ async fn cancellation_labels_agree_in_runs_status_and_wait() {
         ),
         (
             "running",
+            json!({"type":"unreachable","since":1,"cause":"Offline"}),
+            true,
+            false,
+            None,
+            "Cancellation pending",
+        ),
+        (
+            "running",
+            json!({"type":"needs_auth","since":1,"cause":"Connect"}),
+            true,
+            false,
+            None,
+            "Cancellation pending",
+        ),
+        (
+            "submitting",
+            json!({"type":"live"}),
+            true,
+            false,
+            None,
+            "Cancellation pending",
+        ),
+        (
+            "submitting",
+            json!({"type":"unreconciled","since":1,"detail":"No handle"}),
+            true,
+            false,
+            None,
+            "Cancellation pending",
+        ),
+        (
+            "running",
             json!({"type":"unreconciled","since":1,"detail":"Stop pending"}),
             true,
             false,
@@ -664,4 +696,60 @@ fn session_hover_runs_preserve_their_fields_and_expose_cancellation_proof() {
             assert!(run["contact"].is_null());
         }
     }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn abandon_warns_that_actual_compute_must_be_shut_down() {
+    use axum::{routing::get, Json, Router};
+    use serde_json::json;
+    use std::sync::{
+        atomic::{AtomicUsize, Ordering},
+        Arc, Mutex,
+    };
+
+    let sandbox = Sandbox::new();
+    let contact = Arc::new(Mutex::new("unreachable"));
+    let calls = Arc::new(AtomicUsize::new(0));
+    let (read_contact, abandoned) = (contact.clone(), calls.clone());
+    let app = Router::new()
+        .route(
+            "/api/v2/runs/run",
+            get(move || {
+                let contact = *read_contact.lock().unwrap();
+                async move { Json(json!({"id":"run", "contact":{"type":contact}})) }
+            }),
+        )
+        .route(
+            "/api/v2/runs/run/abandon",
+            axum::routing::post(move || {
+                abandoned.fetch_add(1, Ordering::SeqCst);
+                async { Json(json!({"ok":true})) }
+            }),
+        );
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+    for (index, kind) in ["unreachable", "needs_auth", "unreconciled"]
+        .into_iter()
+        .enumerate()
+    {
+        *contact.lock().unwrap() = kind;
+        let output = sandbox
+            .command()
+            .env("ORX_UP_PORT", port.to_string())
+            .env("ORX_UP_AUTH_TOKEN", "test-only")
+            .args(["exp", "abandon", "run"])
+            .output()
+            .unwrap();
+        assert!(output.status.success(), "{}", diagnostics(&output));
+        let warning = String::from_utf8_lossy(&output.stderr);
+        assert_eq!(
+            warning.contains("The machine is unreachable."),
+            kind == "unreachable"
+        );
+        assert!(warning.contains("OpenResearch will stop tracking this run. Double-check that the actual compute is shut down."), "{warning}");
+        assert!(stdout(&output).contains("cancel stays pending"));
+        assert_eq!(calls.load(Ordering::SeqCst), index + 1);
+    }
+    server.abort();
 }

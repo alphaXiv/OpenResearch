@@ -649,12 +649,14 @@ impl ApiClient {
     }
 
     pub async fn abandon(&self, run: &str) -> Result<()> {
-        self.json(
-            reqwest::Method::POST,
-            &format!("runs/{}/abandon", urlencoding::encode(run)),
-            None,
-        )
-        .await?;
+        let path = format!("runs/{}", urlencoding::encode(run));
+        let response = self.json(reqwest::Method::GET, &path, None).await?;
+        if response["contact"]["type"] == "unreachable" {
+            eprint!("{} ", super::LABELS["run_abandon_unreachable"]);
+        }
+        eprintln!("{}", super::LABELS["run_abandon_body"]);
+        self.json(reqwest::Method::POST, &format!("{path}/abandon"), None)
+            .await?;
         println!("Run {run} abandoned; its cancel stays pending until the job is confirmed gone.");
         Ok(())
     }

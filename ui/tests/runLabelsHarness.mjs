@@ -8,7 +8,7 @@ import ts from "typescript";
 const require = createRequire(import.meta.url);
 const src = fileURLToPath(new URL("../src/", import.meta.url));
 
-export function runLabelsHarness(locale = "en", sessionExperiments = []) {
+export function runLabelsHarness(locale = "en", sessionExperiments = [], overrides = {}) {
   const catalog = JSON.parse(readFileSync(new URL(`../messages/${locale}.json`, import.meta.url), "utf8"));
   const modules = new Map();
   const mocks = {
@@ -23,7 +23,8 @@ export function runLabelsHarness(locale = "en", sessionExperiments = []) {
     "components/tourGeometry": { useMeasure: () => ({ ref: () => {}, offsetHeight: 300 }), usePopoverPosition: () => ({ x: 8, y: 8 }) },
     "workspace": { useWorkspace: () => mockWorkspace({ ...mocks.api, ...mocks.dialog, ...mocks["queries/settings"], getSessionExperimentsQuery: () => ({}), requestHostConnect: () => {} }) },
     "queries/settings": { useEngineHosts: () => [], setEngineHost: () => {} },
-    "components/AbandonRunDialog": { AbandonRunDialog: () => null },
+    "dialog": { showConfirmDialog: () => {} },
+    ...overrides,
   };
   function load(name) {
     if (mocks[name]) return mocks[name];
