@@ -5,6 +5,7 @@ import {
   desktopClipboardBridgeAvailable,
   desktopClipboardFileUrl,
   fileFromDesktopClipboardPayload,
+  installDesktopClipboardBridge,
   requestDesktopClipboardPaste,
 } from "../src/desktopClipboard.ts";
 
@@ -54,6 +55,20 @@ test("native errors resolve null", async () => {
 test("a missing native response times out", async () => {
   installFakeWindow();
   assert.equal(await requestDesktopClipboardPaste(5), null);
+});
+
+test("late native replies delete their temporary file", () => {
+  const messages = installFakeWindow();
+  installDesktopClipboardBridge();
+  const path = "/tmp/openresearch-clipboard/1-late.png";
+  window.__ORX_CLIPBOARD_PASTE__({
+    id: "late",
+    path,
+    name: "pasted-image.png",
+    mediaType: "image/png",
+    size: 3,
+  });
+  assert.ok(messages.includes(`clipboard-temp-delete:${path}`));
 });
 
 test("clipboard temp files are fetched and deleted", async () => {

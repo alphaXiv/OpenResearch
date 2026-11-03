@@ -39,6 +39,9 @@ export function installDesktopClipboardBridge(): void {
     }
     const pending = pendingPastes.get(response.id);
     if (!pending) {
+      if (typeof response.path === "string") {
+        deleteDesktopClipboardTemp(response.path);
+      }
       return;
     }
     pendingPastes.delete(response.id);

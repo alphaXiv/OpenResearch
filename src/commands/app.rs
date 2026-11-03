@@ -772,6 +772,8 @@ mod instance {
 mod imp {
     use std::cell::{Cell, RefCell};
     use std::collections::HashMap;
+    #[cfg(target_os = "linux")]
+    use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
     use std::path::{Path, PathBuf};
     use std::rc::Rc;
     use std::time::{Duration, Instant};
@@ -1500,17 +1502,42 @@ mod imp {
     }
 
     #[cfg(target_os = "linux")]
+    fn clipboard_temp_dir_path() -> Option<PathBuf> {
+        dirs::cache_dir().map(|dir| dir.join("openresearch").join("clipboard"))
+    }
+
+    #[cfg(target_os = "linux")]
+    fn clipboard_temp_dir() -> std::result::Result<PathBuf, String> {
+        let dir = clipboard_temp_dir_path().ok_or_else(|| "no cache directory".to_string())?;
+        std::fs::create_dir_all(&dir).map_err(|error| error.to_string())?;
+        std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o700))
+            .map_err(|error| error.to_string())?;
+        Ok(dir)
+    }
+
+    #[cfg(target_os = "linux")]
     fn write_clipboard_image(
         id: &str,
         pixbuf: &gtk::gdk_pixbuf::Pixbuf,
     ) -> std::result::Result<ClipboardPastePayload, String> {
+        use std::io::Write as _;
+
         let bytes = pixbuf
             .save_to_bufferv("png", &[])
             .map_err(|error| error.to_string())?;
-        let dir = std::env::temp_dir().join("openresearch-clipboard");
-        std::fs::create_dir_all(&dir).map_err(|error| error.to_string())?;
-        let path = dir.join(format!("{}-{id}.png", std::process::id()));
-        std::fs::write(&path, &bytes).map_err(|error| error.to_string())?;
+        let dir = clipboard_temp_dir()?;
+        let path = dir.join(format!(
+            "{}-{id}-{}.png",
+            std::process::id(),
+            uuid::Uuid::new_v4().simple()
+        ));
+        let mut file = std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .mode(0o600)
+            .open(&path)
+            .map_err(|error| error.to_string())?;
+        file.write_all(&bytes).map_err(|error| error.to_string())?;
         Ok(ClipboardPastePayload {
             id: id.to_string(),
             path: path.to_string_lossy().into_owned(),
@@ -1522,7 +1549,9 @@ mod imp {
 
     #[cfg(target_os = "linux")]
     fn remove_clipboard_temp(path: &str) {
-        let dir = std::env::temp_dir().join("openresearch-clipboard");
+        let Some(dir) = clipboard_temp_dir_path() else {
+            return;
+        };
         let path = Path::new(path);
         if path.parent() == Some(dir.as_path()) {
             let _ = std::fs::remove_file(path);
@@ -1531,7 +1560,9 @@ mod imp {
 
     #[cfg(target_os = "linux")]
     fn cleanup_clipboard_temp_dir() {
-        let dir = std::env::temp_dir().join("openresearch-clipboard");
+        let Ok(dir) = clipboard_temp_dir() else {
+            return;
+        };
         let Ok(entries) = std::fs::read_dir(&dir) else {
             return;
         };

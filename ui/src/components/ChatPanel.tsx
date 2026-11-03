@@ -5144,7 +5144,10 @@ export function ChatPanel({
 
   /** Queue files (upload button, clipboard paste, or drag-drop) as composer
    * attachments — images and PDFs, which the harness reads off disk by path. */
-  function addFiles(files: File[]) {
+  function addFiles(
+    files: File[],
+    target?: { scope: typeof composerScopeRef.current; stashKey: string },
+  ) {
     // Per-file and total caps keep the base64-inflated (~33%) request body
     // under the backend's 64 MB limit — a single 30 MB file or a batch summing
     // to 40 MB both stay clear once encoded.
@@ -5153,6 +5156,8 @@ export function ChatPanel({
     setAttachError(null);
     setImageRefusedFor(null);
     let total = attachments.reduce((n, a) => n + a.size, 0);
+    const scope = target?.scope ?? composerScopeRef.current;
+    const attachmentStashKey = target?.stashKey ?? stashKey;
     for (const file of files) {
       if (!/^(image\/(png|jpeg|gif|webp)|application\/pdf)$/.test(file.type)) continue;
       if (noImageInputError && file.type.startsWith("image/")) {
@@ -5168,8 +5173,6 @@ export function ChatPanel({
         continue;
       }
       total += file.size;
-      const scope = composerScopeRef.current;
-      const attachmentStashKey = stashKey;
       const reader = new FileReader();
       reader.onload = () => {
         if (!isCurrentScope(sessionsOptions.queryKey)) return;
@@ -5181,7 +5184,7 @@ export function ChatPanel({
         };
         // The decode is async — if the composer moved on, the file belongs to
         // the scope it was pasted into, not whatever chat is now showing.
-        if (composerMountedRef.current && composerScopeRef.current.projectId === scope.projectId && composerScopeRef.current.activeId === scope.activeId) {
+        if (composerMountedRef.current && composerScopeRef.current.projectId === scope.projectId && composerScopeRef.current.activeId === scope.activeId && composerScopeRef.current.mainView === scope.mainView) {
           setAttachments((cur) => [...cur, attachment]);
           return;
         }
@@ -5229,6 +5232,8 @@ export function ChatPanel({
       return;
     }
     e.preventDefault();
+    const scope = composerScopeRef.current;
+    const attachmentStashKey = stashKey;
     void (async () => {
       const payload = await requestDesktopClipboardPaste();
       if (!payload) {
@@ -5236,7 +5241,7 @@ export function ChatPanel({
       }
       const file = await fileFromDesktopClipboardPayload(payload);
       if (file) {
-        addFiles([file]);
+        addFiles([file], { scope, stashKey: attachmentStashKey });
       }
     })();
   }
