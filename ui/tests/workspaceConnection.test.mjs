@@ -121,10 +121,14 @@ for (const kind of ["local", "ssh"]) {
   }
 }
 
-for (const outcome of ["success", "failure", "popup-blocked"]) {
-  test(`SSH host selection from home preserves new-tab behavior: ${outcome}`, async () => {
+for (const [desktop, outcome] of [
+  [false, "success"], [false, "failure"], [false, "popup-blocked"],
+  [true, "success"], [true, "failure"],
+]) {
+  test(`SSH host selection in ${desktop ? "desktop" : "browser"}: ${outcome}`, async () => {
     const state = hooks();
     const calls = [];
+    let finishConnection;
     const { RemoteHostDialog } = load("components/RemoteHostDialog.tsx", {
       react: state.react,
       "react-dom": { createPortal: (tree) => tree },
@@ -132,12 +136,15 @@ for (const outcome of ["success", "failure", "popup-blocked"]) {
         useQuery: ({ kind }) => ({ data: kind === "hosts" ? { hosts: [{ host: "research" }], defaultHost: null } : [] }),
         useMutation: () => ({ mutateAsync: async (args) => {
           calls.push(["connect", ...args]);
+          await new Promise((resolve) => { finishConnection = resolve; });
           if (outcome === "failure") throw new Error("connection failed");
           return { gatewayUrl: "http://localhost:4910/" };
         } }),
       },
       "lucide-react": { SlidersHorizontal: "Icon", X: "Icon" },
       "../api": {}, "../paraglide/messages.js": messages,
+      "../i18n": { ltr: (text) => text },
+      "./ProgressBar": { ProgressBar: "ProgressBar" },
       "../paraglide/runtime.js": { getLocale: () => "en" },
       "../queries/settings": { getSshSettingsQuery: () => ({ kind: "hosts" }), listRemoteSessionsQuery: () => ({ kind: "sessions" }) },
       "../theme": { getThemePreference: () => "dark" },
@@ -147,15 +154,15 @@ for (const outcome of ["success", "failure", "popup-blocked"]) {
       },
     }, {
       document: { body: {} },
-      window: { open: (...args) => {
+      window: { ...(desktop ? { __ORX_DESKTOP__: true } : {}), open: (...args) => {
         calls.push(["open", ...args]);
-        return outcome === "popup-blocked" ? null : {
+        return desktop || outcome === "popup-blocked" ? null : {
           location: { replace: (url) => calls.push(["navigate", url]) },
           close: () => calls.push(["close-tab"]),
         };
       } },
     });
-    const tree = RemoteHostDialog({
+    const props = {
       cancel: () => calls.push(["close-dialog"]),
       confirm: (openRemote) => Promise.resolve(openRemote()).then(
         () => calls.push(["close-dialog"]),
@@ -163,17 +170,38 @@ for (const outcome of ["success", "failure", "popup-blocked"]) {
       ),
       isDisabled: false,
       onConfigureSsh: () => {},
-    });
-    nodes(tree).find((node) => node.type === "button" && nodes(node).some((child) => child.props.children === "research")).props.onClick();
-    await new Promise(setImmediate);
-    assert.deepEqual(calls[0], ["open", "/remote-launch", "_blank"]);
+    };
+    const render = () => { state.reset(); return RemoteHostDialog(props); };
+    nodes(render()).find((node) => node.type === "button" && nodes(node).some((child) => child.props.children === "research")).props.onClick();
+    if (!desktop) assert.deepEqual(calls.shift(), ["open", "/remote-launch", "_blank"]);
     if (outcome === "popup-blocked") {
-      assert.deepEqual(calls.slice(1), [["alert", "remote_popup_blocked", "error"]]);
+      assert.deepEqual(calls, [["alert", "remote_popup_blocked", "error"]]);
     } else {
-      assert.deepEqual(calls[1], ["connect", "research", { theme: "dark", locale: "en" }]);
-      assert.deepEqual(calls.slice(2), outcome === "success"
-        ? [["navigate", "http://localhost:4910/"], ["close-dialog"]]
-        : [["close-tab"], ["error", "connection failed"]]);
+      assert.deepEqual(calls, [["connect", "research", { theme: "dark", locale: "en" }]]);
+      props.isDisabled = true;
+      const pending = nodes(render());
+      assert.ok(pending.some((node) => node.props.role === "status" && nodes(node).some((child) => child.type === "ProgressBar")));
+      assert.ok(pending.filter((node) => node.type === "button" || node.type === "input").every((node) => node.props.disabled));
+
+      finishConnection();
+      await new Promise(setImmediate);
+      assert.deepEqual(calls.slice(1), outcome === "success"
+        ? [desktop ? ["open", "http://localhost:4910/", "_blank"] : ["navigate", "http://localhost:4910/"], ["close-dialog"]]
+        : [...(desktop ? [] : [["close-tab"]]), ["error", "connection failed"]]);
+      assert.ok(!nodes(render()).some((node) => node.type === "ProgressBar"));
     }
   });
 }
+
+test("connection progress has a name and no invented percentage", () => {
+  const { ProgressBar } = load("components/ProgressBar.tsx", {});
+  const pending = ProgressBar({ label: "Connecting" });
+  assert.equal(pending.props.role, "progressbar");
+  assert.equal(pending.props["aria-label"], "Connecting");
+  assert.equal(pending.props["aria-valuenow"], undefined);
+  assert.ok(nodes(pending).some((node) => node.props.className?.includes("motion-safe:animate-")));
+
+  const measured = ProgressBar({ value: 30, max: 50 });
+  assert.equal(measured.props["aria-valuenow"], 60);
+  assert.ok(nodes(measured).some((node) => node.props.style?.width === "60%"));
+});
