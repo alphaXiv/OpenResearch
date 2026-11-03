@@ -633,6 +633,10 @@ fn router(state: AppState, remote_auth: Option<RemoteAuth>) -> Router {
                 .delete(delete_artifact),
         )
         .route("/api/projects/{id}/files/file", get(serve_artifact))
+        .route(
+            "/api/projects/{id}/files/reveal",
+            post(reveal_artifact_file),
+        )
         .route("/api/projects/{id}/terminal", get(project_terminal))
         .route("/api/events", get(events))
         .route("/api/settings/hf", get(hf_settings).post(set_hf_token))
@@ -911,7 +915,9 @@ fn remote_route_forbidden(path: &str) -> bool {
             | "/api/harnesses/setup"
     ) || path.starts_with("/api/remote/")
         || (path.starts_with("/api/projects/")
-            && (path.ends_with("/file/open") || path.ends_with("/file/reveal")))
+            && (path.ends_with("/file/open")
+                || path.ends_with("/file/reveal")
+                || path.ends_with("/files/reveal")))
 }
 
 fn is_remote_callback_route(method: &Method, path: &str) -> bool {
@@ -4528,6 +4534,37 @@ struct ArtifactPathQuery {
     path: String,
 }
 
+#[derive(Deserialize)]
+struct ArtifactRevealReq {
+    path: String,
+}
+
+/// Reveal an artifact file or folder in the OS file manager. Unlike checkout
+/// reveals, this resolves inside the project's artifacts directory.
+async fn reveal_artifact_file(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+    Json(req): Json<ArtifactRevealReq>,
+) -> ApiResult {
+    reject_if_moving(&state)?;
+    blocking_api(move || {
+        let _admission = state
+            .project_lifecycle
+            .admit(&id)
+            .ok_or_else(|| bad_request("project deletion is in progress"))?;
+        let store = Store::open()?;
+        let project = store
+            .get_local_project(&id)?
+            .ok_or_else(|| not_found("project"))?;
+        let full = local::files::file_path(&project, &req.path)
+            .map_err(|e| ApiError::from(anyhow!("could not resolve artifact: {e}")))?;
+        crate::editors::reveal_in_file_manager(&full)
+            .map_err(|e| ApiError::from(anyhow!("could not reveal file: {e}")))?;
+        Ok(Json(json!({ "ok": true })))
+    })
+    .await
+}
+
 /// Delete a file or folder in the artifacts dir, by relative path.
 async fn delete_artifact(
     State(state): State<AppState>,
@@ -6781,6 +6818,7 @@ const SETTINGS_COMMANDS: &[(&str, &[&str])] = &[
     ),
     ("devin auth login", &["devin", "auth", "login"]),
     ("grok login", &["grok", "login"]),
+    ("fx login", &["fx", "login"]),
     ("pi-acp --terminal-login", &["pi-acp", "--terminal-login"]),
     ("zcode login zai", &["zcode", "login", "zai"]),
     ("zcode login bigmodel", &["zcode", "login", "bigmodel"]),
@@ -7075,7 +7113,11 @@ async fn disconnect_remote_session(
 }
 
 async fn local_runtime() -> Json<Value> {
-    Json(json!({ "kind": "local", "version": env!("CARGO_PKG_VERSION") }))
+    Json(json!({
+        "kind": "local",
+        "version": env!("CARGO_PKG_VERSION"),
+        "buildChannel": crate::telemetry::build_channel(),
+    }))
 }
 
 async fn list_local_models() -> ApiResult {
@@ -9648,6 +9690,7 @@ mod tests {
             "/api/remote/sessions",
             "/api/projects/p1/file/open",
             "/api/projects/p1/file/reveal",
+            "/api/projects/p1/files/reveal",
         ] {
             assert!(remote_route_forbidden(path), "{path}");
         }

@@ -1117,9 +1117,12 @@ export interface RemoteSessionInfo {
   canStartNewHost: boolean;
 }
 
+/** `production` only for an official release built by the project's CI. */
+export type BuildChannel = "production" | "development";
+
 export type RuntimeInfo =
-  | { kind: "local"; version: string }
-  | { kind: "ssh"; version: string; dashboardProtocol: number; session: RemoteSessionInfo };
+  | { kind: "local"; version: string; buildChannel: BuildChannel }
+  | { kind: "ssh"; version: string; buildChannel: BuildChannel; dashboardProtocol: number; session: RemoteSessionInfo };
 
 export const getRuntime = (signal?: AbortSignal) => get<RuntimeInfo>("/_orx/runtime", signal);
 
@@ -1404,6 +1407,11 @@ export const deleteArtifact = (projectId: string, path: string) =>
 
 export const manageArtifactFile = (projectId: string, path: string, action: FileAction) =>
   patch<FileActionResult>(`/api/projects/${projectId}/files`, { path, ...action });
+
+/** Reveal an artifact file or folder in the OS file manager on the machine
+ * running `orx up`. */
+export const revealArtifactInManager = (projectId: string, path: string) =>
+  post<{ ok: boolean }>(`/api/projects/${projectId}/files/reveal`, { path });
 
 /** Raw artifact bytes served by the compatibility `/files` API. */
 export const artifactUrl = (projectId: string, path: string) =>

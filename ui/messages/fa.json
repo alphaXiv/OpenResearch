@@ -216,6 +216,8 @@
   "header_configure_repository": "پیکربندی مخزن",
   "header_create_a_new_project": "ایجاد پروژهٔ جدید",
   "header_hide_sidebar": "پنهان کردن نوار کناری",
+  "header_dev_badge": "توسعه",
+  "header_query_devtools": "ابزارهای توسعه‌دهنده Query",
   "header_project": "پروژه",
   "lit_sources_picker_loading": "در حال بارگیری…",
   "md_copy": "کپی",

@@ -72,7 +72,6 @@ import {
   MessageSquareQuote,
   MessagesSquare,
   MoreHorizontal,
-  PanelLeft,
   Paperclip,
   Pencil,
   Plus,
@@ -210,6 +209,7 @@ import { SkillMenu } from "./SkillMenu";
 import { FileMentionMenu } from "./FileMentionMenu";
 import { ComposerSkillChips, MessageWithChips, skillMarginSpaces } from "./SkillChips";
 import { WorkspaceConnection } from "./WorkspaceConnection";
+import { SidebarToggle } from "./Header";
 import {
   defaultSelection,
   harnessLabel,
@@ -6956,17 +6956,9 @@ export function ChatPanel({
       </Dialog.Portal>
     </Dialog.Root>
   ) : railOpen ? rail : null;
+  // Sits exactly where the open sidebar's toggle does; in the macOS app it only holds the titlebar toggle's place.
   const railReopen = (!railOpen || mobileRail) && !embedded && (
-    <Tooltip interactive content={`${m.chat_panel_show_sidebar()} (${formatForDisplay(appHotkeys["sidebar.toggle"].hotkey ?? [])})`} className="rounded-md mac-titlebar:invisible">
-      <IconButton
-        aria-label={m.chat_panel_show_sidebar()}
-        aria-expanded={railOpen}
-        onClick={onShowRail}
-        className="mac-titlebar:ms-titlebar-inset"
-      >
-        <PanelLeft size={20} />
-      </IconButton>
-    </Tooltip>
+    <SidebarToggle open={false} onClick={onShowRail} className="ms-2.5 max-md:ms-1 mac-titlebar:invisible mac-titlebar:ms-titlebar-inset" />
   );
 
   if (mainView !== "chat") {
@@ -6991,7 +6983,7 @@ export function ChatPanel({
       <section inert={contentInert} data-side-chat={embedded || undefined} className="chat-pane flex-1 min-w-0 flex flex-col bg-background min-h-0">
         {/* Header — session title on the left, end-pane view switchers on the
           right, fading into the chat below (sessions live in the rail). */}
-        <div className={railOpen && !mobileRail || embedded ? "contents" : "chat-heading-row grid shrink-0 grid-cols-[2rem_minmax(0,1fr)_2rem] mac-titlebar:grid-cols-titlebar-chat items-center"}>
+        <div className={railOpen && !mobileRail || embedded ? "contents" : "chat-heading-row grid shrink-0 grid-cols-[2.625rem_minmax(0,1fr)_2.625rem] mac-titlebar:grid-cols-titlebar-chat items-center"}>
           {railReopen}
           <div className={headerClass}>
           <div className="flex min-w-0 flex-1 items-center gap-2">

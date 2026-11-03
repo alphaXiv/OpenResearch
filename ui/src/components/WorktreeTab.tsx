@@ -32,6 +32,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   githubBranchUrl,
   manageProjectFile,
+  revealFileInManager,
   type Project,
 } from "../api";
 
@@ -59,9 +60,12 @@ export function WorktreeTab({
   onToggledChange,
   onOpenFile,
   canRenameFile,
+  remote = false,
 }: {
   sessionId?: string;
   project: Project;
+  /** The dashboard is connected to a remote instance; OS actions would run there. */
+  remote?: boolean;
   /** Which segmented view is showing (lives on the tab def, so it survives the
    * unmount/remount when another end-pane tab fronts this one). */
   view: WorktreeView;
@@ -139,6 +143,13 @@ export function WorktreeTab({
   const copyPath = (path: string) => {
     const root = tree?.path ?? project.repoPath;
     copyFilePath(root, path);
+  };
+  const reveal = async (path: string) => {
+    try {
+      await revealFileInManager(projectId, path, { sessionId });
+    } catch (error) {
+      showAlert(error instanceof Error ? error.message : String(error), "error");
+    }
   };
 
   return (
@@ -222,6 +233,9 @@ export function WorktreeTab({
         <FileContextMenu
           target={contextMenu}
           onOpen={() => openFile(contextMenu.path, "keepOpen")}
+          onReveal={canManageFiles && !remote
+            ? () => void reveal(contextMenu.path)
+            : undefined}
           onRename={canManageFiles && canRenameFile(contextMenu.path)
             ? () => setRenamingPath(contextMenu.path)
             : undefined}

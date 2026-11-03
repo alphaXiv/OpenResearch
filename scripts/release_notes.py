@@ -105,14 +105,14 @@ def remote_install(repository, tag):
     )
 
 
-def compose(notes, issues, highlights, remote):
+def compose(notes, issues, remote):
     notes = notes.strip()
     if issues:
         section = "## Fixed issues\n\n" + "\n".join(issues)
         marker = "**Full Changelog**:"
         before, found, after = notes.partition(marker)
         notes = (before.rstrip() + "\n\n" + section + "\n\n" + found + after) if found else notes + "\n\n" + section
-    return "\n\n".join(part for part in (downloads(), remote.strip(), highlights.strip(), notes) if part) + "\n"
+    return "\n\n".join(part for part in (downloads(), remote.strip(), notes) if part) + "\n"
 
 
 def previous_stable_release(repository, tag, commit):
@@ -158,9 +158,7 @@ def main():
         "-f", f"tag_name={tag}", "-f", f"target_commitish={commit}",
         *previous_arg,
     )["body"]
-    highlights_file = Path("release-notes") / f"{tag}.md"
-    highlights = highlights_file.read_text() if highlights_file.is_file() else ""
-    Path(output_file).write_text(compose(generated, fixed_issues(generated, repository), highlights, remote_install(repository, tag)))
+    Path(output_file).write_text(compose(generated, fixed_issues(generated, repository), remote_install(repository, tag)))
 
 
 if __name__ == "__main__":

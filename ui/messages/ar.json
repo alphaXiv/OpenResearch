@@ -216,6 +216,8 @@
   "header_configure_repository": "إعداد المستودع",
   "header_create_a_new_project": "إنشاء مشروع جديد",
   "header_hide_sidebar": "إخفاء الشريط الجانبي",
+  "header_dev_badge": "تطوير",
+  "header_query_devtools": "أدوات المطوّرين لـ Query",
   "header_project": "المشروع",
   "lit_sources_picker_loading": "جارٍ التحميل…",
   "md_copy": "نسخ",

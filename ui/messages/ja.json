@@ -216,6 +216,8 @@
   "header_configure_repository": "リポジトリを設定",
   "header_create_a_new_project": "新しいプロジェクトを作成",
   "header_hide_sidebar": "サイドバーを非表示",
+  "header_dev_badge": "開発版",
+  "header_query_devtools": "Query 開発ツール",
   "header_project": "プロジェクト",
   "lit_sources_picker_loading": "読み込み中…",
   "md_copy": "コピー",
