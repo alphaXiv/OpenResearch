@@ -1173,20 +1173,25 @@ pub(crate) fn write_mcp_config(
     up_port: u16,
     session_id: &str,
     token: &str,
+    parent_session_id: Option<&str>,
 ) -> Result<PathBuf> {
     let orx = crate::paths::spawnable_exe()
         .map_err(|e| anyhow!("cannot resolve orx binary path for the mcp bridge: {e}"))?;
+    let mut env = serde_json::json!({
+        "ORX_UP_PORT": up_port.to_string(),
+        "ORX_SESSION_ID": session_id,
+        "ORX_GATE_TOKEN": token,
+    });
+    if let Some(parent) = parent_session_id.map(str::trim).filter(|s| !s.is_empty()) {
+        env["ORX_PARENT_SESSION_ID"] = serde_json::Value::String(parent.to_string());
+    }
     let config = serde_json::json!({
         "mcpServers": {
             "orx": {
                 "type": "stdio",
                 "command": orx.to_string_lossy(),
                 "args": ["mcp-gate"],
-                "env": {
-                    "ORX_UP_PORT": up_port.to_string(),
-                    "ORX_SESSION_ID": session_id,
-                    "ORX_GATE_TOKEN": token,
-                },
+                "env": env,
             },
         }
     });
@@ -2596,12 +2601,13 @@ mod tests {
     #[test]
     fn local_mcp_config_contains_only_string_environment_values() {
         let repo = std::env::temp_dir().join(format!("orx-mcp-test-{}", uuid::Uuid::new_v4()));
-        let path = write_mcp_config(&repo, 4791, "session", "gate").unwrap();
+        let path = write_mcp_config(&repo, 4791, "session", "gate", None).unwrap();
         let config: serde_json::Value =
             serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
         let env = config["mcpServers"]["orx"]["env"].as_object().unwrap();
         assert!(env.values().all(serde_json::Value::is_string));
         assert!(!env.contains_key("ORX_UP_AUTH_TOKEN"));
+        assert!(!env.contains_key("ORX_PARENT_SESSION_ID"));
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt as _;
@@ -2610,6 +2616,22 @@ mod tests {
                 0o600
             );
         }
+        let _ = std::fs::remove_dir_all(repo);
+    }
+
+    #[test]
+    fn local_mcp_config_includes_parent_session_for_side_chat() {
+        let repo = std::env::temp_dir().join(format!("orx-mcp-test-{}", uuid::Uuid::new_v4()));
+        let path =
+            write_mcp_config(&repo, 4791, "side_child", "gate", Some("main_parent")).unwrap();
+        let config: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+        let env = config["mcpServers"]["orx"]["env"].as_object().unwrap();
+        assert_eq!(
+            env.get("ORX_PARENT_SESSION_ID")
+                .and_then(serde_json::Value::as_str),
+            Some("main_parent")
+        );
         let _ = std::fs::remove_dir_all(repo);
     }
 

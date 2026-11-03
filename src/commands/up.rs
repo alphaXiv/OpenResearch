@@ -936,6 +936,10 @@ fn is_remote_callback_route(method: &Method, path: &str) -> bool {
             .strip_prefix("/api/runs/")
             .and_then(|path| path.strip_suffix("/cancel"))
             .is_some_and(|id| !id.is_empty() && !id.contains('/'))
+        || path
+            .strip_prefix("/api/chat/sessions/")
+            .and_then(|path| path.strip_suffix("/message"))
+            .is_some_and(|id| !id.is_empty() && !id.contains('/'))
 }
 
 // --- error plumbing -------------------------------------------------------
@@ -9702,7 +9706,7 @@ mod tests {
     }
 
     #[test]
-    fn remote_callback_token_is_limited_to_runs_and_the_spawn_preflight() {
+    fn remote_callback_token_allows_runs_spawn_preflight_and_chat_messages() {
         assert!(is_remote_callback_route(&Method::POST, "/api/runs"));
         assert!(is_remote_callback_route(
             &Method::POST,
@@ -9713,9 +9717,17 @@ mod tests {
             &Method::POST,
             "/api/runs/run-1/extra/cancel"
         ));
-        assert!(!is_remote_callback_route(
+        assert!(is_remote_callback_route(
             &Method::POST,
             "/api/chat/sessions/s1/message"
+        ));
+        assert!(!is_remote_callback_route(
+            &Method::GET,
+            "/api/chat/sessions/s1/message"
+        ));
+        assert!(!is_remote_callback_route(
+            &Method::POST,
+            "/api/chat/sessions/s1/extra/message"
         ));
         assert!(is_remote_callback_route(
             &Method::GET,

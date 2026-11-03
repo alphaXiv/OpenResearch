@@ -186,7 +186,7 @@ const S_GIT: AgentSkill = AgentSkill {
 };
 const S_AGENT_DELEGATION: AgentSkill = AgentSkill {
     name: "orx-agent-delegation",
-    description: "Create independent project chats with `orx agent spawn` using the user's New Chat settings. Covers standalone opening messages, project selection, worktrees, and compute authorization. Use before creating another chat.",
+    description: "Create independent project chats with `orx agent spawn` or send messages to other sessions (including side chat to main chat) with `orx agent message`. Use before creating another chat or sending inter-chat updates.",
     content: AGENT_DELEGATION,
     resources: &[],
 };

@@ -421,6 +421,18 @@ pub enum AgentCommand {
         #[arg(long)]
         project: Option<String>,
     },
+    /// Send a message to another chat session (defaults to the parent chat in a side chat).
+    #[command(alias = "send")]
+    Message {
+        /// The message to send to the chat.
+        message: Option<String>,
+        /// Read the message from stdin instead, for long multi-paragraph briefs.
+        #[arg(long)]
+        stdin: bool,
+        /// Target chat session ID (defaults to the parent chat session if in a side chat).
+        #[arg(long)]
+        session: Option<String>,
+    },
 }
 
 #[derive(Args, Debug)]
@@ -1528,6 +1540,52 @@ mod cli_tests {
             };
             assert_eq!(actual, expected);
         }
+    }
+
+    #[test]
+    fn agent_message_and_send_parse_target_and_stdin() {
+        for sub in ["message", "send"] {
+            let cli = Cli::try_parse_from(["orx", "agent", sub, "hello from side chat"])
+                .expect("agent message should parse");
+            let Some(Command::Agent(AgentArgs {
+                command:
+                    AgentCommand::Message {
+                        message,
+                        stdin,
+                        session,
+                    },
+            })) = cli.command
+            else {
+                panic!("expected agent message command");
+            };
+            assert_eq!(message.as_deref(), Some("hello from side chat"));
+            assert!(!stdin);
+            assert_eq!(session, None);
+        }
+
+        let cli = Cli::try_parse_from([
+            "orx",
+            "agent",
+            "message",
+            "--stdin",
+            "--session",
+            "chat_parent",
+        ])
+        .expect("agent message stdin with session");
+        let Some(Command::Agent(AgentArgs {
+            command:
+                AgentCommand::Message {
+                    message,
+                    stdin,
+                    session,
+                },
+        })) = cli.command
+        else {
+            panic!("expected agent message command");
+        };
+        assert_eq!(message, None);
+        assert!(stdin);
+        assert_eq!(session.as_deref(), Some("chat_parent"));
     }
 
     #[test]

@@ -1,7 +1,20 @@
 ---
 name: orx-agent-delegation
-description: "Create independent project chats with `orx agent spawn` using the user's New Chat settings. Covers standalone opening messages, project selection, worktrees, and compute authorization. Use before creating another chat."
+description: "Create independent project chats with `orx agent spawn` or send messages to other sessions (including side chat to main chat) with `orx agent message`. Use before creating another chat or sending inter-chat updates."
 ---
+
+# Send a message to another chat
+
+`orx agent message` (or `orx agent send`) sends a message to another chat session.
+When executed inside a side chat without `--session`, it automatically targets the parent (main) chat.
+
+```sh
+orx agent message "<message to main chat>"
+orx agent message --stdin
+orx agent message "<message>" --session <target-session-id>
+```
+
+When a user in a side chat asks to send findings, code changes, or instructions to the main chat, use this command to post the update directly to the main chat.
 
 # Create an independent chat
 

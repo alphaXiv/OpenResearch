@@ -8287,7 +8287,7 @@ fn side_chat_context<'a>(
 ) -> Option<String> {
     let snapshot = crate::local::harness::transcript_snapshot(messages);
     (!snapshot.is_empty()).then(|| format!(
-        "<orx-side-chat-context>\nThis is a side chat branched from another chat, which may still be running in this same worktree. Use this snapshot of that chat, taken when the side chat opened, to answer questions about its work. Do not modify files unless the user asks.\n{snapshot}\n</orx-side-chat-context>"
+        "<orx-side-chat-context>\nThis is a side chat branched from another chat (main chat), which may still be running in this same worktree. Use this snapshot of that chat, taken when the side chat opened, to answer questions about its work. Do not modify files unless the user asks.\nWhen the user asks you to send a message, findings, or instructions to the main chat, run: `orx agent message \"<message>\"` (or `orx agent send \"<message>\"`). This sends your message directly to the main chat so the main agent can act on it.\n{snapshot}\n</orx-side-chat-context>"
     ))
 }
 
@@ -8731,6 +8731,9 @@ pub fn prepare_env(cmd: &mut tokio::process::Command) {
 /// `launching_chat_session`) and `orx exp wake` can register the current chat.
 pub const CHAT_SESSION_ENV: &str = "ORX_CHAT_SESSION_ID";
 
+/// Parent chat session id when the current chat is a side chat.
+pub const PARENT_CHAT_SESSION_ENV: &str = "ORX_PARENT_CHAT_SESSION_ID";
+
 /// Harness label paired with [`CHAT_SESSION_ENV`] for child telemetry.
 pub const CHAT_HARNESS_ENV: &str = "ORX_CHAT_HARNESS";
 
@@ -8867,6 +8870,18 @@ pub fn set_chat_session_env(
     cmd.env(CHAT_SESSION_ENV, session_id);
     cmd.env(CHAT_HARNESS_ENV, harness);
     cmd.env(LOCAL_SESSION_ENV, "1");
+    let parent = Store::open()
+        .ok()
+        .and_then(|store| store.get_chat_session(session_id).ok().flatten())
+        .and_then(|session| session.side_parent_session_id);
+    match parent {
+        Some(parent_id) => {
+            cmd.env(PARENT_CHAT_SESSION_ENV, parent_id);
+        }
+        None => {
+            cmd.env_remove(PARENT_CHAT_SESSION_ENV);
+        }
+    }
     // Never let a child inherit a port owned by some outer orx up process.
     match up_port {
         Some(port) => {

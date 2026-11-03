@@ -99,6 +99,7 @@ group below has a module (`orx skill <name>`) with the full flags and rules.
 | `orx exp move/archive/unarchive/delete <localExpId>` | Re-parent, hide, restore, or permanently delete experiment nodes; see `orx-experiment-tree`. |
 | `orx exp desc <expId> [--set "<text>" \| --stdin]` | Read or overwrite the experiment's description. |
 | `orx agent spawn "<task>" [--title "<t>"] [--stdin] [--no-wake]` | Delegate an independent task to a helper session; see `orx-agent-delegation`. |
+| `orx agent message "<msg>" [--stdin] [--session <s>]` | Send a message to another chat (defaults to parent in side chat); see `orx-agent-delegation`. |
 
 To **read or edit** a node's code—including diffing what a run changed—use plain
 Git in the local session worktree. See the `orx-git` module.

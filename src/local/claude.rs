@@ -669,7 +669,22 @@ async fn spawn_client(spec: &SpawnSpec, auth_generation: u64) -> Result<Arc<Clau
                 spec.config.permission_mode == Some(PermissionMode::Plan),
                 spec.config.permission_mode == Some(PermissionMode::Bypass),
             );
-            match write_mcp_config(&spec.repo, port, &spec.session_id, &token) {
+            let parent_session_id = std::env::var(crate::local::chat::PARENT_CHAT_SESSION_ENV)
+                .ok()
+                .filter(|s| !s.trim().is_empty())
+                .or_else(|| {
+                    crate::store::Store::open()
+                        .ok()
+                        .and_then(|store| store.get_chat_session(&spec.session_id).ok().flatten())
+                        .and_then(|session| session.side_parent_session_id)
+                });
+            match write_mcp_config(
+                &spec.repo,
+                port,
+                &spec.session_id,
+                &token,
+                parent_session_id.as_deref(),
+            ) {
                 Ok(path) => {
                     cmd.arg("--mcp-config").arg(path);
                     cmd.args(["--permission-prompt-tool", "mcp__orx__approve"]);

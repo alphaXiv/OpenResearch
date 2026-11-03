@@ -32,22 +32,32 @@ struct GateEnv {
     up_port: u16,
     session_id: String,
     token: String,
+    parent_session_id: Option<String>,
 }
 
 impl GateEnv {
     fn from_env() -> Result<Self> {
-        let up_port = std::env::var("ORX_UP_PORT")
-            .ok()
+        Self::from_lookup(&|key| std::env::var(key).ok())
+    }
+
+    fn from_lookup(lookup: &dyn Fn(&str) -> Option<String>) -> Result<Self> {
+        let up_port = lookup("ORX_UP_PORT")
             .and_then(|p| p.parse().ok())
             .ok_or_else(|| anyhow!("ORX_UP_PORT missing or invalid"))?;
-        let session_id =
-            std::env::var("ORX_SESSION_ID").map_err(|_| anyhow!("ORX_SESSION_ID missing"))?;
-        let token =
-            std::env::var("ORX_GATE_TOKEN").map_err(|_| anyhow!("ORX_GATE_TOKEN missing"))?;
+        let session_id = lookup("ORX_SESSION_ID")
+            .filter(|s| !s.trim().is_empty())
+            .ok_or_else(|| anyhow!("ORX_SESSION_ID missing"))?;
+        let token = lookup("ORX_GATE_TOKEN")
+            .filter(|s| !s.trim().is_empty())
+            .ok_or_else(|| anyhow!("ORX_GATE_TOKEN missing"))?;
+        let parent_session_id = lookup("ORX_PARENT_SESSION_ID")
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty());
         Ok(Self {
             up_port,
             session_id,
             token,
+            parent_session_id,
         })
     }
 }
@@ -102,16 +112,28 @@ pub async fn run() -> Result<()> {
                 ));
             }
             Some("tools/list") => {
-                let _ = out_tx.send(reply(
-                    id,
-                    json!({
-                        "tools": [{
-                            "name": "approve",
-                            "description": "Ask the orx user to approve a tool call",
-                            "inputSchema": { "type": "object", "additionalProperties": true },
-                        }]
-                    }),
-                ));
+                let mut tools = vec![json!({
+                    "name": "approve",
+                    "description": "Ask the orx user to approve a tool call",
+                    "inputSchema": { "type": "object", "additionalProperties": true },
+                })];
+                if env.parent_session_id.is_some() {
+                    tools.push(json!({
+                        "name": "send_to_main_chat",
+                        "description": "Send a message or finding to the main chat session from this side chat",
+                        "inputSchema": {
+                            "type": "object",
+                            "properties": {
+                                "message": {
+                                    "type": "string",
+                                    "description": "The message to send to the main chat",
+                                }
+                            },
+                            "required": ["message"],
+                        },
+                    }));
+                }
+                let _ = out_tx.send(reply(id, json!({ "tools": tools })));
             }
             Some("tools/call") => {
                 // Handled concurrently: a held approval must not block the next
@@ -120,6 +142,53 @@ pub async fn run() -> Result<()> {
                     .pointer("/params/arguments")
                     .cloned()
                     .unwrap_or_else(|| json!({}));
+                let name = msg
+                    .pointer("/params/name")
+                    .and_then(Value::as_str)
+                    .unwrap_or("");
+                if name == "send_to_main_chat" {
+                    if let Some(parent) = &env.parent_session_id {
+                        let message = args
+                            .get("message")
+                            .and_then(Value::as_str)
+                            .unwrap_or("")
+                            .to_string();
+                        let client_turn_id = format!("ct_{}", uuid::Uuid::new_v4());
+                        let body = json!({
+                            "text": message,
+                            "clientTurnId": client_turn_id,
+                        });
+                        let out = out_tx.clone();
+                        let up_port = env.up_port;
+                        let parent = parent.clone();
+                        tokio::spawn(async move {
+                            let resp = crate::commands::up::chat_request_via_up(
+                                up_port,
+                                reqwest::Method::POST,
+                                &format!("/api/chat/sessions/{parent}/message"),
+                                &body,
+                            )
+                            .await;
+                            let reply_text = match resp {
+                                Ok(_) => "Message successfully sent to the main chat.".to_string(),
+                                Err(e) => format!("Failed to send message to main chat: {e}"),
+                            };
+                            let _ = out.send(reply(
+                                id,
+                                json!({ "content": [{ "type": "text", "text": reply_text }] }),
+                            ));
+                        });
+                    } else {
+                        let _ = out_tx.send(reply(
+                            id,
+                            json!({
+                                "isError": true,
+                                "content": [{ "type": "text", "text": "This chat is not a side chat with a main chat." }]
+                            }),
+                        ));
+                    }
+                    continue;
+                }
                 let url = format!("http://127.0.0.1:{}/api/internal/permissions", env.up_port);
                 let body = json!({
                     "sessionId": env.session_id,
@@ -352,6 +421,27 @@ fn workspace_read(name: &str, args: &Value, payload: &Value) -> bool {
                 .filter_map(|root| std::fs::canonicalize(root).ok())
                 .any(|root| path.starts_with(root))
         })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn gate_env_reads_parent_session_when_set() {
+        let env = GateEnv::from_lookup(&|key| match key {
+            "ORX_UP_PORT" => Some("4901".into()),
+            "ORX_SESSION_ID" => Some("child_session".into()),
+            "ORX_GATE_TOKEN" => Some("token123".into()),
+            "ORX_PARENT_SESSION_ID" => Some("parent_session".into()),
+            _ => None,
+        })
+        .unwrap();
+        assert_eq!(env.up_port, 4901);
+        assert_eq!(env.session_id, "child_session");
+        assert_eq!(env.token, "token123");
+        assert_eq!(env.parent_session_id.as_deref(), Some("parent_session"));
+    }
 }
 
 #[cfg(test)]

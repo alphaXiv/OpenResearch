@@ -14,7 +14,11 @@ pub async fn run(args: crate::AgentArgs) -> Result<()> {
             title,
             project,
         } => {
-            let prompt = task_text(task, stdin)?;
+            let prompt = prompt_text(
+                task,
+                stdin,
+                "Provide an opening message: orx agent spawn \"<message>\".",
+            )?;
             let port = chat::trusted_up_port()?.ok_or_else(|| anyhow!(
                 "Connect to the running OpenResearch server with ORX_LOCAL_SESSION=1 and ORX_UP_PORT (and ORX_UP_AUTH_TOKEN when required)."
             ))?;
@@ -44,12 +48,65 @@ pub async fn run(args: crate::AgentArgs) -> Result<()> {
             };
             spawn(port, &project, &prompt, title.as_deref()).await
         }
+        AgentCommand::Message {
+            message,
+            stdin,
+            session,
+        } => {
+            let prompt = prompt_text(
+                message,
+                stdin,
+                "Provide a message: orx agent message \"<message>\".",
+            )?;
+            let port = chat::trusted_up_port()?.ok_or_else(|| anyhow!(
+                "Connect to the running OpenResearch server with ORX_LOCAL_SESSION=1 and ORX_UP_PORT (and ORX_UP_AUTH_TOKEN when required)."
+            ))?;
+            let target_session_id = match session {
+                Some(s) if !s.trim().is_empty() => s.trim().to_string(),
+                _ => resolve_target_session(port).await?,
+            };
+            send(port, &target_session_id, &prompt).await
+        }
     }
 }
 
-fn task_text(task: Option<String>, stdin: bool) -> Result<String> {
-    let text = if stdin {
-        if task.is_some() {
+async fn resolve_target_session(port: u16) -> Result<String> {
+    resolve_target_session_with(port, std::env::var(chat::PARENT_CHAT_SESSION_ENV).ok()).await
+}
+
+async fn resolve_target_session_with(port: u16, parent_env: Option<String>) -> Result<String> {
+    if let Some(parent_id) = parent_env {
+        let parent_id = parent_id.trim();
+        if !parent_id.is_empty() {
+            return Ok(parent_id.to_string());
+        }
+    }
+    let session_id = chat::launching_chat_session().ok_or_else(|| {
+        anyhow!("Pass --session <session-id> when there is no current OpenResearch chat.")
+    })?;
+    let session = crate::commands::up::chat_request_via_up(
+        port,
+        reqwest::Method::GET,
+        &format!("/api/chat/sessions/{session_id}"),
+        &serde_json::json!({}),
+    )
+    .await?;
+    if let Some(parent) = session
+        .pointer("/session/sideParentSessionId")
+        .and_then(serde_json::Value::as_str)
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+    {
+        return Ok(parent.to_string());
+    }
+    Err(anyhow!(
+        "Chat {session_id} is not a side chat with a parent chat. Pass --session <session-id> to specify the target chat."
+    ))
+}
+
+fn prompt_text(text: Option<String>, stdin: bool, empty_hint: &str) -> Result<String> {
+    let raw = if stdin {
+        if text.is_some() {
             return Err(anyhow!(
                 "Pass the message as an argument or --stdin, not both."
             ));
@@ -58,15 +115,13 @@ fn task_text(task: Option<String>, stdin: bool) -> Result<String> {
         std::io::stdin().read_to_string(&mut buf)?;
         buf
     } else {
-        task.unwrap_or_default()
+        text.unwrap_or_default()
     };
-    let text = text.trim();
-    if text.is_empty() {
-        return Err(anyhow!(
-            "Provide an opening message: orx agent spawn \"<message>\"."
-        ));
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return Err(anyhow!("{empty_hint}"));
     }
-    Ok(text.to_string())
+    Ok(trimmed.to_string())
 }
 
 async fn spawn(port: u16, project: &str, prompt: &str, title: Option<&str>) -> Result<()> {
@@ -117,17 +172,53 @@ async fn spawn(port: u16, project: &str, prompt: &str, title: Option<&str>) -> R
     Ok(())
 }
 
+async fn send(port: u16, target_id: &str, prompt: &str) -> Result<()> {
+    use crate::commands::up::chat_request_via_up;
+    use reqwest::Method;
+    use serde_json::json;
+
+    let client_turn_id = format!("ct_{}", uuid::Uuid::new_v4());
+    let result = chat_request_via_up(
+        port,
+        Method::POST,
+        &format!("/api/chat/sessions/{target_id}/message"),
+        &json!({"text": prompt, "clientTurnId": client_turn_id}),
+    )
+    .await
+    .map_err(|error| anyhow!("Could not send message to chat {target_id}: {error}"))?;
+
+    if result
+        .pointer("/turn/queued")
+        .and_then(serde_json::Value::as_bool)
+        == Some(true)
+    {
+        println!("Message sent to chat {target_id} and queued.");
+    } else {
+        println!("Message sent to chat {target_id}.");
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
-    use super::task_text;
+    use super::{prompt_text, resolve_target_session_with};
+
     #[test]
-    fn opening_message_requires_one_nonempty_source() {
+    fn prompt_requires_one_nonempty_source() {
         assert_eq!(
-            task_text(Some("  Inspect the code  ".into()), false).unwrap(),
+            prompt_text(Some("  Inspect the code  ".into()), false, "empty").unwrap(),
             "Inspect the code"
         );
-        assert!(task_text(None, false).is_err());
-        assert!(task_text(Some("   ".into()), false).is_err());
-        assert!(task_text(Some("argument".into()), true).is_err());
+        assert!(prompt_text(None, false, "empty").is_err());
+        assert!(prompt_text(Some("   ".into()), false, "empty").is_err());
+        assert!(prompt_text(Some("argument".into()), true, "empty").is_err());
+    }
+
+    #[tokio::test]
+    async fn resolve_target_session_prefers_parent_env() {
+        let target = resolve_target_session_with(1234, Some("chat_parent_123".into()))
+            .await
+            .unwrap();
+        assert_eq!(target, "chat_parent_123");
     }
 }
