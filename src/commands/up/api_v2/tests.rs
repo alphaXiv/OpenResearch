@@ -173,7 +173,7 @@ fn keep(api: &Api, run: &str, start: u64, bytes: &[u8], eof: bool) {
     let file = api.data_dir.join(format!("run-logs/{run}.{start}.page"));
     std::fs::create_dir_all(file.parent().unwrap()).unwrap();
     std::fs::write(&file, bytes).unwrap();
-    let mut ranges = api.kept_ranges(run).unwrap();
+    let mut ranges = kept_ranges(&api.data_dir, run).unwrap();
     ranges.push(KeptRange {
         offset: start,
         len: bytes.len() as u64,

@@ -1229,6 +1229,7 @@ impl Store {
             "ALTER TABLE chat_run_wakeups ADD COLUMN claimed_at INTEGER",
             "ALTER TABLE chat_run_wakeups ADD COLUMN delivered_at INTEGER",
             "ALTER TABLE chat_run_wakeups ADD COLUMN monitoring_alerted INTEGER NOT NULL DEFAULT 0",
+            "ALTER TABLE chat_run_wakeups ADD COLUMN engine_migrated INTEGER NOT NULL DEFAULT 0",
             "ALTER TABLE chat_messages ADD COLUMN parent_id TEXT",
             "ALTER TABLE chat_messages ADD COLUMN base_native_session_id TEXT",
             "ALTER TABLE chat_messages ADD COLUMN result_native_session_id TEXT",
@@ -5738,14 +5739,10 @@ impl Store {
     /// Run under the engine lock after legacy delivery stops and before notice production.
     pub fn migrate_run_wakeups(&self) -> Result<()> {
         let tx = self.begin_immediate()?;
-        let version: i64 = tx.query_row("PRAGMA user_version", [], |row| row.get(0))?;
-        if version >= 2 {
-            return Ok(());
-        }
         let wakeups = {
             let mut stmt = tx.prepare(
                 "SELECT run_id, chat_session_id, state, requested_at, delivered_at, monitoring_alerted
-                 FROM chat_run_wakeups ORDER BY run_id, chat_session_id",
+                 FROM chat_run_wakeups WHERE engine_migrated = 0 ORDER BY run_id, chat_session_id",
             )?;
             let rows = stmt.query_map([], |row| {
                 Ok((
@@ -5792,6 +5789,11 @@ impl Store {
                     params![run_id, chat, dedupe, delivered_at.unwrap_or(requested_at)],
                 )?;
             }
+            tx.execute(
+                "UPDATE chat_run_wakeups SET engine_migrated = 1
+                 WHERE run_id = ?1 AND chat_session_id = ?2",
+                params![run_id, chat],
+            )?;
         }
         tx.pragma_update(None, "user_version", 2)?;
         tx.commit()?;
@@ -5811,20 +5813,32 @@ impl Store {
         use std::io::{Read, Seek, SeekFrom};
 
         let mut bytes = Vec::new();
+        let ranges = crate::commands::up::api_v2::kept_ranges(&self.data_dir, &run.id)?;
         let tail = self.run_artifact_path(TAIL_LOG, &run.id);
-        let path = if tail.exists() {
-            tail
+        let current = if let Some(range) = ranges.iter().max_by_key(|range| range.offset) {
+            let file = std::fs::File::open(&range.file)?;
+            Ok((file, range.file.clone(), range.len))
+        } else if tail.exists() {
+            let file = std::fs::File::open(&tail)?;
+            let size = file.metadata()?.len();
+            Ok((file, tail, size))
         } else {
-            self.run_artifact_path(("run-logs", ".log"), &run.id)
+            crate::jobs::ssh::service::logs::open_current(
+                self.run_artifact_path(("run-logs", ".log"), &run.id),
+            )
         };
-        match std::fs::File::open(path) {
-            Ok(mut file) => {
-                let start = file.metadata()?.len().saturating_sub(TERMINAL_LOG_BYTES);
+        match current {
+            Ok((mut file, _, size)) => {
+                let start = size.saturating_sub(TERMINAL_LOG_BYTES);
                 file.seek(SeekFrom::Start(start))?;
-                file.take(TERMINAL_LOG_BYTES).read_to_end(&mut bytes)?;
+                bytes.resize(usize::try_from(size - start)?, 0);
+                file.read_exact(&mut bytes)?;
             }
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-            Err(error) => return Err(error.into()),
+            Err(error)
+                if error
+                    .downcast_ref::<std::io::Error>()
+                    .is_some_and(|error| error.kind() == std::io::ErrorKind::NotFound) => {}
+            Err(error) => return Err(error),
         }
         let first_character = bytes
             .iter()
@@ -6204,6 +6218,129 @@ mod tests {
     }
 
     #[test]
+    fn engine_wakeup_migration_imports_new_legacy_rows_after_downgrade() {
+        let (dir, store) = engine_fixture();
+        store.migrate_run_wakeups().unwrap();
+        let delivered = store.run_notice_batch("foreign").unwrap();
+        assert_eq!(delivered.len(), 1);
+        store
+            .mark_run_notice_batch_delivered("foreign", &delivered[0].client_turn_id, 600)
+            .unwrap();
+        drop(store);
+
+        let legacy = Connection::open(dir.join("orx.db")).unwrap();
+        legacy
+            .execute_batch(
+                "INSERT INTO chat_run_wakeups (run_id, chat_session_id, requested_at)
+                 VALUES ('slurm_job', 'foreign', 700), ('lost', 'foreign', 701);
+                 INSERT INTO chat_run_wakeups
+                     (run_id, chat_session_id, requested_at, state, delivered_at)
+                 VALUES ('done', 'foreign', 702, 'delivered', 703);",
+            )
+            .unwrap();
+        drop(legacy);
+
+        let store = Store::open_at(dir.clone()).unwrap();
+        store.migrate_run_wakeups().unwrap();
+        assert!(store
+            .run_subscribers("slurm_job")
+            .unwrap()
+            .iter()
+            .any(|chat| chat == "foreign"));
+        let notices = store.run_notice_batch("foreign").unwrap();
+        assert_eq!(notices.len(), 1);
+        assert_eq!(notices[0].run_id, "lost");
+        assert_eq!(
+            store
+                .conn
+                .query_row(
+                    "SELECT delivered_at FROM run_notices
+                     WHERE run_id = 'failed' AND chat_session_id = 'foreign'",
+                    [],
+                    |row| row.get::<_, i64>(0),
+                )
+                .unwrap(),
+            600
+        );
+        store.migrate_run_wakeups().unwrap();
+        assert_eq!(store.run_notice_batch("foreign").unwrap(), notices);
+        drop(store);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn terminal_notice_prefers_kept_ranges_to_the_published_legacy_log_generation() {
+        let (dir, store) = engine_fixture();
+        let run = store.get_run("failed").unwrap().unwrap();
+        let path = dir.join("run-logs/failed.log");
+        std::fs::write(&path, "obsolete generation\n").unwrap();
+        let generation = uuid::Uuid::new_v4();
+        let published = "UPGRADE_BEGIN\nFINAL_METRIC=0.862\nUPGRADE_END\n";
+        std::fs::write(
+            path.with_extension(format!("{generation}.log")),
+            format!("{published}unpublished bytes\n"),
+        )
+        .unwrap();
+        std::fs::write(
+            path.with_extension("cursor.json"),
+            serde_json::to_vec(&serde_json::json!({
+                "generation": generation.to_string(),
+                "identity": "legacy-log",
+                "boundary": "boundary",
+                "bytes": published.len(),
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+        let body = store.terminal_notice_body(&run).unwrap();
+        assert_eq!(
+            body.split_once("Recent log:\n").unwrap().1,
+            published.trim_end()
+        );
+        let collected = "collected after adoption\nUPGRADE_END\n";
+        std::fs::write(&path, format!("{collected}unpublished bytes\n")).unwrap();
+        let manifest = path.with_extension("ranges.json");
+        std::fs::write(
+            &manifest,
+            serde_json::to_vec(&serde_json::json!([{
+                "offset": 0,
+                "len": collected.len(),
+                "file": &path,
+                "ident": "1-2",
+                "eof": true,
+            }]))
+            .unwrap(),
+        )
+        .unwrap();
+        let body = store.terminal_notice_body(&run).unwrap();
+        assert_eq!(
+            body.split_once("Recent log:\n").unwrap().1,
+            collected.trim_end()
+        );
+        std::fs::write(&path, "truncated").unwrap();
+        assert!(store.terminal_notice_body(&run).is_err());
+        std::fs::write(&path, collected).unwrap();
+        std::fs::remove_file(manifest).unwrap();
+        let engine_cursor = path.with_extension("engine-cursor.json");
+        std::fs::write(
+            &engine_cursor,
+            serde_json::to_vec(&serde_json::json!({"offset": collected.len()})).unwrap(),
+        )
+        .unwrap();
+        let body = store.terminal_notice_body(&run).unwrap();
+        assert_eq!(
+            body.split_once("Recent log:\n").unwrap().1,
+            collected.trim_end()
+        );
+        std::fs::remove_file(engine_cursor).unwrap();
+        std::fs::write(dir.join("run-logs/failed.tail.log"), "retained tail\n").unwrap();
+        let body = store.terminal_notice_body(&run).unwrap();
+        assert!(body.ends_with("Recent log:\nretained tail"));
+        drop(store);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
     fn engine_wakeup_migration_rolls_back_on_an_unreadable_completion_log() {
         let (dir, store) = engine_fixture();
         let path = dir.join("run-logs/failed.log");
@@ -6219,6 +6356,17 @@ mod tests {
                 0
             );
         }
+        assert_eq!(
+            store
+                .conn
+                .query_row(
+                    "SELECT COUNT(*) FROM chat_run_wakeups WHERE engine_migrated != 0",
+                    [],
+                    |row| row.get::<_, i64>(0),
+                )
+                .unwrap(),
+            0
+        );
         assert_eq!(
             store
                 .conn

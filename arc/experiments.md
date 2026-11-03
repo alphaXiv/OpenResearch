@@ -220,6 +220,9 @@ keeps its original descriptor and stop semantics. The supervisor, the SSH
 service and its remote helper remain only for those runs, and are deleted once
 no 0.2.x supervisor can still be running.
 
+The engine imports each 0.2.x wake-up subscription once, including subscriptions
+accepted after a downgrade or while the engine is running.
+
 Remote run directories are cleaned up later in bounded batches per host,
 keeping each project's newest finished runs and the source archives live runs
 still need.
@@ -277,7 +280,7 @@ collect log + exit code ◄─ssh─ wait for "collected", 60 s max
   backoff and the auth breaker ([remote](remote.md)) apply to it.
 - **No research data crosses this protocol.** Logs, commands, source,
   experiment IDs, outcomes and artifacts never reach the billing service.
-- Manual teardown follows the [run engine's Cancel and Abandon path](../docs/run-engine.md#10-backends).
+- Manual teardown follows the run engine's Cancel and Abandon path above.
 - Collection is best effort. Data left only on the machine is lost when it is
   deleted, and a run whose final outcome could not be collected ends as
   **lost** ("Outcome unavailable") instead of running forever. The chat is

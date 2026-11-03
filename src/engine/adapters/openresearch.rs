@@ -34,9 +34,9 @@ impl std::fmt::Debug for LegacyTransport {
 }
 
 #[derive(Serialize, Deserialize)]
-struct Cursor {
+pub(crate) struct Cursor {
     ident: Option<FileIdent>,
-    offset: u64,
+    pub(crate) offset: u64,
 }
 
 impl LegacyTransport {

@@ -256,16 +256,26 @@ fn read_at(paths: &Paths, offset: u64, limit: u64, expected: Option<&str>) -> Re
     })
 }
 
-pub(crate) fn open_current(run: &str) -> Result<(std::fs::File, PathBuf, u64)> {
-    let paths = Paths::new(run);
+pub(crate) fn open_current(base: PathBuf) -> Result<(std::fs::File, PathBuf, u64)> {
+    let paths = Paths { base };
     let lock = paths.lock()?;
     let _guard = lock.read()?;
-    let (path, size) = match load(&paths.cursor())? {
-        Some(cursor) => (paths.version(&cursor.generation)?, cursor.bytes),
-        None => {
-            let path = paths.base.clone();
-            let size = std::fs::metadata(&path)?.len();
-            (path, size)
+    let engine_cursor: Option<crate::engine::adapters::openresearch::Cursor> =
+        match std::fs::read(paths.base.with_extension("engine-cursor.json")) {
+            Ok(bytes) => Some(serde_json::from_slice(&bytes)?),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
+            Err(error) => return Err(error.into()),
+        };
+    let (path, size) = if let Some(cursor) = engine_cursor {
+        (paths.base.clone(), cursor.offset)
+    } else {
+        match load(&paths.cursor())? {
+            Some(cursor) => (paths.version(&cursor.generation)?, cursor.bytes),
+            None => {
+                let path = paths.base.clone();
+                let size = std::fs::metadata(&path)?.len();
+                (path, size)
+            }
         }
     };
     Ok((std::fs::File::open(&path)?, path, size))

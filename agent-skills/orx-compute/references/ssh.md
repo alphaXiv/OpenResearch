@@ -13,8 +13,9 @@ once and keeps an orx-owned connection that survives OpenResearch restarts. A
 changed host route also waits for Connect. Network failures back off from 5
 seconds up to 15 minutes without declaring any run stopped; the chat hears once
 when a host has been unreachable for 10 minutes and again when it returns.
-orx no longer edits `~/.ssh/config`. Once no legacy run needs its managed file,
-orx removes that file and leaves the `Include openresearch_config` line.
+On OpenSSH 8.4 and later, plain `ssh`, `scp` and `rsync` share that interactive
+connection through a managed file. orx adds its `Include openresearch_config`
+to `~/.ssh/config` once, preserving the existing contents.
 
 ```sh
 orx exp run <expId> --backend ssh --host lab

@@ -482,7 +482,9 @@ impl Runtime {
                 }
             }
         }
-        Ok(())
+
+        drop(senders);
+        self.engine.store().migrate_run_wakeups()
     }
 
     /// One loop per adapter. A changed watch set interrupts a pending long poll.
@@ -1135,6 +1137,34 @@ mod tests {
             clock.clone(),
         ));
         Runtime::new(engine, clock, dir.to_owned(), None)
+    }
+
+    #[tokio::test]
+    async fn legacy_wakeups_accepted_while_running_are_imported_once() {
+        let dir = std::env::temp_dir().join(format!("orx-live-wakeups-{}", uuid::Uuid::new_v4()));
+        let runtime = collector(&dir);
+        runtime.tick().unwrap();
+        let store = Store::open_at(dir.clone()).unwrap();
+        let legacy = rusqlite::Connection::open(dir.join("orx.db")).unwrap();
+        legacy
+            .execute_batch(
+                "INSERT INTO runs
+                     (id, experiment_id, project_id, status, backend_json, created_at, updated_at)
+                 VALUES ('legacy', 'exp', 'project', 'done', '{\"kind\":\"ssh_job\",\"jobId\":\"old\"}', 1, 2);",
+            )
+            .unwrap();
+        store.register_run_wakeup("legacy", "chat").unwrap();
+        runtime.tick().unwrap();
+        let notices = store.run_notice_batch("chat").unwrap();
+        assert_eq!(notices.len(), 1);
+        assert_eq!(notices[0].run_id, "legacy");
+        assert_eq!(notices[0].kind, crate::store::TERMINAL);
+        runtime.tick().unwrap();
+        assert_eq!(store.run_notice_batch("chat").unwrap(), notices);
+        drop(legacy);
+        drop(store);
+        drop(runtime);
+        std::fs::remove_dir_all(dir).unwrap();
     }
 
     #[cfg(unix)]

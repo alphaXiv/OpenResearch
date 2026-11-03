@@ -77,14 +77,7 @@ pub async fn run(args: crate::LogsArgs) -> Result<()> {
             .await;
     }
     resolve_run(Store::open()?, &args.run_id)?;
-    let manifest = crate::store::data_dir()
-        .join("run-logs")
-        .join(format!("{}.ranges.json", args.run_id));
-    let ranges: Vec<crate::commands::up::api_v2::KeptRange> = match std::fs::read(manifest) {
-        Ok(bytes) => serde_json::from_slice(&bytes)?,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Vec::new(),
-        Err(error) => return Err(error.into()),
-    };
+    let ranges = crate::commands::up::api_v2::kept_ranges(&crate::store::data_dir(), &args.run_id)?;
     if let Some(tail) = ranges.iter().max_by_key(|range| range.offset) {
         let total = ranges
             .iter()
@@ -113,8 +106,8 @@ pub async fn run(args: crate::LogsArgs) -> Result<()> {
         return Ok(());
     }
 
-    let (mut file, path, total) = match crate::jobs::ssh::service::logs::open_current(&args.run_id)
-    {
+    let log_path = crate::store::log_path(&crate::store::data_dir(), &args.run_id);
+    let (mut file, path, total) = match crate::jobs::ssh::service::logs::open_current(log_path) {
         Ok(current) => current,
         Err(error)
             if error

@@ -134,18 +134,6 @@ impl Api {
         Ok(value)
     }
 
-    fn kept_ranges(&self, id: &str) -> Result<Vec<KeptRange>> {
-        let path = self
-            .data_dir
-            .join("run-logs")
-            .join(format!("{id}.ranges.json"));
-        match std::fs::read(path) {
-            Ok(bytes) => Ok(serde_json::from_slice(&bytes)?),
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(Vec::new()),
-            Err(error) => Err(error.into()),
-        }
-    }
-
     pub(super) fn busy(&self) -> Result<bool> {
         Ok(self.store().engine_idle_blocked()? || self.sse_clients() != 0)
     }
@@ -601,6 +589,15 @@ pub(crate) struct KeptRange {
     pub eof: bool,
 }
 
+pub(crate) fn kept_ranges(data_dir: &std::path::Path, run: &str) -> Result<Vec<KeptRange>> {
+    let path = data_dir.join("run-logs").join(format!("{run}.ranges.json"));
+    match std::fs::read(path) {
+        Ok(bytes) => Ok(serde_json::from_slice(&bytes)?),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(Vec::new()),
+        Err(error) => Err(error.into()),
+    }
+}
+
 /// Replaces a run's kept ranges with a collected log, removing page files it no longer uses.
 pub(crate) fn keep_ranges(
     data_dir: &std::path::Path,
@@ -608,11 +605,7 @@ pub(crate) fn keep_ranges(
     ranges: Vec<KeptRange>,
 ) -> Result<()> {
     let manifest = data_dir.join("run-logs").join(format!("{run}.ranges.json"));
-    let old: Vec<KeptRange> = match std::fs::read(&manifest) {
-        Ok(bytes) => serde_json::from_slice(&bytes)?,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Vec::new(),
-        Err(error) => return Err(error.into()),
-    };
+    let old = kept_ranges(data_dir, run)?;
     crate::local::git::atomic_write_with_mode(
         &manifest,
         &serde_json::to_vec(&ranges)?,
@@ -644,8 +637,7 @@ async fn log(
     let page = read_log(&api, &id, range, expected).await?;
     let mut value = serde_json::to_value(&page).map_err(crate::error::Error::from)?;
     if let LogPage::Data { ident, .. } = &page {
-        let kept: Vec<_> = api
-            .kept_ranges(&id)?
+        let kept: Vec<_> = kept_ranges(&api.data_dir, &id)?
             .iter()
             .filter(|range| range.ident == *ident)
             .map(|range| [range.offset, range.offset + range.len])
@@ -671,7 +663,7 @@ async fn read_log(
     // Until its log is kept through the end, a finished run is read like a live one.
     let terminal = Phase::parse(&run.status).is_some_and(Phase::is_terminal)
         && !api.store().log_collection_pending(id)?;
-    let kept = api.kept_ranges(id)?;
+    let kept = kept_ranges(&api.data_dir, id)?;
     let known_len = kept
         .iter()
         .filter(|range| range.eof)
