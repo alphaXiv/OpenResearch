@@ -1929,7 +1929,7 @@ export const deleteLatexTemplate = (name: string) =>
 export interface UserSkill {
   name: string;
   /** The coding agent or plugin it comes from; absent when uploaded here, which
-   * is also the only case the user can delete. */
+   * is also the only case the user can edit or delete. */
   origin?: string | null;
   bytes: number;
   updatedAt: number;
@@ -1956,6 +1956,18 @@ export const deleteUserSkill = (name: string) =>
   writeResponse(`/api/user-skills?name=${encodeURIComponent(name)}`, { method: "DELETE" }).then((r) =>
     json<{ ok: boolean }>(r),
   );
+
+/** The full `SKILL.md`, frontmatter included, of an uploaded skill. */
+export const getUserSkillContent = (name: string) =>
+  get<{ name: string; content: string }>(
+    `/api/user-skills/${encodeURIComponent(name)}`,
+  ).then((r) => r.content);
+
+export const updateUserSkill = (name: string, content: string) =>
+  put<{ skill: UserSkill }>(
+    `/api/user-skills/${encodeURIComponent(name)}`,
+    { content },
+  ).then((r) => r.skill);
 
 /** "openai/gpt-5.5" → "GPT 5.5", "anthropic/claude-opus-4-8" → "Opus 4.8". */
 export function modelLabel(id: string): string {
