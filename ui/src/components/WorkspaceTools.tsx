@@ -139,7 +139,6 @@ function SideChatPicker({ parentId, sessions, onSelect, onCreate, expanded = fal
   const triggerRef = useRef<HTMLButtonElement>(null);
   const panelRef = useRef<HTMLDivElement>(null);
   const closeTimer = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
-  const openedByHover = useRef(false);
   const { open, setOpen, ref } = usePopover(triggerRef);
   const [filter, setFilter] = useState("");
   const visible = children.filter((session) => (session.title?.trim() || m.side_chat_untitled()).toLowerCase().includes(filter.trim().toLowerCase()));
@@ -165,7 +164,6 @@ function SideChatPicker({ parentId, sessions, onSelect, onCreate, expanded = fal
 
   const openPicker = () => {
     clearTimeout(closeTimer.current);
-    openedByHover.current = false;
     setFilter("");
     setOpen(true);
     requestAnimationFrame(() => (panelRef.current?.querySelector<HTMLElement>("input") ?? panelRef.current?.querySelector<HTMLElement>("button"))?.focus());
@@ -182,7 +180,7 @@ function SideChatPicker({ parentId, sessions, onSelect, onCreate, expanded = fal
     "aria-expanded": open,
     "data-keyboard-item": true,
     "data-keyboard-horizontal-item": true,
-    onClick: () => open && !openedByHover.current ? closePicker() : openPicker(),
+    onClick: () => { closePicker(); onCreate(); },
     onKeyDown: (event: React.KeyboardEvent<HTMLButtonElement>) => {
       if (event.key === "ArrowDown") {
         event.preventDefault();
@@ -197,7 +195,6 @@ function SideChatPicker({ parentId, sessions, onSelect, onCreate, expanded = fal
         if (event.pointerType !== "mouse") return;
         clearTimeout(closeTimer.current);
         if (!open) {
-          openedByHover.current = true;
           setFilter("");
           setOpen(true);
         }

@@ -28,6 +28,35 @@ function loadFunction(file, name, globals) {
   return exports.target;
 }
 
+test("workspace side-chat buttons create a draft directly and keep keyboard access to saved chats", () => {
+  for (const layout of [{ expanded: true }, {}, { mobile: true }]) {
+    for (const open of [false, true]) {
+      const opened = [];
+      let created = 0;
+      const SideChatPicker = loadFunction("WorkspaceTools.tsx", "SideChatPicker", {
+        useRef: (value) => ({ current: value }),
+        useState: (value) => [value, () => {}],
+        useEffect: () => {},
+        useLayoutEffect: () => {},
+        usePopover: () => ({ open, setOpen: (value) => opened.push(value), ref: { current: null } }),
+        requestAnimationFrame: (callback) => callback(),
+        m: new Proxy({}, { get: (_, key) => () => key }),
+        MenuItem: "button", IconButton: "button", MessagesSquare: "icon", Plus: "icon", EscapeScope: "escape-scope",
+      });
+      const tree = SideChatPicker({ parentId: "parent", sessions: [], onSelect: () => {}, onCreate: () => created++, ...layout });
+      const trigger = tree.props.children[0];
+      trigger.props.onClick();
+      assert.equal(created, 1);
+      assert.equal(opened.at(-1), false);
+      let prevented = false;
+      trigger.props.onKeyDown({ key: "ArrowDown", preventDefault: () => { prevented = true; } });
+      assert.equal(prevented, true);
+      assert.equal(opened.at(-1), true);
+      assert.equal(created, 1);
+    }
+  }
+});
+
 test("side-chat trigger opens the list on touch and a draft on mouse click", () => {
   const opened = [];
   let created = 0;
