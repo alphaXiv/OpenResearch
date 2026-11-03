@@ -329,6 +329,23 @@ test("a continuation retains the previous answer until a new answer arrives", as
   ]);
 });
 
+test("a message the user wrote into a continuation stays visible with its reply", async () => {
+  const { splitResponseParts } = await import("../src/chatRendering.ts");
+  const oldAnswer = { id: "old-answer", type: "text", phase: "final_answer", text: "Run launched" };
+  const progress = { id: "progress", type: "text", phase: "commentary", text: "Checking the result" };
+  const steer = { id: "steer", type: "steer", text: "Does this need GPUs?" };
+  const reply = { id: "reply", type: "text", phase: "commentary", text: "Yes, it runs a backward pass." };
+  const first = { ...message(oldAnswer), id: "first", completedAt: 10 };
+  const continuation = { ...message(progress, steer, reply), id: "continuation", createdAt: 100 };
+  const live = splitResponseParts([first, continuation], true);
+  assert.deepEqual(live.answer, [steer, reply]);
+  assert.equal(live.answerMessageId, "continuation");
+  assert.deepEqual(live.work, [
+    { id: "first", parts: [oldAnswer] },
+    { id: "continuation", parts: [progress] },
+  ]);
+});
+
 test("continuation prompts stay outside collapsed activity", async () => {
   const { splitResponseParts } = await import("../src/chatRendering.ts");
   const first = message({ id: "answer", type: "text", phase: "final_answer", text: "Started" });
