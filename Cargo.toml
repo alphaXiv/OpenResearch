@@ -6,6 +6,14 @@ description = "OpenResearch CLI (orx) — Rust port"
 repository = "https://github.com/alphaXiv/OpenResearch"
 license = "MIT"
 
+[workspace]
+members = ["tests/support"]
+exclude = ["windows/launcher"]
+default-members = [".", "tests/support"]
+
+[target.'cfg(unix)'.dev-dependencies]
+orx-test-support = { path = "tests/support" }
+
 [[bin]]
 name = "orx"
 path = "src/main.rs"
@@ -136,3 +144,6 @@ debug = "line-tables-only"
 # Third-party crates need no line info; saves another ~0.2 GiB per build.
 [profile.dev.package."*"]
 debug = false
+
+[profile.test.package.orx-test-support]
+opt-level = 3
