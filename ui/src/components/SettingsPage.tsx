@@ -22,6 +22,7 @@ import {
   refreshHarnesses,
   getK8sSettingsQuery,
   getModalSettingsQuery,
+  getVercelSettingsQuery,
   getSshMasterStatusQuery,
   getSshSettingsQuery,
   getSlurmSettingsQuery,
@@ -80,6 +81,8 @@ import {
   saveHfToken,
   saveTinkerKey,
   saveModalToken,
+  saveVercelSetup,
+  getVercelScopes,
   saveK8sSettings,
   saveRaySettings,
   saveSlurmSettings,
@@ -109,6 +112,7 @@ import {
   type K8sSettings,
   type LocalMachine,
   type ModalSettings,
+  type VercelPlan,
   type RayPreflight,
   type TrackioPreflight,
   type RaySettings,
@@ -138,6 +142,7 @@ import { claudeProviderLabel } from "./claudeProvider";
 import { BackendBadge, BackendLogo } from "./BackendLogos";
 import { ProgressBar } from "./ProgressBar";
 import { OptionPicker } from "./ModelPicker";
+import { useDebouncedValue } from "./NewProjectForm";
 import { Popover } from "@base-ui/react/popover";
 import { DirectionProvider } from "@base-ui/react/direction-provider";
 import { HarnessLogo } from "./HarnessLogo";
@@ -854,6 +859,175 @@ function ModalSection() {
             <RefreshCw size={14} /> {m.settings_page_refresh()}
           </Button>
           <Button variant="primary" type="submit" disabled={!tokenId.trim() || !tokenSecret.trim() || loading || saving || s?.processEnv}>
+            {saving ? m.common_saving() : m.common_save()}
+          </Button>
+        </div>
+      </form>
+    </>
+  );
+}
+
+// --- compute (vercel) ------------------------------------------------------------
+
+/** Offered when the team has no project by this name; orx creates it on save. */
+const VERCEL_NEW_PROJECT = "openresearch";
+
+const VERCEL_PLAN_LIMITS: Record<VercelPlan, () => string> = {
+  hobby: m.settings_vercel_plan_hobby,
+  pro: m.settings_vercel_plan_pro,
+  enterprise: m.settings_vercel_plan_enterprise,
+};
+
+function VercelSection() {
+  const saveMutation = useMutation({ mutationFn: saveVercelSetup });
+  const sOptions = getVercelSettingsQuery();
+  const sQuery = useQuery(sOptions);
+  const s = sQuery.data ?? null;
+  const [token, setToken] = useState("");
+  const [pickedTeam, setPickedTeam] = useState<string | null>(null);
+  const [pickedProject, setPickedProject] = useState<string | null>(null);
+  const [saveError, setSaveError] = useState<string | null>(null);
+  const [saving, setSaving] = useState(false);
+  const typedToken = useDebouncedValue(token.trim(), 400);
+
+  const savedScopes = s?.scopes ?? null;
+  const lookup = typedToken || (pickedTeam && pickedTeam !== savedScopes?.teamId)
+    ? { token: typedToken || null, teamId: pickedTeam }
+    : null;
+  const lookupQuery = useQuery({
+    queryKey: ["vercelScopes", lookup?.token, lookup?.teamId],
+    queryFn: () => getVercelScopes(lookup!.token, lookup!.teamId),
+    enabled: lookup !== null,
+    retry: false,
+    gcTime: 0,
+  });
+  const scopes = lookup ? lookupQuery.data ?? null : savedScopes;
+  const lookupError = lookup ? lookupQuery.error?.message ?? null : s?.error ?? null;
+  const finding = lookup !== null && lookupQuery.isFetching;
+
+  const teamId = pickedTeam ?? scopes?.teamId ?? null;
+  const team = scopes?.teams.find((item) => item.id === teamId) ?? null;
+  const projects = scopes?.teamId === teamId ? scopes.projects : [];
+  const hasDefaultProject = projects.some((project) => project.name === VERCEL_NEW_PROJECT);
+  const savedProject = teamId === savedScopes?.teamId && projects.some((project) => project.id === s?.projectId)
+    ? s?.projectId ?? null
+    : null;
+  const projectId = pickedProject
+    ?? savedProject
+    ?? projects.find((project) => project.name === VERCEL_NEW_PROJECT)?.id
+    ?? "new";
+  const projectChoices = [
+    ...(hasDefaultProject ? [] : [{ id: "new", label: m.settings_vercel_new_project({ name: VERCEL_NEW_PROJECT }) }]),
+    ...projects.map((project) => ({ id: project.id, label: project.name })),
+  ];
+
+  const locked = !!s?.processEnv;
+  const changed = !!typedToken || teamId !== savedScopes?.teamId || projectId !== s?.projectId;
+  const canSave = !locked && !saving && !finding && changed && !!scopes && !!teamId && (!!typedToken || !!s?.maskedToken);
+
+  async function submit(event: React.FormEvent) {
+    event.preventDefault();
+    if (!canSave || !teamId) return;
+    setSaving(true);
+    setSaveError(null);
+    try {
+      const next = await saveMutation.mutateAsync({
+        token: typedToken || null,
+        teamId,
+        projectId: projectId === "new" ? null : projectId,
+        newProject: projectId === "new" ? VERCEL_NEW_PROJECT : null,
+      });
+      setScopedQueryData(sOptions.queryKey, next);
+      setToken("");
+      setPickedTeam(null);
+      setPickedProject(null);
+    } catch (err) {
+      setSaveError(err instanceof Error ? err.message : String(err));
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  if (!s) {
+    return sQuery.error
+      ? <div className="error">{sQuery.error.message}</div>
+      : <LoadingRow><Spinner /> {m.settings_page_checking_vercel()}</LoadingRow>;
+  }
+
+  return (
+    <>
+      <dl className="m-0 flex items-center justify-between gap-4 text-sm">
+        <dt className="font-medium text-subtext">{m.settings_page_status()}</dt>
+        <dd className="m-0">
+          {!s.configured ? (
+            <Badge variant="warning">{m.settings_page_not_configured()}</Badge>
+          ) : s.error ? (
+            <Badge variant="error">{m.settings_vercel_cant_connect()}</Badge>
+          ) : (
+            <Badge variant="success">{m.settings_page_ready()}</Badge>
+          )}
+        </dd>
+      </dl>
+      {locked && <p className={SETTINGS_NOTE_CLASS_NAME}>{m.settings_vercel_env_override()}</p>}
+      {!locked && s.oidc && <p className={SETTINGS_NOTE_CLASS_NAME}>{m.settings_vercel_replaces_oidc()}</p>}
+      <form className="mt-5 flex flex-col gap-4" onSubmit={submit}>
+        <label className="flex flex-col gap-2 text-sm font-medium text-subtext">
+          {s.maskedToken ? m.settings_replace_token() : m.settings_vercel_access_token()}
+          <Input
+            type="password"
+            value={token}
+            onChange={(event) => {
+              setToken(event.target.value);
+              setPickedTeam(null);
+              setPickedProject(null);
+            }}
+            placeholder={s.maskedToken ?? undefined}
+            autoComplete="new-password"
+            disabled={locked}
+          />
+        </label>
+        <a className="self-start text-sm text-subtext underline" href="https://vercel.com/account/settings/tokens" target="_blank" rel="noreferrer">
+          {m.settings_vercel_create_token()}
+        </a>
+        {finding && !scopes ? (
+          <LoadingRow><Spinner /> {m.settings_vercel_finding_teams()}</LoadingRow>
+        ) : lookupError ? (
+          <p className="m-0 text-sm text-accent-red break-words">{lookupError}</p>
+        ) : scopes && (
+          <>
+            <label className="flex flex-col gap-2 text-sm font-medium text-subtext">
+              {m.settings_vercel_team()}
+              <OptionPicker
+                choices={scopes.teams.map((item) => ({ id: item.id, label: item.name }))}
+                value={teamId}
+                variant="field"
+                floating
+                dropDown
+                disabled={locked || saving}
+                onSelect={(id) => {
+                  setPickedTeam(id);
+                  setPickedProject(null);
+                }}
+              />
+              {team?.plan && <span className="font-normal">{VERCEL_PLAN_LIMITS[team.plan]()}</span>}
+            </label>
+            <label className="flex flex-col gap-2 text-sm font-medium text-subtext">
+              {m.settings_vercel_project()}
+              <OptionPicker
+                choices={projectChoices}
+                value={projectId}
+                variant="field"
+                floating
+                dropDown
+                disabled={locked || saving || finding}
+                onSelect={setPickedProject}
+              />
+            </label>
+          </>
+        )}
+        {saveError && <p className="m-0 text-sm text-accent-red break-words">{saveError}</p>}
+        <div className="flex justify-end gap-2">
+          <Button variant="primary" type="submit" disabled={!canSave}>
             {saving ? m.common_saving() : m.common_save()}
           </Button>
         </div>
@@ -1652,6 +1826,7 @@ const TARGET_CARD_DESCRIPTIONS: Record<ComputeTargetId, () => string> = {
   k8s: m.compute_description_k8s,
   slurm: m.compute_description_slurm,
   ray: m.compute_description_ray,
+  vercel: m.compute_description_vercel,
   openresearch: m.compute_description_openresearch,
 };
 
@@ -1665,11 +1840,19 @@ const TARGET_KIND: Record<ComputeTargetId, string> = {
   ssh: "ssh_job",
   slurm: "slurm_job",
   ray: "ray_job",
+  vercel: "vercel_job",
   openresearch: "openresearch_job",
 };
 
 /** Backends whose launches take --flavor; mirrors the server's validation. */
-const FLAVORED_TARGETS: ComputeTargetId[] = ["hf", "modal", "slurm", "ray", "openresearch"];
+const FLAVORED_TARGETS: ComputeTargetId[] = [
+  "hf",
+  "modal",
+  "slurm",
+  "ray",
+  "vercel",
+  "openresearch",
+];
 /** Of those, the ones where a launch *requires* a flavor. */
 const FLAVOR_REQUIRED: ComputeTargetId[] = ["hf", "modal", "openresearch"];
 
@@ -1678,10 +1861,11 @@ const FLAVOR_SUGGESTIONS: Partial<Record<ComputeTargetId, string[]>> = {
   modal: ["cpu", "t4", "l4", "a10g", "a100", "a100-80gb", "l40s", "h100", "h100:2"],
   slurm: ["gpu", "h100:1", "h100:2", "a100:4"],
   ray: ["cpu", "cpu:2", "gpu", "gpu:1", "gpu:1,cpu:4", "gpu:1,mem:8GiB"],
+  vercel: ["cpu", "cpu-1", "cpu-4", "cpu-8", "cpu-16", "cpu-32"],
   openresearch: ["h100_sxm", "h100_sxm:2", "cpu5c", "cpu5g", "cpu5m"],
 };
 
-const QUICK_SETUP_TARGETS: ComputeTargetId[] = ["tinker", "hf", "modal", "ray", "k8s"];
+const QUICK_SETUP_TARGETS: ComputeTargetId[] = ["tinker", "hf", "modal", "ray", "k8s", "vercel"];
 
 const TARGET_USAGE: Partial<Record<ComputeTargetId, () => string>> = {
   tinker: m.compute_usage_tinker,
@@ -2038,6 +2222,7 @@ function QuickSetupDialog({ targetId, projectId, remote, cancel, isDisabled, onE
       {targetId === "modal" && <ModalSection />}
       {targetId === "ray" && <RaySection />}
       {targetId === "k8s" && <K8sSection onEditState={updateEditState} />}
+      {targetId === "vercel" && <VercelSection />}
     </DialogContent>;
 }
 

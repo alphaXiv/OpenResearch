@@ -26,6 +26,7 @@ import {
   FILE_PREVIEW_BYTES,
   fmtBytes,
   manageArtifactFile,
+  revealArtifactInManager,
   type ArtifactEntry,
   type Project,
   type ProjectArtifacts,
@@ -540,11 +541,14 @@ export function ArtifactsTab({
   artifacts,
   onOpenFile,
   canRenameFile,
+  remote = false,
 }: {
   project: Project;
   artifacts: ProjectArtifacts | null;
   onOpenFile: (path: string) => void;
   canRenameFile: (path: string) => boolean;
+  /** The dashboard is connected to a remote instance; OS actions would run there. */
+  remote?: boolean;
 }) {
   const [selected, setSelected] = useState<string | null>(null);
   // Folders are open by default — including ones that appear later — so this
@@ -631,6 +635,14 @@ export function ArtifactsTab({
     if (artifacts) copyFilePath(artifacts.dir, path);
   };
 
+  const reveal = async (path: string) => {
+    try {
+      await revealArtifactInManager(project.id, path);
+    } catch (error) {
+      showAlert(error instanceof Error ? error.message : String(error), "error");
+    }
+  };
+
   if (!artifacts) {
     return (
       <div className="files-tab h-full min-h-0 flex bg-background">
@@ -705,6 +717,7 @@ export function ArtifactsTab({
         <FileContextMenu
           target={contextMenu}
           onOpen={() => onOpenFile(contextMenu.path)}
+          onReveal={remote ? undefined : () => void reveal(contextMenu.path)}
           onRename={canRenameFile(contextMenu.path) ? () => setRenamingPath(contextMenu.path) : undefined}
           onDuplicate={() => void manage(contextMenu.path, { action: "duplicate" })}
           onCopyPath={() => copyPath(contextMenu.path)}

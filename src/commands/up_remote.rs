@@ -1282,6 +1282,7 @@ async fn gateway_runtime(State(session): State<Arc<RemoteSession>>) -> Json<serd
     Json(serde_json::json!({
         "kind": "ssh",
         "version": env!("CARGO_PKG_VERSION"),
+        "buildChannel": crate::telemetry::build_channel(),
         "dashboardProtocol": DASHBOARD_PROTOCOL,
         "session": session.info.read().await.clone(),
     }))

@@ -87,7 +87,6 @@ import {
   MessagesSquare,
   Minimize2,
   Package,
-  PanelLeft,
   ScrollText,
   Terminal,
   Users,
@@ -127,7 +126,7 @@ import { TabStrip } from "./components/TabStrip";
 import { DetailDrawer, type ExperimentView } from "./components/DetailDrawer";
 import { FileViewer, type FileScrollPosition } from "./components/FileViewer";
 import { confirmFileDiscard, FileBufferSession } from "./fileSync";
-import { RailHeader } from "./components/Header";
+import { RailHeader, SidebarToggle } from "./components/Header";
 import { UpdateBanner, useUpdateStatus } from "./components/UpdateBanner";
 import { DesktopAppBanner } from "./components/DesktopAppBanner";
 import { OfflineBanner } from "./components/OfflineBanner";
@@ -141,7 +140,7 @@ import { DemoWelcomeModal } from "./components/Tour";
 import { TreeView } from "./components/TreeView";
 import { onChatEvent, useOrxEvents } from "./events";
 import { closeTab, openTab, type TabOpenIntent } from "./tabPreview";
-import { formatForDisplay, useHotkey, useHotkeys } from "@tanstack/react-hotkeys";
+import { useHotkey, useHotkeys } from "@tanstack/react-hotkeys";
 import { commandRegion, subscribeCommandRegion } from "./keyboardRegion";
 import { appHotkeys, tabJumpHotkeys } from "./hotkeys";
 import { Button, IconButton, MenuItem, SEGMENTED_CLASS_NAME, showAlert, Spinner, Tooltip } from "./components/ui";
@@ -1961,16 +1960,13 @@ export default function App({ runtime, projectId, pane }: { runtime: RuntimeInfo
 
   return (
     <div className="app relative flex flex-col h-full">
-      {projectId && <div className="titlebar-sidebar-toggle absolute start-[calc(5.15rem/min(1,var(--desktop-page-zoom,1)))] top-[calc(-2px/min(1,var(--desktop-page-zoom,1)))] z-10 hidden h-[calc(44px/min(1,var(--desktop-page-zoom,1)))] items-center mac-titlebar:flex">
-        <Tooltip interactive content={`${railVisible ? m.header_hide_sidebar() : m.chat_panel_show_sidebar()} (${formatForDisplay(appHotkeys["sidebar.toggle"].hotkey ?? [])})`} className="rounded-md">
-          <IconButton aria-label={railVisible ? m.header_hide_sidebar() : m.chat_panel_show_sidebar()} aria-expanded={railVisible} onClick={toggleSidebar}>
-            <PanelLeft size={18} />
-          </IconButton>
-        </Tooltip>
+      {projectId && <div className="titlebar-sidebar-toggle absolute start-titlebar-toggle top-0 z-10 hidden h-[calc(44px/min(1,var(--desktop-page-zoom,1)))] items-center mac-titlebar:flex">
+        <SidebarToggle open={railVisible} onClick={toggleSidebar} />
       </div>}
       {runtime.kind === "local" && <OfflineBanner hasSidebar={Boolean(projectId)} />}
       {runtime.kind === "local" && <UpdateBanner status={updateStatus} hasSidebar={Boolean(projectId)} />}
-      <DesktopAppBanner />
+      {/* Pointing at the desktop app is noise on the dev server. */}
+      {!import.meta.env.DEV && <DesktopAppBanner />}
       {workspaceError && <div role="alert" className="flex items-center gap-2 px-4 mac-titlebar:ps-titlebar-sidebar-controls mac-titlebar:min-h-titlebar win-titlebar:pe-win-controls py-2 text-subtext"><span>{workspaceError}</span><Button onClick={retryWorkspace}>{m.app_retry()}</Button></div>}
       <div ref={bodyRef} className={`app-body workspace-body relative flex flex-1 min-h-0 ${stackPanel ? "flex-col [&>.chat-pane]:overflow-y-auto [&_.chat-empty]:min-h-0 [&_.chat-empty]:overflow-y-auto [&_.chat-empty]:justify-start [&_.chat-empty]:p-0" : ""} ${workspaceCardVisible ? "workspace-card-visible" : ""} ${mainView === "chat" && workspaceReady && !conversationError ? "has-workspace-tools" : ""}`}>
         {projectId && (
@@ -2114,6 +2110,7 @@ export default function App({ runtime, projectId, pane }: { runtime: RuntimeInfo
                     project={activeProject}
                     artifacts={artifacts}
                     onOpenFile={openArtifactFileTab}
+                    remote={runtime.kind === "ssh"}
                     canRenameFile={(path) => !fileBuffersRef.current.get(
                       fileScrollKey(activeProject.id, activeSessionId, { path, source: "artifacts" }),
                     )?.needsProtection}
@@ -2307,6 +2304,7 @@ export default function App({ runtime, projectId, pane }: { runtime: RuntimeInfo
                     toggled={filesToggled}
                     onViewChange={setFilesView}
                     onToggledChange={setFilesToggled}
+                    remote={runtime.kind === "ssh"}
                     canRenameFile={(path) => !fileBuffersRef.current.get(
                       fileScrollKey(activeProject.id, activeSessionId, {
                         path,

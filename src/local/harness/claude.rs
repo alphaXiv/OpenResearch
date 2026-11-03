@@ -1143,7 +1143,16 @@ pub(crate) fn write_settings(repo: &std::path::Path, plan: bool) -> Result<PathB
         hooks.push(serde_json::json!({"matcher":"Bash","hooks":hook}));
         hooks.push(serde_json::json!({"matcher":"ExitPlanMode","hooks":hook}));
     }
-    let settings = serde_json::json!({"hooks":{"PreToolUse":hooks}});
+    let mut settings = serde_json::json!({"hooks":{"PreToolUse":hooks}});
+    // Dev data lives under the checkout (dev.ts), so Claude would load its
+    // CLAUDE.md, which also suppresses a test repo's own AGENTS.md.
+    if cfg!(debug_assertions) {
+        if let Ok(checkout) = crate::paths::canonicalize(env!("CARGO_MANIFEST_DIR")) {
+            let checkout = checkout.to_string_lossy();
+            settings["claudeMdExcludes"] =
+                serde_json::json!([format!("{checkout}/*"), format!("{checkout}/.claude/**")]);
+        }
+    }
     let path = repo.join(PLAN_SETTINGS_REL);
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)

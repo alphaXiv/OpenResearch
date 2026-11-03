@@ -30,6 +30,7 @@ export function AcpAuthDialog({ harness, remote = false, onReady, cancel, isDisa
     : harness.logo === "mcode" ? ["mcode login --region global"]
     : harness.logo === "devin" ? ["devin auth login"]
     : harness.logo === "grok" ? ["grok login"]
+    : harness.logo === "fx" ? ["fx login"]
     : harness.logo === "pi-acp" ? ["pi-acp --terminal-login"] : [];
 
   useEffect(() => {

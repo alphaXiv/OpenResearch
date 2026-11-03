@@ -609,12 +609,11 @@ mod tests {
         assert_eq!(odd[0].mem_mib, None);
     }
 
+    /// Generous because Git Bash spawns slowly on a Windows runner busy with the parallel suite.
     fn wait_terminal(dir: &Path) -> JobState {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
         let mut state = inspect_job(dir);
-        for _ in 0..100 {
-            if state.stage != "RUNNING" {
-                break;
-            }
+        while state.stage == "RUNNING" && std::time::Instant::now() < deadline {
             std::thread::sleep(std::time::Duration::from_millis(100));
             state = inspect_job(dir);
         }
