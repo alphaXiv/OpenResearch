@@ -41,7 +41,7 @@ test("workspace side-chat buttons create a draft directly and keep keyboard acce
         usePopover: () => ({ open, setOpen: (value) => opened.push(value), ref: { current: null } }),
         requestAnimationFrame: (callback) => callback(),
         m: new Proxy({}, { get: (_, key) => () => key }),
-        MenuItem: "button", IconButton: "button", MessagesSquare: "icon", Plus: "icon", EscapeScope: "escape-scope",
+        MenuItem: "button", IconButton: "button", MessagesSquare: "icon", Plus: "icon", ChevronDown: "icon", EscapeScope: "escape-scope",
       });
       const tree = SideChatPicker({ parentId: "parent", sessions: [], onSelect: () => {}, onCreate: () => created++, ...layout });
       const trigger = tree.props.children[0];
@@ -54,6 +54,30 @@ test("workspace side-chat buttons create a draft directly and keep keyboard acce
       assert.equal(opened.at(-1), true);
       assert.equal(created, 1);
     }
+  }
+});
+
+test("saved workspace side chats have a separate touch-accessible picker button", () => {
+  for (const layout of [{ expanded: true }, {}, { mobile: true }]) {
+    const opened = [];
+    let created = 0;
+    const SideChatPicker = loadFunction("WorkspaceTools.tsx", "SideChatPicker", {
+      useRef: (value) => ({ current: value }),
+      useState: (value) => [value, () => {}],
+      useEffect: () => {},
+      useLayoutEffect: () => {},
+      usePopover: () => ({ open: false, setOpen: (value) => opened.push(value), ref: { current: null } }),
+      requestAnimationFrame: (callback) => callback(),
+      m: new Proxy({}, { get: (_, key) => () => key }),
+      MenuItem: "button", IconButton: "button", MessagesSquare: "icon", ChevronDown: "icon", EscapeScope: "escape-scope",
+    });
+    const tree = SideChatPicker({ parentId: "parent", sessions: [{ id: "saved", sideParentSessionId: "parent", updatedAt: 1 }], onSelect: () => {}, onCreate: () => created++, ...layout });
+    const picker = tree.props.children[1];
+    assert.equal(picker.props["aria-haspopup"], "dialog");
+    assert.equal(picker.props["aria-label"], "side_chat_list");
+    picker.props.onClick();
+    assert.equal(opened.at(-1), true);
+    assert.equal(created, 0);
   }
 });
 

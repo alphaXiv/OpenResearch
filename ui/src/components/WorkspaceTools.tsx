@@ -5,7 +5,7 @@ import { statusLabel } from "./StatusBadge";
 import { getComputeSettingsQuery } from "../queries/settings";
 import { TARGET_LABELS } from "../computeTargets";
 import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
-import { FlaskConical, FolderOpen, Package, GitBranch, Cpu, MessagesSquare, Plus, Terminal } from "lucide-react";
+import { FlaskConical, FolderOpen, Package, GitBranch, Cpu, MessagesSquare, Plus, Terminal, ChevronDown } from "lucide-react";
 import { useQuery } from "@tanstack/react-query";
 import { getSessionWorktreeQuery } from "../queries/files";
 import { countChanges, parseDiffFiles } from "./GitDiff";
@@ -176,8 +176,6 @@ function SideChatPicker({ parentId, sessions, onSelect, onCreate, expanded = fal
     ref: triggerRef,
     type: "button" as const,
     "aria-label": m.side_chat_open(),
-    "aria-haspopup": "dialog" as const,
-    "aria-expanded": open,
     "data-keyboard-item": true,
     "data-keyboard-horizontal-item": true,
     onClick: () => { closePicker(); onCreate(); },
@@ -190,7 +188,7 @@ function SideChatPicker({ parentId, sessions, onSelect, onCreate, expanded = fal
   };
 
   return (
-    <div ref={ref} className={`relative inline-flex${expanded ? " w-full" : ""}`}
+    <div ref={ref} className={`workspace-side-chats relative inline-flex items-center${expanded ? " w-full" : ""}`}
       onPointerEnter={(event) => {
         if (event.pointerType !== "mouse") return;
         clearTimeout(closeTimer.current);
@@ -208,7 +206,7 @@ function SideChatPicker({ parentId, sessions, onSelect, onCreate, expanded = fal
         if (!event.currentTarget.contains(event.relatedTarget)) setOpen(false);
       }}>
       {mobile ? (
-        <button {...triggerProps} className="w-full">
+        <button {...triggerProps} className="w-full min-w-0">
           <MessagesSquare size={20} aria-hidden="true" />
           <span>{m.side_chat_open()}</span>
         </button>
@@ -219,6 +217,13 @@ function SideChatPicker({ parentId, sessions, onSelect, onCreate, expanded = fal
       ) : (
         <IconButton {...triggerProps} size="small" active={open} className="text-text">
           <MessagesSquare size={16} />
+        </IconButton>
+      )}
+      {children.length > 0 && (
+        <IconButton type="button" size="small" active={open} className="text-text"
+          aria-label={m.side_chat_list({ count: children.length })} aria-haspopup="dialog" aria-expanded={open}
+          data-keyboard-item data-keyboard-horizontal-item onClick={openPicker}>
+          <ChevronDown size={14} />
         </IconButton>
       )}
       {open && (
