@@ -226,9 +226,14 @@ impl RunSink for EngineSink {
     ) -> Result<bool> {
         let phase =
             Phase::parse(status.as_str()).ok_or_else(|| anyhow!("Unknown legacy status"))?;
-        self.engine.commit(run, |_, _| reconcile::Change {
-            exit_code,
-            ..reconcile::Change::terminal(phase, reason.map(str::to_owned))
+        self.engine.commit(run, |_, state| {
+            if state.cancel_accepted_at.is_some() {
+                return reconcile::Change::default();
+            }
+            reconcile::Change {
+                exit_code,
+                ..reconcile::Change::terminal(phase, reason.map(str::to_owned))
+            }
         })?;
         Ok(true)
     }
@@ -258,11 +263,7 @@ impl RunSink for EngineSink {
                 code: Some(0),
                 signal: None,
             },
-            RunStatus::Cancelled => Observation::Cancelled {
-                finished_at: None,
-                code: None,
-                signal: None,
-            },
+            RunStatus::Cancelled => return self.finish(run, status, exit_code, None),
             RunStatus::Lost => Observation::Lost {
                 reason: "Legacy outcome unavailable".into(),
             },
@@ -422,9 +423,15 @@ impl Backend for OpenResearch {
             let Handle::Legacy { .. } = &run.handle else {
                 continue;
             };
-            let Ok((stored, _)) = self.engine.load(&run.id) else {
+            let Ok((stored, state)) = self.engine.load(&run.id) else {
                 continue;
             };
+            if stored.cancel_requested
+                || state.cancel_accepted_at.is_some()
+                || phase_of(&stored).is_ok_and(Phase::is_terminal)
+            {
+                continue;
+            }
             let Some(Handle::Legacy { descriptor }) = handle_of(&stored) else {
                 continue;
             };
@@ -461,8 +468,35 @@ impl Backend for OpenResearch {
         }
         vec![]
     }
-    async fn cancel(&self, _run: &WatchedRun) -> CancelOutcome {
-        CancelOutcome::Pending
+    async fn cancel(&self, run: &WatchedRun) -> CancelOutcome {
+        let Handle::Legacy { descriptor } = &run.handle else {
+            return CancelOutcome::Pending;
+        };
+
+        if let Some(task) = self.loops.lock().await.remove(&run.id) {
+            task.abort();
+            let _ = task.await;
+        }
+
+        let released = async {
+            if let Some(rental) = &descriptor.rental_lease {
+                rental.operation("release").await
+            } else {
+                let (_, sandbox) = descriptor.openresearch_ref()?;
+                let creds = crate::config::load_credentials()
+                    .await?
+                    .ok_or_else(|| anyhow!("Missing OpenResearch credentials"))?;
+                crate::jobs::openresearch::teardown(&creds, sandbox).await
+            }
+        }
+        .await;
+
+        match released {
+            Ok(()) => CancelOutcome::Verified,
+            Err(error) => CancelOutcome::Undelivered {
+                detail: error.to_string(),
+            },
+        }
     }
     async fn unwatch(&self, run: &WatchedRun) {
         let task = self.loops.lock().await.remove(&run.id);
@@ -541,6 +575,37 @@ mod tests {
         let notices = engine.store().run_notice_batch("chat").unwrap();
         assert_eq!(notices.len(), 1);
         assert!(notices[0].body.contains("payload exited 7"));
+
+        let pending = StoredRun {
+            id: "pending-stop".into(),
+            ..run.clone()
+        };
+        engine.store().upsert_run(&pending).unwrap();
+        engine
+            .store()
+            .accept_run_cancel(&pending.id, Some("user"))
+            .unwrap();
+        sink.finish(&pending.id, RunStatus::Failed, None, None)
+            .unwrap();
+        sink.update_status(&pending.id, RunStatus::Cancelled, None, None)
+            .unwrap();
+        assert_eq!(engine.load(&pending.id).unwrap().0.status, "running");
+
+        engine
+            .observe(
+                &pending.id,
+                Observation::Unreachable {
+                    cause: "offline".into(),
+                },
+            )
+            .unwrap();
+        assert!(engine.abandon(&pending.id).unwrap());
+        sink.finish(&pending.id, RunStatus::Cancelled, None, None)
+            .unwrap();
+        let (abandoned, state) = engine.load(&pending.id).unwrap();
+        assert_eq!(abandoned.status, "lost");
+        assert_ne!(state.contact, crate::store::Contact::Live);
+
         // The shipped Store sink keeps the old descriptor and writes no engine notices.
         let store = std::sync::Mutex::new(Store::open_at(root.join("legacy")).unwrap());
         store.lock().unwrap().upsert_run(&run).unwrap();

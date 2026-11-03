@@ -83,6 +83,9 @@ export function RunContactNotice({ run, className }: { run: NoticeRun; className
   const engineHost = hostForRun(hosts, run);
   const nextRetryMs = engineHost?.status === "backoff" ? engineHost.nextRetryMs : null;
   const { lead, detail, tone } = copy(notice, nextRetryMs);
+  const rentalBilling = run.backend?.kind === "openresearch_job"
+    && runActive(run.status)
+    && (run.contact?.type === "needs_auth" || run.contact?.type === "unreachable");
   const killPending = notice.kind === "not_fully_stopped";
   const connectHost = runActive(run.status) || killPending
     ? runConnectHost(run) ?? (killPending && engineHost?.status === "needs_auth" ? run.host : null)
@@ -109,10 +112,11 @@ export function RunContactNotice({ run, className }: { run: NoticeRun; className
     <div className={cn("run-contact-notice flex flex-col gap-1.5 text-sm", className)}>
       <div role="status" className="min-w-0">
         <p className={cn("m-0 wrap-anywhere", notice.kind !== "monitoring" && "font-medium", TONES[tone])}>{lead}</p>
+        {rentalBilling && <p className="m-0 mt-0.5 text-xs text-subtext wrap-anywhere">{m.run_notice_rental_billing()}</p>}
         {detail && <p className="m-0 mt-0.5 text-xs text-subtext wrap-anywhere">{detail}</p>}
         {error && <p role="alert" className="m-0 mt-0.5 text-xs text-accent-red wrap-anywhere">{error}</p>}
       </div>
-      {(connectHost || retryHost || stopAgain || killPending || abandonable) && (
+      {(connectHost || retryHost || rentalBilling || stopAgain || killPending || abandonable) && (
         <div className="run-contact-actions flex flex-wrap items-center gap-1">
           {connectHost && (
             <Button size="small" variant="primary" onClick={() => requestHostConnect(connectHost)}>
@@ -122,6 +126,11 @@ export function RunContactNotice({ run, className }: { run: NoticeRun; className
           {retryHost && (
             <Button size="small" variant="ghost" disabled={busy} onClick={() => void act(async () => setEngineHost(await retryEngineHost(retryHost)))}>
               <RefreshCw size={14} />{m.app_retry()}
+            </Button>
+          )}
+          {rentalBilling && (
+            <Button size="small" variant="ghost" disabled={busy} onClick={() => void act(() => cancelRun(run.id))}>
+              <CircleStop size={14} />{m.run_stop_box()}
             </Button>
           )}
           {stopAgain && (

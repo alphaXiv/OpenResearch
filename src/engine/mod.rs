@@ -406,8 +406,7 @@ impl Engine {
         Ok(())
     }
 
-    /// Delivers an accepted cancel, or an abandoned run's kill, once per connection. A host that
-    /// is down gets it on reconnect.
+    /// Delivers a pending stop once per connection; rented boxes can be released without SSH.
     pub async fn deliver_cancel(&self, backend: &dyn Backend, run_id: &str) -> Result<()> {
         if !self.own(run_id)? {
             return Ok(());
@@ -418,16 +417,16 @@ impl Engine {
         let wanted = reconcile::is_tombstone(phase, &state.contact)
             || (matches!(phase, Phase::Starting | Phase::Running)
                 && self.store().accept_run_cancel(run_id, None)?.is_some());
-        let deliverable = matches!(
-            state.contact,
-            Contact::Live | Contact::Unreconciled { .. } | Contact::Stopping { .. }
-        );
-        if !wanted || !deliverable || self.memory().cancels_sent.contains(run_id) {
-            return Ok(());
-        }
         let Some(handle) = handle_of(&run) else {
             return Ok(());
         };
+        let deliverable = matches!(
+            state.contact,
+            Contact::Live | Contact::Unreconciled { .. } | Contact::Stopping { .. }
+        ) || matches!(&handle, Handle::Legacy { descriptor } if descriptor.kind == "openresearch_job");
+        if !wanted || !deliverable || self.memory().cancels_sent.contains(run_id) {
+            return Ok(());
+        }
         let watched = WatchedRun {
             id: run.id.clone(),
             handle,

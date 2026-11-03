@@ -1660,6 +1660,8 @@
   "status_unconfirmed": "अपुष्ट",
   "status_abandoned": "छोड़ा गया",
   "status_last_seen": "आख़िरी बार {time} पर देखा",
+  "run_notice_rental_billing": "किराए की मशीन का शुल्क अभी भी लग रहा है। मशीन रोकने के लिए रन रद्द करें।",
+  "run_stop_box": "मशीन रोकें",
   "run_notice_unreachable": "{time} से {host} तक नहीं पहुँच पा रहे।",
   "run_notice_retry_at": "{time} पर फिर कोशिश होगी।",
   "run_notice_needs_auth": "इस रन को फ़ॉलो करते रहने के लिए {host} से कनेक्ट करें।",

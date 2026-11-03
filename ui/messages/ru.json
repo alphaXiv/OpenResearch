@@ -1660,6 +1660,8 @@
   "status_unconfirmed": "Не подтверждён",
   "status_abandoned": "Оставлен",
   "status_last_seen": "Последний ответ в {time}",
+  "run_notice_rental_billing": "Плата за арендованную машину продолжает начисляться. Отмените запуск, чтобы остановить машину.",
+  "run_stop_box": "Остановить машину",
   "run_notice_unreachable": "Хост {host} недоступен с {time}.",
   "run_notice_retry_at": "Следующая попытка в {time}.",
   "run_notice_needs_auth": "Подключитесь к {host}, чтобы продолжить отслеживание запуска.",

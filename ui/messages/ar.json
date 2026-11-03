@@ -1660,6 +1660,8 @@
   "status_unconfirmed": "غير مؤكد",
   "status_abandoned": "متروك",
   "status_last_seen": "آخر ظهور في {time}",
+  "run_notice_rental_billing": "لا تزال تكلفة الجهاز المستأجر تُحتسب. ألغِ التشغيل لإيقاف الجهاز.",
+  "run_stop_box": "إيقاف الجهاز",
   "run_notice_unreachable": "تعذّر الوصول إلى {host} منذ {time}.",
   "run_notice_retry_at": "ستُعاد المحاولة في {time}.",
   "run_notice_needs_auth": "اتصل بـ {host} لمواصلة متابعة هذا التشغيل.",

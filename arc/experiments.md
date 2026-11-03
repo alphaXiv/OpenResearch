@@ -273,6 +273,7 @@ collect log + exit code ◄─ssh─ wait for "collected", 60 s max
   backoff and the auth breaker ([remote](remote.md)) apply to it.
 - **No research data crosses this protocol.** Logs, commands, source,
   experiment IDs, outcomes and artifacts never reach the billing service.
+- Manual teardown follows the [run engine's Cancel and Abandon path](../docs/run-engine.md#10-backends).
 - Collection is best effort. Data left only on the machine is lost when it is
   deleted, and a run whose final outcome could not be collected ends as
   **lost** ("Outcome unavailable") instead of running forever. The chat is

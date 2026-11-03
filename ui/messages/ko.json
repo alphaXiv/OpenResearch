@@ -1660,6 +1660,8 @@
   "status_unconfirmed": "미확인",
   "status_abandoned": "포기됨",
   "status_last_seen": "마지막 확인 {time}",
+  "run_notice_rental_billing": "대여한 머신에 계속 요금이 부과되고 있습니다. 실행을 취소하여 머신을 중지하세요.",
+  "run_stop_box": "머신 중지",
   "run_notice_unreachable": "{time}부터 {host}에 연결할 수 없습니다.",
   "run_notice_retry_at": "{time}에 다시 시도합니다.",
   "run_notice_needs_auth": "이 실행을 계속 추적하려면 {host}에 연결하세요.",

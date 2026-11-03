@@ -32,10 +32,12 @@ const engineHosts = {};
 new Function("exports", transpile("engineHosts.ts"))(engineHosts);
 
 let hosts = [];
+let stopBox;
+const cancelled = [];
 const exports = {};
 const mocks = {
   "lucide-react": { CircleStop: () => null, Plug: () => null, RefreshCw: () => null },
-  "../api": { cleanupRun: async () => {}, cancelRun: async () => {}, retryEngineHost: async () => ({}) },
+  "../api": { cleanupRun: async () => {}, cancelRun: async (id) => { cancelled.push(id); }, retryEngineHost: async () => ({}) },
   "../engineHosts": engineHosts,
   "../events": { requestHostConnect: () => {} },
   "../i18n": { fmtClock: (ms) => `T${ms}`, ltr: (text) => text },
@@ -43,7 +45,10 @@ const mocks = {
   "../queries/settings": { useEngineHosts: () => hosts, setEngineHost: () => {} },
   "../runDisplay": runDisplay,
   "../dialog": { showConfirmDialog: () => {} },
-  "./ui": { Button: ({ children, variant }) => React.createElement("button", { "data-variant": variant }, children) },
+  "./ui": { Button: ({ children, variant, disabled, onClick }) => {
+    if (React.Children.toArray(children).includes("Stop box")) stopBox = onClick;
+    return React.createElement("button", { "data-variant": variant, disabled }, children);
+  } },
   "./StatusBadge": runLabelsHarness().load("components/StatusBadge"),
   "./ui/cn": { cn: (...values) => values.filter(Boolean).join(" ") },
 };
@@ -186,4 +191,27 @@ test("a cancelled tombstone retains its survivor proof while host authentication
     assert.ok(html.replace(/[\u2066-\u2069]/g, "").includes(detail));
     assert.deepEqual(buttons(html), ["Connect", "Stop now"]);
   } finally { hosts = []; }
+});
+
+test("lost contact with a rented box warns about billing and Stop box cancels without Connect", () => {
+  for (const contact of [unreachable, needsAuth]) {
+    const html = render({ contact, backend: { kind: "openresearch_job" } });
+    assert.match(html, /role="status"/);
+    assert.ok(html.includes(en.run_notice_rental_billing));
+    assert.ok(buttons(html).includes("Stop box"));
+    assert.equal(typeof stopBox, "function");
+    const before = cancelled.length;
+    stopBox();
+    assert.deepEqual(cancelled.slice(before), ["run"]);
+  }
+  for (const extra of [
+    { backend: { kind: "ssh_job" }, contact: unreachable },
+    { backend: { kind: "openresearch_job" }, contact: null },
+    { backend: { kind: "openresearch_job" }, contact: unreachable, status: "lost" },
+    { backend: { kind: "openresearch_job" }, contact: needsAuth, status: "cancelled" },
+  ]) {
+    const html = render(extra);
+    assert.ok(!html.includes(en.run_notice_rental_billing));
+    assert.ok(!buttons(html).includes("Stop box"));
+  }
 });

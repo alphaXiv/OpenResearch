@@ -96,7 +96,9 @@ async fn isolated(test: &str) -> Option<PathBuf> {
                 .into_response();
         }
         if uri.path().starts_with("/sandboxes/") {
-            if method == axum::http::Method::DELETE && root.join("delete-fails").exists() {
+            if (method == axum::http::Method::DELETE || uri.path().ends_with("/lease/release"))
+                && root.join("delete-fails").exists()
+            {
                 return (axum::http::StatusCode::SERVICE_UNAVAILABLE, Json(json!({})))
                     .into_response();
             }
@@ -502,6 +504,134 @@ else:
     assert!(calls.contains("delete job/primary -n default --wait=false"));
 }
 
+#[tokio::test]
+async fn openresearch_cancel_and_abandon_release_without_ssh_and_retry_api_failures() {
+    use super::openresearch::OpenResearch;
+    use crate::store::{Contact, StoredRun};
+
+    let Some(root) =
+        isolated("openresearch_cancel_and_abandon_release_without_ssh_and_retry_api_failures")
+            .await
+    else {
+        return;
+    };
+    crate::config::save_credentials(&crate::config::Credentials {
+        api_url: std::env::var("HF_ENDPOINT").unwrap(),
+        token: "fake".into(),
+    })
+    .await
+    .unwrap();
+    for leased in [false, true] {
+        for abandon in [false, true] {
+            for needs_auth in [false, true] {
+                let id = format!("box-{leased}-{abandon}-{needs_auth}");
+                let mut descriptor = BackendDescriptor::parse(
+                    &json!({"kind":"openresearch_job","namespace":"org","jobId":id}).to_string(),
+                )
+                .unwrap();
+                if leased {
+                    descriptor.rental_lease = Some(crate::jobs::rental::Rental {
+                        api_url: std::env::var("HF_ENDPOINT").unwrap(),
+                        sandbox_id: id.clone(),
+                        token: "fake".into(),
+                    });
+                }
+                let handle = Handle::Legacy {
+                    descriptor: Box::new(descriptor.clone()),
+                };
+                let backend_json = if leased {
+                    handle::backend_json(&id, Some(&handle), &descriptor).unwrap()
+                } else {
+                    descriptor.to_json()
+                };
+                let mut engine = engine(&root.join(&id));
+                let clock = Arc::new(TestClock::new());
+                engine.clock = clock.clone();
+                let engine = Arc::new(engine);
+                engine
+                    .store()
+                    .upsert_run(&StoredRun {
+                        id: id.clone(),
+                        experiment_id: "exp".into(),
+                        project_id: "proj".into(),
+                        status: "running".into(),
+                        backend_json,
+                        command: "true".into(),
+                        created_at: 1,
+                        updated_at: 1,
+                        ended_at: None,
+                        exit_code: None,
+                        commit_sha: None,
+                        result_markdown: None,
+                        cancel_requested: false,
+                        cancel_reason: None,
+                        chat_session_id: Some("chat".into()),
+                    })
+                    .unwrap();
+                let observation = if needs_auth {
+                    Observation::NeedsAuth {
+                        cause: "Permission denied (publickey)".into(),
+                    }
+                } else {
+                    Observation::Unreachable {
+                        cause: "Connection timed out".into(),
+                    }
+                };
+                engine.observe(&id, observation).unwrap();
+                clock.advance(Duration::from_secs(600));
+                engine.check_outages().unwrap();
+                assert_eq!(engine.load(&id).unwrap().0.status, "running");
+                assert!(engine
+                    .store()
+                    .run_notice_batch("chat")
+                    .unwrap()
+                    .iter()
+                    .any(|notice| {
+                        notice.kind == crate::store::ATTENTION
+                            && notice.body.contains("still billing")
+                    }));
+                let adapter =
+                    OpenResearch::new(engine.clone(), Arc::new(|_| panic!("teardown used SSH")));
+                let watched = [WatchedRun {
+                    id: id.clone(),
+                    handle,
+                }];
+                std::fs::write(root.join("delete-fails"), "").unwrap();
+                if abandon {
+                    assert!(engine.abandon(&id).unwrap());
+                    engine
+                        .observe_runs(&adapter, &watched, Duration::ZERO)
+                        .await
+                        .unwrap();
+                } else {
+                    assert!(engine.cancel(&adapter, &id, "user").await.unwrap());
+                }
+                let (run, state) = engine.load(&id).unwrap();
+                assert_eq!(run.status, if abandon { "lost" } else { "running" });
+                assert_ne!(state.contact, Contact::Live);
+                assert!(!engine.memory().cancels_sent.contains(&id));
+                std::fs::remove_file(root.join("delete-fails")).unwrap();
+                engine
+                    .observe_runs(&adapter, &watched, Duration::ZERO)
+                    .await
+                    .unwrap();
+                let (run, state) = engine.load(&id).unwrap();
+                assert_eq!(run.status, if abandon { "lost" } else { "cancelled" });
+                assert_eq!(state.contact, Contact::Live);
+                let released = if leased {
+                    format!("POST /sandboxes/{id}/lease/release")
+                } else {
+                    format!("DELETE /sandboxes/{id}")
+                };
+                assert!(std::fs::read_to_string(root.join("http.log"))
+                    .unwrap()
+                    .lines()
+                    .any(|line| line == released));
+            }
+        }
+    }
+}
+
 async fn legacy_rejected_key(root: PathBuf, watching: bool) {
     use super::openresearch::{LegacyTransport, OpenResearch};
     use super::ssh::Ssh;
@@ -727,6 +857,26 @@ async fn legacy_rejected_key(root: PathBuf, watching: bool) {
         .unwrap();
     let needle = format!("{} ssh-service", std::env::current_exe().unwrap().display());
     assert!(!String::from_utf8_lossy(&processes.stdout).contains(&needle));
+    if watching {
+        assert!(engine.cancel(&adapter, &id, "user").await.unwrap());
+        assert_eq!(engine.load(&id).unwrap().0.status, "cancelled");
+    } else {
+        assert!(engine.abandon(&id).unwrap());
+        engine
+            .observe_runs(&adapter, &watched, Duration::ZERO)
+            .await
+            .unwrap();
+        assert_eq!(engine.load(&id).unwrap().0.status, "lost");
+    }
+    assert_eq!(
+        engine.load(&id).unwrap().1.contact,
+        crate::store::Contact::Live
+    );
+    assert!(std::fs::read_to_string(root.join("http.log"))
+        .unwrap()
+        .lines()
+        .any(|line| line == "POST /sandboxes/box/lease/release"));
+    assert_eq!(server.auth_attempts().unwrap(), attempts);
     drop(adapter);
     drop(conn);
 }

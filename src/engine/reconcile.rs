@@ -470,7 +470,16 @@ impl Engine {
                     let raise = change.attention
                         || (discriminant(&contact) != discriminant(&state.contact)
                             && !matches!(contact, Contact::Unreachable { .. }));
-                    raise.then(|| (ATTENTION, attention_body(run_id, &contact)))
+                    raise.then(|| {
+                        let mut body = attention_body(run_id, &contact);
+                        if matches!(contact, Contact::NeedsAuth { .. } | Contact::Unreachable { .. })
+                            && matches!(super::handle_of(&run), Some(Handle::Legacy { descriptor }) if descriptor.kind == "openresearch_job")
+                        {
+                            body.push(' ');
+                            body.push_str(&crate::plane::LABELS["run_notice_rental_billing"]);
+                        }
+                        (ATTENTION, body)
+                    })
                 };
                 let Some((kind, body)) = notice else {
                     continue;

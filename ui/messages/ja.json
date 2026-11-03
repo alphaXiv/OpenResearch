@@ -1660,6 +1660,8 @@
   "status_unconfirmed": "未確認",
   "status_abandoned": "放棄済み",
   "status_last_seen": "最終確認 {time}",
+  "run_notice_rental_billing": "レンタル中のマシンへの課金が続いています。実行をキャンセルしてマシンを停止してください。",
+  "run_stop_box": "マシンを停止",
   "run_notice_unreachable": "{time} から {host} に接続できません。",
   "run_notice_retry_at": "{time} に再試行します。",
   "run_notice_needs_auth": "この実行を引き続き追跡するには {host} に接続してください。",

@@ -1660,6 +1660,8 @@
   "status_unconfirmed": "未确认",
   "status_abandoned": "已放弃",
   "status_last_seen": "最后一次看到：{time}",
+  "run_notice_rental_billing": "租用的机器仍在计费。取消运行以停止机器。",
+  "run_stop_box": "停止机器",
   "run_notice_unreachable": "自 {time} 起无法连接 {host}。",
   "run_notice_retry_at": "将于 {time} 重试。",
   "run_notice_needs_auth": "连接到 {host} 以继续跟踪此运行。",

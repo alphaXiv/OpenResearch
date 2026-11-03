@@ -1660,6 +1660,8 @@
   "status_unconfirmed": "Niepotwierdzone",
   "status_abandoned": "Porzucone",
   "status_last_seen": "Ostatnio widziane o {time}",
+  "run_notice_rental_billing": "Wynajęta maszyna nadal nalicza opłaty. Anuluj uruchomienie, aby ją zatrzymać.",
+  "run_stop_box": "Zatrzymaj maszynę",
   "run_notice_unreachable": "Brak połączenia z {host} od {time}.",
   "run_notice_retry_at": "Kolejna próba o {time}.",
   "run_notice_needs_auth": "Połącz się z {host}, aby dalej śledzić to uruchomienie.",

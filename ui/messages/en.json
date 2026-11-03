@@ -1660,6 +1660,8 @@
   "status_unconfirmed": "Unconfirmed",
   "status_abandoned": "Abandoned",
   "status_last_seen": "Last seen at {time}",
+  "run_notice_rental_billing": "The rented box is still billing. Cancel the run to stop the box.",
+  "run_stop_box": "Stop box",
   "run_notice_unreachable": "Can't reach {host} since {time}.",
   "run_notice_retry_at": "Trying again at {time}.",
   "run_notice_needs_auth": "Connect to {host} to keep following this run.",
