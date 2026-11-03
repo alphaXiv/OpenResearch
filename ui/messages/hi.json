@@ -1505,5 +1505,7 @@
   "common_cancel": "रद्द करें",
   "common_confirm": "पुष्टि करें",
   "common_ok": "ठीक है",
-  "common_submit": "सबमिट करें"
+  "common_submit": "सबमिट करें",
+  "chat_resize_composer": "संदेश बॉक्स का आकार बदलें",
+  "chat_resize_composer_hint": "आकार बदलने के लिए खींचें। रीसेट करने के लिए डबल-क्लिक करें।"
 }

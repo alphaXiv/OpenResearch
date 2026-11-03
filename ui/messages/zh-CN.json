@@ -1505,5 +1505,7 @@
   "common_cancel": "取消",
   "common_confirm": "确认",
   "common_ok": "确定",
-  "common_submit": "提交"
+  "common_submit": "提交",
+  "chat_resize_composer": "调整消息框大小",
+  "chat_resize_composer_hint": "拖动以调整大小。双击以重置。"
 }

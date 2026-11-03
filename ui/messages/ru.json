@@ -1505,5 +1505,7 @@
   "common_cancel": "Отмена",
   "common_confirm": "Подтвердить",
   "common_ok": "ОК",
-  "common_submit": "Отправить"
+  "common_submit": "Отправить",
+  "chat_resize_composer": "Изменить размер поля сообщения",
+  "chat_resize_composer_hint": "Перетащите, чтобы изменить размер. Дважды щёлкните, чтобы сбросить."
 }

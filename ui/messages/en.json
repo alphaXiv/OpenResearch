@@ -1505,5 +1505,7 @@
   "common_cancel": "Cancel",
   "common_confirm": "Confirm",
   "common_ok": "OK",
-  "common_submit": "Submit"
+  "common_submit": "Submit",
+  "chat_resize_composer": "Resize message box",
+  "chat_resize_composer_hint": "Drag to resize. Double-click to reset."
 }

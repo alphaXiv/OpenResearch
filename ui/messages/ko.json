@@ -1505,5 +1505,7 @@
   "common_cancel": "취소",
   "common_confirm": "확인",
   "common_ok": "확인",
-  "common_submit": "제출"
+  "common_submit": "제출",
+  "chat_resize_composer": "메시지 상자 크기 조정",
+  "chat_resize_composer_hint": "드래그하여 크기를 조정합니다. 두 번 클릭하여 재설정합니다."
 }
