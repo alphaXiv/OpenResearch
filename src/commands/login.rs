@@ -29,7 +29,7 @@ pub async fn run(args: crate::LoginArgs) -> Result<()> {
     let authorization = crate::alphaxiv::Authorization::new(listener.local_addr()?.port())?;
     println!("Opening your browser to sign in with alphaXiv\u{2026}");
     println!("If it doesn't open, visit:\n  {}\n", authorization.url);
-    open_browser(&authorization.url);
+    open_browser(&authorization.url, None);
 
     let creds = tokio::time::timeout(
         LOGIN_TIMEOUT,

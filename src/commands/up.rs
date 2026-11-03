@@ -652,6 +652,11 @@ fn router(state: AppState, remote_auth: Option<RemoteAuth>) -> Router {
             "/api/settings/modal",
             get(modal_settings).post(set_modal_token),
         )
+        .route(
+            "/api/settings/vercel",
+            get(vercel_settings).post(set_vercel),
+        )
+        .route("/api/settings/vercel/scopes", post(vercel_scopes_route))
         .route("/api/settings/env", get(env_settings).post(set_env_var))
         .route(
             "/api/settings/env/{key}",
@@ -782,6 +787,10 @@ fn router(state: AppState, remote_auth: Option<RemoteAuth>) -> Router {
             get(list_user_skills)
                 .post(upload_user_skill)
                 .delete(delete_user_skill),
+        )
+        .route(
+            "/api/user-skills/{name}",
+            get(get_user_skill).put(update_user_skill),
         )
         .route(
             "/api/latex-templates",
@@ -1312,6 +1321,32 @@ async fn delete_user_skill(Query(q): Query<DeleteByNameQ>) -> ApiResult {
         .map_err(|e| ApiError::from(anyhow!(e)))?
         .map_err(bad_request)?;
     Ok(Json(json!({ "ok": true })))
+}
+
+async fn get_user_skill(Path(name): Path<String>) -> ApiResult {
+    let lookup = name.clone();
+    let content =
+        tokio::task::spawn_blocking(move || crate::local::user_skills::read_markdown(&lookup))
+            .await
+            .map_err(|e| ApiError::from(anyhow!(e)))?
+            .map_err(bad_request)?
+            .ok_or_else(|| not_found("skill"))?;
+    Ok(Json(json!({ "name": name, "content": content })))
+}
+
+#[derive(Deserialize)]
+struct UpdateSkillReq {
+    content: String,
+}
+
+async fn update_user_skill(Path(name): Path<String>, Json(req): Json<UpdateSkillReq>) -> ApiResult {
+    let saved = tokio::task::spawn_blocking(move || {
+        crate::local::user_skills::update_markdown(&name, &req.content)
+    })
+    .await
+    .map_err(|e| ApiError::from(anyhow!(e)))?
+    .map_err(bad_request)?;
+    Ok(Json(json!({ "skill": user_skill_json(&saved) })))
 }
 
 fn latex_template_json(t: &crate::local::latex_templates::LatexTemplate) -> Value {
@@ -10092,6 +10127,15 @@ mod tests {
         assert!(tinker["configured"].is_boolean());
         assert!(tinker.get("key").is_none());
         assert!(tinker.get("apiKey").is_none());
+        let ids: Vec<_> = settings["targets"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|target| target["id"].as_str().unwrap())
+            .collect();
+        let vercel = ids.iter().position(|id| *id == "vercel").unwrap();
+        assert_eq!(ids[vercel + 1], "openresearch");
+        assert!(ids.iter().position(|id| *id == "ray").unwrap() < vercel);
     }
 
     #[test]

@@ -34,6 +34,12 @@ export const getModalSettingsQuery = () => queryOptions({
   staleTime: 300_000,
 });
 
+export const getVercelSettingsQuery = () => queryOptions({
+  queryKey: workspaceKey("getVercelSettings"),
+  queryFn: ({ signal }) => api.getVercelSettings(signal),
+  staleTime: 30_000,
+});
+
 export const getSlurmSettingsQuery = () => queryOptions({
   queryKey: workspaceKey("getSlurmSettings"),
   queryFn: ({ signal }) => api.getSlurmSettings(signal),

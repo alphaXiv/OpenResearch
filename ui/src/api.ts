@@ -967,6 +967,34 @@ export const getModalSettings = (signal?: AbortSignal) => get<ModalSettings>("/a
 export const saveModalToken = (tokenId: string, tokenSecret: string) =>
   post<ModalSettings>("/api/settings/modal", { tokenId, tokenSecret });
 
+// --- settings: vercel ---------------------------------------------------------
+
+export type VercelPlan = "hobby" | "pro" | "enterprise";
+
+export interface VercelScopes {
+  teams: { id: string; name: string; plan: VercelPlan | null }[];
+  teamId: string;
+  projects: { id: string; name: string }[];
+}
+
+export interface VercelSettings {
+  configured: boolean;
+  /** Credentials in orx's own process environment override anything saved here. */
+  processEnv: boolean;
+  oidc: boolean;
+  maskedToken: string | null;
+  projectId: string | null;
+  scopes: VercelScopes | null;
+  error: string | null;
+}
+
+export const getVercelSettings = (signal?: AbortSignal) => get<VercelSettings>("/api/settings/vercel", signal);
+/** Lists what a token can reach; `token` omitted uses the saved one. */
+export const getVercelScopes = (token: string | null, teamId: string | null) =>
+  post<VercelScopes>("/api/settings/vercel/scopes", { token, teamId });
+export const saveVercelSetup = (setup: { token: string | null; teamId: string; projectId: string | null; newProject: string | null }) =>
+  post<VercelSettings>("/api/settings/vercel", setup);
+
 // --- settings: env vars / git / harnesses ------------------------------------
 
 export interface EnvVar {
@@ -1267,6 +1295,7 @@ export type ComputeTargetId =
   | "ssh"
   | "slurm"
   | "ray"
+  | "vercel"
   | "openresearch";
 
 /** Cheap fs/env probe only — "worth trying", not "healthy". Deep health lives
@@ -1935,7 +1964,7 @@ export const deleteLatexTemplate = (name: string) =>
 export interface UserSkill {
   name: string;
   /** The coding agent or plugin it comes from; absent when uploaded here, which
-   * is also the only case the user can delete. */
+   * is also the only case the user can edit or delete. */
   origin?: string | null;
   bytes: number;
   updatedAt: number;
@@ -1962,6 +1991,18 @@ export const deleteUserSkill = (name: string) =>
   writeResponse(`/api/user-skills?name=${encodeURIComponent(name)}`, { method: "DELETE" }).then((r) =>
     json<{ ok: boolean }>(r),
   );
+
+/** The full `SKILL.md`, frontmatter included, of an uploaded skill. */
+export const getUserSkillContent = (name: string) =>
+  get<{ name: string; content: string }>(
+    `/api/user-skills/${encodeURIComponent(name)}`,
+  ).then((r) => r.content);
+
+export const updateUserSkill = (name: string, content: string) =>
+  put<{ skill: UserSkill }>(
+    `/api/user-skills/${encodeURIComponent(name)}`,
+    { content },
+  ).then((r) => r.skill);
 
 /** "openai/gpt-5.5" → "GPT 5.5", "anthropic/claude-opus-4-8" → "Opus 4.8". */
 export function modelLabel(id: string): string {

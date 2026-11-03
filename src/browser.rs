@@ -6,8 +6,8 @@ use std::process::{Child, Command, Stdio};
 /// (e.g. no browser, headless) are swallowed, since the caller is expected to
 /// have already printed the URL for manual opening. The child is detached so the
 /// CLI does not block on it.
-pub fn open_browser(url: &str) {
-    launch(url);
+pub fn open_browser(url: &str, activation_token: Option<&str>) {
+    launch(url, activation_token);
 }
 
 /// [`open_browser`] for `orx up`, reporting an opener that fails to spawn or
@@ -17,7 +17,7 @@ pub fn open_dashboard(
     url: &str,
     mode: crate::telemetry::UpLaunchMode,
 ) -> Option<tokio::task::JoinHandle<()>> {
-    let Some(mut child) = launch(url) else {
+    let Some(mut child) = launch(url, None) else {
         crate::telemetry::capture_browser_open_failed(mode);
         return None;
     };
@@ -35,8 +35,12 @@ pub fn open_dashboard(
     }))
 }
 
-fn launch(url: &str) -> Option<Child> {
+fn launch(url: &str, activation_token: Option<&str>) -> Option<Child> {
     openers(url).into_iter().find_map(|mut cmd| {
+        if let Some(token) = activation_token {
+            cmd.env("XDG_ACTIVATION_TOKEN", token)
+                .env("DESKTOP_STARTUP_ID", token);
+        }
         cmd.stdin(Stdio::null())
             .stdout(Stdio::null())
             .stderr(Stdio::null())
