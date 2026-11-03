@@ -1,3 +1,5 @@
+import { useContext } from "react";
+import { WorkspaceDomContext } from "../WorkspaceDom";
 import type { DialogContentProps } from "../dialog";
 import type { RemoteStopPreview } from "../api";
 import { fmtNumber, ltr } from "../i18n";
@@ -18,6 +20,8 @@ export function RemoteStopDialog({
   preview: RemoteStopPreview;
   currentClientAttached: boolean;
 }) {
+  const { id: elementId } = useContext(WorkspaceDomContext);
+
   const otherClients = Math.max(0, preview.attachmentCount - (currentClientAttached ? 1 : 0));
   const impacts: string[] = [];
 
@@ -48,14 +52,14 @@ export function RemoteStopDialog({
   }
 
   return <DialogContent
-    aria-labelledby="remote-stop-dialog-title"
-    aria-describedby={impacts.length > 0 ? "remote-stop-dialog-impact" : undefined}
+    aria-labelledby={elementId("remote-stop-dialog-title")}
+    aria-describedby={impacts.length > 0 ? elementId("remote-stop-dialog-impact") : undefined}
   >
-    <DialogTitle id="remote-stop-dialog-title">
+    <DialogTitle id={elementId("remote-stop-dialog-title")}>
       {m.remote_stop_confirm_title({ host: ltr(host) })}
     </DialogTitle>
     {impacts.length > 0 && (
-      <div id="remote-stop-dialog-impact" className="mt-4 text-sm text-text">
+      <div id={elementId("remote-stop-dialog-impact")} className="mt-4 text-sm text-text">
         <p className="m-0 font-medium">{m.remote_stop_impact_intro()}</p>
         <ul className="mt-2 mb-0 space-y-1 ps-5">
           {impacts.map((impact) => <li key={impact}>{impact}</li>)}

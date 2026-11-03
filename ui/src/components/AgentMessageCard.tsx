@@ -3,7 +3,7 @@ import { ChevronDown, CircleAlert, CircleCheck, CircleX, MessagesSquare, Triangl
 import { useQuery } from "@tanstack/react-query";
 
 import { fmtDuration, type ChatPart, type OrxSource } from "../api";
-import { listRunsQuery } from "../queries/projects";
+import { useWorkspace } from "../workspace";
 import { CITED_ID, firstLine } from "../agentMessages";
 import { m } from "../paraglide/messages.js";
 import { tabOpenGestureHandlers } from "../tabPreview";
@@ -28,6 +28,7 @@ export function AgentMessageCard(props: Props) {
 function RunCard({ part, runExperimentName, onOpenRun }: Props) {
   const { from: runId, status } = part.orx;
   const scope = useContext(FileScopeContext);
+  const { listRunsQuery } = useWorkspace().queries;
   const { data: run } = useQuery({
     ...listRunsQuery(scope?.projectId ?? ""),
     enabled: Boolean(scope && runId),

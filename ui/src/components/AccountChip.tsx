@@ -1,12 +1,12 @@
+import { useMachines } from "../machineSelection";
+import { WorkspaceDomContext } from "../WorkspaceDom";
+import { useWorkspace } from "../workspace";
 import { AlphaXivNotConnectedError, OpenResearchAccountError, type RuntimeInfo } from "../api";
 import { Menu } from "@base-ui/react/menu";
 import { useQuery } from "@tanstack/react-query";
-import { useEffect, useRef, useState } from "react";
+import { useContext, useEffect, useRef, useState } from "react";
 import { UserRound } from "lucide-react";
-import { showCustomDialog, type DialogContentProps } from "../dialog";
-import { invalidateFamilies } from "../queries/invalidation";
-import { queryClient, workspaceKey } from "../queries/client";
-import { getRuntimeQuery, useAlphaXivFolders, useOpenResearchAccount, useSignOutOpenResearch } from "../queries/settings";
+import { type DialogContentProps } from "../dialog";
 import { m } from "../paraglide/messages.js";
 import { confirmOpenResearchSignOut } from "./confirmOpenResearchSignOut";
 import { accountErrorMessage, OpenResearchAccount } from "./OpenResearchAccount";
@@ -21,52 +21,59 @@ export function isRemoteSession(runtime?: RuntimeInfo | null): boolean {
   return false;
 }
 
-function refreshAccount() {
-  invalidateFamilies(["getOpenResearchAccount", "getOpenResearchSettings", "getComputeSettings"]);
-  void queryClient.invalidateQueries({ queryKey: workspaceKey("alphaXivFolders") });
-  void queryClient.invalidateQueries({ queryKey: workspaceKey("alphaXivPapers") });
-}
-
 /** Opens sign-in from anywhere; focus returns to `returnFocus` when the dialog closes. */
-export function openSignIn(
-  connectOnly: boolean,
-  returnFocus: HTMLElement | null,
-  onSignedIn?: () => void,
-  remote = isRemoteSession(queryClient.getQueryData<RuntimeInfo>(["gateway", "runtime"])),
-) {
-  const inDesktopApp = typeof window !== "undefined" && "__ORX_DESKTOP__" in window;
-  const placeholder = remote && !inDesktopApp ? window?.open?.("/remote-launch", "_blank") ?? null : null;
-  if (remote && !inDesktopApp && !placeholder) {
-    showAlert(m.remote_popup_blocked(), "error");
+export function useSignIn() {
+  const workspace = useWorkspace();
+  const { owner } = useMachines();
+  // Sign-in runs on the laptop's server; only a laptop window that is itself remote must open the browser.
+  const remote = isRemoteSession(useQuery(owner.queries.getRuntimeQuery(), owner.queryClient).data);
+  const { queryClient, workspaceKey } = owner;
+  const { invalidateFamilies } = owner.invalidation;
+  const { showCustomDialog } = workspace.dialogs;
+  function refreshAccount() {
+    invalidateFamilies(["getOpenResearchAccount", "getOpenResearchSettings", "getComputeSettings"]);
+    void queryClient.invalidateQueries({ queryKey: workspaceKey("alphaXivFolders") });
+    void queryClient.invalidateQueries({ queryKey: workspaceKey("alphaXivPapers") });
   }
-  showCustomDialog({
-    component: SignInDialog,
-    props: { connectOnly, returnFocus, initialPlaceholder: placeholder, remote },
-    onCancel: () => {
-      placeholder?.close();
-      refreshAccount();
-    },
-    onConfirm: () => {
-      window.ipc?.postMessage("window:focus");
-      refreshAccount();
-      onSignedIn?.();
-    },
-  });
+
+  return (connectOnly: boolean, returnFocus: HTMLElement | null, onSignedIn?: () => void) => {
+    const inDesktopApp = typeof window !== "undefined" && "__ORX_DESKTOP__" in window;
+    const placeholder = remote && !inDesktopApp ? window?.open?.("/remote-launch", "_blank") ?? null : null;
+    if (remote && !inDesktopApp && !placeholder) {
+      showAlert(m.remote_popup_blocked(), "error");
+    }
+    showCustomDialog({
+      component: SignInDialog,
+      props: { connectOnly, returnFocus, initialPlaceholder: placeholder, remote },
+      onCancel: () => {
+        placeholder?.close();
+        refreshAccount();
+      },
+      onConfirm: () => {
+        window.ipc?.postMessage("window:focus");
+        refreshAccount();
+        onSignedIn?.();
+      },
+    });
+  };
 }
 
 export function AccountChip({ onDetails }: { onDetails: () => void }) {
+  const workspace = useWorkspace();
+  const { owner } = useMachines();
+  const { useOpenResearchAccount, useAlphaXivFolders, useSignOutOpenResearch } = owner.queries;
+  const openSignIn = useSignIn();
+  const { portalContainer } = useContext(WorkspaceDomContext);
   const accountQuery = useOpenResearchAccount();
   const user = accountQuery.data?.user;
   const alphaXivNotConnected = useAlphaXivFolders().error instanceof AlphaXivNotConnectedError;
   const signOut = useSignOutOpenResearch();
-  const runtime = useQuery(getRuntimeQuery()).data;
-  const remote = isRemoteSession(runtime);
   const chipRef = useRef<HTMLButtonElement>(null);
   const focusAfterLogin = useRef(false);
   const name = user ? [user.firstName, user.lastName].filter(Boolean).join(" ") || user.email : "";
 
   // Signing in swaps the plain button for the menu trigger, so focus moves to the new element.
-  const signIn = (connectOnly: boolean) => openSignIn(connectOnly, chipRef.current, () => { focusAfterLogin.current = true; }, remote);
+  const signIn = (connectOnly: boolean) => openSignIn(connectOnly, chipRef.current, () => { focusAfterLogin.current = true; });
 
   useEffect(() => {
     if (user && focusAfterLogin.current) { chipRef.current?.focus(); focusAfterLogin.current = false; }
@@ -80,13 +87,13 @@ export function AccountChip({ onDetails }: { onDetails: () => void }) {
 
   return user || reason ? <Menu.Root modal={false} loopFocus>
       <Menu.Trigger ref={chipRef} aria-label={`${label}${user && reason ? ` · ${stateLabel}` : ""} · ${m.account_menu()}`} className={chipClass}>{contents}</Menu.Trigger>
-      <Menu.Portal><Menu.Positioner side="top" align="start" sideOffset={6} collisionPadding={8} className="z-50">
+      <Menu.Portal container={portalContainer}><Menu.Positioner side="top" align="start" sideOffset={6} collisionPadding={8} className="z-50">
         <Menu.Popup aria-label={m.account_menu()} className="outline-none max-h-(--available-height) overflow-y-auto w-64 max-w-[calc(100vw-1rem)] rounded-lg border border-border bg-background p-1.5 shadow-menu">
           <div className="flex flex-col gap-1 border-b border-border-variant px-2 py-2 text-sm break-words">{user && <OpenResearchAccount user={user} />}{reason && <span role="status">{reason}</span>}</div>
           {reason && <Menu.Item nativeButton render={<MenuItem className="data-highlighted:bg-surface" />} onClick={() => void accountQuery.refetch()}>{m.settings_check_again()}</Menu.Item>}
           {user && !accountQuery.isError && alphaXivNotConnected && <Menu.Item nativeButton render={<MenuItem className="data-highlighted:bg-surface" />} onClick={() => signIn(true)}>{m.library_connect()}</Menu.Item>}
           <Menu.Item nativeButton render={<MenuItem className="data-highlighted:bg-surface" />} onClick={onDetails}>{m.account_details()}</Menu.Item>
-          {user && <Menu.Item nativeButton render={<MenuItem className="data-highlighted:bg-surface" />} disabled={signOut.isPending} onClick={() => confirmOpenResearchSignOut(signOut.mutateAsync)}>{m.settings_openresearch_sign_out()}</Menu.Item>}
+          {user && <Menu.Item nativeButton render={<MenuItem className="data-highlighted:bg-surface" />} disabled={signOut.isPending} onClick={() => confirmOpenResearchSignOut(workspace.dialogs, signOut.mutateAsync)}>{m.settings_openresearch_sign_out()}</Menu.Item>}
         </Menu.Popup>
       </Menu.Positioner></Menu.Portal>
     </Menu.Root> : <button ref={chipRef} type="button" className={chipClass} disabled={accountQuery.isLoading} onClick={() => signIn(false)}>{contents}</button>;
@@ -95,18 +102,16 @@ export function AccountChip({ onDetails }: { onDetails: () => void }) {
 /** sysexits' EX_TEMPFAIL, which `orx login` exits with when OpenResearch couldn't reach alphaXiv. */
 const TRY_AGAIN_LATER = 75;
 
-function SignInDialog({ connectOnly, returnFocus, initialPlaceholder, remote: remoteProp, confirm, cancel }: DialogContentProps<void> & {
+function SignInDialog({ connectOnly, returnFocus, initialPlaceholder, remote, confirm, cancel }: DialogContentProps<void> & {
   connectOnly: boolean;
   returnFocus: HTMLElement | null;
-  initialPlaceholder?: Window | null;
-  remote?: boolean;
+  initialPlaceholder: Window | null;
+  remote: boolean;
 }) {
-  const runtime = useQuery(getRuntimeQuery()).data;
-  const remote = remoteProp ?? isRemoteSession(runtime);
   const [attempt, setAttempt] = useState(0);
   const [error, setError] = useState<string | null>(null);
   const cancelRef = useRef<HTMLButtonElement>(null);
-  const placeholderRef = useRef<Window | null>(initialPlaceholder ?? null);
+  const placeholderRef = useRef<Window | null>(initialPlaceholder);
 
   const fail = (exitCode?: number) => {
     placeholderRef.current?.close();
@@ -152,17 +157,18 @@ function SignInDialog({ connectOnly, returnFocus, initialPlaceholder, remote: re
 
 export function LoginSession({
   connectOnly,
-  remote = isRemoteSession(queryClient.getQueryData<RuntimeInfo>(["gateway", "runtime"])),
+  remote,
   placeholderWindow,
   onComplete,
   onError,
 }: {
   connectOnly: boolean;
-  remote?: boolean;
-  placeholderWindow?: Window | null;
+  remote: boolean;
+  placeholderWindow: Window | null;
   onComplete: () => void;
   onError: (exitCode?: number) => void;
 }) {
+  const { socketUrl } = useMachines().owner;
   const [url, setUrl] = useState<string | null>(null);
   const callbacks = useRef({ onComplete, onError });
   callbacks.current = { onComplete, onError };
@@ -172,8 +178,7 @@ export function LoginSession({
     let output = "";
     let complete = false;
     const timer = window.setTimeout(() => {
-      const protocol = location.protocol === "https:" ? "wss:" : "ws:";
-      socket = new WebSocket(new URL(connectOnly ? "/api/settings/alphaxiv/login" : "/api/settings/openresearch/login", `${protocol}//${location.host}`));
+      socket = new WebSocket(socketUrl(connectOnly ? "/api/settings/alphaxiv/login" : "/api/settings/openresearch/login"));
       socket.binaryType = "arraybuffer";
       socket.onmessage = (event) => {
         if (event.data instanceof ArrayBuffer) {
@@ -204,6 +209,6 @@ export function LoginSession({
       socket.onclose = () => { if (!complete) { setUrl(null); callbacks.current.onError(); } };
     }, 0);
     return () => { clearTimeout(timer); if (socket) { socket.onclose = null; socket.close(); } };
-  }, [connectOnly, remote, placeholderWindow]);
+  }, [connectOnly, remote, placeholderWindow, socketUrl]);
   return url && <a href={url} target="_blank" rel="noreferrer" className="break-all text-sm text-text underline">{url}</a>;
 }

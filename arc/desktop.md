@@ -72,6 +72,10 @@ on Windows, custom window controls; and on macOS, a native menu bar whose
 structure and state the page sends. The window never runs commands on the
 page's behalf.
 
+Remote machines share the main window. The machine switcher selects a retained
+workspace with its own route, cache, dialogs and drafts; connecting a server
+keeps the progress dialog visible until that workspace is ready to open.
+
 What leaves the window:
 
 - A pop-up never opens inside the app. `http:`, `https:` and `mailto:` links

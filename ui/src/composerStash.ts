@@ -44,17 +44,19 @@ export function composerStashContent(
   };
 }
 
-const composerSeeds = new Map<string, string>();
-
-/** A prompt for a new project's first chat, offered until the project has a chat. */
-export function seedComposer(projectId: string, prompt: string): void {
-  composerSeeds.set(projectId, prompt);
-}
-
-export function composerSeed(projectId: string): string | null {
-  return composerSeeds.get(projectId) ?? null;
-}
-
-export function forgetComposerSeed(projectId: string): void {
-  composerSeeds.delete(projectId);
+export function createComposerState() {
+  const composerSeeds = new Map<string, string>();
+  return {
+    composerStashes: new Map<string, ComposerStash>(),
+    mountedComposers: new Map<string, (failed: ComposerStash) => void>(),
+    seedComposer(projectId: string, prompt: string) {
+      composerSeeds.set(projectId, prompt);
+    },
+    composerSeed(projectId: string) {
+      return composerSeeds.get(projectId) ?? null;
+    },
+    forgetComposerSeed(projectId: string) {
+      composerSeeds.delete(projectId);
+    },
+  };
 }

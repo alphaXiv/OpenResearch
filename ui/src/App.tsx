@@ -1,17 +1,5 @@
-import { showCustomDialog } from "./dialog";
-import { EscapeScope } from "./components/EscapeScope";
-import { navigateKeyboardList } from "./keyboardNavigation";
 import {
-  setScopedQueryData,
-  deletedSessionIds,
-  isCurrentScope,
-  workspaceScope,
-  queryClient,
-} from "./queries/client";
-import { useMutation, useQuery } from "@tanstack/react-query";
-import type { Viewport } from "@xyflow/react";
-
-import {
+  useContext,
   type SetStateAction,
   useCallback,
   useEffect,
@@ -21,12 +9,15 @@ import {
   useState,
   useSyncExternalStore,
 } from "react";
+import { WorkspaceDomContext } from "./WorkspaceDom";
+import { useWorkspace } from "./workspace";
 
-import { listChatSessionsQuery, getChatMessagesQuery } from "./queries/chat";
-import { listProjectsQuery, getUiStateQuery, listRunsQuery, listExperimentsQuery } from "./queries/projects";
-import { citedMessage, deleteExperiment, openSideChat, sendChatMessage, setExperimentArchived } from "./api";
-import { getArtifactsQuery } from "./queries/files";
-import { readHarnesses } from "./queries/settings";
+import { EscapeScope } from "./components/EscapeScope";
+import { navigateKeyboardList } from "./keyboardNavigation";
+
+import { useMutation, useQuery } from "@tanstack/react-query";
+import type { Viewport } from "@xyflow/react";
+
 import { useBlocker, useRouter, useRouterState } from "@tanstack/react-router";
 import {
   getTaskWorkspace,
@@ -36,7 +27,7 @@ import {
   type Pane,
   type TaskWorkspace,
 } from "./workspaceState";
-import { getRememberedGlobalWorkspace, globalWorkspaceWriter } from "./workspacePersistence";
+
 import { PANEL_MIN_WIDTH, RAIL_DEFAULT_WIDTH, clampRailWidth, initialPanelWidth, panelMaxWidth, railWidthBesidePanel, sideChatPanelWidth, sidebarFitsWithPanel } from "./panelLayout";
 import {
   type ExpViewDef,
@@ -63,11 +54,7 @@ import {
   paneTab,
   defaultTaskWorkspace,
 } from "./workspaceTabs";
-import {
-  getCachedProjectWorkspace,
-  inheritNewTaskWorkspace,
-  useProjectWorkspace,
-} from "./useProjectWorkspace";
+
 import { m } from "./paraglide/messages.js";
 
 import { useLocale } from "./locale";
@@ -94,13 +81,10 @@ import {
 } from "lucide-react";
 
 import {
-  cancelRun,
   DEMO_MAIN_SESSION_ID,
   DEMO_OVERVIEW_ARTIFACT,
-  captureUiEvent,
   isDemoProjectId,
   type FirstAction,
-  updateUiState,
   type AgentSelection,
   type Autonomy,
   DEFAULT_AUTONOMY,
@@ -138,14 +122,14 @@ import { Md } from "./components/Md";
 import { SettingsView, type SettingsTab } from "./components/SettingsPage";
 import { DemoWelcomeModal } from "./components/Tour";
 import { TreeView } from "./components/TreeView";
-import { onChatEvent, useOrxEvents } from "./events";
+
 import { closeTab, openTab, type TabOpenIntent } from "./tabPreview";
 import { useHotkey, useHotkeys } from "@tanstack/react-hotkeys";
 import { commandRegion, subscribeCommandRegion } from "./keyboardRegion";
 import { appHotkeys, tabJumpHotkeys } from "./hotkeys";
 import { Button, IconButton, MenuItem, SEGMENTED_CLASS_NAME, showAlert, Spinner, Tooltip } from "./components/ui";
 import { CodeTabBody, TabBody } from "./components/layout/TabBody";
-import { RemoteStatus } from "./components/RemoteStatus";
+import { WorkspaceConnection } from "./components/WorkspaceConnection";
 import { delegateModelLabel } from "./delegates";
 
 const EMPTY_STATE_CLASS_NAME = [
@@ -273,6 +257,41 @@ function useStableStringMap(next: Map<string, string>): Map<string, string> {
 const errorText = (error: unknown) => ltr(error instanceof Error ? error.message : String(error));
 
 export default function App({ runtime, projectId, pane }: { runtime: RuntimeInfo; projectId: string; pane?: Pane }) {
+  const { id: elementId } = useContext(WorkspaceDomContext);
+
+  const { showCustomDialog, showConfirmDialog } = useWorkspace().dialogs;
+
+  const {
+    updateUiState,
+    setExperimentArchived,
+    deleteExperiment,
+    captureUiEvent,
+    openSideChat,
+    sendChatMessage,
+    cancelRun,
+    citedMessage,
+  } = useWorkspace().api;
+  const {
+    listChatSessionsQuery,
+    listProjectsQuery,
+    getUiStateQuery,
+    listExperimentsQuery,
+    listRunsQuery,
+    getArtifactsQuery,
+    getChatMessagesQuery,
+    readHarnesses,
+  } = useWorkspace().queries;
+  const {
+    setScopedQueryData,
+    queryClient,
+    workspaceScope,
+    isCurrentScope,
+    deletedSessionIds,
+  } = useWorkspace();
+  const { useProjectWorkspace, inheritNewTaskWorkspace, getCachedProjectWorkspace } = useWorkspace().projects;
+  const { globalWorkspaceWriter, getRememberedGlobalWorkspace } = useWorkspace().persistence;
+  const { useOrxEvents, onChatEvent } = useWorkspace().events;
+
   const updateUiStateMutation = useMutation({ mutationFn: updateUiState });
 
   const router = useRouter();
@@ -774,7 +793,7 @@ export default function App({ runtime, projectId, pane }: { runtime: RuntimeInfo
   }, [workspaceReady, destination?.kind, workspaceRef, sessions]);
   useBlocker({
     shouldBlockFn: async ({ next }) => parseDestination(next.pathname)?.projectId !== projectId
-      && [...fileBuffersRef.current.values()].some((buffer) => buffer.needsProtection) && !await confirmFileDiscard(m.file_viewer_discard_unsaved_changes()),
+      && [...fileBuffersRef.current.values()].some((buffer) => buffer.needsProtection) && !await confirmFileDiscard(m.file_viewer_discard_unsaved_changes(), showConfirmDialog),
     enableBeforeUnload: () => [...fileBuffersRef.current.values()].some((buffer) => buffer.needsProtection),
   });
   const lastGlobalLocation = useRef<string | null>(null);
@@ -833,8 +852,9 @@ export default function App({ runtime, projectId, pane }: { runtime: RuntimeInfo
   // The home, error, and loading screens leave projects populated but show no project.
   useEffect(() => {
     const name = startupError || uiState === null ? null : activeProject?.name;
-    document.title = name ? `${autoDir(name)} — OpenResearch` : "OpenResearch";
-  }, [startupError, uiState, activeProject]);
+    const machine = runtime.kind === "ssh" ? `${autoDir(runtime.session.host)} — ` : "";
+    document.title = name ? `${machine}${autoDir(name)} — OpenResearch` : `${machine}OpenResearch`;
+  }, [startupError, uiState, activeProject, runtime]);
 
   const projectIdRef = useRef(projectId);
   projectIdRef.current = projectId;
@@ -1287,7 +1307,7 @@ export default function App({ runtime, projectId, pane }: { runtime: RuntimeInfo
     async (tab: FileViewDef) => {
       if (!fileTabs.some((candidate) => sameFileTab(candidate, tab))) return;
       const key = projectId ? fileScrollKey(projectId, activeSessionId, tab) : null;
-      if (key && fileBuffersRef.current.get(key)?.needsProtection && !await confirmFileDiscard(m.file_viewer_discard_unsaved_changes())) return;
+      if (key && fileBuffersRef.current.get(key)?.needsProtection && !await confirmFileDiscard(m.file_viewer_discard_unsaved_changes(), showConfirmDialog)) return;
 
       setFileTabs((prev) => prev.filter((candidate) => !sameFileTab(candidate, tab)));
       if (key) {
@@ -1952,7 +1972,7 @@ export default function App({ runtime, projectId, pane }: { runtime: RuntimeInfo
           <p>{startupError}</p>
           <Button variant="primary" onClick={loadInitialState}>{m.app_retry()}</Button>
         </div>
-        {runtime.kind === "ssh" && <RemoteStatus runtime={runtime} corner />}
+        <WorkspaceConnection runtime={runtime} corner />
       </div>
     );
   }
@@ -1967,7 +1987,7 @@ export default function App({ runtime, projectId, pane }: { runtime: RuntimeInfo
         <div className={EMPTY_STATE_CLASS_NAME}>
           <Spinner />
         </div>
-        {runtime.kind === "ssh" && <RemoteStatus runtime={runtime} corner />}
+        <WorkspaceConnection runtime={runtime} corner />
       </div>
     );
   }
@@ -2133,7 +2153,7 @@ export default function App({ runtime, projectId, pane }: { runtime: RuntimeInfo
                 </Tooltip>
               </div>
             </div>
-            <div data-workspace-content role="region" aria-labelledby="active-workspace-tab" tabIndex={-1} onKeyDown={navigateKeyboardList} className="relative flex min-h-0 flex-1 flex-col focus-visible:after:pointer-events-none focus-visible:after:absolute focus-visible:after:inset-0 focus-visible:after:z-50 focus-visible:after:border-2 focus-visible:after:border-focus focus-visible:after:content-['']">
+            <div data-workspace-content role="region" aria-labelledby={elementId("active-workspace-tab")} tabIndex={-1} onKeyDown={navigateKeyboardList} className="relative flex min-h-0 flex-1 flex-col focus-visible:after:pointer-events-none focus-visible:after:absolute focus-visible:after:inset-0 focus-visible:after:z-50 focus-visible:after:border-2 focus-visible:after:border-focus focus-visible:after:content-['']">
             {/* The terminal body is the standalone TabBody after this chain. */}
             {rightTab === "terminal" && terminalTabOpen ? null : !workspaceReady || ((pane?.kind === "experiment" || pane?.kind === "code") && !experimentDataReady) || (pane?.kind === "experiment" && pane.runId && !runDataReady) ? (
               <TabBody><Spinner /></TabBody>
@@ -2213,7 +2233,7 @@ export default function App({ runtime, projectId, pane }: { runtime: RuntimeInfo
                         <div className="option-menu absolute bottom-[calc(100%_+_8px)] start-0 max-h-95 flex flex-col bg-background border border-border rounded-lg shadow-menu z-50 overflow-hidden min-w-47.5 p-1.5 [&.align-right]:start-auto [&.align-right]:end-0 [&.drop-down]:bottom-auto [&.drop-down]:top-[calc(100%_+_4px)] [&.session-menu]:start-auto [&.session-menu]:end-1.5 [&.session-menu]:top-[calc(100%_-_2px)] [&.session-menu]:min-w-35 drop-down experiment-scope-menu [&_.model-item]:whitespace-nowrap [&_.model-item:disabled]:text-muted [&_.model-item:disabled]:cursor-default [&_.model-item:disabled:hover]:bg-transparent">
                           <MenuItem
                             aria-pressed={effectiveScope === "agent"}
-                            aria-describedby={!activeSessionId || !allExperimentsAttributed ? "experiment-scope-unavailable" : undefined}
+                            aria-describedby={!activeSessionId || !allExperimentsAttributed ? elementId("experiment-scope-unavailable") : undefined}
                             disabled={!activeSessionId || !allExperimentsAttributed}
                             onClick={() => {
                               setScope("agent");
@@ -2224,7 +2244,7 @@ export default function App({ runtime, projectId, pane }: { runtime: RuntimeInfo
                             {effectiveScope === "agent" && <Check size={14} />}
                           </MenuItem>
                           {(!activeSessionId || !allExperimentsAttributed) && (
-                            <p id="experiment-scope-unavailable" className="px-2 pb-1 text-xs text-muted">
+                            <p id={elementId("experiment-scope-unavailable")} className="px-2 pb-1 text-xs text-muted">
                               {!activeSessionId ? m.app_open_task_to_filter() : m.app_filter_unavailable_unattributed()}
                             </p>
                           )}

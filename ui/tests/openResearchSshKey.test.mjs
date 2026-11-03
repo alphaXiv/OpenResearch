@@ -1,3 +1,4 @@
+import { withWorkspaceMocks } from "./workspaceMocks.mjs";
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { createRequire } from "node:module";
@@ -21,7 +22,7 @@ function render(sshKey, mutation = {}) {
     "./ui": { Button: "button", Spinner: "spinner", showAlert: (message, type) => alerts.push([message, type]) },
   };
   const exports = {};
-  new Function("require", "exports", code)((name) => mocks[name] ?? require(name), exports);
+  new Function("require", "exports", code)(withWorkspaceMocks((name) => mocks[name] ?? require(name)), exports);
   const nodes = (tree) => React.isValidElement(tree) ? [tree, ...React.Children.toArray(tree.props.children).flatMap(nodes)] : [];
   const tree = nodes(exports.OpenResearchSshKey({ sshKey }));
   const text = tree.flatMap((node) => React.Children.toArray(node.props.children)).filter((child) => typeof child === "string");

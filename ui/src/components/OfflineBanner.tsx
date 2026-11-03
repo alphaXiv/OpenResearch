@@ -1,7 +1,7 @@
+import { useWorkspace } from "../workspace";
 import { m } from "../paraglide/messages.js";
 import { CircleAlert } from "lucide-react";
 import { useSyncExternalStore } from "react";
-import { isConnected, onConnectionChange } from "../events";
 
 /** Shown while the event stream is down: everything on screen is a snapshot
  *  from whenever the backend was last reachable.
@@ -10,6 +10,8 @@ import { isConnected, onConnectionChange } from "../events";
  *  already rendered stay worth reading — and not dismissible, since nothing
  *  else on the page distinguishes stale from live. */
 export function OfflineBanner({ hasSidebar = false }: { hasSidebar?: boolean }) {
+  const { onConnectionChange, isConnected } = useWorkspace().events;
+
   const connected = useSyncExternalStore(onConnectionChange, isConnected, isConnected);
 
   return (

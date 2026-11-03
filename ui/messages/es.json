@@ -1607,7 +1607,6 @@
   "settings_openresearch_sign_out_title": "¿Cerrar sesión en OpenResearch?",
   "settings_openresearch_sign_out_description": "Este equipo no podrá iniciar, reiniciar ni detener recursos de OpenResearch hasta que vuelvas a iniciar sesión. Los recursos activos seguirán ejecutándose y generando cargos.",
   "account_finish_browser": "Termina de iniciar sesión en el navegador…",
-  "account_local_to_app": "La cuenta es local a esta aplicación",
   "library_title": "Biblioteca",
   "library_connect": "Conectar alphaXiv",
   "library_connected": "Conectado a alphaXiv",
@@ -1637,5 +1636,14 @@
   "library_selected": "{count} seleccionados",
   "library_open_alphaxiv": "Abrir alphaXiv",
   "chat_resize_composer": "Cambiar el tamaño del cuadro de mensaje",
-  "chat_resize_composer_hint": "Arrastra para cambiar el tamaño. Haz doble clic para restablecer."
+  "chat_resize_composer_hint": "Arrastra para cambiar el tamaño. Haz doble clic para restablecer.",
+  "remote_machine_switcher": "Cambiar de equipo: {machine}",
+  "remote_machine_connected": "Conectado",
+  "remote_machine_connecting": "Conectando…",
+  "remote_machine_disconnected": "Desconectado",
+  "remote_agents_title": "Configura agentes en {host}",
+  "remote_agents_description": "Los agentes deben instalarse e iniciar sesión en cada máquina. Configúralos en {host}.",
+  "remote_claude_datacenter_title": "Evita las suscripciones de Claude en IP de centros de datos",
+  "remote_claude_datacenter_description": "{host} usa la IP de centro de datos {ip}. Usar aquí una suscripción de Claude puede hacer que Anthropic marque tu cuenta. Usa una clave API o continúa bajo tu responsabilidad.",
+  "remote_claude_datacenter_continue": "Continuar de todos modos"
 }

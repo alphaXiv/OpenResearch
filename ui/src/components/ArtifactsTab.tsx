@@ -1,9 +1,10 @@
-import { showConfirmDialog } from "../dialog";
+import { useRuntime } from "../RemoteRuntime";
+import { useWorkspace } from "../workspace";
+
 import { matchesKeyboardEvent } from "@tanstack/react-hotkeys";
 import { WorkspaceEmptyState } from "./WorkspaceEmptyState";
 import { useQuery } from "@tanstack/react-query";
-import { queryClient } from "../queries/client";
-import { getArtifactFileTextQuery } from "../queries/files";
+
 import { m } from "../paraglide/messages.js";
 import { ltr } from "../i18n";
 import { getLocale } from "../paraglide/runtime.js";
@@ -20,17 +21,7 @@ import ReactMarkdown, { type Components } from "react-markdown";
 import rehypeKatex from "rehype-katex";
 import remarkGfm from "remark-gfm";
 import remarkMath from "remark-math";
-import {
-  artifactUrl,
-  deleteArtifact,
-  FILE_PREVIEW_BYTES,
-  fmtBytes,
-  manageArtifactFile,
-  revealArtifactInManager,
-  type ArtifactEntry,
-  type Project,
-  type ProjectArtifacts,
-} from "../api";
+import { FILE_PREVIEW_BYTES, fmtBytes, type ArtifactEntry, type Project, type ProjectArtifacts } from "../api";
 import { CodeView } from "./CodeView";
 import { FileTypeIcon, isMarkdownFile } from "./FileTypeIcon";
 import { MediaPreview, mediaPreviewKind, type MediaPreviewKind } from "./MediaPreview";
@@ -56,7 +47,7 @@ function isExternalSrc(src: string): boolean {
 
 /** Resolve a Markdown target within the artifacts root. URL suffixes stay
  * outside the encoded filesystem path, and upward escapes are rejected. */
-function artifactTarget(projectId: string, folder: string, src: string) {
+function artifactTarget(projectId: string, folder: string, src: string, artifactUrl: (projectId: string, path: string) => string) {
   const hashAt = src.indexOf("#");
   const beforeHash = hashAt === -1 ? src : src.slice(0, hashAt);
   const hash = hashAt === -1 ? "" : src.slice(hashAt);
@@ -150,13 +141,14 @@ export function ArtifactMarkdown({
   markdown: string;
   entries: ArtifactEntry[];
 }) {
+  const { artifactUrl } = useWorkspace().api;
   // Artifact writes refresh `src` through this ref; a new `img` type would remount images.
   const entriesRef = useRef(entries);
   entriesRef.current = entries;
   const components = useMemo((): Components => {
     const resolve = (src: string) => {
       if (isExternalSrc(src)) return src;
-      const target = artifactTarget(projectId, folder, src);
+      const target = artifactTarget(projectId, folder, src, artifactUrl);
       if (!target) return null;
       const entry = findArtifactEntry(entriesRef.current, target.path);
       if (!entry) return target.url;
@@ -219,6 +211,9 @@ function previewKind(entry: ArtifactEntry): PreviewKind {
 
 /** Fetched body for kinds that need text: markdown or raw text. */
 function useTextBody(projectId: string, entry: ArtifactEntry, kind: PreviewKind, version: string | null) {
+  const { getArtifactFileTextQuery } = useWorkspace().queries;
+  const { queryClient } = useWorkspace();
+
   const wantsText = kind === "markdown" || (kind === "text" && entry.size <= FILE_PREVIEW_BYTES);
   const options = getArtifactFileTextQuery(projectId, entry.path);
   const query = useQuery({ ...options, enabled: wantsText, subscribed: wantsText });
@@ -254,6 +249,10 @@ function PreviewPane({
   onDelete: (path: string) => Promise<void>;
   artifactEntries: ArtifactEntry[];
 }) {
+  const { showConfirmDialog } = useWorkspace().dialogs;
+
+  const { artifactUrl } = useWorkspace().api;
+
   const kind = previewKind(entry);
   const version = useFileVersion(artifactUrl(projectId, entry.path));
   const { text, binary, truncated, error, wantsText } = useTextBody(projectId, entry, kind, version);
@@ -400,6 +399,8 @@ function TreeRows({
   onRename: (path: string, name: string) => void;
   onCancelRename: () => void;
 }) {
+  const { showConfirmDialog } = useWorkspace().dialogs;
+
   return (
     <div className="flex w-full max-w-full min-w-0 flex-col items-stretch">
       {entries.map((e) => {
@@ -550,10 +551,16 @@ export function ArtifactsTab({
   /** The dashboard is connected to a remote instance; OS actions would run there. */
   remote?: boolean;
 }) {
+  const { showConfirmDialog } = useWorkspace().dialogs;
+
+  const { deleteArtifact, manageArtifactFile, revealArtifactInManager } = useWorkspace().api;
+
+  const runtime = useRuntime();
+  const storageProjectId = runtime.kind === "ssh" ? `${encodeURIComponent(runtime.session.host)}:${project.id}` : project.id;
   const [selected, setSelected] = useState<string | null>(null);
   // Folders are open by default — including ones that appear later — so this
   // tracks what the user closed instead.
-  const [collapsed, setCollapsed] = useState<Set<string>>(() => initialCollapsed(project.id));
+  const [collapsed, setCollapsed] = useState<Set<string>>(() => initialCollapsed(storageProjectId));
   const [treeWidth, setTreeWidth] = useState(initialTreeWidth);
   const [contextMenu, setContextMenu] = useState<FileContextMenuTarget | null>(null);
   const [renamingPath, setRenamingPath] = useState<string | null>(null);
@@ -561,13 +568,13 @@ export function ArtifactsTab({
   useEffect(() => {
     try {
       localStorage.setItem(
-        `${COLLAPSED_DIRS_KEY_PREFIX}${project.id}`,
+        `${COLLAPSED_DIRS_KEY_PREFIX}${storageProjectId}`,
         JSON.stringify([...collapsed]),
       );
     } catch {
       // best-effort persistence
     }
-  }, [project.id, collapsed]);
+  }, [storageProjectId, collapsed]);
 
   // Drag the divider to resize the tree pane; width persists across reloads.
   // Mirrors App's end-panel resizer: capture the pointer so views under the

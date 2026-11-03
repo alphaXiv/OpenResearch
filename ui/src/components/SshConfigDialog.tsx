@@ -1,20 +1,22 @@
+import { useContext, useEffect, useRef, useState } from "react";
+import { WorkspaceDomContext } from "../WorkspaceDom";
+import { type Workspace, useWorkspace } from "../workspace";
 import { useQuery, useMutation } from "@tanstack/react-query";
-import { setScopedQueryData, isCurrentScope } from "../queries/client";
-import { getSshConfigQuery } from "../queries/settings";
+
 import { X } from "lucide-react";
-import { useEffect, useRef, useState } from "react";
-import { showConfirmDialog, showCustomDialog, type DialogContentProps } from "../dialog";
-import { saveSshConfig, type SshConfigFile } from "../api";
+
+import { type createDialogs, type DialogContentProps } from "../dialog";
+import { type SshConfigFile } from "../api";
 import { m } from "../paraglide/messages.js";
 import { CodeEditor } from "./CodeEditor";
 import { Button, DialogContent, DialogTitle, IconButton, showAlert, Spinner } from "./ui";
 
-export function showSshConfigDialog(onClose?: () => void) {
+export function showSshConfigDialog(dialogs: ReturnType<typeof createDialogs>, onClose?: () => void, workspace?: Workspace) {
   const beforeCancel = { current: () => Promise.resolve() };
 
-  showCustomDialog({
+  dialogs.showCustomDialog({
     component: SshConfigDialog,
-    props: { beforeCancel },
+    props: { beforeCancel, workspace },
     onConfirm: () => {},
     onCancel: async () => {
       await beforeCancel.current();
@@ -28,16 +30,28 @@ export function SshConfigDialog({
   isDisabled,
   beforeCancel,
   onSaved,
+  workspace: dataWorkspace,
 }: DialogContentProps<void> & {
   beforeCancel: { current: () => Promise<void> };
   onSaved?: () => void;
+  workspace?: Workspace;
 }) {
+  const { id: elementId } = useContext(WorkspaceDomContext);
+
+  const currentWorkspace = useWorkspace();
+  const workspace = dataWorkspace ?? currentWorkspace;
+  const { showConfirmDialog } = currentWorkspace.dialogs;
+
+  const { getSshConfigQuery } = workspace.queries;
+  const { saveSshConfig } = workspace.api;
+  const { isCurrentScope, setScopedQueryData } = workspace;
+
   const options = getSshConfigQuery();
-  const fileQuery = useQuery(options);
+  const fileQuery = useQuery(options, workspace.queryClient);
   const [file, setFile] = useState<SshConfigFile | null>(() => fileQuery.data ?? null);
   const [draft, setDraft] = useState(() => fileQuery.data?.content ?? "");
   const loadError = !file && fileQuery.error ? fileQuery.error.message : null;
-  const saveMutation = useMutation({ mutationFn: ({ content, previous }: { content: string; previous: string }) => saveSshConfig(content, previous) });
+  const saveMutation = useMutation({ mutationFn: ({ content, previous }: { content: string; previous: string }) => saveSshConfig(content, previous) }, workspace.queryClient);
   const [saving, setSaving] = useState(false);
   const dialogRef = useRef<HTMLDivElement>(null);
   const dirty = file !== null && draft !== file.content;
@@ -88,10 +102,10 @@ export function SshConfigDialog({
       ref={dialogRef}
       initialFocus={() => dialogRef.current?.querySelector("textarea") ?? true}
       className="relative flex h-[min(48rem,calc(100vh-2.5rem))] w-200 max-w-full flex-col overflow-hidden p-0"
-      aria-labelledby="ssh-config-dialog-title"
+      aria-labelledby={elementId("ssh-config-dialog-title")}
     >
       <div className="shrink-0 px-6 pt-5 pb-4 pe-14">
-        <DialogTitle id="ssh-config-dialog-title">
+        <DialogTitle id={elementId("ssh-config-dialog-title")}>
           {m.ssh_config_title()}
         </DialogTitle>
         <code className="mt-1 block font-mono text-sm text-subtext">~/.ssh/config</code>

@@ -1607,7 +1607,6 @@
   "settings_openresearch_sign_out_title": "Wylogować się z OpenResearch?",
   "settings_openresearch_sign_out_description": "Do ponownego zalogowania ten komputer nie może uruchamiać, restartować ani zatrzymywać zasobów OpenResearch. Działające zasoby i naliczanie opłat będą kontynuowane.",
   "account_finish_browser": "Dokończ logowanie w przeglądarce…",
-  "account_local_to_app": "Konto jest lokalne dla tej aplikacji",
   "library_title": "Biblioteka",
   "library_connect": "Połącz alphaXiv",
   "library_connected": "Połączono z alphaXiv",
@@ -1637,5 +1636,14 @@
   "library_selected": "Wybrano: {count}",
   "library_open_alphaxiv": "Otwórz alphaXiv",
   "chat_resize_composer": "Zmień rozmiar pola wiadomości",
-  "chat_resize_composer_hint": "Przeciągnij, aby zmienić rozmiar. Kliknij dwukrotnie, aby przywrócić."
+  "chat_resize_composer_hint": "Przeciągnij, aby zmienić rozmiar. Kliknij dwukrotnie, aby przywrócić.",
+  "remote_machine_switcher": "Zmień komputer: {machine}",
+  "remote_machine_connected": "Połączono",
+  "remote_machine_connecting": "Łączenie…",
+  "remote_machine_disconnected": "Rozłączono",
+  "remote_agents_title": "Skonfiguruj agentów na {host}",
+  "remote_agents_description": "Na każdym komputerze trzeba zainstalować agentów i się zalogować. Skonfiguruj ich na {host}.",
+  "remote_claude_datacenter_title": "Unikaj subskrypcji Claude na adresach IP centrów danych",
+  "remote_claude_datacenter_description": "{host} używa adresu IP centrum danych {ip}. Korzystanie tu z subskrypcji Claude może spowodować oznaczenie konta przez Anthropic. Użyj klucza API lub kontynuuj na własne ryzyko.",
+  "remote_claude_datacenter_continue": "Kontynuuj mimo ryzyka"
 }

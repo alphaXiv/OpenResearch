@@ -1,3 +1,4 @@
+import { withWorkspaceMocks } from "./workspaceMocks.mjs";
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { createRequire } from "node:module";
@@ -17,7 +18,7 @@ function load(name, mocks = {}, exportName = name) {
   let cursor = 0;
   const exports = {};
   const react = {
-    ...React,
+    ...React, useContext: () => undefined,
     useState(initial) {
       const index = cursor++;
       if (!(index in state)) state[index] = typeof initial === "function" ? initial() : initial;
@@ -30,7 +31,7 @@ function load(name, mocks = {}, exportName = name) {
     },
     useEffect() {},
   };
-  new Function("require", "exports", compiled)((id) => {
+  new Function("require", "exports", compiled)(withWorkspaceMocks((id) => {
     if (id === "./EscapeScope") return { EscapeScope: "escape-scope" };
     if (id in mocks) return mocks[id];
     if (id === "react") return react;
@@ -38,7 +39,7 @@ function load(name, mocks = {}, exportName = name) {
     if (id === "../i18n") return { ltr: String, fmtNumber: String };
     if (id === "./ui") return { Button: "button", MenuItem: "button", IconButton: "button", Dialog: "dialog", DialogContent: "content", DialogTitle: "title", DialogFooter: "footer" };
     return require(id);
-  }, exports);
+  }), exports);
   return {
     ...exports,
     render(props) {
@@ -124,7 +125,7 @@ test("SSH saves retain optimistic concurrency and block Escape while saving", as
     "./CodeEditor": { CodeEditor: "editor" },
     "./ui": { Button: "button", IconButton: "button", DialogContent: "content", DialogTitle: "title", showAlert() {} },
   });
-  dialog.showSshConfigDialog(() => closed++);
+  dialog.showSshConfigDialog(dialogs, () => closed++);
   const render = () => dialog.render(dialogs.render()[0].props.children.props);
   assert.equal(action(render(), "common_save").props.disabled, true);
   elements(render()).find((element) => element.type === "editor").props.onChange("Host edited");
@@ -158,7 +159,7 @@ for (const trigger of ["Escape", "outside click", "cancel button"]) {
       "../dialog": dialogs,
       "./CodeEditor": { CodeEditor: "editor" },
     });
-    dialog.showSshConfigDialog(() => closed++);
+    dialog.showSshConfigDialog(dialogs, () => closed++);
     const render = () => dialog.render(dialogs.render()[0].props.children.props);
     elements(render()).find((element) => element.type === "editor").props.onChange("edited");
     const dismiss = () => {
@@ -234,4 +235,21 @@ test("local model setup reads current installation state and blocks dismissal wh
   await new Promise(setImmediate);
   assert.deepEqual(connected, ["connected-model"]);
   assert.equal(dialogs.render()[0].props.open, false);
+});
+
+test("returning to a workspace removes dismissed dialogs whose exit animation was hidden", async () => {
+  const dialogs = dialogHarness();
+  let complete;
+  dialogs.showCustomDialog({ component: "connect", props: {}, onConfirm: () => new Promise(resolve => { complete = resolve; }), onCancel: "close" });
+  let root = dialogs.render()[0];
+  root.props.children.props.confirm();
+  dialogs.render();
+  complete();
+  await new Promise(setImmediate);
+  assert.equal(dialogs.render()[0].props.open, false);
+  dialogs.showCustomDialog({ component: "keep-open", props: {}, onConfirm() {}, onCancel: "close" });
+  const restored = dialogs.reactivate();
+  assert.equal(restored.length, 1);
+  assert.equal(restored[0].props.children.type, "keep-open");
+  assert.equal(restored[0].props.open, true);
 });

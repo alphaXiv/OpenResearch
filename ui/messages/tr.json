@@ -1607,7 +1607,6 @@
   "settings_openresearch_sign_out_title": "OpenResearch'ten çıkış yapılsın mı?",
   "settings_openresearch_sign_out_description": "Yeniden giriş yapana kadar bu bilgisayar OpenResearch hesaplamasını başlatamaz, yeniden başlatamaz veya durduramaz. Çalışan hesaplama çalışmaya ve faturalandırmaya devam eder.",
   "account_finish_browser": "Girişi tarayıcınızda tamamlayın…",
-  "account_local_to_app": "Hesap bu uygulamaya özel",
   "library_title": "Kitaplık",
   "library_connect": "alphaXiv'i bağla",
   "library_connected": "alphaXiv'e bağlandı",
@@ -1637,5 +1636,14 @@
   "library_selected": "{count} seçildi",
   "library_open_alphaxiv": "alphaXiv'i aç",
   "chat_resize_composer": "Mesaj kutusunu yeniden boyutlandır",
-  "chat_resize_composer_hint": "Yeniden boyutlandırmak için sürükleyin. Sıfırlamak için çift tıklayın."
+  "chat_resize_composer_hint": "Yeniden boyutlandırmak için sürükleyin. Sıfırlamak için çift tıklayın.",
+  "remote_machine_switcher": "Makine değiştir: {machine}",
+  "remote_machine_connected": "Bağlı",
+  "remote_machine_connecting": "Bağlanıyor…",
+  "remote_machine_disconnected": "Bağlantı kesildi",
+  "remote_agents_title": "{host} üzerinde ajanları kurun",
+  "remote_agents_description": "Ajanlar her makinede ayrı ayrı yüklenmeli ve giriş yapılmalıdır. Bunları {host} üzerinde kurun.",
+  "remote_claude_datacenter_title": "Veri merkezi IP'lerinde Claude aboneliği kullanmayın",
+  "remote_claude_datacenter_description": "{host}, {ip} veri merkezi IP adresini kullanıyor. Burada Claude aboneliği kullanmak Anthropic'in hesabınızı işaretlemesine yol açabilir. Bunun yerine bir API anahtarı kullanın ya da riski göze alarak devam edin.",
+  "remote_claude_datacenter_continue": "Yine de devam et"
 }

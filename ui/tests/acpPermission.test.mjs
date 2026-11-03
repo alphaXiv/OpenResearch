@@ -5,13 +5,14 @@ import test from "node:test";
 import React from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 import ts from "typescript";
+import { workspaceDom } from "./workspaceMocks.mjs";
 
 const source = ts.createSourceFile("ChatPanel.tsx", readFileSync(new URL("../src/components/ChatPanel.tsx", import.meta.url), "utf8"), ts.ScriptTarget.Latest, true, ts.ScriptKind.TSX);
 const declaration = source.statements.find((node) => ts.isFunctionDeclaration(node) && node.name?.text === "PromptCard");
 assert.ok(declaration);
 const compiled = ts.transpileModule(declaration.getText(source), { compilerOptions: { module: ts.ModuleKind.CommonJS, jsx: ts.JsxEmit.ReactJSX } }).outputText;
-const makeCard = (useState = React.useState) => new Function("require", "useState", "m", "Button", "TriangleAlert", "inputString", "permissionActivityLabel", "Textarea", "PROMPT_HEAD_CLASS_NAME", "PROMPT_COLLAPSED_CLASS_NAME", "PROMPT_COLLAPSED_BODY_CLASS_NAME", "AnnotationsPopover", "HelpCircle", "IconButton", "X", "Pencil", "Check", "ChevronRight", `const exports = {}; ${compiled}; return PromptCard;`)(
-  createRequire(import.meta.url), useState,
+const makeCard = (useState = React.useState) => new Function("require", "useState", "useContext", "WorkspaceDomContext", "m", "Button", "TriangleAlert", "inputString", "permissionActivityLabel", "Textarea", "PROMPT_HEAD_CLASS_NAME", "PROMPT_COLLAPSED_CLASS_NAME", "PROMPT_COLLAPSED_BODY_CLASS_NAME", "AnnotationsPopover", "HelpCircle", "IconButton", "X", "Pencil", "Check", "ChevronRight", `const exports = {}; ${compiled}; return PromptCard;`)(
+  createRequire(import.meta.url), useState, () => workspaceDom, {},
   new Proxy({}, { get: (_, name) => () => String(name) }),
   ({ children, size, variant, ...props }) => React.createElement("button", props, children),
   () => null, () => "", () => "Native tool",

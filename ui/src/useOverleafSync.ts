@@ -1,3 +1,4 @@
+import { useWorkspace } from "./workspace";
 // The Overleaf side of a .tex tab: which Overleaf project this paper belongs to,
 // and keeping the two copies in step. Split out of FileViewer for the same
 // reason useLatexCompile was — the component already carries three file
@@ -14,31 +15,9 @@
 // for conflicts, and for whenever the live channel is down.
 
 import { useQuery } from "@tanstack/react-query";
-import {
-  isCurrentScope,
-  queryClient,
-} from "./queries/client";
-
-import { getOverleafStateQuery, getOverleafStatusQuery } from "./queries/files";
 
 import { useCallback, useMemo, useEffect, useRef, useState } from "react";
-import {
-  importOverleafSession,
-  linkOverleaf,
-  overleafUploadUrl,
-  saveOverleafSession,
-  saveOverleafToken,
-  startOverleafLive,
-  stopOverleafLive,
-  syncOverleaf,
-  unlinkOverleaf,
-  type OverleafLink,
-  type OverleafLiveStatus,
-  type OverleafResolution,
-  type OverleafState,
-  type OverleafSyncResult,
-} from "./api";
-import { onOverleafEvent } from "./events";
+import { type OverleafLink, type OverleafLiveStatus, type OverleafResolution, type OverleafState, type OverleafSyncResult } from "./api";
 
 /** How often a linked paper asks whether Overleaf has moved. The question is
  * one request that transfers nothing; a clone follows only when it has. */
@@ -117,6 +96,21 @@ export function useOverleafSync({
   /** A sync wrote these files; the viewer reloads when its own is among them. */
   onPulled: (paths: string[]) => void;
 }): OverleafSync {
+  const { getOverleafStateQuery, getOverleafStatusQuery } = useWorkspace().queries;
+  const { isCurrentScope, queryClient } = useWorkspace();
+  const {
+    syncOverleaf,
+    startOverleafLive,
+    stopOverleafLive,
+    overleafUploadUrl,
+    saveOverleafToken,
+    saveOverleafSession,
+    importOverleafSession,
+    linkOverleaf,
+    unlinkOverleaf,
+  } = useWorkspace().api;
+  const { onOverleafEvent } = useWorkspace().events;
+
   const options = useMemo(() => getOverleafStateQuery(projectId, filePath, { sessionId }), [projectId, filePath, sessionId]);
   const stateQuery = useQuery({ ...options, enabled, subscribed: enabled });
   const hasToken = stateQuery.data?.hasToken ?? false;

@@ -1,3 +1,4 @@
+import { withWorkspaceMocks } from "./workspaceMocks.mjs";
 import { queryModules } from "./queryModules.mjs";
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
@@ -11,11 +12,14 @@ function load(name, dependencies) {
     compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022 },
   }).outputText;
   const exports = {};
-  new Function("require", "exports", "window", code)((id) => {
+  new Function("require", "exports", "window", code)(withWorkspaceMocks((id) => {
     if (id in dependencies) return dependencies[id];
     if (id.startsWith("./queries/")) return queries.load(id.slice("./queries/".length));
     throw new Error(`Unexpected dependency: ${id}`);
-  }, exports, { addEventListener() {}, removeEventListener() {} });
+  }), exports, { addEventListener() {}, removeEventListener() {} });
+  if (exports.createProjectPersistence) Object.assign(exports, exports.createProjectPersistence(queries.load("client"), dependencies["./api"], queries.load("projects")));
+  if (exports.createGlobalPersistence) Object.assign(exports, exports.createGlobalPersistence(queries.load("client"), dependencies["./api"], queries.load("projects")));
+  exports.dispose = queries.load("client").replaceWorkspace;
   return exports;
 }
 const demo = { DEMO_MAIN_SESSION_ID: "demo-main", DEMO_FIGURE_SESSION_ID: "demo-figures", DEMO_LITERATURE_SESSION_ID: "demo-literature" };
@@ -217,7 +221,7 @@ test("changing runtimes drops queued writes from the previous database", async (
   await app.flush();
   app.navigate("p", "one", file); await app.flush();
   assert.equal(writes.length, 1);
-  app.hook.clearProjectWorkspaceCache();
+  app.hook.dispose();
   first.resolve(); await app.flush();
   assert.equal(writes.length, 1);
   assert.equal(app.hook.getCachedProjectWorkspace("p"), undefined);

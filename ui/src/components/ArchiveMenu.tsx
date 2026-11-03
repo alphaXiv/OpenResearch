@@ -1,5 +1,7 @@
-import { showConfirmDialog } from "../dialog";
-import { useId, useState } from "react";
+import { useContext, useId, useState } from "react";
+import { WorkspaceDomContext } from "../WorkspaceDom";
+import { useWorkspace } from "../workspace";
+
 import { DirectionProvider } from "@base-ui/react/direction-provider";
 import { Menu } from "@base-ui/react/menu";
 import { Ellipsis } from "lucide-react";
@@ -73,6 +75,10 @@ export function ArchiveMenu({ id, name, actions, onArchive, onDelete, compact = 
   onDelete: (id: string) => void | Promise<void>;
   compact?: boolean;
 }) {
+  const { portalContainer } = useContext(WorkspaceDomContext);
+
+  const { showConfirmDialog } = useWorkspace().dialogs;
+
   const [open, setOpen] = useState(false);
   const triggerId = useId();
 
@@ -92,7 +98,7 @@ export function ArchiveMenu({ id, name, actions, onArchive, onDelete, compact = 
           >
             {compact ? <Ellipsis size={16} aria-hidden="true" /> : m.tree_archive_manage()}
           </Menu.Trigger>
-          <Menu.Portal>
+          <Menu.Portal container={portalContainer}>
             <Menu.Positioner className="z-70" positionMethod="fixed" align="end" sideOffset={4} collisionPadding={4}>
               <Menu.Popup className="outline-none max-h-(--available-height) overflow-y-auto option-menu min-w-44 rounded-lg border border-border bg-background p-1.5 shadow-menu">
                 {actions.archiveAbove && <Menu.Item nativeButton render={<MenuItem className="data-highlighted:bg-surface" />} onClick={() => onArchive(id, "ancestors", true)}>{m.tree_archive_above()}</Menu.Item>}

@@ -1,3 +1,4 @@
+import { withWorkspaceMocks } from "./workspaceMocks.mjs";
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { createRequire } from "node:module";
@@ -32,7 +33,7 @@ const mocks = {
 };
 const exports = {};
 new Function("require", "exports", compiled)(
-  (name) => mocks[name] ?? (name.startsWith(".") ? stub : require(name)),
+  withWorkspaceMocks((name) => mocks[name] ?? (name.startsWith(".") ? stub : require(name))),
   exports,
 );
 const renderMessage = (parts, id = "msg-1") => renderToStaticMarkup(React.createElement(exports.Message, {

@@ -243,13 +243,13 @@ importers:
         specifier: ^4.0.5
         version: 4.0.5
       react:
-        specifier: ^19.1.0
+        specifier: ^19.2.0
         version: 19.2.7
       react-diff-view:
         specifier: ^3.3.3
         version: 3.3.3(react@19.2.7)
       react-dom:
-        specifier: ^19.1.0
+        specifier: ^19.2.0
         version: 19.2.7(react@19.2.7)
       react-markdown:
         specifier: ^10.1.0
@@ -298,10 +298,10 @@ importers:
         specifier: ^4.0.3
         version: 4.0.3
       '@types/react':
-        specifier: ^19.1.0
+        specifier: ^19.2.0
         version: 19.2.17
       '@types/react-dom':
-        specifier: ^19.1.0
+        specifier: ^19.2.0
         version: 19.2.3(@types/react@19.2.17)
       '@vitejs/plugin-react':
         specifier: ^4.5.0

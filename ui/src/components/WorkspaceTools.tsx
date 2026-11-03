@@ -1,13 +1,14 @@
+import { useWorkspace } from "../workspace";
 import { EscapeScope } from "./EscapeScope";
 import { type ChatSession, type Experiment, type Run, runDisplayStatus, fmtNumber, timeAgo } from "../api";
 import { activeWorkspaceRuns } from "../workspaceRuns";
 import { statusLabel } from "./StatusBadge";
-import { getComputeSettingsQuery } from "../queries/settings";
+
 import { TARGET_LABELS } from "../computeTargets";
 import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { ChevronDown, ChevronRight, FlaskConical, HelpCircle, FolderOpen, Package, GitBranch, Cpu, MessagesSquare, Plus, Terminal } from "lucide-react";
 import { useQuery } from "@tanstack/react-query";
-import { getSessionWorktreeQuery } from "../queries/files";
+
 import { countChanges, parseDiffFiles } from "./GitDiff";
 import { m } from "../paraglide/messages.js";
 import { BackendLogo } from "./BackendLogos";
@@ -42,6 +43,8 @@ export function WorkspaceTools({ expanded, experiments, runs, onOpenExperiment, 
   onSelectSideChat: (sessionId: string) => void;
   onOpenDelegate: (sessionId: string) => void;
 }) {
+  const { getComputeSettingsQuery } = useWorkspace().queries;
+
   const experimentRows = activeWorkspaceRuns(experiments, runs, sessionId);
   const compute = useQuery({ ...getComputeSettingsQuery(projectId), enabled: expanded });
   const defaultBackend = compute.data?.configuredDefaultBackend ?? compute.data?.defaultBackend;
@@ -335,6 +338,8 @@ function SubagentLineage({ sessions, sessionId, onOpen }: { sessions: ChatSessio
 }
 
 function ChatBranch({ sessionId, busy, onChanges }: { sessionId: string; busy: boolean; onChanges: () => void }) {
+  const { getSessionWorktreeQuery } = useWorkspace().queries;
+
   const worktree = useQuery({ ...getSessionWorktreeQuery(sessionId), refetchInterval: busy ? 5_000 : false });
   const wasBusy = useRef(busy);
   const { refetch } = worktree;

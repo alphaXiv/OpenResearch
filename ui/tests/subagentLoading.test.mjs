@@ -1,3 +1,4 @@
+import { mockWorkspace } from "./workspaceMocks.mjs";
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import test from "node:test";
@@ -5,8 +6,9 @@ import ts from "typescript";
 
 const file = ts.createSourceFile("SubagentTab.tsx", readFileSync(new URL("../src/components/SubagentTab.tsx", import.meta.url), "utf8"), ts.ScriptTarget.Latest, true, ts.ScriptKind.TSX);
 function evaluate(code, bindings) {
+  bindings = { ...bindings, useWorkspace: () => mockWorkspace(bindings) };
   const js = ts.transpileModule(code, { compilerOptions: { target: ts.ScriptTarget.ES2022 } }).outputText;
-  return new Function(...Object.keys(bindings), js)(...Object.values(bindings));
+  return new Function(...Object.keys(bindings), "return (() => {" + js + "})();")(...Object.values(bindings));
 }
 
 test("a transcript that finishes loading after its messages attaches its growth observer", () => {

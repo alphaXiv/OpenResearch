@@ -1,3 +1,5 @@
+import { WorkspaceDomContext } from "../WorkspaceDom";
+import { useWorkspace } from "../workspace";
 import { DirectionProvider } from "@base-ui/react/direction-provider";
 import { Menu } from "@base-ui/react/menu";
 import { useQuery } from "@tanstack/react-query";
@@ -8,7 +10,7 @@ import { GLOB_CHARS, resolveFileReference } from "../fileReferences";
 import { splitMentionPath } from "../fileMentions";
 import { isWindowsDrivePath, splitLineSuffix } from "../markdownTarget";
 import { m } from "../paraglide/messages.js";
-import { getCodeTreeQuery, getProjectFileQuery } from "../queries/files";
+
 import { tabOpenGestureHandlers, type TabOpenIntent } from "../tabPreview";
 import { MenuItem } from "./ui";
 
@@ -55,6 +57,8 @@ function FileChoices({ label, paths, total, line, onOpenFile }: {
   line?: number;
   onOpenFile: OpenFile;
 }) {
+  const { portalContainer } = useContext(WorkspaceDomContext);
+
   const title = m.md_pick_file({ path: ltr(label) });
   return (
     <DirectionProvider direction={document.documentElement.dir === "rtl" ? "rtl" : "ltr"}>
@@ -64,7 +68,7 @@ function FileChoices({ label, paths, total, line, onOpenFile }: {
           <span className="file-chip-label">{label}</span>
           <ChevronDown size={12} />
         </Menu.Trigger>
-        <Menu.Portal>
+        <Menu.Portal container={portalContainer}>
           <Menu.Positioner className="z-50" positionMethod="fixed" align="start" sideOffset={4} collisionPadding={8}>
             <Menu.Popup aria-label={title} className="outline-none max-h-(--available-height) overflow-y-auto min-w-48 max-w-[min(32rem,calc(100vw-2rem))] rounded-lg border border-border bg-background p-1.5 shadow-menu">
               {paths.map((path) => {
@@ -110,6 +114,8 @@ export function FileReference({ path, line, exp, optimistic, fallback, onOpenFil
   fallback: ReactNode;
   onOpenFile: OpenFile;
 }) {
+  const { getCodeTreeQuery, getProjectFileQuery } = useWorkspace().queries;
+
   const scope = useContext(FileScopeContext);
   // An experiment's file lives on its own branch, which this listing does not cover.
   const checkable = scope != null && exp == null && isRepoRelative(path);

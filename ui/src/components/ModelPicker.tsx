@@ -1,13 +1,26 @@
+import {
+  useContext,
+  useEffect,
+  useLayoutEffect,
+  useMemo,
+  useRef,
+  useState,
+  type ButtonHTMLAttributes,
+  type ReactNode,
+  type RefObject,
+} from "react";
+import { WorkspaceDomContext } from "../WorkspaceDom";
+import { useWorkspace } from "../workspace";
 import { EscapeScope } from "./EscapeScope";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { Menu } from "@base-ui/react/menu";
 import { Popover } from "@base-ui/react/popover";
 import { DirectionProvider } from "@base-ui/react/direction-provider";
-import { getHarnessesQuery } from "../queries/settings";
+
 import { m } from "../paraglide/messages.js";
 import { ltr } from "../i18n";
 import { CircleAlert, Check, ChevronDown, ChevronRight, Plus, Settings, Zap } from "lucide-react";
-import { useEffect, useLayoutEffect, useMemo, useRef, useState, type ButtonHTMLAttributes, type ReactNode, type RefObject } from "react";
+
 import {
   fmtNumber,
   harnessModelLabel,
@@ -32,7 +45,7 @@ import { IconButton, MenuItem, SwitchIndicator, Tooltip } from "./ui";
 import { cn } from "./ui/cn";
 
 import { LocalModelDialog } from "./LocalModelSetup";
-import { showCustomDialog } from "../dialog";
+
 import { formatCodexModel, groupModels, resolveHarnessDefaultModel } from "../modelSelection";
 
 const MODEL_GROUP_CLASS_NAME = [
@@ -112,6 +125,8 @@ function SettingsSubmenu({
   defaultId?: string | null;
   onSelect: (id: string) => void;
 }) {
+  const { portalContainer } = useContext(WorkspaceDomContext);
+
   const [open, setOpen] = useState(false);
 
   return (
@@ -121,7 +136,7 @@ function SettingsSubmenu({
         <span className="ms-auto max-w-36 truncate text-muted">{detail}</span>
         <ChevronRight size={14} aria-hidden="true" className="shrink-0 text-muted rtl:rotate-180" />
       </Menu.SubmenuTrigger>
-      <Menu.Portal>
+      <Menu.Portal container={portalContainer}>
         <Menu.Positioner className="z-50" alignOffset={-6} collisionPadding={8} positionMethod="fixed">
           <Menu.Popup
             aria-label={label}
@@ -213,6 +228,12 @@ export function ModelPicker({
   onSelectNativeOption?: (optionId: string, value: string) => void;
   onStartHarness?: (harness: Harness) => void;
 }) {
+  const { portalContainer } = useContext(WorkspaceDomContext);
+
+  const { showCustomDialog } = useWorkspace().dialogs;
+
+  const { getHarnessesQuery } = useWorkspace().queries;
+
   const { data: catalog = EMPTY_HARNESSES } = useQuery(getHarnessesQuery());
   const harnesses = useMemo(
     () => (sessionHarness ? [sessionHarness, ...catalog.filter((h) => h.id !== sessionHarness.id)] : catalog),
@@ -392,7 +413,7 @@ export function ModelPicker({
               <ChevronDown size={14} className="shrink-0 text-muted" />
             </Popover.Trigger>
           </Tooltip>
-          <Popover.Portal>
+          <Popover.Portal container={portalContainer}>
             <Popover.Positioner
               className="z-50"
               side="top"
@@ -507,7 +528,7 @@ export function ModelPicker({
                                 <span>{m.model_picker_legacy()}</span>
                                 <ChevronRight size={14} aria-hidden="true" className="text-muted rtl:rotate-180" />
                               </Menu.Trigger>
-                              <Menu.Portal>
+                              <Menu.Portal container={portalContainer}>
                                 <Menu.Positioner side="right" align="start" sideOffset={4} collisionPadding={8} className="z-50">
                                   <Menu.Popup onKeyDown={(event) => { if (event.key !== "Escape") event.stopPropagation(); }} aria-label={m.model_picker_legacy()} className="max-h-80 overflow-y-auto rounded-lg border border-border bg-background p-1.5 shadow-dropdown outline-none">
                                     {legacy.map((model) => (
@@ -628,7 +649,7 @@ export function ModelPicker({
               {reasoningLabel ? <span>{reasoningLabel}</span> : <Settings size={14} aria-hidden="true" />}
               <ChevronDown size={14} className="shrink-0" />
             </Menu.Trigger>
-            <Menu.Portal>
+            <Menu.Portal container={portalContainer}>
               <Menu.Positioner
                 className="z-50"
                 side="top"

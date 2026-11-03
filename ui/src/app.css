@@ -465,9 +465,11 @@
 }
 
 @media (max-width: 767px) {
+  :root { --workspace-mobile-nav-height: 64px; }
   html, body, #root { height: 100dvh; }
   .app { padding-top: env(safe-area-inset-top); }
-  .workspace-body.has-workspace-tools { padding-bottom: calc(64px + env(safe-area-inset-bottom)); }
+  .workspace-body.has-workspace-tools { padding-bottom: calc(var(--workspace-mobile-nav-height) + env(safe-area-inset-bottom)); }
+  .workspace-body.has-workspace-tools .workspace-connection-corner { bottom: calc(var(--workspace-mobile-nav-height) + env(safe-area-inset-bottom)); }
   .workspace-body > .chat-pane .chat-header { padding-inline: 8px; }
   .chat-heading-row { grid-template-columns: 48px minmax(0, 1fr) 0; }
   :root:not(.mac-titlebar) .sidebar-toggle > .icon-btn { width: 44px; height: 44px; }
@@ -480,7 +482,7 @@
     inset-inline: 0;
     bottom: 0;
     z-index: 65;
-    min-height: 64px;
+    min-height: var(--workspace-mobile-nav-height);
     padding: 4px 8px calc(4px + env(safe-area-inset-bottom));
     border-top: 1px solid var(--border);
     background: var(--base);
@@ -507,7 +509,7 @@
   .session-rail .rail-nav-item { min-height: 44px; }
   .workspace-body .right-pane, .workspace-body .right-pane.max {
     position: fixed;
-    inset: env(safe-area-inset-top) 0 calc(64px + env(safe-area-inset-bottom));
+    inset: env(safe-area-inset-top) 0 calc(var(--workspace-mobile-nav-height) + env(safe-area-inset-bottom));
     width: 100%;
     border: 0;
     z-index: 60;

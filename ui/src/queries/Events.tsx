@@ -1,30 +1,12 @@
+import { useWorkspace } from "../workspace";
 import type { InfiniteData } from "@tanstack/react-query";
 import type { ChatSession, SidebarChatPage } from "../api";
 import { markLiveUpdate } from "./live";
-import {
-  refreshHarness,
-  refreshHarnesses,
-  getHarnessesQuery,
-  getUpdateStatusQuery,
-} from "./settings";
-import { dispatchChat } from "./chatStore";
+
 import { inputSummaryChanged } from "./chatState";
 import { useEffect, useMemo } from "react";
-import {
-  emitEntity,
-  onDataDirMove,
-  onProjectActivityEvent,
-  onChatEvent,
-  onHarnessAuth,
-  onHarnessCatalog,
-  onUpdateStatus,
-  useOrxEventStream,
-} from "../events";
-import { queryClient, workspaceScope, isCurrentScope, deletedSessionIds } from "./client";
-import { listProjectsQuery, listRunsQuery, listExperimentsQuery } from "./projects";
-import { listChatSessionsQuery } from "./chat";
 
-import { artifactFamilies, liveFamilies, invalidateFamilies, removeSession } from "./invalidation";
+import { artifactFamilies, liveFamilies } from "./invalidation";
 
 function upsert<T extends { id: string; updatedAt: number }>(rows: T[] | undefined, next: T) {
   if (!rows) return undefined;
@@ -34,6 +16,30 @@ function upsert<T extends { id: string; updatedAt: number }>(rows: T[] | undefin
 }
 
 export function QueryEvents() {
+  const { workspaceScope, isCurrentScope, queryClient, deletedSessionIds } = useWorkspace();
+  const { invalidateFamilies, removeSession } = useWorkspace().invalidation;
+  const {
+    useOrxEventStream,
+    emitEntity,
+    onProjectActivityEvent,
+    onDataDirMove,
+    onChatEvent,
+    onHarnessAuth,
+    onHarnessCatalog,
+    onUpdateStatus,
+  } = useWorkspace().events;
+  const {
+    listRunsQuery,
+    listExperimentsQuery,
+    listProjectsQuery,
+    listChatSessionsQuery,
+    refreshHarnesses,
+    refreshHarness,
+    getHarnessesQuery,
+    getUpdateStatusQuery,
+  } = useWorkspace().queries;
+  const { dispatchChat } = useWorkspace().chat;
+
   const scope = workspaceScope();
   const sessionExperiments = useMemo(() => {
     let timer: ReturnType<typeof setTimeout> | undefined;

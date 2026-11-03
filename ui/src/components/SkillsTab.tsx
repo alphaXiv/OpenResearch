@@ -1,25 +1,12 @@
-import { showConfirmDialog, showCustomDialog, type DialogContentProps } from "../dialog";
+import { useWorkspace } from "../workspace";
+import { type DialogContentProps } from "../dialog";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 
-import { listUserSkillsQuery, listLatexTemplatesQuery } from "../queries/settings";
 import { m } from "../paraglide/messages.js";
 import { ltr } from "../i18n";
 import { Pencil, RefreshCw, Trash2, Upload, X } from "lucide-react";
 import { useCallback, useId, useLayoutEffect, useRef, useState, type ReactNode } from "react";
-import {
-  deleteLatexTemplate,
-  deleteUserSkill,
-  fmtBytes,
-  fmtNumber,
-  getUserSkillContent,
-  timeAgo,
-  updateUserSkill,
-  uploadLatexTemplate,
-  uploadUserSkill,
-  type LatexTemplate,
-  type UserSkill,
-  type SkillDiscovery,
-} from "../api";
+import { fmtBytes, fmtNumber, timeAgo, type LatexTemplate, type UserSkill, type SkillDiscovery } from "../api";
 import { Badge, Button, DialogContent, DialogTitle, IconButton, Spinner, Textarea, showAlert } from "./ui";
 import { copyToClipboard } from "../clipboard";
 
@@ -154,6 +141,8 @@ function EditSkillDialog({
   content: string;
   beforeCancel: { current: () => Promise<void> };
 }) {
+  const { showConfirmDialog } = useWorkspace().dialogs;
+
   const [value, setValue] = useState(content);
   const editorId = useId();
   const editorRef = useRef<HTMLTextAreaElement>(null);
@@ -221,6 +210,11 @@ function SkillRow({
 }: {
   skill: UserSkill;
 }) {
+  const { showCustomDialog, showConfirmDialog } = useWorkspace().dialogs;
+
+  const { deleteUserSkill, getUserSkillContent, updateUserSkill } = useWorkspace().api;
+  const { listUserSkillsQuery } = useWorkspace().queries;
+
   const deleteUserSkillMutation = useMutation({ mutationFn: deleteUserSkill });
   const queryClient = useQueryClient();
   const [loading, setLoading] = useState(false);
@@ -294,6 +288,10 @@ function LatexTemplateRow({
 }: {
   template: LatexTemplate;
 }) {
+  const { showConfirmDialog } = useWorkspace().dialogs;
+
+  const { deleteLatexTemplate } = useWorkspace().api;
+
   const deleteLatexTemplateMutation = useMutation({ mutationFn: deleteLatexTemplate });
 
   const busy = deleteLatexTemplateMutation.isPending;
@@ -350,6 +348,9 @@ function SkillDetectionDetails({ reports }: { reports: SkillDiscovery[] }) {
 /** Everything the agent can invoke with `/name`: skills uploaded here, and the
  * ones already installed in the user's coding agents, mirrored automatically. */
 function SkillsCard() {
+  const { uploadUserSkill } = useWorkspace().api;
+  const { listUserSkillsQuery } = useWorkspace().queries;
+
   const uploadUserSkillMutation = useMutation({ mutationFn: uploadUserSkill });
 
   const skillsQuery = useQuery(listUserSkillsQuery());
@@ -469,6 +470,9 @@ function SkillsCard() {
 /** LaTeX templates the `orx-paper` skill follows instead of its built-in
  * preamble — a conference class, a lab style. */
 function LatexTemplatesCard() {
+  const { uploadLatexTemplate } = useWorkspace().api;
+  const { listLatexTemplatesQuery } = useWorkspace().queries;
+
   const uploadLatexTemplateMutation = useMutation({ mutationFn: uploadLatexTemplate });
 
   const templatesQuery = useQuery(listLatexTemplatesQuery());

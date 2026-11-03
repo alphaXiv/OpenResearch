@@ -1,10 +1,10 @@
+import { useWorkspace } from "../workspace";
 import type { DialogContentProps } from "../dialog";
 import { useEffect, useRef, useState } from "react";
 import { useQuery } from "@tanstack/react-query";
 import { Terminal } from "lucide-react";
-import { setEnvVar, type Harness } from "../api";
-import { getEnvVarsQuery, refreshHarnesses } from "../queries/settings";
-import { queryClient } from "../queries/client";
+import { type Harness } from "../api";
+
 import { m } from "../paraglide/messages.js";
 import { HarnessLogo } from "./HarnessLogo";
 import { CommandTerminal } from "./SshConnectTerminal";
@@ -15,6 +15,10 @@ export function AcpAuthDialog({ harness, remote = false, onReady, cancel, isDisa
   remote?: boolean;
   onReady?: (harness: Harness) => void;
 }) {
+  const { getEnvVarsQuery, refreshHarnesses } = useWorkspace().queries;
+  const { setEnvVar } = useWorkspace().api;
+  const { queryClient } = useWorkspace();
+
   const cancelled = useRef(false);
   if (isDisabled) cancelled.current = true;
   const [value, setValue] = useState("");

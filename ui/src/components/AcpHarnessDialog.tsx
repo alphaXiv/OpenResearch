@@ -1,8 +1,11 @@
+import { useContext, useEffect, useRef, useState } from "react";
+import { WorkspaceDomContext } from "../WorkspaceDom";
+import { useWorkspace } from "../workspace";
 import type { DialogContentProps } from "../dialog";
-import { useEffect, useRef, useState } from "react";
+
 import { useQuery } from "@tanstack/react-query";
-import { saveAcpHarness, testAcpHarness, listAcpPresets, type AcpDefinition } from "../api";
-import { workspaceKey } from "../queries/client";
+import { type AcpDefinition } from "../api";
+
 import { formatAcpCommand, parseAcpCommand, validAcpLaunch } from "../acp";
 import { m } from "../paraglide/messages.js";
 import { OptionPicker } from "./ModelPicker";
@@ -13,6 +16,11 @@ export function AcpHarnessDialog({ definition, customOnly = false, cancel, confi
   definition?: AcpDefinition;
   onSaved: (id: AcpDefinition["id"]) => void;
 }) {
+  const { id: elementId } = useContext(WorkspaceDomContext);
+
+  const { workspaceKey } = useWorkspace();
+  const { listAcpPresets, testAcpHarness, saveAcpHarness } = useWorkspace().api;
+
   const cancelled = useRef(false);
   if (isDisabled && !isPending) cancelled.current = true;
 
@@ -86,9 +94,9 @@ export function AcpHarnessDialog({ definition, customOnly = false, cancel, confi
         <div className={`flex flex-col gap-3${preset === "custom" ? "" : " mt-3"}`}>
         <label className="flex flex-col gap-1 text-sm text-subtext">{m.acp_name()}<Input value={name} onChange={(event) => setName(event.target.value)} /></label>
         <div className="flex flex-col gap-1">
-          <label className="flex flex-col gap-1 text-sm text-subtext">{m.acp_executable()}<Input placeholder="kimi acp" spellCheck={false} autoCapitalize="none" autoComplete="off" aria-describedby={invalidCommand ? "acp-command-error" : "acp-command-help"} aria-invalid={invalidCommand || undefined} value={command} onBlur={() => setCommandTouched(true)} onChange={(event) => { setCommand(event.target.value); setConnected(null); setError(null); }} /></label>
-          <div id="acp-command-help" className="text-sm leading-snug text-subtext">{m.acp_command_help()}</div>
-          {invalidCommand && <div id="acp-command-error" role="alert" className="text-sm text-accent-red">{m.acp_command_invalid()}</div>}
+          <label className="flex flex-col gap-1 text-sm text-subtext">{m.acp_executable()}<Input placeholder="kimi acp" spellCheck={false} autoCapitalize="none" autoComplete="off" aria-describedby={invalidCommand ? elementId("acp-command-error") : elementId("acp-command-help")} aria-invalid={invalidCommand || undefined} value={command} onBlur={() => setCommandTouched(true)} onChange={(event) => { setCommand(event.target.value); setConnected(null); setError(null); }} /></label>
+          <div id={elementId("acp-command-help")} className="text-sm leading-snug text-subtext">{m.acp_command_help()}</div>
+          {invalidCommand && <div id={elementId("acp-command-error")} role="alert" className="text-sm text-accent-red">{m.acp_command_invalid()}</div>}
         </div>
         </div>
         </details>}

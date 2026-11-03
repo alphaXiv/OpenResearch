@@ -1,15 +1,17 @@
+import { useContext, useRef, useState } from "react";
+import { WorkspaceDomContext } from "../WorkspaceDom";
+import { useMachines } from "../machineSelection";
 import { useMutation, useQuery } from "@tanstack/react-query";
 import { SlidersHorizontal, X } from "lucide-react";
-import { useRef, useState } from "react";
-import { createRemoteSession } from "../api";
+
 import type { DialogContentProps } from "../dialog";
 import { ltr } from "../i18n";
 import { m } from "../paraglide/messages.js";
 import { getLocale } from "../paraglide/runtime.js";
-import { getSshSettingsQuery, listRemoteSessionsQuery } from "../queries/settings";
+
 import { getThemePreference } from "../theme";
 import { ProgressBar } from "./ProgressBar";
-import { Button, DialogContent, DialogDescription, DialogTitle, IconButton, Input, showAlert, Spinner } from "./ui";
+import { Button, DialogContent, DialogDescription, DialogTitle, IconButton, Input, Spinner } from "./ui";
 
 export function RemoteHostDialog({
   confirm,
@@ -20,10 +22,16 @@ export function RemoteHostDialog({
 }: DialogContentProps<() => Promise<void>> & {
   onConfigureSsh: () => void;
 }) {
-  const createRemoteSessionMutation = useMutation({ mutationFn: (args: Parameters<typeof createRemoteSession>) => createRemoteSession(...args) });
+  const { id: elementId } = useContext(WorkspaceDomContext);
 
-  const hostsQuery = useQuery(getSshSettingsQuery());
-  const sessionsQuery = useQuery(listRemoteSessionsQuery());
+  const machines = useMachines();
+  const { createRemoteSession } = machines.owner.api;
+  const { getSshSettingsQuery, listRemoteSessionsQuery } = machines.owner.queries;
+
+  const createRemoteSessionMutation = useMutation({ mutationFn: (args: Parameters<typeof createRemoteSession>) => createRemoteSession(...args) }, machines.owner.queryClient);
+
+  const hostsQuery = useQuery(getSshSettingsQuery(), machines.owner.queryClient);
+  const sessionsQuery = useQuery(listRemoteSessionsQuery(), machines.owner.queryClient);
   const hosts = hostsQuery.data?.hosts ?? null;
   const sessions = sessionsQuery.data ?? [];
   const [query, setQuery] = useState("");
@@ -32,14 +40,6 @@ export function RemoteHostDialog({
   const searchRef = useRef<HTMLInputElement>(null);
 
   function openRemote(host: string) {
-    // The desktop app sends pop-ups to the system browser and returns no handle,
-    // so it opens the gateway once it exists instead of pre-opening a placeholder.
-    const inDesktopApp = "__ORX_DESKTOP__" in window;
-    const remoteWindow = inDesktopApp ? null : window.open("/remote-launch", "_blank");
-    if (!inDesktopApp && !remoteWindow) {
-      showAlert(m.remote_popup_blocked(), "error");
-      return;
-    }
     setOpeningHost(host);
     confirm(async () => {
       try {
@@ -47,11 +47,7 @@ export function RemoteHostDialog({
           theme: getThemePreference(),
           locale: getLocale(),
         }]);
-        if (remoteWindow) remoteWindow.location.replace(session.gatewayUrl);
-        else window.open(session.gatewayUrl, "_blank");
-      } catch (error) {
-        remoteWindow?.close();
-        throw error;
+        machines.selectRemote(session);
       } finally {
         setOpeningHost(null);
       }
@@ -66,13 +62,13 @@ export function RemoteHostDialog({
   return <DialogContent
       initialFocus={searchRef}
       className="relative flex h-[min(42rem,calc(100vh-2.5rem))] w-160 max-w-full flex-col overflow-hidden p-0"
-      aria-labelledby="remote-host-dialog-title"
+      aria-labelledby={elementId("remote-host-dialog-title")}
     >
       <IconButton className="absolute end-3.5 top-3.5" aria-label={m.remote_dialog_close()} onClick={cancel} disabled={isDisabled}>
         <X size={16} />
       </IconButton>
       <div className="shrink-0 px-6 pt-5 pb-4 pe-14">
-        <DialogTitle id="remote-host-dialog-title">{m.remote_dialog_title()}</DialogTitle>
+        <DialogTitle id={elementId("remote-host-dialog-title")}>{m.remote_dialog_title()}</DialogTitle>
         <DialogDescription className="mt-2 leading-normal">{m.remote_dialog_description()}</DialogDescription>
         <Input
           ref={searchRef}

@@ -1607,7 +1607,6 @@
   "settings_openresearch_sign_out_title": "OpenResearchからサインアウトしますか？",
   "settings_openresearch_sign_out_description": "再度ログインするまで、このコンピューターからOpenResearchの計算を開始、再起動、停止できません。実行中の計算と課金は続きます。",
   "account_finish_browser": "ブラウザーでログインを完了してください…",
-  "account_local_to_app": "アカウントはこのアプリのローカルアカウントです",
   "library_title": "ライブラリ",
   "library_connect": "alphaXivに接続",
   "library_connected": "alphaXivに接続済み",
@@ -1637,5 +1636,14 @@
   "library_selected": "{count} 件選択中",
   "library_open_alphaxiv": "alphaXiv を開く",
   "chat_resize_composer": "メッセージボックスのサイズを変更",
-  "chat_resize_composer_hint": "ドラッグしてサイズを変更します。ダブルクリックでリセットします。"
+  "chat_resize_composer_hint": "ドラッグしてサイズを変更します。ダブルクリックでリセットします。",
+  "remote_machine_switcher": "マシンを切り替え: {machine}",
+  "remote_machine_connected": "接続済み",
+  "remote_machine_connecting": "接続中…",
+  "remote_machine_disconnected": "未接続",
+  "remote_agents_title": "{host} のエージェントを設定",
+  "remote_agents_description": "各マシンでエージェントのインストールとサインインが必要です。{host} で設定してください。",
+  "remote_claude_datacenter_title": "データセンターの IP では Claude のサブスクリプションを避けてください",
+  "remote_claude_datacenter_description": "{host} はデータセンターの IP {ip} を使用しています。ここで Claude のサブスクリプションを使うと、Anthropic がアカウントにフラグを付ける可能性があります。API キーを使うか、リスクを理解して続行してください。",
+  "remote_claude_datacenter_continue": "リスクを理解して続行"
 }

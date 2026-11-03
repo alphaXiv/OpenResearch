@@ -1,10 +1,11 @@
+import { useContext, useState } from "react";
+import { WorkspaceDomContext } from "../WorkspaceDom";
+import { useWorkspace } from "../workspace";
 import { DirectionProvider } from "@base-ui/react/direction-provider";
 import { Popover } from "@base-ui/react/popover";
 import { formatForDisplay } from "@tanstack/react-hotkeys";
 import { PanelLeft } from "lucide-react";
-import { useState } from "react";
-import { applyUpdate } from "../api";
-import { showFormDialog } from "../dialog";
+
 import { appHotkeys } from "../hotkeys";
 import { ltr } from "../i18n";
 import { m } from "../paraglide/messages.js";
@@ -38,6 +39,11 @@ export function RailHeader({ onCollapse }: { onCollapse?: () => void }) {
 
 /** The logo and name, marked when this isn't a stable release; hovering shows the version and its update state. */
 function Brand() {
+  const { portalContainer } = useContext(WorkspaceDomContext);
+
+  const { applyUpdate } = useWorkspace().api;
+  const { showFormDialog } = useWorkspace().dialogs;
+
   const runtime = useRuntime();
   const { status, apply } = useUpdateStatus(runtime.kind === "local");
   const restart = useRestartApp(status);
@@ -81,7 +87,7 @@ function Brand() {
             <span className={`whitespace-nowrap ${badge ? "me-1.5" : ""}`}>OpenResearch</span>
           </span>
         </Popover.Trigger>
-        <Popover.Portal>
+        <Popover.Portal container={portalContainer}>
           <Popover.Positioner side="bottom" align="start" sideOffset={6} collisionPadding={8} className="z-50">
             <Popover.Popup aria-label="OpenResearch" className="w-max min-w-56 max-w-[calc(100vw-1rem)] rounded-lg border border-border bg-background p-3 text-sm text-text shadow-menu outline-none">
               <dl className="m-0 grid grid-cols-[auto_minmax(0,1fr)] items-center gap-x-4 gap-y-2">

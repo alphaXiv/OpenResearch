@@ -152,6 +152,10 @@ endpoints out of it. Other traffic:
   public key to their account so OpenResearch boxes accept their SSH: by
   default `~/.ssh/id_ed25519.pub`, creating the pair if it is missing. The
   private key never leaves the machine.
+- **Remote network check.** Setting up Claude Code asks `ipaddress.to` from the remote
+  machine for its public IP and hosting classification. Only the source IP
+  reaches that service; no account credentials or research data are sent.
+  The result is cached for five minutes and a failed lookup never blocks setup.
 - **Paper search.** Queries go to the public alphaXiv, OpenAlex, bioRxiv and
   PubMed APIs, without credentials.
 - **alphaXiv.** Sign-in is a browser trip to alphaXiv, whose identity token

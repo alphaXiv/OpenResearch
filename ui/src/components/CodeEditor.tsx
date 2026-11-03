@@ -150,6 +150,7 @@ export function CodeEditor({
       </div>
       <textarea
         ref={taRef}
+        aria-label={path}
         className={`file-view-editarea ${layerClassName} overflow-y-auto overflow-x-hidden resize-none border-0 bg-transparent text-transparent caret-text outline-none`}
         style={{ paddingInlineStart: `${codeCh}ch` }}
         value={value}

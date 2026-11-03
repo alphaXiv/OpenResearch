@@ -1,11 +1,10 @@
+import { useWorkspace } from "../workspace";
 import { useQuery } from "@tanstack/react-query";
 import { useNavigate, useRouteContext } from "@tanstack/react-router";
 import { useEffect, useRef } from "react";
 
-import { showCustomDialog } from "../dialog";
-import { seedComposer } from "../composerStash";
 import { m } from "../paraglide/messages.js";
-import { getUiStateQuery, listProjectsQuery, resolvePaperQuery } from "../queries/projects";
+
 import { useRuntime } from "../RemoteRuntime";
 import { RouteFailure, RoutePending } from "../routePages";
 import { NewProjectDialog } from "./ProjectsHome";
@@ -18,6 +17,11 @@ const ARXIV_ID = /^\d{4}\.\d{4,5}(v\d+)?$|\//;
 /** Where an `openresearch://reproduce` link lands: a new project for the paper,
  * confirmed by the user, whose first chat opens with a reproduce prompt. */
 export function ReproducePage({ paperId }: { paperId: string | null }) {
+  const { seedComposer } = useWorkspace().composers;
+  const { showCustomDialog } = useWorkspace().dialogs;
+
+  const { listProjectsQuery, getUiStateQuery, resolvePaperQuery } = useWorkspace().queries;
+
   const runtime = useRuntime();
   const navigate = useNavigate();
   const { queryClient } = useRouteContext({ from: "__root__" });
