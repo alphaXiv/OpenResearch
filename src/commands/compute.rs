@@ -275,9 +275,6 @@ pub struct ConfigureArgs {
 pub struct ConnectArgs {
     #[command(flatten)]
     check: CheckArgs,
-    /// Idle lifetime for a new SSH master, in seconds (default: 86400; 0 means indefinite).
-    #[arg(long)]
-    persist: Option<u64>,
 }
 
 #[derive(Debug, Args)]
@@ -467,23 +464,22 @@ async fn run_command(command: ComputeCommand, json_output: bool) -> Result<()> {
     }
     if let ComputeCommand::Connect(ref args) = command {
         validate_check(&args.check)?;
-        if args.persist.is_some()
-            && (!cfg!(unix) || !matches!(args.check.backend, Backend::Ssh | Backend::Slurm))
-        {
-            return Err(anyhow!("--persist requires SSH or Slurm on Unix."));
-        }
         if json_output {
             return Err(anyhow!(
                 "connect is interactive; use test --json for machine-readable checks."
             ));
         }
-        connect(&args.check, args.persist).await?;
+        if !matches!(args.check.backend, Backend::Ssh | Backend::Slurm) {
+            connect(&args.check).await?;
+        }
     }
     let is_check = matches!(
         command,
         ComputeCommand::Test(_) | ComputeCommand::Connect(_)
     );
     let value = match command {
+        ComputeCommand::Test(args) => check(&args, "test").await?,
+        ComputeCommand::Connect(ConnectArgs { check: args }) => check(&args, "connect").await?,
         ComputeCommand::Catalog(a) => return catalog(a, json_output).await,
         ComputeCommand::Status => settings::status().await?,
         ComputeCommand::Show { backend } => settings::show(backend.name()).await?,
@@ -496,16 +492,6 @@ async fn run_command(command: ComputeCommand, json_output: bool) -> Result<()> {
         ComputeCommand::Configure(args) => {
             let backend = args.backend.name();
             settings::configure(backend, (*args).body()?).await?
-        }
-        ComputeCommand::Test(args) | ComputeCommand::Connect(ConnectArgs { check: args, .. }) => {
-            settings::check(
-                args.backend.name(),
-                args.host,
-                args.container,
-                args.no_container,
-                args.address,
-            )
-            .await?
         }
         ComputeCommand::SshConfig { command } => match command {
             SshConfigCommand::Show => settings::read_ssh_config().await?,
@@ -551,6 +537,29 @@ async fn run_command(command: ComputeCommand, json_output: bool) -> Result<()> {
         ));
     }
     Ok(())
+}
+
+/// Checks run in the server, which owns SSH connections and relays their login prompts.
+async fn check(args: &CheckArgs, action: &str) -> Result<Value> {
+    let body = json!({"backend":args.backend.name(), "host":args.host, "container":args.container, "noContainer":args.no_container, "address":args.address});
+    let client = crate::plane::local_plane::ApiClient::discover().await?;
+    if action == "connect" && matches!(args.backend, Backend::Ssh | Backend::Slurm) {
+        use std::io::IsTerminal as _;
+        if !std::io::stdin().is_terminal() {
+            return Err(anyhow!("connect requires a terminal for login/MFA. Use configure with --credentials-file - for unattended credential setup."));
+        }
+        let prompt: crate::engine::transport::Prompt = std::sync::Arc::new(|question| {
+            Box::pin(async move { Ok(Some(secret_prompt(&question).await?)) })
+        });
+        return client.connect(body, prompt).await;
+    }
+    client
+        .json(
+            reqwest::Method::POST,
+            &format!("compute/{action}"),
+            Some(&body),
+        )
+        .await
 }
 
 fn validate_check(args: &CheckArgs) -> Result<()> {
@@ -619,74 +628,12 @@ fn instructions_write(path: &std::path::Path, content: &str, expected: &str) -> 
     instructions_read(path)
 }
 
-async fn connect(args: &CheckArgs, persist: Option<u64>) -> Result<()> {
+async fn connect(args: &CheckArgs) -> Result<()> {
     use std::io::IsTerminal;
     if !std::io::stdin().is_terminal() {
         return Err(anyhow!("connect requires a terminal for login/MFA. Use configure with --credentials-file - for unattended credential setup."));
     }
     match args.backend {
-        Backend::Ssh | Backend::Slurm => {
-            let host = match &args.host {
-                Some(host) => Some(host.clone()),
-                None => match args.backend {
-                    Backend::Ssh => crate::config::ssh_settings()?.default_host,
-                    _ => {
-                        crate::jobs::slurm::load_settings()?
-                            .unwrap_or_default()
-                            .host
-                    }
-                },
-            }
-            .ok_or_else(|| anyhow!("Pass --host or configure a default host."))?;
-            let target = crate::jobs::ssh::SshTarget::alias(&host);
-            #[cfg(unix)]
-            if !crate::jobs::ssh::service::healthy(&target).await {
-                let connection = crate::jobs::ssh::interactive_args(&target, persist, None).await?;
-                interactive_command("ssh", &connection.args).await?;
-                if let Some(warning) = crate::jobs::ssh::setup_connection_sharing(&target).await {
-                    eprintln!("orx: warning: {warning}");
-                }
-            }
-            #[cfg(windows)]
-            {
-                let _ = persist;
-                use crate::jobs::ssh::service;
-                let start = service::request(&target, json!({"op":"connect_start"})).await?;
-                let attempt = start["attempt"]
-                    .as_str()
-                    .ok_or_else(|| anyhow!("Missing SSH login attempt"))?;
-                let result = async {
-                    loop {
-                        let status = service::request(
-                            &target,
-                            json!({"op":"connect_status", "attempt":attempt}),
-                        )
-                        .await?;
-                        if status["done"] == true {
-                            if let Some(error) = status["error"].as_str() {
-                                return Err(anyhow!(error.to_owned()));
-                            }
-                            return Ok(());
-                        }
-                        if let Some(prompt) = status["prompt"].as_str() {
-                            let answer = secret_prompt(prompt).await?;
-                            service::request(
-                                &target,
-                                json!({"op":"connect_answer", "attempt":attempt, "answer":answer}),
-                            )
-                            .await?;
-                        }
-                        tokio::time::sleep(std::time::Duration::from_millis(150)).await;
-                    }
-                }
-                .await;
-                let _ =
-                    service::request(&target, json!({"op":"connect_cancel", "attempt":attempt}))
-                        .await;
-                result?;
-            }
-            crate::jobs::ssh::service::attach(&target).await?;
-        }
         Backend::Hf => {
             interactive_command("hf", &["auth".into(), "login".into()]).await?;
             use crate::jobs::huggingface::{resolve_token_with_source, TokenSource};
@@ -722,7 +669,7 @@ async fn connect(args: &CheckArgs, persist: Option<u64>) -> Result<()> {
                  Environment. Check them with `orx compute test vercel`."
             );
         }
-        Backend::Local | Backend::Ray | Backend::K8s => {}
+        Backend::Local | Backend::Ray | Backend::K8s | Backend::Ssh | Backend::Slurm => {}
     }
     Ok(())
 }

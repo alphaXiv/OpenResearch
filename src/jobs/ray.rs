@@ -92,7 +92,7 @@ pub fn resolve_address_with_source() -> (String, AddressSource) {
 
 // --- flavor → resources -----------------------------------------------------
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct RayResources {
     pub cpus: f64,
     pub gpus: f64,
@@ -240,10 +240,12 @@ pub async fn preflight(address: &str) -> Result<Option<String>> {
         .map(|s| s.to_string()))
 }
 
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct JobSubmission {
     pub entrypoint: String,
     pub submission_id: String,
     pub resources: RayResources,
+    #[serde(default)]
     pub env: HashMap<String, String>,
     pub metadata: HashMap<String, String>,
     pub working_dir: Option<String>,
@@ -393,10 +395,6 @@ pub async fn fetch_logs(address: &str, submission_id: &str) -> Result<String> {
     } else {
         Ok(res.text().await.unwrap_or_default())
     }
-}
-
-pub fn job_url(address: &str, submission_id: &str) -> String {
-    format!("{address}/#/jobs/{submission_id}")
 }
 
 #[cfg(test)]

@@ -1554,11 +1554,17 @@ mod tests {
     }
 
     #[test]
-    fn compute_skill_explains_opt_in_run_wakeups() {
+    fn compute_skill_explains_automatic_result_messages() {
         let md = sample_playbook();
         let compute = agent_skills::find("orx-compute", SkillSet::Local).unwrap();
         assert!(compute.content.contains("`orx exp wake <expId>`"));
-        assert!(compute.content.contains("Wake-up is opt-in"));
+        assert!(compute
+            .content
+            .contains("The launching chat is\nsubscribed automatically"));
+        assert!(compute
+            .content
+            .contains("Attention messages also arrive in this chat"));
+        assert!(!compute.content.contains("Wake-up is opt-in"));
         assert!(!md.contains("`orx exp wake <expId>`"));
         assert!(!md.contains("OpenResearch injects an `[orx]` message"));
     }

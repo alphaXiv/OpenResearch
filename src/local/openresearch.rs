@@ -1,56 +1,16 @@
-//! Local OpenResearch launch — provision an ephemeral org-billed box for this
-//! one run. Unlike `local/ssh.rs`, submit does NOT launch the payload: the box
-//! takes minutes to provision and has no SSH endpoint yet, so submit records
-//! the run as `starting` and the detached supervisor does the rest (wait for
-//! online, launch over ssh, and collect directly; remote supervision releases the box).
+//! OpenResearch launch intents: an ephemeral org-billed box for one run. The engine
+//! provisions it at launch; the legacy loop waits for it, runs the payload over SSH, collects
+//! the log, and releases the box.
 
-use crate::client::{create_sandbox, list_orgs, CreateSandboxBody};
-use crate::commands::exp::spawn_detached_supervise;
-use crate::compute::SourceSnapshot;
-use crate::error::{anyhow, require_credentials, Result};
-use crate::jobs::{openresearch, BackendDescriptor};
+use crate::client::list_orgs;
+use crate::error::{anyhow, Result};
+use crate::jobs::openresearch;
 use crate::local::ssh_identity;
-use crate::store::{now_ms, Store, StoredRun};
+use crate::store::LaunchSpec;
 
-/// CLI wrapper around `submit_local_openresearch`: submit, then print the
-/// summary (price is best-effort — it needs one extra API read).
-pub async fn launch_local_openresearch(args: &crate::ExpRunArgs) -> Result<()> {
-    let run = submit_local_openresearch(args).await?;
-    let backend = BackendDescriptor::parse(&run.backend_json)?;
-    let sandbox_id = backend.job_id.as_deref().unwrap_or("");
-    println!("\u{2713} OpenResearch box requested.");
-    println!("  flavor  {}", backend.flavor.as_deref().unwrap_or(""));
-    println!("  box     {}", sandbox_id);
-    if let Ok(Some(creds)) = crate::config::load_credentials().await {
-        if let Ok(envelope) = crate::client::get_sandbox(&creds, sandbox_id).await {
-            if let Some(price) = envelope.sandbox.price_per_hour {
-                println!(
-                    "  price   ${price:.2}/hr (includes up to 60 seconds of final collection)"
-                );
-            }
-        }
-    }
-    println!("  run     {}", run.id);
-    println!("  The box is provisioning; the supervisor launches the run once it's online.");
-    println!(
-        "{}",
-        crate::invocation::follow_up(&run.experiment_id, &run.id)
-    );
-    Ok(())
-}
-
-/// Provision a fresh box for the local experiment's run and detach a
-/// supervisor. Requires `--backend openresearch` and `--flavor <shape>`
-/// (`h100_sxm[:count]` or `cpu5c|cpu5g|cpu5m[:vcpus]`), plus `orx login`.
-pub async fn submit_local_openresearch(args: &crate::ExpRunArgs) -> Result<StoredRun> {
-    crate::compute::submit(args).await
-}
-
-pub async fn submit_local_openresearch_with_source(
-    args: &crate::ExpRunArgs,
-    source: SourceSnapshot,
-    run_id: String,
-) -> Result<StoredRun> {
+/// Requires `--flavor <shape>` (`h100_sxm[:count]` or `cpu5c|cpu5g|cpu5m[:vcpus]`) and
+/// `orx login`. The box is provisioned by the engine at launch.
+pub async fn launch_spec(args: &crate::ExpRunArgs) -> Result<LaunchSpec> {
     if args.host.is_some() {
         return Err(anyhow!(
             "--host doesn't apply to --backend openresearch — the box is provisioned \
@@ -73,16 +33,16 @@ pub async fn submit_local_openresearch_with_source(
              or a CPU flavor like cpu5c[:vcpus]. See `orx compute` for the catalog."
         )
     })?;
-    let target =
-        openresearch::parse_flavor(&flavor, args.disk.unwrap_or(100), args.provider.clone())?;
-    // Enforced later (the supervisor wraps the payload) — parsed now so a
-    // typo fails before any billing starts. Same 4h default as hf/modal.
-    let timeout_secs = match &args.timeout {
+    // Parsed now so a typo fails before any billing starts.
+    openresearch::parse_flavor(&flavor, args.disk.unwrap_or(100), args.provider.clone())?;
+    let timeout_seconds = match &args.timeout {
         Some(t) => crate::jobs::huggingface::parse_timeout(t)?,
         None => 4 * 3600,
     };
 
-    let creds = require_credentials().await;
+    let creds = crate::config::load_credentials()
+        .await?
+        .ok_or_else(|| anyhow!("OpenResearch requires `orx login`."))?;
 
     // Which org pays for the box.
     let org_id = match &args.org {
@@ -138,123 +98,21 @@ pub async fn submit_local_openresearch_with_source(
         }
     }
 
-    let store = Store::open()?;
-    let exp = store
-        .get_local_experiment(&args.exp_id)?
-        .ok_or_else(|| anyhow!("Local experiment {} not found.", args.exp_id))?;
-    let project = store
-        .get_local_project(&exp.project_id)?
-        .ok_or_else(|| anyhow!("Local project {} not found.", exp.project_id))?;
-    if let Some(w) = crate::local::experiments::legacy_root_warning(&project, &exp) {
-        eprintln!("{w}");
-    }
-    let run_command = Some(exp.run_command.clone())
-        .filter(|c| !c.trim().is_empty())
-        .or_else(|| project.run_command.clone().filter(|c| !c.trim().is_empty()))
-        .ok_or_else(|| anyhow!("{}", crate::invocation::no_run_command(&project.id)))?;
-
-    let created = create_sandbox(
-        &creds,
-        &CreateSandboxBody {
-            organization_id: org_id.clone(),
-            target,
-            rental_lease: Some(crate::client::CreateRentalLease {
-                version: 1,
-                max_active_seconds: timeout_secs,
-            }),
-        },
-    )
-    .await
-    .map_err(billing_friendly)?;
-    let sandbox = created.sandbox;
-    let capability = match created.rental_lease.filter(|lease| lease.version == 1) {
-        Some(capability) => capability,
-        None => {
-            let _ = openresearch::teardown(&creds, &sandbox.id).await;
-            return Err(anyhow!("The server does not support rental supervision; update the service before launching."));
-        }
-    };
-    let rental = crate::jobs::rental::Rental {
-        api_url: creds.api_url.clone(),
-        sandbox_id: sandbox.id.clone(),
-        token: capability.token,
-    };
-
-    let mut descriptor = BackendDescriptor {
-        ssh_container: None,
-        monitoring_error: None,
-        cancellation_accepted: false,
-        rental_lease: Some(rental),
-        kind: "openresearch_job".to_string(),
-        namespace: Some(org_id),
-        job_id: Some(sandbox.id.clone()),
-        flavor: Some(flavor),
-        image: None,
-        url: None,
-        context: None,
-        manifest: None,
-        resources: None,
-        ssh_host: None,
-        ssh_port: None,
-        ssh_user: None,
-        timeout_secs: Some(timeout_secs),
-        cpus_per_task: None,
-        mem: None,
-        source_digest: None,
-        source_path: None,
-        source_size: None,
-        remote_root: None,
-    };
-    source.apply_to_descriptor(&mut descriptor);
-    if let Err(error) = crate::compute::record_submission_handle(&run_id, &descriptor) {
-        let _ = openresearch::teardown(&creds, &sandbox.id).await;
-        return Err(error);
-    }
-    let run = StoredRun {
-        id: run_id.clone(),
-        experiment_id: exp.id.clone(),
-        project_id: project.id.clone(),
-        status: "starting".to_string(),
-        backend_json: descriptor.to_json(),
-        command: run_command,
-        created_at: now_ms(),
-        updated_at: now_ms(),
-        ended_at: None,
-        exit_code: None,
-        commit_sha: Some(source.revision),
-        result_markdown: None,
-        cancel_requested: store
-            .get_run(&run_id)?
-            .is_some_and(|run| run.cancel_requested),
-        cancel_reason: None,
-        chat_session_id: args.launching_chat_session(),
-    };
-
-    // From here the box is billing: never leak it behind an error the store
-    // doesn't know about.
-    let persisted = store
-        .upsert_run(&run)
-        .and_then(|()| spawn_detached_supervise(&run_id));
-    if let Err(err) = persisted {
-        eprintln!(
-            "submit failed after the box was provisioned — deleting box {}",
-            sandbox.id
-        );
-        if let Err(td) = openresearch::teardown(&creds, &sandbox.id).await {
-            eprintln!(
-                "warning: box {} could not be torn down ({td}) — delete it with \
-                 `orx instance delete {}` or through OpenResearch.",
-                sandbox.id, sandbox.id
-            );
-        }
-        return Err(err);
-    }
-    Ok(run)
+    Ok(LaunchSpec {
+        kind: "openresearch_job".into(),
+        target: Some(org_id),
+        options: serde_json::json!({
+            "flavor": flavor,
+            "disk_gb": args.disk.unwrap_or(100),
+            "provider": args.provider,
+            "timeout_seconds": timeout_seconds,
+        }),
+    })
 }
 
 /// Reword a 402 from `POST /sandboxes` (org has no available compute balance)
 /// into the top-up action, surfacing the checkout URL the API attaches.
-fn billing_friendly(err: crate::error::Error) -> crate::error::Error {
+pub(crate) fn billing_friendly(err: crate::error::Error) -> crate::error::Error {
     let text = err.to_string();
     if !text.contains("(402 ") {
         return err;

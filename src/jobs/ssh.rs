@@ -20,7 +20,7 @@ mod container;
 mod prepared;
 pub(crate) mod service;
 #[cfg(unix)]
-mod sharing;
+pub(crate) mod sharing;
 pub use container::{
     resolve as resolve_container, validate_reference as validate_container_reference, ContainerRun,
 };
@@ -91,13 +91,6 @@ fn prepare_control_dir() -> Result<()> {
 #[cfg(not(unix))]
 fn prepare_control_dir() -> Result<()> {
     Ok(())
-}
-
-#[derive(Debug, Clone)]
-pub struct ResolvedLaunch {
-    pub target: SshTarget,
-    pub container: Option<ContainerRun>,
-    pub remote_root: Option<String>,
 }
 
 pub fn validate_host_options(options: &crate::config::SshHostSettings) -> Result<()> {
@@ -186,36 +179,15 @@ pub fn resolve_options(
     Ok((host, options))
 }
 
-pub async fn resolve_launch(args: &crate::ExpRunArgs) -> Result<ResolvedLaunch> {
-    let settings = crate::config::ssh_settings()?;
-    let (host, options) = resolve_options(args, &settings)?;
-    let target = SshTarget::alias(&host);
-    let host_check = preflight(&target).await;
-    if !host_check.reachable || !host_check.tools_found {
-        return Err(anyhow!(
-            "{}",
-            host_check
-                .error
-                .unwrap_or_else(|| "SSH host needs bash and tar.".into())
-        ));
-    }
-    let container = match options.container {
-        Some(reference) => Some(container::resolve(&target, &reference).await?),
-        None => None,
-    };
-    Ok(ResolvedLaunch {
-        target,
-        container,
-        remote_root: options.remote_root,
-    })
-}
-
 /// An ssh endpoint. The classic ssh backend connects by `~/.ssh/config` alias
 /// (`SshTarget::alias`); backends that learn an endpoint at runtime (an
 /// OpenResearch box on a provider-assigned host:port) pass an explicit
 /// `user@host` plus the options no config file knows about.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct SshTarget {
+    #[serde(skip)]
+    pub(crate) transport:
+        Option<std::sync::Arc<crate::engine::adapters::openresearch::LegacyTransport>>,
     /// What goes after `--`: an alias, or `user@host`.
     pub dest: String,
     #[serde(default)]
@@ -260,6 +232,7 @@ impl SshTarget {
             auth_agent: crate::local::shell_env::var("SSH_AUTH_SOCK")
                 .map(|value| value.to_string_lossy().into_owned()),
             run_id: None,
+            transport: None,
             extra_opts: Vec::new(),
         }
     }
@@ -294,6 +267,7 @@ impl SshTarget {
             auth_agent: crate::local::shell_env::var("SSH_AUTH_SOCK")
                 .map(|value| value.to_string_lossy().into_owned()),
             run_id: None,
+            transport: None,
         }
     }
 }
@@ -595,7 +569,7 @@ pub(crate) fn prepare_sharing_env(cmd: &mut tokio::process::Command) {
 
 pub(crate) async fn setup_connection_sharing(target: &SshTarget) -> Option<String> {
     #[cfg(unix)]
-    if target.extra_opts.is_empty() {
+    if target.extra_opts.is_empty() && target.transport.is_none() {
         return sharing::setup(target).await.err().map(|error| {
             format!("SSH login succeeded, but connection sharing is unavailable: {error}")
         });
@@ -614,6 +588,11 @@ pub(crate) async fn ssh_run(
     remote_cmd: &str,
     stdin: Option<&str>,
 ) -> Result<String> {
+    if let Some(transport) = &target.transport {
+        return transport
+            .execute(remote_cmd, stdin.map(str::as_bytes).unwrap_or_default())
+            .await;
+    }
     service::execute(target, remote_cmd, stdin.map(str::as_bytes)).await
 }
 
@@ -622,6 +601,11 @@ pub(crate) async fn ssh_status(
     command: &str,
     input: Option<&str>,
 ) -> Result<String> {
+    if let Some(transport) = &target.transport {
+        return transport
+            .execute(command, input.map(str::as_bytes).unwrap_or_default())
+            .await;
+    }
     service::execute_lane(target, command, input.map(str::as_bytes), "status").await
 }
 
@@ -630,6 +614,11 @@ pub(crate) async fn ssh_control(
     command: &str,
     input: Option<&str>,
 ) -> Result<String> {
+    if let Some(transport) = &target.transport {
+        return transport
+            .execute(command, input.map(str::as_bytes).unwrap_or_default())
+            .await;
+    }
     service::execute_lane(target, command, input.map(str::as_bytes), "control").await
 }
 
@@ -704,6 +693,10 @@ async fn ssh_run_file(
     remote_cmd: &str,
     source: &std::path::Path,
 ) -> Result<String> {
+    if let Some(transport) = &target.transport {
+        return transport.upload(remote_cmd, source).await;
+    }
+
     service::upload(target, remote_cmd, source).await
 }
 
@@ -1454,6 +1447,17 @@ mod tests {
         assert!(state.trim().is_empty() || state.trim().starts_with('Z'));
     }
 
+    /// Replaces a forked child with `sleep`. Sleeping in place would hold every descriptor the
+    /// test process had open, so other tests' pipes, sockets and locks would not close.
+    #[cfg(unix)]
+    fn exec_sleep() -> ! {
+        let argv = [c"sleep".as_ptr(), c"60".as_ptr(), std::ptr::null()];
+        unsafe {
+            libc::execv(c"/bin/sleep".as_ptr(), argv.as_ptr());
+            libc::_exit(127)
+        }
+    }
+
     #[cfg(unix)]
     #[test]
     fn host_probe_waits_for_live_group_members() {
@@ -1463,10 +1467,7 @@ mod tests {
             unsafe { libc::setsid() };
             let member = unsafe { libc::fork() };
             if member == 0 {
-                unsafe {
-                    libc::sleep(30);
-                    libc::_exit(0)
-                };
+                exec_sleep();
             }
             unsafe { libc::_exit(0) };
         }
@@ -1540,10 +1541,11 @@ mod tests {
                 libc::close(ready[0]);
                 libc::setsid();
                 if libc::fork() == 0 {
+                    // An ignored signal stays ignored across exec.
                     libc::signal(libc::SIGTERM, libc::SIG_IGN);
                     // Tell the test TERM is ignored before sleeping.
                     libc::write(ready[1], b"r".as_ptr().cast(), 1);
-                    libc::sleep(60);
+                    exec_sleep();
                 }
                 libc::_exit(0);
             }
@@ -1557,9 +1559,8 @@ mod tests {
             unsafe {
                 libc::close(ready[0]);
                 libc::setsid();
-                libc::sleep(60);
-                libc::_exit(0)
-            };
+            }
+            exec_sleep();
         }
         // Wait for the member to confirm it ignores TERM and for the leader to
         // exit before cancelling: a group liveness check can pass on the leader
@@ -1700,6 +1701,7 @@ mod tests {
             auth_agent: crate::local::shell_env::var("SSH_AUTH_SOCK")
                 .map(|value| value.to_string_lossy().into_owned()),
             run_id: None,
+            transport: None,
             extra_opts: vec!["-p".into(), port.into()],
         };
         assert_ne!(control_path(&mk("22022")), control_path(&mk("22023")));

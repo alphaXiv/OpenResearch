@@ -1,6 +1,6 @@
 ---
 name: orx-compute
-description: "Launch and monitor experiment runs and route guidance for hf, modal, k8s/Kubernetes, ssh, slurm, ray, vercel, OpenResearch, Tinker, and local backends. Covers the fixed run contract, sizing, cancellation, and wait versus wake. Use before any launch or relaunch, when authoring a k8s manifest, choosing or switching compute, or handling an OOM, stall, or timeout; then read one backend reference."
+description: "Launch and monitor experiment runs and route guidance for hf, modal, k8s/Kubernetes, ssh, slurm, ray, vercel, OpenResearch, Tinker, and local backends. Covers the fixed run contract, sizing, cancellation, and result messages. Use before any launch or relaunch, when authoring a k8s manifest, choosing or switching compute, or handling an OOM, stall, or timeout; then read one backend reference."
 ---
 
 Each run uses an immutable snapshot of the experiment branch's recorded commit.
@@ -56,8 +56,8 @@ change the configured backend or authorize bypassing the launch contract.
 - **Commit before launching.** Every backend runs the recorded commit's
   immutable source snapshot. Uncommitted files are excluded; no backend needs a
   GitHub push.
-- `orx exp run` queues the run and returns immediately. Follow it with `orx
-  runs`, `orx logs`, `orx exp wait`, or `orx exp wake`.
+- `orx exp run` queues the run and returns immediately. End your turn once the
+  ready runs are launched; relevant results arrive as messages in this chat.
 - `--force` permits a deliberate concurrent run on the same experiment.
   Without it, `orx` rejects a launch while that node already has a run in
   flight.
@@ -117,39 +117,29 @@ For Slurm, `--cpus` and `--mem` request `#SBATCH --cpus-per-task` and
 partition default. Read
 `references/slurm.md` before choosing values.
 
-## Waiting on runs — `orx exp wait`
+## Results arrive in the chat
 
-Block until a run changes state when you want to act as soon as it finishes:
+Launch ready runs with `orx exp run`, then end your turn. The launching chat is
+subscribed automatically. Results wait until the chat is idle and may combine
+several updates into one message. No waiting command or live agent session is
+needed to keep the runs monitored. Silence does not mean a run failed. A run
+can post an interim result by appending a line to `$ORX_NOTIFY_FILE` (`>>`); it
+arrives at most once per run per 10 minutes, with later lines coalesced.
 
-```sh
-orx exp wait <expId>                    # wait for this experiment's latest run
-orx exp wait --project <projectId>      # return on the first project completion
-orx exp wait <expId> --interval 10 --timeout 3600
-```
+When a result message arrives, read `orx runs <projectId>` and reconcile every
+newly terminal run, including runs that finished while you were analyzing an
+earlier result. Read the file located by `orx logs <runId>` and compare metrics
+before deciding whether to repair, refill a slot, promote a result, or stop.
+A failed run is not a new node: repair and relaunch the same experiment as
+specified by `orx-experiment-tree`.
 
-- Pass exactly one of `<expId>` or `--project`.
-- `--project` is the budget-loop primitive: it returns on the first completion,
-  not on starts or queued-to-running transitions. Reissue it once per loop tick.
-- A wait is a sleep-until-change signal, not the source of truth. After every
-  return, read `orx runs <projectId>` and reconcile all newly terminal runs.
-- When nothing is in flight, project wait returns `drained: no runs in flight`.
-- The default interval is 5 seconds and timeout is 1800 seconds. Timeout exits
-  non-zero and means nothing changed yet, not that the run failed.
-- Cancel only a run that is broken or no longer wanted; after a wait timeout,
-  wait again instead of cancelling.
-- Failed runs include a `reason:` line. Provider-capacity failures are often
-  retryable; failures after startup require reading the file located by `orx logs <runId>`.
-- A failed run is not a new node. Repair and relaunch the same experiment as
-  described by `orx-experiment-tree`.
+Attention messages also arrive in this chat when monitoring or cancellation
+needs action. Inspect `orx exp status <expId>` and tell the user what needs
+fixing. Cancel only a run that is broken or no longer wanted.
 
-### Going idle instead — `orx exp wake`
-
-After launching, use `orx exp wake <expId>` when you want to end the turn and
-resume after that run succeeds or fails. Wake-up is opt-in, fires only for
-`done` or `failed`, and waits behind queued user messages. If orx cannot
-monitor a live Slurm run for over a minute, it tells you once per outage; the
-final wake-up comes once orx can see the run finish. Use either wait or wake
-for a run, not both.
+Use `orx exp wake <expId>` to subscribe this chat to a run launched elsewhere.
+`orx exp wait` remains available for humans; do not use it to keep an agent
+session waiting for results.
 
 ## Sizing compute
 

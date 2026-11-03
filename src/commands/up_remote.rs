@@ -3284,6 +3284,7 @@ mod tests {
             managed_generation: None,
             auth_agent: None,
             run_id: None,
+            transport: None,
             extra_opts: vec!["-p".into(), "2222".into()],
         };
         let args =

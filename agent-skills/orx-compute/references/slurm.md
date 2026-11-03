@@ -16,6 +16,9 @@ orx exp run <expId> --backend slurm
 
 - `--host` is an alias from `~/.ssh/config`; omit it only when a Slurm default
   host is configured.
+- `--partition` overrides the saved Slurm partition for one run. A list such as
+  `gpu,batch` lets Slurm choose between partitions; omit it to use the saved or
+  cluster default.
 - `--flavor` is an optional GRES GPU request such as `h100:2`. Omit it for CPU.
 - `--cpus` and `--mem` set `#SBATCH --cpus-per-task` and `#SBATCH --mem`
   (`64G`, `4000M`, or a bare number for megabytes). Unset falls back to
@@ -26,19 +29,19 @@ orx exp run <expId> --backend slurm
   profile—is used as-is.
 - `--timeout` covers the batch job. Unset falls back to the Slurm time-limit
   setting, then the cluster's limit.
-- Runs and the cached source archive live under `~/.orx` on the cluster unless
-  `orx compute configure slurm --remote-root /scratch/alice/orx` names another
-  absolute directory, such as scratch space when home quota is small. It must
-  be on a filesystem the compute nodes share. Each run keeps the root it was
-  submitted with; `--clear remote-root` restores the default for new runs.
-- Each project's three newest SSH and Slurm runs, counted together across
-  hosts and including unfinished ones, stay whole. Once an older finished
-  run's log is collected, the running OpenResearch app removes its remote run
-  dir except `tensorboard/`. It also removes orx's cached source archives that
-  no active run uses and that have been idle for an hour, then checks again an
-  hour later. Anything the job wrote into `repo/` goes with it. To keep every run
-  on the cluster, set `orx compute configure slurm --keep-remote-runs true`
-  (it covers runs not yet cleaned up), or write outputs outside the run dir.
-  Deleting a project removes its runs' remote dirs entirely regardless.
-- A detached `orx supervise` process records scheduler status and logs; do not
-  kill it.
+- Runs and the cached source archive live under `~/.orx/engine` on the cluster
+  unless `orx compute configure slurm --remote-root /scratch/alice/orx` names
+  another absolute directory (runs then live in its `engine/` subdirectory),
+  such as scratch space when home quota is small. It must be on a filesystem
+  the compute nodes share. Each run keeps the root it was submitted with;
+  `--clear remote-root` restores the default for new runs.
+- Run dirs stay on the cluster after the run; OpenResearch keeps each run's
+  log on this computer. Remove old dirs under `<root>/engine/runs/` when space
+  runs short.
+- Runs started by orx 0.2.x keep their cleanup: each project's three newest SSH
+  and Slurm runs stay whole, older finished ones lose their remote run dir
+  except `tensorboard/`, and idle cached source archives are removed.
+  `orx compute configure slurm --keep-remote-runs true` keeps them all; deleting
+  a project removes them regardless.
+- The OpenResearch server records scheduler status and logs. The job keeps
+  running while the server is closed, and the server catches up when it opens.

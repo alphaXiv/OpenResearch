@@ -296,12 +296,10 @@ fn user_or_empty_config(home: &std::path::Path) -> Result<PathBuf> {
     Ok(empty)
 }
 
-#[cfg(test)]
-async fn resolve(dest: &str, config: Option<&std::path::Path>) -> Result<Prepared> {
+pub(super) async fn resolve(dest: &str, config: Option<&std::path::Path>) -> Result<Prepared> {
     resolve_with(dest, config, query).await
 }
 
-#[cfg(test)]
 async fn resolve_with<F, Fut>(
     dest: &str,
     config: Option<&std::path::Path>,

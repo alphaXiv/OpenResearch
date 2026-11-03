@@ -1,58 +1,11 @@
-//! Local launch — the on-this-machine twin of `local/ssh.rs`: run the
-//! experiment as a detached process on the machine running orx. Same snapshot
-//! contract as every backend — the run extracts the recorded revision into
-//! its own run dir, never the agent's worktree. The run row lives in the
-//! local store only; a detached `orx supervise` watches the process.
+//! Launch intents for runs on this machine: `local`, and `tinker` (a local controller using
+//! remote Tinker model compute). Each run extracts the recorded revision into its own run
+//! dir, never the agent's worktree.
 
-use std::collections::HashMap;
-
-use crate::commands::exp::spawn_detached_supervise;
-use crate::compute::SourceSnapshot;
 use crate::error::{anyhow, Result};
-use crate::jobs::{localbox, BackendDescriptor};
-use crate::store::{now_ms, Store, StoredRun};
+use crate::store::LaunchSpec;
 
-/// Submit a local controller and print its run directory.
-pub async fn launch_local_run(args: &crate::ExpRunArgs) -> Result<()> {
-    let run = crate::compute::submit(args).await?;
-    let backend = BackendDescriptor::parse(&run.backend_json)?;
-    let label = if backend.kind == "tinker_job" {
-        "Tinker"
-    } else {
-        "Local"
-    };
-    println!("\u{2713} {label} run started.");
-    println!("  dir  {}", backend.job_id.as_deref().unwrap_or(""));
-    println!("  run  {}", run.id);
-    println!(
-        "{}",
-        crate::invocation::follow_up(&run.experiment_id, &run.id)
-    );
-    Ok(())
-}
-
-pub async fn submit_local_run_with_source(
-    args: &crate::ExpRunArgs,
-    source: SourceSnapshot,
-    run_id: String,
-) -> Result<StoredRun> {
-    submit_controller_run(args, source, run_id, "local_job").await
-}
-
-pub async fn submit_tinker_run_with_source(
-    args: &crate::ExpRunArgs,
-    source: SourceSnapshot,
-    run_id: String,
-) -> Result<StoredRun> {
-    submit_controller_run(args, source, run_id, "tinker_job").await
-}
-
-async fn submit_controller_run(
-    args: &crate::ExpRunArgs,
-    source: SourceSnapshot,
-    run_id: String,
-    kind: &str,
-) -> Result<StoredRun> {
+pub fn launch_spec(args: &crate::ExpRunArgs, kind: &str) -> Result<LaunchSpec> {
     let backend = kind.trim_end_matches("_job");
     if args.flavor.is_some() {
         return Err(anyhow!("--backend {backend} does not take --flavor."));
@@ -62,121 +15,9 @@ async fn submit_controller_run(
             "--image doesn't apply to --backend {backend} — the controller uses this machine's own environment."
         ));
     }
-
-    let store = Store::open()?;
-    let exp = store
-        .get_local_experiment(&args.exp_id)?
-        .ok_or_else(|| anyhow!("Local experiment {} not found.", args.exp_id))?;
-    let project = store
-        .get_local_project(&exp.project_id)?
-        .ok_or_else(|| anyhow!("Local project {} not found.", exp.project_id))?;
-    if let Some(w) = crate::local::experiments::legacy_root_warning(&project, &exp) {
-        eprintln!("{w}");
-    }
-    let run_command = Some(exp.run_command.clone())
-        .filter(|c| !c.trim().is_empty())
-        .or_else(|| project.run_command.clone().filter(|c| !c.trim().is_empty()))
-        .ok_or_else(|| anyhow!("{}", crate::invocation::no_run_command(&project.id)))?;
-
-    let script = crate::compute::snapshot_script(
-        &crate::local::bash::bash_path(&source.path),
-        &crate::local::bash::local_run_command(&run_command),
-    );
-
-    // The run's env: everything the user synced (API keys), plus the tokens
-    // the run script expects. Passed to the launcher process.
-    let mut env = crate::config::run_env(&run_id);
-    env.insert(
-        crate::compute::TENSORBOARD_LOGDIR.to_string(),
-        crate::jobs::localbox::run_dir(&run_id)
-            .join("tensorboard")
-            .to_string_lossy()
-            .into_owned(),
-    );
-    env.extend(crate::local::trackio::local_run_env());
-    if let Ok(hf_token) = crate::jobs::huggingface::resolve_token() {
-        env.entry("HF_TOKEN".to_string()).or_insert(hf_token);
-    }
-    // run.sh executes the user's own script, so it needs the shell's PATH — a
-    // run launched from the macOS app would otherwise have no python/uv/conda.
-    // Not on Windows: bash splits PATH on `:`, so a `C:` value collapses there.
-    #[cfg(not(windows))]
-    if let Some(path) = crate::local::shell_env::search_path() {
-        env.insert("PATH".to_string(), path.to_string_lossy().into_owned());
-    }
-    crate::local::shell_env::export_to(|key, value| {
-        env.insert(key.to_string(), value.to_string_lossy().into_owned());
-    });
-    let mut secret_env = HashMap::new();
-    // Every local controller inherits this key without persisting it in run.sh.
-    let tinker_key = if kind == "tinker_job" {
-        Some(crate::jobs::tinker::resolve_api_key()?)
-    } else {
-        env.get(crate::jobs::tinker::API_KEY_ENV).cloned()
-    };
-    env.remove(crate::jobs::tinker::API_KEY_ENV);
-    if let Some(key) = tinker_key {
-        secret_env.insert(crate::jobs::tinker::API_KEY_ENV.to_string(), key);
-    }
-
-    let dir = localbox::run_job(&localbox::LocalJobSpec {
-        run_id: run_id.clone(),
-        script,
-        env,
-        secret_env,
-    })?;
-
-    let mut descriptor = BackendDescriptor {
-        ssh_container: None,
-        monitoring_error: None,
-        cancellation_accepted: false,
-        rental_lease: None,
-        kind: kind.to_string(),
-        namespace: None,
-        job_id: Some(dir.to_string_lossy().into_owned()),
-        flavor: None,
-        image: None,
-        url: None,
-        context: None,
-        manifest: None,
-        resources: None,
-        ssh_host: None,
-        ssh_port: None,
-        ssh_user: None,
-        timeout_secs: None,
-        cpus_per_task: None,
-        mem: None,
-        source_digest: None,
-        source_path: None,
-        source_size: None,
-        remote_root: None,
-    };
-    source.apply_to_descriptor(&mut descriptor);
-    if let Err(error) = crate::compute::record_submission_handle(&run_id, &descriptor) {
-        let _ = localbox::cancel_job(&dir);
-        return Err(error);
-    }
-    let run = StoredRun {
-        id: run_id.clone(),
-        experiment_id: exp.id.clone(),
-        project_id: project.id.clone(),
-        status: "starting".to_string(),
-        backend_json: descriptor.to_json(),
-        command: run_command,
-        created_at: now_ms(),
-        updated_at: now_ms(),
-        ended_at: None,
-        exit_code: None,
-        commit_sha: Some(source.revision),
-        result_markdown: None,
-        cancel_requested: store
-            .get_run(&run_id)?
-            .is_some_and(|run| run.cancel_requested),
-        cancel_reason: None,
-        chat_session_id: args.launching_chat_session(),
-    };
-    store.upsert_run(&run)?;
-
-    spawn_detached_supervise(&run_id)?;
-    Ok(run)
+    Ok(LaunchSpec {
+        kind: kind.into(),
+        target: None,
+        options: serde_json::json!({}),
+    })
 }

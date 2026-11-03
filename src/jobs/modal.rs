@@ -310,6 +310,7 @@ pub fn default_image(gpu: bool) -> String {
     }
 }
 
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct ModalJobSpec {
     /// `bash -c` payload (the shared snapshot-and-run script).
     pub script: String,
@@ -318,6 +319,7 @@ pub struct ModalJobSpec {
     pub cpu: Option<f64>,
     pub memory: Option<u64>,
     /// Passed to the sandbox as an ephemeral Secret (tokens, synced env).
+    #[serde(default)]
     pub env: HashMap<String, String>,
     pub timeout_seconds: u64,
     /// Modal app name to group sandboxes under.
@@ -397,7 +399,7 @@ pub async fn cancel_job(sandbox_id: &str) -> Result<()> {
 pub async fn stream_logs(
     sandbox_id: &str,
     skip: u64,
-    idle: Duration,
+    idle: Option<Duration>,
     sink: &mut (dyn FnMut(&str) + Send),
 ) -> Result<u64> {
     use tokio::io::{AsyncBufReadExt as _, BufReader};
@@ -421,7 +423,11 @@ pub async fn stream_logs(
     let mut lines = BufReader::new(stdout).lines();
     let mut seen = 0u64;
     loop {
-        match tokio::time::timeout(idle, lines.next_line()).await {
+        let next = match idle {
+            Some(idle) => tokio::time::timeout(idle, lines.next_line()).await,
+            None => Ok(lines.next_line().await),
+        };
+        match next {
             Err(_) => break, // idle — let the caller re-check state
             Ok(Err(e)) => {
                 return Err(anyhow!(

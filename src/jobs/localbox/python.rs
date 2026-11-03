@@ -20,7 +20,7 @@ const FORWARD_TO_PYTHON: &str = "#!/bin/sh\nexec python \"$@\"\n";
 
 /// The run.sh line that routes whichever of `python`/`python3` hit the stub to
 /// a real interpreter, or to a clear error.
-pub(super) fn prelude(dir: &Path) -> std::io::Result<String> {
+pub(crate) fn prelude(dir: &Path) -> std::io::Result<String> {
     let Some(path) = crate::local::shell_env::search_path() else {
         return Ok(String::new());
     };

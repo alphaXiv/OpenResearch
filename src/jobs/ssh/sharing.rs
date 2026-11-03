@@ -87,7 +87,12 @@ fn predicate(default_dir: &Path, entries: &BTreeMap<String, Publication>) -> Str
     contents
 }
 
-fn install(ssh_dir: &Path, default_dir: &Path, publication: Option<Publication>) -> Result<()> {
+fn update(
+    ssh_dir: &Path,
+    default_dir: &Path,
+    include: bool,
+    change: impl FnOnce(&mut BTreeMap<String, Publication>) -> Result<()>,
+) -> Result<()> {
     use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt};
 
     let mut builder = std::fs::DirBuilder::new();
@@ -134,20 +139,10 @@ fn install(ssh_dir: &Path, default_dir: &Path, publication: Option<Publication>)
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => BTreeMap::new(),
         Err(error) => return Err(error.into()),
     };
-    if let Some(publication) = publication {
-        entries.insert(
-            format!("{}:{}", publication.host, publication.native_id),
-            publication,
-        );
-    }
+    change(&mut entries)?;
     let contents = fragment(default_dir, &entries);
     let predicate = predicate(default_dir, &entries);
     let registry_contents = serde_json::to_vec(&entries)?;
-    let current = match std::fs::read(&user_config) {
-        Ok(bytes) => bytes,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Vec::new(),
-        Err(error) => return Err(error.into()),
-    };
     for (path, contents) in [
         (&managed_predicate, predicate.as_bytes()),
         (&managed_config, contents.as_bytes()),
@@ -157,6 +152,34 @@ fn install(ssh_dir: &Path, default_dir: &Path, publication: Option<Publication>)
             crate::local::git::atomic_write_with_mode(path, contents, Some(0o600))?;
         }
     }
+    if !include {
+        return Ok(());
+    }
+    let current = match std::fs::read(&user_config) {
+        Ok(bytes) => bytes,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Vec::new(),
+        Err(error) => return Err(error.into()),
+    };
+    if current.split(|&byte| byte == b'\n').any(|line| {
+        let mut fields = line
+            .split(|byte| byte.is_ascii_whitespace() || *byte == b'=')
+            .filter(|field| !field.is_empty());
+        fields
+            .next()
+            .is_some_and(|key| key.eq_ignore_ascii_case(b"include"))
+            && fields
+                .take_while(|field| !field.starts_with(b"#"))
+                .any(|path| {
+                    matches!(
+                        path,
+                        b"openresearch_config"
+                            | b"\"openresearch_config\""
+                            | b"'openresearch_config'"
+                    )
+                })
+    }) {
+        return Ok(());
+    }
     if std::fs::symlink_metadata(&user_config).is_ok_and(|metadata| metadata.is_symlink()) {
         return Err(anyhow!(
             "{} is a symlink; leave it intact and append `Host *` followed by `{}` to your SSH config manually",
@@ -164,37 +187,13 @@ fn install(ssh_dir: &Path, default_dir: &Path, publication: Option<Publication>)
             INCLUDE.trim()
         ));
     }
-    let mut updated = current.clone();
-    while let Some(start) = updated
-        .windows(FOOTER.len())
-        .position(|bytes| bytes == FOOTER.as_bytes())
-    {
-        let end = start + FOOTER.len();
-        let from = if end == updated.len() {
-            start
-        } else {
-            end - INCLUDE.len()
-        };
-        updated.drain(from..end);
-    }
-    while let Some(start) = updated
-        .windows(INCLUDE.len())
-        .enumerate()
-        .find(|(start, bytes)| {
-            (*start == 0 || updated[*start - 1] == b'\n') && *bytes == INCLUDE.as_bytes()
-        })
-        .map(|(start, _)| start)
-    {
-        updated.drain(start..start + INCLUDE.len());
-    }
+    let mut updated = current;
     updated.extend_from_slice(FOOTER.as_bytes());
-    if updated != current {
-        crate::local::git::atomic_write_with_mode(&user_config, &updated, Some(0o600))?;
-    }
+    crate::local::git::atomic_write_with_mode(&user_config, &updated, Some(0o600))?;
     Ok(())
 }
 
-pub(super) async fn setup(target: &SshTarget) -> Result<()> {
+async fn require_sharing() -> Result<()> {
     let version = crate::process::tokio_command("ssh")
         .arg("-V")
         .stdin(Stdio::null())
@@ -206,12 +205,118 @@ pub(super) async fn setup(target: &SshTarget) -> Result<()> {
             "automatic sharing requires OpenSSH 8.4 or newer; your SSH config was not changed"
         ));
     }
+    Ok(())
+}
+
+pub(crate) fn retire_legacy(home: &Path) -> Result<()> {
+    let ssh_dir = home.join(".ssh");
+    if !ssh_dir.join("openresearch_connections.json").exists() {
+        return Ok(());
+    }
+    let default_dir = control_dir_for(&home.join(".config/openresearch"));
+    update(&ssh_dir, &default_dir, false, |entries| {
+        entries.retain(|key, _| {
+            key.strip_prefix("engine:").is_none_or(|path| {
+                let path = Path::new(path);
+                !path.is_absolute() || path.exists()
+            })
+        });
+        Ok(())
+    })
+}
+
+pub(crate) async fn publish_engine(
+    home: &Path,
+    alias: &str,
+    config: Option<&Path>,
+    path: &Path,
+    route: &str,
+) -> Result<()> {
+    require_sharing().await?;
+    let mut publication = super::prepared::resolve(alias, config).await?.publication;
+    let actual = publication.queries[0]
+        .output
+        .lines()
+        .filter(|line| !line.starts_with("controlpath "))
+        .collect::<Vec<_>>();
+    let pinned = route
+        .lines()
+        .filter(|line| !line.starts_with("canonicalizehostname "))
+        .collect::<Vec<_>>();
+    if actual != pinned {
+        return Err(anyhow!(
+            "SSH route changed while publishing connection sharing"
+        ));
+    }
+    publication.socket_name = path.file_name().unwrap().to_string_lossy().into_owned();
+    let path = path.to_path_buf();
+    super::prepare_control_dir()?;
+    let home = home.to_path_buf();
+    let default_dir = control_dir_for(&home.join(".config/openresearch"));
+    tokio::task::spawn_blocking(move || {
+        update(&home.join(".ssh"), &default_dir, true, |entries| {
+            let link = control_dir().join(&publication.socket_name);
+            match std::os::unix::fs::symlink(&path, &link) {
+                Ok(()) => {}
+                Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
+                    if std::fs::read_link(&link)? != path {
+                        return Err(anyhow!(
+                            "SSH sharing socket {} points elsewhere",
+                            link.display()
+                        ));
+                    }
+                }
+                Err(error) => return Err(error.into()),
+            }
+            entries.insert(format!("engine:{}", path.display()), publication);
+            Ok(())
+        })
+    })
+    .await??;
+    Ok(())
+}
+
+pub(crate) async fn withdraw_engine(home: &Path, path: &Path) -> Result<()> {
+    let socket_name = path.file_name().unwrap().to_string_lossy().into_owned();
+    let key = format!("engine:{}", path.display());
+    let home = home.to_path_buf();
+    let default_dir = control_dir_for(&home.join(".config/openresearch"));
+    tokio::task::spawn_blocking(move || {
+        let ssh_dir = home.join(".ssh");
+        if !ssh_dir.join("openresearch_connections.json").exists() {
+            return Ok(());
+        }
+        update(&ssh_dir, &default_dir, false, |entries| {
+            entries.remove(&key);
+            let link = control_dir().join(&socket_name);
+            if link
+                .symlink_metadata()
+                .is_ok_and(|metadata| metadata.is_symlink())
+            {
+                std::fs::remove_file(link)?;
+            }
+            Ok(())
+        })
+    })
+    .await?
+}
+
+pub(super) async fn setup(target: &SshTarget) -> Result<()> {
+    require_sharing().await?;
     let home = dirs::home_dir().ok_or_else(|| anyhow!("could not locate your home directory"))?;
     let ssh_dir = home.join(".ssh");
     let default_dir = control_dir_for(&home.join(".config/openresearch"));
     let publication = super::prepared::prepare(target, false).await?.publication;
-    tokio::task::spawn_blocking(move || install(&ssh_dir, &default_dir, Some(publication)))
-        .await??;
+    tokio::task::spawn_blocking(move || {
+        update(&ssh_dir, &default_dir, true, |entries| {
+            entries.insert(
+                format!("{}:{}", publication.host, publication.native_id),
+                publication,
+            );
+            Ok(())
+        })
+    })
+    .await??;
 
     let mut command = crate::process::tokio_command("ssh");
     command
@@ -384,6 +489,73 @@ mod tests {
     }
 
     #[test]
+    fn engine_and_legacy_publications_share_the_lock_and_registry() {
+        use std::os::unix::net::UnixListener;
+        let temp = crate::local::git::TemporaryDirectory::new("orx-sharing-coexist").unwrap();
+        let ssh_dir = temp.path().join(".ssh");
+        let default_dir = temp.path().join("sockets");
+        let socket = Path::new("/tmp").join(format!("orx-sharing-{}", uuid::Uuid::new_v4()));
+        let listener = UnixListener::bind(&socket).unwrap();
+        let publication = Publication {
+            host: "lab".into(),
+            native_id: "a".repeat(40),
+            socket_name: "0123456789abcdef".into(),
+            queries: Vec::new(),
+        };
+        let key = format!("engine:{}", socket.display());
+        update(&ssh_dir, &default_dir, true, |entries| {
+            entries.insert(key.clone(), publication.clone());
+            Ok(())
+        })
+        .unwrap();
+        let user = std::fs::read(ssh_dir.join("config")).unwrap();
+        let file = std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(ssh_dir.join(".orx-config.lock"))
+            .unwrap();
+        let mut lock = fd_lock::RwLock::new(file);
+        let guard = lock.try_write().unwrap();
+        let (attempting, attempted) = std::sync::mpsc::channel();
+        let writer = std::thread::spawn({
+            let ssh_dir = ssh_dir.clone();
+            let default_dir = default_dir.clone();
+            move || {
+                attempting.send(()).unwrap();
+                update(&ssh_dir, &default_dir, true, |entries| {
+                    entries.insert(
+                        format!("{}:{}", publication.host, publication.native_id),
+                        publication,
+                    );
+                    Ok(())
+                })
+                .unwrap();
+            }
+        });
+        attempted.recv().unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(50));
+        assert!(!writer.is_finished());
+        drop(guard);
+        writer.join().unwrap();
+        let read = || {
+            serde_json::from_slice::<BTreeMap<String, Publication>>(
+                &std::fs::read(ssh_dir.join("openresearch_connections.json")).unwrap(),
+            )
+            .unwrap()
+        };
+        assert_eq!(read().len(), 2);
+        retire_legacy(temp.path()).unwrap();
+        assert_eq!(read().len(), 2);
+        assert_eq!(std::fs::read(ssh_dir.join("config")).unwrap(), user);
+        drop(listener);
+        std::fs::remove_file(socket).unwrap();
+        retire_legacy(temp.path()).unwrap();
+        assert_eq!(read().len(), 1);
+        assert!(!read().contains_key(&key));
+        assert_eq!(std::fs::read(ssh_dir.join("config")).unwrap(), user);
+    }
+
+    #[test]
     fn version_requires_supported_openssh() {
         for version in ["OpenSSH_8.4p1, LibreSSL", "OpenSSH_9.9p2", "OpenSSH_10.3p1"] {
             assert!(supports_sharing(version));
@@ -407,37 +579,34 @@ mod tests {
         let user_config = ssh_dir.join("config");
         let original = b"# user's config\r\nHost lab\r\n  User me";
         std::fs::write(&user_config, original).unwrap();
-        install(&ssh_dir, Path::new("/tmp/default"), None).unwrap();
+        update(&ssh_dir, Path::new("/tmp/default"), true, |_| Ok(())).unwrap();
         let once = std::fs::read(&user_config).unwrap();
         assert_eq!(&once[..original.len()], original);
-        install(&ssh_dir, Path::new("/tmp/default"), None).unwrap();
+        update(&ssh_dir, Path::new("/tmp/default"), true, |_| Ok(())).unwrap();
         assert_eq!(std::fs::read(&user_config).unwrap(), once);
         let later = b"Match final\n  ControlPath none\n";
-        std::fs::write(&user_config, [once.as_slice(), later].concat()).unwrap();
-        install(&ssh_dir, Path::new("/tmp/default"), None).unwrap();
-        let moved = std::fs::read(&user_config).unwrap();
-        assert_eq!(
-            moved,
-            [original.as_slice(), b"\nHost *\n", later, FOOTER.as_bytes()].concat()
-        );
-        install(&ssh_dir, Path::new("/tmp/default"), None).unwrap();
-        assert_eq!(std::fs::read(&user_config).unwrap(), moved);
-        std::fs::write(
-            &user_config,
-            [b"# legacy\n", INCLUDE.as_bytes(), moved.as_slice()].concat(),
-        )
-        .unwrap();
-        install(&ssh_dir, Path::new("/tmp/default"), None).unwrap();
-        assert_eq!(
-            std::fs::read(&user_config).unwrap(),
-            [b"# legacy\n", moved.as_slice()].concat()
-        );
+        for contents in [
+            [once.as_slice(), later].concat(),
+            [b"# legacy\n", INCLUDE.as_bytes(), once.as_slice()].concat(),
+            b"Host *\r\n  include openresearch_config\r\nHost office\r\n  Port 2222\r\n".to_vec(),
+            b"Host *\nInclude\t  \"openresearch_config\" # sharing\nHost office\n".to_vec(),
+            b"Host *\nInclude=openresearch_config".to_vec(),
+        ] {
+            use std::os::unix::fs::MetadataExt;
+            std::fs::write(&user_config, &contents).unwrap();
+            let before = std::fs::metadata(&user_config).unwrap();
+            update(&ssh_dir, Path::new("/tmp/default"), true, |_| Ok(())).unwrap();
+            let after = std::fs::metadata(&user_config).unwrap();
+            assert_eq!(std::fs::read(&user_config).unwrap(), contents);
+            assert_eq!(after.modified().unwrap(), before.modified().unwrap());
+            assert_eq!((after.ino(), after.mode()), (before.ino(), before.mode()));
+        }
         std::fs::write(
             &user_config,
             [b"Host office", FOOTER.as_bytes(), b"  Port 2222\n"].concat(),
         )
         .unwrap();
-        install(&ssh_dir, Path::new("/tmp/default"), None).unwrap();
+        update(&ssh_dir, Path::new("/tmp/default"), true, |_| Ok(())).unwrap();
         let resolved = crate::process::command("ssh")
             .args(["-G", "-F"])
             .arg(&user_config)
@@ -450,11 +619,82 @@ mod tests {
         let real = temp.path().join("real");
         std::fs::write(&real, original).unwrap();
         symlink(&real, &user_config).unwrap();
-        assert!(install(&ssh_dir, Path::new("/tmp/default"), None).is_err());
+        assert!(update(&ssh_dir, Path::new("/tmp/default"), true, |_| Ok(())).is_err());
         assert_eq!(std::fs::read(&real).unwrap(), original);
         assert_eq!(
             std::fs::read(ssh_dir.join("openresearch_config")).unwrap(),
             fragment(Path::new("/tmp/default"), &BTreeMap::new()).as_bytes()
         );
+    }
+    #[test]
+    fn another_stores_live_legacy_publication_is_preserved() {
+        use crate::engine::clock::TestClock;
+        use crate::engine::Engine;
+        use crate::store::{Store, StoredRun};
+        use std::fs::{self, OpenOptions};
+        use std::os::unix::net::UnixListener;
+        use std::sync::Arc;
+        let home = crate::local::git::TemporaryDirectory::new("orx-sharing-stores").unwrap();
+        let ssh_dir = home.path().join(".ssh");
+        fs::create_dir(&ssh_dir).unwrap();
+        fs::write(ssh_dir.join("config"), FOOTER).unwrap();
+        let engine = Engine::new(
+            Store::open_at(home.path().join("data")).unwrap(),
+            Arc::new(TestClock::new()),
+        );
+        let other = Store::open_at(home.path().join("other-data")).unwrap();
+        let run = StoredRun {
+            id: "other-legacy".into(),
+            experiment_id: "exp".into(),
+            project_id: "proj".into(),
+            status: "running".into(),
+            backend_json: r#"{"kind":"ssh_job","jobId":"/other/run"}"#.into(),
+            command: "train".into(),
+            created_at: 1,
+            updated_at: 1,
+            ended_at: None,
+            exit_code: None,
+            commit_sha: None,
+            result_markdown: None,
+            cancel_requested: false,
+            cancel_reason: None,
+            chat_session_id: None,
+        };
+        other.upsert_run(&run).unwrap();
+        let [path, _] = other.supervisor_lock_paths(&run.id).unwrap();
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        let file = OpenOptions::new()
+            .write(true)
+            .create(true)
+            .truncate(false)
+            .open(path)
+            .unwrap();
+        let mut lock = fd_lock::RwLock::new(file);
+        let _guard = lock.try_write().unwrap();
+        let sockets = control_dir_for(&home.path().join(".config/openresearch"));
+        fs::create_dir(&sockets).unwrap();
+        let socket = sockets.join("other-route");
+        let _listener = UnixListener::bind(&socket).unwrap();
+        let registry = serde_json::json!({
+            "engine:other-route": {
+                "host": "engine",
+                "native_id": "other-route",
+                "socket_name": "%C",
+                "queries": []
+            }
+        });
+        let path = ssh_dir.join("openresearch_connections.json");
+        fs::write(&path, serde_json::to_vec(&registry).unwrap()).unwrap();
+        assert!(engine.retire_ssh_config(home.path()).unwrap());
+        assert!(socket.exists());
+        assert_eq!(
+            serde_json::from_slice::<serde_json::Value>(&fs::read(path).unwrap()).unwrap(),
+            registry
+        );
+        assert_eq!(fs::read(ssh_dir.join("config")).unwrap(), FOOTER.as_bytes());
+        assert!(engine.retire_ssh_config(home.path()).unwrap());
+        drop(other);
+        fs::remove_file(socket).unwrap();
+        fs::remove_dir(sockets).unwrap();
     }
 }

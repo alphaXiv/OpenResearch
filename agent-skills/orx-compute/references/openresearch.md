@@ -17,5 +17,5 @@ orx exp run <expId> --backend openresearch --flavor cpu5c:32 --org <orgId>
 - Timeout defaults to 4 hours. The machine and its storage disappear when the
   run ends, so all evidence must reach the run log.
 - `orx` streams the committed snapshot to the provisioned machine.
-- A detached `orx supervise` process records machine status and logs; do not
-  kill it.
+- The OpenResearch server records machine status and logs. The run keeps going
+  while the server is closed, and the server catches up when it opens.

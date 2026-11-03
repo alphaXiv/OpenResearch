@@ -392,6 +392,16 @@ pub fn run_env(run_id: &str) -> std::collections::HashMap<String, String> {
     env
 }
 
+/// What a launched job sees: [`run_env`] plus a configured Hugging Face token. Resolved at
+/// launch, so secrets never enter a stored launch intent.
+pub fn launch_env(run_id: &str) -> std::collections::HashMap<String, String> {
+    let mut env = run_env(run_id);
+    if let Ok(token) = crate::jobs::huggingface::resolve_token() {
+        env.entry("HF_TOKEN".to_string()).or_insert(token);
+    }
+    env
+}
+
 const EXPERIMENT_ENV: &str = "ORX_EXPERIMENT";
 const EXPERIMENT_TITLE_ENV: &str = "ORX_EXPERIMENT_TITLE";
 const PARENT_EXPERIMENT_ENV: &str = "ORX_PARENT_EXPERIMENT";

@@ -141,6 +141,9 @@ def status(name, pid):
     if state == "pending":
         print(json.dumps({"stage": "SCHEDULING"}))
         return
+    if state != "running" and tags.get("orx_cancelled"):
+        print(json.dumps({"stage": "CANCELED"}))
+        return
     if state != "running":
         # Only a running sandbox is queried for its process: process calls on a
         # stopped sandbox would boot a fresh session.
@@ -210,6 +213,9 @@ def cancel(name):
     sandbox, _ = _sdk()
     box = sandbox.get_sandbox(name=name)
     if _status(box) in ("pending", "running"):
+        tags = dict(box.tags or {})
+        tags["orx_cancelled"] = "1"
+        box.update(tags=tags)
         box.stop()
 
 def finish(name):
@@ -919,6 +925,7 @@ pub fn sandbox_name(run_id: &str) -> String {
     name.trim_end_matches('-').to_string()
 }
 
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct VercelJobSpec {
     pub name: String,
     /// `bash -c` payload (the shared snapshot-and-run script).
@@ -1421,6 +1428,7 @@ mod tests {
         };
         for (probe, expected) in [
             ("running", json!({"stage": "RUNNING"})),
+            ("cancelled", json!({"stage": "CANCELED"})),
             (
                 "exited",
                 json!({"stage": "ERROR", "message": "exited with code 3"}),
@@ -1440,9 +1448,11 @@ class Done:
 class Proc:
     def __init__(self, rc): self.returncode = rc
 class Box:
-    status = "running"
-    tags = {{}}
-    def run_process(self, *a, **kw): return Done()
+    status = "stopped" if "{probe}" == "cancelled" else "running"
+    tags = {{"orx_cancelled": "1"}} if "{probe}" == "cancelled" else {{}}
+    def run_process(self, *a, **kw):
+        assert self.status == "running", "queried a stopped sandbox"
+        return Done()
     def get_process(self, pid, wait=False):
         if not wait: return Proc(None)
         assert "{probe}" == "exited", "waited on a running job"

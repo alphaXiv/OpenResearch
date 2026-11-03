@@ -18,5 +18,5 @@ orx exp run <expId> --backend ray --flavor cpu:2,mem:8GiB
 - Omit the flavor to reserve nothing, which avoids Pending on small heads.
 - There is no image, host, or timeout flag. Bound the work in the run command.
 - Ray receives the committed snapshot as its `working_dir` package.
-- A detached `orx supervise` process records job status and logs; do not kill
-  it.
+- The OpenResearch server records job status and logs. The job keeps running
+  while the server is closed, and the server catches up when it opens.

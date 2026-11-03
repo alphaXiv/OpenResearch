@@ -24,7 +24,7 @@ struct Paths {
 impl Paths {
     fn new(run: &str) -> Self {
         Self {
-            base: crate::store::log_path(run),
+            base: crate::store::log_path(&crate::store::data_dir(), run),
         }
     }
     fn cursor(&self) -> PathBuf {
@@ -198,6 +198,23 @@ pub(crate) struct Snapshot {
 
 pub(crate) fn read(run: &str, offset: u64, limit: u64, expected: Option<&str>) -> Result<Snapshot> {
     read_at(&Paths::new(run), offset, limit, expected)
+}
+
+pub(crate) fn read_from(
+    data_dir: &Path,
+    run: &str,
+    offset: u64,
+    limit: u64,
+    expected: Option<&str>,
+) -> Result<Snapshot> {
+    read_at(
+        &Paths {
+            base: crate::store::log_path(data_dir, run),
+        },
+        offset,
+        limit,
+        expected,
+    )
 }
 
 fn read_at(paths: &Paths, offset: u64, limit: u64, expected: Option<&str>) -> Result<Snapshot> {

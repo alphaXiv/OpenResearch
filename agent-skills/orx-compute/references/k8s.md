@@ -49,5 +49,5 @@ The submit-time contract is:
 - Auxiliary resources may accompany the Job and are deleted on cancellation.
   They must reference the `orx-env` Secret themselves when needed.
 - The run log follows the primary Job's sole pod.
-- A detached `orx supervise` process watches the Job through `kubectl`; do not
-  kill it.
+- The OpenResearch server watches the Job through `kubectl`. The Job keeps
+  running while the server is closed, and the server catches up when it opens.

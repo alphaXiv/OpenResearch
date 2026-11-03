@@ -19,7 +19,7 @@ use sha2::{Digest as _, Sha256};
 use crate::error::{anyhow, Result};
 use crate::jobs::BackendDescriptor;
 use crate::local::model::{LocalExperiment, LocalProject};
-use crate::store::{RunStatus, Store, StoredRun};
+use crate::store::{LaunchSpec, Store, StoredRun};
 
 #[derive(Debug, Clone)]
 pub struct SourceSnapshot {
@@ -272,19 +272,6 @@ pub struct Preflight {
 #[derive(Debug, Clone)]
 pub struct StagedSource(pub SourceSnapshot);
 
-#[derive(Debug, Clone, Default)]
-pub struct LogCursor(pub u64, pub Option<String>);
-
-#[derive(Debug, Clone, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct LogBatch {
-    pub generation: String,
-    pub offset: u64,
-    pub data_base64: String,
-    pub next_cursor: u64,
-    pub eof: bool,
-}
-
 #[async_trait]
 // async-trait marks its boxed futures `#[must_use]`; clippy 1.99 flags that generated code.
 #[allow(clippy::double_must_use)]
@@ -296,57 +283,33 @@ pub trait ComputeBackend: Send + Sync {
         project: &LocalProject,
         experiment: &LocalExperiment,
     ) -> Result<StagedSource>;
-    async fn submit(
+    /// The launch intent the run engine stores before any side effect. Secrets are added by
+    /// the engine at launch.
+    async fn prepare(
         &self,
         args: &crate::ExpRunArgs,
-        source: StagedSource,
-        run_id: String,
-    ) -> Result<StoredRun>;
+        source: &SourceSnapshot,
+        run_id: &str,
+        command: &str,
+    ) -> Result<LaunchSpec>;
+}
 
-    async fn status(&self, handle: &StoredRun) -> Result<StoredRun> {
-        Store::open()?
-            .get_run(&handle.id)?
-            .ok_or_else(|| anyhow!("Run {} not found.", handle.id))
+/// A finished Hugging Face run no longer needs the archive staged for its job volume.
+pub fn remove_hf_staging(run: &StoredRun) -> Result<()> {
+    let descriptor = BackendDescriptor::parse(&run.backend_json)?;
+    if !matches!(descriptor.kind.as_str(), "hf_job" | "engine") {
+        return Ok(());
     }
-
-    async fn logs(&self, handle: &StoredRun, cursor: LogCursor) -> Result<LogBatch> {
-        use base64::Engine as _;
-        let snapshot = crate::jobs::ssh::service::logs::read(
-            &handle.id,
-            cursor.0,
-            256 * 1024,
-            cursor.1.as_deref(),
-        )?;
-        let next = snapshot.offset + snapshot.bytes.len() as u64;
-        Ok(LogBatch {
-            generation: snapshot.generation,
-            offset: snapshot.offset,
-            data_base64: base64::engine::general_purpose::STANDARD.encode(snapshot.bytes),
-            next_cursor: next,
-            eof: crate::local::is_terminal(&handle.status) && next >= snapshot.size,
-        })
-    }
-
-    async fn cancel(&self, handle: &StoredRun, reason: &str) -> Result<()> {
-        // Agent-session callers route through orx up before reaching this trusted path.
-        crate::commands::exp::request_local_run_cancel(&Store::open()?, &handle.id, reason)
-    }
-
-    async fn cleanup(&self, handle: &StoredRun) -> Result<()> {
-        if self.capabilities().id == "hf" && crate::local::is_terminal(&handle.status) {
-            let descriptor = BackendDescriptor::parse(&handle.backend_json)?;
-            if let (Some(path), Some(digest)) = (descriptor.source_path, descriptor.source_digest) {
-                let staging = Path::new(&path)
-                    .parent()
-                    .unwrap_or_else(|| Path::new("."))
-                    .join(format!("{digest}.hf"));
-                if staging.is_dir() {
-                    std::fs::remove_dir_all(staging)?;
-                }
-            }
+    if let (Some(path), Some(digest)) = (descriptor.source_path, descriptor.source_digest) {
+        let staging = Path::new(&path)
+            .parent()
+            .unwrap_or_else(|| Path::new("."))
+            .join(format!("{digest}.hf"));
+        if staging.is_dir() {
+            std::fs::remove_dir_all(staging)?;
         }
-        Ok(())
     }
+    Ok(())
 }
 
 async fn stage_snapshot(
@@ -376,7 +339,7 @@ macro_rules! backend_adapter {
         $name:ident, $id:literal, $label:literal, $remote:literal, $flavors:literal,
         $requires_flavor:literal, $transport:literal, $ray_package:literal,
         preflight |$preflight_args:ident| $preflight:expr,
-        submit |$submit_args:ident, $source:ident, $run_id:ident| $submit:expr
+        prepare |$prepare_args:ident, $source:ident, $run_id:ident, $command:ident| $prepare:expr
     ) => {
         pub struct $name;
 
@@ -406,16 +369,18 @@ macro_rules! backend_adapter {
                 stage_snapshot(project, experiment, $ray_package).await
             }
 
-            async fn submit(
+            async fn prepare(
                 &self,
                 args: &crate::ExpRunArgs,
-                staged: StagedSource,
-                id: String,
-            ) -> Result<StoredRun> {
-                let $submit_args = args;
-                let $source = staged.0;
-                let $run_id = id;
-                $submit
+                source: &SourceSnapshot,
+                run_id: &str,
+                command: &str,
+            ) -> Result<LaunchSpec> {
+                let $prepare_args = args;
+                let $source = source;
+                let $run_id = run_id;
+                let $command = command;
+                $prepare
             }
         }
     };
@@ -431,9 +396,10 @@ backend_adapter!(
     "local archive",
     false,
     preflight | _args | ready(),
-    submit | args,
-    source,
-    run_id | crate::local::localrun::submit_local_run_with_source(args, source, run_id).await
+    prepare | args,
+    _source,
+    _run_id,
+    _command | crate::local::localrun::launch_spec(args, "local_job")
 );
 
 backend_adapter!(
@@ -449,9 +415,10 @@ backend_adapter!(
         crate::jobs::tinker::resolve_api_key()?;
         ready()
     },
-    submit | args,
-    source,
-    run_id | crate::local::localrun::submit_tinker_run_with_source(args, source, run_id).await
+    prepare | args,
+    _source,
+    _run_id,
+    _command | crate::local::localrun::launch_spec(args, "tinker_job")
 );
 
 backend_adapter!(
@@ -471,9 +438,10 @@ backend_adapter!(
         crate::jobs::huggingface::whoami(&token).await?;
         ready()
     },
-    submit | args,
+    prepare | args,
     source,
-    run_id | crate::local::hf::submit_local_hf_with_source(args, source, run_id).await
+    run_id,
+    command | crate::local::hf::launch_spec(args, source, run_id, command).await
 );
 
 backend_adapter!(
@@ -492,9 +460,10 @@ backend_adapter!(
         crate::jobs::modal::preflight().await?;
         ready()
     },
-    submit | args,
+    prepare | args,
     source,
-    run_id | crate::local::modal::submit_local_modal_with_source(args, source, run_id).await
+    run_id,
+    command | crate::local::modal::launch_spec(args, source, run_id, command)
 );
 
 backend_adapter!(
@@ -513,9 +482,10 @@ backend_adapter!(
         crate::jobs::vercel::preflight().await?;
         ready()
     },
-    submit | args,
+    prepare | args,
     source,
-    run_id | crate::local::vercel::submit_local_vercel_with_source(args, source, run_id).await
+    run_id,
+    command | crate::local::vercel::launch_spec(args, source, run_id, command).await
 );
 
 backend_adapter!(
@@ -539,57 +509,27 @@ backend_adapter!(
         }
         ready()
     },
-    submit | args,
+    prepare | args,
     source,
-    run_id | crate::local::k8s::submit_local_k8s_with_source(args, source, run_id).await
+    run_id,
+    command | crate::local::k8s::launch_spec(args, source, run_id, command).await
 );
 
-#[derive(Default)]
-pub struct SshCompute {
-    launch: tokio::sync::OnceCell<crate::jobs::ssh::ResolvedLaunch>,
-}
-
-#[async_trait]
-impl ComputeBackend for SshCompute {
-    fn capabilities(&self) -> Capabilities {
-        Capabilities {
-            id: "ssh",
-            label: "SSH",
-            remote: true,
-            flavors: false,
-            requires_flavor: false,
-            source_transport: "SSH tar stream",
-        }
-    }
-
-    async fn preflight(&self, args: &crate::ExpRunArgs) -> Result<Preflight> {
-        self.launch
-            .get_or_try_init(|| crate::jobs::ssh::resolve_launch(args))
-            .await?;
-        ready()
-    }
-
-    async fn stage_source(
-        &self,
-        project: &LocalProject,
-        experiment: &LocalExperiment,
-    ) -> Result<StagedSource> {
-        stage_snapshot(project, experiment, false).await
-    }
-
-    async fn submit(
-        &self,
-        args: &crate::ExpRunArgs,
-        source: StagedSource,
-        run_id: String,
-    ) -> Result<StoredRun> {
-        let launch = self
-            .launch
-            .get()
-            .ok_or_else(|| anyhow!("SSH launch was not prepared."))?;
-        crate::local::ssh::submit_local_ssh_with_source(args, source.0, run_id, launch).await
-    }
-}
+backend_adapter!(
+    SshCompute,
+    "ssh",
+    "SSH",
+    true,
+    false,
+    false,
+    "SSH tar stream",
+    false,
+    preflight | _args | ready(),
+    prepare | args,
+    _source,
+    _run_id,
+    command | crate::local::ssh::launch_spec(args, command)
+);
 
 backend_adapter!(
     SlurmCompute,
@@ -600,24 +540,11 @@ backend_adapter!(
     false,
     "SSH tar stream",
     false,
-    preflight | args | {
-        let settings = crate::jobs::slurm::load_settings()?.unwrap_or_default();
-        let host = args
-            .host
-            .as_deref()
-            .or(settings.host.as_deref())
-            .ok_or_else(|| anyhow!("Slurm requires --host or a configured host."))?;
-        let check = crate::jobs::slurm::preflight(host).await;
-        if !check.reachable || !check.slurm_found || !check.tools_found {
-            return Ok(not_ready(check.error.as_deref().unwrap_or(
-                "The Slurm host needs bash, tar, sbatch, squeue, and scancel.",
-            )));
-        }
-        ready()
-    },
-    submit | args,
-    source,
-    run_id | crate::local::slurm::submit_local_slurm_with_source(args, source, run_id).await
+    preflight | _args | ready(),
+    prepare | args,
+    _source,
+    _run_id,
+    command | crate::local::slurm::launch_spec(args, command)
 );
 
 backend_adapter!(
@@ -634,9 +561,10 @@ backend_adapter!(
         crate::jobs::ray::preflight(&address).await?;
         ready()
     },
-    submit | args,
+    prepare | args,
     source,
-    run_id | crate::local::ray::submit_local_ray_with_source(args, source, run_id).await
+    run_id,
+    command | crate::local::ray::launch_spec(args, source, run_id, command).await
 );
 
 backend_adapter!(
@@ -679,11 +607,10 @@ backend_adapter!(
         }
         ready()
     },
-    submit | args,
-    source,
-    run_id
-        | crate::local::openresearch::submit_local_openresearch_with_source(args, source, run_id)
-            .await
+    prepare | args,
+    _source,
+    _run_id,
+    _command | crate::local::openresearch::launch_spec(args).await
 );
 
 pub fn backend(id: &str) -> Result<Box<dyn ComputeBackend>> {
@@ -693,7 +620,7 @@ pub fn backend(id: &str) -> Result<Box<dyn ComputeBackend>> {
         "hf" => Ok(Box::new(HuggingFaceCompute)),
         "modal" => Ok(Box::new(ModalCompute)),
         "k8s" => Ok(Box::new(KubernetesCompute)),
-        "ssh" => Ok(Box::new(SshCompute::default())),
+        "ssh" => Ok(Box::new(SshCompute)),
         "slurm" => Ok(Box::new(SlurmCompute)),
         "ray" => Ok(Box::new(RayCompute)),
         "vercel" => Ok(Box::new(VercelCompute)),
@@ -750,6 +677,21 @@ pub fn validate_run_args(args: &crate::ExpRunArgs) -> Result<()> {
             "--cpus/--mem only apply with --backend slurm. Size other backends with --flavor."
         ));
     }
+    if let Some(partition) = &args.partition {
+        if args.backend.as_deref() != Some("slurm") {
+            return Err(anyhow!("--partition only applies with --backend slurm."));
+        }
+        if !partition.split(',').all(|name| {
+            !name.is_empty()
+                && name
+                    .bytes()
+                    .all(|byte| byte.is_ascii_alphanumeric() || b"_-.".contains(&byte))
+        }) {
+            return Err(anyhow!(
+                "--partition expects names separated by commas (letters, digits, _, - or .)."
+            ));
+        }
+    }
     if args.cpus == Some(0) {
         return Err(anyhow!("--cpus must be at least 1."));
     }
@@ -794,7 +736,22 @@ pub fn validate_run_args(args: &crate::ExpRunArgs) -> Result<()> {
     Ok(())
 }
 
-pub async fn submit(args: &crate::ExpRunArgs) -> Result<StoredRun> {
+/// A run ready for the engine: its source snapshot and the launch intent stored with it.
+pub struct Submission {
+    pub run_id: String,
+    pub experiment: LocalExperiment,
+    pub source: SourceSnapshot,
+    pub command: String,
+    pub launch: LaunchSpec,
+}
+
+/// Snapshots the source and prepares the launch intent, then hands it to `insert` while the
+/// snapshot is protected from cleanup and no other run of the experiment can start.
+pub async fn submit<F, Fut>(args: &crate::ExpRunArgs, insert: F) -> Result<String>
+where
+    F: FnOnce(Submission) -> Fut,
+    Fut: std::future::Future<Output = Result<()>>,
+{
     validate_run_args(args)?;
     let backend_id = args.backend.as_deref().unwrap_or("local");
     let backend = backend(backend_id)?;
@@ -832,62 +789,18 @@ pub async fn submit(args: &crate::ExpRunArgs) -> Result<StoredRun> {
     let project = store
         .get_local_project(&experiment.project_id)?
         .ok_or_else(|| anyhow!("Local project {} not found.", experiment.project_id))?;
-    let source = backend.stage_source(&project, &experiment).await?;
+    let command = crate::local::experiments::effective_run_command(
+        &experiment,
+        project.run_command.as_deref(),
+    )
+    .ok_or_else(|| anyhow!("{}", crate::invocation::no_run_command(&project.id)))?
+    .to_string();
+    let source = backend.stage_source(&project, &experiment).await?.0;
     let run_id = uuid::Uuid::new_v4().to_string();
-    let command = Some(experiment.run_command.clone())
-        .filter(|value| !value.trim().is_empty())
-        .or_else(|| {
-            project
-                .run_command
-                .clone()
-                .filter(|value| !value.trim().is_empty())
-        })
-        .unwrap_or_default();
-    let mut descriptor = BackendDescriptor {
-        ssh_container: None,
-        monitoring_error: None,
-        cancellation_accepted: false,
-        rental_lease: None,
-        kind: format!("{}_job", backend_id),
-        namespace: None,
-        job_id: None,
-        flavor: args.flavor.clone(),
-        image: args.image.clone(),
-        url: None,
-        context: None,
-        manifest: args.manifest.clone(),
-        resources: None,
-        ssh_host: None,
-        ssh_port: None,
-        ssh_user: None,
-        timeout_secs: None,
-        cpus_per_task: None,
-        mem: None,
-        source_digest: None,
-        source_path: None,
-        source_size: None,
-        remote_root: None,
-    };
-    source.0.apply_to_descriptor(&mut descriptor);
-    let now = crate::store::now_ms();
-    let pending = StoredRun {
-        id: run_id.clone(),
-        experiment_id: experiment.id.clone(),
-        project_id: project.id.clone(),
-        status: "starting".to_string(),
-        backend_json: descriptor.to_json(),
-        command,
-        created_at: now,
-        updated_at: now,
-        ended_at: None,
-        exit_code: None,
-        commit_sha: Some(source.0.revision.clone()),
-        result_markdown: None,
-        cancel_requested: false,
-        cancel_reason: None,
-        chat_session_id: args.launching_chat_session(),
-    };
-    let chat_harness = match &pending.chat_session_id {
+    let launch = backend.prepare(args, &source, &run_id, &command).await?;
+
+    let chat_session = args.launching_chat_session();
+    let chat_harness = match &chat_session {
         Some(session) => store.get_chat_session(session)?.map(|chat| chat.harness),
         None => None,
     };
@@ -904,49 +817,56 @@ pub async fn submit(args: &crate::ExpRunArgs) -> Result<StoredRun> {
             )
         })
         .flatten();
-    reserve_run(
-        &store,
-        &pending,
-        args.force,
-        identity.as_ref(),
-        report.as_ref(),
-    )?;
-    let pending_backend_json = descriptor.to_json();
-    match backend.submit(args, source, run_id.clone()).await {
-        Ok(run) => {
-            if project.github_enabled() {
-                if let Err(error) = crate::local::git::spawn_branch_publication(
-                    Path::new(&project.repo_path),
-                    &experiment.branch_name,
-                    &project.github_owner,
-                    &project.github_repo,
-                ) {
-                    eprintln!(
-                        "GitHub sync could not start; compute is already running from the source snapshot: {error}"
-                    );
-                }
-            }
-            Ok(run)
-        }
-        Err(error) => {
-            let current = store.get_run(&run_id)?;
-            let handle_was_persisted = current
-                .as_ref()
-                .is_some_and(|run| run.backend_json != pending_backend_json);
-            if !handle_was_persisted
-                && store.update_status(
-                    &run_id,
-                    RunStatus::Failed,
-                    Some(crate::store::now_ms()),
-                    None,
-                )?
-            {
-                store
-                    .set_result_markdown(&run_id, &format!("Compute submission failed: {error}"))?;
-            }
-            Err(error)
+
+    let dir = crate::store::data_dir().join("submission-locks");
+    std::fs::create_dir_all(&dir)?;
+    let file = std::fs::OpenOptions::new()
+        .create(true)
+        .read(true)
+        .write(true)
+        .truncate(false)
+        .open(dir.join(&experiment.id))?;
+    let mut lock = fd_lock::RwLock::new(file);
+    let _guard = lock.write()?;
+    if !args.force {
+        if let Some(run) = store
+            .list_runs_by_experiment(&experiment.id)?
+            .into_iter()
+            .find(|run| !crate::local::is_terminal(&run.status))
+        {
+            return Err(anyhow!(
+                "Run {} is already in flight for this experiment ({}). Wait for it with \
+                 `orx exp wait {exp}`; cancel it with `orx exp cancel {exp}` only if it \
+                 should stop, or pass --force to launch anyway.",
+                run.id,
+                run.status,
+                exp = experiment.id
+            ));
         }
     }
+    store.reserve_run_telemetry(&run_id, identity.as_ref(), report.as_ref())?;
+    let branch = experiment.branch_name.clone();
+    insert(Submission {
+        run_id: run_id.clone(),
+        experiment,
+        source,
+        command,
+        launch,
+    })
+    .await?;
+    if project.github_enabled() {
+        if let Err(error) = crate::local::git::spawn_branch_publication(
+            Path::new(&project.repo_path),
+            &branch,
+            &project.github_owner,
+            &project.github_repo,
+        ) {
+            eprintln!(
+                "GitHub sync could not start; compute is already running from the source snapshot: {error}"
+            );
+        }
+    }
+    Ok(run_id)
 }
 
 /// The run report's invoker: the forwarded native identity, else an explicit exception. A context
@@ -998,88 +918,6 @@ fn run_attribution(
         "attributionReason": reason,
         "status": "failed",
     })
-}
-
-fn reserve_run(
-    store: &Store,
-    pending: &StoredRun,
-    force: bool,
-    identity: Option<&crate::store::InvocationIdentity>,
-    report: Option<&(String, serde_json::Value)>,
-) -> Result<()> {
-    let dir = crate::store::data_dir().join("submission-locks");
-    std::fs::create_dir_all(&dir)?;
-    let file = std::fs::OpenOptions::new()
-        .create(true)
-        .read(true)
-        .write(true)
-        .truncate(false)
-        .open(dir.join(&pending.experiment_id))?;
-    let mut lock = fd_lock::RwLock::new(file);
-    let _guard = lock.write()?;
-    if !force {
-        if let Some(run) = store
-            .list_runs_by_experiment(&pending.experiment_id)?
-            .into_iter()
-            .find(|run| !crate::local::is_terminal(&run.status))
-        {
-            return Err(anyhow!(
-                "Run {} is already in flight for this experiment ({}). Wait for it with \
-                 `orx exp wait {exp}`; cancel it with `orx exp cancel {exp}` only if it \
-                 should stop, or pass --force to launch anyway.",
-                run.id,
-                run.status,
-                exp = pending.experiment_id
-            ));
-        }
-    }
-    let tx = store.begin()?;
-    store.reserve_run_telemetry(&pending.id, identity, report)?;
-    store.upsert_run(pending)?;
-    tx.commit()?;
-    Ok(())
-}
-
-pub fn record_submission_handle(run_id: &str, descriptor: &BackendDescriptor) -> Result<()> {
-    let database_error = Store::open()
-        .and_then(|store| store.set_backend_json(run_id, &descriptor.to_json()))
-        .err();
-    let dir = crate::store::data_dir().join("submission-handles");
-    if let Err(error) = prepare_snapshot_dir(&dir) {
-        return match database_error {
-            None => {
-                eprintln!("warning: could not create submission recovery directory: {error}");
-                Ok(())
-            }
-            Some(database_error) => Err(anyhow!(
-                "Could not persist provider handle in SQLite ({database_error}) or the recovery directory ({error})."
-            )),
-        };
-    }
-    let destination = dir.join(format!("{run_id}.json"));
-    let temporary = dir.join(format!(".{run_id}.{}.tmp", uuid::Uuid::new_v4()));
-    let file_error = (|| -> std::io::Result<()> {
-        use std::io::Write;
-        let mut options = std::fs::OpenOptions::new();
-        options.write(true).create_new(true);
-        #[cfg(unix)]
-        options.mode(0o600);
-        options
-            .open(&temporary)?
-            .write_all(descriptor.to_json().as_bytes())
-    })()
-    .and_then(|()| std::fs::rename(&temporary, destination))
-    .err();
-    if let Some(error) = file_error {
-        let _ = std::fs::remove_file(temporary);
-        if let Some(database_error) = database_error {
-            return Err(anyhow!(
-                "Could not persist provider handle in SQLite ({database_error}) or its recovery file ({error})."
-            ));
-        }
-        eprintln!("warning: could not write redundant submission recovery record: {error}");
-    }
-    Ok(())
 }
 
 pub fn recover_submission_handle(run_id: &str) -> Result<Option<BackendDescriptor>> {
@@ -1188,12 +1026,14 @@ pub(crate) mod tests {
             timeout: None,
             cpus: None,
             mem: None,
+            partition: None,
             force: false,
             chat_session_id: None,
             invocation_context: None,
             agent_origin: None,
             forwarded: false,
             telemetry_suppressed: false,
+            caller_config_dir: None,
         }
     }
 
