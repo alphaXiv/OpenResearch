@@ -165,31 +165,144 @@ pub(super) async fn set_hf_token(Json(req): Json<SetHfTokenReq>) -> ApiResult {
 
 // --- vercel settings ----------------------------------------------------------
 
-/// Vercel Sandbox has no saved configuration of its own: credentials are the
-/// SDK's env vars, read from the process env or the Environment tab.
-pub(super) fn vercel_settings_json() -> Value {
-    let source = crate::jobs::vercel::token_source();
-    let credentials: Vec<Value> = crate::jobs::vercel::credential_sources()
-        .into_iter()
-        .map(|(key, source)| json!({"key": key, "source": source}))
-        .collect();
-    let region = std::env::var("ORX_VERCEL_REGION")
-        .ok()
-        .filter(|r| !r.trim().is_empty());
-    let (sdk_source, sdk_ready) = crate::jobs::vercel::sdk_env_status();
+use crate::jobs::vercel;
+
+/// Credentials set in orx's own process environment override anything saved here.
+fn vercel_process_env() -> bool {
+    [
+        vercel::OIDC_TOKEN,
+        vercel::TOKEN,
+        vercel::TEAM_ID,
+        vercel::PROJECT_ID,
+    ]
+    .iter()
+    .any(|key| matches!(vercel::credential(key), Some((_, "env"))))
+}
+
+/// The teams a token can use, the chosen team's projects, and which team was
+/// chosen: the requested one, else the saved one, else the account default.
+async fn vercel_scopes(token: &str, team_id: Option<String>) -> crate::error::Result<Value> {
+    let api = vercel::Api::new(token)?;
+    let teams = api.teams().await?;
+    if teams.is_empty() {
+        return Err(anyhow!(
+            "This token can't see any Vercel team. Create a token with access to a team."
+        ));
+    }
+    let known = |id: &String| teams.iter().any(|team| &team.id == id);
+    let saved = vercel::credential(vercel::TEAM_ID).map(|(id, _)| id);
+    let team_id = match team_id.filter(known).or(saved.filter(known)) {
+        Some(id) => id,
+        None => api
+            .default_team_id()
+            .await
+            .ok()
+            .flatten()
+            .filter(known)
+            .unwrap_or_else(|| teams[0].id.clone()),
+    };
+    let projects = api.projects(&team_id).await?;
+    Ok(json!({ "teams": teams, "teamId": team_id, "projects": projects }))
+}
+
+pub(super) async fn vercel_settings_json() -> Value {
+    let token = vercel::credential(vercel::TOKEN);
+    let scopes = match &token {
+        Some((token, _)) => Some(vercel_scopes(token, None).await),
+        None => None,
+    };
     json!({
-        "tokenConfigured": source.is_some(),
-        "tokenSource": source,
-        "credentials": credentials,
-        "region": region,
-        "defaultRegion": "iad1",
-        "sdkReady": sdk_ready,
-        "sdkSource": sdk_source,
+        "configured": vercel::token_source().is_some(),
+        "processEnv": vercel_process_env(),
+        "oidc": vercel::credential(vercel::OIDC_TOKEN).is_some(),
+        "maskedToken": token.as_ref().map(|(token, _)| mask_token(token)),
+        "projectId": vercel::credential(vercel::PROJECT_ID).map(|(id, _)| id),
+        "scopes": scopes.as_ref().and_then(|scopes| scopes.as_ref().ok()),
+        "error": scopes.and_then(|scopes| scopes.err()).map(|error| error.to_string()),
     })
 }
 
 pub(super) async fn vercel_settings() -> ApiResult {
-    Ok(Json(vercel_settings_json()))
+    Ok(Json(vercel_settings_json().await))
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(super) struct VercelScopesReq {
+    token: Option<String>,
+    team_id: Option<String>,
+}
+
+/// A token typed into Settings but not saved yet, or the saved one when absent.
+fn vercel_request_token(token: Option<String>) -> Result<String, ApiError> {
+    token
+        .map(|token| token.trim().to_string())
+        .filter(|token| !token.is_empty())
+        .or_else(|| vercel::credential(vercel::TOKEN).map(|(token, _)| token))
+        .ok_or_else(|| bad_request("Enter a Vercel access token."))
+}
+
+pub(super) async fn vercel_scopes_route(Json(req): Json<VercelScopesReq>) -> ApiResult {
+    let token = vercel_request_token(req.token)?;
+    Ok(Json(
+        vercel_scopes(&token, req.team_id)
+            .await
+            .map_err(bad_request)?,
+    ))
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(super) struct SetVercelReq {
+    token: Option<String>,
+    team_id: String,
+    /// An existing project, or absent with `new_project` to create one.
+    project_id: Option<String>,
+    new_project: Option<String>,
+}
+
+pub(super) async fn set_vercel(Json(req): Json<SetVercelReq>) -> ApiResult {
+    if vercel_process_env() {
+        return Err(bad_request(
+            "Vercel credentials are set in the process environment. Remove them there to set up \
+             Vercel here.",
+        ));
+    }
+    let token = vercel_request_token(req.token)?;
+    let api = vercel::Api::new(&token).map_err(bad_request)?;
+    let teams = api.teams().await.map_err(bad_request)?;
+    if !teams.iter().any(|team| team.id == req.team_id) {
+        return Err(bad_request("This token can't use that Vercel team."));
+    }
+    let project_id = match (req.project_id, req.new_project) {
+        (_, Some(name)) => {
+            api.create_project(&req.team_id, name.trim())
+                .await
+                .map_err(bad_request)?
+                .id
+        }
+        (Some(id), None) => {
+            let projects = api.projects(&req.team_id).await.map_err(bad_request)?;
+            if !projects.iter().any(|project| project.id == id) {
+                return Err(bad_request("That project isn't in the chosen Vercel team."));
+            }
+            id
+        }
+        (None, None) => return Err(bad_request("Choose a Vercel project.")),
+    };
+    let team_id = req.team_id;
+    tokio::task::spawn_blocking(move || {
+        crate::config::write_synced_env_vars(&[
+            (vercel::TOKEN, &token),
+            (vercel::TEAM_ID, &team_id),
+            (vercel::PROJECT_ID, &project_id),
+        ])?;
+        // An OIDC token wins over the access token and expires within hours.
+        crate::config::remove_synced_env_var(vercel::OIDC_TOKEN)
+    })
+    .await
+    .map_err(|e| anyhow!("env write task failed: {e}"))??;
+    Ok(Json(vercel_settings_json().await))
 }
 
 // --- modal settings -----------------------------------------------------------
@@ -1459,7 +1572,7 @@ pub(crate) async fn show(backend: &str) -> Result<Value> {
         "ray" => ray_settings().await,
         "hf" => Ok(hf_settings().await),
         "modal" => modal_settings().await,
-        "vercel" => Ok(Json(vercel_settings_json())),
+        "vercel" => vercel_settings().await,
         "tinker" => tinker_settings().await,
         "k8s" => k8s_settings().await,
         "openresearch" => openresearch_settings().await,
@@ -1599,7 +1712,7 @@ pub(crate) async fn check(
             Ok(()) => json!({"ready": true}),
             Err(error) => json!({"ready": false, "error": error.to_string()}),
         },
-        "vercel" => match crate::jobs::vercel::preflight().await {
+        "vercel" => match vercel::preflight().await {
             Ok(()) => json!({"ready": true}),
             Err(error) => json!({"ready": false, "error": error.to_string()}),
         },

@@ -6,7 +6,9 @@ Vercel project, billed for active CPU and provisioned memory. It is CPU-only:
 choose another backend for GPU work.
 
 Authentication uses `VERCEL_TOKEN`, `VERCEL_TEAM_ID` and `VERCEL_PROJECT_ID`,
-or a `VERCEL_OIDC_TOKEN` from `vercel env pull` (it expires after 12 hours).
+which orx saves when the user connects Vercel Sandbox with an access token, team
+and project, or a `VERCEL_OIDC_TOKEN` from `vercel env pull` (it expires after
+12 hours).
 `orx` provisions its managed Vercel SDK environment on the first launch and
 never passes these credentials into the job.
 

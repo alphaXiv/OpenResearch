@@ -648,7 +648,11 @@ fn router(state: AppState, remote_auth: Option<RemoteAuth>) -> Router {
             "/api/settings/modal",
             get(modal_settings).post(set_modal_token),
         )
-        .route("/api/settings/vercel", get(vercel_settings))
+        .route(
+            "/api/settings/vercel",
+            get(vercel_settings).post(set_vercel),
+        )
+        .route("/api/settings/vercel/scopes", post(vercel_scopes_route))
         .route("/api/settings/env", get(env_settings).post(set_env_var))
         .route(
             "/api/settings/env/{key}",

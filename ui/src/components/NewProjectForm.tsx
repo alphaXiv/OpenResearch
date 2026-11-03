@@ -27,7 +27,7 @@ import { Button, SEGMENTED_CLASS_NAME } from "./ui";
 import { PaperTitle } from "./PaperTitle";
 import { defaultSelection } from "./ModelPicker";
 
-function useDebouncedValue(value: string, delay: number) {
+export function useDebouncedValue(value: string, delay: number) {
   const [debounced, setDebounced] = useState(value);
   useEffect(() => {
     const timer = setTimeout(() => setDebounced(value), delay);

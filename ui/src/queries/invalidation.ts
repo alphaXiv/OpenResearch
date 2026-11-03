@@ -63,6 +63,7 @@ const settingsFamilies: Record<string, readonly string[]> = {
   tinker: ["getTinkerSettings", "getComputeSettings", "getEnvVars"],
   k8s: ["getK8sSettings", "getComputeSettings"],
   modal: ["getModalSettings", "getComputeSettings", "getEnvVars"],
+  vercel: ["getVercelSettings", "getComputeSettings", "getEnvVars"],
   slurm: ["getSlurmSettings", "getComputeSettings"],
   ray: ["getRaySettings", "getComputeSettings"],
   env: ["getEnvVars", "getHfSettings", "getTinkerSettings", "getModalSettings", "getVercelSettings", "getSlurmSettings", "getRaySettings", "getK8sSettings", "getOpenResearchSettings", "getComputeSettings", "getHarnesses", "getTrackioRuns"],
@@ -81,7 +82,7 @@ export function invalidateWrite(url: string, scope: ReturnType<typeof workspaceS
   const invalidate = (families: readonly string[], target = scope, predicate?: QueryFilters["predicate"]) => invalidateFamilies(families, target, predicate, true);
   const path = url.split("?")[0];
   if (/^\/api\/(experiments|runs)\//.test(path) || /^\/api\/projects\/[^/]+$/.test(path)) invalidate(["getSessionExperiments"], scope);
-  if (/\/(ui-state|open|reveal|prewarm|validate|preflight)$/.test(path)) return;
+  if (/\/(ui-state|open|reveal|prewarm|validate|preflight|scopes)$/.test(path)) return;
   const setting = /^\/api\/settings\/([^/]+)/.exec(path)?.[1];
   if (setting) { invalidate(settingsFamilies[setting] ?? [], scope); return; }
   if (path.startsWith("/api/local-models") && !/\/(discover|check)$/.test(path)) { invalidate(["getLocalModels", "getHarnesses"], scope); return; }

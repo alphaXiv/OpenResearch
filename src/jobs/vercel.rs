@@ -24,6 +24,7 @@ use std::process::Stdio;
 use std::sync::OnceLock;
 use std::time::Duration;
 
+use serde::Serialize;
 use serde_json::{json, Value};
 use tokio::process::Command;
 
@@ -318,8 +319,11 @@ const VERCEL_ENV: ManagedEnv = ManagedEnv {
 };
 
 /// Credentials the Sandbox SDK reads from its environment.
-const OIDC_TOKEN: &str = "VERCEL_OIDC_TOKEN";
-const ACCESS_TOKEN_KEYS: [&str; 3] = ["VERCEL_TOKEN", "VERCEL_TEAM_ID", "VERCEL_PROJECT_ID"];
+pub const OIDC_TOKEN: &str = "VERCEL_OIDC_TOKEN";
+pub const TOKEN: &str = "VERCEL_TOKEN";
+pub const TEAM_ID: &str = "VERCEL_TEAM_ID";
+pub const PROJECT_ID: &str = "VERCEL_PROJECT_ID";
+const ACCESS_TOKEN_KEYS: [&str; 3] = [TOKEN, TEAM_ID, PROJECT_ID];
 
 /// Default image: Vercel's managed Python image, which ships pip, venv, and uv.
 pub const DEFAULT_IMAGE: &str = "vercel/sandbox/python:3.14";
@@ -340,7 +344,8 @@ const SESSION_GRACE_SECS: u64 = 5 * 60;
 /// Vercel team billing plans that change sandbox limits.
 /// <https://vercel.com/docs/sandbox/pricing> and the Sandbox FAQ: Hobby 45
 /// minutes and 4 vCPUs, Pro 24 hours and 8 vCPUs, Enterprise 24 hours and 32.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "lowercase")]
 pub enum TeamPlan {
     Hobby,
     Pro,
@@ -450,44 +455,141 @@ fn redact_token(text: &str, token: &str) -> String {
     }
 }
 
-async fn request_team_plan_with(
-    client: &reqwest::Client,
-    base: &str,
-    token: &str,
-    team_id: &str,
-) -> Result<Option<TeamPlan>> {
-    let url = format!("{}/v2/teams/{team_id}", base.trim_end_matches('/'));
-    let response = client
-        .get(&url)
-        .bearer_auth(token)
-        .send()
-        .await
-        .map_err(|error| anyhow!("{}", redact_token(&error.to_string(), token)))?;
-    let status = response.status();
-    if !status.is_success() {
-        return Err(anyhow!("HTTP {status}"));
-    }
-    let body: Value = response
-        .json()
-        .await
-        .map_err(|error| anyhow!("{}", redact_token(&error.to_string(), token)))?;
-    Ok(plan_from_team_body(&body))
+#[derive(Debug, Clone, Serialize)]
+pub struct Team {
+    pub id: String,
+    pub name: String,
+    pub plan: Option<TeamPlan>,
 }
 
-async fn request_team_plan(token: &str, team_id: &str) -> Result<Option<TeamPlan>> {
-    let client = crate::net::remote_client()
-        .timeout(Duration::from_secs(10))
-        .build()
-        .map_err(|error| anyhow!("HTTP client: {error}"))?;
-    request_team_plan_with(&client, "https://api.vercel.com", token, team_id).await
+#[derive(Debug, Clone, Serialize)]
+pub struct Project {
+    pub id: String,
+    pub name: String,
+}
+
+/// The Vercel REST API as one access token sees it. Errors never carry the token.
+pub struct Api<'a> {
+    client: reqwest::Client,
+    base: &'a str,
+    token: &'a str,
+}
+
+impl<'a> Api<'a> {
+    pub fn new(token: &'a str) -> Result<Self> {
+        let client = crate::net::remote_client()
+            .timeout(Duration::from_secs(10))
+            .build()
+            .map_err(|error| anyhow!("HTTP client: {error}"))?;
+        Ok(Self {
+            client,
+            base: "https://api.vercel.com",
+            token,
+        })
+    }
+
+    async fn call(&self, request: reqwest::RequestBuilder) -> Result<Value> {
+        let redact = |error: reqwest::Error| redact_token(&error.to_string(), self.token);
+        let response = request
+            .bearer_auth(self.token)
+            .send()
+            .await
+            .map_err(|error| anyhow!("Couldn't reach Vercel: {}", redact(error)))?;
+        let status = response.status();
+        if status.is_success() {
+            return response
+                .json()
+                .await
+                .map_err(|error| anyhow!("Unreadable Vercel response: {}", redact(error)));
+        }
+        let message = response
+            .json::<Value>()
+            .await
+            .ok()
+            .and_then(|body| body["error"]["message"].as_str().map(str::to_string));
+        let message = message.map(|m| format!(": {m}")).unwrap_or_default();
+        Err(match status.as_u16() {
+            401 | 403 => anyhow!("Vercel rejected this token{message}"),
+            _ => anyhow!("Vercel returned HTTP {status}{message}"),
+        })
+    }
+
+    async fn get(&self, path: &str, query: &[(&str, &str)]) -> Result<Value> {
+        let url = format!("{}{path}", self.base.trim_end_matches('/'));
+        self.call(self.client.get(url).query(query)).await
+    }
+
+    pub async fn team_plan(&self, team_id: &str) -> Result<Option<TeamPlan>> {
+        let body = self.get(&format!("/v2/teams/{team_id}"), &[]).await?;
+        Ok(plan_from_team_body(&body))
+    }
+
+    /// The teams this token can use. A team-scoped token sees only its team.
+    pub async fn teams(&self) -> Result<Vec<Team>> {
+        let body = self.get("/v2/teams", &[("limit", "100")]).await?;
+        let teams = body["teams"].as_array().cloned().unwrap_or_default();
+        Ok(teams
+            .iter()
+            .filter_map(|team| {
+                let id = team["id"].as_str()?.to_string();
+                let name = team["name"]
+                    .as_str()
+                    .or_else(|| team["slug"].as_str())
+                    .unwrap_or(&id)
+                    .to_string();
+                Some(Team {
+                    id,
+                    name,
+                    plan: plan_from_team_body(team),
+                })
+            })
+            .collect())
+    }
+
+    /// The account's default team, which the dashboard opens on.
+    pub async fn default_team_id(&self) -> Result<Option<String>> {
+        let body = self.get("/v2/user", &[]).await?;
+        Ok(body["user"]["defaultTeamId"].as_str().map(str::to_string))
+    }
+
+    pub async fn projects(&self, team_id: &str) -> Result<Vec<Project>> {
+        let body = self
+            .get("/v10/projects", &[("teamId", team_id), ("limit", "100")])
+            .await?;
+        // The endpoint answers with a bare array or a paginated object.
+        let projects = body
+            .as_array()
+            .or_else(|| body["projects"].as_array())
+            .cloned()
+            .unwrap_or_default();
+        Ok(projects.iter().filter_map(project_from_body).collect())
+    }
+
+    pub async fn create_project(&self, team_id: &str, name: &str) -> Result<Project> {
+        let url = format!("{}/v11/projects", self.base.trim_end_matches('/'));
+        let request = self
+            .client
+            .post(url)
+            .query(&[("teamId", team_id)])
+            .json(&json!({ "name": name }));
+        let body = self.call(request).await?;
+        project_from_body(&body).ok_or_else(|| anyhow!("Vercel created a project without an id"))
+    }
+}
+
+fn project_from_body(body: &Value) -> Option<Project> {
+    Some(Project {
+        id: body["id"].as_str()?.to_string(),
+        name: body["name"].as_str()?.to_string(),
+    })
 }
 
 /// One `GET /v2/teams/{teamId}` when a token and team id are both available.
 /// Missing credentials, an unreadable plan, or a failed request yield `None`
 /// and do not block the launch.
 pub async fn lookup_team_plan() -> Option<TeamPlan> {
-    let (token, _) = credential("VERCEL_TOKEN")?;
-    let (team_id, _) = credential("VERCEL_TEAM_ID")?;
+    let (token, _) = credential(TOKEN)?;
+    let (team_id, _) = credential(TEAM_ID)?;
     if !team_id_is_safe(&team_id) {
         eprintln!(
             "orx: VERCEL_TEAM_ID cannot be used to look up the team plan; submitting without \
@@ -495,7 +597,11 @@ pub async fn lookup_team_plan() -> Option<TeamPlan> {
         );
         return None;
     }
-    match request_team_plan(&token, &team_id).await {
+    let plan = match Api::new(&token) {
+        Ok(api) => api.team_plan(&team_id).await,
+        Err(error) => Err(error),
+    };
+    match plan {
         Ok(Some(plan)) => Some(plan),
         Ok(None) => {
             eprintln!(
@@ -624,7 +730,7 @@ fn resolve_credential(
         .or_else(|| synced(key).filter(present).map(|v| (v, "syncedEnv")))
 }
 
-fn credential(key: &str) -> Option<(String, &'static str)> {
+pub fn credential(key: &str) -> Option<(String, &'static str)> {
     resolve_credential(
         key,
         |k| std::env::var(k).ok(),
@@ -663,27 +769,6 @@ pub fn token_source() -> Option<&'static str> {
     } else {
         Some("env")
     }
-}
-
-/// Per-variable credential source: `"env"`, `"syncedEnv"`, or absent.
-pub fn credential_sources() -> Vec<(&'static str, Option<&'static str>)> {
-    std::iter::once(OIDC_TOKEN)
-        .chain(ACCESS_TOKEN_KEYS)
-        .map(|key| (key, credential(key).map(|(_, source)| source)))
-        .collect()
-}
-
-/// Whether the managed SDK venv is installed, or `ORX_VERCEL_PYTHON` overrides it.
-/// `"override"` means the user pointed at an interpreter; `"managed"` is the
-/// orx venv, ready only once its interpreter exists.
-pub fn sdk_env_status() -> (&'static str, bool) {
-    if std::env::var("ORX_VERCEL_PYTHON")
-        .ok()
-        .is_some_and(|path| !path.trim().is_empty())
-    {
-        return ("override", true);
-    }
-    ("managed", VERCEL_ENV.python().exists())
 }
 
 /// Credentials to inject into the launcher subprocess.
@@ -1013,9 +1098,9 @@ pub async fn preflight() -> Result<()> {
     ensure_env().await?;
     if token_source().is_none() {
         return Err(anyhow!(
-            "No Vercel Sandbox credentials. Set VERCEL_TOKEN, VERCEL_TEAM_ID and \
-             VERCEL_PROJECT_ID (or a VERCEL_OIDC_TOKEN from `vercel env pull`) in the process \
-             environment or Settings → Environment."
+            "Vercel Sandbox isn't set up. Connect it in Settings → Compute → Vercel Sandbox, or \
+             set VERCEL_TOKEN, VERCEL_TEAM_ID and VERCEL_PROJECT_ID (or a VERCEL_OIDC_TOKEN from \
+             `vercel env pull`) in the environment."
         ));
     }
     let probe = Command::new(python_bin())
@@ -1194,10 +1279,13 @@ mod tests {
             .timeout(Duration::from_secs(5))
             .build()
             .unwrap();
-        let plan =
-            request_team_plan_with(&client, &format!("http://{addr}"), "test-token", "team_abc")
-                .await
-                .unwrap();
+        let base = format!("http://{addr}");
+        let api = Api {
+            client,
+            base: &base,
+            token: "test-token",
+        };
+        let plan = api.team_plan("team_abc").await.unwrap();
         assert_eq!(plan, Some(TeamPlan::Hobby));
     }
 
@@ -1221,17 +1309,58 @@ mod tests {
             .timeout(Duration::from_secs(5))
             .build()
             .unwrap();
-        let error = request_team_plan_with(
-            &client,
-            &format!("http://{addr}"),
-            "secret-token",
-            "team_abc",
-        )
-        .await
-        .unwrap_err()
-        .to_string();
-        assert!(error.contains("403"), "{error}");
+        let base = format!("http://{addr}");
+        let api = Api {
+            client,
+            base: &base,
+            token: "secret-token",
+        };
+        let error = api.team_plan("team_abc").await.unwrap_err().to_string();
+        assert!(error.contains("rejected"), "{error}");
         assert!(!error.contains("secret-token"), "{error}");
+    }
+
+    /// Answer each connection with the next body, in order.
+    async fn serve(bodies: Vec<&'static str>) -> String {
+        use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            for body in bodies {
+                let (mut sock, _) = listener.accept().await.unwrap();
+                let mut tmp = [0u8; 4096];
+                let _ = sock.read(&mut tmp).await;
+                let resp = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                    body.len()
+                );
+                sock.write_all(resp.as_bytes()).await.unwrap();
+            }
+        });
+        format!("http://{addr}")
+    }
+
+    #[tokio::test]
+    async fn teams_and_projects_read_both_response_shapes() {
+        let base = serve(vec![
+            r#"{"teams":[{"id":"team_a","name":"Lab","billing":{"plan":"pro"}},{"id":"team_b","slug":"side","limited":true}]}"#,
+            r#"[{"id":"prj_1","name":"site"}]"#,
+            r#"{"projects":[{"id":"prj_2","name":"openresearch"}],"pagination":{"count":1,"next":null}}"#,
+        ])
+        .await;
+        let api = Api {
+            client: crate::net::loopback_client().build().unwrap(),
+            base: &base,
+            token: "t",
+        };
+        let teams = api.teams().await.unwrap();
+        assert_eq!(teams[0].plan, Some(TeamPlan::Pro));
+        assert_eq!((teams[1].name.as_str(), teams[1].plan), ("side", None));
+        assert_eq!(api.projects("team_a").await.unwrap()[0].id, "prj_1");
+        assert_eq!(
+            api.projects("team_a").await.unwrap()[0].name,
+            "openresearch"
+        );
     }
 
     #[test]
