@@ -48,6 +48,12 @@ import { m } from "../paraglide/messages.js";
 import { formatForDisplay, matchesKeyboardEvent, useAppHotkeys, useHotkey } from "@tanstack/react-hotkeys";
 import { appHotkeys } from "../hotkeys";
 import { copyToClipboard } from "../clipboard";
+import {
+  desktopClipboardBridgeAvailable,
+  fileFromDesktopClipboardPayload,
+  installDesktopClipboardBridge,
+  requestDesktopClipboardPaste,
+} from "../desktopClipboard";
 import { autoDir, ltr } from "../i18n";
 import { navigateKeyboardList } from "../keyboardNavigation";
 import { useLocale } from "../locale";
@@ -5190,19 +5196,54 @@ export function ChatPanel({
   }
 
   function onComposerPaste(e: React.ClipboardEvent) {
-    const files = Array.from(e.clipboardData.items)
+    const fileItems = Array.from(e.clipboardData.items).filter(
+      (item) => item.kind === "file",
+    );
+    const files = fileItems
       .filter(
         (item) =>
-          item.kind === "file" &&
-          (item.type.startsWith("image/") || item.type === "application/pdf"),
+          item.type.startsWith("image/") || item.type === "application/pdf",
       )
       .map((item) => item.getAsFile())
       .filter((f): f is File => f !== null);
-    if (files.length > 0) {
+    const usable = files.filter((file) => file.size > 0);
+    if (usable.length > 0) {
       e.preventDefault();
-      addFiles(files);
+      addFiles(usable);
+      return;
     }
+    if (!desktopClipboardBridgeAvailable()) {
+      return;
+    }
+    const types = Array.from(e.clipboardData.types);
+    const mayContainImage =
+      files.length > 0 ||
+      types.some((type) => type.startsWith("image/")) ||
+      fileItems.some(
+        (item) =>
+          item.type.startsWith("image/") || item.type === "application/pdf",
+      ) ||
+      (fileItems.length === 0 &&
+        (types.length === 0 || types.includes("Files")));
+    if (!mayContainImage) {
+      return;
+    }
+    e.preventDefault();
+    void (async () => {
+      const payload = await requestDesktopClipboardPaste();
+      if (!payload) {
+        return;
+      }
+      const file = await fileFromDesktopClipboardPayload(payload);
+      if (file) {
+        addFiles([file]);
+      }
+    })();
   }
+
+  useEffect(() => {
+    installDesktopClipboardBridge();
+  }, []);
 
   // The open session, if any (its harness is locked; its model/mode/reasoning
   // are what the composer should reflect and edit).

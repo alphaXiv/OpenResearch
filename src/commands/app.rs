@@ -833,11 +833,33 @@ mod imp {
         Focus(Option<String>),
         /// The dashboard page finished loading and can take `orx:open-path`.
         PageReady,
+        #[cfg(target_os = "linux")]
+        ClipboardPasteRequest(String),
+        #[cfg(target_os = "linux")]
+        ClipboardPaste(ClipboardPasteResult),
         #[cfg(windows)]
         Close,
         /// Tell a newly loaded page whether the window is maximized (Windows) or fullscreen (macOS).
         #[cfg(any(windows, target_os = "macos"))]
         SyncWindowState,
+    }
+
+    #[cfg(target_os = "linux")]
+    #[derive(serde::Serialize)]
+    #[serde(rename_all = "camelCase")]
+    struct ClipboardPastePayload {
+        id: String,
+        path: String,
+        name: String,
+        media_type: String,
+        size: u64,
+    }
+
+    #[cfg(target_os = "linux")]
+    struct ClipboardPasteResult {
+        id: String,
+        payload: Option<ClipboardPastePayload>,
+        error: Option<String>,
     }
 
     #[derive(Clone, Copy)]
@@ -881,7 +903,11 @@ mod imp {
         // entry's StartupWMClass.
         #[cfg(target_os = "linux")]
         gtk::glib::set_prgname(Some("OpenResearch"));
+        #[cfg(target_os = "linux")]
+        cleanup_clipboard_temp_dir();
         let event_loop = EventLoopBuilder::<UserEvent>::with_user_event().build();
+        #[cfg(target_os = "linux")]
+        let clipboard_proxy = event_loop.create_proxy();
 
         // Dashboard server on background workers (we're inside main's runtime).
         if !external_server {
@@ -1082,6 +1108,8 @@ mod imp {
                     }
                 }
             });
+        #[cfg(target_os = "linux")]
+        let builder = builder.with_initialization_script("window.__ORX_CLIPBOARD_BRIDGE__ = true;");
         #[cfg(windows)]
         let builder = {
             use wry::WebViewBuilderExtWindows;
@@ -1137,6 +1165,17 @@ mod imp {
                         {
                             let _ = window.drag_resize_window(direction);
                         }
+                    }
+                    #[cfg(target_os = "linux")]
+                    _ if message.starts_with("clipboard-paste:") => {
+                        let id = message["clipboard-paste:".len()..].to_string();
+                        if !id.is_empty() && id.bytes().all(|byte| byte.is_ascii_digit()) {
+                            let _ = proxy.send_event(UserEvent::ClipboardPasteRequest(id));
+                        }
+                    }
+                    #[cfg(target_os = "linux")]
+                    _ if message.starts_with("clipboard-temp-delete:") => {
+                        remove_clipboard_temp(&message["clipboard-temp-delete:".len()..]);
                     }
                     #[cfg(target_os = "linux")]
                     _ => {}
@@ -1399,6 +1438,29 @@ mod imp {
             Event::UserEvent(UserEvent::PageReady) if matches!(quit, Quit::No) => {
                 links.on_page_ready(&webview);
             }
+            #[cfg(target_os = "linux")]
+            Event::UserEvent(UserEvent::ClipboardPasteRequest(id)) if matches!(quit, Quit::No) => {
+                request_clipboard_paste(id, clipboard_proxy.clone());
+            }
+            #[cfg(target_os = "linux")]
+            Event::UserEvent(UserEvent::ClipboardPaste(result)) => {
+                let ClipboardPasteResult { id, payload, error } = result;
+                let value = match payload {
+                    Some(payload) => serde_json::to_value(payload).unwrap_or_else(|_| {
+                        serde_json::json!({
+                            "id": id,
+                            "error": "could not encode clipboard image"
+                        })
+                    }),
+                    None => serde_json::json!({
+                        "id": id,
+                        "error": error.unwrap_or_else(|| "could not read clipboard image".to_string())
+                    }),
+                };
+                let _ = webview.evaluate_script(&format!(
+                    "window.__ORX_CLIPBOARD_PASTE__ && window.__ORX_CLIPBOARD_PASTE__({value});"
+                ));
+            }
             #[cfg(target_os = "macos")]
             Event::Opened { urls } if matches!(quit, Quit::No) => {
                 // Before the first page shows, the page-load handler reveals the window.
@@ -1414,6 +1476,78 @@ mod imp {
             }
             _ => {}
         })
+    }
+
+    #[cfg(target_os = "linux")]
+    fn request_clipboard_paste(id: String, proxy: tao::event_loop::EventLoopProxy<UserEvent>) {
+        let clipboard = gtk::Clipboard::get(&gtk::gdk::SELECTION_CLIPBOARD);
+        let callback_id = id.clone();
+        clipboard.request_image(move |_clipboard, pixbuf| {
+            let result = match pixbuf {
+                Some(pixbuf) => write_clipboard_image(&callback_id, pixbuf),
+                None => Err("clipboard does not contain an image".to_string()),
+            };
+            let (payload, error) = match result {
+                Ok(payload) => (Some(payload), None),
+                Err(error) => (None, Some(error)),
+            };
+            let _ = proxy.send_event(UserEvent::ClipboardPaste(ClipboardPasteResult {
+                id: callback_id,
+                payload,
+                error,
+            }));
+        });
+    }
+
+    #[cfg(target_os = "linux")]
+    fn write_clipboard_image(
+        id: &str,
+        pixbuf: &gtk::gdk_pixbuf::Pixbuf,
+    ) -> std::result::Result<ClipboardPastePayload, String> {
+        let bytes = pixbuf
+            .save_to_bufferv("png", &[])
+            .map_err(|error| error.to_string())?;
+        let dir = std::env::temp_dir().join("openresearch-clipboard");
+        std::fs::create_dir_all(&dir).map_err(|error| error.to_string())?;
+        let path = dir.join(format!("{}-{id}.png", std::process::id()));
+        std::fs::write(&path, &bytes).map_err(|error| error.to_string())?;
+        Ok(ClipboardPastePayload {
+            id: id.to_string(),
+            path: path.to_string_lossy().into_owned(),
+            name: "pasted-image.png".to_string(),
+            media_type: "image/png".to_string(),
+            size: bytes.len() as u64,
+        })
+    }
+
+    #[cfg(target_os = "linux")]
+    fn remove_clipboard_temp(path: &str) {
+        let dir = std::env::temp_dir().join("openresearch-clipboard");
+        let path = Path::new(path);
+        if path.parent() == Some(dir.as_path()) {
+            let _ = std::fs::remove_file(path);
+        }
+    }
+
+    #[cfg(target_os = "linux")]
+    fn cleanup_clipboard_temp_dir() {
+        let dir = std::env::temp_dir().join("openresearch-clipboard");
+        let Ok(entries) = std::fs::read_dir(&dir) else {
+            return;
+        };
+        for entry in entries.flatten() {
+            let Ok(metadata) = entry.metadata() else {
+                continue;
+            };
+            let stale = metadata
+                .modified()
+                .ok()
+                .and_then(|modified| modified.elapsed().ok())
+                .is_some_and(|age| age > Duration::from_secs(60 * 60));
+            if stale {
+                let _ = std::fs::remove_file(entry.path());
+            }
+        }
     }
 
     /// Where `openresearch:` links go. One that opens the app arrives before its server answers.
