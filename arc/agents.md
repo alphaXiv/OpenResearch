@@ -106,7 +106,12 @@ to the user's native store, and orx copies recent history only for display.
   hosts, it forwards research calls without credentials to alphaXiv's anonymous
   MCP endpoint. Signed in, it refreshes this computer's alphaXiv token under the
   shared lock and exposes library reads plus requested folder creation and paper
-  saves. Only the allowlisted tools reach the agent; write tools ask in Ask mode.
+  saves. Only the allowlisted tools reach the agent. The write tools carry an
+  ask rule for Claude Code, Codex's app server and OpenCode, whose rule also
+  covers code-mode calls. ACP agents get no per-tool rule and the older
+  `codex exec` path cannot prompt, so there the agent's own policy decides.
+  Cursor and Antigravity get no server and read the library with
+  `orx alphaxiv library`.
   Sign-in changes respawn a resident child on its next turn, resuming its native
   session so the tool list changes without losing context. Tokens stay in orx.
 - **Autonomy.** How much the agent may decide alone rides every turn as a

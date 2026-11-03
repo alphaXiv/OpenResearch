@@ -1,3 +1,4 @@
+import { openSignIn } from "./AccountChip";
 import { confirmOpenResearchSignOut } from "./confirmOpenResearchSignOut";
 import { cn } from "./ui/cn";
 import { showConfirmDialog, showCustomDialog, type DialogContentProps } from "../dialog";
@@ -6,7 +7,7 @@ import { formatAcpCommand } from "../acp";
 import { TARGET_LABELS } from "../computeTargets";
 import { AcpAuthDialog } from "./AcpAuthDialog";
 import { accountErrorMessage, OpenResearchAccount } from "./OpenResearchAccount";
-import { LibraryView } from "./LibraryView";
+import { OpenResearchSshKey } from "./OpenResearchSshKey";
 import { HarnessSetupDialog } from "./HarnessSetupDialog";
 import { AcpHarnessDialog } from "./AcpHarnessDialog";
 import { AddHarnessDialog, canConfigureHarness, sortHarnesses } from "./AddHarnessDialog";
@@ -33,7 +34,7 @@ import {
   getOpenResearchSettingsQuery,
   useOpenResearchAccount,
   useAlphaXivFolders,
-  signOutOpenResearch,
+  useSignOutOpenResearch,
   getLocalMachineQuery,
   getComputeSettingsQuery,
   getTinkerSettingsQuery,
@@ -48,7 +49,6 @@ import {
 import { getOverleafSettingsQuery } from "../queries/files";
 import { githubAccountQuery, githubOrganizationsQuery, listProjectsQuery, listRunsQuery, repoAccessQuery } from "../queries/projects";
 import {
-  BookOpen,
   ArrowLeft,
   ArrowRight,
   ChevronDown,
@@ -156,7 +156,7 @@ import { DirectionProvider } from "@base-ui/react/direction-provider";
 import { HarnessLogo } from "./HarnessLogo";
 import { LocalModelSetup } from "./LocalModelSetup";
 import { StatusBadge } from "./StatusBadge";
-import { OpenResearchSetupTerminal, SettingsCommandTerminal, SshConnectTerminal, SshTerminalTranscript } from "./SshConnectTerminal";
+import { SettingsCommandTerminal, SshConnectTerminal, SshTerminalTranscript } from "./SshConnectTerminal";
 import { SshExecutionSettings, SshDefaultHost } from "./SshExecutionSettings";
 import { showSshConfigDialog } from "./SshConfigDialog";
 import {
@@ -1713,23 +1713,20 @@ function localMachineSummary(hw: LocalMachine) {
 function OpenResearchSection({ remote }: { remote: boolean }) {
   const settingsQuery = useQuery(getOpenResearchSettingsQuery());
   const accountQuery = useOpenResearchAccount();
-  const account = accountQuery.data;
+  // A remote workspace's settings come from the remote host but its account from this machine; don't pair them.
+  const account = remote ? undefined : accountQuery.data;
+  const accountFailed = !remote && accountQuery.isError;
   const folders = useAlphaXivFolders();
   const alphaXivStatus = folders.isSuccess ? m.library_connected() : folders.error instanceof AlphaXivNotConnectedError ? m.library_not_connected() : null;
   const [editProfileBefore, editProfileAfter] = m.settings_openresearch_edit_profile({ settings: "\0" }).split("\0");
-  const accountError = accountErrorMessage(accountQuery.error);
+  const accountError = remote ? null : accountErrorMessage(accountQuery.error);
   const s = settingsQuery.data;
-  const signedOut = !remote && account && !account.loggedIn;
+  const signedOut = account && !account.loggedIn;
   const expired = signedOut && s?.loggedIn;
   const loadError = settingsQuery.error?.message;
   const busy = settingsQuery.isFetching;
-  const [loginAttempt, setLoginAttempt] = useState(0);
-  const [signingIn, setSigningIn] = useState(false);
   const refresh = () => { void accountQuery.refetch(); return settingsQuery.refetch(); };
-  const logout = useMutation({
-    mutationFn: signOutOpenResearch,
-    onSuccess: () => { void refresh(); },
-  });
+  const logout = useSignOutOpenResearch();
 
   return (
     <>
@@ -1740,11 +1737,11 @@ function OpenResearchSection({ remote }: { remote: boolean }) {
           <div className={COMPUTE_DETAILS_CLASS_NAME}>
             <span className="k">{m.settings_page_status()}</span>
             <span className="v">
-              {(!s && busy) || signingIn ? (
-                <Badge className="gap-1.5" role="status"><Spinner />{signingIn ? m.settings_openresearch_setting_up() : m.common_checking()}</Badge>
+              {!s && busy ? (
+                <Badge className="gap-1.5" role="status"><Spinner />{m.common_checking()}</Badge>
               ) : signedOut ? (
                 <Badge variant="warning">{m.settings_page_not_signed_in()}</Badge>
-              ) : loadError || s?.error || accountQuery.isError ? (
+              ) : loadError || s?.error || accountFailed ? (
                 <Badge variant="warning">{m.settings_page_unable_to_verify()}</Badge>
               ) : !s ? null : !s.loggedIn ? (
                 <Badge variant="warning">{m.settings_page_not_signed_in()}</Badge>
@@ -1757,10 +1754,10 @@ function OpenResearchSection({ remote }: { remote: boolean }) {
               )}
             </span>
             {s?.loggedIn && !signedOut && <>
-              {!accountQuery.isError && <>
+              {!remote && !accountFailed && <>
               <span className="k self-start">{account?.user?.alphaxivUrl ? m.settings_openresearch_alphaxiv_account() : m.settings_page_account()}</span>
               <span className="v">
-                {accountQuery.isLoading ? m.common_checking() : <><OpenResearchAccount user={account?.user ?? null} />{alphaXivStatus && <span className="basis-full text-sm text-subtext">{alphaXivStatus}</span>}{account?.user?.alphaxivUrl && <span className="basis-full text-sm text-subtext">{editProfileBefore}<a className="text-text underline" href={`${account.user.alphaxivUrl}/settings`} target="_blank" rel="noreferrer">{m.settings_openresearch_alphaxiv_settings()}</a>{editProfileAfter}</span>}</>}
+                {accountQuery.isLoading ? m.common_checking() : <><OpenResearchAccount user={account?.user ?? null} />{alphaXivStatus && <span className="basis-full text-sm text-subtext">{alphaXivStatus}</span>}{account?.user?.alphaxivUrl && <span className="basis-full text-sm text-subtext">{editProfileBefore}<a className="text-text underline" href={new URL("/settings", account.user.alphaxivUrl).href} target="_blank" rel="noreferrer">{m.settings_openresearch_alphaxiv_settings()}</a>{editProfileAfter}</span>}</>}
               </span>
               </>}
               <span className="k self-start">{m.settings_openresearch_organizations()}</span>
@@ -1792,20 +1789,7 @@ function OpenResearchSection({ remote }: { remote: boolean }) {
               {m.settings_login_help({ command: ltr("orx login") })}
             </p>
           )}
-          {!remote && loginAttempt > 0 && (
-            <OpenResearchSetupTerminal
-              key={loginAttempt}
-              onComplete={() => {
-                setSigningIn(false);
-                setLoginAttempt(0);
-                void refresh();
-              }}
-              onError={(error) => {
-                setSigningIn(false);
-                showAlert(error, "error");
-              }}
-            />
-          )}
+          {!remote && !signedOut && s?.sshKeyToAdd && <OpenResearchSshKey sshKey={s.sshKeyToAdd} />}
           {remote && s?.loggedIn && s.sshKeyStatus === "none_registered" &&
             (s.sshKeyPath ? (
               <p dir="auto" className={SETTINGS_NOTE_CLASS_NAME}>
@@ -1835,26 +1819,13 @@ function OpenResearchSection({ remote }: { remote: boolean }) {
       )}
       <div className="mt-4 flex flex-wrap justify-end gap-2">
         {(account?.apiUrl || s?.apiUrl) && <ButtonLink href={`${(account?.apiUrl || s?.apiUrl || "").replace(/\/$/, "")}/auth/login`} target="_blank" rel="noreferrer">{m.settings_openresearch_dashboard()} <ExternalLink size={14} /></ButtonLink>}
-        {!remote && !signedOut && (account?.loggedIn || s?.loggedIn) && <Button disabled={busy || signingIn || logout.isPending} onClick={() => confirmOpenResearchSignOut(() => logout.mutateAsync().then(() => {}))}>{m.settings_openresearch_sign_out()}</Button>}
-        {signingIn && (
-          <Button onClick={() => {
-            setLoginAttempt(0);
-            setSigningIn(false);
-            void refresh();
-          }}>
-            {m.settings_page_cancel()}
-          </Button>
-        )}
-        <Button onClick={() => void refresh()} disabled={busy || signingIn}>
+        {!remote && !signedOut && (account?.loggedIn || s?.loggedIn) && <Button disabled={busy || logout.isPending} onClick={() => confirmOpenResearchSignOut(logout.mutateAsync)}>{m.settings_openresearch_sign_out()}</Button>}
+        <Button onClick={() => void refresh()} disabled={busy}>
           <RefreshCw size={14} /> {busy ? m.common_checking() : m.settings_check_again()}
         </Button>
-        {!remote && s && account && (!account.loggedIn || s.sshKeyStatus !== "matched") && (
-          <Button variant="primary" disabled={busy || signingIn} onClick={() => {
-            if (!account?.loggedIn) { window.dispatchEvent(new Event("openresearch-sign-in")); return; }
-            setSigningIn(true);
-            setLoginAttempt((attempt) => attempt + 1);
-          }}>
-            {signingIn ? <Spinner /> : <SquareTerminal size={14} />} {account?.loggedIn ? m.settings_setup_ssh_key() : m.account_sign_in_alphaxiv()}
+        {!remote && s && signedOut && (
+          <Button variant="primary" disabled={busy} onClick={(event) => openSignIn(false, event.currentTarget)}>
+            {m.account_sign_in_alphaxiv()}
           </Button>
         )}
       </div>
@@ -4215,7 +4186,6 @@ const SETTINGS_SECTIONS: Tab[] = ["projects", "harnesses", "storage"];
 
 /** Primary rail entries. Configuration sections share the Settings entry. */
 export const SETTINGS_NAV: SettingsNavItem[] = [
-  { id: "library", label: m.library_title, icon: <BookOpen size={16} />, activeTabs: ["library"] },
   {
     id: "compute",
     label: m.settings_page_compute,
@@ -4306,7 +4276,6 @@ export function SettingsView({
           </div>
         </>
       )}
-      {tab === "library" && <LibraryView />}
       {tab === "compute" && (
         <ComputeTab
           project={project}

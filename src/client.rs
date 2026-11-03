@@ -92,7 +92,7 @@ pub struct ListCpuCatalog {
     pub offers: Vec<CpuOffer>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct CurrentUser {
     pub id: String,
@@ -102,7 +102,7 @@ pub struct CurrentUser {
     pub alphaxiv_url: Option<String>,
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Deserialize)]
 pub struct CurrentUserResponse {
     pub user: CurrentUser,
 }
@@ -276,6 +276,14 @@ pub(crate) fn http() -> &'static Client {
 #[derive(Debug)]
 pub struct Unauthorized;
 
+impl std::fmt::Display for Unauthorized {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("Unauthorized — your token is invalid or revoked. Run `orx login` again.")
+    }
+}
+
+impl std::error::Error for Unauthorized {}
+
 #[derive(Debug)]
 pub struct ApiTransportError(pub String);
 
@@ -297,14 +305,6 @@ impl std::fmt::Display for ApiResponseError {
 }
 
 impl std::error::Error for ApiResponseError {}
-
-impl std::fmt::Display for Unauthorized {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str("Unauthorized — your token is invalid or revoked. Run `orx login` again.")
-    }
-}
-
-impl std::error::Error for Unauthorized {}
 
 /// OpenResearch answered 503 to an alphaXiv sign-in: it couldn't fetch
 /// alphaXiv's signing keys, so a retry in a moment may pass.
@@ -437,8 +437,57 @@ async fn api_post<T: DeserializeOwned>(creds: &Credentials, path: &str, body: Va
 // Endpoint fns (one per TS export, same path/method/shape)
 // ---------------------------------------------------------------------------
 
+/// How long the sign-in and account calls wait on OpenResearch, so a hung API
+/// can't hold the sign-in page open.
+const ACCOUNT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
+
 pub async fn current_user(creds: &Credentials) -> Result<CurrentUserResponse> {
-    api_get(creds, "/users/me").await
+    tokio::time::timeout(ACCOUNT_TIMEOUT, api_get(creds, "/users/me"))
+        .await
+        .map_err(|_| {
+            ApiTransportError(format!(
+                "Could not reach the API at {}: timed out",
+                creds.api_url
+            ))
+        })?
+}
+
+/// Posts an alphaXiv id_token issued to the desktop app to `path`, as the
+/// account behind `token` if any, and maps the refusals both routes share.
+async fn post_alphaxiv_id_token(
+    api_url: &str,
+    path: &str,
+    token: Option<&str>,
+    id_token: &str,
+) -> Result<reqwest::Response> {
+    let mut request = http()
+        .post(format!("{api_url}{path}"))
+        .json(&serde_json::json!({ "idToken": id_token }))
+        .timeout(ACCOUNT_TIMEOUT);
+    if let Some(token) = token {
+        request = request.bearer_auth(token);
+    }
+    let response = request
+        .send()
+        .await
+        .map_err(|err| ApiTransportError(format!("Could not reach the API at {api_url}: {err}")))?;
+    match response.status().as_u16() {
+        401 => {
+            let body = response.json::<Value>().await.unwrap_or_default();
+            if body["error"] == "invalid_token" {
+                Err(anyhow!(
+                    "OpenResearch couldn't verify the alphaXiv sign-in. Try again."
+                ))
+            } else {
+                Err(Unauthorized.into())
+            }
+        }
+        404 => Err(anyhow!(
+            "The OpenResearch server at {api_url} is too old for alphaXiv sign-in."
+        )),
+        503 => Err(AlphaXivUnavailable.into()),
+        _ => Ok(response),
+    }
 }
 
 /// A personal access token for the account behind an alphaXiv id_token issued
@@ -449,21 +498,13 @@ pub async fn alphaxiv_desktop_token(api_url: &str, id_token: &str) -> Result<Str
         token: String,
     }
 
-    let response = http()
-        .post(format!("{api_url}/auth/alphaxiv/desktop"))
-        .json(&serde_json::json!({ "idToken": id_token }))
-        .send()
-        .await
-        .map_err(|err| ApiTransportError(format!("Could not reach the API at {api_url}: {err}")))?;
+    let response =
+        post_alphaxiv_id_token(api_url, "/auth/alphaxiv/desktop", None, id_token).await?;
     match response.status().as_u16() {
         200 => Ok(response.json::<Issued>().await?.token),
-        401 => Err(anyhow!(
-            "OpenResearch couldn't verify the alphaXiv sign-in. Try again."
-        )),
         409 => Err(anyhow!(
-            "OpenResearch couldn't sign in with this alphaXiv account."
+            "An OpenResearch account already uses this email. Sign in at openresearch.sh and connect alphaXiv there, then try again."
         )),
-        503 => Err(AlphaXivUnavailable.into()),
         status => Err(anyhow!(
             "Request to /auth/alphaxiv/desktop failed ({status})."
         )),
@@ -473,16 +514,20 @@ pub async fn alphaxiv_desktop_token(api_url: &str, id_token: &str) -> Result<Str
 /// Links the alphaXiv account behind an id_token issued to the desktop app to
 /// the signed-in account — `POST /auth/alphaxiv/link`.
 pub async fn link_alphaxiv(creds: &Credentials, id_token: &str) -> Result<()> {
-    let body = serde_json::json!({ "idToken": id_token });
-    request_no_content(creds, Method::POST, "/auth/alphaxiv/link", Some(body))
-        .await
-        .map_err(|error| match error.downcast_ref::<ApiResponseError>() {
-            Some(ApiResponseError(409, _)) => anyhow!(
-                "This alphaXiv account or your OpenResearch account is already linked to another account."
-            ),
-            Some(ApiResponseError(503, _)) => AlphaXivUnavailable.into(),
-            _ => error,
-        })
+    let response = post_alphaxiv_id_token(
+        &creds.api_url,
+        "/auth/alphaxiv/link",
+        Some(&creds.token),
+        id_token,
+    )
+    .await?;
+    match response.status().as_u16() {
+        200..=299 => Ok(()),
+        409 => Err(anyhow!(
+            "This alphaXiv account or your OpenResearch account is already linked to another account."
+        )),
+        status => Err(anyhow!("Request to /auth/alphaxiv/link failed ({status}).")),
+    }
 }
 
 pub async fn list_orgs(creds: &Credentials) -> Result<ListOrgs> {

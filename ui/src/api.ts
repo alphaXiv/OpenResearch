@@ -1376,7 +1376,7 @@ export const getOpenResearchAccount = async (signal?: AbortSignal) => {
 
 export class AlphaXivNotConnectedError extends Error {}
 export interface AlphaXivFolder { id: string; name: string; parentId: string | null; paperCount: number }
-export interface AlphaXivPaper { paperGroupId: string; title: string; authors: string[]; authorCount: number; publishedAt: string; url: string }
+export interface AlphaXivPaper { paperGroupId: string; title: string; authors: string[]; authorCount: number; url: string; versionId: string; coverBlobId: string | null }
 export interface AlphaXivPage { papers: AlphaXivPaper[]; nextCursor: string | null }
 async function alphaXivGet<T>(url: string, signal?: AbortSignal): Promise<T> {
   const response = await fetch(url, { signal });
@@ -1384,9 +1384,11 @@ async function alphaXivGet<T>(url: string, signal?: AbortSignal): Promise<T> {
   return json<T>(response);
 }
 export const getAlphaXivFolders = (signal?: AbortSignal) => alphaXivGet<AlphaXivFolder[]>("/api/alphaxiv/folders", signal);
-export const getAlphaXivPapers = (folder: string, cursor: string | null, signal?: AbortSignal) => {
-  const params = new URLSearchParams({ folder });
+export const getAlphaXivPapers = (folder: string | null, cursor: string | null, search?: string, signal?: AbortSignal) => {
+  const params = new URLSearchParams();
+  if (folder) params.set("folder", folder);
   if (cursor) params.set("cursor", cursor);
+  if (search) params.set("search", search);
   return alphaXivGet<AlphaXivPage>(`/api/alphaxiv/papers?${params}`, signal);
 };
 
@@ -1402,12 +1404,15 @@ export interface OpenResearchSettings {
   sshKeyStatus?: "matched" | "no_local_match" | "none_registered" | "unknown";
   /** The `.pub` on this machine worth registering; null if there isn't one. */
   sshKeyPath?: string | null;
+  /** What "Add SSH key" would upload while no usable key is registered; a null fingerprint means it creates the key. */
+  sshKeyToAdd?: { path: string; fingerprint: string | null } | null;
   error: string | null;
 }
 
 export const getOpenResearchSettings = (signal?: AbortSignal) =>
   get<OpenResearchSettings>("/api/settings/openresearch", signal);
 export const logoutOpenResearch = () => post<{ ok: boolean }>("/api/settings/openresearch/logout");
+export const addOpenResearchSshKey = () => post<{ ok: boolean }>("/api/settings/openresearch/ssh-key");
 
 /** One node of the artifacts tree: a file, or a directory with children. */
 export interface ArtifactEntry {

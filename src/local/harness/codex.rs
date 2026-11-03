@@ -961,7 +961,10 @@ impl Harness for Codex {
                     .codex
                     .ensure(&ctx.session_id, session.store)
                     .await?;
-                let config = codex_turn_config(&client, &repo).await?;
+                let config = match codex_turn_config(&client, &repo).await {
+                    Err(_) if ctx.permission_mode == Some(PermissionMode::Bypass) => Value::Null,
+                    config => config?,
+                };
                 let auto_review_supported = config_supports_auto_review(&config)
                     && super::detect::api_key("OPENAI_BASE_URL").is_none();
                 let setup = codex_thread_setup(
@@ -1216,9 +1219,6 @@ impl Harness for Codex {
                 // native_id is the JSON-RPC request id's raw text.
                 let rpc_id: Value = serde_json::from_str(native)
                     .map_err(|_| anyhow!("codex prompt reply id is invalid"))?;
-                // Build the reply BEFORE reaching the client, so a bad answer
-                // (a question with no selection/note) errs before delivery and
-                // leaves the card actionable.
                 let client = ctx
                     .host
                     .codex
@@ -2868,7 +2868,11 @@ async fn run_turn_app_server(ctx: &mut TurnCtx) -> Result<()> {
         .unwrap_or(NativeStore::Isolated);
     let mut client = ensure_codex_pre_accept(ctx, preferred_store).await?;
     let config_client = client.clone();
-    let mut config = codex_turn_config(&client, &repo).await?;
+    // Bypass needs the configuration only to avoid MCP server name collisions.
+    let mut config = match codex_turn_config(&client, &repo).await {
+        Err(_) if ctx.permission_mode == Some(PermissionMode::Bypass) => Value::Null,
+        config => config?,
+    };
     let auto_review_supported =
         config_supports_auto_review(&config) && super::detect::api_key("OPENAI_BASE_URL").is_none();
     let (_, approval_policy, approvals_reviewer) =
@@ -4095,12 +4099,23 @@ async fn run_turn_exec(ctx: &mut TurnCtx) -> Result<()> {
     if let Some(override_arg) = native_store::codex_sqlite_override(native_store, &codex_home) {
         cmd.args(["-c", &override_arg]);
     }
-    let configured = match std::fs::read_to_string(codex_home.join("config.toml")) {
-        Ok(raw) => serde_json::to_value(raw.parse::<toml::Value>()?)?,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Value::Null,
-        Err(error) => return Err(error.into()),
-    };
-    let servers = crate::local::codex::alphaxiv_config(&configured["mcp_servers"])?;
+    // Only for the server-name collision check; an unreadable file keeps the default name.
+    let configured: serde_json::Map<String, Value> = [
+        codex_home.join("config.toml"),
+        repo.join(".codex").join("config.toml"),
+    ]
+    .iter()
+    .filter_map(|path| {
+        std::fs::read_to_string(path)
+            .ok()?
+            .parse::<toml::Value>()
+            .ok()
+    })
+    .filter_map(|config| serde_json::to_value(config.get("mcp_servers")?).ok())
+    .filter_map(|servers| servers.as_object().cloned())
+    .flatten()
+    .collect();
+    let servers = crate::local::codex::alphaxiv_config(&Value::Object(configured))?;
     let servers = toml::Value::try_from(servers)?;
     cmd.args(["-c", &format!("mcp_servers={servers}")]);
     let mut turn_text = legacy_exec_text(&ctx.text, ctx.plan_mode);
@@ -5699,6 +5714,8 @@ requires_openai_auth = false
         .is_none());
     }
 
+    /// Part ids are turn-scoped: codex request ids restart at 0 per child
+    /// process, so the same rpc id in two turns must yield distinct cards.
     #[test]
     fn request_part_ids_are_turn_scoped() {
         let id = serde_json::json!(0);

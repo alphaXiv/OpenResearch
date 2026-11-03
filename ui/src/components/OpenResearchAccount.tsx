@@ -14,7 +14,5 @@ export function OpenResearchAccount({ user }: { user: Account["user"] }) {
   if (!user) return <span>{m.settings_openresearch_account_unavailable()}</span>;
 
   const name = [user.firstName, user.lastName].filter(Boolean).join(" ");
-  return <>
-    <span dir="auto" className="min-w-0"><span className="block font-medium">{name}</span><span className="block overflow-x-auto whitespace-nowrap text-subtext">{user.email}</span></span>
-  </>;
+  return <span dir="auto" className="min-w-0"><span className="block font-medium">{name}</span><span className="block overflow-x-auto whitespace-nowrap text-subtext">{user.email}</span></span>;
 }

@@ -1,3 +1,4 @@
+use std::sync::OnceLock;
 use std::time::Duration;
 
 use futures::TryStreamExt;
@@ -20,8 +21,13 @@ pub const RESEARCH_TOOLS: &[&str] = &[
 pub const LIBRARY_READ_TOOLS: &[&str] =
     &["list_library", "list_annotated_papers", "get_paper_notes"];
 pub const WRITE_TOOLS: &[&str] = &["save_papers_to_folder", "create_folder"];
-const SIGNED_OUT: &str = "alphaXiv is signed out on this computer. Ask the user to sign in with alphaXiv from the account menu at the bottom left of OpenResearch, then try again.";
-const INSTRUCTIONS: &str = "alphaXiv tools research papers and researchers. Library tools read the user's saved folders, notes and highlights and require alphaXiv sign-in from the account menu at the bottom left of OpenResearch. Save papers or create folders only when requested. Want to read, Reading and Completed are folders, not exclusive states. Link papers as https://www.alphaxiv.org/abs/<arXiv id>.";
+const SIGNED_OUT: &str = "alphaXiv is signed out on the computer running this chat, so library tools are unavailable. Research tools still work.";
+const INSTRUCTIONS: &str = "alphaXiv tools research papers and researchers. Library tools read the user's saved folders, notes and highlights and need alphaXiv sign-in on the computer running this chat. Save papers or create folders only when requested. Want to read, Reading and Completed are folders, not exclusive states. Link papers as https://www.alphaxiv.org/abs/<arXiv id>.";
+
+/// Under the agents' 300 s tool-call timeouts, so this error reaches the agent first.
+const CALL_TIMEOUT: Duration = Duration::from_secs(240);
+/// Under Codex's 10 s default MCP startup timeout.
+const LIST_TIMEOUT: Duration = Duration::from_secs(8);
 
 pub async fn run() -> Result<()> {
     let (sender, mut receiver) = tokio::sync::mpsc::unbounded_channel::<Value>();
@@ -44,8 +50,25 @@ pub async fn run() -> Result<()> {
         }
         let sender = sender.clone();
         tokio::spawn(async move {
-            let reply = handle(message).await;
+            let reply = handle(message.clone()).await;
+            let list_failed = message["method"] == "tools/list" && reply.get("error").is_some();
             let _ = sender.send(reply);
+            if !list_failed {
+                return;
+            }
+            // Agents keep their first tool list; ask them to list again once alphaXiv answers.
+            let sender = sender.downgrade();
+            loop {
+                tokio::time::sleep(Duration::from_secs(30)).await;
+                if handle(message.clone()).await.get("error").is_none() {
+                    if let Some(sender) = sender.upgrade() {
+                        let _ = sender.send(
+                            json!({"jsonrpc":"2.0", "method":"notifications/tools/list_changed"}),
+                        );
+                    }
+                    return;
+                }
+            }
         });
     }
     drop(sender);
@@ -53,49 +76,59 @@ pub async fn run() -> Result<()> {
     Ok(())
 }
 
+fn allowed(name: &str, signed_in: bool) -> bool {
+    RESEARCH_TOOLS.contains(&name)
+        || signed_in && (LIBRARY_READ_TOOLS.contains(&name) || WRITE_TOOLS.contains(&name))
+}
+
 async fn handle(message: Value) -> Value {
     let id = message["id"].clone();
     let result = match message["method"].as_str() {
         Some("initialize") => json!({
             "protocolVersion": message["params"]["protocolVersion"],
-            "capabilities": {"tools": {}},
+            "capabilities": {"tools": {"listChanged": true}},
             "serverInfo": {"name": "alphaxiv", "version": env!("CARGO_PKG_VERSION")},
             "instructions": INSTRUCTIONS,
         }),
         Some("ping") => json!({}),
         Some(method @ ("tools/list" | "tools/call")) => {
             let signed_in = crate::alphaxiv::signed_in();
-            if method == "tools/call" {
-                let name = message["params"]["name"].as_str().unwrap_or("");
-                if (LIBRARY_READ_TOOLS.contains(&name) || WRITE_TOOLS.contains(&name)) && !signed_in
-                {
-                    return tool_error(id, SIGNED_OUT);
-                }
-                if !(RESEARCH_TOOLS.contains(&name)
-                    || LIBRARY_READ_TOOLS.contains(&name)
-                    || WRITE_TOOLS.contains(&name))
-                {
-                    return tool_error(id, "Not available in OpenResearch.");
-                }
+            let listing = method == "tools/list";
+            let name = message["params"]["name"].as_str().unwrap_or("");
+            if !listing && !allowed(name, signed_in) {
+                let error = if allowed(name, true) {
+                    SIGNED_OUT
+                } else {
+                    "Not available in OpenResearch."
+                };
+                return tool_error(id, error);
             }
-            match tokio::time::timeout(Duration::from_secs(300), forward(&message, signed_in))
+            let anonymous_ok = listing || RESEARCH_TOOLS.contains(&name);
+            // An expired grant signs this computer out; research still works anonymously.
+            let attempt = async {
+                match forward(&message, signed_in).await {
+                    Err(error)
+                        if signed_in
+                            && anonymous_ok
+                            && error.is::<crate::alphaxiv::NotConnected>() =>
+                    {
+                        (false, forward(&message, false).await)
+                    }
+                    reply => (signed_in, reply),
+                }
+            };
+            let timeout = if listing { LIST_TIMEOUT } else { CALL_TIMEOUT };
+            let (signed_in, reply) = tokio::time::timeout(timeout, attempt)
                 .await
-                .unwrap_or_else(|_| Err(anyhow!("The request timed out. Try again.")))
-            {
+                .unwrap_or_else(|_| (signed_in, Err(anyhow!("The request timed out. Try again."))));
+            match reply {
                 Ok(mut reply) => {
-                    if method == "tools/list" {
-                        if let Some(tools) = reply
-                            .pointer_mut("/result/tools")
-                            .and_then(Value::as_array_mut)
-                        {
-                            tools.retain(|tool| {
-                                let name = tool["name"].as_str().unwrap_or("");
-                                RESEARCH_TOOLS.contains(&name)
-                                    || signed_in
-                                        && (LIBRARY_READ_TOOLS.contains(&name)
-                                            || WRITE_TOOLS.contains(&name))
-                            });
-                        }
+                    if let Some(tools) = reply
+                        .pointer_mut("/result/tools")
+                        .and_then(Value::as_array_mut)
+                    {
+                        tools
+                            .retain(|tool| allowed(tool["name"].as_str().unwrap_or(""), signed_in));
                     }
                     return reply;
                 }
@@ -106,10 +139,10 @@ async fn handle(message: Value) -> Value {
                         format!("alphaXiv tools are unavailable: {error}")
                     };
                     eprintln!("{error}");
-                    if method == "tools/call" {
-                        return tool_error(id, &error);
+                    if listing {
+                        return json!({"jsonrpc":"2.0", "id":id, "error":{"code":-32603,"message":error}});
                     }
-                    return json!({"jsonrpc":"2.0", "id":id, "error":{"code":-32603,"message":error}});
+                    return tool_error(id, &error);
                 }
             }
         }
@@ -125,12 +158,18 @@ fn tool_error(id: Value, text: &str) -> Value {
 }
 
 async fn forward(message: &Value, signed_in: bool) -> Result<Value> {
+    static CLIENT: OnceLock<reqwest::Client> = OnceLock::new();
+    let client = CLIENT.get_or_init(|| {
+        crate::net::remote_client()
+            .connect_timeout(Duration::from_secs(5))
+            .build()
+            .expect("http client")
+    });
     let request = |api: &str, path: &str| {
-        crate::client::http()
+        client
             .post(format!("{api}{path}"))
             .header("Accept", "application/json, text/event-stream")
             .json(message)
-            .timeout(Duration::from_secs(300))
     };
     let response = if signed_in {
         crate::alphaxiv::send(|api| request(api, "/mcp/v1")).await?
@@ -188,10 +227,14 @@ mod tests {
         }
         let calls = Arc::new(Mutex::new(Vec::new()));
         let seen = calls.clone();
-        let app = Router::new().route("/{*path}", post(move |headers: HeaderMap, uri: axum::http::Uri, Json(message): Json<Value>| {
+        let app = Router::new().route("/{*path}", post(move |headers: HeaderMap, uri: axum::http::Uri, body: axum::body::Bytes| {
             let seen = seen.clone();
             async move {
                 assert!(!headers.contains_key("origin"));
+                if uri.path() == "/auth/oauth2/token" {
+                    return (axum::http::StatusCode::BAD_REQUEST, Json(json!({"error":"invalid_grant"}))).into_response();
+                }
+                let message: Value = serde_json::from_slice(&body).unwrap();
                 seen.lock().unwrap().push((uri.path().to_owned(), headers.get("authorization").cloned()));
                 let result = if message["method"] == "tools/list" {
                     json!({"tools":[{"name":"discover_papers"},{"name":"list_library"},{"name":"create_folder"},{"name":"delete_folder"}]})
@@ -239,11 +282,23 @@ mod tests {
             handle(call("create_folder")).await["result"]["isError"],
             true
         );
+        std::fs::write(
+            config.join("alphaxiv.json"),
+            json!({"apiUrl":api,"accessToken":"expired","refreshToken":"revoked","expiresAtMs":0})
+                .to_string(),
+        )
+        .unwrap();
+        assert_eq!(
+            handle(call("discover_papers")).await["result"]["content"][0]["text"],
+            "IP rate limit"
+        );
+        assert!(!crate::alphaxiv::signed_in());
         let calls = calls.lock().unwrap();
+        assert_eq!(calls[4], ("/mcp/v1/anonymous".to_owned(), None));
         assert!(calls[..2]
             .iter()
             .all(|(path, auth)| path == "/mcp/v1/anonymous" && auth.is_none()));
-        assert!(calls[2..].iter().all(
+        assert!(calls[2..4].iter().all(
             |(path, auth)| path == "/mcp/v1" && auth.as_ref().unwrap() == "Bearer test-access"
         ));
         server.abort();

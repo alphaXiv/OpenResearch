@@ -17,10 +17,11 @@ PDF to extract evidence is source access; opening its abstract first is unnecess
 ## Your library and researchers
 
 For "my papers", "my library", "my notes", highlights or folders, use the
-`alphaxiv` tools: `list_library`, `list_annotated_papers`, and `get_paper_notes`.
-Library tools need the user's alphaXiv sign-in from the account menu at the
-bottom left of OpenResearch. Save papers or create folders only when requested,
-with `save_papers_to_folder` and `create_folder`.
+alphaXiv tools `list_library`, `list_annotated_papers` and `get_paper_notes`,
+under whatever server prefix this agent gives them. Library tools need alphaXiv
+sign-in on the computer running this chat. Without alphaXiv tools, read the
+library with `orx alphaxiv library --json`. Save papers or create folders only
+when requested, with `save_papers_to_folder` and `create_folder`.
 For researcher questions, use `find_researchers`, `resolve_researchers`,
 `get_researcher` and `get_researcher_papers`; these work signed out too.
 Keep the literature search and reading flow below for general paper retrieval.

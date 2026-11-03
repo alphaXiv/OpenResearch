@@ -1180,13 +1180,14 @@ pub(crate) fn write_mcp_config(
 ) -> Result<PathBuf> {
     let orx = crate::paths::spawnable_exe()
         .map_err(|e| anyhow!("cannot resolve orx binary path for the mcp bridge: {e}"))?;
+    let orx = orx.to_string_lossy();
     let mut config = serde_json::json!({"mcpServers": {
         "alphaxiv": {"type":"stdio", "command":orx, "args":["alphaxiv-mcp"]}
     }});
     if let Some((up_port, session_id, token)) = gate {
         config["mcpServers"]["orx"] = serde_json::json!({
                 "type": "stdio",
-                "command": orx.to_string_lossy(),
+                "command": orx,
                 "args": ["mcp-gate"],
                 "env": {
                     "ORX_UP_PORT": up_port.to_string(),

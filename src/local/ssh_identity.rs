@@ -35,6 +35,18 @@ pub fn fingerprint(line: &str) -> Option<String> {
     Some(format!("{key_type} {blob}"))
 }
 
+/// The `SHA256:…` form `ssh-keygen -l` prints, which is how people recognize a key.
+pub fn sha256_fingerprint(line: &str) -> Option<String> {
+    use base64::engine::general_purpose::{STANDARD, STANDARD_NO_PAD};
+    use base64::Engine as _;
+    use sha2::Digest as _;
+
+    let key = fingerprint(line)?;
+    let (_, blob) = key.split_once(' ')?;
+    let digest = sha2::Sha256::digest(STANDARD.decode(blob).ok()?);
+    Some(format!("SHA256:{}", STANDARD_NO_PAD.encode(digest)))
+}
+
 /// The trailing comment of a public key line, used to name the device.
 pub fn key_comment(line: &str) -> Option<String> {
     let rest = line
@@ -198,9 +210,7 @@ pub fn preferred_local(local: &[LocalKey]) -> Option<&LocalKey> {
         .or_else(|| local.iter().find(|k| k.path.is_some()))
 }
 
-/// What's wrong. Shared so login, preflight and a failed run don't drift into
-/// three phrasings. States only the fact — the consequence differs by caller
-/// (login offers a fix on the next line; preflight is already fatal).
+/// What's wrong, for the launch preflight.
 pub fn diagnosis(registered: &[String]) -> String {
     if registered.is_empty() {
         return "No SSH key is registered on your account.".to_string();
@@ -211,7 +221,7 @@ pub fn diagnosis(registered: &[String]) -> String {
     )
 }
 
-/// How to fix it, so the advice reads identically at login and at preflight.
+/// How to fix it, for the launch preflight.
 pub fn remediation(registered: &[String], local: &[LocalKey]) -> String {
     // A lone action doesn't need a header and a bullet to introduce it.
     if let (Some(key), true) = (preferred_local(local), registered.is_empty()) {
@@ -296,6 +306,18 @@ mod tests {
         assert!(fingerprint("").is_none());
         assert!(fingerprint("ssh-ed25519").is_none(), "no blob");
         assert!(fingerprint("not-a-key AAAA x").is_none());
+    }
+
+    #[test]
+    fn sha256_fingerprint_matches_ssh_keygen() {
+        assert_eq!(
+            sha256_fingerprint(
+                "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIE5jEj+4KP1+kf1xBWmjNx96KLFUkjreQxCOrA08NQEJ t"
+            )
+            .as_deref(),
+            Some("SHA256:pU0aHZujtAnVqRHnpcOVxPe07Yft4bANE4UgHDCaYL4")
+        );
+        assert_eq!(sha256_fingerprint("ssh-ed25519 !!!"), None);
     }
 
     #[test]

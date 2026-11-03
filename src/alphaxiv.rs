@@ -231,10 +231,25 @@ async fn lock() -> Result<std::fs::File> {
     Ok(tokio::task::spawn_blocking(move || file.lock().map(|()| file)).await??)
 }
 
-/// Keeps `tokens` in place of any others.
-pub async fn store(tokens: &Tokens) -> Result<()> {
-    let _lock = lock().await?;
-    save(tokens)
+/// Keeps `tokens`, and the OpenResearch `credentials` they signed in with, in
+/// place of any others, revoking the tokens they replace. On failure neither
+/// changes.
+pub async fn store(tokens: &Tokens, credentials: Option<&config::Credentials>) -> Result<()> {
+    let lock = lock().await?;
+    let previous = load();
+    save(tokens)?;
+    if let Some(credentials) = credentials {
+        if let Err(error) = config::save_credentials(credentials).await {
+            let _ = previous.as_ref().map_or_else(remove, save);
+            return Err(error);
+        }
+    }
+    drop(lock);
+
+    if let Some(previous) = previous {
+        revoke(&previous).await;
+    }
+    Ok(())
 }
 
 /// Revokes the refresh token at alphaXiv, best effort.
@@ -265,83 +280,90 @@ pub async fn sign_out() -> Result<()> {
 
 /// The stored tokens, refreshed when the access token is within a minute of
 /// expiring or is the one alphaXiv just `rejected`.
-async fn fresh_tokens(rejected: Option<&str>) -> Result<Tokens> {
-    let fresh = |tokens: &Tokens| {
-        Some(tokens.access_token.as_str()) != rejected
-            && tokens.expires_at_ms > crate::store::now_ms() + 60_000
-    };
-    let tokens = load().ok_or(NotConnected)?;
-    if fresh(&tokens) {
-        return Ok(tokens);
-    }
-
-    let _lock = lock().await?;
-    // Another process may have refreshed them while this one waited.
-    let tokens = load().ok_or(NotConnected)?;
-    if fresh(&tokens) {
-        return Ok(tokens);
-    }
-    let grant = [
-        ("grant_type", "refresh_token"),
-        ("refresh_token", tokens.refresh_token.as_str()),
-    ];
-    let refreshed = match token_request(&tokens.api_url, &grant).await {
-        Ok(response) => Tokens::issued(&tokens.api_url, response),
-        Err(error) if error.is::<InvalidGrant>() => {
-            remove()?;
-            return Err(NotConnected.into());
+async fn fresh_tokens(rejected: Option<String>) -> Result<Tokens> {
+    // A task of its own, so a caller that gives up mid-refresh can't drop the
+    // rotated refresh token before it is saved.
+    tokio::spawn(async move {
+        let fresh = |tokens: &Tokens| {
+            Some(&tokens.access_token) != rejected.as_ref()
+                && tokens.expires_at_ms > crate::store::now_ms() + 60_000
+        };
+        let tokens = load().ok_or(NotConnected)?;
+        if fresh(&tokens) {
+            return Ok(tokens);
         }
-        Err(error) => return Err(error),
-    };
-    save(&refreshed)?;
-    Ok(refreshed)
+
+        let _lock = lock().await?;
+        // Another process may have refreshed them while this one waited.
+        let tokens = load().ok_or(NotConnected)?;
+        if fresh(&tokens) {
+            return Ok(tokens);
+        }
+        let grant = [
+            ("grant_type", "refresh_token"),
+            ("refresh_token", tokens.refresh_token.as_str()),
+        ];
+        let refreshed = match token_request(&tokens.api_url, &grant).await {
+            Ok(response) => Tokens::issued(&tokens.api_url, response),
+            Err(error) if error.is::<InvalidGrant>() => {
+                remove()?;
+                return Err(NotConnected.into());
+            }
+            Err(error) => return Err(error),
+        };
+        save(&refreshed)?;
+        Ok(refreshed)
+    })
+    .await?
 }
 
 pub async fn send(request: impl Fn(&str) -> reqwest::RequestBuilder) -> Result<reqwest::Response> {
-    let mut tokens = fresh_tokens(None).await?;
-    for attempt in 0..2 {
-        let response = request(&tokens.api_url)
-            .bearer_auth(&tokens.access_token)
-            .send()
-            .await
-            .map_err(|e| crate::client::transport_error(&tokens.api_url, e.without_url()))?;
-        let status = response.status();
-        if status == reqwest::StatusCode::UNAUTHORIZED && attempt == 0 {
-            tokens = fresh_tokens(Some(&tokens.access_token)).await?;
-            continue;
+    let attempt = |tokens: &Tokens| {
+        let api_url = tokens.api_url.clone();
+        let sent = request(&api_url).bearer_auth(&tokens.access_token).send();
+        async move {
+            sent.await
+                .map_err(|e| crate::client::transport_error(&api_url, e.without_url()))
         }
-        if status == reqwest::StatusCode::UNAUTHORIZED {
-            return Err(NotConnected.into());
+    };
+    let tokens = fresh_tokens(None).await?;
+    let mut response = attempt(&tokens).await?;
+    if response.status() == reqwest::StatusCode::UNAUTHORIZED {
+        let tokens = fresh_tokens(Some(tokens.access_token)).await?;
+        response = attempt(&tokens).await?;
+    }
+
+    let status = response.status();
+    if status == reqwest::StatusCode::UNAUTHORIZED {
+        return Err(NotConnected.into());
+    }
+    if status == reqwest::StatusCode::FORBIDDEN {
+        return Err(HttpFailure {
+            status,
+            message: "alphaXiv denied this request.".into(),
         }
-        if status == reqwest::StatusCode::FORBIDDEN {
+        .into());
+    }
+    if !status.is_success() {
+        let text = response.text().await.unwrap_or_default();
+        let message = serde_json::from_str::<Value>(&text)
+            .ok()
+            .and_then(|v| {
+                v.pointer("/error/message")
+                    .and_then(Value::as_str)
+                    .map(str::to_owned)
+            })
+            .unwrap_or(text);
+        if status == reqwest::StatusCode::TOO_MANY_REQUESTS {
             return Err(HttpFailure {
                 status,
-                message: "alphaXiv denied access to this library.".into(),
+                message: format!("alphaXiv: {message}"),
             }
             .into());
         }
-        if !status.is_success() {
-            let text = response.text().await.unwrap_or_default();
-            let message = serde_json::from_str::<Value>(&text)
-                .ok()
-                .and_then(|v| {
-                    v.pointer("/error/message")
-                        .and_then(Value::as_str)
-                        .map(str::to_owned)
-                })
-                .unwrap_or(text);
-            if status == reqwest::StatusCode::TOO_MANY_REQUESTS {
-                return Err(HttpFailure {
-                    status,
-                    message: format!("alphaXiv: {message}"),
-                }
-                .into());
-            }
-            return Err(anyhow!("alphaXiv request failed ({status})."));
-        }
-        return Ok(response);
+        return Err(anyhow!("alphaXiv request failed ({status})."));
     }
-    Err(NotConnected.into())
+    Ok(response)
 }
 
 async fn get(path: &str, query: &[(&str, &str)]) -> Result<Value> {
@@ -373,10 +395,20 @@ pub async fn folders() -> Result<Value> {
     Ok(folders)
 }
 
-pub async fn papers(folder: &str, cursor: Option<&str>) -> Result<Value> {
-    let mut query = vec![("folder", folder), ("scope", "folder")];
+pub async fn papers(
+    folder: Option<&str>,
+    cursor: Option<&str>,
+    search: Option<&str>,
+) -> Result<Value> {
+    let mut query = vec![("scope", if folder.is_some() { "folder" } else { "all" })];
+    if let Some(folder) = folder {
+        query.push(("folder", folder));
+    }
     if let Some(cursor) = cursor {
         query.push(("cursor", cursor));
+    }
+    if let Some(search) = search {
+        query.push(("search", search));
     }
     let mut page = get("/folders/v4/papers", &query).await?;
     if let Some(papers) = page.get_mut("papers").and_then(Value::as_array_mut) {
@@ -408,7 +440,7 @@ pub async fn print_library(json: bool) -> Result<()> {
         let mut all = Vec::new();
         let mut cursor = None;
         loop {
-            let page = papers(&id, cursor.as_deref()).await?;
+            let page = papers(Some(&id), cursor.as_deref(), None).await?;
             all.extend(
                 page.get("papers")
                     .and_then(Value::as_array)

@@ -112,7 +112,8 @@ fn opencode_config_json(
             "external_directory": "allow",
         },
         "instructions": [instructions],
-        "mcp":{"alphaxiv":{"type":"local", "command":[crate::paths::spawnable_exe()?, "alphaxiv-mcp"], "timeout":300000}},
+        // OpenCode V1 deep-merges config layers; pin `enabled` past a user's disabled `alphaxiv`.
+        "mcp":{"alphaxiv":{"type":"local", "enabled":true, "command":[crate::paths::spawnable_exe()?, "alphaxiv-mcp"], "timeout":300000}},
     });
     if let Some(plugin) = plugin {
         cfg["plugin"] = json!([plugin]);
@@ -255,7 +256,6 @@ fn playbook_md(project: &LocalProject, state: &ProjectState) -> String {
         .replace("{id}", id)
         .replace("{publication_line}", publication_line)
         .replace("{paper_line}", &paper_line)
-        .replace("{alphaxiv_line}", "- alphaXiv: the `alphaxiv` tools research papers and researchers. Library, folder, note and highlight tools need the user's alphaXiv sign-in from the account menu at the bottom left of OpenResearch.")
         .replace("{compute_bullet}", &compute_bullet)
         .replace("{artifacts}", &artifacts)
         .replace("{project_state}", &project_state)

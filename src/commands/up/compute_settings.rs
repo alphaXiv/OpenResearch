@@ -1218,69 +1218,49 @@ pub(super) async fn trackio_preflight() -> ApiResult {
 
 // --- compute targets (unified settings list + default) --------------------------
 
-/// The whole payload for the Compute tab's collapsed list, in one round trip.
-/// CHEAP probes only — env vars and file reads, never a network call, kubectl,
-/// or the modal python import. `configured` means "worth trying", not
-/// "healthy"; deep health stays in each backend's own settings endpoint,
-/// fetched when a row is expanded.
 /// Whether a box would accept this machine. Three-valued on purpose: the check
 /// needs the api, so "we couldn't ask" is a different answer from "no" and the
-/// badge shouldn't have to pick one of the two. Each arm carries what the row
-/// needs to say — guessing a key path would send the user to a file that may
-/// not exist.
+/// badge shouldn't have to pick one of the two.
 #[derive(Clone, PartialEq)]
 pub(super) enum SshReadiness {
     Ready,
-    /// The `.pub` on this machine worth registering, if there is one.
-    NoUsableKey {
-        pub_path: Option<String>,
-    },
-    Unverified {
-        reason: String,
-    },
+    NoUsableKey,
+    Unverified { reason: String },
 }
 
 pub(super) async fn openresearch_ssh_readiness() -> SshReadiness {
-    use crate::local::ssh_identity::{preferred_local, tilde, KeyStatus};
+    use crate::local::ssh_identity::KeyStatus;
     let Ok(Some(creds)) = crate::config::load_credentials().await else {
         // Signed-out is reported by the row's own `or_logged_in`.
-        return SshReadiness::NoUsableKey { pub_path: None };
-    };
-    let named = |local: &[crate::local::ssh_identity::LocalKey]| SshReadiness::NoUsableKey {
-        pub_path: preferred_local(local)
-            .and_then(|k| k.path.as_deref())
-            .map(tilde),
+        return SshReadiness::NoUsableKey;
     };
     match crate::local::ssh_identity::check(&creds).await {
         KeyStatus::Matched => SshReadiness::Ready,
-        KeyStatus::NoLocalMatch { local, .. } | KeyStatus::NoneRegistered { local } => {
-            named(&local)
+        KeyStatus::NoLocalMatch { .. } | KeyStatus::NoneRegistered { .. } => {
+            SshReadiness::NoUsableKey
         }
         KeyStatus::Unknown { reason } => SshReadiness::Unverified { reason },
     }
 }
 
-/// The openresearch row's one-line status. Every branch that tells the user to
-/// run something names a path we actually found — never a guessed one.
 pub(super) fn openresearch_summary(logged_in: bool, ssh: &SshReadiness) -> String {
     if !logged_in {
         return "Not signed in — run orx login".to_string();
     }
     match ssh {
         SshReadiness::Ready => "Signed in — ephemeral boxes billed to your org".to_string(),
-        SshReadiness::NoUsableKey {
-            pub_path: Some(path),
-        } => format!("No usable SSH key — run orx ssh-key add {path}"),
-        SshReadiness::NoUsableKey { pub_path: None } => {
-            "No SSH key on this computer — run ssh-keygen -t ed25519, then orx ssh-key add"
-                .to_string()
-        }
+        SshReadiness::NoUsableKey => "Signed in — add this computer's SSH key".to_string(),
         SshReadiness::Unverified { reason } => {
             format!("Signed in — couldn't check your SSH key ({reason})")
         }
     }
 }
 
+/// The whole payload for the Compute tab's collapsed list, in one round trip.
+/// CHEAP probes only — env vars and file reads, never a network call, kubectl,
+/// or the modal python import. `configured` means "worth trying", not
+/// "healthy"; deep health stays in each backend's own settings endpoint,
+/// fetched when a row is expanded.
 pub(super) fn compute_settings_json(ssh: SshReadiness) -> Value {
     let default = crate::config::compute_default();
     let (default_backend, default_flavor) = match &default {
@@ -1546,15 +1526,37 @@ pub(super) async fn openresearch_settings() -> ApiResult {
             "unknown"
         }
     };
+    let ssh_key_to_add = match ssh_key_status {
+        "no_local_match" | "none_registered" => json!({
+            "path": crate::commands::ssh_key::DEFAULT_KEY,
+            "fingerprint": crate::commands::ssh_key::default_key_fingerprint().await,
+        }),
+        _ => Value::Null,
+    };
+    let org_names = orgs
+        .as_ref()
+        .map(|orgs| orgs.iter().map(|org| &org.name).collect::<Vec<_>>())
+        .unwrap_or_default();
     Ok(Json(json!({
         "loggedIn": true,
         "apiUrl": creds.api_url,
-        "orgs": orgs.as_ref().map(|orgs| orgs.iter().map(|org| &org.name).collect::<Vec<_>>()).unwrap_or_default(),
+        "orgs": org_names,
         "organizations": orgs,
         "sshKeyStatus": ssh_key_status,
         "sshKeyPath": ssh_key_path,
+        "sshKeyToAdd": ssh_key_to_add,
         "error": error,
     })))
+}
+
+/// The compute settings' "Add SSH key": uploads the public half of
+/// `~/.ssh/id_ed25519`, creating the pair if missing.
+pub(super) async fn add_openresearch_ssh_key() -> ApiResult {
+    let creds = crate::config::load_credentials()
+        .await?
+        .ok_or_else(|| bad_request("Sign in to OpenResearch first."))?;
+    crate::commands::ssh_key::ensure_default_registered(&creds).await?;
+    Ok(Json(json!({ "ok": true })))
 }
 
 pub(crate) async fn openresearch_account() -> ApiResult {
@@ -1591,8 +1593,8 @@ async fn account_response(creds: Option<crate::config::Credentials>) -> ApiResul
 }
 
 pub(crate) async fn openresearch_logout() -> ApiResult {
-    crate::alphaxiv::sign_out().await?;
     crate::config::clear_credentials().await?;
+    crate::alphaxiv::sign_out().await?;
     Ok(Json(json!({ "ok": true })))
 }
 

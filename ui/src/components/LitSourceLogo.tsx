@@ -20,11 +20,12 @@ export const LIT_SOURCE_NAME: Record<LitSource, string> = {
   pubmed: "PubMed",
 };
 
-const LIT_SOURCE_SVG: Record<LitSource, string> = {
-  alphaxiv: alphaxivSvg,
-  openalex: openalexSvg,
-  biorxiv: biorxivSvg,
-  pubmed: pubmedSvg,
+// Stable HTML objects preserve a pressed SVG target through a re-render.
+const LIT_SOURCE_HTML: Record<LitSource, { __html: string }> = {
+  alphaxiv: { __html: alphaxivSvg },
+  openalex: { __html: openalexSvg },
+  biorxiv: { __html: biorxivSvg },
+  pubmed: { __html: pubmedSvg },
 };
 
 /** `decorative` when the source name is already shown as adjacent text (Settings
@@ -46,8 +47,8 @@ export function LitSourceLogo({
       style={{ width: size, height: size }}
       {...(decorative ? { "aria-hidden": true } : { role: "img", "aria-label": LIT_SOURCE_NAME[source] })}
       // Static, build-inlined brand SVGs — not user input.
-      dangerouslySetInnerHTML={{ __html: LIT_SOURCE_SVG[source] }}
-   />
+      dangerouslySetInnerHTML={LIT_SOURCE_HTML[source]}
+    />
   );
 }
 

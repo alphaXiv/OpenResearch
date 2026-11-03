@@ -747,7 +747,7 @@ fn router(state: AppState, remote_auth: Option<RemoteAuth>) -> Router {
         .route("/api/settings/commands/run", get(run_settings_command))
         .route(
             "/api/settings/openresearch/ssh-key",
-            get(openresearch_ssh_key),
+            post(add_openresearch_ssh_key),
         )
         .route(
             "/api/settings/lit-sources",
@@ -6861,19 +6861,20 @@ pub(crate) async fn alphaxiv_folders() -> ApiResult {
 
 #[derive(Deserialize)]
 pub(crate) struct AlphaXivPapersQuery {
-    folder: String,
+    folder: Option<String>,
     cursor: Option<String>,
+    search: Option<String>,
 }
 
 pub(crate) async fn alphaxiv_papers(Query(query): Query<AlphaXivPapersQuery>) -> ApiResult {
-    crate::alphaxiv::papers(&query.folder, query.cursor.as_deref())
-        .await
-        .map(Json)
-        .map_err(alphaxiv_error)
-}
-
-async fn openresearch_ssh_key(headers: HeaderMap, ws: WebSocketUpgrade) -> Response {
-    openresearch_terminal(headers, ws, vec!["ssh-key".into(), "add".into()]).await
+    crate::alphaxiv::papers(
+        query.folder.as_deref(),
+        query.cursor.as_deref(),
+        query.search.as_deref(),
+    )
+    .await
+    .map(Json)
+    .map_err(alphaxiv_error)
 }
 
 async fn openresearch_terminal(
@@ -10117,7 +10118,7 @@ mod tests {
 
     #[test]
     fn compute_settings_registers_tinker_without_exposing_its_key() {
-        let settings = compute_settings_json(SshReadiness::NoUsableKey { pub_path: None });
+        let settings = compute_settings_json(SshReadiness::NoUsableKey);
         let tinker = settings["targets"]
             .as_array()
             .unwrap()
@@ -10534,32 +10535,10 @@ mod tests {
         assert!(abs_path("~otheruser/x").is_err());
     }
 
-    fn no_key(path: Option<&str>) -> SshReadiness {
-        SshReadiness::NoUsableKey {
-            pub_path: path.map(str::to_string),
-        }
-    }
-
-    /// The row used to hardcode `~/.ssh/id_ed25519.pub`, which is wrong on any
-    /// machine whose key is named something else.
-    #[test]
-    fn names_the_key_file_we_actually_found() {
-        let s = openresearch_summary(true, &no_key(Some("~/.ssh/work_ed25519.pub")));
-        assert!(s.contains("orx ssh-key add ~/.ssh/work_ed25519.pub"));
-        assert!(!s.contains("id_ed25519"), "no guessed default");
-    }
-
-    /// Nothing on disk to register, so `ssh-key add` alone would fail.
-    #[test]
-    fn tells_you_to_generate_one_when_there_is_no_key() {
-        let s = openresearch_summary(true, &no_key(None));
-        assert!(s.contains("ssh-keygen"));
-    }
-
     #[test]
     fn signed_out_beats_every_key_state() {
         assert!(openresearch_summary(false, &SshReadiness::Ready).contains("orx login"));
-        assert!(openresearch_summary(false, &no_key(None)).contains("orx login"));
+        assert!(openresearch_summary(false, &SshReadiness::NoUsableKey).contains("orx login"));
     }
 
     #[test]

@@ -32,7 +32,7 @@ function setup(query, folderError = null) {
     "../api": { AlphaXivNotConnectedError: NotConnected, OpenResearchAccountError: AccountError },
     "@base-ui/react/menu": { Menu: menu },
     "../dialog": { showCustomDialog: (options) => { dialogs.push(options); } },
-    "../queries/settings": { useOpenResearchAccount: () => query, useAlphaXivFolders: () => ({ error: folderError }), signOutOpenResearch: async () => { signedOut++; } },
+    "../queries/settings": { useOpenResearchAccount: () => query, useAlphaXivFolders: () => ({ error: folderError }), useSignOutOpenResearch: () => ({ isPending: false, mutateAsync: async () => { signedOut++; } }) },
     "../queries/invalidation": { invalidateFamilies: () => { invalidated++; } },
     "../queries/client": { queryClient: { invalidateQueries: async () => {} }, workspaceKey: (key) => [key] },
     "../paraglide/messages.js": { m: new Proxy({}, { get: (_, name) => () => String(name) }) },
@@ -55,7 +55,7 @@ function setup(query, folderError = null) {
     const options = dialogs.at(-1);
     return renderIn(options, () => options.component({ ...options.props, confirm: () => calls.push("confirm"), cancel: () => calls.push("cancel"), cancelable: true, isDisabled: false, isPending: false, errorMessage: null }));
   };
-  return { render, dialog, dialogs, posted, confirm: () => confirm(), counts: () => [signedOut, invalidated] };
+  return { render, dialog, dialogs, posted, openSignIn: exports.openSignIn, confirm: () => confirm(), counts: () => [signedOut, invalidated] };
 }
 
 const user = { id: "u", firstName: "Clover", lastName: null, email: "c@example.org", alphaxivUrl: "https://www.alphaxiv.org" };
@@ -71,7 +71,7 @@ test("account menu shows identity, account details and sign out; captions name t
     tree.find((node) => node.type === "menu-item" && node.props.children === "settings_openresearch_sign_out").props.onClick();
     assert.deepEqual(app.counts(), [0, 0]);
     await app.confirm();
-    assert.deepEqual(app.counts(), [1, 1]);
+    assert.deepEqual(app.counts(), [1, 0]);
   }
 });
 
@@ -140,4 +140,11 @@ test("OpenResearch failing to reach alphaXiv asks to try again in a moment", () 
 test("an account outage hides the alphaXiv connection action even with cached identity", () => {
   const app = setup({ data: { loggedIn: true, user }, error: new AccountError("offline"), isError: true }, new NotConnected());
   assert.ok(!app.render().some((node) => node.props.children === "library_connect"));
+});
+
+test("sign-in started elsewhere returns focus to the control that started it", () => {
+  const app = setup({ data: { loggedIn: false, user: null }, isLoading: false, isError: false });
+  const opener = { focus() {} };
+  app.openSignIn(false, opener);
+  assert.equal(app.dialog().find((node) => node.type === "dialog-content").props.finalFocus(), opener);
 });

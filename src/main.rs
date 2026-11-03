@@ -210,8 +210,7 @@ pub struct LoginArgs {
     /// Override the API base URL (or set OPENRESEARCH_API_URL).
     #[arg(long = "api-url")]
     pub api_url: Option<String>,
-    /// The app's sign-in: registers this computer's SSH key without asking and
-    /// skips the agent-skills offer.
+    /// The app's sign-in: skips the agent-skills offer.
     #[arg(long, hide = true)]
     pub non_interactive: bool,
     /// Connect alphaXiv to an existing OpenResearch sign-in.
@@ -1460,8 +1459,8 @@ async fn dispatch(command: Command) -> error::Result<()> {
         Command::PlanGate => commands::plan_gate::run().await,
         Command::InvocationGate => commands::invocation_gate::run().await,
         Command::McpGate => commands::mcp_gate::run().await,
-        Command::AlphaxivMcp => commands::alphaxiv_mcp::run().await,
         Command::AntigravityGate => commands::mcp_gate::run_antigravity().await,
+        Command::AlphaxivMcp => unreachable!("handled before dispatch"),
         Command::PublishBranch(_) => unreachable!("handled before dispatch"),
         Command::RemoteHost(_) => unreachable!("handled before dispatch"),
     }

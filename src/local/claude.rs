@@ -656,6 +656,8 @@ async fn spawn_client(spec: &SpawnSpec, auth_generation: u64) -> Result<Arc<Clau
         spec.config.permission_mode == Some(PermissionMode::Plan),
     )?;
     cmd.arg("--settings").arg(settings);
+    // The gate token is minted only here, once per child: `request_permission`
+    // checks it without expiry, so re-minting would strand the bridge's held requests.
     let gate = if uses_permission_bridge(spec.config.permission_mode) {
         spec.chat.up_port().map(|port| {
             let token = spec.chat.mint_gate_token(
@@ -668,13 +670,21 @@ async fn spawn_client(spec: &SpawnSpec, auth_generation: u64) -> Result<Arc<Clau
     } else {
         None
     };
-    let mcp = write_mcp_config(
-        &spec.repo,
-        gate.as_ref()
-            .map(|(port, token)| (*port, spec.session_id.as_str(), token.as_str())),
-    )?;
-    cmd.arg("--mcp-config").arg(mcp);
-    config.bridge_active = gate.is_some();
+    // Record successful bridge setup so reconciliation retries failures next turn.
+    config.bridge_active = false;
+    let gate_config = gate
+        .as_ref()
+        .map(|(port, token)| (*port, spec.session_id.as_str(), token.as_str()));
+    match write_mcp_config(&spec.repo, gate_config) {
+        Ok(path) => {
+            cmd.arg("--mcp-config").arg(path);
+            config.bridge_active = gate.is_some();
+        }
+        Err(e) => eprintln!(
+            "orx up: MCP config not written, alphaXiv tools are unavailable and gray-area tools will be denied: {e}"
+        ),
+    }
+    // A held approval gets an hour before the CLI abandons the tool call; orx denies at 55 min.
     cmd.env(
         "MCP_TOOL_TIMEOUT",
         if config.bridge_active {

@@ -282,7 +282,6 @@ fn valid_location(location: &str) -> bool {
                             | "projects"
                             | "compute"
                             | "openresearch"
-                            | "library"
                             | "instances"
                             | "environment"
                             | "git"

@@ -1,8 +1,9 @@
 import { readLiveSnapshot } from "./live";
-import { queryOptions, useQuery } from "@tanstack/react-query";
+import { queryOptions, useMutation, useQuery } from "@tanstack/react-query";
 import { useEffect, useRef } from "react";
 import * as api from "../api";
 import { queryClient, isCurrentScope, workspaceKey } from "./client";
+import { invalidateFamilies } from "./invalidation";
 
 export const getFileManagerQuery = (locale: string) => queryOptions({
     queryKey: workspaceKey("getFileManager", locale),
@@ -73,29 +74,38 @@ export const getOpenResearchSettingsQuery = () => queryOptions({
 export const useOpenResearchAccount = () => useQuery({
   queryKey: workspaceKey("getOpenResearchAccount"),
   queryFn: ({ signal }) => api.getOpenResearchAccount(signal),
-  staleTime: 30_000,
-  retry: false,
 });
 
 /** Fails with `AlphaXivNotConnectedError` while the account has no alphaXiv connection. */
 export const useAlphaXivFolders = () => {
   const account = useOpenResearchAccount();
   return useQuery({
-    queryKey: workspaceKey("alphaXivFolders"),
+    queryKey: workspaceKey("alphaXivFolders", account.data?.user?.id ?? null),
     queryFn: ({ signal }) => api.getAlphaXivFolders(signal),
     enabled: !!account.data?.loggedIn,
-    retry: false,
   });
 };
 
-export async function signOutOpenResearch() {
-  const key = workspaceKey("getOpenResearchAccount");
-  await api.logoutOpenResearch();
-  queryClient.removeQueries({ queryKey: workspaceKey("alphaXivFolders") });
-  queryClient.removeQueries({ queryKey: workspaceKey("alphaXivPapers") });
-  await queryClient.cancelQueries({ queryKey: key });
-  if (isCurrentScope(key)) queryClient.setQueryData(key, { loggedIn: false, apiUrl: null, user: null });
-}
+export const useSignOutOpenResearch = () => useMutation({
+  mutationFn: async () => {
+    const key = workspaceKey("getOpenResearchAccount");
+    await api.logoutOpenResearch();
+    queryClient.removeQueries({ queryKey: workspaceKey("alphaXivFolders") });
+    queryClient.removeQueries({ queryKey: workspaceKey("alphaXivPapers") });
+    await queryClient.cancelQueries({ queryKey: key });
+    if (!isCurrentScope(key)) return;
+    queryClient.setQueryData(key, { loggedIn: false, apiUrl: null, user: null });
+    invalidateFamilies(["getOpenResearchSettings", "getComputeSettings"]);
+  },
+});
+
+/** Stays pending until the settings reflect the new key, so the step never offers to add it twice. */
+export const useAddOpenResearchSshKey = () => useMutation({
+  mutationFn: async () => {
+    await api.addOpenResearchSshKey();
+    await queryClient.invalidateQueries({ queryKey: workspaceKey("getOpenResearchSettings") });
+  },
+});
 
 export const getEnvVarsQuery = () => queryOptions({
   queryKey: workspaceKey("getEnvVars"),

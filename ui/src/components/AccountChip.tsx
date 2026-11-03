@@ -1,11 +1,11 @@
 import { AlphaXivNotConnectedError, OpenResearchAccountError } from "../api";
 import { Menu } from "@base-ui/react/menu";
-import { useEffect, useRef, useState, type RefObject } from "react";
+import { useEffect, useRef, useState } from "react";
 import { UserRound } from "lucide-react";
 import { showCustomDialog, type DialogContentProps } from "../dialog";
 import { invalidateFamilies } from "../queries/invalidation";
 import { queryClient, workspaceKey } from "../queries/client";
-import { signOutOpenResearch, useAlphaXivFolders, useOpenResearchAccount } from "../queries/settings";
+import { useAlphaXivFolders, useOpenResearchAccount, useSignOutOpenResearch } from "../queries/settings";
 import { m } from "../paraglide/messages.js";
 import { confirmOpenResearchSignOut } from "./confirmOpenResearchSignOut";
 import { accountErrorMessage, OpenResearchAccount } from "./OpenResearchAccount";
@@ -18,49 +18,35 @@ function refreshAccount() {
   void queryClient.invalidateQueries({ queryKey: workspaceKey("alphaXivPapers") });
 }
 
+/** Opens sign-in from anywhere; focus returns to `returnFocus` when the dialog closes. */
+export function openSignIn(connectOnly: boolean, returnFocus: HTMLElement | null, onSignedIn?: () => void) {
+  showCustomDialog({
+    component: SignInDialog,
+    props: { connectOnly, returnFocus },
+    onCancel: refreshAccount,
+    onConfirm: () => {
+      window.ipc?.postMessage("window:focus");
+      refreshAccount();
+      onSignedIn?.();
+    },
+  });
+}
+
 export function AccountChip({ onDetails }: { onDetails: () => void }) {
   const accountQuery = useOpenResearchAccount();
   const user = accountQuery.data?.user;
   const alphaXivNotConnected = useAlphaXivFolders().error instanceof AlphaXivNotConnectedError;
-  const [signingOut, setSigningOut] = useState(false);
+  const signOut = useSignOutOpenResearch();
   const chipRef = useRef<HTMLButtonElement>(null);
   const focusAfterLogin = useRef(false);
   const name = user ? [user.firstName, user.lastName].filter(Boolean).join(" ") || user.email : "";
 
-  function signIn(connectOnly: boolean) {
-    showCustomDialog({
-      component: SignInDialog,
-      props: { connectOnly, returnFocus: chipRef },
-      onCancel: refreshAccount,
-      onConfirm: () => {
-        window.ipc?.postMessage("window:focus");
-        focusAfterLogin.current = true;
-        refreshAccount();
-      },
-    });
-  }
-
-  useEffect(() => {
-    const open = () => signIn(false);
-    const connect = () => signIn(true);
-    window.addEventListener("openresearch-sign-in", open);
-    window.addEventListener("alphaxiv-connect", connect);
-    return () => { window.removeEventListener("openresearch-sign-in", open); window.removeEventListener("alphaxiv-connect", connect); };
-  }, []);
+  // Signing in swaps the plain button for the menu trigger, so focus moves to the new element.
+  const signIn = (connectOnly: boolean) => openSignIn(connectOnly, chipRef.current, () => { focusAfterLogin.current = true; });
 
   useEffect(() => {
     if (user && focusAfterLogin.current) { chipRef.current?.focus(); focusAfterLogin.current = false; }
   }, [user]);
-
-  async function signOut() {
-    setSigningOut(true);
-    try {
-      await signOutOpenResearch();
-      refreshAccount();
-    } finally {
-      setSigningOut(false);
-    }
-  }
 
   const reason = accountErrorMessage(accountQuery.error);
   const stateLabel = accountQuery.error instanceof OpenResearchAccountError && accountQuery.error.kind === "offline" ? m.account_offline_label() : m.account_error_label();
@@ -68,8 +54,7 @@ export function AccountChip({ onDetails }: { onDetails: () => void }) {
   const chipClass = "flex min-h-[44.5px] min-w-0 flex-1 items-center gap-2 rounded-md px-1.5 py-1.5 text-start hover:bg-surface focus-visible:outline-2 focus-visible:outline-focus";
   const contents = <><span className="flex size-7 shrink-0 items-center justify-center rounded-full bg-panel text-sm font-medium text-text" aria-hidden="true">{user ? name.trim().charAt(0).toLocaleUpperCase() : <UserRound size={16} />}</span><span className="flex min-w-0 flex-col"><span dir="auto" className="truncate text-sm leading-tight">{label}</span>{user && <span className="truncate text-xs leading-tight text-subtext">{reason ? stateLabel : user.alphaxivUrl ? "alphaXiv" : "OpenResearch"}</span>}</span></>;
 
-  return <>
-    {user || reason ? <Menu.Root modal={false} loopFocus>
+  return user || reason ? <Menu.Root modal={false} loopFocus>
       <Menu.Trigger ref={chipRef} aria-label={`${label}${user && reason ? ` · ${stateLabel}` : ""} · ${m.account_menu()}`} className={chipClass}>{contents}</Menu.Trigger>
       <Menu.Portal><Menu.Positioner side="top" align="start" sideOffset={6} collisionPadding={8} className="z-50">
         <Menu.Popup aria-label={m.account_menu()} className="outline-none max-h-(--available-height) overflow-y-auto w-64 max-w-[calc(100vw-1rem)] rounded-lg border border-border bg-background p-1.5 shadow-menu">
@@ -77,11 +62,10 @@ export function AccountChip({ onDetails }: { onDetails: () => void }) {
           {reason && <Menu.Item nativeButton render={<MenuItem className="data-highlighted:bg-surface" />} onClick={() => void accountQuery.refetch()}>{m.settings_check_again()}</Menu.Item>}
           {user && !accountQuery.isError && alphaXivNotConnected && <Menu.Item nativeButton render={<MenuItem className="data-highlighted:bg-surface" />} onClick={() => signIn(true)}>{m.library_connect()}</Menu.Item>}
           <Menu.Item nativeButton render={<MenuItem className="data-highlighted:bg-surface" />} onClick={onDetails}>{m.account_details()}</Menu.Item>
-          {user && <Menu.Item nativeButton render={<MenuItem className="data-highlighted:bg-surface" />} disabled={signingOut} onClick={() => confirmOpenResearchSignOut(signOut)}>{m.settings_openresearch_sign_out()}</Menu.Item>}
+          {user && <Menu.Item nativeButton render={<MenuItem className="data-highlighted:bg-surface" />} disabled={signOut.isPending} onClick={() => confirmOpenResearchSignOut(signOut.mutateAsync)}>{m.settings_openresearch_sign_out()}</Menu.Item>}
         </Menu.Popup>
       </Menu.Positioner></Menu.Portal>
-    </Menu.Root> : <button ref={chipRef} type="button" className={chipClass} disabled={accountQuery.isLoading} onClick={() => signIn(false)}>{contents}</button>}
-  </>;
+    </Menu.Root> : <button ref={chipRef} type="button" className={chipClass} disabled={accountQuery.isLoading} onClick={() => signIn(false)}>{contents}</button>;
 }
 
 /** sysexits' EX_TEMPFAIL, which `orx login` exits with when OpenResearch couldn't reach alphaXiv. */
@@ -89,7 +73,7 @@ const TRY_AGAIN_LATER = 75;
 
 function SignInDialog({ connectOnly, returnFocus, confirm, cancel }: DialogContentProps<void> & {
   connectOnly: boolean;
-  returnFocus: RefObject<HTMLButtonElement | null>;
+  returnFocus: HTMLElement | null;
 }) {
   const [attempt, setAttempt] = useState(0);
   const [error, setError] = useState<string | null>(null);
@@ -98,7 +82,7 @@ function SignInDialog({ connectOnly, returnFocus, confirm, cancel }: DialogConte
     if (exitCode === TRY_AGAIN_LATER) setError(m.account_alphaxiv_unavailable());
     else setError(connectOnly ? m.account_alphaxiv_not_connected() : m.account_sign_in_failed());
   };
-  return <DialogContent initialFocus={cancelRef} finalFocus={returnFocus} className="w-140 max-h-[calc(100vh_-_40px)] overflow-y-auto p-5 text-text">
+  return <DialogContent initialFocus={cancelRef} finalFocus={() => returnFocus} className="w-140 max-h-[calc(100vh_-_40px)] overflow-y-auto p-5 text-text">
     <DialogTitle className="mb-4">{connectOnly ? m.library_connect() : m.account_sign_in_alphaxiv()}</DialogTitle>
     {error ? <p role="alert" className="mt-0 mb-3 text-sm text-accent-red">{error}</p> : <div role="status" className="mb-3 flex items-center gap-2 text-sm text-subtext"><Spinner />{m.account_finish_browser()}</div>}
     <LoginSession key={attempt} connectOnly={connectOnly} onComplete={() => confirm()} onError={fail} />
