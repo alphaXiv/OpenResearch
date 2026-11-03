@@ -1638,7 +1638,7 @@ def get_sandbox(**kw):
             .output()
             .unwrap();
         let _ = std::fs::remove_dir_all(&dir);
-        let stderr = String::from_utf8_lossy(&out.stderr);
+        let stderr = String::from_utf8_lossy(&out.stderr).replace("\r\n", "\n");
         assert!(out.status.success(), "{stderr}");
         assert_eq!(String::from_utf8_lossy(&out.stdout), "hello\n");
         assert!(stderr.contains("--pid"), "{stderr}");
