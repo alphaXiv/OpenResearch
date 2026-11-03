@@ -31,9 +31,10 @@ import {
   getHarnessesQuery,
   getHarnessSetupCommandsQuery,
   getSkillsQuery,
+  useAlphaXivFolders,
 } from "../queries/settings";
 import { listChatActiveRunsQuery, listChatSessionsQuery, getChatMessagesQuery, listNativeChatsQuery, readSidebarChatPage } from "../queries/chat";
-import { getProjectStarterPromptsQuery, listProjectsQuery, listProjectActivityQuery } from "../queries/projects";
+import { getProjectStarterPromptsQuery, listProjectsQuery, listProjectActivityQuery, resolvePaperQuery } from "../queries/projects";
 import { getCodeTreeQuery } from "../queries/files";
 import {
   fileMentionContext,
@@ -139,6 +140,7 @@ import {
   type FirstActionSurface,
   type ChatImageAttachment,
   type ChatMessage,
+  type AlphaXivFolder,
   type ChatPart,
   type Autonomy,
   type ChatSession,
@@ -833,6 +835,8 @@ interface ToolActivity {
   kind: ToolActivityKind;
   label: string;
   progressLabel?: string;
+  /** What an approval card asks to do, when the kind's verb alone says too little. */
+  approvalLabel?: string;
   searchPattern?: string;
   filePath?: string;
   fileRef?: string;
@@ -1491,6 +1495,10 @@ function computeToolActivity(part: ChatPart): ToolActivity {
   const filePath = inputString(normalizedInput, "filePath", "file_path", "notebookPath", "notebook_path", "path");
   const description = inputString(normalizedInput, "description");
   if (part.state?.title === "subagent") return { kind: "agent", label: description ?? m.activity_ran_subagent() };
+  const alphaxivTool = [tool, part.state?.title]
+    .map((name) => name?.match(ALPHAXIV_TOOL)?.[1])
+    .find((name) => name != null);
+  if (alphaxivTool) return alphaxivActivity(alphaxivTool.toLowerCase(), normalizedInput);
   const toolSegments = tool.toLowerCase().split(/(?::|\.|__)+/);
   const baseTool = toolSegments.at(-1) ?? tool.toLowerCase();
   if (baseTool === "run" && toolSegments.includes("web")) {
@@ -1839,6 +1847,176 @@ function computeToolActivity(part: ChatPart): ToolActivity {
   }
 }
 
+/** The tool of an alphaXiv MCP call: Claude names it `mcp__alphaxiv__x`, Codex
+ * `alphaxiv:x` (`orx_alphaxiv:x` when the user configured their own `alphaxiv`),
+ * OpenCode `alphaxiv_x`; ACP agents put such a name, or `Tool: alphaxiv/x`, in
+ * the title. Anchored so commands and URLs never match. */
+const ALPHAXIV_TOOL = /^(?:tool: )?(?:mcp__)?(?:orx_)?alphaxiv(?:__|[:/_])([a-z0-9_]+)$/i;
+
+function alphaxivActivity(tool: string, input: Record<string, unknown>): ToolActivity {
+  const row = (kind: ToolActivityKind, label: string, paper?: string, approvalLabel?: string): ToolActivity => ({
+    kind,
+    label,
+    approvalLabel,
+    // Paper arguments may be full titles, which have no page to link.
+    litCall: { kind: "paper", source: "alphaxiv", id: paper && !/\s/.test(paper) ? paper : undefined },
+  });
+  const readPaper = (paper: string | null) =>
+    paper ? m.activity_read_target({ target: ltr(paper) }) : m.activity_read_paper();
+  const forQuery = (activity: string, query: string | null) =>
+    query ? m.activity_for_query({ activity, query }) : activity;
+
+  switch (tool) {
+    case "list_library":
+      return row("read", m.activity_alphaxiv_read_library());
+    case "list_annotated_papers":
+      return row("read", m.activity_alphaxiv_listed_annotated_papers());
+    case "get_paper_notes": {
+      const paper = inputString(input, "paper_id_or_url");
+      const label = paper
+        ? m.activity_alphaxiv_read_notes_on({ paper: ltr(paper) })
+        : m.activity_alphaxiv_read_notes_on_a_paper();
+      return row("read", label, paper ?? undefined);
+    }
+    case "save_papers_to_folder": {
+      const papers = exactInputStringArray(input, "paper_ids_or_urls") ?? [];
+      const only = papers.length === 1 ? papers[0] : undefined;
+      const label = only
+        ? m.activity_alphaxiv_saved_paper({ paper: ltr(only) })
+        : m.activity_alphaxiv_saved_papers({ count: fmtNumber(papers.length) });
+      return row("edit", label, only, alphaxivApprovalLabel(tool, input));
+    }
+    case "create_folder": {
+      const name = inputString(input, "name");
+      return row(
+        "edit",
+        name ? m.activity_alphaxiv_created_folder({ name }) : m.activity_alphaxiv_created_a_folder(),
+        undefined,
+        alphaxivApprovalLabel(tool, input),
+      );
+    }
+    case "answer_pdf_queries": {
+      const paper = inputString(input, "paper");
+      const queries = typeof input.queries === "string" ? [input.queries] : exactInputStringArray(input, "queries") ?? [];
+      const label = queries.length > 1
+        ? m.activity_for_queries({ activity: readPaper(paper), count: fmtNumber(queries.length) })
+        : forQuery(readPaper(paper), queries[0] ?? null);
+      return row("read", label, paper ?? undefined);
+    }
+    case "get_paper_content": {
+      const paper = inputString(input, "url");
+      return row("read", readPaper(paper), paper ?? undefined);
+    }
+    case "read_files_from_github_repository": {
+      const repository = inputString(input, "githubUrl")
+        ?.replace(/^https?:\/\/(?:www\.)?github\.com\//i, "")
+        .replace(/(?:\.git)?\/*$/, "");
+      const path = inputString(input, "path")?.replace(/^\/+/, "");
+      const target = repository && path ? `${repository}/${path}` : repository;
+      return row("read", target ? m.activity_read_target({ target: ltr(target) }) : m.activity_alphaxiv_read_github_repository());
+    }
+    case "discover_papers": {
+      const keywords = exactInputStringArray(input, "keywords") ?? [];
+      const query = inputString(input, "question") ?? (keywords.join(", ") || null);
+      return row("search", forQuery(m.activity_searched_alphaxiv(), query));
+    }
+    case "find_researchers":
+      return row("search", forQuery(m.activity_alphaxiv_searched_researchers(), inputString(input, "topic", "query")));
+    case "get_researcher":
+    case "resolve_researchers": {
+      const count = Array.isArray(input.people)
+        ? input.people.length
+        : exactInputStringArray(input, "researchers")?.length ?? 0;
+      const only = count === 1
+        ? arrayInputString(input, "people", "name") ?? exactInputStringArray(input, "researchers")?.[0]
+        : null;
+      const label = only
+        ? m.activity_alphaxiv_looked_up_researcher({ name: only })
+        : count > 1
+          ? m.activity_alphaxiv_looked_up_researchers({ count: fmtNumber(count) })
+          : m.activity_alphaxiv_looked_up_some_researchers();
+      return row("search", label);
+    }
+    case "get_researcher_papers": {
+      const researchers = exactInputStringArray(input, "researchers") ?? [];
+      const label = researchers.length === 1
+        ? m.activity_alphaxiv_listed_papers_by({ name: researchers[0] })
+        : researchers.length > 1
+          ? m.activity_alphaxiv_listed_papers_by_researchers({ count: fmtNumber(researchers.length) })
+          : m.activity_alphaxiv_listed_researcher_papers();
+      return row("search", label);
+    }
+    case "get_hot_feed":
+      return row("read", m.activity_alphaxiv_checked_trending_papers());
+    default:
+      return row("command", m.activity_used_alphaxiv());
+  }
+}
+
+/** What an alphaXiv write asks to do, naming its folders once `folders` has them. */
+function alphaxivApprovalLabel(
+  tool: string,
+  input: Record<string, unknown>,
+  folders?: AlphaXivFolder[],
+): string | undefined {
+  const folderName = (key: string) => {
+    const id = inputString(input, key);
+    return id ? folders?.find((folder) => folder.id === id)?.name : undefined;
+  };
+
+  switch (tool) {
+    case "save_papers_to_folder": {
+      const papers = exactInputStringArray(input, "paper_ids_or_urls") ?? [];
+      const folder = folderName("folder_id");
+      if (papers.length === 1) {
+        return folder ? m.activity_alphaxiv_save_a_paper_to({ folder }) : m.activity_alphaxiv_save_a_paper();
+      }
+      const count = fmtNumber(papers.length);
+      return folder ? m.activity_alphaxiv_save_papers_to({ count, folder }) : m.activity_alphaxiv_save_papers({ count });
+    }
+    case "create_folder": {
+      const name = inputString(input, "name");
+      const parent = folderName("parent_folder_id");
+      if (!name) return m.activity_alphaxiv_create_a_folder();
+      return parent ? m.activity_alphaxiv_create_folder_in({ name, parent }) : m.activity_alphaxiv_create_folder({ name });
+    }
+  }
+}
+
+/** The body of an alphaXiv write's approval card: what it writes, with each paper linked by title. */
+function AlphaXivApproval({ tool, input }: { tool: string; input: Record<string, unknown> }) {
+  const folders = useAlphaXivFolders().data;
+  const papers = tool === "save_papers_to_folder" ? exactInputStringArray(input, "paper_ids_or_urls") ?? [] : [];
+  const resolved = useQueries({ queries: papers.map((paper) => resolvePaperQuery(paper)) });
+
+  return (
+    <>
+      <div className="prompt-sub text-base font-normal leading-normal text-text wrap-anywhere" dir="auto">
+        {alphaxivApprovalLabel(tool, input, folders)}
+      </div>
+      {papers.length > 0 && (
+        <ul className="m-0 max-h-40 list-none overflow-auto rounded-md border border-border-variant bg-surface px-3 py-1.5">
+          {papers.map((paper, index) => {
+            const title = resolved[index]?.data?.title?.trim();
+            return (
+              <li key={paper} className="flex h-6 items-center gap-2 text-sm text-text">
+                <LitSourceLogo source="alphaxiv" size={14} className="shrink-0" />
+                <span className="flex min-w-0 items-center">
+                  <span className="min-w-0 truncate" dir="auto" title={title}>
+                    <a className="tool-target" href={paperUrl("alphaxiv", paper)} target="_blank" rel="noopener noreferrer">{title || ltr(paper)}</a>
+                  </span>
+                  <ArrowUpRight className="ms-1 shrink-0 opacity-50" size={14} aria-hidden="true" />
+                </span>
+                {title && <span className="shrink-0 text-xs text-subtext">{ltr(paper)}</span>}
+              </li>
+            );
+          })}
+        </ul>
+      )}
+    </>
+  );
+}
+
 /** Readable one-liner for a Codex sub-agent spawn/activity row, from the
  * collab item fields the backend put in `state.input`. The model-assigned
  * agent name (`nickname`) is the row's identity when present — matching how
@@ -2170,6 +2348,7 @@ function permissionActivityLabel(tool: string | undefined, input: Record<string,
     tool,
     state: { status: "running", input },
   });
+  if (activity.approvalLabel) return activity.approvalLabel;
   return {
     skill: m.activity_load(),
     read: m.activity_read(),
@@ -2804,6 +2983,8 @@ function PromptCard({
     const description = inputString(toolInput, "description") || "";
     const explanation = p.header || reason || description || (summary ? "" : permissionActivityLabel(p.tool, toolInput));
     const headingId = `permission-heading-${part.id}`;
+    const alphaxivTool = p.tool?.match(ALPHAXIV_TOOL)?.[1]?.toLowerCase();
+    const alphaxivWrite = alphaxivTool === "save_papers_to_folder" || alphaxivTool === "create_folder" ? alphaxivTool : null;
     return (
       <div
         className={`prompt-card permission my-3 w-full max-w-2xl overflow-hidden rounded-lg border border-border bg-background [&.readonly]:opacity-60 ${done ? "readonly" : ""}`}
@@ -2817,8 +2998,10 @@ function PromptCard({
           <span id={headingId} className="text-base font-semibold text-text">{m.chat_panel_approval_required()}</span>
         </div>
         <div className="flex flex-col gap-3 px-3.5 py-3">
-          {explanation && <div className="prompt-sub text-base font-normal leading-normal text-text wrap-anywhere">{explanation}</div>}
-          {summary && (
+          {alphaxivWrite
+            ? <AlphaXivApproval tool={alphaxivWrite} input={toolInput} />
+            : explanation && <div className="prompt-sub text-base font-normal leading-normal text-text wrap-anywhere">{explanation}</div>}
+          {summary && !alphaxivWrite && (
             <code className="prompt-command block max-h-36 overflow-auto whitespace-pre-wrap wrap-anywhere rounded-md border border-border-variant bg-surface px-3 py-2 font-mono text-sm leading-relaxed text-text">
               {summary}
             </code>

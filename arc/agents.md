@@ -99,6 +99,16 @@ to the user's native store, and orx copies recent history only for display.
   is how `orx exp run` records which chat launched a run, how an agent asks to
   be woken when a run ends, and how `orx agent spawn` opens a new chat in the
   project.
+- **alphaXiv tools.** Claude Code, Codex, OpenCode and ACP agents always get
+  an `alphaxiv` stdio server, `orx alphaxiv-mcp`. If Codex already defines
+  that name, orx disables it for the thread and uses `orx_alphaxiv`; the user's
+  configuration stays untouched and only one server runs. Signed out, including on remote
+  hosts, it forwards research calls without credentials to alphaXiv's anonymous
+  MCP endpoint. Signed in, it refreshes this computer's alphaXiv token under the
+  shared lock and exposes library reads plus requested folder creation and paper
+  saves. Only the allowlisted tools reach the agent; write tools ask in Ask mode.
+  Sign-in changes respawn a resident child on its next turn, resuming its native
+  session so the tool list changes without losing context. Tokens stay in orx.
 - **Autonomy.** How much the agent may decide alone rides every turn as a
   block of context, independent of the harness, so changing it never restarts
   the agent.

@@ -90,7 +90,11 @@ pub fn agent_log_path() -> PathBuf {
 }
 
 /// Chat-server config; native questions are answered through the dashboard.
-fn opencode_config_json(model: Option<&str>, instructions: &str, plugin: Option<&str>) -> String {
+fn opencode_config_json(
+    model: Option<&str>,
+    instructions: &str,
+    plugin: Option<&str>,
+) -> Result<String> {
     let mut cfg = json!({
         "$schema": "https://opencode.ai/config.json",
         "permission": {
@@ -108,6 +112,7 @@ fn opencode_config_json(model: Option<&str>, instructions: &str, plugin: Option<
             "external_directory": "allow",
         },
         "instructions": [instructions],
+        "mcp":{"alphaxiv":{"type":"local", "command":[crate::paths::spawnable_exe()?, "alphaxiv-mcp"], "timeout":300000}},
     });
     if let Some(plugin) = plugin {
         cfg["plugin"] = json!([plugin]);
@@ -115,7 +120,11 @@ fn opencode_config_json(model: Option<&str>, instructions: &str, plugin: Option<
     if let Some(model) = model {
         cfg["model"] = json!(model);
     }
-    serde_json::to_string_pretty(&cfg).unwrap_or_else(|_| "{}".to_string())
+    cfg["permission"]["alphaxiv_*"] = json!("allow");
+    for tool in crate::commands::alphaxiv_mcp::WRITE_TOOLS {
+        cfg["permission"][format!("alphaxiv_{tool}")] = json!("ask");
+    }
+    Ok(serde_json::to_string_pretty(&cfg)?)
 }
 
 /// The research playbook: durable project context and skill routing for `orx up`.
@@ -246,6 +255,7 @@ fn playbook_md(project: &LocalProject, state: &ProjectState) -> String {
         .replace("{id}", id)
         .replace("{publication_line}", publication_line)
         .replace("{paper_line}", &paper_line)
+        .replace("{alphaxiv_line}", "- alphaXiv: the `alphaxiv` tools research papers and researchers. Library, folder, note and highlight tools need the user's alphaXiv sign-in from the account menu at the bottom left of OpenResearch.")
         .replace("{compute_bullet}", &compute_bullet)
         .replace("{artifacts}", &artifacts)
         .replace("{project_state}", &project_state)
@@ -371,14 +381,14 @@ fn write_agent_files(
             .join("opencode.json");
         std::fs::write(
             &path,
-            opencode_config_json(model, &playbook.to_string_lossy(), plugin.as_deref()),
+            opencode_config_json(model, &playbook.to_string_lossy(), plugin.as_deref())?,
         )
         .map_err(|e| anyhow!("Could not write {}: {}", path.display(), e))?;
         Some(path)
     } else {
         std::fs::write(
             repo.join("opencode.json"),
-            opencode_config_json(model, PLAYBOOK_REL, plugin.as_deref()),
+            opencode_config_json(model, PLAYBOOK_REL, plugin.as_deref())?,
         )
         .map_err(|e| anyhow!("Could not write opencode.json: {}", e))?;
         None
@@ -409,6 +419,7 @@ struct AgentChild {
     session_id: String,
     model: Option<String>,
     native_store: NativeStore,
+    alphaxiv_signed_in: bool,
     binary: ResolvedBinary,
     endpoint: AgentEndpoint,
     database: native_store::opencode_database::DatabaseLease,
@@ -489,6 +500,7 @@ async fn spawn_agent(
         session_id: session_id.to_string(),
         model: model.map(str::to_string),
         native_store,
+        alphaxiv_signed_in: crate::alphaxiv::signed_in(),
         binary,
         endpoint,
         database,
@@ -882,6 +894,7 @@ impl AgentHost {
             let mut guard = self.inner.lock().await;
             if let Some(agent) = guard.get_mut(session_id) {
                 if agent.project_id == project.id
+                    && agent.alphaxiv_signed_in == crate::alphaxiv::signed_in()
                     && agent.native_store == native_store
                     && agent.binary == binary
                     && agent.database.path() == database_path
@@ -1060,6 +1073,7 @@ mod tests {
                 session_id: "chat".into(),
                 model: Some("cloud/selected".into()),
                 native_store: NativeStore::Isolated,
+                alphaxiv_signed_in: false,
                 binary: binary.clone(),
                 endpoint,
                 database,

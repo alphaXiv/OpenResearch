@@ -829,6 +829,7 @@ impl Harness for ClaudeCode {
                 effort: claude_effort(ctx.reasoning_level.as_deref()).map(str::to_string),
                 model: ctx.model.clone(),
                 native_store: native_session.store,
+                alphaxiv_signed_in: crate::alphaxiv::signed_in(),
                 bridge_active: uses_permission_bridge(ctx.permission_mode)
                     && ctx.host.up_port().is_some(),
             },
@@ -1143,7 +1144,17 @@ pub(crate) fn write_settings(repo: &std::path::Path, plan: bool) -> Result<PathB
         hooks.push(serde_json::json!({"matcher":"Bash","hooks":hook}));
         hooks.push(serde_json::json!({"matcher":"ExitPlanMode","hooks":hook}));
     }
-    let mut settings = serde_json::json!({"hooks":{"PreToolUse":hooks}});
+    let allow: Vec<_> = crate::commands::alphaxiv_mcp::RESEARCH_TOOLS
+        .iter()
+        .chain(crate::commands::alphaxiv_mcp::LIBRARY_READ_TOOLS)
+        .map(|name| format!("mcp__alphaxiv__{name}"))
+        .collect();
+    let ask: Vec<_> = crate::commands::alphaxiv_mcp::WRITE_TOOLS
+        .iter()
+        .map(|name| format!("mcp__alphaxiv__{name}"))
+        .collect();
+    let mut settings =
+        serde_json::json!({"hooks":{"PreToolUse":hooks}, "permissions":{"allow":allow, "ask":ask}});
     // Dev data lives under the checkout (dev.ts), so Claude would load its
     // CLAUDE.md, which also suppresses a test repo's own AGENTS.md.
     if cfg!(debug_assertions) {
@@ -1163,22 +1174,17 @@ pub(crate) fn write_settings(repo: &std::path::Path, plan: bool) -> Result<PathB
     Ok(path)
 }
 
-/// Write the per-spawn `--mcp-config` file pointing Claude at `orx mcp-gate`
-/// (this same binary) and return its path. The bridge's env block carries the
-/// `orx up` port, the session id, and a fresh per-child token minted at spawn —
-/// everything the resident bridge needs to relay permission requests back to
-/// the running server for the child's whole life.
 pub(crate) fn write_mcp_config(
     repo: &std::path::Path,
-    up_port: u16,
-    session_id: &str,
-    token: &str,
+    gate: Option<(u16, &str, &str)>,
 ) -> Result<PathBuf> {
     let orx = crate::paths::spawnable_exe()
         .map_err(|e| anyhow!("cannot resolve orx binary path for the mcp bridge: {e}"))?;
-    let config = serde_json::json!({
-        "mcpServers": {
-            "orx": {
+    let mut config = serde_json::json!({"mcpServers": {
+        "alphaxiv": {"type":"stdio", "command":orx, "args":["alphaxiv-mcp"]}
+    }});
+    if let Some((up_port, session_id, token)) = gate {
+        config["mcpServers"]["orx"] = serde_json::json!({
                 "type": "stdio",
                 "command": orx.to_string_lossy(),
                 "args": ["mcp-gate"],
@@ -1187,9 +1193,8 @@ pub(crate) fn write_mcp_config(
                     "ORX_SESSION_ID": session_id,
                     "ORX_GATE_TOKEN": token,
                 },
-            },
-        }
-    });
+        });
+    }
     let path = repo.join(MCP_CONFIG_REL);
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)
@@ -2216,6 +2221,7 @@ fn spawn_config(ctx: &TurnCtx, native_store: NativeStore) -> SpawnConfig {
         effort: claude_effort(ctx.reasoning_level.as_deref()).map(str::to_string),
         model: ctx.model.clone(),
         native_store,
+        alphaxiv_signed_in: crate::alphaxiv::signed_in(),
         // A failed bridge setup must respawn next turn rather than reuse a child without input.
         bridge_active: uses_permission_bridge(ctx.permission_mode) && ctx.host.up_port().is_some(),
     }
@@ -2596,7 +2602,7 @@ mod tests {
     #[test]
     fn local_mcp_config_contains_only_string_environment_values() {
         let repo = std::env::temp_dir().join(format!("orx-mcp-test-{}", uuid::Uuid::new_v4()));
-        let path = write_mcp_config(&repo, 4791, "session", "gate").unwrap();
+        let path = write_mcp_config(&repo, Some((4791, "session", "gate"))).unwrap();
         let config: serde_json::Value =
             serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
         let env = config["mcpServers"]["orx"]["env"].as_object().unwrap();

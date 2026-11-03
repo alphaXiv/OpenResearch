@@ -151,7 +151,13 @@ endpoints out of it. Other traffic:
   orx hands to openresearch.sh for its own token. orx keeps alphaXiv's tokens
   owner-only in the config directory, refreshing them under a file lock since
   each refresh retires the last one, and reads the user's folders and papers
-  with them. Nothing is written to alphaXiv.
+  with them. Agents also send research tool calls to alphaXiv while signed out,
+  limited by IP. Signed-in agents read library notes and highlights and, when
+  requested, create folders and save papers to them. Tool arguments (including
+  research queries, paper and researcher identifiers, GitHub repository paths,
+  folder identifiers and names) go to alphaXiv; tool results enter the agent's
+  context and reach its model provider. The MCP proxy sends no chat transcript,
+  project files, experiments or logs of its own.
 - **Telemetry.** Official builds send opt-out usage events to the first-party
   API under a random install ID that is not tied to an account: commands run,
   harness detection states, and the research profile chosen at onboarding.

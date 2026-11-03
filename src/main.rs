@@ -182,6 +182,9 @@ enum Command {
     #[command(name = "mcp-gate", hide = true)]
     McpGate,
 
+    #[command(name = "alphaxiv-mcp", hide = true)]
+    AlphaxivMcp,
+
     #[command(name = "antigravity-gate", hide = true)]
     AntigravityGate,
 
@@ -1141,6 +1144,13 @@ async fn main() {
         }
         return;
     }
+    if matches!(command, Command::AlphaxivMcp) {
+        if let Err(error) = commands::alphaxiv_mcp::run().await {
+            eprintln!("{error}");
+            std::process::exit(1);
+        }
+        return;
+    }
     if matches!(command, Command::McpGate) {
         if let Err(err) = commands::mcp_gate::run().await {
             // stderr only; a failed bridge degrades plan mode, never the CLI.
@@ -1380,6 +1390,7 @@ fn command_name(command: &Command) -> &'static str {
         Command::PlanGate => "plan-gate",
         Command::InvocationGate => "invocation-gate",
         Command::McpGate => "mcp-gate",
+        Command::AlphaxivMcp => "alphaxiv-mcp",
         Command::AntigravityGate => "antigravity-gate",
         Command::PublishBranch(_) => "publish-branch",
         Command::RemoteHost(_) => "remote-host",
@@ -1442,6 +1453,7 @@ async fn dispatch(command: Command) -> error::Result<()> {
         Command::PlanGate => commands::plan_gate::run().await,
         Command::InvocationGate => commands::invocation_gate::run().await,
         Command::McpGate => commands::mcp_gate::run().await,
+        Command::AlphaxivMcp => commands::alphaxiv_mcp::run().await,
         Command::AntigravityGate => commands::mcp_gate::run_antigravity().await,
         Command::PublishBranch(_) => unreachable!("handled before dispatch"),
         Command::RemoteHost(_) => unreachable!("handled before dispatch"),
@@ -1463,6 +1475,7 @@ fn command_uses_lifecycle_lock(command: &Command) -> bool {
             | Command::Feedback(_)
             | Command::PlanGate
             | Command::InvocationGate
+            | Command::AlphaxivMcp
             | Command::McpGate
             | Command::AntigravityGate
             | Command::PublishBranch(_)

@@ -23,7 +23,8 @@ private to this chat session.
 
 - Project id: `{id}`
 {publication_line}
-{paper_line}{compute_bullet}
+{paper_line}{alphaxiv_line}
+{compute_bullet}
 - Artifacts directory: `{artifacts}` — durable project outputs such as reports,
   figures, images, CSVs, and PDFs are stored as project artifacts. Load
   `orx-reports` before creating or organizing artifacts. Load

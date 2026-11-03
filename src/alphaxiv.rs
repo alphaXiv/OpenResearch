@@ -198,6 +198,10 @@ fn tokens_path() -> PathBuf {
     config::config_dir().join("alphaxiv.json")
 }
 
+pub fn signed_in() -> bool {
+    tokens_path().exists()
+}
+
 fn load() -> Option<Tokens> {
     serde_json::from_str(&std::fs::read_to_string(tokens_path()).ok()?).ok()
 }
@@ -293,12 +297,10 @@ async fn fresh_tokens(rejected: Option<&str>) -> Result<Tokens> {
     Ok(refreshed)
 }
 
-async fn get(path: &str, query: &[(&str, &str)]) -> Result<Value> {
+pub async fn send(request: impl Fn(&str) -> reqwest::RequestBuilder) -> Result<reqwest::Response> {
     let mut tokens = fresh_tokens(None).await?;
     for attempt in 0..2 {
-        let response = crate::client::http()
-            .get(format!("{}{path}", tokens.api_url))
-            .query(query)
+        let response = request(&tokens.api_url)
             .bearer_auth(&tokens.access_token)
             .send()
             .await
@@ -337,12 +339,21 @@ async fn get(path: &str, query: &[(&str, &str)]) -> Result<Value> {
             }
             return Err(anyhow!("alphaXiv request failed ({status})."));
         }
-        return response
-            .json()
-            .await
-            .map_err(|_| anyhow!("alphaXiv returned an incorrect library response."));
+        return Ok(response);
     }
     Err(NotConnected.into())
+}
+
+async fn get(path: &str, query: &[(&str, &str)]) -> Result<Value> {
+    send(|api| {
+        crate::client::http()
+            .get(format!("{api}{path}"))
+            .query(query)
+    })
+    .await?
+    .json()
+    .await
+    .map_err(|_| anyhow!("alphaXiv returned an incorrect library response."))
 }
 
 pub async fn folders() -> Result<Value> {
