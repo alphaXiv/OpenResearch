@@ -967,6 +967,34 @@ export const getModalSettings = (signal?: AbortSignal) => get<ModalSettings>("/a
 export const saveModalToken = (tokenId: string, tokenSecret: string) =>
   post<ModalSettings>("/api/settings/modal", { tokenId, tokenSecret });
 
+// --- settings: vercel ---------------------------------------------------------
+
+export type VercelPlan = "hobby" | "pro" | "enterprise";
+
+export interface VercelScopes {
+  teams: { id: string; name: string; plan: VercelPlan | null }[];
+  teamId: string;
+  projects: { id: string; name: string }[];
+}
+
+export interface VercelSettings {
+  configured: boolean;
+  /** Credentials in orx's own process environment override anything saved here. */
+  processEnv: boolean;
+  oidc: boolean;
+  maskedToken: string | null;
+  projectId: string | null;
+  scopes: VercelScopes | null;
+  error: string | null;
+}
+
+export const getVercelSettings = (signal?: AbortSignal) => get<VercelSettings>("/api/settings/vercel", signal);
+/** Lists what a token can reach; `token` omitted uses the saved one. */
+export const getVercelScopes = (token: string | null, teamId: string | null) =>
+  post<VercelScopes>("/api/settings/vercel/scopes", { token, teamId });
+export const saveVercelSetup = (setup: { token: string | null; teamId: string; projectId: string | null; newProject: string | null }) =>
+  post<VercelSettings>("/api/settings/vercel", setup);
+
 // --- settings: env vars / git / harnesses ------------------------------------
 
 export interface EnvVar {
@@ -1089,9 +1117,12 @@ export interface RemoteSessionInfo {
   canStartNewHost: boolean;
 }
 
+/** `production` only for an official release built by the project's CI. */
+export type BuildChannel = "production" | "development";
+
 export type RuntimeInfo =
-  | { kind: "local"; version: string }
-  | { kind: "ssh"; version: string; dashboardProtocol: number; session: RemoteSessionInfo };
+  | { kind: "local"; version: string; buildChannel: BuildChannel }
+  | { kind: "ssh"; version: string; buildChannel: BuildChannel; dashboardProtocol: number; session: RemoteSessionInfo };
 
 export const getRuntime = (signal?: AbortSignal) => get<RuntimeInfo>("/_orx/runtime", signal);
 
@@ -1264,6 +1295,7 @@ export type ComputeTargetId =
   | "ssh"
   | "slurm"
   | "ray"
+  | "vercel"
   | "openresearch";
 
 /** Cheap fs/env probe only — "worth trying", not "healthy". Deep health lives
@@ -1375,6 +1407,11 @@ export const deleteArtifact = (projectId: string, path: string) =>
 
 export const manageArtifactFile = (projectId: string, path: string, action: FileAction) =>
   patch<FileActionResult>(`/api/projects/${projectId}/files`, { path, ...action });
+
+/** Reveal an artifact file or folder in the OS file manager on the machine
+ * running `orx up`. */
+export const revealArtifactInManager = (projectId: string, path: string) =>
+  post<{ ok: boolean }>(`/api/projects/${projectId}/files/reveal`, { path });
 
 /** Raw artifact bytes served by the compatibility `/files` API. */
 export const artifactUrl = (projectId: string, path: string) =>

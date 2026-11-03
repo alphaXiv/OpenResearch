@@ -26,6 +26,7 @@ fn unix_bootstrap(harness: &str) -> Option<(&'static str, &'static str)> {
             "devin" => Some(("https://cli.devin.ai/install.sh", "bash")),
             "grok" => Some(("https://x.ai/cli/install.sh", "bash")),
             "omp" => Some(("https://omp.sh/install", "sh")),
+            "fx" => Some(("https://fx.sh/setup.sh", "bash")),
             _ => None,
         },
     }
@@ -691,7 +692,10 @@ mod tests {
     fn acp_install_commands_are_allowlisted() {
         for preset in crate::local::acp::presets() {
             assert!(install_command(&preset.launch.id, false).is_some());
-            assert!(install_command(&preset.launch.id, true).is_some());
+            // fx is macOS/Linux only; `presets()` omits it on Windows.
+            if preset.launch.executable != "fx" {
+                assert!(install_command(&preset.launch.id, true).is_some());
+            }
         }
         assert!(install_command("acp:unconfigured", false).is_none());
     }

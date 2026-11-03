@@ -6,6 +6,15 @@
   display: none;
 }
 
+/* The room the macOS traffic lights take. Fullscreen hides them, and the sidebar toggle moves into their place. */
+:root {
+  --titlebar-lights: 5.125rem;
+}
+
+:root[data-fullscreen] {
+  --titlebar-lights: 0.475rem;
+}
+
 :root[data-theme="dark"] .tinker-logo {
   filter: invert(1);
 }
@@ -454,8 +463,10 @@
   .app { padding-top: env(safe-area-inset-top); }
   .workspace-body.has-workspace-tools { padding-bottom: calc(64px + env(safe-area-inset-bottom)); }
   .workspace-body > .chat-pane .chat-header { padding-inline: 8px; }
-  .chat-heading-row { grid-template-columns: 44px minmax(0, 1fr) 0; }
-  .chat-heading-row > span > .icon-btn, .mac-titlebar-spacer > span > .icon-btn { width: 44px; height: 44px; }
+  .chat-heading-row { grid-template-columns: 48px minmax(0, 1fr) 0; }
+  :root:not(.mac-titlebar) .sidebar-toggle > .icon-btn { width: 44px; height: 44px; }
+  /* The touch-size toggle's own padding already spaces it from the logo. */
+  .rail-brand { column-gap: 0; }
   .workspace-tools { display: none; }
   .workspace-mobile-nav {
     display: flex;

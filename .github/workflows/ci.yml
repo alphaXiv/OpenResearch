@@ -40,7 +40,7 @@ jobs:
       windows: ${{ steps.changes.outputs.windows }}
       linux: ${{ steps.changes.outputs.linux }}
       macos: ${{ steps.changes.outputs.macos }}
-      dev_slot: ${{ steps.changes.outputs.dev_slot }}
+      dev: ${{ steps.changes.outputs.dev }}
       chart: ${{ steps.changes.outputs.chart }}
       release_notes: ${{ steps.changes.outputs.release_notes }}
       javascript: ${{ steps.changes.outputs.javascript }}
@@ -97,7 +97,7 @@ jobs:
   helpers:
     name: Helper tests
     needs: changes
-    if: needs.changes.outputs.dev_slot == 'true' || needs.changes.outputs.chart == 'true' || needs.changes.outputs.release_notes == 'true' || needs.changes.outputs.javascript == 'true'
+    if: needs.changes.outputs.dev == 'true' || needs.changes.outputs.chart == 'true' || needs.changes.outputs.release_notes == 'true' || needs.changes.outputs.javascript == 'true'
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
@@ -106,9 +106,9 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: 22
-      - name: Dev-slot helper tests
-        if: needs.changes.outputs.dev_slot == 'true'
-        run: node --test scripts/dev-slot.test.mjs
+      - name: Dev script tests
+        if: needs.changes.outputs.dev == 'true'
+        run: node --test --experimental-strip-types scripts/dev.test.ts
       - name: Interactive chart authoring tests
         if: needs.changes.outputs.chart == 'true'
         run: python3 scripts/test_orx_chart.py
