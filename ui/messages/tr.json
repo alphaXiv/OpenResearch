@@ -1648,5 +1648,11 @@
   "remote_agents_description": "Ajanlar her makinede ayrı ayrı yüklenmeli ve giriş yapılmalıdır. Bunları {host} üzerinde kurun.",
   "remote_claude_datacenter_title": "Veri merkezi IP'lerinde Claude aboneliği kullanmayın",
   "remote_claude_datacenter_description": "{host}, {ip} veri merkezi IP adresini kullanıyor. Burada Claude aboneliği kullanmak Anthropic'in hesabınızı işaretlemesine yol açabilir. Bunun yerine bir API anahtarı kullanın ya da riski göze alarak devam edin.",
-  "remote_claude_datacenter_continue": "Yine de devam et"
+  "remote_claude_datacenter_continue": "Yine de devam et",
+  "chat_panel_remove_file": "Dosyayı kaldır",
+  "chat_panel_remove_image": "Görseli kaldır",
+  "account_local_to_app": "Hesap bu uygulamaya özel",
+  "run_abandon_body_no_host": "orx beklemeyi bırakır ve çalıştırmayı Terk edildi olarak işaretler. İş daha sonra ortaya çıkarsa orx onu durdurur.",
+  "run_abandoning": "Terk ediliyor…",
+  "run_notice_stops_if_found": "İş ortaya çıkarsa orx onu durdurur."
 }

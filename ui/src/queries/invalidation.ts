@@ -21,8 +21,7 @@ export function isImmutableQuery(query: Query) {
 const fileBodies = ["resolvedFile", "getProjectFile", "getArtifactFileText", "getArtifactFileMetadata"];
 
 export const artifactFamilies = ["getArtifacts", "getArtifactFileText", "getArtifactFileMetadata"];
-
-export const liveFamilies = ["getSubagentTranscript", "listChatActiveRuns", "listProjects", "listProjectActivity", "listSidebarChatSessions", "listExperiments", "listRuns", "listChatSessions", "getChatMessages", "getHarnesses", "getUpdateStatus", ...artifactFamilies, ...fileBodies, "getAbsoluteFile", "fileVersion", "getCodeTree", "getSessionWorktree", "getRunDiff", "getExperimentDiff"];
+export const liveFamilies = ["getSubagentTranscript", "listChatActiveRuns", "listProjects", "listProjectActivity", "listSidebarChatSessions", "listExperiments", "listRuns", "listChatSessions", "getChatMessages", "getHarnesses", "getUpdateStatus", ...artifactFamilies, ...fileBodies, "getAbsoluteFile", "fileVersion", "getCodeTree", "getSessionWorktree", "getRunDiff", "getExperimentDiff", "listEngineHosts"];
 
 const settingsFamilies: Record<string, readonly string[]> = {
   hf: ["getHfSettings", "getComputeSettings", "getEnvVars", "getTrackioRuns"],

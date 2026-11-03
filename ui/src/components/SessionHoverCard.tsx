@@ -6,8 +6,9 @@ import { createPortal } from "react-dom";
 
 import { m } from "../paraglide/messages.js";
 import { fmtNumber, ltr } from "../i18n";
-import { fmtDuration, runDisplayStatus, timeAgo } from "../api";
-import type { ChatSession, RunDisplayStatus, SessionExperiment } from "../api";
+import { fmtDuration, timeAgo } from "../api";
+import type { ChatSession, SessionExperiment } from "../api";
+import { runDisplay, type RunDisplayStatus } from "../runDisplay";
 import { harnessLabel } from "./ModelPicker";
 import { HarnessLogo } from "./HarnessLogo";
 import { statusLabel, statusStyle } from "./StatusBadge";
@@ -18,6 +19,7 @@ const CARD_WIDTH = 320;
 const GAP = 8;
 
 const ICON_TONES: Partial<Record<RunDisplayStatus, string>> = {
+  submitting: "text-accent-green",
   starting: "text-accent-green",
   running: "text-accent-green",
   cancelling: "text-accent-amber",
@@ -32,7 +34,8 @@ function ExperimentRow({ row, sessionProjectId, tabbable, onFocus, onOpen }: {
   onOpen: () => void;
 }) {
   const { experiment, currentRun, projectName } = row;
-  const status = currentRun ? runDisplayStatus(currentRun) : null;
+  const display = currentRun ? runDisplay(currentRun) : null;
+  const status = display?.status ?? null;
   const tone = status ? ICON_TONES[status] ?? "text-subtext" : "text-muted";
   const live = status !== null && statusStyle(status).live;
   const elapsed = currentRun && (live ? fmtDuration(Date.now() - currentRun.createdAt) : timeAgo(currentRun.endedAt ?? currentRun.createdAt));
@@ -55,7 +58,7 @@ function ExperimentRow({ row, sessionProjectId, tabbable, onFocus, onOpen }: {
         <span className="min-w-0 flex-1">
           <span className="block break-words">{experiment.title?.trim() || experiment.slug}</span>
           <span className="mt-0.5 flex flex-wrap items-center gap-x-1.5 text-xs text-subtext">
-            {status ? <span className="text-text">{statusLabel(status)}</span> : <span>{m.experiments_not_run_yet()}</span>}
+            {status ? <span className="text-text">{statusLabel(status, display?.stopping)}</span> : <span>{m.experiments_not_run_yet()}</span>}
             {elapsed && <span className="tabular-nums">{elapsed}</span>}
             {experiment.archived && <span>{m.tree_archived()}</span>}
             {experiment.projectId !== sessionProjectId && (
