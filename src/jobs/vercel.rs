@@ -194,7 +194,7 @@ def logs(name):
             sys.exit(1)
         if not line.endswith("\n"):
             line += "\n"
-        sys.stdout.write(line)
+        sys.stdout.buffer.write(line.encode("utf-8"))
         sys.stdout.flush()
     code = getattr(proc, "returncode", None)
     if code is None and hasattr(proc, "wait"):
@@ -1521,6 +1521,7 @@ def get_sandbox(**kw):
         );
     }
 
+    #[cfg(target_os = "linux")]
     #[test]
     fn log_follow_reads_until_the_pid_exits_with_gnu_tail() {
         let dir = std::env::temp_dir().join(format!("orx-vercel-follow-{}", uuid::Uuid::new_v4()));
@@ -1537,6 +1538,7 @@ def get_sandbox(**kw):
         assert!(stdout.contains("second"), "{stdout}");
     }
 
+    #[cfg(target_os = "linux")]
     #[test]
     fn log_follow_reads_until_the_pid_exits_without_gnu_tail() {
         let real_tail = std::process::Command::new("sh")
@@ -1562,13 +1564,9 @@ def get_sandbox(**kw):
             ),
         )
         .unwrap();
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt as _;
-            let mut perms = std::fs::metadata(&stub).unwrap().permissions();
-            perms.set_mode(0o755);
-            std::fs::set_permissions(&stub, perms).unwrap();
-        }
+        let mut perms = std::fs::metadata(&stub).unwrap().permissions();
+        std::os::unix::fs::PermissionsExt::set_mode(&mut perms, 0o755);
+        std::fs::set_permissions(&stub, perms).unwrap();
         let output = follow_log(Some(&bin), &dir);
         let _ = std::fs::remove_dir_all(&dir);
         let stdout = String::from_utf8_lossy(&output.stdout);
@@ -1582,6 +1580,7 @@ def get_sandbox(**kw):
         assert!(!stdout.contains("ORX_LOG_FOLLOW_ERROR"), "{stdout}");
     }
 
+    #[cfg(target_os = "linux")]
     #[test]
     fn log_follow_errors_when_tail_cannot_read() {
         let dir = std::env::temp_dir().join(format!("orx-vercel-follow-{}", uuid::Uuid::new_v4()));
@@ -1589,13 +1588,9 @@ def get_sandbox(**kw):
         std::fs::create_dir_all(&bin).unwrap();
         let stub = bin.join("tail");
         std::fs::write(&stub, "#!/bin/sh\necho 'tail: not available' >&2\nexit 1\n").unwrap();
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt as _;
-            let mut perms = std::fs::metadata(&stub).unwrap().permissions();
-            perms.set_mode(0o755);
-            std::fs::set_permissions(&stub, perms).unwrap();
-        }
+        let mut perms = std::fs::metadata(&stub).unwrap().permissions();
+        std::os::unix::fs::PermissionsExt::set_mode(&mut perms, 0o755);
+        std::fs::set_permissions(&stub, perms).unwrap();
         let output = follow_log(Some(&bin), &dir);
         let _ = std::fs::remove_dir_all(&dir);
         let stdout = String::from_utf8_lossy(&output.stdout);
@@ -1603,6 +1598,7 @@ def get_sandbox(**kw):
         assert!(stdout.contains("ORX_LOG_FOLLOW_ERROR:"), "{stdout}");
     }
 
+    #[cfg(target_os = "linux")]
     fn follow_log(
         tail_dir: Option<&std::path::Path>,
         dir: &std::path::Path,
