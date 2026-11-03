@@ -1720,5 +1720,6 @@
   "status_stopping_many": "完全には停止していません · {host} で {count} 個のプロセスがまだ実行中です",
   "status_stopping_other": "完全には停止していません · {host} で {count} 個のプロセスがまだ実行中です",
   "status_cancellation_pending": "キャンセル待ち",
-  "run_abandon_unreachable": "マシンに接続できません。"
+  "run_abandon_unreachable": "マシンに接続できません。",
+  "run_abandon_keep": "追跡を続ける"
 }

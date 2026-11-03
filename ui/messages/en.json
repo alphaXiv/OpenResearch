@@ -1720,5 +1720,6 @@
   "status_stopping_many": "Not fully stopped · {count} processes still running on {host}",
   "status_stopping_other": "Not fully stopped · {count} processes still running on {host}",
   "status_cancellation_pending": "Cancellation pending",
-  "run_abandon_unreachable": "The machine is unreachable."
+  "run_abandon_unreachable": "The machine is unreachable.",
+  "run_abandon_keep": "Keep tracking"
 }

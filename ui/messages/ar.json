@@ -1720,5 +1720,6 @@
   "status_stopping_many": "لم يتوقف بالكامل · {count} عملية لا تزال تعمل على {host}",
   "status_stopping_other": "لم يتوقف بالكامل · {count} عملية لا تزال تعمل على {host}",
   "status_cancellation_pending": "الإلغاء قيد الانتظار",
-  "run_abandon_unreachable": "يتعذر الوصول إلى الجهاز."
+  "run_abandon_unreachable": "يتعذر الوصول إلى الجهاز.",
+  "run_abandon_keep": "مواصلة التتبع"
 }

@@ -1720,5 +1720,6 @@
   "status_stopping_many": "کاملاً متوقف نشده · {count} فرایند هنوز روی {host} در حال اجرا هستند",
   "status_stopping_other": "کاملاً متوقف نشده · {count} فرایند هنوز روی {host} در حال اجرا هستند",
   "status_cancellation_pending": "لغو در انتظار است",
-  "run_abandon_unreachable": "دستگاه در دسترس نیست."
+  "run_abandon_unreachable": "دستگاه در دسترس نیست.",
+  "run_abandon_keep": "ادامهٔ پیگیری"
 }

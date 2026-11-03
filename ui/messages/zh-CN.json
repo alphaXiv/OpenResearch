@@ -1720,5 +1720,6 @@
   "status_stopping_many": "未完全停止 · {host} 上仍有 {count} 个进程在运行",
   "status_stopping_other": "未完全停止 · {host} 上仍有 {count} 个进程在运行",
   "status_cancellation_pending": "取消待发送",
-  "run_abandon_unreachable": "无法连接到机器。"
+  "run_abandon_unreachable": "无法连接到机器。",
+  "run_abandon_keep": "继续跟踪"
 }

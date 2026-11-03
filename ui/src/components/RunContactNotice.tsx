@@ -149,6 +149,7 @@ export function RunContactNotice({ run, className }: { run: NoticeRun; className
               description: <>{run.contact?.type === "unreachable" && <>{m.run_abandon_unreachable()} </>}{m.run_abandon_body()}</>,
               destructive: true,
               confirmLabel: m.run_abandon_confirm(),
+              cancelLabel: m.run_abandon_keep(),
               onCancel: "close",
               onConfirm: async () => { await abandonRun(run.id); },
             })}>

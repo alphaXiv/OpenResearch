@@ -1720,5 +1720,6 @@
   "status_stopping_many": "Остановлено не полностью · {count} процессов всё ещё работают на {host}",
   "status_stopping_other": "Остановлено не полностью · {count} процесса всё ещё работают на {host}",
   "status_cancellation_pending": "Отмена ожидает отправки",
-  "run_abandon_unreachable": "Машина недоступна."
+  "run_abandon_unreachable": "Машина недоступна.",
+  "run_abandon_keep": "Продолжить отслеживание"
 }

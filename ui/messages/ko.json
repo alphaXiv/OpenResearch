@@ -1720,5 +1720,6 @@
   "status_stopping_many": "완전히 중지되지 않음 · {host}에서 프로세스 {count}개가 아직 실행 중",
   "status_stopping_other": "완전히 중지되지 않음 · {host}에서 프로세스 {count}개가 아직 실행 중",
   "status_cancellation_pending": "취소 대기 중",
-  "run_abandon_unreachable": "머신에 연결할 수 없습니다."
+  "run_abandon_unreachable": "머신에 연결할 수 없습니다.",
+  "run_abandon_keep": "계속 추적"
 }

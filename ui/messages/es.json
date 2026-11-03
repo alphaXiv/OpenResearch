@@ -1720,5 +1720,6 @@
   "status_stopping_many": "No se ha detenido por completo · {count} procesos siguen en ejecución en {host}",
   "status_stopping_other": "No se ha detenido por completo · {count} procesos siguen en ejecución en {host}",
   "status_cancellation_pending": "Cancelación pendiente",
-  "run_abandon_unreachable": "No se puede acceder a la máquina."
+  "run_abandon_unreachable": "No se puede acceder a la máquina.",
+  "run_abandon_keep": "Seguir rastreando"
 }

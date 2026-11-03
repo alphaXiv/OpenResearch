@@ -1720,5 +1720,6 @@
   "status_stopping_many": "पूरी तरह बंद नहीं हुआ · {host} पर {count} प्रक्रियाएँ अभी भी चल रही हैं",
   "status_stopping_other": "पूरी तरह बंद नहीं हुआ · {host} पर {count} प्रक्रियाएँ अभी भी चल रही हैं",
   "status_cancellation_pending": "रद्द करना लंबित है",
-  "run_abandon_unreachable": "मशीन तक पहुँचना संभव नहीं है।"
+  "run_abandon_unreachable": "मशीन तक पहुँचना संभव नहीं है।",
+  "run_abandon_keep": "ट्रैक करना जारी रखें"
 }

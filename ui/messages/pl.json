@@ -1720,5 +1720,6 @@
   "status_stopping_many": "Nie zatrzymano w pełni · {count} procesów nadal działa na {host}",
   "status_stopping_other": "Nie zatrzymano w pełni · {count} procesu nadal działa na {host}",
   "status_cancellation_pending": "Anulowanie oczekuje",
-  "run_abandon_unreachable": "Maszyna jest nieosiągalna."
+  "run_abandon_unreachable": "Maszyna jest nieosiągalna.",
+  "run_abandon_keep": "Śledź dalej"
 }
