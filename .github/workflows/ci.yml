@@ -230,31 +230,48 @@ jobs:
         uses: dtolnay/rust-toolchain@stable
         with:
           components: clippy, rustfmt
+      # Tests create their git repositories under TEMP, so it moves to the Dev Drive too.
+      - uses: samypr100/setup-dev-drive@562171fe8df7401fdf582d766cd3b6ab80d5b1a0
+        with:
+          drive-size: 20GB
+          workspace-copy: true
+          trusted-dev-drive: true
+          env-mapping: |
+            CARGO_HOME,{{ DEV_DRIVE }}\.cargo
+            TMP,{{ DEV_DRIVE }}\tmp
+            TEMP,{{ DEV_DRIVE }}\tmp
+      - run: New-Item -ItemType Directory -Force $env:TMP | Out-Null
       - uses: Swatinem/rust-cache@v2
         with:
           shared-key: windows
           save-if: ${{ matrix.mode == 'all' }}
           workspaces: |
-            . -> target
-            windows/launcher -> target
+            ${{ env.DEV_DRIVE_WORKSPACE }} -> target
+            ${{ env.DEV_DRIVE_WORKSPACE }}/windows/launcher -> target
       - name: Clippy
         if: matrix.mode != 'test'
         run: cargo clippy --all-targets --locked -- -D warnings
+        working-directory: ${{ env.DEV_DRIVE_WORKSPACE }}
       - name: Format app launcher
         if: matrix.mode != 'test'
         run: cargo fmt --manifest-path windows/launcher/Cargo.toml --check
+        working-directory: ${{ env.DEV_DRIVE_WORKSPACE }}
       - name: Clippy (app launcher)
         if: matrix.mode != 'test'
         run: cargo clippy --manifest-path windows/launcher/Cargo.toml --all-targets --locked -- -D warnings
+        working-directory: ${{ env.DEV_DRIVE_WORKSPACE }}
       - name: Build app launcher
         if: matrix.mode != 'lint'
         run: cargo build --manifest-path windows/launcher/Cargo.toml --locked
+        working-directory: ${{ env.DEV_DRIVE_WORKSPACE }}
       - name: Test app launcher
         if: matrix.mode != 'lint'
         run: cargo test --manifest-path windows/launcher/Cargo.toml --locked
+        working-directory: ${{ env.DEV_DRIVE_WORKSPACE }}
       - name: Test
         if: matrix.mode != 'lint'
         run: cargo test --locked
+        working-directory: ${{ env.DEV_DRIVE_WORKSPACE }}
 
   check:
     name: fmt, clippy, test
