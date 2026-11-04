@@ -331,9 +331,7 @@ jobs:
   custom-ci:
     needs:
       - plan
-      - build-local-artifacts
-      - custom-sign-macos-cli
-      - custom-sign-windows-cli
+      - build-ui
     uses: ./.github/workflows/ci.yml
     with:
       plan: ${{ needs.plan.outputs.val }}

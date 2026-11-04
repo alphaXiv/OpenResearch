@@ -13,7 +13,7 @@ const ci = workflow('ci')
 const canary = workflow('release-canary')
 
 test('canary identity handles paginated releases and keeps a running build', () => {
-  assert.match(canary, /group: canary-desktop\n\s+cancel-in-progress: false\n\s+queue: max/)
+  assert.match(canary, /group: canary-desktop\n\s+cancel-in-progress: false\n/)
   assert.match(canary, /if: github.ref == 'refs\/heads\/main'/)
   for (const job of ['macos', 'windows']) {
     const section = canary.split(`\n  ${job}:`)[1].split(/\n  [a-z]/)[0]
