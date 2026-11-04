@@ -22,7 +22,8 @@ catalogs; when you change an API it serves, keep both sides compatible.
 ## Rules that matter most
 
 - **The user's machine owns their research.** Code, experiments, runs, logs and
-  chats never go to openresearch.sh. Anything new that leaves the machine is a
+  chats never go to openresearch.sh unless the user publishes a project.
+  Anything new that leaves the machine is a
   product decision: add it to the storage essay's list or don't ship it.
 - **Every shipped version stays out there.** Old apps stay open for days, a
   remote host runs a different `orx` than the laptop, and openresearch.sh
