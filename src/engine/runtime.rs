@@ -1952,9 +1952,25 @@ mod tests {
             &runtime.box_transport(&next_rental).unwrap()
         ));
         assert_eq!(lock(&runtime.auth).len(), 3);
+        let events = runtime.engine.bus.subscribe();
         drop(transport);
         drop(runtime);
+        engine_released(events).await;
         std::fs::remove_dir_all(directory).unwrap();
+    }
+
+    /// Windows cannot remove the data directory while a host watcher still holds the store.
+    async fn engine_released(
+        mut events: tokio::sync::broadcast::Receiver<crate::engine::bus::RunEvent>,
+    ) {
+        tokio::time::timeout(Duration::from_secs(10), async {
+            while !matches!(
+                events.recv().await,
+                Err(tokio::sync::broadcast::error::RecvError::Closed)
+            ) {}
+        })
+        .await
+        .expect("host watchers retained the engine after its runtime stopped");
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -2006,18 +2022,11 @@ mod tests {
         runtime.retry_host("unused").await;
         assert_eq!(lock(&runtime.conns).len(), 2);
         assert_eq!(lock(&runtime.auth).len(), 1);
-        let mut events = runtime.engine.bus.subscribe();
+        let events = runtime.engine.bus.subscribe();
         drop(other);
         drop(connections);
         drop(runtime);
-        tokio::time::timeout(Duration::from_secs(10), async {
-            while !matches!(
-                events.recv().await,
-                Err(tokio::sync::broadcast::error::RecvError::Closed)
-            ) {}
-        })
-        .await
-        .expect("host watchers retained the engine after its runtime stopped");
+        engine_released(events).await;
         std::fs::remove_dir_all(directory).unwrap();
     }
 
