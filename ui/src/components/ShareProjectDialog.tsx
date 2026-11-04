@@ -50,7 +50,7 @@ export function ShareProjectDialog({ project, remote, returnFocus, cancel, confi
 
   return <DialogContent finalFocus={returnFocus} className="max-h-[calc(100vh-2.5rem)] overflow-y-auto text-text">
     <div className="mb-4 flex items-center justify-between">
-      <DialogTitle>{m.share_dialog_title({ name: project.name })}</DialogTitle>
+      <DialogTitle className="min-w-0 break-words">{m.share_dialog_title({ name: project.name })}</DialogTitle>
       <IconButton type="button" aria-label={m.tour_close()} onClick={cancel} disabled={busy}><X size={16} /></IconButton>
     </div>
     <p className="text-sm">{m.share_explainer()}</p>
@@ -58,16 +58,16 @@ export function ShareProjectDialog({ project, remote, returnFocus, cancel, confi
       <label className="flex items-center gap-2"><input type="checkbox" checked={logs} disabled={busy} onChange={(event) => setLogs(event.target.checked)} />{m.share_logs()}</label>
       <label className="flex items-center gap-2"><input type="checkbox" checked={artifacts} disabled={busy} onChange={(event) => setArtifacts(event.target.checked)} />{m.share_artifacts()}</label>
     </div>
-    <fieldset className="mt-5 text-sm">
-      <legend className="font-medium">{m.share_chats()}</legend>
+    <fieldset className="mt-5 mx-0 mb-0 min-w-0 border-0 p-0 text-sm">
+      <legend className="p-0 font-medium">{m.share_chats()}</legend>
       <p className="mt-1 text-xs text-subtext">{m.share_chats_hint()}</p>
       <div className="mt-2 max-h-48 overflow-y-auto rounded-lg border border-border p-2">
-        {chatsQuery.error ? <p role="alert" className="px-1 text-accent-red">{chatsQuery.error.message}</p>
+        {chatsQuery.error ? <p role="alert" className="px-1 break-words text-accent-red">{chatsQuery.error.message}</p>
           : !chats ? <LoadingRow /> : chats.length === 0 ? <p className="px-1 text-subtext">{m.share_no_chats()}</p>
           : chats.map((chat) => <label key={chat.id} className="flex items-center gap-2 rounded-sm px-1 py-1 hover:bg-surface">
             <input type="checkbox" checked={picked.includes(chat.id)} disabled={busy}
               onChange={(event) => setUnpicked((cur) => event.target.checked ? cur.filter((id) => id !== chat.id) : [...cur, chat.id])} />
-            <span className="truncate">{chat.title || m.share_untitled_chat()}</span>
+            <span dir="auto" className="truncate">{chat.title || m.share_untitled_chat()}</span>
           </label>)}
       </div>
     </fieldset>
@@ -95,7 +95,7 @@ export function ShareProjectDialog({ project, remote, returnFocus, cancel, confi
         </div>
       </div>}
     </section>
-    {(linkError || errorMessage) && <p role="alert" className="mt-3 whitespace-pre-line text-sm text-accent-red">{linkError?.message ?? errorMessage}</p>}
+    {(linkError || errorMessage) && <p role="alert" className="mt-3 whitespace-pre-line break-words text-sm text-accent-red">{linkError?.message ?? errorMessage}</p>}
     <div className="mt-6 flex flex-wrap justify-end gap-2">
       <Button type="button" variant="ghost" disabled={busy} onClick={cancel}>{m.projects_home_cancel()}</Button>
       <Button ref={publishRef} type="button" disabled={busy || !ready || !linkQuery.data || (remote && !signedIn)} onClick={() => {
