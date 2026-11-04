@@ -11,7 +11,6 @@ permissions:
 concurrency:
   group: canary-desktop
   cancel-in-progress: false
-  queue: max
 
 jobs:
   identity:
@@ -74,9 +73,43 @@ jobs:
           path: ui/dist
           if-no-files-found: error
 
-  macos:
-    needs: [identity, ci, ui]
+  macos-build:
+    needs: [identity, ui]
     if: vars.MACOS_SIGNING_ENABLED == 'true'
+    strategy:
+      matrix:
+        target: [aarch64-apple-darwin, x86_64-apple-darwin]
+    runs-on: macos-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c
+        with:
+          name: release-ui
+          path: ui/dist
+      - run: rustup target add ${{ matrix.target }}
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0
+        with:
+          shared-key: canary-macos
+          key: ${{ matrix.target }}
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+      - name: Build orx
+        env:
+          ORX_OFFICIAL_RELEASE_BUILD: '1'
+          ORX_DESKTOP_CANARY_TAG: ${{ needs.identity.outputs.tag }}
+          ORX_DESKTOP_CANARY_SHA: ${{ github.sha }}
+        run: cargo build --release --locked --bin orx --target ${{ matrix.target }}
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: canary-macos-orx-${{ matrix.target }}
+          path: target/${{ matrix.target }}/release/orx
+          if-no-files-found: error
+
+  macos:
+    needs: [identity, macos-build]
     runs-on: macos-latest
     timeout-minutes: 45
     environment: release-signing
@@ -87,12 +120,11 @@ jobs:
           persist-credentials: false
       - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c
         with:
-          name: release-ui
-          path: ui/dist
+          pattern: canary-macos-orx-*
+          path: orx
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
         with:
           node-version: '22'
-      - run: rustup target add aarch64-apple-darwin x86_64-apple-darwin
       - uses: ./.github/actions/macos-signing
         with:
           cert-p12-base64: ${{ secrets.MACOS_CERT_P12_BASE64 }}
@@ -100,16 +132,14 @@ jobs:
           notary-apple-id: ${{ secrets.MACOS_NOTARY_APPLE_ID }}
           notary-team-id: ${{ secrets.MACOS_NOTARY_TEAM_ID }}
           notary-password: ${{ secrets.MACOS_NOTARY_PASSWORD }}
-      - name: Build and sign app
+      - name: Assemble and sign app
         env:
-          ORX_OFFICIAL_RELEASE_BUILD: '1'
-          ORX_APP_UNIVERSAL: '1'
           ORX_DESKTOP_CANARY_TAG: ${{ needs.identity.outputs.tag }}
-          ORX_DESKTOP_CANARY_SHA: ${{ github.sha }}
           MACOS_SIGN_IDENTITY: ${{ secrets.MACOS_SIGN_IDENTITY }}
           MACOS_NOTARY_PROFILE: orx-notary
         run: |
-          bash scripts/build-macos-app.sh
+          lipo -create -output orx/universal orx/canary-macos-orx-aarch64-apple-darwin/orx orx/canary-macos-orx-x86_64-apple-darwin/orx
+          ORX_APP_BINARY=orx/universal bash scripts/build-macos-app.sh
           test "$(dist/OpenResearch.app/Contents/MacOS/OpenResearch --no-telemetry version --build-channel)" = production
           test "$(dist/OpenResearch.app/Contents/MacOS/OpenResearch --no-telemetry version --build-id)" = "$ORX_DESKTOP_CANARY_TAG"
           bash scripts/package-macos-app.sh
@@ -120,7 +150,7 @@ jobs:
           if-no-files-found: error
 
   linux:
-    needs: [identity, ci, ui]
+    needs: [identity, ui]
     if: vars.LINUX_APP_ENABLED == 'true'
     strategy:
       fail-fast: false
@@ -144,6 +174,10 @@ jobs:
       - run: |
           sudo apt-get update
           sudo apt-get install -y libwebkit2gtk-4.1-dev libgtk-3-dev librsvg2-dev file patchelf xvfb xdotool
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0
+        with:
+          shared-key: canary-linux
+          save-if: ${{ github.ref == 'refs/heads/main' }}
       - name: Build app
         env:
           ORX_OFFICIAL_RELEASE_BUILD: '1'
@@ -163,7 +197,7 @@ jobs:
           if-no-files-found: error
 
   windows:
-    needs: [identity, ci, ui]
+    needs: [identity, ui]
     if: vars.WINDOWS_APP_ENABLED == 'true'
     runs-on: windows-latest
     timeout-minutes: 45
@@ -180,6 +214,13 @@ jobs:
         with:
           name: release-ui
           path: ui/dist
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0
+        with:
+          shared-key: canary-windows
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+          workspaces: |
+            . -> target
+            windows/launcher -> target
       - name: Build app
         env:
           ORX_OFFICIAL_RELEASE_BUILD: '1'
@@ -230,8 +271,8 @@ jobs:
           if-no-files-found: error
 
   publish:
-    needs: [identity, ci, ui, macos, linux, windows]
-    if: '!cancelled() && needs.identity.result == ''success'' && needs.ci.result == ''success'' && needs.ui.result == ''success'' && (needs.macos.result == ''success'' || needs.macos.result == ''skipped'') && (needs.linux.result == ''success'' || needs.linux.result == ''skipped'') && (needs.windows.result == ''success'' || needs.windows.result == ''skipped'') && (needs.macos.result == ''success'' || needs.linux.result == ''success'' || needs.windows.result == ''success'')'
+    needs: [identity, ci, ui, macos-build, macos, linux, windows]
+    if: '!cancelled() && needs.identity.result == ''success'' && needs.ci.result == ''success'' && needs.ui.result == ''success'' && (needs.macos-build.result == ''success'' || needs.macos-build.result == ''skipped'') && (needs.macos.result == ''success'' || needs.macos.result == ''skipped'') && (needs.linux.result == ''success'' || needs.linux.result == ''skipped'') && (needs.windows.result == ''success'' || needs.windows.result == ''skipped'') && (needs.macos.result == ''success'' || needs.linux.result == ''success'' || needs.windows.result == ''success'')'
     runs-on: ubuntu-24.04
     permissions:
       contents: write
