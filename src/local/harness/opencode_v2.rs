@@ -437,10 +437,10 @@ fn projected_parts(message: &Value) -> Vec<(WirePart, &Value)> {
                     .flatten()
                     .enumerate()
                     .filter_map(|(call_index, call)| {
-                        let tool = call["tool"].as_str()?.strip_prefix("alphaxiv.")?;
+                        let tool = call["tool"].as_str()?.strip_prefix("orx_alphaxiv.")?;
                         to_wire_part(&json!({
                             "id":format!("{id}:{index}:alphaxiv:{call_index}"),
-                            "type":"tool", "tool":format!("alphaxiv_{tool}"),
+                            "type":"tool", "tool":format!("orx_alphaxiv_{tool}"),
                             "state":{"status":call["status"], "input":call["input"]}
                         }))
                     })
@@ -1488,9 +1488,9 @@ mod tests {
             "type":"tool", "name":"execute", "state":{
                 "status":"completed", "content":[{"type":"text","text":"library output"}],
                 "metadata":{"toolCalls":[
-                    {"tool":"alphaxiv.list_library", "status":"completed", "input":{"include_papers":true}},
+                    {"tool":"orx_alphaxiv.list_library", "status":"completed", "input":{"include_papers":true}},
                     {"tool":"other.read", "status":"completed", "input":{}},
-                    {"tool":"alphaxiv.get_paper_notes", "status":"completed", "input":{"paper_id_or_url":"2502.16982"}}
+                    {"tool":"orx_alphaxiv.get_paper_notes", "status":"completed", "input":{"paper_id_or_url":"2502.16982"}}
                 ]}
             }
         }]}));
@@ -1501,7 +1501,7 @@ mod tests {
         );
         assert_eq!(execute.children.len(), 2);
         let library = &execute.children[0];
-        assert_eq!(library.tool.as_deref(), Some("alphaxiv_list_library"));
+        assert_eq!(library.tool.as_deref(), Some("orx_alphaxiv_list_library"));
         assert_eq!(
             library.state.as_ref().unwrap().input.as_ref().unwrap()["include_papers"],
             true
@@ -1509,7 +1509,7 @@ mod tests {
         assert!(library.state.as_ref().unwrap().output.is_none());
         assert_eq!(
             execute.children[1].tool.as_deref(),
-            Some("alphaxiv_get_paper_notes")
+            Some("orx_alphaxiv_get_paper_notes")
         );
     }
 

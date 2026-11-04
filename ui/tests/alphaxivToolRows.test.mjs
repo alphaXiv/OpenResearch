@@ -67,7 +67,7 @@ test("every harness's alphaXiv tool name reaches the same row", () => {
   const input = { paper_id_or_url: "2307.12307" };
   const expected = 'activity_alphaxiv_read_notes_on {"paper":"2307.12307"}';
   assert.equal(label(call("mcp__alphaxiv__get_paper_notes", input)), expected);
-  assert.equal(label(call("alphaxiv_get_paper_notes", input)), expected);
+  assert.equal(label(call("orx_alphaxiv_get_paper_notes", input)), expected);
   assert.equal(label(call("alphaxiv:get_paper_notes", { arguments: input })), expected);
   assert.equal(label(call("orx_alphaxiv:get_paper_notes", { arguments: input })), expected);
   assert.equal(label(call("other", input, { title: "Tool: alphaxiv/get_paper_notes" })), expected);
@@ -117,9 +117,10 @@ const approval = (tool, toolInput) => {
   return renderMessage([prompt], prompt.id).replaceAll("&quot;", '"');
 };
 
-test("Claude's approval card for an alphaXiv write names what it writes", () => {
+test("an alphaXiv write's approval card names what it writes", () => {
   folders = undefined;
   assert.match(approval("mcp__alphaxiv__create_folder", { name: "Diffusion" }), /activity_alphaxiv_create_folder \{"name":"Diffusion"\}/);
+  assert.match(approval("orx_alphaxiv_create_folder", { name: "Diffusion" }), /activity_alphaxiv_create_folder \{"name":"Diffusion"\}/);
 });
 
 test("the save approval lists every paper and names its folder once folders load", () => {

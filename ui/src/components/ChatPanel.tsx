@@ -1850,8 +1850,8 @@ function computeToolActivity(part: ChatPart): ToolActivity {
 
 /** The tool of an alphaXiv MCP call: Claude names it `mcp__alphaxiv__x`, Codex
  * `alphaxiv:x` (`orx_alphaxiv:x` when the user configured their own `alphaxiv`),
- * OpenCode `alphaxiv_x`; ACP agents put such a name, or `Tool: alphaxiv/x`, in
- * the title. Anchored so commands and URLs never match. */
+ * OpenCode `orx_alphaxiv_x`; ACP agents put such a name, or `Tool: alphaxiv/x`,
+ * in the title. Anchored so commands and URLs never match. */
 const ALPHAXIV_TOOL = /^(?:tool: )?(?:mcp__)?(?:orx_)?alphaxiv(?:__|[:/_])([a-z0-9_]+)$/i;
 
 function alphaxivActivity(tool: string, input: Record<string, unknown>): ToolActivity {

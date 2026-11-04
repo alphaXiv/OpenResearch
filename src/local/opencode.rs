@@ -112,8 +112,8 @@ fn opencode_config_json(
             "external_directory": "allow",
         },
         "instructions": [instructions],
-        // OpenCode V1 deep-merges config layers; pin `enabled` past a user's disabled `alphaxiv`.
-        "mcp":{"alphaxiv":{"type":"local", "enabled":true, "command":[crate::paths::spawnable_exe()?, "alphaxiv-mcp"], "timeout":300000}},
+        // A name of orx's own keeps a user's `alphaxiv` server from merging into this one.
+        "mcp":{"orx_alphaxiv":{"type":"local", "command":[crate::paths::spawnable_exe()?, "alphaxiv-mcp"], "timeout":300000}},
     });
     if let Some(plugin) = plugin {
         cfg["plugin"] = json!([plugin]);
@@ -121,9 +121,9 @@ fn opencode_config_json(
     if let Some(model) = model {
         cfg["model"] = json!(model);
     }
-    cfg["permission"]["alphaxiv_*"] = json!("allow");
+    cfg["permission"]["orx_alphaxiv_*"] = json!("allow");
     for tool in crate::commands::alphaxiv_mcp::WRITE_TOOLS {
-        cfg["permission"][format!("alphaxiv_{tool}")] = json!("ask");
+        cfg["permission"][format!("orx_alphaxiv_{tool}")] = json!("ask");
     }
     Ok(serde_json::to_string_pretty(&cfg)?)
 }
@@ -989,6 +989,20 @@ impl AgentHost {
 mod tests {
     use super::*;
     use crate::local::agent_skills::{self, SkillSet};
+
+    #[test]
+    fn alphaxiv_server_has_its_own_name_and_asks_before_writes() {
+        let cfg: Value =
+            serde_json::from_str(&opencode_config_json(None, "p.md", None).unwrap()).unwrap();
+        assert!(cfg["mcp"].get("alphaxiv").is_none());
+        assert_eq!(cfg["mcp"]["orx_alphaxiv"]["command"][1], "alphaxiv-mcp");
+        assert_eq!(cfg["permission"]["orx_alphaxiv_*"], "allow");
+        assert_eq!(cfg["permission"]["orx_alphaxiv_create_folder"], "ask");
+        assert_eq!(
+            cfg["permission"]["orx_alphaxiv_save_papers_to_folder"],
+            "ask"
+        );
+    }
 
     #[test]
     fn resident_selection_keeps_cloud_session_ahead_of_host_default() {
