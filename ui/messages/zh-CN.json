@@ -1600,5 +1600,7 @@
   "library_empty": "尚未保存论文。",
   "library_add_papers": "添加论文",
   "library_selected": "已选择 {count} 篇",
-  "library_open_alphaxiv": "打开 alphaXiv"
+  "library_open_alphaxiv": "打开 alphaXiv",
+  "chat_resize_composer": "调整消息框大小",
+  "chat_resize_composer_hint": "拖动以调整大小。双击以重置。"
 }

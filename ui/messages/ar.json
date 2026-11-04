@@ -1600,5 +1600,7 @@
   "library_empty": "لا توجد أوراق محفوظة بعد.",
   "library_add_papers": "إضافة أوراق",
   "library_selected": "تم تحديد {count}",
-  "library_open_alphaxiv": "فتح alphaXiv"
+  "library_open_alphaxiv": "فتح alphaXiv",
+  "chat_resize_composer": "تغيير حجم مربع الرسالة",
+  "chat_resize_composer_hint": "اسحب لتغيير الحجم. انقر نقرًا مزدوجًا لإعادة الضبط."
 }

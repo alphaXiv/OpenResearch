@@ -1600,5 +1600,7 @@
   "library_empty": "No saved papers yet.",
   "library_add_papers": "Add papers",
   "library_selected": "{count} selected",
-  "library_open_alphaxiv": "Open alphaXiv"
+  "library_open_alphaxiv": "Open alphaXiv",
+  "chat_resize_composer": "Resize message box",
+  "chat_resize_composer_hint": "Drag to resize. Double-click to reset."
 }
