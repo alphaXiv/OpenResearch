@@ -1648,5 +1648,7 @@
   "remote_agents_description": "Ajanlar her makinede ayrı ayrı yüklenmeli ve giriş yapılmalıdır. Bunları {host} üzerinde kurun.",
   "remote_claude_datacenter_title": "Veri merkezi IP'lerinde Claude aboneliği kullanmayın",
   "remote_claude_datacenter_description": "{host}, {ip} veri merkezi IP adresini kullanıyor. Burada Claude aboneliği kullanmak Anthropic'in hesabınızı işaretlemesine yol açabilir. Bunun yerine bir API anahtarı kullanın ya da riski göze alarak devam edin.",
-  "remote_claude_datacenter_continue": "Yine de devam et"
+  "remote_claude_datacenter_continue": "Yine de devam et",
+  "chat_switched_agent": "{agent} · {model} olarak değiştirildi",
+  "chat_switch_agent_failed": "Ajan değiştirilemedi. Tekrar deneyin."
 }

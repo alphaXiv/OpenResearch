@@ -128,11 +128,15 @@ fn tools() -> Value {
         },
         {
             "name": "read",
-            "description": "Read a chat's recent messages, each with the ref, such as `msg_3fa9c1d2`, that cites it.",
+            "description": "Read recent messages, page backward with `before`, or read one complete message and its tool calls with `ref`. Message refs identify the chat, so chatId is optional with ref or before.",
             "inputSchema": {
                 "type": "object",
-                "properties": { "chatId": chat_id, "limit": { "type": "integer", "description": "How many messages, newest last. Default 10, at most 50." } },
-                "required": ["chatId"],
+                "properties": {
+                    "chatId": chat_id,
+                    "ref": { "type": "string", "description": "A message ref, such as msg_3fa9c1d2. Returns the full stored message, tools and attachment paths." },
+                    "before": { "type": "string", "description": "Read messages older than this ref on its active branch." },
+                    "limit": { "type": "integer", "description": "How many messages, newest last. Default 10, at most 50." }
+                },
             },
         },
         {
@@ -221,13 +225,43 @@ async fn call(
         }
         "read" => {
             let store = Store::open()?;
-            let target = chat(&store, text(args, "chatId")?)?;
+            let reference = optional_text(args, "ref");
+            let before = optional_text(args, "before");
+            if reference.is_some() && before.is_some() {
+                bail!("Use either `ref` or `before`.");
+            }
+            let cited = reference
+                .or(before)
+                .map(|cited| {
+                    delegation::cited_message(&store, cited)?
+                        .ok_or_else(|| anyhow!("Message ref `{cited}` is missing or ambiguous."))
+                })
+                .transpose()?;
+            if let Some(message) = &cited {
+                if optional_text(args, "chatId").is_some_and(|id| id != message.session_id) {
+                    bail!("The message belongs to a different chat.");
+                }
+                if reference.is_some() {
+                    return delegation::read_message(message);
+                }
+            }
+            let id = cited
+                .as_ref()
+                .map(|message| message.session_id.as_str())
+                .or(optional_text(args, "chatId"))
+                .unwrap_or(&caller.id);
+            let target = chat(&store, id)?;
             let limit = args
                 .get("limit")
                 .and_then(Value::as_u64)
                 .unwrap_or(10)
                 .clamp(1, 50);
-            delegation::transcript(&store, &target.id, limit as usize)
+            delegation::transcript(
+                &store,
+                &target.id,
+                limit as usize,
+                cited.as_ref().map(|message| message.id.as_str()),
+            )
         }
         "send" => {
             let store = Store::open()?;

@@ -8453,6 +8453,7 @@ async fn delete_chat_session(State(state): State<AppState>, Path(id): Path<Strin
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct UpdateChatSessionReq {
+    agent: Option<crate::store::StoredAgentSelection>,
     archived: Option<bool>,
     title: Option<String>,
     plan_mode: Option<bool>,
@@ -8559,7 +8560,41 @@ async fn update_chat_session(
     Json(req): Json<UpdateChatSessionReq>,
 ) -> ApiResult {
     reject_if_moving(&state)?;
-    let session = if let Some(title) = req.title {
+    let session = if let Some(agent) = req.agent {
+        let catalog = harnesses_payload(
+            &state,
+            &HarnessQuery {
+                refresh: None,
+                retry: None,
+                harness: None,
+            },
+        )
+        .await;
+        let selected = catalog["harnesses"]
+            .as_array()
+            .and_then(|harnesses| {
+                harnesses
+                    .iter()
+                    .find(|harness| harness["id"].as_str() == Some(&agent.harness))
+            })
+            .filter(|harness| harness["agentReady"].as_bool() == Some(true))
+            .ok_or_else(|| {
+                bad_request(
+                    "This agent is unavailable. Check its installation and sign-in in Settings.",
+                )
+            })?;
+        let metadata = selected["models"].as_array().and_then(|models| {
+            models
+                .iter()
+                .find(|model| model["id"].as_str() == agent.model.as_deref())
+        });
+        let window = metadata.and_then(|model| model["contextWindow"].as_u64());
+        state
+            .chat
+            .set_agent(&id, agent, window)
+            .await
+            .map_err(bad_request)?
+    } else if let Some(title) = req.title {
         let title = title.trim();
         if title.is_empty() {
             return Err(bad_request("title cannot be empty"));
@@ -8651,11 +8686,15 @@ async fn cited_chat_message(Path(cited): Path<String>) -> ApiResult {
         Some(source) => source.from.clone().filter(|from| from.starts_with("chat_")),
         None => (message.role == "assistant").then(|| message.session_id.clone()),
     };
-    let harness = agent_chat
-        .map(|id| store.get_chat_session(&id))
-        .transpose()?
-        .flatten()
-        .map(|session| session.harness);
+    let harness = message
+        .native_harness
+        .clone()
+        .filter(|_| message.role == "assistant")
+        .or(agent_chat
+            .map(|id| store.get_chat_session(&id))
+            .transpose()?
+            .flatten()
+            .map(|session| session.harness));
     let preview =
         local::chat::delegation::preview(&local::chat::delegation::message_text(&message));
     let project_id = store

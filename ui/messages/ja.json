@@ -1648,5 +1648,7 @@
   "remote_agents_description": "各マシンでエージェントのインストールとサインインが必要です。{host} で設定してください。",
   "remote_claude_datacenter_title": "データセンターの IP では Claude のサブスクリプションを避けてください",
   "remote_claude_datacenter_description": "{host} はデータセンターの IP {ip} を使用しています。ここで Claude のサブスクリプションを使うと、Anthropic がアカウントにフラグを付ける可能性があります。API キーを使うか、リスクを理解して続行してください。",
-  "remote_claude_datacenter_continue": "リスクを理解して続行"
+  "remote_claude_datacenter_continue": "リスクを理解して続行",
+  "chat_switched_agent": "{agent} · {model} に切り替えました",
+  "chat_switch_agent_failed": "エージェントを切り替えられません。もう一度お試しください。"
 }

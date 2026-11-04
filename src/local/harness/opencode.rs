@@ -971,13 +971,17 @@ fn parse_verbose_models_filtered(out: &str, public_only: bool) -> Vec<super::Mod
             .as_ref()
             .and_then(|v| v.get("name"))
             .and_then(Value::as_str);
-        let model = match variants {
+        let mut model = match variants {
             Some(ids) => {
                 let refs: Vec<&str> = ids.iter().map(String::as_str).collect();
                 super::ModelInfo::new(header).with_reasoning(&refs)
             }
             None => super::ModelInfo::new(header),
         };
+        model.context_window = parsed
+            .as_ref()
+            .and_then(|model| model.pointer("/limit/context"))
+            .and_then(Value::as_u64);
         let image_input = parsed
             .as_ref()
             .and_then(|v| v.pointer("/capabilities/input/image"))
@@ -1577,7 +1581,7 @@ async fn run_turn(ctx: &mut TurnCtx) -> Result<()> {
         .map(|session| session.store)
         .unwrap_or(NativeStore::Isolated);
     if ctx.native_session_id.is_some() && native_session.is_none() {
-        if let Some(recovery) = super::native_recovery_context(ctx, "OpenCode") {
+        if let Some(recovery) = super::native_recovery_context(ctx, "OpenCode")? {
             ctx.text = format!("{recovery}\n\n{}", ctx.text);
         }
         ctx.native_session_id = None;

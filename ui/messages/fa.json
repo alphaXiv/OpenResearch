@@ -1648,5 +1648,7 @@
   "remote_agents_description": "عامل‌ها باید روی هر دستگاه نصب شوند و وارد حساب شوند. آن‌ها را در {host} راه‌اندازی کنید.",
   "remote_claude_datacenter_title": "از اشتراک Claude روی IP مرکز داده استفاده نکنید",
   "remote_claude_datacenter_description": "{host} از IP مرکز داده {ip} استفاده می‌کند. استفاده از اشتراک Claude در اینجا ممکن است باعث علامت‌گذاری حساب شما توسط Anthropic شود. از کلید API استفاده کنید یا با مسئولیت خود ادامه دهید.",
-  "remote_claude_datacenter_continue": "ادامه با پذیرش خطر"
+  "remote_claude_datacenter_continue": "ادامه با پذیرش خطر",
+  "chat_switched_agent": "به {agent} · {model} تغییر کرد",
+  "chat_switch_agent_failed": "تغییر عامل ممکن نشد. دوباره تلاش کنید."
 }

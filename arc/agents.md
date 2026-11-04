@@ -59,6 +59,34 @@ The providers differ in shape, and the interface absorbs three:
 | shared server | OpenCode | one `opencode serve` per dashboard; a turn posts to it and follows its event stream |
 | child per turn | Cursor, Antigravity | a print-mode process per turn, resuming the native session by id |
 
+An idle chat can change its agent from the model picker. The switch is a
+settings change and a transcript row, with no model call. Messages record the
+harness that owns their native session ids. Returning to a harness resumes
+its last session on the active branch and supplies only the conversation
+since its last reply; a new harness gets the active conversation. Queued
+messages must be sent or removed before switching. A chat retains its saved
+ACP launch when switching away and back; changing between two ACP launches
+requires a new chat.
+Recovery after a switch uses the selected agent's settings and starts a new
+turn, preserving the original failure and the harness that owns it. A native
+thread created before delivery does not count as having seen the request.
+
+The handoff is rendered when the next turn starts, so worktree changes made
+while the chat was idle are visible. It preserves user requests and their
+message refs before the latest answer, then fills remaining space with older
+answers when they fit, or turn headlines and tool counts. Long requests keep
+their beginning and end. Tool logs stay behind refs: `read {ref: "msg_…"}`
+reads a complete stored message,
+its tool calls and attachment paths, and `read {before: "msg_…"}` pages
+backward on the active branch. The same builder supplies native-session
+recovery, compaction's fallback input, ACP branch reseeding and side chats.
+Agents without an exposed MCP tool send the same `read` call through
+`orx mcp` over stdio; the chat's environment supplies its identity.
+The default ceiling is 24,000 UTF-8 bytes, a conservative upper bound on text
+tokens; when the catalog reports the target context window, the ceiling also
+stays within ten percent of it. If even the user-ref index cannot fit, the
+handoff directs the agent to page through the conversation.
+
 A resident child is respawned with its native session resumed when a setting
 it was started with changes, when it is interrupted, or when it crashes.
 Prompts flow back in one of two ways. Some agents end their turn on a

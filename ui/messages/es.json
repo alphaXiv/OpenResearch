@@ -1648,5 +1648,7 @@
   "remote_agents_description": "Los agentes deben instalarse e iniciar sesión en cada máquina. Configúralos en {host}.",
   "remote_claude_datacenter_title": "Evita las suscripciones de Claude en IP de centros de datos",
   "remote_claude_datacenter_description": "{host} usa la IP de centro de datos {ip}. Usar aquí una suscripción de Claude puede hacer que Anthropic marque tu cuenta. Usa una clave API o continúa bajo tu responsabilidad.",
-  "remote_claude_datacenter_continue": "Continuar de todos modos"
+  "remote_claude_datacenter_continue": "Continuar de todos modos",
+  "chat_switched_agent": "Cambiaste a {agent} · {model}",
+  "chat_switch_agent_failed": "No se pudo cambiar de agente. Inténtalo de nuevo."
 }

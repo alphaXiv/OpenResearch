@@ -1648,5 +1648,7 @@
   "remote_agents_description": "يجب تثبيت الوكلاء وتسجيل الدخول إليهم على كل جهاز. أعِدّهم على {host}.",
   "remote_claude_datacenter_title": "تجنّب اشتراكات Claude على عناوين IP لمراكز البيانات",
   "remote_claude_datacenter_description": "يستخدم {host} عنوان IP لمركز بيانات: {ip}. قد يؤدي استخدام اشتراك Claude هنا إلى وضع علامة على حسابك لدى Anthropic. استخدم مفتاح API أو تابع على مسؤوليتك.",
-  "remote_claude_datacenter_continue": "المتابعة على أي حال"
+  "remote_claude_datacenter_continue": "المتابعة على أي حال",
+  "chat_switched_agent": "تم التبديل إلى {agent} · {model}",
+  "chat_switch_agent_failed": "تعذر تبديل الوكيل. حاول مرة أخرى."
 }

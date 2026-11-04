@@ -482,6 +482,7 @@ fn parse_claude_model_list(result: &Value, ultracode: bool) -> Vec<ModelInfo> {
                 .get("resolvedModel")
                 .and_then(Value::as_str)
                 .map(str::to_string);
+            info.context_window = m.get("contextWindow").and_then(Value::as_u64);
             // Claude reports no default *tier* because its unset default isn't
             // one: with adaptive thinking, the CLI scales effort per request.
             // Name the sentinel row for what actually runs — preselecting a
@@ -2498,7 +2499,7 @@ async fn run_turn(ctx: &mut TurnCtx) -> Result<()> {
         .clone()
         .filter(|_| native_session.is_some());
     if ctx.native_session_id.is_some() && resume.is_none() {
-        if let Some(recovery) = super::native_recovery_context(ctx, "Claude Code") {
+        if let Some(recovery) = super::native_recovery_context(ctx, "Claude Code")? {
             ctx.text = format!("{recovery}\n\n{}", ctx.text);
         }
     }

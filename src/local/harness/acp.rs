@@ -277,7 +277,7 @@ async fn run_turn(ctx: &mut TurnCtx, definition: &Definition) -> Result<()> {
             }
             if configuration.is_none() {
                 if let Some(recovery) =
-                    super::native_recovery_context(ctx, definition.name.as_str())
+                    super::native_recovery_context(ctx, definition.name.as_str())?
                 {
                     prompt = format!("{recovery}\n\n{prompt}");
                 }

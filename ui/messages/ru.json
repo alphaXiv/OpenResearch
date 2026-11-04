@@ -1648,5 +1648,7 @@
   "remote_agents_description": "Агентов нужно установить и войти в их учётные записи на каждом компьютере. Настройте их на {host}.",
   "remote_claude_datacenter_title": "Избегайте подписок Claude на IP дата-центров",
   "remote_claude_datacenter_description": "{host} использует IP дата-центра {ip}. При использовании подписки Claude здесь Anthropic может пометить вашу учётную запись. Используйте API-ключ или продолжайте на свой риск.",
-  "remote_claude_datacenter_continue": "Всё равно продолжить"
+  "remote_claude_datacenter_continue": "Всё равно продолжить",
+  "chat_switched_agent": "Переключено на {agent} · {model}",
+  "chat_switch_agent_failed": "Не удалось сменить агента. Попробуйте ещё раз."
 }

@@ -1648,5 +1648,7 @@
   "remote_agents_description": "Agents must be installed and signed in on each machine. Set them up on {host}.",
   "remote_claude_datacenter_title": "Avoid Claude subscriptions on datacenter IPs",
   "remote_claude_datacenter_description": "{host} uses datacenter IP {ip}. Using a Claude subscription here may cause Anthropic to flag your account. Use an API key instead, or continue at your own risk.",
-  "remote_claude_datacenter_continue": "Continue anyway"
+  "remote_claude_datacenter_continue": "Continue anyway",
+  "chat_switched_agent": "Switched to {agent} · {model}",
+  "chat_switch_agent_failed": "Unable to switch agents. Try again."
 }

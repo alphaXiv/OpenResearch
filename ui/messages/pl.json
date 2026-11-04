@@ -1648,5 +1648,7 @@
   "remote_agents_description": "Na każdym komputerze trzeba zainstalować agentów i się zalogować. Skonfiguruj ich na {host}.",
   "remote_claude_datacenter_title": "Unikaj subskrypcji Claude na adresach IP centrów danych",
   "remote_claude_datacenter_description": "{host} używa adresu IP centrum danych {ip}. Korzystanie tu z subskrypcji Claude może spowodować oznaczenie konta przez Anthropic. Użyj klucza API lub kontynuuj na własne ryzyko.",
-  "remote_claude_datacenter_continue": "Kontynuuj mimo ryzyka"
+  "remote_claude_datacenter_continue": "Kontynuuj mimo ryzyka",
+  "chat_switched_agent": "Przełączono na {agent} · {model}",
+  "chat_switch_agent_failed": "Nie można przełączyć agenta. Spróbuj ponownie."
 }

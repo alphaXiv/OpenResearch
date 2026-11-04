@@ -672,7 +672,7 @@ async fn run_turn(ctx: &mut TurnCtx) -> Result<()> {
         .filter(|_| native_session.is_some());
     let mut prompt = ctx.text.clone();
     if ctx.native_session_id.is_some() && resume.is_none() {
-        if let Some(recovery) = super::native_recovery_context(ctx, "Cursor") {
+        if let Some(recovery) = super::native_recovery_context(ctx, "Cursor")? {
             prompt = format!("{recovery}\n\n{prompt}");
         }
     }

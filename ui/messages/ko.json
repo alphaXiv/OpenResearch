@@ -1648,5 +1648,7 @@
   "remote_agents_description": "각 컴퓨터에서 에이전트를 설치하고 로그인해야 합니다. {host}에서 설정하세요.",
   "remote_claude_datacenter_title": "데이터센터 IP에서 Claude 구독 사용을 피하세요",
   "remote_claude_datacenter_description": "{host}에서 데이터센터 IP {ip}를 사용합니다. 여기서 Claude 구독을 사용하면 Anthropic이 계정을 신고 대상으로 표시할 수 있습니다. API 키를 사용하거나 위험을 감수하고 계속하세요.",
-  "remote_claude_datacenter_continue": "위험을 감수하고 계속"
+  "remote_claude_datacenter_continue": "위험을 감수하고 계속",
+  "chat_switched_agent": "{agent} · {model}(으)로 전환됨",
+  "chat_switch_agent_failed": "에이전트를 전환할 수 없습니다. 다시 시도해 주세요."
 }
