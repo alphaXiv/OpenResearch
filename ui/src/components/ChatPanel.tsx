@@ -9,6 +9,7 @@ import {
   useMemo,
   useRef,
   useState,
+  useSyncExternalStore,
   type MouseEvent as ReactMouseEvent,
 } from "react";
 import { WorkspaceDomContext } from "../WorkspaceDom";
@@ -16,7 +17,9 @@ import { useWorkspace } from "../workspace";
 
 import { Dialog } from "@base-ui/react/dialog";
 import { EscapeScope } from "./EscapeScope";
-import { commandRegion } from "../keyboardRegion";
+import { commandRegion, subscribeCommandRegion } from "../keyboardRegion";
+import { ChatSearch } from "./ChatSearch";
+import { chatSearchRanges } from "../chatSearch";
 import { ComposerProjectPicker } from "./ComposerProjectPicker";
 import { LibraryPicker } from "./LibraryPicker";
 import { ProjectInfoCard } from "./ProjectInfoCard";
@@ -118,6 +121,7 @@ import {
   type Autonomy,
   type ChatSession,
   type CitedMessage,
+  type ChatSearchHit,
   type Harness,
   type Project,
   type PromptAnswer,
@@ -2533,6 +2537,8 @@ function TurnStatusRow({
  * raw command/output, because that detail is useful for diagnosis. */
 function ToolRow({
   part,
+  expansionState,
+  revealNonce,
   activity,
   repeatCount = 1,
   onOpenFile,
@@ -2543,6 +2549,8 @@ function ToolRow({
   experimentName,
 }: {
   part: ChatPart;
+  expansionState?: Map<string, boolean>;
+  revealNonce?: number;
   activity: ToolActivity;
   repeatCount?: number;
   onOpenFile?: OpenTranscriptFile;
@@ -2558,7 +2566,13 @@ function ToolRow({
   const failed = state?.status === "error";
   const errorMessage = cleanToolError(state?.error || state?.output || "");
   const hasDetail = failed && Boolean(errorMessage);
-  const [detailOpen, setDetailOpen] = useState(false);
+  const key = `error:${part.id}`;
+  const [detailOpen, setDetailOpen] = useState(() => expansionState?.get(key) ?? false);
+  useLayoutEffect(() => {
+    if (revealNonce === undefined || !hasDetail) return;
+    expansionState?.set(key, true);
+    setDetailOpen(true);
+  }, [revealNonce, hasDetail, expansionState, key]);
   const detailId = elementId(`tool-error-${part.id.replace(/[^A-Za-z0-9_-]/g, "-")}`);
   if (part.id === LOCAL_ERROR_PART_ID) {
     return (
@@ -2601,11 +2615,11 @@ function ToolRow({
   );
 
   if (!hasDetail) {
-    return <div className="tool-row flex items-start gap-2 min-w-0 py-1 px-1">{line}</div>;
+    return <div data-part-id={part.id} className="tool-row flex items-start gap-2 min-w-0 py-1 px-1">{line}</div>;
   }
 
   return (
-    <div className="tool-row tool-row-error flex flex-col min-w-0">
+    <div data-part-id={part.id} className="tool-row tool-row-error flex flex-col min-w-0">
       <div className="flex items-start gap-2 w-fit max-w-full py-1 px-1 min-w-0 rounded-sm">
         {line}
         <button
@@ -2614,7 +2628,7 @@ function ToolRow({
           aria-expanded={detailOpen}
           aria-controls={detailId}
           aria-label={detailOpen ? m.a11y_hide_error_details({ activity: activity.label }) : m.a11y_show_error_details({ activity: activity.label })}
-          onClick={() => setDetailOpen((current) => !current)}
+          onClick={() => { expansionState?.set(key, !detailOpen); setDetailOpen(!detailOpen); }}
         >
           <ChevronRight size={16} className={`text-accent-red transition-transform duration-120 ease-standard ${detailOpen ? "rotate-90" : ""}`} />
         </button>
@@ -2635,6 +2649,7 @@ function ToolRow({
 function ToolGroup({
   parts,
   expansionState,
+  revealNonce,
   pendingTail,
   streaming = false,
   onOpenSubagent,
@@ -2647,6 +2662,7 @@ function ToolGroup({
 }: {
   parts: ChatPart[];
   expansionState?: Map<string, boolean>;
+  revealNonce?: number;
   pendingTail?: boolean;
   streaming?: boolean;
   onOpenSubagent?: OpenSubagent;
@@ -2657,11 +2673,18 @@ function ToolGroup({
   onOpenExperiment?: OpenTranscriptTarget;
   experimentName?: (experimentId: string) => string;
 }) {
-  const [open, setOpen] = useState(() => expansionState?.get(parts[0].id) ?? false);
+  const key = `tool:${parts[0].id}`;
+  const [open, setOpen] = useState(() => expansionState?.get(key) ?? false);
   const [hasOpened, setHasOpened] = useState(open);
+  useLayoutEffect(() => {
+    if (revealNonce === undefined) return;
+    expansionState?.set(key, true);
+    setOpen(true);
+    setHasOpened(true);
+  }, [revealNonce, expansionState, key]);
   const toggle = () => {
     setHasOpened(true);
-    expansionState?.set(parts[0].id, !open);
+    expansionState?.set(key, !open);
     setOpen(!open);
   };
   const displayParts = squashToolParts(parts);
@@ -2793,6 +2816,8 @@ function ToolGroup({
               <ToolRow
                 key={part.id}
                 part={part}
+                expansionState={expansionState}
+                revealNonce={revealNonce}
                 repeatCount={count}
                 activity={activity}
                 onOpenFile={onOpenFile}
@@ -3266,6 +3291,8 @@ export const Message = memo(function Message({
   branchDisabled,
   onFork,
   onSelectFork,
+  expansionState,
+  revealNonce,
 }: {
   message: ChatMessage;
   responseMessages?: ChatMessage[];
@@ -3300,6 +3327,8 @@ export const Message = memo(function Message({
   branchDisabled: boolean;
   onFork: (messageId: string, text: string) => void;
   onSelectFork: (leafId: string) => void;
+  expansionState?: Map<string, boolean>;
+  revealNonce?: number;
 }) {
   const { chatAttachmentUrl } = useWorkspace().api;
   useLocale();
@@ -3454,6 +3483,8 @@ export const Message = memo(function Message({
     <div className="msg-assistant group/turn text-base leading-relaxed text-text min-w-0">
       {turns.length > 0 && <AssistantTurn messages={turns} response={response} options={{
         replies,
+        expansionState,
+        revealNonce,
         activePermissionId,
         pendingTailToolId,
         onOpenFile,
@@ -3520,7 +3551,15 @@ function AssistantTurn({ messages, response, options }: {
   const { work, answer, answerMessageId } = response;
   const message = messages[messages.length - 1];
   const answerOptions = { ...options, predictTextTail: streaming && answerMessageId === message.id };
-  const [expanded, setExpanded] = useState(false);
+  const key = messages[0].id;
+  const [expanded, setExpanded] = useState(() => options.expansionState?.get(key) ?? false);
+  const [hasOpened, setHasOpened] = useState(expanded);
+  useLayoutEffect(() => {
+    if (options.revealNonce === undefined) return;
+    options.expansionState?.set(key, true);
+    setHasOpened(true);
+    setExpanded(true);
+  }, [options.revealNonce, options.expansionState, key]);
   const [, tick] = useState(0);
   useEffect(() => {
     if (!streaming || message.completedAt != null || work.length === 0) return;
@@ -3543,7 +3582,7 @@ function AssistantTurn({ messages, response, options }: {
           className="flex w-full items-center gap-1.5 border-b border-border/50 pb-2 text-start text-base text-subtext cursor-pointer hover:text-text focus-visible:outline-2 focus-visible:outline-focus"
           aria-expanded={expanded}
           data-work-toggle
-          onClick={() => setExpanded((value) => !value)}
+          onClick={() => { setHasOpened(true); options.expansionState?.set(key, !expanded); setExpanded(!expanded); }}
         >
           <span>{duration === null ? m.chat_work_details() : m.chat_worked_for({ duration })}</span>
           <ChevronRight size={16} className={`shrink-0 text-muted transition-transform duration-200 ease-standard motion-reduce:transition-none ${expanded ? "rotate-90" : ""}`} />
@@ -3551,7 +3590,7 @@ function AssistantTurn({ messages, response, options }: {
         <div className={`tool-group-disclosure ${expanded ? "open" : ""}`} aria-hidden={!expanded} inert={!expanded}>
           <div className="tool-group-disclosure-inner">
             <div className="turn-work-content flex flex-col gap-4 pt-4">
-              {work.map((turn) => (
+              {hasOpened && work.map((turn) => (
                 <div key={turn.id}>{renderParts(turn.parts, { ...options, predictTextTail: false, pendingTailToolId: turn.id === message.id ? options.pendingTailToolId : null })}</div>
               ))}
             </div>
@@ -3617,6 +3656,7 @@ function renderParts(
   opts: {
     replies?: QuestionReplies;
     expansionState?: Map<string, boolean>;
+    revealNonce?: number;
     activePermissionId?: string | null;
     pendingTailToolId?: string | null;
     onOpenFile?: OpenTranscriptFile;
@@ -3634,6 +3674,7 @@ function renderParts(
   const {
     replies,
     expansionState,
+    revealNonce,
     activePermissionId,
     pendingTailToolId,
     onOpenFile,
@@ -3661,6 +3702,7 @@ function renderParts(
         key={`tg-${toolRun[0].id}`}
         parts={toolRun}
         expansionState={expansionState}
+        revealNonce={revealNonce}
         pendingTail={toolRun.some((part) => part.id === pendingTailToolId)}
         streaming={predictTextTail}
         onOpenSubagent={onOpenSubagent}
@@ -3697,6 +3739,7 @@ function renderParts(
       rendered.push(
         <Md
           key={part.id}
+          partId={part.id}
           text={part.text!}
           onOpenFile={onOpenFile}
           onOpenRun={onOpenRun}
@@ -3790,6 +3833,8 @@ export function findPartById(parts: ChatPart[], id: string): ChatPart | null {
 export function SubagentTranscript({
   spawn,
   expansionState,
+  searchQuery,
+  searchNonce,
   onOpenFile,
   onOpenRun,
   runExperimentName,
@@ -3799,6 +3844,8 @@ export function SubagentTranscript({
 }: {
   spawn: ChatPart;
   expansionState?: Map<string, boolean>;
+  searchQuery?: string;
+  searchNonce?: number;
   onOpenFile?: OpenTranscriptFile;
   onOpenRun?: OpenTranscriptTarget;
   runExperimentName?: (runId: string) => string;
@@ -3817,6 +3864,7 @@ export function SubagentTranscript({
   // stored transcript of nothing but invisible parts must still read as empty.
   const rendered = renderParts(parts, {
     expansionState,
+    revealNonce: searchQuery ? searchNonce : undefined,
     onOpenFile,
     onOpenRun,
     runExperimentName,
@@ -3846,7 +3894,7 @@ export function SubagentTranscript({
       ) : (
         <>
           {rendered}
-          {finalReport && <Md text={finalReport} onOpenFile={onOpenFile} onOpenRun={onOpenRun} />}
+          {finalReport && <Md text={finalReport} partId={spawn.id} onOpenFile={onOpenFile} onOpenRun={onOpenRun} />}
         </>
       )}
     </div>
@@ -3902,6 +3950,7 @@ function SubagentBlock({
   return (
     <button
       className="subagent-row flex items-start gap-2 w-full py-1 px-1 cursor-pointer text-text text-base text-start rounded-sm [&:hover:not(:disabled)]:bg-surface [&:disabled]:cursor-default"
+      data-part-id={part.id}
       title={errored && errorMessage ? errorMessage : m.chat_open_subagent_transcript()}
       {...tabOpenGestureHandlers<HTMLButtonElement>((intent) =>
         onOpenSubagent?.(part.id, activity.label, intent),
@@ -4055,12 +4104,7 @@ function useTranscriptAnnouncement(messages: ChatMessage[]): TranscriptAnnouncem
 
 const TRANSCRIPT_ROW_SIZES_LIMIT = 5_000;
 
-/** A message an agent cited, to scroll to once its chat is open. `nonce` tells one click from the next. */
-export type FocusedMessage = { sessionId: string; messageId: string; nonce: number };
-
-// A cited message scrolls into view once it has loaded, once per click: a
-// transcript remounts per chat, so revisiting one must not scroll back to it.
-let focusedNonce: number | undefined;
+export type FocusedMessage = { sessionId: string; messageId: string; nonce: number; query?: string; partId?: string; spawnPartId?: string };
 
 const Transcript = memo(function Transcript({
   messages,
@@ -4088,7 +4132,11 @@ const Transcript = memo(function Transcript({
   delegates,
   onOpenDelegate,
   focusedMessageId,
+  focusedPartId,
   focusNonce,
+  searchQuery,
+  handledFocus,
+  highlightName,
   assistantLabel,
   onLeaveFeed,
 }: {
@@ -4121,13 +4169,17 @@ const Transcript = memo(function Transcript({
   delegates: DelegateRow[];
   onOpenDelegate?: (sessionId: string) => void;
   focusedMessageId?: string | null;
+  focusedPartId?: string;
   focusNonce?: number;
+  searchQuery?: string;
+  handledFocus: React.RefObject<number | undefined>;
+  highlightName: string;
   /** Names each assistant article, as the Markdown export does. */
   assistantLabel: string;
   /** Ctrl+End and Ctrl+Home leave the feed, forward or back. */
   onLeaveFeed: (forward: boolean) => void;
 }) {
-  const { transcriptRowSizes } = useWorkspace();
+  const { transcriptRowSizes, transcriptDisclosures: disclosures } = useWorkspace();
   useLocale();
   const replies = useMemo(() => questionReplies(messages), [messages]);
   const activePermissionId = firstPendingPermission(messages)?.id ?? null;
@@ -4160,17 +4212,41 @@ const Transcript = memo(function Transcript({
     );
     return forkPositions(allMessages, messages, bearers.map((group) => group[0]), (id) => id.startsWith(LOCAL_PREFIX));
   }, [messages, visibleMessages, allMessages]);
-  // ponytail: interacted rows stay mounted for this visit; lift row state if retention becomes costly.
-  const retainedRows = useRef(new Set<string>());
+  const draftRows = useRef(new Set<string>());
+  const [selectedRows, setSelectedRows] = useState<Set<string>>(() => new Set());
   const [focusedRow, setFocusedRow] = useState<string | null>(null);
+  const [jumping, setJumping] = useState(false);
+  const feedRef = useRef<HTMLDivElement>(null);
+  const rowIndexes = useMemo(() => new Map(visibleMessages.flatMap((group, index) => group.map((message) => [message.id, index] as const))), [visibleMessages]);
+  const targetIndex = focusedMessageId ? rowIndexes.get(focusedMessageId) : undefined;
   const getItemKey = useCallback((index: number) => visibleMessages[index][0].id, [visibleMessages]);
   const rangeExtractor = useCallback((range: VirtualRange) => {
     const indexes = new Set(defaultRangeExtractor(range));
-    visibleMessages.forEach((group, index) => {
-      if (group[0].id === focusedRow || retainedRows.current.has(group[0].id)) indexes.add(index);
-    });
+    for (const id of [...selectedRows, ...(focusedRow ? [focusedRow] : [])]) {
+      const index = rowIndexes.get(id);
+      if (index !== undefined) indexes.add(index);
+    }
+    for (const id of draftRows.current) {
+      const row = scrollRef.current?.querySelector(`[data-message-id="${CSS.escape(id)}"]`);
+      const index = rowIndexes.get(id);
+      if (index !== undefined && row?.querySelector("input, textarea, [contenteditable=true]")) indexes.add(index);
+      else draftRows.current.delete(id);
+    }
+    if (jumping && targetIndex !== undefined) indexes.add(targetIndex);
     return [...indexes].sort((a, b) => a - b);
-  }, [visibleMessages, focusedRow]);
+  }, [rowIndexes, focusedRow, selectedRows, jumping, targetIndex, scrollRef]);
+  const estimateSize = useCallback((index: number) => {
+    const group = visibleMessages[index];
+    const user = group[0].role === "user";
+    const response = user ? null : splitResponseParts(group, false);
+    const parts = response?.answer ?? group[0].parts;
+    const text = parts.filter((part) => part.type === "text" || part.type === "steer").map((part) => part.text ?? "").join("\n");
+    const width = scrollRef.current?.firstElementChild?.clientWidth ?? 760;
+    const columns = Math.max(20, Math.floor((width - 32) / 8));
+    const lines = text.split("\n").reduce((total, line) => total + Math.max(1, Math.ceil(line.length / columns)), 0);
+
+    return (user ? 56 : response?.work.length ? 72 : 32) + lines * 26;
+  }, [visibleMessages, scrollRef]);
   // Seed via the measurement cache, not estimateSize, so remembered rows count as measured for anchoring.
   const [initialMeasurementsCache] = useState(() => visibleMessages.flatMap((group, index) => {
     const remembered = transcriptRowSizes.get(group[0].id);
@@ -4185,7 +4261,10 @@ const Transcript = memo(function Transcript({
     count: visibleMessages.length,
     getScrollElement: () => scrollRef.current,
     getItemKey,
-    estimateSize: () => 400,
+    estimateSize,
+    directDomUpdates: true,
+    directDomUpdatesMode: "position",
+    scrollMargin: Number.parseFloat(scrollRef.current?.firstElementChild ? getComputedStyle(scrollRef.current.firstElementChild).paddingTop : "0") || 0,
     initialMeasurementsCache,
     measureElement: (element, entry, instance) => {
       const id = element.getAttribute("data-message-id");
@@ -4196,8 +4275,8 @@ const Transcript = memo(function Transcript({
     overscan: 4,
     initialRect: { width: scrollRef.current?.clientWidth ?? 0, height: scrollRef.current?.clientHeight ?? 0 },
     initialOffset: () => {
-      const remembered = initialMeasurementsCache.reduce((total, item) => total + item.size, 0);
-      const estimated = remembered + (visibleMessages.length - initialMeasurementsCache.length) * 400;
+      const remembered = new Map(initialMeasurementsCache.map((item) => [item.key, item.size]));
+      const estimated = visibleMessages.reduce((total, group, index) => total + (remembered.get(group[0].id) ?? estimateSize(index)), 0);
       return Math.max(0, estimated - (scrollRef.current?.clientHeight ?? 0));
     },
     anchorTo: stickToBottom.current ? "end" : "start",
@@ -4205,55 +4284,108 @@ const Transcript = memo(function Transcript({
     scrollEndThreshold: 60,
     rangeExtractor,
   });
+  const setFeed = useCallback((node: HTMLDivElement | null) => { feedRef.current = node; virtualizer.containerRef(node); }, [virtualizer]);
   useLayoutEffect(() => {
-    const scroll = () => virtualizer.scrollToEnd();
+    const scroll = () => virtualizer.scrollToOffset(scrollRef.current?.scrollHeight ?? 0);
     scrollToEndRef.current = scroll;
     onPinToBottom();
     return () => { scrollToEndRef.current = null; };
-  }, [virtualizer, scrollToEndRef, onPinToBottom]);
+  }, [virtualizer, scrollToEndRef, onPinToBottom, scrollRef]);
   useLayoutEffect(() => () => {
     for (const [key, size] of virtualizer.itemSizeCache) {
       const id = String(key);
       const width = measuredWidths.current.get(id) ?? transcriptRowSizes.get(id)?.width;
       transcriptRowSizes.delete(id);
-      // Interacted rows remount with reset local state (e.g. collapsed work), so their height is stale.
-      if (!retainedRows.current.has(id) && width !== undefined) transcriptRowSizes.set(id, { size, width });
+      if (width !== undefined) transcriptRowSizes.set(id, { size, width });
     }
     for (const id of transcriptRowSizes.keys()) {
       if (transcriptRowSizes.size <= TRANSCRIPT_ROW_SIZES_LIMIT) break;
       transcriptRowSizes.delete(id);
     }
-  }, [virtualizer]);
+  }, [virtualizer, transcriptRowSizes]);
   useEffect(() => {
     const retainSelection = () => {
       const selection = window.getSelection();
-      if (!selection || selection.isCollapsed || !selection.rangeCount) return;
-      const range = selection.getRangeAt(0);
-      for (const row of scrollRef.current?.querySelectorAll<HTMLElement>("[data-message-id]") ?? []) {
-        if (range.intersectsNode(row) && row.dataset.messageId) retainedRows.current.add(row.dataset.messageId);
+      const next = new Set<string>();
+      if (selection && !selection.isCollapsed && selection.rangeCount) {
+        const range = selection.getRangeAt(0);
+        for (const row of scrollRef.current?.querySelectorAll<HTMLElement>("[data-message-id]") ?? []) {
+          if (range.intersectsNode(row) && row.dataset.messageId) next.add(row.dataset.messageId);
+        }
       }
+      setSelectedRows((current) => current.size === next.size && [...next].every((id) => current.has(id)) ? current : next);
     };
     document.addEventListener("selectionchange", retainSelection);
     return () => document.removeEventListener("selectionchange", retainSelection);
   }, [scrollRef]);
   const [markedRowId, setMarkedRowId] = useState<string | null>(null);
-  useEffect(() => {
-    if (!focusedMessageId || focusedNonce === focusNonce) return;
-    const row = visibleMessages.find((group) => group.some((message) => message.id === focusedMessageId));
-    if (!row) return;
-    const nonce = focusNonce;
-    focusedNonce = nonce;
-    setMarkedRowId(row[0].id);
-    // A freshly opened transcript pins itself to the bottom first; scroll once that settles.
-    window.requestAnimationFrame(() => window.requestAnimationFrame(() => {
-      const { count, getItemKey } = virtualizer.options;
-      const index = Array.from({ length: count }, (_, i) => i).find((i) => getItemKey(i) === row[0].id);
-      if (focusedNonce !== nonce || index === undefined) return;
-      stickToBottom.current = false;
-      virtualizer.setOptions({ ...virtualizer.options, anchorTo: "start" });
-      virtualizer.scrollToIndex(index, { align: "center" });
-    }));
-  }, [focusedMessageId, focusNonce, visibleMessages, virtualizer, stickToBottom]);
+  useLayoutEffect(() => {
+    const scroll = scrollRef.current;
+    const feed = feedRef.current;
+    if (!scroll || !feed || targetIndex === undefined || focusNonce === undefined || handledFocus.current === focusNonce) return;
+    handledFocus.current = focusNonce;
+    const rowId = virtualizer.options.getItemKey(targetIndex);
+    const selector = `[data-message-id="${CSS.escape(String(rowId))}"]`;
+    const current = feed.querySelector<HTMLElement>(selector);
+    const requestedPart = focusedPartId ? current?.querySelector(`[data-part-id="${CSS.escape(focusedPartId)}"]`) : null;
+    if (!current || focusedPartId && (!requestedPart || requestedPart.closest("[inert], [aria-hidden=true]")) || Math.abs(current.getBoundingClientRect().top - scroll.getBoundingClientRect().top) > scroll.clientHeight * 2) feed.style.visibility = "hidden";
+    stickToBottom.current = false;
+    virtualizer.setOptions({ ...virtualizer.options, anchorTo: "start" });
+    setMarkedRowId(String(rowId));
+    setJumping(true);
+    let frame = 0, stable = 0, attempts = 0;
+    let observer: ResizeObserver | undefined;
+    let stopped = false;
+    const finish = () => { feed.style.visibility = ""; setJumping(false); };
+    const cancel = () => { stopped = true; cancelAnimationFrame(frame); observer?.disconnect(); finish(); };
+    const step = () => {
+      if (stopped) return;
+      const row = feed.querySelector<HTMLElement>(selector);
+      if (!row) { if (attempts++ < 12) frame = requestAnimationFrame(step); else finish(); return; }
+      virtualizer.resizeItem(targetIndex, row.getBoundingClientRect().height);
+      const anchor = () => {
+        const part = focusedPartId ? row.querySelector<HTMLElement>(`[data-part-id="${CSS.escape(focusedPartId)}"]`) : null;
+        const range = searchQuery ? chatSearchRanges(part ?? row, searchQuery)[0] : undefined;
+        return range?.getBoundingClientRect() ?? part?.getBoundingClientRect() ?? row.getBoundingClientRect();
+      };
+      const desired = Math.min(160, scroll.clientHeight / 3);
+      const offset = Math.max(0, Math.min(scroll.scrollHeight - scroll.clientHeight, scroll.scrollTop + anchor().top - scroll.getBoundingClientRect().top - desired));
+      const delta = offset - scroll.scrollTop;
+      if (Math.abs(delta) > 0.5) { stable = 0; virtualizer.scrollToOffset(offset); }
+      else stable++;
+      if (stable < 2 && attempts++ < 12) { frame = requestAnimationFrame(step); return; }
+      finish();
+      if (!document.activeElement?.closest("[role=search]")) row.focus({ preventScroll: true });
+      const anchoredAt = anchor().top - scroll.getBoundingClientRect().top;
+      observer = new ResizeObserver(() => {
+        const delta = anchor().top - scroll.getBoundingClientRect().top - anchoredAt;
+        if (!stopped && Math.abs(delta) > 0.5) virtualizer.scrollToOffset(scroll.scrollTop + delta);
+      });
+      observer.observe(row);
+    };
+    frame = requestAnimationFrame(step);
+    scroll.addEventListener("wheel", cancel, { passive: true });
+    scroll.addEventListener("touchstart", cancel, { passive: true });
+    scroll.addEventListener("pointerdown", cancel);
+    scroll.addEventListener("keydown", cancel);
+    return () => {
+      cancel();
+      scroll.removeEventListener("wheel", cancel);
+      scroll.removeEventListener("touchstart", cancel);
+      scroll.removeEventListener("pointerdown", cancel);
+      scroll.removeEventListener("keydown", cancel);
+    };
+  }, [focusedMessageId, focusedPartId, focusNonce, targetIndex, searchQuery, scrollRef, virtualizer, stickToBottom, handledFocus]);
+  const virtualItems = virtualizer.getVirtualItems();
+  useLayoutEffect(() => {
+    if (!("highlights" in CSS) || typeof Highlight === "undefined") return;
+    const row = focusedMessageId ? feedRef.current?.querySelector<HTMLElement>("[data-search-target=true]") : null;
+    if (!row || !searchQuery) { CSS.highlights.delete(highlightName); return; }
+    const part = focusedPartId ? row.querySelector<HTMLElement>(`[data-part-id="${CSS.escape(focusedPartId)}"]`) : null;
+    const highlight = new Highlight(...chatSearchRanges(part ?? row, searchQuery));
+    CSS.highlights.set(highlightName, highlight);
+    return () => { if (CSS.highlights.get(highlightName) === highlight) CSS.highlights.delete(highlightName); };
+  }, [focusedMessageId, focusedPartId, searchQuery, highlightName, virtualItems]);
   useEffect(() => {
     if (!markedRowId) return;
     const timer = window.setTimeout(() => setMarkedRowId(null), 1600);
@@ -4283,8 +4415,9 @@ const Transcript = memo(function Transcript({
       <div
         role="feed"
         aria-label={m.chat_messages_feed()}
+        aria-busy={jumping}
         className="relative"
-        style={{ height: virtualizer.getTotalSize() }}
+        ref={setFeed}
         onKeyDown={(event) => {
           const target = event.target;
           if (!(target instanceof HTMLElement) || target.isContentEditable || target.matches("input, textarea, select")) return;
@@ -4302,11 +4435,17 @@ const Transcript = memo(function Transcript({
           setFocusedRow(next[0].id);
         }}
       >
-      {virtualizer.getVirtualItems().map((item) => {
+      {virtualItems.map((item) => {
         const group = visibleMessages[item.index];
         const m = group[group.length - 1];
         const rowId = group[0].id;
         const headingId = `${headingPrefix}${rowId}`;
+        let expansionState = disclosures.get(rowId);
+        if (!expansionState) { expansionState = new Map(); disclosures.set(rowId, expansionState); }
+        const isTarget = group.some((message) => message.id === focusedMessageId);
+        const answerText = isTarget && searchQuery ? splitResponseParts(group, false).answer.map((part) => part.text ?? "").join("\n").toLowerCase() : "";
+        const revealWork = isTarget && (jumping || handledFocus.current !== focusNonce) && ((focusedPartId && splitResponseParts(group, false).work.some((turn) => findPartById(turn.parts, focusedPartId)))
+          || searchQuery && !searchQuery.toLowerCase().split(/\s+/u).every((term) => answerText.includes(term)));
 
         // A session owns one turn slot, so one recovery disables every status
         // card until its durable admission resolves.
@@ -4321,17 +4460,15 @@ const Transcript = memo(function Transcript({
             aria-setsize={visibleMessages.length}
             data-index={item.index}
             data-message-id={rowId}
+            data-search-target={isTarget || undefined}
             ref={virtualizer.measureElement}
             className={`absolute left-0 w-full pb-4 isolate outline-none before:-z-10 before:pointer-events-none before:absolute before:-inset-x-2 before:-top-2 before:bottom-2 before:rounded-lg before:bg-highlight before:transition-opacity before:duration-700 motion-reduce:before:transition-none after:pointer-events-none after:absolute after:-inset-x-2 after:-top-2 after:bottom-2 after:rounded-lg focus-visible:after:outline-2 focus-visible:after:outline-focus ${rowId === markedRowId ? "before:opacity-60" : "before:opacity-0"}`}
-            style={{ top: item.start }}
             onClickCapture={(event) => {
-              retainedRows.current.add(rowId);
               if (!(event.target instanceof Element) || !event.target.closest("[data-work-toggle]")) return;
               stickToBottom.current = false;
               virtualizer.setOptions({ ...virtualizer.options, anchorTo: "start" });
             }}
-            onPointerDownCapture={() => retainedRows.current.add(rowId)}
-            onInputCapture={() => retainedRows.current.add(rowId)}
+            onInputCapture={() => draftRows.current.add(rowId)}
             // Screen readers can move focus through every row as they read, so focus holds a row only while it lasts.
             onFocusCapture={() => setFocusedRow(rowId)}
             onBlur={(event) => {
@@ -4344,6 +4481,8 @@ const Transcript = memo(function Transcript({
             : <h6 id={headingId} className="sr-only select-none">{assistantLabel}</h6>}
           <Message
             message={m}
+            expansionState={expansionState}
+            revealNonce={revealWork ? focusNonce : undefined}
             responseMessages={group}
             replies={replies}
             forkCount={positions.get(m.id)?.count}
@@ -4880,6 +5019,8 @@ export function ChatPanel({
   runExperimentName,
   chatInfo,
   onOpenMessage,
+  onOpenSearchHit,
+  onClearSearch,
   focusedMessage,
   onOpenExperiment,
   experimentName,
@@ -4945,6 +5086,8 @@ export function ChatPanel({
   onOpenMessage?: (cited: string) => void;
   /** A message to scroll to and mark once its chat is on screen. */
   focusedMessage?: FocusedMessage | null;
+  onOpenSearchHit: (hit: ChatSearchHit, query: string) => void;
+  onClearSearch: () => void;
   /** Open an experiment overview, where its notes are displayed. */
   onOpenExperiment?: OpenTranscriptTarget;
   /** Resolve an experiment id to the name shown on tool activity links. */
@@ -5280,9 +5423,29 @@ export function ChatPanel({
   // Render-fresh mirror of `sessions` for callbacks memoized on projectId
   // alone (syncSessionList snapshots it before fetching).
   const threadRef = useRef<HTMLDivElement>(null);
+  const handledFocus = useRef<number | undefined>(undefined);
+  const [findRequest, setFindRequest] = useState<number | null>(null);
+  const [branchReturn, setBranchReturn] = useState<{ sessionId: string; leafId: string } | null>(null);
+  const searchRegion = useSyncExternalStore(subscribeCommandRegion, commandRegion);
+  const openFind = useCallback(() => setFindRequest(Date.now()), []);
+  const closeFind = useCallback(() => {
+    const anchor = threadRef.current?.querySelector<HTMLElement>("[data-search-target=true]");
+    const top = anchor?.getBoundingClientRect().top;
+    setFindRequest(null);
+    onClearSearch();
+    setBranchReturn(null);
+    requestAnimationFrame(() => {
+      const scroll = threadRef.current;
+      if (scroll && anchor?.isConnected && top !== undefined) scroll.scrollTop += anchor.getBoundingClientRect().top - top;
+      const pane = threadRef.current?.closest(".chat-pane");
+      const target = pane?.querySelector<HTMLElement>("[data-search-target=true][data-part-id]") ?? pane?.querySelector<HTMLElement>("[data-search-target=true]");
+      target?.focus({ preventScroll: true });
+    });
+  }, [onClearSearch]);
   const threadInnerRef = useRef<HTMLDivElement>(null);
   const scrollToEndRef = useRef<(() => void) | null>(null);
   const stickToBottom = useRef(true);
+  const scrollingByUser = useRef(false);
   const [transcriptAtBottom, setTranscriptAtBottom] = useState(true);
   const composerRef = useRef<ComposerEditorHandle>(null);
   const connection = useRemoteConnection();
@@ -6329,6 +6492,11 @@ export function ChatPanel({
     if ((!newChatPending && !composerPending) || mainView !== "chat" || contentLoading || contentError || historyLoading) return;
     // The welcome dialog restores its previous focus on unmount; run after that.
     const frame = window.requestAnimationFrame(() => {
+      if (document.activeElement?.closest("[role=search]")) {
+        focusedComposerNonce.current = composerFocusNonce;
+        if (newChatPending) setNewChatFocusProject(null);
+        return;
+      }
       const composer = composerRef.current;
       if (!composer?.dom) return;
       composer.focus();
@@ -6346,14 +6514,16 @@ export function ChatPanel({
     projectId === DEMO_PROJECT_ID && draft === DEMO_RUN_EXPERIMENT_PROMPT && !demoHintDismissed;
   const updateTranscriptBottom = useCallback((el: HTMLDivElement) => {
     const atBottom = el.scrollHeight - el.scrollTop - el.clientHeight < 60;
-    stickToBottom.current = atBottom;
+    if (scrollingByUser.current) stickToBottom.current = atBottom;
     setTranscriptAtBottom(atBottom);
   }, []);
   const pinTranscriptToBottom = useCallback(() => {
+    scrollingByUser.current = false;
     stickToBottom.current = true;
     setTranscriptAtBottom(true);
     scrollToEndRef.current?.();
   }, []);
+  useLayoutEffect(() => { scrollingByUser.current = false; }, [focusedMessage?.nonce]);
   const leaveTranscriptFeed = useCallback((forward: boolean) => {
     (forward ? composerRef.current : threadRef.current)?.focus();
   }, []);
@@ -6920,8 +7090,6 @@ export function ChatPanel({
     [activeId, busy, queueSessionMutation],
   );
 
-  // A cited message on another fork: show that fork, once per click, and the
-  // transcript scrolls to the message once it is on screen.
   const forkedForNonce = useRef<number | undefined>(undefined);
   useEffect(() => {
     if (!focusedMessage || focusedMessage.sessionId !== activeId || busy) return;
@@ -6933,8 +7101,44 @@ export function ChatPanel({
     }
     if (!allMessages.some((message) => message.id === messageId)) return;
     forkedForNonce.current = focusedMessage.nonce;
+    const previous = activeLeafRef.current;
+    if (focusedMessage.query && previous) {
+      setBranchReturn((current) => current?.sessionId === activeId ? current : { sessionId: activeId, leafId: previous });
+    }
     selectBranch(messageId);
   }, [focusedMessage, activeId, busy, messages, allMessages, selectBranch]);
+  const restoreSearchBranch = useCallback(() => {
+    if (!branchReturn || branchReturn.sessionId !== activeId) return;
+    selectBranch(branchReturn.leafId);
+    setBranchReturn(null);
+  }, [branchReturn, activeId, selectBranch]);
+  const openedSearchPart = useRef<number | undefined>(undefined);
+  const searchedPart = useMemo(() => {
+    if (focusedMessage?.sessionId !== activeId || !focusedMessage?.partId) return;
+    const message = allMessages.find((message) => message.id === focusedMessage.messageId);
+    return message && findPartById(message.parts, focusedMessage.partId);
+  }, [focusedMessage, activeId, allMessages]);
+  useEffect(() => {
+    if (contentLoading || historyLoading || !focusedMessage?.query || focusedMessage.sessionId !== activeId || openedSearchPart.current === focusedMessage.nonce) return;
+    const message = messages.find((message) => message.id === focusedMessage.messageId);
+    if (!message) return;
+    openedSearchPart.current = focusedMessage.nonce;
+    if (focusedMessage.spawnPartId) openSubagent?.(focusedMessage.spawnPartId, undefined, "preview");
+    else if (focusedMessage.partId) {
+      const part = findPartById(message.parts, focusedMessage.partId);
+      if (part?.prompt?.kind === "plan") openPlan?.(part.prompt.plan ?? "", part.id, "preview");
+    }
+  }, [contentLoading, historyLoading, focusedMessage, activeId, messages, openSubagent, openPlan]);
+  useLayoutEffect(() => {
+    if (findRequest === null || !focusedMessage?.query || !focusedMessage.partId || focusedMessage.sessionId !== activeId) return;
+    const root = threadRef.current?.closest(".chat-pane")?.querySelector<HTMLElement>(`.chat-prompt-questions [data-part-id="${CSS.escape(focusedMessage.partId)}"]`);
+    if (!root || !("highlights" in CSS) || typeof Highlight === "undefined") return;
+    const name = embedded ? "side-chat-search-prompt" : "chat-search-prompt";
+    const highlight = new Highlight(...chatSearchRanges(root, focusedMessage.query));
+    CSS.highlights.set(name, highlight);
+    root.scrollIntoView({ block: "nearest" });
+    return () => { if (CSS.highlights.get(name) === highlight) CSS.highlights.delete(name); };
+  }, [focusedMessage, activeId, findRequest, pendingQuestions, embedded]);
 
   // Durable cancellation wins before the chip disappears. If persistence
   // fails, leave it visible so a restart cannot surprise the user by sending it.
@@ -7125,8 +7329,9 @@ export function ChatPanel({
     if (commandRegion() === "right" && document.querySelector(".right-pane [data-side-chat]")) return;
     startNewTask();
   };
-  useHotkey(appHotkeys["task.new"], newTask, { enabled: !embedded, requireReset: true });
-  useHotkey("Mod+Shift+Enter", newTask, { enabled: !embedded, requireReset: true });
+  useHotkey(appHotkeys["task.new"], newTask, { enabled: !embedded, requireReset: true, conflictBehavior: "allow" });
+  useHotkey(appHotkeys["chat.find"], openFind, { enabled: mainView === "chat" && !contentInert && (embedded ? searchRegion === "right" : searchRegion !== "right"), requireReset: true, ignoreInputs: false, capture: true, conflictBehavior: "allow" });
+  useHotkey("Mod+Shift+Enter", newTask, { enabled: !embedded, requireReset: true, conflictBehavior: "allow" });
 
   const sessionWaiting = (session: ChatSession) => state.messagesBySession[session.id]
     ? waitingSessions.has(session.id) : session.awaitingInput === true;
@@ -7474,7 +7679,7 @@ export function ChatPanel({
     <>
       {displayedRail}
       {!embedded && !railOpen && <WorkspaceConnection runtime={runtime} corner />}
-      <section inert={contentInert} data-side-chat={embedded || undefined} className="chat-pane flex-1 min-w-0 flex flex-col bg-background min-h-0">
+      <section inert={contentInert} data-side-chat={embedded || undefined} className="chat-pane relative flex-1 min-w-0 flex flex-col bg-background min-h-0">
         {/* Header — session title on the left, end-pane view switchers on the
           right, fading into the chat below (sessions live in the rail). */}
         <div className={railOpen && !mobileRail || embedded ? "contents" : "chat-heading-row grid shrink-0 grid-cols-[2.625rem_minmax(0,1fr)_2.625rem] mac-titlebar:grid-cols-titlebar-chat items-center"}>
@@ -7501,9 +7706,15 @@ export function ChatPanel({
               <Trash2 size={16} />
             </IconButton>
           )}
+          <IconButton aria-label={m.chat_search_title()} data-tip={findRequest === null ? m.chat_search_title() : undefined} aria-expanded={findRequest !== null} aria-keyshortcuts="Control+f Meta+f" onClick={openFind}><Search size={16} /></IconButton>
           </div>
         </div>
 
+        {findRequest !== null && <div className="relative z-30 shrink-0 px-4">
+          <ChatSearch key={sessionsOptions.queryKey[1]} projectId={projectId} sessionId={activeId} projects={sidebarProjects} assistantLabel={assistantLabel} focusRequest={findRequest} embedded={embedded}
+            onOpen={onOpenSearchHit} onClose={closeFind} branchReturn={branchReturn?.sessionId === activeId && !busy ? restoreSearchBranch : undefined}
+            pendingMessageId={busy && focusedMessage?.sessionId === activeId && !messages.some((message) => message.id === focusedMessage.messageId) ? focusedMessage.messageId : undefined} />
+        </div>}
         {contentError ? (
           <div className="flex flex-1 flex-col items-center justify-center gap-3 p-5 text-subtext" role="alert">
             <p>{contentError}</p><Button onClick={onRetryContent}>{m.app_retry()}</Button>
@@ -7612,11 +7823,18 @@ export function ChatPanel({
           </div>
         ) : (
           <div
-            className="chat-thread flex-1 min-h-0 overflow-y-auto [scrollbar-gutter:stable_both-edges]"
+            className="chat-thread flex-1 min-h-0 overflow-y-auto [overflow-anchor:none] [scrollbar-gutter:stable_both-edges]"
             ref={threadRef}
             tabIndex={0}
             role="region"
             aria-label={activeSession?.title?.trim() || m.chat_untitled()}
+            onWheelCapture={() => { scrollingByUser.current = true; }}
+            onTouchStartCapture={() => { scrollingByUser.current = true; }}
+            onPointerDownCapture={(event) => { scrollingByUser.current = event.pointerType === "touch" || event.target === event.currentTarget; }}
+            onKeyDownCapture={(event) => {
+              if (event.target instanceof Element && event.target.closest("input, textarea, select, [contenteditable=true]")) return;
+              scrollingByUser.current = ["ArrowUp", "ArrowDown", "PageUp", "PageDown", "Home", "End", " "].includes(event.key);
+            }}
             onScroll={(event) => {
               updateTranscriptBottom(event.currentTarget);
               transcriptSelection.dismiss();
@@ -7626,7 +7844,7 @@ export function ChatPanel({
               <ChatImageScope projectId={projectId} sessionId={activeId}>
                 <ChatLinksContext value={chatLinks}>
                 <Transcript
-                  key={activeId}
+                  key={`${sessionsOptions.queryKey[1]}:${activeId}`}
                   scrollRef={threadRef}
                   scrollToEndRef={scrollToEndRef}
                   stickToBottom={stickToBottom}
@@ -7652,7 +7870,11 @@ export function ChatPanel({
                   delegates={delegates}
                   onOpenDelegate={onOpenDelegate}
                   focusedMessageId={focusedMessage?.sessionId === activeId ? focusedMessage.messageId : null}
+                  focusedPartId={focusedMessage?.spawnPartId ?? focusedMessage?.partId}
                   focusNonce={focusedMessage?.nonce}
+                  searchQuery={findRequest !== null && !focusedMessage?.spawnPartId && searchedPart?.prompt?.kind !== "plan" ? focusedMessage?.query : undefined}
+                  handledFocus={handledFocus}
+                  highlightName={embedded ? "side-chat-search" : "chat-search"}
                   assistantLabel={assistantLabel}
                   onLeaveFeed={leaveTranscriptFeed}
                 />
@@ -7689,8 +7911,8 @@ export function ChatPanel({
         )}
 
         {pendingQuestions.length > 0 && (
-          <div inert={contentLoading || Boolean(contentError) || historyLoading || connection !== null} className="mx-auto mb-2 flex max-h-96 w-full max-w-readable shrink-0 flex-col gap-2 overflow-y-auto px-3">
-            {pendingQuestions.map((part) => <PromptCard key={`${activeId}-${part.id}`} part={part} onRespond={respond} />)}
+          <div inert={contentLoading || Boolean(contentError) || historyLoading || connection !== null} className="chat-prompt-questions mx-auto mb-2 flex max-h-96 w-full max-w-readable shrink-0 flex-col gap-2 overflow-y-auto px-3">
+            {pendingQuestions.map((part) => <div key={`${activeId}-${part.id}`} data-part-id={part.id} data-search-target={focusedMessage?.partId === part.id || undefined} tabIndex={-1}><PromptCard part={part} onRespond={respond} /></div>)}
           </div>
         )}
 
