@@ -219,7 +219,7 @@ function SideChatPicker({ parentId, sessions, onSelect, onCreate, expanded = fal
           <MessagesSquare size={16} />
         </IconButton>
       )}
-      {children.length > 0 && (
+      {mobile && children.length > 0 && (
         <IconButton type="button" size="small" active={open} className="text-text"
           aria-label={m.side_chat_list({ count: children.length })} aria-haspopup="dialog" aria-expanded={open}
           data-keyboard-item data-keyboard-horizontal-item onClick={openPicker}>
