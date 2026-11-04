@@ -879,14 +879,14 @@ impl CodexHost {
         session_id: &str,
         native_store: NativeStore,
     ) -> Result<Arc<CodexClient>> {
+        let codex_home =
+            tokio::task::spawn_blocking(move || native_store::prepare_codex(native_store))
+                .await
+                .map_err(|error| anyhow!("Codex config preparation failed: {error}"))??;
         let host = self.clone();
         let session = session_id.to_string();
         self.ensure_with_spawn(session_id, native_store, async move {
             let bin = find_codex_required()?;
-            let codex_home =
-                tokio::task::spawn_blocking(move || native_store::prepare_codex(native_store))
-                    .await
-                    .map_err(|error| anyhow!("Codex config preparation failed: {error}"))??;
             Ok(move || {
                 spawn_client(
                     &session,
