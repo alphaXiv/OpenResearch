@@ -12,10 +12,11 @@ pr-run-mode = "skip"
 github-build-setup = "../build-setup.yml"
 # Sign platform archives before the global build checksums them.
 local-artifacts-jobs = ["./sign-macos-cli", "./sign-windows-cli"]
-# release.yml is hand-edited (source pinning, release-only triggers, signing dependencies),
-# so dist skips it; see macos/DISTRIBUTION.md before changing dist config.
+# release.yml is hand-edited (source pinning, release-only triggers, signing dependencies,
+# CI beside the builds), so dist skips it; see macos/DISTRIBUTION.md before changing dist config.
 allow-dirty = ["ci"]
-# Verify packaged binaries and source CI before publishing.
+# Verify packaged binaries and source CI before publishing. release.yml starts CI with the
+# builds, which dist cannot express: its plan jobs would gate the builds instead.
 global-artifacts-jobs = ["./verify-build-channel", "./telemetry-contract", "./ci"]
 # The installers to generate for each app
 installers = ["shell", "powershell"]

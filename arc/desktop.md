@@ -135,18 +135,20 @@ regenerated lockfile.
 
 ```text
 merge bump ─► release workflow ─► build and sign every target
-                                ─► CI on the exact packaged commit
+                                ─► CI on the exact packaged commit, beside the builds
                                 ─► verify the build channel and telemetry contract
                                 ─► publish the release (creates the tag)
            ─► desktop workflows ─► DMG (signed, notarized), Windows installer,
                                    AppImages; update manifests; download links
-merge any  ─► canary workflow  ─► CI on that commit ─► canary desktop builds
+merge any  ─► canary workflow  ─► canary desktop builds, beside CI on that commit
+                                ─► publish once both pass
 ```
 
 - **Nothing publishes untested code.** The release workflow calls the same CI
   workflow on the commit being packaged, and publishing requires it, the
-  build-channel check and the telemetry-contract check to pass. CI stays in
-  the release tool's global-artifacts jobs for this reason.
+  build-channel check and the telemetry-contract check to pass. CI runs beside
+  the builds but stays in the release tool's global-artifacts jobs, so a
+  regenerated workflow still gates publishing on it.
 - **Release notes** are GitHub's generated notes, preceded by download buttons
   that link only assets actually uploaded, refreshed as each desktop package
   attaches, plus the issues the release's pull requests closed.
