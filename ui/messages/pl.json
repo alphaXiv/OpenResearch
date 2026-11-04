@@ -1600,5 +1600,7 @@
   "library_empty": "Nie ma jeszcze zapisanych publikacji.",
   "library_add_papers": "Dodaj publikacje",
   "library_selected": "Wybrano: {count}",
-  "library_open_alphaxiv": "Otwórz alphaXiv"
+  "library_open_alphaxiv": "Otwórz alphaXiv",
+  "chat_resize_composer": "Zmień rozmiar pola wiadomości",
+  "chat_resize_composer_hint": "Przeciągnij, aby zmienić rozmiar. Kliknij dwukrotnie, aby przywrócić."
 }

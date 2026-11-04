@@ -1600,5 +1600,7 @@
   "library_empty": "保存した論文はまだありません。",
   "library_add_papers": "論文を追加",
   "library_selected": "{count} 件選択中",
-  "library_open_alphaxiv": "alphaXiv を開く"
+  "library_open_alphaxiv": "alphaXiv を開く",
+  "chat_resize_composer": "メッセージボックスのサイズを変更",
+  "chat_resize_composer_hint": "ドラッグしてサイズを変更します。ダブルクリックでリセットします。"
 }
