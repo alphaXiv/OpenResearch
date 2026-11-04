@@ -6876,8 +6876,7 @@ export function ChatPanel({
                         void navigate({ href: taskLocation(targetProjectId, targetProjectId === s.projectId ? s.id : null, { kind: "experiment", experimentId, view: "overview" }) });
                       }}
                       onOpen={() => {
-                        if (project.id === projectId) onActiveSessionChange(s.id);
-                        else void navigate({ to: "/projects/$projectId/tasks/$sessionId", params: { projectId: project.id, sessionId: s.id } });
+                        onActiveSessionChange(s.id, { projectId: project.id });
                         if (project.id === DEMO_PROJECT_ID) {
                           markDemoSessionRead(s.id);
                           const experiment = DEMO_EXPERIMENT_LABELS[s.id];
