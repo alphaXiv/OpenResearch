@@ -390,8 +390,21 @@ fn opens_in_browser(url: &str) -> bool {
 }
 
 /// The dashboard path an `openresearch://reproduce/<paper id>` link opens; the page validates the id.
+/// A `.orx` file opened with the app goes to the page that imports it.
 #[cfg_attr(not(desktop_app), allow(dead_code))]
 fn deep_link_path(url: &url::Url) -> Option<String> {
+    if url.scheme() == "file" {
+        let file = url.to_file_path().ok()?;
+        let shared = file.extension().is_some_and(|extension| {
+            extension.eq_ignore_ascii_case(crate::local::share::EXTENSION)
+        });
+        return shared.then(|| {
+            format!(
+                "/open?file={}",
+                urlencoding::encode(&file.to_string_lossy())
+            )
+        });
+    }
     let path = url.path();
     if url.scheme() != "openresearch" || url.host_str() != Some("reproduce") || path.len() < 2 {
         return None;
@@ -1898,6 +1911,11 @@ mod tests {
         assert_eq!(link_path("openresearch://reproduce/"), None);
         assert_eq!(link_path("openresearch://reproduce"), None);
         assert_eq!(link_path("openresearch://settings/x"), None);
+        assert_eq!(
+            link_path("file:///Users/ada/Downloads/tiny%20lm.orx").as_deref(),
+            Some("/open?file=%2FUsers%2Fada%2FDownloads%2Ftiny%20lm.orx")
+        );
+        assert_eq!(link_path("file:///Users/ada/notes.txt"), None);
         assert_eq!(link_path("https://reproduce/x"), None);
         assert_eq!(link_path("not a link"), None);
         assert_eq!(

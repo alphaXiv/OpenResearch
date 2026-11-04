@@ -26,6 +26,8 @@ new Function("require", "exports", compiled)((name) => {
   } };
   if (name === "../paraglide/messages.js") return { m: new Proxy({}, { get: (_, key) => () => key }) };
   if (name === "./useFileManagerLabel") return { useFileManagerLabel: () => "Reveal" };
+  if (name === "./ShareProjectDialog") return { ShareProjectDialog: () => null };
+  if (name === "../download") return { downloadFile: () => {} };
   if (name === "../dialog") return { showCustomDialog: (args) => { options = args; dialogs.showCustomDialog(args); } };
   if (name === "./ui") return { Button: "button", DialogContent: "content", DialogTitle: "title", showAlert: (...args) => { alerts.push(args); } };
   return require(name);

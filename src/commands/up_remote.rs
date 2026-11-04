@@ -1461,7 +1461,12 @@ async fn proxy_request(
         .unwrap_or("/");
     let url = format!("{origin}{path}");
     let method = request.method().clone();
-    let (parts, body) = request.with_limited_body().into_parts();
+    // A shared project upload streams past the JSON request cap; the dashboard bounds it.
+    let (parts, body) = if path.split('?').next() == Some("/api/projects/import") {
+        request.into_parts()
+    } else {
+        request.with_limited_body().into_parts()
+    };
     let mut headers = sanitized_request_headers(parts.headers, origin, bearer);
     if websocket {
         headers.insert(header::CONNECTION, HeaderValue::from_static("Upgrade"));

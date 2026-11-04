@@ -250,12 +250,17 @@ pub fn human_bytes(n: u64) -> String {
 }
 
 pub fn log_path(run_id: &str) -> PathBuf {
+    log_path_in(&data_dir(), run_id)
+}
+
+/// [`log_path`] under an explicit data directory.
+pub fn log_path_in(data_dir: &Path, run_id: &str) -> PathBuf {
     // Sanitize the id so malformed local data cannot escape the log directory.
     let safe: String = run_id
         .chars()
         .filter(|c| c.is_ascii_alphanumeric() || *c == '-' || *c == '_')
         .collect();
-    data_dir().join("run-logs").join(format!("{safe}.log"))
+    data_dir.join("run-logs").join(format!("{safe}.log"))
 }
 
 /// A locally tracked run. `backend_json` stores the backend descriptor used by

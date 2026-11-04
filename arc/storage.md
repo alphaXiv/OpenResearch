@@ -158,3 +158,13 @@ endpoints out of it. Other traffic:
 - **Integrations the user turns on.** Pushing a project to GitHub, syncing a
   paper with Overleaf, and the agents' own model providers, which the agent
   talks to directly.
+- **Sharing.** Nothing leaves on its own: sharing writes a `.orx` file the
+  user sends themselves. It is a zip of a Git bundle of the baseline and
+  experiment branches, the experiment tree, the finished runs (backend kind
+  and GPU type, never a descriptor), their logs, the artifacts, the chats the
+  user left ticked, and the sharer's artifacts path so transcript links can be
+  rewritten. Chat attachments stay behind. Chats, logs and artifacts are
+  scanned for credentials and a match refuses the share; the code is not
+  scanned, since it is what the user chose to send. Opening one clones the
+  bundle into a new project with fresh ids and no remote; its runs carry the
+  backend kind `imported`, which no supervisor or cleanup acts on.

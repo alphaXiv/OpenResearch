@@ -35,6 +35,7 @@ function loadModule(filename, api = {}, remembered = null) {
       if (id === "../RemoteRuntime") return { RuntimeRoot: () => null, useRuntime: () => ({ kind: "local" }) };
       if (id === "../routePages") return { ResumeGlobal: () => null, ResumeProject: () => null, ProjectsPage: () => null };
       if (id === "../components/ReproducePage") return { ReproducePage: () => null };
+      if (id === "../components/OpenSharedProjectPage") return { OpenSharedProjectPage: () => null };
       if (id.startsWith("./routes/")) return load(new URL(`${id}.tsx`, url));
       throw new Error(`Unexpected dependency: ${id}`);
     }, exports);
@@ -86,6 +87,13 @@ test("reproduce links carry arXiv and alphaXiv-exclusive ids through the path ex
     assert.equal(leaf.routeId, "/reproduce/$", path);
     assert.equal(linkedPaperId(leaf.params._splat), id, path);
   }
+});
+
+test("a .orx file opened with the app reaches the import page with its path", async () => {
+  const router = await match("/open?file=%2FUsers%2Fada%2Ftiny%20lm.orx");
+  const leaf = router.state.matches.at(-1);
+  assert.equal(leaf.routeId, "/open");
+  assert.deepEqual(leaf.search, { file: "/Users/ada/tiny lm.orx" });
 });
 
 test("project search validates every pane variant and rejects malformed panes", async () => {

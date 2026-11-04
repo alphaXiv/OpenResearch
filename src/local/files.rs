@@ -30,7 +30,7 @@ const MAX_ENTRIES: usize = 2000;
 /// though the product surface is called Artifacts. A pre-v0.1.48 `artifacts/`
 /// root is still migrated in place when no `files/` root exists; when both
 /// exist, `files/` remains authoritative and the legacy root is untouched.
-fn files_root() -> PathBuf {
+pub(super) fn files_root() -> PathBuf {
     let root = data_dir().join("files");
     let legacy = data_dir().join("artifacts");
     if !root.exists() && legacy.is_dir() {
@@ -400,7 +400,7 @@ fn mtime_ms(md: &std::fs::Metadata) -> i64 {
         .unwrap_or(0)
 }
 
-fn is_ignored(name: &str) -> bool {
+pub(super) fn is_ignored(name: &str) -> bool {
     name.starts_with('.') || IGNORED.contains(&name)
 }
 

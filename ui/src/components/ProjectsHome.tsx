@@ -1,12 +1,13 @@
 import { useQuery } from "@tanstack/react-query";
 import { getUiStateQuery } from "../queries/projects";
 import { m } from "../paraglide/messages.js";
-import { useRef } from "react";
-import { FolderOpen, Plus } from "lucide-react";
+import { useRef, useState } from "react";
+import { FileArchive, FolderOpen, Plus } from "lucide-react";
 import { type AgentSelection, type Project } from "../api";
 
 import { showCustomDialog, type DialogContentProps } from "../dialog";
 import { NewProjectForm } from "./NewProjectForm";
+import { OpenSharedProjectForm, reportMissingBranches } from "./OpenSharedProject";
 import { Button, DialogContent, DialogTitle } from "./ui";
 
 /** The projects home once every project is gone; onboarding must not replay here. */
@@ -44,19 +45,41 @@ export function NewProjectDialog({
   remote = false,
   preferredAgent,
   initialPaperId,
+  initialShared,
 }: DialogContentProps<void> & {
   onCreated: (project: Project, githubPublicationError: string | null) => void;
   remote?: boolean;
   preferredAgent: AgentSelection | null;
   initialPaperId?: string;
+  /** A `.orx` file to open instead of creating a project. */
+  initialShared?: File | string;
 }) {
   const dialogRef = useRef<HTMLDivElement>(null);
+  const fileRef = useRef<HTMLInputElement>(null);
+  const [shared, setShared] = useState<File | string | null>(initialShared ?? null);
   const { data: uiState } = useQuery(getUiStateQuery());
+
+  if (shared) return <DialogContent ref={dialogRef} className="max-h-[calc(100vh-2.5rem)] overflow-y-auto">
+    <DialogTitle className="mb-3.5">{m.open_shared_title()}</DialogTitle>
+    <OpenSharedProjectForm source={shared} onCancel={() => initialShared ? cancel() : setShared(null)} onOpened={(opened) => {
+      confirm();
+      onCreated(opened.project, null);
+      reportMissingBranches(opened);
+    }} />
+  </DialogContent>;
 
   return <DialogContent ref={dialogRef}
       initialFocus={() => dialogRef.current?.querySelector<HTMLElement>("[data-initial-focus]") ?? true}
       className="max-h-[calc(100vh-2.5rem)] overflow-y-auto">
-      <DialogTitle className="mb-3.5">{m.projects_home_new_project()}</DialogTitle>
+      <div className="mb-3.5 flex items-center justify-between gap-2">
+        <DialogTitle>{m.projects_home_new_project()}</DialogTitle>
+        <Button type="button" variant="ghost" onClick={() => fileRef.current?.click()}><FileArchive size={16} />{m.open_shared_pick()}</Button>
+        <input ref={fileRef} type="file" accept=".orx" hidden onChange={(event) => {
+          setShared(event.target.files?.[0] ?? null);
+          // Cleared so picking the same file after Cancel fires again.
+          event.target.value = "";
+        }} />
+      </div>
       <NewProjectForm
         onCancel={cancel}
         onCreated={(project, publicationError) => {

@@ -45,7 +45,7 @@ uuid = { version = "1", features = ["v4"] }
 semver = "1"
 fd-lock = "4"
 base64 = "0.22"
-# Extract user-uploaded skills shipped as a .zip of a SKILL.md folder. Lean:
+# Uploaded skills (.zip of a SKILL.md folder) and shared projects (.orx). Lean:
 # deflate only, no bzip2/zstd/time/aes.
 zip = { version = "2", default-features = false, features = ["deflate"] }
 # `orx up` dashboard: axum for routing/SSE, rust-embed for the SPA, futures for

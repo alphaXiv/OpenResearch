@@ -1589,6 +1589,44 @@ export const disableProjectGithub = (projectId: string) =>
 export const pushProjectGithub = (projectId: string) =>
   post<{ project: Project; git: ProjectGitStatus }>(`/api/projects/${projectId}/github/push`);
 
+export interface ShareChoice {
+  chats: string[];
+  logs: boolean;
+  artifacts: boolean;
+}
+
+/** The project as a `.orx` file, and the archive paths left out for size. */
+export async function shareProject(projectId: string, options: ShareChoice) {
+  const res = await writeResponse(`/api/projects/${projectId}/share`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify(options),
+  });
+  if (!res.ok) return json<never>(res);
+  const header = res.headers.get("x-orx-share");
+  const summary: { skipped: string[] } = header ? JSON.parse(decodeURIComponent(header)) : { skipped: [] };
+  const fileName = decodeURIComponent(/filename="([^"]+)"/.exec(res.headers.get("content-disposition") ?? "")?.[1] ?? "project.orx");
+  return { file: await res.blob(), fileName, skipped: summary.skipped };
+}
+
+export interface OpenedSharedProject {
+  project: Project;
+  /** Experiment branches the file named but did not carry. */
+  missingBranches: string[];
+}
+
+/** Open a `.orx` file as a new project in `path`: one picked in the page, or one already on this machine. */
+export const importSharedProject = (path: string, source: File | string) => {
+  const query = `path=${encodeURIComponent(path)}`;
+  return typeof source === "string"
+    ? post<OpenedSharedProject>(`/api/projects/import?${query}&file=${encodeURIComponent(source)}`)
+    : writeResponse(`/api/projects/import?${query}`, {
+      method: "POST",
+      headers: { "content-type": "application/octet-stream" },
+      body: source,
+    }).then((r) => json<OpenedSharedProject>(r));
+};
+
 export interface TelemetrySettings {
   /** Whether usage analytics linked to the random installation ID is on. */
   enabled: boolean;

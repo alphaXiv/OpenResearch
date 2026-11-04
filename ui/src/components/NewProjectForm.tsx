@@ -36,7 +36,7 @@ export function useDebouncedValue(value: string, delay: number) {
   return debounced;
 }
 
-function slugify(text: string, maxLength?: number): string {
+export function slugify(text: string, maxLength?: number): string {
   const slug = text
     .toLowerCase()
     .replace(/[^a-z0-9]+/g, "-")
