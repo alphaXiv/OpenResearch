@@ -89,7 +89,9 @@ pub enum Observation {
     Queued {
         detail: String,
     },
-    Running,
+    Running {
+        started_at: Option<i64>,
+    },
     Exited {
         finished_at: Option<i64>,
         code: Option<i32>,
@@ -107,6 +109,7 @@ pub enum Observation {
         note: Option<Vec<u32>>,
     },
     Failed {
+        finished_at: Option<i64>,
         reason: String,
     },
     Lost {
@@ -290,6 +293,8 @@ pub trait Backend: Send + Sync {
         ident: Option<&FileIdent>,
     ) -> Result<LogPage>;
 }
+
+pub(crate) const ORPHANED_RUN_SETTLE_MS: i64 = 5 * 60 * 1000;
 
 /// Process-local facts; everything durable lives in the store.
 #[derive(Default)]

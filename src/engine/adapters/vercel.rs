@@ -47,7 +47,7 @@ impl Api for VercelAccount {
     async fn inspect(&self, run: &WatchedRun) -> Result<Observation> {
         let (sandbox, process) = ids(run)?;
         let state = vercel::inspect_job(sandbox, process).await?;
-        Ok(api::stage(&state.stage, state.message))
+        Ok(api::stage(&state.stage, state.message, None, None))
     }
 
     async fn cancel(&self, run: &WatchedRun) -> Result<()> {

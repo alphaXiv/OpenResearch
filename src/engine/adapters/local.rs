@@ -378,6 +378,7 @@ impl Backend for Local {
                         Err(error) => Err(error),
                     };
                     Ok(orx_host_proto::Summary {
+                        started_at: orx_host::wrapper::started_at(dir),
                         state: orx_host::wrapper::state(dir)?,
                         log_len: Some(len("log")?),
                         notify_len: len("notify")?,
@@ -418,13 +419,14 @@ impl Backend for Local {
                 }
             } else if job.stage == "ERROR" && !localbox::process_group_alive(dir) {
                 Observation::Failed {
+                    finished_at: None,
                     reason: job
                         .message
                         .unwrap_or_else(|| "Local process died without an exit code".into()),
                 }
             } else {
                 // A killed launcher whose payload survives in its group is still running.
-                Observation::Running
+                Observation::Running { started_at: None }
             };
             result.push((run.id.clone(), observation));
             let len = |file| fs::metadata(dir.join(file)).map_or(0, |metadata| metadata.len());

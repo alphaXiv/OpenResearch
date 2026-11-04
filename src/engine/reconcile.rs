@@ -19,6 +19,7 @@ pub(super) struct Change {
     pub handle: Option<(u32, Handle)>,
     pub exit_code: Option<i64>,
     pub finished_at: Option<i64>,
+    pub started_at: Option<i64>,
     pub reason: Option<String>,
     pub cancel_unconfirmed: Option<Option<Vec<u32>>>,
     pub contact: Option<Contact>,
@@ -95,13 +96,19 @@ fn observed(phase: Phase, contact: &Contact, observation: Observation, now: i64)
         if !is_tombstone(phase, contact) {
             return Change::default();
         }
-        return match observation {
+        let finished_at = match &observation {
+            Exited { finished_at, .. }
+            | Cancelled { finished_at, .. }
+            | Failed { finished_at, .. } => *finished_at,
+            _ => None,
+        };
+        let mut change = match observation {
             Cancelled { .. } | Gone { .. } | NotFound => Change::contact(Contact::Live),
             _ if phase == Phase::Cancelled => Change::default(),
             Unreachable { cause } => Change::contact(Contact::Unreachable { since: now, cause }),
             NeedsAuth { cause } => Change::contact(Contact::NeedsAuth { since: now, cause }),
             Queued { .. }
-            | Running
+            | Running { .. }
             | Exited { .. }
             | Failed { .. }
             | Lost { .. }
@@ -113,6 +120,8 @@ fn observed(phase: Phase, contact: &Contact, observation: Observation, now: i64)
                 Change::default()
             }
         };
+        change.finished_at = finished_at;
+        return change;
     }
     // Until it has a handle, a run moves only through the submission protocol.
     if phase == Phase::Submitting {
@@ -126,7 +135,10 @@ fn observed(phase: Phase, contact: &Contact, observation: Observation, now: i64)
     };
     match observation {
         Queued { .. } => progressed(Phase::Starting),
-        Running => progressed(Phase::Running),
+        Running { started_at } => Change {
+            started_at: Some(started_at.unwrap_or(now)),
+            ..progressed(Phase::Running)
+        },
         Exited {
             code,
             signal,
@@ -150,7 +162,13 @@ fn observed(phase: Phase, contact: &Contact, observation: Observation, now: i64)
                 signal.map(|signal| format!("Killed by signal {signal}.")),
             )
         },
-        Failed { reason } => Change::terminal(Phase::Failed, Some(reason)),
+        Failed {
+            reason,
+            finished_at,
+        } => Change {
+            finished_at,
+            ..Change::terminal(Phase::Failed, Some(reason))
+        },
         Lost { reason } | Gone { reason } => Change::terminal(Phase::Lost, Some(reason)),
         Unreachable { cause } => Change::contact(Contact::Unreachable { since: now, cause }),
         NeedsAuth { cause } => Change::contact(Contact::NeedsAuth { since: now, cause }),
@@ -414,14 +432,15 @@ impl Engine {
                     store.set_result_markdown(run_id, reason)?;
                 }
             }
-            if moved && !recorded {
-                let ended_at = phase.is_terminal().then_some(
-                    change
-                        .finished_at
-                        .unwrap_or(now)
-                        .min(now)
-                        .max(run.created_at),
-                );
+            if moved && !recorded
+                || is_tombstone(old_phase, &state.contact) && change.finished_at.is_some()
+            {
+                let ended_at = phase
+                    .is_terminal()
+                    .then_some(change.finished_at.unwrap_or(now));
+                let started_at = change
+                    .started_at
+                    .filter(|_| phase == Phase::Running && super::is_engine_row(&run));
                 if phase.is_terminal() && super::handle_of(&run).is_some() {
                     store.queue_log_collection(run_id)?;
                 }
@@ -431,6 +450,7 @@ impl Engine {
                     phase.as_str(),
                     ended_at,
                     change.exit_code,
+                    started_at,
                 )?;
             }
 
@@ -570,7 +590,7 @@ mod tests {
     #[test]
     fn submitting_runs_ignore_observations_and_settled_runs_ignore_everything() {
         for observation in [
-            Observation::Running,
+            Observation::Running { started_at: None },
             Observation::Cancelled {
                 finished_at: None,
                 code: None,

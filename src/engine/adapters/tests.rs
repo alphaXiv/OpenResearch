@@ -717,7 +717,7 @@ async fn adopted_legacy_run_uses_read_only_inspection_and_group_cancel() {
             .observe(std::slice::from_ref(&run), Duration::from_millis(100))
             .await[0]
             .1,
-        Observation::Running
+        Observation::Running { started_at: None }
     ));
     assert!(began.elapsed() >= Duration::from_millis(100));
     let outcome = f.ssh.cancel(&run).await;
@@ -951,6 +951,23 @@ async fn local_direct_child_completion_recovery_and_pages() {
     fs::write(f.server.directory().join("local-runs/local/release"), "").unwrap();
     let started = Instant::now();
     assert_eq!(f.terminal(&local, "local").await.status, "done");
+    let dir = f.server.directory().join("local-runs/local");
+    let source_start = orx_host::wrapper::started_at(&dir).unwrap();
+    assert_eq!(
+        f.store()
+            .engine_run_state("local")
+            .unwrap()
+            .unwrap()
+            .started_at,
+        Some(source_start)
+    );
+    assert_eq!(
+        f.store().get_run("local").unwrap().unwrap().ended_at,
+        orx_host::wrapper::receipt(&dir)
+            .unwrap()
+            .unwrap()
+            .finished_at
+    );
     assert!(started.elapsed() < Duration::from_secs(2));
 
     assert!(matches!(
@@ -1215,7 +1232,7 @@ async fn adopted_slurm_uses_recorded_job_id_and_old_receipt_directory() {
     let observed = slurm
         .observe(std::slice::from_ref(&run), Duration::ZERO)
         .await;
-    assert!(matches!(observed[0].1, Observation::Running));
+    assert!(matches!(observed[0].1, Observation::Running { .. }));
     assert_eq!(
         observed
             .iter()
@@ -1284,6 +1301,7 @@ async fn local_cancel_uses_wrapper_observations_and_tinker_recovers_the_same_lay
         .unwrap()
         .unwrap();
     let summary = orx_host_proto::Summary {
+        started_at: orx_host::wrapper::started_at(&root.join("cancel-local")),
         state: orx_host_proto::RunState::Exited { receipt },
         log_len: Some(0),
         notify_len: 0,
@@ -1964,6 +1982,7 @@ async fn ssh_launch_written_with_response_lost_stays_unreconciled() {
 fn cancelled_receipts_use_the_latest_process_proof_and_describe_unchecked_processes() {
     use orx_host_proto::{CancelOutcome as Outcome, ProcessOutcome, RunState, Summary, Survivor};
     let mut summary = Summary {
+        started_at: None,
         state: RunState::Exited {
             receipt: orx_host_proto::ExitReceipt {
                 finished_at: Some(1234),
@@ -2011,6 +2030,21 @@ fn cancelled_receipts_use_the_latest_process_proof_and_describe_unchecked_proces
         Observation::CancelReceipt {
             remaining: 0,
             note: None,
+            ..
+        }
+    ));
+    summary.started_at = Some(500);
+    let observed = super::ssh::observations("run".into(), &summary);
+    assert!(matches!(
+        &observed[0].1,
+        Observation::Running {
+            started_at: Some(500)
+        }
+    ));
+    assert!(matches!(
+        &observed[1].1,
+        Observation::CancelReceipt {
+            finished_at: Some(1234),
             ..
         }
     ));
@@ -2228,7 +2262,7 @@ async fn slurm_foreign_node_uses_scheduler_without_inspecting_or_signalling_loca
         .await;
     assert!(observed
         .iter()
-        .any(|(_, observation)| matches!(observation, Observation::Running)));
+        .any(|(_, observation)| matches!(observation, Observation::Running { .. })));
     assert!(!observed
         .iter()
         .any(|(_, observation)| matches!(observation, Observation::Unreachable { .. })));
@@ -2245,7 +2279,7 @@ async fn slurm_foreign_node_uses_scheduler_without_inspecting_or_signalling_loca
     tokio::time::sleep(Duration::from_millis(150)).await;
     f.clock.advance(Duration::from_secs(31));
     let observed = slurm.observe(&[run], Duration::ZERO).await;
-    assert!(observed.iter().any(|(_, observation)| matches!(observation, Observation::Failed { reason } if reason == "scheduler NODE_FAIL; no receipt")));
+    assert!(observed.iter().any(|(_, observation)| matches!(observation, Observation::Failed { reason, .. } if reason == "scheduler NODE_FAIL; no receipt")));
     assert!(!dir.join("exit.json").exists());
 }
 
@@ -2432,6 +2466,7 @@ async fn local_cancel_reaches_new_sessions_and_double_fork_children() {
     let expected = super::ssh::observations(
         "fork-local".into(),
         &orx_host_proto::Summary {
+            started_at: orx_host::wrapper::started_at(&dir),
             state: orx_host_proto::RunState::Exited { receipt },
             log_len: Some(fs::metadata(dir.join("log")).unwrap().len()),
             notify_len: 0,
@@ -2973,7 +3008,7 @@ async fn legacy_survivors_settle_on_group_absence_without_reconnect() {
         row.backend_json =
             json!({"kind":kind,"namespace":f.server.alias(),"jobId":dir}).to_string();
         f.store().upsert_run(&row).unwrap();
-        assert_eq!(f.engine.scan_legacy().unwrap().len(), 1);
+        assert_eq!(f.engine.scan_legacy(true).unwrap().len(), 1);
         f.engine
             .apply_cancel(&row, CancelOutcome::Survivors { count: 1 })
             .unwrap();

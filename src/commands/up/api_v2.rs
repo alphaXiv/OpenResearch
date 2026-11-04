@@ -97,7 +97,14 @@ impl Api {
             .project_id;
         let admission = (self.admit)(&project)?;
         args.forwarded = true;
-        self.commands.run(args, admission).await
+        crate::local::apply_compute_default(&mut args.backend, &mut args.flavor);
+        args.backend.get_or_insert_with(|| "local".into());
+        if crate::config::run_engine_settings()?.0 {
+            self.commands.run(args, admission).await
+        } else {
+            let run = crate::compute::submit_supervised(&args).await?;
+            Ok(run.id)
+        }
     }
 
     fn run(&self, id: &str) -> Result<StoredRun> {
@@ -114,6 +121,7 @@ impl Api {
                     .as_ref()
                     .is_some_and(|state| state.cancel_accepted_at.is_some()));
         let mut value = serde_json::to_value(run)?;
+        value["startedAt"] = json!(state.as_ref().and_then(|state| state.started_at));
         let launch = state.as_ref().and_then(|state| state.launch.as_ref());
         if let Some(backend) = crate::store::public_backend(&run.backend_json, launch) {
             value["backendJson"] = json!(backend.to_string());

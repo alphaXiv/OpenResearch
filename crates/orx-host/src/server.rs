@@ -134,6 +134,7 @@ impl Host {
                                     .find(|(run, _)| run == name)
                                     .map(|(_, summary)| summary.clone())
                                     .unwrap_or(Summary {
+                                        started_at: None,
                                         state: RunState::Missing,
                                         log_len: None,
                                         notify_len: 0,
@@ -397,6 +398,7 @@ impl Host {
             let intent: LaunchIntent = read_json(&dir.join("launch.json"))?;
             if !repair || (intent.source.is_some() && !dir.join("source.tar").try_exists()?) {
                 return Ok(Summary {
+                    started_at: None,
                     state: RunState::Staging,
                     log_len: if follow {
                         Some(length(&dir.join("log"))?)
@@ -422,6 +424,7 @@ impl Host {
                 .remove(run);
         }
         Ok(Summary {
+            started_at: wrapper::started_at(&dir),
             state,
             log_len: if follow {
                 Some(length(&dir.join("log"))?)
@@ -1130,6 +1133,7 @@ fn slurm_summary(dir: &Path, old: Option<&SlurmLegacyRun>, fallback: RunState) -
                 None => fallback,
             };
             return Ok(Summary {
+                started_at: None,
                 state,
                 log_len: None,
                 notify_len: length(&dir.join("notify"))?,
@@ -1148,6 +1152,7 @@ fn slurm_summary(dir: &Path, old: Option<&SlurmLegacyRun>, fallback: RunState) -
             Err(error) => wrapper::read_error(error),
         };
         Ok(Summary {
+            started_at: wrapper::started_at(dir),
             state,
             log_len: None,
             notify_len: length(&dir.join("notify"))?,
@@ -1155,6 +1160,7 @@ fn slurm_summary(dir: &Path, old: Option<&SlurmLegacyRun>, fallback: RunState) -
         })
     })();
     result.unwrap_or_else(|error| Summary {
+        started_at: None,
         state: wrapper::read_error(error),
         log_len: None,
         notify_len: 0,

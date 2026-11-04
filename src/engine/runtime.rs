@@ -394,7 +394,8 @@ impl Runtime {
     }
 
     fn tick(self: &Arc<Self>) -> Result<()> {
-        self.engine.scan_legacy()?;
+        self.engine
+            .scan_legacy(crate::config::run_engine_settings()?.0)?;
         self.engine.check_outages()?;
         let store = self.store()?;
         // Deleted from the dashboard or the CLI alike.
@@ -850,9 +851,7 @@ impl Runtime {
 
 #[async_trait]
 impl Commands for Runtime {
-    async fn run(&self, mut args: crate::ExpRunArgs, admission: Box<dyn Send>) -> Result<String> {
-        crate::local::apply_compute_default(&mut args.backend, &mut args.flavor);
-        args.backend.get_or_insert_with(|| "local".into());
+    async fn run(&self, args: crate::ExpRunArgs, admission: Box<dyn Send>) -> Result<String> {
         let chat_session = args.launching_chat_session();
         let (durable, inserted) = tokio::sync::oneshot::channel::<()>();
         let submitted = crate::compute::submit(&args, |mut submission| async move {
@@ -925,20 +924,20 @@ impl Commands for Runtime {
     /// Accepts a cancel for a run the engine owns, or records it for the 0.2.x supervisor
     /// that does.
     async fn cancel(&self, run: &StoredRun, reason: &str) -> Result<()> {
-        let backend = self.backend_for(&self.key(run)?)?;
-        if self
-            .engine
-            .cancel(backend.as_ref(), &run.id, reason)
-            .await?
-        {
-            return Ok(());
-        }
         if !is_engine_row(run)
             && !self.engine.holds(&run.id)
             && !crate::local::is_terminal(&run.status)
         {
-            crate::commands::exp::request_legacy_run_cancel(&*self.store()?, &run.id, reason)?;
+            return crate::commands::exp::request_legacy_run_cancel(
+                &*self.store()?,
+                &run.id,
+                reason,
+            );
         }
+        let backend = self.backend_for(&self.key(run)?)?;
+        self.engine
+            .cancel(backend.as_ref(), &run.id, reason)
+            .await?;
         Ok(())
     }
 
@@ -968,6 +967,16 @@ impl Commands for Runtime {
                     .default_host
                     .ok_or_else(|| anyhow!("Pass --host or configure a default host."))?,
             };
+            let supervised = crate::compute::supervised_ssh_needed(
+                crate::config::run_engine_settings()?.0,
+                &self.store()?.list_active_runs()?,
+                &host,
+            );
+            let target = SshTarget::alias(&host);
+            #[cfg(unix)]
+            if supervised && prompt.is_some() {
+                crate::jobs::ssh::interactive_args(&target, None, None).await?;
+            }
             self.ssh(&Self::host_key(&host, slurm)?)?;
             let connections: Vec<_> = lock(&self.conns)
                 .iter()
@@ -977,7 +986,7 @@ impl Commands for Runtime {
             let mut worst: Option<(u8, anyhow::Error)> = None;
             for conn in connections {
                 let result = match &prompt {
-                    Some(prompt) => conn.connect_interactive(prompt.clone()).await,
+                    Some(prompt) => conn.connect_interactive(prompt.clone(), supervised).await,
                     None => conn.retry().await,
                 };
                 if let Err(error) = result {
@@ -989,6 +998,16 @@ impl Commands for Runtime {
             }
             if let Some((_, error)) = worst {
                 return Err(error);
+            }
+            if let Err(error) = crate::jobs::ssh::service::reset_existing_backoff(&target).await {
+                eprintln!("Host {host}: could not reset supervisor SSH backoff: {error:#}");
+            }
+            #[cfg(windows)]
+            if supervised {
+                connect_supervised(prompt.as_ref(), |operation| {
+                    crate::jobs::ssh::service::request(&target, operation)
+                })
+                .await?;
             }
         }
         crate::commands::up::compute_settings::check(
@@ -1040,6 +1059,46 @@ impl Commands for Runtime {
     }
 }
 
+#[cfg(any(windows, test))]
+async fn connect_supervised<F, Fut>(prompt: Option<&Prompt>, mut request: F) -> Result<()>
+where
+    F: FnMut(Value) -> Fut,
+    Fut: std::future::Future<Output = Result<Value>>,
+{
+    if request(json!({"op": "status"})).await?["connected"] == true {
+        return Ok(());
+    }
+    let prompt = prompt.ok_or_else(|| {
+        anyhow!("SSH disconnected. Use Connect to authenticate; background login is disabled.")
+    })?;
+    let start = request(json!({"op": "connect_start"})).await?;
+    let attempt = start["attempt"]
+        .as_str()
+        .ok_or_else(|| anyhow!("SSH Connect returned no authentication attempt. Retry Connect."))?;
+    let result = async {
+        loop {
+            let status = request(json!({"op": "connect_status", "attempt": attempt})).await?;
+            if status["done"] == true {
+                if let Some(error) = status["error"].as_str() {
+                    bail!("{error}");
+                }
+                return Ok(());
+            }
+            if let Some(question) = status["prompt"].as_str() {
+                let answer = prompt(question.to_owned())
+                    .await?
+                    .ok_or_else(|| anyhow!("SSH authentication cancelled."))?;
+                request(json!({"op": "connect_answer", "attempt": attempt, "answer": answer}))
+                    .await?;
+            }
+            tokio::time::sleep(Duration::from_millis(150)).await;
+        }
+    }
+    .await;
+    let _ = request(json!({"op": "connect_cancel", "attempt": attempt})).await;
+    result
+}
+
 pub(crate) fn hex(bytes: &[u8]) -> String {
     bytes.iter().map(|byte| format!("{byte:02x}")).collect()
 }
@@ -1059,6 +1118,89 @@ pub(crate) mod chaos;
 mod tests {
     use super::*;
     use crate::engine::clock::TestClock;
+
+    #[tokio::test]
+    async fn supervisor_connect_skips_a_live_service_and_relays_each_authentication_prompt() {
+        use std::collections::VecDeque;
+        let mut calls = Vec::new();
+        connect_supervised(None, |request| {
+            calls.push(request);
+            std::future::ready(Ok(json!({"connected": true})))
+        })
+        .await
+        .unwrap();
+        assert_eq!(calls, [json!({"op": "status"})]);
+
+        let prompt: Prompt =
+            Arc::new(|question| Box::pin(async move { Ok(Some(format!("answer: {question}"))) }));
+        let mut replies = VecDeque::from([
+            json!({"connected": false}),
+            json!({"attempt": "login"}),
+            json!({"prompt": "Password"}),
+            json!({}),
+            json!({"prompt": "MFA code"}),
+            json!({}),
+            json!({"done": true}),
+            json!({}),
+        ]);
+        calls.clear();
+        connect_supervised(Some(&prompt), |request| {
+            calls.push(request);
+            std::future::ready(Ok(replies.pop_front().unwrap()))
+        })
+        .await
+        .unwrap();
+        assert!(replies.is_empty());
+        assert_eq!(
+            calls
+                .iter()
+                .map(|call| call["op"].as_str().unwrap())
+                .collect::<Vec<_>>(),
+            [
+                "status",
+                "connect_start",
+                "connect_status",
+                "connect_answer",
+                "connect_status",
+                "connect_answer",
+                "connect_status",
+                "connect_cancel",
+            ]
+        );
+        assert_eq!(calls[3]["answer"], "answer: Password");
+        assert_eq!(calls[5]["answer"], "answer: MFA code");
+        assert!(calls[2..].iter().all(|call| call["attempt"] == "login"));
+    }
+
+    #[tokio::test]
+    async fn supervisor_connect_cancels_the_attempt_after_errors_or_cancelled_prompts() {
+        let prompt: Prompt = Arc::new(|_| Box::pin(async { Ok(None) }));
+        for status in [
+            Ok(json!({"done": true, "error": "Login rejected"})),
+            Ok(json!({"prompt": "Password"})),
+            Err(anyhow!("Service unavailable")),
+        ] {
+            let mut replies = std::collections::VecDeque::from([
+                Ok(json!({"connected": false})),
+                Ok(json!({"attempt": "login"})),
+                status,
+                Ok(json!({})),
+            ]);
+            let mut calls = Vec::new();
+            assert!(connect_supervised(Some(&prompt), |request| {
+                calls.push(request);
+                std::future::ready(replies.pop_front().unwrap())
+            })
+            .await
+            .is_err());
+            assert_eq!(
+                calls.last().unwrap(),
+                &json!({"op": "connect_cancel", "attempt": "login"})
+            );
+            assert!(replies.is_empty());
+        }
+    }
+
     use crate::engine::fake::{FakeBackend, HostFile};
 
     /// A host log that counts the bytes collection pages from it and, when `grows`, grows

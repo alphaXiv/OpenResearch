@@ -257,7 +257,7 @@ impl RunSink for EngineSink {
             RunStatus::Starting => Observation::Queued {
                 detail: "Legacy loop starting".into(),
             },
-            RunStatus::Running => Observation::Running,
+            RunStatus::Running => Observation::Running { started_at: None },
             RunStatus::Done => Observation::Exited {
                 finished_at: None,
                 code: Some(0),

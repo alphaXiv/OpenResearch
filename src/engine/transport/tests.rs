@@ -317,11 +317,15 @@ async fn interactive_lifecycle(server: Sshd, factors: usize) {
             })
         }
     });
-    conn.connect_interactive(prompt.clone()).await.unwrap();
+    conn.connect_interactive(prompt.clone(), false)
+        .await
+        .unwrap();
     status(&conn, Status::Live).await;
     assert!(prompts.load(Ordering::SeqCst) > 0);
     let authenticated = auth_attempts(&server);
-    conn.connect_interactive(prompt.clone()).await.unwrap();
+    conn.connect_interactive(prompt.clone(), false)
+        .await
+        .unwrap();
     assert_eq!(auth_attempts(&server), authenticated);
     drop(conn);
     tokio::time::sleep(Duration::from_millis(200)).await;
@@ -373,7 +377,7 @@ async fn interactive_lifecycle(server: Sshd, factors: usize) {
     tokio::time::sleep(Duration::from_millis(250)).await;
     assert!(ssh_pids(&server).is_empty());
     assert_eq!(auth_attempts(&server), retried);
-    conn.connect_interactive(prompt).await.unwrap();
+    conn.connect_interactive(prompt, false).await.unwrap();
     status(&conn, Status::Live).await;
     assert!(matches!(
         conn.request(Request::Hello {
@@ -390,7 +394,7 @@ async fn interactive_lifecycle(server: Sshd, factors: usize) {
     fs::write(server.config_path(), updated).unwrap();
     let prompt: Prompt =
         Arc::new(|_| Box::pin(async { bail!("Unexpected prompt for unencrypted key") }));
-    conn.connect_interactive(prompt).await.unwrap();
+    conn.connect_interactive(prompt, false).await.unwrap();
     assert_ne!(
         original,
         ssh::socket(&config(&server), &alias_auth(&server).route.unwrap()).unwrap()
@@ -621,7 +625,7 @@ async fn connect_without_askpass_preserves_key_reconnection() {
     let conn = start(&server, clock.clone());
     status(&conn, Status::Live).await;
     let prompt: Prompt = Arc::new(|_| Box::pin(async { bail!("Key auth must not prompt") }));
-    conn.connect_interactive(prompt).await.unwrap();
+    conn.connect_interactive(prompt, false).await.unwrap();
     assert_eq!(alias_auth(&server).class, Some(HostClass::Key));
     let path = ssh::socket(&config(&server), &alias_auth(&server).route.unwrap()).unwrap();
     assert!(!path.exists());
@@ -654,7 +658,7 @@ async fn queued_retry_and_connect_actions_share_one_attempt() {
                 assert!(conn.retry().await.is_err());
             } else {
                 let prompt: Prompt = Arc::new(|_| Box::pin(async { bail!("Unexpected prompt") }));
-                assert!(conn.connect_interactive(prompt).await.is_err());
+                assert!(conn.connect_interactive(prompt, false).await.is_err());
             }
         }
     });
@@ -764,7 +768,7 @@ async fn host_key_confirmations_are_relayed_without_classifying_interactive_auth
             Box::pin(async move { Ok(Some(answer.into())) })
         }
     });
-    conn.connect_interactive(prompt).await.unwrap();
+    conn.connect_interactive(prompt, false).await.unwrap();
     assert_eq!(
         {
             status(&conn, Status::Live).await;
@@ -821,7 +825,7 @@ async fn queued_connect_keeps_its_prompt_and_route_approval_after_automatic_fail
             Box::pin(async { Ok(Some(passphrase.into())) })
         }
     });
-    let connect = conn.connect_interactive(prompt);
+    let connect = conn.connect_interactive(prompt, false);
     tokio::pin!(connect);
     assert!(futures::poll!(connect.as_mut()).is_pending());
     server.proxy().clear().unwrap();
@@ -852,7 +856,7 @@ async fn automatic_success_coalesces_queued_connect_without_another_login() {
     status(&conn, Status::Connecting).await;
     let prompt: Prompt =
         Arc::new(|_| Box::pin(async { bail!("Successful key auth must not prompt") }));
-    let connect = conn.connect_interactive(prompt);
+    let connect = conn.connect_interactive(prompt, false);
     tokio::pin!(connect);
     assert!(futures::poll!(connect.as_mut()).is_pending());
     server.proxy().clear().unwrap();
@@ -1257,53 +1261,73 @@ async fn auth_breaker_is_shared_across_roots_and_connect_clears_it() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn connect_with_prompt_on_live_route_preserves_inflight_launch() {
-    let server = Sshd::start().unwrap();
-    let conn = start(&server, TestClock::new());
-    status(&conn, Status::Live).await;
-    let pids = ssh_pids(&server);
-    let before = auth_attempts(&server);
-    server
-        .proxy()
-        .set(Faults {
-            latency: Duration::from_millis(400),
-            ..Faults::default()
+    for keep_master in [false, true] {
+        let server = Sshd::start().unwrap();
+        let conn = start(&server, TestClock::new());
+        status(&conn, Status::Live).await;
+        let pids = ssh_pids(&server);
+        let before = auth_attempts(&server);
+        server
+            .proxy()
+            .set(Faults {
+                latency: Duration::from_millis(400),
+                ..Faults::default()
+            })
+            .unwrap();
+        let calls = conn.clone();
+        let request = tokio::spawn(async move {
+            calls
+                .request(Request::Launch(orx_host_proto::LaunchIntent {
+                    run: "connect-inflight".into(),
+                    digest: orx_host::sha(b"connect-inflight"),
+                    run_sh: "true".into(),
+                    env: Default::default(),
+                    source: None,
+                    cancel_sh: None,
+                }))
+                .await
+        });
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while !server
+                .home()
+                .join("engine-root/runs/connect-inflight/started")
+                .exists()
+            {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
         })
+        .await
         .unwrap();
-    let calls = conn.clone();
-    let request = tokio::spawn(async move {
-        calls
-            .request(Request::Launch(orx_host_proto::LaunchIntent {
-                run: "connect-inflight".into(),
-                digest: orx_host::sha(b"connect-inflight"),
-                run_sh: "true".into(),
-                env: Default::default(),
-                source: None,
-                cancel_sh: None,
-            }))
-            .await
-    });
-    tokio::time::timeout(Duration::from_secs(5), async {
-        while !server
-            .home()
-            .join("engine-root/runs/connect-inflight/started")
-            .exists()
-        {
-            tokio::time::sleep(Duration::from_millis(10)).await;
+        conn.connect_interactive(
+            Arc::new(|_| Box::pin(async { panic!("Live host prompted") })),
+            keep_master,
+        )
+        .await
+        .unwrap();
+        assert!(matches!(
+            request.await.unwrap().unwrap(),
+            Response::Launch { .. }
+        ));
+        assert_eq!(ssh_pids(&server), pids);
+        if keep_master {
+            let path = ssh::socket(&config(&server), &alias_auth(&server).route.unwrap()).unwrap();
+            assert!(ssh::master_alive(&config(&server), &path).await.unwrap());
+            let attempts = auth_attempts(&server);
+            assert_eq!(
+                attempts
+                    .get(&("publickey".into(), "Accepted".into()))
+                    .copied()
+                    .unwrap_or(0),
+                before
+                    .get(&("publickey".into(), "Accepted".into()))
+                    .copied()
+                    .unwrap_or(0)
+                    + 1
+            );
+        } else {
+            assert_eq!(auth_attempts(&server), before);
         }
-    })
-    .await
-    .unwrap();
-    conn.connect_interactive(Arc::new(|_| {
-        Box::pin(async { panic!("Live host prompted") })
-    }))
-    .await
-    .unwrap();
-    assert!(matches!(
-        request.await.unwrap().unwrap(),
-        Response::Launch { .. }
-    ));
-    assert_eq!(ssh_pids(&server), pids);
-    assert_eq!(auth_attempts(&server), before);
+    }
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -1539,7 +1563,7 @@ async fn broken_config_during_connect_leaves_the_actor_alive() {
     let original = fs::read_to_string(server.config_path()).unwrap();
     fs::write(server.config_path(), "InvalidOrxOption yes\n").unwrap();
     assert!(conn
-        .connect_interactive(Arc::new(|_| Box::pin(async { Ok(None) })))
+        .connect_interactive(Arc::new(|_| Box::pin(async { Ok(None) })), false)
         .await
         .is_err());
     assert!(!conn.actions.is_closed());
@@ -1606,9 +1630,10 @@ async fn silent_proxy_failure_stays_behind_the_breaker_until_connect() {
     tokio::time::sleep(Duration::from_millis(250)).await;
     assert_eq!(fs::read_to_string(&counter).unwrap().lines().count(), 1);
     assert!(conn
-        .connect_interactive(Arc::new(|_| Box::pin(async {
-            panic!("Silent proxy prompted")
-        })))
+        .connect_interactive(
+            Arc::new(|_| Box::pin(async { panic!("Silent proxy prompted") })),
+            false
+        )
         .await
         .is_err());
     assert_eq!(conn.state().borrow().status, Status::NeedsAuth);
@@ -1981,7 +2006,9 @@ fi
     let conn = HostConn::start_shared(cfg, store, clock.clone(), auth).unwrap();
     status(&conn, Status::NeedsAuth).await;
     let prompt: Prompt = Arc::new(move |_| Box::pin(async move { Ok(Some(passphrase.into())) }));
-    conn.connect_interactive(prompt.clone()).await.unwrap();
+    conn.connect_interactive(prompt.clone(), false)
+        .await
+        .unwrap();
     status(&conn, Status::Live).await;
     let attempts = auth_attempts(&server);
     let registry = home.join(".ssh/openresearch_connections.json");
@@ -2052,7 +2079,7 @@ fi
         installed
     );
 
-    conn.connect_interactive(prompt).await.unwrap();
+    conn.connect_interactive(prompt, false).await.unwrap();
     let changed = installed.replace("IdentitiesOnly yes", "IdentitiesOnly no");
     fs::write(home.join(".ssh/config"), &changed).unwrap();
     let engine_config = fs::read_to_string(server.config_path())

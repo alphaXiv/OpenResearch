@@ -263,6 +263,18 @@ async fn ensure() -> Result<Endpoint> {
     ))
 }
 
+pub(crate) async fn reset_existing_backoff(target: &SshTarget) -> Result<()> {
+    if !state::root().join("state.sqlite3").try_exists()? {
+        return Ok(());
+    }
+    let resolved = state::resolve(target).await?;
+    state::database()?.execute(
+        "UPDATE connections SET failures = 0, next_at = 0, last_error = NULL WHERE id = ?1",
+        [resolved.key],
+    )?;
+    Ok(())
+}
+
 pub(crate) async fn request(target: &SshTarget, operation: Value) -> Result<Value> {
     let endpoint = ensure().await?;
     // A lost response may follow a successful mutation: never replay it here.

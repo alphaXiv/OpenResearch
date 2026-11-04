@@ -288,7 +288,7 @@ pub(crate) async fn run_manifest(
     context: Option<&str>,
     namespace: &str,
     spec: &ManifestSpec,
-    fence: &crate::engine::Fence<'_>,
+    fence: Option<&crate::engine::Fence<'_>>,
 ) -> Result<Submitted> {
     if !spec.env.is_empty() {
         // stringData via stdin — values never appear on a command line.
@@ -315,7 +315,7 @@ pub(crate) async fn run_manifest(
             context,
             &["create", "-f", "-"],
             Some(&doc.to_string()),
-            Some(fence),
+            fence,
         )
         .await
         {

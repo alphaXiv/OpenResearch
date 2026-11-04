@@ -46,7 +46,7 @@ impl Api for HfAccount {
             &spec,
             &source.path,
             &source.digest,
-            fence,
+            Some(fence),
         )
         .await
         .map_err(api::interrupted)?;
@@ -68,7 +68,7 @@ impl Api for HfAccount {
     }
     async fn inspect(&self, run: &WatchedRun) -> Result<Observation> {
         let job = hf::inspect_job(&hf::resolve_token()?, &self.namespace, self.id(run)?).await?;
-        Ok(api::stage(&job.status.stage, job.status.message))
+        Ok(api::stage(&job.status.stage, job.status.message, None, None))
     }
     async fn cancel(&self, run: &WatchedRun) -> Result<()> {
         hf::cancel_job(&hf::resolve_token()?, &self.namespace, self.id(run)?).await

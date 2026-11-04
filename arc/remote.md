@@ -123,8 +123,9 @@ with a mismatched peer.
 
 ## orx-host
 
-Runs on an SSH host or a Slurm cluster are driven by `orx-host`, a small
-static binary (Linux 3.2 or newer on x86_64 and aarch64, and macOS) that needs
+With the new experiment engine enabled, runs on an SSH host or Slurm cluster
+are driven by `orx-host`, a small static binary (Linux 3.2 or newer on x86_64
+and aarch64, and macOS) that needs
 only `/bin/sh`, Bash, tar and coreutils on the host. Releases embed it, and it
 is named by its SHA-256, so one root holds several versions and each is
 uploaded once, in the same SSH session that first needs it.
@@ -207,10 +208,11 @@ roots, and only the user's Connect closes it.
   a key host, which then connects with no click. A network failure before
   authentication backs off like any key host. Anything that could have reached
   authentication marks the host interactive with the breaker open.
-- **Interactive hosts use a master the user started.** Connect starts a
-  detached master through the askpass bridge, so passphrase, password and
-  host-key prompts reach the dashboard's dialog or the CLI. The engine attaches
-  to that socket with prompts disabled, so a dead master can never log in.
+- **Interactive hosts keep an authenticated master on Unix.** Connect relays
+  passphrase, password and host-key prompts to the dashboard or CLI. Key hosts
+  keep a master only when supervised work needs it: the setting is off, or an
+  active supervised SSH or Slurm run uses the alias. Background work attaches
+  with prompts disabled.
 - **The route is pinned.** `ssh -G` yields the hostname, user, port, proxy and
   identity settings; a changed route opens the breaker until Connect approves
   it.
@@ -224,6 +226,9 @@ check selects the socket only while its pinned route matches and the socket
 exists, so `ssh`, `scp` and `rsync` to that alias reuse the authenticated
 session; without a live master they authenticate as usual and never start an
 engine login.
+
+On Windows there is no shared master. Connect recovers the transports needed
+by existing runs; a second MFA prompt may be required.
 
 ## What must stay true
 

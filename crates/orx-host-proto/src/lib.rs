@@ -341,6 +341,8 @@ pub enum RunState {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Summary {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub started_at: Option<i64>,
     pub state: RunState,
     pub log_len: Option<u64>,
     pub notify_len: u64,

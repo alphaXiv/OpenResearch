@@ -635,6 +635,7 @@ exit 0
         }
     );
     let mut watch = Summary {
+        started_at: None,
         state: RunState::Exited { receipt },
         log_len: None,
         notify_len: 0,

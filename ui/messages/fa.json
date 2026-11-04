@@ -1723,5 +1723,10 @@
   "status_stopping_other": "کاملاً متوقف نشده · {count} فرایند هنوز روی {host} در حال اجرا هستند",
   "status_cancellation_pending": "لغو در انتظار است",
   "run_abandon_unreachable": "دستگاه در دسترس نیست.",
-  "run_abandon_keep": "ادامهٔ پیگیری"
+  "run_abandon_keep": "ادامهٔ پیگیری",
+  "settings_run_engine_label": "موتور جدید آزمایش",
+  "settings_run_engine_description": "اجراکنندهٔ جدید اجراهای راه‌دور را هنگام قطع اتصال و راه‌اندازی مجدد برنامه ادامه می‌دهد. لغو را بررسی می‌کند و بسیاری از مشکلات پایداری SSH را برطرف می‌کند.",
+  "settings_run_engine_override": "این تنظیم سرور با ORX_RUN_ENGINE کنترل می‌شود.",
+  "settings_run_engine_canary": "نسخه‌های Canary همیشه از موتور جدید استفاده می‌کنند.",
+  "settings_run_engine_note": "هنوز در حال آزمایش است. برای اجراهای جدید اعمال می‌شود."
 }

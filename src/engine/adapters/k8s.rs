@@ -60,7 +60,7 @@ impl Api for K8sAccount {
 
     async fn launch(&self, intent: &RunIntent, fence: &Fence<'_>) -> Result<Handle, LaunchError> {
         let spec = self.spec(intent).map_err(api::rejected)?;
-        let submitted = k8s::run_manifest(self.context.as_deref(), &self.namespace, &spec, fence)
+        let submitted = k8s::run_manifest(self.context.as_deref(), &self.namespace, &spec, Some(fence))
             .await
             .map_err(api::interrupted)?;
         Ok(Self::handle(
@@ -109,7 +109,7 @@ impl Api for K8sAccount {
                 }
             });
         }
-        Ok(api::stage(&state.stage, state.message))
+        Ok(api::stage(&state.stage, state.message, None, None))
     }
     async fn cancel(&self, run: &WatchedRun) -> Result<()> {
         k8s::delete_resources(

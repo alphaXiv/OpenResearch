@@ -35,13 +35,32 @@ environment are a fixed contract inherited down the tree, and an experiment
 whose run has answered its question is frozen. Further changes go on a child,
 so a recorded result always matches the code on its branch.
 
+## Choosing the run engine
+
+New experiment engine in Compute and Settings opts new runs into the engine being
+tested; it defaults to off on stable and dev builds. `ORX_RUN_ENGINE=1` or `0`
+in the `orx up` server's environment overrides the saved `runEngine` setting.
+Canary builds always use the engine, ignoring the setting and environment.
+Both launch APIs make the same choice. With it off, the backend launchers and
+detached `orx supervise` processes launch and watch runs as in 0.2.x. The
+engine still runs, importing their results and wakeups and recovering engine
+runs already in flight. Existing owners stay in place; the setting chooses
+which path recovers orphaned supervised runs.
+
+Engine runs keep their first payload start in `started_at` and finish in
+`ended_at`, using source timestamps when available and observation time otherwise.
+
+The snapshot contract below applies in both modes. The engine lifecycle and
+`orx-host` sections describe engine-owned runs; supervised runs keep their
+backend descriptors and stop semantics.
+
 ## A run is an immutable snapshot
 
 ```text
 orx exp run ─► POST /api/v2/runs to this data directory's `orx up`
             ─► archive the experiment branch's commit (tar, plus zip for Ray)
             ─► name the archive by its SHA-256, store it once
-            ─► store the run as submitting, with its full launch spec
+            ─► record the pending run and its snapshot identity
             ─► backend launch ─► handle saved on the run
 ```
 
@@ -213,12 +232,13 @@ die with the agent process; a queued message survives both.
 
 ### Runs from 0.2.x
 
-A run an older orx started under its own detached `orx supervise` stays with
-that supervisor until it ends; the engine only reads it. A run whose
-supervisor is gone is adopted by taking that supervisor's per-run locks, and
-keeps its original descriptor and stop semantics. The supervisor, the SSH
-service and its remote helper remain only for those runs, and are deleted once
-no 0.2.x supervisor can still be running.
+A run started under a detached `orx supervise` stays with that supervisor
+until it ends; the engine only reads it. With the setting off, `orx up`
+re-spawns missing supervisors at startup and periodically. With it on, only
+the engine adopts orphans, after the run has had no update for five minutes
+and its supervisor locks are free. Adopted runs keep their original
+descriptors and stop semantics. Changing the setting leaves engine-owned
+runs and live supervisors in place.
 
 The engine imports each 0.2.x wake-up subscription once, including subscriptions
 accepted after a downgrade or while the engine is running.

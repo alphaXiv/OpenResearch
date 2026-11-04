@@ -11749,6 +11749,77 @@ for line in sys.stdin:
                 .count(),
             6
         );
+        for kind in ["engine", "ssh_job"] {
+            let delegate = format!("delegate-{kind}");
+            let answer = format!("delegate answer exactly once for {kind}");
+            let result = format!("run result exactly once for {kind}");
+            session(&store, &delegate);
+            store.record_chat_delegate(&delegate, "other", false).unwrap();
+            store.subscribe_chat("other", &delegate, None).unwrap();
+            let mut run = run("done");
+            run.id = format!("run-{kind}");
+            run.backend_json = json!({"kind":kind}).to_string();
+            store.upsert_run(&run).unwrap();
+            let turn = crate::store::StoredChatTurn {
+                id: format!("turn-{kind}"),
+                session_id: delegate.clone(),
+                user_message_id: None,
+                assistant_message_id: format!("answer-{kind}"),
+                client_turn_id: format!("client-{kind}"),
+                request_hash: "task".into(),
+                prepared_input: "task".into(),
+                settings_json: "{}".into(),
+                state: "preparing".into(),
+                delivery_state: "not_sent".into(),
+                attempt_count: 0,
+                next_retry_at: None,
+                error_kind: None,
+                error_message: None,
+                recovery_action: None,
+                recovered_by_turn_id: None,
+                created_at: now_ms(),
+                updated_at: now_ms(),
+            };
+            store.admit_chat_turn(None, &turn).unwrap();
+            store.upsert_chat_message(&StoredChatMessage {
+                id: turn.assistant_message_id.clone(),
+                session_id: delegate,
+                role: "assistant".into(),
+                parts_json: serde_json::to_string(&[WirePart::text("answer", &answer)]).unwrap(),
+                created_at: now_ms(),
+                completed_at: Some(now_ms()),
+                parent_id: None,
+                base_native_session_id: None,
+                result_native_session_id: None,
+            }).unwrap();
+            store.complete_chat_turn(&turn.id).unwrap();
+            let tx = store.begin().unwrap();
+            tx.execute(
+                "INSERT INTO chat_run_wakeups (run_id, chat_session_id, requested_at, state) VALUES (?1, 'other', 1, 'pending')",
+                [&run.id],
+            ).unwrap();
+            tx.commit().unwrap();
+            store.insert_run_notice(&run.id, "other", "terminal", "terminal", &result, now_ms()).unwrap();
+            assert_eq!(news::chat_news(&store, Some("other")).unwrap().len(), 1);
+            assert_eq!(store.pending_run_notice_sessions().unwrap(), ["other"]);
+            let before = count_turns();
+            for _ in 0..3 {
+                news::deliver_news(&host, Store::open().unwrap(), None).await.unwrap();
+                settle_run_notices(&host, &moving).await.unwrap();
+            }
+            assert_eq!(count_turns(), before + 2);
+            assert!(news::chat_news(&store, Some("other")).unwrap().is_empty());
+            assert!(store.pending_run_notice_sessions().unwrap().is_empty());
+            let tx = store.begin().unwrap();
+            let mut statement = tx.prepare("SELECT prepared_input, user_message_id FROM chat_turns WHERE session_id = 'other'").unwrap();
+            let turns = statement.query_map([], |row| Ok((row.get::<_, String>(0)?, row.get::<_, Option<String>>(1)?))).unwrap().collect::<std::result::Result<Vec<_>, _>>().unwrap();
+            let results: Vec<_> = turns.iter().filter(|(input, _)| input.contains(&result)).collect();
+            let answers: Vec<_> = turns.iter().filter(|(input, _)| input.contains(&answer)).collect();
+            assert_eq!(results.len(), 1);
+            assert!(results[0].1.is_none());
+            assert_eq!(answers.len(), 1);
+            assert!(answers[0].1.is_some());
+        }
     }
 
     #[test]

@@ -101,6 +101,18 @@ pub async fn run(args: UpArgs) -> Result<()> {
         local::chat::reconcile_unfinished_turns(&store)?;
         // Under the engine lock, before any notice can be produced.
         store.migrate_run_wakeups()?;
+        if !crate::config::run_engine_settings()?.0 {
+            for run in store.list_active_runs()? {
+                if !crate::engine::is_engine_row(&run)
+                    && store.get_local_experiment(&run.experiment_id)?.is_some()
+                {
+                    store.watch_legacy_run(&run.id, None)?;
+                    if let Err(err) = crate::commands::exp::spawn_detached_supervise(&run.id) {
+                        eprintln!("could not recover supervisor for run {}: {err}", run.id);
+                    }
+                }
+            }
+        }
     }
     let clock: Arc<dyn crate::engine::clock::Clock> =
         Arc::new(crate::engine::clock::SystemClock::new());
@@ -206,6 +218,10 @@ pub async fn run(args: UpArgs) -> Result<()> {
         state.data_dir_gate.clone(),
     ));
     runtime.start();
+    tokio::spawn(adopt_orphaned_runs(
+        state.data_dir_move_in_progress.clone(),
+        state.data_dir_gate.clone(),
+    ));
     tokio::spawn(reclaim_orphaned_run_artifacts(
         state.data_dir_move_in_progress.clone(),
         state.data_dir_gate.clone(),
@@ -723,6 +739,10 @@ fn router(state: AppState, remote_auth: Option<RemoteAuth>) -> Router {
         )
         .route("/api/projects/{id}/terminal", get(project_terminal))
         .route("/api/events", get(events))
+        .route(
+            "/api/settings/run-engine",
+            get(run_engine_settings).post(set_run_engine),
+        )
         .route("/api/settings/hf", get(hf_settings).post(set_hf_token))
         .route(
             "/api/settings/tinker",
@@ -1103,6 +1123,8 @@ struct ApiRun {
     created_at: i64,
     updated_at: i64,
     #[serde(skip_serializing_if = "Option::is_none")]
+    started_at: Option<i64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     ended_at: Option<i64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     exit_code: Option<i64>,
@@ -1155,6 +1177,7 @@ impl ApiRun {
             result_markdown: run.result_markdown.clone(),
             created_at: run.created_at,
             updated_at: run.updated_at,
+            started_at: state.as_ref().and_then(|state| state.started_at),
             ended_at: run.ended_at,
             exit_code: run.exit_code,
             cancel_unconfirmed: state
@@ -4750,6 +4773,59 @@ impl axum::body::HttpBody for ActiveBody {
 const ORPHANED_RUN_SCAN_INTERVAL: Duration = Duration::from_secs(60);
 const REMOTE_CLEANUP_INTERVAL: Duration = Duration::from_secs(60);
 
+async fn adopt_orphaned_runs(moving: Arc<AtomicBool>, gate: Arc<tokio::sync::Mutex<()>>) {
+    // Runs whose spawn failure is already logged, so a stuck run logs once.
+    let mut reported = HashSet::new();
+    loop {
+        tokio::time::sleep(ORPHANED_RUN_SCAN_INTERVAL).await;
+        if moving.load(Ordering::SeqCst) {
+            continue;
+        }
+        let _gate = gate.lock().await;
+        if moving.load(Ordering::SeqCst) {
+            continue;
+        }
+        match tokio::task::spawn_blocking(adopt_orphaned_runs_once).await {
+            Ok(Ok(failures)) => {
+                for (run_id, err) in failures {
+                    if reported.insert(run_id.clone()) {
+                        eprintln!("orx up: could not recover supervisor for run {run_id}: {err}");
+                    }
+                }
+            }
+            Ok(Err(err)) => {
+                eprintln!("orx up: could not check runs for missing supervisors: {err}")
+            }
+            Err(_) => {}
+        }
+    }
+}
+
+fn adopt_orphaned_runs_once() -> Result<Vec<(String, crate::error::Error)>> {
+    let mut failures = Vec::new();
+    if crate::config::run_engine_settings()?.0 {
+        return Ok(failures);
+    }
+    let store = Store::open()?;
+    for run in store.list_active_runs()? {
+        // Without a job handle the launch may still be submitting, and a supervisor would fail it.
+        let submitted = crate::jobs::BackendDescriptor::parse(&run.backend_json)
+            .is_ok_and(|descriptor| descriptor.job_id.is_some());
+        if crate::engine::is_engine_row(&run)
+            || !submitted
+            || now_ms() - run.updated_at < crate::engine::ORPHANED_RUN_SETTLE_MS
+            || store.get_local_experiment(&run.experiment_id)?.is_none()
+            || crate::commands::supervise::supervisor_running(&run.id)
+        {
+            continue;
+        }
+        if let Err(err) = crate::commands::exp::spawn_detached_supervise(&run.id) {
+            failures.push((run.id, err));
+        }
+    }
+    Ok(failures)
+}
+
 /// Background task so a large first reclaim never delays startup; it releases the gate between passes.
 async fn reclaim_orphaned_run_artifacts(
     moving: Arc<AtomicBool>,
@@ -5486,6 +5562,26 @@ fn reject_if_stopping(state: &AppState) -> std::result::Result<(), ApiError> {
         ));
     }
     Ok(())
+}
+
+async fn run_engine_settings() -> ApiResult {
+    let (enabled, forced_by) = crate::config::run_engine_settings().map_err(bad_request)?;
+    Ok(Json(json!({"enabled": enabled, "forcedBy": forced_by})))
+}
+
+#[derive(Deserialize)]
+struct RunEngineReq {
+    enabled: bool,
+}
+
+async fn set_run_engine(Json(req): Json<RunEngineReq>) -> ApiResult {
+    match crate::config::run_engine_settings().map_err(bad_request)?.1 {
+        Some("canary") => return Err(bad_request("Canary builds always use the new experiment engine.")),
+        Some(_) => return Err(bad_request("ORX_RUN_ENGINE controls this setting. Remove it from the server environment to use this switch.")),
+        None => {}
+    }
+    crate::config::set_run_engine_enabled(req.enabled)?;
+    run_engine_settings().await
 }
 
 // --- git settings -----------------------------------------------------------
@@ -9562,7 +9658,7 @@ mod tests {
             );
         }
         store
-            .set_engine_phase("r", "running", "done", Some(10), Some(0))
+            .set_engine_phase("r", "running", "done", Some(10), Some(0), None)
             .unwrap();
         store.queue_log_collection("r").unwrap();
         for attempt in 0..=8 {
@@ -10291,6 +10387,31 @@ mod tests {
     }
 
     #[test]
+    fn create_run_request_preserves_forwarded_slurm_resources_and_attribution() {
+        let request: CreateRunReq = serde_json::from_value(json!({
+            "experimentId": "experiment-1",
+            "backend": "slurm",
+            "cpus": 8,
+            "mem": "64G",
+            "partition": "gpu",
+            "chatSessionId": "session-1",
+            "telemetrySuppressed": true,
+            "force": true,
+        }))
+        .unwrap();
+        let forwarded = request.into_run_args();
+        assert_eq!(forwarded.exp_id, "experiment-1");
+        assert_eq!(forwarded.backend.as_deref(), Some("slurm"));
+        assert_eq!(forwarded.cpus, Some(8));
+        assert_eq!(forwarded.mem.as_deref(), Some("64G"));
+        assert_eq!(forwarded.partition.as_deref(), Some("gpu"));
+        assert_eq!(forwarded.chat_session_id.as_deref(), Some("session-1"));
+        assert!(forwarded.forwarded);
+        assert!(forwarded.telemetry_suppressed);
+        assert!(forwarded.force);
+    }
+
+    #[test]
     fn api_run_exposes_cancel_intent_contact_and_the_launched_backend() {
         let mut backend =
             crate::jobs::BackendDescriptor::parse(r#"{"kind":"openresearch_job"}"#).unwrap();
@@ -10349,6 +10470,9 @@ mod tests {
                 launch: &launch,
             })
             .unwrap();
+        store
+            .set_engine_phase("e", "submitting", "running", None, None, Some(1234))
+            .unwrap();
         store.accept_run_cancel("e", Some("user")).unwrap().unwrap();
         let outage = crate::store::Contact::Unreachable {
             since: 3,
@@ -10363,6 +10487,7 @@ mod tests {
         assert_eq!(value["backend"]["namespace"], "lab");
         assert_eq!(value["backend"]["sshContainer"]["reference"], "dev");
         assert_eq!(value["cancelling"], true);
+        assert_eq!(value["startedAt"], 1234);
         assert!(value["lostReason"].is_null());
         assert_eq!(value["host"], "lab");
         assert!(value["noticeError"].is_null());

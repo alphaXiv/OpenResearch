@@ -345,6 +345,7 @@ pub struct SubmissionFence {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct EngineRunState {
+    pub started_at: Option<i64>,
     pub contact: Contact,
     pub cancel_unconfirmed: Option<Vec<u32>>,
     pub spec_digest: Option<String>,
@@ -567,10 +568,9 @@ pub struct ReadyChatSubscription {
     told_turn_id: Option<String>,
 }
 
-/// Each subscription with its target's latest turn and whether the target is
-/// idle after it: done, and with nothing queued unless a stop held the queue.
 const CHAT_SUBSCRIPTION_CLAIM_TTL_MS: i64 = 60 * 1000;
 
+/// Each subscription's latest turn and whether it is idle after draining its queue.
 const LATEST_SUBSCRIBED_TURNS: &str = "subscribed AS (
     SELECT s.subscriber_session_id, s.target_session_id, s.paused, s.told_turn_id,
            s.told_prompt_id, s.claim_token, s.claimed_at, s.created_at,
@@ -1253,6 +1253,7 @@ impl Store {
             "ALTER TABLE runs ADD COLUMN cancel_accepted_at INTEGER",
             "ALTER TABLE runs ADD COLUMN launch_spec TEXT",
             "ALTER TABLE runs ADD COLUMN notify_cursor TEXT",
+            "ALTER TABLE runs ADD COLUMN started_at INTEGER",
         ] {
             let _ = conn.execute(ddl, []);
         }
@@ -1621,8 +1622,6 @@ impl Store {
         Ok(())
     }
 
-    /// Runs are written by the engine; fixtures and 0.2.x-shaped rows are written here.
-    #[cfg(test)]
     pub fn upsert_run(&self, run: &StoredRun) -> Result<()> {
         let status = RunStatus::parse(&run.status)
             .ok_or_else(|| anyhow!("Unknown run status: {}", run.status))?;
@@ -5234,7 +5233,7 @@ impl Store {
             .conn
             .query_row(
                 "SELECT contact, spec_digest, submission_attempt, submission_fence,
-                        cancel_accepted_at, launch_spec, notify_cursor, cancel_unconfirmed
+                        cancel_accepted_at, launch_spec, notify_cursor, cancel_unconfirmed, started_at
                  FROM runs WHERE id = ?1",
                 [run_id],
                 |row| {
@@ -5247,6 +5246,7 @@ impl Store {
                         row.get::<_, Option<String>>(5)?,
                         row.get::<_, Option<String>>(6)?,
                         row.get::<_, Option<String>>(7)?,
+                        row.get::<_, Option<i64>>(8)?,
                     ))
                 },
             )
@@ -5260,11 +5260,13 @@ impl Store {
             launch,
             notify,
             cancel_unconfirmed,
+            started_at,
         )) = row
         else {
             return Ok(None);
         };
         Ok(Some(EngineRunState {
+            started_at,
             contact: json(contact)?.unwrap_or(Contact::Live),
             cancel_unconfirmed: json(cancel_unconfirmed)?,
             spec_digest,
@@ -5431,12 +5433,14 @@ impl Store {
         to: &str,
         ended_at: Option<i64>,
         exit_code: Option<i64>,
+        started_at: Option<i64>,
     ) -> Result<bool> {
         let changed = self.conn.execute(
             "UPDATE runs SET status = ?3, updated_at = ?4, ended_at = COALESCE(?5, ended_at),
-                             exit_code = COALESCE(?6, exit_code)
+                             exit_code = COALESCE(?6, exit_code),
+                             started_at = COALESCE(started_at, ?7)
              WHERE id = ?1 AND status = ?2",
-            params![run_id, from, to, now_ms(), ended_at, exit_code],
+            params![run_id, from, to, now_ms(), ended_at, exit_code, started_at],
         )? == 1;
         if let Some(status) = RunStatus::parse(to).filter(|status| changed && status.is_terminal())
         {
@@ -6519,6 +6523,7 @@ mod tests {
         let old = Connection::open_in_memory().unwrap();
         old.execute_batch(include_str!("../tests/fixtures/store-0.2.22.sql"))
             .unwrap();
+        assert!(old.prepare("SELECT started_at FROM runs").is_err());
         let before = legacy_rows(&old, &format!("{LEGACY_SELECT_RUN} ORDER BY id"));
         let (dir, store) = engine_fixture();
         let after = legacy_rows(&store.conn, &format!("{LEGACY_SELECT_RUN} ORDER BY id"));
@@ -6533,6 +6538,7 @@ mod tests {
             assert_eq!(
                 store.engine_run_state(&run.id).unwrap().unwrap(),
                 EngineRunState {
+                    started_at: None,
                     contact: Contact::Live,
                     cancel_unconfirmed: None,
                     spec_digest: None,

@@ -38,5 +38,8 @@ orx exp run <expId> --backend vercel --flavor 4 --image vercel/sandbox/universal
 - `ORX_VERCEL_REGION` picks a region; otherwise Vercel uses the project default.
 - `orx` copies the committed snapshot into the sandbox; Vercel never needs
   repository access.
-- The OpenResearch app records status and logs, then stops and destroys the
-  sandbox once the run ends and its logs are collected.
+
+OpenResearch stops and destroys the sandbox once the run ends and its logs
+are collected.
+
+See [run monitoring](../SKILL.md#run-engine-setting).

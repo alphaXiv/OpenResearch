@@ -16,8 +16,8 @@ it runs it owns the work that needs a resident process:
   ([agents](agents.md));
 - terminals, each a PTY relayed over a websocket;
 - file serving for the editor, previews and artifacts, with byte ranges;
-- the run engine: launching, watching, cancelling and reporting every run
-  ([experiments](experiments.md));
+- the run engine: watching, cancelling and reporting runs, and launching new
+  runs when enabled ([experiments](experiments.md));
 - background passes: agent detection and model catalogs, sweeping remote run
   directories and orphaned files;
 - remote workspace gateways ([remote](remote.md)).

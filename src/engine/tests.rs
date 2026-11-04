@@ -108,7 +108,9 @@ impl Fixture {
     async fn running(&self, id: &str) {
         self.backend.then_launch(Ok(handle()));
         self.submit(id).await.unwrap();
-        self.engine.observe(id, Observation::Running).unwrap();
+        self.engine
+            .observe(id, Observation::Running { started_at: None })
+            .unwrap();
         assert_eq!(self.status(id), "running");
     }
 
@@ -252,7 +254,9 @@ async fn phase_moves_only_forward_and_one_terminal_notice_survives_a_crash() {
     let row = f.store().get_run("run").unwrap().unwrap();
     assert!(matches!(handle_of(&row), Some(Handle::Ssh { .. })));
 
-    f.engine.observe("run", Observation::Running).unwrap();
+    f.engine
+        .observe("run", Observation::Running { started_at: None })
+        .unwrap();
     f.engine
         .observe(
             "run",
@@ -272,7 +276,9 @@ async fn phase_moves_only_forward_and_one_terminal_notice_survives_a_crash() {
             },
         )
         .unwrap();
-    f.engine.observe("run", Observation::Running).unwrap();
+    f.engine
+        .observe("run", Observation::Running { started_at: None })
+        .unwrap();
     f.engine
         .observe(
             "run",
@@ -393,7 +399,9 @@ async fn contact_never_moves_the_phase_and_raises_one_attention_per_outage() {
     assert_eq!(f.status("run"), "running");
     assert_eq!(f.kinds(), [ATTENTION]);
 
-    f.engine.observe("run", Observation::Running).unwrap();
+    f.engine
+        .observe("run", Observation::Running { started_at: None })
+        .unwrap();
     assert_eq!(f.contact("run"), Contact::Live);
     assert_eq!(f.kinds(), [RECOVERED]);
 
@@ -406,7 +414,9 @@ async fn contact_never_moves_the_phase_and_raises_one_attention_per_outage() {
             },
         )
         .unwrap();
-    f.engine.observe("run", Observation::Running).unwrap();
+    f.engine
+        .observe("run", Observation::Running { started_at: None })
+        .unwrap();
     assert!(f.kinds().is_empty());
     f.engine
         .observe(
@@ -667,6 +677,7 @@ async fn a_death_seen_while_a_cancel_is_verified_waits_for_the_verdict() {
         })
     ));
     let died = Observation::Failed {
+        finished_at: None,
         reason: "process died without an exit code".into(),
     };
     f.engine.observe("run", died.clone()).unwrap();
@@ -704,6 +715,7 @@ async fn a_cancel_registered_just_before_a_terminal_commit_is_honored() {
     std::thread::scope(|scope| {
         let observer = scope.spawn(|| {
             let died = Observation::Failed {
+                finished_at: None,
                 reason: "process died without an exit code".into(),
             };
             f.engine.observe("run", died).unwrap()
@@ -740,7 +752,9 @@ async fn cancel_while_unreachable_is_held_until_reconnect_and_sent_once_per_conn
         .iter()
         .all(|call| !call.starts_with("cancel")));
 
-    f.engine.observe("run", Observation::Running).unwrap();
+    f.engine
+        .observe("run", Observation::Running { started_at: None })
+        .unwrap();
     assert!(f.events().iter().any(|event| matches!(
         event,
         RunEvent::Changed {
@@ -767,7 +781,9 @@ async fn cancel_while_unreachable_is_held_until_reconnect_and_sent_once_per_conn
             },
         )
         .unwrap();
-    f.engine.observe("run", Observation::Running).unwrap();
+    f.engine
+        .observe("run", Observation::Running { started_at: None })
+        .unwrap();
     f.backend.then_cancel(CancelOutcome::Verified);
     f.engine.deliver_cancel(&f.backend, "run").await.unwrap();
     assert_eq!(f.status("run"), "cancelled");
@@ -871,13 +887,14 @@ async fn abandon_tells_the_chat_once_and_keeps_the_kill_pending_until_the_job_is
     );
     // Terminal evidence is not proof of absence: exits and failures keep the kill pending.
     for observation in [
-        Observation::Running,
+        Observation::Running { started_at: None },
         Observation::Exited {
             finished_at: None,
             code: Some(0),
             signal: None,
         },
         Observation::Failed {
+            finished_at: None,
             reason: "receipt unreadable".into(),
         },
         Observation::Lost {
@@ -934,7 +951,7 @@ async fn runs_an_old_supervisor_holds_are_watched_and_never_written() {
     f.legacy_run("mystery", r#"{"kind":"future_job","jobId":"x"}"#);
     f.running("engine").await;
 
-    let mut decisions = f.engine.scan_legacy().unwrap();
+    let mut decisions = f.engine.scan_legacy(true).unwrap();
     decisions.sort_by(|a, b| a.0.cmp(&b.0));
     let container = match &decisions[3].1 {
         Adoption::Inspect { container, .. } => container.clone(),
@@ -963,7 +980,7 @@ async fn runs_an_old_supervisor_holds_are_watched_and_never_written() {
     assert!(f.locked("ssh") && f.locked("box") && f.locked("hf"));
     assert!(f
         .engine
-        .scan_legacy()
+        .scan_legacy(true)
         .unwrap()
         .iter()
         .all(|(id, _)| id == "held"));
@@ -999,14 +1016,14 @@ async fn runs_an_old_supervisor_holds_are_watched_and_never_written() {
         .unwrap();
     drop(old_supervisor);
     f.released("held");
-    f.engine.scan_legacy().unwrap();
+    f.engine.scan_legacy(true).unwrap();
     let notices = f.deliver();
     assert_eq!(notices.len(), 1);
     assert_eq!(
         (notices[0].run_id.as_str(), notices[0].kind.as_str()),
         ("held", TERMINAL)
     );
-    f.engine.scan_legacy().unwrap();
+    f.engine.scan_legacy(true).unwrap();
     assert!(f.deliver().is_empty());
     f.released("held");
 }
@@ -1020,7 +1037,7 @@ async fn an_old_cli_cancel_is_accepted_once_under_its_lock_and_survives_withdraw
             &format!(r#"{{"kind":"ssh_job","jobId":"/orx/runs/{id}"}}"#),
         );
     }
-    f.engine.scan_legacy().unwrap();
+    f.engine.scan_legacy(true).unwrap();
     let old_cli = |id: &str, act: &dyn Fn(&Store)| {
         let path = f.dir.join(format!("run-logs/{id}.cancel.lock"));
         let mut lock = crate::store::open_lifecycle_lock_at(&path).unwrap();
@@ -1086,11 +1103,15 @@ async fn reordered_feed_reports_never_move_a_phase_backwards() {
                 signal: None,
             },
         ),
-        ("unwatched".to_string(), Observation::Running),
-        ("run".to_string(), Observation::Running),
+        (
+            "unwatched".to_string(),
+            Observation::Running { started_at: None },
+        ),
+        ("run".to_string(), Observation::Running { started_at: None }),
         (
             "other".to_string(),
             Observation::Failed {
+                finished_at: None,
                 reason: "OOM".into(),
             },
         ),
@@ -1338,6 +1359,47 @@ async fn a_dropped_launch_leaves_the_run_recoverable() {
     assert_eq!(f.status("run"), "starting");
 }
 
+#[test]
+fn legacy_adoption_waits_for_the_launch_to_settle_and_respects_the_current_mode() {
+    let f = Fixture::new();
+    f.legacy_run("recent", r#"{"kind":"local_job","jobId":"job"}"#);
+    let mut run = f.store().get_run("recent").unwrap().unwrap();
+    run.updated_at = f.clock.wall_ms();
+    f.store().upsert_run(&run).unwrap();
+    for enabled in [false, true] {
+        assert_eq!(
+            f.engine.scan_legacy(enabled).unwrap(),
+            [("recent".into(), Adoption::Watch)]
+        );
+        assert!(!f.engine.holds("recent"));
+    }
+    f.clock.advance(Duration::from_millis(
+        u64::try_from(ORPHANED_RUN_SETTLE_MS).unwrap() - 1,
+    ));
+    assert_eq!(
+        f.engine.scan_legacy(true).unwrap(),
+        [("recent".into(), Adoption::Watch)]
+    );
+    f.clock.advance(Duration::from_millis(1));
+    assert_eq!(
+        f.engine.scan_legacy(false).unwrap(),
+        [("recent".into(), Adoption::Watch)]
+    );
+    assert!(!f.engine.holds("recent"));
+    assert_eq!(
+        f.engine.scan_legacy(true).unwrap(),
+        [(
+            "recent".into(),
+            Adoption::Native {
+                kind: "local_job".into()
+            }
+        )]
+    );
+    assert!(f.engine.holds("recent"));
+    assert!(f.engine.scan_legacy(false).unwrap().is_empty());
+    assert!(f.engine.holds("recent"));
+}
+
 #[tokio::test]
 async fn an_old_supervisor_finishing_while_the_engine_is_down_still_reaches_the_chat() {
     let mut f = Fixture::new();
@@ -1352,7 +1414,7 @@ async fn an_old_supervisor_finishing_while_the_engine_is_down_still_reaches_the_
             file
         });
     assert_eq!(
-        f.engine.scan_legacy().unwrap(),
+        f.engine.scan_legacy(true).unwrap(),
         [("held".to_string(), Adoption::Watch)]
     );
 
@@ -1362,12 +1424,12 @@ async fn an_old_supervisor_finishing_while_the_engine_is_down_still_reaches_the_
         .unwrap();
     drop(old_supervisor);
     f.released("held");
-    assert!(f.engine.scan_legacy().unwrap().is_empty());
+    assert!(f.engine.scan_legacy(true).unwrap().is_empty());
     let notices = f.deliver();
     assert_eq!(notices.len(), 1);
     assert!(notices[0].body.contains("**failed**"));
     f.restart();
-    f.engine.scan_legacy().unwrap();
+    f.engine.scan_legacy(true).unwrap();
     assert!(f.deliver().is_empty());
 }
 
@@ -1385,7 +1447,7 @@ async fn a_supervisor_finishing_between_snapshot_and_adoption_still_reaches_the_
             file
         });
     assert_eq!(
-        f.engine.scan_legacy().unwrap(),
+        f.engine.scan_legacy(true).unwrap(),
         [("held".to_string(), Adoption::Watch)]
     );
 
@@ -1399,13 +1461,13 @@ async fn a_supervisor_finishing_between_snapshot_and_adoption_still_reaches_the_
         drop(old_supervisor);
         released(&paths);
     }));
-    assert!(f.engine.scan_legacy().unwrap().is_empty());
+    assert!(f.engine.scan_legacy(true).unwrap().is_empty());
     let notices = f.deliver();
     assert_eq!(notices.len(), 1);
     assert!(notices[0].body.contains("**done**"));
     assert!(f.store().legacy_watches().unwrap().is_empty());
     f.released("held");
-    f.engine.scan_legacy().unwrap();
+    f.engine.scan_legacy(true).unwrap();
     assert!(f.deliver().is_empty());
 }
 
@@ -1658,14 +1720,66 @@ async fn a_submitter_without_a_readable_identity_cannot_cross_the_fence() {
 }
 
 #[tokio::test]
-async fn receipt_time_is_bounded_by_local_creation_and_reconciliation() {
+async fn running_records_its_first_source_or_observation_time_durably() {
+    let mut f = Fixture::new();
+    for (id, source) in [("source", Some(1234)), ("fallback", None)] {
+        f.backend.then_launch(Ok(handle()));
+        f.submit(id).await.unwrap();
+        let expected = source.unwrap_or_else(|| f.clock.wall_ms());
+        f.engine
+            .observe(id, Observation::Running { started_at: source })
+            .unwrap();
+        assert_eq!(
+            f.store().engine_run_state(id).unwrap().unwrap().started_at,
+            Some(expected)
+        );
+        f.clock.advance(Duration::from_secs(10));
+        f.engine
+            .observe(
+                id,
+                Observation::Running {
+                    started_at: Some(expected + 5000),
+                },
+            )
+            .unwrap();
+        assert_eq!(
+            f.store().engine_run_state(id).unwrap().unwrap().started_at,
+            Some(expected)
+        );
+        f.restart();
+        assert_eq!(
+            f.store().engine_run_state(id).unwrap().unwrap().started_at,
+            Some(expected)
+        );
+    }
+    f.legacy_run("legacy", r#"{"kind":"local_job","jobId":"job"}"#);
+    f.engine
+        .observe(
+            "legacy",
+            Observation::Running {
+                started_at: Some(1234),
+            },
+        )
+        .unwrap();
+    assert_eq!(
+        f.store()
+            .engine_run_state("legacy")
+            .unwrap()
+            .unwrap()
+            .started_at,
+        None
+    );
+}
+
+#[tokio::test]
+async fn receipt_time_uses_the_source_clock_and_falls_back_to_observation_time() {
     let f = Fixture::new();
     let now = f.clock.wall_ms();
     for (id, finished_at, expected) in [
         ("dated", Some(1234), 1234),
         ("old", None, now),
-        ("past", Some(i64::MIN), 1),
-        ("future", Some(i64::MAX), now),
+        ("past", Some(-100), -100),
+        ("future", Some(now + 1000), now + 1000),
     ] {
         f.running(id).await;
         f.engine
@@ -1683,6 +1797,41 @@ async fn receipt_time_is_bounded_by_local_creation_and_reconciliation() {
             Some(expected)
         );
     }
+    f.running("provider-failed").await;
+    f.engine
+        .observe(
+            "provider-failed",
+            Observation::Failed {
+                finished_at: Some(5678),
+                reason: "provider failure".into(),
+            },
+        )
+        .unwrap();
+    assert_eq!(
+        f.store()
+            .get_run("provider-failed")
+            .unwrap()
+            .unwrap()
+            .ended_at,
+        Some(5678)
+    );
+    f.running("abandoned").await;
+    f.engine.abandon("abandoned").unwrap();
+    f.engine
+        .observe(
+            "abandoned",
+            Observation::CancelReceipt {
+                finished_at: Some(2468),
+                code: Some(0),
+                remaining: 0,
+                note: None,
+            },
+        )
+        .unwrap();
+    assert_eq!(
+        f.store().get_run("abandoned").unwrap().unwrap().ended_at,
+        Some(2468)
+    );
     f.running("rollback").await;
     f.clock.jump_wall(-now);
     f.engine
@@ -1697,7 +1846,7 @@ async fn receipt_time_is_bounded_by_local_creation_and_reconciliation() {
         .unwrap();
     assert_eq!(
         f.store().get_run("rollback").unwrap().unwrap().ended_at,
-        Some(1)
+        Some(-100)
     );
 }
 

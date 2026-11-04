@@ -1646,7 +1646,12 @@ async fn run_local(
             {
                 log_task.abort();
             }
-            let applied = store.update_status(&run_id, status, Some(now_ms()), None)?;
+            let applied = store.update_status(
+                &run_id,
+                status,
+                Some(now_ms()),
+                job.exit_code.map(i64::from),
+            )?;
             if applied && status == RunStatus::Failed {
                 if let Some(msg) = &job.message {
                     if let Err(err) =

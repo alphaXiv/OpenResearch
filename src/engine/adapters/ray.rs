@@ -35,8 +35,8 @@ impl Api for RayAccount {
         }
     }
     async fn inspect(&self, run: &WatchedRun) -> Result<Observation> {
-        let state = ray::inspect_job(&self.address, self.id(run)?).await?;
-        Ok(api::stage(&state.stage, state.message))
+        let (state, started_at, finished_at) = ray::inspect_job_with_times(&self.address, self.id(run)?).await?;
+        Ok(api::stage(&state.stage, state.message, started_at, finished_at))
     }
     async fn cancel(&self, run: &WatchedRun) -> Result<()> {
         ray::stop_job(&self.address, self.id(run)?).await

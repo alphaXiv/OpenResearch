@@ -244,7 +244,7 @@ pub async fn run_job_with_source(
     spec: &JobSubmission,
     archive: &Path,
     digest: &str,
-    fence: &crate::engine::Fence<'_>,
+    fence: Option<&crate::engine::Fence<'_>>,
 ) -> Result<JobInfo> {
     let python = CLIENT_ENV.ensure().await?;
     let source_dir = archive
@@ -276,15 +276,17 @@ pub async fn run_job_with_source(
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .spawn()?;
-    let recorded = fence.record_submitter(
-        child
-            .id()
-            .ok_or_else(|| anyhow!("HF launcher exited before fencing"))?,
-    );
-    if let Err(error) = recorded {
-        let _ = child.kill().await;
-        let _ = child.wait().await;
-        return Err(error);
+    if let Some(fence) = fence {
+        let recorded = fence.record_submitter(
+            child
+                .id()
+                .ok_or_else(|| anyhow!("HF launcher exited before fencing"))?,
+        );
+        if let Err(error) = recorded {
+            let _ = child.kill().await;
+            let _ = child.wait().await;
+            return Err(error);
+        }
     }
     use tokio::io::AsyncWriteExt as _;
     child

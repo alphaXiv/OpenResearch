@@ -486,25 +486,31 @@ pub fn closed<T>(
     }
 }
 
-pub fn stage(stage: &str, message: Option<String>) -> Observation {
+pub fn stage(
+    stage: &str,
+    message: Option<String>,
+    started_at: Option<i64>,
+    finished_at: Option<i64>,
+) -> Observation {
     match stage {
         "COMPLETED" => Observation::Exited {
-            finished_at: None,
+            finished_at,
             code: Some(0),
             signal: None,
         },
         "ERROR" | "FAILED" => Observation::Failed {
+            finished_at,
             reason: message.unwrap_or_else(|| stage.into()),
         },
         "CANCELED" | "CANCELLED" => Observation::Cancelled {
-            finished_at: None,
+            finished_at,
             code: None,
             signal: None,
         },
         "DELETED" | "GONE" => Observation::Unreconciled {
             detail: "Provider no longer knows the job".into(),
         },
-        "RUNNING" => Observation::Running,
+        "RUNNING" => Observation::Running { started_at },
         _ => Observation::Queued {
             detail: message.unwrap_or_else(|| stage.into()),
         },
@@ -614,7 +620,7 @@ mod tests {
                     finished_at: None,
                 }
             } else {
-                Observation::Running
+                Observation::Running { started_at: None }
             })
         }
         async fn cancel(&self, _: &WatchedRun) -> Result<()> {
@@ -971,7 +977,7 @@ mod tests {
             assert_eq!(
                 observations,
                 vec![
-                    ("run".into(), Observation::Running),
+                    ("run".into(), Observation::Running { started_at: None }),
                     ("run".into(), Observation::Log { len: 6 })
                 ]
             );

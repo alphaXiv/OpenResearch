@@ -1,9 +1,7 @@
-#[cfg(test)]
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
 use crate::error::{anyhow, Result};
-#[cfg(test)]
 use crate::jobs::ssh::sh_quote;
 
 #[derive(Debug, Clone)]
@@ -28,7 +26,6 @@ pub fn run_dir(run_id: &str) -> PathBuf {
     crate::store::data_dir().join("local-runs").join(safe)
 }
 
-#[cfg(test)]
 pub struct LocalJobSpec {
     /// Names the run dir `<data dir>/local-runs/<run_id>`.
     pub run_id: String,
@@ -42,7 +39,6 @@ pub struct LocalJobSpec {
 
 /// A run as orx 0.2.x launched it: run.sh detached in its own process group (pid == pgid),
 /// with its pid recorded.
-#[cfg(test)]
 pub fn run_job(spec: &LocalJobSpec) -> Result<PathBuf> {
     let dir = run_dir(&spec.run_id);
     std::fs::create_dir_all(&dir)

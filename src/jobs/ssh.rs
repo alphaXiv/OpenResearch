@@ -93,6 +93,37 @@ fn prepare_control_dir() -> Result<()> {
     Ok(())
 }
 
+#[derive(Debug, Clone)]
+pub struct ResolvedLaunch {
+    pub target: SshTarget,
+    pub container: Option<ContainerRun>,
+    pub remote_root: Option<String>,
+}
+
+pub async fn resolve_launch(args: &crate::ExpRunArgs) -> Result<ResolvedLaunch> {
+    let settings = crate::config::ssh_settings()?;
+    let (host, options) = resolve_options(args, &settings)?;
+    let target = SshTarget::alias(&host);
+    let host_check = preflight(&target).await;
+    if !host_check.reachable || !host_check.tools_found {
+        return Err(anyhow!(
+            "{}",
+            host_check
+                .error
+                .unwrap_or_else(|| "SSH host needs bash and tar.".into())
+        ));
+    }
+    let container = match options.container {
+        Some(reference) => Some(container::resolve(&target, &reference).await?),
+        None => None,
+    };
+    Ok(ResolvedLaunch {
+        target,
+        container,
+        remote_root: options.remote_root,
+    })
+}
+
 pub fn validate_host_options(options: &crate::config::SshHostSettings) -> Result<()> {
     if let Some(reference) = &options.container {
         validate_container_reference(reference)?;
@@ -443,23 +474,7 @@ pub(crate) async fn interactive_args(
     #[cfg(not(unix))]
     let options = ssh_opts(target, false);
     #[cfg(unix)]
-    let lock = {
-        let file = std::fs::OpenOptions::new()
-            .create(true)
-            .truncate(false)
-            .write(true)
-            .open(path.with_extension("lock"))?;
-        loop {
-            match file.try_lock() {
-                Ok(()) => break,
-                Err(std::fs::TryLockError::WouldBlock) => {
-                    tokio::time::sleep(Duration::from_millis(50)).await;
-                }
-                Err(std::fs::TryLockError::Error(error)) => return Err(error.into()),
-            }
-        }
-        file
-    };
+    let lock = lock_master(&path).await?;
     #[cfg(unix)]
     if control_master(target, &path, &options, "check").await? {
         if !master_accepts_sessions(target, &path, &options).await?
@@ -489,6 +504,25 @@ pub(crate) async fn interactive_args(
         #[cfg(unix)]
         _lock: lock,
     })
+}
+
+#[cfg(unix)]
+async fn lock_master(path: &std::path::Path) -> Result<std::fs::File> {
+    let file = std::fs::OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .write(true)
+        .open(path.with_extension("lock"))?;
+    loop {
+        match file.try_lock() {
+            Ok(()) => break,
+            Err(std::fs::TryLockError::WouldBlock) => {
+                tokio::time::sleep(Duration::from_millis(50)).await;
+            }
+            Err(std::fs::TryLockError::Error(error)) => return Err(error.into()),
+        }
+    }
+    Ok(file)
 }
 
 #[cfg(unix)]

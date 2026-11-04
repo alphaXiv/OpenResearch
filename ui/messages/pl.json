@@ -1723,5 +1723,10 @@
   "status_stopping_other": "Nie zatrzymano w pełni · {count} procesu nadal działa na {host}",
   "status_cancellation_pending": "Anulowanie oczekuje",
   "run_abandon_unreachable": "Maszyna jest nieosiągalna.",
-  "run_abandon_keep": "Śledź dalej"
+  "run_abandon_keep": "Śledź dalej",
+  "settings_run_engine_label": "Nowy silnik eksperymentów",
+  "settings_run_engine_description": "Nowy silnik utrzymuje zdalne uruchomienia po rozłączeniu i restarcie aplikacji, weryfikuje anulowanie i rozwiązuje wiele problemów ze stabilnością SSH.",
+  "settings_run_engine_override": "ORX_RUN_ENGINE steruje tym ustawieniem serwera.",
+  "settings_run_engine_canary": "Wersje canary zawsze korzystają z nowego silnika.",
+  "settings_run_engine_note": "Wciąż w fazie testów. Dotyczy nowych uruchomień."
 }

@@ -133,6 +133,7 @@ fn small_log_identity_survives_appends_from_empty() {
 /// A watched run the engine has not seen yet, so whatever the host reports is a change.
 fn unseen(run: &str) -> (RunId, Summary) {
     let summary = Summary {
+        started_at: None,
         state: RunState::Unreconciled {
             detail: "unseen".into(),
         },
@@ -525,10 +526,11 @@ fn source_staging_resumes_and_launch_intent_cannot_be_replaced() {
         host.handle(request()),
         Response::Launch {
             summary: Summary {
+                started_at: Some(started_at),
                 state: RunState::Exited { .. },
                 ..
             }
-        }
+        } if Some(started_at) == orx_host::wrapper::started_at(&dir.0.join("runs/staged"))
     ));
     assert!(matches!(
         host.handle(Request::Launch(LaunchIntent {

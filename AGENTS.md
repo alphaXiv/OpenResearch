@@ -41,11 +41,10 @@ catalogs; when you change an API it serves, keep both sides compatible.
 
 A message reaches `orx up`, which starts or reuses the chat's agent in the
 chat's own worktree, with orx's playbook, skills and the `orx` CLI on its
-`PATH`. The agent commits and runs `orx exp run`: the dashboard's engine
-archives the experiment's commit and submits it to a backend, where a per-run
-wrapper owns the job. The engine watches it and keeps its log, and when it
-ends queues the result into the chat that asked. The page follows it all
-through one event stream.
+`PATH`. The agent commits and runs `orx exp run`: the dashboard archives the
+experiment's commit and submits it to a backend. A supervisor or the engine
+watches it and delivers results to the chat that asked. The page follows it
+through one event stream. See [the run engine setting](arc/experiments.md#choosing-the-run-engine).
 
 ## Architecture essays
 

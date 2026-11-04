@@ -87,6 +87,7 @@ impl std::fmt::Display for Unavailable {
 
 impl std::error::Error for Unavailable {}
 
+#[derive(Clone)]
 pub struct Config {
     pub alias: String,
     pub root: String,
@@ -157,6 +158,7 @@ pub struct HostConn {
 
 struct Action {
     key_only: bool,
+    keep_master: bool,
     prompt: Option<Prompt>,
     reply: oneshot::Sender<Result<()>>,
 }
@@ -269,23 +271,29 @@ impl HostConn {
     }
 
     pub async fn retry(&self) -> Result<()> {
-        self.action(None, false).await
+        self.action(None, false, false).await
     }
 
     pub async fn retry_key(&self) -> Result<()> {
-        self.action(None, true).await
+        self.action(None, true, false).await
     }
 
-    pub async fn connect_interactive(&self, prompt: Prompt) -> Result<()> {
-        self.action(Some(prompt), false).await
+    pub async fn connect_interactive(&self, prompt: Prompt, keep_master: bool) -> Result<()> {
+        self.action(Some(prompt), false, keep_master).await
     }
 
-    async fn action(&self, prompt: Option<Prompt>, key_only: bool) -> Result<()> {
+    async fn action(
+        &self,
+        prompt: Option<Prompt>,
+        key_only: bool,
+        keep_master: bool,
+    ) -> Result<()> {
         let (reply, receive) = oneshot::channel();
         self.actions
             .send(Action {
                 prompt,
                 key_only,
+                keep_master,
                 reply,
             })
             .await
@@ -310,6 +318,31 @@ fn lane(body: &Request) -> usize {
         Request::ReadLog { .. } => 2,
         Request::PutBlob { .. } | Request::HasBlob { .. } | Request::PinSource { .. } => 3,
         _ => 0,
+    }
+}
+
+#[cfg(unix)]
+async fn publish_master(config: &Config, route: &str) {
+    let result = async {
+        if let Some(home) = &config.sharing_home {
+            let path = ssh::socket(config, route)?;
+            crate::jobs::ssh::sharing::publish_engine(
+                home,
+                &config.alias,
+                config.ssh_config.as_deref(),
+                &path,
+                route,
+            )
+            .await?;
+        }
+        Ok::<(), anyhow::Error>(())
+    }
+    .await;
+    if let Err(error) = result {
+        eprintln!(
+            "Host {}: connection sharing is unavailable: {error:#}",
+            config.alias
+        );
     }
 }
 
@@ -385,6 +418,7 @@ impl Actor {
         &mut self,
         prompt: Option<Prompt>,
         approve_route: bool,
+        _keep_master: bool,
     ) -> Result<ssh::Session> {
         let auth = self.auth.clone();
         let _guard = auth.gate.lock().await;
@@ -458,7 +492,7 @@ impl Actor {
                         if authenticated && !askpass.auth_prompted() {
                             self.classify(HostClass::Key);
                         }
-                        if self.auth.state.borrow().class == Some(HostClass::Key) {
+                        if self.auth.state.borrow().class == Some(HostClass::Key) && !_keep_master {
                             ssh::stop_master(&self.config, &route).await?;
                         } else {
                             attach = true;
@@ -499,21 +533,8 @@ impl Actor {
             None
         };
         #[cfg(unix)]
-        if let (true, Some(home)) = (attach, &self.config.sharing_home) {
-            if let Err(error) = crate::jobs::ssh::sharing::publish_engine(
-                home,
-                &self.config.alias,
-                self.config.ssh_config.as_deref(),
-                &ssh::socket(&self.config, &route)?,
-                &route,
-            )
-            .await
-            {
-                eprintln!(
-                    "Host {}: connection sharing is unavailable: {error:#}",
-                    self.config.alias
-                );
-            }
+        if attach {
+            publish_master(&self.config, &route).await;
         }
         let mut session = {
             let authorization = auth.state.borrow();
@@ -590,6 +611,8 @@ impl Actor {
         auth.borrow_and_update();
         let mut session: Option<ssh::Session> = None;
         let mut reader: Option<tokio::task::JoinHandle<()>> = None;
+        let mut masters: tokio::task::JoinSet<(oneshot::Sender<Result<()>>, Result<()>, bool)> =
+            tokio::task::JoinSet::new();
         let (events, mut responses) = mpsc::channel(64);
         let mut pending: BTreeMap<u64, Pending> = BTreeMap::new();
         let mut queues: [VecDeque<Call>; 4] = std::array::from_fn(|_| VecDeque::new());
@@ -601,6 +624,14 @@ impl Actor {
             let mut disconnect: Option<String> = None;
             let mut action = None;
             tokio::select! {
+                Some(completed) = masters.join_next(), if !masters.is_empty() => {
+                    if let Ok((reply, result, prompted)) = completed {
+                        if prompted {
+                            self.classify(HostClass::Interactive);
+                        }
+                        let _ = reply.send(result);
+                    }
+                }
                 changed = auth.changed() => {
                     if changed.is_err() { break; }
                     let authorization = auth.borrow_and_update().clone();
@@ -664,6 +695,38 @@ impl Actor {
                     == self.auth.state.borrow().route.as_ref()
             {
                 if let Some(action) = action.take() {
+                    #[cfg(unix)]
+                    if let (true, Some(prompt), Some(route)) = (
+                        action.keep_master,
+                        action.prompt.clone(),
+                        self.auth.state.borrow().route.clone(),
+                    ) {
+                        let config = self.config.clone();
+                        let auth = self.auth.clone();
+                        masters.spawn(async move {
+                            let mut reply = action.reply;
+                            let mut prompted = false;
+                            let connect = async {
+                                let _guard = auth.gate.lock().await;
+                                let askpass = askpass::Askpass::start(prompt).await?;
+                                let result =
+                                    ssh::master(&config, &ssh::socket(&config, &route)?, &askpass)
+                                        .await;
+                                prompted = askpass.auth_prompted();
+                                result?;
+                                publish_master(&config, &route).await;
+                                Ok(())
+                            };
+                            let result = tokio::select! {
+                                result = connect => result,
+                                _ = reply.closed() => Err(anyhow!("SSH authentication cancelled.")),
+                            };
+                            (reply, result, prompted)
+                        });
+                    } else {
+                        let _ = action.reply.send(Ok(()));
+                    }
+                    #[cfg(windows)]
                     let _ = action.reply.send(Ok(()));
                 }
             }
@@ -814,6 +877,9 @@ impl Actor {
                         self.state.next_retry_ms = None;
                     }
                     let approve_route = next_action.as_ref().is_some_and(|action| !action.key_only);
+                    let keep_master = next_action
+                        .as_ref()
+                        .is_some_and(|action| action.keep_master);
                     let prompt = next_action.take().and_then(|action| {
                         replies.push(action.reply);
                         action.prompt
@@ -827,7 +893,7 @@ impl Actor {
                         }
                     };
                     let result = {
-                        let attempt = self.connect(prompt, approve_route);
+                        let attempt = self.connect(prompt, approve_route, keep_master);
                         tokio::pin!(attempt);
                         loop {
                             tokio::select! {
@@ -851,7 +917,14 @@ impl Actor {
                             let _ = action.reply.send(Err(anyhow!("Host requires Connect")));
                         }
                     }
-                    if result.is_err() && queued_action.is_some() {
+                    if queued_action.is_some()
+                        && (result.is_err()
+                            || cfg!(unix)
+                                && !keep_master
+                                && queued_action
+                                    .as_ref()
+                                    .is_some_and(|action| action.keep_master))
+                    {
                         next_action = queued_action;
                         continue;
                     }
@@ -962,7 +1035,7 @@ mod state_tests {
             .is_err());
         assert!(conn.retry().await.is_err());
         let prompt: Prompt = Arc::new(|_| Box::pin(async { bail!("unexpected prompt") }));
-        assert!(conn.connect_interactive(prompt).await.is_err());
+        assert!(conn.connect_interactive(prompt, false).await.is_err());
         drop(conn);
         tokio::time::sleep(Duration::from_millis(150)).await;
         std::fs::remove_dir_all(directory).unwrap();

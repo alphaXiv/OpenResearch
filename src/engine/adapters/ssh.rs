@@ -405,6 +405,7 @@ fn rejected(error: impl std::fmt::Display) -> LaunchError {
 
 pub(super) fn missing() -> Summary {
     Summary {
+        started_at: None,
         state: RunState::Missing,
         log_len: None,
         notify_len: 0,
@@ -418,7 +419,9 @@ pub(super) fn observations(run: String, summary: &Summary) -> Vec<(String, Obser
         RunState::Staging | RunState::Starting => Observation::Queued {
             detail: "starting".into(),
         },
-        RunState::Running => Observation::Running,
+        RunState::Running => Observation::Running {
+            started_at: summary.started_at,
+        },
         RunState::Exited { receipt } if receipt.reason == ExitReason::Cancelled => {
             let proof = summary.cleanup.as_ref();
             let processes = proof.map_or(&receipt.processes, |proof| &proof.processes);
@@ -440,6 +443,7 @@ pub(super) fn observations(run: String, summary: &Summary) -> Vec<(String, Obser
             signal: receipt.signal,
         },
         RunState::Failed { reason } => Observation::Failed {
+            finished_at: None,
             reason: reason.clone(),
         },
         RunState::Lost { reason } => Observation::Lost {
@@ -489,6 +493,17 @@ pub(super) fn observations(run: String, summary: &Summary) -> Vec<(String, Obser
     }
     if let Some(len) = summary.log_len {
         result.push((run.clone(), Observation::Log { len }));
+    }
+    if let Some(started_at) = summary
+        .started_at
+        .filter(|_| matches!(&summary.state, RunState::Exited { .. }))
+    {
+        result.push((
+            run.clone(),
+            Observation::Running {
+                started_at: Some(started_at),
+            },
+        ));
     }
     // Persist attention before terminal runs leave the watch set.
     result.push((run.clone(), observation));
@@ -604,7 +619,7 @@ impl Backend for Ssh {
                                 signal: None,
                             }
                         } else if inspection.alive {
-                            Observation::Running
+                            Observation::Running { started_at: None }
                         } else {
                             Observation::Unreconciled {
                                 detail: if inspection.receipt_unreadable {

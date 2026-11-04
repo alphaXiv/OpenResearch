@@ -265,8 +265,14 @@ pub(super) async fn prepare(target: &SshTarget, refresh: bool) -> Result<Prepare
             return Ok(connection);
         }
     }
-    let connection =
-        resolve_with_agent(&target.dest, None, query, target.auth_agent.as_deref()).await?;
+    let config = std::env::var_os("ORX_SSH_CONFIG").map(PathBuf::from);
+    let connection = resolve_with_agent(
+        &target.dest,
+        config.as_deref(),
+        query,
+        target.auth_agent.as_deref(),
+    )
+    .await?;
     CONNECTIONS
         .write()
         .unwrap_or_else(std::sync::PoisonError::into_inner)

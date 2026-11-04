@@ -36,6 +36,7 @@ impl Sandbox {
             .env("XDG_CONFIG_HOME", self.root.join("config"))
             .env("ORX_DATA_DIR", self.data())
             .env("ORX_NO_UPDATE_CHECK", "1")
+            .env("ORX_RUN_ENGINE", "1")
             .env("ORX_SSH_CONFIG", self.server.config_path())
             .env("ORX_HOST_BIN_DIR", orx_test_support::host_binaries())
             .env("ORX_CHAT_SESSION_ID", "chat")
@@ -45,6 +46,54 @@ impl Sandbox {
             .env_remove("HF_TOKEN")
             .arg("--no-telemetry");
         command
+    }
+
+    fn connect(&self, engine: &str) {
+        use portable_pty::{native_pty_system, CommandBuilder, PtySize};
+        use std::io::Read;
+
+        std::fs::write(
+            self.root.join(".ssh/config"),
+            format!("Include {}\n", self.server.config_path().display()),
+        )
+        .unwrap();
+        let command = self.command();
+        let mut builder = CommandBuilder::new(command.get_program());
+        builder.args(command.get_args());
+        for (key, value) in command.get_envs() {
+            match value {
+                Some(value) => builder.env(key, value),
+                None => builder.env_remove(key),
+            }
+        }
+        builder.env("ORX_RUN_ENGINE", engine);
+        builder.args(["compute", "connect", "ssh", "--host", self.server.alias()]);
+        let pair = native_pty_system().openpty(PtySize::default()).unwrap();
+        let mut child = pair.slave.spawn_command(builder).unwrap();
+        drop(pair.slave);
+        let mut reader = pair.master.try_clone_reader().unwrap();
+        let output = std::thread::spawn(move || {
+            let mut output = String::new();
+            let _ = reader.read_to_string(&mut output);
+            output
+        });
+        if !wait_for(Duration::from_secs(60), || {
+            child.try_wait().unwrap().is_some()
+        }) {
+            child.kill().unwrap();
+        }
+        let status = child.wait().unwrap();
+        assert!(status.success(), "{}", output.join().unwrap());
+    }
+
+    fn stop_service(&self) -> Output {
+        Command::new(env!("CARGO_BIN_EXE_orx"))
+            .env("HOME", &self.root)
+            .env("XDG_CONFIG_HOME", self.root.join("config"))
+            .env("ORX_DATA_DIR", self.data())
+            .args(["ssh-service", "stop"])
+            .output()
+            .unwrap()
     }
 
     fn run(&self, args: &[&str]) -> Output {
@@ -153,6 +202,7 @@ impl Sandbox {
 impl Drop for Sandbox {
     fn drop(&mut self) {
         orx_test_support::stop_server(&self.data());
+        let _ = self.stop_service();
         let _ = std::fs::remove_dir_all(&self.root);
     }
 }
@@ -204,8 +254,7 @@ fn diagnostics(output: &Output) -> String {
 
 /// The engine end to end: `orx exp run` autostarts the server, which launches over SSH through
 /// `orx-host`; `orx exp wait` returns from one event stream; the launching chat gets exactly
-/// one result. On startup the engine adopts a free 0.2.x run, leaves a held one to its
-/// supervisor, and never spawns `orx supervise`; a second `orx up` attaches.
+/// one result. Startup recovers legacy supervisors; a second `orx up` attaches.
 #[test]
 fn ssh_runs_go_through_the_autostarted_engine() {
     let sandbox = Sandbox::new();
@@ -216,6 +265,10 @@ fn ssh_runs_go_through_the_autostarted_engine() {
     std::fs::create_dir_all(&locks).unwrap();
     let held = std::fs::File::create(locks.join(format!("{RUN_HELD}.supervisor.lock"))).unwrap();
     held.try_lock().unwrap();
+    let shared =
+        std::fs::File::create(locks.join(format!("{RUN_HELD}.supervisor.shared-ssh.lock")))
+            .unwrap();
+    shared.try_lock().unwrap();
 
     let launched = sandbox.run(&[
         "exp",
@@ -321,7 +374,6 @@ fn ssh_runs_go_through_the_autostarted_engine() {
         .unwrap();
     assert_eq!(other, 1);
 
-    // Adopted under both per-run locks and observed through the host, never `orx supervise`.
     assert!(
         wait_for(Duration::from_secs(60), || sandbox.status(RUN_FREE)
             == "done"),
@@ -330,9 +382,9 @@ fn ssh_runs_go_through_the_autostarted_engine() {
         sandbox.server_log()
     );
     assert_eq!(sandbox.terminal_notices(RUN_FREE).len(), 1);
-    // Its log is collected through the engine like any other finished run.
     let kept = sandbox.data().join(format!("run-logs/{RUN_FREE}.log"));
     assert_eq!(std::fs::read_to_string(kept).unwrap(), "legacy output\n");
+    assert!(supervise_processes(&[&run, RUN_FREE, RUN_HELD]).is_empty());
     assert_eq!(sandbox.status(RUN_HELD), "running");
     let watched: i64 = sandbox
         .db()
@@ -343,7 +395,6 @@ fn ssh_runs_go_through_the_autostarted_engine() {
         )
         .unwrap();
     assert_eq!(watched, 1);
-    assert!(supervise_processes(&[RUN_FREE, RUN_HELD]).is_empty());
 
     // The old supervisor finishes its run; the engine only reads it and tells the chat.
     sandbox
@@ -752,4 +803,284 @@ async fn abandon_warns_that_actual_compute_must_be_shut_down() {
         assert_eq!(calls.load(Ordering::SeqCst), index + 1);
     }
     server.abort();
+}
+
+#[test]
+fn an_engine_run_finishing_while_up_is_down_keeps_the_receipt_finish_time() {
+    let sandbox = Sandbox::new();
+    let release = sandbox.root.join("release");
+    sandbox.project(&format!(
+        "echo started\nwhile [ ! -f '{}' ]; do sleep 0.05; done\necho finished\n",
+        release.display(),
+    ));
+    let launched = sandbox.run(&["exp", "run", "exp", "--force", "--backend", "local"]);
+    assert!(launched.status.success(), "{}", diagnostics(&launched));
+    let run = stdout(&launched)
+        .split_whitespace()
+        .find(|word| word.len() == 36 && word.matches('-').count() == 4)
+        .unwrap()
+        .to_owned();
+    assert!(wait_for(Duration::from_secs(30), || sandbox.status(&run)
+        == "running"));
+    let backend: String = sandbox
+        .db()
+        .query_row(
+            "SELECT backend_json FROM runs WHERE id = ?1",
+            [&run],
+            |row| row.get(0),
+        )
+        .unwrap();
+    let backend: serde_json::Value = serde_json::from_str(&backend).unwrap();
+    let dir = PathBuf::from(backend["handle"]["dir"].as_str().unwrap());
+    orx_test_support::stop_server(&sandbox.data());
+    std::fs::write(release, "").unwrap();
+    assert!(wait_for(Duration::from_secs(15), || dir
+        .join("exit.json")
+        .exists()));
+    let receipt: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(dir.join("exit.json")).unwrap()).unwrap();
+    let finished_at = receipt["finished_at"].as_i64().unwrap();
+    assert_eq!(sandbox.status(&run), "running");
+    std::thread::sleep(Duration::from_millis(150));
+    let resumed = sandbox.run(&["runs", "project"]);
+    assert!(resumed.status.success(), "{}", diagnostics(&resumed));
+    assert!(wait_for(Duration::from_secs(30), || sandbox.status(&run) == "done"));
+    let (started_at, ended_at): (i64, i64) = sandbox
+        .db()
+        .query_row(
+            "SELECT started_at, ended_at FROM runs WHERE id = ?1",
+            [&run],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .unwrap();
+    assert_eq!(ended_at, finished_at);
+    assert!(started_at <= ended_at);
+}
+
+#[test]
+fn engine_setting_flips_preserve_in_flight_runs_across_restart() {
+    use serde_json::{json, Value};
+
+    let sandbox = Sandbox::new();
+    let release = sandbox.root.join("release");
+    std::fs::create_dir(&release).unwrap();
+    sandbox.project(&format!(
+        "echo run-$ORX_RUN_ID\nwhile [ ! -f '{}/'$ORX_RUN_ID ]; do sleep 0.2; done\necho finished\n",
+        release.display(),
+    ));
+    let launched = sandbox
+        .command()
+        .env_remove("ORX_RUN_ENGINE")
+        .args(["exp", "run", "exp", "--force", "--backend", "local"])
+        .output()
+        .unwrap();
+    assert!(launched.status.success(), "{}", diagnostics(&launched));
+    let supervised = stdout(&launched)
+        .split_whitespace()
+        .find(|word| word.len() == 36 && word.matches('-').count() == 4)
+        .unwrap()
+        .to_owned();
+    let backend = |id: &str| -> Value {
+        let raw: String = sandbox
+            .db()
+            .query_row("SELECT backend_json FROM runs WHERE id = ?1", [id], |row| {
+                row.get(0)
+            })
+            .unwrap();
+        serde_json::from_str(&raw).unwrap()
+    };
+    assert_eq!(backend(&supervised)["kind"], "local_job");
+    let request = |path: &str, body: Option<Value>| -> Value {
+        let port = sandbox.descriptor().unwrap()["port"].as_u64().unwrap();
+        let mut command = Command::new("curl");
+        command.args(["-sf", "--noproxy", "*", "--max-time", "60"]);
+        if let Some(body) = body {
+            command.args([
+                "-H",
+                "Content-Type: application/json",
+                "-d",
+                &body.to_string(),
+            ]);
+        }
+        let output = command
+            .arg(format!("http://127.0.0.1:{port}{path}"))
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{}\n{}",
+            diagnostics(&output),
+            sandbox.server_log()
+        );
+        serde_json::from_slice(&output.stdout).unwrap()
+    };
+    assert_eq!(
+        request("/api/settings/run-engine", None),
+        json!({"enabled": false, "forcedBy": null})
+    );
+    assert_eq!(
+        request("/api/settings/run-engine", Some(json!({"enabled":true})))["enabled"],
+        true
+    );
+    let launched = request(
+        "/api/runs",
+        Some(json!({
+            "experimentId":"exp", "backend":"local", "force":true, "chatSessionId":"chat",
+        })),
+    );
+    let engine = launched["run"]["id"].as_str().unwrap();
+    assert_eq!(backend(engine)["kind"], "engine");
+    assert!(wait_for(Duration::from_secs(30), || sandbox
+        .status(&supervised)
+        == "running"
+        && sandbox.status(engine) == "running"));
+    assert_eq!(
+        request("/api/settings/run-engine", Some(json!({"enabled":false})))["enabled"],
+        false
+    );
+    orx_test_support::stop_server(&sandbox.data());
+    let restarted = sandbox
+        .command()
+        .env_remove("ORX_RUN_ENGINE")
+        .args(["runs", "project"])
+        .output()
+        .unwrap();
+    assert!(restarted.status.success(), "{}", diagnostics(&restarted));
+    assert_eq!(request("/api/settings/run-engine", None)["enabled"], false);
+    assert_eq!(backend(&supervised)["kind"], "local_job");
+    assert_eq!(backend(engine)["kind"], "engine");
+    let stopped = sandbox.run(&["exp", "cancel", "--run", engine]);
+    assert!(stopped.status.success(), "{}", diagnostics(&stopped));
+    std::fs::write(release.join(&supervised), "").unwrap();
+    assert!(
+        wait_for(Duration::from_secs(45), || sandbox.status(engine)
+            == "cancelled"
+            && sandbox.status(&supervised) == "done"),
+        "{}",
+        sandbox.server_log()
+    );
+    assert!(
+        wait_for(Duration::from_secs(15), || sandbox
+            .terminal_notices(engine)
+            .len()
+            == 1
+            && sandbox.terminal_notices(&supervised).len() == 1),
+        "{}",
+        sandbox.server_log()
+    );
+    assert_eq!(
+        request(&format!("/api/runs/{supervised}"), None)["run"]["exitCode"],
+        0
+    );
+    for run in [&supervised, engine] {
+        let logs = sandbox.run(&["logs", run]);
+        assert!(logs.status.success(), "{}", diagnostics(&logs));
+        assert!(
+            stdout(&logs).contains(&format!("run-{run}")),
+            "{}",
+            stdout(&logs)
+        );
+    }
+}
+
+#[test]
+fn environment_off_restores_ssh_supervision_over_the_shared_transport() {
+    let sandbox = Sandbox::new();
+    sandbox.project("echo supervisor-says-hi\nsleep 2\necho finished\n");
+    let config = sandbox.root.join("config/openresearch");
+    std::fs::create_dir_all(&config).unwrap();
+    std::fs::write(config.join("settings.json"), r#"{"runEngine":true}"#).unwrap();
+    sandbox.connect("0");
+    let launched = sandbox.run(&[
+        "exp",
+        "run",
+        "exp",
+        "--backend",
+        "ssh",
+        "--host",
+        sandbox.server.alias(),
+    ]);
+    assert!(
+        launched.status.success(),
+        "{}\n{}",
+        diagnostics(&launched),
+        sandbox.server_log()
+    );
+    let run = stdout(&launched)
+        .split_whitespace()
+        .find(|word| word.len() == 36 && word.matches('-').count() == 4)
+        .unwrap()
+        .to_owned();
+    let backend: String = sandbox
+        .db()
+        .query_row("SELECT backend_json FROM runs WHERE id=?1", [&run], |row| {
+            row.get(0)
+        })
+        .unwrap();
+    let backend: serde_json::Value = serde_json::from_str(&backend).unwrap();
+    assert_eq!(backend["kind"], "ssh_job");
+    let waited = sandbox.run(&["exp", "wait", "exp", "--timeout", "120"]);
+    assert!(
+        waited.status.success(),
+        "{}\n{}",
+        diagnostics(&waited),
+        sandbox.server_log()
+    );
+    assert_eq!(sandbox.status(&run), "done");
+    let log = sandbox.run(&["logs", &run]);
+    assert!(log.status.success(), "{}", diagnostics(&log));
+    assert!(
+        stdout(&log).contains("supervisor-says-hi"),
+        "{}",
+        diagnostics(&log)
+    );
+    assert!(sandbox
+        .data()
+        .join(format!("run-logs/{run}.supervisor.log"))
+        .exists());
+    assert!(wait_for(Duration::from_secs(15), || sandbox
+        .terminal_notices(&run)
+        .len()
+        == 1));
+    let service = std::fs::read_dir(sandbox.data())
+        .unwrap()
+        .flatten()
+        .find(|entry| {
+            entry
+                .file_name()
+                .to_string_lossy()
+                .starts_with("ssh-service-")
+        })
+        .unwrap();
+    let db = rusqlite::Connection::open(service.path().join("state.sqlite3")).unwrap();
+    let resolved: String = db
+        .query_row("SELECT resolved FROM connections LIMIT 1", [], |row| {
+            row.get(0)
+        })
+        .unwrap();
+    let resolved: serde_json::Value = serde_json::from_str(&resolved).unwrap();
+    let socket = PathBuf::from(resolved["socket"].as_str().unwrap());
+    let stopped = sandbox.stop_service();
+    assert!(stopped.status.success(), "{}", diagnostics(&stopped));
+    std::fs::remove_file(&socket).unwrap();
+    drop(std::os::unix::net::UnixListener::bind(&socket).unwrap());
+    sandbox.connect("0");
+    assert!(
+        std::fs::read_link(&socket).is_ok(),
+        "{}",
+        sandbox.server_log()
+    );
+    let relaunched = sandbox.run(&[
+        "exp",
+        "run",
+        "exp",
+        "--backend",
+        "ssh",
+        "--host",
+        sandbox.server.alias(),
+    ]);
+    assert!(relaunched.status.success(), "{}", diagnostics(&relaunched));
+    let waited = sandbox.run(&["exp", "wait", "exp", "--timeout", "120"]);
+    assert!(waited.status.success(), "{}", diagnostics(&waited));
+    std::fs::remove_file(socket).unwrap();
 }

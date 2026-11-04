@@ -261,6 +261,10 @@ pub struct JobInfo {
 #[derive(Debug, Deserialize)]
 struct RawJobStatus {
     #[serde(default)]
+    start_time: Option<i64>,
+    #[serde(default)]
+    end_time: Option<i64>,
+    #[serde(default)]
     status: Option<String>,
     #[serde(default)]
     message: Option<String>,
@@ -339,6 +343,13 @@ pub async fn stage_working_dir(
 }
 
 pub async fn inspect_job(address: &str, submission_id: &str) -> Result<JobInfo> {
+    Ok(inspect_job_with_times(address, submission_id).await?.0)
+}
+
+pub(crate) async fn inspect_job_with_times(
+    address: &str,
+    submission_id: &str,
+) -> Result<(JobInfo, Option<i64>, Option<i64>)> {
     let res = http()
         .get(format!("{address}/api/jobs/{submission_id}"))
         .send()
@@ -348,17 +359,25 @@ pub async fn inspect_job(address: &str, submission_id: &str) -> Result<JobInfo> 
     // restarted) — a distinct GONE stage for the supervisor to debounce, not
     // a transport error to retry forever.
     if res.status() == reqwest::StatusCode::NOT_FOUND {
-        return Ok(JobInfo {
-            stage: "GONE".to_string(),
-            message: None,
-        });
+        return Ok((
+            JobInfo {
+                stage: "GONE".to_string(),
+                message: None,
+            },
+            None,
+            None,
+        ));
     }
     let raw: RawJobStatus = check(res, "job inspect").await?.json().await?;
     let status = raw.status.unwrap_or_else(|| "PENDING".into());
-    Ok(JobInfo {
-        stage: map_ray_status(&status),
-        message: raw.message,
-    })
+    Ok((
+        JobInfo {
+            stage: map_ray_status(&status),
+            message: raw.message,
+        },
+        raw.start_time,
+        raw.end_time,
+    ))
 }
 
 pub async fn stop_job(address: &str, submission_id: &str) -> Result<()> {

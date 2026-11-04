@@ -2,6 +2,7 @@ use super::prepared::{probe_args, Publication};
 use super::ROUTE_FIELDS;
 use sha2::{Digest, Sha256};
 use std::collections::BTreeMap;
+use std::os::unix::fs::FileTypeExt;
 use std::path::Path;
 use std::process::Stdio;
 
@@ -233,8 +234,8 @@ pub(crate) async fn publish_engine(
     route: &str,
 ) -> Result<()> {
     require_sharing().await?;
-    let mut publication = super::prepared::resolve(alias, config).await?.publication;
-    let actual = publication.queries[0]
+    let connection = super::prepared::resolve(alias, config).await?;
+    let actual = connection.publication.queries[0]
         .output
         .lines()
         .filter(|line| !line.starts_with("controlpath "))
@@ -248,7 +249,8 @@ pub(crate) async fn publish_engine(
             "SSH route changed while publishing connection sharing"
         ));
     }
-    publication.socket_name = path.file_name().unwrap().to_string_lossy().into_owned();
+    let _master_lock = super::lock_master(&connection.path).await?;
+    let publication = connection.publication;
     let path = path.to_path_buf();
     super::prepare_control_dir()?;
     let home = home.to_path_buf();
@@ -256,12 +258,19 @@ pub(crate) async fn publish_engine(
     tokio::task::spawn_blocking(move || {
         update(&home.join(".ssh"), &default_dir, true, |entries| {
             let link = control_dir().join(&publication.socket_name);
+            if link
+                .symlink_metadata()
+                .is_ok_and(|metadata| metadata.is_symlink())
+                && !link.exists()
+            {
+                std::fs::remove_file(&link)?;
+            }
             match std::os::unix::fs::symlink(&path, &link) {
                 Ok(()) => {}
                 Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
-                    if std::fs::read_link(&link)? != path {
+                    if !std::fs::metadata(&link)?.file_type().is_socket() {
                         return Err(anyhow!(
-                            "SSH sharing socket {} points elsewhere",
+                            "SSH sharing path {} is not a socket",
                             link.display()
                         ));
                     }
@@ -277,8 +286,8 @@ pub(crate) async fn publish_engine(
 }
 
 pub(crate) async fn withdraw_engine(home: &Path, path: &Path) -> Result<()> {
-    let socket_name = path.file_name().unwrap().to_string_lossy().into_owned();
     let key = format!("engine:{}", path.display());
+    let path = path.to_path_buf();
     let home = home.to_path_buf();
     let default_dir = control_dir_for(&home.join(".config/openresearch"));
     tokio::task::spawn_blocking(move || {
@@ -287,13 +296,21 @@ pub(crate) async fn withdraw_engine(home: &Path, path: &Path) -> Result<()> {
             return Ok(());
         }
         update(&ssh_dir, &default_dir, false, |entries| {
-            entries.remove(&key);
-            let link = control_dir().join(&socket_name);
-            if link
-                .symlink_metadata()
-                .is_ok_and(|metadata| metadata.is_symlink())
-            {
-                std::fs::remove_file(link)?;
+            let Some(publication) = entries.remove(&key) else {
+                return Ok(());
+            };
+            let link = control_dir().join(&publication.socket_name);
+            if std::fs::read_link(&link).ok().as_ref() == Some(&path) {
+                std::fs::remove_file(&link)?;
+                if let Some(other) = entries.iter().find_map(|(key, entry)| {
+                    let path = Path::new(key.strip_prefix("engine:")?);
+                    (entry.socket_name == publication.socket_name
+                        && std::fs::metadata(path)
+                            .is_ok_and(|metadata| metadata.file_type().is_socket()))
+                    .then_some(path)
+                }) {
+                    std::os::unix::fs::symlink(other, &link)?;
+                }
             }
             Ok(())
         })
@@ -350,6 +367,73 @@ mod tests {
     use super::super::route_configuration;
     use super::*;
     use std::path::PathBuf;
+
+    #[tokio::test]
+    async fn shared_master_withdrawal_keeps_other_stores_and_legacy_sockets() {
+        use std::os::unix::net::UnixListener;
+        let home = crate::local::git::TemporaryDirectory::new("orx-sharing-withdraw").unwrap();
+        if std::env::var("ORX_TEST_SHARED_MASTER").as_deref() != Ok("1") {
+            let output = std::process::Command::new(std::env::current_exe().unwrap())
+                .env("ORX_TEST_SHARED_MASTER", "1")
+                .env("XDG_CONFIG_HOME", home.path().join("config"))
+                .args([
+                    "--exact",
+                    concat!(
+                        module_path!(),
+                        "::shared_master_withdrawal_keeps_other_stores_and_legacy_sockets"
+                    ),
+                    "--nocapture",
+                ])
+                .output()
+                .unwrap();
+            assert!(
+                output.status.success(),
+                "{}\n{}",
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr)
+            );
+            return;
+        }
+        super::super::prepare_control_dir().unwrap();
+        let sockets = Path::new("/tmp").join(format!("orx-sharing-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir(&sockets).unwrap();
+        let first = sockets.join("first");
+        let second = sockets.join("second");
+        let _first = UnixListener::bind(&first).unwrap();
+        let _second = UnixListener::bind(&second).unwrap();
+        let publication = Publication {
+            host: "lab".into(),
+            native_id: "a".repeat(40),
+            socket_name: "same-route-and-agent".into(),
+            queries: Vec::new(),
+        };
+        let link = control_dir().join(&publication.socket_name);
+        std::os::unix::fs::symlink(&first, &link).unwrap();
+        update(&home.path().join(".ssh"), &control_dir(), true, |entries| {
+            entries.insert(format!("engine:{}", first.display()), publication.clone());
+            entries.insert(format!("engine:{}", second.display()), publication.clone());
+            Ok(())
+        })
+        .unwrap();
+        withdraw_engine(home.path(), &first).await.unwrap();
+        assert_eq!(std::fs::read_link(&link).unwrap(), second);
+        withdraw_engine(home.path(), &second).await.unwrap();
+        assert!(link.symlink_metadata().is_err());
+        let _legacy = UnixListener::bind(&link).unwrap();
+        update(&home.path().join(".ssh"), &control_dir(), true, |entries| {
+            entries.insert(format!("engine:{}", first.display()), publication.clone());
+            Ok(())
+        })
+        .unwrap();
+        withdraw_engine(home.path(), &first).await.unwrap();
+        assert!(std::fs::symlink_metadata(&link)
+            .unwrap()
+            .file_type()
+            .is_socket());
+        std::fs::remove_file(link).unwrap();
+        std::fs::remove_dir(control_dir()).unwrap();
+        std::fs::remove_dir_all(sockets).unwrap();
+    }
 
     #[test]
     fn native_config_shares_only_matching_live_sockets_and_preserves_user_settings() {

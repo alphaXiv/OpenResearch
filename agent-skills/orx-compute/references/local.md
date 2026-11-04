@@ -17,5 +17,5 @@ orx exp run <expId> --backend local
   the process group.
 - Finished runs older than each project's three newest local runs lose
   `repo/.venv` and `repo/.cache/uv`; logs, TensorBoard files, and other outputs stay.
-- The OpenResearch server watches the run. The run keeps going if the server
-  closes, and the server catches up when it opens.
+
+See [run monitoring](../SKILL.md#run-engine-setting).

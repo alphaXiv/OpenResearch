@@ -587,6 +587,18 @@ pub(crate) fn read_error(error: io::Error) -> RunState {
     }
 }
 
+pub fn started_at(dir: &Path) -> Option<i64> {
+    fs::metadata(dir.join("started"))
+        .ok()?
+        .modified()
+        .ok()?
+        .duration_since(std::time::UNIX_EPOCH)
+        .ok()?
+        .as_millis()
+        .try_into()
+        .ok()
+}
+
 pub fn state(dir: &Path) -> io::Result<RunState> {
     let first = receipt(dir);
     let identity = read_json::<ProcessIdentity>(&dir.join("wrapper.json"));

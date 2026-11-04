@@ -1,5 +1,4 @@
-//! Runner-1 (0.2.x) rows: adopt them once their supervisor lock is free, and until then only
-//! watch what the old supervisor writes (§8).
+//! Runner-1 rows remain read-only until engine adoption is enabled and their launch has settled.
 
 use super::bus::RunEvent;
 use super::{handle_of, phase_of, Engine};
@@ -55,9 +54,7 @@ pub(super) fn cancel_note(run: &StoredRun) -> Option<String> {
 }
 
 impl Engine {
-    /// Adopts every free runner-1 run and reports how; runs an old supervisor holds come back
-    /// as `Watch`. Call on the 5 s legacy timer: it also surfaces what those supervisors wrote.
-    pub fn scan_legacy(&self) -> Result<Vec<(String, Adoption)>> {
+    pub fn scan_legacy(&self, adopt: bool) -> Result<Vec<(String, Adoption)>> {
         let candidates: Vec<(StoredRun, Adoption)> = {
             let store = self.store();
             let mut candidates = Vec::new();
@@ -92,7 +89,10 @@ impl Engine {
             if self.memory().locks.holds(&run.id) {
                 continue;
             }
-            if !self.own(&run.id)? {
+            if !adopt
+                || self.clock.wall_ms() - run.updated_at < super::ORPHANED_RUN_SETTLE_MS
+                || !self.own(&run.id)?
+            {
                 self.store().watch_legacy_run(&run.id, None)?;
                 decisions.push((run.id, Adoption::Watch));
             } else if self.reread_watch(&run.id, None, true)?.is_some() {

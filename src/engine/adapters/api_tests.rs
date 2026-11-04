@@ -309,21 +309,23 @@ exec sleep 120
 #[tokio::test]
 async fn ray_submission_id_survives_lost_response_and_observations_are_batched() {
     use std::sync::Mutex;
+    type Context = (Arc<Mutex<Vec<Value>>>, Arc<Mutex<Value>>);
     let requests = Arc::new(Mutex::new(Vec::<Value>::new()));
+    let response = Arc::new(Mutex::new(json!({"status":"RUNNING", "start_time":1234})));
     async fn submit(
-        State(requests): State<Arc<Mutex<Vec<Value>>>>,
+        State((requests, _)): State<Context>,
         Json(body): Json<Value>,
     ) -> axum::http::StatusCode {
         requests.lock().unwrap().push(body);
         axum::http::StatusCode::INTERNAL_SERVER_ERROR
     }
-    async fn inspect() -> Json<Value> {
-        Json(json!({"status":"RUNNING"}))
+    async fn inspect(State((_, response)): State<Context>) -> Json<Value> {
+        Json(response.lock().unwrap().clone())
     }
     let app = Router::new()
         .route("/api/jobs/", axum::routing::post(submit))
         .route("/api/jobs/run", axum::routing::get(inspect))
-        .with_state(requests.clone());
+        .with_state((requests.clone(), response.clone()));
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let address = format!("http://{}", listener.local_addr().unwrap());
     let server = tokio::spawn(async move {
@@ -355,7 +357,12 @@ async fn ray_submission_id_survives_lost_response_and_observations_are_batched()
     }];
     assert_eq!(
         adapter.observe(&runs, Duration::from_secs(2)).await,
-        vec![("run".into(), Observation::Running)]
+        vec![(
+            "run".into(),
+            Observation::Running {
+                started_at: Some(1234)
+            }
+        )]
     );
     assert!(adapter
         .observe(&runs, Duration::from_secs(2))
@@ -366,6 +373,20 @@ async fn ray_submission_id_survives_lost_response_and_observations_are_batched()
         adapter.observe(&runs, Duration::from_secs(2)).await.len(),
         1
     );
+    *response.lock().unwrap() = json!({"status":"SUCCEEDED", "start_time":1234, "end_time":4567});
+    clock.advance(Duration::from_secs(10));
+    let observations = adapter.observe(&runs, Duration::from_secs(2)).await;
+    assert!(observations.iter().any(|(_, observation)| matches!(
+        observation,
+        Observation::Exited {
+            finished_at: Some(4567),
+            ..
+        }
+    )));
+    for (id, observation) in observations {
+        engine.observe(&id, observation).unwrap();
+    }
+    assert_eq!(engine.load("run").unwrap().0.ended_at, Some(4567));
     server.abort();
     drop(engine);
     std::fs::remove_dir_all(root).unwrap();
@@ -1256,14 +1277,19 @@ touch '{}/leaked-k8s'
     std::fs::write(&archive, "snapshot").unwrap();
     let hf = serde_json::from_value(json!({"command":["true"],"docker_image":"python","flavor":"cpu","environment":{},"secrets":{},"timeout_seconds":60,"labels":{}})).unwrap();
     let error = crate::jobs::huggingface::run_job_with_source(
-        "fake", "org", &hf, &archive, "digest", &fence,
+        "fake",
+        "org",
+        &hf,
+        &archive,
+        "digest",
+        Some(&fence),
     )
     .await
     .unwrap_err();
     assert!(error.to_string().contains("no longer awaits"), "{error}");
     let manifest = json!({"apiVersion":"batch/v1","kind":"Job","metadata":{"name":"run"},"spec":{"template":{"spec":{"containers":[{"name":"run","command":["bash","-c","eval \"$ORX_SCRIPT\""]}]}}}});
     let spec = serde_json::from_value(json!({"manifest":manifest.to_string(),"script":"true","run_token":"run","env":{},"timeout_seconds":60,"labels":{},"pod_env":[],"source_archive":archive})).unwrap();
-    let error = crate::jobs::kubernetes::run_manifest(None, "default", &spec, &fence)
+    let error = crate::jobs::kubernetes::run_manifest(None, "default", &spec, Some(&fence))
         .await
         .err()
         .expect("unfenced creation succeeded");
@@ -1404,7 +1430,7 @@ esac
     let observations = backend
         .observe(std::slice::from_ref(&run), Duration::from_secs(5))
         .await;
-    assert!(observations.contains(&("run".into(), Observation::Running)));
+    assert!(observations.contains(&("run".into(), Observation::Running { started_at: None })));
     std::fs::write(root.join("history"), "first\nsecond\n").unwrap();
     clock.advance(Duration::from_secs(10));
     backend
@@ -1761,12 +1787,13 @@ esac
     adapter.finish(&legacy).await.unwrap();
     let mut legacy_row = run.clone();
     legacy_row.id = legacy.id.clone();
+    legacy_row.updated_at = 1;
     legacy_row.backend_json = serde_json::json!({
         "kind":"vercel_job", "namespace":"orx-run", "jobId":"proc-1"
     })
     .to_string();
     engine.store().upsert_run(&legacy_row).unwrap();
-    let adopted = engine.scan_legacy().unwrap();
+    let adopted = engine.scan_legacy(true).unwrap();
     assert!(adopted.iter().any(|(id, adoption)| {
         id == "legacy"
             && matches!(adoption,

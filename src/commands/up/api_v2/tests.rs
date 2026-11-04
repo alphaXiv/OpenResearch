@@ -197,6 +197,24 @@ async fn completion(events: &mut (impl Stream<Item = Result<Value>> + Unpin)) ->
     panic!("event stream ended before completion")
 }
 
+fn run_with_engine(test: &str) -> bool {
+    if std::env::var("ORX_RUN_ENGINE").as_deref() == Ok("1") {
+        return false;
+    }
+    let output = std::process::Command::new(std::env::current_exe().unwrap())
+        .env("ORX_RUN_ENGINE", "1")
+        .args(["--exact", test, "--nocapture"])
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    true
+}
+
 struct Fixture {
     api: Arc<Api>,
     backend: Arc<Fake>,
@@ -352,7 +370,16 @@ async fn authenticated_routes_expose_contact_and_commands() {
             .unwrap()["instance"],
         "instance"
     );
-    f.insert("run", "exp", "project", "running");
+    f.insert("run", "exp", "project", "starting");
+    f.api
+        .engine
+        .observe(
+            "run",
+            Observation::Running {
+                started_at: Some(1234),
+            },
+        )
+        .unwrap();
     let list = f
         .client
         .json(reqwest::Method::GET, "runs?project=project", None)
@@ -363,6 +390,7 @@ async fn authenticated_routes_expose_contact_and_commands() {
     assert_eq!(run_view.id, "run");
     assert_eq!(run_view.status, "running");
     assert_eq!(list["runs"][0]["contact"]["type"], "live");
+    assert_eq!(list["runs"][0]["startedAt"], 1234);
     let cancel = f
         .client
         .json(reqwest::Method::POST, "runs/run/cancel", None)
@@ -474,7 +502,10 @@ async fn wait_is_one_sse_request_completed_by_first_matching_bus_event() {
             },
         )
         .unwrap();
-    f.api.engine.observe("run", Observation::Running).unwrap();
+    f.api
+        .engine
+        .observe("run", Observation::Running { started_at: None })
+        .unwrap();
     f.api
         .engine
         .observe(
@@ -563,7 +594,7 @@ async fn log_pages_use_kept_offsets_remote_ranges_and_503_on_unreachable() {
     assert_eq!(remote["data"], json!("MjM0"));
     f.api
         .store()
-        .set_engine_phase("run", "running", "done", Some(1), Some(0))
+        .set_engine_phase("run", "running", "done", Some(1), Some(0), None)
         .unwrap();
     f.backend.offline.store(true, Ordering::SeqCst);
     *f.backend.outage.lock().unwrap() = Some(crate::engine::transport::HostState {
@@ -608,7 +639,7 @@ async fn finished_runs_read_from_their_host_until_the_log_is_kept() {
     {
         let store = f.api.store();
         store
-            .set_engine_phase("run", "running", "done", Some(1), Some(0))
+            .set_engine_phase("run", "running", "done", Some(1), Some(0), None)
             .unwrap();
         store.queue_log_collection("run").unwrap();
         assert!(!store
@@ -672,7 +703,7 @@ async fn idle_requires_ten_uninterrupted_minutes_and_all_blockers_clear() {
     assert!(!idle.check(&f.api, Duration::from_secs(601)).unwrap());
     f.api
         .store()
-        .set_engine_phase("run", "running", "lost", Some(1), None)
+        .set_engine_phase("run", "running", "lost", Some(1), None, None)
         .unwrap();
     f.api
         .store()
@@ -724,6 +755,12 @@ async fn idle_requires_ten_uninterrupted_minutes_and_all_blockers_clear() {
 
 #[tokio::test]
 async fn cli_launch_and_cancel_use_the_server_and_kept_pages_span_file_boundaries() {
+    if run_with_engine(concat!(
+        module_path!(),
+        "::cli_launch_and_cancel_use_the_server_and_kept_pages_span_file_boundaries"
+    )) {
+        return;
+    }
     use clap::Parser;
     let f = Fixture::new().await;
     let cli =
@@ -852,6 +889,12 @@ async fn log_feed_is_refcounted_and_pushes_without_a_cli_poll() {
 
 #[tokio::test]
 async fn v2_launches_are_host_checked_admitted_and_keep_a_run_submission_active() {
+    if run_with_engine(concat!(
+        module_path!(),
+        "::v2_launches_are_host_checked_admitted_and_keep_a_run_submission_active"
+    )) {
+        return;
+    }
     use clap::Parser;
     let _guard = crate::commands::up::ACTIVE_TEST_LOCK.lock().await;
     let f = Fixture::new().await;
@@ -1960,7 +2003,7 @@ async fn dashboard_host_lifecycle_child() {
     assert_eq!(page["kept"], json!([]));
     assert_eq!(page["eof"], false);
     api.store()
-        .set_engine_phase("live", "running", "done", Some(1), Some(0))
+        .set_engine_phase("live", "running", "done", Some(1), Some(0), None)
         .unwrap();
     let attempts = server.auth_attempts().unwrap();
     let tested = client
@@ -2206,7 +2249,7 @@ async fn runner_one_local_logs_use_pages_for_live_and_finished_runs() {
         if status == "done" {
             f.api
                 .store()
-                .set_engine_phase("legacy", "running", "done", Some(10), Some(0))
+                .set_engine_phase("legacy", "running", "done", Some(10), Some(0), None)
                 .unwrap();
         }
         let response = app

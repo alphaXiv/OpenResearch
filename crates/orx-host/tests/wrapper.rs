@@ -233,10 +233,12 @@ fn crash_windows_never_reexecute_after_started() {
     run.spawn();
     run.wait();
     fs::remove_file(run.directory.0.join("exit.json")).unwrap();
-    assert!(matches!(
-        wrapper::state(&run.directory.0).unwrap(),
-        RunState::Lost { .. }
-    ));
+    until(Duration::from_secs(5), || {
+        matches!(
+            wrapper::state(&run.directory.0).unwrap(),
+            RunState::Lost { .. }
+        )
+    });
     run.spawn();
     run.wait();
     assert_eq!(
@@ -267,10 +269,9 @@ fn wrapper_gone_with_a_complete_empty_tag_scan_is_lost() {
     identity.starttime += 1;
     publish(&dir.0.join("wrapper.json"), &identity).unwrap();
     assert_eq!(wrapper::cancel(&dir.0).unwrap(), CancelAck::WrapperGone);
-    assert!(matches!(
-        wrapper::state(&dir.0).unwrap(),
-        RunState::Lost { .. }
-    ));
+    until(Duration::from_secs(5), || {
+        matches!(wrapper::state(&dir.0).unwrap(), RunState::Lost { .. })
+    });
 }
 
 #[test]

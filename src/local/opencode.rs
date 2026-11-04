@@ -1561,9 +1561,6 @@ mod tests {
         assert!(compute
             .content
             .contains("The launching chat is\nsubscribed automatically"));
-        assert!(compute
-            .content
-            .contains("Attention messages also arrive in this chat"));
         assert!(!compute.content.contains("Wake-up is opt-in"));
         assert!(!md.contains("`orx exp wake <expId>`"));
         assert!(!md.contains("OpenResearch injects an `[orx]` message"));

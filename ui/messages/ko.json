@@ -1723,5 +1723,10 @@
   "status_stopping_other": "완전히 중지되지 않음 · {host}에서 프로세스 {count}개가 아직 실행 중",
   "status_cancellation_pending": "취소 대기 중",
   "run_abandon_unreachable": "머신에 연결할 수 없습니다.",
-  "run_abandon_keep": "계속 추적"
+  "run_abandon_keep": "계속 추적",
+  "settings_run_engine_label": "새 실험 엔진",
+  "settings_run_engine_description": "새 실행기는 연결 끊김과 앱 재시작에도 원격 실행을 유지하고, 취소를 검증하며, 여러 SSH 안정성 문제를 해결합니다.",
+  "settings_run_engine_override": "ORX_RUN_ENGINE이 이 서버 설정을 제어합니다.",
+  "settings_run_engine_canary": "Canary 빌드는 항상 새 엔진을 사용합니다.",
+  "settings_run_engine_note": "아직 테스트 중입니다. 새 실행에 적용됩니다."
 }

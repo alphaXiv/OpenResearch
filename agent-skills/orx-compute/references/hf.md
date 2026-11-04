@@ -23,5 +23,5 @@ orx exp run <expId> --backend hf --flavor cpu-upgrade --image python:3.12
   shapes and `python:3.12` for CPU shapes.
 - `orx` uploads the committed snapshot into a private job volume. The job never
   clones a repository or needs repository credentials.
-- The OpenResearch server records provider status and logs. The job keeps
-  running while the server is closed, and the server catches up when it opens.
+
+See [run monitoring](../SKILL.md#run-engine-setting).

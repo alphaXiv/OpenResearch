@@ -60,6 +60,12 @@ export function createSettingsQueries(client: WorkspaceClient, api: Api, invalid
     staleTime: 300_000,
   });
 
+  const getRunEngineQuery = () => queryOptions({
+    queryKey: workspaceKey("getRunEngine"),
+    queryFn: ({ signal }) => api.getRunEngine(signal),
+    staleTime: 30_000,
+  });
+
   const getComputeSettingsQuery = (projectId?: string) => queryOptions({
     queryKey: workspaceKey("getComputeSettings", projectId ?? null),
     queryFn: ({ signal }) => api.getComputeSettings(projectId, signal),
@@ -327,6 +333,7 @@ export function createSettingsQueries(client: WorkspaceClient, api: Api, invalid
     getVercelSettingsQuery,
     getSlurmSettingsQuery,
     getRaySettingsQuery,
+    getRunEngineQuery,
     getComputeSettingsQuery,
     getLocalMachineQuery,
     getPublicNetworkQuery,
