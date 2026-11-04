@@ -355,7 +355,7 @@
   "settings_page_checking_modal": "Modal denetleniyor…",
   "settings_page_choose_a_preset_flavor": "Hazır bir flavor seçin",
   "settings_page_cluster_default": "küme varsayılanı",
-  "settings_page_cluster_default_e_g_4h_30m": "küme varsayılanı (örn. 4s, 30d)",
+  "settings_page_cluster_default_e_g_4h_30m": "küme varsayılanı (örn. 4h, 30m)",
   "settings_page_cluster_unreachable": "Kümeye ulaşılamıyor",
   "settings_page_compute": "Hesaplama",
   "settings_page_connect_compute_backends_and_choose_where_new_runs": "Hesaplama arka uçlarını bağlayın ve yeni çalıştırmaların nerede yürütüleceğini seçin.",
