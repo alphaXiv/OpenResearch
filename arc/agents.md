@@ -72,10 +72,13 @@ a message sent during a turn waits in the chat's queue.
 An agent runs in the chat's worktree with a configuration home orx prepares
 inside its data directory. The user's sign-in, settings, instructions, plugins
 and skills are linked into that home, so the agent behaves as the user set it
-up, while its sessions and history stay out of the user's own. **orx never
-edits the user's agent configuration.** What it needs to add, such as hooks,
-an MCP server or sandbox roots, goes in through the agent's command line or a
-settings file of orx's own.
+up, while its sessions and history stay out of the user's own. Codex shares
+home entries by default so relative configuration paths keep working; known
+session stores, databases, memories and runtime state are excluded. The links
+are reconciled before each turn, including when reusing a running Codex
+process. **orx never edits the user's agent configuration.** What it needs to
+add, such as hooks, an MCP server or sandbox roots, goes in through the agent's
+command line or a settings file of orx's own.
 
 Chats the user had in an agent's own CLI can be adopted. Those keep resolving
 to the user's native store, and orx copies recent history only for display.
