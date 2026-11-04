@@ -175,6 +175,12 @@ export const getUpdateStatusQuery = () => queryOptions({
   staleTime: 30_000,
 });
 
+export const getBuildNotesQuery = () => queryOptions({
+  queryKey: workspaceKey("getBuildNotes"),
+  queryFn: ({ signal }) => api.getBuildNotes(signal),
+  staleTime: 300_000,
+});
+
 export const getProfileQuery = () => queryOptions({
   queryKey: workspaceKey("getProfile"),
   queryFn: ({ signal }) => api.getProfile(signal),

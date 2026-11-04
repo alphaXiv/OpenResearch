@@ -688,6 +688,7 @@ fn router(state: AppState, remote_auth: Option<RemoteAuth>) -> Router {
             get(profile_settings).post(set_profile_settings),
         )
         .route("/api/update", get(update_status))
+        .route("/api/update/notes", get(update_notes))
         .route("/api/update/apply", post(apply_update))
         .route("/api/update/restart", post(restart_after_update))
         .route("/api/update/auto", post(set_auto_update))
@@ -5777,6 +5778,10 @@ async fn update_status() -> ApiResult {
         .map_err(|e| ApiError::from(anyhow!("update status task failed: {e}")))?
 }
 
+async fn update_notes() -> ApiResult {
+    Ok(Json(json!(updates::fetch_build_notes().await?)))
+}
+
 #[derive(Deserialize)]
 struct SetAutoUpdateReq {
     enabled: bool,
@@ -5837,7 +5842,7 @@ async fn set_update_channel(Json(req): Json<SetUpdateChannelReq>) -> ApiResult {
     })
     .await
     .map_err(|e| ApiError::from(anyhow!("update channel task failed: {e}")))??;
-    tokio::spawn(updates::periodic_update_pass());
+    updates::periodic_update_pass().await;
     Ok(Json(json!(updates::status())))
 }
 
