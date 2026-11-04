@@ -13,7 +13,7 @@ import { accountErrorMessage, OpenResearchAccount } from "./OpenResearchAccount"
 import { Button, DialogContent, DialogTitle, MenuItem, Spinner } from "./ui";
 
 function refreshAccount() {
-  invalidateFamilies(["getOpenResearchAccount", "getOpenResearchSettings", "getComputeSettings"]);
+  invalidateFamilies(["getOpenResearchAccount", "getOpenResearchSettings", "getComputeSettings", "getProjectLink"]);
   void queryClient.invalidateQueries({ queryKey: workspaceKey("alphaXivFolders") });
   void queryClient.invalidateQueries({ queryKey: workspaceKey("alphaXivPapers") });
 }

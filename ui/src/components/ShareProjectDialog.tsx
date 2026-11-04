@@ -7,12 +7,12 @@ import { showConfirmDialog, type DialogContentProps } from "../dialog";
 import { m } from "../paraglide/messages.js";
 import { listChatSessionsQuery } from "../queries/chat";
 import { queryClient, workspaceKey } from "../queries/client";
-import { useRuntime } from "../RemoteRuntime";
 import { openSignIn } from "./AccountChip";
 import { Button, ButtonLink, DialogContent, DialogTitle, IconButton, Input, LoadingRow, Spinner, showAlert } from "./ui";
 
-export function ShareProjectDialog({ project, returnFocus, cancel, confirm, isDisabled: pending, isPending, errorMessage }: DialogContentProps<ShareChoice> & {
+export function ShareProjectDialog({ project, remote, returnFocus, cancel, confirm, isDisabled: pending, isPending, errorMessage }: DialogContentProps<ShareChoice> & {
   project: Project;
+  remote: boolean;
   returnFocus: RefObject<HTMLButtonElement | null>;
 }) {
   const chatsQuery = useQuery(listChatSessionsQuery(project.id));
@@ -22,10 +22,14 @@ export function ShareProjectDialog({ project, returnFocus, cancel, confirm, isDi
   const [logs, setLogs] = useState(true);
   const [artifacts, setArtifacts] = useState(true);
   const choice: ShareChoice = { chats: picked, logs, artifacts };
-  const remote = useRuntime().kind === "ssh";
   // Asked of the machine that publishes: in an SSH workspace that is the remote, not this laptop.
   const linkKey = workspaceKey("getProjectLink", project.id);
-  const linkQuery = useQuery({ queryKey: linkKey, queryFn: ({ signal }) => getProjectLink(project.id, signal) });
+  const linkQuery = useQuery({
+    queryKey: linkKey,
+    queryFn: ({ signal }) => getProjectLink(project.id, signal),
+    // `orx login` on the remote happens in a shell, so nothing else tells this dialog.
+    refetchInterval: (query) => remote && query.state.data?.signedIn === false ? 3_000 : false,
+  });
   const signedIn = linkQuery.data?.signedIn === true;
   const link = linkQuery.data?.sharedProject ?? null;
   const publish = useMutation({
@@ -96,7 +100,7 @@ export function ShareProjectDialog({ project, returnFocus, cancel, confirm, isDi
       <Button type="button" variant="ghost" disabled={busy} onClick={cancel}>{m.projects_home_cancel()}</Button>
       <Button ref={publishRef} type="button" disabled={busy || !ready || !linkQuery.data || (remote && !signedIn)} onClick={() => {
         if (signedIn) publish.mutate();
-        else openSignIn(false, publishRef.current, () => { void linkQuery.refetch(); });
+        else openSignIn(false, publishRef.current);
       }}>{publish.isPending ? <Spinner /> : <Link2 size={16} />}{linkQuery.data && !signedIn ? m.share_publish_sign_in() : link ? m.share_republish() : m.share_publish()}</Button>
       <Button type="button" variant="primary" disabled={busy || !ready} onClick={() => { publish.reset(); confirm(choice); }}>{isPending ? <Spinner /> : <Download size={16} />}{m.share_save()}</Button>
     </div>

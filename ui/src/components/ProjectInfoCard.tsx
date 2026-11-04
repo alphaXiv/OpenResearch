@@ -7,6 +7,7 @@ import { Folder, FolderOpen, MessageCircle, MoreHorizontal, Pin, Plus, Settings,
 import { deleteProject, revealFileInManager, shareProject, updateProject, type Project } from "../api";
 import { downloadFile } from "../download";
 import { m } from "../paraglide/messages.js";
+import { useRuntime } from "../RemoteRuntime";
 import { ShareProjectDialog } from "./ShareProjectDialog";
 import { Button, DialogContent, DialogTitle, Spinner, IconButton, Input, MenuItem, Tooltip, showAlert } from "./ui";
 
@@ -27,6 +28,7 @@ export function ProjectInfoCard({ project, chatCount, collapsed, busy, onToggleC
   onPin: () => void;
 }) {
   const revealLabel = useFileManagerLabel();
+  const remote = useRuntime().kind === "ssh";
   const [menuOpen, setMenuOpen] = useState(false);
   const triggerRef = useRef<HTMLButtonElement>(null);
 
@@ -77,7 +79,7 @@ export function ProjectInfoCard({ project, chatCount, collapsed, busy, onToggleC
                 setMenuOpen(false);
                 showCustomDialog({
                   component: ShareProjectDialog,
-                  props: { project, returnFocus: triggerRef },
+                  props: { project, remote, returnFocus: triggerRef },
                   onCancel: "close",
                   onConfirm: async (choice) => {
                     const { file, fileName, skipped } = await shareProject(project.id, choice);
