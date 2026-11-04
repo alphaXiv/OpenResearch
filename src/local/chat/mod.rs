@@ -4790,12 +4790,13 @@ impl ChatHost {
                     text: project
                         .filter(|_| orx.is_none())
                         .map(|project| {
-                            expand_slash_skills(
+                            let text = expand_slash_skills(
                                 &project,
                                 &text,
                                 Some(&session.harness),
                                 Some(session_id),
-                            )
+                            );
+                            delegation::expand_refs(&store, &text).unwrap_or(text)
                         })
                         .unwrap_or_else(|| text.clone()),
                     display: orx
@@ -5932,7 +5933,13 @@ impl ChatHost {
         let mut turn_text = prepared_input.unwrap_or_else(|| {
             let mut expanded = contextualize_messages(messages, |text| {
                 if orx.is_empty() {
-                    expand_slash_skills(&project, text, Some(&session.harness), Some(&session.id))
+                    let text = expand_slash_skills(
+                        &project,
+                        text,
+                        Some(&session.harness),
+                        Some(&session.id),
+                    );
+                    delegation::expand_refs(&store, &text).unwrap_or(text)
                 } else {
                     text.to_string()
                 }

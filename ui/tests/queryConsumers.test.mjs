@@ -35,7 +35,7 @@ function sendPreparation() {
   const statements = turn.tryBlock.statements;
   const optimisticIndex = statements.findIndex((node) => node.getText(file).includes('type: "optimisticUser"'));
   const prefix = statements.slice(0, optimisticIndex + 1).map((node) => node.getText(file)).join("\n");
-  return `const retry = null, mode = null;\nconst composerLiveRef = { current: { draft, attachments: pending, annotations: pendingAnnotations } };\nconst clearComposer = ${declaration(file, "clearComposer")};\n${prefix}`;
+  return `const retry = null, mode = null, attachmentsAtSend = pending;\nconst composerLiveRef = { current: { draft, attachments: attachmentsAtSend, annotations: pendingAnnotations } };\nconst clearComposer = ${declaration(file, "clearComposer")};\n${prefix}`;
 }
 
 function settingsRenderer(name, returns, bindings) {

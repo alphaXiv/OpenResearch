@@ -3,7 +3,7 @@ import { WorkspaceDomContext } from "../WorkspaceDom";
 import { Popover } from "@base-ui/react/popover";
 import { useInfiniteQuery } from "@tanstack/react-query";
 import { ArrowLeft, ArrowUpRight, Check, FileText, Folder, Search } from "lucide-react";
-import { useContext, useRef, useState, type RefObject } from "react";
+import { useContext, useRef, useState } from "react";
 import { AlphaXivNotConnectedError, type AlphaXivPaper } from "../api";
 import { fmtNumber } from "../i18n";
 import { m } from "../paraglide/messages.js";
@@ -18,7 +18,7 @@ const STATE_CLASS_NAME =
 
 type Props = {
   onAdd: (papers: AlphaXivPaper[]) => void;
-  composerRef: RefObject<HTMLTextAreaElement | null>;
+  className: string;
 };
 
 export function LibraryPicker(props: Props) {
@@ -31,7 +31,7 @@ export function LibraryPicker(props: Props) {
 
 function SignedInLibraryPicker({
   onAdd,
-  composerRef,
+  className,
   user,
 }: Props & {
   user: { id: string; alphaxivUrl: string | null };
@@ -85,9 +85,9 @@ function SignedInLibraryPicker({
         <Tooltip interactive disabled={open} content={m.library_picker()}>
           <Popover.Trigger
             ref={trigger}
-            render={<IconButton className="composer-bare" aria-label={m.library_picker()} />}
+            render={<IconButton size="small" className={className} aria-label={m.library_picker()} />}
           >
-            <LitSourceLogo source="alphaxiv" decorative />
+            <LitSourceLogo source="alphaxiv" decorative framed={false} className="text-subtext [&_svg_*]:fill-current" />
           </Popover.Trigger>
         </Tooltip>
         <Popover.Portal container={portalContainer}>
@@ -101,7 +101,7 @@ function SignedInLibraryPicker({
             <Popover.Popup
               aria-label={m.library_title()}
               initialFocus={searchInput}
-              finalFocus={() => (added.current ? composerRef.current : trigger.current)}
+              finalFocus={() => (added.current ? false : trigger.current)}
               className="flex w-104 max-w-[calc(100vw-1.5rem)] h-[min(34rem,var(--available-height))] flex-col overflow-hidden rounded-xl border border-border bg-background text-text shadow-menu outline-none"
             >
               <div className="flex items-center justify-between gap-3 px-3.5 pt-3 pb-2.5">

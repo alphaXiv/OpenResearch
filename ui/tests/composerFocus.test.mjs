@@ -72,24 +72,27 @@ function composer() {
   let nextFrame = 0;
   let cleanup;
   let previousDeps;
-  const input = {
-    value: "side question",
-    focus() { document.activeElement = input; calls.push("focus"); },
-    setSelectionRange(start, end) { calls.push([start, end]); },
-    scrollIntoView() {},
+  const input = {};
+  const handle = {
+    dom: { contains: (element) => element === input, scrollIntoView() {} },
+    focus(at) {
+      if (at === "end") calls.push("end");
+      else if (handle.canFocus) { document.activeElement = input; calls.push("focus"); }
+    },
+    canFocus: true,
   };
   const bindings = {
     composerFocusNonce: 0, contentLoading: false, contentError: null, historyLoading: false,
     newChatFocusProject: null, projectId: "p", activeId: null, mainView: "chat",
     setNewChatFocusProject(value) { bindings.newChatFocusProject = value; },
-    focusedComposerNonce, composerRef: { current: input }, document,
+    focusedComposerNonce, composerRef: { current: handle }, document,
     window: {
       requestAnimationFrame(callback) { frames.set(++nextFrame, callback); return nextFrame; },
       cancelAnimationFrame(id) { frames.delete(id); },
     },
   };
   return {
-    calls, document, input,
+    calls, document, input, handle,
     render(props) {
       Object.assign(bindings, props);
       const evaluate = node => new Function(...Object.keys(bindings), `return (${node.getText(source)})`)(...Object.values(bindings));
@@ -116,7 +119,7 @@ for (const loading of ["contentLoading", "contentError", "historyLoading"]) {
     chat.render({ [loading]: false });
     chat.flush();
     assert.equal(chat.document.activeElement, chat.input);
-    assert.deepEqual(chat.calls, ["focus", [13, 13]]);
+    assert.deepEqual(chat.calls, ["focus", "end"]);
     const main = {};
     chat.document.activeElement = main;
     chat.render({ [loading]: true });
@@ -155,12 +158,11 @@ test("loading cancels scheduled focus without consuming its request", () => {
 
 test("unsuccessful focus leaves the request pending", () => {
   const chat = composer();
-  const focus = chat.input.focus;
-  chat.input.focus = () => {};
+  chat.handle.canFocus = false;
   chat.render({ composerFocusNonce: 1 });
   chat.flush();
   assert.deepEqual(chat.calls, []);
-  chat.input.focus = focus;
+  chat.handle.canFocus = true;
   chat.render({ historyLoading: true });
   chat.render({ historyLoading: false });
   chat.flush();

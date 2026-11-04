@@ -98,6 +98,14 @@ export function createChatQueries(
     } finally { off(); }
   }
 
+  /** The chat, author and first words of the message a ref cites. */
+  const citedMessageQuery = (cited: string) => queryOptions({
+    queryKey: workspaceKey("citedMessage", cited),
+    queryFn: () => api.citedMessage(cited),
+    staleTime: Infinity,
+    retry: false,
+  });
+
   const listChatActiveRunsQuery = () => queryOptions({
     queryKey: workspaceKey("listChatActiveRuns"),
     queryFn: ({ signal }) => api.listChatActiveRuns(signal),
@@ -105,6 +113,7 @@ export function createChatQueries(
   });
 
   return {
+    citedMessageQuery,
     listChatSessionsQuery,
     getSessionExperimentsQuery,
     listNativeChatsQuery,

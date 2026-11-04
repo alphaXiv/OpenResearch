@@ -19,8 +19,7 @@ import { DirectionProvider } from "@base-ui/react/direction-provider";
 
 import { m } from "../paraglide/messages.js";
 import { ltr } from "../i18n";
-import { CircleAlert, Check, ChevronDown, ChevronRight, Plus, Settings, Zap } from "lucide-react";
-
+import { Bot, CircleAlert, Check, ChevronDown, ChevronRight, Handshake, ListChecks, Lock, LockOpen, Pencil, Plus, Settings, ShieldCheck, Workflow, Zap, type LucideIcon } from "lucide-react";
 import {
   fmtNumber,
   harnessModelLabel,
@@ -105,6 +104,90 @@ export function usePopover(triggerRef?: RefObject<HTMLButtonElement | null>) {
     };
   }, [open, triggerRef]);
   return { open, setOpen, ref };
+}
+
+const PILL =
+  "composer-pill inline-flex h-7 min-w-0 shrink-0 items-center gap-1.5 rounded-md px-2 text-sm text-subtext whitespace-nowrap transition-[background,color] duration-150 ease-standard hover:bg-hover-muted hover:text-text data-[popup-open]:bg-hover-muted data-[popup-open]:text-text";
+
+const MENU_POPUP = "overflow-y-auto rounded-lg border border-border bg-background p-1 shadow-dropdown outline-none";
+
+const MENU_LABEL = "px-2 pt-1.5 pb-1 text-sm text-muted";
+
+/** Effort tiers fill more of a 3×3 grid; ids the grid does not know stay empty. */
+const EFFORT_DOTS: Record<string, { dots: number[]; tone: string }> = {
+  minimal: { dots: [4], tone: "text-muted" },
+  low: { dots: [4], tone: "text-accent-green" },
+  medium: { dots: [3, 4, 5], tone: "text-accent-amber" },
+  high: { dots: [1, 3, 4, 5, 7], tone: "text-accent-orange" },
+  xhigh: { dots: [0, 2, 4, 6, 8], tone: "text-accent-red" },
+  max: { dots: [0, 1, 2, 3, 4, 5, 6, 7, 8], tone: "text-accent-purple" },
+};
+
+/** Claude's `ultracode` is a session mode, `xhigh` plus dynamic workflows, so it toggles on top of the effort levels. */
+const ULTRACODE = "ultracode";
+
+function EffortIcon({ id }: { id: string | null | undefined }) {
+  if (id === ULTRACODE) return <Workflow size={14} aria-hidden="true" className="shrink-0 text-accent-purple" />;
+
+  const effort = (id && EFFORT_DOTS[id]) || (id?.startsWith("ultra") ? EFFORT_DOTS.max : null);
+  return (
+    <svg viewBox="0 0 14 14" className="size-3.5 shrink-0" aria-hidden="true">
+      {Array.from({ length: 9 }, (_, dot) => (
+        <rect
+          key={dot}
+          x={(dot % 3) * 5}
+          y={Math.floor(dot / 3) * 5}
+          width="4"
+          height="4"
+          rx="1"
+          fill="currentColor"
+          className={effort?.dots.includes(dot) ? effort.tone : "text-border"}
+        />
+      ))}
+    </svg>
+  );
+}
+
+/** Icons follow the shared policy behind each provider's permission id (`PermissionMode::from_id`). */
+const PERMISSION_ICONS: Record<string, { icon: LucideIcon; tone: string }> = {
+  ask: { icon: Lock, tone: "text-accent-amber" },
+  manual: { icon: Lock, tone: "text-accent-amber" },
+  default: { icon: Lock, tone: "text-accent-amber" },
+  "accept-edits": { icon: Pencil, tone: "text-accent-orange" },
+  acceptEdits: { icon: Pencil, tone: "text-accent-orange" },
+  plan: { icon: ListChecks, tone: "text-accent-teal" },
+  auto: { icon: ShieldCheck, tone: "text-accent-blue" },
+  "approve-for-me": { icon: ShieldCheck, tone: "text-accent-blue" },
+  "auto-approve": { icon: ShieldCheck, tone: "text-accent-blue" },
+  bypass: { icon: LockOpen, tone: "text-accent-red" },
+  bypassPermissions: { icon: LockOpen, tone: "text-accent-red" },
+  "full-access": { icon: LockOpen, tone: "text-accent-red" },
+};
+
+function PermissionIcon({ id }: { id: string | null | undefined }) {
+  const permission = id ? PERMISSION_ICONS[id] : undefined;
+  const Icon = permission?.icon ?? ShieldCheck;
+  return <Icon size={14} aria-hidden="true" className={cn("shrink-0", permission?.tone ?? "text-subtext")} />;
+}
+
+function DescribedRadioItem({ choice, icon, isDefault }: { choice: OptionChoice; icon?: ReactNode; isDefault: boolean }) {
+  return (
+    <Menu.RadioItem value={choice.id} closeOnClick label={choice.label} className={cn(SETTINGS_ROW, "items-start")}>
+      <span className="flex min-w-0 items-start gap-2">
+        {icon && <span className="flex h-5 items-center">{icon}</span>}
+        <span className="flex min-w-0 flex-col items-start gap-0.5">
+          <span>
+            {choice.label}
+            {isDefault && <span className="text-muted"> {m.model_picker_default()}</span>}
+          </span>
+          {choice.description && <span className="text-sm leading-snug text-muted">{choice.description}</span>}
+        </span>
+      </span>
+      <Menu.RadioItemIndicator className="flex h-5 shrink-0 items-center">
+        <Check size={14} aria-hidden="true" />
+      </Menu.RadioItemIndicator>
+    </Menu.RadioItem>
+  );
 }
 
 const SETTINGS_ROW =
@@ -242,7 +325,7 @@ export function ModelPicker({
   const queryClient = useQueryClient();
   const localModelConnected = useRef<(model: string) => void>(() => {});
   useEffect(() => () => { localModelConnected.current = () => {}; }, []);
-  const [menu, setMenu] = useState<"model" | "settings" | null>(null);
+  const [menu, setMenu] = useState<"model" | "effort" | "permissions" | null>(null);
   const [legacyMenu, setLegacyMenu] = useState<string | null>(null);
   const [filter, setFilter] = useState("");
   const modelTriggerRef = useRef<HTMLButtonElement>(null);
@@ -331,20 +414,25 @@ export function ModelPicker({
     : m.model_picker_model();
   const effectiveReasoningId = value?.reasoningLevel ?? defaultReasoningId ?? reasoningChoices[0]?.id;
   const reasoningLabel = reasoningChoices.find((choice) => choice.id === effectiveReasoningId)?.label;
+  const ultracodeChoice = reasoningChoices.find((choice) => choice.id === ULTRACODE);
+  const effortChoices = reasoningChoices.filter((choice) => choice.id !== ULTRACODE);
+  const ultracode = effectiveReasoningId === ULTRACODE;
   const effectivePermissionId = value?.permissionMode ?? defaultPermissionId ?? permissionChoices[0]?.id;
   const permissionLabel = permissionChoices.find((choice) => choice.id === effectivePermissionId)?.label;
   const effectiveServiceTier = reconcileServiceTier(selectedHarness, value?.model, value?.serviceTier);
   const fastChoice = serviceTiersFor(selectedHarness, value?.model).find((choice) => choice.id === "priority");
-  const autonomyChoices: (OptionChoice & { id: Autonomy })[] = [
+  const autonomyChoices: (OptionChoice & { id: Autonomy; icon: ReactNode })[] = [
     {
       id: "agentic",
       label: m.model_picker_autonomy_agentic(),
       description: m.model_picker_autonomy_agentic_description(),
+      icon: <Bot size={14} aria-hidden="true" className="shrink-0 text-accent-purple" />,
     },
     {
       id: "copilot",
       label: m.model_picker_autonomy_copilot(),
       description: m.model_picker_autonomy_copilot_description(),
+      icon: <Handshake size={14} aria-hidden="true" className="shrink-0 text-accent-green" />,
     },
   ];
   const autonomyLabel = autonomyChoices.find((choice) => choice.id === autonomy)?.label;
@@ -361,17 +449,9 @@ export function ModelPicker({
     items[(index + (event.key === "ArrowDown" ? 1 : -1) + items.length) % items.length]?.focus();
   };
 
-  const hasSettings =
-    reasoningChoices.length > 0 ||
-    nativeOptions.length > 0 ||
-    !!fastChoice ||
-    permissionChoices.length > 0 ||
-    !!onSelectAutonomy;
-
   useEffect(() => {
-    if (menu === "settings" && !hasSettings) setMenu(null);
     if (menu !== "model") setLegacyMenu(null);
-  }, [menu, hasSettings]);
+  }, [menu]);
 
   return (
     <DirectionProvider direction={document.documentElement.dir === "rtl" ? "rtl" : "ltr"}>
@@ -390,10 +470,7 @@ export function ModelPicker({
             <Popover.Trigger
               ref={modelTriggerRef}
               type="button"
-              className={cn(
-                "composer-pill inline-flex h-8 min-w-0 max-w-full items-center gap-1 rounded-md px-2 text-sm text-text whitespace-nowrap transition-[background,color] duration-150 ease-standard hover:bg-surface",
-                className,
-              )}
+              className={cn(PILL, "max-w-full", className)}
               aria-label={m.a11y_chat_model({ label })}
               onKeyDown={(event) => {
                 if (event.key === "ArrowDown") {
@@ -626,72 +703,57 @@ export function ModelPicker({
             </Popover.Positioner>
           </Popover.Portal>
         </Popover.Root>
-        {hasSettings && (
+        {(reasoningChoices.length > 0 || nativeOptions.length > 0 || fastChoice) && (
           <Menu.Root
-            open={menu === "settings"}
+            open={menu === "effort"}
             modal={false}
-            onOpenChange={(open) =>
-              setMenu((current) => (open ? "settings" : current === "settings" ? null : current))
-            }
+            onOpenChange={(open) => setMenu((current) => (open ? "effort" : current === "effort" ? null : current))}
           >
             <Menu.Trigger
-              className="composer-pill inline-flex h-8 shrink-0 items-center gap-1 rounded-md px-2 text-sm text-muted transition-[background,color] duration-150 ease-standard hover:bg-surface"
+              className={PILL}
               aria-label={[
-                reasoningLabel
-                  ? `${m.settings_page_settings()}: ${reasoningLabel}`
-                  : m.settings_page_settings(),
+                reasoningLabel ? `${m.model_picker_effort()}: ${reasoningLabel}` : m.model_picker_effort(),
                 effectiveServiceTier === "priority" ? m.model_picker_fast_mode() : null,
               ].filter(Boolean).join(" · ")}
             >
-              {effectiveServiceTier === "priority" && (
-                <Zap size={14} fill="currentColor" aria-hidden="true" />
+              {effectiveServiceTier === "priority" && <Zap size={14} fill="currentColor" aria-hidden="true" className="shrink-0 text-accent-amber" />}
+              {reasoningLabel ? (
+                <>
+                  <EffortIcon id={effectiveReasoningId} />
+                  <span>{reasoningLabel}</span>
+                </>
+              ) : (
+                <Settings size={14} aria-hidden="true" />
               )}
-              {reasoningLabel ? <span>{reasoningLabel}</span> : <Settings size={14} aria-hidden="true" />}
-              <ChevronDown size={14} className="shrink-0" />
+              <ChevronDown size={14} className="shrink-0 text-muted" />
             </Menu.Trigger>
             <Menu.Portal container={portalContainer}>
-              <Menu.Positioner
-                className="z-50"
-                side="top"
-                align="end"
-                sideOffset={8}
-                collisionPadding={8}
-                positionMethod="fixed"
-              >
-                <Menu.Popup
-                  aria-label={m.settings_page_settings()}
-                  className="model-settings-menu overflow-y-auto rounded-lg border border-border bg-background p-1 shadow-dropdown outline-none"
-                  style={{
-                    width: "min(288px, calc(100vw - 16px))",
-                    maxHeight: "min(400px, var(--available-height))",
-                  }}
-                >
-                  <Menu.RadioGroup
-                    value={effectiveReasoningId}
-                    onValueChange={(id) => {
-                      if (typeof id === "string") onSelectReasoning?.(id);
-                    }}
-                  >
-                    {reasoningChoices.map((choice) => (
-                      <Menu.RadioItem
-                        key={choice.id}
-                        value={choice.id}
-                        closeOnClick
-                        label={choice.label}
-                        className={SETTINGS_ROW}
+              <Menu.Positioner className="z-50" side="top" align="end" sideOffset={8} collisionPadding={8} positionMethod="fixed">
+                <Menu.Popup aria-label={m.model_picker_effort()} className={MENU_POPUP} style={{ width: "min(240px, calc(100vw - 16px))", maxHeight: "min(400px, var(--available-height))" }}>
+                  {effortChoices.length > 0 && (
+                    <Menu.Group>
+                      <Menu.GroupLabel className={MENU_LABEL}>{m.model_picker_effort()}</Menu.GroupLabel>
+                      <Menu.RadioGroup
+                        value={ultracode ? "xhigh" : effectiveReasoningId}
+                        onValueChange={(id) => {
+                          if (typeof id === "string") onSelectReasoning?.(id);
+                        }}
                       >
-                        <span>
-                          {choice.label}
-                          {choice.id === defaultReasoningId && (
-                            <span className="text-muted"> {m.model_picker_default()}</span>
-                          )}
-                        </span>
-                        <Menu.RadioItemIndicator>
-                          <Check size={14} />
-                        </Menu.RadioItemIndicator>
-                      </Menu.RadioItem>
-                    ))}
-                  </Menu.RadioGroup>
+                        {effortChoices.map((choice) => (
+                          <Menu.RadioItem key={choice.id} value={choice.id} closeOnClick label={choice.label} className={SETTINGS_ROW}>
+                            <span className="inline-flex items-center gap-2">
+                              <EffortIcon id={choice.id} />
+                              {choice.label}
+                              {choice.id === defaultReasoningId && choice.id !== REASONING_DEFAULT_ID && <span className="text-muted">{m.model_picker_default()}</span>}
+                            </span>
+                            <Menu.RadioItemIndicator>
+                              <Check size={14} />
+                            </Menu.RadioItemIndicator>
+                          </Menu.RadioItem>
+                        ))}
+                      </Menu.RadioGroup>
+                    </Menu.Group>
+                  )}
                   {nativeOptions.map((option) => (
                     <SettingsSubmenu
                       key={option.id}
@@ -702,47 +764,97 @@ export function ModelPicker({
                       onSelect={(id) => onSelectNativeOption?.(option.id, id)}
                     />
                   ))}
-                  {(reasoningChoices.length > 0 || nativeOptions.length > 0) &&
-                    (fastChoice || permissionChoices.length > 0 || onSelectAutonomy) && (
-                      <Menu.Separator className="m-1 h-px bg-border-variant" />
-                    )}
+                  {(ultracodeChoice || fastChoice) && (effortChoices.length > 0 || nativeOptions.length > 0) && (
+                    <Menu.Separator className="m-1 h-px bg-border-variant" />
+                  )}
+                  {ultracodeChoice && (
+                    <Tooltip interactive side="start" content={m.model_picker_ultracode_description()} className="flex w-full rounded-sm">
+                      <Menu.CheckboxItem
+                        className={SETTINGS_ROW}
+                        checked={ultracode}
+                        onCheckedChange={(checked) => onSelectReasoning?.(checked ? ULTRACODE : "xhigh")}
+                      >
+                        <span className="inline-flex items-center gap-2">
+                          <EffortIcon id={ULTRACODE} />
+                          {ultracodeChoice.label}
+                        </span>
+                        <SwitchIndicator checked={ultracode} aria-hidden="true" />
+                      </Menu.CheckboxItem>
+                    </Tooltip>
+                  )}
                   {fastChoice && (
                     <Menu.CheckboxItem
-                      className={cn(SETTINGS_ROW, "min-h-9")}
+                      className={SETTINGS_ROW}
                       checked={effectiveServiceTier === fastChoice.id}
                       onCheckedChange={(checked) => {
                         if (value) onSelect({ ...value, serviceTier: checked ? fastChoice.id : "default" });
                       }}
                     >
-                      <span>{m.model_picker_fast_mode()}</span>
+                      <span className="inline-flex items-center gap-2">
+                        <Zap size={14} aria-hidden="true" className="text-accent-amber" />
+                        {m.model_picker_fast_mode()}
+                      </span>
                       <SwitchIndicator checked={effectiveServiceTier === fastChoice.id} aria-hidden="true" />
                     </Menu.CheckboxItem>
                   )}
-                  {fastChoice && (permissionChoices.length > 0 || onSelectAutonomy) && (
-                    <Menu.Separator className="m-1 h-px bg-border-variant" />
-                  )}
+                </Menu.Popup>
+              </Menu.Positioner>
+            </Menu.Portal>
+          </Menu.Root>
+        )}
+        {(permissionChoices.length > 0 || onSelectAutonomy) && (
+          <Menu.Root
+            open={menu === "permissions"}
+            modal={false}
+            onOpenChange={(open) => setMenu((current) => (open ? "permissions" : current === "permissions" ? null : current))}
+          >
+            <Tooltip interactive content={[permissionLabel, autonomyLabel].filter(Boolean).join(" · ")} className="rounded-md">
+              <Menu.Trigger
+                className={PILL}
+                aria-label={`${m.model_picker_permissions()}: ${[permissionLabel, autonomyLabel].filter(Boolean).join(", ")}`}
+              >
+                <PermissionIcon id={effectivePermissionId} />
+                <ChevronDown size={14} className="shrink-0 text-muted" />
+              </Menu.Trigger>
+            </Tooltip>
+            <Menu.Portal container={portalContainer}>
+              <Menu.Positioner className="z-50" side="top" align="end" sideOffset={8} collisionPadding={8} positionMethod="fixed">
+                <Menu.Popup
+                  aria-label={m.model_picker_permissions()}
+                  className={MENU_POPUP}
+                  style={{ width: "min(320px, calc(100vw - 16px))", maxHeight: "min(560px, var(--available-height))" }}
+                >
                   {permissionChoices.length > 0 && (
-                    <SettingsSubmenu
-                      label={m.model_picker_permissions()}
-                      detail={permissionLabel}
-                      choices={permissionChoices}
-                      value={effectivePermissionId}
-                      defaultId={defaultPermissionId}
-                      onSelect={(id) => onSelectPermission?.(id)}
-                    />
+                    <Menu.Group>
+                      <Menu.GroupLabel className={MENU_LABEL}>{m.model_picker_permissions()}</Menu.GroupLabel>
+                      <Menu.RadioGroup
+                        value={effectivePermissionId}
+                        onValueChange={(id) => {
+                          if (typeof id === "string") onSelectPermission?.(id);
+                        }}
+                      >
+                        {permissionChoices.map((choice) => (
+                          <DescribedRadioItem key={choice.id} choice={choice} icon={<PermissionIcon id={choice.id} />} isDefault={choice.id === defaultPermissionId} />
+                        ))}
+                      </Menu.RadioGroup>
+                    </Menu.Group>
                   )}
+                  {permissionChoices.length > 0 && onSelectAutonomy && <Menu.Separator className="m-1 h-px bg-border-variant" />}
                   {onSelectAutonomy && (
-                    <SettingsSubmenu
-                      label={m.model_picker_autonomy()}
-                      detail={autonomyLabel}
-                      choices={autonomyChoices}
-                      value={autonomy ?? DEFAULT_AUTONOMY}
-                      defaultId={DEFAULT_AUTONOMY}
-                      onSelect={(id) => {
-                        const choice = autonomyChoices.find((entry) => entry.id === id);
-                        if (choice) onSelectAutonomy(choice.id);
-                      }}
-                    />
+                    <Menu.Group>
+                      <Menu.GroupLabel className={MENU_LABEL}>{m.model_picker_autonomy()}</Menu.GroupLabel>
+                      <Menu.RadioGroup
+                        value={autonomy ?? DEFAULT_AUTONOMY}
+                        onValueChange={(id) => {
+                          const choice = autonomyChoices.find((entry) => entry.id === id);
+                          if (choice) onSelectAutonomy(choice.id);
+                        }}
+                      >
+                        {autonomyChoices.map((choice) => (
+                          <DescribedRadioItem key={choice.id} choice={choice} icon={choice.icon} isDefault={choice.id === DEFAULT_AUTONOMY} />
+                        ))}
+                      </Menu.RadioGroup>
+                    </Menu.Group>
                   )}
                 </Menu.Popup>
               </Menu.Positioner>

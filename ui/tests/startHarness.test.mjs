@@ -117,7 +117,7 @@ test("a file read finishing after a workspace change cannot update or recreate a
   const stashes = new Map();
   const bindings = {
     FileReader: class { constructor() { reader = this; this.result = "data:,image"; } readAsDataURL() {} },
-    attachments: [], noImageInputError: null, selectedModel: null,
+    cited: { attachments: [] }, noImageInputError: null, selectedModel: null,
     setAttachError: () => {}, setImageRefusedFor: () => {}, setAttachments: () => { updates++; },
     composerScopeRef: { current: { projectId: "p", activeId: "s" } }, composerMountedRef: { current: true },
     stashKey: "1:side:s", composerStashes: stashes, EMPTY_COMPOSER_STASH,

@@ -30,7 +30,7 @@ import { ImageCarousel, ImageCarouselContext } from "./ImageCarousel";
 import { FileChip, FileReference, FileScopeContext, type OpenFile } from "./FileReference";
 import { imageWheelZoom } from "../imageZoom";
 import { CITED_ID } from "../agentMessages";
-import { ChatLinksContext, MessageRefPill } from "./ChatLinks";
+import { CitedRef } from "./ChatLinks";
 import { chatImageTarget, chatImageTargets, citedFilePath, documentAssetTarget, encodeMarkdownPath, firstCitedLine, nativeMarkdownPath, rehypeSafeUrls, splitLineSuffix, type ImageCandidate } from "../markdownTarget";
 
 const ImageResolverContext = createContext<((src: string) => ImageCandidate[]) | undefined>(undefined);
@@ -382,15 +382,9 @@ const InsideLinkContext = createContext(false);
 
 /** A message's ref or a chat's id an agent wrote: a link to it, or as written outside a transcript. */
 function CitedId({ cited, code }: { cited: string; code: boolean }) {
-  const links = useContext(ChatLinksContext);
   const insideLink = useContext(InsideLinkContext);
   const asWritten = code ? <code>{cited}</code> : <>{cited}</>;
-  if (!links || insideLink) return asWritten;
-  if (cited.startsWith("msg_")) return <MessageRefPill cited={cited} />;
-  const chat = links.chat(cited);
-  return chat
-    ? <button type="button" className="file-link cursor-pointer" onClick={() => links.onOpenChat(cited)}>{chat.title}</button>
-    : asWritten;
+  return insideLink ? asWritten : <CitedRef cited={cited} fallback={asWritten} />;
 }
 
 /** Code that looks like a repo path becomes a file reference once it is verified; inside a link it stays code. */
