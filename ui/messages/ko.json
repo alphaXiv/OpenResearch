@@ -1618,5 +1618,7 @@
   "library_empty": "저장한 논문이 없습니다.",
   "library_add_papers": "논문 추가",
   "library_selected": "{count}개 선택됨",
-  "library_open_alphaxiv": "alphaXiv 열기"
+  "library_open_alphaxiv": "alphaXiv 열기",
+  "chat_resize_composer": "메시지 상자 크기 조정",
+  "chat_resize_composer_hint": "드래그하여 크기를 조정합니다. 두 번 클릭하여 재설정합니다."
 }

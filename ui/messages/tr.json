@@ -1618,5 +1618,7 @@
   "library_empty": "Henüz kayıtlı makale yok.",
   "library_add_papers": "Makale ekle",
   "library_selected": "{count} seçildi",
-  "library_open_alphaxiv": "alphaXiv'i aç"
+  "library_open_alphaxiv": "alphaXiv'i aç",
+  "chat_resize_composer": "Mesaj kutusunu yeniden boyutlandır",
+  "chat_resize_composer_hint": "Yeniden boyutlandırmak için sürükleyin. Sıfırlamak için çift tıklayın."
 }

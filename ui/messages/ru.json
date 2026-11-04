@@ -1618,5 +1618,7 @@
   "library_empty": "Сохранённых статей пока нет.",
   "library_add_papers": "Добавить статьи",
   "library_selected": "Выбрано: {count}",
-  "library_open_alphaxiv": "Открыть alphaXiv"
+  "library_open_alphaxiv": "Открыть alphaXiv",
+  "chat_resize_composer": "Изменить размер поля сообщения",
+  "chat_resize_composer_hint": "Перетащите, чтобы изменить размер. Дважды щёлкните, чтобы сбросить."
 }

@@ -1618,5 +1618,7 @@
   "library_empty": "Aún no hay artículos guardados.",
   "library_add_papers": "Añadir artículos",
   "library_selected": "{count} seleccionados",
-  "library_open_alphaxiv": "Abrir alphaXiv"
+  "library_open_alphaxiv": "Abrir alphaXiv",
+  "chat_resize_composer": "Cambiar el tamaño del cuadro de mensaje",
+  "chat_resize_composer_hint": "Arrastra para cambiar el tamaño. Haz doble clic para restablecer."
 }

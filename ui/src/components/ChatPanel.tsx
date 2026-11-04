@@ -272,6 +272,43 @@ const TOOL_OUTPUT_SCAN_LIMIT = 20_000;
 const SELECTION_ACTION_GAP_PX = 8;
 const CHAT_ANNOTATION_HIGHLIGHT_NAME = "chat-annotations";
 const SIDE_CHAT_ANNOTATION_HIGHLIGHT_NAME = "side-chat-annotations";
+const COMPOSER_HEIGHT_KEY = "orx:composer-height";
+const COMPOSER_MIN_HEIGHT = 72;
+const COMPOSER_MAX_VIEWPORT_RATIO = 0.6;
+const COMPOSER_PANE_RESERVE = 220;
+const COMPOSER_KEYBOARD_STEP = 24;
+
+function composerHeightStorageKey(embedded: boolean): string {
+  return embedded ? `${COMPOSER_HEIGHT_KEY}:side` : COMPOSER_HEIGHT_KEY;
+}
+
+function initialComposerHeight(key: string): number | null {
+  try {
+    const height = Number(localStorage.getItem(key));
+    return Number.isFinite(height) && height >= COMPOSER_MIN_HEIGHT && height <= 4000
+      ? Math.round(height)
+      : null;
+  } catch {
+    return null;
+  }
+}
+
+function persistComposerHeight(key: string, height: number | null): void {
+  try {
+    if (height === null) localStorage.removeItem(key);
+    else localStorage.setItem(key, String(Math.round(height)));
+  } catch {}
+}
+
+function maxComposerHeight(textarea: HTMLTextAreaElement | null): number {
+  if (typeof window === "undefined") return COMPOSER_MIN_HEIGHT;
+  const pane = textarea?.closest(".chat-pane") as HTMLElement | null;
+  const paneHeight = pane?.clientHeight ?? window.innerHeight;
+  return Math.max(
+    COMPOSER_MIN_HEIGHT,
+    Math.min(window.innerHeight * COMPOSER_MAX_VIEWPORT_RATIO, paneHeight - COMPOSER_PANE_RESERVE),
+  );
+}
 
 interface SelectionAction {
   text: string;
@@ -5179,6 +5216,15 @@ export function ChatPanel({
   const stickToBottom = useRef(true);
   const [transcriptAtBottom, setTranscriptAtBottom] = useState(true);
   const composerRef = useRef<HTMLTextAreaElement>(null);
+  const composerStorageKey = composerHeightStorageKey(embedded);
+  const [composerHeight, setComposerHeight] = useState<number | null>(() => initialComposerHeight(composerStorageKey));
+  const composerHeightRef = useRef(composerHeight);
+  composerHeightRef.current = composerHeight;
+  const [composerLimit, setComposerLimit] = useState(() => maxComposerHeight(null));
+  const composerAriaValue = Math.min(
+    composerLimit,
+    Math.round(composerHeight ?? composerRef.current?.getBoundingClientRect().height ?? COMPOSER_MIN_HEIGHT),
+  );
   const connection = useRemoteConnection();
   const resumeCancelRef = useRef<(() => void) | null>(null);
   const dataSources = usePopover();
@@ -5358,6 +5404,86 @@ export function ChatPanel({
         addFiles([file], { scope, stashKey: attachmentStashKey });
       }
     })();
+  }
+
+  useEffect(() => {
+    persistComposerHeight(composerStorageKey, composerHeight);
+  }, [composerStorageKey, composerHeight]);
+
+  useEffect(() => {
+    const textarea = composerRef.current;
+    if (!textarea) return;
+    const pane = textarea.closest(".chat-pane") as HTMLElement | null;
+    const clamp = () => {
+      const limit = maxComposerHeight(textarea);
+      setComposerLimit(limit);
+      const current = composerHeightRef.current;
+      if (current !== null && current > limit) setComposerHeight(limit);
+    };
+    clamp();
+    const observer = pane && typeof ResizeObserver !== "undefined"
+      ? new ResizeObserver(clamp)
+      : null;
+    if (observer && pane) observer.observe(pane);
+    window.addEventListener("resize", clamp);
+    return () => {
+      observer?.disconnect();
+      window.removeEventListener("resize", clamp);
+    };
+  }, []);
+
+  function resizeComposer(event: React.PointerEvent<HTMLDivElement>) {
+    const textarea = composerRef.current;
+    if (!textarea) return;
+    event.preventDefault();
+    event.currentTarget.focus({ preventScroll: true });
+    event.currentTarget.setPointerCapture(event.pointerId);
+    const startY = event.clientY;
+    const startHeight = textarea.getBoundingClientRect().height;
+    const limit = maxComposerHeight(textarea);
+    const previousUserSelect = document.body.style.userSelect;
+    document.body.style.userSelect = "none";
+    const onMove = (moveEvent: PointerEvent) => {
+      setComposerHeight(Math.round(Math.min(
+        Math.max(startHeight + startY - moveEvent.clientY, COMPOSER_MIN_HEIGHT),
+        limit,
+      )));
+    };
+    const stop = () => {
+      window.removeEventListener("pointermove", onMove);
+      window.removeEventListener("pointerup", stop);
+      window.removeEventListener("pointercancel", stop);
+      document.body.style.userSelect = previousUserSelect;
+    };
+    window.addEventListener("pointermove", onMove);
+    window.addEventListener("pointerup", stop);
+    window.addEventListener("pointercancel", stop);
+  }
+
+  function resetComposerHeight() {
+    setComposerHeight(null);
+  }
+
+  function nudgeComposerHeight(delta: number) {
+    const textarea = composerRef.current;
+    const startHeight = composerHeight ?? textarea?.getBoundingClientRect().height ?? COMPOSER_MIN_HEIGHT;
+    setComposerHeight(Math.round(Math.min(
+      Math.max(startHeight + delta, COMPOSER_MIN_HEIGHT),
+      maxComposerHeight(textarea),
+    )));
+  }
+
+  function onComposerResizeKeyDown(event: React.KeyboardEvent<HTMLDivElement>) {
+    if (event.key === "ArrowUp") {
+      event.preventDefault();
+      nudgeComposerHeight(COMPOSER_KEYBOARD_STEP);
+    } else if (event.key === "ArrowDown") {
+      event.preventDefault();
+      nudgeComposerHeight(-COMPOSER_KEYBOARD_STEP);
+    } else if (event.key === "Home") {
+      event.preventDefault();
+      resetComposerHeight();
+    }
   }
 
   // The open session, if any (its harness is locked; its model/mode/reasoning
@@ -7569,7 +7695,7 @@ export function ChatPanel({
 
         {/* Docked while a plan awaits a decision, so the approval controls never
           scroll away. Actions mirror the (now compact) inline card's wire. */}
-        <div inert={contentLoading || Boolean(contentError) || historyLoading} className="composer px-3 pb-3 shrink-0 relative z-4 bg-background w-full max-w-readable my-0 mx-auto [&_textarea]:border-0 [&_textarea]:bg-none [&_textarea]:bg-transparent [&_textarea]:resize-none [&_textarea]:pt-2.5 [&_textarea]:px-3 [&_textarea]:pb-1 [&_textarea]:text-base [&_textarea]:field-sizing-content [&_textarea]:min-h-18 [&_textarea]:max-h-45">
+        <div inert={contentLoading || Boolean(contentError) || historyLoading} className={`composer px-3 pb-3 shrink-0 relative z-4 bg-background w-full max-w-readable my-0 mx-auto [&_textarea]:border-0 [&_textarea]:bg-none [&_textarea]:bg-transparent [&_textarea]:resize-none [&_textarea]:pt-2.5 [&_textarea]:px-3 [&_textarea]:pb-1 [&_textarea]:text-base [&_textarea]:min-h-18 ${composerHeight === null ? "[&_textarea]:field-sizing-content [&_textarea]:max-h-45" : "[&_textarea]:field-sizing-fixed [&_textarea]:max-h-none [&_textarea]:overflow-y-auto"}`}>
           {threadMounted && (
             <Tooltip interactive content={m.chat_scroll_to_bottom()} className={`absolute bottom-full left-1/2 z-5 mb-6 -translate-x-1/2 transition-opacity duration-150 ease-standard ${transcriptAtBottom ? "pointer-events-none opacity-0" : "opacity-100"}`}>
               <IconButton
@@ -7723,6 +7849,22 @@ export function ChatPanel({
           )}
           <RemoteConnectionStrip />
           <div inert={connection !== null} className={`composer-box relative flex flex-col border ${bashMode ? "border-accent-amber" : "border-border"} rounded-lg bg-background shadow-control-subtle${connection ? " opacity-60" : ""}`} data-onboarding="composer">
+            <div
+              role="separator"
+              aria-orientation="horizontal"
+              aria-label={m.chat_resize_composer()}
+              aria-valuemin={COMPOSER_MIN_HEIGHT}
+              aria-valuemax={composerLimit}
+              aria-valuenow={composerAriaValue}
+              title={m.chat_resize_composer_hint()}
+              tabIndex={0}
+              onPointerDown={resizeComposer}
+              onDoubleClick={resetComposerHeight}
+              onKeyDown={onComposerResizeKeyDown}
+              className="composer-resizer group flex h-2.5 w-full shrink-0 cursor-row-resize touch-none select-none items-center justify-center outline-none"
+            >
+              <span className={`h-0.5 w-8 rounded-full transition-colors group-hover:bg-resizer-hover group-active:bg-resizer-hover group-focus-visible:ring-2 group-focus-visible:ring-focus-ring group-focus-visible:ring-offset-2 group-focus-visible:ring-offset-background ${composerHeight === null ? "bg-border" : "bg-border-strong"}`} />
+            </div>
             {unconfirmedSend !== null && (
               <div id={unconfirmedSendId} role="alert" className="flex items-start gap-2 pt-2 px-3 text-sm text-text">
                 <span className="flex-1" dir="auto">{m.chat_send_unconfirmed({ error: ltr(unconfirmedSend) })}</span>
@@ -7829,6 +7971,7 @@ export function ChatPanel({
                 aria-describedby={[demoHintVisible && demoHintId, unconfirmedSend !== null && unconfirmedSendId].filter(Boolean).join(" ") || undefined}
                 // Native prose stays visible; the aligned mirror paints only skill tokens.
                 className="relative z-1 min-w-0 overflow-x-hidden bg-transparent"
+                style={composerHeight === null ? undefined : { height: composerHeight, maxHeight: "60vh" }}
                 value={draft}
                 placeholder={
                   steering && activeHarness

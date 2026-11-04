@@ -1618,5 +1618,7 @@
   "library_empty": "अभी कोई पेपर सहेजा नहीं गया है।",
   "library_add_papers": "पेपर जोड़ें",
   "library_selected": "{count} चुने गए",
-  "library_open_alphaxiv": "alphaXiv खोलें"
+  "library_open_alphaxiv": "alphaXiv खोलें",
+  "chat_resize_composer": "संदेश बॉक्स का आकार बदलें",
+  "chat_resize_composer_hint": "आकार बदलने के लिए खींचें। रीसेट करने के लिए डबल-क्लिक करें।"
 }
