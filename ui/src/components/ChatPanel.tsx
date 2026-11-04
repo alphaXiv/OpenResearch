@@ -41,9 +41,10 @@ import { useNavigate } from "@tanstack/react-router";
 import {
   fileMentionContext,
   insertFileMention,
+  insertMentionToken,
   matchFileMentions,
   mentionCandidates,
-  type FileMentionMatch,
+  paperToken,
 } from "../fileMentions";
 import { m } from "../paraglide/messages.js";
 import { formatForDisplay, matchesKeyboardEvent, useAppHotkeys, useHotkey } from "@tanstack/react-hotkeys";
@@ -66,6 +67,7 @@ import {
   Clock,
   CornerDownLeft,
   Copy,
+  Link,
   FileText,
   FlaskConical,
   FolderPlus,
@@ -73,6 +75,7 @@ import {
   Gauge,
   HelpCircle,
   Goal,
+  LibraryBig,
   Lightbulb,
   MessageSquareQuote,
   MessagesSquare,
@@ -83,7 +86,6 @@ import {
   Search,
   SlidersHorizontal,
   SquareTerminal,
-  ToggleRight,
   TriangleAlert,
   Trash2,
   Users,
@@ -115,6 +117,7 @@ import {
   type OrxSource,
   type Autonomy,
   type ChatSession,
+  type CitedMessage,
   type Harness,
   type Project,
   type PromptAnswer,
@@ -155,8 +158,11 @@ import {
   retryStatusLabel,
 } from "../chatRecovery";
 import {
+  attachmentToken,
+  citedAttachments,
   composerStashContent,
   EMPTY_COMPOSER_STASH,
+  nextAttachmentId,
   type ComposerAnnotation,
   type ComposerAttachment,
   type ComposerStash,
@@ -174,12 +180,15 @@ import { LitSourceLogo, parseOrxLit, paperUrl } from "./LitSourceLogo";
 import { LitSourcesList } from "./LitSourcesPicker";
 import { ChatImageScope, Md } from "./Md";
 import { ChatLinksContext, type ChatLinks } from "./ChatLinks";
+import { CITED_ID, messageRef } from "../agentMessages";
 import { PlanStrip } from "./PlanStrip";
 import { ExperimentRunBanner } from "./ExperimentRunBanner";
 import { SETTINGS_NAV, harnessSetupPath, type SettingsTab } from "./SettingsPage";
 import { SkillMenu } from "./SkillMenu";
-import { FileMentionMenu } from "./FileMentionMenu";
-import { ComposerSkillChips, MessageWithChips, skillMarginSpaces } from "./SkillChips";
+import { MentionMenu, type MentionMatch } from "./MentionMenu";
+import { useDebouncedValue } from "./NewProjectForm";
+import { MessageWithChips } from "./SkillChips";
+import { ComposerEditor, type ChipSource, type ComposerEditorHandle } from "./ComposerEditor";
 import { WorkspaceConnection } from "./WorkspaceConnection";
 import { SidebarToggle } from "./Header";
 import { AccountChip } from "./AccountChip";
@@ -233,43 +242,6 @@ const TOOL_OUTPUT_SCAN_LIMIT = 20_000;
 const SELECTION_ACTION_GAP_PX = 8;
 const CHAT_ANNOTATION_HIGHLIGHT_NAME = "chat-annotations";
 const SIDE_CHAT_ANNOTATION_HIGHLIGHT_NAME = "side-chat-annotations";
-const COMPOSER_HEIGHT_KEY = "orx:composer-height";
-const COMPOSER_MIN_HEIGHT = 72;
-const COMPOSER_MAX_VIEWPORT_RATIO = 0.6;
-const COMPOSER_PANE_RESERVE = 220;
-const COMPOSER_KEYBOARD_STEP = 24;
-
-function composerHeightStorageKey(embedded: boolean): string {
-  return embedded ? `${COMPOSER_HEIGHT_KEY}:side` : COMPOSER_HEIGHT_KEY;
-}
-
-function initialComposerHeight(key: string): number | null {
-  try {
-    const height = Number(localStorage.getItem(key));
-    return Number.isFinite(height) && height >= COMPOSER_MIN_HEIGHT && height <= 4000
-      ? Math.round(height)
-      : null;
-  } catch {
-    return null;
-  }
-}
-
-function persistComposerHeight(key: string, height: number | null): void {
-  try {
-    if (height === null) localStorage.removeItem(key);
-    else localStorage.setItem(key, String(Math.round(height)));
-  } catch {}
-}
-
-function maxComposerHeight(textarea: HTMLTextAreaElement | null): number {
-  if (typeof window === "undefined") return COMPOSER_MIN_HEIGHT;
-  const pane = textarea?.closest(".chat-pane") as HTMLElement | null;
-  const paneHeight = pane?.clientHeight ?? window.innerHeight;
-  return Math.max(
-    COMPOSER_MIN_HEIGHT,
-    Math.min(window.innerHeight * COMPOSER_MAX_VIEWPORT_RATIO, paneHeight - COMPOSER_PANE_RESERVE),
-  );
-}
 
 interface SelectionAction {
   text: string;
@@ -3189,6 +3161,7 @@ function ForkControls({
   pagerDisabled,
   onEdit,
   editDisabled,
+  citeRef,
 }: {
   text: string;
   createdAt: number;
@@ -3200,6 +3173,8 @@ function ForkControls({
   pagerDisabled: boolean;
   onEdit: () => void;
   editDisabled: boolean;
+  /** The ref Copy link puts on the clipboard, once the message is saved. */
+  citeRef?: string;
 }) {
   const many = count > 1;
   const sentAt = new Date(createdAt);
@@ -3242,6 +3217,13 @@ function ForkControls({
         <IconButton size="small" aria-label={m.md_copy()} disabled={!text} onClick={copy}>
           <Copy size={14} />
         </IconButton>
+        {citeRef && (
+          <Tooltip interactive content={m.chat_copy_message_link()}>
+            <IconButton size="small" aria-label={m.chat_copy_message_link()} onClick={() => void copyToClipboard(citeRef)}>
+              <Link size={14} />
+            </IconButton>
+          </Tooltip>
+        )}
       </div>
       <Tooltip interactive content={m.chat_panel_edit_and_re_send()}>
         <IconButton size="small"
@@ -3419,7 +3401,7 @@ export const Message = memo(function Message({
         {annotations.length > 0 && (
           <AnnotationsPopover annotations={annotations} variant="sent" />
         )}
-        <div dir="auto" className="msg-user max-w-full bg-panel rounded-2xl py-2.5 px-4 text-base whitespace-pre-wrap wrap-anywhere [&_.skill-chip]:align-baseline">
+        <div dir="auto" className="msg-user max-w-full bg-panel rounded-2xl py-2.5 px-4 text-base whitespace-pre-wrap wrap-anywhere [&_.skill-chip]:align-baseline [&_.context-pill]:border-border [&_.context-pill]:bg-highlight [&_.context-pill:hover]:bg-border">
           {replies?.questionById.has(message.id) && <div className="mb-1 truncate text-subtext">{replies.questionById.get(message.id)}</div>}
           <MessageWithChips text={text} isCommand={isCommand} />
           {images.length > 0 && (
@@ -3454,6 +3436,7 @@ export const Message = memo(function Message({
             pagerDisabled={branchDisabled}
             onEdit={() => setEditDraft(text)}
             editDisabled={forkDisabled}
+            citeRef={messageRef(message.id)}
           />
         )}
       </div>
@@ -3466,6 +3449,7 @@ export const Message = memo(function Message({
   const response = splitResponseParts(turns, predictTextTail, replies);
   const predictingAnswer = predictTextTail && response.answerMessageId === message.id;
   const copyText = predictingAnswer && !message.completedAt ? "" : responseText({ ...message, parts: response.answer });
+  const answerRef = messageRef(response.answerMessageId ?? message.id);
   return (
     <div className="msg-assistant group/turn text-base leading-relaxed text-text min-w-0">
       {turns.length > 0 && <AssistantTurn messages={turns} response={response} options={{
@@ -3510,6 +3494,17 @@ export const Message = memo(function Message({
               <Copy size={14} />
             </IconButton>
           </Tooltip>
+          {answerRef && (
+            <Tooltip interactive content={m.chat_copy_message_link()}>
+              <IconButton
+                size="small"
+                aria-label={m.chat_copy_message_link()}
+                onClick={() => void copyToClipboard(answerRef)}
+              >
+                <Link size={14} />
+              </IconButton>
+            </Tooltip>
+          )}
         </div>
       )}
     </div>
@@ -5036,7 +5031,10 @@ export function ChatPanel({
     listNativeChatsQuery,
     getChatMessagesQuery,
     getProjectStarterPromptsQuery,
+    citedMessageQuery,
   } = useWorkspace().queries;
+  // The alphaXiv account and library belong to the machine the app runs on.
+  const owner = useMachines().owner;
   const { workspaceKey, setScopedQueryData, queryClient, isCurrentScope, deletedSessionIds } = useWorkspace();
   const { useChatState } = useWorkspace().chat;
   const { composerStashes, mountedComposers, composerSeed, forgetComposerSeed } = useWorkspace().composers;
@@ -5172,6 +5170,7 @@ export function ChatPanel({
   const goalArmed = goalScope === composerScopeRef.current;
   // Pasted/dropped/uploaded attachments waiting in the composer, as data URLs.
   const [attachments, setAttachments] = useState<ComposerAttachment[]>([]);
+  const cited = citedAttachments(draft, attachments);
   const [attachError, setAttachError] = useState<string | null>(null);
   const [imageRefusedFor, setImageRefusedFor] = useState<string | null>(null);
   // Unsent composer content belongs to the scope it was typed in — stash on
@@ -5285,16 +5284,7 @@ export function ChatPanel({
   const scrollToEndRef = useRef<(() => void) | null>(null);
   const stickToBottom = useRef(true);
   const [transcriptAtBottom, setTranscriptAtBottom] = useState(true);
-  const composerRef = useRef<HTMLTextAreaElement>(null);
-  const composerStorageKey = composerHeightStorageKey(embedded);
-  const [composerHeight, setComposerHeight] = useState<number | null>(() => initialComposerHeight(composerStorageKey));
-  const composerHeightRef = useRef(composerHeight);
-  composerHeightRef.current = composerHeight;
-  const [composerLimit, setComposerLimit] = useState(() => maxComposerHeight(null));
-  const composerAriaValue = Math.min(
-    composerLimit,
-    Math.round(composerHeight ?? composerRef.current?.getBoundingClientRect().height ?? COMPOSER_MIN_HEIGHT),
-  );
+  const composerRef = useRef<ComposerEditorHandle>(null);
   const connection = useRemoteConnection();
   const resumeCancelRef = useRef<(() => void) | null>(null);
   const dataSources = usePopover();
@@ -5323,8 +5313,6 @@ export function ChatPanel({
   const [skillMenuDismissed, setSkillMenuDismissed] = useState(false);
   const [modelPickerRequest, setModelPickerRequest] = useState(0);
   const [composerCursor, setComposerCursor] = useState(0);
-  // IME guard: mid-composition text can transiently look like a full command.
-  const composingRef = useRef(false);
 
   // Only reachable while the menu is open, which needs a live slash context.
   function pickSkill(skill: SkillInfo) {
@@ -5336,52 +5324,22 @@ export function ChatPanel({
       return;
     }
     // The command replaces the `/query` token in place, so the chip lands where
-    // it was typed and the rest of the message stays untouched. Only a skill
-    // chip is painted wider than its token, so only it reserves a margin.
-    const tokenName = skill.name.replace(/@u$/, "^").replace(/@p$/, "~");
-    const marginSpaces = skill.source === "command" ? 1 : skillMarginSpaces(tokenName, composerRef.current);
-    const next = insertSlashCommand(draft, slashContext, tokenName, marginSpaces);
-    setDraft(next.text);
-    window.requestAnimationFrame(() => {
-      composerRef.current?.focus();
-      composerRef.current?.setSelectionRange(next.cursor, next.cursor);
-      setComposerCursor(next.cursor);
-    });
+    // it was typed and the rest of the message stays untouched.
+    const next = insertSlashCommand(draft, slashContext, skill.name.replace(/@u$/, "^").replace(/@p$/, "~"));
+    composerRef.current?.setText(next.text, next.cursor);
   }
 
-  function pickFileMention(match: FileMentionMatch) {
+  function pickMention(match: MentionMatch) {
     if (!mentionContext) return;
-    const next = insertFileMention(draft, mentionContext, match);
-    setDraft(next.text);
-    window.requestAnimationFrame(() => {
-      composerRef.current?.focus();
-      composerRef.current?.setSelectionRange(next.cursor, next.cursor);
-      setComposerCursor(next.cursor);
-    });
-  }
-
-  /** Backspace just behind a chip deletes the whole command, the way the chip
-   * it paints reads — a single object, not eight characters. */
-  function deleteCommandBehindCaret(textarea: HTMLTextAreaElement): boolean {
-    if (typingCommand) return false;
-    const cursor = textarea.selectionStart;
-    if (composingRef.current || cursor !== textarea.selectionEnd) return false;
-    const tokenEnd = draft.slice(0, cursor).replace(/[ \t]+$/, "").length;
-    const context = slashCommandContext(draft, tokenEnd);
-    if (!context || context.end !== tokenEnd) return false;
-    if (!knownCommand(context.query)) return false;
-    if (cursor > tokenEnd && cursor - tokenEnd !== skillMarginSpaces(context.query, textarea)) return false;
-    const next = removeSlashCommand(draft, { ...context, end: cursor });
-    setDraft(next.text);
-    setComposerCursor(next.cursor);
-    window.requestAnimationFrame(() =>
-      textarea.setSelectionRange(next.cursor, next.cursor),
-    );
-    return true;
+    const next = match.kind === "file"
+      ? insertFileMention(draft, mentionContext, match)
+      : insertMentionToken(draft, mentionContext, match.kind === "paper" ? paperToken(match.paper) : match.id);
+    composerRef.current?.setText(next.text, next.cursor);
   }
 
   /** Queue files (upload button, clipboard paste, or drag-drop) as composer
-   * attachments — images and PDFs, which the harness reads off disk by path. */
+   * attachments — images and PDFs, which the harness reads off disk by path —
+   * cited in the draft at the caret. */
   function addFiles(
     files: File[],
     target?: { scope: typeof composerScopeRef.current; stashKey: string },
@@ -5393,7 +5351,7 @@ export function ChatPanel({
     const TOTAL_BYTES = 40 * 1024 * 1024;
     setAttachError(null);
     setImageRefusedFor(null);
-    let total = attachments.reduce((n, a) => n + a.size, 0);
+    let total = cited.attachments.reduce((n, a) => n + a.size, 0);
     const scope = target?.scope ?? composerScopeRef.current;
     const attachmentStashKey = target?.stashKey ?? stashKey;
     for (const file of files) {
@@ -5415,6 +5373,7 @@ export function ChatPanel({
       reader.onload = () => {
         if (!isCurrentScope(sessionsOptions.queryKey)) return;
         const attachment = {
+          id: nextAttachmentId(),
           dataUrl: reader.result as string,
           mediaType: file.type,
           name: file.name,
@@ -5424,11 +5383,13 @@ export function ChatPanel({
         // the scope it was pasted into, not whatever chat is now showing.
         if (composerMountedRef.current && composerScopeRef.current.projectId === scope.projectId && composerScopeRef.current.activeId === scope.activeId && composerScopeRef.current.mainView === scope.mainView) {
           setAttachments((cur) => [...cur, attachment]);
+          composerRef.current?.insertToken(attachmentToken(attachment));
           return;
         }
         const stash = composerStashes.get(attachmentStashKey) ?? EMPTY_COMPOSER_STASH;
         composerStashes.set(attachmentStashKey, {
           ...stash,
+          draft: [stash.draft, attachmentToken(attachment)].filter(Boolean).join(" "),
           attachments: [...stash.attachments, attachment],
         });
       };
@@ -5436,8 +5397,10 @@ export function ChatPanel({
     }
   }
 
-  function onComposerPaste(e: React.ClipboardEvent) {
-    const files = Array.from(e.clipboardData.items)
+  function onComposerPaste(e: ClipboardEvent) {
+    const data = e.clipboardData;
+    if (!data) return;
+    const files = Array.from(data.items)
       .filter(
         (item) =>
           item.kind === "file" &&
@@ -5451,14 +5414,14 @@ export function ChatPanel({
       addFiles(usable);
       return;
     }
-    const types = Array.from(e.clipboardData.types);
+    const types = Array.from(data.types);
     const hasImageType =
       types.some((type) => type.startsWith("image/")) ||
       files.some((file) => file.type.startsWith("image/"));
     const mayContainImage = hasImageType || types.length === 0 || types.includes("Files");
     const hasText =
       types.some((type) => type.startsWith("text/")) ||
-      Boolean(e.clipboardData.getData("text/plain"));
+      Boolean(data.getData("text/plain"));
     if (!mayContainImage || (hasText && !hasImageType)) {
       return;
     }
@@ -5474,86 +5437,6 @@ export function ChatPanel({
         addFiles([file], { scope, stashKey: attachmentStashKey });
       }
     })();
-  }
-
-  useEffect(() => {
-    persistComposerHeight(composerStorageKey, composerHeight);
-  }, [composerStorageKey, composerHeight]);
-
-  useEffect(() => {
-    const textarea = composerRef.current;
-    if (!textarea) return;
-    const pane = textarea.closest(".chat-pane") as HTMLElement | null;
-    const clamp = () => {
-      const limit = maxComposerHeight(textarea);
-      setComposerLimit(limit);
-      const current = composerHeightRef.current;
-      if (current !== null && current > limit) setComposerHeight(limit);
-    };
-    clamp();
-    const observer = pane && typeof ResizeObserver !== "undefined"
-      ? new ResizeObserver(clamp)
-      : null;
-    if (observer && pane) observer.observe(pane);
-    window.addEventListener("resize", clamp);
-    return () => {
-      observer?.disconnect();
-      window.removeEventListener("resize", clamp);
-    };
-  }, []);
-
-  function resizeComposer(event: React.PointerEvent<HTMLDivElement>) {
-    const textarea = composerRef.current;
-    if (!textarea) return;
-    event.preventDefault();
-    event.currentTarget.focus({ preventScroll: true });
-    event.currentTarget.setPointerCapture(event.pointerId);
-    const startY = event.clientY;
-    const startHeight = textarea.getBoundingClientRect().height;
-    const limit = maxComposerHeight(textarea);
-    const previousUserSelect = document.body.style.userSelect;
-    document.body.style.userSelect = "none";
-    const onMove = (moveEvent: PointerEvent) => {
-      setComposerHeight(Math.round(Math.min(
-        Math.max(startHeight + startY - moveEvent.clientY, COMPOSER_MIN_HEIGHT),
-        limit,
-      )));
-    };
-    const stop = () => {
-      window.removeEventListener("pointermove", onMove);
-      window.removeEventListener("pointerup", stop);
-      window.removeEventListener("pointercancel", stop);
-      document.body.style.userSelect = previousUserSelect;
-    };
-    window.addEventListener("pointermove", onMove);
-    window.addEventListener("pointerup", stop);
-    window.addEventListener("pointercancel", stop);
-  }
-
-  function resetComposerHeight() {
-    setComposerHeight(null);
-  }
-
-  function nudgeComposerHeight(delta: number) {
-    const textarea = composerRef.current;
-    const startHeight = composerHeight ?? textarea?.getBoundingClientRect().height ?? COMPOSER_MIN_HEIGHT;
-    setComposerHeight(Math.round(Math.min(
-      Math.max(startHeight + delta, COMPOSER_MIN_HEIGHT),
-      maxComposerHeight(textarea),
-    )));
-  }
-
-  function onComposerResizeKeyDown(event: React.KeyboardEvent<HTMLDivElement>) {
-    if (event.key === "ArrowUp") {
-      event.preventDefault();
-      nudgeComposerHeight(COMPOSER_KEYBOARD_STEP);
-    } else if (event.key === "ArrowDown") {
-      event.preventDefault();
-      nudgeComposerHeight(-COMPOSER_KEYBOARD_STEP);
-    } else if (event.key === "Home") {
-      event.preventDefault();
-      resetComposerHeight();
-    }
   }
 
   // The open session, if any (its harness is locked; its model/mode/reasoning
@@ -5632,15 +5515,46 @@ export function ChatPanel({
   const mentionQuery = mentionContext?.end === composerCursor ? mentionContext.query : null;
   const mentionTree = useQuery({
     ...getCodeTreeQuery(projectId, activeId ? { sessionId: activeId } : {}),
-    enabled: mentionQuery !== null,
+    // Also loaded for `@path` tokens already in the draft, which chip only when the path exists.
+    enabled: mentionQuery !== null || /(^|\s)@\S/.test(draft),
   });
   const mentionEntries = mentionTree.data?.entries;
   const mentionPool = useMemo(() => mentionCandidates(mentionEntries ?? []), [mentionEntries]);
-  const mentionMatches = useMemo(
-    () => (mentionQuery !== null && !skillMenuDismissed ? matchFileMentions(mentionPool, mentionQuery) : []),
-    [mentionPool, mentionQuery, skillMenuDismissed],
-  );
+  const libraryUserId = owner.queries.useOpenResearchAccount().data?.user?.id;
+  // A `/` in the query browses the checkout, so papers and chats sit that out.
+  const searchesBeyondFiles = mentionQuery !== null && !mentionQuery.includes("/");
+  const paperSearch = useDebouncedValue(mentionQuery ?? "", 200);
+  const mentionPapers = useQuery({
+    queryKey: owner.workspaceKey("mentionPapers", libraryUserId, paperSearch),
+    queryFn: ({ signal }) => owner.api.getAlphaXivPapers(null, null, paperSearch || undefined, signal),
+    enabled: Boolean(libraryUserId) && searchesBeyondFiles,
+    staleTime: 60_000,
+    retry: false,
+  }, owner.queryClient);
+  const mentionMatches = useMemo((): MentionMatch[] => {
+    if (mentionQuery === null || skillMenuDismissed) return [];
+    const files = matchFileMentions(mentionPool, mentionQuery).map((match) => ({ kind: "file" as const, ...match }));
+    if (!searchesBeyondFiles) return files;
+
+    const needle = mentionQuery.toLowerCase();
+    const papers = (mentionPapers.data?.papers ?? [])
+      .slice(0, 3)
+      .map((paper) => ({ kind: "paper" as const, paper }));
+    const chats = sessions
+      .filter((session) => session.id !== activeId && !session.archived)
+      .map((session) => ({
+        kind: "chat" as const,
+        id: session.id,
+        title: chatInfo?.(session.id)?.title ?? session.title ?? m.chat_untitled(),
+        harness: session.harness,
+      }))
+      .filter((chat) => chat.title.toLowerCase().includes(needle))
+      .slice(0, 3);
+    // Room for every section above the fold.
+    return [...files.slice(0, papers.length + chats.length > 0 ? 4 : undefined), ...papers, ...chats];
+  }, [mentionPool, mentionQuery, skillMenuDismissed, searchesBeyondFiles, mentionPapers.data, sessions, activeId, chatInfo]);
   const mentionMenuOpen = mentionMatches.length > 0;
+  const mentionPaths = useMemo(() => new Set(mentionPool.map((candidate) => candidate.path)), [mentionPool]);
   const activeMentionIdx = Math.min(mentionIdx, Math.max(0, mentionMatches.length - 1));
   useEffect(() => setMentionIdx(0), [mentionQuery]);
   // Reconcile the selected model's settings, including stale saved preferences,
@@ -5656,7 +5570,7 @@ export function ChatPanel({
     ? m.chat_model_no_image_input({ model: ltr(harnessModelLabel(selectedModel)) })
     : null;
   const imageInputBlocked =
-    !!noImageInputError && attachments.some((a) => a.mediaType.startsWith("image/"));
+    !!noImageInputError && cited.attachments.some((a) => a.mediaType.startsWith("image/"));
   const imageRefused = !!selectedModel && imageRefusedFor === selectedModel.id;
   const imageInputError = imageInputBlocked || imageRefused ? noImageInputError : null;
   useEffect(() => setImageRefusedFor(null), [selectedModel?.id]);
@@ -6046,12 +5960,7 @@ export function ChatPanel({
     setDraft(next.text);
     setSkillMenuDismissed(true);
     if (runComposerCommand(name)) return;
-    window.requestAnimationFrame(() => {
-      if (composerRef.current?.value !== next.text) return;
-      composerRef.current?.focus();
-      composerRef.current?.setSelectionRange(next.cursor, next.cursor);
-      setComposerCursor(next.cursor);
-    });
+    composerRef.current?.setText(next.text, next.cursor);
   }
 
   // Reconcile deletions and title animations after missed session events.
@@ -6265,6 +6174,27 @@ export function ChatPanel({
     }
     return draft.trim().toLowerCase() === `/${name}`;
   };
+
+  const draftRefs = useMemo(
+    () => [...new Set(Array.from(draft.matchAll(CITED_ID), ([cited]) => cited).filter((cited) => cited.startsWith("msg_")))],
+    [draft],
+  );
+  const combineCited = useCallback(
+    (results: { data?: CitedMessage }[]) => new Map(results.flatMap((result, i) => (result.data ? [[draftRefs[i], result.data] as const] : []))),
+    [draftRefs],
+  );
+  const citedInDraft = useQueries({ queries: draftRefs.map(citedMessageQuery), combine: combineCited });
+
+  const chipSource = useMemo<ChipSource>(() => ({
+    isCommand: knownCommand,
+    message: (ref) => citedInDraft.get(ref),
+    chat: (id) => chatInfo?.(id),
+    skill: (name) => commands.find((command) => command.name === canonicalSkillName(name) && command.source !== "command"),
+    isPath: (path) => !bashMode && mentionPaths.has(path),
+    attachment: (id) => attachments.find((attachment) => attachment.id === id),
+    // `knownCommand` reads the draft, commands and bash mode.
+  }), [draft, commands, bashMode, mentionPaths, attachments, citedInDraft, chatInfo]);
+
   /** Sent messages keep any command token as prose — it was never intercepted. */
   const transcriptSkills = useMemo(
     () => commands.filter((command) => command.source !== "command"),
@@ -6296,7 +6226,7 @@ export function ChatPanel({
     !pendingPlan &&
     !awaitingInput &&
     !pendingPermission &&
-    attachments.length === 0 &&
+    cited.attachments.length === 0 &&
     annotations.length === 0;
 
   // Plan opens are stamped with the session like file opens are. Memoized
@@ -6377,15 +6307,8 @@ export function ChatPanel({
   const telemetrySurface: FirstActionSurface =
     projectId === DEMO_PROJECT_ID ? "demo" : "project";
   const applyStarterPrompt = (prompt: string) => {
-    setDraft(prompt);
     setSkillMenuDismissed(false);
-    window.requestAnimationFrame(() => {
-      const el = composerRef.current;
-      if (!el) return;
-      el.focus();
-      el.setSelectionRange(prompt.length, prompt.length);
-      setComposerCursor(prompt.length);
-    });
+    composerRef.current?.setText(prompt, prompt.length);
   };
   // Seeds without taking focus; focus may still belong to the welcome dialog.
   // Declared after the stash-restore effect so `current` below is the scope's
@@ -6406,14 +6329,14 @@ export function ChatPanel({
     if ((!newChatPending && !composerPending) || mainView !== "chat" || contentLoading || contentError || historyLoading) return;
     // The welcome dialog restores its previous focus on unmount; run after that.
     const frame = window.requestAnimationFrame(() => {
-      const el = composerRef.current;
-      if (!el) return;
-      el.focus();
-      if (document.activeElement !== el) return;
+      const composer = composerRef.current;
+      if (!composer?.dom) return;
+      composer.focus();
+      if (!composer.dom.contains(document.activeElement)) return;
       focusedComposerNonce.current = composerFocusNonce;
       if (newChatPending) setNewChatFocusProject(null);
-      el.setSelectionRange(el.value.length, el.value.length);
-      el.scrollIntoView({ block: "nearest" });
+      composer.focus("end");
+      composer.dom.scrollIntoView({ block: "nearest" });
     });
     return () => window.cancelAnimationFrame(frame);
   }, [composerFocusNonce, newChatFocusProject, projectId, activeId, mainView, contentLoading, contentError, historyLoading]);
@@ -6502,8 +6425,11 @@ export function ChatPanel({
     const planPermissionMode = planRequested && activeHarness?.id === "claude-code"
       ? toggledPlanMode ? "plan" : "auto"
       : undefined;
-    const text = composerCommand ? composerCommand.prompt : originalText;
-    const pending = attachments;
+    // Attachments travel in the order the text cites them.
+    const sending = citedAttachments(composerCommand ? composerCommand.prompt : originalText, attachments);
+    const text = sending.text;
+    const pending = sending.attachments;
+    const attachmentsAtSend = attachments;
     const pendingAnnotations = annotations;
     const wireAnnotations = pendingAnnotations.map((annotation) => ({
       text: annotation.text,
@@ -6637,11 +6563,11 @@ export function ChatPanel({
       composerLiveRef.current = {
         ...live,
         draft: live.draft === draft ? "" : live.draft,
-        attachments: live.attachments === pending ? [] : live.attachments,
+        attachments: live.attachments === attachmentsAtSend ? [] : live.attachments,
         annotations: live.annotations === pendingAnnotations ? [] : live.annotations,
       };
       setDraft((current) => current === draft ? "" : current);
-      setAttachments((current) => current === pending ? [] : current);
+      setAttachments((current) => current === attachmentsAtSend ? [] : current);
       setAnnotations((current) => current === pendingAnnotations ? [] : current);
       setAttachError(null);
       setImageRefusedFor(null);
@@ -6851,12 +6777,7 @@ export function ChatPanel({
 
   function exitBashMode() {
     const next = withoutBashPrefix(draft);
-    setDraft(next);
-    window.requestAnimationFrame(() => {
-      composerRef.current?.focus();
-      composerRef.current?.setSelectionRange(next.length, next.length);
-      setComposerCursor(next.length);
-    });
+    composerRef.current?.setText(next, next.length);
   }
 
   /** Enter in bash mode: run the command where the agent works and show the
@@ -7656,7 +7577,7 @@ export function ChatPanel({
                       action: "starter_click",
                     });
                     // Don't auto-send past an unavailable agent or a non-empty composer.
-                    const composerEmpty = !draft.trim() && attachments.length === 0 && annotations.length === 0;
+                    const composerEmpty = !draft.trim() && annotations.length === 0;
                     if (edit || !activeHarness?.agentReady || !composerEmpty) applyStarterPrompt(item.prompt);
                     else void send({ starter: item.prompt });
                   };
@@ -7775,7 +7696,7 @@ export function ChatPanel({
 
         {/* Docked while a plan awaits a decision, so the approval controls never
           scroll away. Actions mirror the (now compact) inline card's wire. */}
-        <div inert={contentLoading || Boolean(contentError) || historyLoading} className={`composer px-3 pb-3 shrink-0 relative z-4 bg-background w-full max-w-readable my-0 mx-auto [&_textarea]:border-0 [&_textarea]:bg-none [&_textarea]:bg-transparent [&_textarea]:resize-none [&_textarea]:pt-2.5 [&_textarea]:px-3 [&_textarea]:pb-1 [&_textarea]:text-base [&_textarea]:min-h-18 ${composerHeight === null ? "[&_textarea]:field-sizing-content [&_textarea]:max-h-45" : "[&_textarea]:field-sizing-fixed [&_textarea]:max-h-none [&_textarea]:overflow-y-auto"}`}>
+        <div inert={contentLoading || Boolean(contentError) || historyLoading} className="composer px-3 pb-3 shrink-0 relative z-4 bg-background w-full max-w-readable my-0 mx-auto">
           {threadMounted && (
             <Tooltip interactive content={m.chat_scroll_to_bottom()} className={`absolute bottom-full left-1/2 z-5 mb-6 -translate-x-1/2 transition-opacity duration-150 ease-standard ${transcriptAtBottom ? "pointer-events-none opacity-0" : "opacity-100"}`}>
               <IconButton
@@ -7926,274 +7847,244 @@ export function ChatPanel({
             />
           )}
           <RemoteConnectionStrip />
-          <div inert={connection !== null} className={`composer-box relative flex flex-col border ${bashMode ? "border-accent-amber" : "border-border"} rounded-lg bg-background shadow-control-subtle${connection ? " opacity-60" : ""}`} data-onboarding="composer">
-            <div
-              role="separator"
-              aria-orientation="horizontal"
-              aria-label={m.chat_resize_composer()}
-              aria-valuemin={COMPOSER_MIN_HEIGHT}
-              aria-valuemax={composerLimit}
-              aria-valuenow={composerAriaValue}
-              title={m.chat_resize_composer_hint()}
-              tabIndex={0}
-              onPointerDown={resizeComposer}
-              onDoubleClick={resetComposerHeight}
-              onKeyDown={onComposerResizeKeyDown}
-              className="composer-resizer group flex h-2.5 w-full shrink-0 cursor-row-resize touch-none select-none items-center justify-center outline-none"
-            >
-              <span className={`h-0.5 w-8 rounded-full transition-colors group-hover:bg-resizer-hover group-active:bg-resizer-hover group-focus-visible:ring-2 group-focus-visible:ring-focus-ring group-focus-visible:ring-offset-2 group-focus-visible:ring-offset-background ${composerHeight === null ? "bg-border" : "bg-border-strong"}`} />
-            </div>
-            {unconfirmedSend !== null && (
-              <div id={unconfirmedSendId} role="alert" className="flex items-start gap-2 pt-2 px-3 text-sm text-text">
-                <span className="flex-1" dir="auto">{m.chat_send_unconfirmed({ error: ltr(unconfirmedSend) })}</span>
-                <button type="button" className="underline cursor-pointer" onClick={() => {
-                  composerLiveRef.current = { ...composerLiveRef.current, unconfirmedSend: null };
-                  setUnconfirmedSend(null);
-                  composerRef.current?.focus();
-                }}>
-                  {m.chat_panel_dismiss_demo_hint()}
-                </button>
-              </div>
-            )}
-            {activeHarness && !activeHarness.agentReady && (
-              <div className="composer-harness-warning py-2 px-3 text-subtext text-sm leading-normal border-b border-b-border-variant [&_strong]:text-accent-amber [&_strong]:font-medium [&_code]:font-mono [&_code]:text-text">
-                {activeHarness.catalogPending ? (
-                  <span>{activeHarness.name} — {m.onboarding_checking()}</span>
-                ) : (
-                  <>
-                    <strong>{activeHarness.name} {m.chat_panel_is_unavailable()}</strong>{" "}
-                    {activeHarness.agentNote
-                      ? renderNote(activeHarness.agentNote, onRunSetup && {
-                        canRun: (command) => setupPath(command) !== undefined,
-                        onRun: (command) => {
-                          const path = setupPath(command);
-                          if (path) onRunSetup(command, path);
-                        },
-                      })
-                      : m.chat_recheck_setup()}
-                  </>
-                )}
-              </div>
-            )}
-            {skillMenuOpen && (
-              <SkillMenu
-                skills={skillMatches}
-                activeIndex={activeSkillIdx}
-                onPick={pickSkill}
-                onHover={setSkillIdx}
-              />
-            )}
-            {mentionMenuOpen && (
-              <FileMentionMenu
-                matches={mentionMatches}
-                activeIndex={activeMentionIdx}
-                onPick={pickFileMention}
-                onHover={setMentionIdx}
-              />
-            )}
-            {annotations.length > 0 && (
-              <ComposerAnnotations
-                annotations={annotations}
-                onClear={() => {
-                  setAnnotations([]);
-                  window.requestAnimationFrame(() => composerRef.current?.focus());
-                }}
-                onRemove={(id) => {
-                  const remaining = annotations.filter((annotation) => annotation.id !== id);
-                  setAnnotations(remaining);
-                  if (remaining.length === 0) {
-                    window.requestAnimationFrame(() => composerRef.current?.focus());
-                  }
-                }}
-              />
-            )}
-            {attachments.length > 0 && (
-              <div className="composer-attachments flex flex-wrap gap-1.5 pt-2 px-3 pb-0">
-                {attachments.map((a, i) => {
-                  const remove = () =>
-                    setAttachments((cur) => cur.filter((_, j) => j !== i));
-                  return a.mediaType === "application/pdf" ? (
-                    <div key={i} className="attachment-file [&_button]:absolute [&_button]:-top-[5px] [&_button]:-right-[5px] [&_button]:inline-flex [&_button]:items-center [&_button]:justify-center [&_button]:w-4 [&_button]:h-4 [&_button]:p-0 [&_button]:border [&_button]:border-border [&_button]:rounded-full [&_button]:bg-surface [&_button]:text-text [&_button]:cursor-pointer [&_button:hover]:bg-text [&_button:hover]:text-background relative inline-flex items-center gap-2 max-w-55 py-2 px-2.5 border border-border rounded-sm text-text bg-surface [&_svg]:shrink-0 [&_svg]:text-muted" title={a.name}>
-                      <FileText size={22} />
-                      <span className="attachment-file-name overflow-hidden text-ellipsis whitespace-nowrap text-sm">{a.name ?? "document.pdf"}</span>
-                      <button title={m.chat_panel_remove_file()} aria-label={m.chat_panel_remove_file()} onClick={remove}>
-                        <X size={12} />
-                      </button>
-                    </div>
+          <div inert={connection !== null} className={`composer-frame flex flex-col rounded-xl bg-surface${connection ? " opacity-60" : ""}`} data-onboarding="composer">
+            <div className={`composer-box relative flex flex-col rounded-xl border ${bashMode ? "border-accent-amber" : "border-border"} bg-background shadow-control-subtle`}>
+              {unconfirmedSend !== null && (
+                <div id={unconfirmedSendId} role="alert" className="flex items-start gap-2 pt-2 px-3 text-sm text-text">
+                  <span className="flex-1" dir="auto">{m.chat_send_unconfirmed({ error: ltr(unconfirmedSend) })}</span>
+                  <button type="button" className="underline cursor-pointer" onClick={() => {
+                    composerLiveRef.current = { ...composerLiveRef.current, unconfirmedSend: null };
+                    setUnconfirmedSend(null);
+                    composerRef.current?.focus();
+                  }}>
+                    {m.chat_panel_dismiss_demo_hint()}
+                  </button>
+                </div>
+              )}
+              {activeHarness && !activeHarness.agentReady && (
+                <div className="composer-harness-warning py-2 px-3 text-subtext text-sm leading-normal border-b border-b-border-variant [&_strong]:text-accent-amber [&_strong]:font-medium [&_code]:font-mono [&_code]:text-text">
+                  {activeHarness.catalogPending ? (
+                    <span>{activeHarness.name} — {m.onboarding_checking()}</span>
                   ) : (
-                    <div key={i} className="attachment-thumb relative [&_img]:w-13 [&_img]:h-13 [&_img]:object-cover [&_img]:border [&_img]:border-border [&_img]:rounded-sm [&_img]:block [&_button]:absolute [&_button]:-top-[5px] [&_button]:-right-[5px] [&_button]:inline-flex [&_button]:items-center [&_button]:justify-center [&_button]:w-4 [&_button]:h-4 [&_button]:p-0 [&_button]:border [&_button]:border-border [&_button]:rounded-full [&_button]:bg-surface [&_button]:text-text [&_button]:cursor-pointer [&_button:hover]:bg-text [&_button:hover]:text-background">
-                      <img src={a.dataUrl} alt={m.chat_pasted_image()} />
-                      <button title={m.chat_panel_remove_image()} aria-label={m.chat_panel_remove_image()} onClick={remove}>
-                        <X size={12} />
-                      </button>
-                    </div>
-                  );
-                })}
-              </div>
-            )}
-            {(imageInputError ?? attachError) && (
-              <div className="composer-attach-error pt-1.5 px-3 pb-0 text-sm text-accent-red" role="alert">
-                {imageInputError ?? attachError}
-              </div>
-            )}
-            {settingsError && (
-              <div className="composer-settings-error pt-1.5 px-3 pb-0 text-sm text-accent-red" role="alert">
-                {settingsError}
-              </div>
-            )}
-            <div className={`composer-input relative flex overflow-hidden [&_textarea]:flex-1 ${bashMode ? "[&_textarea]:font-mono [&_textarea]:text-sm" : ""}`}>
-              <textarea
-                dir="auto"
-                {...{ writingsuggestions: "false" }}
-                ref={composerRef}
-                aria-describedby={[demoHintVisible && demoHintId, unconfirmedSend !== null && unconfirmedSendId].filter(Boolean).join(" ") || undefined}
-                // Native prose stays visible; the aligned mirror paints only skill tokens.
-                className="relative z-1 min-w-0 overflow-x-hidden bg-transparent"
-                style={composerHeight === null ? undefined : { height: composerHeight, maxHeight: "60vh" }}
-                value={draft}
-                placeholder={
-                  steering && activeHarness
-                    ? m.chat_steer_placeholder({ harness: ltr(activeHarness.name), shortcut: ltr(queueChord) })
-                    : composerSelection
-                      ? activeHarness?.agentReady
-                        ? m.chat_message_harness({ harness: ltr(harnessLabel(composerSelection.harness, activeHarness?.name)) })
-                        : m.chat_harness_unavailable({ harness: ltr(harnessLabel(composerSelection.harness, activeHarness?.name)) })
-                      : m.chat_ask_agent_placeholder()
-                }
-                rows={2}
-                onPaste={onComposerPaste}
-                onDragOver={(e) => {
-                  if (e.dataTransfer.types.includes("Files")) e.preventDefault();
-                }}
-                onDrop={(e) => {
-                  if (e.dataTransfer.files.length === 0) return;
-                  e.preventDefault();
-                  addFiles(Array.from(e.dataTransfer.files));
-                }}
-                onChange={(e) => {
-                  const v = e.target.value;
-                  const cursor = e.target.selectionStart;
-                  setComposerCursor(cursor);
-                  // Composer commands run rather than send: each fires the moment
-                  // its space lands, but not mid-IME-composition,
-                  // where the text can transiently look complete.
-                  const completedCommand =
-                    cursor > 0 && /\s/.test(v[cursor - 1]) && !composingRef.current && bashCommand(v) === null
-                      ? slashCommandContext(v, cursor - 1)
-                      : null;
-                  const completedName = completedCommand && resolveComposerCommand(completedCommand.query);
-                  const restOfDraft = completedCommand
-                    ? (v.slice(0, completedCommand.start) + v.slice(completedCommand.end)).trim()
-                    : "";
-                  if (
-                    completedCommand && completedName
-                    && (completedName === "plan" || completedName === "goal" || (!takesArgument(completedName) && !restOfDraft))
-                    && commands.some((command) => command.name === completedName)
-                  ) {
-                    activateComposerCommand(completedName, v, completedCommand);
-                    return;
+                    <>
+                      <strong>{activeHarness.name} {m.chat_panel_is_unavailable()}</strong>{" "}
+                      {activeHarness.agentNote
+                        ? renderNote(activeHarness.agentNote, onRunSetup && {
+                          canRun: (command) => setupPath(command) !== undefined,
+                          onRun: (command) => {
+                            const path = setupPath(command);
+                            if (path) onRunSetup(command, path);
+                          },
+                        })
+                        : m.chat_recheck_setup()}
+                    </>
+                  )}
+                </div>
+              )}
+              {skillMenuOpen && (
+                <SkillMenu
+                  skills={skillMatches}
+                  activeIndex={activeSkillIdx}
+                  onPick={pickSkill}
+                  onHover={setSkillIdx}
+                />
+              )}
+              {mentionMenuOpen && (
+                <MentionMenu
+                  matches={mentionMatches}
+                  activeIndex={activeMentionIdx}
+                  onPick={pickMention}
+                  onHover={setMentionIdx}
+                />
+              )}
+              {annotations.length > 0 && (
+                <ComposerAnnotations
+                  annotations={annotations}
+                  onClear={() => {
+                    setAnnotations([]);
+                    window.requestAnimationFrame(() => composerRef.current?.focus());
+                  }}
+                  onRemove={(id) => {
+                    const remaining = annotations.filter((annotation) => annotation.id !== id);
+                    setAnnotations(remaining);
+                    if (remaining.length === 0) {
+                      window.requestAnimationFrame(() => composerRef.current?.focus());
+                    }
+                  }}
+                />
+              )}
+              {(imageInputError ?? attachError) && (
+                <div className="composer-attach-error pt-1.5 px-3 pb-0 text-sm text-accent-red" role="alert">
+                  {imageInputError ?? attachError}
+                </div>
+              )}
+              {settingsError && (
+                <div className="composer-settings-error pt-1.5 px-3 pb-0 text-sm text-accent-red" role="alert">
+                  {settingsError}
+                </div>
+              )}
+              <div className="composer-input flex min-w-0 items-end">
+                <ComposerEditor
+                  ref={composerRef}
+                  value={draft}
+                  describedBy={[demoHintVisible && demoHintId, unconfirmedSend !== null && unconfirmedSendId].filter(Boolean).join(" ") || undefined}
+                  placeholder={
+                    steering && activeHarness
+                      ? m.chat_steer_placeholder({ harness: ltr(activeHarness.name), shortcut: ltr(queueChord) })
+                      : composerSelection
+                        ? activeHarness?.agentReady
+                          ? m.chat_message_harness({ harness: ltr(harnessLabel(composerSelection.harness, activeHarness?.name)) })
+                          : m.chat_harness_unavailable({ harness: ltr(harnessLabel(composerSelection.harness, activeHarness?.name)) })
+                        : m.chat_ask_agent_placeholder()
                   }
-                  setDraft(v);
-                  setSkillMenuDismissed(false);
-                }}
-                onSelect={(e) => setComposerCursor(e.currentTarget.selectionStart)}
-                onCompositionStart={() => {
-                  composingRef.current = true;
-                }}
-                onCompositionEnd={() => {
-                  composingRef.current = false;
-                }}
-                onKeyDown={(e) => {
-                  // WebKit can end composition before the confirming keydown (keyCode 229).
-                  if (composingRef.current || e.nativeEvent.isComposing || e.nativeEvent.keyCode === 229) {
-                    e.stopPropagation();
-                    return;
-                  }
-                  if (skillMenuOpen) {
-                    if (e.key === "ArrowDown" || e.key === "ArrowUp") {
-                      e.preventDefault();
-                      const delta = e.key === "ArrowDown" ? 1 : -1;
-                      if (activeSkillIdx >= 0) {
-                        const index = selectableSkillIndices.indexOf(activeSkillIdx);
-                        setSkillIdx(selectableSkillIndices[(index + delta + selectableSkillIndices.length) % selectableSkillIndices.length]);
-                      }
-                      return;
-                    }
-                    if ((e.key === "Tab" || e.key === "Enter") && activeSkillIdx >= 0) {
-                      e.preventDefault();
-                      pickSkill(skillMatches[activeSkillIdx]);
-                      return;
-                    }
-                    if (e.key === "Escape") {
-                      e.stopPropagation();
-                      e.preventDefault();
-                      setSkillMenuDismissed(true);
-                      return;
-                    }
-                  }
-                  if (mentionMenuOpen) {
-                    if (e.key === "ArrowDown" || e.key === "ArrowUp") {
-                      e.preventDefault();
-                      const delta = e.key === "ArrowDown" ? 1 : -1;
-                      setMentionIdx(
-                        (activeMentionIdx + delta + mentionMatches.length) % mentionMatches.length,
-                      );
-                      return;
-                    }
-                    // A bare trailing `@` still sends on Enter; `@` is common in prose.
+                  plain={bashMode}
+                  chipSource={chipSource}
+                  projectId={projectId}
+                  draftKey={stashKey}
+                  resizeKey={embedded ? "orx:composer-height:side" : "orx:composer-height"}
+                  onFiles={addFiles}
+                  onPaste={onComposerPaste}
+                  onChange={(v, cursor, typed) => {
+                    setComposerCursor(cursor);
+                    if (v === draft) return;
+                    // Composer commands run rather than send: each fires the moment
+                    // its space lands, but not mid-IME-composition, where the text
+                    // can transiently look complete.
+                    const completedCommand =
+                      typed && cursor > 0 && /\s/.test(v[cursor - 1]) && bashCommand(v) === null
+                        ? slashCommandContext(v, cursor - 1)
+                        : null;
+                    const completedName = completedCommand && resolveComposerCommand(completedCommand.query);
+                    const restOfDraft = completedCommand
+                      ? (v.slice(0, completedCommand.start) + v.slice(completedCommand.end)).trim()
+                      : "";
                     if (
-                      e.key === "Tab"
-                      || (mentionQuery !== "" && matchesKeyboardEvent(e.nativeEvent, "Enter"))
+                      completedCommand && completedName
+                      && (completedName === "plan" || completedName === "goal" || (!takesArgument(completedName) && !restOfDraft))
+                      && commands.some((command) => command.name === completedName)
                     ) {
-                      e.preventDefault();
-                      pickFileMention(mentionMatches[activeMentionIdx]);
+                      activateComposerCommand(completedName, v, completedCommand);
                       return;
                     }
-                    if (e.key === "Escape") {
-                      e.stopPropagation();
-                      e.preventDefault();
-                      setSkillMenuDismissed(true);
-                      return;
+                    setDraft(v);
+                    setSkillMenuDismissed(false);
+                  }}
+                  onKeyDown={(e) => {
+                    if (skillMenuOpen) {
+                      if (e.key === "ArrowDown" || e.key === "ArrowUp") {
+                        e.preventDefault();
+                        const delta = e.key === "ArrowDown" ? 1 : -1;
+                        if (activeSkillIdx >= 0) {
+                          const index = selectableSkillIndices.indexOf(activeSkillIdx);
+                          setSkillIdx(selectableSkillIndices[(index + delta + selectableSkillIndices.length) % selectableSkillIndices.length]);
+                        }
+                        return;
+                      }
+                      if ((e.key === "Tab" || e.key === "Enter") && activeSkillIdx >= 0) {
+                        e.preventDefault();
+                        pickSkill(skillMatches[activeSkillIdx]);
+                        return;
+                      }
+                      if (e.key === "Escape") {
+                        e.stopPropagation();
+                        e.preventDefault();
+                        setSkillMenuDismissed(true);
+                        return;
+                      }
                     }
-                  }
-                  // Backspace just behind a chip deletes the whole command.
-                  if (e.key === "Backspace" && deleteCommandBehindCaret(e.currentTarget)) {
-                    e.preventDefault();
-                    return;
-                  }
-                  if (e.key === "Enter" && !e.shiftKey) {
-                    e.preventDefault();
-                    if (bashMode) {
-                      void runShell();
-                      return;
+                    if (mentionMenuOpen) {
+                      if (e.key === "ArrowDown" || e.key === "ArrowUp") {
+                        e.preventDefault();
+                        const delta = e.key === "ArrowDown" ? 1 : -1;
+                        setMentionIdx(
+                          (activeMentionIdx + delta + mentionMatches.length) % mentionMatches.length,
+                        );
+                        return;
+                      }
+                      // A bare trailing `@` still sends on Enter; `@` is common in prose.
+                      if (
+                        e.key === "Tab"
+                        || (mentionQuery !== "" && matchesKeyboardEvent(e, "Enter"))
+                      ) {
+                        e.preventDefault();
+                        pickMention(mentionMatches[activeMentionIdx]);
+                        return;
+                      }
+                      if (e.key === "Escape") {
+                        e.stopPropagation();
+                        e.preventDefault();
+                        setSkillMenuDismissed(true);
+                        return;
+                      }
                     }
-                    void send({ queue: matchesKeyboardEvent(e.nativeEvent, "Mod+Enter") });
-                  }
-                }}
-              />
-              {/* After the textarea: its ref must be attached before the mirror
-              * measures it. */}
-              <ComposerSkillChips
-                text={draft}
-                editingTokenEnd={slashContext?.end}
-                isCommand={knownCommand}
-                skills={commands}
-                projectId={projectId}
-                textareaRef={composerRef}
-              />
+                  }}
+                  onSubmit={(e) => {
+                    if (bashMode) void runShell();
+                    else void send({ queue: matchesKeyboardEvent(e, "Mod+Enter") });
+                  }}
+                />
+                <div className="flex shrink-0 items-center gap-1 p-1.5">
+                  <input
+                    ref={fileInputRef}
+                    type="file"
+                    accept="application/pdf,image/png,image/jpeg,image/gif,image/webp"
+                    multiple
+                    hidden
+                    onChange={(e) => {
+                      addFiles(Array.from(e.target.files ?? []));
+                      e.target.value = ""; // let the same file be re-picked
+                    }}
+                  />
+                  <Tooltip interactive content={m.chat_panel_attach_a_pdf_or_image()}>
+                    <IconButton
+                      type="button"
+                      className="composer-attach"
+                      aria-label={m.chat_panel_attach_a_pdf_or_image()}
+                      onClick={() => fileInputRef.current?.click()}
+                    >
+                      <Paperclip size={16} />
+                    </IconButton>
+                  </Tooltip>
+                  {busy ? (
+                    <Tooltip interactive content={m.chat_panel_stop()}>
+                      <IconButton className="send-btn" variant="stop" aria-label={m.chat_panel_stop()} onClick={stop}>
+                        <X size={16} />
+                      </IconButton>
+                    </Tooltip>
+                  ) : (
+                    <Tooltip interactive content={bashMode ? m.chat_panel_run() : m.chat_panel_send()}>
+                      <IconButton
+                        className={`send-btn ${demoHintVisible && activeHarness?.agentReady ? "ring-2 ring-primary ring-offset-2 ring-offset-background" : ""}`}
+                        variant="primary"
+                        aria-label={bashMode ? m.chat_panel_run() : m.chat_panel_send()}
+                        onClick={() => void (bashMode ? runShell() : send())}
+                        disabled={
+                          bashMode
+                            ? !shellCommand || (!activeId && !activeHarness?.agentReady)
+                            : !activeHarness?.agentReady ||
+                            (!draft.trim() && annotations.length === 0)
+                        }
+                      >
+                        <CornerDownLeft size={16} />
+                      </IconButton>
+                    </Tooltip>
+                  )}
+                </div>
+              </div>
             </div>
-            <div className="composer-actions flex min-w-0 justify-end items-center gap-2 pt-1.5 px-2 pb-2">
+            <div className="composer-actions flex min-w-0 items-center gap-1 px-1.5 py-1">
               <div className="option-picker relative inline-flex shrink-0" ref={dataSources.ref}>
                 <Tooltip interactive content={m.chat_panel_data_sources()}>
                   <IconButton
                     type="button"
-                    className="composer-bare"
+                    size="small"
+                    className={`composer-bare ${BAR_BUTTON}`}
                     aria-label={m.chat_panel_data_sources()}
                     aria-haspopup="dialog"
                     aria-expanded={dataSources.open}
                     onClick={() => dataSources.setOpen((open) => !open)}
                   >
-                    <ToggleRight size={16} />
+                    <LibraryBig size={16} />
                   </IconButton>
                 </Tooltip>
                 {dataSources.open && (
@@ -8203,42 +8094,19 @@ export function ChatPanel({
                   </div>
                 )}
               </div>
-              <input
-                ref={fileInputRef}
-                type="file"
-                accept="application/pdf,image/png,image/jpeg,image/gif,image/webp"
-                multiple
-                hidden
-                onChange={(e) => {
-                  addFiles(Array.from(e.target.files ?? []));
-                  e.target.value = ""; // let the same file be re-picked
-                }}
-              />
-              <Tooltip interactive content={m.chat_panel_attach_a_pdf_or_image()}>
-                <IconButton
-                  type="button"
-                  className="composer-attach"
-                  aria-label={m.chat_panel_attach_a_pdf_or_image()}
-                  onClick={() => fileInputRef.current?.click()}
-                >
-                  <Paperclip size={16} />
-                </IconButton>
-              </Tooltip>
-              <LibraryPicker composerRef={composerRef} onAdd={(papers) => {
-                const references = papers.map((paper) => `${paper.title}\n${paper.url}`).join("\n\n");
-                const prefix = draft.trim() ? `${draft.trimEnd()}\n\n` : "";
-                const next = `${prefix}${references}\n\n`;
-                setDraft(next);
-                window.requestAnimationFrame(() => {
+              <LibraryPicker
+                className={`composer-bare ${BAR_BUTTON}`}
+                onAdd={(papers) => window.requestAnimationFrame(() => {
                   composerRef.current?.focus();
-                  composerRef.current?.setSelectionRange(next.length, next.length);
-                  setComposerCursor(next.length);
-                });
-              }} />
+                  composerRef.current?.insertToken(papers.map(paperToken).join(" "));
+                })}
+              />
               {steeringDelegate && activeSession && (
                 <Tooltip interactive content={m.chat_notify_parent()}>
                   <IconButton
                     type="button"
+                    size="small"
+                    className={BAR_BUTTON}
                     aria-label={m.chat_notify_parent()}
                     aria-pressed
                     active
@@ -8252,6 +8120,7 @@ export function ChatPanel({
                 <Tooltip interactive content={goalArmed ? m.goal_command_description() : m.chat_panel_clear_goal({ goal: autoDir(sessionGoal) })}>
                   <Button
                     type="button"
+                    size="small"
                     variant="purple"
                     active
                     className="group max-w-60"
@@ -8273,6 +8142,7 @@ export function ChatPanel({
                 <Tooltip interactive content={m.chat_panel_exit_plan_mode()}>
                   <Button
                     type="button"
+                    size="small"
                     variant="amber"
                     active
                     className="group"
@@ -8291,9 +8161,10 @@ export function ChatPanel({
                 <Tooltip interactive content={m.chat_panel_exit_bash_mode()}>
                   <Button
                     type="button"
+                    size="small"
                     variant="ghost"
                     active
-                    className="group"
+                    className={`group ${BAR_BUTTON}`}
                     aria-label={m.chat_panel_exit_bash_mode()}
                     onClick={exitBashMode}
                   >
@@ -8309,7 +8180,7 @@ export function ChatPanel({
               {/* The model picker reflects the open session (harness locked once it
                 exists); the global default only applies before the first
                 message. */}
-              <div className="flex min-w-0 items-center">
+              <div className="flex min-w-0 items-center gap-0.5">
                 <ModelPicker
                   sessionHarness={openSession?.harness.startsWith("acp:") ? activeHarness : undefined}
                   value={composerSelection}
@@ -8334,30 +8205,6 @@ export function ChatPanel({
                 />
                 <ContextMeter usage={openSession?.contextUsage} />
               </div>
-              {busy ? (
-                <Tooltip interactive content={m.chat_panel_stop()}>
-                  <IconButton className="send-btn" variant="stop" aria-label={m.chat_panel_stop()} onClick={stop}>
-                    <X size={16} />
-                  </IconButton>
-                </Tooltip>
-              ) : (
-                <Tooltip interactive content={bashMode ? m.chat_panel_run() : m.chat_panel_send()}>
-                  <IconButton
-                    className={`send-btn ${demoHintVisible && activeHarness?.agentReady ? "ring-2 ring-primary ring-offset-2 ring-offset-background" : ""}`}
-                    variant="primary"
-                    aria-label={bashMode ? m.chat_panel_run() : m.chat_panel_send()}
-                    onClick={() => void (bashMode ? runShell() : send())}
-                    disabled={
-                      bashMode
-                        ? !shellCommand || (!activeId && !activeHarness?.agentReady)
-                        : !activeHarness?.agentReady ||
-                        (!draft.trim() && attachments.length === 0 && annotations.length === 0)
-                    }
-                  >
-                    <CornerDownLeft size={16} />
-                  </IconButton>
-                </Tooltip>
-              )}
             </div>
           </div>
         </div>
@@ -8367,6 +8214,9 @@ export function ChatPanel({
     </>
   );
 }
+
+/** Bar controls sit on the surface tint, where the default surface hover vanishes. */
+const BAR_BUTTON = "[&:hover:not(:disabled)]:bg-hover-muted [&.active]:bg-hover-muted";
 
 const COMPOSER_HINT_CLASS =
   "flex items-center gap-2.5 mb-2.5 py-2 ps-3.5 pe-2 rounded-lg border border-border bg-surface text-text text-sm leading-normal";

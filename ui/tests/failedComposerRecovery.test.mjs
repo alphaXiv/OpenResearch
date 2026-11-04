@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import test from "node:test";
 import ts from "typescript";
-import { composerStashContent, EMPTY_COMPOSER_STASH } from "../src/composerStash.ts";
+import { citedAttachments, composerStashContent, EMPTY_COMPOSER_STASH } from "../src/composerStash.ts";
 import { queryModules } from "./queryModules.mjs";
 
 const file = ts.createSourceFile("ChatPanel.tsx", readFileSync(new URL("../src/components/ChatPanel.tsx", import.meta.url), "utf8"), ts.ScriptTarget.Latest, true, ts.ScriptKind.TSX);
@@ -18,11 +18,14 @@ function find(name) {
 }
 const code = ts.transpileModule(`${find("mergeFailedComposer")}\n${find("send")}\nreturn send;`, { compilerOptions: { target: ts.ScriptTarget.ES2022 } }).outputText;
 
+/** The draft cites its one attachment, as a pasted image does. */
+const ORIGINAL = "original [Image #1]";
+
 class RejectedResponseError extends Error {}
 
 function setup({ side = false, sessionId = "s", busy = false, steering = false, history = async () => ({}), submission = async () => ({ accepted: false }), deferred = false } = {}) {
   let rejectSend, resolveSend;
-  let state = { draft: "original", attachments: [{ dataUrl: "data:,old", mediaType: "image/png", size: 1 }], annotations: [{ id: "a", text: "old selection" }], unconfirmedSend: null };
+  let state = { draft: ORIGINAL, attachments: [{ id: 1, dataUrl: "data:,old", mediaType: "image/png", size: 1 }], annotations: [{ id: "a", text: "old selection" }], unconfirmedSend: null };
   const composerLiveRef = { current: state };
   const updates = [];
   const stashes = new Map(), mounted = new Map(), actions = [], deleted = new Set();
@@ -40,7 +43,7 @@ function setup({ side = false, sessionId = "s", busy = false, steering = false, 
     projectId: "p", mainView: "chat", activeId: sessionId, composerScopeRef: scope, composerLiveRef,
     composerMountedRef: { current: true }, sessionsOptions: { queryKey: ["workspace", 1] },
     isCurrentScope: (key) => key[1] === generation, deletedSessionIds: deleted,
-    composerStashes: stashes, mountedComposers: mounted, composerStashContent, EMPTY_COMPOSER_STASH,
+    composerStashes: stashes, mountedComposers: mounted, composerStashContent, citedAttachments, EMPTY_COMPOSER_STASH,
     setDraft: update("draft"), setAttachments: update("attachments"), setAnnotations: update("annotations"),
     setUnconfirmedSend: update("unconfirmedSend"),
     setAttachError: () => {}, setImageRefusedFor: () => {}, setGoalScope: () => {}, setSkillMenuDismissed: () => {},
@@ -93,8 +96,8 @@ function mountComposer(s) {
 
 for (const busy of [false, true]) {
   for (const unmounted of [false, true]) {
-    for (const newer of ["original", "newer"]) {
-      test(`failed ${busy ? "queued" : "normal"} send preserves ${newer === "original" ? "identical" : "different"} later draft ${unmounted ? "after unmount" : "in the active chat"}`, async () => {
+    for (const newer of [ORIGINAL, "newer"]) {
+      test(`failed ${busy ? "queued" : "normal"} send preserves ${newer === ORIGINAL ? "identical" : "different"} later draft ${unmounted ? "after unmount" : "in the active chat"}`, async () => {
         const s = setup({ busy });
         s.stashes.set(s.key, s.state);
         const cleanup = mountComposer(s);
@@ -106,7 +109,7 @@ for (const busy of [false, true]) {
         if (unmounted) { cleanup(); s.unmount(); }
         s.reject(new RejectedResponseError("rejected"));
         await task;
-        assert.equal(unmounted ? s.stashes.get(s.key).draft : s.state.draft, `original\n\n${newer}`);
+        assert.equal(unmounted ? s.stashes.get(s.key).draft : s.state.draft, `${ORIGINAL}\n\n${newer}`);
       });
     }
   }
@@ -118,9 +121,9 @@ test("failure before the clear renders restores one draft", async () => {
   mountComposer(s);
   s.render();
   await s.send();
-  assert.equal(s.bindings.composerLiveRef.current.draft, "original");
+  assert.equal(s.bindings.composerLiveRef.current.draft, ORIGINAL);
   s.render();
-  assert.equal(s.state.draft, "original");
+  assert.equal(s.state.draft, ORIGINAL);
 });
 
 test("unmount before the clear renders does not stash the sent draft", async () => {
@@ -134,7 +137,7 @@ test("unmount before the clear renders does not stash the sent draft", async () 
   s.unmount();
   s.reject(new RejectedResponseError("rejected"));
   await task;
-  assert.equal(s.stashes.get(s.key).draft, "original");
+  assert.equal(s.stashes.get(s.key).draft, ORIGINAL);
 });
 
 test("failed plan toggle before the clear renders restores one draft", async () => {
@@ -151,9 +154,9 @@ test("failed plan toggle before the clear renders restores one draft", async () 
   s.render();
   const send = new Function(...Object.keys(s.bindings), code)(...Object.values(s.bindings));
   await send();
-  assert.equal(s.bindings.composerLiveRef.current.draft, "original");
+  assert.equal(s.bindings.composerLiveRef.current.draft, ORIGINAL);
   s.render();
-  assert.equal(s.state.draft, "original");
+  assert.equal(s.state.draft, ORIGINAL);
 });
 
 test("failed plan toggle after unmount before the clear renders restores one draft", async () => {
@@ -175,7 +178,7 @@ test("failed plan toggle after unmount before the clear renders restores one dra
   s.unmount();
   rejectToggle(new Error("toggle failed"));
   await task;
-  assert.equal(s.stashes.get(s.key).draft, "original");
+  assert.equal(s.stashes.get(s.key).draft, ORIGINAL);
 });
 
 for (const side of [false, true]) {
@@ -186,7 +189,7 @@ for (const side of [false, true]) {
     s.switchAway();
     s.reject(new RejectedResponseError("rejected"));
     await task;
-    assert.deepEqual(s.stashes.get(s.key), { draft: "original", attachments: s.bindings.attachments, annotations: s.bindings.annotations, unconfirmedSend: null, pendingClientTurn: null });
+    assert.deepEqual(s.stashes.get(s.key), { draft: ORIGINAL, attachments: s.bindings.attachments, annotations: s.bindings.annotations, unconfirmedSend: null, pendingClientTurn: null });
     assert.equal(s.actions.at(-1).sessionId, "s");
     assert.equal(s.state.draft, "");
   });
@@ -202,7 +205,7 @@ test("recovery merges newer content, including non-equivalent annotation IDs", a
   s.reject(new RejectedResponseError("rejected"));
   await task;
   const restored = s.stashes.get(s.key);
-  assert.equal(restored.draft, "original\n\nnewer");
+  assert.equal(restored.draft, `${ORIGINAL}\n\nnewer`);
   assert.deepEqual(restored.attachments, [...s.bindings.attachments, ...newer.attachments]);
   assert.deepEqual(restored.annotations.map((item) => item.text), ["old selection", "new selection"]);
   assert.notEqual(restored.annotations[0].id, restored.annotations[1].id);
@@ -215,7 +218,7 @@ test("a newly created session receives recovery after its original composer unmo
   s.unmount();
   s.reject();
   await task;
-  assert.equal(s.stashes.get("1:side:created").draft, "original");
+  assert.equal(s.stashes.get("1:side:created").draft, ORIGINAL);
   assert.equal(s.stashes.has(s.key), false);
 });
 
@@ -251,7 +254,7 @@ test("a failed queued send restores its side composer and surfaces the error", a
   s.switchAway();
   s.reject(new RejectedResponseError("rejected"));
   await task;
-  assert.equal(s.stashes.get(s.key).draft, "original");
+  assert.equal(s.stashes.get(s.key).draft, ORIGINAL);
   assert.equal(s.actions.at(-1).type, "localError");
 });
 
@@ -263,7 +266,7 @@ for (const update of ["event", "refresh"]) {
     s.unmount();
     s.reject(new TypeError("network"));
     await task;
-    assert.equal(s.stashes.get(s.key)?.draft, "original");
+    assert.equal(s.stashes.get(s.key)?.draft, ORIGINAL);
 
     const serverMessage = { id: "server", role: "user", parts: [], createdAt: 1 };
     const snapshot = { messages: [serverMessage], queued: [], activeLeafId: "server" };
@@ -276,7 +279,7 @@ for (const update of ["event", "refresh"]) {
     if (update === "event") store.dispatchChat("p", { type: "upsertMessage", sessionId: "s", message: serverMessage }, true);
     else await client.fetchQuery({ ...options, staleTime: 0 });
     assert.deepEqual(client.getQueryData(options.queryKey).messages.map((message) => message.id), ["server"]);
-    assert.equal(s.stashes.get(s.key)?.draft, "original");
+    assert.equal(s.stashes.get(s.key)?.draft, ORIGINAL);
 
     let effect;
     function visit(node) {
@@ -299,7 +302,7 @@ for (const update of ["event", "refresh"]) {
     const mount = ts.transpileModule(`${find("mergeFailedComposer")}\n${effect}`, { compilerOptions: { target: ts.ScriptTarget.ES2022 } }).outputText;
     new Function(...Object.keys(bindings), mount)(...Object.values(bindings));
     assert.ok(cleanup);
-    assert.equal(current.draft, "original");
+    assert.equal(current.draft, ORIGINAL);
     assert.equal(current.unconfirmedSend, "network");
     current = { ...current, draft: "edited", attachments: [], annotations: [] };
     live.current = current;
@@ -340,7 +343,7 @@ test("a failure after returning updates the mounted composer without losing newe
   current = { draft: "newer", attachments: [{ dataUrl: "data:,new" }], annotations: [{ id: "b", text: "new selection" }] };
   s.reject();
   await task;
-  assert.equal(current.draft, "original\n\nnewer");
+  assert.equal(current.draft, `${ORIGINAL}\n\nnewer`);
   assert.equal(current.attachments.length, 2);
   assert.deepEqual(current.annotations.map((item) => item.text), ["old selection", "new selection"]);
 });
@@ -353,7 +356,7 @@ for (const busy of [false, true]) {
     s.unmount();
     s.reject(new RejectedResponseError("rejected"));
     await task;
-    assert.equal(s.stashes.get(s.key).draft, "original");
+    assert.equal(s.stashes.get(s.key).draft, ORIGINAL);
     assert.equal(s.stashes.get(s.key).attachments.length, 1);
     assert.equal(s.stashes.get(s.key).annotations.length, 1);
     assert.equal(s.stashes.get(s.key).unconfirmedSend, null);
@@ -427,7 +430,7 @@ for (const busy of [false, true]) {
     s.unmount();
     s.reject(new TypeError("network"));
     await task;
-    assert.equal(s.stashes.get(s.key).draft, "original");
+    assert.equal(s.stashes.get(s.key).draft, ORIGINAL);
     assert.equal(s.stashes.get(s.key).unconfirmedSend, "network");
     assert.equal(s.actions.some((action) => action.type === "localError"), false);
   });
@@ -438,7 +441,7 @@ test("a failed history read restores before any message is submitted", async () 
   const task = s.send();
   s.switchAway();
   await task;
-  assert.equal(s.stashes.get(s.key).draft, "original");
+  assert.equal(s.stashes.get(s.key).draft, ORIGINAL);
   assert.equal(s.actions.at(-1).type, "localError");
 });
 
@@ -451,7 +454,7 @@ test("a session creation failure restores the unsaved composer and reports an er
   const task = send();
   s.switchAway();
   await task;
-  assert.equal(s.stashes.get(s.key).draft, "original");
+  assert.equal(s.stashes.get(s.key).draft, ORIGINAL);
   assert.match(alerts[0], /creation failed/);
 });
 

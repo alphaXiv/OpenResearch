@@ -39,7 +39,7 @@ export function ContextMeter({ usage }: { usage?: ContextUsage }) {
         <div className="option-picker relative inline-flex shrink-0">
           <Popover.Trigger
             type="button"
-            className={`${pct === null ? "inline-flex h-8 items-center rounded-md px-1 transition-[background,color] duration-150 ease-standard hover:bg-surface" : "inline-flex h-8 w-8 shrink-0 items-center justify-center rounded-md text-text transition-[background,color] duration-150 ease-standard hover:bg-surface"} composer-bare context-ring text-sm text-text`}
+            className={`${pct === null ? "inline-flex h-7 items-center rounded-md px-1" : "inline-flex size-7 shrink-0 items-center justify-center rounded-md"} composer-bare context-ring text-sm text-subtext transition-[background,color] duration-150 ease-standard hover:bg-hover-muted hover:text-text`}
             title={m.context_meter_context_window_used()}
             aria-label={m.context_meter_context_window_used()}
           >

@@ -89,6 +89,26 @@ export function matchFileMentions(candidates: FileMentionCandidate[], query: str
   return ranked.slice(0, MAX_MATCHES).map(({ match }) => ({ path: match.path, directory: match.directory }));
 }
 
+/** A paper as a draft cites it: a markdown link the agent can follow, shown as a chip. */
+export function paperToken(paper: { title: string; url: string }): string {
+  return `[${paper.title.replace(/[[\]]/g, "").replace(/\s+/g, " ").trim()}](${paper.url})`;
+}
+
+/** A markdown link to a paper's alphaXiv page, as `paperToken` writes it. */
+export const PAPER_LINK = /\[(?<paperTitle>[^\]\n]+)\]\((?<paperUrl>https?:\/\/[^\s)]*alphaxiv[^\s)]*\/abs\/[^\s)]+)\)/g;
+
+/** Replace the `@query` token with `token`, followed by a space. */
+export function insertMentionToken(
+  text: string,
+  context: FileMentionContext,
+  token: string,
+): { text: string; cursor: number } {
+  const before = text.slice(0, context.start) + token;
+  const after = text.slice(context.end);
+  const spaced = /^\s/.test(after) ? after : ` ${after}`;
+  return { text: before + spaced, cursor: before.length + 1 };
+}
+
 /** Replace the `@query` token with the picked path. A file gets a trailing
  * space; an unquoted directory keeps the caret inside the token so the menu continues. */
 export function insertFileMention(

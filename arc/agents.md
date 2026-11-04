@@ -218,10 +218,12 @@ only the agent reads the refs expanded and the instructions around them. The
 dashboard shows it as the sender's message, and a finished run by its outcome.
 
 **Messages travel by reference.** Each user message reaches its agent tagged
-with a short ref from its id. A ref in a task or message expands to the cited
-message, its chat and its attachments, so a delegate reads the user's own words
-rather than a paraphrase. In the dashboard, a ref or chat id an agent writes is
-a link to that message or chat. An agent can read any chat. It can message or answer
+with a short ref from its id. A ref in a task or message, the user's included,
+expands to the cited message, its chat and its attachments, so a delegate reads
+the user's own words rather than a paraphrase. In the dashboard, a ref is a
+link to that message wherever it is written, and a chat id an agent writes is a
+link to that chat; Copy link on a message puts its ref on the clipboard, and the
+composer shows a pasted ref as a chip. An agent can read any chat. It can message or answer
 its own delegates, and any other chat whose permission mode orx can read and is
 no broader than its own, and it can stop its own delegates.
 

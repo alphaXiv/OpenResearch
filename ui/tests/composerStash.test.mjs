@@ -50,3 +50,14 @@ test("machines with cloned project and chat IDs keep their prompt seeds and fail
   alpha.forgetComposerSeed("same-project");
   assert.equal(beta.composerSeed("same-project"), "Reproduce Beta");
 });
+
+test("a draft sends the attachments it cites, renumbered in order of mention", async () => {
+  const { citedAttachments } = await import("../src/composerStash.ts");
+  const image = { id: 7, dataUrl: "data:,a", mediaType: "image/png", size: 1 };
+  const pdf = { id: 3, dataUrl: "data:,b", mediaType: "application/pdf", size: 1 };
+  const deleted = { id: 9, dataUrl: "data:,c", mediaType: "image/png", size: 1 };
+  assert.deepEqual(
+    citedAttachments("see [PDF #3] then [Image #7], again [PDF #3], and [Image #42]", [image, pdf, deleted]),
+    { text: "see [PDF #1] then [Image #2], again [PDF #1], and [Image #42]", attachments: [pdf, image] },
+  );
+});

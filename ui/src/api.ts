@@ -1552,6 +1552,8 @@ export interface LocalModelConnection {
   models: Record<string, number>;
 }
 
+export type CitedMessage = { projectId: string | null; sessionId: string; messageId: string; harness: HarnessId | null; preview: string };
+
 export interface ChatActiveRun {
   sessionId: string;
   run: Run;
@@ -2462,10 +2464,7 @@ export function createApi(
     );
 
   /** The message an agent cited by ref: where it lives, the agent that wrote it if one did, and its first words. */
-  const citedMessage = (cited: string) =>
-    get<{ projectId: string | null; sessionId: string; messageId: string; harness: HarnessId | null; preview: string }>(
-      `/api/chat/messages/${encodeURIComponent(cited)}`,
-    );
+  const citedMessage = (cited: string) => get<CitedMessage>(`/api/chat/messages/${encodeURIComponent(cited)}`);
 
   const renameChatSession = (sessionId: string, title: string) =>
     patch<{ session: ChatSession }>(`/api/chat/sessions/${sessionId}`, { title }).then(

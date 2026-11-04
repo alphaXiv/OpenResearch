@@ -684,7 +684,7 @@ export default function App({ runtime, projectId, pane }: { runtime: RuntimeInfo
       if (focusWasInPanel) pendingTabFocus.current = rightTabKey(fallback);
       setRightTab(fallback);
     } else {
-      if (focusWasInPanel) bodyRef.current?.querySelector<HTMLElement>(".chat-pane .composer-input textarea")?.focus();
+      if (focusWasInPanel) bodyRef.current?.querySelector<HTMLElement>(".chat-pane .composer-input .cm-content")?.focus();
       closePanel();
       setPanelMax(false);
     }
