@@ -126,6 +126,17 @@ async fn isolated(test: &str) -> Option<PathBuf> {
             axum::http::Method::GET,
             "recovery must never create a job"
         );
+        if let Ok(body) = std::fs::read(root.join("inspect-response.json")) {
+            let status = std::fs::read_to_string(root.join("inspect-status"))
+                .unwrap_or_else(|_| "200".into())
+                .parse::<u16>()
+                .unwrap();
+            return (
+                axum::http::StatusCode::from_u16(status).unwrap(),
+                Json(serde_json::from_slice::<Value>(&body).unwrap()),
+            )
+                .into_response();
+        }
         let jobs = if root.join("created").exists() {
             json!([{"id":"hf-1", "status":{"stage":"RUNNING"}, "labels":{"or_run":"run"}}])
         } else {
@@ -392,6 +403,43 @@ async fn ray_submission_id_survives_lost_response_and_observations_are_batched()
     std::fs::remove_dir_all(root).unwrap();
 }
 
+#[test]
+fn provider_terminal_observations_keep_source_finish_times_and_exit_codes() {
+    for (stage, code, expected) in [
+        (
+            "FAILED",
+            Some(17),
+            Observation::Exited {
+                finished_at: Some(123),
+                code: Some(17),
+                signal: None,
+            },
+        ),
+        (
+            "CANCELLED",
+            Some(137),
+            Observation::Cancelled {
+                finished_at: Some(123),
+                code: Some(137),
+                signal: None,
+            },
+        ),
+        (
+            "FAILED",
+            None,
+            Observation::Failed {
+                finished_at: Some(123),
+                reason: "FAILED".into(),
+            },
+        ),
+    ] {
+        assert_eq!(
+            super::api::stage(stage, None, code, Some(100), Some(123)),
+            expected
+        );
+    }
+}
+
 #[tokio::test]
 async fn k8s_recovery_resumes_staging_and_ready_is_immutable() {
     let Some(root) = isolated("k8s_recovery_resumes_staging_and_ready_is_immutable").await else {
@@ -408,7 +456,7 @@ with (root/'kubectl.log').open('a') as f: f.write(' '.join(a)+'\n')
 if '--dry-run=client' in a:
     print(sys.stdin.read())
 elif a[0]=='get' and a[1]=='pods':
-    print('pod-1',end='')
+    print('{"items":[]}' if a[-1]=='json' else 'pod-1',end='')
 elif a[0]=='get' and a[1]=='job' and a[2]!='-n' and (root/'finished').exists():
     print('{"status":{"succeeded":1}}')
 elif a[0]=='get':
@@ -1809,4 +1857,225 @@ esac
         adapter.recover(&intent).await,
         Recovery::Unknown { .. }
     ));
+}
+
+#[tokio::test]
+async fn providers_reject_credentials_and_preserve_numeric_exits() {
+    let Some(root) = isolated("providers_reject_credentials_and_preserve_numeric_exits").await
+    else {
+        return;
+    };
+    for launcher in ["modal-python", "vercel-python", "kubectl"] {
+        script(
+            &root.join("bin").join(launcher),
+            &format!(
+                r#"#!/bin/sh
+cd '{}'
+if test -f inspect-error; then cat inspect-error >&2; exit 1; fi
+case "$*" in
+  *"get pods"*) cat pods.json ;;
+  *) cat inspect-response.json ;;
+esac
+"#,
+                root.display()
+            ),
+        );
+    }
+    let engine = engine(&root);
+    let endpoint = std::env::var("HF_ENDPOINT").unwrap();
+    for (kind, response, rejection) in [
+        ("ray_job", json!({"status":"FAILED", "driver_exit_code":7}), ""),
+        ("hf_job", json!({"id":"job", "status":{"stage":"ERROR", "message":"Job failed with exit code: 7. Reason: Error"}}), ""),
+        ("vercel_job", json!({"stage":"ERROR", "exitCode":7}), "vercel.sandbox._internal.errors.SandboxApiError: HTTP 403: Not authorized (code=forbidden)"),
+        ("modal_job", json!({"stage":"ERROR", "exitCode":7}), "modal.exception.AuthError: Token is not authorized"),
+        ("k8s_job", json!({"status":{"conditions":[{"type":"Failed","status":"True","reason":"BackoffLimitExceeded"}]}}), "Error from server (Forbidden): jobs.batch is forbidden"),
+    ] {
+        let target = if kind == "ray_job" {
+            endpoint.as_str()
+        } else {
+            "org"
+        };
+        let ids = match kind {
+            "vercel_job" => vec!["box".into(), "process".into()],
+            "k8s_job" => vec!["job/job".into()],
+            _ => vec!["job".into()],
+        };
+        let handle = super::api::test_handle(kind, Some(target), None, ids);
+        let metadata = BackendDescriptor::parse(&json!({"kind":kind}).to_string()).unwrap();
+        engine.store().upsert_run(&crate::store::StoredRun {
+            id: kind.into(),
+            experiment_id: "exp".into(),
+            project_id: "proj".into(),
+            status: "running".into(),
+            backend_json: crate::engine::handle::backend_json(kind, Some(&handle), &metadata).unwrap(),
+            command: "exit 7".into(),
+            created_at: 1,
+            updated_at: 1,
+            ended_at: None,
+            exit_code: None,
+            commit_sha: None,
+            result_markdown: None,
+            cancel_requested: false,
+            cancel_reason: None,
+            chat_session_id: None,
+        }).unwrap();
+
+        let clock = Arc::new(TestClock::new());
+        let provider = super::api::provider(kind).unwrap();
+        let adapter = (provider.build)(
+            &crate::engine::handle::ApiAccount {
+                target: Some(target.into()),
+                context: None,
+            },
+            clock.clone(),
+            root.join("spools"),
+        ).unwrap();
+        let runs = [WatchedRun { id: kind.into(), handle }];
+        std::fs::write(root.join("inspect-response.json"), response.to_string()).unwrap();
+        std::fs::write(root.join("pods.json"), json!({"items":[{
+            "metadata":{"annotations":{"kubectl.kubernetes.io/default-container":"main"}},
+            "status":{"containerStatuses":[
+                {"name":"sidecar", "state":{"terminated":{"exitCode":99}}},
+                {"name":"main", "state":{"terminated":{"exitCode":7}}}
+            ]}
+        }]}).to_string()).unwrap();
+
+        let rejections = match kind {
+            "ray_job" | "hf_job" => vec![("401", true), ("403", true), ("503", false)],
+            "vercel_job" => vec![
+                ("SandboxApiError: HTTP 401: Unauthorized", true),
+                (rejection, true),
+                ("connection timed out", false),
+            ],
+            "modal_job" => vec![
+                ("GRPCError: (<Status.UNAUTHENTICATED: 16>, 'Token rejected')", true),
+                ("GRPCError: (<Status.PERMISSION_DENIED: 7>, 'Access denied')", true),
+                (rejection, true),
+                ("connection timed out", false),
+            ],
+            _ => vec![
+                ("Error from server (Unauthorized): You must be logged in to the server", true),
+                (rejection, true),
+                ("connection timed out", false),
+            ],
+        };
+        for (rejection, needs_auth) in rejections {
+            let file = if kind == "ray_job" || kind == "hf_job" {
+                "inspect-status"
+            } else {
+                "inspect-error"
+            };
+            std::fs::write(root.join(file), rejection).unwrap();
+            let observations = adapter.observe(&runs, Duration::from_secs(5)).await;
+            assert_eq!(observations.len(), 1, "{kind}: {observations:?}");
+            let (_, observation) = observations.into_iter().next().unwrap();
+            assert!(
+                matches!(
+                    (needs_auth, &observation),
+                    (true, Observation::NeedsAuth { .. }) | (false, Observation::Unreachable { .. })
+                ),
+                "{kind}: {observation:?}"
+            );
+            engine.observe(kind, observation).unwrap();
+            assert_eq!(engine.load(kind).unwrap().0.status, "running");
+            assert_eq!(
+                matches!(engine.load(kind).unwrap().1.contact, crate::store::Contact::NeedsAuth { .. }),
+                needs_auth
+            );
+            std::fs::remove_file(root.join(file)).unwrap();
+            clock.advance(Duration::from_secs(10));
+        }
+        for (_, observation) in adapter.observe(&runs, Duration::from_secs(5)).await {
+            engine.observe(kind, observation).unwrap();
+        }
+
+        let row = engine.load(kind).unwrap().0;
+        assert_eq!(row.status, "failed", "{kind}");
+        assert_eq!(row.exit_code, Some(7), "{kind}");
+
+        let cancel_id = format!("{kind}-cancel");
+        let cancel_runs = [WatchedRun {
+            id: cancel_id.clone(),
+            handle: runs[0].handle.clone(),
+        }];
+        let pending_cancel = crate::store::StoredRun {
+            id: cancel_id.clone(),
+            status: "running".into(),
+            exit_code: None,
+            ended_at: None,
+            ..row
+        };
+        engine.store().upsert_run(&pending_cancel).unwrap();
+        assert!(engine.store().accept_run_cancel(&cancel_id, Some("Dashboard stop")).unwrap().is_some());
+        let response = match kind {
+            "ray_job" => json!({"status":"FAILED", "driver_exit_code":137}),
+            "hf_job" => json!({"id":"job", "status":{"stage":"ERROR", "message":"Job failed with exit code: 137. Reason: Error"}}),
+            "k8s_job" => response,
+            _ => json!({"stage":"ERROR", "exitCode":137}),
+        };
+        std::fs::write(root.join("inspect-response.json"), response.to_string()).unwrap();
+        clock.advance(Duration::from_secs(10));
+        for (id, observation) in adapter.observe(&cancel_runs, Duration::from_secs(5)).await {
+            engine.observe(&id, observation).unwrap();
+        }
+        let row = engine.load(&cancel_id).unwrap().0;
+        assert_eq!(row.status, "cancelled", "{kind}");
+        assert_eq!(row.exit_code, Some(if kind == "k8s_job" { 7 } else { 137 }), "{kind}");
+    }
+}
+
+#[tokio::test]
+async fn hf_exit_evidence_requires_the_provider_failure_format() {
+    let Some(root) = isolated("hf_exit_evidence_requires_the_provider_failure_format").await else {
+        return;
+    };
+    let account = HfAccount {
+        namespace: "org".into(),
+    };
+    let run = WatchedRun {
+        id: "run".into(),
+        handle: super::api::test_handle("hf_job", Some("org"), None, vec!["job".into()]),
+    };
+    for (stage, message, expected) in [
+        (
+            "ERROR",
+            "Job failed with exit code: 7. Reason: Error",
+            Some(7),
+        ),
+        (
+            "ERROR",
+            "Job failed with exit code: -7. Reason: Error",
+            Some(-7),
+        ),
+        (
+            "ERROR",
+            "Job failed with exit code: seven. Reason: Error",
+            None,
+        ),
+        ("ERROR", "Could not start: image unavailable", None),
+    ] {
+        std::fs::write(
+            root.join("inspect-response.json"),
+            json!({"id":"job", "status":{"stage":stage, "message":message}}).to_string(),
+        )
+        .unwrap();
+        let observation = super::api::Api::inspect(&account, &run).await.unwrap();
+        match expected {
+            Some(code) => assert_eq!(
+                observation,
+                Observation::Exited {
+                    finished_at: None,
+                    code: Some(code),
+                    signal: None
+                }
+            ),
+            None => assert_eq!(
+                observation,
+                Observation::Failed {
+                    finished_at: None,
+                    reason: message.into()
+                }
+            ),
+        }
+    }
 }

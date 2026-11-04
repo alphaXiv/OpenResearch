@@ -753,6 +753,7 @@ fn prepare_docs(
 pub struct JobState {
     pub stage: String,
     pub message: Option<String>,
+    pub exit_code: Option<i32>,
 }
 
 pub async fn inspect_job(context: Option<&str>, namespace: &str, name: &str) -> Result<JobState> {
@@ -768,6 +769,7 @@ pub async fn inspect_job(context: Option<&str>, namespace: &str, name: &str) -> 
             return Ok(JobState {
                 stage: "DELETED".to_string(),
                 message: None,
+                exit_code: None,
             })
         }
         Err(e) => return Err(e),
@@ -788,24 +790,9 @@ pub async fn inspect_job(context: Option<&str>, namespace: &str, name: &str) -> 
         return Ok(JobState {
             stage: "COMPLETED".to_string(),
             message: None,
+            exit_code: Some(0),
         });
     }
-    if let Some(failed) = condition("Failed") {
-        let reason = failed["reason"].as_str().unwrap_or("");
-        let msg = failed["message"].as_str().unwrap_or("");
-        return Ok(JobState {
-            stage: "ERROR".to_string(),
-            message: Some(
-                format!("{reason}: {msg}")
-                    .trim_matches([':', ' '])
-                    .to_string(),
-            ),
-        });
-    }
-
-    // Live: RUNNING once every expected pod runs (the whole gang for Indexed
-    // jobs), SCHEDULING before that (surfacing pod waiting reasons like
-    // ImagePullBackOff so "stuck" is diagnosable).
     let pods_raw = kubectl(
         context,
         &[
@@ -820,9 +807,41 @@ pub async fn inspect_job(context: Option<&str>, namespace: &str, name: &str) -> 
         ],
         None,
     )
-    .await
-    .unwrap_or_default();
-    let pods: Value = serde_json::from_str(&pods_raw).unwrap_or_else(|_| json!({"items": []}));
+    .await?;
+    let pods: Value = serde_json::from_str(&pods_raw)?;
+    if let Some(failed) = condition("Failed") {
+        let reason = failed["reason"].as_str().unwrap_or("");
+        let msg = failed["message"].as_str().unwrap_or("");
+        return Ok(JobState {
+            stage: "ERROR".to_string(),
+            exit_code: pods["items"]
+                .as_array()
+                .unwrap_or(&empty)
+                .iter()
+                .find_map(|pod| {
+                    let script = pod["metadata"]["annotations"]
+                        ["kubectl.kubernetes.io/default-container"]
+                        .as_str()?;
+                    pod["status"]["containerStatuses"]
+                        .as_array()?
+                        .iter()
+                        .find(|container| container["name"] == script)?["state"]["terminated"]
+                        ["exitCode"]
+                        .as_i64()
+                        .and_then(|code| i32::try_from(code).ok())
+                        .filter(|code| *code != 0)
+                }),
+            message: Some(
+                format!("{reason}: {msg}")
+                    .trim_matches([':', ' '])
+                    .to_string(),
+            ),
+        });
+    }
+
+    // Live: RUNNING once every expected pod runs (the whole gang for Indexed
+    // jobs), SCHEDULING before that (surfacing pod waiting reasons like
+    // ImagePullBackOff so "stuck" is diagnosable).
     let mut waiting_msg = None;
     let mut live = 0u64;
     for pod in pods["items"].as_array().unwrap_or(&empty) {
@@ -843,11 +862,13 @@ pub async fn inspect_job(context: Option<&str>, namespace: &str, name: &str) -> 
         return Ok(JobState {
             stage: "RUNNING".to_string(),
             message: None,
+            exit_code: None,
         });
     }
     Ok(JobState {
         stage: "SCHEDULING".to_string(),
         message: waiting_msg,
+        exit_code: None,
     })
 }
 

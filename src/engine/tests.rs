@@ -824,6 +824,63 @@ async fn a_verified_cancel_receipt_keeps_its_exit_code() {
 }
 
 #[tokio::test]
+async fn accepted_cancels_classify_nonzero_exits_after_restart() {
+    for (requested, code, signal, status) in [
+        (true, Some(137), None, "cancelled"),
+        (false, Some(137), None, "failed"),
+        (true, Some(0), None, "done"),
+        (true, None, Some(9), "cancelled"),
+    ] {
+        let mut f = Fixture::new();
+        f.running("run").await;
+        if requested {
+            assert!(f
+                .store()
+                .accept_run_cancel("run", Some("Dashboard stop"))
+                .unwrap()
+                .is_some());
+        }
+        f.restart();
+        f.engine
+            .observe(
+                "run",
+                Observation::Exited {
+                    finished_at: Some(123),
+                    code,
+                    signal,
+                },
+            )
+            .unwrap();
+
+        let row = f.store().get_run("run").unwrap().unwrap();
+        assert_eq!(row.status, status);
+        assert_eq!(row.exit_code, code.map(i64::from));
+        assert_eq!(row.ended_at, Some(123));
+    }
+}
+
+#[tokio::test]
+async fn nonzero_exit_after_abandon_keeps_cleanup_pending() {
+    let mut f = Fixture::new();
+    f.running("run").await;
+    assert!(f.engine.abandon("run").unwrap());
+    f.restart();
+    f.engine
+        .observe(
+            "run",
+            Observation::Exited {
+                finished_at: None,
+                code: Some(137),
+                signal: None,
+            },
+        )
+        .unwrap();
+
+    assert_eq!(f.status("run"), "lost");
+    assert!(unreconciled(&f.contact("run")));
+}
+
+#[tokio::test]
 async fn an_unreconciled_run_keeps_its_since_across_a_restart() {
     let mut f = Fixture::new();
     f.running("run").await;

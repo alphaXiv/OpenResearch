@@ -28,7 +28,7 @@ impl Api for ModalAccount {
     }
     async fn inspect(&self, run: &WatchedRun) -> Result<Observation> {
         let state = modal::inspect_job(api::id(run, "modal_job", None, None)?).await?;
-        Ok(api::stage(&state.stage, state.message, None, None))
+        Ok(api::stage(&state.stage, state.message, state.exit_code, None, None))
     }
     async fn cancel(&self, run: &WatchedRun) -> Result<()> {
         modal::cancel_job(api::id(run, "modal_job", None, None)?).await

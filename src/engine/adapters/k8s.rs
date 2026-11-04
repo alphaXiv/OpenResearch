@@ -109,7 +109,7 @@ impl Api for K8sAccount {
                 }
             });
         }
-        Ok(api::stage(&state.stage, state.message, None, None))
+        Ok(api::stage(&state.stage, state.message, state.exit_code, None, None))
     }
     async fn cancel(&self, run: &WatchedRun) -> Result<()> {
         k8s::delete_resources(

@@ -89,6 +89,7 @@ def status(sid):
         out = {"stage": "COMPLETED"}
     else:
         out = {"stage": "ERROR", "message": "exited with code %d" % code}
+    out["exitCode"] = code
     print(json.dumps(out))
 
 def logs(sid):
@@ -369,6 +370,7 @@ pub async fn run_job(spec: &ModalJobSpec) -> Result<String> {
 pub struct JobState {
     pub stage: String,
     pub message: Option<String>,
+    pub exit_code: Option<i32>,
 }
 
 pub async fn inspect_job(sandbox_id: &str) -> Result<JobState> {
@@ -382,6 +384,10 @@ pub async fn inspect_job(sandbox_id: &str) -> Result<JobState> {
             .unwrap_or("RUNNING")
             .to_string(),
         message: v.get("message").and_then(Value::as_str).map(str::to_string),
+        exit_code: v
+            .get("exitCode")
+            .and_then(Value::as_i64)
+            .and_then(|code| code.try_into().ok()),
     })
 }
 
@@ -615,6 +621,36 @@ pub async fn detect() -> ModalStatus {
 mod credential_tests {
     use super::*;
     use std::io::Write as _;
+
+    #[tokio::test]
+    async fn status_keeps_the_sandbox_exit_code() {
+        let Ok(python) =
+            crate::jobs::managed_env::base_python(MODAL_ENV.min_python, MODAL_ENV.label).await
+        else {
+            return;
+        };
+        let dir = std::env::temp_dir().join(format!("orx-modal-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        for (code, stage) in [("None", "RUNNING"), ("0", "COMPLETED"), ("7", "ERROR")] {
+            std::fs::write(dir.join("modal.py"), format!(
+                "class Sandbox:\n    @staticmethod\n    def from_id(sid): return Sandbox()\n    def poll(self): return {code}\n"
+            )).unwrap();
+            let output = std::process::Command::new(python)
+                .args(["-B", "-c", LAUNCHER, "status", "sandbox"])
+                .env("PYTHONPATH", &dir)
+                .output()
+                .unwrap();
+            assert!(
+                output.status.success(),
+                "{}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+            let state: Value = serde_json::from_slice(&output.stdout).unwrap();
+            assert_eq!(state["stage"], stage);
+            assert_eq!(state["exitCode"].as_i64(), code.parse::<i64>().ok());
+        }
+        std::fs::remove_dir_all(dir).unwrap();
+    }
 
     #[test]
     fn selects_active_or_explicit_profile_and_rejects_ambiguity() {

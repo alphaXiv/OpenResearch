@@ -6,7 +6,7 @@ import { hostForRun } from "../engineHosts";
 import { fmtBytes, fmtClock, ltr } from "../i18n";
 import { createLogFollower, INITIAL_LOG_VIEW, isKept, LOG_WINDOW, parsePosition, shouldRecover } from "../logWindow";
 import { m } from "../paraglide/messages.js";
-import { runActive } from "../runDisplay";
+import { runActive, runApiProvider } from "../runDisplay";
 import { mountTerminal } from "./terminal";
 import { Button, IconButton, StatusIndicator } from "./ui";
 
@@ -78,6 +78,8 @@ export function LogTerminal({ run }: { run: Pick<Run, "id" | "status" | "contact
 
   const percent = (bytes: number) => len ? `${(bytes / len) * 100}%` : "0%";
   const atEnd = len !== null && span.end >= len;
+  const provider = runApiProvider(run);
+  const authMessage = provider === "k8s_job" ? m.run_notice_cluster_auth() : provider ? m.run_notice_provider_auth() : null;
   const unavailableHost = ltr(unavailable?.host ?? run.host ?? m.run_notice_the_host());
   // Failures cover only an empty view; a live view keeps its output and retries on the next delta.
   const empty = span.end === span.start;
@@ -85,7 +87,7 @@ export function LogTerminal({ run }: { run: Pick<Run, "id" | "status" | "contact
     ? null
     : unavailable
       ? unavailable.contact === "needs_auth"
-        ? m.log_unavailable_auth({ host: unavailableHost })
+        ? authMessage ?? m.log_unavailable_auth({ host: unavailableHost })
         : m.log_unavailable({ host: unavailableHost, time: fmtClock(unavailable.since) })
       : error ?? (loading && paged && !isKept(kept, span) && run.host ? m.log_loading_from({ host: ltr(run.host) }) : null);
 

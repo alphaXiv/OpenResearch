@@ -5,7 +5,7 @@ import { type Run } from "../api";
 import { hostForRun } from "../engineHosts";
 import { fmtClock, ltr } from "../i18n";
 import { m } from "../paraglide/messages.js";
-import { runAbandonable, runActive, runConnectHost, runNotice, type RunNotice } from "../runDisplay";
+import { runAbandonable, runActive, runApiProvider, runConnectHost, runNotice, type RunNotice } from "../runDisplay";
 import { statusLabel } from "./StatusBadge";
 import { Button } from "./ui";
 import { cn } from "./ui/cn";
@@ -18,7 +18,8 @@ const TONES = {
   quiet: "text-subtext",
 };
 
-function copy(notice: RunNotice, nextRetryMs: number | null): { lead: string; detail: string | null; tone: keyof typeof TONES } {
+function copy(notice: RunNotice, nextRetryMs: number | null, provider: string | null): { lead: string; detail: string | null; tone: keyof typeof TONES } {
+  const authLead = provider === "k8s_job" ? m.run_notice_cluster_auth() : provider ? m.run_notice_provider_auth() : null;
   const host = (name: string | null) => ltr(name ?? m.run_notice_the_host());
   switch (notice.kind) {
     case "monitoring":
@@ -29,13 +30,13 @@ function copy(notice: RunNotice, nextRetryMs: number | null): { lead: string; de
       return { lead: lead + retry, detail: notice.cause, tone: "warning" };
     }
     case "needs_auth":
-      return { lead: m.run_notice_needs_auth({ host: host(notice.host) }), detail: notice.cause, tone: "warning" };
+      return { lead: authLead ?? m.run_notice_needs_auth({ host: host(notice.host) }), detail: notice.cause, tone: "warning" };
     case "cancelling":
       return { lead: m.status_cancelling(), detail: null, tone: "caution" };
     case "cancel_pending":
       return notice.contact === "unreachable"
         ? { lead: m.status_cancellation_pending(), detail: `${m.run_notice_cancel_pending({ host: host(notice.host), time: fmtClock(notice.since) })} ${m.run_notice_cancel_pending_later()}`, tone: "warning" }
-        : { lead: m.status_cancellation_pending(), detail: m.run_notice_cancel_pending_auth({ host: host(notice.host) }), tone: "warning" };
+        : { lead: m.status_cancellation_pending(), detail: authLead ?? m.run_notice_cancel_pending_auth({ host: host(notice.host) }), tone: "warning" };
     case "unconfirmed_launch":
       return { lead: m.run_notice_unconfirmed_launch(), detail: notice.detail, tone: "caution" };
     case "cancel_pending_launch":
@@ -82,7 +83,7 @@ export function RunContactNotice({ run, className }: { run: NoticeRun; className
 
   const engineHost = hostForRun(hosts, run);
   const nextRetryMs = engineHost?.status === "backoff" ? engineHost.nextRetryMs : null;
-  const { lead, detail, tone } = copy(notice, nextRetryMs);
+  const { lead, detail, tone } = copy(notice, nextRetryMs, runApiProvider(run));
   const rentalBilling = run.backend?.kind === "openresearch_job"
     && runActive(run.status)
     && (run.contact?.type === "needs_auth" || run.contact?.type === "unreachable");

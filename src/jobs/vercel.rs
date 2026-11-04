@@ -65,6 +65,7 @@ def _emit_exit(code):
         out = {"stage": "COMPLETED"}
     else:
         out = {"stage": "ERROR", "message": "exited with code %d" % code}
+    out["exitCode"] = code
     print(json.dumps(out))
 
 def submit():
@@ -999,6 +1000,7 @@ pub fn session_limit(timeout_seconds: u64, session_cap: u64) -> u64 {
 pub struct JobState {
     pub stage: String,
     pub message: Option<String>,
+    pub exit_code: Option<i32>,
 }
 
 pub async fn inspect_job(sandbox_name: &str, process_id: &str) -> Result<JobState> {
@@ -1012,6 +1014,10 @@ pub async fn inspect_job(sandbox_name: &str, process_id: &str) -> Result<JobStat
             .unwrap_or("RUNNING")
             .to_string(),
         message: v.get("message").and_then(Value::as_str).map(str::to_string),
+        exit_code: v
+            .get("exitCode")
+            .and_then(Value::as_i64)
+            .and_then(|code| code.try_into().ok()),
     })
 }
 
@@ -1431,7 +1437,7 @@ mod tests {
             ("cancelled", json!({"stage": "CANCELED"})),
             (
                 "exited",
-                json!({"stage": "ERROR", "message": "exited with code 3"}),
+                json!({"stage": "ERROR", "message": "exited with code 7", "exitCode": 7}),
             ),
         ] {
             let dir = std::env::temp_dir().join(format!("orx-vercel-{}", uuid::Uuid::new_v4()));
@@ -1456,7 +1462,7 @@ class Box:
     def get_process(self, pid, wait=False):
         if not wait: return Proc(None)
         assert "{probe}" == "exited", "waited on a running job"
-        return Proc(3)
+        return Proc(7)
     def update(self, tags): sys.stderr.write("tagged " + tags["orx_exit"])
 def get_sandbox(**kw): return Box()
 "#
@@ -1476,7 +1482,7 @@ def get_sandbox(**kw): return Box()
                 expected,
                 "{probe}"
             );
-            assert_eq!(stderr.contains("tagged 3"), probe == "exited", "{stderr}");
+            assert_eq!(stderr.contains("tagged 7"), probe == "exited", "{stderr}");
         }
     }
 

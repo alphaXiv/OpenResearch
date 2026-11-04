@@ -217,7 +217,7 @@ fn attention_body(run_id: &str, contact: &Contact) -> String {
             crate::telemetry::iso8601_utc(*since)
         ),
         Contact::NeedsAuth { cause, .. } => format!(
-            "[orx] Run `{run_id}` needs you to reconnect to its host ({cause}). Its status is unchanged; nothing retries until Connect."
+            "[orx] Run `{run_id}` needs authentication ({cause}). Its status is unchanged."
         ),
         Contact::Unreconciled { detail, .. } => {
             format!("[orx] Run `{run_id}` needs attention: {detail}")
@@ -285,6 +285,20 @@ impl Engine {
                 return Change::default();
             }
             let observation = match observation {
+                Observation::Exited {
+                    finished_at,
+                    code,
+                    signal,
+                } if matches!(phase, Phase::Starting | Phase::Running)
+                    && state.cancel_accepted_at.is_some()
+                    && (code.is_some_and(|code| code != 0) || signal.is_some()) =>
+                {
+                    Observation::Cancelled {
+                        finished_at,
+                        code,
+                        signal,
+                    }
+                }
                 Observation::Gone { .. } if state.cancel_accepted_at.is_some() => {
                     Observation::Cancelled {
                         finished_at: None,

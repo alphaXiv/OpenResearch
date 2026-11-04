@@ -131,9 +131,17 @@ export function noticeRun<R extends Parameters<typeof runNotice>[0] & Pick<Run, 
   return newestFirst.find((run) => runNotice(run) !== null) ?? null;
 }
 
+export function runApiProvider(run: Pick<Run, "backend">): string | null {
+  const handle = run.backend?.handle;
+  if (typeof handle === "object" && handle !== null && "type" in handle && handle.type === "Api" && "provider" in handle && typeof handle.provider === "string") return handle.provider;
+  const descriptor = typeof handle === "object" && handle !== null && "descriptor" in handle ? handle.descriptor : run.backend;
+  const kind = typeof descriptor === "object" && descriptor !== null && "kind" in descriptor ? descriptor.kind : null;
+  return typeof kind === "string" && ["hf_job", "ray_job", "vercel_job", "modal_job", "k8s_job"].includes(kind) ? kind : null;
+}
+
 /** The host whose Connect this run is waiting on, if any. */
-export function runConnectHost(run: Pick<Run, "host"> & Partial<Pick<Run, "contact">>): string | null {
-  return run.contact?.type === "needs_auth" ? run.host : null;
+export function runConnectHost(run: Pick<Run, "host"> & Partial<Pick<Run, "contact" | "backend">>): string | null {
+  return run.contact?.type === "needs_auth" && !runApiProvider(run) ? run.host : null;
 }
 
 /** Abandon is the way out for an active run whose outcome we cannot observe. */

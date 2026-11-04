@@ -126,10 +126,10 @@ unfinished run, no undelivered notice and no client
 
 A run has two independent fields. **Phase** is the lifecycle: submitting,
 starting, running, done, failed, cancelled or lost. **Contact** is how fresh
-that knowledge is: live, unreachable, needs auth (Connect), unreconciled (an
-outcome the engine cannot establish), or stopping (a cancelled run with
-processes left). A non-live contact marks the shown phase stale with its
-`since`.
+that knowledge is: live, unreachable, needs auth (SSH Connect or provider
+credentials), unreconciled (an outcome the engine cannot establish), or stopping
+(a cancelled run with processes left). A non-live contact marks the shown phase
+stale with its `since`.
 
 - **Phases move forward only**, and submitting leaves only by recording a
   handle or ending. Contact never moves the phase.
@@ -167,10 +167,12 @@ unreconciled until the user abandons it.
 
 ### Cancel and Abandon
 
-Cancelling records the intent and its reason on the run. The engine delivers
-it whenever the run's machine is reachable, and the run's wrapper performs the
-stop, so verification never races its own exit: a container's cancel hook,
-TERM, a grace period, KILL, then fresh scans of every process carrying the
+Cancelling records the intent and its reason on the run. For an active run, a
+nonzero exit or signal after an accepted cancel ends Cancelled, preserving the
+reported exit code. The engine delivers the stop whenever the run's machine is
+reachable, and the run's wrapper performs the stop, so verification never races
+its own exit: a container's cancel hook, TERM, a grace period, KILL, then fresh
+scans of every process carrying the
 run's tag. Completion of a run is its direct child's exit; processes it left
 behind are listed, raise one notice, and are stopped only on request.
 

@@ -68,7 +68,11 @@ impl Api for HfAccount {
     }
     async fn inspect(&self, run: &WatchedRun) -> Result<Observation> {
         let job = hf::inspect_job(&hf::resolve_token()?, &self.namespace, self.id(run)?).await?;
-        Ok(api::stage(&job.status.stage, job.status.message, None, None))
+        let exit_code = job.status.message.as_deref()
+            .and_then(|message| message.strip_prefix("Job failed with exit code: "))
+            .and_then(|message| message.split_once(". Reason:"))
+            .and_then(|(code, _)| code.parse().ok());
+        Ok(api::stage(&job.status.stage, job.status.message, exit_code, None, None))
     }
     async fn cancel(&self, run: &WatchedRun) -> Result<()> {
         hf::cancel_job(&hf::resolve_token()?, &self.namespace, self.id(run)?).await

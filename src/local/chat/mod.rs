@@ -11754,7 +11754,9 @@ for line in sys.stdin:
             let answer = format!("delegate answer exactly once for {kind}");
             let result = format!("run result exactly once for {kind}");
             session(&store, &delegate);
-            store.record_chat_delegate(&delegate, "other", false).unwrap();
+            store
+                .record_chat_delegate(&delegate, "other", false)
+                .unwrap();
             store.subscribe_chat("other", &delegate, None).unwrap();
             let mut run = run("done");
             run.id = format!("run-{kind}");
@@ -11781,17 +11783,20 @@ for line in sys.stdin:
                 updated_at: now_ms(),
             };
             store.admit_chat_turn(None, &turn).unwrap();
-            store.upsert_chat_message(&StoredChatMessage {
-                id: turn.assistant_message_id.clone(),
-                session_id: delegate,
-                role: "assistant".into(),
-                parts_json: serde_json::to_string(&[WirePart::text("answer", &answer)]).unwrap(),
-                created_at: now_ms(),
-                completed_at: Some(now_ms()),
-                parent_id: None,
-                base_native_session_id: None,
-                result_native_session_id: None,
-            }).unwrap();
+            store
+                .upsert_chat_message(&StoredChatMessage {
+                    id: turn.assistant_message_id.clone(),
+                    session_id: delegate,
+                    role: "assistant".into(),
+                    parts_json: serde_json::to_string(&[WirePart::text("answer", &answer)])
+                        .unwrap(),
+                    created_at: now_ms(),
+                    completed_at: Some(now_ms()),
+                    parent_id: None,
+                    base_native_session_id: None,
+                    result_native_session_id: None,
+                })
+                .unwrap();
             store.complete_chat_turn(&turn.id).unwrap();
             let tx = store.begin().unwrap();
             tx.execute(
@@ -11799,12 +11804,16 @@ for line in sys.stdin:
                 [&run.id],
             ).unwrap();
             tx.commit().unwrap();
-            store.insert_run_notice(&run.id, "other", "terminal", "terminal", &result, now_ms()).unwrap();
+            store
+                .insert_run_notice(&run.id, "other", "terminal", "terminal", &result, now_ms())
+                .unwrap();
             assert_eq!(news::chat_news(&store, Some("other")).unwrap().len(), 1);
             assert_eq!(store.pending_run_notice_sessions().unwrap(), ["other"]);
             let before = count_turns();
             for _ in 0..3 {
-                news::deliver_news(&host, Store::open().unwrap(), None).await.unwrap();
+                news::deliver_news(&host, Store::open().unwrap(), None)
+                    .await
+                    .unwrap();
                 settle_run_notices(&host, &moving).await.unwrap();
             }
             assert_eq!(count_turns(), before + 2);
@@ -11812,9 +11821,21 @@ for line in sys.stdin:
             assert!(store.pending_run_notice_sessions().unwrap().is_empty());
             let tx = store.begin().unwrap();
             let mut statement = tx.prepare("SELECT prepared_input, user_message_id FROM chat_turns WHERE session_id = 'other'").unwrap();
-            let turns = statement.query_map([], |row| Ok((row.get::<_, String>(0)?, row.get::<_, Option<String>>(1)?))).unwrap().collect::<std::result::Result<Vec<_>, _>>().unwrap();
-            let results: Vec<_> = turns.iter().filter(|(input, _)| input.contains(&result)).collect();
-            let answers: Vec<_> = turns.iter().filter(|(input, _)| input.contains(&answer)).collect();
+            let turns = statement
+                .query_map([], |row| {
+                    Ok((row.get::<_, String>(0)?, row.get::<_, Option<String>>(1)?))
+                })
+                .unwrap()
+                .collect::<std::result::Result<Vec<_>, _>>()
+                .unwrap();
+            let results: Vec<_> = turns
+                .iter()
+                .filter(|(input, _)| input.contains(&result))
+                .collect();
+            let answers: Vec<_> = turns
+                .iter()
+                .filter(|(input, _)| input.contains(&answer))
+                .collect();
             assert_eq!(results.len(), 1);
             assert!(results[0].1.is_none());
             assert_eq!(answers.len(), 1);

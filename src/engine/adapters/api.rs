@@ -281,9 +281,7 @@ impl<A: Api + 'static> Backend for Adapter<A> {
                 let result = tokio::time::timeout(budget, self.account.inspect(run)).await;
                 let observation = match result {
                     Ok(Ok(observation)) => observation,
-                    Ok(Err(error)) => Observation::Unreachable {
-                        cause: error.to_string(),
-                    },
+                    Ok(Err(error)) => observation_error(error),
                     Err(_) => Observation::Unreachable {
                         cause: "Provider observation timed out".into(),
                     },
@@ -486,13 +484,47 @@ pub fn closed<T>(
     }
 }
 
+fn observation_error(error: crate::error::Error) -> Observation {
+    let cause = error.to_string();
+    let detail = cause.to_ascii_lowercase();
+    let http_auth = error
+        .downcast_ref::<reqwest::Error>()
+        .and_then(reqwest::Error::status)
+        .is_some_and(|status| matches!(status.as_u16(), 401 | 403));
+    let sdk_auth = [
+        "http 401:",
+        "http 403:",
+        "not authorized",
+        "modal.exception.autherror:",
+        "status.unauthenticated",
+        "status.permission_denied",
+        "error from server (unauthorized)",
+        "error from server (forbidden)",
+        "you must be logged in to the server",
+    ]
+    .iter()
+    .any(|rejection| detail.contains(rejection));
+
+    if http_auth || sdk_auth {
+        Observation::NeedsAuth { cause }
+    } else {
+        Observation::Unreachable { cause }
+    }
+}
+
 pub fn stage(
     stage: &str,
     message: Option<String>,
+    exit_code: Option<i32>,
     started_at: Option<i64>,
     finished_at: Option<i64>,
 ) -> Observation {
     match stage {
+        "COMPLETED" | "ERROR" | "FAILED" if exit_code.is_some() => Observation::Exited {
+            finished_at,
+            code: exit_code,
+            signal: None,
+        },
         "COMPLETED" => Observation::Exited {
             finished_at,
             code: Some(0),
@@ -504,7 +536,7 @@ pub fn stage(
         },
         "CANCELED" | "CANCELLED" => Observation::Cancelled {
             finished_at,
-            code: None,
+            code: exit_code,
             signal: None,
         },
         "DELETED" | "GONE" => Observation::Unreconciled {

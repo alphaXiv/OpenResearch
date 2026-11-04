@@ -1094,7 +1094,7 @@ pub(crate) async fn watch_ssh_job(
         }
         let mut job = job;
         let mut exit_code = None;
-        if descriptor.rental_lease.is_some() && is_terminal_stage(&job.stage) {
+        if is_terminal_stage(&job.stage) {
             exit_code = ssh::ssh_run(
                 &target,
                 &format!("cat {}/exit_code", ssh::shell_path(&dir)),
@@ -1922,6 +1922,7 @@ async fn run_ray(
                 continue;
             }
             job = ray::JobInfo {
+                exit_code: None,
                 stage: "ERROR".to_string(),
                 message: Some(
                     "job no longer known to the cluster (record purged or head restarted?)"

@@ -215,3 +215,22 @@ test("lost contact with a rented box warns about billing and Stop box cancels wi
     assert.ok(!buttons(html).includes("Stop box"));
   }
 });
+
+
+test("API credential rejection gives provider recovery without SSH Connect", () => {
+  for (const provider of ["ray_job", "hf_job", "vercel_job", "modal_job", "k8s_job"]) {
+    for (const backend of [
+      { kind: "engine", handle: { type: "Api", provider } },
+      { kind: "engine", handle: { type: "Legacy", descriptor: { kind: provider } } },
+      { kind: provider },
+    ]) {
+      for (const cancelling of [false, true]) {
+        const html = render({ contact: { ...needsAuth, cause: "HTTP 403" }, backend, cancelling });
+        assert.ok(html.includes(provider === "k8s_job" ? en.run_notice_cluster_auth : en.run_notice_provider_auth), html);
+        assert.match(html, /role="status"/);
+        assert.deepEqual(buttons(html), ["Abandon…"]);
+        assert.doesNotMatch(html, /Connect to|Connect needed/);
+      }
+    }
+  }
+});

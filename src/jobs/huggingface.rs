@@ -138,10 +138,10 @@ async fn check(res: reqwest::Response, what: &str) -> Result<reqwest::Response> 
     if status.is_success() {
         return Ok(res);
     }
-    if status.as_u16() == 401 {
+    if matches!(status.as_u16(), 401 | 403) {
         res.error_for_status_ref().map_err(|error| {
             anyhow!(error).context(format!(
-                "Hugging Face rejected the token (HTTP 401) during {what}. Check HF_TOKEN."
+                "Hugging Face rejected the token (HTTP {status}) during {what}. Check HF_TOKEN."
             ))
         })?;
     }
@@ -485,7 +485,7 @@ mod settings_tests {
 
     #[tokio::test]
     async fn invalid_token_retains_http_status() {
-        for status in [401, 503] {
+        for status in [401, 403, 503] {
             let response = axum::http::Response::builder()
                 .status(status)
                 .body("")
@@ -495,7 +495,7 @@ mod settings_tests {
                 error
                     .downcast_ref::<reqwest::Error>()
                     .and_then(|e| e.status()),
-                (status == 401).then_some(reqwest::StatusCode::UNAUTHORIZED)
+                matches!(status, 401 | 403).then(|| reqwest::StatusCode::from_u16(status).unwrap())
             );
         }
     }

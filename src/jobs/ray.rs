@@ -215,6 +215,11 @@ async fn check(res: reqwest::Response, what: &str) -> Result<reqwest::Response> 
     if status.is_success() {
         return Ok(res);
     }
+    if matches!(status.as_u16(), 401 | 403) {
+        res.error_for_status_ref().map_err(|error| {
+            anyhow!(error).context(format!("Ray Jobs {what} rejected access (HTTP {status})"))
+        })?;
+    }
     let body = res.text().await.unwrap_or_default();
     Err(anyhow!(
         "Ray Jobs {} failed ({}): {}",
@@ -256,6 +261,7 @@ pub struct JobInfo {
     /// Shared stage vocabulary (`SCHEDULING` / `RUNNING` / `COMPLETED` / …).
     pub stage: String,
     pub message: Option<String>,
+    pub exit_code: Option<i32>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -268,6 +274,7 @@ struct RawJobStatus {
     status: Option<String>,
     #[serde(default)]
     message: Option<String>,
+    driver_exit_code: Option<i32>,
 }
 
 fn map_ray_status(raw: &str) -> String {
@@ -363,6 +370,7 @@ pub(crate) async fn inspect_job_with_times(
             JobInfo {
                 stage: "GONE".to_string(),
                 message: None,
+                exit_code: None,
             },
             None,
             None,
@@ -374,6 +382,7 @@ pub(crate) async fn inspect_job_with_times(
         JobInfo {
             stage: map_ray_status(&status),
             message: raw.message,
+            exit_code: raw.driver_exit_code,
         },
         raw.start_time,
         raw.end_time,
