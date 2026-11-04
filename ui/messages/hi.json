@@ -1607,7 +1607,6 @@
   "settings_openresearch_sign_out_title": "OpenResearch से साइन आउट करें?",
   "settings_openresearch_sign_out_description": "दोबारा साइन इन करने तक यह कंप्यूटर OpenResearch कंप्यूट शुरू, पुनः शुरू या बंद नहीं कर सकता। चालू कंप्यूट और उसका बिल जारी रहेगा।",
   "account_finish_browser": "ब्राउज़र में साइन इन पूरा करें…",
-  "account_local_to_app": "खाता इस ऐप के लिए स्थानीय है",
   "library_title": "लाइब्रेरी",
   "library_connect": "alphaXiv कनेक्ट करें",
   "library_connected": "alphaXiv से कनेक्ट है",
@@ -1637,5 +1636,14 @@
   "library_selected": "{count} चुने गए",
   "library_open_alphaxiv": "alphaXiv खोलें",
   "chat_resize_composer": "संदेश बॉक्स का आकार बदलें",
-  "chat_resize_composer_hint": "आकार बदलने के लिए खींचें। रीसेट करने के लिए डबल-क्लिक करें।"
+  "chat_resize_composer_hint": "आकार बदलने के लिए खींचें। रीसेट करने के लिए डबल-क्लिक करें।",
+  "remote_machine_switcher": "मशीन बदलें: {machine}",
+  "remote_machine_connected": "कनेक्ट है",
+  "remote_machine_connecting": "कनेक्ट हो रहा है…",
+  "remote_machine_disconnected": "डिस्कनेक्ट है",
+  "remote_agents_title": "{host} पर एजेंट सेट अप करें",
+  "remote_agents_description": "हर मशीन पर एजेंट इंस्टॉल करके साइन इन करना ज़रूरी है। उन्हें {host} पर सेट अप करें।",
+  "remote_claude_datacenter_title": "डेटासेंटर IP पर Claude सदस्यता का उपयोग करने से बचें",
+  "remote_claude_datacenter_description": "{host} डेटासेंटर IP {ip} का उपयोग करता है। यहाँ Claude सदस्यता का उपयोग करने पर Anthropic आपके खाते को फ़्लैग कर सकता है। API कुंजी का उपयोग करें या अपने जोखिम पर जारी रखें।",
+  "remote_claude_datacenter_continue": "फिर भी जारी रखें"
 }

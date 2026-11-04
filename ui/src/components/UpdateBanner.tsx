@@ -1,11 +1,11 @@
+import { useWorkspace } from "../workspace";
 import { useQuery } from "@tanstack/react-query";
-import { queryClient, setScopedQueryData, isCurrentScope } from "../queries/client";
-import { getBuildNotesQuery, getUpdateStatusQuery } from "../queries/settings";
+
 import { m } from "../paraglide/messages.js";
 import { ltr } from "../i18n";
 import { RefreshCw, X } from "lucide-react";
 import { useEffect, useRef, useState } from "react";
-import { restartApp, type Changes, type UpdateStatus } from "../api";
+import { type Changes, type UpdateStatus } from "../api";
 import { getLocale } from "../paraglide/runtime.js";
 
 import { Button, IconButton, Spinner } from "./ui";
@@ -22,6 +22,9 @@ export interface UpdateState {
 /** Live update status: the initial fetch plus every `update.status` SSE frame.
  *  Exported because the Updates settings card renders the same state. */
 export function useUpdateStatus(enabled = true): UpdateState {
+  const { getUpdateStatusQuery } = useWorkspace().queries;
+  const { setScopedQueryData } = useWorkspace();
+
   const options = getUpdateStatusQuery();
   const query = useQuery({ ...options, enabled });
   return {
@@ -63,6 +66,10 @@ export const releaseNotesUrl = (tag: string) =>
  *  answers — the page itself is the old build until it reloads. The old server answers the POST and then drops every connection,
  *  so the polling errors in between are expected and swallowed. */
 export function useRestartApp(status: UpdateStatus | null): RestartState {
+  const { getUpdateStatusQuery } = useWorkspace().queries;
+  const { isCurrentScope, queryClient } = useWorkspace();
+  const { restartApp } = useWorkspace().api;
+
   const [restarting, setRestarting] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const unmounted = useRef(false);
@@ -166,6 +173,7 @@ const COMMIT_TITLE = /^(\w+)(?:\(([^)]*)\))?!?:\s*(.*)$/;
 
 /** The commits a canary build adds over stable, grouped the way the banner counts them. */
 export function BuildNotes() {
+  const { getBuildNotesQuery } = useWorkspace().queries;
   const { data, error, isPending } = useQuery(getBuildNotesQuery());
   if (isPending) return <div className="flex items-center gap-2 text-subtext"><Spinner /> {m.settings_page_loading()}</div>;
   if (error) return <p role="alert" className="m-0 text-accent-red">{m.update_notes_failed({ error: error.message })}</p>;

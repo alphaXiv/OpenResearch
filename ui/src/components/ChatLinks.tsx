@@ -2,7 +2,8 @@ import { createContext, useContext } from "react";
 import { MessageSquare } from "lucide-react";
 import { useQuery } from "@tanstack/react-query";
 
-import { citedMessage, type HarnessId } from "../api";
+import type { HarnessId } from "../api";
+import { useWorkspace } from "../workspace";
 import { refLabel } from "../agentMessages";
 import { m } from "../paraglide/messages.js";
 import { HarnessLogo } from "./HarnessLogo";
@@ -17,6 +18,7 @@ export type ChatLinks = {
 export const ChatLinksContext = createContext<ChatLinks | null>(null);
 
 function useCitedMessage(cited: string) {
+  const { citedMessage } = useWorkspace().api;
   return useQuery({
     queryKey: ["cited-message", cited],
     queryFn: () => citedMessage(cited),

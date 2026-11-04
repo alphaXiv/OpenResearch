@@ -51,6 +51,7 @@ use crate::{browser, UpArgs};
 mod agent_tools;
 pub(crate) mod compute_settings;
 mod harness_setup;
+mod network;
 use compute_settings::*;
 
 pub async fn run(args: UpArgs) -> Result<()> {
@@ -695,6 +696,7 @@ fn router(state: AppState, remote_auth: Option<RemoteAuth>) -> Router {
         .route("/api/update/channel", post(set_update_channel))
         .route("/api/update/install-cli", post(install_cli))
         .route("/api/settings/ui-state", get(ui_state).post(set_ui_state))
+        .route("/api/settings/network", get(network::public_network))
         .route(
             "/api/projects/{id}/ui-state",
             get(project_ui_state).post(set_project_ui_state),
@@ -721,6 +723,10 @@ fn router(state: AppState, remote_auth: Option<RemoteAuth>) -> Router {
             post(disconnect_remote_session),
         )
         .route("/_orx/runtime", get(local_runtime))
+        .route(
+            "/_orx/workspaces/{id}/{*path}",
+            axum::routing::any(remote_workspace),
+        )
         .route(
             "/api/settings/slurm",
             get(slurm_settings).post(set_slurm_settings),
@@ -934,7 +940,6 @@ fn remote_route_forbidden(path: &str) -> bool {
             | "/api/alphaxiv/folders"
             | "/api/alphaxiv/papers"
             | "/api/settings/commands/run"
-            | "/api/harnesses/setup"
     ) || path.starts_with("/api/remote/")
         || (path.starts_with("/api/projects/")
             && (path.ends_with("/file/open")
@@ -7134,6 +7139,14 @@ async fn remote_sessions(State(state): State<AppState>) -> Json<Value> {
     Json(json!({ "sessions": state.remote_sessions.list().await }))
 }
 
+async fn remote_workspace(
+    State(state): State<AppState>,
+    Path((id, _)): Path<(String, String)>,
+    request: axum::extract::Request,
+) -> axum::response::Response {
+    state.remote_sessions.serve_workspace(&id, request).await
+}
+
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct CreateRemoteSessionReq {
@@ -9825,6 +9838,8 @@ mod tests {
         assert!(!remote_route_forbidden("/api/settings/ssh/master"));
         assert!(!remote_route_forbidden("/api/settings/ssh/preflight"));
         assert!(!remote_route_forbidden("/api/settings/ssh/connect"));
+        assert!(!remote_route_forbidden("/api/harnesses/setup"));
+        assert!(!remote_route_forbidden("/api/settings/network"));
         assert!(!remote_route_forbidden("/api/projects/p1/file"));
     }
 

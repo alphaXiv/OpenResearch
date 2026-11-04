@@ -1,3 +1,4 @@
+import { withWorkspaceMocks } from "./workspaceMocks.mjs";
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { createRequire } from "node:module";
@@ -13,8 +14,8 @@ const compiled = ts.transpileModule(source, {
 }).outputText;
 let state, index, calls, removed, failure, artifactsError, alerts, dialogs, options;
 const exports = {};
-new Function("require", "exports", compiled)((name) => {
-  if (name === "react") return { ...React, useState: (initial) => {
+new Function("require", "exports", compiled)(withWorkspaceMocks((name) => {
+  if (name === "react") return { ...React, useContext: () => undefined, useState: (initial) => {
     const key = index++;
     if (!(key in state)) state[key] = initial;
     return [state[key], (value) => { state[key] = value; }];
@@ -29,7 +30,7 @@ new Function("require", "exports", compiled)((name) => {
   if (name === "../dialog") return { showCustomDialog: (args) => { options = args; dialogs.showCustomDialog(args); } };
   if (name === "./ui") return { Button: "button", DialogContent: "content", DialogTitle: "title", showAlert: (...args) => { alerts.push(args); } };
   return require(name);
-}, exports);
+}), exports);
 
 function render() {
   index = 0;

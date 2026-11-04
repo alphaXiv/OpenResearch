@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { composerStashContent, EMPTY_COMPOSER_STASH } from "../src/composerStash.ts";
+import { composerStashContent, EMPTY_COMPOSER_STASH, createComposerState } from "../src/composerStash.ts";
 
 test("an empty composer leaves nothing behind", () => {
   const live = { ...EMPTY_COMPOSER_STASH };
@@ -37,4 +37,16 @@ test("an unconfirmed send remains stashed even if its draft is cleared", () => {
   const live = { ...EMPTY_COMPOSER_STASH, unconfirmedSend: "network" };
   assert.deepEqual(composerStashContent(live, null), live);
   assert.equal(composerStashContent({ ...live, unconfirmedSend: null }, null), null);
+});
+
+test("machines with cloned project and chat IDs keep their prompt seeds and failed drafts separate", () => {
+  const alpha = createComposerState(), beta = createComposerState();
+  alpha.seedComposer("same-project", "Reproduce Alpha");
+  beta.seedComposer("same-project", "Reproduce Beta");
+  alpha.composerStashes.set("same-chat", { ...EMPTY_COMPOSER_STASH, draft: "Alpha draft" });
+  assert.equal(alpha.composerSeed("same-project"), "Reproduce Alpha");
+  assert.equal(beta.composerSeed("same-project"), "Reproduce Beta");
+  assert.equal(beta.composerStashes.has("same-chat"), false);
+  alpha.forgetComposerSeed("same-project");
+  assert.equal(beta.composerSeed("same-project"), "Reproduce Beta");
 });

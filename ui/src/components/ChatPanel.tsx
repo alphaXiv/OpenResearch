@@ -1,4 +1,19 @@
-import { showConfirmDialog, showCustomDialog } from "../dialog";
+import { useMachines } from "../machineSelection";
+import {
+  useContext,
+  memo,
+  useCallback,
+  useEffect,
+  useId,
+  useLayoutEffect,
+  useMemo,
+  useRef,
+  useState,
+  type MouseEvent as ReactMouseEvent,
+} from "react";
+import { WorkspaceDomContext } from "../WorkspaceDom";
+import { useWorkspace } from "../workspace";
+
 import { Dialog } from "@base-ui/react/dialog";
 import { EscapeScope } from "./EscapeScope";
 import { commandRegion } from "../keyboardRegion";
@@ -13,33 +28,16 @@ import { taskLocation } from "../workspaceState";
 import { fitSidebarRows, sidebarRowHeight, type SidebarRow } from "../sidebarLayout";
 import { useVirtualizer, defaultRangeExtractor, measureElement as measureVirtualElement, type Range as VirtualRange } from "@tanstack/react-virtual";
 import { markLiveUpdate } from "../queries/live";
-import { removeSession as removeCachedSession } from "../queries/invalidation";
+
 import { nativeOptions, sessionAcpHarness } from "../acp";
 import { resolveHarnessDefaultModel } from "../modelSelection";
-import { setChatConfiguration } from "../api";
+
 import { RemoteConnectionStrip, useRemoteConnection } from "../RemoteRuntime";
-import {
-  isCurrentScope,
-  setScopedQueryData,
-  deletedSessionIds,
-  queryClient,
-  subscribeWorkspace,
-  workspaceKey,
-} from "../queries/client";
+
 import { LOCAL_ERROR_PART_ID, LOCAL_PREFIX, SHELL_TOOL } from "../queries/chatState";
 import { CancelledError, useInfiniteQuery, useMutation, useQueries, useQuery } from "@tanstack/react-query";
 import { useNavigate } from "@tanstack/react-router";
-import { useChatState } from "../queries/chatStore";
 
-import {
-  getHarnessesQuery,
-  getHarnessSetupCommandsQuery,
-  getSkillsQuery,
-  useAlphaXivFolders,
-} from "../queries/settings";
-import { listChatActiveRunsQuery, listChatSessionsQuery, getChatMessagesQuery, listNativeChatsQuery, readSidebarChatPage } from "../queries/chat";
-import { getProjectStarterPromptsQuery, listProjectsQuery, listProjectActivityQuery, resolvePaperQuery } from "../queries/projects";
-import { getCodeTreeQuery } from "../queries/files";
 import {
   fileMentionContext,
   insertFileMention,
@@ -92,58 +90,23 @@ import {
   WifiOff,
   X,
 } from "lucide-react";
-import {
-  memo,
-  useCallback,
-  useEffect,
-  useId,
-  useLayoutEffect,
-  useMemo,
-  useRef,
-  useState,
-  type MouseEvent as ReactMouseEvent,
-} from "react";
+
 import { BrandMark } from "./Wordmark";
 import {
   type SidebarChatCursor,
-  cancelQueuedMessage,
-  chatAttachmentUrl,
-  createChatSession,
-  openSideChat,
-  getChatSession,
-  deleteChatSession,
   DEMO_FIGURE_SESSION_ID,
   DEMO_LITERATURE_SESSION_ID,
-  captureUiEvent,
   DEMO_EXPERIMENT_LABELS,
   DEMO_PROJECT_ID,
   DEMO_RUN_EXPERIMENT_PROMPT,
   DEMO_SEEDED_LEAF_IDS,
-  forkChatTurn,
   fmtNumber,
   harnessModelLabel,
-  interruptChat,
   reasoningFor,
-  recoverChatTurn,
   reconcileReasoning,
   reconcileServiceTier,
-  renameChatSession,
-  retryQueuedMessage,
-  respondChat,
-  selectChatBranch,
-  compactChatSession,
-  runShellCommand,
   fmtDuration,
-  sendChatMessage,
-  getChatSubmission,
   RejectedResponseError,
-  setChatSessionArchived,
-  releaseDelegate,
-  setChatSessionAutonomy,
-  setChatSessionPermissionMode,
-  importNativeChat,
-  setChatSessionGoal,
-  setChatSessionPlanMode,
   type FirstActionSurface,
   type ChatImageAttachment,
   type ChatMessage,
@@ -184,7 +147,7 @@ import {
   transcriptFileName,
   transcriptMarkdown,
 } from "../chatRendering";
-import { onChatEvent } from "../events";
+
 import {
   queuedRetryLabel,
   recoveryAction as parseRecoveryAction,
@@ -192,9 +155,7 @@ import {
   retryStatusLabel,
 } from "../chatRecovery";
 import {
-  composerSeed,
   composerStashContent,
-  forgetComposerSeed,
   EMPTY_COMPOSER_STASH,
   type ComposerAnnotation,
   type ComposerAttachment,
@@ -2033,6 +1994,8 @@ function alphaxivApprovalLabel(
 
 /** The body of an alphaXiv write's approval card: what it writes, with each paper linked by title. */
 function AlphaXivApproval({ tool, input }: { tool: string; input: Record<string, unknown> }) {
+  const { useAlphaXivFolders } = useMachines().owner.queries;
+  const { resolvePaperQuery } = useWorkspace().queries;
   const folders = useAlphaXivFolders().data;
   const papers = tool === "save_papers_to_folder" ? exactInputStringArray(input, "paper_ids_or_urls") ?? [] : [];
   const resolved = useQueries({ queries: papers.map((paper) => resolvePaperQuery(paper)) });
@@ -2617,12 +2580,14 @@ function ToolRow({
   onOpenExperiment?: OpenTranscriptTarget;
   experimentName?: (experimentId: string) => string;
 }) {
+  const { id: elementId } = useContext(WorkspaceDomContext);
+
   const state = part.state;
   const failed = state?.status === "error";
   const errorMessage = cleanToolError(state?.error || state?.output || "");
   const hasDetail = failed && Boolean(errorMessage);
   const [detailOpen, setDetailOpen] = useState(false);
-  const detailId = `tool-error-${part.id.replace(/[^A-Za-z0-9_-]/g, "-")}`;
+  const detailId = elementId(`tool-error-${part.id.replace(/[^A-Za-z0-9_-]/g, "-")}`);
   if (part.id === LOCAL_ERROR_PART_ID) {
     return (
       <div className="local-error mt-4 flex items-start gap-2 text-base text-subtext">
@@ -2893,6 +2858,7 @@ function PromptCard({
   onOpenFile?: OpenTranscriptFile;
   onOpenPlan?: (plan: string, promptId: string, intent: TabOpenIntent) => void;
 }) {
+  const { id: elementId } = useContext(WorkspaceDomContext);
   const p = part.prompt;
   const [picked, setPicked] = useState<string[]>([]);
   const [answerText, setAnswerText] = useState("");
@@ -3032,7 +2998,7 @@ function PromptCard({
       (typeof p.toolInput?.reason === "string" && p.toolInput.reason) || "";
     const description = inputString(toolInput, "description") || "";
     const explanation = p.header || reason || description || (summary ? "" : permissionActivityLabel(p.tool, toolInput));
-    const headingId = `permission-heading-${part.id}`;
+    const headingId = elementId(`permission-heading-${part.id}`);
     const alphaxivTool = p.tool?.match(ALPHAXIV_TOOL)?.[1]?.toLowerCase();
     const alphaxivWrite = alphaxivTool === "save_papers_to_folder" || alphaxivTool === "create_folder" ? alphaxivTool : null;
     return (
@@ -3104,13 +3070,13 @@ function PromptCard({
   };
   const skip = () => void respond({ approve: false });
   return (
-    <div className="prompt-card question flex flex-col gap-2 rounded-lg border border-border bg-surface p-3" role="group" aria-labelledby={`question-${part.id}`}>
+    <div className="prompt-card question flex flex-col gap-2 rounded-lg border border-border bg-surface p-3" role="group" aria-labelledby={elementId(`question-${part.id}`)}>
       <div className="flex items-center gap-2 text-subtext">
         <HelpCircle size={18} aria-hidden="true" />
         <span className="flex-1 text-sm">{p.header || m.chat_question()}</span>
         {onRespond && <IconButton aria-label={m.chat_question_skip()} disabled={done} onClick={skip}><X size={16} /></IconButton>}
       </div>
-      <div id={`question-${part.id}`} className="text-base font-medium leading-snug text-text whitespace-pre-line wrap-anywhere">{p.question?.replace(/\n\s*\n/g, "\n")}</div>
+      <div id={elementId(`question-${part.id}`)} className="text-base font-medium leading-snug text-text whitespace-pre-line wrap-anywhere">{p.question?.replace(/\n\s*\n/g, "\n")}</div>
       {(p.options?.length ?? 0) > 0 && (
         <div className="prompt-options flex flex-col">
           {p.options?.map((option, index) => {
@@ -3182,7 +3148,7 @@ function messageHasVisibleContent(m: ChatMessage, activePermissionId?: string | 
  * memo stops those from touching the rows at all. */
 /** Resolve an `image` (attachment) part into what the transcript renders: a
  * source URL, whether it's a PDF (file chip vs inline image), and a name. */
-function attachmentPartView(p: ChatPart): { src: string; isPdf: boolean; name: string } {
+function attachmentPartView(p: ChatPart, chatAttachmentUrl: (name: string) => string): { src: string; isPdf: boolean; name: string } {
   const raw = p.text ?? "";
   const src = raw.startsWith("data:") ? raw : chatAttachmentUrl(raw);
   // Server file names embed the original after a `__` marker; optimistic parts
@@ -3353,6 +3319,7 @@ export const Message = memo(function Message({
   onFork: (messageId: string, text: string) => void;
   onSelectFork: (leafId: string) => void;
 }) {
+  const { chatAttachmentUrl } = useWorkspace().api;
   useLocale();
   // Editing re-asks as a new fork rather than rewriting history, so the original
   // stays reachable through the pager.
@@ -3386,7 +3353,7 @@ export const Message = memo(function Message({
     // Optimistic parts carry a data URL; server parts carry a file name.
     const attachments = message.parts
       .filter((p) => p.type === "image" && p.text)
-      .map(attachmentPartView);
+      .map((part) => attachmentPartView(part, chatAttachmentUrl));
     const images = attachments.filter((a) => !a.isPdf);
     const files = attachments.filter((a) => a.isPdf);
     const annotations: ComposerAnnotation[] = message.parts
@@ -4091,8 +4058,6 @@ function useTranscriptAnnouncement(messages: ChatMessage[]): TranscriptAnnouncem
   return announcement;
 }
 
-// Measured heights outlive the per-chat remount so switching back paints at the real layout.
-const transcriptRowSizes = new Map<string, { size: number; width: number }>();
 const TRANSCRIPT_ROW_SIZES_LIMIT = 5_000;
 
 /** A message an agent cited, to scroll to once its chat is open. `nonce` tells one click from the next. */
@@ -4167,6 +4132,7 @@ const Transcript = memo(function Transcript({
   /** Ctrl+End and Ctrl+Home leave the feed, forward or back. */
   onLeaveFeed: (forward: boolean) => void;
 }) {
+  const { transcriptRowSizes } = useWorkspace();
   useLocale();
   const replies = useMemo(() => questionReplies(messages), [messages]);
   const activePermissionId = firstPendingPermission(messages)?.id ?? null;
@@ -4220,6 +4186,7 @@ const Transcript = memo(function Transcript({
   // Offscreen rows keep their old height through a resize, so each height carries its measuring width.
   const measuredWidths = useRef(new Map<string, number>());
   const virtualizer = useVirtualizer({
+    useFlushSync: false,
     count: visibleMessages.length,
     getScrollElement: () => scrollRef.current,
     getItemKey,
@@ -4854,9 +4821,6 @@ const STARTER_TONES = [
 ];
 const STARTER_GRID_CLASS =
   "mt-7 grid w-full max-w-readable grid-cols-1 gap-3 sm:grid-cols-2";
-const composerStashes = new Map<string, ComposerStash>();
-const mountedComposers = new Map<string, (failed: ComposerStash) => void>();
-subscribeWorkspace(() => { composerStashes.clear(); });
 
 function mergeFailedComposer(current: ComposerStash, failed: ComposerStash): ComposerStash {
   const annotations = [...current.annotations];
@@ -5028,6 +4992,57 @@ export function ChatPanel({
   /** Middle-pane content when a settings section is active. */
   children?: React.ReactNode;
 }) {
+  const { portalContainer } = useContext(WorkspaceDomContext);
+
+  const { showCustomDialog, showConfirmDialog } = useWorkspace().dialogs;
+
+  const {
+    setChatSessionPermissionMode,
+    setChatSessionPlanMode,
+    setChatSessionAutonomy,
+    setChatSessionGoal,
+    importNativeChat,
+    openSideChat,
+    createChatSession,
+    setChatSessionArchived,
+    releaseDelegate,
+    renameChatSession,
+    deleteChatSession,
+    setChatConfiguration,
+    compactChatSession,
+    captureUiEvent,
+    sendChatMessage,
+    getChatSubmission,
+    runShellCommand,
+    interruptChat,
+    recoverChatTurn,
+    forkChatTurn,
+    selectChatBranch,
+    cancelQueuedMessage,
+    retryQueuedMessage,
+    respondChat,
+    getChatSession,
+  } = useWorkspace().api;
+  const {
+    listProjectsQuery,
+    listProjectActivityQuery,
+    listChatSessionsQuery,
+    readSidebarChatPage,
+    listChatActiveRunsQuery,
+    getHarnessesQuery,
+    getSkillsQuery,
+    getHarnessSetupCommandsQuery,
+    getCodeTreeQuery,
+    listNativeChatsQuery,
+    getChatMessagesQuery,
+    getProjectStarterPromptsQuery,
+  } = useWorkspace().queries;
+  const { workspaceKey, setScopedQueryData, queryClient, isCurrentScope, deletedSessionIds } = useWorkspace();
+  const { useChatState } = useWorkspace().chat;
+  const { composerStashes, mountedComposers, composerSeed, forgetComposerSeed } = useWorkspace().composers;
+  const { onChatEvent } = useWorkspace().events;
+  const { removeSession: removeCachedSession } = useWorkspace().invalidation;
+
   const setChatSessionPermissionModeMutation = useMutation({ mutationFn: (args: Parameters<typeof setChatSessionPermissionMode>) => setChatSessionPermissionMode(...args) });
   const setChatSessionPlanModeMutation = useMutation({ mutationFn: (args: Parameters<typeof setChatSessionPlanMode>) => setChatSessionPlanMode(...args) });
   const setChatSessionAutonomyMutation = useMutation({ mutationFn: (args: Parameters<typeof setChatSessionAutonomy>) => setChatSessionAutonomy(...args) });
@@ -5047,15 +5062,18 @@ export function ChatPanel({
     try { return localStorage.getItem("sidebar-grouping") === "list" ? "list" : "projects"; }
     catch { return "projects"; }
   });
+  const machineSuffix = runtime.kind === "ssh" ? `:${encodeURIComponent(runtime.session.host)}` : "";
+  const pinnedProjectsKey = `sidebar-pinned-projects${machineSuffix}`;
+  const collapsedProjectsKey = `sidebar-collapsed-projects${machineSuffix}`;
   const [pinnedProjects, setPinnedProjects] = useState<string[]>(() => {
     try {
-      const stored: unknown = JSON.parse(localStorage.getItem("sidebar-pinned-projects") ?? "[]");
+      const stored: unknown = JSON.parse(localStorage.getItem(pinnedProjectsKey) ?? "[]");
       return Array.isArray(stored) ? stored.filter((id): id is string => typeof id === "string") : [];
     } catch { return []; }
   });
   const [collapsedProjects, setCollapsedProjects] = useState<string[]>(() => {
     try {
-      const stored: unknown = JSON.parse(localStorage.getItem("sidebar-collapsed-projects") ?? "[]");
+      const stored: unknown = JSON.parse(localStorage.getItem(collapsedProjectsKey) ?? "[]");
       return Array.isArray(stored) ? stored.filter((id): id is string => typeof id === "string") : [];
     } catch { return []; }
   });
@@ -6092,10 +6110,6 @@ export function ChatPanel({
   }, [projectId, syncSessionList]);
 
   useEffect(() => {
-    setRecoveryOverrides(EMPTY_RECOVERY_OVERRIDES);
-  }, [activeId]);
-
-  useEffect(() => {
     return onChatEvent((ev) => {
       switch (ev.type) {
         case "session": {
@@ -6322,8 +6336,13 @@ export function ChatPanel({
   );
 
   // Drop any unsent composer tweak when switching sessions, so it never bleeds
-  // from one session's pickers onto another's.
+  // from one session's pickers onto another's. A hidden machine's effects rerun
+  // when it is shown again, so only a real session change resets them.
+  const overridesSession = useRef<string | null | undefined>(undefined);
   useEffect(() => {
+    if (overridesSession.current === activeId) return;
+    overridesSession.current = activeId;
+    setRecoveryOverrides(EMPTY_RECOVERY_OVERRIDES);
     settingsMutationSeq.current += 1;
     planMutationSeq.current += 1;
     const queuedMode = (activeId ? state.queuedBySession[activeId] ?? [] : []).reduce<
@@ -7232,6 +7251,7 @@ export function ChatPanel({
   const defaultRowsHeight = defaultRows.reduce((height, row) => height + sidebarRowHeight(row), 0);
   const sidebarRowKey = (row: SidebarRow) => row.kind === "chat" ? row.session.id : `${row.kind}:${row.project.id}`;
   const sidebarVirtualizer = useVirtualizer({
+    useFlushSync: false,
     count: sidebarRows.length,
     getScrollElement: () => railBodyRef.current,
     getItemKey: (index) => sidebarRowKey(sidebarRows[index]),
@@ -7394,13 +7414,13 @@ export function ChatPanel({
                       onToggleCollapsed={() => {
                         const next = collapsedProjects.includes(project.id) ? collapsedProjects.filter((id) => id !== project.id) : [...collapsedProjects, project.id];
                         setCollapsedProjects(next);
-                        try { localStorage.setItem("sidebar-collapsed-projects", JSON.stringify(next)); } catch {}
+                        try { localStorage.setItem(collapsedProjectsKey, JSON.stringify(next)); } catch {}
                       }}
                       pinned={pinnedProjects.includes(project.id)}
                       onPin={() => {
                         const next = pinnedProjects.includes(project.id) ? pinnedProjects.filter((id) => id !== project.id) : [...pinnedProjects, project.id];
                         setPinnedProjects(next);
-                        try { localStorage.setItem("sidebar-pinned-projects", JSON.stringify(next)); } catch {}
+                        try { localStorage.setItem(pinnedProjectsKey, JSON.stringify(next)); } catch {}
                       }}
                       onRemoved={() => { if (project.id === projectId) void navigate({ to: "/projects" }); }}
                       onNewChat={() => {
@@ -7501,7 +7521,7 @@ export function ChatPanel({
   const headerClass = `chat-header flex items-center gap-2 py-0 px-4 bg-background shrink-0 h-12 mac-titlebar:h-titlebar relative z-4 w-full max-w-readable my-0 mx-auto [&::after]:content-[''] [&::after]:absolute [&::after]:top-full [&::after]:start-0 [&::after]:end-0 [&::after]:h-6 [&::after]:bg-[linear-gradient(to_bottom,_var(--base),_transparent)] [&::after]:pointer-events-none`;
   const displayedRail = mobileRail ? (
     <Dialog.Root open={railOpen} onOpenChange={(open) => { if (!open) onCloseMobileRail?.(); }}>
-      <Dialog.Portal>
+      <Dialog.Portal container={portalContainer}>
         <Dialog.Backdrop className="fixed inset-0 z-70 bg-modal-backdrop" />
         <Dialog.Popup aria-modal="true" aria-label={m.chat_panel_show_sidebar()} className="mobile-rail-dialog fixed inset-y-0 start-0 z-80 outline-none">{rail}</Dialog.Popup>
       </Dialog.Portal>
@@ -7516,6 +7536,7 @@ export function ChatPanel({
     return (
       <>
         {displayedRail}
+        {!embedded && !railOpen && <WorkspaceConnection runtime={runtime} corner />}
         <section inert={contentInert} className="chat-pane flex-1 min-w-0 flex flex-col bg-background min-h-0">
           {(!railOpen || mobileRail) && <div className="mac-titlebar-spacer flex h-12 mac-titlebar:h-titlebar shrink-0 items-center">{railReopen}</div>}
           {/* Keyed per view so no tab inherits the chat thread's or another tab's scroll offset. */}
@@ -7531,6 +7552,7 @@ export function ChatPanel({
   return (
     <>
       {displayedRail}
+      {!embedded && !railOpen && <WorkspaceConnection runtime={runtime} corner />}
       <section inert={contentInert} data-side-chat={embedded || undefined} className="chat-pane flex-1 min-w-0 flex flex-col bg-background min-h-0">
         {/* Header — session title on the left, end-pane view switchers on the
           right, fading into the chat below (sessions live in the rail). */}

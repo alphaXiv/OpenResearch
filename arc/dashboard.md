@@ -63,7 +63,9 @@ store + run logs ─► per-subscriber diff, every 500 ms ─┐
 chat host ─► broadcast as it happens ──────────────────┘
 ```
 
-The page opens one event stream. Two sources feed it:
+The visible workspace opens one event stream. Hidden workspaces retain their
+caches; returning paints those caches immediately and repairs missed changes
+when the stream opens again. Two sources feed the stream:
 
 - **A diff loop over the store and the run logs.** Other processes write the
   store, so polling it is the only way to see their changes. Each subscriber
@@ -100,9 +102,12 @@ the server knows.
   queries, keeping whichever copy has the newer `updatedAt`. Other events
   invalidate families of queries. A query keyed by a commit hash is immutable
   and never invalidated.
-- **Workspaces scope every key.** Each query key begins with the current
-  workspace: this machine or a remote one. Switching workspaces discards the
-  old scope, so data from one machine can never appear in another's view.
+- **Workspaces scope every key.** Each machine owns a QueryClient,
+  immutable API destination and lifetime-scoped keys. Switching preserves its
+  cache, route, drafts and mounted screen, so returning to a connected machine
+  paints immediately. Reads, mutations, event streams and resource URLs stay
+  bound to their originating machine even after a switch. Replacing the data
+  directory disposes that lifetime and aborts its requests.
 - **Layout is server state too.** Each project remembers its tabs per chat,
   the active pane, history, scroll and expanded folders; the app remembers
   the last location, panel sizes and the sidebar. Both are saved to the store

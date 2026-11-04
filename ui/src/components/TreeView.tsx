@@ -1,3 +1,6 @@
+import { useContext, memo, useId, useMemo, useRef, useState } from "react";
+import { WorkspaceDomContext } from "../WorkspaceDom";
+import { useWorkspace } from "../workspace";
 import { DirectionProvider } from "@base-ui/react/direction-provider";
 import { m } from "../paraglide/messages.js";
 import { ltr } from "../i18n";
@@ -15,20 +18,11 @@ import {
   type Viewport,
 } from "@xyflow/react";
 import { Archive, ChartLine, Ellipsis, FolderTree, Terminal } from "lucide-react";
-import { useTrackioRuns } from "../queries/settings";
+
 import { Menu } from "@base-ui/react/menu";
 import { GitHubMark } from "./BackendLogos";
-import { memo, useId, useMemo, useRef, useState } from "react";
-import {
-  githubBranchUrl,
-  fmtNumber,
-  runDisplayStatus,
-  trackioRunUrl,
-  timeAgo,
-  type Experiment,
-  type Project,
-  type Run,
-} from "../api";
+
+import { githubBranchUrl, fmtNumber, runDisplayStatus, timeAgo, type Experiment, type Project, type Run } from "../api";
 import type { ExperimentView } from "./DetailDrawer";
 import type { CodeView } from "./CodeTab";
 import { ExpHoverCard, dismissTreeHoverCards, useHoverIntent } from "./ExpHoverCard";
@@ -223,6 +217,9 @@ function runSquareClass(status: string): string {
 }
 
 const ExpNode = memo(function ExpNode({ data }: NodeProps<ExpFlowNode>) {
+  const { useTrackioRuns } = useWorkspace().queries;
+  const { trackioRunUrl } = useWorkspace().api;
+
   useLocale();
   const { exp, latestRun, runs, isBaseline, parentSlug, githubOwner, githubRepo, onOpenView, onOpenCode, onArchive, onDelete, actions } = data;
   const status = latestRun ? runDisplayStatus(latestRun) : undefined;
@@ -358,6 +355,8 @@ const ExpNode = memo(function ExpNode({ data }: NodeProps<ExpFlowNode>) {
 });
 
 const ArchivedNode = memo(function ArchivedNode({ data }: NodeProps<ArchivedFlowNode>) {
+  const { portalContainer } = useContext(WorkspaceDomContext);
+
   useLocale();
   const { rootId, count, onRestoreRegion } = data;
   const [open, setOpen] = useState(false);
@@ -377,7 +376,7 @@ const ArchivedNode = memo(function ArchivedNode({ data }: NodeProps<ArchivedFlow
             <Archive size={16} className="shrink-0 text-subtext" aria-hidden="true" />
             <span>{m.tree_archived_count({ count: fmtNumber(count) })}</span>
           </Menu.Trigger>
-          <Menu.Portal>
+          <Menu.Portal container={portalContainer}>
             <Menu.Positioner positionMethod="fixed" side="bottom" align="start" sideOffset={4} collisionPadding={4} className="z-70">
               <Menu.Popup className="outline-none max-h-(--available-height) overflow-y-auto option-menu min-w-56 rounded-lg border border-border bg-background p-1.5 shadow-menu">
                 <Menu.Item nativeButton render={<MenuItem className="data-highlighted:bg-surface" />} onClick={() => onRestoreRegion(rootId)}>

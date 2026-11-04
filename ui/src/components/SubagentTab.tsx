@@ -1,10 +1,9 @@
+import { useWorkspace } from "../workspace";
 import { useQuery } from "@tanstack/react-query";
 
-import { getChatMessagesQuery } from "../queries/chat";
 import { m } from "../paraglide/messages.js";
 import { useEffect, useLayoutEffect, useRef } from "react";
-import { getSubagentTranscript } from "../api";
-import { workspaceKey } from "../queries/client";
+
 import { agentTranscript } from "../chatRendering";
 
 import { SubagentTranscript } from "./ChatPanel";
@@ -53,6 +52,10 @@ export function SubagentTab({
     intent: TabOpenIntent,
   ) => void;
 }) {
+  const { getChatMessagesQuery } = useWorkspace().queries;
+  const { workspaceKey } = useWorkspace();
+  const { getSubagentTranscript } = useWorkspace().api;
+
   const query = useQuery(getChatMessagesQuery(sessionId));
   const messages = query.data?.messages ?? (query.isError ? [] : null);
   const selectedSpawn = agentTranscript(messages ?? [], spawnPartId);

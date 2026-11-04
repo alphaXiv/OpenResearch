@@ -1,10 +1,13 @@
 import {
+  useContext,
   useEffect,
   useRef,
   useState,
   type KeyboardEvent as ReactKeyboardEvent,
   type MouseEvent as ReactMouseEvent,
 } from "react";
+import { WorkspaceDomContext } from "../WorkspaceDom";
+
 import { Menu } from "@base-ui/react/menu";
 import { DirectionProvider } from "@base-ui/react/direction-provider";
 import { m } from "../paraglide/messages.js";
@@ -117,6 +120,8 @@ export function FileContextMenu({
   onDelete?: () => void;
   onClose: () => void;
 }) {
+  const { portalContainer } = useContext(WorkspaceDomContext);
+
   const revealLabel = useFileManagerLabel();
   const menuRef = useRef<HTMLDivElement>(null);
   const onCloseRef = useRef(onClose);
@@ -140,7 +145,7 @@ export function FileContextMenu({
   return (
     <DirectionProvider direction={typeof document !== "undefined" && document.documentElement.dir === "rtl" ? "rtl" : "ltr"}>
       <Menu.Root open modal={false} onOpenChange={(open) => { if (!open) onClose(); }}>
-        <Menu.Portal>
+        <Menu.Portal container={portalContainer}>
           <Menu.Positioner
             positionMethod="fixed"
             anchor={{ getBoundingClientRect: () => new DOMRect(target.x, target.y, 0, 0) }}

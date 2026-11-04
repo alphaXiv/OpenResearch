@@ -1607,7 +1607,6 @@
   "settings_openresearch_sign_out_title": "Sign out of OpenResearch?",
   "settings_openresearch_sign_out_description": "This computer cannot start, restart or stop OpenResearch compute until you sign in again. Running compute keeps running and billing.",
   "account_finish_browser": "Finish signing in in your browser…",
-  "account_local_to_app": "Account is local to this app",
   "library_title": "Library",
   "library_connect": "Connect alphaXiv",
   "library_connected": "Connected to alphaXiv",
@@ -1637,5 +1636,14 @@
   "library_selected": "{count} selected",
   "library_open_alphaxiv": "Open alphaXiv",
   "chat_resize_composer": "Resize message box",
-  "chat_resize_composer_hint": "Drag to resize. Double-click to reset."
+  "chat_resize_composer_hint": "Drag to resize. Double-click to reset.",
+  "remote_machine_switcher": "Switch machine: {machine}",
+  "remote_machine_connected": "Connected",
+  "remote_machine_connecting": "Connecting…",
+  "remote_machine_disconnected": "Disconnected",
+  "remote_agents_title": "Set up agents on {host}",
+  "remote_agents_description": "Agents must be installed and signed in on each machine. Set them up on {host}.",
+  "remote_claude_datacenter_title": "Avoid Claude subscriptions on datacenter IPs",
+  "remote_claude_datacenter_description": "{host} uses datacenter IP {ip}. Using a Claude subscription here may cause Anthropic to flag your account. Use an API key instead, or continue at your own risk.",
+  "remote_claude_datacenter_continue": "Continue anyway"
 }

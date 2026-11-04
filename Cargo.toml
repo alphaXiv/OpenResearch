@@ -17,6 +17,7 @@ path = "src/main.rs"
 desktop = ["dep:tao", "dep:wry", "dep:gtk", "dep:webkit2gtk", "dep:png"]
 
 [dependencies]
+tower = { version = "0.5", features = ["util"] }
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "io-util", "io-std", "time", "fs", "process", "sync", "signal"] }
 tokio-util = { version = "0.7", features = ["io", "compat"] }
 agent-client-protocol = "2.2"

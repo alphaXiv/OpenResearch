@@ -1,3 +1,5 @@
+import { workspaceDom, mockWorkspace } from "./workspaceMocks.mjs";
+import { withWorkspaceMocks } from "./workspaceMocks.mjs";
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { createRequire } from "node:module";
@@ -37,7 +39,10 @@ function mount(writeText) {
     navigator: { clipboard: { writeText } },
   };
   const exports = {};
-  new Function("require", "exports", ...Object.keys(bindings), compiled)(require, exports, ...Object.values(bindings));
+  bindings.useWorkspace = () => mockWorkspace(bindings);
+  bindings.useContext = () => workspaceDom;
+  bindings.WorkspaceDomContext = {};
+  new Function("require", "exports", ...Object.keys(bindings), compiled)(withWorkspaceMocks(require), exports, ...Object.values(bindings));
   const props = {
     runtime: { session: { status: "disconnected", error: "Permissions refused", host: "fixture", installPaths: null, repairCommand: "chmod go-w '/fixture/bin'" } },
     retriedInteractiveError: null,

@@ -1,3 +1,4 @@
+import { useWorkspace } from "../workspace";
 import { m } from "../paraglide/messages.js";
 import { ltr } from "../i18n";
 import { useLocale } from "../locale";
@@ -23,7 +24,7 @@ import { looksLikeFilePath } from "../fileReferences";
 import { normalizeMarkdownForRendering } from "../markdownNormalization";
 import { tabOpenGestureHandlers, type TabOpenIntent } from "../tabPreview";
 import { Button, Dialog, DialogContent, IconButton, IconButtonLink, Tooltip } from "./ui";
-import { absoluteFileUrl, artifactUrl, projectFileUrl } from "../api";
+
 import { InlineHtmlFigure } from "./InlineHtmlFigure";
 import { ImageCarousel, ImageCarouselContext } from "./ImageCarousel";
 import { FileChip, FileReference, FileScopeContext, type OpenFile } from "./FileReference";
@@ -39,6 +40,8 @@ export function ChatImageScope({ projectId, sessionId, children }: {
   sessionId?: string | null;
   children: ReactNode;
 }) {
+  const { absoluteFileUrl, artifactUrl, projectFileUrl } = useWorkspace().api;
+
   const resolver = useMemo(() => {
     const url = (target: NonNullable<ReturnType<typeof chatImageTarget>>) => (target.source === "absolute" ? absoluteFileUrl(target.path)
       : target.source === "artifact" ? artifactUrl(projectId, target.path)

@@ -1,9 +1,5 @@
-import { useQuery } from "@tanstack/react-query";
-import { Copy, Cpu, Download, FoldVertical, Goal, History, ListChecks, MessagesSquare, SquarePen, WandSparkles, type LucideIcon } from "lucide-react";
-
-import { getSkillContentQuery } from "../queries/settings";
-import { m } from "../paraglide/messages.js";
 import {
+  useContext,
   Fragment,
   useEffect,
   useId,
@@ -14,6 +10,13 @@ import {
   type MouseEvent as ReactMouseEvent,
   type ReactNode,
 } from "react";
+import { WorkspaceDomContext } from "../WorkspaceDom";
+import { useWorkspace } from "../workspace";
+import { useQuery } from "@tanstack/react-query";
+import { Copy, Cpu, Download, FoldVertical, Goal, History, ListChecks, MessagesSquare, SquarePen, WandSparkles, type LucideIcon } from "lucide-react";
+
+import { m } from "../paraglide/messages.js";
+
 import { createPortal } from "react-dom";
 import { type SkillInfo } from "../api";
 import { canonicalSkillName, commandDisplayName, isComposerCommand, splitCommandTokens, type ComposerCommandName } from "../composerCommands";
@@ -149,6 +152,10 @@ function ComposerSkillToken({
   projectId: string;
   textareaRef: React.RefObject<HTMLTextAreaElement | null>;
 }) {
+  const { portalContainer } = useContext(WorkspaceDomContext);
+
+  const { getSkillContentQuery } = useWorkspace().queries;
+
   const tokenRef = useRef<HTMLSpanElement>(null);
   const cardRef = useRef<HTMLDivElement>(null);
   const closeTimer = useRef<number | null>(null);
@@ -287,7 +294,7 @@ function ComposerSkillToken({
               )}
             </div>
           </div>,
-          document.body,
+          portalContainer ?? document.body,
         )}
     </Fragment>
   );

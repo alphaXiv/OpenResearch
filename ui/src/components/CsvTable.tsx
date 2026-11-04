@@ -116,6 +116,7 @@ export function CsvTable({
   const scrollRef = useRef<HTMLDivElement>(null);
   const initialScroll = useRef(scrollPosition);
   const virtualizer = useVirtualizer({
+    useFlushSync: false,
     count: rows.length,
     getScrollElement: () => scrollRef.current,
     getItemKey: (index) => rows[index].id,

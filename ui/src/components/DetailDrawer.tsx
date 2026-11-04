@@ -1,16 +1,8 @@
+import { useWorkspace } from "../workspace";
 import { m } from "../paraglide/messages.js";
 import { ChartLine, ChevronDown, CircleStop, ExternalLink, ScrollText } from "lucide-react";
 import { useEffect, useRef, useState } from "react";
-import {
-  cancelRun,
-  runDisplayStatus,
-  runMonitoringError,
-  timeAgo,
-  trackioRunUrl,
-  type Experiment,
-  type Project,
-  type Run,
-} from "../api";
+import { runDisplayStatus, runMonitoringError, timeAgo, type Experiment, type Project, type Run } from "../api";
 import { ExperimentOverview } from "./ExperimentOverview";
 import type { CodeView } from "./CodeTab";
 import { LogTerminal } from "./LogTerminal";
@@ -19,7 +11,6 @@ import { tabOpenGestureHandlers, type TabOpenIntent } from "../tabPreview";
 import { useResolvedTheme } from "../theme";
 import { Button, ButtonLink, MenuItem } from "./ui";
 import { buildHistoryNodes } from "./experimentLineageModel";
-import { useTrackioRuns } from "../queries/settings";
 
 export type ExperimentView = "overview" | "terminal" | "trackio";
 
@@ -105,6 +96,9 @@ function TerminalView({
   onSelectRun: (id: string | null) => void;
   onOpenView: (view: ExperimentView, runId: string | undefined, intent: TabOpenIntent) => void;
 }) {
+  const { useTrackioRuns } = useWorkspace().queries;
+  const { trackioRunUrl, cancelRun } = useWorkspace().api;
+
   const [error, setError] = useState<string | null>(null);
   const [pendingRunId, setPendingRunId] = useState<string | null>(null);
   const [historyOpen, setHistoryOpen] = useState(false);

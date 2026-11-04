@@ -1607,7 +1607,6 @@
   "settings_openresearch_sign_out_title": "退出 OpenResearch 登录？",
   "settings_openresearch_sign_out_description": "再次登录前，此电脑无法启动、重启或停止 OpenResearch 计算。正在运行的计算和计费将继续。",
   "account_finish_browser": "请在浏览器中完成登录…",
-  "account_local_to_app": "账户属于此应用的本地账户",
   "library_title": "文库",
   "library_connect": "连接 alphaXiv",
   "library_connected": "已连接 alphaXiv",
@@ -1637,5 +1636,14 @@
   "library_selected": "已选择 {count} 篇",
   "library_open_alphaxiv": "打开 alphaXiv",
   "chat_resize_composer": "调整消息框大小",
-  "chat_resize_composer_hint": "拖动以调整大小。双击以重置。"
+  "chat_resize_composer_hint": "拖动以调整大小。双击以重置。",
+  "remote_machine_switcher": "切换机器: {machine}",
+  "remote_machine_connected": "已连接",
+  "remote_machine_connecting": "连接中…",
+  "remote_machine_disconnected": "已断开",
+  "remote_agents_title": "在 {host} 上设置代理",
+  "remote_agents_description": "每台机器都需要安装代理并分别登录。请在 {host} 上完成设置。",
+  "remote_claude_datacenter_title": "避免在数据中心 IP 上使用 Claude 订阅",
+  "remote_claude_datacenter_description": "{host} 使用数据中心 IP {ip}。在此使用 Claude 订阅可能导致 Anthropic 标记你的账户。请改用 API 密钥，或自行承担风险继续。",
+  "remote_claude_datacenter_continue": "仍然继续"
 }

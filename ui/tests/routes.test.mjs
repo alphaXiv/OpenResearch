@@ -1,3 +1,4 @@
+import { withWorkspaceMocks } from "./workspaceMocks.mjs";
 import * as query from "@tanstack/react-query";
 import { queryModules } from "./queryModules.mjs";
 import assert from "node:assert/strict";
@@ -20,7 +21,7 @@ function loadModule(filename, api = {}, remembered = null) {
     }).outputText;
     const exports = {};
     cache.set(url.href, exports);
-    new Function("require", "exports", output)((id) => {
+    new Function("require", "exports", output)(withWorkspaceMocks((id) => {
       if (id === "@tanstack/react-router") return routing;
       if (id === "react") return react;
       if (id === "@tanstack/react-query") return query;
@@ -37,7 +38,18 @@ function loadModule(filename, api = {}, remembered = null) {
       if (id === "../components/ReproducePage") return { ReproducePage: () => null };
       if (id.startsWith("./routes/")) return load(new URL(`${id}.tsx`, url));
       throw new Error(`Unexpected dependency: ${id}`);
-    }, exports);
+    }), exports);
+    if (url.pathname.endsWith("/routeResume.ts")) {
+      const destination = {
+        ...queries.load("client"), queries: { ...queries.load("projects"), ...queries.load("chat") },
+        persistence: { getRememberedGlobalWorkspace: () => remembered },
+        projects: { getCachedProjectWorkspace: () => undefined },
+      };
+      const global = exports.globalResumeLocation;
+      const project = exports.projectResumeLocation;
+      exports.globalResumeLocation = (client = queries.client) => global({ ...destination, queryClient: client });
+      exports.projectResumeLocation = (id, client = queries.client) => project(id, { ...destination, queryClient: client });
+    }
     return exports;
   }
   return load(new URL(`../src/${filename}`, import.meta.url));
@@ -167,6 +179,11 @@ test("malformed pane cleanup removes only the invalid pane and leaves valid desc
 });
 
 function resumeEffect(bindings) {
+  const global = bindings.globalResumeLocation;
+  const project = bindings.projectResumeLocation;
+  bindings.globalResumeLocation = () => global(bindings.client);
+  bindings.projectResumeLocation = (id) => project(id, bindings.client);
+  bindings.workspace = { queryClient: bindings.client };
   const source = ts.createSourceFile("routePages.tsx", readFileSync(new URL("../src/routePages.tsx", import.meta.url), "utf8"), ts.ScriptTarget.Latest, true, ts.ScriptKind.TSX);
   const resume = source.statements.find(node => ts.isFunctionDeclaration(node) && node.name.text === "Resume");
   const effect = resume.body.statements.find(node => ts.isExpressionStatement(node) && ts.isCallExpression(node.expression) && node.expression.expression.getText(source) === "useEffect");

@@ -59,6 +59,7 @@ export function Tooltip({
     window.addEventListener("scroll", dismiss, true);
     window.addEventListener("resize", dismiss);
     return () => {
+      dismiss();
       window.removeEventListener("scroll", dismiss, true);
       window.removeEventListener("resize", dismiss);
     };

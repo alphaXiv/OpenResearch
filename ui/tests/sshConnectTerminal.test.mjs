@@ -1,3 +1,4 @@
+import { withWorkspaceMocks } from "./workspaceMocks.mjs";
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { createRequire } from "node:module";
@@ -18,6 +19,8 @@ test("Connect shows the server diagnostic even after an authentication prompt", 
     write() {}, writeln: (line) => lines.push(line),
   };
   const mocks = {
+    "./useTerminalSession": { useTerminalSession: (_element, identity, open) => ({ current: { identity, mounted: open({}) } }) },
+    "../queries/client": { socketUrl: (path) => new URL(path, "ws://localhost") },
     react: {
       useRef: (value) => ({ current: value ?? {} }),
       useState: (value) => [value, () => {}],
@@ -35,7 +38,7 @@ test("Connect shows the server diagnostic even after an authentication prompt", 
   }
   const exports = {};
   new Function("require", "exports", "WebSocket", "location", code)(
-    (name) => mocks[name] ?? require(name), exports, Socket, { protocol: "http:", host: "localhost" },
+    withWorkspaceMocks((name) => mocks[name] ?? require(name)), exports, Socket, { protocol: "http:", host: "localhost" },
   );
   exports.CommandTerminal({ path: "/connect", label: "Connect", onComplete: () => false });
   socket.onmessage({ data: new TextEncoder().encode("Password: ").buffer });

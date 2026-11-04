@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { m } from "../paraglide/messages.js";
 import { ltr } from "../i18n";
 import { isExternalMarkdownTarget } from "../markdownTarget";
@@ -175,8 +175,10 @@ export function HtmlPreview({
   resolveSrc: (src: string) => string | null;
   fitContent?: boolean;
 }) {
+  const prepared = useMemo<{ page: { source: string; partial: boolean } | null }>(() => ({ page: null }), [html, truncated, url, resolveSrc, fitContent]);
   const [page, setPage] = useState<{ source: string; partial: boolean } | null>(null);
   const frame = useRef<HTMLIFrameElement>(null);
+  const viewport = useRef<HTMLDivElement>(null);
   const [height, setHeight] = useState(360);
   const [metricPicker, setMetricPicker] = useState<{
     choices: { id: string; label: string }[]; value: string; left: number; top: number; width: number;
@@ -210,6 +212,7 @@ export function HtmlPreview({
   }, [fitContent]);
 
   useEffect(() => {
+    if (prepared.page) { setPage(prepared.page); return; }
     let cancelled = false;
     const controller = new AbortController();
     setPage(null);
@@ -239,15 +242,33 @@ export function HtmlPreview({
         partial,
       }))
       .then((next) => {
-        if (!cancelled) setPage(next);
+        if (!cancelled) { prepared.page = next; setPage(next); }
       });
     return () => {
       cancelled = true;
       controller.abort();
     };
-  }, [html, truncated, url, resolveSrc, fitContent]);
+  }, [html, truncated, url, resolveSrc, fitContent, prepared]);
 
-  if (page === null) {
+  useLayoutEffect(() => {
+    const element = viewport.current;
+    const iframe = frame.current;
+    if (!element || !iframe) return;
+    const resize = () => {
+      const width = element.clientWidth;
+      const height = iframe.getBoundingClientRect().height;
+      // A hidden workspace keeps the report's last usable viewport.
+      if (width > 0) iframe.style.width = `${width}px`;
+      if (!fitContent && height > 0) iframe.style.height = `${height}px`;
+    };
+    const observer = new ResizeObserver(resize);
+    observer.observe(element);
+    observer.observe(iframe);
+    resize();
+    return () => observer.disconnect();
+  }, [page, fitContent]);
+
+  if (page === null || page !== prepared.page) {
     return (
       <div className="file-view-note flex items-center gap-2 py-2.5 px-4 text-sm text-muted">
         <Spinner /> {m.file_viewer_loading()}
@@ -256,7 +277,7 @@ export function HtmlPreview({
   }
 
   return (
-    <div className={fitContent ? "relative flex flex-col" : "flex h-full min-h-0 flex-col"}>
+    <div ref={viewport} className={fitContent ? "relative flex flex-col" : "flex h-full min-h-0 flex-col"}>
       {page.partial && (
         <div className="file-view-note shrink-0 border-b border-b-border-variant py-2 px-4 text-sm text-muted">
           {m.file_viewer_html_partial()}

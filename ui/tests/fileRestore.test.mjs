@@ -1,3 +1,4 @@
+import { withWorkspaceMocks } from "./workspaceMocks.mjs";
 import { queryModules } from "./queryModules.mjs";
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
@@ -93,7 +94,7 @@ function viewerHooks(restored) {
     }).outputText;
     const exports = {};
     new Function("require", "exports", "setInterval", "clearInterval", compiled)(
-      (id) => {
+      withWorkspaceMocks((id) => {
         if (id === "react") return react;
         if (id === "@tanstack/react-query") return queryHooks;
         if (id.startsWith("./queries/")) return queries.load(id.slice("./queries/".length));
@@ -103,7 +104,7 @@ function viewerHooks(restored) {
         // here, so the subscription is a no-op.
         if (id === "./events") return { onOverleafEvent: () => () => {} };
         throw new Error(`Unexpected dependency: ${id}`);
-      },
+      }),
       exports,
       (callback) => { timers.set(++timerId, callback); return timerId; },
       (id) => timers.delete(id),

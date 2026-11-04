@@ -1607,7 +1607,6 @@
   "settings_openresearch_sign_out_title": "از OpenResearch خارج می‌شوید؟",
   "settings_openresearch_sign_out_description": "تا ورود دوباره، این رایانه نمی‌تواند پردازش OpenResearch را شروع، راه‌اندازی مجدد یا متوقف کند. پردازش‌های فعال و هزینه آن‌ها ادامه می‌یابد.",
   "account_finish_browser": "ورود را در مرورگر کامل کنید…",
-  "account_local_to_app": "حساب محلی این برنامه است",
   "library_title": "کتابخانه",
   "library_connect": "اتصال alphaXiv",
   "library_connected": "متصل به alphaXiv",
@@ -1637,5 +1636,14 @@
   "library_selected": "{count} انتخاب شده",
   "library_open_alphaxiv": "باز کردن alphaXiv",
   "chat_resize_composer": "تغییر اندازه کادر پیام",
-  "chat_resize_composer_hint": "برای تغییر اندازه بکشید. برای بازنشانی دوبار کلیک کنید."
+  "chat_resize_composer_hint": "برای تغییر اندازه بکشید. برای بازنشانی دوبار کلیک کنید.",
+  "remote_machine_switcher": "تغییر دستگاه: {machine}",
+  "remote_machine_connected": "متصل",
+  "remote_machine_connecting": "در حال اتصال…",
+  "remote_machine_disconnected": "قطع شده",
+  "remote_agents_title": "راه‌اندازی عامل‌ها در {host}",
+  "remote_agents_description": "عامل‌ها باید روی هر دستگاه نصب شوند و وارد حساب شوند. آن‌ها را در {host} راه‌اندازی کنید.",
+  "remote_claude_datacenter_title": "از اشتراک Claude روی IP مرکز داده استفاده نکنید",
+  "remote_claude_datacenter_description": "{host} از IP مرکز داده {ip} استفاده می‌کند. استفاده از اشتراک Claude در اینجا ممکن است باعث علامت‌گذاری حساب شما توسط Anthropic شود. از کلید API استفاده کنید یا با مسئولیت خود ادامه دهید.",
+  "remote_claude_datacenter_continue": "ادامه با پذیرش خطر"
 }

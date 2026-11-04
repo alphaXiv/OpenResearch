@@ -1607,7 +1607,6 @@
   "settings_openresearch_sign_out_title": "Выйти из OpenResearch?",
   "settings_openresearch_sign_out_description": "Этот компьютер не сможет запускать, перезапускать и останавливать вычисления OpenResearch, пока вы снова не войдёте. Запущенные вычисления продолжат работать и оплачиваться.",
   "account_finish_browser": "Завершите вход в браузере…",
-  "account_local_to_app": "Аккаунт действует только в этом приложении",
   "library_title": "Библиотека",
   "library_connect": "Подключить alphaXiv",
   "library_connected": "alphaXiv подключён",
@@ -1637,5 +1636,14 @@
   "library_selected": "Выбрано: {count}",
   "library_open_alphaxiv": "Открыть alphaXiv",
   "chat_resize_composer": "Изменить размер поля сообщения",
-  "chat_resize_composer_hint": "Перетащите, чтобы изменить размер. Дважды щёлкните, чтобы сбросить."
+  "chat_resize_composer_hint": "Перетащите, чтобы изменить размер. Дважды щёлкните, чтобы сбросить.",
+  "remote_machine_switcher": "Переключить машину: {machine}",
+  "remote_machine_connected": "Подключено",
+  "remote_machine_connecting": "Подключение…",
+  "remote_machine_disconnected": "Отключено",
+  "remote_agents_title": "Настройте агентов на {host}",
+  "remote_agents_description": "Агентов нужно установить и войти в их учётные записи на каждом компьютере. Настройте их на {host}.",
+  "remote_claude_datacenter_title": "Избегайте подписок Claude на IP дата-центров",
+  "remote_claude_datacenter_description": "{host} использует IP дата-центра {ip}. При использовании подписки Claude здесь Anthropic может пометить вашу учётную запись. Используйте API-ключ или продолжайте на свой риск.",
+  "remote_claude_datacenter_continue": "Всё равно продолжить"
 }

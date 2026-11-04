@@ -1,7 +1,6 @@
+import { useWorkspace } from "../workspace";
 import { useIsFetching, useQuery } from "@tanstack/react-query";
 
-import { queryClient } from "../queries/client";
-import { getCodeTreeQuery, getSessionWorktreeQuery, getExperimentDiffQuery } from "../queries/files";
 import { m } from "../paraglide/messages.js";
 import { ltr } from "../i18n";
 // Files and committed changes for one experiment branch. The opening
@@ -49,6 +48,9 @@ export function CodeTab({
     intent: TabOpenIntent,
   ) => void;
 }) {
+  const { getCodeTreeQuery, getSessionWorktreeQuery, getExperimentDiffQuery } = useWorkspace().queries;
+  const { queryClient } = useWorkspace();
+
   const branch = experiment.branchName;
   const files = useQuery({ ...getCodeTreeQuery(projectId, { ref: branch }), enabled: view === "files", subscribed: view === "files" });
   const worktree = useQuery({ ...getSessionWorktreeQuery(experiment.chatSessionId ?? ""), enabled: view === "files" && Boolean(experiment.chatSessionId), subscribed: view === "files" && Boolean(experiment.chatSessionId) });

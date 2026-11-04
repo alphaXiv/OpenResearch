@@ -1,11 +1,12 @@
+import { useWorkspace } from "../workspace";
 import { useQuery } from "@tanstack/react-query";
-import { getUiStateQuery } from "../queries/projects";
+
 import { m } from "../paraglide/messages.js";
 import { useRef } from "react";
 import { FolderOpen, Plus } from "lucide-react";
 import { type AgentSelection, type Project } from "../api";
 
-import { showCustomDialog, type DialogContentProps } from "../dialog";
+import { type DialogContentProps } from "../dialog";
 import { NewProjectForm } from "./NewProjectForm";
 import { Button, DialogContent, DialogTitle } from "./ui";
 
@@ -19,6 +20,8 @@ export function ProjectsEmptyState({
   preferredAgent: AgentSelection | null;
   onCreated: (project: Project, githubPublicationError: string | null) => void;
 }) {
+  const { showCustomDialog } = useWorkspace().dialogs;
+
   return (
     <div className="home flex flex-1 min-h-0 flex-col items-center justify-center gap-3 bg-background p-6 text-center">
       <FolderOpen size={36} strokeWidth={1.5} className="shrink-0 text-muted" />
@@ -50,6 +53,8 @@ export function NewProjectDialog({
   preferredAgent: AgentSelection | null;
   initialPaperId?: string;
 }) {
+  const { getUiStateQuery } = useWorkspace().queries;
+
   const dialogRef = useRef<HTMLDivElement>(null);
   const { data: uiState } = useQuery(getUiStateQuery());
 
