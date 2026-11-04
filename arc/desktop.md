@@ -113,6 +113,17 @@ failures. The CLI prints a one-line warning when a newer release exists.
 builds (`canary-YYYYMMDD.N`), one per merge to main. Switching channels is
 refused while a downloaded update waits for a restart.
 
+**What an update brings.** Every release publishes cumulative totals of its
+commit titles by prefix (`feat`, `fix`, everything else) next to what the
+updater already reads: `orx_changes` in a stable release's `dist-manifest.json`,
+`changes` in the canary manifest. The update's summary is its totals minus the
+running build's, which a canary build has compiled in and a stable build reads
+from its own release. A release or build without totals has no summary; nothing
+else depends on it. The canary manifest also lists
+the commits between the latest stable release and its own commit, which the
+canary release's notes repeat; a canary build shows the part from its own
+commit down, so the list matches the build rather than the newest canary.
+
 ## The build channel
 
 A build is **production** only when it is an official release built in the
